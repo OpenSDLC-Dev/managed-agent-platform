@@ -51,7 +51,23 @@ func New(ctx context.Context, cfg Config) (*Verifier, error) {
 	if len(cfg.RoleMap) == 0 {
 		return nil, errors.New("identity: a role map is required")
 	}
-	if err := requireHTTPS(cfg.Issuer); err != nil {
+	// Validated AND copied. ConfigFromEnv already rejects these shapes, but New is
+	// the package's own boundary and a caller can build a Config literally: an
+	// empty claim value would grant its role to every token whose roles claim
+	// carries an empty string, and keeping the caller's map would leave live
+	// authority mutable from outside — a data race against every concurrent
+	// Verify, and a silent privilege change.
+	roleMap := make(map[string]Role, len(cfg.RoleMap))
+	for value, role := range cfg.RoleMap {
+		if value == "" {
+			return nil, errors.New("identity: the role map has an empty claim value")
+		}
+		if _, ok := roleRank[role]; !ok {
+			return nil, fmt.Errorf("identity: the role map gives %q the unknown role %q", value, string(role))
+		}
+		roleMap[value] = role
+	}
+	if err := requireIssuerURL(cfg.Issuer); err != nil {
 		return nil, fmt.Errorf("identity: issuer %w", err)
 	}
 	if cfg.JWKSURL != "" {
@@ -97,7 +113,7 @@ func New(ctx context.Context, cfg Config) (*Verifier, error) {
 		rolesClaim: valueOr(cfg.RolesClaim, "roles"),
 		emailClaim: valueOr(cfg.EmailClaim, "email"),
 		nameClaim:  valueOr(cfg.NameClaim, "name"),
-		roleMap:    cfg.RoleMap,
+		roleMap:    roleMap,
 		now:        now,
 		keys:       newKeySet(jwksURL, client, algNames, now),
 	}
@@ -111,8 +127,8 @@ func New(ctx context.Context, cfg Config) (*Verifier, error) {
 
 	slog.Info("identity configured",
 		"mode", string(cfg.Mode), "issuer", cfg.Issuer, "audience", cfg.Audience,
-		"jwks_url", jwksURL, "algorithms", algNames, "roles_claim", v.rolesClaim,
-		"mapped_values", len(cfg.RoleMap))
+		"jwks_url", redactURL(jwksURL), "algorithms", algNames, "roles_claim", v.rolesClaim,
+		"mapped_values", len(roleMap))
 	return v, nil
 }
 
@@ -160,6 +176,18 @@ func (v *Verifier) Verify(ctx context.Context, token string) (Identity, error) {
 		return Identity{}, reject("not a verifiable JWS")
 	}
 	hdr := tok.Headers[0]
+	// Any crit at all is refused, and refused HERE — before the key lookup, so a
+	// junk token cannot even reach the network.
+	//
+	// go-jose's own check is weaker than it looks: it allows a crit naming "b64"
+	// (shared.go's supportedCritical), and RFC 7797 §7 says a JWT MUST NOT use
+	// b64 — an unencoded payload is exactly the kind of thing two parsers
+	// disagree about. Nothing this package needs is negotiated through crit, so
+	// "present" is the whole test. go-jose files crit under ExtraHeaders because
+	// its sanitized() switch does not name it.
+	if _, ok := hdr.ExtraHeaders[jose.HeaderKey("crit")]; ok {
+		return Identity{}, reject("crit header present")
+	}
 	if hdr.KeyID == "" {
 		return Identity{}, reject("no kid")
 	}
@@ -173,15 +201,10 @@ func (v *Verifier) Verify(ctx context.Context, token string) (Identity, error) {
 	}
 
 	// Passing a single key rather than a key set means go-jose never re-derives
-	// which key to use: selection is ours, indexed by the kid we checked. This
-	// call also runs go-jose's critical-header check, so a crit naming anything
-	// it does not implement is refused here rather than ignored.
+	// which key to use: selection is ours, indexed by the kid we checked.
 	var std jwt.Claims
 	all := map[string]any{}
 	if err := tok.Claims(key.pub, &std, &all); err != nil {
-		if errors.Is(err, jose.ErrUnsupportedCriticalHeader) {
-			return Identity{}, reject("crit header present")
-		}
 		return Identity{}, reject("signature invalid")
 	}
 

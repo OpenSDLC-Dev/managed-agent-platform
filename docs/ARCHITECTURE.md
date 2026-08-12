@@ -582,11 +582,16 @@ The platform's human-authentication boundary (docs/plan/31_console-sso-rbac.md s
 strict OIDC relying party over `github.com/go-jose/go-jose/v4`, with no vendor SDK and, as of
 slice 1, no route yet consuming it. `Verify` authenticates one compact JWT and returns an
 `Identity` (issuer, subject, email, display name, `Role`): the signature allowlist is a required
-parameter of go-jose's parser, so `alg:none` and HS256 are refused before any key lookup; `iss` is
+parameter of go-jose's parser, so `alg:none` and HS256 are refused before any key lookup; a `crit`
+header is refused outright and equally early, since go-jose's own check permits `crit:["b64"]`
+while RFC 7797 §7 forbids `b64` in a JWT; `iss` is
 exact, `aud` must contain the configured audience, `azp` is checked when `aud` carries several,
 and non-empty `sub` and `exp` are required because go-jose checks neither. Every rejection is one
 `*Error` whose `Error()` is a constant string, the detail behind `Reason()` for the caller's log —
-no oracle distinguishes expired from bad-signature from wrong-audience. `Role` (`viewer` <
+no oracle distinguishes expired from bad-signature from wrong-audience, and no log line or error
+carries a token byte or a URL credential (a key-set URL may be a signed URL whose query string is
+the credential, so URLs are redacted into logs and errors alike; the one attacker-supplied value
+logged on purpose is the `kid`, truncated, at Debug). `Role` (`viewer` <
 `developer` < `admin`, plus `RoleNone`) is deliberately not a `domain` type: it is a declared
 divergence that never appears on a `/v1` path or in a `/v1` body, and `AtLeast` fails closed at
 both ends, so a mis-annotated route denies. Roles come from a configurable claim on every request
@@ -602,7 +607,9 @@ cooldown, hand-rolled single-flight under the same mutex as the cache, a per-fet
 share that one verifier: `oidc` (discovery from the issuer, or a pinned `IDENTITY_OIDC_JWKS_URL`
 that skips it) and `trusted_proxy` (a signed assertion header; the `gcp-iap` preset pins Google's
 header, issuer, ES256 and global key set, which is why its audience is required and is the entire
-tenant boundary). `FromEnv` returns `(nil, nil)` when `IDENTITY_MODE` is unset or `disabled` —
+tenant boundary). The role map is validated and **copied** at construction, so the live policy cannot be edited
+through the map the caller passed in. `FromEnv` returns `(nil, nil)` when `IDENTITY_MODE` is unset
+or `disabled` —
 the optional-dependency shape `blob.Store` and `secrets.Cipher` already use, concrete-typed so
 `== nil` is correct — and every other misconfiguration fails startup rather than open.
 

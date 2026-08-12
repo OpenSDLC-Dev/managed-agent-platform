@@ -81,8 +81,16 @@ func newKeySet(url string, client *http.Client, algs []string, now func() time.T
 // lookup, so a persistently failing IdP cannot livelock a request.
 func (k *keySet) get(ctx context.Context, kid string) (verifyKey, error) {
 	k.mu.Lock()
+	// The unlock is deferred rather than written on each path because leadFlight
+	// runs the fetch — arbitrary code, including a third-party JSON decoder. A
+	// panic there unwinds through this function, and net/http recovers a handler
+	// panic per connection: the process would survive with this mutex held
+	// forever, which is every later authentication deadlocked. The two paths that
+	// release the lock re-acquire it before returning, so the defer is always
+	// balanced.
+	defer k.mu.Unlock()
+
 	if key, ok := k.lookupLocked(kid); ok {
-		k.mu.Unlock()
 		return key, nil
 	}
 	switch {
@@ -93,19 +101,24 @@ func (k *keySet) get(ctx context.Context, kid string) (verifyKey, error) {
 		case <-ch:
 		case <-ctx.Done():
 			// This caller abandons; the shared fetch continues for the others.
+			k.mu.Lock()
 			return verifyKey{}, reject("key set unavailable")
 		}
 		k.mu.Lock()
 	case k.now().Sub(k.lastTry) < k.cooldown:
 		// Rate-limited: fall through to the final lookup with the cache as it
 		// stands. A stale cache yields nothing, which is the fail-closed answer.
+		//
+		// The kid is logged truncated and only here: it is the one diagnostic
+		// that answers "which key did the provider rotate to" during a failed
+		// rotation, and it is attacker-supplied, so it is bounded (slog escapes
+		// control bytes but does not bound length) and confined to Debug.
 		slog.DebugContext(ctx, "identity: key-set refresh rate-limited",
-			"url", k.url, "kid", truncate(kid, maxLoggedKID))
+			"url", redactURL(k.url), "kid", truncate(kid, maxLoggedKID))
 	default:
 		k.leadFlight(ctx) // releases and re-acquires k.mu
 	}
 	key, ok := k.lookupLocked(kid)
-	k.mu.Unlock()
 	if !ok {
 		return verifyKey{}, reject("unknown kid")
 	}
@@ -148,11 +161,16 @@ func (k *keySet) leadFlight(ctx context.Context) {
 	}()
 
 	var err error
-	if fetched, err = k.fetch(ctx); err != nil {
-		slog.WarnContext(ctx, "identity: key set fetch failed", "url", k.url, "err", err)
+	// The fetch is detached from this caller's cancellation (its trace context
+	// still rides along) because it is shared: the request that happened to lead
+	// the flight hanging up must not fail every other caller waiting on it.
+	// Waiters honour their own context on the flight channel instead. Startup
+	// calls fetch directly and so keeps its deadline.
+	if fetched, err = k.fetch(context.WithoutCancel(ctx)); err != nil {
+		slog.WarnContext(ctx, "identity: key set fetch failed", "url", redactURL(k.url), "err", err)
 		return
 	}
-	slog.InfoContext(ctx, "identity: key set refreshed", "url", k.url, "keys", len(fetched))
+	slog.InfoContext(ctx, "identity: key set refreshed", "url", redactURL(k.url), "keys", len(fetched))
 	ok = true
 }
 
@@ -194,12 +212,13 @@ type rawKeyMeta struct {
 // A set yielding zero usable keys is an error, so a failed parse never replaces a
 // working cache with an empty one.
 func parseKeySet(body []byte, algs map[string]bool, url string) (map[string]verifyKey, error) {
+	safe := redactURL(url)
 	var raw rawKeySet
 	if err := json.Unmarshal(body, &raw); err != nil {
-		return nil, fmt.Errorf("decode key set %s: %w", url, err)
+		return nil, fmt.Errorf("decode key set %s: %w", safe, err)
 	}
 	if len(raw.Keys) > maxKeys {
-		return nil, fmt.Errorf("key set %s has %d keys, limit %d", url, len(raw.Keys), maxKeys)
+		return nil, fmt.Errorf("key set %s has %d keys, limit %d", safe, len(raw.Keys), maxKeys)
 	}
 	out := make(map[string]verifyKey, len(raw.Keys))
 	skipped := 0
@@ -229,10 +248,10 @@ func parseKeySet(body []byte, algs map[string]bool, url string) (map[string]veri
 		out[jwk.KeyID] = key
 	}
 	if skipped > 0 {
-		slog.Warn("identity: skipped unusable JWKs", "url", url, "count", skipped)
+		slog.Warn("identity: skipped unusable JWKs", "url", safe, "count", skipped)
 	}
 	if len(out) == 0 {
-		return nil, fmt.Errorf("key set %s has no usable keys", url)
+		return nil, fmt.Errorf("key set %s has no usable keys", safe)
 	}
 	return out, nil
 }
@@ -265,9 +284,18 @@ func usableKey(jwk *jose.JSONWebKey, use string, keyOps []string, algs map[strin
 		if bits := pub.N.BitLen(); bits < minRSABits || bits > maxRSABits {
 			return verifyKey{}, false
 		}
+		// An RSA modulus is a product of odd primes, so an even one is not a
+		// modulus at all — go-jose checks neither this nor the size above.
+		if pub.N.Bit(0) == 0 {
+			return verifyKey{}, false
+		}
 		// Go bounds the exponent's magnitude at verify time but does not require
-		// it odd, and bounds nothing about the modulus.
-		if pub.E < 3 || pub.E%2 == 0 {
+		// it odd. The upper bound is not redundant with that check: go-jose
+		// decodes "e" as int(big.Int.Int64()) (encoding.go:193), and Int64 on an
+		// oversized value yields its low 64 bits, so a published exponent above
+		// the range silently becomes a DIFFERENT, plausible one. Skipping the
+		// entry outright beats installing a key the provider never published.
+		if pub.E < 3 || pub.E%2 == 0 || pub.E > maxRSAExponent {
 			return verifyKey{}, false
 		}
 	case *ecdsa.PublicKey:

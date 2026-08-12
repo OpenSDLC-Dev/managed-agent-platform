@@ -32,9 +32,13 @@
 //   - require exp — ValidateWithLeeway skips it when absent (jwt/validation.go);
 //   - require a non-empty sub;
 //   - anything about azp;
+//   - refuse a crit header naming "b64": go-jose lists b64 in its own
+//     supportedCritical set (shared.go), while RFC 7797 §7 says a JWT MUST NOT
+//     use it. Verify refuses any crit at all, before the key lookup;
 //   - fetch, cache, or bound the lifetime of a key set, and OIDC discovery;
-//   - bound an RSA modulus or require an odd exponent (jwk.go rsaPublicKey builds
-//     a bare rsa.PublicKey);
+//   - bound an RSA modulus, require an odd exponent, reject an even modulus, or
+//     bound the exponent above (jwk.go rsaPublicKey builds a bare rsa.PublicKey,
+//     and decodes e as int(big.Int.Int64()), which silently truncates);
 //   - parse key_ops at all (rawJSONWebKey has no such field);
 //   - enforce a JWK's declared alg against the JWS header;
 //   - decode a JWK Set per entry: jose.JSONWebKeySet has no set-level
@@ -58,6 +62,16 @@
 // current key set — and the key set is a public document. Signature verification
 // uses constant-time stdlib primitives, and every claim comparison is against a
 // public configured value.
+//
+// # Logs and errors
+//
+// No log line and no error carries a token byte or a URL credential. A key-set
+// URL may be a signed URL whose query string IS the credential, so every URL
+// reaching a log or an error goes through redactURL, and a transport error is
+// wrapped by its CAUSE rather than by *url.Error, whose message quotes the URL.
+// The one attacker-supplied value logged on purpose is the kid, truncated, at
+// Debug: it is the diagnostic that answers which key a provider rotated to, and
+// it is not a credential. TestLogsCarryNoCredentials reads the actual output.
 //
 // # kid is required
 //

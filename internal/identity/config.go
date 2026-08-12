@@ -63,9 +63,13 @@ const (
 	// cap structurally cannot see.
 	maxHeaderBytesPerResponse = 64 << 10
 
-	maxKeys         = 50
-	minRSABits      = 2048
-	maxRSABits      = 8192
+	maxKeys    = 50
+	minRSABits = 2048
+	maxRSABits = 8192
+	// maxRSAExponent is crypto/rsa's own ceiling (checkPub rejects anything
+	// larger), applied at parse time so an oversized exponent skips the entry
+	// instead of surviving as a silently truncated one.
+	maxRSAExponent  = 1<<31 - 1
 	clockSkewLeeway = 60 * time.Second
 	maxTokenBytes   = 16 << 10 // Entra with many groups reaches roughly 8 KiB
 	maxRoleValues   = 100
@@ -146,7 +150,7 @@ func configureOIDC(cfg *Config, getenv func(string) string) error {
 	if cfg.Issuer == "" {
 		return fmt.Errorf("%s=%s needs %s", envMode, ModeOIDC, envOIDCIssuer)
 	}
-	if err := requireHTTPS(cfg.Issuer); err != nil {
+	if err := requireIssuerURL(cfg.Issuer); err != nil {
 		return fmt.Errorf("%s: %w", envOIDCIssuer, err)
 	}
 	if cfg.Audience = strings.TrimSpace(getenv(envOIDCAudience)); cfg.Audience == "" {
@@ -219,7 +223,7 @@ func configureCustomProxy(cfg *Config, getenv func(string) string) error {
 	if cfg.Issuer == "" {
 		return fmt.Errorf("%s=%s needs %s", envProxyPreset, PresetCustom, envProxyIssuer)
 	}
-	if err := requireHTTPS(cfg.Issuer); err != nil {
+	if err := requireIssuerURL(cfg.Issuer); err != nil {
 		return fmt.Errorf("%s: %w", envProxyIssuer, err)
 	}
 	if cfg.Audience = strings.TrimSpace(getenv(envProxyAudience)); cfg.Audience == "" {

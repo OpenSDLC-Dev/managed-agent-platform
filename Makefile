@@ -64,7 +64,7 @@ fmt-check:
 # gate, exactly as cmd/ main glue would.
 test:
 	@set -euo pipefail; \
-	coverpkg="$$(go list ./internal/... | grep -vE '/(pgtest|dockertest|sandboxtest|modeltest|blobtest|gcstest|providertest|secretstest|gcpkmstest|webtooltest|identitytest)$' | paste -sd, -)"; \
+	coverpkg="$$(go list ./internal/... | grep -vE '/(pgtest|dockertest|sandboxtest|modeltest|blobtest|gcstest|providertest|secretstest|gcpkmstest|webtooltest|identitytest)$$' | paste -sd, -)"; \
 	set -x; \
 	go test -count=1 -coverpkg="$$coverpkg" -coverprofile=coverage.out ./...
 

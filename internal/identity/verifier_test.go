@@ -9,6 +9,7 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -540,21 +541,32 @@ func TestVerifyDeclaredKeyAlgMustMatchHeader(t *testing.T) {
 	verifierXAccepted(t, "RS512 header against an RS512 key", got, err, verifierXWant(keyed.idp))
 }
 
-// TestVerifyRejectsCritHeader pins that a critical header naming an extension
-// this stack does not implement is refused rather than ignored. The token is
-// genuinely signed by a key the verifier holds, so nothing but the crit check
-// can be what rejects it — and the control, the same signer without the header,
-// verifies.
+// TestVerifyRejectsCritHeader pins that a critical header is refused rather than
+// ignored — ANY crit, not only one naming an extension go-jose fails on. The
+// token is genuinely signed by a key the verifier holds, so nothing but the crit
+// check can be what rejects it, and the control, the same signer without the
+// header, verifies.
+//
+// The bare {"b64"} row is the one that matters and the one a weaker test misses:
+// go-jose lists b64 in its own supportedCritical set, so leaning on its check
+// alone accepts it. RFC 7797 §7 says a JWT MUST NOT use b64, and an unencoded
+// payload is exactly the kind of thing two parsers read differently. Paired with
+// {"b64","exp"} below, which go-jose rejects on the "exp" member, the two rows
+// separate our rule from the library's.
 func TestVerifyRejectsCritHeader(t *testing.T) {
 	t.Parallel()
 	keyed := verifierXNewKeyed(t, "RS256")
 	v := keyed.verifier(t)
 	claims := keyed.claims()
 
-	for _, crit := range [][]string{{"exp"}, {"http://example.test/ext"}, {"b64", "exp"}} {
+	for _, crit := range [][]string{{"exp"}, {"http://example.test/ext"}, {"b64"}, {"b64", "exp"}, {}} {
 		token := keyed.signClaims(t, jose.RS256, claims, map[jose.HeaderKey]any{"crit": crit})
 		got, err := v.Verify(context.Background(), token)
-		verifierXRejected(t, "crit "+strings.Join(crit, ","), got, err)
+		ie := verifierXRejected(t, "crit "+strings.Join(crit, ","), got, err)
+		if want := "crit header present"; ie.Reason() != want {
+			t.Errorf("crit %v: Reason() = %q, want %q — the rejection must be the crit rule, "+
+				"not a later step", crit, ie.Reason(), want)
+		}
 	}
 
 	got, err := v.Verify(context.Background(), keyed.signClaims(t, jose.RS256, claims, nil))
@@ -898,6 +910,21 @@ func TestVerifyLeewayBoundary(t *testing.T) {
 		{
 			name:   "not yet valid, one second outside the leeway",
 			mutate: func(c map[string]any) { c["nbf"] = now.Add(leeway + time.Second).Unix() },
+		},
+		// The edge itself, where "one second either side" cannot say which way the
+		// comparison goes. Inclusive is the answer go-jose gives (its check is
+		// expiry.Before(now.Add(-leeway))), and pinning it means a library change
+		// that silently made the allowance exclusive would fail here rather than
+		// start rejecting real tokens at exactly the skew bound.
+		{
+			name:   "expired by exactly the leeway",
+			mutate: func(c map[string]any) { c["exp"] = now.Add(-leeway).Unix() },
+			want:   true,
+		},
+		{
+			name:   "not valid until exactly the leeway from now",
+			mutate: func(c map[string]any) { c["nbf"] = now.Add(leeway).Unix() },
+			want:   true,
 		},
 		{
 			name:   "issued one second inside the leeway",
@@ -1470,4 +1497,97 @@ func TestVerifyRoleClaimTypes(t *testing.T) {
 		want.Role = identity.RoleNone
 		verifierXAccepted(t, "absent roles", got, err, want)
 	})
+}
+
+// syncBufferX is a concurrency-safe log sink. slog.SetDefault is process-wide, so
+// lines from tests running in parallel land here too — which is why every
+// assertion below is about the ABSENCE of a string unique to this test.
+type syncBufferX struct {
+	mu  sync.Mutex
+	buf strings.Builder
+}
+
+func (b *syncBufferX) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *syncBufferX) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
+
+// TestLogsCarryNoCredentials reads what this package actually writes, at Debug,
+// through every logging path it has: startup, a successful refresh, a failed one,
+// and the rate-limited branch. The claim that no secret reaches a log is
+// otherwise a comment, and a comment is not evidence.
+//
+// The two secrets under test are the ones that really travel: a key-set URL can
+// be a SIGNED url whose query string is the credential, and a token's payload and
+// signature are bearer material for as long as the token lives.
+//
+// One thing is deliberately NOT asserted absent: the kid, which the rate-limited
+// branch logs truncated and on purpose, because it is the diagnostic that answers
+// "which key did the provider rotate to". It is attacker-supplied, so it is
+// bounded; it is not a credential.
+//
+// Not parallel: it replaces the default logger for its duration.
+func TestLogsCarryNoCredentials(t *testing.T) {
+	const canary = "SUPER-SECRET-CANARY"
+
+	sink := &syncBufferX{}
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(sink, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+
+	idp, clock := verifierXIdP(t)
+	// The provider's key-set route ignores the query, so this stands in for a
+	// signed key URL exactly as a real one behaves.
+	signed := idp.JWKSURL() + "?access_token=" + canary
+	v := verifierXNew(t, idp, clock, func(c *identity.Config) { c.JWKSURL = signed })
+
+	// A live token, accepted: its payload and signature are bearer material.
+	token := idp.Mint(t, verifierXClaims(idp, clock))
+	if _, err := v.Verify(context.Background(), token); err != nil {
+		t.Fatalf("Verify: %v", err)
+	}
+
+	// Past the TTL with the provider failing: the fetch-failure path logs.
+	idp.FailJWKS(http.StatusInternalServerError)
+	clock.Advance(identity.KeySetTTLForTest + time.Second)
+	if _, err := v.Verify(context.Background(), token); err == nil {
+		t.Fatal("Verify succeeded against a failing provider past the TTL")
+	}
+	// Immediately again: inside the cooldown, so the rate-limited Debug line runs.
+	if _, err := v.Verify(context.Background(), token); err == nil {
+		t.Fatal("Verify succeeded against a failing provider past the TTL")
+	}
+	// And a recovery, so the success path logs its URL too.
+	idp.Restore()
+	clock.Advance(identity.RefreshCooldownForTest + time.Second)
+	if _, err := v.Verify(context.Background(), token); err != nil {
+		t.Fatalf("Verify after recovery: %v", err)
+	}
+
+	logged := sink.String()
+	for _, want := range []string{
+		"identity configured",
+		"identity: key set fetch failed",
+		"identity: key-set refresh rate-limited",
+		"identity: key set refreshed",
+	} {
+		if !strings.Contains(logged, want) {
+			t.Fatalf("the %q path never logged, so this test asserted nothing:\n%s", want, logged)
+		}
+	}
+	if strings.Contains(logged, canary) {
+		t.Errorf("a log line quotes the key URL's query credential:\n%s", logged)
+	}
+	for i, segment := range strings.Split(token, ".") {
+		if strings.Contains(logged, segment) {
+			t.Errorf("a log line quotes token segment %d:\n%s", i, logged)
+		}
+	}
 }
