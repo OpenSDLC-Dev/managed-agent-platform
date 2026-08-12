@@ -12,10 +12,10 @@ untouched. Six slices; slice 1 is in flight.
 
 ## Tasks
 
-- [ ] Slice 1 — `internal/identity`: the shared JWT verifier (JWKS cache,
-      algorithm allowlist, `iss`/`aud`/`sub`/`exp`/`azp` discipline),
-      claim→role mapping, OIDC discovery, the `gcp-iap` preset, and env
-      config. Library plus its contract tests; no route touched.
+- [x] Slice 1 — `internal/identity`: the shared JWT verifier (bounded JWKS
+      cache, algorithm allowlist, `iss`/`aud`/`sub`/`exp`/`azp` discipline),
+      claim→role mapping, OIDC discovery, the `gcp-iap` preset, env config,
+      and the `identitytest` fake provider. No route touched.
 - [ ] Slice 2 — the principals migration and JIT provisioning; the identity
       lane in `dispatchAuth`, default-deny; `permission_error`; the console
       environment-key routes require `admin`.
