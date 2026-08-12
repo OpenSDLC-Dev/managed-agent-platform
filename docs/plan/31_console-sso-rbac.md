@@ -63,7 +63,7 @@ which consumes what lands here and must trail it.
   planning: ~13 handler files with 60–80 scoped statements, ~6 create-time
   cross-reference checks, one worker-lane policy reversal — env-lane skill
   reads are deliberately global today (server.go:329–360) and become a
-  cross-tenant leak — plus the `api_keys_one_live` rebuild 0013:43–48
+  cross-tenant leak — plus the `api_keys_one_live` rebuild that 0013:43–48
   pre-announces, with tests expected at 2–3× the production diff. No
   structural obstacle; this plan's principals and key-issuance surfaces are
   its prerequisites.)
@@ -244,21 +244,31 @@ verifies a compact JWT — signature via JWKS (kid-indexed cache with a
 bounded lifetime: refreshed on unknown `kid` under a rate limit, expired on a
 minutes-order TTL so a key the IdP removes stops verifying within that bound
 instead of living in the cache forever, and a `kid` still absent after a
-fresh fetch is rejected; no static certs), `iss` exact, `aud` contains,
-`exp`/`nbf` with ≤60s leeway, algorithm from an explicit allowlist (RS256/
-RS512/ES256/ES384/ES512 — never `none`, never HS*) — and returns a verified
-claim set. Claim mapping then produces the identity: subject (`sub`), email
-(claim name configurable, default `email`), display name, and **roles** — a
-configurable claim name (default `roles`; dotted paths allowed for nested
-claims) whose values pass through an explicit value→role map. Unmapped values
-drop; no mapped value ⇒ no role ⇒ every role-gated route answers 403. Tokens
+fresh fetch is rejected; fetches carry a deadline and a response-size cap and
+coalesce single-flight, and a failed refresh is the same uniform 401; no
+static certs; every issuer/discovery/key URL is `https://`, loopback excepted
+for tests — the rule the reference SDK applies to its own endpoints,
+internal/auth/https.go), `iss` exact, `aud` contains, non-empty `sub` and
+`exp` required, `exp`/`nbf` with ≤60s leeway, `azp` checked against the
+expected client when `aud` carries multiple values, algorithm from an
+explicit allowlist (RS256/RS512/ES256/ES384/ES512 — never `none`, never HS*)
+— and returns a verified claim set. Claim mapping then produces the identity:
+subject (`sub`), email and display name (claim names configurable), and
+**roles** — a configurable claim name (default `roles`; dotted paths allowed
+for nested claims, scalar and array values both accepted) whose values pass
+through an explicit value→role map: unmapped values drop, and when several
+map, the principal holds the single strongest role by the fixed order
+`admin` > `developer` > `viewer` — never claim order, never map iteration
+order. No mapped value ⇒ no role ⇒ every role-gated route answers 403. Tokens
 are never logged; verification failures are uniform 401s
 (`authentication_error`) with no oracle distinguishing expired / bad
 signature / wrong audience.
 
-**Mode A — `oidc` (the RP seam).** Config: issuer URL (drives
-`/.well-known/openid-configuration` discovery at startup; JWKS URI can be
-overridden), audience, claim mappings. **The accepted credential is pinned,
+**Mode A — `oidc` (the RP seam).** Config: issuer URL, audience, claim
+mappings. Startup runs `/.well-known/openid-configuration` discovery against
+the issuer and fails if discovery does; setting `IDENTITY_OIDC_JWKS_URL`
+skips discovery entirely — issuer + audience + JWKS URL are then the whole
+contract, for OPs whose discovery is absent or wrong. **The accepted credential is pinned,
 not inferred: a JWT whose `aud` contains `IDENTITY_OIDC_AUDIENCE` —
 canonically the OIDC ID token of the deployment's console application**
 (guaranteed JWT-shaped by OIDC Core, where an OAuth access token may be
@@ -292,7 +302,13 @@ plane's own backend service** — the console reaches the platform through the
 same protected path, so every request carries an assertion audience-bound to
 the *platform's* backend (`IDENTITY_PROXY_AUDIENCE`), and an assertion minted
 for some other backend fails `aud` by design; machine traffic (`/v1` keys,
-workers) rides a separate, non-proxied backend at the load balancer.
+workers) rides a separate, non-proxied backend at the load balancer. In this
+mode the console is **not** a proxying BFF for platform calls: the browser
+calls the platform's protected backend directly, so the assertion IAP mints
+names the human — a server-to-server BFF hop would make IAP re-authenticate
+the *BFF's* workload identity and collapse every user onto one principal
+(and forwarding the console backend's own assertion fails `aud` here by
+design). Console plan 08 carries this as its Mode B shape.
 GCIP-behind-IAP needs nothing more; direct-GCIP login UI is a console
 frontend option, never a Go-core concern.
 
@@ -305,13 +321,16 @@ Config (all `IDENTITY_*`, controlplane only):
 | `IDENTITY_OIDC_JWKS_URL` | optional override when discovery is absent/wrong |
 | `IDENTITY_PROXY_PRESET` | Mode B: `gcp-iap` · `custom` |
 | `IDENTITY_PROXY_HEADER` / `_ISSUER` / `_AUDIENCE` / `_KEYS_URL` / `_ALGS` | Mode B `custom` fields |
-| `IDENTITY_CLAIM_ROLES` / `IDENTITY_CLAIM_EMAIL` | claim names (defaults `roles` / `email`) |
+| `IDENTITY_CLAIM_ROLES` / `IDENTITY_CLAIM_EMAIL` / `IDENTITY_CLAIM_NAME` | claim names (defaults `roles` / `email` / `name`) |
 | `IDENTITY_ROLE_MAP` | value→role pairs, e.g. `platform-admins=admin,eng=developer,everyone=viewer` |
 
 `IDENTITY_MODE=disabled` (the default) is byte-for-byte today's platform: the
 OIDC lane does not exist, a Bearer on a management path stays a 401, and
 `x-api-key` remains the only management credential. Misconfigured identity
-(mode set, issuer unreachable, empty role map) fails startup, not open.
+fails startup, not open: mode set with the issuer unreachable, an empty role
+map, a malformed pair, a duplicate source value, or a target outside the
+three roles are all boot errors — never silently converted into universal
+403s.
 
 ### Principals — migration `00NN_principals.sql` (next free number at landing)
 
@@ -336,6 +355,13 @@ CREATE TABLE principals (
   No admin pre-registration; authorization comes from claims, so a row is
   identity bookkeeping, not an authority grant. Roles are **not stored** —
   the IdP stays authoritative per request.
+- Retention is stated, not implied: the row holds only what audit needs
+  (issuer, subject, email, display name, timestamps — nothing else is
+  persisted from the token). Revoking the human at the IdP ends platform
+  access when their token expires — nothing platform-side keeps them in. An
+  operator may DELETE a stale row at any time: `created_by` is a plain text
+  column, not a foreign key, so audit history survives as an opaque id. The
+  SSO docs section says all of this.
 - `principal_` joins the private-id family (`envkey_`, `apikey_`, `gtk_`) —
   **not** `domain.knownPrefixes`; it never appears on a `/v1` path.
 - `api_keys` is untouched here: key ownership (`principal_id`) arrives only
@@ -358,7 +384,9 @@ CREATE TABLE principals (
   and the reference's own model: a key *is* its authority);
 - else `Authorization: Bearer` with a JWT silhouette (two dots) and
   `IDENTITY_MODE=oidc` → the identity lane: verify, resolve principal,
-  attach `{principal_id, roles}` to context, enforce the route's role;
+  attach `{principal_id, roles}` to context, enforce the route's role —
+  **default-deny: a route with no explicit role annotation answers 403 on
+  this lane**, so the lane is fail-closed from the moment it exists;
 - else → 401 exactly as today.
 
 On the dual-auth worker paths, discrimination extends the existing rule:
@@ -388,9 +416,11 @@ adapters — the streaming handlers `GET /v1/sessions/{id}/events/stream`,
 `GET /v1/skills/{id}/versions/{version}/content`, and
 `GET /v1/files/{id}/content` (server.go:73, 103, 109) — and each carries the
 same minimum-role check explicitly (all three are `viewer` reads); a
-completeness test walks the registrations and fails on any identity-reachable
-route without a role. (`GET …/work/poll` is also adapter-free but lives on
-the environment-key lane, which identity dispatch never reaches.) The matrix:
+completeness test walks every registration — the `/v1` table and the `/api/`
+console routes alike — and fails on any identity-reachable route without a
+role, with the lane's default-deny as the backstop beneath it. (`GET
+…/work/poll` is also adapter-free but lives on the environment-key lane,
+which identity dispatch never reaches.) The matrix:
 
 | Role | May |
 |---|---|
@@ -414,9 +444,12 @@ container, seeded with: one organization, one application (the console as
 OIDC client — code + PKCE, the console's redirect URL), **zero upstream
 providers**, public signup off, the token-exchange grant off, and a role
 claim (`roles`) emitted in tokens so `IDENTITY_ROLE_MAP` has something to
-map. The compose fronting proxy (or the docs, where no proxy runs) blocks
-`POST /api/acs` and `GET /api/get-saml-login` plus the unused SAML-IdP/CAS
-routes. docs/self-hosted-security.md gains an SSO section stating the
+map. The `iam` profile fronts Casdoor with a minimal reverse proxy that blocks
+`POST /api/acs`, `GET /api/get-saml-login`, and the unused SAML-IdP/CAS
+routes — an enforced control, not advice: the browser must reach Casdoor to
+log in, so internal-only networking is not available; Casdoor's own port
+stays unpublished, only the proxy's is exposed, and the acceptance run curls
+the blocked routes expecting the refusal. docs/self-hosted-security.md gains an SSO section stating the
 VU#780781 posture plainly: which CVEs the configuration voids, which the
 pinned version fixes (9090), and that enterprises federating their own IdP
 should point `IDENTITY_OIDC_ISSUER` straight at it — the bundled Casdoor is
@@ -458,14 +491,17 @@ matching IAP variables and docs.
    discrimination; the context principal; `created_by` widening; the
    `permission_error` envelope; the `s.handle`/`s.handleNoContent`
    minimum-role parameter lands here (the mechanism), with its first use: the
-   console env-key routes require `admin`. Tests over real HTTP: a Casdoor-shaped and an IAP-shaped
+   console env-key routes require `admin` — and every other identity-reachable
+   route **default-denies** until slice 3 annotates it, so the lane is born
+   fail-closed and slice 3 relaxes rather than closes. Tests over real HTTP: a Casdoor-shaped and an IAP-shaped
    token both authenticate; wrong iss/aud/alg/expired all 401 uniformly;
    Bearer on management paths with `IDENTITY_MODE=disabled` still 401s; an
    environment key on a console route still 401s; `x-api-key` behavior
    byte-identical throughout.
-3. **The role matrix across the route tables.** The slice-2 mechanism
-   applied everywhere per the matrix, including explicit checks on the three
-   adapter-free streaming routes, plus the route-table completeness test;
+3. **The role matrix across the route tables.** Annotating every route per
+   the matrix — relaxing slice 2's default-deny — including explicit checks
+   on the three adapter-free streaming routes, plus the completeness test
+   over both route tables;
    per-resource tests (viewer 403 on every mutation and on the env-key list,
    developer 403 on every credential surface, admin green; the key lane
    untouched by all of it). Wire-compat rung: the `/v1` route table diff is
