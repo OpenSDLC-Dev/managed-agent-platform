@@ -45,8 +45,9 @@ type server struct {
 // secret-bearing paths (credential create/update with secret fields, the
 // validate probe) answer with a configuration error (fails closed, plan 12 D1).
 // verifier authenticates humans; nil is IDENTITY_MODE=disabled, and the surface
-// is then byte-for-byte what it was before plan 31 — no lane, no role check, no
-// new rejection.
+// is then what it was before plan 31 — no lane, no role check — on every
+// request shape but one: requireAPIKey refuses a repeated x-api-key field in
+// every mode, deliberately (see dispatchManagementAuth).
 func NewHandler(pool *pgxpool.Pool, blobs blob.Store, cipher secrets.Cipher, verifier *identity.Verifier) http.Handler {
 	s := &server{pool: pool, log: events.NewLog(pool), broker: events.NewBroker(pool), queue: queue.New(pool), blobs: blobs, cipher: cipher}
 	mux := http.NewServeMux()
@@ -285,9 +286,15 @@ func dispatchAuth(pool *pgxpool.Pool, v *identity.Verifier, next http.Handler) h
 // never vouch for it, and a caller cannot downgrade a route's role requirement
 // by attaching a second credential.
 //
-// With identity disabled this is requireAPIKey itself, unwrapped: the platform
-// is byte-for-byte what it was, which is the contract IDENTITY_MODE=disabled
-// carries.
+// With identity disabled this is requireAPIKey itself, unwrapped — no lane, no
+// role check, no dispatch, which is the contract IDENTITY_MODE=disabled carries.
+// That contract is byte-for-byte on every request shape but one: the duplicate
+// x-api-key refusal inside requireAPIKey is unconditional, so a repeated field
+// that header order used to resolve is now a 401 even with identity off. It is
+// deliberately not gated on v — one rule in both places is what keeps lane
+// selection and authentication from disagreeing about which value is the key,
+// and gating it would make the same malformed request answer differently in two
+// deployments. No client sends one; the change only ever denies.
 func dispatchManagementAuth(pool *pgxpool.Pool, v *identity.Verifier, next http.Handler) http.Handler {
 	mgmt := requireAPIKey(pool, next)
 	if v == nil {

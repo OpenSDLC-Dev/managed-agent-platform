@@ -438,6 +438,34 @@ func TestIdentityDisabledIsUnchanged(t *testing.T) {
 	if msg := laneMessage(t, raw); !strings.Contains(msg, "x-api-key") {
 		t.Errorf("message = %q; the missing-key 401 must stay the one this platform always sent", msg)
 	}
+
+	// The one request shape that is NOT what it was, and the only behaviour this
+	// slice changes in a default deployment: a repeated x-api-key field. The
+	// refusal in requireAPIKey is unconditional, so it fires with no verifier at
+	// all. Gating it on one would leave the same malformed request answered
+	// differently in two deployments, and would let lane selection and
+	// authentication disagree about which value is the key — so this is pinned
+	// here rather than left to the enabled-mode test.
+	req, err := http.NewRequest(http.MethodGet, s.url+"/v1/agents", nil)
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+	req.Header.Add("x-api-key", "")
+	req.Header.Add("x-api-key", testKey)
+	res, err = http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("GET /v1/agents: %v", err)
+	}
+	status, errType, raw = laneRead(t, res)
+	if status != http.StatusUnauthorized {
+		t.Errorf("repeated x-api-key with identity disabled: status %d, want 401", status)
+	}
+	if errType != "authentication_error" {
+		t.Errorf("error type %q, want authentication_error", errType)
+	}
+	if msg := laneMessage(t, raw); !strings.Contains(msg, "multiple") {
+		t.Errorf("message = %q, want the ambiguous-credential refusal", msg)
+	}
 }
 
 // TestManagementKeyWinsOverAHumanCredential pins the dispatch order. A machine
