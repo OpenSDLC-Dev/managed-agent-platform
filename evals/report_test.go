@@ -81,7 +81,9 @@ func recordMeta(cfg modeltest.Config) {
 	defer recorder.mu.Unlock()
 	recorder.rep.Model = cfg.Model
 	recorder.rep.Endpoint = endpointHost(cfg.BaseURL)
-	recorder.secrets = secretsOf(cfg)
+	// Two sources, because the run has two credentials: the model endpoint's
+	// (secretsOf) and the repo-answer fixture's (repoSecrets).
+	recorder.secrets = append(secretsOf(cfg), repoSecrets()...)
 }
 
 // recordTrial adds a trial's outcome to the run and flushes the artifacts.

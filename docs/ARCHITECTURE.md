@@ -1001,12 +1001,16 @@ new backend inherits the whole battery. The queue still has one production imple
 extraction. The merge gate is `make verify`
 (build, linux/arm cross-compile, vet, gofmt, `go test -count=1`, and **≥90% total
 statement coverage** over the logic packages of `./internal/...`). On top sits the eval
-system (`make eval`, [plan 02](./plan/02_evals-system.md)): fourteen deterministic regression
+system (`make eval`, [plan 02](./plan/02_evals-system.md)): fifteen deterministic regression
 tasks driving whole sessions through the public API against a real model, graded
-code-only with per-trial nonces and Platform/Model/Either failure classing. It stays out
+code-only with per-trial nonces and Platform/Model/Either failure classing. `repo-answer`
+is the one trial whose expected answer is not nonce-derived — it lives in a fixed private
+GitHub fixture repository, whose privacy stands in for the nonce a fixed remote cannot
+carry (#358). The registered set is pinned by an offline test, so a trial added or dropped
+without updating the counts stated here and in README.md fails `make verify`. The tier stays out
 of the merge gate — it spends money and minutes — but a scheduled workflow
 (`.github/workflows/evals.yml`, daily plus manual dispatch) runs it against the `MODEL_*`
-secrets of the `evals` deployment environment — which admits only the default branch, so a
+and `EVAL_GITHUB_REPO_*` secrets of the `evals` deployment environment — which admits only the default branch, so a
 dispatch cannot borrow the credential onto an unreviewed ref — and a break in the
 whole-session path therefore surfaces on the next scheduled run instead of at whoever's next
 manual one. That job carries the same fail-not-skip rule: with the secrets unset it is red,

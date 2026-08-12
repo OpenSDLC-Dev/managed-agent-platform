@@ -2126,6 +2126,48 @@ passphrase without naming the mount or the file's path, so the brain's injected
 thing under test, exactly as in its `skill-answer` and `file-answer` twins. Its transcript
 joins this record when the tier is first run.
 
+**First green run of `repo-answer` — 2026-08-12 (#358).** It stayed unrun long enough to be
+parked out of `tasks()` on 2026-08-10 (#359), after three weeks of reddening the nightly for
+want of the fixture. The fixture now exists: a **private** repository holding one root-level
+`PASSPHRASE.txt` of sixteen hex characters from `/dev/urandom` (17 bytes with its newline),
+and a fine-grained token scoped to that one repository at Contents: Read-only, expiring
+**2027-08-13** — the day the nightly will start failing on a 401 unless it is rotated first.
+Both, with the fixture's URL, live as secrets on the `evals` deployment environment. The two
+`.env` names became `EVAL_GITHUB_REPO_URL` / `EVAL_GITHUB_REPO_TOKEN`, because GitHub refuses
+to store a secret or variable whose name begins with `GITHUB_`.
+
+The privacy the trial rests on was measured rather than assumed: anonymous `git-upload-pack`
+against the fixture answers 401 and anonymous `raw.githubusercontent.com` answers 404, so the
+eval sandbox's unrestricted egress cannot reach the passphrase unless the platform really
+materialized the checkout — which is the silent success this trial exists to rule out.
+
+```
+=== RUN   TestEvals/repo-answer
+INFO session repository credentials sealed session_id=sesn_5g9j8kh6vy52dpn0myf820rr repos=1
+INFO session created with resources session_id=sesn_5g9j8kh6vy52dpn0myf820rr resource_count=1
+INFO repository materialized  session_id=sesn_5g9j8kh6vy52dpn0myf820rr mount_path=/workspace/fixture bytes=14848
+INFO repository already present, skipping clone  session_id=sesn_5g9j8kh6vy52dpn0myf820rr
+--- PASS: TestEvals/repo-answer (7.94s)
+```
+
+Both the clone and the idempotence path, with every grader green: `ReadsFile` on the mounted
+path, `RepoPassphraseAnswered` against the passphrase the in-process oracle read from the
+remote, and the Platform-class `TranscriptCarriesNoRepoToken`.
+
+**The two failed attempts before it are the other half of the record**, because what failed was
+the network and what behaved was the platform. WSL on that machine cannot reach `github.com` —
+the host's proxy is invisible to a NAT-mode WSL, so `api.github.com` answers and `github.com`
+times out — and `materializeRepos` met it exactly as designed: a `session.error` of
+`type: github_repository_clone_error` with `reason: network`, then `reason: timeout`, carrying
+`retry_status: retrying`, and one retry. The event carried the repository URL and **not** the
+token, which is this plan's `scrubToken` path holding on the likeliest clone failure there is.
+The green run above was obtained by pointing the test process at the host proxy; nothing in the
+repository depends on that, and GitHub's own runners reach `github.com` directly.
+
+**CI cannot prove this on a branch.** The `evals` environment admits only `main`, so a
+`workflow_dispatch` from a PR branch gets no secrets at all. The CI half of the proof is a
+dispatch on `main` after the merge.
+
 **Self-review round — two defects on the clone-error path, both fixed red-first.**
 Re-reading `materializeRepos` with fresh eyes turned up `scrubToken(err.Error(), "")`:
 a scrub called with an empty token, which the helper returns unchanged. It read as

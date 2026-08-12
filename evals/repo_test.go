@@ -21,12 +21,6 @@ import (
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/modeltest"
 )
 
-// PARKED: repoAnswer is not registered in tasks() — the fixture repository and
-// token this file needs have never existed, so the trial only ever reddened the
-// nightly. Everything below is kept intact for the restore; what that needs is
-// in #358. Read the rest of this file in that light: it describes the tier as it
-// will work again, not as anything that runs today.
-//
 // The e-repo-answer tier (docs/plan/25_git-repo-mounting.md, "Unit E"): the
 // github_repository chain against a real GitHub repository. Consent is the
 // suite's own RUN_EVALS, because this task costs what every other task costs —
@@ -34,12 +28,20 @@ import (
 // beside the model endpoint, under the same contract the other live tiers keep:
 // the file supplies configuration, the environment supplies consent, and once
 // opted in a missing name FAILS rather than skips.
+//
+// Neither name begins with GITHUB_, and that is not a style choice: GitHub
+// refuses to store a secret or a variable whose name starts with that prefix, so
+// the spelling these constants had until #358 could never have been configured
+// in CI under the name the code reads — it would have needed a second name and a
+// mapping in the workflow's env: block, a permanent indirection whose one job is
+// to be typed correctly forever. Renaming was free while nothing anywhere was
+// configured; it stopped being free the moment the evals environment took both.
 const (
 	// RepoURLEnv is the fixture repository's canonical clone URL.
-	RepoURLEnv = "GITHUB_EVAL_REPO_URL"
+	RepoURLEnv = "EVAL_GITHUB_REPO_URL"
 	// RepoTokenEnv is a fine-grained token scoped to that one repository,
 	// Contents: Read-only. Nothing here ever needs write.
-	RepoTokenEnv = "GITHUB_EVAL_REPO_TOKEN"
+	RepoTokenEnv = "EVAL_GITHUB_REPO_TOKEN"
 )
 
 // passphraseFile is the fixture repository's one required file. The trial asks
@@ -167,6 +169,27 @@ func TranscriptCarriesNoRepoToken() Grader {
 			return nil
 		},
 	}
+}
+
+// repoSecrets is the fixture token as an artifact-scrub entry (see secretsOf,
+// which supplies the model endpoint's).
+//
+// TranscriptCarriesNoRepoToken asserts the token never reaches the transcript —
+// but the run where that grader fires is precisely the run whose artifacts would
+// carry it. A failed trial's whole transcript is dumped to evals/artifacts/, and
+// evals.yml uploads that directory unconditionally from a public repository,
+// whose workflow artifacts anyone can download. So the one run that proves the
+// token leaked must not also be the run that publishes it. The grader still
+// reads the live events in memory, because the scrub runs on the way to disk and
+// nowhere else.
+//
+// Nil when unconfigured rather than a one-element slice holding "": scrub skips
+// empty entries, but a caller that appended one would be relying on that.
+func repoSecrets() []string {
+	if token := repoResolve(RepoTokenEnv); token != "" {
+		return []string{token}
+	}
+	return nil
 }
 
 // repoPassphrase clones the fixture repository in-process and returns the
