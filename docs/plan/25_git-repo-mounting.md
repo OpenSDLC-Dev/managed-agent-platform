@@ -455,7 +455,9 @@ meets it. Its rules, translated to this repo:
   real GitHub fixture repository; the agent must answer it — proving
   create → seal → claim → clone → tar → extract → brain block → model → file-tool read as
   one chain. Configuration rides `.env` under the established live-tier contract
-  (`GITHUB_EVAL_REPO_URL`, `GITHUB_EVAL_REPO_TOKEN`; consent via `RUN_EVALS=1`; once
+  (`GITHUB_EVAL_REPO_URL`, `GITHUB_EVAL_REPO_TOKEN` — renamed `EVAL_GITHUB_REPO_URL` /
+  `EVAL_GITHUB_REPO_TOKEN` in #358, because GitHub refuses to store a secret or variable
+  whose name begins with `GITHUB_`; consent via `RUN_EVALS=1`; once
   opted in, missing configuration fails rather than skips). The recorded transcript is
   an artifact in a public repository: the record never quotes `.env`, and the
   acceptance ritual greps the assembled record for the token value before it lands in

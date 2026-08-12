@@ -77,11 +77,40 @@ var recorder struct {
 }
 
 func recordMeta(cfg modeltest.Config) {
+	// Two sources, because the run has two sets of values the artifacts must
+	// never carry: the model endpoint's credentials (secretsOf) and the
+	// repo-answer fixture's token and passphrase (repoSecrets).
+	//
+	// Gathered before the lock: repoSecrets resolves the passphrase from the
+	// fixture's remote, and holding the recorder's mutex across a network clone
+	// would block every trial's artifact flush behind it for no reason.
+	secrets := append(secretsOf(cfg), repoSecrets()...)
+
 	recorder.mu.Lock()
 	defer recorder.mu.Unlock()
 	recorder.rep.Model = cfg.Model
 	recorder.rep.Endpoint = endpointHost(cfg.BaseURL)
-	recorder.secrets = secretsOf(cfg)
+	recorder.secrets = secrets
+}
+
+// addRunSecret adds one more string to the run's scrub set, for a value that is
+// not knowable when recordMeta runs.
+//
+// The repo-answer fixture's passphrase is the case: it exists only once
+// something has cloned the fixture, which may first happen inside a grader, long
+// after the meta line was recorded. Registering it there rather than only at
+// startup is what keeps the scrub honest on the path that matters — a run whose
+// startup clone failed, whose platform clone then succeeded, and whose failing
+// trial is therefore about to have its transcript written out with the
+// passphrase in it. Every artifact is rendered fresh on every flush, so a secret
+// registered late still covers what was already written.
+func addRunSecret(s string) {
+	if s == "" {
+		return
+	}
+	recorder.mu.Lock()
+	defer recorder.mu.Unlock()
+	recorder.secrets = append(recorder.secrets, s)
 }
 
 // recordTrial adds a trial's outcome to the run and flushes the artifacts.

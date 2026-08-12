@@ -1218,3 +1218,63 @@ func TestOkResult(t *testing.T) {
 		t.Error("an explicit is_error:false result should be ok")
 	}
 }
+
+// no-session-error tolerates exactly one thing, and this table says what: a
+// clone failure the executor means to retry, on a trial that mounts a
+// repository, for a reason that means the network was unwell.
+//
+// The rows that must NOT be tolerated are the point. retry_status is "retrying"
+// for every reason the executor emits, so the reason is the only thing standing
+// between "a GitHub blip the platform recovered from" and "our own bug arriving
+// under a rule written for the network's" — and a grader that quietly stopped
+// noticing the second would be worse than the unactionable red the tolerance
+// was added to remove.
+func TestNoSessionErrorToleratesOnlyARetriedTransientClone(t *testing.T) {
+	cloneErr := func(reason, retry string) map[string]any {
+		return map[string]any{
+			"type": "session.error",
+			"error": map[string]any{
+				"type":         "github_repository_clone_error",
+				"reason":       reason,
+				"retry_status": map[string]any{"type": retry},
+			},
+		}
+	}
+	byName := func(task Task) Grader {
+		t.Helper()
+		for _, g := range corePack(task) {
+			if g.Name == "no-session-error" {
+				return g
+			}
+		}
+		t.Fatal("core pack has no no-session-error grader")
+		return Grader{}
+	}
+	repoTask := Task{Turns: []Turn{{Message: "x"}}, Repo: &RepoFixture{MountPath: "/workspace/fixture"}}
+	plainTask := Task{Turns: []Turn{{Message: "x"}}}
+	repoGrader, plainGrader := byName(repoTask), byName(plainTask)
+
+	for _, tc := range []struct {
+		name      string
+		grader    Grader
+		ev        map[string]any
+		tolerated bool
+	}{
+		{"a retried network failure on a repository trial", repoGrader, cloneErr("network", "retrying"), true},
+		{"a retried timeout on a repository trial", repoGrader, cloneErr("timeout", "retrying"), true},
+		{"a retried auth failure — a bad token is actionable", repoGrader, cloneErr("auth", "retrying"), false},
+		{"a retried not_found — the wrong repository is actionable", repoGrader, cloneErr("not_found", "retrying"), false},
+		{"a retried internal failure — that one is ours", repoGrader, cloneErr("internal", "retrying"), false},
+		{"a network failure the platform gave up on", repoGrader, cloneErr("network", "exhausted"), false},
+		{"the very same event, on a trial that mounts nothing", plainGrader, cloneErr("network", "retrying"), false},
+		{"a session.error that is not a clone at all", repoGrader,
+			map[string]any{"type": "session.error", "error": map[string]any{"type": "model_error"}}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := tc.grader.Check(t, &Trial{Events: []map[string]any{tc.ev}})
+			if tolerated := err == nil; tolerated != tc.tolerated {
+				t.Errorf("tolerated = %v, want %v (grader said: %v)", tolerated, tc.tolerated, err)
+			}
+		})
+	}
+}

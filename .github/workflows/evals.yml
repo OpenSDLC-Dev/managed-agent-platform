@@ -36,12 +36,17 @@ jobs:
   evals:
     name: evals
     runs-on: ubuntu-latest
-    # The four MODEL_* secrets live in this environment and nowhere else — there
-    # are no repository-level copies — so this line is what grants access to
-    # them, and the environment's deployment-branch policy (main only) is what
-    # bounds it. That closes the hole a plain repo secret leaves: `workflow_dispatch`
+    # The six secrets this job reads — four MODEL_*, two EVAL_GITHUB_REPO_* —
+    # live in this environment and nowhere else; there are no repository-level
+    # copies, so this line is what grants access to them, and the environment's
+    # deployment-branch policy (main only) is what bounds it. That closes the hole
+    # a plain repo secret leaves: `workflow_dispatch`
     # runs the workflow file from whichever ref is chosen, so without the policy a
     # modified branch could rewrite the eval step and walk off with the credential.
+    #
+    # The same policy is why a change to this job cannot be proved on its branch:
+    # a dispatch from anywhere but main gets no secrets. Land it, then dispatch
+    # from main, and read that run — not the PR's checks — as the proof.
     #
     # Deliberately NO required reviewers on this environment: an approval gate on
     # a nightly unattended job means the job waits for a human every night, which
@@ -73,15 +78,17 @@ jobs:
       # variable it wanted; a precheck would be a second copy of that rule, and
       # the tempting shape for one — skip when unconfigured — is exactly the
       # failure this workflow exists to prevent: green while testing nothing.
-      # So a deployment that has not configured the four secrets gets a red job
-      # by design rather than a green one. (They were configured here on
-      # 2026-07-25, with the first run; a red job since then means something
-      # else, and the step log names it.)
+      # So a deployment that has not configured the secrets gets a red job
+      # by design rather than a green one. (The four MODEL_* were configured here
+      # on 2026-07-25, with the first run; the two EVAL_GITHUB_REPO_* on
+      # 2026-08-12 with #358. A red job since then means something else, and the
+      # step log names it.)
       - name: eval suite (real model endpoint + Docker sandboxes)
         # The endpoint, from the environment's secrets and nowhere else. No .env is written
         # here, on purpose: internal/modeltest resolves MODEL_* from the
         # environment first and only falls back to the repo-root file, so in CI
-        # these four *are* the whole configuration. An unset secret renders as the
+        # these *are* the whole configuration — evals/repo_test.go resolves its
+        # own two the same way. An unset secret renders as the
         # empty string, which modeltest reads as an explicit "unset" no file can
         # quietly refill.
         #
@@ -95,6 +102,25 @@ jobs:
           MODEL_BASE_URL: ${{ secrets.MODEL_BASE_URL }}
           MODEL_API_KEY: ${{ secrets.MODEL_API_KEY }}
           MODEL_ID: ${{ secrets.MODEL_ID }}
+          # The repo-answer fixture (#358): a PRIVATE repository holding
+          # PASSPHRASE.txt, and a fine-grained token scoped to that repository
+          # alone, Contents: Read-only.
+          #
+          # Neither name may begin with GITHUB_ — GitHub refuses to store a
+          # secret or variable spelled that way — which is why the constants in
+          # evals/repo_test.go read EVAL_GITHUB_REPO_*, so the stored name and
+          # the read name are the same string with no mapping to keep correct.
+          #
+          # The URL is a secret rather than a variable although it is not a
+          # credential: a variable is rendered into the step log, and repo-answer
+          # is the one answer-style trial with no per-trial nonce, so the
+          # fixture's privacy is doing that job. That masking covers this log and
+          # nothing else — a clone failure records the URL in its own
+          # session.error payload, which rides the transcript this job uploads.
+          # Knowing the URL grants nothing: what protects the passphrase is that
+          # the repository refuses an unauthenticated fetch.
+          EVAL_GITHUB_REPO_URL: ${{ secrets.EVAL_GITHUB_REPO_URL }}
+          EVAL_GITHUB_REPO_TOKEN: ${{ secrets.EVAL_GITHUB_REPO_TOKEN }}
         run: make eval
       # Artifacts are written whether the run was green or red, and a red run is
       # the one whose transcripts someone needs — so both steps below run on
@@ -120,3 +146,12 @@ jobs:
           # summary step above has already reported; this must not pile a second,
           # less informative failure on top of it.
           if-no-files-found: warn
+          # Bounded rather than left at the repository default of up to 90 days.
+          # These are triage artifacts for a nightly — nobody reads a fortnight-old
+          # one — and this repository is public, so every upload is downloadable by
+          # anyone. Since #358 they can also carry the repo-answer fixture's
+          # identity, and on a narrow failure path its passphrase; a fixed fixture
+          # cannot be un-published by rotating it afterwards, because every
+          # artifact still inside the window keeps the old value readable. A week
+          # is longer than triage takes and far shorter than the default.
+          retention-days: 7
