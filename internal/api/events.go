@@ -327,7 +327,12 @@ func (s *server) sendSessionEvents(r *http.Request) (any, error) {
 		// them is a web tool, else tool_exec, the same web-first choice the
 		// brain's settlement makes and for the same reason: a tool_exec is
 		// visible to a BYOC worker, which implements only the six sandbox tools
-		// and must not see the log while a web call is outstanding.
+		// and must not see the log while a web call is outstanding. If the only
+		// remaining unanswered tools are client-executed custom tools, enqueue
+		// nothing — the client's user.custom_tool_result resumes the turn
+		// (mirroring the non-ask suspend, which never runs an executor for a
+		// custom-only turn). If every tool is answered (all gated tools
+		// denied), resume the brain directly.
 		//
 		// This site knows nothing about MCP yet, and an allowed MCP call would
 		// resume into no work at all: UnansweredPlatformToolNames counts only
@@ -340,15 +345,32 @@ func (s *server) sendSessionEvents(r *http.Request) (any, error) {
 		// Unreachable today: the brain stamps evaluated_permission inside its
 		// agent.tool_use branch alone, classify() resolves no name to the MCP
 		// event type, and a client may not post one, so no MCP call can be
-		// gated. The mcp_exec arm of the four-way settlement closes it, and has
-		// to land in the same change that first stamps a permission on an MCP
-		// call — not merely before one is stamped. If the only
-		// remaining unanswered tools are client-executed custom tools, enqueue
-		// nothing — the client's user.custom_tool_result resumes the turn
-		// (mirroring the non-ask suspend, which never runs an executor for a
-		// custom-only turn). If every tool is answered (all gated tools
-		// denied), resume the brain directly.
-		platformPending, err := events.UnansweredPlatformToolNames(ctx, tx, domain.ID(id), deniedIDs)
+		// gated. But the trigger is the first agent.mcp_tool_use *emitted*, not
+		// the first one gated — an ungated MCP call reaches the same two
+		// queries by the paths that settle a turn — so the mcp_exec arm of the
+		// four-way settlement is owed to that emission, wherever it lands.
+		//
+		// Landing both in one commit is necessary and not sufficient: the brain
+		// and the control plane are separate deployments, so a rollout runs a
+		// new brain against an old control plane (and a rollback the reverse).
+		// A brain that emits an MCP call while some control-plane replica still
+		// runs this version strands whatever that call was meant to resume. The
+		// scheduling side has to be deployable first — either released ahead of
+		// the producer, or written so an unrecognized outstanding call resumes
+		// something rather than nothing.
+		// Answered: the calls this batch denies, and the calls its own results
+		// answer. A client may confirm and post an outstanding result in one
+		// send, and that result is validated and about to be appended — as good
+		// as answered, which is why the two sibling arms of this switch pass
+		// ToolResultRefs too. Counting only the denials reads such a call as
+		// outstanding, and both decisions below then go wrong in opposite
+		// directions: a platform call answered here would run an executor pass
+		// with nothing to do, and a client-executed one would leave the turn
+		// unresumed — committed running, everything answered, nothing queued,
+		// and no later trigger, since the tool-result trigger fires on a
+		// subsequent send the client has no reason to make.
+		answered := append(deniedIDs, events.ToolResultRefs(newEvents)...)
+		platformPending, err := events.UnansweredPlatformToolNames(ctx, tx, domain.ID(id), answered)
 		if err != nil {
 			return nil, err
 		}
@@ -366,7 +388,7 @@ func (s *server) sendSessionEvents(r *http.Request) (any, error) {
 			}
 			break
 		}
-		anyPending, err := events.HasUnansweredToolUse(ctx, tx, domain.ID(id), deniedIDs)
+		anyPending, err := events.HasUnansweredToolUse(ctx, tx, domain.ID(id), answered)
 		if err != nil {
 			return nil, err
 		}

@@ -74,21 +74,24 @@ func TestDenialAnswersInTheDeniedCallsOwnFamily(t *testing.T) {
 			if obj[tc.refKey] != id.String() {
 				t.Errorf("%s = %v, want %s", tc.refKey, obj[tc.refKey], id)
 			}
-			// Exactly one reference key: a payload carrying two would answer the
-			// call under whichever the reader happens to check first.
-			for _, other := range []string{"tool_use_id", "custom_tool_use_id", "mcp_tool_use_id"} {
-				if other == tc.refKey {
-					continue
-				}
-				if _, set := obj[other]; set {
-					t.Errorf("payload also carries %s: %s", other, results[0].Payload)
+			// The whole key set, not a list of absences. Naming the fields that
+			// must not appear only bans the ones someone thought of: neither
+			// result event carries an mcp_server_name or a session_thread_id on
+			// the wire (verified against the SDK's event types), and inventing
+			// one would slip past every absence check written so far. Exactly
+			// one reference key matters on its own account — a payload carrying
+			// two answers the call under whichever key the reader happens to
+			// check first.
+			want := map[string]bool{tc.refKey: true, "content": true, "is_error": true}
+			for k := range obj {
+				if !want[k] {
+					t.Errorf("payload carries the unexpected field %q: %s", k, results[0].Payload)
 				}
 			}
-			// agent.mcp_tool_result and agent.tool_result both lack a
-			// session_thread_id on the wire (verified against the SDK's event
-			// types), so writing one would invent a field.
-			if _, set := obj["session_thread_id"]; set {
-				t.Errorf("payload carries session_thread_id: %s", results[0].Payload)
+			for k := range want {
+				if _, set := obj[k]; !set {
+					t.Errorf("payload is missing %q: %s", k, results[0].Payload)
+				}
 			}
 			if obj["is_error"] != true {
 				t.Errorf("is_error = %v, want true", obj["is_error"])
@@ -189,8 +192,8 @@ func TestDenialsFollowBatchOrder(t *testing.T) {
 	}
 	wantText := []string{"a", "b", "c"}
 	wantIDs := []string{first.String(), second.String(), third.String()}
-	if len(results) != 3 {
-		t.Fatalf("results = %v, want three", results)
+	if len(results) != 3 || len(denied) != 3 {
+		t.Fatalf("results = %v, denied = %v; want three of each", results, denied)
 	}
 	for i, ev := range results {
 		if ev.Type != wantTypes[i] {
@@ -247,9 +250,10 @@ func TestDenialRefusesWhatItCannotAnswer(t *testing.T) {
 		sid := newSession(t, pool)
 		_, _, err := events.DenialResults(ctx, pool, sid,
 			[]events.NewEvent{inRaw(domain.EventUserToolConfirm, `"nope"`)})
-		if err == nil {
-			t.Error("a non-object confirmation payload should error")
-		}
+		// The decoder's own message, not one of this function's diagnoses: a
+		// payload that is not an object never reaches the lookup, and reporting
+		// it as an unknown id would name a field the caller never sent.
+		wantErrHas(t, err, "cannot unmarshal string")
 	})
 }
 

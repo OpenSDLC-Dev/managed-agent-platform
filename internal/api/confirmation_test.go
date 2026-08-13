@@ -18,9 +18,18 @@ import (
 // tool_use event id a confirmation must reference.
 func appendToolUseWithPerm(t *testing.T, s *tserver, sessionID, name, perm string) string {
 	t.Helper()
-	payload := []byte(`{"name":"` + name + `","input":{},"evaluated_permission":"` + perm + `","session_thread_id":null}`)
+	return appendGatedToolUse(t, s, sessionID, domain.EventAgentToolUse,
+		`{"name":"`+name+`","input":{},"evaluated_permission":"`+perm+`","session_thread_id":null}`)
+}
+
+// appendGatedToolUse plants one tool intent with the payload the brain would
+// commit for it and forces the session idle. Both gated families use it: they
+// differ in the event type and in one payload field, not in what the gate does
+// with them, which is the point these tests exist to check.
+func appendGatedToolUse(t *testing.T, s *tserver, sessionID string, typ domain.EventType, payload string) string {
+	t.Helper()
 	evs, err := events.NewLog(s.pool).Append(context.Background(), domain.ID(sessionID),
-		[]events.NewEvent{{Type: domain.EventAgentToolUse, Payload: payload}})
+		[]events.NewEvent{{Type: typ, Payload: []byte(payload)}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -42,18 +51,9 @@ func appendAskToolUse(t *testing.T, s *tserver, sessionID, name string) string {
 // exactly as the reference declares it (name, mcp_server_name, input).
 func appendAskMCPToolUse(t *testing.T, s *tserver, sessionID, server, name string) string {
 	t.Helper()
-	payload := []byte(`{"name":"` + name + `","mcp_server_name":"` + server +
-		`","input":{},"evaluated_permission":"ask","session_thread_id":null}`)
-	evs, err := events.NewLog(s.pool).Append(context.Background(), domain.ID(sessionID),
-		[]events.NewEvent{{Type: domain.EventAgentMCPToolUse, Payload: payload}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := s.pool.Exec(context.Background(),
-		`UPDATE sessions SET status = 'idle' WHERE id = $1`, sessionID); err != nil {
-		t.Fatal(err)
-	}
-	return evs[0].ID.String()
+	return appendGatedToolUse(t, s, sessionID, domain.EventAgentMCPToolUse,
+		`{"name":"`+name+`","mcp_server_name":"`+server+
+			`","input":{},"evaluated_permission":"ask","session_thread_id":null}`)
 }
 
 func confirm(id, result string, extra map[string]any) map[string]any {
@@ -271,6 +271,58 @@ func TestMCPCallBlocksTheRequiresActionGate(t *testing.T) {
 	ids, ok := stop["event_ids"].([]any)
 	if !ok || len(ids) != 1 || ids[0] != mcp {
 		t.Errorf("event_ids = %v, want [%s]", stop["event_ids"], mcp)
+	}
+}
+
+// TestConfirmationBatchedWithTheLastToolResultResumesTheTurn: a client may send
+// its confirmation and an outstanding tool's result in one batch, and the two
+// enqueue decisions that follow have to count that result. It is in the batch,
+// not yet in the log, which is exactly why the two sibling arms of this switch
+// pass ToolResultRefs — a confirmation arm that passes only the denied ids reads
+// the call as still outstanding, declines to wake the brain, and commits a
+// session with every call answered, nothing queued and no later trigger: the
+// tool-result trigger fires on a *subsequent* send, and the client has nothing
+// left to send. The session is stuck running, where archive and delete are both
+// refused, and only a user.interrupt gets it back.
+func TestConfirmationBatchedWithTheLastToolResultResumesTheTurn(t *testing.T) {
+	s := newTestServer(t)
+	sessionID := eventsFixture(t, s)
+	askID := appendAskToolUse(t, s, sessionID, "bash")
+	customID := appendToolUse(t, s, sessionID, domain.EventAgentCustomToolUse)
+
+	sendEvents(t, s, sessionID,
+		confirm(askID, "deny", map[string]any{"deny_message": "no"}),
+		map[string]any{"type": "user.custom_tool_result", "custom_tool_use_id": customID,
+			"content": []any{map[string]any{"type": "text", "text": "done"}}})
+
+	if got := s.sessionStatus(sessionID); got != "running" {
+		t.Errorf("status = %q, want running", got)
+	}
+	if n := s.liveWork(sessionID, queue.ModelTurn); n != 1 {
+		t.Errorf("live model_turn = %d, want 1 — every call is answered, so the turn must resume", n)
+	}
+}
+
+// TestConfirmationBatchedWithAToolResultDoesNotRunTheExecutorForIt is the same
+// omission seen from the other side: a platform call answered in the same batch
+// must not look outstanding either, or the resume provisions a sandbox and runs
+// an executor pass that finds nothing to do.
+func TestConfirmationBatchedWithAToolResultDoesNotRunTheExecutorForIt(t *testing.T) {
+	s := newTestServer(t)
+	sessionID := selfHostedSession(t, s)
+	askID := appendAskToolUse(t, s, sessionID, "bash")
+	otherID := appendToolUse(t, s, sessionID, domain.EventAgentToolUse)
+
+	sendEvents(t, s, sessionID,
+		confirm(askID, "deny", map[string]any{"deny_message": "no"}),
+		map[string]any{"type": "user.tool_result", "tool_use_id": otherID,
+			"content": []any{map[string]any{"type": "text", "text": "done"}}})
+
+	if n := s.liveWork(sessionID, queue.ToolExec); n != 0 {
+		t.Errorf("live tool_exec = %d, want 0 — the only platform call was answered in this batch", n)
+	}
+	if n := s.liveWork(sessionID, queue.ModelTurn); n != 1 {
+		t.Errorf("live model_turn = %d, want 1", n)
 	}
 }
 

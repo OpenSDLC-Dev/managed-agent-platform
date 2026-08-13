@@ -3,6 +3,7 @@ package events
 import (
 	"encoding/json"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
+	"slices"
 	"strings"
 	"testing"
 	"unicode/utf8"
@@ -68,6 +69,19 @@ func TestEveryConfirmableFamilyHasAnOutboundAnswer(t *testing.T) {
 		}
 		if answer.thread {
 			t.Errorf("%s is answered by %s, which the table marks as carrying a session_thread_id", typ, answer.result)
+		}
+		// Being outbound is not enough to be an answer. The queries that decide
+		// whether a call is still outstanding look for a result of one of
+		// toolResultTypes, referencing the call under one of three keys — so a
+		// family mapped to some other outbound event, or keyed by a field
+		// answeredBy does not read, would be answered in this package's own
+		// terms and unanswered in the database's, leaving the call outstanding
+		// forever with a result already written for it.
+		if !slices.Contains(toolResultTypes, string(answer.result)) {
+			t.Errorf("%s is answered by %s, which no answered-ness query counts as a result", typ, answer.result)
+		}
+		if key := "r.payload->>'" + answer.refKey + "'"; !strings.Contains(answeredBy(3), key) {
+			t.Errorf("%s's answer is keyed by %q, which answeredBy does not read", typ, answer.refKey)
 		}
 	}
 }

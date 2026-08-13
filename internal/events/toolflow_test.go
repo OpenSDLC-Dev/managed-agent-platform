@@ -647,11 +647,11 @@ func TestValidateToolResults(t *testing.T) {
 				"is awaiting confirmation")
 		})
 
-		// The gate reads evaluated_permission on any tool-use kind, while only
-		// agent.tool_use is confirmable. An ask-stamped custom tool use is
-		// therefore unanswerable from both sides at once. Pinned as current
-		// behavior, not endorsed: the brain stamps a policy on built-ins only,
-		// so nothing reaches this state today.
+		// The gate reads evaluated_permission on any tool-use kind, while a
+		// custom tool use is not confirmable. An ask-stamped one is therefore
+		// unanswerable from both sides at once. Pinned as current behavior, not
+		// endorsed: the brain stamps a policy on built-ins only, so nothing
+		// reaches this state today.
 		t.Run("gates kinds that cannot be confirmed", func(t *testing.T) {
 			sid := newSession(t, pool)
 			id := toolUse(t, log, sid, domain.EventAgentCustomToolUse, `"ask"`)
@@ -793,12 +793,17 @@ func TestValidateToolConfirmations(t *testing.T) {
 		}
 	})
 
+	// Both confirmable families, because membership and gatedness are separate
+	// checks: joining the confirmable set buys an MCP call the right to be
+	// asked about, not the right to be confirmed when nobody asked.
 	t.Run("not gated for ask", func(t *testing.T) {
-		for _, perm := range []string{`"allow"`, "", "null"} {
-			sid := newSession(t, pool)
-			id := toolUse(t, log, sid, domain.EventAgentToolUse, perm)
-			wantErrIs(t, validate(sid, inConfirm(id.String())),
-				fmt.Sprintf(`events[0]: tool use %q was not gated for confirmation`, id))
+		for _, typ := range []domain.EventType{domain.EventAgentToolUse, domain.EventAgentMCPToolUse} {
+			for _, perm := range []string{`"allow"`, "", "null"} {
+				sid := newSession(t, pool)
+				id := toolUse(t, log, sid, typ, perm)
+				wantErrIs(t, validate(sid, inConfirm(id.String())),
+					fmt.Sprintf(`events[0]: tool use %q was not gated for confirmation`, id))
+			}
 		}
 	})
 
