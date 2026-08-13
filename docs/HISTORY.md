@@ -98,8 +98,10 @@ acceptance did. Both tokens decode as the platform requires — `iss` byte-equal
   `{"id":"principal_jx3rwe9a1sacy8yhfh4mv9z6","type":"principal"}`. The audit trail
   names the human, which is the reason the identity lane exists. (This step and the
   agent create below asserted on the returned resource rather than the status line,
-  so their success is transcript-proven and their `200` is code-backed; every other
-  code quoted in this record was captured with `-w '%{http_code}'`.)
+  so their success is transcript-proven and their `200` is code-backed. Every other
+  code quoted in this record was captured with `-w '%{http_code}'`, except the
+  `401`s in the `ant` paragraph, which are the CLI's own printed error output —
+  verbatim in its transcripts, just not `-w`'s.)
 - **The issued key drives `/v1`.** `GET /v1/agents` → **200**, and `POST /v1/agents`
   minted `agent_thm8jh8c862tymp57ce41k44`. A read and a mutation, on a credential no
   operator seeded.
