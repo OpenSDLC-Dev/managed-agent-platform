@@ -1208,6 +1208,9 @@ func (c *container) WriteFile(ctx context.Context, path string, data []byte) err
 // because the bytes were landing under a temporary name, that failure takes the
 // partial file with it instead of leaving it at the target.
 func (c *container) WriteFileStream(ctx context.Context, path string, src io.Reader, size int64) error {
+	if err := sandbox.CheckWriteSize(size); err != nil {
+		return fmt.Errorf("docker: write %s: %w", path, err)
+	}
 	dir := gopath.Dir(path)
 	if err := c.mkdirAll(ctx, dir); err != nil {
 		return err

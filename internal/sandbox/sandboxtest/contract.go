@@ -794,6 +794,37 @@ func Run(t *testing.T, newHarness func(t *testing.T) Harness) {
 			t.Errorf("after a failed write of a new file: err = %v, want ErrFileNotExist", err)
 		}
 
+		// A size that is not a length at all is refused too, and refused before
+		// the write starts rather than after it fails (#386). Both backends
+		// already ended up refusing a -1 — one comparing the delivered count
+		// against a number nothing could equal, the other handing it to an
+		// archive writer that complained — but each only after creating the
+		// target's parent directory, and the Kubernetes one only after carrying
+		// every byte of the reader into the pod. So the guard is asked for here
+		// by its consequences: the parent must not appear, which is what a
+		// caller who was told nothing was written is entitled to.
+		refused := workdir + "/nosuchdir/unknown.bin"
+		if err := sb.WriteFileStream(ctx, refused, strings.NewReader("replacement"), -1); err == nil {
+			t.Error("stream write with a negative size returned nil, want an error")
+		}
+		if _, err := sb.ReadFile(ctx, refused); !errors.Is(err, sandbox.ErrFileNotExist) {
+			t.Errorf("after a refused write: err = %v, want ErrFileNotExist", err)
+		}
+		if res, err := sb.Exec(ctx, sandbox.ExecRequest{
+			Command: "test -d " + workdir + "/nosuchdir && echo present || echo absent",
+		}); err != nil {
+			t.Fatalf("probe the parent: %v", err)
+		} else if got := strings.TrimSpace(res.Stdout); got != "absent" {
+			t.Errorf("the refused write's parent directory is %s, want absent", got)
+		}
+		// An existing target keeps what it held, for the same reason.
+		if err := sb.WriteFileStream(ctx, kept, strings.NewReader("replacement"), -1); err == nil {
+			t.Error("stream write with a negative size over a target returned nil, want an error")
+		}
+		if got, err := sb.ReadFile(ctx, kept); err != nil || string(got) != "original" {
+			t.Errorf("after a refused write the target holds %q, %v; want %q untouched", got, err, "original")
+		}
+
 		// Nor does the residue linger beside the target: a 500 MB mount that dies
 		// part way through must not leave 400 of them in the sandbox.
 		res, err := sb.Exec(ctx, sandbox.ExecRequest{

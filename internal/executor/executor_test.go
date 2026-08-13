@@ -157,6 +157,12 @@ func (f *fakeSandbox) WriteFile(ctx context.Context, path string, data []byte) e
 	return nil
 }
 func (f *fakeSandbox) WriteFileStream(ctx context.Context, path string, src io.Reader, size int64) error {
+	// The seam's own refusal, so the fake cannot be more permissive than the
+	// backends it stands in for: a -1 read through the LimitReader below would
+	// otherwise land an empty file and report success (#386).
+	if err := sandbox.CheckWriteSize(size); err != nil {
+		return fmt.Errorf("fake: write %s: %w", path, err)
+	}
 	data, err := io.ReadAll(io.LimitReader(src, size))
 	if err != nil {
 		return err
