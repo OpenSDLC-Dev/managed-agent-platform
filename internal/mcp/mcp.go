@@ -56,11 +56,18 @@ import (
 //
 // That does not make DialTimeout a floor overall, and it would be easy to read
 // it that way: DefaultClient also sets it as its own Timeout, which is a
-// whole-request cap that beats a longer context deadline. So under the
-// production client every request is bounded at 30s, and ListTimeout's two
-// minutes bound the listing across its pages rather than any single one of them.
-// A caller supplying its own client sets that policy itself, and may set none —
-// which is the case the fallback exists for.
+// whole-request cap that beats a longer context deadline. So every request
+// through DefaultClient is bounded at 30s, and ListTimeout's two minutes bound
+// the listing across its pages rather than any single one of them. Which client
+// carries a connection therefore decides this too: on [CallClient] the same cap
+// is [CallTimeout], so *every* request that connection makes gets a tool's
+// budget rather than a dial's — the handshake, and the session-ending DELETE the
+// SDK sends on a context nothing here can cancel, included. That is the price of
+// running tools through one client, and it is bounded rather than open: the
+// driver's own pass budget is what keeps a server that accepts and never answers
+// from holding a work item indefinitely. A caller supplying its own client sets
+// that policy itself, and may set none — which is the case the fallback exists
+// for.
 //
 // None of the deadlines here is exact, and the overshoot is the SDK's: when a
 // caller's context ends a request that is still outstanding, the SDK tells the

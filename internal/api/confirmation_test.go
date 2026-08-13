@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"testing"
+	"time"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/events"
@@ -151,6 +152,21 @@ func appendUngatedMCPToolUse(t *testing.T, s *tserver, sessionID, server, name s
 	return appendGatedToolUse(t, s, sessionID, domain.EventAgentMCPToolUse,
 		`{"name":"`+name+`","mcp_server_name":"`+server+
 			`","input":{},"evaluated_permission":"allow","session_thread_id":null}`)
+}
+
+// appendRunningMCPToolUse plants the same call without forcing the session
+// idle — what a brain turn that emitted an ungated call actually leaves behind,
+// and the state the tool-result resume runs in.
+func appendRunningMCPToolUse(t *testing.T, s *tserver, sessionID, server, name string) string {
+	t.Helper()
+	evs, err := events.NewLog(s.pool).Append(context.Background(), domain.ID(sessionID),
+		[]events.NewEvent{{Type: domain.EventAgentMCPToolUse, Payload: []byte(
+			`{"name":"` + name + `","mcp_server_name":"` + server +
+				`","input":{},"evaluated_permission":"allow","session_thread_id":null}`)}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return evs[0].ID.String()
 }
 
 // A confirmation resume schedules the MCP call ahead of the built-ins it just
@@ -604,5 +620,41 @@ func TestConfirmationValidation(t *testing.T) {
 	// …and a second confirmation for the same call is rejected.
 	if got := post(confirm(askID, "allow", nil)); got != http.StatusBadRequest {
 		t.Errorf("already confirmed: status %d, want 400", got)
+	}
+}
+
+// A tool result posted while an MCP call is outstanding is the sixth settlement
+// site, and the one a self_hosted session reaches: its worker answers the
+// sandbox call through user.tool_result, and if that arrives last the MCP call
+// is what remains. Scheduling nothing there would leave the session running with
+// a call no other party can answer — a client posts neither the call nor its
+// result, and a BYOC worker's contract has no MCP surface at all.
+func TestToolResultResumeSchedulesAnOutstandingMCPCall(t *testing.T) {
+	s := newTestServer(t)
+	sessionID := selfHostedSession(t, s)
+	ctx := context.Background()
+	q := queue.New(s.pool)
+
+	sendEvents(t, s, sessionID, userMessage("run a tool"))
+	item, err := q.Claim(ctx, queue.ModelTurn, time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	toolUseID := appendToolUse(t, s, sessionID, domain.EventAgentToolUse)
+	appendRunningMCPToolUse(t, s, sessionID, "docs", "search")
+	if err := q.Complete(ctx, s.pool, item); err != nil {
+		t.Fatal(err)
+	}
+
+	sendEvents(t, s, sessionID, map[string]any{
+		"type": "user.tool_result", "tool_use_id": toolUseID,
+		"content": []any{map[string]any{"type": "text", "text": "ok"}},
+	})
+
+	if n := s.liveWork(sessionID, queue.MCPExec); n != 1 {
+		t.Errorf("mcp_exec = %d, want 1 — the MCP call is what is left outstanding", n)
+	}
+	if n := s.liveWork(sessionID, queue.ModelTurn); n != 0 {
+		t.Errorf("model_turn = %d, want 0 — the turn cannot resume on an unanswered call", n)
 	}
 }

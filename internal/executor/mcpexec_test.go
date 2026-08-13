@@ -15,6 +15,10 @@ import (
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/mcp/mcptest"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/queue"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/toolset"
+	"go.opentelemetry.io/otel"
+	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
+	"go.opentelemetry.io/otel/sdk/metric/metricdata"
+	semconv "go.opentelemetry.io/otel/semconv/v1.41.0"
 )
 
 // appendMCPToolUse plants the call the brain will commit once MCP tools reach a
@@ -911,6 +915,10 @@ func TestMCPImageWithoutItsRequiredFieldsIsDescribed(t *testing.T) {
 	url := mcptest.Server(t, mcptest.Tool{Name: "shot", Blocks: []mcptest.Block{
 		{Type: "image", Data: []byte{0x89, 'P', 'N', 'G'}},     // no media type
 		{Type: "image", MIMEType: "image/png", Data: []byte{}}, // no bytes
+		// A real MIME type the image block's own source has no slot for: the
+		// Messages request fixes that field at four values, so this one can be
+		// stored and never sent again.
+		{Type: "image", MIMEType: "image/svg+xml", Data: []byte("<svg/>")},
 	}})
 	h := mcpHarness(t)
 	h.declareMCPServers(t, [2]string{"docs", url})
@@ -920,8 +928,8 @@ func TestMCPImageWithoutItsRequiredFieldsIsDescribed(t *testing.T) {
 	h.stepOnce(t)
 
 	blocks := blocksOf(t, h.mcpResults(t)[0])
-	if len(blocks) != 2 {
-		t.Fatalf("content = %v, want both blocks accounted for", blocks)
+	if len(blocks) != 3 {
+		t.Fatalf("content = %v, want all three blocks accounted for", blocks)
 	}
 	for i, b := range blocks {
 		if b["type"] != "text" {
@@ -930,15 +938,20 @@ func TestMCPImageWithoutItsRequiredFieldsIsDescribed(t *testing.T) {
 	}
 }
 
-// A blob resource names no media type of its own either, and the document source
-// that carries it requires one. The address it does have is what answers that:
-// the platform's pinned extension table, whose own fallback for bytes that name
-// nothing is application/octet-stream — honest, where an empty string is a
-// required field left blank.
-func TestMCPBlobResourceWithoutAMediaTypeStillDeclaresOne(t *testing.T) {
+// What a block may declare is the intersection of two schemas. The session event
+// takes a free string for a media type; the brain replays a result's content
+// array into a Messages tool_result unchanged, and there a base64 document's
+// media type is the single constant application/pdf and an image's is an enum of
+// four. A block this platform can store but never send again fails every later
+// turn of the session, on a log that cannot take it back — so a blob rides the
+// block type that can carry it, and is described when neither can.
+func TestMCPBlobResourceRidesOnlyABlockTheWireCanCarry(t *testing.T) {
+	png := []byte{0x89, 'P', 'N', 'G'}
 	url := mcptest.Server(t, mcptest.Tool{Name: "read", Blocks: []mcptest.Block{
-		{Type: "resource", URI: "file:///report.pdf", Data: []byte{'%', 'P', 'D', 'F'}},
-		{Type: "resource", URI: "file:///opaque", Data: []byte{0x00, 0x01}},
+		{Type: "resource", URI: "file:///report.pdf", MIMEType: "application/pdf", Data: []byte{'%', 'P', 'D', 'F'}},
+		{Type: "resource", URI: "file:///shot.png", MIMEType: "image/png", Data: png},
+		{Type: "resource", URI: "file:///bundle.zip", MIMEType: "application/zip", Data: png},
+		{Type: "resource", URI: "file:///opaque", Data: png},
 	}})
 	h := mcpHarness(t)
 	h.declareMCPServers(t, [2]string{"docs", url})
@@ -948,16 +961,147 @@ func TestMCPBlobResourceWithoutAMediaTypeStillDeclaresOne(t *testing.T) {
 	h.stepOnce(t)
 
 	blocks := blocksOf(t, h.mcpResults(t)[0])
-	if len(blocks) != 2 {
-		t.Fatalf("content = %v, want both resources", blocks)
+	if len(blocks) != 4 {
+		t.Fatalf("content = %v, want all four resources accounted for", blocks)
 	}
-	for i, want := range []string{"application/pdf", "application/octet-stream"} {
-		src, ok := blocks[i]["source"].(map[string]any)
-		if !ok {
-			t.Fatalf("block %d = %v, want a document source", i, blocks[i])
+	pdf, ok := blocks[0]["source"].(map[string]any)
+	if !ok || blocks[0]["type"] != "document" || pdf["media_type"] != "application/pdf" {
+		t.Errorf("block 0 = %v, want the pdf as a document source", blocks[0])
+	}
+	img, ok := blocks[1]["source"].(map[string]any)
+	if !ok || blocks[1]["type"] != "image" || img["media_type"] != "image/png" {
+		t.Errorf("block 1 = %v, want the png as an image block", blocks[1])
+	}
+	// Neither block type can declare these, so they are said rather than sent.
+	for i, name := range []string{"file:///bundle.zip", "file:///opaque"} {
+		b := blocks[2+i]
+		if b["type"] != "text" {
+			t.Fatalf("block %d = %v, want it described — no block type can carry it", 2+i, b)
 		}
-		if got := src["media_type"]; got != want {
-			t.Errorf("block %d media_type = %v, want %q", i, got, want)
+		if txt, _ := b["text"].(string); !strings.Contains(txt, name) {
+			t.Errorf("block %d text = %q, want it to name %s", 2+i, txt, name)
 		}
+	}
+}
+
+// The budget exempts one block so an over-long answer arrives truncated rather
+// than not at all, and which block it exempts has to be the one that was capped
+// — not whichever came first. A server that sends a thumbnail and then its
+// report would otherwise have the report vanish for standing second, which is
+// exactly the answer the exemption exists to keep readable.
+func TestMCPExemptionFollowsTheCappedBlockNotThePosition(t *testing.T) {
+	url := mcptest.Server(t, mcptest.Tool{Name: "report", Blocks: []mcptest.Block{
+		{Type: "image", MIMEType: "image/png", Data: []byte{0x89, 'P', 'N', 'G'}},
+		{Type: "text", Text: strings.Repeat("r", 4*toolset.MaxOutputBytes)},
+	}})
+	h := mcpHarness(t)
+	h.declareMCPServers(t, [2]string{"docs", url})
+	h.appendMCPToolUse(t, "docs", "report", `{}`)
+	h.enqueueMCP(t)
+
+	h.stepOnce(t)
+
+	blocks := blocksOf(t, h.mcpResults(t)[0])
+	if len(blocks) != 2 {
+		t.Fatalf("content = %v, want the thumbnail and the report", blocks)
+	}
+	if blocks[0]["type"] != "image" {
+		t.Errorf("block 0 = %v, want the image kept — it fits", blocks[0])
+	}
+	txt, _ := blocks[1]["text"].(string)
+	if blocks[1]["type"] != "text" {
+		t.Fatalf("block 1 = %v, want the report truncated rather than dropped", blocks[1])
+	}
+	// It must be the report itself and not the notice that says the report was
+	// dropped: both are short text blocks in the second slot, and an assertion
+	// that only checked the type and the length would pass against either.
+	if !strings.HasPrefix(txt, "rrrr") {
+		t.Fatalf("block 1 text = %.80q, want the report's own bytes — a notice here means it was dropped", txt)
+	}
+	// The cap plus its own truncation marker, not the raw four times over.
+	if len(txt) < toolset.MaxOutputBytes/2 || len(txt) > toolset.MaxOutputBytes+64 {
+		t.Errorf("report is %d bytes, want it capped to about %d", len(txt), toolset.MaxOutputBytes)
+	}
+}
+
+// The model-visible text of a failed call quotes the platform's own error, and
+// that error quotes the endpoint — which is customer-supplied and may carry a
+// credential. This is the arm no test drove: a call that reached the server and
+// failed there, rather than one that never connected.
+func TestMCPFailedCallDoesNotShowTheModelTheEndpointsCredential(t *testing.T) {
+	url := mcptest.Server(t, mcptest.Tool{Name: "search", Fail: "boom"})
+	h := mcpHarness(t)
+	// The fixture's own address, with a credential in front of it.
+	h.declareMCPServers(t, [2]string{"docs", withUserinfo(url)})
+	h.appendMCPToolUse(t, "docs", "search", `{}`)
+	h.enqueueMCP(t)
+
+	h.stepOnce(t)
+
+	blocks := blocksOf(t, h.mcpResults(t)[0])
+	if len(blocks) != 1 {
+		t.Fatalf("content = %v, want one block", blocks)
+	}
+	txt, _ := blocks[0]["text"].(string)
+	if txt == "" {
+		t.Fatalf("block = %v, want the failure said to the model", blocks[0])
+	}
+	if strings.Contains(txt, "s3cret") || strings.Contains(txt, "svc:") {
+		t.Errorf("model-visible text = %q, want the endpoint's credential gone", txt)
+	}
+}
+
+// withUserinfo puts a credential in front of a fixture's host.
+func withUserinfo(raw string) string {
+	return strings.Replace(raw, "http://", "http://svc:s3cret@", 1)
+}
+
+// The duration metric's tool name has until now been one of eight fixed
+// strings. A server's name and its tools' names are neither fixed nor ours, so
+// putting them in a metric label multiplies time series without bound in
+// whatever backend collects them — the classic cardinality blowup, and one no
+// other assertion in this package would notice. Which tool ran is on the event
+// log, where it costs storage rather than series.
+func TestMCPCallsShareOneMetricLabel(t *testing.T) {
+	reader := sdkmetric.NewManualReader()
+	prev := otel.GetMeterProvider()
+	otel.SetMeterProvider(sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader)))
+	t.Cleanup(func() { otel.SetMeterProvider(prev) })
+
+	url := mcptest.Server(t, mcptest.Tool{Name: "search", Result: "answered"})
+	h := mcpHarness(t)
+	h.declareMCPServers(t, [2]string{"docs", url})
+	h.appendMCPToolUse(t, "docs", "search", `{}`)
+	h.enqueueMCP(t)
+
+	h.stepOnce(t)
+
+	var rm metricdata.ResourceMetrics
+	if err := reader.Collect(context.Background(), &rm); err != nil {
+		t.Fatalf("collect: %v", err)
+	}
+	var names []string
+	for _, sm := range rm.ScopeMetrics {
+		for _, m := range sm.Metrics {
+			if m.Name != toolset.MetricToolDuration {
+				continue
+			}
+			hist, ok := m.Data.(metricdata.Histogram[float64])
+			if !ok {
+				continue
+			}
+			for _, dp := range hist.DataPoints {
+				if v, ok := dp.Attributes.Value(semconv.GenAIToolNameKey); ok {
+					names = append(names, v.AsString())
+				}
+			}
+		}
+	}
+	if len(names) != 1 {
+		t.Fatalf("tool-name label values = %v, want exactly one", names)
+	}
+	if names[0] != "mcp" {
+		t.Errorf("tool name = %q, want the one bounded value — a server's and a tool's names "+
+			"are third-party and belong on the log, not in a metric label", names[0])
 	}
 }

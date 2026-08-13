@@ -435,7 +435,26 @@ func (s *server) sendSessionEvents(r *http.Request) (any, error) {
 		setStatus(domain.SessionRunning)
 		opts.Then = enqueueTurn
 	case hasToolResult && status == string(domain.SessionRunning):
-		unanswered, err := events.HasUnansweredToolUse(ctx, tx, domain.ID(id), events.ToolResultRefs(newEvents))
+		answered := events.ToolResultRefs(newEvents)
+		// MCP first here as at the other settlements, and for the reason that
+		// makes it a rule rather than an order: only the platform's own driver
+		// answers an agent.mcp_tool_use, so a result that leaves one
+		// outstanding must schedule that driver. Ordinarily the item is already
+		// live and Enqueue's (session_id, kind) conflict makes this a no-op;
+		// where it is not — a self_hosted session whose worker answers last —
+		// this is the enqueue that keeps the call from waiting on nothing.
+		mcpPending, err := events.HasUnansweredMCPToolUse(ctx, tx, domain.ID(id), answered)
+		if err != nil {
+			return nil, err
+		}
+		if mcpPending {
+			opts.Then = func(ctx context.Context, tx pgx.Tx) error {
+				_, err := s.queue.Enqueue(ctx, tx, envID, domain.ID(id), queue.MCPExec)
+				return err
+			}
+			break
+		}
+		unanswered, err := events.HasUnansweredToolUse(ctx, tx, domain.ID(id), answered)
 		if err != nil {
 			return nil, err
 		}

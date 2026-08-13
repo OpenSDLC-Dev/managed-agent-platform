@@ -689,6 +689,26 @@ func (e *Executor) settleMCP(ctx context.Context, item *queue.Item, rows []catal
 			return fmt.Errorf("write mcp catalog for %q: %w", r.name, err)
 		}
 	}
+	// An MCP call outstanding takes this item back rather than completing it,
+	// the same first arm the four other settlements have and for the same
+	// reason: only this driver answers an agent.mcp_tool_use. A call committed
+	// while these dials were in flight — the pass runs for minutes — cannot have
+	// been queued behind them, since Enqueue is keyed (session_id, kind) over
+	// the live states and this very item is one; so completing here would leave
+	// the call with nothing scheduled to answer it, the session running, and
+	// archive and delete both refused. Handing the item back is what makes the
+	// next pass find the call and answer it (processMCP answers before it
+	// discovers).
+	mcpPending, err := events.HasUnansweredMCPToolUse(ctx, tx, item.SessionID, nil)
+	if err != nil {
+		return err
+	}
+	if mcpPending {
+		if err := e.queue.Requeue(ctx, tx, item); err != nil {
+			return err
+		}
+		return tx.Commit(ctx)
+	}
 	// The turn is chained on the same condition every other settlement uses.
 	// Discovery is not an answer to a tool call, so ordinarily nothing is
 	// outstanding and the brain is woken here — but mcp_exec and tool_exec are

@@ -14,7 +14,6 @@ import (
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/events"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/mcp"
-	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/mimetab"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/queue"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/toolset"
 	"github.com/jackc/pgx/v5"
@@ -129,7 +128,14 @@ func (e *Executor) runMCPTools(ctx context.Context, cfg domain.EnvironmentConfig
 			break
 		}
 		res, failure := e.runMCPTool(ctx, cfg, endpoints[u.server], u)
-		toolset.RecordRun(ctx, "mcp__"+u.server+"__"+u.name, time.Since(start),
+		// One label value for every MCP call, rather than the call's own name.
+		// The metric's tool name has until now been drawn from a fixed set of
+		// eight, and a server's name and its tools' names are both third-party
+		// and unbounded: an agent that declares generated server names, or a
+		// server offering a large catalog, multiplies time series without limit
+		// in whatever backend collects them. Which tool ran is on the event log,
+		// where it costs storage rather than cardinality.
+		toolset.RecordRun(ctx, mcpToolMetricName, time.Since(start),
 			toolset.Result{IsError: res.isError}, ctx.Err())
 		if ctx.Err() != nil {
 			return out, fmt.Errorf("mcp tool %s (%s): %w", u.name, u.id, ctx.Err()), nil
@@ -338,28 +344,7 @@ func mcpResultBlocks(content []mcp.Content) []map[string]any {
 				out = append(out, txt)
 			}
 		case "image":
-			// An image block's source requires both of its fields, and neither
-			// is this platform's to invent. MCP requires a mimeType on image
-			// content, so a block arriving without one — or with no bytes at
-			// all — is a server sending something this wire cannot carry
-			// faithfully, and it is described the way audio is rather than sent
-			// hollow. Guessing the type from the bytes would be a guess about
-			// what the model is looking at.
-			mime := capLabel(c.MIMEType)
-			if len(c.Data) == 0 || mime == "" {
-				out = append(out, textBlock(fmt.Sprintf(
-					"The tool returned %d bytes of image data (%s), which cannot be shown here.",
-					len(c.Data), mimeOrUnknown(c.MIMEType))))
-				continue
-			}
-			out = append(out, map[string]any{
-				"type": "image",
-				"source": map[string]any{
-					"type":       "base64",
-					"media_type": mime,
-					"data":       base64.StdEncoding.EncodeToString(c.Data),
-				},
-			})
+			out = append(out, imageBlock(c))
 		case "resource":
 			out = append(out, resourceBlock(c))
 		case "resource_link":
@@ -395,16 +380,21 @@ func mcpResultBlocks(content []mcp.Content) []map[string]any {
 // decodes to nothing, so the tool catalog's whole-or-nothing rule applies here
 // too. What was dropped is said rather than left to look like a short answer.
 //
-// A leading block is exempt when this driver has already capped every string
-// inside it — a text block, or a document whose source is text: the body goes
-// through toolset.CapOutput and the two labels a document carries about its
-// resource go through capLabel. Keeping one admits a fixed overhead and not a
-// server's bytes: the JSON around it, the truncation notices inside it, the
-// labels' own small ceiling, and whatever JSON escaping costs, which is bounded
-// but not one-to-one — a control byte the NUL strip leaves alone marshals as
-// six. What the exemption buys is that the ordinary over-long answer arrives
-// *truncated* rather than not at all, which is the whole difference for the
-// shapes a model can still read.
+// One block is exempt: the first this driver has already capped every string
+// inside — a text block, or a document whose source is text, the body through
+// toolset.CapOutput and the two labels a document carries about its resource
+// through capLabel. Keeping it admits a fixed overhead and not a server's bytes:
+// the JSON around it, the truncation notices inside it, the labels' own small
+// ceiling, and whatever JSON escaping costs, which is bounded but not one-to-one
+// — a control byte the NUL strip leaves alone marshals as six. What the
+// exemption buys is that the ordinary over-long answer arrives *truncated*
+// rather than not at all, which is the whole difference for the shapes a model
+// can still read.
+//
+// It is the first *capped* block and not the first block, because those are not
+// the same answer: a server that sends a thumbnail and then its report would,
+// under a positional rule, have the report vanish for standing second — the one
+// shape the exemption exists to keep readable, lost to something in front of it.
 //
 // It stops at those two. A leading image or base64 document is bounded by
 // nothing but the transport's megabytes and cannot be truncated — half a base64
@@ -418,11 +408,18 @@ func mcpResultBlocks(content []mcp.Content) []map[string]any {
 // truncating it is plan 29 slice 4b's, alongside the sandbox tools' spill.
 func capMCPBlocks(blocks []map[string]any) []map[string]any {
 	budget := toolset.MaxOutputBytes
+	exempted := false
 	out := make([]map[string]any, 0, len(blocks))
 	for i, b := range blocks {
 		// Cannot fail: every block here is built from strings and byte slices.
 		raw, _ := json.Marshal(b)
-		if len(raw) > budget && !(i == 0 && alreadyCapped(b)) {
+		if len(raw) > budget && alreadyCapped(b) && !exempted {
+			exempted = true
+			out = append(out, b)
+			budget -= len(raw)
+			continue
+		}
+		if len(raw) > budget {
 			return append(out, textBlock(fmt.Sprintf(
 				"%d content block(s) of this answer were dropped: it is past the %d bytes "+
 					"a tool result may put on this session's log.", len(blocks)-i, toolset.MaxOutputBytes)))
@@ -472,6 +469,51 @@ func capLabel(s string) string {
 	return s[:cut] + "[truncated]"
 }
 
+// What a block may declare is the intersection of two schemas, not the one this
+// event is written against. The session event takes a free string for an image
+// source's media type and for a document's; the brain replays a result's content
+// array into a Messages tool_result *unchanged* (brain/replay.go's
+// toolResultBlock), and there the image source's media type is an enum of four
+// and a base64 document's is the single constant application/pdf. A block the
+// platform can store but not send again fails not this turn but every later one,
+// on an append-only log — so what the log may hold is what both schemas admit.
+var imageMediaTypes = map[string]bool{
+	"image/jpeg": true,
+	"image/png":  true,
+	"image/gif":  true,
+	"image/webp": true,
+}
+
+const pdfMediaType = "application/pdf"
+
+// mcpToolMetricName is what every MCP call is counted under. See the call site
+// for why it is one value rather than the tool's own name.
+const mcpToolMetricName = "mcp"
+
+// imageBlock carries image bytes when the wire can carry them and describes them
+// when it cannot. A server's mimeType is neither trusted into the enum nor
+// guessed at from the bytes: what a model is looking at is the server's to
+// declare, and MCP requires it to (mimeType is required on image content), so a
+// block without one — or with no bytes, or with a type this wire has no slot for
+// — is described the way audio is rather than sent with a field the endpoint
+// will reject.
+func imageBlock(c mcp.Content) map[string]any {
+	mime := capLabel(c.MIMEType)
+	if len(c.Data) == 0 || !imageMediaTypes[mime] {
+		return textBlock(fmt.Sprintf(
+			"The tool returned %d bytes of image data (%s), which cannot be shown here.",
+			len(c.Data), mimeOrUnknown(c.MIMEType)))
+	}
+	return map[string]any{
+		"type": "image",
+		"source": map[string]any{
+			"type":       "base64",
+			"media_type": mime,
+			"data":       base64.StdEncoding.EncodeToString(c.Data),
+		},
+	}
+}
+
 func resourceBlock(c mcp.Content) map[string]any {
 	title := capLabel(c.URI)
 	// A resource with no bytes either way — an empty file read over MCP is as
@@ -485,21 +527,27 @@ func resourceBlock(c mcp.Content) map[string]any {
 	}
 	block := map[string]any{"type": "document", "title": title}
 	if len(c.Data) > 0 {
-		// The base64 source requires a media type and a blob's bytes declare
-		// none, so a resource that does not name one falls back to what this
-		// platform already pins for a path — its extension's type, or
-		// application/octet-stream for an address that names nothing. Sending
-		// the empty string instead would leave a required field blank.
+		// A blob rides whichever block type can carry its bytes, and the two
+		// that can are narrow: a base64 document source is application/pdf and
+		// nothing else, and an image source is one of four. A resource that is
+		// neither is described — with its address, which is the part worth
+		// keeping — rather than sent under a media type the endpoint rejects.
 		mime := capLabel(c.MIMEType)
-		if mime == "" {
-			mime = mimetab.ByPath(c.URI)
+		switch {
+		case mime == pdfMediaType:
+			block["source"] = map[string]any{
+				"type":       "base64",
+				"media_type": pdfMediaType,
+				"data":       base64.StdEncoding.EncodeToString(c.Data),
+			}
+			return block
+		case imageMediaTypes[mime]:
+			return imageBlock(c)
+		default:
+			return textBlock(fmt.Sprintf(
+				"The tool returned %d bytes of %s at %s, which cannot be shown here.",
+				len(c.Data), mimeOrUnknown(c.MIMEType), title))
 		}
-		block["source"] = map[string]any{
-			"type":       "base64",
-			"media_type": mime,
-			"data":       base64.StdEncoding.EncodeToString(c.Data),
-		}
-		return block
 	}
 	block["source"] = map[string]any{
 		"type":       "text",

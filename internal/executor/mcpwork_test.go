@@ -11,6 +11,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -1087,5 +1088,53 @@ func TestStorableToolsCapsTheListing(t *testing.T) {
 		if want := fmt.Sprintf("tool_%d", i); tool.Name != want {
 			t.Errorf("tool %d is %q, want %q — the cap must keep a prefix, in order", i, tool.Name, want)
 		}
+	}
+}
+
+// roundTripAfter delegates to base and runs after once, on the first request it
+// carries. It is how a test puts an event on the log *during* a pass: between
+// the driver's own check and its settlement, which is the window this file's
+// concurrency arguments are about and which no fixture hook can reach.
+type roundTripAfter struct {
+	base  http.RoundTripper
+	once  sync.Once
+	after func()
+}
+
+func (r *roundTripAfter) RoundTrip(req *http.Request) (*http.Response, error) {
+	res, err := r.base.RoundTrip(req)
+	r.once.Do(r.after)
+	return res, err
+}
+
+// A discovery pass is the fifth settlement site, and the one whose pass is long
+// enough for a call to arrive underneath it: the dials run for minutes, and an
+// mcp_tool_use committed while they do cannot have been queued behind them —
+// Enqueue is keyed (session_id, kind) over the live states and this very item is
+// one. Completing here would leave the call with nothing scheduled to answer it,
+// the session running, and archive and delete both refused.
+func TestDiscoveryHandsItsItemBackForACallThatArrivedUnderneathIt(t *testing.T) {
+	url := mcptest.Server(t, mcptest.Tool{Name: "search", Description: "searches"})
+	h := mcpHarness(t)
+	// The call arrives after the driver has looked for one and before the pass
+	// settles — the only window in which settleMCP sees an unanswered call.
+	h.exec.mcpHTTP = &http.Client{Transport: &roundTripAfter{
+		base:  h.exec.mcpHTTP.Transport,
+		after: func() { h.appendMCPToolUse(t, "docs", "search", `{}`) },
+	}}
+	h.declareMCPServers(t, [2]string{"docs", url})
+	h.enqueueMCP(t)
+
+	h.stepOnce(t)
+
+	if n := h.liveOf(t, queue.MCPExec); n != 1 {
+		t.Errorf("mcp_exec live = %d, want 1 — the call needs this driver and nothing else answers it", n)
+	}
+	if n := h.liveOf(t, queue.ModelTurn); n != 0 {
+		t.Errorf("model_turn = %d, want 0 — a call is unanswered", n)
+	}
+	// The listing still landed: handing the item back must not throw the pass away.
+	if got := h.catalog(t)["docs"]; got.status != "ready" {
+		t.Errorf("catalog row = %+v, want the listing this pass fetched", got)
 	}
 }

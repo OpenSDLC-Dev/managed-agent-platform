@@ -2027,3 +2027,62 @@ func TestListToolsRefusesPagesThatExceedTheBudgetTogether(t *testing.T) {
 		t.Errorf("server was asked for %d pages; the budget should have stopped it inside the second", got)
 	}
 }
+
+// TestCallClientCarriesEveryGuardDefaultClientDoes is the twin's own test, and
+// it exists because the twin is the one production tool calls go through: every
+// assertion above is written against DefaultClient, so a change that guarded
+// only the client the tests name would leave the call path bare and the suite
+// green. The two are built by one factory and differ in one field, which is
+// exactly what this pins — the guard, the redirect refusal and the header bound
+// are identical, and only the request cap is not.
+func TestCallClientCarriesEveryGuardDefaultClientDoes(t *testing.T) {
+	t.Parallel()
+	transport, ok := mcp.CallClient.Transport.(*http.Transport)
+	if !ok {
+		t.Fatalf("CallClient.Transport = %T, want *http.Transport", mcp.CallClient.Transport)
+	}
+	if transport.DialContext == nil {
+		t.Fatal("CallClient dials without a Control hook — the address guard is the SSRF floor")
+	}
+	// The guard itself, on the same address classes the twin refuses.
+	for _, addr := range []string{"127.0.0.1:443", "169.254.169.254:80", "[64:ff9b::7f00:1]:443"} {
+		_, err := transport.DialContext(context.Background(), "tcp", addr)
+		if err == nil {
+			t.Errorf("CallClient dialled %s", addr)
+			continue
+		}
+		// The guard's own words, not merely a failed dial: an unroutable
+		// address fails on its own and would pass an assertion that only
+		// checked for an error.
+		if !strings.Contains(err.Error(), "disallowed address") {
+			t.Errorf("CallClient dialling %s failed with %v, want the guard's own refusal", addr, err)
+		}
+	}
+	if transport.Proxy != nil {
+		t.Error("CallClient dials through a proxy, which takes the dial off the address the guard vetted")
+	}
+	hdr, _ := mcp.HeaderBoundsForTest()
+	if transport.MaxResponseHeaderBytes != hdr {
+		t.Errorf("CallClient allows %d bytes of response headers, want %d", transport.MaxResponseHeaderBytes, hdr)
+	}
+	req, err := http.NewRequest(http.MethodGet, "https://example.invalid/", nil)
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+	if mcp.CallClient.CheckRedirect == nil {
+		t.Fatal("CallClient follows redirects")
+	}
+	if err := mcp.CallClient.CheckRedirect(req, nil); !errors.Is(err, http.ErrUseLastResponse) {
+		t.Errorf("CheckRedirect = %v, want ErrUseLastResponse", err)
+	}
+	// The one difference, and the reason the twin exists: a tool call is not
+	// complete until the tool is, so its cap is the call budget rather than the
+	// dial budget. Stated as an inequality against the twin as well as a value,
+	// since a factory that ignored its argument would give both the same cap.
+	if mcp.CallClient.Timeout != mcp.CallTimeout {
+		t.Errorf("CallClient.Timeout = %v, want CallTimeout (%v)", mcp.CallClient.Timeout, mcp.CallTimeout)
+	}
+	if mcp.CallClient.Timeout == mcp.DefaultClient.Timeout {
+		t.Error("CallClient and DefaultClient share a request cap; the split exists because they must not")
+	}
+}
