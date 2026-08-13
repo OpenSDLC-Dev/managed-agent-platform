@@ -159,12 +159,6 @@ func (s *server) createAPIKey(r *http.Request) (any, error) {
 	// authenticated on both lanes, so it is never empty — and it must not be, since
 	// a NULL issuer is what marks a row env-var-managed.
 	key, row, err := IssueManagementKey(r.Context(), s.pool, *name, expiresAt, principalFrom(r.Context()))
-	// The expiry passed the process-clock check above and had lapsed by the time
-	// the database decided. Same answer as the check itself gives: this is the
-	// caller's timestamp being too close to now, not a server fault.
-	if errors.Is(err, errExpiryLapsed) {
-		return nil, errInvalid("expires_at must be in the future")
-	}
 	if err != nil {
 		return nil, err
 	}
@@ -223,9 +217,12 @@ func (s *server) updateAPIKey(r *http.Request) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	if status == nil && name == nil {
-		return nil, errInvalid("at least one of status, name is required")
-	}
+	// An empty patch is NOT refused. It used to be — "at least one of status, name
+	// is required" — which read like a helpful guard and is not what the reference
+	// does: `POST …/{id} {}` there answers 200 with the unchanged resource (#389).
+	// The state guards below still apply to it, so an empty patch aimed at an
+	// archived or lapsed row is refused for that reason rather than for its shape,
+	// which is the ordering the reference's own messages imply.
 
 	ctx := r.Context()
 	tx, err := s.pool.Begin(ctx)
@@ -265,49 +262,43 @@ func (s *server) updateAPIKey(r *http.Request) (any, error) {
 	if createdBy == nil {
 		return nil, errInvalid("api key %s is managed by CONTROLPLANE_API_KEY; rotate it by restarting the control plane with a new value", keyID)
 	}
-	// Archived is terminal, but archiving is idempotent. Nothing in the settable
-	// enum says either — the reference accepts all three values here and its
-	// behaviour on an archived row is unobserved (INFERRED in docs/DIVERGENCES.md).
-	// Terminality is what keeps `archived` and `inactive` from meaning the same
-	// thing: `inactive` exists to be undone, and if `archived` can be undone too,
-	// an operator who retired a key has no way to say so and no way to rely on it,
-	// while its plaintext may sit in a leaked backup one request away from working.
-	// Migration 0024 states the same rule, mapping every `revoked_at` row to
-	// archived because "revocation was one-way, and archived is the one-way state".
+	// Archived is terminal, and NOTHING may be patched onto an archived row — the
+	// repeated archive included. The reference refuses all five shapes with one
+	// message, "Archived API keys cannot be updated." (#389, measured on two
+	// independent keys). An earlier round of #388 made the repeated archive a
+	// succeeding no-op, reasoning that a retried Delete should not error; the
+	// reasoning is sound in the abstract and simply not what this API does.
+	//
+	// Terminality is also what keeps `archived` and `inactive` from meaning the
+	// same thing: `inactive` exists to be undone, and if `archived` could be undone
+	// an operator who retired a key would have no way to rely on it while its
+	// plaintext may sit in a leaked backup one request from working. Migration 0024
+	// states the same rule, mapping every `revoked_at` row to archived because
+	// "revocation was one-way, and archived is the one-way state".
 	//
 	// Terminal *on this surface*. EnsureAPIKey still adopts an archived row whose
 	// plaintext is configured as CONTROLPLANE_API_KEY, which is deliberate and
 	// logged — see the warning it emits. That is the environment variable claiming
 	// a value, not the console undoing an archive, and it needs the deployment
 	// access that could equally configure a fresh key.
-	//
-	// Re-archiving is not a transition out, so it is not refused: a Delete whose
-	// response was lost to a proxy, or an operator's double-click, asks for a state
-	// that already holds, and answering 400 — advising `inactive`, the state they
-	// deliberately did not choose — would be wrong on both counts. It falls through
-	// to a no-op write, the same call RevokeEnvironmentKey makes idempotent for the
-	// same reason ("a retry is not an error").
-	if current == KeyStatusArchived && !(name == nil && status != nil && *status == KeyStatusArchived) {
-		return nil, errInvalid("api key %s is archived, which is permanent; use %q for a disable you can undo",
-			keyID, KeyStatusInactive)
+	if current == KeyStatusArchived {
+		return nil, errInvalid("api key %s is archived, and an archived key cannot be updated", keyID)
 	}
-	// Activating a key whose expiry has passed would answer 200 with a resource
-	// reporting `expired`, because the status is stored and the expiry is derived
-	// from a column this route cannot set — `rejectUnknownKeys` admits only status
-	// and name. The write would succeed and change nothing an operator can use, so
-	// the honest answer names the reason instead. Refusing here is a local choice;
-	// the reference's behaviour on this combination is unobserved, and registered
-	// INFERRED beside the archived one.
+	// A lapsed key admits exactly one operation: archiving it. The reference states
+	// the rule in the refusal itself — "Expired API keys can only be deleted, not
+	// renamed or reactivated" — where "deleted" is `status: archived`, since it
+	// serves no DELETE verb (that route answers 405). Re-activating, disabling and
+	// renaming are all 400 there; this platform used to permit the last two, on the
+	// argument that cleanup must not depend on the clock. Only the archive does.
 	//
-	// `lapsed` is deliberately read from expires_at ALONE, not from the derived
-	// status. Anding in `status = 'active'` — which is what the rendering does,
-	// because a disabled key should report the operator's own action rather than
-	// the clock — left the whole guard reachable around: disable a key, let it
-	// lapse, re-enable it, and the flag was false because the row was `inactive`
-	// at the moment it was read. The row is what expired; which state it is
-	// sitting in while that happened does not change the answer here.
-	if lapsed && status != nil && *status == KeyStatusActive {
-		return nil, errInvalid("api key %s expired at its expires_at and cannot be re-activated; issue a new key", keyID)
+	// `lapsed` is read from expires_at ALONE, not from the derived status. Anding in
+	// a status — which the rendering does, since archived outranks expired there —
+	// left an earlier version of this guard reachable around: disable a key, let it
+	// lapse, re-enable it, and the flag was false because the row was `inactive` at
+	// the moment it was read. The row is what expired; which state it sits in while
+	// that happened does not change the answer here.
+	if lapsed && !(name == nil && status != nil && *status == KeyStatusArchived) {
+		return nil, errInvalid("api key %s has expired; an expired key can only be archived, not renamed or re-activated", keyID)
 	}
 	row, err := updateManagementKey(ctx, tx, keyID, status, name)
 	if err != nil {
@@ -410,14 +401,12 @@ func apiKeyStatus(obj map[string]json.RawMessage) (*string, error) {
 // "3 hours / 30 days / Custom N units", and every one of those is client-side
 // sugar resolved to an absolute instant before it crosses the wire.
 //
-// A past instant is refused. Nothing observed says whether the reference accepts
-// one — its UI cannot produce one — so this is a local choice, and it is the
-// safe direction: accepting it mints a credential that is dead on arrival and
-// sends the operator debugging an authentication failure, while refusing it says
-// what went wrong at the moment they can still fix it. The comparison is against
-// this process's clock rather than the database's, which is the right trade for
-// a guard: it costs a round trip to do better, and the authority on whether a
-// key is live remains the one query that decides it.
+// A past instant is accepted, and mints a key already reporting `expired`. This
+// platform refused it until #389 measured the reference, which answers 200 — the
+// argument for refusing (a validation message beats debugging an authentication
+// failure) lost to the one that governs here: the reference's behaviour is the
+// source of truth, and a key born expired is refused by the credential path from
+// its first request, so nothing unsafe is minted.
 func apiKeyExpiry(obj map[string]json.RawMessage) (*time.Time, error) {
 	raw, ok := obj["expires_at"]
 	if !ok || isNull(raw) {
@@ -430,9 +419,6 @@ func apiKeyExpiry(obj map[string]json.RawMessage) (*time.Time, error) {
 	t, err := time.Parse(time.RFC3339, s)
 	if err != nil {
 		return nil, errInvalid("expires_at must be an RFC 3339 timestamp")
-	}
-	if !t.After(time.Now()) {
-		return nil, errInvalid("expires_at must be in the future")
 	}
 	return &t, nil
 }

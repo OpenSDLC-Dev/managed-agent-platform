@@ -38,6 +38,62 @@ new directory and in-repo citations re-pointed in the moving PR (plan
 
 ---
 
+## Management-key inferences settled against the live console (#389) — three of five went against us, 2026-08-13
+
+Plan 32 shipped with five INFERRED entries in docs/DIVERGENCES.md: behaviours the
+2026-08-13 recording never probed, where this platform had to choose. #389 existed
+to settle them against the real console, and it did — from the console's own page
+context, the way the original recording was made. Probe keys were created for the
+run and all archived afterwards; every `sk-ant-…` was redacted at capture time to
+prefix-and-length, so no key material entered this repository, its issues, or its
+commits.
+
+**All five are now resolved, and three of them were resolved against us.** The
+registry's INFERRED section loses all five entries — not because they were
+confirmed, but because there is nothing left to infer and, after this change,
+nothing left to diverge on.
+
+| Inference | The reference's answer | Us, before |
+|---|---|---|
+| Is `archived` terminal? | `400 "Archived API keys cannot be updated."` | matched |
+| Is re-archiving idempotent? | **`400`** — the same refusal | 200 no-op |
+| Can a lapsed key be re-activated? | `400 "Expired API keys can only be deleted, not renamed or reactivated."` | matched |
+| Is `"expires_at": null` accepted on create? | `200`, `expires_at: null` | matched |
+| How does a *disabled* key past its expiry render? | **`expired`** | `inactive` |
+| Is a past `expires_at` accepted on create? | **`200`**, born `expired` | `400` |
+
+Two further divergences surfaced that were never registered because nobody
+suspected them. The reference's expired-key refusal states its own rule — an
+expired key *"can only be deleted, not renamed or reactivated"* — so **archiving
+is the only operation a lapsed key admits**, where we had permitted the disable
+and the rename too, on the argument that cleanup must not depend on the clock.
+And an **empty patch** (`{}`) answers 200 with the unchanged resource, where we
+answered `400 "at least one of status, name is required"`. ("Deleted" in that
+message means `status: archived`; there is no DELETE verb — that route answers
+405, as does a single-key GET.)
+
+A third fact fell out of the same run and is now pinned in code: **`archived`
+outranks `expired`** in the rendering. A key archived after its expiry had
+already passed reads `archived`, not `expired`.
+
+**The uncomfortable one.** Our original implementation refused *every* patch to an
+archived row — exactly what the reference does. Three reviewers converged on that
+as a defect in round 1 of #388, arguing that a retried Delete should not error,
+and we changed it to a succeeding no-op. The reasoning was sound in the abstract
+and wrong about this API. That is the fourth time in this plan's history that a
+fix introduced the next round's finding, and the first time the finder was the
+reference itself rather than a reviewer. It is also the cleanest argument in the
+repository for CLAUDE.md's rule that a wire shape is never guessed: every one of
+these six answers was cheap to obtain and three of them were unguessable.
+
+What landed with this record: the derived-status precedence, the archived guard
+widened to refuse everything, the lapsed guard narrowed to permit only archiving,
+the past-`expires_at` refusal dropped along with the database-clock guard that
+enforced it, and the empty-patch refusal dropped. The DIVERGENCES entries and
+docs/self-hosted-security.md §10 are corrected in the same PR, and the plan-32
+acceptance record below carries a pointer saying which of its observations the
+code has since moved away from.
+
 ## Management API keys (plan 32, #378) — archived 2026-08-13, all three slices delivered (#385, #388, #391)
 
 The slice that plan 31 could not ship. Its issuance surface was gated on a live
@@ -78,6 +134,13 @@ refused, re-enables it, archives it and is refused again"*. Every step below is
 that chain, driven over real HTTP against the shipped `deploy/compose` stack with
 `--profile iam`, on a database Casdoor had never seeded. **31 assertions, 0
 failures.** No manual database edits: every operator action is an HTTP call.
+
+> **Three observations below no longer describe the code**, and are left standing
+> because this is the record of a run rather than a description of the system.
+> #389 later measured the reference and moved us: a repeated archive now answers
+> **400** rather than 200, a past `expires_at` is now **accepted** rather than
+> refused, and a lapsed key now admits **only** archiving rather than also the
+> disable and the rename. The section immediately above has the detail.
 
 **The tokens are real.** The seeded application carries `authorization_code` and
 `refresh_token` and no password grant, so the run scripts the full
