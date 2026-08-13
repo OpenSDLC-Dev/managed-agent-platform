@@ -1,7 +1,14 @@
 ---
-status: in-progress
+status: archived
 issue: "#378"
 ---
+
+> **Archived 2026-08-13 — completed.** All three slices delivered (#385, #388, and
+> the archiving PR that carries this line).
+> The progress summary and the acceptance-run record are in
+> [docs/HISTORY.md](../HISTORY.md); the five inferences this plan registered are
+> tracked for confirmation by
+> [#389](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/389).
 
 # Management API keys: named, expiring, console-issued (plan 32)
 

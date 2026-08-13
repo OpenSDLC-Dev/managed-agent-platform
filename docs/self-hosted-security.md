@@ -31,6 +31,7 @@ deliberate divergences from the reference are in
 | **Runtime isolation** | Sets `runtimeClassName` on sandbox pods (`SANDBOX_K8S_RUNTIME_CLASS`; the chart's `sandboxRuntimeClass`) | Running gVisor/Kata on the nodes and naming it; on Docker, a daemon-level runtime or userns-remap |
 | **Sandbox placement** | On **Kubernetes**, puts your `nodeSelector` and `tolerations` on every sandbox pod (`SANDBOX_K8S_NODE_SELECTOR` / `SANDBOX_K8S_TOLERATIONS`; the chart's `sandboxPlacement`), and refuses a malformed one at startup | Building the node pool, labelling and tainting it, and keeping the platform's own workloads off it |
 | **Environment-key lifecycle** | Server-generated secrets, hash-only storage, one key per host with a one-year expiry, individual revocation, per-environment scope | Provisioning keys, rotation cadence, transport secrecy |
+| **Management-key lifecycle** | Server-generated secrets, hash-only storage, a masked hint as the only surviving trace; a reversible `inactive` and a permanent `archived`; an expiry the caller sets and the database's clock enforces, derived and never stored; rotation-by-restart for `CONTROLPLANE_API_KEY` | Choosing an expiry at all (absent means never), one key per consumer, rotation cadence, and configuring SSO if "which human issued this" must have an answer |
 | **Model / tool credentials** | Never enter the sandbox; redacted from error events | Securing the brain's provider config and any egress-time secrets |
 | **Auth transport** | Hashes `x-api-key` and environment keys at rest; scopes each | Terminating TLS; keeping keys off logs and out of images |
 | **Single-tenant daemon trust** | The `ours` label guards *accidents*, not a hostile co-tenant | Treating the Docker daemon / cluster as a single trust domain |
@@ -612,8 +613,8 @@ What you own:
   throughout, which the previous rotate-on-mint model could not offer.
 - **Transport secrecy.** The key travels as a Bearer token — terminate TLS in
   front of the control plane, and keep the value out of images, logs, and shell
-  history. (The management `x-api-key` follows the same model: hashed at rest,
-  rotation-by-restart via `EnsureAPIKey`.)
+  history. (The management `x-api-key` is hashed at rest the same way, and has a
+  lifecycle of its own — §10 below.)
 
 ### 7. Credential-cipher key material and backup pairing
 
@@ -823,6 +824,105 @@ could be handed over.
   denied everywhere, which is the fail-closed direction but also the shape a
   misconfiguration takes: if every human is refused, check the claim name and the map
   before you suspect the token.
+
+### 10. Management-key lifecycle
+
+Numbered last because it shipped last (plan 32,
+[#378](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/378)); read it
+beside §6, whose environment-key lifecycle it parallels.
+
+The management `x-api-key` authenticates every `/v1` call and the console API
+behind it, so it is the credential with the widest blast radius in the platform.
+Two things write it, and they are deliberately different.
+
+`CONTROLPLANE_API_KEY` is **env-var-managed**: `EnsureAPIKey` runs once at boot,
+hashes the value you configured, and archives any other live key sharing its
+name. That is **rotation-by-restart** — set a new value, restart, and the previous
+one is dead — and `api_keys_one_live_unissued` makes "one live key per name" a
+schema invariant for these rows, so two control-plane replicas racing to adopt
+different values cannot both win. Its inverse is worth knowing before you meet
+it: rotation is by *value*, so putting a previously-archived value back into the
+variable revives that row at the next boot. If the value had been issued from the
+console, the adoption is logged with a warning naming its previous status; if it
+was env-var-managed all along, it is not, having never left that lane.
+
+Console-**issued** keys are the other writer. The platform generates the secret —
+256 bits of CSPRNG behind an `sk-map-api01-` prefix — returns it exactly once in
+the issuing response, and stores only its SHA-256 hash. Nothing can render the
+value again, so a lost key is reissued, never recovered; what survives is a
+`partial_key_hint`, masked by anchoring on the known prefix rather than on the
+value's last separator, because base64url's alphabet contains `-` and a
+last-separator rule would publish most of a minted key. Several live keys may
+share a name here, matching the reference, so these rows sit outside the
+one-live index above.
+
+A key has three settable states and one derived one. `active` authenticates.
+`inactive` is a **disable you can undo** — the reversible state, and the one to
+reach for when you are not certain. `archived` is **permanent**: the console
+surface refuses any transition out of it, so an operator who retired a key can
+rely on that, while a repeated archive request is a no-op that succeeds rather
+than an error about a state that already holds. `expired` is not settable at all
+— it is computed at read time from `expires_at` **against the database's clock**,
+so a lapsed key stops authenticating the instant it lapses and no sweeper can be
+down when it does.
+
+Expiry itself is the caller's choice: an absolute instant supplied at issue, with
+no duration vocabulary, and **absent means never**. A past instant is refused
+rather than minted dead. A key that has lapsed cannot be re-activated — the write
+would change nothing usable, since `expires_at` is not settable on update — so
+issue a replacement. Archiving, disabling and renaming a lapsed key all stay
+permitted: cleanup must never depend on the clock.
+
+What you own:
+
+- **Who may mint one.** The three console routes are gated at the **admin** role,
+  the same tier as vaults and environment keys. Read that gate precisely: it
+  binds the *human* lane. `requireRole` applies only to identity-authenticated
+  requests, so with `IDENTITY_MODE` unset or `disabled` — the default — anyone
+  holding the management `x-api-key` reaches these routes, and **a management key
+  can mint management keys**. That is not an escalation, since the holder already
+  has every management capability, but it does mean the audit trail is only as
+  good as the identity lane: a key minted on the machine lane records the issuing
+  *key's* row id in `created_by`, not a human. If you want "which person issued
+  this credential" to have an answer, configure SSO (§9) and let admins act
+  through it.
+- **Provisioning.** The operator surface is the console API — off the `/v1` wire,
+  under `/api/console/organizations/default/workspaces/{workspace}/api_keys`.
+  Note the prefix: `/api/console/`, not the `/api/oauth/` the environment-key
+  surface uses. Both mirror the reference, which runs two dialects on two
+  surfaces, and each of ours keeps the one it was recorded under.
+
+  ```sh
+  # issue — raw_key is the only copy that will ever exist
+  curl -sX POST "$CONTROLPLANE/api/console/organizations/default/workspaces/default/api_keys" \
+    -H "x-api-key: $MANAGEMENT_KEY" -H 'content-type: application/json' \
+    -d '{"name":"ci-runner","expires_at":"2027-01-01T00:00:00Z"}'
+  # list — a bare JSON array, archived rows included, never a secret
+  curl -s "$CONTROLPLANE/api/console/organizations/default/workspaces/default/api_keys" \
+    -H "x-api-key: $MANAGEMENT_KEY"
+  # disable reversibly; swap for "archived" to retire one for good
+  curl -sX POST "$CONTROLPLANE/api/console/organizations/default/workspaces/default/api_keys/$KEY_ID" \
+    -H "x-api-key: $MANAGEMENT_KEY" -H 'content-type: application/json' \
+    -d '{"status":"inactive"}'
+  ```
+
+- **Rotation cadence.** The two lanes rotate differently and you should not mix
+  them. Rotate `CONTROLPLANE_API_KEY` by changing the variable and restarting;
+  rotate an issued key by minting its replacement, rolling that value out, and
+  archiving the old one — in that order, so nothing is ever without a live
+  credential. Issue one key per consumer (a CI runner, a console BFF, an
+  operator's laptop) rather than sharing one, for the same reason environment
+  keys are per-host: the blast radius of a leak is then one consumer, and
+  archiving is a rolling operation.
+- **Expiry as policy, not backstop.** Unlike environment keys, which carry a
+  fixed one-year expiry, a management key expires only if you say so. Set one on
+  every key you issue to a machine — the credential that outlives the job it was
+  minted for is the one that leaks quietly — and leave it absent only where you
+  have a rotation process that does not depend on it.
+- **Transport secrecy.** Terminate TLS in front of the control plane, and keep
+  the value out of images, logs, and shell history. `raw_key` appears in exactly
+  one response body and nowhere else, which makes the issuing call the one to
+  keep out of a terminal recording.
 
 ### Host and runtime isolation
 

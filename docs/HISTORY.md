@@ -38,6 +38,184 @@ new directory and in-repo citations re-pointed in the moving PR (plan
 
 ---
 
+## Management API keys (plan 32, #378) — archived 2026-08-13, all three slices delivered (#385, #388, and this PR)
+
+The slice that plan 31 could not ship. Its issuance surface was gated on a live
+observation of the reference console's key-management dialect, which needed an
+authenticated Anthropic console account; plan 31 declined to invent the dialect and
+moved the work to #378 with the recording it needed written down. That recording
+was made on 2026-08-13 (transcripts in #378's comments) and this plan is what it
+bought.
+
+- **Slice 1 — the lifecycle in the schema, no new surface** (#385). Migration 0024:
+  `status` replacing `revoked_at`, plus `expires_at`, `partial_key_hint` and
+  `created_by`, with `api_keys_one_live` re-created over the rows nobody issued so
+  console-issued keys may share a name as the reference allows. `authenticate`
+  gained its expiry check **in the query**, against the database's clock. Nothing
+  observable changed for an existing deployment, which is what the green gate
+  proved. Two defects were found and fixed in review rather than shipped: the
+  key-masking rule anchored on the value's *last separator*, which for base64url —
+  whose alphabet contains `-` — published most of a minted key against an unsalted
+  hash; and `EnsureAPIKey` adopted an existing row without clearing `created_by` or
+  `expires_at`, which would have put the bootstrap key outside its own uniqueness
+  index and let the process boot over a credential `authenticate` already refused.
+- **Slice 2 — the console surface** (#388). Three admin-gated routes under
+  `/api/console/organizations/{org}/workspaces/{workspace}/api_keys`: issue
+  (resource plus `raw_key`), list (a bare JSON array, archived rows included),
+  update status or name. Five CONFIRMED and five INFERRED DIVERGENCES entries, the
+  inferences tracked by #389. Its four review rounds are recorded two sections
+  below.
+- **Slice 3 — docs and acceptance** (this PR). §10 of
+  [docs/self-hosted-security.md](./self-hosted-security.md), and the acceptance run
+  recorded immediately below.
+
+## Management API keys (plan 32, #378) — acceptance against real Casdoor tokens and the real `ant` CLI (run 2026-08-13) — ✅ passed
+
+Plan 32's slice-3 criterion, quoted rather than paraphrased: *"an acceptance run
+that issues a key over the console API, drives `/v1` with it, disables it and is
+refused, re-enables it, archives it and is refused again"*. Every step below is
+that chain, driven over real HTTP against the shipped `deploy/compose` stack with
+`--profile iam`, on a database Casdoor had never seeded. **31 assertions, 0
+failures.** No manual database edits: every operator action is an HTTP call.
+
+**The tokens are real.** The seeded application carries `authorization_code` and
+`refresh_token` and no password grant, so the run scripts the full
+authorization-code + PKCE exchange against Casdoor's own OP endpoints, as plan 31's
+acceptance did. Both tokens decode as the platform requires — `iss` byte-equal to
+`IDENTITY_OIDC_ISSUER`, `aud=["map-console-dev"]`, and
+`groups=["map/platform-admins"]` / `["map/platform-read"]`.
+
+- **The machine lane is untouched and the human lane is live.** `GET /v1/agents`
+  answers **200** to both `x-api-key` and the admin's Casdoor token.
+- **The surface is admin-only.** Viewer LIST → **403**
+  `{"message":"this route requires the admin role","type":"permission_error"}`;
+  viewer ISSUE → **403**. Admin LIST → **200**, and the body is a **bare array**,
+  not an envelope.
+- **An admin issues a key.** **200**, `raw_key` of 56 characters behind
+  `sk-map-api01-`, hint `sk-map-api01-f9x...nM7Q`, and `created_by` is the admin's
+  own principal — `{"id":"principal_jx3rwe9a1sacy8yhfh4mv9z6","type":"principal"}`.
+  The audit trail names the human, which is the reason the identity lane exists.
+- **The issued key drives `/v1`.** `GET /v1/agents` → **200**; `POST /v1/agents` →
+  **200**, minting `agent_thm8jh8c862tymp57ce41k44`. A read and a mutation, on a
+  credential no operator seeded.
+- **Disable is reversible.** `{"status":"inactive"}` → **200**, and the key is then
+  **401** on `/v1` (`invalid x-api-key`). `{"status":"active"}` → **200**, and it is
+  **200** on `/v1` again. This is the sequence the round-3 review found a hole in;
+  it now behaves as documented end to end.
+- **Archive is permanent.** `{"status":"archived"}` → **200**, `/v1` → **401**.
+  Un-archiving → **400** *"is archived, which is permanent; use "inactive" for a
+  disable you can undo"*; `inactive` → **400**; renaming → **400**; **re-archiving
+  → 200**, still rendering `archived` — the idempotent retry, not an error about a
+  state that already holds.
+- **The env-var-managed key is listed but not the console's to change.**
+  `{"status":"inactive"}` on the `CONTROLPLANE_API_KEY` row → **400** *"is managed
+  by CONTROLPLANE_API_KEY; rotate it by restarting the control plane with a new
+  value"*, and that key still authenticates afterwards.
+- **Expiry is the caller's, and the database's clock enforces it.** A past
+  `expires_at` → **400** *"expires_at must be in the future"*. A key minted with
+  `expires_at` 45 seconds out worked while live, was **401** on `/v1` once it
+  lapsed, listed as **`expired`** (derived, never written), refused re-activation
+  → **400** *"expired at its expires_at and cannot be re-activated; issue a new
+  key"* — and **archiving it still succeeded**, because cleanup must not depend on
+  the clock.
+- **The listing never carries a secret.** Five rows including archived and expired
+  ones; zero occurrences of `raw_key` or of any `sk-map-api01-` value; only masked
+  hints. Two rows share the name `acceptance-runner` and two share `short-lived` —
+  residue of an earlier partial run, and an unplanned demonstration that live keys
+  may share a name, which is exactly what `api_keys_one_live_unissued` was narrowed
+  to permit.
+- **A real `ant` authenticates with it.** `ant` 1.21.0, built from the read-only
+  `anthropic-cli` checkout: `ant beta:agents list --base-url http://127.0.0.1:8080`
+  on a console-issued key returned the agent JSON, exit **0**; `ant beta:agents
+  create --name plan32-ant-created --model 'id: claude-sonnet-5'` minted
+  `agent_mmcr66adag155sty2ta2szrf`, exit **0**. Disabling the key over the console
+  API made the same command fail with `401 … {"message":"invalid x-api-key",
+  "type":"authentication_error"}`; re-enabling it made the command succeed again;
+  archiving it made it fail for good. The whole lifecycle, observed through the
+  reference client rather than through curl.
+- **One property measured because §10 asserts it.** With `IDENTITY_MODE=oidc`
+  live, the management `x-api-key` still reaches the admin-gated routes — LIST
+  **200**, ISSUE **200** — because `requireRole` binds the human lane only. The
+  minted row's `created_by` is then
+  `{"id":"apikey_m9p5qs6wggbgypyb87d95397","type":"api_key"}`: the issuing key's
+  row id, typed from its own prefix. So "a management key can mint management
+  keys" is a measured fact rather than a reading of the code, and §10 says so
+  where an operator will meet it.
+
+Machine state: the stack ran under its own compose project (`map-accept32`) and was
+torn down with `--profile iam down -v`, volumes included. The three containers
+predating the run (`managed-agent-console`, `kind-control-plane`, and an exited
+jaeger) were left untouched, and `docker ps -a` afterwards showed exactly those
+three.
+
+## Management API keys (plan 32, #378) — slice 2's four review rounds: two defects the fixes created, and three findings refuted, 2026-08-13
+
+Worth recording because of *where* the defects came from: the two that mattered
+were not in the original implementation. Each was introduced by a fix for the
+previous round's finding, which is the failure mode a single review pass cannot
+see.
+
+**Round 1 → the archived-resurrection defect.** Making `archived` terminal was
+correct and is now an INFERRED divergence. The implementation of it refused *every*
+patch to an archived row, which broke the idempotent retry: an operator repeating a
+Delete got a 400 that both errored on a state already holding and advised
+`inactive`, the state they had just declined. All three reviewers — Codex,
+`/code-review`, and the verifier — reached it independently. The fix lets a
+repeated archive fall through to a no-op write, as `RevokeEnvironmentKey` already
+did for the same reason.
+
+**Round 3 → the lapsed guard was reachable around.** The refusal to re-activate a
+lapsed key was itself added in round 2, and it computed its condition with the same
+SQL the *rendering* uses — including a `status = 'active'` conjunct. The two
+expressions answer different questions. The rendering asks "does this row currently
+show expired" and ands in the status deliberately, so a disabled key reports the
+operator's action rather than the clock; the guard has to ask "would activating
+this row produce a dead key", which the current status has nothing to do with. So
+the guard was reachable around by the sequence an operator actually performs:
+disable, forget, re-enable after the expiry passes — answering **200** with
+`status: "expired"`, verbatim the answer-shape the refusal existed to eliminate.
+CodeRabbit and the verifier found it independently; the verifier then reproduced it
+against a real Postgres, and after the fix confirmed the pinning test can fail by
+restoring the conjunct in a throwaway copy. Eleven further orderings and body
+combinations were driven against the fixed guard and none got around it.
+
+Worse than that bug, and the reason the verifier called it a concern rather than a
+note: the comment beside the guard said the refusal was "registered INFERRED beside
+the archived one" and **no such entry existed**. A false claim that a divergence is
+registered is worse than an unregistered one, because it tells the next reader the
+checking has been done.
+
+**Three findings refuted with evidence rather than "fixed".**
+
+- CodeRabbit flagged a "future-dated August 13, 2026" reference. That is the date
+  the recording was made, and the transcripts are on #378.
+- It read the `ON CONFLICT` finding as environment-key rotation. Wrong subsystem:
+  `environment_keys` issuance has no `ON CONFLICT` at all.
+- It prescribed refusing to boot when `EnsureAPIKey` adopts a console-issued key.
+  Declined: that strands the control plane behind a state only a direct database
+  edit clears, and protects nobody — setting the variable at all requires the
+  deployment access that could equally configure a fresh value. The adoption logs
+  a warning naming the previous status instead, which the acceptance run above
+  confirmed fires for a console-issued row and stays silent for an env-var-managed
+  one.
+
+**One tracking gap, found by the verifier in round 4.** All five INFERRED entries
+cross-linked #389 while the issue enumerated only four of them — someone working it
+from its body would have closed it leaving two inferences unconfirmed. The issue
+now enumerates all five, in six experiments.
+
+**A note on the local gate.** Across this plan the verifier never obtained one
+uninterrupted green `make verify` on this host, and said so rather than composing
+silence: `internal/mcp` flaked in 6 of 8 executions (#380, measured this session
+against the "~40%" in its title) and `internal/sandbox/shell` flaked once with a
+signature that turned out to be worth its own issue (#390 — a genuine timeout
+misclassification, not merely a slow test). Both packages were byte-identical to
+`main`, both passed re-run alone, and CI was green on every merged SHA. The verdicts
+were composed from per-package results plus the coverage total plus CI, and each
+verifier report labelled that composition explicitly.
+
+---
+
 ## Console SSO and RBAC (plan 31, #56) — slice 1's dependency decision: rejected alternatives, 2026-08-12
 
 Plan 31's Scope decision 1 originally named `coreos/go-oidc` + `golang.org/x/oauth2`
