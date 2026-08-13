@@ -343,15 +343,14 @@ func (s *server) sendSessionEvents(r *http.Request) (any, error) {
 		// claims, which is the web-first argument above applied to a second
 		// shape the worker cannot answer.
 		//
-		// No gated MCP call can reach here today — the brain stamps
-		// evaluated_permission inside its agent.tool_use branch alone — but the
-		// arm is owed to the first agent.mcp_tool_use *emitted*, not the first
-		// one gated: a confirmation that clears one built-in while an ungated
-		// MCP call is outstanding lands here with a call this site must route.
-		// It ships ahead of that emission on purpose. The brain and the control
+		// Both shapes reach here now that the brain offers MCP tools: a
+		// confirmation that releases a gated MCP call — always_ask is the MCP
+		// toolset's default, so most of them are gated — and one that clears a
+		// built-in while an ungated MCP call is outstanding. The arm shipped a
+		// slice ahead of that emission on purpose. The brain and the control
 		// plane are separate deployments, so a rollout runs a new brain against
-		// an old control plane; a brain that emits an MCP call while some
-		// control-plane replica still lacks this arm would strand whatever that
+		// an old control plane; a brain that emitted an MCP call while some
+		// control-plane replica still lacked this arm would strand whatever that
 		// call was meant to resume — running rather than idle, which is the
 		// worse of the two, since a running session also refuses archive and
 		// delete and only a user.interrupt gets out of it.

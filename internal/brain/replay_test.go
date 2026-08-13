@@ -30,7 +30,7 @@ func TestBuildRequestReplaysTheLog(t *testing.T) {
 		},
 	}
 	toolUse := ev(5, domain.EventAgentToolUse, `{"name":"bash","input":{"command":"ls"}}`)
-	mcpUse := ev(7, domain.EventAgentMCPToolUse, `{"name":"search","input":{}}`)
+	mcpUse := ev(7, domain.EventAgentMCPToolUse, `{"name":"search","mcp_server_name":"srv","input":{}}`)
 	// Realistic order: tool_use → user text mid-tool → tool_result; the
 	// result and the mid-tool text land in one user turn where the
 	// tool_result must sort ahead of the earlier text.
@@ -49,7 +49,19 @@ func TestBuildRequestReplaysTheLog(t *testing.T) {
 		ev(10, domain.EventUserInterrupt, `{}`),
 	}
 
-	req, watermark, err := buildRequest(agent, history, "", "", "")
+	// The custom tool, the eight expanded agent_toolset tools and the one tool
+	// the MCP server reported all reach the model, the agent's own first.
+	tools, _, _, err := resolveTools(agent, mcpCatalog{"srv": listingOf(t, mcpTool("search"))})
+	if err != nil {
+		t.Fatalf("resolveTools: %v", err)
+	}
+	want := []string{"lookup", "bash", "read", "write", "edit", "glob", "grep",
+		"web_fetch", "web_search", "mcp__srv__search"}
+	if got := defNames(t, tools); !slicesEqual(got, want) {
+		t.Fatalf("tools = %v, want %v", got, want)
+	}
+
+	req, watermark, err := buildRequest(agent, tools, history, "", "", "")
 	if err != nil {
 		t.Fatalf("buildRequest: %v", err)
 	}
@@ -59,30 +71,17 @@ func TestBuildRequestReplaysTheLog(t *testing.T) {
 	if req.System != "base prompt\n\nmid-run steering" {
 		t.Errorf("system = %q", req.System)
 	}
-	// The custom tool and the eight expanded agent_toolset tools reach the
-	// model, in order; mcp_toolset still waits for the MCP client.
-	if len(req.Tools) != 9 || !strings.Contains(string(req.Tools[0]), `"lookup"`) {
-		t.Fatalf("tools = %v", req.Tools)
-	}
-	var names []string
-	for _, raw := range req.Tools[1:] {
-		var d struct {
-			Name string `json:"name"`
-		}
-		_ = json.Unmarshal(raw, &d)
-		names = append(names, d.Name)
-	}
-	if strings.Join(names, ",") != "bash,read,write,edit,glob,grep,web_fetch,web_search" {
-		t.Errorf("expanded toolset names = %v", names)
+	if len(req.Tools) != len(tools) {
+		t.Errorf("request carried %d tools, want the %d assembled", len(req.Tools), len(tools))
 	}
 
 	roles := make([]string, len(req.Messages))
 	for i, m := range req.Messages {
 		roles[i] = m.Role
 	}
-	want := []string{"user", "assistant", "user", "assistant", "user"}
-	if strings.Join(roles, ",") != strings.Join(want, ",") {
-		t.Fatalf("roles = %v, want %v", roles, want)
+	wantRoles := []string{"user", "assistant", "user", "assistant", "user"}
+	if strings.Join(roles, ",") != strings.Join(wantRoles, ",") {
+		t.Fatalf("roles = %v, want %v", roles, wantRoles)
 	}
 
 	// String content normalized to a text block.
@@ -108,6 +107,15 @@ func TestBuildRequestReplaysTheLog(t *testing.T) {
 	if third[0]["is_error"] != false || third[1]["text"] != "typed while tool ran" {
 		t.Errorf("user run detail = %v", third)
 	}
+	// The MCP call replays under the name the model was offered, put back
+	// together from the two fields the wire event splits it into — a tool_use
+	// block naming a tool the request does not offer is one the endpoint may
+	// refuse, and this block replays on every later turn.
+	var fourth []map[string]any
+	_ = json.Unmarshal(req.Messages[3].Content, &fourth)
+	if len(fourth) != 1 || fourth[0]["name"] != "mcp__srv__search" || fourth[0]["id"] != mcpUse.ID.String() {
+		t.Errorf("mcp call = %v, want the prefixed name under the event id", fourth)
+	}
 	// MCP result: id via mcp_tool_use_id, no content key when absent.
 	var fifth []map[string]any
 	_ = json.Unmarshal(req.Messages[4].Content, &fifth)
@@ -121,7 +129,7 @@ func TestBuildRequestReplaysTheLog(t *testing.T) {
 
 func TestBuildRequestCustomToolResultID(t *testing.T) {
 	agent := domain.ResolvedAgent{AgentSpec: domain.AgentSpec{Model: domain.Model{ID: "m"}}}
-	req, _, err := buildRequest(agent, []domain.Event{
+	req, _, err := buildRequest(agent, nil, []domain.Event{
 		ev(1, domain.EventAgentCustomToolUse, `{"name":"x","input":{}}`),
 		ev(2, domain.EventUserCustomToolRes, `{"custom_tool_use_id":"sevt_abc","is_error":true}`),
 	}, "", "", "")
@@ -140,7 +148,7 @@ func TestBuildRequestEmptyToolInputDefaults(t *testing.T) {
 	// Absent and JSON-null inputs both replay as {} — a tool_use block's
 	// input must be an object on the wire.
 	for _, payload := range []string{`{"name":"noop"}`, `{"name":"noop","input":null}`} {
-		req, _, err := buildRequest(agent, []domain.Event{
+		req, _, err := buildRequest(agent, nil, []domain.Event{
 			ev(1, domain.EventAgentToolUse, payload),
 		}, "", "", "")
 		if err != nil {
@@ -165,23 +173,15 @@ func TestBuildRequestRejectsMalformedEvents(t *testing.T) {
 		ev(1, domain.EventUserToolResult, `not json`),
 	}
 	for _, bad := range cases {
-		if _, _, err := buildRequest(agent, []domain.Event{bad}, "", "", ""); err == nil {
+		if _, _, err := buildRequest(agent, nil, []domain.Event{bad}, "", "", ""); err == nil {
 			t.Errorf("%s with body %q accepted", bad.Type, bad.Body)
 		}
-	}
-
-	badTool := domain.ResolvedAgent{AgentSpec: domain.AgentSpec{
-		Model: domain.Model{ID: "m"},
-		Tools: []json.RawMessage{json.RawMessage(`"not an object"`)},
-	}}
-	if _, _, err := buildRequest(badTool, nil, "", "", ""); err == nil {
-		t.Error("malformed agent tool accepted")
 	}
 
 	// The skills block is placed after the agent system prompt and before any
 	// runtime system.message text, joined with blank lines.
 	skilled := domain.ResolvedAgent{AgentSpec: domain.AgentSpec{Model: domain.Model{ID: "m"}, System: "base"}}
-	req, _, err := buildRequest(skilled, []domain.Event{
+	req, _, err := buildRequest(skilled, nil, []domain.Event{
 		ev(1, domain.EventSystemMessage, `{"content":[{"type":"text","text":"steer"}]}`),
 	}, "SKILLS", "", "")
 	if err != nil {
@@ -192,7 +192,7 @@ func TestBuildRequestRejectsMalformedEvents(t *testing.T) {
 	}
 	// With no agent system prompt the block leads, still before runtime text.
 	bare := domain.ResolvedAgent{AgentSpec: domain.AgentSpec{Model: domain.Model{ID: "m"}}}
-	req, _, err = buildRequest(bare, nil, "SKILLS", "", "")
+	req, _, err = buildRequest(bare, nil, nil, "SKILLS", "", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -205,7 +205,7 @@ func TestBuildRequestRejectsMalformedEvents(t *testing.T) {
 // skills block and before any runtime system.message text, all blank-joined.
 func TestBuildRequestFilesBlockPlacement(t *testing.T) {
 	agent := domain.ResolvedAgent{AgentSpec: domain.AgentSpec{Model: domain.Model{ID: "m"}, System: "base"}}
-	req, _, err := buildRequest(agent, []domain.Event{
+	req, _, err := buildRequest(agent, nil, []domain.Event{
 		ev(1, domain.EventSystemMessage, `{"content":[{"type":"text","text":"steer"}]}`),
 	}, "SKILLS", "FILES", "")
 	if err != nil {
@@ -216,7 +216,7 @@ func TestBuildRequestFilesBlockPlacement(t *testing.T) {
 	}
 	// The files block leads when there is no agent prompt and no skills block.
 	bare := domain.ResolvedAgent{AgentSpec: domain.AgentSpec{Model: domain.Model{ID: "m"}}}
-	req, _, err = buildRequest(bare, nil, "", "FILES", "")
+	req, _, err = buildRequest(bare, nil, nil, "", "FILES", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -235,7 +235,7 @@ func TestBuildRequestRendersDefineOutcome(t *testing.T) {
 			`{"description":"Build a DCF model","rubric":{"type":"text","content":"# Rubric"},"max_iterations":3,"outcome_id":"outc_1"}`),
 		ev(2, domain.EventSessionStatusRunning, `{}`),
 	}
-	req, watermark, err := buildRequest(agent, history, "", "", "")
+	req, watermark, err := buildRequest(agent, nil, history, "", "", "")
 	if err != nil {
 		t.Fatalf("buildRequest: %v", err)
 	}
@@ -260,7 +260,7 @@ func TestBuildRequestRendersDefineOutcome(t *testing.T) {
 	// grader from the acceptance snapshot (slice 3), not the conversation.
 	history[0] = ev(1, domain.EventUserDefineOutcome,
 		`{"description":"Build it","rubric":{"type":"file","file_id":"file_1"},"max_iterations":3,"outcome_id":"outc_2"}`)
-	req, _, err = buildRequest(agent, history, "", "", "")
+	req, _, err = buildRequest(agent, nil, history, "", "", "")
 	if err != nil {
 		t.Fatalf("buildRequest (file rubric): %v", err)
 	}
