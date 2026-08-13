@@ -94,6 +94,17 @@ func scanManagementKey(row pgx.Row) (ManagementKey, error) {
 // and it is the reference's: an operator issuing a management credential picks
 // its lifetime; a worker credential's lifetime is the platform's business.
 func IssueManagementKey(ctx context.Context, pool *pgxpool.Pool, name string, expiresAt *time.Time, createdBy string) (string, ManagementKey, error) {
+	// Enforced rather than asserted, because two code paths read this field for
+	// the same fact and would disagree about a blank one: the listing renders an
+	// empty issuer as `created_by: null`, which is the documented signal for "this
+	// row belongs to CONTROLPLANE_API_KEY and is not the console's to change",
+	// while the update route tests for SQL NULL and would happily rename it. A
+	// blank issuer would also sit under api_keys_one_live_unissued's complement —
+	// non-NULL — so the row would be outside the one-live rule while claiming, in
+	// every listing, to be inside it.
+	if createdBy == "" {
+		return "", ManagementKey{}, fmt.Errorf("api: issue management key: no issuer")
+	}
 	buf := make([]byte, issuedKeySecretBytes)
 	if _, err := rand.Read(buf); err != nil {
 		return "", ManagementKey{}, fmt.Errorf("api: generate management key: %w", err)
@@ -138,6 +149,23 @@ func IssueManagementKey(ctx context.Context, pool *pgxpool.Pool, name string, ex
 // the route validated it and no longer was when the row would have been written.
 var errExpiryLapsed = errors.New("api: requested expires_at lapsed before the key was written")
 
+// updateManagementKey applies a status and/or name patch and returns the row as
+// a listing would render it. A nil argument leaves that column alone, which is
+// what makes a name-only patch possible without a read-modify-write.
+//
+// It takes a transaction rather than the pool because the caller's decisions —
+// whether the row is env-var-managed, archived, or lapsed — are read under
+// FOR UPDATE and must not be separated from the write that acts on them. Keeping
+// the statement here rather than in the route is what stops the projection from
+// being spelled twice: a second caller copying SQL is how managementKeyColumns
+// stops being the single spelling it exists to be.
+func updateManagementKey(ctx context.Context, tx pgx.Tx, id string, status, name *string) (ManagementKey, error) {
+	return scanManagementKey(tx.QueryRow(ctx,
+		`UPDATE api_keys SET status = coalesce($2, status), name = coalesce($3, name)
+		  WHERE id = $1
+		  RETURNING `+managementKeyColumns, id, status, name))
+}
+
 // ListManagementKeys returns every management key, newest first.
 //
 // Every one, including archived rows and including the key seeded from
@@ -152,6 +180,18 @@ var errExpiryLapsed = errors.New("api: requested expires_at lapsed before the ke
 // No paging. The reference's console list is a bare array with no pagination at
 // all, and this table holds one row per issued credential plus the bootstrap
 // one — an operator-paced count, not a growing log.
+//
+// And no index, which settles a question migration 0024 left open. Its closing
+// comment declined `api_keys (created_at DESC)` as build-ahead and said "the
+// listing that would want one lands in slice 2"; the listing has landed and does
+// not want one. A migration is immutable once merged, so the reconsideration has
+// to be recorded where a reader will meet it rather than by editing that file:
+// the sort is over an operator-paced table with no growth driver — issuance is a
+// deliberate admin action, and nothing else writes rows — so an index would be
+// paid for on every write to speed a read that has nothing to scan. If a
+// deployment ever does accumulate keys, the missing bound is the *response size*,
+// which an index does not fix; that would be paging, and the reference's own
+// surface has none to mirror.
 func ListManagementKeys(ctx context.Context, pool *pgxpool.Pool) ([]ManagementKey, error) {
 	// id breaks ties so the order is total rather than merely partial: two keys
 	// issued inside one clock tick would otherwise sort arbitrarily, and the same

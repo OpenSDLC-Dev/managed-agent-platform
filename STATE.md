@@ -4,16 +4,12 @@ What is being worked on right now, and how far along it is — nothing else. **S
 
 ## Active work
 
-Two plans are in flight, each on its own branch.
+Two plans are in flight, each on its own branch. Progress is the checklists below.
 
-[Plan 29](./docs/plan/29_mcp-toolset.md) — the MCP client and `mcp_toolset` end to end
-(#45): an agent configured with an `mcp_toolset` gets no tools today, and this plan
-closes that with discovery, gating, credential injection and the reference's failure
-semantics. Seven slices, three landed.
-
-[Plan 32](./docs/plan/32_management-api-keys.md) — management API keys (#378): named,
-expiring, admin-issued over the console API, mirroring the reference dialect recorded
-live on 2026-08-13. Three slices.
+- [Plan 29](./docs/plan/29_mcp-toolset.md) (#45) — give an agent with an `mcp_toolset`
+  the tools it configures: discovery, gating, credentials, failure semantics.
+- [Plan 32](./docs/plan/32_management-api-keys.md) (#378) — named, expiring management
+  API keys an admin issues over the console, mirroring a live reference recording.
 
 ## Tasks — plan 29
 
@@ -33,6 +29,6 @@ live on 2026-08-13. Three slices.
       one-live index narrowed to the rows nobody issued ([#385](https://github.com/OpenSDLC-Dev/managed-agent-platform/pull/385)).
 - [x] Slice 2 — the console surface: issue (resource plus `raw_key`), list (bare
       array, archived rows included), update status and name. Admin-gated, five
-      CONFIRMED and three INFERRED DIVERGENCES entries ([#388](https://github.com/OpenSDLC-Dev/managed-agent-platform/pull/388)).
-- [ ] Slice 3 — DIVERGENCES entries, a management-key section in
-      docs/self-hosted-security.md, and an acceptance run.
+      CONFIRMED and four INFERRED DIVERGENCES entries ([#388](https://github.com/OpenSDLC-Dev/managed-agent-platform/pull/388)).
+- [ ] Slice 3 — a management-key section in docs/self-hosted-security.md and an
+      acceptance run; the DIVERGENCES entries landed with slice 2's surface.

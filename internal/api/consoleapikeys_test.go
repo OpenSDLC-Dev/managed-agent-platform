@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/api"
 )
@@ -173,8 +174,19 @@ func TestAPIKeyIssuanceRendersTheRecordedShape(t *testing.T) {
 	if !strings.HasPrefix(hint, api.IssuedKeyPrefix) || !strings.Contains(hint, "...") {
 		t.Errorf("partial_key_hint = %q, want the prefix plus an elision", hint)
 	}
-	if hint == raw || strings.Contains(raw, strings.TrimPrefix(hint, api.IssuedKeyPrefix)) {
-		t.Errorf("partial_key_hint %q is not masked against the key", hint)
+	// A bound on how much of the secret the hint publishes, not a spot check.
+	// The previous assertion here compared the hint to the key and looked for the
+	// trimmed hint inside it — both structurally impossible, since the hint always
+	// carries an ellipsis and a base64url body never contains a dot, so it could
+	// not fail whatever partialKeyHint did. A rule emitting `IssuedKeyPrefix` plus
+	// twenty body characters would have passed it, publishing half a live
+	// credential against an unsalted SHA-256.
+	body := strings.TrimPrefix(raw, api.IssuedKeyPrefix)
+	shown := utf8.RuneCountInString(
+		strings.ReplaceAll(strings.TrimPrefix(hint, api.IssuedKeyPrefix), "...", ""))
+	if hidden := utf8.RuneCountInString(body) - shown; hidden < shown {
+		t.Errorf("partial_key_hint %q shows %d of the key's %d secret characters, hiding only %d",
+			hint, shown, utf8.RuneCountInString(body), hidden)
 	}
 	if id, _ := created["id"].(string); !strings.HasPrefix(id, "apikey_") {
 		t.Errorf("id = %q, want the apikey_ prefix the reference uses", id)
@@ -279,6 +291,23 @@ func TestAPIKeyExpiryIsClientSuppliedAndDerived(t *testing.T) {
 	if res.StatusCode != http.StatusUnauthorized {
 		t.Errorf("a key the listing calls expired still authenticates: %d", res.StatusCode)
 	}
+
+	// Re-activating it is refused rather than answered 200. The stored status is
+	// already `active` — expiry is derived — so the write would succeed, change
+	// nothing usable, and hand back a resource reporting `expired`: a success for
+	// an action that had no effect. This route cannot set expires_at, so there is
+	// no version of the request that would work; the honest answer says why.
+	status, obj := s.do(http.MethodPost, consoleAPIKey(id), map[string]any{"status": api.KeyStatusActive})
+	if status != http.StatusBadRequest {
+		t.Errorf("re-activating a lapsed key: %d %v, want 400", status, obj)
+	} else if !strings.Contains(errMessage(obj), "expired") {
+		t.Errorf("the refusal %q does not name the expiry", errMessage(obj))
+	}
+	// Retiring it is still allowed — an operator must be able to clean up.
+	if code, body := s.do(http.MethodPost, consoleAPIKey(id),
+		map[string]any{"status": api.KeyStatusArchived}); code != http.StatusOK {
+		t.Errorf("archiving a lapsed key: %d %v, want 200", code, body)
+	}
 }
 
 // TestAPIKeyIssuanceRejectsBadRequests walks the input contract.
@@ -326,6 +355,11 @@ func TestAPIKeyUpdateGuardsTheEnumAndTheEnvManagedRow(t *testing.T) {
 		{"expired is derived", map[string]any{"status": "expired"}, "cannot be set"},
 		{"unknown status", map[string]any{"status": "deleted"}, "status must be one of"},
 		{"empty patch", map[string]any{}, "at least one of"},
+		// A supplied null is not a missing field. `requiredString` folds absent,
+		// null and empty into one branch, which would tell a caller who did send
+		// the field that they had not.
+		{"null status", map[string]any{"status": nil}, "status cannot be null"},
+		{"null name", map[string]any{"name": nil}, "name cannot be null"},
 		{"unknown field", map[string]any{"status": "active", "nope": 1}, `unknown field "nope"`},
 		{"blank name", map[string]any{"name": " "}, "name must be"},
 	} {
@@ -392,8 +426,9 @@ func TestArchivingAnAPIKeyIsPermanent(t *testing.T) {
 	for _, patch := range []map[string]any{
 		{"status": api.KeyStatusActive},
 		{"status": api.KeyStatusInactive},
-		{"status": api.KeyStatusArchived},
 		{"name": "revived"},
+		// A rename riding along with a re-archive is still a mutation.
+		{"status": api.KeyStatusArchived, "name": "revived"},
 	} {
 		status, obj := s.do(http.MethodPost, consoleAPIKey(id), patch)
 		if status != http.StatusBadRequest {
@@ -401,6 +436,15 @@ func TestArchivingAnAPIKeyIsPermanent(t *testing.T) {
 		} else if !strings.Contains(errMessage(obj), api.KeyStatusInactive) {
 			t.Errorf("the refusal %q does not point at the reversible state", errMessage(obj))
 		}
+	}
+
+	// Terminal is not the same as non-idempotent. A Delete whose response was lost
+	// to a proxy, or an operator's double-click, asks for the state that already
+	// holds; answering 400 — and advising the reversible state they deliberately
+	// did not choose — would be wrong on both counts.
+	status, obj := s.do(http.MethodPost, consoleAPIKey(id), map[string]any{"status": api.KeyStatusArchived})
+	if status != http.StatusOK || obj["status"] != api.KeyStatusArchived {
+		t.Errorf("re-archiving an archived key: %d %v, want 200 and archived", status, obj)
 	}
 
 	// The key stayed dead, and the row stayed archived.

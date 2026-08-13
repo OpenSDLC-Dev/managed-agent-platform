@@ -79,16 +79,28 @@ type apiKeyIssuedJSON struct {
 // apiKeyResourceType is the resource discriminator the reference emits.
 const apiKeyResourceType = "api_key"
 
-// actorFor renders an id as an actor, or nil for the empty issuer a key seeded
+// The actor vocabulary, which is a SEPARATE wire concept from the resource
+// discriminator above even though one of its values is spelled the same. The
+// reference's actor union has a single member, `user`; ours has two, because we
+// have no `user_` id to give. Binding actorMachine to apiKeyResourceType would
+// mean that matching the resource discriminator to a future recording silently
+// rewrote every machine issuer's actor type in the same edit.
+const (
+	actorMachine = "api_key"
+	actorHuman   = "principal"
+)
+
+// actorFor renders an id as an actor, or nil for the absent issuer a key seeded
 // from CONTROLPLANE_API_KEY carries. The type is read from the id's own prefix,
-// so the two can never disagree.
+// so the two can never disagree. An empty string is treated as absent for
+// safety, though IssueManagementKey refuses to write one.
 func actorFor(id *string) *actorJSON {
 	if id == nil || *id == "" {
 		return nil
 	}
-	kind := apiKeyResourceType
+	kind := actorMachine
 	if strings.HasPrefix(*id, domain.PrefixPrincipal+"_") {
-		kind = "principal"
+		kind = actorHuman
 	}
 	return &actorJSON{ID: *id, Type: kind}
 }
@@ -113,8 +125,8 @@ func renderAPIKey(k ManagementKey) apiKeyJSON {
 // segment answers with the same 404 shape, so the namespace is no better an
 // enumeration oracle than /v1 is.
 func consoleWorkspace(r *http.Request) error {
-	if org := r.PathValue("org"); org != reservedOrganization {
-		return errNotFound("organization %s not found", org)
+	if err := consoleOrganization(r); err != nil {
+		return err
 	}
 	if ws := r.PathValue("workspace"); ws != reservedWorkspace {
 		return errNotFound("workspace %s not found", ws)
@@ -134,7 +146,7 @@ func (s *server) createAPIKey(r *http.Request) (any, error) {
 	if err := rejectUnknownKeys(obj, "name", "expires_at"); err != nil {
 		return nil, err
 	}
-	name, err := apiKeyName(obj, true)
+	name, err := consoleKeyName(obj, true)
 	if err != nil {
 		return nil, err
 	}
@@ -207,7 +219,7 @@ func (s *server) updateAPIKey(r *http.Request) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	name, err := apiKeyName(obj, false)
+	name, err := consoleKeyName(obj, false)
 	if err != nil {
 		return nil, err
 	}
@@ -224,44 +236,73 @@ func (s *server) updateAPIKey(r *http.Request) (any, error) {
 
 	var createdBy *string
 	var current string
+	var lapsed bool
 	err = tx.QueryRow(ctx,
-		`SELECT created_by, status FROM api_keys WHERE id = $1 FOR UPDATE`, keyID).Scan(&createdBy, &current)
+		`SELECT created_by, status,
+		        (status = 'active' AND expires_at IS NOT NULL AND expires_at <= now())
+		 FROM api_keys WHERE id = $1 FOR UPDATE`, keyID).Scan(&createdBy, &current, &lapsed)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, errNotFound("api key %s not found", keyID)
 	}
 	if err != nil {
 		return nil, err
 	}
-	// Archived is terminal. Nothing in the settable enum says so — the reference
-	// accepts all three values on this route and its behaviour on an archived row
-	// is unobserved (INFERRED in docs/DIVERGENCES.md) — but the alternative makes
-	// two of the three states mean the same thing. `inactive` exists to be undone;
-	// if `archived` can be undone too, then an operator who retired a key has no
-	// way to say so and no way to rely on it. The plaintext of an archived key may
-	// sit in a leaked backup or an old shell history, and resurrecting it needs
-	// nothing but one more admin request. Migration 0024 already states the rule
-	// this enforces: it maps every `revoked_at` row to archived precisely because
-	// "revocation was one-way, and archived is the one-way state".
-	if current == KeyStatusArchived {
-		return nil, errInvalid("api key %s is archived, which is permanent; use %q for a disable you can undo",
-			keyID, KeyStatusInactive)
-	}
-	// A key nobody issued is managed by CONTROLPLANE_API_KEY, and this route does
-	// not get to touch it. Two reasons, and the second is the load-bearing one.
-	// Its lifecycle already has an owner — rotation-by-restart — so a console
-	// disable would be undone by the next boot, silently. And renaming it would
-	// break that rotation outright: EnsureAPIKey archives the incumbent by *name*,
-	// so a bootstrap row renamed out from under it would survive the next
-	// rotation and leave two live credentials, which is exactly the race
-	// api_keys_one_live_unissued exists to prevent. The row is still listed —
-	// hiding it would be a worse lie than refusing to mutate it.
+	// The env-var-managed refusal comes FIRST, before the archived one, because a
+	// rotated deployment holds archived rows with no issuer — EnsureAPIKey archives
+	// the incumbent on every rotation — and for those the environment variable is
+	// both the more fundamental fact and the only actionable one. Ordered the other
+	// way, an admin patching such a row is told "archived is permanent, use
+	// inactive", follows that advice, is refused again, and is never told the thing
+	// they could act on.
+	//
+	// The rule itself: a key nobody issued belongs to CONTROLPLANE_API_KEY and this
+	// route does not get to touch it. Its lifecycle already has an owner —
+	// rotation-by-restart — so a console disable would be silently undone by the
+	// next boot. And renaming it would break that rotation outright: EnsureAPIKey
+	// archives the incumbent by *name*, so a bootstrap row renamed out from under it
+	// would survive the next rotation and leave two live credentials, which is
+	// exactly the race api_keys_one_live_unissued exists to prevent. The row is
+	// still listed — hiding it would be a worse lie than refusing to mutate it.
 	if createdBy == nil {
 		return nil, errInvalid("api key %s is managed by CONTROLPLANE_API_KEY; rotate it by restarting the control plane with a new value", keyID)
 	}
-	row, err := scanManagementKey(tx.QueryRow(ctx,
-		`UPDATE api_keys SET status = coalesce($2, status), name = coalesce($3, name)
-		  WHERE id = $1
-		  RETURNING `+managementKeyColumns, keyID, status, name))
+	// Archived is terminal, but archiving is idempotent. Nothing in the settable
+	// enum says either — the reference accepts all three values here and its
+	// behaviour on an archived row is unobserved (INFERRED in docs/DIVERGENCES.md).
+	// Terminality is what keeps `archived` and `inactive` from meaning the same
+	// thing: `inactive` exists to be undone, and if `archived` can be undone too,
+	// an operator who retired a key has no way to say so and no way to rely on it,
+	// while its plaintext may sit in a leaked backup one request away from working.
+	// Migration 0024 states the same rule, mapping every `revoked_at` row to
+	// archived because "revocation was one-way, and archived is the one-way state".
+	//
+	// Terminal *on this surface*. EnsureAPIKey still adopts an archived row whose
+	// plaintext is configured as CONTROLPLANE_API_KEY, which is deliberate and
+	// logged — see the warning it emits. That is the environment variable claiming
+	// a value, not the console undoing an archive, and it needs the deployment
+	// access that could equally configure a fresh key.
+	//
+	// Re-archiving is not a transition out, so it is not refused: a Delete whose
+	// response was lost to a proxy, or an operator's double-click, asks for a state
+	// that already holds, and answering 400 — advising `inactive`, the state they
+	// deliberately did not choose — would be wrong on both counts. It falls through
+	// to a no-op write, the same call RevokeEnvironmentKey makes idempotent for the
+	// same reason ("a retry is not an error").
+	if current == KeyStatusArchived && !(name == nil && status != nil && *status == KeyStatusArchived) {
+		return nil, errInvalid("api key %s is archived, which is permanent; use %q for a disable you can undo",
+			keyID, KeyStatusInactive)
+	}
+	// Activating a key whose expiry has passed would answer 200 with a resource
+	// reporting `expired`, because the status is stored and the expiry is derived
+	// from a column this route cannot set — `rejectUnknownKeys` admits only status
+	// and name. The write would succeed and change nothing an operator can use, so
+	// the honest answer names the reason instead. Refusing here is a local choice;
+	// the reference's behaviour on this combination is unobserved, and registered
+	// INFERRED beside the archived one.
+	if lapsed && status != nil && *status == KeyStatusActive {
+		return nil, errInvalid("api key %s expired at its expires_at and cannot be re-activated; issue a new key", keyID)
+	}
+	row, err := updateManagementKey(ctx, tx, keyID, status, name)
 	if err != nil {
 		return nil, err
 	}
@@ -273,14 +314,20 @@ func (s *server) updateAPIKey(r *http.Request) (any, error) {
 
 // apiKeyName parses the operator's label. Bounds are environmentKeyNameMax's,
 // reused rather than re-chosen: both are a console label an operator reads back
-// in a list, and the dialect's own bound is unobserved on either surface.
+// in a list, and the dialect's own bound is unobserved on either surface. Reusing
+// the other surface's number is a local choice, not evidence about this one, so
+// it is registered in docs/DIVERGENCES.md as plan 30 registered its own.
 //
 // Returns nil when the field is absent, which only the update path allows.
-func apiKeyName(obj map[string]json.RawMessage, required bool) (*string, error) {
-	if !required {
-		if _, ok := obj["name"]; !ok {
+func consoleKeyName(obj map[string]json.RawMessage, required bool) (*string, error) {
+	if raw, ok := obj["name"]; !ok {
+		if !required {
 			return nil, nil
 		}
+	} else if isNull(raw) {
+		// As with status: a supplied null is not a missing field, and a name cannot
+		// be cleared — every key carries one, and the listing renders it.
+		return nil, errInvalid("name cannot be null")
 	}
 	name, err := requiredString(obj, "name")
 	if err != nil {
@@ -305,8 +352,18 @@ func apiKeyName(obj map[string]json.RawMessage, required bool) (*string, error) 
 // same set and write our own text, since that message is framework-generated
 // validation output and ours can say more.
 func apiKeyStatus(obj map[string]json.RawMessage) (*string, error) {
-	if _, ok := obj["status"]; !ok {
+	raw, ok := obj["status"]
+	if !ok {
 		return nil, nil
+	}
+	// An explicit null is its own answer, not a missing field. wire.go keeps
+	// absent/null/value distinct because the distinction is semantic on a patch,
+	// and `requiredString` folds all three into "status is required" — which would
+	// tell a caller who supplied the field that they had not. There is nothing to
+	// clear here (a key always has a status), so null is invalid; the message just
+	// has to say which of the two things went wrong.
+	if isNull(raw) {
+		return nil, errInvalid("status cannot be null; omit it to leave the status unchanged")
 	}
 	status, err := requiredString(obj, "status")
 	if err != nil {
@@ -329,7 +386,11 @@ func apiKeyStatus(obj map[string]json.RawMessage) (*string, error) {
 // console's "Never" **omits the field** rather than sending null, and the
 // response then reports expires_at: null. An explicit null is accepted for the
 // same meaning — nothing observed forbids it, and refusing a spelling the
-// response itself uses would be a gratuitous asymmetry.
+// response itself uses would be a gratuitous asymmetry, since a client
+// round-tripping a fetched resource back into a create would be rejected for
+// echoing what it was given. That step from the response shape to the request
+// shape is an extrapolation, not an observation, and is registered INFERRED in
+// docs/DIVERGENCES.md.
 //
 // There is no duration vocabulary, deliberately. The reference's dialog offers
 // "3 hours / 30 days / Custom N units", and every one of those is client-side
