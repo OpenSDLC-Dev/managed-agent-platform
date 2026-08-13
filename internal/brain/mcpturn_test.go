@@ -172,6 +172,32 @@ func TestAnAllowedMCPCallSchedulesTheMCPDriverFirst(t *testing.T) {
 	}
 }
 
+// The web tools already displace a sandbox tool_exec, so a turn carrying both a
+// web call and an MCP call is where the ranking is actually decided: mcp_exec
+// outranks web_exec, not merely tool_exec. The web driver chains what is left.
+func TestAnMCPCallOutranksAWebCallOnTheSameTurn(t *testing.T) {
+	h := newHarness(t, [][]provider.Chunk{{
+		provider.Chunk{Kind: provider.KindToolUse, ToolUse: &provider.ToolUse{
+			ID: "toolu_1", Name: "web_fetch", Input: json.RawMessage(`{"url":"https://x.test"}`)}},
+		toolUseChunk("toolu_2", "mcp__docs__search"),
+		done("tool_use", 3),
+	}}, nil)
+	mcpAgent(t, h, `{"type":"agent_toolset_20260401"},
+		{"type":"mcp_toolset","mcp_server_name":"docs",
+		 "default_config":{"permission_policy":{"type":"always_allow"}}}`)
+	listing(t, h, "ready", searchTool)
+
+	h.wake(t, "fetch then search")
+	h.runOnce(t)
+
+	if got := h.liveOf(t, queue.MCPExec); got != 1 {
+		t.Errorf("mcp_exec items = %d, want 1", got)
+	}
+	if got := h.liveOf(t, queue.WebExec); got != 0 {
+		t.Errorf("web_exec items = %d, want 0 (the MCP driver chains it)", got)
+	}
+}
+
 // A server whose discovery failed has a row, and a row is an answer: the turn
 // runs without that server's tools rather than suspending to re-dial an endpoint
 // that just refused. The alternative loops forever against a server that is down.
