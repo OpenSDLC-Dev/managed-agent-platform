@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	gopath "path"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -1462,7 +1463,14 @@ func TestExecWrapperReleasesTheStreamWhenTheCommandExits(t *testing.T) {
 	// a pipe wired to nothing would EOF promptly for the wrong reason. Its
 	// deadline is long enough that the watchdog is still on its first sleep when
 	// the command exits, which is the moment under test.
-	cmd := exec.Command("/bin/bash", "-c", execWrapper, "map-exec", "echo hi >&2", "30", t.TempDir()+"/state")
+	//
+	// It outlives the watchdog's first `kill -0` on purpose. Without that, the
+	// command could exit before the watchdog ever looked, the watchdog would find
+	// it already gone and leave — and the row would pass whether or not the
+	// descriptor was closed, which is a guard that proves nothing rather than a
+	// flake. A fifth of a second is far past the microseconds that first poll
+	// takes and far short of the poll interval the regression waits out.
+	cmd := exec.Command("/bin/bash", "-c", execWrapper, "map-exec", "echo hi >&2; sleep 0.2", "30", t.TempDir()+"/state")
 	cmd.Stderr = w
 	if env != nil {
 		cmd.Env = env
@@ -2237,7 +2245,13 @@ func TestWriteScriptDrainsEveryEarlyExit(t *testing.T) {
 // The one-byte write is not decoration: without it this row passes just as well
 // against a provider that never asks for stdin at all, which would strand every
 // write that has bytes to deliver.
-func TestAnEmptyWriteAsksForNoStdinStream(t *testing.T) {
+// execsAsked stands an API server up in front of a pod and answers what its
+// execs asked for. Every request is refused, which is immaterial: the question
+// these rows put is what the query said before the refusal, and a refusal is the
+// cheapest way to reach it without a cluster. The returned func collects the
+// `stdin` parameter of each exec, in order.
+func execsAsked(t *testing.T) (*pod, func() []string) {
+	t.Helper()
 	var mu sync.Mutex
 	var asked []string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -2248,7 +2262,7 @@ func TestAnEmptyWriteAsksForNoStdinStream(t *testing.T) {
 		}
 		w.WriteHeader(http.StatusInternalServerError)
 	}))
-	defer srv.Close()
+	t.Cleanup(srv.Close)
 
 	rc := &rest.Config{Host: srv.URL}
 	cs, err := kubernetes.NewForConfig(rc)
@@ -2260,13 +2274,21 @@ func TestAnEmptyWriteAsksForNoStdinStream(t *testing.T) {
 		name:    "map-sesn-x",
 		workdir: sandbox.DefaultWorkdir,
 	}
+	return pd, func() []string {
+		mu.Lock()
+		defer mu.Unlock()
+		return slices.Clone(asked)
+	}
+}
+
+func TestAnEmptyWriteAsksForNoStdinStream(t *testing.T) {
+	pd, execs := execsAsked(t)
 	ctx := context.Background()
 	// Both fail on the refused upgrade; what they asked for is already recorded.
 	_ = pd.WriteFile(ctx, sandbox.DefaultWorkdir+"/empty.txt", nil)
 	_ = pd.WriteFile(ctx, sandbox.DefaultWorkdir+"/one.txt", []byte("x"))
 
-	mu.Lock()
-	defer mu.Unlock()
+	asked := execs()
 	if len(asked) != 2 {
 		t.Fatalf("the pod was asked to exec %d times, want 2 (one write each)", len(asked))
 	}
@@ -2275,6 +2297,29 @@ func TestAnEmptyWriteAsksForNoStdinStream(t *testing.T) {
 	}
 	if asked[1] != "true" {
 		t.Errorf("a one-byte write asked stdin=%q, want true — its bytes travel on that stream", asked[1])
+	}
+}
+
+// The stream a zero-byte write does not open is also the thing that would have
+// counted its bytes, so a caller whose size disagrees with its reader has to be
+// refused before the write starts rather than by the count that no longer
+// happens. `size must equal the number of bytes src yields: a short or long
+// stream is an error, not a silently truncated file` — internal/sandbox's own
+// contract, which the docker backend keeps through its tar writer, and which
+// this would otherwise answer by landing an empty file over the target.
+//
+// The pod is never asked, which is the half that matters beyond the error: the
+// refusal has to leave the target holding what it held, and it can only promise
+// that by happening before anything in the pod is created.
+func TestAZeroSizedWriteWithBytesToDeliverIsRefused(t *testing.T) {
+	pd, execs := execsAsked(t)
+	path := sandbox.DefaultWorkdir + "/mismatch.txt"
+	err := pd.WriteFileStream(context.Background(), path, strings.NewReader("x"), 0)
+	if err == nil || !strings.Contains(err.Error(), "short write") {
+		t.Errorf("WriteFileStream(size 0, one byte to read) = %v, want the short-write refusal", err)
+	}
+	if asked := execs(); len(asked) != 0 {
+		t.Errorf("the pod was asked to exec %d times for a write that could not be honoured — the target must keep what it held", len(asked))
 	}
 }
 

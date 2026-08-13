@@ -16,6 +16,14 @@
   It costs the in-pod script nothing — a container whose exec requested no stdin reads EOF
   immediately, so `tee | wc -c` still counts the same zero the script compares its expected
   size against, measured against a live cluster.
+  The stream that is no longer opened is also the one that would have counted the bytes, so
+  the write reads one byte itself first. Without that, `WriteFileStream(path, src, 0)` with
+  a byte still on `src` would have landed an empty file *over* the target where the
+  interface promises a refusal — "a short or long stream is an error, not a silently
+  truncated file" — and where the docker backend's tar writer refuses it, a divergence the
+  shared contract suite would not have caught, since it exercises a short stream and not a
+  long one. The probe is asked before anything in the pod is created, so the refusal is the
+  same one the script's own count gives and the target still holds what it held.
   Why a cluster loses that close is *not* established, and this does not claim to have
   diagnosed it. What is established is the correlation: all five stalls landed on one of the
   suite's two zero-byte writes, none on the hundreds of writes that carry bytes. Removing
@@ -46,10 +54,18 @@
   five differences came out 779ms, 901ms, 928ms, 936ms, 1.15s, so the smallest had lost
   220ms of a 1s signal to noise while the median had not. The median has to be bought three
   times out of five in whichever direction is wrong. Both directions were then measured on
-  the same oversubscribed host: three runs red against the mutated script (medians 928ms and
-  1.045s), three runs green against the fixed one.
+  the same oversubscribed host: three runs red against the mutated script, at medians of
+  928ms and 1.045s in the two whose output was kept, and three runs green against the fixed
+  one.
+  The pairs also alternate which half runs first, so that load arriving in a rhythm has no
+  fixed phase to hold against a fixed order, and the row carries a budget of its own — half
+  its execs are the untimed baseline, and an exec with no deadline of its own is bounded by
+  nothing, which in this package is how one wedged stream costs a whole binary.
   The script's own half of that property — the watchdog closing its inherited copy of the
   stream — is now pinned without a cluster at all, on the host's own shell, by running the
   wrapper with its stderr on an `os.Pipe` and requiring the pipe to reach EOF once the
-  wrapper exits. It costs milliseconds, it cannot be blurred by cluster latency, and with
-  the `3>&-` removed it fails every time, including at a quarter of a CPU.
+  wrapper exits. It costs milliseconds and cannot be blurred by cluster latency. Its command
+  outlives the watchdog's first poll deliberately: a command that exited before the watchdog
+  ever looked would take the watchdog with it and the row would pass whether or not the
+  descriptor was ever closed, which is a guard proving nothing rather than a flaky one. With
+  the `3>&-` removed it failed 8 runs out of 8.

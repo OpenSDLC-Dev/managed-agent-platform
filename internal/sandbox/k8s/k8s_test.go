@@ -327,7 +327,13 @@ func TestK8sNoServiceAccountToken(t *testing.T) {
 // 5x load), far below the interval a regression adds.
 func TestK8sTimedExecDoesNotWaitForItsWatchdog(t *testing.T) {
 	sb := liveSandbox(t)
-	ctx := context.Background()
+	// Half these execs carry no deadline of their own — that is what makes them
+	// the baseline — and an exec with neither is bounded by nothing at all, which
+	// in this package means a wedged stream costs the whole binary rather than
+	// this row (#318). A budget the ten fast execs cannot approach turns that back
+	// into one row's failure, as the suite's own long rows already do.
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
 	elapsed := func(timeout time.Duration) time.Duration {
 		start := time.Now()
 		res, err := sb.Exec(ctx, sandbox.ExecRequest{Command: "echo hi", Timeout: timeout})
@@ -342,9 +348,17 @@ func TestK8sTimedExecDoesNotWaitForItsWatchdog(t *testing.T) {
 
 	const pairs = 5
 	costs := make([]time.Duration, 0, pairs)
-	for range pairs {
-		untimed := elapsed(0)
-		timed := elapsed(time.Minute)
+	for i := range pairs {
+		// Alternating which half goes first: a fixed order holds a fixed phase
+		// against anything periodic on the host, and load that lands on every
+		// timed half and no untimed one would then read as a cost rather than as
+		// the noise it is. Alternating gives that pattern no phase to hold.
+		var untimed, timed time.Duration
+		if i%2 == 0 {
+			untimed, timed = elapsed(0), elapsed(time.Minute)
+		} else {
+			timed, untimed = elapsed(time.Minute), elapsed(0)
+		}
 		costs = append(costs, timed-untimed)
 	}
 	slices.Sort(costs)
