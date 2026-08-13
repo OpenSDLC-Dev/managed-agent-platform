@@ -159,6 +159,32 @@ func (s *server) sendSessionEvents(r *http.Request) (any, error) {
 		_, err := s.queue.Enqueue(ctx, tx, envID, domain.ID(id), queue.ModelTurn)
 		return err
 	}
+	// startWorkCycle is enqueueTurn where the turn begins a *new* cycle rather
+	// than resuming a suspended one — an idle session woken by a message or a new
+	// outcome, and the same pair redirecting a turn an interrupt just ended.
+	//
+	// It re-attempts the MCP servers the last cycle could not reach, and this
+	// delete is what makes it one. A failed catalog row is an answer rather than
+	// an absence, so the brain runs its turn without that server instead of
+	// suspending to re-dial an endpoint that just refused — which is right within
+	// a cycle and wrong across them: the discovery driver runs only when a turn
+	// suspends for a server with no row, so without this the first failure would
+	// stand for the whole life of the session, however long ago it was and
+	// whatever the operator has fixed since. Dropping the rows puts those servers
+	// back in the state a turn suspends for, so the next turn re-dials them once,
+	// and a server that is still down costs one dial per message rather than one
+	// per turn. It is the cadence the reference documents — retry on the
+	// session.status_idle → session.status_running transition — which is why the
+	// two arms that make that transition on a new cycle are the two that call
+	// this, and the resuming ones (a confirmation clearing the last gate, a tool
+	// result completing the set) are not: their turn is already under way.
+	startWorkCycle := func(ctx context.Context, tx pgx.Tx) error {
+		if _, err := tx.Exec(ctx,
+			`DELETE FROM mcp_catalogs WHERE session_id = $1 AND status = 'failed'`, id); err != nil {
+			return err
+		}
+		return enqueueTurn(ctx, tx)
+	}
 
 	// The confirmation gate: the ask-gated tool uses this session is still
 	// blocked on after applying this batch's confirmations. While it is
@@ -272,7 +298,7 @@ func (s *server) sendSessionEvents(r *http.Request) (any, error) {
 					}
 				}
 				if hasUserMessage || hasDefineOutcome {
-					return enqueueTurn(ctx, tx)
+					return startWorkCycle(ctx, tx)
 				}
 				return nil
 			}
@@ -432,25 +458,7 @@ func (s *server) sendSessionEvents(r *http.Request) (any, error) {
 		}
 		batch = append(batch, events.NewEvent{Type: domain.EventSessionStatusRunning})
 		setStatus(domain.SessionRunning)
-		// A new work cycle re-attempts the MCP servers this session failed to
-		// reach, and this is the delete that makes it one. A failed row is an
-		// answer rather than an absence, so the brain runs the turn without that
-		// server instead of suspending to re-dial an endpoint that just refused —
-		// which is right within a work cycle and wrong across them: the discovery
-		// driver only runs when a turn suspends for a server with no row, so
-		// without this the first failure would stand for the whole life of the
-		// session, however long ago it was and whatever the operator has fixed
-		// since. Dropping the rows here puts those servers back in the state a
-		// turn suspends for, so the next turn re-dials them once, and a server
-		// that is still down costs that one dial per message rather than per turn.
-		opts.Then = func(ctx context.Context, tx pgx.Tx) error {
-			if _, err := tx.Exec(ctx,
-				`DELETE FROM mcp_catalogs WHERE session_id = $1 AND status = 'failed'`,
-				id); err != nil {
-				return err
-			}
-			return enqueueTurn(ctx, tx)
-		}
+		opts.Then = startWorkCycle
 	case hasToolResult && status == string(domain.SessionRunning):
 		answered := events.ToolResultRefs(newEvents)
 		// MCP first here as at the other settlements, and for the reason that

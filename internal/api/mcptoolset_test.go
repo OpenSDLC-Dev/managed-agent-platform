@@ -702,6 +702,43 @@ func TestWakingASessionRetriesItsFailedMCPListings(t *testing.T) {
 	}
 }
 
+// The redirect an interrupt carries is a new work cycle too — the documented
+// one-send steer — and it makes the same idle→running transition from an arm of
+// its own, decided before every other trigger. A retry that fired only on the
+// plain wake would leave a repaired server unavailable to the very turn the user
+// redirected the agent onto.
+func TestAnInterruptRedirectRetriesFailedMCPListings(t *testing.T) {
+	s := newTestServer(t)
+	agentID, envID := fixture(t, s)
+	created := createSession(t, s, map[string]any{
+		"agent": map[string]any{"type": "agent_with_overrides", "id": agentID,
+			"mcp_servers": []any{mcpServer("up"), mcpServer("down")},
+			"tools":       []any{mcpToolset("up"), mcpToolset("down")}},
+		"environment_id": envID,
+	})
+	sid := created["id"].(string)
+
+	for _, row := range [][3]string{
+		{"up", "https://mcp.example/up", "ready"},
+		{"down", "https://mcp.example/down", "failed"},
+	} {
+		if _, err := s.pool.Exec(context.Background(),
+			`INSERT INTO mcp_catalogs (session_id, server_name, url, tools, status)
+			 VALUES ($1, $2, $3, '[]'::jsonb, $4)`, sid, row[0], row[1], row[2]); err != nil {
+			t.Fatalf("seed catalog row %q: %v", row[0], err)
+		}
+	}
+
+	sendEvents(t, s, sid,
+		map[string]any{"type": "user.interrupt"},
+		map[string]any{"type": "user.message",
+			"content": []any{map[string]any{"type": "text", "text": "do this instead"}}})
+
+	if left := catalogRows(t, s, sid); len(left) != 1 || left[0] != "up" {
+		t.Errorf("catalog rows after the redirect = %v, want only the server that answered", left)
+	}
+}
+
 // catalogRows reports the session's catalog server names in name order.
 func catalogRows(t *testing.T, s *tserver, sid string) []string {
 	t.Helper()
