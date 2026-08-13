@@ -44,15 +44,21 @@ var (
 		string(domain.EventAgentMCPToolResult),
 	}
 	// confirmableToolUseTypes are the tool-use events that can carry an
-	// evaluated_permission of "ask" and so be gated on user.tool_confirmation.
-	// v1 gates only platform built-ins (agent.tool_use): the brain stamps a
-	// policy on nothing else, and a denial's result is emitted as an
-	// agent.tool_result (the wrong shape for an MCP tool, whose result is
-	// agent.mcp_tool_result / mcp_tool_use_id). MCP gating is slice-8+ work and
-	// must extend the denial synthesis with it. Custom tools are
-	// client-executed and never gated by the platform.
+	// evaluated_permission of "ask" and so be gated on user.tool_confirmation:
+	// the two the platform executes itself. The reference keys the confirmation
+	// on tool_use_id for both — "The id of the agent.tool_use or
+	// agent.mcp_tool_use event this result corresponds to" — so a human
+	// approving an MCP call sends what they send for a built-in, and the MCP
+	// tool use's own session_thread_id is documented as the value to echo back
+	// on the confirmation. Custom tools are client-executed and never gated by
+	// the platform: it cannot stop what it does not run.
+	//
+	// Each entry must have an answer in toolUseAnswer, since a denial has to be
+	// answered in the family of the call it refuses; a white-box test holds the
+	// two together.
 	confirmableToolUseTypes = []string{
 		string(domain.EventAgentToolUse),
+		string(domain.EventAgentMCPToolUse),
 	}
 )
 
@@ -412,17 +418,20 @@ func payloadString(payload json.RawMessage, key string) (string, error) {
 	return s, nil
 }
 
-// interruptAnswer maps a tool-use event type to the result event that answers it
-// when a user.interrupt abandons the call, and to the field that names the call.
-// The families have to match — a custom tool's result is a
-// user.custom_tool_result keyed by custom_tool_use_id, an MCP tool's an
-// agent.mcp_tool_result keyed by mcp_tool_use_id — for the reason the denial
-// synthesis is confined to agent.tool_use (confirmableToolUseTypes above): a
-// result of the wrong shape is not the answer a client watching that tool's
-// family is waiting for. thread marks the one shape whose wire object carries a
-// session_thread_id; the two agent.* results have no such field (verified
-// against the SDK's event types).
-var interruptAnswer = map[domain.EventType]struct {
+// toolUseAnswer maps a tool-use event type to the result event that answers it
+// when the platform has to answer it itself — a user.interrupt abandoning the
+// call, or a human denying it — and to the field that names the call. The
+// families have to match: a custom tool's result is a user.custom_tool_result
+// keyed by custom_tool_use_id, an MCP tool's an agent.mcp_tool_result keyed by
+// mcp_tool_use_id, and a result of the wrong shape is not the answer a client
+// watching that tool's family is waiting for. Nothing else catches that — the
+// answered-ness queries COALESCE the three reference keys, so a wrong-family
+// answer unblocks the gate and replays cleanly.
+//
+// thread marks the one shape whose wire object carries a session_thread_id; the
+// two agent.* results have no such field (verified against the SDK's event
+// types).
+var toolUseAnswer = map[domain.EventType]struct {
 	result domain.EventType
 	refKey string
 	thread bool
@@ -449,11 +458,10 @@ const InterruptResultText = "The user interrupted this tool call before it retur
 // processed_at, indistinguishable from a client event still queued behind
 // earlier ones, and would look to a settling brain like input to chain a turn on.
 //
-// It lives here rather than beside the control plane's denial synthesis because
-// what it encodes is event-shape knowledge this package already owns — which
-// result type answers which use type, under which reference key — and because
-// one definition is what keeps a second caller (the brain's tests drive the same
-// trigger) from drifting from the first.
+// It lives here beside DenialResults, rather than beside the control plane's
+// confirmation handling, because what both encode is event-shape knowledge this
+// package already owns — which result type answers which use type, under which
+// reference key — and one definition is what keeps them from drifting apart.
 //
 // That an interrupt answers the calls at all, and in this shape, is an inference:
 // the reference documents the interrupt's stop reason, not what it writes for
@@ -462,7 +470,7 @@ func InterruptResults(uses []ToolUseRef) ([]NewEvent, error) {
 	now := time.Now().UTC()
 	out := make([]NewEvent, 0, len(uses))
 	for _, use := range uses {
-		answer, ok := interruptAnswer[use.Type]
+		answer, ok := toolUseAnswer[use.Type]
 		if !ok {
 			// Unreachable while this map and toolUseTypes agree; the check is
 			// what keeps them agreeing, since a new tool-use type with no answer
@@ -482,6 +490,124 @@ func InterruptResults(uses []ToolUseRef) ([]NewEvent, error) {
 			return nil, err
 		}
 		out = append(out, NewEvent{Type: answer.result, Payload: payload, ProcessedAt: &now})
+	}
+	return out, nil
+}
+
+// DenialResultText is what a refused call is answered with when the client gives
+// no deny_message. Never an empty text block, for the reason InterruptResultText
+// is not: a Messages endpoint rejects one, and the denial is replayed into every
+// later request this session assembles.
+const DenialResultText = "The user declined this tool call."
+
+// DenialResults answers each tool call a batch's user.tool_confirmation events
+// refuse, with an error result carrying the client's deny_message. The model
+// protocol requires every tool_use answered before the turn resumes, so a denied
+// call must have a result or the next replay is a request the model rejects. It
+// also returns the ids it answered, which the caller passes on as already-answered
+// to the queries that decide what work the resume schedules.
+//
+// The result is written in the family of the call that was refused — the same
+// mapping an interrupt answers under, for the same reason. The family is not in
+// the confirmation, which names its call by tool_use_id whichever kind it is, so
+// it is read from the log: one query for the whole batch, since a batch may deny
+// a built-in and an MCP call at once and each needs its own shape.
+//
+// Nothing is stamped processed_at here, unlike InterruptResults: every confirmable
+// family is answered by an agent.* event, which the store stamps as it inserts.
+// The white-box table test is what keeps that true.
+//
+// The denial's result shape is an inference: the reference documents the
+// confirmation event, not the result a denial produces (docs/DIVERGENCES.md).
+func DenialResults(ctx context.Context, q Querier, sessionID domain.ID, evs []NewEvent) ([]NewEvent, []string, error) {
+	type denial struct{ id, msg string }
+	var denials []denial
+	for _, ev := range evs {
+		if ev.Type != domain.EventUserToolConfirm {
+			continue
+		}
+		var c struct {
+			Result      string `json:"result"`
+			ToolUseID   string `json:"tool_use_id"`
+			DenyMessage string `json:"deny_message"`
+		}
+		if err := json.Unmarshal(ev.Payload, &c); err != nil {
+			return nil, nil, err
+		}
+		if c.Result != "deny" {
+			continue
+		}
+		msg := c.DenyMessage
+		if msg == "" {
+			msg = DenialResultText
+		}
+		denials = append(denials, denial{c.ToolUseID, msg})
+	}
+	if len(denials) == 0 {
+		return nil, nil, nil
+	}
+
+	ids := make([]string, len(denials))
+	for i, d := range denials {
+		ids[i] = d.id
+	}
+	useType, err := toolUseTypesByID(ctx, q, sessionID, ids)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	results := make([]NewEvent, 0, len(denials))
+	answered := make([]string, 0, len(denials))
+	for _, d := range denials {
+		typ, found := useType[d.id]
+		if !found {
+			// Unreachable through the API: ValidateToolConfirmations rejects a
+			// confirmation naming nothing in this session before the batch gets
+			// here. Refusing rather than skipping is what keeps it unreachable —
+			// a denial that synthesized no result would leave the call unanswered
+			// on an append-only log, which is the wedge this function prevents.
+			return nil, nil, fmt.Errorf("denied tool_use_id %q does not name an event in this session", d.id)
+		}
+		answer, ok := toolUseAnswer[typ]
+		if !ok {
+			return nil, nil, fmt.Errorf("no result event answers a %s (%q)", typ, d.id)
+		}
+		payload, err := json.Marshal(map[string]any{
+			answer.refKey: d.id,
+			"content":     []map[string]any{{"type": "text", "text": d.msg}},
+			"is_error":    true,
+		})
+		if err != nil {
+			return nil, nil, err
+		}
+		results = append(results, NewEvent{Type: answer.result, Payload: payload})
+		answered = append(answered, d.id)
+	}
+	return results, answered, nil
+}
+
+// toolUseTypesByID reads the event types of ids in one round trip. Ids absent
+// from the session are absent from the result rather than an error here — the
+// caller decides what a miss means.
+func toolUseTypesByID(ctx context.Context, q Querier, sessionID domain.ID, ids []string) (map[string]domain.EventType, error) {
+	rows, err := q.Query(ctx,
+		`SELECT id, type FROM events WHERE session_id = $1 AND id = ANY($2)`,
+		sessionID.String(), ids)
+	if err != nil {
+		return nil, fmt.Errorf("denied tool uses: %w", err)
+	}
+	defer rows.Close()
+	out := make(map[string]domain.EventType, len(ids))
+	for rows.Next() {
+		var id string
+		var typ domain.EventType
+		if err := rows.Scan(&id, &typ); err != nil {
+			return nil, fmt.Errorf("denied tool uses: %w", err)
+		}
+		out[id] = typ
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("denied tool uses: %w", err)
 	}
 	return out, nil
 }
