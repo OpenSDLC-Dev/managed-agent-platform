@@ -148,13 +148,15 @@ type Config struct {
 	// tolerated clone failures (too_large / timeout), never as a failed run.
 	RepoCloneTimeout  time.Duration
 	RepoCloneMaxBytes int64
-	// MCPDiscoveryTimeout bounds one mcp_exec pass across all of the session's
-	// MCP servers, for the reason the clone budgets exist: the dials are serial
-	// and the endpoints are third-party, so an unbounded pass would hold this
-	// process's single work goroutine and disrupt unrelated sessions. A server
-	// the pass does not reach in time is recorded as a tolerated failure, never
-	// as a failed run.
-	MCPDiscoveryTimeout time.Duration
+	// MCPPassTimeout bounds one mcp_exec pass — the discovery half across all of
+	// the session's MCP servers, and the execution half across all of a turn's
+	// outstanding calls — for the reason the clone budgets exist: both walk
+	// third-party endpoints serially, so an unbounded pass would hold this
+	// process's single work goroutine and disrupt unrelated sessions. Neither
+	// half fails the run when it runs out: a server discovery does not reach is
+	// a tolerated failed row, and a call execution does not make stays
+	// outstanding and keeps the item, which comes back to finish it.
+	MCPPassTimeout time.Duration
 }
 
 func (c Config) withDefaults() Config {
@@ -179,8 +181,8 @@ func (c Config) withDefaults() Config {
 	if c.RepoCloneMaxBytes <= 0 {
 		c.RepoCloneMaxBytes = 1 << 30
 	}
-	if c.MCPDiscoveryTimeout <= 0 {
-		c.MCPDiscoveryTimeout = 5 * time.Minute
+	if c.MCPPassTimeout <= 0 {
+		c.MCPPassTimeout = 5 * time.Minute
 	}
 	return c
 }

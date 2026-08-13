@@ -338,6 +338,16 @@ func TestMCPCallBlocksTheRequiresActionGate(t *testing.T) {
 	if !ok || len(ids) != 1 || ids[0] != mcp {
 		t.Errorf("event_ids = %v, want [%s]", stop["event_ids"], mcp)
 	}
+	// Re-idling is only half of it: nothing may be scheduled either. A resume
+	// arm that ran before the re-idle break would leave the session idle on the
+	// ask *and* an mcp_exec item on its way to run the call the human has not
+	// approved — a state this test would otherwise call correct.
+	if n := s.liveWork(sessionID, queue.MCPExec); n != 0 {
+		t.Errorf("mcp_exec = %d, want 0 — the call is still gated", n)
+	}
+	if n := s.liveWork(sessionID, queue.ToolExec); n != 0 {
+		t.Errorf("tool_exec = %d, want 0 — the turn is suspended, not resumed", n)
+	}
 }
 
 // TestConfirmationBatchedWithTheLastToolResultResumesTheTurn: a client may send

@@ -119,7 +119,7 @@ executor:
   checkpointMaxBytes: ""   # EXECUTOR_CHECKPOINT_MAX_BYTES in bytes; empty uses the binary default (2 GiB)
   repoCloneMaxBytes: ""    # EXECUTOR_REPO_CLONE_MAX_BYTES in bytes, per repository; empty uses the binary default (1 GiB)
   repoCloneTimeout: ""     # EXECUTOR_REPO_CLONE_TIMEOUT, e.g. "5m", per repository; empty uses the binary default (5m)
-  mcpDiscoveryTimeout: ""  # EXECUTOR_MCP_DISCOVERY_TIMEOUT, e.g. "2m", per discovery pass across all of a session's MCP servers; empty uses the binary default (5m)
+  mcpPassTimeout: ""  # EXECUTOR_MCP_PASS_TIMEOUT, e.g. "2m", per mcp_exec pass — discovery across a session's MCP servers, execution across a turn's calls; empty uses the binary default (5m)
   sandboxIdleTTL: ""       # EXECUTOR_SANDBOX_IDLE_TTL, e.g. "24h"; "0" disables the idle tier; empty uses the binary default (24h)
   # -- Base image for the per-session sandbox pods the executor launches.
   sandboxImage: "debian:stable-slim"

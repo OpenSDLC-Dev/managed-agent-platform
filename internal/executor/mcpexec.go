@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"slices"
@@ -113,8 +114,19 @@ func (e *Executor) runMCPTools(ctx context.Context, cfg domain.EnvironmentConfig
 	}
 
 	var out []events.NewEvent
-	for _, u := range uses {
+	deadline := time.Now().Add(e.cfg.MCPPassTimeout)
+	for i, u := range uses {
 		start := time.Now()
+		// The budget is checked between calls and never cancels one: a call cut
+		// off mid-flight would be answered as though the server had failed, and
+		// a tool with a side effect would have run without an answer on the log
+		// saying so. So the pass overruns by at most one call, and always makes
+		// progress — the first call is past this check with the clock at zero.
+		// What it leaves unanswered keeps the item (answerMCPCalls requeues it),
+		// and the calls it did make are committed, so nothing runs twice.
+		if i > 0 && start.After(deadline) {
+			break
+		}
 		res, failure := e.runMCPTool(ctx, cfg, endpoints[u.server], u)
 		toolset.RecordRun(ctx, "mcp__"+u.server+"__"+u.name, time.Since(start),
 			toolset.Result{IsError: res.isError}, ctx.Err())
@@ -260,7 +272,16 @@ func (e *Executor) runMCPTool(ctx context.Context, cfg domain.EnvironmentConfig,
 	res, err := conn.CallTool(ctx, u.name, u.input)
 	if err != nil {
 		msg := storableReason(err.Error(), endpoint)
-		return mcpFailed("MCP tool %q on server %q could not be run: %s", u.name, u.server, msg), msg
+		failure := msg
+		if errors.Is(err, mcp.ErrServerAnswered) {
+			// The server was reached and refused the call — an unknown tool, or
+			// a request for input this platform cannot supply. The model is told
+			// so it can stop calling that tool; the operator is not, because
+			// mcp_connection_failed_error is the wire's word for a connection
+			// that failed and there is no connection here to heal.
+			failure = ""
+		}
+		return mcpFailed("MCP tool %q on server %q could not be run: %s", u.name, u.server, msg), failure
 	}
 	return mcpAnswer{blocks: mcpResultBlocks(res.Content), isError: res.IsError}, ""
 }
@@ -305,7 +326,16 @@ func mcpResultBlocks(content []mcp.Content) []map[string]any {
 	for _, c := range content {
 		switch c.Type {
 		case "text":
-			out = append(out, textBlock(c.Text))
+			// An explicit empty text block is a shape a server may legally send
+			// and a Messages endpoint rejects, and replay puts this content
+			// array into a Messages tool_result unchanged — so one on this
+			// append-only log fails every later turn of the session, not just
+			// this one. Dropping it cannot lose an answer: there is nothing in
+			// it, and a result left with no blocks at all picks up the
+			// no-content block below.
+			if txt := textBlock(c.Text); txt["text"] != "" {
+				out = append(out, txt)
+			}
 		case "image":
 			out = append(out, map[string]any{
 				"type": "image",
@@ -429,6 +459,15 @@ func capLabel(s string) string {
 
 func resourceBlock(c mcp.Content) map[string]any {
 	title := capLabel(c.URI)
+	// A resource with no bytes either way — an empty file read over MCP is as
+	// ordinary here as it is through the built-in read — would leave a document
+	// whose source holds nothing. This platform keeps an empty payload off the
+	// log (the empty text block above is the case the wire is known to reject),
+	// and the address is what was worth saying about it anyway.
+	if len(c.Data) == 0 && toolset.SanitizeText(c.Text) == "" {
+		return textBlock(fmt.Sprintf("The tool returned an empty resource: %s (%s)",
+			title, mimeOrUnknown(c.MIMEType)))
+	}
 	block := map[string]any{"type": "document", "title": title}
 	if c.Data != nil {
 		block["source"] = map[string]any{

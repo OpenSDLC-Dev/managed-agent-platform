@@ -3,9 +3,11 @@ package mcp
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"time"
 
+	"github.com/modelcontextprotocol/go-sdk/jsonrpc"
 	sdk "github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
@@ -79,6 +81,24 @@ type Content struct {
 // client bounds each one.
 const CallTimeout = 2 * time.Minute
 
+// ErrServerAnswered marks a call the connected server itself refused: a
+// JSON-RPC error rather than an answer, or a request for input this platform
+// cannot supply. Both leave a caller with nothing to hand a model — which is why
+// they are errors rather than results — but neither is a connection that failed,
+// and the difference is one a caller cannot recover from the message. A caller
+// that reports connection failures separately (the MCP work driver does, on the
+// wire, as mcp_connection_failed_error) tests for this before doing so.
+var ErrServerAnswered = errors.New("the server answered, refusing the call")
+
+// answered reports whether an error is the server's own JSON-RPC error
+// response, which by definition reached us over a connection that worked. The
+// SDK aliases the wire type publicly (jsonrpc.Error), so the test costs this
+// package nothing and the type stays inside it.
+func answered(err error) bool {
+	var wire *jsonrpc.Error
+	return errors.As(err, &wire)
+}
+
 // CallTool runs one tool on the connected server and returns its answer.
 //
 // arguments is sent verbatim: json.RawMessage marshals as itself, so the bytes
@@ -112,6 +132,9 @@ const CallTimeout = 2 * time.Minute
 //     answer carries no output, so a caller reading only Content would show the
 //     model an empty result from a tool that was never executed. It is refused
 //     here instead.
+//
+// Both of the shapes that end a call this way are the server's own answer, and
+// so are marked [ErrServerAnswered].
 func (c *Conn) CallTool(ctx context.Context, name string, arguments json.RawMessage) (*CallResult, error) {
 	if c == nil || c.session == nil {
 		return nil, fmt.Errorf("mcp: call tool on a connection that was never opened")
@@ -129,11 +152,14 @@ func (c *Conn) CallTool(ctx context.Context, name string, arguments json.RawMess
 		Arguments: args,
 	})
 	if err != nil {
+		if answered(err) {
+			return nil, fmt.Errorf("mcp: call tool %q: %w: %w", name, ErrServerAnswered, err)
+		}
 		return nil, fmt.Errorf("mcp: call tool %q: %w", name, err)
 	}
 	if res.NeedsInput() {
-		return nil, fmt.Errorf("mcp: call tool %q: the server asked for further input, "+
-			"which this platform has no surface to supply", name)
+		return nil, fmt.Errorf("mcp: call tool %q: %w: the server asked for further input, "+
+			"which this platform has no surface to supply", name, ErrServerAnswered)
 	}
 	out := &CallResult{IsError: res.IsError, Content: convertContent(res.Content)}
 	// A tool that declares an outputSchema answers with structuredContent, and

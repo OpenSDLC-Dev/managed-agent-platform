@@ -237,7 +237,7 @@ services:
       # time, so the budget is what keeps a server that accepts a connection and
       # never answers from holding every other session's work behind it. Empty =
       # the binary's default, 5m.
-      EXECUTOR_MCP_DISCOVERY_TIMEOUT: ${EXECUTOR_MCP_DISCOVERY_TIMEOUT:-}
+      EXECUTOR_MCP_PASS_TIMEOUT: ${EXECUTOR_MCP_PASS_TIMEOUT:-}
       # Sandbox containment (#65). The executor applies its own defaults when
       # these are unset — 512 processes, 2 CPUs, and the NET_RAW/SETUID/SETGID
       # drops — so they are here to be *lowered* or turned off (0, or `none` for

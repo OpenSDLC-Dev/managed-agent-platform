@@ -37,7 +37,13 @@ import (
 // produces.
 func mcpHarness(t *testing.T) *harness {
 	t.Helper()
-	h := newHarnessWith(t, &fakeProvider{sb: &fakeSandbox{}}, Config{})
+	return mcpHarnessWith(t, Config{})
+}
+
+// mcpHarnessWith is the same fixture for a test that needs a configured budget.
+func mcpHarnessWith(t *testing.T, cfg Config) *harness {
+	t.Helper()
+	h := newHarnessWith(t, &fakeProvider{sb: &fakeSandbox{}}, cfg)
 	h.exec.mcpHTTP = mcptest.Client()
 	h.setNetworking(t, domain.Networking{Type: domain.NetUnrestricted})
 	return h
@@ -157,23 +163,24 @@ func TestDiscoveryStoresOnlyABoundedListing(t *testing.T) {
 	}
 }
 
-// TestTheDiscoveryBudgetDefaultsToFiveMinutes pins the one number in this
+// TestTheMCPPassBudgetDefaultsToFiveMinutes pins the one number in this
 // driver's configuration that nothing else would notice changing. The budget is
 // what stands between a server that accepts a connection and never answers and
-// every other session's work on the host, and its default is quoted in three
+// every other session's work on the host — whether the pass is listing that
+// server's tools or running one — and its default is quoted in three
 // places an operator reads — the Config comment, the Helm value and the compose
 // file — none of which a test can check. A non-positive value resolves to the
 // default rather than to "no bound", so an operator who unsets the variable, or
 // writes 0 expecting to disable it, gets the bound instead.
-func TestTheDiscoveryBudgetDefaultsToFiveMinutes(t *testing.T) {
+func TestTheMCPPassBudgetDefaultsToFiveMinutes(t *testing.T) {
 	for _, supplied := range []time.Duration{0, -time.Second} {
-		cfg := Config{MCPDiscoveryTimeout: supplied}.withDefaults()
-		if want := 5 * time.Minute; cfg.MCPDiscoveryTimeout != want {
-			t.Errorf("MCPDiscoveryTimeout %v resolved to %v, want %v", supplied, cfg.MCPDiscoveryTimeout, want)
+		cfg := Config{MCPPassTimeout: supplied}.withDefaults()
+		if want := 5 * time.Minute; cfg.MCPPassTimeout != want {
+			t.Errorf("MCPPassTimeout %v resolved to %v, want %v", supplied, cfg.MCPPassTimeout, want)
 		}
 	}
 	// A supplied bound is not overridden, or the variable would do nothing.
-	if got := (Config{MCPDiscoveryTimeout: 90 * time.Second}).withDefaults().MCPDiscoveryTimeout; got != 90*time.Second {
+	if got := (Config{MCPPassTimeout: 90 * time.Second}).withDefaults().MCPPassTimeout; got != 90*time.Second {
 		t.Errorf("a supplied budget resolved to %v, want it kept", got)
 	}
 }
@@ -959,7 +966,7 @@ func TestDiscoveryStopsWhenThePassRunsOutOfTime(t *testing.T) {
 		second.Close()
 	})
 
-	h := newHarnessWith(t, &fakeProvider{sb: &fakeSandbox{}}, Config{MCPDiscoveryTimeout: 300 * time.Millisecond})
+	h := newHarnessWith(t, &fakeProvider{sb: &fakeSandbox{}}, Config{MCPPassTimeout: 300 * time.Millisecond})
 	h.exec.mcpHTTP = client
 	h.setNetworking(t, domain.Networking{Type: domain.NetUnrestricted})
 	h.declareMCPServers(t, [2]string{"slow", hang.URL}, [2]string{"after", second.URL})

@@ -180,7 +180,7 @@ func (e *Executor) undiscoveredServers(ctx context.Context, sid domain.ID, decla
 // it against an endpoint that is simply down. The error return is the dead
 // context alone — the item's own, not the pass's budget.
 //
-// The pass is bounded as a whole (Config.MCPDiscoveryTimeout), the way
+// The pass is bounded as a whole (Config.MCPPassTimeout), the way
 // mcp.ListTimeout bounds one listing across its pages. Without an aggregate
 // bound the worst case is the per-server bound times the servers an agent may
 // declare: twenty (maxAgentMCPServers), each costing a handshake at
@@ -193,7 +193,7 @@ func (e *Executor) undiscoveredServers(ctx context.Context, sid domain.ID, decla
 // takes as long as the client's own cancellation does to unwind (see
 // mcp.DialTimeout on why that is seconds rather than immediate).
 func (e *Executor) discoverServers(ctx context.Context, cfg domain.EnvironmentConfig, servers []mcpServerRef) ([]catalogRow, error) {
-	budget, cancel := context.WithTimeout(ctx, e.cfg.MCPDiscoveryTimeout)
+	budget, cancel := context.WithTimeout(ctx, e.cfg.MCPPassTimeout)
 	defer cancel()
 
 	var rows []catalogRow

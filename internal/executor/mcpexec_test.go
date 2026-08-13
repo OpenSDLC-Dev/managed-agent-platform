@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/events"
@@ -126,7 +127,10 @@ func TestMCPToolFailureIsTheModelsToRead(t *testing.T) {
 // would leave the call unanswered and wedge every later replay.
 func TestMCPTransportFailureIsAnsweredAndReported(t *testing.T) {
 	h := mcpHarness(t)
-	h.declareMCPServers(t, [2]string{"docs", "http://127.0.0.1:1/mcp"})
+	// A credential in the endpoint, because that is what the cut is for: an
+	// endpoint with nothing to leak cannot tell a message that leaks one from a
+	// message that does not.
+	h.declareMCPServers(t, [2]string{"docs", "http://svc:s3cret@127.0.0.1:1/mcp"})
 	useID := h.appendMCPToolUse(t, "docs", "search", `{}`)
 	h.enqueueMCP(t)
 
@@ -174,6 +178,9 @@ func TestMCPTransportFailureIsAnsweredAndReported(t *testing.T) {
 	// is cut to scheme://host exactly as a catalog reason is.
 	if strings.Contains(e.Error.Message, "/mcp") {
 		t.Errorf("message = %q, want the endpoint cut to scheme://host", e.Error.Message)
+	}
+	if strings.Contains(e.Error.Message, "s3cret") || strings.Contains(e.Error.Message, "svc:") {
+		t.Errorf("message = %q, want the endpoint's credential gone", e.Error.Message)
 	}
 }
 
@@ -738,5 +745,159 @@ func TestMCPResourceLabelsAreCappedSoTheExemptionHolds(t *testing.T) {
 	ctx, _ := blocks[0]["context"].(string)
 	if len(ctx) > maxResourceLabel+128 {
 		t.Errorf("context is %d bytes, want it capped to %d", len(ctx), maxResourceLabel)
+	}
+}
+
+// A server may answer with an explicit empty text block — the SDK decodes it,
+// the wire admits it, and it is a different shape from the empty content array
+// the no-content fallback covers. A Messages endpoint does not admit it: replay
+// hands an mcp_tool_result's content array straight into a Messages tool_result
+// (brain/replay.go's toolResultBlock), so an empty text block on this
+// append-only log is a session that fails on this turn and on every later one.
+// It is the same wedge TestEmptyToolResultOmitsEmptyTextBlock keeps a built-in
+// tool's empty read out of, arriving by a route only a server can open.
+func TestMCPEmptyTextBlockNeverReachesTheLog(t *testing.T) {
+	url := mcptest.Server(t, mcptest.Tool{Name: "search", Blocks: []mcptest.Block{
+		{Type: "text", Text: ""},
+	}})
+	h := mcpHarness(t)
+	h.declareMCPServers(t, [2]string{"docs", url})
+	h.appendMCPToolUse(t, "docs", "search", `{}`)
+	h.enqueueMCP(t)
+
+	h.stepOnce(t)
+
+	results := h.mcpResults(t)
+	if len(results) != 1 {
+		t.Fatalf("results = %d, want one", len(results))
+	}
+	blocks := blocksOf(t, results[0])
+	for i, b := range blocks {
+		if b["type"] == "text" && b["text"] == "" {
+			t.Errorf("block %d is an empty text block — a Messages endpoint rejects it, "+
+				"so every later replay of this session would fail", i)
+		}
+	}
+	// The answer still says something: dropping the empty block must not leave a
+	// result with no content, which is the other shape the model cannot read.
+	if len(blocks) != 1 {
+		t.Fatalf("content = %v, want the one block that says the tool answered with nothing", blocks)
+	}
+}
+
+// A tool the server does not have is not a server that could not be reached.
+// The connection opened, the server answered, and it answered with a JSON-RPC
+// error — so the model is told the call failed and the operator is told nothing,
+// because mcp_connection_failed_error is documented as "Failed to connect to an
+// MCP server" and this platform does not have a connection to heal.
+func TestMCPProtocolFailureIsNotReportedAsAConnectionFailure(t *testing.T) {
+	url := mcptest.Server(t, mcptest.Tool{Name: "search", Fail: "no such tool"})
+	h := mcpHarness(t)
+	h.declareMCPServers(t, [2]string{"docs", url})
+	useID := h.appendMCPToolUse(t, "docs", "search", `{}`)
+	h.enqueueMCP(t)
+
+	h.stepOnce(t)
+
+	results := h.mcpResults(t)
+	if len(results) != 1 || results[0]["mcp_tool_use_id"] != useID {
+		t.Fatalf("results = %v, want one answering %s", results, useID)
+	}
+	if results[0]["is_error"] != true {
+		t.Errorf("is_error = %v, want true — the call did not produce an answer", results[0]["is_error"])
+	}
+	errs, err := h.log.List(context.Background(), h.sid, events.ListQuery{
+		Types: []string{string(domain.EventSessionError)}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(errs) != 0 {
+		t.Errorf("session.error count = %d, want 0 — the server was reached and answered", len(errs))
+	}
+	// The turn still moves: the call is answered, so the model runs again.
+	if n := h.liveOf(t, queue.ModelTurn); n != 1 {
+		t.Errorf("model_turn = %d, want 1", n)
+	}
+}
+
+// The calls in a turn are run one after another, so without a bound on the pass
+// a turn holding several slow servers owns this process's single work goroutine
+// for as long as they care to take, and every other session on the replica waits
+// behind it. Discovery is bounded for exactly this reason; execution is bounded
+// the same way, and hands the rest back rather than dropping it — the calls it
+// already made are committed, so nothing with a side effect runs twice.
+func TestMCPPassStopsAtItsBudgetAndHandsTheRestBack(t *testing.T) {
+	url := mcptest.Server(t, mcptest.Tool{Name: "search", Result: "answered", While: func() {
+		time.Sleep(120 * time.Millisecond)
+	}})
+	h := mcpHarnessWith(t, Config{MCPPassTimeout: 40 * time.Millisecond})
+	h.declareMCPServers(t, [2]string{"docs", url})
+	first := h.appendMCPToolUse(t, "docs", "search", `{}`)
+	h.appendMCPToolUse(t, "docs", "search", `{"q":"second"}`)
+	h.enqueueMCP(t)
+
+	h.stepOnce(t)
+
+	results := h.mcpResults(t)
+	if len(results) != 1 || results[0]["mcp_tool_use_id"] != first {
+		t.Fatalf("results = %v, want only the first call answered — the budget stops the pass "+
+			"before the second, and never before the first, or no pass makes progress", results)
+	}
+	// The call left over is this item's to finish, so the item comes back rather
+	// than the session going idle on an unanswered call.
+	if n := h.liveOf(t, queue.MCPExec); n != 1 {
+		t.Errorf("mcp_exec live = %d, want 1 — the outstanding call keeps the item", n)
+	}
+	if n := h.liveOf(t, queue.ModelTurn); n != 0 {
+		t.Errorf("model_turn = %d, want 0 — a call is still unanswered", n)
+	}
+}
+
+// An MCP read of an empty file is the resource-shaped twin of the empty text
+// block: a document whose source holds nothing. Rather than put an empty payload
+// on the log in a shape whose acceptance nothing here has established, the
+// address is said in text.
+func TestMCPEmptyResourceIsSaidRatherThanSentEmpty(t *testing.T) {
+	url := mcptest.Server(t, mcptest.Tool{Name: "read", Blocks: []mcptest.Block{
+		{Type: "resource", URI: "file:///empty.txt", MIMEType: "text/plain", Text: ""},
+	}})
+	h := mcpHarness(t)
+	h.declareMCPServers(t, [2]string{"docs", url})
+	h.appendMCPToolUse(t, "docs", "read", `{}`)
+	h.enqueueMCP(t)
+
+	h.stepOnce(t)
+
+	blocks := blocksOf(t, h.mcpResults(t)[0])
+	if len(blocks) != 1 {
+		t.Fatalf("content = %v, want one block", blocks)
+	}
+	if blocks[0]["type"] != "text" {
+		t.Fatalf("block = %v, want text — an empty resource has no payload to carry", blocks[0])
+	}
+	if txt, _ := blocks[0]["text"].(string); !strings.Contains(txt, "file:///empty.txt") {
+		t.Errorf("text = %q, want it to name the resource", txt)
+	}
+}
+
+// The budget must never starve the pass of its first call. A bound short enough
+// to have expired before the loop begins would otherwise answer nothing and hand
+// the item straight back, and the item would come back to do it again — a queue
+// spinning on an unanswerable turn rather than a slow one.
+func TestMCPPassAlwaysMakesItsFirstCall(t *testing.T) {
+	url := mcptest.Server(t, mcptest.Tool{Name: "search", Result: "answered"})
+	h := mcpHarnessWith(t, Config{MCPPassTimeout: time.Nanosecond})
+	h.declareMCPServers(t, [2]string{"docs", url})
+	useID := h.appendMCPToolUse(t, "docs", "search", `{}`)
+	h.enqueueMCP(t)
+
+	h.stepOnce(t)
+
+	results := h.mcpResults(t)
+	if len(results) != 1 || results[0]["mcp_tool_use_id"] != useID {
+		t.Fatalf("results = %v, want the call answered whatever the budget says", results)
+	}
+	if n := h.liveOf(t, queue.ModelTurn); n != 1 {
+		t.Errorf("model_turn = %d, want 1 — the turn moves on", n)
 	}
 }

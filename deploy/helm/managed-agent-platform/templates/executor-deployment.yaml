@@ -187,8 +187,8 @@ spec:
             - name: EXECUTOR_REPO_CLONE_TIMEOUT
               value: {{ . | quote }}
             {{- end }}
-            {{- with .Values.executor.mcpDiscoveryTimeout }}
-            - name: EXECUTOR_MCP_DISCOVERY_TIMEOUT
+            {{- with .Values.executor.mcpPassTimeout }}
+            - name: EXECUTOR_MCP_PASS_TIMEOUT
               value: {{ . | quote }}
             {{- end }}
             {{- /* Not `with`: template truthiness folds the numeric 0 — the
