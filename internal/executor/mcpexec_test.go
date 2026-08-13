@@ -469,6 +469,23 @@ func TestMCPCallRefusedByEgressPolicyIsAnsweredAndReported(t *testing.T) {
 	if len(errs) != 1 {
 		t.Fatalf("session.error count = %d, want 1", len(errs))
 	}
+	// terminal, not retrying: no later turn changes the policy that refused the
+	// dial, so telling a client to wait for the next one would be a lie. It is
+	// the one failure here this code can know is terminal — a connection error
+	// may be a server restarting as easily as a host that will never resolve.
+	var e struct {
+		Error struct {
+			RetryStatus struct {
+				Type string `json:"type"`
+			} `json:"retry_status"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(errs[0].Body, &e); err != nil {
+		t.Fatalf("decode session.error: %v", err)
+	}
+	if e.Error.RetryStatus.Type != "terminal" {
+		t.Errorf("retry_status = %q, want terminal for a policy refusal", e.Error.RetryStatus.Type)
+	}
 }
 
 // A tool that genuinely returns nothing still gets a block. The wire's content
@@ -562,7 +579,7 @@ func TestMCPAnswerBeyondTheBudgetIsCutWithANotice(t *testing.T) {
 		t.Fatalf("got %d blocks, want some kept, some dropped, and a notice", len(blocks))
 	}
 	notice, _ := blocks[len(blocks)-1]["text"].(string)
-	if !strings.Contains(notice, "further content block(s)") {
+	if !strings.Contains(notice, "content block(s) of this answer were dropped") {
 		t.Errorf("last block = %q, want it to name what was dropped", notice)
 	}
 	total := 0
@@ -576,5 +593,53 @@ func TestMCPAnswerBeyondTheBudgetIsCutWithANotice(t *testing.T) {
 	if total > toolset.MaxOutputBytes+512 {
 		t.Errorf("answer is %d bytes, want it held near the %d-byte budget",
 			total, toolset.MaxOutputBytes)
+	}
+}
+
+// The budget binds a leading image too. Only a text block is bounded on its own
+// (textBlock caps it), so exempting whatever came first would let a lone image —
+// bounded by nothing but the transport's megabytes, and base64 a third larger
+// again — land whole on the append-only log and ride every later replay of the
+// session. There is no truncation to fall back on for one: half a base64 payload
+// decodes to nothing, so it is dropped and said to have been.
+func TestMCPOversizedLeadingImageIsDroppedNotExempted(t *testing.T) {
+	png := make([]byte, 2*toolset.MaxOutputBytes)
+	for i := range png {
+		png[i] = byte(i)
+	}
+	url := mcptest.Server(t, mcptest.Tool{Name: "shot", Blocks: []mcptest.Block{
+		{Type: "image", Data: png, MIMEType: "image/png"},
+	}})
+	h := mcpHarness(t)
+	h.declareMCPServers(t, [2]string{"docs", url})
+	h.appendMCPToolUse(t, "docs", "shot", `{}`)
+	h.enqueueMCP(t)
+
+	h.stepOnce(t)
+
+	results := h.mcpResults(t)
+	if len(results) != 1 {
+		t.Fatalf("results = %d, want one", len(results))
+	}
+	blocks := blocksOf(t, results[0])
+	for _, b := range blocks {
+		if b["type"] == "image" {
+			t.Fatalf("the oversized image landed on the log: %v", b["type"])
+		}
+	}
+	if len(blocks) != 1 {
+		t.Fatalf("got %d blocks, want just the notice", len(blocks))
+	}
+	notice, _ := blocks[0]["text"].(string)
+	if !strings.Contains(notice, "content block(s) of this answer were dropped") {
+		t.Errorf("block = %q, want it to say the image was dropped", notice)
+	}
+	raw, err := json.Marshal(blocks)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(raw) > toolset.MaxOutputBytes {
+		t.Errorf("answer is %d bytes, want it under the %d-byte budget",
+			len(raw), toolset.MaxOutputBytes)
 	}
 }

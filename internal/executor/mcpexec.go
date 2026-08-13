@@ -125,7 +125,7 @@ func (e *Executor) runMCPTools(ctx context.Context, cfg domain.EnvironmentConfig
 			return out, nil, err
 		}
 		out = append(out, ev)
-		if failure != "" {
+		if failure.message != "" {
 			ev, err := mcpConnectionFailedEvent(u.server, failure)
 			if err != nil {
 				return out, nil, err
@@ -221,8 +221,24 @@ func mcpFailed(format string, args ...any) mcpAnswer {
 	return mcpAnswer{blocks: []map[string]any{textBlock(fmt.Sprintf(format, args...))}, isError: true}
 }
 
+// mcpFailure is a transport-level failure worth a session.error: the message,
+// already cut to scheme://host, and which of the wire's retry statuses it is. A
+// zero value means no session.error — the call reached the server, or there was
+// nothing to reach.
+type mcpFailure struct {
+	message string
+	// terminal marks a failure no later turn can fix, which is the plan's
+	// reading of the status union: `retrying` for a failure the next turn will
+	// re-attempt, `terminal` for one it cannot. Only the egress refusal is
+	// terminal here, because it is the only one this code can *know* is: a
+	// connection error may be a server restarting as easily as a host that will
+	// never resolve, and reporting a transient outage as terminal would tell a
+	// client the session is done with a server that is back a minute later.
+	terminal bool
+}
+
 // runMCPTool answers one call. The second return is a transport failure worth a
-// session.error, empty when the call reached the server at all — including when
+// session.error, zero when the call reached the server at all — including when
 // the tool itself failed, which is a working server reporting a working failure.
 //
 // The connection is per call rather than per pass. A turn's MCP calls are few,
@@ -230,37 +246,39 @@ func mcpFailed(format string, args ...any) mcpAnswer {
 // failure from touching another's call — the same reason discovery dials each
 // server on its own.
 func (e *Executor) runMCPTool(ctx context.Context, cfg domain.EnvironmentConfig,
-	endpoint string, u mcpToolUse) (mcpAnswer, string) {
+	endpoint string, u mcpToolUse) (mcpAnswer, mcpFailure) {
 
 	if endpoint == "" {
 		// The agent stopped declaring this server between the turn that called
 		// it and now — mcp_servers is mid-session-mutable. The model is told,
-		// and nothing is dialled: there is no address to dial.
-		return mcpFailed("MCP server %q is no longer configured on this agent.", u.server), ""
+		// and nothing is dialled: there is no address to dial, and an agent edit
+		// is not a connection that failed.
+		return mcpFailed("MCP server %q is no longer configured on this agent.", u.server), mcpFailure{}
 	}
 	host, err := mcpEndpointHost(endpoint)
 	if err != nil {
-		return mcpFailed("MCP server %q has an unusable url.", u.server), ""
+		return mcpFailed("MCP server %q has an unusable url.", u.server), mcpFailure{}
 	}
 	if !mcpEgressAllowed(cfg, host) {
 		reason := egressRefusal(cfg, host)
 		return mcpFailed("MCP server %q could not be reached: %s", u.server, reason),
-			storableReason(reason, endpoint)
+			mcpFailure{message: storableReason(reason, endpoint), terminal: true}
 	}
 
 	conn, err := mcp.Connect(ctx, mcp.Config{URL: endpoint, HTTPClient: e.mcpCallHTTP()})
 	if err != nil {
 		msg := storableReason(err.Error(), endpoint)
-		return mcpFailed("MCP server %q could not be reached: %s", u.server, msg), msg
+		return mcpFailed("MCP server %q could not be reached: %s", u.server, msg), mcpFailure{message: msg}
 	}
 	defer conn.Close()
 
 	res, err := conn.CallTool(ctx, u.name, u.input)
 	if err != nil {
 		msg := storableReason(err.Error(), endpoint)
-		return mcpFailed("MCP tool %q on server %q could not be run: %s", u.name, u.server, msg), msg
+		return mcpFailed("MCP tool %q on server %q could not be run: %s", u.name, u.server, msg),
+			mcpFailure{message: msg}
 	}
-	return mcpAnswer{blocks: mcpResultBlocks(res.Content), isError: res.IsError}, ""
+	return mcpAnswer{blocks: mcpResultBlocks(res.Content), isError: res.IsError}, mcpFailure{}
 }
 
 // mcpCallHTTP is the client tool calls go through: the executor's own when a
@@ -348,13 +366,15 @@ func mcpResultBlocks(content []mcp.Content) []map[string]any {
 // decodes to nothing, so the tool catalog's whole-or-nothing rule applies here
 // too. What was dropped is said rather than left to look like a short answer.
 //
-// The first block is kept whatever it costs, which is what makes the ordinary
-// over-long answer — one huge text block — a truncated answer rather than no
-// answer at all. It has already been bounded on its own, so keeping it admits a
-// fixed overhead (the JSON around it and the truncation notice inside it) and
-// not a server's bytes. Dropping it would leave a result whose only content
-// says the content was dropped, which is strictly worse than the truncation the
-// model can still read.
+// One block is exempt and only one: a leading text block, which has already been
+// bounded on its own in textBlock. Keeping it admits a fixed overhead — the JSON
+// around it and the truncation notice inside it — and not a server's bytes, and
+// it is what makes the ordinary over-long answer a truncated answer rather than
+// no answer at all. The exemption stops there. A leading *image* or base64
+// document is bounded by nothing but the transport's megabytes, and there is no
+// truncation to fall back on, so an over-budget one is dropped like any other:
+// a result saying the image was too large is something a model can act on, where
+// a base64 payload cut in half is not.
 //
 // The trailing notice rides on top of the budget rather than inside it: it is
 // this platform's text about the server's, and it is a couple of hundred bytes.
@@ -366,9 +386,10 @@ func capMCPBlocks(blocks []map[string]any) []map[string]any {
 	for i, b := range blocks {
 		// Cannot fail: every block here is built from strings and byte slices.
 		raw, _ := json.Marshal(b)
-		if i > 0 && len(raw) > budget {
+		exempt := i == 0 && b["type"] == "text"
+		if len(raw) > budget && !exempt {
 			return append(out, textBlock(fmt.Sprintf(
-				"%d further content block(s) of this answer were dropped: it is past the %d bytes "+
+				"%d content block(s) of this answer were dropped: it is past the %d bytes "+
 					"a tool result may put on this session's log.", len(blocks)-i, toolset.MaxOutputBytes)))
 		}
 		budget -= len(raw)
@@ -435,19 +456,24 @@ func mcpResultEvent(useID domain.ID, res mcpAnswer) (events.NewEvent, error) {
 // catalog row's is: an mcp_servers entry is customer-supplied and may carry a
 // credential in its userinfo or its query.
 //
-// retry_status is the union's `retrying` variant — an object carrying a type,
-// like every other retry status this platform emits, not the bare string the
-// field's name invites — because retrying is what this platform does: every turn
-// re-attempts a failed server, so a transient failure heals by itself. Nothing
-// documents a server being disabled for the rest of a session and this does not
-// invent one (docs/DIVERGENCES.md).
-func mcpConnectionFailedEvent(server, message string) (events.NewEvent, error) {
+// retry_status is a union variant — an object carrying a type, like every other
+// retry status this platform emits, not the bare string the field's name invites.
+// Which variant follows from what this platform will actually do next: every turn
+// re-attempts a failed server, so an ordinary failure is `retrying` and heals by
+// itself, while an egress refusal is `terminal` because no later turn changes the
+// policy that refused it. Nothing disables a server for the rest of a session,
+// and this does not invent that (docs/DIVERGENCES.md).
+func mcpConnectionFailedEvent(server string, f mcpFailure) (events.NewEvent, error) {
+	status := "retrying"
+	if f.terminal {
+		status = "terminal"
+	}
 	payload, err := json.Marshal(map[string]any{
 		"error": map[string]any{
 			"type":            "mcp_connection_failed_error",
 			"mcp_server_name": server,
-			"message":         message,
-			"retry_status":    map[string]any{"type": "retrying"},
+			"message":         f.message,
+			"retry_status":    map[string]any{"type": status},
 		},
 	})
 	if err != nil {
