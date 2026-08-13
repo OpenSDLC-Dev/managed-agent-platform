@@ -38,54 +38,61 @@ new directory and in-repo citations re-pointed in the moving PR (plan
 
 ---
 
-## The lease keeper needs no retry, and #392's premise was wrong, 2026-08-14
+## A refutation of #392 that both reviewers refuted, 2026-08-14
 
-A decision **evaluated and rejected**: giving `queue.KeepLease` a bounded retry, or a wider
-budget, so a lease extension that fails is not immediately treated as a lease lost.
+A **review-hardening record**: the first version of the #392 fix argued the issue had no
+defect behind it, and shipped no production change. Both reviewers independently proved
+that argument wrong, and the PR became a real fix. The defect and its repair are the
+changelog entry; what belongs here is how a confidently-argued refutation survived its
+author and died at review.
 
-**The premise.** [#392](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/392)
-was filed on one failure of `TestLongTimeToFirstTokenKeepsLease` under full-suite load —
-`lease keeper: queue: extend …: context deadline exceeded` — and reasoned that a lease
-genuinely taken by another brain and a lease extension whose round trip simply did not
-finish are indistinguishable at that call site, so the second would be a false positive
-costing a turn that had streamed a real answer.
+**The claim.** [#392](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/392)
+was filed — by this session — on one failure of `TestLongTimeToFirstTokenKeepsLease` under
+full-suite load, reasoning that a lease genuinely taken by another brain and an extension
+whose round trip merely did not finish are indistinguishable at that call site. The first
+attempt at the issue rejected it on the keeper's own arithmetic: renewals tick at `ttl/3`
+and each is bounded at `ttl - ttl/3`, so an attempt that exhausts its budget began a third
+of a lease in and ran to the end of it — *"by the time an extend times out, the lease
+really has lapsed"*. The keeper's existing comment said the same, which made the claim feel
+confirmed rather than merely repeated. The proposed change was to widen the test's margin
+and record the keeper as correct.
 
-**Why that is wrong, and it is the keeper's own arithmetic that says so.** `KeepLease`
-ticks at `ttl/3` and bounds each attempt at `ttl - ttl/3`. An attempt therefore starts a
-third of a lease after the last successful renewal and may run to exactly the end of it:
-exhausting the budget means the lease has lapsed, at which point another brain may claim
-it and abandoning is the only correct reaction. The comment in `internal/queue/keeper.go`
-already stated this — *"an Extend that overruns it has let the lease lapse anyway"* — and
-the issue (which this session filed) missed it. The two situations are not
-indistinguishable; they are distinguished by construction.
+**Why it was wrong.** The arithmetic holds only for a punctual tick. A `time.Ticker`
+buffers one tick and drops the rest, so a renewal that outlasts an interval is followed by
+a tick *already waiting*, and the next attempt starts at once with a budget computed as
+though it had not — landing its deadline inside the lease the slow renewal had just bought.
+The invariant fails on every tick after the first slow one, which is exactly the loaded-host
+condition the issue was filed under.
 
-**What was actually wrong was the test.** Production `LeaseTTL` is two minutes, so each
-extend has an eighty-second budget and the scenario needs a database eighty seconds
-unreachable — by which point abandoning is right. The test pinned `250ms`, giving each
-extend **167ms** and requiring seven consecutive round trips inside it. The fix is the
-test's margin, not the keeper.
+**How it was established, by three independent routes.** The Codex reviewer produced the
+counterexample by construction (High). The verifier, dispatched against the same commit and
+knowing nothing of that finding, reached FAIL by two further routes: a simulation of the
+loop, and the real keeper against real Postgres, failing 3/3 once the contention window was
+widened. This session then reproduced it with queued `SELECT … FOR UPDATE` row locks, which
+fails against `main`'s keeper with the issue's own error string and passes with the fix.
 
-**Not reproduced, and said plainly.** Two load models were tried against the *old*
-timings: CPU saturation (3× `nproc` busy loops, six runs) and database contention
-(`internal/store` ×2, `internal/api` and `internal/executor` running concurrently, eight
-runs). Neither reproduced the failure. So the margin increase is justified by the
-arithmetic above and by the test being objectively tight, **not** by a demonstrated
-repair; if it recurs, that is new evidence and the issue should be reopened with it. What
-was verified is that the test still tests its subject: neutering the keeper's renewal
-fails it with *"healthy long turn was reclaimable mid-stream: the lease was not
-extended"*.
+**A negative result that mattered.** The first version of that reproduction passed 6/6
+against the *buggy* keeper — the second lock raced the second renewal instead of queueing
+behind it, so the bug had a window to escape through. A reproduction is only evidence once
+it has been made to fail against the unfixed code.
 
-**The one case a retry would cover, recorded so it need not be re-derived.** An extend
-that fails *fast* — an exhausted pool, a reset connection — returns while the lease is
-still live for most of its term, and the keeper kills the turn anyway. That is a genuine
-false positive, and it is unobserved. It was left unbuilt deliberately: nothing in the
-record calls for it, and a naive retry would introduce a worse bug, because `Extend`
-identifies the claimant by the lease timestamp it is replacing (`WHERE … lease_expires_at
-= $2`) and updates `item.Lease` only on success — so a retry after an attempt that
-committed server-side but errored client-side would present a stale timestamp and be told,
-wrongly, that the lease was lost. Any future retry has to resynchronise the lease value
-first, and may only do so while the current lease is still live, since that is the window
-in which no other brain can have claimed the item.
+**What was not done.** The original 250ms flake was never reproduced (CPU saturation, six
+runs; database contention, eight runs). The test's margin was therefore left exactly as it
+was: the diagnosis that justified widening it — a merely tight test over a correct keeper —
+is the diagnosis that turned out to be false, and widening a test after fixing the
+mechanism it was pointing at only costs sensitivity. If it recurs, that is new evidence.
+
+**The retry remains rejected, for a narrower reason than first written.** An extend that
+fails *fast* — an exhausted pool, a reset connection — still returns while the lease is
+live, and the keeper still kills the turn. That case is unobserved, so nothing is built for
+it. The first draft called a naive retry *worse* than nothing; the verifier corrected this,
+and it is right: `internal/brain/brain.go` treats every keeper error identically, so the
+outcome would be unchanged, not worse. The real constraint is that `Extend` identifies the
+claimant by the lease timestamp it replaces (`WHERE … lease_expires_at = $2`) and updates
+`item.Lease` only on success, so a retry after an attempt that committed server-side but
+errored client-side would present a stale timestamp and be told, wrongly, that the lease
+was lost. Any future retry must resynchronise the lease value first, and may only do so
+while the current lease is still live.
 
 ---
 

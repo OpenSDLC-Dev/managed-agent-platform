@@ -1054,18 +1054,6 @@ func TestLongTimeToFirstTokenKeepsLease(t *testing.T) {
 	// The model may think past the whole lease before the first chunk; the
 	// keeper must extend the lease while the stream is blocked, or a
 	// healthy turn gets reclaimed and forked.
-	//
-	// The TTL is a second rather than the 250ms this test used to pin, and the
-	// arithmetic is why (#392). KeepLease ticks at ttl/3 and bounds each attempt
-	// at ttl-ttl/3, so a 250ms lease gave every extend a **167ms** budget and this
-	// test needed seven of them in a row. Under full-suite load one Postgres round
-	// trip exceeding 167ms was enough to fail it — which the keeper then reported,
-	// correctly, as a lease it could not maintain, because by the time that budget
-	// is exhausted the lease really has lapsed. The flake was this test asking a
-	// loaded host to renew a quarter-second lease seven times, not the keeper
-	// misjudging anything. A second gives each attempt 667ms and keeps what the
-	// test is for: the model still thinks well past a whole lease, so without the
-	// keeper the rival claim below still succeeds.
 	pool := pgtest.NewPool(t)
 	sid, envID := pgtest.NewSession(t, pool, "self_hosted")
 	fake := &fakeProvider{scripts: [][]provider.Chunk{{textChunk(0, "slow but fine"), done("end_turn", 2)}}}
@@ -1076,14 +1064,14 @@ func TestLongTimeToFirstTokenKeepsLease(t *testing.T) {
 		t.Fatal(err)
 	}
 	h := &harness{pool: pool, log: events.NewLog(pool), queue: queue.New(pool),
-		provider: fake, brain: brain.New(pool, reg, nil, brain.Config{LeaseTTL: time.Second}),
+		provider: fake, brain: brain.New(pool, reg, nil, brain.Config{LeaseTTL: 250 * time.Millisecond}),
 		sessionID: sid, envID: envID}
 	fake.onGenerate = func(int) {
 		// Well past the original lease, a rival brain must still find
 		// nothing to claim: the keeper has been renewing it while the
 		// model thinks. Without the keeper this claim succeeds and the
 		// turn forks.
-		time.Sleep(1600 * time.Millisecond)
+		time.Sleep(400 * time.Millisecond)
 		got, err := h.queue.Claim(context.Background(), queue.ModelTurn, time.Minute)
 		if err != nil {
 			t.Errorf("rival claim: %v", err)
@@ -1091,7 +1079,7 @@ func TestLongTimeToFirstTokenKeepsLease(t *testing.T) {
 		if got != nil {
 			t.Errorf("healthy long turn was reclaimable mid-stream: the lease was not extended")
 		}
-		time.Sleep(400 * time.Millisecond)
+		time.Sleep(200 * time.Millisecond)
 	}
 
 	h.wake(t, "hi")

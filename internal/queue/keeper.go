@@ -2,6 +2,7 @@ package queue
 
 import (
 	"context"
+	"fmt"
 	"time"
 )
 
@@ -41,6 +42,12 @@ func (q *Queue) KeepLease(ctx context.Context, item *Item, ttl time.Duration) (c
 		defer close(k.done)
 		t := time.NewTicker(interval)
 		defer t.Stop()
+		// When the lease we are currently holding was bought. Claim bought it just
+		// before this goroutine started, so starting the clock here overstates it
+		// by that setup — in the safe direction, since an over-long budget only
+		// lets an attempt run to a lease that has already lapsed, where Extend's
+		// own `lease_expires_at = $2` guard refuses it anyway.
+		bought := time.Now()
 		for {
 			select {
 			case <-k.quit:
@@ -48,14 +55,37 @@ func (q *Queue) KeepLease(ctx context.Context, item *Item, ttl time.Duration) (c
 			case <-kctx.Done():
 				return
 			case <-t.C:
-				// Bounded: Close waits for this goroutine, so an Extend blocked
-				// on an exhausted pool or a stalled database would otherwise hang
-				// the holder forever. The budget is the lease the last renewal
-				// bought minus the tick we waited — an Extend that overruns it has
-				// let the lease lapse anyway. A duration, not the lease timestamp:
-				// the deadline must not depend on agreement between the database
-				// clock and this process's.
-				ectx, ecancel := context.WithTimeout(kctx, ttl-ttl/3)
+				// Bounded: Close waits for this goroutine, so an Extend blocked on
+				// an exhausted pool or a stalled database would otherwise hang the
+				// holder forever. The budget is what is left of the lease the last
+				// renewal bought, so an Extend that overruns it has let the lease
+				// lapse — which is what makes abandoning the turn on a timeout the
+				// right answer rather than a guess.
+				//
+				// Measured from that renewal rather than assumed to be `ttl-ttl/3`,
+				// and #392's review is why. A Ticker buffers a tick and drops the
+				// rest, so a renewal that takes longer than one interval is followed
+				// by a tick that is *already waiting*: the next attempt starts at
+				// once, not an interval later. With a fixed `ttl-ttl/3` its deadline
+				// then fell well inside a lease that renewal had just extended, and
+				// a timeout there abandoned a turn this brain still owned — exactly
+				// the false positive #392 was filed about, reachable by construction
+				// on any host slow enough to make one renewal outlast an interval.
+				// Subtracting the elapsed time restores the invariant in both cases:
+				// punctual ticks still get `ttl-ttl/3`, and a late one gets only what
+				// the lease has left.
+				//
+				// A duration, not the lease timestamp: the deadline must not depend
+				// on agreement between the database clock and this process's.
+				budget := ttl - time.Since(bought)
+				if budget <= 0 {
+					// A tick this late means the goroutine was starved for a whole
+					// lease; there is nothing left to renew.
+					k.failed = fmt.Errorf("queue: keep lease %s: %w", item.ID, ErrLeaseLost)
+					k.cancel()
+					return
+				}
+				ectx, ecancel := context.WithTimeout(kctx, budget)
 				err := q.Extend(ectx, item, ttl)
 				ecancel()
 				if err != nil {
@@ -63,6 +93,7 @@ func (q *Queue) KeepLease(ctx context.Context, item *Item, ttl time.Duration) (c
 					k.cancel() // aborts the in-flight tool run or provider stream
 					return
 				}
+				bought = time.Now()
 			}
 		}
 	}()
