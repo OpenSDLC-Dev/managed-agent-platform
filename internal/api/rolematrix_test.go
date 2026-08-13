@@ -193,12 +193,17 @@ func laneOf(pattern string) lane {
 	if strings.Contains(pattern, "gateconfig.Path") {
 		return laneGate
 	}
-	// Every console-API pattern is built from a constant whose name starts with
-	// "console" — the family test rather than a list of the two, then four, that
-	// exist today. A list would silently classify the next console route as a
-	// fallback closure, and a fallback is the one lane this test does not hold to
-	// the declares-a-role rule.
-	if strings.Contains(pattern, "console") {
+	// Every console-API route registers `"METHOD "+consoleSomethingPath`, which
+	// render() spells `METHOD +consoleSomethingPath`. Matching on "+console" is
+	// therefore a test for *a constant of that family*, not for the word: a bare
+	// "console" anywhere would also claim a literal route like
+	// `GET /v1/console_settings`, which dispatches through the management lane in
+	// production and would then be excluded from the matrix join — free to declare
+	// an over-permissive role with the suite green. The family form is still the
+	// right shape rather than a list of the constants that exist today, because a
+	// list would classify the next console route as a fallback closure, and
+	// fallback is the one lane exempt from the declares-a-role rule.
+	if strings.Contains(pattern, "+console") {
 		return laneConsole
 	}
 

@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"time"
 
@@ -106,18 +107,36 @@ func IssueManagementKey(ctx context.Context, pool *pgxpool.Pool, name string, ex
 	// created_at comes from the column default, i.e. the database clock — the same
 	// clock the expiry is compared against, so a skewed application host cannot
 	// mint a key that is already expired or that outlives what it was promised.
+	//
+	// The WHERE is the second half of that: the route rejects a past expires_at
+	// against the *process* clock, which is the right place for a friendly 400 but
+	// cannot be authoritative. An instant a few milliseconds ahead passes that
+	// check and can still lapse before this statement runs — a skewed host makes it
+	// systematic rather than unlucky — and the row would be born already refused by
+	// authenticate, having answered 200 with a key in it. Deciding on the database
+	// clock costs nothing here: no row is written, and the caller turns the missing
+	// row back into the same 400. ErrNoRows is therefore not an impossible state,
+	// which is why it is named rather than folded into err.
 	row := pool.QueryRow(ctx,
 		`INSERT INTO api_keys (id, name, key_hash, partial_key_hint, created_by, expires_at)
-		 VALUES ($1, $2, $3, $4, $5, $6)
+		 SELECT $1, $2, $3, $4, $5, $6::timestamptz
+		  WHERE $6::timestamptz IS NULL OR $6::timestamptz > now()
 		 RETURNING `+managementKeyColumns,
 		domain.NewID(domain.PrefixAPIKey).String(), name, hashKey(key), partialKeyHint(key),
 		createdBy, expiresAt)
 	k, err := scanManagementKey(row)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "", ManagementKey{}, errExpiryLapsed
+	}
 	if err != nil {
 		return "", ManagementKey{}, err
 	}
 	return key, k, nil
 }
+
+// errExpiryLapsed reports that the requested expiry was still in the future when
+// the route validated it and no longer was when the row would have been written.
+var errExpiryLapsed = errors.New("api: requested expires_at lapsed before the key was written")
 
 // ListManagementKeys returns every management key, newest first.
 //

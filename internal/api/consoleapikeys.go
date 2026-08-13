@@ -147,6 +147,12 @@ func (s *server) createAPIKey(r *http.Request) (any, error) {
 	// authenticated on both lanes, so it is never empty — and it must not be, since
 	// a NULL issuer is what marks a row env-var-managed.
 	key, row, err := IssueManagementKey(r.Context(), s.pool, *name, expiresAt, principalFrom(r.Context()))
+	// The expiry passed the process-clock check above and had lapsed by the time
+	// the database decided. Same answer as the check itself gives: this is the
+	// caller's timestamp being too close to now, not a server fault.
+	if errors.Is(err, errExpiryLapsed) {
+		return nil, errInvalid("expires_at must be in the future")
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -217,13 +223,28 @@ func (s *server) updateAPIKey(r *http.Request) (any, error) {
 	defer func() { _ = tx.Rollback(ctx) }()
 
 	var createdBy *string
+	var current string
 	err = tx.QueryRow(ctx,
-		`SELECT created_by FROM api_keys WHERE id = $1 FOR UPDATE`, keyID).Scan(&createdBy)
+		`SELECT created_by, status FROM api_keys WHERE id = $1 FOR UPDATE`, keyID).Scan(&createdBy, &current)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, errNotFound("api key %s not found", keyID)
 	}
 	if err != nil {
 		return nil, err
+	}
+	// Archived is terminal. Nothing in the settable enum says so — the reference
+	// accepts all three values on this route and its behaviour on an archived row
+	// is unobserved (INFERRED in docs/DIVERGENCES.md) — but the alternative makes
+	// two of the three states mean the same thing. `inactive` exists to be undone;
+	// if `archived` can be undone too, then an operator who retired a key has no
+	// way to say so and no way to rely on it. The plaintext of an archived key may
+	// sit in a leaked backup or an old shell history, and resurrecting it needs
+	// nothing but one more admin request. Migration 0024 already states the rule
+	// this enforces: it maps every `revoked_at` row to archived precisely because
+	// "revocation was one-way, and archived is the one-way state".
+	if current == KeyStatusArchived {
+		return nil, errInvalid("api key %s is archived, which is permanent; use %q for a disable you can undo",
+			keyID, KeyStatusInactive)
 	}
 	// A key nobody issued is managed by CONTROLPLANE_API_KEY, and this route does
 	// not get to touch it. Two reasons, and the second is the load-bearing one.

@@ -371,6 +371,53 @@ func TestAPIKeyUpdateGuardsTheEnumAndTheEnvManagedRow(t *testing.T) {
 	}
 }
 
+// TestArchivingAnAPIKeyIsPermanent is what makes `archived` and `inactive` two
+// states rather than one spelling of the same one. A review found the route
+// accepting archived → active, which would have meant an operator who retired a
+// key had no way to say so and no way to rely on it — while the plaintext may
+// still sit in a leaked backup or an old shell history, one admin request away
+// from working again. Migration 0024 already asserted the rule ("revocation was
+// one-way, and archived is the one-way state"); this enforces it.
+func TestArchivingAnAPIKeyIsPermanent(t *testing.T) {
+	s := newTestServer(t)
+	ctx := context.Background()
+
+	created := issueAPIKey(t, s, map[string]any{"name": "retired"})
+	id, raw := created["id"].(string), created["raw_key"].(string)
+	if code, obj := s.do(http.MethodPost, consoleAPIKey(id),
+		map[string]any{"status": api.KeyStatusArchived}); code != http.StatusOK {
+		t.Fatalf("archive: %d %v", code, obj)
+	}
+
+	for _, patch := range []map[string]any{
+		{"status": api.KeyStatusActive},
+		{"status": api.KeyStatusInactive},
+		{"status": api.KeyStatusArchived},
+		{"name": "revived"},
+	} {
+		status, obj := s.do(http.MethodPost, consoleAPIKey(id), patch)
+		if status != http.StatusBadRequest {
+			t.Errorf("patch %v on an archived key: %d %v, want 400", patch, status, obj)
+		} else if !strings.Contains(errMessage(obj), api.KeyStatusInactive) {
+			t.Errorf("the refusal %q does not point at the reversible state", errMessage(obj))
+		}
+	}
+
+	// The key stayed dead, and the row stayed archived.
+	res := s.doRaw(http.MethodGet, "/v1/agents", nil, map[string]string{"x-api-key": raw})
+	res.Body.Close()
+	if res.StatusCode != http.StatusUnauthorized {
+		t.Errorf("an archived key authenticates: %d", res.StatusCode)
+	}
+	var stored string
+	if err := s.pool.QueryRow(ctx, `SELECT status FROM api_keys WHERE id = $1`, id).Scan(&stored); err != nil {
+		t.Fatalf("read status: %v", err)
+	}
+	if stored != api.KeyStatusArchived {
+		t.Errorf("stored status = %q after four refused patches", stored)
+	}
+}
+
 // TestAPIKeyNamesNeedNotBeUnique pins the finding with the sharpest consequence
 // for us: the reference created two live keys named alike, both 200, which is why
 // migration 0024 narrowed api_keys_one_live rather than keeping it.
@@ -409,19 +456,46 @@ func TestAPIKeyRoutesRejectUnknownScopesAndIDs(t *testing.T) {
 		})
 	}
 
-	for name, keyID := range map[string]string{
-		"wrong prefix":  "envkey_" + strings.Repeat("a", 24),
-		"not an id":     "../../etc/passwd",
-		"unknown id":    "apikey_" + strings.Repeat("a", 24),
-		"empty segment": "",
+	// Each case names the status it must produce, not merely "not 200". The whole
+	// point of validating an id at the edge is that an unstorable byte becomes a
+	// 404 instead of binding into a query as a 500 — an assertion that accepted any
+	// non-200 would pass on exactly the failure it exists to catch.
+	for name, tc := range map[string]struct {
+		keyID string
+		want  int
+	}{
+		// A well-formed id of the wrong family, and a well-formed id of the right
+		// family that names nothing, are the same answer: this route cannot confirm
+		// that an id exists somewhere else.
+		"wrong prefix": {"envkey_" + strings.Repeat("a", 24), http.StatusNotFound},
+		"unknown id":   {"apikey_" + strings.Repeat("a", 24), http.StatusNotFound},
+		"bad alphabet": {"apikey_" + strings.Repeat("!", 24), http.StatusNotFound},
+		// Bytes Postgres cannot store in a text column — the reason the shape check
+		// runs before the id reaches a query at all. They are written
+		// percent-encoded because net/url refuses to build a URL containing a raw
+		// control character, so a literal NUL never leaves the client; encoding is
+		// also how one would actually arrive, since ServeMux decodes each segment
+		// before PathValue sees it.
+		"NUL byte":      {"apikey_%00" + strings.Repeat("a", 23), http.StatusNotFound},
+		"invalid UTF-8": {"apikey_%ff" + strings.Repeat("a", 23), http.StatusNotFound},
 	} {
 		t.Run(name, func(t *testing.T) {
-			status, obj := s.do(http.MethodPost, consoleAPIKey(keyID), map[string]any{"status": "active"})
-			if status == http.StatusOK {
-				t.Errorf("update reached a handler for %q: %v", keyID, obj)
+			status, obj := s.do(http.MethodPost, consoleAPIKey(tc.keyID), map[string]any{"status": "active"})
+			if status != tc.want {
+				t.Errorf("update with %q: status %d, want %d (body %v)", tc.keyID, status, tc.want, obj)
 			}
 		})
 	}
+
+	// A traversal never reaches the handler at all — net/http normalises the path
+	// before matching — so the guarantee here is that it does not resolve to this
+	// route, and specifically that it is not a server error.
+	t.Run("path traversal", func(t *testing.T) {
+		status, obj := s.do(http.MethodPost, consoleAPIKey("../../etc/passwd"), map[string]any{"status": "active"})
+		if status == http.StatusOK || status >= http.StatusInternalServerError {
+			t.Errorf("traversal: status %d (body %v)", status, obj)
+		}
+	})
 
 	// The real id under the wrong scope is refused by the scope, not by the id.
 	status, _ := s.do(http.MethodPost,

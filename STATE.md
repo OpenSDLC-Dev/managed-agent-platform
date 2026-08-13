@@ -31,8 +31,8 @@ live on 2026-08-13. Three slices.
 - [x] Slice 1 — the lifecycle in the schema, no new surface: `status` replacing
       `revoked_at`, plus `expires_at`, `partial_key_hint`, `created_by`, and the
       one-live index narrowed to the rows nobody issued ([#385](https://github.com/OpenSDLC-Dev/managed-agent-platform/pull/385)).
-- [x] Slice 2 — the console surface: issue (the resource plus `raw_key`), list (bare
-      array, archived rows included), update status and name. Admin-gated, with the
-      four DIVERGENCES entries ([#388](https://github.com/OpenSDLC-Dev/managed-agent-platform/pull/388)).
+- [x] Slice 2 — the console surface: issue (resource plus `raw_key`), list (bare
+      array, archived rows included), update status and name. Admin-gated, five
+      CONFIRMED and three INFERRED DIVERGENCES entries ([#388](https://github.com/OpenSDLC-Dev/managed-agent-platform/pull/388)).
 - [ ] Slice 3 — DIVERGENCES entries, a management-key section in
       docs/self-hosted-security.md, and an acceptance run.

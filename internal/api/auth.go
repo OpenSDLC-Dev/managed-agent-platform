@@ -210,8 +210,10 @@ func requireAPIKey(pool *pgxpool.Pool, next http.Handler) http.Handler {
 
 // principalFrom is the audit answer to "who made this request" — the value
 // sessions.created_by records. It resolves either lane's principal: the api key's
-// name on the machine lane, and the human's `principal_` id on the identity lane
-// (plan 31 slice 2, #56).
+// row id on the machine lane — `authenticate` returns `id`, and the comment here
+// said "name" until plan 32 gave the console a resource that renders the value as
+// an actor and made the difference visible — and the human's `principal_` id on
+// the identity lane (plan 31 slice 2, #56).
 //
 // Reading only ctxKeyPrincipal was the pre-plan-31 shape, when a machine key was
 // the only thing that could reach a mutation. Left that way, the moment slice 3
