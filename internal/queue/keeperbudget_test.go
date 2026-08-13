@@ -191,14 +191,31 @@ func TestASlowRenewalDoesNotShortenTheNextOnesBudget(t *testing.T) {
 // budget: once subtracting the elapsed time can leave nothing, a tick that late
 // must report the lease lost rather than issue an Extend that cannot land.
 //
-// A microsecond lease makes that the first tick's situation on any real host —
-// no timer delivers a 333ns interval inside a microsecond — without introducing
-// a fake clock for one branch. The pool is the assertion: it is closed before the
-// keeper ever sees it, so an Extend issued here could not reach a database and
-// would fail with the pool's own error instead of ErrLeaseLost. That keeps the
-// two outcomes distinguishable, and keeps the failure a failure — a nil pool
-// asserts the same thing by panicking, which would take the whole test binary
-// down with it if the timing assumption above ever did not hold.
+// A one-nanosecond lease makes that the first tick's situation, and the margin is
+// measured rather than assumed. The keeper stamps its anchor before starting the
+// goroutine, so what this branch races is anchor → goroutine start → ticker arm →
+// first receive; timing exactly that path over 2000 samples on a dev host gives a
+// floor of 414ns and a median of 480ns. A nanosecond lease clears the floor by
+// ~400x.
+//
+// The microsecond lease this test used first did not clear it at all: 1µs sits
+// *above* a 414ns floor, so the branch this test exists to pin could be skipped
+// and the assertion would fail on the pool error instead. A reviewer called that
+// thin and the measurement agreed — worth recording, because 1µs reads like the
+// more conservative number and is the one to reach for again.
+//
+// The nanosecond TTL also runs through the sub-3ns fallback, which ticks at the
+// TTL itself rather than panicking time.NewTicker.
+//
+// Genuinely deterministic would mean injecting a clock into LeaseKeeper for one
+// defensive branch, which is the sort of single-use abstraction this repo says
+// not to add; the residual is stated rather than papered over.
+//
+// The pool is the assertion: it is closed before the keeper ever sees it, so an
+// Extend issued here could not reach a database and fails with an error that is
+// not ErrLeaseLost. That keeps the two outcomes distinguishable, and keeps a
+// failure a failure — a nil pool asserts the same thing by panicking, which would
+// take the whole test binary down with it.
 func TestATickAfterAWholeLeaseNeverDialsTheDatabase(t *testing.T) {
 	unusable, err := pgxpool.New(context.Background(), "postgres://nobody@127.0.0.1:1/none")
 	if err != nil {
@@ -209,7 +226,7 @@ func TestATickAfterAWholeLeaseNeverDialsTheDatabase(t *testing.T) {
 	q := queue.New(unusable)
 	item := &queue.Item{ID: domain.ID("work_starvedkeeper"), Lease: time.Now()}
 
-	kctx, keeper := q.KeepLease(context.Background(), item, time.Microsecond)
+	kctx, keeper := q.KeepLease(context.Background(), item, time.Nanosecond)
 	select {
 	case <-kctx.Done():
 	case <-time.After(5 * time.Second):
