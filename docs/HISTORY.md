@@ -38,6 +38,94 @@ new directory and in-repo citations re-pointed in the moving PR (plan
 
 ---
 
+## A refutation of #392 that both reviewers refuted, 2026-08-14
+
+A **review-hardening record**: the first version of the #392 fix argued the issue had no
+defect behind it, and shipped no production change. Both reviewers independently proved
+that argument wrong, and the PR became a real fix. The defect and its repair are the
+changelog entry; what belongs here is how a confidently-argued refutation survived its
+author and died at review.
+
+**The claim.** [#392](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/392)
+was filed — by this session — on one failure of `TestLongTimeToFirstTokenKeepsLease` under
+full-suite load, reasoning that a lease genuinely taken by another brain and an extension
+whose round trip merely did not finish are indistinguishable at that call site. The first
+attempt at the issue rejected it on the keeper's own arithmetic: renewals tick at `ttl/3`
+and each is bounded at `ttl - ttl/3`, so an attempt that exhausts its budget began a third
+of a lease in and ran to the end of it — *"by the time an extend times out, the lease
+really has lapsed"*. The keeper's existing comment said the same, which made the claim feel
+confirmed rather than merely repeated. The proposed change was to widen the test's margin
+and record the keeper as correct.
+
+**Why it was wrong.** The arithmetic holds only for a punctual tick. A `time.Ticker`
+buffers one tick and drops the rest, so a renewal that outlasts an interval is followed by
+a tick *already waiting*, and the next attempt starts at once with a budget computed as
+though it had not — landing its deadline inside the lease the slow renewal had just bought.
+The invariant fails on every tick after the first slow one, which is exactly the loaded-host
+condition the issue was filed under.
+
+**How it was established, by three independent routes.** The Codex reviewer produced the
+counterexample by construction (High). The verifier, dispatched against the same commit and
+knowing nothing of that finding, reached FAIL by two further routes: a simulation of the
+loop, and the real keeper against real Postgres, failing 3/3 once the contention window was
+widened. This session then reproduced it with queued `SELECT … FOR UPDATE` row locks, which
+fails against `main`'s keeper with the issue's own error string and passes with the fix.
+
+**A negative result that mattered.** The first version of that reproduction passed 6/6
+against the *buggy* keeper — the second lock raced the second renewal instead of queueing
+behind it, so the bug had a window to escape through. A reproduction is only evidence once
+it has been made to fail against the unfixed code. The version that replaced it bought its
+ordering with sleeps, and Codex pointed out the remaining hole: on a slow enough host the
+intended queue never forms, and the test does not fail — it silently stops testing. Both
+orderings are now *observed* before the next step runs, a lock only once its goroutine
+reports the grant and a queued renewal only once Postgres reports a backend waiting on a
+lock, leaving sleeps to decide how long a lock is held and never who gets the row.
+
+**A second refutation, this one the reviewer's.** Attacking the fix, Codex called the
+anchor wrong: `bought` is stamped when `Extend` *returns*, later than the instant the
+database bought the lease, so a budget can outlast the real lease. The observation is
+exactly right; the conclusion drawn from it — anchor before the call instead — is
+backwards, because the two directions are not symmetric. Anchoring late overstates the
+lease, and an attempt that runs past an expiry it cannot see still cannot commit the turn:
+settlement happens only once `Close` reports the keeper healthy, and `Complete`/`Requeue`
+carry the lease as proof. (The overdue `Extend` itself may succeed — its guard matches the
+timestamp it is replacing, not the wall clock, so an item nobody reclaimed is simply
+re-extended. The first draft of this paragraph said otherwise, and the same reviewer caught
+it.) Anchoring early understates it, and an
+attempt then times out while the lease is still live — which is #392 itself. Applying the
+suggestion and running the reproduction fails it 2/2 with *"the keeper abandoned a lease it
+still held"*, the same signature `main` produces. It is recorded here because the code now
+reads like an oversight and will attract the same correction again.
+
+**What was not done.** The original 250ms flake was never reproduced (CPU saturation, six
+runs; database contention, eight runs). The test's margin was therefore left exactly as it
+was: the diagnosis that justified widening it — a merely tight test over a correct keeper —
+is the diagnosis that turned out to be false, and widening a test after fixing the
+mechanism it was pointing at only costs sensitivity. If it recurs, that is new evidence.
+
+**What the fix does not cover, and the third reviewer who said so.** The GitHub Codex bot,
+reviewing the same commit, raised a *different* mechanism: an `Extend` whose `UPDATE`
+commits while the client's deadline fires renews a lease the caller never observes, so a
+timeout still discards a turn whose row is in fact leased. It is right, and the measured
+budget does not close it — the budget makes a timeout mean "this attempt outlived the lease
+it was racing", which is safe, not "the item is free", which would be certain. Split out as
+[#400](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/400) rather than
+stretched into this PR: it is unobserved, and closing it means changing the keeper's
+ownership protocol, not its arithmetic.
+
+**The retry remains rejected, for a narrower reason than first written.** An extend that
+fails *fast* — an exhausted pool, a reset connection — likewise returns while the lease is
+live, and the keeper still kills the turn. The first draft called a naive retry *worse*
+than nothing; the verifier corrected this, and it is right: `internal/brain/brain.go`
+treats every keeper error identically, so the outcome would be unchanged, not worse. The
+real constraint is that `Extend` identifies the claimant by the lease timestamp it replaces
+(`WHERE … lease_expires_at = $2`) and updates `item.Lease` only on success, so a retry
+after an ambiguous completion would present a stale timestamp and be told, wrongly, that
+the lease was lost. Any future retry must resynchronise the lease value first, and may only
+do so while the current lease is still live — the requirement #400 inherits.
+
+---
+
 ## The docker wrapper's no-state rule, narrowed rather than kept (#390), 2026-08-13
 
 A decision this repo made deliberately, recorded as a property in
