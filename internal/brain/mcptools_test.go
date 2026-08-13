@@ -121,6 +121,34 @@ func TestAnUnusableMCPToolNameCostsOnlyItsOwnTool(t *testing.T) {
 	}
 }
 
+// A note is written per tool and per turn, and neither half of an MCP tool's
+// name is capped where it is stored: a server name rides the agent spec, which
+// the API bounds at megabytes rather than at the reference's documented 255. An
+// uncapped note multiplies that into the log for as long as the session lives.
+func TestANoteQuotesABoundedName(t *testing.T) {
+	huge := strings.Repeat("s", 100_000)
+	agent := domain.ResolvedAgent{AgentSpec: domain.AgentSpec{Tools: []json.RawMessage{
+		json.RawMessage(`{"type":"mcp_toolset","mcp_server_name":"` + huge + `"}`),
+	}}}
+	cat := mcpCatalog{huge: listingOf(t, mcpTool("search"), mcpTool("fetch"))}
+
+	defs, _, notes, err := resolveTools(agent, cat)
+	if err != nil {
+		t.Fatalf("resolveTools: %v", err)
+	}
+	if len(defs) != 0 {
+		t.Fatalf("offered %d tools under a name no request can carry", len(defs))
+	}
+	if len(notes) != 2 {
+		t.Fatalf("notes = %d, want one per dropped tool", len(notes))
+	}
+	for _, n := range notes {
+		if len(n) > 4*maxNoteLabel {
+			t.Errorf("a note is %d bytes, want the quoted names bounded", len(n))
+		}
+	}
+}
+
 // A tool name is one namespace. A custom tool the agent's author named
 // mcp__docs__search wins it — the author's own definition is not displaced by a
 // third party's listing — and the MCP tool is dropped rather than sent as a

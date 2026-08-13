@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"unicode/utf8"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/events"
@@ -66,6 +67,25 @@ const (
 
 func mcpModelName(server, tool string) string {
 	return mcpNamePrefix + server + mcpNameSeparator + tool
+}
+
+// maxNoteLabel bounds a name a note quotes. Nothing caps either half of an MCP
+// tool's name where it is stored — a server name rides the agent spec, bounded
+// only by the API's 4 MiB body, and the reference's documented 1–255 is not
+// enforced (docs/DIVERGENCES.md #66) — while a note is written per tool and per
+// turn, so an uncapped one multiplies into the log for as long as the session
+// lives. A name past this is a name being used as a payload.
+const maxNoteLabel = 256
+
+func noteLabel(s string) string {
+	if len(s) <= maxNoteLabel {
+		return s
+	}
+	cut := maxNoteLabel
+	for cut > 0 && !utf8.RuneStart(s[cut]) {
+		cut--
+	}
+	return s[:cut] + "[truncated]"
 }
 
 // offerable reports whether a name can be sent as a tool definition. A name
@@ -165,7 +185,8 @@ func resolveTools(agent domain.ResolvedAgent, cat mcpCatalog) ([]json.RawMessage
 		stored, ok := cat[probe.Server]
 		if !ok {
 			notes = append(notes, fmt.Sprintf(
-				"no tools were offered from MCP server %q: it has no listing this turn", probe.Server))
+				"no tools were offered from MCP server %q: it has no listing this turn",
+				noteLabel(probe.Server)))
 			continue
 		}
 		var listing []toolset.MCPTool
@@ -178,20 +199,22 @@ func resolveTools(agent domain.ResolvedAgent, cat mcpCatalog) ([]json.RawMessage
 		}
 		for _, name := range unknown {
 			notes = append(notes, fmt.Sprintf(
-				"MCP server %q does not report a tool named %q, which its toolset configures", probe.Server, name))
+				"MCP server %q does not report a tool named %q, which its toolset configures",
+				noteLabel(probe.Server), noteLabel(name)))
 		}
 		for _, r := range resolved {
 			name := mcpModelName(probe.Server, r.Name)
 			if !offerable(name) {
 				notes = append(notes, fmt.Sprintf(
-					"MCP tool %q on server %q was not offered: %q is not a name a model request can carry",
-					r.Name, probe.Server, name))
+					"MCP tool %q on server %q was not offered: together they do not compose a name "+
+						"a model request can carry (letters, digits, underscore and hyphen, at most %d)",
+					noteLabel(r.Name), noteLabel(probe.Server), maxModelToolName))
 				continue
 			}
 			if _, taken := class[name]; taken {
 				notes = append(notes, fmt.Sprintf(
 					"MCP tool %q on server %q was not offered: another tool is already named %q",
-					r.Name, probe.Server, name))
+					noteLabel(r.Name), noteLabel(probe.Server), noteLabel(name)))
 				continue
 			}
 			def, err := json.Marshal(map[string]any{
