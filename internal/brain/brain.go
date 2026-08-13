@@ -238,6 +238,32 @@ func (b *Brain) runTurn(ctx context.Context, item *queue.Item, claimedAt time.Ti
 	if active, ok := events.ActiveOutcome(evals); ok && active.Result == domain.OutcomeResultEvaluating {
 		return b.runGrading(ctx, item, agent, evals)
 	}
+
+	// An MCP server the agent declares and this session has never reached has
+	// tools nobody can name yet, so the turn is not assembled at all: it hands
+	// the item back as an mcp_exec and the discovery driver chains the turn once
+	// the listing is in. Suspending is what makes the tools *appear* rather than
+	// silently miss the first turn — and it costs one round trip per session,
+	// since only a server with no row at all gets here.
+	//
+	// It sits above the outcome flip below because a suspended turn is a turn
+	// that never begins: flipping first would record that the agent started work
+	// on the outcome and then produce nothing at all until a listing arrives.
+	declared, err := declaredMCPServers(agent)
+	if err != nil {
+		// Deterministic, exactly as the agent decode above is: this is a spec
+		// this platform stored, and re-reading it fails the same way on every
+		// retry, so a lease-expiry loop would grind forever telling nobody.
+		return b.failTurn(ctx, sid, item, nil, 0, fmt.Sprintf("session mcp server state is corrupt: %v", err))
+	}
+	cat, undiscovered, err := b.loadMCPCatalog(ctx, sid, declared)
+	if err != nil {
+		return fmt.Errorf("mcp catalog: %w", err)
+	}
+	if len(undiscovered) > 0 {
+		return b.suspendForDiscovery(ctx, sid, item, undiscovered)
+	}
+
 	if active, ok := events.ActiveOutcome(evals); ok && active.Result == domain.OutcomeResultPending {
 		// The agent begins work now: the entry leaves pending for running
 		// (the SDK: "pending" before the agent begins work, "running" while
@@ -261,20 +287,6 @@ func (b *Brain) runTurn(ctx context.Context, item *queue.Item, claimedAt time.Ti
 		}); err != nil {
 			return fmt.Errorf("outcome running flip: %w", err)
 		}
-	}
-
-	// An MCP server the agent declares and this session has never reached has
-	// tools nobody can name yet, so the turn is not assembled at all: it hands
-	// the item back as an mcp_exec and the discovery driver chains the turn once
-	// the listing is in. Suspending is what makes the tools *appear* rather than
-	// silently miss the first turn — and it costs one round trip per session,
-	// since only a server with no row at all gets here.
-	cat, undiscovered, err := b.loadMCPCatalog(ctx, sid, agent)
-	if err != nil {
-		return fmt.Errorf("mcp catalog: %w", err)
-	}
-	if len(undiscovered) > 0 {
-		return b.suspendForDiscovery(ctx, sid, item, undiscovered)
 	}
 
 	history, err := b.log.List(ctx, sid, events.ListQuery{})
@@ -312,7 +324,7 @@ func (b *Brain) runTurn(ctx context.Context, item *queue.Item, claimedAt time.Ti
 		return b.failTurn(ctx, sid, item, nil, 0, fmt.Sprintf("resolve tools: %v", err))
 	}
 	logToolNotes(ctx, sid, notes)
-	req, watermark, err := buildRequest(agent, toolDefs, history, skillsBlock, filesBlock, reposBlock)
+	req, watermark, err := buildRequest(agent.System, toolDefs, history, skillsBlock, filesBlock, reposBlock)
 	if err != nil {
 		return b.failTurn(ctx, sid, item, nil, 0, fmt.Sprintf("replay: %v", err))
 	}
@@ -553,11 +565,25 @@ func turnEvents(turn *turnResult, class map[string]toolClass) (batch []events.Ne
 // unknown tool. The same precedence is spelled out at the confirmation resume
 // (internal/api/events.go) and in each driver's own settlement.
 func escalate(have, want queue.Kind) queue.Kind {
-	rank := map[queue.Kind]int{queue.ToolExec: 1, queue.WebExec: 2, queue.MCPExec: 3}
-	if rank[want] > rank[have] {
+	if execRank(want) > execRank(have) {
 		return want
 	}
 	return have
+}
+
+// execRank is that order. Anything else ranks below every kind named here,
+// including the zero Kind that stands for "this turn has enqueued nothing yet".
+func execRank(k queue.Kind) int {
+	switch k {
+	case queue.MCPExec:
+		return 3
+	case queue.WebExec:
+		return 2
+	case queue.ToolExec:
+		return 1
+	default:
+		return 0
+	}
 }
 
 // settleTurn commits the turn: the emitted events (message, tool intents),

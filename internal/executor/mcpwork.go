@@ -129,19 +129,10 @@ func (e *Executor) processMCP(ctx context.Context, item *queue.Item) (err error)
 	return e.settleMCP(ctx, item, rows)
 }
 
-// undiscoveredServers narrows the agent's declared servers to those this
-// session still needs reached: no catalog row, a row that failed, or a row whose
-// url no longer matches what the agent declares.
-//
-// That last case is why the url is compared rather than only the name. A
-// mid-session agent patch may repoint a server (mcp_servers is one of two
-// mid-session-mutable agent fields) and the patch deletes the rows it
-// invalidates in its own transaction — but a listing attributed to the wrong
-// endpoint is the kind of error that would surface as a model calling tools
-// that do not exist, so the driver does not depend on that delete having
-// happened. An entry missing either field is skipped: there is nothing to dial
-// and nothing to key a row on.
-func (e *Executor) undiscoveredServers(ctx context.Context, sid domain.ID, declared []mcpServerRef) ([]mcpServerRef, error) {
+// readyEndpoints is the url each of this session's usable listings was read at,
+// by server name. It answers the one question both MCP drivers ask of the
+// catalog: which servers have a listing, and where it came from.
+func (e *Executor) readyEndpoints(ctx context.Context, sid domain.ID) (map[string]string, error) {
 	rows, err := e.pool.Query(ctx,
 		`SELECT server_name, url FROM mcp_catalogs WHERE session_id = $1 AND status = 'ready'`,
 		sid.String())
@@ -159,6 +150,26 @@ func (e *Executor) undiscoveredServers(ctx context.Context, sid domain.ID, decla
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("read mcp catalog: %w", err)
+	}
+	return ready, nil
+}
+
+// undiscoveredServers narrows the agent's declared servers to those this
+// session still needs reached: no catalog row, a row that failed, or a row whose
+// url no longer matches what the agent declares.
+//
+// That last case is why the url is compared rather than only the name. A
+// mid-session agent patch may repoint a server (mcp_servers is one of two
+// mid-session-mutable agent fields) and the patch deletes the rows it
+// invalidates in its own transaction — but a listing attributed to the wrong
+// endpoint is the kind of error that would surface as a model calling tools
+// that do not exist, so the driver does not depend on that delete having
+// happened. An entry missing either field is skipped: there is nothing to dial
+// and nothing to key a row on.
+func (e *Executor) undiscoveredServers(ctx context.Context, sid domain.ID, declared []mcpServerRef) ([]mcpServerRef, error) {
+	ready, err := e.readyEndpoints(ctx, sid)
+	if err != nil {
+		return nil, err
 	}
 
 	var out []mcpServerRef

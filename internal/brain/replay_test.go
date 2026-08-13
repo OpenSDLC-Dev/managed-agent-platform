@@ -61,7 +61,7 @@ func TestBuildRequestReplaysTheLog(t *testing.T) {
 		t.Fatalf("tools = %v, want %v", got, want)
 	}
 
-	req, watermark, err := buildRequest(agent, tools, history, "", "", "")
+	req, watermark, err := buildRequest(agent.System, tools, history, "", "", "")
 	if err != nil {
 		t.Fatalf("buildRequest: %v", err)
 	}
@@ -129,7 +129,7 @@ func TestBuildRequestReplaysTheLog(t *testing.T) {
 
 func TestBuildRequestCustomToolResultID(t *testing.T) {
 	agent := domain.ResolvedAgent{AgentSpec: domain.AgentSpec{Model: domain.Model{ID: "m"}}}
-	req, _, err := buildRequest(agent, nil, []domain.Event{
+	req, _, err := buildRequest(agent.System, nil, []domain.Event{
 		ev(1, domain.EventAgentCustomToolUse, `{"name":"x","input":{}}`),
 		ev(2, domain.EventUserCustomToolRes, `{"custom_tool_use_id":"sevt_abc","is_error":true}`),
 	}, "", "", "")
@@ -148,7 +148,7 @@ func TestBuildRequestEmptyToolInputDefaults(t *testing.T) {
 	// Absent and JSON-null inputs both replay as {} — a tool_use block's
 	// input must be an object on the wire.
 	for _, payload := range []string{`{"name":"noop"}`, `{"name":"noop","input":null}`} {
-		req, _, err := buildRequest(agent, nil, []domain.Event{
+		req, _, err := buildRequest(agent.System, nil, []domain.Event{
 			ev(1, domain.EventAgentToolUse, payload),
 		}, "", "", "")
 		if err != nil {
@@ -173,7 +173,7 @@ func TestBuildRequestRejectsMalformedEvents(t *testing.T) {
 		ev(1, domain.EventUserToolResult, `not json`),
 	}
 	for _, bad := range cases {
-		if _, _, err := buildRequest(agent, nil, []domain.Event{bad}, "", "", ""); err == nil {
+		if _, _, err := buildRequest(agent.System, nil, []domain.Event{bad}, "", "", ""); err == nil {
 			t.Errorf("%s with body %q accepted", bad.Type, bad.Body)
 		}
 	}
@@ -181,7 +181,7 @@ func TestBuildRequestRejectsMalformedEvents(t *testing.T) {
 	// The skills block is placed after the agent system prompt and before any
 	// runtime system.message text, joined with blank lines.
 	skilled := domain.ResolvedAgent{AgentSpec: domain.AgentSpec{Model: domain.Model{ID: "m"}, System: "base"}}
-	req, _, err := buildRequest(skilled, nil, []domain.Event{
+	req, _, err := buildRequest(skilled.System, nil, []domain.Event{
 		ev(1, domain.EventSystemMessage, `{"content":[{"type":"text","text":"steer"}]}`),
 	}, "SKILLS", "", "")
 	if err != nil {
@@ -192,7 +192,7 @@ func TestBuildRequestRejectsMalformedEvents(t *testing.T) {
 	}
 	// With no agent system prompt the block leads, still before runtime text.
 	bare := domain.ResolvedAgent{AgentSpec: domain.AgentSpec{Model: domain.Model{ID: "m"}}}
-	req, _, err = buildRequest(bare, nil, nil, "SKILLS", "", "")
+	req, _, err = buildRequest(bare.System, nil, nil, "SKILLS", "", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -205,7 +205,7 @@ func TestBuildRequestRejectsMalformedEvents(t *testing.T) {
 // skills block and before any runtime system.message text, all blank-joined.
 func TestBuildRequestFilesBlockPlacement(t *testing.T) {
 	agent := domain.ResolvedAgent{AgentSpec: domain.AgentSpec{Model: domain.Model{ID: "m"}, System: "base"}}
-	req, _, err := buildRequest(agent, nil, []domain.Event{
+	req, _, err := buildRequest(agent.System, nil, []domain.Event{
 		ev(1, domain.EventSystemMessage, `{"content":[{"type":"text","text":"steer"}]}`),
 	}, "SKILLS", "FILES", "")
 	if err != nil {
@@ -216,7 +216,7 @@ func TestBuildRequestFilesBlockPlacement(t *testing.T) {
 	}
 	// The files block leads when there is no agent prompt and no skills block.
 	bare := domain.ResolvedAgent{AgentSpec: domain.AgentSpec{Model: domain.Model{ID: "m"}}}
-	req, _, err = buildRequest(bare, nil, nil, "", "FILES", "")
+	req, _, err = buildRequest(bare.System, nil, nil, "", "FILES", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -235,7 +235,7 @@ func TestBuildRequestRendersDefineOutcome(t *testing.T) {
 			`{"description":"Build a DCF model","rubric":{"type":"text","content":"# Rubric"},"max_iterations":3,"outcome_id":"outc_1"}`),
 		ev(2, domain.EventSessionStatusRunning, `{}`),
 	}
-	req, watermark, err := buildRequest(agent, nil, history, "", "", "")
+	req, watermark, err := buildRequest(agent.System, nil, history, "", "", "")
 	if err != nil {
 		t.Fatalf("buildRequest: %v", err)
 	}
@@ -260,7 +260,7 @@ func TestBuildRequestRendersDefineOutcome(t *testing.T) {
 	// grader from the acceptance snapshot (slice 3), not the conversation.
 	history[0] = ev(1, domain.EventUserDefineOutcome,
 		`{"description":"Build it","rubric":{"type":"file","file_id":"file_1"},"max_iterations":3,"outcome_id":"outc_2"}`)
-	req, _, err = buildRequest(agent, nil, history, "", "", "")
+	req, _, err = buildRequest(agent.System, nil, history, "", "", "")
 	if err != nil {
 		t.Fatalf("buildRequest (file rubric): %v", err)
 	}

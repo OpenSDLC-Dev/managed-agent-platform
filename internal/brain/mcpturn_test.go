@@ -3,6 +3,7 @@ package brain_test
 import (
 	"context"
 	"encoding/json"
+	"slices"
 	"strings"
 	"testing"
 
@@ -212,10 +213,16 @@ func TestAFailedListingRunsTheTurnWithoutThatServer(t *testing.T) {
 	if n := len(h.provider.calls); n != 1 {
 		t.Fatalf("model requests = %d, want 1 (a failed listing must not suspend the turn)", n)
 	}
-	for _, name := range requestTools(t, h.provider.calls[0]) {
+	offered := requestTools(t, h.provider.calls[0])
+	for _, name := range offered {
 		if strings.HasPrefix(name, "mcp__") {
 			t.Errorf("offered %q from a server whose listing failed", name)
 		}
+	}
+	// The agent's own toolset still reaches the model: one server's failure costs
+	// that server's tools and nothing else.
+	if !slices.Contains(offered, "bash") {
+		t.Errorf("offered = %v, want the agent's built-in tools kept", offered)
 	}
 	if got := h.liveOf(t, queue.MCPExec); got != 0 {
 		t.Errorf("mcp_exec items = %d, want 0", got)
@@ -249,6 +256,60 @@ func TestAListingForAnotherEndpointIsNotUsed(t *testing.T) {
 	}
 	if got := h.liveOf(t, queue.MCPExec); got != 1 {
 		t.Errorf("mcp_exec items = %d, want 1", got)
+	}
+}
+
+// A turn that suspends for discovery never began, so the outcome it would work
+// toward stays pending. Flipping first would put "the agent begins work now" on
+// an entry that then produces nothing at all until a listing arrives — and on a
+// server that is slow or down, that is the state a reader of the session sees.
+func TestASuspendedTurnLeavesItsOutcomePending(t *testing.T) {
+	h := newHarness(t, [][]provider.Chunk{{textChunk(0, "unused"), done("end_turn", 3)}}, nil)
+	mcpAgent(t, h, `{"type":"mcp_toolset","mcp_server_name":"docs"}`)
+
+	h.wakeOutcome(t, "write the report", 3)
+	h.runOnce(t)
+
+	if n := len(h.provider.calls); n != 0 {
+		t.Fatalf("model requests = %d, want 0 (the turn should have suspended)", n)
+	}
+	evals := h.outcomes(t)
+	if len(evals) != 1 {
+		t.Fatalf("outcome entries = %d, want 1", len(evals))
+	}
+	if evals[0].Result != domain.OutcomeResultPending {
+		t.Errorf("outcome result = %q, want %q — no work has begun",
+			evals[0].Result, domain.OutcomeResultPending)
+	}
+}
+
+// A stored spec this platform cannot read back fails the same way on every
+// retry, so handing the error to the queue would reclaim-loop the turn forever
+// and tell nobody. It fails the turn visibly instead, exactly as a corrupt
+// resolved_agent does.
+func TestACorruptMCPServerSpecFailsTheTurn(t *testing.T) {
+	h := newHarness(t, [][]provider.Chunk{{textChunk(0, "unused"), done("end_turn", 3)}}, nil)
+	if _, err := h.pool.Exec(context.Background(),
+		`UPDATE sessions SET resolved_agent = jsonb_set(resolved_agent, '{mcp_servers}', '["not an object"]'::jsonb)
+		  WHERE id = $1`, h.sessionID.String()); err != nil {
+		t.Fatal(err)
+	}
+
+	h.wake(t, "search the docs")
+	h.runOnce(t)
+
+	if n := len(h.provider.calls); n != 0 {
+		t.Fatalf("model requests = %d, want 0", n)
+	}
+	errs := h.eventsOfType(t, domain.EventSessionError)
+	if len(errs) != 1 {
+		t.Fatalf("session.error count = %d, want 1 — a permanent failure must be said out loud", len(errs))
+	}
+	if got := h.status(t); got != "idle" {
+		t.Errorf("status = %q, want idle (the turn ended)", got)
+	}
+	if got := h.liveOf(t, queue.MCPExec); got != 0 {
+		t.Errorf("mcp_exec items = %d, want 0", got)
 	}
 }
 

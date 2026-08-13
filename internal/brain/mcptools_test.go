@@ -2,6 +2,7 @@ package brain
 
 import (
 	"encoding/json"
+	"regexp"
 	"strings"
 	"testing"
 	"unicode/utf8"
@@ -53,32 +54,55 @@ func hasNote(notes []string, substr string) bool {
 	return false
 }
 
-// The documented rule is ^[a-zA-Z0-9_-]{1,64}$, so both edges of it matter: a
-// bound one short refuses names the endpoint accepts, and the loss is silent —
-// a tool the agent declared simply never reaches the model.
-func TestOfferableIsTheDocumentedNameRule(t *testing.T) {
+// modelToolName is the documented rule, written out so this test pins it
+// literally rather than re-deriving whatever the brain happens to compose.
+var modelToolName = regexp.MustCompile(`^[a-zA-Z0-9_-]{1,64}$`)
+
+// Both edges of that rule matter. A bound one short refuses names the endpoint
+// accepts and the loss is silent — a tool the agent declared simply never
+// reaches the model — while a name one byte too long, or one byte outside the
+// class, costs the whole request and every tool in it, on every turn of a
+// session that replays.
+func TestAComposedMCPNameMatchesTheDocumentedRule(t *testing.T) {
+	// mcp__ and __ frame the pair, so the two names together may spend
+	// maxModelToolName less that frame.
+	frame := len(mcpNamePrefix) + len(mcpNameSeparator)
+	exact := strings.Repeat("t", maxModelToolName-frame-len("docs"))
+
 	cases := []struct {
-		name string
-		want bool
+		server, tool string
+		fits         bool
+		want         string
 	}{
-		{"", false},
-		{"a", true},
-		{strings.Repeat("n", 63), true},
-		{strings.Repeat("n", 64), true},
-		{strings.Repeat("n", 65), false},
-		{"mcp__docs__search", true},
-		{"Aa0_-", true},
-		{"search files", false},
-		{"search.files", false},
-		{"search/files", false},
-		{"séarch", false},
-		// Four bytes, one rune: a byte-counted bound must not read it as four
-		// characters, and the charset must refuse it whichever way it counts.
-		{"🔎", false},
+		{"docs", "search", true, "mcp__docs__search"},
+		{"docs", "Aa0_-", true, "mcp__docs__Aa0_-"},
+		// A listing entry with no name is not a tool, and nothing composes for it.
+		{"docs", "", false, ""},
+		{"docs", exact, true, "mcp__docs__" + exact},
+		{"docs", exact + "t", false, ""},
+		// Bytes outside the class are mangled rather than dropped: internal/mcp
+		// admits the SDK's own tool-name class, which includes '.', so a server
+		// publishing dotted names would otherwise offer nothing at all.
+		{"git.hub", "create.issue", true, "mcp__git_hub__create_issue"},
+		{"docs", "search files", true, "mcp__docs__search_files"},
+		// One rune, four bytes. The bound counts bytes and the class replaces
+		// bytes, so the two agree on what this name costs.
+		{"docs", "🔎", true, "mcp__docs__" + strings.Repeat("_", 4)},
 	}
 	for _, tc := range cases {
-		if got := offerable(tc.name); got != tc.want {
-			t.Errorf("offerable(%q) = %v, want %v", tc.name, got, tc.want)
+		if got := mcpNameFits(tc.server, tc.tool); got != tc.fits {
+			t.Errorf("mcpNameFits(%q, %q) = %v, want %v", tc.server, tc.tool, got, tc.fits)
+			continue
+		}
+		if !tc.fits {
+			continue
+		}
+		got := mcpModelName(tc.server, tc.tool)
+		if got != tc.want {
+			t.Errorf("mcpModelName(%q, %q) = %q, want %q", tc.server, tc.tool, got, tc.want)
+		}
+		if !modelToolName.MatchString(got) {
+			t.Errorf("mcpModelName(%q, %q) = %q, which the documented rule rejects", tc.server, tc.tool, got)
 		}
 	}
 }
@@ -148,11 +172,11 @@ func TestMCPToolsAreOfferedUnderAPrefixedName(t *testing.T) {
 // name and 128 of tool name both fit the MCP wire. A name the endpoint would
 // reject costs the whole request, every turn, on a log that keeps replaying it,
 // so the tool is dropped and the rest of the listing still reaches the model.
-func TestAnUnusableMCPToolNameCostsOnlyItsOwnTool(t *testing.T) {
+func TestAnOverlongMCPToolNameCostsOnlyItsOwnTool(t *testing.T) {
 	long := strings.Repeat("n", 64)
 	cat := mcpCatalog{"docs": listingOf(t,
-		mcpTool("search files"), // a space is outside the pinned class
-		mcpTool(long),           // mcp__docs__ + 64 is past the ceiling
+		mcpTool(long), // mcp__docs__ + 64 is past the ceiling
+		mcpTool("search files"),
 		mcpTool("fetch"),
 	)}
 	agent := domain.ResolvedAgent{AgentSpec: domain.AgentSpec{Tools: []json.RawMessage{
@@ -163,14 +187,115 @@ func TestAnUnusableMCPToolNameCostsOnlyItsOwnTool(t *testing.T) {
 	if err != nil {
 		t.Fatalf("resolveTools: %v", err)
 	}
-	if got := defNames(t, defs); !slicesEqual(got, []string{"mcp__docs__fetch"}) {
-		t.Fatalf("offered = %v, want only the usable name", got)
+	// The space is outside the class but the name still fits, so that tool is
+	// mangled into the request rather than lost with the overlong one.
+	want := []string{"mcp__docs__search_files", "mcp__docs__fetch"}
+	if got := defNames(t, defs); !slicesEqual(got, want) {
+		t.Fatalf("offered = %v, want %v", got, want)
+	}
+	if len(class) != 2 {
+		t.Errorf("class = %v, want only the offered tools", class)
+	}
+	if c := class["mcp__docs__search_files"]; c.tool != "search files" {
+		t.Errorf("class tool = %q, want the server's own name kept for the wire", c.tool)
+	}
+	if len(notes) != 1 || !hasNote(notes, long) {
+		t.Errorf("notes = %v, want only the overlong tool named", notes)
+	}
+}
+
+// Two names that mangle alike contest the one they compose to, exactly as two
+// that composed to it directly would: the mangling is what the model sees, and
+// a request cannot carry two definitions under one name.
+func TestTwoToolNamesThatSanitizeAlikeContestOneName(t *testing.T) {
+	cat := mcpCatalog{"docs": listingOf(t, mcpTool("find.files"), mcpTool("find files"))}
+	agent := domain.ResolvedAgent{AgentSpec: domain.AgentSpec{Tools: []json.RawMessage{
+		json.RawMessage(`{"type":"mcp_toolset","mcp_server_name":"docs"}`),
+	}}}
+
+	defs, class, notes, err := resolveTools(agent, cat)
+	if err != nil {
+		t.Fatalf("resolveTools: %v", err)
+	}
+	if got := defNames(t, defs); !slicesEqual(got, []string{"mcp__docs__find_files"}) {
+		t.Fatalf("offered = %v, want one definition", got)
+	}
+	if c := class["mcp__docs__find_files"]; c.tool != "find.files" {
+		t.Errorf("class tool = %q, want the first-listed name to hold it", c.tool)
+	}
+	if len(notes) != 1 || !hasNote(notes, "find files") {
+		t.Errorf("notes = %v, want the loser named", notes)
+	}
+}
+
+// Every skip is written down, but their number is not bounded by anything an
+// operator controls: one catalog row lists thousands of tools inside its own
+// cap, and a session replays the same listing on every turn. Past a handful the
+// count is the news and the names are not.
+func TestTheNotesOneTurnWritesAreBounded(t *testing.T) {
+	long := strings.Repeat("n", 64) // past the ceiling under any server name
+	var tools []toolset.MCPTool
+	for i := 0; i < maxToolNotes+4; i++ {
+		tools = append(tools, mcpTool(long+string(rune('a'+i))))
+	}
+	cat := mcpCatalog{"docs": listingOf(t, tools...)}
+	agent := domain.ResolvedAgent{AgentSpec: domain.AgentSpec{Tools: []json.RawMessage{
+		json.RawMessage(`{"type":"mcp_toolset","mcp_server_name":"docs"}`),
+	}}}
+
+	defs, _, notes, err := resolveTools(agent, cat)
+	if err != nil {
+		t.Fatalf("resolveTools: %v", err)
+	}
+	if len(defs) != 0 {
+		t.Fatalf("offered %d tools under names no request can carry", len(defs))
+	}
+	if len(notes) != maxToolNotes+1 {
+		t.Fatalf("notes = %d, want %d and one summary", len(notes), maxToolNotes)
+	}
+	if !strings.Contains(notes[len(notes)-1], "4 further declared tools") {
+		t.Errorf("last note = %q, want it to count the rest", notes[len(notes)-1])
+	}
+}
+
+// The per-server catalog cap bounds one listing; an agent may declare twenty.
+// What one request carries has to be bounded on its own, and by declaration
+// order, so which tools survive is the agent author's ordering and not a
+// server's.
+func TestOneRequestCarriesABoundedSetOfMCPDefinitions(t *testing.T) {
+	// A schema large enough that a handful of tools exhaust the budget.
+	fat := toolset.MCPTool{
+		Name:        "search",
+		InputSchema: json.RawMessage(`{"type":"object","description":"` + strings.Repeat("d", maxMCPToolBytes*3/4) + `"}`),
+	}
+	second := fat
+	second.Name = "fetch"
+	third := fat
+	third.Name = "list"
+	cat := mcpCatalog{"docs": listingOf(t, fat, second, third)}
+	agent := domain.ResolvedAgent{AgentSpec: domain.AgentSpec{Tools: []json.RawMessage{
+		json.RawMessage(`{"type":"mcp_toolset","mcp_server_name":"docs"}`),
+	}}}
+
+	defs, class, notes, err := resolveTools(agent, cat)
+	if err != nil {
+		t.Fatalf("resolveTools: %v", err)
+	}
+	if got := defNames(t, defs); !slicesEqual(got, []string{"mcp__docs__search"}) {
+		t.Fatalf("offered = %v, want the budget to stop after the first", got)
 	}
 	if len(class) != 1 {
-		t.Errorf("class = %v, want only the offered tool", class)
+		t.Errorf("class = %v, want a dropped tool to be uncallable too", class)
 	}
-	if !hasNote(notes, "search files") || !hasNote(notes, long) {
-		t.Errorf("notes = %v, want both skipped tools named", notes)
+	spent := 0
+	for _, d := range defs {
+		spent += len(d)
+	}
+	if spent > maxMCPToolBytes {
+		t.Errorf("offered %d bytes of definitions, want at most %d", spent, maxMCPToolBytes)
+	}
+	if len(notes) != 1 || !hasNote(notes, "2 MCP tools were not offered") {
+		t.Errorf("notes = %v, want the dropped tools counted", notes)
 	}
 }
 

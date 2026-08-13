@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
-	"unicode/utf8"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/events"
@@ -65,8 +64,57 @@ const (
 	mcpToolsetType   = "mcp_toolset"
 )
 
+// mcpNameFits reports whether a server and a tool name compose into a name a
+// model request can carry — and answers before anything is composed. A name
+// outside the pinned shape is not one tool's problem: the endpoint rejects the
+// whole request, so it costs every tool in it, every turn, on a log that keeps
+// replaying the same agent.
+//
+// The length is settled first because neither half is bounded where it is
+// stored: a server name rides the agent spec, bounded only by the API's 4 MiB
+// body, and a listing inside one catalog row can hold thousands of tools, so
+// composing first would allocate a name per tool only to throw it away.
+func mcpNameFits(server, tool string) bool {
+	if tool == "" {
+		return false
+	}
+	return len(mcpNamePrefix)+len(server)+len(mcpNameSeparator)+len(tool) <= maxModelToolName
+}
+
+// mcpModelName composes the name an MCP tool is offered to the model under. A
+// caller deciding whether to offer one asks mcpNameFits first; replay composes
+// unconditionally, because the assistant block it rebuilds has to name the tool
+// that call was committed under.
+//
+// Bytes outside the documented class become '_', one for one, so the length
+// mcpNameFits settled is the length produced. Mangling rather than dropping is
+// what keeps a whole server's tools from vanishing over a naming convention:
+// internal/mcp admits the SDK's own tool-name class, which includes '.', so a
+// server publishing `github.create_issue` would otherwise offer nothing at all.
+// The model's name is not the wire's — agent.mcp_tool_use carries the server and
+// the bare tool in two fields of its own, and the class map keeps the pair — so
+// a mangled model-facing name costs nothing a reader of the log can see, while
+// two tools that sanitize to one name contest it exactly as two that composed to
+// one do.
 func mcpModelName(server, tool string) string {
-	return mcpNamePrefix + server + mcpNameSeparator + tool
+	b := make([]byte, 0, len(mcpNamePrefix)+len(server)+len(mcpNameSeparator)+len(tool))
+	b = append(b, mcpNamePrefix...)
+	b = appendModelName(b, server)
+	b = append(b, mcpNameSeparator...)
+	b = appendModelName(b, tool)
+	return string(b)
+}
+
+func appendModelName(b []byte, s string) []byte {
+	for i := 0; i < len(s); i++ {
+		switch c := s[i]; {
+		case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z', c >= '0' && c <= '9', c == '_', c == '-':
+			b = append(b, c)
+		default:
+			b = append(b, '_')
+		}
+	}
+	return b
 }
 
 // maxNoteLabel bounds a name a note quotes. Nothing caps either half of an MCP
@@ -81,30 +129,48 @@ func noteLabel(s string) string {
 	if len(s) <= maxNoteLabel {
 		return s
 	}
-	cut := maxNoteLabel
-	for cut > 0 && !utf8.RuneStart(s[cut]) {
-		cut--
-	}
-	return s[:cut] + "[truncated]"
+	return toolset.TruncateRunes(s, maxNoteLabel) + "[truncated]"
 }
 
-// offerable reports whether a name can be sent as a tool definition. A name
-// outside the pinned shape is not one tool's problem: the endpoint rejects the
-// request, so it costs every tool in it, every turn, on a log that keeps
-// replaying the same agent.
-func offerable(name string) bool {
-	if name == "" || len(name) > maxModelToolName {
-		return false
-	}
-	for _, r := range name {
-		switch {
-		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '_', r == '-':
-		default:
-			return false
-		}
-	}
-	return true
+// maxToolNotes bounds how many of a turn's skips are written down. Each note is
+// capped on its own, but their number is not: a catalog row holds thousands of
+// tools inside its own 256 KiB, a configs[] array is bounded only by the API's
+// body limit, and every entry of either can be a skip — on every turn, for as
+// long as the session lives. Past a handful the count is the news and the names
+// are not, so the rest are summarized in one line.
+const maxToolNotes = 16
+
+type toolNotes struct {
+	lines   []string
+	dropped int
 }
+
+func (n *toolNotes) add(format string, args ...any) {
+	if len(n.lines) >= maxToolNotes {
+		n.dropped++
+		return
+	}
+	n.lines = append(n.lines, fmt.Sprintf(format, args...))
+}
+
+func (n *toolNotes) render() []string {
+	if n.dropped == 0 {
+		return n.lines
+	}
+	return append(n.lines, fmt.Sprintf(
+		"%d further declared tools were not offered this turn", n.dropped))
+}
+
+// maxMCPToolBytes bounds what a session's MCP toolsets may add to one provider
+// request. Each stored listing is capped where it is written (maxCatalogTools,
+// internal/executor/mcpwork.go), but that cap is per server and an agent may
+// declare twenty, so without this the request is bounded only by their sum. The
+// figure is that per-server cap, for the reason it was chosen: a hundred tools
+// averaging a kilobyte fit inside it, and a request carrying more definitions
+// than that is an unusable request whatever an endpoint's own limit turns out to
+// be. Tools are charged in declaration order, so which ones survive a session
+// that overruns is the agent author's ordering rather than a server's.
+const maxMCPToolBytes = 256 << 10
 
 // resolveTools turns the agent's tools[] and the session's MCP catalog into the
 // two halves of a turn's tool surface: the definitions the model is offered, and
@@ -125,15 +191,16 @@ func offerable(name string) bool {
 //
 // A note is not a failure. An MCP server that could not be reached, a tool whose
 // prefixed name the endpoint would reject, a name already taken, a configs[]
-// entry naming a tool the server does not report: each costs its own tool and
-// nothing else, because the alternative — failing the turn — takes down an agent
-// whose other tools work over a third party's listing it does not control. The
-// one hard error is a permission policy this platform cannot evaluate, which is
-// the #26 fail-open: defaulting it would run an unconfirmed tool.
+// entry naming a tool the server does not report, a definition past the budget
+// one request carries: each costs its own tool and nothing else, because the
+// alternative — failing the turn — takes down an agent whose other tools work
+// over a third party's listing it does not control. The one hard error is a
+// permission policy this platform cannot evaluate, which is the #26 fail-open:
+// defaulting it would run an unconfirmed tool.
 func resolveTools(agent domain.ResolvedAgent, cat mcpCatalog) ([]json.RawMessage, map[string]toolClass, []string, error) {
 	var defs []json.RawMessage
 	class := map[string]toolClass{}
-	var notes []string
+	var notes toolNotes
 
 	for _, raw := range agent.Tools {
 		var probe struct {
@@ -171,6 +238,7 @@ func resolveTools(agent domain.ResolvedAgent, cat mcpCatalog) ([]json.RawMessage
 		}
 	}
 
+	spent, overBudget := 0, 0
 	for _, raw := range agent.Tools {
 		var probe struct {
 			Type   string `json:"type"`
@@ -184,9 +252,8 @@ func resolveTools(agent domain.ResolvedAgent, cat mcpCatalog) ([]json.RawMessage
 		}
 		stored, ok := cat[probe.Server]
 		if !ok {
-			notes = append(notes, fmt.Sprintf(
-				"no tools were offered from MCP server %q: it has no listing this turn",
-				noteLabel(probe.Server)))
+			notes.add("no tools were offered from MCP server %q: it has no listing this turn",
+				noteLabel(probe.Server))
 			continue
 		}
 		var listing []toolset.MCPTool
@@ -198,29 +265,27 @@ func resolveTools(agent domain.ResolvedAgent, cat mcpCatalog) ([]json.RawMessage
 			return nil, nil, nil, fmt.Errorf("agent tool: %w", err)
 		}
 		for _, name := range unknown {
-			notes = append(notes, fmt.Sprintf(
-				"MCP server %q does not report a tool named %q, which its toolset configures",
-				noteLabel(probe.Server), noteLabel(name)))
+			notes.add("MCP server %q does not report a tool named %q, which its toolset configures",
+				noteLabel(probe.Server), noteLabel(name))
 		}
 		for _, r := range resolved {
-			name := mcpModelName(probe.Server, r.Name)
-			if !offerable(name) {
-				notes = append(notes, fmt.Sprintf(
-					"MCP tool %q on server %q was not offered: together they do not compose a name "+
-						"a model request can carry (letters, digits, underscore and hyphen, at most %d)",
-					noteLabel(r.Name), noteLabel(probe.Server), maxModelToolName))
+			if !mcpNameFits(probe.Server, r.Name) {
+				notes.add("MCP tool %q on server %q was not offered: together they do not compose a "+
+					"name a model request can carry (at most %d bytes)",
+					noteLabel(r.Name), noteLabel(probe.Server), maxModelToolName)
 				continue
 			}
+			name := mcpModelName(probe.Server, r.Name)
 			if _, taken := class[name]; taken {
-				// Nothing here needs noteLabel: this branch is past offerable,
-				// so the whole composed name is at most maxModelToolName and
-				// both halves of it are shorter still. A contest is also not
-				// only with the agent's own tools — two servers can compose to
-				// one string (a server named a__b with tool c, and a server
-				// named a with tool b__c), which declaration order settles.
-				notes = append(notes, fmt.Sprintf(
-					"MCP tool %q on server %q was not offered: another tool is already named %q",
-					r.Name, probe.Server, name))
+				// Nothing here needs noteLabel: this branch is past
+				// mcpNameFits, so the composed name is at most
+				// maxModelToolName and both halves of it are shorter still. A
+				// contest is not only with the agent's own tools — two servers
+				// can compose to one string (a server named a__b with tool c,
+				// and a server named a with tool b__c), as can two names that
+				// sanitize to one — and declaration order settles all of them.
+				notes.add("MCP tool %q on server %q was not offered: another tool is already named %q",
+					r.Name, probe.Server, name)
 				continue
 			}
 			def, err := json.Marshal(map[string]any{
@@ -229,6 +294,11 @@ func resolveTools(agent domain.ResolvedAgent, cat mcpCatalog) ([]json.RawMessage
 			if err != nil {
 				return nil, nil, nil, err
 			}
+			if spent+len(def) > maxMCPToolBytes {
+				overBudget++
+				continue
+			}
+			spent += len(def)
 			defs = append(defs, def)
 			class[name] = toolClass{
 				kind: domain.EventAgentMCPToolUse, policy: r.Policy,
@@ -236,7 +306,11 @@ func resolveTools(agent domain.ResolvedAgent, cat mcpCatalog) ([]json.RawMessage
 			}
 		}
 	}
-	return defs, class, notes, nil
+	if overBudget > 0 {
+		notes.add("%d MCP tools were not offered: this session's listings hold more than the %d bytes "+
+			"of tool definitions one request carries", overBudget, maxMCPToolBytes)
+	}
+	return defs, class, notes.render(), nil
 }
 
 // loadMCPCatalog reads the session's catalog into the listings request assembly
@@ -256,15 +330,10 @@ func resolveTools(agent domain.ResolvedAgent, cat mcpCatalog) ([]json.RawMessage
 // first — but a listing attributed to the wrong endpoint would surface as a
 // model calling tools that do not exist, and the check costs a string compare.
 //
-// An entry missing its name or url is skipped rather than reported: there is
-// nothing to dial, so suspending for it would never end. The API rejects both at
-// the boundary; this mirrors the discovery driver's own skip so the two sides
-// cannot disagree about what is discoverable.
-func (b *Brain) loadMCPCatalog(ctx context.Context, sid domain.ID, agent domain.ResolvedAgent) (mcpCatalog, []string, error) {
-	declared, err := declaredMCPServers(agent)
-	if err != nil {
-		return nil, nil, err
-	}
+// The declared servers are the caller's, already parsed: a spec this platform
+// stored and cannot read back is a permanent failure of this session rather than
+// a transient one, and the caller is where the two are told apart.
+func (b *Brain) loadMCPCatalog(ctx context.Context, sid domain.ID, declared []mcpServerRef) (mcpCatalog, []string, error) {
 	if len(declared) == 0 {
 		return nil, nil, nil
 	}
@@ -315,6 +384,12 @@ type mcpServerRef struct {
 	name, url string
 }
 
+// declaredMCPServers reads those two fields out of the agent's spec.
+//
+// An entry missing either is skipped rather than reported: there is nothing to
+// dial, so waiting for its listing would never end. The API rejects both at the
+// boundary; this mirrors the discovery driver's own skip so the two sides cannot
+// disagree about what is discoverable.
 func declaredMCPServers(agent domain.ResolvedAgent) ([]mcpServerRef, error) {
 	var out []mcpServerRef
 	for _, raw := range agent.MCPServers {
@@ -350,8 +425,15 @@ func declaredMCPServers(agent domain.ResolvedAgent) ([]mcpServerRef, error) {
 // correct: Enqueue is keyed (session_id, kind) over the live states, and the
 // item already there will chain the turn when it settles.
 func (b *Brain) suspendForDiscovery(ctx context.Context, sid domain.ID, item *queue.Item, servers []string) error {
+	// Bounded for the reason a note's names are: a server name is agent-supplied
+	// and capped by nothing before the API's 4 MiB body, and this line is written
+	// once per undiscovered server on the first turn of every session.
+	labels := make([]string, len(servers))
+	for i, s := range servers {
+		labels[i] = noteLabel(s)
+	}
 	slog.InfoContext(ctx, "brain: turn suspended for MCP discovery",
-		"session_id", sid.String(), "servers", servers)
+		"session_id", sid.String(), "servers", labels)
 	_, err := b.log.AppendWith(ctx, sid, nil, events.AppendOptions{
 		Then: func(ctx context.Context, tx pgx.Tx) error {
 			if err := b.queue.Complete(ctx, tx, item); err != nil {

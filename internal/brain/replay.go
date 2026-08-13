@@ -17,7 +17,9 @@ import (
 // The tool definitions arrive already assembled (resolveTools), because what
 // the model may call is not a question the log answers: it comes from the
 // agent's tools[] and the session's MCP catalog, and the same resolution has to
-// decide what a name the model calls back means.
+// decide what a name the model calls back means. So the agent reaches here as
+// its system prompt and nothing more — everything else it contributes to a
+// request has been resolved by the time replay runs.
 //
 // Replay mapping, v1:
 //   - user.message           → user text/blocks
@@ -33,8 +35,8 @@ import (
 //
 // agent.thinking replays as nothing: the wire event carries no content, so
 // thinking is never reconstructed (and v1 never requests extended thinking).
-func buildRequest(agent domain.ResolvedAgent, tools []json.RawMessage, history []domain.Event, skillsBlock, filesBlock, reposBlock string) (provider.Request, int64, error) {
-	req := provider.Request{System: agent.System, Tools: tools}
+func buildRequest(system string, tools []json.RawMessage, history []domain.Event, skillsBlock, filesBlock, reposBlock string) (provider.Request, int64, error) {
+	req := provider.Request{System: system, Tools: tools}
 	// Startup metadata blocks sit after the agent's own system prompt and before
 	// any runtime system.message text (systemTail), which is appended at the end:
 	// the Level-1 skills block first, then the Mounted-files block, then the
