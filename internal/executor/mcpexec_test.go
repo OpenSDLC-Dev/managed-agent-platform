@@ -151,7 +151,12 @@ func TestMCPTransportFailureIsAnsweredAndReported(t *testing.T) {
 			Type          string `json:"type"`
 			MCPServerName string `json:"mcp_server_name"`
 			Message       string `json:"message"`
-			RetryStatus   string `json:"retry_status"`
+			// The union variant, not a bare string: every retry_status on this
+			// wire is an object carrying a type, and a string here would decode
+			// to the zero value in a client's typed union rather than fail.
+			RetryStatus struct {
+				Type string `json:"type"`
+			} `json:"retry_status"`
 		} `json:"error"`
 	}
 	if err := json.Unmarshal(errs[0].Body, &e); err != nil {
@@ -159,6 +164,10 @@ func TestMCPTransportFailureIsAnsweredAndReported(t *testing.T) {
 	}
 	if e.Error.Type != "mcp_connection_failed_error" || e.Error.MCPServerName != "docs" {
 		t.Errorf("session.error = %+v, want mcp_connection_failed_error naming docs", e.Error)
+	}
+	if e.Error.RetryStatus.Type != "retrying" {
+		t.Errorf("retry_status = %+v, want the retrying variant — every turn re-attempts the server",
+			e.Error.RetryStatus)
 	}
 	// The endpoint is customer-supplied and may carry a credential; the message
 	// is cut to scheme://host exactly as a catalog reason is.
@@ -387,5 +396,102 @@ func TestSandboxPassChainsMCPRatherThanStranding(t *testing.T) {
 	}
 	if n := h.liveOf(t, queue.ModelTurn); n != 1 {
 		t.Errorf("live model_turn = %d, want 1 — everything is answered now", n)
+	}
+}
+
+// A call naming a server the agent has since stopped declaring is answered, not
+// dialled: mcp_servers is mid-session-mutable, so the endpoint can be gone by
+// the time the call runs. The model is told, and nothing is reported to the
+// operator — an agent edit is not a connection that failed.
+func TestMCPCallForADroppedServerIsAnsweredWithoutDialling(t *testing.T) {
+	h := mcpHarness(t)
+	h.declareMCPServers(t) // the agent declares none
+	useID := h.appendMCPToolUse(t, "docs", "search", `{}`)
+	h.enqueueMCP(t)
+
+	h.stepOnce(t)
+
+	results := h.mcpResults(t)
+	if len(results) != 1 || results[0]["mcp_tool_use_id"] != useID {
+		t.Fatalf("results = %v, want one answering %s", results, useID)
+	}
+	if results[0]["is_error"] != true {
+		t.Errorf("is_error = %v, want true", results[0]["is_error"])
+	}
+	if blocks := blocksOf(t, results[0]); len(blocks) != 1 ||
+		!strings.Contains(blocks[0]["text"].(string), "no longer configured") {
+		t.Errorf("content = %v, want the model told the server is gone", blocks)
+	}
+	errs, err := h.log.List(context.Background(), h.sid, events.ListQuery{
+		Types: []string{string(domain.EventSessionError)}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(errs) != 0 {
+		t.Errorf("session.error count = %d, want 0 — nothing was dialled", len(errs))
+	}
+	if n := h.liveOf(t, queue.ModelTurn); n != 1 {
+		t.Errorf("live model_turn = %d, want 1 — the call is answered", n)
+	}
+}
+
+// The environment's networking policy is enforced at the dial or nowhere, since
+// the platform dials from this process rather than through the per-session gate.
+// A refusal answers the call — the turn must continue — and reports itself, so
+// an operator who meant to admit the server can see why it was not.
+func TestMCPCallRefusedByEgressPolicyIsAnsweredAndReported(t *testing.T) {
+	url := mcptest.Server(t, mcptest.Tool{Name: "search", Result: "never reached"})
+	h := mcpHarness(t)
+	h.setNetworking(t, domain.Networking{Type: domain.NetLimited})
+	h.declareMCPServers(t, [2]string{"docs", url})
+	useID := h.appendMCPToolUse(t, "docs", "search", `{}`)
+	h.enqueueMCP(t)
+
+	h.stepOnce(t)
+
+	results := h.mcpResults(t)
+	if len(results) != 1 || results[0]["mcp_tool_use_id"] != useID {
+		t.Fatalf("results = %v, want one answering %s", results, useID)
+	}
+	if results[0]["is_error"] != true {
+		t.Errorf("is_error = %v, want true", results[0]["is_error"])
+	}
+	if blocks := blocksOf(t, results[0]); len(blocks) != 1 ||
+		!strings.Contains(blocks[0]["text"].(string), "allow_mcp_servers") {
+		t.Errorf("content = %v, want the refusal to name what would admit the host", blocks)
+	}
+	errs, err := h.log.List(context.Background(), h.sid, events.ListQuery{
+		Types: []string{string(domain.EventSessionError)}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(errs) != 1 {
+		t.Fatalf("session.error count = %d, want 1", len(errs))
+	}
+}
+
+// A tool that genuinely returns nothing still gets a block. The wire's content
+// is optional, but an empty array is indistinguishable from a tool that returned
+// nothing, and a Messages endpoint rejects an empty text block — which is what
+// every later replay of this session would send.
+func TestMCPToolThatReturnsNothingStillGetsABlock(t *testing.T) {
+	url := mcptest.Server(t, mcptest.Tool{Name: "noop", Blocks: []mcptest.Block{}})
+	h := mcpHarness(t)
+	h.declareMCPServers(t, [2]string{"docs", url})
+	h.appendMCPToolUse(t, "docs", "noop", `{}`)
+	h.enqueueMCP(t)
+
+	h.stepOnce(t)
+
+	results := h.mcpResults(t)
+	if len(results) != 1 {
+		t.Fatalf("results = %v, want one", results)
+	}
+	if results[0]["is_error"] == true {
+		t.Errorf("is_error = true, want a tool that succeeded with no output: %v", results[0])
+	}
+	blocks := blocksOf(t, results[0])
+	if len(blocks) != 1 || blocks[0]["type"] != "text" || blocks[0]["text"] == "" {
+		t.Errorf("content = %v, want one non-empty text block", blocks)
 	}
 }

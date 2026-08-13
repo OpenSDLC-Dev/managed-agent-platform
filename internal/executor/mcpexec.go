@@ -387,7 +387,9 @@ func mcpResultEvent(useID domain.ID, res mcpAnswer) (events.NewEvent, error) {
 // catalog row's is: an mcp_servers entry is customer-supplied and may carry a
 // credential in its userinfo or its query.
 //
-// retry_status is "retrying" because that is what this platform does: every turn
+// retry_status is the union's `retrying` variant — an object carrying a type,
+// like every other retry status this platform emits, not the bare string the
+// field's name invites — because retrying is what this platform does: every turn
 // re-attempts a failed server, so a transient failure heals by itself. Nothing
 // documents a server being disabled for the rest of a session and this does not
 // invent one (docs/DIVERGENCES.md).
@@ -397,7 +399,7 @@ func mcpConnectionFailedEvent(server, message string) (events.NewEvent, error) {
 			"type":            "mcp_connection_failed_error",
 			"mcp_server_name": server,
 			"message":         message,
-			"retry_status":    "retrying",
+			"retry_status":    map[string]any{"type": "retrying"},
 		},
 	})
 	if err != nil {
