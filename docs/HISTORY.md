@@ -49,8 +49,9 @@ bought.
 
 - **Slice 1 — the lifecycle in the schema, no new surface** (#385). Migration 0024:
   `status` replacing `revoked_at`, plus `expires_at`, `partial_key_hint` and
-  `created_by`, with `api_keys_one_live` re-created over the rows nobody issued so
-  console-issued keys may share a name as the reference allows. `authenticate`
+  `created_by`, with `api_keys_one_live` **dropped** and a narrower
+  `api_keys_one_live_unissued` created in its place — keyed on `created_by IS
+  NULL`, so console-issued keys may share a name as the reference allows. `authenticate`
   gained its expiry check **in the query**, against the database's clock. Nothing
   observable changed for an existing deployment, which is what the green gate
   proved. Two defects were found and fixed in review rather than shipped: the

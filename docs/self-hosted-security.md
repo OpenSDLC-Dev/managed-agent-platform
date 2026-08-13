@@ -831,16 +831,21 @@ Numbered last because it shipped last (plan 32,
 [#378](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/378)); read it
 beside §6, whose environment-key lifecycle it parallels.
 
-The management `x-api-key` authenticates every `/v1` call and the console API
-behind it, so it is the credential with the widest blast radius in the platform.
-Two things write it, and they are deliberately different.
+The management `x-api-key` authenticates every **management** `/v1` route and the
+console API behind it — the work API is the exception, taking a worker's
+environment key instead — so it is the credential with the widest blast radius in
+the platform. Two things write it, and they are deliberately different.
 
 `CONTROLPLANE_API_KEY` is **env-var-managed**: `EnsureAPIKey` runs once at boot,
-hashes the value you configured, and archives any other live key sharing its
-name. That is **rotation-by-restart** — set a new value, restart, and the previous
-one is dead — and `api_keys_one_live_unissued` makes "one live key per name" a
-schema invariant for these rows, so two control-plane replicas racing to adopt
-different values cannot both win. Its inverse is worth knowing before you meet
+hashes the value you configured, and archives any other live **env-var-managed**
+key sharing its name. That is **rotation-by-restart** — set a new value, restart,
+and the previous one is dead — and `api_keys_one_live_unissued` makes "one live
+key per name" a schema invariant for those rows, so two control-plane replicas
+racing to adopt different values cannot both win. Read the qualifier literally: a
+**console-issued** key that happens to share the name is left alone, because it is
+not this lane's to retire and several live keys may share a name here. Restarting
+with a new value therefore rotates the bootstrap credential and nothing else — if
+you also meant to retire an issued key, archive it over the console API. Its inverse is worth knowing before you meet
 it: rotation is by *value*, so putting a previously-archived value back into the
 variable revives that row at the next boot. If the value had been issued from the
 console, the adoption is logged with a warning naming its previous status; if it
@@ -875,8 +880,10 @@ permitted: cleanup must never depend on the clock.
 
 What you own:
 
-- **Who may mint one.** The three console routes are gated at the **admin** role,
-  the same tier as vaults and environment keys. Read that gate precisely: it
+- **Who may mint one.** The three console routes are gated at the **admin** role —
+  the tier that bounds writing a secret: environment-key issuance, and vault
+  *credential* mutation and validation (a vault itself is `developer` to write and
+  `viewer` to read; only what it holds is admin-gated). Read that gate precisely: it
   binds the *human* lane. `requireRole` applies only to identity-authenticated
   requests, so with `IDENTITY_MODE` unset or `disabled` — the default — anyone
   holding the management `x-api-key` reaches these routes, and **a management key
