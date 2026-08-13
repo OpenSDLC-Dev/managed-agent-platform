@@ -213,11 +213,13 @@ func TestSendValidationSweep(t *testing.T) {
 		{"event missing type", map[string]any{"events": []any{map[string]any{"content": txt}}}, "type is required"},
 		{"unknown type", map[string]any{"events": []any{map[string]any{"type": "user.bogus"}}}, "unknown event type"},
 		{"platform type", map[string]any{"events": []any{map[string]any{"type": "agent.message"}}}, "emitted by the platform"},
-		// The two MCP shapes by name, because the gate now acts on them: a client
-		// that could post an agent.mcp_tool_use carrying evaluated_permission
-		// "ask" would park its own session on a call nothing runs, and one that
-		// could post an agent.mcp_tool_result would answer a call the platform
-		// alone may answer.
+		// The two MCP shapes by name. Both were already refused — platformEmitted
+		// has listed them since the types existed — so these rows pin standing
+		// behavior rather than anything this change introduced. They are named
+		// now because the gate acts on one of them: a client able to post an
+		// agent.mcp_tool_use carrying evaluated_permission "ask" could park its
+		// own session on a call nothing runs, and one able to post an
+		// agent.mcp_tool_result could answer a call only the platform may answer.
 		{"platform MCP tool use", map[string]any{"events": []any{map[string]any{"type": "agent.mcp_tool_use"}}}, "emitted by the platform"},
 		{"platform MCP tool result", map[string]any{"events": []any{map[string]any{"type": "agent.mcp_tool_result"}}}, "emitted by the platform"},
 		{"stream-only type", map[string]any{"events": []any{map[string]any{"type": "event_delta"}}}, "stream-only"},

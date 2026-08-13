@@ -17,7 +17,7 @@ semantics. Seven slices, three landed.
       ([#352](https://github.com/OpenSDLC-Dev/managed-agent-platform/pull/352)), then the `mcp_catalogs` migration and the executor's
       `mcp_exec` discovery driver ([#377](https://github.com/OpenSDLC-Dev/managed-agent-platform/pull/377)). Nothing offered to the model yet.
 - [x] Slice 3 — gate machinery: `agent.mcp_tool_use` is confirmable, and a denial is
-      answered in the refused call's own family ([#380](https://github.com/OpenSDLC-Dev/managed-agent-platform/pull/380)). Inert until slice 4 stamps a policy.
+      answered in the refused call's own family ([#387](https://github.com/OpenSDLC-Dev/managed-agent-platform/pull/387)). Inert until slice 4 stamps a policy.
 - [ ] Slice 4 — activation: brain expansion, `agent.mcp_tool_use`, the execution driver,
       four-way settlement, output spill. **#45's acceptance criterion is met here.**
 - [ ] Slice 5 — credentials: matching, injection, OAuth refresh, `mcp_authentication_failed`.
