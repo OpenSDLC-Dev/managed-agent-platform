@@ -208,7 +208,10 @@ checking has been done.
   edit clears, and protects nobody — setting the variable at all requires the
   deployment access that could equally configure a fresh value. The adoption logs
   a warning naming the previous status instead — which **slice 2's round-4
-  verification** drove directly, booting a control plane over an archived
+  verification** drove directly (its verdict is a comment on
+  [#388](https://github.com/OpenSDLC-Dev/managed-agent-platform/pull/388), where
+  this provenance chain ends: no raw boot log of that measurement survives),
+  booting a control plane over an archived
   console-issued value and reading `configured management key already existed as a
   console-issued key … previous_status=archived` out of its log, then booting over
   an archived env-var-managed value and finding no such line. That is the
