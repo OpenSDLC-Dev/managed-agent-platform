@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"net/http"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
 	"github.com/jackc/pgx/v5"
@@ -19,26 +20,65 @@ func hashKey(key string) string {
 	return hex.EncodeToString(sum[:])
 }
 
-// partialKeyHint is the masked form a listing shows: the value's leading run up
-// to and including its last '-', then three characters, an ellipsis, and the
-// final four. It mirrors the reference's `sk-ant-api03-R2D...igAA`.
+// IssuedKeyPrefix marks a management key this platform minted, beside plan 30's
+// `sk-map-env01-` for worker credentials. It is public by construction: it is the
+// same for every key, so showing it identifies the *kind* of credential without
+// revealing anything about a particular one.
+const IssuedKeyPrefix = "sk-map-api01-"
+
+// partialKeyHint is the masked form a listing shows. It is computed from the
+// plaintext because it cannot be recovered from the hash, and it is the only part
+// of a key that outlives issuance.
 //
-// It is computed from the plaintext because it cannot be recovered from the hash,
-// and it is the only part of a key that outlives issuance. A value too short to
-// mask that way is reported as "" rather than leaked in full — an operator-chosen
-// CONTROLPLANE_API_KEY may be anything, including something short enough that
-// "prefix plus last four" would print most of it.
+// Two rules, because there are two kinds of value here and only one has a format
+// this platform knows.
+//
+// A key we minted carries IssuedKeyPrefix, which is public, so the hint may show
+// it in full and then three characters, an ellipsis, and the final four —
+// mirroring the reference's `sk-ant-api03-R2D...igAA`. The split is taken at a
+// fixed offset from the *known* prefix, never at the last separator in the value:
+// the body is base64url (envkeys.go mints with base64.RawURLEncoding), whose
+// alphabet includes `-`, so a last-separator rule would move the split to wherever
+// a random dash happened to land and could leave a key almost entirely published.
+//
+// A CONTROLPLANE_API_KEY is operator-chosen and may be anything, so NOTHING in it
+// may be assumed public — its leading run is not a prefix this platform knows, and
+// reading it as one would render `secret-12345678` as `secret-123...5678`,
+// fourteen of its fifteen characters. Such a value gets its last four characters
+// only.
+//
+// Both paths refuse to produce a hint at all below a length floor, because "a
+// masked value that is mostly the value" is worse than an empty column — and worse
+// than it looks, since key_hash is an unsalted SHA-256 that a mostly-known
+// plaintext makes trivially searchable offline.
+//
+// Slicing is by rune, not byte. A key is an arbitrary environment-variable string
+// and may be non-ASCII; cutting mid-rune yields invalid UTF-8, which Postgres
+// refuses on a text column — an EnsureAPIKey error at boot, i.e. a control plane
+// that will not start because of the *hint*. A value that is not valid UTF-8 at
+// all gets no hint for the same reason.
 func partialKeyHint(key string) string {
 	const lead, tail = 3, 4
-	prefix := ""
-	if i := strings.LastIndex(key, "-"); i >= 0 {
-		prefix = key[:i+1]
-	}
-	rest := key[len(prefix):]
-	if len(rest) < lead+tail+1 {
+	// An issued key's body must hide at least as much as it shows; an opaque one,
+	// where nothing is public, at least three times as much. Minted bodies are 43
+	// base64url characters, so the issued floor is slack rather than a constraint —
+	// which is the point: the rule stays safe by construction, not by luck.
+	const minIssuedBody, minOpaque = 2 * (lead + tail), 4 * tail
+	if !utf8.ValidString(key) {
 		return ""
 	}
-	return prefix + rest[:lead] + "..." + rest[len(rest)-tail:]
+	if strings.HasPrefix(key, IssuedKeyPrefix) {
+		body := []rune(key[len(IssuedKeyPrefix):])
+		if len(body) < minIssuedBody {
+			return ""
+		}
+		return IssuedKeyPrefix + string(body[:lead]) + "..." + string(body[len(body)-tail:])
+	}
+	r := []rune(key)
+	if len(r) < minOpaque {
+		return ""
+	}
+	return "..." + string(r[len(r)-tail:])
 }
 
 // EnsureAPIKey makes key the one live credential for the named logical key:
@@ -70,10 +110,22 @@ func EnsureAPIKey(ctx context.Context, pool *pgxpool.Pool, name, key string) err
 		name, hash); err != nil {
 		return err
 	}
+	// created_by and expires_at are RESET, not preserved, when an existing row is
+	// adopted. The conflict path fires when the configured value already exists as
+	// a row, and that row may have been issued over the console — carrying an
+	// issuer and possibly an expiry. Leaving either in place would break both
+	// halves of this function's contract: an issued row sits outside
+	// api_keys_one_live_unissued, so the archive above would skip it on the next
+	// rotation and leave two live credentials under one name; and an inherited
+	// expiry would let EnsureAPIKey report success over a key authenticate then
+	// refuses, i.e. a control plane that starts without a working bootstrap
+	// credential. Naming a value in CONTROLPLANE_API_KEY makes it env-var-managed,
+	// whatever it was before.
 	if _, err := tx.Exec(ctx,
 		`INSERT INTO api_keys (id, name, key_hash, partial_key_hint) VALUES ($1, $2, $3, $4)
 		 ON CONFLICT (key_hash) DO UPDATE
-		 SET status = 'active', name = EXCLUDED.name, partial_key_hint = EXCLUDED.partial_key_hint`,
+		 SET status = 'active', name = EXCLUDED.name, partial_key_hint = EXCLUDED.partial_key_hint,
+		     created_by = NULL, expires_at = NULL`,
 		domain.NewID("apikey").String(), name, hash, partialKeyHint(key)); err != nil {
 		return err
 	}

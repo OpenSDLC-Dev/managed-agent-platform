@@ -2,12 +2,25 @@ package api_test
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/api"
 )
+
+// sha256Hex is the stored form of a key, spelled out here rather than reached for
+// across the package boundary: a test that stages a row the way the code would
+// proves nothing about the format the code actually uses. This is the second,
+// independent statement of it.
+func sha256Hex(key string) string {
+	sum := sha256.Sum256([]byte(key))
+	return hex.EncodeToString(sum[:])
+}
 
 // TestAPIKeyStatusGatesAuthentication walks the three stored states against the
 // management lane. `inactive` is the state plan 32 adds that `revoked_at` could
@@ -112,11 +125,39 @@ func TestEnsureAPIKeyRecordsAMaskedHint(t *testing.T) {
 	for _, tc := range []struct {
 		name, key, want string
 	}{
-		{"prefixed", "sk-map-api01-AbCdefghijklmnopQRST", "sk-map-api01-AbC...QRST"},
-		{"no prefix", "0123456789abcdef", "012...cdef"},
+		// A key this platform minted: the prefix is public by construction, so it
+		// shows in full.
+		{"issued", api.IssuedKeyPrefix + "AbCdefghijklmnopQRST", api.IssuedKeyPrefix + "AbC...QRST"},
+		{"issued, exactly too short", api.IssuedKeyPrefix + "1234567890abc", ""},
+		{"issued, exactly long enough", api.IssuedKeyPrefix + "1234567890abcd", api.IssuedKeyPrefix + "123...abcd"},
+
+		// A real minted shape: 43 base64url characters, whose alphabet contains
+		// `-`. This row is why the split is taken at a fixed offset from the known
+		// prefix. Under a "cut at the last dash" rule the mask would start after
+		// the body's own dash and render this as
+		// "sk-map-api01-jJS0rezEtM3wgUCBCwDAZWdaspykfF55zo-Wr4...63cs", publishing
+		// all but three characters of a live credential.
+		{
+			"issued, dash inside the base64url body",
+			api.IssuedKeyPrefix + "jJS0rezEtM3wgUCBCwDAZWdaspykfF55zo-Wr4E63cs",
+			api.IssuedKeyPrefix + "jJS...63cs",
+		},
+
+		// An operator-chosen value: nothing in it is public, so only the tail
+		// shows, and only when the value is long enough that four characters are a
+		// small fraction of it.
+		{"operator value with a dash", "secret-12345678", ""},
+		{"operator value, long enough", "secret-1234567890abcdef", "...cdef"},
+		{"opaque, exactly long enough", "0123456789abcdef", "...cdef"},
+		{"opaque, one short", "0123456789abcde", ""},
 		{"too short to mask", "short", ""},
-		{"exactly too short", "sk-map-api01-1234567", ""},
-		{"one longer", "sk-map-api01-12345678", "sk-map-api01-123...5678"},
+		{"empty", "", ""},
+
+		// Runes, not bytes. Slicing this by byte would cut mid-rune and produce
+		// invalid UTF-8, which Postgres refuses on a text column — turning a
+		// cosmetic field into a control plane that will not boot.
+		{"multi-byte", "パスワード-これはとてもながいかぎです", "...かぎです"},
+		{"multi-byte, too short", "éééé", ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if err := api.EnsureAPIKey(ctx, s.pool, "hint-"+tc.name, tc.key); err != nil {
@@ -130,11 +171,76 @@ func TestEnsureAPIKeyRecordsAMaskedHint(t *testing.T) {
 			if hint != tc.want {
 				t.Errorf("partial_key_hint = %q, want %q", hint, tc.want)
 			}
-			// Whatever the hint is, it must never be the key.
-			if hint == tc.key {
-				t.Error("the hint is the key itself")
+			// A bound, not a spot check. Every `want` above is hand-written, so a
+			// bad rule and a bad expectation would agree with each other and the
+			// comparison alone would bless the result. This asserts the property
+			// the masking exists for, against whatever was actually produced: a
+			// hint must never show more of the secret part of a key than it hides.
+			// It matters beyond tidiness — key_hash is an unsalted SHA-256, so a
+			// mostly-published plaintext is recoverable offline.
+			if hint != "" {
+				secret := strings.TrimPrefix(tc.key, api.IssuedKeyPrefix)
+				shown := utf8.RuneCountInString(
+					strings.ReplaceAll(strings.TrimPrefix(hint, api.IssuedKeyPrefix), "...", ""))
+				if hidden := utf8.RuneCountInString(secret) - shown; hidden < shown {
+					t.Errorf("hint %q shows %d of the key's %d secret characters, hiding only %d",
+						hint, shown, utf8.RuneCountInString(secret), hidden)
+				}
 			}
 		})
+	}
+}
+
+// TestEnsureAPIKeyAdoptsAnIssuedRowAsEnvManaged covers the conflict path, where
+// the value configured in CONTROLPLANE_API_KEY turns out to already exist as a row
+// somebody issued from the console. Naming a value there makes it env-var-managed,
+// whatever it was before, and both inherited fields would otherwise break that:
+// an inherited created_by leaves the row outside api_keys_one_live_unissued, so
+// the next rotation's archive skips it and the name carries two live credentials
+// (#72, reopened); an inherited expires_at lets a control plane boot reporting
+// success over a bootstrap key that authenticate() already refuses.
+func TestEnsureAPIKeyAdoptsAnIssuedRowAsEnvManaged(t *testing.T) {
+	s := newTestServer(t)
+	ctx := context.Background()
+
+	const key = "ak-adopted"
+	if _, err := s.pool.Exec(ctx,
+		`INSERT INTO api_keys (id, name, key_hash, status, created_by, expires_at)
+		 VALUES ('apikey_adopted', 'issued-then-configured', $1, 'inactive', 'principal_someone',
+		         now() - interval '1 hour')`,
+		sha256Hex(key)); err != nil {
+		t.Fatalf("stage issued key: %v", err)
+	}
+
+	if err := api.EnsureAPIKey(ctx, s.pool, "boot", key); err != nil {
+		t.Fatalf("EnsureAPIKey: %v", err)
+	}
+
+	var (
+		name, status string
+		createdBy    *string
+		expiresAt    *time.Time
+	)
+	if err := s.pool.QueryRow(ctx,
+		`SELECT name, status, created_by, expires_at FROM api_keys WHERE id = 'apikey_adopted'`).
+		Scan(&name, &status, &createdBy, &expiresAt); err != nil {
+		t.Fatalf("read adopted row: %v", err)
+	}
+	if name != "boot" || status != "active" {
+		t.Errorf("adopted row = (%q, %q), want (\"boot\", \"active\")", name, status)
+	}
+	if createdBy != nil {
+		t.Errorf("created_by = %q, want NULL — the row is env-var-managed now", *createdBy)
+	}
+	if expiresAt != nil {
+		t.Errorf("expires_at = %v, want NULL — an inherited expiry boots a dead bootstrap key", *expiresAt)
+	}
+
+	// The whole point: the adopted key actually authenticates.
+	res := s.doRaw(http.MethodGet, "/v1/agents", nil, map[string]string{"x-api-key": key})
+	res.Body.Close()
+	if res.StatusCode != http.StatusOK {
+		t.Errorf("adopted key: %d, want 200", res.StatusCode)
 	}
 }
 

@@ -17,11 +17,12 @@ remaining slices are tracked on that branch, not here.
 
 ## Tasks
 
-- [ ] Slice 1 — the lifecycle in the schema, no new surface: migration 0024
+- [x] Slice 1 — the lifecycle in the schema, no new surface: migration 0024
       (`status` replacing `revoked_at`, `expires_at`, `partial_key_hint`,
       `created_by`; `api_keys_one_live` narrowed to the rows nobody issued),
       `authenticate` honouring status and expiry against the database clock,
-      `EnsureAPIKey` recording a hint and keeping rotation-by-restart.
+      `EnsureAPIKey` recording a hint and keeping rotation-by-restart
+      ([#385](https://github.com/OpenSDLC-Dev/managed-agent-platform/pull/385)).
 - [ ] Slice 2 — the console surface: issue (returning the resource plus
       `raw_key`), list (bare array, archived rows included), update status and
       name. Admin-gated, `/api/console/organizations/{org}/workspaces/{ws}/api_keys`.

@@ -123,7 +123,8 @@ public docs alone would have suggested:
 1. **Lifecycle in the schema, no new surface.** Migration 0024: `status` (checked
    enum, backfilled `archived` where `revoked_at` is set), `expires_at`,
    `partial_key_hint`, `created_by`; `api_keys_one_live` dropped and re-created
-   bootstrap-only.
+   over the rows nobody issued (decision 4 — keyed on `created_by IS NULL`, not on
+   the literal name `bootstrap`).
    `authenticate` accepts a key only when `status = 'active'` and it has not
    expired; `EnsureAPIKey` writes a hint and keeps its rotation. Nothing observable
    changes for an existing deployment — the gate green is the proof.
@@ -131,8 +132,11 @@ public docs alone would have suggested:
    `GET` (bare array, archived rows included as the reference returns them),
    `POST …/{key_id}` (status and name updates, rejecting `expired` with the same
    message shape the reference produces). Name bounds reuse
-   `environmentKeyNameMax`. 405 fallbacks registered as plan 30's are.
-3. **Docs and acceptance.** DIVERGENCES entries for decisions 1, 7 and 8; a
+   `environmentKeyNameMax`. 405 fallbacks registered as plan 30's are. All four
+   DIVERGENCES entries land here, with the surface that diverges — including the
+   `sk-map-api01-` one: slice 1 declares the constant, but until something mints a
+   key with it there is no observable divergence to register.
+3. **Docs and acceptance.** A
    `docs/self-hosted-security.md` section on management-key rotation beside the
    environment-key one; an acceptance run that issues a key over the console API,
    drives `/v1` with it, disables it and is refused, re-enables it, archives it and
@@ -154,4 +158,4 @@ against `/v1`.
 - Client-supplied `expires_at` on management keys against server-fixed TTL on
   environment keys, and what "absent" means (slice 2).
 - `can_manage` omitted from the listing while the surface stays admin-only (slice 2).
-- `sk-map-api01-` as the issued-key prefix, beside `sk-map-env01-` (slice 1).
+- `sk-map-api01-` as the issued-key prefix, beside `sk-map-env01-` (slice 2).

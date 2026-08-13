@@ -77,8 +77,8 @@ DROP INDEX IF EXISTS api_keys_one_live;
 CREATE UNIQUE INDEX api_keys_one_live_unissued ON api_keys (name)
     WHERE status = 'active' AND created_by IS NULL;
 
--- Listings are ordered newest-first and filtered by status; both scan the whole
--- table today because 0001 created no index beyond the primary key and key_hash's
--- UNIQUE. One key per host in a large fleet is still a small table, but the
--- listing is an operator-facing read and created_at is what it sorts on.
-CREATE INDEX api_keys_created_at_idx ON api_keys (created_at DESC);
+-- No index for the listing here on purpose. Nothing sorts or filters this table
+-- by created_at yet -- the two reads in the tree are keyed on name and key_hash --
+-- and the listing that would want one lands in slice 2. A migration is immutable
+-- once merged, so an index taken a slice early is a permanent bet on a query that
+-- does not exist.
