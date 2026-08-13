@@ -331,6 +331,49 @@ func mcpResultBlocks(content []mcp.Content) []map[string]any {
 	if len(out) == 0 {
 		out = append(out, textBlock("The tool returned no content."))
 	}
+	return capMCPBlocks(out)
+}
+
+// capMCPBlocks holds one answer to the budget every tool result gets on this
+// platform (toolset.MaxOutputBytes), for the two reasons that budget exists: it
+// is the model's context, and a tool result is on the append-only event log
+// forever. Neither MCP nor the reference bounds a tool's output, and this
+// package's own ceiling is megabytes per response, so without this one server's
+// answer would ride every later replay of the session.
+//
+// Blocks are charged their marshalled size — what actually lands — in the order
+// the server sent them, and the first that does not fit ends the answer. A block
+// is kept or dropped whole: a text block is already capped where it was built
+// (textBlock), and cutting a base64 payload in half yields something that
+// decodes to nothing, so the tool catalog's whole-or-nothing rule applies here
+// too. What was dropped is said rather than left to look like a short answer.
+//
+// The first block is kept whatever it costs, which is what makes the ordinary
+// over-long answer — one huge text block — a truncated answer rather than no
+// answer at all. It has already been bounded on its own, so keeping it admits a
+// fixed overhead (the JSON around it and the truncation notice inside it) and
+// not a server's bytes. Dropping it would leave a result whose only content
+// says the content was dropped, which is strictly worse than the truncation the
+// model can still read.
+//
+// The trailing notice rides on top of the budget rather than inside it: it is
+// this platform's text about the server's, and it is a couple of hundred bytes.
+// Spilling an over-budget answer to a file the model can read instead of
+// truncating it is plan 29 slice 4b's, alongside the sandbox tools' spill.
+func capMCPBlocks(blocks []map[string]any) []map[string]any {
+	budget := toolset.MaxOutputBytes
+	out := make([]map[string]any, 0, len(blocks))
+	for i, b := range blocks {
+		// Cannot fail: every block here is built from strings and byte slices.
+		raw, _ := json.Marshal(b)
+		if i > 0 && len(raw) > budget {
+			return append(out, textBlock(fmt.Sprintf(
+				"%d further content block(s) of this answer were dropped: it is past the %d bytes "+
+					"a tool result may put on this session's log.", len(blocks)-i, toolset.MaxOutputBytes)))
+		}
+		budget -= len(raw)
+		out = append(out, b)
+	}
 	return out
 }
 
@@ -348,7 +391,7 @@ func resourceBlock(c mcp.Content) map[string]any {
 	block["source"] = map[string]any{
 		"type":       "text",
 		"media_type": "text/plain",
-		"data":       toolset.SanitizeText(c.Text),
+		"data":       toolset.CapOutput(toolset.SanitizeText(c.Text)),
 	}
 	// The schema's plain-text source admits exactly one media type, so a
 	// resource declaring another is carried as context rather than dropped:
@@ -359,8 +402,13 @@ func resourceBlock(c mcp.Content) map[string]any {
 	return block
 }
 
+// textBlock is every text block this driver writes, and the one place a single
+// block is bounded: capped to what a tool result may return to a model, with the
+// same truncation notice every built-in tool's output carries. Capping here
+// rather than in capMCPBlocks is what keeps the ordinary answer — one huge text
+// block — truncated rather than dropped whole.
 func textBlock(s string) map[string]any {
-	return map[string]any{"type": "text", "text": toolset.SanitizeText(s)}
+	return map[string]any{"type": "text", "text": toolset.CapOutput(toolset.SanitizeText(s))}
 }
 
 func mimeOrUnknown(mime string) string {

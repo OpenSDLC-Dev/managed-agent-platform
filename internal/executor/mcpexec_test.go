@@ -13,6 +13,7 @@ import (
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/events"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/mcp/mcptest"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/queue"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/toolset"
 )
 
 // appendMCPToolUse plants the call the brain will commit once MCP tools reach a
@@ -493,5 +494,87 @@ func TestMCPToolThatReturnsNothingStillGetsABlock(t *testing.T) {
 	blocks := blocksOf(t, results[0])
 	if len(blocks) != 1 || blocks[0]["type"] != "text" || blocks[0]["text"] == "" {
 		t.Errorf("content = %v, want one non-empty text block", blocks)
+	}
+}
+
+// One huge text block is truncated, not dropped: it is the ordinary shape of an
+// over-long answer, and a model can act on the first hundred kilobytes of a
+// document where it can do nothing with an answer that vanished.
+func TestMCPHugeTextAnswerIsTruncatedToTheToolBudget(t *testing.T) {
+	huge := strings.Repeat("x", 4*toolset.MaxOutputBytes)
+	url := mcptest.Server(t, mcptest.Tool{Name: "dump", Result: huge})
+	h := mcpHarness(t)
+	h.declareMCPServers(t, [2]string{"docs", url})
+	h.appendMCPToolUse(t, "docs", "dump", `{}`)
+	h.enqueueMCP(t)
+
+	h.stepOnce(t)
+
+	results := h.mcpResults(t)
+	if len(results) != 1 {
+		t.Fatalf("results = %d, want one", len(results))
+	}
+	blocks := blocksOf(t, results[0])
+	if len(blocks) != 1 || blocks[0]["type"] != "text" {
+		t.Fatalf("content = %v, want one text block", blocks)
+	}
+	text := blocks[0]["text"].(string)
+	if len(text) > toolset.MaxOutputBytes+64 {
+		t.Errorf("text is %d bytes, want it held to the %d-byte tool budget",
+			len(text), toolset.MaxOutputBytes)
+	}
+	if !strings.Contains(text, "truncated") {
+		t.Errorf("text does not say it was truncated: %q", text[max(0, len(text)-120):])
+	}
+}
+
+// Many blocks are charged against one shared budget and the answer ends at the
+// first that does not fit — dropped whole, since half a base64 payload decodes
+// to nothing — with a block saying how many went. A short answer that silently
+// lost half its blocks would read to a model as the tool's whole output.
+func TestMCPAnswerBeyondTheBudgetIsCutWithANotice(t *testing.T) {
+	// Four blocks of a third of the budget each: the first three fit, the
+	// fourth does not.
+	third := strings.Repeat("y", toolset.MaxOutputBytes/3)
+	url := mcptest.Server(t, mcptest.Tool{Name: "many", Blocks: []mcptest.Block{
+		{Type: "text", Text: third},
+		{Type: "text", Text: third},
+		{Type: "text", Text: third},
+		{Type: "text", Text: third},
+		{Type: "text", Text: "the tail nobody sees"},
+	}})
+	h := mcpHarness(t)
+	h.declareMCPServers(t, [2]string{"docs", url})
+	h.appendMCPToolUse(t, "docs", "many", `{}`)
+	h.enqueueMCP(t)
+
+	h.stepOnce(t)
+
+	results := h.mcpResults(t)
+	if len(results) != 1 {
+		t.Fatalf("results = %d, want one", len(results))
+	}
+	blocks := blocksOf(t, results[0])
+	// Exactly how many of the four fit depends on each block's JSON overhead,
+	// so the assertion is the shape rather than the count: some were kept, some
+	// were dropped, and the last block says so.
+	if len(blocks) < 2 || len(blocks) >= 5 {
+		t.Fatalf("got %d blocks, want some kept, some dropped, and a notice", len(blocks))
+	}
+	notice, _ := blocks[len(blocks)-1]["text"].(string)
+	if !strings.Contains(notice, "further content block(s)") {
+		t.Errorf("last block = %q, want it to name what was dropped", notice)
+	}
+	total := 0
+	for _, b := range blocks {
+		raw, err := json.Marshal(b)
+		if err != nil {
+			t.Fatal(err)
+		}
+		total += len(raw)
+	}
+	if total > toolset.MaxOutputBytes+512 {
+		t.Errorf("answer is %d bytes, want it held near the %d-byte budget",
+			total, toolset.MaxOutputBytes)
 	}
 }

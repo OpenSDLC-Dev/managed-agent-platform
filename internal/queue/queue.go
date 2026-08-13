@@ -40,8 +40,11 @@ const (
 	// worker has no file lane).
 	OutputsHarvest Kind = "outputs_harvest"
 	// MCPExec is the MCP work (docs/plan/29_mcp-toolset.md): the executor's
-	// MCP driver discovers a session's MCP servers' tools into mcp_catalogs
-	// and later answers the session's MCP tool calls. Like WebExec it runs in
+	// MCP driver discovers a session's MCP servers' tools into mcp_catalogs,
+	// and answers the session's MCP tool calls. One item does one of the two —
+	// a pass with a call outstanding answers calls and does not discover, since
+	// the turn is stopped on that call while a listing is only ever wanted by a
+	// turn that has not started. Like WebExec it runs in
 	// the platform executor's process for cloud AND self_hosted sessions
 	// alike — the SDK states three times that MCP tools are server-side, the
 	// work API has no MCP surface, and the BYOC worker's contract is
