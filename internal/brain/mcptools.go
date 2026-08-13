@@ -212,9 +212,15 @@ func resolveTools(agent domain.ResolvedAgent, cat mcpCatalog) ([]json.RawMessage
 				continue
 			}
 			if _, taken := class[name]; taken {
+				// Nothing here needs noteLabel: this branch is past offerable,
+				// so the whole composed name is at most maxModelToolName and
+				// both halves of it are shorter still. A contest is also not
+				// only with the agent's own tools — two servers can compose to
+				// one string (a server named a__b with tool c, and a server
+				// named a with tool b__c), which declaration order settles.
 				notes = append(notes, fmt.Sprintf(
 					"MCP tool %q on server %q was not offered: another tool is already named %q",
-					noteLabel(r.Name), noteLabel(probe.Server), noteLabel(name)))
+					r.Name, probe.Server, name))
 				continue
 			}
 			def, err := json.Marshal(map[string]any{

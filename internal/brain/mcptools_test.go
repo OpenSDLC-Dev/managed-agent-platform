@@ -127,25 +127,53 @@ func TestAnUnusableMCPToolNameCostsOnlyItsOwnTool(t *testing.T) {
 // uncapped note multiplies that into the log for as long as the session lives.
 func TestANoteQuotesABoundedName(t *testing.T) {
 	huge := strings.Repeat("s", 100_000)
-	agent := domain.ResolvedAgent{AgentSpec: domain.AgentSpec{Tools: []json.RawMessage{
-		json.RawMessage(`{"type":"mcp_toolset","mcp_server_name":"` + huge + `"}`),
-	}}}
-	cat := mcpCatalog{huge: listingOf(t, mcpTool("search"), mcpTool("fetch"))}
+	other := strings.Repeat("o", 100_000)
 
-	defs, _, notes, err := resolveTools(agent, cat)
-	if err != nil {
-		t.Fatalf("resolveTools: %v", err)
-	}
-	if len(defs) != 0 {
-		t.Fatalf("offered %d tools under a name no request can carry", len(defs))
-	}
-	if len(notes) != 2 {
-		t.Fatalf("notes = %d, want one per dropped tool", len(notes))
-	}
-	for _, n := range notes {
-		if len(n) > 4*maxNoteLabel {
-			t.Errorf("a note is %d bytes, want the quoted names bounded", len(n))
-		}
+	cases := []struct {
+		name  string
+		tools string
+		cat   mcpCatalog
+		want  int // notes expected
+	}{{
+		// A server with no listing: the "no listing" note.
+		name:  "no listing",
+		tools: `{"type":"mcp_toolset","mcp_server_name":"` + huge + `"}`,
+		cat:   mcpCatalog{},
+		want:  1,
+	}, {
+		// A listing whose every composed name is unusable, plus a configs[]
+		// entry naming a tool the server does not report: the other two notes.
+		name: "unusable names and an unknown config",
+		tools: `{"type":"mcp_toolset","mcp_server_name":"` + huge + `",
+		         "configs":[{"name":"` + other + `","enabled":true}]}`,
+		cat:  mcpCatalog{huge: nil},
+		want: 3,
+	}}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.cat[huge] == nil && len(tc.cat) > 0 {
+				tc.cat[huge] = listingOf(t, mcpTool("search"), mcpTool("fetch"))
+			}
+			agent := domain.ResolvedAgent{AgentSpec: domain.AgentSpec{
+				Tools: []json.RawMessage{json.RawMessage(tc.tools)},
+			}}
+			defs, _, notes, err := resolveTools(agent, tc.cat)
+			if err != nil {
+				t.Fatalf("resolveTools: %v", err)
+			}
+			if len(defs) != 0 {
+				t.Fatalf("offered %d tools under a name no request can carry", len(defs))
+			}
+			if len(notes) != tc.want {
+				t.Fatalf("notes = %d (%v), want %d", len(notes), notes, tc.want)
+			}
+			for _, n := range notes {
+				if len(n) > 4*maxNoteLabel {
+					t.Errorf("a note is %d bytes, want the quoted names bounded", len(n))
+				}
+			}
+		})
 	}
 }
 
@@ -172,6 +200,36 @@ func TestAnMCPToolLosesAContestedName(t *testing.T) {
 	}
 	if !hasNote(notes, "mcp__docs__search") {
 		t.Errorf("notes = %v, want the dropped MCP tool named", notes)
+	}
+}
+
+// Flattening two names into one string is not injective: a server named a__b
+// offering c and a server named a offering b__c compose to mcp__a__b__c. The
+// contest is settled the same way as one with a custom tool — declaration
+// order, with the loser noted — rather than by escaping a separator the
+// reference never publishes.
+func TestTwoServersCanContestOneComposedName(t *testing.T) {
+	agent := domain.ResolvedAgent{AgentSpec: domain.AgentSpec{Tools: []json.RawMessage{
+		json.RawMessage(`{"type":"mcp_toolset","mcp_server_name":"a__b"}`),
+		json.RawMessage(`{"type":"mcp_toolset","mcp_server_name":"a"}`),
+	}}}
+	cat := mcpCatalog{
+		"a__b": listingOf(t, mcpTool("c")),
+		"a":    listingOf(t, mcpTool("b__c"), mcpTool("d")),
+	}
+
+	defs, class, notes, err := resolveTools(agent, cat)
+	if err != nil {
+		t.Fatalf("resolveTools: %v", err)
+	}
+	if got := defNames(t, defs); !slicesEqual(got, []string{"mcp__a__b__c", "mcp__a__d"}) {
+		t.Fatalf("offered = %v, want the first claim on the contested name plus the uncontested one", got)
+	}
+	if c := class["mcp__a__b__c"]; c.server != "a__b" || c.tool != "c" {
+		t.Errorf("class = %+v, want the first-declared server to keep the name", c)
+	}
+	if !hasNote(notes, `"b__c"`) {
+		t.Errorf("notes = %v, want the dropped tool named", notes)
 	}
 }
 
