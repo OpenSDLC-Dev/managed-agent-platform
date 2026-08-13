@@ -1368,6 +1368,9 @@ func (pd *pod) WriteFile(ctx context.Context, path string, data []byte) error {
 // A write of no bytes is the one that opens no stream, and so is the one whose
 // count the caller makes instead — see below.
 func (pd *pod) WriteFileStream(ctx context.Context, path string, src io.Reader, size int64) error {
+	if err := sandbox.CheckWriteSize(size); err != nil {
+		return fmt.Errorf("k8s: write %s: %w", path, err)
+	}
 	dir := gopath.Dir(path)
 	tmp := gopath.Join(dir, sandbox.TempName())
 	argv := []string{"/bin/bash", "-c", writeScript, "map-write", path, dir, strconv.FormatInt(size, 10), tmp}

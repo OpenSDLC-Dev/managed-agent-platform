@@ -6,7 +6,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
+	"os"
 	"path"
 	"sort"
 	"strings"
@@ -117,16 +119,89 @@ func SetupFiles(ctx context.Context, client sdk.Client, sessionID string, sb san
 	return nil
 }
 
+// maxSpoolBytes bounds the temp file a length-less download is spooled to. It
+// is not a policy — the upload cap is the authority on how large a mounted file
+// may be — only the guard that keeps a body which never declares its end from
+// filling the worker's disk, so it is sized to the Files API's own per-file cap
+// and refuses nothing a legitimate mount can be. A package var, not a const, so
+// a test can lower it and exercise the refusal without half a gigabyte of body.
+var maxSpoolBytes int64 = 500 << 20
+
 // materializeFile streams one mount's bytes from the file-content lane to its
 // mount_path. The response's Content-Length drives the streaming write, so a
-// large mount never fully buffers in the worker.
+// large mount never fully buffers in the worker — but a length is exactly what
+// an intermediary can take away: Go reports -1 for a chunked body and for one it
+// decompressed on the way, and -1 is not a byte count any stream can match, so
+// passing it through refused every mount (#386). The worker cannot ask anyone
+// for the true count — the session resource carries no size (it mirrors the
+// reference's file resource, which has none) and the environment key's file lane
+// admits only /v1/files/{id}/content, never the metadata read (the API's
+// isFileReadPath) — so it measures the bytes itself, spooling them to disk
+// rather than to memory because a mount can be 500 MB.
+//
+// What that measurement cannot do is check the transfer against anything: the
+// count comes from the bytes that arrived, so the seam's short-stream guard has
+// nothing independent left to compare. Two of the three ways a length can go
+// missing carry their own end-of-message — chunked framing errors on a missing
+// terminator, and a decompressed body fails its checksum — and both surface as
+// a copy error here. The third, a body delimited only by the connection
+// closing, cannot be told from a complete one by any client, so a mount behind
+// such a hop can land short. That is still strictly better than the refusal it
+// replaces, and it is the reason this platform's own control plane always
+// declares a length.
 func materializeFile(ctx context.Context, client sdk.Client, sb sandbox.Sandbox, m fileRef) error {
 	resp, err := client.Beta.Files.Download(ctx, m.FileID, sdk.BetaFileDownloadParams{})
 	if err != nil {
 		return err
 	}
 	defer resp.Body.Close()
-	return sb.WriteFileStream(ctx, m.MountPath, resp.Body, resp.ContentLength)
+	if resp.ContentLength >= 0 {
+		return sb.WriteFileStream(ctx, m.MountPath, resp.Body, resp.ContentLength)
+	}
+	spool, size, err := spoolBody(resp.Body)
+	if err != nil {
+		return err
+	}
+	defer spool.Close()
+	return sb.WriteFileStream(ctx, m.MountPath, spool, size)
+}
+
+// spoolBody copies a body of undeclared length to a temp file and returns it
+// rewound, with the count the write seam requires. The +1 on the budget lets an
+// over-budget body be detected rather than truncated into a silently short
+// mount — the executor's checkpoint spool measures the same way.
+//
+// The file is unlinked the moment it exists, so the only thing that holds it is
+// the descriptor and closing it is all any path has to do. Unlike the executor's
+// spools, which run on machines this platform operates, this one holds a
+// customer's file bytes on a customer's own worker: a kill between create and
+// cleanup — an eviction, an OOM, a rolling redeploy — would otherwise leave up
+// to 500 MB of them in /tmp with nothing that ever sweeps it. Where the spool
+// lands is $TMPDIR, the ordinary lever for an operator whose /tmp is a small
+// tmpfs; no knob of our own, because Go already reads that one.
+func spoolBody(body io.Reader) (*os.File, int64, error) {
+	spool, err := os.CreateTemp("", "map-mount-*")
+	if err != nil {
+		return nil, 0, err
+	}
+	if err := os.Remove(spool.Name()); err != nil {
+		spool.Close()
+		return nil, 0, fmt.Errorf("unlink file spool: %w", err)
+	}
+	n, err := io.Copy(spool, io.LimitReader(body, maxSpoolBytes+1))
+	if err != nil {
+		spool.Close()
+		return nil, 0, fmt.Errorf("spool file content: %w", err)
+	}
+	if n > maxSpoolBytes {
+		spool.Close()
+		return nil, 0, fmt.Errorf("file content exceeds the worker's %d-byte spool budget", maxSpoolBytes)
+	}
+	if _, err := spool.Seek(0, io.SeekStart); err != nil {
+		spool.Close()
+		return nil, 0, fmt.Errorf("rewind file spool: %w", err)
+	}
+	return spool, n, nil
 }
 
 // skipFile classifies and logs a tolerated per-file failure — the skipSkill twin:

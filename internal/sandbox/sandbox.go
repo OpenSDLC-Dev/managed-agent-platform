@@ -92,7 +92,26 @@ var (
 	ErrNotWritable = errors.New("sandbox: target cannot be written")
 	// ErrFileTooLarge reports a read of a file above MaxFileBytes.
 	ErrFileTooLarge = errors.New("sandbox: file too large")
+	// ErrSizeNotALength reports a streaming write whose declared size is not a
+	// byte count at all. It exists because the one caller that could produce
+	// one — a download with no Content-Length, which Go reports as -1 (#386) —
+	// was blaming the stream for a number it had chosen itself.
+	ErrSizeNotALength = errors.New("sandbox: size is not a length")
 )
+
+// CheckWriteSize refuses a declared size that is not a byte count, and is the
+// first thing every WriteFileStream does — before the target's directory is
+// created and before a single byte is carried to the sandbox, so the refusal
+// costs the caller nothing and leaves nothing behind. One implementation
+// because it is one rule: left to each backend, both arrived at a refusal by
+// accident and by different routes (a count nothing could equal; an archive
+// writer's own complaint), each of them after the work was already done.
+func CheckWriteSize(size int64) error {
+	if size < 0 {
+		return fmt.Errorf("%w (%d)", ErrSizeNotALength, size)
+	}
+	return nil
+}
 
 // PathNotWritableError is ErrNotWritable with the sandbox's own words for why —
 // the last strerror field of the shell's message ("Read-only file system",
@@ -387,7 +406,14 @@ type Sandbox interface {
 	// whole payload in the caller, so a large mounted file (up to the Files API's
 	// 500 MB cap) streams straight through from object storage. size must equal
 	// the number of bytes src yields: a short or long stream is an error, not a
-	// silently truncated file.
+	// silently truncated file. It must also be a length — a caller holding an
+	// unknown count (a download with no Content-Length reads as -1) has to
+	// measure the bytes before calling, because a negative size is refused
+	// rather than read as "however many arrive" (#386). That refusal is
+	// CheckWriteSize, taken before the target's directory is created and before
+	// any byte is carried to the sandbox, so it costs nothing and leaves
+	// nothing — not a stray parent directory, and not a 500 MB body pushed into
+	// a container that was always going to reject it.
 	WriteFileStream(ctx context.Context, path string, src io.Reader, size int64) error
 	// WriteFiles writes a whole set of files, each exactly as WriteFile writes
 	// one — creating parent directories, overwriting, landing under a temporary
