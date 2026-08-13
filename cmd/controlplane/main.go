@@ -5,7 +5,10 @@
 //	DATABASE_URL          Postgres DSN (required)
 //	CONTROLPLANE_API_KEY  bootstrap management API key (required); seeded
 //	                      (hashed) into api_keys at startup. Changing it and
-//	                      restarting revokes the previous bootstrap key.
+//	                      restarting archives the previous bootstrap key. Naming
+//	                      a value here makes that key env-var-managed: if the
+//	                      value already exists as a console-issued key, the row
+//	                      loses its issuer and any expiry it carried.
 //	BLOB_BACKEND          object storage for skill archives and files: "s3"
 //	                      (default when empty) or "gcs". Empty with no
 //	                      BLOB_ENDPOINT deploys without object storage (the

@@ -874,7 +874,7 @@ deploys the *same* commit, so `helm upgrade` produces a byte-identical pod templ
 Kubernetes correctly changes nothing. (The chart's `checksum/secret` annotation cannot help
 here — with `existingSecret` no Secret is rendered, so it hashes an empty template on every
 run, which is what the three deployment templates' comments say.) The pods would go on
-serving the *revoked* key, and `controlplane`'s rotation-by-restart semantics
+serving the *archived* key, and `controlplane`'s rotation-by-restart semantics
 (`EnsureAPIKey`, `internal/api/auth.go`) mean the new key is not even registered until one
 restarts. So the workflow keeps the one word `kubectl apply` prints — created, configured or
 unchanged — and rolls every Deployment in the release when, and only when, the Secret

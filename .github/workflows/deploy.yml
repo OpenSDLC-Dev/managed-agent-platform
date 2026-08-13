@@ -524,7 +524,7 @@ jobs:
           # every run; and the case this matters in — a workflow_dispatch after a
           # human rotated a Secret Manager value — deploys the same commit, so
           # the pod template is byte-identical and Kubernetes correctly does
-          # nothing. The pods would go on serving the revoked key and the old
+          # nothing. The pods would go on serving the archived key and the old
           # DSN, and the smoke check below would fail with the *new* key against
           # them. So record whether the Secret changed; the step after the
           # upgrade rolls the pods when it did.
