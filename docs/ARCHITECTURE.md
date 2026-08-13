@@ -378,9 +378,10 @@ where the SDK retries it after an unsupported-version answer), and against an ol
 discover plus the legacy `initialize` and `notifications/initialized`, three requests, before
 `Connect` returns. That handshake is what per-work-item connections cost; a client with no
 state to lose is what they buy.
-Its caller is the executor's MCP driver (`internal/executor/mcpwork.go`), which connects once
-per work item to discover a server's tools into `mcp_catalogs`. Nothing calls `CallTool` yet —
-offering MCP tools to a model is a later slice.
+Its callers are the two halves of the executor's MCP driver, each connecting once per work item:
+`mcpwork.go` discovers a server's tools into `mcp_catalogs`, and `mcpexec.go` calls one of them
+for a model that asked. The brain is what puts a tool in front of the model to ask for
+(`internal/brain/mcptools.go`, plan 29 slice 4b).
 
 | File | Contents |
 |---|---|

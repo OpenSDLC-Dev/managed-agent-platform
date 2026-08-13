@@ -801,6 +801,10 @@ func (b *Brain) commitUnderLock(ctx context.Context, sid domain.ID, batch []even
 	return nil
 }
 
+// maxFailureMessage bounds the text a session.error carries. Generous enough
+// that no real explanation is cut, small enough that none of them is a payload.
+const maxFailureMessage = 8 << 10
+
 // failTurn records a model-side or deterministic failure on the log. If no
 // input is pending past the watermark, the session idles with
 // retries_exhausted (v1 has no automatic retry budget — documented in
@@ -812,7 +816,17 @@ func (b *Brain) failTurn(ctx context.Context, sid domain.ID, item *queue.Item, s
 	// The message may quote endpoint bytes (an error body, a stream error),
 	// and a NUL there would fault the session.error append — the failure
 	// path failing, the same wedge one level up (#228).
-	err := b.commitFailure(ctx, sid, item, span, watermark, toolset.SanitizeText(msg))
+	msg = toolset.SanitizeText(msg)
+	// Every string a message is built from belongs to somebody else, and none of
+	// them is capped where it is stored: an endpoint's error body, a server name
+	// off the agent spec, a permission policy type as the spec spelled it. The
+	// event sits on the session stream for as long as the session does and every
+	// client replays it, so a message past this is a payload rather than an
+	// explanation.
+	if len(msg) > maxFailureMessage {
+		msg = toolset.TruncateRunes(msg, maxFailureMessage) + "[truncated]"
+	}
+	err := b.commitFailure(ctx, sid, item, span, watermark, msg)
 	if span != nil {
 		span.Finish(ctx, true, err)
 	}

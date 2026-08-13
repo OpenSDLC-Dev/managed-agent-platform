@@ -313,6 +313,81 @@ func TestACorruptMCPServerSpecFailsTheTurn(t *testing.T) {
 	}
 }
 
+// A name the model was never offered is treated as client-executed: the
+// platform must not run a tool it does not recognise as its own, and a
+// client-executed intent is the arm that strands nothing — it waits for a
+// result the client posts, or for the interrupt that ends the turn. This slice
+// is what makes the branch reachable in ordinary use: an MCP tool the model saw
+// on an earlier turn can go unoffered on a later one (its server's listing
+// failed, its name lost a contest, the request's definition budget ran out) and
+// the model calls it anyway.
+func TestAToolTheModelWasNotOfferedIsClientExecuted(t *testing.T) {
+	h := newHarness(t, [][]provider.Chunk{{
+		toolUseChunk("toolu_1", "mcp__docs__search"),
+		done("tool_use", 3),
+	}}, nil)
+	// The server's listing failed, so nothing of its is offered — and the model
+	// asks for one of its tools regardless.
+	mcpAgent(t, h, `{"type":"mcp_toolset","mcp_server_name":"docs"}`)
+	listing(t, h, "failed", `[]`)
+
+	h.wake(t, "search the docs")
+	h.runOnce(t)
+
+	if n := len(h.eventsOfType(t, domain.EventAgentMCPToolUse)); n != 0 {
+		t.Errorf("agent.mcp_tool_use events = %d, want 0 — the platform must not run what it did not offer", n)
+	}
+	custom := h.eventsOfType(t, domain.EventAgentCustomToolUse)
+	if len(custom) != 1 {
+		t.Fatalf("agent.custom_tool_use events = %d, want 1", len(custom))
+	}
+	for _, k := range []queue.Kind{queue.MCPExec, queue.WebExec, queue.ToolExec} {
+		if got := h.liveOf(t, k); got != 0 {
+			t.Errorf("%s items = %d, want 0 — the client answers a custom tool", k, got)
+		}
+	}
+	if got := h.status(t); got != "running" {
+		t.Errorf("status = %q, want running (waiting on the client's result)", got)
+	}
+}
+
+// A session.error sits on the stream for as long as the session does, and every
+// string its message is built from belongs to somebody else — here a permission
+// policy type as the agent spec spelled it, capped nowhere it is stored.
+func TestAFailureMessageIsBounded(t *testing.T) {
+	huge := strings.Repeat("p", 100_000)
+	h := newHarness(t, [][]provider.Chunk{{textChunk(0, "unused"), done("end_turn", 3)}}, nil)
+	mcpAgent(t, h, `{"type":"mcp_toolset","mcp_server_name":"docs",
+		"default_config":{"permission_policy":{"type":"`+huge+`"}}}`)
+	listing(t, h, "ready", searchTool)
+
+	h.wake(t, "search the docs")
+	h.runOnce(t)
+
+	errs := h.eventsOfType(t, domain.EventSessionError)
+	if len(errs) != 1 {
+		t.Fatalf("session.error count = %d, want 1", len(errs))
+	}
+	var body struct {
+		Error struct {
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(errs[0].Body, &body); err != nil {
+		t.Fatal(err)
+	}
+	if body.Error.Message == "" {
+		t.Fatal("the error carries no message")
+	}
+	// Well under the policy type it quotes, and marked where it was cut.
+	if len(body.Error.Message) > 16<<10 {
+		t.Errorf("message is %d bytes, want it bounded", len(body.Error.Message))
+	}
+	if !strings.HasSuffix(body.Error.Message, "[truncated]") {
+		t.Errorf("message = %q…, want it marked truncated", body.Error.Message[:64])
+	}
+}
+
 // An agent with no MCP server at all never reads the catalog and never
 // suspends: the whole path is inert for the sessions that do not use it.
 func TestASessionWithoutMCPNeverWaits(t *testing.T) {
