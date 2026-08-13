@@ -355,6 +355,63 @@ func TestIdentityLaneEnvironmentKeyRoutesRequireAdmin(t *testing.T) {
 	}
 }
 
+// TestIdentityLaneAPIKeyRoutesRequireAdmin is the environment-key section's twin
+// for management keys (plan 32 slice 2, #378), and gated the same way and for a
+// sharper reason: this surface mints the credential that reaches every /v1 route,
+// so a developer who could issue one would hold admin by another name. The
+// listing is gated with the mutations because which credentials exist, what they
+// are named and who issued them is itself the inventory an attacker would want.
+func TestIdentityLaneAPIKeyRoutesRequireAdmin(t *testing.T) {
+	s := newLaneServer(t)
+
+	for _, tc := range []struct {
+		role string
+		want int
+	}{
+		{role: "platform-read", want: http.StatusForbidden},
+		{role: "platform-devs", want: http.StatusForbidden},
+		{role: "platform-admins", want: http.StatusOK},
+	} {
+		status, errType := laneStatus(t, s.bearer(http.MethodGet, consoleAPIKeysPath, s.token(tc.role), nil))
+		if status != tc.want {
+			t.Errorf("GET api_keys as %s: status %d, want %d (error type %q)", tc.role, status, tc.want, errType)
+		}
+		if tc.want == http.StatusForbidden && errType != "permission_error" {
+			t.Errorf("GET api_keys as %s: error type %q, want permission_error", tc.role, errType)
+		}
+
+		body := map[string]any{"name": "key-" + tc.role}
+		status, errType = laneStatus(t, s.bearer(http.MethodPost, consoleAPIKeysPath, s.token(tc.role), body))
+		if status != tc.want {
+			t.Errorf("POST api_keys as %s: status %d, want %d (error type %q)", tc.role, status, tc.want, errType)
+		}
+	}
+
+	// The update route denies before it decides whether the key exists — a 404
+	// here would be a probe for key ids, from a caller who may not read the list.
+	status, errType := laneStatus(t, s.bearer(http.MethodPost,
+		consoleAPIKey("apikey_"+strings.Repeat("a", 24)), s.token("platform-devs"),
+		map[string]any{"status": "archived"}))
+	if status != http.StatusForbidden || errType != "permission_error" {
+		t.Errorf("update as a developer: status %d, error type %q, want 403 permission_error", status, errType)
+	}
+
+	// An admin who issues a key over the identity lane is recorded as its creator
+	// by their stable principal_ id — the audit answer plan 31 shipped principals
+	// for, and the reason created_by is not merely decorative.
+	_, _, raw := laneRead(t, s.bearer(http.MethodPost, consoleAPIKeysPath, s.token("platform-admins"),
+		map[string]any{"name": "issued-by-a-human"}))
+	var issued struct {
+		CreatedBy struct{ ID, Type string } `json:"created_by"`
+	}
+	if err := json.Unmarshal([]byte(raw), &issued); err != nil {
+		t.Fatalf("decode issuance: %v (body %s)", err, raw)
+	}
+	if issued.CreatedBy.Type != "principal" || !strings.HasPrefix(issued.CreatedBy.ID, "principal_") {
+		t.Errorf("created_by = %+v, want the issuing human's principal_ id", issued.CreatedBy)
+	}
+}
+
 // TestIdentityLaneRejectionsAreUniform401 pins that every bad credential answers
 // alike. The lane must not become an oracle telling an attacker whether the
 // issuer was wrong, the audience was wrong, or the token had merely expired.

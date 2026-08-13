@@ -5,9 +5,7 @@ import (
 	"net/http"
 	"net/url"
 	"strconv"
-	"strings"
 	"time"
-	"unicode/utf8"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
 	"github.com/jackc/pgx/v5"
@@ -51,6 +49,19 @@ const (
 // platform's reserved tenancy keys (principle 5); until they become real
 // scoping, any other value names an organization that does not exist.
 const reservedOrganization = "default"
+
+// consoleOrganization resolves the {org} segment every console-API route carries,
+// shared by both surfaces rather than spelled once each. The point of the 404 is
+// that the namespace is no better an enumeration oracle than /v1 is, and that
+// argument only holds if the two surfaces answer alike — which a second copy
+// cannot guarantee once #56 makes org a real tenancy key and someone updates one
+// of them.
+func consoleOrganization(r *http.Request) error {
+	if org := r.PathValue("org"); org != reservedOrganization {
+		return errNotFound("organization %s not found", org)
+	}
+	return nil
+}
 
 // consoleKeyLimit is both the default and the maximum page size for the key
 // listing — the reference console's own listing reported limit 100, and a
@@ -109,8 +120,8 @@ type paginationJSON struct {
 // 404 shape an absent environment gets, so the namespace is no better an
 // enumeration oracle than /v1 is.
 func consoleEnvironmentID(r *http.Request) (string, error) {
-	if org := r.PathValue("org"); org != reservedOrganization {
-		return "", errNotFound("organization %s not found", org)
+	if err := consoleOrganization(r); err != nil {
+		return "", err
 	}
 	id := r.PathValue("id")
 	if err := checkID(id, "environment"); err != nil {
@@ -162,16 +173,16 @@ func (s *server) createEnvironmentKey(r *http.Request) (any, error) {
 	if err := rejectUnknownKeys(obj, "name"); err != nil {
 		return nil, err
 	}
-	name, err := requiredString(obj, "name")
+	// Shared with the management-key surface (consoleapikeys.go): both are an
+	// operator's label on a credential, read back in a console listing, and both
+	// bound on environmentKeyNameMax. Two copies of the trim-and-measure would let
+	// the two contracts drift the first time one of them gained a character-class
+	// rule or a different bound.
+	namePtr, err := consoleKeyName(obj, true)
 	if err != nil {
 		return nil, err
 	}
-	// Trim before measuring and before storing: a name is a label an operator
-	// reads back in a list, and one that is all whitespace names nothing.
-	name = strings.TrimSpace(name)
-	if name == "" || utf8.RuneCountInString(name) > environmentKeyNameMax {
-		return nil, errInvalid("name must be 1-%d characters", environmentKeyNameMax)
-	}
+	name := *namePtr
 
 	// One transaction around check → insert, the idiom session create already
 	// uses (internal/api/sessions.go): FOR SHARE on the environment row blocks a

@@ -106,7 +106,9 @@ func TestEveryIdentityReachableRouteDeclaresARole(t *testing.T) {
 // Console routes are excluded: their patterns are built from constants rather
 // than literals, and they need a real environment to address, so they are
 // covered by TestIdentityLaneEnvironmentKeyRoutesRequireAdmin and
-// TestAnAdminCanWorkTheEnvironmentKeySurfaceEndToEnd instead.
+// TestAnAdminCanWorkTheEnvironmentKeySurfaceEndToEnd — and, for the
+// management-key section, TestIdentityLaneAPIKeyRoutesRequireAdmin and
+// TestAnAdminCanWorkTheAPIKeySurfaceEndToEnd — instead.
 func TestTheMatrixCoversEveryAnnotatedRoute(t *testing.T) {
 	inSource := map[string]bool{}
 	for _, reg := range parseRoutes(t, "server.go") {
@@ -191,7 +193,17 @@ func laneOf(pattern string) lane {
 	if strings.Contains(pattern, "gateconfig.Path") {
 		return laneGate
 	}
-	if strings.Contains(pattern, "consoleTokensPath") || strings.Contains(pattern, "consoleRevokePath") {
+	// Every console-API route registers `"METHOD "+consoleSomethingPath`, which
+	// render() spells `METHOD +consoleSomethingPath`. Matching on "+console" is
+	// therefore a test for *a constant of that family*, not for the word: a bare
+	// "console" anywhere would also claim a literal route like
+	// `GET /v1/console_settings`, which dispatches through the management lane in
+	// production and would then be excluded from the matrix join — free to declare
+	// an over-permissive role with the suite green. The family form is still the
+	// right shape rather than a list of the constants that exist today, because a
+	// list would classify the next console route as a fallback closure, and
+	// fallback is the one lane exempt from the declares-a-role rule.
+	if strings.Contains(pattern, "+console") {
 		return laneConsole
 	}
 

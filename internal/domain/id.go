@@ -47,6 +47,13 @@ const (
 	// knownPrefixes would widen the id shape every wire path accepts in order
 	// to validate something no wire path ever receives.
 	PrefixPrincipal = "principal"
+	// PrefixAPIKey names a management credential's row. The reference uses the
+	// same spelling — its console addressed a probe key as
+	// `apikey_013EepdgX96Ux6op9hfWqjqJ` (#378) — but on its console's private API,
+	// not on the wire, so this joins the private family too. It was a bare string
+	// literal in internal/api until plan 32 gave the console a route that has to
+	// validate one on a path; the two spellings are the same constant now.
+	PrefixAPIKey = "apikey"
 )
 
 // altSessionPrefix is accepted on input for wire compatibility: some Anthropic
