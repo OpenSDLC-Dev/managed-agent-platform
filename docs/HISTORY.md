@@ -38,6 +38,71 @@ new directory and in-repo citations re-pointed in the moving PR (plan
 
 ---
 
+## The docker wrapper's no-state rule, narrowed rather than kept (#390), 2026-08-13
+
+A decision this repo made deliberately, recorded as a property in
+[docs/history/2026-07.md](./history/2026-07.md) § *"`internal/sandbox` — the hands"*, and
+reversed here in one specific direction. It is written down because the reversal is not
+visible from the diff: the code it changes is four lines, and the reasoning it overturns
+is a paragraph somewhere else.
+
+**What was decided.** The docker exec wrapper keeps **no state inside the container**. The
+stated reason: "a marker file under /tmp — the first design — let a command forge a
+timeout it never hit or erase one it did." A test pinned it, asserting the wrapper's script
+mentioned no writable path at all. Everything the sandbox knew about a command's deadline
+came from outside: two probes of the command's process, run against the daemon on Exec's
+own clock.
+
+**What broke it.** [#390](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/390):
+those two probes each keep their own clock, and under host load they are scheduled *after*
+the watchdog's kill has landed. The daemon then answers, correctly, that the process is
+gone; both terms come back false; and a command the platform genuinely timed out is
+reported as an ordinary exit 137. The observation was one run of
+`TestShell/TimeoutDoesNotKillTheSession` taking 135 seconds for a command with a
+one-second deadline.
+
+**Why the reversal holds where the first design did not.** The first design used the mark
+*as the evidence*, so erasing it hid a real timeout — the objection was exact and it was
+right. Here the mark is one OR-term beside two host-measured ones, and the structure is
+what makes it safe:
+
+- **Erasing it** returns the classification to the probes — precisely where this backend
+  stood before the mark existed. It is not a regression, it is a no-op.
+- **Forging it** requires also exiting 137, and buys a tenant a `TimedOut` label on its own
+  tool call. It cannot extend a deadline, reach another session, or suppress anything.
+- **`overran`** — the term that carries the deadline's actual guarantee — never reads the
+  mark at all, so the guarantee is still measured entirely from outside the container.
+
+Every term only ever *adds* a timeout, which is the property that lets in-container state
+be weighed at all, and it is the same argument the Kubernetes backend already made when
+[#95](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/95) and
+[#110](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/110) cost it the same
+classification. That backend's own comment noted the mark was "the thing docker keeps out
+of its container on purpose"; that sentence is now out of date, and this section is why.
+
+**What was not reversed.** The deadline is still enforced from outside, on Exec's clock,
+because the watchdog is a process the command can kill. The wrapper still bakes no
+writable path into its script — the state path arrives as argv, random per exec, so a
+tenant cannot pre-create a mark for an exec that has not started. And the test that pinned
+the old rule was not deleted: it was rewritten to pin the narrowed one, that the mark is
+the *only* write the wrapper makes. A change that had merely stopped tripping the old
+assertion — the mark's path is passed in rather than written in the script, so the original
+string check would have gone on passing — would have left the repo with a documented rule
+its code no longer followed.
+
+**Alternative considered and rejected.** The issue itself proposed the cheaper fix: have
+the pre-deadline probe read a "process gone" answer that arrives *after* the deadline as a
+timeout, since it cannot then distinguish a command the watchdog killed from one that
+finished early. It needs no container state at all. It was rejected because it trades one
+misclassification for another under the same load: a command that exits early and leaves a
+straggler holding the exec's output stream — `sleep 300 & echo started`, an ordinary agent
+pattern, pinned by `TestAStragglerHoldingTheStreamIsNotTheCommand` — would start reading as
+a timeout on exactly the loaded hosts this fixes. The mark leaves that command alone,
+because the watchdog re-checks `kill -0` and never marks a command that is already gone.
+Positive evidence beats a widened guess.
+
+---
+
 ## Management-key inferences settled against the live console (#389) — three of five went against us, 2026-08-13
 
 Plan 32 shipped with five INFERRED entries in docs/DIVERGENCES.md: behaviours the
