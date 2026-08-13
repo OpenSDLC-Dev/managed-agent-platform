@@ -45,10 +45,12 @@ func (q *Queue) KeepLease(ctx context.Context, item *Item, ttl time.Duration) (c
 	// this *later* than the instant the database bought the lease — later and never
 	// earlier, the same deliberate direction as the renewal anchor below, so the
 	// budget can outlast the real lease but never fall short of it. Nothing of a
-	// lost lease commits either way — Extend's `lease_expires_at = $2` guard fails
-	// the moment another claimant has taken the item — but the holder can go on
-	// working past the point that could happen, so the gap is worth keeping small
-	// rather than calling it free.
+	// lost lease commits either way, and it takes both guards to say so: Extend's
+	// `lease_expires_at = $2` fails a renewal once another claimant has taken the
+	// item, and the settling Complete/Requeue carry the same proof, which is what
+	// covers a reclaim landing after the keeper has closed healthy. What the
+	// overstatement does cost is a holder working past the point that could
+	// happen, so the gap is worth keeping small rather than calling it free.
 	bought := time.Now()
 	go func() {
 		defer close(k.done)
