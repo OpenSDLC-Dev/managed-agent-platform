@@ -139,6 +139,16 @@ func HasUnansweredPlatformToolUse(ctx context.Context, q Querier, sessionID doma
 	return hasUnansweredToolUse(ctx, q, sessionID, []string{string(domain.EventAgentToolUse)}, extraRefs)
 }
 
+// HasUnansweredMCPToolUse reports whether any MCP call still lacks a result.
+// Every settlement asks it first, because the answer decides a work kind no
+// other driver can serve: only the platform's MCP driver answers an
+// agent.mcp_tool_use — a client may post neither the call nor its result, and a
+// BYOC worker's contract has no MCP surface at all — so a session left with one
+// outstanding and no mcp_exec queued waits forever.
+func HasUnansweredMCPToolUse(ctx context.Context, q Querier, sessionID domain.ID, extraRefs []string) (bool, error) {
+	return hasUnansweredToolUse(ctx, q, sessionID, []string{string(domain.EventAgentMCPToolUse)}, extraRefs)
+}
+
 // UnansweredPlatformToolNames lists, in log order, the tool names of the
 // platform built-in calls HasUnansweredPlatformToolUse counts. The name is
 // what routes the work: web_fetch/web_search run in the executor's own

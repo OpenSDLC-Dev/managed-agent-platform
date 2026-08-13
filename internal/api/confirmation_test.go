@@ -142,6 +142,72 @@ func TestConfirmationAllowWebToolResumesWithWebExec(t *testing.T) {
 	}
 }
 
+// appendUngatedMCPToolUse plants an MCP call the brain never gated: the model
+// asked for it, the policy allowed it, and it is waiting on the platform's MCP
+// driver. It is the shape a confirmation resume has to route around, and no
+// confirmation ever names it.
+func appendUngatedMCPToolUse(t *testing.T, s *tserver, sessionID, server, name string) string {
+	t.Helper()
+	return appendGatedToolUse(t, s, sessionID, domain.EventAgentMCPToolUse,
+		`{"name":"`+name+`","mcp_server_name":"`+server+
+			`","input":{},"evaluated_permission":"allow","session_thread_id":null}`)
+}
+
+// A confirmation resume schedules the MCP call ahead of the built-ins it just
+// cleared, web and sandbox alike. Only this platform's mcp_exec driver answers
+// an agent.mcp_tool_use — a client posts neither the call nor its result, and a
+// BYOC worker has no MCP surface — so scheduling anything else first hands the
+// tool_exec a worker may claim a log it cannot finish.
+func TestConfirmationResumesMCPAheadOfTheBuiltins(t *testing.T) {
+	s := newTestServer(t)
+	sessionID := eventsFixture(t, s)
+	appendUngatedMCPToolUse(t, s, sessionID, "docs", "search")
+	webAsk := appendAskToolUse(t, s, sessionID, "web_search")
+	bashAsk := appendAskToolUse(t, s, sessionID, "bash")
+
+	sendEvents(t, s, sessionID,
+		confirm(webAsk, "allow", nil),
+		confirm(bashAsk, "allow", nil))
+
+	if got := s.sessionStatus(sessionID); got != "running" {
+		t.Errorf("status after allow = %q, want running", got)
+	}
+	if n := s.liveWork(sessionID, queue.MCPExec); n != 1 {
+		t.Fatalf("live mcp_exec = %d, want 1", n)
+	}
+	if n := s.liveWork(sessionID, queue.WebExec); n != 0 {
+		t.Errorf("live web_exec = %d, want 0 — the MCP pass chains it", n)
+	}
+	if n := s.liveWork(sessionID, queue.ToolExec); n != 0 {
+		t.Errorf("live tool_exec = %d, want 0 — the MCP pass chains it", n)
+	}
+	if n := s.liveWork(sessionID, queue.ModelTurn); n != 0 {
+		t.Errorf("live model_turn = %d, want 0", n)
+	}
+}
+
+// The same arm on the path that would otherwise schedule nothing at all: every
+// gated tool is denied, so the denials answer them, but the MCP call is still
+// outstanding. Without the arm this resume enqueues no work — the denied calls
+// are answered so no executor is wanted, and the MCP call keeps the brain from
+// being woken — and the session commits running with no trigger left, which
+// also refuses archive and delete until a user.interrupt.
+func TestConfirmationDenyStillSchedulesAnOutstandingMCPCall(t *testing.T) {
+	s := newTestServer(t)
+	sessionID := eventsFixture(t, s)
+	appendUngatedMCPToolUse(t, s, sessionID, "docs", "search")
+	bashAsk := appendAskToolUse(t, s, sessionID, "bash")
+
+	sendEvents(t, s, sessionID, confirm(bashAsk, "deny", map[string]any{"deny_message": "no"}))
+
+	if n := s.liveWork(sessionID, queue.MCPExec); n != 1 {
+		t.Fatalf("live mcp_exec = %d, want 1", n)
+	}
+	if n := s.liveWork(sessionID, queue.ModelTurn); n != 0 {
+		t.Errorf("live model_turn = %d, want 0 — the MCP call is unanswered", n)
+	}
+}
+
 func TestConfirmationDenyAnswersWithErrorAndResumesBrain(t *testing.T) {
 	s := newTestServer(t)
 	sessionID := eventsFixture(t, s)

@@ -393,14 +393,31 @@ func (e *Executor) process(ctx context.Context, item *queue.Item) (err error) {
 					return err
 				}
 			}
-			// A web call this sandbox pass filtered out and left unanswered is
-			// healed with a chained web_exec rather than abandoned: every
-			// enqueue site excludes the shape (the web-first hold-back), so a
-			// tool_exec coexisting with an unanswered web call is a log no
-			// current code produces — but completing the item over one would
-			// strand the session permanently, and the heal is the same chain
-			// the web driver runs in the other direction.
+			// A web or MCP call this sandbox pass left unanswered is healed
+			// with a chained work item rather than abandoned: every enqueue
+			// site holds a tool_exec back behind both shapes, so a tool_exec
+			// coexisting with either outstanding is a log no current code
+			// produces — but completing the item over one would strand the
+			// session permanently (HasUnansweredToolUse counts it, so no
+			// model_turn follows either), and the heal is the same chain the
+			// web and MCP drivers run in the other direction.
+			//
+			// MCP first, for the reason it is first everywhere: only this
+			// platform's MCP driver answers an agent.mcp_tool_use, and a
+			// tool_exec is the one kind a BYOC worker can claim — handing it
+			// the log while an MCP call is outstanding shows a customer-hosted
+			// worker a call it has no surface to answer.
 			if complete {
+				mcpPending, err := events.HasUnansweredMCPToolUse(ctx, tx, item.SessionID, nil)
+				if err != nil {
+					return err
+				}
+				if mcpPending {
+					if _, err := e.queue.Enqueue(ctx, tx, item.EnvironmentID, item.SessionID, queue.MCPExec); err != nil {
+						return err
+					}
+					return e.queue.Complete(ctx, tx, item)
+				}
 				names, err := events.UnansweredPlatformToolNames(ctx, tx, item.SessionID, nil)
 				if err != nil {
 					return err

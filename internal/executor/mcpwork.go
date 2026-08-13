@@ -3,6 +3,7 @@ package executor
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/url"
 	"regexp"
@@ -92,6 +93,18 @@ func (e *Executor) processMCP(ctx context.Context, item *queue.Item) (err error)
 	sess, live, err := e.sessionForRun(ctx, item)
 	if err != nil || !live {
 		return err
+	}
+
+	// Calls first, and only calls: a turn stopped on an unanswered call is
+	// waiting on this pass, while a listing is wanted by a turn that has not
+	// started. Spending this pass's budget dialling for a catalog would leave
+	// that turn stopped for as long as the dials take.
+	calls, err := e.unansweredMCPToolUses(ctx, item.SessionID)
+	if err != nil {
+		return err
+	}
+	if len(calls) > 0 {
+		return e.answerMCPCalls(ctx, item, sess, calls)
 	}
 
 	pending, err := e.undiscoveredServers(ctx, item.SessionID, sess.mcpServers)
@@ -232,13 +245,13 @@ func (e *Executor) discoverServer(ctx context.Context, cfg domain.EnvironmentCon
 	}()
 	row = catalogRow{name: s.Name, url: s.URL, status: "failed"}
 
-	parsed, err := url.Parse(s.URL)
-	if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" {
-		row.reason = "the server's url is not an http or https URL"
+	host, err := mcpEndpointHost(s.URL)
+	if err != nil {
+		row.reason = err.Error()
 		return row
 	}
-	if !mcpEgressAllowed(cfg, parsed.Hostname()) {
-		row.reason = egressRefusal(cfg, parsed.Hostname())
+	if !mcpEgressAllowed(cfg, host) {
+		row.reason = egressRefusal(cfg, host)
 		return row
 	}
 
@@ -526,6 +539,19 @@ func redactURL(match string) string {
 // sends them to a list that is not being consulted — and they may well have put
 // it there already, since a malformed block can carry both admitting fields and
 // still be refused.
+// mcpEndpointHost validates a declared endpoint and returns the host the egress
+// check judges. Both halves of this driver ask it — discovery before it lists,
+// execution before it calls — so what counts as a usable MCP endpoint has one
+// definition: a scheme this client speaks and a host to dial. Its error is
+// already a reason a catalog row or a model can be shown.
+func mcpEndpointHost(endpoint string) (string, error) {
+	u, err := url.Parse(endpoint)
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+		return "", errors.New("the server's url is not an http or https URL")
+	}
+	return u.Hostname(), nil
+}
+
 func egressRefusal(cfg domain.EnvironmentConfig, host string) string {
 	if cfg.Networking.Type == domain.NetLimited {
 		return fmt.Sprintf("host %q is not admitted by this environment's `limited` networking policy "+

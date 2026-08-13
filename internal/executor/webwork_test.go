@@ -293,6 +293,31 @@ func TestMixedTurnChainsToolExecAfterWebCalls(t *testing.T) {
 	}
 }
 
+// An outstanding MCP call takes the web pass's chain ahead of the sandbox
+// call: a tool_exec is the one kind a BYOC worker claims, and a worker has no
+// surface to answer an MCP call with, so the same hold-back that keeps a
+// tool_exec behind a web call keeps it behind this one.
+func TestWebPassChainsMCPAheadOfTheSandbox(t *testing.T) {
+	h := webHarness(t, `{"results":[]}`, "")
+	h.appendMCPToolUse(t, "docs", "search", `{}`)
+	h.suspendWeb(t, searchUse("q"), writeUse("out.txt", "hello"))
+
+	h.stepOnce(t)
+
+	if n := h.liveOf(t, queue.WebExec); n != 0 {
+		t.Errorf("live web_exec = %d, want 0 (completed)", n)
+	}
+	if n := h.liveOf(t, queue.MCPExec); n != 1 {
+		t.Fatalf("live mcp_exec = %d, want 1 (chained ahead of the sandbox call)", n)
+	}
+	if n := h.liveOf(t, queue.ToolExec); n != 0 {
+		t.Errorf("live tool_exec = %d, want 0 — the MCP pass chains it in turn", n)
+	}
+	if n := h.liveOf(t, queue.ModelTurn); n != 0 {
+		t.Errorf("live model_turn = %d, want 0 — two calls are still unanswered", n)
+	}
+}
+
 func TestWebSearchUnconfiguredAnswersIsError(t *testing.T) {
 	// No TavilyAPIKey: the searcher is unconfigured. The call still gets an
 	// answer — an is_error naming the missing variable — so the session

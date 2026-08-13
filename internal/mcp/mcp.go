@@ -174,23 +174,44 @@ type Conn struct {
 // default, per header block, which is a bound on the peak one block reaches and
 // deliberately not a total: how many blocks a connection answers is not this
 // package's to know, and MaxResponseBytes says why.
-var DefaultClient = &http.Client{
-	Timeout: DialTimeout,
-	CheckRedirect: func(*http.Request, []*http.Request) error {
-		return http.ErrUseLastResponse
-	},
-	Transport: &http.Transport{
-		DialContext: (&net.Dialer{
-			Timeout: DialTimeout,
-			Control: dialguard.Control(dialguard.IPAllowed),
-		}).DialContext,
-		ForceAttemptHTTP2:      true,
-		MaxIdleConnsPerHost:    2,
-		IdleConnTimeout:        90 * time.Second,
-		TLSHandshakeTimeout:    10 * time.Second,
-		ExpectContinueTimeout:  time.Second,
-		MaxResponseHeaderBytes: maxHeaderBytesPerResponse,
-	},
+var DefaultClient = guardedClient(DialTimeout)
+
+// CallClient is DefaultClient's twin for running tools, and it exists because
+// http.Client.Timeout bounds the whole request including the body read: a
+// `tools/call` response is not complete until the tool is, so a client whose cap
+// is the dial budget cannot run a tool that takes longer than a dial. That is
+// the right cap for a handshake and a listing, where the server is answering
+// from what it already knows, and the wrong one for a tool that goes and does
+// something — a query, a build, a fetch of its own.
+//
+// The cap here is [CallTimeout], which is what a tool call gets on this platform
+// already: a remote tool should not outlive a local one by default. Everything
+// else is DefaultClient's, the address guard included — the URL is
+// customer-supplied on this path exactly as it is on that one.
+var CallClient = guardedClient(CallTimeout)
+
+// guardedClient builds one of the two, differing only in how long a single
+// request may take. Everything a customer-supplied URL makes necessary is here
+// rather than at the call sites, so neither client can be built without it.
+func guardedClient(requestTimeout time.Duration) *http.Client {
+	return &http.Client{
+		Timeout: requestTimeout,
+		CheckRedirect: func(*http.Request, []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+		Transport: &http.Transport{
+			DialContext: (&net.Dialer{
+				Timeout: DialTimeout,
+				Control: dialguard.Control(dialguard.IPAllowed),
+			}).DialContext,
+			ForceAttemptHTTP2:      true,
+			MaxIdleConnsPerHost:    2,
+			IdleConnTimeout:        90 * time.Second,
+			TLSHandshakeTimeout:    10 * time.Second,
+			ExpectContinueTimeout:  time.Second,
+			MaxResponseHeaderBytes: maxHeaderBytesPerResponse,
+		},
+	}
 }
 
 // maxHeaderBytesPerResponse bounds a raw header block before net/http parses

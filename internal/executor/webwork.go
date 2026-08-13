@@ -69,12 +69,26 @@ func (e *Executor) processWeb(ctx context.Context, item *queue.Item) (err error)
 
 	// Commit the results, the follow-on work, and the item's fate together
 	// under the session lock, mirroring process's settlement. Once every web
-	// call is answered: sandbox built-ins still unanswered ride a chained
-	// tool_exec (the second half of the web-first hold-back); nothing platform
-	// outstanding but custom/MCP calls means the client resumes the turn; a
-	// fully-answered set wakes the brain.
+	// call is answered: an outstanding MCP call rides a chained mcp_exec, which
+	// takes precedence over the sandbox built-ins for the reason it does
+	// everywhere — the tool_exec that would otherwise come next is the one kind
+	// a BYOC worker claims, and it has no surface to answer an MCP call with;
+	// sandbox built-ins still unanswered ride a chained tool_exec (the second
+	// half of the web-first hold-back); nothing platform or MCP outstanding but
+	// custom calls means the client resumes the turn; a fully-answered set
+	// wakes the brain.
 	opts := events.AppendOptions{
 		Then: func(ctx context.Context, tx pgx.Tx) error {
+			mcpPending, err := events.HasUnansweredMCPToolUse(ctx, tx, item.SessionID, nil)
+			if err != nil {
+				return err
+			}
+			if mcpPending {
+				if _, err := e.queue.Enqueue(ctx, tx, item.EnvironmentID, item.SessionID, queue.MCPExec); err != nil {
+					return err
+				}
+				return e.queue.Complete(ctx, tx, item)
+			}
 			platformPending, err := events.UnansweredPlatformToolNames(ctx, tx, item.SessionID, nil)
 			if err != nil {
 				return err

@@ -68,15 +68,15 @@ type Content struct {
 // outlive a local one by default.
 //
 // It is a ceiling on the aggregate and not a promise about how long a call may
-// run, and under [DefaultClient] it is not the binding constraint at all: that
-// client sets Timeout to [DialTimeout], a whole-request cap net/http applies to
-// the body read as well, and a `tools/call` response is not complete until the
-// tool is. So a call through the production client is bounded at thirty seconds
+// run, and which client carries the call decides whether it binds at all.
+// [DefaultClient] sets Timeout to [DialTimeout], a whole-request cap net/http
+// applies to the body read as well — and a `tools/call` response is not complete
+// until the tool is, so a call through that client is bounded at thirty seconds
 // and an MCP tool that takes longer fails every time, whatever this constant
-// says — the same relationship [ListTimeout] has with that cap, where the
-// aggregate bounds the pages and the client bounds each one. Whether an MCP tool
-// deserves a client of its own with a longer request cap is a question for the
-// slice that first calls one; today nothing does, so nothing here answers it.
+// says. That is why [CallClient] exists and why the executor calls through it:
+// its request cap is this same budget, leaving the relationship [ListTimeout]
+// has with a client's cap, where the aggregate bounds the round trips and the
+// client bounds each one.
 const CallTimeout = 2 * time.Minute
 
 // CallTool runs one tool on the connected server and returns its answer.
