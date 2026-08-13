@@ -14,6 +14,7 @@ import (
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/events"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/mcp"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/mimetab"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/queue"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/toolset"
 	"github.com/jackc/pgx/v5"
@@ -337,11 +338,25 @@ func mcpResultBlocks(content []mcp.Content) []map[string]any {
 				out = append(out, txt)
 			}
 		case "image":
+			// An image block's source requires both of its fields, and neither
+			// is this platform's to invent. MCP requires a mimeType on image
+			// content, so a block arriving without one — or with no bytes at
+			// all — is a server sending something this wire cannot carry
+			// faithfully, and it is described the way audio is rather than sent
+			// hollow. Guessing the type from the bytes would be a guess about
+			// what the model is looking at.
+			mime := capLabel(c.MIMEType)
+			if len(c.Data) == 0 || mime == "" {
+				out = append(out, textBlock(fmt.Sprintf(
+					"The tool returned %d bytes of image data (%s), which cannot be shown here.",
+					len(c.Data), mimeOrUnknown(c.MIMEType))))
+				continue
+			}
 			out = append(out, map[string]any{
 				"type": "image",
 				"source": map[string]any{
 					"type":       "base64",
-					"media_type": toolset.SanitizeText(c.MIMEType),
+					"media_type": mime,
 					"data":       base64.StdEncoding.EncodeToString(c.Data),
 				},
 			})
@@ -469,10 +484,19 @@ func resourceBlock(c mcp.Content) map[string]any {
 			title, mimeOrUnknown(c.MIMEType)))
 	}
 	block := map[string]any{"type": "document", "title": title}
-	if c.Data != nil {
+	if len(c.Data) > 0 {
+		// The base64 source requires a media type and a blob's bytes declare
+		// none, so a resource that does not name one falls back to what this
+		// platform already pins for a path — its extension's type, or
+		// application/octet-stream for an address that names nothing. Sending
+		// the empty string instead would leave a required field blank.
+		mime := capLabel(c.MIMEType)
+		if mime == "" {
+			mime = mimetab.ByPath(c.URI)
+		}
 		block["source"] = map[string]any{
 			"type":       "base64",
-			"media_type": toolset.SanitizeText(c.MIMEType),
+			"media_type": mime,
 			"data":       base64.StdEncoding.EncodeToString(c.Data),
 		}
 		return block

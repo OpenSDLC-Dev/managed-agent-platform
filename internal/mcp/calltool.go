@@ -81,13 +81,18 @@ type Content struct {
 // client bounds each one.
 const CallTimeout = 2 * time.Minute
 
-// ErrServerAnswered marks a call the connected server itself refused: a
-// JSON-RPC error rather than an answer, or a request for input this platform
-// cannot supply. Both leave a caller with nothing to hand a model — which is why
-// they are errors rather than results — but neither is a connection that failed,
-// and the difference is one a caller cannot recover from the message. A caller
-// that reports connection failures separately (the MCP work driver does, on the
-// wire, as mcp_connection_failed_error) tests for this before doing so.
+// ErrServerAnswered marks every error this package returns from a call the
+// server *did* answer: a JSON-RPC error rather than a result, a request for
+// input this platform cannot supply, and an answer that arrived but could not be
+// read — one whose blocks are all of types a tool result cannot carry, or whose
+// structured value would not re-marshal. All of them leave a caller with nothing
+// to hand a model, which is why they are errors rather than results; none of
+// them is a connection that failed, and the difference is one a caller cannot
+// recover from the message. A caller that reports connection failures separately
+// (the MCP work driver does, on the wire, as mcp_connection_failed_error) tests
+// for this before doing so. The rule is the boundary rather than the list: an
+// error raised after `callTool` returned is the server's answer, not the
+// transport's failure.
 var ErrServerAnswered = errors.New("the server answered, refusing the call")
 
 // answered reports whether an error is the server's own JSON-RPC error
@@ -172,7 +177,8 @@ func (c *Conn) CallTool(ctx context.Context, name string, arguments json.RawMess
 	if len(out.Content) == 0 && res.StructuredContent != nil {
 		b, err := json.Marshal(res.StructuredContent)
 		if err != nil {
-			return nil, fmt.Errorf("mcp: call tool %q: structured content: %w", name, err)
+			return nil, fmt.Errorf("mcp: call tool %q: %w: structured content: %w",
+				name, ErrServerAnswered, err)
 		}
 		out.Content = append(out.Content, Content{Type: "text", Text: string(b)})
 	}
@@ -183,8 +189,8 @@ func (c *Conn) CallTool(ctx context.Context, name string, arguments json.RawMess
 	// nothing succeeds with no content, and a tool whose whole answer was
 	// untranslatable fails loudly enough to be fixed.
 	if len(out.Content) == 0 && len(res.Content) > 0 {
-		return nil, fmt.Errorf("mcp: call tool %q: the answer's %d content block(s) are all of "+
-			"types a tool result cannot carry", name, len(res.Content))
+		return nil, fmt.Errorf("mcp: call tool %q: %w: the answer's %d content block(s) are all of "+
+			"types a tool result cannot carry", name, ErrServerAnswered, len(res.Content))
 	}
 	return out, nil
 }

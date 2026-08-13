@@ -408,6 +408,12 @@ func TestCallToolFailsWhenEveryBlockOfTheAnswerIsDropped(t *testing.T) {
 	if !strings.Contains(err.Error(), "cannot carry") {
 		t.Errorf("error %q does not say the blocks were untranslatable", err)
 	}
+	// It is the server's answer, not a connection that failed: the call reached
+	// the server, the tool ran, and the answer arrived — it just could not be
+	// read. A caller reporting connection failures must not report this one.
+	if !errors.Is(err, mcp.ErrServerAnswered) {
+		t.Errorf("error %q is not marked ErrServerAnswered; the call reached the server", err)
+	}
 }
 
 // TestCallToolStillSucceedsWhenATrulyEmptyAnswerComesBack is the other side of

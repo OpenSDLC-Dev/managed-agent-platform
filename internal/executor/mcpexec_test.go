@@ -901,3 +901,63 @@ func TestMCPPassAlwaysMakesItsFirstCall(t *testing.T) {
 		t.Errorf("model_turn = %d, want 1 — the turn moves on", n)
 	}
 }
+
+// The two fields an image's source requires are the server's to supply, and a
+// block missing either cannot be sent as an image: the schema marks both
+// required, and an empty one is a required field left blank. MCP requires a
+// mimeType on image content, so a block without one is a server out of spec
+// rather than a case to guess at — the bytes are described, the way audio is.
+func TestMCPImageWithoutItsRequiredFieldsIsDescribed(t *testing.T) {
+	url := mcptest.Server(t, mcptest.Tool{Name: "shot", Blocks: []mcptest.Block{
+		{Type: "image", Data: []byte{0x89, 'P', 'N', 'G'}},     // no media type
+		{Type: "image", MIMEType: "image/png", Data: []byte{}}, // no bytes
+	}})
+	h := mcpHarness(t)
+	h.declareMCPServers(t, [2]string{"docs", url})
+	h.appendMCPToolUse(t, "docs", "shot", `{}`)
+	h.enqueueMCP(t)
+
+	h.stepOnce(t)
+
+	blocks := blocksOf(t, h.mcpResults(t)[0])
+	if len(blocks) != 2 {
+		t.Fatalf("content = %v, want both blocks accounted for", blocks)
+	}
+	for i, b := range blocks {
+		if b["type"] != "text" {
+			t.Errorf("block %d = %v, want it described rather than sent as an image", i, b)
+		}
+	}
+}
+
+// A blob resource names no media type of its own either, and the document source
+// that carries it requires one. The address it does have is what answers that:
+// the platform's pinned extension table, whose own fallback for bytes that name
+// nothing is application/octet-stream — honest, where an empty string is a
+// required field left blank.
+func TestMCPBlobResourceWithoutAMediaTypeStillDeclaresOne(t *testing.T) {
+	url := mcptest.Server(t, mcptest.Tool{Name: "read", Blocks: []mcptest.Block{
+		{Type: "resource", URI: "file:///report.pdf", Data: []byte{'%', 'P', 'D', 'F'}},
+		{Type: "resource", URI: "file:///opaque", Data: []byte{0x00, 0x01}},
+	}})
+	h := mcpHarness(t)
+	h.declareMCPServers(t, [2]string{"docs", url})
+	h.appendMCPToolUse(t, "docs", "read", `{}`)
+	h.enqueueMCP(t)
+
+	h.stepOnce(t)
+
+	blocks := blocksOf(t, h.mcpResults(t)[0])
+	if len(blocks) != 2 {
+		t.Fatalf("content = %v, want both resources", blocks)
+	}
+	for i, want := range []string{"application/pdf", "application/octet-stream"} {
+		src, ok := blocks[i]["source"].(map[string]any)
+		if !ok {
+			t.Fatalf("block %d = %v, want a document source", i, blocks[i])
+		}
+		if got := src["media_type"]; got != want {
+			t.Errorf("block %d media_type = %v, want %q", i, got, want)
+		}
+	}
+}
