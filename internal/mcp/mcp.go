@@ -56,11 +56,18 @@ import (
 //
 // That does not make DialTimeout a floor overall, and it would be easy to read
 // it that way: DefaultClient also sets it as its own Timeout, which is a
-// whole-request cap that beats a longer context deadline. So under the
-// production client every request is bounded at 30s, and ListTimeout's two
-// minutes bound the listing across its pages rather than any single one of them.
-// A caller supplying its own client sets that policy itself, and may set none —
-// which is the case the fallback exists for.
+// whole-request cap that beats a longer context deadline. So every request
+// through DefaultClient is bounded at 30s, and ListTimeout's two minutes bound
+// the listing across its pages rather than any single one of them. Which client
+// carries a connection therefore decides this too: on [CallClient] the same cap
+// is [CallTimeout], so *every* request that connection makes gets a tool's
+// budget rather than a dial's — the handshake, and the session-ending DELETE the
+// SDK sends on a context nothing here can cancel, included. That is the price of
+// running tools through one client, and it is bounded rather than open: the
+// driver's own pass budget is what keeps a server that accepts and never answers
+// from holding a work item indefinitely. A caller supplying its own client sets
+// that policy itself, and may set none — which is the case the fallback exists
+// for.
 //
 // None of the deadlines here is exact, and the overshoot is the SDK's: when a
 // caller's context ends a request that is still outstanding, the SDK tells the
@@ -174,23 +181,44 @@ type Conn struct {
 // default, per header block, which is a bound on the peak one block reaches and
 // deliberately not a total: how many blocks a connection answers is not this
 // package's to know, and MaxResponseBytes says why.
-var DefaultClient = &http.Client{
-	Timeout: DialTimeout,
-	CheckRedirect: func(*http.Request, []*http.Request) error {
-		return http.ErrUseLastResponse
-	},
-	Transport: &http.Transport{
-		DialContext: (&net.Dialer{
-			Timeout: DialTimeout,
-			Control: dialguard.Control(dialguard.IPAllowed),
-		}).DialContext,
-		ForceAttemptHTTP2:      true,
-		MaxIdleConnsPerHost:    2,
-		IdleConnTimeout:        90 * time.Second,
-		TLSHandshakeTimeout:    10 * time.Second,
-		ExpectContinueTimeout:  time.Second,
-		MaxResponseHeaderBytes: maxHeaderBytesPerResponse,
-	},
+var DefaultClient = guardedClient(DialTimeout)
+
+// CallClient is DefaultClient's twin for running tools, and it exists because
+// http.Client.Timeout bounds the whole request including the body read: a
+// `tools/call` response is not complete until the tool is, so a client whose cap
+// is the dial budget cannot run a tool that takes longer than a dial. That is
+// the right cap for a handshake and a listing, where the server is answering
+// from what it already knows, and the wrong one for a tool that goes and does
+// something — a query, a build, a fetch of its own.
+//
+// The cap here is [CallTimeout], which is what a tool call gets on this platform
+// already: a remote tool should not outlive a local one by default. Everything
+// else is DefaultClient's, the address guard included — the URL is
+// customer-supplied on this path exactly as it is on that one.
+var CallClient = guardedClient(CallTimeout)
+
+// guardedClient builds one of the two, differing only in how long a single
+// request may take. Everything a customer-supplied URL makes necessary is here
+// rather than at the call sites, so neither client can be built without it.
+func guardedClient(requestTimeout time.Duration) *http.Client {
+	return &http.Client{
+		Timeout: requestTimeout,
+		CheckRedirect: func(*http.Request, []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+		Transport: &http.Transport{
+			DialContext: (&net.Dialer{
+				Timeout: DialTimeout,
+				Control: dialguard.Control(dialguard.IPAllowed),
+			}).DialContext,
+			ForceAttemptHTTP2:      true,
+			MaxIdleConnsPerHost:    2,
+			IdleConnTimeout:        90 * time.Second,
+			TLSHandshakeTimeout:    10 * time.Second,
+			ExpectContinueTimeout:  time.Second,
+			MaxResponseHeaderBytes: maxHeaderBytesPerResponse,
+		},
+	}
 }
 
 // maxHeaderBytesPerResponse bounds a raw header block before net/http parses

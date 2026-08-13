@@ -221,7 +221,9 @@ the server → `session.error{mcp_authentication_failed_error}`.
   guard); `limited` requires host ∈ `allowed_hosts` ∪ (agent's MCP server hosts when
   `allow_mcp_servers`); `self_hosted` has no networking block → unconstrained
   (inference, recorded). A policy block → `mcp_connection_failed_error` with
-  `retry_status: terminal`.
+  `retry_status: retrying` (this said `terminal`; slice 4a measured the union against the SDK's
+  own variant docs and found it describes the *session's* fate rather than whether a
+  retry would help — docs/DIVERGENCES.md).
 - **Sandbox egress** (gate): `internal/gate`'s `newPolicy` finally honors
   `allow_mcp_servers` — the gate config gains the agent's MCP server host set, so
   in-sandbox processes reach those hosts under `limited`, closing that half of the
@@ -236,9 +238,9 @@ tied to a turn ending with `stop_reason.retries_exhausted` (SDK). Nothing docume
 server being disabled for the rest of a session, so this plan does **not** invent one:
 every turn re-attempts a failed server, a transient failure therefore heals by itself,
 and `retry_status` reports which of the three the attempt was — `retrying` for a
-failure the next turn will re-attempt, `terminal` for one no retry can fix (an egress
-policy block, an unresolvable host), `exhausted` reserved for the case that ends the
-turn. The per-server attempt count, if a threshold is ever needed, is derivable from
+failure the next turn will re-attempt — which, per slice 4a's reading, is every MCP
+failure, since `terminal` asserts the session transitions to `terminated` and `exhausted`
+is a turn's settlement (docs/DIVERGENCES.md). The per-server attempt count, if a threshold is ever needed, is derivable from
 the log (prior `session.error` events for that server) rather than from new state.
 
 ## Slices

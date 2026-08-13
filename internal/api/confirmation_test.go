@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"testing"
+	"time"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/events"
@@ -142,6 +143,87 @@ func TestConfirmationAllowWebToolResumesWithWebExec(t *testing.T) {
 	}
 }
 
+// appendUngatedMCPToolUse plants an MCP call the brain never gated: the model
+// asked for it, the policy allowed it, and it is waiting on the platform's MCP
+// driver. It is the shape a confirmation resume has to route around, and no
+// confirmation ever names it.
+func appendUngatedMCPToolUse(t *testing.T, s *tserver, sessionID, server, name string) string {
+	t.Helper()
+	return appendGatedToolUse(t, s, sessionID, domain.EventAgentMCPToolUse,
+		`{"name":"`+name+`","mcp_server_name":"`+server+
+			`","input":{},"evaluated_permission":"allow","session_thread_id":null}`)
+}
+
+// appendRunningMCPToolUse plants the same call without forcing the session
+// idle — what a brain turn that emitted an ungated call actually leaves behind,
+// and the state the tool-result resume runs in.
+func appendRunningMCPToolUse(t *testing.T, s *tserver, sessionID, server, name string) string {
+	t.Helper()
+	evs, err := events.NewLog(s.pool).Append(context.Background(), domain.ID(sessionID),
+		[]events.NewEvent{{Type: domain.EventAgentMCPToolUse, Payload: []byte(
+			`{"name":"` + name + `","mcp_server_name":"` + server +
+				`","input":{},"evaluated_permission":"allow","session_thread_id":null}`)}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return evs[0].ID.String()
+}
+
+// A confirmation resume schedules the MCP call ahead of the built-ins it just
+// cleared, web and sandbox alike. Only this platform's mcp_exec driver answers
+// an agent.mcp_tool_use — a client posts neither the call nor its result, and a
+// BYOC worker has no MCP surface — so scheduling anything else first hands the
+// tool_exec a worker may claim a log it cannot finish.
+func TestConfirmationResumesMCPAheadOfTheBuiltins(t *testing.T) {
+	s := newTestServer(t)
+	sessionID := eventsFixture(t, s)
+	appendUngatedMCPToolUse(t, s, sessionID, "docs", "search")
+	webAsk := appendAskToolUse(t, s, sessionID, "web_search")
+	bashAsk := appendAskToolUse(t, s, sessionID, "bash")
+
+	sendEvents(t, s, sessionID,
+		confirm(webAsk, "allow", nil),
+		confirm(bashAsk, "allow", nil))
+
+	if got := s.sessionStatus(sessionID); got != "running" {
+		t.Errorf("status after allow = %q, want running", got)
+	}
+	if n := s.liveWork(sessionID, queue.MCPExec); n != 1 {
+		t.Fatalf("live mcp_exec = %d, want 1", n)
+	}
+	if n := s.liveWork(sessionID, queue.WebExec); n != 0 {
+		t.Errorf("live web_exec = %d, want 0 — the MCP pass chains it", n)
+	}
+	if n := s.liveWork(sessionID, queue.ToolExec); n != 0 {
+		t.Errorf("live tool_exec = %d, want 0 — the MCP pass chains it", n)
+	}
+	if n := s.liveWork(sessionID, queue.ModelTurn); n != 0 {
+		t.Errorf("live model_turn = %d, want 0", n)
+	}
+}
+
+// The same arm on the path that would otherwise schedule nothing at all: every
+// gated tool is denied, so the denials answer them, but the MCP call is still
+// outstanding. Without the arm this resume enqueues no work — the denied calls
+// are answered so no executor is wanted, and the MCP call keeps the brain from
+// being woken — and the session commits running with no trigger left, which
+// also refuses archive and delete until a user.interrupt.
+func TestConfirmationDenyStillSchedulesAnOutstandingMCPCall(t *testing.T) {
+	s := newTestServer(t)
+	sessionID := eventsFixture(t, s)
+	appendUngatedMCPToolUse(t, s, sessionID, "docs", "search")
+	bashAsk := appendAskToolUse(t, s, sessionID, "bash")
+
+	sendEvents(t, s, sessionID, confirm(bashAsk, "deny", map[string]any{"deny_message": "no"}))
+
+	if n := s.liveWork(sessionID, queue.MCPExec); n != 1 {
+		t.Fatalf("live mcp_exec = %d, want 1", n)
+	}
+	if n := s.liveWork(sessionID, queue.ModelTurn); n != 0 {
+		t.Errorf("live model_turn = %d, want 0 — the MCP call is unanswered", n)
+	}
+}
+
 func TestConfirmationDenyAnswersWithErrorAndResumesBrain(t *testing.T) {
 	s := newTestServer(t)
 	sessionID := eventsFixture(t, s)
@@ -271,6 +353,16 @@ func TestMCPCallBlocksTheRequiresActionGate(t *testing.T) {
 	ids, ok := stop["event_ids"].([]any)
 	if !ok || len(ids) != 1 || ids[0] != mcp {
 		t.Errorf("event_ids = %v, want [%s]", stop["event_ids"], mcp)
+	}
+	// Re-idling is only half of it: nothing may be scheduled either. A resume
+	// arm that ran before the re-idle break would leave the session idle on the
+	// ask *and* an mcp_exec item on its way to run the call the human has not
+	// approved — a state this test would otherwise call correct.
+	if n := s.liveWork(sessionID, queue.MCPExec); n != 0 {
+		t.Errorf("mcp_exec = %d, want 0 — the call is still gated", n)
+	}
+	if n := s.liveWork(sessionID, queue.ToolExec); n != 0 {
+		t.Errorf("tool_exec = %d, want 0 — the turn is suspended, not resumed", n)
 	}
 }
 
@@ -528,5 +620,41 @@ func TestConfirmationValidation(t *testing.T) {
 	// …and a second confirmation for the same call is rejected.
 	if got := post(confirm(askID, "allow", nil)); got != http.StatusBadRequest {
 		t.Errorf("already confirmed: status %d, want 400", got)
+	}
+}
+
+// A tool result posted while an MCP call is outstanding is the sixth settlement
+// site, and the one a self_hosted session reaches: its worker answers the
+// sandbox call through user.tool_result, and if that arrives last the MCP call
+// is what remains. Scheduling nothing there would leave the session running with
+// a call no other party can answer — a client posts neither the call nor its
+// result, and a BYOC worker's contract has no MCP surface at all.
+func TestToolResultResumeSchedulesAnOutstandingMCPCall(t *testing.T) {
+	s := newTestServer(t)
+	sessionID := selfHostedSession(t, s)
+	ctx := context.Background()
+	q := queue.New(s.pool)
+
+	sendEvents(t, s, sessionID, userMessage("run a tool"))
+	item, err := q.Claim(ctx, queue.ModelTurn, time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	toolUseID := appendToolUse(t, s, sessionID, domain.EventAgentToolUse)
+	appendRunningMCPToolUse(t, s, sessionID, "docs", "search")
+	if err := q.Complete(ctx, s.pool, item); err != nil {
+		t.Fatal(err)
+	}
+
+	sendEvents(t, s, sessionID, map[string]any{
+		"type": "user.tool_result", "tool_use_id": toolUseID,
+		"content": []any{map[string]any{"type": "text", "text": "ok"}},
+	})
+
+	if n := s.liveWork(sessionID, queue.MCPExec); n != 1 {
+		t.Errorf("mcp_exec = %d, want 1 — the MCP call is what is left outstanding", n)
+	}
+	if n := s.liveWork(sessionID, queue.ModelTurn); n != 0 {
+		t.Errorf("model_turn = %d, want 0 — the turn cannot resume on an unanswered call", n)
 	}
 }

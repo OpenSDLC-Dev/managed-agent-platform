@@ -3,6 +3,7 @@ package executor
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/url"
 	"regexp"
@@ -94,6 +95,18 @@ func (e *Executor) processMCP(ctx context.Context, item *queue.Item) (err error)
 		return err
 	}
 
+	// Calls first, and only calls: a turn stopped on an unanswered call is
+	// waiting on this pass, while a listing is wanted by a turn that has not
+	// started. Spending this pass's budget dialling for a catalog would leave
+	// that turn stopped for as long as the dials take.
+	calls, err := e.unansweredMCPToolUses(ctx, item.SessionID)
+	if err != nil {
+		return err
+	}
+	if len(calls) > 0 {
+		return e.answerMCPCalls(ctx, item, sess, calls)
+	}
+
 	pending, err := e.undiscoveredServers(ctx, item.SessionID, sess.mcpServers)
 	if err != nil {
 		return err
@@ -167,7 +180,7 @@ func (e *Executor) undiscoveredServers(ctx context.Context, sid domain.ID, decla
 // it against an endpoint that is simply down. The error return is the dead
 // context alone — the item's own, not the pass's budget.
 //
-// The pass is bounded as a whole (Config.MCPDiscoveryTimeout), the way
+// The pass is bounded as a whole (Config.MCPPassTimeout), the way
 // mcp.ListTimeout bounds one listing across its pages. Without an aggregate
 // bound the worst case is the per-server bound times the servers an agent may
 // declare: twenty (maxAgentMCPServers), each costing a handshake at
@@ -180,7 +193,7 @@ func (e *Executor) undiscoveredServers(ctx context.Context, sid domain.ID, decla
 // takes as long as the client's own cancellation does to unwind (see
 // mcp.DialTimeout on why that is seconds rather than immediate).
 func (e *Executor) discoverServers(ctx context.Context, cfg domain.EnvironmentConfig, servers []mcpServerRef) ([]catalogRow, error) {
-	budget, cancel := context.WithTimeout(ctx, e.cfg.MCPDiscoveryTimeout)
+	budget, cancel := context.WithTimeout(ctx, e.cfg.MCPPassTimeout)
 	defer cancel()
 
 	var rows []catalogRow
@@ -232,13 +245,13 @@ func (e *Executor) discoverServer(ctx context.Context, cfg domain.EnvironmentCon
 	}()
 	row = catalogRow{name: s.Name, url: s.URL, status: "failed"}
 
-	parsed, err := url.Parse(s.URL)
-	if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" {
-		row.reason = "the server's url is not an http or https URL"
+	host, err := mcpEndpointHost(s.URL)
+	if err != nil {
+		row.reason = err.Error()
 		return row
 	}
-	if !mcpEgressAllowed(cfg, parsed.Hostname()) {
-		row.reason = egressRefusal(cfg, parsed.Hostname())
+	if !mcpEgressAllowed(cfg, host) {
+		row.reason = egressRefusal(cfg, host)
 		return row
 	}
 
@@ -517,6 +530,19 @@ func redactURL(match string) string {
 	return u.Scheme + "://" + u.Host + trailing
 }
 
+// mcpEndpointHost validates a declared endpoint and returns the host the egress
+// check judges. Both halves of this driver ask it — discovery before it lists,
+// execution before it calls — so what counts as a usable MCP endpoint has one
+// definition: a scheme this client speaks and a host to dial. Its error is
+// already a reason a catalog row or a model can be shown.
+func mcpEndpointHost(endpoint string) (string, error) {
+	u, err := url.Parse(endpoint)
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+		return "", errors.New("the server's url is not an http or https URL")
+	}
+	return u.Hostname(), nil
+}
+
 // egressRefusal says why the dial was refused, and there are exactly two
 // reasons because mcpEgressAllowed has exactly two ways to say no.
 //
@@ -662,6 +688,26 @@ func (e *Executor) settleMCP(ctx context.Context, item *queue.Item, rows []catal
 			r.notReached); err != nil {
 			return fmt.Errorf("write mcp catalog for %q: %w", r.name, err)
 		}
+	}
+	// An MCP call outstanding takes this item back rather than completing it,
+	// the same first arm the four other settlements have and for the same
+	// reason: only this driver answers an agent.mcp_tool_use. A call committed
+	// while these dials were in flight — the pass runs for minutes — cannot have
+	// been queued behind them, since Enqueue is keyed (session_id, kind) over
+	// the live states and this very item is one; so completing here would leave
+	// the call with nothing scheduled to answer it, the session running, and
+	// archive and delete both refused. Handing the item back is what makes the
+	// next pass find the call and answer it (processMCP answers before it
+	// discovers).
+	mcpPending, err := events.HasUnansweredMCPToolUse(ctx, tx, item.SessionID, nil)
+	if err != nil {
+		return err
+	}
+	if mcpPending {
+		if err := e.queue.Requeue(ctx, tx, item); err != nil {
+			return err
+		}
+		return tx.Commit(ctx)
 	}
 	// The turn is chained on the same condition every other settlement uses.
 	// Discovery is not an answer to a tool call, so ordinarily nothing is

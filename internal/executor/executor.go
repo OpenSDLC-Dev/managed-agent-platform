@@ -148,13 +148,15 @@ type Config struct {
 	// tolerated clone failures (too_large / timeout), never as a failed run.
 	RepoCloneTimeout  time.Duration
 	RepoCloneMaxBytes int64
-	// MCPDiscoveryTimeout bounds one mcp_exec pass across all of the session's
-	// MCP servers, for the reason the clone budgets exist: the dials are serial
-	// and the endpoints are third-party, so an unbounded pass would hold this
-	// process's single work goroutine and disrupt unrelated sessions. A server
-	// the pass does not reach in time is recorded as a tolerated failure, never
-	// as a failed run.
-	MCPDiscoveryTimeout time.Duration
+	// MCPPassTimeout bounds one mcp_exec pass — the discovery half across all of
+	// the session's MCP servers, and the execution half across all of a turn's
+	// outstanding calls — for the reason the clone budgets exist: both walk
+	// third-party endpoints serially, so an unbounded pass would hold this
+	// process's single work goroutine and disrupt unrelated sessions. Neither
+	// half fails the run when it runs out: a server discovery does not reach is
+	// a tolerated failed row, and a call execution does not make stays
+	// outstanding and keeps the item, which comes back to finish it.
+	MCPPassTimeout time.Duration
 }
 
 func (c Config) withDefaults() Config {
@@ -179,8 +181,8 @@ func (c Config) withDefaults() Config {
 	if c.RepoCloneMaxBytes <= 0 {
 		c.RepoCloneMaxBytes = 1 << 30
 	}
-	if c.MCPDiscoveryTimeout <= 0 {
-		c.MCPDiscoveryTimeout = 5 * time.Minute
+	if c.MCPPassTimeout <= 0 {
+		c.MCPPassTimeout = 5 * time.Minute
 	}
 	return c
 }
@@ -393,14 +395,31 @@ func (e *Executor) process(ctx context.Context, item *queue.Item) (err error) {
 					return err
 				}
 			}
-			// A web call this sandbox pass filtered out and left unanswered is
-			// healed with a chained web_exec rather than abandoned: every
-			// enqueue site excludes the shape (the web-first hold-back), so a
-			// tool_exec coexisting with an unanswered web call is a log no
-			// current code produces — but completing the item over one would
-			// strand the session permanently, and the heal is the same chain
-			// the web driver runs in the other direction.
+			// A web or MCP call this sandbox pass left unanswered is healed
+			// with a chained work item rather than abandoned: every enqueue
+			// site holds a tool_exec back behind both shapes, so a tool_exec
+			// coexisting with either outstanding is a log no current code
+			// produces — but completing the item over one would strand the
+			// session permanently (HasUnansweredToolUse counts it, so no
+			// model_turn follows either), and the heal is the same chain the
+			// web and MCP drivers run in the other direction.
+			//
+			// MCP first, for the reason it is first everywhere: only this
+			// platform's MCP driver answers an agent.mcp_tool_use, and a
+			// tool_exec is the one kind a BYOC worker can claim — handing it
+			// the log while an MCP call is outstanding shows a customer-hosted
+			// worker a call it has no surface to answer.
 			if complete {
+				mcpPending, err := events.HasUnansweredMCPToolUse(ctx, tx, item.SessionID, nil)
+				if err != nil {
+					return err
+				}
+				if mcpPending {
+					if _, err := e.queue.Enqueue(ctx, tx, item.EnvironmentID, item.SessionID, queue.MCPExec); err != nil {
+						return err
+					}
+					return e.queue.Complete(ctx, tx, item)
+				}
 				names, err := events.UnansweredPlatformToolNames(ctx, tx, item.SessionID, nil)
 				if err != nil {
 					return err

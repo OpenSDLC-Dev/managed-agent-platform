@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -203,6 +204,36 @@ func TestCallToolReportsAProtocolFailureAsAnError(t *testing.T) {
 	if !strings.Contains(err.Error(), "no_such_tool") {
 		t.Errorf("error %q does not name the tool", err)
 	}
+	// And it is marked as the server's own answer. A caller that reports
+	// unreachable servers — the work driver does, as mcp_connection_failed_error
+	// — cannot tell this from a dead endpoint by reading the message, and would
+	// otherwise tell an operator to heal a connection that worked.
+	if !errors.Is(err, mcp.ErrServerAnswered) {
+		t.Errorf("error %q is not marked ErrServerAnswered; the connection was fine", err)
+	}
+}
+
+// TestCallToolLeavesATransportFailureUnmarked is that mark's other side: a
+// server that cannot be reached at all must NOT look like one that answered, or
+// the distinction buys nothing.
+func TestCallToolLeavesATransportFailureUnmarked(t *testing.T) {
+	t.Parallel()
+	url := serveTool(t, func(context.Context, *sdk.CallToolRequest) (*sdk.CallToolResult, error) {
+		return &sdk.CallToolResult{}, nil
+	})
+	conn := connect(t, url)
+	// Cancelled before the call: the request never reaches a server, which is
+	// the shape of every transport failure this driver reports.
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	_, err := conn.CallTool(ctx, "echo", json.RawMessage(`{}`))
+	if err == nil {
+		t.Fatal("CallTool reported success on a cancelled context")
+	}
+	if errors.Is(err, mcp.ErrServerAnswered) {
+		t.Errorf("error %q is marked as the server's answer; nothing reached a server", err)
+	}
 }
 
 // TestCallToolSendsTheModelsArgumentBytesUnaltered pins that the arguments
@@ -376,6 +407,12 @@ func TestCallToolFailsWhenEveryBlockOfTheAnswerIsDropped(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "cannot carry") {
 		t.Errorf("error %q does not say the blocks were untranslatable", err)
+	}
+	// It is the server's answer, not a connection that failed: the call reached
+	// the server, the tool ran, and the answer arrived — it just could not be
+	// read. A caller reporting connection failures must not report this one.
+	if !errors.Is(err, mcp.ErrServerAnswered) {
+		t.Errorf("error %q is not marked ErrServerAnswered; the call reached the server", err)
 	}
 }
 

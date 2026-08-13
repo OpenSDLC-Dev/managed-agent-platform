@@ -11,6 +11,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -37,7 +38,13 @@ import (
 // produces.
 func mcpHarness(t *testing.T) *harness {
 	t.Helper()
-	h := newHarnessWith(t, &fakeProvider{sb: &fakeSandbox{}}, Config{})
+	return mcpHarnessWith(t, Config{})
+}
+
+// mcpHarnessWith is the same fixture for a test that needs a configured budget.
+func mcpHarnessWith(t *testing.T, cfg Config) *harness {
+	t.Helper()
+	h := newHarnessWith(t, &fakeProvider{sb: &fakeSandbox{}}, cfg)
 	h.exec.mcpHTTP = mcptest.Client()
 	h.setNetworking(t, domain.Networking{Type: domain.NetUnrestricted})
 	return h
@@ -157,23 +164,24 @@ func TestDiscoveryStoresOnlyABoundedListing(t *testing.T) {
 	}
 }
 
-// TestTheDiscoveryBudgetDefaultsToFiveMinutes pins the one number in this
+// TestTheMCPPassBudgetDefaultsToFiveMinutes pins the one number in this
 // driver's configuration that nothing else would notice changing. The budget is
 // what stands between a server that accepts a connection and never answers and
-// every other session's work on the host, and its default is quoted in three
+// every other session's work on the host — whether the pass is listing that
+// server's tools or running one — and its default is quoted in three
 // places an operator reads — the Config comment, the Helm value and the compose
 // file — none of which a test can check. A non-positive value resolves to the
 // default rather than to "no bound", so an operator who unsets the variable, or
 // writes 0 expecting to disable it, gets the bound instead.
-func TestTheDiscoveryBudgetDefaultsToFiveMinutes(t *testing.T) {
+func TestTheMCPPassBudgetDefaultsToFiveMinutes(t *testing.T) {
 	for _, supplied := range []time.Duration{0, -time.Second} {
-		cfg := Config{MCPDiscoveryTimeout: supplied}.withDefaults()
-		if want := 5 * time.Minute; cfg.MCPDiscoveryTimeout != want {
-			t.Errorf("MCPDiscoveryTimeout %v resolved to %v, want %v", supplied, cfg.MCPDiscoveryTimeout, want)
+		cfg := Config{MCPPassTimeout: supplied}.withDefaults()
+		if want := 5 * time.Minute; cfg.MCPPassTimeout != want {
+			t.Errorf("MCPPassTimeout %v resolved to %v, want %v", supplied, cfg.MCPPassTimeout, want)
 		}
 	}
 	// A supplied bound is not overridden, or the variable would do nothing.
-	if got := (Config{MCPDiscoveryTimeout: 90 * time.Second}).withDefaults().MCPDiscoveryTimeout; got != 90*time.Second {
+	if got := (Config{MCPPassTimeout: 90 * time.Second}).withDefaults().MCPPassTimeout; got != 90*time.Second {
 		t.Errorf("a supplied budget resolved to %v, want it kept", got)
 	}
 }
@@ -959,7 +967,7 @@ func TestDiscoveryStopsWhenThePassRunsOutOfTime(t *testing.T) {
 		second.Close()
 	})
 
-	h := newHarnessWith(t, &fakeProvider{sb: &fakeSandbox{}}, Config{MCPDiscoveryTimeout: 300 * time.Millisecond})
+	h := newHarnessWith(t, &fakeProvider{sb: &fakeSandbox{}}, Config{MCPPassTimeout: 300 * time.Millisecond})
 	h.exec.mcpHTTP = client
 	h.setNetworking(t, domain.Networking{Type: domain.NetUnrestricted})
 	h.declareMCPServers(t, [2]string{"slow", hang.URL}, [2]string{"after", second.URL})
@@ -1080,5 +1088,53 @@ func TestStorableToolsCapsTheListing(t *testing.T) {
 		if want := fmt.Sprintf("tool_%d", i); tool.Name != want {
 			t.Errorf("tool %d is %q, want %q — the cap must keep a prefix, in order", i, tool.Name, want)
 		}
+	}
+}
+
+// roundTripAfter delegates to base and runs after once, on the first request it
+// carries. It is how a test puts an event on the log *during* a pass: between
+// the driver's own check and its settlement, which is the window this file's
+// concurrency arguments are about and which no fixture hook can reach.
+type roundTripAfter struct {
+	base  http.RoundTripper
+	once  sync.Once
+	after func()
+}
+
+func (r *roundTripAfter) RoundTrip(req *http.Request) (*http.Response, error) {
+	res, err := r.base.RoundTrip(req)
+	r.once.Do(r.after)
+	return res, err
+}
+
+// A discovery pass is the fifth settlement site, and the one whose pass is long
+// enough for a call to arrive underneath it: the dials run for minutes, and an
+// mcp_tool_use committed while they do cannot have been queued behind them —
+// Enqueue is keyed (session_id, kind) over the live states and this very item is
+// one. Completing here would leave the call with nothing scheduled to answer it,
+// the session running, and archive and delete both refused.
+func TestDiscoveryHandsItsItemBackForACallThatArrivedUnderneathIt(t *testing.T) {
+	url := mcptest.Server(t, mcptest.Tool{Name: "search", Description: "searches"})
+	h := mcpHarness(t)
+	// The call arrives after the driver has looked for one and before the pass
+	// settles — the only window in which settleMCP sees an unanswered call.
+	h.exec.mcpHTTP = &http.Client{Transport: &roundTripAfter{
+		base:  h.exec.mcpHTTP.Transport,
+		after: func() { h.appendMCPToolUse(t, "docs", "search", `{}`) },
+	}}
+	h.declareMCPServers(t, [2]string{"docs", url})
+	h.enqueueMCP(t)
+
+	h.stepOnce(t)
+
+	if n := h.liveOf(t, queue.MCPExec); n != 1 {
+		t.Errorf("mcp_exec live = %d, want 1 — the call needs this driver and nothing else answers it", n)
+	}
+	if n := h.liveOf(t, queue.ModelTurn); n != 0 {
+		t.Errorf("model_turn = %d, want 0 — a call is unanswered", n)
+	}
+	// The listing still landed: handing the item back must not throw the pass away.
+	if got := h.catalog(t)["docs"]; got.status != "ready" {
+		t.Errorf("catalog row = %+v, want the listing this pass fetched", got)
 	}
 }

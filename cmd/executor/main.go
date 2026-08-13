@@ -40,10 +40,10 @@
 //	                         abandoned and surfaces as a session.error
 //	EXECUTOR_REPO_CLONE_TIMEOUT     per-repository clone deadline (default 5m);
 //	                         past it the clone is abandoned the same way
-//	EXECUTOR_MCP_DISCOVERY_TIMEOUT  budget for one session's whole MCP
-//	                         discovery pass (default 5m); the servers it does
-//	                         not reach are recorded as failures and retried
-//	                         on the next turn
+//	EXECUTOR_MCP_PASS_TIMEOUT       budget for one mcp_exec pass (default 5m),
+//	                         whether it is listing a session's MCP servers or
+//	                         running a turn's calls; what it does not reach is
+//	                         retried on the next pass rather than failing the run
 //	CONTROLPLANE_URL         where a session's egress gate fetches its config;
 //	                         set with EXECUTOR_GATE_IMAGE to opt into the gate.
 //	                         Unset: no gate runs; a gate-wanting session (limited
@@ -201,7 +201,7 @@ func run(ctx context.Context) error {
 	for env, dst := range map[string]*time.Duration{
 		"EXECUTOR_LEASE_TTL": &cfg.LeaseTTL, "EXECUTOR_POLL_INTERVAL": &cfg.PollInterval,
 		"EXECUTOR_REAP_INTERVAL": &cfg.ReapInterval, "EXECUTOR_REPO_CLONE_TIMEOUT": &cfg.RepoCloneTimeout,
-		"EXECUTOR_MCP_DISCOVERY_TIMEOUT": &cfg.MCPDiscoveryTimeout,
+		"EXECUTOR_MCP_PASS_TIMEOUT": &cfg.MCPPassTimeout,
 	} {
 		if v := os.Getenv(env); v != "" {
 			d, err := time.ParseDuration(v)

@@ -3,9 +3,11 @@ package mcp
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"time"
 
+	"github.com/modelcontextprotocol/go-sdk/jsonrpc"
 	sdk "github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
@@ -68,16 +70,39 @@ type Content struct {
 // outlive a local one by default.
 //
 // It is a ceiling on the aggregate and not a promise about how long a call may
-// run, and under [DefaultClient] it is not the binding constraint at all: that
-// client sets Timeout to [DialTimeout], a whole-request cap net/http applies to
-// the body read as well, and a `tools/call` response is not complete until the
-// tool is. So a call through the production client is bounded at thirty seconds
+// run, and which client carries the call decides whether it binds at all.
+// [DefaultClient] sets Timeout to [DialTimeout], a whole-request cap net/http
+// applies to the body read as well — and a `tools/call` response is not complete
+// until the tool is, so a call through that client is bounded at thirty seconds
 // and an MCP tool that takes longer fails every time, whatever this constant
-// says — the same relationship [ListTimeout] has with that cap, where the
-// aggregate bounds the pages and the client bounds each one. Whether an MCP tool
-// deserves a client of its own with a longer request cap is a question for the
-// slice that first calls one; today nothing does, so nothing here answers it.
+// says. That is why [CallClient] exists and why the executor calls through it:
+// its request cap is this same budget, leaving the relationship [ListTimeout]
+// has with a client's cap, where the aggregate bounds the round trips and the
+// client bounds each one.
 const CallTimeout = 2 * time.Minute
+
+// ErrServerAnswered marks every error this package returns from a call the
+// server *did* answer: a JSON-RPC error rather than a result, a request for
+// input this platform cannot supply, and an answer that arrived but could not be
+// read — one whose blocks are all of types a tool result cannot carry, or whose
+// structured value would not re-marshal. All of them leave a caller with nothing
+// to hand a model, which is why they are errors rather than results; none of
+// them is a connection that failed, and the difference is one a caller cannot
+// recover from the message. A caller that reports connection failures separately
+// (the MCP work driver does, on the wire, as mcp_connection_failed_error) tests
+// for this before doing so. The rule is the boundary rather than the list: an
+// error raised after `callTool` returned is the server's answer, not the
+// transport's failure.
+var ErrServerAnswered = errors.New("the server answered, refusing the call")
+
+// answered reports whether an error is the server's own JSON-RPC error
+// response, which by definition reached us over a connection that worked. The
+// SDK aliases the wire type publicly (jsonrpc.Error), so the test costs this
+// package nothing and the type stays inside it.
+func answered(err error) bool {
+	var wire *jsonrpc.Error
+	return errors.As(err, &wire)
+}
 
 // CallTool runs one tool on the connected server and returns its answer.
 //
@@ -112,6 +137,9 @@ const CallTimeout = 2 * time.Minute
 //     answer carries no output, so a caller reading only Content would show the
 //     model an empty result from a tool that was never executed. It is refused
 //     here instead.
+//
+// Both of the shapes that end a call this way are the server's own answer, and
+// so are marked [ErrServerAnswered].
 func (c *Conn) CallTool(ctx context.Context, name string, arguments json.RawMessage) (*CallResult, error) {
 	if c == nil || c.session == nil {
 		return nil, fmt.Errorf("mcp: call tool on a connection that was never opened")
@@ -129,11 +157,14 @@ func (c *Conn) CallTool(ctx context.Context, name string, arguments json.RawMess
 		Arguments: args,
 	})
 	if err != nil {
+		if answered(err) {
+			return nil, fmt.Errorf("mcp: call tool %q: %w: %w", name, ErrServerAnswered, err)
+		}
 		return nil, fmt.Errorf("mcp: call tool %q: %w", name, err)
 	}
 	if res.NeedsInput() {
-		return nil, fmt.Errorf("mcp: call tool %q: the server asked for further input, "+
-			"which this platform has no surface to supply", name)
+		return nil, fmt.Errorf("mcp: call tool %q: %w: the server asked for further input, "+
+			"which this platform has no surface to supply", name, ErrServerAnswered)
 	}
 	out := &CallResult{IsError: res.IsError, Content: convertContent(res.Content)}
 	// A tool that declares an outputSchema answers with structuredContent, and
@@ -146,7 +177,8 @@ func (c *Conn) CallTool(ctx context.Context, name string, arguments json.RawMess
 	if len(out.Content) == 0 && res.StructuredContent != nil {
 		b, err := json.Marshal(res.StructuredContent)
 		if err != nil {
-			return nil, fmt.Errorf("mcp: call tool %q: structured content: %w", name, err)
+			return nil, fmt.Errorf("mcp: call tool %q: %w: structured content: %w",
+				name, ErrServerAnswered, err)
 		}
 		out.Content = append(out.Content, Content{Type: "text", Text: string(b)})
 	}
@@ -157,8 +189,8 @@ func (c *Conn) CallTool(ctx context.Context, name string, arguments json.RawMess
 	// nothing succeeds with no content, and a tool whose whole answer was
 	// untranslatable fails loudly enough to be fixed.
 	if len(out.Content) == 0 && len(res.Content) > 0 {
-		return nil, fmt.Errorf("mcp: call tool %q: the answer's %d content block(s) are all of "+
-			"types a tool result cannot carry", name, len(res.Content))
+		return nil, fmt.Errorf("mcp: call tool %q: %w: the answer's %d content block(s) are all of "+
+			"types a tool result cannot carry", name, ErrServerAnswered, len(res.Content))
 	}
 	return out, nil
 }
