@@ -525,7 +525,13 @@ func resourceBlock(c mcp.Content) map[string]any {
 		return textBlock(fmt.Sprintf("The tool returned an empty resource: %s (%s)",
 			title, mimeOrUnknown(c.MIMEType)))
 	}
-	block := map[string]any{"type": "document", "title": title}
+	block := map[string]any{"type": "document"}
+	// The title is optional on the request side, so an absent one is a shape
+	// the endpoint is known to take and an empty one is not. MCP requires a
+	// resource to carry a URI, so only a server out of spec gets here.
+	if title != "" {
+		block["title"] = title
+	}
 	if len(c.Data) > 0 {
 		// A blob rides whichever block type can carry its bytes, and the two
 		// that can are narrow: a base64 document source is application/pdf and

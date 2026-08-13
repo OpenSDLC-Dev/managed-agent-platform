@@ -275,6 +275,12 @@ func (e *Executor) settleHarvest(ctx context.Context, item *queue.Item, files []
 			}
 		}
 	}
+	// The one settlement that wakes the brain without first asking whether an
+	// MCP call is outstanding, and deliberately: a harvest runs inside the
+	// outcome cycle, after the turn has already ended, and the only producer of
+	// an agent.mcp_tool_use is the brain inside a turn — so there is no call
+	// here to schedule ahead of this. Said rather than left implicit, because
+	// the six sites that *do* ask are a set someone will count again.
 	if _, err := e.queue.Enqueue(ctx, tx, item.EnvironmentID, item.SessionID, queue.ModelTurn); err != nil {
 		return err
 	}

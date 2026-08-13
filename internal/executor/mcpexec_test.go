@@ -1105,3 +1105,27 @@ func TestMCPCallsShareOneMetricLabel(t *testing.T) {
 			"are third-party and belong on the log, not in a metric label", names[0])
 	}
 }
+
+// A document's title is optional on the request side, so an absent one is a
+// shape the endpoint is known to take and an empty one is not — the same
+// standard the hollow blocks are held to. Only a server violating MCP's
+// required-URI rule gets here, which is exactly why nothing else would notice.
+func TestMCPResourceWithNoAddressOmitsItsTitle(t *testing.T) {
+	url := mcptest.Server(t, mcptest.Tool{Name: "read", Blocks: []mcptest.Block{
+		{Type: "resource", MIMEType: "text/plain", Text: "body without an address"},
+	}})
+	h := mcpHarness(t)
+	h.declareMCPServers(t, [2]string{"docs", url})
+	h.appendMCPToolUse(t, "docs", "read", `{}`)
+	h.enqueueMCP(t)
+
+	h.stepOnce(t)
+
+	blocks := blocksOf(t, h.mcpResults(t)[0])
+	if len(blocks) != 1 || blocks[0]["type"] != "document" {
+		t.Fatalf("content = %v, want the resource as a document", blocks)
+	}
+	if _, ok := blocks[0]["title"]; ok {
+		t.Errorf("block = %v, want no title at all rather than an empty one", blocks[0])
+	}
+}
