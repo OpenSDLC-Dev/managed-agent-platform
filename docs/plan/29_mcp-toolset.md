@@ -176,9 +176,9 @@ Provision — cloud and self_hosted alike):
    name skips the MCP tool, and so does a prefixed name outside the Messages API's
    documented `^[a-zA-Z0-9_-]{1,64}$` — which an MCP server's own 255-character server
    names and 128-character tool names can compose past. Each of those skips is a **log line**
-   (this said `system.message`; slice 4b found that event is client-sent, carries a
-   documented placement rule, and replays into the *system prompt*, so one per turn
-   would grow the prompt without bound — docs/DIVERGENCES.md). `configs[]` names absent
+   rather than a `system.message`: that event is client-sent, carries a documented
+   placement rule, and replays into the *system prompt*, so one per turn would grow the
+   prompt without bound (docs/DIVERGENCES.md). `configs[]` names absent
    from the catalog warn, never error (documented dynamic-availability semantics). Tool
    classification learns the third arm: `mcp__` names → `agent.mcp_tool_use` + the
    resolved per-tool policy.
