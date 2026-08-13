@@ -11,6 +11,8 @@ import (
 	"archive/tar"
 	"bytes"
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -36,7 +38,8 @@ const sessionLabel = "dev.opensdlc.managed-agent-platform.session-id"
 
 // execWrapper kills the command when its deadline passes. Docker has no API to
 // kill a running exec, so this has to happen inside the container. $1 is the
-// command, $2 the timeout in whole seconds ("0" = no limit).
+// command, $2 the timeout in whole seconds ("0" = no limit), $3 the per-exec
+// state path whose `.killed` suffix the watchdog marks when it fires.
 //
 // The command runs via `exec`, so it *becomes* this process — the pid Docker
 // reports for the exec is the command itself, not a shell wrapping it. That is
@@ -67,6 +70,37 @@ const sessionLabel = "dev.opensdlc.managed-agent-platform.session-id"
 // assigned that pid. The watchdog's own output is discarded; the command's
 // stderr is the exec's, untouched, so a SIGKILL leaves no shell "Killed" line
 // in the tool result to begin with.
+//
+// The watchdog marks `$3.killed` between that final `kill -0` and the `kill -9`.
+// Why the classification needs a mark at all — and why weighing state written
+// inside the container is safe here, which this backend spent its whole life
+// avoiding — is argued once at classifyTimeout, where the decision is made. What
+// belongs here is how it is written, and when.
+//
+// **When: before the signal, and not because the watchdog dies with it.** An
+// earlier draft of this comment said the watchdog is inside the group it kills
+// and so could never write a mark afterwards. That is measurably untrue: `set -m`
+// is job control, which gives the *background* subshell its own process group, and
+// a `mkdir` placed after `kill -9 -"$self"` runs and leaves its directory (checked
+// on a real container by the verifier, and reproduced on a plain host). The
+// ordering is still the right one, for the reason that survives measurement: the
+// mark must not depend on the watchdog outliving a signal it aimed at its own
+// process group. Whether it does is a bash job-control detail that varies with
+// how the shell was started, and resting a classification on it would be resting
+// on an accident. Written first, the mark is unconditional under either topology.
+//
+// **How: `mkdir`, and that is the point rather than an oddity.** The mark must
+// never be able to hold the kill back. A redirect cannot promise that: `: >
+// "$3.killed"` opens the path, and a tenant who plants a FIFO there — the state
+// path is its own parent's argv, so it is readable from /proc — blocks that open
+// forever. The watchdog would hang before `kill -9` and the runaway would never
+// die, which is strictly worse than the misclassification this fixes. `mkdir` is
+// the one creation primitive that cannot block: it creates the path or fails
+// immediately, whatever already sits there. Nor is it a shell special builtin,
+// so a failure cannot abort the subshell under a POSIX-mode bash. A tenant can
+// still make the `mkdir` fail and suppress its own mark — that only returns the
+// classification to where it stood before this existed, which is the direction
+// this trade is allowed to fail in.
 const execWrapper = `
 set -m
 self=$$
@@ -78,7 +112,10 @@ if [ "$2" != "0" ]; then
       sleep 1
       n=$((n + 1))
     done
-    kill -0 "$self" 2>/dev/null && kill -9 -"$self" 2>/dev/null
+    if kill -0 "$self" 2>/dev/null; then
+      mkdir "$3.killed" 2>/dev/null
+      kill -9 -"$self" 2>/dev/null
+    fi
   ) >/dev/null 2>&1 &
 fi
 exec /bin/bash -c "$1"
@@ -891,11 +928,12 @@ func (c *container) Exec(ctx context.Context, req sandbox.ExecRequest) (sandbox.
 	// caller's unrounded request — is the one a kill has to have arrived after.
 	deadline := time.Duration(seconds) * time.Second
 
+	state := execState()
 	execID, err := c.api.execCreate(ctx, c.id, execConfig{
 		AttachStdout: true,
 		AttachStderr: true,
 		Cmd: []string{"/bin/bash", "-c", execWrapper,
-			"map-exec", req.Command, strconv.Itoa(seconds)},
+			"map-exec", req.Command, strconv.Itoa(seconds), state},
 		WorkingDir: c.workdir,
 	})
 	if err != nil {
@@ -1010,7 +1048,12 @@ func (c *container) Exec(ctx context.Context, req sandbox.ExecRequest) (sandbox.
 	// have killed it first. (A command the kernel OOM-kills past its deadline
 	// reads as a timeout. It hit a limit and produced nothing; the label is close
 	// enough, and the alternative is to guess.)
-	timedOut := (code == sigkillExit && v.aliveAtDeadline) || v.overran
+	//
+	// Three, since #390: the watchdog says it fired. Asked only when the other two
+	// have already come back false and the exit code still says SIGKILL, which is
+	// exactly the state the misclassification lives in — so the extra round trip
+	// is paid on the rare path rather than on every command.
+	timedOut := classifyTimeout(seconds > 0, code, c.watchdogFired(ctx, seconds, code, v, state), v)
 	return sandbox.ExecResult{
 		Stdout:    string(out.stdout),
 		Stderr:    string(out.stderr),
@@ -1018,6 +1061,117 @@ func (c *container) Exec(ctx context.Context, req sandbox.ExecRequest) (sandbox.
 		TimedOut:  timedOut,
 		Truncated: out.truncated,
 	}, nil
+}
+
+// classifyTimeout decides TimedOut from the three things Exec can know about a
+// finished command, and nothing else — no clock, so what it decides is testable
+// without one. It is the k8s backend's function, case for case: the two backends
+// share a contract suite, and a shared suite is worth little if they disagree
+// about what a timeout is.
+//
+// An exit code of 137 is evidence, not proof: bash reports it for a job
+// SIGKILLed out from under it, and a command is free to choose it. What it rules
+// out is a command that reports some other code and calls itself killed.
+//
+// The witnesses it is read against, in the order they were added. The command
+// was still alive when the pre-deadline probe looked, so a SIGKILL after that is
+// the watchdog's — but the probe is a `top` against the daemon, and on a loaded
+// host it can be scheduled past the kill it was sent to see, at which point it
+// answers, honestly, that the process is gone (#390; the k8s backend lost the
+// same classification to the same race in #95 and #110). Or it outlived the
+// deadline and the slop and exited anyway, which needs no exit code, since none
+// it chose could be believed. Or — the answer to that race — the watchdog
+// reports having fired, the one witness that is not a guess about timing.
+//
+// The mark is not quite proof of authorship: the watchdog marks after `kill -0`
+// says the command is there, and a command that exits between that look and the
+// signal is marked without having been killed. Requiring a SIGKILL alongside is
+// what makes that harmless — the command's own exit code is whatever it chose —
+// except for the one command that chooses 137 inside that window, which is the
+// same unconditional cost the probe lead has always paid.
+//
+// **Every term only ever adds a timeout, and that is what lets this backend
+// weigh in-container state at all.** Keeping the verdict out of the container was
+// deliberate here, and remains the rule for everything the sandbox *guarantees*:
+// the watchdog is a process the command can find and kill, so the deadline is
+// enforced from outside, by Exec's own clock, and none of that changes. What
+// changes is that one more piece of evidence may now *raise* a verdict. A tenant
+// who forges the mark mislabels its own tool call as a timeout, having also had
+// to exit 137 to be believed.
+//
+// Suppressing it is the residual limitation, and worth stating plainly rather
+// than filing under "monotonic and therefore safe". A command can read $3 out of
+// its watchdog's argv in /proc and pre-create the directory, so the `mkdir` fails
+// EEXIST and the watchdog kills anyway; or delete it after the mark is written
+// and before the daemon is asked. Either way this term goes back to false and a
+// punctual timeout of that command reads as a plain SIGKILL — which is exactly
+// what it did before this existed. So the accurate claim is that suppression
+// costs the *tenant's own* call its timeout label and restores the pre-#390
+// behaviour, not that erasure is harmless: the mark is a fix for probes that were
+// scheduled late, which is a race, and it is best effort against a command that
+// is actively hostile to its own label. What no tenant can do is hide an overrun
+// or survive the deadline: `overran` is measured from outside, never reads the
+// mark, and the kill is not conditional on any of this.
+func classifyTimeout(deadlined bool, code int, watchdogFired bool, v verdict) bool {
+	// A command with no deadline was never given a watchdog, so nothing can
+	// honestly have marked it and no probe ever ran. Saying so here rather than
+	// trusting the terms to come out false keeps a planted mark from labelling an
+	// untimed command as timed out.
+	if !deadlined {
+		return false
+	}
+	return (code == sigkillExit && (watchdogFired || v.aliveAtDeadline)) || v.overran
+}
+
+// watchdogFired asks the daemon whether the watchdog left its mark, and only
+// when the answer can still change the verdict: a deadlined command whose exit
+// code says SIGKILL and whose two probes both came back false. Everywhere else
+// classifyTimeout has already decided, and this is a round trip that would buy
+// nothing.
+//
+// The read is out-of-band — a HEAD against the archive endpoint, the daemon
+// answering for the container's filesystem — so it needs no second exec, cannot
+// be delayed by whatever the command left running, and asks nothing of the
+// container's userland.
+//
+// A daemon that will not answer reads as "not fired", which is the one place
+// this file deliberately does *not* fail toward the timeout label: the mark
+// exists to add precision, so an unreadable mark leaves the classification
+// exactly where it stood before the mark existed, rather than turning a daemon
+// hiccup into a timeout on a command that finished early and chose 137.
+//
+// Nothing removes the mark. It is an empty directory under /tmp, written only by
+// a watchdog that actually fired — so at most one per timed-out command — inside
+// a container that is per-session and disposable. The alternative is an exec per
+// timeout purely to `rmdir`, spending a round trip on the path that is already
+// the slow one, in a container the session's end throws away.
+func (c *container) watchdogFired(ctx context.Context, seconds, code int, v verdict, state string) bool {
+	if seconds == 0 || code != sigkillExit || v.aliveAtDeadline || v.overran {
+		return false
+	}
+	fired, err := c.api.pathExists(ctx, c.id, state+".killed")
+	return err == nil && fired
+}
+
+// execState is the per-exec state path handed to the wrapper as $3. The token is
+// random so that a tenant cannot pre-create the mark for an exec that has not
+// started yet: the path is its own wrapper's argv and readable from /proc once
+// the command runs, but by then the only mark it can plant is its own. /tmp
+// because sandbox.WritablePaths keeps it writable under a read-only rootfs, and
+// because nothing there is the agent's workdir — the mark must not appear among
+// the files a tool call lists.
+//
+// The uniqueness is load-bearing beyond one command, because nothing removes a
+// mark: a repeated path would let one timeout's mark be read as a later command's.
+// Discarding the error is still right, and is what k8s's nonce does. Since Go
+// 1.24 crypto/rand.Read "never returns an error, and always fills b entirely",
+// and crashes the program irrecoverably rather than handing back a short or
+// zeroed buffer — so the failure mode that would matter here, every exec quietly
+// sharing one all-zero path, is not reachable.
+func execState() string {
+	var b [8]byte
+	_, _ = rand.Read(b[:])
+	return "/tmp/.map-exec-" + hex.EncodeToString(b[:])
 }
 
 // pollExec inspects the exec until ready is satisfied, giving up after

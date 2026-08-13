@@ -67,9 +67,46 @@ type fakeExec struct {
 	stdout     string
 	inspects   *int          // optional: counts /exec/{id}/json calls
 	topDelay   time.Duration // how long the daemon takes to answer /top
+	// killed: the watchdog's mark is on the container's filesystem, as it is
+	// after a kill it actually delivered. Absent by default, which is what every
+	// command that was never killed by its watchdog looks like.
+	killed bool
+	// marks counts the reads of that mark, so a test can pin that the round trip
+	// is only paid where the answer could still change the verdict.
+	marks *int
 }
 
 const fakeExecPid = 4242
+
+// wrapperCommand pulls the shell command out of an exec create body.
+//
+// Every exec this backend makes — a tool call, and equally the mkdir, rename and
+// shed the write path runs — goes through Exec and so through the same wrapper,
+// whose argv is `/bin/bash -c <wrapper> map-exec <command> <seconds> <state>`.
+// The command therefore sits at a fixed index from the front. These tests used to
+// read it from the *back*, which was correct only for as long as the wrapper's
+// argument count never changed: #390 appended the state path and silently shifted
+// every one of them onto the seconds string. Reading from the front is what makes
+// the next argument a compile-or-fail question rather than a set of assertions
+// that quietly begin describing the wrong thing.
+func wrapperCommand(cmd []string) string {
+	const commandArg = 4
+	if len(cmd) <= commandArg {
+		return ""
+	}
+	return cmd[commandArg]
+}
+
+// wrapperState pulls the per-exec state path out of the same argv, so a fake
+// daemon can hold Exec to the path it actually handed the wrapper rather than
+// answering any archive HEAD it happens to receive.
+func wrapperState(cmd []string) string {
+	const stateArg = 6
+	if len(cmd) <= stateArg {
+		return ""
+	}
+	return cmd[stateArg]
+}
 
 // execDaemon serves the endpoints Exec uses, with fe's timings.
 func execDaemon(t *testing.T, fe fakeExec) *container {
@@ -81,6 +118,10 @@ func execDaemon(t *testing.T, fe fakeExec) *container {
 
 	var mu sync.Mutex
 	var startedAt time.Time
+	// state is the path Exec handed this exec's wrapper, captured at create so the
+	// archive HEAD can be held to it. Without that, the fake would answer *any*
+	// mark path and the tests would pass an Exec that probed the wrong one.
+	var state string
 	// ran reports how long the exec has been going, and whether it started.
 	ran := func() (time.Duration, bool) {
 		mu.Lock()
@@ -94,6 +135,13 @@ func execDaemon(t *testing.T, fe fakeExec) *container {
 	p := fakeDaemon(t, func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case strings.HasSuffix(r.URL.Path, "/exec"):
+			var body execConfig
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				t.Errorf("decode exec create: %v", err)
+			}
+			mu.Lock()
+			state = wrapperState(body.Cmd)
+			mu.Unlock()
 			io.WriteString(w, `{"Id":"e1"}`)
 
 		case r.URL.Path == "/exec/e1/start":
@@ -120,6 +168,27 @@ func execDaemon(t *testing.T, fe fakeExec) *container {
 			elapsed, started := ran()
 			running := !started || fe.holdStream || elapsed < fe.streamFor
 			fmt.Fprintf(w, `{"Running":%t,"ExitCode":%d,"Pid":%d}`, running, fe.code, fakeExecPid)
+
+		case r.URL.Path == "/containers/abc/archive" && r.Method == http.MethodHead:
+			// The watchdog's mark, read out of band. A 404 is the honest answer
+			// for every command whose watchdog never fired.
+			mu.Lock()
+			if fe.marks != nil {
+				*fe.marks++
+			}
+			want := state + ".killed"
+			mu.Unlock()
+			// Held to the exact path this exec's wrapper was given. Answering any
+			// path would let an Exec that probed the wrong one — a stale state, or
+			// one missing the suffix — pass every test in this file.
+			if got := r.URL.Query().Get("path"); got != want {
+				t.Errorf("archive HEAD path = %q, want %q", got, want)
+			}
+			if !fe.killed {
+				w.WriteHeader(http.StatusNotFound)
+				return
+			}
+			w.WriteHeader(http.StatusOK)
 
 		case strings.HasSuffix(r.URL.Path, "/top"):
 			// A loaded daemon: `top` forks `ps` on the host, so the answer can
@@ -712,14 +781,43 @@ func TestAStragglerHoldingTheStreamIsNotTheCommand(t *testing.T) {
 	}
 }
 
-// The wrapper must keep no state anywhere the agent's own commands can reach.
-// A marker file under /tmp — the first design — let a command forge a timeout
-// it never hit, or erase one it did.
-func TestExecWrapperKeepsNoStateInsideTheContainer(t *testing.T) {
+// The wrapper writes exactly one thing inside the container — the watchdog's
+// mark — and this test is the boundary of that permission.
+//
+// It used to assert the wrapper wrote *nothing*, and that was a deliberate
+// property with a stated reason: "a marker file under /tmp — the first design —
+// let a command forge a timeout it never hit, or erase one it did"
+// (docs/history/2026-07.md). #390 reversed the first half of it, and the reversal
+// only holds because the mark is used differently than that first design used it.
+// There, the mark was the evidence. Here it is one OR-term beside two
+// host-measured ones, and `overran` — the term carrying the deadline's actual
+// guarantee — never reads it, so no tampering lets a command outlive its deadline.
+// Forging one still requires exiting 137 and buys a tenant a timeout label on its
+// own tool call; erasing one costs that command its label and puts it back where
+// it stood before the mark existed, which classifyTimeout states as the residual
+// limitation rather than as harmlessness.
+//
+// So the invariant is narrowed rather than dropped, and these assertions are what
+// keeps it narrow: no writable path is baked into the script (the state path
+// arrives as argv, per-exec and random, so a tenant cannot pre-create a mark for
+// an exec that has not started), and `mkdir` is the only write in it.
+func TestExecWrapperWritesOnlyTheWatchdogsMark(t *testing.T) {
 	for _, writable := range []string{"/tmp", "/var/tmp", "/dev/shm", "/run", "/workspace"} {
 		if strings.Contains(execWrapper, writable) {
-			t.Errorf("the exec wrapper touches %s, which the sandboxed command can write", writable)
+			t.Errorf("the exec wrapper bakes in %s, which the sandboxed command can write "+
+				"and could then pre-create a mark under", writable)
 		}
+	}
+	// One write, and it is the mark. Anything else appearing here is a new grant
+	// of container-side state that has not been argued.
+	for _, write := range []string{">>", "touch ", "cat >", "tee "} {
+		if strings.Contains(execWrapper, write) {
+			t.Errorf("the wrapper writes with %q; the mark is the only write it may make:\n%s",
+				write, execWrapper)
+		}
+	}
+	if n := strings.Count(execWrapper, "mkdir"); n != 1 {
+		t.Errorf("mkdir appears %d times; the mark is the wrapper's one write", n)
 	}
 	if !strings.Contains(execWrapper, "set -m") {
 		t.Error("the wrapper must enable job control so the deadline kills the command's process group")
@@ -887,7 +985,7 @@ func TestWriteFileCreatesParentsOnlyWhenNeeded(t *testing.T) {
 				t.Errorf("decode exec create: %v", err)
 			}
 			// The wrapper takes the command as an argument, not as script text.
-			commands = append(commands, body.Cmd[len(body.Cmd)-2])
+			commands = append(commands, wrapperCommand(body.Cmd))
 			io.WriteString(w, `{"Id":"e1"}`)
 		case r.URL.Path == "/exec/e1/start":
 		case r.URL.Path == "/exec/e1/json":
@@ -956,7 +1054,7 @@ func TestWriteFileShedsItsTempWhenThePutFails(t *testing.T) {
 			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 				t.Errorf("decode exec create: %v", err)
 			}
-			commands = append(commands, body.Cmd[len(body.Cmd)-2])
+			commands = append(commands, wrapperCommand(body.Cmd))
 			io.WriteString(w, `{"Id":"e1"}`)
 		case r.URL.Path == "/exec/e1/start":
 		case r.URL.Path == "/exec/e1/json":
@@ -1026,7 +1124,7 @@ func TestCleanupOutlivesTheWriteThatWasCanceled(t *testing.T) {
 			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 				t.Errorf("decode exec create: %v", err)
 			}
-			commands = append(commands, body.Cmd[len(body.Cmd)-2])
+			commands = append(commands, wrapperCommand(body.Cmd))
 			io.WriteString(w, `{"Id":"e1"}`)
 		case r.URL.Path == "/exec/e1/start":
 		case r.URL.Path == "/exec/e1/json":
@@ -1072,7 +1170,7 @@ func TestTheBatchesCleanupOutlivesTheWriteThatWasCanceled(t *testing.T) {
 			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 				t.Errorf("decode exec create: %v", err)
 			}
-			commands = append(commands, body.Cmd[len(body.Cmd)-2])
+			commands = append(commands, wrapperCommand(body.Cmd))
 			io.WriteString(w, `{"Id":"e1"}`)
 		case r.URL.Path == "/exec/e1/start":
 		case r.URL.Path == "/exec/e1/json":
@@ -1126,7 +1224,7 @@ func TestWriteFileClassifiesAnUnwritableParentWhenThePutFails(t *testing.T) {
 			}
 			execN++
 			id := fmt.Sprintf("e%d", execN)
-			probes[id] = strings.Contains(body.Cmd[len(body.Cmd)-2], ": > '/workspace/"+sandbox.TempPrefix)
+			probes[id] = strings.Contains(wrapperCommand(body.Cmd), ": > '/workspace/"+sandbox.TempPrefix)
 			fmt.Fprintf(w, `{"Id":%q}`, id)
 		case strings.HasSuffix(r.URL.Path, "/start"):
 			w.WriteHeader(http.StatusOK)
@@ -1212,7 +1310,7 @@ func TestWriteFileClassifiesARootOwnedParentAtRename(t *testing.T) {
 			}
 			execN++
 			id := fmt.Sprintf("e%d", execN)
-			switch cmd := body.Cmd[len(body.Cmd)-2]; {
+			switch cmd := wrapperCommand(body.Cmd); {
 			case strings.Contains(cmd, "mv -f"):
 				kinds[id] = "rename"
 			case strings.Contains(cmd, ": > '/etc/"+sandbox.TempPrefix):
@@ -1295,7 +1393,7 @@ func TestARefusedRenameReclaimsItsTempThroughTheDaemon(t *testing.T) {
 			}
 			execN++
 			id := fmt.Sprintf("e%d", execN)
-			cmd := body.Cmd[len(body.Cmd)-2]
+			cmd := wrapperCommand(body.Cmd)
 			commands = append(commands, cmd)
 			switch {
 			case strings.Contains(cmd, "mv -f"):
@@ -1387,7 +1485,7 @@ func TestARenameExecFailureShedsOnlyWithTheSandboxUsersRm(t *testing.T) {
 			}
 			execN++
 			id := fmt.Sprintf("e%d", execN)
-			cmd := body.Cmd[len(body.Cmd)-2]
+			cmd := wrapperCommand(body.Cmd)
 			commands = append(commands, cmd)
 			renames[id] = strings.Contains(cmd, "mv -f")
 			fmt.Fprintf(w, `{"Id":%q}`, id)
@@ -1476,7 +1574,7 @@ func TestABulkFaultReclaimsItsMembersThroughTheDaemon(t *testing.T) {
 			}
 			execN++
 			id := fmt.Sprintf("e%d", execN)
-			cmd := body.Cmd[len(body.Cmd)-2]
+			cmd := wrapperCommand(body.Cmd)
 			commands = append(commands, cmd)
 			if strings.Contains(cmd, "__map_bulk_rename") {
 				kinds[id] = "rename"
@@ -1593,7 +1691,7 @@ func TestABulkShedsBothWaysBeforeTheRenameCanRun(t *testing.T) {
 					}
 					execN++
 					id := fmt.Sprintf("e%d", execN)
-					cmd := body.Cmd[len(body.Cmd)-2]
+					cmd := wrapperCommand(body.Cmd)
 					commands = append(commands, cmd)
 					if strings.Contains(cmd, "__map_bulk_discard") {
 						kinds[id] = "discard"
@@ -1665,7 +1763,7 @@ func TestASuccessfulBulkStillEmptiesBookkeepingItCouldNotRemove(t *testing.T) {
 			}
 			execN++
 			id := fmt.Sprintf("e%d", execN)
-			if strings.Contains(body.Cmd[len(body.Cmd)-2], "__map_bulk_rename") {
+			if strings.Contains(wrapperCommand(body.Cmd), "__map_bulk_rename") {
 				kinds[id] = "rename"
 			}
 			fmt.Fprintf(w, `{"Id":%q}`, id)
@@ -1728,7 +1826,7 @@ func TestABulkThatLostItsManifestEmptiesThePlatformsOwnList(t *testing.T) {
 			}
 			execN++
 			id := fmt.Sprintf("e%d", execN)
-			if strings.Contains(body.Cmd[len(body.Cmd)-2], "__map_bulk_rename") {
+			if strings.Contains(wrapperCommand(body.Cmd), "__map_bulk_rename") {
 				kinds[id] = "rename"
 			}
 			fmt.Fprintf(w, `{"Id":%q}`, id)
@@ -1804,7 +1902,7 @@ func TestABulkThatLostItsManifestStillEmptiesBookkeepingItNamed(t *testing.T) {
 			}
 			execN++
 			id := fmt.Sprintf("e%d", execN)
-			if strings.Contains(body.Cmd[len(body.Cmd)-2], "__map_bulk_rename") {
+			if strings.Contains(wrapperCommand(body.Cmd), "__map_bulk_rename") {
 				kinds[id] = "rename"
 			}
 			fmt.Fprintf(w, `{"Id":%q}`, id)
@@ -1870,7 +1968,7 @@ func TestABulkRenameExecFailureShedsOnlyWithTheSandboxUsersRm(t *testing.T) {
 			}
 			execN++
 			id := fmt.Sprintf("e%d", execN)
-			cmd := body.Cmd[len(body.Cmd)-2]
+			cmd := wrapperCommand(body.Cmd)
 			commands = append(commands, cmd)
 			switch {
 			case strings.Contains(cmd, "__map_bulk_rename"):
@@ -1945,7 +2043,7 @@ func TestRenameFailureOnAWritableTargetKeepsTheRawError(t *testing.T) {
 			}
 			execN++
 			id := fmt.Sprintf("e%d", execN)
-			cmd := body.Cmd[len(body.Cmd)-2]
+			cmd := wrapperCommand(body.Cmd)
 			commands = append(commands, cmd)
 			renames[id] = strings.Contains(cmd, "mv -f")
 			fmt.Fprintf(w, `{"Id":%q}`, id)
@@ -2016,7 +2114,7 @@ func TestWriteFileSurfacesMkdirFailure(t *testing.T) {
 			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 				t.Errorf("decode exec create: %v", err)
 			}
-			commands = append(commands, body.Cmd[len(body.Cmd)-2])
+			commands = append(commands, wrapperCommand(body.Cmd))
 			io.WriteString(w, `{"Id":"e1"}`)
 		case r.URL.Path == "/exec/e1/start":
 			w.Write(frame(2, "Read-only file system\n"))
