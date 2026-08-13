@@ -136,6 +136,27 @@ func NewHandler(pool *pgxpool.Pool, blobs blob.Store, cipher secrets.Cipher, ver
 		})
 	}
 
+	// Management-key issuance (plan 32 slice 2, #378), on the reference's own
+	// `/api/console/` prefix rather than the `/api/oauth/` one above — it uses
+	// both, and each surface keeps the one it was recorded under. Admin for the
+	// same reason the environment-key section is: a listing of which credentials
+	// exist, their names and their issuers is itself the inventory an attacker
+	// would want, so the section is gated whole rather than only its mutations.
+	//
+	// There is deliberately no /v1 twin. The reference withholds key creation from
+	// its public API on purpose ("new API keys can only be created through the
+	// Claude Console for security reasons"), and its read/update pair lives on the
+	// Admin API, behind an `sk-ant-admin…` credential class this platform does not
+	// have. Both registered in docs/DIVERGENCES.md.
+	mux.HandleFunc("POST "+consoleAPIKeysPath, noStore(s.handle(identity.RoleAdmin, s.createAPIKey)))
+	mux.HandleFunc("GET "+consoleAPIKeysPath, s.handle(identity.RoleAdmin, s.listAPIKeys))
+	mux.HandleFunc("POST "+consoleAPIKeyPath, s.handle(identity.RoleAdmin, s.updateAPIKey))
+	for _, pattern := range []string{consoleAPIKeysPath, consoleAPIKeyPath} {
+		mux.HandleFunc(pattern, func(w http.ResponseWriter, r *http.Request) {
+			writeError(w, r, methodNotAllowed(r))
+		})
+	}
+
 	// Internal gate-config endpoint — not on the public /v1 wire. A session's
 	// egress gate authenticates with its per-session gtk_ token (its own auth
 	// lane in dispatchAuth) and fetches its networking policy + resolved

@@ -148,7 +148,7 @@ func EnsureAPIKey(ctx context.Context, pool *pgxpool.Pool, name, key string) err
 		 ON CONFLICT (key_hash) DO UPDATE
 		 SET status = 'active', name = EXCLUDED.name, partial_key_hint = EXCLUDED.partial_key_hint,
 		     created_by = NULL, expires_at = NULL`,
-		domain.NewID("apikey").String(), name, hash, partialKeyHint(key)); err != nil {
+		domain.NewID(domain.PrefixAPIKey).String(), name, hash, partialKeyHint(key)); err != nil {
 		return err
 	}
 	return tx.Commit(ctx)

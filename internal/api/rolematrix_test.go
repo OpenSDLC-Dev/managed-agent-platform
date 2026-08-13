@@ -106,7 +106,9 @@ func TestEveryIdentityReachableRouteDeclaresARole(t *testing.T) {
 // Console routes are excluded: their patterns are built from constants rather
 // than literals, and they need a real environment to address, so they are
 // covered by TestIdentityLaneEnvironmentKeyRoutesRequireAdmin and
-// TestAnAdminCanWorkTheEnvironmentKeySurfaceEndToEnd instead.
+// TestAnAdminCanWorkTheEnvironmentKeySurfaceEndToEnd — and, for the
+// management-key section, TestIdentityLaneAPIKeyRoutesRequireAdmin and
+// TestAnAdminCanWorkTheAPIKeySurfaceEndToEnd — instead.
 func TestTheMatrixCoversEveryAnnotatedRoute(t *testing.T) {
 	inSource := map[string]bool{}
 	for _, reg := range parseRoutes(t, "server.go") {
@@ -191,7 +193,12 @@ func laneOf(pattern string) lane {
 	if strings.Contains(pattern, "gateconfig.Path") {
 		return laneGate
 	}
-	if strings.Contains(pattern, "consoleTokensPath") || strings.Contains(pattern, "consoleRevokePath") {
+	// Every console-API pattern is built from a constant whose name starts with
+	// "console" — the family test rather than a list of the two, then four, that
+	// exist today. A list would silently classify the next console route as a
+	// fallback closure, and a fallback is the one lane this test does not hold to
+	// the declares-a-role rule.
+	if strings.Contains(pattern, "console") {
 		return laneConsole
 	}
 
