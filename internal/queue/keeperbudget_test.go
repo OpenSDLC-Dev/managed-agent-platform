@@ -3,8 +3,11 @@ package queue_test
 import (
 	"context"
 	"errors"
+	"sync"
 	"testing"
 	"time"
+
+	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/pgtest"
@@ -30,22 +33,34 @@ import (
 // with `SELECT … FOR UPDATE`, which is what makes `Extend`'s `UPDATE` wait, so the
 // renewal is genuinely slow rather than merely told it is.
 //
-// The numbers, on a 900ms lease (300ms interval):
+// Every ordering the reproduction depends on is *observed* before the next step
+// runs — a lock is held only once its goroutine says so, and a renewal is queued
+// behind it only once Postgres reports a backend waiting on a lock. Two earlier
+// versions of this test are why. The first raced the locks and passed 6/6 against
+// the unfixed keeper; the second replaced the race with sleeps, and a reviewer
+// pointed out that a slow enough host would simply not form the intended queue,
+// leaving a regression test that silently stops testing. Sleeps here only ever
+// set how *long* a lock is held, never who gets the row first.
 //
-//   - t=0      the keeper starts; a lock is already held.
-//   - t=300    the first renewal ticks and blocks on the lock.
-//   - t=700    the lock releases; the renewal succeeds and buys a lease to 1600.
-//     the t=600 tick is waiting, so the second renewal starts *now*.
-//   - t=700    a second lock is taken, blocking that renewal.
-//   - old      its budget was 900-300=600, so it gave up at 1300 — inside a lease
-//     good until 1600, with nothing else able to claim the item.
-//   - new      its budget is what the lease has left, 900, so it may run to 1600.
-//   - t=1200   the lock releases and the renewal succeeds.
+// The numbers, on a 1500ms lease (500ms interval), with t=0 the keeper's start:
 //
-// The keeper must therefore still hold the lease at the end. Timings are slack in
-// the direction that matters: every margin is ≥300ms, and the assertion is about
-// the keeper surviving, so a slow host makes the *old* code fail sooner rather
-// than making the new code flake.
+//   - t=0     lock A already holds the row; the keeper starts.
+//   - t=500   the first renewal ticks and blocks on A. Observed, not assumed.
+//   - then    lock B queues — behind that renewal, and observed to be waiting
+//     before A is released, so the order is A → renewal 1 → B.
+//   - t=1100  A releases. Renewal 1 has been blocked 600ms, longer than one
+//     interval, so the t=1000 tick is buffered behind it. It commits, buying a
+//     lease to ≈2600, and B takes the row next.
+//   - t=1100  the buffered tick fires immediately, so renewal 2 starts now and
+//     blocks on B.
+//     old: budget 1500-500=1000 → gives up at ≈2100, inside a lease good
+//     until ≈2600 that nothing else could claim.
+//     new: budget is what the lease has left, ≈1500 → may run to ≈2600.
+//   - t=2350  B releases and renewal 2 succeeds. That is 250ms past the old
+//     deadline and 250ms short of the new one — the widest symmetric margin the
+//     `ttl/3` gap between the two budgets allows.
+//
+// So the keeper must still hold the lease at the end.
 func TestASlowRenewalDoesNotShortenTheNextOnesBudget(t *testing.T) {
 	ctx := context.Background()
 	pool := pgtest.NewPool(t)
@@ -55,26 +70,58 @@ func TestASlowRenewalDoesNotShortenTheNextOnesBudget(t *testing.T) {
 	if _, err := q.Enqueue(ctx, pool, envID, sessionID, queue.ModelTurn); err != nil {
 		t.Fatal(err)
 	}
-	const ttl = 900 * time.Millisecond
+	const (
+		ttl      = 1500 * time.Millisecond
+		interval = ttl / 3
+	)
 	item, err := q.Claim(ctx, queue.ModelTurn, ttl)
 	if err != nil || item == nil {
 		t.Fatalf("Claim: item=%v err=%v", item, err)
 	}
 
-	// holdRow takes the item's row after `after` and keeps it for `hold`. Both
-	// locks are *queued* rather than raced: Postgres serves waiters in order, so
-	// starting the second request while the first still holds the row guarantees it
-	// is ahead of the renewal that will ask next. Racing them instead lets the
-	// second renewal grab the row the instant the first lock lifts, which is how
-	// the first version of this test passed against the unfixed keeper.
-	holdRow := func(after, hold time.Duration) chan struct{} {
-		done := make(chan struct{})
+	// Reserved before anything else takes one: the two lock holders and the
+	// keeper's own Extend occupy three connections, and the default pool is four,
+	// so acquiring this later could block behind the very waits it is watching.
+	mon, err := pool.Acquire(ctx)
+	if err != nil {
+		t.Fatalf("acquire the monitor connection: %v", err)
+	}
+	defer mon.Release()
+
+	// waitBlocked returns once exactly n backends are waiting on a lock. The
+	// database is freshly created for this test, so nothing else can be waiting.
+	waitBlocked := func(n int) {
+		t.Helper()
+		deadline := time.Now().Add(10 * time.Second)
+		for {
+			var got int
+			if err := mon.QueryRow(ctx,
+				`SELECT count(*) FROM pg_stat_activity
+				 WHERE datname = current_database() AND wait_event_type = 'Lock'`).Scan(&got); err != nil {
+				t.Fatalf("count blocked backends: %v", err)
+			}
+			if got == n {
+				return
+			}
+			if time.Now().After(deadline) {
+				t.Fatalf("waited for %d blocked backend(s), saw %d", n, got)
+			}
+			time.Sleep(5 * time.Millisecond)
+		}
+	}
+
+	// holdRow takes the item's row and holds it until release is called. held
+	// closes once the lock is actually granted, so callers never guess.
+	holdRow := func() (held <-chan struct{}, release func()) {
+		h, rel, done := make(chan struct{}), make(chan struct{}), make(chan struct{})
+		var once sync.Once
+		release = func() { once.Do(func() { close(rel) }) }
 		go func() {
 			defer close(done)
-			time.Sleep(after)
 			tx, err := pool.Begin(ctx)
 			if err != nil {
 				t.Errorf("begin lock tx: %v", err)
+				close(h)
 				return
 			}
 			defer func() { _ = tx.Rollback(ctx) }()
@@ -82,30 +129,41 @@ func TestASlowRenewalDoesNotShortenTheNextOnesBudget(t *testing.T) {
 			if err := tx.QueryRow(ctx,
 				`SELECT id FROM work_items WHERE id = $1 FOR UPDATE`, item.ID).Scan(&id); err != nil {
 				t.Errorf("lock the row: %v", err)
+				close(h)
 				return
 			}
-			time.Sleep(hold)
+			close(h)
+			<-rel
 		}()
-		return done
+		// Releasing here too, not just waiting: a t.Fatal anywhere below would
+		// otherwise leave this goroutine parked on rel forever and hang the run.
+		t.Cleanup(func() { release(); <-done })
+		return h, release
 	}
 
-	// Lock A holds from t=0 to t=700, so the renewal that ticks at t=300 blocks on
-	// it and lands at t=700 — slow, but successful, buying a lease to t=1600.
-	first := holdRow(0, 700*time.Millisecond)
-	// Lock B queues at t=350, behind that renewal and ahead of the next one, and
-	// holds for 700ms once it gets the row (t=700 to t=1400). The t=600 tick is
-	// already waiting, so the second renewal starts at t=700 and waits on B.
-	//
-	//	old budget: 900-300 = 600ms from t=700 → gives up at t=1300, a full 300ms
-	//	            inside a lease nothing else could claim until t=1600.
-	//	new budget: what the lease has left, ~900ms → may run to t=1600, and the
-	//	            renewal lands at t=1400.
-	second := holdRow(350*time.Millisecond, 700*time.Millisecond)
+	heldA, releaseA := holdRow()
+	<-heldA // the row is locked before the keeper can renew anything
 
 	kctx, keeper := q.KeepLease(ctx, item, ttl)
-	<-first
-	<-second
-	time.Sleep(300 * time.Millisecond) // let the second renewal land
+
+	waitBlocked(1) // the first renewal has issued its UPDATE and is queued behind A
+	tick1 := time.Now()
+
+	heldB, releaseB := holdRow()
+	waitBlocked(2) // ...and B is queued behind that renewal, before A lets go
+
+	// Hold A past a full interval so the next tick buffers behind renewal 1.
+	time.Sleep(time.Until(tick1.Add(interval + interval/5)))
+	releaseA()
+	<-heldB // renewal 1 has committed (B could not have the row otherwise)
+
+	// Renewal 2 is now running on the buffered tick and blocked on B. Release B
+	// after the old budget would have expired but before the new one does: the
+	// two deadlines are ttl/3 apart, so half past the earlier one is the widest
+	// margin available on both sides.
+	time.Sleep(interval * 5 / 2)
+	releaseB()
+	time.Sleep(300 * time.Millisecond) // let renewal 2 land
 
 	if kctx.Err() != nil {
 		t.Errorf("the keeper abandoned a lease it still held: %v", kctx.Err())
@@ -119,13 +177,22 @@ func TestASlowRenewalDoesNotShortenTheNextOnesBudget(t *testing.T) {
 // budget: once subtracting the elapsed time can leave nothing, a tick that late
 // must report the lease lost rather than issue an Extend that cannot land.
 //
-// A microsecond lease makes it deterministic on every platform without a fake
-// clock — no timer anywhere delivers a 333ns interval inside a microsecond, so
-// by the first tick the lease is long gone. The nil pool is the assertion: it is
-// only safe because the branch returns before touching the database, so a keeper
-// that tried the doomed Extend anyway would panic here instead of passing.
+// A microsecond lease makes that the first tick's situation on any real host —
+// no timer delivers a 333ns interval inside a microsecond — without introducing
+// a fake clock for one branch. The pool is the assertion: it is closed before the
+// keeper ever sees it, so an Extend issued here could not reach a database and
+// would fail with the pool's own error instead of ErrLeaseLost. That keeps the
+// two outcomes distinguishable, and keeps the failure a failure — a nil pool
+// asserts the same thing by panicking, which would take the whole test binary
+// down with it if the timing assumption above ever did not hold.
 func TestATickAfterAWholeLeaseNeverDialsTheDatabase(t *testing.T) {
-	q := queue.New(nil)
+	unusable, err := pgxpool.New(context.Background(), "postgres://nobody@127.0.0.1:1/none")
+	if err != nil {
+		t.Fatalf("build the unusable pool: %v", err)
+	}
+	unusable.Close()
+
+	q := queue.New(unusable)
 	item := &queue.Item{ID: domain.ID("work_starvedkeeper"), Lease: time.Now()}
 
 	kctx, keeper := q.KeepLease(context.Background(), item, time.Microsecond)

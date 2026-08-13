@@ -74,7 +74,25 @@ fails against `main`'s keeper with the issue's own error string and passes with 
 **A negative result that mattered.** The first version of that reproduction passed 6/6
 against the *buggy* keeper — the second lock raced the second renewal instead of queueing
 behind it, so the bug had a window to escape through. A reproduction is only evidence once
-it has been made to fail against the unfixed code.
+it has been made to fail against the unfixed code. The version that replaced it bought its
+ordering with sleeps, and Codex pointed out the remaining hole: on a slow enough host the
+intended queue never forms, and the test does not fail — it silently stops testing. Both
+orderings are now *observed* before the next step runs, a lock only once its goroutine
+reports the grant and a queued renewal only once Postgres reports a backend waiting on a
+lock, leaving sleeps to decide how long a lock is held and never who gets the row.
+
+**A second refutation, this one the reviewer's.** Attacking the fix, Codex called the
+anchor wrong: `bought` is stamped when `Extend` *returns*, later than the instant the
+database bought the lease, so a budget can outlast the real lease. The observation is
+exactly right; the conclusion drawn from it — anchor before the call instead — is
+backwards, because the two directions are not symmetric. Anchoring late overstates the
+lease, and an attempt that runs past an expiry it cannot see commits nothing (`Extend`
+matches the lease timestamp it replaces) and is caught by the next tick, which returns
+`ErrLeaseLost` immediately rather than blocking. Anchoring early understates it, and an
+attempt then times out while the lease is still live — which is #392 itself. Applying the
+suggestion and running the reproduction fails it 2/2 with *"the keeper abandoned a lease it
+still held"*, the same signature `main` produces. It is recorded here because the code now
+reads like an oversight and will attract the same correction again.
 
 **What was not done.** The original 250ms flake was never reproduced (CPU saturation, six
 runs; database contention, eight runs). The test's margin was therefore left exactly as it
@@ -82,17 +100,26 @@ was: the diagnosis that justified widening it — a merely tight test over a cor
 is the diagnosis that turned out to be false, and widening a test after fixing the
 mechanism it was pointing at only costs sensitivity. If it recurs, that is new evidence.
 
+**What the fix does not cover, and the third reviewer who said so.** The GitHub Codex bot,
+reviewing the same commit, raised a *different* mechanism: an `Extend` whose `UPDATE`
+commits while the client's deadline fires renews a lease the caller never observes, so a
+timeout still discards a turn whose row is in fact leased. It is right, and the measured
+budget does not close it — the budget makes a timeout mean "this attempt outlived the lease
+it was racing", which is safe, not "the item is free", which would be certain. Split out as
+[#400](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/400) rather than
+stretched into this PR: it is unobserved, and closing it means changing the keeper's
+ownership protocol, not its arithmetic.
+
 **The retry remains rejected, for a narrower reason than first written.** An extend that
-fails *fast* — an exhausted pool, a reset connection — still returns while the lease is
-live, and the keeper still kills the turn. That case is unobserved, so nothing is built for
-it. The first draft called a naive retry *worse* than nothing; the verifier corrected this,
-and it is right: `internal/brain/brain.go` treats every keeper error identically, so the
-outcome would be unchanged, not worse. The real constraint is that `Extend` identifies the
-claimant by the lease timestamp it replaces (`WHERE … lease_expires_at = $2`) and updates
-`item.Lease` only on success, so a retry after an attempt that committed server-side but
-errored client-side would present a stale timestamp and be told, wrongly, that the lease
-was lost. Any future retry must resynchronise the lease value first, and may only do so
-while the current lease is still live.
+fails *fast* — an exhausted pool, a reset connection — likewise returns while the lease is
+live, and the keeper still kills the turn. The first draft called a naive retry *worse*
+than nothing; the verifier corrected this, and it is right: `internal/brain/brain.go`
+treats every keeper error identically, so the outcome would be unchanged, not worse. The
+real constraint is that `Extend` identifies the claimant by the lease timestamp it replaces
+(`WHERE … lease_expires_at = $2`) and updates `item.Lease` only on success, so a retry
+after an ambiguous completion would present a stale timestamp and be told, wrongly, that
+the lease was lost. Any future retry must resynchronise the lease value first, and may only
+do so while the current lease is still live — the requirement #400 inherits.
 
 ---
 

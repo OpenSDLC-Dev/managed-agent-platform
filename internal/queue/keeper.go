@@ -38,16 +38,23 @@ func (q *Queue) KeepLease(ctx context.Context, item *Item, ttl time.Duration) (c
 	if interval <= 0 {
 		interval = ttl
 	}
+	// When the lease currently held was bought, on this process's monotonic clock.
+	// Stamped here rather than inside the goroutine so that scheduling delay is not
+	// added to the lease as though it were lease time; the residue is Claim's own
+	// round trip, which no anchor on this side of the wire can remove. That leaves
+	// this *later* than the instant the database bought the lease — later and never
+	// earlier, the same deliberate direction as the renewal anchor below, so the
+	// budget can outlast the real lease but never fall short of it. Nothing
+	// incorrect commits either way —
+	// Extend's `lease_expires_at = $2` guard turns a too-late attempt into
+	// ErrLeaseLost rather than a wrong success — but the holder can go on working
+	// past the point another claimant could take the item, so the gap is worth
+	// keeping small rather than calling it free.
+	bought := time.Now()
 	go func() {
 		defer close(k.done)
 		t := time.NewTicker(interval)
 		defer t.Stop()
-		// When the lease we are currently holding was bought. Claim bought it just
-		// before this goroutine started, so starting the clock here overstates it
-		// by that setup — in the safe direction, since an over-long budget only
-		// lets an attempt run to a lease that has already lapsed, where Extend's
-		// own `lease_expires_at = $2` guard refuses it anyway.
-		bought := time.Now()
 		for {
 			select {
 			case <-k.quit:
@@ -58,9 +65,15 @@ func (q *Queue) KeepLease(ctx context.Context, item *Item, ttl time.Duration) (c
 				// Bounded: Close waits for this goroutine, so an Extend blocked on
 				// an exhausted pool or a stalled database would otherwise hang the
 				// holder forever. The budget is what is left of the lease the last
-				// renewal bought, so an Extend that overruns it has let the lease
-				// lapse — which is what makes abandoning the turn on a timeout the
-				// right answer rather than a guess.
+				// successful renewal bought, so an attempt that overruns it has
+				// outlived that lease, and abandoning the turn is the safe reaction
+				// rather than a guess.
+				//
+				// Safe, not certain: an UPDATE that commits while this client's
+				// deadline fires renews a lease the caller never gets to see, so a
+				// timeout here can still discard a turn whose row is in fact leased.
+				// Closing that window needs the keeper to resynchronise the lease
+				// value it holds, not a wider budget, and it is unobserved — #400.
 				//
 				// Measured from that renewal rather than assumed to be `ttl-ttl/3`,
 				// and #392's review is why. A Ticker buffers a tick and drops the
@@ -75,8 +88,11 @@ func (q *Queue) KeepLease(ctx context.Context, item *Item, ttl time.Duration) (c
 				// punctual ticks still get `ttl-ttl/3`, and a late one gets only what
 				// the lease has left.
 				//
-				// A duration, not the lease timestamp: the deadline must not depend
-				// on agreement between the database clock and this process's.
+				// A duration, not the lease timestamp: the deadline must never
+				// depend on the database clock and this process's agreeing on the
+				// time of day. Measuring elapsed time still asks them to agree on
+				// the rate of a second, which is a far weaker assumption and the
+				// only one this can be built on.
 				budget := ttl - time.Since(bought)
 				if budget <= 0 {
 					// A tick this late means the goroutine was starved for a whole
@@ -93,6 +109,18 @@ func (q *Queue) KeepLease(ctx context.Context, item *Item, ttl time.Duration) (c
 					k.cancel() // aborts the in-flight tool run or provider stream
 					return
 				}
+				// Stamped on return, not before the call, and the asymmetry is
+				// deliberate. The database bought this lease partway through the
+				// round trip, so a timestamp taken here is *later* than the real
+				// purchase and the budget it feeds is therefore never short of
+				// what the lease has left. Anchoring before the call would invert
+				// that: the budget would understate a slow round trip, and an
+				// attempt could time out while the lease was still live — which is
+				// the false positive this whole change exists to remove. The cost
+				// of the direction chosen is that a holder can go on working past
+				// an expiry it cannot see; nothing of it commits (Extend's guard),
+				// and the next tick's Extend returns ErrLeaseLost at once rather
+				// than blocking, so the overrun is bounded in practice.
 				bought = time.Now()
 			}
 		}
