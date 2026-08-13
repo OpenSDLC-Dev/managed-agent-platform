@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -300,21 +301,69 @@ func TestK8sNoServiceAccountToken(t *testing.T) {
 
 // The deadline watchdog must not pin the exec's stderr open: a quick command
 // under a timeout returns as soon as it finishes, not a watchdog poll interval
-// (~1s) later. The bound is generous so cluster exec latency does not flake it,
-// while a regression to the old up-to-1s-late EOF still trips it.
-func TestK8sTimedFastCommandReturnsPromptly(t *testing.T) {
+// (~1s) later. The script's half of that — the watchdog closing its inherited
+// copy of the stream — is pinned without a cluster by
+// TestExecWrapperReleasesTheStreamWhenTheCommandExits; what only a cluster can
+// answer is whether the whole path still returns on the command's exit, kubelet
+// and provider included.
+//
+// Measured as a difference rather than a wall clock (#318). The same command
+// makes the same two round trips with and without a deadline — Exec's second
+// exec collects the state either way — so the deadline adds the watchdog and
+// nothing else, and runner load, which scales both, cancels. An absolute bound
+// measured the cluster's latency as much as the property and reddened CI on a
+// loaded runner: 900ms held at 0.85s on an idle machine and failed at 2.27s on a
+// busy one, while the regression it exists for is a fixed ~1s.
+//
+// The pairs are interleaved and the **median** of their differences decides.
+// Not the best pair: `min` passes as soon as one pair's noise runs 500ms the
+// favourable way, so it would go green against a regression that delayed every
+// timed exec by a second — the most permissive statistic is the one a guard can
+// least afford. Not the worst either, which flakes on a single adverse outlier.
+// The median has to be bought three times out of five in whichever direction is
+// wrong, so both failure modes need a majority of the samples rather than one.
+// The bound is half the watchdog's poll interval — far above the difference
+// between two adjacent execs (single-digit ms idle, tens of ms on a host under
+// 5x load), far below the interval a regression adds.
+func TestK8sTimedExecDoesNotWaitForItsWatchdog(t *testing.T) {
 	sb := liveSandbox(t)
-	start := time.Now()
-	res, err := sb.Exec(context.Background(), sandbox.ExecRequest{
-		Command: "echo hi", Timeout: time.Minute,
-	})
-	if err != nil {
-		t.Fatalf("exec: %v", err)
+	// Half these execs carry no deadline of their own — that is what makes them
+	// the baseline — and an exec with neither is bounded by nothing at all, which
+	// in this package means a wedged stream costs the whole binary rather than
+	// this row (#318). A budget the ten fast execs cannot approach turns that back
+	// into one row's failure, as the suite's own long rows already do.
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	elapsed := func(timeout time.Duration) time.Duration {
+		start := time.Now()
+		res, err := sb.Exec(ctx, sandbox.ExecRequest{Command: "echo hi", Timeout: timeout})
+		if err != nil {
+			t.Fatalf("exec: %v", err)
+		}
+		if res.ExitCode != 0 || strings.TrimSpace(res.Stdout) != "hi" {
+			t.Fatalf("unexpected result: %+v", res)
+		}
+		return time.Since(start)
 	}
-	if res.ExitCode != 0 || strings.TrimSpace(res.Stdout) != "hi" {
-		t.Fatalf("unexpected result: %+v", res)
+
+	const pairs = 5
+	costs := make([]time.Duration, 0, pairs)
+	for i := range pairs {
+		// Alternating which half goes first: a fixed order holds a fixed phase
+		// against anything periodic on the host, and load that lands on every
+		// timed half and no untimed one would then read as a cost rather than as
+		// the noise it is. Alternating gives that pattern no phase to hold.
+		var untimed, timed time.Duration
+		if i%2 == 0 {
+			untimed, timed = elapsed(0), elapsed(time.Minute)
+		} else {
+			timed, untimed = elapsed(time.Minute), elapsed(0)
+		}
+		costs = append(costs, timed-untimed)
 	}
-	if elapsed := time.Since(start); elapsed > 900*time.Millisecond {
-		t.Errorf("a quick timed command took %s — the watchdog is pinning the exec stream open again", elapsed)
+	slices.Sort(costs)
+	if median := costs[len(costs)/2]; median > 500*time.Millisecond {
+		t.Errorf("across %d pairs a deadline cost a quick command a median %s (%v) — the watchdog is pinning the exec stream open again",
+			pairs, median, costs)
 	}
 }

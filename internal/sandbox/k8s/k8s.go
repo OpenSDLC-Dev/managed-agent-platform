@@ -1364,6 +1364,9 @@ func (pd *pod) WriteFile(ctx context.Context, path string, data []byte) error {
 // the writeScript already counts (tee | wc -c vs the expected size), so a large
 // mount never fully buffers in the executor. WriteFile is the buffered special
 // case: src is a bytes.Reader over the whole payload.
+//
+// A write of no bytes is the one that opens no stream, and so is the one whose
+// count the caller makes instead — see below.
 func (pd *pod) WriteFileStream(ctx context.Context, path string, src io.Reader, size int64) error {
 	dir := gopath.Dir(path)
 	tmp := gopath.Join(dir, sandbox.TempName())
@@ -1372,7 +1375,46 @@ func (pd *pod) WriteFileStream(ctx context.Context, path string, src io.Reader, 
 	// with the shell's own strerror text, plan 23); capped because the sandbox
 	// writes it.
 	out := &cappedBuffer{limit: 4096}
-	res, err := pd.client.exec(ctx, pd.name, containerName, argv, src, out, io.Discard)
+	// A write of no bytes opens no stdin stream, the way the bulk scripts that
+	// read no stdin are given none. Five CI stalls in one week hung here and
+	// nowhere else (#318): the exec for a zero-byte write opened a stdin stream,
+	// the client's copy of it finished and closed it at once, and the pod's side
+	// of that exec then never completed — stdout, stderr and the error stream all
+	// sat waiting for an EOF that never came, on an idle connection, until go
+	// test's package alarm killed the whole binary nine minutes later. Why the
+	// cluster loses that close is not established. That all five landed on one of
+	// the suite's two zero-byte writes, and none on the hundreds of writes that
+	// carry bytes, is. Asking for no stream removes the race rather than
+	// diagnosing it, and costs the script nothing: a container whose exec
+	// requested no stdin reads EOF immediately, so `tee | wc -c` still counts the
+	// zero that $3 is compared against. That last part is the one assumption this
+	// takes on — that the runtime hands a stdin-less exec a readable fd 0 rather
+	// than a closed one, which `tee` under `set -o pipefail` would fail on —
+	// measured against containerd, the runtime under kind, CI and every cluster
+	// this repo documents deploying to.
+	//
+	// What it would cost, without the probe below, is the interface's own promise
+	// that "a short or long stream is an error, not a silently truncated file":
+	// with no stream the script counts zero whatever the reader holds, so a caller
+	// whose size disagreed with its reader would land an empty file *over* the
+	// target where today it is refused and the target keeps what it held — and the
+	// docker backend, whose tar writer refuses the same mismatch, would answer
+	// differently. One byte settles it, and is asked before anything in the pod is
+	// created, so the refusal costs the target nothing.
+	stdin := src
+	if size == 0 {
+		stdin = nil
+		if src != nil {
+			var probe [1]byte
+			switch n, err := io.ReadFull(src, probe[:]); {
+			case n > 0:
+				return shortWrite(path, size)
+			case !errors.Is(err, io.EOF):
+				return fmt.Errorf("k8s: write %s: read: %w", path, err)
+			}
+		}
+	}
+	res, err := pd.client.exec(ctx, pd.name, containerName, argv, stdin, out, io.Discard)
 	if err != nil {
 		return pd.execErr(ctx, err)
 	}
@@ -1386,7 +1428,7 @@ func (pd *pod) WriteFileStream(ctx context.Context, path string, src io.Reader, 
 		// turned into the error it is rather than a silent half-written file. The
 		// script has already removed what did arrive, so the target still holds
 		// what it held.
-		return fmt.Errorf("k8s: write %s: short write (exec stdin did not deliver all %d bytes)", path, size)
+		return shortWrite(path, size)
 	case sandbox.ExitPathNotDirectory:
 		return fmt.Errorf("%s: %w", dir, sandbox.ErrNotDirectory)
 	case sandbox.ExitPathIsDirectory:
@@ -1402,6 +1444,13 @@ func (pd *pod) WriteFileStream(ctx context.Context, path string, src io.Reader, 
 		// daemon's error here, so this must not read as a successful write.
 		return fmt.Errorf("k8s: write %s: exit %d", path, res.code)
 	}
+}
+
+// shortWrite is the refusal a write whose stream and size disagree answers with,
+// named once because two places reach it: the script's own count, and the probe
+// that stands in for it when a zero-byte write asks for no stream to count.
+func shortWrite(path string, size int64) error {
+	return fmt.Errorf("k8s: write %s: short write (exec stdin did not deliver all %d bytes)", path, size)
 }
 
 // WriteFiles lands a whole batch for one exec: the archive rides the exec's stdin
