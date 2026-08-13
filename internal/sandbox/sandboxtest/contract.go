@@ -59,6 +59,18 @@ type Harness struct {
 
 const workdir = "/workspace"
 
+// untouchableReader fails the test if anything reads it. It is how a write that
+// must refuse *before* it starts is told apart from one that refuses after
+// carrying the bytes somewhere: the second reads its source, and the first
+// cannot.
+type untouchableReader struct{ t *testing.T }
+
+func (r untouchableReader) Read([]byte) (int, error) {
+	r.t.Helper()
+	r.t.Error("the refused write read its source; it must refuse before touching it")
+	return 0, io.EOF
+}
+
 // Run exercises the sandbox.Provider contract. newHarness is called once per
 // subtest so a backend can isolate its own fixtures.
 func Run(t *testing.T, newHarness func(t *testing.T) Harness) {
@@ -803,8 +815,10 @@ func Run(t *testing.T, newHarness func(t *testing.T) Harness) {
 		// every byte of the reader into the pod. So the guard is asked for here
 		// by its consequences: the parent must not appear, which is what a
 		// caller who was told nothing was written is entitled to.
+		// The source says so first-hand: a reader that faults the moment it is
+		// read cannot be reached at all by a write that refuses before it starts.
 		refused := workdir + "/nosuchdir/unknown.bin"
-		if err := sb.WriteFileStream(ctx, refused, strings.NewReader("replacement"), -1); err == nil {
+		if err := sb.WriteFileStream(ctx, refused, untouchableReader{t}, -1); err == nil {
 			t.Error("stream write with a negative size returned nil, want an error")
 		}
 		if _, err := sb.ReadFile(ctx, refused); !errors.Is(err, sandbox.ErrFileNotExist) {
@@ -818,7 +832,7 @@ func Run(t *testing.T, newHarness func(t *testing.T) Harness) {
 			t.Errorf("the refused write's parent directory is %s, want absent", got)
 		}
 		// An existing target keeps what it held, for the same reason.
-		if err := sb.WriteFileStream(ctx, kept, strings.NewReader("replacement"), -1); err == nil {
+		if err := sb.WriteFileStream(ctx, kept, untouchableReader{t}, -1); err == nil {
 			t.Error("stream write with a negative size over a target returned nil, want an error")
 		}
 		if got, err := sb.ReadFile(ctx, kept); err != nil || string(got) != "original" {
