@@ -4,14 +4,59 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"log"
+	"log/slog"
 	"net/http"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 	"unicode/utf8"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/api"
 )
+
+// captureWarnings routes WARN-and-above logging into a buffer for one test and
+// returns a locked accessor for it.
+//
+// The stdlib-log save/restore is not optional, for the reason internal/worker's
+// namesake documents: slog.SetDefault reroutes the standard log package into
+// whatever handler it installs, and restoring only slog.Default() does not undo
+// that — on the way back the previous handler IS a *defaultHandler, so
+// SetDefault's type check skips the log.SetOutput call and log keeps pointing at
+// this finished test's handler. Every later log.Print in this package's test
+// binary would vanish into it, taking the httptest control plane's diagnostics
+// with them.
+func captureWarnings(t *testing.T) func() string {
+	t.Helper()
+	buf := &lockedBuffer{}
+	prev := slog.Default()
+	prevOut, prevFlags := log.Writer(), log.Flags()
+	slog.SetDefault(slog.New(slog.NewTextHandler(buf, &slog.HandlerOptions{Level: slog.LevelWarn})))
+	t.Cleanup(func() {
+		slog.SetDefault(prev)
+		log.SetOutput(prevOut)
+		log.SetFlags(prevFlags)
+	})
+	return buf.String
+}
+
+type lockedBuffer struct {
+	mu sync.Mutex
+	b  strings.Builder
+}
+
+func (l *lockedBuffer) Write(p []byte) (int, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.b.Write(p)
+}
+
+func (l *lockedBuffer) String() string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.b.String()
+}
 
 // sha256Hex is the stored form of a key, spelled out here rather than reached for
 // across the package boundary: a test that stages a row the way the code would
@@ -241,6 +286,45 @@ func TestEnsureAPIKeyAdoptsAnIssuedRowAsEnvManaged(t *testing.T) {
 	res.Body.Close()
 	if res.StatusCode != http.StatusOK {
 		t.Errorf("adopted key: %d, want 200", res.StatusCode)
+	}
+}
+
+// TestEnsureAPIKeyAnnouncesAnAdoption pins the audit half of that decision. The
+// review asked for the opposite behaviour — refuse to boot when the configured
+// value belongs to an issued key — which would strand a control plane behind a
+// state only a direct database edit could clear, and would protect nobody, since
+// setting the variable at all requires the access to configure any value. The
+// hazard the review was pointing at is real, though: an operator pasting an
+// archived key out of an old runbook resurrects it. Adoption stays, and this
+// asserts it is announced, because a boot-time event nothing logs is invisible.
+func TestEnsureAPIKeyAnnouncesAnAdoption(t *testing.T) {
+	s := newTestServer(t)
+	ctx := context.Background()
+	warnings := captureWarnings(t)
+
+	// A plain new key says nothing: an ordinary boot must not cry wolf.
+	if err := api.EnsureAPIKey(ctx, s.pool, "quiet", "ak-brand-new"); err != nil {
+		t.Fatalf("EnsureAPIKey: %v", err)
+	}
+	if got := warnings(); strings.Contains(got, "console-issued") {
+		t.Errorf("a first-time key warned:\n%s", got)
+	}
+
+	const key = "ak-resurrected"
+	if _, err := s.pool.Exec(ctx,
+		`INSERT INTO api_keys (id, name, key_hash, status, created_by)
+		 VALUES ('apikey_retired', 'retired', $1, 'archived', 'principal_leaver')`,
+		sha256Hex(key)); err != nil {
+		t.Fatalf("stage archived issued key: %v", err)
+	}
+	if err := api.EnsureAPIKey(ctx, s.pool, "boot", key); err != nil {
+		t.Fatalf("EnsureAPIKey: %v", err)
+	}
+	got := warnings()
+	for _, want := range []string{"console-issued", "principal_leaver", "archived"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("adoption warning does not mention %q:\n%s", want, got)
+		}
 	}
 }
 

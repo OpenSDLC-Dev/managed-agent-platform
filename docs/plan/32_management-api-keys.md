@@ -20,9 +20,9 @@ live product rather than inferred.
 ## Ground truth (verified 2026-08-13, live)
 
 Recorded against `platform.claude.com` with `window.fetch` hooked, five probe keys
-created and archived, `sk-ant-…` values redacted at capture. Full transcripts in
-#378's comments. What it settled, including four things that contradict what the
-public docs alone would have suggested:
+created and archived, `sk-ant-…` values redacted at capture. Full transcripts are
+in the comments on #378. What it settled, including four things that contradict
+what the public docs alone would have suggested:
 
 1. **There is no key-creation endpoint on the public API, deliberately.** The
    Admin API FAQ: "new API keys can only be created through the Claude Console for

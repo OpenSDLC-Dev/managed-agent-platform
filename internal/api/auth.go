@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"log/slog"
 	"net/http"
 	"strings"
 	"unicode/utf8"
@@ -100,6 +101,27 @@ func EnsureAPIKey(ctx context.Context, pool *pgxpool.Pool, name, key string) err
 		return err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+	// Adopting a key somebody issued from the console is the right outcome (see the
+	// ON CONFLICT clause below) but it must not be a silent one. An operator who
+	// pasted an archived console key out of an old runbook has just brought a
+	// retired credential back, and since this runs once at boot there is nothing
+	// else that would ever mention it. Refusing to boot instead was considered and
+	// rejected: it would strand the control plane behind a state only a direct
+	// database edit could clear, and it protects nobody — setting the variable at
+	// all requires the deployment access that could equally configure a fresh
+	// value. So: adopt, and say so.
+	var priorIssuer *string
+	var priorStatus string
+	switch err := tx.QueryRow(ctx,
+		`SELECT created_by, status FROM api_keys WHERE key_hash = $1`, hash).
+		Scan(&priorIssuer, &priorStatus); {
+	case err == pgx.ErrNoRows: // a value this deployment has never seen
+	case err != nil:
+		return err
+	case priorIssuer != nil:
+		slog.WarnContext(ctx, "configured management key already existed as a console-issued key; adopting it as env-var-managed",
+			"name", name, "issued_by", *priorIssuer, "previous_status", priorStatus)
+	}
 	// Archive before inserting: api_keys_one_live_unissued admits one active
 	// unissued row per name and Postgres enforces it per statement, so
 	// registering the replacement while the incumbent is still live would fail
