@@ -530,15 +530,6 @@ func redactURL(match string) string {
 	return u.Scheme + "://" + u.Host + trailing
 }
 
-// egressRefusal says why the dial was refused, and there are exactly two
-// reasons because mcpEgressAllowed has exactly two ways to say no.
-//
-// They are told apart because the advice differs and one of them is advice an
-// operator cannot act on: a config whose networking names no recognized policy
-// refuses every host, so telling its owner to add this one to `allowed_hosts`
-// sends them to a list that is not being consulted — and they may well have put
-// it there already, since a malformed block can carry both admitting fields and
-// still be refused.
 // mcpEndpointHost validates a declared endpoint and returns the host the egress
 // check judges. Both halves of this driver ask it — discovery before it lists,
 // execution before it calls — so what counts as a usable MCP endpoint has one
@@ -552,6 +543,15 @@ func mcpEndpointHost(endpoint string) (string, error) {
 	return u.Hostname(), nil
 }
 
+// egressRefusal says why the dial was refused, and there are exactly two
+// reasons because mcpEgressAllowed has exactly two ways to say no.
+//
+// They are told apart because the advice differs and one of them is advice an
+// operator cannot act on: a config whose networking names no recognized policy
+// refuses every host, so telling its owner to add this one to `allowed_hosts`
+// sends them to a list that is not being consulted — and they may well have put
+// it there already, since a malformed block can carry both admitting fields and
+// still be refused.
 func egressRefusal(cfg domain.EnvironmentConfig, host string) string {
 	if cfg.Networking.Type == domain.NetLimited {
 		return fmt.Sprintf("host %q is not admitted by this environment's `limited` networking policy "+
