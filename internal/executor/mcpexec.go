@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"slices"
 	"time"
+	"unicode/utf8"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/events"
@@ -349,14 +350,16 @@ func mcpResultBlocks(content []mcp.Content) []map[string]any {
 // decodes to nothing, so the tool catalog's whole-or-nothing rule applies here
 // too. What was dropped is said rather than left to look like a short answer.
 //
-// A leading block is exempt when this driver has already capped the text inside
-// it — a text block, or a document whose source is text (both go through
-// toolset.CapOutput where they are built). Keeping one admits a fixed overhead
-// and not a server's bytes: the JSON around it, the truncation notice inside it,
-// and whatever JSON escaping costs, which is bounded but not one-to-one — a
-// control byte the NUL strip leaves alone marshals as six. What the exemption
-// buys is that the ordinary over-long answer arrives *truncated* rather than not
-// at all, which is the whole difference for the shapes a model can still read.
+// A leading block is exempt when this driver has already capped every string
+// inside it — a text block, or a document whose source is text: the body goes
+// through toolset.CapOutput and the two labels a document carries about its
+// resource go through capLabel. Keeping one admits a fixed overhead and not a
+// server's bytes: the JSON around it, the truncation notices inside it, the
+// labels' own small ceiling, and whatever JSON escaping costs, which is bounded
+// but not one-to-one — a control byte the NUL strip leaves alone marshals as
+// six. What the exemption buys is that the ordinary over-long answer arrives
+// *truncated* rather than not at all, which is the whole difference for the
+// shapes a model can still read.
 //
 // It stops at those two. A leading image or base64 document is bounded by
 // nothing but the transport's megabytes and cannot be truncated — half a base64
@@ -399,8 +402,33 @@ func alreadyCapped(b map[string]any) bool {
 	return ok && src["type"] == "text"
 }
 
+// maxResourceLabel bounds the two strings a document block carries *about* its
+// resource rather than *from* it: the URI it is titled with, and the media type
+// its context names. Both are server-chosen and neither is content, so a label
+// past this is a label being used as a payload. It is small on purpose — the
+// leading-block exemption in capMCPBlocks is only honest if everything textual
+// in the block has been capped, and capping these at the answer budget would let
+// one exempt block carry three of them. A URI longer than this is truncated in
+// the title a model reads; the resource itself is unaffected.
+const maxResourceLabel = 2 << 10
+
+// capLabel bounds one of those, cutting on a rune boundary. json.Marshal would
+// coerce a rune split by a byte-wise cut to U+FFFD, which is a silent corruption
+// where a visible marker is honest.
+func capLabel(s string) string {
+	s = toolset.SanitizeText(s)
+	if len(s) <= maxResourceLabel {
+		return s
+	}
+	cut := maxResourceLabel
+	for cut > 0 && !utf8.RuneStart(s[cut]) {
+		cut--
+	}
+	return s[:cut] + "[truncated]"
+}
+
 func resourceBlock(c mcp.Content) map[string]any {
-	title := toolset.SanitizeText(c.URI)
+	title := capLabel(c.URI)
 	block := map[string]any{"type": "document", "title": title}
 	if c.Data != nil {
 		block["source"] = map[string]any{
@@ -418,7 +446,7 @@ func resourceBlock(c mcp.Content) map[string]any {
 	// The schema's plain-text source admits exactly one media type, so a
 	// resource declaring another is carried as context rather than dropped:
 	// "text/markdown" changes how a model should read the same bytes.
-	if mime := toolset.SanitizeText(c.MIMEType); mime != "" && mime != "text/plain" {
+	if mime := capLabel(c.MIMEType); mime != "" && mime != "text/plain" {
 		block["context"] = "The source resource declares its media type as " + mime + "."
 	}
 	return block

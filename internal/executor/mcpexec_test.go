@@ -469,10 +469,12 @@ func TestMCPCallRefusedByEgressPolicyIsAnsweredAndReported(t *testing.T) {
 	if len(errs) != 1 {
 		t.Fatalf("session.error count = %d, want 1", len(errs))
 	}
-	// retrying, even though no later turn changes the policy that refused the
-	// dial. The union is about the session, not about whether a retry would
-	// help: the SDK documents terminal as the session transitioning to
-	// terminated, and this session carries on with the call answered is_error.
+	// retrying, and truthfully so: the union is about the session — the SDK
+	// documents terminal as the session transitioning to terminated, and this
+	// session carries on with the call answered is_error — and a refusal is in
+	// any case healable while the session runs, since an environment's
+	// networking and an agent's mcp_servers are both patchable mid-session and
+	// this driver re-reads them every pass.
 	var e struct {
 		Error struct {
 			RetryStatus struct {
@@ -691,5 +693,50 @@ func TestMCPLargeTextResourceArrivesTruncated(t *testing.T) {
 	}
 	if !strings.Contains(data, "truncated") {
 		t.Errorf("data does not say it was truncated: %q", data[max(0, len(data)-80):])
+	}
+}
+
+// The exemption's premise is that everything textual in an exempt block was
+// capped where the block was built — so the two strings a document carries
+// *about* its resource are capped too. Neither is content: a URI is a title and
+// a media type is a note, and a server that sends megabytes of either is using a
+// label as a payload. Left uncapped they walked straight past the answer budget
+// inside the one block the budget exempts.
+func TestMCPResourceLabelsAreCappedSoTheExemptionHolds(t *testing.T) {
+	huge := strings.Repeat("u", 4*toolset.MaxOutputBytes)
+	url := mcptest.Server(t, mcptest.Tool{Name: "read", Blocks: []mcptest.Block{
+		{Type: "resource", URI: "file:///" + huge, MIMEType: "text/" + huge, Text: "short body"},
+	}})
+	h := mcpHarness(t)
+	h.declareMCPServers(t, [2]string{"docs", url})
+	h.appendMCPToolUse(t, "docs", "read", `{}`)
+	h.enqueueMCP(t)
+
+	h.stepOnce(t)
+
+	results := h.mcpResults(t)
+	if len(results) != 1 {
+		t.Fatalf("results = %d, want one", len(results))
+	}
+	blocks := blocksOf(t, results[0])
+	raw, err := json.Marshal(blocks)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(raw) > toolset.MaxOutputBytes {
+		t.Errorf("answer is %d bytes, want it under the %d-byte budget — the labels rode past it",
+			len(raw), toolset.MaxOutputBytes)
+	}
+	// The block still arrives: capping a label must not cost the resource.
+	if len(blocks) != 1 || blocks[0]["type"] != "document" {
+		t.Fatalf("content = %v, want the document itself", blocks)
+	}
+	title, _ := blocks[0]["title"].(string)
+	if title == "" || len(title) > maxResourceLabel+32 {
+		t.Errorf("title is %d bytes, want it capped to %d", len(title), maxResourceLabel)
+	}
+	ctx, _ := blocks[0]["context"].(string)
+	if len(ctx) > maxResourceLabel+128 {
+		t.Errorf("context is %d bytes, want it capped to %d", len(ctx), maxResourceLabel)
 	}
 }
