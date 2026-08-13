@@ -147,11 +147,17 @@ that chain, driven over real HTTP against the shipped `deploy/compose` stack wit
 `--profile iam`, on a database Casdoor had never seeded. **31 assertions, 0
 failures.** No manual database edits: every operator action is an HTTP call.
 
-> **Three observations below no longer describe the code**, and are left standing
+> **Parts of the record below no longer describe the code**, and are left standing
 > because this is the record of a run rather than a description of the system.
-> #389 later measured the reference and moved us: a repeated archive now answers
-> **400** rather than 200, a past `expires_at` is now **accepted** rather than
-> refused, and a lapsed key now admits **only** archiving rather than also the
+> #389 later measured the reference and moved us. Two observations the run made
+> are now reversed: a repeated archive answers **400** rather than 200, and a past
+> `expires_at` is **accepted** rather than refused with *"expires_at must be in the
+> future"*. Two refusal messages quoted verbatim below are no longer the ones the
+> code emits — *"is archived, which is permanent; use "inactive" for a disable you
+> can undo"* and *"expired at its expires_at and cannot be re-activated; issue a
+> new key"*. And one rule tightened in a direction the run never probed: a lapsed
+> key now admits **archiving alone**, where the rationale recorded below — that
+> cleanup must not depend on the clock — had also been read as licensing the
 > disable and the rename. The section immediately above has the detail.
 
 **The tokens are real.** The seeded application carries `authorization_code` and

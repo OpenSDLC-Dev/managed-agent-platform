@@ -390,12 +390,12 @@ func apiKeyStatus(obj map[string]json.RawMessage) (*string, error) {
 // Absent means never, which is the recorded contract from both ends: the
 // console's "Never" **omits the field** rather than sending null, and the
 // response then reports expires_at: null. An explicit null is accepted for the
-// same meaning — nothing observed forbids it, and refusing a spelling the
-// response itself uses would be a gratuitous asymmetry, since a client
-// round-tripping a fetched resource back into a create would be rejected for
-// echoing what it was given. That step from the response shape to the request
-// shape is an extrapolation, not an observation, and is registered INFERRED in
-// docs/DIVERGENCES.md.
+// same meaning, and that is no longer the extrapolation this comment used to
+// call it: #389 posted `"expires_at": null` to the reference and got 200 with
+// `expires_at: null` back, so the step from the response shape to the request
+// shape is now an observation. The INFERRED entry that once registered it is
+// gone from docs/DIVERGENCES.md along with the other four — there is nothing
+// left to infer here, and nothing left to diverge on.
 //
 // There is no duration vocabulary, deliberately. The reference's dialog offers
 // "3 hours / 30 days / Custom N units", and every one of those is client-side
