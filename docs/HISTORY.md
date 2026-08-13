@@ -38,7 +38,7 @@ new directory and in-repo citations re-pointed in the moving PR (plan
 
 ---
 
-## Management API keys (plan 32, #378) — archived 2026-08-13, all three slices delivered (#385, #388, and this PR)
+## Management API keys (plan 32, #378) — archived 2026-08-13, all three slices delivered (#385, #388, #391)
 
 The slice that plan 31 could not ship. Its issuance surface was gated on a live
 observation of the reference console's key-management dialect, which needed an
@@ -65,7 +65,7 @@ bought.
   update status or name. Five CONFIRMED and five INFERRED DIVERGENCES entries, the
   inferences tracked by #389. Its four review rounds are recorded two sections
   below.
-- **Slice 3 — docs and acceptance** (this PR). §10 of
+- **Slice 3 — docs and acceptance** (#391). §10 of
   [docs/self-hosted-security.md](./self-hosted-security.md), and the acceptance run
   recorded immediately below.
 
