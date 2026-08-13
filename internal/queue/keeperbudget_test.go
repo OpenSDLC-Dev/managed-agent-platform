@@ -110,9 +110,21 @@ func TestASlowRenewalDoesNotShortenTheNextOnesBudget(t *testing.T) {
 		}
 	}
 
-	// holdRow takes the item's row and holds it until release is called. held
-	// closes once the lock is actually granted, so callers never guess.
-	holdRow := func() (held <-chan struct{}, release func()) {
+	// Registered before any lock exists, so — cleanups being LIFO — it runs after
+	// every release below. Waiting inside each lock's own cleanup deadlocks
+	// instead: B's would wait on a goroutine still queued behind A, whose release
+	// sits in a cleanup that has not run yet, and the test hangs to its timeout
+	// rather than reporting whatever failed first.
+	var finished []chan struct{}
+	t.Cleanup(func() {
+		for _, done := range finished {
+			<-done
+		}
+	})
+
+	// holdRow takes the item's row and holds it until release is called. granted
+	// closes once the lock really is held, so callers never guess.
+	holdRow := func() (granted <-chan struct{}, release func()) {
 		h, rel, done := make(chan struct{}), make(chan struct{}), make(chan struct{})
 		var once sync.Once
 		release = func() { once.Do(func() { close(rel) }) }
@@ -135,9 +147,11 @@ func TestASlowRenewalDoesNotShortenTheNextOnesBudget(t *testing.T) {
 			close(h)
 			<-rel
 		}()
-		// Releasing here too, not just waiting: a t.Fatal anywhere below would
-		// otherwise leave this goroutine parked on rel forever and hang the run.
-		t.Cleanup(func() { release(); <-done })
+		finished = append(finished, done)
+		// Release only, never wait: a t.Fatal anywhere below would otherwise
+		// leave this goroutine parked on rel forever. The waiting is the
+		// aggregate cleanup's job, once every holder has let go.
+		t.Cleanup(release)
 		return h, release
 	}
 

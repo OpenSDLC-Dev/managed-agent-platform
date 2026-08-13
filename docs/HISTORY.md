@@ -86,9 +86,12 @@ anchor wrong: `bought` is stamped when `Extend` *returns*, later than the instan
 database bought the lease, so a budget can outlast the real lease. The observation is
 exactly right; the conclusion drawn from it — anchor before the call instead — is
 backwards, because the two directions are not symmetric. Anchoring late overstates the
-lease, and an attempt that runs past an expiry it cannot see commits nothing (`Extend`
-matches the lease timestamp it replaces) and is caught by the next tick, which returns
-`ErrLeaseLost` immediately rather than blocking. Anchoring early understates it, and an
+lease, and an attempt that runs past an expiry it cannot see still cannot commit the turn:
+settlement happens only once `Close` reports the keeper healthy, and `Complete`/`Requeue`
+carry the lease as proof. (The overdue `Extend` itself may succeed — its guard matches the
+timestamp it is replacing, not the wall clock, so an item nobody reclaimed is simply
+re-extended. The first draft of this paragraph said otherwise, and the same reviewer caught
+it.) Anchoring early understates it, and an
 attempt then times out while the lease is still live — which is #392 itself. Applying the
 suggestion and running the reproduction fails it 2/2 with *"the keeper abandoned a lease it
 still held"*, the same signature `main` produces. It is recorded here because the code now

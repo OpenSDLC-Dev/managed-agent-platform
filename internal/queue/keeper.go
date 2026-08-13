@@ -44,12 +44,11 @@ func (q *Queue) KeepLease(ctx context.Context, item *Item, ttl time.Duration) (c
 	// round trip, which no anchor on this side of the wire can remove. That leaves
 	// this *later* than the instant the database bought the lease — later and never
 	// earlier, the same deliberate direction as the renewal anchor below, so the
-	// budget can outlast the real lease but never fall short of it. Nothing
-	// incorrect commits either way —
-	// Extend's `lease_expires_at = $2` guard turns a too-late attempt into
-	// ErrLeaseLost rather than a wrong success — but the holder can go on working
-	// past the point another claimant could take the item, so the gap is worth
-	// keeping small rather than calling it free.
+	// budget can outlast the real lease but never fall short of it. Nothing of a
+	// lost lease commits either way — Extend's `lease_expires_at = $2` guard fails
+	// the moment another claimant has taken the item — but the holder can go on
+	// working past the point that could happen, so the gap is worth keeping small
+	// rather than calling it free.
 	bought := time.Now()
 	go func() {
 		defer close(k.done)
@@ -118,9 +117,13 @@ func (q *Queue) KeepLease(ctx context.Context, item *Item, ttl time.Duration) (c
 				// attempt could time out while the lease was still live — which is
 				// the false positive this whole change exists to remove. The cost
 				// of the direction chosen is that a holder can go on working past
-				// an expiry it cannot see; nothing of it commits (Extend's guard),
-				// and the next tick's Extend returns ErrLeaseLost at once rather
-				// than blocking, so the overrun is bounded in practice.
+				// an expiry it cannot see. What that cannot do is commit the turn:
+				// settlement runs only once Close reports the keeper healthy, and
+				// Complete/Requeue carry the lease as their proof. The overdue
+				// Extend itself may well succeed — the guard matches the timestamp
+				// it is replacing, not the wall clock, so an item nobody reclaimed
+				// is simply re-extended. It is a reclaim, never the clock, that
+				// turns a renewal into ErrLeaseLost.
 				bought = time.Now()
 			}
 		}
