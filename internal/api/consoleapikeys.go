@@ -238,8 +238,7 @@ func (s *server) updateAPIKey(r *http.Request) (any, error) {
 	var current string
 	var lapsed bool
 	err = tx.QueryRow(ctx,
-		`SELECT created_by, status,
-		        (status = 'active' AND expires_at IS NOT NULL AND expires_at <= now())
+		`SELECT created_by, status, (expires_at IS NOT NULL AND expires_at <= now())
 		 FROM api_keys WHERE id = $1 FOR UPDATE`, keyID).Scan(&createdBy, &current, &lapsed)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, errNotFound("api key %s not found", keyID)
@@ -299,6 +298,14 @@ func (s *server) updateAPIKey(r *http.Request) (any, error) {
 	// the honest answer names the reason instead. Refusing here is a local choice;
 	// the reference's behaviour on this combination is unobserved, and registered
 	// INFERRED beside the archived one.
+	//
+	// `lapsed` is deliberately read from expires_at ALONE, not from the derived
+	// status. Anding in `status = 'active'` — which is what the rendering does,
+	// because a disabled key should report the operator's own action rather than
+	// the clock — left the whole guard reachable around: disable a key, let it
+	// lapse, re-enable it, and the flag was false because the row was `inactive`
+	// at the moment it was read. The row is what expired; which state it is
+	// sitting in while that happened does not change the answer here.
 	if lapsed && status != nil && *status == KeyStatusActive {
 		return nil, errInvalid("api key %s expired at its expires_at and cannot be re-activated; issue a new key", keyID)
 	}
@@ -312,7 +319,7 @@ func (s *server) updateAPIKey(r *http.Request) (any, error) {
 	return renderAPIKey(row), nil
 }
 
-// apiKeyName parses the operator's label. Bounds are environmentKeyNameMax's,
+// consoleKeyName parses the operator's label. Bounds are environmentKeyNameMax's,
 // reused rather than re-chosen: both are a console label an operator reads back
 // in a list, and the dialect's own bound is unobserved on either surface. Reusing
 // the other surface's number is a local choice, not evidence about this one, so
@@ -324,9 +331,16 @@ func consoleKeyName(obj map[string]json.RawMessage, required bool) (*string, err
 		if !required {
 			return nil, nil
 		}
-	} else if isNull(raw) {
-		// As with status: a supplied null is not a missing field, and a name cannot
-		// be cleared — every key carries one, and the listing renders it.
+	} else if isNull(raw) && !required {
+		// On a PATCH, absent means "leave it alone", so an explicit null is a
+		// distinct thing the caller said and cannot mean the same — and a name
+		// cannot be cleared, since every key carries one the listing renders.
+		//
+		// On a create the two DO coincide: a null name is a missing name, and
+		// `requiredString` below already says so in the words the environment-key
+		// surface has always used. Keeping that branch untouched is deliberate —
+		// sharing this helper with createEnvironmentKey must not quietly reword an
+		// error message on a surface plan 30 already shipped.
 		return nil, errInvalid("name cannot be null")
 	}
 	name, err := requiredString(obj, "name")

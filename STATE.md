@@ -29,6 +29,7 @@ Two plans are in flight, each on its own branch. Progress is the checklists belo
       one-live index narrowed to the rows nobody issued ([#385](https://github.com/OpenSDLC-Dev/managed-agent-platform/pull/385)).
 - [x] Slice 2 — the console surface: issue (resource plus `raw_key`), list (bare
       array, archived rows included), update status and name. Admin-gated, five
-      CONFIRMED and four INFERRED DIVERGENCES entries ([#388](https://github.com/OpenSDLC-Dev/managed-agent-platform/pull/388)).
+      CONFIRMED and five INFERRED DIVERGENCES entries, the inferences tracked for
+      confirmation by [#389](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/389) ([#388](https://github.com/OpenSDLC-Dev/managed-agent-platform/pull/388)).
 - [ ] Slice 3 — a management-key section in docs/self-hosted-security.md and an
       acceptance run; the DIVERGENCES entries landed with slice 2's surface.

@@ -303,10 +303,33 @@ func TestAPIKeyExpiryIsClientSuppliedAndDerived(t *testing.T) {
 	} else if !strings.Contains(errMessage(obj), "expired") {
 		t.Errorf("the refusal %q does not name the expiry", errMessage(obj))
 	}
-	// Retiring it is still allowed — an operator must be able to clean up.
-	if code, body := s.do(http.MethodPost, consoleAPIKey(id),
-		map[string]any{"status": api.KeyStatusArchived}); code != http.StatusOK {
-		t.Errorf("archiving a lapsed key: %d %v, want 200", code, body)
+	// The same refusal must hold by the route a review found around it: disable a
+	// key, let it lapse while disabled, then re-enable. Reading the lapsed flag
+	// from the *derived* status made this pass the guard, because the row was
+	// `inactive` at the moment it was read — so the write landed and answered 200
+	// with `expired`, the exact case the guard above exists to prevent.
+	disabled := issueAPIKey(t, s, map[string]any{
+		"name": "disabled-then-lapsed", "expires_at": at.Format(time.RFC3339)})
+	other := disabled["id"].(string)
+	if code, body := s.do(http.MethodPost, consoleAPIKey(other),
+		map[string]any{"status": api.KeyStatusInactive}); code != http.StatusOK {
+		t.Fatalf("disable: %d %v", code, body)
+	}
+	if _, err := s.pool.Exec(ctx,
+		`UPDATE api_keys SET expires_at = now() - interval '1 second' WHERE id = $1`, other); err != nil {
+		t.Fatalf("age the disabled key: %v", err)
+	}
+	status, obj = s.do(http.MethodPost, consoleAPIKey(other), map[string]any{"status": api.KeyStatusActive})
+	if status != http.StatusBadRequest {
+		t.Errorf("re-enabling a key that lapsed while disabled: %d %v, want 400", status, obj)
+	}
+
+	// Retiring either is still allowed — an operator must be able to clean up.
+	for _, retire := range []string{id, other} {
+		if code, body := s.do(http.MethodPost, consoleAPIKey(retire),
+			map[string]any{"status": api.KeyStatusArchived}); code != http.StatusOK {
+			t.Errorf("archiving a lapsed key: %d %v, want 200", code, body)
+		}
 	}
 }
 
