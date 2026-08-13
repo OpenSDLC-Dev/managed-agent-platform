@@ -4,7 +4,6 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/base64"
-	"errors"
 	"fmt"
 	"time"
 
@@ -61,13 +60,19 @@ type ManagementKey struct {
 // clock, so a listing can never show `active` for a key the very next request is
 // about to reject.
 //
-// Only an `active` row derives to `expired`. A key an operator disabled reports
-// `inactive` even past its expiry, because that is the operator's own action and
-// the more useful of the two answers; the reference's console does not
-// distinguish them either — its "not usable" marker covers both — so nothing is
-// contradicted. Recorded as INFERRED in docs/DIVERGENCES.md.
+// The precedence is archived > expired > the stored status, and both halves were
+// measured on the reference (#389, 2026-08-13). A key disabled while live and
+// then left to lapse lists as `expired`, not `inactive` — the clock outranks the
+// operator's own action, which is the opposite of what this platform inferred
+// before the probe. And a key archived after its expiry had passed lists as
+// `archived`, not `expired` — retirement is the more final fact, and it is the
+// one an operator acted on.
+//
+// The expiry half stays the exact complement of the comparison in authenticate
+// (`expires_at IS NULL OR expires_at > now()`), on the database's clock, so a
+// listing can never show a live status for a key the next request will refuse.
 const managementKeyColumns = `id, name,
-	CASE WHEN status = 'active' AND expires_at IS NOT NULL AND expires_at <= now()
+	CASE WHEN status <> 'archived' AND expires_at IS NOT NULL AND expires_at <= now()
 	     THEN 'expired' ELSE status END,
 	partial_key_hint, created_at, created_by, expires_at`
 
@@ -117,37 +122,27 @@ func IssueManagementKey(ctx context.Context, pool *pgxpool.Pool, name string, ex
 	//
 	// created_at comes from the column default, i.e. the database clock — the same
 	// clock the expiry is compared against, so a skewed application host cannot
-	// mint a key that is already expired or that outlives what it was promised.
+	// mint a key that outlives what it was promised.
 	//
-	// The WHERE is the second half of that: the route rejects a past expires_at
-	// against the *process* clock, which is the right place for a friendly 400 but
-	// cannot be authoritative. An instant a few milliseconds ahead passes that
-	// check and can still lapse before this statement runs — a skewed host makes it
-	// systematic rather than unlucky — and the row would be born already refused by
-	// authenticate, having answered 200 with a key in it. Deciding on the database
-	// clock costs nothing here: no row is written, and the caller turns the missing
-	// row back into the same 400. ErrNoRows is therefore not an impossible state,
-	// which is why it is named rather than folded into err.
+	// A past expires_at is written like any other. This platform used to refuse it,
+	// and guarded the refusal here against the database clock so a value that
+	// lapsed between the route's check and the insert could not slip through. The
+	// reference accepts it (#389): posting an instant in 2020 answers 200 with a
+	// resource already reporting `expired`. Nothing needs guarding once the value
+	// is allowed to be in the past — the row is simply born in the derived state,
+	// which the credential path refuses exactly as it refuses any lapsed key.
 	row := pool.QueryRow(ctx,
 		`INSERT INTO api_keys (id, name, key_hash, partial_key_hint, created_by, expires_at)
-		 SELECT $1, $2, $3, $4, $5, $6::timestamptz
-		  WHERE $6::timestamptz IS NULL OR $6::timestamptz > now()
+		 VALUES ($1, $2, $3, $4, $5, $6)
 		 RETURNING `+managementKeyColumns,
 		domain.NewID(domain.PrefixAPIKey).String(), name, hashKey(key), partialKeyHint(key),
 		createdBy, expiresAt)
 	k, err := scanManagementKey(row)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return "", ManagementKey{}, errExpiryLapsed
-	}
 	if err != nil {
 		return "", ManagementKey{}, err
 	}
 	return key, k, nil
 }
-
-// errExpiryLapsed reports that the requested expiry was still in the future when
-// the route validated it and no longer was when the row would have been written.
-var errExpiryLapsed = errors.New("api: requested expires_at lapsed before the key was written")
 
 // updateManagementKey applies a status and/or name patch and returns the row as
 // a listing would render it. A nil argument leaves that column alone, which is

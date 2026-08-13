@@ -264,8 +264,24 @@ func TestAPIKeyExpiryIsClientSuppliedAndDerived(t *testing.T) {
 		t.Errorf("a key expiring in an hour reports %v", dated["status"])
 	}
 
-	// Move the stored instant into the past — the only way to reach the derived
-	// state, since issuance refuses to mint one already lapsed.
+	// A past instant is accepted and the key is born reporting `expired`. The
+	// reference does exactly this (#389, measured 2026-08-13): posting an
+	// expires_at of 2020 answers 200 with status `expired`. We used to refuse it.
+	past := issueAPIKey(t, s, map[string]any{
+		"name": "born-dead", "expires_at": "2020-01-01T00:00:00Z"})
+	if past["status"] != api.KeyStatusExpired {
+		t.Errorf("a key minted with a past expires_at reports %v, want expired", past["status"])
+	}
+	if res := s.doRaw(http.MethodGet, "/v1/agents", nil,
+		map[string]string{"x-api-key": past["raw_key"].(string)}); res.StatusCode != http.StatusUnauthorized {
+		res.Body.Close()
+		t.Errorf("a key born expired authenticates: %d", res.StatusCode)
+	} else {
+		res.Body.Close()
+	}
+
+	// Move the stored instant into the past to reach the derived state on a key
+	// whose stored status is still `active`.
 	id := dated["id"].(string)
 	if _, err := s.pool.Exec(ctx,
 		`UPDATE api_keys SET expires_at = now() - interval '1 second' WHERE id = $1`, id); err != nil {
@@ -304,10 +320,7 @@ func TestAPIKeyExpiryIsClientSuppliedAndDerived(t *testing.T) {
 		t.Errorf("the refusal %q does not name the expiry", errMessage(obj))
 	}
 	// The same refusal must hold by the route a review found around it: disable a
-	// key, let it lapse while disabled, then re-enable. Reading the lapsed flag
-	// from the *derived* status made this pass the guard, because the row was
-	// `inactive` at the moment it was read — so the write landed and answered 200
-	// with `expired`, the exact case the guard above exists to prevent.
+	// key, let it lapse while disabled, then re-enable.
 	disabled := issueAPIKey(t, s, map[string]any{
 		"name": "disabled-then-lapsed", "expires_at": at.Format(time.RFC3339)})
 	other := disabled["id"].(string)
@@ -319,12 +332,42 @@ func TestAPIKeyExpiryIsClientSuppliedAndDerived(t *testing.T) {
 		`UPDATE api_keys SET expires_at = now() - interval '1 second' WHERE id = $1`, other); err != nil {
 		t.Fatalf("age the disabled key: %v", err)
 	}
+	// Expired outranks the operator's own disable in the rendering. Measured on
+	// the reference (#389): a key set `inactive` while live and then left to lapse
+	// lists as `expired`. We used to report `inactive`, on the argument that the
+	// operator's action is the more useful answer; the reference says the clock is.
+	if row := rowByID(listAPIKeys(t, s), other); row["status"] != api.KeyStatusExpired {
+		t.Errorf("a key disabled and then lapsed lists as %v, want expired", row["status"])
+	}
 	status, obj = s.do(http.MethodPost, consoleAPIKey(other), map[string]any{"status": api.KeyStatusActive})
 	if status != http.StatusBadRequest {
 		t.Errorf("re-enabling a key that lapsed while disabled: %d %v, want 400", status, obj)
 	}
 
-	// Retiring either is still allowed — an operator must be able to clean up.
+	// A lapsed key admits ONE operation: archiving it. The reference says so in
+	// the refusal itself — "Expired API keys can only be deleted, not renamed or
+	// reactivated" — and "deleted" there is `status: archived`, since it serves no
+	// DELETE verb. We used to permit the disable and the rename too, on the
+	// argument that cleanup must not depend on the clock; only the archive does.
+	// The empty patch is measured here as well, on a key minted with a past
+	// expires_at so it was lapsed but not archived: 400, and the expiry message —
+	// so "one operation" really does mean one, and asking for nothing is not it.
+	for _, patch := range []map[string]any{
+		{"status": api.KeyStatusInactive},
+		{"name": "renamed-while-lapsed"},
+		{"status": api.KeyStatusArchived, "name": "renamed-while-lapsed"},
+		{},
+	} {
+		code, body := s.do(http.MethodPost, consoleAPIKey(id), patch)
+		if code != http.StatusBadRequest {
+			t.Errorf("patch %v on a lapsed key: %d %v, want 400", patch, code, body)
+		} else if !strings.Contains(errMessage(body), "expired") {
+			t.Errorf("the refusal %q does not name the expiry", errMessage(body))
+		}
+	}
+
+	// Retiring either is the one thing that still works — an operator must be able
+	// to clean up, and the reference permits exactly this.
 	for _, retire := range []string{id, other} {
 		if code, body := s.do(http.MethodPost, consoleAPIKey(retire),
 			map[string]any{"status": api.KeyStatusArchived}); code != http.StatusOK {
@@ -347,7 +390,9 @@ func TestAPIKeyIssuanceRejectsBadRequests(t *testing.T) {
 		{"name not a string", map[string]any{"name": 7}, "name must be a string"},
 		{"unknown field", map[string]any{"name": "n", "nope": 1}, `unknown field "nope"`},
 		{"expiry not a timestamp", map[string]any{"name": "n", "expires_at": "tomorrow"}, "RFC 3339"},
-		{"expiry in the past", map[string]any{"name": "n", "expires_at": "2020-01-01T00:00:00Z"}, "must be in the future"},
+		// A past expires_at is NOT here: the reference accepts it and mints a key
+		// already reporting `expired` (#389), and so do we —
+		// TestAPIKeyExpiryIsClientSuppliedAndDerived covers it.
 		{"body is not an object", `[]`, ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -377,7 +422,6 @@ func TestAPIKeyUpdateGuardsTheEnumAndTheEnvManagedRow(t *testing.T) {
 		// retire the key, and the useful answer names the state that does.
 		{"expired is derived", map[string]any{"status": "expired"}, "cannot be set"},
 		{"unknown status", map[string]any{"status": "deleted"}, "status must be one of"},
-		{"empty patch", map[string]any{}, "at least one of"},
 		// A supplied null is not a missing field. `requiredString` folds absent,
 		// null and empty into one branch, which would tell a caller who did send
 		// the field that they had not.
@@ -395,6 +439,14 @@ func TestAPIKeyUpdateGuardsTheEnumAndTheEnvManagedRow(t *testing.T) {
 				t.Errorf("message %q does not mention %q", errMessage(obj), tc.want)
 			}
 		})
+	}
+
+	// An empty patch is a no-op that succeeds, not a validation error. The
+	// reference answers 200 with the unchanged resource (#389), so we do too.
+	if code, obj := s.do(http.MethodPost, consoleAPIKey(id), map[string]any{}); code != http.StatusOK {
+		t.Errorf("empty patch on a live key: %d %v, want 200", code, obj)
+	} else if obj["status"] != api.KeyStatusActive || obj["name"] != "guarded" {
+		t.Errorf("empty patch changed the resource: %v", obj)
 	}
 
 	// A name-only patch works, and leaves the status alone.
@@ -446,28 +498,33 @@ func TestArchivingAnAPIKeyIsPermanent(t *testing.T) {
 		t.Fatalf("archive: %d %v", code, obj)
 	}
 
+	// EVERY patch is refused, the repeated archive included. Measured against the
+	// reference on 2026-08-13 (#389): all four of these, and a second archive, come
+	// back 400 "Archived API keys cannot be updated." An earlier round of #388 made
+	// the repeated archive a succeeding no-op on the reasoning that a retried Delete
+	// should not error — sound in the abstract, and wrong about this API.
+	//
+	// The empty patch is in the table for a reason a reviewer found: without it an
+	// implementation that answered `{}` before consulting the row's state would pass
+	// this test while breaking the rule it exists to pin. It is measured too, on the
+	// same reference and on an already-archived key — 400, and the *archived*
+	// message, so the terminality check runs ahead of any shape check.
 	for _, patch := range []map[string]any{
 		{"status": api.KeyStatusActive},
 		{"status": api.KeyStatusInactive},
 		{"name": "revived"},
-		// A rename riding along with a re-archive is still a mutation.
 		{"status": api.KeyStatusArchived, "name": "revived"},
+		// The repeated archive: a transition to the state that already holds.
+		{"status": api.KeyStatusArchived},
+		// The empty patch: nothing asked for, still refused.
+		{},
 	} {
 		status, obj := s.do(http.MethodPost, consoleAPIKey(id), patch)
 		if status != http.StatusBadRequest {
 			t.Errorf("patch %v on an archived key: %d %v, want 400", patch, status, obj)
-		} else if !strings.Contains(errMessage(obj), api.KeyStatusInactive) {
-			t.Errorf("the refusal %q does not point at the reversible state", errMessage(obj))
+		} else if !strings.Contains(errMessage(obj), api.KeyStatusArchived) {
+			t.Errorf("the refusal %q does not name the archived state", errMessage(obj))
 		}
-	}
-
-	// Terminal is not the same as non-idempotent. A Delete whose response was lost
-	// to a proxy, or an operator's double-click, asks for the state that already
-	// holds; answering 400 — and advising the reversible state they deliberately
-	// did not choose — would be wrong on both counts.
-	status, obj := s.do(http.MethodPost, consoleAPIKey(id), map[string]any{"status": api.KeyStatusArchived})
-	if status != http.StatusOK || obj["status"] != api.KeyStatusArchived {
-		t.Errorf("re-archiving an archived key: %d %v, want 200 and archived", status, obj)
 	}
 
 	// The key stayed dead, and the row stayed archived.
@@ -481,7 +538,19 @@ func TestArchivingAnAPIKeyIsPermanent(t *testing.T) {
 		t.Fatalf("read status: %v", err)
 	}
 	if stored != api.KeyStatusArchived {
-		t.Errorf("stored status = %q after four refused patches", stored)
+		t.Errorf("stored status = %q after six refused patches", stored)
+	}
+
+	// Archived outranks expired in the rendering. A row archived after its expiry
+	// had passed reports `archived`, not `expired` — measured on the reference,
+	// where a key that had already lapsed rendered `archived` the moment it was
+	// retired. So the precedence is archived > expired > the stored status.
+	if _, err := s.pool.Exec(ctx,
+		`UPDATE api_keys SET expires_at = now() - interval '1 second' WHERE id = $1`, id); err != nil {
+		t.Fatalf("age the archived key: %v", err)
+	}
+	if row := rowByID(listAPIKeys(t, s), id); row["status"] != api.KeyStatusArchived {
+		t.Errorf("an archived key past its expiry lists as %v, want archived", row["status"])
 	}
 }
 

@@ -863,20 +863,33 @@ one-live index above.
 
 A key has three settable states and one derived one. `active` authenticates.
 `inactive` is a **disable you can undo** — the reversible state, and the one to
-reach for when you are not certain. `archived` is **permanent**: the console
-surface refuses any transition out of it, so an operator who retired a key can
-rely on that, while a repeated archive request is a no-op that succeeds rather
-than an error about a state that already holds. `expired` is not settable at all
-— it is computed at read time from `expires_at` **against the database's clock**,
-so a lapsed key stops authenticating the instant it lapses and no sweeper can be
-down when it does.
+reach for when you are not certain. `archived` is **permanent**, and permanent
+here means an archived key cannot be patched at all: not un-archived, not
+renamed, not archived a second time, and not even with an empty body. A retried
+archive is an error rather than a no-op, which is worth knowing if you script
+against this surface — as is the fact that an empty patch, which succeeds
+harmlessly on a live key, becomes an error once the row is archived or lapsed.
+`expired` is not settable — it is computed at read time from `expires_at`
+**against the database's clock**, so a lapsed key stops authenticating the
+instant it lapses and no sweeper can be down when it does.
+
+Where those overlap, the precedence is **`archived` > `expired` > what you set**.
+A key you disabled and then let lapse reads `expired`, not `inactive` — the clock
+outranks your own action. A key you archived after it had already lapsed reads
+`archived`, because retirement is the more final fact and the one you chose.
 
 Expiry itself is the caller's choice: an absolute instant supplied at issue, with
-no duration vocabulary, and **absent means never**. A past instant is refused
-rather than minted dead. A key that has lapsed cannot be re-activated — the write
-would change nothing usable, since `expires_at` is not settable on update — so
-issue a replacement. Archiving, disabling and renaming a lapsed key all stay
-permitted: cleanup must never depend on the clock.
+no duration vocabulary, and **absent means never**. An instant already in the
+past is accepted and mints a key that is born `expired` — useless, but refused by
+the credential path from its first request, so it is inert rather than dangerous.
+Once a key has lapsed, the **only** operation left is archiving it: re-activating,
+disabling, renaming and the empty patch are all refused. So a lapsed key cannot
+be tidied up by renaming it — retire it and issue a replacement.
+
+Every rule in these two paragraphs was measured against the reference console
+rather than inferred ([#389](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/389)).
+Three of them contradict what this platform shipped first, which is why they are
+stated this precisely.
 
 What you own:
 
