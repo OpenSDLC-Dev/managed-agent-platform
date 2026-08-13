@@ -18,9 +18,18 @@ import (
 // tool_use event id a confirmation must reference.
 func appendToolUseWithPerm(t *testing.T, s *tserver, sessionID, name, perm string) string {
 	t.Helper()
-	payload := []byte(`{"name":"` + name + `","input":{},"evaluated_permission":"` + perm + `","session_thread_id":null}`)
+	return appendGatedToolUse(t, s, sessionID, domain.EventAgentToolUse,
+		`{"name":"`+name+`","input":{},"evaluated_permission":"`+perm+`","session_thread_id":null}`)
+}
+
+// appendGatedToolUse plants one tool intent with the payload the brain would
+// commit for it and forces the session idle. Both gated families use it: they
+// differ in the event type and in one payload field, not in what the gate does
+// with them, which is the point these tests exist to check.
+func appendGatedToolUse(t *testing.T, s *tserver, sessionID string, typ domain.EventType, payload string) string {
+	t.Helper()
 	evs, err := events.NewLog(s.pool).Append(context.Background(), domain.ID(sessionID),
-		[]events.NewEvent{{Type: domain.EventAgentToolUse, Payload: payload}})
+		[]events.NewEvent{{Type: typ, Payload: []byte(payload)}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -34,6 +43,17 @@ func appendToolUseWithPerm(t *testing.T, s *tserver, sessionID, name, perm strin
 func appendAskToolUse(t *testing.T, s *tserver, sessionID, name string) string {
 	t.Helper()
 	return appendToolUseWithPerm(t, s, sessionID, name, "ask")
+}
+
+// appendAskMCPToolUse plants the MCP twin: the same gate, one field wider. The
+// brain does not commit these yet — MCP tools reach no model until the catalog
+// is offered at request assembly — so the shape is planted straight onto the log
+// exactly as the reference declares it (name, mcp_server_name, input).
+func appendAskMCPToolUse(t *testing.T, s *tserver, sessionID, server, name string) string {
+	t.Helper()
+	return appendGatedToolUse(t, s, sessionID, domain.EventAgentMCPToolUse,
+		`{"name":"`+name+`","mcp_server_name":"`+server+
+			`","input":{},"evaluated_permission":"ask","session_thread_id":null}`)
 }
 
 func confirm(id, result string, extra map[string]any) map[string]any {
@@ -150,6 +170,159 @@ func TestConfirmationDenyAnswersWithErrorAndResumesBrain(t *testing.T) {
 	}
 	if block := content[0].(map[string]any); block["text"] != "not allowed" {
 		t.Errorf("deny result text = %v, want the deny_message", block["text"])
+	}
+}
+
+// TestConfirmationDenyOfAnMCPCallAnswersInItsOwnFamily is the gate seen from the
+// wire. A client watching an MCP tool is waiting for an agent.mcp_tool_result
+// keyed by mcp_tool_use_id; answering with the built-in shape satisfies the
+// database (the answered-ness check COALESCEs all three reference keys) and the
+// replay, and is visible as wrong only here.
+func TestConfirmationDenyOfAnMCPCallAnswersInItsOwnFamily(t *testing.T) {
+	s := newTestServer(t)
+	sessionID := eventsFixture(t, s)
+	askID := appendAskMCPToolUse(t, s, sessionID, "docs", "search")
+
+	sendEvents(t, s, sessionID, confirm(askID, "deny", map[string]any{"deny_message": "not allowed"}))
+
+	res := lastEventOfType(t, s, sessionID, "agent.mcp_tool_result")
+	if res["mcp_tool_use_id"] != askID {
+		t.Errorf("mcp_tool_use_id = %v, want %s", res["mcp_tool_use_id"], askID)
+	}
+	if _, set := res["tool_use_id"]; set {
+		t.Errorf("the MCP result also carries tool_use_id: %v", res)
+	}
+	if res["is_error"] != true {
+		t.Errorf("is_error = %v, want true", res["is_error"])
+	}
+	// The store stamps it, since the platform emits it — a null here would look
+	// to a settling brain like a client event still queued.
+	if res["processed_at"] == nil {
+		t.Errorf("processed_at = nil, want the append-time stamp")
+	}
+	content, ok := res["content"].([]any)
+	if !ok || len(content) != 1 {
+		t.Fatalf("content = %v, want one block", res["content"])
+	}
+	if block := content[0].(map[string]any); block["text"] != "not allowed" {
+		t.Errorf("text = %v, want the deny_message", block["text"])
+	}
+	// The built-in shape must not be written alongside it.
+	if n := countEventType(t, s, sessionID, "agent.tool_result"); n != 0 {
+		t.Errorf("agent.tool_result count = %d, want 0", n)
+	}
+	if got := s.sessionStatus(sessionID); got != "running" {
+		t.Errorf("status after deny = %q, want running", got)
+	}
+	if n := s.liveWork(sessionID, queue.ModelTurn); n != 1 {
+		t.Errorf("live model_turn = %d, want 1 (resume on the deny result)", n)
+	}
+}
+
+// TestConfirmationDenialsKeepEachCallInItsOwnFamily: one batch may refuse a
+// built-in and an MCP call together, and each is answered in its own shape. A
+// synthesis that picked one shape per batch — or read the family from the first
+// denial — passes every single-family test and fails this one.
+func TestConfirmationDenialsKeepEachCallInItsOwnFamily(t *testing.T) {
+	s := newTestServer(t)
+	sessionID := eventsFixture(t, s)
+	builtin := appendAskToolUse(t, s, sessionID, "bash")
+	mcp := appendAskMCPToolUse(t, s, sessionID, "docs", "search")
+
+	sendEvents(t, s, sessionID,
+		confirm(builtin, "deny", map[string]any{"deny_message": "no bash"}),
+		confirm(mcp, "deny", map[string]any{"deny_message": "no docs"}))
+
+	builtinRes := lastEventOfType(t, s, sessionID, "agent.tool_result")
+	if builtinRes["tool_use_id"] != builtin {
+		t.Errorf("agent.tool_result tool_use_id = %v, want %s", builtinRes["tool_use_id"], builtin)
+	}
+	mcpRes := lastEventOfType(t, s, sessionID, "agent.mcp_tool_result")
+	if mcpRes["mcp_tool_use_id"] != mcp {
+		t.Errorf("agent.mcp_tool_result mcp_tool_use_id = %v, want %s", mcpRes["mcp_tool_use_id"], mcp)
+	}
+	if n := countEventType(t, s, sessionID, "agent.tool_result"); n != 1 {
+		t.Errorf("agent.tool_result count = %d, want 1", n)
+	}
+	if n := countEventType(t, s, sessionID, "agent.mcp_tool_result"); n != 1 {
+		t.Errorf("agent.mcp_tool_result count = %d, want 1", n)
+	}
+}
+
+// TestMCPCallBlocksTheRequiresActionGate: an ask-gated MCP call is part of the
+// blocking set, so resolving only the built-in re-idles the session on the MCP
+// id rather than resuming past a call no human has approved.
+func TestMCPCallBlocksTheRequiresActionGate(t *testing.T) {
+	s := newTestServer(t)
+	sessionID := eventsFixture(t, s)
+	builtin := appendAskToolUse(t, s, sessionID, "bash")
+	mcp := appendAskMCPToolUse(t, s, sessionID, "docs", "search")
+
+	sendEvents(t, s, sessionID, confirm(builtin, "allow", nil))
+
+	if got := s.sessionStatus(sessionID); got != "idle" {
+		t.Errorf("status = %q, want idle (the MCP ask is still blocking)", got)
+	}
+	idle := lastEventOfType(t, s, sessionID, "session.status_idle")
+	stop, ok := idle["stop_reason"].(map[string]any)
+	if !ok || stop["type"] != "requires_action" {
+		t.Fatalf("stop_reason = %v, want requires_action", idle["stop_reason"])
+	}
+	ids, ok := stop["event_ids"].([]any)
+	if !ok || len(ids) != 1 || ids[0] != mcp {
+		t.Errorf("event_ids = %v, want [%s]", stop["event_ids"], mcp)
+	}
+}
+
+// TestConfirmationBatchedWithTheLastToolResultResumesTheTurn: a client may send
+// its confirmation and an outstanding tool's result in one batch, and the two
+// enqueue decisions that follow have to count that result. It is in the batch,
+// not yet in the log, which is exactly why the two sibling arms of this switch
+// pass ToolResultRefs — a confirmation arm that passes only the denied ids reads
+// the call as still outstanding, declines to wake the brain, and commits a
+// session with every call answered, nothing queued and no later trigger: the
+// tool-result trigger fires on a *subsequent* send, and the client has nothing
+// left to send. The session is stuck running, where archive and delete are both
+// refused, and only a user.interrupt gets it back.
+func TestConfirmationBatchedWithTheLastToolResultResumesTheTurn(t *testing.T) {
+	s := newTestServer(t)
+	sessionID := eventsFixture(t, s)
+	askID := appendAskToolUse(t, s, sessionID, "bash")
+	customID := appendToolUse(t, s, sessionID, domain.EventAgentCustomToolUse)
+
+	sendEvents(t, s, sessionID,
+		confirm(askID, "deny", map[string]any{"deny_message": "no"}),
+		map[string]any{"type": "user.custom_tool_result", "custom_tool_use_id": customID,
+			"content": []any{map[string]any{"type": "text", "text": "done"}}})
+
+	if got := s.sessionStatus(sessionID); got != "running" {
+		t.Errorf("status = %q, want running", got)
+	}
+	if n := s.liveWork(sessionID, queue.ModelTurn); n != 1 {
+		t.Errorf("live model_turn = %d, want 1 — every call is answered, so the turn must resume", n)
+	}
+}
+
+// TestConfirmationBatchedWithAToolResultDoesNotRunTheExecutorForIt is the same
+// omission seen from the other side: a platform call answered in the same batch
+// must not look outstanding either, or the resume provisions a sandbox and runs
+// an executor pass that finds nothing to do.
+func TestConfirmationBatchedWithAToolResultDoesNotRunTheExecutorForIt(t *testing.T) {
+	s := newTestServer(t)
+	sessionID := selfHostedSession(t, s)
+	askID := appendAskToolUse(t, s, sessionID, "bash")
+	otherID := appendToolUse(t, s, sessionID, domain.EventAgentToolUse)
+
+	sendEvents(t, s, sessionID,
+		confirm(askID, "deny", map[string]any{"deny_message": "no"}),
+		map[string]any{"type": "user.tool_result", "tool_use_id": otherID,
+			"content": []any{map[string]any{"type": "text", "text": "done"}}})
+
+	if n := s.liveWork(sessionID, queue.ToolExec); n != 0 {
+		t.Errorf("live tool_exec = %d, want 0 — the only platform call was answered in this batch", n)
+	}
+	if n := s.liveWork(sessionID, queue.ModelTurn); n != 1 {
+		t.Errorf("live model_turn = %d, want 1", n)
 	}
 }
 

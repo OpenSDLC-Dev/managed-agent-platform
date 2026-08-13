@@ -285,7 +285,7 @@ func (s *server) sendSessionEvents(r *http.Request) (any, error) {
 		// with the shrunken blocking set; once the last ask is resolved it
 		// resumes — running an executor for any still-unanswered allowed tool,
 		// or the brain directly when every gated tool was denied.
-		denyResults, deniedIDs, err := denyToolResults(newEvents)
+		denyResults, deniedIDs, err := events.DenialResults(ctx, tx, domain.ID(id), newEvents)
 		if err != nil {
 			return nil, err
 		}
@@ -333,7 +333,44 @@ func (s *server) sendSessionEvents(r *http.Request) (any, error) {
 		// (mirroring the non-ask suspend, which never runs an executor for a
 		// custom-only turn). If every tool is answered (all gated tools
 		// denied), resume the brain directly.
-		platformPending, err := events.UnansweredPlatformToolNames(ctx, tx, domain.ID(id), deniedIDs)
+		//
+		// This site knows nothing about MCP yet, and an allowed MCP call would
+		// resume into no work at all: UnansweredPlatformToolNames counts only
+		// agent.tool_use, so it schedules nothing, while HasUnansweredToolUse
+		// below counts the MCP call and so declines to wake the brain either.
+		// The session is left running rather than idle, which is the worse of
+		// the two — a running session also refuses archive and delete — and only
+		// a user.interrupt gets out of it.
+		//
+		// Unreachable today: the brain stamps evaluated_permission inside its
+		// agent.tool_use branch alone, classify() resolves no name to the MCP
+		// event type, and a client may not post one, so no MCP call can be
+		// gated. But the trigger is the first agent.mcp_tool_use *emitted*, not
+		// the first one gated — an ungated MCP call reaches the same two
+		// queries by the paths that settle a turn — so the mcp_exec arm of the
+		// four-way settlement is owed to that emission, wherever it lands.
+		//
+		// Landing both in one commit is necessary and not sufficient: the brain
+		// and the control plane are separate deployments, so a rollout runs a
+		// new brain against an old control plane (and a rollback the reverse).
+		// A brain that emits an MCP call while some control-plane replica still
+		// runs this version strands whatever that call was meant to resume. The
+		// scheduling side has to be deployable first — either released ahead of
+		// the producer, or written so an unrecognized outstanding call resumes
+		// something rather than nothing.
+		// Answered: the calls this batch denies, and the calls its own results
+		// answer. A client may confirm and post an outstanding result in one
+		// send, and that result is validated and about to be appended — as good
+		// as answered, which is why the two sibling arms of this switch pass
+		// ToolResultRefs too. Counting only the denials reads such a call as
+		// outstanding, and both decisions below then go wrong in opposite
+		// directions: a platform call answered here would run an executor pass
+		// with nothing to do, and a client-executed one would leave the turn
+		// unresumed — committed running, everything answered, nothing queued,
+		// and no later trigger, since the tool-result trigger fires on a
+		// subsequent send the client has no reason to make.
+		answered := append(deniedIDs, events.ToolResultRefs(newEvents)...)
+		platformPending, err := events.UnansweredPlatformToolNames(ctx, tx, domain.ID(id), answered)
 		if err != nil {
 			return nil, err
 		}
@@ -351,7 +388,7 @@ func (s *server) sendSessionEvents(r *http.Request) (any, error) {
 			}
 			break
 		}
-		anyPending, err := events.HasUnansweredToolUse(ctx, tx, domain.ID(id), deniedIDs)
+		anyPending, err := events.HasUnansweredToolUse(ctx, tx, domain.ID(id), answered)
 		if err != nil {
 			return nil, err
 		}
@@ -479,53 +516,6 @@ func (s *server) snapshotRubrics(ctx context.Context, defs []events.DefineOutcom
 		}
 	}
 	return nil
-}
-
-// denyToolResults turns each denied user.tool_confirmation in a batch into the
-// agent.tool_result that answers its gated tool use: an error result carrying
-// the client's deny_message (or a default). The model protocol requires every
-// tool_use answered before the turn resumes, so a denied tool must have a
-// result, or the next replay is a request the model rejects. It also returns
-// the answered (denied) tool-use ids.
-//
-// The denial's result shape is an inference: the reference documents the
-// confirmation event, not the result a denial produces (see docs/DIVERGENCES.md).
-func denyToolResults(evs []events.NewEvent) ([]events.NewEvent, []string, error) {
-	var results []events.NewEvent
-	var deniedIDs []string
-	for _, ev := range evs {
-		if ev.Type != domain.EventUserToolConfirm {
-			continue
-		}
-		var c struct {
-			Result      string `json:"result"`
-			ToolUseID   string `json:"tool_use_id"`
-			DenyMessage string `json:"deny_message"`
-		}
-		if err := json.Unmarshal(ev.Payload, &c); err != nil {
-			return nil, nil, err
-		}
-		if c.Result != "deny" {
-			continue
-		}
-		msg := c.DenyMessage
-		if msg == "" {
-			// Never an empty text block: a Messages endpoint rejects one, and
-			// that request is what the brain replays on resume.
-			msg = "The user declined this tool call."
-		}
-		payload, err := json.Marshal(map[string]any{
-			"tool_use_id": c.ToolUseID,
-			"content":     []map[string]any{{"type": "text", "text": msg}},
-			"is_error":    true,
-		})
-		if err != nil {
-			return nil, nil, err
-		}
-		results = append(results, events.NewEvent{Type: domain.EventAgentToolResult, Payload: payload})
-		deniedIDs = append(deniedIDs, c.ToolUseID)
-	}
-	return results, deniedIDs, nil
 }
 
 // listSessionEvents implements GET /v1/sessions/{id}/events with the

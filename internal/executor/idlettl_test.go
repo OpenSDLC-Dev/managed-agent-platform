@@ -77,16 +77,18 @@ func seedStoppedClaim(t *testing.T, h *harness, id string, age time.Duration) {
 	}
 }
 
-// seedUnansweredAsk appends an ask-gated agent.tool_use with no confirmation —
+// seedUnansweredAsk appends an ask-gated tool use of typ with no confirmation —
 // the HITL-idle shape (the brain suspends requires_action, the session shows
-// idle, and the approval is human latency).
-func seedUnansweredAsk(t *testing.T, h *harness, id string) {
+// idle, and the approval is human latency). typ is a parameter because both
+// platform-executed families are gated, and a session waiting on either is
+// waiting on a human.
+func seedUnansweredAsk(t *testing.T, h *harness, id string, typ domain.EventType) {
 	t.Helper()
 	if _, err := h.pool.Exec(context.Background(),
 		`INSERT INTO events (id, session_id, seq, type, payload)
 		 VALUES ($1, $2, (SELECT COALESCE(max(seq), 0) + 1 FROM events WHERE session_id = $2),
-		         'agent.tool_use', '{"evaluated_permission": "ask"}')`,
-		id, h.sid.String()); err != nil {
+		         $3, '{"evaluated_permission": "ask"}')`,
+		id, h.sid.String(), string(typ)); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -159,16 +161,22 @@ func TestReapPassIdleTierLeavesIneligibleSessions(t *testing.T) {
 			t.Error("reaped under a freshly-stopped claim whose tool may still be running")
 		}
 	})
-	t.Run("unanswered-ask", func(t *testing.T) {
-		h := ttlHarness(t, &fakeSandbox{})
-		seedUnansweredAsk(t, h, "sevt_ask1")
-		if err := h.exec.reapPass(context.Background()); err != nil {
-			t.Fatalf("reap pass: %v", err)
-		}
-		if len(h.prov.reapedSnapshot()) != 0 {
-			t.Error("reaped with an unanswered confirmation ask")
-		}
-	})
+	// Either gated family pins the sandbox. The MCP arm needs no sandbox to run
+	// its own call, but the session it belongs to is mid-turn and its built-in
+	// tools do — reaping under a question no human has answered would destroy
+	// the workspace the approved turn resumes into.
+	for _, typ := range []domain.EventType{domain.EventAgentToolUse, domain.EventAgentMCPToolUse} {
+		t.Run("unanswered-ask-"+string(typ), func(t *testing.T) {
+			h := ttlHarness(t, &fakeSandbox{})
+			seedUnansweredAsk(t, h, "sevt_ask1", typ)
+			if err := h.exec.reapPass(context.Background()); err != nil {
+				t.Fatalf("reap pass: %v", err)
+			}
+			if len(h.prov.reapedSnapshot()) != 0 {
+				t.Errorf("reaped with an unanswered %s confirmation ask", typ)
+			}
+		})
+	}
 	t.Run("ttl-zero-disables", func(t *testing.T) {
 		h := newHarness(t, &fakeSandbox{})
 		h.prov.owned = []domain.ID{h.sid}
@@ -199,7 +207,7 @@ func TestReapPassIdleTierLeavesIneligibleSessions(t *testing.T) {
 // block on its own).
 func TestReapPassIdleReapsOnceTheAskIsAnswered(t *testing.T) {
 	h := ttlHarness(t, &fakeSandbox{})
-	seedUnansweredAsk(t, h, "sevt_ask1")
+	seedUnansweredAsk(t, h, "sevt_ask1", domain.EventAgentToolUse)
 	if _, err := h.pool.Exec(context.Background(),
 		`INSERT INTO events (id, session_id, seq, type, payload)
 		 VALUES ('sevt_conf1', $1, (SELECT max(seq) + 1 FROM events WHERE session_id = $1),
