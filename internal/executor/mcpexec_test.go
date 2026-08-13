@@ -469,10 +469,10 @@ func TestMCPCallRefusedByEgressPolicyIsAnsweredAndReported(t *testing.T) {
 	if len(errs) != 1 {
 		t.Fatalf("session.error count = %d, want 1", len(errs))
 	}
-	// terminal, not retrying: no later turn changes the policy that refused the
-	// dial, so telling a client to wait for the next one would be a lie. It is
-	// the one failure here this code can know is terminal — a connection error
-	// may be a server restarting as easily as a host that will never resolve.
+	// retrying, even though no later turn changes the policy that refused the
+	// dial. The union is about the session, not about whether a retry would
+	// help: the SDK documents terminal as the session transitioning to
+	// terminated, and this session carries on with the call answered is_error.
 	var e struct {
 		Error struct {
 			RetryStatus struct {
@@ -483,8 +483,19 @@ func TestMCPCallRefusedByEgressPolicyIsAnsweredAndReported(t *testing.T) {
 	if err := json.Unmarshal(errs[0].Body, &e); err != nil {
 		t.Fatalf("decode session.error: %v", err)
 	}
-	if e.Error.RetryStatus.Type != "terminal" {
-		t.Errorf("retry_status = %q, want terminal for a policy refusal", e.Error.RetryStatus.Type)
+	if e.Error.RetryStatus.Type != "retrying" {
+		t.Errorf("retry_status = %q, want retrying — this session does not terminate",
+			e.Error.RetryStatus.Type)
+	}
+	// And the session is demonstrably not terminated, which is what would have
+	// made `terminal` the honest variant.
+	var status string
+	if err := h.pool.QueryRow(context.Background(),
+		`SELECT status FROM sessions WHERE id = $1`, h.sid.String()).Scan(&status); err != nil {
+		t.Fatal(err)
+	}
+	if status == "terminated" {
+		t.Errorf("session status = %q after a refusal, want it still live", status)
 	}
 }
 
@@ -641,5 +652,44 @@ func TestMCPOversizedLeadingImageIsDroppedNotExempted(t *testing.T) {
 	if len(raw) > toolset.MaxOutputBytes {
 		t.Errorf("answer is %d bytes, want it under the %d-byte budget",
 			len(raw), toolset.MaxOutputBytes)
+	}
+}
+
+// A large *text* embedded resource arrives truncated, not as nothing. Its data
+// is text, so resourceBlock caps it where the block is built — but a capped body
+// plus its document wrapper always exceeds the whole budget, so exempting only
+// text *blocks* dropped every such document whole and a 150 KB file reached the
+// model as a one-line notice. The exemption follows the cap, not the block type.
+func TestMCPLargeTextResourceArrivesTruncated(t *testing.T) {
+	body := strings.Repeat("z", 2*toolset.MaxOutputBytes)
+	url := mcptest.Server(t, mcptest.Tool{Name: "read", Blocks: []mcptest.Block{
+		{Type: "resource", URI: "file:///big.txt", MIMEType: "text/plain", Text: body},
+	}})
+	h := mcpHarness(t)
+	h.declareMCPServers(t, [2]string{"docs", url})
+	h.appendMCPToolUse(t, "docs", "read", `{}`)
+	h.enqueueMCP(t)
+
+	h.stepOnce(t)
+
+	results := h.mcpResults(t)
+	if len(results) != 1 {
+		t.Fatalf("results = %d, want one", len(results))
+	}
+	blocks := blocksOf(t, results[0])
+	if len(blocks) != 1 || blocks[0]["type"] != "document" {
+		t.Fatalf("content = %v, want the document itself rather than a notice", blocks)
+	}
+	src, ok := blocks[0]["source"].(map[string]any)
+	if !ok || src["type"] != "text" {
+		t.Fatalf("source = %v, want the plain-text source", blocks[0]["source"])
+	}
+	data, _ := src["data"].(string)
+	if len(data) == 0 || len(data) > toolset.MaxOutputBytes+64 {
+		t.Errorf("data is %d bytes, want it truncated to the %d-byte tool budget",
+			len(data), toolset.MaxOutputBytes)
+	}
+	if !strings.Contains(data, "truncated") {
+		t.Errorf("data does not say it was truncated: %q", data[max(0, len(data)-80):])
 	}
 }
