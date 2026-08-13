@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/toolset"
@@ -50,6 +51,58 @@ func hasNote(notes []string, substr string) bool {
 		}
 	}
 	return false
+}
+
+// The documented rule is ^[a-zA-Z0-9_-]{1,64}$, so both edges of it matter: a
+// bound one short refuses names the endpoint accepts, and the loss is silent —
+// a tool the agent declared simply never reaches the model.
+func TestOfferableIsTheDocumentedNameRule(t *testing.T) {
+	cases := []struct {
+		name string
+		want bool
+	}{
+		{"", false},
+		{"a", true},
+		{strings.Repeat("n", 63), true},
+		{strings.Repeat("n", 64), true},
+		{strings.Repeat("n", 65), false},
+		{"mcp__docs__search", true},
+		{"Aa0_-", true},
+		{"search files", false},
+		{"search.files", false},
+		{"search/files", false},
+		{"séarch", false},
+		// Four bytes, one rune: a byte-counted bound must not read it as four
+		// characters, and the charset must refuse it whichever way it counts.
+		{"🔎", false},
+	}
+	for _, tc := range cases {
+		if got := offerable(tc.name); got != tc.want {
+			t.Errorf("offerable(%q) = %v, want %v", tc.name, got, tc.want)
+		}
+	}
+}
+
+// noteLabel cuts on a rune boundary: a server name is customer-supplied text,
+// and a label cut mid-rune reaches the log as replacement characters that name
+// nothing.
+func TestNoteLabelCutsOnARuneBoundary(t *testing.T) {
+	// Three-byte runes over the cap: the cut lands mid-rune unless backed off.
+	long := strings.Repeat("界", maxNoteLabel)
+	got := noteLabel(long)
+	if !strings.HasSuffix(got, "[truncated]") {
+		t.Fatalf("label = %q, want it marked truncated", got)
+	}
+	head := strings.TrimSuffix(got, "[truncated]")
+	if !utf8.ValidString(head) {
+		t.Errorf("label head is not valid UTF-8: %q", head)
+	}
+	if len(head) > maxNoteLabel {
+		t.Errorf("label head is %d bytes, want at most %d", len(head), maxNoteLabel)
+	}
+	if short := noteLabel("界"); short != "界" {
+		t.Errorf("noteLabel(%q) = %q, want it untouched", "界", short)
+	}
 }
 
 // An MCP tool reaches the model under mcp__{server}__{tool}: this brain sends

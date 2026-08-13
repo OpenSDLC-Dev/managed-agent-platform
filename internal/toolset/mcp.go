@@ -38,10 +38,17 @@ type MCPResolved struct {
 // docs make an unrecognised configs[] name a warning and not an error; the
 // caller says so where a human will see it.
 //
-// A repeated tool name is dropped after its first listing. Nothing downstream
-// could tell the two apart — a result names a tool, not a position — and two
-// definitions under one name is a request the endpoint rejects, which would
-// cost the whole turn rather than the duplicate.
+// A tool with no name, and a repeated name after its first listing, are dropped
+// silently rather than returned for the caller to report. Both are already
+// refused where a listing is read (internal/mcp drops an unusable or repeated
+// name before a catalog row is written), so reaching either means a row nothing
+// in this platform wrote — and a note about a state that cannot arise is noise
+// on every turn rather than news. Dropping is still what happens, because
+// neither can be offered: two definitions under one name is a request the
+// endpoint rejects (which would cost the whole turn rather than the duplicate,
+// and nothing downstream could tell the two apart — a result names a tool, not
+// a position), and an empty name composes to a model-facing name that is legal
+// on its face while the wire event it commits requires a tool name.
 //
 // Unknown keys are not rejected here, where Tools and Policies do reject them
 // for the built-in kind. The API boundary (ValidateMCPToolset) is where an
@@ -91,7 +98,7 @@ func ResolveMCP(raw json.RawMessage, tools []MCPTool) ([]MCPResolved, []string, 
 	var out []MCPResolved
 	reported := make(map[string]bool, len(tools))
 	for _, t := range tools {
-		if reported[t.Name] {
+		if t.Name == "" || reported[t.Name] {
 			continue
 		}
 		reported[t.Name] = true

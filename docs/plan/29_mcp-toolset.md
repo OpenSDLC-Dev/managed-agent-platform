@@ -175,7 +175,7 @@ Provision — cloud and self_hosted alike):
    back at emission, and replay maps forward again). A collision with a custom tool's
    name skips the MCP tool, and so does a prefixed name outside the Messages API's
    documented `^[a-zA-Z0-9_-]{1,64}$` — which an MCP server's own 255-character server
-   names and 128-character tool names can compose past. Every skip is a **log line**
+   names and 128-character tool names can compose past. Each of those skips is a **log line**
    (this said `system.message`; slice 4b found that event is client-sent, carries a
    documented placement rule, and replays into the *system prompt*, so one per turn
    would grow the prompt without bound — docs/DIVERGENCES.md). `configs[]` names absent

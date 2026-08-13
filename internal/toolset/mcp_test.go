@@ -167,6 +167,24 @@ func TestResolveMCPUnknownConfigNames(t *testing.T) {
 	}
 }
 
+// A tool with no name cannot be offered: the model-facing name it composes to
+// is legal on its face, and the wire event a call on it would commit requires a
+// tool name. Nothing writes such a row — internal/mcp refuses an empty name
+// where the listing is read — which is why the drop is silent rather than a
+// warning about a state that cannot arise.
+func TestResolveMCPDropsANamelessTool(t *testing.T) {
+	nameless := append(reported(), toolset.MCPTool{
+		Description: "No name at all.", InputSchema: json.RawMessage(`{"type":"object"}`),
+	})
+	got, _, err := toolset.ResolveMCP(json.RawMessage(`{"type":"mcp_toolset","mcp_server_name":"docs"}`), nameless)
+	if err != nil {
+		t.Fatalf("ResolveMCP: %v", err)
+	}
+	if !equal(resolvedNames(got), []string{"search", "fetch", "index"}) {
+		t.Errorf("enabled = %v, want the named tools alone", resolvedNames(got))
+	}
+}
+
 // A server that reports the same tool twice gets one definition: a duplicate
 // model-facing name is a request the endpoint rejects, and the two entries are
 // indistinguishable to everything downstream — the result names a tool, not a
