@@ -35,6 +35,19 @@ func TestClassifyTimeout(t *testing.T) {
 			code: sigkillExit, v: verdict{aliveAtDeadline: true}, want: true},
 		{name: "AnOverrunNeedsNoExitCodeAtAll",
 			code: 0, v: verdict{overran: true}, want: true},
+		// **The monotonicity rows.** Weighing state written inside the container is
+		// only defensible because a mark can add a timeout and never remove one, and
+		// a review pass found that property resting on nothing: mutating the last
+		// term to `v.overran && !watchdogFired` — letting the mark suppress the one
+		// verdict that carries the deadline's guarantee — left the whole suite green.
+		// These are the rows that would have caught it. A mark must not subtract from
+		// an overrun, whatever the exit code beside it.
+		{name: "AMarkNeverSuppressesAnOverrun",
+			code: 0, watchdogFired: true, v: verdict{overran: true}, want: true},
+		{name: "AMarkNeverSuppressesAnOverrunOnASigkillEither",
+			code: sigkillExit, watchdogFired: true, v: verdict{overran: true}, want: true},
+		{name: "AMarkNeverSuppressesAPunctualProbe",
+			code: sigkillExit, watchdogFired: true, v: verdict{aliveAtDeadline: true}, want: true},
 		{name: "AFinishedCommandIsNotATimeout",
 			code: 0, want: false},
 		// A mark without a SIGKILL is not evidence of a kill: the watchdog marks
@@ -65,10 +78,13 @@ func TestClassifyTimeout(t *testing.T) {
 // TestWatchdogMarksBeforeItKills pins the two properties of the mark that the
 // classification rests on, in the one place they are expressed: the wrapper.
 //
-// The ordering is the whole mechanism. `kill -9 -"$self"` signals the process
-// group, and `set -m` has put the watchdog subshell in that same group, so the
-// watchdog kills itself along with the command — a mark written after the signal
-// would never be written at all.
+// The ordering is pinned because the mark must not depend on the watchdog
+// outliving the signal it sends. It is *not* pinned because the watchdog dies
+// with the command: `set -m` is job control, so the background subshell gets its
+// own process group, and a `mkdir` after `kill -9 -"$self"` demonstrably runs.
+// Which way that goes is a bash detail that varies with how the shell was
+// started, and a classification resting on it would be resting on an accident —
+// so the wrapper writes first and the assertion keeps it that way.
 //
 // `mkdir` rather than a redirect, for the reason the k8s wrapper gives: the mark
 // must never be able to hold the kill back. `: > "$3.killed"` opens the path, and

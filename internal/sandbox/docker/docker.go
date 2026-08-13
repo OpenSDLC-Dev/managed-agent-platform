@@ -77,10 +77,17 @@ const sessionLabel = "dev.opensdlc.managed-agent-platform.session-id"
 // avoiding — is argued once at classifyTimeout, where the decision is made. What
 // belongs here is how it is written, and when.
 //
-// **When: before the signal, necessarily.** `kill -9 -"$self"` signals the
-// process group, and `set -m` has made the wrapper its leader, so the watchdog
-// subshell is in the group it is about to kill. It does not outlive its own
-// signal; a mark written afterwards would never be written at all.
+// **When: before the signal, and not because the watchdog dies with it.** An
+// earlier draft of this comment said the watchdog is inside the group it kills
+// and so could never write a mark afterwards. That is measurably untrue: `set -m`
+// is job control, which gives the *background* subshell its own process group, and
+// a `mkdir` placed after `kill -9 -"$self"` runs and leaves its directory (checked
+// on a real container by the verifier, and reproduced on a plain host). The
+// ordering is still the right one, for the reason that survives measurement: the
+// mark must not depend on the watchdog outliving a signal it aimed at its own
+// process group. Whether it does is a bash job-control detail that varies with
+// how the shell was started, and resting a classification on it would be resting
+// on an accident. Written first, the mark is unconditional under either topology.
 //
 // **How: `mkdir`, and that is the point rather than an oddity.** The mark must
 // never be able to hold the kill back. A redirect cannot promise that: `: >

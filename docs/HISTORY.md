@@ -53,13 +53,17 @@ mentioned no writable path at all. Everything the sandbox knew about a command's
 came from outside: two probes of the command's process, run against the daemon on Exec's
 own clock.
 
-**What broke it.** [#390](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/390):
-those two probes each keep their own clock, and under host load they are scheduled *after*
-the watchdog's kill has landed. The daemon then answers, correctly, that the process is
-gone; both terms come back false; and a command the platform genuinely timed out is
-reported as an ordinary exit 137. The observation was one run of
-`TestShell/TimeoutDoesNotKillTheSession` taking 135 seconds for a command with a
-one-second deadline.
+**What broke it.** [#390](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/390).
+What was *observed* is one run of `TestShell/TimeoutDoesNotKillTheSession` reporting
+`TimedOut=false` beside `ExitCode:137`, and taking 135 seconds for a command with a
+one-second deadline. What is *inferred*, and stated in the issue as a hypothesis nobody has
+reproduced under load, is the mechanism: the two probes each keep their own clock, and on a
+loaded host they are scheduled after the watchdog's kill has landed, so the daemon answers
+— correctly — that the process is gone, both terms come back false, and a genuine timeout
+reads as an ordinary 137. The fix does not depend on that inference being the whole story.
+It removes the dependence on probe scheduling altogether, which is why it was preferred to
+tuning the probes: any cause that leaves both probes answering late is covered by a witness
+that does not consult a clock.
 
 **Why the reversal holds where the first design did not.** The first design used the mark
 *as the evidence*, so erasing it hid a real timeout — the objection was exact and it was
