@@ -121,8 +121,27 @@ treats every keeper error identically, so the outcome would be unchanged, not wo
 real constraint is that `Extend` identifies the claimant by the lease timestamp it replaces
 (`WHERE … lease_expires_at = $2`) and updates `item.Lease` only on success, so a retry
 after an ambiguous completion would present a stale timestamp and be told, wrongly, that
-the lease was lost. Any future retry must resynchronise the lease value first, and may only
-do so while the current lease is still live — the requirement #400 inherits.
+the lease was lost.
+
+**And resynchronising is not the way out, though this record first said it was.** The
+sentence that stood here told a future implementer to resynchronise the lease value before
+retrying, while the current lease is still live. Triaging #400 showed that recipe is not
+merely insufficient but dangerous, so it is corrected rather than left to be followed.
+`Claim` reclaims an expired-active row **without** reassigning the id
+(`internal/queue/queue.go:209-241`); only `Poll` rotates the identity (`queue.go:352`), so
+#62's "every re-hand-out mints a fresh `work_` id" covers the BYOC wire lifecycle, not the
+internal claim path that the brain and executor actually use. No migration adds an owner or
+generation column, and `Extend`'s proof is a bare timestamp. So after an ambiguous
+completion the row reads identically — `active`, with a future expiry — whether this
+holder's own `UPDATE` committed or a rival reclaimed the item. Adopting the expiry found
+there would let the adopting holder's next `Extend` *and its settlement* both match and
+succeed, so two brains would believe they owned one item and the loser's settlement would
+stop rolling back: a correctness bug where today there is only a wasted turn. The
+live-lease guard does not save it, a rival's fresh lease being live by definition.
+
+What #400 inherits is therefore a real fencing token — an owner or generation identity
+threaded through `Claim`/`Extend`/`Complete`/`Requeue` — which is why it is triaged as
+needing a plan, and why it stays unbuilt while the race remains unobserved.
 
 ---
 
