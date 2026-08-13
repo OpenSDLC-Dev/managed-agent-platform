@@ -1090,9 +1090,21 @@ func (c *container) Exec(ctx context.Context, req sandbox.ExecRequest) (sandbox.
 // enforced from outside, by Exec's own clock, and none of that changes. What
 // changes is that one more piece of evidence may now *raise* a verdict. A tenant
 // who forges the mark mislabels its own tool call as a timeout, having also had
-// to exit 137 to be believed; a tenant who suppresses it is back on the probes,
-// exactly where this backend stood before. Neither can hide an overrun, because
-// `overran` is measured from outside and is not read against the mark at all.
+// to exit 137 to be believed.
+//
+// Suppressing it is the residual limitation, and worth stating plainly rather
+// than filing under "monotonic and therefore safe". A command can read $3 out of
+// its watchdog's argv in /proc and pre-create the directory, so the `mkdir` fails
+// EEXIST and the watchdog kills anyway; or delete it after the mark is written
+// and before the daemon is asked. Either way this term goes back to false and a
+// punctual timeout of that command reads as a plain SIGKILL — which is exactly
+// what it did before this existed. So the accurate claim is that suppression
+// costs the *tenant's own* call its timeout label and restores the pre-#390
+// behaviour, not that erasure is harmless: the mark is a fix for probes that were
+// scheduled late, which is a race, and it is best effort against a command that
+// is actively hostile to its own label. What no tenant can do is hide an overrun
+// or survive the deadline: `overran` is measured from outside, never reads the
+// mark, and the kill is not conditional on any of this.
 func classifyTimeout(deadlined bool, code int, watchdogFired bool, v verdict) bool {
 	// A command with no deadline was never given a watchdog, so nothing can
 	// honestly have marked it and no probe ever ran. Saying so here rather than
@@ -1141,6 +1153,14 @@ func (c *container) watchdogFired(ctx context.Context, seconds, code int, v verd
 // because sandbox.WritablePaths keeps it writable under a read-only rootfs, and
 // because nothing there is the agent's workdir — the mark must not appear among
 // the files a tool call lists.
+//
+// The uniqueness is load-bearing beyond one command, because nothing removes a
+// mark: a repeated path would let one timeout's mark be read as a later command's.
+// Discarding the error is still right, and is what k8s's nonce does. Since Go
+// 1.24 crypto/rand.Read "never returns an error, and always fills b entirely",
+// and crashes the program irrecoverably rather than handing back a short or
+// zeroed buffer — so the failure mode that would matter here, every exec quietly
+// sharing one all-zero path, is not reachable.
 func execState() string {
 	var b [8]byte
 	_, _ = rand.Read(b[:])

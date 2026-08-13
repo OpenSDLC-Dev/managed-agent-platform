@@ -66,12 +66,20 @@ one-second deadline.
 right. Here the mark is one OR-term beside two host-measured ones, and the structure is
 what makes it safe:
 
-- **Erasing it** returns the classification to the probes — precisely where this backend
-  stood before the mark existed. It is not a regression, it is a no-op.
 - **Forging it** requires also exiting 137, and buys a tenant a `TimedOut` label on its own
   tool call. It cannot extend a deadline, reach another session, or suppress anything.
+- **Erasing it** returns the classification to the probes — precisely where this backend
+  stood before the mark existed. This is the **residual limitation**, and it is not the
+  same as harmless: a command can read `$3` out of its watchdog's argv in `/proc` and
+  pre-create the directory so the `mkdir` fails `EEXIST`, or delete it before the daemon is
+  asked, and its own punctual timeout then reads as a plain SIGKILL again. The honest claim
+  is that suppression costs *that command* its timeout label and restores the pre-fix
+  behaviour — not that erasure cannot hide a timeout. The mark repairs a **race** (probes
+  scheduled late under load); against a command hostile to its own label it is best
+  effort, which is the same standing the watchdog itself has always had.
 - **`overran`** — the term that carries the deadline's actual guarantee — never reads the
-  mark at all, so the guarantee is still measured entirely from outside the container.
+  mark at all, so the guarantee is still measured entirely from outside the container, and
+  no amount of mark tampering lets a command outlive its deadline or go unkilled.
 
 Every term only ever *adds* a timeout, which is the property that lets in-container state
 be weighed at all, and it is the same argument the Kubernetes backend already made when

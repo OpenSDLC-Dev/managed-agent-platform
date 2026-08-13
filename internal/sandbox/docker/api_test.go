@@ -97,6 +97,17 @@ func wrapperCommand(cmd []string) string {
 	return cmd[commandArg]
 }
 
+// wrapperState pulls the per-exec state path out of the same argv, so a fake
+// daemon can hold Exec to the path it actually handed the wrapper rather than
+// answering any archive HEAD it happens to receive.
+func wrapperState(cmd []string) string {
+	const stateArg = 6
+	if len(cmd) <= stateArg {
+		return ""
+	}
+	return cmd[stateArg]
+}
+
 // execDaemon serves the endpoints Exec uses, with fe's timings.
 func execDaemon(t *testing.T, fe fakeExec) *container {
 	t.Helper()
@@ -107,6 +118,10 @@ func execDaemon(t *testing.T, fe fakeExec) *container {
 
 	var mu sync.Mutex
 	var startedAt time.Time
+	// state is the path Exec handed this exec's wrapper, captured at create so the
+	// archive HEAD can be held to it. Without that, the fake would answer *any*
+	// mark path and the tests would pass an Exec that probed the wrong one.
+	var state string
 	// ran reports how long the exec has been going, and whether it started.
 	ran := func() (time.Duration, bool) {
 		mu.Lock()
@@ -120,6 +135,13 @@ func execDaemon(t *testing.T, fe fakeExec) *container {
 	p := fakeDaemon(t, func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case strings.HasSuffix(r.URL.Path, "/exec"):
+			var body execConfig
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				t.Errorf("decode exec create: %v", err)
+			}
+			mu.Lock()
+			state = wrapperState(body.Cmd)
+			mu.Unlock()
 			io.WriteString(w, `{"Id":"e1"}`)
 
 		case r.URL.Path == "/exec/e1/start":
@@ -154,7 +176,14 @@ func execDaemon(t *testing.T, fe fakeExec) *container {
 			if fe.marks != nil {
 				*fe.marks++
 			}
+			want := state + ".killed"
 			mu.Unlock()
+			// Held to the exact path this exec's wrapper was given. Answering any
+			// path would let an Exec that probed the wrong one — a stale state, or
+			// one missing the suffix — pass every test in this file.
+			if got := r.URL.Query().Get("path"); got != want {
+				t.Errorf("archive HEAD path = %q, want %q", got, want)
+			}
 			if !fe.killed {
 				w.WriteHeader(http.StatusNotFound)
 				return
@@ -760,12 +789,13 @@ func TestAStragglerHoldingTheStreamIsNotTheCommand(t *testing.T) {
 // let a command forge a timeout it never hit, or erase one it did"
 // (docs/history/2026-07.md). #390 reversed the first half of it, and the reversal
 // only holds because the mark is used differently than that first design used it.
-// There, the mark was the evidence; erasing it hid a real timeout. Here it is one
-// OR-term beside two host-measured ones, so erasing it returns the classification
-// to the probes — exactly where this backend stood before the mark existed — and
-// `overran`, the term that carries the deadline's actual guarantee, never reads
-// the mark at all. Forging one still requires exiting 137, and buys a tenant a
-// timeout label on its own tool call. classifyTimeout argues this in full.
+// There, the mark was the evidence. Here it is one OR-term beside two
+// host-measured ones, and `overran` — the term carrying the deadline's actual
+// guarantee — never reads it, so no tampering lets a command outlive its deadline.
+// Forging one still requires exiting 137 and buys a tenant a timeout label on its
+// own tool call; erasing one costs that command its label and puts it back where
+// it stood before the mark existed, which classifyTimeout states as the residual
+// limitation rather than as harmlessness.
 //
 // So the invariant is narrowed rather than dropped, and these assertions are what
 // keeps it narrow: no writable path is baked into the script (the state path
