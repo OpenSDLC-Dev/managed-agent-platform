@@ -31,7 +31,7 @@ const (
 
 // wantMigrations tracks the number of embedded migration files; bump it when
 // a migration is added.
-const wantMigrations = 23
+const wantMigrations = 24
 
 func open(t *testing.T, dsn string) *pgxpool.Pool {
 	t.Helper()
@@ -411,14 +411,32 @@ func TestKeyRotationMigrationRepairsExistingDuplicates(t *testing.T) {
 	}
 
 	// Rewind to the pre-0013 schema, then stage the state the race produced.
-	// Only api_keys_one_live is dropped: migration 0021 already retired the
-	// environment_keys half, so there is no index there to remove. Replaying 0013
-	// recreates it in this throwaway database — the repair, not the index, is what
-	// this test is about, and a fresh deployment's chain ends with 0021 dropping
-	// it again.
+	//
+	// Every later migration that touched what 0013 built is rewound with it, so the
+	// replay is 0013 → 0021 → 0024 in the order a real upgrade runs them. Rewinding
+	// 0013 alone would not merely be untidy, it would not work: 0024 drops the
+	// api_keys.revoked_at column 0013's repair writes, so 0013 against a current
+	// schema fails on a missing column. And leaving 0021 recorded would be worse
+	// than untidy — 0013 creates BOTH one-live indexes, so replaying it recreates
+	// environment_keys_one_live, and a still-recorded 0021 never runs again to drop
+	// the index it exists to drop. The test would end on a schema no deployment can
+	// reach, quietly asserting against it.
+	//
+	// Replaying the real order also makes this test cover one thing more than it
+	// used to: that 0024's backfill turns what 0013's repair produced (revoked
+	// duplicates) into archived rows.
 	for _, q := range []string{
-		`DROP INDEX api_keys_one_live`,
-		`DELETE FROM schema_migrations WHERE version = '0013_key_rotation_one_live.sql'`,
+		`DROP INDEX api_keys_one_live_unissued`,
+		`ALTER TABLE api_keys ADD COLUMN revoked_at timestamptz`,
+		`UPDATE api_keys SET revoked_at = now() WHERE status <> 'active'`,
+		`ALTER TABLE api_keys DROP COLUMN status,
+		   DROP COLUMN expires_at, DROP COLUMN partial_key_hint, DROP COLUMN created_by`,
+		`DROP INDEX environment_keys_environment_idx`,
+		`ALTER TABLE environment_keys DROP COLUMN name, DROP COLUMN expires_at`,
+		`DELETE FROM schema_migrations
+		   WHERE version IN ('0013_key_rotation_one_live.sql',
+		                     '0021_environment_keys_named.sql',
+		                     '0024_api_keys_lifecycle.sql')`,
 	} {
 		if _, err := pool.Exec(ctx, q); err != nil {
 			t.Fatalf("rewind %q: %v", q, err)
@@ -454,9 +472,9 @@ func TestKeyRotationMigrationRepairsExistingDuplicates(t *testing.T) {
 	// One live row per slot, and the survivor is the newest — the row a mint
 	// would have left live had the race not happened.
 	for _, tc := range []struct{ what, query, want string }{
-		{"api_keys/boot", `SELECT id FROM api_keys WHERE name = 'boot' AND revoked_at IS NULL`, "apikey_dup2"},
+		{"api_keys/boot", `SELECT id FROM api_keys WHERE name = 'boot' AND status = 'active'`, "apikey_dup2"},
 		{"environment_keys/env_1", `SELECT id FROM environment_keys WHERE environment_id = 'env_1' AND revoked_at IS NULL`, "envkey_dup2"},
-		{"api_keys/other", `SELECT id FROM api_keys WHERE name = 'other' AND revoked_at IS NULL`, "apikey_other"},
+		{"api_keys/other", `SELECT id FROM api_keys WHERE name = 'other' AND status = 'active'`, "apikey_other"},
 		{"environment_keys/env_2", `SELECT id FROM environment_keys WHERE environment_id = 'env_2' AND revoked_at IS NULL`, "envkey_other"},
 	} {
 		rows, err := pool.Query(ctx, tc.query)
@@ -474,6 +492,39 @@ func TestKeyRotationMigrationRepairsExistingDuplicates(t *testing.T) {
 		if len(ids) != 1 || ids[0] != tc.want {
 			t.Errorf("%s live rows = %v, want exactly [%s]", tc.what, ids, tc.want)
 		}
+	}
+
+	// The losers were retired, not deleted. Without this the assertions above pass
+	// just as happily on a repair that DELETEd the duplicates — and deleting them
+	// would erase the evidence an operator needs to see that a second credential
+	// once existed under this name. 0013 revokes, 0024 maps that to archived.
+	var archived []string
+	rows, err := pool.Query(ctx,
+		`SELECT id FROM api_keys WHERE name = 'boot' AND status = 'archived' ORDER BY id`)
+	if err != nil {
+		t.Fatalf("archived duplicates: %v", err)
+	}
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			t.Fatalf("archived scan: %v", err)
+		}
+		archived = append(archived, id)
+	}
+	if want := []string{"apikey_dup0", "apikey_dup1"}; !slices.Equal(archived, want) {
+		t.Errorf("archived rows under 'boot' = %v, want %v", archived, want)
+	}
+
+	// And 0021 really did run again on top of the replayed 0013, rather than
+	// staying recorded while 0013 quietly recreated the index it had retired.
+	var oneLive bool
+	if err := pool.QueryRow(ctx,
+		`SELECT EXISTS (SELECT 1 FROM pg_indexes WHERE indexname = 'environment_keys_one_live')`).
+		Scan(&oneLive); err != nil {
+		t.Fatalf("query pg_indexes: %v", err)
+	}
+	if oneLive {
+		t.Error("environment_keys_one_live is back: the replay did not run 0021 after 0013")
 	}
 }
 
