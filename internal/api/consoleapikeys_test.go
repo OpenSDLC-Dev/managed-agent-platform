@@ -349,6 +349,9 @@ func TestAPIKeyExpiryIsClientSuppliedAndDerived(t *testing.T) {
 	// reactivated" — and "deleted" there is `status: archived`, since it serves no
 	// DELETE verb. We used to permit the disable and the rename too, on the
 	// argument that cleanup must not depend on the clock; only the archive does.
+	// The empty patch is measured here as well, on a key minted with a past
+	// expires_at so it was lapsed but not archived: 400, and the expiry message —
+	// so "one operation" really does mean one, and asking for nothing is not it.
 	for _, patch := range []map[string]any{
 		{"status": api.KeyStatusInactive},
 		{"name": "renamed-while-lapsed"},
@@ -500,6 +503,12 @@ func TestArchivingAnAPIKeyIsPermanent(t *testing.T) {
 	// back 400 "Archived API keys cannot be updated." An earlier round of #388 made
 	// the repeated archive a succeeding no-op on the reasoning that a retried Delete
 	// should not error — sound in the abstract, and wrong about this API.
+	//
+	// The empty patch is in the table for a reason a reviewer found: without it an
+	// implementation that answered `{}` before consulting the row's state would pass
+	// this test while breaking the rule it exists to pin. It is measured too, on the
+	// same reference and on an already-archived key — 400, and the *archived*
+	// message, so the terminality check runs ahead of any shape check.
 	for _, patch := range []map[string]any{
 		{"status": api.KeyStatusActive},
 		{"status": api.KeyStatusInactive},
@@ -507,6 +516,8 @@ func TestArchivingAnAPIKeyIsPermanent(t *testing.T) {
 		{"status": api.KeyStatusArchived, "name": "revived"},
 		// The repeated archive: a transition to the state that already holds.
 		{"status": api.KeyStatusArchived},
+		// The empty patch: nothing asked for, still refused.
+		{},
 	} {
 		status, obj := s.do(http.MethodPost, consoleAPIKey(id), patch)
 		if status != http.StatusBadRequest {
@@ -527,7 +538,7 @@ func TestArchivingAnAPIKeyIsPermanent(t *testing.T) {
 		t.Fatalf("read status: %v", err)
 	}
 	if stored != api.KeyStatusArchived {
-		t.Errorf("stored status = %q after five refused patches", stored)
+		t.Errorf("stored status = %q after six refused patches", stored)
 	}
 
 	// Archived outranks expired in the rendering. A row archived after its expiry

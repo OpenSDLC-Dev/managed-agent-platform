@@ -72,6 +72,18 @@ answered `400 "at least one of status, name is required"`. ("Deleted" in that
 message means `status: archived`; there is no DELETE verb — that route answers
 405, as does a single-key GET.)
 
+That 200 is a *live* row's answer, and the first review of the change caught the
+gap it left. The tests asserted `{}` was refused on archived and on lapsed rows —
+which is what the code does, the state guards running ahead of any shape check —
+but neither shape had been probed, so an assertion about the reference rested on
+nothing. Both were then measured rather than reasoned about: `{}` on an archived
+key returns `400 "Archived API keys cannot be updated."`, and `{}` on a key minted
+with a past `expires_at` — lapsed but not archived — returns `400 "Expired API
+keys can only be deleted, not renamed or reactivated."` Both match what shipped.
+The reviewer's finding was that a test could pass against a weaker implementation;
+the more useful answer was that the test had been pinning an unmeasured claim, in
+a change whose whole point was to stop doing that.
+
 A third fact fell out of the same run and is now pinned in code: **`archived`
 outranks `expired`** in the rendering. A key archived after its expiry had
 already passed reads `archived`, not `expired`.
