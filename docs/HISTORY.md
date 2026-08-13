@@ -92,13 +92,17 @@ acceptance did. Both tokens decode as the platform requires — `iss` byte-equal
   `{"message":"this route requires the admin role","type":"permission_error"}`;
   viewer ISSUE → **403**. Admin LIST → **200**, and the body is a **bare array**,
   not an envelope.
-- **An admin issues a key.** **200**, `raw_key` of 56 characters behind
-  `sk-map-api01-`, hint `sk-map-api01-f9x...nM7Q`, and `created_by` is the admin's
-  own principal — `{"id":"principal_jx3rwe9a1sacy8yhfh4mv9z6","type":"principal"}`.
-  The audit trail names the human, which is the reason the identity lane exists.
-- **The issued key drives `/v1`.** `GET /v1/agents` → **200**; `POST /v1/agents` →
-  **200**, minting `agent_thm8jh8c862tymp57ce41k44`. A read and a mutation, on a
-  credential no operator seeded.
+- **An admin issues a key.** The response carried the whole resource plus a
+  `raw_key` of 56 characters behind `sk-map-api01-`, hint
+  `sk-map-api01-f9x...nM7Q`, and a `created_by` that is the admin's own principal —
+  `{"id":"principal_jx3rwe9a1sacy8yhfh4mv9z6","type":"principal"}`. The audit trail
+  names the human, which is the reason the identity lane exists. (This step and the
+  agent create below asserted on the returned resource rather than the status line,
+  so their success is transcript-proven and their `200` is code-backed; every other
+  code quoted in this record was captured with `-w '%{http_code}'`.)
+- **The issued key drives `/v1`.** `GET /v1/agents` → **200**, and `POST /v1/agents`
+  minted `agent_thm8jh8c862tymp57ce41k44`. A read and a mutation, on a credential no
+  operator seeded.
 - **Disable is reversible.** `{"status":"inactive"}` → **200**, and the key is then
   **401** on `/v1` (`invalid x-api-key`). `{"status":"active"}` → **200**, and it is
   **200** on `/v1` again. This is the sequence the round-3 review found a hole in;
@@ -126,14 +130,18 @@ acceptance did. Both tokens decode as the platform requires — `iss` byte-equal
   may share a name, which is exactly what `api_keys_one_live_unissued` was narrowed
   to permit.
 - **A real `ant` authenticates with it.** `ant` 1.21.0, built from the read-only
-  `anthropic-cli` checkout: `ant beta:agents list --base-url http://127.0.0.1:8080`
-  on a console-issued key returned the agent JSON, exit **0**; `ant beta:agents
-  create --name plan32-ant-created --model 'id: claude-sonnet-5'` minted
-  `agent_mmcr66adag155sty2ta2szrf`, exit **0**. Disabling the key over the console
-  API made the same command fail with `401 … {"message":"invalid x-api-key",
-  "type":"authentication_error"}`; re-enabling it made the command succeed again;
-  archiving it made it fail for good. The whole lifecycle, observed through the
-  reference client rather than through curl.
+  `anthropic-cli` checkout, across **three** console-issued keys — one per run, each
+  archived at the end, so no run inherited another's credential. On the first
+  (`apikey_9grz…`), `ant beta:agents list --base-url http://127.0.0.1:8080` returned
+  the agent JSON at exit **0**, and archiving that key over the console API made the
+  same command fail with `401 … {"message":"invalid x-api-key",
+  "type":"authentication_error"}`. On the second (`apikey_wz3a…`), the full
+  reversibility ran against `beta:agents list`: disabled → 401, re-enabled →
+  succeeded, archived → 401 for good. On the third (`apikey_nhx5…`), `ant
+  beta:agents create --name plan32-ant-created --model 'id: claude-sonnet-5'` minted
+  `agent_mmcr66adag155sty2ta2szrf` at exit **0** — the mutation, so the CLI is not
+  merely reading. The whole lifecycle observed through the reference client rather
+  than through curl.
 - **One property measured because §10 asserts it.** With `IDENTITY_MODE=oidc`
   live, the management `x-api-key` still reaches the admin-gated routes — LIST
   **200**, ISSUE **200** — because `requireRole` binds the human lane only. The
@@ -160,10 +168,11 @@ see.
 correct and is now an INFERRED divergence. The implementation of it refused *every*
 patch to an archived row, which broke the idempotent retry: an operator repeating a
 Delete got a 400 that both errored on a state already holding and advised
-`inactive`, the state they had just declined. All three reviewers — Codex,
-`/code-review`, and the verifier — reached it independently. The fix lets a
-repeated archive fall through to a no-op write, as `RevokeEnvironmentKey` already
-did for the same reason.
+`inactive`, the state they had just declined. Three reviewers reached it
+independently, which is what the contemporaneous reply on #388 records: the Codex
+CLI pass, this repo's `verifier` subagent, and then the Codex GitHub bot raising it
+a third time on the same diff. The fix lets a repeated archive fall through to a
+no-op write, as `RevokeEnvironmentKey` already did for the same reason.
 
 **Round 3 → the lapsed guard was reachable around.** The refusal to re-activate a
 lapsed key was itself added in round 2, and it computed its condition with the same
@@ -196,9 +205,14 @@ checking has been done.
   Declined: that strands the control plane behind a state only a direct database
   edit clears, and protects nobody — setting the variable at all requires the
   deployment access that could equally configure a fresh value. The adoption logs
-  a warning naming the previous status instead, which the acceptance run above
-  confirmed fires for a console-issued row and stays silent for an env-var-managed
-  one.
+  a warning naming the previous status instead — which **slice 2's round-4
+  verification** drove directly, booting a control plane over an archived
+  console-issued value and reading `configured management key already existed as a
+  console-issued key … previous_status=archived` out of its log, then booting over
+  an archived env-var-managed value and finding no such line. That is the
+  provenance: a verification run, not the acceptance run above, which never
+  restarted a control plane and so could not have observed a boot-time adoption at
+  all.
 
 **One tracking gap, found by the verifier in round 4.** All five INFERRED entries
 cross-linked #389 while the issue enumerated only four of them — someone working it
@@ -210,10 +224,16 @@ uninterrupted green `make verify` on this host, and said so rather than composin
 silence: `internal/mcp` flaked in 6 of 8 executions (#380, measured this session
 against the "~40%" in its title) and `internal/sandbox/shell` flaked once with a
 signature that turned out to be worth its own issue (#390 — a genuine timeout
-misclassification, not merely a slow test). Both packages were byte-identical to
-`main`, both passed re-run alone, and CI was green on every merged SHA. The verdicts
-were composed from per-package results plus the coverage total plus CI, and each
-verifier report labelled that composition explicitly.
+misclassification, not merely a slow test). Slice 3's own verification then turned
+up a **third** signature on a run where the first two both passed:
+`internal/brain`'s `TestLongTimeToFirstTokenKeepsLease` failed with
+`lease keeper: queue: extend work_…: context deadline exceeded` at 153s of package
+time and passed in 3.1s re-run alone (#392). Every one of the three packages was
+byte-identical to `main`, every one passed alone, and CI was green on every merged
+SHA — so the pattern is the host under full-suite load, not the changes. The
+verdicts were composed from per-package results plus the coverage total plus CI
+(90.81% on slice 3's run), and each verifier report labelled that composition
+explicitly rather than reporting a green it had not obtained.
 
 ---
 
