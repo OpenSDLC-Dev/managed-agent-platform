@@ -175,7 +175,7 @@ func TestMCPTransportFailureIsAnsweredAndReported(t *testing.T) {
 		t.Errorf("session.error = %+v, want mcp_connection_failed_error naming docs", e.Error)
 	}
 	if e.Error.RetryStatus.Type != "retrying" {
-		t.Errorf("retry_status = %+v, want the retrying variant — every turn re-attempts the server",
+		t.Errorf("retry_status = %+v, want the retrying variant — every work cycle re-attempts the server",
 			e.Error.RetryStatus)
 	}
 	// The endpoint is customer-supplied and may carry a credential; the message

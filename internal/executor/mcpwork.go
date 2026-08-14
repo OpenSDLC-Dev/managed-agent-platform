@@ -7,8 +7,10 @@ import (
 	"fmt"
 	"net/url"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
@@ -17,6 +19,7 @@ import (
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/mcp"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/queue"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/toolset"
+	"github.com/jackc/pgx/v5"
 	"go.opentelemetry.io/otel/codes"
 )
 
@@ -37,10 +40,10 @@ import (
 //
 // The row is the retry state, and its absence means something different from
 // its presence. No row means the server has never been reached, a `failed` row
-// means an attempt that did not work and is re-attempted on the next turn (the
-// reference retries "on the next session.status_idle to session.status_running
-// transition"), and a `ready` row is a listing the brain can offer. Nothing here
-// disables a server for the rest of a session: the sources document no such
+// means an attempt that did not work and is re-attempted on the next work cycle
+// (the reference retries "on the next session.status_idle to
+// session.status_running transition"), and a `ready` row is a listing the brain
+// can offer. Nothing here disables a server for the rest of a session: the sources document no such
 // state, and inventing one would outlive the outage that caused it.
 //
 // Unlike the web tools, the session's networking policy *does* constrain these
@@ -73,10 +76,31 @@ type catalogRow struct {
 	// nothing holds a server's unbounded text and the settlement stores it as it
 	// stands.
 	reason string
-	// notReached marks a row the pass never dialled — the budget ran out first.
+	// notReached marks a row whose failure is this platform's scheduling rather
+	// than the server's: the pass's budget ran out before an answer came back.
 	// Its reason is a fallback rather than a finding, so the settlement keeps
-	// whatever an earlier pass recorded instead.
+	// whatever an earlier pass recorded instead — and it says nothing on the
+	// wire, because there is no connection for an operator to go and heal.
 	notReached bool
+	// offWire marks a failure that is neither of the wire's two errors, so the
+	// session is not told about it. A url that is not http(s) is the case:
+	// `mcp_connection_failed_error` is documented as a server that "could not be
+	// reached (network error, timeout, or non-authentication HTTP failure)", and
+	// nothing was ever dialled. The execution half of this driver already draws
+	// the line there — a malformed url answers the call is_error and emits no
+	// event (mcpexec.go, runMCPTool) while an egress refusal emits one — and the
+	// two halves must not disagree about one condition.
+	//
+	// Distinct from notReached, which also stays quiet but for the other reason
+	// and with the other effect on the row: that one is this pass's own clock,
+	// and its fallback text must not displace a verdict an earlier pass earned.
+	// This one is a verdict, and it overwrites.
+	offWire bool
+	// authentication picks which of the wire's two failures this row is, on the
+	// same split the execution path uses (mcpFailure): a refused credential is
+	// not a connection that failed, because the connection worked well enough to
+	// be refused. Meaningless on a "ready" row.
+	authentication bool
 }
 
 // processMCP runs one mcp_exec item to completion. It mirrors processWeb — the
@@ -188,75 +212,147 @@ func (e *Executor) undiscoveredServers(ctx context.Context, sid domain.ID, decla
 	return out, nil
 }
 
-// discoverServers lists each server's tools, oldest declaration first. Every
-// server yields a row: a server that cannot be reached is a fact about that
-// server, not a fault of the work item, and faulting the item would reclaim-loop
-// it against an endpoint that is simply down. The error return is the dead
-// context alone — the item's own, not the pass's budget.
+// discoverServers gives every declared server a row. A server that cannot be
+// reached is a fact about that server, not a fault of the work item, and
+// faulting the item would reclaim-loop it against an endpoint that is simply
+// down. The error return is the dead context alone — the item's own, not the
+// pass's budget.
 //
-// The pass is bounded as a whole (Config.MCPPassTimeout), the way
-// mcp.ListTimeout bounds one listing across its pages. Without an aggregate
-// bound the worst case is the per-server bound times the servers an agent may
-// declare: twenty (maxAgentMCPServers), each costing a handshake at
-// mcp.DialTimeout plus a listing at mcp.ListTimeout, is the better part of an
-// hour — and the lease keeper renews throughout, so nothing reclaims the item
-// and cuts it short.
+// The pass runs in two phases, and the split is the point of it.
 //
-// It bounds the work rather than the wall clock: the budget stops the pass
-// dialling anything further, and the call already in flight when it expires
-// takes as long as the client's own cancellation does to unwind (see
-// mcp.DialTimeout on why that is seconds rather than immediate).
+// **Serial first: everything that touches this host's shared Postgres pool.**
+// Resolving a credential reads a row, may decrypt through a cipher backend, and
+// may run an OAuth refresh whose rotation is sealed back onto the credential
+// (internal/vaultresolve). Two declared servers may name the *same* URL under
+// different names and so resolve the same credential — and an issuer that
+// detects refresh-token reuse answers two simultaneous exchanges of one token by
+// revoking the whole family, which costs the operator a re-authorization. Doing
+// this phase N-wide would make that reachable inside a single pass. It would
+// also put N waiters on a pool this executor shares with the lease keeper
+// holding this very item, and a keeper that cannot extend cancels the pass.
+//
+// **Concurrent second: the dials.** This is where the time goes — a handshake at
+// mcp.DialTimeout plus a listing at mcp.ListTimeout — and where serial order used
+// to decide reach. One server that accepts a connection and never answers spent
+// the whole budget, so the servers declared behind it were recorded unreached and
+// never entered the catalog, and the model was never offered their tools.
+// Position is not a fact about a server, so it must not be what decides.
+//
+// The two are interleaved rather than staged: each dial is launched as soon as
+// its own preparation returns, and the next preparation runs while it is in
+// flight. Preparing everything first would be tidier and would age the tokens it
+// resolved — see the slot below.
+//
+// Nothing in the second phase is shared but the http.Client, which is safe for
+// it: each goroutine fills its own declaration's slot, so the rows the settlement
+// walks are in declaration order however the dials interleave.
+//
+// The pass is still bounded as a whole (Config.MCPPassTimeout), because this
+// process runs one work item at a time and a tarpit server would otherwise hold
+// every other session on the host — the lease keeper renews throughout, so
+// nothing reclaims the item and cuts it short. What the fan-out changed is the
+// size of that hold: one server's dial-and-list rather than the sum of every
+// declared server's. It bounds the work rather than the wall clock; a call in
+// flight when the budget expires takes as long as the client's own cancellation
+// does to unwind (see mcp.DialTimeout on why that is seconds rather than
+// immediate).
 func (e *Executor) discoverServers(ctx context.Context, cfg domain.EnvironmentConfig,
 	vaultIDs []string, servers []mcpServerRef) ([]catalogRow, error) {
 	budget, cancel := context.WithTimeout(ctx, e.cfg.MCPPassTimeout)
 	defer cancel()
 
-	var rows []catalogRow
-	for _, s := range servers {
-		// The budget is spent, but the item's own context is alive: the servers
-		// still unreached are this pass's failures, not the item's. They get the
-		// ordinary failed row, which the next turn re-attempts — but the reason
-		// on it does not displace one an earlier pass earned. "Ran out of time"
-		// says what this pass did, and a server that was refused by the egress
-		// policy last turn already has the answer an operator needs; overwriting
-		// that with a scheduling artifact would make the row read as though the
-		// clock were the problem. So this reason is a fallback for a server that
-		// has none yet, applied in the settlement's upsert.
-		if budget.Err() != nil && ctx.Err() == nil {
-			rows = append(rows, catalogRow{name: s.Name, url: s.URL, status: "failed",
-				reason: passRanOutOfTime, notReached: true})
+	rows := make([]catalogRow, len(servers))
+	sem := make(chan struct{}, maxConcurrentDials)
+	var wg sync.WaitGroup
+	// The only thing between a dial still writing its slot and a caller reading
+	// the rows — deferred rather than called at the end of the loop, because the
+	// error paths return from inside it and a dial in flight there is writing
+	// into the array this function is handing back. It is registered after the
+	// cancel it must precede: defers unwind last-registered-first, so the dials
+	// are waited out and only then is the budget they are holding torn down.
+	defer wg.Wait()
+
+	for i, s := range servers {
+		// The slot is taken before the credential is resolved, not after,
+		// because what it has to cover is *this* server's resolve and dial
+		// together. A refresh hands back a token whose remaining life may be
+		// only the leeway that triggered it (vaultresolve, refreshLeeway — one
+		// minute, documented as absorbing clock skew and the flight time of the
+		// dial it is about to authorize), so a token that waited for a slot
+		// before being used could be spent by the time it is sent, and the
+		// healthy credential would earn an authentication failure.
+		sem <- struct{}{}
+		row, token, dial, err := e.prepareServer(budget, cfg, vaultIDs, s)
+		if err != nil {
+			<-sem
+			// The dials already in flight have nowhere to put their rows —
+			// this pass is throwing all of them away — so they are cut short
+			// rather than waited out.
+			cancel()
+			return nil, fmt.Errorf("discover mcp server %q: %w", s.Name, err)
+		}
+		rows[i] = row
+		if !dial {
+			<-sem
 			continue
 		}
-		row, err := e.discoverServer(budget, cfg, vaultIDs, s)
-		if err != nil {
-			return nil, err
-		}
-		rows = append(rows, row)
-		if ctx.Err() != nil {
-			return nil, fmt.Errorf("discover mcp server %q: %w", s.Name, ctx.Err())
-		}
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			defer func() { <-sem }()
+			rows[i] = e.listServerTools(budget, s, token, rows[i])
+		}()
+	}
+
+	if ctx.Err() != nil {
+		return nil, fmt.Errorf("discover mcp servers: %w", ctx.Err())
 	}
 	return rows, nil
 }
 
-// passRanOutOfTime is the reason a server the pass never got to carries. It is
-// a fallback rather than a verdict — the settlement's upsert keeps a reason an
-// earlier pass earned, because "ran out of time" says what this pass did and
-// would otherwise make a policy refusal read as a scheduling artifact.
+// maxConcurrentDials bounds the dials in flight, and it is a memory bound rather
+// than a copy of the wire's twenty-entry mcp_servers cap.
+//
+// Each connection carries its own cumulative response budget (mcp.MaxResponseBytes,
+// 8 MiB, sized there against a host running many sessions), and the SDK reads a
+// response whole before it decodes anything — so the width multiplies the bytes a
+// pass can hold live. Twenty would be a hundred and sixty megabytes of one
+// session's servers, in a process whose every other buffer is measured in
+// megabytes; eight is sixty-four, and the fairness this width exists for is
+// already had at any width above one. The wire cap is not the right number here
+// anyway: it is enforced where an agent spec is written, and this array is read
+// back out of a stored resolved_agent, which an import, a restore or a
+// hand-written UPDATE can have filled — the provenance mcpEgressAllowed already
+// refuses to assume away.
+const maxConcurrentDials = 8
+
+// passRanOutOfTime is the reason a server the pass could not finish with
+// carries. It is a fallback rather than a verdict — the settlement's upsert
+// keeps a reason an earlier pass earned, because "ran out of time" says what
+// this pass did and would otherwise make a policy refusal read as a scheduling
+// artifact.
 const passRanOutOfTime = "this discovery pass ran out of time before reaching the server"
 
-// discoverServer reaches one server.
+// prepareServer is the serial half of one server's discovery: everything
+// decided before a socket is opened. It reports the row so far, the bearer token
+// the dial should carry, and whether there is anything left to dial — a server
+// this phase already has a verdict on is not.
 //
 // The reason it writes is a stored column and an mcp_servers entry may carry a
 // credential in its userinfo or its query, so the reasons written here name the
 // host and nothing more. The ones that come from elsewhere are not covered at
-// their source, and it would be easy to assume they were: the MCP client
-// redacts the endpoint in the prefix *it* writes, but the transport error it
-// wraps is net/http's, which names the URL it dialled with only the password
-// masked — the username and query ride along. That is why storableReason
-// redacts by value here rather than trusting what arrives.
-func (e *Executor) discoverServer(ctx context.Context, cfg domain.EnvironmentConfig,
-	vaultIDs []string, s mcpServerRef) (row catalogRow, err error) {
+// their source, and it would be easy to assume they were: the MCP client redacts
+// the endpoint in the prefix *it* writes, but the transport error it wraps is
+// net/http's, which names the URL it dialled with only the password masked — the
+// username and query ride along. That is why storableReason redacts by value
+// here rather than trusting what arrives.
+func (e *Executor) prepareServer(ctx context.Context, cfg domain.EnvironmentConfig,
+	vaultIDs []string, s mcpServerRef) (row catalogRow, token string, dial bool, err error) {
+	// The resolved token is held here rather than read off the named result,
+	// which every failing return below assigns "" before the defer runs — so a
+	// scrub reading that result would be scrubbing nothing on exactly the
+	// returns that carry a reason.
+	var bearer string
 	// The reason is made storable here, where it is produced, rather than at
 	// settlement. A server chooses this text and a JSON-RPC error message is
 	// bounded only by a whole connection's response budget, so deferring the cap
@@ -265,33 +361,32 @@ func (e *Executor) discoverServer(ctx context.Context, cfg domain.EnvironmentCon
 	// anything holds the string anyway.
 	// Declared ahead of the defer so whatever line produced the reason, the
 	// token that line's dial carried is scrubbed out of it.
-	var token string
 	defer func() {
 		if row.reason != "" {
-			row.reason = storableReason(row.reason, row.url, token)
+			row.reason = storableReason(row.reason, row.url, bearer)
 		}
 	}()
 	row = catalogRow{name: s.Name, url: s.URL, status: "failed"}
 
 	host, herr := mcpEndpointHost(s.URL)
 	if herr != nil {
-		row.reason = herr.Error()
-		return row, nil
+		row.reason, row.offWire = herr.Error(), true
+		return row, "", false, nil
 	}
 	if !mcpEgressAllowed(cfg, host) {
 		row.reason = egressRefusal(cfg, host)
-		return row, nil
+		return row, "", false, nil
 	}
 
-	token, cerr := e.mcpBearer(ctx, vaultIDs, s.URL)
+	bearer, cerr := e.mcpBearer(ctx, vaultIDs, s.URL)
 	// The clock is read first, and whether or not the credential produced a
-	// verdict of its own. Resolving one can now include an OAuth refresh, which is
+	// verdict of its own. Resolving one can include an OAuth refresh, which is
 	// seconds of third-party I/O rather than a query, plus a cipher backend that
 	// is a network call — so this is where a discovery budget realistically runs
 	// out, and it runs out the same way on the resolutions that succeed. That is
-	// this pass's failure, not the item's, so it settles like the budget branch
-	// above rather than faulting and throwing away the rows every server before
-	// this one earned.
+	// this pass's failure, not the item's, so it settles like a dial the budget
+	// cut short rather than faulting and throwing away the rows every server
+	// before this one earned.
 	//
 	// Reading it before the credential's verdict, because a resolution cut short
 	// marks some of its failures against the credential — a decrypt that never
@@ -302,32 +397,84 @@ func (e *Executor) discoverServer(ctx context.Context, cfg domain.EnvironmentCon
 	if ctx.Err() != nil {
 		row.reason = passRanOutOfTime
 		row.notReached = true
-		return row, nil
+		return row, "", false, nil
 	}
 	if cerr != nil {
 		if credentialUnusable(cerr) {
-			row.reason = mcpDialReason(cerr)
-			return row, nil
+			// A credential this platform could not resolve is an authentication
+			// failure that never reached the server — the reference's third arm.
+			row.reason, row.authentication = mcpDialReason(cerr), true
+			return row, "", false, nil
 		}
 		// The lookup failed, not the credential. A failed row would blame the
 		// credential for a pool that blinked; faulting the item retries the pass.
-		return catalogRow{}, fmt.Errorf("mcp credential for %q: %w", s.Name, cerr)
+		return catalogRow{}, "", false, fmt.Errorf("mcp credential: %w", cerr)
 	}
+	return row, bearer, true, nil
+}
+
+// listServerTools is the concurrent half: the socket, and the listing on it.
+// Everything it can decide was decided in prepareServer, so what it touches is
+// the shared http.Client — safe for concurrent use — and the row it was handed.
+func (e *Executor) listServerTools(ctx context.Context, s mcpServerRef,
+	token string, prepared catalogRow) (row catalogRow) {
+	row = prepared
+	// The same redaction prepareServer applies, for the same reason, over the
+	// errors this half produces. On the named result, because a defer can only
+	// reach what the function returns through one — and what it is scrubbing out
+	// is the bearer token this dial carried, which every transport error quotes.
+	defer func() {
+		if row.reason != "" {
+			row.reason = storableReason(row.reason, row.url, token)
+		}
+	}()
 
 	conn, derr := mcp.Connect(ctx, mcp.Config{URL: s.URL, HTTPClient: e.mcpHTTP, BearerToken: token})
 	if derr != nil {
-		row.reason = mcpDialReason(derr)
-		return row, nil
+		row = failedDial(ctx, row, derr)
+		return row
 	}
 	defer func() { _ = conn.Close() }()
 
 	tools, lerr := conn.ListTools(ctx)
 	if lerr != nil {
-		row.reason = mcpDialReason(lerr)
-		return row, nil
+		row = failedDial(ctx, row, lerr)
+		return row
 	}
 	row.status, row.reason, row.tools = "ready", "", storableTools(tools, token)
-	return row, nil
+	return row
+}
+
+// failedDial fills in a row for a dial or a listing that did not come back.
+//
+// A budget spent while the request was in flight is this pass's failure and not
+// the server's, so it reads as the scheduling artifact it is rather than as a
+// timeout the server earned — the same verdict a server the pass could not
+// start on gets, and for the same reason: the row is what an operator reads,
+// and "ran out of time" must never displace a finding. The item's own
+// cancellation lands here too and is indistinguishable from the budget's, which
+// costs nothing: discoverServers throws every row away when the item is gone.
+func failedDial(ctx context.Context, row catalogRow, err error) catalogRow {
+	// Both halves of the clock question, because the budget is now a deadline
+	// every dial in the pass shares and they all converge on the same instant.
+	// The clock alone would relabel a verdict the server had already earned — a
+	// 401 that arrived microseconds before the deadline — as the pass's own
+	// scheduling, throwing the finding away and saying nothing about it. The
+	// error alone would miss a cancellation the transport reported some other
+	// way.
+	//
+	// And the credential is asked about first, ahead of both. Once a connection
+	// has been answered 401 the MCP client wraps mcp.ErrUnauthorized around
+	// whatever it fails with next (internal/mcp, authstatus.go), so an error can
+	// carry a refusal and a cancellation at once — and a refusal is a verdict
+	// the server earned however the pass then ended.
+	if !mcpAuthFailure(err) && ctx.Err() != nil &&
+		(errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled)) {
+		row.reason, row.notReached = passRanOutOfTime, true
+		return row
+	}
+	row.reason, row.authentication = mcpDialReason(err), mcpAuthFailure(err)
+	return row
 }
 
 // storableTools is the catalog's last gate before Postgres: it strips NUL from
@@ -416,7 +563,7 @@ func valueCarriesNUL(v any) bool {
 }
 
 // maxCatalogReason caps a stored failure reason. A `failed` row is re-attempted
-// on every turn and rewritten each time, and the text on it is a server's to
+// on every work cycle and rewritten each time, and the text on it is a server's to
 // choose: MCP response bodies are bounded at mcp.MaxResponseBytes, so a
 // JSON-RPC error message arrives able to carry megabytes into a column with no
 // length of its own. Nothing reading a reason needs more than the first lines
@@ -724,8 +871,10 @@ func mcpEgressAllowed(cfg domain.EnvironmentConfig, host string) bool {
 // a pass ends, and a session archived in between must not have rows written for
 // it or a turn chained on its behalf. Every other executor settlement gets this
 // from events.AppendInTx, which refuses an archived session under this very
-// lock; discovery appends no event, so it asks directly. The item is completed
-// either way — the work is done and there is nothing to retry.
+// lock; discovery appends one only on the pass where a server starts failing, so
+// on every other pass there is nothing for that refusal to act on and it asks
+// directly. The item is completed either way — the work is done and there is
+// nothing to retry.
 func (e *Executor) settleMCP(ctx context.Context, item *queue.Item, rows []catalogRow) error {
 	tx, err := e.pool.Begin(ctx)
 	if err != nil {
@@ -757,10 +906,54 @@ func (e *Executor) settleMCP(ctx context.Context, item *queue.Item, rows []catal
 	for _, s := range agent.MCPServers {
 		declared[s.Name] = s.URL
 	}
-
+	// Which servers this session has already been told about, read under the
+	// session row lock this transaction already holds so no other pass can be
+	// between the read and the upsert. Only consulted when there is something to
+	// announce, which on a healthy session is never.
+	var announced map[string]bool
+	var failures []events.NewEvent
+	if slices.ContainsFunc(rows, func(r catalogRow) bool {
+		return r.announceable() && declared[r.name] == r.url
+	}) {
+		announced, err = announcedServers(ctx, tx, item.SessionID)
+		if err != nil {
+			return err
+		}
+	}
 	for _, r := range rows {
 		if declared[r.name] != r.url {
 			continue
+		}
+		// Said out loud on the cadence the server is re-dialled at: once per
+		// work cycle. That falls out of the row rather than being imposed — a
+		// new work cycle deletes a session's failed rows (internal/api,
+		// startWorkCycle, the reference's documented retry-on-idle→running),
+		// which is the same thing that puts the server back in the
+		// never-reached state a turn suspends for. A second pass inside one
+		// cycle finds the row this pass wrote and stays quiet.
+		//
+		// Not the rows this pass did not finish with: those are its own
+		// scheduling, with no connection behind them for an operator to heal.
+		// Which is why announcedServers asks about the reason and not the
+		// status — a budget row is `failed` too, and counting it as an
+		// announcement would silence that server's first real verdict.
+		//
+		// Not re-announced: a failure that changes kind inside a cycle. The row
+		// carries the truth; the event is not re-sent. Keying on the reason text
+		// would fix that and hand a server an event per pass for the price of
+		// varying its own error message.
+		if r.announceable() && !announced[announceKey(r.name, r.url)] {
+			ev, err := mcpFailureEvent(r.name, mcpFailure{
+				message: r.reason, authentication: r.authentication})
+			if err != nil {
+				return err
+			}
+			failures = append(failures, ev)
+			// Marked as we go, not only as read: two declared entries can name
+			// one server at one url — the write path rejects that, the stored
+			// resolved_agent this reads back need not — and the set was read
+			// before the loop, so the second would not see the first's upsert.
+			announced[announceKey(r.name, r.url)] = true
 		}
 		toolsJSON, err := json.Marshal(r.tools)
 		if err != nil {
@@ -782,6 +975,14 @@ func (e *Executor) settleMCP(ctx context.Context, item *queue.Item, rows []catal
 			item.SessionID.String(), r.name, r.url, string(toolsJSON), r.status, reason,
 			r.notReached); err != nil {
 			return fmt.Errorf("write mcp catalog for %q: %w", r.name, err)
+		}
+	}
+	if len(failures) > 0 {
+		// In this transaction, so a server's row and the line about it commit
+		// together or not at all, and the stream notify fires on the same commit.
+		if _, err := e.log.AppendInTx(ctx, tx, item.SessionID, failures,
+			events.AppendOptions{}); err != nil {
+			return fmt.Errorf("append mcp discovery failures: %w", err)
 		}
 	}
 	// An MCP call outstanding takes this item back rather than completing it,
@@ -825,4 +1026,51 @@ func (e *Executor) settleMCP(ctx context.Context, item *queue.Item, rows []catal
 		return err
 	}
 	return tx.Commit(ctx)
+}
+
+// announcedServers is the set of a session's MCP servers whose catalog row
+// records a failure this session has already been told about. It is what keeps
+// one work cycle from announcing the same server twice, and — because a new work
+// cycle deletes those rows — what lets the next cycle say it again.
+//
+// A row whose reason is passRanOutOfTime is deliberately not in the set. That
+// row is the pass's own scheduling and was never announced, and the upsert only
+// ever writes that reason onto a row with no earlier one (its COALESCE arm), so
+// a row still carrying it has earned no verdict and been told to nobody. Asking
+// for `status = 'failed'` instead would let a single timed-out pass silence that
+// server's first real failure for the rest of the cycle.
+func announcedServers(ctx context.Context, tx pgx.Tx, sid domain.ID) (map[string]bool, error) {
+	rows, err := tx.Query(ctx,
+		`SELECT server_name, url FROM mcp_catalogs
+		  WHERE session_id = $1 AND status = 'failed'
+		    AND error IS NOT NULL AND error <> $2`,
+		sid.String(), passRanOutOfTime)
+	if err != nil {
+		return nil, fmt.Errorf("read mcp catalog statuses: %w", err)
+	}
+	defer rows.Close()
+	announced := map[string]bool{}
+	for rows.Next() {
+		var name, url string
+		if err := rows.Scan(&name, &url); err != nil {
+			return nil, fmt.Errorf("read mcp catalog statuses: %w", err)
+		}
+		announced[announceKey(name, url)] = true
+	}
+	return announced, rows.Err()
+}
+
+// announceKey is what an announcement is remembered by. The url is in it for
+// the reason every other row decision in this file compares one: a listing or a
+// failure attributed to an endpoint the server no longer sits at is about a
+// different server, and a row left behind at the old one would otherwise
+// silence the first real failure of the new.
+func announceKey(name, url string) string { return name + "\x00" + url }
+
+// announceable says whether a failed row is one the session is told about. Two
+// kinds are not: a row this pass ran out of time on, which is the platform's own
+// scheduling with no connection behind it for an operator to heal, and a row
+// whose failure is neither of the wire's two errors.
+func (r catalogRow) announceable() bool {
+	return r.status == "failed" && !r.notReached && !r.offWire
 }

@@ -1,9 +1,12 @@
 package executor
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -440,7 +443,8 @@ func TestASelfHostedEnvironmentWithNoPolicyIsStillUnconstrained(t *testing.T) {
 // catalog rows written for it, nor a model turn chained on its behalf for a
 // brain to claim and drain. Every other executor settlement inherits this from
 // events.AppendInTx, which refuses an archived session under the same row lock;
-// discovery appends no event, so it has to ask.
+// discovery appends one only on the pass where a server starts failing, so on
+// every other pass there is nothing for that refusal to act on and it has to ask.
 //
 // The end lands after the dials and before the settlement, which is the window
 // under test: the server is reachable and the pass succeeds, so nothing but the
@@ -955,48 +959,68 @@ func TestStorableReasonRedactsTruncatesAndSanitizes(t *testing.T) {
 	})
 }
 
-// TestDiscoveryStopsWhenThePassRunsOutOfTime pins the aggregate budget. The
-// dials are serial, the endpoints are third-party, and this process runs one
-// work item at a time — so without a bound on the pass as a whole, one tarpit
-// server holds every other session's tool calls on the host behind it for as
-// long as it cares to. The servers the budget does not reach are recorded as
-// failures, which the next turn re-attempts; the item itself still completes.
+// errorsOfType returns the `error` object of every session.error the session
+// carries whose type is typ, so a test can count the ones it means without
+// counting the ones another rung emits.
+func (h *harness) errorsOfType(t *testing.T, typ string) []map[string]any {
+	t.Helper()
+	var out []map[string]any
+	for _, ev := range h.sessionErrors(t) {
+		var body struct {
+			Error map[string]any `json:"error"`
+		}
+		if err := json.Unmarshal(ev.Body, &body); err != nil {
+			t.Fatalf("decode session error: %v", err)
+		}
+		if body.Error["type"] == typ {
+			out = append(out, body.Error)
+		}
+	}
+	return out
+}
+
+// TestATarpitServerDoesNotStarveTheOnesDeclaredAfterIt pins what the pass owes
+// a session with more than one server. Serially, position decided reach: a
+// server that accepts a connection and never answers spent the whole budget, so
+// the servers behind it were recorded unreached for the life of the session and
+// the model was never offered their tools. Position is not a
+// fact about a server.
 //
-// It costs about ten seconds of wall clock for a budget of a third of a second,
-// and that is the behaviour under test rather than a slow fixture: the SDK
-// answers a cancelled request with a `notifications/cancelled` sent on a
-// context detached from the one that was cancelled and bounded at five seconds
-// of its own, and a connection can have two calls outstanding. What the budget
-// stops is the pass reaching any further server, which is what the second
-// server's untouched counter shows; it does not cap the wall clock.
-func TestDiscoveryStopsWhenThePassRunsOutOfTime(t *testing.T) {
+// The aggregate budget is still what stops the pass — the tarpit's own row is
+// the failure it earns — but it stops that server rather than the queue behind
+// it.
+func TestATarpitServerDoesNotStarveTheOnesDeclaredAfterIt(t *testing.T) {
 	release := make(chan struct{})
 	hang := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
 		<-release
 	}))
-	reached := &atomic.Int32{}
-	second := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		reached.Add(1)
-		w.WriteHeader(http.StatusOK)
-	}))
 	client := mcptest.Client()
+	// Registered before the teardown below so that it runs after it: t.Cleanup
+	// unwinds last-registered-first, and this server's Close waits for every
+	// connection to go idle — which is what the block below sees to.
+	healthy := mcptest.Server(t, mcptest.Tool{Name: "ok_tool"})
 	// Teardown in one place, because its order matters and the default is
 	// wrong twice over. The tarpit is released explicitly rather than by its
 	// request context — a client that abandons a request does not reliably
 	// cancel the server's side of it — and the client's pooled connections are
-	// dropped before the servers close, because httptest.Server.Close waits for
+	// dropped before the server closes, because httptest.Server.Close waits for
 	// every connection to go idle and the abandoned response bodies never do.
 	t.Cleanup(func() {
 		close(release)
 		client.CloseIdleConnections()
 		hang.Close()
-		second.Close()
 	})
 
-	h := newHarnessWith(t, &fakeProvider{sb: &fakeSandbox{}}, Config{MCPPassTimeout: 300 * time.Millisecond})
+	// Headroom over what a loopback handshake and listing take, because what
+	// this test is about is that the healthy server is *dialled at all* while
+	// the tarpit holds the budget — a budget so tight that a loaded runner
+	// could miss it would report this test's own regression.
+	h := newHarnessWith(t, &fakeProvider{sb: &fakeSandbox{}}, Config{MCPPassTimeout: 5 * time.Second})
 	h.exec.mcpHTTP = client
 	h.setNetworking(t, domain.Networking{Type: domain.NetUnrestricted})
-	h.declareMCPServers(t, [2]string{"slow", hang.URL}, [2]string{"after", second.URL})
+	// Declared behind the tarpit, which is the whole point: this is the entry a
+	// serial pass never reached.
+	h.declareMCPServers(t, [2]string{"slow", hang.URL}, [2]string{"after", healthy})
 	h.enqueueMCP(t)
 
 	h.stepOnce(t)
@@ -1005,17 +1029,158 @@ func TestDiscoveryStopsWhenThePassRunsOutOfTime(t *testing.T) {
 	if got := cat["slow"]; got.status != "failed" {
 		t.Errorf("row = %+v, want the tarpit server recorded as a failure", got)
 	}
-	if got := cat["after"]; got.status != "failed" || !strings.Contains(got.reason, "out of time") {
-		t.Errorf("row = %+v, want a row saying the pass ran out of time before reaching it", got)
-	}
-	if n := reached.Load(); n != 0 {
-		t.Errorf("the server behind the tarpit was contacted %d times; the budget was already spent", n)
+	if got := cat["after"]; got.status != "ready" || len(got.tools) != 1 {
+		t.Errorf("row = %+v, want the server behind the tarpit listed in this same pass", got)
 	}
 	if n := h.liveOf(t, queue.MCPExec); n != 0 {
 		t.Errorf("live mcp_exec items = %d: a spent budget is a recorded failure, not a faulted item", n)
 	}
 	if n := h.liveOf(t, queue.ModelTurn); n != 1 {
 		t.Errorf("live model_turn items = %d, want the turn chained regardless", n)
+	}
+}
+
+// TestDiscoveryStopsWhenThePassRunsOutOfTime pins the aggregate budget. The
+// endpoints are third-party and this process runs one work item at a time, so
+// without a bound on the pass as a whole a tarpit server holds every other
+// session's tool calls on the host behind it for as long as it cares to. What
+// the fan-out changed is who pays: the bound is now one server's dial-and-list
+// rather than the sum of every declared server's, so the row a tarpit earns is
+// its own.
+//
+// It costs about ten seconds of wall clock for a budget of a third of a second,
+// and that is the behaviour under test rather than a slow fixture: the SDK
+// answers a cancelled request with a `notifications/cancelled` sent on a
+// context detached from the one that was cancelled and bounded at five seconds
+// of its own, and a connection can have two calls outstanding.
+func TestDiscoveryStopsWhenThePassRunsOutOfTime(t *testing.T) {
+	release := make(chan struct{})
+	hang := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		<-release
+	}))
+	client := mcptest.Client()
+	t.Cleanup(func() {
+		close(release)
+		client.CloseIdleConnections()
+		hang.Close()
+	})
+
+	h := newHarnessWith(t, &fakeProvider{sb: &fakeSandbox{}}, Config{MCPPassTimeout: 300 * time.Millisecond})
+	h.exec.mcpHTTP = client
+	h.setNetworking(t, domain.Networking{Type: domain.NetUnrestricted})
+	h.declareMCPServers(t, [2]string{"slow", hang.URL})
+	h.enqueueMCP(t)
+
+	h.stepOnce(t)
+
+	got := h.catalog(t)["slow"]
+	if got.status != "failed" {
+		t.Errorf("row = %+v, want the tarpit server recorded as a failure", got)
+	}
+	// The reason says what this pass did rather than blaming the server for a
+	// clock this platform owns, and it is marked so the settlement keeps a
+	// finding an earlier pass earned instead of overwriting it.
+	if !strings.Contains(got.reason, "out of time") {
+		t.Errorf("reason = %q, want the pass's own scheduling and not a verdict on the server", got.reason)
+	}
+	// A pass that ran out of time has no connection for an operator to heal, so
+	// it says nothing on the wire.
+	if n := len(h.errorsOfType(t, "mcp_connection_failed_error")); n != 0 {
+		t.Errorf("session errors = %d, want none for a budget this platform spent", n)
+	}
+	if n := h.liveOf(t, queue.MCPExec); n != 0 {
+		t.Errorf("live mcp_exec items = %d: a spent budget is a recorded failure, not a faulted item", n)
+	}
+	if n := h.liveOf(t, queue.ModelTurn); n != 1 {
+		t.Errorf("live model_turn items = %d, want the turn chained regardless", n)
+	}
+}
+
+// A server the discovery pass could not reach is said out loud on the cadence it
+// is re-dialled at: once per work cycle, not once per turn. The row alone was
+// the whole record before this — an operator watching the session's events saw a
+// model quietly offered fewer tools than the agent declared.
+//
+// Both halves are pinned here, because the quiet half is what a wrong dedupe
+// gets right by accident: a second pass within the cycle must add nothing, and a
+// new cycle must speak again.
+func TestADiscoveryFailureIsAnnouncedOncePerWorkCycle(t *testing.T) {
+	down := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "no", http.StatusInternalServerError)
+	}))
+	defer down.Close()
+
+	h := mcpHarness(t)
+	h.declareMCPServers(t, [2]string{"github", down.URL})
+	h.enqueueMCP(t)
+	h.stepOnce(t)
+
+	if got := h.catalog(t)["github"]; got.status != "failed" {
+		t.Fatalf("row = %+v, want the unreachable server recorded as a failure", got)
+	}
+	errs := h.errorsOfType(t, "mcp_connection_failed_error")
+	if len(errs) != 1 {
+		t.Fatalf("session errors = %d, want exactly one naming the server", len(errs))
+	}
+	if got := errs[0]["mcp_server_name"]; got != "github" {
+		t.Errorf("mcp_server_name = %v, want the declared name", got)
+	}
+	// The endpoint is customer-supplied and may carry a credential, so what the
+	// message carries is what the row carries — already cut to scheme://host by
+	// storableReason — and nothing more.
+	if got, want := errs[0]["message"], h.catalog(t)["github"].reason; got != want {
+		t.Errorf("message = %v, want the row's own reason %q", got, want)
+	}
+
+	// A second pass inside the same work cycle — an agent patch adding a server
+	// enqueues one, so this is reachable without a new cycle.
+	h.enqueueMCP(t)
+	h.stepOnce(t)
+	if n := len(h.errorsOfType(t, "mcp_connection_failed_error")); n != 1 {
+		t.Errorf("session errors after a second pass = %d, want still 1 — the row this pass wrote is what keeps it quiet", n)
+	}
+
+	// A new work cycle drops the session's failed rows, which is what puts those
+	// servers back in the never-reached state a turn suspends for (internal/api,
+	// startWorkCycle — the reference's documented retry cadence). The next pass
+	// therefore dials again, and a server still down is worth saying again: the
+	// operator sent another message, and this is the answer to it.
+	if _, err := h.pool.Exec(context.Background(),
+		`DELETE FROM mcp_catalogs WHERE session_id = $1 AND status = 'failed'`,
+		h.sid.String()); err != nil {
+		t.Fatalf("start a new work cycle: %v", err)
+	}
+	h.enqueueMCP(t)
+	h.stepOnce(t)
+	if n := len(h.errorsOfType(t, "mcp_connection_failed_error")); n != 2 {
+		t.Errorf("session errors after a new work cycle = %d, want 2 — the operator asked again", n)
+	}
+}
+
+// A credential the server refused is the other of the wire's two failures, and
+// discovery has to tell them apart the way execution already does: a refused
+// credential is not a connection that failed, because the connection worked
+// well enough to be refused.
+func TestADiscoveryAuthenticationFailureIsTypedAsOne(t *testing.T) {
+	refuses := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "nope", http.StatusUnauthorized)
+	}))
+	defer refuses.Close()
+
+	h := mcpHarness(t)
+	h.declareMCPServers(t, [2]string{"github", refuses.URL})
+	h.enqueueMCP(t)
+	h.stepOnce(t)
+
+	if n := len(h.errorsOfType(t, "mcp_connection_failed_error")); n != 0 {
+		t.Errorf("connection-failed errors = %d, want none: the server answered, it refused", n)
+	}
+	errs := h.errorsOfType(t, "mcp_authentication_failed_error")
+	if len(errs) != 1 {
+		t.Fatalf("authentication-failed errors = %d, want exactly one", len(errs))
+	}
+	if got := errs[0]["mcp_server_name"]; got != "github" {
+		t.Errorf("mcp_server_name = %v, want the declared name", got)
 	}
 }
 
@@ -1162,5 +1327,341 @@ func TestDiscoveryHandsItsItemBackForACallThatArrivedUnderneathIt(t *testing.T) 
 	// The listing still landed: handing the item back must not throw the pass away.
 	if got := h.catalog(t)["docs"]; got.status != "ready" {
 		t.Errorf("catalog row = %+v, want the listing this pass fetched", got)
+	}
+}
+
+// A credential the platform could not resolve at all never reaches the server,
+// and the reference counts it as an authentication failure all the same — so
+// discovery has to type it as one. The row alone was already pinned; the event
+// this slice adds needs its own assertion, because typing it wrongly sends an
+// operator after a connection that is fine.
+func TestACredentialThePlatformCannotOpenIsAnAuthenticationFailure(t *testing.T) {
+	h := mcpHarness(t)
+	url := mcptest.Server(t, mcptest.Tool{Name: "ok_tool"})
+	h.attachVaultWithAnUnopenableCredential(t, url)
+	h.declareMCPServers(t, [2]string{"docs", url})
+	h.enqueueMCP(t)
+
+	h.stepOnce(t)
+
+	if n := len(h.errorsOfType(t, "mcp_connection_failed_error")); n != 0 {
+		t.Errorf("connection-failed errors = %d, want none: nothing was dialled", n)
+	}
+	errs := h.errorsOfType(t, "mcp_authentication_failed_error")
+	if len(errs) != 1 {
+		t.Fatalf("authentication-failed errors = %d, want exactly one", len(errs))
+	}
+	if got := errs[0]["mcp_server_name"]; got != "docs" {
+		t.Errorf("mcp_server_name = %v, want the declared name", got)
+	}
+}
+
+// A pass that ran out of time before a server has told nobody anything, so it
+// must not be what silences that server's first real verdict. The two states are
+// one status in the table — "failed" — which is why the dedupe asks about the
+// reason rather than the status.
+func TestABudgetRowDoesNotSilenceTheFirstRealFailure(t *testing.T) {
+	down := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "no", http.StatusInternalServerError)
+	}))
+	defer down.Close()
+
+	h := mcpHarness(t)
+	h.declareMCPServers(t, [2]string{"github", down.URL})
+	// The row an earlier, timed-out pass would have left: failed, and carrying
+	// the fallback reason that says so.
+	if _, err := h.pool.Exec(context.Background(),
+		`INSERT INTO mcp_catalogs (session_id, server_name, url, tools, status, error, fetched_at)
+		 VALUES ($1, 'github', $2, '[]'::jsonb, 'failed', $3, now())`,
+		h.sid.String(), down.URL, passRanOutOfTime); err != nil {
+		t.Fatalf("seed the timed-out row: %v", err)
+	}
+	h.enqueueMCP(t)
+
+	h.stepOnce(t)
+
+	if n := len(h.errorsOfType(t, "mcp_connection_failed_error")); n != 1 {
+		t.Errorf("session errors = %d, want the first real failure said out loud "+
+			"even though a timed-out pass had already written a failed row", n)
+	}
+}
+
+// The pass's budget is one deadline every dial in it shares, so a verdict a
+// server earned microseconds before that instant arrives with the context
+// already dead. Deciding on the clock alone would relabel it as this platform's
+// scheduling, throwing the finding away and saying nothing about it — so the
+// error has to agree that it was a cancellation. Asserted on the function rather
+// than through a pass, because the interleaving it is about is a race no test
+// can schedule.
+func TestAVerdictThatBeatTheBudgetIsNotRelabelledAsScheduling(t *testing.T) {
+	dead, cancel := context.WithCancel(context.Background())
+	cancel()
+	row := catalogRow{name: "docs", url: "https://example.test/mcp", status: "failed"}
+
+	earned := failedDial(dead, row, errors.New("boom"))
+	if earned.notReached {
+		t.Error("a verdict the server earned was marked as the pass's own scheduling")
+	}
+	if !strings.Contains(earned.reason, "boom") {
+		t.Errorf("reason = %q, want the verdict the server earned", earned.reason)
+	}
+
+	cut := failedDial(dead, row, context.DeadlineExceeded)
+	if !cut.notReached || cut.reason != passRanOutOfTime {
+		t.Errorf("row = %+v, want a dial the budget cut short marked as scheduling", cut)
+	}
+}
+
+// A server that answered has nothing for an operator to hear, so it must not
+// reach the session log at all. Pinned alongside a server that did fail, because
+// the two together are what a mixed session looks like: the announcement has to
+// be about one row rather than about the pass, and the event has to name which.
+func TestAServerThatAnsweredIsNeverAnnouncedAsAFailure(t *testing.T) {
+	down := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "no", http.StatusInternalServerError)
+	}))
+	defer down.Close()
+
+	h := mcpHarness(t)
+	healthy := mcptest.Server(t, mcptest.Tool{Name: "ok_tool"})
+	h.declareMCPServers(t, [2]string{"docs", healthy}, [2]string{"github", down.URL})
+	h.enqueueMCP(t)
+
+	h.stepOnce(t)
+
+	cat := h.catalog(t)
+	if got := cat["docs"]; got.status != "ready" {
+		t.Fatalf("row = %+v, want the healthy server listed", got)
+	}
+	if got := cat["github"]; got.status != "failed" {
+		t.Fatalf("row = %+v, want the unreachable server recorded as a failure", got)
+	}
+	errs := h.errorsOfType(t, "mcp_connection_failed_error")
+	if len(errs) != 1 {
+		t.Fatalf("session errors = %d, want exactly one — the server that answered "+
+			"has no failure to announce", len(errs))
+	}
+	if got := errs[0]["mcp_server_name"]; got != "github" {
+		t.Errorf("mcp_server_name = %v, want the server that failed and not the one that "+
+			"answered", got)
+	}
+}
+
+// Two declared entries naming one server at one url each earn a row, and the
+// set of names already announced is read once before the settlement walks them —
+// so without marking as it goes, the second would not see the first and the
+// session would hear the same failure twice. The write path rejects this shape
+// (internal/api, wire.go's duplicate-name check), which is exactly why it is
+// tested here: what reaches this code is a stored resolved_agent, and the
+// provenance the dial width already refuses to assume away is the same one.
+func TestOneServerDeclaredTwiceIsAnnouncedOnce(t *testing.T) {
+	down := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "no", http.StatusInternalServerError)
+	}))
+	defer down.Close()
+
+	h := mcpHarness(t)
+	h.declareMCPServers(t, [2]string{"github", down.URL}, [2]string{"github", down.URL})
+	h.enqueueMCP(t)
+
+	h.stepOnce(t)
+
+	if n := len(h.errorsOfType(t, "mcp_connection_failed_error")); n != 1 {
+		t.Errorf("session errors = %d, want one: two entries for one server are one "+
+			"server being down", n)
+	}
+}
+
+// More declared servers than the fan-out is wide, and half of them never reach a
+// dial at all. The slot is taken before the credential is resolved, so every path
+// out of that iteration has to give it back — a server that earns its verdict
+// before any socket opens included. Miss one and the pass stops for good once the
+// leaked slots fill the channel, which is a hang rather than a wrong answer: this
+// declares more entries than maxConcurrentDials so the leak has somewhere to show.
+//
+// Over the wire cap on purpose. mcp_servers is capped at maxAgentMCPServers where
+// an agent spec is written, and this array is read back out of a stored
+// resolved_agent — the provenance the fan-out width already refuses to assume
+// away.
+func TestEveryDeclaredServerGetsARowPastTheFanOutWidth(t *testing.T) {
+	h := mcpHarness(t)
+
+	// Two more pairs than the width, not exactly the width: with one leak per
+	// non-dialling entry, a run of exactly maxConcurrentDials of them fills the
+	// channel on the last iteration and the loop finishes regardless. The block
+	// only shows once an acquisition comes after the channel is full.
+	const pairs = maxConcurrentDials + 2
+	declared := make([][2]string, 0, 2*pairs)
+	for i := range pairs {
+		// Alternating, so the two kinds interleave rather than the non-dialling
+		// ones all landing before the channel could fill.
+		declared = append(declared,
+			[2]string{fmt.Sprintf("ok%d", i), mcptest.Server(t, mcptest.Tool{Name: "ok_tool"})},
+			// Not http(s): refused by mcpEndpointHost, so this entry is a row
+			// with no dial behind it.
+			[2]string{fmt.Sprintf("bad%d", i), fmt.Sprintf("ftp://example.invalid/%d", i)})
+	}
+	h.declareMCPServers(t, declared...)
+	h.enqueueMCP(t)
+
+	h.stepOnce(t)
+
+	cat := h.catalog(t)
+	if len(cat) != len(declared) {
+		t.Fatalf("catalog rows = %d, want one per declared server (%d)", len(cat), len(declared))
+	}
+	for i := range pairs {
+		if got := cat[fmt.Sprintf("ok%d", i)]; got.status != "ready" {
+			t.Errorf("row %s = %+v, want the reachable server listed", got.server, got)
+		}
+		if got := cat[fmt.Sprintf("bad%d", i)]; got.status != "failed" {
+			t.Errorf("row %s = %+v, want the unusable endpoint recorded as a failure",
+				got.server, got)
+		}
+	}
+}
+
+// stallsOnListing is a server that completes the handshake and then never
+// answers tools/list. It proxies a real fixture server rather than hand-writing
+// JSON-RPC, so the handshake is the SDK's own and only the one method is held.
+func stallsOnListing(t *testing.T, release <-chan struct{}) string {
+	t.Helper()
+	upstream := mcptest.Server(t, mcptest.Tool{Name: "ok_tool"})
+	client := mcptest.Client()
+	proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadGateway)
+			return
+		}
+		if bytes.Contains(body, []byte(`"tools/list"`)) {
+			<-release
+			return
+		}
+		req, err := http.NewRequest(r.Method, upstream, bytes.NewReader(body))
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadGateway)
+			return
+		}
+		req.Header = r.Header.Clone()
+		resp, err := client.Do(req)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadGateway)
+			return
+		}
+		defer func() { _ = resp.Body.Close() }()
+		for k, vs := range resp.Header {
+			for _, v := range vs {
+				w.Header().Add(k, v)
+			}
+		}
+		w.WriteHeader(resp.StatusCode)
+		_, _ = io.Copy(w, resp.Body)
+	}))
+	t.Cleanup(func() {
+		client.CloseIdleConnections()
+		proxy.Close()
+	})
+	return proxy.URL
+}
+
+// The budget can also run out on the *listing*, after a handshake the server
+// answered — a different error path from a dial that never connected, and one
+// the tarpit fixtures do not reach because they hold the handshake instead. It
+// has to read as this platform's scheduling all the same: marked otherwise, the
+// upsert would overwrite a verdict an earlier pass earned and the session would
+// hear a connection failure for a server that answered.
+func TestAListingTheBudgetCutShortIsNotAVerdictOnTheServer(t *testing.T) {
+	release := make(chan struct{})
+	stall := stallsOnListing(t, release)
+	t.Cleanup(func() { close(release) })
+
+	h := mcpHarnessWith(t, Config{MCPPassTimeout: 2 * time.Second})
+	h.declareMCPServers(t, [2]string{"slow", stall})
+	h.enqueueMCP(t)
+
+	h.stepOnce(t)
+
+	got := h.catalog(t)["slow"]
+	if got.status != "failed" {
+		t.Fatalf("row = %+v, want the stalled listing recorded as a failure", got)
+	}
+	if got.reason != passRanOutOfTime {
+		t.Errorf("reason = %q, want the pass's own scheduling: a listing this platform "+
+			"cut short is not a verdict the server earned", got.reason)
+	}
+	if n := len(h.errorsOfType(t, "mcp_connection_failed_error")); n != 0 {
+		t.Errorf("session errors = %d, want none for a budget this platform spent", n)
+	}
+}
+
+// A url that is not http(s) is a row and a tool error, never a session event:
+// the wire's mcp_connection_failed_error means a server that could not be
+// reached, and this one was never dialled. The execution half of the driver
+// already draws that line (mcpexec.go, runMCPTool: a malformed url answers
+// is_error with an empty mcpFailure), and one condition must not produce an
+// event on one half of a driver and silence on the other.
+func TestAUrlThatIsNotHTTPIsARowAndNotASessionEvent(t *testing.T) {
+	h := mcpHarness(t)
+	h.declareMCPServers(t, [2]string{"docs", "ftp://example.invalid/mcp"})
+	h.enqueueMCP(t)
+
+	h.stepOnce(t)
+
+	got := h.catalog(t)["docs"]
+	if got.status != "failed" || got.reason == "" {
+		t.Fatalf("row = %+v, want the unusable url recorded with its reason", got)
+	}
+	if n := len(h.sessionErrors(t)); n != 0 {
+		t.Errorf("session errors = %d, want none: nothing was dialled, so neither of "+
+			"the wire's two failures happened", n)
+	}
+}
+
+// Once a connection has been answered 401 the MCP client wraps
+// mcp.ErrUnauthorized around whatever it fails with next, so an error can carry
+// a refusal and a cancellation at once. The refusal is a verdict the server
+// earned however the pass then ended — deciding on the clock first would discard
+// it and tell the operator nothing.
+func TestACredentialRefusedOnTheWayToTheDeadlineIsStillARefusal(t *testing.T) {
+	dead, cancel := context.WithCancel(context.Background())
+	cancel()
+	row := catalogRow{name: "docs", url: "https://example.test/mcp", status: "failed"}
+
+	got := failedDial(dead, row, fmt.Errorf("%w: %w", mcp.ErrUnauthorized, context.DeadlineExceeded))
+	if got.notReached {
+		t.Error("a credential the server refused was written off as the pass's own scheduling")
+	}
+	if !got.authentication {
+		t.Errorf("row = %+v, want the refusal typed as an authentication failure", got)
+	}
+}
+
+// A row left behind at an endpoint the server no longer sits at has been
+// announced about a different server, so it must not silence the first failure
+// of the current one. Every other row decision in the file compares the url;
+// the dedupe does too.
+func TestAFailureAtANewEndpointIsAnnouncedPastAStaleRow(t *testing.T) {
+	down := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "no", http.StatusInternalServerError)
+	}))
+	defer down.Close()
+
+	h := mcpHarness(t)
+	h.declareMCPServers(t, [2]string{"github", down.URL})
+	// The row an earlier pass wrote, for the endpoint this server used to be at.
+	if _, err := h.pool.Exec(context.Background(),
+		`INSERT INTO mcp_catalogs (session_id, server_name, url, tools, status, error, fetched_at)
+		 VALUES ($1, 'github', 'https://old.example/mcp', '[]'::jsonb, 'failed', 'gone', now())`,
+		h.sid.String()); err != nil {
+		t.Fatalf("seed the stale row: %v", err)
+	}
+	h.enqueueMCP(t)
+
+	h.stepOnce(t)
+
+	if n := len(h.errorsOfType(t, "mcp_connection_failed_error")); n != 1 {
+		t.Errorf("session errors = %d, want the new endpoint's failure said out loud "+
+			"even though a row for the old one was already there", n)
 	}
 }

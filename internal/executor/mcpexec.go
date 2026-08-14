@@ -803,7 +803,7 @@ type mcpFailure struct {
 // carries on. `exhausted` is likewise the brain's ("this turn is dead; queued
 // inputs are flushed"), not a tool call's. So `retrying` is the only variant that
 // does not assert something this platform will then contradict, and it is true on
-// its own terms: every turn re-attempts a failed server. Plan 29's own reading of
+// its own terms: every work cycle re-attempts a failed server. Plan 29's own reading of
 // the union — terminal for a refusal — was measured against these three doc
 // comments and dropped (docs/DIVERGENCES.md).
 func mcpFailureEvent(server string, f mcpFailure) (events.NewEvent, error) {
