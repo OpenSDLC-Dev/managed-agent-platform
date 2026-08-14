@@ -9,6 +9,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
@@ -17,6 +18,7 @@ import (
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/mcp"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/queue"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/toolset"
+	"github.com/jackc/pgx/v5"
 	"go.opentelemetry.io/otel/codes"
 )
 
@@ -73,10 +75,17 @@ type catalogRow struct {
 	// nothing holds a server's unbounded text and the settlement stores it as it
 	// stands.
 	reason string
-	// notReached marks a row the pass never dialled — the budget ran out first.
+	// notReached marks a row whose failure is this platform's scheduling rather
+	// than the server's: the pass's budget ran out before an answer came back.
 	// Its reason is a fallback rather than a finding, so the settlement keeps
-	// whatever an earlier pass recorded instead.
+	// whatever an earlier pass recorded instead — and it says nothing on the
+	// wire, because there is no connection for an operator to go and heal.
 	notReached bool
+	// authentication picks which of the wire's two failures this row is, on the
+	// same split the execution path uses (mcpFailure): a refused credential is
+	// not a connection that failed, because the connection worked well enough to
+	// be refused. Meaningless on a "ready" row.
+	authentication bool
 }
 
 // processMCP runs one mcp_exec item to completion. It mirrors processWeb — the
@@ -211,38 +220,58 @@ func (e *Executor) discoverServers(ctx context.Context, cfg domain.EnvironmentCo
 	budget, cancel := context.WithTimeout(ctx, e.cfg.MCPPassTimeout)
 	defer cancel()
 
-	var rows []catalogRow
-	for _, s := range servers {
-		// The budget is spent, but the item's own context is alive: the servers
-		// still unreached are this pass's failures, not the item's. They get the
-		// ordinary failed row, which the next turn re-attempts — but the reason
-		// on it does not displace one an earlier pass earned. "Ran out of time"
-		// says what this pass did, and a server that was refused by the egress
-		// policy last turn already has the answer an operator needs; overwriting
-		// that with a scheduling artifact would make the row read as though the
-		// clock were the problem. So this reason is a fallback for a server that
-		// has none yet, applied in the settlement's upsert.
-		if budget.Err() != nil && ctx.Err() == nil {
-			rows = append(rows, catalogRow{name: s.Name, url: s.URL, status: "failed",
-				reason: passRanOutOfTime, notReached: true})
-			continue
-		}
-		row, err := e.discoverServer(budget, cfg, vaultIDs, s)
+	// Every declared server is dialled, and they are dialled at once. Serially,
+	// declaration order decided who got reached: one server that accepts a
+	// connection and never answers spends the whole budget, and the servers
+	// behind it are recorded as unreached on every turn for the life of the
+	// session — so a healthy server three entries down could never enter the
+	// catalog, and the model was never offered its tools. Position is not a
+	// fact about a server, so it must not be what decides.
+	//
+	// The fan-out needs no width of its own: `mcp_servers` is capped at
+	// maxAgentMCPServers entries where it is written (internal/api), and this
+	// pass has already dropped the ones a `ready` row covers, so the wire's cap
+	// is the bound. Nothing here is shared — each goroutine fills its own slot,
+	// and the slot is its declaration's, so the rows the settlement walks are in
+	// declaration order however the dials interleave.
+	//
+	// It bounds the hold as well as the starvation, though it does not remove
+	// it: this pass runs on the one goroutine that takes this host's work items,
+	// so a tarpit server still holds them — but for one server's dial-and-list
+	// rather than the sum of every declared server's, and MCPPassTimeout still
+	// caps that.
+	rows := make([]catalogRow, len(servers))
+	errs := make([]error, len(servers))
+	var wg sync.WaitGroup
+	for i, s := range servers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			rows[i], errs[i] = e.discoverServer(budget, cfg, vaultIDs, s)
+		}()
+	}
+	wg.Wait()
+
+	// A hard error is the item's, not a server's — a pool that blinked, a
+	// listing that would not encode — so it faults the item and throws the pass
+	// away rather than storing a verdict it did not earn. The first one wins;
+	// they are all the same kind of failure and one is enough to fault on.
+	for i, err := range errs {
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("discover mcp server %q: %w", servers[i].Name, err)
 		}
-		rows = append(rows, row)
-		if ctx.Err() != nil {
-			return nil, fmt.Errorf("discover mcp server %q: %w", s.Name, ctx.Err())
-		}
+	}
+	if ctx.Err() != nil {
+		return nil, fmt.Errorf("discover mcp servers: %w", ctx.Err())
 	}
 	return rows, nil
 }
 
-// passRanOutOfTime is the reason a server the pass never got to carries. It is
-// a fallback rather than a verdict — the settlement's upsert keeps a reason an
-// earlier pass earned, because "ran out of time" says what this pass did and
-// would otherwise make a policy refusal read as a scheduling artifact.
+// passRanOutOfTime is the reason a server the pass could not finish with
+// carries. It is a fallback rather than a verdict — the settlement's upsert
+// keeps a reason an earlier pass earned, because "ran out of time" says what
+// this pass did and would otherwise make a policy refusal read as a scheduling
+// artifact.
 const passRanOutOfTime = "this discovery pass ran out of time before reaching the server"
 
 // discoverServer reaches one server.
@@ -306,7 +335,9 @@ func (e *Executor) discoverServer(ctx context.Context, cfg domain.EnvironmentCon
 	}
 	if cerr != nil {
 		if credentialUnusable(cerr) {
-			row.reason = mcpDialReason(cerr)
+			// A credential this platform could not resolve is an authentication
+			// failure that never reached the server — the reference's third arm.
+			row.reason, row.authentication = mcpDialReason(cerr), true
 			return row, nil
 		}
 		// The lookup failed, not the credential. A failed row would blame the
@@ -316,18 +347,34 @@ func (e *Executor) discoverServer(ctx context.Context, cfg domain.EnvironmentCon
 
 	conn, derr := mcp.Connect(ctx, mcp.Config{URL: s.URL, HTTPClient: e.mcpHTTP, BearerToken: token})
 	if derr != nil {
-		row.reason = mcpDialReason(derr)
-		return row, nil
+		return failedDial(row, derr, ctx), nil
 	}
 	defer func() { _ = conn.Close() }()
 
 	tools, lerr := conn.ListTools(ctx)
 	if lerr != nil {
-		row.reason = mcpDialReason(lerr)
-		return row, nil
+		return failedDial(row, lerr, ctx), nil
 	}
 	row.status, row.reason, row.tools = "ready", "", storableTools(tools, token)
 	return row, nil
+}
+
+// failedDial fills in a row for a dial or a listing that did not come back.
+//
+// A budget spent while the request was in flight is this pass's failure and not
+// the server's, so it reads as the scheduling artifact it is rather than as a
+// timeout the server earned — the same verdict a server the pass could not
+// start on gets, and for the same reason: the row is what an operator reads,
+// and "ran out of time" must never displace a finding. The item's own
+// cancellation lands here too and is indistinguishable from the budget's, which
+// costs nothing: discoverServers throws every row away when the item is gone.
+func failedDial(row catalogRow, err error, ctx context.Context) catalogRow {
+	if ctx.Err() != nil {
+		row.reason, row.notReached = passRanOutOfTime, true
+		return row
+	}
+	row.reason, row.authentication = mcpDialReason(err), mcpAuthFailure(err)
+	return row
 }
 
 // storableTools is the catalog's last gate before Postgres: it strips NUL from
@@ -757,10 +804,36 @@ func (e *Executor) settleMCP(ctx context.Context, item *queue.Item, rows []catal
 	for _, s := range agent.MCPServers {
 		declared[s.Name] = s.URL
 	}
+	// What each server's row said before this pass, so a failure is announced
+	// when it starts rather than on every turn that re-attempts it. Read here,
+	// under the session row lock this transaction already holds, so no other
+	// pass for this session can be between the read and the upsert.
+	failing, err := failingServers(ctx, tx, item.SessionID)
+	if err != nil {
+		return err
+	}
 
+	var failures []events.NewEvent
 	for _, r := range rows {
 		if declared[r.name] != r.url {
 			continue
+		}
+		// A server the platform could not reach is said out loud, once. Not the
+		// rows this pass simply did not finish with: those are its own
+		// scheduling, and there is no connection behind them for an operator to
+		// go and heal. Not a repeat, either — the pass runs every turn, so a
+		// server that has been down for an hour would otherwise fill the log
+		// with the same line; the row carries the current reason for anyone who
+		// looks. A row that healed is never re-dialled (undiscoveredServers
+		// skips a `ready` one), so the only transition this can miss is a
+		// failure that changes kind mid-run, which the row still records.
+		if r.status == "failed" && !r.notReached && !failing[r.name] {
+			ev, err := mcpFailureEvent(r.name, mcpFailure{
+				message: r.reason, authentication: r.authentication})
+			if err != nil {
+				return err
+			}
+			failures = append(failures, ev)
 		}
 		toolsJSON, err := json.Marshal(r.tools)
 		if err != nil {
@@ -782,6 +855,14 @@ func (e *Executor) settleMCP(ctx context.Context, item *queue.Item, rows []catal
 			item.SessionID.String(), r.name, r.url, string(toolsJSON), r.status, reason,
 			r.notReached); err != nil {
 			return fmt.Errorf("write mcp catalog for %q: %w", r.name, err)
+		}
+	}
+	if len(failures) > 0 {
+		// In this transaction, so a server's row and the line about it commit
+		// together or not at all, and the stream notify fires on the same commit.
+		if _, err := e.log.AppendInTx(ctx, tx, item.SessionID, failures,
+			events.AppendOptions{}); err != nil {
+			return fmt.Errorf("append mcp discovery failures: %w", err)
 		}
 	}
 	// An MCP call outstanding takes this item back rather than completing it,
@@ -825,4 +906,26 @@ func (e *Executor) settleMCP(ctx context.Context, item *queue.Item, rows []catal
 		return err
 	}
 	return tx.Commit(ctx)
+}
+
+// failingServers is the set of a session's MCP servers whose catalog row already
+// records a failure, which is what keeps a discovery failure from being
+// announced again on every turn that re-attempts it.
+func failingServers(ctx context.Context, tx pgx.Tx, sid domain.ID) (map[string]bool, error) {
+	rows, err := tx.Query(ctx,
+		`SELECT server_name FROM mcp_catalogs WHERE session_id = $1 AND status = 'failed'`,
+		sid.String())
+	if err != nil {
+		return nil, fmt.Errorf("read mcp catalog statuses: %w", err)
+	}
+	defer rows.Close()
+	failing := map[string]bool{}
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			return nil, fmt.Errorf("read mcp catalog statuses: %w", err)
+		}
+		failing[name] = true
+	}
+	return failing, rows.Err()
 }
