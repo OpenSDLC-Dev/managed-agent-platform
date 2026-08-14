@@ -38,12 +38,12 @@ var ErrUnauthorized = errors.New("the server refused the credential")
 // whether any exchange came back 401 or 403, so an error raised anywhere
 // downstream of one can be marked as an authentication failure.
 //
-// The flag spans an operation, not a request and not the connection. A single
-// operation is several exchanges and a failure surfaces at whichever of them the
-// SDK gave up on, which need not be the refused one — so it cannot be per
-// request. But a 401 the SDK recovered from would otherwise answer for every
-// later error on the same connection, so each operation clears it before it
-// begins (see [authWatch.reset]) and the flag then answers only for that one.
+// The flag answers for the connection's most recent exchange, within an
+// operation. A failure surfaces at whichever exchange the SDK gave up on, which
+// need not be the refused one, so the flag cannot be per request; but a refusal
+// the SDK recovered from must not speak for what failed afterwards, so each
+// response replaces the last and each operation clears the flag before it
+// begins (see [authWatch.reset]).
 type authWatch struct {
 	base http.RoundTripper
 	seen atomic.Bool
@@ -65,9 +65,24 @@ func (w *authWatch) RoundTrip(req *http.Request) (*http.Response, error) {
 	}
 	resp, err := base.RoundTrip(req)
 	// A transport error and a response can arrive together; the status is worth
-	// recording whenever there is one to read.
-	if resp != nil && (resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden) {
-		w.seen.Store(true)
+	// reading whenever there is one.
+	//
+	// The latest answer replaces the one before it rather than joining it. An
+	// operation is several exchanges and the SDK recovers from some of them — it
+	// opens with `server/discover` and falls back to the legacy `initialize` on
+	// any error there — so a refused probe followed by a 500 is a connection
+	// that failed, not a credential that was refused, and a flag that only ever
+	// rose would report the wrong one.
+	//
+	// A DELETE is not one of those exchanges. It is the streamable transport's
+	// session teardown, sent after the operation has already failed, and letting
+	// its status answer for the operation would erase the refusal that caused
+	// the teardown — which is exactly what it did. What no status can speak for
+	// is an exchange that produced no response at all, so an operation also
+	// clears the flag before it begins (see [authWatch.reset]).
+	if resp != nil && req.Method != http.MethodDelete {
+		w.seen.Store(resp.StatusCode == http.StatusUnauthorized ||
+			resp.StatusCode == http.StatusForbidden)
 	}
 	return resp, err
 }

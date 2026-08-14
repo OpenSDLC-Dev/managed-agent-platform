@@ -265,6 +265,24 @@ func TestARecoveredRefusalDoesNotSpeakForALaterFailure(t *testing.T) {
 			t.Errorf("a refusal the handshake recovered from was reported as this listing's: %v", err)
 		}
 	})
+
+	// The one an operation-scoped reset cannot reach: both exchanges are inside
+	// the same Connect, so nothing clears the flag between them.
+	t.Run("inside the handshake that recovered from it", func(t *testing.T) {
+		conn, err := mcp.Connect(context.Background(), mcp.Config{
+			URL: serveThenFailing(t, map[string]int{
+				"server/discover": http.StatusUnauthorized,
+				"initialize":      http.StatusInternalServerError,
+			}),
+			HTTPClient: &http.Client{}, BearerToken: "tok"})
+		if err == nil {
+			_ = conn.Close()
+			t.Fatal("expected the handshake to fail")
+		}
+		if errors.Is(err, mcp.ErrUnauthorized) {
+			t.Errorf("a 500 that followed a recovered 401 was reported as a refused credential: %v", err)
+		}
+	})
 }
 
 // connectRefusingDiscovery opens a connection to a server that refuses the

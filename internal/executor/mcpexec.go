@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"slices"
 	"time"
@@ -134,7 +135,21 @@ func (e *Executor) runMCPTools(ctx context.Context, cfg domain.EnvironmentConfig
 			var runErr error
 			res, failure, runErr = e.runMCPTool(ctx, cfg, vaultIDs, endpoint, u)
 			if runErr != nil {
-				return out, runErr, nil
+				// A call this pass could not even attempt, for a reason that is
+				// not the server's. If earlier calls in the pass were answered,
+				// this leaves like a spent budget rather than like a fault: their
+				// answers are committed and the item comes back for the rest,
+				// because faulting would drop those answers on the floor and a
+				// tool with a side effect would run a second time. With nothing
+				// answered there is nothing to protect, so it faults — which
+				// retries at the lease's pace rather than immediately, and is the
+				// arm a persistently failing lookup settles into.
+				if len(out) == 0 {
+					return nil, runErr, nil
+				}
+				slog.ErrorContext(ctx, "executor: mcp pass cut short, its answers committed",
+					"tool_use", u.id, "tool", u.name, "error", runErr)
+				break
 			}
 		}
 		// One label value for every MCP call, rather than the call's own name.

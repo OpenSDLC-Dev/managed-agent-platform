@@ -10,6 +10,7 @@ import (
 	"net/http/httputil"
 	neturl "net/url"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 
@@ -281,6 +282,71 @@ func TestMCPCallWithAFailedCredentialLookupFaultsRatherThanAnswers(t *testing.T)
 	}
 }
 
+// The other half of the same rule: a pass that already answered a call must not
+// throw that answer away to fault. An MCP tool can have a side effect, and a
+// discarded result is one the reclaim runs a second time.
+func TestMCPPassCommitsWhatItAnsweredBeforeALookupFails(t *testing.T) {
+	h := mcpHarness(t)
+	var breakAfterAnswering func()
+	url := serveInterceptingCalls(t,
+		mcptest.Tool{Name: "ask", Blocks: []mcptest.Block{{Type: "text", Text: "answered"}}},
+		func() { breakAfterAnswering() })
+	h.attachVaultWithMCPCredential(t, url, "tok")
+	// Armed only once the vault row exists, so the credential the first call
+	// resolves is real and only the second call's lookup fails.
+	var once sync.Once
+	breakAfterAnswering = func() { once.Do(func() { h.breakTheCredentialQuery(t) }) }
+
+	h.declareListedMCPServers(t, [2]string{"docs", url})
+	h.appendMCPToolUse(t, "docs", "ask", `{}`)
+	h.appendMCPToolUse(t, "docs", "ask", `{}`)
+	h.enqueueMCP(t)
+
+	var faulted error
+	h.exec.onFault = func(_ *queue.Item, err error) { faulted = err }
+	h.stepOnce(t)
+
+	if faulted != nil {
+		t.Errorf("the item faulted and discarded the answer it had: %v", faulted)
+	}
+	if results := h.mcpResults(t); len(results) != 1 {
+		t.Fatalf("got %d results, want the one call that was answered committed", len(results))
+	}
+	if n := h.liveOf(t, queue.MCPExec); n != 1 {
+		t.Errorf("live mcp_exec items = %d, want the item back for the call it could not make", n)
+	}
+}
+
+// serveInterceptingCalls runs `after` once each tool call has been served, so a
+// test can change the world between two calls of one pass.
+func serveInterceptingCalls(t *testing.T, tool mcptest.Tool, after func()) string {
+	t.Helper()
+	inner := mcptest.Server(t, tool)
+	target, err := neturl.Parse(inner)
+	if err != nil {
+		t.Fatal(err)
+	}
+	proxy := httputil.NewSingleHostReverseProxy(target)
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Errorf("read body: %v", err)
+			return
+		}
+		var msg struct {
+			Method string `json:"method"`
+		}
+		_ = json.Unmarshal(body, &msg)
+		r.Body = io.NopCloser(bytes.NewReader(body))
+		proxy.ServeHTTP(w, r)
+		if msg.Method == "tools/call" {
+			after()
+		}
+	}))
+	t.Cleanup(ts.Close)
+	return ts.URL
+}
+
 // Discovery decides it the same way. A failed row would blame the credential in
 // a stored column an operator reads later, for a failure that was never the
 // credential's.
@@ -380,6 +446,25 @@ func TestMCPCallDoesNotStoreATokenTheServerQuotedBack(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// The three redactions are ordered, and the secret goes last: the two before it
+// substitute text *in*, so a token the endpoint pass happens to write back would
+// survive a scrub that ran first.
+func TestStorableReasonScrubsASecretItsOwnRedactionWouldPutBack(t *testing.T) {
+	// Declared with an upper-case scheme, which url.Parse lowercases — so the
+	// safe form the endpoint pass writes contains text the declared bytes do
+	// not. A token scrubbed before that pass is a token the pass can put back.
+	const endpoint = "HTTPS://mcp.example.com/rpc"
+	// Absurd as a bearer token, and that is the point: the ordering has to hold
+	// for any token rather than for the likely ones.
+	const token = "https"
+
+	got := storableReason("dialling "+endpoint+" failed", endpoint, token)
+
+	if strings.Contains(got, token) {
+		t.Errorf("reason = %q, still carries the token", got)
 	}
 }
 

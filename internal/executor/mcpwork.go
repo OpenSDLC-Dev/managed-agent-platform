@@ -456,8 +456,16 @@ var urlInText = regexp.MustCompile(`(?i)https?://[^\s<>]+`)
 // is not in the endpoint, so no rendering of the endpoint covers it, and it is
 // nowhere at rest in the clear — the vault holds it sealed. A server that reads
 // its own Authorization header can quote it back in a JSON-RPC error message,
-// which the SDK preserves. So callers pass it in `secrets` and it is replaced
-// first, wherever it is known.
+// which the SDK preserves. So callers pass it in `secrets`.
+//
+// It is replaced *last* of the three redactions, because the two before it
+// substitute text in: a rendering's safe form is a URL, and a token that happens
+// to be a substring of one — `https`, a host name — would be put back by the
+// very pass that redacts the endpoint. Nothing after it inserts anything, so
+// last is the only position that holds. What no ordering reaches is a server
+// that transforms the token before quoting it — percent-encoded, base64'd, cut
+// in half — which is the same residue the endpoint's own pass leaves, and no
+// rule over text closes it.
 //
 // Then NUL, for the reason storableTools gives, and then UTF-8 twice, for two
 // different reasons. Postgres rejects an invalid byte sequence on a text column
@@ -468,15 +476,15 @@ var urlInText = regexp.MustCompile(`(?i)https?://[^\s<>]+`)
 // and once more after the cap, because cutting a byte slice mid-rune produces
 // the same invalid sequence out of input that was clean.
 func storableReason(reason, endpoint string, secrets ...string) string {
+	for _, form := range endpointRenderings(endpoint) {
+		reason = strings.ReplaceAll(reason, form.text, form.safe)
+	}
+	reason = urlInText.ReplaceAllStringFunc(reason, redactURL)
 	for _, secret := range secrets {
 		if secret != "" {
 			reason = strings.ReplaceAll(reason, secret, "***")
 		}
 	}
-	for _, form := range endpointRenderings(endpoint) {
-		reason = strings.ReplaceAll(reason, form.text, form.safe)
-	}
-	reason = urlInText.ReplaceAllStringFunc(reason, redactURL)
 	reason = toolset.SanitizeText(reason)
 	reason = strings.ToValidUTF8(reason, "")
 	if len(reason) > maxCatalogReason {
