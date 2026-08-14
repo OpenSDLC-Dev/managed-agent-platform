@@ -94,21 +94,7 @@ func (s *mcpSpiller) write(ctx context.Context, id domain.ID, content []mcp.Cont
 	if !lost || s.failed || s.sess.envConfig.Type != domain.EnvCloud {
 		return ""
 	}
-	// One cheap pass: an image or a blob is bytes no text file can carry, and
-	// pointing a model at a file of nothing but sentences saying so would be a
-	// promise about content that is not there.
-	spillable := false
-	for _, c := range content {
-		switch c.Type {
-		case "text", "resource":
-			spillable = spillable || c.Text != ""
-		case "resource_link", "audio":
-			// Described rather than carried inline too, so the file holds
-			// exactly what the answer would have read as here.
-			spillable = true
-		}
-	}
-	if !spillable {
+	if !spillableText(content) {
 		return ""
 	}
 	// Nothing this pass writes will be committed once its lease context is dead
@@ -133,6 +119,45 @@ func (s *mcpSpiller) write(ctx context.Context, id domain.ID, content []mcp.Cont
 	// it somewhere this file does not go. The path convention is shared; the
 	// sentence says what is true of each.
 	return "[the full text of this answer was written to " + path + "]"
+}
+
+// spillableText reports whether the file mcpAnswerText would write holds any of
+// the answer itself, rather than only this platform's sentences about the parts
+// of it a text file cannot carry. One cheap pass over the server's content,
+// asking exactly what the writer will answer — pointing a model at a file of
+// nothing but "which is not in this file" would be a promise about content that
+// is not in it.
+//
+// It has to test what the writer tests, in the order the writer tests it. A
+// resource carrying bytes is written as the sentence naming them whatever text
+// it also carries, because that is the order resourceBlock reads it in and the
+// file may not describe a block differently from the answer; asking on the text
+// alone would call a blob-with-an-extraction spillable and then write a file
+// holding neither the bytes nor the text. And text is measured sanitized,
+// because that is what the file would hold: a block of nothing but NUL bytes is
+// text the server sent and nothing this can write.
+//
+// The go-sdk refuses to *marshal* a resource carrying both text and a blob, so a
+// server built on it cannot send one — but nothing checks it on the way in, so a
+// server built on anything else can.
+func spillableText(content []mcp.Content) bool {
+	for _, c := range content {
+		switch c.Type {
+		case "text":
+			if toolset.SanitizeText(c.Text) != "" {
+				return true
+			}
+		case "resource":
+			if len(c.Data) == 0 && toolset.SanitizeText(c.Text) != "" {
+				return true
+			}
+		case "resource_link", "audio":
+			// Described rather than carried inline too, so the file holds
+			// exactly what the answer would have read as here.
+			return true
+		}
+	}
+	return false
 }
 
 // sandbox is the session's sandbox if it has a running one on this endpoint, and

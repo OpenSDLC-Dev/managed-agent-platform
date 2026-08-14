@@ -231,6 +231,16 @@ func (p *fakeProvider) Provision(ctx context.Context, spec sandbox.Spec) (sandbo
 	p.mu.Lock()
 	p.calls = append(p.calls, "provision")
 	delete(p.destroyed, spec.SessionID)
+	// A provisioned session has a running sandbox, so Attach finds one — the
+	// fake's lifecycle must not say the opposite of a real provider's, or a
+	// test that provisions and then spills would exercise a state production
+	// never reaches.
+	if p.provisionErr == nil {
+		if p.running == nil {
+			p.running = map[domain.ID]bool{}
+		}
+		p.running[spec.SessionID] = true
+	}
 	p.mu.Unlock()
 	if p.entered != nil {
 		select {
@@ -285,6 +295,7 @@ func (p *fakeProvider) Reap(_ context.Context, sid domain.ID) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.calls = append(p.calls, "reap")
+	delete(p.running, sid)
 	if sid == p.reapFailFor && sid != "" {
 		return errors.New("daemon unreachable")
 	}

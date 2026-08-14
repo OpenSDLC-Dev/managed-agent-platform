@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/mcp"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/mcp/mcptest"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/toolset"
 )
@@ -80,8 +81,10 @@ func TestMCPOversizedAnswerSpillsToTheSandbox(t *testing.T) {
 	if n := len(blocksOf(t, results[0])); n != 2 {
 		t.Errorf("blocks = %d, want the truncated answer plus the notice", n)
 	}
-	if text := blockText(t, results[0]); len(text) > 2*toolset.MaxOutputBytes {
-		t.Errorf("answer text is %d bytes, want it truncated to the budget", len(text))
+	// The truncated answer plus the notice, and nothing like the whole of what
+	// the server sent: a loose bound here would admit an untruncated answer.
+	if text := blockText(t, results[0]); len(text) > toolset.MaxOutputBytes+512 {
+		t.Errorf("answer text is %d bytes, want it held to the %d-byte budget", len(text), toolset.MaxOutputBytes)
 	}
 	if results[0]["is_error"] == true {
 		t.Errorf("is_error = true, want a spilled answer to stay an ordinary answer")
@@ -596,5 +599,84 @@ func TestMCPSpillDescribesAResourceTheWayTheAnswerDid(t *testing.T) {
 	}
 	if strings.Contains(got, "an extraction of the bytes") {
 		t.Errorf("spill file holds the resource's text where the answer carried its bytes")
+	}
+}
+
+// An answer that is one oversized blob loses that block and spills nothing: the
+// file would hold only the line saying the bytes are elsewhere, and a notice
+// promising the answer's text over that is a promise about content that is not
+// in it. (The blob-plus-extraction shape is asserted in
+// TestSpillableTextAsksWhatTheWriterAnswers, which mcptest cannot build.)
+func TestMCPOversizedBlobResourceSpillsNothing(t *testing.T) {
+	url := mcptest.Server(t, mcptest.Tool{Name: "read", Blocks: []mcptest.Block{
+		// application/pdf so the bytes are actually carried (a base64 document
+		// source) and the block overruns, rather than being described in one
+		// short sentence that loses nothing.
+		{Type: "resource", URI: "file:///big.pdf", MIMEType: "application/pdf",
+			Data: []byte(strings.Repeat("b", toolset.MaxOutputBytes+5_000))},
+	}})
+	h := mcpHarness(t)
+	h.hasSandbox()
+	h.declareListedMCPServers(t, [2]string{"docs", url})
+	useID := h.appendMCPToolUse(t, "docs", "read", `{}`)
+	h.enqueueMCP(t)
+
+	h.stepOnce(t)
+
+	results := h.mcpResults(t)
+	if len(results) != 1 {
+		t.Fatalf("results = %v, want one", results)
+	}
+	text := blockText(t, results[0])
+	if !strings.Contains(text, "content block(s) of this answer were dropped") {
+		t.Fatalf("this answer was expected to lose its block; it did not: %.200q", text)
+	}
+	if got, ok := h.prov.sb.files["/tmp/tool_outputs/"+useID+".txt"]; ok {
+		t.Errorf("spill file holds %d bytes, want none — the file would carry none of the answer", len(got))
+	}
+	if strings.Contains(text, "/tmp/tool_outputs/") {
+		t.Errorf("the model was pointed at a file holding none of its answer: %.200q", text)
+	}
+}
+
+// What the file would hold, block shape by block shape. Two of these cannot be
+// built through mcptest and so are asserted here rather than through the driver:
+// the go-sdk refuses to marshal a resource carrying both text and a blob, so no
+// server built on it can send one — and nothing checks that on the way in, so a
+// server built on anything else can.
+func TestSpillableTextAsksWhatTheWriterAnswers(t *testing.T) {
+	blob := []byte("the bytes themselves")
+	for _, row := range []struct {
+		name    string
+		content []mcp.Content
+		want    bool
+	}{
+		{"a text block", []mcp.Content{{Type: "text", Text: "hello"}}, true},
+		{"a text block of nothing but NULs", []mcp.Content{{Type: "text", Text: "\x00\x00"}}, false},
+		{"an image", []mcp.Content{{Type: "image", MIMEType: "image/png", Data: blob}}, false},
+		{"a text resource", []mcp.Content{
+			{Type: "resource", URI: "file:///a.txt", Text: "a body"}}, true},
+		{"a blob resource", []mcp.Content{
+			{Type: "resource", URI: "file:///a.pdf", MIMEType: "application/pdf", Data: blob}}, false},
+		// The writer names the bytes and omits the text, so the file would hold
+		// none of the answer — the shape the two must not disagree about.
+		{"a resource carrying both bytes and text", []mcp.Content{
+			{Type: "resource", URI: "file:///a.pdf", MIMEType: "application/pdf",
+				Text: "an extraction of the bytes", Data: blob}}, false},
+		{"a resource link", []mcp.Content{
+			{Type: "resource_link", URI: "file:///a.md", MIMEType: "text/markdown"}}, true},
+		{"an audio clip", []mcp.Content{{Type: "audio", MIMEType: "audio/wav", Data: blob}}, true},
+		// The verifier's shape: an answer that really lost a block, whose only
+		// text is unwritable.
+		{"an oversized image beside a NUL-only text block", []mcp.Content{
+			{Type: "image", MIMEType: "image/png", Data: blob},
+			{Type: "text", Text: "\x00"}}, false},
+		{"nothing at all", nil, false},
+	} {
+		t.Run(row.name, func(t *testing.T) {
+			if got := spillableText(row.content); got != row.want {
+				t.Errorf("spillableText = %v, want %v", got, row.want)
+			}
+		})
 	}
 }
