@@ -167,16 +167,21 @@ func (r Runner) spill(ctx context.Context, id domain.ID, full string) string {
 	if len(full) <= MaxOutputBytes {
 		return ""
 	}
-	path, ok := SpillFile(ctx, r.Sandbox, id, full)
-	if !ok {
+	path, err := SpillFile(ctx, r.Sandbox, id, full)
+	if err != nil {
 		return ""
 	}
 	return "[output truncated; full output written to " + path + "]"
 }
 
 // SpillFile writes one call's oversized output to the sandbox and returns the
-// path, or false when the write failed. It is the half of spill that decides
-// *where*, without the budget test or the notice.
+// path, or the error the sandbox refused the write with. It is the half of spill
+// that decides *where*, without the budget test or the notice.
+//
+// It hands back the error rather than a bool because the sandbox classifies the
+// refusal (ErrNotFound, ErrNotDirectory, ErrNotWritable) and that classification
+// is the only account of why no file exists — this package logs nothing, by
+// design, so a caller that runs on a shared process is where it can be said.
 //
 // Exported for the executor's MCP driver (plan 29 slice 4c), which spills to the
 // same directory under the same id-per-call convention — so a model that has
@@ -186,12 +191,12 @@ func (r Runner) spill(ctx context.Context, id domain.ID, full string) string {
 // promising the full output, and it spills on a trigger of its own — whether the
 // rendering lost anything, which a length test cannot answer for an answer made
 // of blocks — so it cannot borrow the budget test either.
-func SpillFile(ctx context.Context, sb sandbox.Sandbox, id domain.ID, full string) (string, bool) {
+func SpillFile(ctx context.Context, sb sandbox.Sandbox, id domain.ID, full string) (string, error) {
 	path := spillDir + "/" + id.String() + ".txt"
 	if err := sb.WriteFile(ctx, path, []byte(full)); err != nil {
-		return "", false
+		return "", err
 	}
-	return path, true
+	return path, nil
 }
 
 // SanitizeText strips NUL bytes from tool output. Postgres's jsonb cannot

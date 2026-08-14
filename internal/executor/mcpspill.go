@@ -109,8 +109,12 @@ func (s *mcpSpiller) write(ctx context.Context, id domain.ID, content []mcp.Cont
 	if sb == nil {
 		return ""
 	}
-	path, ok := toolset.SpillFile(ctx, sb, id, mcpAnswerText(content))
-	if !ok {
+	path, err := toolset.SpillFile(ctx, sb, id, mcpAnswerText(content))
+	if err != nil {
+		// The one account of why the model was given no path: the sandbox's own
+		// classification of the refusal, which nothing else records.
+		slog.WarnContext(ctx, "mcp answer not spilled: write failed",
+			"session_id", s.sid.String(), "error", err)
 		s.failed = true
 		return ""
 	}

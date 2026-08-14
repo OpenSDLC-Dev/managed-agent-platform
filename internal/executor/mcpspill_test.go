@@ -574,31 +574,26 @@ func TestMCPTruncatedResourceBodySpills(t *testing.T) {
 // inline rendering reads the blob: a document the model can open beats an
 // extracted text it cannot check. The spill file has to read it the same way, or
 // the file and the answer describe one block differently and a model reconciling
-// them is told two things.
+// them is told two things. So both renderings are asserted here, against the one
+// block, and neither may take the other's arm.
+//
+// Built by hand rather than driven through mcptest, whose server sends a
+// resource's blob or its text and never both — the go-sdk refuses to marshal one
+// carrying both, so no server built on it can send this shape, and nothing
+// checks that on the way in, so a server built on anything else can.
 func TestMCPSpillDescribesAResourceTheWayTheAnswerDid(t *testing.T) {
-	huge := strings.Repeat("a", toolset.MaxOutputBytes+5_000)
-	url := mcptest.Server(t, mcptest.Tool{Name: "read", Blocks: []mcptest.Block{
-		{Type: "text", Text: huge},
-		{Type: "resource", URI: "file:///both.bin", MIMEType: "application/octet-stream",
-			Text: "an extraction of the bytes", Data: []byte("the bytes themselves")},
-	}})
-	h := mcpHarness(t)
-	h.hasSandbox()
-	h.declareListedMCPServers(t, [2]string{"docs", url})
-	useID := h.appendMCPToolUse(t, "docs", "read", `{}`)
-	h.enqueueMCP(t)
+	both := mcp.Content{Type: "resource", URI: "file:///both.bin",
+		MIMEType: "application/octet-stream",
+		Text:     "an extraction of the bytes", Data: []byte("the bytes themselves")}
+	const bytesAt = "The tool returned 20 bytes of application/octet-stream at file:///both.bin, "
 
-	h.stepOnce(t)
-
-	got := h.prov.sb.files["/tmp/tool_outputs/"+useID+".txt"]
-	want := "The tool returned 20 bytes of application/octet-stream at file:///both.bin, " +
-		"which is not in this file."
-	if !strings.Contains(got, want) {
-		t.Errorf("spill file describes the resource as %.200q, want it read as the answer read it: %q",
-			got[len(got)-min(len(got), 200):], want)
+	answer, _ := resourceBlock(both)["text"].(string)
+	if want := bytesAt + "which cannot be shown here."; answer != want {
+		t.Errorf("the answer describes the resource as %q, want %q", answer, want)
 	}
-	if strings.Contains(got, "an extraction of the bytes") {
-		t.Errorf("spill file holds the resource's text where the answer carried its bytes")
+	if spilled := mcpAnswerText([]mcp.Content{both}); spilled != bytesAt+"which is not in this file." {
+		t.Errorf("the spill file describes the resource as %q, want it read as the answer read it: %q",
+			spilled, bytesAt+"which is not in this file.")
 	}
 }
 
