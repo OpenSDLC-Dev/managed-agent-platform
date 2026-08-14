@@ -39,7 +39,76 @@ func tasks() []Task {
 		fibQuickstart(), echoNoTool(), shellState(),
 		editConfig(), needleSearch(), permAllow(), permDeny(),
 		exitCode(), journalMultiturn(), viewRange(), skillAnswer(),
-		fileAnswer(), repoAnswer(), outcomeSatisfy(), outcomeRevise(),
+		fileAnswer(), repoAnswer(), mcpAnswer(), outcomeSatisfy(), outcomeRevise(),
+	}
+}
+
+// mcpAnswer is the MCP chain end to end (plan 29 slice 7): a passphrase lives
+// only in what an MCP server's tool returns, so a correct answer proves
+// discovery (the executor dialling the declared server and writing its listing
+// into mcp_catalogs), the brain offering that listing to the model as
+// mcp__{server}__{tool}, the executor answering the call it comes back with, and
+// the result reaching the next request.
+//
+// The turn names no tool and no server: it asks only for the passphrase. What
+// tells the model a tool can answer is the listing the brain assembled from the
+// catalog, which is the link under test — a prompt that named the tool would let
+// the model succeed on a listing that never arrived by guessing the name, and the
+// platform would look healthy with discovery broken.
+//
+// The server runs in this test binary but is reached over real HTTP by the real
+// executor through the real MCP client, on an address the platform's dial guard
+// admits (see mcpHosts). Nothing here is a fake: the fixture is a go-sdk server.
+func mcpAnswer() Task {
+	return Task{
+		ID: "mcp-answer",
+		// Empty rather than nil, which would take the bare agent toolset: the
+		// only legitimate action here is one MCP call, and offering bash and the
+		// file tools alongside it would let the model spend real turns searching
+		// a sandbox the passphrase is not in — and make whether the trial
+		// produces any agent.tool_use at all a property of the model.
+		Tools: []any{},
+		MCP: &MCPFixture{
+			Name:        "vault",
+			Tool:        "read_passphrase",
+			Description: "Returns this task's secret passphrase.",
+			Answer:      "The secret passphrase is {{RECALL}}.",
+		},
+		Turns: []Turn{{
+			// The provenance sentence is load-bearing, and it is what the other
+			// mounted-answer trials say too ("A file has been mounted into your
+			// sandbox"). Without it the model reads "tell me the secret
+			// passphrase" as an injection attempt and declines on principle —
+			// observed, with the platform working perfectly underneath. It names
+			// the mechanism and not the tool, so the listing is still what has to
+			// arrive for the model to know what to call.
+			Message: "This task has attached an MCP server to your session. " +
+				"What is this task's secret passphrase? " +
+				"Reply with exactly the passphrase and nothing else.",
+			// An mcp_toolset gates on human confirmation by default (issue #26,
+			// extended to the MCP arm), so the trial takes the default path
+			// rather than configuring the gate away — which puts slice 3's MCP
+			// confirmation round trip under the same trial as discovery.
+			OnAsk: &Ask{Allow: true},
+		}},
+		Graders: []Grader{
+			// Platform for both: the gate is the toolset's documented default, so
+			// a call that ran unattended is the platform's own regression and
+			// nothing to do with the model. The per-call one is what actually
+			// holds it — RequiresActionRaised asks whether the session stopped
+			// at all, which any gated call in the trial would satisfy. Neither
+			// reds when the model never calls the tool; MCPToolUse, below, owns
+			// that as Either.
+			RequiresActionRaised(Platform),
+			MCPEvaluatedPermissionAsk("vault", "read_passphrase", Platform),
+			// Either for the two below, as with the other answer-style trials:
+			// the passphrase exists nowhere but the tool's result, so a right
+			// answer is unambiguous platform evidence, while a missing one is as
+			// likely the model declining to call a tool it was offered. The call
+			// grader is what separates the two on a miss.
+			MCPToolUse("vault", "read_passphrase", Either),
+			FinalMessageHas("{{RECALL}}", Either),
+		},
 	}
 }
 

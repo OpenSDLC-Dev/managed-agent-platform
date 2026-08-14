@@ -4,12 +4,14 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"net"
 	"os/exec"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/mcp/mcptest"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/sandbox"
 )
 
@@ -77,12 +79,86 @@ type Task struct {
 	// runs and the brain injects the Mounted-repositories block. Its url and
 	// token come from the environment, never from the task (see RepoFixture).
 	Repo *RepoFixture
+	// MCP, when set, stands up an in-process MCP server before the agent is
+	// created and declares it on the agent's mcp_servers, with an mcp_toolset
+	// naming it. Exercises the whole MCP chain — discovery into mcp_catalogs, the
+	// brain offering the listing as mcp__{server}__{tool}, the executor answering
+	// the call, and the answer reaching the model.
+	MCP *MCPFixture
 	// Turns are the user messages, sent one at a time; each waits for the
 	// session to go idle before the next is sent.
 	Turns []Turn
 	// Graders run after the last turn. The core pack (see grade_test.go) is
 	// prepended to every task's list.
 	Graders []Grader
+}
+
+// MCPFixture is one MCP server the trial serves itself. Answer is the text its
+// single tool returns; {{RECALL}} is substituted, so a task can put the answer
+// somewhere reachable only by calling the tool.
+//
+// One server and one tool: the chain under test is whether a declared server's
+// tools reach the model and its answer comes back, and a second of either would
+// exercise the same path twice.
+type MCPFixture struct {
+	Name        string
+	Tool        string
+	Description string
+	Answer      string
+}
+
+// mcpHosts lists the addresses of this machine an MCP fixture can listen on and
+// the platform will dial back, best first.
+//
+// Not loopback, which is where httptest listens and where every other fixture in
+// this suite is reached: the executor dials MCP servers with its own guarded
+// client (internal/dialguard), and that guard refuses loopback because the
+// platform's own surfaces live there. So the fixture moves to an interface
+// address instead.
+//
+// Private-range first and then any other admitted address, because that is the
+// order of preference and not the rule: the guard refuses only loopback,
+// link-local, unspecified and multicast, so a machine whose sole address is
+// public or CGNAT — a cloud VM with no private network, a Tailscale-only host —
+// has somewhere the fixture can serve and the trial should use it. The
+// passphrase it serves is a per-trial nonce that means nothing anywhere else.
+//
+// IPv4 only, and that is a platform rule rather than a preference:
+// egress.ValidateHostEntry refuses any host carrying a colon (plan 29 slice 6a),
+// so an MCP endpoint at an IPv6 literal is one whose sandbox the gate would
+// never be widened for, and a trial built on one would exercise a shape the
+// platform itself declines.
+//
+// A machine with no such address fails the trial rather than skipping it: the
+// suite is opt-in already, and a silent skip would read as a passing MCP chain.
+func mcpHosts(t *testing.T) []string {
+	t.Helper()
+	addrs, err := net.InterfaceAddrs()
+	if err != nil {
+		t.Fatalf("list interface addresses: %v", err)
+	}
+	var private, other []string
+	for _, a := range addrs {
+		n, ok := a.(*net.IPNet)
+		if !ok {
+			continue
+		}
+		ip := n.IP.To4()
+		switch {
+		case ip == nil || ip.IsLoopback() || ip.IsLinkLocalUnicast() ||
+			ip.IsLinkLocalMulticast() || ip.IsUnspecified() || ip.IsMulticast():
+		case ip.IsPrivate():
+			private = append(private, ip.String())
+		default:
+			other = append(other, ip.String())
+		}
+	}
+	hosts := append(private, other...)
+	if len(hosts) == 0 {
+		t.Fatal("no IPv4 interface address the platform's dial guard will dial back: " +
+			"an MCP fixture has nowhere to listen")
+	}
+	return hosts
 }
 
 // Seed is a file planted before turn 1. Path may be relative (resolved against
@@ -212,7 +288,16 @@ func runTrial(t *testing.T, s *stack, task Task, rec *record) *Trial {
 			"type": "custom", "skill_id": sid, "version": "latest",
 		})
 	}
-	agentID := s.createAgent(t, agentBody(task, s.model, tr, skillRefs))
+	// Before the agent, which has to name the endpoint it ends up on.
+	var mcpURL string
+	if task.MCP != nil {
+		mcpURL = mcptest.ServeAt(t, mcpHosts(t), mcptest.Tool{
+			Name:        task.MCP.Tool,
+			Description: task.MCP.Description,
+			Result:      tr.fill(task.MCP.Answer),
+		})
+	}
+	agentID := s.createAgent(t, agentBody(task, s.model, tr, skillRefs, mcpURL))
 	envID := s.createEnvironment(t, "eval-"+task.ID)
 	// A repository can only be attached at create — the add endpoint is
 	// file-only — so it is resolved here, where a missing credential fails this
@@ -356,13 +441,21 @@ func (s *stack) driveToIdle(t *testing.T, stream *sseStream, turn Turn, tr *Tria
 // MODEL_ID: the registry's single route sends MODEL_ID upstream whatever the
 // agent says, so any other string here would be a fiction the transcript then
 // records, naming a model the endpoint never saw.
-func agentBody(task Task, model string, tr *Trial, skills []any) map[string]any {
+func agentBody(task Task, model string, tr *Trial, skills []any, mcpURL string) map[string]any {
 	tools := task.Tools
 	if tools == nil {
 		// The bare agent toolset, whose default permission policy runs every
 		// tool unattended. A task that needs a gated toolset (a permission
 		// round-trip) supplies task.Tools instead.
 		tools = []any{map[string]any{"type": "agent_toolset_20260401"}}
+	}
+	if task.MCP != nil {
+		// Appended rather than replacing: the mcp_toolset offers one server's
+		// tools and nothing else, so a task that also wants to read a file keeps
+		// the bare toolset alongside it.
+		tools = append(tools, map[string]any{
+			"type": "mcp_toolset", "mcp_server_name": task.MCP.Name,
+		})
 	}
 	body := map[string]any{
 		"name":  "eval-" + task.ID,
@@ -374,6 +467,11 @@ func agentBody(task Task, model string, tr *Trial, skills []any) map[string]any 
 	}
 	if len(skills) > 0 {
 		body["skills"] = skills
+	}
+	if task.MCP != nil {
+		body["mcp_servers"] = []any{map[string]any{
+			"type": "url", "name": task.MCP.Name, "url": mcpURL,
+		}}
 	}
 	return body
 }

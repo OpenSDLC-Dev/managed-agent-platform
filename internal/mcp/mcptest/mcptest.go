@@ -11,9 +11,13 @@ package mcptest
 import (
 	"context"
 	"errors"
+	"fmt"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
+	"time"
 
 	sdk "github.com/modelcontextprotocol/go-sdk/mcp"
 )
@@ -73,6 +77,66 @@ func sdkContent(b Block) sdk.Content {
 // shut down when the test ends.
 func Server(t *testing.T, tools ...Tool) string {
 	t.Helper()
+	ts := httptest.NewServer(handler(build(tools)))
+	t.Cleanup(ts.Close)
+	return ts.URL
+}
+
+// ServeAt is Server listening somewhere other than loopback, and returns the
+// same thing: the endpoint to point an MCP client at.
+//
+// It exists for the callers the platform reaches with its *own* dialer rather
+// than a test client. The eval suite runs a real executor, whose MCP dials go
+// through internal/dialguard — and that guard refuses loopback, which is exactly
+// where httptest listens. Such a caller has nowhere to pass Client() in, so the
+// fixture moves instead.
+//
+// hosts are addresses of this machine the guard admits, in preference order,
+// and the first that binds wins. A list rather than one address because
+// enumerating interfaces yields addresses that cannot be bound — a stopped VM
+// bridge or a docker0 whose interface is down still appears — and picking one of
+// those would abort the caller's test on a machine where nothing is wrong.
+//
+// The port is chosen free, and the URL names the host that bound, so a caller
+// that resolved an interface gets back a URL the executor can dial.
+func ServeAt(t *testing.T, hosts []string, tools ...Tool) string {
+	t.Helper()
+	var ln net.Listener
+	var failures []string
+	for _, host := range hosts {
+		l, err := net.Listen("tcp", net.JoinHostPort(host, "0"))
+		if err != nil {
+			failures = append(failures, fmt.Sprintf("%s: %v", host, err))
+			continue
+		}
+		ln = l
+		break
+	}
+	if ln == nil {
+		t.Fatalf("mcptest: no candidate address could be bound: %s",
+			strings.Join(failures, "; "))
+	}
+	srv := &http.Server{Handler: handler(build(tools))}
+	go func() { _ = srv.Serve(ln) }()
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), shutdownGrace)
+		defer cancel()
+		_ = srv.Shutdown(ctx)
+	})
+	return "http://" + ln.Addr().String()
+}
+
+// shutdownGrace bounds the wait for in-flight requests at teardown. A fixture
+// whose client walked away from a response would otherwise hold the test binary
+// open for as long as that connection stays warm.
+const shutdownGrace = 5 * time.Second
+
+func handler(server *sdk.Server) http.Handler {
+	return sdk.NewStreamableHTTPHandler(func(*http.Request) *sdk.Server { return server }, nil)
+}
+
+// build is the fixture server itself, shared by both ways of serving it.
+func build(tools []Tool) *sdk.Server {
 	server := sdk.NewServer(&sdk.Implementation{Name: "mcptest", Version: "1"}, nil)
 	for _, tool := range tools {
 		tool := tool
@@ -100,10 +164,7 @@ func Server(t *testing.T, tools ...Tool) string {
 				return &sdk.CallToolResult{Content: content, IsError: tool.IsError}, nil
 			})
 	}
-	ts := httptest.NewServer(sdk.NewStreamableHTTPHandler(
-		func(*http.Request) *sdk.Server { return server }, nil))
-	t.Cleanup(ts.Close)
-	return ts.URL
+	return server
 }
 
 // Client is an HTTP client a fixture server can be reached through. The

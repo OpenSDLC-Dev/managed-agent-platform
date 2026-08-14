@@ -27,7 +27,7 @@ func TestTaskSetIsPinned(t *testing.T) {
 		"fib-quickstart", "echo-notool", "shell-state",
 		"edit-config", "needle-search", "perm-allow", "perm-deny",
 		"exit-code", "journal-multiturn", "view-range", "skill-answer",
-		"file-answer", "repo-answer", "outcome-satisfy", "outcome-revise",
+		"file-answer", "repo-answer", "mcp-answer", "outcome-satisfy", "outcome-revise",
 	}
 
 	got := make([]string, 0, len(want))

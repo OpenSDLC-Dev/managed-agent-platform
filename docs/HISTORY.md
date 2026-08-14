@@ -38,6 +38,76 @@ new directory and in-repo citations re-pointed in the moving PR (plan
 
 ---
 
+## MCP client and `mcp_toolset` (plan 29) — archived 2026-08-15, delivered in twelve PRs (#45)
+
+Closed #45: an agent configured with `mcp_servers` + `mcp_toolset` now calls a real MCP
+server's tools. Before this plan both were accepted on the wire and stored, the brain never
+expanded the toolset, and such an agent silently got no tools at all.
+
+Delivered as seven slices:
+
+1. **Wire correctness** (#343) — the shapes the rest of the plan is built on, checked
+   field-by-field against the pinned SDK.
+2. **The client and the catalog** (#352, #377) — `internal/mcp` over the official go-sdk,
+   the dial-address guard beneath it, the `mcp_catalogs` table, and the `mcp_exec`
+   discovery driver. Inert: nothing offered to the model yet.
+3. **A tool call can stop and ask** (#387) — the human-confirmation arm, on the same
+   `always_ask` default the rest of the platform gates on.
+4. **Activation** (#398, #402, #404) — the execution driver and MCP-first settlement, the
+   brain offering a catalog's listing as `mcp__{server}__{tool}`, and an oversized answer
+   spilling into the session's sandbox. **#45's acceptance criterion is met here.**
+5. **Credentials** (#405, #406) — vault matching, bearer injection on both dial paths,
+   `mcp_authentication_failed_error` split off the connection failure, and an expired
+   `mcp_oauth` token refreshing at the dial with the rotation sealed back onto the row.
+6. **Networking polish** (#407, #409) — `allow_mcp_servers` widening the per-session gate
+   so a sandbox reaches the servers its agent declares; the discovery pass dialling
+   concurrently so declaration order stops deciding who gets reached, and a server it
+   cannot reach said out loud on the session's event stream.
+7. **Evals and acceptance** (#410) — the `mcp-answer` eval trial, the `RUN_LIVE_MCP_TESTS` tier
+   against a server this project did not write, and the `ant` CLI acceptance run recorded
+   below.
+
+Three things the plan set out to do and did not, each for a reason recorded where it
+belongs: no per-server disable state (no source documents one, so a transient failure heals
+by itself); no MCP surface on the work API (the reference makes the connection server-side
+on every environment kind, so a BYOC worker never sees one); and the discovery pass stays on
+the goroutine that took the work item rather than moving off it, which no source asks for.
+Issue #408 was filed out of the last slice's review: a credential-resolution failure that is
+infrastructure rather than credential faults its work item and says nothing, which is a
+work-queue retry-policy question rather than an MCP one.
+
+## MCP toolset acceptance — real `ant` CLI, real third-party MCP server (plan 29 slice 7, run 2026-08-15) — ✅ passed
+
+A controlplane + brain + executor built from this branch, on ports of their own against a
+Postgres of their own — deliberately not the shared compose stack, whose image predates
+every commit under test. Every management call driven by the real `ant` CLI (v1.22.1, built
+from the local checkout) over `--base-url`, and the MCP server was **DeepWiki's public
+endpoint** (`https://mcp.deepwiki.com/mcp`): a server this project did not write, reached
+over the public internet through the executor's own guarded client.
+
+- **The agent round-trips.** `ant beta:agents create --mcp-server '{"type":"url","name":"deepwiki","url":"..."}' --tool '{"type":"mcp_toolset","mcp_server_name":"deepwiki"}'` returned the agent with both arrays echoed in the wire's shape, and with the `mcp_toolset`'s `default_config.permission_policy` defaulted to **`always_ask`** — the gate issue #26 extended to the MCP arm, visible on the wire without anyone asking for it.
+- **The chain closes.** One `user.message` asking which MCP tools were available produced `session.status_running` → `span.model_request_start` → an `agent.message` naming **`mcp__deepwiki__ask_question`, `mcp__deepwiki__read_wiki_contents` and `mcp__deepwiki__read_wiki_structure`** → `span.model_request_end` → `session.status_idle` with `stop_reason.type = "end_turn"`. The model can only have those names from the listing the brain assembled out of `mcp_catalogs`, so one message proves the executor's discovery pass dialled a third-party server, stored what it answered, and the brain offered it under this platform's `mcp__{server}__{tool}` naming.
+
+Two CLI shapes worth recording, both this client's and neither a defect of ours:
+
+- **`--model` takes a mapping, not the scalar its help text advertises.** `--model MiniMax-M3` fails inside the CLI at `[1:1] string was used where mapping is expected`, before any request goes out; `--model '{"id":"MiniMax-M3"}'` works. Our server's rejection of the intermediate guess (`{"model":...}` → `model.id is required`) is itself the wire shape asserting itself.
+- **The event verbs are `retrieve` / `send` / `list` / `stream`**, addressed by `--session-id` rather than positionally. `get` and `--event` on a positional session id do not exist in v1.22.1.
+
+The live MCP tier landed with the same slice and was run against the same endpoint:
+`RUN_LIVE_MCP_TESTS=1 MCP_LIVE_SERVER_URL=https://mcp.deepwiki.com/mcp` listed three tools
+through `mcp.DefaultClient` — the guarded one — in 6.2s. That tier exists because every
+other MCP test in the repository speaks to a fixture built from the same go-sdk the client
+is built from, so both ends share one understanding of the protocol and agree even where
+that understanding is wrong.
+
+The `mcp-answer` eval trial (`RUN_EVALS=1`, real model, real containers) covers the half the
+CLI run does not: a passphrase that exists only in what an MCP tool returns, retrieved
+through the confirmation round trip the `always_ask` default requires. Its first run failed
+in a way worth keeping: the model read "tell me the secret passphrase" as a prompt-injection
+attempt and declined — naming `mcp__vault__read_passphrase` in its refusal, which is itself
+proof the platform chain underneath was working. The trial now says who attached the server,
+as the other mounted-answer trials do.
+
 ## A refutation of #392 that both reviewers refuted, 2026-08-14
 
 A **review-hardening record**: the first version of the #392 fix argued the issue had no

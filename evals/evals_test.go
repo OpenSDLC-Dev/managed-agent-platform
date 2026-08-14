@@ -69,7 +69,9 @@ func runAndGrade(t *testing.T, s *stack, task Task) {
 	// whose container and logs hold the evidence.
 	tr := runTrial(t, s, task, rec)
 	rec.ElapsedMS = tr.Elapsed.Milliseconds()
-	rec.ToolCalls = countToolUse(tr, "")
+	// Both families: an MCP call is a tool call to anyone reading this report,
+	// and the one trial whose whole point is a tool call would otherwise read zero.
+	rec.ToolCalls = countToolUse(tr, "") + len(eventsOfType(tr, "agent.mcp_tool_use"))
 	rec.Tokens = sumTokens(tr)
 	rec.events = tr.Events
 
