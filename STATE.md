@@ -20,9 +20,10 @@ What is being worked on right now, and how far along it is — nothing else. **S
       `mcp_authentication_failed_error` split off the connection failure ([#405](https://github.com/OpenSDLC-Dev/managed-agent-platform/pull/405)); an
       expired `mcp_oauth` token refreshing at the dial, the rotation sealed back
       onto the row ([#406](https://github.com/OpenSDLC-Dev/managed-agent-platform/pull/406)).
-- [ ] Slice 6 — networking polish. **6a** done: `allow_mcp_servers` widens the
-      per-session gate, so a sandbox reaches the servers its agent declares
-      ([#407](https://github.com/OpenSDLC-Dev/managed-agent-platform/pull/407)). **6b** in
-      progress: the discovery pass dials concurrently, so declaration order stops deciding
-      who gets reached, and a server it cannot reach is said out loud.
+- [x] Slice 6 — networking polish: `allow_mcp_servers` widens the per-session gate, so a
+      sandbox reaches the servers its agent declares
+      ([#407](https://github.com/OpenSDLC-Dev/managed-agent-platform/pull/407)); the
+      discovery pass dials concurrently, so declaration order stops deciding who gets
+      reached, and a server it cannot reach is said out loud
+      ([#409](https://github.com/OpenSDLC-Dev/managed-agent-platform/pull/409)).
 - [ ] Slice 7 — evals, the live tier, the `ant` acceptance transcript, archiving.
