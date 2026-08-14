@@ -39,7 +39,7 @@ func TestConvert(t *testing.T) {
 	cfg := &gateconfig.Config{
 		Networking: domain.Networking{
 			Type: domain.NetLimited, AllowedHosts: []string{"api.example.com"}, AllowMCPServers: true},
-		MCPServerHosts: []string{"mcp.example.com"},
+		MCPServerEndpoints: []string{"mcp.example.com:443"},
 		Credentials: []gateconfig.Credential{
 			{
 				CredentialID: "vcrd_1", Placeholder: "vltph_a", Secret: "S1",
@@ -58,9 +58,10 @@ func TestConvert(t *testing.T) {
 	if gc.Networking.Type != domain.NetLimited || len(gc.Networking.AllowedHosts) != 1 {
 		t.Errorf("networking not passed through: %+v", gc.Networking)
 	}
-	// The agent's MCP hosts arrive as their own list, for the policy to decide on.
-	if len(gc.MCPServerHosts) != 1 || gc.MCPServerHosts[0] != "mcp.example.com" {
-		t.Errorf("mcp server hosts not passed through: %v", gc.MCPServerHosts)
+	// The agent's MCP endpoints arrive as their own list, for the policy to
+	// decide on.
+	if len(gc.MCPServerEndpoints) != 1 || gc.MCPServerEndpoints[0] != "mcp.example.com:443" {
+		t.Errorf("mcp server endpoints not passed through: %v", gc.MCPServerEndpoints)
 	}
 	if len(gc.Credentials) != 2 {
 		t.Fatalf("credentials = %d, want 2", len(gc.Credentials))

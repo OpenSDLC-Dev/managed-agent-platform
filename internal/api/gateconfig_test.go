@@ -110,10 +110,10 @@ func TestGateConfigServesNetworkingAndCredentials(t *testing.T) {
 	}
 }
 
-// The sandbox half of allow_mcp_servers: the gate is told the hosts the
+// The sandbox half of allow_mcp_servers: the gate is told the endpoints the
 // session's agent declares MCP servers at, and only when the policy can use
-// them. A gate that is never sent a host cannot be made to admit it.
-func TestGateConfigServesTheAgentsMCPHostsUnderTheFlag(t *testing.T) {
+// them. A gate that is never sent an endpoint cannot be made to admit it.
+func TestGateConfigServesTheAgentsMCPEndpointsUnderTheFlag(t *testing.T) {
 	for name, tc := range map[string]struct {
 		networking map[string]any
 		want       []string
@@ -121,7 +121,7 @@ func TestGateConfigServesTheAgentsMCPHostsUnderTheFlag(t *testing.T) {
 		"limited with the flag": {
 			map[string]any{"type": "limited", "allowed_hosts": []any{"api.example.com"},
 				"allow_mcp_servers": true},
-			[]string{"mcp.example"},
+			[]string{"mcp.example:443"},
 		},
 		"limited without it": {
 			map[string]any{"type": "limited", "allowed_hosts": []any{"api.example.com"}},
@@ -151,8 +151,8 @@ func TestGateConfigServesTheAgentsMCPHostsUnderTheFlag(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Fetch: %v", err)
 			}
-			if !slices.Equal(cfg.MCPServerHosts, tc.want) {
-				t.Errorf("mcp_server_hosts = %v, want %v", cfg.MCPServerHosts, tc.want)
+			if !slices.Equal(cfg.MCPServerEndpoints, tc.want) {
+				t.Errorf("mcp_server_endpoints = %v, want %v", cfg.MCPServerEndpoints, tc.want)
 			}
 			// Whatever the flag says, the operator's own list is served as written.
 			if tc.networking["type"] == "limited" &&

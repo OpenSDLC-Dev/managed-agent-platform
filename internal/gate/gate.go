@@ -27,8 +27,10 @@ import (
 	"strconv"
 	"strings"
 	"sync/atomic"
+	"syscall"
 	"time"
 
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/dialguard"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/egress"
 )
@@ -55,12 +57,17 @@ var errBodyTooLarge = errors.New("request body exceeds the gate substitution lim
 // a direct network dialer and transport; tests override them.
 type Config struct {
 	Networking domain.Networking
-	// MCPServerHosts are the hosts the session's agent declares MCP servers at.
-	// They widen a `limited` policy that sets allow_mcp_servers and nothing else
-	// — see newPolicy.
-	MCPServerHosts []string
-	Credentials    []egress.Credential
-	OnUnreachable  func(host string, placeholders []string)
+	// MCPServerEndpoints are the `host:port` endpoints the session's agent
+	// declares MCP servers at. They widen a `limited` policy that sets
+	// allow_mcp_servers and nothing else — see newPolicy.
+	MCPServerEndpoints []string
+	// IPAllowed is the address floor a dial admitted only by MCPServerEndpoints
+	// is held to, run on the resolved address. Nil selects dialguard.IPAllowed,
+	// which is what the platform's own MCP client uses on the same declarations;
+	// a test overrides it to reach a loopback server.
+	IPAllowed     func(net.IP) error
+	Credentials   []egress.Credential
+	OnUnreachable func(host string, placeholders []string)
 	// Dial reaches an origin for a CONNECT tunnel; Transport forwards a plain
 	// HTTP request. Both default to direct, non-proxied network access.
 	Dial      func(ctx context.Context, network, addr string) (net.Conn, error)
@@ -93,11 +100,42 @@ type Gate struct {
 	tunnelIdle    time.Duration
 }
 
+// mcpGuardKey marks a request whose destination only the agent's own MCP
+// declarations admitted. It rides the context because the address floor has to
+// run on the *resolved* address, which is the dialer's business and not the
+// handler's — a name that resolves into a refused class, or one that resolves
+// differently on the second lookup, is exactly what a pre-dial check misses.
+type mcpGuardKey struct{}
+
+// guardTheDial marks ctx so the dialer under it holds the connection to the
+// address floor.
+func guardTheDial(ctx context.Context) context.Context {
+	return context.WithValue(ctx, mcpGuardKey{}, struct{}{})
+}
+
 // New builds a Gate from cfg.
 func New(cfg Config) *Gate {
+	ipAllowed := cfg.IPAllowed
+	if ipAllowed == nil {
+		ipAllowed = dialguard.IPAllowed
+	}
 	dial := cfg.Dial
 	if dial == nil {
-		var d net.Dialer
+		// The floor runs only for a dial the agent's own declarations admitted:
+		// `allowed_hosts` is an operator's list and this proxy is the operator's
+		// own egress, so narrowing that half would be a plan 12 decision rather
+		// than this one. ControlContext rather than Control, because the marker
+		// is what tells the two apart and only the context carries it.
+		d := net.Dialer{ControlContext: func(ctx context.Context, _, address string, _ syscall.RawConn) error {
+			if ctx.Value(mcpGuardKey{}) == nil {
+				return nil
+			}
+			host, _, err := net.SplitHostPort(address)
+			if err != nil {
+				return err
+			}
+			return ipAllowed(net.ParseIP(host))
+		}}
 		dial = d.DialContext
 	}
 	transport := cfg.Transport
@@ -128,7 +166,7 @@ func New(cfg Config) *Gate {
 		tunnelIdle = defaultTunnelIdleTimeout
 	}
 	return &Gate{
-		policy:        newPolicy(cfg.Networking, cfg.MCPServerHosts),
+		policy:        newPolicy(cfg.Networking, cfg.MCPServerEndpoints),
 		engine:        egress.NewEngine(cfg.Credentials),
 		onUnreachable: cfg.OnUnreachable,
 		dial:          dial,
@@ -152,12 +190,18 @@ func (g *Gate) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 // copies bytes opaquely — no substitution, so a placeholder in a TLS body
 // reaches the origin literally (the documented #166 gap).
 func (g *Gate) handleConnect(w http.ResponseWriter, r *http.Request) {
-	host := hostOnly(r.Host)
-	if !g.policy.admit(host) {
+	target := addrWithPort(r.Host, "443")
+	host, port := hostOnly(target), portOnly(target)
+	ok, mcpOnly := g.policy.admit(host, port)
+	if !ok {
 		http.Error(w, "host not permitted by the environment's networking policy", http.StatusForbidden)
 		return
 	}
-	upstream, err := g.dial(r.Context(), "tcp", addrWithPort(r.Host, "443"))
+	ctx := r.Context()
+	if mcpOnly {
+		ctx = guardTheDial(ctx)
+	}
+	upstream, err := g.dial(ctx, "tcp", target)
 	if err != nil {
 		http.Error(w, "cannot reach host", http.StatusBadGateway)
 		return
@@ -277,13 +321,22 @@ func (g *Gate) handlePlain(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "not a proxy request", http.StatusBadRequest)
 		return
 	}
-	host := hostOnly(r.URL.Host)
-	if !g.policy.admit(host) {
+	// The port a plain-HTTP request names is its URL's, defaulted from the
+	// scheme the way every client defaults it — an `mcp_servers` declaration
+	// carries the same two halves and is normalized the same way.
+	target := addrWithPort(r.URL.Host, defaultPort(r.URL.Scheme))
+	host, port := hostOnly(target), portOnly(target)
+	ok, mcpOnly := g.policy.admit(host, port)
+	if !ok {
 		http.Error(w, "host not permitted by the environment's networking policy", http.StatusForbidden)
 		return
 	}
 
-	out := r.Clone(r.Context())
+	ctx := r.Context()
+	if mcpOnly {
+		ctx = guardTheDial(ctx)
+	}
+	out := r.Clone(ctx)
 	out.RequestURI = "" // must be empty on a client request
 	unreachable := map[string]struct{}{}
 	g.substituteHeaders(host, out.Header, unreachable)
@@ -387,4 +440,20 @@ func addrWithPort(hostport, defaultPort string) string {
 		return hostport
 	}
 	return net.JoinHostPort(hostport, defaultPort)
+}
+
+// portOnly returns the port of an address that already carries one.
+func portOnly(hostport string) string {
+	if _, p, err := net.SplitHostPort(hostport); err == nil {
+		return p
+	}
+	return ""
+}
+
+// defaultPort is the port a client assumes for a scheme it was given none for.
+func defaultPort(scheme string) string {
+	if strings.EqualFold(scheme, "https") {
+		return "443"
+	}
+	return "80"
 }
