@@ -94,6 +94,24 @@ func hostOf(t *testing.T, serverURL string) string {
 	return u.Hostname()
 }
 
+// endpointOf returns a server URL's host:port, the shape a declared MCP
+// endpoint reaches the gate as.
+func endpointOf(t *testing.T, serverURL string) string {
+	t.Helper()
+	u, err := url.Parse(serverURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	port := u.Port()
+	if port == "" {
+		port = "80"
+		if u.Scheme == "https" {
+			port = "443"
+		}
+	}
+	return u.Hostname() + ":" + port
+}
+
 func cred(placeholder, secret string, hosts []string) egress.Credential {
 	return egress.Credential{
 		Placeholder: placeholder, Secret: secret,
@@ -332,6 +350,201 @@ func TestGateUnknownNetworkingFailsClosed(t *testing.T) {
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusForbidden {
 		t.Errorf("status = %d, want 403 (fail closed) for an unknown networking type", resp.StatusCode)
+	}
+}
+
+// allow_mcp_servers widens `limited` by the endpoints the agent declares MCP
+// servers at — the sandbox half of a flag the executor already honors for the
+// platform's own dial. Driven end to end through the proxy, so what is asserted
+// is a request that arrived rather than a predicate that returned true.
+//
+// Every row lifts the address floor, because an httptest origin is on loopback
+// and the floor refuses loopback; the floor has tests of its own below.
+func TestGateAdmitsADeclaredMCPEndpointOnlyUnderItsFlag(t *testing.T) {
+	origin := echoOrigin(t)
+	defer origin.Close()
+	declared := endpointOf(t, origin.URL)
+	// A name the request never targets. Two httptest servers would not do: both
+	// listen on 127.0.0.1 and differ only by port.
+	const elsewhere = "mcp.example.com:443"
+
+	for name, tc := range map[string]struct {
+		net       domain.Networking
+		endpoints []string
+		want      int
+	}{
+		"the flag admits the declared endpoint": {
+			domain.Networking{Type: domain.NetLimited, AllowMCPServers: true},
+			[]string{declared}, http.StatusOK,
+		},
+		// The gate is never sent the endpoints without the flag; if one reaches
+		// it anyway, the flag is still what decides.
+		"without it the same endpoint is refused": {
+			domain.Networking{Type: domain.NetLimited},
+			[]string{declared}, http.StatusForbidden,
+		},
+		"and an endpoint nobody declared, either way": {
+			domain.Networking{Type: domain.NetLimited, AllowMCPServers: true},
+			[]string{elsewhere}, http.StatusForbidden,
+		},
+		// The port is part of the endpoint: declaring one MCP server does not
+		// open the rest of the ports on its host, which is the difference
+		// between this list and an operator's allowed_hosts.
+		"another port on the same host is not the endpoint": {
+			domain.Networking{Type: domain.NetLimited, AllowMCPServers: true},
+			[]string{hostOf(t, origin.URL) + ":1"}, http.StatusForbidden,
+		},
+		// The flag widens; it does not replace. An operator's own list still
+		// admits what it always did — every port on the host, as it always has.
+		"allowed_hosts still admits its own": {
+			domain.Networking{
+				Type: domain.NetLimited, AllowMCPServers: true,
+				AllowedHosts: []string{hostOf(t, origin.URL)},
+			},
+			[]string{elsewhere}, http.StatusOK,
+		},
+		// An unrecognized policy admits nothing, and a widening flag beside it
+		// does not make it recognized.
+		"an unknown policy stays closed": {
+			domain.Networking{Type: "bogus", AllowMCPServers: true},
+			[]string{declared}, http.StatusForbidden,
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			g := gate.New(gate.Config{
+				Networking: tc.net, MCPServerEndpoints: tc.endpoints,
+				IPAllowed: func(net.IP) error { return nil },
+			})
+			gsrv := httptest.NewServer(g)
+			defer gsrv.Close()
+
+			resp, err := proxyClient(t, gsrv.URL, nil).Get(origin.URL)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer resp.Body.Close()
+			if resp.StatusCode != tc.want {
+				t.Errorf("status = %d, want %d", resp.StatusCode, tc.want)
+			}
+		})
+	}
+}
+
+// A dial the agent's own declarations are the only reason for is held to the
+// platform's address floor, on the *resolved* address — the same floor the
+// platform's MCP client applies to the same declarations. Without it an agent
+// author could name the cloud metadata endpoint, or any name that resolves to
+// it, and have the sandbox reach what no operator listed.
+//
+// The floor is not applied to allowed_hosts: that is an operator's list on the
+// operator's own egress, and narrowing it is a plan 12 decision rather than
+// this one.
+func TestAnMCPOnlyDialIsHeldToTheAddressFloor(t *testing.T) {
+	origin := echoOrigin(t)
+	defer origin.Close()
+	host, declared := hostOf(t, origin.URL), endpointOf(t, origin.URL)
+
+	for name, tc := range map[string]struct {
+		net  domain.Networking
+		want int
+	}{
+		// The origin is on loopback, which the real floor refuses.
+		"the floor refuses a declared loopback endpoint": {
+			domain.Networking{Type: domain.NetLimited, AllowMCPServers: true},
+			http.StatusBadGateway,
+		},
+		// The same address, admitted by the operator's own list, is dialled.
+		"and leaves an operator's own host alone": {
+			domain.Networking{
+				Type: domain.NetLimited, AllowMCPServers: true,
+				AllowedHosts: []string{host},
+			},
+			http.StatusOK,
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			// No IPAllowed override: this is the production floor.
+			g := gate.New(gate.Config{Networking: tc.net, MCPServerEndpoints: []string{declared}})
+			gsrv := httptest.NewServer(g)
+			defer gsrv.Close()
+
+			resp, err := proxyClient(t, gsrv.URL, nil).Get(origin.URL)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer resp.Body.Close()
+			if resp.StatusCode != tc.want {
+				t.Errorf("status = %d, want %d", resp.StatusCode, tc.want)
+			}
+		})
+	}
+}
+
+// The same floor over CONNECT, where the refusal surfaces as a failed tunnel
+// rather than a status — the two handlers admit through one policy but dial on
+// their own, so a guard installed on one of them is not installed on both.
+//
+// "The tunnel failed" alone would not prove it: a regression that stopped
+// admitting MCP endpoints over CONNECT refuses before dialing and fails the
+// tunnel too. So the two are told apart by the status Go reports for a refused
+// CONNECT — 502 is the dial the policy admitted and the floor then stopped, 403
+// is the policy — and the same gate with the floor lifted is required to carry
+// the request through.
+func TestAnMCPOnlyTunnelIsHeldToTheAddressFloor(t *testing.T) {
+	origin := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, "secure-ok")
+	}))
+	defer origin.Close()
+	cfg := gate.Config{
+		Networking:         domain.Networking{Type: domain.NetLimited, AllowMCPServers: true},
+		MCPServerEndpoints: []string{endpointOf(t, origin.URL)},
+	}
+
+	// No IPAllowed override: the production floor, against an origin on loopback.
+	floored := httptest.NewServer(gate.New(cfg))
+	defer floored.Close()
+	_, err := proxyClient(t, floored.URL, origin).Get(origin.URL)
+	if err == nil {
+		t.Fatal("the tunnel to a refused address was established")
+	}
+	// Go surfaces a refused CONNECT as its status text.
+	if got := err.Error(); !strings.Contains(got, http.StatusText(http.StatusBadGateway)) {
+		t.Errorf("tunnel error = %v, want the 502 of an admitted dial the floor stopped "+
+			"(a %q would mean the policy refused it and the floor was never asked)",
+			err, http.StatusText(http.StatusForbidden))
+	}
+
+	// The same declaration, the same origin, the floor lifted: CONNECT is
+	// admitted and the tunnel carries the request.
+	cfg.IPAllowed = func(net.IP) error { return nil }
+	open := httptest.NewServer(gate.New(cfg))
+	defer open.Close()
+	resp, err := proxyClient(t, open.URL, origin).Get(origin.URL)
+	if err != nil {
+		t.Fatalf("the declared endpoint was not tunnelled with the floor lifted: %v", err)
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(body) != "secure-ok" {
+		t.Errorf("tunnelled body = %q, want the origin's own", body)
+	}
+}
+
+// The declared endpoints are read, never written to: a policy that appended them
+// onto the config's own AllowedHosts array would hand the next reader of that
+// slice a list it never configured.
+func TestGateDoesNotWriteTheMCPHostsIntoTheConfiguredList(t *testing.T) {
+	configured := make([]string, 1, 4) // spare capacity is what makes append destructive
+	configured[0] = "api.example.com"
+	net := domain.Networking{Type: domain.NetLimited, AllowMCPServers: true, AllowedHosts: configured}
+
+	gate.New(gate.Config{Networking: net, MCPServerEndpoints: []string{"mcp.example.com:443"}})
+
+	if got := configured[:cap(configured)]; got[1] != "" {
+		t.Errorf("the configured list was written past its length: %q", got)
 	}
 }
 
@@ -803,8 +1016,8 @@ func TestGatePlainHTTPBadGatewayWhenOriginStalls(t *testing.T) {
 	host, _, _ := net.SplitHostPort(ln.Addr().String())
 
 	g := gate.New(gate.Config{
-		Networking: domain.Networking{Type: domain.NetLimited, AllowedHosts: []string{host}},
-		Transport:  &http.Transport{ResponseHeaderTimeout: 200 * time.Millisecond},
+		Networking:            domain.Networking{Type: domain.NetLimited, AllowedHosts: []string{host}},
+		ResponseHeaderTimeout: 200 * time.Millisecond,
 	})
 	gsrv := httptest.NewServer(g)
 	defer gsrv.Close()

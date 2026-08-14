@@ -18,12 +18,13 @@ What is being worked on right now, and how far along it is — nothing else. **S
       `mcp__{server}__{tool}`, committing `agent.mcp_tool_use`, waiting for a first
       listing ([#402](https://github.com/OpenSDLC-Dev/managed-agent-platform/pull/402)); an answer the result could not carry whole spilling into a
       sandbox the session already has ([#404](https://github.com/OpenSDLC-Dev/managed-agent-platform/pull/404)).
-- [ ] Slice 5 — credentials. **5a** done: matching, bearer injection on both dial paths, and
+- [x] Slice 5 — credentials: matching, bearer injection on both dial paths, and
       `mcp_authentication_failed_error` split off the connection failure
-      ([#405](https://github.com/OpenSDLC-Dev/managed-agent-platform/pull/405)). **5b** in review: an expired `mcp_oauth` token refreshes at
-      the dial, through the grant `internal/oauthrefresh` now spells once for the
-      probe and the executor alike, and the rotation is sealed back onto the row
-      ([#406](https://github.com/OpenSDLC-Dev/managed-agent-platform/pull/406)).
-- [ ] Slice 6 — networking polish: `allow_mcp_servers`, retry escalation, `mcp_connection_failed`.
+      ([#405](https://github.com/OpenSDLC-Dev/managed-agent-platform/pull/405)); an expired `mcp_oauth` token refreshing at the dial through
+      the grant `internal/oauthrefresh` now spells once for the probe and the
+      executor alike, the rotation sealed back onto the row ([#406](https://github.com/OpenSDLC-Dev/managed-agent-platform/pull/406)).
+- [ ] Slice 6 — networking polish. **6a** in review: `allow_mcp_servers` widens the
+      per-session gate, so a sandbox reaches the servers its agent declares. Left:
+      discovery-pass fairness (a slow server starving the ones behind it).
 - [ ] Slice 7 — evals, the live tier, the `ant` acceptance transcript, archiving.
 

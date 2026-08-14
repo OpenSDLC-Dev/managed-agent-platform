@@ -27,11 +27,22 @@ import (
 const Path = "/internal/v1/gate/config"
 
 // Config is one session's gate configuration: the environment's request-level
-// networking policy (which hosts a request may reach at all) and the resolved
+// networking policy (which hosts a request may reach at all), the `host:port`
+// endpoints the session's agent declares MCP servers at, and the resolved
 // credentials for egress substitution.
+//
+// The MCP endpoints ride beside the policy rather than folded into its
+// AllowedHosts, so the gate is told what an operator configured and what the
+// agent declared as two separate facts — which is what lets it treat them
+// differently, matching the port on one and holding its dial to the platform's
+// address floor. The control plane sends them only for the policy that can use
+// them (`limited` with `allow_mcp_servers`), and the gate admits them only
+// under the same condition — two ends of one rule, since a widening the agent
+// spec controls is worth failing closed twice.
 type Config struct {
-	Networking  domain.Networking `json:"networking"`
-	Credentials []Credential      `json:"credentials"`
+	Networking         domain.Networking `json:"networking"`
+	MCPServerEndpoints []string          `json:"mcp_server_endpoints,omitempty"`
+	Credentials        []Credential      `json:"credentials"`
 }
 
 // Credential is one resolved environment_variable vault credential as the gate

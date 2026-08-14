@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -106,6 +107,59 @@ func TestGateConfigServesNetworkingAndCredentials(t *testing.T) {
 	}
 	if !cr.InjectionLocation.Header || cr.InjectionLocation.Body {
 		t.Errorf("injection_location = %+v, want header-only", cr.InjectionLocation)
+	}
+}
+
+// The sandbox half of allow_mcp_servers: the gate is told the endpoints the
+// session's agent declares MCP servers at, and only when the policy can use
+// them. A gate that is never sent an endpoint cannot be made to admit it.
+func TestGateConfigServesTheAgentsMCPEndpointsUnderTheFlag(t *testing.T) {
+	for name, tc := range map[string]struct {
+		networking map[string]any
+		want       []string
+	}{
+		"limited with the flag": {
+			map[string]any{"type": "limited", "allowed_hosts": []any{"api.example.com"},
+				"allow_mcp_servers": true},
+			[]string{"mcp.example:443"},
+		},
+		"limited without it": {
+			map[string]any{"type": "limited", "allowed_hosts": []any{"api.example.com"}},
+			nil,
+		},
+		// Nothing to widen: every host is admitted already.
+		"unrestricted": {map[string]any{"type": "unrestricted"}, nil},
+	} {
+		t.Run(name, func(t *testing.T) {
+			s := newTestServer(t)
+			agent := createAgent(t, s, map[string]any{
+				"name": "task-agent", "model": "claude-opus-4-8", "system": "base",
+				"mcp_servers": []any{mcpServer("docs")},
+				"tools":       []any{mcpToolset("docs")},
+			})
+			env := createEnvironment(t, s, map[string]any{
+				"name":   "gated-env",
+				"config": map[string]any{"type": "cloud", "networking": tc.networking},
+			})
+			sess := createSession(t, s, map[string]any{
+				"agent": agent["id"], "environment_id": env["id"],
+			})
+			sessionID := sess["id"].(string)
+
+			cfg, err := gateconfig.NewClient(s.url, mintGateToken(t, s, sessionID), nil).
+				Fetch(context.Background())
+			if err != nil {
+				t.Fatalf("Fetch: %v", err)
+			}
+			if !slices.Equal(cfg.MCPServerEndpoints, tc.want) {
+				t.Errorf("mcp_server_endpoints = %v, want %v", cfg.MCPServerEndpoints, tc.want)
+			}
+			// Whatever the flag says, the operator's own list is served as written.
+			if tc.networking["type"] == "limited" &&
+				(len(cfg.Networking.AllowedHosts) != 1 || cfg.Networking.AllowedHosts[0] != "api.example.com") {
+				t.Errorf("allowed_hosts = %v, want the configured list untouched", cfg.Networking.AllowedHosts)
+			}
+		})
 	}
 }
 
