@@ -15,15 +15,39 @@ func TestLiveServerGate(t *testing.T) {
 	}
 
 	t.Run("not opted in skips and asks for nothing", func(t *testing.T) {
-		url, token, skip, err := liveServer(env(map[string]string{
-			ServerURLEnv: "https://example.test/mcp", ServerTokenEnv: "tok",
-		}))
+		// A poisoned getenv rather than a populated one: the promise is that the
+		// credential file is never opened, and a resolver that read the keys and
+		// discarded them would satisfy any assertion about the return values.
+		poisoned := func(k string) string {
+			if k != LiveEnv {
+				t.Errorf("resolved %s before checking consent: the credential file "+
+					"must not be opened on a run that is not opted in", k)
+			}
+			return ""
+		}
+		url, token, skip, err := liveServer(poisoned)
 		if skip == "" || err != nil || url != "" || token != "" {
 			t.Fatalf("liveServer = (%q, %q, %q, %v), want a skip and nothing else",
 				url, token, skip, err)
 		}
 		if !strings.Contains(skip, LiveEnv) {
 			t.Errorf("skip = %q, want it to name %s so a reader knows what to set", skip, LiveEnv)
+		}
+	})
+
+	t.Run("consent is naming the variable, not its value", func(t *testing.T) {
+		// RUN_LIVE_MCP_TESTS=0 opts in. Someone who sets it to 0 meaning "off"
+		// gets a live run, which is surprising — but the alternative is parsing
+		// the value, and then a typo means a silent skip. Loud and documented
+		// beats quiet and clever, and it is what every sibling tier does.
+		url, _, skip, err := liveServer(env(map[string]string{
+			LiveEnv: "0", ServerURLEnv: "https://example.test/mcp",
+		}))
+		if skip != "" || err != nil {
+			t.Fatalf("liveServer = (%q, %v), want an opted-in run", skip, err)
+		}
+		if url != "https://example.test/mcp" {
+			t.Errorf("url = %q, want the configured endpoint", url)
 		}
 	})
 

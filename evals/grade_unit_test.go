@@ -152,15 +152,15 @@ func TestMCPEvaluatedPermissionAsk(t *testing.T) {
 		t.Error("an ungated mcp call should fail evaluated-permission-ask")
 	}
 
-	// Unlike its built-in twin this one requires the call. The trial it grades
-	// has nothing else asserting the gate fired, so passing on an absent call
-	// would leave a grader that cannot go red.
+	// No matching call: the model never reached for the tool, which MCPToolUse
+	// owns as Either. Reding here would file a model refusal as a platform
+	// defect, so it passes — the same division its built-in twin makes.
 	none := trialWith([]map[string]any{
 		{"type": "agent.mcp_tool_use", "mcp_server_name": "vault", "name": "other_tool",
-			"evaluated_permission": "ask"},
+			"evaluated_permission": "allow"},
 	})
-	if err := g.Check(t, none); err == nil {
-		t.Error("no matching mcp call should fail, not pass vacuously")
+	if err := g.Check(t, none); err != nil {
+		t.Errorf("another tool's call should not be graded here: %v", err)
 	}
 
 	// Two calls, the second unstamped — a gate that held only for the opening
@@ -295,6 +295,44 @@ func TestCorePackToolResultsJoined(t *testing.T) {
 	})
 	if err := joined.Check(t, missingID); err == nil {
 		t.Error("a tool_use with no id should fail rather than join on the empty string")
+	}
+
+	// The MCP family, which travels in its own pair and correlates on its own
+	// field. Left out, the executor's second answering path would carry this
+	// invariant nowhere — and the mcp-answer trial is where it has no other
+	// coverage.
+	mcpOK := trialWith([]map[string]any{
+		{"type": "agent.mcp_tool_use", "id": "sevt_1", "name": "read_passphrase"},
+		{"type": "agent.mcp_tool_result", "mcp_tool_use_id": "sevt_1"},
+	})
+	if err := joined.Check(t, mcpOK); err != nil {
+		t.Errorf("one mcp call, one mcp result should pass: %v", err)
+	}
+
+	mcpDoubled := trialWith([]map[string]any{
+		{"type": "agent.mcp_tool_use", "id": "sevt_1", "name": "read_passphrase"},
+		{"type": "agent.mcp_tool_result", "mcp_tool_use_id": "sevt_1"},
+		{"type": "agent.mcp_tool_result", "mcp_tool_use_id": "sevt_1"},
+	})
+	if err := joined.Check(t, mcpDoubled); err == nil {
+		t.Error("two mcp results for one mcp call should fail tool-results-joined")
+	}
+
+	mcpUnanswered := trialWith([]map[string]any{
+		{"type": "agent.mcp_tool_use", "id": "sevt_1", "name": "read_passphrase"},
+	})
+	if err := joined.Check(t, mcpUnanswered); err == nil {
+		t.Error("an unanswered mcp call should fail tool-results-joined")
+	}
+
+	// The families must not cross-join: an MCP result carrying a built-in call's
+	// id answers nothing, and correlating on the wrong field would hide it.
+	crossed := trialWith([]map[string]any{
+		{"type": "agent.tool_use", "id": "toolu_1", "name": "bash"},
+		{"type": "agent.mcp_tool_result", "mcp_tool_use_id": "toolu_1"},
+	})
+	if err := joined.Check(t, crossed); err == nil {
+		t.Error("an mcp result must not answer a built-in tool_use")
 	}
 }
 

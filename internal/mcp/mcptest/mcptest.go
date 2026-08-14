@@ -11,9 +11,11 @@ package mcptest
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -89,14 +91,30 @@ func Server(t *testing.T, tools ...Tool) string {
 // where httptest listens. Such a caller has nowhere to pass Client() in, so the
 // fixture moves instead.
 //
-// host is an address of this machine the guard admits: a private-range interface
-// address. The port is chosen free, and the URL names the host as given, so a
-// caller that resolved an interface gets back a URL the executor can dial.
-func ServeAt(t *testing.T, host string, tools ...Tool) string {
+// hosts are addresses of this machine the guard admits, in preference order,
+// and the first that binds wins. A list rather than one address because
+// enumerating interfaces yields addresses that cannot be bound — a stopped VM
+// bridge or a docker0 whose interface is down still appears — and picking one of
+// those would abort the caller's test on a machine where nothing is wrong.
+//
+// The port is chosen free, and the URL names the host that bound, so a caller
+// that resolved an interface gets back a URL the executor can dial.
+func ServeAt(t *testing.T, hosts []string, tools ...Tool) string {
 	t.Helper()
-	ln, err := net.Listen("tcp", net.JoinHostPort(host, "0"))
-	if err != nil {
-		t.Fatalf("mcptest: listen on %s: %v", host, err)
+	var ln net.Listener
+	var failures []string
+	for _, host := range hosts {
+		l, err := net.Listen("tcp", net.JoinHostPort(host, "0"))
+		if err != nil {
+			failures = append(failures, fmt.Sprintf("%s: %v", host, err))
+			continue
+		}
+		ln = l
+		break
+	}
+	if ln == nil {
+		t.Fatalf("mcptest: no candidate address could be bound: %s",
+			strings.Join(failures, "; "))
 	}
 	srv := &http.Server{Handler: handler(build(tools))}
 	go func() { _ = srv.Serve(ln) }()

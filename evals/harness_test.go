@@ -107,40 +107,58 @@ type MCPFixture struct {
 	Answer      string
 }
 
-// mcpHost is an address of this machine an MCP fixture can listen on and the
-// platform will dial back.
+// mcpHosts lists the addresses of this machine an MCP fixture can listen on and
+// the platform will dial back, best first.
 //
 // Not loopback, which is where httptest listens and where every other fixture in
 // this suite is reached: the executor dials MCP servers with its own guarded
 // client (internal/dialguard), and that guard refuses loopback because the
-// platform's own surfaces live there. A private-range interface address is
-// admitted, so the fixture goes there instead.
+// platform's own surfaces live there. So the fixture moves to an interface
+// address instead.
 //
-// A machine with no private address fails the trial rather than skipping it: the
+// Private-range first and then any other admitted address, because that is the
+// order of preference and not the rule: the guard refuses only loopback,
+// link-local, unspecified and multicast, so a machine whose sole address is
+// public or CGNAT — a cloud VM with no private network, a Tailscale-only host —
+// has somewhere the fixture can serve and the trial should use it. The
+// passphrase it serves is a per-trial nonce that means nothing anywhere else.
+//
+// IPv4 only, and that is a platform rule rather than a preference:
+// egress.ValidateHostEntry refuses any host carrying a colon (plan 29 slice 6a),
+// so an MCP endpoint at an IPv6 literal is one whose sandbox the gate would
+// never be widened for, and a trial built on one would exercise a shape the
+// platform itself declines.
+//
+// A machine with no such address fails the trial rather than skipping it: the
 // suite is opt-in already, and a silent skip would read as a passing MCP chain.
-func mcpHost(t *testing.T) string {
+func mcpHosts(t *testing.T) []string {
 	t.Helper()
 	addrs, err := net.InterfaceAddrs()
 	if err != nil {
 		t.Fatalf("list interface addresses: %v", err)
 	}
+	var private, other []string
 	for _, a := range addrs {
 		n, ok := a.(*net.IPNet)
 		if !ok {
 			continue
 		}
 		ip := n.IP.To4()
-		if ip != nil && ip.IsPrivate() {
-			return ip.String()
+		switch {
+		case ip == nil || ip.IsLoopback() || ip.IsLinkLocalUnicast() ||
+			ip.IsLinkLocalMulticast() || ip.IsUnspecified() || ip.IsMulticast():
+		case ip.IsPrivate():
+			private = append(private, ip.String())
+		default:
+			other = append(other, ip.String())
 		}
 	}
-	t.Fatal("no private IPv4 interface address: an MCP fixture cannot listen anywhere " +
-		"the platform's dial guard will dial back. IPv4 and not IPv6 on purpose — " +
-		"egress.ValidateHostEntry refuses any host carrying a colon, so an MCP endpoint " +
-		"at an IPv6 literal is one whose sandbox the gate would never be widened for " +
-		"(plan 29 slice 6a), and a trial built on one would exercise a shape the " +
-		"platform itself declines")
-	return ""
+	hosts := append(private, other...)
+	if len(hosts) == 0 {
+		t.Fatal("no IPv4 interface address the platform's dial guard will dial back: " +
+			"an MCP fixture has nowhere to listen")
+	}
+	return hosts
 }
 
 // Seed is a file planted before turn 1. Path may be relative (resolved against
@@ -273,7 +291,7 @@ func runTrial(t *testing.T, s *stack, task Task, rec *record) *Trial {
 	// Before the agent, which has to name the endpoint it ends up on.
 	var mcpURL string
 	if task.MCP != nil {
-		mcpURL = mcptest.ServeAt(t, mcpHost(t), mcptest.Tool{
+		mcpURL = mcptest.ServeAt(t, mcpHosts(t), mcptest.Tool{
 			Name:        task.MCP.Tool,
 			Description: task.MCP.Description,
 			Result:      tr.fill(task.MCP.Answer),

@@ -62,6 +62,12 @@ func tasks() []Task {
 func mcpAnswer() Task {
 	return Task{
 		ID: "mcp-answer",
+		// Empty rather than nil, which would take the bare agent toolset: the
+		// only legitimate action here is one MCP call, and offering bash and the
+		// file tools alongside it would let the model spend real turns searching
+		// a sandbox the passphrase is not in — and make whether the trial
+		// produces any agent.tool_use at all a property of the model.
+		Tools: []any{},
 		MCP: &MCPFixture{
 			Name:        "vault",
 			Tool:        "read_passphrase",
@@ -90,7 +96,9 @@ func mcpAnswer() Task {
 			// a call that ran unattended is the platform's own regression and
 			// nothing to do with the model. The per-call one is what actually
 			// holds it — RequiresActionRaised asks whether the session stopped
-			// at all, which any gated call in the trial would satisfy.
+			// at all, which any gated call in the trial would satisfy. Neither
+			// reds when the model never calls the tool; MCPToolUse, below, owns
+			// that as Either.
 			RequiresActionRaised(Platform),
 			MCPEvaluatedPermissionAsk("vault", "read_passphrase", Platform),
 			// Either for the two below, as with the other answer-style trials:

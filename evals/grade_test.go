@@ -155,29 +155,19 @@ func corePack(task Task) []Grader {
 		// The executor's contract in one line: every intent the brain emitted
 		// got exactly one answer. Zero means a tool call was dropped and the
 		// session would wedge on resume; two would double-feed the model.
+		//
+		// Both families, because MCP calls travel in their own pair and the
+		// executor answers them down a second path. Checking only the built-in
+		// one would leave the invariant unheld for exactly the driver that has
+		// no other coverage.
 		Check: func(_ *testing.T, tr *Trial) error {
-			answers := map[string]int{}
-			for _, ev := range eventsOfType(tr, "agent.tool_result") {
-				id, _ := ev["tool_use_id"].(string)
-				answers[id]++
-			}
-			for _, use := range eventsOfType(tr, "agent.tool_use") {
-				id, _ := use["id"].(string)
-				// A missing id is a wire regression, not a join to check: left as
-				// the empty string it would match a tool_result whose tool_use_id
-				// was also dropped, and the pair would pass vacuously. Reject it
-				// as the malformed event it is.
-				if id == "" {
-					return fmt.Errorf("agent.tool_use (%v) has no id", use["name"])
+			for _, fam := range []struct{ use, result, idField string }{
+				{"agent.tool_use", "agent.tool_result", "tool_use_id"},
+				{"agent.mcp_tool_use", "agent.mcp_tool_result", "mcp_tool_use_id"},
+			} {
+				if err := joinedOnce(tr, fam.use, fam.result, fam.idField); err != nil {
+					return err
 				}
-				if n := answers[id]; n != 1 {
-					return fmt.Errorf("tool_use %s (%v) has %d tool_results, want exactly 1",
-						id, use["name"], n)
-				}
-				delete(answers, id)
-			}
-			for id, n := range answers {
-				return fmt.Errorf("%d tool_result(s) for tool_use %s, which is not on the log", n, id)
 			}
 			return nil
 		},
@@ -309,6 +299,35 @@ func ToolUseAtLeast(name string, n int, class Class) Grader {
 			return nil
 		},
 	}
+}
+
+// joinedOnce is one family's half of the tool-results-joined invariant.
+func joinedOnce(tr *Trial, useType, resultType, idField string) error {
+	answers := map[string]int{}
+	for _, ev := range eventsOfType(tr, resultType) {
+		id, _ := ev[idField].(string)
+		answers[id]++
+	}
+	for _, use := range eventsOfType(tr, useType) {
+		id, _ := use["id"].(string)
+		// A missing id is a wire regression, not a join to check: left as the
+		// empty string it would match a result whose own id field was also
+		// dropped, and the pair would pass vacuously. Reject it as the
+		// malformed event it is.
+		if id == "" {
+			return fmt.Errorf("%s (%v) has no id", useType, use["name"])
+		}
+		if n := answers[id]; n != 1 {
+			return fmt.Errorf("%s %s (%v) has %d %ss, want exactly 1",
+				useType, id, use["name"], n, resultType)
+		}
+		delete(answers, id)
+	}
+	for id, n := range answers {
+		return fmt.Errorf("%d %s(s) for %s %s, which is not on the log",
+			n, resultType, useType, id)
+	}
+	return nil
 }
 
 // MCPToolUse asserts the agent called one server's tool at least once.
@@ -1058,33 +1077,31 @@ func EvaluatedPermissionAsk(name string, class Class) Grader {
 }
 
 // MCPEvaluatedPermissionAsk asserts one server's tool was stamped as needing a
-// human before it ran. It is the MCP twin of EvaluatedPermissionAsk, and unlike
-// that one it **requires** the call: a grader that passes when the call it is
-// about never happened cannot fail, which is exactly how the plain
-// RequiresActionRaised came to say nothing on an MCP-only trial.
+// human before it ran — the MCP twin of EvaluatedPermissionAsk, reading the
+// wire's own field: agent.mcp_tool_use carries evaluated_permission beside
+// mcp_server_name and the bare tool name.
 //
-// The field is the wire's own: agent.mcp_tool_use carries evaluated_permission
-// beside mcp_server_name and the bare tool name.
+// Like its twin it passes when the call never happened, and for the same
+// reason. Class P means the product is wrong and the model could not have caused
+// it, so a grader that reds on an absence would blame the platform for a model
+// that declined the turn — something this trial has already been seen to do.
+// MCPToolUse, which is Either, owns that arm. What is left here is the claim
+// only the platform can break: a call that ran, and ran ungated.
 func MCPEvaluatedPermissionAsk(server, tool string, class Class) Grader {
 	return Grader{
 		Name:  "mcp-evaluated-permission-ask:" + server + ":" + tool,
 		Class: class,
 		Check: func(_ *testing.T, tr *Trial) error {
-			var found bool
 			for _, ev := range eventsOfType(tr, "agent.mcp_tool_use") {
 				if ev["mcp_server_name"] != server || ev["name"] != tool {
 					continue
 				}
-				found = true
 				// Every call, not the first — a gate that held only for the
 				// opening call is the shape its twin checks for too.
 				if ev["evaluated_permission"] != "ask" {
 					return fmt.Errorf("%s:%s mcp_tool_use %v evaluated_permission = %v, want ask",
 						server, tool, ev["id"], ev["evaluated_permission"])
 				}
-			}
-			if !found {
-				return fmt.Errorf("no agent.mcp_tool_use for %s:%s, so nothing was gated", server, tool)
 			}
 			return nil
 		},

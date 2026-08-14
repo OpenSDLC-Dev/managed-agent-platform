@@ -2,11 +2,13 @@ package mcp_test
 
 import (
 	"context"
-	"fmt"
-	"net/url"
+	"net/http"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
+
+	"net/url"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/mcp"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/mcp/mcptest"
@@ -24,13 +26,15 @@ import (
 //
 // It asserts little on purpose. What a public server offers is its business and
 // will change; that the platform can reach one, complete the handshake, and read
-// back a listing it can store is the whole claim.
+// back a listing it can store is the whole claim. Nothing here checks the shape
+// of a listed tool: ListTools already drops anything without a usable name or an
+// object input schema, so an assertion about those would be about the client's
+// filter and not about the server.
 func TestLiveServerListsItsTools(t *testing.T) {
 	endpoint, token := mcptest.LiveServer(t)
-	// Cut to scheme://host before it is quoted anywhere, the way every stored
-	// MCP reason is: this endpoint is operator-supplied and may carry a
-	// credential in its userinfo or its query, and a test log is a place those
-	// end up in CI output.
+	// Cut to scheme://host before it is quoted anywhere: this endpoint is
+	// operator-supplied and may carry a credential in its userinfo or its
+	// query, and a test log is a place those end up in CI output.
 	where := safeEndpoint(endpoint)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
@@ -38,27 +42,16 @@ func TestLiveServerListsItsTools(t *testing.T) {
 
 	conn, err := mcp.Connect(ctx, mcp.Config{URL: endpoint, BearerToken: token})
 	if err != nil {
-		t.Fatalf("connect to the live server %s: %v", where, scrub(err, endpoint, token))
+		t.Fatalf("connect to the live server %s: %v", where, scrub(err, token))
 	}
 	defer func() { _ = conn.Close() }()
 
 	tools, err := conn.ListTools(ctx)
 	if err != nil {
-		t.Fatalf("list the live server %s's tools: %v", where, scrub(err, endpoint, token))
+		t.Fatalf("list the live server %s's tools: %v", where, scrub(err, token))
 	}
 	if len(tools) == 0 {
 		t.Fatal("the live server listed no tools: nothing here proves a listing round-trips")
-	}
-	// The shape the platform stores and later hands the model. A server that
-	// answered with a nameless tool, or one with no schema, would be written
-	// into a catalog the brain then offers as a tool the model cannot call.
-	for _, tool := range tools {
-		if strings.TrimSpace(tool.Name) == "" {
-			t.Errorf("a listed tool has no name: %+v", tool)
-		}
-		if len(tool.InputSchema) == 0 {
-			t.Errorf("tool %q has no input schema", tool.Name)
-		}
 	}
 	// No test client is passed in, so this went out through DefaultClient — the
 	// guarded one. Reaching a third-party endpoint through it is the other half
@@ -66,8 +59,8 @@ func TestLiveServerListsItsTools(t *testing.T) {
 	t.Logf("live server %s listed %d tool(s)", where, len(tools))
 }
 
-// safeEndpoint renders a configured endpoint for a log: scheme and host, nothing
-// else. url.URL.Redacted would keep the query, which is one of the two places a
+// safeEndpoint renders a URL for a log: scheme and host, nothing else.
+// url.URL.Redacted would keep the query, which is one of the two places a
 // credential rides.
 func safeEndpoint(raw string) string {
 	u, err := url.Parse(raw)
@@ -75,6 +68,33 @@ func safeEndpoint(raw string) string {
 		return "(unparseable endpoint)"
 	}
 	return u.Scheme + "://" + u.Host
+}
+
+// urlInText finds a URL anywhere in a message. The closing set excludes the
+// quote %q wraps a url.Error's URL in, so the match ends where the URL does.
+var urlInText = regexp.MustCompile(`[a-zA-Z][a-zA-Z0-9+.-]*://[^\s"'<>]+`)
+
+// scrub keeps the configured endpoint's secrets out of an error whose text
+// something else chose.
+//
+// Redacting by the configured string alone does not work, and fails on exactly
+// the shape it would be written for: net/http masks the password before it
+// writes the URL into the *url.Error it returns, so the declared bytes are not
+// what appears and a substring replacement matches nothing — leaving the query,
+// where the other half of endpoint credentials ride, in the log. So every URL in
+// the message is cut to scheme://host whatever its spelling, which is the same
+// thing the executor's storableReason does with the reasons it stores.
+//
+// The token is separate: it is not in the URL, and a server may quote back the
+// header it received in any text it likes.
+func scrub(err error, token string) string {
+	out := urlInText.ReplaceAllStringFunc(err.Error(), func(match string) string {
+		return safeEndpoint(strings.TrimRight(match, `.,;:)]}`))
+	})
+	if token != "" {
+		out = strings.ReplaceAll(out, token, "[redacted]")
+	}
+	return out
 }
 
 // TestTheLiveTierNeverQuotesItsConfiguration runs offline, unlike the tier whose
@@ -89,44 +109,47 @@ func TestTheLiveTierNeverQuotesItsConfiguration(t *testing.T) {
 	if want := "https://mcp.example.com"; where != want {
 		t.Errorf("safeEndpoint = %q, want %q", where, want)
 	}
-	for _, secret := range []string{"user:pw", "sekrit", "api_key"} {
-		if strings.Contains(where, secret) {
-			t.Errorf("safeEndpoint kept %q: %s", secret, where)
-		}
-	}
-	if got := safeEndpoint("::not a url"); got != "(unparseable endpoint)" {
+	if got := safeEndpoint("://not a url"); got != "(unparseable endpoint)" {
 		t.Errorf("an unparseable endpoint rendered as %q", got)
 	}
 
-	// net/http names the URL it dialled, masking the password and nothing else,
-	// so the error a failing dial wraps carries both the query and the token.
-	err := fmt.Errorf(`Post %q: bad token %s`, endpoint, token)
-	out := scrub(err, endpoint, token)
-	for _, secret := range []string{"sekrit", token} {
+	// The error a real failing dial produces, not one built from the declared
+	// string: net/http rewrites the password to *** on its way into url.Error,
+	// so a fixture written by hand from the configuration tests a shape this
+	// path never emits and passes a scrub that would leak.
+	_, err := http.Get("http://user:pw@127.0.0.1:1/mcp?api_key=" + "sekrit")
+	if err == nil {
+		t.Fatal("a dial to a closed port should fail")
+	}
+	if !strings.Contains(err.Error(), "sekrit") {
+		t.Fatalf("this fixture no longer carries the query credential, so it proves "+
+			"nothing about scrubbing one: %v", err)
+	}
+	out := scrub(err, token)
+	for _, secret := range []string{"sekrit", "api_key", "user:"} {
 		if strings.Contains(out, secret) {
 			t.Errorf("scrub kept %q: %s", secret, out)
 		}
 	}
-	if !strings.Contains(out, "[redacted]") {
-		t.Errorf("scrub replaced nothing: %s", out)
+	if !strings.Contains(out, "http://127.0.0.1:1") {
+		t.Errorf("scrub dropped the host, which the message needs to be readable: %s", out)
 	}
-	// An empty token is the anonymous dial this tier admits; scrubbing "" would
+
+	// The token rides a header, not the URL, so it survives the URL rewrite and
+	// needs its own replacement.
+	quoted := scrub(errFor("server said: bad bearer "+token), token)
+	if strings.Contains(quoted, token) {
+		t.Errorf("scrub kept the token: %s", quoted)
+	}
+	// An empty token is the anonymous dial this tier admits; replacing "" would
 	// rewrite every character boundary in the message.
-	if got := scrub(fmt.Errorf("plain failure"), "", ""); got != "plain failure" {
-		t.Errorf("scrub with no secrets rewrote the message: %q", got)
+	if got := scrub(errFor("plain failure"), ""); got != "plain failure" {
+		t.Errorf("scrub with no token rewrote the message: %q", got)
 	}
 }
 
-// scrub keeps the configured values out of an error a server chose the text of.
-// The MCP client redacts the endpoint in the prefix it writes, but the transport
-// error it wraps is net/http's, which names the URL it dialled with only the
-// password masked.
-func scrub(err error, secrets ...string) string {
-	out := err.Error()
-	for _, secret := range secrets {
-		if secret != "" {
-			out = strings.ReplaceAll(out, secret, "[redacted]")
-		}
-	}
-	return out
-}
+func errFor(msg string) error { return &staticError{msg} }
+
+type staticError struct{ msg string }
+
+func (e *staticError) Error() string { return e.msg }
