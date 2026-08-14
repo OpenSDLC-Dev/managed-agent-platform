@@ -13,11 +13,13 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/events"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/mcp/mcptest"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/queue"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/secrets"
 	sdk "github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
@@ -309,6 +311,152 @@ func TestMCPCallWithAFailedCredentialLookupFaultsRatherThanAnswers(t *testing.T)
 	if errs := h.sessionErrors(t); len(errs) != 0 {
 		t.Errorf("a failed lookup emitted %d session errors", len(errs))
 	}
+}
+
+// A pass whose budget runs out inside the credential settles like one that ran
+// out between servers — a notReached row — rather than faulting and throwing
+// away the rows every server before it earned. Resolving a credential used to be
+// a query and a decrypt; with the OAuth refresh it can be seconds of
+// third-party I/O, which is where a discovery budget realistically lands.
+//
+// Driven at discoverServer rather than through a step, because the budget has to
+// expire *inside* the credential: a pass whose budget is already spent when the
+// loop reaches a server never gets that far.
+func TestABudgetSpentInsideTheCredentialSettlesRatherThanFaulting(t *testing.T) {
+	h := mcpHarness(t)
+	url, _ := serveRequiringBearer(t, "never-resolved",
+		mcptest.Tool{Name: "ask", Blocks: []mcptest.Block{{Type: "text", Text: "unreached"}}})
+	h.attachVaultWithMCPCredential(t, url, "never-resolved")
+	h.declareListedMCPServers(t, [2]string{"docs", url})
+	h.enqueueMCP(t)
+	h.breakTheCredentialQuery(t)
+
+	item, err := h.queue.Claim(context.Background(), queue.MCPExec, time.Minute)
+	if err != nil || item == nil {
+		t.Fatalf("claim: %+v %v", item, err)
+	}
+	sess, live, err := h.exec.sessionForRun(context.Background(), item)
+	if err != nil || !live {
+		t.Fatalf("sessionForRun: live=%v err=%v", live, err)
+	}
+	ref := sess.mcpServers[0]
+
+	// With time left, the lookup's own failure faults the item: it says nothing
+	// about the credential, so the pass is worth retrying.
+	if _, err := h.exec.discoverServer(context.Background(), sess.envConfig, sess.vaultIDs, ref); err == nil {
+		t.Fatal("a failed lookup with budget left settled instead of faulting")
+	}
+
+	// With the budget spent, the same failure is this pass running out of time.
+	spent, cancel := context.WithCancel(context.Background())
+	cancel()
+	row, err := h.exec.discoverServer(spent, sess.envConfig, sess.vaultIDs, ref)
+	if err != nil {
+		t.Fatalf("a spent budget faulted the pass: %v", err)
+	}
+	if !row.notReached || row.status != "failed" {
+		t.Errorf("row = %+v, want a failed, not-reached row", row)
+	}
+	if !strings.Contains(row.reason, "ran out of time") {
+		t.Errorf("row reason = %q, want it to say the pass ran out of time", row.reason)
+	}
+}
+
+// The clock is read before the credential's own verdict, because a resolution
+// cut short marks some of its failures against the credential — a decrypt that
+// never returned reads exactly like one that was refused, and a cipher backend
+// can be a network call. Blaming a healthy credential is a verdict the row keeps
+// and the tool call commits, so the budget has to win the tie.
+func TestASpentBudgetOutranksTheCredentialsOwnVerdict(t *testing.T) {
+	h := mcpHarness(t)
+	url, _ := serveRequiringBearer(t, "never-resolved",
+		mcptest.Tool{Name: "ask", Blocks: []mcptest.Block{{Type: "text", Text: "unreached"}}})
+	// A credential whose sealed bytes this cipher cannot open: every failure it
+	// produces is marked against the credential.
+	h.attachVaultWithAnUnopenableCredential(t, url)
+	h.declareListedMCPServers(t, [2]string{"docs", url})
+	h.enqueueMCP(t)
+
+	item, err := h.queue.Claim(context.Background(), queue.MCPExec, time.Minute)
+	if err != nil || item == nil {
+		t.Fatalf("claim: %+v %v", item, err)
+	}
+	sess, live, err := h.exec.sessionForRun(context.Background(), item)
+	if err != nil || !live {
+		t.Fatalf("sessionForRun: live=%v err=%v", live, err)
+	}
+	ref := sess.mcpServers[0]
+
+	// With time left, the credential is what the row blames.
+	row, err := h.exec.discoverServer(context.Background(), sess.envConfig, sess.vaultIDs, ref)
+	if err != nil {
+		t.Fatalf("an unusable credential faulted the pass: %v", err)
+	}
+	if row.notReached || !strings.Contains(row.reason, "authentication failed") {
+		t.Errorf("row = %+v, want the credential blamed while there was time", row)
+	}
+
+	// With the budget spent, the clock is. Spent from inside the cipher and not
+	// before the call, because a context already done fails the credential
+	// *query* first — a plain error, not the credential's fault — which would
+	// leave the two orderings indistinguishable and prove nothing.
+	spent, cancel := context.WithCancel(context.Background())
+	h.exec.cipher = cipherThatSpendsTheBudget{Cipher: h.cipher, spend: cancel}
+	row, err = h.exec.discoverServer(spent, sess.envConfig, sess.vaultIDs, ref)
+	if err != nil {
+		t.Fatalf("a spent budget faulted the pass: %v", err)
+	}
+	if !row.notReached || !strings.Contains(row.reason, "ran out of time") {
+		t.Errorf("row = %+v, want the clock blamed rather than the credential", row)
+	}
+}
+
+// And the clock is read after a resolution that *succeeded*, not only after one
+// that failed: a refresh can finish just as the budget runs out, and the dial
+// below would then fail on a spent context and be stored as a server that was
+// reached and refused this platform.
+func TestABudgetSpentByASuccessfulCredentialSettlesBeforeTheDial(t *testing.T) {
+	h := mcpHarness(t)
+	url, seen := serveRequiringBearer(t, "tok",
+		mcptest.Tool{Name: "ask", Blocks: []mcptest.Block{{Type: "text", Text: "unreached"}}})
+	h.attachVaultWithMCPCredential(t, url, "tok")
+	h.declareListedMCPServers(t, [2]string{"docs", url})
+	h.enqueueMCP(t)
+
+	item, err := h.queue.Claim(context.Background(), queue.MCPExec, time.Minute)
+	if err != nil || item == nil {
+		t.Fatalf("claim: %+v %v", item, err)
+	}
+	sess, live, err := h.exec.sessionForRun(context.Background(), item)
+	if err != nil || !live {
+		t.Fatalf("sessionForRun: live=%v err=%v", live, err)
+	}
+
+	spent, cancel := context.WithCancel(context.Background())
+	h.exec.cipher = cipherThatSpendsTheBudget{Cipher: h.cipher, spend: cancel}
+	row, err := h.exec.discoverServer(spent, sess.envConfig, sess.vaultIDs, sess.mcpServers[0])
+	if err != nil {
+		t.Fatalf("a spent budget faulted the pass: %v", err)
+	}
+	if !row.notReached || !strings.Contains(row.reason, "ran out of time") {
+		t.Errorf("row = %+v, want the clock blamed rather than the server", row)
+	}
+	if _, reached := seen(); reached {
+		t.Error("the dial went out on a context that was already spent")
+	}
+}
+
+// cipherThatSpendsTheBudget stands in for a cipher backend that is a network
+// round trip of its own (OpenBao transit, Cloud KMS): the pass's budget runs out
+// while it is in flight, and whatever it answers afterwards arrives too late.
+type cipherThatSpendsTheBudget struct {
+	secrets.Cipher
+	spend func()
+}
+
+func (c cipherThatSpendsTheBudget) Decrypt(ctx context.Context, ciphertext []byte, keyID string) ([]byte, error) {
+	c.spend()
+	return c.Cipher.Decrypt(ctx, ciphertext, keyID)
 }
 
 // The other half of the same rule: a pass that already answered a call must not

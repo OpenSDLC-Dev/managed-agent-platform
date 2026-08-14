@@ -20,12 +20,23 @@ import (
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/egress"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 )
 
 // Querier is the read surface resolution needs — satisfied by a *pgxpool.Pool
 // or a pgx.Tx. Resolution decrypts nothing, so it takes no cipher yet.
 type Querier interface {
 	Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error)
+}
+
+// DB is Querier plus the one write resolution performs: storing an mcp_oauth
+// credential's rotated tokens after a dial-time refresh (see MCPCredentialFor).
+// The two are separate because the environment-variable resolutions genuinely
+// only read, and widening their parameter would say otherwise.
+type DB interface {
+	Querier
+	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
+	Exec(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error)
 }
 
 // Binding is one resolved environment-variable credential: the sandbox-visible

@@ -16,6 +16,7 @@ import (
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/secrets/local"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/vaultresolve"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -394,6 +395,25 @@ type countingQuerier struct{ calls int }
 func (c *countingQuerier) Query(context.Context, string, ...any) (pgx.Rows, error) {
 	c.calls++
 	return nil, fmt.Errorf("countingQuerier.Query should not have been called")
+}
+
+// Exec and QueryRow make it a vaultresolve.DB as well, and count the same way:
+// resolution with no attached vaults must reach the database on none of the
+// three surfaces.
+func (c *countingQuerier) Exec(context.Context, string, ...any) (pgconn.CommandTag, error) {
+	c.calls++
+	return pgconn.CommandTag{}, fmt.Errorf("countingQuerier.Exec should not have been called")
+}
+
+func (c *countingQuerier) QueryRow(context.Context, string, ...any) pgx.Row {
+	c.calls++
+	return erroringRow{}
+}
+
+type erroringRow struct{}
+
+func (erroringRow) Scan(...any) error {
+	return fmt.Errorf("countingQuerier.QueryRow should not have been called")
 }
 
 func TestCredentialsNilCipher(t *testing.T) {

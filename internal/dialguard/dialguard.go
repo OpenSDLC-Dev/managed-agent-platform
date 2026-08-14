@@ -26,10 +26,20 @@
 package dialguard
 
 import (
+	"errors"
 	"fmt"
 	"net"
 	"syscall"
 )
+
+// ErrRefused is wrapped by every refusal this guard produces, so a caller can
+// tell a destination that can never be dialled from a network that may recover:
+// no retry makes a refused address reachable. For an address the guard refuses
+// by class the sentinel is the phrase the message already ended with, so that
+// text is unchanged; the unreadable-address refusal gains it as a suffix, which
+// no caller can reach through Control (net.ParseIP rejects it first) and which
+// nothing asserts on.
+var ErrRefused = errors.New("disallowed address")
 
 // IPAllowed reports whether a resolved address may be dialed, returning an
 // error naming the refusal. The text names the resolved address and says only
@@ -45,7 +55,7 @@ func IPAllowed(ip net.IP) error {
 	// so without this line the shape a caller naturally writes,
 	// IPAllowed(net.ParseIP(host)), admits every host that is not an IP at all.
 	if ip.To16() == nil {
-		return fmt.Errorf("dial target is not a usable address")
+		return fmt.Errorf("dial target is not a usable address: %w", ErrRefused)
 	}
 	// The address itself, and then — because an IPv6 transition address
 	// forwards to an embedded IPv4 target through a translator on the
@@ -59,7 +69,7 @@ func IPAllowed(ip net.IP) error {
 	// the most obvious refusal in the list into an admission. Checking each in
 	// turn keeps a wrong decode able only to add a refusal.
 	if refused(ip) {
-		return fmt.Errorf("dial target %s is a disallowed address", ip)
+		return fmt.Errorf("dial target %s is a %w", ip, ErrRefused)
 	}
 	for _, target := range embeddedIPv4(ip) {
 		// A decode landing on the unspecified address is reading padding
@@ -101,7 +111,7 @@ func IPAllowed(ip net.IP) error {
 			continue
 		}
 		if refused(target) {
-			return fmt.Errorf("dial target %s is a disallowed address", ip)
+			return fmt.Errorf("dial target %s is a %w", ip, ErrRefused)
 		}
 	}
 	return nil

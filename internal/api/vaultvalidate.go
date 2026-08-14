@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/dialguard"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/oauthrefresh"
 	"github.com/jackc/pgx/v5"
 )
 
@@ -206,50 +207,24 @@ func validationStatus(refresh refreshProbeJSON, probe *httpResponseJSON) string 
 // refreshExchange performs the OAuth refresh-token grant against the stored
 // token endpoint. On success it mutates secrets and doc with the rotated
 // tokens and expiry and reports refreshed=true.
+//
+// The grant's wire shape lives in internal/oauthrefresh, shared with the
+// executor's dial-time refresh; everything here is the probe's own half — the
+// guarded client, the scrubbed capture, and the three documented statuses.
 func (s *server) refreshExchange(ctx context.Context, doc *mcpOAuthAuthJSON,
 	secrets map[string]string, scrub *scrubber) (refreshProbeJSON, bool) {
-	form := url.Values{
-		"grant_type":    {"refresh_token"},
-		"refresh_token": {secrets["refresh_token"]},
-	}
-	if doc.Refresh.Scope != nil {
-		form.Set("scope", *doc.Refresh.Scope)
-	}
-	if doc.Refresh.Resource != nil {
-		form.Set("resource", *doc.Refresh.Resource)
-	}
-	// The Basic-auth arm carries the secret as base64(escaped client_id ':'
-	// escaped client_secret) in a header. That composite is not any single
-	// secret value, so register it as its own needle — a token endpoint that
-	// reflects the request Authorization header would otherwise leak it.
-	basicNeedle := ""
-	if doc.Refresh.TokenEndpointAuth.Type == "client_secret_basic" {
-		basicNeedle = base64.StdEncoding.EncodeToString(
-			[]byte(url.QueryEscape(doc.Refresh.ClientID) + ":" + url.QueryEscape(secrets["client_secret"])))
-		scrub.add(basicNeedle)
-	}
-	switch doc.Refresh.TokenEndpointAuth.Type {
-	case "client_secret_basic":
-		// Credentials ride the Authorization header, added below.
-	case "client_secret_post":
-		form.Set("client_id", doc.Refresh.ClientID)
-		form.Set("client_secret", secrets["client_secret"])
-	default: // "none": a public client sends its client_id in the body
-		form.Set("client_id", doc.Refresh.ClientID)
-	}
+	params := mcpRefreshParams(doc, secrets)
+	// The Basic arm's header composite is not any single secret value, so it
+	// needs a needle of its own; see [oauthrefresh.Params.BasicNeedle].
+	basicNeedle := params.BasicNeedle()
+	scrub.add(basicNeedle)
+
 	callCtx, cancel := context.WithTimeout(ctx, validateCallTimeout)
 	defer cancel()
-	req, err := http.NewRequestWithContext(callCtx, http.MethodPost, doc.Refresh.TokenEndpoint, strings.NewReader(form.Encode()))
+	req, err := params.NewRequest(callCtx)
 	if err != nil {
 		return refreshProbeJSON{Status: "connect_error"}, false
 	}
-	if doc.Refresh.TokenEndpointAuth.Type == "client_secret_basic" {
-		// RFC 6749 §2.3.1: both halves are form-urlencoded before basic auth.
-		req.SetBasicAuth(url.QueryEscape(doc.Refresh.ClientID), url.QueryEscape(secrets["client_secret"]))
-	}
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	req.Header.Set("Accept", "application/json")
-
 	resp, err := probeClient.Do(req)
 	if err != nil {
 		return refreshProbeJSON{Status: "connect_error"}, false
@@ -259,12 +234,8 @@ func (s *server) refreshExchange(ctx context.Context, doc *mcpOAuthAuthJSON,
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return refreshProbeJSON{Status: "failed", HTTPResponse: captureResponse(resp, raw, scrub)}, false
 	}
-	var grant struct {
-		AccessToken  string `json:"access_token"`
-		RefreshToken string `json:"refresh_token"`
-		ExpiresIn    int64  `json:"expires_in"`
-	}
-	if err := json.Unmarshal(raw, &grant); err != nil || grant.AccessToken == "" {
+	grant, ok := oauthrefresh.ParseGrant(raw)
+	if !ok {
 		return refreshProbeJSON{Status: "failed", HTTPResponse: captureResponse(resp, raw, scrub)}, false
 	}
 	secrets["access_token"] = grant.AccessToken
@@ -281,6 +252,20 @@ func (s *server) refreshExchange(ctx context.Context, doc *mcpOAuthAuthJSON,
 	succScrub := newScrubber(secrets)
 	succScrub.add(basicNeedle)
 	return refreshProbeJSON{Status: "succeeded", HTTPResponse: captureResponse(resp, raw, succScrub)}, true
+}
+
+// mcpRefreshParams reads a credential's refresh configuration out of its stored
+// auth document and its sealed secrets. Only reached with doc.Refresh non-nil.
+func mcpRefreshParams(doc *mcpOAuthAuthJSON, secrets map[string]string) oauthrefresh.Params {
+	return oauthrefresh.Params{
+		ClientID:          doc.Refresh.ClientID,
+		TokenEndpoint:     doc.Refresh.TokenEndpoint,
+		TokenEndpointAuth: doc.Refresh.TokenEndpointAuth.Type,
+		Resource:          doc.Refresh.Resource,
+		Scope:             doc.Refresh.Scope,
+		RefreshToken:      secrets["refresh_token"],
+		ClientSecret:      secrets["client_secret"],
+	}
 }
 
 // mcpInitializeProbe issues a streamable-HTTP MCP initialize request under

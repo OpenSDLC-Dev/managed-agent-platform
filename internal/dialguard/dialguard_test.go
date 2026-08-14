@@ -1,6 +1,7 @@
 package dialguard_test
 
 import (
+	"errors"
 	"net"
 	"strings"
 	"testing"
@@ -213,6 +214,14 @@ func TestIPAllowed(t *testing.T) {
 					t.Errorf("refusal %q names the class that matched", err)
 				}
 			}
+			// Every refusal carries the sentinel, whichever of the three sites
+			// produced it — a caller that tells "can never be dialled" from "the
+			// network may recover" reads this and not the message. The wrapped
+			// forms matter most: they are the ones a plain-address test would
+			// never reach.
+			if got := errors.Is(err, dialguard.ErrRefused); got != tc.refused {
+				t.Errorf("errors.Is(%v, ErrRefused) = %v, want %v", err, got, tc.refused)
+			}
 		})
 	}
 }
@@ -236,8 +245,12 @@ func TestIPAllowedRefusesWhatItCannotRead(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			if err := dialguard.IPAllowed(tc.ip); err == nil {
+			err := dialguard.IPAllowed(tc.ip)
+			if err == nil {
 				t.Fatalf("IPAllowed(%#v) = nil, want a refusal", tc.ip)
+			}
+			if !errors.Is(err, dialguard.ErrRefused) {
+				t.Errorf("refusal %v does not carry ErrRefused", err)
 			}
 		})
 	}

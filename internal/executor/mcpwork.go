@@ -224,8 +224,7 @@ func (e *Executor) discoverServers(ctx context.Context, cfg domain.EnvironmentCo
 		// has none yet, applied in the settlement's upsert.
 		if budget.Err() != nil && ctx.Err() == nil {
 			rows = append(rows, catalogRow{name: s.Name, url: s.URL, status: "failed",
-				reason:     "this discovery pass ran out of time before reaching the server",
-				notReached: true})
+				reason: passRanOutOfTime, notReached: true})
 			continue
 		}
 		row, err := e.discoverServer(budget, cfg, vaultIDs, s)
@@ -239,6 +238,12 @@ func (e *Executor) discoverServers(ctx context.Context, cfg domain.EnvironmentCo
 	}
 	return rows, nil
 }
+
+// passRanOutOfTime is the reason a server the pass never got to carries. It is
+// a fallback rather than a verdict — the settlement's upsert keeps a reason an
+// earlier pass earned, because "ran out of time" says what this pass did and
+// would otherwise make a policy refusal read as a scheduling artifact.
+const passRanOutOfTime = "this discovery pass ran out of time before reaching the server"
 
 // discoverServer reaches one server.
 //
@@ -279,15 +284,34 @@ func (e *Executor) discoverServer(ctx context.Context, cfg domain.EnvironmentCon
 	}
 
 	token, cerr := e.mcpBearer(ctx, vaultIDs, s.URL)
-	if cerr != nil {
-		if !credentialUnusable(cerr) {
-			// The lookup failed, not the credential. A failed row would blame
-			// the credential for a pool that blinked; faulting the item retries
-			// the pass.
-			return catalogRow{}, fmt.Errorf("mcp credential for %q: %w", s.Name, cerr)
-		}
-		row.reason = mcpDialReason(cerr)
+	// The clock is read first, and whether or not the credential produced a
+	// verdict of its own. Resolving one can now include an OAuth refresh, which is
+	// seconds of third-party I/O rather than a query, plus a cipher backend that
+	// is a network call — so this is where a discovery budget realistically runs
+	// out, and it runs out the same way on the resolutions that succeed. That is
+	// this pass's failure, not the item's, so it settles like the budget branch
+	// above rather than faulting and throwing away the rows every server before
+	// this one earned.
+	//
+	// Reading it before the credential's verdict, because a resolution cut short
+	// marks some of its failures against the credential — a decrypt that never
+	// returned reads the same as one that was refused — and blaming a healthy
+	// credential for the clock is a verdict this row keeps. Reading it after a
+	// success, because the dial below would otherwise go out on a spent context
+	// and store the timeout as a server that was reached and failed.
+	if ctx.Err() != nil {
+		row.reason = passRanOutOfTime
+		row.notReached = true
 		return row, nil
+	}
+	if cerr != nil {
+		if credentialUnusable(cerr) {
+			row.reason = mcpDialReason(cerr)
+			return row, nil
+		}
+		// The lookup failed, not the credential. A failed row would blame the
+		// credential for a pool that blinked; faulting the item retries the pass.
+		return catalogRow{}, fmt.Errorf("mcp credential for %q: %w", s.Name, cerr)
 	}
 
 	conn, derr := mcp.Connect(ctx, mcp.Config{URL: s.URL, HTTPClient: e.mcpHTTP, BearerToken: token})
