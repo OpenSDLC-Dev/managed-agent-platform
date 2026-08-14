@@ -13,6 +13,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/events"
@@ -308,6 +309,55 @@ func TestMCPCallWithAFailedCredentialLookupFaultsRatherThanAnswers(t *testing.T)
 	}
 	if errs := h.sessionErrors(t); len(errs) != 0 {
 		t.Errorf("a failed lookup emitted %d session errors", len(errs))
+	}
+}
+
+// A pass whose budget runs out inside the credential settles like one that ran
+// out between servers — a notReached row — rather than faulting and throwing
+// away the rows every server before it earned. Resolving a credential used to be
+// a query and a decrypt; with the OAuth refresh it can be seconds of
+// third-party I/O, which is where a discovery budget realistically lands.
+//
+// Driven at discoverServer rather than through a step, because the budget has to
+// expire *inside* the credential: a pass whose budget is already spent when the
+// loop reaches a server never gets that far.
+func TestABudgetSpentInsideTheCredentialSettlesRatherThanFaulting(t *testing.T) {
+	h := mcpHarness(t)
+	url, _ := serveRequiringBearer(t, "never-resolved",
+		mcptest.Tool{Name: "ask", Blocks: []mcptest.Block{{Type: "text", Text: "unreached"}}})
+	h.attachVaultWithMCPCredential(t, url, "never-resolved")
+	h.declareListedMCPServers(t, [2]string{"docs", url})
+	h.enqueueMCP(t)
+	h.breakTheCredentialQuery(t)
+
+	item, err := h.queue.Claim(context.Background(), queue.MCPExec, time.Minute)
+	if err != nil || item == nil {
+		t.Fatalf("claim: %+v %v", item, err)
+	}
+	sess, live, err := h.exec.sessionForRun(context.Background(), item)
+	if err != nil || !live {
+		t.Fatalf("sessionForRun: live=%v err=%v", live, err)
+	}
+	ref := sess.mcpServers[0]
+
+	// With time left, the lookup's own failure faults the item: it says nothing
+	// about the credential, so the pass is worth retrying.
+	if _, err := h.exec.discoverServer(context.Background(), sess.envConfig, sess.vaultIDs, ref); err == nil {
+		t.Fatal("a failed lookup with budget left settled instead of faulting")
+	}
+
+	// With the budget spent, the same failure is this pass running out of time.
+	spent, cancel := context.WithCancel(context.Background())
+	cancel()
+	row, err := h.exec.discoverServer(spent, sess.envConfig, sess.vaultIDs, ref)
+	if err != nil {
+		t.Fatalf("a spent budget faulted the pass: %v", err)
+	}
+	if !row.notReached || row.status != "failed" {
+		t.Errorf("row = %+v, want a failed, not-reached row", row)
+	}
+	if !strings.Contains(row.reason, "ran out of time") {
+		t.Errorf("row reason = %q, want it to say the pass ran out of time", row.reason)
 	}
 }
 

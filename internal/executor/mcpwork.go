@@ -224,8 +224,7 @@ func (e *Executor) discoverServers(ctx context.Context, cfg domain.EnvironmentCo
 		// has none yet, applied in the settlement's upsert.
 		if budget.Err() != nil && ctx.Err() == nil {
 			rows = append(rows, catalogRow{name: s.Name, url: s.URL, status: "failed",
-				reason:     "this discovery pass ran out of time before reaching the server",
-				notReached: true})
+				reason: passRanOutOfTime, notReached: true})
 			continue
 		}
 		row, err := e.discoverServer(budget, cfg, vaultIDs, s)
@@ -239,6 +238,12 @@ func (e *Executor) discoverServers(ctx context.Context, cfg domain.EnvironmentCo
 	}
 	return rows, nil
 }
+
+// passRanOutOfTime is the reason a server the pass never got to carries. It is
+// a fallback rather than a verdict — the settlement's upsert keeps a reason an
+// earlier pass earned, because "ran out of time" says what this pass did and
+// would otherwise make a policy refusal read as a scheduling artifact.
+const passRanOutOfTime = "this discovery pass ran out of time before reaching the server"
 
 // discoverServer reaches one server.
 //
@@ -280,13 +285,23 @@ func (e *Executor) discoverServer(ctx context.Context, cfg domain.EnvironmentCon
 
 	token, cerr := e.mcpBearer(ctx, vaultIDs, s.URL)
 	if cerr != nil {
-		if !credentialUnusable(cerr) {
+		switch {
+		case credentialUnusable(cerr):
+			row.reason = mcpDialReason(cerr)
+		case ctx.Err() != nil:
+			// The pass ran out of time inside the credential — resolving one can
+			// now include an OAuth refresh, which is seconds of third-party I/O
+			// rather than a query. That is this pass's failure, not the item's, so
+			// it settles like the budget branch above: faulting here would throw
+			// away the rows every server before this one earned.
+			row.reason = passRanOutOfTime
+			row.notReached = true
+		default:
 			// The lookup failed, not the credential. A failed row would blame
 			// the credential for a pool that blinked; faulting the item retries
 			// the pass.
 			return catalogRow{}, fmt.Errorf("mcp credential for %q: %w", s.Name, cerr)
 		}
-		row.reason = mcpDialReason(cerr)
 		return row, nil
 	}
 

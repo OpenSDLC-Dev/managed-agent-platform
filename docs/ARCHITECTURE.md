@@ -620,11 +620,16 @@ credential whose `expires_at` is past, or within `refreshLeeway` of it, runs the
 grant (`internal/oauthrefresh`) before its token is handed back, and the rotation is sealed onto
 the row under a compare-and-set on the ciphertext this resolution read — the same best-effort
 persist the validate endpoint performs, for the same reason: the exchange spent seconds on network
-I/O. The dial uses the token it was issued whether or not the write lands. A grant the issuer
-refuses is `ErrCredentialUnusable`; an issuer that is unreachable, rate-limiting, or 5xx-ing is
-not, so the item retries. The token endpoint is credential-supplied, so it is dialled through the
-address guard (`internal/dialguard`) and never redirected — following one would replay the refresh
-token to a target the per-hop guard never approved as a destination.
+I/O. The dial uses the token it was issued whether or not the write lands, and the write itself
+does not inherit the caller's deadline, because by then the issuer may have retired the refresh
+token this exchange spent. A grant the issuer refuses is `ErrCredentialUnusable`, and a refusal
+that follows another resolution's rotation reads that rotation back rather than reporting it; an
+issuer that is unreachable, rate-limiting, or 5xx-ing is not, so the item retries. The token
+endpoint is credential-supplied, so it is dialled through the address guard
+(`internal/dialguard`) and never redirected — following one would replay the refresh token to a
+target the per-hop guard never approved as a destination — and an address that guard refuses is the
+credential's fault rather than a retry, since no waiting makes it reachable
+(`dialguard.ErrRefused`).
 
 ### internal/oauthrefresh
 

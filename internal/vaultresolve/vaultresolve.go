@@ -35,6 +35,7 @@ type Querier interface {
 // only read, and widening their parameter would say otherwise.
 type DB interface {
 	Querier
+	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
 	Exec(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error)
 }
 

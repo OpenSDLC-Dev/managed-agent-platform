@@ -15,6 +15,8 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"strings"
@@ -39,6 +41,22 @@ type Params struct {
 	Scope             *string
 	RefreshToken      string
 	ClientSecret      string
+}
+
+// String and LogValue render Params without its two secrets. This type is
+// shared by callers with different logging habits, and a struct holding a
+// refresh token and a client secret prints both under a bare `%v` or a
+// structured log of the whole value. Redacting here makes that impossible
+// rather than merely absent — one method for each route, because neither
+// covers the other: fmt reaches String, and a structured handler reaches
+// LogValue before it would marshal the fields.
+func (p Params) String() string {
+	return fmt.Sprintf("oauthrefresh.Params{ClientID:%s TokenEndpoint:%s TokenEndpointAuth:%s "+
+		"RefreshToken:[redacted] ClientSecret:[redacted]}", p.ClientID, p.TokenEndpoint, p.TokenEndpointAuth)
+}
+
+func (p Params) LogValue() slog.Value {
+	return slog.StringValue(p.String())
 }
 
 // NewRequest builds the token request. It reads nothing back and dials nothing:

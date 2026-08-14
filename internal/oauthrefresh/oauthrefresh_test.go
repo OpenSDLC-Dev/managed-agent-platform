@@ -1,10 +1,14 @@
 package oauthrefresh_test
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
+	"fmt"
 	"io"
+	"log/slog"
 	"net/url"
+	"strings"
 	"testing"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/oauthrefresh"
@@ -161,6 +165,34 @@ func TestAnUnusableTokenEndpointIsRefusedBeforeTheDial(t *testing.T) {
 	p.TokenEndpoint = "://not a url"
 	if _, err := p.NewRequest(context.Background()); err == nil {
 		t.Fatal("built a request for an unparseable token endpoint")
+	}
+}
+
+// Params holds two secrets, and is shared by callers with different logging
+// habits. Neither route to a string may carry them.
+func TestParamsNeverPrintsItsSecrets(t *testing.T) {
+	p := params()
+	p.TokenEndpointAuth = oauthrefresh.AuthPost
+	p.RefreshToken = "refresh-SECRET"
+	p.ClientSecret = "client-SECRET"
+
+	var logged bytes.Buffer
+	slog.New(slog.NewJSONHandler(&logged, nil)).Info("refreshing", "params", p)
+
+	for label, rendered := range map[string]string{
+		"%v":         fmt.Sprintf("%v", p),
+		"%+v":        fmt.Sprintf("%+v", p),
+		"%s":         fmt.Sprintf("%s", p),
+		"a JSON log": logged.String(),
+	} {
+		for _, secret := range []string{"refresh-SECRET", "client-SECRET"} {
+			if strings.Contains(rendered, secret) {
+				t.Errorf("%s printed %s: %s", label, secret, rendered)
+			}
+		}
+		if !strings.Contains(rendered, "client-1") {
+			t.Errorf("%s dropped the non-secret half too: %s", label, rendered)
+		}
 	}
 }
 
