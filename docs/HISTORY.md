@@ -63,7 +63,7 @@ Delivered as seven slices:
    so a sandbox reaches the servers its agent declares; the discovery pass dialling
    concurrently so declaration order stops deciding who gets reached, and a server it
    cannot reach said out loud on the session's event stream.
-7. **Evals and acceptance** — the `mcp-answer` eval trial, the `RUN_LIVE_MCP_TESTS` tier
+7. **Evals and acceptance** (#410) — the `mcp-answer` eval trial, the `RUN_LIVE_MCP_TESTS` tier
    against a server this project did not write, and the `ant` CLI acceptance run recorded
    below.
 
