@@ -731,8 +731,9 @@ The gate ↔ control-plane config contract and the gate-side client for it (docs
 `requireGateToken`, selected by path so it never crosses the management or worker lanes) returns one
 session's `Config`: the environment's request-level `Networking` policy, the hosts the session's
 resolved agent declares MCP servers at (`MCPServerHosts`, plan 29 slice 6 — sent only under
-`limited` + `allow_mcp_servers`, the one policy that can widen by them, and skipping any declared
-URL the platform would itself refuse to dial), and its resolved, decrypted
+`limited` + `allow_mcp_servers`, the one policy that can widen by them, skipping any declared
+URL the platform would itself refuse to dial, and refusing a wildcard-shaped host, which a host
+set reads as a suffix rule and no URL grammar keeps out of an `mcp_servers` entry), and its resolved, decrypted
 vault `Credential`s (placeholder, plaintext secret, the credential's own `allowed_hosts` arm,
 injection locations, and the non-secret `credential_id`). The endpoint decrypts through the same
 `vaultresolve.Credentials` path the gate-side resolution uses, so a leak-safe error (credential ids,

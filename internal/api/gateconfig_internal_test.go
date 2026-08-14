@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -118,11 +119,21 @@ func TestTheGatesMCPHostsSkipAUrlThePlatformWouldNotDial(t *testing.T) {
 		{"url":"://not-a-url"},
 		{"url":"https:///no-host"},
 		{"url":""},
-		{"url":"http://second.example:8443/mcp"}]}`)
+		{"url":"https://*.example.com/mcp"},
+		{"url":"https://user:pw@second.example:8443/mcp"}]}`)
 
 	got := mcpGateHosts(limited, agent)
+	// The wildcard is the one that would widen rather than narrow: a host set
+	// reads `*.example.com` as a suffix rule, so sending it would open every
+	// subdomain of example.com to the sandbox from one declaration. The userinfo
+	// and the port are dropped with the rest of the URL — only a host is sent.
 	if want := []string{"good.example", "second.example"}; !slices.Equal(got, want) {
-		t.Errorf("hosts = %v, want %v — the port dropped and the rest skipped", got, want)
+		t.Errorf("hosts = %v, want %v", got, want)
+	}
+	for _, h := range got {
+		if strings.ContainsAny(h, "*:@") {
+			t.Errorf("host %q carries more than a host name", h)
+		}
 	}
 	// An agent document that will not decode leaves the gate with no MCP hosts
 	// rather than failing the fetch it is blocking on.

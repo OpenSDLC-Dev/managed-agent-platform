@@ -134,6 +134,17 @@ func mcpGateHosts(net domain.Networking, resolvedAgent []byte) []string {
 		if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Hostname() == "" {
 			continue
 		}
+		// A wildcard means one thing in a host set and nothing at all in a URL,
+		// and the agent grammar constrains an `mcp_servers` url in no way beyond
+		// being a non-empty string (parseMCPServers). So `https://*.example.com/`
+		// is a declaration an author can write today, whose host the platform's
+		// own dial would merely fail to resolve — while a host *set* reads it as
+		// a suffix rule and would open the sandbox to every subdomain of
+		// example.com. Skipped rather than escaped: nothing is listening on the
+		// host it names either way.
+		if strings.Contains(u.Hostname(), "*") {
+			continue
+		}
 		hosts = append(hosts, u.Hostname())
 	}
 	return hosts
