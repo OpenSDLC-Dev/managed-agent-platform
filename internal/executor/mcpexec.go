@@ -389,8 +389,29 @@ func (e *Executor) runMCPTool(ctx context.Context, cfg domain.EnvironmentConfig,
 		}
 		return mcpFailed("MCP tool %q on server %q could not be run: %s", u.name, u.server, msg), failure, nil
 	}
-	blocks, lost := mcpResultBlocks(res.Content)
-	return mcpAnswer{blocks: blocks, isError: res.IsError, content: res.Content, lost: lost}, mcpFailure{}, nil
+	// Before anything renders or spills it: both the result blocks and the spill
+	// file are derived from this content, so scrubbing it once covers both.
+	content := scrubContent(res.Content, token)
+	blocks, lost := mcpResultBlocks(content)
+	return mcpAnswer{blocks: blocks, isError: res.IsError, content: content, lost: lost}, mcpFailure{}, nil
+}
+
+// scrubContent replaces secrets in the three strings a server chooses inside a
+// content block. Data is left alone: it is bytes rather than text — an image, an
+// audio clip, a blob — and a substring replacement there would corrupt the
+// payload without meaningfully covering a secret nothing reads back as text.
+func scrubContent(content []mcp.Content, secrets ...string) []mcp.Content {
+	if len(secrets) == 0 {
+		return content
+	}
+	out := make([]mcp.Content, len(content))
+	for i, c := range content {
+		c.Text = scrubSecrets(c.Text, secrets...)
+		c.MIMEType = scrubSecrets(c.MIMEType, secrets...)
+		c.URI = scrubSecrets(c.URI, secrets...)
+		out[i] = c
+	}
+	return out
 }
 
 // mcpCallHTTP is the client tool calls go through: the executor's own when a

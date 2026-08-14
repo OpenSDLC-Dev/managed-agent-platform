@@ -64,8 +64,8 @@ func (w *authWatch) RoundTrip(req *http.Request) (*http.Response, error) {
 		base = http.DefaultTransport
 	}
 	resp, err := base.RoundTrip(req)
-	// A transport error and a response can arrive together; the status is worth
-	// reading whenever there is one.
+	// A transport error and a response can arrive together, so the status is
+	// read whenever there is one rather than only when err is nil.
 	//
 	// The latest answer replaces the one before it rather than joining it. An
 	// operation is several exchanges and the SDK recovers from some of them — it
@@ -74,15 +74,18 @@ func (w *authWatch) RoundTrip(req *http.Request) (*http.Response, error) {
 	// that failed, not a credential that was refused, and a flag that only ever
 	// rose would report the wrong one.
 	//
+	// An exchange with no response at all replaces it too, with nothing: a
+	// transport failure after a refused probe is a connection that failed, and
+	// leaving the refusal standing would send the operator after a credential
+	// that is fine.
+	//
 	// A DELETE is not one of those exchanges. It is the streamable transport's
 	// session teardown, sent after the operation has already failed, and letting
-	// its status answer for the operation would erase the refusal that caused
-	// the teardown — which is exactly what it did. What no status can speak for
-	// is an exchange that produced no response at all, so an operation also
-	// clears the flag before it begins (see [authWatch.reset]).
-	if resp != nil && req.Method != http.MethodDelete {
-		w.seen.Store(resp.StatusCode == http.StatusUnauthorized ||
-			resp.StatusCode == http.StatusForbidden)
+	// it answer for the operation would erase the refusal that caused the
+	// teardown — which is exactly what it did.
+	if req.Method != http.MethodDelete {
+		w.seen.Store(resp != nil && (resp.StatusCode == http.StatusUnauthorized ||
+			resp.StatusCode == http.StatusForbidden))
 	}
 	return resp, err
 }

@@ -18,6 +18,7 @@ import (
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/events"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/mcp/mcptest"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/queue"
+	sdk "github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
 // attachVaultWithMCPCredential attaches a vault to the session carrying one
@@ -54,6 +55,34 @@ func (h *harness) attachVaultWithMCPCredential(t *testing.T, serverURL, token st
 	if _, err := h.pool.Exec(ctx,
 		`UPDATE sessions SET vault_ids = $2 WHERE id = $1`,
 		h.sid.String(), []string{vaultID}); err != nil {
+		t.Fatalf("attach vault: %v", err)
+	}
+}
+
+// attachVaultWithAnUnopenableCredential is attachVaultWithMCPCredential's
+// unusable twin: the sealed bytes are not this cipher's, the shape a rotated or
+// misconfigured key leaves behind.
+func (h *harness) attachVaultWithAnUnopenableCredential(t *testing.T, serverURL string) {
+	t.Helper()
+	ctx := context.Background()
+	vaultID := domain.NewID("vlt").String()
+	if _, err := h.pool.Exec(ctx,
+		`INSERT INTO vaults (id, display_name) VALUES ($1, 'test vault')`, vaultID); err != nil {
+		t.Fatalf("insert vault: %v", err)
+	}
+	auth, err := json.Marshal(map[string]string{"type": "static_bearer", "mcp_server_url": serverURL})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h.pool.Exec(ctx,
+		`INSERT INTO vault_credentials (id, vault_id, auth_type, auth, secret_ciphertext, secret_key_id, cred_key)
+		 VALUES ($1, $2, 'static_bearer', $3::jsonb, $4, $5, $6)`,
+		domain.NewID("vcrd").String(), vaultID, auth,
+		[]byte("not a ciphertext this key produced"), "test-1", "url:"+serverURL); err != nil {
+		t.Fatalf("insert mcp credential: %v", err)
+	}
+	if _, err := h.pool.Exec(ctx,
+		`UPDATE sessions SET vault_ids = $2 WHERE id = $1`, h.sid.String(), []string{vaultID}); err != nil {
 		t.Fatalf("attach vault: %v", err)
 	}
 }
@@ -474,6 +503,80 @@ func TestStorableReasonScrubsASecretItsOwnRedactionWouldPutBack(t *testing.T) {
 	}
 }
 
+// A server that succeeds can quote the token just as well as one that fails —
+// in the answer it returns, and in the tool metadata it publishes. Both land in
+// storage the failure path's redaction never runs on: the result event and its
+// spill, and mcp_catalogs.tools, which is also what the model is offered.
+func TestMCPScrubsATokenEchoedInASuccessfulAnswer(t *testing.T) {
+	h := mcpHarness(t)
+	url := serveEchoingTheToken(t)
+	h.attachVaultWithMCPCredential(t, url, "sk-echoed-back")
+	h.declareListedMCPServers(t, [2]string{"docs", url})
+	h.appendMCPToolUse(t, "docs", "ask", `{}`)
+	h.enqueueMCP(t)
+
+	h.stepOnce(t)
+
+	results := h.mcpResults(t)
+	if len(results) != 1 {
+		t.Fatalf("got %d results, want the call answered", len(results))
+	}
+	rendered := string(mustJSON(t, results))
+	// The redacted form, so this cannot pass on an answer that never carried it.
+	if !strings.Contains(rendered, "you sent Bearer ***") {
+		t.Errorf("result = %s, want the echoed credential replaced", rendered)
+	}
+	if strings.Contains(rendered, "sk-echoed-back") {
+		t.Errorf("the tool result carries the vault's token: %s", rendered)
+	}
+}
+
+// The listing half, stored in mcp_catalogs and handed to the model as the tool's
+// own definition.
+func TestMCPScrubsATokenEchoedInAToolDefinition(t *testing.T) {
+	h := mcpHarness(t)
+	url := serveEchoingTheToken(t)
+	h.attachVaultWithMCPCredential(t, url, "sk-echoed-back")
+	h.declareMCPServers(t, [2]string{"docs", url})
+	h.enqueueMCP(t)
+
+	h.stepOnce(t)
+
+	row := h.catalog(t)["docs"]
+	if row.status != "ready" {
+		t.Fatalf("catalog row = %q (%s), want ready", row.status, row.reason)
+	}
+	stored := string(mustJSON(t, row.tools))
+	if !strings.Contains(stored, "you sent Bearer ***") {
+		t.Errorf("stored tools = %s, want the echoed credential replaced", stored)
+	}
+	if strings.Contains(stored, "sk-echoed-back") {
+		t.Errorf("the stored listing carries the vault's token: %s", stored)
+	}
+}
+
+// serveEchoingTheToken is an MCP server that quotes the Authorization header it
+// received back into both halves of what it publishes: the description of the
+// tool it lists, and the text of the answer it returns.
+func serveEchoingTheToken(t *testing.T) string {
+	t.Helper()
+	inner := sdk.NewStreamableHTTPHandler(func(r *http.Request) *sdk.Server {
+		echo := "you sent " + r.Header.Get("Authorization")
+		s := sdk.NewServer(&sdk.Implementation{Name: "echoing-server", Version: "1"}, nil)
+		sdk.AddTool(s, &sdk.Tool{Name: "ask", Description: echo},
+			func(context.Context, *sdk.CallToolRequest, map[string]any) (
+				*sdk.CallToolResult, map[string]any, error) {
+				return &sdk.CallToolResult{
+					Content: []sdk.Content{&sdk.TextContent{Text: echo}},
+				}, nil, nil
+			})
+		return s
+	}, nil)
+	ts := httptest.NewServer(inner)
+	t.Cleanup(ts.Close)
+	return ts.URL
+}
+
 // The discovery path stores its reason in a catalog row rather than an event,
 // and reaches redaction by a different line, so it is pinned separately.
 func TestMCPDiscoveryDoesNotStoreATokenTheServerQuotedBack(t *testing.T) {
@@ -628,29 +731,7 @@ func TestMCPCallWithAnUnopenableCredentialDoesNotDialAnonymously(t *testing.T) {
 	}))
 	defer ts.Close()
 
-	// A credential whose sealed bytes this cipher cannot open — the shape a
-	// rotated or misconfigured key leaves behind.
-	ctx := context.Background()
-	vaultID := domain.NewID("vlt").String()
-	if _, err := h.pool.Exec(ctx,
-		`INSERT INTO vaults (id, display_name) VALUES ($1, 'test vault')`, vaultID); err != nil {
-		t.Fatalf("insert vault: %v", err)
-	}
-	auth, err := json.Marshal(map[string]string{"type": "static_bearer", "mcp_server_url": ts.URL})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := h.pool.Exec(ctx,
-		`INSERT INTO vault_credentials (id, vault_id, auth_type, auth, secret_ciphertext, secret_key_id, cred_key)
-		 VALUES ($1, $2, 'static_bearer', $3::jsonb, $4, $5, $6)`,
-		domain.NewID("vcrd").String(), vaultID, auth,
-		[]byte("not a ciphertext this key produced"), "test-1", "url:"+ts.URL); err != nil {
-		t.Fatalf("insert mcp credential: %v", err)
-	}
-	if _, err := h.pool.Exec(ctx,
-		`UPDATE sessions SET vault_ids = $2 WHERE id = $1`, h.sid.String(), []string{vaultID}); err != nil {
-		t.Fatalf("attach vault: %v", err)
-	}
+	h.attachVaultWithAnUnopenableCredential(t, ts.URL)
 
 	h.declareListedMCPServers(t, [2]string{"docs", ts.URL})
 	h.appendMCPToolUse(t, "docs", "ask", `{}`)
@@ -675,27 +756,7 @@ func TestMCPDiscoveryWithAnUnopenableCredentialNamesTheCredential(t *testing.T) 
 	url, seen := serveRequiringBearer(t, "never-sent",
 		mcptest.Tool{Name: "ask", Blocks: []mcptest.Block{{Type: "text", Text: "ok"}}})
 
-	ctx := context.Background()
-	vaultID := domain.NewID("vlt").String()
-	if _, err := h.pool.Exec(ctx,
-		`INSERT INTO vaults (id, display_name) VALUES ($1, 'test vault')`, vaultID); err != nil {
-		t.Fatalf("insert vault: %v", err)
-	}
-	auth, err := json.Marshal(map[string]string{"type": "static_bearer", "mcp_server_url": url})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := h.pool.Exec(ctx,
-		`INSERT INTO vault_credentials (id, vault_id, auth_type, auth, secret_ciphertext, secret_key_id, cred_key)
-		 VALUES ($1, $2, 'static_bearer', $3::jsonb, $4, $5, $6)`,
-		domain.NewID("vcrd").String(), vaultID, auth,
-		[]byte("not a ciphertext this key produced"), "test-1", "url:"+url); err != nil {
-		t.Fatalf("insert mcp credential: %v", err)
-	}
-	if _, err := h.pool.Exec(ctx,
-		`UPDATE sessions SET vault_ids = $2 WHERE id = $1`, h.sid.String(), []string{vaultID}); err != nil {
-		t.Fatalf("attach vault: %v", err)
-	}
+	h.attachVaultWithAnUnopenableCredential(t, url)
 
 	h.declareMCPServers(t, [2]string{"docs", url})
 	h.enqueueMCP(t)

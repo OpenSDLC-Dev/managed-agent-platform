@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/mcp"
@@ -124,9 +125,14 @@ func TestAListingThatFailsForAnotherReasonIsNotMarkedRefused(t *testing.T) {
 // a vault credential the dial is not anonymous, and with one the vault's token
 // replaces the URL's — the configured, rotatable credential wins.
 func TestAResolvedTokenReplacesTheURLsOwnCredential(t *testing.T) {
+	// Guarded: the handler runs on the server's goroutine and the assertions on
+	// the test's, and nothing between them synchronises.
+	var mu sync.Mutex
 	var seen []string
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
 		seen = append(seen, r.Header.Get("Authorization"))
+		mu.Unlock()
 		w.WriteHeader(http.StatusInternalServerError)
 	}))
 	defer ts.Close()
@@ -138,13 +144,19 @@ func TestAResolvedTokenReplacesTheURLsOwnCredential(t *testing.T) {
 		{name: "a credential resolved", token: "VAULT-TOKEN", want: "Bearer VAULT-TOKEN"},
 	} {
 		t.Run(row.name, func(t *testing.T) {
+			mu.Lock()
 			seen = nil
+			mu.Unlock()
+
 			conn, err := mcp.Connect(context.Background(), mcp.Config{
 				URL: withUserinfo, HTTPClient: &http.Client{}, BearerToken: row.token})
 			if err == nil {
 				_ = conn.Close()
 				t.Fatal("expected the handshake to fail against a 500")
 			}
+
+			mu.Lock()
+			defer mu.Unlock()
 			if len(seen) == 0 {
 				t.Fatal("the server saw no request at all")
 			}
@@ -283,6 +295,52 @@ func TestARecoveredRefusalDoesNotSpeakForALaterFailure(t *testing.T) {
 			t.Errorf("a 500 that followed a recovered 401 was reported as a refused credential: %v", err)
 		}
 	})
+
+	// And its response-less twin: the exchange after the refusal never answered
+	// at all, which says as little about the credential as a 500 does.
+	t.Run("when the exchange after it never answered", func(t *testing.T) {
+		conn, err := mcp.Connect(context.Background(), mcp.Config{
+			URL: serveRefusingDiscoveryThenHangingUp(t), HTTPClient: &http.Client{}, BearerToken: "tok"})
+		if err == nil {
+			_ = conn.Close()
+			t.Fatal("expected the handshake to fail")
+		}
+		if errors.Is(err, mcp.ErrUnauthorized) {
+			t.Errorf("a dropped connection after a recovered 401 was reported as a refusal: %v", err)
+		}
+	})
+}
+
+// serveRefusingDiscoveryThenHangingUp answers the discovery probe 401 and then
+// closes the connection on the exchange the SDK falls back to, so that one
+// produces a transport error and no response at all.
+func serveRefusingDiscoveryThenHangingUp(t *testing.T) string {
+	t.Helper()
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Errorf("read body: %v", err)
+			return
+		}
+		var msg struct {
+			Method string `json:"method"`
+		}
+		_ = json.Unmarshal(body, &msg)
+		if msg.Method == "server/discover" {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		// No status, no body: hijack and drop, which is what a middlebox that
+		// resets the connection looks like to the client.
+		conn, _, err := http.NewResponseController(w).Hijack()
+		if err != nil {
+			t.Errorf("hijack: %v", err)
+			return
+		}
+		_ = conn.Close()
+	}))
+	t.Cleanup(ts.Close)
+	return ts.URL
 }
 
 // connectRefusingDiscovery opens a connection to a server that refuses the

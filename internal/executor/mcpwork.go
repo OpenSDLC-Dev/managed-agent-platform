@@ -302,7 +302,7 @@ func (e *Executor) discoverServer(ctx context.Context, cfg domain.EnvironmentCon
 		row.reason = mcpDialReason(lerr)
 		return row, nil
 	}
-	row.status, row.reason, row.tools = "ready", "", storableTools(tools)
+	row.status, row.reason, row.tools = "ready", "", storableTools(tools, token)
 	return row, nil
 }
 
@@ -338,15 +338,16 @@ func (e *Executor) discoverServer(ctx context.Context, cfg domain.EnvironmentCon
 // and the rest are dropped rather than truncated: half a schema is a contract the
 // server never published, and dropping is already what this function does with a
 // tool it cannot store.
-func storableTools(tools []mcp.Tool) []mcp.Tool {
+func storableTools(tools []mcp.Tool, secrets ...string) []mcp.Tool {
 	out := make([]mcp.Tool, 0, len(tools))
 	budget := maxCatalogTools
 	for _, t := range tools {
 		if schemaCarriesNUL(t.InputSchema) {
 			continue
 		}
-		t.Name = toolset.SanitizeText(t.Name)
-		t.Description = toolset.SanitizeText(t.Description)
+		t.Name = scrubSecrets(toolset.SanitizeText(t.Name), secrets...)
+		t.Description = scrubSecrets(toolset.SanitizeText(t.Description), secrets...)
+		t.InputSchema = json.RawMessage(scrubSecrets(string(t.InputSchema), secrets...))
 		size := len(t.Name) + len(t.Description) + len(t.InputSchema)
 		if size > budget {
 			break
@@ -480,17 +481,32 @@ func storableReason(reason, endpoint string, secrets ...string) string {
 		reason = strings.ReplaceAll(reason, form.text, form.safe)
 	}
 	reason = urlInText.ReplaceAllStringFunc(reason, redactURL)
-	for _, secret := range secrets {
-		if secret != "" {
-			reason = strings.ReplaceAll(reason, secret, "***")
-		}
-	}
+	reason = scrubSecrets(reason, secrets...)
 	reason = toolset.SanitizeText(reason)
 	reason = strings.ToValidUTF8(reason, "")
 	if len(reason) > maxCatalogReason {
 		reason = strings.ToValidUTF8(reason[:maxCatalogReason], "") + "…"
 	}
 	return reason
+}
+
+// scrubSecrets replaces each secret wherever it appears. Callers pass the token
+// the dial carried, which a server may quote back in any text it chooses: an
+// error message, a tool's description, a tool result. Unlike the endpoint, it is
+// nowhere else at rest in the clear, and unlike the endpoint it is what the next
+// dial authenticates with.
+//
+// A substring replacement, and that is its limit: a server that percent-encodes,
+// base64s or splits the token before quoting it leaves something no rule over
+// text recognises. What it does close is the ordinary case, which is a server
+// echoing the header it received.
+func scrubSecrets(s string, secrets ...string) string {
+	for _, secret := range secrets {
+		if secret != "" {
+			s = strings.ReplaceAll(s, secret, "***")
+		}
+	}
+	return s
 }
 
 // endpointRenderings lists the ways the declared endpoint can appear in a
