@@ -311,6 +311,36 @@ func ToolUseAtLeast(name string, n int, class Class) Grader {
 	}
 }
 
+// MCPToolUse asserts the agent called one server's tool at least once.
+//
+// It reads agent.mcp_tool_use rather than agent.tool_use, which is the point:
+// the wire keeps MCP calls in their own event carrying the bare tool name and
+// the server in two fields, and the prefixed mcp__{server}__{tool} the model was
+// offered exists only inside a provider request. A grader that looked for the
+// prefixed name on the log would be asserting a naming scheme the log
+// deliberately does not carry.
+func MCPToolUse(server, tool string, class Class) Grader {
+	return Grader{
+		Name:  "mcp-tool-use:" + server + ":" + tool,
+		Class: class,
+		Check: func(_ *testing.T, tr *Trial) error {
+			var seen []string
+			for _, use := range eventsOfType(tr, "agent.mcp_tool_use") {
+				got := fmt.Sprintf("%v:%v", use["mcp_server_name"], use["name"])
+				if got == server+":"+tool {
+					return nil
+				}
+				seen = append(seen, got)
+			}
+			if len(seen) == 0 {
+				return fmt.Errorf("no agent.mcp_tool_use at all, want %s:%s", server, tool)
+			}
+			return fmt.Errorf("mcp calls were %s, want %s:%s",
+				strings.Join(seen, ", "), server, tool)
+		},
+	}
+}
+
 // NoToolUse asserts the agent ran no tools at all — the negative half of the
 // suite. Without it, a platform that ran tools nobody asked for would look
 // identical to one that behaved.
