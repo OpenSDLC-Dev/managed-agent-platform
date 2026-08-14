@@ -49,6 +49,14 @@ const defaultTunnelIdleTimeout = 5 * time.Minute
 // goroutine when Config.ResponseHeaderTimeout is unset.
 const defaultResponseHeaderTimeout = 60 * time.Second
 
+// dialTimeout bounds the connect phase, which neither TLSHandshakeTimeout nor
+// ResponseHeaderTimeout covers. Without it a dial to an address that blackholes
+// packets is bounded only by the request context — which the sandbox controls —
+// so concurrent stalled dials would hold serving goroutines and sockets for the
+// OS connect timeout. It is a constant rather than a Config field because the
+// gate owns its dialer outright (see Config).
+const dialTimeout = 10 * time.Second
+
 // errBodyTooLarge signals a request body over the substitution size limit; the
 // handler maps it to 413 rather than the generic read-failure 502.
 var errBodyTooLarge = errors.New("request body exceeds the gate substitution limit")
@@ -123,27 +131,36 @@ func guardTheDial(ctx context.Context) context.Context {
 	return context.WithValue(ctx, mcpGuardKey{}, struct{}{})
 }
 
+// newDialer is the one dialer the gate opens every socket through — both
+// handlers, and the transport under handlePlain.
+//
+// The floor runs only for a dial the agent's own declarations admitted:
+// `allowed_hosts` is an operator's list and this proxy is the operator's own
+// egress, so narrowing that half would be a plan 12 decision rather than this
+// one. ControlContext rather than Control, because the marker is what tells the
+// two apart and only the context carries it; Go calls it once per candidate
+// address, so a dual-stack or multi-A name is judged on every address it is
+// actually about to connect to.
+func newDialer(ipAllowed func(net.IP) error) *net.Dialer {
+	floor := dialguard.Control(ipAllowed)
+	return &net.Dialer{
+		Timeout: dialTimeout,
+		ControlContext: func(ctx context.Context, network, address string, c syscall.RawConn) error {
+			if ctx.Value(mcpGuardKey{}) == nil {
+				return nil
+			}
+			return floor(network, address, c)
+		},
+	}
+}
+
 // New builds a Gate from cfg.
 func New(cfg Config) *Gate {
 	ipAllowed := cfg.IPAllowed
 	if ipAllowed == nil {
 		ipAllowed = dialguard.IPAllowed
 	}
-	// The floor runs only for a dial the agent's own declarations admitted:
-	// `allowed_hosts` is an operator's list and this proxy is the operator's own
-	// egress, so narrowing that half would be a plan 12 decision rather than this
-	// one. ControlContext rather than Control, because the marker is what tells
-	// the two apart and only the context carries it; Go calls it once per
-	// candidate address, so a dual-stack or multi-A name is judged on every
-	// address it is actually about to connect to.
-	floor := dialguard.Control(ipAllowed)
-	d := net.Dialer{ControlContext: func(ctx context.Context, network, address string, c syscall.RawConn) error {
-		if ctx.Value(mcpGuardKey{}) == nil {
-			return nil
-		}
-		return floor(network, address, c)
-	}}
-	dial := d.DialContext
+	dial := newDialer(ipAllowed).DialContext
 	headerTimeout := cfg.ResponseHeaderTimeout
 	if headerTimeout <= 0 {
 		headerTimeout = defaultResponseHeaderTimeout

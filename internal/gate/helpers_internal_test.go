@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/dialguard"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
 )
 
@@ -21,6 +22,20 @@ func TestDefaultTransportConfig(t *testing.T) {
 	}
 	if tr.ResponseHeaderTimeout != 60*time.Second {
 		t.Errorf("default ResponseHeaderTimeout = %v, want 60s", tr.ResponseHeaderTimeout)
+	}
+}
+
+// The connect phase has a bound of its own. The transport's timeouts start
+// after it, and the gate owns its dialer outright, so nothing else can supply
+// one: a dial to an address that blackholes packets would otherwise be bounded
+// only by the request context, which the sandbox controls.
+func TestTheGatesDialerBoundsTheConnectPhase(t *testing.T) {
+	d := newDialer(dialguard.IPAllowed)
+	if d.Timeout <= 0 {
+		t.Errorf("dialer Timeout = %v, want a finite bound on the connect phase", d.Timeout)
+	}
+	if d.ControlContext == nil {
+		t.Error("dialer has no ControlContext, so the address floor never runs")
 	}
 }
 
