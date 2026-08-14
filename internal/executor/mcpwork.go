@@ -273,7 +273,7 @@ func (e *Executor) discoverServer(ctx context.Context, cfg domain.EnvironmentCon
 
 	token, err := e.mcpBearer(ctx, vaultIDs, s.URL)
 	if err != nil {
-		row.reason = err.Error()
+		row.reason = mcpDialReason(err)
 		return row
 	}
 

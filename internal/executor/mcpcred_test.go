@@ -363,3 +363,54 @@ func TestMCPCallWithAnUnopenableCredentialDoesNotDialAnonymously(t *testing.T) {
 		t.Errorf("session error type = %q, want mcp_authentication_failed_error", got)
 	}
 }
+
+// A credential that cannot be opened is an authentication failure on the
+// discovery path too, and its row says so: the two paths decide it with one
+// predicate, so a reason that named neither the credential nor the failure would
+// send an operator looking at the network.
+func TestMCPDiscoveryWithAnUnopenableCredentialNamesTheCredential(t *testing.T) {
+	h := mcpHarness(t)
+	url, seen := serveRequiringBearer(t, "never-sent",
+		mcptest.Tool{Name: "ask", Blocks: []mcptest.Block{{Type: "text", Text: "ok"}}})
+
+	ctx := context.Background()
+	vaultID := domain.NewID("vlt").String()
+	if _, err := h.pool.Exec(ctx,
+		`INSERT INTO vaults (id, display_name) VALUES ($1, 'test vault')`, vaultID); err != nil {
+		t.Fatalf("insert vault: %v", err)
+	}
+	auth, err := json.Marshal(map[string]string{"type": "static_bearer", "mcp_server_url": url})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h.pool.Exec(ctx,
+		`INSERT INTO vault_credentials (id, vault_id, auth_type, auth, secret_ciphertext, secret_key_id, cred_key)
+		 VALUES ($1, $2, 'static_bearer', $3::jsonb, $4, $5, $6)`,
+		domain.NewID("vcrd").String(), vaultID, auth,
+		[]byte("not a ciphertext this key produced"), "test-1", "url:"+url); err != nil {
+		t.Fatalf("insert mcp credential: %v", err)
+	}
+	if _, err := h.pool.Exec(ctx,
+		`UPDATE sessions SET vault_ids = $2 WHERE id = $1`, h.sid.String(), []string{vaultID}); err != nil {
+		t.Fatalf("attach vault: %v", err)
+	}
+
+	h.declareMCPServers(t, [2]string{"docs", url})
+	h.enqueueMCP(t)
+
+	h.stepOnce(t)
+
+	if got := seen(); got != "" {
+		t.Errorf("discovery dialled anyway with Authorization %q", got)
+	}
+	row := h.catalog(t)["docs"]
+	if row.status != "failed" {
+		t.Fatalf("catalog row = %q, want failed", row.status)
+	}
+	if !strings.HasPrefix(row.reason, "authentication failed:") {
+		t.Errorf("row reason = %q, want it to name an authentication failure", row.reason)
+	}
+	if !strings.Contains(row.reason, "credential") {
+		t.Errorf("row reason = %q, want it to name the credential", row.reason)
+	}
+}

@@ -324,7 +324,7 @@ func (e *Executor) runMCPTool(ctx context.Context, cfg domain.EnvironmentConfig,
 	if err != nil {
 		msg := storableReason(err.Error(), endpoint)
 		return mcpFailed("MCP server %q could not be reached: %s", u.server, msg),
-			mcpFailure{message: msg, authentication: true}
+			mcpFailure{message: msg, authentication: mcpAuthFailure(err)}
 	}
 
 	conn, err := mcp.Connect(ctx, mcp.Config{
@@ -332,7 +332,7 @@ func (e *Executor) runMCPTool(ctx context.Context, cfg domain.EnvironmentConfig,
 	if err != nil {
 		msg := storableReason(err.Error(), endpoint)
 		return mcpFailed("MCP server %q could not be reached: %s", u.server, msg),
-			mcpFailure{message: msg, authentication: errors.Is(err, mcp.ErrUnauthorized)}
+			mcpFailure{message: msg, authentication: mcpAuthFailure(err)}
 	}
 	defer conn.Close()
 
@@ -341,7 +341,7 @@ func (e *Executor) runMCPTool(ctx context.Context, cfg domain.EnvironmentConfig,
 		msg := storableReason(err.Error(), endpoint)
 		failure := mcpFailure{message: msg}
 		switch {
-		case errors.Is(err, mcp.ErrUnauthorized):
+		case mcpAuthFailure(err):
 			// A credential the server refused, or one it required and this dial
 			// did not carry. Either way the operator has something to fix, and
 			// it is not the network.
