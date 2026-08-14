@@ -135,7 +135,11 @@ func mcpHost(t *testing.T) string {
 		}
 	}
 	t.Fatal("no private IPv4 interface address: an MCP fixture cannot listen anywhere " +
-		"the platform's dial guard will dial back")
+		"the platform's dial guard will dial back. IPv4 and not IPv6 on purpose — " +
+		"egress.ValidateHostEntry refuses any host carrying a colon, so an MCP endpoint " +
+		"at an IPv6 literal is one whose sandbox the gate would never be widened for " +
+		"(plan 29 slice 6a), and a trial built on one would exercise a shape the " +
+		"platform itself declines")
 	return ""
 }
 

@@ -997,7 +997,12 @@ func RequiresActionRaised(class Class) Grader {
 		Name:  "requires-action-raised",
 		Class: class,
 		Check: func(_ *testing.T, tr *Trial) error {
-			if len(eventsOfType(tr, "agent.tool_use")) == 0 {
+			// Both gated families. An MCP call is agent.mcp_tool_use and gates
+			// on the same confirmation, so counting only agent.tool_use made
+			// this pass an MCP-only trial by having nothing to look at — which
+			// is the shape of a grader that cannot fail.
+			if len(eventsOfType(tr, "agent.tool_use"))+
+				len(eventsOfType(tr, "agent.mcp_tool_use")) == 0 {
 				return nil
 			}
 			for _, ev := range eventsOfType(tr, "session.status_idle") {
@@ -1046,6 +1051,40 @@ func EvaluatedPermissionAsk(name string, class Class) Grader {
 					return fmt.Errorf("%s tool_use %v evaluated_permission = %v, want ask",
 						name, ev["id"], ev["evaluated_permission"])
 				}
+			}
+			return nil
+		},
+	}
+}
+
+// MCPEvaluatedPermissionAsk asserts one server's tool was stamped as needing a
+// human before it ran. It is the MCP twin of EvaluatedPermissionAsk, and unlike
+// that one it **requires** the call: a grader that passes when the call it is
+// about never happened cannot fail, which is exactly how the plain
+// RequiresActionRaised came to say nothing on an MCP-only trial.
+//
+// The field is the wire's own: agent.mcp_tool_use carries evaluated_permission
+// beside mcp_server_name and the bare tool name.
+func MCPEvaluatedPermissionAsk(server, tool string, class Class) Grader {
+	return Grader{
+		Name:  "mcp-evaluated-permission-ask:" + server + ":" + tool,
+		Class: class,
+		Check: func(_ *testing.T, tr *Trial) error {
+			var found bool
+			for _, ev := range eventsOfType(tr, "agent.mcp_tool_use") {
+				if ev["mcp_server_name"] != server || ev["name"] != tool {
+					continue
+				}
+				found = true
+				// Every call, not the first — a gate that held only for the
+				// opening call is the shape its twin checks for too.
+				if ev["evaluated_permission"] != "ask" {
+					return fmt.Errorf("%s:%s mcp_tool_use %v evaluated_permission = %v, want ask",
+						server, tool, ev["id"], ev["evaluated_permission"])
+				}
+			}
+			if !found {
+				return fmt.Errorf("no agent.mcp_tool_use for %s:%s, so nothing was gated", server, tool)
 			}
 			return nil
 		},

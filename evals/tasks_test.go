@@ -86,10 +86,13 @@ func mcpAnswer() Task {
 			OnAsk: &Ask{Allow: true},
 		}},
 		Graders: []Grader{
-			// Platform: the gate is the toolset's documented default, so a call
-			// that ran unattended is the platform's own regression and nothing
-			// to do with the model.
+			// Platform for both: the gate is the toolset's documented default, so
+			// a call that ran unattended is the platform's own regression and
+			// nothing to do with the model. The per-call one is what actually
+			// holds it — RequiresActionRaised asks whether the session stopped
+			// at all, which any gated call in the trial would satisfy.
 			RequiresActionRaised(Platform),
+			MCPEvaluatedPermissionAsk("vault", "read_passphrase", Platform),
 			// Either for the two below, as with the other answer-style trials:
 			// the passphrase exists nowhere but the tool's result, so a right
 			// answer is unambiguous platform evidence, while a missing one is as
