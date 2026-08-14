@@ -1408,3 +1408,38 @@ func TestAVerdictThatBeatTheBudgetIsNotRelabelledAsScheduling(t *testing.T) {
 		t.Errorf("row = %+v, want a dial the budget cut short marked as scheduling", cut)
 	}
 }
+
+// A server that answered has nothing for an operator to hear, so it must not
+// reach the session log at all. Pinned alongside a server that did fail, because
+// the two together are what a mixed session looks like: the announcement has to
+// be about one row rather than about the pass, and the event has to name which.
+func TestAServerThatAnsweredIsNeverAnnouncedAsAFailure(t *testing.T) {
+	down := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "no", http.StatusInternalServerError)
+	}))
+	defer down.Close()
+
+	h := mcpHarness(t)
+	healthy := mcptest.Server(t, mcptest.Tool{Name: "ok_tool"})
+	h.declareMCPServers(t, [2]string{"docs", healthy}, [2]string{"github", down.URL})
+	h.enqueueMCP(t)
+
+	h.stepOnce(t)
+
+	cat := h.catalog(t)
+	if got := cat["docs"]; got.status != "ready" {
+		t.Fatalf("row = %+v, want the healthy server listed", got)
+	}
+	if got := cat["github"]; got.status != "failed" {
+		t.Fatalf("row = %+v, want the unreachable server recorded as a failure", got)
+	}
+	errs := h.errorsOfType(t, "mcp_connection_failed_error")
+	if len(errs) != 1 {
+		t.Fatalf("session errors = %d, want exactly one — the server that answered "+
+			"has no failure to announce", len(errs))
+	}
+	if got := errs[0]["mcp_server_name"]; got != "github" {
+		t.Errorf("mcp_server_name = %v, want the server that failed and not the one that "+
+			"answered", got)
+	}
+}

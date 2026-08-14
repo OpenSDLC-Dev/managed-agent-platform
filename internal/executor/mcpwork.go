@@ -40,9 +40,9 @@ import (
 //
 // The row is the retry state, and its absence means something different from
 // its presence. No row means the server has never been reached, a `failed` row
-// means an attempt that did not work and is re-attempted on the next turn (the
-// reference retries "on the next session.status_idle to session.status_running
-// transition"), and a `ready` row is a listing the brain can offer. Nothing here
+// means an attempt that did not work and is re-attempted on the next work cycle
+// (the reference retries "on the next session.status_idle to
+// session.status_running transition"), and a `ready` row is a listing the brain can offer. Nothing here
 // disables a server for the rest of a session: the sources document no such
 // state, and inventing one would outlive the outage that caused it.
 //
@@ -901,6 +901,11 @@ func (e *Executor) settleMCP(ctx context.Context, item *queue.Item, rows []catal
 				return err
 			}
 			failures = append(failures, ev)
+			// Marked as we go, not only as read: two declared entries can name
+			// one server at one url — the write path rejects that, the stored
+			// resolved_agent this reads back need not — and the set was read
+			// before the loop, so the second would not see the first's upsert.
+			announced[r.name] = true
 		}
 		toolsJSON, err := json.Marshal(r.tools)
 		if err != nil {
