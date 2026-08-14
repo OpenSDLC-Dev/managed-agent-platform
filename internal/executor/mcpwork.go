@@ -818,15 +818,20 @@ func (e *Executor) settleMCP(ctx context.Context, item *queue.Item, rows []catal
 		if declared[r.name] != r.url {
 			continue
 		}
-		// A server the platform could not reach is said out loud, once. Not the
-		// rows this pass simply did not finish with: those are its own
+		// A server the platform could not reach is said out loud, on the
+		// cadence it is re-dialled at rather than on every turn: once per work
+		// cycle. What makes that so is the row itself — a new work cycle
+		// deletes a session's failed rows (internal/api, startWorkCycle, the
+		// reference's documented retry-on-idle→running), so the next pass finds
+		// nothing here and speaks again, while the several turns within one
+		// cycle find the row this pass wrote and stay quiet. That is the right
+		// cadence for a transient failure: an operator hears "still down" once
+		// per message they send, not once per turn the model takes, and the row
+		// carries the current reason in between.
+		//
+		// Not the rows this pass simply did not finish with: those are its own
 		// scheduling, and there is no connection behind them for an operator to
-		// go and heal. Not a repeat, either — the pass runs every turn, so a
-		// server that has been down for an hour would otherwise fill the log
-		// with the same line; the row carries the current reason for anyone who
-		// looks. A row that healed is never re-dialled (undiscoveredServers
-		// skips a `ready` one), so the only transition this can miss is a
-		// failure that changes kind mid-run, which the row still records.
+		// go and heal.
 		if r.status == "failed" && !r.notReached && !failing[r.name] {
 			ev, err := mcpFailureEvent(r.name, mcpFailure{
 				message: r.reason, authentication: r.authentication})
@@ -909,8 +914,9 @@ func (e *Executor) settleMCP(ctx context.Context, item *queue.Item, rows []catal
 }
 
 // failingServers is the set of a session's MCP servers whose catalog row already
-// records a failure, which is what keeps a discovery failure from being
-// announced again on every turn that re-attempts it.
+// records a failure. It is what keeps a discovery failure from being announced
+// again on every turn within one work cycle — and, because a new work cycle
+// deletes those rows, what lets the next cycle say it again.
 func failingServers(ctx context.Context, tx pgx.Tx, sid domain.ID) (map[string]bool, error) {
 	rows, err := tx.Query(ctx,
 		`SELECT server_name FROM mcp_catalogs WHERE session_id = $1 AND status = 'failed'`,

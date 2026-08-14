@@ -1085,13 +1085,15 @@ func TestDiscoveryStopsWhenThePassRunsOutOfTime(t *testing.T) {
 	}
 }
 
-// A server the discovery pass could not reach is said out loud, once. The row
-// alone was the whole record before this: an operator watching the session's
-// events saw a model quietly offered fewer tools than the agent declared.
+// A server the discovery pass could not reach is said out loud on the cadence it
+// is re-dialled at: once per work cycle, not once per turn. The row alone was
+// the whole record before this — an operator watching the session's events saw a
+// model quietly offered fewer tools than the agent declared.
 //
-// Once, because the pass re-attempts a failed server on every turn — so the
-// second pass over the same broken server must add nothing.
-func TestADiscoveryFailureIsAnnouncedOnceAndNotOnEveryTurn(t *testing.T) {
+// Both halves are pinned here, because the quiet half is what a wrong dedupe
+// gets right by accident: a second pass within the cycle must add nothing, and a
+// new cycle must speak again.
+func TestADiscoveryFailureIsAnnouncedOncePerWorkCycle(t *testing.T) {
 	down := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		http.Error(w, "no", http.StatusInternalServerError)
 	}))
@@ -1118,11 +1120,27 @@ func TestADiscoveryFailureIsAnnouncedOnceAndNotOnEveryTurn(t *testing.T) {
 		t.Errorf("message = %q, want the row's own reason", msg)
 	}
 
-	// The same broken server, one turn later.
+	// The same broken server, another turn in the same work cycle.
 	h.enqueueMCP(t)
 	h.stepOnce(t)
 	if n := len(h.errorsOfType(t, "mcp_connection_failed_error")); n != 1 {
 		t.Errorf("session errors after a second pass = %d, want still 1 — the pass runs every turn", n)
+	}
+
+	// A new work cycle drops the session's failed rows, which is what puts those
+	// servers back in the never-reached state a turn suspends for (internal/api,
+	// startWorkCycle — the reference's documented retry cadence). The next pass
+	// therefore dials again, and a server still down is worth saying again: the
+	// operator sent another message, and this is the answer to it.
+	if _, err := h.pool.Exec(context.Background(),
+		`DELETE FROM mcp_catalogs WHERE session_id = $1 AND status = 'failed'`,
+		h.sid.String()); err != nil {
+		t.Fatalf("start a new work cycle: %v", err)
+	}
+	h.enqueueMCP(t)
+	h.stepOnce(t)
+	if n := len(h.errorsOfType(t, "mcp_connection_failed_error")); n != 2 {
+		t.Errorf("session errors after a new work cycle = %d, want 2 — the operator asked again", n)
 	}
 }
 
