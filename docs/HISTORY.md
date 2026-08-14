@@ -2163,7 +2163,7 @@ the issue and in the plan. Public docs (self-hosted-sandboxes / tools / events-a
 
 docs/plan/15_web-tools.md is archived complete: the last two `agent_toolset_20260401` tools execute in the platform executor's process on both deployment modes, behind config-driven Tavily/Jina backends. Slice 1: the `internal/webtool` seam — Searcher/Fetcher interfaces, tavily/jina adapters, shared contract suite, `RUN_LIVE_WEB_TESTS` live tier (PR #221). Slices 2+3, one PR (#224): domain `SearchResultBlock` + `Result.SearchResults` + eight-tool definitions + openai `search_result` flattening; the `web_exec` work kind (migration 0015), the web-first hold-back (brain settlement + confirmation resume), the executor web driver (no sandbox, both env kinds), worker/sandbox-pass filters, env wiring (compose passthrough + helm `executor.extraEnv`), and the acceptance run below. Review hardening landed in-PR: fail-closed fetch construction, the metadata-charged output budget, NUL sanitization, the http/https scheme check at the executor seam, the stray-web-call heal, claim-order alternation. Follow-ups split out rather than absorbed: #222 (double-answer race, pre-existing), #223 (sandbox NUL output, pre-existing), #225 (allowed-domains allowlist), #226 (spill-to-file). Slice 4: the remaining DIVERGENCES registrations (#225/#226), the README status line, the plan archive. Deliberate divergences and inferences are in docs/DIVERGENCES.md; the as-built system in docs/ARCHITECTURE.md.
 
-## MCP client and `mcp_toolset` (plan 29) — archived 2026-08-15, delivered in eleven PRs (#45)
+## MCP client and `mcp_toolset` (plan 29) — archived 2026-08-15, delivered in twelve PRs (#45)
 
 Closed #45: an agent configured with `mcp_servers` + `mcp_toolset` now calls a real MCP
 server's tools. Before this plan both were accepted on the wire and stored, the brain never
@@ -2176,7 +2176,7 @@ Delivered as seven slices:
 2. **The client and the catalog** (#352, #377) — `internal/mcp` over the official go-sdk,
    the dial-address guard beneath it, the `mcp_catalogs` table, and the `mcp_exec`
    discovery driver. Inert: nothing offered to the model yet.
-3. **A tool call can stop and ask** (#377) — the human-confirmation arm, on the same
+3. **A tool call can stop and ask** (#387) — the human-confirmation arm, on the same
    `always_ask` default the rest of the platform gates on.
 4. **Activation** (#398, #402, #404) — the execution driver and MCP-first settlement, the
    brain offering a catalog's listing as `mcp__{server}__{tool}`, and an oversized answer
