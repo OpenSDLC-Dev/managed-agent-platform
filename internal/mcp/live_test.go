@@ -6,6 +6,8 @@ import (
 	"net"
 	"net/http"
 	"regexp"
+	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -105,21 +107,56 @@ func scrub(err error, endpoint, token string) string {
 	return out
 }
 
-// endpointForms lists the spellings the configured endpoint appears in. Three
-// writers put it into a message and none agree: whatever echoes the
-// configuration writes the declared bytes, the MCP client writes
-// url.URL.Redacted's (password "xxxxx"), and net/http writes its own ("***").
+// endpointForms lists the spellings the configured endpoint appears in, the way
+// the executor's endpointRenderings does and for the same reason: nothing that
+// writes it agrees on one. Whatever echoes the configuration writes the declared
+// bytes, url.Parse normalizes so its own rendering may differ from those, the
+// MCP client writes url.URL.Redacted's (password "xxxxx") and net/http writes
+// its own ("***") — and url.Error renders through %q, which escapes an embedded
+// quote or backslash and so spells every one of them a second way.
+//
+// The empty-port variant is there because net/http drops a trailing ":" from a
+// host before it writes the URL (Go issue 14836), so an endpoint declared with
+// one appears without it.
 func endpointForms(endpoint string) []string {
-	forms := []string{endpoint}
 	u, err := url.Parse(endpoint)
-	if err != nil || u.User == nil {
-		return forms
+	if err != nil || u.Host == "" {
+		return []string{endpoint}
 	}
-	if _, ok := u.User.Password(); !ok {
-		return forms
+	variants := []*url.URL{u}
+	if trimmed := strings.TrimSuffix(u.Host, ":"); trimmed != u.Host {
+		withoutPort := *u
+		withoutPort.Host = trimmed
+		variants = append(variants, &withoutPort)
 	}
-	redacted := u.Redacted()
-	return append(forms, redacted, strings.Replace(redacted, ":xxxxx@", ":***@", 1))
+
+	var forms []string
+	seen := map[string]bool{"": true}
+	for i, v := range variants {
+		var written []string
+		if i == 0 {
+			written = append(written, endpoint)
+		}
+		written = append(written, v.String(), v.Redacted())
+		if _, hasPassword := v.User.Password(); hasPassword {
+			written = append(written, strings.Replace(
+				v.String(), v.User.String()+"@", v.User.Username()+":***@", 1))
+		}
+		// Each of those again as %q renders it, without the surrounding quotes:
+		// those belong to the sentence around the URL, not to the URL.
+		for _, form := range written[:len(written):len(written)] {
+			if quoted := strconv.Quote(form); len(quoted) > 2 {
+				written = append(written, quoted[1:len(quoted)-1])
+			}
+		}
+		for _, form := range written {
+			if !seen[form] {
+				seen[form] = true
+				forms = append(forms, form)
+			}
+		}
+	}
+	return forms
 }
 
 // redactURL cuts one matched URL to scheme://host, handing back trailing
@@ -173,11 +210,18 @@ func TestTheLiveTierNeverQuotesItsConfiguration(t *testing.T) {
 	// that dropped the packet would fail or hang the merge gate.
 	closed := closedPort(t)
 	client := &http.Client{Timeout: 10 * time.Second}
+	//
+	// The last three combine them, which is what defeats both passes at once:
+	// %q escapes the quote or the backslash, so no declared form matches, and
+	// the space ends the shape match before the credential.
 	for _, query := range []string{
 		"api_key=sekrit",
 		"note='&api_key=sekrit",
 		"agent=my agent&api_key=sekrit",
 		`note="x"&api_key=sekrit`,
+		`note="x" y&api_key=sekrit`,
+		`note=x\ y&api_key=sekrit`,
+		"agent=my agent&api_key=sekrit#frag",
 	} {
 		dialled := "http://user:pw@" + closed + "/mcp?" + query
 		_, err := client.Get(dialled)
@@ -207,6 +251,29 @@ func TestTheLiveTierNeverQuotesItsConfiguration(t *testing.T) {
 			t.Errorf("scrub dropped the host, which the message needs to be "+
 				"readable: %s", out)
 		}
+	}
+
+	// An endpoint whose declared bytes are not what url.Parse renders: the
+	// scheme is normalized to lower case, so a rule that only knew the declared
+	// spelling would miss the URL net/http actually writes.
+	declared := "HTTP://user:pw@" + closed + "/mcp?agent=my agent&api_key=sekrit"
+	if _, err := client.Get(declared); err == nil {
+		t.Error("a dial to a closed port should fail")
+	} else if got := scrub(err, declared, token); strings.Contains(got, "sekrit") {
+		t.Errorf("scrub kept a secret from a normalized endpoint: %s", got)
+	}
+
+	// The empty-port spelling belongs to the same class — net/http drops a
+	// trailing ":" from the host before writing the URL (Go issue 14836) — but
+	// it cannot be dialled here: an empty port means 80, which is not this
+	// test's to assume anything about. So the rendering itself is what is
+	// checked, against the spelling net/http would write.
+	emptyPort := "http://user:pw@mcp.example.com:/mcp?agent=my agent&api_key=sekrit"
+	wantForm := "http://user:***@mcp.example.com/mcp?agent=my agent&api_key=sekrit"
+	if !slices.Contains(endpointForms(emptyPort), wantForm) {
+		t.Errorf("endpointForms(%q) does not offer %q, the spelling net/http writes "+
+			"for a host with an empty port: %q", emptyPort, wantForm,
+			endpointForms(emptyPort))
 	}
 
 	// A URL that is not the configured endpoint — a redirect target a server
