@@ -517,7 +517,7 @@ func valueCarriesNUL(v any) bool {
 }
 
 // maxCatalogReason caps a stored failure reason. A `failed` row is re-attempted
-// on every turn and rewritten each time, and the text on it is a server's to
+// on every work cycle and rewritten each time, and the text on it is a server's to
 // choose: MCP response bodies are bounded at mcp.MaxResponseBytes, so a
 // JSON-RPC error message arrives able to carry megabytes into a column with no
 // length of its own. Nothing reading a reason needs more than the first lines

@@ -979,8 +979,8 @@ func (h *harness) errorsOfType(t *testing.T, typ string) []map[string]any {
 // TestATarpitServerDoesNotStarveTheOnesDeclaredAfterIt pins what the pass owes
 // a session with more than one server. Serially, position decided reach: a
 // server that accepts a connection and never answers spent the whole budget, so
-// the servers behind it were recorded unreached on every turn for the life of
-// the session and the model was never offered their tools. Position is not a
+// the servers behind it were recorded unreached for the life of the session and
+// the model was never offered their tools. Position is not a
 // fact about a server.
 //
 // The aggregate budget is still what stops the pass — the tarpit's own row is
@@ -1129,11 +1129,12 @@ func TestADiscoveryFailureIsAnnouncedOncePerWorkCycle(t *testing.T) {
 		t.Errorf("message = %v, want the row's own reason %q", got, want)
 	}
 
-	// The same broken server, another turn in the same work cycle.
+	// A second pass inside the same work cycle — an agent patch adding a server
+	// enqueues one, so this is reachable without a new cycle.
 	h.enqueueMCP(t)
 	h.stepOnce(t)
 	if n := len(h.errorsOfType(t, "mcp_connection_failed_error")); n != 1 {
-		t.Errorf("session errors after a second pass = %d, want still 1 — the pass runs every turn", n)
+		t.Errorf("session errors after a second pass = %d, want still 1 — the row this pass wrote is what keeps it quiet", n)
 	}
 
 	// A new work cycle drops the session's failed rows, which is what puts those
