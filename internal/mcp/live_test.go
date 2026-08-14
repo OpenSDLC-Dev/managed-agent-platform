@@ -2,6 +2,8 @@ package mcp_test
 
 import (
 	"context"
+	"errors"
+	"net"
 	"net/http"
 	"regexp"
 	"strings"
@@ -164,16 +166,32 @@ func TestTheLiveTierNeverQuotesItsConfiguration(t *testing.T) {
 	// The queries carry characters that can end a URL match — an apostrophe, a
 	// raw space, a double quote — because bounding the match wrongly is how a
 	// shape rule fails, and a query is where the credential is.
+	//
+	// The port is one this test opened and closed, so it is known shut rather
+	// than assumed so, and the client carries a deadline: this runs on every
+	// `make verify`, where a host that answered on a guessed port or a firewall
+	// that dropped the packet would fail or hang the merge gate.
+	closed := closedPort(t)
+	client := &http.Client{Timeout: 10 * time.Second}
 	for _, query := range []string{
 		"api_key=sekrit",
 		"note='&api_key=sekrit",
 		"agent=my agent&api_key=sekrit",
 		`note="x"&api_key=sekrit`,
 	} {
-		dialled := "http://user:pw@127.0.0.1:1/mcp?" + query
-		_, err := http.Get(dialled)
+		dialled := "http://user:pw@" + closed + "/mcp?" + query
+		_, err := client.Get(dialled)
 		if err == nil {
 			t.Fatalf("a dial to a closed port should fail: ?%s", query)
+		}
+		// A refusal, not the client's deadline. Something listening on that
+		// address would leave the request in an accept backlog until the
+		// timeout, and an error that arrived that way says nothing about the
+		// shape net/http writes for a failed dial.
+		var timeout net.Error
+		if errors.As(err, &timeout) && timeout.Timeout() {
+			t.Fatalf("the dial to %s timed out rather than being refused, so the "+
+				"port is not closed and this fixture proves nothing", closed)
 		}
 		if !strings.Contains(err.Error(), "sekrit") {
 			t.Fatalf("this fixture no longer carries the query credential, so it "+
@@ -185,7 +203,7 @@ func TestTheLiveTierNeverQuotesItsConfiguration(t *testing.T) {
 				t.Errorf("scrub kept %q from ?%s: %s", secret, query, out)
 			}
 		}
-		if !strings.Contains(out, "http://127.0.0.1:1") {
+		if !strings.Contains(out, "http://"+closed) {
 			t.Errorf("scrub dropped the host, which the message needs to be "+
 				"readable: %s", out)
 		}
@@ -221,6 +239,22 @@ func TestTheLiveTierNeverQuotesItsConfiguration(t *testing.T) {
 	if got := scrub(errFor("plain failure"), "", ""); got != "plain failure" {
 		t.Errorf("scrub with no configuration rewrote the message: %q", got)
 	}
+}
+
+// closedPort returns a loopback address nothing is listening on, by taking one
+// and giving it back. Guessing a low port instead would rest on nothing running
+// there, which is not this test's to assume on a machine it does not own.
+func closedPort(t *testing.T) string {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("reserve a port: %v", err)
+	}
+	addr := ln.Addr().String()
+	if err := ln.Close(); err != nil {
+		t.Fatalf("release the reserved port: %v", err)
+	}
+	return addr
 }
 
 func errFor(msg string) error { return &staticError{msg} }

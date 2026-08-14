@@ -326,9 +326,13 @@ func TestCorePackToolResultsJoined(t *testing.T) {
 	}
 
 	// The families must not cross-join: an MCP result carrying a built-in call's
-	// id answers nothing, and correlating on the wrong field would hide it.
+	// id answers nothing, and correlating on the wrong field would hide it. The
+	// built-in call gets its own proper result, so the built-in half passes and
+	// the failure can only come from the orphan MCP result — without it the
+	// built-in half reds first and this proves nothing about the MCP arm.
 	crossed := trialWith([]map[string]any{
 		{"type": "agent.tool_use", "id": "toolu_1", "name": "bash"},
+		{"type": "agent.tool_result", "tool_use_id": "toolu_1"},
 		{"type": "agent.mcp_tool_result", "mcp_tool_use_id": "toolu_1"},
 	})
 	if err := joined.Check(t, crossed); err == nil {
