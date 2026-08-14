@@ -77,6 +77,69 @@ func TestMCPAnswerWithinTheBudgetProvisionsNoSandbox(t *testing.T) {
 	}
 }
 
+// The file holds the whole answer, not its first block: a server may split a
+// long document across several, and a spill that kept only the first would hand
+// the model a file that looks complete and is not. Order is the server's, since
+// that is the order the answer would have read in.
+func TestMCPSpillHoldsEveryTextBlockInOrder(t *testing.T) {
+	half := strings.Repeat("a", toolset.MaxOutputBytes/2+2_000)
+	tail := strings.Repeat("b", toolset.MaxOutputBytes/2+2_000)
+	url := mcptest.Server(t, mcptest.Tool{Name: "report", Blocks: []mcptest.Block{
+		{Type: "text", Text: half},
+		{Type: "resource", URI: "file:///notes.txt", MIMEType: "text/plain", Text: "the middle"},
+		{Type: "text", Text: tail},
+	}})
+	h := mcpHarness(t)
+	h.declareListedMCPServers(t, [2]string{"docs", url})
+	useID := h.appendMCPToolUse(t, "docs", "report", `{}`)
+	h.enqueueMCP(t)
+
+	h.stepOnce(t)
+
+	path := "/tmp/tool_outputs/" + useID + ".txt"
+	want := half + "\nthe middle\n" + tail
+	if got := h.prov.sb.files[path]; got != want {
+		t.Errorf("spill file holds %d bytes, want the %d of every block joined in order",
+			len(got), len(want))
+	}
+}
+
+// A sandbox that cannot be provisioned is not a new way for a call to fail — the
+// same bargain a failed write makes, one step earlier — and it is not tried
+// again for the rest of the pass: a provision costs an image pull and a lock,
+// and a pass of twenty oversized calls would pay it twenty times to learn what
+// the first call already knew.
+func TestMCPSpillWithoutASandboxFallsBackToPlainTruncation(t *testing.T) {
+	huge := strings.Repeat("a", toolset.MaxOutputBytes+5_000)
+	url := mcptest.Server(t, mcptest.Tool{Name: "search", Result: huge})
+	h := mcpHarness(t)
+	h.prov.provisionErr = errors.New("no capacity")
+	h.declareListedMCPServers(t, [2]string{"docs", url})
+	useID := h.appendMCPToolUse(t, "docs", "search", `{"n":1}`)
+	h.appendMCPToolUse(t, "docs", "search", `{"n":2}`)
+	h.enqueueMCP(t)
+
+	h.stepOnce(t)
+
+	if n := h.prov.provisions; n != 1 {
+		t.Errorf("sandbox provisions = %d, want 1 — a failed provision is not retried per call", n)
+	}
+	results := h.mcpResults(t)
+	if len(results) != 2 {
+		t.Fatalf("results = %v, want both calls answered", results)
+	}
+	if results[0]["is_error"] == true {
+		t.Errorf("is_error = true, want a missing sandbox to leave the answer alone")
+	}
+	text := blockText(t, results[0])
+	if strings.Contains(text, "/tmp/tool_outputs/"+useID) {
+		t.Errorf("the model was pointed at a file that was never written: %.200q", text)
+	}
+	if !strings.Contains(text, "[output truncated]") {
+		t.Errorf("answer does not say it was truncated: %.200q", text)
+	}
+}
+
 // Two oversized answers in one pass share one sandbox: provisioning is per pass
 // and not per call, so a turn whose model made several large MCP calls does not
 // pay for a container each.
