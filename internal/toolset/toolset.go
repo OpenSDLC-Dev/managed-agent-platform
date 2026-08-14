@@ -142,7 +142,7 @@ func (r Runner) dispatch(ctx context.Context, id domain.ID, name string, input j
 	// the rest. Every other tool's output is ephemeral — the one place the
 	// spill earns its keep.
 	if name != "read" {
-		if notice := r.spill(ctx, id, res.Content); notice != "" {
+		if notice := Spill(ctx, r.Sandbox, id, res.Content); notice != "" {
 			res.Content = TruncateRunes(res.Content, MaxOutputBytes) + "\n" + notice
 			return res, nil
 		}
@@ -157,18 +157,24 @@ func (r Runner) dispatch(ctx context.Context, id domain.ID, name string, input j
 // neither its path nor its preview shape (docs/DIVERGENCES.md, #226).
 const spillDir = "/tmp/tool_outputs"
 
-// spill writes an output past MaxOutputBytes to the sandbox whole and returns
+// Spill writes an output past MaxOutputBytes to the sandbox whole and returns
 // the truncation notice naming the file — or "" when the output fits, or when
 // the write fails: the caller then truncates exactly as before, so the spill
 // is an enhancement, never a new failure mode for the call. The web tools
 // never reach it — their driver runs with no sandbox at all, a deliberate
 // divergence (web content is re-fetchable; a command's output is not).
-func (r Runner) spill(ctx context.Context, id domain.ID, full string) string {
+//
+// Exported for the executor's MCP driver, which answers a call outside this
+// Runner and spills against the same budget, to the same directory, under the
+// same id-per-call convention (plan 29 slice 4c). One convention, so a model
+// that has learned where its truncated output goes is right whichever tool
+// produced it.
+func Spill(ctx context.Context, sb sandbox.Sandbox, id domain.ID, full string) string {
 	if len(full) <= MaxOutputBytes {
 		return ""
 	}
 	path := spillDir + "/" + id.String() + ".txt"
-	if err := r.Sandbox.WriteFile(ctx, path, []byte(full)); err != nil {
+	if err := sb.WriteFile(ctx, path, []byte(full)); err != nil {
 		return ""
 	}
 	return "[output truncated; full output written to " + path + "]"

@@ -600,8 +600,11 @@ func TestMCPHugeTextAnswerIsTruncatedToTheToolBudget(t *testing.T) {
 		t.Fatalf("results = %d, want one", len(results))
 	}
 	blocks := blocksOf(t, results[0])
-	if len(blocks) != 1 || blocks[0]["type"] != "text" {
-		t.Fatalf("content = %v, want one text block", blocks)
+	// The answer itself, first. A trailing block naming the spill file follows
+	// it on a cloud session (mcpspill_test.go); what this test pins is that the
+	// answer arrives truncated rather than dropped.
+	if len(blocks) == 0 || blocks[0]["type"] != "text" {
+		t.Fatalf("content = %v, want a leading text block", blocks)
 	}
 	text := blocks[0]["text"].(string)
 	if len(text) > toolset.MaxOutputBytes+64 {
@@ -642,13 +645,13 @@ func TestMCPAnswerBeyondTheBudgetIsCutWithANotice(t *testing.T) {
 	blocks := blocksOf(t, results[0])
 	// Exactly how many of the four fit depends on each block's JSON overhead,
 	// so the assertion is the shape rather than the count: some were kept, some
-	// were dropped, and the last block says so.
-	if len(blocks) < 2 || len(blocks) >= 5 {
+	// were dropped, and a notice says so. A cloud session adds one more trailing
+	// block naming the spill file (mcpspill_test.go).
+	if len(blocks) < 2 || len(blocks) > 6 {
 		t.Fatalf("got %d blocks, want some kept, some dropped, and a notice", len(blocks))
 	}
-	notice, _ := blocks[len(blocks)-1]["text"].(string)
-	if !strings.Contains(notice, "content block(s) of this answer were dropped") {
-		t.Errorf("last block = %q, want it to name what was dropped", notice)
+	if !strings.Contains(blockText(t, results[0]), "content block(s) of this answer were dropped") {
+		t.Errorf("content = %v, want a notice naming what was dropped", blocks)
 	}
 	total := 0
 	for _, b := range blocks {
@@ -734,7 +737,9 @@ func TestMCPLargeTextResourceArrivesTruncated(t *testing.T) {
 		t.Fatalf("results = %d, want one", len(results))
 	}
 	blocks := blocksOf(t, results[0])
-	if len(blocks) != 1 || blocks[0]["type"] != "document" {
+	// The document itself, first — a cloud session adds a trailing text block
+	// naming the spill file its full body went to (mcpspill_test.go).
+	if len(blocks) == 0 || blocks[0]["type"] != "document" {
 		t.Fatalf("content = %v, want the document itself rather than a notice", blocks)
 	}
 	src, ok := blocks[0]["source"].(map[string]any)
@@ -1046,7 +1051,9 @@ func TestMCPExemptionFollowsTheCappedBlockNotThePosition(t *testing.T) {
 	h.stepOnce(t)
 
 	blocks := blocksOf(t, h.mcpResults(t)[0])
-	if len(blocks) != 2 {
+	// The thumbnail and the report, in that order — a cloud session adds a
+	// trailing block naming the spill file (mcpspill_test.go).
+	if len(blocks) < 2 {
 		t.Fatalf("content = %v, want the thumbnail and the report", blocks)
 	}
 	if blocks[0]["type"] != "image" {

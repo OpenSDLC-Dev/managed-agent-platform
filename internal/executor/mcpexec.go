@@ -105,7 +105,8 @@ func (e *Executor) unansweredMCPToolUses(ctx context.Context, sid domain.ID) ([]
 // same all-or-nothing the web driver and discovery use: the reclaim re-runs the
 // calls this pass had not answered.
 func (e *Executor) runMCPTools(ctx context.Context, cfg domain.EnvironmentConfig,
-	declared []mcpServerRef, ready map[string]string, uses []mcpToolUse) ([]events.NewEvent, error, error) {
+	declared []mcpServerRef, ready map[string]string, spill *mcpSpiller,
+	uses []mcpToolUse) ([]events.NewEvent, error, error) {
 
 	endpoints := make(map[string]string, len(declared))
 	for _, s := range declared {
@@ -130,7 +131,7 @@ func (e *Executor) runMCPTools(ctx context.Context, cfg domain.EnvironmentConfig
 		if endpoint, refusal := callEndpoint(endpoints, ready, u.server); refusal != "" {
 			res = mcpFailed("%s", refusal)
 		} else {
-			res, failure = e.runMCPTool(ctx, cfg, endpoint, u)
+			res, failure = e.runMCPTool(ctx, cfg, endpoint, spill, u)
 		}
 		// One label value for every MCP call, rather than the call's own name.
 		// The metric's tool name has until now been drawn from a fixed set of
@@ -181,7 +182,8 @@ func (e *Executor) answerMCPCalls(ctx context.Context, item *queue.Item, sess se
 		return err
 	}
 	kctx, keeper := e.queue.KeepLease(ctx, item, e.cfg.LeaseTTL)
-	results, faultErr, runErr := e.runMCPTools(kctx, sess.envConfig, sess.mcpServers, ready, calls)
+	spill := &mcpSpiller{exec: e, sid: item.SessionID, sess: sess}
+	results, faultErr, runErr := e.runMCPTools(kctx, sess.envConfig, sess.mcpServers, ready, spill, calls)
 	if kerr := keeper.Close(); kerr != nil {
 		return fmt.Errorf("lease keeper: %w", kerr)
 	}
@@ -287,7 +289,7 @@ func callEndpoint(declared, ready map[string]string, server string) (string, str
 // failure from touching another's call — the same reason discovery dials each
 // server on its own.
 func (e *Executor) runMCPTool(ctx context.Context, cfg domain.EnvironmentConfig,
-	endpoint string, u mcpToolUse) (mcpAnswer, string) {
+	endpoint string, spill *mcpSpiller, u mcpToolUse) (mcpAnswer, string) {
 
 	host, err := mcpEndpointHost(endpoint)
 	if err != nil {
@@ -320,7 +322,14 @@ func (e *Executor) runMCPTool(ctx context.Context, cfg domain.EnvironmentConfig,
 		}
 		return mcpFailed("MCP tool %q on server %q could not be run: %s", u.name, u.server, msg), failure
 	}
-	return mcpAnswer{blocks: mcpResultBlocks(res.Content), isError: res.IsError}, ""
+	blocks := mcpResultBlocks(res.Content)
+	// The notice rides on top of the budget, as the dropped-block notice does:
+	// it is this platform's line about the server's answer, and a pointer to
+	// the spill file is worthless if the pointer is what gets cut.
+	if notice := spill.write(ctx, u.id, mcpAnswerText(res.Content)); notice != "" {
+		blocks = append(blocks, textBlock(notice))
+	}
+	return mcpAnswer{blocks: blocks, isError: res.IsError}, ""
 }
 
 // mcpCallHTTP is the client tool calls go through: the executor's own when a
@@ -434,8 +443,11 @@ func mcpResultBlocks(content []mcp.Content) []map[string]any {
 //
 // The trailing notice rides on top of the budget rather than inside it: it is
 // this platform's text about the server's, and it is a couple of hundred bytes.
-// Spilling an over-budget answer to a file the model can read instead of
-// truncating it is plan 29 slice 4b's, alongside the sandbox tools' spill.
+// The spill notice that may follow it rides on top for the same reason
+// (mcpspill.go): a pointer to the file holding the rest is worthless if the
+// pointer is what gets cut. The two say different things and both can be true —
+// this one counts blocks that left the answer, that one names where the answer's
+// text went, and an image the budget dropped is in neither.
 func capMCPBlocks(blocks []map[string]any) []map[string]any {
 	budget := toolset.MaxOutputBytes
 	exempted := false
