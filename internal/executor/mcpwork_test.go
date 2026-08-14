@@ -1443,3 +1443,28 @@ func TestAServerThatAnsweredIsNeverAnnouncedAsAFailure(t *testing.T) {
 			"answered", got)
 	}
 }
+
+// Two declared entries naming one server at one url each earn a row, and the
+// set of names already announced is read once before the settlement walks them —
+// so without marking as it goes, the second would not see the first and the
+// session would hear the same failure twice. The write path rejects this shape
+// (internal/api, wire.go's duplicate-name check), which is exactly why it is
+// tested here: what reaches this code is a stored resolved_agent, and the
+// provenance the dial width already refuses to assume away is the same one.
+func TestOneServerDeclaredTwiceIsAnnouncedOnce(t *testing.T) {
+	down := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "no", http.StatusInternalServerError)
+	}))
+	defer down.Close()
+
+	h := mcpHarness(t)
+	h.declareMCPServers(t, [2]string{"github", down.URL}, [2]string{"github", down.URL})
+	h.enqueueMCP(t)
+
+	h.stepOnce(t)
+
+	if n := len(h.errorsOfType(t, "mcp_connection_failed_error")); n != 1 {
+		t.Errorf("session errors = %d, want one: two entries for one server are one "+
+			"server being down", n)
+	}
+}
