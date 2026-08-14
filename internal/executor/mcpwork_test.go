@@ -69,6 +69,29 @@ func (h *harness) declareMCPServers(t *testing.T, servers ...[2]string) {
 	}
 }
 
+// declareListedMCPServers is declareMCPServers plus the catalog row discovery
+// would have written for each: the state every call-path test starts from,
+// because a model is only ever offered an MCP tool that some listing published,
+// and the driver dials a call only where that listing was read.
+func (h *harness) declareListedMCPServers(t *testing.T, servers ...[2]string) {
+	t.Helper()
+	h.declareMCPServers(t, servers...)
+	for _, s := range servers {
+		h.listMCPServer(t, s[0], s[1])
+	}
+}
+
+func (h *harness) listMCPServer(t *testing.T, server, url string) {
+	t.Helper()
+	if _, err := h.pool.Exec(context.Background(),
+		`INSERT INTO mcp_catalogs (session_id, server_name, url, status)
+		 VALUES ($1, $2, $3, 'ready')
+		 ON CONFLICT (session_id, server_name) DO UPDATE SET url = EXCLUDED.url, status = 'ready'`,
+		h.sid.String(), server, url); err != nil {
+		t.Fatalf("write mcp catalog row: %v", err)
+	}
+}
+
 // setNetworking rewrites the session's environment config networking block.
 func (h *harness) setNetworking(t *testing.T, net domain.Networking) {
 	t.Helper()

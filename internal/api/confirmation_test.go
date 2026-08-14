@@ -47,9 +47,10 @@ func appendAskToolUse(t *testing.T, s *tserver, sessionID, name string) string {
 }
 
 // appendAskMCPToolUse plants the MCP twin: the same gate, one field wider. The
-// brain does not commit these yet — MCP tools reach no model until the catalog
-// is offered at request assembly — so the shape is planted straight onto the log
-// exactly as the reference declares it (name, mcp_server_name, input).
+// shape is planted straight onto the log, exactly as the reference declares it
+// (name, mcp_server_name, input), rather than driven through a brain turn —
+// these tests are about what the API does with the event, and planting it keeps
+// them independent of what a model happens to call.
 func appendAskMCPToolUse(t *testing.T, s *tserver, sessionID, server, name string) string {
 	t.Helper()
 	return appendGatedToolUse(t, s, sessionID, domain.EventAgentMCPToolUse,

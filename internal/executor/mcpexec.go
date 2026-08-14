@@ -9,7 +9,6 @@ import (
 	"net/http"
 	"slices"
 	"time"
-	"unicode/utf8"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/events"
@@ -106,7 +105,7 @@ func (e *Executor) unansweredMCPToolUses(ctx context.Context, sid domain.ID) ([]
 // same all-or-nothing the web driver and discovery use: the reclaim re-runs the
 // calls this pass had not answered.
 func (e *Executor) runMCPTools(ctx context.Context, cfg domain.EnvironmentConfig,
-	declared []mcpServerRef, uses []mcpToolUse) ([]events.NewEvent, error, error) {
+	declared []mcpServerRef, ready map[string]string, uses []mcpToolUse) ([]events.NewEvent, error, error) {
 
 	endpoints := make(map[string]string, len(declared))
 	for _, s := range declared {
@@ -127,7 +126,12 @@ func (e *Executor) runMCPTools(ctx context.Context, cfg domain.EnvironmentConfig
 		if i > 0 && start.After(deadline) {
 			break
 		}
-		res, failure := e.runMCPTool(ctx, cfg, endpoints[u.server], u)
+		res, failure := mcpAnswer{}, ""
+		if endpoint, refusal := callEndpoint(endpoints, ready, u.server); refusal != "" {
+			res = mcpFailed("%s", refusal)
+		} else {
+			res, failure = e.runMCPTool(ctx, cfg, endpoint, u)
+		}
 		// One label value for every MCP call, rather than the call's own name.
 		// The metric's tool name has until now been drawn from a fixed set of
 		// eight, and a server's name and its tools' names are both third-party
@@ -172,8 +176,12 @@ func (e *Executor) runMCPTools(ctx context.Context, cfg domain.EnvironmentConfig
 func (e *Executor) answerMCPCalls(ctx context.Context, item *queue.Item, sess sessionRun, calls []mcpToolUse) error {
 	// Keep the lease across the calls: a tool that takes its time would
 	// otherwise outlast a fixed TTL and lose the item mid-call.
+	ready, err := e.readyEndpoints(ctx, item.SessionID)
+	if err != nil {
+		return err
+	}
 	kctx, keeper := e.queue.KeepLease(ctx, item, e.cfg.LeaseTTL)
-	results, faultErr, runErr := e.runMCPTools(kctx, sess.envConfig, sess.mcpServers, calls)
+	results, faultErr, runErr := e.runMCPTools(kctx, sess.envConfig, sess.mcpServers, ready, calls)
 	if kerr := keeper.Close(); kerr != nil {
 		return fmt.Errorf("lease keeper: %w", kerr)
 	}
@@ -241,9 +249,38 @@ func mcpFailed(format string, args ...any) mcpAnswer {
 	return mcpAnswer{blocks: []map[string]any{textBlock(fmt.Sprintf(format, args...))}, isError: true}
 }
 
-// runMCPTool answers one call. The second return is a transport failure worth a
-// session.error, empty when the call reached the server at all — including when
-// the tool itself failed, which is a working server reporting a working failure.
+// callEndpoint says where one outstanding call may be dialled, or — as the
+// second return, in the words the model reads — why it may not be dialled at
+// all. Nothing is dialled on a refusal: neither case is a connection that
+// failed, so neither is worth a session.error either.
+//
+// Two things have to agree. The agent must still declare the server, because
+// mcp_servers is one of the two mid-session-mutable fields and the turn that
+// called this tool may be older than the spec. And the session's listing for it
+// must have been read at that same url: the model was offered this tool because
+// *that* endpoint published it, so dialling a new address would send a call
+// built from one server's listing to a different server, under a name the second
+// one never published — and whatever came back would be an answer to a question
+// nobody asked. The patch that repoints a server already deletes the rows it
+// invalidates, so ordinarily the listing is simply gone; this check does not
+// depend on that delete having happened.
+func callEndpoint(declared, ready map[string]string, server string) (string, string) {
+	url := declared[server]
+	if url == "" {
+		return "", fmt.Sprintf("MCP server %q is no longer configured on this agent.", server)
+	}
+	if ready[server] != url {
+		return "", fmt.Sprintf(
+			"MCP server %q now points somewhere else than the server that offered this tool; "+
+				"the call was not made.", server)
+	}
+	return url, ""
+}
+
+// runMCPTool answers one call at the endpoint callEndpoint cleared. The second
+// return is a transport failure worth a session.error, empty when the call
+// reached the server at all — including when the tool itself failed, which is a
+// working server reporting a working failure.
 //
 // The connection is per call rather than per pass. A turn's MCP calls are few,
 // a handshake is one round trip, and a connection each keeps one server's
@@ -252,13 +289,6 @@ func mcpFailed(format string, args ...any) mcpAnswer {
 func (e *Executor) runMCPTool(ctx context.Context, cfg domain.EnvironmentConfig,
 	endpoint string, u mcpToolUse) (mcpAnswer, string) {
 
-	if endpoint == "" {
-		// The agent stopped declaring this server between the turn that called
-		// it and now — mcp_servers is mid-session-mutable. The model is told,
-		// and nothing is dialled: there is no address to dial, and an agent edit
-		// is not a connection that failed.
-		return mcpFailed("MCP server %q is no longer configured on this agent.", u.server), ""
-	}
 	host, err := mcpEndpointHost(endpoint)
 	if err != nil {
 		return mcpFailed("MCP server %q has an unusable url.", u.server), ""
@@ -462,11 +492,7 @@ func capLabel(s string) string {
 	if len(s) <= maxResourceLabel {
 		return s
 	}
-	cut := maxResourceLabel
-	for cut > 0 && !utf8.RuneStart(s[cut]) {
-		cut--
-	}
-	return s[:cut] + "[truncated]"
+	return toolset.TruncateRunes(s, maxResourceLabel) + "[truncated]"
 }
 
 // What a block may declare is the intersection of two schemas, not the one this

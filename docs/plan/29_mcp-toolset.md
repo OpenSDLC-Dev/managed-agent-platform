@@ -172,10 +172,16 @@ Provision — cloud and self_hosted alike):
 3. Brain assembles with the catalog: each enabled MCP tool becomes a model tool
    definition named **`mcp__{server}__{tool}`** (internal to provider requests only —
    the session wire always carries the bare `name` + `mcp_server_name`; the brain maps
-   back at emission). A collision with a custom tool's name skips the MCP tool and
-   appends a `system.message` warning. `configs[]` names absent from the catalog warn,
-   never error (documented dynamic-availability semantics). `classify()` learns the
-   third arm: `mcp__` names → `agent.mcp_tool_use` + the resolved per-tool policy.
+   back at emission, and replay maps forward again). A collision with a custom tool's
+   name skips the MCP tool, and so does a prefixed name outside the Messages API's
+   documented `^[a-zA-Z0-9_-]{1,64}$` — which an MCP server's own 255-character server
+   names and 128-character tool names can compose past. Each of those skips is a **log line**
+   rather than a `system.message`: that event is client-sent, carries a documented
+   placement rule, and replays into the *system prompt*, so one per turn would grow the
+   prompt without bound (docs/DIVERGENCES.md). `configs[]` names absent
+   from the catalog warn, never error (documented dynamic-availability semantics). Tool
+   classification learns the third arm: `mcp__` names → `agent.mcp_tool_use` + the
+   resolved per-tool policy.
 4. On a call: `evaluated_permission` stamped; `ask` (the default) parks the session
    through the existing `requires_action` gate — `confirmableToolUseTypes` gains
    `agent.mcp_tool_use`, and denial synthesis gains the MCP shape

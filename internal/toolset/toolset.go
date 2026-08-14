@@ -143,7 +143,7 @@ func (r Runner) dispatch(ctx context.Context, id domain.ID, name string, input j
 	// spill earns its keep.
 	if name != "read" {
 		if notice := r.spill(ctx, id, res.Content); notice != "" {
-			res.Content = truncateRunes(res.Content, MaxOutputBytes) + "\n" + notice
+			res.Content = TruncateRunes(res.Content, MaxOutputBytes) + "\n" + notice
 			return res, nil
 		}
 	}
@@ -227,10 +227,16 @@ func badField(tool, field, value string) (Result, bool) {
 	return Result{}, false
 }
 
-// truncateRunes returns s cut to at most n bytes, backing off to a rune
+// TruncateRunes returns s cut to at most n bytes, backing off to a rune
 // boundary so a split multi-byte character never reaches the event log as a
 // replacement character.
-func truncateRunes(s string, n int) string {
+//
+// Exported for the reason CapOutput is: other packages cut strings against
+// budgets of their own — the executor's MCP driver caps a resource label, the
+// brain caps a name its tool notes quote — and every hand-rolled cut is another
+// chance to land mid-rune, where json.Marshal coerces the tail to U+FFFD and the
+// corruption is silent.
+func TruncateRunes(s string, n int) string {
 	if len(s) <= n {
 		return s
 	}
@@ -253,7 +259,7 @@ func CapOutput(s string) string {
 	if len(s) <= MaxOutputBytes {
 		return s
 	}
-	return truncateRunes(s, MaxOutputBytes) + "\n" + truncationNotice
+	return TruncateRunes(s, MaxOutputBytes) + "\n" + truncationNotice
 }
 
 // capWithTrailer caps body so that body + trailer still fits MaxOutputBytes with
@@ -275,7 +281,7 @@ func capWithTrailer(body, trailer, spillNotice string) string {
 	if budget < 0 {
 		budget = 0
 	}
-	return truncateRunes(body, budget) + notice + trailer
+	return TruncateRunes(body, budget) + notice + trailer
 }
 
 // combine folds a command's two streams into the one text block a tool result

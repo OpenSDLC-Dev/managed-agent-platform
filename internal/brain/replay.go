@@ -6,7 +6,6 @@ import (
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/provider"
-	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/toolset"
 )
 
 // buildRequest replays the event log into one provider request: the log IS
@@ -14,6 +13,13 @@ import (
 // rebuild provider messages"). It returns the request and the replay
 // watermark (the highest seq consumed), which the turn's settlement stamps
 // as processed.
+//
+// The tool definitions arrive already assembled (resolveTools), because what
+// the model may call is not a question the log answers: it comes from the
+// agent's tools[] and the session's MCP catalog, and the same resolution has to
+// decide what a name the model calls back means. So the agent reaches here as
+// its system prompt and nothing more — everything else it contributes to a
+// request has been resolved by the time replay runs.
 //
 // Replay mapping, v1:
 //   - user.message           → user text/blocks
@@ -29,8 +35,8 @@ import (
 //
 // agent.thinking replays as nothing: the wire event carries no content, so
 // thinking is never reconstructed (and v1 never requests extended thinking).
-func buildRequest(agent domain.ResolvedAgent, history []domain.Event, skillsBlock, filesBlock, reposBlock string) (provider.Request, int64, error) {
-	req := provider.Request{System: agent.System}
+func buildRequest(system string, tools []json.RawMessage, history []domain.Event, skillsBlock, filesBlock, reposBlock string) (provider.Request, int64, error) {
+	req := provider.Request{System: system, Tools: tools}
 	// Startup metadata blocks sit after the agent's own system prompt and before
 	// any runtime system.message text (systemTail), which is appended at the end:
 	// the Level-1 skills block first, then the Mounted-files block, then the
@@ -45,40 +51,6 @@ func buildRequest(agent domain.ResolvedAgent, history []domain.Event, skillsBloc
 		}
 	}
 	var watermark int64
-
-	// Custom tools are real Messages-API tool definitions minus the union
-	// discriminator; an agent_toolset entry expands to the built-in tools it
-	// enables (bash/read/write/edit/glob/grep), which the executor runs in the
-	// sandbox. An mcp_toolset expands to nothing here yet: the catalog its
-	// tools would come from is filled by the executor's discovery driver, but
-	// reading it at request assembly is a later slice — documented.
-	for _, raw := range agent.Tools {
-		var probe struct {
-			Type        string          `json:"type"`
-			Name        string          `json:"name"`
-			Description string          `json:"description"`
-			InputSchema json.RawMessage `json:"input_schema"`
-		}
-		if err := json.Unmarshal(raw, &probe); err != nil {
-			return req, 0, fmt.Errorf("agent tool: %w", err)
-		}
-		switch probe.Type {
-		case "custom":
-			def, err := json.Marshal(map[string]any{
-				"name": probe.Name, "description": probe.Description, "input_schema": probe.InputSchema,
-			})
-			if err != nil {
-				return req, 0, err
-			}
-			req.Tools = append(req.Tools, def)
-		case "agent_toolset_20260401":
-			defs, err := toolset.Tools(raw)
-			if err != nil {
-				return req, 0, fmt.Errorf("agent tool: %w", err)
-			}
-			req.Tools = append(req.Tools, defs...)
-		}
-	}
 
 	// Merge runs of same-role events into single messages; within a user
 	// message, tool_result blocks sort first (the Messages API requires
@@ -234,11 +206,21 @@ func buildRequest(agent domain.ResolvedAgent, history []domain.Event, skillsBloc
 
 		case domain.EventAgentToolUse, domain.EventAgentMCPToolUse, domain.EventAgentCustomToolUse:
 			var p struct {
-				Name  string          `json:"name"`
-				Input json.RawMessage `json:"input"`
+				Name   string          `json:"name"`
+				Server string          `json:"mcp_server_name"`
+				Input  json.RawMessage `json:"input"`
 			}
 			if err := json.Unmarshal(ev.Body, &p); err != nil {
 				return req, 0, fmt.Errorf("event %s: %w", ev.ID, err)
+			}
+			if ev.Type == domain.EventAgentMCPToolUse {
+				// The event splits the name the model was offered back into the
+				// server and the bare tool, which is the shape the wire wants
+				// and the shape a Messages request cannot carry. Replay puts it
+				// together again: a tool_use block naming a tool this request
+				// does not offer is a conversation the endpoint may refuse, and
+				// every later turn replays this same block.
+				p.Name = mcpModelName(p.Server, p.Name)
 			}
 			input := p.Input
 			if len(input) == 0 || string(input) == "null" {
@@ -276,47 +258,6 @@ func buildRequest(agent domain.ResolvedAgent, history []domain.Event, skillsBloc
 	}
 	req.System += systemTail
 	return req, watermark, nil
-}
-
-// classify resolves, in one pass over the agent's tools, both the event type
-// each tool's use commits under and — for platform built-ins — its permission
-// policy. A custom tool is client-executed (agent.custom_tool_use) and carries
-// no policy; an agent_toolset tool is platform-executed (agent.tool_use) and
-// carries a policy; an mcp_toolset's tools are not offered to the model yet —
-// the catalog the executor's discovery driver fills is not read at request
-// assembly — so they never appear here. A name the model calls that is in
-// neither map falls back to custom at emission — the client can reject it —
-// since the platform only runs names it recognises as its own.
-//
-// The built-in names come from toolset.Policies' keys (every enabled tool,
-// which is exactly what Tools offers), so classify resolves each entry once and
-// needs no second pass to recover names.
-func classify(agent domain.ResolvedAgent) (map[string]domain.EventType, map[string]domain.PermissionPolicyType, error) {
-	kind := make(map[string]domain.EventType)
-	policy := make(map[string]domain.PermissionPolicyType)
-	for _, raw := range agent.Tools {
-		var probe struct {
-			Type string `json:"type"`
-			Name string `json:"name"`
-		}
-		if err := json.Unmarshal(raw, &probe); err != nil {
-			return nil, nil, fmt.Errorf("agent tool: %w", err)
-		}
-		switch probe.Type {
-		case "custom":
-			kind[probe.Name] = domain.EventAgentCustomToolUse
-		case "agent_toolset_20260401":
-			pols, err := toolset.Policies(raw)
-			if err != nil {
-				return nil, nil, fmt.Errorf("agent tool: %w", err)
-			}
-			for name, p := range pols {
-				kind[name] = domain.EventAgentToolUse
-				policy[name] = p
-			}
-		}
-	}
-	return kind, policy, nil
 }
 
 // contentBlocks normalizes wire message content (a bare string or an array

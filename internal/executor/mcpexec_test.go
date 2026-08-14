@@ -74,7 +74,7 @@ func blocksOf(t *testing.T, res map[string]any) []map[string]any {
 func TestMCPCallIsAnsweredWithItsOutput(t *testing.T) {
 	url := mcptest.Server(t, mcptest.Tool{Name: "search", Result: "the answer"})
 	h := mcpHarness(t)
-	h.declareMCPServers(t, [2]string{"docs", url})
+	h.declareListedMCPServers(t, [2]string{"docs", url})
 	useID := h.appendMCPToolUse(t, "docs", "search", `{"q":"x"}`)
 	h.enqueueMCP(t)
 
@@ -103,7 +103,7 @@ func TestMCPCallIsAnsweredWithItsOutput(t *testing.T) {
 func TestMCPToolFailureIsTheModelsToRead(t *testing.T) {
 	url := mcptest.Server(t, mcptest.Tool{Name: "search", Result: "no such record", IsError: true})
 	h := mcpHarness(t)
-	h.declareMCPServers(t, [2]string{"docs", url})
+	h.declareListedMCPServers(t, [2]string{"docs", url})
 	useID := h.appendMCPToolUse(t, "docs", "search", `{}`)
 	h.enqueueMCP(t)
 
@@ -134,7 +134,7 @@ func TestMCPTransportFailureIsAnsweredAndReported(t *testing.T) {
 	// A credential in the endpoint, because that is what the cut is for: an
 	// endpoint with nothing to leak cannot tell a message that leaks one from a
 	// message that does not.
-	h.declareMCPServers(t, [2]string{"docs", "http://svc:s3cret@127.0.0.1:1/mcp"})
+	h.declareListedMCPServers(t, [2]string{"docs", "http://svc:s3cret@127.0.0.1:1/mcp"})
 	useID := h.appendMCPToolUse(t, "docs", "search", `{}`)
 	h.enqueueMCP(t)
 
@@ -203,7 +203,7 @@ func TestMCPBlocksBecomeTheirAnthropicShapes(t *testing.T) {
 		{Type: "audio", Data: png, MIMEType: "audio/wav"},
 	}})
 	h := mcpHarness(t)
-	h.declareMCPServers(t, [2]string{"docs", url})
+	h.declareListedMCPServers(t, [2]string{"docs", url})
 	h.appendMCPToolUse(t, "docs", "mixed", `{}`)
 	h.enqueueMCP(t)
 
@@ -276,7 +276,7 @@ func TestMCPBlocksBecomeTheirAnthropicShapes(t *testing.T) {
 func TestMCPCallsAreAnsweredBeforeDiscoveryRuns(t *testing.T) {
 	url := mcptest.Server(t, mcptest.Tool{Name: "search", Result: "answered"})
 	h := mcpHarness(t)
-	h.declareMCPServers(t, [2]string{"docs", url})
+	h.declareListedMCPServers(t, [2]string{"docs", url})
 	h.appendMCPToolUse(t, "docs", "search", `{}`)
 	h.enqueueMCP(t)
 
@@ -285,8 +285,11 @@ func TestMCPCallsAreAnsweredBeforeDiscoveryRuns(t *testing.T) {
 	if len(h.mcpResults(t)) != 1 {
 		t.Errorf("the outstanding call was not answered")
 	}
-	if got := h.catalog(t); len(got) != 0 {
-		t.Errorf("catalog = %v, want none written — this pass had a call to answer", got)
+	// The seeded row is the listing this call's tool was offered from. Had
+	// discovery run, it would have replaced it with the server's own — which
+	// reports one tool, where the seeded row reports none.
+	if got := h.catalog(t); len(got) != 1 || len(got["docs"].tools) != 0 {
+		t.Errorf("catalog = %v, want the row untouched — this pass had a call to answer", got)
 	}
 }
 
@@ -296,7 +299,7 @@ func TestMCPCallsAreAnsweredBeforeDiscoveryRuns(t *testing.T) {
 func TestAnsweredMCPCallsWakeTheBrain(t *testing.T) {
 	url := mcptest.Server(t, mcptest.Tool{Name: "search", Result: "answered"})
 	h := mcpHarness(t)
-	h.declareMCPServers(t, [2]string{"docs", url})
+	h.declareListedMCPServers(t, [2]string{"docs", url})
 	h.appendMCPToolUse(t, "docs", "search", `{}`)
 	h.enqueueMCP(t)
 
@@ -342,7 +345,7 @@ func TestMCPPassChainsItsOwnItemForACallThatArrivedMidPass(t *testing.T) {
 			mid <- planted{id: evs[0].ID.String()}
 		})
 	}})
-	h.declareMCPServers(t, [2]string{"docs", url})
+	h.declareListedMCPServers(t, [2]string{"docs", url})
 	h.appendMCPToolUse(t, "docs", "search", `{"n":1}`)
 	h.enqueueMCP(t)
 
@@ -383,7 +386,7 @@ func TestMCPPassChainsItsOwnItemForACallThatArrivedMidPass(t *testing.T) {
 func TestSandboxPassChainsMCPRatherThanStranding(t *testing.T) {
 	url := mcptest.Server(t, mcptest.Tool{Name: "search", Result: "found"})
 	h := mcpHarness(t)
-	h.declareMCPServers(t, [2]string{"docs", url})
+	h.declareListedMCPServers(t, [2]string{"docs", url})
 	h.appendMCPToolUse(t, "docs", "search", `{}`)
 	h.suspend(t, writeUse("out.txt", "hello"))
 
@@ -447,6 +450,47 @@ func TestMCPCallForADroppedServerIsAnsweredWithoutDialling(t *testing.T) {
 	}
 }
 
+// A call naming a server the agent has since repointed is answered, not dialled
+// at the new address. The model was offered this tool because the *old* endpoint
+// published it, so the new one is being asked a question it never advertised an
+// answer to — and it is a different party, which is the part that matters when
+// the tool has a side effect or the input carries the session's data.
+func TestMCPCallForARepointedServerIsNotDialledElsewhere(t *testing.T) {
+	moved := mcptest.Server(t, mcptest.Tool{Name: "search", Result: "should never be reached"})
+	h := mcpHarness(t)
+	// Listed at one address, declared at another: the shape a mid-session patch
+	// leaves behind if its own invalidating delete has not run.
+	h.listMCPServer(t, "docs", "http://127.0.0.1:1/original")
+	h.declareMCPServers(t, [2]string{"docs", moved})
+	useID := h.appendMCPToolUse(t, "docs", "search", `{}`)
+	h.enqueueMCP(t)
+
+	h.stepOnce(t)
+
+	results := h.mcpResults(t)
+	if len(results) != 1 || results[0]["mcp_tool_use_id"] != useID {
+		t.Fatalf("results = %v, want one answering %s", results, useID)
+	}
+	if results[0]["is_error"] != true {
+		t.Errorf("is_error = %v, want true", results[0]["is_error"])
+	}
+	if blocks := blocksOf(t, results[0]); len(blocks) != 1 ||
+		!strings.Contains(blocks[0]["text"].(string), "points somewhere else") {
+		t.Errorf("content = %v, want the model told the server moved", blocks)
+	}
+	errs, err := h.log.List(context.Background(), h.sid, events.ListQuery{
+		Types: []string{string(domain.EventSessionError)}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(errs) != 0 {
+		t.Errorf("session.error count = %d, want 0 — nothing was dialled", len(errs))
+	}
+	if n := h.liveOf(t, queue.ModelTurn); n != 1 {
+		t.Errorf("live model_turn = %d, want 1 — the call is answered", n)
+	}
+}
+
 // The environment's networking policy is enforced at the dial or nowhere, since
 // the platform dials from this process rather than through the per-session gate.
 // A refusal answers the call — the turn must continue — and reports itself, so
@@ -455,7 +499,7 @@ func TestMCPCallRefusedByEgressPolicyIsAnsweredAndReported(t *testing.T) {
 	url := mcptest.Server(t, mcptest.Tool{Name: "search", Result: "never reached"})
 	h := mcpHarness(t)
 	h.setNetworking(t, domain.Networking{Type: domain.NetLimited})
-	h.declareMCPServers(t, [2]string{"docs", url})
+	h.declareListedMCPServers(t, [2]string{"docs", url})
 	useID := h.appendMCPToolUse(t, "docs", "search", `{}`)
 	h.enqueueMCP(t)
 
@@ -519,7 +563,7 @@ func TestMCPCallRefusedByEgressPolicyIsAnsweredAndReported(t *testing.T) {
 func TestMCPToolThatReturnsNothingStillGetsABlock(t *testing.T) {
 	url := mcptest.Server(t, mcptest.Tool{Name: "noop", Blocks: []mcptest.Block{}})
 	h := mcpHarness(t)
-	h.declareMCPServers(t, [2]string{"docs", url})
+	h.declareListedMCPServers(t, [2]string{"docs", url})
 	h.appendMCPToolUse(t, "docs", "noop", `{}`)
 	h.enqueueMCP(t)
 
@@ -545,7 +589,7 @@ func TestMCPHugeTextAnswerIsTruncatedToTheToolBudget(t *testing.T) {
 	huge := strings.Repeat("x", 4*toolset.MaxOutputBytes)
 	url := mcptest.Server(t, mcptest.Tool{Name: "dump", Result: huge})
 	h := mcpHarness(t)
-	h.declareMCPServers(t, [2]string{"docs", url})
+	h.declareListedMCPServers(t, [2]string{"docs", url})
 	h.appendMCPToolUse(t, "docs", "dump", `{}`)
 	h.enqueueMCP(t)
 
@@ -585,7 +629,7 @@ func TestMCPAnswerBeyondTheBudgetIsCutWithANotice(t *testing.T) {
 		{Type: "text", Text: "the tail nobody sees"},
 	}})
 	h := mcpHarness(t)
-	h.declareMCPServers(t, [2]string{"docs", url})
+	h.declareListedMCPServers(t, [2]string{"docs", url})
 	h.appendMCPToolUse(t, "docs", "many", `{}`)
 	h.enqueueMCP(t)
 
@@ -635,7 +679,7 @@ func TestMCPOversizedLeadingImageIsDroppedNotExempted(t *testing.T) {
 		{Type: "image", Data: png, MIMEType: "image/png"},
 	}})
 	h := mcpHarness(t)
-	h.declareMCPServers(t, [2]string{"docs", url})
+	h.declareListedMCPServers(t, [2]string{"docs", url})
 	h.appendMCPToolUse(t, "docs", "shot", `{}`)
 	h.enqueueMCP(t)
 
@@ -679,7 +723,7 @@ func TestMCPLargeTextResourceArrivesTruncated(t *testing.T) {
 		{Type: "resource", URI: "file:///big.txt", MIMEType: "text/plain", Text: body},
 	}})
 	h := mcpHarness(t)
-	h.declareMCPServers(t, [2]string{"docs", url})
+	h.declareListedMCPServers(t, [2]string{"docs", url})
 	h.appendMCPToolUse(t, "docs", "read", `{}`)
 	h.enqueueMCP(t)
 
@@ -719,7 +763,7 @@ func TestMCPResourceLabelsAreCappedSoTheExemptionHolds(t *testing.T) {
 		{Type: "resource", URI: "file:///" + huge, MIMEType: "text/" + huge, Text: "short body"},
 	}})
 	h := mcpHarness(t)
-	h.declareMCPServers(t, [2]string{"docs", url})
+	h.declareListedMCPServers(t, [2]string{"docs", url})
 	h.appendMCPToolUse(t, "docs", "read", `{}`)
 	h.enqueueMCP(t)
 
@@ -765,7 +809,7 @@ func TestMCPEmptyTextBlockNeverReachesTheLog(t *testing.T) {
 		{Type: "text", Text: ""},
 	}})
 	h := mcpHarness(t)
-	h.declareMCPServers(t, [2]string{"docs", url})
+	h.declareListedMCPServers(t, [2]string{"docs", url})
 	h.appendMCPToolUse(t, "docs", "search", `{}`)
 	h.enqueueMCP(t)
 
@@ -797,7 +841,7 @@ func TestMCPEmptyTextBlockNeverReachesTheLog(t *testing.T) {
 func TestMCPProtocolFailureIsNotReportedAsAConnectionFailure(t *testing.T) {
 	url := mcptest.Server(t, mcptest.Tool{Name: "search", Fail: "no such tool"})
 	h := mcpHarness(t)
-	h.declareMCPServers(t, [2]string{"docs", url})
+	h.declareListedMCPServers(t, [2]string{"docs", url})
 	useID := h.appendMCPToolUse(t, "docs", "search", `{}`)
 	h.enqueueMCP(t)
 
@@ -835,7 +879,7 @@ func TestMCPPassStopsAtItsBudgetAndHandsTheRestBack(t *testing.T) {
 		time.Sleep(120 * time.Millisecond)
 	}})
 	h := mcpHarnessWith(t, Config{MCPPassTimeout: 40 * time.Millisecond})
-	h.declareMCPServers(t, [2]string{"docs", url})
+	h.declareListedMCPServers(t, [2]string{"docs", url})
 	first := h.appendMCPToolUse(t, "docs", "search", `{}`)
 	h.appendMCPToolUse(t, "docs", "search", `{"q":"second"}`)
 	h.enqueueMCP(t)
@@ -866,7 +910,7 @@ func TestMCPEmptyResourceIsSaidRatherThanSentEmpty(t *testing.T) {
 		{Type: "resource", URI: "file:///empty.txt", MIMEType: "text/plain", Text: ""},
 	}})
 	h := mcpHarness(t)
-	h.declareMCPServers(t, [2]string{"docs", url})
+	h.declareListedMCPServers(t, [2]string{"docs", url})
 	h.appendMCPToolUse(t, "docs", "read", `{}`)
 	h.enqueueMCP(t)
 
@@ -891,7 +935,7 @@ func TestMCPEmptyResourceIsSaidRatherThanSentEmpty(t *testing.T) {
 func TestMCPPassAlwaysMakesItsFirstCall(t *testing.T) {
 	url := mcptest.Server(t, mcptest.Tool{Name: "search", Result: "answered"})
 	h := mcpHarnessWith(t, Config{MCPPassTimeout: time.Nanosecond})
-	h.declareMCPServers(t, [2]string{"docs", url})
+	h.declareListedMCPServers(t, [2]string{"docs", url})
 	useID := h.appendMCPToolUse(t, "docs", "search", `{}`)
 	h.enqueueMCP(t)
 
@@ -921,7 +965,7 @@ func TestMCPImageWithoutItsRequiredFieldsIsDescribed(t *testing.T) {
 		{Type: "image", MIMEType: "image/svg+xml", Data: []byte("<svg/>")},
 	}})
 	h := mcpHarness(t)
-	h.declareMCPServers(t, [2]string{"docs", url})
+	h.declareListedMCPServers(t, [2]string{"docs", url})
 	h.appendMCPToolUse(t, "docs", "shot", `{}`)
 	h.enqueueMCP(t)
 
@@ -954,7 +998,7 @@ func TestMCPBlobResourceRidesOnlyABlockTheWireCanCarry(t *testing.T) {
 		{Type: "resource", URI: "file:///opaque", Data: png},
 	}})
 	h := mcpHarness(t)
-	h.declareMCPServers(t, [2]string{"docs", url})
+	h.declareListedMCPServers(t, [2]string{"docs", url})
 	h.appendMCPToolUse(t, "docs", "read", `{}`)
 	h.enqueueMCP(t)
 
@@ -995,7 +1039,7 @@ func TestMCPExemptionFollowsTheCappedBlockNotThePosition(t *testing.T) {
 		{Type: "text", Text: strings.Repeat("r", 4*toolset.MaxOutputBytes)},
 	}})
 	h := mcpHarness(t)
-	h.declareMCPServers(t, [2]string{"docs", url})
+	h.declareListedMCPServers(t, [2]string{"docs", url})
 	h.appendMCPToolUse(t, "docs", "report", `{}`)
 	h.enqueueMCP(t)
 
@@ -1032,7 +1076,7 @@ func TestMCPFailedCallDoesNotShowTheModelTheEndpointsCredential(t *testing.T) {
 	url := mcptest.Server(t, mcptest.Tool{Name: "search", Fail: "boom"})
 	h := mcpHarness(t)
 	// The fixture's own address, with a credential in front of it.
-	h.declareMCPServers(t, [2]string{"docs", withUserinfo(url)})
+	h.declareListedMCPServers(t, [2]string{"docs", withUserinfo(url)})
 	h.appendMCPToolUse(t, "docs", "search", `{}`)
 	h.enqueueMCP(t)
 
@@ -1070,7 +1114,7 @@ func TestMCPCallsShareOneMetricLabel(t *testing.T) {
 
 	url := mcptest.Server(t, mcptest.Tool{Name: "search", Result: "answered"})
 	h := mcpHarness(t)
-	h.declareMCPServers(t, [2]string{"docs", url})
+	h.declareListedMCPServers(t, [2]string{"docs", url})
 	h.appendMCPToolUse(t, "docs", "search", `{}`)
 	h.enqueueMCP(t)
 
@@ -1115,7 +1159,7 @@ func TestMCPResourceWithNoAddressOmitsItsTitle(t *testing.T) {
 		{Type: "resource", MIMEType: "text/plain", Text: "body without an address"},
 	}})
 	h := mcpHarness(t)
-	h.declareMCPServers(t, [2]string{"docs", url})
+	h.declareListedMCPServers(t, [2]string{"docs", url})
 	h.appendMCPToolUse(t, "docs", "read", `{}`)
 	h.enqueueMCP(t)
 

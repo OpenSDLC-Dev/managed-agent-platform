@@ -238,6 +238,32 @@ func (b *Brain) runTurn(ctx context.Context, item *queue.Item, claimedAt time.Ti
 	if active, ok := events.ActiveOutcome(evals); ok && active.Result == domain.OutcomeResultEvaluating {
 		return b.runGrading(ctx, item, agent, evals)
 	}
+
+	// An MCP server the agent declares and this session has never reached has
+	// tools nobody can name yet, so the turn is not assembled at all: it hands
+	// the item back as an mcp_exec and the discovery driver chains the turn once
+	// the listing is in. Suspending is what makes the tools *appear* rather than
+	// silently miss the first turn — and it costs one round trip per session,
+	// since only a server with no row at all gets here.
+	//
+	// It sits above the outcome flip below because a suspended turn is a turn
+	// that never begins: flipping first would record that the agent started work
+	// on the outcome and then produce nothing at all until a listing arrives.
+	declared, err := declaredMCPServers(agent)
+	if err != nil {
+		// Deterministic, exactly as the agent decode above is: this is a spec
+		// this platform stored, and re-reading it fails the same way on every
+		// retry, so a lease-expiry loop would grind forever telling nobody.
+		return b.failTurn(ctx, sid, item, nil, 0, fmt.Sprintf("session mcp server state is corrupt: %v", err))
+	}
+	cat, undiscovered, err := b.loadMCPCatalog(ctx, sid, declared)
+	if err != nil {
+		return fmt.Errorf("mcp catalog: %w", err)
+	}
+	if len(undiscovered) > 0 {
+		return b.suspendForDiscovery(ctx, sid, item, undiscovered)
+	}
+
 	if active, ok := events.ActiveOutcome(evals); ok && active.Result == domain.OutcomeResultPending {
 		// The agent begins work now: the entry leaves pending for running
 		// (the SDK: "pending" before the agent begins work, "running" while
@@ -288,7 +314,17 @@ func (b *Brain) runTurn(ctx context.Context, item *queue.Item, claimedAt time.Ti
 	// rendered fact already lives in the stored resource, so there is no join
 	// to miss.
 	reposBlock, reposInjected := b.resolveReposBlock(ctx, sid, resourcesJSON, envKind)
-	req, watermark, err := buildRequest(agent, history, skillsBlock, filesBlock, reposBlock)
+	// The tool surface: what the model may call, and what each name it calls
+	// back means. Both come from the same resolution so the two cannot disagree,
+	// and every tool the agent declared that the model was not offered is logged
+	// with its reason. It sits below the injection counters deliberately — a
+	// resolve miss is a fact of assembly whatever fails next (skillsinject_test).
+	toolDefs, class, notes, err := resolveTools(agent, cat)
+	if err != nil {
+		return b.failTurn(ctx, sid, item, nil, 0, fmt.Sprintf("resolve tools: %v", err))
+	}
+	logToolNotes(ctx, sid, notes)
+	req, watermark, err := buildRequest(agent.System, toolDefs, history, skillsBlock, filesBlock, reposBlock)
 	if err != nil {
 		return b.failTurn(ctx, sid, item, nil, 0, fmt.Sprintf("replay: %v", err))
 	}
@@ -375,24 +411,12 @@ func (b *Brain) runTurn(ctx context.Context, item *queue.Item, claimedAt time.Ti
 		turn.toolUses = nil
 	}
 
-	// Only a turn that actually called a tool needs the name→type and
-	// name→policy maps; a text-only end_turn would otherwise re-expand the
-	// whole toolset for nothing.
-	var toolKind map[string]domain.EventType
-	var policy map[string]domain.PermissionPolicyType
-	if len(turn.toolUses) > 0 {
-		kinds, pols, err := classify(agent)
-		if err != nil {
-			return b.failTurn(sctx, sid, item, span, watermark, fmt.Sprintf("classify tools: %v", err))
-		}
-		toolKind, policy = kinds, pols
-	}
 	// Settle under sctx (the span-carrying context), not ctx: a tool_use turn
 	// enqueues the tool_exec item in commitTurn's Then, and the enqueue captures
 	// the active span's trace context into the work item so the executor or BYOC
 	// worker that runs it parents its tool spans on this turn — one trace across
 	// the process boundary.
-	return b.settleTurn(sctx, sid, item, span, turn, toolKind, policy, watermark)
+	return b.settleTurn(sctx, sid, item, span, turn, class, watermark)
 }
 
 // claimLiveSession loads the session under its row lock and settles stale
@@ -463,18 +487,19 @@ func pendingInput(ctx context.Context, tx pgx.Tx, sid domain.ID, watermark int64
 //
 // Each platform tool_use is stamped with its evaluated_permission (the resolved
 // policy: allow for always_allow, ask for always_ask); custom tools are
-// client-executed and carry none. It reports whether any intent is a
-// platform-executed tool (platform), whether any of those is a web tool (web —
-// which picks the work kind the settlement enqueues) and the pre-minted ids of
-// the tool_use events whose policy is always_ask (askIDs) — the events a
-// requires_action suspension blocks on. An ask intent's id is minted here
-// rather than left to the store so the same id can name it in the status_idle
-// stop_reason.
-func turnEvents(turn *turnResult, toolKind map[string]domain.EventType, policy map[string]domain.PermissionPolicyType) (batch []events.NewEvent, platform, web bool, askIDs []domain.ID, err error) {
+// client-executed and carry none, and an MCP call is a platform call like any
+// other — the third party running the tool changes who answers it, not who
+// authorised it. It reports the work kind the settlement must enqueue (empty
+// when every intent is client-executed and there is nothing for this platform to
+// run) and the pre-minted ids of the tool_use events whose policy is always_ask
+// (askIDs) — the events a requires_action suspension blocks on. An ask intent's
+// id is minted here rather than left to the store so the same id can name it in
+// the status_idle stop_reason.
+func turnEvents(turn *turnResult, class map[string]toolClass) (batch []events.NewEvent, kind queue.Kind, askIDs []domain.ID, err error) {
 	if len(turn.text) > 0 {
 		content, err := json.Marshal(map[string]any{"content": turn.text})
 		if err != nil {
-			return nil, false, false, nil, err
+			return nil, "", nil, err
 		}
 		batch = append(batch, events.NewEvent{
 			ID: turn.messageEventID, Type: domain.EventAgentMessage, Payload: content,
@@ -484,20 +509,34 @@ func turnEvents(turn *turnResult, toolKind map[string]domain.EventType, policy m
 		fields := map[string]any{
 			"name": tu.Name, "input": tu.Input, "session_thread_id": nil,
 		}
-		typ := toolKind[tu.Name]
-		if typ == "" {
+		c, offered := class[tu.Name]
+		if !offered {
 			// A name the model was not offered — treat it as client-executed so
 			// the platform never runs a tool it does not recognise as its own.
-			typ = domain.EventAgentCustomToolUse
+			c.kind = domain.EventAgentCustomToolUse
 		}
 		var id domain.ID
-		if typ == domain.EventAgentToolUse {
-			platform = true
+		gated := false
+		switch c.kind {
+		case domain.EventAgentToolUse:
+			gated = true
+			kind = escalate(kind, queue.ToolExec)
 			if toolset.IsWebTool(tu.Name) {
-				web = true
+				kind = escalate(kind, queue.WebExec)
 			}
+		case domain.EventAgentMCPToolUse:
+			gated = true
+			kind = escalate(kind, queue.MCPExec)
+			// The wire carries the server and the bare tool in two fields; the
+			// prefixed name the model was offered exists only inside a provider
+			// request (resolveTools), and putting it on the log would make every
+			// consumer of the session stream decode a naming scheme of ours.
+			fields["name"] = c.tool
+			fields["mcp_server_name"] = c.server
+		}
+		if gated {
 			perm := domain.EvalPermAllow
-			if policy[tu.Name] == domain.PolicyAlwaysAsk {
+			if c.policy == domain.PolicyAlwaysAsk {
 				perm = domain.EvalPermAsk
 				id = domain.NewID("sevt")
 				askIDs = append(askIDs, id)
@@ -506,11 +545,45 @@ func turnEvents(turn *turnResult, toolKind map[string]domain.EventType, policy m
 		}
 		payload, err := json.Marshal(fields)
 		if err != nil {
-			return nil, false, false, nil, err
+			return nil, "", nil, err
 		}
-		batch = append(batch, events.NewEvent{ID: id, Type: typ, Payload: payload})
+		batch = append(batch, events.NewEvent{ID: id, Type: c.kind, Payload: payload})
 	}
-	return batch, platform, web, askIDs, nil
+	return batch, kind, askIDs, nil
+}
+
+// escalate picks the work kind a turn's whole set of platform calls settles to.
+// A turn may mix families, and only one item is enqueued: whichever driver runs
+// answers its own family and chains the next needed, so the order here is which
+// family must be answered first rather than which is most common.
+//
+// mcp_exec outranks both, because only this platform's MCP driver answers an
+// agent.mcp_tool_use — a client posts neither the call nor its result, and a
+// BYOC worker's contract has no MCP surface. web_exec outranks tool_exec for the
+// same shape of reason: a tool_exec is visible to a BYOC worker, whose official
+// toolset implements the six sandbox tools alone and would fail a web call as an
+// unknown tool. The same precedence is spelled out at the confirmation resume
+// (internal/api/events.go) and in each driver's own settlement.
+func escalate(have, want queue.Kind) queue.Kind {
+	if execRank(want) > execRank(have) {
+		return want
+	}
+	return have
+}
+
+// execRank is that order. Anything else ranks below every kind named here,
+// including the zero Kind that stands for "this turn has enqueued nothing yet".
+func execRank(k queue.Kind) int {
+	switch k {
+	case queue.MCPExec:
+		return 3
+	case queue.WebExec:
+		return 2
+	case queue.ToolExec:
+		return 1
+	default:
+		return 0
+	}
 }
 
 // settleTurn commits the turn: the emitted events (message, tool intents),
@@ -523,8 +596,8 @@ func turnEvents(turn *turnResult, toolKind map[string]domain.EventType, policy m
 // sides stand down) and the integrity guarantee (a brain that lost its claim
 // rolls the whole turn back; the log never carries a loser's half-turn,
 // whose duplicate tool intents would poison every future replay).
-func (b *Brain) settleTurn(ctx context.Context, sid domain.ID, item *queue.Item, span *events.ModelRequest, turn *turnResult, toolKind map[string]domain.EventType, policy map[string]domain.PermissionPolicyType, watermark int64) error {
-	err := b.commitTurn(ctx, sid, item, span, turn, toolKind, policy, watermark)
+func (b *Brain) settleTurn(ctx context.Context, sid domain.ID, item *queue.Item, span *events.ModelRequest, turn *turnResult, class map[string]toolClass, watermark int64) error {
+	err := b.commitTurn(ctx, sid, item, span, turn, class, watermark)
 	span.Finish(ctx, false, err)
 	if err != nil {
 		return fmt.Errorf("settle: %w", err)
@@ -532,8 +605,8 @@ func (b *Brain) settleTurn(ctx context.Context, sid domain.ID, item *queue.Item,
 	return nil
 }
 
-func (b *Brain) commitTurn(ctx context.Context, sid domain.ID, item *queue.Item, span *events.ModelRequest, turn *turnResult, toolKind map[string]domain.EventType, policy map[string]domain.PermissionPolicyType, watermark int64) error {
-	head, platform, web, askIDs, err := turnEvents(turn, toolKind, policy)
+func (b *Brain) commitTurn(ctx context.Context, sid domain.ID, item *queue.Item, span *events.ModelRequest, turn *turnResult, class map[string]toolClass, watermark int64) error {
+	head, workKind, askIDs, err := turnEvents(turn, class)
 	if err != nil {
 		return err
 	}
@@ -613,27 +686,22 @@ func (b *Brain) commitTurn(ctx context.Context, sid domain.ID, item *queue.Item,
 		// for an earlier intent that landed mid-turn is not lost either —
 		// it stays unprocessed and the resuming turn replays it.
 		//
-		// If any intent is a platform-executed built-in tool, enqueue its
-		// work item in the same commit so an executor picks it up. A turn
-		// with any web tool enqueues web_exec INSTEAD of tool_exec, even
-		// when sandbox tools ride the same turn: a tool_exec is visible to a
-		// BYOC worker, whose official toolset implements only the six
-		// sandbox tools and answers the whole unanswered set — it would fail
-		// the web calls as unknown tools. The web driver answers the web
-		// calls first and chains the tool_exec itself (webwork.go). A turn
-		// of only client-executed custom tools enqueues nothing — the client
-		// posts user.custom_tool_result and the control plane's trigger
-		// schedules the resume.
+		// If any intent is a platform-executed tool, enqueue ONE work item in
+		// the same commit so a driver picks it up. A turn may mix families and
+		// still enqueues one kind, the highest its calls demand (escalate):
+		// each driver answers its own family and chains the next needed. The
+		// ranking is which family must be answered first — an MCP call has only
+		// this platform's MCP driver to answer it, and a web call would be
+		// failed as an unknown tool by a BYOC worker, the one claimant a
+		// tool_exec is visible to. A turn of only client-executed custom tools
+		// enqueues nothing — the client posts user.custom_tool_result and the
+		// control plane's trigger schedules the resume.
 		opts.Then = func(ctx context.Context, tx pgx.Tx) error {
 			if err := b.queue.Complete(ctx, tx, item); err != nil {
 				return err
 			}
-			if platform {
-				kind := queue.ToolExec
-				if web {
-					kind = queue.WebExec
-				}
-				if _, err := b.queue.Enqueue(ctx, tx, item.EnvironmentID, sid, kind); err != nil {
+			if workKind != "" {
+				if _, err := b.queue.Enqueue(ctx, tx, item.EnvironmentID, sid, workKind); err != nil {
 					return err
 				}
 			}
@@ -733,6 +801,10 @@ func (b *Brain) commitUnderLock(ctx context.Context, sid domain.ID, batch []even
 	return nil
 }
 
+// maxFailureMessage bounds the text a session.error carries. Generous enough
+// that no real explanation is cut, small enough that none of them is a payload.
+const maxFailureMessage = 8 << 10
+
 // failTurn records a model-side or deterministic failure on the log. If no
 // input is pending past the watermark, the session idles with
 // retries_exhausted (v1 has no automatic retry budget — documented in
@@ -744,7 +816,17 @@ func (b *Brain) failTurn(ctx context.Context, sid domain.ID, item *queue.Item, s
 	// The message may quote endpoint bytes (an error body, a stream error),
 	// and a NUL there would fault the session.error append — the failure
 	// path failing, the same wedge one level up (#228).
-	err := b.commitFailure(ctx, sid, item, span, watermark, toolset.SanitizeText(msg))
+	msg = toolset.SanitizeText(msg)
+	// Every string a message is built from belongs to somebody else, and none of
+	// them is capped where it is stored: an endpoint's error body, a server name
+	// off the agent spec, a permission policy type as the spec spelled it. The
+	// event sits on the session stream for as long as the session does and every
+	// client replays it, so a message past this is a payload rather than an
+	// explanation.
+	if len(msg) > maxFailureMessage {
+		msg = toolset.TruncateRunes(msg, maxFailureMessage) + "[truncated]"
+	}
+	err := b.commitFailure(ctx, sid, item, span, watermark, msg)
 	if span != nil {
 		span.Finish(ctx, true, err)
 	}
