@@ -626,8 +626,9 @@ token this exchange spent. A refusal, a 2xx that yields no grant however it fail
 address the guard will not dial (`dialguard.ErrRefused`) are all `ErrCredentialUnusable` — no retry
 improves any of them, and a retryable verdict has nowhere to surface, since a faulted `mcp_exec`
 item writes no catalog row at all; a refusal that follows another resolution's rotation, seen as
-the row's sealed bytes having changed under this dial, reads that rotation back rather than
-reporting it. A grant whose access token cannot be sent as a header is unusable too, but its
+the row now holding an access token other than the one this dial was refused a replacement for,
+reads that rotation back rather than reporting it — the token and not the sealed bytes, which
+change for a reseal that rotated nothing. A grant whose access token cannot be sent as a header is unusable too, but its
 *refresh* token is stored beside the unchanged access token and expiry — the issuer has spent the
 one in the row, and without the replacement no later dial can buy a token at all. What retries is
 the issuer having a moment: unreachable, 5xx, or 408/425/429. The

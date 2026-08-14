@@ -54,21 +54,25 @@ type Params struct {
 // same way and for the same reason); and a structured handler reaches LogValue
 // before it would marshal the fields.
 //
-// Three of the fields are secrets, not two: the create-time grammar
-// (internal/api, validateEndpointURL) accepts a URL carrying userinfo, so a
-// token endpoint can be `https://id:secret@issuer/token` — the reason the
-// executor redacts these URLs by value out of everything it stores.
+// Four of the fields are secrets, not two. The create-time grammar accepts a
+// token endpoint carrying userinfo (internal/api, validateEndpointURL), and
+// takes the RFC 8707 resource indicator as free text with no grammar at all, so
+// either can be `https://id:secret@host/` — the reason the executor redacts
+// these URLs by value out of everything it stores.
+//
+// %p is the one route left open, and nothing here can close it: fmt resolves it
+// before consulting any method. internal/modeltest's Config spells that out at
+// length, and the reasoning applies unchanged.
 func (p Params) String() string {
 	return fmt.Sprintf("oauthrefresh.Params{ClientID:%s TokenEndpoint:%s TokenEndpointAuth:%s "+
 		"Resource:%s Scope:%s RefreshToken:[redacted] ClientSecret:[redacted]}",
-		p.ClientID, redactURL(p.TokenEndpoint), p.TokenEndpointAuth, derefOr(p.Resource), derefOr(p.Scope))
+		p.ClientID, redactURL(p.TokenEndpoint), p.TokenEndpointAuth,
+		derefOrRedactURL(p.Resource), derefOr(p.Scope))
 }
 
-func (p Params) Format(f fmt.State, verb rune) {
-	if verb == 'v' && f.Flag('#') {
-		io.WriteString(f, "oauthrefresh."+p.String())
-		return
-	}
+// One rendering for every verb, the package prefix included: String already
+// names the type, so `%#v` needs nothing added to it.
+func (p Params) Format(f fmt.State, _ rune) {
 	io.WriteString(f, p.String())
 }
 
@@ -88,6 +92,14 @@ func redactURL(raw string) string {
 		u.User = url.User("[redacted]")
 	}
 	return u.String()
+}
+
+// derefOrRedactURL is derefOr for a field whose free text may be a URL.
+func derefOrRedactURL(s *string) string {
+	if s == nil {
+		return "<unset>"
+	}
+	return redactURL(*s)
 }
 
 // derefOr renders an optional field, distinguishing an unset one from an empty

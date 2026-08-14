@@ -178,7 +178,9 @@ func TestParamsNeverPrintsItsSecrets(t *testing.T) {
 	p := params()
 	p.TokenEndpoint = "https://client-1:endpoint-SECRET@issuer.example/token?trace=1"
 	p.TokenEndpointAuth = oauthrefresh.AuthPost
-	resource, scope := "https://mcp.example/", "mcp:read"
+	// The resource indicator is free text the API does not parse, so it can be a
+	// URL carrying userinfo exactly as the endpoint can.
+	resource, scope := "https://client-1:resource-SECRET@mcp.example/", "mcp:read"
 	p.Resource, p.Scope = &resource, &scope
 	p.RefreshToken = "refresh-SECRET"
 	p.ClientSecret = "client-SECRET"
@@ -194,14 +196,16 @@ func TestParamsNeverPrintsItsSecrets(t *testing.T) {
 		"%d":         fmt.Sprintf("%d", p),
 		"a JSON log": logged.String(),
 	} {
-		for _, secret := range []string{"refresh-SECRET", "client-SECRET", "endpoint-SECRET"} {
+		for _, secret := range []string{
+			"refresh-SECRET", "client-SECRET", "endpoint-SECRET", "resource-SECRET",
+		} {
 			if strings.Contains(rendered, secret) {
 				t.Errorf("%s printed %s: %s", label, secret, rendered)
 			}
 		}
 		// The non-secret halves all survive, or the redaction has made the
 		// rendering useless for the debugging it exists to serve.
-		for _, kept := range []string{"client-1", "issuer.example/token", "trace=1", resource, scope} {
+		for _, kept := range []string{"client-1", "issuer.example/token", "trace=1", "mcp.example", scope} {
 			if !strings.Contains(rendered, kept) {
 				t.Errorf("%s dropped %q, which is not a secret: %s", label, kept, rendered)
 			}

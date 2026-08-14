@@ -1,7 +1,6 @@
 package vaultresolve
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -145,7 +144,7 @@ func refreshIfDue(ctx context.Context, db DB, cipher secrets.Cipher, w mcpRow,
 		// holds a working token would be wrong, and on an executing tool call
 		// that answer is committed rather than retried.
 		if errors.Is(err, ErrCredentialUnusable) {
-			if token, ok := rotatedElsewhere(ctx, db, cipher, w); ok {
+			if token, ok := rotatedElsewhere(ctx, db, cipher, w, sealed["access_token"]); ok {
 				return token, nil
 			}
 		}
@@ -202,15 +201,21 @@ func expiryFor(expiresIn int64) json.RawMessage {
 // answers the token another resolution stored in the meantime — see the call
 // site for the race this closes.
 //
-// Whether the sealed bytes changed is what decides it, and nothing else. A row
-// nobody wrote still holds the token this dial already read and the issuer just
-// refused a replacement for, so there is nothing to answer with; a row somebody
-// wrote holds a token this resolution has not tried, which is better than
-// failing whatever its expiry says. The expiry deliberately does not get a vote:
-// a winner's grant may name no lifetime, or one shorter than the leeway, and
-// both are tokens the platform sends elsewhere without complaint — refusing them
-// here would report a failure for a credential the very next dial uses happily.
-func rotatedElsewhere(ctx context.Context, db DB, cipher secrets.Cipher, w mcpRow) (string, bool) {
+// What decides it is whether the row now holds an access token other than
+// `tried`, the one this resolution read and the issuer just refused to replace.
+// A different token is one this dial has not sent yet, which is better than
+// failing whatever its expiry says: the expiry deliberately gets no vote,
+// because a winner's grant may name no lifetime, or one shorter than the leeway,
+// and both are tokens the platform sends elsewhere without complaint.
+//
+// The access token and not the sealed bytes, though the bytes are what a
+// rotation changes: they also change when nothing was rotated — an operator
+// updating the client secret reseals the whole document, and so does this
+// package's own store of a replacement refresh token beside an access token it
+// refused to use. Reading either as a rotation would hand back the very token
+// that just failed.
+func rotatedElsewhere(ctx context.Context, db DB, cipher secrets.Cipher, w mcpRow,
+	tried string) (string, bool) {
 	var ciphertext []byte
 	var keyID *string
 	if err := db.QueryRow(ctx,
@@ -218,7 +223,7 @@ func rotatedElsewhere(ctx context.Context, db DB, cipher secrets.Cipher, w mcpRo
 		   WHERE id = $1 AND archived_at IS NULL`, w.id).Scan(&ciphertext, &keyID); err != nil {
 		return "", false
 	}
-	if ciphertext == nil || bytes.Equal(ciphertext, w.ciphertext) {
+	if ciphertext == nil {
 		return "", false
 	}
 	sealed, err := openSealed(ctx, cipher, w.id, ciphertext, keyID)
@@ -226,7 +231,7 @@ func rotatedElsewhere(ctx context.Context, db DB, cipher secrets.Cipher, w mcpRo
 		return "", false
 	}
 	token := sealed["access_token"]
-	if token == "" || !sendableAsHeader(token) {
+	if token == "" || token == tried || !sendableAsHeader(token) {
 		return "", false
 	}
 	return token, true
@@ -296,10 +301,19 @@ func exchange(ctx context.Context, refresh mcpOAuthRefresh, sealed map[string]st
 	// and a retryable verdict here has nowhere to surface: the work item faults,
 	// is reclaimed, and writes no catalog row at all, so an operator is told
 	// nothing while the exchange repeats forever.
-	raw, err := io.ReadAll(io.LimitReader(resp.Body, refreshBodyMax))
+	// One byte past the cap, so an answer that exceeds it is known to have done
+	// so. Reading exactly the cap cannot tell a body that ended there from one
+	// that did not, and a truncation is not always visible in what arrives: a
+	// grant followed by padding out to the cap parses as a grant, whatever the
+	// endpoint sent after it.
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, refreshBodyMax+1))
 	if err != nil {
 		return zero, unusable(fmt.Errorf(
 			"vaultresolve: credential %s got an unreadable answer from its token endpoint", credID))
+	}
+	if len(raw) > refreshBodyMax {
+		return zero, unusable(fmt.Errorf(
+			"vaultresolve: credential %s got an answer past the cap from its token endpoint", credID))
 	}
 	grant, ok := oauthrefresh.ParseGrant(raw)
 	if !ok {

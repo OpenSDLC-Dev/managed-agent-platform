@@ -860,6 +860,21 @@ func TestAnAnswerThatIsNotAGrantIsTheCredentialsFault(t *testing.T) {
 			}
 			_, _ = w.Write([]byte(`","access_token":"never-read"}`))
 		},
+		// The same overrun with the grant at the *front*, padded out past the cap
+		// with the whitespace a JSON reader skips. Truncating at exactly the cap
+		// would hand json.Unmarshal a document that parses, so the answer would be
+		// taken for a grant however the endpoint went on to end it.
+		"a grant padded past the cap": func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"access_token":"never-read"}`))
+			block := bytes.Repeat([]byte(" "), 64<<10)
+			for written := 0; written <= 1<<20; written += len(block) {
+				if _, err := w.Write(block); err != nil {
+					return
+				}
+			}
+			_, _ = w.Write([]byte(`garbage`))
+		},
 	} {
 		t.Run(name, func(t *testing.T) {
 			pool := pgtest.NewPool(t)
@@ -978,15 +993,23 @@ func TestTheLargestBelievableLifetimeIsBelieved(t *testing.T) {
 // rows are the winner's rotation under each of those expiries, and nobody having
 // written at all.
 func TestARefusedRefreshReadsBackARotationThatLandedMeanwhile(t *testing.T) {
+	winner := map[string]string{"access_token": "the-winners-token", "refresh_token": "refresh-2"}
+	// A reseal that left the access token where it was. This platform writes
+	// exactly that itself — a replacement refresh token stored beside an access
+	// token it refused to use — and so does an operator updating the client
+	// secret. The sealed bytes change and nothing was rotated, so a reader that
+	// asked only whether they changed would hand back the token that just failed.
+	kept := map[string]string{"access_token": "expired", "refresh_token": "refresh-2"}
 	for name, row := range map[string]struct {
-		rotate       bool
+		resealed     map[string]string // nil — nobody wrote
 		winnerExpiry *time.Time
 		want         string // "" — the refusal stands
 	}{
-		"a rotation an hour out is used":  {true, ahead(time.Hour), "the-winners-token"},
-		"an unknown expiry is used too":   {true, nil, "the-winners-token"},
-		"one inside the leeway, likewise": {true, ahead(30 * time.Second), "the-winners-token"},
-		"and with no rotation at all":     {false, nil, ""},
+		"a rotation an hour out is used":   {winner, ahead(time.Hour), "the-winners-token"},
+		"an unknown expiry is used too":    {winner, nil, "the-winners-token"},
+		"one inside the leeway, likewise":  {winner, ahead(30 * time.Second), "the-winners-token"},
+		"and with no rotation at all":      {nil, nil, ""},
+		"nor a reseal that kept the token": {kept, nil, ""},
 	} {
 		t.Run(name, func(t *testing.T) {
 			pool := pgtest.NewPool(t)
@@ -995,10 +1018,8 @@ func TestARefusedRefreshReadsBackARotationThatLandedMeanwhile(t *testing.T) {
 
 			var id string
 			issuer := newTokenEndpoint(t, func(w http.ResponseWriter, _ int) {
-				if row.rotate {
-					rotateSealed(t, pool, cipher, id, map[string]string{
-						"access_token": "the-winners-token", "refresh_token": "refresh-2",
-					})
+				if row.resealed != nil {
+					rotateSealed(t, pool, cipher, id, row.resealed)
 					stampExpiry(t, pool, id, row.winnerExpiry)
 				}
 				// The refresh token this exchange carries has been retired.
