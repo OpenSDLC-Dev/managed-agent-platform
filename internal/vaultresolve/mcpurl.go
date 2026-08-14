@@ -2,6 +2,7 @@ package vaultresolve
 
 import (
 	"net/url"
+	"strconv"
 	"strings"
 )
 
@@ -49,9 +50,19 @@ func normalizeMCPURL(raw string) (string, bool) {
 	if u.Host == "" {
 		return "", false
 	}
-	host := lowerHost(u.Host)
-	if port := u.Port(); (scheme == "http" && port == "80") || (scheme == "https" && port == "443") {
-		host = strings.TrimSuffix(host, ":"+port)
+	// A trailing colon with no port after it is not a port: net/http removes it
+	// before the request goes out, so "host:" and "host" are one origin on the
+	// wire and have to be one key here.
+	host := strings.TrimSuffix(lowerHost(u.Host), ":")
+	// The port is compared as a number, not as text. Go accepts a zero-padded
+	// port and dials it as the number it spells, so ":0443" is the https default
+	// written differently — and leaving it unstripped would put a credential and
+	// an agent that spell one endpoint two ways into different keys.
+	if port := u.Port(); port != "" {
+		if n, err := strconv.Atoi(port); err == nil &&
+			((scheme == "http" && n == 80) || (scheme == "https" && n == 443)) {
+			host = strings.TrimSuffix(host, ":"+port)
+		}
 	}
 	// The key is assembled rather than rendered through url.URL.String(), which
 	// re-encodes from the decoded Path and would equate two URLs this must keep
@@ -71,14 +82,37 @@ func normalizeMCPURL(raw string) (string, bool) {
 	return key, true
 }
 
-// lowerHost lowercases a host the way DNS allows and an IPv6 zone identifier
-// does not: everything up to a "%" is folded, the zone after it is left exactly
-// as written.
+// lowerHost folds a host's case the way DNS does — ASCII only — leaving an IPv6
+// zone identifier alone.
+//
+// ASCII only is the security-relevant half. strings.ToLower folds by Unicode, and
+// Unicode maps several non-ASCII letters onto ASCII ones: it lowercases U+0130
+// (LATIN CAPITAL LETTER I WITH DOT ABOVE) to plain "i", so "İ.example" and
+// "i.example" would share one key. They are not one host — Go's HTTP stack
+// resolves the first through IDNA to "xn--i-9bb.example" — so a credential
+// registered for the IDN would be selected for the ASCII domain and its token
+// sent there. Case folding a hostname is an ASCII operation; anything else is a
+// different name.
+//
+// The zone identifier is left as written for the same reason internal/mcp's
+// sameHost leaves it: it is locally significant and may distinguish two
+// interfaces that differ only in case.
 func lowerHost(host string) string {
+	end := len(host)
 	if i := strings.IndexByte(host, '%'); i >= 0 {
-		return strings.ToLower(host[:i]) + host[i:]
+		end = i
 	}
-	return strings.ToLower(host)
+	var b strings.Builder
+	b.Grow(len(host))
+	for i := 0; i < end; i++ {
+		c := host[i]
+		if 'A' <= c && c <= 'Z' {
+			c += 'a' - 'A'
+		}
+		b.WriteByte(c)
+	}
+	b.WriteString(host[end:])
+	return b.String()
 }
 
 // matchesMCPServer reports whether a credential registered for credURL is the
@@ -87,7 +121,13 @@ func lowerHost(host string) string {
 // agent's `url` at dial, so a URL that fails here is one the platform would not
 // dial anyway, and matching it to a token would be the wrong direction to guess.
 func matchesMCPServer(credURL, serverURL string) bool {
-	a, aok := normalizeMCPURL(credURL)
-	b, bok := normalizeMCPURL(serverURL)
-	return aok && bok && a == b
+	wanted, ok := normalizeMCPURL(serverURL)
+	return ok && matchesNormalized(credURL, wanted)
+}
+
+// matchesNormalized is the half the scan loop runs per candidate row, against a
+// server key normalized once for the whole query rather than once per row.
+func matchesNormalized(credURL, wanted string) bool {
+	got, ok := normalizeMCPURL(credURL)
+	return ok && got == wanted
 }

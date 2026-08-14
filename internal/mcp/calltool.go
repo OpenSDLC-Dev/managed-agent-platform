@@ -146,6 +146,7 @@ func (c *Conn) CallTool(ctx context.Context, name string, arguments json.RawMess
 	}
 	ctx, cancel := context.WithTimeout(ctx, CallTimeout)
 	defer cancel()
+	c.auth.reset()
 
 	var args any
 	if len(arguments) > 0 {

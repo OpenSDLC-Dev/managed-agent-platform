@@ -338,14 +338,16 @@ func Connect(ctx context.Context, cfg Config) (*Conn, error) {
 	if httpClient == nil {
 		httpClient = DefaultClient
 	}
+	// Innermost, so it reads a status straight off the wire. The response limit
+	// sits above it and answers (nil, error) for a response whose headers alone
+	// exceed what the budget has left, discarding that response — a 401 read
+	// anywhere above the limit would be a 401 the limit can swallow.
+	httpClient, auth := withAuthWatch(httpClient)
 	httpClient = withResponseLimit(httpClient)
 	httpClient = withTraceContext(httpClient)
 	if cfg.BearerToken != "" {
 		httpClient = withBearer(httpClient, cfg.BearerToken, endpoint)
 	}
-	// Outermost, so it reads the status of every exchange on its way back out
-	// whatever the layers below did with the body.
-	httpClient, auth := withAuthWatch(httpClient)
 
 	client := sdk.NewClient(&sdk.Implementation{Name: clientName}, nil)
 	// The SDK closes the session it built on most failure paths but not on all
@@ -458,6 +460,7 @@ func (c *Conn) listTools(ctx context.Context, budget time.Duration) ([]Tool, err
 	// most of an hour.
 	ctx, cancel := context.WithTimeout(ctx, budget)
 	defer cancel()
+	c.auth.reset()
 
 	out := []Tool{}
 	// Every cursor the server has already handed out, and every name already
@@ -1105,7 +1108,14 @@ func withBearer(client *http.Client, token string, endpoint *url.URL) *http.Clie
 // case. Folding the whole string is the one way this comparison could match
 // two origins that are not the same one — the direction that leaks rather than
 // withholds — so the zone is split off and compared exactly.
+//
+// An empty port is dropped from both sides first, because net/http drops it
+// from the request: http.NewRequest normalizes "host:" to "host", so an
+// endpoint written that way would be compared against a request that no longer
+// spells it that way and the header would be withheld from the very server it
+// was resolved for.
 func sameHost(a, b string) bool {
+	a, b = trimEmptyPort(a), trimEmptyPort(b)
 	az, bz := strings.IndexByte(a, '%'), strings.IndexByte(b, '%')
 	if az < 0 && bz < 0 {
 		return strings.EqualFold(a, b)
@@ -1114,6 +1124,13 @@ func sameHost(a, b string) bool {
 		return false
 	}
 	return strings.EqualFold(a[:az], b[:bz]) && a[az:] == b[bz:]
+}
+
+// trimEmptyPort is net/http's removeEmptyPort, which is unexported there. The
+// trailing colon is the only shape it removes: "[::1]" keeps its brackets and
+// "host:0" keeps a port that was actually written.
+func trimEmptyPort(host string) string {
+	return strings.TrimSuffix(host, ":")
 }
 
 type bearerTransport struct {
@@ -1133,6 +1150,11 @@ func (t *bearerTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	}
 	// RoundTrippers must not modify the request they are given.
 	cloned := req.Clone(req.Context())
+	// Set, so the vault's credential wins over anything already there. The one
+	// header that can be is the Basic net/http derives from an endpoint's own
+	// userinfo (client.go, send), and a vault credential is the configured,
+	// rotatable one — an endpoint that carries both is a misconfiguration, and
+	// sending two credentials or picking the URL's would be the worse answer.
 	cloned.Header.Set("Authorization", "Bearer "+t.token)
 	return t.base.RoundTrip(cloned)
 }

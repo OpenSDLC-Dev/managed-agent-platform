@@ -131,7 +131,11 @@ func (e *Executor) runMCPTools(ctx context.Context, cfg domain.EnvironmentConfig
 		if endpoint, refusal := callEndpoint(endpoints, ready, u.server); refusal != "" {
 			res = mcpFailed("%s", refusal)
 		} else {
-			res, failure = e.runMCPTool(ctx, cfg, vaultIDs, endpoint, u)
+			var runErr error
+			res, failure, runErr = e.runMCPTool(ctx, cfg, vaultIDs, endpoint, u)
+			if runErr != nil {
+				return out, runErr, nil
+			}
 		}
 		// One label value for every MCP call, rather than the call's own name.
 		// The metric's tool name has until now been drawn from a fixed set of
@@ -308,37 +312,44 @@ func callEndpoint(declared, ready map[string]string, server string) (string, str
 // failure from touching another's call — the same reason discovery dials each
 // server on its own.
 func (e *Executor) runMCPTool(ctx context.Context, cfg domain.EnvironmentConfig,
-	vaultIDs []string, endpoint string, u mcpToolUse) (mcpAnswer, mcpFailure) {
+	vaultIDs []string, endpoint string, u mcpToolUse) (mcpAnswer, mcpFailure, error) {
 
 	host, err := mcpEndpointHost(endpoint)
 	if err != nil {
-		return mcpFailed("MCP server %q has an unusable url.", u.server), mcpFailure{}
+		return mcpFailed("MCP server %q has an unusable url.", u.server), mcpFailure{}, nil
 	}
 	if !mcpEgressAllowed(cfg, host) {
 		reason := egressRefusal(cfg, host)
 		return mcpFailed("MCP server %q could not be reached: %s", u.server, reason),
-			mcpFailure{message: storableReason(reason, endpoint)}
+			mcpFailure{message: storableReason(reason, endpoint)}, nil
 	}
 
 	token, err := e.mcpBearer(ctx, vaultIDs, endpoint)
 	if err != nil {
+		if !credentialUnusable(err) {
+			// The lookup failed, not the credential. Answering the call would
+			// settle a transient failure permanently — the result event commits
+			// and nothing re-runs it — and would tell the operator to look at a
+			// credential that is fine. Faulting the item retries the whole call.
+			return mcpAnswer{}, mcpFailure{}, fmt.Errorf("mcp credential for %q: %w", u.server, err)
+		}
 		msg := storableReason(err.Error(), endpoint)
 		return mcpFailed("MCP server %q could not be reached: %s", u.server, msg),
-			mcpFailure{message: msg, authentication: mcpAuthFailure(err)}
+			mcpFailure{message: msg, authentication: true}, nil
 	}
 
 	conn, err := mcp.Connect(ctx, mcp.Config{
 		URL: endpoint, HTTPClient: e.mcpCallHTTP(), BearerToken: token})
 	if err != nil {
-		msg := storableReason(err.Error(), endpoint)
+		msg := storableReason(err.Error(), endpoint, token)
 		return mcpFailed("MCP server %q could not be reached: %s", u.server, msg),
-			mcpFailure{message: msg, authentication: mcpAuthFailure(err)}
+			mcpFailure{message: msg, authentication: mcpAuthFailure(err)}, nil
 	}
 	defer conn.Close()
 
 	res, err := conn.CallTool(ctx, u.name, u.input)
 	if err != nil {
-		msg := storableReason(err.Error(), endpoint)
+		msg := storableReason(err.Error(), endpoint, token)
 		failure := mcpFailure{message: msg}
 		switch {
 		case mcpAuthFailure(err):
@@ -361,10 +372,10 @@ func (e *Executor) runMCPTool(ctx context.Context, cfg domain.EnvironmentConfig,
 			// that failed and there is no connection here to heal.
 			failure = mcpFailure{}
 		}
-		return mcpFailed("MCP tool %q on server %q could not be run: %s", u.name, u.server, msg), failure
+		return mcpFailed("MCP tool %q on server %q could not be run: %s", u.name, u.server, msg), failure, nil
 	}
 	blocks, lost := mcpResultBlocks(res.Content)
-	return mcpAnswer{blocks: blocks, isError: res.IsError, content: res.Content, lost: lost}, mcpFailure{}
+	return mcpAnswer{blocks: blocks, isError: res.IsError, content: res.Content, lost: lost}, mcpFailure{}, nil
 }
 
 // mcpCallHTTP is the client tool calls go through: the executor's own when a

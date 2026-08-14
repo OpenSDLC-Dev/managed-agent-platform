@@ -34,14 +34,16 @@ import (
 // to fix, so a caller checks this one first.
 var ErrUnauthorized = errors.New("the server refused the credential")
 
-// authWatch is the outermost RoundTripper of a connection's chain: it records
+// authWatch is the innermost RoundTripper of a connection's chain: it records
 // whether any exchange came back 401 or 403, so an error raised anywhere
 // downstream of one can be marked as an authentication failure.
 //
-// One flag per connection, not per request. A handshake is several exchanges and
-// a failure surfaces at whichever of them the SDK gave up on, which need not be
-// the refused one; the question a caller asks is whether this connection was
-// refused, and that is what the flag answers.
+// The flag spans an operation, not a request and not the connection. A single
+// operation is several exchanges and a failure surfaces at whichever of them the
+// SDK gave up on, which need not be the refused one — so it cannot be per
+// request. But a 401 the SDK recovered from would otherwise answer for every
+// later error on the same connection, so each operation clears it before it
+// begins (see [authWatch.reset]) and the flag then answers only for that one.
 type authWatch struct {
 	base http.RoundTripper
 	seen atomic.Bool
@@ -80,6 +82,16 @@ func (w *authWatch) mark(err error) error {
 	return fmt.Errorf("%w: %w", ErrUnauthorized, err)
 }
 
-// refused reports whether this connection was answered 401 or 403. A nil watch
+// refused reports whether this operation was answered 401 or 403. A nil watch
 // has seen nothing.
 func (w *authWatch) refused() bool { return w != nil && w.seen.Load() }
+
+// reset starts a fresh operation. Clearing on the way in rather than on any
+// non-401 response is what keeps the flag readable under the SDK's standalone
+// SSE stream, whose exchanges are not this operation's and could otherwise clear
+// a refusal between the refusal and the read of it.
+func (w *authWatch) reset() {
+	if w != nil {
+		w.seen.Store(false)
+	}
+}

@@ -3,6 +3,7 @@ package vaultresolve_test
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
 
@@ -55,7 +56,12 @@ func insertMCPCred(t *testing.T, pool *pgxpool.Pool, vaultID, authType, serverUR
 		`INSERT INTO vault_credentials
 		   (id, vault_id, auth_type, auth, secret_ciphertext, secret_key_id, cred_key, archived_at)
 		 VALUES ($1, $2, $3, $4::jsonb, $5, $6, $7, `+archivedAt+`)`,
-		id, vaultID, authType, auth, ciphertext, keyID, "url:"+serverURL+":"+id); err != nil {
+		// The API's own key (internal/api/vaultcredauth.go), so the partial
+		// unique index over a vault's active credentials rejects here exactly
+		// what it rejects in production — a fixture free to write two active
+		// rows for one URL would let a test pin a state the platform cannot
+		// reach.
+		id, vaultID, authType, auth, ciphertext, keyID, "url:"+serverURL); err != nil {
 		t.Fatalf("insert mcp cred: %v", err)
 	}
 	return id
@@ -81,14 +87,8 @@ func TestMCPCredentialReadsTheTokenFieldItsTypeNames(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if got == nil {
-				t.Fatal("no credential resolved for the server it was registered for")
-			}
-			if got.Token != row.token {
-				t.Errorf("Token = %q, want %q", got.Token, row.token)
-			}
-			if got.CredentialID != id || got.VaultID != v {
-				t.Errorf("resolved %s/%s, want %s/%s", got.VaultID, got.CredentialID, v, id)
+			if got != row.token {
+				t.Errorf("credential %s in vault %s resolved %q, want %q", id, v, got, row.token)
 			}
 		})
 	}
@@ -120,7 +120,7 @@ func TestMCPCredentialFirstVaultWithAMatchWins(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if got == nil || got.Token != row.want {
+			if got != row.want {
 				t.Fatalf("resolved %v, want the token %q", got, row.want)
 			}
 		})
@@ -142,6 +142,9 @@ func TestMCPCredentialMatchesTheServerAcrossNormalizedSpellings(t *testing.T) {
 		resolves bool
 	}{
 		{"cased host, default port and a trailing slash", "HTTPS://MCP.Example.com:443/mcp/", true},
+		// net/http removes an empty port before the request goes out, so this is
+		// the same origin written a way url.Parse keeps and the wire does not.
+		{"an empty port", "https://mcp.example.com:/mcp", true},
 		{"a different path", "https://mcp.example.com/other", false},
 		{"a non-default port", "https://mcp.example.com:8443/mcp", false},
 	} {
@@ -153,9 +156,9 @@ func TestMCPCredentialMatchesTheServerAcrossNormalizedSpellings(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if (got != nil) != row.resolves {
+			if (got != "") != row.resolves {
 				t.Fatalf("a credential stored for %q resolved %v for %q, want %v",
-					row.stored, got != nil, mcpServer, row.resolves)
+					row.stored, got != "", mcpServer, row.resolves)
 			}
 		})
 	}
@@ -178,8 +181,8 @@ func TestMCPCredentialSkipsArchivedCredentialsAndVaults(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got != nil {
-		t.Fatalf("resolved %s from an archived vault or credential, want nothing", got.CredentialID)
+	if got != "" {
+		t.Fatalf("resolved %q from an archived vault or credential, want nothing", got)
 	}
 }
 
@@ -198,15 +201,16 @@ func TestMCPCredentialResolvesNothingForAnUnregisteredServer(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got != nil {
-		t.Fatalf("resolved %q for a server it is not registered for", got.Token)
+	if got != "" {
+		t.Fatalf("resolved %q for a server it is not registered for", got)
 	}
 }
 
 // The first vault matched, so it won — even though its secret is gone. Falling
 // through to the next vault would authenticate the dial with a credential the
-// documented rule did not choose.
-func TestMCPCredentialAWinningVaultWithAPurgedSecretDoesNotFallThrough(t *testing.T) {
+// documented rule did not choose, and answering "no credential" would send the
+// dial out anonymously on a session an operator configured a credential for.
+func TestMCPCredentialAWinningVaultWithAPurgedSecretFailsRatherThanFallsThrough(t *testing.T) {
 	pool := pgtest.NewPool(t)
 	ctx := context.Background()
 	cipher := testCipher(t)
@@ -216,11 +220,14 @@ func TestMCPCredentialAWinningVaultWithAPurgedSecretDoesNotFallThrough(t *testin
 	newSealedMCPCred(t, pool, cipher, live, "static_bearer", mcpServer, "the-later-vaults-token")
 
 	got, err := vaultresolve.MCPCredentialFor(ctx, pool, cipher, []string{purged, live}, mcpServer)
-	if err != nil {
-		t.Fatal(err)
+	if got != "" {
+		t.Fatalf("resolved %q, want nothing: the first vault matched and had no secret", got)
 	}
-	if got != nil {
-		t.Fatalf("resolved %q, want nothing: the first vault matched and had no secret", got.Token)
+	if err == nil {
+		t.Fatal("a matched credential with no sealed secret must fail, not read as absent")
+	}
+	if !strings.Contains(err.Error(), "sealed secret") {
+		t.Errorf("error = %v, want it to name the missing secret", err)
 	}
 }
 
@@ -245,8 +252,8 @@ func TestMCPCredentialNilCipherFailsClosedOnlyOnAMatch(t *testing.T) {
 	// No attached vaults: no query at all, whatever the server URL says.
 	cq := &countingQuerier{}
 	got, err := vaultresolve.MCPCredentialFor(ctx, cq, nil, nil, mcpServer)
-	if err != nil || got != nil {
-		t.Fatalf("got %v, %v; want nil, nil for no attached vaults", got, err)
+	if err != nil || got != "" {
+		t.Fatalf("got %q, %v; want no token and no error for no attached vaults", got, err)
 	}
 	if cq.calls != 0 {
 		t.Fatalf("querier called %d times for empty vaultIDs, want 0", cq.calls)
@@ -311,8 +318,8 @@ func TestMCPCredentialIgnoresARowOfAnotherType(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got != nil {
-		t.Fatalf("resolved an environment_variable row as an MCP credential: %s", got.CredentialID)
+	if got != "" {
+		t.Fatalf("resolved an environment_variable row as an MCP credential: %q", got)
 	}
 }
 
@@ -353,6 +360,51 @@ func TestMCPCredentialRefusesASealedSecretMissingItsTokenField(t *testing.T) {
 	}
 }
 
+// A token that cannot be written into a header is refused here, where the
+// credential can be named, rather than at the dial — net/http rejects a header
+// value with a control character in it, and that error names the server and says
+// nothing about the credential that is actually wrong.
+func TestMCPCredentialRefusesATokenNoHeaderCanCarry(t *testing.T) {
+	pool := pgtest.NewPool(t)
+	ctx := context.Background()
+	cipher := testCipher(t)
+
+	for _, row := range []struct {
+		name, token string
+		usable      bool
+	}{
+		{name: "a trailing newline", token: "lin_api_secret\n"},
+		{name: "an embedded CRLF", token: "a\r\nX-Injected: 1"},
+		{name: "a raw NUL", token: "lin\x00secret"},
+		// Everything a header may carry still resolves: the guard has to be the
+		// rule net/http applies and not a narrower one.
+		{name: "punctuation and case", token: "sk-Live_1234.abc/xyz+=", usable: true},
+		{name: "a tab", token: "tok\ttok", usable: true},
+	} {
+		t.Run(row.name, func(t *testing.T) {
+			v := newVault(t, pool, false)
+			newSealedMCPCred(t, pool, cipher, v, "static_bearer", mcpServer, row.token)
+
+			got, err := vaultresolve.MCPCredentialFor(ctx, pool, cipher, []string{v}, mcpServer)
+			if row.usable {
+				if err != nil || got != row.token {
+					t.Fatalf("resolved %q, %v; want the token back", got, err)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatalf("resolved %q, want a refusal: no header can carry it", got)
+			}
+			if !errors.Is(err, vaultresolve.ErrCredentialUnusable) {
+				t.Errorf("error = %v, want it marked as the credential's own fault", err)
+			}
+			if strings.Contains(err.Error(), row.token) {
+				t.Errorf("the refusal echoed the token: %v", err)
+			}
+		})
+	}
+}
+
 // mcp_server_url is unique among a vault's active credentials only as the
 // literal string it was created with, so two spellings of one server are two
 // rows the 409 never saw. Which of them wins must be a fact rather than a race
@@ -375,8 +427,8 @@ func TestMCPCredentialBreaksAnIntraVaultTieDeterministically(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if got == nil || got.Token != winner {
-			t.Fatalf("resolve %d returned %v, want the lower credential id to win with %q", i, got, winner)
+		if got != winner {
+			t.Fatalf("resolve %d returned %q, want the lower credential id to win with %q", i, got, winner)
 		}
 	}
 }

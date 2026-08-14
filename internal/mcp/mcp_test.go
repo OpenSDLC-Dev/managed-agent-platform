@@ -972,6 +972,17 @@ func TestBearerOriginComparison(t *testing.T) {
 		{name: "explicit port differs textually", endpoint: "http://example.com/rpc", target: "http://example.com:80/rpc",
 			wrong: "fails closed: the credential is withheld and the request 401s rather than leaking"},
 
+		// An endpoint may be written with a colon and no port, and net/http
+		// removes that colon from every request it builds — so the two sides of
+		// this comparison see different spellings of one origin unless the
+		// endpoint is normalized the same way.
+		{name: "empty port on both sides", endpoint: "https://example.com:/rpc", target: "https://example.com:/rpc", attach: true,
+			wrong: "the credential is withheld from the very server it was resolved for"},
+		{name: "empty port against no port", endpoint: "https://example.com:/rpc", target: "https://example.com/rpc", attach: true,
+			wrong: "an empty port is no port; net/http drops it before the request goes out"},
+		{name: "empty port against a real one", endpoint: "https://example.com:/rpc", target: "https://example.com:8443/rpc",
+			wrong: "dropping an empty port must not drop a written one"},
+
 		// A zone identifier names a local interface, and two interfaces can
 		// differ only in case. Folding it would call two different scoped
 		// addresses the same origin — the one direction that leaks.

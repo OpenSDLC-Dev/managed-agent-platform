@@ -3,22 +3,17 @@ package executor
 import (
 	"context"
 	"errors"
-	"fmt"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/mcp"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/vaultresolve"
 )
 
-// errCredentialUnusable marks a credential that matched this server and could
-// not be turned into a token to send — an unopenable ciphertext, a cipher-less
-// deployment. The dial never happens, so no server ever refuses it, but it is
-// an authentication failure all the same and the wire has no fourth type for it.
-var errCredentialUnusable = errors.New("the credential could not be resolved")
-
 // mcpBearer resolves the bearer token this session's attached vaults register
-// for endpoint, or "" when they register none — in which case the dial goes out
-// unauthenticated, which is what the reference documents for a server no
-// credential matches.
+// for endpoint, or "" when they register none — in which case the dial carries
+// no credential of this platform's choosing, which is what the reference
+// documents for a server no credential matches. An mcp_servers URL written with
+// userinfo still authenticates with it: net/http derives a Basic header from the
+// URL, and a resolved token replaces that header rather than joining it.
 //
 // Resolved at every connect, on both dial paths, rather than once per session:
 // the rows are read fresh each time, so a rotated token, an archived credential
@@ -29,17 +24,19 @@ var errCredentialUnusable = errors.New("the credential could not be resolved")
 // unauthenticated request the operator believes was authenticated, and the
 // server's own refusal would then read as a credential that is wrong rather than
 // one that never arrived.
+//
+// The caller has to tell that error apart from one the lookup itself raised —
+// see [vaultresolve.ErrCredentialUnusable].
 func (e *Executor) mcpBearer(ctx context.Context, vaultIDs []string, endpoint string) (string, error) {
-	cred, err := vaultresolve.MCPCredentialFor(ctx, e.pool, e.cipher, vaultIDs, endpoint)
-	if err != nil {
-		// vaultresolve's errors name credential ids and never secrets or
-		// ciphertext, so this one is safe to store and log as it stands.
-		return "", fmt.Errorf("%w: %w", errCredentialUnusable, err)
-	}
-	if cred == nil {
-		return "", nil
-	}
-	return cred.Token, nil
+	return vaultresolve.MCPCredentialFor(ctx, e.pool, e.cipher, vaultIDs, endpoint)
+}
+
+// credentialUnusable says the credential itself is at fault, so answering the
+// call settles something an operator has to fix. Everything else — a pool that
+// blinked, a cipher backend that timed out — says nothing about the credential
+// and is worth the retry a faulted work item gets.
+func credentialUnusable(err error) bool {
+	return errors.Is(err, vaultresolve.ErrCredentialUnusable)
 }
 
 // mcpAuthFailure separates the wire's two MCP failures, by cause rather than by
@@ -50,7 +47,7 @@ func (e *Executor) mcpBearer(ctx context.Context, vaultIDs []string, endpoint st
 // could not produce. The first two arrive alike as a 401 or 403 — a server
 // answers the same whether a token was sent or not — so one test answers both.
 func mcpAuthFailure(err error) bool {
-	return errors.Is(err, mcp.ErrUnauthorized) || errors.Is(err, errCredentialUnusable)
+	return errors.Is(err, mcp.ErrUnauthorized) || credentialUnusable(err)
 }
 
 // mcpDialReason renders a failed dial, listing or credential lookup into the

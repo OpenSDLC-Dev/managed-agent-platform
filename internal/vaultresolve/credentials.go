@@ -82,18 +82,10 @@ func Credentials(ctx context.Context, q Querier, cipher secrets.Cipher, sessionI
 		// The cipher error and the decrypted plaintext must NOT flow into a
 		// resolution error a caller may log: name the credential and the failure,
 		// never wrap the cipher error (%w) or the plaintext-derived parse error.
-		// Leak-safety is then a property of this function, not of the cipher.
-		plain, err := cipher.Decrypt(ctx, w.ciphertext, deref(w.keyID))
+		// Leak-safety is then a property of sealedField, not of the cipher.
+		secret, err := sealedField(ctx, cipher, w.id, w.ciphertext, w.keyID, "secret_value")
 		if err != nil {
-			return nil, fmt.Errorf("vaultresolve: cannot decrypt credential %s", w.id)
-		}
-		var sealed map[string]string
-		if err := json.Unmarshal(plain, &sealed); err != nil {
-			return nil, fmt.Errorf("vaultresolve: malformed sealed secret for credential %s", w.id)
-		}
-		secret := sealed["secret_value"]
-		if secret == "" {
-			return nil, fmt.Errorf("vaultresolve: credential %s has no secret_value", w.id)
+			return nil, err
 		}
 		// Reject an unknown networking arm rather than coercing it to limited: a
 		// corrupt or future type carried alongside allowed_hosts would otherwise be

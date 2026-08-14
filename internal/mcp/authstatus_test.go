@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 
@@ -92,16 +93,76 @@ func TestAWorkingConnectionIsNotMarkedRefused(t *testing.T) {
 	if _, err := conn.CallTool(context.Background(), "echo", nil); err != nil {
 		t.Fatalf("call: %v", err)
 	}
-	if _, err := conn.ListTools(context.Background()); err != nil && errors.Is(err, mcp.ErrUnauthorized) {
-		t.Errorf("a working server was marked as refusing the credential: %v", err)
+	// Success, not "did not fail with ErrUnauthorized": mark wraps only a
+	// non-nil error, so an assertion guarded on err != nil holds whatever the
+	// marking does and pins nothing at all.
+	if _, err := conn.ListTools(context.Background()); err != nil {
+		t.Fatalf("list on a working server: %v", err)
 	}
 }
 
-// serveThenRefuse completes the handshake and answers 401 to the named JSON-RPC
-// method — a token that expires mid-session, or a server that authenticates the
-// work rather than the connection. The refusal arrives on a Conn that already
-// exists, which is the half a connect-time test cannot reach.
-func serveThenRefuse(t *testing.T, refuse string) string {
+// The listing's other half: a failure that is not a refusal must not be marked
+// as one. 500 is the nearest thing to it — a server that answered, and answered
+// badly — and it reaches the listing path, which the connect-time table cannot.
+func TestAListingThatFailsForAnotherReasonIsNotMarkedRefused(t *testing.T) {
+	conn, err := mcp.Connect(context.Background(), mcp.Config{
+		URL:        serveThenFailing(t, map[string]int{"tools/list": http.StatusInternalServerError}),
+		HTTPClient: &http.Client{}, BearerToken: "tok"})
+	if err != nil {
+		t.Fatalf("the handshake was expected to succeed: %v", err)
+	}
+	defer conn.Close()
+	if _, err := conn.ListTools(context.Background()); err == nil {
+		t.Fatal("expected the failed listing to fail")
+	} else if errors.Is(err, mcp.ErrUnauthorized) {
+		t.Errorf("a 500 on the listing was marked as a refused credential: %v", err)
+	}
+}
+
+// An endpoint may carry userinfo, from which net/http derives a Basic header of
+// its own. Both directions of that are decisions rather than accidents: without
+// a vault credential the dial is not anonymous, and with one the vault's token
+// replaces the URL's — the configured, rotatable credential wins.
+func TestAResolvedTokenReplacesTheURLsOwnCredential(t *testing.T) {
+	var seen []string
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seen = append(seen, r.Header.Get("Authorization"))
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer ts.Close()
+	withUserinfo := (&url.URL{Scheme: "http", Host: strings.TrimPrefix(ts.URL, "http://"),
+		User: url.UserPassword("bob", "pw"), Path: "/"}).String()
+
+	for _, row := range []struct{ name, token, want string }{
+		{name: "no credential resolved", want: "Basic Ym9iOnB3"},
+		{name: "a credential resolved", token: "VAULT-TOKEN", want: "Bearer VAULT-TOKEN"},
+	} {
+		t.Run(row.name, func(t *testing.T) {
+			seen = nil
+			conn, err := mcp.Connect(context.Background(), mcp.Config{
+				URL: withUserinfo, HTTPClient: &http.Client{}, BearerToken: row.token})
+			if err == nil {
+				_ = conn.Close()
+				t.Fatal("expected the handshake to fail against a 500")
+			}
+			if len(seen) == 0 {
+				t.Fatal("the server saw no request at all")
+			}
+			for _, got := range seen {
+				if got != row.want {
+					t.Errorf("the server saw Authorization %q, want %q", got, row.want)
+				}
+			}
+		})
+	}
+}
+
+// serveThenFailing serves MCP but answers each named JSON-RPC method with the
+// status `rules` gives it — a token that expires mid-session, a server that
+// authenticates the work rather than the connection, or one that refuses the
+// discovery probe alone. The failures arrive on a Conn that already exists,
+// which is the half a connect-time test cannot reach.
+func serveThenFailing(t *testing.T, rules map[string]int) string {
 	t.Helper()
 	inner := sdk.NewStreamableHTTPHandler(func(*http.Request) *sdk.Server {
 		s := sdk.NewServer(&sdk.Implementation{Name: "refusing-server", Version: "1"}, nil)
@@ -122,8 +183,8 @@ func serveThenRefuse(t *testing.T, refuse string) string {
 			Method string `json:"method"`
 		}
 		_ = json.Unmarshal(body, &msg)
-		if msg.Method == refuse {
-			w.WriteHeader(http.StatusUnauthorized)
+		if status, ok := rules[msg.Method]; ok {
+			w.WriteHeader(status)
 			return
 		}
 		r.Body = io.NopCloser(bytes.NewReader(body))
@@ -139,7 +200,7 @@ func serveThenRefuse(t *testing.T, refuse string) string {
 func TestARefusalAfterTheHandshakeIsMarkedToo(t *testing.T) {
 	t.Run("on a tool call", func(t *testing.T) {
 		conn, err := mcp.Connect(context.Background(), mcp.Config{
-			URL: serveThenRefuse(t, "tools/call"), HTTPClient: &http.Client{}, BearerToken: "tok"})
+			URL: serveThenFailing(t, map[string]int{"tools/call": http.StatusUnauthorized}), HTTPClient: &http.Client{}, BearerToken: "tok"})
 		if err != nil {
 			t.Fatalf("the handshake was expected to succeed: %v", err)
 		}
@@ -155,7 +216,7 @@ func TestARefusalAfterTheHandshakeIsMarkedToo(t *testing.T) {
 
 	t.Run("on a listing", func(t *testing.T) {
 		conn, err := mcp.Connect(context.Background(), mcp.Config{
-			URL: serveThenRefuse(t, "tools/list"), HTTPClient: &http.Client{}, BearerToken: "tok"})
+			URL: serveThenFailing(t, map[string]int{"tools/list": http.StatusUnauthorized}), HTTPClient: &http.Client{}, BearerToken: "tok"})
 		if err != nil {
 			t.Fatalf("the handshake was expected to succeed: %v", err)
 		}
@@ -166,4 +227,139 @@ func TestARefusalAfterTheHandshakeIsMarkedToo(t *testing.T) {
 			t.Errorf("a 401 on the listing was not marked: %v", err)
 		}
 	})
+}
+
+// A 401 the SDK itself shrugs off must not answer for every later failure on the
+// connection. go-sdk opens with `server/discover` and carries on when that one is
+// refused, so a server requiring authentication for discovery alone hands back a
+// working connection that has already seen a 401 — and every subsequent error
+// would read as an authentication failure the operator cannot find.
+func TestARecoveredRefusalDoesNotSpeakForALaterFailure(t *testing.T) {
+	t.Run("on a tool call", func(t *testing.T) {
+		conn := connectRefusingDiscovery(t, nil)
+		defer conn.Close()
+
+		// The server answers this one itself, in full: nothing about it is an
+		// authentication failure, and the credential it accepted is the same one.
+		_, err := conn.CallTool(context.Background(), "no-such-tool", nil)
+		if err == nil {
+			t.Fatal("expected the unknown tool to fail")
+		}
+		if errors.Is(err, mcp.ErrUnauthorized) {
+			t.Errorf("a refusal the handshake recovered from was reported as this call's: %v", err)
+		}
+		if !errors.Is(err, mcp.ErrServerAnswered) {
+			t.Errorf("a server refusing a call it answered = %v, want ErrServerAnswered", err)
+		}
+	})
+
+	t.Run("on a listing", func(t *testing.T) {
+		conn := connectRefusingDiscovery(t, map[string]int{"tools/list": http.StatusInternalServerError})
+		defer conn.Close()
+
+		_, err := conn.ListTools(context.Background())
+		if err == nil {
+			t.Fatal("expected the failed listing to fail")
+		}
+		if errors.Is(err, mcp.ErrUnauthorized) {
+			t.Errorf("a refusal the handshake recovered from was reported as this listing's: %v", err)
+		}
+	})
+}
+
+// connectRefusingDiscovery opens a connection to a server that refuses the
+// discovery probe go-sdk leads with and serves everything else, plus whatever
+// `also` adds. The handshake stands — the SDK falls back to the legacy
+// initialize on any discovery error — so the connection starts life having
+// already seen a 401.
+func connectRefusingDiscovery(t *testing.T, also map[string]int) *mcp.Conn {
+	t.Helper()
+	rules := map[string]int{"server/discover": http.StatusUnauthorized}
+	for m, s := range also {
+		rules[m] = s
+	}
+	conn, err := mcp.Connect(context.Background(), mcp.Config{
+		URL: serveThenFailing(t, rules), HTTPClient: &http.Client{}, BearerToken: "tok"})
+	if err != nil {
+		t.Fatalf("the SDK recovers from a refused discovery, so the handshake should stand: %v", err)
+	}
+	return conn
+}
+
+// serveDrainingThenRefusing answers the handshake normally, spends almost the
+// whole connection budget on one tools/list page, then refuses the next page with
+// a 401 whose header block alone is larger than what is left.
+//
+// That combination is the only way to reach the response limit's discard path
+// with a status worth reading: the limit answers (nil, error) and closes the
+// response, so a status watcher above it would be handed neither.
+func serveDrainingThenRefusing(t *testing.T) string {
+	t.Helper()
+	inner := sdk.NewStreamableHTTPHandler(func(*http.Request) *sdk.Server {
+		return sdk.NewServer(&sdk.Implementation{Name: "draining-server", Version: "1"}, nil)
+	}, nil)
+	// Sized to leave the budget with more than a plain 401's header block and
+	// less than the padded one below, so neither margin depends on counting the
+	// handshake's own bytes exactly.
+	pad := strings.Repeat("d", mcp.MaxResponseBytes-(16<<10))
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Errorf("read body: %v", err)
+			return
+		}
+		var req struct {
+			ID     json.RawMessage `json:"id"`
+			Method string          `json:"method"`
+			Params struct {
+				Cursor string `json:"cursor"`
+			} `json:"params"`
+		}
+		if json.Unmarshal(body, &req) != nil || req.Method != "tools/list" {
+			r.Body = io.NopCloser(bytes.NewReader(body))
+			inner.ServeHTTP(w, r)
+			return
+		}
+		if req.Params.Cursor != "" {
+			w.Header().Set("X-Padding", strings.Repeat("p", 32<<10))
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"jsonrpc": "2.0", "id": req.ID,
+			"result": map[string]any{
+				"nextCursor": "page-2",
+				"tools": []any{map[string]any{
+					"name": "bulky", "description": pad,
+					"inputSchema": map[string]any{"type": "object"},
+				}},
+			},
+		})
+	}))
+	t.Cleanup(ts.Close)
+	return ts.URL
+}
+
+// The status has to be read below the response limit, not above it: the limit
+// refuses an oversized response by discarding it and returning an error of its
+// own, and a 401 refused that way is a 401 nothing above the limit ever sees.
+func TestARefusalTheResponseLimitDiscardsIsStillMarked(t *testing.T) {
+	conn, err := mcp.Connect(context.Background(), mcp.Config{
+		URL: serveDrainingThenRefusing(t), HTTPClient: &http.Client{}, BearerToken: "tok"})
+	if err != nil {
+		t.Fatalf("the handshake was expected to succeed: %v", err)
+	}
+	defer conn.Close()
+
+	_, err = conn.ListTools(context.Background())
+	if err == nil {
+		t.Fatal("expected the listing to fail")
+	}
+	if !strings.Contains(err.Error(), "exceed") {
+		t.Fatalf("the fixture did not reach the response limit, so this proves nothing: %v", err)
+	}
+	if !errors.Is(err, mcp.ErrUnauthorized) {
+		t.Errorf("a 401 the limit discarded was not marked: %v", err)
+	}
 }

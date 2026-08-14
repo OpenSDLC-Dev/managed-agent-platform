@@ -75,6 +75,12 @@ func TestMCPCredentialMatchingStripsOnlyTheSchemesOwnDefaultPort(t *testing.T) {
 		// A bare host normalizes to itself; the trailing slash is the only path.
 		{"https://mcp.example.com/", "https://mcp.example.com"},
 		{"https://mcp.example.com", "https://mcp.example.com"},
+		// The port is a number, and Go dials these as the numbers they spell.
+		// Compared as text they would each be a server of their own.
+		{"https://mcp.example.com:0443/mcp", "https://mcp.example.com/mcp"},
+		{"http://mcp.example.com:080/mcp", "http://mcp.example.com/mcp"},
+		{"https://mcp.example.com:/mcp", "https://mcp.example.com/mcp"},
+		{"https://mcp.example.com:08443/mcp", "https://mcp.example.com:08443/mcp"},
 	} {
 		t.Run(row.raw, func(t *testing.T) {
 			got, ok := vaultresolve.NormalizeMCPURLForTest(row.raw)
@@ -126,5 +132,26 @@ func TestMCPCredentialMatchingKeepsAnIPv6ZoneCase(t *testing.T) {
 	}
 	if vaultresolve.MatchesMCPServerForTest(withZone, "https://[fe80::1%25ETH0]/mcp") {
 		t.Error("two link-local addresses differing only in zone case must not match")
+	}
+}
+
+// Case folding a host name is an ASCII operation. Unicode's is not the same
+// operation and maps several letters onto ASCII ones — strings.ToLower turns
+// U+0130 (İ) into a plain "i" — so folding by Unicode would put an IDN and an
+// unrelated ASCII domain into one key and send that credential's token to
+// whichever of them an agent named. They are not one host: Go's HTTP stack
+// resolves the IDN through IDNA to xn--i-9bb.example.
+func TestMCPCredentialMatchingFoldsHostCaseAsASCIINotAsUnicode(t *testing.T) {
+	const idn = "https://İ.example/mcp"
+	if vaultresolve.MatchesMCPServerForTest(idn, "https://i.example/mcp") {
+		t.Error("a credential for İ.example was matched to i.example, a different DNS name")
+	}
+	if vaultresolve.MatchesMCPServerForTest(idn, "https://I.example/mcp") {
+		t.Error("a credential for İ.example was matched to I.example, a different DNS name")
+	}
+	// The ASCII fold itself still has to work, or the guard above is just a
+	// comparison that never matches anything.
+	if !vaultresolve.MatchesMCPServerForTest("https://MCP.Example/mcp", "https://mcp.example/mcp") {
+		t.Error("an ASCII host's case is not significant and must still fold")
 	}
 }

@@ -9,6 +9,7 @@ without a restart.
 **A refused credential is now reported as one.** A 401 or 403 from the server — its refusal,
 or its requiring a credential where none matched — is `mcp_authentication_failed_error`
 rather than `mcp_connection_failed_error`, as is a credential this platform could not
-resolve, whose dial is not made at all. Every other failure is unchanged.
+open, whose dial is not made at all. A lookup that fails for its own reasons is neither: it
+retries. Every other failure is unchanged.
 
 OAuth refresh of an expired `mcp_oauth` token is the next slice.
