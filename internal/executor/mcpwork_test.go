@@ -1,10 +1,12 @@
 package executor
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -1483,8 +1485,13 @@ func TestOneServerDeclaredTwiceIsAnnouncedOnce(t *testing.T) {
 func TestEveryDeclaredServerGetsARowPastTheFanOutWidth(t *testing.T) {
 	h := mcpHarness(t)
 
-	declared := make([][2]string, 0, 2*maxConcurrentDials)
-	for i := range maxConcurrentDials {
+	// Two more pairs than the width, not exactly the width: with one leak per
+	// non-dialling entry, a run of exactly maxConcurrentDials of them fills the
+	// channel on the last iteration and the loop finishes regardless. The block
+	// only shows once an acquisition comes after the channel is full.
+	const pairs = maxConcurrentDials + 2
+	declared := make([][2]string, 0, 2*pairs)
+	for i := range pairs {
 		// Alternating, so the two kinds interleave rather than the non-dialling
 		// ones all landing before the channel could fill.
 		declared = append(declared,
@@ -1502,7 +1509,7 @@ func TestEveryDeclaredServerGetsARowPastTheFanOutWidth(t *testing.T) {
 	if len(cat) != len(declared) {
 		t.Fatalf("catalog rows = %d, want one per declared server (%d)", len(cat), len(declared))
 	}
-	for i := range maxConcurrentDials {
+	for i := range pairs {
 		if got := cat[fmt.Sprintf("ok%d", i)]; got.status != "ready" {
 			t.Errorf("row %s = %+v, want the reachable server listed", got.server, got)
 		}
@@ -1510,5 +1517,79 @@ func TestEveryDeclaredServerGetsARowPastTheFanOutWidth(t *testing.T) {
 			t.Errorf("row %s = %+v, want the unusable endpoint recorded as a failure",
 				got.server, got)
 		}
+	}
+}
+
+// stallsOnListing is a server that completes the handshake and then never
+// answers tools/list. It proxies a real fixture server rather than hand-writing
+// JSON-RPC, so the handshake is the SDK's own and only the one method is held.
+func stallsOnListing(t *testing.T, release <-chan struct{}) string {
+	t.Helper()
+	upstream := mcptest.Server(t, mcptest.Tool{Name: "ok_tool"})
+	client := mcptest.Client()
+	proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadGateway)
+			return
+		}
+		if bytes.Contains(body, []byte(`"tools/list"`)) {
+			<-release
+			return
+		}
+		req, err := http.NewRequest(r.Method, upstream, bytes.NewReader(body))
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadGateway)
+			return
+		}
+		req.Header = r.Header.Clone()
+		resp, err := client.Do(req)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadGateway)
+			return
+		}
+		defer func() { _ = resp.Body.Close() }()
+		for k, vs := range resp.Header {
+			for _, v := range vs {
+				w.Header().Add(k, v)
+			}
+		}
+		w.WriteHeader(resp.StatusCode)
+		_, _ = io.Copy(w, resp.Body)
+	}))
+	t.Cleanup(func() {
+		client.CloseIdleConnections()
+		proxy.Close()
+	})
+	return proxy.URL
+}
+
+// The budget can also run out on the *listing*, after a handshake the server
+// answered — a different error path from a dial that never connected, and one
+// the tarpit fixtures do not reach because they hold the handshake instead. It
+// has to read as this platform's scheduling all the same: marked otherwise, the
+// upsert would overwrite a verdict an earlier pass earned and the session would
+// hear a connection failure for a server that answered.
+func TestAListingTheBudgetCutShortIsNotAVerdictOnTheServer(t *testing.T) {
+	release := make(chan struct{})
+	stall := stallsOnListing(t, release)
+	t.Cleanup(func() { close(release) })
+
+	h := mcpHarnessWith(t, Config{MCPPassTimeout: 2 * time.Second})
+	h.declareMCPServers(t, [2]string{"slow", stall})
+	h.enqueueMCP(t)
+
+	h.stepOnce(t)
+
+	got := h.catalog(t)["slow"]
+	if got.status != "failed" {
+		t.Fatalf("row = %+v, want the stalled listing recorded as a failure", got)
+	}
+	if got.reason != passRanOutOfTime {
+		t.Errorf("reason = %q, want the pass's own scheduling: a listing this platform "+
+			"cut short is not a verdict the server earned", got.reason)
+	}
+	if n := len(h.errorsOfType(t, "mcp_connection_failed_error")); n != 0 {
+		t.Errorf("session errors = %d, want none for a budget this platform spent", n)
 	}
 }

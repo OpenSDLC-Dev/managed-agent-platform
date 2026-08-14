@@ -250,9 +250,12 @@ func (e *Executor) discoverServers(ctx context.Context, cfg domain.EnvironmentCo
 	rows := make([]catalogRow, len(servers))
 	sem := make(chan struct{}, maxConcurrentDials)
 	var wg sync.WaitGroup
-	// No goroutine outlives this function, on the error path as well as the
-	// ordinary one: they write into rows, and the budget they hold is cancelled
-	// on the way out.
+	// The only thing between a dial still writing its slot and a caller reading
+	// the rows — deferred rather than called at the end of the loop, because the
+	// error paths return from inside it and a dial in flight there is writing
+	// into the array this function is handing back. It is registered after the
+	// cancel it must precede: defers unwind last-registered-first, so the dials
+	// are waited out and only then is the budget they are holding torn down.
 	defer wg.Wait()
 
 	for i, s := range servers {
@@ -286,7 +289,6 @@ func (e *Executor) discoverServers(ctx context.Context, cfg domain.EnvironmentCo
 			rows[i] = e.listServerTools(budget, s, token, rows[i])
 		}()
 	}
-	wg.Wait()
 
 	if ctx.Err() != nil {
 		return nil, fmt.Errorf("discover mcp servers: %w", ctx.Err())
