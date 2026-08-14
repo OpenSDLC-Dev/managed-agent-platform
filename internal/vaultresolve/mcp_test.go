@@ -376,8 +376,9 @@ func TestMCPCredentialRefusesATokenNoHeaderCanCarry(t *testing.T) {
 		{name: "a trailing newline", token: "lin_api_secret\n"},
 		{name: "an embedded CRLF", token: "a\r\nX-Injected: 1"},
 		{name: "a raw NUL", token: "lin\x00secret"},
-		// Everything a header may carry still resolves: the guard has to be the
-		// rule net/http applies and not a narrower one.
+		// Every shape a bearer token actually takes still resolves. The guard is
+		// narrower than net/http's rule by its obs-text arm alone (see
+		// sendableAsHeader), and these rows are what stops it narrowing further.
 		{name: "punctuation and case", token: "sk-Live_1234.abc/xyz+=", usable: true},
 		{name: "a tab", token: "tok\ttok", usable: true},
 	} {

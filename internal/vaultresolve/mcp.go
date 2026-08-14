@@ -174,9 +174,15 @@ func sealedField(ctx context.Context, cipher secrets.Cipher, id string,
 	return v, nil
 }
 
-// sendableAsHeader is net/http's own rule for a header field value — visible
-// ASCII, space, or tab — spelled out rather than imported, since x/net's
-// httpguts is an indirect dependency and this is six lines of it.
+// sendableAsHeader admits visible ASCII, space and tab, which is net/http's
+// rule for a header field value minus its obs-text arm: httpguts also accepts
+// 0x80–0xFF, and this does not. Deliberately the narrower of the two — no
+// bearer token the wire defines carries those bytes, and refusing here names the
+// credential where letting them through would fail the dial as a transport
+// error naming only the server.
+//
+// Spelled out rather than imported: x/net is an indirect dependency and this is
+// six lines of it.
 func sendableAsHeader(v string) bool {
 	for i := 0; i < len(v); i++ {
 		if c := v[i]; c != '\t' && (c < 0x20 || c > 0x7e) {
