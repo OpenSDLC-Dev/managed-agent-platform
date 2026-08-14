@@ -118,7 +118,7 @@ func (e *Executor) processMCP(ctx context.Context, item *queue.Item) (err error)
 	// Keep the lease across the dials: a server that answers slowly would
 	// otherwise outlast a fixed TTL and lose the item mid-listing.
 	kctx, keeper := e.queue.KeepLease(ctx, item, e.cfg.LeaseTTL)
-	rows, runErr := e.discoverServers(kctx, sess.envConfig, pending)
+	rows, runErr := e.discoverServers(kctx, sess.envConfig, sess.vaultIDs, pending)
 	if kerr := keeper.Close(); kerr != nil {
 		return fmt.Errorf("lease keeper: %w", kerr)
 	}
@@ -206,7 +206,8 @@ func (e *Executor) undiscoveredServers(ctx context.Context, sid domain.ID, decla
 // dialling anything further, and the call already in flight when it expires
 // takes as long as the client's own cancellation does to unwind (see
 // mcp.DialTimeout on why that is seconds rather than immediate).
-func (e *Executor) discoverServers(ctx context.Context, cfg domain.EnvironmentConfig, servers []mcpServerRef) ([]catalogRow, error) {
+func (e *Executor) discoverServers(ctx context.Context, cfg domain.EnvironmentConfig,
+	vaultIDs []string, servers []mcpServerRef) ([]catalogRow, error) {
 	budget, cancel := context.WithTimeout(ctx, e.cfg.MCPPassTimeout)
 	defer cancel()
 
@@ -227,7 +228,11 @@ func (e *Executor) discoverServers(ctx context.Context, cfg domain.EnvironmentCo
 				notReached: true})
 			continue
 		}
-		rows = append(rows, e.discoverServer(budget, cfg, s))
+		row, err := e.discoverServer(budget, cfg, vaultIDs, s)
+		if err != nil {
+			return nil, err
+		}
+		rows = append(rows, row)
 		if ctx.Err() != nil {
 			return nil, fmt.Errorf("discover mcp server %q: %w", s.Name, ctx.Err())
 		}
@@ -245,44 +250,60 @@ func (e *Executor) discoverServers(ctx context.Context, cfg domain.EnvironmentCo
 // wraps is net/http's, which names the URL it dialled with only the password
 // masked — the username and query ride along. That is why storableReason
 // redacts by value here rather than trusting what arrives.
-func (e *Executor) discoverServer(ctx context.Context, cfg domain.EnvironmentConfig, s mcpServerRef) (row catalogRow) {
+func (e *Executor) discoverServer(ctx context.Context, cfg domain.EnvironmentConfig,
+	vaultIDs []string, s mcpServerRef) (row catalogRow, err error) {
 	// The reason is made storable here, where it is produced, rather than at
 	// settlement. A server chooses this text and a JSON-RPC error message is
 	// bounded only by a whole connection's response budget, so deferring the cap
 	// to the end of the pass would keep every declared server's megabytes alive
 	// in the executor's heap at once — and the redaction has to happen before
 	// anything holds the string anyway.
+	// Declared ahead of the defer so whatever line produced the reason, the
+	// token that line's dial carried is scrubbed out of it.
+	var token string
 	defer func() {
 		if row.reason != "" {
-			row.reason = storableReason(row.reason, row.url)
+			row.reason = storableReason(row.reason, row.url, token)
 		}
 	}()
 	row = catalogRow{name: s.Name, url: s.URL, status: "failed"}
 
-	host, err := mcpEndpointHost(s.URL)
-	if err != nil {
-		row.reason = err.Error()
-		return row
+	host, herr := mcpEndpointHost(s.URL)
+	if herr != nil {
+		row.reason = herr.Error()
+		return row, nil
 	}
 	if !mcpEgressAllowed(cfg, host) {
 		row.reason = egressRefusal(cfg, host)
-		return row
+		return row, nil
 	}
 
-	conn, err := mcp.Connect(ctx, mcp.Config{URL: s.URL, HTTPClient: e.mcpHTTP})
-	if err != nil {
-		row.reason = err.Error()
-		return row
+	token, cerr := e.mcpBearer(ctx, vaultIDs, s.URL)
+	if cerr != nil {
+		if !credentialUnusable(cerr) {
+			// The lookup failed, not the credential. A failed row would blame
+			// the credential for a pool that blinked; faulting the item retries
+			// the pass.
+			return catalogRow{}, fmt.Errorf("mcp credential for %q: %w", s.Name, cerr)
+		}
+		row.reason = mcpDialReason(cerr)
+		return row, nil
+	}
+
+	conn, derr := mcp.Connect(ctx, mcp.Config{URL: s.URL, HTTPClient: e.mcpHTTP, BearerToken: token})
+	if derr != nil {
+		row.reason = mcpDialReason(derr)
+		return row, nil
 	}
 	defer func() { _ = conn.Close() }()
 
-	tools, err := conn.ListTools(ctx)
-	if err != nil {
-		row.reason = err.Error()
-		return row
+	tools, lerr := conn.ListTools(ctx)
+	if lerr != nil {
+		row.reason = mcpDialReason(lerr)
+		return row, nil
 	}
-	row.status, row.reason, row.tools = "ready", "", storableTools(tools)
-	return row
+	row.status, row.reason, row.tools = "ready", "", storableTools(tools, token)
+	return row, nil
 }
 
 // storableTools is the catalog's last gate before Postgres: it strips NUL from
@@ -317,15 +338,16 @@ func (e *Executor) discoverServer(ctx context.Context, cfg domain.EnvironmentCon
 // and the rest are dropped rather than truncated: half a schema is a contract the
 // server never published, and dropping is already what this function does with a
 // tool it cannot store.
-func storableTools(tools []mcp.Tool) []mcp.Tool {
+func storableTools(tools []mcp.Tool, secrets ...string) []mcp.Tool {
 	out := make([]mcp.Tool, 0, len(tools))
 	budget := maxCatalogTools
 	for _, t := range tools {
 		if schemaCarriesNUL(t.InputSchema) {
 			continue
 		}
-		t.Name = toolset.SanitizeText(t.Name)
-		t.Description = toolset.SanitizeText(t.Description)
+		t.Name = scrubSecrets(toolset.SanitizeText(t.Name), secrets...)
+		t.Description = scrubSecrets(toolset.SanitizeText(t.Description), secrets...)
+		t.InputSchema = json.RawMessage(scrubSecrets(string(t.InputSchema), secrets...))
 		size := len(t.Name) + len(t.Description) + len(t.InputSchema)
 		if size > budget {
 			break
@@ -431,6 +453,21 @@ var urlInText = regexp.MustCompile(`(?i)https?://[^\s<>]+`)
 // in `url`, as `sessions.resolved_agent` already does. Keeping it out of
 // *derived* text is the point — that is what a later slice hands to a model.
 //
+// A vault's bearer token is the one secret both of those arguments fail for: it
+// is not in the endpoint, so no rendering of the endpoint covers it, and it is
+// nowhere at rest in the clear — the vault holds it sealed. A server that reads
+// its own Authorization header can quote it back in a JSON-RPC error message,
+// which the SDK preserves. So callers pass it in `secrets`.
+//
+// It is replaced *last* of the three redactions, because the two before it
+// substitute text in: a rendering's safe form is a URL, and a token that happens
+// to be a substring of one — `https`, a host name — would be put back by the
+// very pass that redacts the endpoint. Nothing after it inserts anything, so
+// last is the only position that holds. What no ordering reaches is a server
+// that transforms the token before quoting it — percent-encoded, base64'd, cut
+// in half — which is the same residue the endpoint's own pass leaves, and no
+// rule over text closes it.
+//
 // Then NUL, for the reason storableTools gives, and then UTF-8 twice, for two
 // different reasons. Postgres rejects an invalid byte sequence on a text column
 // exactly as it rejects a NUL, and faults the item the same way — so the text
@@ -439,17 +476,37 @@ var urlInText = regexp.MustCompile(`(?i)https?://[^\s<>]+`)
 // an SDK error that quotes such a header back carries those bytes into here),
 // and once more after the cap, because cutting a byte slice mid-rune produces
 // the same invalid sequence out of input that was clean.
-func storableReason(reason, endpoint string) string {
+func storableReason(reason, endpoint string, secrets ...string) string {
 	for _, form := range endpointRenderings(endpoint) {
 		reason = strings.ReplaceAll(reason, form.text, form.safe)
 	}
 	reason = urlInText.ReplaceAllStringFunc(reason, redactURL)
+	reason = scrubSecrets(reason, secrets...)
 	reason = toolset.SanitizeText(reason)
 	reason = strings.ToValidUTF8(reason, "")
 	if len(reason) > maxCatalogReason {
 		reason = strings.ToValidUTF8(reason[:maxCatalogReason], "") + "…"
 	}
 	return reason
+}
+
+// scrubSecrets replaces each secret wherever it appears. Callers pass the token
+// the dial carried, which a server may quote back in any text it chooses: an
+// error message, a tool's description, a tool result. Unlike the endpoint, it is
+// nowhere else at rest in the clear, and unlike the endpoint it is what the next
+// dial authenticates with.
+//
+// A substring replacement, and that is its limit: a server that percent-encodes,
+// base64s or splits the token before quoting it leaves something no rule over
+// text recognises. What it does close is the ordinary case, which is a server
+// echoing the header it received.
+func scrubSecrets(s string, secrets ...string) string {
+	for _, secret := range secrets {
+		if secret != "" {
+			s = strings.ReplaceAll(s, secret, "***")
+		}
+	}
+	return s
 }
 
 // endpointRenderings lists the ways the declared endpoint can appear in a

@@ -137,6 +137,10 @@ type Tool struct {
 // use and is not meant to be: one work item, one connection, one goroutine.
 type Conn struct {
 	session *sdk.ClientSession
+	// auth records whether this connection was ever answered 401 or 403, so a
+	// failure raised on it can be told from one that never got that far. Nil on
+	// a Conn built without the transport chain, which marks nothing.
+	auth *authWatch
 }
 
 // DefaultClient is the guarded HTTP client used when a Config supplies none.
@@ -334,6 +338,11 @@ func Connect(ctx context.Context, cfg Config) (*Conn, error) {
 	if httpClient == nil {
 		httpClient = DefaultClient
 	}
+	// Innermost, so it reads a status straight off the wire. The response limit
+	// sits above it and answers (nil, error) for a response whose headers alone
+	// exceed what the budget has left, discarding that response — a 401 read
+	// anywhere above the limit would be a 401 the limit can swallow.
+	httpClient, auth := withAuthWatch(httpClient)
 	httpClient = withResponseLimit(httpClient)
 	httpClient = withTraceContext(httpClient)
 	if cfg.BearerToken != "" {
@@ -378,9 +387,10 @@ func Connect(ctx context.Context, cfg Config) (*Conn, error) {
 		// what an operator needs to know which server failed; net/http's own
 		// half of the message redacts its password and keeps the rest, which is
 		// why the executor redacts this string again by value before storing it.
-		return nil, fmt.Errorf("mcp: connect to %s://%s: %w", endpoint.Scheme, endpoint.Host, connErr)
+		return nil, auth.mark(
+			fmt.Errorf("mcp: connect to %s://%s: %w", endpoint.Scheme, endpoint.Host, connErr))
 	}
-	return &Conn{session: session}, nil
+	return &Conn{session: session, auth: auth}, nil
 }
 
 // capturingTransport keeps the Connection its inner transport produced so a
@@ -450,6 +460,7 @@ func (c *Conn) listTools(ctx context.Context, budget time.Duration) ([]Tool, err
 	// most of an hour.
 	ctx, cancel := context.WithTimeout(ctx, budget)
 	defer cancel()
+	c.auth.reset()
 
 	out := []Tool{}
 	// Every cursor the server has already handed out, and every name already
@@ -460,7 +471,7 @@ func (c *Conn) listTools(ctx context.Context, budget time.Duration) ([]Tool, err
 	for page := 0; page < maxToolPages; page++ {
 		res, err := c.listPage(ctx, cursor)
 		if err != nil {
-			return nil, fmt.Errorf("mcp: list tools: %w", err)
+			return nil, c.auth.mark(fmt.Errorf("mcp: list tools: %w", err))
 		}
 		for _, tool := range res.Tools {
 			// A nil element is what `"tools": [null]` decodes to. With go-sdk
@@ -1097,7 +1108,14 @@ func withBearer(client *http.Client, token string, endpoint *url.URL) *http.Clie
 // case. Folding the whole string is the one way this comparison could match
 // two origins that are not the same one — the direction that leaks rather than
 // withholds — so the zone is split off and compared exactly.
+//
+// An empty port is dropped from both sides first, because net/http drops it
+// from the request: http.NewRequest normalizes "host:" to "host", so an
+// endpoint written that way would be compared against a request that no longer
+// spells it that way and the header would be withheld from the very server it
+// was resolved for.
 func sameHost(a, b string) bool {
+	a, b = trimEmptyPort(a), trimEmptyPort(b)
 	az, bz := strings.IndexByte(a, '%'), strings.IndexByte(b, '%')
 	if az < 0 && bz < 0 {
 		return strings.EqualFold(a, b)
@@ -1106,6 +1124,13 @@ func sameHost(a, b string) bool {
 		return false
 	}
 	return strings.EqualFold(a[:az], b[:bz]) && a[az:] == b[bz:]
+}
+
+// trimEmptyPort is net/http's removeEmptyPort, which is unexported there. The
+// trailing colon is the only shape it removes: "[::1]" keeps its brackets and
+// "host:0" keeps a port that was actually written.
+func trimEmptyPort(host string) string {
+	return strings.TrimSuffix(host, ":")
 }
 
 type bearerTransport struct {
@@ -1125,6 +1150,11 @@ func (t *bearerTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	}
 	// RoundTrippers must not modify the request they are given.
 	cloned := req.Clone(req.Context())
+	// Set, so the vault's credential wins over anything already there. The one
+	// header that can be is the Basic net/http derives from an endpoint's own
+	// userinfo (client.go, send), and a vault credential is the configured,
+	// rotatable one — an endpoint that carries both is a misconfiguration, and
+	// sending two credentials or picking the URL's would be the worse answer.
 	cloned.Header.Set("Authorization", "Bearer "+t.token)
 	return t.base.RoundTrip(cloned)
 }

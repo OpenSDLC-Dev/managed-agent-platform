@@ -469,7 +469,8 @@ func TestASessionEndedMidPassGetsNoRowsAndNoTurn(t *testing.T) {
 			if err != nil || !live {
 				t.Fatalf("sessionForRun: live=%v err=%v", live, err)
 			}
-			rows, err := h.exec.discoverServers(context.Background(), sess.envConfig, sess.mcpServers)
+			rows, err := h.exec.discoverServers(
+				context.Background(), sess.envConfig, sess.vaultIDs, sess.mcpServers)
 			if err != nil {
 				t.Fatalf("discoverServers: %v", err)
 			}
