@@ -299,7 +299,7 @@ func TestMCPCallWithAFailedCredentialLookupFaultsRatherThanAnswers(t *testing.T)
 	h.breakTheCredentialQuery(t)
 
 	faulted := h.stepExpectingFault(t)
-	if !strings.Contains(faulted.Error(), "mcp credential for") {
+	if !strings.Contains(faulted.Error(), "mcp credential") {
 		t.Errorf("the item faulted for another reason, so this pins nothing: %v", faulted)
 	}
 	if _, reached := seen(); reached {
@@ -548,7 +548,7 @@ func TestMCPDiscoveryWithAFailedCredentialLookupFaultsRatherThanFailsTheRow(t *t
 	h.breakTheCredentialQuery(t)
 
 	faulted := h.stepExpectingFault(t)
-	if !strings.Contains(faulted.Error(), "mcp credential for") {
+	if !strings.Contains(faulted.Error(), "mcp credential") {
 		t.Errorf("the item faulted for another reason, so this pins nothing: %v", faulted)
 	}
 	if _, reached := seen(); reached {

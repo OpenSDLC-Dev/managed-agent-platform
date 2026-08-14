@@ -443,7 +443,8 @@ func TestASelfHostedEnvironmentWithNoPolicyIsStillUnconstrained(t *testing.T) {
 // catalog rows written for it, nor a model turn chained on its behalf for a
 // brain to claim and drain. Every other executor settlement inherits this from
 // events.AppendInTx, which refuses an archived session under the same row lock;
-// discovery appends no event, so it has to ask.
+// discovery appends one only on the pass where a server starts failing, so on
+// every other pass there is nothing for that refusal to act on and it has to ask.
 //
 // The end lands after the dials and before the settlement, which is the window
 // under test: the server is reachable and the pass succeeds, so nothing but the
@@ -994,9 +995,9 @@ func TestATarpitServerDoesNotStarveTheOnesDeclaredAfterIt(t *testing.T) {
 		<-release
 	}))
 	client := mcptest.Client()
-	// Registered before the teardown below, because t.Cleanup is LIFO and this
-	// server's own cleanup has to run first — the ordering the comment there is
-	// about.
+	// Registered before the teardown below so that it runs after it: t.Cleanup
+	// unwinds last-registered-first, and this server's Close waits for every
+	// connection to go idle — which is what the block below sees to.
 	healthy := mcptest.Server(t, mcptest.Tool{Name: "ok_tool"})
 	// Teardown in one place, because its order matters and the default is
 	// wrong twice over. The tarpit is released explicitly rather than by its
@@ -1591,5 +1592,76 @@ func TestAListingTheBudgetCutShortIsNotAVerdictOnTheServer(t *testing.T) {
 	}
 	if n := len(h.errorsOfType(t, "mcp_connection_failed_error")); n != 0 {
 		t.Errorf("session errors = %d, want none for a budget this platform spent", n)
+	}
+}
+
+// A url that is not http(s) is a row and a tool error, never a session event:
+// the wire's mcp_connection_failed_error means a server that could not be
+// reached, and this one was never dialled. The execution half of the driver
+// already draws that line (mcpexec.go, runMCPTool: a malformed url answers
+// is_error with an empty mcpFailure), and one condition must not produce an
+// event on one half of a driver and silence on the other.
+func TestAUrlThatIsNotHTTPIsARowAndNotASessionEvent(t *testing.T) {
+	h := mcpHarness(t)
+	h.declareMCPServers(t, [2]string{"docs", "ftp://example.invalid/mcp"})
+	h.enqueueMCP(t)
+
+	h.stepOnce(t)
+
+	got := h.catalog(t)["docs"]
+	if got.status != "failed" || got.reason == "" {
+		t.Fatalf("row = %+v, want the unusable url recorded with its reason", got)
+	}
+	if n := len(h.sessionErrors(t)); n != 0 {
+		t.Errorf("session errors = %d, want none: nothing was dialled, so neither of "+
+			"the wire's two failures happened", n)
+	}
+}
+
+// Once a connection has been answered 401 the MCP client wraps
+// mcp.ErrUnauthorized around whatever it fails with next, so an error can carry
+// a refusal and a cancellation at once. The refusal is a verdict the server
+// earned however the pass then ended — deciding on the clock first would discard
+// it and tell the operator nothing.
+func TestACredentialRefusedOnTheWayToTheDeadlineIsStillARefusal(t *testing.T) {
+	dead, cancel := context.WithCancel(context.Background())
+	cancel()
+	row := catalogRow{name: "docs", url: "https://example.test/mcp", status: "failed"}
+
+	got := failedDial(dead, row, fmt.Errorf("%w: %w", mcp.ErrUnauthorized, context.DeadlineExceeded))
+	if got.notReached {
+		t.Error("a credential the server refused was written off as the pass's own scheduling")
+	}
+	if !got.authentication {
+		t.Errorf("row = %+v, want the refusal typed as an authentication failure", got)
+	}
+}
+
+// A row left behind at an endpoint the server no longer sits at has been
+// announced about a different server, so it must not silence the first failure
+// of the current one. Every other row decision in the file compares the url;
+// the dedupe does too.
+func TestAFailureAtANewEndpointIsAnnouncedPastAStaleRow(t *testing.T) {
+	down := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "no", http.StatusInternalServerError)
+	}))
+	defer down.Close()
+
+	h := mcpHarness(t)
+	h.declareMCPServers(t, [2]string{"github", down.URL})
+	// The row an earlier pass wrote, for the endpoint this server used to be at.
+	if _, err := h.pool.Exec(context.Background(),
+		`INSERT INTO mcp_catalogs (session_id, server_name, url, tools, status, error, fetched_at)
+		 VALUES ($1, 'github', 'https://old.example/mcp', '[]'::jsonb, 'failed', 'gone', now())`,
+		h.sid.String()); err != nil {
+		t.Fatalf("seed the stale row: %v", err)
+	}
+	h.enqueueMCP(t)
+
+	h.stepOnce(t)
+
+	if n := len(h.errorsOfType(t, "mcp_connection_failed_error")); n != 1 {
+		t.Errorf("session errors = %d, want the new endpoint's failure said out loud "+
+			"even though a row for the old one was already there", n)
 	}
 }
