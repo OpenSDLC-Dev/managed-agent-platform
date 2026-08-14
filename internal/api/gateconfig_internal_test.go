@@ -121,6 +121,7 @@ func TestTheGatesMCPEndpointsRefuseWhatWouldWiden(t *testing.T) {
 		{"url":""},
 		{"url":"https://*.example.com/mcp"},
 		{"url":"http://[::1]:9000/mcp"},
+		{"url":"https://[2606:4700:4700::1111]/mcp"},
 		{"url":"http://169.254.169.254/latest/meta-data/"},
 		{"url":"http://127.0.0.1:8080/mcp"},
 		{"url":"http://[64:ff9b::a9fe:a9fe]/mcp"},
@@ -136,8 +137,10 @@ func TestTheGatesMCPEndpointsRefuseWhatWouldWiden(t *testing.T) {
 	}
 	// Each refusal for its own reason:
 	//   the wildcard, which a host set reads as a suffix rule;
-	//   the IPv6 literal, which the gate cannot match consistently over both
-	//     CONNECT (bracket-stripped) and plain HTTP (bracketed);
+	//   the two IPv6 literals, which the gate cannot match consistently over
+	//     both CONNECT (bracket-stripped) and plain HTTP (bracketed) — one of
+	//     them a routable address, so the refusal below is this rule's and not
+	//     the address floor's;
 	//   the three addresses the platform's own MCP client refuses — link-local
 	//     (cloud metadata), loopback, and the same metadata address hidden in a
 	//     NAT64 wrapper;
