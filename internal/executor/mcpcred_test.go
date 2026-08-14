@@ -287,15 +287,16 @@ func TestMCPCallWithAFailedCredentialLookupFaultsRatherThanAnswers(t *testing.T)
 // discarded result is one the reclaim runs a second time.
 func TestMCPPassCommitsWhatItAnsweredBeforeALookupFails(t *testing.T) {
 	h := mcpHarness(t)
-	var breakAfterAnswering func()
+	var breakOnce func()
 	url := serveInterceptingCalls(t,
 		mcptest.Tool{Name: "ask", Blocks: []mcptest.Block{{Type: "text", Text: "answered"}}},
-		func() { breakAfterAnswering() })
+		func() { breakOnce() })
 	h.attachVaultWithMCPCredential(t, url, "tok")
-	// Armed only once the vault row exists, so the credential the first call
-	// resolves is real and only the second call's lookup fails.
+	// Armed only once the vault row exists, and fired on the first call — whose
+	// own credential was resolved before this server was reached, so it is
+	// answered and only the second call's lookup fails.
 	var once sync.Once
-	breakAfterAnswering = func() { once.Do(func() { h.breakTheCredentialQuery(t) }) }
+	breakOnce = func() { once.Do(func() { h.breakTheCredentialQuery(t) }) }
 
 	h.declareListedMCPServers(t, [2]string{"docs", url})
 	h.appendMCPToolUse(t, "docs", "ask", `{}`)
@@ -317,9 +318,14 @@ func TestMCPPassCommitsWhatItAnsweredBeforeALookupFails(t *testing.T) {
 	}
 }
 
-// serveInterceptingCalls runs `after` once each tool call has been served, so a
-// test can change the world between two calls of one pass.
-func serveInterceptingCalls(t *testing.T, tool mcptest.Tool, after func()) string {
+// serveInterceptingCalls runs `before` on each tool call and then serves it, so
+// a test can change the world between two calls of one pass.
+//
+// Before the answer rather than after it, which is what makes the order a fact:
+// the driver is blocked on this response, so anything done here is done before
+// it moves on. Run afterwards, the change would race the next call's own
+// queries — and lose in CI, where the driver is not the slow half.
+func serveInterceptingCalls(t *testing.T, tool mcptest.Tool, before func()) string {
 	t.Helper()
 	inner := mcptest.Server(t, tool)
 	target, err := neturl.Parse(inner)
@@ -337,11 +343,11 @@ func serveInterceptingCalls(t *testing.T, tool mcptest.Tool, after func()) strin
 			Method string `json:"method"`
 		}
 		_ = json.Unmarshal(body, &msg)
+		if msg.Method == "tools/call" {
+			before()
+		}
 		r.Body = io.NopCloser(bytes.NewReader(body))
 		proxy.ServeHTTP(w, r)
-		if msg.Method == "tools/call" {
-			after()
-		}
 	}))
 	t.Cleanup(ts.Close)
 	return ts.URL
