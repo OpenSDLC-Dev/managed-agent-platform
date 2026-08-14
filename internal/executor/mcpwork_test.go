@@ -1468,3 +1468,47 @@ func TestOneServerDeclaredTwiceIsAnnouncedOnce(t *testing.T) {
 			"server being down", n)
 	}
 }
+
+// More declared servers than the fan-out is wide, and half of them never reach a
+// dial at all. The slot is taken before the credential is resolved, so every path
+// out of that iteration has to give it back — a server that earns its verdict
+// before any socket opens included. Miss one and the pass stops for good once the
+// leaked slots fill the channel, which is a hang rather than a wrong answer: this
+// declares more entries than maxConcurrentDials so the leak has somewhere to show.
+//
+// Over the wire cap on purpose. mcp_servers is capped at maxAgentMCPServers where
+// an agent spec is written, and this array is read back out of a stored
+// resolved_agent — the provenance the fan-out width already refuses to assume
+// away.
+func TestEveryDeclaredServerGetsARowPastTheFanOutWidth(t *testing.T) {
+	h := mcpHarness(t)
+
+	declared := make([][2]string, 0, 2*maxConcurrentDials)
+	for i := range maxConcurrentDials {
+		// Alternating, so the two kinds interleave rather than the non-dialling
+		// ones all landing before the channel could fill.
+		declared = append(declared,
+			[2]string{fmt.Sprintf("ok%d", i), mcptest.Server(t, mcptest.Tool{Name: "ok_tool"})},
+			// Not http(s): refused by mcpEndpointHost, so this entry is a row
+			// with no dial behind it.
+			[2]string{fmt.Sprintf("bad%d", i), fmt.Sprintf("ftp://example.invalid/%d", i)})
+	}
+	h.declareMCPServers(t, declared...)
+	h.enqueueMCP(t)
+
+	h.stepOnce(t)
+
+	cat := h.catalog(t)
+	if len(cat) != len(declared) {
+		t.Fatalf("catalog rows = %d, want one per declared server (%d)", len(cat), len(declared))
+	}
+	for i := range maxConcurrentDials {
+		if got := cat[fmt.Sprintf("ok%d", i)]; got.status != "ready" {
+			t.Errorf("row %s = %+v, want the reachable server listed", got.server, got)
+		}
+		if got := cat[fmt.Sprintf("bad%d", i)]; got.status != "failed" {
+			t.Errorf("row %s = %+v, want the unusable endpoint recorded as a failure",
+				got.server, got)
+		}
+	}
+}

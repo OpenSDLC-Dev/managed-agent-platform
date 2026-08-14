@@ -224,6 +224,11 @@ func (e *Executor) undiscoveredServers(ctx context.Context, sid domain.ID, decla
 // never entered the catalog, and the model was never offered their tools.
 // Position is not a fact about a server, so it must not be what decides.
 //
+// The two are interleaved rather than staged: each dial is launched as soon as
+// its own preparation returns, and the next preparation runs while it is in
+// flight. Preparing everything first would be tidier and would age the tokens it
+// resolved — see the slot below.
+//
 // Nothing in the second phase is shared but the http.Client, which is safe for
 // it: each goroutine fills its own declaration's slot, so the rows the settlement
 // walks are in declaration order however the dials interleave.
@@ -243,40 +248,42 @@ func (e *Executor) discoverServers(ctx context.Context, cfg domain.EnvironmentCo
 	defer cancel()
 
 	rows := make([]catalogRow, len(servers))
-	tokens := make([]string, len(servers))
-	var dial []int
-	for i, s := range servers {
-		row, token, ok, err := e.prepareServer(budget, cfg, vaultIDs, s)
-		if err != nil {
-			return nil, fmt.Errorf("discover mcp server %q: %w", s.Name, err)
-		}
-		rows[i], tokens[i] = row, token
-		if ok {
-			dial = append(dial, i)
-		}
-	}
-
-	// A width, even though the wire caps mcp_servers at maxAgentMCPServers
-	// entries: that cap is enforced where an agent spec is *written*, and this
-	// array is read back out of a stored resolved_agent, which an import, a
-	// restore or a hand-written UPDATE can have filled — the provenance
-	// mcpEgressAllowed already refuses to assume away. The width is the same
-	// number, so a session within the cap is dialled all at once and one past it
-	// is bounded rather than unbounded.
-	//
-	// Taken before the goroutine is spawned rather than inside it, so the one
-	// channel bounds the goroutines too. Blocking the loop costs nothing here:
-	// this is already the goroutine that took the work item, and every dial it
-	// waits on shares the budget's deadline.
 	sem := make(chan struct{}, maxConcurrentDials)
 	var wg sync.WaitGroup
-	for _, i := range dial {
+	// No goroutine outlives this function, on the error path as well as the
+	// ordinary one: they write into rows, and the budget they hold is cancelled
+	// on the way out.
+	defer wg.Wait()
+
+	for i, s := range servers {
+		// The slot is taken before the credential is resolved, not after,
+		// because what it has to cover is *this* server's resolve and dial
+		// together. A refresh hands back a token whose remaining life may be
+		// only the leeway that triggered it (vaultresolve, refreshLeeway — one
+		// minute, documented as absorbing clock skew and the flight time of the
+		// dial it is about to authorize), so a token that waited for a slot
+		// before being used could be spent by the time it is sent, and the
+		// healthy credential would earn an authentication failure.
 		sem <- struct{}{}
+		row, token, dial, err := e.prepareServer(budget, cfg, vaultIDs, s)
+		if err != nil {
+			<-sem
+			// The dials already in flight have nowhere to put their rows —
+			// this pass is throwing all of them away — so they are cut short
+			// rather than waited out.
+			cancel()
+			return nil, fmt.Errorf("discover mcp server %q: %w", s.Name, err)
+		}
+		rows[i] = row
+		if !dial {
+			<-sem
+			continue
+		}
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
 			defer func() { <-sem }()
-			rows[i] = e.listServerTools(budget, servers[i], tokens[i], rows[i])
+			rows[i] = e.listServerTools(budget, s, token, rows[i])
 		}()
 	}
 	wg.Wait()
@@ -287,10 +294,21 @@ func (e *Executor) discoverServers(ctx context.Context, cfg domain.EnvironmentCo
 	return rows, nil
 }
 
-// maxConcurrentDials bounds the second phase. It is maxAgentMCPServers restated,
-// for the reason discoverServers gives: the cap belongs to the write path and
-// this is the read path.
-const maxConcurrentDials = 20
+// maxConcurrentDials bounds the dials in flight, and it is a memory bound rather
+// than a copy of the wire's twenty-entry mcp_servers cap.
+//
+// Each connection carries its own cumulative response budget (mcp.MaxResponseBytes,
+// 8 MiB, sized there against a host running many sessions), and the SDK reads a
+// response whole before it decodes anything — so the width multiplies the bytes a
+// pass can hold live. Twenty would be a hundred and sixty megabytes of one
+// session's servers, in a process whose every other buffer is measured in
+// megabytes; eight is sixty-four, and the fairness this width exists for is
+// already had at any width above one. The wire cap is not the right number here
+// anyway: it is enforced where an agent spec is written, and this array is read
+// back out of a stored resolved_agent, which an import, a restore or a
+// hand-written UPDATE can have filled — the provenance mcpEgressAllowed already
+// refuses to assume away.
+const maxConcurrentDials = 8
 
 // passRanOutOfTime is the reason a server the pass could not finish with
 // carries. It is a fallback rather than a verdict — the settlement's upsert
