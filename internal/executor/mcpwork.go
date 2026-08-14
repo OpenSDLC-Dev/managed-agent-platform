@@ -21,8 +21,10 @@ import (
 )
 
 // The MCP driver: mcp_exec items reach the session's MCP servers from this
-// process — no sandbox Provision — for cloud AND self_hosted sessions alike
-// (docs/plan/29_mcp-toolset.md). MCP is server-side on every environment kind:
+// process — creating no sandbox to do it — for cloud AND self_hosted sessions
+// alike (docs/plan/29_mcp-toolset.md). A cloud session that already has one is
+// written into, never provisioned: an answer past the tool budget spills its
+// text there (mcpspill.go). MCP is server-side on every environment kind:
 // the SDK says so three times (BetaManagedAgentsSessionToolRunner, "MCP tools
 // are server-side"), the work API has no MCP surface to poll, and a BYOC
 // worker's contract is agent.tool_use + agent.custom_tool_use alone. That makes
@@ -79,7 +81,8 @@ type catalogRow struct {
 
 // processMCP runs one mcp_exec item to completion. It mirrors processWeb — the
 // consumer span, the dead-session drain, the lease keeper, the one-commit
-// settlement — minus everything sandbox.
+// settlement — and runs no tool in a sandbox, reaching only for one the session
+// already has when an answer has to spill (mcpspill.go).
 func (e *Executor) processMCP(ctx context.Context, item *queue.Item) (err error) {
 	ctx, span := consumerSpan(ctx, item, "mcp_exec")
 	defer func() {

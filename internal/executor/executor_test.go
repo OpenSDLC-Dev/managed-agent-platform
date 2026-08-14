@@ -38,6 +38,9 @@ type fakeSandbox struct {
 	files    map[string]string
 	writeErr error
 	readErr  error
+	// writes counts every WriteFile, successful or not, so a test can pin how
+	// many attempts a pass made rather than only what survived them.
+	writes int
 	// failPath, if set, makes WriteFile fail (a backend fault) for a path with
 	// this suffix, so a test can fault one tool of a parallel set while the
 	// others succeed.
@@ -131,6 +134,7 @@ func (f *fakeSandbox) ReadFileStream(ctx context.Context, path string, maxBytes 
 	return io.NopCloser(bytes.NewReader(data)), int64(len(data)), nil
 }
 func (f *fakeSandbox) WriteFile(ctx context.Context, path string, data []byte) error {
+	f.writes++
 	if f.entered != nil {
 		select {
 		case f.entered <- struct{}{}:
@@ -202,6 +206,7 @@ type fakeProvider struct {
 	// capture-BEFORE-destroy ordering under test.
 	mu          sync.Mutex
 	owned       []domain.ID
+	ownedCalls  int
 	reaped      []domain.ID
 	destroyed   map[domain.ID]bool
 	reapFailFor domain.ID
@@ -244,7 +249,15 @@ func (p *fakeProvider) Provision(ctx context.Context, spec sandbox.Spec) (sandbo
 func (p *fakeProvider) Owned(context.Context) ([]domain.ID, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	p.ownedCalls++
 	return slices.Clone(p.owned), nil
+}
+
+// ownedLookups is ownedCalls under the lock the reaper goroutine shares.
+func (p *fakeProvider) ownedLookups() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.ownedCalls
 }
 
 func (p *fakeProvider) Reap(_ context.Context, sid domain.ID) error {

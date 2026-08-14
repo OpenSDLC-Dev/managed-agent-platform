@@ -131,7 +131,7 @@ func (e *Executor) runMCPTools(ctx context.Context, cfg domain.EnvironmentConfig
 		if endpoint, refusal := callEndpoint(endpoints, ready, u.server); refusal != "" {
 			res = mcpFailed("%s", refusal)
 		} else {
-			res, failure = e.runMCPTool(ctx, cfg, endpoint, spill, u)
+			res, failure = e.runMCPTool(ctx, cfg, endpoint, u)
 		}
 		// One label value for every MCP call, rather than the call's own name.
 		// The metric's tool name has until now been drawn from a fixed set of
@@ -144,6 +144,17 @@ func (e *Executor) runMCPTools(ctx context.Context, cfg domain.EnvironmentConfig
 			toolset.Result{IsError: res.isError}, ctx.Err())
 		if ctx.Err() != nil {
 			return out, fmt.Errorf("mcp tool %s (%s): %w", u.name, u.id, ctx.Err()), nil
+		}
+		// Spilled here rather than where the answer was rendered so that the
+		// metric above measures the server and not this platform: a spill takes
+		// the session lock, and recording that wait as MCP latency would page an
+		// operator about a server that answered promptly.
+		//
+		// The notice rides on top of the budget, as the dropped-block notice
+		// does: it is this platform's line about the server's answer, and a
+		// pointer to the spill file is worthless if the pointer is what gets cut.
+		if notice := spill.write(ctx, u.id, res.content, res.dropped > 0); notice != "" {
+			res.blocks = append(res.blocks, textBlock(notice))
 		}
 		ev, err := mcpResultEvent(u.id, res)
 		if err != nil {
@@ -245,6 +256,12 @@ func (e *Executor) answerMCPCalls(ctx context.Context, item *queue.Item, sess se
 type mcpAnswer struct {
 	blocks  []map[string]any
 	isError bool
+	// content is the server's answer before this driver rendered or capped it,
+	// and dropped is how many blocks the budget threw away. Both are carried
+	// out to the caller rather than used here because the spill they feed runs
+	// outside the region timed as the server's call (runMCPTools).
+	content []mcp.Content
+	dropped int
 }
 
 func mcpFailed(format string, args ...any) mcpAnswer {
@@ -289,7 +306,7 @@ func callEndpoint(declared, ready map[string]string, server string) (string, str
 // failure from touching another's call — the same reason discovery dials each
 // server on its own.
 func (e *Executor) runMCPTool(ctx context.Context, cfg domain.EnvironmentConfig,
-	endpoint string, spill *mcpSpiller, u mcpToolUse) (mcpAnswer, string) {
+	endpoint string, u mcpToolUse) (mcpAnswer, string) {
 
 	host, err := mcpEndpointHost(endpoint)
 	if err != nil {
@@ -322,14 +339,8 @@ func (e *Executor) runMCPTool(ctx context.Context, cfg domain.EnvironmentConfig,
 		}
 		return mcpFailed("MCP tool %q on server %q could not be run: %s", u.name, u.server, msg), failure
 	}
-	blocks := mcpResultBlocks(res.Content)
-	// The notice rides on top of the budget, as the dropped-block notice does:
-	// it is this platform's line about the server's answer, and a pointer to
-	// the spill file is worthless if the pointer is what gets cut.
-	if notice := spill.write(ctx, u.id, mcpAnswerText(res.Content)); notice != "" {
-		blocks = append(blocks, textBlock(notice))
-	}
-	return mcpAnswer{blocks: blocks, isError: res.IsError}, ""
+	blocks, dropped := mcpResultBlocks(res.Content)
+	return mcpAnswer{blocks: blocks, isError: res.IsError, content: res.Content, dropped: dropped}, ""
 }
 
 // mcpCallHTTP is the client tool calls go through: the executor's own when a
@@ -367,7 +378,7 @@ func (e *Executor) mcpCallHTTP() *http.Client {
 //
 // A block whose type is none of MCP's five is dropped — the SDK's decoder admits
 // two sampling-only types here that a tool result has no business carrying.
-func mcpResultBlocks(content []mcp.Content) []map[string]any {
+func mcpResultBlocks(content []mcp.Content) ([]map[string]any, int) {
 	out := make([]map[string]any, 0, len(content))
 	for _, c := range content {
 		switch c.Type {
@@ -387,12 +398,9 @@ func mcpResultBlocks(content []mcp.Content) []map[string]any {
 		case "resource":
 			out = append(out, resourceBlock(c))
 		case "resource_link":
-			out = append(out, textBlock(fmt.Sprintf("The tool returned a link to a resource: %s (%s)",
-				c.URI, mimeOrUnknown(c.MIMEType))))
+			out = append(out, textBlock(mcpLinkText(c)))
 		case "audio":
-			out = append(out, textBlock(fmt.Sprintf(
-				"The tool returned %d bytes of audio (%s), which cannot be shown here.",
-				len(c.Data), mimeOrUnknown(c.MIMEType))))
+			out = append(out, textBlock(mcpAudioText(c)))
 		}
 	}
 	// A tool that answers with nothing at all still needs one block: the wire's
@@ -448,7 +456,7 @@ func mcpResultBlocks(content []mcp.Content) []map[string]any {
 // pointer is what gets cut. The two say different things and both can be true —
 // this one counts blocks that left the answer, that one names where the answer's
 // text went, and an image the budget dropped is in neither.
-func capMCPBlocks(blocks []map[string]any) []map[string]any {
+func capMCPBlocks(blocks []map[string]any) ([]map[string]any, int) {
 	budget := toolset.MaxOutputBytes
 	exempted := false
 	out := make([]map[string]any, 0, len(blocks))
@@ -463,13 +471,14 @@ func capMCPBlocks(blocks []map[string]any) []map[string]any {
 		}
 		if len(raw) > budget {
 			return append(out, textBlock(fmt.Sprintf(
-				"%d content block(s) of this answer were dropped: it is past the %d bytes "+
-					"a tool result may put on this session's log.", len(blocks)-i, toolset.MaxOutputBytes)))
+					"%d content block(s) of this answer were dropped: it is past the %d bytes "+
+						"a tool result may put on this session's log.", len(blocks)-i, toolset.MaxOutputBytes))),
+				len(blocks) - i
 		}
 		budget -= len(raw)
 		out = append(out, b)
 	}
-	return out
+	return out, 0
 }
 
 // alreadyCapped reports whether the text this block carries has been through
@@ -614,6 +623,20 @@ func resourceBlock(c mcp.Content) map[string]any {
 // block — truncated rather than dropped whole.
 func textBlock(s string) map[string]any {
 	return map[string]any{"type": "text", "text": toolset.CapOutput(toolset.SanitizeText(s))}
+}
+
+// mcpLinkText and mcpAudioText are the sentences a link and an audio block are
+// described in — here and in the spill file both (mcpspill.go), so the file and
+// the answer it stands in for never come to say different things about the same
+// block.
+func mcpLinkText(c mcp.Content) string {
+	return fmt.Sprintf("The tool returned a link to a resource: %s (%s)",
+		c.URI, mimeOrUnknown(c.MIMEType))
+}
+
+func mcpAudioText(c mcp.Content) string {
+	return fmt.Sprintf("The tool returned %d bytes of audio (%s), which cannot be shown here.",
+		len(c.Data), mimeOrUnknown(c.MIMEType))
 }
 
 func mimeOrUnknown(mime string) string {

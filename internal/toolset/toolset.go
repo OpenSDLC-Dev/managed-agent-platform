@@ -163,21 +163,35 @@ const spillDir = "/tmp/tool_outputs"
 // is an enhancement, never a new failure mode for the call. The web tools
 // never reach it — their driver runs with no sandbox at all, a deliberate
 // divergence (web content is re-fetchable; a command's output is not).
-//
-// Exported for the executor's MCP driver, which answers a call outside this
-// Runner and spills against the same budget, to the same directory, under the
-// same id-per-call convention (plan 29 slice 4c). One convention, so a model
-// that has learned where its truncated output goes is right whichever tool
-// produced it.
 func Spill(ctx context.Context, sb sandbox.Sandbox, id domain.ID, full string) string {
 	if len(full) <= MaxOutputBytes {
 		return ""
 	}
-	path := spillDir + "/" + id.String() + ".txt"
-	if err := sb.WriteFile(ctx, path, []byte(full)); err != nil {
+	path, ok := SpillFile(ctx, sb, id, full)
+	if !ok {
 		return ""
 	}
 	return "[output truncated; full output written to " + path + "]"
+}
+
+// SpillFile writes one call's oversized output to the sandbox and returns the
+// path, or false when the write failed. It is the half of Spill that decides
+// *where*, without the budget test or the notice.
+//
+// Exported for the executor's MCP driver (plan 29 slice 4c), which spills to the
+// same directory under the same id-per-call convention — so a model that has
+// learned where its truncated output goes is right whichever tool produced it —
+// but says something different about it. The two differ where they must and
+// nowhere else: an MCP answer spills its *text*, so it cannot borrow a sentence
+// promising the full output, and it spills on a second trigger of its own (a
+// budget that drops blocks charges their JSON, not their text), so it cannot
+// borrow the budget test either.
+func SpillFile(ctx context.Context, sb sandbox.Sandbox, id domain.ID, full string) (string, bool) {
+	path := spillDir + "/" + id.String() + ".txt"
+	if err := sb.WriteFile(ctx, path, []byte(full)); err != nil {
+		return "", false
+	}
+	return path, true
 }
 
 // SanitizeText strips NUL bytes from tool output. Postgres's jsonb cannot
