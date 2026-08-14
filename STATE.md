@@ -21,7 +21,9 @@ What is being worked on right now, and how far along it is — nothing else. **S
 - [ ] Slice 5 — credentials. **5a** done: matching, bearer injection on both dial paths, and
       `mcp_authentication_failed_error` split off the connection failure
       ([#405](https://github.com/OpenSDLC-Dev/managed-agent-platform/pull/405)). **5b** in review: an expired `mcp_oauth` token refreshes at
-      the dial and the rotation is stored.
+      the dial, through the grant `internal/oauthrefresh` now spells once for the
+      probe and the executor alike, and the rotation is sealed back onto the row
+      ([#406](https://github.com/OpenSDLC-Dev/managed-agent-platform/pull/406)).
 - [ ] Slice 6 — networking polish: `allow_mcp_servers`, retry escalation, `mcp_connection_failed`.
 - [ ] Slice 7 — evals, the live tier, the `ant` acceptance transcript, archiving.
 
