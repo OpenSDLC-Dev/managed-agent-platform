@@ -27,7 +27,8 @@ import (
 const tracerName = "github.com/OpenSDLC-Dev/managed-agent-platform/internal/gaterun"
 
 // Convert builds a gate.Config from a fetched gateconfig.Config: the environment
-// networking policy passes through unchanged, and each resolved credential
+// networking policy and the agent's MCP server hosts pass through unchanged
+// (the policy decides what to do with the hosts — gate.newPolicy), and each resolved credential
 // becomes an egress.Credential — its allowed_hosts a HostSet, its unrestricted
 // arm carried through so the secret substitutes for any host. OnUnreachable is
 // left unset — the seam is diagnostic-only, and credential_host_unreachable_error
@@ -47,8 +48,9 @@ func Convert(cfg *gateconfig.Config) gate.Config {
 		})
 	}
 	return gate.Config{
-		Networking:  cfg.Networking,
-		Credentials: creds,
+		Networking:     cfg.Networking,
+		MCPServerHosts: cfg.MCPServerHosts,
+		Credentials:    creds,
 	}
 }
 

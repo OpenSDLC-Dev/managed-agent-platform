@@ -335,6 +335,84 @@ func TestGateUnknownNetworkingFailsClosed(t *testing.T) {
 	}
 }
 
+// allow_mcp_servers widens `limited` by the hosts the agent declares MCP
+// servers at — the sandbox half of a flag the executor already honors for the
+// platform's own dial. Driven end to end through the proxy, so what is asserted
+// is a request that arrived rather than a predicate that returned true.
+func TestGateAdmitsAnMCPServerHostOnlyUnderItsFlag(t *testing.T) {
+	origin := echoOrigin(t)
+	defer origin.Close()
+	// A name the request never targets. Two httptest servers would not do: both
+	// listen on 127.0.0.1 and differ only by port, which a host set does not see.
+	const elsewhere = "mcp.example.com"
+
+	for name, tc := range map[string]struct {
+		net   domain.Networking
+		hosts []string
+		want  int
+	}{
+		"the flag admits the declared host": {
+			domain.Networking{Type: domain.NetLimited, AllowMCPServers: true},
+			[]string{hostOf(t, origin.URL)}, http.StatusOK,
+		},
+		// The gate is never sent the hosts without the flag; if one reaches it
+		// anyway, the flag is still what decides.
+		"without it the same host is refused": {
+			domain.Networking{Type: domain.NetLimited},
+			[]string{hostOf(t, origin.URL)}, http.StatusForbidden,
+		},
+		"and a host nobody declared, either way": {
+			domain.Networking{Type: domain.NetLimited, AllowMCPServers: true},
+			[]string{elsewhere}, http.StatusForbidden,
+		},
+		// The flag widens; it does not replace. An operator's own list still
+		// admits what it always did.
+		"allowed_hosts still admits its own": {
+			domain.Networking{
+				Type: domain.NetLimited, AllowMCPServers: true,
+				AllowedHosts: []string{hostOf(t, origin.URL)},
+			},
+			[]string{elsewhere}, http.StatusOK,
+		},
+		// An unrecognized policy admits nothing, and a widening flag beside it
+		// does not make it recognized.
+		"an unknown policy stays closed": {
+			domain.Networking{Type: "bogus", AllowMCPServers: true},
+			[]string{hostOf(t, origin.URL)}, http.StatusForbidden,
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			g := gate.New(gate.Config{Networking: tc.net, MCPServerHosts: tc.hosts})
+			gsrv := httptest.NewServer(g)
+			defer gsrv.Close()
+
+			resp, err := proxyClient(t, gsrv.URL, nil).Get(origin.URL)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer resp.Body.Close()
+			if resp.StatusCode != tc.want {
+				t.Errorf("status = %d, want %d", resp.StatusCode, tc.want)
+			}
+		})
+	}
+}
+
+// The declared hosts are read, never written to: a policy that appended them
+// onto the config's own AllowedHosts array would hand the next reader of that
+// slice a list it never configured.
+func TestGateDoesNotWriteTheMCPHostsIntoTheConfiguredList(t *testing.T) {
+	configured := make([]string, 1, 4) // spare capacity is what makes append destructive
+	configured[0] = "api.example.com"
+	net := domain.Networking{Type: domain.NetLimited, AllowMCPServers: true, AllowedHosts: configured}
+
+	gate.New(gate.Config{Networking: net, MCPServerHosts: []string{"mcp.example.com"}})
+
+	if got := configured[:cap(configured)]; got[1] != "" {
+		t.Errorf("the configured list was written past its length: %q", got)
+	}
+}
+
 func TestGateUnrestrictedAdmitsAnyHost(t *testing.T) {
 	origin := echoOrigin(t)
 	defer origin.Close()

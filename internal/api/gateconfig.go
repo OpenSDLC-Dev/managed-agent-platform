@@ -6,6 +6,7 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -42,14 +43,14 @@ func (s *server) getGateConfig(r *http.Request) (any, error) {
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
-	var configJSON []byte
+	var configJSON, agentJSON []byte
 	var vaultIDs []string
 	err = tx.QueryRow(ctx,
-		`SELECT e.config, s.vault_ids
+		`SELECT e.config, s.resolved_agent, s.vault_ids
 		   FROM sessions s JOIN environments e ON e.id = s.environment_id
 		  WHERE s.id = $1 AND s.archived_at IS NULL
 		  FOR SHARE OF s`,
-		sessionID).Scan(&configJSON, &vaultIDs)
+		sessionID).Scan(&configJSON, &agentJSON, &vaultIDs)
 	if errors.Is(err, pgx.ErrNoRows) {
 		// Authenticated, but the session was archived or deleted between auth and
 		// this read — re-auth (fail-closed), never a partial config.
@@ -91,9 +92,51 @@ func (s *server) getGateConfig(r *http.Request) (any, error) {
 	s.startEmission(ctx, sessionID, cfg.Networking, probes)
 
 	return gateconfig.Config{
-		Networking:  cfg.Networking,
-		Credentials: toGateCredentials(creds),
+		Networking:     cfg.Networking,
+		MCPServerHosts: mcpGateHosts(cfg.Networking, agentJSON),
+		Credentials:    toGateCredentials(creds),
 	}, nil
+}
+
+// mcpGateHosts is the sandbox-egress half of allow_mcp_servers: the hosts the
+// session's resolved agent declares MCP servers at, so a process inside the
+// sandbox can reach the same servers the platform dials on its behalf. The
+// platform's own dial is gated separately, in the executor, because it happens
+// outside the sandbox entirely (internal/executor, mcpEgressAllowed).
+//
+// Nothing is sent for a policy that cannot use it: `unrestricted` admits every
+// host already, an unrecognized policy admits none and must keep admitting none,
+// and `limited` without the flag is the case the flag exists to distinguish.
+// What the gate never receives, it cannot be made to admit.
+//
+// A malformed resolved agent yields no hosts rather than an error: the gate is
+// blocking on this response for every host it may reach, and the same bytes are
+// decoded — and complained about — by the brain and the executor, which is where
+// a session with an unreadable agent actually fails.
+func mcpGateHosts(net domain.Networking, resolvedAgent []byte) []string {
+	if net.Type != domain.NetLimited || !net.AllowMCPServers {
+		return nil
+	}
+	var agent struct {
+		MCPServers []struct {
+			URL string `json:"url"`
+		} `json:"mcp_servers"`
+	}
+	if err := json.Unmarshal(resolvedAgent, &agent); err != nil {
+		return nil
+	}
+	hosts := make([]string, 0, len(agent.MCPServers))
+	for _, s := range agent.MCPServers {
+		// The scheme is checked because a declaration this platform would refuse
+		// to dial is not a promise of reach either: admitting its host would hand
+		// the sandbox a host the flag never named.
+		u, err := url.Parse(s.URL)
+		if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Hostname() == "" {
+			continue
+		}
+		hosts = append(hosts, u.Hostname())
+	}
+	return hosts
 }
 
 // emitTimeout bounds one detached advisory emission — matching the gate

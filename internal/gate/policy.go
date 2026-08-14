@@ -11,22 +11,33 @@ import (
 // policy is the environment's request-level networking gate — which hosts a
 // sandbox may reach at all, independent of any credential. It is the first of
 // the two-level gate; a credential's own allowed_hosts (egress.Engine) is the
-// second. "limited" admits only the configured allowed_hosts; "unrestricted"
-// admits every host — the reference's safety blocklist for unrestricted is
-// unpublished and its enforcement is deferred to a later sub-PR (recorded
-// INFERRED in DIVERGENCES), so this phase does not narrow it. An unknown type
-// fails closed (admits nothing).
+// second. "limited" admits the configured allowed_hosts, plus the hosts the
+// agent declares MCP servers at when the policy sets allow_mcp_servers;
+// "unrestricted" admits every host — the reference's safety blocklist for
+// unrestricted is unpublished and its enforcement is deferred to a later sub-PR
+// (recorded INFERRED in DIVERGENCES), so this phase does not narrow it. An
+// unknown type fails closed (admits nothing).
 type policy struct {
 	admitAll bool
 	allowed  *egress.HostSet
 }
 
-func newPolicy(net domain.Networking) *policy {
+// newPolicy builds the policy. mcpHosts are the agent's declared MCP server
+// hosts, which only `limited` can widen by and only under its own flag: an
+// unrecognized type must stay closed to them like everything else, and
+// `unrestricted` already admits them along with every other host.
+func newPolicy(net domain.Networking, mcpHosts []string) *policy {
 	switch net.Type {
 	case domain.NetUnrestricted:
 		return &policy{admitAll: true}
 	case domain.NetLimited:
-		return &policy{allowed: egress.NewHostSet(net.AllowedHosts)}
+		allowed := net.AllowedHosts
+		if net.AllowMCPServers {
+			// A fresh slice: appending onto the config's own array would write
+			// past it into whatever else the decode put there.
+			allowed = append(append(make([]string, 0, len(allowed)+len(mcpHosts)), allowed...), mcpHosts...)
+		}
+		return &policy{allowed: egress.NewHostSet(allowed)}
 	default:
 		return &policy{} // fail closed: neither admitAll nor an allow-list
 	}

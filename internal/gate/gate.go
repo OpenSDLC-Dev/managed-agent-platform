@@ -54,9 +54,13 @@ var errBodyTooLarge = errors.New("request body exceeds the gate substitution lim
 // allowed_hosts did not admit it — never a secret. Dial and Transport default to
 // a direct network dialer and transport; tests override them.
 type Config struct {
-	Networking    domain.Networking
-	Credentials   []egress.Credential
-	OnUnreachable func(host string, placeholders []string)
+	Networking domain.Networking
+	// MCPServerHosts are the hosts the session's agent declares MCP servers at.
+	// They widen a `limited` policy that sets allow_mcp_servers and nothing else
+	// — see newPolicy.
+	MCPServerHosts []string
+	Credentials    []egress.Credential
+	OnUnreachable  func(host string, placeholders []string)
 	// Dial reaches an origin for a CONNECT tunnel; Transport forwards a plain
 	// HTTP request. Both default to direct, non-proxied network access.
 	Dial      func(ctx context.Context, network, addr string) (net.Conn, error)
@@ -124,7 +128,7 @@ func New(cfg Config) *Gate {
 		tunnelIdle = defaultTunnelIdleTimeout
 	}
 	return &Gate{
-		policy:        newPolicy(cfg.Networking),
+		policy:        newPolicy(cfg.Networking, cfg.MCPServerHosts),
 		engine:        egress.NewEngine(cfg.Credentials),
 		onUnreachable: cfg.OnUnreachable,
 		dial:          dial,

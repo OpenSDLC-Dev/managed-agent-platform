@@ -37,7 +37,9 @@ func proxyStatus(t *testing.T, srvURL, host string) int {
 
 func TestConvert(t *testing.T) {
 	cfg := &gateconfig.Config{
-		Networking: domain.Networking{Type: domain.NetLimited, AllowedHosts: []string{"api.example.com"}},
+		Networking: domain.Networking{
+			Type: domain.NetLimited, AllowedHosts: []string{"api.example.com"}, AllowMCPServers: true},
+		MCPServerHosts: []string{"mcp.example.com"},
 		Credentials: []gateconfig.Credential{
 			{
 				CredentialID: "vcrd_1", Placeholder: "vltph_a", Secret: "S1",
@@ -55,6 +57,10 @@ func TestConvert(t *testing.T) {
 
 	if gc.Networking.Type != domain.NetLimited || len(gc.Networking.AllowedHosts) != 1 {
 		t.Errorf("networking not passed through: %+v", gc.Networking)
+	}
+	// The agent's MCP hosts arrive as their own list, for the policy to decide on.
+	if len(gc.MCPServerHosts) != 1 || gc.MCPServerHosts[0] != "mcp.example.com" {
+		t.Errorf("mcp server hosts not passed through: %v", gc.MCPServerHosts)
 	}
 	if len(gc.Credentials) != 2 {
 		t.Fatalf("credentials = %d, want 2", len(gc.Credentials))

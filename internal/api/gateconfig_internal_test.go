@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"slices"
 	"testing"
 	"time"
 
@@ -102,5 +103,30 @@ func TestEmitUnreachableCredentialsNoConflict(t *testing.T) {
 		})
 	if n := unreachableEventCount(t, s, sessionID); n != 0 {
 		t.Errorf("no-conflict emissions wrote %d events, want 0", n)
+	}
+}
+
+// A declaration this platform would refuse to dial is not a promise of reach
+// either, so its host is not sent. Driven at the reader, because the create
+// grammar rejects these before a session could carry one — which is also why
+// this is the only place the rule can be observed.
+func TestTheGatesMCPHostsSkipAUrlThePlatformWouldNotDial(t *testing.T) {
+	limited := domain.Networking{Type: domain.NetLimited, AllowMCPServers: true}
+	agent := []byte(`{"mcp_servers":[
+		{"url":"https://good.example/mcp"},
+		{"url":"ftp://ftp.example/mcp"},
+		{"url":"://not-a-url"},
+		{"url":"https:///no-host"},
+		{"url":""},
+		{"url":"http://second.example:8443/mcp"}]}`)
+
+	got := mcpGateHosts(limited, agent)
+	if want := []string{"good.example", "second.example"}; !slices.Equal(got, want) {
+		t.Errorf("hosts = %v, want %v — the port dropped and the rest skipped", got, want)
+	}
+	// An agent document that will not decode leaves the gate with no MCP hosts
+	// rather than failing the fetch it is blocking on.
+	if got := mcpGateHosts(limited, []byte(`{"mcp_servers":`)); got != nil {
+		t.Errorf("hosts = %v, want none for an unreadable agent", got)
 	}
 }

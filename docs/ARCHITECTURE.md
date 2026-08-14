@@ -729,7 +729,10 @@ endpoint (`internal/gateconfig`, below); the gate runtime that presents it is `i
 The gate ↔ control-plane config contract and the gate-side client for it (docs/plan/12, slice 4).
 `GET /internal/v1/gate/config` (handled in `internal/api`, on its own `gtk_`-token auth lane —
 `requireGateToken`, selected by path so it never crosses the management or worker lanes) returns one
-session's `Config`: the environment's request-level `Networking` policy and its resolved, decrypted
+session's `Config`: the environment's request-level `Networking` policy, the hosts the session's
+resolved agent declares MCP servers at (`MCPServerHosts`, plan 29 slice 6 — sent only under
+`limited` + `allow_mcp_servers`, the one policy that can widen by them, and skipping any declared
+URL the platform would itself refuse to dial), and its resolved, decrypted
 vault `Credential`s (placeholder, plaintext secret, the credential's own `allowed_hosts` arm,
 injection locations, and the non-secret `credential_id`). The endpoint decrypts through the same
 `vaultresolve.Credentials` path the gate-side resolution uses, so a leak-safe error (credential ids,
@@ -762,7 +765,7 @@ the sidecar (shared network namespace, proxy env, teardown; slice 4-i); the K8s 
 
 | File | Contents |
 |---|---|
-| `policy.go` | `policy` — the environment's request-level networking gate (the first of the two levels): `unrestricted` admits every host (its safety blocklist unpublished by the reference, deferred and recorded INFERRED), `limited` admits only `allowed_hosts` (via `egress.HostSet`), an unknown type fails closed. Plus the hop-by-hop header set a forwarding proxy must strip (`removeHopByHop`, honoring the `Connection` header on both the forwarded request and the returned response). |
+| `policy.go` | `policy` — the environment's request-level networking gate (the first of the two levels): `unrestricted` admits every host (its safety blocklist unpublished by the reference, deferred and recorded INFERRED), `limited` admits `allowed_hosts` (via `egress.HostSet`) plus the agent's declared MCP server hosts when it sets `allow_mcp_servers` (plan 29 slice 6 — the control plane sends those hosts only for that same policy, so the rule fails closed at both ends, and they are unioned into a fresh slice rather than appended onto the config's own array), an unknown type fails closed whatever flags ride beside it. Plus the hop-by-hop header set a forwarding proxy must strip (`removeHopByHop`, honoring the `Connection` header on both the forwarded request and the returned response). |
 | `gate.go` | `Gate` — an `http.Handler` forward proxy. `CONNECT` is host-filtered on its target and, if admitted, tunnelled opaquely (no substitution — the #166 TLS gap): the tunnel forwards bytes the server buffered past the `CONNECT` line, propagates a half-close in either direction, and closes only when both directions do — bounded by an activity-based idle deadline (`TunnelIdleTimeout`, default 5m) that tears down a tunnel only when **both** directions have gone quiet, so a one-way stream never trips it and gate swaps never touch a running tunnel (the watchdog is owned per handler invocation). A plain-HTTP request is host-filtered, then its header values and body are rewritten through `egress.Engine.Substitute` (the second gate level — a credential's own `allowed_hosts`) before it is forwarded and the response streamed back; a credential the host does not admit is left as its literal placeholder (never the secret) — documented reference behavior, not an error — and its placeholder (never the `*Credential`, which carries the secret) is surfaced through the diagnostic `OnUnreachable` seam, which the deployment wiring leaves unset: `credential_host_unreachable_error` is a config-conflict event the controlplane emits at gate-config render (`internal/api`), never a gate report. The body buffered for substitution is bounded by `MaxBodyBytes` (default 10 MiB) — a larger sandbox-controlled body is refused `413` rather than read unbounded. |
 
 ### internal/gaterun
