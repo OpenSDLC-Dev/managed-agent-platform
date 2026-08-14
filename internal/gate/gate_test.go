@@ -483,21 +483,53 @@ func TestAnMCPOnlyDialIsHeldToTheAddressFloor(t *testing.T) {
 // The same floor over CONNECT, where the refusal surfaces as a failed tunnel
 // rather than a status — the two handlers admit through one policy but dial on
 // their own, so a guard installed on one of them is not installed on both.
+//
+// "The tunnel failed" alone would not prove it: a regression that stopped
+// admitting MCP endpoints over CONNECT refuses before dialing and fails the
+// tunnel too. So the two are told apart by the status Go reports for a refused
+// CONNECT — 502 is the dial the policy admitted and the floor then stopped, 403
+// is the policy — and the same gate with the floor lifted is required to carry
+// the request through.
 func TestAnMCPOnlyTunnelIsHeldToTheAddressFloor(t *testing.T) {
 	origin := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = io.WriteString(w, "secure-ok")
 	}))
 	defer origin.Close()
-
-	g := gate.New(gate.Config{
+	cfg := gate.Config{
 		Networking:         domain.Networking{Type: domain.NetLimited, AllowMCPServers: true},
 		MCPServerEndpoints: []string{endpointOf(t, origin.URL)},
-	})
-	gsrv := httptest.NewServer(g)
-	defer gsrv.Close()
+	}
 
-	if _, err := proxyClient(t, gsrv.URL, origin).Get(origin.URL); err == nil {
-		t.Error("the tunnel to a refused address was established")
+	// No IPAllowed override: the production floor, against an origin on loopback.
+	floored := httptest.NewServer(gate.New(cfg))
+	defer floored.Close()
+	_, err := proxyClient(t, floored.URL, origin).Get(origin.URL)
+	if err == nil {
+		t.Fatal("the tunnel to a refused address was established")
+	}
+	// Go surfaces a refused CONNECT as its status text.
+	if got := err.Error(); !strings.Contains(got, http.StatusText(http.StatusBadGateway)) {
+		t.Errorf("tunnel error = %v, want the 502 of an admitted dial the floor stopped "+
+			"(a %q would mean the policy refused it and the floor was never asked)",
+			err, http.StatusText(http.StatusForbidden))
+	}
+
+	// The same declaration, the same origin, the floor lifted: CONNECT is
+	// admitted and the tunnel carries the request.
+	cfg.IPAllowed = func(net.IP) error { return nil }
+	open := httptest.NewServer(gate.New(cfg))
+	defer open.Close()
+	resp, err := proxyClient(t, open.URL, origin).Get(origin.URL)
+	if err != nil {
+		t.Fatalf("the declared endpoint was not tunnelled with the floor lifted: %v", err)
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(body) != "secure-ok" {
+		t.Errorf("tunnelled body = %q, want the origin's own", body)
 	}
 }
 
@@ -984,8 +1016,8 @@ func TestGatePlainHTTPBadGatewayWhenOriginStalls(t *testing.T) {
 	host, _, _ := net.SplitHostPort(ln.Addr().String())
 
 	g := gate.New(gate.Config{
-		Networking: domain.Networking{Type: domain.NetLimited, AllowedHosts: []string{host}},
-		Transport:  &http.Transport{ResponseHeaderTimeout: 200 * time.Millisecond},
+		Networking:            domain.Networking{Type: domain.NetLimited, AllowedHosts: []string{host}},
+		ResponseHeaderTimeout: 200 * time.Millisecond,
 	})
 	gsrv := httptest.NewServer(g)
 	defer gsrv.Close()

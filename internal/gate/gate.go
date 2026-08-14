@@ -45,6 +45,10 @@ const defaultMaxBodyBytes = 10 << 20 // 10 MiB
 // abandoned tunnel stops holding its goroutines and sockets once it elapses.
 const defaultTunnelIdleTimeout = 5 * time.Minute
 
+// defaultResponseHeaderTimeout bounds a stalled origin's hold on the serving
+// goroutine when Config.ResponseHeaderTimeout is unset.
+const defaultResponseHeaderTimeout = 60 * time.Second
+
 // errBodyTooLarge signals a request body over the substitution size limit; the
 // handler maps it to 413 rather than the generic read-failure 502.
 var errBodyTooLarge = errors.New("request body exceeds the gate substitution limit")
@@ -53,8 +57,13 @@ var errBodyTooLarge = errors.New("request body exceeds the gate substitution lim
 // policy; Credentials are the session's resolved env-var credentials for
 // substitution (nil is a valid gate that only host-filters). OnUnreachable, when
 // set, is called with the request host and the placeholders of credentials whose
-// allowed_hosts did not admit it — never a secret. Dial and Transport default to
-// a direct network dialer and transport; tests override them.
+// allowed_hosts did not admit it — never a secret.
+//
+// There is deliberately no seam for the dialer or the transport. The gate opens
+// every socket through one dialer of its own so the address floor below cannot
+// be substituted away: a caller who replaced either would have kept IPAllowed —
+// which the type would still accept — and silently lost the floor on the path
+// they replaced, with a missing refusal as the only symptom.
 type Config struct {
 	Networking domain.Networking
 	// MCPServerEndpoints are the `host:port` endpoints the session's agent
@@ -68,10 +77,11 @@ type Config struct {
 	IPAllowed     func(net.IP) error
 	Credentials   []egress.Credential
 	OnUnreachable func(host string, placeholders []string)
-	// Dial reaches an origin for a CONNECT tunnel; Transport forwards a plain
-	// HTTP request. Both default to direct, non-proxied network access.
-	Dial      func(ctx context.Context, network, addr string) (net.Conn, error)
-	Transport http.RoundTripper
+	// ResponseHeaderTimeout bounds a stalled origin's hold on the serving
+	// goroutine for a plain-HTTP request. It caps time-to-response-headers only,
+	// so a slow-streaming body is unaffected. Zero selects
+	// defaultResponseHeaderTimeout.
+	ResponseHeaderTimeout time.Duration
 	// MaxBodyBytes bounds a plain-HTTP request body the gate buffers for
 	// substitution; a larger body is refused with 413 rather than read into
 	// memory, since the sandbox controls its size. Zero selects
@@ -119,43 +129,37 @@ func New(cfg Config) *Gate {
 	if ipAllowed == nil {
 		ipAllowed = dialguard.IPAllowed
 	}
-	dial := cfg.Dial
-	if dial == nil {
-		// The floor runs only for a dial the agent's own declarations admitted:
-		// `allowed_hosts` is an operator's list and this proxy is the operator's
-		// own egress, so narrowing that half would be a plan 12 decision rather
-		// than this one. ControlContext rather than Control, because the marker
-		// is what tells the two apart and only the context carries it.
-		d := net.Dialer{ControlContext: func(ctx context.Context, _, address string, _ syscall.RawConn) error {
-			if ctx.Value(mcpGuardKey{}) == nil {
-				return nil
-			}
-			host, _, err := net.SplitHostPort(address)
-			if err != nil {
-				return err
-			}
-			return ipAllowed(net.ParseIP(host))
-		}}
-		dial = d.DialContext
-	}
-	transport := cfg.Transport
-	if transport == nil {
-		transport = &http.Transport{
-			DialContext:       dial,
-			ForceAttemptHTTP2: false,
-			MaxIdleConns:      32,
-			IdleConnTimeout:   90 * time.Second,
-			// A transparent proxy must not inject Accept-Encoding or auto-decompress:
-			// the sandbox controls its own content negotiation, and the origin's
-			// Content-Encoding/Content-Length must reach it unaltered.
-			DisableCompression:  true,
-			TLSHandshakeTimeout: 10 * time.Second,
-			// Bound a stalled origin's hold on the serving goroutine — this caps
-			// time-to-response-headers only, so a slow-streaming body is unaffected.
-			// The deployment wiring (4c-2b) can override the whole transport.
-			ResponseHeaderTimeout: 60 * time.Second,
-			ExpectContinueTimeout: time.Second,
+	// The floor runs only for a dial the agent's own declarations admitted:
+	// `allowed_hosts` is an operator's list and this proxy is the operator's own
+	// egress, so narrowing that half would be a plan 12 decision rather than this
+	// one. ControlContext rather than Control, because the marker is what tells
+	// the two apart and only the context carries it; Go calls it once per
+	// candidate address, so a dual-stack or multi-A name is judged on every
+	// address it is actually about to connect to.
+	floor := dialguard.Control(ipAllowed)
+	d := net.Dialer{ControlContext: func(ctx context.Context, network, address string, c syscall.RawConn) error {
+		if ctx.Value(mcpGuardKey{}) == nil {
+			return nil
 		}
+		return floor(network, address, c)
+	}}
+	dial := d.DialContext
+	headerTimeout := cfg.ResponseHeaderTimeout
+	if headerTimeout <= 0 {
+		headerTimeout = defaultResponseHeaderTimeout
+	}
+	transport := &http.Transport{
+		DialContext:       dial,
+		ForceAttemptHTTP2: false,
+		MaxIdleConns:      32,
+		IdleConnTimeout:   90 * time.Second,
+		// A transparent proxy must not inject Accept-Encoding or auto-decompress:
+		// the sandbox controls its own content negotiation, and the origin's
+		// Content-Encoding/Content-Length must reach it unaltered.
+		DisableCompression:    true,
+		TLSHandshakeTimeout:   10 * time.Second,
+		ResponseHeaderTimeout: headerTimeout,
+		ExpectContinueTimeout: time.Second,
 	}
 	maxBody := cfg.MaxBodyBytes
 	if maxBody <= 0 {

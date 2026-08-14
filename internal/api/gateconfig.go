@@ -8,6 +8,8 @@ import (
 	stdnet "net"
 	"net/http"
 	"net/url"
+	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -99,7 +101,18 @@ func (s *server) getGateConfig(r *http.Request) (any, error) {
 	// credential as unreachable on exactly the hosts this handler just widened
 	// the gate by — and that error is permanent and deduped, so a working
 	// configuration would carry a false one for the life of the session.
-	endpoints := mcpGateEndpoints(cfg.Networking, mcpServersJSON)
+	endpoints, refused := mcpGateEndpoints(cfg.Networking, mcpServersJSON)
+	if refused > 0 {
+		// The declaration is dropped silently on the wire — there is no session
+		// event for it, and the sandbox only ever sees the ordinary 403 the gate
+		// gives any host it does not admit. So the count is said here, where an
+		// operator holding a 403 and a server the platform's own catalog listed
+		// can find the reason. The urls themselves are not logged: an
+		// mcp_servers url may carry a credential in its userinfo or query
+		// (internal/mcp redacts one for exactly that reason).
+		slog.WarnContext(ctx, "gateconfig: MCP server declarations cannot widen the sandbox's egress",
+			"session", sessionID, "refused", refused, "admitted", len(endpoints))
+	}
 	s.startEmission(ctx, sessionID, cfg.Networking, hostsOf(endpoints), probes)
 
 	return gateconfig.Config{
@@ -131,16 +144,25 @@ func (s *server) getGateConfig(r *http.Request) (any, error) {
 // agent with no mcp_servers projects to — yields nothing rather than an error:
 // the gate is blocking on this response for every host it may reach, and the
 // same bytes are decoded, and complained about, by the brain and the executor,
-// which is where a session with an unreadable agent actually fails.
-func mcpGateEndpoints(net domain.Networking, declared []byte) []string {
+// which is where a session with an unreadable agent actually fails. Wholesale
+// rather than per-entry, deliberately, because that is what every other reader
+// of the array does: the brain fails the turn on an unreadable mcp_servers
+// (internal/brain, TestACorruptMCPServerSpecFailsTheTurn) and the executor's
+// decode errors, so a document nothing else will act on grants no reach here
+// either.
+//
+// The second return is how many declarations were refused, for the caller to
+// say out loud — a refusal is invisible to the sandbox, which sees only the
+// ordinary 403.
+func mcpGateEndpoints(net domain.Networking, declared []byte) ([]string, int) {
 	if net.Type != domain.NetLimited || !net.AllowMCPServers {
-		return nil
+		return nil, 0
 	}
 	var servers []struct {
 		URL string `json:"url"`
 	}
 	if err := json.Unmarshal(declared, &servers); err != nil {
-		return nil
+		return nil, 0
 	}
 	endpoints := make([]string, 0, len(servers))
 	for _, s := range servers {
@@ -148,7 +170,7 @@ func mcpGateEndpoints(net domain.Networking, declared []byte) []string {
 			endpoints = append(endpoints, e)
 		}
 	}
-	return endpoints
+	return endpoints, len(servers) - len(endpoints)
 }
 
 // mcpEndpoint reduces one declared url to the `host:port` the gate matches on,
@@ -165,23 +187,23 @@ func mcpEndpoint(raw string) (string, bool) {
 		return "", false
 	}
 	host := u.Hostname()
-	if host == "" {
-		return "", false
-	}
 	// A wildcard means one thing in a host set and nothing at all in a URL, so
 	// `https://*.example.com/` — which an author can write today — would open
 	// every subdomain of example.com while the platform's own dial of it merely
-	// failed to resolve.
+	// failed to resolve. It is refused first because the grammar below is an
+	// operator's, in which a `*.` prefix is a legitimate entry.
 	if strings.Contains(host, "*") {
 		return "", false
 	}
-	// An IPv6 literal is refused because the gate cannot match one consistently:
-	// a CONNECT target always carries a port, so its brackets come off, while a
-	// plain-HTTP url on the default port keeps them — the same server would be
-	// admitted over one and refused over the other. `allowed_hosts` cannot
-	// express an IPv6 literal at all (egress.ValidateHostEntry), so refusing one
-	// here leaves the two lists saying the same thing.
-	if strings.Contains(host, ":") {
+	// The rest of the grammar is the one an operator's allowed_hosts pass, asked
+	// of the same function rather than restated: a bare hostname or an IPv4
+	// literal, so an empty host, an empty DNS label, a malformed dotted-numeric
+	// address, and an IPv6 literal are all out. The IPv6 refusal matters on its
+	// own — the gate cannot match one consistently, since a CONNECT target always
+	// carries a port and loses its brackets while a plain-HTTP url on the default
+	// port keeps them — and it is worth nothing that the two lists reach it by
+	// the same rule.
+	if egress.ValidateHostEntry(host) != nil {
 		return "", false
 	}
 	// An address the platform's own MCP client would refuse — loopback,
@@ -191,14 +213,30 @@ func mcpEndpoint(raw string) (string, bool) {
 	if ip := stdnet.ParseIP(host); ip != nil && dialguard.IPAllowed(ip) != nil {
 		return "", false
 	}
-	port := u.Port()
-	if port == "" {
-		port = "80"
-		if u.Scheme == "https" {
-			port = "443"
-		}
+	port, ok := endpointPort(u)
+	if !ok {
+		return "", false
 	}
-	return strings.ToLower(host) + ":" + port, true
+	return egress.NormalizeHost(host) + ":" + port, true
+}
+
+// endpointPort is the port half of an endpoint: the url's own, or the one a
+// client assumes for its scheme. A port no server can listen on is refused
+// rather than keyed into the gate's set, and the digits are canonicalized —
+// `:0443` is the port Go's dialer will resolve it to, so the entry says 443.
+func endpointPort(u *url.URL) (string, bool) {
+	raw := u.Port()
+	if raw == "" {
+		if u.Scheme == "https" {
+			return "443", true
+		}
+		return "80", true
+	}
+	n, err := strconv.ParseUint(raw, 10, 16)
+	if err != nil || n == 0 {
+		return "", false
+	}
+	return strconv.FormatUint(n, 10), true
 }
 
 // hostsOf drops the port from each endpoint, for the one consumer that asks a
@@ -206,10 +244,9 @@ func mcpEndpoint(raw string) (string, bool) {
 func hostsOf(endpoints []string) []string {
 	hosts := make([]string, 0, len(endpoints))
 	for _, e := range endpoints {
-		host, _, ok := strings.Cut(e, ":")
-		if ok {
-			hosts = append(hosts, host)
-		}
+		// mcpEndpoint proved the host colon-free, so the cut always splits.
+		host, _, _ := strings.Cut(e, ":")
+		hosts = append(hosts, host)
 	}
 	return hosts
 }
@@ -279,8 +316,7 @@ func (s *server) emitUnreachableCredentials(ctx context.Context, sessionID strin
 	// this is the coarser of the two questions the gate asks and errs toward not
 	// reporting a conflict — the direction that matters for an advisory error
 	// that is emitted once and never retracted.
-	policy := egress.NewHostSet(append(append(make([]string, 0,
-		len(net.AllowedHosts)+len(mcpHosts)), net.AllowedHosts...), mcpHosts...))
+	policy := egress.NewHostSet(slices.Concat(net.AllowedHosts, mcpHosts))
 	for _, c := range creds {
 		if c.unrestricted {
 			continue // no allowed_hosts of its own; reach is the environment's call

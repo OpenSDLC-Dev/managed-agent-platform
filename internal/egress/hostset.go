@@ -35,7 +35,7 @@ type HostSet struct {
 func NewHostSet(entries []string) *HostSet {
 	s := &HostSet{exact: make(map[string]struct{}, len(entries))}
 	for _, e := range entries {
-		e = normalizeHost(e)
+		e = NormalizeHost(e)
 		if rest, ok := strings.CutPrefix(e, "*."); ok {
 			if rest != "" {
 				s.suffixes = append(s.suffixes, rest)
@@ -59,7 +59,7 @@ func (s *HostSet) Match(host string) bool {
 	if s == nil {
 		return false
 	}
-	host = normalizeHost(host)
+	host = NormalizeHost(host)
 	if host == "" || hasEmptyLabel(host) {
 		return false
 	}
@@ -90,7 +90,7 @@ func (s *HostSet) CoversEntry(entry string) bool {
 	if s == nil {
 		return false
 	}
-	entry = normalizeHost(entry)
+	entry = NormalizeHost(entry)
 	if rest, ok := strings.CutPrefix(entry, "*."); ok {
 		if rest == "" || hasEmptyLabel(rest) {
 			return false
@@ -105,15 +105,17 @@ func (s *HostSet) CoversEntry(entry string) bool {
 	return s.Match(entry)
 }
 
-// normalizeHost lowercases and strips a single trailing FQDN dot so
-// "Example.com." and "example.com" compare equal.
-func normalizeHost(h string) string {
+// NormalizeHost lowercases and strips a single trailing FQDN dot so
+// "Example.com." and "example.com" compare equal. Exported because the gate's
+// MCP endpoint set has to answer a host exactly the way this package's HostSet
+// does (internal/gate, policy.go) while staying an exact-match map.
+func NormalizeHost(h string) string {
 	h = strings.ToLower(strings.TrimSpace(h))
 	return strings.TrimSuffix(h, ".")
 }
 
 // hasEmptyLabel reports whether host contains an empty DNS label — a leading dot,
-// a trailing dot (beyond the one normalizeHost strips), or a ".." run. Such a
+// a trailing dot (beyond the one NormalizeHost strips), or a ".." run. Such a
 // string is not a valid hostname and must not match, least of all a wildcard.
 func hasEmptyLabel(host string) bool {
 	for _, label := range strings.Split(host, ".") {
