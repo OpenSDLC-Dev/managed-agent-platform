@@ -16,7 +16,8 @@ What is being worked on right now, and how far along it is — nothing else. **S
       and MCP-first settlement, shipped ahead of the emission so a rollout could not strand a
       call ([#398](https://github.com/OpenSDLC-Dev/managed-agent-platform/pull/398)); the brain offering an `mcp_toolset`'s tools as
       `mcp__{server}__{tool}`, committing `agent.mcp_tool_use`, waiting for a first
-      listing ([#402](https://github.com/OpenSDLC-Dev/managed-agent-platform/pull/402)); an over-budget answer spilling into a sandbox the session already has.
+      listing ([#402](https://github.com/OpenSDLC-Dev/managed-agent-platform/pull/402)); an answer the result could not carry whole spilling into a
+      sandbox the session already has ([#404](https://github.com/OpenSDLC-Dev/managed-agent-platform/pull/404)).
 - [ ] Slice 5 — credentials: matching, injection, OAuth refresh, `mcp_authentication_failed`.
 - [ ] Slice 6 — networking polish: `allow_mcp_servers`, retry escalation, `mcp_connection_failed`.
 - [ ] Slice 7 — evals, the live tier, the `ant` acceptance transcript, archiving.
