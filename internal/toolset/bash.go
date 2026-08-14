@@ -71,9 +71,9 @@ func (r Runner) bash(ctx context.Context, id domain.ID, raw json.RawMessage) (Re
 		// call resumes from the last completed one, not from this command's
 		// mutations.
 		trailer := fmt.Sprintf("\ncommand timed out after %s; this call's shell state changes were dropped", timeout)
-		return Result{Content: capWithTrailer(out, trailer, Spill(ctx, r.Sandbox, id, out)), IsError: true}, nil
+		return Result{Content: capWithTrailer(out, trailer, r.spill(ctx, id, out)), IsError: true}, nil
 	case res.ExitCode != 0:
-		return Result{Content: capWithTrailer(out, fmt.Sprintf("\nexit code: %d", res.ExitCode), Spill(ctx, r.Sandbox, id, out)), IsError: true}, nil
+		return Result{Content: capWithTrailer(out, fmt.Sprintf("\nexit code: %d", res.ExitCode), r.spill(ctx, id, out)), IsError: true}, nil
 	}
 	return succeed(out)
 }

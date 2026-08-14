@@ -722,6 +722,39 @@ func adoptable(info containerInfo, spec sandbox.Spec, workdir, gateID string) er
 // attach builds the sandbox handle. gateID is the session's egress-gate
 // container when the sandbox is half of a pair, "" otherwise; Destroy uses it to
 // tear the gate down alongside the sandbox.
+// Attach is Provision's read-only half: the session's running container, or
+// ErrNotFound. It inspects and nothing else — a stopped container is a miss
+// rather than something to start, a stale gate pairing is not rebuilt, and no
+// image is pulled — so a caller holding a handle for a write cannot cost the
+// session the container it is working in.
+//
+// The handle's workdir and gate come from the container itself rather than from
+// a spec, because there is no spec here: both are fixed at create, which is what
+// makes reading them back sound.
+func (p *Provider) Attach(ctx context.Context, sessionID domain.ID) (sandbox.Sandbox, error) {
+	if sessionID.IsZero() {
+		return nil, errors.New("docker: attach needs a session id")
+	}
+	info, err := p.api.inspectContainer(ctx, containerName(sessionID))
+	switch {
+	case statusIs(err, 404):
+		return nil, sandbox.ErrNotFound
+	case err != nil:
+		return nil, err
+	}
+	if aerr := ours(info, sessionID); aerr != nil {
+		return nil, aerr
+	}
+	if !info.State.Running {
+		return nil, sandbox.ErrNotFound
+	}
+	gateID := strings.TrimPrefix(info.HostConfig.NetworkMode, "container:")
+	if gateID == info.HostConfig.NetworkMode {
+		gateID = ""
+	}
+	return p.attach(info.ID, info.Config.WorkingDir, gateID), nil
+}
+
 func (p *Provider) attach(id, workdir, gateID string) *container {
 	return &container{
 		api: p.api, id: id, workdir: workdir, gateID: gateID,

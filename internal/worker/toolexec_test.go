@@ -149,6 +149,13 @@ func (p *fakeProvider) Provision(_ context.Context, spec sandbox.Spec) (sandbox.
 	return p.sb, nil
 }
 
+// Attach answers ErrNotFound: nothing on the BYOC side reaches for a sandbox it
+// did not provision, and a fake that handed one back would hide a caller that
+// started to.
+func (p *fakeProvider) Attach(context.Context, domain.ID) (sandbox.Sandbox, error) {
+	return nil, sandbox.ErrNotFound
+}
+
 func (p *fakeProvider) Owned(context.Context) ([]domain.ID, error) { return nil, nil }
 
 func (p *fakeProvider) Reap(context.Context, domain.ID) error { return nil }

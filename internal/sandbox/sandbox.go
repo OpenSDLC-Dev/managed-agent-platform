@@ -7,10 +7,17 @@
 // pure functions of Exec and the file primitives below, so they live once in
 // the toolset layer instead of being re-implemented by every backend.
 //
-// Divergence from the plan: there is no Attach. Provision is idempotent per
-// session — it returns the session's existing sandbox when one is running —
-// which is the only thing an executor ever needed Attach for, and it saves
-// persisting a sandbox id nothing else would read.
+// Divergence from the plan, since amended: Attach exists but returns a handle
+// only. Provision is idempotent per session — it returns the session's existing
+// sandbox when one is running — and for a long time that was the only thing an
+// executor needed, so there was no Attach at all. What it does not do is nothing
+// else: Provision heals, and healing creates, replaces and restores. A caller
+// that only wants to write a file into a sandbox the session already has must
+// not be able to bring one into being, nor to have a merely slow one reclaimed
+// out from under a running turn (plan 29's MCP answer spill is that caller).
+// Attach is that read of the world and no more. Neither takes a sandbox id: the
+// session id derives the name on both backends, so there is still nothing to
+// persist.
 package sandbox
 
 import (
@@ -467,6 +474,17 @@ type Provider interface {
 	// running. Concurrent executors provisioning the same session converge on
 	// one sandbox rather than racing to create two.
 	Provision(ctx context.Context, spec Spec) (Sandbox, error)
+	// Attach returns a handle to the session's sandbox when this endpoint is
+	// already running one, and ErrNotFound when it is not. It is Provision's
+	// read-only half: it creates nothing, starts nothing, replaces nothing and
+	// restores nothing, so a caller that wants the sandbox a session has —
+	// rather than the sandbox it is about to use — cannot heal, reclaim or
+	// rebuild one as a side effect. A sandbox that exists but is not running is
+	// ErrNotFound: "running" is what a handle can be used against, and starting
+	// it would be the healing this is here to avoid. A container or pod holding
+	// the session's name without its ownership label is an error, not a miss —
+	// the same refusal every adoption path makes.
+	Attach(ctx context.Context, sessionID domain.ID) (Sandbox, error)
 	// Owned lists the distinct session ids of every sandbox asset — sandbox
 	// containers/pods and gate containers, running or stopped — this endpoint
 	// currently holds, read from the ownership label. Endpoint-local by

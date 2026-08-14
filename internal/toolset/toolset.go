@@ -142,7 +142,7 @@ func (r Runner) dispatch(ctx context.Context, id domain.ID, name string, input j
 	// the rest. Every other tool's output is ephemeral — the one place the
 	// spill earns its keep.
 	if name != "read" {
-		if notice := Spill(ctx, r.Sandbox, id, res.Content); notice != "" {
+		if notice := r.spill(ctx, id, res.Content); notice != "" {
 			res.Content = TruncateRunes(res.Content, MaxOutputBytes) + "\n" + notice
 			return res, nil
 		}
@@ -157,17 +157,17 @@ func (r Runner) dispatch(ctx context.Context, id domain.ID, name string, input j
 // neither its path nor its preview shape (docs/DIVERGENCES.md, #226).
 const spillDir = "/tmp/tool_outputs"
 
-// Spill writes an output past MaxOutputBytes to the sandbox whole and returns
+// spill writes an output past MaxOutputBytes to the sandbox whole and returns
 // the truncation notice naming the file — or "" when the output fits, or when
 // the write fails: the caller then truncates exactly as before, so the spill
 // is an enhancement, never a new failure mode for the call. The web tools
 // never reach it — their driver runs with no sandbox at all, a deliberate
 // divergence (web content is re-fetchable; a command's output is not).
-func Spill(ctx context.Context, sb sandbox.Sandbox, id domain.ID, full string) string {
+func (r Runner) spill(ctx context.Context, id domain.ID, full string) string {
 	if len(full) <= MaxOutputBytes {
 		return ""
 	}
-	path, ok := SpillFile(ctx, sb, id, full)
+	path, ok := SpillFile(ctx, r.Sandbox, id, full)
 	if !ok {
 		return ""
 	}
@@ -175,7 +175,7 @@ func Spill(ctx context.Context, sb sandbox.Sandbox, id domain.ID, full string) s
 }
 
 // SpillFile writes one call's oversized output to the sandbox and returns the
-// path, or false when the write failed. It is the half of Spill that decides
+// path, or false when the write failed. It is the half of spill that decides
 // *where*, without the budget test or the notice.
 //
 // Exported for the executor's MCP driver (plan 29 slice 4c), which spills to the
@@ -183,9 +183,9 @@ func Spill(ctx context.Context, sb sandbox.Sandbox, id domain.ID, full string) s
 // learned where its truncated output goes is right whichever tool produced it —
 // but says something different about it. The two differ where they must and
 // nowhere else: an MCP answer spills its *text*, so it cannot borrow a sentence
-// promising the full output, and it spills on a second trigger of its own (a
-// budget that drops blocks charges their JSON, not their text), so it cannot
-// borrow the budget test either.
+// promising the full output, and it spills on a trigger of its own — whether the
+// rendering lost anything, which a length test cannot answer for an answer made
+// of blocks — so it cannot borrow the budget test either.
 func SpillFile(ctx context.Context, sb sandbox.Sandbox, id domain.ID, full string) (string, bool) {
 	path := spillDir + "/" + id.String() + ".txt"
 	if err := sb.WriteFile(ctx, path, []byte(full)); err != nil {

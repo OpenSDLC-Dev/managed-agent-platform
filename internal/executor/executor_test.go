@@ -204,9 +204,14 @@ type fakeProvider struct {
 	// after a reap fails the way both real backends do (a removed container
 	// or deleted pod answers ErrNotFound), which is what pins the tier's
 	// capture-BEFORE-destroy ordering under test.
-	mu          sync.Mutex
-	owned       []domain.ID
-	ownedCalls  int
+	mu    sync.Mutex
+	owned []domain.ID
+	// attached records every session Attach was asked about, and attachErr and
+	// running drive its answer: running is the set this endpoint holds a live
+	// sandbox for, so a test can be a session that has one without provisioning.
+	attached    []domain.ID
+	attachErr   error
+	running     map[domain.ID]bool
 	reaped      []domain.ID
 	destroyed   map[domain.ID]bool
 	reapFailFor domain.ID
@@ -249,15 +254,31 @@ func (p *fakeProvider) Provision(ctx context.Context, spec sandbox.Spec) (sandbo
 func (p *fakeProvider) Owned(context.Context) ([]domain.ID, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	p.ownedCalls++
 	return slices.Clone(p.owned), nil
 }
 
-// ownedLookups is ownedCalls under the lock the reaper goroutine shares.
-func (p *fakeProvider) ownedLookups() int {
+// Attach is Provision's read-only half: it creates nothing, so a session this
+// fixture was not told is running answers ErrNotFound however many times it is
+// asked.
+func (p *fakeProvider) Attach(_ context.Context, sid domain.ID) (sandbox.Sandbox, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	return p.ownedCalls
+	p.attached = append(p.attached, sid)
+	if p.attachErr != nil {
+		return nil, p.attachErr
+	}
+	if !p.running[sid] {
+		return nil, sandbox.ErrNotFound
+	}
+	return p.sb, nil
+}
+
+// attachCount is how many times Attach was asked about any session, under the
+// lock the reaper goroutine shares.
+func (p *fakeProvider) attachCount() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return len(p.attached)
 }
 
 func (p *fakeProvider) Reap(_ context.Context, sid domain.ID) error {
