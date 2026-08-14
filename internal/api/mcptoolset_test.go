@@ -739,6 +739,53 @@ func TestAnInterruptRedirectRetriesFailedMCPListings(t *testing.T) {
 	}
 }
 
+// The other half of the retry rule, and the half only a test can hold: a
+// confirmation that clears the last gate flips idle → running too, and it must
+// *not* drop anything. That turn is already under way — its tool calls are
+// committed and waiting — so re-listing would suspend a resuming turn for
+// discovery and could change the tools it was assembled with, mid-turn.
+// Both of its exits: an allowed call schedules the MCP driver, and a denial
+// leaves everything answered and schedules the brain. Neither may drop a row.
+func TestAConfirmationResumeKeepsTheFailedMCPListings(t *testing.T) {
+	for _, tc := range []struct {
+		name, result string
+		extra        map[string]any
+	}{
+		{"allowed", "allow", nil},
+		{"denied", "deny", map[string]any{"deny_message": "no"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := newTestServer(t)
+			agentID, envID := fixture(t, s)
+			created := createSession(t, s, map[string]any{
+				"agent": map[string]any{"type": "agent_with_overrides", "id": agentID,
+					"mcp_servers": []any{mcpServer("up"), mcpServer("down")},
+					"tools":       []any{mcpToolset("up"), mcpToolset("down")}},
+				"environment_id": envID,
+			})
+			sid := created["id"].(string)
+
+			for _, row := range [][3]string{
+				{"up", "https://mcp.example/up", "ready"},
+				{"down", "https://mcp.example/down", "failed"},
+			} {
+				if _, err := s.pool.Exec(context.Background(),
+					`INSERT INTO mcp_catalogs (session_id, server_name, url, tools, status)
+					 VALUES ($1, $2, $3, '[]'::jsonb, $4)`, sid, row[0], row[1], row[2]); err != nil {
+					t.Fatalf("seed catalog row %q: %v", row[0], err)
+				}
+			}
+
+			askID := appendAskMCPToolUse(t, s, sid, "up", "search")
+			sendEvents(t, s, sid, confirm(askID, tc.result, tc.extra))
+
+			if left := catalogRows(t, s, sid); len(left) != 2 {
+				t.Errorf("catalog rows after the resume = %v, want both — the turn is already under way", left)
+			}
+		})
+	}
+}
+
 // catalogRows reports the session's catalog server names in name order.
 func catalogRows(t *testing.T, s *tserver, sid string) []string {
 	t.Helper()
