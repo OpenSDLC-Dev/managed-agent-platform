@@ -44,7 +44,9 @@ func mcpHarness(t *testing.T) *harness {
 // mcpHarnessWith is the same fixture for a test that needs a configured budget.
 func mcpHarnessWith(t *testing.T, cfg Config) *harness {
 	t.Helper()
-	h := newHarnessWith(t, &fakeProvider{sb: &fakeSandbox{}}, cfg)
+	prov := &fakeProvider{sb: &fakeSandbox{}}
+	h := newHarnessWith(t, prov, cfg)
+	h.prov = prov
 	h.exec.mcpHTTP = mcptest.Client()
 	h.setNetworking(t, domain.Networking{Type: domain.NetUnrestricted})
 	return h

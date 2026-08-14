@@ -1492,6 +1492,60 @@ func Run(t *testing.T, newHarness func(t *testing.T) Harness) {
 	// endpoint hold", Reap destroys a session's holdings without a live handle.
 	// The endpoint is shared with parallel tests, so Owned rows assert
 	// membership only, never the whole set.
+	t.Run("AttachReturnsTheProvisionedSandbox", func(t *testing.T) {
+		sb, h, sid := provision(t, unrestricted)
+		ctx := context.Background()
+		if err := sb.WriteFile(ctx, workdir+"/attach.txt", []byte("provisioned")); err != nil {
+			t.Fatalf("write: %v", err)
+		}
+		got, err := h.Provider.Attach(ctx, sid)
+		if err != nil {
+			t.Fatalf("attach: %v", err)
+		}
+		// The same sandbox, not merely one: a handle that reached a fresh
+		// container would read nothing here, which is the failure the caller
+		// cannot see for itself.
+		if body := catInSandbox(t, got, workdir+"/attach.txt"); body != "provisioned" {
+			t.Errorf("attached sandbox holds %q, want the provisioned one's file", body)
+		}
+		if err := got.WriteFile(ctx, workdir+"/attached.txt", []byte("written through the handle")); err != nil {
+			t.Fatalf("write through the attached handle: %v", err)
+		}
+		if body := catInSandbox(t, sb, workdir+"/attached.txt"); body != "written through the handle" {
+			t.Errorf("the provisioned sandbox holds %q, want what the attached handle wrote", body)
+		}
+	})
+
+	t.Run("AttachOfANeverProvisionedSessionIsNotFound", func(t *testing.T) {
+		h := newHarness(t)
+		got, err := h.Provider.Attach(context.Background(), domain.NewID("sesn"))
+		if !errors.Is(err, sandbox.ErrNotFound) {
+			t.Errorf("attach of a never-provisioned session: %v, want ErrNotFound", err)
+		}
+		// The whole point of the seam: asking must not bring one into being.
+		if got != nil {
+			t.Errorf("attach returned a handle %v for a session with no sandbox", got.ID())
+		}
+	})
+
+	t.Run("AttachAfterReapIsNotFound", func(t *testing.T) {
+		_, h, sid := provision(t, unrestricted)
+		ctx := context.Background()
+		if err := h.Provider.Reap(ctx, sid); err != nil {
+			t.Fatalf("reap: %v", err)
+		}
+		if _, err := h.Provider.Attach(ctx, sid); !errors.Is(err, sandbox.ErrNotFound) {
+			t.Errorf("attach after reap: %v, want ErrNotFound", err)
+		}
+		owned, err := h.Provider.Owned(ctx)
+		if err != nil {
+			t.Fatalf("owned: %v", err)
+		}
+		if containsID(owned, sid) {
+			t.Errorf("attach after reap re-created a sandbox for %s", sid)
+		}
+	})
+
 	t.Run("OwnedListsProvisionedSession", func(t *testing.T) {
 		_, h, sid := provision(t, unrestricted)
 		owned, err := h.Provider.Owned(context.Background())

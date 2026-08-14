@@ -105,7 +105,8 @@ func (e *Executor) unansweredMCPToolUses(ctx context.Context, sid domain.ID) ([]
 // same all-or-nothing the web driver and discovery use: the reclaim re-runs the
 // calls this pass had not answered.
 func (e *Executor) runMCPTools(ctx context.Context, cfg domain.EnvironmentConfig,
-	declared []mcpServerRef, ready map[string]string, uses []mcpToolUse) ([]events.NewEvent, error, error) {
+	declared []mcpServerRef, ready map[string]string, spill *mcpSpiller,
+	uses []mcpToolUse) ([]events.NewEvent, error, error) {
 
 	endpoints := make(map[string]string, len(declared))
 	for _, s := range declared {
@@ -144,6 +145,17 @@ func (e *Executor) runMCPTools(ctx context.Context, cfg domain.EnvironmentConfig
 		if ctx.Err() != nil {
 			return out, fmt.Errorf("mcp tool %s (%s): %w", u.name, u.id, ctx.Err()), nil
 		}
+		// Spilled here rather than where the answer was rendered so that the
+		// metric above measures the server and not this platform: a spill reaches
+		// the sandbox endpoint and writes a file, and recording that as MCP
+		// latency would page an operator about a server that answered promptly.
+		//
+		// The notice rides on top of the budget, as the dropped-block notice
+		// does: it is this platform's line about the server's answer, and a
+		// pointer to the spill file is worthless if the pointer is what gets cut.
+		if notice := spill.write(ctx, u.id, res.content, res.lost); notice != "" {
+			res.blocks = append(res.blocks, textBlock(notice))
+		}
 		ev, err := mcpResultEvent(u.id, res)
 		if err != nil {
 			return out, nil, err
@@ -181,7 +193,8 @@ func (e *Executor) answerMCPCalls(ctx context.Context, item *queue.Item, sess se
 		return err
 	}
 	kctx, keeper := e.queue.KeepLease(ctx, item, e.cfg.LeaseTTL)
-	results, faultErr, runErr := e.runMCPTools(kctx, sess.envConfig, sess.mcpServers, ready, calls)
+	spill := &mcpSpiller{exec: e, sid: item.SessionID, sess: sess}
+	results, faultErr, runErr := e.runMCPTools(kctx, sess.envConfig, sess.mcpServers, ready, spill, calls)
 	if kerr := keeper.Close(); kerr != nil {
 		return fmt.Errorf("lease keeper: %w", kerr)
 	}
@@ -243,6 +256,13 @@ func (e *Executor) answerMCPCalls(ctx context.Context, item *queue.Item, sess se
 type mcpAnswer struct {
 	blocks  []map[string]any
 	isError bool
+	// content is the server's answer before this driver rendered or capped it,
+	// and lost says the rendering did not carry all of it — a block truncated,
+	// or a block the budget threw away. Both are carried out to the caller
+	// rather than used here because the spill they feed runs outside the region
+	// timed as the server's call (runMCPTools).
+	content []mcp.Content
+	lost    bool
 }
 
 func mcpFailed(format string, args ...any) mcpAnswer {
@@ -320,7 +340,8 @@ func (e *Executor) runMCPTool(ctx context.Context, cfg domain.EnvironmentConfig,
 		}
 		return mcpFailed("MCP tool %q on server %q could not be run: %s", u.name, u.server, msg), failure
 	}
-	return mcpAnswer{blocks: mcpResultBlocks(res.Content), isError: res.IsError}, ""
+	blocks, lost := mcpResultBlocks(res.Content)
+	return mcpAnswer{blocks: blocks, isError: res.IsError, content: res.Content, lost: lost}, ""
 }
 
 // mcpCallHTTP is the client tool calls go through: the executor's own when a
@@ -358,8 +379,9 @@ func (e *Executor) mcpCallHTTP() *http.Client {
 //
 // A block whose type is none of MCP's five is dropped — the SDK's decoder admits
 // two sampling-only types here that a tool result has no business carrying.
-func mcpResultBlocks(content []mcp.Content) []map[string]any {
+func mcpResultBlocks(content []mcp.Content) ([]map[string]any, bool) {
 	out := make([]map[string]any, 0, len(content))
+	truncated := false
 	for _, c := range content {
 		switch c.Type {
 		case "text":
@@ -370,20 +392,21 @@ func mcpResultBlocks(content []mcp.Content) []map[string]any {
 			// this one. Dropping it cannot lose an answer: there is nothing in
 			// it, and a result left with no blocks at all picks up the
 			// no-content block below.
-			if txt := textBlock(c.Text); txt["text"] != "" {
+			txt, cut := textBlockCut(c.Text)
+			truncated = truncated || cut
+			if txt["text"] != "" {
 				out = append(out, txt)
 			}
 		case "image":
 			out = append(out, imageBlock(c))
 		case "resource":
-			out = append(out, resourceBlock(c))
+			blk, cut := resourceBlockCut(c)
+			truncated = truncated || cut
+			out = append(out, blk)
 		case "resource_link":
-			out = append(out, textBlock(fmt.Sprintf("The tool returned a link to a resource: %s (%s)",
-				c.URI, mimeOrUnknown(c.MIMEType))))
+			out = append(out, textBlock(mcpLinkText(c)))
 		case "audio":
-			out = append(out, textBlock(fmt.Sprintf(
-				"The tool returned %d bytes of audio (%s), which cannot be shown here.",
-				len(c.Data), mimeOrUnknown(c.MIMEType))))
+			out = append(out, textBlock(mcpAudioText(c)))
 		}
 	}
 	// A tool that answers with nothing at all still needs one block: the wire's
@@ -393,7 +416,8 @@ func mcpResultBlocks(content []mcp.Content) []map[string]any {
 	if len(out) == 0 {
 		out = append(out, textBlock("The tool returned no content."))
 	}
-	return capMCPBlocks(out)
+	capped, dropped := capMCPBlocks(out)
+	return capped, truncated || dropped
 }
 
 // capMCPBlocks holds one answer to the budget every tool result gets on this
@@ -434,9 +458,12 @@ func mcpResultBlocks(content []mcp.Content) []map[string]any {
 //
 // The trailing notice rides on top of the budget rather than inside it: it is
 // this platform's text about the server's, and it is a couple of hundred bytes.
-// Spilling an over-budget answer to a file the model can read instead of
-// truncating it is plan 29 slice 4b's, alongside the sandbox tools' spill.
-func capMCPBlocks(blocks []map[string]any) []map[string]any {
+// The spill notice that may follow it rides on top for the same reason
+// (mcpspill.go): a pointer to the file holding the rest is worthless if the
+// pointer is what gets cut. The two say different things and both can be true —
+// this one counts blocks that left the answer, that one names where the answer's
+// text went, and an image the budget dropped is in neither.
+func capMCPBlocks(blocks []map[string]any) ([]map[string]any, bool) {
 	budget := toolset.MaxOutputBytes
 	exempted := false
 	out := make([]map[string]any, 0, len(blocks))
@@ -451,13 +478,14 @@ func capMCPBlocks(blocks []map[string]any) []map[string]any {
 		}
 		if len(raw) > budget {
 			return append(out, textBlock(fmt.Sprintf(
-				"%d content block(s) of this answer were dropped: it is past the %d bytes "+
-					"a tool result may put on this session's log.", len(blocks)-i, toolset.MaxOutputBytes)))
+					"%d content block(s) of this answer were dropped: it is past the %d bytes "+
+						"a tool result may put on this session's log.", len(blocks)-i, toolset.MaxOutputBytes))),
+				true
 		}
 		budget -= len(raw)
 		out = append(out, b)
 	}
-	return out
+	return out, false
 }
 
 // alreadyCapped reports whether the text this block carries has been through
@@ -475,13 +503,18 @@ func alreadyCapped(b map[string]any) bool {
 }
 
 // maxResourceLabel bounds the two strings a document block carries *about* its
-// resource rather than *from* it: the URI it is titled with, and the media type
-// its context names. Both are server-chosen and neither is content, so a label
-// past this is a label being used as a payload. It is small on purpose — the
-// leading-block exemption in capMCPBlocks is only honest if everything textual
-// in the block has been capped, and capping these at the answer budget would let
-// one exempt block carry three of them. A URI longer than this is truncated in
-// the title a model reads; the resource itself is unaffected.
+// resource rather than *from* it: the URI it is titled with, the media type its
+// context names, and the same two where a block this wire cannot carry is
+// described in a sentence instead — a resource link's address, an audio clip's
+// or an image's media type. All are server-chosen and none is content, so a
+// label past this is a label being used as a payload. It is small on purpose —
+// the leading-block exemption in capMCPBlocks is only honest if everything
+// textual in the block has been capped, and capping these at the answer budget
+// would let one exempt block carry three of them: a described block is one text
+// block, so an uncapped label there would take the whole budget under the
+// exemption and the rest of the answer with it, with nothing over budget for the
+// spill to catch. A URI longer than this is truncated in the title or the
+// sentence a model reads; the resource itself is unaffected.
 const maxResourceLabel = 2 << 10
 
 // capLabel bounds one of those, cutting on a rune boundary. json.Marshal would
@@ -541,6 +574,14 @@ func imageBlock(c mcp.Content) map[string]any {
 }
 
 func resourceBlock(c mcp.Content) map[string]any {
+	blk, _ := resourceBlockCut(c)
+	return blk
+}
+
+// resourceBlockCut is resourceBlock plus whether a text resource's body was
+// capped on the way into its document source — the other half of what tells the
+// spill an answer did not arrive whole.
+func resourceBlockCut(c mcp.Content) (map[string]any, bool) {
 	title := capLabel(c.URI)
 	// A resource with no bytes either way — an empty file read over MCP is as
 	// ordinary here as it is through the built-in read — would leave a document
@@ -548,8 +589,7 @@ func resourceBlock(c mcp.Content) map[string]any {
 	// log (the empty text block above is the case the wire is known to reject),
 	// and the address is what was worth saying about it anyway.
 	if len(c.Data) == 0 && toolset.SanitizeText(c.Text) == "" {
-		return textBlock(fmt.Sprintf("The tool returned an empty resource: %s (%s)",
-			title, mimeOrUnknown(c.MIMEType)))
+		return textBlock(mcpEmptyResourceText(c)), false
 	}
 	block := map[string]any{"type": "document"}
 	// The title is optional on the request side, so an absent one is a shape
@@ -572,19 +612,21 @@ func resourceBlock(c mcp.Content) map[string]any {
 				"media_type": pdfMediaType,
 				"data":       base64.StdEncoding.EncodeToString(c.Data),
 			}
-			return block
+			return block, false
 		case imageMediaTypes[mime]:
-			return imageBlock(c)
+			return imageBlock(c), false
 		default:
 			return textBlock(fmt.Sprintf(
 				"The tool returned %d bytes of %s at %s, which cannot be shown here.",
-				len(c.Data), mimeOrUnknown(c.MIMEType), title))
+				len(c.Data), mimeOrUnknown(c.MIMEType), title)), false
 		}
 	}
+	clean := toolset.SanitizeText(c.Text)
+	capped := toolset.CapOutput(clean)
 	block["source"] = map[string]any{
 		"type":       "text",
 		"media_type": "text/plain",
-		"data":       toolset.CapOutput(toolset.SanitizeText(c.Text)),
+		"data":       capped,
 	}
 	// The schema's plain-text source admits exactly one media type, so a
 	// resource declaring another is carried as context rather than dropped:
@@ -592,7 +634,7 @@ func resourceBlock(c mcp.Content) map[string]any {
 	if mime := capLabel(c.MIMEType); mime != "" && mime != "text/plain" {
 		block["context"] = "The source resource declares its media type as " + mime + "."
 	}
-	return block
+	return block, capped != clean
 }
 
 // textBlock is every text block this driver writes, and the one place a single
@@ -601,11 +643,45 @@ func resourceBlock(c mcp.Content) map[string]any {
 // rather than in capMCPBlocks is what keeps the ordinary answer — one huge text
 // block — truncated rather than dropped whole.
 func textBlock(s string) map[string]any {
-	return map[string]any{"type": "text", "text": toolset.CapOutput(toolset.SanitizeText(s))}
+	blk, _ := textBlockCut(s)
+	return blk
 }
 
+// textBlockCut is textBlock plus whether the cap took anything off, which is
+// half of what tells the spill an answer did not arrive whole. CapOutput returns
+// its input unchanged when it fits, so the comparison is exact rather than a
+// length heuristic.
+func textBlockCut(s string) (map[string]any, bool) {
+	clean := toolset.SanitizeText(s)
+	capped := toolset.CapOutput(clean)
+	return map[string]any{"type": "text", "text": capped}, capped != clean
+}
+
+// mcpLinkText and mcpAudioText are the sentences a link and an audio block are
+// described in — here and in the spill file both (mcpspill.go), so the file and
+// the answer it stands in for never come to say different things about the same
+// block.
+func mcpLinkText(c mcp.Content) string {
+	return fmt.Sprintf("The tool returned a link to a resource: %s (%s)",
+		capLabel(c.URI), mimeOrUnknown(c.MIMEType))
+}
+
+func mcpEmptyResourceText(c mcp.Content) string {
+	return fmt.Sprintf("The tool returned an empty resource: %s (%s)",
+		capLabel(c.URI), mimeOrUnknown(c.MIMEType))
+}
+
+func mcpAudioText(c mcp.Content) string {
+	return fmt.Sprintf("The tool returned %d bytes of audio (%s), which cannot be shown here.",
+		len(c.Data), mimeOrUnknown(c.MIMEType))
+}
+
+// mimeOrUnknown is every media type this driver names in a sentence, and it caps
+// as capLabel does and for the same reason: a media type is a label, and one
+// that arrives as a payload would otherwise ride an exempt block for the whole
+// budget.
 func mimeOrUnknown(mime string) string {
-	if m := toolset.SanitizeText(mime); m != "" {
+	if m := capLabel(mime); m != "" {
 		return m
 	}
 	return "media type unstated"

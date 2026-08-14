@@ -722,6 +722,57 @@ func adoptable(info containerInfo, spec sandbox.Spec, workdir, gateID string) er
 // attach builds the sandbox handle. gateID is the session's egress-gate
 // container when the sandbox is half of a pair, "" otherwise; Destroy uses it to
 // tear the gate down alongside the sandbox.
+// Attach is Provision's read-only half: the session's running container, or
+// ErrNotFound. It inspects and nothing else — a stopped container is a miss
+// rather than something to start, a stale gate pairing is not rebuilt, and no
+// image is pulled — so a caller holding a handle for a write cannot cost the
+// session the container it is working in.
+//
+// The handle's workdir and gate come from the container itself rather than from
+// a spec, because there is no spec here: both are fixed at create, which is what
+// makes reading them back sound.
+func (p *Provider) Attach(ctx context.Context, sessionID domain.ID) (sandbox.Sandbox, error) {
+	if sessionID.IsZero() {
+		return nil, errors.New("docker: attach needs a session id")
+	}
+	info, err := p.api.inspectContainer(ctx, containerName(sessionID))
+	switch {
+	case statusIs(err, 404):
+		return nil, sandbox.ErrNotFound
+	case err != nil:
+		return nil, err
+	}
+	if aerr := ours(info, sessionID); aerr != nil {
+		return nil, aerr
+	}
+	if !info.State.Running {
+		return nil, sandbox.ErrNotFound
+	}
+	return p.attach(info.ID, info.Config.WorkingDir, p.pairedGate(ctx, sessionID, info)), nil
+}
+
+// pairedGate is the gate the attached handle may tear down with its sandbox: the
+// container the sandbox is networked through, but only once that container is
+// confirmed to be this session's own gate. Provision's gateID comes from the gate
+// it just ensured; this one would otherwise come from a string a container
+// carries, and Destroy removes what it names without asking again. A container of
+// this platform's pointed at anything else is a shape nothing here writes — a
+// legacy or hand-edited one — and a handle whose Destroy would remove an
+// unrelated container is not one to hand out. So an unverifiable pairing yields
+// "": the handle tears down its sandbox and leaves the gate to the standalone
+// teardown reaper, which is what collects an orphaned one anyway.
+func (p *Provider) pairedGate(ctx context.Context, sessionID domain.ID, info containerInfo) string {
+	gateID := strings.TrimPrefix(info.HostConfig.NetworkMode, "container:")
+	if gateID == info.HostConfig.NetworkMode {
+		return ""
+	}
+	gi, err := p.api.inspectContainer(ctx, gateName(sessionID))
+	if err != nil || gi.ID != gateID || ours(gi, sessionID) != nil {
+		return ""
+	}
+	return gateID
+}
+
 func (p *Provider) attach(id, workdir, gateID string) *container {
 	return &container{
 		api: p.api, id: id, workdir: workdir, gateID: gateID,

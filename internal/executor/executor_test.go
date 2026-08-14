@@ -38,6 +38,9 @@ type fakeSandbox struct {
 	files    map[string]string
 	writeErr error
 	readErr  error
+	// writes counts every WriteFile, successful or not, so a test can pin how
+	// many attempts a pass made rather than only what survived them.
+	writes int
 	// failPath, if set, makes WriteFile fail (a backend fault) for a path with
 	// this suffix, so a test can fault one tool of a parallel set while the
 	// others succeed.
@@ -131,6 +134,7 @@ func (f *fakeSandbox) ReadFileStream(ctx context.Context, path string, maxBytes 
 	return io.NopCloser(bytes.NewReader(data)), int64(len(data)), nil
 }
 func (f *fakeSandbox) WriteFile(ctx context.Context, path string, data []byte) error {
+	f.writes++
 	if f.entered != nil {
 		select {
 		case f.entered <- struct{}{}:
@@ -200,8 +204,14 @@ type fakeProvider struct {
 	// after a reap fails the way both real backends do (a removed container
 	// or deleted pod answers ErrNotFound), which is what pins the tier's
 	// capture-BEFORE-destroy ordering under test.
-	mu          sync.Mutex
-	owned       []domain.ID
+	mu    sync.Mutex
+	owned []domain.ID
+	// attached records every session Attach was asked about, and attachErr and
+	// running drive its answer: running is the set this endpoint holds a live
+	// sandbox for, so a test can be a session that has one without provisioning.
+	attached    []domain.ID
+	attachErr   error
+	running     map[domain.ID]bool
 	reaped      []domain.ID
 	destroyed   map[domain.ID]bool
 	reapFailFor domain.ID
@@ -221,6 +231,16 @@ func (p *fakeProvider) Provision(ctx context.Context, spec sandbox.Spec) (sandbo
 	p.mu.Lock()
 	p.calls = append(p.calls, "provision")
 	delete(p.destroyed, spec.SessionID)
+	// A provisioned session has a running sandbox, so Attach finds one — the
+	// fake's lifecycle must not say the opposite of a real provider's, or a
+	// test that provisions and then spills would exercise a state production
+	// never reaches.
+	if p.provisionErr == nil {
+		if p.running == nil {
+			p.running = map[domain.ID]bool{}
+		}
+		p.running[spec.SessionID] = true
+	}
 	p.mu.Unlock()
 	if p.entered != nil {
 		select {
@@ -247,10 +267,35 @@ func (p *fakeProvider) Owned(context.Context) ([]domain.ID, error) {
 	return slices.Clone(p.owned), nil
 }
 
+// Attach is Provision's read-only half: it creates nothing, so a session this
+// fixture was not told is running answers ErrNotFound however many times it is
+// asked.
+func (p *fakeProvider) Attach(_ context.Context, sid domain.ID) (sandbox.Sandbox, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.attached = append(p.attached, sid)
+	if p.attachErr != nil {
+		return nil, p.attachErr
+	}
+	if !p.running[sid] {
+		return nil, sandbox.ErrNotFound
+	}
+	return p.sb, nil
+}
+
+// attachCount is how many times Attach was asked about any session, under the
+// lock the reaper goroutine shares.
+func (p *fakeProvider) attachCount() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return len(p.attached)
+}
+
 func (p *fakeProvider) Reap(_ context.Context, sid domain.ID) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.calls = append(p.calls, "reap")
+	delete(p.running, sid)
 	if sid == p.reapFailFor && sid != "" {
 		return errors.New("daemon unreachable")
 	}

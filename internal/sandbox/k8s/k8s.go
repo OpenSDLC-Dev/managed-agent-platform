@@ -992,6 +992,47 @@ func (p *Provider) waitReady(ctx context.Context, name string, gated bool) error
 	}
 }
 
+// Attach is Provision's read-only half: the session's running pod, or
+// ErrNotFound. It Gets and nothing else — a pod that is not ready is a miss
+// rather than something to wait on, and a wait is exactly what must not happen
+// here: Provision's readiness wait ends in reclaimUnready for a gated pod, so a
+// caller giving it a deadline shorter than readyTimeout would have a merely slow
+// pod deleted out from under a running turn.
+//
+// The handle's workdir comes from the pod itself rather than from a spec,
+// because there is no spec here: a pod spec is immutable, which is what makes
+// reading it back sound.
+func (p *Provider) Attach(ctx context.Context, sessionID domain.ID) (sandbox.Sandbox, error) {
+	if sessionID.IsZero() {
+		return nil, errors.New("k8s: attach needs a session id")
+	}
+	name := podName(sessionID)
+	existing, err := p.client.cs.CoreV1().Pods(p.client.namespace).Get(ctx, name, metav1.GetOptions{})
+	switch {
+	case apierrors.IsNotFound(err):
+		return nil, sandbox.ErrNotFound
+	case err != nil:
+		return nil, fmt.Errorf("k8s: attach %s: %w", name, err)
+	}
+	if aerr := ours(existing, sessionID); aerr != nil {
+		return nil, aerr
+	}
+	if !podReady(existing, hasGateSidecar(existing)) {
+		return nil, sandbox.ErrNotFound
+	}
+	var workdir string
+	for _, c := range existing.Spec.Containers {
+		if c.Name == containerName {
+			workdir = c.WorkingDir
+		}
+	}
+	if workdir == "" {
+		return nil, fmt.Errorf("k8s: pod %s carries no %s container: %w",
+			name, containerName, sandbox.ErrSpecMismatch)
+	}
+	return p.attach(name, workdir), nil
+}
+
 func (p *Provider) attach(name, workdir string) *pod {
 	return &pod{
 		client: p.client, name: name, workdir: workdir,
