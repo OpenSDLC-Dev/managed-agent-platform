@@ -622,14 +622,18 @@ the row under a compare-and-set on the ciphertext this resolution read — the s
 persist the validate endpoint performs, for the same reason: the exchange spent seconds on network
 I/O. The dial uses the token it was issued whether or not the write lands, and the write itself
 does not inherit the caller's deadline, because by then the issuer may have retired the refresh
-token this exchange spent. A grant the issuer refuses is `ErrCredentialUnusable`, and a refusal
-that follows another resolution's rotation reads that rotation back rather than reporting it; an
-issuer that is unreachable, rate-limiting, or 5xx-ing is not, so the item retries. The token
-endpoint is credential-supplied, so it is dialled through the address guard
+token this exchange spent. A refusal, a 2xx that yields no grant however it failed to, and an
+address the guard will not dial (`dialguard.ErrRefused`) are all `ErrCredentialUnusable` — no retry
+improves any of them, and a retryable verdict has nowhere to surface, since a faulted `mcp_exec`
+item writes no catalog row at all; a refusal that follows another resolution's rotation, seen as
+the row's sealed bytes having changed under this dial, reads that rotation back rather than
+reporting it. A grant whose access token cannot be sent as a header is unusable too, but its
+*refresh* token is stored beside the unchanged access token and expiry — the issuer has spent the
+one in the row, and without the replacement no later dial can buy a token at all. What retries is
+the issuer having a moment: unreachable, 5xx, or 408/425/429. The
+token endpoint is credential-supplied, so it is dialled through the address guard
 (`internal/dialguard`) and never redirected — following one would replay the refresh token to a
-target the per-hop guard never approved as a destination — and an address that guard refuses is the
-credential's fault rather than a retry, since no waiting makes it reachable
-(`dialguard.ErrRefused`).
+target the per-hop guard never approved as a destination.
 
 ### internal/oauthrefresh
 

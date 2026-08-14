@@ -2,8 +2,13 @@ package vaultresolve
 
 import (
 	"net"
+	"net/http"
 	"testing"
 )
+
+// RefreshClientForTest exposes the token-endpoint client, so its guards can be
+// asserted rather than only read. See internal/mcp for the twin.
+func RefreshClientForTest() *http.Client { return refreshClient }
 
 // AllowLoopbackTokenEndpointForTest lifts the address guard under the
 // token-endpoint dial for one test, so the exchange can reach an httptest

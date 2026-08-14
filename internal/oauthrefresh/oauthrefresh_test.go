@@ -170,9 +170,16 @@ func TestAnUnusableTokenEndpointIsRefusedBeforeTheDial(t *testing.T) {
 
 // Params holds two secrets, and is shared by callers with different logging
 // habits. Neither route to a string may carry them.
+// Three secrets, not two: the token endpoint may carry userinfo, which the
+// create-time grammar accepts. And every route fmt offers, because a debugging
+// %#v or a verb that does not match is exactly how a struct gets printed by
+// accident.
 func TestParamsNeverPrintsItsSecrets(t *testing.T) {
 	p := params()
+	p.TokenEndpoint = "https://client-1:endpoint-SECRET@issuer.example/token?trace=1"
 	p.TokenEndpointAuth = oauthrefresh.AuthPost
+	resource, scope := "https://mcp.example/", "mcp:read"
+	p.Resource, p.Scope = &resource, &scope
 	p.RefreshToken = "refresh-SECRET"
 	p.ClientSecret = "client-SECRET"
 
@@ -183,16 +190,32 @@ func TestParamsNeverPrintsItsSecrets(t *testing.T) {
 		"%v":         fmt.Sprintf("%v", p),
 		"%+v":        fmt.Sprintf("%+v", p),
 		"%s":         fmt.Sprintf("%s", p),
+		"%#v":        fmt.Sprintf("%#v", p),
+		"%d":         fmt.Sprintf("%d", p),
 		"a JSON log": logged.String(),
 	} {
-		for _, secret := range []string{"refresh-SECRET", "client-SECRET"} {
+		for _, secret := range []string{"refresh-SECRET", "client-SECRET", "endpoint-SECRET"} {
 			if strings.Contains(rendered, secret) {
 				t.Errorf("%s printed %s: %s", label, secret, rendered)
 			}
 		}
-		if !strings.Contains(rendered, "client-1") {
-			t.Errorf("%s dropped the non-secret half too: %s", label, rendered)
+		// The non-secret halves all survive, or the redaction has made the
+		// rendering useless for the debugging it exists to serve.
+		for _, kept := range []string{"client-1", "issuer.example/token", "trace=1", resource, scope} {
+			if !strings.Contains(rendered, kept) {
+				t.Errorf("%s dropped %q, which is not a secret: %s", label, kept, rendered)
+			}
 		}
+	}
+}
+
+// A token endpoint that will not parse is not rendered at all: nothing can strip
+// userinfo out of it, and it reached the type the same way a parseable one did.
+func TestAnUnparseableTokenEndpointIsNotPrintedEither(t *testing.T) {
+	p := params()
+	p.TokenEndpoint = "https://client-1:endpoint-SECRET@issuer.example:not-a-port/token"
+	if rendered := fmt.Sprintf("%v", p); strings.Contains(rendered, "endpoint-SECRET") {
+		t.Errorf("an unparseable endpoint printed its userinfo: %s", rendered)
 	}
 }
 

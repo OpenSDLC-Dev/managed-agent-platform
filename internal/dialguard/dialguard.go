@@ -34,8 +34,11 @@ import (
 
 // ErrRefused is wrapped by every refusal this guard produces, so a caller can
 // tell a destination that can never be dialled from a network that may recover:
-// no retry makes a refused address reachable. The messages are unchanged — the
-// sentinel is the phrase they already ended with.
+// no retry makes a refused address reachable. For an address the guard refuses
+// by class the sentinel is the phrase the message already ended with, so that
+// text is unchanged; the unreadable-address refusal gains it as a suffix, which
+// no caller can reach through Control (net.ParseIP rejects it first) and which
+// nothing asserts on.
 var ErrRefused = errors.New("disallowed address")
 
 // IPAllowed reports whether a resolved address may be dialed, returning an

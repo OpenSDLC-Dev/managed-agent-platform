@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -433,6 +434,10 @@ func TestARefusedRefreshIsTheCredentialsFault(t *testing.T) {
 		"200 that is not a grant": func(w http.ResponseWriter, _ int) {
 			fmt.Fprint(w, `{"error":"invalid_grant"}`)
 		},
+		// Above 5xx is outside the status registry altogether, so it is not the
+		// issuer reporting a condition that passes: net/http hands back any
+		// three-digit code, and "5xx and up" would retry this one forever.
+		"a status outside the registry": func(w http.ResponseWriter, _ int) { w.WriteHeader(600) },
 	} {
 		t.Run(name, func(t *testing.T) {
 			pool := pgtest.NewPool(t)
@@ -458,8 +463,10 @@ func TestARefusedRefreshIsTheCredentialsFault(t *testing.T) {
 // faults and comes back rather than answering a permanent failure.
 func TestAnIssuerHavingAMomentIsRetryable(t *testing.T) {
 	for name, answer := range map[string]func(http.ResponseWriter, int){
-		"rate limited": func(w http.ResponseWriter, _ int) { w.WriteHeader(http.StatusTooManyRequests) },
-		"server error": func(w http.ResponseWriter, _ int) { w.WriteHeader(http.StatusBadGateway) },
+		"rate limited":    func(w http.ResponseWriter, _ int) { w.WriteHeader(http.StatusTooManyRequests) },
+		"server error":    func(w http.ResponseWriter, _ int) { w.WriteHeader(http.StatusBadGateway) },
+		"request timeout": func(w http.ResponseWriter, _ int) { w.WriteHeader(http.StatusRequestTimeout) },
+		"too early":       func(w http.ResponseWriter, _ int) { w.WriteHeader(http.StatusTooEarly) },
 	} {
 		t.Run(name, func(t *testing.T) {
 			pool := pgtest.NewPool(t)
@@ -510,6 +517,40 @@ func TestAnAddressTheGuardRefusesIsTheCredentialsFault(t *testing.T) {
 	_, err := vaultresolve.MCPCredentialFor(context.Background(), pool, cipher, []string{v}, mcpServer)
 	if !errorsIsUnusable(err) {
 		t.Fatalf("err = %v, want it marked ErrCredentialUnusable", err)
+	}
+}
+
+// The token-endpoint client's guards are asserted rather than only written,
+// because each is a decision that reads like an omission once it is gone —
+// most of all the absent Proxy, which is the reflex fix for a deployment whose
+// egress needs one and which would take every exchange off the address the
+// dial-time guard vetted, carrying the refresh token with it.
+func TestTheTokenEndpointClientCarriesItsGuards(t *testing.T) {
+	client := vaultresolve.RefreshClientForTest()
+	if client.CheckRedirect == nil {
+		t.Error("redirects are followed; a 307 replays the refresh token to the target")
+	}
+	transport, ok := client.Transport.(*http.Transport)
+	if !ok {
+		t.Fatalf("Transport is %T, want *http.Transport", client.Transport)
+	}
+	if transport.Proxy != nil {
+		t.Error("a proxy is configured; the address guard would vet the proxy, not the endpoint")
+	}
+	if transport.DialContext == nil {
+		t.Error("no DialContext, so no address guard")
+	}
+	if !transport.ForceAttemptHTTP2 {
+		t.Error("HTTP/2 is off; setting DialContext disables it unless this is set")
+	}
+	if transport.MaxResponseHeaderBytes == 0 {
+		t.Error("header blocks are unbounded; the body cap bounds nothing else")
+	}
+	if transport.IdleConnTimeout == 0 || transport.MaxIdleConnsPerHost == 0 {
+		t.Error("idle connections to an issuer are held until the process ends")
+	}
+	if client.Timeout == 0 {
+		t.Error("an exchange has no whole-request bound")
 	}
 }
 
@@ -705,60 +746,59 @@ func TestARefreshedTokenMustBeSendableBeforeItIsStored(t *testing.T) {
 	}
 }
 
-// A refusal whose body cannot be read is still a refusal. Classifying on the
-// body's arrival would turn a definitive `400 invalid_grant` — sent with a
-// truncated body or a wrong Content-Length — into a work item that faults and
-// reclaims forever.
-func TestARefusalWithAnUnreadableBodyIsStillARefusal(t *testing.T) {
+// The replacement refresh token beside an unsendable access token *is* stored,
+// because the issuer has already spent the one in the row: dropping it would
+// leave a credential no later exchange can buy a token for, repairable only by
+// an operator rewriting it. Everything else is left alone — the old access
+// token, and the expiry still in the past, which is what makes the next dial
+// exchange again with the token that can still buy one.
+func TestAnUnsendableTokenStillStoresTheRefreshTokenBesideIt(t *testing.T) {
 	pool := pgtest.NewPool(t)
 	cipher := testCipher(t)
-	vaultresolve.AllowLoopbackTokenEndpointForTest(t)
-	issuer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		// A body that promises more than it sends, then hangs up: io.ReadAll
-		// answers io.ErrUnexpectedEOF.
-		w.Header().Set("Content-Length", "4096")
-		w.WriteHeader(http.StatusBadRequest)
-		_, _ = w.Write([]byte(`{"error":"invalid_gr`))
-		if f, ok := w.(http.Flusher); ok {
-			f.Flush()
-		}
-		if hj, ok := w.(http.Hijacker); ok {
-			conn, _, err := hj.Hijack()
-			if err == nil {
-				_ = conn.Close()
-			}
-		}
-	}))
-	defer issuer.Close()
+	issuer := newTokenEndpoint(t, func(w http.ResponseWriter, _ int) {
+		fmt.Fprint(w, `{"access_token":"line-one\nline-two","refresh_token":"refresh-2","expires_in":3600}`)
+	})
 
 	v := newVault(t, pool, false)
-	newRefreshableCred(t, pool, cipher, v, refreshable{
+	id := newRefreshableCred(t, pool, cipher, v, refreshable{
 		expiresAt: ago(time.Hour), endpoint: issuer.URL,
 		sealed: map[string]string{"access_token": "expired", "refresh_token": "refresh-1"},
 	})
+	before, _ := storedCred(t, pool, cipher, id)
 
 	_, err := vaultresolve.MCPCredentialFor(context.Background(), pool, cipher, []string{v}, mcpServer)
 	if !errorsIsUnusable(err) {
 		t.Fatalf("err = %v, want it marked ErrCredentialUnusable", err)
 	}
+	doc, sealed := storedCred(t, pool, cipher, id)
+	if sealed["refresh_token"] != "refresh-2" {
+		t.Errorf("stored refresh_token = %q, want the replacement the issuer just handed over",
+			sealed["refresh_token"])
+	}
+	if sealed["access_token"] != "expired" {
+		t.Errorf("stored access_token = %q, want the unsendable token not written", sealed["access_token"])
+	}
+	if !bytes.Equal(doc["expires_at"], before["expires_at"]) {
+		t.Errorf("stored expires_at = %s, want the old expiry untouched (was %s)",
+			doc["expires_at"], before["expires_at"])
+	}
 }
 
-// An answer this platform's own cap cut short says nothing about the
-// credential — what the issuer sent is simply unknown — so it stays retryable
-// rather than being read as a refusal.
-func TestAnAnswerTooLargeToReadIsRetryable(t *testing.T) {
+// A write that fails is logged as its SQLSTATE and not as what the driver said.
+// Postgres renders the value it choked on into a DETAIL or CONTEXT line, and one
+// of this write's bound values is the auth document — whose `mcp_server_url` and
+// `token_endpoint` are allowed to carry a credential in their userinfo.
+func TestAFailedWriteIsLoggedAsItsSQLSTATE(t *testing.T) {
 	pool := pgtest.NewPool(t)
 	cipher := testCipher(t)
+	// The table goes away between the read and the write, which is where the
+	// exchange's own seconds of network I/O sit in production.
 	issuer := newTokenEndpoint(t, func(w http.ResponseWriter, _ int) {
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"padding":"`))
-		block := bytes.Repeat([]byte("p"), 64<<10)
-		for written := 0; written <= 1<<20; written += len(block) {
-			if _, err := w.Write(block); err != nil {
-				return
-			}
+		if _, err := pool.Exec(context.Background(),
+			`ALTER TABLE vault_credentials RENAME TO vault_credentials_moved`); err != nil {
+			t.Errorf("move the table out from under the write: %v", err)
 		}
-		_, _ = w.Write([]byte(`","access_token":"never-read"}`))
+		fmt.Fprint(w, `{"access_token":"fresh","expires_in":3600}`)
 	})
 
 	v := newVault(t, pool, false)
@@ -767,12 +807,92 @@ func TestAnAnswerTooLargeToReadIsRetryable(t *testing.T) {
 		sealed: map[string]string{"access_token": "expired", "refresh_token": "refresh-1"},
 	})
 
-	_, err := vaultresolve.MCPCredentialFor(context.Background(), pool, cipher, []string{v}, mcpServer)
-	if err == nil {
-		t.Fatal("an oversized answer resolved a token")
+	var logged bytes.Buffer
+	old := slog.Default()
+	slog.SetDefault(slog.New(slog.NewJSONHandler(&logged, nil)))
+	t.Cleanup(func() { slog.SetDefault(old) })
+
+	// The dial still gets its fresh token: the exchange succeeded, and failing it
+	// over a write would turn a working credential into a broken one.
+	token, err := vaultresolve.MCPCredentialFor(context.Background(), pool, cipher, []string{v}, mcpServer)
+	if err != nil || token != "fresh" {
+		t.Fatalf("token = %q, err = %v; want the fresh token despite the failed write", token, err)
 	}
-	if errorsIsUnusable(err) {
-		t.Fatalf("err = %v, want an answer this platform truncated to stay retryable", err)
+	// 42P01 is undefined_table, and the driver's own rendering of it names the
+	// relation — a stand-in here for the bound value a DETAIL line would quote.
+	if !strings.Contains(logged.String(), "SQLSTATE 42P01") {
+		t.Errorf("the failed write was not logged as its SQLSTATE: %s", logged.String())
+	}
+	if strings.Contains(logged.String(), "vault_credentials") {
+		t.Errorf("the failed write logged what the driver said: %s", logged.String())
+	}
+}
+
+// An answer the platform cannot turn into a grant is the credential's fault
+// whatever went wrong with it: a body that never finished, one past the cap, or
+// a status whose body is not consulted at all. A retryable verdict on any of
+// them has nowhere to surface — the work item faults, is reclaimed, writes no
+// catalog row, and repeats forever with the operator told nothing.
+func TestAnAnswerThatIsNotAGrantIsTheCredentialsFault(t *testing.T) {
+	for name, serve := range map[string]http.HandlerFunc{
+		// A refusal whose body promises more than it sends, then hangs up:
+		// io.ReadAll answers io.ErrUnexpectedEOF. Classifying on the body's arrival
+		// would turn a definitive `400 invalid_grant` into an endless retry.
+		"a refusal with an unreadable body": func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("Content-Length", "4096")
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = w.Write([]byte(`{"error":"invalid_gr`))
+			hangUp(w)
+		},
+		"a 200 with an unreadable body": func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("Content-Length", "4096")
+			_, _ = w.Write([]byte(`{"access_token":"never-fin`))
+			hangUp(w)
+		},
+		"a 200 past the cap": func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"padding":"`))
+			block := bytes.Repeat([]byte("p"), 64<<10)
+			for written := 0; written <= 1<<20; written += len(block) {
+				if _, err := w.Write(block); err != nil {
+					return
+				}
+			}
+			_, _ = w.Write([]byte(`","access_token":"never-read"}`))
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			pool := pgtest.NewPool(t)
+			cipher := testCipher(t)
+			vaultresolve.AllowLoopbackTokenEndpointForTest(t)
+			issuer := httptest.NewServer(serve)
+			defer issuer.Close()
+
+			v := newVault(t, pool, false)
+			newRefreshableCred(t, pool, cipher, v, refreshable{
+				expiresAt: ago(time.Hour), endpoint: issuer.URL,
+				sealed: map[string]string{"access_token": "expired", "refresh_token": "refresh-1"},
+			})
+
+			_, err := vaultresolve.MCPCredentialFor(context.Background(), pool, cipher,
+				[]string{v}, mcpServer)
+			if !errorsIsUnusable(err) {
+				t.Fatalf("err = %v, want it marked ErrCredentialUnusable", err)
+			}
+		})
+	}
+}
+
+// hangUp closes the connection under a response that promised more, so the
+// client's body read fails rather than ending cleanly.
+func hangUp(w http.ResponseWriter) {
+	if f, ok := w.(http.Flusher); ok {
+		f.Flush()
+	}
+	if hj, ok := w.(http.Hijacker); ok {
+		if conn, _, err := hj.Hijack(); err == nil {
+			_ = conn.Close()
+		}
 	}
 }
 
@@ -786,8 +906,8 @@ func TestALifetimeThatCannotBeBelievedLeavesTheExpiryUnknown(t *testing.T) {
 		"zero":        `,"expires_in":0`,
 		"negative":    `,"expires_in":-3600`,
 		"overflowing": `,"expires_in":9223372036854775807`,
-		"beyond the bound": `,"expires_in":` +
-			strconv.FormatInt(11*365*24*60*60, 10),
+		"one second beyond the bound": `,"expires_in":` +
+			strconv.FormatInt(10*365*24*60*60+1, 10),
 	} {
 		t.Run(name, func(t *testing.T) {
 			pool := pgtest.NewPool(t)
@@ -817,24 +937,56 @@ func TestALifetimeThatCannotBeBelievedLeavesTheExpiryUnknown(t *testing.T) {
 	}
 }
 
+// The other side of that bound: the largest lifetime this platform will believe
+// is believed. Without a row here, tightening the comparison by one second would
+// silently downgrade a ten-year grant into the dead end above.
+func TestTheLargestBelievableLifetimeIsBelieved(t *testing.T) {
+	pool := pgtest.NewPool(t)
+	cipher := testCipher(t)
+	tenYears := int64(10 * 365 * 24 * 60 * 60)
+	issuer := newTokenEndpoint(t, grants(`,"expires_in":`+strconv.FormatInt(tenYears, 10)))
+
+	v := newVault(t, pool, false)
+	id := newRefreshableCred(t, pool, cipher, v, refreshable{
+		expiresAt: ago(time.Hour), endpoint: issuer.URL,
+		sealed: map[string]string{"access_token": "expired", "refresh_token": "refresh-1"},
+	})
+
+	if _, err := vaultresolve.MCPCredentialFor(context.Background(), pool, cipher,
+		[]string{v}, mcpServer); err != nil {
+		t.Fatal(err)
+	}
+	doc, _ := storedCred(t, pool, cipher, id)
+	var expiresAt time.Time
+	if err := json.Unmarshal(doc["expires_at"], &expiresAt); err != nil {
+		t.Fatalf("stored expires_at = %s (%v), want a timestamp", doc["expires_at"], err)
+	}
+	if !expiresAt.After(time.Now().UTC().AddDate(9, 0, 0)) {
+		t.Errorf("stored expires_at = %s, want about ten years out", expiresAt)
+	}
+}
+
 // The race a dial-time refresh has: two dials of one expired credential both
 // exchange, and an issuer that makes refresh tokens single-use refuses the
 // second. This resolution is the loser — it read the row before the winner wrote
 // it, and the winner's write lands from inside the handler while its own
 // exchange is in flight, which is the only way to make that ordering a fact.
 //
-// The read-back is decided by the expiry alone, so the three rows are what an
-// expiry can be: the winner's rotation usable, the winner's rotation itself
-// already due, and nobody having written at all.
+// The read-back is decided by whether the sealed bytes changed, and the expiry
+// gets no vote: an issuer may name no lifetime, or one shorter than the leeway,
+// and both are tokens this platform sends elsewhere without complaint. So the
+// rows are the winner's rotation under each of those expiries, and nobody having
+// written at all.
 func TestARefusedRefreshReadsBackARotationThatLandedMeanwhile(t *testing.T) {
 	for name, row := range map[string]struct {
 		rotate       bool
 		winnerExpiry *time.Time
 		want         string // "" — the refusal stands
 	}{
-		"a usable rotation is used":    {true, ahead(time.Hour), "the-winners-token"},
-		"a rotation itself due is not": {true, ago(time.Minute), ""},
-		"and with no rotation at all":  {false, nil, ""},
+		"a rotation an hour out is used":  {true, ahead(time.Hour), "the-winners-token"},
+		"an unknown expiry is used too":   {true, nil, "the-winners-token"},
+		"one inside the leeway, likewise": {true, ahead(30 * time.Second), "the-winners-token"},
+		"and with no rotation at all":     {false, nil, ""},
 	} {
 		t.Run(name, func(t *testing.T) {
 			pool := pgtest.NewPool(t)

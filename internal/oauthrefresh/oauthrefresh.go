@@ -16,6 +16,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"net/url"
@@ -43,20 +44,59 @@ type Params struct {
 	ClientSecret      string
 }
 
-// String and LogValue render Params without its two secrets. This type is
-// shared by callers with different logging habits, and a struct holding a
-// refresh token and a client secret prints both under a bare `%v` or a
-// structured log of the whole value. Redacting here makes that impossible
-// rather than merely absent — one method for each route, because neither
-// covers the other: fmt reaches String, and a structured handler reaches
-// LogValue before it would marshal the fields.
+// String, Format and LogValue render Params without any of its secrets. This
+// type is shared by callers with different logging habits, and a struct holding
+// a refresh token and a client secret prints both under a bare `%v` or a
+// structured log of the whole value. Three methods, because none of them covers
+// the others: fmt reaches String for %v and its kin but past it for `%#v` and
+// for a mismatched verb like %d, which is what Format catches (the reasoning is
+// spelled out at internal/modeltest's Config, which redacts a credential the
+// same way and for the same reason); and a structured handler reaches LogValue
+// before it would marshal the fields.
+//
+// Three of the fields are secrets, not two: the create-time grammar
+// (internal/api, validateEndpointURL) accepts a URL carrying userinfo, so a
+// token endpoint can be `https://id:secret@issuer/token` — the reason the
+// executor redacts these URLs by value out of everything it stores.
 func (p Params) String() string {
 	return fmt.Sprintf("oauthrefresh.Params{ClientID:%s TokenEndpoint:%s TokenEndpointAuth:%s "+
-		"RefreshToken:[redacted] ClientSecret:[redacted]}", p.ClientID, p.TokenEndpoint, p.TokenEndpointAuth)
+		"Resource:%s Scope:%s RefreshToken:[redacted] ClientSecret:[redacted]}",
+		p.ClientID, redactURL(p.TokenEndpoint), p.TokenEndpointAuth, derefOr(p.Resource), derefOr(p.Scope))
+}
+
+func (p Params) Format(f fmt.State, verb rune) {
+	if verb == 'v' && f.Flag('#') {
+		io.WriteString(f, "oauthrefresh."+p.String())
+		return
+	}
+	io.WriteString(f, p.String())
 }
 
 func (p Params) LogValue() slog.Value {
 	return slog.StringValue(p.String())
+}
+
+// redactURL renders a stored URL without the userinfo it is allowed to carry. A
+// URL that will not parse is not rendered at all: it cannot be stripped, and it
+// reached this type from the same place the parseable ones did.
+func redactURL(raw string) string {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return "[unparseable]"
+	}
+	if u.User != nil {
+		u.User = url.User("[redacted]")
+	}
+	return u.String()
+}
+
+// derefOr renders an optional field, distinguishing an unset one from an empty
+// string the credential actually carries.
+func derefOr(s *string) string {
+	if s == nil {
+		return "<unset>"
+	}
+	return *s
 }
 
 // NewRequest builds the token request. It reads nothing back and dials nothing:
