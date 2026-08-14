@@ -263,13 +263,18 @@ func (e *Executor) discoverServers(ctx context.Context, cfg domain.EnvironmentCo
 	// mcpEgressAllowed already refuses to assume away. The width is the same
 	// number, so a session within the cap is dialled all at once and one past it
 	// is bounded rather than unbounded.
+	//
+	// Taken before the goroutine is spawned rather than inside it, so the one
+	// channel bounds the goroutines too. Blocking the loop costs nothing here:
+	// this is already the goroutine that took the work item, and every dial it
+	// waits on shares the budget's deadline.
 	sem := make(chan struct{}, maxConcurrentDials)
 	var wg sync.WaitGroup
 	for _, i := range dial {
+		sem <- struct{}{}
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			sem <- struct{}{}
 			defer func() { <-sem }()
 			rows[i] = e.listServerTools(budget, servers[i], tokens[i], rows[i])
 		}()
@@ -871,28 +876,24 @@ func (e *Executor) settleMCP(ctx context.Context, item *queue.Item, rows []catal
 		if declared[r.name] != r.url {
 			continue
 		}
-		// A server the platform could not reach is said out loud on the cadence
-		// it is re-dialled at: once per work cycle. What makes that so is the
-		// row — a new work cycle deletes a session's failed rows (internal/api,
+		// Said out loud on the cadence the server is re-dialled at: once per
+		// work cycle. That falls out of the row rather than being imposed — a
+		// new work cycle deletes a session's failed rows (internal/api,
 		// startWorkCycle, the reference's documented retry-on-idle→running),
-		// which is also what puts the server back in the never-reached state a
-		// turn suspends for, so the next cycle dials again and speaks again. A
-		// second pass inside one cycle (an agent patch adding a server, say)
-		// finds the row this pass wrote and stays quiet.
+		// which is the same thing that puts the server back in the
+		// never-reached state a turn suspends for. A second pass inside one
+		// cycle finds the row this pass wrote and stays quiet.
 		//
-		// Not the rows this pass simply did not finish with: those are its own
-		// scheduling, and there is no connection behind them for an operator to
-		// go and heal. Which is why "has a row" is not the question asked —
-		// a budget row is a `failed` row too, and treating it as an
-		// announcement would silence the server's first real verdict for the
-		// rest of the cycle.
+		// Not the rows this pass did not finish with: those are its own
+		// scheduling, with no connection behind them for an operator to heal.
+		// Which is why announcedServers asks about the reason and not the
+		// status — a budget row is `failed` too, and counting it as an
+		// announcement would silence that server's first real verdict.
 		//
-		// One thing this does not re-announce: a failure that changes kind
-		// inside a cycle — unreachable on one pass, credential refused on the
-		// next. The row is rewritten and carries the truth; the event is not
-		// re-sent. Keying on the reason text instead would fix that and hand a
-		// server the ability to make this platform emit an event per pass by
-		// varying its own error message, which is the worse trade.
+		// Not re-announced: a failure that changes kind inside a cycle. The row
+		// carries the truth; the event is not re-sent. Keying on the reason text
+		// would fix that and hand a server an event per pass for the price of
+		// varying its own error message.
 		if r.status == "failed" && !r.notReached && !announced[r.name] {
 			ev, err := mcpFailureEvent(r.name, mcpFailure{
 				message: r.reason, authentication: r.authentication})
