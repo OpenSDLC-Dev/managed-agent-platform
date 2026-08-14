@@ -58,7 +58,7 @@ func tasks() []Task {
 //
 // The server runs in this test binary but is reached over real HTTP by the real
 // executor through the real MCP client, on an address the platform's dial guard
-// admits (see mcpHost). Nothing here is a fake: the fixture is a go-sdk server.
+// admits (see mcpHosts). Nothing here is a fake: the fixture is a go-sdk server.
 func mcpAnswer() Task {
 	return Task{
 		ID: "mcp-answer",

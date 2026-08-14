@@ -42,13 +42,13 @@ func TestLiveServerListsItsTools(t *testing.T) {
 
 	conn, err := mcp.Connect(ctx, mcp.Config{URL: endpoint, BearerToken: token})
 	if err != nil {
-		t.Fatalf("connect to the live server %s: %v", where, scrub(err, token))
+		t.Fatalf("connect to the live server %s: %v", where, scrub(err, endpoint, token))
 	}
 	defer func() { _ = conn.Close() }()
 
 	tools, err := conn.ListTools(ctx)
 	if err != nil {
-		t.Fatalf("list the live server %s's tools: %v", where, scrub(err, token))
+		t.Fatalf("list the live server %s's tools: %v", where, scrub(err, endpoint, token))
 	}
 	if len(tools) == 0 {
 		t.Fatal("the live server listed no tools: nothing here proves a listing round-trips")
@@ -70,31 +70,74 @@ func safeEndpoint(raw string) string {
 	return u.Scheme + "://" + u.Host
 }
 
-// urlInText finds a URL anywhere in a message. The closing set excludes the
-// quote %q wraps a url.Error's URL in, so the match ends where the URL does.
-var urlInText = regexp.MustCompile(`[a-zA-Z][a-zA-Z0-9+.-]*://[^\s"'<>]+`)
+// urlInText finds a URL anywhere in a message. Deliberately not stopping at a
+// quote: a URL is allowed to contain one, and a pattern that ended the match
+// there would cut a query in half and leave its tail in the log.
+var urlInText = regexp.MustCompile(`(?i)https?://[^\s<>]+`)
 
 // scrub keeps the configured endpoint's secrets out of an error whose text
-// something else chose.
+// something else chose. By value first and then by shape, which is the order
+// and the reason the executor's storableReason uses.
 //
-// Redacting by the configured string alone does not work, and fails on exactly
-// the shape it would be written for: net/http masks the password before it
-// writes the URL into the *url.Error it returns, so the declared bytes are not
-// what appears and a substring replacement matches nothing — leaving the query,
-// where the other half of endpoint credentials ride, in the log. So every URL in
-// the message is cut to scheme://host whatever its spelling, which is the same
-// thing the executor's storableReason does with the reasons it stores.
+// By value, because redacting by shape alone leaves whatever the pattern cannot
+// bound — a query holding a space or a quote ends the match early. By shape as
+// well, because redacting by value alone misses the spellings the declared bytes
+// never take: net/http masks the password before it writes the URL into the
+// *url.Error it returns, and the client writes url.URL.Redacted's.
 //
-// The token is separate: it is not in the URL, and a server may quote back the
-// header it received in any text it likes.
-func scrub(err error, token string) string {
-	out := urlInText.ReplaceAllStringFunc(err.Error(), func(match string) string {
-		return safeEndpoint(strings.TrimRight(match, `.,;:)]}`))
-	})
+// The token is separate again: it is not in the URL, and a server may quote back
+// the header it received in any text it likes.
+func scrub(err error, endpoint, token string) string {
+	out := err.Error()
+	for _, form := range endpointForms(endpoint) {
+		// An empty form would match at every character boundary, which is what
+		// replacing "" means. The token below is guarded for the same reason.
+		if form != "" {
+			out = strings.ReplaceAll(out, form, safeEndpoint(endpoint))
+		}
+	}
+	out = urlInText.ReplaceAllStringFunc(out, redactURL)
 	if token != "" {
 		out = strings.ReplaceAll(out, token, "[redacted]")
 	}
 	return out
+}
+
+// endpointForms lists the spellings the configured endpoint appears in. Three
+// writers put it into a message and none agree: whatever echoes the
+// configuration writes the declared bytes, the MCP client writes
+// url.URL.Redacted's (password "xxxxx"), and net/http writes its own ("***").
+func endpointForms(endpoint string) []string {
+	forms := []string{endpoint}
+	u, err := url.Parse(endpoint)
+	if err != nil || u.User == nil {
+		return forms
+	}
+	if _, ok := u.User.Password(); !ok {
+		return forms
+	}
+	redacted := u.Redacted()
+	return append(forms, redacted, strings.Replace(redacted, ":xxxxx@", ":***@", 1))
+}
+
+// redactURL cuts one matched URL to scheme://host, handing back trailing
+// punctuation the greedy match swallowed. The give-back is one character at a
+// time until what is left parses, because two of those characters also end a
+// URL — "]" closes an IPv6 literal and ":" precedes a port.
+func redactURL(match string) string {
+	var trailing string
+	for len(match) > 0 && strings.ContainsRune(`.,:;!?)]}"'`, rune(match[len(match)-1])) {
+		trailing, match = match[len(match)-1:]+trailing, match[:len(match)-1]
+	}
+	u, err := url.Parse(match)
+	for (err != nil || u.Host == "") && trailing != "" {
+		match, trailing = match+trailing[:1], trailing[1:]
+		u, err = url.Parse(match)
+	}
+	if err != nil || u.Host == "" {
+		return "[redacted url]" + trailing
+	}
+	return u.Scheme + "://" + u.Host + trailing
 }
 
 // TestTheLiveTierNeverQuotesItsConfiguration runs offline, unlike the tier whose
@@ -113,38 +156,70 @@ func TestTheLiveTierNeverQuotesItsConfiguration(t *testing.T) {
 		t.Errorf("an unparseable endpoint rendered as %q", got)
 	}
 
-	// The error a real failing dial produces, not one built from the declared
+	// Errors a real failing dial produces, not ones built from the declared
 	// string: net/http rewrites the password to *** on its way into url.Error,
 	// so a fixture written by hand from the configuration tests a shape this
 	// path never emits and passes a scrub that would leak.
-	_, err := http.Get("http://user:pw@127.0.0.1:1/mcp?api_key=" + "sekrit")
-	if err == nil {
-		t.Fatal("a dial to a closed port should fail")
+	//
+	// The queries carry characters that can end a URL match — an apostrophe, a
+	// raw space, a double quote — because bounding the match wrongly is how a
+	// shape rule fails, and a query is where the credential is.
+	for _, query := range []string{
+		"api_key=sekrit",
+		"note='&api_key=sekrit",
+		"agent=my agent&api_key=sekrit",
+		`note="x"&api_key=sekrit`,
+	} {
+		dialled := "http://user:pw@127.0.0.1:1/mcp?" + query
+		_, err := http.Get(dialled)
+		if err == nil {
+			t.Fatalf("a dial to a closed port should fail: ?%s", query)
+		}
+		if !strings.Contains(err.Error(), "sekrit") {
+			t.Fatalf("this fixture no longer carries the query credential, so it "+
+				"proves nothing about scrubbing one: %v", err)
+		}
+		out := scrub(err, dialled, token)
+		for _, secret := range []string{"sekrit", "api_key", "user:"} {
+			if strings.Contains(out, secret) {
+				t.Errorf("scrub kept %q from ?%s: %s", secret, query, out)
+			}
+		}
+		if !strings.Contains(out, "http://127.0.0.1:1") {
+			t.Errorf("scrub dropped the host, which the message needs to be "+
+				"readable: %s", out)
+		}
 	}
-	if !strings.Contains(err.Error(), "sekrit") {
-		t.Fatalf("this fixture no longer carries the query credential, so it proves "+
-			"nothing about scrubbing one: %v", err)
+
+	// A URL that is not the configured endpoint — a redirect target a server
+	// named, say — has no declared form to match, so the shape pass is what has
+	// to catch it.
+	other := scrub(errFor(`redirected to "https://elsewhere.test/x?api_key=sekrit"`),
+		endpoint, token)
+	if strings.Contains(other, "sekrit") {
+		t.Errorf("scrub kept a secret from a URL it was not configured with: %s", other)
 	}
-	out := scrub(err, token)
+
+	out := scrub(errFor("failed to reach "+endpoint), endpoint, token)
 	for _, secret := range []string{"sekrit", "api_key", "user:"} {
 		if strings.Contains(out, secret) {
 			t.Errorf("scrub kept %q: %s", secret, out)
 		}
 	}
-	if !strings.Contains(out, "http://127.0.0.1:1") {
+	if !strings.Contains(out, where) {
 		t.Errorf("scrub dropped the host, which the message needs to be readable: %s", out)
 	}
 
 	// The token rides a header, not the URL, so it survives the URL rewrite and
 	// needs its own replacement.
-	quoted := scrub(errFor("server said: bad bearer "+token), token)
+	quoted := scrub(errFor("server said: bad bearer "+token), endpoint, token)
 	if strings.Contains(quoted, token) {
 		t.Errorf("scrub kept the token: %s", quoted)
 	}
 	// An empty token is the anonymous dial this tier admits; replacing "" would
 	// rewrite every character boundary in the message.
-	if got := scrub(errFor("plain failure"), ""); got != "plain failure" {
-		t.Errorf("scrub with no token rewrote the message: %q", got)
+	if got := scrub(errFor("plain failure"), "", ""); got != "plain failure" {
+		t.Errorf("scrub with no configuration rewrote the message: %q", got)
 	}
 }
 

@@ -99,8 +99,15 @@ func TestLookupPrefersTheEnvironment(t *testing.T) {
 		t.Errorf("url = %q, want the file's when the environment is silent", got)
 	}
 	// The tier variable is outside the two keys the file may answer for, so a
-	// .env can never opt a run into spending anything.
-	if got := lookup(env(nil), file, LiveEnv); got != "" {
+	// .env can never opt a run into spending anything — and the file is not
+	// even opened to find that out. A poisoned callback rather than an
+	// assertion on the return value, which a load-then-discard would satisfy.
+	poisonedFile := func() map[string]string {
+		t.Error("opened the credential file to resolve " + LiveEnv +
+			": consent must be answered without reading it")
+		return nil
+	}
+	if got := lookup(env(nil), poisonedFile, LiveEnv); got != "" {
 		t.Errorf("%s = %q from the file: consent must come from the environment alone",
 			LiveEnv, got)
 	}
