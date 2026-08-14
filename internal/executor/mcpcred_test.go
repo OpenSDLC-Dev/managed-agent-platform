@@ -343,14 +343,14 @@ func TestABudgetSpentInsideTheCredentialSettlesRatherThanFaulting(t *testing.T) 
 
 	// With time left, the lookup's own failure faults the item: it says nothing
 	// about the credential, so the pass is worth retrying.
-	if _, err := h.exec.discoverServer(context.Background(), sess.envConfig, sess.vaultIDs, ref); err == nil {
+	if _, _, _, err := h.exec.prepareServer(context.Background(), sess.envConfig, sess.vaultIDs, ref); err == nil {
 		t.Fatal("a failed lookup with budget left settled instead of faulting")
 	}
 
 	// With the budget spent, the same failure is this pass running out of time.
 	spent, cancel := context.WithCancel(context.Background())
 	cancel()
-	row, err := h.exec.discoverServer(spent, sess.envConfig, sess.vaultIDs, ref)
+	row, _, _, err := h.exec.prepareServer(spent, sess.envConfig, sess.vaultIDs, ref)
 	if err != nil {
 		t.Fatalf("a spent budget faulted the pass: %v", err)
 	}
@@ -388,7 +388,7 @@ func TestASpentBudgetOutranksTheCredentialsOwnVerdict(t *testing.T) {
 	ref := sess.mcpServers[0]
 
 	// With time left, the credential is what the row blames.
-	row, err := h.exec.discoverServer(context.Background(), sess.envConfig, sess.vaultIDs, ref)
+	row, _, _, err := h.exec.prepareServer(context.Background(), sess.envConfig, sess.vaultIDs, ref)
 	if err != nil {
 		t.Fatalf("an unusable credential faulted the pass: %v", err)
 	}
@@ -402,7 +402,7 @@ func TestASpentBudgetOutranksTheCredentialsOwnVerdict(t *testing.T) {
 	// leave the two orderings indistinguishable and prove nothing.
 	spent, cancel := context.WithCancel(context.Background())
 	h.exec.cipher = cipherThatSpendsTheBudget{Cipher: h.cipher, spend: cancel}
-	row, err = h.exec.discoverServer(spent, sess.envConfig, sess.vaultIDs, ref)
+	row, _, _, err = h.exec.prepareServer(spent, sess.envConfig, sess.vaultIDs, ref)
 	if err != nil {
 		t.Fatalf("a spent budget faulted the pass: %v", err)
 	}
@@ -434,12 +434,17 @@ func TestABudgetSpentByASuccessfulCredentialSettlesBeforeTheDial(t *testing.T) {
 
 	spent, cancel := context.WithCancel(context.Background())
 	h.exec.cipher = cipherThatSpendsTheBudget{Cipher: h.cipher, spend: cancel}
-	row, err := h.exec.discoverServer(spent, sess.envConfig, sess.vaultIDs, sess.mcpServers[0])
+	row, _, dial, err := h.exec.prepareServer(spent, sess.envConfig, sess.vaultIDs, sess.mcpServers[0])
 	if err != nil {
 		t.Fatalf("a spent budget faulted the pass: %v", err)
 	}
 	if !row.notReached || !strings.Contains(row.reason, "ran out of time") {
 		t.Errorf("row = %+v, want the clock blamed rather than the server", row)
+	}
+	// The dial is a separate phase now, and this is what keeps it from starting:
+	// a server the serial phase already has a verdict on is not handed to it.
+	if dial {
+		t.Error("a spent budget still handed the server to the dialling phase")
 	}
 	if _, reached := seen(); reached {
 		t.Error("the dial went out on a context that was already spent")

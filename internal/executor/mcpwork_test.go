@@ -3,6 +3,7 @@ package executor
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -991,6 +992,10 @@ func TestATarpitServerDoesNotStarveTheOnesDeclaredAfterIt(t *testing.T) {
 		<-release
 	}))
 	client := mcptest.Client()
+	// Registered before the teardown below, because t.Cleanup is LIFO and this
+	// server's own cleanup has to run first — the ordering the comment there is
+	// about.
+	healthy := mcptest.Server(t, mcptest.Tool{Name: "ok_tool"})
 	// Teardown in one place, because its order matters and the default is
 	// wrong twice over. The tarpit is released explicitly rather than by its
 	// request context — a client that abandons a request does not reliably
@@ -1002,9 +1007,12 @@ func TestATarpitServerDoesNotStarveTheOnesDeclaredAfterIt(t *testing.T) {
 		client.CloseIdleConnections()
 		hang.Close()
 	})
-	healthy := mcptest.Server(t, mcptest.Tool{Name: "ok_tool"})
 
-	h := newHarnessWith(t, &fakeProvider{sb: &fakeSandbox{}}, Config{MCPPassTimeout: 300 * time.Millisecond})
+	// Headroom over what a loopback handshake and listing take, because what
+	// this test is about is that the healthy server is *dialled at all* while
+	// the tarpit holds the budget — a budget so tight that a loaded runner
+	// could miss it would report this test's own regression.
+	h := newHarnessWith(t, &fakeProvider{sb: &fakeSandbox{}}, Config{MCPPassTimeout: 5 * time.Second})
 	h.exec.mcpHTTP = client
 	h.setNetworking(t, domain.Networking{Type: domain.NetUnrestricted})
 	// Declared behind the tarpit, which is the whole point: this is the entry a
@@ -1115,9 +1123,10 @@ func TestADiscoveryFailureIsAnnouncedOncePerWorkCycle(t *testing.T) {
 		t.Errorf("mcp_server_name = %v, want the declared name", got)
 	}
 	// The endpoint is customer-supplied and may carry a credential, so what the
-	// message carries is what the row carries and nothing more.
-	if msg, _ := errs[0]["message"].(string); !strings.Contains(msg, "github") && msg == "" {
-		t.Errorf("message = %q, want the row's own reason", msg)
+	// message carries is what the row carries — already cut to scheme://host by
+	// storableReason — and nothing more.
+	if got, want := errs[0]["message"], h.catalog(t)["github"].reason; got != want {
+		t.Errorf("message = %v, want the row's own reason %q", got, want)
 	}
 
 	// The same broken server, another turn in the same work cycle.
@@ -1314,5 +1323,87 @@ func TestDiscoveryHandsItsItemBackForACallThatArrivedUnderneathIt(t *testing.T) 
 	// The listing still landed: handing the item back must not throw the pass away.
 	if got := h.catalog(t)["docs"]; got.status != "ready" {
 		t.Errorf("catalog row = %+v, want the listing this pass fetched", got)
+	}
+}
+
+// A credential the platform could not resolve at all never reaches the server,
+// and the reference counts it as an authentication failure all the same — so
+// discovery has to type it as one. The row alone was already pinned; the event
+// this slice adds needs its own assertion, because typing it wrongly sends an
+// operator after a connection that is fine.
+func TestACredentialThePlatformCannotOpenIsAnAuthenticationFailure(t *testing.T) {
+	h := mcpHarness(t)
+	url := mcptest.Server(t, mcptest.Tool{Name: "ok_tool"})
+	h.attachVaultWithAnUnopenableCredential(t, url)
+	h.declareMCPServers(t, [2]string{"docs", url})
+	h.enqueueMCP(t)
+
+	h.stepOnce(t)
+
+	if n := len(h.errorsOfType(t, "mcp_connection_failed_error")); n != 0 {
+		t.Errorf("connection-failed errors = %d, want none: nothing was dialled", n)
+	}
+	errs := h.errorsOfType(t, "mcp_authentication_failed_error")
+	if len(errs) != 1 {
+		t.Fatalf("authentication-failed errors = %d, want exactly one", len(errs))
+	}
+	if got := errs[0]["mcp_server_name"]; got != "docs" {
+		t.Errorf("mcp_server_name = %v, want the declared name", got)
+	}
+}
+
+// A pass that ran out of time before a server has told nobody anything, so it
+// must not be what silences that server's first real verdict. The two states are
+// one status in the table — "failed" — which is why the dedupe asks about the
+// reason rather than the status.
+func TestABudgetRowDoesNotSilenceTheFirstRealFailure(t *testing.T) {
+	down := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "no", http.StatusInternalServerError)
+	}))
+	defer down.Close()
+
+	h := mcpHarness(t)
+	h.declareMCPServers(t, [2]string{"github", down.URL})
+	// The row an earlier, timed-out pass would have left: failed, and carrying
+	// the fallback reason that says so.
+	if _, err := h.pool.Exec(context.Background(),
+		`INSERT INTO mcp_catalogs (session_id, server_name, url, tools, status, error, fetched_at)
+		 VALUES ($1, 'github', $2, '[]'::jsonb, 'failed', $3, now())`,
+		h.sid.String(), down.URL, passRanOutOfTime); err != nil {
+		t.Fatalf("seed the timed-out row: %v", err)
+	}
+	h.enqueueMCP(t)
+
+	h.stepOnce(t)
+
+	if n := len(h.errorsOfType(t, "mcp_connection_failed_error")); n != 1 {
+		t.Errorf("session errors = %d, want the first real failure said out loud "+
+			"even though a timed-out pass had already written a failed row", n)
+	}
+}
+
+// The pass's budget is one deadline every dial in it shares, so a verdict a
+// server earned microseconds before that instant arrives with the context
+// already dead. Deciding on the clock alone would relabel it as this platform's
+// scheduling, throwing the finding away and saying nothing about it — so the
+// error has to agree that it was a cancellation. Asserted on the function rather
+// than through a pass, because the interleaving it is about is a race no test
+// can schedule.
+func TestAVerdictThatBeatTheBudgetIsNotRelabelledAsScheduling(t *testing.T) {
+	dead, cancel := context.WithCancel(context.Background())
+	cancel()
+	row := catalogRow{name: "docs", url: "https://example.test/mcp", status: "failed"}
+
+	earned := failedDial(dead, row, errors.New("boom"))
+	if earned.notReached {
+		t.Error("a verdict the server earned was marked as the pass's own scheduling")
+	}
+	if !strings.Contains(earned.reason, "boom") {
+		t.Errorf("reason = %q, want the verdict the server earned", earned.reason)
+	}
+
+	cut := failedDial(dead, row, context.DeadlineExceeded)
+	if !cut.notReached || cut.reason != passRanOutOfTime {
+		t.Errorf("row = %+v, want a dial the budget cut short marked as scheduling", cut)
 	}
 }
