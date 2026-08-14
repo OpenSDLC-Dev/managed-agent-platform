@@ -4,6 +4,8 @@ import (
 	"net/http"
 	"testing"
 	"time"
+
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
 )
 
 func TestDefaultTransportConfig(t *testing.T) {
@@ -70,5 +72,29 @@ func TestRemoveHopByHop(t *testing.T) {
 	}
 	if h.Get("Authorization") != "keep-me" {
 		t.Error("Authorization is end-to-end and must survive forwarding")
+	}
+}
+
+// The MCP set answers a host the way an operator's allowed_hosts does — case and
+// a trailing dot are not what tells two names apart — so a declaration and the
+// request that uses it need not be spelled identically. Driven at the policy,
+// because a proxy test reaches an httptest origin by address and an address has
+// neither case nor a trailing dot.
+func TestTheMCPSetNormalizesAHostLikeTheOperatorsList(t *testing.T) {
+	p := newPolicy(
+		domain.Networking{Type: domain.NetLimited, AllowMCPServers: true},
+		[]string{"MCP.Example.com.:8443"})
+
+	for _, host := range []string{"mcp.example.com", "MCP.Example.com", "mcp.example.com."} {
+		if ok, mcpOnly := p.admit(host, "8443"); !ok || !mcpOnly {
+			t.Errorf("admit(%q, 8443) = (%v, %v), want the declaration to admit it", host, ok, mcpOnly)
+		}
+	}
+	// The port is still exact, and a neighbouring name is still not the name.
+	if ok, _ := p.admit("mcp.example.com", "22"); ok {
+		t.Error("a second port on the declared host was admitted")
+	}
+	if ok, _ := p.admit("evil.mcp.example.com", "8443"); ok {
+		t.Error("a subdomain of the declared host was admitted")
 	}
 }

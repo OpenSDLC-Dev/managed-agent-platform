@@ -45,7 +45,9 @@ func newPolicy(net domain.Networking, mcpEndpoints []string) *policy {
 		if net.AllowMCPServers {
 			p.mcp = make(map[string]struct{}, len(mcpEndpoints))
 			for _, e := range mcpEndpoints {
-				p.mcp[strings.ToLower(strings.TrimSpace(e))] = struct{}{}
+				if host, port, ok := strings.Cut(strings.TrimSpace(e), ":"); ok {
+					p.mcp[normalizeHost(host)+":"+port] = struct{}{}
+				}
 			}
 		}
 		return p
@@ -64,10 +66,21 @@ func (p *policy) admit(host, port string) (ok, mcpOnly bool) {
 	if p.allowed.Match(host) {
 		return true, false
 	}
-	if _, declared := p.mcp[strings.ToLower(host)+":"+port]; declared {
+	if _, declared := p.mcp[normalizeHost(host)+":"+port]; declared {
 		return true, true
 	}
 	return false, false
+}
+
+// normalizeHost is egress.HostSet's own host normalization, applied to the MCP
+// set so the two lists answer a host the same way: `MCP.Example.com.` and
+// `mcp.example.com` are one name, and an operator's list already treats them as
+// one. The set stays an exact-match map rather than a second HostSet, because a
+// HostSet would read a `*.`-prefixed entry as a suffix rule and this list comes
+// from the agent spec — mcpEndpoint refuses a wildcard, and a map cannot become
+// one however that changes.
+func normalizeHost(h string) string {
+	return strings.TrimSuffix(strings.ToLower(strings.TrimSpace(h)), ".")
 }
 
 // hopByHop are the connection-scoped headers a forwarding proxy must not pass
