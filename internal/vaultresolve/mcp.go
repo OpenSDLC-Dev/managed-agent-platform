@@ -21,6 +21,24 @@ import (
 // so they cannot be told apart by position.
 var ErrCredentialUnusable = errors.New("the matched credential cannot be used")
 
+// The two credential types that carry a bearer token for an MCP server. Only
+// the first can be refreshed.
+const (
+	authMCPOAuth     = "mcp_oauth"
+	authStaticBearer = "static_bearer"
+)
+
+// mcpRow is one candidate MCP credential. authDoc is the row's non-secret auth
+// document, carried whole so the winner can be refreshed from it.
+type mcpRow struct {
+	id         string
+	vaultID    string
+	authType   string
+	authDoc    []byte
+	ciphertext []byte
+	keyID      *string
+}
+
 // MCPCredentialFor resolves the bearer token a session's attached vaults
 // register for an MCP server at serverURL — static_bearer's `token` or
 // mcp_oauth's `access_token` — or "" when none of them register one, in which
@@ -47,7 +65,9 @@ var ErrCredentialUnusable = errors.New("the matched credential cannot be used")
 // matching is what the rule is about; falling through would authenticate with a
 // credential the reference would not have chosen. The dial then goes out
 // unauthenticated and the server's refusal is the operator's signal.
-func MCPCredentialFor(ctx context.Context, q Querier, cipher secrets.Cipher,
+// An mcp_oauth credential whose expires_at has passed is refreshed before it is
+// handed back, and the rotation is stored — see [refreshIfDue].
+func MCPCredentialFor(ctx context.Context, db DB, cipher secrets.Cipher,
 	vaultIDs []string, serverURL string) (string, error) {
 	if len(vaultIDs) == 0 || serverURL == "" {
 		return "", nil
@@ -59,7 +79,7 @@ func MCPCredentialFor(ctx context.Context, q Querier, cipher secrets.Cipher,
 	if !ok {
 		return "", nil
 	}
-	rows, err := q.Query(ctx,
+	rows, err := db.Query(ctx,
 		`SELECT c.id, c.vault_id, c.auth_type, c.auth, c.secret_ciphertext, c.secret_key_id
 		    FROM vault_credentials c
 		    JOIN vaults v ON v.id = c.vault_id
@@ -71,24 +91,16 @@ func MCPCredentialFor(ctx context.Context, q Querier, cipher secrets.Cipher,
 	}
 	defer rows.Close()
 
-	type mcpRow struct {
-		id         string
-		vaultID    string
-		authType   string
-		ciphertext []byte
-		keyID      *string
-	}
 	byVault := map[string][]mcpRow{}
 	for rows.Next() {
 		var r mcpRow
-		var authDoc []byte
-		if err := rows.Scan(&r.id, &r.vaultID, &r.authType, &authDoc, &r.ciphertext, &r.keyID); err != nil {
+		if err := rows.Scan(&r.id, &r.vaultID, &r.authType, &r.authDoc, &r.ciphertext, &r.keyID); err != nil {
 			return "", err
 		}
 		var doc struct {
 			MCPServerURL string `json:"mcp_server_url"`
 		}
-		if err := json.Unmarshal(authDoc, &doc); err != nil {
+		if err := json.Unmarshal(r.authDoc, &doc); err != nil {
 			return "", fmt.Errorf("vaultresolve: credential %s auth document: %w: %w",
 				r.id, ErrCredentialUnusable, err)
 		}
@@ -127,9 +139,26 @@ func MCPCredentialFor(ctx context.Context, q Querier, cipher secrets.Cipher,
 			return "", unusable(fmt.Errorf(
 				"vaultresolve: a cipher is required to resolve credential %s", w.id))
 		}
-		token, err := sealedField(ctx, cipher, w.id, w.ciphertext, w.keyID, bearerField(w.authType))
+		sealed, err := openSealed(ctx, cipher, w.id, w.ciphertext, w.keyID)
 		if err != nil {
 			return "", unusable(err)
+		}
+		token := sealed[bearerField(w.authType)]
+		// Before the empty check below: a credential whose expiry has passed is
+		// refreshed here, and the token it hands back is the one that is checked
+		// and sent.
+		if w.authType == authMCPOAuth {
+			refreshed, err := refreshIfDue(ctx, db, cipher, w, sealed)
+			if err != nil {
+				return "", err
+			}
+			if refreshed != "" {
+				token = refreshed
+			}
+		}
+		if token == "" {
+			return "", unusable(fmt.Errorf("vaultresolve: credential %s has no %s",
+				w.id, bearerField(w.authType)))
 		}
 		// A token is about to become an Authorization header value, and net/http
 		// refuses to write one containing a control character — so a token sealed
@@ -159,19 +188,31 @@ func unusable(err error) error {
 // backend the deployment configured.
 func sealedField(ctx context.Context, cipher secrets.Cipher, id string,
 	ciphertext []byte, keyID *string, field string) (string, error) {
-	plain, err := cipher.Decrypt(ctx, ciphertext, deref(keyID))
+	sealed, err := openSealed(ctx, cipher, id, ciphertext, keyID)
 	if err != nil {
-		return "", fmt.Errorf("vaultresolve: cannot decrypt credential %s", id)
-	}
-	var sealed map[string]string
-	if err := json.Unmarshal(plain, &sealed); err != nil {
-		return "", fmt.Errorf("vaultresolve: malformed sealed secret for credential %s", id)
+		return "", err
 	}
 	v := sealed[field]
 	if v == "" {
 		return "", fmt.Errorf("vaultresolve: credential %s has no %s", id, field)
 	}
 	return v, nil
+}
+
+// openSealed decrypts a credential's sealed document. Its two errors name the
+// credential and the failure and nothing else — see [sealedField], which is this
+// plus one field read, and which is why the guarantee lives here.
+func openSealed(ctx context.Context, cipher secrets.Cipher, id string,
+	ciphertext []byte, keyID *string) (map[string]string, error) {
+	plain, err := cipher.Decrypt(ctx, ciphertext, deref(keyID))
+	if err != nil {
+		return nil, fmt.Errorf("vaultresolve: cannot decrypt credential %s", id)
+	}
+	var sealed map[string]string
+	if err := json.Unmarshal(plain, &sealed); err != nil {
+		return nil, fmt.Errorf("vaultresolve: malformed sealed secret for credential %s", id)
+	}
+	return sealed, nil
 }
 
 // sendableAsHeader admits visible ASCII, space and tab, which is net/http's
@@ -195,7 +236,7 @@ func sendableAsHeader(v string) bool {
 // bearerField names the sealed field each MCP credential type carries its bearer
 // token in. The query admits exactly these two types, so there is no third arm.
 func bearerField(authType string) string {
-	if authType == "static_bearer" {
+	if authType == authStaticBearer {
 		return "token"
 	}
 	return "access_token"

@@ -615,6 +615,30 @@ separates it from a failure of the lookup: the first is the operator's to fix an
 the second is worth a retry and faults the work item. The readings this settles beyond the
 reference's sentence are in docs/DIVERGENCES.md.
 
+`mcprefresh.go` (plan 29 slice 5b) is the one write this package performs. An `mcp_oauth`
+credential whose `expires_at` is past, or within `refreshLeeway` of it, runs the refresh-token
+grant (`internal/oauthrefresh`) before its token is handed back, and the rotation is sealed onto
+the row under a compare-and-set on the ciphertext this resolution read — the same best-effort
+persist the validate endpoint performs, for the same reason: the exchange spent seconds on network
+I/O. The dial uses the token it was issued whether or not the write lands. A grant the issuer
+refuses is `ErrCredentialUnusable`; an issuer that is unreachable, rate-limiting, or 5xx-ing is
+not, so the item retries. The token endpoint is credential-supplied, so it is dialled through the
+address guard (`internal/dialguard`) and never redirected — following one would replay the refresh
+token to a target the per-hop guard never approved as a destination.
+
+### internal/oauthrefresh
+
+The RFC 6749 refresh-token grant, spelled once for its two performers: the control plane's
+`mcp_oauth_validate` probe (`internal/api/vaultvalidate.go`) and the executor's dial-time
+resolution (`internal/vaultresolve/mcprefresh.go`). It builds the request and parses the grant and
+stops there — the HTTP client, the response capture and the meaning of a failure genuinely differ
+between the two, while the wire must not: which fields a grant carries, which of the three
+`token_endpoint_auth` arms puts the client secret where, and that the `client_secret_basic` arm
+form-urlencodes both halves before base64 (RFC 6749 §2.3.1). `BasicNeedle` hands back that base64
+composite, which is not any single secret value and which a caller that scrubs captured text has
+to register on its own. An arm this platform does not recognize is treated as a public client:
+sending the secret to an unknown arm is worse than not sending it.
+
 ### internal/identity
 
 The platform's human-authentication boundary (docs/plan/31_console-sso-rbac.md slices 1–2) — a
