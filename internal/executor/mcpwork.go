@@ -42,8 +42,8 @@ import (
 // its presence. No row means the server has never been reached, a `failed` row
 // means an attempt that did not work and is re-attempted on the next work cycle
 // (the reference retries "on the next session.status_idle to
-// session.status_running transition"), and a `ready` row is a listing the brain can offer. Nothing here
-// disables a server for the rest of a session: the sources document no such
+// session.status_running transition"), and a `ready` row is a listing the brain
+// can offer. Nothing here disables a server for the rest of a session: the sources document no such
 // state, and inventing one would outlive the outage that caused it.
 //
 // Unlike the web tools, the session's networking policy *does* constrain these
@@ -871,8 +871,10 @@ func mcpEgressAllowed(cfg domain.EnvironmentConfig, host string) bool {
 // a pass ends, and a session archived in between must not have rows written for
 // it or a turn chained on its behalf. Every other executor settlement gets this
 // from events.AppendInTx, which refuses an archived session under this very
-// lock; discovery appends one only on the pass where a server starts failing, so on every other pass there is nothing for that refusal to act on and it asks directly. The item is completed
-// either way — the work is done and there is nothing to retry.
+// lock; discovery appends one only on the pass where a server starts failing, so
+// on every other pass there is nothing for that refusal to act on and it asks
+// directly. The item is completed either way — the work is done and there is
+// nothing to retry.
 func (e *Executor) settleMCP(ctx context.Context, item *queue.Item, rows []catalogRow) error {
 	tx, err := e.pool.Begin(ctx)
 	if err != nil {
