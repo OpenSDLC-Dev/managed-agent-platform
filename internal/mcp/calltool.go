@@ -157,6 +157,12 @@ func (c *Conn) CallTool(ctx context.Context, name string, arguments json.RawMess
 		Arguments: args,
 	})
 	if err != nil {
+		// The refusal is asked about first: a 401 is a working server declining
+		// to serve this credential, which is the operator's to fix, where
+		// ErrServerAnswered means the model's to stop asking for.
+		if c.auth.refused() {
+			return nil, c.auth.mark(fmt.Errorf("mcp: call tool %q: %w", name, err))
+		}
 		if answered(err) {
 			return nil, fmt.Errorf("mcp: call tool %q: %w: %w", name, ErrServerAnswered, err)
 		}

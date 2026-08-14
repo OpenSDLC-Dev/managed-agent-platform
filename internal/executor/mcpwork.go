@@ -118,7 +118,7 @@ func (e *Executor) processMCP(ctx context.Context, item *queue.Item) (err error)
 	// Keep the lease across the dials: a server that answers slowly would
 	// otherwise outlast a fixed TTL and lose the item mid-listing.
 	kctx, keeper := e.queue.KeepLease(ctx, item, e.cfg.LeaseTTL)
-	rows, runErr := e.discoverServers(kctx, sess.envConfig, pending)
+	rows, runErr := e.discoverServers(kctx, sess.envConfig, sess.vaultIDs, pending)
 	if kerr := keeper.Close(); kerr != nil {
 		return fmt.Errorf("lease keeper: %w", kerr)
 	}
@@ -206,7 +206,8 @@ func (e *Executor) undiscoveredServers(ctx context.Context, sid domain.ID, decla
 // dialling anything further, and the call already in flight when it expires
 // takes as long as the client's own cancellation does to unwind (see
 // mcp.DialTimeout on why that is seconds rather than immediate).
-func (e *Executor) discoverServers(ctx context.Context, cfg domain.EnvironmentConfig, servers []mcpServerRef) ([]catalogRow, error) {
+func (e *Executor) discoverServers(ctx context.Context, cfg domain.EnvironmentConfig,
+	vaultIDs []string, servers []mcpServerRef) ([]catalogRow, error) {
 	budget, cancel := context.WithTimeout(ctx, e.cfg.MCPPassTimeout)
 	defer cancel()
 
@@ -227,7 +228,7 @@ func (e *Executor) discoverServers(ctx context.Context, cfg domain.EnvironmentCo
 				notReached: true})
 			continue
 		}
-		rows = append(rows, e.discoverServer(budget, cfg, s))
+		rows = append(rows, e.discoverServer(budget, cfg, vaultIDs, s))
 		if ctx.Err() != nil {
 			return nil, fmt.Errorf("discover mcp server %q: %w", s.Name, ctx.Err())
 		}
@@ -245,7 +246,8 @@ func (e *Executor) discoverServers(ctx context.Context, cfg domain.EnvironmentCo
 // wraps is net/http's, which names the URL it dialled with only the password
 // masked — the username and query ride along. That is why storableReason
 // redacts by value here rather than trusting what arrives.
-func (e *Executor) discoverServer(ctx context.Context, cfg domain.EnvironmentConfig, s mcpServerRef) (row catalogRow) {
+func (e *Executor) discoverServer(ctx context.Context, cfg domain.EnvironmentConfig,
+	vaultIDs []string, s mcpServerRef) (row catalogRow) {
 	// The reason is made storable here, where it is produced, rather than at
 	// settlement. A server chooses this text and a JSON-RPC error message is
 	// bounded only by a whole connection's response budget, so deferring the cap
@@ -269,16 +271,22 @@ func (e *Executor) discoverServer(ctx context.Context, cfg domain.EnvironmentCon
 		return row
 	}
 
-	conn, err := mcp.Connect(ctx, mcp.Config{URL: s.URL, HTTPClient: e.mcpHTTP})
+	token, err := e.mcpBearer(ctx, vaultIDs, s.URL)
 	if err != nil {
 		row.reason = err.Error()
+		return row
+	}
+
+	conn, err := mcp.Connect(ctx, mcp.Config{URL: s.URL, HTTPClient: e.mcpHTTP, BearerToken: token})
+	if err != nil {
+		row.reason = mcpDialReason(err)
 		return row
 	}
 	defer func() { _ = conn.Close() }()
 
 	tools, err := conn.ListTools(ctx)
 	if err != nil {
-		row.reason = err.Error()
+		row.reason = mcpDialReason(err)
 		return row
 	}
 	row.status, row.reason, row.tools = "ready", "", storableTools(tools)

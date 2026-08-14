@@ -137,6 +137,10 @@ type Tool struct {
 // use and is not meant to be: one work item, one connection, one goroutine.
 type Conn struct {
 	session *sdk.ClientSession
+	// auth records whether this connection was ever answered 401 or 403, so a
+	// failure raised on it can be told from one that never got that far. Nil on
+	// a Conn built without the transport chain, which marks nothing.
+	auth *authWatch
 }
 
 // DefaultClient is the guarded HTTP client used when a Config supplies none.
@@ -339,6 +343,9 @@ func Connect(ctx context.Context, cfg Config) (*Conn, error) {
 	if cfg.BearerToken != "" {
 		httpClient = withBearer(httpClient, cfg.BearerToken, endpoint)
 	}
+	// Outermost, so it reads the status of every exchange on its way back out
+	// whatever the layers below did with the body.
+	httpClient, auth := withAuthWatch(httpClient)
 
 	client := sdk.NewClient(&sdk.Implementation{Name: clientName}, nil)
 	// The SDK closes the session it built on most failure paths but not on all
@@ -378,9 +385,10 @@ func Connect(ctx context.Context, cfg Config) (*Conn, error) {
 		// what an operator needs to know which server failed; net/http's own
 		// half of the message redacts its password and keeps the rest, which is
 		// why the executor redacts this string again by value before storing it.
-		return nil, fmt.Errorf("mcp: connect to %s://%s: %w", endpoint.Scheme, endpoint.Host, connErr)
+		return nil, auth.mark(
+			fmt.Errorf("mcp: connect to %s://%s: %w", endpoint.Scheme, endpoint.Host, connErr))
 	}
-	return &Conn{session: session}, nil
+	return &Conn{session: session, auth: auth}, nil
 }
 
 // capturingTransport keeps the Connection its inner transport produced so a
@@ -460,7 +468,7 @@ func (c *Conn) listTools(ctx context.Context, budget time.Duration) ([]Tool, err
 	for page := 0; page < maxToolPages; page++ {
 		res, err := c.listPage(ctx, cursor)
 		if err != nil {
-			return nil, fmt.Errorf("mcp: list tools: %w", err)
+			return nil, c.auth.mark(fmt.Errorf("mcp: list tools: %w", err))
 		}
 		for _, tool := range res.Tools {
 			// A nil element is what `"tools": [null]` decodes to. With go-sdk

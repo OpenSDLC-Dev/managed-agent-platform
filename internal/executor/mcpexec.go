@@ -105,7 +105,7 @@ func (e *Executor) unansweredMCPToolUses(ctx context.Context, sid domain.ID) ([]
 // same all-or-nothing the web driver and discovery use: the reclaim re-runs the
 // calls this pass had not answered.
 func (e *Executor) runMCPTools(ctx context.Context, cfg domain.EnvironmentConfig,
-	declared []mcpServerRef, ready map[string]string, spill *mcpSpiller,
+	vaultIDs []string, declared []mcpServerRef, ready map[string]string, spill *mcpSpiller,
 	uses []mcpToolUse) ([]events.NewEvent, error, error) {
 
 	endpoints := make(map[string]string, len(declared))
@@ -127,11 +127,11 @@ func (e *Executor) runMCPTools(ctx context.Context, cfg domain.EnvironmentConfig
 		if i > 0 && start.After(deadline) {
 			break
 		}
-		res, failure := mcpAnswer{}, ""
+		res, failure := mcpAnswer{}, mcpFailure{}
 		if endpoint, refusal := callEndpoint(endpoints, ready, u.server); refusal != "" {
 			res = mcpFailed("%s", refusal)
 		} else {
-			res, failure = e.runMCPTool(ctx, cfg, endpoint, u)
+			res, failure = e.runMCPTool(ctx, cfg, vaultIDs, endpoint, u)
 		}
 		// One label value for every MCP call, rather than the call's own name.
 		// The metric's tool name has until now been drawn from a fixed set of
@@ -161,8 +161,8 @@ func (e *Executor) runMCPTools(ctx context.Context, cfg domain.EnvironmentConfig
 			return out, nil, err
 		}
 		out = append(out, ev)
-		if failure != "" {
-			ev, err := mcpConnectionFailedEvent(u.server, failure)
+		if failure.message != "" {
+			ev, err := mcpFailureEvent(u.server, failure)
 			if err != nil {
 				return out, nil, err
 			}
@@ -194,7 +194,8 @@ func (e *Executor) answerMCPCalls(ctx context.Context, item *queue.Item, sess se
 	}
 	kctx, keeper := e.queue.KeepLease(ctx, item, e.cfg.LeaseTTL)
 	spill := &mcpSpiller{exec: e, sid: item.SessionID, sess: sess}
-	results, faultErr, runErr := e.runMCPTools(kctx, sess.envConfig, sess.mcpServers, ready, spill, calls)
+	results, faultErr, runErr := e.runMCPTools(
+		kctx, sess.envConfig, sess.vaultIDs, sess.mcpServers, ready, spill, calls)
 	if kerr := keeper.Close(); kerr != nil {
 		return fmt.Errorf("lease keeper: %w", kerr)
 	}
@@ -307,41 +308,63 @@ func callEndpoint(declared, ready map[string]string, server string) (string, str
 // failure from touching another's call — the same reason discovery dials each
 // server on its own.
 func (e *Executor) runMCPTool(ctx context.Context, cfg domain.EnvironmentConfig,
-	endpoint string, u mcpToolUse) (mcpAnswer, string) {
+	vaultIDs []string, endpoint string, u mcpToolUse) (mcpAnswer, mcpFailure) {
 
 	host, err := mcpEndpointHost(endpoint)
 	if err != nil {
-		return mcpFailed("MCP server %q has an unusable url.", u.server), ""
+		return mcpFailed("MCP server %q has an unusable url.", u.server), mcpFailure{}
 	}
 	if !mcpEgressAllowed(cfg, host) {
 		reason := egressRefusal(cfg, host)
 		return mcpFailed("MCP server %q could not be reached: %s", u.server, reason),
-			storableReason(reason, endpoint)
+			mcpFailure{message: storableReason(reason, endpoint)}
 	}
 
-	conn, err := mcp.Connect(ctx, mcp.Config{URL: endpoint, HTTPClient: e.mcpCallHTTP()})
+	token, err := e.mcpBearer(ctx, vaultIDs, endpoint)
 	if err != nil {
 		msg := storableReason(err.Error(), endpoint)
-		return mcpFailed("MCP server %q could not be reached: %s", u.server, msg), msg
+		return mcpFailed("MCP server %q could not be reached: %s", u.server, msg),
+			mcpFailure{message: msg, authentication: true}
+	}
+
+	conn, err := mcp.Connect(ctx, mcp.Config{
+		URL: endpoint, HTTPClient: e.mcpCallHTTP(), BearerToken: token})
+	if err != nil {
+		msg := storableReason(err.Error(), endpoint)
+		return mcpFailed("MCP server %q could not be reached: %s", u.server, msg),
+			mcpFailure{message: msg, authentication: errors.Is(err, mcp.ErrUnauthorized)}
 	}
 	defer conn.Close()
 
 	res, err := conn.CallTool(ctx, u.name, u.input)
 	if err != nil {
 		msg := storableReason(err.Error(), endpoint)
-		failure := msg
-		if errors.Is(err, mcp.ErrServerAnswered) {
+		failure := mcpFailure{message: msg}
+		switch {
+		case errors.Is(err, mcp.ErrUnauthorized):
+			// A credential the server refused, or one it required and this dial
+			// did not carry. Either way the operator has something to fix, and
+			// it is not the network.
+			//
+			// The two arms cannot both match today: mcp.Conn asks about the
+			// refusal first and does not mark a refused call as answered, which
+			// is where that precedence belongs — the client knows which of its
+			// own markings applies. The order here agrees with it rather than
+			// relying on it, and costs nothing; a refusal read as
+			// ErrServerAnswered would tell the operator nothing at all.
+			failure.authentication = true
+		case errors.Is(err, mcp.ErrServerAnswered):
 			// The server was reached and refused the call — an unknown tool, or
 			// a request for input this platform cannot supply. The model is told
 			// so it can stop calling that tool; the operator is not, because
 			// mcp_connection_failed_error is the wire's word for a connection
 			// that failed and there is no connection here to heal.
-			failure = ""
+			failure = mcpFailure{}
 		}
 		return mcpFailed("MCP tool %q on server %q could not be run: %s", u.name, u.server, msg), failure
 	}
 	blocks, lost := mcpResultBlocks(res.Content)
-	return mcpAnswer{blocks: blocks, isError: res.IsError, content: res.Content, lost: lost}, ""
+	return mcpAnswer{blocks: blocks, isError: res.IsError, content: res.Content, lost: lost}, mcpFailure{}
 }
 
 // mcpCallHTTP is the client tool calls go through: the executor's own when a
@@ -699,10 +722,29 @@ func mcpResultEvent(useID domain.ID, res mcpAnswer) (events.NewEvent, error) {
 	return events.NewEvent{Type: domain.EventAgentMCPToolResult, Payload: payload}, nil
 }
 
-// mcpConnectionFailedEvent reports a server the platform could not reach. The
-// message is already cut to scheme://host by the caller, for the reason a
-// catalog row's is: an mcp_servers entry is customer-supplied and may carry a
-// credential in its userinfo or its query.
+// mcpFailure is what one call's dial left for the operator: the message a
+// session.error carries, empty when there is nothing to heal, and which of the
+// wire's two failures it was.
+//
+// The distinction is the reference's, and it is about cause rather than
+// symptom: mcp_connection_failed_error is a server that "could not be reached
+// (network error, timeout, or non-authentication HTTP failure)", while
+// mcp_authentication_failed_error covers "the server rejected the credential
+// from the attached vault, required authentication when no matching credential
+// was configured, or an OAuth token refresh failed". The first two of those
+// three arrive as the same 401 or 403 whether a token was sent or not, so one
+// test answers both; the third is the credential this platform could not
+// resolve at all, which never reaches the server and is an authentication
+// failure all the same.
+type mcpFailure struct {
+	message        string
+	authentication bool
+}
+
+// mcpFailureEvent reports a server the platform could not reach, or one that
+// refused the session's credential. The message is already cut to scheme://host
+// by the caller, for the reason a catalog row's is: an mcp_servers entry is
+// customer-supplied and may carry a credential in its userinfo or its query.
 //
 // retry_status is a union variant — an object carrying a type, like every other
 // retry status this platform emits, not the bare string the field's name invites
@@ -717,12 +759,16 @@ func mcpResultEvent(useID domain.ID, res mcpAnswer) (events.NewEvent, error) {
 // its own terms: every turn re-attempts a failed server. Plan 29's own reading of
 // the union — terminal for a refusal — was measured against these three doc
 // comments and dropped (docs/DIVERGENCES.md).
-func mcpConnectionFailedEvent(server, message string) (events.NewEvent, error) {
+func mcpFailureEvent(server string, f mcpFailure) (events.NewEvent, error) {
+	errType := "mcp_connection_failed_error"
+	if f.authentication {
+		errType = "mcp_authentication_failed_error"
+	}
 	payload, err := json.Marshal(map[string]any{
 		"error": map[string]any{
-			"type":            "mcp_connection_failed_error",
+			"type":            errType,
 			"mcp_server_name": server,
-			"message":         message,
+			"message":         f.message,
 			"retry_status":    map[string]any{"type": "retrying"},
 		},
 	})
