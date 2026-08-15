@@ -4,6 +4,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -454,6 +455,55 @@ func TestFragmentTrailingSpacesPreserved(t *testing.T) {
 	got := readFile(t, clPath)
 	if !strings.Contains(got, "- An interior break  \n  and a final-line hard break  \n") {
 		t.Error("trailing spaces inside or at the end of the fragment were not preserved")
+	}
+}
+
+// The size cap is enforced, not merely documented: a body exactly at the cap
+// releases, one byte over is refused with a message naming the file, the size
+// and the cap. The cap counts bytes, so a body under it in runes but over it
+// in bytes is refused too — an entry is prose, and this project's prose is
+// full of em dashes.
+func TestFragmentSizeCap(t *testing.T) {
+	atCap := "- " + strings.Repeat("a", maxFragmentBytes-2)
+	clPath, dir := writeFixture(t, steadyChangelog, map[string]string{
+		"a.added.md": atCap + "\n",
+	})
+	if err := runAssemble(clPath, dir, "0.3.0", "2026-09-01"); err != nil {
+		t.Fatalf("a fragment exactly at the %d-byte cap must load: %v", maxFragmentBytes, err)
+	}
+	if got := readFile(t, clPath); !strings.Contains(got, atCap) {
+		t.Error("at-cap fragment not released")
+	}
+
+	for _, tc := range []struct{ name, body string }{
+		{"one byte over", "- " + strings.Repeat("a", maxFragmentBytes-1)},
+		{"under in runes, over in bytes", "- " + strings.Repeat("—", maxFragmentBytes/2)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			clPath, dir := writeFixture(t, steadyChangelog, map[string]string{
+				"a.added.md": tc.body + "\n",
+			})
+			err := runAssemble(clPath, dir, "0.3.0", "2026-09-01")
+			if err == nil {
+				t.Fatal("want error for an over-cap fragment")
+			}
+			for _, want := range []string{
+				"changelog.d/a.added.md",
+				strconv.Itoa(len(tc.body)) + " bytes",
+				strconv.Itoa(maxFragmentBytes) + "-byte cap",
+				"changelog.d/README.md",
+			} {
+				if !strings.Contains(err.Error(), want) {
+					t.Errorf("error %q does not mention %q", err, want)
+				}
+			}
+			if got := readFile(t, clPath); got != steadyChangelog {
+				t.Error("CHANGELOG modified on refused assemble")
+			}
+			if _, statErr := os.Stat(filepath.Join(dir, "a.added.md")); statErr != nil {
+				t.Error("fragment deleted on refused assemble")
+			}
+		})
 	}
 }
 

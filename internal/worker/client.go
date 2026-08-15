@@ -1,17 +1,3 @@
-// Package worker is the BYOC (bring-your-own-compute) consumer of the work
-// queue: the customer-hosted twin of internal/executor. Where the executor runs
-// inside the platform with direct database access, a worker runs in the
-// customer's own network and reaches the control plane only over the wire —
-// authenticating with its environment key, reading a session's suspended tool
-// calls through the session events API, running the built-in toolset in a local
-// sandbox, and posting the results back as user.tool_result events. Platform
-// executor and BYOC worker are the same pull protocol at two deployment points;
-// this is the self_hosted one.
-//
-// This package is the tool-exec driver only (slice 8, PR C2a): given a session
-// id, run its outstanding tools once. The lease loop that polls the work queue,
-// acknowledges, heartbeats, and drives this driver — plus the cmd/worker binary
-// that wires it to configuration — is a later increment.
 package worker
 
 import (

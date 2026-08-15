@@ -82,6 +82,18 @@ obligation on the operator. Those are never cut here. Restatement, duplication a
 
 ## Recording checklist
 
+- **Slice 2 refuted one of its own preconditions.** `internal/vaultresolve/mcprefresh.go` was listed
+  as holding its retryable-versus-unusable taxonomy only in prose. It does not: `mcp.go:13-22`
+  defines the split and the caller's differing response, `mcprefresh.go:119-123` gives the
+  refresh-specific version, and `exchange` carries per-arm rationale. Nothing was added, and slice 3
+  may cut ARCHITECTURE's vaultresolve paragraph without a precondition. A survey finding is a
+  hypothesis; the code is the answer.
+- **Native Windows is not a supported place to run the gate.**
+  `tools/changelog.TestAssembleStagingFailureLeavesEverythingUntouched` fails there because
+  `os.Chmod(dir, 0o555)` does not deny a rename on Windows and `os.Geteuid()` returns -1, so its
+  root-skip never fires. Confirmed identical at `main` with main's own sources, so it is the
+  environment, not a regression. Run the gate in WSL or read CI.
+
 - **Config-doc gap for slice 4.** The rule that decides how a role-claim *name* is read — a
   URI-shaped name is one flat key, any other dotted name is a path, fixed at configuration time
   so a token cannot choose the reading — is stated only in `internal/identity/claims.go:10-22`.

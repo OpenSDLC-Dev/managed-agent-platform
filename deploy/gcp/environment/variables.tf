@@ -103,7 +103,7 @@ variable "platform_machine_type" {
 
 variable "sandbox_node_count" {
   type        = number
-  description = "Nodes in the dedicated sandbox pool. The sizing guidance built on the mode-1 run's measurements is in docs/deploy-gcp.md; while #64 leaves pods unreaped, every leaked pod holds its CPU and ephemeral-storage reservation."
+  description = "Nodes in the dedicated sandbox pool. The sizing guidance built on the mode-1 run's measurements is in docs/deploy-gcp.md, which also says what frees a pod: the executor reaps a cloud session's sandbox on delete, archive or terminate, and on idle once EXECUTOR_SANDBOX_IDLE_TTL passes, so size for concurrent sessions rather than cumulative ones."
   default     = 2
 }
 
