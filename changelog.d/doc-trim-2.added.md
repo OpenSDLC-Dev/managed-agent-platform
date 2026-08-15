@@ -8,5 +8,5 @@
   offline test fails if any doc enumerates a wire ID-prefix list that disagrees with
   `internal/domain/id.go`, and another fails if a `RUN_LIVE_*` consent variable the tree reads has
   no row in README's tier table. Both found real drift on their first run and this release carries
-  the corrections: the documented prefix lists were missing `outc_` and `skillver_`, and the tier
-  table omitted `RUN_LIVE_KMS_TESTS`.
+  the corrections: `outc_` was missing from both prefix lists, `skillver_` from CLAUDE.md's and
+  `vcrd_` from ARCHITECTURE's, and the tier table omitted `RUN_LIVE_KMS_TESTS`.

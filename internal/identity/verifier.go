@@ -371,7 +371,9 @@ func (v *Verifier) Verify(ctx context.Context, token string) (Identity, error) {
 		// an email must make its own verification decision — on an IdP with
 		// self-service profile attributes, Casdoor included, the user chooses
 		// this string. upsertPrincipal (internal/api) is written to that rule:
-		// it conflicts on (issuer, subject) and merely refreshes email.
+		// it conflicts on (issuer, subject) — never on email — and treats these
+		// two as the provider's to restate, refreshing them alongside
+		// last_seen_at on every request rather than writing them once.
 		Email:       truncate(stringClaim(all, v.emailClaim), maxProfileBytes),
 		DisplayName: truncate(stringClaim(all, v.nameClaim), maxProfileBytes),
 		// RoleNone is not an error: the principal is authenticated with no
