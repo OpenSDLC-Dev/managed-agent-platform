@@ -87,6 +87,39 @@ func (h *harness) refSkills(t *testing.T, refs ...[2]string) {
 	}
 }
 
+// TestSkillResolutionReportsPerRoundTrip: resolving one reference is not one
+// round trip, and the per-reference report above it does not cover what happens
+// inside. An alias is resolved by *walking every version* the control plane has
+// — the pager fetching as it goes — and a version GET follows that. Reporting
+// once around the whole resolution would put an unbounded number of wire calls
+// inside one silent interval, which is precisely the shape a stall budget cannot
+// tell apart from a wedge (#383).
+//
+// Counted rather than timed, and driven at resolveSkill directly: the
+// materialization test above exercises this path but asserts nothing about it,
+// so without this test the reports inside could be deleted with every suite
+// still green.
+func TestSkillResolutionReportsPerRoundTrip(t *testing.T) {
+	h := newHarness(t, &fakeSandbox{})
+	for _, v := range []string{"100", "200", "300"} {
+		h.seedSkill(t, "walk-me", v, "walk-notes", map[string]string{"SKILL.md": "ok"})
+	}
+
+	var reports int
+	r, err := resolveSkill(context.Background(), h.client,
+		skillRef{SkillID: "walk-me", Version: "latest"}, func() { reports++ })
+	if err != nil {
+		t.Fatalf("resolveSkill: %v", err)
+	}
+	if r.Version != "300" {
+		t.Errorf("resolved version = %q, want the newest of the three", r.Version)
+	}
+	if want := 4; reports != want {
+		t.Errorf("progress reports = %d, want %d (one per version walked, plus the version GET behind them)",
+			reports, want)
+	}
+}
+
 func TestSetupSkillsOverTheWire(t *testing.T) {
 	sb := &fakeSandbox{}
 	h := newHarness(t, sb)

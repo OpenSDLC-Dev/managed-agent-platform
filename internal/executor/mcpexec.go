@@ -317,6 +317,18 @@ func (e *Executor) answerMCPCalls(ctx context.Context, item *queue.Item, sess se
 	}
 	// Committed, and still a stall: the item is settled but the run was cut
 	// short, and the operator needs to know which of the two happened.
+	//
+	// Almost always the settlement above requeued, because a stall latched during
+	// a *call* leaves that call unanswered — the ctx check after it returns runs
+	// before the result is appended. One window escapes that: the answer's spill
+	// to the sandbox sits between the two, so a tick landing during the last
+	// call's spill latches a stall with every call answered, and the Then
+	// completes the item. The error below is then a report and not a state — the
+	// item is finished, nothing is requeued or billed twice — and the residue is
+	// one "work item faulted" line about a pass that in fact finished. Accepted:
+	// the alternative is a second flag threaded out of the Then to suppress a log
+	// line, and a stall that reached that far is worth an operator's attention
+	// either way (#383).
 	if stalled {
 		return fmt.Errorf("lease keeper: %w", faultErr)
 	}

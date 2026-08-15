@@ -528,7 +528,7 @@ func (w *Worker) heartbeat(ctx context.Context, cancel context.CancelFunc, workI
 		if prog.stalledFor(w.cfg.StallTimeout) {
 			// The run has said nothing for its whole budget: cancel it and beat no
 			// more, so the lease lapses and the control plane re-offers the item.
-			slog.Warn("worker: run reported no progress within its stall budget, releasing the item",
+			slog.Warn("worker: run reported no progress within its stall budget, leaving its lease to lapse",
 				"work", workID, "budget", w.cfg.StallTimeout)
 			cancel()
 			return hbExitStalled
