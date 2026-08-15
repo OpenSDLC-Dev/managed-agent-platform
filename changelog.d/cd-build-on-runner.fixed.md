@@ -6,6 +6,6 @@
   as the *caller* rather than as the build's `--service-account`, so every
   manual run that worked was made by a human with Owner and none exercised the
   path CI takes. Building on the runner needs one permission the deploy identity
-  already holds, `artifactregistry.writer`, and no bucket, staging upload or
+  already holds, `roles/artifactregistry.writer`, and no bucket, staging upload or
   Cloud Build API. `deploy/gcp/cloudbuild.yaml` is unchanged and remains the
   manual path's build definition.

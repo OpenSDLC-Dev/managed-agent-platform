@@ -1,4 +1,5 @@
-- **Continuous delivery to the GCP staging environment** (#347). A new
+- **Continuous delivery to the GCP staging environment** (#347; the ref assertion below was
+  corrected in #351). A new
   `.github/workflows/deploy.yml` builds, pushes, installs and smoke-tests on every push to
   `main` and on `workflow_dispatch`, using the new `deploy/gcp/staging-values.yaml`. The
   deployment is **mode 2** (Cloud SQL, Cloud Storage, Cloud KMS) behind the pre-created Secret

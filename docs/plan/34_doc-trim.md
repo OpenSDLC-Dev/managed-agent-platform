@@ -51,7 +51,9 @@ obligation on the operator. Those are never cut here. Restatement, duplication a
    Markdown only.
 2. **Comments worth pointing at** — the seven package-comment repairs and additions, the
    drift-pinning test, and the matching `variables.tf` description. Touches `.go`; comments only,
-   no logic, no new statements.
+   no logic, no new statements — with one exception it also carries: a byte-length check in
+   `loadFragments`, so the 1,500-byte cap slice 1 introduced is enforced rather than advisory.
+   Without it the cap regresses silently, which is exactly how `changelog.d/` reached 196 KB.
 3. **`docs/ARCHITECTURE.md`** — delete the 155 per-file table rows and 27 package preambles,
    package by package, each replaced by a stub pointing at `go doc`. Cross-package claims found
    inside a row move to the execution-flow section rather than being dropped.
