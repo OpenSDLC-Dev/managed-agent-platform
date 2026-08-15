@@ -4,6 +4,29 @@
 // and customer BYOC are the same pull protocol at two deployment points; this
 // is the platform-managed one, embedding the Docker sandbox provider.
 //
+// tool_exec is the loop this package is named for but not the whole of it. The
+// same process claims three more kinds, each with its own driver file, and two
+// of them run in the executor's own process with no sandbox at all: web_exec
+// (webwork.go — web_fetch and web_search, for BOTH environment kinds, since the
+// reference's worker implements only the six sandbox tools) and mcp_exec
+// (mcpwork.go for the discovery that fills mcp_catalogs, mcpexec.go for the
+// call itself, mcpspill.go for an answer too large to inline, mcpcred.go for
+// the credential — likewise both kinds, since only this platform's driver
+// answers an MCP call). The fourth, outputs_harvest (harvest.go), is a cloud
+// session's alone: it snapshots the deliverables out of the sandbox to open an
+// outcome-grading cycle, and a self_hosted sandbox has no file lane to read.
+// What goes INTO a sandbox lives beside them — skills.go, files.go, repos.go
+// and repoclone.go (go-git, so no git binary is a runtime dependency).
+//
+// This package also owns the sandbox's lifecycle, which no work item triggers.
+// reaper.go is the single owner of sandbox destruction on four tiers (a session
+// deleted, archived or terminated, plus an idle tier past a configured TTL),
+// and checkpoint.go captures a session's durable state to object storage before
+// the idle tier destroys it, restoring it into a fresh sandbox on the next
+// provision. Both are here because this is the only process holding the sandbox
+// provider, and both are per-endpoint rather than coordinated: an executor sees
+// only its own daemon or namespace, and reaping is idempotent.
+//
 // The loop mirrors the brain's: Claim the oldest tool_exec item (reclaiming an
 // expired lease), do the work, hand the item back. The brain, when a turn stops
 // for a built-in tool, commits the agent.tool_use intents and enqueues one

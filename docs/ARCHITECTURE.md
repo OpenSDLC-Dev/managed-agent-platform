@@ -88,8 +88,9 @@ platform's own executor, just deployed elsewhere.
    work API (`poll`/`ack`/`heartbeat`/`stop`, lease expiry, dead-worker reclaim) — the
    same pull semantics at two deployment points. Either materializes the agent's
    skills into the freshly provisioned sandbox (`{workdir}/skills/<name>/`, versions
-   resolved at use time, per-skill failure tolerated), runs the tool, and posts the
-   result event (`agent.tool_result` platform-managed, `user.tool_result` self-hosted).
+   resolved at use time, per-skill failure tolerated) along with the session's mounted
+   resources (below), runs the tool, and posts the result event (`agent.tool_result`
+   platform-managed, `user.tool_result` self-hosted).
 5. The commit that appends the result also enqueues the next `model_turn` — only once
    every tool use in the turn is answered. A brain claims it (brains wake by polling the
    queue; Postgres LISTEN/NOTIFY serves the SSE fan-out, not the brain), replays, and
@@ -128,6 +129,30 @@ a working agent in one request.
 **Crash recovery is replay.** Sessions are never bound to a brain: any brain can pick up
 any session's next turn from the log. A sandbox container dying surfaces as one
 tool-call error; a worker dying strands its lease, which `poll` reclaims after expiry.
+
+**Session resources** (plans 08 and 25). A session mounts things besides its agent's
+skills: uploaded files, and `github_repository` entries cloned in-process by the executor
+(go-git, so no `git` binary is in any image). Each is a `sesrsc_` row under
+`/v1/sessions/{id}/resources` with the mount path it lands on; a private repository's
+token is sealed through the same credential cipher the vaults use
+(`session_resource_credentials`). Both halves work the same way at both ends — the
+executor materializes them into the sandbox beside the skills, and the brain renders a
+"Mounted files" / "Mounted repositories" block into the request so the model knows what
+is there. A resource that has gone missing costs its own mount and a log line, never the
+turn.
+
+**Sandboxes have a lifecycle** (plan 24). Provision is idempotent per session — it
+returns, heals, or re-creates — and the **reaper in the executor is the single owner of
+destruction**, on four tiers: a session `deleted`, `archived` or `terminated`, plus an
+`idle` tier that reclaims a session idle past `EXECUTOR_SANDBOX_IDLE_TTL` with no work
+owed. It needs no cross-replica coordination, because each executor sees only its own
+daemon or namespace and reaping is idempotent; teardown is one interval behind its
+trigger, which no wire surface can observe. Before the idle tier destroys a sandbox the
+checkpoint engine captures the session's durable state — workdir, the persistent shell's
+cwd/env, the published deliverables — as one gzipped tar in object storage, and the next
+provision restores it into a fresh sandbox, so an idle-reaped session resumes where it
+left off. Both halves run under the session advisory lock. Without an object store
+configured the idle tier is disarmed rather than lossy.
 
 ## Wire-compatibility model
 
@@ -174,12 +199,15 @@ leak to a configured third-party endpoint.
 
 ## Package reference
 
-A map, not a description — **the code is the reference.** Every package below but
-one carries more comment than this section ever spent on it, most by three to ten
-times: `internal/api` 192 KB of comment against the 50 KB that was here,
+A map, not a description — **the code is the reference.** Nearly every package
+below carries more comment than this section ever spent on it, most by three to
+ten times: `internal/api` 192 KB of comment against the 50 KB that was here,
 `internal/executor` 169 KB against 43 KB, `internal/identity` 45 KB against 5 KB.
-(The exception is `internal/version`, which is a single variable.) Those comments
-sit beside the code they describe, so they cannot drift from it; what stood here
+Two qualify that. `internal/version` is one variable and falls just under. And
+`internal/store` only clears it by counting the SQL comments under
+`migrations/`, which is right — the schema *is* those files — but they are the
+one substantial body of comment `go doc` will not print for you. Everything else
+sits beside the code it describes, so it cannot drift from it; what stood here
 was a second, staler copy that did.
 
 Read a package with `go doc ./internal/X`. That prints the package doc and the
@@ -207,7 +235,7 @@ Layout order is by layer, as the repo is.
 | `queue/` | The work queue over Postgres (`FOR UPDATE SKIP LOCKED`). Five kinds share `work_items`, and two ways take one: `Claim` is the in-process lane, `Poll` the wire lane that serves exactly a `tool_exec` item on a `self_hosted` environment. That split is what makes the executor and the BYOC worker one protocol at two deployment points. |
 | `executor/` | The platform-managed half of that protocol: pull work, run the built-in toolset in the session's sandbox, append the results the brain resumes on. Also the web and MCP work, which run in its own process for **both** environment kinds, and the outputs harvest, which only a `cloud` session enqueues — a `self_hosted` sandbox has no file lane to snapshot, so its grading stays transcript-only (`brain/grader.go`). |
 | `worker/` | The customer-hosted twin. It holds no database handle and reaches everything over the wire with its environment key — which is what makes "customer compute, zero inbound network access" the same code path as the executor's. |
-| `toolset/` | The built-in `agent_toolset_20260401` — bash, read, write, edit, glob, grep — and nothing about what a call means for the session. |
+| `toolset/` | What the model is offered and how one call runs: the built-in `agent_toolset_20260401` (bash, read, write, edit, glob, grep), the `web_fetch`/`web_search` definitions and the `IsWebTool` predicate that routes them, and the `mcp_toolset` arm — validation, and resolving an entry's `default_config`/`configs[]` against a server's listing. Nothing here knows what a call means for the session; that is the executor's. |
 | `sandbox/` | The "hands" boundary: a disposable per-session container, `docker/` and `k8s/` behind one interface with one contract suite (`sandboxtest/`), plus `shell/`, the persistent per-session bash built on the stateless primitives. |
 | `webtool/` | The `web_fetch` / `web_search` seam (`tavily/`, `jina/`). These run in the executor's process on both deployment modes — never in the sandbox, never on the worker, never through the egress gate. |
 | `mcp/` | The MCP client: a thin wrapper over the official go-sdk, whose types never reach the domain layer. Connections are per-work-item, so a crashed executor loses nothing a fresh one cannot rebuild. |
@@ -220,10 +248,10 @@ Layout order is by layer, as the repo is.
 | `gate/` | The per-session forward proxy the sandbox reaches through `HTTP_PROXY`: the enforcement point where the networking policy admits a host and substitution rewrites placeholders on plain HTTP. HTTPS rides through as an opaque CONNECT tunnel. |
 | `gaterun/` | That gate's runtime — firewall, privilege drop, the config fetch-and-swap loop. The OS-touching adapters live in `cmd/gate` behind seams declared here, so everything with logic stays testable off a container. |
 | `gateconfig/` · `gatetoken/` | The internal gate-config endpoint's client and shared wire contract, and the per-session `gtk_` tokens that authenticate to it. Off the public wire, and registered as a divergence. |
-| `vaultresolve/` | Read-time credential resolution: a session's vault ids become the sandbox's placeholder bindings and the gate's decrypted secrets, under one selection rule so the two halves can never disagree. Current rows every time, so rotation needs no session restart. |
+| `vaultresolve/` | Credential resolution at read time: a session's vault ids become the sandbox's placeholder bindings and the gate's decrypted secrets, under one selection rule so the two halves can never disagree, plus a third lane resolving an MCP endpoint's bearer by URL. Current rows every time, so rotation needs no session restart. It also performs the **one write** in this area — the OAuth refresh grant reseals the rotated token onto the credential row under a compare-and-set. |
 | `secrets/` | The credential-cipher seam — `openbao/` in production, `gcpkms/` for GCP, `local/` (AES-256-GCM, one configured master key) for tests **and bao-less minimal deployments** — with the ciphertext persisted by the caller, never here. |
-| `dialguard/` | The SSRF floor under the dials whose URL a **customer** supplied — an agent's `mcp_servers` entry, a vault credential's MCP server or token endpoint — and not a general egress check: a configured provider or web backend dials with its own ordinary client. The check runs on the resolved IP at connect time, so DNS rebinding cannot slip past a name that resolved innocently. RFC 1918 is deliberately allowed — this platform runs in the operator's own network. |
-| `identity/` | The human-authentication boundary: verify the credential a human presents, reduce it to a principal with one of three roles. Machine credentials never come here. `identitytest/` is its fake OpenID Provider. |
+| `dialguard/` | The SSRF floor under the dials whose URL a **customer** supplied — an agent's `mcp_servers` entry, a vault credential's MCP server or token endpoint. **Not a universal egress check**, and reading it as one misplaces three neighbours: a configured provider or web backend dials with its own ordinary client, the `github_repository` clone's host is pinned to the literal `github.com` by the create-time grammar rather than by an address check, and the per-session gate admits hosts by the environment's network policy. The check runs on the resolved IP at connect time, so DNS rebinding cannot slip past a name that resolved innocently. RFC 1918 is deliberately allowed — this platform runs in the operator's own network. |
+| `identity/` | The human-authentication boundary: verify the credential a human presents and reduce it to a principal holding one of three roles — or `RoleNone`, the fourth value and a live denial, which is what an authenticated human whose claims mapped to nothing receives and what no route minimum accepts. Machine credentials never come here. `identitytest/` is its fake OpenID Provider. |
 | `oauthrefresh/` | The RFC 6749 refresh grant, spelled once for the two places that perform it. |
 
 ### Storage and shared infrastructure
@@ -235,6 +263,7 @@ Layout order is by layer, as the repo is.
 | `skills/` | Skill-upload validation and canonical-zip normalization, funnelled through one place so the rules cannot drift between entry points. |
 | `telemetry/` | OTel tracing and metrics init, and W3C trace-context propagation. The `span.*` domain events come from the spans started here, so the two views never drift. |
 | `mimetab/` | The pinned extension → MIME table both writers of the files registry consult, so the serving host never decides a wire-visible value. |
+| `sandbox/backend/` · `blob/backend/` · `secrets/backend/` | Where a deployment's backend is *chosen*, one selector per seam, so every binary constructs it from the same config point. Each is a sibling rather than part of its seam because the seam package holds the interface **and** the sentinel errors backends wrap, so it must not import them. |
 | `version/` | The build-time version stamp. A bare variable on purpose: there is no version endpoint, which would be net-new wire surface. |
 
 ### Test support, and `cmd/`
@@ -243,11 +272,15 @@ Test-support packages are excluded from the coverage denominator and production
 code must never import them: `pgtest/`, `dockertest/`, `modeltest/`, and the
 per-seam pairs — `sandbox/sandboxtest/`, `blob/blobtest/`, `blob/gcs/gcstest/`,
 `provider/providertest/`, `secrets/secretstest/`, `secrets/gcpkms/gcpkmstest/`,
-`webtool/webtooltest/`, `identity/identitytest/`, `mcp/mcptest/`. Two rules they
-share: a missing Docker daemon is a hard failure rather than a skip, because a
-skipped contract test hollows out the coverage gate silently; and consent to
-spend money is always an environment variable, never the presence of a
-configured `.env`.
+`webtool/webtooltest/`, `identity/identitytest/`, `mcp/mcptest/`. Two rules run
+through them, each over its own half of the list. The ones that start a
+container — `pgtest`, `dockertest`, `sandboxtest`, `blobtest`, `gcstest`,
+`secretstest` — treat a missing Docker daemon as a hard failure rather than a
+skip, because a skipped contract test hollows out the coverage gate silently;
+the rest serve an in-process fake (an httptest server, a fake gRPC endpoint, a
+fake OpenID provider) and need no daemon. And the ones gating a paid tier take
+consent from an environment variable, never from the presence of a configured
+`.env`; once given, missing configuration fails rather than skips.
 
 The four server binaries under `cmd/` — `controlplane`, `brain`, `executor`,
 `worker` — are thin glue: they map the environment to a config and call into the

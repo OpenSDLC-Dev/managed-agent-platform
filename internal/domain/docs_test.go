@@ -41,10 +41,12 @@ var prefixToken = regexp.MustCompile("`([a-z]+)_`")
 // ARCHITECTURE.md's own entry when plan 34 slice 3 replaced its per-file tables,
 // the id.go row among them, with a map. CLAUDE.md is the enumeration now.
 //
-// One document is enough to catch the drift, and one is also the floor: with the
-// list empty this test would pass without reading anything, so it refuses to run
-// on an empty list rather than going quietly vacuous the next time a document is
-// trimmed.
+// One document is enough to catch the drift. The list below carries a tripwire
+// for the case where it stops being one: an empty list makes the loop a no-op
+// and the test a pass, so it fatals instead. Nothing at runtime can reach that
+// branch — the list is a literal — and it is not trying to; it is a note to
+// whoever deletes the last entry, at the moment they do it, that removing an
+// entry and re-anchoring it are different acts.
 //
 // The comparison runs in both directions. An omission is the drift that has
 // already happened; a prefix the document adds matters just as much, because
