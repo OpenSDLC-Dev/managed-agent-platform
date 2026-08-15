@@ -4,11 +4,19 @@ What is being worked on right now, and how far along it is — nothing else. **S
 
 ## Active work
 
-**None.** [Plan 33](./docs/plan/33_bounding-a-wedged-work-item.md) (#383) archived 2026-08-15 —
-a work item is bounded by its own silence in both halves of the pull protocol, so a wedged call
-is cancelled and its item reclaimed rather than held forever; its slices 2 and 3 are deferred to
-#395 and #396. [Plan 29](./docs/plan/29_mcp-toolset.md) (#45) archived the same day — an agent
-with an `mcp_toolset` calls a real MCP server's tools, with discovery, gating, credentials
-and failure semantics. Both delivery records are in [docs/HISTORY.md](./docs/HISTORY.md).
+[Plan 34](./docs/plan/34_doc-trim.md) (#413) — trimming the documentation to what code cannot say.
+Tracked markdown was 2,665,735 bytes at plan start against 2,364,778 bytes of non-test Go;
+the target is ~719 KB, cut from restatement and staleness only.
 
-The backlog is GitHub issues; nothing is in flight.
+## Tasks
+
+- [x] **Slice 1 — fragments and facts.** The `changelog.d/` size convention (1,500-byte cap,
+      60–120 words the aim) and the recut of every fragment over the cap; the release blocker in
+      `cd-build-on-runner.fixed.md`, which `loadFragments` rejects for want of a `- ` prefix;
+      the sandbox-pool sizing correction in `docs/deploy-gcp.md`, which told operators nothing
+      reaps a pod although `internal/executor/executor.go:311` runs `reapLoop`.
+- [ ] Slice 2 — the seven package-comment repairs and the drift-pinning test (touches `.go`).
+- [ ] Slice 3 — `docs/ARCHITECTURE.md`: 155 per-file rows and 27 preambles to `go doc` stubs.
+- [ ] Slice 4 — deployment docs, `self-hosted-security.md`, and the steering layer.
+- [ ] Slice 5 — `DIVERGENCES.md` reshaped; the 32 archived plans compressed to decisions.
+- [ ] Slice 6 — `HISTORY.md`, `docs/history/`, `docs/changelog/`.

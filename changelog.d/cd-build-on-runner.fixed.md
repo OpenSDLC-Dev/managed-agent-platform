@@ -1,13 +1,11 @@
-The delivery pipeline builds its images on the runner instead of submitting
-them to Cloud Build. Its first real run failed at the build step in under a
-second — `The user is forbidden from accessing the bucket
-[…_cloudbuild]` — and kept failing with both documented remedies applied,
-`roles/storage.admin` on that bucket and
-`roles/serviceusage.serviceUsageConsumer` on the project. The trap underneath
-it is that `gcloud builds submit` stages the source as the **caller**, not as
-the build's `--service-account`, so every manual run that worked was called by
-a human with Owner and none of them exercised the path CI takes. Building on
-the runner needs one permission the job already holds,
-`artifactregistry.writer`, and no bucket, no staging upload and no Cloud Build
-API. `deploy/gcp/cloudbuild.yaml` is unchanged and remains the manual path's
-build definition.
+- **The delivery pipeline builds its images on the runner** (#349). The deploy
+  workflow now runs `docker build` and `docker push` itself instead of
+  submitting to Cloud Build, which failed at the build step with the caller
+  forbidden from the project's `_cloudbuild` staging bucket and stayed red with
+  both documented IAM remedies applied. `gcloud builds submit` stages the source
+  as the *caller* rather than as the build's `--service-account`, so every
+  manual run that worked was made by a human with Owner and none exercised the
+  path CI takes. Building on the runner needs one permission the deploy identity
+  already holds, `roles/artifactregistry.writer`, and no bucket, staging upload or
+  Cloud Build API. `deploy/gcp/cloudbuild.yaml` is unchanged and remains the
+  manual path's build definition.

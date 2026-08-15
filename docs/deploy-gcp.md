@@ -413,12 +413,19 @@ Measured on two `e2-standard-4` nodes with the shipped defaults:
   ephemeral storage; trivial sessions used 0.04–0.09 MiB. At those rates the 100 GiB boot
   disk is dominated by the image, not by workspaces.
 
-The number that matters is 68, and it matters more than it looks because
-[#64](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/64) means nothing in
-production calls `Sandbox.Destroy`: every session keeps its pod, and its 100m CPU request,
-indefinitely. So the pool degrades at roughly 68 **sessions**, not 68 concurrent ones. Size
-for the number of sessions you expect between cluster rebuilds, not the number you expect
-at once, until #64 lands.
+The number that matters is 68, and how long each pod holds its 100m CPU request is the
+reaper's answer (`internal/executor/reaper.go`, plan 24). A **cloud** session's sandbox is
+destroyed once the session is deleted, archived or terminated, and — where the idle tier is
+armed — after `EXECUTOR_SANDBOX_IDLE_TTL` of inactivity (default 24h; `0` disables the
+tier). Size for **concurrent** sessions plus whatever has not yet aged out.
+
+Two configurations weaken that, and both are worth checking before sizing. The idle tier
+needs an object store to hold the checkpoint it takes before destroying a sandbox, so an
+executor with no blob backend runs with that tier off — it logs the disablement once at
+startup — and an idle session then holds its pod until it reaches a terminal state; the
+other three tiers still reap. Only a `self_hosted` session is never reaped at all: its
+sandbox belongs to the customer's BYOC worker, which the platform does not destroy in any
+tier.
 
 ## Required node settings
 
