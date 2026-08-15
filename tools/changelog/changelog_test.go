@@ -507,6 +507,34 @@ func TestFragmentSizeCap(t *testing.T) {
 	}
 }
 
+// TestTheShippingFragmentsLoad runs the loader against this repository's own
+// changelog.d/ — the only fragments that will ever be released.
+//
+// Every other test here builds a fixture, so the loader's rules (naming, the
+// "- " prefix, no headings, the byte cap) were checked only against fragments
+// written to be checked. Nothing in `make verify` or CI touched the real
+// directory, so a fragment breaking one of them merged green and failed at the
+// release PR — the point where the cost is highest and the author is elsewhere.
+// This puts the failure in the PR that causes it.
+//
+// loadFragments only reads. Never reach for assemble here: it DELETES every
+// fragment it folds, which is why every other test in this file copies its
+// fixtures (docs/plan/34_doc-trim.md, "Never run the assembler to check a
+// fragment").
+//
+// Directly after a release the directory is empty and this test proves nothing.
+// That is correct: there is then nothing to break.
+func TestTheShippingFragmentsLoad(t *testing.T) {
+	dir := filepath.Join("..", "..", "changelog.d")
+	if _, err := os.Stat(dir); err != nil {
+		t.Fatalf("changelog.d/ must exist at the repo root: %v", err)
+	}
+	if _, err := loadFragments(dir); err != nil {
+		t.Fatalf("the repository's own changelog.d/ does not load, so the next release "+
+			"PR would fail on it: %v", err)
+	}
+}
+
 // A fragment name deleted by an earlier release and reused later must sort by
 // the commit that added the CURRENT file, not the historical first add.
 func TestReusedFragmentNameSortsByCurrentAdd(t *testing.T) {

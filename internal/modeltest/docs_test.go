@@ -100,17 +100,35 @@ func TestDocsListEveryLiveTierVariable(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read README.md: %v", err)
 	}
-	// Only table rows count. A tier named in passing in a paragraph is not the
-	// table a reader scans to choose one, and it was prose that let the sets
-	// diverge while every document still "mentioned" the variables.
+	// Only the tier table counts, and it is located by its own header rather
+	// than by "any table row" — so the failures below say what they mean, and a
+	// row added to some other table would not satisfy them. A tier named in
+	// passing in a paragraph does not count either: it was prose that let the
+	// sets diverge while every document still "mentioned" the variables.
 	inTable := map[string]bool{}
+	var foundTable, inRows bool
 	for _, line := range strings.Split(string(b), "\n") {
-		if !strings.HasPrefix(strings.TrimSpace(line), "|") {
+		line = strings.TrimSpace(line)
+		if !strings.HasPrefix(line, "|") {
+			inRows = false // a non-table line ends the table
+			continue
+		}
+		if strings.Contains(line, "Tier") && strings.Contains(line, "Opt-in") {
+			foundTable, inRows = true, true
+			continue
+		}
+		if !inRows {
 			continue
 		}
 		for _, name := range liveTierName.FindAllString(line, -1) {
 			inTable[name] = true
 		}
+	}
+	if !foundTable {
+		t.Fatalf("README.md has no tier table: no row carries both a Tier and an Opt-in "+
+			"column header. Either the table was renamed — in which case fix this locator, "+
+			"since the check is otherwise vacuous — or it is gone, and every %s below is "+
+			"undocumented.", "RUN_LIVE_*")
 	}
 
 	for _, name := range sortedKeys(inCode) {

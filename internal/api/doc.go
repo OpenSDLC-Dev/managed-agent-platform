@@ -2,7 +2,7 @@
 // platform serves, and the dispatcher deciding which credential may reach which
 // route. Five surfaces share one http.ServeMux, four credentials reach them, and
 // dispatchAuth (server.go) picks the credential by path and runs it before the
-// router — splitting the routes across nested muxes let ServeMux's own
+// router — splitting the routes across nested muxes would let ServeMux's own
 // path-cleaning and subtree-slash redirects answer an unauthenticated request
 // before auth had run. Surfaces and credentials do not line up one to one, and
 // the exceptions are the part a reader has to carry: they are collected at the
@@ -43,8 +43,9 @@
 // its session is dual-auth (dualAuth) — reached by a worker's Bearer
 // environment key, or by a management or human caller, whichever the request
 // carries. That is the session events subtree; the bare GET /v1/sessions/{id};
-// the GET skill reads under /v1/skills/{id} — its versions, a version, and a
-// version's /content; and the GET /v1/files/{id}/content download, which is the
+// the GET skill reads at and under /v1/skills/{id} — the skill itself, its
+// versions, a version, and a version's /content (isSkillReadPath, server.go);
+// and the GET /v1/files/{id}/content download, which is the
 // worker's own SetupSkills and SetupFiles path. Skill content and file content
 // therefore do NOT need a management key. What keeps the lane narrow is
 // per-resource scoping inside the handlers rather than the dispatcher: a
