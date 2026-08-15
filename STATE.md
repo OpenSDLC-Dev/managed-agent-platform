@@ -14,8 +14,8 @@ the target is ~719 KB, cut from restatement and staleness only.
 - [x] Slice 2 — twelve package comments rewritten from the code; three documented lists pinned by
       offline tests, each of which found real drift on its first run.
 - [x] Slice 3 — `docs/ARCHITECTURE.md` 325 KB → 35 KB: the per-file tables were 92% of the file
-      and the derivative (every package carries 3–10× more comment than the document spent on it),
-      so they became a map. Cross-package sections untouched.
+      and the derivative (every package but `version` carries more comment than the document
+      spent on it, most 3–10×), so they became a map. Cross-package sections untouched.
 - [ ] Slice 4 — deployment docs, `self-hosted-security.md`, and the steering layer.
 - [ ] Slice 5 — `DIVERGENCES.md` reshaped; the 32 archived plans compressed to decisions.
 - [ ] Slice 6 — `HISTORY.md`, `docs/history/`, `docs/changelog/`.

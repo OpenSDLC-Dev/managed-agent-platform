@@ -13,8 +13,9 @@ import (
 // prefixToken matches one prefix as the documents write it: a backticked
 // lowercase word ending in an underscore, e.g. `sesn_`. The trailing underscore
 // is what separates a prefix from every other backticked identifier on the same
-// line — `id.go`, `idAlphabet` and `Valid()` all sit in the ARCHITECTURE.md row
-// this test reads, and none of them is a prefix.
+// line, and a pinned line is dense with them: CLAUDE.md's carries `knownPrefixes`
+// and `internal/domain/id.go` beside the prefixes themselves, and none of those
+// is one.
 var prefixToken = regexp.MustCompile("`([a-z]+)_`")
 
 // TestDocsEnumerateTheWirePrefixSet holds the documents that spell the

@@ -174,12 +174,13 @@ leak to a configured third-party endpoint.
 
 ## Package reference
 
-A map, not a description — **the code is the reference.** Every package below
-carries more comment than this section ever spent on it, most by three to ten
+A map, not a description — **the code is the reference.** Every package below but
+one carries more comment than this section ever spent on it, most by three to ten
 times: `internal/api` 192 KB of comment against the 50 KB that was here,
 `internal/executor` 169 KB against 43 KB, `internal/identity` 45 KB against 5 KB.
-Those comments sit beside the code they describe, so they cannot drift from it;
-what stood here was a second, staler copy that did.
+(The exception is `internal/version`, which is a single variable.) Those comments
+sit beside the code they describe, so they cannot drift from it; what stood here
+was a second, staler copy that did.
 
 Read a package with `go doc ./internal/X`. That prints the package doc and the
 exported surface, which is the whole story for the seam packages — but not for
@@ -204,7 +205,7 @@ Layout order is by layer, as the repo is.
 | `brain/` | The stateless orchestration loop: claim a `model_turn`, replay the log into a provider request, stream the turn back as events, drive the session state machine at turn end. It never runs a tool in-process — a tool call is an emitted intent, and the turn resumes when the result event lands. |
 | `provider/` | Model backends behind Anthropic Messages semantics, constructed purely from configuration. `anthropic/` works against **any** endpoint speaking Anthropic Messages; `openai/` is the platform's one lossy seam and confines every conversion; `providertest/` is the contract suite both must pass. |
 | `queue/` | The work queue over Postgres (`FOR UPDATE SKIP LOCKED`). Five kinds share `work_items`, and two ways take one: `Claim` is the in-process lane, `Poll` the wire lane that serves exactly a `tool_exec` item on a `self_hosted` environment. That split is what makes the executor and the BYOC worker one protocol at two deployment points. |
-| `executor/` | The platform-managed half of that protocol: pull work, run the built-in toolset in the session's sandbox, append the results the brain resumes on. Also the web, outputs-harvest and MCP work, which run in its own process for **both** environment kinds. |
+| `executor/` | The platform-managed half of that protocol: pull work, run the built-in toolset in the session's sandbox, append the results the brain resumes on. Also the web and MCP work, which run in its own process for **both** environment kinds, and the outputs harvest, which only a `cloud` session enqueues — a `self_hosted` sandbox has no file lane to snapshot, so its grading stays transcript-only (`brain/grader.go`). |
 | `worker/` | The customer-hosted twin. It holds no database handle and reaches everything over the wire with its environment key — which is what makes "customer compute, zero inbound network access" the same code path as the executor's. |
 | `toolset/` | The built-in `agent_toolset_20260401` — bash, read, write, edit, glob, grep — and nothing about what a call means for the session. |
 | `sandbox/` | The "hands" boundary: a disposable per-session container, `docker/` and `k8s/` behind one interface with one contract suite (`sandboxtest/`), plus `shell/`, the persistent per-session bash built on the stateless primitives. |
@@ -220,8 +221,8 @@ Layout order is by layer, as the repo is.
 | `gaterun/` | That gate's runtime — firewall, privilege drop, the config fetch-and-swap loop. The OS-touching adapters live in `cmd/gate` behind seams declared here, so everything with logic stays testable off a container. |
 | `gateconfig/` · `gatetoken/` | The internal gate-config endpoint's client and shared wire contract, and the per-session `gtk_` tokens that authenticate to it. Off the public wire, and registered as a divergence. |
 | `vaultresolve/` | Read-time credential resolution: a session's vault ids become the sandbox's placeholder bindings and the gate's decrypted secrets, under one selection rule so the two halves can never disagree. Current rows every time, so rotation needs no session restart. |
-| `secrets/` | The credential-cipher seam — `openbao/` in production, `gcpkms/` for GCP, `local/` for tests — with the ciphertext persisted by the caller, never here. |
-| `dialguard/` | The SSRF floor under every platform-initiated dial: the check runs on the resolved IP at connect time, so DNS rebinding cannot slip past a name that resolved innocently. RFC 1918 is deliberately allowed — this platform runs in the operator's own network. |
+| `secrets/` | The credential-cipher seam — `openbao/` in production, `gcpkms/` for GCP, `local/` (AES-256-GCM, one configured master key) for tests **and bao-less minimal deployments** — with the ciphertext persisted by the caller, never here. |
+| `dialguard/` | The SSRF floor under the dials whose URL a **customer** supplied — an agent's `mcp_servers` entry, a vault credential's MCP server or token endpoint — and not a general egress check: a configured provider or web backend dials with its own ordinary client. The check runs on the resolved IP at connect time, so DNS rebinding cannot slip past a name that resolved innocently. RFC 1918 is deliberately allowed — this platform runs in the operator's own network. |
 | `identity/` | The human-authentication boundary: verify the credential a human presents, reduce it to a principal with one of three roles. Machine credentials never come here. `identitytest/` is its fake OpenID Provider. |
 | `oauthrefresh/` | The RFC 6749 refresh grant, spelled once for the two places that perform it. |
 
