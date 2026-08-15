@@ -119,14 +119,33 @@ func orNone(s []string) string {
 	return strings.Join(s, " ")
 }
 
-// repoRoot derives the checkout root from this file's compile-time path, so the
-// check reads the documents of the tree it was compiled from — a worktree's own
-// CLAUDE.md, not the main checkout's — and needs no working directory, network
-// or fixture to do it.
+// repoRoot finds the checkout root — the directory holding go.mod — so the
+// check reads the documents of the tree it was compiled from (a worktree's own
+// CLAUDE.md, not the main checkout's) with no working directory, network or
+// fixture needed.
+//
+// It starts from this file's compile-time path and walks up. Under -trimpath
+// that path is module-relative rather than absolute, so the walk starts from
+// the test's working directory instead — which `go test` sets to the package
+// directory, the same place. Releases build with -trimpath (Makefile,
+// Dockerfile) and tests do not, but GOFLAGS carries it into either, and the
+// cost of not handling it is a red build blamed on documentation drift.
 func repoRoot() string {
-	_, file, _, ok := runtime.Caller(0)
-	if !ok {
-		return ""
+	dir := ""
+	if _, file, _, ok := runtime.Caller(0); ok && filepath.IsAbs(file) {
+		dir = filepath.Dir(file)
+	} else if wd, err := os.Getwd(); err == nil {
+		dir = wd
 	}
-	return filepath.Join(filepath.Dir(file), "..", "..")
+	for dir != "" {
+		if _, err := os.Stat(filepath.Join(dir, "go.mod")); err == nil {
+			return dir
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			break
+		}
+		dir = parent
+	}
+	return ""
 }

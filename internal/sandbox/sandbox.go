@@ -155,7 +155,10 @@ type Spec struct {
 	// mean: a different image or workdir is a different sandbox rather than
 	// this one found again, and a different network mode is a route out the
 	// session never asked for. A mismatch is refused with ErrSpecMismatch
-	// rather than served as if it matched.
+	// rather than served as if it matched — the one path that refuses for a
+	// different reason being a gated K8s pod that never turns ready, whose
+	// readiness error and reclaim deliberately precede the comparison so a pod
+	// both wedged and mismatched is removed rather than stranded (k8s.go).
 	Image string
 	// Workdir is where commands run and where the toolset's relative paths
 	// resolve. Empty means DefaultWorkdir, resolved by the provider before the
@@ -170,9 +173,12 @@ type Spec struct {
 	// ungated case, each backend reading back its own expression of it.
 	Networking domain.Networking
 	// Env is injected at provision time and visible to every tool exec (nil =
-	// none). Slice 4 populates it with the per-session egress-proxy address and
-	// the vault env-var placeholders; both backends thread it in the same way,
-	// so the behavior is identical across Docker and Kubernetes.
+	// none). What the executor puts here is the vault env-var placeholders and
+	// only those (sandboxEnv, internal/executor) — the egress-proxy variables
+	// are the gate's, injected by whichever backend runs it and reserved
+	// against callers below, so a sandbox's secrets and its route out arrive by
+	// different doors. Both backends thread Env in the same way, so the
+	// behavior is identical across Docker and Kubernetes.
 	//
 	// Keys must be valid environment-variable names (ValidateEnv); an invalid
 	// key fails provisioning on both backends rather than diverging (Docker

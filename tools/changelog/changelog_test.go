@@ -4,6 +4,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"testing"
@@ -463,7 +464,39 @@ func TestFragmentTrailingSpacesPreserved(t *testing.T) {
 // and the cap. The cap counts bytes, so a body under it in runes but over it
 // in bytes is refused too — an entry is prose, and this project's prose is
 // full of em dashes.
+// documentedCap is the cap changelog.d/README.md promises a contributor, read
+// from that file rather than from maxFragmentBytes.
+//
+// A boundary test that computes its own inputs from the constant it is testing
+// still passes after the constant moves — and the number is not an
+// implementation detail but a contract stated in prose, which is exactly the
+// pair that drifts. Reading it back makes the doc and the code fail together or
+// not at all.
+func documentedCap(t *testing.T) int {
+	t.Helper()
+	b, err := os.ReadFile(filepath.Join("..", "..", "changelog.d", "README.md"))
+	if err != nil {
+		t.Fatalf("read changelog.d/README.md: %v", err)
+	}
+	m := regexp.MustCompile(`hard cap ([\d,]+) bytes`).FindStringSubmatch(string(b))
+	if m == nil {
+		t.Fatalf("changelog.d/README.md no longer states a %q — either the cap stopped "+
+			"being documented, or this locator needs fixing; leaving it unmatched would "+
+			"make the check below vacuous.", "hard cap N bytes")
+	}
+	n, err := strconv.Atoi(strings.ReplaceAll(m[1], ",", ""))
+	if err != nil {
+		t.Fatalf("changelog.d/README.md states cap %q, which is not a number: %v", m[1], err)
+	}
+	return n
+}
+
 func TestFragmentSizeCap(t *testing.T) {
+	if want := documentedCap(t); maxFragmentBytes != want {
+		t.Fatalf("maxFragmentBytes = %d but changelog.d/README.md promises contributors %d: "+
+			"a fragment written to the documented limit would be refused, or one over it "+
+			"accepted. Move both or neither.", maxFragmentBytes, want)
+	}
 	atCap := "- " + strings.Repeat("a", maxFragmentBytes-2)
 	clPath, dir := writeFixture(t, steadyChangelog, map[string]string{
 		"a.added.md": atCap + "\n",

@@ -54,8 +54,11 @@
 // environment in which some session mounts that file (downloadFile), and
 // skills, workspace-global resources every environment's sandboxes consume,
 // need no scoping at all. Everything else on /v1 — the collections, the file
-// metadata read, every mutation — is management-only, and outside the events
-// subtree the dual-auth routes are GET-only.
+// metadata read, every mutation — is management-only, the work API excepted:
+// it runs the other way, taking the environment key and nothing else, since
+// resolveEnvironmentKey demands a Bearer and a management x-api-key never
+// satisfies it (envauth.go). Outside the events subtree the dual-auth routes
+// are GET-only.
 //
 // The cross-cutting fact no single file makes obvious: dispatchAuth classifies
 // on r.URL.EscapedPath() while ServeMux matches the DECODED path, and the
