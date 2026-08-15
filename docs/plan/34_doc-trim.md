@@ -104,10 +104,15 @@ obligation on the operator. Those are never cut here. Restatement, duplication a
   slice 1 destroyed the whole recut and it had to be rebuilt from the agent transcripts. Check
   fragments against `loadFragments`' rules by reading, or run `TestTheShippingFragmentsLoad`,
   which the gate now runs for you — never by executing `assemble`.
-- **`internal/executor/mcpwork.go`'s two "later slice" mentions are still true.** Slice 2 swept
-  eight stale ones and checked these; the `reason` column exists, but no code under `internal/api`
-  or `internal/brain` reads it, so "later slices surface it to the model and the API" remains
-  future work. Leave them until something does. Not every forward-looking comment is stale.
+- **`internal/executor/mcpwork.go`'s two "later slice" mentions are still true, with one
+  qualifier.** Slice 2 swept eight stale ones and checked these. The `mcp_catalogs.error`
+  column really is unread: the brain selects `server_name, url, status, tools` and not it
+  (mcptools.go), and `internal/api` only deletes those rows. But the same text is already on
+  the wire by another road — the settlement passes `message: r.reason` to `mcpFailureEvent`
+  (mcpwork.go:966), which appends a `session.error` the events endpoints serve. So "to the
+  model" is fully future and "to the API" is not. A later slice revisiting these comments
+  should add that qualifier rather than delete them. Not every forward-looking comment is
+  stale — and not every one is wholly true either.
 
 - `docs/DIVERGENCES.md` cites "the v1.62.0 checkout" three times as evidence, but the local
   `anthropic-sdk-go` reference checkout's newest tag is v1.61.0, which is also the `go.mod` pin.
