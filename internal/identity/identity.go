@@ -137,8 +137,9 @@ func ParseRole(s string) (Role, bool) {
 
 // Identity is one verified human principal.
 //
-// The four strings are exactly the principals-table columns a later slice
-// persists; Role is re-derived from the token on every request and never stored,
+// The four strings are exactly the principals-table columns upsertPrincipal
+// writes (internal/api); Role is re-derived from the token per request and never
+// stored,
 // because the IdP stays authoritative. A field that is not here cannot be
 // persisted or logged by accident: no raw claims, no token, no expiry.
 type Identity struct {

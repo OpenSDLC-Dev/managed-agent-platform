@@ -7,4 +7,6 @@
   fragment fails in the pull request that writes it instead of months later in a release PR. An
   offline test fails if any doc enumerates a wire ID-prefix list that disagrees with
   `internal/domain/id.go`, and another fails if a `RUN_LIVE_*` consent variable the tree reads has
-  no row in README's tier table. All three found real drift on their first run.
+  no row in README's tier table. Both found real drift on their first run and this release carries
+  the corrections: the documented prefix lists were missing `outc_` and `skillver_`, and the tier
+  table omitted `RUN_LIVE_KMS_TESTS`.

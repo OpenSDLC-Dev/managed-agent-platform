@@ -364,7 +364,8 @@ func exponentInRange(raw string) bool {
 // truncate bounds an attacker-controlled string to n BYTES, cutting only on a
 // rune boundary. slog escapes control bytes but does not bound length, so an
 // unbounded kid would be a log-volume amplifier; the two profile fields are
-// bounded for a different reason — a later slice persists them to a column.
+// bounded for a different reason — upsertPrincipal (internal/api) writes them
+// to a column.
 //
 // The rune boundary is what makes the second use correct rather than
 // self-defeating. A cut through a multi-byte sequence leaves bytes that are not

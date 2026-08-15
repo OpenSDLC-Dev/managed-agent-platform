@@ -1,5 +1,5 @@
 // Package identitytest is a fake OpenID Provider for the identity verifier's
-// tests, and for the API layer's real-token tests in later slices.
+// tests and for the API layer's real-token tests (api/identitylane_test.go).
 //
 // It deliberately does not import internal/identity: with no cycle, that
 // package's own in-package test files may use it, and so may any consumer. For

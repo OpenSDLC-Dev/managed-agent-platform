@@ -116,7 +116,7 @@ func New(ctx context.Context, cfg Config) (*Verifier, error) {
 	// A clock reading the zero time is refused rather than tolerated. go-jose's
 	// jwt.Expected treats a zero Time as "use time.Now()" (jwt/validation.go), so
 	// a Config.Now starting at time.Time{} — the natural zero value, and an easy
-	// thing for a later slice's fake clock to be — would validate exp, nbf and
+	// thing for a test's fake clock to be — would validate exp, nbf and
 	// iat against the real wall clock while the key-set TTL and the cooldown ran
 	// against the fake one. Silent, and in the direction where an expired token
 	// can verify.
@@ -359,18 +359,19 @@ func (v *Verifier) Verify(ctx context.Context, token string) (Identity, error) {
 		Issuer:  v.issuer,
 		Subject: std.Subject,
 		// Bounded, because these two are the only fields whose length the token
-		// alone decides, and a later slice persists them. Under maxTokenBytes a
+		// alone decides, and upsertPrincipal persists them. Under maxTokenBytes a
 		// claim can reach roughly 12 KiB, which is a valid login turning into an
 		// insert failure against a bounded column. Truncating keeps the login
 		// working and the descriptive value intact; neither field carries any
 		// authority, so nothing is decided on the bytes dropped.
 		//
-		// Note for the slice that persists them: Email is NOT verified here.
-		// Requiring email_verified would deny every human on the many providers
-		// that never emit it, and this package has no use for the claim beyond
-		// display. Anything that MATCHES or LINKS on an email must make its own
-		// verification decision — on an IdP with self-service profile attributes,
-		// Casdoor included, the user chooses this string.
+		// Email is NOT verified here. Requiring email_verified would deny every
+		// human on the many providers that never emit it, and this package has
+		// no use for the claim beyond display. Anything that MATCHES or LINKS on
+		// an email must make its own verification decision — on an IdP with
+		// self-service profile attributes, Casdoor included, the user chooses
+		// this string. upsertPrincipal (internal/api) is written to that rule:
+		// it conflicts on (issuer, subject) and merely refreshes email.
 		Email:       truncate(stringClaim(all, v.emailClaim), maxProfileBytes),
 		DisplayName: truncate(stringClaim(all, v.nameClaim), maxProfileBytes),
 		// RoleNone is not an error: the principal is authenticated with no

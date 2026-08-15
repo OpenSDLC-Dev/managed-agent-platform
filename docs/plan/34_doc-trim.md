@@ -102,7 +102,12 @@ obligation on the operator. Those are never cut here. Restatement, duplication a
 - **Never run the assembler to check a fragment.** `go run ./tools/changelog assemble` deletes
   every file in `changelog.d/` after folding it into CHANGELOG.md; a verification attempt during
   slice 1 destroyed the whole recut and it had to be rebuilt from the agent transcripts. Check
-  fragments against `loadFragments`' rules by reading, never by executing.
+  fragments against `loadFragments`' rules by reading, or run `TestTheShippingFragmentsLoad`,
+  which the gate now runs for you — never by executing `assemble`.
+- **`internal/executor/mcpwork.go`'s two "later slice" mentions are still true.** Slice 2 swept
+  eight stale ones and checked these; the `reason` column exists, but no code under `internal/api`
+  or `internal/brain` reads it, so "later slices surface it to the model and the API" remains
+  future work. Leave them until something does. Not every forward-looking comment is stale.
 
 - `docs/DIVERGENCES.md` cites "the v1.62.0 checkout" three times as evidence, but the local
   `anthropic-sdk-go` reference checkout's newest tag is v1.61.0, which is also the `go.mod` pin.
