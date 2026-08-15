@@ -36,7 +36,14 @@ var prefixToken = regexp.MustCompile("`([a-z]+)_`")
 // five prefixes and then an ellipsis, and is right to; an elided list claims
 // nothing about completeness and so cannot go stale, which is why it is not
 // pinned. A document that stops enumerating the set loses its entry here rather
-// than keeping an anchor nothing satisfies.
+// than keeping an anchor nothing satisfies — which is what became of
+// ARCHITECTURE.md's own entry when plan 34 slice 3 replaced its per-file tables,
+// the id.go row among them, with a map. CLAUDE.md is the enumeration now.
+//
+// One document is enough to catch the drift, and one is also the floor: with the
+// list empty this test would pass without reading anything, so it refuses to run
+// on an empty list rather than going quietly vacuous the next time a document is
+// trimmed.
 //
 // The comparison runs in both directions. An omission is the drift that has
 // already happened; a prefix the document adds matters just as much, because
@@ -50,10 +57,16 @@ func TestDocsEnumerateTheWirePrefixSet(t *testing.T) {
 	}
 	slices.Sort(want)
 
-	for _, doc := range []struct{ path, anchor string }{
+	docs := []struct{ path, anchor string }{
 		{"CLAUDE.md", "**ID prefixes**:"},
-		{filepath.Join("docs", "ARCHITECTURE.md"), "`ID` with wire-compatible prefixes"},
-	} {
+	}
+	if len(docs) == 0 {
+		t.Fatal("no document is pinned to knownPrefixes: the last entry was removed rather " +
+			"than re-anchored, so this check reads nothing and passes. Either a document " +
+			"still enumerates the set and belongs here, or none does and the set is " +
+			"documented nowhere — both need fixing, neither is a pass.")
+	}
+	for _, doc := range docs {
 		b, err := os.ReadFile(filepath.Join(repoRoot(), doc.path))
 		if err != nil {
 			t.Errorf("read %s: %v", doc.path, err)
