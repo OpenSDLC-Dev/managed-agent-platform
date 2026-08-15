@@ -20,6 +20,3 @@ the target is ~719 KB, cut from restatement and staleness only.
 - [ ] Slice 4 — deployment docs, `self-hosted-security.md`, and the steering layer.
 - [ ] Slice 5 — `DIVERGENCES.md` reshaped; the 32 archived plans compressed to decisions.
 - [ ] Slice 6 — `HISTORY.md`, `docs/history/`, `docs/changelog/`.
-
-Plans 29 and 33 archived 2026-08-15; their delivery records are in
-[docs/HISTORY.md](./docs/HISTORY.md). The rest of the backlog is GitHub issues.
