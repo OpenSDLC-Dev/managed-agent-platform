@@ -473,10 +473,19 @@ func TestASessionEndedMidPassGetsNoRowsAndNoTurn(t *testing.T) {
 			if err != nil || !live {
 				t.Fatalf("sessionForRun: live=%v err=%v", live, err)
 			}
+			// The pass reports one step per server reached, so a deployment whose
+			// discovery budget outruns its stall budget is not cancelled mid-pass
+			// (#383).
+			var reports int
 			rows, err := h.exec.discoverServers(
-				context.Background(), sess.envConfig, sess.vaultIDs, sess.mcpServers)
+				context.Background(), sess.envConfig, sess.vaultIDs, sess.mcpServers,
+				func() { reports++ })
 			if err != nil {
 				t.Fatalf("discoverServers: %v", err)
+			}
+			if want := len(sess.mcpServers) + 1; reports != want {
+				t.Errorf("progress reports = %d, want %d (one per server, plus the pass boundary that reports the last one finishing)",
+					reports, want)
 			}
 			if len(rows) != 1 || rows[0].status != "ready" {
 				t.Fatalf("rows = %+v, want the pass to have succeeded before the session ended", rows)

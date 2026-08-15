@@ -108,8 +108,8 @@ func (e *Executor) processHarvest(ctx context.Context, item *queue.Item) (err er
 
 	// Keep the lease from provisioning through the reads: a large tree can
 	// outlast a fixed TTL, and losing the lease mid-stage cancels the work.
-	kctx, keeper := e.queue.KeepLease(ctx, item, e.cfg.LeaseTTL)
-	files, runErr := e.collectOutputs(kctx, item, sess)
+	kctx, keeper := e.queue.KeepLease(ctx, item, e.cfg.LeaseTTL, e.cfg.StallTimeout)
+	files, runErr := e.collectOutputs(kctx, item, sess, keeper.Progress)
 	if kerr := keeper.Close(); kerr != nil {
 		e.discardStaged(ctx, files)
 		return fmt.Errorf("lease keeper: %w", kerr)
@@ -123,7 +123,12 @@ func (e *Executor) processHarvest(ctx context.Context, item *queue.Item) (err er
 // collectOutputs lists the outputs tree and stages every admitted file's bytes
 // into the blob store at its final key. On error the staged objects are
 // deleted — a snapshot either stages whole or leaves no residue.
-func (e *Executor) collectOutputs(ctx context.Context, item *queue.Item, sess sessionRun) (_ []harvestFile, err error) {
+//
+// progress is called as each step lands, because this is the other lane that
+// reads a sandbox and so the other lane a wedged call can park (#383): a large
+// tree legitimately takes a while, and only a per-file report tells that apart
+// from a read that will never return.
+func (e *Executor) collectOutputs(ctx context.Context, item *queue.Item, sess sessionRun, progress func()) (_ []harvestFile, err error) {
 	var staged []harvestFile
 	defer func() {
 		if err != nil {
@@ -133,14 +138,16 @@ func (e *Executor) collectOutputs(ctx context.Context, item *queue.Item, sess se
 		}
 	}()
 
-	sb, err := e.provisionSandbox(ctx, item.SessionID, sess)
+	sb, err := e.provisionSandbox(ctx, item.SessionID, sess, progress)
 	if err != nil {
 		return nil, err
 	}
+	progress()
 	res, err := sb.Exec(ctx, sandbox.ExecRequest{Command: harvestListScript})
 	if err != nil {
 		return nil, fmt.Errorf("list outputs: %w", err)
 	}
+	progress()
 	if res.ExitCode != 0 {
 		return nil, fmt.Errorf("list outputs: exit %d: %s", res.ExitCode, strings.TrimSpace(res.Stderr))
 	}
@@ -164,6 +171,11 @@ func (e *Executor) collectOutputs(ctx context.Context, item *queue.Item, sess se
 
 	var total int64
 	for _, p := range paths {
+		// At the top of the iteration, so the exclusions below count too: a file
+		// that vanished, overran a cap, or turned out not to be regular still
+		// took a sandbox round trip, and a tree of thousands of excluded paths
+		// is a run that is moving (#383).
+		progress()
 		if len(staged) >= harvestSessionCapFiles {
 			// No later path can be admitted once the count cap is hit — one
 			// warning for the rest, not one per path.
@@ -200,6 +212,10 @@ func (e *Executor) collectOutputs(ctx context.Context, item *queue.Item, sess se
 		staged = append(staged, harvestFile{path: p, id: id, size: size, mime: m})
 		total += size
 	}
+	// The loop reports as each path is taken up, so the last file's staging is
+	// reported here — otherwise it and the settlement behind it would share one
+	// silent interval.
+	progress()
 	return staged, nil
 }
 

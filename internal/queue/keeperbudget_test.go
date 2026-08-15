@@ -158,7 +158,9 @@ func TestASlowRenewalDoesNotShortenTheNextOnesBudget(t *testing.T) {
 	heldA, releaseA := holdRow()
 	<-heldA // the row is locked before the keeper can renew anything
 
-	kctx, keeper := q.KeepLease(ctx, item, ttl)
+	// No stall budget: this test measures the renewal bound alone, and a holder
+	// that reports no progress is exactly what it holds still to do.
+	kctx, keeper := q.KeepLease(ctx, item, ttl, 0)
 
 	waitBlocked(1) // the first renewal has issued its UPDATE and is queued behind A
 	tick1 := time.Now()
@@ -226,7 +228,7 @@ func TestATickAfterAWholeLeaseNeverDialsTheDatabase(t *testing.T) {
 	q := queue.New(unusable)
 	item := &queue.Item{ID: domain.ID("work_starvedkeeper"), Lease: time.Now()}
 
-	kctx, keeper := q.KeepLease(context.Background(), item, time.Nanosecond)
+	kctx, keeper := q.KeepLease(context.Background(), item, time.Nanosecond, 0)
 	select {
 	case <-kctx.Done():
 	case <-time.After(5 * time.Second):

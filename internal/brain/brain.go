@@ -356,7 +356,7 @@ func (b *Brain) runTurn(ctx context.Context, item *queue.Item, claimedAt time.Ti
 		attribute.Int("repos.block_chars", len(reposBlock)),
 	)
 
-	kctx, keeper := b.queue.KeepLease(sctx, item, b.cfg.LeaseTTL)
+	kctx, keeper := b.queue.KeepLease(sctx, item, b.cfg.LeaseTTL, 0)
 	turn, streamErr := b.streamTurn(kctx, sid, p, req)
 	// The call to the model ended here, whatever happens to the turn from now
 	// on. Everything below is ours — leases, classification, a session-locked

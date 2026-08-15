@@ -102,12 +102,17 @@ func (e *Executor) unansweredMCPToolUses(ctx context.Context, sid domain.ID) ([]
 // it as a session error would cry wolf on a server that is working exactly as
 // designed.
 //
-// A dead context (lease lost, shutdown) stops the pass and settles nothing, the
-// same all-or-nothing the web driver and discovery use: the reclaim re-runs the
-// calls this pass had not answered.
+// A dead context stops the pass, and what happens then depends on which death it
+// was. A lost lease or a shutdown settles nothing — the row is someone else's, or
+// nothing may be trusted — and the reclaim re-runs the calls this pass had not
+// answered. A *stall* is the exception this lane and the web driver share: the
+// claimant still holds the item, and a call that returned ran in a third party's
+// system, so its answer commits and only the rest is re-derived (#383).
+// Discovery has no such exception: a listing is re-derivable, so it stays
+// all-or-nothing whichever death it was.
 func (e *Executor) runMCPTools(ctx context.Context, cfg domain.EnvironmentConfig,
 	vaultIDs []string, declared []mcpServerRef, ready map[string]string, spill *mcpSpiller,
-	uses []mcpToolUse) ([]events.NewEvent, error, error) {
+	uses []mcpToolUse, progress func()) ([]events.NewEvent, error, error) {
 
 	endpoints := make(map[string]string, len(declared))
 	for _, s := range declared {
@@ -117,6 +122,9 @@ func (e *Executor) runMCPTools(ctx context.Context, cfg domain.EnvironmentConfig
 	var out []events.NewEvent
 	deadline := time.Now().Add(e.cfg.MCPPassTimeout)
 	for i, u := range uses {
+		// Per call, at the top of the iteration — the files.go rule: a call the
+		// budget stopped short of still advances the pass (#383).
+		progress()
 		start := time.Now()
 		// The budget is checked between calls and never cancels one: a call cut
 		// off mid-flight would be answered as though the server had failed, and
@@ -188,6 +196,10 @@ func (e *Executor) runMCPTools(ctx context.Context, cfg domain.EnvironmentConfig
 			out = append(out, ev)
 		}
 	}
+	// The pass boundary: the report at the top of the loop covers every call but
+	// the last one, whose answer would otherwise land inside the same silent
+	// interval as the settlement behind it (#383).
+	progress()
 	return out, nil, nil
 }
 
@@ -207,22 +219,51 @@ func (e *Executor) runMCPTools(ctx context.Context, cfg domain.EnvironmentConfig
 func (e *Executor) answerMCPCalls(ctx context.Context, item *queue.Item, sess sessionRun, calls []mcpToolUse) error {
 	// Keep the lease across the calls: a tool that takes its time would
 	// otherwise outlast a fixed TTL and lose the item mid-call.
+	// Progress is one call answered, not one pass finished. The pass is already
+	// bounded whole by Config.MCPPassTimeout, which is well inside the stall
+	// budget at both defaults (5m against 30m) — but the two knobs are
+	// independently tunable, and a deployment that raises the pass budget past
+	// the stall budget would otherwise have every pass cancelled at 30 minutes.
+	// The settlement below keeps the calls that answered, so that converges
+	// rather than looping — at the price of calling a third party's tool twice
+	// for the one cut off in flight, every reclaim (#383).
 	ready, err := e.readyEndpoints(ctx, item.SessionID)
 	if err != nil {
 		return err
 	}
-	kctx, keeper := e.queue.KeepLease(ctx, item, e.cfg.LeaseTTL)
+	kctx, keeper := e.queue.KeepLease(ctx, item, e.cfg.LeaseTTL, e.cfg.StallTimeout)
 	spill := &mcpSpiller{exec: e, sid: item.SessionID, sess: sess}
 	results, faultErr, runErr := e.runMCPTools(
-		kctx, sess.envConfig, sess.vaultIDs, sess.mcpServers, ready, spill, calls)
-	if kerr := keeper.Close(); kerr != nil {
+		kctx, sess.envConfig, sess.vaultIDs, sess.mcpServers, ready, spill, calls, keeper.Progress)
+	kerr := keeper.Close()
+	// A stall commits what answered, for the reason the tool_exec lane does: an
+	// MCP call that returned ran in *someone else's system*, and discarding its
+	// answer would have the reclaim call it a second time — a second write to a
+	// third-party server, which is the one thing this settlement can prevent and
+	// no retry can undo. Only the call the stall cut short and the ones behind it
+	// are re-derived, and the Then below hands this very item back for them. A
+	// lease genuinely lost still commits nothing.
+	stalled := errors.Is(kerr, queue.ErrWorkStalled)
+	if kerr != nil && !stalled {
 		return fmt.Errorf("lease keeper: %w", kerr)
 	}
 	if runErr != nil {
 		return runErr
 	}
-	if faultErr != nil {
+	if faultErr != nil && !stalled {
 		return faultErr
+	}
+	if stalled && len(results) == 0 {
+		// Nothing to commit, but the fault still names the call the stall cut
+		// short — which with zero results is the *first* one, and the only place
+		// its identity is written down.
+		return fmt.Errorf("lease keeper: %w", stallFault(kerr, faultErr))
+	}
+	// Folded once, before the settlement, so every exit below carries both the
+	// sentinel and the call the stall cut short — the failing-append path most
+	// of all, being the one where nothing else records either (#383).
+	if stalled {
+		faultErr = stallFault(kerr, faultErr)
 	}
 
 	opts := events.AppendOptions{
@@ -266,7 +307,30 @@ func (e *Executor) answerMCPCalls(ctx context.Context, item *queue.Item, sess se
 		},
 	}
 	if _, err := e.log.AppendWith(ctx, item.SessionID, results, opts); err != nil {
+		// The stall rides along, as it does in the tool_exec lane: the answers
+		// are lost and the item is left to the lease, and the append error alone
+		// names neither the stall nor the call it cut short.
+		if stalled {
+			return fmt.Errorf("append mcp tool results: %w (keeper: %w)", err, faultErr)
+		}
 		return fmt.Errorf("append mcp tool results: %w", err)
+	}
+	// Committed, and still a stall: the item is settled but the run was cut
+	// short, and the operator needs to know which of the two happened.
+	//
+	// Almost always the settlement above requeued, because a stall latched during
+	// a *call* leaves that call unanswered — the ctx check after it returns runs
+	// before the result is appended. One window escapes that: the answer's spill
+	// to the sandbox sits between the two, so a tick landing during the last
+	// call's spill latches a stall with every call answered, and the Then
+	// completes the item. The error below is then a report and not a state — the
+	// item is finished, nothing is requeued or billed twice — and the residue is
+	// one "work item faulted" line about a pass that in fact finished. Accepted:
+	// the alternative is a second flag threaded out of the Then to suppress a log
+	// line, and a stall that reached that far is worth an operator's attention
+	// either way (#383).
+	if stalled {
+		return fmt.Errorf("lease keeper: %w", faultErr)
 	}
 	return nil
 }

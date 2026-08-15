@@ -291,7 +291,7 @@ func TestIdleReapThenProvisionRestores(t *testing.T) {
 		t.Fatalf("reap pass: %v", err)
 	}
 	if _, err := h.exec.provisionSandbox(context.Background(), h.sid,
-		sessionRun{networking: domain.Networking{Type: domain.NetUnrestricted}}); err != nil {
+		sessionRun{networking: domain.Networking{Type: domain.NetUnrestricted}}, func() {}); err != nil {
 		t.Fatalf("provision after idle reap: %v", err)
 	}
 	shipped, ok := sb.files[restoreTarPath]

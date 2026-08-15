@@ -3,6 +3,7 @@ package worker
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log"
 	"log/slog"
 	"net/http"
@@ -751,6 +752,86 @@ func TestWorkerLeaseLossDoesNotStopTheItem(t *testing.T) {
 		t.Errorf("user.tool_result = %d, want 0 (the run was cancelled)", got)
 	}
 	close(sb.gate) // release, though the tool already returned via cancellation
+	waitExit(t, cancel, errc)
+}
+
+// TestWorkerStalledRunReleasesTheItem is the wedge #383 is about, in the BYOC
+// lane: a sandbox call that never returns leaves the run blocked while the
+// heartbeat happily beats on, so the item is neither progressing nor
+// reclaimable — the documented recovery (the lease lapses, another worker takes
+// it) never fires, because nothing crashed. A run that reports no progress for
+// its whole stall budget is cancelled, and the beating stops with it: the item
+// is left live, its lease lapses, and the control plane can re-offer it.
+func TestWorkerStalledRunReleasesTheItem(t *testing.T) {
+	sb := &fakeSandbox{entered: make(chan struct{}, 1), gate: make(chan struct{})}
+	h := newHarness(t, sb)
+	h.suspend(t, writeUse("out.txt", "hi"))
+	h.enqueueWork(t)
+
+	// A second of budget, not a few hundred milliseconds: the clock starts before
+	// the liveness read and the provision, so a tight budget could cancel the run
+	// before the gated tool is ever entered — and then the receive below would
+	// block until go test's package alarm, which is the very failure this change
+	// exists to remove (#318).
+	w, done := h.newWorker(Config{StallTimeout: time.Second})
+	cancel, errc := runWorker(w)
+
+	// The tool is held open mid-run and never returns.
+	select {
+	case <-sb.entered:
+	case <-time.After(15 * time.Second):
+		t.Fatal("the gated tool was never entered")
+	}
+	waitForState(t, h, "active")
+	// Without the guard the run is held by the gate forever and this never fires.
+	waitDone(t, done)
+
+	if got := h.workState(t); got != "active" {
+		t.Errorf("work item state = %q, want it left active for reclaim (a stalled run must not stop the item)", got)
+	}
+	if got := len(h.results(t)); got != 0 {
+		t.Errorf("user.tool_result = %d, want 0 (the wedged tool never answered)", got)
+	}
+	// The lease is given up rather than held: the beats stop, so the control
+	// plane's TTL (30s, far outside this window) lapses and the item is free.
+	mark := h.lastHeartbeat(t)
+	time.Sleep(200 * time.Millisecond) // ~10 beats at the test cadence
+	if got := h.lastHeartbeat(t); got.After(mark) {
+		t.Errorf("the heartbeat kept beating after the stall (%v -> %v); a stalled item must be released", mark, got)
+	}
+	close(sb.gate)
+	waitExit(t, cancel, errc)
+}
+
+// TestWorkerLongButMovingRunKeepsItsItem is the other half of the guard, and the
+// one that decides whether it can ship: a run that is long overall but keeps
+// finishing steps must never be killed for being long. The budget is a second
+// against a run of thirty 50ms tools — one and a half times the budget in total,
+// a twentieth of it per step, so a result post that takes twenty times its usual
+// round trip still lands inside it and this test does not become the flake class
+// it is defending against — and only the per-tool progress reports keep the run
+// alive: it finishes normally, every tool answered, the item stopped.
+func TestWorkerLongButMovingRunKeepsItsItem(t *testing.T) {
+	const tools = 30
+	sb := &fakeSandbox{delay: 50 * time.Millisecond}
+	h := newHarness(t, sb)
+	uses := make([]string, tools)
+	for i := range uses {
+		uses[i] = writeUse(fmt.Sprintf("out%d.txt", i), "hi")
+	}
+	h.suspend(t, uses...)
+	h.enqueueWork(t)
+
+	w, done := h.newWorker(Config{StallTimeout: time.Second})
+	cancel, errc := runWorker(w)
+	waitDone(t, done)
+
+	if got := len(h.results(t)); got != tools {
+		t.Errorf("user.tool_result = %d, want %d (a moving run must not be cut short)", got, tools)
+	}
+	if got := h.workState(t); got != "stopped" {
+		t.Errorf("work item state = %q, want stopped (the run completed)", got)
+	}
 	waitExit(t, cancel, errc)
 }
 

@@ -40,7 +40,7 @@ var skillDigitsRe = regexp.MustCompile(`^[0-9]+$`)
 // live sandbox skips rewriting unchanged skills (the reference re-extracts
 // every time, but its workdir is host-shared across sessions and cleaned per
 // item; this sandbox is per-session, so skipping is safe and cheaper).
-func SetupSkills(ctx context.Context, client sdk.Client, sessionID string, sb sandbox.Sandbox, workdir string) error {
+func SetupSkills(ctx context.Context, client sdk.Client, sessionID string, sb sandbox.Sandbox, workdir string, progress func()) error {
 	sess, err := client.Beta.Sessions.Get(ctx, sessionID, sdk.BetaSessionGetParams{})
 	if err != nil {
 		return fmt.Errorf("read session for skills: %w", err)
@@ -71,11 +71,15 @@ func SetupSkills(ctx context.Context, client sdk.Client, sessionID string, sb sa
 	seen := map[string]bool{}
 	misses := 0
 	for _, ref := range refs {
+		// Resolution is per-reference work too — round trips each, and the
+		// dangling ones leave by the continue below without ever reaching the
+		// write loop. A set of them is a run that is moving (#383).
+		progress()
 		if seen[ref.SkillID] {
 			continue
 		}
 		seen[ref.SkillID] = true
-		r, err := resolveSkill(ctx, client, ref)
+		r, err := resolveSkill(ctx, client, ref, progress)
 		if err != nil {
 			skipSkill(ctx, sessionID, ref.SkillID, ref.Version, err)
 			misses++
@@ -92,16 +96,29 @@ func SetupSkills(ctx context.Context, client sdk.Client, sessionID string, sb sa
 	// trees to still hold their SKILL.md — the workdir is agent-writable, so
 	// a tool call may have deleted skills the marker still claims.
 	sentinelPath := path.Join(workdir, "skills", skills.SentinelName)
+	// The probe is one sandbox read per recorded tree — a session may reference
+	// hundreds — and the skip returns without ever entering the write loop, so
+	// the reads report as they land rather than the whole probe counting as one
+	// silent step (#383).
+	probeRead := func(ctx context.Context, p string) ([]byte, error) {
+		progress()
+		return sb.ReadFile(ctx, p)
+	}
 	if misses == 0 {
 		if prev, err := sb.ReadFile(ctx, sentinelPath); err == nil &&
-			skills.SentinelMatches(ctx, sb.ReadFile, workdir, prev, resolved) {
+			skills.SentinelMatches(ctx, probeRead, workdir, prev, resolved) {
 			span.SetAttributes(attribute.Bool("skills.unchanged", true))
 			return nil
 		}
 	}
+	progress()
 
 	var landed []skills.Resolved
 	for _, r := range resolved {
+		// Per skill, at the top of the iteration — the files.go rule, so a set
+		// of large archives reports as it goes rather than once at the end
+		// (#383).
+		progress()
 		if err := materializeSkill(ctx, client, sb, workdir, r); err != nil {
 			skipSkill(ctx, sessionID, r.ID, r.Version, err)
 			continue
@@ -110,6 +127,11 @@ func SetupSkills(ctx context.Context, client sdk.Client, sessionID string, sb sa
 		recordSkillMaterialized(ctx, skillOutcomeOK)
 		slog.InfoContext(ctx, "skill materialized", "session_id", sessionID, "skill_id", r.ID, "version", r.Version)
 	}
+	// The pass boundary: the report at the top of the loop covers every item but
+	// the last one, whose landing would otherwise share a silent interval with
+	// the sentinel write behind it — a 500 MB mount and a slow sandbox write are
+	// each well inside the budget and together need not be (#383).
+	progress()
 	span.SetAttributes(attribute.Int("skills.materialized", len(landed)))
 	if err := sb.WriteFile(ctx, sentinelPath, skills.Sentinel(landed)); err != nil {
 		slog.WarnContext(ctx, "skills sentinel not written", "session_id", sessionID, "err", err)
@@ -140,13 +162,19 @@ func skipSkill(ctx context.Context, sessionID, skillID, version string, err erro
 // resolveSkillVersion resolves one reference the reference worker's way: an
 // all-digits version is already concrete; anything else ("latest") lists the
 // skill's versions and picks the newest numeric one client-side.
-func resolveSkillVersion(ctx context.Context, client sdk.Client, ref skillRef) (string, error) {
+func resolveSkillVersion(ctx context.Context, client sdk.Client, ref skillRef, progress func()) (string, error) {
 	if skillDigitsRe.MatchString(ref.Version) {
 		return ref.Version, nil
 	}
 	iter := client.Beta.Skills.Versions.ListAutoPaging(ctx, ref.SkillID, sdk.BetaSkillVersionListParams{})
 	best := ""
 	for iter.Next() {
+		// One reference can be many wire round trips: the alias is resolved by
+		// walking every version, and the pager fetches a page per Next. Reporting
+		// only around the whole resolution would put an unbounded number of them
+		// inside one silent interval — the rule this change is built on, applied
+		// to the one loop in this file that is not over items (#383).
+		progress()
 		if v := iter.Current().Version; skillDigitsRe.MatchString(v) && numericGreater(v, best) {
 			best = v
 		}
@@ -175,11 +203,14 @@ func numericGreater(a, b string) bool {
 // GET for the name, from which the landing directory is derived. The name
 // comes from the version object, never the sandbox, so it is safe to drive the
 // skip probe with.
-func resolveSkill(ctx context.Context, client sdk.Client, ref skillRef) (skills.Resolved, error) {
-	version, err := resolveSkillVersion(ctx, client, ref)
+func resolveSkill(ctx context.Context, client sdk.Client, ref skillRef, progress func()) (skills.Resolved, error) {
+	version, err := resolveSkillVersion(ctx, client, ref, progress)
 	if err != nil {
 		return skills.Resolved{}, err
 	}
+	// The version GET is a second round trip behind whatever the line above
+	// cost, so it gets its own interval rather than sharing that one.
+	progress()
 	v, err := client.Beta.Skills.Versions.Get(ctx, version, sdk.BetaSkillVersionGetParams{SkillID: ref.SkillID})
 	if err != nil {
 		return skills.Resolved{}, err

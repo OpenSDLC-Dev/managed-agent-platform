@@ -27,6 +27,11 @@ type ToolExecConfig struct {
 	// the same environment variables the executor reads, so a customer-hosted
 	// sandbox is capped the same way a platform-managed one is.
 	Hardening sandbox.Hardening
+	// Progress, when set, is called each time the run finishes a step — the
+	// sandbox provisioned, the skills or files materialized, a tool answered.
+	// The lease loop watches it to tell a long run from a wedged one (#383);
+	// a caller that runs the driver directly leaves it nil.
+	Progress func()
 }
 
 // toolUse is one unanswered agent.tool_use the worker must run: the tool-use
@@ -70,13 +75,29 @@ type toolUse struct {
 // post to a merely not-running one appends without resuming — so the complete
 // gate belongs in the caller, not in a reliance on the append being rejected.
 func RunSessionTools(ctx context.Context, client sdk.Client, provider sandbox.Provider, sessionID string, cfg ToolExecConfig) error {
-	uses, err := unansweredToolUses(ctx, client, sessionID)
+	// Called at each step below, so the caller's stall guard measures the run's
+	// silence rather than its length (#383). Nil-safe: a caller that does not
+	// watch the run passes none. Named report, not progress — the package's
+	// progress type is the tracker this ends up feeding.
+	report := cfg.Progress
+	if report == nil {
+		report = func() {}
+	}
+	// Before the scan, not after the caller: whatever the caller did last — the
+	// session liveness read, a wire round trip of its own — ends here, so it does
+	// not share a silent interval with the paging scan below. The budget's floor
+	// covers neither (#383).
+	report()
+	uses, err := unansweredToolUses(ctx, client, sessionID, report)
 	if err != nil {
 		return err
 	}
 	if len(uses) == 0 {
 		return nil
 	}
+	// The scan pages over the wire, and provisioning below can pull a cold
+	// image: two steps the budget must clear one at a time, not together.
+	report()
 	sb, err := provider.Provision(ctx, sandbox.Spec{
 		SessionID:  domain.ID(sessionID),
 		Image:      cfg.Image,
@@ -87,12 +108,15 @@ func RunSessionTools(ctx context.Context, client sdk.Client, provider sandbox.Pr
 	if err != nil {
 		return fmt.Errorf("provision sandbox: %w", err)
 	}
-	if err := SetupSkills(ctx, client, sessionID, sb, cfg.Workdir); err != nil {
+	report()
+	if err := SetupSkills(ctx, client, sessionID, sb, cfg.Workdir, report); err != nil {
 		return err
 	}
-	if err := SetupFiles(ctx, client, sessionID, sb, cfg.Workdir); err != nil {
+	report()
+	if err := SetupFiles(ctx, client, sessionID, sb, cfg.Workdir, report); err != nil {
 		return err
 	}
+	report()
 	runner := toolset.Runner{Sandbox: sb, Session: domain.ID(sessionID), Workdir: cfg.Workdir}
 	for _, u := range uses {
 		res, err := runner.Run(ctx, u.id, u.name, u.input)
@@ -101,9 +125,19 @@ func RunSessionTools(ctx context.Context, client sdk.Client, provider sandbox.Pr
 			// this tool and any after it are re-derived on a reclaiming pass.
 			return fmt.Errorf("tool %s (%s): %w", u.name, u.id, err)
 		}
+		// The run and the post are two steps, and reporting only after both puts
+		// them in one silent interval — which the floor does not cover. A `bash`
+		// call may legitimately take toolset.MaxTimeout, and posting its result is
+		// a wire round trip to the control plane with no bound of its own, so the
+		// pair can outlast a budget neither half comes close to. The run would then
+		// be cancelled *after* its side effects had happened and *before* its
+		// result was posted, and the reclaim would run the same command again
+		// (#383).
+		report()
 		if err := postToolResult(ctx, client, sessionID, u.id, res); err != nil {
 			return err
 		}
+		report()
 	}
 	return nil
 }
@@ -160,7 +194,7 @@ const toolScanPageSize = 20
 // others. On any log the current code can produce, the bound is exact and the
 // two diffs agree; a log a pre-#181 binary already stranded is the residue
 // neither reaches.
-func unansweredToolUses(ctx context.Context, client sdk.Client, sessionID string) ([]toolUse, error) {
+func unansweredToolUses(ctx context.Context, client sdk.Client, sessionID string, progress func()) ([]toolUse, error) {
 	iter := client.Beta.Sessions.Events.ListAutoPaging(ctx, sessionID, sdk.BetaSessionEventListParams{
 		Types: []string{
 			string(domain.EventAgentToolUse),
@@ -175,6 +209,10 @@ func unansweredToolUses(ctx context.Context, client sdk.Client, sessionID string
 	var sawUse bool
 scan:
 	for iter.Next() {
+		// Per event, because the walk auto-pages: a turn wide enough to span
+		// several pages would otherwise spend every one of those round trips
+		// inside a single silent step (#383).
+		progress()
 		var ev struct {
 			ID        string          `json:"id"`
 			Type      string          `json:"type"`

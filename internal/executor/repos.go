@@ -63,7 +63,7 @@ var errRepoNoCredential = errors.New("repository credential row missing")
 // and the agent sees an absent path. Unlike a file's, it also surfaces as a
 // session.error the client can see (decision 4). refs come from the same
 // locked session read that gated the run (sessionForRun).
-func (e *Executor) materializeRepos(ctx context.Context, sb sandbox.Sandbox, sid domain.ID, refs []repoRef) {
+func (e *Executor) materializeRepos(ctx context.Context, sb sandbox.Sandbox, sid domain.ID, refs []repoRef, progress func()) {
 	mounts := make([]repoRef, 0, len(refs))
 	for _, r := range refs {
 		if r.Type == "github_repository" && r.ID != "" && r.URL != "" && r.MountPath != "" {
@@ -90,6 +90,11 @@ func (e *Executor) materializeRepos(ctx context.Context, sb sandbox.Sandbox, sid
 
 	var landed, unchanged, failed int
 	for _, m := range mounts {
+		// Per repository, at the top of the iteration (the files.go rule, and
+		// for a sharper reason): a session may mount eight, each allowed
+		// RepoCloneTimeout, so a per-pass report would let a wholly healthy pass
+		// sit silent for far longer than any stall budget (#383).
+		progress()
 		if e.repoPresent(ctx, sb, m) {
 			unchanged++
 			recordRepoMaterialized(ctx, repoOutcomeUnchanged)
@@ -124,7 +129,13 @@ func (e *Executor) materializeRepos(ctx context.Context, sb sandbox.Sandbox, sid
 				"a secrets cipher is not configured on this executor")
 			continue
 		}
-		bytes, err := e.materializeRepo(ctx, sb, sid, m)
+		// The probe and the two guards above are behind us; what follows is the
+		// clone, whose own deadline is the floor's anchor. Reported here so that
+		// deadline is the whole of this interval rather than its tail — a slow
+		// presence exec ahead of a full-length clone would otherwise overrun a
+		// budget floored on the clone alone (#383).
+		progress()
+		bytes, err := e.materializeRepo(ctx, sb, sid, m, progress)
 		if err != nil {
 			failed++
 			reason := cloneReason(err)
@@ -157,11 +168,15 @@ func (e *Executor) materializeRepos(ctx context.Context, sb sandbox.Sandbox, sid
 // sends it as an Authorization header, so the tar that reaches the sandbox
 // carries a clean .git/config and the sandbox never sees the secret in any
 // form (plan 25 decision 1).
-func (e *Executor) materializeRepo(ctx context.Context, sb sandbox.Sandbox, sid domain.ID, m repoRef) (int64, error) {
+func (e *Executor) materializeRepo(ctx context.Context, sb sandbox.Sandbox, sid domain.ID, m repoRef, progress func()) (int64, error) {
 	token, err := e.repoToken(ctx, sid, m.ID)
 	if err != nil {
 		return 0, err
 	}
+	// The row read and the cipher's decrypt are their own round trips — a KMS
+	// among them — and the clone below is what the stall floor is measured
+	// against, so the two do not share an interval (#383).
+	progress()
 	ctx, cancel := context.WithTimeout(ctx, e.cfg.RepoCloneTimeout)
 	defer cancel()
 

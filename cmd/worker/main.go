@@ -19,6 +19,17 @@
 //	WORKER_IMAGE                 sandbox base image (default "debian:stable-slim")
 //	WORKER_WORKDIR               working directory inside the sandbox (default
 //	                             "/workspace")
+//	WORKER_STALL_TIMEOUT         how long a run may report no progress before the
+//	                             worker cancels it and stops heartbeating, so the
+//	                             lease lapses and the control plane re-offers the
+//	                             item — it is never released outright, since by
+//	                             then it may be another worker's to stop (Go
+//	                             duration, default 30m). No
+//	                             off switch, and floored at "11m" — one bash
+//	                             tool's timeout plus the kill and the answer that
+//	                             follow it: a budget under the longest step a
+//	                             healthy run takes makes every reclaim stall at
+//	                             the same place
 //	SANDBOX_BACKEND              "docker" (default) or "k8s"
 //	DOCKER_HOST                  Docker daemon address for the docker backend
 //	                             (falls back to the well-known socket)
@@ -57,6 +68,7 @@ import (
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/sandbox"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/sandbox/backend"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/telemetry"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/toolset"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/version"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/worker"
 )
@@ -120,6 +132,17 @@ func run(ctx context.Context) error {
 	// customer-hosted sandbox is capped the way a platform-managed one is.
 	if cfg.Hardening, err = sandbox.HardeningFromEnv(); err != nil {
 		return err
+	}
+	// The refusals — malformed, non-positive, under the floor — are the
+	// executor's, from the same helper, so the two binaries cannot drift and the
+	// guard is tested where a main package cannot be (toolset.ParseStallTimeout).
+	// This worker mounts files but clones no repository, so the floor rests on
+	// the one step every deployment has: a single bash call.
+	if v := os.Getenv("WORKER_STALL_TIMEOUT"); v != "" {
+		if cfg.StallTimeout, err = toolset.ParseStallTimeout(
+			"WORKER_STALL_TIMEOUT", v, 0); err != nil {
+			return err
+		}
 	}
 	client := worker.NewClient(baseURL, envKey)
 

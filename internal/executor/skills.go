@@ -42,7 +42,7 @@ var skillDigitsRe = regexp.MustCompile(`^[0-9]+$`)
 // live sandbox skips rewriting unchanged skills. refs come from the same
 // locked session read that gated the run (sessionForRun) — the reference's
 // one hard failure, the session read, faults there, so nothing here does.
-func (e *Executor) materializeSkills(ctx context.Context, sb sandbox.Sandbox, sid domain.ID, refs []skillRef) {
+func (e *Executor) materializeSkills(ctx context.Context, sb sandbox.Sandbox, sid domain.ID, refs []skillRef, progress func()) {
 	if len(refs) == 0 {
 		return
 	}
@@ -65,6 +65,10 @@ func (e *Executor) materializeSkills(ctx context.Context, sb sandbox.Sandbox, si
 	seen := map[string]bool{}
 	misses := 0
 	for _, ref := range refs {
+		// Resolution is per-reference work too — two round trips each, and the
+		// dangling ones leave by the continue below without ever reaching the
+		// write loop. A set of them is a run that is moving (#383).
+		progress()
 		if seen[ref.SkillID] {
 			continue
 		}
@@ -96,16 +100,29 @@ func (e *Executor) materializeSkills(ctx context.Context, sb sandbox.Sandbox, si
 	// trees to still hold their SKILL.md — the workdir is agent-writable, so
 	// a tool call may have deleted skills the marker still claims.
 	sentinelPath := path.Join(workdir, "skills", skills.SentinelName)
+	// The probe is one sandbox read per recorded tree — a session may reference
+	// hundreds — and the skip returns without ever entering the write loop, so
+	// the reads report as they land rather than the whole probe counting as one
+	// silent step (#383).
+	probeRead := func(ctx context.Context, p string) ([]byte, error) {
+		progress()
+		return sb.ReadFile(ctx, p)
+	}
 	if misses == 0 {
 		if prev, err := sb.ReadFile(ctx, sentinelPath); err == nil &&
-			skills.SentinelMatches(ctx, sb.ReadFile, workdir, prev, resolved) {
+			skills.SentinelMatches(ctx, probeRead, workdir, prev, resolved) {
 			span.SetAttributes(attribute.Bool("skills.unchanged", true))
 			return
 		}
 	}
+	progress()
 
 	var landed []skills.Resolved
 	for _, r := range resolved {
+		// Per skill, at the top of the iteration — the files.go rule, applied
+		// here so a set of large archives reports as it goes rather than once at
+		// the end (#383).
+		progress()
 		if err := e.materializeSkill(ctx, sb, workdir, r); err != nil {
 			e.skipSkill(ctx, sid, r.ID, r.Version, err)
 			continue
@@ -114,6 +131,11 @@ func (e *Executor) materializeSkills(ctx context.Context, sb sandbox.Sandbox, si
 		recordSkillMaterialized(ctx, skillOutcomeOK)
 		slog.InfoContext(ctx, "skill materialized", "session_id", sid, "skill_id", r.ID, "version", r.Version)
 	}
+	// The pass boundary: the report at the top of the loop covers every item but
+	// the last one, whose landing would otherwise share a silent interval with
+	// the sentinel write behind it — a 500 MB mount and a slow sandbox write are
+	// each well inside the budget and together need not be (#383).
+	progress()
 	span.SetAttributes(attribute.Int("skills.materialized", len(landed)))
 	// The sentinel records only what landed: a partial pass re-runs next time.
 	if err := sb.WriteFile(ctx, sentinelPath, skills.Sentinel(landed)); err != nil {

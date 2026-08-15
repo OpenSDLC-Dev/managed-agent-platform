@@ -48,7 +48,7 @@ var errFileMissing = errors.New("file missing")
 // re-provisioning a live sandbox skips an unchanged, still-present set;
 // per-file failure is logged and tolerated, never fatal to the run. refs come
 // from the same locked session read that gated the run (sessionForRun).
-func (e *Executor) materializeFiles(ctx context.Context, sb sandbox.Sandbox, sid domain.ID, refs []fileRef) {
+func (e *Executor) materializeFiles(ctx context.Context, sb sandbox.Sandbox, sid domain.ID, refs []fileRef, progress func()) {
 	mounts := make([]fileRef, 0, len(refs))
 	for _, r := range refs {
 		if r.Type == "file" && r.FileID != "" && r.MountPath != "" {
@@ -88,15 +88,27 @@ func (e *Executor) materializeFiles(ctx context.Context, sb sandbox.Sandbox, sid
 	// it is there.
 	marker := filesSentinel(mounts)
 	if sentinelUsable {
-		if prev, err := sb.ReadFile(ctx, sentinelPath); err == nil &&
-			bytes.Equal(prev, marker) && e.mountsPresent(ctx, sb, mounts) {
-			span.SetAttributes(attribute.Bool("files.unchanged", true))
-			return
+		if prev, err := sb.ReadFile(ctx, sentinelPath); err == nil && bytes.Equal(prev, marker) {
+			// The probe is two sandbox round trips — this read, then one exec
+			// that tests every mount — and the skip returns without ever
+			// entering the write loop, so the read reports before the exec
+			// rather than the pair counting as one silent step (#383).
+			progress()
+			if e.mountsPresent(ctx, sb, mounts) {
+				span.SetAttributes(attribute.Bool("files.unchanged", true))
+				return
+			}
 		}
 	}
 
 	landed := make([]fileRef, 0, len(mounts))
 	for _, m := range mounts {
+		// Reported at the top of the iteration, not the bottom: every tolerated
+		// miss below continues, and the run has moved either way — a mount that
+		// took its time and one that was skipped both leave the pass advancing
+		// (#383). One mount can be 500 MB, so a per-pass report would make a
+		// legitimately large set look silent.
+		progress()
 		if err := e.materializeFile(ctx, sb, m); err != nil {
 			outcome := fileOutcomeFailed
 			if errors.Is(err, errFileMissing) {
@@ -112,6 +124,11 @@ func (e *Executor) materializeFiles(ctx context.Context, sb sandbox.Sandbox, sid
 		slog.InfoContext(ctx, "file materialized",
 			"session_id", sid, "file_id", m.FileID, "mount_path", m.MountPath)
 	}
+	// The pass boundary: the report at the top of the loop covers every item but
+	// the last one, whose landing would otherwise share a silent interval with
+	// the sentinel write behind it — a 500 MB mount and a slow sandbox write are
+	// each well inside the budget and together need not be (#383).
+	progress()
 	span.SetAttributes(attribute.Int("files.materialized", len(landed)))
 	// The sentinel records only what landed: a partial pass (a dangling mount)
 	// leaves a marker that never equals the full set, so the next pass re-runs —

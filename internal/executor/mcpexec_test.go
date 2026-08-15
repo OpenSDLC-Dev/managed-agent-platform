@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -1171,5 +1172,167 @@ func TestMCPResourceWithNoAddressOmitsItsTitle(t *testing.T) {
 	}
 	if _, ok := blocks[0]["title"]; ok {
 		t.Errorf("block = %v, want no title at all rather than an empty one", blocks[0])
+	}
+}
+
+// TestMCPCallPassReportsProgressPerCall: the call lane reports one step per
+// call, not one per pass. A turn may stop on several MCP calls at once, each
+// costing a dial and a round trip to a third-party server, so a pass that
+// reported only on return would spend all of them inside one silent interval —
+// and a deployment whose pass budget outruns its stall budget would have every
+// reclaim cancelled at the same point, answering nothing (#383).
+func TestMCPCallPassReportsProgressPerCall(t *testing.T) {
+	url := mcptest.Server(t, mcptest.Tool{Name: "search", Result: "the answer"})
+	h := mcpHarness(t)
+	// Listed, not merely declared: the driver dials a call only where a listing
+	// published the endpoint, so a merely-declared server refuses every call
+	// instantly — which still produces a result apiece and would let this test
+	// count its reports without a single call ever leaving the process.
+	h.declareListedMCPServers(t, [2]string{"docs", url})
+	for range 3 {
+		h.appendMCPToolUse(t, "docs", "search", `{"q":"x"}`)
+	}
+	h.enqueueMCP(t)
+
+	item, err := h.queue.Claim(context.Background(), queue.MCPExec, time.Minute)
+	if err != nil || item == nil {
+		t.Fatalf("claim: %+v %v", item, err)
+	}
+	sess, live, err := h.exec.sessionForRun(context.Background(), item)
+	if err != nil || !live {
+		t.Fatalf("sessionForRun: live=%v err=%v", live, err)
+	}
+	calls, err := h.exec.unansweredMCPToolUses(context.Background(), item.SessionID)
+	if err != nil {
+		t.Fatalf("unansweredMCPToolUses: %v", err)
+	}
+	if len(calls) != 3 {
+		t.Fatalf("calls = %d, want the three that are unanswered", len(calls))
+	}
+
+	ready, err := h.exec.readyEndpoints(context.Background(), item.SessionID)
+	if err != nil {
+		t.Fatalf("readyEndpoints: %v", err)
+	}
+	var reports int
+	results, faultErr, runErr := h.exec.runMCPTools(context.Background(), sess.envConfig,
+		sess.vaultIDs, sess.mcpServers, ready,
+		&mcpSpiller{exec: h.exec, sid: item.SessionID, sess: sess},
+		calls, func() { reports++ })
+	if faultErr != nil || runErr != nil {
+		t.Fatalf("runMCPTools: fault=%v run=%v", faultErr, runErr)
+	}
+	if len(results) != 3 {
+		t.Fatalf("results = %d, want one per call", len(results))
+	}
+	// Each result carries what the server actually returned, not a refusal. A
+	// call the driver declines to make still produces a result and would leave
+	// every count above intact, so without this the test could pass with nothing
+	// ever leaving the process — which is exactly what it did while the servers
+	// were declared but unlisted.
+	for i, ev := range results {
+		if !strings.Contains(string(ev.Payload), "the answer") {
+			t.Errorf("result %d = %s, want the server's own answer", i, ev.Payload)
+		}
+	}
+	if want := len(calls) + 1; reports != want {
+		t.Errorf("progress reports = %d, want %d (one per call, plus the pass boundary that reports the last one answering)",
+			reports, want)
+	}
+}
+
+// TestAStalledMCPPassKeepsTheCallsThatAnswered: an MCP call that returned ran in
+// someone else's system, and its side effect is spent — a second run is a second
+// write to a third-party server, which no retry can undo. So a stall commits the
+// answers it has and hands the item back for the rest, exactly as the tool_exec
+// lane does; a lost lease still commits nothing.
+func TestAStalledMCPPassKeepsTheCallsThatAnswered(t *testing.T) {
+	release := make(chan struct{})
+	url := mcptest.Server(t,
+		mcptest.Tool{Name: "quick", Result: "answered"},
+		mcptest.Tool{Name: "wedged", While: func() { <-release }})
+	// Registered after the server, so cleanups being LIFO this one runs BEFORE
+	// the server's: closing the server first would wait on a handler that only
+	// this channel releases.
+	t.Cleanup(func() { close(release) })
+
+	h := mcpHarnessWith(t, Config{
+		LeaseTTL:     1500 * time.Millisecond,
+		StallTimeout: time.Second,
+	})
+	h.declareListedMCPServers(t, [2]string{"docs", url})
+	answered := h.appendMCPToolUse(t, "docs", "quick", `{}`)
+	h.appendMCPToolUse(t, "docs", "wedged", `{}`)
+	h.enqueueMCP(t)
+
+	item, err := h.queue.Claim(context.Background(), queue.MCPExec, 1500*time.Millisecond)
+	if err != nil || item == nil {
+		t.Fatalf("claim: %+v %v", item, err)
+	}
+	// This takes ~31s against a 1s budget, and deliberately so: the stall fires on
+	// time, but the cancelled call's own unwind is the rest. The lane dials per
+	// call and closes on return, and the SDK sends that session-ending DELETE on
+	// a context nothing can cancel, which a blocked handler spends in full. The
+	// 30s is the *fixture* client's cap (mcptest.Client sets no Timeout, so
+	// internal/mcp's transport falls back to DialTimeout); production runs tool
+	// calls through CallClient, whose cap is CallTimeout — so the real wait is
+	// longer than this test's, not shorter. Waking the handler early to shorten
+	// the test would make its own clock decide whether the stall or the release
+	// lands first, which is the flake this change exists to stop chasing.
+	if err := h.exec.processMCP(context.Background(), item); !errors.Is(err, queue.ErrWorkStalled) {
+		t.Fatalf("processMCP = %v, want it to report the stall", err)
+	}
+
+	results := h.mcpResults(t)
+	if len(results) != 1 {
+		t.Fatalf("results = %d, want 1 (the call that answered before the stall must not be re-run)", len(results))
+	}
+	if results[0]["mcp_tool_use_id"] != answered {
+		t.Errorf("kept %v, want the answer to the call that finished (%s)", results[0]["mcp_tool_use_id"], answered)
+	}
+	// The item is handed back for the call the stall cut short, never completed
+	// over: Enqueue is keyed (session, kind), so a second mcp_exec would be
+	// dropped on conflict and nothing would ever answer it.
+	if n := h.liveOf(t, queue.MCPExec); n != 1 {
+		t.Errorf("live mcp_exec = %d, want 1 (requeued for the unanswered call)", n)
+	}
+	if n := h.liveOf(t, queue.ModelTurn); n != 0 {
+		t.Errorf("live model_turn = %d, want 0 (a call is still unanswered)", n)
+	}
+}
+
+// TestAStalledMCPPassWithNothingAnsweredStillNamesTheCall: the exit taken when a
+// stall leaves *nothing* to commit. It has no results to protect, so it settles
+// nothing and lets the reclaim re-derive the pass — but the call it was inside
+// when the budget ran out is the first one, and the fault is the only place its
+// tool_use id is ever written down. Returning the bare sentinel there would
+// leave an operator a stalled item with no way to tell which call wedged, which
+// is the question they will actually have (#383).
+func TestAStalledMCPPassWithNothingAnsweredStillNamesTheCall(t *testing.T) {
+	release := make(chan struct{})
+	url := mcptest.Server(t, mcptest.Tool{Name: "wedged", While: func() { <-release }})
+	t.Cleanup(func() { close(release) })
+
+	h := mcpHarnessWith(t, Config{
+		LeaseTTL:     1500 * time.Millisecond,
+		StallTimeout: 900 * time.Millisecond,
+	})
+	h.declareListedMCPServers(t, [2]string{"docs", url})
+	wedged := h.appendMCPToolUse(t, "docs", "wedged", `{}`)
+	h.enqueueMCP(t)
+
+	item, err := h.queue.Claim(context.Background(), queue.MCPExec, 1500*time.Millisecond)
+	if err != nil || item == nil {
+		t.Fatalf("claim: %+v %v", item, err)
+	}
+	err = h.exec.processMCP(context.Background(), item)
+	if !errors.Is(err, queue.ErrWorkStalled) {
+		t.Fatalf("processMCP = %v, want it to report the stall", err)
+	}
+	if !strings.Contains(err.Error(), wedged) {
+		t.Errorf("processMCP = %q, want it to name the call the stall cut short (%s)", err, wedged)
+	}
+	if n := len(h.mcpResults(t)); n != 0 {
+		t.Errorf("results = %d, want 0 (nothing answered, so nothing to keep)", n)
 	}
 }

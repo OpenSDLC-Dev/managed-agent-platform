@@ -297,6 +297,54 @@ func TestAssertProvesOwnership(t *testing.T) {
 	}
 }
 
+// A claimant that asserts its lease and then writes must not find the item
+// reclaimed underneath the open transaction: the proof has to hold until the
+// commit, not just at the instant it is read. The stalled executor's partial
+// commit is where this bites — it settles with nothing renewing its lease, so
+// the row is reclaimable the whole time it is writing (#383).
+func TestAssertHoldsTheItemAgainstAConcurrentReclaim(t *testing.T) {
+	ctx := context.Background()
+	pool := pgtest.NewPool(t)
+	sessionID, envID := pgtest.NewSession(t, pool, "cloud")
+	q := queue.New(pool)
+
+	if _, err := q.Enqueue(ctx, pool, envID, sessionID, queue.ModelTurn); err != nil {
+		t.Fatal(err)
+	}
+	item, err := q.Claim(ctx, queue.ModelTurn, 50*time.Millisecond)
+	if err != nil || item == nil {
+		t.Fatalf("claim: %+v %v", item, err)
+	}
+	// Let the lease lapse with no renewal, then settle under it.
+	time.Sleep(60 * time.Millisecond)
+
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if err := q.Assert(ctx, tx, item); err != nil {
+		t.Fatalf("Assert inside the settling transaction: %v", err)
+	}
+
+	re, err := q.Claim(ctx, queue.ModelTurn, time.Minute)
+	if err != nil {
+		t.Fatalf("concurrent claim: %v", err)
+	}
+	if re != nil {
+		t.Fatalf("reclaimed %s while its holder was settling: two claimants own it", re.ID)
+	}
+
+	// Once the settlement commits, the lapsed lease is reclaimable again — the
+	// lock defers the reclaim, it does not cancel it.
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+	if re, err = q.Claim(ctx, queue.ModelTurn, time.Minute); err != nil || re == nil {
+		t.Fatalf("reclaim after the settlement committed: %+v %v", re, err)
+	}
+}
+
 func TestEnqueueUnknownSessionFails(t *testing.T) {
 	ctx := context.Background()
 	pool := pgtest.NewPool(t)

@@ -141,8 +141,10 @@ func (e *Executor) processMCP(ctx context.Context, item *queue.Item) (err error)
 
 	// Keep the lease across the dials: a server that answers slowly would
 	// otherwise outlast a fixed TTL and lose the item mid-listing.
-	kctx, keeper := e.queue.KeepLease(ctx, item, e.cfg.LeaseTTL)
-	rows, runErr := e.discoverServers(kctx, sess.envConfig, sess.vaultIDs, pending)
+	// Progress is one server reached, not one pass finished — answerMCPCalls says
+	// why the pass being bounded whole is not enough on its own (#383).
+	kctx, keeper := e.queue.KeepLease(ctx, item, e.cfg.LeaseTTL, e.cfg.StallTimeout)
+	rows, runErr := e.discoverServers(kctx, sess.envConfig, sess.vaultIDs, pending, keeper.Progress)
 	if kerr := keeper.Close(); kerr != nil {
 		return fmt.Errorf("lease keeper: %w", kerr)
 	}
@@ -257,7 +259,7 @@ func (e *Executor) undiscoveredServers(ctx context.Context, sid domain.ID, decla
 // does to unwind (see mcp.DialTimeout on why that is seconds rather than
 // immediate).
 func (e *Executor) discoverServers(ctx context.Context, cfg domain.EnvironmentConfig,
-	vaultIDs []string, servers []mcpServerRef) ([]catalogRow, error) {
+	vaultIDs []string, servers []mcpServerRef, progress func()) ([]catalogRow, error) {
 	budget, cancel := context.WithTimeout(ctx, e.cfg.MCPPassTimeout)
 	defer cancel()
 
@@ -273,6 +275,12 @@ func (e *Executor) discoverServers(ctx context.Context, cfg domain.EnvironmentCo
 	defer wg.Wait()
 
 	for i, s := range servers {
+		// Per server, at the top of the iteration — the files.go rule: a server
+		// the pass never reached still advances it (#383). Reported from this
+		// goroutine alone, and the loop only gets here as dials complete and free
+		// their slots, so silence here means the dials in flight have all stopped
+		// moving — which is exactly what the budget above is meant to catch.
+		progress()
 		// The slot is taken before the credential is resolved, not after,
 		// because what it has to cover is *this* server's resolve and dial
 		// together. A refresh hands back a token whose remaining life may be
@@ -307,6 +315,18 @@ func (e *Executor) discoverServers(ctx context.Context, cfg domain.EnvironmentCo
 	if ctx.Err() != nil {
 		return nil, fmt.Errorf("discover mcp servers: %w", ctx.Err())
 	}
+	// The loop reports as it launches each server's dial, so the last launch and
+	// the settlement behind it would otherwise share one silent interval. What
+	// this does not cover is the deferred wg.Wait below: the dials still in
+	// flight when the loop ends are waited out after this, silently. Nor is that
+	// wait bounded by the pass budget, which would be the easy thing to assume —
+	// each listing closes its connection on the way out, and the SDK sends that
+	// session-ending DELETE on a context nothing here can cancel, so it is capped
+	// by the client's own request cap rather than by `budget` (30s, on the client
+	// discovery dials with; internal/mcp documents which cap belongs to which
+	// client). A pass can therefore overrun MCPPassTimeout by a teardown, and
+	// what has to stay inside the stall budget is the sum (#383).
+	progress()
 	return rows, nil
 }
 

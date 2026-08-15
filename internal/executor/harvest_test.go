@@ -146,6 +146,49 @@ func TestHarvestPublishesSnapshotAndChainsGrading(t *testing.T) {
 	}
 }
 
+func TestHarvestReportsProgressAsItStages(t *testing.T) {
+	// The harvest is the second lane that reads a sandbox, so its item carries
+	// the same stall bound (#383) — and that bound is only safe if a harvest
+	// that is merely large keeps reporting. Counted rather than timed: the guard
+	// itself is tested in executor_test.go, and what can silently break here is
+	// the reporting, which a count pins deterministically.
+	sb := &fakeSandbox{files: map[string]string{
+		outputsDir + "/a.txt": "1",
+		outputsDir + "/b.txt": "2",
+		outputsDir + "/c.txt": "3",
+	}}
+	h := newHarness(t, sb)
+	h.seedOutcome(t, domain.OutcomeResultEvaluating)
+	h.enqueueHarvest(t)
+
+	ctx := context.Background()
+	item, err := h.queue.Claim(ctx, queue.OutputsHarvest, time.Minute)
+	if err != nil || item == nil {
+		t.Fatalf("Claim: item=%v err=%v", item, err)
+	}
+	sess, live, err := h.exec.sessionForRun(ctx, item)
+	if err != nil || !live {
+		t.Fatalf("sessionForRun: live=%v err=%v", live, err)
+	}
+
+	var reports int
+	files, err := h.exec.collectOutputs(ctx, item, sess, func() { reports++ })
+	if err != nil {
+		t.Fatalf("collectOutputs: %v", err)
+	}
+	if len(files) != 3 {
+		t.Fatalf("staged = %d, want 3", len(files))
+	}
+	// One per staged file, the three provisioning steps, the sandbox and the
+	// listing before them, and the boundary that reports the last file staging
+	// — an exact count, because a report that quietly stops being made is the
+	// failure this test exists to catch.
+	if reports != 9 {
+		t.Errorf("progress reports = %d, want 9 (3 provisioning steps, sandbox, listing, %d files, pass boundary)",
+			reports, len(files))
+	}
+}
+
 func TestReHarvestReplacesSnapshotPerPath(t *testing.T) {
 	sb := &fakeSandbox{files: map[string]string{
 		outputsDir + "/report.json": "v1",

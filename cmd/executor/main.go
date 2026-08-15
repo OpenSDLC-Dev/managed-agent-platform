@@ -19,6 +19,19 @@
 //	EXECUTOR_LEASE_TTL       work-item lease, Go duration (default "15m") —
 //	                         must comfortably exceed a single tool's timeout
 //	EXECUTOR_POLL_INTERVAL   idle queue poll, Go duration (default "500ms")
+//	EXECUTOR_STALL_TIMEOUT   how long a claimed item may report no progress
+//	                         before the lease keeper cancels it and lets the
+//	                         lease lapse for another executor to reclaim (Go
+//	                         duration, default "30m"). No off switch, and floored
+//	                         at the longest single step this binary can name plus
+//	                         a minute for the kill and the answer that follow it:
+//	                         "11m" for one bash tool's timeout, or
+//	                         EXECUTOR_REPO_CLONE_TIMEOUT plus a minute where that
+//	                         is longer, since one clone is one silent interval.
+//	                         The floor holds for the default too: a clone budget
+//	                         the default cannot clear fails startup until this is
+//	                         set. A budget under that step makes every reclaim
+//	                         stall at the same place
 //	EXECUTOR_REAP_INTERVAL   sandbox reap pass interval, Go duration (default
 //	                         "1m"); each pass destroys the sandboxes of
 //	                         deleted (tombstone-evidenced), archived, and
@@ -126,6 +139,7 @@ import (
 	secretsbackend "github.com/OpenSDLC-Dev/managed-agent-platform/internal/secrets/backend"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/store"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/telemetry"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/toolset"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/version"
 )
 
@@ -210,6 +224,25 @@ func run(ctx context.Context) error {
 			}
 			*dst = d
 		}
+	}
+	// The stall budget is parsed apart from the loop above because its refusals
+	// are its own (toolset.ParseStallTimeout), and floored against the longest
+	// single step THIS binary can name. A bash call is that step everywhere; a
+	// repository clone is the executor's own, and it is the sharper one — the
+	// materialization reports once per repository and gives each clone the whole
+	// of RepoCloneTimeout, so an operator who raises that knob for a large
+	// monorepo past the stall budget makes every reclaim cancel the same clone
+	// at the same point (#383). Read after the loop, so the clone budget it is
+	// compared against is the configured one.
+	if v := os.Getenv("EXECUTOR_STALL_TIMEOUT"); v != "" {
+		if cfg.StallTimeout, err = toolset.ParseStallTimeout(
+			"EXECUTOR_STALL_TIMEOUT", v, cfg.RepoCloneTimeout); err != nil {
+			return err
+		}
+	} else if err := toolset.CheckStallDefault(
+		"EXECUTOR_STALL_TIMEOUT", "EXECUTOR_REPO_CLONE_TIMEOUT",
+		executor.DefaultStallTimeout, cfg.RepoCloneTimeout); err != nil {
+		return err
 	}
 	// Unset takes the 24h default; an explicit "0" disables the idle tier
 	// (Config's zero value), matching the knob's documented semantics.

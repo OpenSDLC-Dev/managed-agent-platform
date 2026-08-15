@@ -341,7 +341,7 @@ func TestProvisionWaitsForTheSessionLock(t *testing.T) {
 
 	done := make(chan error, 1)
 	go func() {
-		_, err := h.exec.provisionSandbox(ctx, h.sid, sessionRun{networking: domain.Networking{Type: domain.NetUnrestricted}})
+		_, err := h.exec.provisionSandbox(ctx, h.sid, sessionRun{networking: domain.Networking{Type: domain.NetUnrestricted}}, func() {})
 		done <- err
 	}()
 

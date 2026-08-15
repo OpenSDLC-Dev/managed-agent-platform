@@ -47,9 +47,16 @@ type fakeSandbox struct {
 	failPath string
 	// entered (if set) receives one signal the first time WriteFile is entered,
 	// and gate (if set) blocks WriteFile until closed — together they let a test
-	// hold a tool mid-run to observe the lease keeper renew.
-	entered chan struct{}
-	gate    chan struct{}
+	// hold a tool mid-run to observe the lease keeper renew. gateFrom is the
+	// WriteFile call the gate starts holding at (1-based; 0 means the first), so
+	// a test can let some tools finish before one wedges. writes counts them.
+	entered  chan struct{}
+	gate     chan struct{}
+	gateFrom int
+	// delay, if set, is how long each WriteFile takes, so a test can build a run
+	// that is long overall while every single step is quick — the shape a stall
+	// guard must carry rather than kill (#383).
+	delay time.Duration
 	// bulkSizes records the member count of every WriteFiles call, so a test can
 	// hold a materializer to one batched call carrying a skill's whole tree,
 	// rather than one write per file (#206).
@@ -134,14 +141,22 @@ func (f *fakeSandbox) ReadFileStream(ctx context.Context, path string, maxBytes 
 	return io.NopCloser(bytes.NewReader(data)), int64(len(data)), nil
 }
 func (f *fakeSandbox) WriteFile(ctx context.Context, path string, data []byte) error {
+	if f.delay > 0 {
+		select {
+		case <-time.After(f.delay):
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
 	f.writes++
-	if f.entered != nil {
+	held := f.gateFrom <= 1 || f.writes >= f.gateFrom
+	if f.entered != nil && held {
 		select {
 		case f.entered <- struct{}{}:
 		default:
 		}
 	}
-	if f.gate != nil {
+	if f.gate != nil && held {
 		select {
 		case <-f.gate:
 		case <-ctx.Done():
@@ -788,6 +803,331 @@ func TestLeaseRenewedWhileToolRuns(t *testing.T) {
 	}
 	if got := h.liveOf(t, queue.ToolExec); got != 0 {
 		t.Errorf("tool_exec live = %d, want 0 (completed under renewed lease)", got)
+	}
+}
+
+func TestStalledToolReleasesTheItemForReclaim(t *testing.T) {
+	// The wedge #383 is about: a sandbox call that never returns leaves this
+	// executor blocked, the row untouched and the lease renewing forever, so the
+	// documented recovery — the lease lapses, another executor reclaims — never
+	// fires, because nothing crashed. A run that reports no progress for its
+	// stall budget is cancelled and its lease left to lapse: nothing commits, and
+	// the item stays live for the reclaim.
+	sb := &fakeSandbox{entered: make(chan struct{}, 1), gate: make(chan struct{})}
+	// A second of budget, not a few hundred milliseconds: the clock starts before
+	// the session load and the provision, so a tight budget could cancel the run
+	// before the gated tool is ever entered — and then the receive below would
+	// block until go test's package alarm, which is the very failure this change
+	// exists to remove (#318).
+	h := newHarnessWith(t, &fakeProvider{sb: sb},
+		Config{LeaseTTL: 1500 * time.Millisecond, StallTimeout: time.Second})
+	var faultErr error
+	h.exec.onFault = func(_ *queue.Item, err error) { faultErr = err }
+	h.suspend(t, writeUse("out.txt", "hi"))
+
+	done := make(chan struct{})
+	go func() { _, _ = h.exec.step(context.Background()); close(done) }()
+
+	select {
+	case <-sb.entered:
+	case <-time.After(15 * time.Second):
+		t.Fatal("the gated tool was never entered")
+	}
+	// Without the guard the gated tool holds the run — and the lease — forever.
+	select {
+	case <-done:
+	case <-time.After(15 * time.Second):
+		t.Fatal("the wedged run was never given up")
+	}
+
+	if !errors.Is(faultErr, queue.ErrWorkStalled) {
+		t.Errorf("fault = %v, want ErrWorkStalled", faultErr)
+	}
+	// And it says which tool wedged. "The item stalled" alone sends an operator
+	// to the whole session; the tool fault carries the name and the tool_use id,
+	// and this is the only place either is written down.
+	if faultErr == nil || !strings.Contains(faultErr.Error(), "tool write") {
+		t.Errorf("fault = %v, want the wedged tool named alongside the stall", faultErr)
+	}
+	if got := len(h.types(t, "agent.tool_result")); got != 0 {
+		t.Errorf("results = %d, want 0 (the wedged tool never answered)", got)
+	}
+	if got := h.liveOf(t, queue.ToolExec); got != 1 {
+		t.Errorf("tool_exec live = %d, want 1 (a stalled item is left for reclaim, not completed)", got)
+	}
+	if got := h.liveOf(t, queue.ModelTurn); got != 0 {
+		t.Errorf("model_turn = %d, want 0 (a stalled run resumes nothing)", got)
+	}
+	close(sb.gate) // release, though the tool already returned via cancellation
+}
+
+func TestLongButMovingToolRunKeepsItsItem(t *testing.T) {
+	// The other half of the guard, and the one that decides whether it can ship:
+	// a run that is long overall but keeps finishing steps must never be killed
+	// for being long. The budget is 900ms against thirty 50ms tools — one and two
+	// thirds of the budget in total, an eighteenth of it per step, so a step can
+	// take eighteen times its usual round trip and still report inside the budget.
+	// That margin is what keeps this test from becoming the flake class it is
+	// defending against. Only the per-tool progress reports keep the run alive.
+	//
+	// The lease TTL is short on purpose: the keeper checks for a stall on its
+	// renewal tick (TTL/3), so a long TTL would let a run with no progress
+	// reports finish before the first check and pass this test with the reports
+	// removed. At a 1.5s TTL the checks land at 500ms, 1s and 1.5s, and the 900ms
+	// budget is what puts the mutation's death on the second of them rather than
+	// the third: 1s of silence exceeds it by a clear 100ms, where a 1s budget
+	// would be decided by whether the tick landed a hair either side of exactly
+	// its own length — and the third check is a dead heat with this run's own
+	// 1.5s. So a report-less run dies at ~1s, this one finishes at ~1.5s, and the
+	// gap between them is arithmetic rather than luck.
+	const tools = 30
+	sb := &fakeSandbox{delay: 50 * time.Millisecond}
+	h := newHarnessWith(t, &fakeProvider{sb: sb},
+		Config{LeaseTTL: 1500 * time.Millisecond, StallTimeout: 900 * time.Millisecond})
+	uses := make([]string, tools)
+	for i := range uses {
+		uses[i] = writeUse(fmt.Sprintf("out%d.txt", i), "hi")
+	}
+	h.suspend(t, uses...)
+
+	if _, err := h.exec.step(context.Background()); err != nil {
+		t.Fatalf("step: %v", err)
+	}
+	if got := len(h.types(t, "agent.tool_result")); got != tools {
+		t.Errorf("results = %d, want %d (a moving run must not be cut short)", got, tools)
+	}
+	if got := h.liveOf(t, queue.ToolExec); got != 0 {
+		t.Errorf("tool_exec live = %d, want 0 (the run completed)", got)
+	}
+	if got := h.liveOf(t, queue.ModelTurn); got != 1 {
+		t.Errorf("model_turn = %d, want 1 (a completed set resumes the turn)", got)
+	}
+}
+
+// TestStallFaultKeepsBothTheSentinelAndTheCause pins the property that the
+// obvious spelling of this fold silently breaks. Choosing between the two with
+// cmp.Or looks equivalent and is not: a stall almost always cancels a call in
+// flight, so a cause almost always exists, so the sentinel almost always loses —
+// and errors.Is(err, queue.ErrWorkStalled), which is how an operator and the
+// settling lanes recognise a stall at all, goes quietly false in exactly the
+// case it is needed. Every lane that settles a stall folds through here, and the
+// worst path — a settlement whose own append fails — is the one where nothing
+// else records either fact (#383).
+func TestStallFaultKeepsBothTheSentinelAndTheCause(t *testing.T) {
+	cause := fmt.Errorf("web tool web_fetch (toolu_1): %w", context.Canceled)
+	got := stallFault(queue.ErrWorkStalled, cause)
+	if !errors.Is(got, queue.ErrWorkStalled) {
+		t.Errorf("errors.Is(%v, ErrWorkStalled) = false, want true (the sentinel is what a stall is matched on)", got)
+	}
+	if !errors.Is(got, context.Canceled) {
+		t.Errorf("errors.Is(%v, context.Canceled) = false, want true (the cause must survive the fold)", got)
+	}
+	if !strings.Contains(got.Error(), "toolu_1") {
+		t.Errorf("stallFault = %q, want it to name the tool_use the stall cut short", got)
+	}
+	// Nothing to fold in: setup stalled before a call was reached, and the
+	// sentinel must come back unwrapped rather than wrapped around nil.
+	if got := stallFault(queue.ErrWorkStalled, nil); !errors.Is(got, queue.ErrWorkStalled) {
+		t.Errorf("stallFault(kerr, nil) = %v, want the sentinel itself", got)
+	}
+}
+
+func TestStalledRunCommitsTheToolsThatAlreadyAnswered(t *testing.T) {
+	// Containment must not cost more than the wedge did. A stalled item is
+	// released for reclaim, so anything this pass ran and did not commit would be
+	// run a second time by the reclaiming pass — and a tool's side effects are
+	// already spent the moment it returns (a push, a POST, a file appended). So a
+	// stall commits the results that did answer, down the same partial-commit
+	// path a backend fault uses: the item stays live, no turn is enqueued while
+	// uses are unanswered, and only the wedged tool and the ones behind it are
+	// re-derived. A lost lease still commits nothing — there the row belongs to
+	// someone else (#383).
+	sb := &fakeSandbox{entered: make(chan struct{}, 1), gate: make(chan struct{}), gateFrom: 2}
+	h := newHarnessWith(t, &fakeProvider{sb: sb},
+		Config{LeaseTTL: 1500 * time.Millisecond, StallTimeout: time.Second})
+	var faultErr error
+	h.exec.onFault = func(_ *queue.Item, err error) { faultErr = err }
+	h.suspend(t, writeUse("first.txt", "one"), writeUse("second.txt", "two"))
+
+	done := make(chan struct{})
+	go func() { _, _ = h.exec.step(context.Background()); close(done) }()
+
+	// The first tool answered; the second is held open and never returns.
+	select {
+	case <-sb.entered:
+	case <-time.After(15 * time.Second):
+		t.Fatal("the second tool was never entered")
+	}
+	select {
+	case <-done:
+	case <-time.After(15 * time.Second):
+		t.Fatal("the wedged run was never given up")
+	}
+
+	if !errors.Is(faultErr, queue.ErrWorkStalled) {
+		t.Errorf("fault = %v, want ErrWorkStalled", faultErr)
+	}
+	if got := len(h.types(t, "agent.tool_result")); got != 1 {
+		t.Errorf("results = %d, want 1 (the tool that answered before the stall must not be re-run)", got)
+	}
+	if got := h.liveOf(t, queue.ToolExec); got != 1 {
+		t.Errorf("tool_exec live = %d, want 1 (a stalled item is left for reclaim)", got)
+	}
+	if got := h.liveOf(t, queue.ModelTurn); got != 0 {
+		t.Errorf("model_turn = %d, want 0 (a tool is still unanswered)", got)
+	}
+	close(sb.gate) // release, though the tool already returned via cancellation
+}
+
+func TestMaterializationReportsProgressPerItem(t *testing.T) {
+	// Each materialization pass reports per item, not once per pass — the
+	// difference decides whether the stall bound can be worn (#383). A session
+	// may mount eight repositories, each allowed RepoCloneTimeout, and each mount
+	// may be 500 MB, so a pass over a legitimate set outlasts any budget a wedge
+	// should not. Counted rather than timed, and counted over items that are
+	// *skipped* — a dangling skill, a repository this executor cannot clone
+	// without a cipher, a file whose row is gone — because a tolerated miss still
+	// costs a round trip and still means the run is moving.
+	sb := &fakeSandbox{}
+	h := newHarness(t, sb)
+	h.seedSkill(t, "skill_progressa", "20260101", "alpha", map[string]string{"SKILL.md": "---\nname: alpha\n---\n"})
+	h.seedSkill(t, "skill_progressb", "20260101", "beta", map[string]string{"SKILL.md": "---\nname: beta\n---\n"})
+	ctx := context.Background()
+
+	var reports int
+	count := func() { reports++ }
+	// Three references, the third dangling. Resolution is its own loop, and the
+	// dangling one leaves it by the skip path without ever reaching the write
+	// loop — so a per-write report alone would count a set of dangling skills as
+	// silence, however many round trips resolving them took.
+	h.exec.materializeSkills(ctx, sb, h.sid, []skillRef{
+		{SkillID: "skill_progressa", Version: "20260101"},
+		{SkillID: "skill_progressb", Version: "20260101"},
+		{SkillID: "skill_progressgone", Version: "20260101"},
+	}, count)
+	if reports != 7 {
+		t.Errorf("skills reports = %d, want 7 (3 resolved + 1 sentinel decision + 2 written + the pass boundary)", reports)
+	}
+
+	// The same set again: the sentinel now matches, so the pass returns without
+	// entering the write loop. The probe is a sandbox read per recorded tree —
+	// the one step of this lane a large unchanged set spends real time on — so
+	// those reads report as they land. (The skip itself does not report: the
+	// caller reports the moment this returns.)
+	reports = 0
+	h.exec.materializeSkills(ctx, sb, h.sid, []skillRef{
+		{SkillID: "skill_progressa", Version: "20260101"},
+		{SkillID: "skill_progressb", Version: "20260101"},
+	}, count)
+	if reports != 4 {
+		t.Errorf("unchanged-set reports = %d, want 4 (2 resolved + 2 sentinel reads)", reports)
+	}
+
+	reports = 0
+	h.exec.materializeRepos(ctx, sb, h.sid, []repoRef{
+		{Type: "github_repository", ID: "sesrsc_a", URL: "https://github.com/o/a", MountPath: "/workspace/a"},
+		{Type: "github_repository", ID: "sesrsc_b", URL: "https://github.com/o/b", MountPath: "/workspace/b"},
+		{Type: "github_repository", ID: "sesrsc_c", URL: "https://github.com/o/c", MountPath: "/workspace/c"},
+	}, count)
+	if reports != 6 {
+		t.Errorf("repos reports = %d, want 6 (one per repository, refused ones included, plus one before each clone)", reports)
+	}
+
+	reports = 0
+	h.exec.materializeFiles(ctx, sb, h.sid, []fileRef{
+		{Type: "file", FileID: "file_gone1", MountPath: "/mnt/session/uploads/a"},
+		{Type: "file", FileID: "file_gone2", MountPath: "/mnt/session/uploads/b"},
+	}, count)
+	if reports != 3 {
+		t.Errorf("files reports = %d, want 3 (one per mount, dangling ones included, plus the pass boundary)", reports)
+	}
+
+	// And the boundary is not decoration: the last mount landing and the sentinel
+	// write behind it are two steps. A 500 MB mount is well inside the budget and
+	// so is a slow sandbox write; together they need not be, and a pass cancelled
+	// between them writes no sentinel, so every reclaim repeats the whole
+	// materialization and dies at the same place (#383).
+	reports = 0
+	h.exec.materializeFiles(ctx, sb, h.sid, []fileRef{
+		{Type: "file", FileID: "file_gone1", MountPath: "/mnt/session/uploads/a"},
+	}, count)
+	if reports != 2 {
+		t.Errorf("one-mount reports = %d, want 2 (the mount, then the boundary before the sentinel write)", reports)
+	}
+
+	// The unchanged-set path is the files lane's own probe: a marker read, then
+	// one exec that tests every mount. It returns without entering the write
+	// loop, so the read has to report before the exec rather than the two
+	// counting as one silent step — a session with hundreds of mounts spends the
+	// whole probe there (#383).
+	h.seedFile(t, "file_probe", "mounted")
+	mounted := []fileRef{{Type: "file", FileID: "file_probe", MountPath: "/mnt/session/uploads/probe"}}
+	h.exec.materializeFiles(ctx, sb, h.sid, mounted, count)
+	reports = 0
+	h.exec.materializeFiles(ctx, sb, h.sid, mounted, count)
+	if reports != 1 {
+		t.Errorf("unchanged-mount reports = %d, want 1 (the marker read, before the presence exec)", reports)
+	}
+}
+
+func TestProvisioningReportsBetweenItsSteps(t *testing.T) {
+	// Provisioning is the run's longest stretch of not-a-tool-call — resolving
+	// credentials, waiting out another goroutine's checkpoint capture on the
+	// session lock, then the pull — and the budget clears one silent step at a
+	// time. Reporting only on return would make the whole stretch one interval
+	// and put the largest healthy pause of all under the wedge bound (#383).
+	sb := &fakeSandbox{}
+	h := newHarness(t, sb)
+	var reports int
+	if _, err := h.exec.provisionSandbox(context.Background(), h.sid,
+		sessionRun{networking: domain.Networking{Type: domain.NetUnrestricted}},
+		func() { reports++ }); err != nil {
+		t.Fatalf("provisionSandbox: %v", err)
+	}
+	if reports != 3 {
+		t.Errorf("provision reports = %d, want 3 (credentials resolved, session lock taken, sandbox up)", reports)
+	}
+}
+
+func TestAStallWithNothingLeftUnansweredCompletesTheItem(t *testing.T) {
+	// A stall can land on a pass with nothing left to answer — here a redundant
+	// reclaim wedged in provisioning, whose session's tools another pass already
+	// committed. Leaving that item live would be worse than untidy: the
+	// model_turn the settlement schedules would find its own follow-on tool_exec
+	// swallowed by the live-item dedupe, and the session would sit still until
+	// the abandoned lease lapsed. Nothing is unanswered, so there is nothing for
+	// a reclaim to do: the item is finished.
+	prov := &fakeProvider{sb: &fakeSandbox{}, entered: make(chan struct{}, 1), gate: make(chan struct{})}
+	h := newHarnessWith(t, prov, Config{LeaseTTL: 1500 * time.Millisecond, StallTimeout: time.Second})
+	var faultErr error
+	h.exec.onFault = func(_ *queue.Item, err error) { faultErr = err }
+	h.suspend(t) // an item, no unanswered uses
+
+	done := make(chan struct{})
+	go func() { _, _ = h.exec.step(context.Background()); close(done) }()
+
+	select {
+	case <-prov.entered:
+	case <-time.After(15 * time.Second):
+		t.Fatal("provisioning was never entered")
+	}
+	select {
+	case <-done:
+	case <-time.After(15 * time.Second):
+		t.Fatal("the wedged provision was never given up")
+	}
+
+	if !errors.Is(faultErr, queue.ErrWorkStalled) {
+		t.Errorf("fault = %v, want ErrWorkStalled", faultErr)
+	}
+	if faultErr == nil || !strings.Contains(faultErr.Error(), "provision sandbox") {
+		t.Errorf("fault = %v, want the provisioning error kept alongside the stall", faultErr)
+	}
+	if got := h.liveOf(t, queue.ToolExec); got != 0 {
+		t.Errorf("tool_exec live = %d, want 0 (nothing was left unanswered, so the item is done)", got)
+	}
+	if got := h.liveOf(t, queue.ModelTurn); got != 1 {
+		t.Errorf("model_turn = %d, want 1 (every use is answered, so the turn resumes)", got)
 	}
 }
 

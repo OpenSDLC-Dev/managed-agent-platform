@@ -56,6 +56,12 @@ const (
 // expired and another claim took over, or it already finished.
 var ErrLeaseLost = errors.New("queue: work item lease lost")
 
+// ErrWorkStalled reports that the holder stopped making progress for longer than
+// its keeper's stall budget, so the keeper cancelled the work and stopped
+// renewing. It is a distinct outcome from ErrLeaseLost on purpose: the lease was
+// never taken from this claimant, it was given up (#383).
+var ErrWorkStalled = errors.New("queue: work item stalled")
+
 // Item is one claimed unit of work.
 type Item struct {
 	ID            domain.ID
@@ -414,10 +420,23 @@ func (q *Queue) Requeue(ctx context.Context, db DB, item *Item) error {
 // announcement) must carry this proof like every other state write: a
 // claimant that stalled past its lease could otherwise flip a session
 // another brain has since settled.
+//
+// It locks the work row rather than merely reading it, because an unlocked read
+// is only a proof at the instant it runs: a reclaim committing between the read
+// and the caller's commit would leave two holders writing the same session. The
+// lock lasts as long as the caller's transaction, which is the only place this
+// belongs — handed a pool it is a bare read again, the row lock ending with the
+// implicit transaction the statement ran in. The
+// lock closes that window from both sides — Claim takes its rows FOR UPDATE
+// SKIP LOCKED, so it skips a row being asserted rather than blocking on it, and
+// a reclaim that got there first has already changed lease_expires_at, which
+// this read then fails on. The window is widest where nothing renews the lease
+// while the caller settles, which is exactly the stalled executor's partial
+// commit (#383).
 func (q *Queue) Assert(ctx context.Context, db DB, item *Item) error {
 	var one int
 	err := db.QueryRow(ctx,
-		`SELECT 1 FROM work_items WHERE id = $1 AND state = 'active' AND lease_expires_at = $2`,
+		`SELECT 1 FROM work_items WHERE id = $1 AND state = 'active' AND lease_expires_at = $2 FOR UPDATE`,
 		item.ID, item.Lease).Scan(&one)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return fmt.Errorf("queue: assert %s: %w", item.ID, ErrLeaseLost)

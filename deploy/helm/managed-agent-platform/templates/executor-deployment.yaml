@@ -175,6 +175,10 @@ spec:
             - name: EXECUTOR_REAP_INTERVAL
               value: {{ . | quote }}
             {{- end }}
+            {{- with .Values.executor.stallTimeout }}
+            - name: EXECUTOR_STALL_TIMEOUT
+              value: {{ . | quote }}
+            {{- end }}
             {{- with .Values.executor.checkpointMaxBytes }}
             - name: EXECUTOR_CHECKPOINT_MAX_BYTES
               value: {{ . | quote }}

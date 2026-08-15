@@ -3,8 +3,10 @@ package executor
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/url"
+	"slices"
 	"strings"
 	"time"
 
@@ -50,21 +52,51 @@ func (e *Executor) processWeb(ctx context.Context, item *queue.Item) (err error)
 		return err
 	}
 
-	kctx, keeper := e.queue.KeepLease(ctx, item, e.cfg.LeaseTTL)
-	results, faultErr, runErr := e.runWebTools(kctx, item.SessionID)
-	if kerr := keeper.Close(); kerr != nil {
+	// Progress is one answered call, not one finished item: a turn may hold many
+	// web calls and each backend allows its request 60s
+	// (internal/webtool/{tavily,jina}), so a turn of 31 slow-but-answering
+	// fetches would otherwise be silent past a 30m budget, and a turn that was
+	// answering perfectly well would be cut short. The settlement below keeps
+	// what it had answered, so the reclaim resumes rather than looping — but it
+	// resumes having paid twice for the call cancelled in flight, and it will be
+	// cut short again at the same distance into what remains (#383).
+	kctx, keeper := e.queue.KeepLease(ctx, item, e.cfg.LeaseTTL, e.cfg.StallTimeout)
+	results, faultErr, runErr := e.runWebTools(kctx, item.SessionID, keeper.Progress)
+	kerr := keeper.Close()
+	// A stall is not a lost lease here either. This claimant still held the item
+	// when it gave the lease up, and a web call that answered was *paid for* — a
+	// re-run spends the backend's quota and its money again — so the answers
+	// commit and only the calls behind the stall are re-derived, the same
+	// partial commit the tool_exec lane makes for a side effect already spent.
+	// A lease genuinely lost still commits nothing: the row is someone else's by
+	// then, and the settlement below would be refused anyway.
+	stalled := errors.Is(kerr, queue.ErrWorkStalled)
+	if kerr != nil && !stalled {
 		return fmt.Errorf("lease keeper: %w", kerr)
 	}
 	if runErr != nil {
 		return runErr
 	}
-	// The only web fault is a dead context (lease lost, shutdown), and a dead
-	// context cannot begin the commit transaction — so unlike process's
-	// partial-commit fault path, an interrupted web run commits NOTHING and
-	// the reclaim re-runs the calls, the same all-or-nothing a cancelled
-	// model turn settles to.
-	if faultErr != nil {
+	// The only web fault is a dead context (lease lost, shutdown). On a stall the
+	// *item's* context is still alive — only the keeper's child was cancelled —
+	// so the commit below can run; on the others it cannot, and an interrupted
+	// run commits NOTHING, the same all-or-nothing a cancelled model turn
+	// settles to.
+	if faultErr != nil && !stalled {
 		return faultErr
+	}
+	if stalled && len(results) == 0 {
+		// Nothing to commit, but the fault still names the call the stall cut
+		// short — which with zero results is the *first* one, and the only place
+		// its identity is written down.
+		return fmt.Errorf("lease keeper: %w", stallFault(kerr, faultErr))
+	}
+	// Fold the two into one error before the settlement rather than at each exit
+	// out of it, the tool_exec lane's shape: every path from here — including a
+	// settlement that fails, the worst case and the one that most needs the
+	// diagnosis — then carries the sentinel and the cut-short call together.
+	if stalled {
+		faultErr = stallFault(kerr, faultErr)
 	}
 
 	// Commit the results, the follow-on work, and the item's fate together
@@ -94,6 +126,17 @@ func (e *Executor) processWeb(ctx context.Context, item *queue.Item) (err error)
 				return err
 			}
 			if len(platformPending) > 0 {
+				// A web call of this lane's own is still outstanding only when a
+				// stall cut the pass short, and it is chained by handing THIS
+				// item back rather than enqueuing a second: Enqueue is keyed
+				// (session_id, kind) over the live states, and this item is
+				// still live inside this transaction, so a fresh web_exec would
+				// be dropped on conflict and the call would wait for the
+				// abandoned lease to lapse — the mcp_exec driver's rule, for the
+				// same reason (#383).
+				if slices.ContainsFunc(platformPending, toolset.IsWebTool) {
+					return e.queue.Requeue(ctx, tx, item)
+				}
 				if _, err := e.queue.Enqueue(ctx, tx, item.EnvironmentID, item.SessionID, queue.ToolExec); err != nil {
 					return err
 				}
@@ -112,7 +155,19 @@ func (e *Executor) processWeb(ctx context.Context, item *queue.Item) (err error)
 		},
 	}
 	if _, err := e.log.AppendWith(ctx, item.SessionID, results, opts); err != nil {
+		// The stall rides along, as it does in the tool_exec lane: a settlement
+		// that fails here is the worst case — the answers lost AND the item left
+		// to the lease — and reporting the append error alone would drop both the
+		// sentinel an operator matches on and the call the stall cut short.
+		if stalled {
+			return fmt.Errorf("append web tool results: %w (keeper: %w)", err, faultErr)
+		}
 		return fmt.Errorf("append web tool results: %w", err)
+	}
+	// Committed, and still a stall: the item is settled but the run was cut
+	// short, and the operator needs to know which of the two happened.
+	if stalled {
+		return fmt.Errorf("lease keeper: %w", faultErr)
 	}
 	return nil
 }
@@ -123,7 +178,7 @@ func (e *Executor) processWeb(ctx context.Context, item *queue.Item) (err error)
 // error, a missing key are all the model's to read, so every call yields a
 // result — except when the context dies mid-call (lease lost, shutdown),
 // where the outcome is untrustworthy and the rest is left for the reclaim.
-func (e *Executor) runWebTools(ctx context.Context, sid domain.ID) ([]events.NewEvent, error, error) {
+func (e *Executor) runWebTools(ctx context.Context, sid domain.ID, progress func()) ([]events.NewEvent, error, error) {
 	uses, err := e.unansweredToolUses(ctx, sid)
 	if err != nil {
 		return nil, nil, err
@@ -133,6 +188,10 @@ func (e *Executor) runWebTools(ctx context.Context, sid domain.ID) ([]events.New
 		if !toolset.IsWebTool(u.name) {
 			continue
 		}
+		// One report per web call, at the top of the iteration (see
+		// internal/executor/files.go): the item is bounded by silence, and a
+		// turn's calls are answered one at a time (#383).
+		progress()
 		start := time.Now()
 		res := e.runWebTool(ctx, u)
 		toolset.RecordRun(ctx, u.name, time.Since(start), res, ctx.Err())
@@ -145,6 +204,10 @@ func (e *Executor) runWebTools(ctx context.Context, sid domain.ID) ([]events.New
 		}
 		results = append(results, ev)
 	}
+	// The loop reports as each call starts, so the last one's completion is
+	// reported here — otherwise it and the settlement behind it would share one
+	// silent interval.
+	progress()
 	return results, nil, nil
 }
 
