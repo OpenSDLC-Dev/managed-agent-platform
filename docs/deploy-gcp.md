@@ -413,18 +413,19 @@ Measured on two `e2-standard-4` nodes with the shipped defaults:
   ephemeral storage; trivial sessions used 0.04–0.09 MiB. At those rates the 100 GiB boot
   disk is dominated by the image, not by workspaces.
 
-The number that matters is 68, and how long each pod holds its 100m of it is the
+The number that matters is 68, and how long each pod holds its 100m CPU request is the
 reaper's answer (`internal/executor/reaper.go`, plan 24). A **cloud** session's sandbox is
 destroyed once the session is deleted, archived or terminated, and — where the idle tier is
 armed — after `EXECUTOR_SANDBOX_IDLE_TTL` of inactivity (default 24h; `0` disables the
 tier). Size for **concurrent** sessions plus whatever has not yet aged out.
 
-Two configurations keep the cumulative arithmetic instead, and both are worth checking
-before sizing. The idle tier needs an object store to hold the checkpoint it takes before
-destroying a sandbox, so an executor with no blob backend runs with that tier off — it logs
-the disablement once at startup — and idle sessions then hold their pods until they reach a
-terminal state. And a `self_hosted` session's sandbox belongs to the customer's BYOC worker,
-which the platform does not destroy in any tier.
+Two configurations weaken that, and both are worth checking before sizing. The idle tier
+needs an object store to hold the checkpoint it takes before destroying a sandbox, so an
+executor with no blob backend runs with that tier off — it logs the disablement once at
+startup — and an idle session then holds its pod until it reaches a terminal state; the
+other three tiers still reap. Only a `self_hosted` session is never reaped at all: its
+sandbox belongs to the customer's BYOC worker, which the platform does not destroy in any
+tier.
 
 ## Required node settings
 

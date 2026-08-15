@@ -5,13 +5,13 @@ What is being worked on right now, and how far along it is — nothing else. **S
 ## Active work
 
 [Plan 34](./docs/plan/34_doc-trim.md) (#413) — trimming the documentation to what code cannot say.
-Tracked markdown is 2,665,735 bytes against 2,364,778 bytes of non-test Go; the target is
-~719 KB, cut from restatement and staleness only.
+Tracked markdown was 2,665,735 bytes at plan start against 2,364,778 bytes of non-test Go;
+the target is ~719 KB, cut from restatement and staleness only.
 
 ## Tasks
 
-- [x] **Slice 1 — fragments and facts.** The `changelog.d/` size convention (60–120 words,
-      1,500-byte cap) and the recut of every fragment over it; the release blocker in
+- [x] **Slice 1 — fragments and facts.** The `changelog.d/` size convention (1,500-byte cap,
+      60–120 words the aim) and the recut of every fragment over the cap; the release blocker in
       `cd-build-on-runner.fixed.md`, which `loadFragments` rejects for want of a `- ` prefix;
       the sandbox-pool sizing correction in `docs/deploy-gcp.md`, which told operators nothing
       reaps a pod although `internal/executor/executor.go:311` runs `reapLoop`.

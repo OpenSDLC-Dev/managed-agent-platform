@@ -45,8 +45,8 @@ obligation on the operator. Those are never cut here. Restatement, duplication a
 
 ## Slices
 
-1. **Fragments and facts** — the `changelog.d/` size convention (60–120 words, 1,500-byte cap)
-   and the recut of every unreleased fragment over it; the release blocker in
+1. **Fragments and facts** — the `changelog.d/` size convention (1,500-byte cap, 60–120 words
+   the aim) and the recut of every unreleased fragment over it; the release blocker in
    `cd-build-on-runner.fixed.md`; the sandbox-pool sizing correction in `docs/deploy-gcp.md`.
    Markdown only.
 2. **Comments worth pointing at** — the seven package-comment repairs and additions, the
