@@ -224,6 +224,11 @@ services:
       # database lifecycle says they may be destroyed (plan 24). Empty = the
       # binary's 1m default.
       EXECUTOR_REAP_INTERVAL: ${EXECUTOR_REAP_INTERVAL:-}
+      # How long a claimed work item may report no progress — no step finished,
+      # no tool answered — before the executor cancels it and lets its lease
+      # lapse, so another executor reclaims it (#383). It bounds silence, not
+      # duration. Empty = the binary's 30m default.
+      EXECUTOR_STALL_TIMEOUT: ${EXECUTOR_STALL_TIMEOUT:-}
       EXECUTOR_CHECKPOINT_MAX_BYTES: ${EXECUTOR_CHECKPOINT_MAX_BYTES:-}
       EXECUTOR_SANDBOX_IDLE_TTL: ${EXECUTOR_SANDBOX_IDLE_TTL:-}
       # Budgets for cloning a github_repository session resource (plan 25). Both

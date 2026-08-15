@@ -24,6 +24,7 @@
 package executor
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -68,6 +69,26 @@ type Config struct {
 	Workdir      string
 	LeaseTTL     time.Duration
 	PollInterval time.Duration
+	// StallTimeout bounds how long a claimed item may make no progress before
+	// the lease keeper gives up on it — cancelling the work and leaving the
+	// lease to lapse, so another executor reclaims it (#383). Progress is a
+	// step finishing, not a byte moving, so it must clear the longest single
+	// step a healthy run takes: toolset.MaxTimeout for one `bash`, a 500 MB
+	// mount, a wait on the session lock behind another goroutine's checkpoint
+	// capture, a cold image pull, or a CheckpointMaxBytes restore — provisioning
+	// reports between those, so they are separate intervals rather than one sum.
+	// The check rides the keeper's renewal tick, so detection lands somewhere in
+	// [stall, stall+LeaseTTL/3]. Set it under the longest step and the item does
+	// not merely retry: every reclaim re-runs that step and cancels at the same
+	// point, so the session waits on a loop nothing breaks — which is why the
+	// binary floors the configured value above toolset.MaxTimeout (a tool at its
+	// cap is killed and answers *after* it) and a deployment whose object store
+	// is far away should raise it well past that. It bounds
+	// *silence*, never duration — an item that keeps finishing steps runs as
+	// long as it likes. Not an off switch: a wedged sandbox call is what left
+	// an executor stuck with no recovery at all, so 0 takes the default
+	// (EXECUTOR_STALL_TIMEOUT).
+	StallTimeout time.Duration
 	// ReapInterval paces the sandbox reaper (reaper.go): one sweep of this
 	// endpoint's owned sessions per interval (EXECUTOR_REAP_INTERVAL; 0 takes
 	// the 60s default). Teardown latency is bounded by it, and nothing else
@@ -159,6 +180,31 @@ type Config struct {
 	MCPPassTimeout time.Duration
 }
 
+// DefaultStallTimeout is the budget an operator who sets none gets, shared with
+// the BYOC worker rather than written out twice (toolset.DefaultStallBudget).
+//
+// Exported because cmd/executor must check the budget an operator will actually
+// get. A floor that only guards the value they typed is no floor at all: raising
+// EXECUTOR_REPO_CLONE_TIMEOUT past this default rebuilds the reclaim loop while
+// EXECUTOR_STALL_TIMEOUT is left unset (#383).
+const DefaultStallTimeout = toolset.DefaultStallBudget
+
+// stallFault folds the error a cut-short run came back with into the stall
+// sentinel, for every lane that settles one.
+//
+// Both are needed and neither substitutes for the other: queue.ErrWorkStalled is
+// what an operator (and a test) matches on, while the run's error is the only
+// place the tool_use the stall cut short is written down. Choosing between them
+// — which is what the obvious cmp.Or does — silently drops the sentinel in the
+// ordinary case, since a stall usually cancels a call in flight and so usually
+// has a cause (#383).
+func stallFault(kerr, cause error) error {
+	if cause == nil {
+		return kerr
+	}
+	return fmt.Errorf("%w (run: %w)", kerr, cause)
+}
+
 func (c Config) withDefaults() Config {
 	if c.Image == "" {
 		c.Image = "debian:stable-slim"
@@ -168,6 +214,9 @@ func (c Config) withDefaults() Config {
 	}
 	if c.PollInterval <= 0 {
 		c.PollInterval = 500 * time.Millisecond
+	}
+	if c.StallTimeout <= 0 {
+		c.StallTimeout = DefaultStallTimeout
 	}
 	if c.ReapInterval <= 0 {
 		c.ReapInterval = time.Minute
@@ -364,16 +413,38 @@ func (e *Executor) process(ctx context.Context, item *queue.Item) (err error) {
 	// lapse mid-provision and a second executor reclaim and double-run the
 	// session's tools. Provisioning and every tool run happen under kctx, so
 	// losing the lease cancels the work.
-	kctx, keeper := e.queue.KeepLease(ctx, item, e.cfg.LeaseTTL)
+	kctx, keeper := e.queue.KeepLease(ctx, item, e.cfg.LeaseTTL, e.cfg.StallTimeout)
 
-	results, faultErr, runErr := e.provisionAndRun(kctx, item, sess)
+	results, faultErr, runErr := e.provisionAndRun(kctx, item, sess, keeper.Progress)
 	if kerr := keeper.Close(); kerr != nil {
-		// The lease is gone — another executor may already own this item.
-		// Nothing of ours may commit; the results we ran are re-derived on the
-		// reclaiming pass (a committed result is never re-run).
-		return fmt.Errorf("lease keeper: %w", kerr)
-	}
-	if runErr != nil {
+		if !errors.Is(kerr, queue.ErrWorkStalled) {
+			// The lease is gone — another executor may already own this item.
+			// Nothing of ours may commit; the results we ran are re-derived on
+			// the reclaiming pass (a committed result is never re-run).
+			return fmt.Errorf("lease keeper: %w", kerr)
+		}
+		// A stall is the opposite case, and must not be treated as a lost lease:
+		// this claimant gave the lease up, so it still holds it here, and the
+		// tools that already answered really did run — in a sandbox, with their
+		// side effects already spent. Discarding them would leave the reclaim to
+		// run each of them a second time. So they commit down the fault path
+		// below (which asserts the lease, leaves the item live, and enqueues no
+		// turn while uses stay unanswered), and only the wedged tool and the
+		// ones behind it are re-derived (#383).
+		//
+		// Best-effort, and deliberately so: the keeper has stopped renewing, so
+		// a settlement slower than the lease's remainder finds the item
+		// reclaimed and rolls back to exactly the pre-#383 outcome. And a call
+		// that ignores cancellation never returns here at all — the run that
+		// commits nothing is the one still wedged (#396).
+		//
+		// Whichever error the run came back with rides along rather than being
+		// dropped. Both are the cancellation itself in the ordinary case — but
+		// the tool fault is the one that names the *tool_use that wedged*, which
+		// is the first thing an operator wants and the only place it is written
+		// down; the setup error is the diagnosis when nothing had started yet.
+		faultErr = stallFault(kerr, cmp.Or(faultErr, runErr))
+	} else if runErr != nil {
 		return runErr
 	}
 
@@ -439,6 +510,14 @@ func (e *Executor) process(ctx context.Context, item *queue.Item) (err error) {
 				if _, err := e.queue.Enqueue(ctx, tx, item.EnvironmentID, item.SessionID, queue.ModelTurn); err != nil {
 					return err
 				}
+				// Every use is answered, so this item has nothing left to do
+				// whatever went wrong after the last of them — a stall declared
+				// on the boundary, say. Leaving it live would be worse than
+				// untidy: Enqueue dedupes per (session, kind) while a live item
+				// exists, so the turn just scheduled would find its own
+				// tool_exec swallowed and the session would sit still until the
+				// abandoned lease lapsed.
+				return e.queue.Complete(ctx, tx, item)
 			}
 			if complete {
 				return e.queue.Complete(ctx, tx, item)
@@ -447,6 +526,15 @@ func (e *Executor) process(ctx context.Context, item *queue.Item) (err error) {
 		},
 	}
 	if _, err := e.log.AppendWith(ctx, item.SessionID, results, opts); err != nil {
+		// The diagnosis the branch above built rides along rather than being
+		// replaced. A settlement that fails on the stall path is the worst case
+		// this change has — the results are lost AND the item is left to the
+		// lease — and reporting only "append tool results: ..." would drop both
+		// the stall sentinel an operator matches on and the wedged tool's name,
+		// which is written down nowhere else (#383).
+		if faultErr != nil {
+			return fmt.Errorf("append tool results: %w (run: %w)", err, faultErr)
+		}
 		return fmt.Errorf("append tool results: %w", err)
 	}
 	return faultErr
@@ -472,16 +560,25 @@ func consumerSpan(ctx context.Context, item *queue.Item, name string) (context.C
 // append, the first backend fault a tool hit (nil if every tool ran), and a
 // setup error from provisioning or reading the log — which stops the item with
 // nothing committed, distinct from a tool fault, which commits what did run.
-func (e *Executor) provisionAndRun(ctx context.Context, item *queue.Item, sess sessionRun) ([]events.NewEvent, error, error) {
-	sb, err := e.provisionSandbox(ctx, item.SessionID, sess)
+func (e *Executor) provisionAndRun(ctx context.Context, item *queue.Item, sess sessionRun, progress func()) ([]events.NewEvent, error, error) {
+	sb, err := e.provisionSandbox(ctx, item.SessionID, sess, progress)
 	if err != nil {
 		return nil, nil, err
 	}
-	e.materializeSkills(ctx, sb, item.SessionID, sess.skills)
+	// Each step this run finishes tells the keeper the run is alive (#383).
+	// Reported at the boundaries a wedged sandbox call stops the run from
+	// crossing: provisioning returned, a pass ended, a tool answered — and,
+	// inside the passes, per skill, per repository and per mount, because a
+	// pass over many of them is legitimately long while each item is not.
+	progress()
+	e.materializeSkills(ctx, sb, item.SessionID, sess.skills, progress)
+	progress()
 	// Repositories before files, so a file mount may deliberately overlay into
 	// a checkout (plan 25 decision 5).
-	e.materializeRepos(ctx, sb, item.SessionID, sess.repos)
-	e.materializeFiles(ctx, sb, item.SessionID, sess.files)
+	e.materializeRepos(ctx, sb, item.SessionID, sess.repos, progress)
+	progress()
+	e.materializeFiles(ctx, sb, item.SessionID, sess.files, progress)
+	progress()
 	uses, err := e.unansweredToolUses(ctx, item.SessionID)
 	if err != nil {
 		return nil, nil, err
@@ -491,18 +588,24 @@ func (e *Executor) provisionAndRun(ctx context.Context, item *queue.Item, sess s
 	// after every web call is answered (the web-first hold-back). The filter
 	// keeps a stray one from reaching the Runner's unknown-tool arm.
 	uses = slices.DeleteFunc(uses, func(u toolUse) bool { return toolset.IsWebTool(u.name) })
-	results, faultErr := e.runTools(ctx, sb, item.SessionID, uses)
+	results, faultErr := e.runTools(ctx, sb, item.SessionID, uses, progress)
 	return results, faultErr, nil
 }
 
 // provisionSandbox resolves the session's credential env and gate spec and
 // provisions (or adopts) its sandbox — the front half of provisionAndRun,
 // shared with the outputs harvest, which reads the sandbox but runs no tools.
-func (e *Executor) provisionSandbox(ctx context.Context, sessionID domain.ID, sess sessionRun) (sandbox.Sandbox, error) {
+func (e *Executor) provisionSandbox(ctx context.Context, sessionID domain.ID, sess sessionRun, progress func()) (sandbox.Sandbox, error) {
+	// This is the run's longest stretch of not-a-tool-call, and the stall bound
+	// measures silence — so its steps report one at a time rather than as one
+	// interval the budget must clear whole (#383). progress is required, like
+	// every other reporting function in this package: a caller that does not
+	// watch the run passes a no-op rather than nil.
 	env, err := e.sandboxEnv(ctx, sessionID, sess.vaultIDs)
 	if err != nil {
 		return nil, fmt.Errorf("resolve vault credentials: %w", err)
 	}
+	progress()
 	// The session advisory lock serializes the one pair that must not
 	// interleave: this provision against the reaper's checkpoint+destroy
 	// (plan 24 D4). Blocking, unlike the reaper's try-lock — work proceeds
@@ -517,6 +620,9 @@ func (e *Executor) provisionSandbox(ctx context.Context, sessionID domain.ID, se
 		return nil, fmt.Errorf("acquire session lock: %w", err)
 	}
 	defer unlockSession(conn, sessionID)
+	// The lock is held by the reaper's checkpoint capture of this same session,
+	// so the wait above is bounded by a capture, not by anything this run does.
+	progress()
 	// Restore fires on the D6 marker, never on "the container is fresh": a
 	// ready marker means a checkpointed reap happened and nothing consumed it
 	// yet. Reap-before-provision is the half-restore replacement rule in one
@@ -541,6 +647,7 @@ func (e *Executor) provisionSandbox(ctx context.Context, sessionID domain.ID, se
 		if err := e.provider.Reap(ctx, sessionID); err != nil {
 			return nil, fmt.Errorf("replace pre-restore sandbox: %w", err)
 		}
+		progress()
 	}
 	sb, err := e.provider.Provision(ctx, sandbox.Spec{
 		SessionID:  sessionID,
@@ -558,11 +665,14 @@ func (e *Executor) provisionSandbox(ctx context.Context, sessionID domain.ID, se
 	if err != nil {
 		return nil, fmt.Errorf("provision sandbox: %w", err)
 	}
+	// The image pull is behind us; the restore below is the one step left that
+	// a large workspace can spend real time in, and it gets the budget alone.
+	progress()
 	if restore {
 		// Failure surfaces rather than consuming the marker: the tool run
 		// errors, the lease reclaims it, and the next provision replaces the
 		// half-restored tree and retries — plan 24 D6's crash rule.
-		if err := e.restoreCheckpoint(ctx, conn, sessionID, blobKey, sb); err != nil {
+		if err := e.restoreCheckpoint(ctx, conn, sessionID, blobKey, sb, progress); err != nil {
 			return nil, fmt.Errorf("restore checkpoint: %w", err)
 		}
 	}
@@ -671,7 +781,7 @@ func GateTokenRevoker(pool *pgxpool.Pool) sandbox.GateTokenRevoker {
 // that fails at the tool level (missing file, nonzero exit) still yields a
 // result event — that is the model's to see; only a backend fault (sandbox
 // gone, daemon unreachable) stops the set and leaves the rest unanswered.
-func (e *Executor) runTools(ctx context.Context, sb sandbox.Sandbox, sid domain.ID, uses []toolUse) ([]events.NewEvent, error) {
+func (e *Executor) runTools(ctx context.Context, sb sandbox.Sandbox, sid domain.ID, uses []toolUse, progress func()) ([]events.NewEvent, error) {
 	// Workdir must match the one the sandbox was provisioned with, so the file
 	// tools resolve a relative path against the same directory bash runs in.
 	// Empty resolves to sandbox.DefaultWorkdir on both sides.
@@ -690,6 +800,8 @@ func (e *Executor) runTools(ctx context.Context, sb sandbox.Sandbox, sid domain.
 			return results, err
 		}
 		results = append(results, ev)
+		// A tool answered: the run is moving, however long the next one takes.
+		progress()
 	}
 	return results, nil
 }
@@ -825,11 +937,18 @@ func (e *Executor) sessionForRun(ctx context.Context, item *queue.Item) (session
 // the right *trace*, but only to the enqueuing turn's span — leaving the red
 // tool_exec span, the one an operator clicks, with no log under it.
 func (e *Executor) report(ctx context.Context, item *queue.Item, err error) {
-	// The item's fate is the queue's and is not stated here, because it depends on
-	// how the run failed: a backend fault leaves the lease to expire and be
-	// reclaimed, while a lost lease means the item is already another executor's
-	// or was cancelled outright by a user.interrupt.
-	slog.ErrorContext(ctx, "executor: work item faulted, its results were not committed",
+	// Neither the item's fate nor what committed is stated here, because both
+	// depend on how the run failed AND on which lane it was. In the tool_exec
+	// lane a backend fault or a stall commits the tools that answered and leaves
+	// the lease to expire and be reclaimed; a lost lease there commits nothing,
+	// the item being another executor's by then or cancelled outright by a
+	// user.interrupt; the web and MCP call lanes commit what answered on a stall
+	// for the same reason and nothing on a lost lease; and the harvest lane
+	// discards on either, half a snapshot being no snapshot. One sentence here
+	// would be wrong for most of those, and an operator reading the wrong one
+	// goes looking for results that are on the log — or stops looking for
+	// results that are not (#383).
+	slog.ErrorContext(ctx, "executor: work item faulted",
 		"kind", item.Kind, "item", item.ID, "session", item.SessionID, "error", err)
 	if e.onFault != nil {
 		e.onFault(item, err)

@@ -12,6 +12,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/api"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/blob/blobtest"
@@ -37,6 +38,10 @@ type fakeSandbox struct {
 	failPath string
 	entered  chan struct{}
 	gate     chan struct{}
+	// delay, if set, is how long each WriteFile takes, so a test can build a run
+	// that is long overall while every single step is quick — the shape a stall
+	// guard must carry rather than kill (#383).
+	delay time.Duration
 	// bulkSizes records the member count of every WriteFiles call, so a test can
 	// hold a materializer to one batched call carrying a skill's whole tree,
 	// rather than one write per file (#206).
@@ -82,6 +87,13 @@ func (f *fakeSandbox) ReadFileStream(ctx context.Context, path string, maxBytes 
 	return io.NopCloser(bytes.NewReader(data)), int64(len(data)), nil
 }
 func (f *fakeSandbox) WriteFile(ctx context.Context, path string, data []byte) error {
+	if f.delay > 0 {
+		select {
+		case <-time.After(f.delay):
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
 	if f.entered != nil {
 		select {
 		case f.entered <- struct{}{}:
@@ -723,5 +735,56 @@ func TestNULToolOutputIsSanitizedByTheWorker(t *testing.T) {
 	}
 	if len(results[0].Content) != 1 || results[0].Content[0]["text"] != "ab" {
 		t.Errorf("content = %+v, want one text block %q", results[0].Content, "ab")
+	}
+}
+
+func TestRunSessionToolsReportsProgressPerItem(t *testing.T) {
+	// The BYOC twin of the executor's per-item reporting (#383). The heartbeat
+	// bounds this run by its silence, so every step that costs a round trip has
+	// to report — including the scan that runs before provisioning, and the
+	// references that resolve to nothing and so never reach the write loop.
+	sb := &fakeSandbox{}
+	h := newHarness(t, sb)
+	h.seedSkill(t, "prog-good", "100", "prog-notes", map[string]string{"SKILL.md": "ok"})
+	h.refSkills(t, [2]string{"prog-gone", "latest"}, [2]string{"prog-good", "100"})
+	h.suspend(t, writeUse("out.txt", "hello"))
+
+	var reports int
+	if err := RunSessionTools(context.Background(), h.client, h.prov, h.sid.String(),
+		ToolExecConfig{Progress: func() { reports++ }}); err != nil {
+		t.Fatalf("RunSessionTools: %v", err)
+	}
+	// The boundary before the scan (whatever the caller did last ends there), the
+	// one event the scan walks and the scan's own boundary, the provision,
+	// the two references resolved plus the version GET the concrete one goes on to
+	// make (the dangling reference never reaches it, its listing failing first),
+	// the sentinel decision, the one skill written,
+	// the skills pass boundary before its sentinel write, the caller's skills and
+	// files boundaries, and — for the one tool — its run and its posted result,
+	// which are two steps and not one (#383). This session mounts no files, so
+	// that pass returns before any boundary of its own.
+	if reports != 14 {
+		t.Errorf("progress reports = %d, want 14", reports)
+	}
+
+	// A second pass over an unchanged set takes the sentinel skip, which returns
+	// before the write loop — so that decision, one sandbox read per recorded
+	// tree, has to report on its own account.
+	h.refSkills(t, [2]string{"prog-good", "100"})
+	h.suspend(t, writeUse("out2.txt", "again"))
+	reports = 0
+	if err := RunSessionTools(context.Background(), h.client, h.prov, h.sid.String(),
+		ToolExecConfig{Progress: func() { reports++ }}); err != nil {
+		t.Fatalf("second run: %v", err)
+	}
+	// The boundary before the scan, the two events this scan walks before it can
+	// bound the set, its own boundary,
+	// the provision, the one reference resolved and its version GET, the one
+	// sentinel read, the
+	// caller's skills and files boundaries, and the tool's run and posted result.
+	// The skip returns before the pass boundary the first run reached, which is
+	// what makes this count one lower than a rewriting pass.
+	if reports != 12 {
+		t.Errorf("unchanged-set reports = %d, want 12", reports)
 	}
 }

@@ -107,6 +107,280 @@ in a way worth keeping: the model read "tell me the secret passphrase" as a prom
 attempt and declined — naming `mcp__vault__read_passphrase` in its refusal, which is itself
 proof the platform chain underneath was working. The trial now says who attached the server,
 as the other mounted-answer trials do.
+## A work item cannot run forever (plan 33, #383) — archived 2026-08-15, slice 1 delivered; slices 2 and 3 deferred to #395 and #396
+
+docs/plan/33_bounding-a-wedged-work-item.md is archived: a work item is now bounded by its
+own silence in both halves of the pull protocol — the platform executor through the shared
+lease keeper, the BYOC worker through its heartbeat — and a holder that reports no progress
+for its budget has its work cancelled and its lease left to lapse, so the item is reclaimed
+by the path that a blocked-but-alive process had made unreachable. The narrative is in
+CHANGELOG.md; what follows is the designs evaluated and rejected, one of which was this
+plan's own first draft.
+
+- **A ceiling on the item's total runtime** — the plan's original D1, written before the
+  tool loop was read closely. Rejected once it was: a `tool_exec` runs its turn's tools
+  *serially*, and `bash` — the one tool that carries a cap, `toolset.MaxTimeout`, ten
+  minutes — may legitimately spend all of it, so a turn of eight `bash` calls can legitimately
+  occupy eighty minutes, while `read`/`write`/`edit` carry no cap at all, which is the wedge
+  itself. Any ceiling tight enough to contain a wedge would kill that turn; any ceiling loose
+  enough to spare it (hours) would contain little.
+  Silence separates the two cases where a clock cannot, which is the same conclusion plan 17
+  reached for the model endpoint — and #383 itself named that shape before this plan did.
+- **A deadline on each sandbox call** — rejected for the reason the seam is untimed by
+  design: `WriteFileStream` legitimately streams a 500 MB mount and an untimed `Exec`
+  legitimately runs as long as its command does, so a per-call wall clock has no defensible
+  value. The finer version of this — bounding a call by *silence* inside the two transports
+  — is right but needs progress plumbing inside Docker's and Kubernetes' streams, and is
+  deferred whole to #395 rather than half-built here.
+- **Having the control plane refuse to extend a BYOC worker's lease past some age** — the
+  plan's original D3, and the tempting one, since the control plane already sees every
+  heartbeat and `work_items.started_at` is already set by that path. Rejected: it changes
+  observable wire behaviour whose reference semantics are unconfirmed, so it would need a
+  recording and a DIVERGENCES entry to be honest about, and it would bound a process this
+  platform does not run. The worker bounds itself instead, in its own loop, against its own
+  clock — no wire change at all.
+- **Inferring progress instead of having the holder report it** — rejected as
+  self-defeating: anything derived from a timer, or from the renewal succeeding, reports
+  progress a wedged holder is precisely not making. Only the holder can tell a long step
+  from a stuck one, so `Progress` is called at the boundaries a wedge stops a run from
+  crossing (provisioned, each materialization pass, each tool answered).
+- **Reusing `queue.LeaseKeeper` in the worker** — not available: the BYOC worker has no
+  database and renews over the wire, so the two lanes keep separate trackers with the same
+  arithmetic, each measuring from its own monotonic base as the keeper already did for its
+  `Extend` budget.
+- **Force-stopping a stalled item from the worker** — rejected for the reason a lost lease
+  is not force-stopped either: a stop is terminal and no reclaim recovers a stopped item,
+  and by the time the worker gives up, another worker may already hold it. The item is left
+  live and its lease is left to lapse, which is exactly what a dead process would have done.
+
+**Review hardening, landed in the same PR.** The first cut armed the budget on lanes and
+passes that reported nothing, which both reviewers and the verifier attacked from three
+directions at once; each is now a mutation-checked test:
+
+- **Per-pass reporting was the same defect wearing the fix's clothes.** A session may mount
+  eight repositories at `RepoCloneTimeout` apiece and dozens of half-gigabyte files, so a
+  wholly healthy materialization pass outlasts the budget — and because a pass writes its
+  sentinel only at the end, the reclaim restarts it from zero and is killed at the same
+  place, forever. Reporting moved inside the loops, per skill, per repository, per mount, per
+  harvested output, and the excluded items report too (a vanished file, a repository this
+  executor cannot clone): each still cost a round trip. The `web_exec` lane, whose 60s-per-
+  request backends make a 31-call turn legitimately exceed 30 minutes, and the `mcp_exec`
+  lane, whose own budget is operator-tunable past the stall budget, now report per call and
+  per server rather than resting on an arithmetic argument about defaults.
+- **A stall settled as a lost lease discarded work that had really run.** The first cut
+  returned at the keeper's error for both, so a wedge in the third tool threw away the two
+  results already committed to the sandbox's side effects — and the reclaim ran them again: a
+  second push, a second POST. A stall now commits down the partial-commit path a backend
+  fault uses, since the claimant still holds the lease when it gives it up; only a genuinely
+  lost lease commits nothing.
+- **Two timing tests were the flake class this change exists to remove.** A 300ms budget
+  against a run whose clock starts before a session read and a provision could cancel before
+  the gated tool was entered, leaving an unguarded channel receive to hang to `go test`'s
+  package alarm — #318's own failure mode. Budgets moved to a second, receives are guarded,
+  and the moving-run tests carry a twentieth-of-budget per step so a scheduling pause cannot
+  redden the gate.
+- Smaller: the stall arithmetic is `elapsed - last > budget` rather than `last + budget`, so
+  a budget near the duration ceiling cannot wrap negative and stall instantly; and a
+  non-positive `EXECUTOR_STALL_TIMEOUT`/`WORKER_STALL_TIMEOUT` now fails startup instead of
+  being silently replaced by the default.
+
+A second review round, on the commit that answered the first, found four more and was right
+about all four:
+
+- **The remaining silence was in the steps between the loops.** Skill *resolution* is its own
+  loop — two round trips per reference in the executor, wire calls in the worker — and a
+  dangling reference leaves it by the skip path without ever reaching the instrumented write
+  loop; the sentinel probe is a sandbox read per recorded tree and returns before that loop
+  when the set is unchanged; the worker's unanswered-use scan pages over the wire before
+  provisioning. Each reports now. So does provisioning itself, between its own steps rather
+  than only on return — the credentials resolved, the session lock taken (behind, at worst,
+  another goroutine's checkpoint capture), the sandbox up — which was the largest healthy
+  pause of all sitting under the wedge bound as one interval.
+- **A budget under one step loops rather than degrades.** The knob's documentation promised
+  "a cancelled item that is reclaimed and re-run, not a failed session", which is false when
+  the re-run is deterministic: every reclaim cancels at the same place and no error ever
+  reaches the session. Both binaries now floor a configured budget, and the documentation
+  states the loop instead.
+- **The ownership proof was a read, not a lock.** `queue.Assert` proved ownership at the
+  instant it ran and then let the transaction commit behind it — and the stalled claimant is
+  precisely the one settling with nothing renewing its lease. It takes the row `FOR UPDATE`
+  now; `Claim` skips locked rows, so a reclaim waits for the settlement instead of racing it.
+  What the lock cannot cover is stated rather than papered over: a settlement slower than the
+  lease's remainder, and a call that never returns to settle at all.
+- **A stall with nothing left unanswered left the item live.** The settlement scheduled the
+  `model_turn` and kept the row `active`, so the turn's own follow-on `tool_exec` hit the
+  live-item dedupe and the session sat still until the abandoned lease lapsed. It completes
+  the item now — nothing unanswered means nothing for a reclaim to do. The same round
+  corrected the fault log, which asserted "its results were not committed" on the path that
+  had just committed them, and kept the run error that the stall branch had been dropping.
+- **Refuted, with evidence:** that the change lets a stalled item's already-committed
+  `session.error` rows contradict "nothing commits" — the per-repository clone error is
+  appended outside any settlement and always was, exactly as a lease lost at that moment
+  would leave it (D4 now says so).
+
+A third round found four more, all of them the same lesson a third time — a report placed at
+the end of something that is itself a loop:
+
+- **The floor was exactly the cap, and a tool at its cap answers after it.** Both sandbox
+  backends wait a kill grace past a command's deadline before giving up on it, and the result
+  still has to come back, so a budget of exactly `toolset.MaxTimeout` would cancel a healthy
+  timed-out `bash` moments before it answered — and its use, never answered, would take the
+  same path on every reclaim. The floor is that cap plus a minute.
+- **The unchanged-set probe is a loop.** `skills.SentinelMatches` reads one file per recorded
+  skill, and the API admits sessions of up to 500 skills, so the single report after the probe
+  covered a pass that a legal budget can lose to. The reads report as they land, through a
+  wrapper around the read function the helper already takes.
+- **The worker's event scan pages.** Its report landed after the auto-pager had walked every
+  page; a turn wide enough to span several spent all of those round trips inside one silent
+  step. It reports per event now, so the silent interval is one page.
+- **The lease-TTL flake was left in a third test.** Two of the three keeper tests moved to a
+  1.5s TTL; `TestKeepLeaseRenewsWhileHeld` kept the 600ms one whose 400ms renewal bound had
+  just reddened a gate run. It moved too.
+
+A fourth round, on the branch as a whole, found the same shape once more — a diagnosis kept
+in the rarer case and dropped in the common one — plus five smaller things:
+
+- **The stall report could not name the tool that wedged.** The branch had taken care to
+  carry the *setup* error through a stall (the diagnosis when nothing had started yet) while
+  overwriting the *tool* fault, which is the ordinary case and the only place the wedged
+  tool's name and `tool_use` id are written down. Whichever the run returned now rides along.
+- **Four of the executor's stall tests kept the 600ms lease TTL** the queue's had just left
+  behind — in a PR whose subject is removing a flake class. They moved to 1.5s.
+- Smaller: `Assert`'s doc now says the lock lasts as long as the *caller's transaction* and
+  is a bare read when handed a pool; `provisionSandbox` no longer carries a nil-progress guard
+  its eight siblings lack (the tests pass a no-op); the sentinel skip's own report went away
+  as redundant with the caller's; `report`'s comment no longer states the tool_exec lane's
+  commit rule as if it held for the three lanes that discard; and the worker tells a malformed
+  `WORKER_STALL_TIMEOUT` apart from a negative one, as the executor already did.
+- **Refuted, with evidence:** that wrapping a stall as `lease keeper: %w` in the web, MCP and
+  harvest lanes makes it indistinguishable from a lost lease — the wrapped text still reads
+  `queue: work item stalled` rather than `queue: work item lease lost`, and `errors.Is` sees
+  through the wrap either way.
+
+A fifth round, after the rebase onto plan 29's MCP call lane and #399's renewal, found the
+guard's own blind spots — three places where the floor or the reporting stopped short of the
+thing it was supposed to cover, and one where the fix contradicted itself:
+
+- **The floor was measured against the wrong step.** It compared a configured budget with
+  `toolset.MaxTimeout` alone, but `EXECUTOR_REPO_CLONE_TIMEOUT` is a sibling knob with no
+  ceiling of its own, and one clone is a single silent interval of exactly its length. A
+  monorepo deployment setting it to 45 minutes and leaving the 30-minute default rebuilt the
+  loop the floor exists to prevent — every reclaim cancelling the same clone at the same
+  point, a `session.error` every half hour and the repository never mounted. The floor
+  follows the longest step the binary can name now.
+- **The one guard with no test.** The sign and floor checks were written out twice, verbatim,
+  in two `main` packages the coverage gate excludes and that hold no test files. They are one
+  helper in `internal/toolset` now, tested where a main package cannot be, and the two
+  binaries cannot drift apart.
+- **Two steps were counted as one, three times.** The BYOC worker reported only after a tool
+  had run *and* its result had been posted, so a full-length `bash` and a slow wire round trip
+  shared one interval that the floor does not cover — the run cancelled after its side
+  effects and before its answer, and the reclaim running the command again. A materialization
+  pass reported per item but not before the sentinel write behind the last one, so a 500 MB
+  mount and a slow write shared an interval, and a pass cut between them writes no sentinel
+  and repeats forever. And a checkpoint restore — fetch, validate, ship, extract — was one
+  silent stretch whose size cap an operator may raise with no relation to the budget.
+- **Detection rode the wrong clock.** The stall check shares the renewal ticker, so a lease
+  far longer than the budget stretched detection with it: at a three-hour TTL the first check
+  came an hour in, and this consumer runs one item at a time. The tick is the shorter of the
+  two now, and a test pins both that and the check's position *before* the renewal — an
+  ordering nothing else would have failed on.
+- **The fix contradicted itself in two lanes.** The `tool_exec` lane commits what already
+  answered because a spent side effect must not be spent twice; the web and MCP lanes
+  discarded, on a rationale ("re-derivable work") that fits a discovery and does not fit a
+  call someone was billed for or one that wrote to a third party's system. Both commit now,
+  handing this item back for what is left rather than enqueuing a second one the live-item
+  dedupe would swallow. Harvest still discards, for a different reason: half a snapshot is
+  not a snapshot.
+- Smaller: a settling append that fails on the stall path no longer drops the stall sentinel
+  and the wedged tool's name; the copy-pasted budget rationale in the two MCP passes is
+  written once.
+- **Refuted, with evidence:** that abandoning the lease while the container's command runs is
+  a new defect — it is the change's stated cost, in the changelog's "what this deliberately
+  does not do" and in #396, and the alternative it replaces is an item nobody can ever
+  recover. And that the silence tracker is a third re-implementation to be shared — the BYOC
+  worker is wire-only and imports no `internal/queue` in production code, so its heartbeat
+  cannot use the keeper's; `provider.StallGuard` sits a layer below both and guards a stream
+  rather than a work item.
+
+A sixth round, on the fifth's own fixes, found that half of them stopped one step short —
+and both reviewers, independently, found the same first one:
+
+- **The floor guarded only the budget an operator typed.** The check ran when
+  `EXECUTOR_STALL_TIMEOUT` was set and never otherwise, so raising
+  `EXECUTOR_REPO_CLONE_TIMEOUT` alone — which is the way this actually happens, since nobody
+  raising a clone timeout for a monorepo thinks to touch a knob about stalls — left the 30m
+  default in place under a 45m clone. That is the exact scenario the round-five commit
+  message said was now prevented, which made the message an overclaim as well as the code a
+  gap. The default is checked now, and startup is refused until the two agree.
+- **Three more pairs were hiding behind one report.** A repository's presence probe and its
+  credential decrypt sat ahead of the clone the floor is *measured against*, so the interval
+  the floor guards was never the interval that existed. A checkpoint restore's extraction
+  shared an interval with the marker update behind it — and a pass cancelled there leaves the
+  marker `ready`, so the reclaim reaps the sandbox and restores from zero, forever. The
+  worker's session-liveness read shared one with its paging scan, two wire round trips before
+  a tool is ever reached.
+- **The two new partial commits dropped their diagnosis.** The `tool_exec` lane had just been
+  taught to keep the stall sentinel and the wedged tool's name through a failing settlement;
+  the web and MCP lanes, which had only just learned to commit at all, had not.
+- **Accepted rather than fixed, and written down:** the stall check and the renewal share the
+  keeper's goroutine, so a renewal blocked on a stalled database delays the next check by
+  however long it blocks. That is bounded by what the lease has left and self-limiting — the
+  blocked attempt either times out, which cancels the holder anyway, or returns to a tick
+  already buffered and checks at once — and the outcome in that window is a cancelled holder
+  either way. A second goroutine would close it and is not worth the synchronisation; the
+  keeper's documentation states the cost rather than leaving it to be discovered.
+
+A seventh round, on the sixth's, found two — and again both reviewers landed independently on
+the same one, which is again the one that mattered:
+
+- **`cmp.Or` cannot keep two things.** The sixth round taught the web and MCP lanes to carry
+  the stall sentinel and the cut-short call through a failing settlement, and spelled it
+  `cmp.Or(faultErr, kerr)` — which *chooses*. A stall usually cancels a call in flight, so a
+  cause usually exists, so the sentinel usually lost: `errors.Is(err, queue.ErrWorkStalled)`
+  went quietly false in exactly the case it was added for, and the round-six entry above,
+  which claimed the parity, was wrong when written. All three settling lanes now fold through
+  one `stallFault` helper that keeps both, and a test pins the property rather than the
+  spelling.
+- **The floor's own arithmetic could invert it.** `StallFloor` added its minute without
+  checking, and `time.ParseDuration` accepts every duration up to the largest int64 of
+  nanoseconds — so a clone budget within a minute of that wrapped the sum negative, and a
+  negative floor is one every budget clears. The guard would not have failed loudly; it would
+  have read as satisfied while the default went on cancelling the step. It saturates now.
+  Unreachable in any real deployment, and repaired anyway: a guard that inverts under its own
+  input is a different class of defect from one that is merely absent.
+- **And the refusal nobody could test.** The sixth round's default-side check was written
+  inline in `cmd/executor`, outside the coverage gate — so the plan and the changelog, which
+  both said the refusals lived in a tested helper, had become untrue in the same commit that
+  added it. It is `toolset.CheckStallDefault` now, tested there, and the sentence is true
+  again.
+
+**Evidence.** Every guard and reporting path was mutated against its test: with the
+executor's stall budget unwired the wedged-tool test hangs to its own 15-second alarm; with
+the worker's guard disabled the worker holds its item past the same alarm; dropping either
+lane's per-tool reports cuts a healthy thirty-tool run short; routing a stall back through
+the lease-lost branch loses the answered result; dropping the per-item reports collapses
+each materialization, harvest, web and MCP count to its pass boundaries; unlocking the
+ownership proof lets a second claimant take an item its holder is still settling; and
+removing the resolution, sentinel, pre-scan or provisioning reports drops each of the two
+processes' counts by exactly the steps they cover. The fifth round's guards were measured the
+same way: with the tick left riding the lease's third a 400ms budget under a 30s lease goes
+undetected past five seconds; with the stall check moved after the renewal the wedged item's
+lease is bought once more; with either the web or the MCP stall routed back through the
+discard the call that had answered is lost; and dropping the worker's run/post split, either
+materialization boundary or the files probe's report takes each count down by exactly one. The
+sixth round's four report placements answer the same way — the pre-clone and post-credential
+reports, the one after a checkpoint's extraction, and the worker's pre-scan boundary — and its
+floor was measured by running the binary: a 45m clone budget with the stall knob unset is
+refused by name, 29m30s is refused against the 30m default by half a minute, 20m is accepted,
+and a deployment that sets nothing still starts. The seventh round's two are the sharpest of
+the set, each mutation restoring the exact code a reviewer had objected to: spelling the fold
+`cmp.Or` again turns `errors.Is(err, ErrWorkStalled)` false on an error that names the wedged
+call, and dropping the floor's saturation makes `StallFloor` of a near-maximum step return
+*negative* — whereupon both the typed-budget and default-budget refusals silently become
+acceptances. The binary answers to match: a 292-year clone budget is now refused rather than
+started, and the eight earlier probes are unchanged. The suite was observed failing in each
+case before the mutation was reverted.
 
 ## A refutation of #392 that both reviewers refuted, 2026-08-14
 

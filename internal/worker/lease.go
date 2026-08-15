@@ -10,11 +10,13 @@ import (
 	mrand "math/rand/v2"
 	"net/http"
 	"os"
+	"sync/atomic"
 	"time"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/sandbox"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/telemetry"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/toolset"
 	sdk "github.com/anthropics/anthropic-sdk-go"
 	"github.com/anthropics/anthropic-sdk-go/option"
 	"go.opentelemetry.io/otel"
@@ -75,6 +77,22 @@ type Config struct {
 	// [heartbeatFloor, heartbeatCap]) as the reference does. Tests set a small
 	// value; production leaves it 0.
 	HeartbeatInterval time.Duration
+	// StallTimeout bounds how long a run may report no progress before the
+	// heartbeat gives up on it — cancelling the run and, deliberately, beating
+	// no more, so the lease lapses server-side and the control plane re-offers
+	// the item (#383). It is the BYOC twin of the platform executor's knob, for
+	// the same wedge: a sandbox call that never returns leaves this worker
+	// heartbeating a run that will never finish, so the item is neither
+	// progressing nor reclaimable. Progress is a step finishing, not a byte
+	// moving, so the budget must clear the longest single step a healthy run
+	// takes: toolset.MaxTimeout for one `bash`, a cold image pull, a large
+	// mount. No two steps share one interval: the liveness read is reported at
+	// the top of RunSessionTools, ahead of the paging unanswered-use scan, so
+	// two bounded control-plane calls do not add up inside one silence.
+	// It bounds *silence*, never duration — a run that keeps finishing
+	// steps runs as long as it likes. Not an off switch: 0 takes the default
+	// (WORKER_STALL_TIMEOUT).
+	StallTimeout time.Duration
 }
 
 func (c Config) withDefaults() Config {
@@ -88,6 +106,12 @@ func (c Config) withDefaults() Config {
 	}
 	if c.EmptyPollSleep <= 0 {
 		c.EmptyPollSleep = time.Second
+	}
+	// The executor's default, from the same constant rather than a copy of its
+	// number: the two binaries answer the same wedge and must not drift apart
+	// because one of them was edited.
+	if c.StallTimeout <= 0 {
+		c.StallTimeout = toolset.DefaultStallBudget
 	}
 	return c
 }
@@ -259,8 +283,9 @@ const (
 //   - drain: the session is dead, so stopping its item disrupts nothing live.
 //   - complete: every tool was answered — force-stop to clear the item (which
 //     otherwise lingers active and blocks the session's next tool turn), UNLESS
-//     the heartbeat observed losing the lease, in which case another worker may
-//     now own the item and stopping it could terminate that worker's run. This
+//     the heartbeat gave up ownership — it observed the lease lost, or gave it up
+//     on a stall (#383) — in which case another worker may now own the item and
+//     stopping it could terminate that worker's run. This
 //     lease-lost guard covers the common case; the tightest residual race (a
 //     worker whose delayed ack let a second worker reclaim, then completes before
 //     its own claim-beat 412s) is not closed by it — the wire's stop carries no
@@ -271,11 +296,15 @@ const (
 //     faultErr is nil).
 func (w *Worker) handleItem(ctx context.Context, work *sdk.BetaSelfHostedWork, parent map[string]string) {
 	sessCtx, cancel := context.WithCancel(ctx)
+	// The run's progress, watched by the heartbeat: the beat is the one loop
+	// that keeps ticking while the run is wedged, so it is where the item's
+	// silence is bounded (#383).
+	prog := newProgress()
 	hbDone := make(chan struct{})
 	var hb hbExit
 	go func() {
 		defer close(hbDone)
-		hb = w.heartbeat(sessCtx, cancel, work.ID)
+		hb = w.heartbeat(sessCtx, cancel, work.ID, prog)
 	}()
 
 	// Parent the tool-exec span on the turn that enqueued the work (its trace
@@ -289,7 +318,7 @@ func (w *Worker) handleItem(ctx context.Context, work *sdk.BetaSelfHostedWork, p
 			attribute.String("session.id", work.Data.ID),
 			attribute.String("work.id", work.ID),
 		))
-	outcome, fault := w.runItem(runCtx, work)
+	outcome, fault := w.runItem(runCtx, work, prog)
 	if fault != nil {
 		// Mirror the platform executor (internal/executor/executor.go): only the
 		// platform's own faults — the control plane unreachable for the liveness
@@ -312,10 +341,10 @@ func (w *Worker) handleItem(ctx context.Context, work *sdk.BetaSelfHostedWork, p
 		case outcomeDrain:
 			w.forceStop(work.ID, work.Data.ID)
 		case outcomeComplete:
-			if hb == hbExitLeaseLost {
+			if hb.ownershipGone() {
 				// runCtx, not ctx: the span has ended but its context has not, so the
 				// record still lands on the tool_exec span it is about.
-				slog.WarnContext(runCtx, "worker: completed work but observed losing the lease, not stopping", "work", work.ID)
+				slog.WarnContext(runCtx, "worker: completed work but no longer holds the lease, not stopping", "work", work.ID)
 			} else {
 				w.forceStop(work.ID, work.Data.ID)
 			}
@@ -333,7 +362,7 @@ func (w *Worker) handleItem(ctx context.Context, work *sdk.BetaSelfHostedWork, p
 // run, a drain, and a reclaim caused by cancellation; non-nil only for the
 // platform's own faults (see reclaimFault). handleItem sets the span's status
 // from it.
-func (w *Worker) runItem(ctx context.Context, work *sdk.BetaSelfHostedWork) (itemOutcome, error) {
+func (w *Worker) runItem(ctx context.Context, work *sdk.BetaSelfHostedWork, prog *progress) (itemOutcome, error) {
 	sessionID := work.Data.ID
 	live, err := w.sessionLive(ctx, sessionID)
 	if err != nil {
@@ -358,6 +387,7 @@ func (w *Worker) runItem(ctx context.Context, work *sdk.BetaSelfHostedWork) (ite
 		Workdir:    w.cfg.Workdir,
 		Networking: w.cfg.Networking,
 		Hardening:  w.cfg.Hardening,
+		Progress:   prog.report,
 	}); err != nil {
 		// A tool backend-faulted (or the heartbeat cancelled the run): some tools
 		// may be unanswered. Leave the item live for reclaim, matching the
@@ -399,6 +429,35 @@ func reclaimFault(ctx context.Context, err error) error {
 	return err
 }
 
+// progress records when the run last reported that it moved, so the heartbeat
+// can tell a long item from a wedged one. Only the run can make that call — a
+// tool answered, a mount landed — so progress is reported, never inferred here;
+// a timer would report progress a wedged run is not making. It is the worker's
+// twin of queue.LeaseKeeper's own tracker, separate because the two lanes renew
+// leases through different mechanisms (a database row there, the wire here).
+type progress struct {
+	// start is the monotonic base last is measured from; storing an instant
+	// instead would compare a wall clock against the loop's monotonic one.
+	start time.Time
+	last  atomic.Int64 // nanoseconds since start of the last report
+}
+
+func newProgress() *progress { return &progress{start: time.Now()} }
+
+// report marks the run as having moved. Safe from any goroutine.
+func (p *progress) report() { p.last.Store(int64(time.Since(p.start))) }
+
+// stalledFor reports whether the run has said nothing for the whole budget. A
+// budget of zero or less never stalls.
+//
+// Written as elapsed-minus-last rather than last-plus-budget: the left side
+// cannot underflow (last is an elapsed time this tracker stored, so never ahead
+// of now), while the right side would wrap negative — and stall instantly — for
+// a budget near the duration ceiling, which time.ParseDuration accepts.
+func (p *progress) stalledFor(budget time.Duration) bool {
+	return budget > 0 && time.Since(p.start)-time.Duration(p.last.Load()) > budget
+}
+
 // hbExit reports why the heartbeat loop ended, so handleItem can tell a stop the
 // control plane deliberately asked for from a lease this worker merely lost.
 // Both cancel the run identically, but they are opposite instructions about the
@@ -420,7 +479,19 @@ const (
 	// extend, or the staleness ceiling. The item may be another worker's now, so
 	// this worker must not stop it.
 	hbExitLeaseLost
+	// hbExitStalled: the run reported no progress for Config.StallTimeout, so
+	// the heartbeat cancelled it and stopped beating (#383). The lease is then
+	// given up rather than taken: it lapses server-side and the control plane
+	// re-offers the item, which is the recovery a wedged run would otherwise
+	// never reach, because nothing crashed.
+	hbExitStalled
 )
+
+// ownershipGone reports the exits after which this worker must not touch the
+// item again. A lost lease was taken from it; a stalled one it gave up — either
+// way another worker may hold the item by now, and stopping it could terminate
+// that worker's run.
+func (e hbExit) ownershipGone() bool { return e == hbExitLeaseLost || e == hbExitStalled }
 
 // heartbeat keeps the item's lease alive on the wire's optimistic-concurrency
 // protocol: the first beat sends NO_HEARTBEAT to claim the lease (starting →
@@ -436,7 +507,14 @@ const (
 // left executing against a lease this worker no longer holds. While retrying
 // transiently, the wait shrinks so the ceiling is checked right at the deadline,
 // not up to a full interval late. The first beat fires immediately.
-func (w *Worker) heartbeat(ctx context.Context, cancel context.CancelFunc, workID string) hbExit {
+//
+// It is also where the run's own liveness is bounded: before each beat it asks
+// prog whether the run has reported anything within Config.StallTimeout, and a
+// run that has not is cancelled and beaten for no longer (hbExitStalled, #383).
+// The check sits before the beat, never after, so a wedged item's lease is never
+// bought another interval it cannot use. Detection costs up to one interval on
+// top of the budget, since both live on this loop.
+func (w *Worker) heartbeat(ctx context.Context, cancel context.CancelFunc, workID string, prog *progress) hbExit {
 	last := noHeartbeat
 	interval := heartbeatCap
 	if w.cfg.HeartbeatInterval > 0 {
@@ -447,6 +525,14 @@ func (w *Worker) heartbeat(ctx context.Context, cancel context.CancelFunc, workI
 	ttl := heartbeatCap
 	lastSuccess := time.Now()
 	for {
+		if prog.stalledFor(w.cfg.StallTimeout) {
+			// The run has said nothing for its whole budget: cancel it and beat no
+			// more, so the lease lapses and the control plane re-offers the item.
+			slog.Warn("worker: run reported no progress within its stall budget, releasing the item",
+				"work", workID, "budget", w.cfg.StallTimeout)
+			cancel()
+			return hbExitStalled
+		}
 		// Bound each call so a hung heartbeat cannot silently let the lease lapse,
 		// but never below a second: the derived interval is already clamped to
 		// [1s, 30s], so this floor only guards a very short configured interval

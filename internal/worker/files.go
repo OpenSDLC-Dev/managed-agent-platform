@@ -47,7 +47,7 @@ const filesSentinelName = ".files_materialized"
 // environment mounts answers 404 and is tolerated as a not_found miss. Only the
 // session read is fatal; a per-file failure is logged, counted, and skipped,
 // never failing the run.
-func SetupFiles(ctx context.Context, client sdk.Client, sessionID string, sb sandbox.Sandbox, workdir string) error {
+func SetupFiles(ctx context.Context, client sdk.Client, sessionID string, sb sandbox.Sandbox, workdir string, progress func()) error {
 	sess, err := client.Beta.Sessions.Get(ctx, sessionID, sdk.BetaSessionGetParams{})
 	if err != nil {
 		return fmt.Errorf("read session for files: %w", err)
@@ -89,15 +89,25 @@ func SetupFiles(ctx context.Context, client sdk.Client, sessionID string, sb san
 	// executor's rule.
 	marker := filesSentinel(mounts)
 	if sentinelUsable {
-		if prev, err := sb.ReadFile(ctx, sentinelPath); err == nil &&
-			bytes.Equal(prev, marker) && mountsPresent(ctx, sb, mounts) {
-			span.SetAttributes(attribute.Bool("files.unchanged", true))
-			return nil
+		if prev, err := sb.ReadFile(ctx, sentinelPath); err == nil && bytes.Equal(prev, marker) {
+			// The marker read and the presence exec are two round trips, and the
+			// skip returns without entering the write loop — the executor's
+			// rule, so the pair is not one silent step (#383).
+			progress()
+			if mountsPresent(ctx, sb, mounts) {
+				span.SetAttributes(attribute.Bool("files.unchanged", true))
+				return nil
+			}
 		}
 	}
 
 	landed := make([]fileRef, 0, len(mounts))
 	for _, m := range mounts {
+		// Per mount, at the top of the iteration — the executor's rule
+		// (internal/executor/files.go): a tolerated miss continues, and one
+		// mount can be 500 MB, so a per-pass report would make a legitimately
+		// large set look silent to the lease loop's stall guard (#383).
+		progress()
 		if err := materializeFile(ctx, client, sb, m); err != nil {
 			skipFile(ctx, sessionID, m, err)
 			continue
@@ -107,6 +117,11 @@ func SetupFiles(ctx context.Context, client sdk.Client, sessionID string, sb san
 		slog.InfoContext(ctx, "file materialized",
 			"session_id", sessionID, "file_id", m.FileID, "mount_path", m.MountPath)
 	}
+	// The pass boundary: the report at the top of the loop covers every item but
+	// the last one, whose landing would otherwise share a silent interval with
+	// the sentinel write behind it — a 500 MB mount and a slow sandbox write are
+	// each well inside the budget and together need not be (#383).
+	progress()
 	span.SetAttributes(attribute.Int("files.materialized", len(landed)))
 	// The sentinel records only what landed, so a partial pass (a dangling mount)
 	// leaves a marker that never equals the full set and the next pass re-runs.

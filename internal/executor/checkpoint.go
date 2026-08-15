@@ -356,7 +356,7 @@ type execer interface {
 // marker consumed — a crash mid-restore leaves `ready` standing and the next
 // provision replaces the half-restored tree (plan 24 D6). The caller holds
 // the session's advisory lock and hands in the lock's connection.
-func (e *Executor) restoreCheckpoint(ctx context.Context, q execer, sid domain.ID, key string, sb sandbox.Sandbox) (err error) {
+func (e *Executor) restoreCheckpoint(ctx context.Context, q execer, sid domain.ID, key string, sb sandbox.Sandbox, progress func()) (err error) {
 	start := time.Now()
 	defer func() { recordRestore(ctx, err, time.Since(start)) }()
 
@@ -387,12 +387,22 @@ func (e *Executor) restoreCheckpoint(ctx context.Context, q execer, sid domain.I
 	if n > e.cfg.CheckpointMaxBytes {
 		return ErrCheckpointTooLarge
 	}
+	// A restore is four steps, not one, and each is its own silent interval:
+	// the workspace comes down from object storage, is validated, is shipped
+	// into the sandbox and is extracted there. Reporting only on return put a
+	// whole restore under one stall budget — and CheckpointMaxBytes is
+	// operator-raisable with no relation to that budget, so a large enough
+	// workspace was cancelled as a wedge while the marker deliberately stayed
+	// "ready", making every reclaim restart the same restore and die at the same
+	// point (#383).
+	progress()
 	if _, err := spool.Seek(0, io.SeekStart); err != nil {
 		return err
 	}
 	if err := validateCheckpointTar(spool, e.checkpointRoots(sid)); err != nil {
 		return fmt.Errorf("invalid checkpoint: %w", err)
 	}
+	progress()
 	if _, err := spool.Seek(0, io.SeekStart); err != nil {
 		return err
 	}
@@ -400,6 +410,7 @@ func (e *Executor) restoreCheckpoint(ctx context.Context, q execer, sid domain.I
 	if err := sb.WriteFileStream(ctx, restoreTarPath, spool, n); err != nil {
 		return fmt.Errorf("ship checkpoint: %w", err)
 	}
+	progress()
 	res, err := sb.Exec(ctx, sandbox.ExecRequest{
 		Command: "tar -xf " + restoreTarPath + " -C / && rm -f " + restoreTarPath,
 	})
@@ -409,6 +420,11 @@ func (e *Executor) restoreCheckpoint(ctx context.Context, q execer, sid domain.I
 	if res.ExitCode != 0 {
 		return fmt.Errorf("extract checkpoint: tar exited %d: %s", res.ExitCode, res.Stderr)
 	}
+	// The extraction is done and the marker update is its own round trip. A pass
+	// cancelled between them leaves the marker `ready` by plan 24 D6's crash
+	// rule, so the reclaim reaps the restored sandbox and does the whole restore
+	// again — the loop, one step later (#383).
+	progress()
 
 	if _, err := q.Exec(ctx,
 		`UPDATE session_checkpoints SET state = 'consumed' WHERE session_id = $1`, sid.String()); err != nil {

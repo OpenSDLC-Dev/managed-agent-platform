@@ -3,10 +3,13 @@ package executor
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/egress"
@@ -152,6 +155,31 @@ func TestWebSearchAnswersWithSearchResultBlocks(t *testing.T) {
 	}
 	if n := h.liveOf(t, queue.ModelTurn); n != 1 {
 		t.Errorf("live model_turn = %d, want 1", n)
+	}
+}
+
+func TestWebToolsReportProgressPerAnsweredCall(t *testing.T) {
+	// A web_exec item is bounded by silence like any other (#383), and this lane
+	// touches no sandbox — so the only thing that can make a healthy turn look
+	// wedged is a turn with many calls: each backend allows its request 60s, and
+	// this driver answers them one at a time. Reporting per answered call is what
+	// keeps that turn alive; without it the item is cancelled partway through a
+	// turn that was answering perfectly well, and every reclaim is cut short at
+	// the same place — each one re-billing the call it cancelled in flight.
+	// Counted, not timed.
+	h := webHarness(t, `{"results":[]}`, "")
+	h.suspendWeb(t, searchUse("one"), searchUse("two"), searchUse("three"))
+
+	var reports int
+	results, faultErr, runErr := h.exec.runWebTools(context.Background(), h.sid, func() { reports++ })
+	if runErr != nil || faultErr != nil {
+		t.Fatalf("runWebTools: runErr=%v faultErr=%v", runErr, faultErr)
+	}
+	if len(results) != 3 {
+		t.Fatalf("results = %d, want 3", len(results))
+	}
+	if reports != 4 {
+		t.Errorf("progress reports = %d, want 4 (one per web call, plus the pass boundary that reports the last one answering)", reports)
 	}
 }
 
@@ -593,5 +621,64 @@ func TestNewBuildsTheAllowlistOnlyWhenConfigured(t *testing.T) {
 	e := New(nil, nil, nil, nil, nil, nil, Config{WebAllowedDomains: []string{"example.com"}})
 	if e.webAllowed == nil || !e.webAllowed.Match("example.com") || e.webAllowed.Match("evil.test") {
 		t.Errorf("configured allowlist = %+v, want example.com admitted and evil.test refused", e.webAllowed)
+	}
+}
+
+// TestAStalledWebPassKeepsTheCallsItPaidFor: a web call that answered has been
+// paid for — the backend billed it and spent its rate limit — so a stall must
+// not throw it away for the reclaim to buy again. It is the same rule the
+// tool_exec lane follows for a side effect already spent, and the same
+// precondition holds: a stall means this claimant still held the lease when it
+// gave it up, so its settlement is accepted. Only a lease genuinely lost commits
+// nothing.
+func TestAStalledWebPassKeepsTheCallsItPaidFor(t *testing.T) {
+	// The second call blocks past the stall budget; the first answers at once.
+	release := make(chan struct{})
+	var calls atomic.Int32
+	search := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if calls.Add(1) > 1 {
+			select {
+			case <-release:
+			case <-r.Context().Done():
+			}
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"results":[]}`))
+	}))
+	// Released before the server is closed (cleanups are LIFO): Close waits on
+	// outstanding handlers, and this channel is what lets the blocked one go.
+	t.Cleanup(search.Close)
+	t.Cleanup(func() { close(release) })
+
+	prov := &fakeProvider{sb: &fakeSandbox{}}
+	h := newHarnessWith(t, prov, Config{
+		TavilyAPIKey:     "tvly-test",
+		WebSearchBaseURL: search.URL,
+		LeaseTTL:         1500 * time.Millisecond,
+		StallTimeout:     time.Second,
+	})
+	h.prov = prov
+	h.suspendWeb(t, searchUse("answered"), searchUse("wedged"))
+
+	item, err := h.queue.Claim(context.Background(), queue.WebExec, 1500*time.Millisecond)
+	if err != nil || item == nil {
+		t.Fatalf("claim: %+v %v", item, err)
+	}
+	err = h.exec.processWeb(context.Background(), item)
+	if !errors.Is(err, queue.ErrWorkStalled) {
+		t.Fatalf("processWeb = %v, want it to report the stall", err)
+	}
+
+	if got := len(h.toolResults(t)); got != 1 {
+		t.Errorf("results = %d, want 1 (the call that answered before the stall must not be re-run)", got)
+	}
+	// And the rest rides a fresh web_exec rather than a tool_exec that could not
+	// answer a web call at all.
+	if n := h.liveOf(t, queue.WebExec); n != 1 {
+		t.Errorf("live web_exec = %d, want 1 (the call the stall cut short)", n)
+	}
+	if n := h.liveOf(t, queue.ModelTurn); n != 0 {
+		t.Errorf("live model_turn = %d, want 0 (a call is still unanswered)", n)
 	}
 }

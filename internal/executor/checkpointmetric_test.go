@@ -41,7 +41,7 @@ func TestCheckpointAndRestoreMetrics(t *testing.T) {
 		t.Fatalf("capture: %v", err)
 	}
 	if _, err := h.exec.provisionSandbox(context.Background(), h.sid,
-		sessionRun{networking: domain.Networking{Type: domain.NetUnrestricted}}); err == nil {
+		sessionRun{networking: domain.Networking{Type: domain.NetUnrestricted}}, func() {}); err == nil {
 		t.Fatal("restore succeeded with a failing extraction")
 	}
 

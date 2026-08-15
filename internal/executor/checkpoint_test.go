@@ -244,7 +244,7 @@ func TestCaptureAndRestoreShareOneBudget(t *testing.T) {
 		t.Fatalf("capture within budget: %v", err)
 	}
 	if _, err := fits.exec.provisionSandbox(context.Background(), fits.sid,
-		sessionRun{networking: domain.Networking{Type: domain.NetUnrestricted}}); err != nil {
+		sessionRun{networking: domain.Networking{Type: domain.NetUnrestricted}}, func() {}); err != nil {
 		t.Fatalf("restore of an accepted capture under the same budget: %v", err)
 	}
 	if state, _ := markerState(t, fits); state != "consumed" {
@@ -433,7 +433,7 @@ func TestProvisionFailsClosedOnAReadyMarkerWithoutBlobs(t *testing.T) {
 	setMarker(t, h, "ready", checkpointBlob(t, h, map[string]string{"workspace/prev.txt": "x"}))
 	bare := New(h.pool, h.log, h.queue, h.prov, nil, h.cipher, Config{})
 	_, err := bare.provisionSandbox(context.Background(), h.sid,
-		sessionRun{networking: domain.Networking{Type: domain.NetUnrestricted}})
+		sessionRun{networking: domain.Networking{Type: domain.NetUnrestricted}}, func() {})
 	if err == nil || !strings.Contains(err.Error(), "no object store") {
 		t.Fatalf("err = %v, want the no-object-store refusal", err)
 	}
@@ -546,7 +546,7 @@ func TestProvisionRestoresAReadyCheckpoint(t *testing.T) {
 	setMarker(t, h, "ready", key)
 
 	if _, err := h.exec.provisionSandbox(context.Background(), h.sid,
-		sessionRun{networking: domain.Networking{Type: domain.NetUnrestricted}}); err != nil {
+		sessionRun{networking: domain.Networking{Type: domain.NetUnrestricted}}, func() {}); err != nil {
 		t.Fatalf("provision with a ready checkpoint: %v", err)
 	}
 
@@ -599,7 +599,7 @@ func TestProvisionWithoutAReadyMarkerRestoresNothing(t *testing.T) {
 			setMarker(t, h, "consumed", checkpointBlob(t, h, map[string]string{"workspace/old.txt": "stale"}))
 		}
 		if _, err := h.exec.provisionSandbox(context.Background(), h.sid,
-			sessionRun{networking: domain.Networking{Type: domain.NetUnrestricted}}); err != nil {
+			sessionRun{networking: domain.Networking{Type: domain.NetUnrestricted}}, func() {}); err != nil {
 			t.Fatalf("provision (%s): %v", seed, err)
 		}
 		if len(h.prov.reapedSnapshot()) != 0 {
@@ -626,7 +626,7 @@ func TestRestoreFailureLeavesTheMarkerReady(t *testing.T) {
 	setMarker(t, h, "ready", checkpointBlob(t, h, map[string]string{"workspace/prev.txt": "x"}))
 
 	if _, err := h.exec.provisionSandbox(context.Background(), h.sid,
-		sessionRun{networking: domain.Networking{Type: domain.NetUnrestricted}}); err == nil {
+		sessionRun{networking: domain.Networking{Type: domain.NetUnrestricted}}, func() {}); err == nil {
 		t.Fatal("provision succeeded with a failing extraction")
 	}
 	if state, _ := markerState(t, h); state != "ready" {
@@ -649,7 +649,7 @@ func TestRestoreRejectsATamperedBlob(t *testing.T) {
 		h := newHarness(t, sb)
 		setMarker(t, h, "ready", checkpointBlob(t, h, files))
 		if _, err := h.exec.provisionSandbox(context.Background(), h.sid,
-			sessionRun{networking: domain.Networking{Type: domain.NetUnrestricted}}); err == nil {
+			sessionRun{networking: domain.Networking{Type: domain.NetUnrestricted}}, func() {}); err == nil {
 			t.Fatalf("%s: tampered blob restored", name)
 		}
 		if _, ok := sb.files[restoreTarPath]; ok {
@@ -675,7 +675,7 @@ func TestRestoreRejectsATamperedBlob(t *testing.T) {
 	}
 	setMarker(t, h, "ready", key)
 	if _, err := h.exec.provisionSandbox(context.Background(), h.sid,
-		sessionRun{networking: domain.Networking{Type: domain.NetUnrestricted}}); err == nil {
+		sessionRun{networking: domain.Networking{Type: domain.NetUnrestricted}}, func() {}); err == nil {
 		t.Fatal("fifo member restored")
 	}
 	if _, ok := sb.files[restoreTarPath]; ok {
@@ -693,11 +693,41 @@ func TestRestoreOverBudgetFails(t *testing.T) {
 		"workspace/big.bin": strings.Repeat("A", 64),
 	}))
 	_, err := h.exec.provisionSandbox(context.Background(), h.sid,
-		sessionRun{networking: domain.Networking{Type: domain.NetUnrestricted}})
+		sessionRun{networking: domain.Networking{Type: domain.NetUnrestricted}}, func() {})
 	if !errors.Is(err, ErrCheckpointTooLarge) {
 		t.Fatalf("restore over budget: %v, want ErrCheckpointTooLarge", err)
 	}
 	if _, ok := sb.files[restoreTarPath]; ok {
 		t.Error("over-budget tar reached the sandbox")
+	}
+}
+
+// TestRestoreReportsBetweenItsSteps: a restore is not one step. It fetches the
+// workspace from object storage, validates the spooled tar, ships it into the
+// sandbox and extracts it there, and then consumes the marker — five round
+// trips, four of them able to take real time on a large workspace over a distant
+// bucket, and `EXECUTOR_CHECKPOINT_MAX_BYTES` is operator-raisable with no
+// relation to the stall budget. Reported only on return, the whole restore was
+// one silent interval: a budget that a single step clears comfortably would
+// cancel the sum of them, the marker would deliberately stay `ready` (D6's crash
+// rule), and every reclaim would reap the sandbox and restore again from zero
+// (#383).
+func TestRestoreReportsBetweenItsSteps(t *testing.T) {
+	sb := &fakeSandbox{}
+	h := newHarness(t, sb)
+	setMarker(t, h, "ready", checkpointBlob(t, h, map[string]string{"workspace/prev.txt": "x"}))
+
+	var reports int
+	if _, err := h.exec.provisionSandbox(context.Background(), h.sid,
+		sessionRun{networking: domain.Networking{Type: domain.NetUnrestricted}},
+		func() { reports++ }); err != nil {
+		t.Fatalf("provisionSandbox: %v", err)
+	}
+	// Three provisioning steps (credentials, session lock, sandbox) plus the
+	// pre-restore reap, then the restore's own four: fetched and spooled,
+	// validated, shipped into the sandbox, extracted — the last of them landing
+	// before the marker update, which is a round trip of its own.
+	if reports != 8 {
+		t.Errorf("provision-with-restore reports = %d, want 8 (4 provisioning steps + 4 restore steps)", reports)
 	}
 }

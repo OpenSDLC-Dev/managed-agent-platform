@@ -124,7 +124,7 @@ func (b *Brain) runGrading(ctx context.Context, item *queue.Item, agent domain.R
 		}},
 	}
 
-	kctx, keeper := b.queue.KeepLease(sctx, item, b.cfg.LeaseTTL)
+	kctx, keeper := b.queue.KeepLease(sctx, item, b.cfg.LeaseTTL, 0)
 	hbStop := make(chan struct{})
 	hbDone := make(chan struct{})
 	go func() {

@@ -3,6 +3,7 @@ package queue
 import (
 	"context"
 	"fmt"
+	"sync/atomic"
 	"time"
 )
 
@@ -22,21 +23,62 @@ type LeaseKeeper struct {
 	quit   chan struct{}
 	done   chan struct{}
 	failed error // written once by the goroutine before done closes
+	// start is the monotonic base last is measured from; storing an instant
+	// instead would compare a wall clock against the ticker's monotonic one —
+	// provider.StallGuard measures the model endpoint the same way.
+	start time.Time
+	last  atomic.Int64 // nanoseconds since start of the last reported progress
 }
 
 // KeepLease starts a keeper that extends item's lease to ttl at every ttl/3 until
 // Close, and returns a child context cancelled when a renewal fails (the lease is
 // lost). Run the work under the returned context and call Close when it finishes;
 // Close reports the first renewal failure, if any.
-func (q *Queue) KeepLease(ctx context.Context, item *Item, ttl time.Duration) (context.Context, *LeaseKeeper) {
+//
+// stall bounds how long the holder may report no progress before the keeper gives
+// up on it: the work is cancelled and, deliberately, the lease is left to lapse,
+// so the item becomes reclaimable exactly as it would if the process had died.
+// That is the containment #383 was missing — a wedged sandbox call leaves the row
+// untouched, so renewal succeeds forever and the documented crash recovery never
+// fires, because nothing crashed. A stall of zero or less keeps a keeper that
+// renews for as long as its holder lives, which is what the brain's turn loop
+// wants: its silence is bounded a layer down, by provider.StallGuard on the model
+// stream itself.
+//
+// Progress is reported by the holder (a tool finished, a mount landed), never
+// inferred here, because only the holder can tell a long step from a stuck one.
+// Detection costs up to one tick on top of the budget, since both live on the
+// same ticker — and the tick is the shorter of ttl/3 and the budget itself, so a
+// lease much longer than the budget cannot stretch that cost with it. One case
+// costs more, deliberately: the check and the renewal share this goroutine, so a
+// renewal blocked on a stalled database delays the next check by however long it
+// blocks. That is bounded by what the lease has left (the renewal's own budget)
+// and self-limiting — the blocked attempt either times out, which cancels the
+// holder anyway, or returns to a tick that is already buffered and checks at
+// once. A second goroutine would close the gap and is not worth its
+// synchronisation: the outcome in that window is a cancelled holder either way,
+// and only the error naming it differs.
+func (q *Queue) KeepLease(ctx context.Context, item *Item, ttl, stall time.Duration) (context.Context, *LeaseKeeper) {
 	kctx, cancel := context.WithCancel(ctx)
-	k := &LeaseKeeper{cancel: cancel, quit: make(chan struct{}), done: make(chan struct{})}
+	k := &LeaseKeeper{cancel: cancel, quit: make(chan struct{}), done: make(chan struct{}), start: time.Now()}
 	// Renew at a third of the lease. Guard the degenerate case: a sub-3ns TTL
 	// (operator misconfiguration — a lease that short is unusable anyway) would
 	// otherwise make the interval zero and panic time.NewTicker.
 	interval := ttl / 3
 	if interval <= 0 {
 		interval = ttl
+	}
+	// The stall check rides this same tick, so a lease far longer than the stall
+	// budget would push detection out with it: at a three-hour TTL the tick is an
+	// hour, and a wedge that the budget says costs half an hour would cost an hour
+	// and a half — during which this consumer, which processes one item at a time,
+	// runs nothing else. The two knobs are independently tunable and neither
+	// binary can validate a relation the queue is free to change, so the tick
+	// takes the shorter of the two instead. Renewing more often than a third of a
+	// lease is only extra UPDATEs; detecting a wedge later than the budget says is
+	// the defect (#383).
+	if stall > 0 && stall < interval {
+		interval = stall
 	}
 	// When the lease currently held was bought, on this process's monotonic clock.
 	// Stamped here rather than inside the goroutine so that scheduling delay is not
@@ -63,6 +105,18 @@ func (q *Queue) KeepLease(ctx context.Context, item *Item, ttl time.Duration) (c
 			case <-kctx.Done():
 				return
 			case <-t.C:
+				// Checked before renewing, so a wedged item's lease is never
+				// bought another interval it cannot use. Written as
+				// elapsed-minus-last rather than last-plus-stall: the left side
+				// cannot underflow (last is an elapsed time this keeper stored,
+				// so never ahead of now), while the right side would wrap
+				// negative — and stall instantly — for a budget near the
+				// duration ceiling, which time.ParseDuration accepts.
+				if stall > 0 && time.Since(k.start)-time.Duration(k.last.Load()) > stall {
+					k.failed = ErrWorkStalled
+					k.cancel()
+					return
+				}
 				// Bounded: Close waits for this goroutine, so an Extend blocked on
 				// an exhausted pool or a stalled database would otherwise hang the
 				// holder forever. The budget is what is left of the lease the last
@@ -132,6 +186,14 @@ func (q *Queue) KeepLease(ctx context.Context, item *Item, ttl time.Duration) (c
 	}()
 	return kctx, k
 }
+
+// Progress reports that the work has moved: another tool answered, another mount
+// landed. It is what keeps a long but healthy item alive, so it belongs at the
+// steps a wedge would stop — never on a timer, which would report progress a
+// wedged holder is not making. Safe from any goroutine. A keeper started with no
+// stall budget ignores what it records, but the store still happens, so a caller
+// that reports on a hot path pays for it whether or not anything reads it.
+func (k *LeaseKeeper) Progress() { k.last.Store(int64(time.Since(k.start))) }
 
 // Close stops the keeper and reports the first extension failure. The goroutine
 // has exited when Close returns, so the item's lease value is stable again for

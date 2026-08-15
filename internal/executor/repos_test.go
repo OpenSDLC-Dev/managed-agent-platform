@@ -802,11 +802,18 @@ func TestRepoCancelledCloneSweepsTheSandbox(t *testing.T) {
 	defer cancel()
 	sb.onWrite = cancel
 
+	// The credential read and the cipher's decrypt are their own round trips, and
+	// the clone below is what the stall floor is measured against — so this row
+	// also pins the report between them (#383).
+	var reports int
 	_, err := h.exec.materializeRepo(ctx, sb, h.sid, repoRef{
 		ID: "sesrsc_sweep", Type: "github_repository", URL: fx.url(), MountPath: repoMount,
-	})
+	}, func() { reports++ })
 	if err == nil {
 		t.Fatal("the materialization reported success after its context was cancelled")
+	}
+	if reports != 1 {
+		t.Errorf("progress reports = %d, want 1 (the sealed token resolved, before the clone that the floor is measured against)", reports)
 	}
 
 	const tar = repoStagingRoot + "/repo-sesrsc_sweep.tar"
