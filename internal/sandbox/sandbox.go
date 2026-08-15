@@ -141,19 +141,59 @@ func (e *PathNotWritableError) Is(target error) bool { return target == ErrNotWr
 // choice (the wire's environment config has no image field); Networking comes
 // from the environment.
 type Spec struct {
-	SessionID  domain.ID
-	Image      string
-	Workdir    string
+	// SessionID is the sandbox's whole identity: both backends derive the
+	// container or pod name from it, which is why no sandbox id is ever
+	// persisted and any executor can find a session's sandbox again from the
+	// session alone. Provision refuses a zero id.
+	SessionID domain.ID
+	// Image is what the sandbox is created from; Provision refuses an empty
+	// one. It and Workdir are what every adoption compares, joined by
+	// Networking only when the sandbox has no gate — a gated one's egress path
+	// is already pinned by the pairing, so both backends skip that leg. What
+	// selects this set is not that it is fixed at create (Env and Hardening are
+	// too, and are deliberately adopted as created) but what a mismatch would
+	// mean: a different image or workdir is a different sandbox rather than
+	// this one found again, and a different network mode is a route out the
+	// session never asked for. A mismatch is refused with ErrSpecMismatch
+	// rather than served as if it matched — the one path that refuses for a
+	// different reason being a gated K8s pod that never turns ready, whose
+	// readiness error and reclaim deliberately precede the comparison so a pod
+	// both wedged and mismatched is removed rather than stranded (k8s.go).
+	Image string
+	// Workdir is where commands run and where the toolset's relative paths
+	// resolve. Empty means DefaultWorkdir, resolved by the provider before the
+	// adoption comparison, so an empty spec and an explicit "/workspace" are
+	// the same sandbox rather than a mismatch.
+	Workdir string
+	// Networking is the session's egress policy. What a backend does with it
+	// depends on Gate: with a gate the gate enforces it and the backend leaves
+	// the sandbox's own networking to the pairing, without one the backend
+	// applies its own fail-closed containment (Docker's NetworkMode, the K8s
+	// route-flush init container) — which is what the adoption compares in that
+	// ungated case, each backend reading back its own expression of it.
 	Networking domain.Networking
 	// Env is injected at provision time and visible to every tool exec (nil =
-	// none). Slice 4 populates it with the per-session egress-proxy address and
-	// the vault env-var placeholders; both backends thread it in the same way,
-	// so the behavior is identical across Docker and Kubernetes.
+	// none). What the executor puts here is the vault env-var placeholders and
+	// only those (sandboxEnv, internal/executor) — the egress-proxy variables
+	// are the gate's, injected by whichever backend runs it and reserved
+	// against callers below, so a sandbox's secrets and its route out arrive by
+	// different doors. Both backends thread Env in the same way, so the
+	// behavior is identical across Docker and Kubernetes.
 	//
 	// Keys must be valid environment-variable names (ValidateEnv); an invalid
 	// key fails provisioning on both backends rather than diverging (Docker
 	// would fold a '=' into the value, Kubernetes would reject the pod). Values
 	// are unconstrained opaque strings.
+	//
+	// That check is the grammar and nothing else. A name the platform reserves
+	// passes it — PATH, the loader and shell hooks, the proxy variables the
+	// sandbox's route to its gate depends on (ReservedEnvName) — because being
+	// reserved is not a grammar rule and the platform's own trusted injections
+	// go through the same check. A caller filling Env from an untrusted source
+	// (a vault credential's secret_name is the one that exists) therefore drops
+	// those keys itself rather than letting them reach ValidateEnv: a rejected
+	// map fails the whole provision, so one bad credential would reclaim-loop
+	// the session.
 	//
 	// Env is bound when the sandbox is first created. Provision is idempotent
 	// and adopts a session's existing sandbox without re-applying a changed Env
@@ -201,9 +241,14 @@ type Spec struct {
 // path for every tool call after the first, does not revoke the token a
 // still-running gate is using. The token is therefore not carried here.
 type GateSpec struct {
-	Image           string          // the gate container image (built with `docker build --target gate`)
-	ControlplaneURL string          // the gate fetches its per-session config from here
-	TokenMinter     GateTokenMinter // mints the gate token on create; see GateTokenMinter
+	Image           string // the gate container image (built with `docker build --target gate`)
+	ControlplaneURL string // the gate fetches its per-session config from here
+	// TokenMinter mints the gate's per-session token in two steps — generated in
+	// memory before the create, persisted only once this provider has won it, so
+	// an adoption never revokes the token a running gate is using (the full
+	// argument is on GateTokenMinter). It must be non-nil wherever a GateSpec is:
+	// both backends call it unconditionally on the create path.
+	TokenMinter GateTokenMinter
 	// OTelEndpoint and OTelInsecure carry the deployment's OTLP collector config
 	// into the gate container so its egress_request spans export to the same
 	// collector as the rest of the platform (observability is built in, not bolted
@@ -346,6 +391,13 @@ type ExecResult struct {
 type Sandbox interface {
 	// ID identifies the sandbox to the backend (a container id, a pod name).
 	ID() string
+	// Exec runs one command to completion and reports what it did (ExecRequest,
+	// ExecResult). A command that fails is not an error here: a non-zero exit,
+	// output on stderr, and a command killed at its deadline are all a finished
+	// ExecResult, because each is something the model reads and answers. The
+	// error return is the sandbox failing the caller instead — gone
+	// (ErrNotFound), unreachable, the context cancelled — which the toolset
+	// carries up as a backend fault rather than folding into a tool result.
 	Exec(ctx context.Context, req ExecRequest) (ExecResult, error)
 	// ReadFile returns a file's bytes verbatim, binary included.
 	ReadFile(ctx context.Context, path string) ([]byte, error)

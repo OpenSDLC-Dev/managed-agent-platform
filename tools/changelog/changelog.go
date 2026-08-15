@@ -33,6 +33,15 @@ const unreleasedPointer = "Unreleased changes accumulate as one fragment file pe
 	"[changelog.d/](./changelog.d/) and are assembled into a dated section here\n" +
 	"by `make changelog` at release time (see [docs/RELEASING.md](./docs/RELEASING.md))."
 
+// maxFragmentBytes caps a fragment body — one paragraph, around 200 words —
+// measured in bytes after the surrounding-newline trim, the same bytes that
+// reach the released section. The convention, and the table naming where each
+// longer form belongs instead, live in changelog.d/README.md; the cap is
+// enforced here because a documented-only limit is not a limit, and assembly
+// freezes what it folds in — an over-long fragment is a paragraph the project
+// then maintains forever.
+const maxFragmentBytes = 1500
+
 var (
 	// SemVer forbids leading zeros — 0.2.01 is not a version.
 	versionRe  = regexp.MustCompile(`^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$`)
@@ -95,6 +104,9 @@ func loadFragments(dir string) ([]fragment, error) {
 		body := strings.Trim(string(raw), "\n")
 		if strings.TrimSpace(body) == "" {
 			return nil, fmt.Errorf("changelog.d/%s: empty fragment", name)
+		}
+		if len(body) > maxFragmentBytes {
+			return nil, fmt.Errorf("changelog.d/%s: %d bytes, over the %d-byte cap — a fragment holds what a reader of the release notes needs; changelog.d/README.md names the home of every longer form", name, len(body), maxFragmentBytes)
 		}
 		if !strings.HasPrefix(body, "- ") {
 			return nil, fmt.Errorf("changelog.d/%s: a fragment is the final CHANGELOG entry verbatim and must start with %q", name, "- ")

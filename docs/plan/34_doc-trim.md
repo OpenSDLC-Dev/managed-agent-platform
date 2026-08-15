@@ -82,6 +82,18 @@ obligation on the operator. Those are never cut here. Restatement, duplication a
 
 ## Recording checklist
 
+- **Slice 2 refuted one of its own preconditions.** `internal/vaultresolve/mcprefresh.go` was listed
+  as holding its retryable-versus-unusable taxonomy only in prose. It does not: `mcp.go:13-22`
+  defines the split and the caller's differing response, `mcprefresh.go:119-123` gives the
+  refresh-specific version, and `exchange` carries per-arm rationale. Nothing was added, and slice 3
+  may cut ARCHITECTURE's vaultresolve paragraph without a precondition. A survey finding is a
+  hypothesis; the code is the answer.
+- **Native Windows is not a supported place to run the gate.**
+  `tools/changelog.TestAssembleStagingFailureLeavesEverythingUntouched` fails there because
+  `os.Chmod(dir, 0o555)` does not deny a rename on Windows and `os.Geteuid()` returns -1, so its
+  root-skip never fires. Confirmed identical at `main` with main's own sources, so it is the
+  environment, not a regression. Run the gate in WSL or read CI.
+
 - **Config-doc gap for slice 4.** The rule that decides how a role-claim *name* is read — a
   URI-shaped name is one flat key, any other dotted name is a path, fixed at configuration time
   so a token cannot choose the reading — is stated only in `internal/identity/claims.go:10-22`.
@@ -90,7 +102,17 @@ obligation on the operator. Those are never cut here. Restatement, duplication a
 - **Never run the assembler to check a fragment.** `go run ./tools/changelog assemble` deletes
   every file in `changelog.d/` after folding it into CHANGELOG.md; a verification attempt during
   slice 1 destroyed the whole recut and it had to be rebuilt from the agent transcripts. Check
-  fragments against `loadFragments`' rules by reading, never by executing.
+  fragments against `loadFragments`' rules by reading, or run `TestTheShippingFragmentsLoad`,
+  which the gate now runs for you — never by executing `assemble`.
+- **`internal/executor/mcpwork.go`'s two "later slice" mentions are still true, with one
+  qualifier.** Slice 2 swept eight stale ones and checked these. The `mcp_catalogs.error`
+  column really is unread: the brain selects `server_name, url, status, tools` and not it
+  (mcptools.go), and `internal/api` only deletes those rows. But the same text is already on
+  the wire by another road — the settlement passes `message: r.reason` to `mcpFailureEvent`
+  (mcpwork.go:966), which appends a `session.error` the events endpoints serve. So "to the
+  model" is fully future and "to the API" is not. A later slice revisiting these comments
+  should add that qualifier rather than delete them. Not every forward-looking comment is
+  stale — and not every one is wholly true either.
 
 - `docs/DIVERGENCES.md` cites "the v1.62.0 checkout" three times as evidence, but the local
   `anthropic-sdk-go` reference checkout's newest tag is v1.61.0, which is also the `go.mod` pin.

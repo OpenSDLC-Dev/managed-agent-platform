@@ -2,8 +2,12 @@
 // substitution engine that rewrites vault placeholders into their secret values
 // on outbound requests, and the host matcher both it and the per-session gate
 // use to decide which hosts a request — or a credential — may reach. It holds
-// no I/O: the gate (a later slice) drives it against real HTTP requests, and
-// resolution supplies it credentials read from the store.
+// no I/O, and that is the invariant to preserve: internal/gate drives it
+// against real HTTP requests — constructing the substitution engine
+// (gate.go) and calling Substitute for header and body locations — while
+// internal/gate/policy.go reuses NewHostSet and NormalizeHost for the
+// environment's allowed-host policy, and internal/vaultresolve supplies the
+// credentials read from the store.
 package egress
 
 import (

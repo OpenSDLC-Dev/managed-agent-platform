@@ -1,8 +1,3 @@
-// Package api implements the wire-compatible control-plane REST surface:
-// Anthropic Managed Agents resource CRUD (agents / environments / sessions)
-// with the reference paths, JSON shapes, ID prefixes, pagination envelope,
-// error envelope, and x-api-key management auth. The `?beta=true` query and
-// anthropic-version / anthropic-beta headers are accepted and ignored.
 package api
 
 import (

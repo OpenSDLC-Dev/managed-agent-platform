@@ -4,6 +4,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -454,6 +456,115 @@ func TestFragmentTrailingSpacesPreserved(t *testing.T) {
 	got := readFile(t, clPath)
 	if !strings.Contains(got, "- An interior break  \n  and a final-line hard break  \n") {
 		t.Error("trailing spaces inside or at the end of the fragment were not preserved")
+	}
+}
+
+// The size cap is enforced, not merely documented: a body exactly at the cap
+// releases, one byte over is refused with a message naming the file, the size
+// and the cap. The cap counts bytes, so a body under it in runes but over it
+// in bytes is refused too — an entry is prose, and this project's prose is
+// full of em dashes.
+// documentedCap is the cap changelog.d/README.md promises a contributor, read
+// from that file rather than from maxFragmentBytes.
+//
+// A boundary test that computes its own inputs from the constant it is testing
+// still passes after the constant moves — and the number is not an
+// implementation detail but a contract stated in prose, which is exactly the
+// pair that drifts. Reading it back makes the doc and the code fail together or
+// not at all.
+func documentedCap(t *testing.T) int {
+	t.Helper()
+	b, err := os.ReadFile(filepath.Join("..", "..", "changelog.d", "README.md"))
+	if err != nil {
+		t.Fatalf("read changelog.d/README.md: %v", err)
+	}
+	m := regexp.MustCompile(`hard cap ([\d,]+) bytes`).FindStringSubmatch(string(b))
+	if m == nil {
+		t.Fatalf("changelog.d/README.md no longer states a %q — either the cap stopped "+
+			"being documented, or this locator needs fixing; leaving it unmatched would "+
+			"make the check below vacuous.", "hard cap N bytes")
+	}
+	n, err := strconv.Atoi(strings.ReplaceAll(m[1], ",", ""))
+	if err != nil {
+		t.Fatalf("changelog.d/README.md states cap %q, which is not a number: %v", m[1], err)
+	}
+	return n
+}
+
+func TestFragmentSizeCap(t *testing.T) {
+	if want := documentedCap(t); maxFragmentBytes != want {
+		t.Fatalf("maxFragmentBytes = %d but changelog.d/README.md promises contributors %d: "+
+			"a fragment written to the documented limit would be refused, or one over it "+
+			"accepted. Move both or neither.", maxFragmentBytes, want)
+	}
+	atCap := "- " + strings.Repeat("a", maxFragmentBytes-2)
+	clPath, dir := writeFixture(t, steadyChangelog, map[string]string{
+		"a.added.md": atCap + "\n",
+	})
+	if err := runAssemble(clPath, dir, "0.3.0", "2026-09-01"); err != nil {
+		t.Fatalf("a fragment exactly at the %d-byte cap must load: %v", maxFragmentBytes, err)
+	}
+	if got := readFile(t, clPath); !strings.Contains(got, atCap) {
+		t.Error("at-cap fragment not released")
+	}
+
+	for _, tc := range []struct{ name, body string }{
+		{"one byte over", "- " + strings.Repeat("a", maxFragmentBytes-1)},
+		{"under in runes, over in bytes", "- " + strings.Repeat("—", maxFragmentBytes/2)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			clPath, dir := writeFixture(t, steadyChangelog, map[string]string{
+				"a.added.md": tc.body + "\n",
+			})
+			err := runAssemble(clPath, dir, "0.3.0", "2026-09-01")
+			if err == nil {
+				t.Fatal("want error for an over-cap fragment")
+			}
+			for _, want := range []string{
+				"changelog.d/a.added.md",
+				strconv.Itoa(len(tc.body)) + " bytes",
+				strconv.Itoa(maxFragmentBytes) + "-byte cap",
+				"changelog.d/README.md",
+			} {
+				if !strings.Contains(err.Error(), want) {
+					t.Errorf("error %q does not mention %q", err, want)
+				}
+			}
+			if got := readFile(t, clPath); got != steadyChangelog {
+				t.Error("CHANGELOG modified on refused assemble")
+			}
+			if _, statErr := os.Stat(filepath.Join(dir, "a.added.md")); statErr != nil {
+				t.Error("fragment deleted on refused assemble")
+			}
+		})
+	}
+}
+
+// TestTheShippingFragmentsLoad runs the loader against this repository's own
+// changelog.d/ — the only fragments that will ever be released.
+//
+// Every other test here builds a fixture, so the loader's rules (naming, the
+// "- " prefix, no headings, the byte cap) were checked only against fragments
+// written to be checked. Nothing in `make verify` or CI touched the real
+// directory, so a fragment breaking one of them merged green and failed at the
+// release PR — the point where the cost is highest and the author is elsewhere.
+// This puts the failure in the PR that causes it.
+//
+// loadFragments only reads. Never reach for assemble here: it DELETES every
+// fragment it folds, which is why every other test in this file copies its
+// fixtures (docs/plan/34_doc-trim.md, "Never run the assembler to check a
+// fragment").
+//
+// Directly after a release the directory is empty and this test proves nothing.
+// That is correct: there is then nothing to break.
+func TestTheShippingFragmentsLoad(t *testing.T) {
+	dir := filepath.Join("..", "..", "changelog.d")
+	if _, err := os.Stat(dir); err != nil {
+		t.Fatalf("changelog.d/ must exist at the repo root: %v", err)
+	}
+	if _, err := loadFragments(dir); err != nil {
+		t.Fatalf("the repository's own changelog.d/ does not load, so the next release "+
+			"PR would fail on it: %v", err)
 	}
 }
 

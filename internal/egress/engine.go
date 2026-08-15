@@ -74,8 +74,9 @@ func (c *Credential) enabled(loc Location) bool {
 }
 
 // Engine holds the resolved credentials for one substitution pass, keyed by
-// placeholder. Resolution (a later slice) builds it from the store; the gate
-// drives Substitute over each outbound request.
+// placeholder. internal/vaultresolve reads them from the store and the control
+// plane hands them to the gate (api/gateconfig.go), which builds an engine per
+// session and drives Substitute over each outbound request.
 type Engine struct {
 	creds []Credential
 }

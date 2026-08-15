@@ -1,9 +1,24 @@
 // Package queue is the internal work queue over Postgres (FOR UPDATE SKIP
-// LOCKED, per the plan's component 4). Two kinds share the work_items table:
-// model_turn drives the brain, tool_exec drives executors (consumed from
-// slice 6). Enqueue is idempotent per (session, kind) while a live item
-// exists, so event-append triggers can fire without double-scheduling; a
-// claim leases the item and an expired lease makes it claimable again.
+// LOCKED, per the plan's component 4). Five kinds share the work_items table —
+// model_turn, tool_exec, web_exec, outputs_harvest and mcp_exec — and there are
+// two ways to take one, which is the distinction to hold on to.
+//
+// Claim is the in-process lane, for a caller holding a database handle: the
+// brain claims model_turn, and the platform executor claims the rest. Poll is
+// the wire lane behind the work API, and it serves exactly one thing — a
+// tool_exec item on a self_hosted environment. A BYOC worker therefore never
+// sees a model_turn row, nor any other kind, nor another environment's work.
+//
+// That single split is what makes the platform executor and the BYOC worker
+// the same pull protocol at two deployment points: one tool_exec item goes
+// in-process when its environment is cloud and out to the customer's worker
+// when it is self_hosted, and Claim's own predicate says so
+// (kind <> 'tool_exec' OR e.kind = 'cloud'). Each Kind below records why it
+// falls where it does.
+//
+// Enqueue is idempotent per (session, kind) while a live item exists, so
+// event-append triggers can fire without double-scheduling; a claim leases the
+// item and an expired lease makes it claimable again.
 package queue
 
 import (
@@ -25,8 +40,17 @@ import (
 type Kind string
 
 const (
+	// ModelTurn drives the brain: one turn of the orchestration loop, claimed
+	// in-process by whichever brain replica gets there first. It is never
+	// offered on the wire — a turn calls the model with the deployment's
+	// credentials and appends to the event log, neither of which a customer's
+	// worker has any way to do.
 	ModelTurn Kind = "model_turn"
-	ToolExec  Kind = "tool_exec"
+	// ToolExec runs a session's suspended tool calls in a sandbox, and is the
+	// one kind that reaches both deployment points: Claim serves it in-process
+	// when the environment is cloud, Poll serves it over the wire when the
+	// environment is self_hosted. Nothing else crosses that line.
+	ToolExec Kind = "tool_exec"
 	// WebExec is the web_fetch/web_search work (docs/plan/15_web-tools.md):
 	// run by the platform executor's web driver in its own process — no
 	// sandbox — for cloud AND self_hosted sessions alike. Poll never serves
