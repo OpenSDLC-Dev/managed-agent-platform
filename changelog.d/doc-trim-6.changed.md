@@ -1,5 +1,5 @@
 - **Plan 34 archived: the documentation is smaller than the system again** (#413) — Tracked
-  markdown went 2,665,735 → 2,162,389 bytes (−19%), below the 2,382,801 bytes of non-test Go it
+  markdown went 2,665,735 → 2,165,474 bytes (−19%), below the 2,382,801 bytes of non-test Go it
   documents, which was the plan's stated problem. The final slice cut nothing. `HISTORY.md` and
   `docs/history/` hold what a changelog structurally cannot — measurements, attacks that were
   tried, alternatives rejected — and its 414 KB → 120 KB target is retired as the fifth of nine
