@@ -274,6 +274,21 @@ request/session/file ids) **and** OTel metrics/spans, mirroring the density alre
 - **E2E-3 (BYOC, manual):** a worker outside the platform materializes the same mount
   wire-only; transcript recorded in docs/history/2026-07.md (slice 4).
 
+## Observability
+
+Cardinality rule as everywhere: outcome-only metric labels; file and resource IDs go to
+span attributes and **structured logs** (`slog.*Context`, so the request-id and trace
+context ride along) — never metric labels. Every row below carries both metrics/spans and
+`slog` at its link, per the user's logging+metrics directive.
+
+| Link | Instrumentation |
+|---|---|
+| API upload/download/delete | `files.uploads` (counter, `outcome` ∈ ok\|invalid\|error), `files.upload.bytes`, `files.download.bytes` (histograms, "By") on the api meter; request span from `withTracing` as today; `slog` on create (`file_id`, `filename`, `bytes`), delete, rejected-upload, download, and orphan/interrupt warnings — the `skills.go` pattern |
+| Blob traffic | existing `blob.op.duration` / `blob.op.bytes` via `WithMetrics` |
+| Executor materialization | `files_materialize` span (`files.referenced`, `files.materialized`, `files.unchanged`); `files.materialized` counter (`outcome` ∈ ok\|not_found\|failed), `files.materialize.duration` |
+| Worker materialization | identical names on the worker meter (the skills twin-name precedent) |
+| Brain injection | span attributes `files.injected`, `files.block_chars` on the model_request span (the skills precedent, brain.go:207-210) |
+
 ## Inferences and divergences to record, by slice
 
 Slice 1 — DIVERGENCES.md entries: **CONFIRMED** — org-storage quota not enforced

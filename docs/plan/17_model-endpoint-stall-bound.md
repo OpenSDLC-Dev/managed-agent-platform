@@ -99,3 +99,9 @@ next replica.
 - `internal/brain/brain_test.go` — the acceptance end to end, with nothing faked in the model path:
   the real Anthropic adapter against a wedged `httptest` endpoint, the turn over and its
   `session.error` written inside the budget, the work item completed rather than left to reclaim.
+
+## Acceptance
+
+A model turn against an endpoint that accepts the connection and never responds fails within a
+bounded time instead of hanging, with the failure visible in the event log; and `provider.Registry`
+still constructs providers per turn without a per-instance connection pool.

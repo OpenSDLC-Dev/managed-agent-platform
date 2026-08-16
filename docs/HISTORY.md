@@ -7,13 +7,6 @@ progress summaries. A change's **narrative** is written once, in
 "Iteration workflow"). The as-built system description is
 [ARCHITECTURE.md](./ARCHITECTURE.md).
 
-A transcript is redacted before it lands here, and the rule is wider than
-credentials: `x-api-key` and `Authorization` values, and **any live endpoint
-identity**, are replaced with placeholders. The acceptance ritual then greps the
-assembled record for the token value itself — a hit blocks the record rather than
-being cleaned up afterwards, because a secret that reaches a commit is already
-spent.
-
 Provenance: this file began 2026-07-16 as the verbatim completed-work archive moved out
 of [STATE.md](../STATE.md), and documents — [DIVERGENCES.md](./DIVERGENCES.md) above
 all — cite its section headings as evidence anchors. On 2026-07-18 the per-PR delivery
@@ -2316,12 +2309,10 @@ docs/plan/21_outcomes.md is archived complete: the reference's define-outcomes s
 The reference doc's DCF example (<https://platform.claude.com/docs/en/managed-agents/define-outcomes>) driven against the full compose stack (controlplane + brain + executor + Postgres + MinIO + OpenBao) with a real model behind the Anthropic-protocol route (MiniMax-M3 via the `.env` gateway), by three independent clients:
 
 - **Go SDK leg (anthropic-sdk-go v1.61.0, typed end to end).** `TestLiveDefineOutcomesAcceptance` runs the doc flow twice — file rubric and text rubric — with `assertNoExtras` on the file, session, and outcome-evaluation resources. File-rubric: session `sesn_fwd8vp7a635s8j7j78x3scj5` reached `satisfied` with one deliverable (`Costco_DCF_Model.xlsx`, 61,202 bytes, correct xlsx mime) in 609s. Text-rubric: `sesn_antqq6tn9ev1nddccn7ncqak` reached `satisfied` with two deliverables (`Costco_DCF_Model.xlsx` + `build_dcf.py`) in 576s. Every deliverable downloaded byte-count-identical to its `size_bytes`. The harness fails any `satisfied` outcome with zero harvested files — the assertion the discovery runs earned (below).
-- **Real `ant` CLI leg (v1.21.0, built from the local checkout, over `--base-url`).** It embeds SDK v1.61.0, so the three legs are listed in order of authority rather than as three independent witnesses — this one exercises the CLI's own behavior, not a second reading of the typed schema. The doc page's Note variant: `beta:sessions create --initial-event` carrying the `user.define_outcome` with a **file rubric** (`beta:files upload` first) created session `sesn_4vr1x915wnpb0tz29e7fhsgk` directly in `running`; a mid-outcome `beta:sessions:events send user.message` was accepted; the poll reached `satisfied` at **iteration 1** — the revision loop live: the grader's iteration-0 feedback drove a rebuild, and the iteration-1 `span.outcome_evaluation_end` references its start event, carries usage, and settles to `status_idle end_turn`. The deliverable listed via `beta:files list --scope-id` and downloaded via `beta:files download` — `file(1)` reads it as `Microsoft Excel 2007+`, size matching `size_bytes`.
+- **Real `ant` CLI leg (v1.21.0, built from the local checkout, over `--base-url`).** The doc page's Note variant: `beta:sessions create --initial-event` carrying the `user.define_outcome` with a **file rubric** (`beta:files upload` first) created session `sesn_4vr1x915wnpb0tz29e7fhsgk` directly in `running`; a mid-outcome `beta:sessions:events send user.message` was accepted; the poll reached `satisfied` at **iteration 1** — the revision loop live: the grader's iteration-0 feedback drove a rebuild, and the iteration-1 `span.outcome_evaluation_end` references its start event, carries usage, and settles to `status_idle end_turn`. The deliverable listed via `beta:files list --scope-id` and downloaded via `beta:files download` — `file(1)` reads it as `Microsoft Excel 2007+`, size matching `size_bytes`.
 - **Raw-wire curl leg (the doc's four curl blocks, byte-faithful).** Multipart rubric upload, session create + define_outcome, the doc's own `jq -r '.outcome_evaluations[] | "\(.outcome_id): \(.result)"'` poll (observed `pending` → `running` → `satisfied` at iteration 0 — the no-revision path), and the files list + `/v1/files/{id}/content` download, on session `sesn_2zwc3nejcgz3dn4f1580xbbq` with three deliverables (`README.md`, `build_dcf.py`, `Costco_DCF_Model.xlsx`). Headers as printed in the doc (`x-api-key`, `anthropic-version`, `anthropic-beta: managed-agents-2026-04-01`) — accepted and ignored per the platform's beta-header contract.
 
 Two discovery runs preceded the recorded one, each converting a live failure into an in-PR fix (the vaults-acceptance precedent). Run 1: the model's whole-workbook `write` tool call was truncated at the anthropic adapter's 8192 `max_tokens` fallback mid-JSON (`model_request_failed_error`, retries exhausted) → the per-route `max_tokens` config knob, with the compose route set to 32768. Run 2 (rounds 3): both rubric variants graded `satisfied` with **zero** harvested deliverables — the agent wrote to `/workspace` because nothing named the outputs directory → the outcome charge now ends by naming the deliverables contract, and the harness hard-fails a hollow pass. The grader's explanations in the recorded run cite the deliverables sheet-by-sheet against the rubric criteria.
-
-This record is also the platform-side baseline for [#78](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/78): when a real managed-agents endpoint can be recorded, it is what that recording is diffed against, which is the only way the outcome entries marked INFERRED in [DIVERGENCES.md](./DIVERGENCES.md) get settled.
 
 Client-side accommodations, none touching the wire: the CLI's `--model` flag is typed `map[string]any` (its usage text notwithstanding), so agent create takes the `model_config` object form `{id: …}` — the server accepts both forms per the SDK schema; the CLI transcript's final download was re-issued with the file ID passed literally after a `--transform` guess extracted the whole object; and the `ongoing` heartbeat was not observed live — grading cycles completed inside the 30s cadence (the rehearsal pins the no-heartbeat path; the firing path itself has only unit coverage of the event shape, no end-to-end exercise yet).
 
@@ -2532,11 +2523,7 @@ required zero code, and its one genuinely new fact is a documentation sentence �
 event-list params are now documented as keyed on `processed_at`, which this platform deliberately
 does not do (new DIVERGENCES entry, below). The bump exists for plan 21's acceptance goal: the
 outcomes surface verifies against the latest SDK release, and v1.61.0 is the latest
-(released 2026-07-24; confirmed against the upstream tag list on 2026-08-02). The pin holds
-across languages, which is why one leg can speak for the wire: as of 2026-08-02 the latest
-releases were Go v1.61.0 (2026-07-24), Python 0.120.2 (2026-07-28) and TypeScript 0.115.0
-(2026-07-24), and the outcome wire types are identical in all three, having landed together
-on 2026-05-06.
+(released 2026-07-24; confirmed against the upstream tag list on 2026-08-02).
 
 **What the range contains.** Two upstream releases: v1.60.0 (2026-07-23 — the
 `model_context_window_exceeded` stop reason, apijson param-unmarshal fixes (#73), RawJSON

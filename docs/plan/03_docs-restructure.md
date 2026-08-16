@@ -97,3 +97,15 @@ trigger rule.
 
 Every PR takes the full ritual (verifier + dual review) — each touches behavior-steering
 markdown (CLAUDE.md / AGENTS.md / `.claude/`).
+
+## Verification
+
+- PR A: `make verify` green; every relative link in touched files resolves; no content
+  deleted from HISTORY without verified CHANGELOG coverage (the prune report is the
+  evidence); every file path in ARCHITECTURE's package reference exists; CLAUDE.md still
+  carries the guardrails verbatim-or-compressed (verifier re-derives against them).
+- PR B: STATE.md ≤ ~30 lines; the removed content demonstrably lives at its new homes;
+  verifier's STATE checks updated in the same PR.
+- PR C: the agent file parses (frontmatter, model pin); a dry-run dispatch on a real
+  issue returns valid JSON matching the schema; CLAUDE.md trigger rule consistent with
+  the agent's own scope statement.

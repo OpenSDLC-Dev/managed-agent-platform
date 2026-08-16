@@ -449,8 +449,8 @@ resources deleted and the sweep verified empty afterwards.
    The deploy guide carries a Gateway + HTTPRoute + managed-certificate example and
    states plainly that terminating TLS — or fronting the service with IAP or a VPN — is a
    **prerequisite for any exposed deployment**, not an optional hardening step. Nothing
-   goes in the chart, and both acceptance runs went over `kubectl port-forward` rather
-   than an exposed address, so neither claims a transport property it did not exercise.
+   goes in the chart, and the plan-level acceptance below claims no transport property it
+   did not exercise.
 9. **A persistent staging environment with one-command create and destroy.** The cluster
    and its backing services stay up between slices rather than being rebuilt per run,
    but teardown must be one command, so that an idle week costs the cents the
@@ -816,3 +816,57 @@ Each slice is one PR unless noted; TDD per CLAUDE.md (the failing test first).
   HMAC-key and KMS-key lifecycles, the second of which is now a data-loss hazard rather
   than a rotation chore. Acceptance record → docs/HISTORY.md; README status line updated
   in the same PR.
+
+## Acceptance (plan-level)
+
+The real `ant` CLI drives the platform on GKE in mode-2, reached over
+`kubectl port-forward` — all backing services Google-managed; KMS and the collector
+authenticate via Workload Identity with no downloaded key material; both evals pass;
+gate enforcement and credential substitution are proven in a `limited` session; traces
+are visible in Cloud Trace; and the deploy guide reproduces the whole setup from a clean
+project. Teardown is proven on `environment/` — `terraform destroy` removes the cluster,
+Cloud SQL and the bucket, `foundation/` is deliberately untouched (Decision 9), and a
+second `apply` rebuilds a working stack against the surviving KMS key and service
+accounts. Both acceptance runs recorded in docs/HISTORY.md.
+
+**Every static credential that remains in-cluster is rotatable. Exactly one of them is
+unscoped**, and the guide says which rather than letting "scoped and rotatable" cover
+the set. Scoped, each asserted rather than assumed: the GCS HMAC pair (single bucket;
+its removal is the GCS-native-backend follow-on), the model key (the provider's own),
+and the **Cloud SQL user, narrowed to ownership of the platform's own database** —
+DDL-capable there because `store.Open` migrates the database its DSN names, and kept
+clear of the `cloudsqlsuperuser` a built-in user is created with, checked in the
+acceptance run by `rolcreatedb`, `rolcreaterole` **and** `pg_has_role(…,
+'cloudsqlsuperuser', 'member')` all being false (slice 5). Unscoped:
+the **management API key, which authorizes every management `/v1` route with no role or
+resource model** (`requireAPIKey`). That one is unscoped by design, and narrowing it is
+a platform change rather than a deployment one.
+
+**What this acceptance does not establish** — the same three conditions the plan opens
+with, repeated here so a reader who arrives at the acceptance never has to go looking:
+
+- **Sustained operation.** No production code calls `Sandbox.Destroy`
+  ([#64](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/64)), so pods
+  accumulate for as long as the deployment runs. A finite battery passes; a long-lived
+  deployment fills its node pool. Slice 4 measures the rate. **#64 is a prerequisite for
+  production traffic, not for this plan.**
+- **Transport security.** Nothing here terminates TLS (Decision 8), and nothing here is
+  publicly exposed. Exposing this deployment requires TLS, IAP or a VPN first.
+- **Host-level isolation of untrusted code.** Sandboxes run on GKE Standard's default
+  runtime. `docs/self-hosted-security.md` recommends a hardened runtime such as gVisor
+  or Kata for model-directed commands, and this plan cannot adopt it without breaking
+  gated sessions (Decision 1, and the operator hazard above). The interim boundary is
+  the disk limit and dedicated tainted sandbox node pool of Decision 10, the node's
+  `podPidsLimit`, and the containment plan 19/#65 already applies; the real answer is
+  the standalone-gate plan.
+
+Meeting those three is what turns this plan's production *shape* into production
+*readiness*. This plan delivers the shape and says so; it does not quietly claim the
+rest.
+
+## Open questions
+
+*(none — the plan's questions were resolved before approval: no domain/TLS for this
+delivery, a persistent staging environment with scripted teardown, and the secret-delivery
+mechanism, are Decisions 8, 9 and 6 respectively. Every trade this plan declines to make
+is argued in a Decision and named in the acceptance above rather than left open.)*

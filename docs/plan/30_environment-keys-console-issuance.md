@@ -348,6 +348,48 @@ Auth and routing:
   The DB-seeding instructions live only in docs/self-hosted-security.md — there
   are none under deploy/ to remove.
 
+## Slices
+
+1. **Storage + primitives.** The migration; `IssueEnvironmentKey` /
+   `ListEnvironmentKeys` / `RevokeEnvironmentKey`; expiry-aware
+   `authenticateEnvironmentKey`; delete `EnsureEnvironmentKey`; rewrite the
+   key-invariant/rotation/race tests as above. TDD: the many-live coexistence
+   and expiry-401 tests land red first.
+2. **The console-API endpoints.** The three `/api/oauth/…` routes, their
+   405/404 fallbacks, the local key-id check and the org-segment gate; HTTP
+   tests in house style (`s.do`/`s.doRaw`): management auth required and an
+   environment key rejected on every route, `organization_id != "default"`
+   404s, every error envelope pinned via `wantErr`, a grandfathered row's
+   `expires_at` rendering `null`, and the issued key proven end to end — the
+   `access_token` from `POST …/tokens` polls
+   `GET /v1/environments/{id}/work/poll` over real HTTP, then is revoked and
+   polls again to a 401; direct SQL asserts hash-only storage. Its own doc
+   updates ride with it (the DIVERGENCES entry for the dialect, the endpoint in
+   ARCHITECTURE and self-hosted-security).
+3. **Acceptance + archive.** The compose-stack acceptance run recorded in
+   docs/HISTORY.md: bring up `deploy/compose`, issue a key with curl against
+   the dialect, run a real `ant beta:worker poll --environment-key …
+   --base-url http://localhost:…` until it pulls a work item — the issue's
+   acceptance, with zero DB edits — then flip this plan to `archived`. Slices 1
+   and 2 each carry the doc rewrites their own code invalidates, so nothing
+   doc-shaped waits for this slice.
+
+Console repo work (its plan 07: an `/api/oauth/[...path]` BFF passthrough so
+the console's own URLs mirror the reference verbatim, zod schemas with
+platform file:line cites, `["environment-keys", envId]` hooks, the keys
+section + reveal-once dialog + setup panel on self-hosted detail pages, mock
+platform routes, e2e/fidelity) starts after slice 2 merges and is tracked
+there, not here.
+
+## Verification
+
+- Per slice: `make verify` (no cached results), verifier subagent before any
+  done-claim, per CLAUDE.md.
+- Wire-compat rung: `/v1` route table diff is empty; the worker lane's behavior
+  change is invisible to a compliant worker (expired ⇒ the existing 401 shape).
+- Slice 3's acceptance transcript (real `ant` CLI, console-issued key) is the
+  plan's exit criterion, recorded in docs/HISTORY.md.
+
 ## New DIVERGENCES entries (to record as they land)
 
 - Rewritten CONFIRMED "Environment worker keys — issuance" (slice 1, extended

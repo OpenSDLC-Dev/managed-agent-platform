@@ -128,3 +128,16 @@ Measured, not assumed. Everything in this section was run.
    deleted at all, and on secrets as the reconciliation source. Four passages say the old
    thing and are rewritten; `check_split.py`'s `MIN_PROTECTED` drops deliberately, which is
    exactly what its own failure message asks for.
+
+## Slices
+
+1. **The backend and its selector.** `internal/blob/gcs`, `internal/blob/backend`, the
+   fake-gcs test support package and the live tier, the four construction call sites, and
+   the `BLOB_BACKEND` documentation. `blobtest.Run` passes unchanged, bare and through the
+   metrics decorator.
+2. **The deployment.** Chart wiring for a keyless object-storage mode, binding the
+   ServiceAccounts all three processes now have; `deploy/gcp` drops the HMAC pair, re-points
+   IAM to Workload Identity, and shrinks `bootstrap.sh`; the guides and the split rationale
+   follow. Credential-free
+   Terraform checks are the gate here — a real apply and a mode-2 acceptance re-run are an
+   operator action, and the PR says so rather than implying otherwise.

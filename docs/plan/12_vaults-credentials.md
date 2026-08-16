@@ -312,6 +312,17 @@ substitutes from a config the controlplane renders from current rows at fetch ti
 config fetched after the archive no longer carries the credential or its purged
 ciphertext). Record the transcript in docs/history/2026-07.md as the acceptance run.
 
+## Observability
+
+CRUD spans follow the existing api conventions. The gate emits one span per egress
+decision (host, verdict, matched rule; never values) and the substitution engine one per
+substitution (credential_id, location; never values). The Redactor posture extends:
+plaintext secrets exist only inside the cipher, the substitution call path, and the
+`mcp_oauth_validate` probe (whose outbound refresh and MCP calls necessarily carry the
+token, and whose captured responses are scrubbed and truncated before they are stored or
+rendered); they are never logged and never enter session events — the same invariant the
+provider Redactor enforces for model keys.
+
 ## Inferences and divergences to record, by slice
 
 Slice 2: enforcement of documented caps as hard 400s where the reference's live behavior

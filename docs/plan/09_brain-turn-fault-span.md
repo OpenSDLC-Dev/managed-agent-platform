@@ -108,3 +108,24 @@ worker.
 Only brain-side faults reach this exit. A model failure or a deterministic input problem is settled
 onto the wire as a `session.error` by `failTurn` and returns no error, so it does not redden the
 span — the executor's rule ("a tool-level failure is not a platform fault") applied to the brain.
+
+## Acceptance criteria → coverage
+
+- The fault log carries the `model_turn` span's **span id**, not merely its trace id — a parent and
+  child share a trace id, so only the span id distinguishes this design from the cheap one. New
+  `TestTurnFaultLogLandsOnTheModelTurnSpan`, the shape of `internal/executor`'s
+  `TestFaultLogLandsOnTheToolExecSpan`, driving a real lease-loss fault through `RunOnce`.
+- The faulted turn's span carries `codes.Error` and a description — same test.
+- `model_request` is a **child** of `model_turn`, and `model_turn` is a consumer span — new
+  `TestModelRequestSpanIsAChildOfTheModelTurnSpan`, pinning that the outer span really covers the
+  whole claimed item.
+- A model failure settled as `session.error` leaves the span **unset**, and `RunOnce` returns no
+  error for it — new `TestAModelFailureLeavesTheModelTurnSpanUnset`, the brain's counterpart of the
+  executor's and worker's unset-status tests, so a later refactor cannot quietly reclassify ordinary
+  model trouble as a platform fault.
+- A clean shutdown logs no claim fault — new `TestShutdownLogsNoClaimFault`. `Run`'s surviving log
+  fires only when the loop meant to keep running; a cancelled claim is the exit path, and announcing
+  a retry there would put one ERROR line into every clean stop.
+- `tool_exec` items still carry the turn's `model_request` span as their parent — retained by the
+  existing `TestToolExecEnqueueCapturesTurnTrace`.
+- `make verify` green (build, crossbuild, vet, fmt, test, ≥90% coverage).

@@ -233,6 +233,22 @@ with code; the listed DIVERGENCES.md entries land in the slice that creates the 
   internals run SetupSkills) against this platform: the strongest wire evidence for the
   env-key lane and `/content`; transcript recorded in docs/history/2026-07.md.
 
+## Observability
+
+slog structured logs (bridged to OTLP by `internal/telemetry`); per-package OTel meters
+following `internal/events/metrics.go`. Cardinality rule: **no `skill_id` in metric
+labels** (unbounded — ids go in logs and span attributes); labels are bounded
+`op`/`outcome` only.
+
+| Link | Instrumentation |
+| --- | --- |
+| api upload/download | slog create/delete/validation-reject (skill_id, version, file count, bytes, reason); `skills.uploads` counter{outcome}, `skills.upload.bytes` / `skills.download.bytes` histograms |
+| blob | at the interface seam: `blob.op.duration` histogram{op, outcome}, `blob.op.bytes` histogram{op}; error slog with key+op |
+| executor materialization | child span `skills_materialize` under the existing executor span; `skills.materialize.duration` histogram, `skills.materialized` counter{outcome=ok\|not_found\|failed}; a slog line for **every** skipped skill |
+| worker twin | same instruments under the worker's existing span/meter |
+| brain injection | attrs on the `model_request` span (injected count, block chars); `skills.resolve.misses` counter + slog on any missing reference |
+| importer | slog summary only (run-once) |
+
 ## Inferences and divergences to record, by slice
 
 Slice 2: zip-form detection by magic bytes; `anonymous_file`/flat-basename rejection;

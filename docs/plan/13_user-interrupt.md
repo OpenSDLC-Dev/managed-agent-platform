@@ -119,6 +119,15 @@ Steps 2 and 3 apply only to the two statuses v1 ever writes, `idle` and `running
 guards the same thing by requiring `idle` — and `rescheduling` is a state nothing writes,
 so settling it would invent semantics.
 
+## Acceptance
+
+Posting `user.interrupt` to a session stuck awaiting a tool result ends the turn and
+returns the session to a resumable state, with the event sequence wire-compatible —
+covered by state-machine tests in `internal/api` (each of the three dead ends, the one-send
+redirect, the no-op case, and the cancelled work item) and brain tests in `internal/brain`
+(an interrupted turn commits nothing; the next turn's replay pairs every `tool_use` with a
+`tool_result`).
+
 ## Known consequences, not fixed here
 
 **Stopping is not instant.** Cancelling the item is what makes the claimant's work
