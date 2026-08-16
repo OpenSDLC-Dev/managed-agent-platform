@@ -53,11 +53,13 @@ mid-slice in something the release would half-ship.
    one is left pointing at nothing — and it may spell the fragment three ways:
    full path, bare filename, or bare slug. Grep the **slug**, which is a
    substring of all three, over the whole tree from the repo root:
-   `for f in $(git diff main...HEAD --diff-filter=D --name-only -- changelog.d); do n=${f##*/}; git grep -nF "${n%.*.md}" -- . ':!CHANGELOG.md'; done`
+   `for f in $(git diff main...HEAD --diff-filter=D --name-only -- changelog.d); do n=${f##*/}; git grep -nF "${n%.*.md}" -- . ':!CHANGELOG.md' ':!docs/changelog'; done`
    The deleted-file list is the enumeration rather than `main:changelog.d`: it
    names exactly what this cut consumed, and cannot drift with a fragment that
-   lands on main mid-review. Retarget each hit. CHANGELOG.md is excluded
-   because a just-folded entry may name a fragment in past-tense narrative, and
+   lands on main mid-review. Retarget each hit. CHANGELOG.md and
+   docs/changelog/ are both excluded — step 9 moves that same frozen prose
+   from one to the other, so an earlier release's copy is already there —
+   because a folded entry may name a fragment in past-tense narrative, and
    step 3 froze that text — a dead path there records what was fixed; it is not
    a live citation. The v0.3.0 cut found three, all in one archived plan, and a
    filename-only grep saw only two of them.
@@ -81,7 +83,10 @@ mid-slice in something the release would half-ship.
    be inline at tag time (step 2 of the trigger list renders the notes from
    it), and the stub keeps the dated heading, so existing
    `CHANGELOG.md § [X.Y.Z]` citations resolve through it — no citation
-   sweep.
+   sweep. This is also the PR that closes the release out in STATE.md: the
+   archive is the last task the release tracked, so Active work returns to
+   **None** here, and leaving it mid-release is what the verifier's
+   docs-consistency rung will catch.
 
 ## What the tag triggers
 
