@@ -33,7 +33,12 @@ mid-slice in something the release would half-ship.
 2. Branch: `git checkout -b release/vX.Y.Z` off a fresh `main`.
 3. `make changelog VERSION=X.Y.Z` — folds every `changelog.d/` fragment (and,
    for the first cut under this scheme, the legacy `[Unreleased]` body) into a
-   dated CHANGELOG.md section and advances the link references.
+   dated CHANGELOG.md section and advances the link references. Assembly is
+   pure concatenation, and the section it writes is **frozen on arrival**: it
+   must reproduce byte-for-byte from its source fragments, so no entry is
+   edited after folding. The v0.2.0 cut refreshed one stale figure in the
+   assembled text and reverted it under review. A defect in an entry is fixed
+   in the fragment before this step runs, never in the section after.
 4. Bump `deploy/helm/managed-agent-platform/Chart.yaml`: `version` and
    `appVersion`, both to `X.Y.Z`.
 5. Update README.md's status line if the release changes what it says.
@@ -44,7 +49,18 @@ mid-slice in something the release would half-ship.
    docs/DIVERGENCES.md and docs/HISTORY.md cite it as an evidence anchor
    under more than one phrasing (`CHANGELOG.md § […]`, `CHANGELOG § […]`);
    the v0.2.0 cut missed seven variant-phrased citations with a narrower
-   pattern.
+   pattern. Step 3 also *deletes* every fragment it folds in, so a citation of
+   one is left pointing at nothing — and it may spell the fragment three ways:
+   full path, bare filename, or bare slug. Grep the **slug**, which is a
+   substring of all three, over the whole tree from the repo root:
+   `for f in $(git diff main...HEAD --diff-filter=D --name-only -- changelog.d); do n=${f##*/}; git grep -nF "${n%.*.md}" -- . ':!CHANGELOG.md'; done`
+   The deleted-file list is the enumeration rather than `main:changelog.d`: it
+   names exactly what this cut consumed, and cannot drift with a fragment that
+   lands on main mid-review. Retarget each hit. CHANGELOG.md is excluded
+   because a just-folded entry may name a fragment in past-tense narrative, and
+   step 3 froze that text — a dead path there records what was fixed; it is not
+   a live citation. The v0.3.0 cut found three, all in one archived plan, and a
+   filename-only grep saw only two of them.
 7. Normal PR flow — verifier plus **full dual review** (the PR touches
    `Chart.yaml`, and a release PR changes the deploy surface; it is not
    LIGHT-tier docs), CI green, threads settled, squash merge.
