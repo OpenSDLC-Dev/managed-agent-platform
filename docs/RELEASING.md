@@ -53,7 +53,7 @@ mid-slice in something the release would half-ship.
    one is left pointing at nothing — and it may spell the fragment three ways:
    full path, bare filename, or bare slug. Grep the **slug**, which is a
    substring of all three, over the whole tree from the repo root:
-   `for f in $(git diff origin/main...HEAD --diff-filter=D --name-only -- changelog.d); do n=${f##*/}; git grep -nF "${n%.*.md}" -- . ':!CHANGELOG.md' ':!docs/changelog/[0-9]*.md'; done`
+   `for f in $(git diff origin/main...HEAD --diff-filter=D --name-only -- changelog.d); do n=${f##*/}; git grep -nF "${n%.*.md}" -- . ':!CHANGELOG.md' ':(glob,exclude)docs/changelog/[0-9]*.[0-9]*.[0-9]*.md'; done`
    The deleted-file list is the enumeration rather than `main:changelog.d`: it
    names exactly what this cut consumed, and cannot drift with a fragment that
    lands on main mid-review. It reads `origin/main` because a stale local `main`
@@ -62,9 +62,11 @@ mid-slice in something the release would half-ship.
    The exclusions are frozen prose and only that: a folded entry may name a
    fragment in past-tense narrative, and step 3 froze that text, so a dead path
    in CHANGELOG.md or in an archived section records what was fixed rather than
-   citing it. The pattern excludes those archives by name, so anything else
-   landing under docs/changelog/ is still swept. The v0.3.0 cut found three, all
-   in one archived plan, and a filename-only grep saw only two of them.
+   citing it. The pattern matches the `X.Y.Z.md` shape the archives are named
+   in, so a future non-archive file under docs/changelog/ is still swept —
+   `(glob)` is what buys that, an ordinary pathspec's `*` crossing directory
+   separators and swallowing a whole subdirectory with it. The v0.3.0 cut found
+   three, all in one archived plan, and a filename-only grep saw only two.
 7. Normal PR flow — verifier plus **full dual review** (the PR touches
    `Chart.yaml`, and a release PR changes the deploy surface; it is not
    LIGHT-tier docs), CI green, threads settled, squash merge.
