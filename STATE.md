@@ -4,9 +4,8 @@ What is being worked on right now, and how far along it is — nothing else. **S
 
 ## Active work
 
-**None.** [Plan 34](./docs/plan/34_doc-trim.md) (#413) archived on 2026-08-16; its progress
-record is in [docs/HISTORY.md](./docs/HISTORY.md). The backlog is GitHub issues.
+**None.** [Plan 34](./docs/plan/34_doc-trim.md) (#413) archived 2026-08-16 — tracked markdown
+is smaller than the non-test Go it documents, and four of nine byte targets were retired on
+measurement rather than met. Its delivery record is [docs/HISTORY.md](./docs/HISTORY.md).
 
-## Tasks
-
-None in flight.
+The backlog is GitHub issues; nothing is in flight.

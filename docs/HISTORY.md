@@ -11,13 +11,19 @@ Provenance: this file began 2026-07-16 as the verbatim completed-work archive mo
 of [STATE.md](../STATE.md), and documents — [DIVERGENCES.md](./DIVERGENCES.md) above
 all — cite its section headings as evidence anchors. On 2026-07-18 the per-PR delivery
 narratives were verified section-by-section against CHANGELOG.md and pruned (git history
-is the backstop); every heading cited then is still below or in [docs/history/](./history/).
+is the backstop). No heading has been removed since: plan 34 re-checked and left both
+heading sets untouched, 46 here and 54 in [docs/history/](./history/).
 
-A later trimmer should know that the heading is not the unit of citation. When plan 34
-measured them, more citations quoted body prose — a number, a rejected alternative, a
-sentence of reasoning — than named the heading, so a section can keep its title and still
-lose the thing something else points at. That is why plan 34 assessed this file and cut
-nothing from it.
+A later trimmer should know two things. **What is under a cited heading is generally
+recorded nowhere else** — that is the standing reason not to delete body prose, and it is
+why the 2026-07-18 prune stopped where it did. And **the heading is not the unit of
+citation**: much of what points here quotes a sentence, a number or a rejected alternative
+rather than naming a section, so preserving every title can still orphan the thing being
+cited. The docker-deadline record in [docs/history/](./history/) is the worked example —
+`internal/sandbox/docker/api_test.go` quotes one clause of it, and a heading-only check
+sees nothing. A count is not given because it depends entirely on how a citation is
+enumerated; the shape, not the number, is the argument. That is why plan 34 assessed this
+file and cut nothing from it.
 
 Older periods archive by month to [docs/history/](./history/) — so far
 [2026-07](./history/2026-07.md) — with relative links re-based for the
@@ -45,34 +51,35 @@ new directory and in-repo citations re-pointed in the moving PR (plan
 
 ## Trimming the documentation to what code cannot say (plan 34, #413) — archived 2026-08-16, six slices delivered
 
-Tracked markdown went **2,665,735 → 2,165,474 bytes** (−19%) and is now smaller than the
+Tracked markdown went **2,665,735 → 2,166,640 bytes** (−19%) and is now smaller than the
 2,382,801 bytes of non-test Go it documents, which was the plan's stated problem. The rule
 the plan wrote into CLAUDE.md — a document earns its place by holding what code cannot — is
-also what stopped it: five of its nine byte targets were retired rather than met.
+also what stopped it: of nine byte targets, four were retired rather than met, three were
+missed after real cuts, and two were met or beaten (`ARCHITECTURE.md` by 71 KB, and
+`changelog.d/`, whose size a release resets anyway).
 
-**The five failed for one reason, worth recording because the plan re-learned it five
-times.** Each target was derived from a cluster's *size* without asking what the cluster
-must still hold, then defended by an instrument narrower than the thing it tested: quoted
-section titles only, `var.` occurrences only, exported symbols only, heading granularity,
-headings rather than the prose under them. Every deletion premise that broke, broke on the
-reference class nobody had measured. Two targets were beaten anyway (`ARCHITECTURE.md` by
-71 KB, `changelog.d/`), and two more were cut into without reaching their number, so the
-finding is not that documents are incompressible — it is that a byte target is a hypothesis
-about content, and only the content settles it.
+**The retirements failed for one reason, and the plan re-learned it each time.** Each target
+was derived from a cluster's *size* without asking what the cluster must still hold, then
+defended by an instrument narrower than the thing it tested — quoted section titles only,
+`var.` occurrences only, heading granularity. Every deletion premise that broke, broke on
+the reference class nobody had measured. The finding is not that documents are
+incompressible: it is that a byte target is a hypothesis about content, and only the content
+settles it.
 
-**One deletion was made and reverted inside its own PR.** Slice 5 cut 33 spent sections
-from the 32 archived plans after confirming no quoted title and no `#anchor` pointed at
-them. Review found plans are cited two other ways — by slice number (`plan 29 slice 3`) and
-by role ("whose DCF-rubric example the plan's acceptance replays") — and the verifier's docs
-rung had checked the same two classes and passed the same deletions. Everything was
-restored. Archived plans are not trimmable; the attempt is the evidence.
+**One deletion was made and reverted inside its own PR.** Slice 5 cut 33 spent sections from
+the 32 archived plans after a cut-candidate check found zero collisions against quoted
+section titles. Review found plans are cited two ways that check never tested — by slice
+number (`plan 29 slice 3`) and by role ("whose DCF-rubric example the plan's acceptance
+replays") — and the verifier's docs rung had passed the same deletions on the same evidence.
+Everything was restored. Archived plans are not trimmable; the attempt is the evidence.
 
 **What survives is method, not bytes.** Slice 5's working shape — draft a rewrite, then set
-an adversarial skeptic on it whose only job is to find what the rewrite lost — repaired 25
-information losses and 9 accuracy defects across 24 entries, most of them inherited from the
-originals rather than introduced by the rewrite. Feeding the first batch's defect patterns
-into the second batch's prompts more than halved the losses per entry (20 across 11 entries,
-then 5 across 6).
+an adversarial skeptic on it whose only job is to find what the rewrite lost — restored 25
+claims the rewrite had dropped and fixed 9 accuracy defects across 24 entries, the defects
+mostly inherited from the original entries rather than introduced. Feeding the first batch's
+defect patterns into the second batch's prompts more than halved the losses per entry: 20
+across 11 entries, then 5 across the 6 that followed — the two measured batches, covering 17
+of the 24.
 
 Rejected along the way: rewriting citations to permit deletion (churn against a record whose
 value is that it does not move), and editing archived records to match present behavior — a
@@ -542,8 +549,9 @@ visible from the diff: the code it changes is four lines, and the reasoning it o
 is a paragraph somewhere else.
 
 **What was decided.** The docker exec wrapper keeps **no state inside the container**. The
-stated reason: the first design's `/tmp` marker "let a command forge a timeout it never hit
-or erase one it did." A test pinned it, asserting the wrapper's script
+stated reason: the first design's marker "let a command forge a timeout it never hit or
+erase one it did" — the same section's review list names it the `/tmp` marker. A test
+pinned it, asserting the wrapper's script
 mentioned no writable path at all. Everything the sandbox knew about a command's deadline
 came from outside: two probes of the command's process, run against the daemon on Exec's
 own clock.
@@ -1485,8 +1493,9 @@ defense-in-depth.
 
 Slice 2 (the archiving PR): the 31 sections of 2026-07 (1,327 lines) moved
 to docs/history/2026-07.md by a one-off scripted manual move —
-recomposition from the two output files reproduces the pre-split file
-byte-for-byte — links re-based the same way, and 96 references to moved
+recomposition from the two output files reproduced the pre-split file
+byte-for-byte as performed, a property of the move rather than a standing
+invariant — links re-based the same way, and 96 references to moved
 sections re-pointed: 69 citations in docs/DIVERGENCES.md, 24 across
 thirteen archived plan files, one each in docs/ARCHITECTURE.md and
 README.md, and one Go comment (internal/sandbox/k8s) — the wider net after
