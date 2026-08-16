@@ -66,6 +66,13 @@ mid-slice in something the release would half-ship.
    LIGHT-tier docs), CI green, threads settled, squash merge.
 8. Tag the squash-merge commit and push the tag:
    `git tag -a vX.Y.Z -m "vX.Y.Z" <merge-sha> && git push origin vX.Y.Z`.
+   **If anything the tag runs was itself fixed after that merge, tag the later
+   commit instead** — every step below executes the tooling as of the tagged
+   commit, so a fix landing after the release PR is simply not in the release
+   unless the tag reaches it. `release-tag-check` allows this: it asks that
+   the changelog's newest released section is X.Y.Z and that the commit is on
+   `origin/main`, not that the commit is the release PR's. This rule exists
+   because v0.3.0's notes-link fix landed after its own release PR.
 9. After the release run is green: `make changelog-archive VERSION=X.Y.Z` in
    the next docs PR (normally the one archiving the plan that drove the
    release) — the section moves to `docs/changelog/X.Y.Z.md` behind an index
@@ -95,7 +102,13 @@ also runs locally, where without `PUSH=1` nothing leaves the machine:
    release notes, rendered up front for the same reason: whole leading
    Keep-a-Changelog groups under GitHub's 125,000-character body cap, then
    a link to the full CHANGELOG.md section (the first cut's absorbed
-   backlog exceeds the cap).
+   backlog exceeds the cap). The section's relative links are rewritten
+   absolute at the tag on the way out: a release body is read off the
+   release page, where a repo-root-relative target resolves against that
+   page and 404s. A link form the rewrite cannot map fails **this step**,
+   after the tag is pushed and therefore after it is immutable, and nothing
+   earlier checks link forms — which is why changelog.d/README.md asks for
+   a glance at them while the fragment is still in review.
 3. `make release-images PUSH=1 VERSION=X.Y.Z` — one server build
    (linux/amd64 + arm64; the build stage cross-compiles rather than
    emulating the Go toolchain) pushed as

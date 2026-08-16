@@ -1,7 +1,9 @@
 // Package main implements the release-time changelog tool (plans 27 and 28):
 // `assemble` folds the changelog.d/ fragments — plus any legacy [Unreleased]
 // body — into a new dated section of CHANGELOG.md, `notes` extracts a
-// released section's body for GitHub Release notes, and `archive` moves a
+// released section's body for GitHub Release notes — rewriting its relative
+// links absolute at the tag, since that body is read off the release page
+// rather than from the repository — and `archive` moves a
 // released section to docs/changelog/<version>.md behind an index stub,
 // post-release — byte-reversibly: relative links are re-based for the new
 // location and the inverse rewrite must reproduce the moved section. The ritual that runs them is docs/RELEASING.md; the
@@ -495,9 +497,12 @@ func clampNotes(body, base, version string, cap int) (string, error) {
 	return kept + "\n\n" + trailer, nil
 }
 
-// runNotes is the `notes` subcommand; out == "" or "-" writes to stdout, and
-// a positive cap clamps the body (deriving the repository URL from the
-// [Unreleased] link reference).
+// runNotes is the `notes` subcommand; out == "" or "-" writes to stdout. On
+// every render — not only when clamping — the section's relative links are
+// made absolute at the tag (absolutizeLinks), so a link form that cannot be
+// mapped fails the subcommand rather than the published release page. A
+// positive cap then clamps the body. Both need the repository URL, which
+// repoBase reads from the [Unreleased] link reference.
 func runNotes(changelogPath, version, out string, cap int) error {
 	content, err := os.ReadFile(changelogPath)
 	if err != nil {
@@ -507,15 +512,14 @@ func runNotes(changelogPath, version, out string, cap int) error {
 	if err != nil {
 		return err
 	}
+	base := repoBase(string(content))
+	lines := strings.Split(body, "\n")
+	abs, err := absolutizeLinks(lines, fenceStates(lines), base, version)
+	if err != nil {
+		return err
+	}
+	body = strings.Join(abs, "\n")
 	if cap > 0 && len(body) > cap {
-		refs, _ := splitTrailingRefs(strings.Split(string(content), "\n"))
-		base := ""
-		for _, r := range refs {
-			if m := unreleasedRefRe.FindStringSubmatch(r); m != nil {
-				base = m[1]
-				break
-			}
-		}
 		if base == "" {
 			return fmt.Errorf("notes exceed the %d-byte cap and no [Unreleased] link reference exists to derive the changelog link from", cap)
 		}
@@ -574,12 +578,31 @@ func fenceStates(lines []string) []bool {
 var linkTargetRe = regexp.MustCompile(`\]\(([^)\s]+)`)
 
 // refDefTargetRe captures a link-reference definition's target (`[label]:
-// target`) — a form the inline scan cannot see, checked separately.
-var refDefTargetRe = regexp.MustCompile(`^ {0,3}\[[^\]]+\]:\s*(\S+)`)
+// target`) — a form the inline scan cannot see, checked separately. The
+// target must end the line, bar an optional title: without that anchor the
+// pattern also matches ordinary wrapped prose, since this repository's
+// two-space continuation indent sits inside the `{0,3}` allowance, and a
+// sentence like "[expired]: computed at read time, never stored." would be
+// read as a definition whose target is the word "computed".
+var refDefTargetRe = regexp.MustCompile(`^ {0,3}\[[^\]]+\]:[ \t]*(\S+)[ \t]*(?:"[^"]*"|'[^']*'|\([^)]*\))?[ \t]*$`)
 
 // linkSchemeRe matches an absolute-URL (or mailto:) target, which no rewrite
-// touches.
-var linkSchemeRe = regexp.MustCompile(`^[a-z][a-z0-9+.-]*:`)
+// touches. Case-insensitive because a scheme is: `HTTPS://x` is absolute, and
+// reporting it as a relative target would fail a release over a capital.
+var linkSchemeRe = regexp.MustCompile(`(?i)^[a-z][a-z0-9+.-]*:`)
+
+// linkDestRe captures an inline link or image *destination*: `](`, the
+// optional whitespace CommonMark allows before a destination, then the
+// destination up to whitespace or the closing paren. absolutizeLinks rewrites
+// the captured span rather than the substring `](docs/`, which matters twice:
+// a destination written `]( ./x)` is seen at all (a raw-substring rewrite
+// leaves it relative and its guard never sees it), and a `](docs/` occurring
+// *inside* an already-absolute destination is consumed by that destination's
+// own match instead of being rewritten in place. Anchoring on `](` rather
+// than on a whole `[label](dest)` keeps the guard complete: a label
+// containing brackets would defeat a label-anchored pattern and let its
+// destination through unchecked.
+var linkDestRe = regexp.MustCompile(`\]\(\s*([^)\s]*)`)
 
 // rebaseLinks rewrites a section's relative link targets for a file two
 // directories below the changelog (docs/changelog/): `](./` becomes
@@ -617,6 +640,121 @@ func rebaseLinks(section []string, fenced []bool) ([]string, error) {
 			return nil, fmt.Errorf("%q: unhandled relative link target %q — teach rebaseLinks its mapping first", strings.TrimSpace(l), t)
 		}
 		out[i] = r
+	}
+	return out, nil
+}
+
+// hasParentSegment reports whether a cleaned-of-`./` relative path contains a
+// `..` path segment anywhere. Prefix-stripping alone cannot see one: `./../x`
+// becomes `../x`, which concatenated onto a blob URL resolves back off the
+// ref and 404s.
+func hasParentSegment(p string) bool {
+	for _, seg := range strings.Split(p, "/") {
+		if seg == ".." {
+			return true
+		}
+	}
+	return false
+}
+
+// repoBase returns the repository URL carried by the [Unreleased] link
+// reference, or "" when the changelog has none.
+func repoBase(content string) string {
+	refs, _ := splitTrailingRefs(strings.Split(content, "\n"))
+	for _, r := range refs {
+		if m := unreleasedRefRe.FindStringSubmatch(r); m != nil {
+			return m[1]
+		}
+	}
+	return ""
+}
+
+// absolutizeLinks rewrites a notes body's relative link targets to absolute
+// URLs at the release tag. The notes become a GitHub Release body, where a
+// repo-root-relative target resolves against the release page rather than the
+// repository and 404s — which is why clampNotes already writes its own
+// trailer absolute. The two forms changelog.d/README.md permits are the two
+// mapped here; any other relative destination it sees is refused rather than
+// published broken, the same bargain rebaseLinks makes for docs/changelog/,
+// and so is one it could map but has no [Unreleased] reference to build a
+// repository URL from. Fenced lines are quoted examples and are left alone.
+//
+// What it sees is inline destinations and link-reference definitions, and
+// nothing else — so the refusal is not a promise that every dead link is
+// caught. A reference-style link (`[text][label]`) loses its definition when
+// notes drops the trailing block and renders as literal brackets; a raw HTML
+// `<a href="docs/…">`, which GitHub allows in a release body, and a relative
+// autolink `<docs/…>` both pass untouched. None occurs in changelog content
+// today.
+//
+// Of the forms it does see, three are known limits. Only ``` fences are
+// recognised, so a link inside an indented block or an inline code span is
+// rewritten as a real one (shared with rebaseLinks). An image destination
+// becomes a /blob/ URL, which renders the blob page rather than the image
+// bytes; changelog content has never contained image syntax. And an
+// angle-bracket destination — `](<./a b.md>)`, the CommonMark spelling that
+// admits spaces — is refused rather than rewritten, since the capture stops
+// at the space; a test pins that refusal so it cannot decay into a silent
+// pass. A balanced paren inside a destination is fine: the capture ends at
+// the first `)` and the untouched remainder is copied through.
+func absolutizeLinks(section []string, fenced []bool, base, version string) ([]string, error) {
+	prefix := ""
+	if base != "" {
+		prefix = fmt.Sprintf("%s/blob/v%s/", base, version)
+	}
+	out := make([]string, len(section))
+	for i, l := range section {
+		if fenced[i] {
+			out[i] = l
+			continue
+		}
+		// A link-reference definition carries its target outside the `](`
+		// syntax, so the destination scan below cannot see it. It maps by the
+		// same rules: a body may legitimately end with one (see notes).
+		refDef := refDefTargetRe.FindStringSubmatchIndex(l)
+		var b strings.Builder
+		last := 0
+		rewrite := func(ds, de int) error {
+			dest := l[ds:de]
+			// An empty destination has nothing to resolve, and `#anchor` and
+			// absolute targets already read correctly off the release page.
+			if dest == "" || strings.HasPrefix(dest, "#") || linkSchemeRe.MatchString(dest) {
+				return nil
+			}
+			rel, ok := strings.CutPrefix(dest, "./")
+			if !ok {
+				if !strings.HasPrefix(dest, "docs/") {
+					return fmt.Errorf("%q: unhandled relative link target %q — teach absolutizeLinks its mapping first", strings.TrimSpace(l), dest)
+				}
+				rel = dest
+			}
+			// `./../x` strips to `../x`, which would publish a URL holding a
+			// `/../` segment: a browser resolves it back off the blob path and
+			// the link 404s with a green exit — the one outcome this function
+			// exists to make impossible. Refused however it is spelled.
+			if hasParentSegment(rel) {
+				return fmt.Errorf("%q: relative link target %q climbs out of the repository root", strings.TrimSpace(l), dest)
+			}
+			if prefix == "" {
+				return fmt.Errorf("%q: relative link target %q cannot be made absolute — the changelog has no [Unreleased] link reference to derive the repository URL from", strings.TrimSpace(l), dest)
+			}
+			b.WriteString(l[last:ds])
+			b.WriteString(prefix + rel)
+			last = de
+			return nil
+		}
+		if refDef != nil {
+			if err := rewrite(refDef[2], refDef[3]); err != nil {
+				return nil, err
+			}
+		}
+		for _, ix := range linkDestRe.FindAllStringSubmatchIndex(l, -1) {
+			if err := rewrite(ix[2], ix[3]); err != nil {
+				return nil, err
+			}
+		}
+		b.WriteString(l[last:])
+		out[i] = b.String()
 	}
 	return out, nil
 }

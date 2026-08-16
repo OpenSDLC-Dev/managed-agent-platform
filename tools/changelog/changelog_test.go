@@ -933,6 +933,172 @@ func TestNotes(t *testing.T) {
 	}
 }
 
+// The notes become a GitHub Release body, where a repo-root-relative target
+// resolves against the release page and 404s. Both forms the fragment rules
+// permit are rewritten to an absolute blob URL at the tag — the same job
+// rebaseLinks does for docs/changelog/, which the notes path never had.
+func TestNotesAbsolutizesRelativeLinks(t *testing.T) {
+	cl := "# Changelog\n\n## [Unreleased]\n\n" + unreleasedPointer + `
+
+## [0.3.0] - 2026-08-16
+
+### Added
+
+- Bare form [security](docs/self-hosted-security.md), dot form
+  [gcp](./deploy/gcp/README.md#continuous-delivery).
+- Untouched: [abs](https://example.com/x), [anchor](#top).
+
+` + "```" + `
+- fenced [keep](./docs/keep.md)
+` + "```" + `
+
+[Unreleased]: https://github.com/o/r/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/o/r/compare/v0.2.0...v0.3.0
+`
+	clPath, _ := writeFixture(t, cl, nil)
+	out := filepath.Join(t.TempDir(), "notes.md")
+	if err := runNotes(clPath, "0.3.0", out, 0); err != nil {
+		t.Fatal(err)
+	}
+	got := readFile(t, out)
+	for _, want := range []string{
+		"](https://github.com/o/r/blob/v0.3.0/docs/self-hosted-security.md)",
+		"](https://github.com/o/r/blob/v0.3.0/deploy/gcp/README.md#continuous-delivery)",
+		"](https://example.com/x)",
+		"](#top)",
+		"- fenced [keep](./docs/keep.md)",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("notes missing %q:\n%s", want, got)
+		}
+	}
+	if strings.Contains(got, "](docs/") || strings.Contains(got, "](./deploy/") {
+		t.Errorf("a relative target survived into the release body:\n%s", got)
+	}
+}
+
+// A relative target the rewrite has no mapping for must fail the notes rather
+// than ship a link that 404s from the release page.
+func TestNotesRefusesUnmappedRelativeLink(t *testing.T) {
+	cl := "# Changelog\n\n## [Unreleased]\n\n" + unreleasedPointer + `
+
+## [0.3.0] - 2026-08-16
+
+- Parent-relative [x](../elsewhere.md).
+
+[Unreleased]: https://github.com/o/r/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/o/r/compare/v0.2.0...v0.3.0
+`
+	clPath, _ := writeFixture(t, cl, nil)
+	out := filepath.Join(t.TempDir(), "notes.md")
+	if err := runNotes(clPath, "0.3.0", out, 0); err == nil {
+		t.Error("want an error for a relative target with no absolute mapping")
+	}
+}
+
+// The rewrite works on parsed destinations, not on the substring `](docs/`.
+// The two spellings that motivated it are the ones a substring rewrite got
+// silently wrong: `]( ./x)`, which it left relative *and* hid from the guard,
+// and a `](docs/` sitting inside an already-absolute destination, which it
+// corrupted while the guard accepted the result as absolute.
+func TestAbsolutizeLinksDestinations(t *testing.T) {
+	const base = "https://github.com/o/r"
+	const pre = base + "/blob/v1.2.3/"
+	for _, tc := range []struct {
+		name, in, want string
+		wantErr        bool
+	}{
+		{name: "dot form keeps its anchor", in: "[a](./deploy/x.md#frag)", want: "[a](" + pre + "deploy/x.md#frag)"},
+		{name: "bare docs form", in: "[a](docs/x.md)", want: "[a](" + pre + "docs/x.md)"},
+		// Only the destination span is rewritten, so the whitespace CommonMark
+		// allows before it survives — still a valid link, now an absolute one.
+		{name: "whitespace before the destination", in: "[a]( ./docs/x.md)", want: "[a]( " + pre + "docs/x.md)"},
+		{name: "mapping-like text inside an absolute destination", in: "[x](https://example.com/a](docs/b)", want: "[x](https://example.com/a](docs/b)"},
+		{name: "absolute untouched", in: "[a](https://example.com/x)", want: "[a](https://example.com/x)"},
+		{name: "mailto untouched", in: "[a](mailto:x@y.z)", want: "[a](mailto:x@y.z)"},
+		{name: "anchor untouched", in: "[a](#top)", want: "[a](#top)"},
+		{name: "empty destination untouched", in: "[a]()", want: "[a]()"},
+		{name: "title after the destination", in: `[a](docs/y.md "T")`, want: "[a](" + pre + `docs/y.md "T")`},
+		{name: "several destinations on one line", in: "[a](docs/x.md), [b](./y.md), [c](#z)", want: "[a](" + pre + "docs/x.md), [b](" + pre + "y.md), [c](#z)"},
+		// Only the captured span is replaced, so a destination whose tail
+		// contains a balanced paren keeps it: the `)` ends the capture, and
+		// the remainder is copied through untouched.
+		{name: "balanced parens in the destination", in: "[x](./a_(b).md)", want: "[x](" + pre + "a_(b).md)"},
+		{name: "bracketed label still guarded", in: "[a [b] c](x.md)", wantErr: true},
+		{name: "parent-relative refused", in: "[a](../x.md)", wantErr: true},
+		{name: "unmapped bare relative refused", in: "[a](x.md)", wantErr: true},
+		// `./../x` strips to `../x` and would publish a URL holding `/../`,
+		// which resolves off the blob path and 404s with a green exit.
+		{name: "parent escape via the dot form refused", in: "[a](./../deploy/x.md)", wantErr: true},
+		{name: "parent segment mid-path refused", in: "[a](docs/../../x.md)", wantErr: true},
+		{name: "uppercase scheme is absolute", in: "[a](HTTPS://example.com/x)", want: "[a](HTTPS://example.com/x)"},
+		// An angle-bracket destination is a known gap, asserted so it stays a
+		// loud refusal rather than becoming a silent pass.
+		{name: "angle-bracket destination refused", in: "[x](<./a.md>)", wantErr: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := absolutizeLinks([]string{tc.in}, []bool{false}, base, "1.2.3")
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("absolutizeLinks(%q) = %q, want an error", tc.in, got)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("absolutizeLinks(%q): %v", tc.in, err)
+			}
+			if got[0] != tc.want {
+				t.Errorf("absolutizeLinks(%q)\n got %q\nwant %q", tc.in, got[0], tc.want)
+			}
+		})
+	}
+
+	// A fenced line is a quoted example, left byte-identical.
+	fenced, err := absolutizeLinks([]string{"[a](docs/x.md)"}, []bool{true}, base, "1.2.3")
+	if err != nil || fenced[0] != "[a](docs/x.md)" {
+		t.Errorf("fenced line rewritten: %q, %v", fenced, err)
+	}
+
+	// With no [Unreleased] reference there is no repository URL to build, and
+	// a relative target must fail rather than publish unresolvable.
+	if _, err := absolutizeLinks([]string{"[a](docs/x.md)"}, []bool{false}, "", "1.2.3"); err == nil {
+		t.Error("want an error for a relative target with no base URL")
+	}
+
+	// A link-reference definition carries its target outside the `](` syntax,
+	// so it has its own branch. A released body may legitimately end with one,
+	// so a mappable target is rewritten rather than refused — refusing a form
+	// the tool knows how to rewrite would fail a release for nothing.
+	for _, tc := range []struct {
+		name, in, want string
+		wantErr        bool
+	}{
+		{name: "bare docs definition mapped", in: "[l]: docs/x.md", want: "[l]: " + pre + "docs/x.md"},
+		{name: "dot-form definition mapped", in: "[l]: ./docs/x.md", want: "[l]: " + pre + "docs/x.md"},
+		{name: "definition with a title mapped", in: `[l]: docs/x.md "T"`, want: "[l]: " + pre + `docs/x.md "T"`},
+		{name: "parent-relative definition refused", in: "[l]: ../x.md", wantErr: true},
+		{name: "unmapped definition refused", in: "[l]: x.md", wantErr: true},
+		{name: "absolute definition untouched", in: "[l]: https://example.com/x", want: "[l]: https://example.com/x"},
+		{name: "anchor definition untouched", in: "[l]: #top", want: "[l]: #top"},
+		// Wrapped prose is not a definition. This repository's two-space
+		// continuation indent sits inside the pattern's leading allowance, so
+		// without the end-of-line anchor an English sentence would be read as
+		// a definition whose "target" is its first word — and would fail a
+		// release that had nothing wrong with it.
+		{name: "wrapped prose is not a definition", in: "  [expired]: computed at read time, never stored.", want: "  [expired]: computed at read time, never stored."},
+	} {
+		got, err := absolutizeLinks([]string{tc.in}, []bool{false}, base, "1.2.3")
+		switch {
+		case tc.wantErr && err == nil:
+			t.Errorf("%s: absolutizeLinks(%q) = %q, want an error", tc.name, tc.in, got)
+		case !tc.wantErr && err != nil:
+			t.Errorf("%s: absolutizeLinks(%q): %v", tc.name, tc.in, err)
+		case !tc.wantErr && got[0] != tc.want:
+			t.Errorf("%s: absolutizeLinks(%q)\n got %q\nwant %q", tc.name, tc.in, got[0], tc.want)
+		}
+	}
+}
+
 // --- archive: the CHANGELOG slimming subcommand (plan 28) ---
 
 // slimmed is steadyChangelog after archiving 0.2.0 — the golden document
