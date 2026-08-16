@@ -44,10 +44,17 @@ mid-slice in something the release would half-ship.
    docs/DIVERGENCES.md and docs/HISTORY.md cite it as an evidence anchor
    under more than one phrasing (`CHANGELOG.md § […]`, `CHANGELOG § […]`);
    the v0.2.0 cut missed seven variant-phrased citations with a narrower
-   pattern. Step 3 also *deletes* every fragment it folds in, so a doc that
-   cites one by filename is left pointing at nothing:
-   `grep -rn 'changelog\.d/[a-z0-9]' docs/` and retarget those to the new
-   section too — the v0.3.0 cut found one, in an archived plan.
+   pattern. Step 3 also *deletes* every fragment it folds in, so a citation of
+   one is left pointing at nothing. Sweep the **whole tree** for every consumed
+   name, matching the bare basename too — a `docs/`-only, `changelog.d/`-prefixed
+   grep misses on both counts:
+   `for f in $(git ls-tree --name-only main:changelog.d | grep -v README); do git grep -nF "$f" -- . ':!CHANGELOG.md'; done`
+   Retarget each hit to the new section. CHANGELOG.md is excluded because a
+   just-folded entry may name a fragment in past-tense narrative, and that text
+   is frozen by step 3's byte-for-byte rule — a dead path there is the record
+   of what was fixed, not a live citation. The v0.3.0 cut found two, both in
+   one archived plan: one by path, one by basename, and only the first was
+   caught before review.
 7. Normal PR flow — verifier plus **full dual review** (the PR touches
    `Chart.yaml`, and a release PR changes the deploy surface; it is not
    LIGHT-tier docs), CI green, threads settled, squash merge.

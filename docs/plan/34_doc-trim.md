@@ -46,8 +46,9 @@ obligation on the operator. Those are never cut here. Restatement, duplication a
 ## Slices
 
 1. **Fragments and facts** — the `changelog.d/` size convention (1,500-byte cap, 60–120 words
-   the aim) and the recut of every unreleased fragment over it; the release blocker in
-   `cd-build-on-runner.fixed.md`; the sandbox-pool sizing correction in `docs/deploy-gcp.md`.
+   the aim) and the recut of every unreleased fragment over it; the release blocker in the
+   `cd-build-on-runner` fragment (`CHANGELOG.md § [0.3.0]`); the sandbox-pool sizing
+   correction in `docs/deploy-gcp.md`.
    Markdown only.
 2. **Comments worth pointing at** — the seven package-comment repairs and additions, the
    drift-pinning test, and the matching `variables.tf` description. Touches `.go`; comments only,
