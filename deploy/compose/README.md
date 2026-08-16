@@ -55,10 +55,12 @@ Two files, and each documents its own settings in place rather than here:
 - **[`docker-compose.yml`](./docker-compose.yml)** — every other variable the stack
   passes through, declared on the service that reads it and grouped under comments
   explaining the group: the executor's timeouts and reap intervals, sandbox
-  containment, MinIO and OpenBao's dev credentials, and the web-tool backends. Not
-  every variable has prose of its own there; each binary's own package doc
-  (`go doc ./cmd/executor`) is the authority on what a variable means and what it
-  defaults to, and it documents all of them.
+  containment, MinIO and OpenBao's dev credentials, and the web-tool backends. Not every
+  variable has prose of its own there. Where a group needs more, the code has it: the
+  binaries' package docs (`go doc ./cmd/executor`) are the authority on their own
+  `EXECUTOR_*` and `DATABASE_URL` settings, and the seven `SANDBOX_*` containment
+  variables are documented in `internal/sandbox` (`hardening.go`), which is what reads
+  them.
 
 Three defaults worth knowing before you change anything: **sandbox containment is
 on** (512 processes, 2 CPUs, and the `NET_RAW`/`SETUID`/`SETGID` drops), so those

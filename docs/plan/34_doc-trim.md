@@ -122,11 +122,19 @@ obligation on the operator. Those are never cut here. Restatement, duplication a
   "Notable values" table restated `values.yaml` (whose 53 keys already carry `# --`
   helm-docs annotations, richer per key than the table), and the compose README's variable
   table was a *third* home behind `.env.example` and `docker-compose.yml`'s own inline
-  comments. It did not hold for the two GCP documents: `deploy/gcp/README.md` names a
-  Terraform variable exactly **once** in 70 KB, and `docs/deploy-gcp.md` once in 43 KB —
-  they are procedure, decisions and recovery (state adoption, the gVisor/gate
-  incompatibility with its exact error strings, node settings), which the `.tf` files
-  cannot hold. `docs/self-hosted-security.md` is the same: a platform-enforces/you-own
+  comments. It did not hold for the two GCP documents, which are procedure, decisions and
+  recovery — state adoption, the gVisor/gate incompatibility with its exact error strings,
+  required node settings — none of which the `.tf` files can hold. They do name Terraform
+  variables (eight of them across fourteen lines in `deploy/gcp/README.md`, one in
+  `docs/deploy-gcp.md`), but never as a reference: the mentions sit inside shell
+  procedures, a `terraform.tfvars` example, and cross-references tying the two
+  configurations together, and the one table among them is two rows wiring a single
+  feature (IAP). **Measure the shape, not the token.** A first pass here counted `var.`
+  occurrences, found one, and concluded the documents mention variables once — an
+  instrument that missed every bare `name_prefix`. It was wrong by an order of magnitude
+  while the conclusion it supported happened to survive; the verifier caught it, and it is
+  the same class of error as slice 3's `go doc` measurement, which counted only exported
+  symbols. `docs/self-hosted-security.md` is the same: a platform-enforces/you-own
   synthesis that no single file carries, and it names no Terraform variable at all. The two
   GCP documents were therefore left untouched, and cutting them would have traded truth for
   brevity, which the Ground truth above forbids. **`self-hosted-security.md` went the other

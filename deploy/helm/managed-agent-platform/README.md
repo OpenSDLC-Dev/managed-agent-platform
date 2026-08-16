@@ -561,10 +561,10 @@ Four things worth understanding before you turn them on:
   [docs/self-hosted-security.md](../../../docs/self-hosted-security.md) §3).
 - **The egress gate needs a privileged sidecar.** Setting `executor.gateImage` opts
   `limited` and vault-attached sessions into per-session egress filtering and
-  credential substitution. The sidecar needs `CAP_NET_ADMIN`, so the namespace must
-  enforce neither the `baseline` nor the `restricted` Pod Security level — `baseline`
-  permits only `NET_BIND_SERVICE` — and it needs Kubernetes ≥ 1.29. Left unset, those
-  sessions keep the fail-closed route-flush instead.
+  credential substitution. The sidecar needs `CAP_NET_ADMIN`, which neither the `baseline`
+  nor the `restricted` Pod Security level admits, so the namespace must enforce neither —
+  and it needs Kubernetes ≥ 1.29. Left unset, those sessions keep the fail-closed
+  route-flush instead.
 - **`sandboxHardening.runAsUser` does not turn off the way its neighbours do.** Every
   other knob in that block is disabled with `0` (or `none` for `capDrop`), but `0` is a
   valid uid meaning **root** — only an empty value leaves the image's own user alone.
