@@ -315,7 +315,7 @@ without them — which is why they are called out here rather than left to be di
 
 | Value | Why |
 | --- | --- |
-| `image.tag` | the tag `cloudbuild.yaml` pushed. Empty falls back to the chart's `appVersion` (`0.2.0`), which this flow's Artifact Registry does not hold, so all three platform pods sit in `ImagePullBackOff` |
+| `image.tag` | the tag `cloudbuild.yaml` pushed. Empty falls back to the chart's `appVersion` (`0.3.0`), which this flow's Artifact Registry does not hold, so all three platform pods sit in `ImagePullBackOff` |
 | `executor.gateImage` | the full `…/gate:TAG` reference. Empty is *valid* and means no gate: `limited` and vault-attached sessions fall back to the backend's own fail-closed networking, and credential substitution does not happen |
 
 Pass them on the `helm` command line, **not** by appending to the values file. The fragment

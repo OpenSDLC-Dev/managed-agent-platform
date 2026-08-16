@@ -192,7 +192,7 @@ was aimed at, not only of what happened.
   scaffolding turned out to be the reference targets themselves. An archived plan is a
   citation target, not prose — its size is not the measure of it.
 - **`docs/changelog/` cannot be trimmed at all without breaking a stated invariant.** Its
-  files are called "byte-frozen" by `changelog.d/history-split.changed.md`, and
+  files are called "byte-frozen" by `CHANGELOG.md § [0.3.0]`'s history-split entry, and
   `make changelog-archive` is recorded as byte-reversible — which holds only while an
   archived file equals the section it was moved from. Deleting or rewriting one also breaks
   the index stubs in `CHANGELOG.md`, which only a release PR or the archive tool may edit.

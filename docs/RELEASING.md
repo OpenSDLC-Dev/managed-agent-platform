@@ -44,7 +44,10 @@ mid-slice in something the release would half-ship.
    docs/DIVERGENCES.md and docs/HISTORY.md cite it as an evidence anchor
    under more than one phrasing (`CHANGELOG.md § […]`, `CHANGELOG § […]`);
    the v0.2.0 cut missed seven variant-phrased citations with a narrower
-   pattern.
+   pattern. Step 3 also *deletes* every fragment it folds in, so a doc that
+   cites one by filename is left pointing at nothing:
+   `grep -rn 'changelog\.d/[a-z0-9]' docs/` and retarget those to the new
+   section too — the v0.3.0 cut found one, in an archived plan.
 7. Normal PR flow — verifier plus **full dual review** (the PR touches
    `Chart.yaml`, and a release PR changes the deploy surface; it is not
    LIGHT-tier docs), CI green, threads settled, squash merge.
