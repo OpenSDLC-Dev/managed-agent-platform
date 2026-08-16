@@ -250,6 +250,19 @@ services:
       # default are opt-in because they need an image that tolerates them:
       # SANDBOX_MEMORY_BYTES (an OOM kill mid-task) and SANDBOX_READONLY_ROOTFS /
       # SANDBOX_RUN_AS_USER (a uid that can reach the workdir).
+      #
+      # Turning one OFF is per field — there is no single spelling:
+      #   PIDS_LIMIT / CPU_MILLIS / MEMORY_BYTES   0
+      #   CAP_DROP                                 none
+      #   READONLY_ROOTFS                          false or empty (0 is not a
+      #                                            boolean and fails startup)
+      #   RUN_AS_USER                              EMPTY ONLY. 0 is a valid uid
+      #                                            meaning ROOT, so reaching for
+      #                                            the numeric off-switch gives
+      #                                            every sandbox a root process
+      #                                            — and does it silently, where
+      #                                            every other wrong value fails
+      #                                            startup. `none` fails startup.
       SANDBOX_PIDS_LIMIT: ${SANDBOX_PIDS_LIMIT:-}
       SANDBOX_CPU_MILLIS: ${SANDBOX_CPU_MILLIS:-}
       SANDBOX_MEMORY_BYTES: ${SANDBOX_MEMORY_BYTES:-}

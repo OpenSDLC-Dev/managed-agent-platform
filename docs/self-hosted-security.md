@@ -556,6 +556,27 @@ at the executor's own network, or by the backend endpoints you configure
 ([#47](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/47),
 [#225](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/225)).
 
+**MCP is the second egress path that does not leave the sandbox, and it is the
+one most easily missed.** A session's MCP servers are dialled **from the
+executor process**, with no sandbox involved, on `cloud` and `self_hosted`
+environments alike — so a firewall or `NetworkPolicy` around the sandbox network
+constrains none of it. `allow_mcp_servers` is what the environment's networking
+policy is consulted for on that path: under a `limited` policy the executor
+admits a declared server's host only if the flag is set (or the host is in
+`allowed_hosts`), and it is asked only about servers the agent itself declared.
+Read the asymmetry deliberately — a `self_hosted` environment carries no
+networking block at all by construction, so on that kind the dial is not
+policy-restricted here in the first place. What the platform guarantees
+here is a floor and not a policy: every such dial is checked against the
+resolved IP at connect time and refused for loopback, link-local (cloud
+metadata included), unspecified and multicast addresses, and redirects are not
+followed — but **RFC 1918 private ranges are deliberately allowed**, because
+reaching an MCP server on your own private network is the on-prem deployment
+model this platform exists for. So the reachable set for a declared MCP server
+is your executor's network, and bounding it is yours: run the executor where its
+egress is governed the way you want, and treat `allow_mcp_servers` on an
+environment as the grant that it is.
+
 ### 6. Environment-key lifecycle
 
 The platform owns the *primitive*; you own the *lifecycle*. `IssueEnvironmentKey`
@@ -580,6 +601,21 @@ debt rather than a supported state: such a key is a value **you** chose, so it
 never had the platform's 256-bit generation guarantee, and it now never expires
 either. Issue a replacement for each host and revoke the old key — the list
 shows them with an empty name and no expiry, which is how you find them.
+
+**Reissue them before you turn on single sign-on (§9), not after.** With OIDC
+identity enabled, two different credentials arrive in the same `Authorization:
+Bearer` header, and the platform tells them apart by shape: a compact-JWS
+silhouette goes to the human lane, anything else stays a worker's environment
+key. The predicate is exact — **three non-empty segments separated by two dots,
+every byte of all three in the base64url alphabet** (`identity.LooksLikeJWT`) —
+so most operator-chosen values are unaffected even if they contain dots. Every
+key this platform minted is `sk-map-env01-` plus base64url and carries no dot
+at all, so it can never be misread. A grandfathered key is the residual case:
+if the value **you** chose happens to satisfy that predicate, it is routed to
+the human lane and fails verification there. That is a 401 — fail-closed, never
+an over-authorization — and it is what a worker that authenticated yesterday
+would start returning the moment SSO goes live. Reissuing removes the case
+entirely, and you cannot tell by eye which grandfathered values qualify.
 
 What you own:
 

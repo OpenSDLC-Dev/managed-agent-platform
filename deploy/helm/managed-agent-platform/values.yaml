@@ -141,8 +141,16 @@ executor:
   # -- Containment applied to every sandbox pod at provision time (#65). The
   # executor's own defaults hold where a value is empty — 2000 millicores (2
   # CPUs) and the `NET_RAW,SETUID,SETGID` capability drops — so these knobs are
-  # for lowering a cap or turning one off (`0`, or `none` for capDrop), not for
-  # switching containment on. A malformed value fails executor startup.
+  # for lowering a cap or turning one off, not for switching containment on. A
+  # malformed value fails executor startup.
+  #
+  # How you turn one OFF is per field, and there is no single spelling:
+  #   cpuMillis / memoryBytes / ephemeralStorageBytes  `0`
+  #   capDrop                                          `none`
+  #   readOnlyRootfs                                   `false` or empty (`0` is
+  #                                                    not a boolean and fails
+  #                                                    startup)
+  #   runAsUser                                        EMPTY ONLY — see below
   #
   # The `memoryBytes`, `ephemeralStorageBytes`, `readOnlyRootfs` and `runAsUser`
   # half is opt-in because
@@ -169,6 +177,13 @@ executor:
     ephemeralStorageBytes: ""
     capDrop: ""
     readOnlyRootfs: ""
+    # -- Numeric uid every sandbox container runs as, overriding the image's own
+    # USER. The dangerous one: `0` here is not "off", it is a valid uid meaning
+    # ROOT, so reaching for the numeric off-switch gives every sandbox a root
+    # process — the exact inversion of the intent, and unlike a wrong value on
+    # any other knob it fails silently rather than at startup. Only an EMPTY
+    # value leaves the image's user alone; `none` fails startup as
+    # "not a uid (0..N)".
     runAsUser: ""
   # -- Extra literal env entries for the executor container, rendered verbatim.
   # The seam for deployment-shaped configuration the chart has no dedicated knob

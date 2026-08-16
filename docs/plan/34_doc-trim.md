@@ -78,9 +78,13 @@ obligation on the operator. Those are never cut here. Restatement, duplication a
 | `ARCHITECTURE.md` | 325 KB | ~~110 KB~~ 39 KB |
 | `DIVERGENCES.md` | 313 KB | 120 KB |
 | `changelog.d/` | 196 KB | 60 KB |
-| deployment docs (4) | 174 KB | 95 KB |
-| `self-hosted-security.md` | 77 KB | 62 KB |
-| `CLAUDE.md`/`README.md`/`AGENTS.md`/`STATE.md` | 56 KB | 32 KB |
+| deployment docs (4) | 174 KB | ~~95 KB~~ landed at 163 KB — the GCP pair was kept |
+| `self-hosted-security.md` | 77 KB | ~~62 KB~~ retired — slice 4 grew it to 79 KB |
+| `CLAUDE.md`/`README.md`/`AGENTS.md`/`STATE.md` | 56 KB | ~~32 KB~~ landed at 50 KB |
+
+A struck target is one a slice deliberately did not meet; the checklist entry below says
+why in each case. They are amended rather than deleted so the plan stays a record of what
+was aimed at, not only of what happened.
 
 ## Recording checklist
 
@@ -116,6 +120,44 @@ obligation on the operator. Those are never cut here. Restatement, duplication a
   should add that qualifier rather than delete them. Not every forward-looking comment is
   stale — and not every one is wholly true either.
 
+- **Slice 4's deployment cluster was two documents, not four.** The 174 KB → 95 KB target
+  assumed all four deployment docs restated their configuration the way `ARCHITECTURE.md`
+  restated the packages. Measured, that held for exactly two: the chart README's
+  "Notable values" table restated `values.yaml` (whose 53 keys already carry `# --`
+  helm-docs annotations, richer per key than the table), and the compose README's variable
+  table was a *third* home behind `.env.example` and `docker-compose.yml`'s own inline
+  comments. It did not hold for the two GCP documents, which are procedure, decisions and
+  recovery — state adoption, the gVisor/gate incompatibility with its exact error strings,
+  required node settings — none of which the `.tf` files can hold. They do name Terraform
+  variables, but never as a reference: the mentions sit inside shell procedures, a
+  `terraform.tfvars` example, cross-references tying `foundation/` to `environment/`, and
+  table rows about an operation (rotate this password, pick this cluster shape) rather than
+  about the variable. Nothing there reproduces a `variables.tf` description, so both were
+  kept.
+- **Measure the shape, not the token — and this entry had to learn it twice.** The first
+  pass counted `var.` occurrences, found one, and reported that the GCP documents name a
+  variable once; that instrument matches Terraform *expression* syntax and misses every
+  bare `name_prefix`. The correction then counted bare names, undercounted again by
+  dropping the common-word variables (`region`, `zone`, `namespace`), and asserted "one
+  table" past two table rows that contain variables. Both counts were wrong; the shape
+  claim they were meant to support was right each time. The numbers are gone rather than
+  fixed a third time, because they were never the argument — the same lesson as slice 3's
+  `go doc` measurement, which counted only exported symbols and nearly condemned seven
+  well-documented packages. `docs/self-hosted-security.md` is the same: a platform-enforces/you-own
+  synthesis that no single file carries, and it names no Terraform variable at all. The two
+  GCP documents were therefore left untouched, and cutting them would have traded truth for
+  brevity, which the Ground truth above forbids. **`self-hosted-security.md` went the other
+  way** — slice 4 grew it from 77 KB to 79 KB with the MCP-egress account it was missing and
+  the identity consequence of a grandfathered environment key, so its 62 KB target is
+  retired rather than missed. A byte target derived from one document's failure mode does
+  not transfer to documents with a different one.
+- **Carried into a later slice: `docs/ARCHITECTURE.md` is a second, un-pinned home for the
+  test-support package set.** Its list is currently accurate against the Makefile's
+  exclusion expression — all twelve match — but slice 4 removed CLAUDE.md's copy precisely
+  because a hand-maintained enumeration of that set drifts, and this one is subject to the
+  same failure with nothing to catch it. Slice 4's diff does not touch ARCHITECTURE.md, so
+  it was left alone rather than widened; whichever later slice edits that file replaces the
+  list with the naming convention, as CLAUDE.md now does.
 - `docs/DIVERGENCES.md` cites "the v1.62.0 checkout" three times as evidence, but the local
   `anthropic-sdk-go` reference checkout's newest tag is v1.61.0, which is also the `go.mod` pin.
   The substance verifies (`betaagent.go` does carry the four resolved-config types at v1.61.0),

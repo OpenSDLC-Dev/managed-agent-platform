@@ -18,6 +18,13 @@ the target is ~719 KB, cut from restatement and staleness only.
       and the derivative (nearly every package carries more comment than the document spent on
       it, most 3–10×), so they became a map. The subsystems that span packages — session
       resources, the sandbox lifecycle — moved into Execution flow rather than going with them.
-- [ ] Slice 4 — deployment docs, `self-hosted-security.md`, and the steering layer.
+- [x] Slice 4 — the steering layer (CLAUDE.md gains the "documents say what code cannot"
+      rule and two invariants AGENTS.md held alone; README stops narrating delivery the
+      changelog owns) plus the two deployment docs that did restate their config: the
+      eight documents it covers went 307 KB → 291 KB. The two GCP docs name their
+      Terraform variables only inside procedures, never as a reference, so they were kept;
+      `self-hosted-security.md` grew instead — see the plan's checklist for both. Three gaps
+      closed: the identity claim-name rule, MCP egress leaving the executor rather than the
+      sandbox, and `runAsUser`, which `0` makes root rather than off.
 - [ ] Slice 5 — `DIVERGENCES.md` reshaped; the 32 archived plans compressed to decisions.
 - [ ] Slice 6 — `HISTORY.md`, `docs/history/`, `docs/changelog/`.
