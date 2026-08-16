@@ -72,11 +72,11 @@ obligation on the operator. Those are never cut here. Restatement, duplication a
 
 | cluster | now | target |
 | --- | ---: | ---: |
-| archived plans (32) | 545 KB | 80 KB |
-| `docs/changelog/` | 518 KB | 40 KB |
+| archived plans (32) | 545 KB | ~~80 KB~~ retired — nothing is cuttable; see below |
+| `docs/changelog/` | 518 KB | ~~40 KB~~ retired — the files are byte-frozen |
 | `HISTORY.md` + `history/` | 414 KB | 120 KB |
 | `ARCHITECTURE.md` | 325 KB | ~~110 KB~~ 39 KB |
-| `DIVERGENCES.md` | 313 KB | 120 KB |
+| `DIVERGENCES.md` | 313 KB | ~~120 KB~~ landed at 228 KB — the floor is entry count, not prose |
 | `changelog.d/` | 196 KB | 60 KB |
 | deployment docs (4) | 174 KB | ~~95 KB~~ landed at 163 KB — the GCP pair was kept |
 | `self-hosted-security.md` | 77 KB | ~~62 KB~~ retired — slice 4 grew it to 79 KB |
@@ -158,8 +158,42 @@ was aimed at, not only of what happened.
   same failure with nothing to catch it. Slice 4's diff does not touch ARCHITECTURE.md, so
   it was left alone rather than widened; whichever later slice edits that file replaces the
   list with the naming convention, as CLAUDE.md now does.
-- `docs/DIVERGENCES.md` cites "the v1.62.0 checkout" three times as evidence, but the local
-  `anthropic-sdk-go` reference checkout's newest tag is v1.61.0, which is also the `go.mod` pin.
-  The substance verifies (`betaagent.go` does carry the four resolved-config types at v1.61.0),
-  so this is a citation a reviewer cannot reproduce rather than a false claim. Slice 5 settles it
-  by re-verifying against the checkout and restating the version, not by swapping the string.
+- ~~`docs/DIVERGENCES.md` cites "the v1.62.0 checkout" three times~~ **Settled in slice 5.**
+  Re-verified at the checkout, whose newest tag, `git describe` and `internal/version.go`
+  all say v1.61.0 — the `go.mod` pin. Each claim was re-read there and restated to what a
+  reviewer can open: the resolved-config types and the eight-value `Name` enum are read at
+  the pin, and the sentence about no `AlwaysAsk` outside the generated schema now names the
+  two files that carry the boilerplate (`betaagent.go`, `betasession.go`). The
+  "byte-identical in the v1.62.0 checkout" comparison is gone rather than restated — there
+  is no second version here to compare against, so the claim was unreproducible by
+  construction, not merely mis-versioned.
+- **Three byte targets in the table above rest on the same mistaken premise, and slice 5
+  measured the third.** Each was derived from a cluster's total size without asking what
+  the cluster must still hold. For `DIVERGENCES.md`, 120 KB over 142 entries implies 845
+  bytes an entry, against a 1,256-byte mean for the 118 entries this slice never touched —
+  the target is smaller than what an untrimmed row already costs. The file's floor is entry
+  count times what a row must carry: a surface, what the platform does, whether it is
+  CONFIRMED or INFERRED, and an evidence pointer. So the reachable win was the 24 entries
+  that had grown into essays, and it was taken: 313 KB → 228 KB, every entry, line, header
+  and citation intact.
+- **Archived plans are not trimmable at all, and the attempt is the evidence.** 33 spent-
+  looking sections were removed and then restored in the same PR, because review found the
+  premise false in two ways the cut-candidate check had never tested. The check compared
+  candidates against *quoted section titles* and found zero collisions — but plans are also
+  addressed **by slice number** (`plan 32 slice 2`, `plan 29 slice 1`, in DIVERGENCES
+  entries, code comments, tests, a migration and the released changelog — over a hundred
+  such references, the exact figure depending on how you count, which is why the shape and
+  not the number is the argument), and **by role** (`docs/changelog/0.2.0.md` says of plan
+  21 "whose DCF-rubric example the plan's acceptance replays end-to-end"). Deleting a
+  Slices section orphans every by-number citation; deleting an Acceptance section falsifies
+  a byte-frozen released file. Rewriting those citations is the churn design decision 3
+  above already rejected. Most of the corpus is cited by `DIVERGENCES.md` or is the problem
+  statement and design rationale Ground truth protects; what looked like the remaining
+  scaffolding turned out to be the reference targets themselves. An archived plan is a
+  citation target, not prose — its size is not the measure of it.
+- **`docs/changelog/` cannot be trimmed at all without breaking a stated invariant.** Its
+  files are called "byte-frozen" by `changelog.d/history-split.changed.md`, and
+  `make changelog-archive` is recorded as byte-reversible — which holds only while an
+  archived file equals the section it was moved from. Deleting or rewriting one also breaks
+  the index stubs in `CHANGELOG.md`, which only a release PR or the archive tool may edit.
+  The 40 KB target is retired rather than missed.

@@ -380,6 +380,12 @@ func (w *streamWatch) verifySpans(t *testing.T, run *dcfRun) {
 
 // assertNoExtras is the acceptance posture in one helper: a field on the wire
 // the SDK's typed struct does not know is a wire-compat failure.
+//
+// It checks that one direction only. Plan 21's acceptance also called for the
+// inverse — that every field the SDK marks api:"required" is present
+// (docs/plan/21_outcomes.md) — and that half was never built; nothing here
+// asserts it. Said here rather than left in the plan alone, because the gap is
+// real: a response omitting a required field passes this suite today.
 func assertNoExtras(t *testing.T, what string, extras map[string]respjson.Field) {
 	t.Helper()
 	for k := range extras {

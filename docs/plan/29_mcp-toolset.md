@@ -41,9 +41,9 @@ transport (the wire admits only `type: "url"`).
 
 Resolved per CLAUDE.md's order: public docs (platform.claude.com, fetched 2026-08-08:
 managed-agents/mcp-connector, /vaults, /permission-policies, /environments, /reference)
-→ `anthropic-sdk-go` (local checkout v1.62.0; the managed-agents MCP surface is
-unchanged from the pinned v1.61.0) → the `ant` CLI source (Stainless-generated; adds no
-semantics of its own). The SDK carries **two separate MCP schemas** — the Messages API
+→ `anthropic-sdk-go` (the local checkout at v1.61.0, which is also the `go.mod` pin —
+its newest tag, so no later version is available here to compare against) → the `ant`
+CLI source (Stainless-generated; adds no semantics of its own). The SDK carries **two separate MCP schemas** — the Messages API
 connector (`betamessage.go`: `authorization_token`, map-keyed configs, `defer_loading`)
 and managed agents (`BetaManagedAgents*`) — never conflate them; everything below is the
 managed-agents surface.

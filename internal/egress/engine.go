@@ -99,6 +99,13 @@ func NewEngine(creds []Credential) *Engine {
 // placeholder whose credential is not enabled for loc is left literal and is
 // not unreachable — the documented "a disabled injection_location is neither
 // substituted nor stripped". Each unreachable credential is reported once.
+//
+// This path is uninstrumented: no span, no metric, no decision log. Plan 12
+// intended a per-substitution span and it was never built, so an operator
+// asking "why was my credential not substituted?" has only the gate's
+// egress_request span, which carries the method and server address and no
+// verdict. Said here rather than in that plan alone, because the absence is
+// the answer to a question this function invites.
 func (e *Engine) Substitute(host string, loc Location, s string) (out string, unreachable []*Credential) {
 	var pairs []string // placeholder, secret, … for the admitted credentials
 	for i := range e.creds {

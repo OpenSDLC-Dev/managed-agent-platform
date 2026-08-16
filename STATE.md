@@ -26,5 +26,8 @@ the target is ~719 KB, cut from restatement and staleness only.
       `self-hosted-security.md` grew instead — see the plan's checklist for both. Three gaps
       closed: the identity claim-name rule, MCP egress leaving the executor rather than the
       sandbox, and `runAsUser`, which `0` makes root rather than off.
-- [ ] Slice 5 — `DIVERGENCES.md` reshaped; the 32 archived plans compressed to decisions.
-- [ ] Slice 6 — `HISTORY.md`, `docs/history/`, `docs/changelog/`.
+- [x] Slice 5 — `DIVERGENCES.md` 313 KB → 228 KB: the 24 entries grown into design essays
+      became rows, each attacked by a skeptic; 25 losses and 9 accuracy defects repaired. The
+      archived-plan half is **abandoned, not deferred** — 33 sections were cut and restored in
+      the same PR, plans being cited by slice number and by role. Four targets retired, why in the plan.
+- [ ] Slice 6 — `HISTORY.md` and `docs/history/`; `docs/changelog/` is byte-frozen and out.
