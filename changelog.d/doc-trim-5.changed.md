@@ -11,4 +11,6 @@
   lacking a field path where the code has three, a field the SDK's error union requires on every
   variant presented as ours, a bounded path-id enumeration widened to "every", two Anthropic
   bounds attributed to the MCP protocol, and a cumulative byte ceiling stated as a bound on
-  delivered bytes when the code counts only part of what crosses the wire.
+  delivered bytes when the code counts only part of what crosses the wire. Four citations of
+  an "SDK v1.62.0 checkout" are settled against the pinned v1.61.0 they were read at — one in
+  archived plan 29, edited for that correction alone.
