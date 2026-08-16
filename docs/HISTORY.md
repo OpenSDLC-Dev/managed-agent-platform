@@ -11,8 +11,8 @@ Provenance: this file began 2026-07-16 as the verbatim completed-work archive mo
 of [STATE.md](../STATE.md), and documents — [DIVERGENCES.md](./DIVERGENCES.md) above
 all — cite its section headings as evidence anchors. On 2026-07-18 the per-PR delivery
 narratives were verified section-by-section against CHANGELOG.md and pruned (git history
-is the backstop). No heading has been removed since: plan 34 re-checked and left both
-heading sets untouched, 46 here and 54 in [docs/history/](./history/).
+is the backstop). No heading has been removed since — plan 34 re-checked, and removed none
+from this file or from [docs/history/](./history/).
 
 A later trimmer should know two things. **What is under a cited heading is generally
 recorded nowhere else** — that is the standing reason not to delete body prose, and it is
@@ -51,7 +51,7 @@ new directory and in-repo citations re-pointed in the moving PR (plan
 
 ## Trimming the documentation to what code cannot say (plan 34, #413) — archived 2026-08-16, six slices delivered
 
-Tracked markdown went **2,665,735 → 2,166,640 bytes** (−19%) and is now smaller than the
+Tracked markdown went **2,665,735 → 2,166,628 bytes** (−19%) and is now smaller than the
 2,382,801 bytes of non-test Go it documents, which was the plan's stated problem. The rule
 the plan wrote into CLAUDE.md — a document earns its place by holding what code cannot — is
 also what stopped it: of nine byte targets, four were retired rather than met, three were

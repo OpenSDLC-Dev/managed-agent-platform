@@ -1,5 +1,5 @@
 - **Plan 34 archived: the documentation is smaller than the system it documents** (#413) —
-  Tracked markdown went 2,665,735 → 2,166,640 bytes (−19%), against 2,382,801 bytes of
+  Tracked markdown went 2,665,735 → 2,166,628 bytes (−19%), against 2,382,801 bytes of
   non-test Go. The final slice cut nothing. `docs/HISTORY.md` and `docs/history/` hold what a
   changelog structurally cannot — measurements, attacks that were tried, alternatives
   rejected — so their 414 KB → 120 KB target is retired rather than met by deleting evidence,
