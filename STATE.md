@@ -21,7 +21,7 @@ the target is ~719 KB, cut from restatement and staleness only.
 - [x] Slice 4 — the steering layer (CLAUDE.md gains the "documents say what code cannot"
       rule and two invariants AGENTS.md held alone; README stops narrating delivery the
       changelog owns) plus the two deployment docs that did restate their config: the
-      eight documents it covers went 307,350 → 289,874 bytes. The two GCP docs name their
+      eight documents it covers went 307,350 → 290,325 bytes. The two GCP docs name their
       Terraform variables only inside procedures, never as a reference, so they were kept;
       `self-hosted-security.md` grew instead — see the plan's checklist for both. Three gaps
       closed: the identity claim-name rule, MCP egress leaving the executor rather than the
