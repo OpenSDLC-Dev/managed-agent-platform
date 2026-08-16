@@ -5,7 +5,7 @@ What is being worked on right now, and how far along it is — nothing else. **S
 ## Active work
 
 **Cutting v0.3.0** ([docs/RELEASING.md](./docs/RELEASING.md)). The 54 pending `changelog.d/`
-fragments — plans 28–32 and 34, the GCP delivery lane, and a run of issue fixes — carry `Added`
+fragments — plans 28–34, the GCP delivery lane, and a run of issue fixes — carry `Added`
 and `Changed` groups, so the policy makes the bump minor. The one release train moves the
 platform version, the chart `version` and its `appVersion` together.
 
