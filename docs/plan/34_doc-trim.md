@@ -75,7 +75,7 @@ obligation on the operator. Those are never cut here. Restatement, duplication a
 | archived plans (32) | 545 KB | 80 KB |
 | `docs/changelog/` | 518 KB | 40 KB |
 | `HISTORY.md` + `history/` | 414 KB | 120 KB |
-| `ARCHITECTURE.md` | 325 KB | ~~110 KB~~ 35 KB |
+| `ARCHITECTURE.md` | 325 KB | ~~110 KB~~ 39 KB |
 | `DIVERGENCES.md` | 313 KB | 120 KB |
 | `changelog.d/` | 196 KB | 60 KB |
 | deployment docs (4) | 174 KB | 95 KB |

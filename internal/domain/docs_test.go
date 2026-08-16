@@ -13,7 +13,7 @@ import (
 // prefixToken matches one prefix as the documents write it: a backticked
 // lowercase word ending in an underscore, e.g. `sesn_`. The trailing underscore
 // is what separates a prefix from every other backticked identifier on the same
-// line, and a pinned line is dense with them: CLAUDE.md's carries `knownPrefixes`
+// line, and a pinned line is dense with them: CLAUDE.md carries `knownPrefixes`
 // and `internal/domain/id.go` beside the prefixes themselves, and none of those
 // is one.
 var prefixToken = regexp.MustCompile("`([a-z]+)_`")

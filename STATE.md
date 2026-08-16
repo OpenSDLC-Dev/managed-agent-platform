@@ -11,9 +11,10 @@ the target is ~719 KB, cut from restatement and staleness only.
 ## Tasks
 
 - [x] Slice 1 — `changelog.d/` 196 KB → 50 KB: a 1,500-byte cap and every fragment recut to it.
-- [x] Slice 2 — twelve package comments rewritten from the code; three documented lists pinned by
+- [x] Slice 2 — twelve comments rewritten from the code (package docs, plus field and symbol
+      comments; the plan's "seven" counted package docs alone); three documented lists pinned by
       offline tests, each of which found real drift on its first run.
-- [x] Slice 3 — `docs/ARCHITECTURE.md` 325 KB → 35 KB: the per-file tables were 92% of the file
+- [x] Slice 3 — `docs/ARCHITECTURE.md` 325 KB → 39 KB: the per-file tables were 92% of the file
       and the derivative (nearly every package carries more comment than the document spent on
       it, most 3–10×), so they became a map. The subsystems that span packages — session
       resources, the sandbox lifecycle — moved into Execution flow rather than going with them.
