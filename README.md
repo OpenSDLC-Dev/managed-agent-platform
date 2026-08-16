@@ -9,9 +9,9 @@ Run the whole thing on-prem or in your own VPC — **your data and your compute 
 What runs today, end to end:
 
 - **The core loop** — the wire-compatible control-plane API over an append-only session event log with SSE streaming, config-driven model providers (Anthropic-protocol and OpenAI-compatible), and the brain orchestration loop.
-- **Tools in sandboxes** — the complete `agent_toolset_20260401`, `web_search` and `web_fetch` included, executing in per-session Docker or Kubernetes sandboxes under permission policies with human-in-the-loop approval.
+- **Tools in sandboxes** — the complete `agent_toolset_20260401`, executing in per-session Docker or Kubernetes sandboxes under permission policies with human-in-the-loop approval. `web_search` and `web_fetch` are the deliberate exception: they run in the platform executor behind config-driven backends, on both deployment modes, with no sandbox involved.
 - **Your own compute** — BYOC workers run a self-hosted session's tools, with dead-worker recovery and a single OTel trace across the process boundary.
-- **Sandbox lifecycle** — an idle session's workspace is checkpointed to object storage and restored intact when the next message arrives.
+- **Sandbox lifecycle** — an executor-resident reaper destroys the sandboxes of deleted, archived and terminated **cloud** sessions, and checkpoints an idle one's workspace to object storage, restoring it intact when the next message arrives. A `self_hosted` session's sandbox belongs to its BYOC worker and is never touched.
 - **Session resources** — **skills**, **files** and **GitHub repositories** mount into a session; repositories are cloned platform-side, so the token never enters the container the agent controls.
 - **Outcomes** — a text or file rubric is graded each work cycle, deliverables are harvested into the Files API, and revision feedback runs up to `max_iterations`.
 - **MCP servers** — declared per agent, discovered, offered to the model and answered under human confirmation by default, with vault credentials matched and expiring OAuth tokens refreshed at the dial.

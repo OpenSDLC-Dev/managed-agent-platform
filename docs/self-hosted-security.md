@@ -557,11 +557,16 @@ at the executor's own network, or by the backend endpoints you configure
 [#225](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/225)).
 
 **MCP is the second egress path that does not leave the sandbox, and it is the
-one most easily missed.** `allow_mcp_servers` above widens what the *sandbox*
-may reach, but the platform's own calls to a session's MCP servers are dialled
-**from the executor process**, with no sandbox involved, on `cloud` and
-`self_hosted` environments alike. A firewall or `NetworkPolicy` around the
-sandbox network therefore constrains none of it. What the platform guarantees
+one most easily missed.** A session's MCP servers are dialled **from the
+executor process**, with no sandbox involved, on `cloud` and `self_hosted`
+environments alike — so a firewall or `NetworkPolicy` around the sandbox network
+constrains none of it. `allow_mcp_servers` is what the environment's networking
+policy is consulted for on that path: under a `limited` policy the executor
+admits a declared server's host only if the flag is set (or the host is in
+`allowed_hosts`), and it is asked only about servers the agent itself declared.
+Read the asymmetry deliberately — a `self_hosted` environment carries no
+networking block at all by construction, so on that kind the dial is not
+policy-restricted here in the first place. What the platform guarantees
 here is a floor and not a policy: every such dial is checked against the
 resolved IP at connect time and refused for loopback, link-local (cloud
 metadata included), unspecified and multicast addresses, and redirects are not

@@ -84,7 +84,7 @@ internal/
 deploy/{helm,compose,gcp}
 ```
 
-**Test support is named, not listed here**: a directory under `internal/` whose name ends in `test` is one (`pgtest`, `sandboxtest`, `mcptest`, …). The `test` recipe in the Makefile holds the authoritative set, because it has to spell them out to keep them out of the coverage denominator — so adding one means editing that expression, and nothing else. Beside them sit the top-level `evals/` live suite and `acceptance/` doc-example suite. There is no `internal/policy`: permission policy lives across `domain`/`toolset`/`brain`/`api`.
+**Test support is named, not listed here**: a directory under `internal/` whose name ends in `test` is one (`pgtest`, `sandboxtest`, `mcptest`, …). The `test` recipe in the Makefile holds the authoritative set, because it has to spell them out to keep them out of the coverage denominator — so adding one means editing that recipe: both its exclusion expression and the comment above it that names the same packages in prose. Beside them sit the top-level `evals/` live suite and `acceptance/` doc-example suite. There is no `internal/policy`: permission policy lives across `domain`/`toolset`/`brain`/`api`.
 
 What a package actually does is its own doc comment — `go doc ./internal/<pkg>`, or the files themselves where the substance is unexported. [docs/ARCHITECTURE.md](./docs/ARCHITECTURE.md) → "Package reference" is a one-line-per-package map to them; the subsystems that span packages are covered in its other sections, chiefly "Execution flow".
 
