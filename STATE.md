@@ -27,8 +27,7 @@ the target is ~719 KB, cut from restatement and staleness only.
       closed: the identity claim-name rule, MCP egress leaving the executor rather than the
       sandbox, and `runAsUser`, which `0` makes root rather than off.
 - [x] Slice 5 — `DIVERGENCES.md` 313 KB → 227 KB: the 24 entries grown into design essays
-      became rows, each attacked by an independent skeptic; 25 losses and 6 accuracy defects
-      repaired, not waived. Then 33 spent scaffolding sections from 25 archived plans (−38 KB),
-      seven facts relocated first and plan 25's Verification kept, the released changelog
-      asserting the plan contains it. Three byte targets retired — the plan says why.
+      became rows, each attacked by a skeptic; 25 losses and 6 accuracy defects repaired, not
+      waived. Then 33 spent scaffolding sections from 25 archived plans (−38 KB), seven facts
+      relocated first. Three byte targets retired — the plan says why.
 - [ ] Slice 6 — `HISTORY.md` and `docs/history/`; `docs/changelog/` is byte-frozen and out.
