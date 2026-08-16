@@ -1100,7 +1100,10 @@ with tracking issues, not silent omissions:
   keys" role — a human reaching it over SSO needs the general `admin` role
   (plan 31, [#56](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/56)),
   the whole surface including the listing, while the management key itself
-  remains ungated because it has always meant full authority; and a key still
+  remains ungated because it has always meant full authority — it is the one
+  credential a deployment holds whose authority is unscoped, every other
+  (the model provider's key, the database user, an environment key) being
+  bounded to one provider, one database or one environment; and a key still
   cannot be scoped to less than its whole environment. A third limit was lifted on 2026-08-11: the acceptance now also
   covers a worker *executing* a pulled tool call on such a key — a real
   `ant beta:worker` claimed a `tool_exec` item, ran `bash` in-process and settled

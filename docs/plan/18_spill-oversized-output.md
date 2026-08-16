@@ -93,8 +93,3 @@ what it hit — which is exactly where the reference's spill earns its keep.
    deliberately keep truncation/pruning); ARCHITECTURE `toolset.go` row;
    HISTORY progress summary; STATE.md ticks #226 and closes the four-issue
    batch.
-
-## Acceptance
-
-`make verify` green; the new tests red with the spill removed
-(mutation-checked); verifier PASS; dual review per CLAUDE.md.

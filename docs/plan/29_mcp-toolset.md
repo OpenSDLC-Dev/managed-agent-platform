@@ -249,53 +249,6 @@ failure, since `terminal` asserts the session transitions to `terminated` and `e
 is a turn's settlement (docs/DIVERGENCES.md). The per-server attempt count, if a threshold is ever needed, is derivable from
 the log (prior `session.error` events for that server) rather than from new state.
 
-## Slices
-
-Ordered so no landed slice leaves an incoherent state (tools are never offered to the
-model before they can be gated and executed):
-
-1. **Wire correctness** — three rungs, none of which needs an MCP client: bidirectional
-   reference validation (dangling toolsets now rejected — the public docs pin both
-   directions verbatim, superseding #66's one-way reading; that DIVERGENCES entry is
-   rewritten here); `mcp_toolset` nested-shape validation at the API boundary, parity
-   with what `toolset.Validate` already gives `agent_toolset_20260401` (unknown keys and
-   unevaluable policy types rejected — the #26 fail-open class, currently open on the
-   MCP arm because `parseTools` checks only `mcp_server_name`); and resolved-config echo
-   for **both** toolset kinds, applied non-mutatingly in the two render funnels
-   (`renderAgent`, `renderSession`) so stored bytes stay verbatim and pre-existing rows
-   echo resolved without a backfill — and so each kind's resolved default policy
-   stays a single constant rather than a value frozen into old rows. Both
-   defaults turn out to be documented outright by the permission-policies guide,
-   which retires the doubt #59 was opened on; that entry is updated in the same
-   slice.
-2. **`internal/mcp` + catalog** — the client wrapper, `mcp_catalogs` migration + store,
-   the `mcp_exec` discovery driver **including the MCP-client egress policy check**
-   (limited networking is never fail-open, even one slice long; before slice 5 the
-   driver connects unauthenticated, which is the documented no-match behavior). Nothing
-   offered to the model yet.
-3. **Gate machinery** — `confirmableToolUseTypes` + MCP-shaped denial/interrupt
-   synthesis (event-layer, independently testable).
-4. **Activation** — brain expansion + `agent.mcp_tool_use` emission + the execution
-   driver + four-way settlement chaining + output spill. **#45's acceptance criterion
-   is met at the end of this slice.**
-5. **Credentials** — matching, injection, OAuth refresh, `mcp_authentication_failed`.
-6. **Networking polish** — the gate's `allow_mcp_servers` host set (sandbox egress),
-   retry-status escalation, `mcp_connection_failed` semantics.
-7. **Evals + acceptance** — the `mcp-answer` eval (in-process fixture server + real
-   model, `RUN_EVALS`), the live public-server tier (`RUN_LIVE_MCP_TESTS`; `.env` gains
-   `MCP_LIVE_SERVER_URL` / `MCP_LIVE_SERVER_TOKEN`, missing config fails rather than
-   skips), the `ant` CLI end-to-end transcript into docs/HISTORY.md, and archiving.
-
-## Verification
-
-Every slice ships contract tests in CI against in-process MCP servers (the go-sdk's
-server + `InMemoryTransport`, and an `httptest` streamable-HTTP server for
-transport-level cases) — discovery, execution, gating, credential matching and refresh
-(an `httptest` token endpoint), policy enforcement, both failure families, spill — no
-money, no external network. The dedicated live tiers and the CLI acceptance land with
-slice 7. Each slice runs the verifier before review per CLAUDE.md; wire claims diff
-against the SDK checkout field by field.
-
 ## New DIVERGENCES entries (inferences to record as they land)
 
 - Execution locus: platform executor for all environment kinds (slice 4).

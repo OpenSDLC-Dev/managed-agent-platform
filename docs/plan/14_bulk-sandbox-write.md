@@ -177,18 +177,3 @@ noise, and an index cannot be confused with it.
 counts. They bracket an exec — the command file before it, the head pointer after it — so
 they cannot be batched; only the restart pair could, saving one exec on restart calls alone.
 Not worth a second shape.
-
-## Acceptance
-
-1. `sandbox.Sandbox` has `WriteFiles`; both backends implement it and pass the same new
-   contract rows in `internal/sandbox/sandboxtest`: round trip creating parents, per-file
-   atomicity, `ErrIsDirectory` naming the offending member, `ErrNotDirectory` for a blocked
-   parent, an existing target's mode preserved, a created file at 0644 and a created
-   directory at 0755, no temporary file left behind on either outcome, and an empty batch as
-   a no-op.
-2. Materializing a skill of N files costs O(1) execs, not O(N) — both materializers
-   (`internal/executor/skills.go`, `internal/worker/skills.go`) write a skill's tree in one
-   call, measured against a real daemon.
-3. Per-file atomicity is unchanged: a failed batch leaves each target holding what it held,
-   never a truncated file, and the temporary files are shed.
-4. `make verify` green, coverage gate held.

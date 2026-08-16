@@ -124,39 +124,6 @@ what the public docs alone would have suggested:
     against the reference's `user` — a divergence, because we have no `user_` id to
     give.
 
-## Slices
-
-1. **Lifecycle in the schema, no new surface.** Migration 0024: `status` (checked
-   enum, backfilled `archived` where `revoked_at` is set), `expires_at`,
-   `partial_key_hint`, `created_by`; `api_keys_one_live` dropped and re-created
-   over the rows nobody issued (decision 4 — keyed on `created_by IS NULL`, not on
-   the literal name `bootstrap`).
-   `authenticate` accepts a key only when `status = 'active'` and it has not
-   expired; `EnsureAPIKey` writes a hint and keeps its rotation. Nothing observable
-   changes for an existing deployment — the gate green is the proof.
-2. **The console surface.** `POST` (issue, returning the resource plus `raw_key`),
-   `GET` (bare array, archived rows included as the reference returns them),
-   `POST …/{key_id}` (status and name updates, rejecting `expired` with the same
-   message shape the reference produces). Name bounds reuse
-   `environmentKeyNameMax`. 405 fallbacks registered as plan 30's are. All four
-   DIVERGENCES entries land here, with the surface that diverges — including the
-   `sk-map-api01-` one: slice 1 declares the constant, but until something mints a
-   key with it there is no observable divergence to register.
-3. **Docs and acceptance.** A
-   `docs/self-hosted-security.md` section on management-key rotation beside the
-   environment-key one; an acceptance run that issues a key over the console API,
-   drives `/v1` with it, disables it and is refused, re-enables it, archives it and
-   is refused again — recorded in docs/HISTORY.md.
-
-## Verification
-
-Contract tests per slice against the Dockerized Postgres the API suite already
-uses: the status/expiry matrix in `authenticate`, bootstrap rotation across the
-index change, migration backfill from a pre-0024 row, and each route's role
-gating (admin passes, developer and viewer get `permission_error`). The acceptance
-run in slice 3 is the end-to-end proof and the only place a real key is exercised
-against `/v1`.
-
 ## New DIVERGENCES entries
 
 - No `/v1/organizations/api_keys`: creation withheld as the reference withholds it,

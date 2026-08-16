@@ -108,21 +108,6 @@ The reference-implementation findings become repo documentation, in two steps:
   contract-suite rows take the new sentinel and cells; CHANGELOG.md carries the entry;
   #306 closes.
 
-## Testing (TDD — red observed first)
-
-- Host-bash (`k8s_internal_test.go`): `TemporaryCannotBeCreated` asserts exit 20 and the
-  reason on stdout (red: today exit 1, empty stdout); a mkdir-EROFS row is not stageable
-  on a host filesystem, so the mkdir route is pinned by the script-literal test and the
-  contract row below. The drain assertions stay as they are.
-- Contract (`sandboxtest/contract.go`): #304's read-only-root large-stream cell tightens
-  from `err != nil` to `ErrNotWritable` (its comment already names this plan's issue); a
-  buffered small-body cell joins it; both backends must answer the same sentinel. The
-  non-root row's uid-route bound is unchanged (`RunAsUser` travels with `ReadOnlyRootfs`).
-- docker unit (`api_test.go`): PUT refusal on a replaceable target runs
-  probe-then-classify (exec sequence pinned, as `TestWriteFileShedsItsTempWhenThePutFails`
-  pins removal-then-probe); a probe that succeeds keeps the daemon's error.
-- toolset unit: the `ErrNotWritable` row's wording, mapped and passthrough cases both.
-
 ## Out of scope
 
 Bulk writes (workdir-only by design), the read path (unaffected by parent writability),

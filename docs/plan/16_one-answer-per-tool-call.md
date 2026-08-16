@@ -121,8 +121,3 @@ references at all.
 3. Docs in the same PR: CHANGELOG entry; DIVERGENCES INFERRED entry;
    ARCHITECTURE rows (`toolflow.go` validation arm, webwork one-writer note);
    HISTORY progress summary (this plan archives at birth); STATE.md task tick.
-
-## Acceptance
-
-`make verify` green; the new rejections red before the arm lands
-(mutation-checked); verifier PASS; dual review per CLAUDE.md.

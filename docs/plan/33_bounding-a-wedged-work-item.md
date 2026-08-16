@@ -147,18 +147,3 @@ Docker and Kubernetes transports, and the item bound already removes the outage 
 (b) The executor's single-goroutine blast radius is real but is a separate change with a
 separate question: whether two items of one session may run concurrently on one executor,
 which is already possible across replicas — #396.
-
-## Slices
-
-1. **The stall bound.** `queue.KeepLease` takes a stall budget and
-   `LeaseKeeper.Progress`; the executor reports per item — each of provisioning's own steps,
-   each skill reference resolved and written, each repository, mount, harvested output, web
-   call, MCP server and MCP call, each tool answered — and passes `Config.StallTimeout`; the
-   BYOC worker's heartbeat carries the same guard against
-   its own `Config.StallTimeout`, exiting `hbExitStalled` and leaving the item for reclaim.
-   The brain passes zero — its silence is bounded a layer down by `provider.StallGuard`. Both
-   lanes are tested by consequence (a wedged run ends and is left reclaimable; a long but
-   moving run finishes untouched; a stall keeps the results that answered) and every guard
-   and reporting path is mutation-verified.
-2. *(deferred, D5a → #395)* Silence-bounded sandbox primitives.
-3. *(deferred, D5b → #396)* The executor's blast radius.

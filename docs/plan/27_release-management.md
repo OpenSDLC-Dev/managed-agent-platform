@@ -78,35 +78,3 @@ from a public, reproducible workflow run, not a maintainer's laptop.
    step-2 wording and the verifier's docs rung move from "a CHANGELOG.md
    entry" to "a `changelog.d/` fragment"; only a release PR edits
    CHANGELOG.md, via `make changelog`.
-
-## Slices
-
-1. **Fragment mechanism** — `changelog.d/` + README, `tools/changelog` with
-   its test suite (mutation-checked), Make targets, docs/RELEASING.md, the
-   governance rewording (CLAUDE.md, AGENTS.md, `.claude/agents/verifier.md`).
-   From this PR on, new PRs write fragments.
-2. **Version embedding** — `internal/version`, Dockerfile ARG + ldflags,
-   startup logs, worker `--version`.
-3. **Publishing pipeline** — `release.yml` + the release Make targets (which
-   bring the Make-side ldflags injection with its consumer,
-   `release-binaries`) + deploy-doc updates (Helm values comment, README
-   install pointers, RELEASING.md's "what the tag triggers" section goes
-   live).
-4. **Cut v0.2.0** — the acceptance run of the whole scheme: release PR
-   (assembles the legacy backlog plus accumulated fragments, bumps the chart,
-   README status line), annotated tag, `release.yml` publishes everything;
-   verified by a kind `helm install` from the published OCI chart and GHCR
-   images and a `--version` check on a downloaded worker binary. Acceptance
-   record to docs/HISTORY.md; the plan archives.
-
-## Acceptance
-
-- A PR's changelog obligation is one added file; parallel PRs no longer
-  contend for CHANGELOG.md's insertion point (a same-slug add/add collision
-  stays possible and resolves by renaming one file).
-- `make changelog VERSION=0.2.0` moves the legacy body byte-identically
-  (diff shows only the seams) and consumes the fragments.
-- After slice 4: `helm install` from `oci://ghcr.io/opensdlc-dev/charts`
-  with default values pulls the published GHCR images and the platform runs
-  on kind; the GitHub Release for v0.2.0 carries the clamped notes (decision
-  4) and the worker tarballs; the released worker binary prints `0.2.0`.

@@ -2194,6 +2194,11 @@ func TestWriteScriptDrainsEveryEarlyExit(t *testing.T) {
 	// classified (plan 23): exit 20, with the shell's own strerror text as
 	// the reason on stdout — the sandbox's equivalent of the errno the
 	// reference toolset maps.
+	//
+	// The `mkdir -p` branch has no sibling row here on purpose: its failure is
+	// EROFS, which cannot be staged inside a host tempdir. That route is
+	// covered by the script-literal test and by the cross-backend contract
+	// row instead.
 	t.Run("TemporaryCannotBeCreated", func(t *testing.T) {
 		dir := t.TempDir()
 		tmp := gopath.Join(dir, sandbox.TempName())

@@ -72,17 +72,3 @@ validation (`TestPoliciesValidatesLazily`, which uses correctly spelled keys), s
 (`internal/api/agents.go`), session create `agent_with_overrides` and session update `agent.tools`
 patch (`internal/api/sessions.go`) — so one fix closes every path, each returning HTTP 400
 `invalid_request_error` before persisting.
-
-## Acceptance criteria → coverage
-
-- `toolset.Validate` rejects `default_config.permission_polciy` and `configs[n].permission_polciy`,
-  naming the field's path — new `internal/toolset` unit tests.
-- Unknown keys at every nesting level (toolset object, `default_config`, `configs[]`,
-  `permission_policy`) rejected, including on a disabled tool — new unit tests.
-- Each API path (agent create, session create overrides, session update patch) returns 400 and does
-  not persist — new `internal/api` tests.
-- A correctly spelled `always_ask` still resolves to `always_ask`, and a genuinely omitted policy
-  keeps the default — retained by existing `TestPolicies` / `TestPoliciesValidatesLazily`.
-- A valid `always_ask` turn enqueues no tool work before confirmation — already asserted by
-  `TestConfirmationClosedLoopAllow` (`liveWork(ToolExec) == 0` before confirm).
-- `make verify` green (build, crossbuild, vet, fmt, test, ≥90% coverage).

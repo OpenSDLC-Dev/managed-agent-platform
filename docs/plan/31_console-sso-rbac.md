@@ -5,7 +5,7 @@ issue: "#56"
 
 > **Archived 2026-08-12 — completed on slices 1–4 and the slice 6 acceptance.**
 > #56 keeps its multi-tenant half (never in scope here — see Out of scope).
-> **Slice 5, the api-key issuance surface, did not ship**: it is gated below on
+> **Slice 5, the api-key issuance surface, did not ship**: it was gated on
 > a live observation of the reference console's key-management dialect, which
 > needs an authenticated Anthropic console account and creates real credentials
 > in it, so this plan's own provision applied and the slice moved to
@@ -653,60 +653,6 @@ that admit users) and the docs to go with them.
   `changelog.d/` fragment per PR. Each doc moves in the slice whose code
   invalidates it.
 
-## Slices
-
-1. **`internal/identity`: the verifier and both modes.** The shared verifier
-   (JWKS cache, alg allowlist, iss/aud/exp discipline), claim→role mapping,
-   discovery, the `gcp-iap` preset, and config parsing — pure
-   library + contract tests against a local fake IdP (httptest JWKS server:
-   key rotation, unknown kid, wrong aud/iss/alg, expiry skew, ES256+RS256,
-   nested role claims). No route touched; `make verify` green proves nothing
-   observable changed.
-2. **Principals + the identity lane.** The migration; JIT provisioning;
-   `dispatchAuth`'s credential dispatch and the `/api/` arm; dual-auth
-   discrimination; the context principal; `created_by` widening; the
-   `permission_error` envelope; the `s.handle`/`s.handleNoContent`
-   minimum-role parameter lands here (the mechanism), with its first use: the
-   console env-key routes require `admin` — and every other identity-reachable
-   route **default-denies** until slice 3 annotates it, so the lane is born
-   fail-closed and slice 3 relaxes rather than closes. Tests over real HTTP: a Casdoor-shaped and an IAP-shaped
-   token both authenticate; wrong iss/aud/alg/expired all 401 uniformly;
-   Bearer on management paths with `IDENTITY_MODE=disabled` still 401s; an
-   environment key on a console route still 401s; `x-api-key` behavior
-   byte-identical throughout.
-3. **The role matrix across the route tables.** Annotating every route per
-   the matrix — relaxing slice 2's default-deny — including explicit checks
-   on the three adapter-free streaming routes, plus the completeness test
-   over both route tables;
-   per-resource tests (viewer 403 on every mutation and on the env-key list,
-   developer 403 on every credential surface, admin green; the key lane
-   untouched by all of it). Wire-compat rung: the `/v1` route table diff is
-   empty; no response shape changes for key-authenticated callers.
-4. **Deployment wiring.** The compose `iam` profile with the hardened Casdoor
-   seed; the Helm `identity.*` values plus the `casdoor.enabled` first-party
-   templates (default off, same hardened configuration, chart-lint and render
-   tests for both states); the GCP Terraform IAP variables and docs, where
-   Google's own IdP does the SSO and no Casdoor is deployed;
-   docs/self-hosted-security.md's SSO section.
-5. **The api-key issuance surface** — `admin`-gated minting of named,
-   principal-owned management keys, retiring hand-edited `CONTROLPLANE_API_KEY`
-   rotation as the only path. **Gated on a live observation** of the
-   reference console's key-management dialect (the standing convention from
-   plan 30: console-facing endpoints mirror the observed reference path, no
-   invented naming) — needs a recording session like 2026-08-10's; if the
-   observation cannot be made, this slice moves to its own follow-up issue
-   rather than shipping an invented dialect.
-6. **Acceptance + archive.** Compose stack with the `iam` profile up; a real
-   token minted from the bundled Casdoor (scripted code+PKCE against its OP
-   endpoints); the chain proven end to end: viewer token 403s a mutation →
-   admin token issues an environment key over the console API → a real
-   `ant beta:worker poll --environment-key …` authenticates with it; recorded
-   in docs/HISTORY.md, plan flipped to `archived`.
-
-Console-repo work (its plan 08: the browser code+PKCE flow, forwarding the
-user's token instead of the server-held management key, role-aware UI) starts
-after slice 2 merges and is tracked there, not here.
-
 ## Verification
 
 - Per slice: `make verify` (no cached results), the verifier subagent before
@@ -716,8 +662,10 @@ after slice 2 merges and is tracked there, not here.
   the local server behave identically with identity disabled and enabled; the
   identity lane's Bearer acceptance on `/v1` is resolved against its
   DIVERGENCES entry, not waved through as invisible.
-- Security-sensitive slices (1, 2) get the full dual review regardless of
-  diff shape; slice 6's acceptance transcript is the plan's exit criterion.
+- The two security-sensitive slices — the token verifier, and the principal
+  model with its dispatch and default-deny — get the full dual review
+  regardless of diff shape; the acceptance transcript against a real IdP is
+  the plan's exit criterion.
 
 ## New DIVERGENCES entries (to record as they land)
 

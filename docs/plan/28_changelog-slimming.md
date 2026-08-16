@@ -76,23 +76,3 @@ user asked for the slimming on 2026-08-08, choosing the shape below.
    (Manual move with a byte-identity check in the PR — HISTORY has no
    parsing tool to extend, and building one for a two-file split is exactly
    the speculative tooling CLAUDE.md's simplicity rule forbids.)
-
-## Slices
-
-1. **The `archive` subcommand + the CHANGELOG split.** TDD: extraction/stub/
-   round-trip contract tests first (mutation-check the lossless guard — a
-   mutant that drops the round-trip comparison must go red). Make target,
-   RELEASING.md post-release step, CLAUDE.md/AGENTS.md wording where they
-   describe CHANGELOG.md's shape. Run it for 0.2.0 and 0.1.0; changelog
-   fragment.
-2. **The HISTORY split.** Move pre-current-month sections to
-   `docs/history/<YYYY-MM>.md`; pointer paragraph; citation sweep; byte-count
-   check recorded in the PR; changelog fragment. Archive this plan.
-
-## Acceptance
-
-`make verify` green; `go run ./tools/changelog latest` still answers from the
-slimmed CHANGELOG.md; the real move re-composes to the pre-move document
-byte-for-byte under the inverse link rewrite; every `CHANGELOG.md § [X.Y.Z]`
-citation still resolves through the stub's onward link; CHANGELOG.md lands
-under ~60 lines and HISTORY.md under ~1,000.

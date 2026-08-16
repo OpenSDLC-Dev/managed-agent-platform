@@ -153,25 +153,3 @@ checksum field to fill it from, which is the whole reason for the header.
 
 **Download endpoint.** The existence probe (`SELECT EXISTS …`) becomes a `SELECT sha256 …` — same
 round trip, same 404 on no rows — and sets the header when the value is non-NULL.
-
-## Acceptance criteria → coverage
-
-- `Digest` matches a known sha256 vector; both `Bundle` constructors set `SHA256` to the digest of
-  the `Zip` they return — new `internal/skills` unit tests.
-- `ReadArchive` returns the bytes on a matching digest, `ErrDigestMismatch` on a mismatched or
-  malformed one, and reads unverified on an empty one; the byte cap still fires first for an
-  oversized stream — new `internal/skills` unit tests.
-- An upload (both forms) and an operator import persist `skill_versions.sha256` equal to the
-  sha256 of the stored archive — new `internal/api` tests.
-- The `/content` download carries `x-skill-archive-sha256` equal to the sha256 of the body it
-  streamed, and omits the header for a row whose digest is NULL — new `internal/api` tests.
-- The executor materializes a skill whose stored object was substituted after upload: refuses it,
-  counts `corrupt`, and the tool run still completes; a row with a NULL digest still materializes
-  — new `internal/executor` tests.
-- The worker does the same end-to-end over the wire against the real API server — new
-  `internal/worker` tests.
-- A sentinel written under the pre-verification generation does not match: the pass
-  re-materializes and verifies (healing a healthy archive, refusing a substituted one) and
-  rewrites the marker in the current generation — new `internal/skills` and
-  `internal/executor` tests.
-- `make verify` green (build, crossbuild, vet, fmt, test, ≥90% coverage).
