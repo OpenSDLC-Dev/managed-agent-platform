@@ -556,6 +556,22 @@ at the executor's own network, or by the backend endpoints you configure
 ([#47](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/47),
 [#225](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/225)).
 
+**MCP is the second egress path that does not leave the sandbox, and it is the
+one most easily missed.** `allow_mcp_servers` above widens what the *sandbox*
+may reach, but the platform's own calls to a session's MCP servers are dialled
+**from the executor process**, with no sandbox involved, on `cloud` and
+`self_hosted` environments alike. A firewall or `NetworkPolicy` around the
+sandbox network therefore constrains none of it. What the platform guarantees
+here is a floor and not a policy: every such dial is checked against the
+resolved IP at connect time and refused for loopback, link-local (cloud
+metadata included), unspecified and multicast addresses, and redirects are not
+followed — but **RFC 1918 private ranges are deliberately allowed**, because
+reaching an MCP server on your own private network is the on-prem deployment
+model this platform exists for. So the reachable set for a declared MCP server
+is your executor's network, and bounding it is yours: run the executor where its
+egress is governed the way you want, and treat `allow_mcp_servers` on an
+environment as the grant that it is.
+
 ### 6. Environment-key lifecycle
 
 The platform owns the *primitive*; you own the *lifecycle*. `IssueEnvironmentKey`

@@ -345,7 +345,19 @@ encodes it into the flat `value=role,...` the verifier parses; a claim value or
 role containing `,` or `=` fails the render, because it would encode as a
 different, still-valid map. A principal whose claims map to nothing holds **no
 role** and is denied on every route, so this map is the whole grant.
-`identity.claims.roles` names the claim those values come from (default `roles`).
+`identity.claims.roles` names the claim those values come from (default `roles`),
+and **how you spell that name decides how it is read**:
+
+| Configured name | Read as |
+|---|---|
+| `roles` — no dot | one top-level claim |
+| `https://corp.example/roles` — URI-shaped | one top-level claim, dots and all (the namespaced convention Auth0 requires, and Okta and Entra use) |
+| `resource_access.console.roles` — any other dotted name | a path, walked segment by segment (the Keycloak shape) |
+
+The reading is fixed by your configured name before any token is seen, never
+inferred from the token — so a user who can place a flat claim literally named
+`resource_access.console.roles` on themselves cannot use it to outrank the real
+nested claim and grant themselves a role.
 
 Everything else the platform refuses, it refuses at **startup** and by variable
 name — an unreachable issuer, an empty role map, a malformed pair, a role outside
@@ -497,96 +509,58 @@ false).
 Set `otlp.endpoint` (OTLP/gRPC) to ship traces, metrics, and logs from all three
 processes; `otlp.insecure=true` to export without TLS.
 
-## Notable values
+## Values
 
-| Key | Default | Meaning |
-|---|---|---|
-| `image.registry` / `image.repository` / `image.tag` | `ghcr.io` / `opensdlc-dev/managed-agent-platform` / chart `appVersion` | image coordinates |
-| `controlplane.apiKey` | `""` (required) | bootstrap management `x-api-key` |
-| `brain.modelProviders` | `[]` (required) | list of model routes (JSON array) |
-| `otlp.endpoint` | `""` | OTLP/gRPC collector; empty disables export |
-| `postgresql.enabled` | `true` | run the bundled Postgres |
-| `postgresql.password` | `""` (required when enabled) | URL-safe DB password; not auto-generated |
-| `externalDatabase.url` | `""` | DSN used when `postgresql.enabled=false` |
-| `openbao.enabled` | `true` | run the bundled OpenBao (credential cipher) |
-| `openbao.staticSealKey` / `openbao.platformToken` | `""` (required when enabled) | static-unseal key (base64, 32 bytes) and platform token; not auto-generated |
-| `externalOpenBao.address` | `""` | external OpenBao/Vault URL when `openbao.enabled=false` |
-| `localCipher.masterKey` | `""` | AES-256-GCM fallback when no OpenBao is configured |
-| `gcpKMS.keyName` | `""` | Cloud KMS CryptoKey resource name; selects the KMS cipher (exclusive with the OpenBao options and `localCipher`). Needs the Workload Identity annotations below — no key material rides the Secret |
-| `gcsObjectStorage.enabled` / `.bucket` | `false` / `""` (required when enabled) | reach Google Cloud Storage natively (#240), exclusive with `minio.enabled` and `externalObjectStorage.endpoint`. The bucket name is the whole configuration: no endpoint, no credential — authentication is Application Default Credentials, so it needs the Workload Identity annotations below. The bucket must already exist |
-| `controlplane.serviceAccount.annotations` / `brain.serviceAccount.annotations` / `executor.serviceAccount.annotations` | `{}` | annotations on each component's ServiceAccount; `iam.gke.io/gcp-service-account` is how the Google-native backends authenticate. Which ones you need depends on the backend: `gcsObjectStorage` needs **all three**, since every process reaches object storage; `gcpKMS` needs only the controlplane and executor, the two that receive the cipher env; the brain otherwise needs one only for the Cloud SQL Auth Proxy |
-| `cloudSQLProxy.enabled` / `.instanceConnectionName` | `false` / `""` (required when enabled) | run the Cloud SQL Auth Proxy as a native sidecar in all three deployments (below). The name is `PROJECT:REGION:INSTANCE`, never an address |
-| `cloudSQLProxy.image` / `.privateIP` / `.resources` | `gcr.io/cloud-sql-connectors/cloud-sql-proxy:2.24.1` / `true` / `{}` | proxy image, whether to pass `--private-ip` (what an instance with no public address needs), and its resources |
-| `identity.mode` | `""` (disabled) | `oidc` or `trusted_proxy` turns on the human lane; empty renders no `IDENTITY_*` env at all and leaves `x-api-key` the only management credential |
-| `identity.oidc.issuer` / `.audience` / `.jwksURL` | `""` | Mode `oidc`: discovery root and exact `iss`; the client id tokens are minted for; an optional key-set URL that skips discovery. Both URLs must be `https` |
-| `identity.proxy.preset` / `.audience` / `.header` / `.issuer` / `.keysURL` / `.algs` | `""` | Mode `trusted_proxy`: `gcp-iap` needs only `audience` (the backend-service audience) and refuses the rest; `custom` needs header, issuer, audience and keysURL |
-| `identity.claims.roles` / `.email` / `.name` | `""` (platform defaults `roles`/`email`/`name`) | claim names. With the bundled Casdoor `roles` must be `groups` — its `roles` claim carries objects, which map to nothing |
-| `identity.roleMap` | `{}` | claim value → `admin`/`developer`/`viewer`, as a map; the chart encodes it for the verifier. No mapped value means no role, which is denied everywhere |
-| `casdoor.enabled` | `false` | deploy the bundled Casdoor (Deployment, ClusterIP Service, a Secret for its DSN, a Secret for its seed, Ingress with the SAML/CAS deny rules, NetworkPolicy) |
-| `casdoor.adminPassword` / `casdoor.console.clientSecret` | `""` (both required when enabled) | the password the seed puts on Casdoor's own `built-in/admin` (replacing the documented default), and the console's OAuth client secret. Not auto-generated; both ride the seed Secret, and both rotate by changing these values and upgrading rather than in the admin UI |
-| `casdoor.ingress.host` | `""` (required when enabled) | the IdP's external host — also its `origin`, so `identity.oidc.issuer` must equal `https://<host>`. Must be served over HTTPS |
-| `casdoor.ingress.className` / `.annotations` / `.tls.secretName` | `""` / `{}` / `""` | IngressClass, annotations, and the TLS Secret for that host |
-| `casdoor.console.clientId` / `.redirectURIs` | `map-console` / `[]` (both required when enabled) | the seeded OIDC application's client id (which `identity.oidc.audience` must equal) and the console's callback URLs. The seed's own callback is a laptop's and is replaced at render, so an empty list would register an application every login fails against — the chart refuses it instead |
-| `casdoor.database.name` / `.dataSourceName` | `casdoor` / `""` | Casdoor's own database; the DSN is derived against the bundled Postgres, and required (keyword/value form, not a URL) when that is off |
-| `casdoor.networkPolicy.enabled` / `.from` | `true` / the `ingress-nginx` namespace | admit pod ingress only from your ingress controller. An empty `from` fails the render — to Kubernetes it would mean "all sources" |
-| `existingSecret` | `""` | reference a pre-created Secret instead of inlining |
-| `executor.sandboxImage` | `debian:stable-slim` | base image for sandbox Pods |
-| `executor.gateImage` | `""` (gate off) | per-session egress-gate sidecar image (`--target gate` build); setting it opts `limited` / vault-attached sessions into the gate — allowed_hosts enforcement plus vault-credential substitution at egress. The sidecar needs `CAP_NET_ADMIN` (no `restricted` Pod Security on the namespace) and, as a native sidecar, Kubernetes >= 1.29 (the render fails on older clusters); unset keeps the fail-closed route-flush |
-| `executor.sandboxHardening.*` | `""` (executor defaults) | containment applied to every sandbox Pod (#65): `cpuMillis`, `memoryBytes`, `ephemeralStorageBytes`, `capDrop`, `readOnlyRootfs`, `runAsUser`. Empty keeps the executor's own defaults — 2 CPUs and the `NET_RAW,SETUID,SETGID` drops. Turning one **off** is per field, not one rule: `0` for a numeric cap, `none` for `capDrop`, `false` for `readOnlyRootfs` — and for `runAsUser` only an **empty** value, because `0` is a valid uid meaning **root** and `none` fails executor startup |
-| `sandboxPlacement.nodeSelector` / `.tolerations` | `{}` / `[]` | where sandbox Pods may run: node labels they require, and taints they tolerate. Written as ordinary Kubernetes shapes (a map and a list of Toleration objects); the chart encodes them for the executor. **Not** `executor.nodeSelector`/`executor.tolerations`, which place the executor's own Deployment |
-| `sandboxImagePullSecrets` | `null` (inherits `imagePullSecrets`) | imagePullSecrets for the sandbox Pods the executor creates (#199) — same `{name: ...}` list shape as the top-level `imagePullSecrets`, which covers only the platform's own Pods. `null` inherits that top-level list (the sandbox Pods run in the release namespace, where the same Secrets answer); an explicit `[]` opts sandbox Pods out. Pod-level, so it also covers a limited session's net-setup image and a gated session's gate sidecar |
-| `sandboxRuntimeClass.name` | `""` (cluster default) | `runtimeClassName` set on every sandbox Pod — a hardened runtime such as gVisor |
-| `sandboxRuntimeClass.create` / `.handler` | `false` / `runsc` | also create the cluster-scoped `RuntimeClass` object named above |
+[`values.yaml`](./values.yaml) documents every key beside the key itself — what it
+does, whether it is REQUIRED, what it conflicts with, and what it costs to get
+wrong. It is the reference; this section is only the shape of the decisions it
+asks you to make.
 
-See [`values.yaml`](./values.yaml) for the full set.
+You pick one option from each of four groups, and the options within a group are
+**mutually exclusive** — a render that selects two fails rather than silently
+preferring one:
 
-> **gVisor:** `sandboxRuntimeClass.name` puts a `runtimeClassName` on every sandbox Pod, so
-> a cluster whose nodes run gVisor can isolate the sandbox with it — the strongest lever an
-> operator has over a container that runs untrusted, model-directed commands. Point it at a
-> `RuntimeClass` the cluster already has, or set `sandboxRuntimeClass.create=true` to have the
-> chart create one (off by default: the object is cluster-scoped, so it collides with another
-> release creating the same name, the install needs cluster-scope RBAC, and the nodes must
-> already run the handler — and, being Helm-managed, `helm uninstall` takes it away again,
-> which breaks anything else pointing at it).
+| Decision | Options |
+|---|---|
+| Database | bundled Postgres · `externalDatabase.url` · either one behind the Cloud SQL Auth Proxy (`cloudSQLProxy.*`) |
+| Object storage | bundled MinIO · any S3-compatible endpoint · `gcsObjectStorage` (Google Cloud Storage natively) |
+| Credential cipher | bundled OpenBao · an external one · `gcpKMS.keyName` · `localCipher.masterKey` |
+| Identity | off · `identity.mode=oidc` · `identity.mode=trusted_proxy` — with the bundled Casdoor as an optional IdP |
 
-<!-- Two separate notes: a bare blank line between blockquotes renders as one. -->
+The Google-native backends authenticate with **Workload Identity**, which is a
+ServiceAccount annotation and no key material: `gcsObjectStorage` needs that
+annotation on all three components, since every process reaches object storage,
+while `gcpKMS` needs only the controlplane and executor.
 
-> **Process limits:** `executor.sandboxHardening` has no pids knob because Kubernetes has no
-> per-pod one — it is the kubelet's `podPidsLimit` node setting, which you configure on the
-> nodes, not in this chart. The Docker backend does cap it per container
-> ([docs/DIVERGENCES.md](../../../docs/DIVERGENCES.md)).
+Four things worth understanding before you turn them on:
 
-<!-- Two separate notes: a bare blank line between blockquotes renders as one. -->
+- **A hardened runtime is your strongest lever.** The sandbox runs untrusted,
+  model-directed commands, so `sandboxRuntimeClass.name` — pointed at a gVisor or
+  Kata RuntimeClass — does more for isolation than any other value here.
+- **Sandbox Pods are not the executor's Pod.** `sandboxPlacement.*` places the
+  per-session sandboxes; `executor.nodeSelector`/`.tolerations` place the executor
+  Deployment. A dedicated, tainted sandbox node pool needs both, aimed at different
+  pools. The executor validates these at startup against the API server's own
+  rules, but it cannot know whether your cluster enables the alpha
+  `TaintTolerationComparisonOperators` gate — so the `Lt`/`Gt` toleration operators
+  are accepted here and refused at pod-create by any cluster (GKE included) that
+  has it off.
+- **Two limits the sandbox backends do not share.** There is no per-pod pids knob
+  in this chart, because Kubernetes has none — it is the kubelet's `podPidsLimit`,
+  set on the nodes, where the Docker backend caps pids per container.
+  `ephemeralStorageBytes` is the asymmetry pointing the other way, and Kubernetes
+  enforces it by **evicting the pod** rather than failing the write, so a cap set
+  too low ends sessions mid-call
+  ([docs/DIVERGENCES.md](../../../docs/DIVERGENCES.md),
+  [docs/self-hosted-security.md](../../../docs/self-hosted-security.md) §3).
+- **The egress gate needs a privileged sidecar.** Setting `executor.gateImage` opts
+  `limited` and vault-attached sessions into per-session egress filtering and
+  credential substitution. The sidecar needs `CAP_NET_ADMIN`, so the namespace
+  cannot be under `restricted` Pod Security, and it needs Kubernetes ≥ 1.29. Left
+  unset, those sessions keep the fail-closed route-flush instead.
 
-> **Disk limits:** `ephemeralStorageBytes` is the asymmetry pointing the other way — a
-> Kubernetes-only cap on the node-local disk a sandbox may consume (its writable layer and
-> every `emptyDir` under it), with no Docker counterpart, because whether a Docker daemon
-> enforces a writable-layer quota depends on its storage driver — some do, some refuse the
-> option outright, and some accept it and enforce nothing. Give it **bytes** —
-> `21474836480`, not `20Gi`; a Kubernetes quantity string fails executor startup. Off by
-> default, and worth understanding before turning on: Kubernetes enforces this one by
-> **evicting the pod**, not by failing the write, so a cap set too low ends sessions
-> mid-call rather than making a tool call fail — and it enforces it only on the node
-> layouts whose local ephemeral storage the kubelet can measure, so check yours before
-> treating the number as a bound
-> ([docs/self-hosted-security.md](../../../docs/self-hosted-security.md) §3).
+Nothing here is auto-generated: every secret-shaped value (`controlplane.apiKey`,
+`postgresql.password`, the OpenBao pair, the Casdoor pair) is one you supply, and
+the chart refuses to render without it rather than inventing a credential you did
+not choose.
 
-<!-- Two separate notes: a bare blank line between blockquotes renders as one. -->
-
-> **Sandbox placement:** `sandboxPlacement` is a different pod from
-> `executor.nodeSelector`/`executor.tolerations`, and the distinction is the reason it is
-> top-level rather than nested under `executor`. The `executor.*` pair places the executor
-> **Deployment**; `sandboxPlacement` places the per-session **sandbox Pods** the executor
-> creates. A dedicated, tainted sandbox node pool needs the pair together — the selector
-> reaches the pool, the tolerations get admitted onto its taint — and needs the executor
-> itself to stay somewhere else. Both are validated at executor startup, against the rules the
-> API server enforces at pod-create time — a malformed selector entry, an invalid label key or
-> value, or a toleration the pod-create validator refuses stops the process, instead of failing
-> every Provision for the life of the deployment. Two things it cannot check: whether the
-> labels exist — a well-formed selector matching no node starts fine and leaves its Pods
-> `Pending`, because only the cluster can answer that and the parse runs before there is a
-> client to ask — and whether your cluster enables the alpha
-> `TaintTolerationComparisonOperators` gate, so the `Lt`/`Gt` toleration operators are accepted
-> here and refused at pod create by any cluster (including GKE) that has it off. Their values
-> are still held to the server's rule — a canonical decimal integer fitting in 64 bits, so `5`,
-> `0` and `-5` pass and `0100`, `+5` and `-0` do not.

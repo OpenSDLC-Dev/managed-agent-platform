@@ -116,6 +116,21 @@ obligation on the operator. Those are never cut here. Restatement, duplication a
   should add that qualifier rather than delete them. Not every forward-looking comment is
   stale — and not every one is wholly true either.
 
+- **Slice 4's deployment cluster was two documents, not four.** The 174 KB → 95 KB target
+  assumed all four deployment docs restated their configuration the way `ARCHITECTURE.md`
+  restated the packages. Measured, that held for exactly two: the chart README's
+  "Notable values" table restated `values.yaml` (whose 53 keys already carry `# --`
+  helm-docs annotations, richer per key than the table), and the compose README's variable
+  table was a *third* home behind `.env.example` and `docker-compose.yml`'s own inline
+  comments. It did not hold for the two GCP documents: `deploy/gcp/README.md` names a
+  Terraform variable exactly **once** in 70 KB, and `docs/deploy-gcp.md` once in 43 KB —
+  they are procedure, decisions and recovery (state adoption, the gVisor/gate
+  incompatibility with its exact error strings, node settings), which the `.tf` files
+  cannot hold. `docs/self-hosted-security.md` is the same: a platform-enforces/you-own
+  synthesis that no single file carries. Those three were left at their size deliberately;
+  cutting them would have traded truth for brevity, which the Ground truth above forbids.
+  A byte target derived from one document's failure mode does not transfer to documents
+  with a different one.
 - `docs/DIVERGENCES.md` cites "the v1.62.0 checkout" three times as evidence, but the local
   `anthropic-sdk-go` reference checkout's newest tag is v1.61.0, which is also the `go.mod` pin.
   The substance verifies (`betaagent.go` does carry the four resolved-config types at v1.61.0),
