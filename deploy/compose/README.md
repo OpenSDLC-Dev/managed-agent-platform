@@ -53,11 +53,12 @@ Two files, and each documents its own settings in place rather than here:
   `CONTROLPLANE_API_KEY` is the only **required** one, and `CONTROLPLANE_BIND` stays
   on loopback until you replace the placeholder key.
 - **[`docker-compose.yml`](./docker-compose.yml)** — every other variable the stack
-  passes through, commented beside the service that reads it: the executor's
-  timeouts and reap intervals, sandbox containment, MinIO and OpenBao's dev
-  credentials, and the web-tool backends. Each binary's own package doc
-  (`go doc ./cmd/executor`) is the authority on what its variables mean and what
-  they default to.
+  passes through, declared on the service that reads it and grouped under comments
+  explaining the group: the executor's timeouts and reap intervals, sandbox
+  containment, MinIO and OpenBao's dev credentials, and the web-tool backends. Not
+  every variable has prose of its own there; each binary's own package doc
+  (`go doc ./cmd/executor`) is the authority on what a variable means and what it
+  defaults to, and it documents all of them.
 
 Three defaults worth knowing before you change anything: **sandbox containment is
 on** (512 processes, 2 CPUs, and the `NET_RAW`/`SETUID`/`SETGID` drops), so those
@@ -169,9 +170,12 @@ control plane reads none of the others, so uncommenting six of seven changes not
 seventh, `SSL_CERT_FILE`, is the one whose absence is not silent — leave it commented and
 the control plane cannot verify the proxy's certificate, so it exits at boot with
 `x509: certificate signed by unknown authority` and restarts forever.
-Each of the six is commented in `.env.example` beside the value it sets, including the two
-that are load-bearing rather than cosmetic: the issuer must equal the IdP's `origin` byte
-for byte, and `IDENTITY_CLAIM_ROLES` must be `groups` rather than `roles`.
+`.env.example` explains all six in one block above the commented-out assignments. Three of
+them are load-bearing rather than cosmetic: the issuer must equal the IdP's `origin` byte
+for byte; `IDENTITY_OIDC_JWKS_URL` is **not** optional here, because the control plane
+requires an https key set and so fetches through the proxy's TLS listener while the browser
+keeps plain HTTP on the issuer; and `IDENTITY_CLAIM_ROLES` must be `groups` rather than
+`roles`.
 
 Three accounts are seeded, one per role:
 

@@ -79,7 +79,7 @@ obligation on the operator. Those are never cut here. Restatement, duplication a
 | `DIVERGENCES.md` | 313 KB | 120 KB |
 | `changelog.d/` | 196 KB | 60 KB |
 | deployment docs (4) | 174 KB | 95 KB |
-| `self-hosted-security.md` | 77 KB | 62 KB |
+| `self-hosted-security.md` | 77 KB | ~~62 KB~~ retired — slice 4 grew it to 79 KB |
 | `CLAUDE.md`/`README.md`/`AGENTS.md`/`STATE.md` | 56 KB | 32 KB |
 
 ## Recording checklist
@@ -127,10 +127,13 @@ obligation on the operator. Those are never cut here. Restatement, duplication a
   they are procedure, decisions and recovery (state adoption, the gVisor/gate
   incompatibility with its exact error strings, node settings), which the `.tf` files
   cannot hold. `docs/self-hosted-security.md` is the same: a platform-enforces/you-own
-  synthesis that no single file carries. Those three were left at their size deliberately;
-  cutting them would have traded truth for brevity, which the Ground truth above forbids.
-  A byte target derived from one document's failure mode does not transfer to documents
-  with a different one.
+  synthesis that no single file carries, and it names no Terraform variable at all. The two
+  GCP documents were therefore left untouched, and cutting them would have traded truth for
+  brevity, which the Ground truth above forbids. **`self-hosted-security.md` went the other
+  way** — slice 4 grew it from 77 KB to 79 KB with the MCP-egress account it was missing and
+  the identity consequence of a grandfathered environment key, so its 62 KB target is
+  retired rather than missed. A byte target derived from one document's failure mode does
+  not transfer to documents with a different one.
 - `docs/DIVERGENCES.md` cites "the v1.62.0 checkout" three times as evidence, but the local
   `anthropic-sdk-go` reference checkout's newest tag is v1.61.0, which is also the `go.mod` pin.
   The substance verifies (`betaagent.go` does carry the four resolved-config types at v1.61.0),

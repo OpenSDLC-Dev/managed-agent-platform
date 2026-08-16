@@ -6,10 +6,10 @@
   own them. [README.md](./README.md) stops narrating delivery the changelog already holds — its
   status line says what runs today, and its roadmap lists only what is deferred, which its own
   "progress is tracked in" pointer had always promised. The chart's "Notable values" table and
-  the compose stack's variable table were third homes behind `values.yaml`,
-  `docker-compose.yml` and `.env.example`, each of which documents every key beside the key;
-  both become the shape of the decisions instead. Two gaps closed rather than trimmed: how a
-  role-claim *name* is read (a URI-shaped name is one flat key, any other dotted name a path —
-  fixed at configuration time so no token can choose the reading), and that a session's MCP
-  servers are dialled from the **executor process**, so a firewall around the sandbox does not
-  bound them.
+  the compose stack's variable table were third homes behind `values.yaml`, `docker-compose.yml`,
+  `.env.example` and the binaries' own package docs; both become the shape of the decisions
+  instead. Three gaps closed rather than trimmed: how a role-claim *name* is read (a URI-shaped
+  name is one flat key, any other dotted name a path — fixed at configuration time so no token
+  can choose the reading); that a session's MCP servers are dialled from the **executor
+  process**, so a firewall around the sandbox does not bound them; and that `runAsUser` alone
+  does not turn off with `0`, which is a valid uid meaning root.

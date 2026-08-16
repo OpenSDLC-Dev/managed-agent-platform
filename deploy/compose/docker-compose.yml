@@ -250,6 +250,11 @@ services:
       # default are opt-in because they need an image that tolerates them:
       # SANDBOX_MEMORY_BYTES (an OOM kill mid-task) and SANDBOX_READONLY_ROOTFS /
       # SANDBOX_RUN_AS_USER (a uid that can reach the workdir).
+      #
+      # SANDBOX_RUN_AS_USER is the one exception to "0 turns it off": 0 is a
+      # valid uid meaning ROOT, so that spelling gives every sandbox a root
+      # process instead of disabling the override. Only an EMPTY value leaves
+      # the image's own USER alone, and `none` fails executor startup.
       SANDBOX_PIDS_LIMIT: ${SANDBOX_PIDS_LIMIT:-}
       SANDBOX_CPU_MILLIS: ${SANDBOX_CPU_MILLIS:-}
       SANDBOX_MEMORY_BYTES: ${SANDBOX_MEMORY_BYTES:-}

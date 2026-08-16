@@ -169,6 +169,12 @@ executor:
     ephemeralStorageBytes: ""
     capDrop: ""
     readOnlyRootfs: ""
+    # -- Numeric uid every sandbox container runs as, overriding the image's own
+    # USER. This is the ONE knob the "`0` turns it off" rule above does not
+    # reach: `0` is a valid uid meaning ROOT, so setting it to turn the override
+    # off gives every sandbox a root process — the exact inversion of the
+    # intent. Only an EMPTY value leaves the image's user alone. `none` is not
+    # the escape either; it fails executor startup as "not a uid (0..N)".
     runAsUser: ""
   # -- Extra literal env entries for the executor container, rendered verbatim.
   # The seam for deployment-shaped configuration the chart has no dedicated knob

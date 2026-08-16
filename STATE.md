@@ -20,9 +20,10 @@ the target is ~719 KB, cut from restatement and staleness only.
       resources, the sandbox lifecycle — moved into Execution flow rather than going with them.
 - [x] Slice 4 — the steering layer (CLAUDE.md gains the "documents say what code cannot"
       rule and two invariants AGENTS.md held alone; README stops narrating delivery the
-      changelog owns) plus the two deployment docs that did restate their config, 236 KB →
-      213 KB. The two GCP docs and `self-hosted-security.md` name a Terraform variable once
-      each in 113 KB and were kept — see the plan's checklist. Closed two gaps instead: the
-      identity claim-name rule, and MCP egress leaving the executor, not the sandbox.
+      changelog owns) plus the two deployment docs that did restate their config: the
+      cluster went 309 KB → 290 KB. The two GCP docs name a Terraform variable once each in
+      113 KB and were kept; `self-hosted-security.md` grew instead — see the plan's
+      checklist. Three gaps closed: the identity claim-name rule, MCP egress leaving the
+      executor rather than the sandbox, and `runAsUser`, which `0` makes root, not off.
 - [ ] Slice 5 — `DIVERGENCES.md` reshaped; the 32 archived plans compressed to decisions.
 - [ ] Slice 6 — `HISTORY.md`, `docs/history/`, `docs/changelog/`.
