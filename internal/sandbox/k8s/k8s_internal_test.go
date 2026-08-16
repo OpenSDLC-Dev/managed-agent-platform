@@ -2196,9 +2196,9 @@ func TestWriteScriptDrainsEveryEarlyExit(t *testing.T) {
 	// reference toolset maps.
 	//
 	// The `mkdir -p` branch has no sibling row here on purpose: its failure is
-	// EROFS, which cannot be staged inside a host tempdir. That route is
-	// covered by the script-literal test and by the cross-backend contract
-	// row instead.
+	// EROFS, which cannot be staged inside a host tempdir. Its cover is the
+	// cross-backend contract row, which runs against a real read-only root
+	// (sandboxtest/contract.go) — nothing here asserts on that branch.
 	t.Run("TemporaryCannotBeCreated", func(t *testing.T) {
 		dir := t.TempDir()
 		tmp := gopath.Join(dir, sandbox.TempName())

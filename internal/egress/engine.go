@@ -104,8 +104,8 @@ func NewEngine(creds []Credential) *Engine {
 // intended a per-substitution span and it was never built, so an operator
 // asking "why was my credential not substituted?" has only the gate's
 // egress_request span, which carries the method and server address and no
-// verdict. Recorded here when that plan's Observability section was retired,
-// because the absence is the answer to a question this function invites.
+// verdict. Said here rather than in that plan alone, because the absence is
+// the answer to a question this function invites.
 func (e *Engine) Substitute(host string, loc Location, s string) (out string, unreachable []*Credential) {
 	var pairs []string // placeholder, secret, … for the admitted credentials
 	for i := range e.creds {
