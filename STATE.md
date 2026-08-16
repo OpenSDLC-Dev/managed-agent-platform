@@ -12,10 +12,9 @@ platform version, the chart `version` and its `appVersion` together.
 Tasks:
 - [x] Release PR (#421, merged) — section assembled (byte-for-byte from all 54 fragments),
       Chart.yaml at 0.3.0, README status line, and every dangling citation re-pointed
-- [ ] `changelog-notes` links absolutely, so the Release body does not ship 29 targets that
-      404 from the release page. Landing before the tag, because `release.yml` renders the
-      notes with the tooling at the tagged commit — the tag therefore names main's tip, not
-      #421's merge commit, and this fix's own narrative belongs to the next release
+- [x] `changelog-notes` links absolutely (#423), so the Release body does not ship 30 targets
+      that 404 from the release page. It lands before the tag, which therefore names main's
+      tip rather than #421's merge commit ([docs/RELEASING.md](./docs/RELEASING.md) step 8)
 - [ ] Tag that commit `v0.3.0` and push it — `release.yml` publishes the images, the chart
       and the worker binaries, and nothing before the tag publishes anything
 - [ ] `make changelog-archive VERSION=0.3.0`, in the next docs PR once the release run is green

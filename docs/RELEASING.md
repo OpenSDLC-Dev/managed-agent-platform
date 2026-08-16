@@ -105,8 +105,10 @@ also runs locally, where without `PUSH=1` nothing leaves the machine:
    backlog exceeds the cap). The section's relative links are rewritten
    absolute at the tag on the way out: a release body is read off the
    release page, where a repo-root-relative target resolves against that
-   page and 404s. This renders with the tooling **at the tagged commit**,
-   so a fix to it must be tagged to take effect.
+   page and 404s. A link form the rewrite cannot map fails **this step**,
+   after the tag is pushed and therefore after it is immutable, and nothing
+   earlier checks link forms — which is why changelog.d/README.md asks for
+   a glance at them while the fragment is still in review.
 3. `make release-images PUSH=1 VERSION=X.Y.Z` — one server build
    (linux/amd64 + arm64; the build stage cross-compiles rather than
    emulating the Go toolchain) pushed as

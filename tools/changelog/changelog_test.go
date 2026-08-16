@@ -1027,6 +1027,11 @@ func TestAbsolutizeLinksDestinations(t *testing.T) {
 		{name: "bracketed label still guarded", in: "[a [b] c](x.md)", wantErr: true},
 		{name: "parent-relative refused", in: "[a](../x.md)", wantErr: true},
 		{name: "unmapped bare relative refused", in: "[a](x.md)", wantErr: true},
+		// `./../x` strips to `../x` and would publish a URL holding `/../`,
+		// which resolves off the blob path and 404s with a green exit.
+		{name: "parent escape via the dot form refused", in: "[a](./../deploy/x.md)", wantErr: true},
+		{name: "parent segment mid-path refused", in: "[a](docs/../../x.md)", wantErr: true},
+		{name: "uppercase scheme is absolute", in: "[a](HTTPS://example.com/x)", want: "[a](HTTPS://example.com/x)"},
 		// An angle-bracket destination is a known gap, asserted so it stays a
 		// loud refusal rather than becoming a silent pass.
 		{name: "angle-bracket destination refused", in: "[x](<./a.md>)", wantErr: true},
@@ -1061,15 +1066,26 @@ func TestAbsolutizeLinksDestinations(t *testing.T) {
 	}
 
 	// A link-reference definition carries its target outside the `](` syntax,
-	// so it has its own branch — exercised here rather than assumed.
+	// so it has its own branch. A released body may legitimately end with one,
+	// so a mappable target is rewritten rather than refused — refusing a form
+	// the tool knows how to rewrite would fail a release for nothing.
 	for _, tc := range []struct {
-		name, in string
-		wantErr  bool
+		name, in, want string
+		wantErr        bool
 	}{
-		{name: "relative definition refused", in: "[l]: docs/x.md", wantErr: true},
+		{name: "bare docs definition mapped", in: "[l]: docs/x.md", want: "[l]: " + pre + "docs/x.md"},
+		{name: "dot-form definition mapped", in: "[l]: ./docs/x.md", want: "[l]: " + pre + "docs/x.md"},
+		{name: "definition with a title mapped", in: `[l]: docs/x.md "T"`, want: "[l]: " + pre + `docs/x.md "T"`},
 		{name: "parent-relative definition refused", in: "[l]: ../x.md", wantErr: true},
-		{name: "absolute definition untouched", in: "[l]: https://example.com/x"},
-		{name: "anchor definition untouched", in: "[l]: #top"},
+		{name: "unmapped definition refused", in: "[l]: x.md", wantErr: true},
+		{name: "absolute definition untouched", in: "[l]: https://example.com/x", want: "[l]: https://example.com/x"},
+		{name: "anchor definition untouched", in: "[l]: #top", want: "[l]: #top"},
+		// Wrapped prose is not a definition. This repository's two-space
+		// continuation indent sits inside the pattern's leading allowance, so
+		// without the end-of-line anchor an English sentence would be read as
+		// a definition whose "target" is its first word — and would fail a
+		// release that had nothing wrong with it.
+		{name: "wrapped prose is not a definition", in: "  [expired]: computed at read time, never stored.", want: "  [expired]: computed at read time, never stored."},
 	} {
 		got, err := absolutizeLinks([]string{tc.in}, []bool{false}, base, "1.2.3")
 		switch {
@@ -1077,8 +1093,8 @@ func TestAbsolutizeLinksDestinations(t *testing.T) {
 			t.Errorf("%s: absolutizeLinks(%q) = %q, want an error", tc.name, tc.in, got)
 		case !tc.wantErr && err != nil:
 			t.Errorf("%s: absolutizeLinks(%q): %v", tc.name, tc.in, err)
-		case !tc.wantErr && got[0] != tc.in:
-			t.Errorf("%s: absolutizeLinks(%q) = %q, want it unchanged", tc.name, tc.in, got[0])
+		case !tc.wantErr && got[0] != tc.want:
+			t.Errorf("%s: absolutizeLinks(%q)\n got %q\nwant %q", tc.name, tc.in, got[0], tc.want)
 		}
 	}
 }

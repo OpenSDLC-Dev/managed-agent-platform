@@ -44,12 +44,20 @@ permanently, and a released entry is frozen the moment `make changelog` folds
 it in — so an over-long fragment is a paragraph the project maintains forever.
 
 **Links:** a relative target must be written `](./…)` from the repo root, or
-`](docs/…)`. Those are the only two forms the post-release
-`make changelog-archive` can re-base when the section moves down to
-docs/changelog/; every other relative form — `](../…)` and bare `](deploy/…)`
-alike — fails the archive rather than being guessed at (`rebaseLinks` in
-tools/changelog). Absolute URLs and `#anchor` targets are always fine. The
-failure lands a release later than the mistake, so it is worth a glance now.
+`](docs/…)`. Those are the only two forms the tooling can rewrite, and it
+rewrites them twice over: `make changelog-notes` makes them absolute at the
+tag, because a release body is read off the release page where a
+repo-root-relative target 404s, and the post-release `make changelog-archive`
+re-bases them when the section moves down to docs/changelog/. Every other
+relative form — `](../…)` and bare `](deploy/…)` alike — is refused rather
+than guessed at, by `absolutizeLinks` and `rebaseLinks` respectively. Absolute
+URLs and `#anchor` targets are always fine, and a link-reference definition
+(`[label]: docs/…`) follows the same rules as an inline target.
+
+**A bad form now fails the tagged release run**, not merely a later archive:
+`changelog-notes` is the first thing `release.yml` renders after the tag is
+pushed, and the tag is immutable. It is worth a glance before the fragment
+lands — nothing before the tag checks link forms.
 
 At release time `make changelog VERSION=X.Y.Z` folds every fragment into a
 dated CHANGELOG.md section (groups in Keep-a-Changelog order, entries
