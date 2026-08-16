@@ -47,7 +47,7 @@ obligation on the operator. Those are never cut here. Restatement, duplication a
 
 1. **Fragments and facts** — the `changelog.d/` size convention (1,500-byte cap, 60–120 words
    the aim) and the recut of every unreleased fragment over it; the release blocker in the
-   `cd-build-on-runner` fragment (`CHANGELOG.md § [0.3.0]`); the sandbox-pool sizing
+   `cd-build-on-runner` fragment (`docs/changelog/0.3.0.md`); the sandbox-pool sizing
    correction in `docs/deploy-gcp.md`.
    Markdown only.
 2. **Comments worth pointing at** — the seven package-comment repairs and additions, the
@@ -193,7 +193,7 @@ was aimed at, not only of what happened.
   scaffolding turned out to be the reference targets themselves. An archived plan is a
   citation target, not prose — its size is not the measure of it.
 - **`docs/changelog/` cannot be trimmed at all without breaking a stated invariant.** Its
-  files are called "byte-frozen" by `CHANGELOG.md § [0.3.0]`'s history-split entry, and
+  files are called "byte-frozen" by `docs/changelog/0.3.0.md`'s history-split entry, and
   `make changelog-archive` is recorded as byte-reversible — which holds only while an
   archived file equals the section it was moved from. Deleting or rewriting one also breaks
   the index stubs in `CHANGELOG.md`, which only a release PR or the archive tool may edit.
@@ -219,7 +219,7 @@ was aimed at, not only of what happened.
   the content can settle it.
 - **What slice 6 did instead: made the record true.** Three copies of one provenance claim had
   been falsified by this plan's own slice 3, which edited `docs/history/2026-07.md` — the
-  archive header, the `history-split` entry now in `CHANGELOG.md § [0.3.0]`, and `HISTORY.md`'s own plan-28
+  archive header, the `history-split` entry now in `docs/changelog/0.3.0.md`, and `HISTORY.md`'s own plan-28
   record, which review caught after the first two were fixed and which is the reason to grep
   for a claim rather than fix the copies you happen to remember. A fourth statement, in
   archived plan 28's Acceptance list, is deliberately left: it records a check made at
