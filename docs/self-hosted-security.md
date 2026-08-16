@@ -602,16 +602,20 @@ never had the platform's 256-bit generation guarantee, and it now never expires
 either. Issue a replacement for each host and revoke the old key — the list
 shows them with an empty name and no expiry, which is how you find them.
 
-**Reissue them before you turn on single sign-on (§9), not after.** With
+**Reissue them before you turn on single sign-on (§9), not after.** With OIDC
 identity enabled, two different credentials arrive in the same `Authorization:
-Bearer` header, and the platform tells them apart by shape: a JWT silhouette
-(two dots) goes to the human lane, anything else stays a worker's environment
-key. Every key this platform minted is `sk-map-env01-` plus base64url and
-contains no dot at all, so it can never be misread — but a grandfathered key's
-value is one **you** chose, and one containing two dots is routed to the human
-lane and fails verification there. That is a 401: fail-closed, never an
-over-authorization, and it is what a worker that authenticated yesterday will
-start returning the moment SSO goes live. Reissuing removes the case entirely.
+Bearer` header, and the platform tells them apart by shape: a compact-JWS
+silhouette goes to the human lane, anything else stays a worker's environment
+key. The predicate is exact — **three non-empty segments separated by two dots,
+every byte of all three in the base64url alphabet** (`identity.LooksLikeJWT`) —
+so most operator-chosen values are unaffected even if they contain dots. Every
+key this platform minted is `sk-map-env01-` plus base64url and carries no dot
+at all, so it can never be misread. A grandfathered key is the residual case:
+if the value **you** chose happens to satisfy that predicate, it is routed to
+the human lane and fails verification there. That is a 401 — fail-closed, never
+an over-authorization — and it is what a worker that authenticated yesterday
+would start returning the moment SSO goes live. Reissuing removes the case
+entirely, and you cannot tell by eye which grandfathered values qualify.
 
 What you own:
 

@@ -110,9 +110,13 @@ itself when its credentials rot is not a safety net.
 | Live acceptance | `RUN_LIVE_ACCEPTANCE_TESTS=1` | the reference doc's [define-outcomes example](https://platform.claude.com/docs/en/managed-agents/define-outcomes) end-to-end against an externally running stack through the typed Go SDK — configured by `ACCEPTANCE_BASE_URL` / `ACCEPTANCE_API_KEY` / `ACCEPTANCE_MODEL` from the environment only, never `.env` (its deterministic scripted-model rehearsal runs in the default tier) |
 | Live-system evals | `RUN_EVALS=1` (`make eval`) | whole sessions: API → brain → real model → sandbox → SSE, deterministically graded. [Sixteen regression tasks](./docs/plan/02_evals-system.md) spanning the built-in toolset, permission allow/deny, single- and multi-turn, skill injection, file, repository and MCP-server mounting, and outcome grading; results land in `evals/artifacts/`. CI also runs this tier daily on a schedule ([`evals.yml`](./.github/workflows/evals.yml)), reading the same four model variables plus `EVAL_GITHUB_REPO_URL` / `EVAL_GITHUB_REPO_TOKEN` from the `evals` deployment environment's secrets — and failing rather than skipping while they are unset |
 
-Configure all of it once in a gitignored repo-root `.env`: the endpoint itself —
-`MODEL_PROTOCOL` (`anthropic`|`openai`), `MODEL_BASE_URL`, `MODEL_API_KEY`, `MODEL_ID` —
-and the per-tier names the table above spells out. The environment wins over the file.
+Configure the dotenv-loading tiers once in a gitignored repo-root `.env`: the endpoint
+itself — `MODEL_PROTOCOL` (`anthropic`|`openai`), `MODEL_BASE_URL`, `MODEL_API_KEY`,
+`MODEL_ID` — and the per-tier names the table above spells out for the model, web, MCP,
+KMS, Cloud Storage and eval tiers. The environment wins over the file. **Live acceptance is
+the exception**: `RUN_LIVE_ACCEPTANCE_TESTS` and its `ACCEPTANCE_*` settings are read from
+the process environment only and are never loaded from `.env`, because that tier drives an
+externally running stack rather than this checkout's.
 **Never commit real credentials.** The eval fixture is the one entry with a requirement of
 its own: `EVAL_GITHUB_REPO_URL` must name a **private** repository holding a
 `PASSPHRASE.txt`, and `EVAL_GITHUB_REPO_TOKEN` a fine-grained, single-repository,

@@ -565,11 +565,12 @@ Four things worth understanding before you turn them on:
   nor the `restricted` Pod Security level admits, so the namespace must enforce neither —
   and it needs Kubernetes ≥ 1.29. Left unset, those sessions keep the fail-closed
   route-flush instead.
-- **`sandboxHardening.runAsUser` does not turn off the way its neighbours do.** Every
-  other knob in that block is disabled with `0` (or `none` for `capDrop`), but `0` is a
-  valid uid meaning **root** — only an empty value leaves the image's own user alone.
-  `values.yaml` says so beside the key; it is repeated here because the general rule is
-  the thing an operator remembers.
+- **There is no single spelling for turning a `sandboxHardening` knob off.** Numeric caps
+  take `0`, `capDrop` takes `none`, `readOnlyRootfs` takes `false` or empty — and
+  `runAsUser` takes **empty only**, because `0` there is a valid uid meaning **root**.
+  That last one is the one to remember: every other wrong value fails executor startup,
+  while `runAsUser: 0` succeeds and quietly gives every sandbox a root process.
+  `values.yaml` carries the per-field table beside the keys.
 
 Nothing here is auto-generated: every secret-shaped value you must supply yourself —
 `controlplane.apiKey`, `postgresql.password`, the MinIO pair (`minio.rootUser` /
