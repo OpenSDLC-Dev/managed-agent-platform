@@ -63,12 +63,12 @@ mid-slice in something the release would half-ship.
    fragment in past-tense narrative, and step 3 froze that text, so a dead path
    in CHANGELOG.md or in an archived section records what was fixed rather than
    citing it. The pattern excludes the `X.Y.Z.md` names the archives are
-   written under, so an index or notes file landing beside them is swept rather
-   than exempted; `(glob)` is what stops `*` at a directory separator, which an
+   written under, so a README or index beside them is swept rather than
+   exempted; `(glob)` is what stops `*` at a directory separator, which an
    ordinary pathspec does not, and without it a digit-named *subdirectory* went
    too. It matches a shape and not a grammar — `[0-9]*` is one digit then
-   anything — so a file deliberately named like a version escapes the sweep as
-   well. That is the trade a name-based exclusion buys; what it cannot do is
+   anything, so `1.2.3-notes.md` matches as readily as `1.2.3.md` — and
+   anything named like a version escapes the sweep with the archives. That is the trade a name-based exclusion buys; what it cannot do is
    miss an archive, since the tool writes those from a strict `X.Y.Z` version
    and nowhere else. The v0.3.0 cut found three citations, all in one archived
    plan, and a filename-only grep saw only two.
