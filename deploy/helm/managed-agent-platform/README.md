@@ -516,20 +516,22 @@ does, whether it is REQUIRED, what it conflicts with, and what it costs to get
 wrong. It is the reference; this section is only the shape of the decisions it
 asks you to make.
 
-You pick one option from each of four groups:
+Four decisions. Only the database is mandatory; the other three have a supported
+**none**, which costs you the feature rather than the deployment:
 
-| Decision | Options | If you pick two |
-|---|---|---|
-| Database | bundled Postgres · `externalDatabase.url` | `postgresql.enabled` **wins silently** — the external URL is only read when it is false |
-| Object storage | bundled MinIO · any S3-compatible endpoint · `gcsObjectStorage` (Google Cloud Storage natively) | the render **fails**, naming the pair |
-| Credential cipher | bundled OpenBao · an external one · `gcpKMS.keyName` · `localCipher.masterKey` | the render **fails**, naming the pair |
-| Identity | off · `identity.mode=oidc` · `identity.mode=trusted_proxy` — with the bundled Casdoor as an optional IdP | not expressible: `mode` is one string |
+| Decision | Options | Choosing none | If you pick two |
+|---|---|---|---|
+| Database | bundled Postgres · `externalDatabase.url` | not an option | `postgresql.enabled` **wins silently** — the external URL is only read when it is false |
+| Object storage | bundled MinIO · any S3-compatible endpoint · `gcsObjectStorage` (Google Cloud Storage natively) | supported: no `blob-*` keys, and the features that need object storage are unavailable | the render **fails**, naming the pair |
+| Credential cipher | bundled OpenBao · an external one · `gcpKMS.keyName` · `localCipher.masterKey` | supported: no `secrets-*` keys, and vault credential storage is unavailable | the render **fails**, naming the pair |
+| Identity | `identity.mode=oidc` · `identity.mode=trusted_proxy` — with the bundled Casdoor as an optional IdP | the default: no `IDENTITY_*` env at all, and `x-api-key` stays the only management credential | not expressible: `mode` is one string |
 
-The Cloud SQL Auth Proxy (`cloudSQLProxy.*`) is not a fourth database option but a
-transport for the external one: it is **incompatible with `postgresql.enabled`**
+The Cloud SQL Auth Proxy (`cloudSQLProxy.*`) is not a third database option but a
+transport for the **external** one. It is incompatible with `postgresql.enabled`
 and the render says so, because one `database-url` cannot name both the bundled
-Postgres and the proxy's loopback socket. It also needs Kubernetes ≥ 1.29, being a
-native sidecar.
+Postgres and the proxy's loopback socket — so enabling it means
+`postgresql.enabled=false` plus a DSN through `externalDatabase.url` or
+`existingSecret`. Being a native sidecar, it also needs Kubernetes ≥ 1.29.
 
 The Google-native backends authenticate with **Workload Identity**, which is a
 ServiceAccount annotation and no key material: `gcsObjectStorage` needs that
