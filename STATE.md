@@ -4,9 +4,8 @@ What is being worked on right now, and how far along it is — nothing else. **S
 
 ## Active work
 
-**None.** v0.3.0 released 2026-08-16; its record is
-[docs/changelog/0.3.0.md](./docs/changelog/0.3.0.md), archived here (#426) as the release
-ritual's last step. [Plan 34](./docs/plan/34_doc-trim.md) (#413) archived 2026-08-16; its
-delivery record is [docs/HISTORY.md](./docs/HISTORY.md).
+**None.** v0.3.0 released 2026-08-16 — the platform, chart and `appVersion` on one number.
+Its record is [docs/changelog/0.3.0.md](./docs/changelog/0.3.0.md), archived here (#426) as
+the release ritual's last step.
 
 The backlog is GitHub issues; nothing is in flight.
