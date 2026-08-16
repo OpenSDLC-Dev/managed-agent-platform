@@ -582,6 +582,19 @@ var refDefTargetRe = regexp.MustCompile(`^ {0,3}\[[^\]]+\]:\s*(\S+)`)
 // touches.
 var linkSchemeRe = regexp.MustCompile(`^[a-z][a-z0-9+.-]*:`)
 
+// linkDestRe captures an inline link or image *destination*: `](`, the
+// optional whitespace CommonMark allows before a destination, then the
+// destination up to whitespace or the closing paren. absolutizeLinks rewrites
+// the captured span rather than the substring `](docs/`, which matters twice:
+// a destination written `]( ./x)` is seen at all (a raw-substring rewrite
+// leaves it relative and its guard never sees it), and a `](docs/` occurring
+// *inside* an already-absolute destination is consumed by that destination's
+// own match instead of being rewritten in place. Anchoring on `](` rather
+// than on a whole `[label](dest)` keeps the guard complete: a label
+// containing brackets would defeat a label-anchored pattern and let its
+// destination through unchecked.
+var linkDestRe = regexp.MustCompile(`\]\(\s*([^)\s]*)`)
+
 // rebaseLinks rewrites a section's relative link targets for a file two
 // directories below the changelog (docs/changelog/): `](./` becomes
 // `](../../`, and the bare `](docs/` form becomes `](../`. unrebaseLinks is
@@ -640,10 +653,16 @@ func repoBase(content string) string {
 // repository and 404s — which is why clampNotes already writes its own
 // trailer absolute. The two forms changelog.d/README.md permits are the two
 // mapped here; anything else is refused rather than published broken, the
-// same bargain rebaseLinks makes for docs/changelog/. Fenced lines are quoted
-// examples and are left alone. An absent base is not special-cased: with no
-// prefix to build, a relative target simply falls through to the guard and is
-// reported there.
+// same bargain rebaseLinks makes for docs/changelog/, and a relative target
+// with no [Unreleased] reference to derive a repository URL from is refused
+// for that same reason. Fenced lines are quoted examples and are left alone.
+//
+// Two limits are known, both shared with rebaseLinks and neither reachable
+// from any changelog this repository has published (zero occurrences across
+// CHANGELOG.md and both archived sections): only ``` fences are recognised,
+// so a link inside an indented block or an inline code span is treated as a
+// real one; and an image destination becomes a /blob/ URL, which renders the
+// blob page rather than the image bytes.
 func absolutizeLinks(section []string, fenced []bool, base, version string) ([]string, error) {
 	prefix := ""
 	if base != "" {
@@ -656,25 +675,38 @@ func absolutizeLinks(section []string, fenced []bool, base, version string) ([]s
 			continue
 		}
 		// A link-reference definition carries its target outside the `](`
-		// syntax, so the inline scan below cannot see it.
+		// syntax, so the destination scan below cannot see it.
 		if m := refDefTargetRe.FindStringSubmatch(l); m != nil {
 			if t := m[1]; !strings.HasPrefix(t, "#") && !linkSchemeRe.MatchString(t) {
 				return nil, fmt.Errorf("%q: a link-reference definition with a relative target cannot be made absolute — teach absolutizeLinks its mapping first", strings.TrimSpace(l))
 			}
 		}
-		r := l
-		if prefix != "" {
-			r = strings.ReplaceAll(r, "](./", "]("+prefix)
-			r = strings.ReplaceAll(r, "](docs/", "]("+prefix+"docs/")
-		}
-		for _, m := range linkTargetRe.FindAllStringSubmatch(r, -1) {
-			t := m[1]
-			if strings.HasPrefix(t, "#") || linkSchemeRe.MatchString(t) {
+		var b strings.Builder
+		last := 0
+		for _, ix := range linkDestRe.FindAllStringSubmatchIndex(l, -1) {
+			ds, de := ix[2], ix[3]
+			dest := l[ds:de]
+			// An empty destination has nothing to resolve, and `#anchor` and
+			// absolute targets already read correctly off the release page.
+			if dest == "" || strings.HasPrefix(dest, "#") || linkSchemeRe.MatchString(dest) {
 				continue
 			}
-			return nil, fmt.Errorf("%q: unhandled relative link target %q — teach absolutizeLinks its mapping first", strings.TrimSpace(l), t)
+			rel, ok := strings.CutPrefix(dest, "./")
+			if !ok {
+				if !strings.HasPrefix(dest, "docs/") {
+					return nil, fmt.Errorf("%q: unhandled relative link target %q — teach absolutizeLinks its mapping first", strings.TrimSpace(l), dest)
+				}
+				rel = dest
+			}
+			if prefix == "" {
+				return nil, fmt.Errorf("%q: relative link target %q cannot be made absolute — the changelog has no [Unreleased] link reference to derive the repository URL from", strings.TrimSpace(l), dest)
+			}
+			b.WriteString(l[last:ds])
+			b.WriteString(prefix + rel)
+			last = de
 		}
-		out[i] = r
+		b.WriteString(l[last:])
+		out[i] = b.String()
 	}
 	return out, nil
 }

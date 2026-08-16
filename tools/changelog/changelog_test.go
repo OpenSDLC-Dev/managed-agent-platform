@@ -996,6 +996,64 @@ func TestNotesRefusesUnmappedRelativeLink(t *testing.T) {
 	}
 }
 
+// The rewrite works on parsed destinations, not on the substring `](docs/`.
+// The two spellings that motivated it are the ones a substring rewrite got
+// silently wrong: `]( ./x)`, which it left relative *and* hid from the guard,
+// and a `](docs/` sitting inside an already-absolute destination, which it
+// corrupted while the guard accepted the result as absolute.
+func TestAbsolutizeLinksDestinations(t *testing.T) {
+	const base = "https://github.com/o/r"
+	const pre = base + "/blob/v1.2.3/"
+	for _, tc := range []struct {
+		name, in, want string
+		wantErr        bool
+	}{
+		{name: "dot form keeps its anchor", in: "[a](./deploy/x.md#frag)", want: "[a](" + pre + "deploy/x.md#frag)"},
+		{name: "bare docs form", in: "[a](docs/x.md)", want: "[a](" + pre + "docs/x.md)"},
+		// Only the destination span is rewritten, so the whitespace CommonMark
+		// allows before it survives — still a valid link, now an absolute one.
+		{name: "whitespace before the destination", in: "[a]( ./docs/x.md)", want: "[a]( " + pre + "docs/x.md)"},
+		{name: "mapping-like text inside an absolute destination", in: "[x](https://example.com/a](docs/b)", want: "[x](https://example.com/a](docs/b)"},
+		{name: "absolute untouched", in: "[a](https://example.com/x)", want: "[a](https://example.com/x)"},
+		{name: "mailto untouched", in: "[a](mailto:x@y.z)", want: "[a](mailto:x@y.z)"},
+		{name: "anchor untouched", in: "[a](#top)", want: "[a](#top)"},
+		{name: "empty destination untouched", in: "[a]()", want: "[a]()"},
+		{name: "title after the destination", in: `[a](docs/y.md "T")`, want: "[a](" + pre + `docs/y.md "T")`},
+		{name: "several destinations on one line", in: "[a](docs/x.md), [b](./y.md), [c](#z)", want: "[a](" + pre + "docs/x.md), [b](" + pre + "y.md), [c](#z)"},
+		{name: "bracketed label still guarded", in: "[a [b] c](x.md)", wantErr: true},
+		{name: "parent-relative refused", in: "[a](../x.md)", wantErr: true},
+		{name: "unmapped bare relative refused", in: "[a](x.md)", wantErr: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := absolutizeLinks([]string{tc.in}, []bool{false}, base, "1.2.3")
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("absolutizeLinks(%q) = %q, want an error", tc.in, got)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("absolutizeLinks(%q): %v", tc.in, err)
+			}
+			if got[0] != tc.want {
+				t.Errorf("absolutizeLinks(%q)\n got %q\nwant %q", tc.in, got[0], tc.want)
+			}
+		})
+	}
+
+	// A fenced line is a quoted example, left byte-identical.
+	fenced, err := absolutizeLinks([]string{"[a](docs/x.md)"}, []bool{true}, base, "1.2.3")
+	if err != nil || fenced[0] != "[a](docs/x.md)" {
+		t.Errorf("fenced line rewritten: %q, %v", fenced, err)
+	}
+
+	// With no [Unreleased] reference there is no repository URL to build, and
+	// a relative target must fail rather than publish unresolvable.
+	if _, err := absolutizeLinks([]string{"[a](docs/x.md)"}, []bool{false}, "", "1.2.3"); err == nil {
+		t.Error("want an error for a relative target with no base URL")
+	}
+}
+
 // --- archive: the CHANGELOG slimming subcommand (plan 28) ---
 
 // slimmed is steadyChangelog after archiving 0.2.0 — the golden document
