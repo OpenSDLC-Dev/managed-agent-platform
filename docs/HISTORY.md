@@ -51,7 +51,7 @@ new directory and in-repo citations re-pointed in the moving PR (plan
 
 ## Trimming the documentation to what code cannot say (plan 34, #413) — archived 2026-08-16, six slices delivered
 
-Tracked markdown went **2,665,735 → 2,166,628 bytes** (−19%) and is now smaller than the
+Tracked markdown went **2,665,735 → 2,166,819 bytes** (−19%) and is now smaller than the
 2,382,801 bytes of non-test Go it documents, which was the plan's stated problem. The rule
 the plan wrote into CLAUDE.md — a document earns its place by holding what code cannot — is
 also what stopped it: of nine byte targets, four were retired rather than met, three were

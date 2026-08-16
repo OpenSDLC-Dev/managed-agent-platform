@@ -1,4 +1,4 @@
-- **A falsified provenance claim, in all three places it was written** (#413) — The archive
+- **A falsified provenance claim, in all three places it was asserted** (#413) — The archive
   header of `docs/history/2026-07.md`, the unreleased `history-split` changelog fragment, and
   `docs/HISTORY.md`'s own plan-28 record each promised that the archive and `HISTORY.md` still
   recompose to the pre-split file byte-for-byte. Slice 3 of this plan had edited that archive,

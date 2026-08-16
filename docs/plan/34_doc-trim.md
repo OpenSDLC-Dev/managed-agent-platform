@@ -220,7 +220,9 @@ was aimed at, not only of what happened.
   been falsified by this plan's own slice 3, which edited `docs/history/2026-07.md` — the
   archive header, the unreleased `history-split` fragment, and `HISTORY.md`'s own plan-28
   record, which review caught after the first two were fixed and which is the reason to grep
-  for a claim rather than fix the copies you happen to remember. All three now say
+  for a claim rather than fix the copies you happen to remember. A fourth statement, in
+  archived plan 28's Acceptance list, is deliberately left: it records a check made at
+  delivery, which is true of that moment, not a property claimed to still hold. All three now say
   byte-reversibility was a property of the *move*, not a standing invariant; the fragment was
   the urgent one, since a release would have frozen the false claim into
   `CHANGELOG.md`. Two decisions the archive records as final have since been reversed by plan
