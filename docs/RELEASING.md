@@ -68,10 +68,11 @@ mid-slice in something the release would half-ship.
    ordinary pathspec does not, and without it a digit-named *subdirectory* went
    too. It matches a shape and not a grammar — `[0-9]*` is one digit then
    anything, so `1.2.3-notes.md` matches as readily as `1.2.3.md` — and
-   anything named like a version escapes the sweep with the archives. That is the trade a name-based exclusion buys; what it cannot do is
-   miss an archive, since the tool writes those from a strict `X.Y.Z` version
-   and nowhere else. The v0.3.0 cut found three citations, all in one archived
-   plan, and a filename-only grep saw only two.
+   anything named like a version escapes the sweep with the archives. That is
+   the trade a name-based exclusion buys; what it cannot do is miss an archive,
+   since the tool writes those from a strict `X.Y.Z` version and nowhere else.
+   The v0.3.0 cut found three citations, all in one archived plan, and a
+   filename-only grep saw only two.
 7. Normal PR flow — verifier plus **full dual review** (the PR touches
    `Chart.yaml`, and a release PR changes the deploy surface; it is not
    LIGHT-tier docs), CI green, threads settled, squash merge.
