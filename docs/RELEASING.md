@@ -53,14 +53,26 @@ mid-slice in something the release would half-ship.
    one is left pointing at nothing — and it may spell the fragment three ways:
    full path, bare filename, or bare slug. Grep the **slug**, which is a
    substring of all three, over the whole tree from the repo root:
-   `for f in $(git diff main...HEAD --diff-filter=D --name-only -- changelog.d); do n=${f##*/}; git grep -nF "${n%.*.md}" -- . ':!CHANGELOG.md'; done`
+   `for f in $(git diff origin/main...HEAD --diff-filter=D --name-only -- changelog.d); do n=${f##*/}; git grep -nF "${n%.*.md}" -- . ':!CHANGELOG.md' ':(glob,exclude)docs/changelog/[0-9]*.[0-9]*.[0-9]*.md'; done`
    The deleted-file list is the enumeration rather than `main:changelog.d`: it
    names exactly what this cut consumed, and cannot drift with a fragment that
-   lands on main mid-review. Retarget each hit. CHANGELOG.md is excluded
-   because a just-folded entry may name a fragment in past-tense narrative, and
-   step 3 froze that text — a dead path there records what was fixed; it is not
-   a live citation. The v0.3.0 cut found three, all in one archived plan, and a
-   filename-only grep saw only two of them.
+   lands on main mid-review. It reads `origin/main` because a stale local `main`
+   moves the merge base back and enumerates earlier cuts' fragments too — a
+   worktree branched before the last merge has exactly that. Retarget each hit.
+   The exclusions are frozen prose and only that: a folded entry may name a
+   fragment in past-tense narrative, and step 3 froze that text, so a dead path
+   in CHANGELOG.md or in an archived section records what was fixed rather than
+   citing it. The pattern excludes the `X.Y.Z.md` names the archives are
+   written under, so a README or index beside them is swept rather than
+   exempted; `(glob)` is what stops `*` at a directory separator, which an
+   ordinary pathspec does not, and without it a digit-named *subdirectory* went
+   too. It matches a shape and not a grammar — `[0-9]*` is one digit then
+   anything, so `1.2.3-notes.md` matches as readily as `1.2.3.md` — and
+   anything named like a version escapes the sweep with the archives. That is
+   the trade a name-based exclusion buys; what it cannot do is miss an archive,
+   since the tool writes those from a strict `X.Y.Z` version and nowhere else.
+   The v0.3.0 cut found three citations, all in one archived plan, and a
+   filename-only grep saw only two.
 7. Normal PR flow — verifier plus **full dual review** (the PR touches
    `Chart.yaml`, and a release PR changes the deploy surface; it is not
    LIGHT-tier docs), CI green, threads settled, squash merge.
@@ -72,7 +84,11 @@ mid-slice in something the release would half-ship.
    unless the tag reaches it. `release-tag-check` allows this: it asks that
    the changelog's newest released section is X.Y.Z and that the commit is on
    `origin/main`, not that the commit is the release PR's. This rule exists
-   because v0.3.0's notes-link fix landed after its own release PR.
+   because v0.3.0's notes-link fix landed after its own release PR. Its
+   **fragment** stays pending, though — step 3 already assembled the section —
+   so a change the advanced tag reaches ships in that release while its entry
+   folds into the next one's. Name the version inside such a fragment, so the
+   later heading cannot misdate it.
 9. After the release run is green: `make changelog-archive VERSION=X.Y.Z` in
    the next docs PR (normally the one archiving the plan that drove the
    release) — the section moves to `docs/changelog/X.Y.Z.md` behind an index
@@ -81,7 +97,9 @@ mid-slice in something the release would half-ship.
    be inline at tag time (step 2 of the trigger list renders the notes from
    it), and the stub keeps the dated heading, so existing
    `CHANGELOG.md § [X.Y.Z]` citations resolve through it — no citation
-   sweep.
+   sweep. This is also the PR that closes the release out in STATE.md: the
+   archive is the last task the release tracked, so the release leaves Active
+   work here — returning it to **None** if nothing else is in flight.
 
 ## What the tag triggers
 
