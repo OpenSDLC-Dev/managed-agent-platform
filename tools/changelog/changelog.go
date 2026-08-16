@@ -657,12 +657,18 @@ func repoBase(content string) string {
 // with no [Unreleased] reference to derive a repository URL from is refused
 // for that same reason. Fenced lines are quoted examples and are left alone.
 //
-// Two limits are known, both shared with rebaseLinks and neither reachable
-// from any changelog this repository has published (zero occurrences across
-// CHANGELOG.md and both archived sections): only ``` fences are recognised,
-// so a link inside an indented block or an inline code span is treated as a
-// real one; and an image destination becomes a /blob/ URL, which renders the
-// blob page rather than the image bytes.
+// Three limits are known, none of them reachable from any changelog this
+// repository has published, and none able to publish a wrong link silently —
+// each either fails loudly or has zero occurrences. Only ``` fences are
+// recognised, so a link inside an indented block or an inline code span is
+// rewritten as a real one (shared with rebaseLinks). An image destination
+// becomes a /blob/ URL, which renders the blob page rather than the image
+// bytes; changelog content has never contained image syntax. And an
+// angle-bracket destination — `](<./a b.md>)`, the CommonMark spelling that
+// admits spaces — is refused rather than rewritten, since the capture stops
+// at the space; a test pins that refusal so it cannot decay into a silent
+// pass. A balanced paren inside a destination is fine: the capture ends at
+// the first `)` and the untouched remainder is copied through.
 func absolutizeLinks(section []string, fenced []bool, base, version string) ([]string, error) {
 	prefix := ""
 	if base != "" {

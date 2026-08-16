@@ -66,6 +66,13 @@ mid-slice in something the release would half-ship.
    LIGHT-tier docs), CI green, threads settled, squash merge.
 8. Tag the squash-merge commit and push the tag:
    `git tag -a vX.Y.Z -m "vX.Y.Z" <merge-sha> && git push origin vX.Y.Z`.
+   **If anything the tag runs was itself fixed after that merge, tag the later
+   commit instead** — every step below executes the tooling as of the tagged
+   commit, so a fix landing after the release PR is simply not in the release
+   unless the tag reaches it. `release-tag-check` allows this: it asks that
+   the changelog's newest released section is X.Y.Z and that the commit is on
+   `origin/main`, not that the commit is the release PR's. This rule exists
+   because v0.3.0's notes-link fix landed after its own release PR.
 9. After the release run is green: `make changelog-archive VERSION=X.Y.Z` in
    the next docs PR (normally the one archiving the plan that drove the
    release) — the section moves to `docs/changelog/X.Y.Z.md` behind an index

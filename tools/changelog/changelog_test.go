@@ -1020,9 +1020,16 @@ func TestAbsolutizeLinksDestinations(t *testing.T) {
 		{name: "empty destination untouched", in: "[a]()", want: "[a]()"},
 		{name: "title after the destination", in: `[a](docs/y.md "T")`, want: "[a](" + pre + `docs/y.md "T")`},
 		{name: "several destinations on one line", in: "[a](docs/x.md), [b](./y.md), [c](#z)", want: "[a](" + pre + "docs/x.md), [b](" + pre + "y.md), [c](#z)"},
+		// Only the captured span is replaced, so a destination whose tail
+		// contains a balanced paren keeps it: the `)` ends the capture, and
+		// the remainder is copied through untouched.
+		{name: "balanced parens in the destination", in: "[x](./a_(b).md)", want: "[x](" + pre + "a_(b).md)"},
 		{name: "bracketed label still guarded", in: "[a [b] c](x.md)", wantErr: true},
 		{name: "parent-relative refused", in: "[a](../x.md)", wantErr: true},
 		{name: "unmapped bare relative refused", in: "[a](x.md)", wantErr: true},
+		// An angle-bracket destination is a known gap, asserted so it stays a
+		// loud refusal rather than becoming a silent pass.
+		{name: "angle-bracket destination refused", in: "[x](<./a.md>)", wantErr: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			got, err := absolutizeLinks([]string{tc.in}, []bool{false}, base, "1.2.3")
@@ -1051,6 +1058,28 @@ func TestAbsolutizeLinksDestinations(t *testing.T) {
 	// a relative target must fail rather than publish unresolvable.
 	if _, err := absolutizeLinks([]string{"[a](docs/x.md)"}, []bool{false}, "", "1.2.3"); err == nil {
 		t.Error("want an error for a relative target with no base URL")
+	}
+
+	// A link-reference definition carries its target outside the `](` syntax,
+	// so it has its own branch — exercised here rather than assumed.
+	for _, tc := range []struct {
+		name, in string
+		wantErr  bool
+	}{
+		{name: "relative definition refused", in: "[l]: docs/x.md", wantErr: true},
+		{name: "parent-relative definition refused", in: "[l]: ../x.md", wantErr: true},
+		{name: "absolute definition untouched", in: "[l]: https://example.com/x"},
+		{name: "anchor definition untouched", in: "[l]: #top"},
+	} {
+		got, err := absolutizeLinks([]string{tc.in}, []bool{false}, base, "1.2.3")
+		switch {
+		case tc.wantErr && err == nil:
+			t.Errorf("%s: absolutizeLinks(%q) = %q, want an error", tc.name, tc.in, got)
+		case !tc.wantErr && err != nil:
+			t.Errorf("%s: absolutizeLinks(%q): %v", tc.name, tc.in, err)
+		case !tc.wantErr && got[0] != tc.in:
+			t.Errorf("%s: absolutizeLinks(%q) = %q, want it unchanged", tc.name, tc.in, got[0])
+		}
 	}
 }
 
