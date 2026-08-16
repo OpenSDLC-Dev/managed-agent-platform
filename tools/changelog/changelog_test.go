@@ -933,6 +933,69 @@ func TestNotes(t *testing.T) {
 	}
 }
 
+// The notes become a GitHub Release body, where a repo-root-relative target
+// resolves against the release page and 404s. Both forms the fragment rules
+// permit are rewritten to an absolute blob URL at the tag — the same job
+// rebaseLinks does for docs/changelog/, which the notes path never had.
+func TestNotesAbsolutizesRelativeLinks(t *testing.T) {
+	cl := "# Changelog\n\n## [Unreleased]\n\n" + unreleasedPointer + `
+
+## [0.3.0] - 2026-08-16
+
+### Added
+
+- Bare form [security](docs/self-hosted-security.md), dot form
+  [gcp](./deploy/gcp/README.md#continuous-delivery).
+- Untouched: [abs](https://example.com/x), [anchor](#top).
+
+` + "```" + `
+- fenced [keep](./docs/keep.md)
+` + "```" + `
+
+[Unreleased]: https://github.com/o/r/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/o/r/compare/v0.2.0...v0.3.0
+`
+	clPath, _ := writeFixture(t, cl, nil)
+	out := filepath.Join(t.TempDir(), "notes.md")
+	if err := runNotes(clPath, "0.3.0", out, 0); err != nil {
+		t.Fatal(err)
+	}
+	got := readFile(t, out)
+	for _, want := range []string{
+		"](https://github.com/o/r/blob/v0.3.0/docs/self-hosted-security.md)",
+		"](https://github.com/o/r/blob/v0.3.0/deploy/gcp/README.md#continuous-delivery)",
+		"](https://example.com/x)",
+		"](#top)",
+		"- fenced [keep](./docs/keep.md)",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("notes missing %q:\n%s", want, got)
+		}
+	}
+	if strings.Contains(got, "](docs/") || strings.Contains(got, "](./deploy/") {
+		t.Errorf("a relative target survived into the release body:\n%s", got)
+	}
+}
+
+// A relative target the rewrite has no mapping for must fail the notes rather
+// than ship a link that 404s from the release page.
+func TestNotesRefusesUnmappedRelativeLink(t *testing.T) {
+	cl := "# Changelog\n\n## [Unreleased]\n\n" + unreleasedPointer + `
+
+## [0.3.0] - 2026-08-16
+
+- Parent-relative [x](../elsewhere.md).
+
+[Unreleased]: https://github.com/o/r/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/o/r/compare/v0.2.0...v0.3.0
+`
+	clPath, _ := writeFixture(t, cl, nil)
+	out := filepath.Join(t.TempDir(), "notes.md")
+	if err := runNotes(clPath, "0.3.0", out, 0); err == nil {
+		t.Error("want an error for a relative target with no absolute mapping")
+	}
+}
+
 // --- archive: the CHANGELOG slimming subcommand (plan 28) ---
 
 // slimmed is steadyChangelog after archiving 0.2.0 — the golden document

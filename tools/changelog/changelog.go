@@ -1,7 +1,9 @@
 // Package main implements the release-time changelog tool (plans 27 and 28):
 // `assemble` folds the changelog.d/ fragments — plus any legacy [Unreleased]
 // body — into a new dated section of CHANGELOG.md, `notes` extracts a
-// released section's body for GitHub Release notes, and `archive` moves a
+// released section's body for GitHub Release notes — rewriting its relative
+// links absolute at the tag, since that body is read off the release page
+// rather than from the repository — and `archive` moves a
 // released section to docs/changelog/<version>.md behind an index stub,
 // post-release — byte-reversibly: relative links are re-based for the new
 // location and the inverse rewrite must reproduce the moved section. The ritual that runs them is docs/RELEASING.md; the
@@ -507,15 +509,14 @@ func runNotes(changelogPath, version, out string, cap int) error {
 	if err != nil {
 		return err
 	}
+	base := repoBase(string(content))
+	lines := strings.Split(body, "\n")
+	abs, err := absolutizeLinks(lines, fenceStates(lines), base, version)
+	if err != nil {
+		return err
+	}
+	body = strings.Join(abs, "\n")
 	if cap > 0 && len(body) > cap {
-		refs, _ := splitTrailingRefs(strings.Split(string(content), "\n"))
-		base := ""
-		for _, r := range refs {
-			if m := unreleasedRefRe.FindStringSubmatch(r); m != nil {
-				base = m[1]
-				break
-			}
-		}
 		if base == "" {
 			return fmt.Errorf("notes exceed the %d-byte cap and no [Unreleased] link reference exists to derive the changelog link from", cap)
 		}
@@ -615,6 +616,63 @@ func rebaseLinks(section []string, fenced []bool) ([]string, error) {
 				continue
 			}
 			return nil, fmt.Errorf("%q: unhandled relative link target %q — teach rebaseLinks its mapping first", strings.TrimSpace(l), t)
+		}
+		out[i] = r
+	}
+	return out, nil
+}
+
+// repoBase returns the repository URL carried by the [Unreleased] link
+// reference, or "" when the changelog has none.
+func repoBase(content string) string {
+	refs, _ := splitTrailingRefs(strings.Split(content, "\n"))
+	for _, r := range refs {
+		if m := unreleasedRefRe.FindStringSubmatch(r); m != nil {
+			return m[1]
+		}
+	}
+	return ""
+}
+
+// absolutizeLinks rewrites a notes body's relative link targets to absolute
+// URLs at the release tag. The notes become a GitHub Release body, where a
+// repo-root-relative target resolves against the release page rather than the
+// repository and 404s — which is why clampNotes already writes its own
+// trailer absolute. The two forms changelog.d/README.md permits are the two
+// mapped here; anything else is refused rather than published broken, the
+// same bargain rebaseLinks makes for docs/changelog/. Fenced lines are quoted
+// examples and are left alone. An absent base is not special-cased: with no
+// prefix to build, a relative target simply falls through to the guard and is
+// reported there.
+func absolutizeLinks(section []string, fenced []bool, base, version string) ([]string, error) {
+	prefix := ""
+	if base != "" {
+		prefix = fmt.Sprintf("%s/blob/v%s/", base, version)
+	}
+	out := make([]string, len(section))
+	for i, l := range section {
+		if fenced[i] {
+			out[i] = l
+			continue
+		}
+		// A link-reference definition carries its target outside the `](`
+		// syntax, so the inline scan below cannot see it.
+		if m := refDefTargetRe.FindStringSubmatch(l); m != nil {
+			if t := m[1]; !strings.HasPrefix(t, "#") && !linkSchemeRe.MatchString(t) {
+				return nil, fmt.Errorf("%q: a link-reference definition with a relative target cannot be made absolute — teach absolutizeLinks its mapping first", strings.TrimSpace(l))
+			}
+		}
+		r := l
+		if prefix != "" {
+			r = strings.ReplaceAll(r, "](./", "]("+prefix)
+			r = strings.ReplaceAll(r, "](docs/", "]("+prefix+"docs/")
+		}
+		for _, m := range linkTargetRe.FindAllStringSubmatch(r, -1) {
+			t := m[1]
+			if strings.HasPrefix(t, "#") || linkSchemeRe.MatchString(t) {
+				continue
+			}
+			return nil, fmt.Errorf("%q: unhandled relative link target %q — teach absolutizeLinks its mapping first", strings.TrimSpace(l), t)
 		}
 		out[i] = r
 	}
