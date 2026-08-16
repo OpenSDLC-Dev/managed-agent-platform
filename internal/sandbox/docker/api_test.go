@@ -785,8 +785,8 @@ func TestAStragglerHoldingTheStreamIsNotTheCommand(t *testing.T) {
 // mark — and this test is the boundary of that permission.
 //
 // It used to assert the wrapper wrote *nothing*, and that was a deliberate
-// property with a stated reason: "a marker file under /tmp — the first design —
-// let a command forge a timeout it never hit, or erase one it did"
+// property with a stated reason: the first design's /tmp marker "let a command
+// forge a timeout it never hit or erase one it did"
 // (docs/history/2026-07.md). #390 reversed the first half of it, and the reversal
 // only holds because the mark is used differently than that first design used it.
 // There, the mark was the evidence. Here it is one OR-term beside two

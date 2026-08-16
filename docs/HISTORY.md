@@ -11,8 +11,13 @@ Provenance: this file began 2026-07-16 as the verbatim completed-work archive mo
 of [STATE.md](../STATE.md), and documents — [DIVERGENCES.md](./DIVERGENCES.md) above
 all — cite its section headings as evidence anchors. On 2026-07-18 the per-PR delivery
 narratives were verified section-by-section against CHANGELOG.md and pruned (git history
-is the backstop); every cited heading is preserved below or in [docs/history/](./history/), and anything still under one is
-recorded nowhere else.
+is the backstop); every heading cited then is still below or in [docs/history/](./history/).
+
+A later trimmer should know that the heading is not the unit of citation. When plan 34
+measured them, more citations quoted body prose — a number, a rejected alternative, a
+sentence of reasoning — than named the heading, so a section can keep its title and still
+lose the thing something else points at. That is why plan 34 assessed this file and cut
+nothing from it.
 
 Older periods archive by month to [docs/history/](./history/) — so far
 [2026-07](./history/2026-07.md) — with relative links re-based for the
@@ -35,6 +40,45 @@ new directory and in-repo citations re-pointed in the moving PR (plan
 | 7 | Permission policies + `requires_action` / `user.tool_confirmation` approval round-trip | ✅ Done |
 | 8 | Wire-compatible work API (`/work/poll`, `/ack`, `/heartbeat`, `/stop`) + distributable BYOC worker + `traceparent` propagated through work items | ✅ Done (PRs A, B, C1, C-list, C2a, C2b, C3, C2b-2, C-meta, C-stats — per-PR narratives in CHANGELOG.md § 0.1.0) |
 | 9 | Kubernetes sandbox provider + Helm chart (with OTLP endpoint values) | ✅ Done (K8s `sandbox.Provider` on the shared contract suite via kind, `SANDBOX_BACKEND` selection, Helm chart, compose stack) |
+
+---
+
+## Trimming the documentation to what code cannot say (plan 34, #413) — archived 2026-08-16, six slices delivered
+
+Tracked markdown went **2,665,735 → 2,162,389 bytes** (−19%) and is now smaller than the
+2,382,801 bytes of non-test Go it documents, which was the plan's stated problem. The rule
+the plan wrote into CLAUDE.md — a document earns its place by holding what code cannot — is
+also what stopped it: five of its nine byte targets were retired rather than met.
+
+**The five failed for one reason, worth recording because the plan re-learned it five
+times.** Each target was derived from a cluster's *size* without asking what the cluster
+must still hold, then defended by an instrument narrower than the thing it tested: quoted
+section titles only, `var.` occurrences only, exported symbols only, heading granularity,
+headings rather than the prose under them. Every deletion premise that broke, broke on the
+reference class nobody had measured. Two targets were beaten anyway (`ARCHITECTURE.md` by
+71 KB, `changelog.d/`), and two more were cut into without reaching their number, so the
+finding is not that documents are incompressible — it is that a byte target is a hypothesis
+about content, and only the content settles it.
+
+**One deletion was made and reverted inside its own PR.** Slice 5 cut 33 spent sections
+from the 32 archived plans after confirming no quoted title and no `#anchor` pointed at
+them. Review found plans are cited two other ways — by slice number (`plan 29 slice 3`) and
+by role ("whose DCF-rubric example the plan's acceptance replays") — and the verifier's docs
+rung had checked the same two classes and passed the same deletions. Everything was
+restored. Archived plans are not trimmable; the attempt is the evidence.
+
+**What survives is method, not bytes.** Slice 5's working shape — draft a rewrite, then set
+an adversarial skeptic on it whose only job is to find what the rewrite lost — repaired 25
+information losses and 9 accuracy defects across 24 entries, most of them inherited from the
+originals rather than introduced by the rewrite. Feeding the first batch's defect patterns
+into the second batch's prompts more than halved the losses per entry (20 across 11 entries,
+then 5 across 6).
+
+Rejected along the way: rewriting citations to permit deletion (churn against a record whose
+value is that it does not move), and editing archived records to match present behavior — a
+decision later overturned is exactly what an archive exists to hold, so reversals get dated
+notes instead. Detail, including every retired target and why, is in
+[docs/plan/34_doc-trim.md](./plan/34_doc-trim.md).
 
 ---
 
@@ -498,8 +542,8 @@ visible from the diff: the code it changes is four lines, and the reasoning it o
 is a paragraph somewhere else.
 
 **What was decided.** The docker exec wrapper keeps **no state inside the container**. The
-stated reason: "a marker file under /tmp — the first design — let a command forge a
-timeout it never hit or erase one it did." A test pinned it, asserting the wrapper's script
+stated reason: the first design's `/tmp` marker "let a command forge a timeout it never hit
+or erase one it did." A test pinned it, asserting the wrapper's script
 mentioned no writable path at all. Everything the sandbox knew about a command's deadline
 came from outside: two probes of the command's process, run against the daemon on Exec's
 own clock.
