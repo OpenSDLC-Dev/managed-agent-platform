@@ -222,14 +222,34 @@ var dotEnv = sync.OnceValue(func() map[string]string {
 	return parseDotEnv(f)
 })
 
-// repoRoot derives the checkout root from this file's compile-time path, so
-// every caller reaches the same .env regardless of its own package directory.
+// repoRoot finds the checkout root — the directory holding go.mod — so every
+// caller reaches the same .env regardless of its own package directory.
+//
+// It starts from this file's compile-time path and walks up. Under -trimpath
+// that path is module-relative rather than absolute, so the walk starts from
+// the working directory instead, which `go test` sets to the package directory.
+// Releases build with -trimpath (Makefile, Dockerfile) and tests do not, but
+// GOFLAGS carries it into either, and without this the paid tiers would look
+// unconfigured on a tree that configures them — the one failure this file's
+// opt-in contract exists to prevent.
 func repoRoot() string {
-	_, file, _, ok := runtime.Caller(0)
-	if !ok {
-		return ""
+	dir := ""
+	if _, file, _, ok := runtime.Caller(0); ok && filepath.IsAbs(file) {
+		dir = filepath.Dir(file)
+	} else if wd, err := os.Getwd(); err == nil {
+		dir = wd
 	}
-	return filepath.Join(filepath.Dir(file), "..", "..")
+	for dir != "" {
+		if _, err := os.Stat(filepath.Join(dir, "go.mod")); err == nil {
+			return dir
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			break
+		}
+		dir = parent
+	}
+	return ""
 }
 
 func parseDotEnv(r io.Reader) map[string]string {

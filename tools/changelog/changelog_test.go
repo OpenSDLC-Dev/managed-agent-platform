@@ -459,11 +459,6 @@ func TestFragmentTrailingSpacesPreserved(t *testing.T) {
 	}
 }
 
-// The size cap is enforced, not merely documented: a body exactly at the cap
-// releases, one byte over is refused with a message naming the file, the size
-// and the cap. The cap counts bytes, so a body under it in runes but over it
-// in bytes is refused too — an entry is prose, and this project's prose is
-// full of em dashes.
 // documentedCap is the cap changelog.d/README.md promises a contributor, read
 // from that file rather than from maxFragmentBytes.
 //
@@ -491,6 +486,13 @@ func documentedCap(t *testing.T) int {
 	return n
 }
 
+// TestFragmentSizeCap holds the cap to what it promises: a body exactly at it
+// releases, one byte over is refused with a message naming the file, the size
+// and the cap, and the refusal leaves CHANGELOG.md and the fragment untouched.
+// The cap counts bytes, so a body under it in runes but over it in bytes is
+// refused too — an entry is prose, and this project's prose is full of em
+// dashes. The number itself comes from the README rather than from
+// maxFragmentBytes, so the documented cap and the enforced one cannot part.
 func TestFragmentSizeCap(t *testing.T) {
 	if want := documentedCap(t); maxFragmentBytes != want {
 		t.Fatalf("maxFragmentBytes = %d but changelog.d/README.md promises contributors %d: "+

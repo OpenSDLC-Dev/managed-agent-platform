@@ -13,8 +13,9 @@ import (
 // prefixToken matches one prefix as the documents write it: a backticked
 // lowercase word ending in an underscore, e.g. `sesn_`. The trailing underscore
 // is what separates a prefix from every other backticked identifier on the same
-// line — `id.go`, `idAlphabet` and `Valid()` all sit in the ARCHITECTURE.md row
-// this test reads, and none of them is a prefix.
+// line, and a pinned line is dense with them: CLAUDE.md carries `knownPrefixes`
+// and `internal/domain/id.go` beside the prefixes themselves, and none of those
+// is one.
 var prefixToken = regexp.MustCompile("`([a-z]+)_`")
 
 // TestDocsEnumerateTheWirePrefixSet holds the documents that spell the
@@ -36,7 +37,16 @@ var prefixToken = regexp.MustCompile("`([a-z]+)_`")
 // five prefixes and then an ellipsis, and is right to; an elided list claims
 // nothing about completeness and so cannot go stale, which is why it is not
 // pinned. A document that stops enumerating the set loses its entry here rather
-// than keeping an anchor nothing satisfies.
+// than keeping an anchor nothing satisfies — which is what became of
+// ARCHITECTURE.md's own entry when plan 34 slice 3 replaced its per-file tables,
+// the id.go row among them, with a map. CLAUDE.md is the enumeration now.
+//
+// One document is enough to catch the drift. The list below carries a tripwire
+// for the case where it stops being one: an empty list makes the loop a no-op
+// and the test a pass, so it fatals instead. Nothing at runtime can reach that
+// branch — the list is a literal — and it is not trying to; it is a note to
+// whoever deletes the last entry, at the moment they do it, that removing an
+// entry and re-anchoring it are different acts.
 //
 // The comparison runs in both directions. An omission is the drift that has
 // already happened; a prefix the document adds matters just as much, because
@@ -50,10 +60,16 @@ func TestDocsEnumerateTheWirePrefixSet(t *testing.T) {
 	}
 	slices.Sort(want)
 
-	for _, doc := range []struct{ path, anchor string }{
+	docs := []struct{ path, anchor string }{
 		{"CLAUDE.md", "**ID prefixes**:"},
-		{filepath.Join("docs", "ARCHITECTURE.md"), "`ID` with wire-compatible prefixes"},
-	} {
+	}
+	if len(docs) == 0 {
+		t.Fatal("no document is pinned to knownPrefixes: the last entry was removed rather " +
+			"than re-anchored, so this check reads nothing and passes. Either a document " +
+			"still enumerates the set and belongs here, or none does and the set is " +
+			"documented nowhere — both need fixing, neither is a pass.")
+	}
+	for _, doc := range docs {
 		b, err := os.ReadFile(filepath.Join(repoRoot(), doc.path))
 		if err != nil {
 			t.Errorf("read %s: %v", doc.path, err)

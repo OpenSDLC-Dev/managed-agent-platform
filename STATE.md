@@ -10,18 +10,14 @@ the target is ~719 KB, cut from restatement and staleness only.
 
 ## Tasks
 
-- [x] **Slice 1 — fragments and facts.** The `changelog.d/` size convention (1,500-byte cap,
-      60–120 words the aim) and the recut of every fragment over the cap; the release blocker in
-      `cd-build-on-runner.fixed.md`, which `loadFragments` rejects for want of a `- ` prefix;
-      the sandbox-pool sizing correction in `docs/deploy-gcp.md`, which told operators nothing
-      reaps a pod although `internal/executor/executor.go:311` runs `reapLoop`.
-- [x] **Slice 2 — comments worth pointing at.** `worker`, `queue` and `egress` described shipped
-      code as unbuilt; `api` and `store` had comments too thin to point at; `sandbox` kept Spec
-      semantics only prose held. All rewritten from the code. `vaultresolve` needed nothing — its
-      refresh taxonomy is already stated at the decision points, so slice 3 may cut that prose
-      unconditionally. The 1,500-byte fragment cap is enforced in `loadFragments`, and two offline
-      tests pin the ID-prefix and `RUN_LIVE_*` lists — all three found real drift on first run.
-- [ ] Slice 3 — `docs/ARCHITECTURE.md`: 155 per-file rows and 27 preambles to `go doc` stubs.
+- [x] Slice 1 — `changelog.d/` 196 KB → 50 KB: a 1,500-byte cap and every fragment recut to it.
+- [x] Slice 2 — twelve comments rewritten from the code (package docs, plus field and symbol
+      comments; the plan's "seven" counted package docs alone); three documented lists pinned by
+      offline tests, each of which found real drift on its first run.
+- [x] Slice 3 — `docs/ARCHITECTURE.md` 325 KB → 39 KB: the per-file tables were 92% of the file
+      and the derivative (nearly every package carries more comment than the document spent on
+      it, most 3–10×), so they became a map. The subsystems that span packages — session
+      resources, the sandbox lifecycle — moved into Execution flow rather than going with them.
 - [ ] Slice 4 — deployment docs, `self-hosted-security.md`, and the steering layer.
 - [ ] Slice 5 — `DIVERGENCES.md` reshaped; the 32 archived plans compressed to decisions.
 - [ ] Slice 6 — `HISTORY.md`, `docs/history/`, `docs/changelog/`.

@@ -54,9 +54,11 @@ obligation on the operator. Those are never cut here. Restatement, duplication a
    no logic, no new statements — with one exception it also carries: a byte-length check in
    `loadFragments`, so the 1,500-byte cap slice 1 introduced is enforced rather than advisory.
    Without it the cap regresses silently, which is exactly how `changelog.d/` reached 196 KB.
-3. **`docs/ARCHITECTURE.md`** — delete the 155 per-file table rows and 27 package preambles,
-   package by package, each replaced by a stub pointing at `go doc`. Cross-package claims found
-   inside a row move to the execution-flow section rather than being dropped.
+3. **`docs/ARCHITECTURE.md`** — delete the per-file tables (measured: 176 rows across 30
+   subsections, 92% of the file), replaced by a map. `go doc` is the pointer only where the
+   exported surface is the story; for `api`, `brain` and `executor` the substance is unexported
+   and the pointer is the files. Cross-package claims found inside a row move to the map or the
+   execution-flow section rather than being dropped.
 4. **Deployment, security and steering** — the four deployment documents against
    `values.yaml`/`*.tf`/`docker-compose.yml`; `docs/self-hosted-security.md` (including the
    missing MCP-egress account); `README.md`, `AGENTS.md` and `CLAUDE.md`, which gains a *Writing
@@ -73,7 +75,7 @@ obligation on the operator. Those are never cut here. Restatement, duplication a
 | archived plans (32) | 545 KB | 80 KB |
 | `docs/changelog/` | 518 KB | 40 KB |
 | `HISTORY.md` + `history/` | 414 KB | 120 KB |
-| `ARCHITECTURE.md` | 325 KB | 110 KB |
+| `ARCHITECTURE.md` | 325 KB | ~~110 KB~~ 39 KB |
 | `DIVERGENCES.md` | 313 KB | 120 KB |
 | `changelog.d/` | 196 KB | 60 KB |
 | deployment docs (4) | 174 KB | 95 KB |

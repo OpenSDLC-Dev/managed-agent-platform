@@ -6,8 +6,10 @@ package executor
 // deliverables — into one gzipped tar in object storage; restore replays it
 // into a fresh sandbox so an idle-reaped session resumes where it left off
 // (#28). Both halves run under the session advisory lock: capture inside the
-// reaper's hold (slice 5's TTL tier), restore inside provisionSandbox's. In
-// this slice the engine's only trigger is its test suite.
+// reaper's hold (the TTL tier), restore inside provisionSandbox's. That tier is
+// live: reaper.go calls captureCheckpoint before it destroys an idle sandbox,
+// and without an object store configured the tier is disarmed rather than
+// destroying uncaptured state.
 
 import (
 	"archive/tar"
