@@ -62,11 +62,16 @@ mid-slice in something the release would half-ship.
    The exclusions are frozen prose and only that: a folded entry may name a
    fragment in past-tense narrative, and step 3 froze that text, so a dead path
    in CHANGELOG.md or in an archived section records what was fixed rather than
-   citing it. The pattern matches the `X.Y.Z.md` shape the archives are named
-   in, so a future non-archive file under docs/changelog/ is still swept —
-   `(glob)` is what buys that, an ordinary pathspec's `*` crossing directory
-   separators and swallowing a whole subdirectory with it. The v0.3.0 cut found
-   three, all in one archived plan, and a filename-only grep saw only two.
+   citing it. The pattern excludes the `X.Y.Z.md` names the archives are
+   written under, so an index or notes file landing beside them is swept rather
+   than exempted; `(glob)` is what stops `*` at a directory separator, which an
+   ordinary pathspec does not, and without it a digit-named *subdirectory* went
+   too. It matches a shape and not a grammar — `[0-9]*` is one digit then
+   anything — so a file deliberately named like a version escapes the sweep as
+   well. That is the trade a name-based exclusion buys; what it cannot do is
+   miss an archive, since the tool writes those from a strict `X.Y.Z` version
+   and nowhere else. The v0.3.0 cut found three citations, all in one archived
+   plan, and a filename-only grep saw only two.
 7. Normal PR flow — verifier plus **full dual review** (the PR touches
    `Chart.yaml`, and a release PR changes the deploy surface; it is not
    LIGHT-tier docs), CI green, threads settled, squash merge.
