@@ -85,9 +85,9 @@ mid-slice in something the release would half-ship.
    `origin/main`, not that the commit is the release PR's. This rule exists
    because v0.3.0's notes-link fix landed after its own release PR. Its
    **fragment** stays pending, though — step 3 already assembled the section —
-   so a change merged in this window ships in the release while its entry folds
-   into the next one's. Name the version inside the fragment, so the later
-   heading cannot misdate it.
+   so a change the advanced tag reaches ships in that release while its entry
+   folds into the next one's. Name the version inside such a fragment, so the
+   later heading cannot misdate it.
 9. After the release run is green: `make changelog-archive VERSION=X.Y.Z` in
    the next docs PR (normally the one archiving the plan that drove the
    release) — the section moves to `docs/changelog/X.Y.Z.md` behind an index
