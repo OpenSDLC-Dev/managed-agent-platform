@@ -219,7 +219,7 @@ was aimed at, not only of what happened.
   the content can settle it.
 - **What slice 6 did instead: made the record true.** Three copies of one provenance claim had
   been falsified by this plan's own slice 3, which edited `docs/history/2026-07.md` — the
-  archive header, the unreleased `history-split` fragment, and `HISTORY.md`'s own plan-28
+  archive header, the `history-split` entry now in `CHANGELOG.md § [0.3.0]`, and `HISTORY.md`'s own plan-28
   record, which review caught after the first two were fixed and which is the reason to grep
   for a claim rather than fix the copies you happen to remember. A fourth statement, in
   archived plan 28's Acceptance list, is deliberately left: it records a check made at
