@@ -1,5 +1,5 @@
 ---
-status: in-progress
+status: archived
 issue: "#413"
 ---
 
@@ -74,10 +74,10 @@ obligation on the operator. Those are never cut here. Restatement, duplication a
 | --- | ---: | ---: |
 | archived plans (32) | 545 KB | ~~80 KB~~ retired — nothing is cuttable; see below |
 | `docs/changelog/` | 518 KB | ~~40 KB~~ retired — the files are byte-frozen |
-| `HISTORY.md` + `history/` | 414 KB | 120 KB |
+| `HISTORY.md` + `history/` | 414 KB | ~~120 KB~~ retired — the record is the evidence; see below |
 | `ARCHITECTURE.md` | 325 KB | ~~110 KB~~ 39 KB |
 | `DIVERGENCES.md` | 313 KB | ~~120 KB~~ landed at 228 KB — the floor is entry count, not prose |
-| `changelog.d/` | 196 KB | 60 KB |
+| `changelog.d/` | 196 KB | 60 KB — met at slice 1 (50 KB), but a staging directory a release empties, so the figure is transient |
 | deployment docs (4) | 174 KB | ~~95 KB~~ landed at 163 KB — the GCP pair was kept |
 | `self-hosted-security.md` | 77 KB | ~~62 KB~~ retired — slice 4 grew it to 79 KB |
 | `CLAUDE.md`/`README.md`/`AGENTS.md`/`STATE.md` | 56 KB | ~~32 KB~~ landed at 50 KB |
@@ -197,3 +197,38 @@ was aimed at, not only of what happened.
   archived file equals the section it was moved from. Deleting or rewriting one also breaks
   the index stubs in `CHANGELOG.md`, which only a release PR or the archive tool may edit.
   The 40 KB target is retired rather than missed.
+- **The record is the evidence, so slice 6 cut nothing from it — the fourth target retired,
+  and the fourth to fail on measurement** (the three above, plus this one).
+  414 KB → 120 KB assumed HISTORY was padded with narrative the changelog
+  already carried. What it holds instead is what a changelog structurally cannot: measurements,
+  attacks that were tried, alternatives evaluated and rejected. Two probes proposed deletions
+  and both premises broke the same way every earlier one did — on the reference class nobody
+  measured. Here it was the *unit of citation*: the checkers matched section headings, but more
+  citations quote body prose than name a heading, so preserving every heading would still have
+  orphaned them. The precedent was already on disk — plan 03 had trimmed this file's largest
+  section by exactly the proposed method in 2026-07, and what it left behind is what survives
+  a search of the changelog. That leaves nothing to re-cut.
+- **The four retirements share one root cause, and it is worth stating once.** Each was derived
+  from a cluster's *size* without asking what the cluster must still hold, then defended by an
+  instrument narrower than the thing it tested — quoted titles only, `var.` occurrences only,
+  heading granularity. The lesson is not "documents are incompressible": of the nine targets,
+  four were retired, three were missed after real cuts (`DIVERGENCES.md`, the deployment pair,
+  the steering cluster), and two were met or beaten — `ARCHITECTURE.md` by 71 KB, and
+  `changelog.d/` at slice 1. It is that a byte target is a hypothesis about content, and only
+  the content can settle it.
+- **What slice 6 did instead: made the record true.** Three copies of one provenance claim had
+  been falsified by this plan's own slice 3, which edited `docs/history/2026-07.md` — the
+  archive header, the unreleased `history-split` fragment, and `HISTORY.md`'s own plan-28
+  record, which review caught after the first two were fixed and which is the reason to grep
+  for a claim rather than fix the copies you happen to remember. A fourth statement, in
+  archived plan 28's Acceptance list, is deliberately left: it records a check made at
+  delivery, which is true of that moment, not a property claimed to still hold. All three now say
+  byte-reversibility was a property of the *move*, not a standing invariant; the fragment was
+  the urgent one, since a release would have frozen the false claim into
+  `CHANGELOG.md`. Two decisions the archive records as final have since been reversed by plan
+  29 (MCP confirmation gating; `Attach` back on `SandboxProvider`) and now carry dated notes in
+  the existing "Since closed" style — the record is not edited to match the present, because a
+  decision that was later overturned is exactly the thing an archive exists to hold. One quoted
+  sentence had drifted across three copies and was re-pointed at the source it actually came
+  from. `HISTORY.md`'s own provenance paragraph now names the citation unit, so the next
+  trimmer starts where this slice finished rather than re-deriving it.
