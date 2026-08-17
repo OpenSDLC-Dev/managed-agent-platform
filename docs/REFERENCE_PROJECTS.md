@@ -8,6 +8,8 @@ https://github.com/anthropics/anthropic-sdk-go, ../../anthropic-sdk-go
 https://github.com/anthropics/anthropic-cli, ../../anthropic-cli
 https://github.com/anthropics/claude-code, ../../claude-code-source
 https://github.com/google/adk-go, ../../adk-go
+https://github.com/deepseek-ai/deepseek-harness, ../../deepseek-harness
+https://github.com/openai/codex, ../../codex
 ```
 
 ## Roles and authority order
@@ -37,6 +39,11 @@ snapshot with no git remote; the URL above is the upstream project it correspond
 where the snapshot was cloned from.
 `adk-go` is a source of **ideas only**, governed by CLAUDE.md design principle 2 — never a
 foundation; where it conflicts with the Anthropic model, it loses by rule.
+`deepseek-harness` (a TypeScript monorepo) and `openai/codex` (a Rust workspace under
+`codex-rs/`) are **multi-agent design references only** — child-agent lifecycle, message
+passing, waiting, concurrency limits, permission routing — added for
+[plan 35](./plan/35_multiagent-threads.md): never a wire-schema source, never copy code
+from them, and where either conflicts with the Anthropic model, the Anthropic model wins.
 
 ## Caveats
 
