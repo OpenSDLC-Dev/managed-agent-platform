@@ -387,10 +387,16 @@ reference only, never as wire sources: `claude-code-source`, `deepseek-harness`,
     worker, `agent.tool_result` from an interrupt's synthesized errors), the uses carrying
     `session_thread_id` exactly as a cross-posted ask does on cloud. Cloud sessions keep
     the documented condensed view. Store-once/filter-per-stream makes this a predicate on
-    the environment kind, not a second write. The results are in the view for the
-    reference runner's sake: its `reconcile` marks answered from what it lists, and a
-    result it cannot see makes it re-dispatch the call on every reconnect, straight into
-    the duplicate-result 400 (DIVERGENCES `:143`).
+    the environment kind, not a second write. The results are in the view for the two
+    workers' sakes, and they read different ones: the reference runner's `reconcile`
+    marks answered **only** from `user.tool_result` / `user.custom_tool_result`
+    (`betasessiontoolrunner.go:842-845`), and a worker result it cannot see makes it
+    re-dispatch the call on every reconnect, straight into the duplicate-result 400
+    (DIVERGENCES `:143`); ours counts `agent.tool_result` too (`toolexec.go:157-166`).
+    An interrupt's synthesized `agent.tool_result` is therefore invisible to the
+    reference runner — it re-executes the interrupted call on reconnect — but that is
+    today's behavior on every single-agent `self_hosted` session already (#429, filed
+    from this review); the view rule neither causes nor cures it.
     (ii) *Nothing on the work item changes.* One `tool_exec` per session, `work.data`
     `{id, type:"session"}`; a result routes to its thread by the referenced tool-use row's
     `thread_id` (decision 9), and a `session_thread_id` a worker echoes is validated,
@@ -403,10 +409,15 @@ reference only, never as wire sources: `claude-code-source`, `deepseek-harness`,
     closes its own inside the settlement transaction (`executor.go:528-546`) — but with
     concurrent threads it is as wide as a tool run. So: when a `tool_exec` item reaches
     `stopped` through the work API and the session still has unanswered
-    platform-executed calls, the same statement enqueues a fresh item of the kind the
-    API's own trigger would pick (`events.go:410-421`: `web_exec` if any is a web call,
-    else `tool_exec`). Benign for the reference runner, which stops only after `MaxIdle`
-    of `end_turn` idleness, when nothing is unanswered; it also closes today's
+    platform-executed calls, the same transaction — **under the session row lock**, so
+    it is serialized with every settlement and trigger that appends calls or enqueues,
+    rather than resting on `ON CONFLICT DO NOTHING`'s wait-and-recheck — enqueues a
+    fresh item of the kind the API's own trigger would pick, in its order
+    (`events.go:395-421`: `mcp_exec` if an MCP call is unanswered, else `web_exec` if a
+    web call is, else `tool_exec` — MCP first because only the platform's MCP driver can
+    answer it and a BYOC worker must never be handed a log with one outstanding,
+    `executor.go:501-526`). Benign for the reference runner, which stops only after
+    `MaxIdle` of `end_turn` idleness, when nothing is unanswered; it also closes today's
     theoretical window. The lease-lapse path needs nothing — `Poll` re-offers the item.
     (iv) *The worker.* It already loads the session for its liveness gate; a snapshot
     with `agent.multiagent` set switches `unansweredToolUses` to a full newest-first walk
@@ -496,8 +507,10 @@ behavior**; the last slice archives the plan and closes #53.
   reports → at most one queued parent turn); mid-turn report chains; the thread-scoped
   watermark never stamps a sibling's input; thread-scoped interrupt leaves the shared exec
   item and drops the late result; a `tool_exec` stopped through the work API with
-  platform calls still unanswered leaves a fresh queued item of the right kind, and one
-  stopped with everything answered leaves none.
+  platform calls still unanswered leaves a fresh queued item of the right kind
+  (`mcp_exec` when an MCP call is among them), one stopped with everything answered
+  leaves none, and a stop racing a settlement that appends a call under the session lock
+  never leaves the call without a live item.
 - Slice 4: a turn calling `create_agent`×3 + `wait_for_agents` produces in one commit
   three thread rows, the nine projection events, four `agent.tool_result`s, three child
   `model_turn`s and no `tool_exec`; a child's `submit_result` wakes an idle parent
@@ -606,6 +619,9 @@ In priority order — each settles a decision above:
   again — the #76 bound is kept only where its premises hold (single-agent sessions).
 - If a recording shows the reference refuses coordinators on `self_hosted`, our
   acceptance stands as a registered divergence rather than being withdrawn.
+- The reference runner re-executes an interrupted call on reconnect because the
+  interrupt's synthesized `agent.tool_result` is not a type it reads (#429) — a
+  `self_hosted` behavior that predates this plan and reaches child threads unchanged.
 
 ## End-to-end acceptance (recorded into docs/HISTORY.md by slice 4)
 
