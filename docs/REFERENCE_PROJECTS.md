@@ -40,10 +40,10 @@ where the snapshot was cloned from.
 `adk-go` is a source of **ideas only**, governed by CLAUDE.md design principle 2 — never a
 foundation; where it conflicts with the Anthropic model, it loses by rule.
 `deepseek-harness` (a TypeScript monorepo) and `openai/codex` (a Rust workspace under
-`codex-rs/`) are **multi-agent design references only** — child-agent lifecycle, message
-passing, waiting, concurrency limits, permission routing — added for
-[plan 35](./plan/35_multiagent-threads.md): never a wire-schema source, never copy code
-from them, and where either conflicts with the Anthropic model, the Anthropic model wins.
+`codex-rs/`) are **harness design references**, like `claude-code-source` — agent loop,
+tool orchestration, permission flow, child-agent lifecycle and message passing, whatever
+the work at hand needs: never a wire-schema source, never copy code from them, and where
+either conflicts with the Anthropic model, the Anthropic model wins.
 
 ## Caveats
 
