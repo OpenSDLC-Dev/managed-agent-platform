@@ -302,12 +302,15 @@ reference only, never as wire sources: `claude-code-source`, `deepseek-harness`,
    the item would deadlock a single-agent `self_hosted` session that idles today).
    Session-level idle `stop_reason` is a precedence pick over the idle threads' reasons —
    `requires_action ≻ retries_exhausted ≻ end_turn` — with `event_ids` the seq-ordered
-   union of every thread's outstanding asks. Emission: every existing `session.status_*`
-   site keeps exactly its emission — including the interrupt's idle→idle re-emit and the
-   reclaim's `rescheduled`+`running` pair on an already-running session, neither of which
-   is a value change — the fold only decides the *value* those sites write; a **child**
-   transition emits a session event only when the folded value changes (plus the
-   payload-only re-idle when the ask set shrinks or grows). Order within one transition:
+   union of every thread's outstanding asks. Emission: on a single-agent session every
+   existing `session.status_*` site keeps exactly its emission — including the
+   interrupt's idle→idle re-emit and the reclaim's `rescheduled`+`running` pair on an
+   already-running session, neither of which is a value change; on a multiagent session
+   any thread's transition, the primary's included, emits a session event only when the
+   folded value changes (so the coordinator's W1 park emits its `thread_status_idle` and
+   no session event while children run), the two value-independent emissions above
+   staying as they are, plus the payload-only re-idle when the ask set shrinks or grows.
+   Order within one transition:
    **thread event first, session event second** (facts, then rollup — the order the
    reference's budget sequence shows). A single-thread session reduces to today's
    behavior exactly; that reduction is the regression gate.
@@ -401,11 +404,10 @@ reference only, never as wire sources: `claude-code-source`, `deepseek-harness`,
    archive the session instead). W2 is a later, local change (join predicate in the
    child's settlement + a sweeper) if a recording shows the reference's coordinator
    thread stays `running` across a wait.
-8. **Caps and amplification.** 25 non-archived threads per session — a child never
-   reaches `terminated` on its own (docs: a finished child "goes `idle`, not
-   `terminated`"; it terminates only with the session, decision 12), so archiving is the
-   one way to free a slot, as the docs say — enforced by `create_agent` (`is_error` on
-   the 26th); the roster bound (1–20, distinct,
+8. **Caps and amplification.** 25 non-terminated threads per session — a finished child
+   "goes `idle`, not `terminated`" (docs), and archiving it is what terminates it
+   (decision 12), which is how archiving "frees up a thread against the 25-thread limit"
+   — enforced by `create_agent` (`is_error` on the 26th); the roster bound (1–20, distinct,
    one `self`, depth 1) enforced at agent write. Wake amplification is bounded
    structurally by `Enqueue`'s dedup and `pendingInput`; a coordinator that answers every
    report with a fresh spawn is bounded only by the instantaneous cap — recorded as a
@@ -459,11 +461,18 @@ reference only, never as wire sources: `claude-code-source`, `deepseek-harness`,
     rescheduled follow the SDK's "Emitted on the thread's own stream" doc on all four;
     the webhooks page carves the primary's end out. A session's history from before the
     slice holds none of these events (append-only; nothing backfills them) — stated in
-    the registry entry, not discovered later. Children reach `terminated` only with the
-    session — its termination, archive or delete marks every non-archived child
-    `terminated` and emits `session.thread_status_terminated` for each, cross-posted to
-    the primary as the SDK doc says (`:4430-4661`); no other path terminates a child
-    (whether `retries_exhausted` idles or terminates one is a recording item).
+    the registry entry, not discovered later. A child reaches `terminated` two ways, both
+    documented: **archiving it** ("A thread was archived or encountered a terminal error"
+    — multiagent; "either because the thread was archived or because it exhausted its
+    retries" — webhooks) sets `archived_at`, moves its status to `terminated` and emits
+    `session.thread_status_terminated`, cross-posted to the primary (SDK `:4430-4661`);
+    and the **session's own end** — termination, archive or delete — does the same for
+    every child still live. A terminal error / exhausted retries is left as a recording
+    item, because the pages disagree with the idle union: the SDK types
+    `retries_exhausted` as an *idle* stop reason (`:4471-4544`) while the webhooks page
+    files it under `thread_terminated`; until recorded, a child that exhausts retries
+    idles `retries_exhausted` (the typed shape) and its coordinator is told (decision
+    7). No other path terminates a child.
 13. **BYOC under reading (a): the worker stays thread-unaware; the platform puts what it
     must run on the view it already reads.** Four parts.
     (i) *The view rule.* For a session on a `self_hosted` environment, decision 2's
@@ -497,8 +506,10 @@ reference only, never as wire sources: `claude-code-source`, `deepseek-harness`,
     session's next turn cannot start before its last result lands, and the executor
     closes its own inside the settlement transaction (`executor.go:528-546`) — but with
     concurrent threads it is as wide as a tool run. So: when a `tool_exec` item reaches
-    `stopped` through the work API and the session still has unanswered
-    platform-executed calls, the same transaction — **under the session row lock**, so
+    `stopped` through the work API and the session still has **runnable**
+    platform-executed calls (decision 5's set — an "unanswered" test would re-arm for an
+    ask-gated sibling call and loop stop → re-arm → nothing runnable → stop), the same
+    transaction — **under the session row lock**, so
     it is serialized with every settlement and trigger that appends calls or enqueues,
     rather than resting on `ON CONFLICT DO NOTHING`'s wait-and-recheck — enqueues a
     fresh item of the kind the API's own trigger would pick, in its order
@@ -538,8 +549,9 @@ reference only, never as wire sources: `claude-code-source`, `deepseek-harness`,
     per-agent declarations). Credentials (vault bindings) stay session-wide, as
     documented.
 15. **Outcomes belong to the primary thread and grade on session quiescence.** Plan 21
-    hooks grading into every `end_turn` settlement and every claimed `model_turn`
-    (`grader.go:77-78`, the `settleEndTurn` intercept); left alone, a child's own
+    hooks grading into every `end_turn` settlement (`settleEndTurn`'s intercept,
+    `grader.go:729`, `:770`) and every claimed `model_turn` (`brain.go:238-239`); left
+    alone, a child's own
     `end_turn` — or the coordinator's W1 park — would start an evaluation cycle
     mid-delegation and harvest the shared sandbox while siblings still write to it, and
     a sibling's next claim would run the grader with the wrong agent. So the intercept
@@ -580,9 +592,10 @@ PR that introduces the behavior**; the last slice archives the plan and closes #
    caps at 100; thread events list asc by seq with the existing seq cursor; the
    primary's list/stream serve the session view, decision 2; a thread stream = the
    session broker filtered per subscriber, `event_deltas[]` honored, preview frames
-   carrying and filtered by thread; archiving the primary or a non-idle thread is
-   refused with a clear error — the reference's status code for the latter is
-   unrecorded); primary-thread status events beside the twelve `session.status_*`
+   carrying and filtered by thread; archiving an idle child sets `archived_at`, moves it
+   to `terminated` and emits `session.thread_status_terminated`; archiving the primary
+   or a non-idle thread is refused with a clear error — the reference's status code for
+   the latter is unrecorded); primary-thread status events beside the twelve `session.status_*`
    emission sites (thread first, then session); the 20 exact-sequence assertions
    updated, the 15 exact-key-set sites untouched. `ant beta:sessions:threads
    list|retrieve` and `beta:sessions:threads:events list|stream` work against a
@@ -644,10 +657,8 @@ PR that introduces the behavior**; the last slice archives the plan and closes #
   `allow` lands (and the same for the worker's scan and the re-arm predicate); two
   primary `model_turn` enqueues and two `tool_exec` enqueues dedupe under the NULL-thread
   key; wake amplification (three concurrent reports → at most one queued parent turn); a
-  report landing mid-turn chains once (by seq, with `processed_at` stamped); a turn of
-  only `create_agent`/`send_to_agent` calls enqueues the caller's next turn in the same
-  commit; a `wait_for_agents` with no child running answers `timed_out:true` and does not
-  park; a child's `end_turn` never starts an outcome evaluation and quiescence does; a
+  report landing mid-turn chains once (by seq, with `processed_at` stamped); a child's
+  `end_turn` never starts an outcome evaluation and quiescence does; a
   child's own MCP server is discovered and dialed from the child's list; the
   thread-scoped watermark never stamps a sibling's input; a thread-scoped interrupt
   leaves the shared exec item, drops the late result, and cancels an in-flight call on
@@ -659,8 +670,11 @@ PR that introduces the behavior**; the last slice archives the plan and closes #
 - Slice 4: a turn calling `create_agent`×3 + `wait_for_agents` produces in one commit
   three thread rows, the twelve projection events (four per spawn) plus the primary's
   `thread_status_idle` for the wait, four `agent.tool_result`s, three child
-  `model_turn`s and no `tool_exec`; a child's `submit_result` wakes an idle parent
-  exactly once; a client `user.tool_result` naming a delegation call is refused; a child's
+  `model_turn`s and no `tool_exec`; a turn of only `create_agent`/`send_to_agent` calls
+  enqueues the caller's next turn in the same commit; a `wait_for_agents` with no child
+  running answers `timed_out:true` and does not park; a child's `submit_result` wakes an
+  idle parent exactly once; a client `user.tool_result` naming a delegation call is
+  refused; archiving a reported child terminates it with the event; a child's
   request never contains `create_agent`; two consecutive coordinator turns produce
   identical request prefixes up to new content; the 26th spawn is an `is_error`; the
   primary cannot be archived. BYOC (decision 13): on a `self_hosted` session the
@@ -690,7 +704,9 @@ PR that introduces the behavior**; the last slice archives the plan and closes #
   derivation is unrecorded and ids are opaque). Primary-thread `running`/`idle`/
   `rescheduled` events are emitted on every session, thread event before session event
   within a transition; no primary `terminated` (INFERRED — only `_running` is asserted
-  for every session); children terminate only with the session (INFERRED). A session's
+  for every session); a child terminates on archive and on the session's end
+  (documented) and idles, not terminates, on exhausted retries (INFERRED — the typed
+  idle union against the webhooks page's wording). A session's
   pre-slice history holds no primary-thread events. Thread `stats` render the empty
   shape. Thread list default `limit` 1000; thread events list ascending, no `types[]`.
   Cross-posts are one event id on both surfaces, and the primary thread's own list/stream
@@ -714,7 +730,7 @@ PR that introduces the behavior**; the last slice archives the plan and closes #
   quiescence (INFERRED — the outcome docs predate threads). A thread-scoped interrupt
   does not stop the shared work item; the drivers cancel an in-flight call once its use
   is answered (ours). A `tool_exec` stopped through the work
-  API while platform calls remain unanswered is re-armed as a fresh item with a fresh
+  API while runnable platform calls remain is re-armed as a fresh item with a fresh
   work id (ours; a poller sees a new item where the reference's long-lived worker never
   stops early — client-visible only to a one-pass worker like ours).
 - (slice 4) The six delegation tools' schemas and result payloads (INFERRED, ours);
@@ -737,14 +753,14 @@ PR that introduces the behavior**; the last slice archives the plan and closes #
   (client-side behavior, recorded beside the #383 entry's precedent, not a wire
   mismatch). All INFERRED items cross-link #78.
 
-## Recording checklist (a real coordinator session, `ant beta:sessions:events stream` + a full events list + `GET /threads`)
+## Recording checklist (a real coordinator session, `ant beta:sessions:events stream` + a full events list + `GET /threads`, plus the agent create/update and session create responses that produced it)
 
 In priority order — each settles a decision above:
 
 1. Does `agent.tool_use{name:"create_agent"}` appear in the primary thread's event list?
    (Design C vs a filtered projection.)
 2. Does `session.thread_status_idle` appear on the primary between a spawn and the first
-   report? (W1 vs W2.)
+   report? (W1 vs W2.) And what a `wait_for_agents` issued with no child running returns.
 3. The six tool schemas as the model sees them, and whether `create_agent` returns the
    thread id; how `send_to_agent` addresses one of several copies of an agent.
 4. What the coordinator receives when a child errors, is interrupted or archived; whether
@@ -772,6 +788,15 @@ In priority order — each settles a decision above:
     `self` copy runs the session's overrides; whether an ask-gated call on one child
     blocks a sibling's allow-policy call from executing (the runnable set); whether an
     outcome evaluation can start while children run.
+12. From the create/update responses: what `agent_with_overrides` carrying `multiagent`
+    returns; whether a bare-string roster entry's `version` in the response moves when
+    the member is updated later (eager pin) or not; whether `{type:"self"}` is accepted
+    on an agent that itself has `multiagent` set (the depth-1 exemption).
+13. From a session with one child idle `end_turn` and another `requires_action`, then
+    one `retries_exhausted`: the session-level `stop_reason` each time (the rank of
+    `end_turn` below `retries_exhausted`) and whether its `event_ids` is the union across
+    threads; whether the primary emits `session.thread_status_terminated` when the
+    session terminates.
 
 Every INFERRED entry in the section above maps to one of these items; an entry with no
 item is a plan defect.
@@ -815,7 +840,9 @@ beta:sessions:events send` a task; `ant beta:sessions:events stream` shows
 child; `ant beta:sessions:threads:events stream --thread-id <child> --event-delta
 agent.message` previews the child's text; `ant beta:sessions:events send` a
 `user.interrupt` with `--event.session-thread-id <child>` interrupts only that thread;
-`ant beta:sessions:threads archive` on the idle child succeeds and on the primary 400s.
+`ant beta:sessions:threads archive` on the idle child succeeds — the child reads
+`terminated` with `archived_at` set and the stream shows its
+`session.thread_status_terminated` — and on the primary 400s.
 Then the same coordinator on a `self_hosted` environment: `ant beta:worker` (the
 reference's own thread-unaware runner) polls the `tool_exec`, sees the child's `bash`
 call on the session-level stream with its `session_thread_id`, runs it, posts a plain
