@@ -48,7 +48,7 @@ Two standing product decisions travel with these principles: **v1's first-class 
 
 ## Reference source checkouts (local)
 
-Four read-only local reference sources serve as ground truth and design reference. Their GitHub URLs, repo-relative local paths, per-project roles, authority order, and caveats live in **[docs/REFERENCE_PROJECTS.md](./docs/REFERENCE_PROJECTS.md)**. In short: `anthropic-sdk-go` is the typed wire schema, `anthropic-cli` is client-side behavior, `claude-code-source` is harness design reference only (a local source snapshot, not a git checkout — never a wire-schema source, never copy code from it), and `adk-go` is ideas only per design principle 2. In a new session, `/add-dir` them when needed.
+Six read-only local reference sources serve as ground truth and design reference. Their GitHub URLs, repo-relative local paths, per-project roles, authority order, and caveats live in **[docs/REFERENCE_PROJECTS.md](./docs/REFERENCE_PROJECTS.md)**. In short: `anthropic-sdk-go` is the typed wire schema, `anthropic-cli` is client-side behavior, `claude-code-source` is harness design reference only (a local source snapshot, not a git checkout — never a wire-schema source, never copy code from it), `adk-go` is ideas only per design principle 2, and `deepseek-harness` and `openai/codex` are harness design references like `claude-code-source` — never wire sources, never copied from. In a new session, `/add-dir` them when needed.
 
 ## Repo layout
 
