@@ -23,14 +23,18 @@ was revised in that dialogue; the others stand as proposed):
 
 1. **Bump the SDK pin to v1.63.1 as slice 0.** All managed-agents drift from the pinned
    v1.61.0 landed in one additive release (v1.62.0: advisor, budgets, `session.usage`,
-   cost/server-tool usage fields, `redacted` block, `inference_geo`); v1.63.x is bug fixes.
-   The v1.61.0 thread surface is a forward-compatible subset (routes, params, events and
-   the SSE allowlist are byte-identical, and the thread agent snapshot already carries
-   `type:"agent"`), so a bump obligates nothing — but the official docs this plan cites
-   describe the v1.62 service, and a plan citing a schema the repo refuses to read is the
-   doc/code lag the verifier exists to catch. Alternative if declined: keep v1.61.0 and
-   carry the exclusion list of decision 3 verbatim, reading post-pin surface as evidence,
-   never as contract (docs/REFERENCE_PROJECTS.md's caveat).
+   cost/server-tool usage fields, `redacted` block, `inference_geo`); v1.63.0 adds only
+   the unrelated dream `output_behavior`, and v1.63.1 changes one client behavior (the
+   tool runner posts "(no output)" for an empty text result — harmless to a server). The
+   v1.61.0 thread surface is a forward-compatible subset: routes and params are
+   identical, and the event unions grew only additive members (the thread stream gains
+   `session.usage`, the idle stop reason `budget_reached`, the thread agent an advisor
+   variant, content unions `redacted` — every one on decision 3's exclusion list; the
+   thread agent snapshot already carries `type:"agent"`), so a bump obligates nothing —
+   but the official docs this plan cites describe the v1.62 service, and a plan citing a
+   schema the repo refuses to read is the doc/code lag the verifier exists to catch.
+   Rejected: keeping v1.61.0 and carrying decision 3's exclusion list verbatim, reading
+   post-pin surface as evidence, never as contract (docs/REFERENCE_PROJECTS.md's caveat).
 2. **Coordinator sessions run on `self_hosted` environments too, under reading (a) of an
    unrecorded behavior; the worker stays thread-unaware.** The docs define cross-posting
    narrowly — a child's event reaches the session-level stream when the child "needs
@@ -59,9 +63,11 @@ was revised in that dialogue; the others stand as proposed):
    alternative they are post-pin surface the registry need not name.
 4. **Every session gets a primary thread, retroactively.** The reference's event catalog
    states that *every* session emits `session.thread_status_running` for its primary
-   thread and that `GET /threads` lists it. So threads are not purely additive: existing
-   single-agent sessions gain a listable primary thread and, going forward, primary-thread
-   status events beside the session ones. Design decision 2 keeps the retro cost to one
+   thread, and the multiagent page shows `GET /threads` listing it. So threads are not
+   purely additive: existing single-agent sessions gain a listable primary thread, and
+   transitions they make after the slice lands emit primary-thread status events beside
+   the session ones (their history before it holds none — the log is append-only, and no
+   backfill invents events). Design decision 2 keeps the retro cost to one
    SQL backfill and zero events-table changes; the alternative — thread events only in
    multiagent sessions, registered as a divergence — leaves `ant beta:sessions:threads
    list` broken on ordinary sessions and grows a permanently thread-event-less back
@@ -102,8 +108,10 @@ reference only, never as wire sources: `claude-code-source`, `deepseek-harness`,
   create/update (`betaagent.go:2620-2652`, `:2860-2900`, optional); response
   `BetaManagedAgentsMultiagent{type, agents:[{id,type:"agent",version}]}` — required on
   every agent (`betaagent.go:146`, `betasession.go:851-876`). Roster entry request union
-  (`betasession.go:924-932`): a bare agent-id string ("pins the latest version"),
-  `{type:"agent",id,version?}` (`betasession.go:178-197`), `{type:"self"}`
+  (`betasession.go:924-932`): a bare agent-id string (the roster doc says only "an agent
+  ID string"; that it pins the member's *current* version is this plan's inference, by
+  analogy with the session-create `agent` param's documented "pins the latest version",
+  `betasession.go:2075`), `{type:"agent",id,version?}` (`betasession.go:178-197`), `{type:"self"}`
   (`betaagent.go:2223-2241`). Constraints, verbatim doc comment
   (`betasession.go:884-889`): "1–20 entries … Entries must reference distinct agents
   (after resolving `self` and string forms); at most one `self`. Referenced agents must
@@ -203,8 +211,9 @@ reference only, never as wire sources: `claude-code-source`, `deepseek-harness`,
   Nothing says an allow-policy built-in call is surfaced — on cloud the platform runs it
   and no client needs to see it — and nothing says what a `self_hosted` session shows
   (scope decision 2). A child's own `agent.message`/thinking/results never reach the
-  session stream; previews are per-connection and per-thread; the session feed carries
-  only the primary's `span.model_request_end`.
+  session stream; previews are per-connection and per-thread; the plan-big cookbook
+  (§4) adds that the session feed carries only the primary thread's
+  `span.model_request_end` — a cookbook statement, not a docs-page one.
 - "All agents share the same sandbox, filesystem, and vault credentials"; context, tools,
   MCP servers, skills, model and system prompt are per agent. "A maximum of 25 concurrent
   threads is supported"; "the coordinator can call multiple copies of each agent";
@@ -219,14 +228,19 @@ reference only, never as wire sources: `claude-code-source`, `deepseek-harness`,
   during which the session had at least one thread running". `terminated` is not a
   rollup: "the primary thread's end … surfaces only as `session.status_terminated`"
   (webhooks); a child that finishes "goes `idle`, not `terminated`". Precedence when
-  threads' idle reasons disagree: `requires_action` outranks a budget pause, which
-  outranks `end_turn` (budgets) — "the actionable reason wins".
+  threads' idle reasons disagree is documented for one pair — "A pending ask outranks
+  the cap: a session with one thread waiting on `requires_action` and another paused at
+  `budget_reached` reports `requires_action` at the session level" (budgets); ranking
+  `end_turn` below both is this plan's extension of that rule.
 - "Archive only succeeds if the thread is `idle`. A thread parked on `requires_action`
   counts as idle"; archiving "frees up a thread against the 25-thread limit". Against a
   child blocked on `requires_action`, an interrupt "closes each pending tool call with an
   error tool result … and re-emits `session.thread_status_idle` with `stop_reason:
   end_turn` directly; the model is not sampled"; against an idle thread it is a no-op.
-- `user.message` and `system.message` land on the primary thread only.
+- `system.message` "lands on the primary thread only" (events-and-streaming). Nothing
+  says the same of `user.message`; that it does is inferred from the wire — its params
+  carry no thread field, so there is nowhere else it can be addressed (registered
+  INFERRED, slice 3).
 
 ## Design decisions
 
@@ -249,15 +263,26 @@ reference only, never as wire sources: `claude-code-source`, `deepseek-harness`,
    carries its `session_thread_id` in the payload and no events row is rewritten. Child
    events are stored once with `thread_id = <child>`; the session-level list/stream is
    the view `thread_id IS NULL OR type ∈ {session.thread_created, session.thread_status_*,
-   agent.thread_message_received-on-primary, cross-posted agent.*tool_use}` — store once,
-   filter per stream. A thread's own list/stream is `thread_id = $tid` (primary:
-   `IS NULL`). One event, one `sevt_` id on both surfaces — the reconnect procedure the
-   docs describe (seed seen ids from the list, skip duplicates) works unchanged.
-   Rejected: dual-writing cross-posts (two rows, two ids, breaks "one event, one id" and
-   the append-once invariant). Index `(session_id, thread_id, seq)` in the same migration.
+   agent.thread_message_received-on-primary, cross-posted agent.*tool_use, and the
+   inbound user.tool_confirmation / user.custom_tool_result answering a cross-posted
+   call}` — store once, filter per stream. **The primary thread's own list/stream is
+   that same view** (the docs say the session-level stream *is* the primary thread, so
+   `GET /threads/{primary}/events` and `GET /events` never differ); a child's is
+   `thread_id = $tid`. Rendering is per surface: `session_thread_id` is set on a child
+   event seen through the session/primary view and empty on the child's own stream
+   ("Empty on the thread's own events"), rendered from the row's `thread_id` and the
+   view being served, not stored twice. Preview frames follow the same rule: the
+   broker envelope gains the emitting thread's id, the session/primary stream previews
+   only primary-thread turns, and a child's stream only its own — a child's
+   `agent.message` deltas never reach a session-level subscriber, whose buffered event
+   would be filtered out and leave an orphaned preview. One event, one `sevt_` id on
+   both surfaces — the reconnect procedure the docs describe (seed seen ids from the
+   list, skip duplicates) works unchanged. Rejected: dual-writing cross-posts (two rows,
+   two ids, breaks "one event, one id" and the append-once invariant). Index
+   `(session_id, thread_id, seq)` in the same migration.
 3. **One session-wide `seq` under the session row lock, unchanged.** Threads claim
    concurrently and commit serially on the session row (`commitUnderLock`). This preserves
-   I1 (seq/created_at agreement), the SSE `AfterSeq` cursor, the events-list keyset
+   the seq/`created_at` agreement the log guarantees, the SSE `AfterSeq` cursor, the events-list keyset
    cursor, and — decisively — correctness of cross-thread writes: a child's settlement
    appends to the parent's log and reads the parent's outstanding calls; a per-thread lock
    would make that a lost-update race, not merely a different design. Cost: one hot row
@@ -266,28 +291,52 @@ reference only, never as wire sources: `claude-code-source`, `deepseek-harness`,
 4. **Session status is a fold over thread statuses; thread status is authoritative.**
    Written in the same transaction that moves a thread's status, under the same lock:
    `terminated` iff the primary is terminated; else `running` iff any non-archived thread
-   is running **or holds a live work item** (the disjunct closes the enqueue-to-claim
-   window a status-only fold would report as quiescence — the window deepseek-harness
-   closes with its `accepted` set); else `rescheduling` iff any thread is; else `idle`.
+   is running; else `rescheduling` iff any thread is; else `idle`. The enqueue-to-claim
+   window a status fold could misreport as quiescence (the one deepseek-harness closes
+   with its `accepted` set) is closed by today's invariant carried per thread: a thread's
+   status is set `running` in the **same transaction** that enqueues its `model_turn` —
+   a spawn, a report that wakes an idle parent, a confirmation that resumes a thread.
+   Exec items are session-keyed and never enter the fold: a `tool_exec` a BYOC worker
+   holds while a session sits idle must not keep it `running` (the reference runner
+   only releases that item after `session.status_idle{end_turn}` + `MaxIdle` — counting
+   the item would deadlock a single-agent `self_hosted` session that idles today).
    Session-level idle `stop_reason` is a precedence pick over the idle threads' reasons —
    `requires_action ≻ retries_exhausted ≻ end_turn` — with `event_ids` the seq-ordered
-   union of every thread's outstanding asks. Emit `session.status_*` only on a value
-   change, plus the existing payload-only re-idle when the ask set shrinks or grows.
-   Order within one transition: **thread event first, session event second** (facts,
-   then rollup — the order the reference's budget sequence shows). A single-thread session
-   reduces to today's behavior exactly; that reduction is the regression gate.
+   union of every thread's outstanding asks. Emission: every existing `session.status_*`
+   site keeps exactly its emission — including the interrupt's idle→idle re-emit and the
+   reclaim's `rescheduled`+`running` pair on an already-running session, neither of which
+   is a value change — the fold only decides the *value* those sites write; a **child**
+   transition emits a session event only when the folded value changes (plus the
+   payload-only re-idle when the ask set shrinks or grows). Order within one transition:
+   **thread event first, session event second** (facts, then rollup — the order the
+   reference's budget sequence shows). A single-thread session reduces to today's
+   behavior exactly; that reduction is the regression gate.
 5. **Turns are (session, thread); exec work stays per session.** `work_items.thread_id`
-   (NULL = primary); the live-dedup index becomes `(session_id, thread_id, kind)` so
-   sibling threads run `model_turn`s concurrently; the brain's `claimLiveSession` checks
-   the **thread's** status; replay, watermark (`MarkProcessedThrough`), `pendingInput` and
-   every `toolflow` unanswered-query become thread-scoped (a session-wide watermark would
-   stamp a sibling's queued input as processed — a correctness hazard, not a
-   refinement). `tool_exec`/`web_exec`/`mcp_exec` remain session-keyed: one shared
-   sandbox, one item covers every thread's backlog, execution across threads is serial
-   (what the reference's own runner does), and the executor drains **per thread** — it
-   wakes each thread's `model_turn` as that thread's calls become answered and re-scans
-   before completing the item so a call that arrived under a live item is never
-   stranded (the BYOC worker's counterpart is decision 13). Rejected: a thread id on the
+   (NULL = primary); the live-dedup index becomes `(session_id, thread_id, kind)`
+   **`NULLS NOT DISTINCT`** (Postgres 15+; every fixture and deployment runs 16) — under
+   the default NULLS DISTINCT two `(sesn, NULL, model_turn)` rows would never conflict
+   and the primary's turn and every session-keyed exec item would lose the dedup that
+   0003 exists for — with `Enqueue`'s `ON CONFLICT` arbiter changed to the same three
+   columns in the same slice, so sibling threads run `model_turn`s concurrently; the
+   brain's `claimLiveSession` checks the **thread's** status; replay, watermark
+   (`MarkProcessedThrough`), `pendingInput` and every `toolflow` unanswered-query become
+   thread-scoped (a session-wide watermark would stamp a sibling's queued input as
+   processed — a correctness hazard, not a refinement). `tool_exec`/`web_exec`/
+   `mcp_exec` remain session-keyed: one shared sandbox, one item covers every thread's
+   backlog, execution across threads is serial (what the reference's own runner does),
+   and the executor drains **per thread** — it wakes each thread's `model_turn` as that
+   thread's calls become answered and re-scans before completing the item so a call
+   that arrived under a live item is never stranded (the BYOC worker's counterpart is
+   decision 13). **The exec drivers run the runnable set, not the unanswered set.**
+   Today a turn holding an ask enqueues no exec item at all (`brain.go:651-676`) and the
+   confirmation arm enqueues only after the last ask is answered, so "unanswered" and
+   "runnable" coincide; with siblings they do not — thread B's allow-policy call would
+   enqueue the session's `tool_exec` while thread A's `bash` still awaits its human, and
+   a driver that runs everything unanswered would execute A's gated command in the
+   shared sandbox. So the set every driver drains, the re-arm of decision 13 (iii)
+   tests, and the worker's scan (which the reference runner already gets right by
+   holding ask calls until their verdict) is: unanswered **and** (`evaluated_permission`
+   ≠ `ask`, or an `allow` confirmation is recorded for it). Rejected: a thread id on the
    work item's wire shape (the reference has none; `work.data` is `{id, type:"session"}`)
    and per-thread sandboxes (documented shared; the BYOC wire could not even name one).
 6. **Delegation is a settlement feature, not a tool-execution feature.** The six tools
@@ -306,9 +355,16 @@ reference only, never as wire sources: `claude-code-source`, `deepseek-harness`,
    target; `list_agents` reads the rows; `submit_result` appends the child's
    `agent.thread_message_sent`, `session.thread_status_idle{end_turn}` and the parent's
    `agent.thread_message_received`; `send_to_parent` the same without ending the child's
-   turn. Every call is answered by an `agent.tool_result` in the same commit — **Design C:
-   the delegation `tool_use`/`tool_result` are persisted on the calling thread's own log
-   and the thread events are the client-facing projection.** Replay then needs no new arm
+   turn. Every call is answered by an `agent.tool_result` in the same commit, **and the
+   commit schedules what follows**: a turn whose calls were all settlement-executed and
+   none a wait has nothing left to wait for, so the same transaction enqueues the calling
+   thread's next `model_turn` (the executor's own rule after its last answer — today's
+   tool branch would otherwise `Complete` and enqueue nothing, leaving the thread
+   `running` with no live item and no trigger); a turn that mixed in exec-family calls
+   leaves the wake to that driver's drain, as today; a turn holding a `wait_for_agents`
+   parks per decision 7 — **Design C: the delegation `tool_use`/`tool_result` are
+   persisted on the calling thread's own log and the thread events are the client-facing
+   projection.** Replay then needs no new arm
    for the model's own view, the request prefix stays byte-stable across turns, and the
    advisor's stated exemption ("composed by the platform rather than sent by the agent")
    does not extend to agent-sent calls. Its wire risk is confined to one output — the
@@ -324,18 +380,32 @@ reference only, never as wire sources: `claude-code-source`, `deepseek-harness`,
    Reports arrive as messages; do not conclude yet.","timed_out":false}` (Codex V2's
    payload-less shape), settles the primary `idle`/`end_turn` — the session stays
    `running` under decision 4 because children run, which is the only reading under
-   which the documented aggregation sentence is load-bearing — and treats
-   `agent.thread_message_received` as **pending input** on the parent thread: idle parent
-   → enqueue its turn; mid-turn parent → the running turn's `settle` chains once; the
-   `Enqueue` dedup makes N reports cost at most one queued turn plus one chain. Replay
-   renders a received message as a user-role text block (Claude Code's task-notification
-   shape). A child's terminal condition (interrupted, archived, errored, retries
-   exhausted) is delivered the same way, as text naming the outcome and a next action.
-   Guard: the primary thread cannot be archived (400; archive the session instead). W2 is
-   a later, local change (join predicate in the child's settlement + a sweeper) if a
-   recording shows the reference's coordinator thread stays `running` across a wait.
-8. **Caps and amplification.** 25 non-archived, non-terminated threads per session,
-   enforced by `create_agent` (`is_error` on the 26th); the roster bound (1–20, distinct,
+   which the documented aggregation sentence is load-bearing — **when there is something
+   to wait for**: a wait issued with no child running and no report unread (none
+   spawned, all already reported, all idle or archived) is answered in-commit with
+   `{"message":"No agents are running and no reports are pending.","timed_out":true}`
+   and the turn continues (next `model_turn` enqueued, no park) — Codex's wait returns
+   at once on pending activity and times out otherwise, and a park nothing can wake is
+   the wedge W1 exists to avoid. A report — `agent.thread_message_received` on the parent
+   thread — is **pending input** for the parent, detected by seq, not by `processed_at`:
+   an `agent.*` event is stamped at write (`events/log.go:189-194`) and the field is
+   wire-required, so `pendingInput`'s `processed_at IS NULL` predicate can never see it;
+   instead the child's settlement, under the session lock, enqueues an idle parent's turn
+   directly (setting it `running` in the same transaction, decision 4), and a running
+   parent's `settle` chains once iff a report's seq exceeds the head its turn replayed to
+   (`settleEndTurn` already carries that head). The `Enqueue` dedup makes N reports cost
+   at most one queued turn plus one chain. Replay renders a received message as a
+   user-role text block (Claude Code's task-notification shape). A child's ending
+   condition (interrupted, archived, errored) is delivered the same way, as text naming
+   the outcome and a next action. Guard: the primary thread cannot be archived (400;
+   archive the session instead). W2 is a later, local change (join predicate in the
+   child's settlement + a sweeper) if a recording shows the reference's coordinator
+   thread stays `running` across a wait.
+8. **Caps and amplification.** 25 non-archived threads per session — a child never
+   reaches `terminated` on its own (docs: a finished child "goes `idle`, not
+   `terminated`"; it terminates only with the session, decision 12), so archiving is the
+   one way to free a slot, as the docs say — enforced by `create_agent` (`is_error` on
+   the 26th); the roster bound (1–20, distinct,
    one `self`, depth 1) enforced at agent write. Wake amplification is bounded
    structurally by `Enqueue`'s dedup and `pendingInput`; a coordinator that answers every
    report with a fresh spawn is bounded only by the instantaneous cap — recorded as a
@@ -349,12 +419,20 @@ reference only, never as wire sources: `claude-code-source`, `deepseek-harness`,
    inbound `session_thread_id` is accepted and must match — a mismatch is a 400.
    `user.message`, `user.define_outcome` and `system.message` carry no thread id and
    always address the primary thread.
-   `user.interrupt` without a thread id interrupts every non-archived thread and cancels
-   the session's `model_turn` items; with one it interrupts that thread only (`CancelThread`
-   on its `model_turn`), synthesizes its error results, re-idles it `end_turn`, and never
-   stops the shared exec item — the executor's result append checks answered-ness under
-   the lock first (plan 16's one-answer invariant), so a late sandbox result for an
-   already-interrupted call is dropped.
+   `user.interrupt` without a thread id interrupts every non-archived thread and keeps
+   today's `CancelSession` exactly — every live item of every kind, so the in-flight
+   sandbox command is aborted through the executor's lease keeper as now; with one it
+   interrupts that thread only (`CancelThread` on its `model_turn`), synthesizes its
+   error results, re-idles it `end_turn`, and never stops the shared exec item — a
+   sibling's calls ride on it. What it does to the interrupted thread's *in-flight*
+   command: the exec drivers treat an answered call as cancelled — before starting one
+   (the answered-check under the lock that plan 16's one-answer invariant already
+   requires; a late result for it is dropped) and, for the executor, mid-run: its
+   per-item lease keeper checks the running call's answered-ness on each beat and
+   cancels the run context, so an interrupted `sleep 3600` costs one beat, not
+   `toolset.MaxTimeout`, and the sibling calls queued behind it in the serial runner
+   are not held hostage. Our BYOC worker does the same on its heartbeat; the reference
+   runner cannot be told and runs the command to completion (known consequence).
 10. **Roster resolution and snapshotting is a foundational slice of its own.** Agent
     create/update resolve the roster inside the write transaction: bare strings and
     versionless references pin the member's current version eagerly (the response
@@ -362,11 +440,14 @@ reference only, never as wire sources: `claude-code-source`, `deepseek-harness`,
     resolves to the coordinator's own id and the version the write is about to produce;
     C-1…C-7 checked against the merged spec with `FOR SHARE` on the referenced agents.
     Session create builds `session.agent.multiagent.agents[]` as full
-    `SessionThreadAgent` snapshots by fetching each member's pinned version — computed at
-    the API boundary and stored in `sessions.resolved_agent`, leaving
-    `domain.AgentSpec.Multiagent` untyped (option (a); splitting the type is the bigger
-    diff for no runtime gain). `multiagent` inside `agent_with_overrides` becomes an
-    explicit 400 instead of today's silent drop.
+    `SessionThreadAgent` snapshots by fetching each member's pinned version — **except
+    the `self` member, whose snapshot is the coordinator's own resolved spec for this
+    session, overrides applied, minus `multiagent`** (docs: overrides "apply to the
+    coordinator and its `self` copies"; a `self` copy built from the stored version would
+    run the un-overridden system prompt) — computed at the API boundary and stored in
+    `sessions.resolved_agent`, leaving `domain.AgentSpec.Multiagent` untyped (option
+    (a); splitting the type is the bigger diff for no runtime gain). `multiagent` inside
+    `agent_with_overrides` becomes an explicit 400 instead of today's silent drop.
 11. **Skills: materialize the union of the roster's skills once per session.** The roster
     is snapshotted at session create, so the union is known before the sandbox exists;
     the shared filesystem is documented, and each thread's system prompt still injects
@@ -376,9 +457,13 @@ reference only, never as wire sources: `claude-code-source`, `deepseek-harness`,
 12. **Primary-thread events on every session, mirroring `running`/`idle`/`rescheduled`;
     never `terminated`.** The catalog asserts `_running` for every session; idle and
     rescheduled follow the SDK's "Emitted on the thread's own stream" doc on all four;
-    the webhooks page carves the primary's end out. Sessions written before this plan
-    can never gain these events (append-only) — stated in the registry entry, not
-    discovered later.
+    the webhooks page carves the primary's end out. A session's history from before the
+    slice holds none of these events (append-only; nothing backfills them) — stated in
+    the registry entry, not discovered later. Children reach `terminated` only with the
+    session — its termination, archive or delete marks every non-archived child
+    `terminated` and emits `session.thread_status_terminated` for each, cross-posted to
+    the primary as the SDK doc says (`:4430-4661`); no other path terminates a child
+    (whether `retries_exhausted` idles or terminates one is a recording item).
 13. **BYOC under reading (a): the worker stays thread-unaware; the platform puts what it
     must run on the view it already reads.** Four parts.
     (i) *The view rule.* For a session on a `self_hosted` environment, decision 2's
@@ -387,7 +472,11 @@ reference only, never as wire sources: `claude-code-source`, `deepseek-harness`,
     worker, `agent.tool_result` from an interrupt's synthesized errors), the uses carrying
     `session_thread_id` exactly as a cross-posted ask does on cloud. Cloud sessions keep
     the documented condensed view. Store-once/filter-per-stream makes this a predicate on
-    the environment kind, not a second write. The results are in the view for the two
+    the environment kind, not a second write. The `user.tool_confirmation` that releases
+    a child's ask-gated call is in the session view on every session (decision 2): the
+    reference runner parks an ask call until it sees the verdict on the session stream
+    or list (`betasessiontoolrunner.go:750-751`, `:834-838`), and a verdict stored only
+    on the child's log would leave the call suspended forever. The results are in the view for the two
     workers' sakes, and they read different ones: the reference runner's `reconcile`
     marks answered **only** from `user.tool_result` / `user.custom_tool_result`
     (`betasessiontoolrunner.go:842-845`), and a worker result it cannot see makes it
@@ -433,48 +522,88 @@ reference only, never as wire sources: `claude-code-source`, `deepseek-harness`,
     condition — the group count is unknowable without listing threads); adopting the
     reference's long-lived tail (a rewrite of `internal/worker` to close a window a few
     control-plane lines close).
+14. **MCP is per thread's agent.** Each roster member declares its own `mcp_servers`
+    (`SessionThreadAgent`), but today discovery and dialing read the coordinator's
+    `sessions.resolved_agent.mcp_servers` (`brain.go:252-264`, `executor/mcpwork.go:137`,
+    `mcpexec.go`'s `declared[server]`) and the catalog is keyed `(session_id,
+    server_name)` (`0023_mcp_catalogs.sql:43`) — a child declaring a server only it has
+    would loop suspend→discover-nothing→resume, and two members naming different servers
+    alike would collide on the key. So: the brain's `declaredMCPServers` reads the
+    **thread's** agent snapshot (the thread row's `agent`); the `mcp_exec` item stays
+    session-keyed and its driver resolves each `agent.mcp_tool_use` to its thread by the
+    row's `thread_id`, discovering and dialing from that thread's declared list; the
+    catalog key becomes `(session_id, thread_id, server_name)` in slice 3's migration
+    (`thread_id` NULL for the primary — the same `NULLS NOT DISTINCT` care as the work
+    index; a server two threads both declare is discovered once per thread, the price of
+    per-agent declarations). Credentials (vault bindings) stay session-wide, as
+    documented.
+15. **Outcomes belong to the primary thread and grade on session quiescence.** Plan 21
+    hooks grading into every `end_turn` settlement and every claimed `model_turn`
+    (`grader.go:77-78`, the `settleEndTurn` intercept); left alone, a child's own
+    `end_turn` — or the coordinator's W1 park — would start an evaluation cycle
+    mid-delegation and harvest the shared sandbox while siblings still write to it, and
+    a sibling's next claim would run the grader with the wrong agent. So the intercept
+    fires only when a settlement moves the **session's folded status** to `idle` with
+    `end_turn` (quiescence, decision 4), the grading turn runs on the primary thread
+    with the coordinator's agent, and `user.define_outcome` addresses the primary
+    (decision 9). A single-agent session's quiescence is its own `end_turn`, so plan
+    21's behavior is unchanged there.
 
 ## Slices
 
 Ordered so no landed slice leaves an incoherent state; each is one PR through the full
-ritual. Lifecycle per CLAUDE.md: slice 1's PR flips this plan to `in-progress` and takes
-over STATE.md; **every slice lands its DIVERGENCES entries in the PR that introduces the
-behavior**; the last slice archives the plan and closes #53.
+ritual. Lifecycle per CLAUDE.md: slice 0's PR — the plan's first — flips this plan to
+`in-progress` and takes over STATE.md; **every slice lands its DIVERGENCES entries in the
+PR that introduces the behavior**; the last slice archives the plan and closes #53.
 
-0. **SDK bump v1.61.0→v1.63.1** (only under scope decision 1; the plan-05/11 ritual): pin,
-   pairwise diffs, advance the three live version labels, re-read DIVERGENCES' 17
-   `v1.61.0` evidence labels, CONFIRMED entries + issues for every excluded v1.62 item
-   (advisor, budgets, `session.usage`, usage cost fields, `redacted`, `inference_geo`;
-   note the CLI already sends `--budget` and we drop it silently), HISTORY record.
+0. **SDK bump v1.61.0→v1.63.1** (scope decision 1; the plan-05/11 ritual): pin, pairwise
+   diffs, advance the three live version labels, re-read every `v1.61.0` evidence label
+   in DIVERGENCES, CONFIRMED entries + issues for every excluded v1.62 item (advisor,
+   budgets, `session.usage`, usage cost fields, `redacted`, `inference_geo`; note the
+   CLI's `--budget` flag lands as a top-level `budget` key that `rejectUnknownKeys` 400s
+   today, `wire.go:184` — `edge_test.go:79` pins the mechanism on session create — so
+   the entry records a rejection, not a silent drop), HISTORY record.
 1. **Roster resolution and snapshot** (design decision 10): `agents.go` create/update
    accept and resolve `multiagent`; `sessions.go` `resolveAgent` snapshots full member
-   definitions; overrides carrying `multiagent` 400; the "multiagent … rejected" clause of
+   definitions, the `self` member from the session's overridden coordinator spec;
+   overrides carrying `multiagent` 400; the "multiagent … rejected" clause of
    DIVERGENCES `:30` is corrected in place. Inert at runtime — no thread machinery
    exists yet, and a coordinator session behaves as a single-agent session.
 2. **Thread resource and the primary thread** (decisions 1, 2, 12): migration
-   `0025_session_threads.sql` (table, backfill of one primary row per existing session,
-   `events (session_id, thread_id, seq)` index); `PrefixSessionThread` in `id.go` +
-   CLAUDE.md's prefix line; `events.thread_id` written and read (`NewEvent.ThreadID`,
-   `ListQuery.ThreadID`); the five routes (threads list defaults to `limit` 1000, its
-   documented default; thread events list asc by seq with the existing seq cursor;
-   thread stream = the session broker filtered per subscriber, `event_deltas[]`
-   honored; archiving the primary or a non-idle thread is refused with a clear error —
-   the reference's status code for the latter is unrecorded); primary-thread status
-   events beside the twelve `session.status_*` emission sites (thread
-   first, then session); the 20 exact-sequence assertions updated, the 15 exact-key-set
-   sites untouched. `ant beta:sessions:threads list|retrieve` and
-   `beta:sessions:threads:events list|stream` work against a single-agent session.
-3. **Thread execution substrate** (decisions 3, 4, 5, 9): migration `0026_work_thread.sql`
-   (`work_items.thread_id`, the widened `model_turn` dedup index replacing
-   `work_items_live_session_kind_idx`); brain claims `(session, thread)` turns with
-   thread-scoped replay/watermark/pendingInput; thread-scoped `toolflow` queries; the
-   status fold and stop-reason pick; the API's trigger arms thread-aware (a confirmation
-   for thread A while B runs resumes A; the session never falsely idles); `requireNullThread`
-   → accept-and-validate; `CancelThread` + thread-scoped interrupt; executor per-thread
-   drain and wake; result-append answered-check; the `tool_exec` stop re-arm (decision
-   13 iii — control-plane only, and it closes today's theoretical window on its own).
-   Reachable only through tests until slice 4 (a test seam spawns a child row) — the
-   substrate is coherent and the wire is unchanged for single-agent sessions.
+   `0025_session_threads.sql` (table with `session_id … REFERENCES sessions ON DELETE
+   CASCADE` like every sibling table — sessions are hard-deleted — backfill of one
+   primary row per existing session, `events (session_id, thread_id, seq)` index);
+   `PrefixSessionThread` in `id.go` + CLAUDE.md's prefix line; `events.thread_id`
+   written and read (`NewEvent.ThreadID`, `ListQuery.ThreadID`); the five routes
+   (threads list defaults to `limit` 1000, its documented default, through the same
+   per-route cap override the session-events list already uses — the shared paginator
+   caps at 100; thread events list asc by seq with the existing seq cursor; the
+   primary's list/stream serve the session view, decision 2; a thread stream = the
+   session broker filtered per subscriber, `event_deltas[]` honored, preview frames
+   carrying and filtered by thread; archiving the primary or a non-idle thread is
+   refused with a clear error — the reference's status code for the latter is
+   unrecorded); primary-thread status events beside the twelve `session.status_*`
+   emission sites (thread first, then session); the 20 exact-sequence assertions
+   updated, the 15 exact-key-set sites untouched. `ant beta:sessions:threads
+   list|retrieve` and `beta:sessions:threads:events list|stream` work against a
+   single-agent session.
+3. **Thread execution substrate** (decisions 3, 4, 5, 9, 14, 15): migration
+   `0026_work_thread.sql` (`work_items.thread_id`; the widened dedup index
+   `(session_id, thread_id, kind) NULLS NOT DISTINCT` replacing
+   `work_items_live_session_kind_idx`, `Enqueue`'s arbiter changed with it;
+   `mcp_catalogs` re-keyed per thread); brain claims `(session, thread)` turns with
+   thread-scoped replay/watermark/pendingInput; thread-scoped `toolflow` queries and the
+   **runnable set** for every exec driver; the status fold and stop-reason pick with
+   every existing emission preserved; the outcome intercept moved to session
+   quiescence; MCP discovery/dial per thread's agent; the API's trigger arms
+   thread-aware (a confirmation for thread A while B runs resumes A; the session never
+   falsely idles); `requireNullThread` → accept-and-validate; `CancelThread` +
+   thread-scoped interrupt with the drivers' answered-means-cancelled check (before a
+   call and, on the executor's keeper beat, mid-call); executor per-thread drain and
+   wake; result-append answered-check; the `tool_exec` stop re-arm (decision 13 iii —
+   control-plane only, and it closes today's theoretical window on its own). Reachable
+   only through tests until slice 4 (a test seam spawns a child row) — the substrate is
+   coherent and the wire is unchanged for single-agent sessions.
 4. **Coordinator delegation** (decisions 6, 7, 8, 11, 13; scope decision 2): tool
    injection by role, settlement-executed delegation, the thread-event projection, the
    wake path, child-failure delivery, the 25-cap, the primary-archive guard, skills union
@@ -494,25 +623,42 @@ behavior**; the last slice archives the plan and closes #53.
 - Slice 1: API contract tests for C-1…C-7 (each rejection its own case; `self` resolves
   to the coordinator's own next version; eager pinning survives a member update); the
   session snapshot renders full member definitions with `type:"agent"` and no nested
-  `multiagent`; overrides with `multiagent` 400.
+  `multiagent`; a session created with a `system` override snapshots its `self` member
+  with that override and the other members without; overrides with `multiagent` 400.
 - Slice 2: the migration backfill on a fixture with legacy sessions; `GET /threads` on a
   legacy and a new session both list one primary with `parent_thread_id: null` and the
-  derived id; the events index; thread events list/stream equal the session's for the
-  primary; the primary-thread event pairs at every status site with the fixed order;
-  archive rules; the CLI transcript.
+  derived id; deleting a session deletes its thread rows; the events index; the
+  primary's events list/stream equal the session's on a single-agent session **and**
+  on a coordinator session with cross-posts (a child's ask shows on both, with
+  `session_thread_id` set there and empty on the child's own stream); a child's
+  preview deltas reach only the child's stream; the primary-thread event pairs at every
+  status site with the fixed order; archive rules; the CLI transcript.
 - Slice 3: the eight rollup tests (child idle does not idle the session; quiescence idles
   once; `requires_action ≻ end_turn`; `event_ids` union; confirmation for A while B runs;
-  child termination leaves the session; the live-work window; single-thread reduction —
-  every existing status assertion passes unchanged); wake amplification (three concurrent
-  reports → at most one queued parent turn); mid-turn report chains; the thread-scoped
-  watermark never stamps a sibling's input; thread-scoped interrupt leaves the shared exec
-  item and drops the late result; a `tool_exec` stopped through the work API with
+  child termination leaves the session; the spawn's same-transaction `running` closes the
+  enqueue-to-claim window; single-thread reduction — every existing status assertion,
+  the interrupt's re-idle and the reclaim pair included, passes unchanged); an idle
+  `self_hosted` session with a worker still holding its `tool_exec` idles as today;
+  the HITL non-bypass: thread A holds an ask, thread B's allow-policy call enqueues the
+  session's `tool_exec`, and the executor runs B's call and **not** A's until A's
+  `allow` lands (and the same for the worker's scan and the re-arm predicate); two
+  primary `model_turn` enqueues and two `tool_exec` enqueues dedupe under the NULL-thread
+  key; wake amplification (three concurrent reports → at most one queued parent turn); a
+  report landing mid-turn chains once (by seq, with `processed_at` stamped); a turn of
+  only `create_agent`/`send_to_agent` calls enqueues the caller's next turn in the same
+  commit; a `wait_for_agents` with no child running answers `timed_out:true` and does not
+  park; a child's `end_turn` never starts an outcome evaluation and quiescence does; a
+  child's own MCP server is discovered and dialed from the child's list; the
+  thread-scoped watermark never stamps a sibling's input; a thread-scoped interrupt
+  leaves the shared exec item, drops the late result, and cancels an in-flight call on
+  the next keeper beat; a `tool_exec` stopped through the work API with
   platform calls still unanswered leaves a fresh queued item of the right kind
   (`mcp_exec` when an MCP call is among them), one stopped with everything answered
   leaves none, and a stop racing a settlement that appends a call under the session lock
   never leaves the call without a live item.
 - Slice 4: a turn calling `create_agent`×3 + `wait_for_agents` produces in one commit
-  three thread rows, the nine projection events, four `agent.tool_result`s, three child
+  three thread rows, the twelve projection events (four per spawn) plus the primary's
+  `thread_status_idle` for the wait, four `agent.tool_result`s, three child
   `model_turn`s and no `tool_exec`; a child's `submit_result` wakes an idle parent
   exactly once; a client `user.tool_result` naming a delegation call is refused; a child's
   request never contains `create_agent`; two consecutive coordinator turns produce
@@ -534,26 +680,40 @@ behavior**; the last slice archives the plan and closes #53.
 ## New DIVERGENCES entries (inferences to record as they land)
 
 - (slice 1) `multiagent` in `agent_with_overrides` is a 400 — the reference SDK cannot
-  send it and the server's response to the stray key is unrecorded (CONFIRMED, replaces
+  send it and the server's response to the stray key is unrecorded (INFERRED, replaces
   the silent drop). Bare-string and versionless roster entries pin eagerly at write time
-  (INFERRED from the resolved type's plain `int64`). `self` is exempt from the depth-1
-  check (INFERRED — read literally the rule would forbid the documented feature).
+  (INFERRED from the resolved type's plain `int64`; the roster doc says only "an agent
+  ID string"). `self` is exempt from the depth-1 check (INFERRED — read literally the
+  rule would forbid the documented feature); the `self` member's snapshot carries the
+  session's overrides (documented).
 - (slice 2) The primary thread's id is derived from the session id (ours; the reference's
   derivation is unrecorded and ids are opaque). Primary-thread `running`/`idle`/
   `rescheduled` events are emitted on every session, thread event before session event
   within a transition; no primary `terminated` (INFERRED — only `_running` is asserted
-  for every session). Sessions predating the slice carry no primary-thread events, ever.
-  Thread `stats` render the empty shape. Thread list default `limit` 1000; thread events
-  list ascending, no `types[]`. Cross-posts are one event id on both surfaces (INFERRED).
-  The `session_thread_id` rejection entry at `:37` is rewritten, not deleted.
-- (slice 3) Session status is a fold over thread statuses with the live-work disjunct;
-  the idle stop-reason precedence `requires_action ≻ retries_exhausted ≻ end_turn`
-  (`budget_reached`'s documented rank recorded, not implemented); session-level
-  `event_ids` is the union across threads (INFERRED). Inbound `session_thread_id` on
-  confirmations/results is optional and validated; routing is by tool-use id (matches the
-  docs). Tool execution across sibling threads is serial (matches the reference runner's
-  own comment; whether the reference server serializes is INFERRED). A thread-scoped
-  interrupt does not stop the shared work item. A `tool_exec` stopped through the work
+  for every session); children terminate only with the session (INFERRED). A session's
+  pre-slice history holds no primary-thread events. Thread `stats` render the empty
+  shape. Thread list default `limit` 1000; thread events list ascending, no `types[]`.
+  Cross-posts are one event id on both surfaces, and the primary thread's own list/stream
+  is the session view (INFERRED from "the session-level stream is the primary thread");
+  a client's `user.tool_confirmation` / `user.custom_tool_result` answering a
+  cross-posted call is itself in that view (INFERRED). Previews are thread-scoped on
+  every surface (documented for previews; the frame envelope carrying the thread is
+  ours). The `session_thread_id` rejection entry at `:37` is rewritten, not deleted.
+- (slice 3) Session status is a fold over thread statuses; the idle stop-reason
+  precedence `requires_action ≻ retries_exhausted ≻ end_turn` (the ask-over-cap pair is
+  documented, `end_turn`'s rank is INFERRED; `budget_reached`'s documented rank
+  recorded, not implemented); session-level `event_ids` is the union across threads
+  (INFERRED). `user.message` addresses the primary thread (INFERRED — documented only
+  for `system.message`; the params carry no thread field). Inbound `session_thread_id`
+  on confirmations/results is optional and validated; routing is by tool-use id
+  (matches the docs). Exec drivers run only the runnable set — an ask-gated sibling call
+  waits for its verdict (INFERRED; the reference runner behaves so client-side). Tool
+  execution across sibling threads is serial (matches the reference runner's own
+  comment; whether the reference server serializes is INFERRED). MCP servers are
+  discovered per thread's agent (ours). Outcome grading runs on the primary at session
+  quiescence (INFERRED — the outcome docs predate threads). A thread-scoped interrupt
+  does not stop the shared work item; the drivers cancel an in-flight call once its use
+  is answered (ours). A `tool_exec` stopped through the work
   API while platform calls remain unanswered is re-armed as a fresh item with a fresh
   work id (ours; a poller sees a new item where the reference's long-lived worker never
   stops early — client-visible only to a one-pass worker like ours).
@@ -562,9 +722,10 @@ behavior**; the last slice archives the plan and closes #53.
   own log (INFERRED — the reference's primary-thread event table omits them and its
   behavior is unobserved); `wait_for_agents` is answered immediately and the coordinator
   parks idle (INFERRED, W1); `create_agent` returns the thread id; `send_to_agent`
-  addresses by thread id, else by unique name; a child's terminal condition is delivered
-  as `agent.thread_message_received` text (INFERRED); the 25-cap counts non-archived,
-  non-terminated threads (INFERRED); skills materialize as the roster union (ours);
+  addresses by thread id, else by unique name; a `wait_for_agents` with nothing to wait
+  for answers `timed_out:true` and does not park (INFERRED); a child's ending condition
+  is delivered as `agent.thread_message_received` text (INFERRED); the 25-cap counts
+  non-archived threads (INFERRED); skills materialize as the roster union (ours);
   **the `self_hosted` view rule** — on a `self_hosted` session the session-level
   list/stream surfaces every child thread's `agent.tool_use` and the results answering
   them, beyond the documented "condensed view" (INFERRED: the docs are silent on
@@ -601,7 +762,19 @@ In priority order — each settles a decision above:
    events (decision 13 i); whether `ant beta:worker` actually serves a child's `bash`
    call; and whether the reference serializes tool calls across sibling threads.
 9. What archiving the primary thread does; whether the 25-cap counts idle-but-unarchived
-   threads; whether `retries_exhausted` idles or terminates a child.
+   threads; whether `retries_exhausted` idles or terminates a child; whether children
+   emit `thread_status_terminated` when the session ends.
+10. Whether `GET /threads/{primary}/events` equals `GET /events` on a coordinator session
+    (cross-posts included), and how `session_thread_id` renders on a child's own stream
+    versus the session view; whether a client's `user.tool_confirmation` for a child's
+    call appears in the session-level list.
+11. Whether a `user.message` sent while children run lands on the primary; whether a
+    `self` copy runs the session's overrides; whether an ask-gated call on one child
+    blocks a sibling's allow-policy call from executing (the runnable set); whether an
+    outcome evaluation can start while children run.
+
+Every INFERRED entry in the section above maps to one of these items; an entry with no
+item is a plan defect.
 
 ## Known consequences, not fixed here
 
@@ -621,7 +794,14 @@ In priority order — each settles a decision above:
   acceptance stands as a registered divergence rather than being withdrawn.
 - The reference runner re-executes an interrupted call on reconnect because the
   interrupt's synthesized `agent.tool_result` is not a type it reads (#429) — a
-  `self_hosted` behavior that predates this plan and reaches child threads unchanged.
+  `self_hosted` behavior that predates this plan and reaches child threads unchanged;
+  likewise it cannot be told to abort an in-flight command a thread-scoped interrupt
+  abandoned, so on the reference worker that command runs to completion (our drivers
+  cancel it on the next beat).
+- An MCP server two roster agents both declare is discovered once per thread.
+- A cross-posted child ask on a cloud session is visible in the session view with its
+  confirmation; the rest of the child's log is not — a client that wants it reads the
+  child's stream, as documented.
 
 ## End-to-end acceptance (recorded into docs/HISTORY.md by slice 4)
 
