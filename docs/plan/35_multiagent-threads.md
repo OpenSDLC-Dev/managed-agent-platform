@@ -18,8 +18,8 @@ this plan a coordinator agent's session runs its roster as concurrent threads on
 shared sandbox, every thread has its own event log, status, usage and stream, and the
 real `ant` CLI drives all of it unchanged.
 
-Scope decisions **proposed** on 2026-08-17 (each needs the user's confirmation; the
-default stands until then):
+Scope decisions, proposed 2026-08-17 and settled with the user on 2026-08-19 (decision 2
+was revised in that dialogue; the others stand as proposed):
 
 1. **Bump the SDK pin to v1.63.1 as slice 0.** All managed-agents drift from the pinned
    v1.61.0 landed in one additive release (v1.62.0: advisor, budgets, `session.usage`,
@@ -31,14 +31,22 @@ default stands until then):
    doc/code lag the verifier exists to catch. Alternative if declined: keep v1.61.0 and
    carry the exclusion list of decision 3 verbatim, reading post-pin surface as evidence,
    never as contract (docs/REFERENCE_PROJECTS.md's caveat).
-2. **Coordinator sessions are cloud-only in this plan; `self_hosted` refuses them.** A
-   coordinator agent on a `self_hosted` environment is rejected at session create with a
-   clear error. The reference's own environment worker tails only the session-level
-   stream and dispatches serially, and only client-actionable child events are
-   cross-posted there — so a child's allow-policy `bash` call would never reach a BYOC
-   worker at all; our worker's bounded newest-first scan (`internal/worker/toolexec.go:197`)
-   additionally strands sibling threads' calls silently. Whether the reference offers
-   multiagent on `self_hosted` is itself unrecorded. A follow-up issue owns BYOC threads.
+2. **Coordinator sessions run on `self_hosted` environments too, under reading (a) of an
+   unrecorded behavior; the worker stays thread-unaware.** The docs define cross-posting
+   narrowly — a child's event reaches the session-level stream when the child "needs
+   something from your client" (an `always_ask` permission, a custom tool's result) — and
+   say nothing about self-hosted sandboxes in a multiagent session (the multiagent page
+   never mentions self-hosting; the self-hosted-sandboxes page never mentions threads).
+   Yet the reference's own worker reads only the session-level stream and has no thread
+   concept at any tag. So either **(a)** the reference surfaces child threads' built-in
+   tool calls on the session-level view of a `self_hosted` session — the only reading
+   under which its own worker can serve them — or **(b)** it refuses coordinators on
+   `self_hosted`. This plan implements (a), registered INFERRED (design decision 13):
+   the BYOC model is the one the user set out — the worker fetches the session's
+   unanswered tool calls, runs them in order, and the tool-call → thread mapping lives
+   on the platform. If a recording later shows (b), what we hold is an accepts-where-
+   the-reference-refuses divergence to register, not a redesign. Rejected: refusing
+   coordinator sessions on `self_hosted` until a recording exists (the earlier proposal).
 3. **Excluded, each behind its own issue and a DIVERGENCES entry:** the platform
    **advisor** roster entry (`{type:"advisor",model}`, reserved name `anthropic.advisor`,
    advisor threads, `redacted` advice) — a hosted model consulted mid-turn has no
@@ -66,11 +74,13 @@ default stands until then):
    Agents API access) is a question for the user, and its answer decides how many of
    those entries close before slice 4 merges rather than after.
 
-Out of scope, besides decision 3: per-thread skills/files materialization on BYOC
-(moot under decision 2), a fork/inherit-context primitive (the reference has none — every
-spawn is fresh), thread-count or wake budgets beyond the documented 25-thread cap
-(argued under design decision 8), and `rescheduling` semantics (nothing writes the value
-today; the fold ranks it, no code produces it).
+Out of scope, besides decision 3: per-thread skills directories (design decision 11
+materializes the roster's union once, on both deployment kinds), a fork/inherit-context
+primitive (the reference has none — every spawn is fresh), thread-count or wake budgets
+beyond the documented 25-thread cap (argued under design decision 8), `rescheduling`
+semantics (nothing writes the value today; the fold ranks it, no code produces it), and
+a long-lived, stream-tailing BYOC worker (the reference's shape; ours stays one pass per
+work item — decision 13 says why that is enough).
 
 ## Ground truth (verified 2026-08-17)
 
@@ -78,7 +88,8 @@ Resolved per CLAUDE.md's order: public docs (platform.claude.com/docs/en/managed
 `multiagent-orchestration`, `events-and-streaming` § "Preview session thread events",
 `agent-setup`, `sessions`, `budgets`, `webhooks`, `tools`, `reference` — the event
 catalog — and the cookbooks `CMA_plan_big_execute_small`, `CMA_coordinate_specialist_team`,
-`CMA_watch_subagents_live`, all fetched 2026-08-17) → `anthropic-sdk-go` read at the
+`CMA_watch_subagents_live`, all fetched 2026-08-17; `self-hosted-sandboxes` fetched
+2026-08-19) → `anthropic-sdk-go` read at the
 pinned tag **v1.61.0** via `git show v1.61.0:<file>` (the checkout is at v1.63.1; every
 citation below is a v1.61.0 line unless marked *v1.63.1*) → the `ant` CLI (v1.23.0,
 Stainless-generated, adds no semantics). Four further local checkouts served as design
@@ -158,7 +169,18 @@ reference only, never as wire sources: `claude-code-source`, `deepseek-harness`,
 - **BYOC** — `BetaSelfHostedWork.Data` is exactly `{id, type:"session"}` at both tags
   (`betaenvironmentwork.go:490-501`), and `betasessiontoolrunner.go` has no thread
   concept: one session-level stream, serial dispatch, `user.tool_result` without a thread
-  field.
+  field. Its discovery mechanics (verified 2026-08-19): `streamLoop` (`:698-726`) opens
+  the session-level SSE **first**, then runs `reconcile` (`:815-861`) — one full
+  `ListAutoPaging` walk of the session's history, `order=asc`, `limit=1000`, collecting
+  every `agent.tool_use`/`agent.custom_tool_use` and marking `answered` from the results —
+  **once per (re)connect**; the steady state is the live stream alone, deduplicated by
+  tool-use id (`seen`/`answered`). `lib/environments/worker.go:365-380` runs one runner
+  per work item and holds the item until the session terminates or sits idle on
+  `end_turn` for `MaxIdle` (60 s), then force-stops it. Neither file, nor the poller,
+  nor the CLI's `pkg/cmd/worker.go` (v1.23.0) contains the word "thread" at v1.63.1.
+  Contrast ours: `internal/worker` opens no stream at all — claim → one bounded
+  newest-first list scan (`toolexec.go:197-257`, #76) → run → post → force-stop, one
+  pass per item.
 - **Not typed anywhere**: the delegation tools. The cookbook (plan-big §1) is the sole
   source: "the server automatically gives it `create_agent`, `send_to_agent`,
   `wait_for_agents`, and `list_agents`, and workers get `submit_result` and
@@ -172,10 +194,17 @@ reference only, never as wire sources: `claude-code-source`, `deepseek-harness`,
 - The session-level stream **is** the primary thread: "a condensed view of all activity
   across all threads. You don't see the full activity from subagents, but you do see the
   start and end of their work, and blocking events such as tool permission requests."
-  Cross-posted child `agent.tool_use` carry `session_thread_id`; a child's own
-  `agent.message`/thinking/results never reach the session stream; previews are
-  per-connection and per-thread; the session feed carries only the primary's
-  `span.model_request_end`.
+  What is cross-posted is stated once, and narrowly: "If a subagent needs something from
+  your client, such as permission to run an `always_ask` tool, or the result of a custom
+  tool, the event is cross-posted to the primary thread with `session_thread_id`
+  identifying the originating session thread" — the SDK's `agent.tool_use` field doc
+  says the same ("to surface its **permission request** on the primary thread's stream",
+  `:978-982`; the `agent.custom_tool_use` variant says "its custom tool use", `:123-125`).
+  Nothing says an allow-policy built-in call is surfaced — on cloud the platform runs it
+  and no client needs to see it — and nothing says what a `self_hosted` session shows
+  (scope decision 2). A child's own `agent.message`/thinking/results never reach the
+  session stream; previews are per-connection and per-thread; the session feed carries
+  only the primary's `span.model_request_end`.
 - "All agents share the same sandbox, filesystem, and vault credentials"; context, tools,
   MCP servers, skills, model and system prompt are per agent. "A maximum of 25 concurrent
   threads is supported"; "the coordinator can call multiple copies of each agent";
@@ -258,9 +287,9 @@ reference only, never as wire sources: `claude-code-source`, `deepseek-harness`,
    (what the reference's own runner does), and the executor drains **per thread** — it
    wakes each thread's `model_turn` as that thread's calls become answered and re-scans
    before completing the item so a call that arrived under a live item is never
-   stranded. Rejected: a thread id on the work item's wire shape (the reference has none;
-   `work.data` is `{id, type:"session"}`) and per-thread sandboxes (documented shared;
-   the BYOC wire could not even name one).
+   stranded (the BYOC worker's counterpart is decision 13). Rejected: a thread id on the
+   work item's wire shape (the reference has none; `work.data` is `{id, type:"session"}`)
+   and per-thread sandboxes (documented shared; the BYOC wire could not even name one).
 6. **Delegation is a settlement feature, not a tool-execution feature.** The six tools
    are injected by thread role in `resolveTools` — coordinator four on the primary thread
    of a session whose snapshot has a non-empty roster, worker two on any child; a child
@@ -350,6 +379,49 @@ reference only, never as wire sources: `claude-code-source`, `deepseek-harness`,
     the webhooks page carves the primary's end out. Sessions written before this plan
     can never gain these events (append-only) — stated in the registry entry, not
     discovered later.
+13. **BYOC under reading (a): the worker stays thread-unaware; the platform puts what it
+    must run on the view it already reads.** Four parts.
+    (i) *The view rule.* For a session on a `self_hosted` environment, decision 2's
+    session-level filter widens to every child thread's `agent.tool_use` — whatever its
+    evaluated permission — and every result answering one (`user.tool_result` from a
+    worker, `agent.tool_result` from an interrupt's synthesized errors), the uses carrying
+    `session_thread_id` exactly as a cross-posted ask does on cloud. Cloud sessions keep
+    the documented condensed view. Store-once/filter-per-stream makes this a predicate on
+    the environment kind, not a second write. The results are in the view for the
+    reference runner's sake: its `reconcile` marks answered from what it lists, and a
+    result it cannot see makes it re-dispatch the call on every reconnect, straight into
+    the duplicate-result 400 (DIVERGENCES `:143`).
+    (ii) *Nothing on the work item changes.* One `tool_exec` per session, `work.data`
+    `{id, type:"session"}`; a result routes to its thread by the referenced tool-use row's
+    `thread_id` (decision 9), and a `session_thread_id` a worker echoes is validated,
+    never used to route.
+    (iii) *A one-pass worker's window closes on the control plane.* Ours scans once at
+    claim; if thread B commits tool calls while the worker runs thread A's, B's
+    `Enqueue(tool_exec)` is a no-op against the live item, the worker force-stops on
+    finishing its found set, and nothing serves B. Today that window is theoretical — a
+    session's next turn cannot start before its last result lands, and the executor
+    closes its own inside the settlement transaction (`executor.go:528-546`) — but with
+    concurrent threads it is as wide as a tool run. So: when a `tool_exec` item reaches
+    `stopped` through the work API and the session still has unanswered
+    platform-executed calls, the same statement enqueues a fresh item of the kind the
+    API's own trigger would pick (`events.go:410-421`: `web_exec` if any is a web call,
+    else `tool_exec`). Benign for the reference runner, which stops only after `MaxIdle`
+    of `end_turn` idleness, when nothing is unanswered; it also closes today's
+    theoretical window. The lease-lapse path needs nothing — `Poll` re-offers the item.
+    (iv) *The worker.* It already loads the session for its liveness gate; a snapshot
+    with `agent.multiagent` set switches `unansweredToolUses` to a full newest-first walk
+    under the same three-type filter — the #76 bound's two premises hold per thread, not
+    per session, and no per-session stop condition exists short of the log's start (the
+    reference pays this per attach; we pay it per claimed item, for coordinator sessions
+    only) — and the driver re-scans after answering the found set until a scan comes
+    back empty. Single-agent sessions keep the bound. Skills are decision 11's union,
+    computed from the same snapshot; files are session resources and unchanged.
+    Rejected: per-thread runners in the worker (thread endpoints the reference worker
+    never calls); an unanswered-only discovery endpoint (new wire surface the reference
+    worker would not use); a per-`session_thread_id` trailing-run bound (no stop
+    condition — the group count is unknowable without listing threads); adopting the
+    reference's long-lived tail (a rewrite of `internal/worker` to close a window a few
+    control-plane lines close).
 
 ## Slices
 
@@ -388,14 +460,17 @@ behavior**; the last slice archives the plan and closes #53.
    status fold and stop-reason pick; the API's trigger arms thread-aware (a confirmation
    for thread A while B runs resumes A; the session never falsely idles); `requireNullThread`
    → accept-and-validate; `CancelThread` + thread-scoped interrupt; executor per-thread
-   drain and wake; result-append answered-check. Reachable only through tests until
-   slice 4 (a test seam spawns a child row) — the substrate is coherent and the wire is
-   unchanged for single-agent sessions.
-4. **Coordinator delegation** (decisions 6, 7, 8, 11; scope decision 2): tool injection
-   by role, settlement-executed delegation, the thread-event projection, the wake path,
-   child-failure delivery, the 25-cap, the primary-archive guard, skills union,
-   `self_hosted` refusal at session create, the INFERRED entries for every inferred
-   shape, and the end-to-end acceptance transcript. This slice meets #53's acceptance.
+   drain and wake; result-append answered-check; the `tool_exec` stop re-arm (decision
+   13 iii — control-plane only, and it closes today's theoretical window on its own).
+   Reachable only through tests until slice 4 (a test seam spawns a child row) — the
+   substrate is coherent and the wire is unchanged for single-agent sessions.
+4. **Coordinator delegation** (decisions 6, 7, 8, 11, 13; scope decision 2): tool
+   injection by role, settlement-executed delegation, the thread-event projection, the
+   wake path, child-failure delivery, the 25-cap, the primary-archive guard, skills union
+   on both deployment kinds, the `self_hosted` session view rule and the worker's
+   coordinator-session scan (decision 13 i, iv), the INFERRED entries for every inferred
+   shape, and the end-to-end acceptance transcripts — cloud and `self_hosted`. This
+   slice meets #53's acceptance.
 5. **Close-out**: HISTORY acceptance + review-hardening records and the progress summary,
    ARCHITECTURE "Execution flow"/"Wire-compatibility model"/package rows and a new
    security-invariant paragraph (what a child thread shares: sandbox, vault bindings,
@@ -420,16 +495,26 @@ behavior**; the last slice archives the plan and closes #53.
   every existing status assertion passes unchanged); wake amplification (three concurrent
   reports → at most one queued parent turn); mid-turn report chains; the thread-scoped
   watermark never stamps a sibling's input; thread-scoped interrupt leaves the shared exec
-  item and drops the late result.
+  item and drops the late result; a `tool_exec` stopped through the work API with
+  platform calls still unanswered leaves a fresh queued item of the right kind, and one
+  stopped with everything answered leaves none.
 - Slice 4: a turn calling `create_agent`×3 + `wait_for_agents` produces in one commit
   three thread rows, the nine projection events, four `agent.tool_result`s, three child
   `model_turn`s and no `tool_exec`; a child's `submit_result` wakes an idle parent
   exactly once; a client `user.tool_result` naming a delegation call is refused; a child's
   request never contains `create_agent`; two consecutive coordinator turns produce
   identical request prefixes up to new content; the 26th spawn is an `is_error`; the
-  primary cannot be archived; a `self_hosted` coordinator session is refused; a
-  `RUN_EVALS` live eval runs a two-worker coordinator end to end; the `ant` CLI
-  acceptance below.
+  primary cannot be archived. BYOC (decision 13): on a `self_hosted` session the
+  session-level list and stream carry a child's allow-policy `agent.tool_use` with its
+  `session_thread_id` and, once posted, the `user.tool_result` answering it, while the
+  same log on a cloud session shows neither; the worker's scan against a fixture log of
+  interleaved sibling calls (a child's use above an older sibling's unanswered use, a
+  result between them — the shape the #76 bound strands) returns every unanswered call
+  oldest-first, and the single-agent fixture still stops at the trailing turn; a call
+  committed during the run is answered by the re-scan; a `user.tool_result` from the
+  worker lands on the child's log and wakes that child's turn only; the worker's skills
+  set-up materializes the roster union. A `RUN_EVALS` live eval runs a two-worker
+  coordinator end to end; the `ant` CLI acceptance below.
 - Coverage stays ≥ 90 % over the logic packages; every slice runs `make verify`, the
   verifier, and the dual review.
 
@@ -455,7 +540,10 @@ behavior**; the last slice archives the plan and closes #53.
   confirmations/results is optional and validated; routing is by tool-use id (matches the
   docs). Tool execution across sibling threads is serial (matches the reference runner's
   own comment; whether the reference server serializes is INFERRED). A thread-scoped
-  interrupt does not stop the shared work item.
+  interrupt does not stop the shared work item. A `tool_exec` stopped through the work
+  API while platform calls remain unanswered is re-armed as a fresh item with a fresh
+  work id (ours; a poller sees a new item where the reference's long-lived worker never
+  stops early — client-visible only to a one-pass worker like ours).
 - (slice 4) The six delegation tools' schemas and result payloads (INFERRED, ours);
   delegation calls persist as `agent.tool_use`/`agent.tool_result` on the calling thread's
   own log (INFERRED — the reference's primary-thread event table omits them and its
@@ -464,8 +552,16 @@ behavior**; the last slice archives the plan and closes #53.
   addresses by thread id, else by unique name; a child's terminal condition is delivered
   as `agent.thread_message_received` text (INFERRED); the 25-cap counts non-archived,
   non-terminated threads (INFERRED); skills materialize as the roster union (ours);
-  coordinator sessions are refused on `self_hosted` (CONFIRMED, tracked by a new issue).
-  All INFERRED items cross-link #78.
+  **the `self_hosted` view rule** — on a `self_hosted` session the session-level
+  list/stream surfaces every child thread's `agent.tool_use` and the results answering
+  them, beyond the documented "condensed view" (INFERRED: the docs are silent on
+  self-hosted multiagent sessions and this is the one reading under which the
+  reference's thread-unaware worker can serve child threads; the alternative — the
+  reference refuses coordinators on `self_hosted` — turns this into an
+  accepts-where-the-reference-refuses entry, never a rewrite); the BYOC worker is one
+  pass per work item where the reference's is a stream tail held until `MaxIdle`
+  (client-side behavior, recorded beside the #383 entry's precedent, not a wire
+  mismatch). All INFERRED items cross-link #78.
 
 ## Recording checklist (a real coordinator session, `ant beta:sessions:events stream` + a full events list + `GET /threads`)
 
@@ -485,9 +581,12 @@ In priority order — each settles a decision above:
    `agent.tool_use` are cross-posted or only ask-gated ones.
 7. Whether inbound `session_thread_id` on a `user.tool_confirmation` is accepted, and
    `sth_` vs `sthr_` on a real thread id.
-8. Whether `multiagent` is supported on `self_hosted` environments (`ant beta:worker poll`
-   against a coordinator session), and whether the reference serializes tool calls across
-   sibling threads.
+8. Whether `multiagent` is supported on `self_hosted` environments at all (`ant
+   beta:sessions create` from a coordinator on one), and if so what the session-level
+   list/stream shows a worker there — reading (a): every child thread's built-in
+   `agent.tool_use` and their `user.tool_result`s, or only the documented blocking
+   events (decision 13 i); whether `ant beta:worker` actually serves a child's `bash`
+   call; and whether the reference serializes tool calls across sibling threads.
 9. What archiving the primary thread does; whether the 25-cap counts idle-but-unarchived
    threads; whether `retries_exhausted` idles or terminates a child.
 
@@ -501,8 +600,12 @@ In priority order — each settles a decision above:
 - The reference's `pause_turn`-style held-open wait (W2) is not implemented; the
   coordinator's `session.thread_status_idle{end_turn}` while children run is a visible
   difference if the reference holds the thread `running`.
-- BYOC coordinator sessions are refused; the worker's bounded scan and per-thread skills
-  stay unaddressed until that issue is picked up.
+- A `self_hosted` session's session-level view is wider than the documented condensed
+  view: a client of such a session sees child tool calls it would not see on cloud, and
+  the worker's per-item scan on a coordinator session is O(the session's tool history)
+  again — the #76 bound is kept only where its premises hold (single-agent sessions).
+- If a recording shows the reference refuses coordinators on `self_hosted`, our
+  acceptance stands as a registered divergence rather than being withdrawn.
 
 ## End-to-end acceptance (recorded into docs/HISTORY.md by slice 4)
 
@@ -517,3 +620,8 @@ child; `ant beta:sessions:threads:events stream --thread-id <child> --event-delt
 agent.message` previews the child's text; `ant beta:sessions:events send` a
 `user.interrupt` with `--event.session-thread-id <child>` interrupts only that thread;
 `ant beta:sessions:threads archive` on the idle child succeeds and on the primary 400s.
+Then the same coordinator on a `self_hosted` environment: `ant beta:worker` (the
+reference's own thread-unaware runner) polls the `tool_exec`, sees the child's `bash`
+call on the session-level stream with its `session_thread_id`, runs it, posts a plain
+`user.tool_result`, and the child's thread stream shows the result landing on the child's
+log; a second run with our own `cmd/worker` does the same.
