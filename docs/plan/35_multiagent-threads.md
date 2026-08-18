@@ -741,7 +741,7 @@ PR that introduces the behavior**; the last slice archives the plan and closes #
   addresses by thread id, else by unique name; a `wait_for_agents` with nothing to wait
   for answers `timed_out:true` and does not park (INFERRED); a child's ending condition
   is delivered as `agent.thread_message_received` text (INFERRED); the 25-cap counts
-  non-archived threads (INFERRED); skills materialize as the roster union (ours);
+  non-terminated threads, idle ones included (INFERRED); skills materialize as the roster union (ours);
   **the `self_hosted` view rule** — on a `self_hosted` session the session-level
   list/stream surfaces every child thread's `agent.tool_use` and the results answering
   them, beyond the documented "condensed view" (INFERRED: the docs are silent on
