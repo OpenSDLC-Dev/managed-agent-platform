@@ -163,8 +163,8 @@ reference only, never as wire sources: `claude-code-source`, `deepseek-harness`,
   types say "Echo this…"; the docs resolve it — "Post `user.tool_confirmation` (with
   `tool_use_id`) or `user.custom_tool_result` … the server routes the response to the
   correct thread automatically." So the routing key is the tool-use id.
-- **ID prefix** — `sthr_`: seven "Public `sthr_` ID" doc comments and the fixture
-  `sthr_011CZkZVWa6oIjw0rgXZpnBt` in SDK and CLI tests. (The docs' one example says
+- **ID prefix** — `sthr_`: three "Public `sthr_` ID" doc comments and seven occurrences
+  of the fixture `sthr_011CZkZVWa6oIjw0rgXZpnBt` across SDK and CLI tests. (The docs' one example says
   `sth_01DEF…`; the SDK is authoritative — recording item.)
 - **BYOC** — `BetaSelfHostedWork.Data` is exactly `{id, type:"session"}` at both tags
   (`betaenvironmentwork.go:490-501`), and `betasessiontoolrunner.go` has no thread
@@ -449,7 +449,7 @@ behavior**; the last slice archives the plan and closes #53.
    thread stream = the session broker filtered per subscriber, `event_deltas[]`
    honored; archiving the primary or a non-idle thread is refused with a clear error —
    the reference's status code for the latter is unrecorded); primary-thread status
-   events beside the ten `session.status_*` sites (thread
+   events beside the twelve `session.status_*` emission sites (thread
    first, then session); the 20 exact-sequence assertions updated, the 15 exact-key-set
    sites untouched. `ant beta:sessions:threads list|retrieve` and
    `beta:sessions:threads:events list|stream` work against a single-agent session.
