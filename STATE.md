@@ -4,8 +4,23 @@ What is being worked on right now, and how far along it is — nothing else. **S
 
 ## Active work
 
-**None.** v0.3.0 released 2026-08-16; its record is
-[docs/changelog/0.3.0.md](./docs/changelog/0.3.0.md), archived in #426 as the release
-ritual's last step.
+[Plan 35](./docs/plan/35_multiagent-threads.md) (#53) — multi-agent session threads, the
+coordinator topology: a coordinator agent's roster runs as concurrent session threads on
+one shared sandbox, wire-compatible with the reference's `sthr_` thread resource, routes
+and events; coordinator sessions on cloud and `self_hosted` alike, the BYOC worker
+thread-unaware. Every scope decision is settled; the design is the plan's fifteen decisions.
 
-The backlog is GitHub issues; nothing is in flight.
+## Tasks
+
+- [x] **Slice 0 — SDK bump v1.61.0 → v1.63.1**: pin, pairwise diffs, live labels, registry
+      citations re-read, registry entries + issues #430–#433 for the excluded v1.62 surface,
+      four v1.63.x toolset/runner behaviors converged, HISTORY record; plan → `in-progress`.
+- [ ] Slice 1 — roster resolution and the session snapshot (design decision 10).
+- [ ] Slice 2 — thread resource and the primary thread: migration 0025, `sthr_`, five routes,
+      primary-thread status events on every session (decisions 1, 2, 12).
+- [ ] Slice 3 — thread execution substrate: migration 0026, `(session, thread)` turns, the
+      status fold, the runnable set, MCP per thread, outcomes on quiescence, interrupts, the
+      `tool_exec` re-arm (decisions 3, 4, 5, 9, 14, 15).
+- [ ] Slice 4 — coordinator delegation, BYOC view rule and worker scan, acceptance transcripts
+      (decisions 6, 7, 8, 11, 13). Meets #53's acceptance.
+- [ ] Slice 5 — close-out: HISTORY records, ARCHITECTURE/README, plan → `archived`, #53 closed.

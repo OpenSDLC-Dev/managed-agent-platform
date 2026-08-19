@@ -155,10 +155,15 @@ func normalizeUserMessage(obj map[string]json.RawMessage) (NewEvent, error) {
 	}
 	// The SDK's content union accepts a plain string alongside the block
 	// array (OfString); it is stored verbatim so the echo round-trips, and
-	// replay already renders the string form.
+	// replay already renders the string form — as one text block, so the
+	// empty string is refused for the same reason an empty text block is
+	// (validateBlock).
 	if raw, ok := obj["content"]; ok && !isNullRaw(raw) {
 		var s string
 		if json.Unmarshal(raw, &s) == nil {
+			if s == "" {
+				return NewEvent{}, fmt.Errorf("content must not be empty")
+			}
 			return newEvent(domain.EventUserMessage, fields{"content": raw})
 		}
 	}
@@ -485,6 +490,16 @@ func validateBlock(raw json.RawMessage, allowed map[string]bool) error {
 		var s string
 		if raw, ok := obj["text"]; !ok || isNullRaw(raw) || json.Unmarshal(raw, &s) != nil {
 			return fmt.Errorf("text block requires a string text field")
+		}
+		// The reference API rejects an empty text block in a tool result —
+		// its runner substitutes "(no output)" for one since v1.63.1 — and
+		// the user-side carriers that reach here are replayed to a Messages
+		// endpoint, which rejects it too, so accepting it would wedge the
+		// session; system.message shares the rule for uniformity (its text
+		// folds into the system string, where empty is harmless) (INFERRED,
+		// docs/DIVERGENCES.md).
+		if s == "" {
+			return fmt.Errorf("text block text must not be empty")
 		}
 		return nil
 	case "image":

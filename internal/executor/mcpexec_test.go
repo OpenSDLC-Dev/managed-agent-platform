@@ -803,7 +803,7 @@ func TestMCPResourceLabelsAreCappedSoTheExemptionHolds(t *testing.T) {
 // hands an mcp_tool_result's content array straight into a Messages tool_result
 // (brain/replay.go's toolResultBlock), so an empty text block on this
 // append-only log is a session that fails on this turn and on every later one.
-// It is the same wedge TestEmptyToolResultOmitsEmptyTextBlock keeps a built-in
+// It is the same wedge TestEmptyToolResultPostsPlaceholder keeps a built-in
 // tool's empty read out of, arriving by a route only a server can open.
 func TestMCPEmptyTextBlockNeverReachesTheLog(t *testing.T) {
 	url := mcptest.Server(t, mcptest.Tool{Name: "search", Blocks: []mcptest.Block{

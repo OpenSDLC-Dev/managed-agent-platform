@@ -1,5 +1,5 @@
 ---
-status: draft
+status: in-progress
 issue: "#53"
 ---
 
@@ -23,9 +23,13 @@ was revised in that dialogue; the others stand as proposed):
 
 1. **Bump the SDK pin to v1.63.1 as slice 0.** All managed-agents drift from the pinned
    v1.61.0 landed in one additive release (v1.62.0: advisor, budgets, `session.usage`,
-   cost/server-tool usage fields, `redacted` block, `inference_geo`); v1.63.0 adds only
-   the unrelated dream `output_behavior`, and v1.63.1 changes one client behavior (the
-   tool runner posts "(no output)" for an empty text result — harmless to a server). The
+   cost/server-tool usage fields, `redacted` block, `inference_geo`); v1.63.0 adds the
+   unrelated dream `output_behavior` and changes the reference's *client* toolset
+   behavior (an inverted `view_range` reads empty, non-plain archive members are
+   skipped, fs errors are bare errno text, symlink loops are rejected), and v1.63.1
+   changes one runner behavior (it posts "(no output)" for an empty text result) — no
+   server obligation in either, though where the platform's own toolset had mirrored
+   the old behavior, slice 0 converged it (docs/HISTORY.md's v1.63.1 bump record). The
    v1.61.0 thread surface is a forward-compatible subset: routes and params are
    identical, and the event unions grew only additive members (the thread stream gains
    `session.usage`, the idle stop reason `budget_reached`, the thread agent an advisor
@@ -95,9 +99,10 @@ Resolved per CLAUDE.md's order: public docs (platform.claude.com/docs/en/managed
 `agent-setup`, `sessions`, `budgets`, `webhooks`, `tools`, `reference` — the event
 catalog — and the cookbooks `CMA_plan_big_execute_small`, `CMA_coordinate_specialist_team`,
 `CMA_watch_subagents_live`, all fetched 2026-08-17; `self-hosted-sandboxes` fetched
-2026-08-18) → `anthropic-sdk-go` read at the
-pinned tag **v1.61.0** via `git show v1.61.0:<file>` (the checkout is at v1.63.1; every
-citation below is a v1.61.0 line unless marked *v1.63.1*) → the `ant` CLI (v1.23.0,
+2026-08-18) → `anthropic-sdk-go` read at
+tag **v1.61.0** via `git show v1.61.0:<file>` — the pin when this plan was drafted; slice 0
+moved `go.mod` and the checkout to v1.63.1, and every citation below is a v1.61.0 line
+unless marked *v1.63.1* (the v1.62.0 additive members are decision 1's list) → the `ant` CLI (v1.23.0,
 Stainless-generated, adds no semantics). Four further local checkouts served as design
 reference only, never as wire sources: `claude-code-source`, `deepseek-harness`,
 `openai/codex`, `adk-go` (docs/REFERENCE_PROJECTS.md).

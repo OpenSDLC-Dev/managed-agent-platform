@@ -21,10 +21,12 @@ import (
 
 // sessionRequiredFields is the BetaManagedAgentsSession wire surface; all
 // fields are api:"required" except deployment_id (nullable but present).
+// budget is api:"required" too, and rendered null here the way archived_at
+// is: the platform has no budgets (INFERRED, docs/DIVERGENCES.md).
 var sessionRequiredFields = []string{
 	"id", "type", "agent", "environment_id", "status", "title", "metadata",
 	"usage", "stats", "outcome_evaluations", "resources", "vault_ids",
-	"deployment_id", "created_at", "updated_at", "archived_at",
+	"deployment_id", "budget", "created_at", "updated_at", "archived_at",
 }
 
 // sessionAgentRequiredFields is the resolved-agent snapshot embedded in a
@@ -372,8 +374,8 @@ func TestSessionCreateWithAgentString(t *testing.T) {
 			t.Errorf("%s = %v, want []", k, res[k])
 		}
 	}
-	if res["deployment_id"] != nil || res["archived_at"] != nil {
-		t.Errorf("deployment_id/archived_at = %v/%v, want null/null", res["deployment_id"], res["archived_at"])
+	if res["deployment_id"] != nil || res["archived_at"] != nil || res["budget"] != nil {
+		t.Errorf("deployment_id/archived_at/budget = %v/%v/%v, want null/null/null", res["deployment_id"], res["archived_at"], res["budget"])
 	}
 	for _, k := range []string{"created_at", "updated_at"} {
 		ts, _ := res[k].(string)

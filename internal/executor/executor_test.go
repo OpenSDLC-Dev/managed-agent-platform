@@ -23,6 +23,7 @@ import (
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/sandbox"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/secrets"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/secrets/local"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/toolset"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -1277,10 +1278,11 @@ func TestUserToolResultCountsAsAnswered(t *testing.T) {
 	}
 }
 
-func TestEmptyToolResultOmitsEmptyTextBlock(t *testing.T) {
-	// A read of an empty file yields empty output. It must be an empty content
-	// array, never a text block with an empty string — a Messages endpoint
-	// rejects an empty text block, which would wedge the session on every resume.
+func TestEmptyToolResultPostsPlaceholder(t *testing.T) {
+	// A read of an empty file yields empty output. It must be the reference
+	// runner's "(no output)" text block (v1.63.1), never a text block with an
+	// empty string — a Messages endpoint rejects an empty text block, which
+	// would wedge the session on every resume.
 	sb := &fakeSandbox{files: map[string]string{"/workspace/empty.txt": ""}}
 	h := newHarness(t, sb)
 	read, _ := json.Marshal(map[string]any{"name": "read", "input": map[string]string{"file_path": "empty.txt"}})
@@ -1303,8 +1305,8 @@ func TestEmptyToolResultOmitsEmptyTextBlock(t *testing.T) {
 	if body.IsError {
 		t.Errorf("empty read is not an error: %+v", body)
 	}
-	if len(body.Content) != 0 {
-		t.Errorf("content = %v, want an empty array (no empty text block)", body.Content)
+	if len(body.Content) != 1 || body.Content[0]["type"] != "text" || body.Content[0]["text"] != toolset.NoOutput {
+		t.Errorf("content = %v, want one text block %q", body.Content, toolset.NoOutput)
 	}
 }
 

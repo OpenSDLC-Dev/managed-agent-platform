@@ -20,6 +20,7 @@ import (
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/events"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/pgtest"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/sandbox"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/toolset"
 	sdk "github.com/anthropics/anthropic-sdk-go"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -426,10 +427,11 @@ func TestToolLevelErrorIsAnsweredNotAbandoned(t *testing.T) {
 	}
 }
 
-// TestEmptyToolResultOmitsContent: empty tool output must post no content blocks
-// (stored as null content), never an empty text block — a Messages endpoint
-// rejects an empty text block, and that request is what the brain replays.
-func TestEmptyToolResultOmitsContent(t *testing.T) {
+// TestEmptyToolResultPostsPlaceholder: empty tool output posts the reference
+// runner's "(no output)" text block (v1.63.1), never an empty text block — a
+// Messages endpoint rejects an empty text block, and that request is what the
+// brain replays.
+func TestEmptyToolResultPostsPlaceholder(t *testing.T) {
 	sb := &fakeSandbox{files: map[string]string{"/workspace/empty.txt": ""}}
 	h := newHarness(t, sb)
 	h.suspend(t, readUse("empty.txt"))
@@ -444,8 +446,8 @@ func TestEmptyToolResultOmitsContent(t *testing.T) {
 	if results[0].IsError {
 		t.Errorf("empty read is not an error: %+v", results[0])
 	}
-	if len(results[0].Content) != 0 {
-		t.Errorf("content = %v, want empty (no content blocks for empty output)", results[0].Content)
+	if len(results[0].Content) != 1 || results[0].Content[0]["type"] != "text" || results[0].Content[0]["text"] != toolset.NoOutput {
+		t.Errorf("content = %v, want one text block %q", results[0].Content, toolset.NoOutput)
 	}
 }
 

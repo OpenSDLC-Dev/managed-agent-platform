@@ -257,25 +257,27 @@ scan:
 }
 
 // postToolResult sends one user.tool_result answering a tool use. Empty tool
-// output posts no content blocks (the SDK omits the empty field): the control
-// plane stores that as null content, which the brain's replay renders as a
-// tool_result block with no content field — valid for the Messages API, where an
-// empty text block is not. is_error is carried through so the model sees a
-// tool-level failure as an error result.
+// output posts the reference runner's toolset.NoOutput text block (v1.63.1),
+// never an empty one: the Sessions API rejects an empty text block, and so
+// does the Messages endpoint the brain's replay hands the content to.
+// is_error is carried through so the model sees a tool-level failure as an
+// error result.
 func postToolResult(ctx context.Context, client sdk.Client, sessionID string, useID domain.ID, res toolset.Result) error {
 	ev := sdk.BetaManagedAgentsEventParamsOfUserToolResult(useID.String())
 	// The convenience constructor sets only tool_use_id; the wire requires the
 	// event's type discriminator, which the union marshaler does not fill in.
 	ev.OfUserToolResult.Type = sdk.BetaManagedAgentsUserToolResultEventParamsTypeUserToolResult
 	ev.OfUserToolResult.IsError = sdk.Bool(res.IsError)
-	if res.Content != "" {
-		ev.OfUserToolResult.Content = []sdk.BetaManagedAgentsUserToolResultEventParamsContentUnion{{
-			OfText: &sdk.BetaManagedAgentsTextBlockParam{
-				Text: res.Content,
-				Type: sdk.BetaManagedAgentsTextBlockTypeText,
-			},
-		}}
+	text := res.Content
+	if text == "" {
+		text = toolset.NoOutput
 	}
+	ev.OfUserToolResult.Content = []sdk.BetaManagedAgentsUserToolResultEventParamsContentUnion{{
+		OfText: &sdk.BetaManagedAgentsTextBlockParam{
+			Text: text,
+			Type: sdk.BetaManagedAgentsTextBlockTypeText,
+		},
+	}}
 	_, err := client.Beta.Sessions.Events.Send(ctx, sessionID, sdk.BetaSessionEventSendParams{
 		Events: []sdk.BetaManagedAgentsEventParamsUnion{ev},
 	})

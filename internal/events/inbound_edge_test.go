@@ -60,6 +60,17 @@ func TestNormalizeInboundRejections(t *testing.T) {
 		{"citations not object", `{"type":"user.custom_tool_result","custom_tool_use_id":"x","content":[{"type":"search_result","source":"https://x","title":"t","citations":true,"content":[{"type":"text","text":"b"}]}]}`, "must be a JSON object"},
 		{"citations unknown key", `{"type":"user.custom_tool_result","custom_tool_use_id":"x","content":[{"type":"search_result","source":"https://x","title":"t","citations":{"enable":true},"content":[{"type":"text","text":"b"}]}]}`, "unknown field"},
 		{"text null", `{"type":"user.message","content":[{"type":"text","text":null}]}`, "text"},
+		// An empty text block is refused wherever a text block may appear: the
+		// reference API rejects it in a tool result (its runner substitutes
+		// "(no output)" since v1.63.1), and every carrier here is replayed to a
+		// Messages endpoint that rejects it too (INFERRED, docs/DIVERGENCES.md).
+		// user.tool_result shares the same block validator (self_hosted-only, so
+		// it cannot sit in this cloud table).
+		{"text empty in custom tool result", `{"type":"user.custom_tool_result","custom_tool_use_id":"x","content":[{"type":"text","text":""}]}`, "must not be empty"},
+		{"text empty in message", `{"type":"user.message","content":[{"type":"text","text":""}]}`, "must not be empty"},
+		{"string content empty in message", `{"type":"user.message","content":""}`, "must not be empty"},
+		{"text empty in system message", `{"type":"system.message","content":[{"type":"text","text":""}]}`, "must not be empty"},
+		{"text empty in search_result", `{"type":"user.custom_tool_result","custom_tool_use_id":"x","content":[{"type":"search_result","source":"https://x","title":"t","citations":{"enabled":true},"content":[{"type":"text","text":""}]}]}`, "must not be empty"},
 		{"NUL escape in text", `{"type":"user.message","content":[{"type":"text","text":"a\u0000b"}]}`, "U+0000"},
 		{"NUL escape in deny_message", `{"type":"user.tool_confirmation","result":"deny","tool_use_id":"x","deny_message":"no\u0000pe"}`, "U+0000"},
 		{"system content null", `{"type":"system.message","content":null}`, "content is required"},

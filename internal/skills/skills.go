@@ -191,6 +191,12 @@ func FromZip(data []byte) (*Bundle, error) {
 	if skillMD == nil {
 		return nil, fmt.Errorf("missing %s at the root of directory %q", skillMDName, dir)
 	}
+	// Extraction (ours and the reference worker's alike) skips a member whose
+	// type bits are not a regular file's, so a manifest stored as a symlink or
+	// FIFO entry would validate here and never materialize.
+	if !skillMD.Mode().IsRegular() {
+		return nil, fmt.Errorf("%s must be a regular file", skillMDName)
+	}
 	rc, err := skillMD.Open()
 	if err != nil {
 		return nil, fmt.Errorf("read %s: %v", skillMDName, err)

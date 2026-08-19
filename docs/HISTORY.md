@@ -49,6 +49,115 @@ new directory and in-repo citations re-pointed in the moving PR (plan
 
 ---
 
+## anthropic-sdk-go v1.63.1 bump — wire-schema verification record (2026-08-19, plan 35 slice 0)
+
+The fourth bump record, and the first since v1.59.0's to move shapes this repo mirrors: v1.62.0
+(2026-08-06) is the release that carries every managed-agents type change in the range — advisor,
+budgets and list-cost usage, `session.usage`, `redacted`, `inference_geo`, `budget_reached` — and
+none of it is in the platform's scope, so all of it lands as **registry entries and four issues,
+not code**; the range's other content is **behavior** in the reference's client-side toolset and
+runner (v1.62.0's typed refusals and `executeTools` early return, v1.63.0's toolset changes,
+v1.63.1's runner placeholder), four of which were converged in-bump. The bump exists
+for plan 35: the threads surface it will build (`betasessionthread.go` and its unions) verifies
+against the latest release, and v1.63.1 is the latest (confirmed against the upstream tag list on
+2026-08-18). Endpoint count is unchanged at **131** (`.stats.yml`); the spec hash moved; the SDK's
+own `go.mod`/`go.sum` are byte-identical between the tags, so the bump drags in no new module.
+
+**What the range contains.** 61 files, +4166/−356. `shared/constant/constants.go` gains exactly one
+constant (`SessionBudgetReached`, the webhook event type), drops one `ModelNonStreamingTokens`
+row the platform never reads (`claude-opus-4-1-20250805`), and moves **no literal** — the eleven
+removed non-comment lines across the four session files are Go retypes to unions whose JSON tags
+are unchanged (`Multiagent.Agents`, `SessionMultiagentCoordinator.Agents`, `SessionThread.Agent`,
+`agent.message` content), so the dangerous class of the v1.59.0 bump is structurally empty again.
+The v1.62.0 changelog headline "skills auto-loading from GitHub" left **no Go-SDK schema surface**
+(the only `Skill` hunks are union projections onto the new advisor unions; the CLI checkout has
+no matching string) — stated here so nobody hunts for it later.
+
+**The enumeration.** Every SDK file defining a shape this repo mirrors, `git diff`ed pairwise
+between the tags. Byte-identical: `betaenvironment.go`, `betaenvironmentwork.go`,
+`betavaultcredential.go`, `betasessionresource.go`, `betafile.go`, `betaskill.go`,
+`betaskillversion.go`, `betasessionthreadevent.go`, `betaagentversion.go`, `tools/agenttoolset/
+skills.go` and `search.go`, `lib/environments/worker.go`, `config/federation.go`. Changed, each
+resolved:
+
+- *`betasession.go` (+392), `betasessionevent.go` (+413), `betasessionthread.go` (+215),
+  `betaagent.go` (+48), `betawebhook.go`, `betadeployment.go`, `beta.go`* — the v1.62.0 types:
+  `AdvisorParams` and the roster/coordinator/thread unions admitting `{type:"advisor"}`;
+  `BudgetLimit`/`BetaMonetaryAmount`/`BetaCurrency`, `budget` on session create/update and on the
+  session (`api:"required"`), `session.updated` and deployments (nullable), the `budget_reached`
+  stop reason on both idle events, the `session.usage` event in the list/stream/thread-stream
+  unions, `SessionUsage` + thread usage gaining `active_seconds`/`list_cost`/`server_tool_use`, the
+  `session.budget_reached` webhook; the `redacted` block on `agent.message`, both thread-message
+  events, deployment and **inbound** `user.message` content; `model.inference_geo` on params and
+  response. Session-events list/stream/send params are byte-identical. **Registered**: one
+  CONFIRMED entry for the unbuilt surface (each reachable piece is a 400, none a silent drop —
+  `budget` on create/update, `redacted` inbound), the `effort` entry extended to `inference_geo`
+  (still a silent drop, by the same reasoning), and one INFERRED entry for the session's
+  `budget: null` render (the tag says required, the deployment twin says nullable, `archived_at` is
+  the precedent). Issues #430 (redacted), #431 (advisor), #432 (budgets / usage / `session.usage`),
+  #433 (`inference_geo`). The `agent.message` content retype is decode-compatible: the platform
+  emits text blocks only.
+- *`tools/agenttoolset/fs.go`, `agenttoolset.go`, `skillarchive.go`* (v1.63.0, #226) and *`bash.go`,
+  `agenttoolset.go`* (v1.62.0, #213) — behavior, not shape. **Converged in-bump:** an inverted `view_range` selects nothing (empty
+  content, no error — the platform's error text had been byte-identical to the reference's old one);
+  skill-archive extraction materializes only regular files and directories (`zipEntryIsPlain` — a
+  Unix-host symlink/FIFO/device entry is skipped, an `S_IFDIR` entry without the trailing slash is
+  a directory, a non-Unix entry is data whatever its bits — and, a Codex review finding, the upload
+  form now refuses a `SKILL.md` that is such an entry, since it would validate and never
+  materialize); `fsErrorMessage` now answers an unmapped
+  error with Go's bare errno text (`read-only file system`) or `"i/o error"`, never `op /abs/path:` —
+  the platform's passthrough of the sandbox's strerror lowercases its first rune to match. **No
+  change:** `ToolError` typed refusal and `ErrBashTerminated` (in-process API, wording unchanged);
+  symlink-loop rejection (`too many levels of symbolic links`) — the platform has no workdir
+  confinement (registry) and its sandbox contract refuses a symlink leaf outright, a pre-existing
+  difference under the same entry.
+- *`betasessiontoolrunner.go`* — v1.63.1 (#236): the runner posts `(no output)` for an empty text
+  block in `user.tool_result` / `user.custom_tool_result` ("The Sessions API rejects empty text
+  blocks; a tool that succeeds silently must still produce a postable result"); v1.63.0 (#226):
+  `isFatal4xxStatus` excludes 409. **Converged in-bump:** both platform halves post `(no output)` for a silent
+  success (the executor had posted `[]`, the worker no content), and every inbound text block is
+  refused when empty — INFERRED, since the SDK witnesses the rejection for tool results only and
+  records no status; the extension to `user.message` is the platform's replay-wedge argument. The
+  409 change is a no-op: the platform's events lane never answers 409.
+- *`betatoolrunner.go`* (v1.62.0) — `executeTools` gains a second early return: a `max_tokens` /
+  `model_context_window_exceeded` turn executes **no** tool ("a cut-off turn left its last call's
+  arguments incomplete"), complete calls included. The platform keeps running the complete blocks
+  of such a turn — its truncation guard is per block, and #181 is the reason — so the turn-
+  classification registry entry and `brain.go`'s comment now state the disagreement instead of
+  citing the SDK's refusal return as its sole non-execution case.
+- *`lib/environments/poller.go`* — `isFatal4xx` also excludes 409 (heartbeat 409 → transient,
+  retried to the staleness ceiling; poll 409 → backoff). The platform's work API answers 409 only
+  from stop, never poll/ack/heartbeat, and its heartbeat mismatch is 412 (fatal on both sides), so
+  nothing needs tolerating; the platform's own BYOC twin `isFatalHeartbeat` keeps 409 fatal
+  (`internal/worker/lease.go`) — unreachable against this server, left as is.
+- *`betamessage.go`, `message.go`* — thinking / redacted_thinking doc comments and the removal of
+  the two `claude-opus-4-1` model constants (model ids are opaque config-resolved strings here);
+  no stop-reason or MCP change. `betadream.go` (+285, v1.63.0: `output_behavior`) is Messages-side
+  dream surface the platform does not mirror. `api.md` +21 rows above the route table (Stop Work
+  citation 693 → 698). No-op.
+
+**Citation durability — 36 SDK line citations re-read at v1.63.1: 15 hold, 21 drifted, 0 broken by
+line; one broken by content** (`betatoolrunner.go executeTools`, restated above). Every drift is a
+mechanical shift from insertions above the cited lines (advisor +28 and `inference_geo` +8 in
+`betaagent.go`; the budget/advisor/usage types in `betasession.go`; `execRead`'s −2 in `fs.go`;
++2 imports in `worker_test.go`; +5 in `api.md`), each re-read identical at the new line and
+corrected in the registry. The 24 live `v1.61.0` labels advanced (`.claude/agents/verifier.md`,
+`docs/REFERENCE_PROJECTS.md`, `internal/toolset/definitions.go` — the toolset types are untouched —
+plus `internal/domain/outcome.go`, `internal/api/outcomes_test.go` and the registry's evidence
+labels); the historical ones ("v1.61.0's SDK re-worded…", "again with v1.61.0's: 683 → 693",
+CHANGELOG/HISTORY/archived plans) stay as written. Plan 35's Ground-truth ranges are v1.61.0 lines
+by its own statement and were re-confirmed at that tag; the ranges that drift at v1.63.1 are the
+plan's to update when it cites them.
+
+**Evidence.** The sweep ran as five parallel investigations (session/event types; agent/thread/
+webhook types; toolset and runner behavior; citation durability; Messages/REST residue) plus a
+cross-check that reconciled their file lists and found no contradiction. `make verify` in WSL on the
+bumped pin: every package green (Docker and K8s sandbox suites included) at total statement
+coverage **91.03%** — the one red line being `internal/mcp`'s #380 assertion, which fails on
+roughly half of WSL2 runs, on `main` too, and is green in CI; a run before the review fold
+went fully green at 91.06%; the toolset, skills, events, executor, worker, brain and api suites were additionally
+run standalone under the new pin.
+
 ## Trimming the documentation to what code cannot say (plan 34, #413) — archived 2026-08-16, six slices delivered
 
 Tracked markdown went **2,665,735 → 2,166,819 bytes** (−19%) and is now smaller than the
