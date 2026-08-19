@@ -26,8 +26,9 @@ import (
 
 // sessionAgentJSON is the resolved-agent snapshot embedded in a session
 // (BetaManagedAgentsSessionAgent) — the domain wire shape, stored verbatim in
-// sessions.resolved_agent. Rendering it is a passthrough except for tools[],
-// whose toolset configuration renderSession resolves for the echo.
+// sessions.resolved_agent. Rendering it is a passthrough except for tools[]
+// — its own and each multiagent member's — whose toolset configuration
+// renderSession resolves for the echo.
 type sessionAgentJSON = domain.ResolvedAgent
 
 // usageJSON is the session-level usage wire shape — the domain type (nested
@@ -245,7 +246,9 @@ func (s *server) resolveAgent(ctx context.Context, db querier, raw json.RawMessa
 			// AgentWithOverridesParams); the coordinator's stored roster is
 			// the only one a session gets — an explicit 400, not a silent
 			// drop (plan 35 decision 10, INFERRED in docs/DIVERGENCES.md).
-			if len(obj.Multiagent) > 0 {
+			// An explicit null is the value every session response renders
+			// for a single agent, so a read-modify-write echo passes.
+			if present(obj.Multiagent) {
 				return snap, errInvalid("agent override multiagent is not supported; the roster is the coordinator agent's")
 			}
 			for key, val := range map[string]json.RawMessage{
@@ -367,7 +370,7 @@ func (s *server) resolveAgent(ctx context.Context, db querier, raw json.RawMessa
 	}
 	// A coordinator's roster is snapshotted as full member definitions, the
 	// `self` member from this very resolution — overrides applied (roster.go).
-	if len(spec.Multiagent) > 0 && !isNull(spec.Multiagent) {
+	if present(spec.Multiagent) {
 		roster, err := snapshotRoster(ctx, db, spec.Multiagent, snap)
 		if err != nil {
 			return snap, err

@@ -6,9 +6,9 @@ issue: "#53"
 # Multi-agent session threads — the coordinator topology (plan 35)
 
 This plan addresses #53 (its last slice closes it): a session's primary thread orchestrates work by spawning **session
-threads**, each running an agent from the coordinator's roster. Today the seam is
-reserved and nothing more — `internal/api/agents.go:55` rejects `multiagent` on agent
-create/update, `internal/events/inbound.go:423` (`requireNullThread`) rejects any non-null
+threads**, each running an agent from the coordinator's roster. At drafting the seam was
+reserved and nothing more — `internal/api/agents.go` rejected `multiagent` on agent
+create/update (slice 1 lifted that; the rest holds until its slice), `internal/events/inbound.go:423` (`requireNullThread`) rejects any non-null
 `session_thread_id`, `internal/brain/brain.go:510` stamps `session_thread_id: nil` on every
 tool intent, `internal/store/migrations/0001_init.sql:106` reserves `events.thread_id`
 (never written, never read), `internal/domain/event.go:97`'s `ThreadID` is dead, and no
@@ -572,8 +572,11 @@ reference only, never as wire sources: `claude-code-source`, `deepseek-harness`,
     catalog key becomes `(session_id, thread_id, server_name)` in slice 3's migration
     (`thread_id` NULL for the primary — the same `NULLS NOT DISTINCT` care as the work
     index; a server two threads both declare is discovered once per thread, the price of
-    per-agent declarations). Credentials (vault bindings) stay session-wide, as
-    documented.
+    per-agent declarations). The egress gate's per-session allowlist
+    (`internal/api/gateconfig.go` reads `resolved_agent->'mcp_servers'`) widens in the
+    same slice to every thread's declared servers — a sidecar that knows only the
+    coordinator's list would 403 a child's dial. Credentials (vault bindings) stay
+    session-wide, as documented.
 15. **Outcomes belong to the primary thread and grade on session quiescence.** Plan 21
     hooks grading into every `end_turn` settlement (`settleEndTurn`'s intercept,
     `grader.go:729`, `:770`) and every claimed `model_turn` (`brain.go:238-239`); left

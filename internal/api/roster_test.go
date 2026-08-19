@@ -1,6 +1,7 @@
 package api_test
 
 import (
+	"context"
 	"fmt"
 	"net/http"
 	"strings"
@@ -120,19 +121,58 @@ func TestRosterUpdateSelfAndReplacement(t *testing.T) {
 		t.Fatalf("update: %d %v", status, res)
 	}
 	got := rosterOf(t, res)
-	if len(got) != 2 || got[1]["id"] != id || got[1]["version"] != float64(2) {
-		t.Errorf("roster after update = %v, want [a, self@2]", got)
+	if len(got) != 2 || got[0]["id"] != a || got[0]["version"] != float64(1) || got[1]["id"] != id || got[1]["version"] != float64(2) {
+		t.Errorf("roster after update = %v, want [a@1, self@2]", got)
+	}
+
+	// The rendered roster round-trips: self renders as an ordinary reference
+	// to the coordinator at its current version, and echoing it back (the
+	// read-modify-write of a roster "replaced as a whole") is the self entry
+	// again — any entry naming the coordinator's own id is.
+	_, rendered := s.do(http.MethodGet, "/v1/agents/"+id, nil)
+	status, res = s.do(http.MethodPost, "/v1/agents/"+id, map[string]any{"name": "echoed", "multiagent": rendered["multiagent"]})
+	if status != http.StatusOK {
+		t.Fatalf("echo: %d %v", status, res)
+	}
+	if got := rosterOf(t, res); len(got) != 2 || got[0]["id"] != a || got[0]["version"] != float64(1) || got[1]["id"] != id || got[1]["version"] != float64(3) {
+		t.Errorf("roster after echo = %v, want [a@1, self@3]", got)
+	}
+	// A bare own id, or one pinned to the version being written, is self
+	// too; an own id at some other version is not this coordinator's self.
+	status, res = s.do(http.MethodPost, "/v1/agents/"+id, map[string]any{"multiagent": map[string]any{"type": "coordinator", "agents": []any{id, a}}})
+	if status != http.StatusOK || rosterOf(t, res)[0]["version"] != float64(4) {
+		t.Errorf("bare own id: %d %v, want self@4 first", status, res)
+	}
+	status, res = s.do(http.MethodPost, "/v1/agents/"+id, map[string]any{"multiagent": map[string]any{"type": "coordinator", "agents": []any{
+		map[string]any{"type": "agent", "id": id, "version": 5}, a}}})
+	if status != http.StatusOK || rosterOf(t, res)[0]["version"] != float64(5) {
+		t.Errorf("own id at the written version: %d %v, want self@5 first", status, res)
+	}
+	for _, entries := range [][]any{
+		{map[string]any{"type": "agent", "id": id, "version": 1}},
+		{map[string]any{"type": "self"}, id},
+	} {
+		status, body := s.do(http.MethodPost, "/v1/agents/"+id, map[string]any{"multiagent": map[string]any{"type": "coordinator", "agents": entries}})
+		wantErr(t, status, body, http.StatusBadRequest, "invalid_request_error")
+	}
+	if _, cur := s.do(http.MethodGet, "/v1/agents/"+id, nil); cur["version"] != float64(5) {
+		t.Fatalf("rejected updates changed the agent: %v", cur)
+	}
+	// Back to [a, self] for the rest.
+	status, res = s.do(http.MethodPost, "/v1/agents/"+id, map[string]any{"multiagent": map[string]any{"type": "coordinator", "agents": []any{a, map[string]any{"type": "self"}}}})
+	if status != http.StatusOK || rosterOf(t, res)[1]["version"] != float64(6) {
+		t.Fatalf("reset: %d %v", status, res)
 	}
 
 	// Omitted: a name-only update keeps the roster's members as pinned, but
 	// self moves with the coordinator — it means this coordinator at the
-	// version a session resolves, so a session on version 3 still finds it.
+	// version a session resolves, so a session on version 7 still finds it.
 	status, res = s.do(http.MethodPost, "/v1/agents/"+id, map[string]any{"name": "coordinator-renamed"})
 	if status != http.StatusOK {
 		t.Fatalf("rename: %d %v", status, res)
 	}
-	if got := rosterOf(t, res); len(got) != 2 || got[0]["id"] != a || got[1]["version"] != float64(3) {
-		t.Errorf("roster after rename = %v, want [a@1, self@3]", got)
+	if got := rosterOf(t, res); len(got) != 2 || got[0]["id"] != a || got[0]["version"] != float64(1) || got[1]["id"] != id || got[1]["version"] != float64(7) {
+		t.Errorf("roster after rename = %v, want [a@1, self@7]", got)
 	}
 	envID := createEnvironment(t, s, map[string]any{"name": "env"})["id"].(string)
 	sess := createSession(t, s, map[string]any{
@@ -141,7 +181,7 @@ func TestRosterUpdateSelfAndReplacement(t *testing.T) {
 	})
 	sa, _ := sess["agent"].(map[string]any)
 	if snap := rosterOf(t, sa); len(snap) != 2 || snap[1]["system"] != "overridden" || snap[1]["name"] != "coordinator-renamed" {
-		t.Errorf("session on the kept roster = %v, want the self copy from the overridden version-3 spec", snap)
+		t.Errorf("session on the kept roster = %v, want the self copy from the overridden version-7 spec", snap)
 	}
 	// Replaced as a whole.
 	status, res = s.do(http.MethodPost, "/v1/agents/"+id, map[string]any{
@@ -163,8 +203,8 @@ func TestRosterUpdateSelfAndReplacement(t *testing.T) {
 	}
 	// The pinned versions render the roster of their time.
 	_, v2 := s.do(http.MethodGet, "/v1/agents/"+id+"?version=2", nil)
-	if got := rosterOf(t, v2); len(got) != 2 {
-		t.Errorf("version 2 roster = %v, want [a, self@2]", got)
+	if got := rosterOf(t, v2); len(got) != 2 || got[0]["id"] != a || got[0]["version"] != float64(1) || got[1]["id"] != id || got[1]["version"] != float64(2) {
+		t.Errorf("version 2 roster = %v, want [a@1, self@2]", got)
 	}
 }
 
@@ -195,8 +235,9 @@ func TestRosterConstraints(t *testing.T) {
 		{"C-1 over 20", roster(many...), "between 1 and 20"},
 		{"C-2 duplicate ids", roster(a, map[string]any{"type": "agent", "id": a}), "referenced more than once"},
 		{"C-3 two selfs", roster(map[string]any{"type": "self"}, map[string]any{"type": "self"}), "at most one self"},
-		{"C-4 missing agent", roster("agent_doesnotexist"), "not found"},
+		{"C-4 missing agent", roster("agent_0000000000000000000000000"), "not found"},
 		{"C-4 missing version", roster(map[string]any{"type": "agent", "id": a, "version": 9}), "version 9 not found"},
+		{"C-4 version past int32", roster(map[string]any{"type": "agent", "id": a, "version": 2147483648}), "version 2147483648 not found"},
 		{"C-5 archived member", roster(archived), "is archived"},
 		{"C-6 nested coordinator", roster(nested), "depth limit 1"},
 		{"C-7 type not coordinator", map[string]any{"type": "advisor", "agents": []any{a}}, `type must be "coordinator"`},
@@ -204,6 +245,11 @@ func TestRosterConstraints(t *testing.T) {
 		{"entry unknown key", roster(map[string]any{"type": "self", "name": "x"}), "unknown field"},
 		{"entry bad version", roster(map[string]any{"type": "agent", "id": a, "version": 0}), "positive integer"},
 		{"entry empty string", roster(""), "must not be empty"},
+		{"entry not an agent id", roster("bogus"), `"bogus" is not an agent id`},
+		{"entry null", roster(nil), "entry must be an agent id string"},
+		{"entry id not a string", roster(map[string]any{"type": "agent", "id": 7}), "id must be a string"},
+		{"entry id missing", roster(map[string]any{"type": "agent"}), "id is required"},
+		{"agents not an array", map[string]any{"type": "coordinator", "agents": "x"}, "agents must be an array"},
 		{"unknown roster key", map[string]any{"type": "coordinator", "agents": []any{a}, "max": 3}, "unknown field"},
 		{"not an object", []any{a}, "must be an object"},
 	}
@@ -290,20 +336,51 @@ func TestRosterSessionSnapshot(t *testing.T) {
 		t.Errorf("GET session roster = %v", a2["multiagent"])
 	}
 
-	// A session update patching the coordinator's tools reaches its self copy.
+	// A session update patching the coordinator's tools and mcp_servers
+	// reaches its self copy — in the response and in the session.updated
+	// event alike — and leaves the other member as stored.
+	mcp := []any{map[string]any{"type": "url", "name": "docs", "url": "https://mcp.example.com"}}
 	status, upd := s.do(http.MethodPost, "/v1/sessions/"+res["id"].(string), map[string]any{
-		"agent": map[string]any{"tools": []any{}},
+		"agent": map[string]any{
+			"tools":       []any{map[string]any{"type": "mcp_toolset", "mcp_server_name": "docs"}},
+			"mcp_servers": mcp,
+		},
 	})
 	if status != http.StatusOK {
 		t.Fatalf("session update: %d %v", status, upd)
 	}
 	ua, _ := upd["agent"].(map[string]any)
-	if self := rosterOf(t, ua)[1]; len(self["tools"].([]any)) != 0 {
-		t.Errorf("self member after tools patch = %v, want [] like the coordinator", self["tools"])
+	checkPatched := func(where string, agent map[string]any) {
+		t.Helper()
+		self := rosterOf(t, agent)[1]
+		tools, _ := self["tools"].([]any)
+		servers, _ := self["mcp_servers"].([]any)
+		if len(tools) != 1 || len(servers) != 1 {
+			t.Fatalf("%s: self member after patch = %v, want the patched tools and mcp_servers", where, self)
+		}
+		if ts, _ := tools[0].(map[string]any); ts["type"] != "mcp_toolset" || ts["default_config"] == nil {
+			t.Errorf("%s: self member tools = %v, want the patched mcp_toolset, materialized", where, tools)
+		}
+		if sv, _ := servers[0].(map[string]any); sv["name"] != "docs" {
+			t.Errorf("%s: self member mcp_servers = %v, want the patched server", where, servers)
+		}
+		if member := rosterOf(t, agent)[0]; member["system"] != "worker-a system" || len(member["mcp_servers"].([]any)) != 0 {
+			t.Errorf("%s: other member after patch = %v, want untouched", where, member)
+		}
 	}
-	if member := rosterOf(t, ua)[0]; member["system"] != "worker-a system" {
-		t.Errorf("other member after patch = %v, want untouched", member)
+	checkPatched("response", ua)
+	_, listed := s.do(http.MethodGet, "/v1/sessions/"+res["id"].(string)+"/events", nil)
+	var updated map[string]any
+	for _, ev := range listData(t, listed) {
+		if ev["type"] == "session.updated" {
+			updated = ev
+		}
 	}
+	if updated == nil {
+		t.Fatalf("no session.updated event in %v", listed)
+	}
+	ea, _ := updated["agent"].(map[string]any)
+	checkPatched("session.updated", ea)
 
 	// A single-agent session still renders multiagent null.
 	plain := createSession(t, s, map[string]any{"agent": a, "environment_id": envID})
@@ -313,19 +390,50 @@ func TestRosterSessionSnapshot(t *testing.T) {
 }
 
 // agent_with_overrides cannot carry a roster: an explicit 400, not a silent
-// drop.
+// drop — while an explicit null, the value every single-agent session
+// renders, reads as absent.
 func TestRosterOverrideRejected(t *testing.T) {
 	s := newTestServer(t)
 	a := member(t, s, "worker-a")
 	envID := createEnvironment(t, s, map[string]any{"name": "env"})["id"].(string)
-	for _, val := range []any{nil, map[string]any{"type": "coordinator", "agents": []any{a}}} {
-		status, body := s.do(http.MethodPost, "/v1/sessions", map[string]any{
-			"agent":          map[string]any{"type": "agent_with_overrides", "id": a, "multiagent": val},
-			"environment_id": envID,
-		})
-		wantErr(t, status, body, http.StatusBadRequest, "invalid_request_error")
-		if msg := errMessage(body); !strings.Contains(msg, "override multiagent") {
-			t.Errorf("message = %q", msg)
-		}
+	status, body := s.do(http.MethodPost, "/v1/sessions", map[string]any{
+		"agent":          map[string]any{"type": "agent_with_overrides", "id": a, "multiagent": map[string]any{"type": "coordinator", "agents": []any{a}}},
+		"environment_id": envID,
+	})
+	wantErr(t, status, body, http.StatusBadRequest, "invalid_request_error")
+	if msg := errMessage(body); !strings.Contains(msg, "override multiagent") {
+		t.Errorf("message = %q", msg)
+	}
+	status, body = s.do(http.MethodPost, "/v1/sessions", map[string]any{
+		"agent":          map[string]any{"type": "agent_with_overrides", "id": a, "system": "x", "multiagent": nil},
+		"environment_id": envID,
+	})
+	if status != http.StatusOK {
+		t.Errorf("override multiagent null: %d %v, want a session", status, body)
+	}
+}
+
+// A member's stored spec answers to the whole-spec caps at session create,
+// as the coordinator's own does (resolveAgent): a pre-cap spec fails there.
+func TestRosterMemberValidatedAtSessionCreate(t *testing.T) {
+	s := newTestServer(t)
+	a := member(t, s, "worker-a")
+	coord := createAgent(t, s, map[string]any{"name": "coordinator", "model": "claude-opus-4-8",
+		"multiagent": map[string]any{"type": "coordinator", "agents": []any{a}}})["id"].(string)
+	envID := createEnvironment(t, s, map[string]any{"name": "env"})["id"].(string)
+	// Past the tools cap, written around the API as an old row could be.
+	tools := make([]map[string]any, 129)
+	for i := range tools {
+		tools[i] = map[string]any{"type": "agent_toolset_20260401"}
+	}
+	if _, err := s.pool.Exec(context.Background(),
+		`UPDATE agent_versions SET spec = jsonb_set(spec, '{tools}', $2) WHERE agent_id = $1 AND version = 1`,
+		a, mustJSON(t, tools)); err != nil {
+		t.Fatal(err)
+	}
+	status, body := s.do(http.MethodPost, "/v1/sessions", map[string]any{"agent": coord, "environment_id": envID})
+	wantErr(t, status, body, http.StatusBadRequest, "invalid_request_error")
+	if msg := errMessage(body); !strings.Contains(msg, "multiagent member "+a) || !strings.Contains(msg, "tools lists at most") {
+		t.Errorf("message = %q", msg)
 	}
 }

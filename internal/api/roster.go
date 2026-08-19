@@ -10,6 +10,7 @@ import (
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/toolset"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 )
 
 // The multiagent roster (plan 35 decision 10). An agent's `multiagent` is a
@@ -23,16 +24,20 @@ import (
 //     id string and a versionless reference pin the member's *current* version;
 //     the docs say the roster "never follows later member updates");
 //     {type:"self"} resolves to the coordinator's own id and the version the
-//     write produces.
+//     write produces — and so does any entry naming the coordinator's own id,
+//     because the rendered roster carries no self marker and the echo of a GET
+//     has to read back as what it rendered.
 //   - stored on the session (BetaManagedAgentsSessionMultiagentCoordinator):
 //     {type:"coordinator", agents:[SessionThreadAgent…]} — full definitions
 //     fetched from each member's pinned version, except the `self` member,
 //     whose definition is the coordinator's own resolved spec for this session
 //     (overrides applied, per the docs' "overrides apply to the coordinator and
-//     its `self` copies") minus `multiagent`.
+//     its `self` copies").
 //
 // The roster is untyped in domain.AgentSpec (a json.RawMessage) so one struct
-// serves both shapes; these are the parsers and renderers around it.
+// serves both shapes; these are the parsers and renderers around it. The
+// rewriters (repinSelf, patchSelfMember, materializeRoster) touch one member,
+// or one key of one member, and leave every other byte as stored.
 
 // rosterMaxEntries is the documented roster size: "1–20 entries".
 const rosterMaxEntries = 20
@@ -52,7 +57,10 @@ type storedRoster struct {
 
 // threadAgentJSON is BetaManagedAgentsSessionThreadAgent: a roster member's
 // full definition as snapshotted into a session. Every field is required on
-// the wire; the roster is deliberately not repeated inside a member.
+// the wire; the roster is deliberately not repeated inside a member. Declared
+// field by field rather than embedding domain.AgentSpec on purpose: this is
+// the SDK's fixed ten-field shape, not the spec, and TestRosterSessionSnapshot
+// pins the ten names.
 type threadAgentJSON struct {
 	ID          string            `json:"id"`
 	Type        string            `json:"type"` // "agent"
@@ -72,6 +80,12 @@ type sessionRoster struct {
 	Agents []threadAgentJSON `json:"agents"`
 }
 
+// rawRoster is either shape with its members' bytes kept, for the rewriters.
+type rawRoster struct {
+	Type   string            `json:"type"`
+	Agents []json.RawMessage `json:"agents"`
+}
+
 func threadAgentOf(id string, version int64, name string, spec domain.AgentSpec) threadAgentJSON {
 	spec.Normalize()
 	return threadAgentJSON{
@@ -79,6 +93,13 @@ func threadAgentOf(id string, version int64, name string, spec domain.AgentSpec)
 		Description: spec.Description, Model: spec.Model, System: spec.System,
 		Tools: spec.Tools, MCPServers: spec.MCPServers, Skills: spec.Skills,
 	}
+}
+
+// selfMember is the `self` member of a session-side roster: the coordinator's
+// resolved spec for this session, overrides applied (threadAgentOf carries no
+// roster, so "minus `multiagent`" falls out of the shape).
+func selfMember(self sessionAgentJSON) threadAgentJSON {
+	return threadAgentOf(self.ID.String(), self.Version, self.Name, self.AgentSpec)
 }
 
 // resolveRoster validates a `multiagent` request value and resolves it into
@@ -95,10 +116,6 @@ func threadAgentOf(id string, version int64, name string, spec domain.AgentSpec)
 // and the depth check reads the spec that gets pinned, since that is the
 // definition a thread would run. Every rejection is a 400 naming the entry.
 func resolveRoster(ctx context.Context, tx pgx.Tx, raw json.RawMessage, selfID string, selfVersion int64) (json.RawMessage, error) {
-	var in struct {
-		Type   *string           `json:"type"`
-		Agents []json.RawMessage `json:"agents"`
-	}
 	obj, err := asObjectRaw(raw)
 	if err != nil {
 		return nil, errInvalid("multiagent must be an object")
@@ -106,79 +123,148 @@ func resolveRoster(ctx context.Context, tx pgx.Tx, raw json.RawMessage, selfID s
 	if err := rejectUnknownKeys(obj, "type", "agents"); err != nil {
 		return nil, errInvalid("multiagent: %s", err.Error())
 	}
-	if err := json.Unmarshal(raw, &in); err != nil {
-		return nil, errInvalid("multiagent must be a {type, agents} object")
-	}
-	if in.Type == nil || *in.Type != "coordinator" {
+	var typ string
+	if raw, ok := obj["type"]; !ok || json.Unmarshal(raw, &typ) != nil || typ != "coordinator" {
 		return nil, errInvalid(`multiagent.type must be "coordinator"`)
 	}
-	if len(in.Agents) == 0 || len(in.Agents) > rosterMaxEntries {
+	entries, err := rawList(obj["agents"], "multiagent.agents")
+	if err != nil {
+		return nil, err
+	}
+	if len(entries) == 0 || len(entries) > rosterMaxEntries {
 		return nil, errInvalid("multiagent.agents must have between 1 and %d entries", rosterMaxEntries)
 	}
 
-	out := storedRoster{Type: "coordinator", Agents: make([]rosterRef, 0, len(in.Agents))}
+	refs := make([]rosterRef, len(entries))
 	seen := map[string]bool{}
 	selfSeen := false
-	for i, entry := range in.Agents {
+	var ids []string // the members to look up, in request order
+	for i, entry := range entries {
 		id, version, isSelf, err := parseRosterEntry(entry)
 		if err != nil {
 			return nil, errInvalid("multiagent.agents[%d]: %s", i, err.Error())
 		}
-		if isSelf {
+		if isSelf || id == selfID {
 			if selfSeen {
 				return nil, errInvalid("multiagent.agents[%d]: at most one self entry", i)
 			}
 			selfSeen = true
+			// An explicit own-id reference may carry the version a GET
+			// renders for self (the one being superseded) or the one this
+			// write produces; any other is not this coordinator's self.
+			if version != 0 && version != selfVersion && version != selfVersion-1 {
+				return nil, errInvalid(`multiagent.agents[%d]: agent %s version %d is not this coordinator's current version; use {"type":"self"}`, i, id, version)
+			}
 			id, version = selfID, selfVersion
 		} else {
-			// The lock is on the agent row: agent_versions rows are immutable,
-			// and what a concurrent writer could change is the archive state.
-			var (
-				current    int64
-				archivedAt *time.Time
-			)
-			err := tx.QueryRow(ctx,
-				`SELECT version, archived_at FROM agents WHERE id = $1 FOR SHARE`, id).
-				Scan(&current, &archivedAt)
-			if errors.Is(err, pgx.ErrNoRows) {
-				return nil, errInvalid("multiagent.agents[%d]: agent %s not found", i, id)
-			}
-			if err != nil {
-				return nil, err
-			}
-			if archivedAt != nil {
-				return nil, errInvalid("multiagent.agents[%d]: agent %s is archived", i, id)
-			}
-			if version == 0 {
-				version = current
-			}
-			var specJSON []byte
-			err = tx.QueryRow(ctx,
-				`SELECT spec FROM agent_versions WHERE agent_id = $1 AND version = $2`, id, version).
-				Scan(&specJSON)
-			if errors.Is(err, pgx.ErrNoRows) {
-				return nil, errInvalid("multiagent.agents[%d]: agent %s version %d not found", i, id, version)
-			}
-			if err != nil {
-				return nil, err
-			}
-			var member struct {
-				Multiagent json.RawMessage `json:"multiagent"`
-			}
-			if err := json.Unmarshal(specJSON, &member); err != nil {
-				return nil, fmt.Errorf("decode stored agent spec: %w", err)
-			}
-			if len(member.Multiagent) > 0 && !isNull(member.Multiagent) {
-				return nil, errInvalid("multiagent.agents[%d]: agent %s is itself a coordinator (depth limit 1)", i, id)
-			}
+			ids = append(ids, id)
 		}
 		if seen[id] {
 			return nil, errInvalid("multiagent.agents[%d]: agent %s is referenced more than once", i, id)
 		}
 		seen[id] = true
-		out.Agents = append(out.Agents, rosterRef{ID: id, Type: "agent", Version: version})
+		refs[i] = rosterRef{ID: id, Type: "agent", Version: version}
 	}
-	return json.Marshal(out)
+
+	// One statement locks every member row, in id order so that two rosters
+	// naming the same members lock them alike. The lock is on the agent row:
+	// agent_versions rows are immutable, and what a concurrent writer could
+	// change is the archive state.
+	type agentRow struct {
+		current  int64
+		archived bool
+	}
+	members := map[string]agentRow{}
+	rows, err := tx.Query(ctx,
+		`SELECT id, version, archived_at FROM agents WHERE id = ANY($1) ORDER BY id FOR SHARE`, ids)
+	if err != nil {
+		return nil, rosterLockErr(err)
+	}
+	for rows.Next() {
+		var (
+			id         string
+			current    int64
+			archivedAt *time.Time
+		)
+		if err := rows.Scan(&id, &current, &archivedAt); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		members[id] = agentRow{current: current, archived: archivedAt != nil}
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, rosterLockErr(err)
+	}
+	agentIDs, versions := make([]string, 0, len(ids)), make([]int64, 0, len(ids))
+	for i := range refs {
+		if refs[i].ID == selfID {
+			continue
+		}
+		m, ok := members[refs[i].ID]
+		if !ok {
+			return nil, errInvalid("multiagent.agents[%d]: agent %s not found", i, refs[i].ID)
+		}
+		if m.archived {
+			return nil, errInvalid("multiagent.agents[%d]: agent %s is archived", i, refs[i].ID)
+		}
+		if refs[i].Version == 0 {
+			refs[i].Version = m.current
+		}
+		agentIDs, versions = append(agentIDs, refs[i].ID), append(versions, refs[i].Version)
+	}
+
+	// The pinned versions exist, and none carries a roster (depth limit 1):
+	// one statement reads just the `multiagent` key of each.
+	found, nested := map[string]bool{}, map[string]bool{}
+	rows, err = tx.Query(ctx,
+		`SELECT v.agent_id, v.spec->'multiagent'
+		   FROM agent_versions v
+		   JOIN unnest($1::text[], $2::bigint[]) AS p(agent_id, version)
+		     ON p.agent_id = v.agent_id AND p.version = v.version`, agentIDs, versions)
+	if err != nil {
+		return nil, err
+	}
+	for rows.Next() {
+		var (
+			id string
+			ma []byte
+		)
+		if err := rows.Scan(&id, &ma); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		found[id] = true
+		nested[id] = present(ma)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	for i := range refs {
+		if refs[i].ID == selfID {
+			continue
+		}
+		if !found[refs[i].ID] {
+			return nil, errInvalid("multiagent.agents[%d]: agent %s version %d not found", i, refs[i].ID, refs[i].Version)
+		}
+		if nested[refs[i].ID] {
+			return nil, errInvalid("multiagent.agents[%d]: agent %s is itself a coordinator (depth limit 1)", i, refs[i].ID)
+		}
+	}
+	return json.Marshal(storedRoster{Type: "coordinator", Agents: refs})
+}
+
+// rosterLockErr maps the one failure the member locks can add — two
+// coordinators' updates naming each other deadlock on the row locks, and
+// Postgres aborts one (SQLSTATE 40P01) — to a 409 the client retries, as
+// the other concurrent-write sites do; anything else is the caller's error.
+func rosterLockErr(err error) error {
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) && pgErr.Code == "40P01" {
+		return errConflict("an agent the roster references is being updated concurrently; retry")
+	}
+	return err
 }
 
 // repinSelf moves a stored roster's `self` entry — the one naming the
@@ -186,19 +272,54 @@ func resolveRoster(ctx context.Context, tx pgx.Tx, raw json.RawMessage, selfID s
 // an update that kept the roster produces (to). A roster without one, or no
 // roster, is returned unchanged.
 func repinSelf(stored json.RawMessage, selfID string, from, to int64) (json.RawMessage, error) {
-	if len(stored) == 0 || isNull(stored) {
+	if !present(stored) {
 		return stored, nil
 	}
-	var roster storedRoster
+	return rewriteMembers(stored, func(m map[string]json.RawMessage) (any, error) {
+		if !memberIs(m, selfID, from) {
+			return nil, nil
+		}
+		m["version"] = mustJSON(to)
+		return m, nil
+	})
+}
+
+// rewriteMembers applies fn to every member of a stored roster (either
+// shape), each decoded as a key → raw-value map so that whatever fn leaves
+// alone survives byte for byte; fn returns the member to write back, or nil
+// to keep it as stored.
+func rewriteMembers(stored json.RawMessage, fn func(m map[string]json.RawMessage) (any, error)) (json.RawMessage, error) {
+	var roster rawRoster
 	if err := json.Unmarshal(stored, &roster); err != nil {
 		return nil, fmt.Errorf("decode stored roster: %w", err)
 	}
-	for i := range roster.Agents {
-		if roster.Agents[i].ID == selfID && roster.Agents[i].Version == from {
-			roster.Agents[i].Version = to
+	for i, raw := range roster.Agents {
+		var m map[string]json.RawMessage
+		if err := json.Unmarshal(raw, &m); err != nil || m == nil {
+			return nil, fmt.Errorf("decode stored roster member: %v", err)
+		}
+		out, err := fn(m)
+		if err != nil {
+			return nil, err
+		}
+		if out == nil {
+			continue
+		}
+		if roster.Agents[i], err = json.Marshal(out); err != nil {
+			return nil, err
 		}
 	}
 	return json.Marshal(roster)
+}
+
+// memberIs reports whether a roster member (either shape) names id at version.
+func memberIs(m map[string]json.RawMessage, id string, version int64) bool {
+	var (
+		mid string
+		mv  int64
+	)
+	return json.Unmarshal(m["id"], &mid) == nil && json.Unmarshal(m["version"], &mv) == nil &&
+		mid == id && mv == version
 }
 
 // asObjectRaw decodes raw as a JSON object; null and non-objects are errors.
@@ -212,18 +333,20 @@ func asObjectRaw(raw json.RawMessage) (map[string]json.RawMessage, error) {
 
 // parseRosterEntry reads one roster entry: a bare agent-id string, a
 // {type:"agent", id, version?} reference, or {type:"self"}. version 0 means
-// "pin the current version".
+// "pin the current version" (an explicit null reads as omitted, as session
+// create's agent.version does).
 func parseRosterEntry(raw json.RawMessage) (id string, version int64, isSelf bool, err error) {
+	shapeErr := errors.New(`entry must be an agent id string, {"type":"agent","id",…} or {"type":"self"}`)
+	if isNull(raw) {
+		return "", 0, false, shapeErr
+	}
 	var s string
 	if json.Unmarshal(raw, &s) == nil {
-		if s == "" {
-			return "", 0, false, errors.New("agent id must not be empty")
-		}
-		return s, 0, false, nil
+		return s, 0, false, checkAgentID(s)
 	}
 	obj, err := asObjectRaw(raw)
 	if err != nil {
-		return "", 0, false, errors.New(`entry must be an agent id string, {"type":"agent","id",…} or {"type":"self"}`)
+		return "", 0, false, shapeErr
 	}
 	var typ string
 	if raw, ok := obj["type"]; !ok || json.Unmarshal(raw, &typ) != nil {
@@ -239,8 +362,12 @@ func parseRosterEntry(raw json.RawMessage) (id string, version int64, isSelf boo
 		if err := rejectUnknownKeys(obj, "type", "id", "version"); err != nil {
 			return "", 0, false, err
 		}
-		if raw, ok := obj["id"]; !ok || json.Unmarshal(raw, &id) != nil || id == "" {
-			return "", 0, false, errors.New("id is required")
+		id, err := requiredString(obj, "id")
+		if err != nil {
+			return "", 0, false, err
+		}
+		if err := checkAgentID(id); err != nil {
+			return "", 0, false, err
 		}
 		if raw, ok := obj["version"]; ok && !isNull(raw) {
 			if err := json.Unmarshal(raw, &version); err != nil || version < 1 {
@@ -253,13 +380,27 @@ func parseRosterEntry(raw json.RawMessage) (id string, version int64, isSelf boo
 	}
 }
 
+// checkAgentID rejects a member id on shape before it reaches a bind
+// parameter (the vault_ids precedent): a value that is not an agent_ id can
+// never name a stored agent.
+func checkAgentID(id string) error {
+	if id == "" {
+		return errors.New("agent id must not be empty")
+	}
+	if !domain.ID(id).HasPrefix(domain.PrefixAgent) || !domain.ID(id).Valid() {
+		return fmt.Errorf("%q is not an agent id", id)
+	}
+	return nil
+}
+
 // snapshotRoster builds the session-side roster from a stored one: every
 // member's definition is fetched from its pinned version, and the `self`
 // member — the entry naming the coordinator at the version the session
-// resolved — is `self`'s own resolved spec, overrides applied, minus the
-// roster. Members are not re-checked for archive state here: the roster was
-// validated when it was written and pins immutable versions (INFERRED,
-// docs/DIVERGENCES.md).
+// resolved — is `self`'s own resolved spec, overrides applied. Members are not
+// re-checked for archive state here: the roster was validated when it was
+// written and pins immutable versions (INFERRED, docs/DIVERGENCES.md). Each
+// member does answer to the whole-spec caps, as resolveAgent's rule for the
+// coordinator says: a pre-cap stored spec fails here, at create.
 func snapshotRoster(ctx context.Context, db querier, stored json.RawMessage, self sessionAgentJSON) (json.RawMessage, error) {
 	var roster storedRoster
 	if err := json.Unmarshal(stored, &roster); err != nil {
@@ -268,9 +409,7 @@ func snapshotRoster(ctx context.Context, db querier, stored json.RawMessage, sel
 	out := sessionRoster{Type: "coordinator", Agents: make([]threadAgentJSON, 0, len(roster.Agents))}
 	for _, ref := range roster.Agents {
 		if ref.ID == self.ID.String() && ref.Version == self.Version {
-			spec := self.AgentSpec
-			spec.Multiagent = nil
-			out.Agents = append(out.Agents, threadAgentOf(ref.ID, ref.Version, self.Name, spec))
+			out.Agents = append(out.Agents, selfMember(self))
 			continue
 		}
 		var (
@@ -292,6 +431,10 @@ func snapshotRoster(ctx context.Context, db querier, stored json.RawMessage, sel
 		if err := json.Unmarshal(specJSON, &spec); err != nil {
 			return nil, fmt.Errorf("decode stored agent spec: %w", err)
 		}
+		spec.Normalize()
+		if err := validateAgentSpec(spec); err != nil {
+			return nil, errInvalid("multiagent member %s: %s", ref.ID, err.Error())
+		}
 		out.Agents = append(out.Agents, threadAgentOf(ref.ID, ref.Version, name, spec))
 	}
 	return json.Marshal(out)
@@ -303,41 +446,32 @@ func snapshotRoster(ctx context.Context, db querier, stored json.RawMessage, sel
 // session — true after the update as it was at create. A snapshot without a
 // self member (or without a roster) is returned unchanged.
 func patchSelfMember(stored json.RawMessage, self sessionAgentJSON) (json.RawMessage, error) {
-	if len(stored) == 0 || isNull(stored) {
+	if !present(stored) {
 		return stored, nil
 	}
-	var roster sessionRoster
-	if err := json.Unmarshal(stored, &roster); err != nil {
-		return nil, fmt.Errorf("decode stored roster snapshot: %w", err)
-	}
-	for i := range roster.Agents {
-		if roster.Agents[i].ID == self.ID.String() && roster.Agents[i].Version == self.Version {
-			spec := self.AgentSpec
-			spec.Multiagent = nil
-			roster.Agents[i] = threadAgentOf(roster.Agents[i].ID, roster.Agents[i].Version, self.Name, spec)
+	return rewriteMembers(stored, func(m map[string]json.RawMessage) (any, error) {
+		if !memberIs(m, self.ID.String(), self.Version) {
+			return nil, nil
 		}
-	}
-	return json.Marshal(roster)
+		return selfMember(self), nil
+	})
 }
 
 // materializeRoster resolves the toolset configuration inside every member of
 // a session-side roster, the rule renderSession applies to the coordinator's
 // own tools[]. It never fails: a roster it cannot decode ships as stored.
 func materializeRoster(stored json.RawMessage) json.RawMessage {
-	if len(stored) == 0 || isNull(stored) {
+	if !present(stored) {
 		return stored
 	}
-	var roster sessionRoster
-	if err := json.Unmarshal(stored, &roster); err != nil {
-		return stored
-	}
-	for i := range roster.Agents {
-		if roster.Agents[i].Tools == nil {
-			roster.Agents[i].Tools = []json.RawMessage{}
+	out, err := rewriteMembers(stored, func(m map[string]json.RawMessage) (any, error) {
+		var tools []json.RawMessage
+		if raw, ok := m["tools"]; !ok || json.Unmarshal(raw, &tools) != nil {
+			return nil, nil
 		}
-		roster.Agents[i].Tools = toolset.MaterializeTools(roster.Agents[i].Tools)
-	}
-	out, err := json.Marshal(roster)
+		m["tools"] = mustJSON(toolset.MaterializeTools(tools))
+		return m, nil
+	})
 	if err != nil {
 		return stored
 	}
