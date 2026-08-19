@@ -295,8 +295,11 @@ func rewriteMembers(stored json.RawMessage, fn func(m map[string]json.RawMessage
 	}
 	for i, raw := range roster.Agents {
 		var m map[string]json.RawMessage
-		if err := json.Unmarshal(raw, &m); err != nil || m == nil {
-			return nil, fmt.Errorf("decode stored roster member: %v", err)
+		if err := json.Unmarshal(raw, &m); err != nil {
+			return nil, fmt.Errorf("decode stored roster member: %w", err)
+		}
+		if m == nil {
+			return nil, errors.New("decode stored roster member: not an object")
 		}
 		out, err := fn(m)
 		if err != nil {
