@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/url"
 	"strings"
 	"time"
@@ -152,8 +153,16 @@ func (e *Executor) runWebTools(ctx context.Context, sid domain.ID, progress func
 		progress()
 		// Answered under a thread-scoped interrupt since the scan: skipped, and
 		// cancelled on the keeper's beat if it happens mid-call (decision 9).
+		// A check that fails is a pass cut short, never answers thrown away:
+		// the calls answered so far were paid for, so they commit and the
+		// item comes back for the rest; with nothing answered it faults.
 		if answered, err := events.Answered(ctx, e.pool, sid, u.id); err != nil {
-			return results, nil, fmt.Errorf("tool %s (%s): answered check: %w", u.name, u.id, err)
+			if len(results) == 0 {
+				return nil, nil, fmt.Errorf("tool %s (%s): answered check: %w", u.name, u.id, err)
+			}
+			slog.ErrorContext(ctx, "executor: web pass cut short, its answers committed",
+				"tool_use", u.id, "tool", u.name, "error", err)
+			break
 		} else if answered {
 			continue
 		}
@@ -161,6 +170,7 @@ func (e *Executor) runWebTools(ctx context.Context, sid domain.ID, progress func
 		start := time.Now()
 		res := e.runWebTool(cctx, u)
 		if stop() {
+			toolset.RecordRun(ctx, u.name, time.Since(start), res, context.Canceled)
 			continue
 		}
 		toolset.RecordRun(ctx, u.name, time.Since(start), res, ctx.Err())

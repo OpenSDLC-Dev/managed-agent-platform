@@ -140,7 +140,7 @@ func (e *Executor) processMCP(ctx context.Context, item *queue.Item) (err error)
 	// Discovery is per thread (plan 35 decision 14): each live thread's agent
 	// declares its own servers, listed under its own key — a server two
 	// threads both declare is dialled once per thread.
-	threads, err := e.liveThreadMCPServers(ctx, item.SessionID, sess.mcpServers)
+	threads, err := liveThreadMCPServers(ctx, e.pool, item.SessionID, sess.mcpServers)
 	if err != nil {
 		return err
 	}
@@ -149,19 +149,25 @@ func (e *Executor) processMCP(ctx context.Context, item *queue.Item) (err error)
 	// Progress is one server reached, not one pass finished — answerMCPCalls says
 	// why the pass being bounded whole is not enough on its own (#383).
 	kctx, keeper := e.queue.KeepLease(ctx, item, e.cfg.LeaseTTL, e.cfg.StallTimeout)
+	// One budget for the pass, whatever the thread count: the bound is the
+	// item's, not each thread's, or a coordinator's threads would multiply it.
+	budget, cancel := context.WithTimeout(kctx, e.cfg.MCPPassTimeout)
+	defer cancel()
 	var rows []catalogRow
 	var runErr error
 	for _, th := range threads {
 		pending, err := e.undiscoveredServers(ctx, item.SessionID, th.id, th.servers)
 		if err != nil {
-			_ = keeper.Close()
+			if kerr := keeper.Close(); kerr != nil {
+				return fmt.Errorf("lease keeper: %w (run: %w)", kerr, err)
+			}
 			return err
 		}
 		if len(pending) == 0 {
 			continue
 		}
 		var found []catalogRow
-		if found, runErr = e.discoverServers(kctx, sess.envConfig, sess.vaultIDs, pending, keeper.Progress); runErr != nil {
+		if found, runErr = e.discoverServers(budget, sess.envConfig, sess.vaultIDs, pending, keeper.Progress); runErr != nil {
 			break
 		}
 		for i := range found {
@@ -214,8 +220,8 @@ type threadServers struct {
 // declared servers, the primary first — the units discovery runs for. A
 // session from before the thread resource, with no rows, is its primary
 // alone.
-func (e *Executor) liveThreadMCPServers(ctx context.Context, sid domain.ID, primary []mcpServerRef) ([]threadServers, error) {
-	rows, err := e.pool.Query(ctx,
+func liveThreadMCPServers(ctx context.Context, q events.Querier, sid domain.ID, primary []mcpServerRef) ([]threadServers, error) {
+	rows, err := q.Query(ctx,
 		`SELECT CASE WHEN parent_thread_id IS NULL THEN '' ELSE id END, agent->'mcp_servers'
 		   FROM session_threads WHERE session_id = $1 AND archived_at IS NULL
 		  ORDER BY parent_thread_id IS NOT NULL, created_at, id`, sid.String())
@@ -257,7 +263,7 @@ func (e *Executor) readyEndpoints(ctx context.Context, sid, threadID domain.ID) 
 	rows, err := e.pool.Query(ctx,
 		`SELECT server_name, url FROM mcp_catalogs
 		  WHERE session_id = $1 AND thread_id IS NOT DISTINCT FROM $2 AND status = 'ready'`,
-		sid.String(), nullableThread(threadID))
+		sid.String(), events.NullableThread(threadID))
 	if err != nil {
 		return nil, fmt.Errorf("read mcp catalog: %w", err)
 	}
@@ -342,7 +348,8 @@ func (e *Executor) undiscoveredServers(ctx context.Context, sid, threadID domain
 // it: each goroutine fills its own declaration's slot, so the rows the settlement
 // walks are in declaration order however the dials interleave.
 //
-// The pass is still bounded as a whole (Config.MCPPassTimeout), because this
+// The pass is still bounded as a whole (Config.MCPPassTimeout, on the context
+// processMCP hands in — one budget across every thread's servers), because this
 // process runs one work item at a time and a tarpit server would otherwise hold
 // every other session on the host — the lease keeper renews throughout, so
 // nothing reclaims the item and cuts it short. What the fan-out changed is the
@@ -353,7 +360,7 @@ func (e *Executor) undiscoveredServers(ctx context.Context, sid, threadID domain
 // immediate).
 func (e *Executor) discoverServers(ctx context.Context, cfg domain.EnvironmentConfig,
 	vaultIDs []string, servers []mcpServerRef, progress func()) ([]catalogRow, error) {
-	budget, cancel := context.WithTimeout(ctx, e.cfg.MCPPassTimeout)
+	budget, cancel := context.WithCancel(ctx)
 	defer cancel()
 
 	rows := make([]catalogRow, len(servers))
@@ -1017,7 +1024,7 @@ func (e *Executor) settleMCP(ctx context.Context, item *queue.Item, rows []catal
 	}
 	// What each thread declares, re-read under the lock (a child's snapshot
 	// never changes; the primary's resolved agent can).
-	threads, err := e.liveThreadMCPServers(ctx, item.SessionID, agent.MCPServers)
+	threads, err := liveThreadMCPServers(ctx, tx, item.SessionID, agent.MCPServers)
 	if err != nil {
 		return err
 	}
@@ -1098,7 +1105,7 @@ func (e *Executor) settleMCP(ctx context.Context, item *queue.Item, rows []catal
 			                  ELSE EXCLUDED.error END,
 			     fetched_at = EXCLUDED.fetched_at`,
 			item.SessionID.String(), r.name, r.url, string(toolsJSON), r.status, reason,
-			r.notReached, nullableThread(r.thread)); err != nil {
+			r.notReached, events.NullableThread(r.thread)); err != nil {
 			return fmt.Errorf("write mcp catalog for %q: %w", r.name, err)
 		}
 	}

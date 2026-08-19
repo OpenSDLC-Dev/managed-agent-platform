@@ -266,6 +266,20 @@ func TestTransitionThreadFoldsOverChildren(t *testing.T) {
 	if len(union) != 2 || union[0] != ids[0].ID.String() || union[1] != ids[1].ID.String() {
 		t.Errorf("session event_ids = %v, want the seq-ordered union [%s %s]", union, ids[0].ID, ids[1].ID)
 	}
+	// The moving thread's own asks may not be on the log yet — the brain
+	// transitions before it appends the batch that carries them, under
+	// pre-minted ids — and they close the union, which is their place once
+	// appended.
+	minted := domain.NewID("sevt")
+	got, _ = transition(t, pool, log, sid, events.ThreadTransition{ThreadID: a, Status: idle, Reemit: true,
+		Stop: &domain.StopReason{Type: domain.StopRequiresAction, EventIDs: []domain.ID{minted}}})
+	sr, _ = bodyOf(t, got[1])["stop_reason"].(map[string]any)
+	union, _ = sr["event_ids"].([]any)
+	if len(union) != 2 || union[0] != ids[0].ID.String() || union[1] != minted.String() {
+		t.Errorf("session event_ids with an ask not yet on the log = %v, want [%s %s]", union, ids[0].ID, minted)
+	}
+	transition(t, pool, log, sid, events.ThreadTransition{ThreadID: a, Status: idle, Reemit: true,
+		Stop: &domain.StopReason{Type: domain.StopRequiresAction, EventIDs: []domain.ID{ids[1].ID}}})
 	// The preview agrees with the fold, without writing.
 	st, stop, err := events.PreviewTransition(ctx, pool, sid, events.ThreadTransition{ThreadID: a, Status: idle, Stop: endTurn})
 	if err != nil || st != idle || stop == nil || stop.Type != domain.StopRequiresAction || len(stop.EventIDs) != 1 {

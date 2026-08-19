@@ -201,20 +201,15 @@ func HasUnansweredPlatformToolUse(ctx context.Context, q Querier, sessionID doma
 	return hasUnansweredToolUse(ctx, q, sessionID, []string{string(domain.EventAgentToolUse)}, extraRefs)
 }
 
-// HasUnansweredMCPToolUse reports whether any MCP call still lacks a result.
+// HasRunnableMCPToolUse reports whether any MCP call still lacks a result.
 // Every settlement asks it first, because the answer decides a work kind no
 // other driver can serve: only the platform's MCP driver answers an
 // agent.mcp_tool_use — a client may post neither the call nor its result, and a
 // BYOC worker's contract has no MCP surface at all — so a session left with one
-// outstanding and no mcp_exec queued waits forever.
-func HasUnansweredMCPToolUse(ctx context.Context, q Querier, sessionID domain.ID, extraRefs []string) (bool, error) {
-	return hasUnansweredToolUse(ctx, q, sessionID, []string{string(domain.EventAgentMCPToolUse)}, extraRefs)
-}
-
-// HasRunnableMCPToolUse is HasUnansweredMCPToolUse over the runnable set: the
-// question the mcp_exec enqueue sites ask, since a gated MCP call still
-// awaiting its human is nothing for the driver to run. extraAllowed are the
-// ids a batch's validated-but-not-yet-inserted allow confirmations release.
+// outstanding and no mcp_exec queued waits forever. Asked over the runnable
+// set (plan 35 decision 5): a gated MCP call still awaiting its human is
+// nothing for the driver to run. extraAllowed are the ids a batch's
+// validated-but-not-yet-inserted allow confirmations release.
 func HasRunnableMCPToolUse(ctx context.Context, q Querier, sessionID domain.ID, extraRefs, extraAllowed []string) (bool, error) {
 	if extraRefs == nil {
 		extraRefs = []string{}
@@ -371,6 +366,36 @@ func Answered(ctx context.Context, q Querier, sessionID domain.ID, useID domain.
 		return false, fmt.Errorf("answered check: %w", err)
 	}
 	return answered, nil
+}
+
+// AnsweredSet is Answered over many ids in one query: the subset of ids that
+// some result already answers.
+func AnsweredSet(ctx context.Context, q Querier, sessionID domain.ID, ids []domain.ID) (map[domain.ID]bool, error) {
+	strs := make([]string, 0, len(ids))
+	for _, id := range ids {
+		if id != "" {
+			strs = append(strs, id.String())
+		}
+	}
+	out := map[domain.ID]bool{}
+	if len(strs) == 0 {
+		return out, nil
+	}
+	rows, err := q.Query(ctx,
+		`SELECT tu.id FROM events tu WHERE tu.session_id = $1 AND tu.id = ANY($2) AND `+answeredBy(3),
+		sessionID.String(), strs, toolResultTypes)
+	if err != nil {
+		return nil, fmt.Errorf("answered check: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		out[domain.ID(id)] = true
+	}
+	return out, rows.Err()
 }
 
 // ResumableThreads lists the session's running threads whose own calls are

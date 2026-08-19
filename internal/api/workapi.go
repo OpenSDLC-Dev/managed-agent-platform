@@ -146,6 +146,13 @@ func (s *server) pollWork(w http.ResponseWriter, r *http.Request) {
 		cancel()
 	}
 	for {
+		// Abandoned wind-downs first: a stopping tool_exec whose worker never
+		// finished is finalized and its session re-armed (plan 35 decision
+		// 13 iii), so the poll below hands the fresh item out.
+		if err := s.finalizeAbandoned(r.Context(), envID); err != nil {
+			writeError(w, r, err)
+			return
+		}
 		item, err := s.queue.Poll(r.Context(), envID, reclaim)
 		if err != nil {
 			writeError(w, r, err)
@@ -470,24 +477,63 @@ func (s *server) stopWork(r *http.Request) error {
 	if err != nil {
 		return mapWorkErr(err)
 	}
-	// A tool_exec that reached stopped with runnable platform calls still on
-	// the log is re-armed as a fresh item of the kind the send trigger would
-	// pick — mcp_exec first, the only driver that can answer one; the runnable
-	// set, so an ask-gated sibling call never loops stop → re-arm → nothing
-	// runnable → stop. A graceful stop that parked the item stopping is not
-	// yet stopped; the worker's own stop after its wind-down lands here again.
+	// A tool_exec that reached stopped is re-armed. A graceful stop that
+	// parked the item stopping is not yet stopped; the worker's own stop after
+	// its wind-down lands here again, and a wind-down the worker never
+	// finishes is finalized — and re-armed — by the next poll.
 	if w.State == "stopped" && kind == string(queue.ToolExec) {
-		kind, err := execKindFor(ctx, tx, domain.ID(sessionID), nil, nil)
-		if err != nil {
+		if err := s.rearm(ctx, tx, envID, domain.ID(sessionID)); err != nil {
 			return err
-		}
-		if kind != "" {
-			if _, err := s.queue.Enqueue(ctx, tx, envID, domain.ID(sessionID), kind); err != nil {
-				return err
-			}
 		}
 	}
 	return tx.Commit(ctx)
+}
+
+// rearm queues a fresh exec item for the session's runnable platform calls
+// after its tool_exec reached stopped (plan 35 decision 13 iii): the kind the
+// send trigger would pick — mcp_exec first, the only driver that can answer
+// one; the runnable set, so an ask-gated sibling call never loops stop →
+// re-arm → nothing runnable → stop. Under the session row lock the caller
+// holds, serialized with every settlement and trigger that appends calls.
+func (s *server) rearm(ctx context.Context, tx pgx.Tx, envID, sessionID domain.ID) error {
+	kind, err := execKindFor(ctx, tx, sessionID, nil, nil)
+	if err != nil {
+		return err
+	}
+	if kind == "" {
+		return nil
+	}
+	_, err = s.queue.Enqueue(ctx, tx, envID, sessionID, kind)
+	return err
+}
+
+// finalizeAbandoned finalizes the environment's abandoned wind-downs and
+// re-arms each finalized item's session under its row lock.
+func (s *server) finalizeAbandoned(ctx context.Context, envID domain.ID) error {
+	sessions, err := s.queue.FinalizeAbandoned(ctx, envID)
+	if err != nil {
+		return err
+	}
+	for _, sid := range sessions {
+		tx, err := s.pool.Begin(ctx)
+		if err != nil {
+			return err
+		}
+		err = func() error {
+			defer func() { _ = tx.Rollback(ctx) }()
+			if _, err := tx.Exec(ctx, `SELECT 1 FROM sessions WHERE id = $1 FOR UPDATE`, sid.String()); err != nil {
+				return err
+			}
+			if err := s.rearm(ctx, tx, envID, sid); err != nil {
+				return err
+			}
+			return tx.Commit(ctx)
+		}()
+		if err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // heartbeatTTL reads desired_ttl_seconds (default 30, clamped to

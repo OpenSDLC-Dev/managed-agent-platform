@@ -365,7 +365,7 @@ func (b *Brain) runTurn(ctx context.Context, item *queue.Item, claimedAt time.Ti
 	)
 
 	kctx, keeper := b.queue.KeepLease(sctx, item, b.cfg.LeaseTTL, 0)
-	turn, streamErr := b.streamTurn(kctx, sid, p, req)
+	turn, streamErr := b.streamTurn(kctx, sid, item.ThreadID, p, req)
 	// The call to the model ended here, whatever happens to the turn from now
 	// on. Everything below is ours — leases, classification, a session-locked
 	// settlement — and none of it belongs in a model-latency metric. The usage
@@ -509,7 +509,7 @@ func pendingInput(ctx context.Context, tx pgx.Tx, sid, threadID domain.ID, water
 		`SELECT EXISTS (SELECT 1 FROM events
 		  WHERE session_id = $1 AND type = ANY($2) AND processed_at IS NULL AND seq > $3
 		    AND thread_id IS NOT DISTINCT FROM $4)`,
-		sid.String(), pendingInputTypes, watermark, nullableThread(threadID)).Scan(&pending)
+		sid.String(), pendingInputTypes, watermark, events.NullableThread(threadID)).Scan(&pending)
 	return pending, err
 }
 

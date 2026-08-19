@@ -150,8 +150,15 @@ func (e *Executor) runMCPTools(ctx context.Context, cfg domain.EnvironmentConfig
 		}
 		// Answered under a thread-scoped interrupt since the scan: skipped, and
 		// cancelled on the keeper's beat if it happens mid-call (decision 9).
+		// A check that fails leaves like the cut-short arm below: answers
+		// already given commit, the item comes back for the rest.
 		if answered, err := events.Answered(ctx, e.pool, spill.sid, u.id); err != nil {
-			return out, nil, fmt.Errorf("mcp tool %s (%s): answered check: %w", u.name, u.id, err)
+			if len(out) == 0 {
+				return nil, fmt.Errorf("mcp tool %s (%s): answered check: %w", u.name, u.id, err), nil
+			}
+			slog.ErrorContext(ctx, "executor: mcp pass cut short, its answers committed",
+				"tool_use", u.id, "tool", u.name, "error", err)
+			break
 		} else if answered {
 			continue
 		}
@@ -164,6 +171,8 @@ func (e *Executor) runMCPTools(ctx context.Context, cfg domain.EnvironmentConfig
 			cctx, stop := e.answeredWatch(ctx, spill.sid, u.id, e.cfg.LeaseTTL/3)
 			res, failure, runErr = e.runMCPTool(cctx, cfg, vaultIDs, endpoint, u)
 			if stop() {
+				toolset.RecordRun(ctx, mcpToolMetricName, time.Since(start),
+					toolset.Result{IsError: true}, context.Canceled)
 				continue
 			}
 			if runErr != nil {
@@ -218,7 +227,9 @@ func (e *Executor) runMCPTools(ctx context.Context, cfg domain.EnvironmentConfig
 			if err != nil {
 				return out, nil, err
 			}
-			ev.ThreadID = u.thread
+			// On the surfaces the call and its answer are on: the diagnosis
+			// follows the result it explains.
+			ev.ThreadID, ev.CrossPosted = u.thread, u.crossPosted
 			out = append(out, ev)
 		}
 	}

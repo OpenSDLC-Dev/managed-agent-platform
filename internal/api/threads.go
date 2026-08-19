@@ -290,10 +290,36 @@ func terminateThread(ctx context.Context, tx pgx.Tx, log *events.Log, row thread
 	if err != nil {
 		return row, err
 	}
-	var parkedOn *string
-	if err := tx.QueryRow(ctx, `SELECT stop_reason->>'type' FROM session_threads WHERE id = $1`, row.id).
-		Scan(&parkedOn); err != nil {
+	// The session's idle stop reason is a pick over its idle threads'
+	// (decision 4), this child's among them — its asks in the union, or its
+	// retries_exhausted outranking a sibling's end_turn. What the session
+	// advertised before the child left and what the fold says after are
+	// compared, and a difference is re-advertised payload-only; an idle
+	// session is the only one with a stop reason to keep current, and the
+	// column itself moves only on a real fold change.
+	var before, after *domain.StopReason
+	var stopJSON []byte
+	if err := tx.QueryRow(ctx, `SELECT stop_reason FROM session_threads WHERE id = $1`, row.id).
+		Scan(&stopJSON); err != nil {
 		return row, err
+	}
+	if row.status == string(domain.SessionIdle) {
+		var own *domain.StopReason
+		if len(stopJSON) > 0 {
+			own = new(domain.StopReason)
+			if err := json.Unmarshal(stopJSON, own); err != nil {
+				return row, fmt.Errorf("thread %s stop_reason: %w", row.id, err)
+			}
+		}
+		var folded domain.SessionStatus
+		folded, before, err = events.PreviewTransition(ctx, tx, domain.ID(row.sessionID), events.ThreadTransition{
+			ThreadID: domain.ID(row.id), Status: domain.SessionIdle, Stop: own})
+		if err != nil {
+			return row, err
+		}
+		if folded != domain.SessionIdle {
+			before = nil
+		}
 	}
 	pair, moved, err := events.TransitionThread(ctx, tx, domain.ID(row.sessionID), events.ThreadTransition{
 		ThreadID: domain.ID(row.id), Status: domain.SessionTerminated})
@@ -301,19 +327,17 @@ func terminateThread(ctx context.Context, tx pgx.Tx, log *events.Log, row thread
 		return row, err
 	}
 	batch = append(batch, pair...)
-	if parkedOn != nil && *parkedOn == string(domain.StopRequiresAction) && moved == nil {
-		// The child was parked on its asks, which the session's idle
-		// stop_reason named in its union: the ask set shrank, so an idle
-		// session re-idles payload-only with what remains (decision 4).
+	if before != nil && moved == nil {
 		folded, stop, err := events.PreviewTransition(ctx, tx, domain.ID(row.sessionID), events.ThreadTransition{
 			ThreadID: domain.ID(row.id), Status: domain.SessionTerminated})
 		if err != nil {
 			return row, err
 		}
-		if folded == domain.SessionIdle {
+		after = stop
+		if folded == domain.SessionIdle && !sameStop(before, after) {
 			payload := map[string]any{}
-			if stop != nil {
-				payload["stop_reason"] = stop
+			if after != nil {
+				payload["stop_reason"] = after
 			}
 			raw, _ := json.Marshal(payload)
 			batch = append(batch, events.NewEvent{Type: domain.EventSessionStatusIdle, Payload: raw})
@@ -334,6 +358,19 @@ func terminateThread(ctx context.Context, tx pgx.Tx, log *events.Log, row thread
 		return row, errNotFound("session %s not found", row.sessionID)
 	}
 	return row, err
+}
+
+// sameStop compares two idle stop reasons by their wire shape.
+func sameStop(a, b *domain.StopReason) bool {
+	if (a == nil) != (b == nil) {
+		return false
+	}
+	if a == nil {
+		return true
+	}
+	ja, _ := json.Marshal(a)
+	jb, _ := json.Marshal(b)
+	return string(ja) == string(jb)
 }
 
 // terminateLiveChildren ends every live child of a session being archived

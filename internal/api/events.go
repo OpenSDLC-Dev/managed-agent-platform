@@ -158,6 +158,26 @@ func (s *server) sendSessionEvents(r *http.Request) (any, error) {
 		for _, th := range threads {
 			at(th.id).interrupt = true
 		}
+	} else if hasInterrupt {
+		// Interrupts that name every live thread one by one — the primary's
+		// own id on a single-agent session, the documented echo of what a
+		// client read off the status events — are the session-wide interrupt
+		// spelled out: the same cancellation of every live item follows, so
+		// the two requests the docs equate leave the work in one state.
+		interruptAll = true
+		for _, th := range threads {
+			interruptAll = interruptAll && at(th.id).interrupt
+		}
+	}
+	now := time.Now().UTC()
+	for i := range newEvents {
+		// A child-scoped interrupt is consumed right here, by this arm: the
+		// child's turn it ends is the only turn that could ever stamp it, so
+		// it is stamped processed on append (a session-wide one is the
+		// primary's next turn's to stamp, as before).
+		if newEvents[i].Type == domain.EventUserInterrupt && newEvents[i].ThreadID != "" {
+			newEvents[i].ProcessedAt = &now
+		}
 	}
 	primaryStatus := status
 	for _, th := range threads {
@@ -340,8 +360,11 @@ func (s *server) sendSessionEvents(r *http.Request) (any, error) {
 				// thread is already idle and its clients still need the new stop
 				// reason — and so is the session's when it stays idle (Reemit);
 				// the column only moves when the fold really changes.
+				// A session-wide interrupt re-idles the session once, after its
+				// last thread moved — not once per child it ends.
+				last := th.id == threads[len(threads)-1].id
 				if err := transition(events.ThreadTransition{ThreadID: tid, Status: domain.SessionIdle,
-					Stop: &domain.StopReason{Type: domain.StopEndTurn}, Reemit: true}); err != nil {
+					Stop: &domain.StopReason{Type: domain.StopEndTurn}, Reemit: !interruptAll || last}); err != nil {
 					return nil, err
 				}
 				// Cancel first, then enqueue. A session-wide interrupt keeps today's
@@ -413,15 +436,20 @@ func (s *server) sendSessionEvents(r *http.Request) (any, error) {
 			// it — this thread's most recent requires_action idle. Measured under
 			// the same row lock the resume commits under, so it reads a consistent
 			// log, and in the database so both ends read one clock.
+			// The primary's suspension may predate the thread resource — a
+			// session parked on requires_action across that upgrade has the
+			// session event alone — so the session-level idle counts for it too.
 			var secs float64
 			err = tx.QueryRow(ctx,
 				`SELECT EXTRACT(EPOCH FROM (clock_timestamp() - created_at))
 				 FROM events
-				 WHERE session_id = $1 AND type = $2
-				   AND thread_id IS NOT DISTINCT FROM $3
+				 WHERE session_id = $1
+				   AND ((type = $2 AND thread_id IS NOT DISTINCT FROM $3::text)
+				        OR (type = $4 AND $3::text IS NULL))
 				   AND payload->'stop_reason'->>'type' = 'requires_action'
 				 ORDER BY seq DESC LIMIT 1`,
-				id, string(domain.EventSessionThreadStatusIdle), nullableThread(tid)).Scan(&secs)
+				id, string(domain.EventSessionThreadStatusIdle), events.NullableThread(tid),
+				string(domain.EventSessionStatusIdle)).Scan(&secs)
 			if err != nil && !errors.Is(err, pgx.ErrNoRows) {
 				return nil, err
 			}

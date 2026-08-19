@@ -333,15 +333,6 @@ func resolveTools(agent domain.ResolvedAgent, cat mcpCatalog) ([]json.RawMessage
 // The declared servers are the caller's, already parsed: a spec this platform
 // stored and cannot read back is a permanent failure of this session rather than
 // a transient one, and the caller is where the two are told apart.
-// nullableThread binds a thread id: NULL for the primary.
-func nullableThread(threadID domain.ID) *string {
-	if threadID == "" {
-		return nil
-	}
-	s := threadID.String()
-	return &s
-}
-
 func (b *Brain) loadMCPCatalog(ctx context.Context, sid, threadID domain.ID, declared []mcpServerRef) (mcpCatalog, []string, error) {
 	if len(declared) == 0 {
 		return nil, nil, nil
@@ -352,7 +343,7 @@ func (b *Brain) loadMCPCatalog(ctx context.Context, sid, threadID domain.ID, dec
 	rows, err := b.pool.Query(ctx,
 		`SELECT server_name, url, status, tools FROM mcp_catalogs
 		  WHERE session_id = $1 AND thread_id IS NOT DISTINCT FROM $2`,
-		sid.String(), nullableThread(threadID))
+		sid.String(), events.NullableThread(threadID))
 	if err != nil {
 		return nil, nil, fmt.Errorf("read mcp catalog: %w", err)
 	}

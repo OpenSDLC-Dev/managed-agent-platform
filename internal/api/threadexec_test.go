@@ -2,6 +2,7 @@ package api_test
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"strings"
 	"sync"
@@ -10,6 +11,7 @@ import (
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/events"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/pgtest"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/queue"
 )
 
@@ -227,6 +229,11 @@ func TestThreadScopedInterruptLeavesTheSharedExecItem(t *testing.T) {
 	if interrupt["session_thread_id"] != a {
 		t.Errorf("the interrupt on the session view = %v, want session_thread_id A", interrupt)
 	}
+	// Consumed by the arm that ended A's turn — the only turn that could
+	// ever have stamped it — so it is processed on append.
+	if interrupt["processed_at"] == nil {
+		t.Errorf("a child-scoped interrupt renders processed_at null: %v", interrupt)
+	}
 	_, own := s.do(http.MethodGet, "/v1/sessions/"+sid+"/threads/"+a+"/events", nil)
 	for _, ev := range listData(t, own) {
 		if ev["type"] == "user.interrupt" && ev["session_thread_id"] != nil {
@@ -422,5 +429,105 @@ func TestWorkStopWaitsForTheSessionLock(t *testing.T) {
 	wg.Wait()
 	if n := s.liveWork(sid, queue.ToolExec); n != 1 {
 		t.Errorf("live tool_exec after the racing stop = %d, want the re-armed item for the call committed under the lock", n)
+	}
+}
+
+// An interrupt naming the primary's own id on a single-agent session is the
+// session-wide interrupt spelled out: every live item is cancelled, the shared
+// exec item included, exactly as the unnamed form does.
+func TestInterruptNamingThePrimaryCancelsEveryItem(t *testing.T) {
+	s := newTestServer(t)
+	sid := eventsFixture(t, s)
+	primary := domain.PrimaryThreadID(domain.ID(sid)).String()
+	pgtest.SetSessionStatus(t, s.pool, domain.ID(sid), "running")
+	appendOn(t, s, sid, "", false, domain.EventAgentToolUse, allowBashCall)
+	envID := s.environmentID(sid)
+	if _, err := queue.New(s.pool).Enqueue(context.Background(), s.pool, domain.ID(envID), domain.ID(sid), queue.ToolExec); err != nil {
+		t.Fatal(err)
+	}
+
+	sendEvents(t, s, sid, map[string]any{"type": "user.interrupt", "session_thread_id": primary})
+
+	if got := s.sessionStatus(sid); got != "idle" {
+		t.Errorf("session status = %q, want idle", got)
+	}
+	if n := s.liveWork(sid, queue.ToolExec); n != 0 {
+		t.Errorf("live tool_exec = %d, want 0 — the primary is the only thread, so the interrupt is the session's", n)
+	}
+	if n := countEventType(t, s, sid, "session.status_idle"); n != 1 {
+		t.Errorf("session.status_idle count = %d, want 1", n)
+	}
+}
+
+// Archiving an idle child whose stop reason the session's idle pick carried
+// re-advertises the pick payload-only — a retries_exhausted child beside a
+// primary parked on end_turn, not only the requires_action case — and one
+// whose stop reason the pick never carried re-advertises nothing.
+func TestThreadArchiveReadvertisesTheIdlePick(t *testing.T) {
+	s := newTestServer(t)
+	sid := eventsFixture(t, s)
+	setThread(t, s, domain.PrimaryThreadID(domain.ID(sid)).String(), "idle", `{"type":"end_turn"}`)
+	exhausted := insertChild(t, s, sid, "idle")
+	setThread(t, s, exhausted, "idle", `{"type":"retries_exhausted"}`)
+	quiet := insertChild(t, s, sid, "idle")
+	setThread(t, s, quiet, "idle", `{"type":"end_turn"}`)
+	path := "/v1/sessions/" + sid + "/threads/"
+
+	if status, res := s.do(http.MethodPost, path+quiet+"/archive", nil); status != http.StatusOK {
+		t.Fatalf("archive the end_turn child: %d %v", status, res)
+	}
+	if n := countEventType(t, s, sid, "session.status_idle"); n != 0 {
+		t.Errorf("archiving a child the pick never carried re-idled the session %d times, want 0", n)
+	}
+	if status, res := s.do(http.MethodPost, path+exhausted+"/archive", nil); status != http.StatusOK {
+		t.Fatalf("archive the retries_exhausted child: %d %v", status, res)
+	}
+	if n := countEventType(t, s, sid, "session.status_idle"); n != 1 {
+		t.Fatalf("archiving the child the pick carried re-idled the session %d times, want once", n)
+	}
+	if got := stopReasonType(t, lastEventOfType(t, s, sid, "session.status_idle")); got != "end_turn" {
+		t.Errorf("re-advertised stop reason = %q, want end_turn (what remains)", got)
+	}
+	if got := s.sessionStatus(sid); got != "idle" {
+		t.Errorf("session status = %q, want idle", got)
+	}
+}
+
+// A wind-down the worker never finishes is finalized by the next poll and its
+// session re-armed, so the poll hands the fresh item straight out: the calls
+// the abandoned item covered are nobody's otherwise (decision 13 iii).
+func TestWorkPollFinalizesAnAbandonedStopAndReArms(t *testing.T) {
+	s := newTestServer(t)
+	envID, sid, key := selfHostedWorker(t, s, "ek-abandon")
+	appendOn(t, s, sid, "", false, domain.EventAgentToolUse, allowBashCall)
+	workID := s.enqueueAndPoll(t, envID, sid, key)
+	get := "/v1/environments/" + envID + "/work/" + workID
+	if res, _, raw := s.workReq(t, http.MethodPost, get+"/ack", key, nil); res.StatusCode != http.StatusOK {
+		t.Fatalf("ack: %d %s", res.StatusCode, raw)
+	}
+	if res, _, raw := s.workReq(t, http.MethodPost, get+"/heartbeat?expected_last_heartbeat=NO_HEARTBEAT", key, nil); res.StatusCode != http.StatusOK {
+		t.Fatalf("heartbeat: %d %s", res.StatusCode, raw)
+	}
+	wantNoContent(t, s, get+"/stop", key, nil) // graceful: stopping
+	// The worker dies mid-wind-down: its lease lapses.
+	if _, err := s.pool.Exec(context.Background(),
+		`UPDATE work_items SET lease_expires_at = now() - interval '1 second' WHERE id = $1`, workID); err != nil {
+		t.Fatal(err)
+	}
+
+	res, raw := s.poll(t, envID, map[string]string{"Authorization": "Bearer " + key})
+	if res.StatusCode != http.StatusOK {
+		t.Fatalf("poll: %d %s", res.StatusCode, raw)
+	}
+	var handed map[string]any
+	if err := json.Unmarshal([]byte(raw), &handed); err != nil {
+		t.Fatal(err)
+	}
+	if id, _ := handed["id"].(string); id == "" || id == workID {
+		t.Fatalf("poll handed back %q, want a fresh re-armed item (the abandoned one was %s)", id, workID)
+	}
+	_, old, _ := s.workReq(t, http.MethodGet, get, key, nil)
+	if old["state"] != "stopped" {
+		t.Errorf("the abandoned item = %v, want stopped", old["state"])
 	}
 }

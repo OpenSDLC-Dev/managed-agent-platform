@@ -160,9 +160,11 @@ const toolScanPageSize = 20
 // user.tool_result (this worker), both referencing it by tool_use_id, so both
 // count. This is the third expression of one rule — the canonical answered-set
 // is events.HasUnansweredToolUse (the SQL the control plane resumes on) and
-// executor.unansweredToolUses (the executor's DB-backed copy); the result types
-// that answer are the shared domain constants below, so a new answering type
-// must be added in all three. A drift here re-runs an answered tool every
+// executor.runnableToolUses (the executor's DB-backed copy, narrowed since plan
+// 35 slice 3 to the runnable set — the ask-gated calls a sibling thread still
+// holds are not run; this scan follows in slice 4 with the self_hosted view
+// rule); the result types that answer are the shared domain constants below,
+// so a new answering type must be added in all three. A drift here re-runs an answered tool every
 // reclaim, re-posting a result the control plane's ValidateToolResults rejects.
 //
 // Events are parsed from each event's raw wire JSON into a minimal local shape

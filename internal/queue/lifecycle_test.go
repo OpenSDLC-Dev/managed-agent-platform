@@ -309,6 +309,9 @@ func TestPollFinalizesAnAbandonedWindDown(t *testing.T) {
 	// While the lease is live the wind-down is still its worker's to finish, so a
 	// poll must leave the item alone. This is what makes the finalize below a
 	// consequence of the lapsed lease rather than of the stopping state.
+	if done, err := q.FinalizeAbandoned(ctx, env); err != nil || len(done) != 0 {
+		t.Fatalf("finalize during a live wind-down = %v %v, want nothing", done, err)
+	}
 	if next, err := q.Poll(ctx, env, time.Minute); err != nil || next != nil {
 		t.Fatalf("poll during a live wind-down = %+v %v, want no work", next, err)
 	}
@@ -320,6 +323,10 @@ func TestPollFinalizesAnAbandonedWindDown(t *testing.T) {
 	if _, err := pool.Exec(ctx,
 		`UPDATE work_items SET lease_expires_at = now() - interval '1 second' WHERE id = $1`, id); err != nil {
 		t.Fatal(err)
+	}
+	done, err := q.FinalizeAbandoned(ctx, env)
+	if err != nil || len(done) != 1 {
+		t.Fatalf("finalize = %v %v, want the one abandoned item's session", done, err)
 	}
 	next, err := q.Poll(ctx, env, time.Minute)
 	if err != nil {
@@ -362,6 +369,9 @@ func TestPollFinalizesALeaselessWindDown(t *testing.T) {
 		t.Fatalf("stage the legacy row: %v", err)
 	}
 
+	if done, err := q.FinalizeAbandoned(ctx, env); err != nil || len(done) != 1 || done[0] != sessionID {
+		t.Fatalf("finalize = %v %v, want the legacy row's session", done, err)
+	}
 	next, err := q.Poll(ctx, env, time.Minute)
 	if err != nil {
 		t.Fatalf("poll: %v", err)

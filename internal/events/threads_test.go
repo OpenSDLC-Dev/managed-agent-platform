@@ -3,6 +3,7 @@ package events_test
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/events"
@@ -97,6 +98,39 @@ func TestListScopes(t *testing.T) {
 // The broker hands a frame to the subscribers of the thread named in its
 // envelope — the session stream gets unaddressed frames, a child's stream its
 // own — and session.deleted to everyone.
+// A child's previews are published on the child's own surface, where the
+// event they preview will land; the session stream never sees them.
+func TestPreviewOnAChildThreadReachesItsStreamAlone(t *testing.T) {
+	pool := pgtest.NewPool(t)
+	log := events.NewLog(pool)
+	broker := events.NewBroker(pool)
+	sid := newSession(t, pool)
+	child := domain.NewID(domain.PrefixSessionThread)
+	session := subscribeReady(t, broker, sid)
+	own := broker.SubscribeThread(sid, child)
+	t.Cleanup(own.Close)
+
+	ctx := context.Background()
+	p, err := log.StartPreviewOn(ctx, sid, child, domain.EventAgentMessage)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := p.Delta(ctx, 0, "hi"); err != nil {
+		t.Fatal(err)
+	}
+	if f := waitFrame(t, own); f["type"] != "event_start" {
+		t.Errorf("child stream first frame = %v, want event_start", f["type"])
+	}
+	if f := waitFrame(t, own); f["type"] != "event_delta" {
+		t.Errorf("child stream second frame = %v, want event_delta", f["type"])
+	}
+	select {
+	case raw := <-session.Frames():
+		t.Errorf("session stream received a child's preview frame %s", raw)
+	case <-time.After(200 * time.Millisecond):
+	}
+}
+
 func TestSubscribeThreadFiltersFrames(t *testing.T) {
 	pool := pgtest.NewPool(t)
 	broker := events.NewBroker(pool)

@@ -325,7 +325,10 @@ func foldSession(ctx context.Context, q Querier, sessionID domain.ID, t ThreadTr
 	return domain.SessionIdle, pick, nil
 }
 
-// idsInSeqOrder returns ids ordered by their events' seq.
+// idsInSeqOrder returns ids ordered by their events' seq. Ids not yet on the
+// log — the moving thread's own asks, minted in memory and appended after the
+// transition in the same commit — come last, in the order given: they land
+// above everything committed, so that is their log order too.
 func idsInSeqOrder(ctx context.Context, q Querier, sessionID domain.ID, ids []domain.ID) ([]domain.ID, error) {
 	strs := make([]string, len(ids))
 	for i, id := range ids {
@@ -339,14 +342,24 @@ func idsInSeqOrder(ctx context.Context, q Querier, sessionID domain.ID, ids []do
 	}
 	defer rows.Close()
 	out := make([]domain.ID, 0, len(ids))
+	seen := make(map[domain.ID]bool, len(ids))
 	for rows.Next() {
 		var id string
 		if err := rows.Scan(&id); err != nil {
 			return nil, err
 		}
 		out = append(out, domain.ID(id))
+		seen[domain.ID(id)] = true
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	for _, id := range ids {
+		if !seen[id] {
+			out = append(out, id)
+		}
+	}
+	return out, nil
 }
 
 // withAgentName sets agent_name on a thread status payload that lacks it.
@@ -370,3 +383,8 @@ func nullableID(id domain.ID) *string {
 	s := id.String()
 	return &s
 }
+
+// NullableThread binds a thread id as the thread_id column holds it: NULL for
+// the primary (plan 35 decision 2) — the one convention every package that
+// queries by thread shares.
+func NullableThread(threadID domain.ID) *string { return nullableID(threadID) }

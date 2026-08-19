@@ -26,17 +26,26 @@ func Previewable(t domain.EventType) bool {
 type Preview struct {
 	log       *Log
 	sessionID domain.ID
+	threadID  domain.ID
 	eventID   domain.ID
 	typ       domain.EventType
 }
 
 // StartPreview broadcasts the event_start frame and pre-allocates the id the
-// buffered event must later be appended under.
+// buffered event must later be appended under — on the primary thread's
+// surface, the session stream.
 func (l *Log) StartPreview(ctx context.Context, sessionID domain.ID, typ domain.EventType) (*Preview, error) {
+	return l.StartPreviewOn(ctx, sessionID, "", typ)
+}
+
+// StartPreviewOn is StartPreview on one thread's surface (plan 35 decision
+// 2): a child's previews reach its own stream alone, where the event they
+// preview will land; the session stream previews the primary's turns.
+func (l *Log) StartPreviewOn(ctx context.Context, sessionID, threadID domain.ID, typ domain.EventType) (*Preview, error) {
 	if !Previewable(typ) {
 		return nil, fmt.Errorf("event type %q cannot be previewed", typ)
 	}
-	p := &Preview{log: l, sessionID: sessionID, eventID: domain.NewID("sevt"), typ: typ}
+	p := &Preview{log: l, sessionID: sessionID, threadID: threadID, eventID: domain.NewID("sevt"), typ: typ}
 	frame := map[string]any{
 		"type": "event_start",
 		"event": map[string]any{
@@ -44,7 +53,7 @@ func (l *Log) StartPreview(ctx context.Context, sessionID domain.ID, typ domain.
 			"type": string(typ),
 		},
 	}
-	if err := l.publishFrame(ctx, sessionID, "", frame); err != nil {
+	if err := l.publishFrame(ctx, sessionID, threadID, frame); err != nil {
 		return nil, err
 	}
 	return p, nil
@@ -75,7 +84,7 @@ func (p *Preview) Delta(ctx context.Context, index int64, text string) error {
 				},
 			},
 		}
-		if err := p.log.publishFrame(ctx, p.sessionID, "", frame); err != nil {
+		if err := p.log.publishFrame(ctx, p.sessionID, p.threadID, frame); err != nil {
 			return err
 		}
 	}

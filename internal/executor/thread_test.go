@@ -3,6 +3,7 @@ package executor
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"testing"
 	"time"
 
@@ -332,5 +333,27 @@ func TestAnMCPFailureIsAnnouncedPerThread(t *testing.T) {
 	}
 	if told[a.String()] != 1 || told[b.String()] != 1 || len(told) != 2 {
 		t.Errorf("failure announcements by thread = %v, want one on A and one on B", told)
+	}
+}
+
+// A faulted pass still chains the kind only another driver can serve: a
+// sibling's MCP call committed under the live tool_exec gets its mcp_exec
+// queued even as the faulted item stays leased for the reclaim.
+func TestAFaultedPassStillChainsTheOtherDriver(t *testing.T) {
+	h := newHarness(t, &fakeSandbox{writeErr: errors.New("connection refused")})
+	h.exec.onFault = func(*queue.Item, error) {}
+	b := h.childThread(t, "running")
+	h.suspend(t, writeUse("out.txt", "hi"))
+	h.appendOn(t, b, domain.EventAgentMCPToolUse,
+		`{"name":"lookup","mcp_server_name":"srv","input":{},"evaluated_permission":"allow","session_thread_id":null}`)
+
+	if _, err := h.exec.step(context.Background()); err != nil {
+		t.Fatalf("step: %v", err)
+	}
+	if got := h.liveOf(t, queue.ToolExec); got != 1 {
+		t.Errorf("tool_exec live = %d, want 1 (left for the reclaim)", got)
+	}
+	if got := h.liveOf(t, queue.MCPExec); got != 1 {
+		t.Errorf("mcp_exec live = %d, want the chain for B's call", got)
 	}
 }

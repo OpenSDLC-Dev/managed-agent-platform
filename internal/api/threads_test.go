@@ -347,7 +347,7 @@ func TestThreadArchive(t *testing.T) {
 	status, body = s.do(http.MethodPost, path+"sthr_0000000000000000000000000/archive", nil)
 	wantErr(t, status, body, http.StatusNotFound, "not_found_error")
 	// A running child makes the session running under the fold (plan 35
-	// decision 3); the session was born idle, so the child parks idle from
+	// decision 4); the session was born idle, so the child parks idle from
 	// here — still live, so the session's archive below has it to terminate.
 	if _, err := s.pool.Exec(context.Background(),
 		`UPDATE session_threads SET status = 'idle' WHERE id = $1`, running); err != nil {

@@ -29,5 +29,13 @@ CREATE INDEX mcp_catalogs_thread_idx ON mcp_catalogs (thread_id) WHERE thread_id
 
 -- The thread's idle stop reason, beside its status: the session's idle
 -- stop_reason is a precedence pick over its idle threads' (decision 4), read
--- from here in the transaction that moves a thread. NULL unless idle.
+-- from here in the transaction that moves a thread. NULL unless idle. A
+-- primary row 0025 backfilled idle learns the reason its session last
+-- advertised, so the first fold over it does not read an idle thread with no
+-- reason at all.
 ALTER TABLE session_threads ADD COLUMN stop_reason jsonb;
+UPDATE session_threads t
+   SET stop_reason = (SELECT e.payload->'stop_reason' FROM events e
+                       WHERE e.session_id = t.session_id AND e.type = 'session.status_idle'
+                       ORDER BY e.seq DESC LIMIT 1)
+ WHERE t.parent_thread_id IS NULL AND t.status = 'idle';

@@ -70,12 +70,3 @@ func execKindFor(ctx context.Context, q events.Querier, sessionID domain.ID, ans
 var execKinds = map[events.ExecClass]queue.Kind{
 	events.ExecMCP: queue.MCPExec, events.ExecWeb: queue.WebExec, events.ExecTool: queue.ToolExec,
 }
-
-// nullableThread binds a thread id: NULL for the primary.
-func nullableThread(threadID domain.ID) *string {
-	if threadID == "" {
-		return nil
-	}
-	s := threadID.String()
-	return &s
-}

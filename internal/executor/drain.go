@@ -36,8 +36,9 @@ var execKinds = map[events.ExecClass]queue.Kind{
 // completed when it is another's, the item completed when nothing is left.
 // leaveLive is the fault path: the item stays leased for the reclaim to retry
 // what it could not answer (the lease asserted, so a claim lost while blocked
-// on the lock commits nothing) — unless nothing runnable of its own kind
-// remains, when it has nothing left to do and completes.
+// on the lock commits nothing) — the chain to another kind still runs, since
+// only that kind's driver can answer those calls — unless nothing runnable
+// of any kind remains, when it has nothing left to do and completes.
 func (e *Executor) settleDrain(ctx context.Context, tx pgx.Tx, item *queue.Item, own queue.Kind, leaveLive bool) error {
 	threads, err := events.ResumableThreads(ctx, tx, item.SessionID)
 	if err != nil {
@@ -53,9 +54,15 @@ func (e *Executor) settleDrain(ctx context.Context, tx pgx.Tx, item *queue.Item,
 		return err
 	}
 	kind := execKinds[class]
-	switch {
-	case kind == "":
+	if kind == "" {
 		return e.queue.Complete(ctx, tx, item)
+	}
+	if kind != own {
+		if _, err := e.queue.Enqueue(ctx, tx, item.EnvironmentID, item.SessionID, kind); err != nil {
+			return err
+		}
+	}
+	switch {
 	case leaveLive:
 		// The reclaim's pass answers what it can; its complete settlement
 		// chains whatever else is left.
@@ -63,9 +70,6 @@ func (e *Executor) settleDrain(ctx context.Context, tx pgx.Tx, item *queue.Item,
 	case kind == own:
 		return e.queue.Requeue(ctx, tx, item)
 	default:
-		if _, err := e.queue.Enqueue(ctx, tx, item.EnvironmentID, item.SessionID, kind); err != nil {
-			return err
-		}
 		return e.queue.Complete(ctx, tx, item)
 	}
 }
@@ -118,8 +122,10 @@ func (e *Executor) answeredWatch(ctx context.Context, sid, useID domain.ID, beat
 // call is already answered on the log — a thread-scoped interrupt's own
 // result committed between the watch's last beat and the call's return
 // (decision 9), or a sibling claimant's: a late result is dropped under the
-// lock, never appended as a second answer every replay would then carry.
-// An emptied batch still settles.
+// lock, never appended as a second answer every replay would then carry. An
+// event riding beside a dropped result — the MCP lane's failure explaining
+// it — goes with it. One query for the whole batch, so the lock is held for
+// two round trips however large it is. An emptied batch still settles.
 func (e *Executor) commitResults(ctx context.Context, sid domain.ID, results []events.NewEvent, settle func(context.Context, pgx.Tx) error) error {
 	tx, err := e.pool.Begin(ctx)
 	if err != nil {
@@ -129,13 +135,24 @@ func (e *Executor) commitResults(ctx context.Context, sid domain.ID, results []e
 	if _, err := tx.Exec(ctx, `SELECT 1 FROM sessions WHERE id = $1 FOR UPDATE`, sid.String()); err != nil {
 		return err
 	}
+	refs := make([]domain.ID, len(results))
+	for i, r := range results {
+		refs[i] = resultRef(r)
+	}
+	answered, err := events.AnsweredSet(ctx, tx, sid, refs)
+	if err != nil {
+		return err
+	}
 	kept := results[:0:0]
-	for _, r := range results {
-		answered, err := events.Answered(ctx, tx, sid, resultRef(r))
-		if err != nil {
-			return err
-		}
-		if !answered {
+	var dropped domain.ID
+	for i, r := range results {
+		switch {
+		case refs[i] != "" && answered[refs[i]]:
+			dropped = refs[i]
+		case refs[i] == "" && dropped != "" && r.Type == domain.EventSessionError:
+			// The failure beside the result just dropped.
+		default:
+			dropped = ""
 			kept = append(kept, r)
 		}
 	}
@@ -146,7 +163,8 @@ func (e *Executor) commitResults(ctx context.Context, sid domain.ID, results []e
 }
 
 // resultRef is the tool-use id a driver's result answers (agent.tool_result's
-// tool_use_id, agent.mcp_tool_result's mcp_tool_use_id).
+// tool_use_id, agent.mcp_tool_result's mcp_tool_use_id); empty for an event
+// that answers none (the MCP lane's session.error beside a result).
 func resultRef(r events.NewEvent) domain.ID {
 	var ref struct {
 		ToolUseID    string `json:"tool_use_id"`
@@ -157,13 +175,4 @@ func resultRef(r events.NewEvent) domain.ID {
 		return domain.ID(ref.MCPToolUseID)
 	}
 	return domain.ID(ref.ToolUseID)
-}
-
-// nullableThread binds a thread id: NULL for the primary.
-func nullableThread(threadID domain.ID) *string {
-	if threadID == "" {
-		return nil
-	}
-	s := threadID.String()
-	return &s
 }
