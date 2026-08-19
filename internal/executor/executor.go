@@ -835,7 +835,7 @@ func (e *Executor) runTools(ctx context.Context, sb sandbox.Sandbox, sid domain.
 // SearchResults set (a web_search answer) IS the content — search_result
 // blocks, an empty slice landing as an empty array for a search with no hits.
 // Otherwise empty output (a read of an empty file) becomes the reference
-// runner's "(no output)" text block (v1.63.0), never a text block with an
+// runner's "(no output)" text block (v1.63.1), never a text block with an
 // empty string — a Messages endpoint rejects an empty text block, and that
 // request is what the brain replays every resume, wedging the session.
 func toolResultEvent(useID domain.ID, res toolset.Result) (events.NewEvent, error) {

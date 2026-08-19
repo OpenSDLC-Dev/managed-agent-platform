@@ -427,7 +427,7 @@ func TestToolLevelErrorIsAnsweredNotAbandoned(t *testing.T) {
 }
 
 // TestEmptyToolResultPostsPlaceholder: empty tool output posts the reference
-// runner's "(no output)" text block (v1.63.0), never an empty text block — a
+// runner's "(no output)" text block (v1.63.1), never an empty text block — a
 // Messages endpoint rejects an empty text block, and that request is what the
 // brain replays.
 func TestEmptyToolResultPostsPlaceholder(t *testing.T) {

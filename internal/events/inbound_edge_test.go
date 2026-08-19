@@ -62,7 +62,7 @@ func TestNormalizeInboundRejections(t *testing.T) {
 		{"text null", `{"type":"user.message","content":[{"type":"text","text":null}]}`, "text"},
 		// An empty text block is refused wherever a text block may appear: the
 		// reference API rejects it in a tool result (its runner substitutes
-		// "(no output)" since v1.63.0), and every carrier here is replayed to a
+		// "(no output)" since v1.63.1), and every carrier here is replayed to a
 		// Messages endpoint that rejects it too (INFERRED, docs/DIVERGENCES.md).
 		// user.tool_result shares the same block validator (self_hosted-only, so
 		// it cannot sit in this cloud table).

@@ -1279,7 +1279,7 @@ func TestUserToolResultCountsAsAnswered(t *testing.T) {
 
 func TestEmptyToolResultPostsPlaceholder(t *testing.T) {
 	// A read of an empty file yields empty output. It must be the reference
-	// runner's "(no output)" text block (v1.63.0), never a text block with an
+	// runner's "(no output)" text block (v1.63.1), never a text block with an
 	// empty string — a Messages endpoint rejects an empty text block, which
 	// would wedge the session on every resume.
 	sb := &fakeSandbox{files: map[string]string{"/workspace/empty.txt": ""}}

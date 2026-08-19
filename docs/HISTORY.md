@@ -63,7 +63,8 @@ against the latest release, and v1.63.1 is the latest (confirmed against the ups
 own `go.mod`/`go.sum` are byte-identical between the tags, so the bump drags in no new module.
 
 **What the range contains.** 61 files, +4166/−356. `shared/constant/constants.go` gains exactly one
-constant (`SessionBudgetReached`, the webhook event type) and moves **no literal** — the eleven
+constant (`SessionBudgetReached`, the webhook event type), drops one `ModelNonStreamingTokens`
+row the platform never reads (`claude-opus-4-1-20250805`), and moves **no literal** — the eleven
 removed non-comment lines across the four session files are Go retypes to unions whose JSON tags
 are unchanged (`Multiagent.Agents`, `SessionMultiagentCoordinator.Agents`, `SessionThread.Agent`,
 `agent.message` content), so the dangerous class of the v1.59.0 bump is structurally empty again.
