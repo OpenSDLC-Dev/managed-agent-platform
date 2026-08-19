@@ -102,14 +102,19 @@ func scanSession(row pgx.Row) (sessionRow, error) {
 // Event.Agent). Without it the same update answers twice in two shapes — a
 // resolved agent in the HTTP response and a sparse one in the event stream.
 //
-// It rewrites only the `tools` key and leaves every other byte of the snapshot
-// alone, and it never fails: a snapshot it cannot decode ships as stored,
-// because an event recording that the agent changed must be appended either
-// way. The store is untouched — the caller passes the bytes it already wrote.
+// It rewrites only the `tools` key (and the members' tools inside a
+// coordinator's `multiagent` roster) and leaves every other byte of the
+// snapshot alone, and it never fails: a snapshot it cannot decode ships as
+// stored, because an event recording that the agent changed must be appended
+// either way. The store is untouched — the caller passes the bytes it already
+// wrote.
 func materializedAgentSnapshot(stored []byte) json.RawMessage {
 	var obj map[string]json.RawMessage
 	if err := json.Unmarshal(stored, &obj); err != nil || obj == nil {
 		return json.RawMessage(stored)
+	}
+	if roster, ok := obj["multiagent"]; ok {
+		obj["multiagent"] = materializeRoster(roster)
 	}
 	var tools []json.RawMessage
 	if err := json.Unmarshal(obj["tools"], &tools); err != nil {
@@ -145,6 +150,7 @@ func renderSession(r sessionRow) (sessionJSON, error) {
 	// The resolved-agent snapshot echoes resolved toolset configuration, the
 	// same rule renderAgent applies to the agent resource itself.
 	agent.Tools = toolset.MaterializeTools(agent.Tools)
+	agent.Multiagent = materializeRoster(agent.Multiagent)
 	if agent.MCPServers == nil {
 		agent.MCPServers = []json.RawMessage{}
 	}
@@ -216,14 +222,15 @@ func (s *server) resolveAgent(ctx context.Context, db querier, raw json.RawMessa
 
 	if err := json.Unmarshal(raw, &agentID); err != nil {
 		var obj struct {
-			Type    string          `json:"type"`
-			ID      string          `json:"id"`
-			Version *int64          `json:"version"`
-			Model   json.RawMessage `json:"model"`
-			System  json.RawMessage `json:"system"`
-			Tools   json.RawMessage `json:"tools"`
-			MCP     json.RawMessage `json:"mcp_servers"`
-			Skills  json.RawMessage `json:"skills"`
+			Type       string          `json:"type"`
+			ID         string          `json:"id"`
+			Version    *int64          `json:"version"`
+			Model      json.RawMessage `json:"model"`
+			System     json.RawMessage `json:"system"`
+			Tools      json.RawMessage `json:"tools"`
+			MCP        json.RawMessage `json:"mcp_servers"`
+			Skills     json.RawMessage `json:"skills"`
+			Multiagent json.RawMessage `json:"multiagent"`
 		}
 		if err := json.Unmarshal(raw, &obj); err != nil {
 			return snap, errInvalid("agent must be an agent id string or an agent reference object")
@@ -234,6 +241,13 @@ func (s *server) resolveAgent(ctx context.Context, db querier, raw json.RawMessa
 		switch obj.Type {
 		case "agent":
 		case "agent_with_overrides":
+			// The override params carry no roster (SDK betasession.go
+			// AgentWithOverridesParams); the coordinator's stored roster is
+			// the only one a session gets — an explicit 400, not a silent
+			// drop (plan 35 decision 10, INFERRED in docs/DIVERGENCES.md).
+			if len(obj.Multiagent) > 0 {
+				return snap, errInvalid("agent override multiagent is not supported; the roster is the coordinator agent's")
+			}
 			for key, val := range map[string]json.RawMessage{
 				"model": obj.Model, "system": obj.System, "tools": obj.Tools,
 				"mcp_servers": obj.MCP, "skills": obj.Skills,
@@ -347,10 +361,20 @@ func (s *server) resolveAgent(ctx context.Context, db querier, raw json.RawMessa
 		return snap, err
 	}
 
-	return sessionAgentJSON{
+	snap = sessionAgentJSON{
 		Type: "agent", ID: domain.ID(agentID), Version: version, Name: name,
 		AgentSpec: spec,
-	}, nil
+	}
+	// A coordinator's roster is snapshotted as full member definitions, the
+	// `self` member from this very resolution — overrides applied (roster.go).
+	if len(spec.Multiagent) > 0 && !isNull(spec.Multiagent) {
+		roster, err := snapshotRoster(ctx, db, spec.Multiagent, snap)
+		if err != nil {
+			return snap, err
+		}
+		snap.Multiagent = roster
+	}
+	return snap, nil
 }
 
 // parseVaultIDs reads the optional top-level vault_ids array attached at session
@@ -882,6 +906,11 @@ func (s *server) updateSession(r *http.Request) (any, error) {
 		// Validate the merged result, exactly as agent update does: a patch
 		// that strands a stored mcp_server or grows past a cap rejects (#287).
 		if err := validateAgentSpec(agent.AgentSpec); err != nil {
+			return nil, err
+		}
+		// A coordinator's `self` copy is its resolved spec for this session,
+		// so the patch reaches that member of the snapshot too (roster.go).
+		if agent.Multiagent, err = patchSelfMember(agent.Multiagent, agent); err != nil {
 			return nil, err
 		}
 		row.agentJSON, err = json.Marshal(agent)

@@ -258,7 +258,7 @@ func TestAgentCreateValidation(t *testing.T) {
 		{"unknown tool type", map[string]any{"name": "x", "model": "m", "tools": []any{map[string]any{"type": "bogus"}}}},
 		{"custom tool without name", map[string]any{"name": "x", "model": "m", "tools": []any{map[string]any{"type": "custom", "description": "d", "input_schema": map[string]any{"type": "object"}}}}},
 		{"mcp_toolset without server name", map[string]any{"name": "x", "model": "m", "tools": []any{map[string]any{"type": "mcp_toolset"}}}},
-		{"multiagent unsupported", map[string]any{"name": "x", "model": "m", "multiagent": map[string]any{"type": "coordinator", "agents": []any{"agent_x"}}}},
+		{"multiagent member missing", map[string]any{"name": "x", "model": "m", "multiagent": map[string]any{"type": "coordinator", "agents": []any{"agent_x"}}}},
 		{"malformed json", `{"name": `},
 		{"non-object body", `"just a string"`},
 	}

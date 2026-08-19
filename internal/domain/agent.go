@@ -63,7 +63,10 @@ type AgentSpec struct {
 	Tools       []json.RawMessage `json:"tools"`
 	MCPServers  []json.RawMessage `json:"mcp_servers"`
 	Skills      []json.RawMessage `json:"skills"`
-	Multiagent  json.RawMessage   `json:"multiagent"` // reserved seam: always null in v1
+	// Multiagent is the coordinator roster, null for a single agent: on the
+	// stored agent, pinned {id, type, version} references; on a session's
+	// resolved agent, full member definitions (plan 35; internal/api/roster.go).
+	Multiagent json.RawMessage `json:"multiagent"`
 }
 
 // Normalize guarantees non-nil collections so JSON renders [] rather than null.
