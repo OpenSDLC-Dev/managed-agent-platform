@@ -2,6 +2,7 @@ package executor
 
 import (
 	"context"
+	"encoding/json"
 	"time"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
@@ -76,8 +77,11 @@ func (e *Executor) settleDrain(ctx context.Context, tx pgx.Tx, item *queue.Item,
 // context cancelled once a result references the use, and a stop func the
 // caller runs when the call returns, which reports whether the watch was
 // what cancelled it (a late result for such a call is dropped by the
-// caller). The check is best-effort: a failed read is one missed beat, never
-// a cancelled call.
+// caller — and once more, under the lock, by commitResults, for the answer
+// that lands between the last beat and the return). The check is
+// best-effort: a failed read is one missed beat, never a cancelled call; the
+// read runs under the watch's own context, so stopping the watch never waits
+// on a read in flight.
 func (e *Executor) answeredWatch(ctx context.Context, sid, useID domain.ID, beat time.Duration) (context.Context, func() bool) {
 	wctx, cancel := context.WithCancel(ctx)
 	if beat <= 0 {
@@ -94,7 +98,7 @@ func (e *Executor) answeredWatch(ctx context.Context, sid, useID domain.ID, beat
 			case <-wctx.Done():
 				return
 			case <-t.C:
-				if ok, err := events.Answered(ctx, e.pool, sid, useID); err == nil && ok {
+				if ok, err := events.Answered(wctx, e.pool, sid, useID); err == nil && ok {
 					answered = true
 					cancel()
 					return
@@ -107,6 +111,52 @@ func (e *Executor) answeredWatch(ctx context.Context, sid, useID domain.ID, beat
 		<-done
 		return answered
 	}
+}
+
+// commitResults appends a driver's results and runs its settlement in one
+// transaction under the session row lock, dropping first any result whose
+// call is already answered on the log — a thread-scoped interrupt's own
+// result committed between the watch's last beat and the call's return
+// (decision 9), or a sibling claimant's: a late result is dropped under the
+// lock, never appended as a second answer every replay would then carry.
+// An emptied batch still settles.
+func (e *Executor) commitResults(ctx context.Context, sid domain.ID, results []events.NewEvent, settle func(context.Context, pgx.Tx) error) error {
+	tx, err := e.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if _, err := tx.Exec(ctx, `SELECT 1 FROM sessions WHERE id = $1 FOR UPDATE`, sid.String()); err != nil {
+		return err
+	}
+	kept := results[:0:0]
+	for _, r := range results {
+		answered, err := events.Answered(ctx, tx, sid, resultRef(r))
+		if err != nil {
+			return err
+		}
+		if !answered {
+			kept = append(kept, r)
+		}
+	}
+	if _, err := e.log.AppendInTx(ctx, tx, sid, kept, events.AppendOptions{Then: settle}); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
+}
+
+// resultRef is the tool-use id a driver's result answers (agent.tool_result's
+// tool_use_id, agent.mcp_tool_result's mcp_tool_use_id).
+func resultRef(r events.NewEvent) domain.ID {
+	var ref struct {
+		ToolUseID    string `json:"tool_use_id"`
+		MCPToolUseID string `json:"mcp_tool_use_id"`
+	}
+	_ = json.Unmarshal(r.Payload, &ref)
+	if ref.MCPToolUseID != "" {
+		return domain.ID(ref.MCPToolUseID)
+	}
+	return domain.ID(ref.ToolUseID)
 }
 
 // nullableThread binds a thread id: NULL for the primary.

@@ -126,6 +126,20 @@ plane answers whatever the turn left outstanding, settles the session `idle` on
 it commits nothing. Sent together with a `user.message`, it is also how a client redirects
 a working agent in one request.
 
+**Session threads** ([plan 35](./plan/35_multiagent-threads.md), in progress). Every session
+has a primary `sthr_` thread and, once slice 4 lands the coordinator's delegation tools, child
+threads — each with its own agent, its own log and its own turn, all on the session's one
+sandbox. The flow above then reads per thread: a turn is `(session, thread)`-keyed, the
+`requires_action` suspension and the interrupt address one thread (an interrupt naming a
+`session_thread_id` ends that thread alone and leaves the shared exec item; one without
+ends every thread), the exec drivers run the runnable calls of every thread off the one
+`tool_exec` and wake each thread as its own calls are answered, outcome grading runs at
+the session's quiescence, and the session's status is a fold over its threads' (running ≻
+rescheduling ≻ idle; `requires_action` over `end_turn`, `event_ids` unioned). A single-agent
+session is the one-thread case of the same machinery and its wire is unchanged. What is
+inferred versus documented is in [DIVERGENCES.md](./DIVERGENCES.md) ("Session status as a
+fold over threads"); this section is rewritten in full when the plan closes.
+
 **Crash recovery is replay.** Sessions are never bound to a brain: any brain can pick up
 any session's next turn from the log. A sandbox container dying surfaces as one
 tool-call error; a worker dying strands its lease, which `poll` reclaims after expiry.

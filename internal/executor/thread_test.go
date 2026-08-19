@@ -11,6 +11,7 @@ import (
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/mcp/mcptest"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/pgtest"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/queue"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/toolset"
 	"github.com/jackc/pgx/v5"
 )
 
@@ -265,5 +266,71 @@ func TestAChildsMCPServerIsDiscoveredFromItsOwnList(t *testing.T) {
 	turns := h.liveTurnThreads(t)
 	if len(turns) != 2 || turns[0] != "" || turns[1] != child.String() {
 		t.Errorf("live turns = %v, want the primary's and the child's (both running, nothing outstanding)", turns)
+	}
+}
+
+// The under-lock recheck behind the keeper-beat watch: a result for a call
+// the log already answers — the interrupt's answer landing between the
+// watch's last beat and the call's return — is dropped at the settlement,
+// never appended as a second answer; the sibling's result and the
+// settlement itself still go through.
+func TestALateResultIsDroppedUnderTheSessionLock(t *testing.T) {
+	h := newHarness(t, &fakeSandbox{})
+	a := h.childThread(t, "running")
+	useA := h.appendOn(t, a, domain.EventAgentToolUse, writeUse("a.txt", "from A"))
+	useP := h.appendOn(t, "", domain.EventAgentToolUse, writeUse("p.txt", "primary"))
+	h.appendOn(t, a, domain.EventAgentToolResult,
+		`{"tool_use_id":"`+useA.String()+`","content":[{"type":"text","text":"`+events.InterruptResultText+`"}],"is_error":true}`)
+
+	late, err := toolResultEvent(useA, toolset.Result{Content: "late"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	late.ThreadID, late.CrossPosted = a, true
+	fresh, err := toolResultEvent(useP, toolset.Result{Content: "wrote"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	settled := false
+	if err := h.exec.commitResults(context.Background(), h.sid, []events.NewEvent{late, fresh},
+		func(context.Context, pgx.Tx) error { settled = true; return nil }); err != nil {
+		t.Fatalf("commitResults: %v", err)
+	}
+	if !settled {
+		t.Error("the settlement did not run")
+	}
+	var forA, forP int
+	if err := h.pool.QueryRow(context.Background(),
+		`SELECT count(*) FILTER (WHERE payload->>'tool_use_id' = $2), count(*) FILTER (WHERE payload->>'tool_use_id' = $3)
+		   FROM events WHERE session_id = $1 AND type = 'agent.tool_result'`,
+		h.sid.String(), useA.String(), useP.String()).Scan(&forA, &forP); err != nil {
+		t.Fatal(err)
+	}
+	if forA != 1 || forP != 1 {
+		t.Errorf("results for A = %d (want the interrupt's alone), for the primary = %d (want 1)", forA, forP)
+	}
+}
+
+// Two children declaring one failing server are each told once, on their own
+// log: the announcement is remembered per thread, as the catalog row is.
+func TestAnMCPFailureIsAnnouncedPerThread(t *testing.T) {
+	h := mcpHarness(t)
+	agent := `{"type":"agent","id":"agent_worker","version":1,"name":"worker","model":{"id":"fixture-model"},` +
+		`"system":"","description":"","tools":[],"skills":[],` +
+		`"mcp_servers":[{"type":"url","name":"down","url":"http://127.0.0.1:1/mcp"}]}`
+	a := pgtest.NewChildThreadWithAgent(t, h.pool, h.sid, agent)
+	b := pgtest.NewChildThreadWithAgent(t, h.pool, h.sid, agent)
+	h.setThread(t, a, "running", "")
+	h.setThread(t, b, "running", "")
+	h.enqueueMCP(t)
+
+	h.stepOnce(t)
+
+	told := map[string]int{}
+	for _, ev := range h.sessionErrors(t) {
+		told[ev.ThreadID.String()]++
+	}
+	if told[a.String()] != 1 || told[b.String()] != 1 || len(told) != 2 {
+		t.Errorf("failure announcements by thread = %v, want one on A and one on B", told)
 	}
 }

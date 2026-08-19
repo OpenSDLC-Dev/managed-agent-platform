@@ -110,12 +110,9 @@ func (e *Executor) processWeb(ctx context.Context, item *queue.Item) (err error)
 	// a stall cut the pass short, or a sibling committed one under this live
 	// item — hands THIS item back rather than enqueuing a second (#383);
 	// nothing runnable completes the item.
-	opts := events.AppendOptions{
-		Then: func(ctx context.Context, tx pgx.Tx) error {
-			return e.settleDrain(ctx, tx, item, queue.WebExec, false)
-		},
-	}
-	if _, err := e.log.AppendWith(ctx, item.SessionID, results, opts); err != nil {
+	if err := e.commitResults(ctx, item.SessionID, results, func(ctx context.Context, tx pgx.Tx) error {
+		return e.settleDrain(ctx, tx, item, queue.WebExec, false)
+	}); err != nil {
 		// The stall rides along, as it does in the tool_exec lane: a settlement
 		// that fails here is the worst case — the answers lost AND the item left
 		// to the lease — and reporting the append error alone would drop both the

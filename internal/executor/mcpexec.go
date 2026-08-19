@@ -298,12 +298,9 @@ func (e *Executor) answerMCPCalls(ctx context.Context, item *queue.Item, sess se
 	// would be dropped on conflict and the session would wait on work nobody
 	// queued); the other kinds enqueue and complete; each thread whose calls
 	// are all answered is woken.
-	opts := events.AppendOptions{
-		Then: func(ctx context.Context, tx pgx.Tx) error {
-			return e.settleDrain(ctx, tx, item, queue.MCPExec, false)
-		},
-	}
-	if _, err := e.log.AppendWith(ctx, item.SessionID, results, opts); err != nil {
+	if err := e.commitResults(ctx, item.SessionID, results, func(ctx context.Context, tx pgx.Tx) error {
+		return e.settleDrain(ctx, tx, item, queue.MCPExec, false)
+	}); err != nil {
 		// The stall rides along, as it does in the tool_exec lane: the answers
 		// are lost and the item is left to the lease, and the append error alone
 		// names neither the stall nor the call it cut short.

@@ -483,12 +483,9 @@ func (e *Executor) process(ctx context.Context, item *queue.Item) (err error) {
 	// wake, the chain to the web or MCP driver for a call this sandbox pass
 	// cannot answer, the re-scan for a call a sibling committed under this
 	// live item — is settleDrain's, shared with the other drivers.
-	opts := events.AppendOptions{
-		Then: func(ctx context.Context, tx pgx.Tx) error {
-			return e.settleDrain(ctx, tx, item, queue.ToolExec, faultErr != nil)
-		},
-	}
-	if _, err := e.log.AppendWith(ctx, item.SessionID, results, opts); err != nil {
+	if err := e.commitResults(ctx, item.SessionID, results, func(ctx context.Context, tx pgx.Tx) error {
+		return e.settleDrain(ctx, tx, item, queue.ToolExec, faultErr != nil)
+	}); err != nil {
 		// The diagnosis the branch above built rides along rather than being
 		// replaced. A settlement that fails on the stall path is the worst case
 		// this change has — the results are lost AND the item is left to the

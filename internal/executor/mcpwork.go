@@ -1066,7 +1066,7 @@ func (e *Executor) settleMCP(ctx context.Context, item *queue.Item, rows []catal
 		// carries the truth; the event is not re-sent. Keying on the reason text
 		// would fix that and hand a server an event per pass for the price of
 		// varying its own error message.
-		if r.announceable() && !announced[announceKey(r.name, r.url)] {
+		if r.announceable() && !announced[announceKey(r.thread, r.name, r.url)] {
 			ev, err := mcpFailureEvent(r.name, mcpFailure{
 				message: r.reason, authentication: r.authentication})
 			if err != nil {
@@ -1078,7 +1078,7 @@ func (e *Executor) settleMCP(ctx context.Context, item *queue.Item, rows []catal
 			// one server at one url — the write path rejects that, the stored
 			// resolved_agent this reads back need not — and the set was read
 			// before the loop, so the second would not see the first's upsert.
-			announced[announceKey(r.name, r.url)] = true
+			announced[announceKey(r.thread, r.name, r.url)] = true
 		}
 		toolsJSON, err := json.Marshal(r.tools)
 		if err != nil {
@@ -1145,7 +1145,7 @@ func (e *Executor) settleMCP(ctx context.Context, item *queue.Item, rows []catal
 // server's first real failure for the rest of the cycle.
 func announcedServers(ctx context.Context, tx pgx.Tx, sid domain.ID) (map[string]bool, error) {
 	rows, err := tx.Query(ctx,
-		`SELECT server_name, url FROM mcp_catalogs
+		`SELECT COALESCE(thread_id, ''), server_name, url FROM mcp_catalogs
 		  WHERE session_id = $1 AND status = 'failed'
 		    AND error IS NOT NULL AND error <> $2`,
 		sid.String(), passRanOutOfTime)
@@ -1155,11 +1155,11 @@ func announcedServers(ctx context.Context, tx pgx.Tx, sid domain.ID) (map[string
 	defer rows.Close()
 	announced := map[string]bool{}
 	for rows.Next() {
-		var name, url string
-		if err := rows.Scan(&name, &url); err != nil {
+		var thread, name, url string
+		if err := rows.Scan(&thread, &name, &url); err != nil {
 			return nil, fmt.Errorf("read mcp catalog statuses: %w", err)
 		}
-		announced[announceKey(name, url)] = true
+		announced[announceKey(domain.ID(thread), name, url)] = true
 	}
 	return announced, rows.Err()
 }
@@ -1168,8 +1168,12 @@ func announcedServers(ctx context.Context, tx pgx.Tx, sid domain.ID) (map[string
 // the reason every other row decision in this file compares one: a listing or a
 // failure attributed to an endpoint the server no longer sits at is about a
 // different server, and a row left behind at the old one would otherwise
-// silence the first real failure of the new.
-func announceKey(name, url string) string { return name + "\x00" + url }
+// silence the first real failure of the new. The thread is in it because the
+// row and the event are the thread's (plan 35 decision 14): two children
+// declaring one failing server are each told once, on their own log.
+func announceKey(thread domain.ID, name, url string) string {
+	return thread.String() + "\x00" + name + "\x00" + url
+}
 
 // announceable says whether a failed row is one the session is told about. Two
 // kinds are not: a row this pass ran out of time on, which is the platform's own
