@@ -191,6 +191,12 @@ func isNull(raw json.RawMessage) bool {
 	return bytes.Equal(bytes.TrimSpace(raw), []byte("null"))
 }
 
+// present reports whether an optional raw value carries something: neither
+// absent (empty) nor an explicit null.
+func present(raw json.RawMessage) bool {
+	return len(raw) > 0 && !isNull(raw)
+}
+
 // stringField parses an optional string field. Returns set=false when the key
 // is absent; null=true when explicitly null.
 func stringField(obj map[string]json.RawMessage, key string) (val string, set, null bool, err error) {
@@ -524,8 +530,10 @@ func validateAgentSpec(spec agentSpec) error {
 }
 
 // maxSkillsPerSession is the reference's published cap, counted across every
-// agent — a v1 session resolves exactly one agent, so it binds on that
-// agent's skills[] (base spec and session override alike).
+// agent. It binds per agent spec — base spec and session override alike, and
+// each roster member's on its own — until plan 35 slice 4 unions a
+// coordinator session's skills across its threads (decision 11), where the
+// cross-agent count gets its one natural place.
 const maxSkillsPerSession = 500
 
 // parseSkills validates skills[]: {type:"anthropic"|"custom", skill_id,

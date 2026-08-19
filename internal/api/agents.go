@@ -50,11 +50,10 @@ func renderAgent(id, name string, version int64, spec agentSpec, metadata map[st
 }
 
 // parseAgentSpecFields reads the spec-shaped fields shared by create and
-// update bodies into spec, tracking which keys were present.
+// update bodies into spec, tracking which keys were present. `multiagent` is
+// not read here: its resolution needs the write transaction (resolveRoster),
+// so create/update handle it beside their INSERT/UPDATE.
 func parseAgentSpecFields(obj map[string]json.RawMessage, spec *agentSpec) error {
-	if raw, ok := obj["multiagent"]; ok && !isNull(raw) {
-		return errInvalid("multiagent is not supported yet")
-	}
 	if raw, ok := obj["model"]; ok {
 		if isNull(raw) {
 			return errInvalid("model cannot be cleared")
@@ -134,10 +133,6 @@ func (s *server) createAgent(r *http.Request) (any, error) {
 		return nil, err
 	}
 
-	specJSON, err := json.Marshal(spec)
-	if err != nil {
-		return nil, err
-	}
 	id := domain.NewID(domain.PrefixAgent).String()
 
 	tx, err := s.pool.Begin(ctx)
@@ -145,6 +140,18 @@ func (s *server) createAgent(r *http.Request) (any, error) {
 		return nil, err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+
+	// The roster resolves inside the transaction (FOR SHARE on its members),
+	// with `self` pinned to the version this create produces.
+	if raw, ok := obj["multiagent"]; ok && !isNull(raw) {
+		if spec.Multiagent, err = resolveRoster(ctx, tx, raw, id, 1); err != nil {
+			return nil, err
+		}
+	}
+	specJSON, err := json.Marshal(spec)
+	if err != nil {
+		return nil, err
+	}
 
 	var createdAt, updatedAt time.Time
 	if err := tx.QueryRow(ctx,
@@ -340,11 +347,25 @@ func (s *server) updateAgent(r *http.Request) (any, error) {
 		}
 	}
 
+	newVersion := current + 1
+	// The roster is replaced as a whole when sent (`null` clears it) and left
+	// as stored when omitted — it never follows later member updates (docs).
+	// `self` pins the version this update produces, in both cases: a kept
+	// roster's self entry moves from the current version to the new one, so
+	// "self" keeps meaning this coordinator at the version a session resolves.
+	if raw, ok := obj["multiagent"]; ok {
+		if isNull(raw) {
+			spec.Multiagent = nil
+		} else if spec.Multiagent, err = resolveRoster(ctx, tx, raw, id, newVersion); err != nil {
+			return nil, err
+		}
+	} else if spec.Multiagent, err = repinSelf(spec.Multiagent, id, current, newVersion); err != nil {
+		return nil, err
+	}
 	newSpecJSON, err := json.Marshal(spec)
 	if err != nil {
 		return nil, err
 	}
-	newVersion := current + 1
 	if err := tx.QueryRow(ctx,
 		`UPDATE agents SET name = $2, version = $3, spec = $4, metadata = $5, updated_at = now()
 		 WHERE id = $1 RETURNING updated_at`,
