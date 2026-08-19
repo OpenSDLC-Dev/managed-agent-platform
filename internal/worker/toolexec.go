@@ -257,7 +257,7 @@ scan:
 }
 
 // postToolResult sends one user.tool_result answering a tool use. Empty tool
-// output posts the reference runner's "(no output)" text block (v1.63.1),
+// output posts the reference runner's toolset.NoOutput text block (v1.63.1),
 // never an empty one: the Sessions API rejects an empty text block, and so
 // does the Messages endpoint the brain's replay hands the content to.
 // is_error is carried through so the model sees a tool-level failure as an
@@ -270,7 +270,7 @@ func postToolResult(ctx context.Context, client sdk.Client, sessionID string, us
 	ev.OfUserToolResult.IsError = sdk.Bool(res.IsError)
 	text := res.Content
 	if text == "" {
-		text = "(no output)"
+		text = toolset.NoOutput
 	}
 	ev.OfUserToolResult.Content = []sdk.BetaManagedAgentsUserToolResultEventParamsContentUnion{{
 		OfText: &sdk.BetaManagedAgentsTextBlockParam{

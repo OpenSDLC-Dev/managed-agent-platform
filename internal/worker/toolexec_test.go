@@ -20,6 +20,7 @@ import (
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/events"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/pgtest"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/sandbox"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/toolset"
 	sdk "github.com/anthropics/anthropic-sdk-go"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -445,8 +446,8 @@ func TestEmptyToolResultPostsPlaceholder(t *testing.T) {
 	if results[0].IsError {
 		t.Errorf("empty read is not an error: %+v", results[0])
 	}
-	if len(results[0].Content) != 1 || results[0].Content[0]["text"] != "(no output)" {
-		t.Errorf("content = %v, want one text block %q", results[0].Content, "(no output)")
+	if len(results[0].Content) != 1 || results[0].Content[0]["text"] != toolset.NoOutput {
+		t.Errorf("content = %v, want one text block %q", results[0].Content, toolset.NoOutput)
 	}
 }
 

@@ -232,7 +232,7 @@ func extractWithLimits(data []byte, maxMembers int, maxBytes int64) ([]File, err
 	remaining := maxBytes
 	var files []File
 	for _, f := range zr.File {
-		if !plain(f) || f.Mode().IsDir() {
+		if !f.Mode().IsRegular() { // directories and non-plain members alike
 			continue
 		}
 		p := f.Name

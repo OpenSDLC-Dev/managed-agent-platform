@@ -23,6 +23,7 @@ import (
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/sandbox"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/secrets"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/secrets/local"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/toolset"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -1304,8 +1305,8 @@ func TestEmptyToolResultPostsPlaceholder(t *testing.T) {
 	if body.IsError {
 		t.Errorf("empty read is not an error: %+v", body)
 	}
-	if len(body.Content) != 1 || body.Content[0]["text"] != "(no output)" {
-		t.Errorf("content = %v, want one text block %q", body.Content, "(no output)")
+	if len(body.Content) != 1 || body.Content[0]["text"] != toolset.NoOutput {
+		t.Errorf("content = %v, want one text block %q", body.Content, toolset.NoOutput)
 	}
 }
 

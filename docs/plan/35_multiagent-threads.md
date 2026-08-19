@@ -99,9 +99,10 @@ Resolved per CLAUDE.md's order: public docs (platform.claude.com/docs/en/managed
 `agent-setup`, `sessions`, `budgets`, `webhooks`, `tools`, `reference` — the event
 catalog — and the cookbooks `CMA_plan_big_execute_small`, `CMA_coordinate_specialist_team`,
 `CMA_watch_subagents_live`, all fetched 2026-08-17; `self-hosted-sandboxes` fetched
-2026-08-18) → `anthropic-sdk-go` read at the
-pinned tag **v1.61.0** via `git show v1.61.0:<file>` (the checkout is at v1.63.1; every
-citation below is a v1.61.0 line unless marked *v1.63.1*) → the `ant` CLI (v1.23.0,
+2026-08-18) → `anthropic-sdk-go` read at
+tag **v1.61.0** via `git show v1.61.0:<file>` — the pin when this plan was drafted; slice 0
+moved `go.mod` and the checkout to v1.63.1, and every citation below is a v1.61.0 line
+unless marked *v1.63.1* (the v1.62.0 additive members are decision 1's list) → the `ant` CLI (v1.23.0,
 Stainless-generated, adds no semantics). Four further local checkouts served as design
 reference only, never as wire sources: `claude-code-source`, `deepseek-harness`,
 `openai/codex`, `adk-go` (docs/REFERENCE_PROJECTS.md).

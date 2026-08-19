@@ -156,10 +156,12 @@ func fileFault(verb, display string, err error) (Result, error) {
 // table is — its one mapped case matches fs.ErrPermission, which Go answers
 // for EACCES and EPERM alike, so both strerror spellings take the reference's
 // wording; anything else it answers with Go's own errno text (v1.63.0,
-// agenttoolset.go), which is the shell's strerror in lowercase — "read-only
+// agenttoolset.go), which is glibc's strerror in lowercase — "read-only
 // file system", "no space left on device" — so the passthrough lowercases its
-// first rune; and a refusal that carried no reason falls back to the
-// sentinel's own words (plan 23, #306).
+// first rune (parity for a glibc image; a musl image's strerror can differ in
+// wording — "filename too long" — and passes through as it is); and a refusal
+// that carried no reason falls back to the sentinel's own words (plan 23,
+// #306).
 func notWritableReason(err error) string {
 	var pnw *sandbox.PathNotWritableError
 	if !errors.As(err, &pnw) || pnw.Reason == "" {
