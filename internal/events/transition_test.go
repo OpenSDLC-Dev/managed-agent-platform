@@ -140,8 +140,13 @@ func TestTransitionThreadSingleThreadIsThePair(t *testing.T) {
 	// forced, the column back where it was.
 	transition(t, pool, log, sid, events.ThreadTransition{Status: running})
 	ctx := context.Background()
-	tx, _ := pool.Begin(ctx)
-	_, _ = tx.Exec(ctx, `SELECT 1 FROM sessions WHERE id = $1 FOR UPDATE`, sid.String())
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tx.Exec(ctx, `SELECT 1 FROM sessions WHERE id = $1 FOR UPDATE`, sid.String()); err != nil {
+		t.Fatal(err)
+	}
 	a, _, err := events.TransitionThread(ctx, tx, sid, events.ThreadTransition{Status: domain.SessionRescheduling, Force: true})
 	if err != nil {
 		t.Fatal(err)
@@ -184,7 +189,10 @@ func TestTransitionThreadWithoutThreadRows(t *testing.T) {
 		t.Errorf("bare session: %v moved %v status %s", types(got), moved, sessionStatus(t, pool, sid))
 	}
 	ctx := context.Background()
-	tx, _ := pool.Begin(ctx)
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
 	defer func() { _ = tx.Rollback(ctx) }()
 	if _, _, err := events.TransitionThread(ctx, tx, sid, events.ThreadTransition{ThreadID: "sthr_missing", Status: domain.SessionRunning}); err == nil {
 		t.Error("a child thread that does not exist was moved")

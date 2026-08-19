@@ -339,7 +339,7 @@ func terminateThread(ctx context.Context, tx pgx.Tx, log *events.Log, row thread
 			if after != nil {
 				payload["stop_reason"] = after
 			}
-			raw, _ := json.Marshal(payload)
+			raw := mustJSON(payload)
 			batch = append(batch, events.NewEvent{Type: domain.EventSessionStatusIdle, Payload: raw})
 		}
 	}

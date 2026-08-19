@@ -148,10 +148,11 @@ func (s *server) pollWork(w http.ResponseWriter, r *http.Request) {
 	for {
 		// Abandoned wind-downs first: a stopping tool_exec whose worker never
 		// finished is finalized and its session re-armed (plan 35 decision
-		// 13 iii), so the poll below hands the fresh item out.
+		// 13 iii), so the poll below hands the fresh item out. Opportunistic
+		// cleanup: a transient finalize failure must not fail work delivery —
+		// the rows stay stopping and the next poll retries.
 		if err := s.finalizeAbandoned(r.Context(), envID); err != nil {
-			writeError(w, r, err)
-			return
+			slog.WarnContext(r.Context(), "finalize abandoned wind-downs", "environment", envID, "error", err)
 		}
 		item, err := s.queue.Poll(r.Context(), envID, reclaim)
 		if err != nil {
@@ -513,7 +514,9 @@ func (s *server) rearm(ctx context.Context, tx pgx.Tx, envID, sessionID domain.I
 // strand the session's runnable calls behind a row already stopped — one
 // still stopping is retried by the next poll. The guarded flip re-checks the
 // candidate under the lock, so racing polls settle and re-arm each session
-// exactly once.
+// exactly once. The lock is taken SKIP LOCKED: a session a settlement or a
+// send holds is left for the next poll rather than blocking this one past
+// its window.
 func (s *server) finalizeAbandoned(ctx context.Context, envID domain.ID) error {
 	items, err := s.queue.ListAbandoned(ctx, envID)
 	if err != nil {
@@ -526,7 +529,13 @@ func (s *server) finalizeAbandoned(ctx context.Context, envID domain.ID) error {
 		}
 		err = func() error {
 			defer func() { _ = tx.Rollback(ctx) }()
-			if _, err := tx.Exec(ctx, `SELECT 1 FROM sessions WHERE id = $1 FOR UPDATE`, it.SessionID.String()); err != nil {
+			var one int
+			err := tx.QueryRow(ctx, `SELECT 1 FROM sessions WHERE id = $1 FOR UPDATE SKIP LOCKED`,
+				it.SessionID.String()).Scan(&one)
+			if errors.Is(err, pgx.ErrNoRows) {
+				return nil
+			}
+			if err != nil {
 				return err
 			}
 			done, err := s.queue.FinalizeAbandoned(ctx, tx, envID, it.ID)

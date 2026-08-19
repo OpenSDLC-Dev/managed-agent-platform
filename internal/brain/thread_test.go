@@ -172,6 +172,23 @@ func TestChildTurnCrossPostsOnlyWhatAClientMustAnswer(t *testing.T) {
 	if !typesEqual(viewTypes, []string{"agent.custom_tool_use"}) {
 		t.Errorf("session view = %v, want the child's custom tool use alone (its bash call is the platform's to run)", viewTypes)
 	}
+	// The other half of the rule: staying off the session view must mean the
+	// bash intent landed on the child's own log, not that it was dropped.
+	own, err := h.log.List(context.Background(), h.sessionID, events.ListQuery{Scope: events.ScopeThread, ThreadID: child})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var ownTypes []string
+	for _, ev := range own {
+		ownTypes = append(ownTypes, string(ev.Type))
+	}
+	has := map[string]bool{}
+	for _, typ := range ownTypes {
+		has[typ] = true
+	}
+	if !has["agent.tool_use"] || !has["agent.custom_tool_use"] {
+		t.Errorf("child view = %v, want both the bash intent and the custom call on the child's own log", ownTypes)
+	}
 	if got := h.threadStatus(t, child); got != "running" {
 		t.Errorf("child = %q, want running (suspended on its tools)", got)
 	}

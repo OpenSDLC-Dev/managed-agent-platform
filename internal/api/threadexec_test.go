@@ -401,20 +401,36 @@ func TestWorkStopWaitsForTheSessionLock(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer func() { _ = tx.Rollback(ctx) }()
 	if _, err := tx.Exec(ctx, `SELECT 1 FROM sessions WHERE id = $1 FOR UPDATE`, sid); err != nil {
 		t.Fatal(err)
 	}
 	var wg sync.WaitGroup
 	wg.Add(1)
-	stopped := make(chan struct{})
+	// A raw request: the fatal-on-error helpers must not Fatal off the test
+	// goroutine, and a failed request must still unblock the receive below.
+	stopped := make(chan int, 1)
 	go func() {
 		defer wg.Done()
-		wantNoContent(t, s, "/v1/environments/"+envID+"/work/"+workID+"/stop", key, map[string]any{"force": true})
-		close(stopped)
+		req, err := http.NewRequest(http.MethodPost,
+			s.url+"/v1/environments/"+envID+"/work/"+workID+"/stop",
+			strings.NewReader(`{"force":true}`))
+		if err != nil {
+			stopped <- 0
+			return
+		}
+		req.Header.Set("Authorization", "Bearer "+key)
+		res, err := http.DefaultClient.Do(req)
+		if err != nil {
+			stopped <- 0
+			return
+		}
+		res.Body.Close()
+		stopped <- res.StatusCode
 	}()
 	select {
-	case <-stopped:
-		t.Fatal("the stop did not wait for the session lock")
+	case status := <-stopped:
+		t.Fatalf("the stop did not wait for the session lock (status %d)", status)
 	case <-time.After(300 * time.Millisecond):
 	}
 	// The settlement appends its call under the lock and commits; the stop
@@ -427,6 +443,9 @@ func TestWorkStopWaitsForTheSessionLock(t *testing.T) {
 		t.Fatal(err)
 	}
 	wg.Wait()
+	if status := <-stopped; status != http.StatusNoContent {
+		t.Fatalf("stop status = %d, want 204", status)
+	}
 	if n := s.liveWork(sid, queue.ToolExec); n != 1 {
 		t.Errorf("live tool_exec after the racing stop = %d, want the re-armed item for the call committed under the lock", n)
 	}

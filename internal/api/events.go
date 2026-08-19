@@ -311,12 +311,16 @@ func (s *server) sendSessionEvents(r *http.Request) (any, error) {
 		// any other input) posted meanwhile appends and waits for the next
 		// replay: waking the turn past an unresolved tool_use would replay a
 		// request the model protocol rejects, and requires_action resolves only
-		// by confirmation (BetaManagedAgentsSessionRequiresAction). Empty for a
-		// thread with no gated tools, so it costs the common path only one
-		// indexed query.
-		askBlocking, err := events.UnconfirmedThreadAskEvents(ctx, tx, domain.ID(id), tid, events.ToolConfirmationRefs(newEvents))
-		if err != nil {
-			return nil, err
+		// by confirmation (BetaManagedAgentsSessionRequiresAction). Read only
+		// for the two arms that use it — a confirmation, or an idle primary's
+		// wake — so the other triggers cost no query per live thread.
+		var askBlocking []string
+		if a.confirmation || (isPrimary && (hasUserMessage || hasDefineOutcome) && status == string(domain.SessionIdle)) {
+			blocked, err := events.UnconfirmedThreadAskEvents(ctx, tx, domain.ID(id), tid, events.ToolConfirmationRefs(newEvents))
+			if err != nil {
+				return nil, err
+			}
+			askBlocking = blocked
 		}
 		switch {
 		case a.interrupt:

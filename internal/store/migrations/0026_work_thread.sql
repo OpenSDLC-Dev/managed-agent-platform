@@ -8,7 +8,14 @@
 -- gains the thread column so sibling threads run model_turns concurrently
 -- while each thread still has at most one live turn. NULLS NOT DISTINCT is
 -- what keeps 0003's dedup for the primary's turn and every exec item — under
--- the default two (sesn, NULL, model_turn) rows would never conflict.
+-- the default two (sesn, NULL, model_turn) rows would never conflict. It
+-- needs PostgreSQL 15+ (the bundled deployments run 16). Swapping 0003's
+-- index out from under ON CONFLICT (session_id, kind) makes this a
+-- coordinated-rollout release: a replica still on pre-0026 code fails its
+-- enqueues until it is replaced. The window is transient and self-healing —
+-- a settlement that cannot enqueue rolls back and its turn replays after
+-- lease reclaim; an API send surfaces a retryable 500 — but a rolling
+-- upgrade should expect enqueue errors from old replicas until it completes.
 ALTER TABLE work_items ADD COLUMN thread_id text REFERENCES session_threads(id) ON DELETE CASCADE;
 DROP INDEX work_items_live_session_kind_idx;
 CREATE UNIQUE INDEX work_items_live_session_thread_kind_idx
@@ -23,6 +30,10 @@ CREATE INDEX work_items_thread_idx ON work_items (thread_id) WHERE thread_id IS 
 -- A server two threads both declare is discovered once per thread.
 ALTER TABLE mcp_catalogs ADD COLUMN thread_id text REFERENCES session_threads(id) ON DELETE CASCADE;
 ALTER TABLE mcp_catalogs DROP CONSTRAINT mcp_catalogs_pkey;
+-- The PK cannot survive the widening — thread_id is NULL for the primary and
+-- a PK column cannot be — so row identity moves to this unique index. The
+-- platform configures no logical replication; an operator running CDC on
+-- this table sets a replica identity of their own.
 CREATE UNIQUE INDEX mcp_catalogs_thread_server_idx
     ON mcp_catalogs (session_id, thread_id, server_name) NULLS NOT DISTINCT;
 CREATE INDEX mcp_catalogs_thread_idx ON mcp_catalogs (thread_id) WHERE thread_id IS NOT NULL;

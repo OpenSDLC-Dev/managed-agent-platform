@@ -108,7 +108,10 @@ var runnableToolUse = unansweredToolUse + `
 		          ))`
 
 // threadClause scopes a tool-use predicate to one thread's own rows, bound as
-// $5: NULL is the primary's (nullableID).
+// $5: NULL is the primary's (nullableID). runnableToolUse binds $5 to its
+// extra allowed ids, so a scan composing the two fragments must renumber one
+// of them — today no call site combines them (the worker's thread-scoped
+// scan is slice 4).
 const threadClause = ` AND tu.thread_id IS NOT DISTINCT FROM $5`
 
 // HasUnansweredToolUse reports whether any tool-use event in the session

@@ -30,7 +30,11 @@ func TestEnqueueThreadKeysTurnsAndDedupesExecItems(t *testing.T) {
 	if err != nil || !created {
 		t.Fatalf("child enqueue beside a live primary turn: created=%v err=%v, want true", created, err)
 	}
-	if created, _ := q.EnqueueThread(ctx, pool, envID, sid, child, queue.ModelTurn); created {
+	created, err = q.EnqueueThread(ctx, pool, envID, sid, child, queue.ModelTurn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if created {
 		t.Error("a second child turn was not deduped")
 	}
 	for i, want := range []bool{true, false} {
@@ -49,7 +53,11 @@ func TestEnqueueThreadKeysTurnsAndDedupesExecItems(t *testing.T) {
 	if err != nil || second == nil || second.ThreadID != child {
 		t.Fatalf("second claim = %+v err=%v, want the child's turn", second, err)
 	}
-	if third, _ := q.Claim(ctx, queue.ModelTurn, time.Minute); third != nil {
+	third, err := q.Claim(ctx, queue.ModelTurn, time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if third != nil {
 		t.Errorf("third claim = %+v, want nothing", third)
 	}
 }
@@ -95,7 +103,9 @@ func TestCancelThreadLeavesSiblingsAndExecItems(t *testing.T) {
 		t.Fatal(err)
 	}
 	var n int
-	_ = pool.QueryRow(ctx, `SELECT count(*) FROM work_items WHERE session_id = $1 AND state <> 'stopped' AND kind = 'model_turn'`, sid.String()).Scan(&n)
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM work_items WHERE session_id = $1 AND state <> 'stopped' AND kind = 'model_turn'`, sid.String()).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
 	if n != 1 {
 		t.Errorf("live turns after cancelling the primary = %d, want b's alone", n)
 	}

@@ -27,9 +27,13 @@ type threadState struct {
 // with no rows, is its primary alone at the session's status. The session
 // row is the caller's to lock.
 func liveThreads(ctx context.Context, tx pgx.Tx, sessionID, sessionStatus string) ([]threadState, error) {
+	// Live is what foldSession means by it — unarchived and not terminated —
+	// so the triggers and the fold derive from one rule (the two travel
+	// together today; the guard keeps them aligned if that ever splits).
 	rows, err := tx.Query(ctx,
 		`SELECT CASE WHEN parent_thread_id IS NULL THEN '' ELSE id END, status
 		   FROM session_threads WHERE session_id = $1 AND archived_at IS NULL
+		     AND status <> 'terminated'
 		  ORDER BY parent_thread_id IS NOT NULL, created_at, id`, sessionID)
 	if err != nil {
 		return nil, err

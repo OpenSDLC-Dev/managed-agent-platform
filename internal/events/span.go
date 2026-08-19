@@ -40,9 +40,15 @@ func (l *Log) StartModelRequest(ctx context.Context, sessionID domain.ID, backen
 // the start and end events are written on that thread's own log; an empty
 // threadID is the primary.
 func (l *Log) StartModelRequestOn(ctx context.Context, sessionID, threadID domain.ID, backend Backend) (context.Context, *ModelRequest, error) {
+	// A child's turn names its thread, so two concurrent turns of one
+	// session stay distinguishable in a trace.
+	attrs := []attribute.KeyValue{attribute.String("session.id", sessionID.String())}
+	if threadID != "" {
+		attrs = append(attrs, attribute.String("session.thread_id", threadID.String()))
+	}
 	ctx, span := otel.GetTracerProvider().Tracer(tracerName).Start(ctx, "model_request",
 		trace.WithSpanKind(trace.SpanKindClient),
-		trace.WithAttributes(attribute.String("session.id", sessionID.String())))
+		trace.WithAttributes(attrs...))
 	now := time.Now().UTC()
 	evs, err := l.Append(ctx, sessionID, []NewEvent{{
 		Type:        domain.EventSpanModelRequestStart,

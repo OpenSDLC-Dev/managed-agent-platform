@@ -76,9 +76,10 @@ func RouteInbound(ctx context.Context, q Querier, sessionID domain.ID, evs []New
 				continue
 			}
 			var archivedAt *time.Time
+			var status string
 			err := q.QueryRow(ctx,
-				`SELECT archived_at FROM session_threads WHERE id = $1 AND session_id = $2`,
-				claim.String(), sessionID.String()).Scan(&archivedAt)
+				`SELECT archived_at, status FROM session_threads WHERE id = $1 AND session_id = $2`,
+				claim.String(), sessionID.String()).Scan(&archivedAt, &status)
 			if errors.Is(err, pgx.ErrNoRows) {
 				return nil, fmt.Errorf("events[%d]: session_thread_id %q does not name a thread in this session", i, claim)
 			}
@@ -87,6 +88,11 @@ func RouteInbound(ctx context.Context, q Querier, sessionID domain.ID, evs []New
 			}
 			if archivedAt != nil {
 				return nil, fmt.Errorf("events[%d]: thread %s is archived", i, claim)
+			}
+			// Not live even before archived_at lands: termination and archiving
+			// travel together today, but the claim's rule is the fold's.
+			if status == string(domain.SessionTerminated) {
+				return nil, fmt.Errorf("events[%d]: thread %s is terminated", i, claim)
 			}
 			ev.CrossPosted = true
 		}
