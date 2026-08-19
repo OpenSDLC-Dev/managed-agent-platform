@@ -69,7 +69,7 @@ func parsePageMax(q url.Values, max int) (pageParams, error) {
 }
 
 // parsePageWith is parsePage with explicit default and maximum limits, for
-// the threads list whose documented default is its cap.
+// the threads list, whose documented default (1000) is also the cap we impose.
 func parsePageWith(q url.Values, def, max int) (pageParams, error) {
 	p := pageParams{limit: def}
 	if s := q.Get("limit"); s != "" {

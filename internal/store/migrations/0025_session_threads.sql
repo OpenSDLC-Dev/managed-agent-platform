@@ -20,12 +20,20 @@ CREATE TABLE session_threads (
     usage            jsonb NOT NULL DEFAULT '{}',
     created_at       timestamptz NOT NULL DEFAULT now(),
     updated_at       timestamptz NOT NULL DEFAULT now(),
-    archived_at      timestamptz
+    archived_at      timestamptz,
+    -- parent_thread_id is the one discriminator readers use; the agent column
+    -- follows it — a child row always carries its snapshot, the primary never
+    -- does — so no reader can render one kind as the other.
+    CHECK ((parent_thread_id IS NULL) = (agent IS NULL))
 );
 -- One primary per session is a schema fact, not a convention.
 CREATE UNIQUE INDEX session_threads_primary_idx ON session_threads (session_id) WHERE parent_thread_id IS NULL;
 -- The threads list is keyed by creation order.
 CREATE INDEX session_threads_session_idx ON session_threads (session_id, created_at, id);
+-- The self-reference is checked on every row delete (a session's cascade
+-- removes its primary and children in one statement); without this index
+-- each check is a scan of the whole table — the work_items precedent (0001).
+CREATE INDEX session_threads_parent_idx ON session_threads (parent_thread_id);
 
 -- Backfill: one primary row per existing session, mirroring the session row.
 INSERT INTO session_threads (id, session_id, org_id, workspace_id, project_id, agent_name,
@@ -39,4 +47,11 @@ SELECT 'sthr_' || split_part(id, '_', 2), id, org_id, workspace_id, project_id,
 -- child's row the session-level view — which is the primary thread's own —
 -- also surfaces (a child's status events, an ask-gated call and its answer).
 ALTER TABLE events ADD COLUMN cross_posted boolean NOT NULL DEFAULT false;
-CREATE INDEX events_thread_seq_idx ON events (session_id, thread_id, seq);
+-- A child thread's own view reads `thread_id = $tid` in seq order; the session
+-- view's predicate (thread_id IS NULL OR cross_posted) walks the existing
+-- (session_id, seq) key. Partial, because no row written before this
+-- migration has a thread_id: the build is then a scan that writes nothing,
+-- where a full index over a large events table would hold CREATE INDEX's
+-- SHARE lock — blocking every append — for the rest of the migrator's single
+-- transaction (the 0013 note).
+CREATE INDEX events_thread_seq_idx ON events (session_id, thread_id, seq) WHERE thread_id IS NOT NULL;

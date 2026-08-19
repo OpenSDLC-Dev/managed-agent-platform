@@ -15,9 +15,12 @@ import (
 // a history from before the thread resource existed holds no thread events
 // (append-only; nothing backfills them).
 
-// threadLifecycle is the set of events that name a thread and its agent.
-var threadLifecycle = map[domain.EventType]bool{
-	domain.EventSessionThreadCreated:           true,
+// primaryStatusEvents are the thread events AppendInTx completes with the
+// session's agent name when they carry no thread (the primary's own status
+// changes). session.thread_created is deliberately not here: it is written
+// to the parent's stream naming the *child's* agent, so its emitter supplies
+// agent_name itself.
+var primaryStatusEvents = map[domain.EventType]bool{
 	domain.EventSessionThreadStatusRunning:     true,
 	domain.EventSessionThreadStatusIdle:        true,
 	domain.EventSessionThreadStatusRescheduled: true,
@@ -63,30 +66,22 @@ func StatusChange(sessionID domain.ID, status domain.SessionStatus, stop *domain
 	}
 	out := make([]NewEvent, 0, 2)
 	if threadType, ok := threadStatusOf[status]; ok {
-		out = append(out, NewEvent{Type: threadType, Payload: mustMarshal(thread)})
+		out = append(out, NewEvent{Type: threadType, Payload: mustJSON(thread)})
 	}
-	return append(out, NewEvent{Type: sessionType, Payload: mustMarshal(session)})
+	return append(out, NewEvent{Type: sessionType, Payload: mustJSON(session)})
 }
 
-// withAgentName sets agent_name on a thread lifecycle payload that lacks it.
+// withAgentName sets agent_name on a thread status payload that lacks it.
 func withAgentName(payload json.RawMessage, name string) (json.RawMessage, error) {
-	var obj map[string]json.RawMessage
-	if err := json.Unmarshal(payload, &obj); err != nil || obj == nil {
-		return nil, fmt.Errorf("thread event payload is not an object: %v", err)
+	obj, err := asObject(payload, "thread event payload")
+	if err != nil {
+		return nil, err
 	}
 	if _, ok := obj["agent_name"]; ok {
 		return payload, nil
 	}
-	obj["agent_name"] = mustMarshal(name)
+	obj["agent_name"] = mustJSON(name)
 	return json.Marshal(obj)
-}
-
-func mustMarshal(v any) json.RawMessage {
-	raw, err := json.Marshal(v)
-	if err != nil {
-		panic(err) // maps of strings and a StopReason cannot fail to marshal
-	}
-	return raw
 }
 
 // nullableID binds an optional id: NULL when empty.

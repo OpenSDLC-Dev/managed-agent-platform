@@ -261,7 +261,7 @@ func (b *Broker) dispatch(channel, payload string) {
 		for s := range b.subs[domain.ID(m.SessionID)] {
 			// Previews belong to one thread's surface; session.deleted ends
 			// every stream of the session alike.
-			if s.threadID.String() != m.ThreadID && ft.Type != "session.deleted" {
+			if s.threadID.String() != m.ThreadID && ft.Type != string(domain.EventSessionDeleted) {
 				continue
 			}
 			// A fresh preview generation clears the lossy state: chunk

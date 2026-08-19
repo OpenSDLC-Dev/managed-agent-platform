@@ -206,7 +206,7 @@ func (l *Log) AppendInTx(ctx context.Context, tx pgx.Tx, sessionID domain.ID, ev
 		// The primary thread's own lifecycle events name the session's agent:
 		// completed here, under the lock that already read it, so no emitter
 		// carries the name around (StatusChange builds the pair without it).
-		if ev.ThreadID == "" && threadLifecycle[ev.Type] {
+		if ev.ThreadID == "" && primaryStatusEvents[ev.Type] {
 			payload, err = withAgentName(payload, *agentName)
 			if err != nil {
 				return nil, err

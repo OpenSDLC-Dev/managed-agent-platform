@@ -8,12 +8,13 @@ issue: "#53"
 This plan addresses #53 (its last slice closes it): a session's primary thread orchestrates work by spawning **session
 threads**, each running an agent from the coordinator's roster. At drafting the seam was
 reserved and nothing more — `internal/api/agents.go` rejected `multiagent` on agent
-create/update (slice 1 lifted that; the rest holds until its slice), `internal/events/inbound.go:423` (`requireNullThread`) rejects any non-null
-`session_thread_id`, `internal/brain/brain.go:510` stamps `session_thread_id: nil` on every
-tool intent, `internal/store/migrations/0001_init.sql:106` reserves `events.thread_id`
-(never written, never read), `internal/domain/event.go:97`'s `ThreadID` is dead, and no
-`/threads` route exists — `ant beta:sessions:threads list` returns our `no such endpoint`
-404 on **any** session, single-agent ones included (`internal/api/server.go:168`). After
+create/update (slice 1 lifted that), `internal/events/inbound.go` (`requireNullThread`) rejects any non-null
+`session_thread_id` (holds until slice 3), `internal/brain/brain.go:510` stamps `session_thread_id: nil` on every
+tool intent, `internal/store/migrations/0001_init.sql:106` reserved `events.thread_id`
+unwritten and unread and `internal/domain/event.go`'s `ThreadID` was dead, and no
+`/threads` route existed — `ant beta:sessions:threads list` returned our `no such endpoint`
+404 on **any** session, single-agent ones included (slice 2 lifted those three: the
+column is written and read, the five routes exist, every session lists its primary). After
 this plan a coordinator agent's session runs its roster as concurrent threads on one
 shared sandbox, every thread has its own event log, status, usage and stream, and the
 real `ant` CLI drives all of it unchanged.

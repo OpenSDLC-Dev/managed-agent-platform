@@ -17,6 +17,16 @@ import (
 // own status event in front of it; child threads (rows this slice only reads)
 // have their own view and cross-post into the session's.
 
+// threadRows counts a session's session_threads rows.
+func threadRows(t *testing.T, s *tserver, sid string) int {
+	t.Helper()
+	var n int
+	if err := s.pool.QueryRow(context.Background(), `SELECT count(*) FROM session_threads WHERE session_id = $1`, sid).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	return n
+}
+
 func listThreads(t *testing.T, s *tserver, sid string) []map[string]any {
 	t.Helper()
 	status, res := s.do(http.MethodGet, "/v1/sessions/"+sid+"/threads", nil)
@@ -89,7 +99,7 @@ func TestThreadsPrimaryOnEverySession(t *testing.T) {
 	other := eventsFixture(t, s)
 	status, body = s.do(http.MethodGet, "/v1/sessions/"+other+"/threads/"+primary, nil)
 	wantErr(t, status, body, http.StatusNotFound, "not_found_error")
-	// List validation: the documented default is the cap; page is forward-only.
+	// List validation: the documented default, 1000, is also our cap; page is forward-only.
 	status, body = s.do(http.MethodGet, "/v1/sessions/"+sid+"/threads?limit=1001", nil)
 	wantErr(t, status, body, http.StatusBadRequest, "invalid_request_error")
 	status, body = s.do(http.MethodGet, "/v1/sessions/sesn_0000000000000000000000000/threads", nil)
@@ -194,8 +204,31 @@ func TestPrimaryThreadEventsAreTheSessionView(t *testing.T) {
 			t.Errorf("%s: message = %q", qs, msg)
 		}
 	}
-	status, body := s.do(http.MethodGet, "/v1/sessions/"+sid+"/threads/sthr_0000000000000000000000000/events", nil)
+	// A descending cursor minted by the session list is foreign here: it
+	// would walk backwards past the order refusal.
+	_, desc := s.do(http.MethodGet, "/v1/sessions/"+sid+"/events?order=desc&limit=2", nil)
+	status, body := s.do(http.MethodGet, tpath+"/events?page="+nextPage(t, desc), nil)
+	wantErr(t, status, body, http.StatusBadRequest, "invalid_request_error")
+	status, body = s.do(http.MethodGet, "/v1/sessions/"+sid+"/threads/sthr_0000000000000000000000000/events", nil)
 	wantErr(t, status, body, http.StatusNotFound, "not_found_error")
+	// A missing session is named as such on every thread route, and a bad
+	// parameter on it is still the 400 every list answers first.
+	gone := "/v1/sessions/sesn_0000000000000000000000000/threads/" + primary
+	for _, p := range []string{"", "/events", "/stream"} {
+		status, body = s.do(http.MethodGet, gone+p, nil)
+		wantErr(t, status, body, http.StatusNotFound, "not_found_error")
+		if msg := errMessage(body); !strings.Contains(msg, "session sesn_0000000000000000000000000 not found") {
+			t.Errorf("%s on a missing session: message = %q", p, msg)
+		}
+	}
+	status, body = s.do(http.MethodPost, gone+"/archive", nil)
+	wantErr(t, status, body, http.StatusNotFound, "not_found_error")
+	status, body = s.do(http.MethodGet, gone+"/events?limit=0", nil)
+	wantErr(t, status, body, http.StatusBadRequest, "invalid_request_error")
+	status, body = s.do(http.MethodGet, "/v1/sessions/sesn_0000000000000000000000000/events?limit=0", nil)
+	wantErr(t, status, body, http.StatusBadRequest, "invalid_request_error")
+	status, body = s.do(http.MethodGet, gone+"/stream?event_deltas[]=bogus", nil)
+	wantErr(t, status, body, http.StatusBadRequest, "invalid_request_error")
 
 	// The stream: the same frames as the session's, from connect time.
 	st := s.stream(t, tpath+"/stream")
@@ -397,16 +430,13 @@ func TestThreadArchive(t *testing.T) {
 	}
 
 	// Delete takes the rows with the session.
-	var n int
-	_ = s.pool.QueryRow(context.Background(), `SELECT count(*) FROM session_threads WHERE session_id = $1`, sid).Scan(&n)
-	if n != 3 {
+	if n := threadRows(t, s, sid); n != 3 {
 		t.Fatalf("thread rows before delete = %d", n)
 	}
 	if status, res := s.do(http.MethodDelete, "/v1/sessions/"+sid, nil); status != http.StatusOK {
 		t.Fatalf("delete session: %d %v", status, res)
 	}
-	_ = s.pool.QueryRow(context.Background(), `SELECT count(*) FROM session_threads WHERE session_id = $1`, sid).Scan(&n)
-	if n != 0 {
+	if n := threadRows(t, s, sid); n != 0 {
 		t.Errorf("thread rows after delete = %d, want 0", n)
 	}
 }
@@ -436,9 +466,7 @@ func TestSessionDeleteEndsLiveChildren(t *testing.T) {
 			t.Errorf("%s stream second frame = %s, want session.deleted", name, f.name)
 		}
 	}
-	var n int
-	_ = s.pool.QueryRow(context.Background(), `SELECT count(*) FROM session_threads WHERE session_id = $1`, sid).Scan(&n)
-	if n != 0 {
+	if n := threadRows(t, s, sid); n != 0 {
 		t.Errorf("thread rows after delete = %d, want 0", n)
 	}
 }
@@ -465,8 +493,31 @@ func TestPrimaryThreadAgentReadsThrough(t *testing.T) {
 		t.Errorf("thread agent toolset = %v, want it materialized", tools[0])
 	}
 	var raw json.RawMessage
-	_ = s.pool.QueryRow(context.Background(), `SELECT agent FROM session_threads WHERE id = $1`, primary).Scan(&raw)
+	if err := s.pool.QueryRow(context.Background(), `SELECT agent FROM session_threads WHERE id = $1`, primary).Scan(&raw); err != nil {
+		t.Fatal(err)
+	}
 	if raw != nil {
 		t.Errorf("primary thread row stores an agent: %s", raw)
+	}
+	// A child's snapshot renders the SDK's required arrays as [] even when the
+	// stored document omits them; the schema refuses a child without one.
+	bare := domain.NewID(domain.PrefixSessionThread).String()
+	if _, err := s.pool.Exec(context.Background(),
+		`INSERT INTO session_threads (id, session_id, parent_thread_id, agent, agent_name, status)
+		 VALUES ($1, $2, $3, '{"id":"agent_y","type":"agent","version":1,"name":"bare","model":{"id":"m"}}', 'bare', 'idle')`,
+		bare, sid, primary); err != nil {
+		t.Fatal(err)
+	}
+	_, bth := s.do(http.MethodGet, "/v1/sessions/"+sid+"/threads/"+bare, nil)
+	bagent, _ := bth["agent"].(map[string]any)
+	for _, k := range []string{"tools", "mcp_servers", "skills"} {
+		if arr, ok := bagent[k].([]any); !ok || len(arr) != 0 {
+			t.Errorf("child agent %s = %v, want []", k, bagent[k])
+		}
+	}
+	if _, err := s.pool.Exec(context.Background(),
+		`INSERT INTO session_threads (id, session_id, parent_thread_id, agent_name, status) VALUES ($1, $2, $3, 'x', 'idle')`,
+		domain.NewID(domain.PrefixSessionThread).String(), sid, primary); err == nil {
+		t.Error("a child row without an agent snapshot was accepted")
 	}
 }

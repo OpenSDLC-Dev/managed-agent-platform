@@ -82,10 +82,10 @@ func TestStatusChangeIsAPrimaryThreadPair(t *testing.T) {
 	events.StatusChange(sid, domain.SessionStatus("bogus"), nil)
 }
 
-// AppendInTx completes agent_name on the primary thread's lifecycle events
-// from the session's resolved agent, leaves a supplied name alone, and
-// leaves child-thread rows (which carry their own) untouched; the primary
-// session_threads row follows SetStatus and AddUsage.
+// AppendInTx completes agent_name on the primary thread's status events from
+// the session's resolved agent, leaves session.thread_created alone (it names
+// the child's agent — its emitter's job), and leaves child-thread rows
+// untouched; the primary session_threads row follows SetStatus and AddUsage.
 func TestAppendCompletesAgentNameAndMirrorsThePrimaryRow(t *testing.T) {
 	ctx := context.Background()
 	pool := pgtest.NewPool(t)
@@ -97,7 +97,7 @@ func TestAppendCompletesAgentNameAndMirrorsThePrimaryRow(t *testing.T) {
 	running := domain.SessionRunning
 	batch := append(events.StatusChange(sid, running, nil),
 		events.NewEvent{Type: domain.EventSessionThreadCreated,
-			Payload: []byte(`{"session_thread_id":"` + child.String() + `","agent_name":"given"}`)},
+			Payload: []byte(`{"session_thread_id":"` + child.String() + `"}`)},
 		events.NewEvent{Type: domain.EventSessionThreadStatusRunning, ThreadID: child, CrossPosted: true,
 			Payload: []byte(`{"session_thread_id":"` + child.String() + `"}`)},
 	)
@@ -116,9 +116,10 @@ func TestAppendCompletesAgentNameAndMirrorsThePrimaryRow(t *testing.T) {
 	if name(0) != "named" || name(1) != nil {
 		t.Errorf("primary pair agent_name = %v / %v, want named / absent", name(0), name(1))
 	}
-	if name(2) != "given" {
-		t.Errorf("a supplied agent_name was rewritten: %v", name(2))
+	if name(2) != nil {
+		t.Errorf("session.thread_created got an agent_name completed (%v); it names the child, so its emitter supplies it", name(2))
 	}
+
 	if name(3) != nil || got[3].ThreadID != child {
 		t.Errorf("child-thread row = %s thread %q, want untouched payload on thread %s", got[3].Body, got[3].ThreadID, child)
 	}

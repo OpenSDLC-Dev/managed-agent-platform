@@ -571,17 +571,17 @@ func (s *server) listSessionEvents(r *http.Request) (any, error) {
 	if err := checkID(id, "session"); err != nil {
 		return nil, err
 	}
-	if err := s.sessionExists(r.Context(), id); err != nil {
-		return nil, err
-	}
-	return s.listEvents(r, id, events.ListQuery{Scope: events.ScopeSession}, true)
+	return s.listEvents(r, id, events.ListQuery{Scope: events.ScopeSession}, true, func(ctx context.Context) error {
+		return s.sessionExists(ctx, id)
+	})
 }
 
 // listEvents renders one page of a session's log on the surface scope
 // selects. filters admits the session list's order / types[] / created_at
 // params; the thread lists carry none, so there they are refused rather than
-// silently defaulted.
-func (s *server) listEvents(r *http.Request, id string, query events.ListQuery, filters bool) (any, error) {
+// silently defaulted. exists resolves the 404 — after the params, so a bad
+// request on a missing resource stays a 400, as every list here answers.
+func (s *server) listEvents(r *http.Request, id string, query events.ListQuery, filters bool, exists func(context.Context) error) (any, error) {
 	ctx := r.Context()
 	q := r.URL.Query()
 	if !filters {
@@ -605,7 +605,10 @@ func (s *server) listEvents(r *http.Request, id string, query events.ListQuery, 
 		return nil, errInvalid(`order must be "asc" or "desc"`)
 	}
 	if page.cur != nil {
-		if !page.cur.seqKeyed {
+		// A thread list mints only ascending cursors; a descending one came
+		// from the session list and would walk the thread backwards past
+		// the order refusal above.
+		if !page.cur.seqKeyed || (!filters && page.cur.seqDesc) {
 			return nil, errInvalid("invalid page cursor")
 		}
 		// The cursor binds the direction it was minted under, so a
@@ -638,6 +641,9 @@ func (s *server) listEvents(r *http.Request, id string, query events.ListQuery, 
 		*dst = t
 	}
 
+	if err := exists(ctx); err != nil {
+		return nil, err
+	}
 	evs, err := s.log.List(ctx, domain.ID(id), query)
 	if err != nil {
 		return nil, err
@@ -675,19 +681,17 @@ func (s *server) streamSessionEvents(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, err)
 		return
 	}
-	if err := s.sessionExists(r.Context(), id); err != nil {
-		writeError(w, r, err)
-		return
-	}
-	s.streamEvents(w, r, id, events.ListQuery{Scope: events.ScopeSession}, s.broker.Subscribe(domain.ID(id)))
+	s.streamEvents(w, r, id, events.ListQuery{Scope: events.ScopeSession}, func(ctx context.Context) error {
+		return s.sessionExists(ctx, id)
+	})
 }
 
-// streamEvents tails one surface of a session's log: scope selects the rows,
-// sub the preview frames (the broker delivers a thread's frames only to that
-// thread's subscribers). It owns sub.
-func (s *server) streamEvents(w http.ResponseWriter, r *http.Request, id string, scope events.ListQuery, sub *events.Subscription) {
+// streamEvents tails one surface of a session's log: scope selects the rows
+// and, through the broker, the preview frames (a thread's frames reach only
+// that thread's subscribers). exists resolves the 404 — after the params, as
+// listEvents does.
+func (s *server) streamEvents(w http.ResponseWriter, r *http.Request, id string, scope events.ListQuery, exists func(context.Context) error) {
 	ctx := r.Context()
-	defer sub.Close()
 	q := r.URL.Query()
 
 	previews := make(map[string]bool)
@@ -698,6 +702,12 @@ func (s *server) streamEvents(w http.ResponseWriter, r *http.Request, id string,
 		}
 		previews[v] = true
 	}
+	if err := exists(ctx); err != nil {
+		writeError(w, r, err)
+		return
+	}
+	sub := s.broker.SubscribeThread(domain.ID(id), scope.ThreadID)
+	defer sub.Close()
 
 	if err := s.broker.Ready(ctx); err != nil {
 		writeError(w, r, err)
@@ -806,6 +816,18 @@ func (s *server) streamEvents(w http.ResponseWriter, r *http.Request, id string,
 			if drainFrames() {
 				return
 			}
+			// The scope may hide the rows this wake announced (another
+			// thread's), and they still move the tail: read the log's
+			// high-water mark first — seq order is commit order, the session
+			// lock serializes appends — and advance to it once the scoped
+			// rows up to it are written, so a quiet surface never re-scans a
+			// widening window.
+			var upTo int64
+			if err := s.pool.QueryRow(ctx,
+				`SELECT COALESCE(MAX(seq), 0) FROM events WHERE session_id = $1`, id).Scan(&upTo); err != nil {
+				writeErrorFrame(w, flusher)
+				return
+			}
 			wrote := 0
 			for {
 				evs, err := s.log.List(ctx, domain.ID(id), events.ListQuery{
@@ -829,6 +851,9 @@ func (s *server) streamEvents(w http.ResponseWriter, r *http.Request, id string,
 				if len(evs) < sseWakeBatch {
 					break
 				}
+			}
+			if upTo > lastSeq {
+				lastSeq = upTo
 			}
 			// An empty wake can mean the log vanished with its session.
 			if wrote == 0 && sessionGone() {
