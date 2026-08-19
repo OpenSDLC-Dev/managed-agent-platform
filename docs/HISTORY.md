@@ -151,9 +151,11 @@ plan's to update when it cites them.
 
 **Evidence.** The sweep ran as five parallel investigations (session/event types; agent/thread/
 webhook types; toolset and runner behavior; citation durability; Messages/REST residue) plus a
-cross-check that reconciled their file lists and found no contradiction. `make verify` green on the
-bumped pin in WSL at total statement coverage **91.06%** (Docker and K8s sandbox suites
-included); the toolset, skills, events, executor, worker, brain and api suites were additionally
+cross-check that reconciled their file lists and found no contradiction. `make verify` in WSL on the
+bumped pin: every package green (Docker and K8s sandbox suites included) at total statement
+coverage **91.03%** — the one red line being `internal/mcp`'s #380 assertion, which fails
+deterministically on WSL2, on `main` too, and is green in CI; a run before the review fold
+went fully green at 91.06%; the toolset, skills, events, executor, worker, brain and api suites were additionally
 run standalone under the new pin.
 
 ## Trimming the documentation to what code cannot say (plan 34, #413) — archived 2026-08-16, six slices delivered
