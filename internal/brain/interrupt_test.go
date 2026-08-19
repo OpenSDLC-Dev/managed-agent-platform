@@ -45,9 +45,7 @@ func (h *harness) interrupt(t *testing.T) {
 	}
 	batch := []events.NewEvent{{Type: domain.EventUserInterrupt, Payload: []byte(`{"session_thread_id":null}`)}}
 	batch = append(batch, results...)
-	batch = append(batch, events.NewEvent{
-		Type:    domain.EventSessionStatusIdle,
-		Payload: []byte(`{"stop_reason":{"type":"end_turn"}}`)})
+	batch = append(batch, events.StatusChange(h.sessionID, domain.SessionIdle, &domain.StopReason{Type: domain.StopEndTurn})...)
 	idle := domain.SessionIdle
 	if _, err := h.log.AppendInTx(ctx, tx, h.sessionID, batch, events.AppendOptions{
 		SetStatus: &idle,

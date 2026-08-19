@@ -62,10 +62,16 @@ func parsePage(q url.Values) (pageParams, error) {
 	return parsePageMax(q, maxLimit)
 }
 
-// parsePageMax is parsePage with an explicit maximum limit, for the one list
-// (session events) whose reference cap differs from maxLimit.
+// parsePageMax is parsePage with an explicit maximum limit, for the lists
+// (session and thread events) whose reference cap differs from maxLimit.
 func parsePageMax(q url.Values, max int) (pageParams, error) {
-	p := pageParams{limit: defaultLimit}
+	return parsePageWith(q, defaultLimit, max)
+}
+
+// parsePageWith is parsePage with explicit default and maximum limits, for
+// the threads list, whose documented default (1000) is also the cap we impose.
+func parsePageWith(q url.Values, def, max int) (pageParams, error) {
+	p := pageParams{limit: def}
 	if s := q.Get("limit"); s != "" {
 		n, err := strconv.Atoi(s)
 		if err != nil || n < 1 || n > max {

@@ -658,6 +658,15 @@ func (s *server) createSession(r *http.Request) (any, error) {
 		return nil, err
 	}
 
+	// The primary thread is born with the session (plan 35 decision 1): its
+	// id derived from the session's, no agent of its own (read through
+	// resolved_agent), status and timestamps the session's.
+	if _, err := tx.Exec(ctx,
+		`INSERT INTO session_threads (id, session_id, agent_name, status, created_at, updated_at)
+		 VALUES ($1, $2, $3, $4, $5, $5)`,
+		domain.PrimaryThreadID(domain.ID(id)).String(), id, agent.Name, row.status, row.createdAt); err != nil {
+		return nil, err
+	}
 	// After the session INSERT (the rows FK it), inside the same transaction:
 	// a repo-bearing create either stores every pre-sealed token or creates
 	// nothing.
@@ -683,7 +692,7 @@ func (s *server) createSession(r *http.Request) (any, error) {
 		}
 		// The log announces the status the session was born into, after the
 		// initial events it processes in order (placement ours, INFERRED).
-		batch := append(initialEvents, events.NewEvent{Type: domain.EventSessionStatusRunning})
+		batch := append(initialEvents, events.StatusChange(domain.ID(id), domain.SessionRunning, nil)...)
 		opts := events.AppendOptions{
 			Then: func(ctx context.Context, tx pgx.Tx) error {
 				_, err := s.queue.Enqueue(ctx, tx, domain.ID(envID), domain.ID(id), queue.ModelTurn)
@@ -1175,12 +1184,24 @@ func (s *server) archiveSession(r *http.Request) (any, error) {
 	if err := requireNotRunning(ctx, tx, id, "archiving"); err != nil {
 		return nil, err
 	}
+	// The session's end ends its live child threads (plan 35 decision 12) —
+	// before the archive mark, which closes the log to appends — and the
+	// primary's archived_at mirrors the session's.
+	if err := terminateLiveChildren(ctx, tx, s.log, id); err != nil {
+		return nil, err
+	}
 	row, err := scanSession(tx.QueryRow(ctx,
 		`UPDATE sessions SET
 		   updated_at  = CASE WHEN archived_at IS NULL THEN now() ELSE updated_at END,
 		   archived_at = COALESCE(archived_at, now())
 		 WHERE id = $1 RETURNING `+sessionColumns, id))
 	if err != nil {
+		return nil, err
+	}
+	if _, err := tx.Exec(ctx,
+		`UPDATE session_threads SET archived_at = $2, updated_at = $3
+		  WHERE session_id = $1 AND parent_thread_id IS NULL AND archived_at IS NULL`,
+		id, row.archivedAt, row.updatedAt); err != nil {
 		return nil, err
 	}
 	if err := tx.Commit(ctx); err != nil {
@@ -1211,6 +1232,12 @@ func (s *server) deleteSession(r *http.Request) (any, error) {
 	if _, err := tx.Exec(ctx, store.SessionTombstoneInsertSQL, id); err != nil {
 		return nil, err
 	}
+	// The live children end with the session (decision 12), but their rows
+	// go with it too, so the termination is broadcast below, not appended.
+	liveChildren, err := liveChildThreads(ctx, tx, id)
+	if err != nil {
+		return nil, err
+	}
 	if _, err := tx.Exec(ctx, `DELETE FROM sessions WHERE id = $1`, id); err != nil {
 		return nil, err
 	}
@@ -1228,7 +1255,20 @@ func (s *server) deleteSession(r *http.Request) (any, error) {
 	// The session.deleted event terminates any active event stream. It
 	// cannot be persisted — the log rows just cascaded away with the
 	// session — so it goes out as an ephemeral broadcast, best-effort:
-	// the delete itself has already succeeded.
+	// the delete itself has already succeeded. Each live child's
+	// session.thread_status_terminated goes out first, the same way, on the
+	// child's own stream and cross-posted to the session's.
+	for _, child := range liveChildren {
+		frame := map[string]any{
+			"id":                domain.NewID("sevt").String(),
+			"type":              string(domain.EventSessionThreadStatusTerminated),
+			"processed_at":      time.Now().UTC(),
+			"session_thread_id": child.id,
+			"agent_name":        child.agentName,
+		}
+		_ = s.log.PublishThreadEventFrame(ctx, domain.ID(id), domain.ID(child.id), frame)
+		_ = s.log.PublishEventFrame(ctx, domain.ID(id), frame)
+	}
 	_ = s.log.PublishEventFrame(ctx, domain.ID(id), map[string]any{
 		"id":           domain.NewID("sevt").String(),
 		"type":         "session.deleted",

@@ -256,6 +256,10 @@ func NewSessionInEnv(t *testing.T, pool *pgxpool.Pool, envID domain.ID) (session
 			[]any{agentID}},
 		{`INSERT INTO sessions (id, agent_id, agent_version, resolved_agent, environment_id, status)
 		  VALUES ($1, $2, 1, $3, $4, 'idle')`, []any{sessionID, agentID, resolved, envID}},
+		// The primary thread every session has (plan 35): status the session's,
+		// no agent of its own.
+		{`INSERT INTO session_threads (id, session_id, agent_name, status) VALUES ($1, $2, 'fixture', 'idle')`,
+			[]any{domain.PrimaryThreadID(sessionID), sessionID}},
 	} {
 		if _, err := pool.Exec(ctx, q.sql, q.args...); err != nil {
 			t.Fatalf("fixture insert: %v", err)

@@ -252,11 +252,7 @@ func (s *server) sendSessionEvents(r *http.Request) (any, error) {
 			// interrupted turn as ending on the same stop reason as one that
 			// finishes by itself, and the idle stop_reason union has no
 			// interruption variant to carry (docs/DIVERGENCES.md).
-			stop, err := json.Marshal(map[string]any{"stop_reason": map[string]any{"type": "end_turn"}})
-			if err != nil {
-				return nil, err
-			}
-			batch = append(batch, events.NewEvent{Type: domain.EventSessionStatusIdle, Payload: stop})
+			batch = append(batch, events.StatusChange(domain.ID(id), domain.SessionIdle, &domain.StopReason{Type: domain.StopEndTurn})...)
 			// The event is emitted whenever a turn ends — a stranded or
 			// gate-blocked session is already idle and its clients still need the
 			// new stop reason — but the column only moves when the session was
@@ -284,7 +280,7 @@ func (s *server) sendSessionEvents(r *http.Request) (any, error) {
 		// would on any idle session: the documented way to steer a running
 		// agent, or to chain outcomes, in one send.
 		if (hasUserMessage || hasDefineOutcome) && interruptible {
-			batch = append(batch, events.NewEvent{Type: domain.EventSessionStatusRunning})
+			batch = append(batch, events.StatusChange(domain.ID(id), domain.SessionRunning, nil)...)
 			setStatus(domain.SessionRunning)
 		}
 		if settling || ((hasUserMessage || hasDefineOutcome) && interruptible) {
@@ -318,16 +314,11 @@ func (s *server) sendSessionEvents(r *http.Request) (any, error) {
 		batch = append(batch, denyResults...)
 
 		if len(askBlocking) > 0 {
-			stop, err := json.Marshal(map[string]any{"stop_reason": map[string]any{
-				"type": "requires_action", "event_ids": askBlocking,
-			}})
-			if err != nil {
-				return nil, err
-			}
-			batch = append(batch, events.NewEvent{Type: domain.EventSessionStatusIdle, Payload: stop})
+			batch = append(batch, events.StatusChange(domain.ID(id), domain.SessionIdle,
+				&domain.StopReason{Type: domain.StopRequiresAction, EventIDs: idsOf(askBlocking)})...)
 			break
 		}
-		batch = append(batch, events.NewEvent{Type: domain.EventSessionStatusRunning})
+		batch = append(batch, events.StatusChange(domain.ID(id), domain.SessionRunning, nil)...)
 		setStatus(domain.SessionRunning)
 		// How long the gate held: the elapsed since the suspension that raised it —
 		// the most recent requires_action idle. Measured under the same row lock the
@@ -456,7 +447,7 @@ func (s *server) sendSessionEvents(r *http.Request) (any, error) {
 				"session_id", id)
 			break
 		}
-		batch = append(batch, events.NewEvent{Type: domain.EventSessionStatusRunning})
+		batch = append(batch, events.StatusChange(domain.ID(id), domain.SessionRunning, nil)...)
 		setStatus(domain.SessionRunning)
 		opts.Then = startWorkCycle
 	case hasToolResult && status == string(domain.SessionRunning):
@@ -537,7 +528,7 @@ func (s *server) sendSessionEvents(r *http.Request) (any, error) {
 	// state-machine reaction (which clients observe on the stream/log).
 	data := make([]any, 0, len(newEvents))
 	for _, ev := range appended[:len(newEvents)] {
-		wire, err := eventWire(ev)
+		wire, err := eventWire(ev, events.ScopeSession)
 		if err != nil {
 			return nil, err
 		}
@@ -573,19 +564,39 @@ func (s *server) snapshotRubrics(ctx context.Context, defs []events.DefineOutcom
 
 // listSessionEvents implements GET /v1/sessions/{id}/events with the
 // PageCursor envelope {"data":[…],"next_page":…} (no prev_page on events).
+// The session's view is the primary thread's (plan 35 decision 2): its own
+// rows plus what child threads cross-post.
 func (s *server) listSessionEvents(r *http.Request) (any, error) {
-	ctx := r.Context()
 	id := normalizeSessionID(r.PathValue("id"))
 	if err := checkID(id, "session"); err != nil {
 		return nil, err
 	}
+	return s.listEvents(r, id, events.ListQuery{Scope: events.ScopeSession}, true, func(ctx context.Context) error {
+		return s.sessionExists(ctx, id)
+	})
+}
+
+// listEvents renders one page of a session's log on the surface scope
+// selects. filters admits the session list's order / types[] / created_at
+// params; the thread lists carry none, so there they are refused rather than
+// silently defaulted. exists resolves the 404 — after the params, so a bad
+// request on a missing resource stays a 400, as every list here answers.
+func (s *server) listEvents(r *http.Request, id string, query events.ListQuery, filters bool, exists func(context.Context) error) (any, error) {
+	ctx := r.Context()
 	q := r.URL.Query()
+	if !filters {
+		for _, key := range []string{"order", "types", "types[]", "created_at[gt]", "created_at[gte]", "created_at[lt]", "created_at[lte]"} {
+			if _, ok := q[key]; ok {
+				return nil, errInvalid("%s is not supported on a thread's events", key)
+			}
+		}
+	}
 
 	page, err := parsePageMax(q, maxEventLimit)
 	if err != nil {
 		return nil, err
 	}
-	query := events.ListQuery{Limit: page.limit + 1}
+	query.Limit = page.limit + 1
 	switch q.Get("order") {
 	case "", "asc":
 	case "desc":
@@ -594,7 +605,10 @@ func (s *server) listSessionEvents(r *http.Request) (any, error) {
 		return nil, errInvalid(`order must be "asc" or "desc"`)
 	}
 	if page.cur != nil {
-		if !page.cur.seqKeyed {
+		// A thread list mints only ascending cursors; a descending one came
+		// from the session list and would walk the thread backwards past
+		// the order refusal above.
+		if !page.cur.seqKeyed || (!filters && page.cur.seqDesc) {
 			return nil, errInvalid("invalid page cursor")
 		}
 		// The cursor binds the direction it was minted under, so a
@@ -627,10 +641,9 @@ func (s *server) listSessionEvents(r *http.Request) (any, error) {
 		*dst = t
 	}
 
-	if err := s.sessionExists(ctx, id); err != nil {
+	if err := exists(ctx); err != nil {
 		return nil, err
 	}
-
 	evs, err := s.log.List(ctx, domain.ID(id), query)
 	if err != nil {
 		return nil, err
@@ -641,7 +654,7 @@ func (s *server) listSessionEvents(r *http.Request) (any, error) {
 	}
 	data := make([]any, 0, len(evs))
 	for _, ev := range evs {
-		wire, err := eventWire(ev)
+		wire, err := eventWire(ev, query.Scope)
 		if err != nil {
 			return nil, err
 		}
@@ -663,12 +676,22 @@ func (s *server) listSessionEvents(r *http.Request) (any, error) {
 // payload's type. Previews (event_start/event_delta) are only sent for the
 // types opted into via ?event_deltas[].
 func (s *server) streamSessionEvents(w http.ResponseWriter, r *http.Request) {
-	ctx := r.Context()
 	id := normalizeSessionID(r.PathValue("id"))
 	if err := checkID(id, "session"); err != nil {
 		writeError(w, r, err)
 		return
 	}
+	s.streamEvents(w, r, id, events.ListQuery{Scope: events.ScopeSession}, func(ctx context.Context) error {
+		return s.sessionExists(ctx, id)
+	})
+}
+
+// streamEvents tails one surface of a session's log: scope selects the rows
+// and, through the broker, the preview frames (a thread's frames reach only
+// that thread's subscribers). exists resolves the 404 — after the params, as
+// listEvents does.
+func (s *server) streamEvents(w http.ResponseWriter, r *http.Request, id string, scope events.ListQuery, exists func(context.Context) error) {
+	ctx := r.Context()
 	q := r.URL.Query()
 
 	previews := make(map[string]bool)
@@ -679,13 +702,13 @@ func (s *server) streamSessionEvents(w http.ResponseWriter, r *http.Request) {
 		}
 		previews[v] = true
 	}
-	if err := s.sessionExists(ctx, id); err != nil {
+	if err := exists(ctx); err != nil {
 		writeError(w, r, err)
 		return
 	}
-
-	sub := s.broker.Subscribe(domain.ID(id))
+	sub := s.broker.SubscribeThread(domain.ID(id), scope.ThreadID)
 	defer sub.Close()
+
 	if err := s.broker.Ready(ctx); err != nil {
 		writeError(w, r, err)
 		return
@@ -793,15 +816,28 @@ func (s *server) streamSessionEvents(w http.ResponseWriter, r *http.Request) {
 			if drainFrames() {
 				return
 			}
+			// The scope may hide the rows this wake announced (another
+			// thread's), and they still move the tail: read the log's
+			// high-water mark first — seq order is commit order, the session
+			// lock serializes appends — and advance to it once the scoped
+			// rows up to it are written, so a quiet surface never re-scans a
+			// widening window.
+			var upTo int64
+			if err := s.pool.QueryRow(ctx,
+				`SELECT COALESCE(MAX(seq), 0) FROM events WHERE session_id = $1`, id).Scan(&upTo); err != nil {
+				writeErrorFrame(w, flusher)
+				return
+			}
 			wrote := 0
 			for {
-				evs, err := s.log.List(ctx, domain.ID(id), events.ListQuery{AfterSeq: &lastSeq, Limit: sseWakeBatch})
+				evs, err := s.log.List(ctx, domain.ID(id), events.ListQuery{
+					AfterSeq: &lastSeq, Limit: sseWakeBatch, Scope: scope.Scope, ThreadID: scope.ThreadID})
 				if err != nil {
 					writeErrorFrame(w, flusher)
 					return
 				}
 				for _, ev := range evs {
-					wire, err := eventWire(ev)
+					wire, err := eventWire(ev, scope.Scope)
 					if err != nil {
 						writeErrorFrame(w, flusher)
 						return
@@ -815,6 +851,9 @@ func (s *server) streamSessionEvents(w http.ResponseWriter, r *http.Request) {
 				if len(evs) < sseWakeBatch {
 					break
 				}
+			}
+			if upTo > lastSeq {
+				lastSeq = upTo
 			}
 			// An empty wake can mean the log vanished with its session.
 			if wrote == 0 && sessionGone() {
@@ -883,16 +922,32 @@ func writeSSEFrame(w io.Writer, name string, data []byte) {
 	fmt.Fprintf(w, "event: %s\ndata: %s\n\n", name, data)
 }
 
+// threadAddressable are the event types whose nullable session_thread_id
+// names the child thread they were cross-posted from (SDK: "When set, this
+// event was cross-posted from a subagent's thread … Empty on the thread's own
+// events") — the tool-use kinds and the inbound answers to them.
+var threadAddressable = map[domain.EventType]bool{
+	domain.EventAgentToolUse: true, domain.EventAgentMCPToolUse: true, domain.EventAgentCustomToolUse: true,
+	domain.EventUserToolConfirm: true, domain.EventUserCustomToolRes: true, domain.EventUserToolResult: true,
+	domain.EventUserInterrupt: true,
+}
+
 // eventWire renders a stored event onto the wire: the type-specific payload
 // fields merged with the id/type/processed_at envelope. Payload bytes pass
-// through untouched, so content blocks round-trip exactly.
-func eventWire(ev domain.Event) (json.RawMessage, error) {
+// through untouched, so content blocks round-trip exactly — except
+// session_thread_id, rendered per surface (plan 35 decision 2): a child's
+// cross-posted event seen through the session view names its thread; on the
+// child's own surface the stored null stands.
+func eventWire(ev domain.Event, scope events.Scope) (json.RawMessage, error) {
 	var out map[string]json.RawMessage
 	if err := json.Unmarshal(ev.Body, &out); err != nil {
 		return nil, fmt.Errorf("event %s payload is corrupt: %w", ev.ID, err)
 	}
 	if out == nil {
 		out = make(map[string]json.RawMessage)
+	}
+	if scope == events.ScopeSession && ev.ThreadID != "" && threadAddressable[ev.Type] {
+		out["session_thread_id"], _ = json.Marshal(ev.ThreadID.String())
 	}
 	// Marshals of plain strings and database timestamps cannot fail.
 	out["id"], _ = json.Marshal(ev.ID.String())
@@ -912,6 +967,15 @@ func (s *server) sessionExists(ctx context.Context, id string) error {
 		return errNotFound("session %s not found", id)
 	}
 	return err
+}
+
+// idsOf converts event id strings to domain ids for a stop reason.
+func idsOf(ids []string) []domain.ID {
+	out := make([]domain.ID, len(ids))
+	for i, id := range ids {
+		out[i] = domain.ID(id)
+	}
+	return out
 }
 
 // listParam collects a repeatable array query parameter in both wire

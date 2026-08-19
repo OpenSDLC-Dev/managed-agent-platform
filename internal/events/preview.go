@@ -44,7 +44,7 @@ func (l *Log) StartPreview(ctx context.Context, sessionID domain.ID, typ domain.
 			"type": string(typ),
 		},
 	}
-	if err := l.publishFrame(ctx, sessionID, frame); err != nil {
+	if err := l.publishFrame(ctx, sessionID, "", frame); err != nil {
 		return nil, err
 	}
 	return p, nil
@@ -75,7 +75,7 @@ func (p *Preview) Delta(ctx context.Context, index int64, text string) error {
 				},
 			},
 		}
-		if err := p.log.publishFrame(ctx, p.sessionID, frame); err != nil {
+		if err := p.log.publishFrame(ctx, p.sessionID, "", frame); err != nil {
 			return err
 		}
 	}

@@ -315,11 +315,7 @@ func (b *Brain) settleVerdict(ctx context.Context, item *queue.Item, oe *events.
 				return b.queue.Requeue(ctx, tx, item)
 			}
 		} else {
-			stop, merr := json.Marshal(map[string]any{"stop_reason": map[string]any{"type": "end_turn"}})
-			if merr != nil {
-				return merr
-			}
-			batch = append(batch, events.NewEvent{Type: domain.EventSessionStatusIdle, Payload: stop})
+			batch = append(batch, events.StatusChange(sid, domain.SessionIdle, &domain.StopReason{Type: domain.StopEndTurn})...)
 			idle := domain.SessionIdle
 			opts.SetStatus = &idle
 			opts.Then = func(ctx context.Context, tx pgx.Tx) error {
@@ -392,11 +388,7 @@ func (b *Brain) settleGraderError(ctx context.Context, item *queue.Item, active 
 			return b.queue.Requeue(ctx, tx, item)
 		}
 	} else {
-		stop, merr := json.Marshal(map[string]any{"stop_reason": map[string]any{"type": "retries_exhausted"}})
-		if merr != nil {
-			return merr
-		}
-		batch = append(batch, events.NewEvent{Type: domain.EventSessionStatusIdle, Payload: stop})
+		batch = append(batch, events.StatusChange(sid, domain.SessionIdle, &domain.StopReason{Type: domain.StopRetriesExhausted})...)
 		idle := domain.SessionIdle
 		opts.SetStatus = &idle
 		opts.Then = func(ctx context.Context, tx pgx.Tx) error {
@@ -803,11 +795,7 @@ func (b *Brain) settleEndTurn(ctx context.Context, sid domain.ID, item *queue.It
 			}
 			break
 		}
-		payload, merr := json.Marshal(map[string]any{"stop_reason": map[string]any{"type": "end_turn"}})
-		if merr != nil {
-			return merr
-		}
-		batch = append(batch, events.NewEvent{Type: domain.EventSessionStatusIdle, Payload: payload})
+		batch = append(batch, events.StatusChange(sid, domain.SessionIdle, &domain.StopReason{Type: domain.StopEndTurn})...)
 		idle := domain.SessionIdle
 		opts.SetStatus = &idle
 		opts.Then = func(ctx context.Context, tx pgx.Tx) error {

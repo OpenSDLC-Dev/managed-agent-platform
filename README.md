@@ -69,7 +69,7 @@ Progress is tracked in:
 
 Deferred past v1 — **seams reserved, not implemented**, each tracked as an issue. Vaults, skills, files and repository mounting were on this list and have since landed; what remains is:
 
-- Scheduled deployments, memory stores, and multi-agent threads.
+- Scheduled deployments, memory stores, and multi-agent threads (in progress: [plan 35](./docs/plan/35_multiagent-threads.md), [#53](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/53)).
 - The **multi-tenant** half of RBAC and SSO ([#56](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/56), which stays open for it). Single-tenant SSO and the three-role matrix are done.
 - **Repository materialization on BYOC compute** ([#322](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/322)): a `self_hosted` session accepts a `github_repository` resource and mounts nothing, without being told otherwise.
 - **BYOC gate delivery** ([#165](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/165)) and **credential substitution inside TLS** ([#166](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/166)) — until #166, an in-sandbox HTTPS request keeps its vault placeholders rather than having them substituted at egress.

@@ -15,11 +15,11 @@ import (
 // byte-for-byte.
 //
 // Divergences (documented in docs/DIVERGENCES.md): session_thread_id must be
-// null/absent (threads are deferred). Tool-result references are cross-checked
-// against the log by ValidateToolResults (toolflow.go) — that needs a
-// database, so it runs in the API's send transaction, not here; so do
-// user.define_outcome's single-active check and file-rubric validation
-// (ValidateDefineOutcomes in the API layer).
+// null/absent until child threads are spawned (plan 35 slice 3). Tool-result
+// references are cross-checked against the log by ValidateToolResults
+// (toolflow.go) — that needs a database, so it runs in the API's send
+// transaction, not here; so do user.define_outcome's single-active check and
+// file-rubric validation (ValidateDefineOutcomes in the API layer).
 
 // NormalizeInbound validates one send batch. envKind is the session's
 // environment kind ("cloud" | "self_hosted"), which gates user.tool_result.
@@ -144,7 +144,10 @@ var platformEmitted = map[domain.EventType]bool{
 	domain.EventSessionStatusRunning: true, domain.EventSessionStatusIdle: true,
 	domain.EventSessionStatusRescheduled: true, domain.EventSessionStatusTerminated: true,
 	domain.EventSessionError: true, domain.EventSessionUpdated: true, domain.EventSessionDeleted: true,
-	domain.EventSpanModelRequestStart: true, domain.EventSpanModelRequestEnd: true,
+	domain.EventSessionThreadCreated: true, domain.EventSessionThreadStatusRunning: true,
+	domain.EventSessionThreadStatusIdle: true, domain.EventSessionThreadStatusRescheduled: true,
+	domain.EventSessionThreadStatusTerminated: true,
+	domain.EventSpanModelRequestStart:         true, domain.EventSpanModelRequestEnd: true,
 	domain.EventSpanOutcomeEvalStart: true, domain.EventSpanOutcomeEvalOngoing: true,
 	domain.EventSpanOutcomeEvalEnd: true,
 }
@@ -425,11 +428,12 @@ func isNullRaw(raw json.RawMessage) bool {
 	return string(raw) == "null"
 }
 
-// requireNullThread rejects a non-null session_thread_id: multi-agent threads
-// are a reserved seam in v1 (documented divergence).
+// requireNullThread rejects a non-null session_thread_id: nothing spawns a
+// child thread yet (plan 35 slice 3 lifts this into accept-and-validate), so
+// there is no thread for the field to address (documented divergence).
 func requireNullThread(obj map[string]json.RawMessage) error {
 	if raw, set := obj["session_thread_id"]; set && !isNullRaw(raw) {
-		return fmt.Errorf("session_thread_id is not supported in v1 (multi-agent threads are deferred)")
+		return fmt.Errorf("session_thread_id must be null: child threads are not spawned yet")
 	}
 	return nil
 }
