@@ -54,6 +54,9 @@ func TestThreadsPrimaryOnEverySession(t *testing.T) {
 	th := threads[0]
 	wantFields(t, th, "id", "type", "session_id", "parent_thread_id", "agent", "status", "usage", "stats",
 		"created_at", "updated_at", "archived_at")
+	if len(th) != 11 {
+		t.Errorf("thread carries %d keys, want the SDK's 11: %v", len(th), keysOf(th))
+	}
 	if th["id"] != primary || th["type"] != "session_thread" || th["session_id"] != sid ||
 		th["parent_thread_id"] != nil || th["status"] != "idle" || th["archived_at"] != nil {
 		t.Errorf("primary thread = %v", th)
@@ -350,6 +353,27 @@ func TestThreadArchive(t *testing.T) {
 	if thr := listThreads(t, s, sid); len(thr) != 3 {
 		t.Errorf("threads = %d, want primary + 2 children", len(thr))
 	}
+	// The list pages in creation order on a forward-only cursor: primary,
+	// running, idle; a cursor from another list shape is refused.
+	var walked []string
+	page := ""
+	for range 4 {
+		_, res := s.do(http.MethodGet, "/v1/sessions/"+sid+"/threads?limit=1"+page, nil)
+		for _, th := range listData(t, res) {
+			walked = append(walked, th["id"].(string))
+		}
+		if np := nextPage(t, res); np != "" {
+			page = "&page=" + np
+			continue
+		}
+		break
+	}
+	if !sameStrings(walked, []string{primary, running, idle}) {
+		t.Errorf("cursor walk = %v, want [%s %s %s]", walked, primary, running, idle)
+	}
+	_, evres := s.do(http.MethodGet, "/v1/sessions/"+sid+"/events?limit=1", nil)
+	status, body = s.do(http.MethodGet, "/v1/sessions/"+sid+"/threads?page="+nextPage(t, evres), nil)
+	wantErr(t, status, body, http.StatusBadRequest, "invalid_request_error")
 
 	// The session's archive: the running child is terminated too, the
 	// primary carries the session's archived_at.
