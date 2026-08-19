@@ -65,22 +65,21 @@ func migrate(ctx context.Context, pool *pgxpool.Pool, through string) error {
 			version).Scan(&applied); err != nil {
 			return fmt.Errorf("store: check %s: %w", version, err)
 		}
-		if applied {
-			continue
-		}
-		sql, err := migrationsFS.ReadFile(name)
-		if err != nil {
-			return fmt.Errorf("store: read %s: %w", version, err)
-		}
-		if _, err := tx.Exec(ctx, string(sql)); err != nil {
-			return fmt.Errorf("store: apply %s: %w", version, err)
-		}
-		if _, err := tx.Exec(ctx,
-			`INSERT INTO schema_migrations (version) VALUES ($1)`, version); err != nil {
-			return fmt.Errorf("store: record %s: %w", version, err)
+		if !applied {
+			sql, err := migrationsFS.ReadFile(name)
+			if err != nil {
+				return fmt.Errorf("store: read %s: %w", version, err)
+			}
+			if _, err := tx.Exec(ctx, string(sql)); err != nil {
+				return fmt.Errorf("store: apply %s: %w", version, err)
+			}
+			if _, err := tx.Exec(ctx,
+				`INSERT INTO schema_migrations (version) VALUES ($1)`, version); err != nil {
+				return fmt.Errorf("store: record %s: %w", version, err)
+			}
 		}
 		if version == through {
-			break
+			break // applied already or just now: the schema stops here either way
 		}
 	}
 	return tx.Commit(ctx)

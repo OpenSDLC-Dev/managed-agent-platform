@@ -95,10 +95,17 @@ func TestThreadsPrimaryOnEverySession(t *testing.T) {
 	wantErr(t, status, body, http.StatusNotFound, "not_found_error")
 	status, body = s.do(http.MethodGet, "/v1/sessions/"+sid+"/threads/bogus", nil)
 	wantErr(t, status, body, http.StatusNotFound, "not_found_error")
-	// Another session's primary is not this session's.
+	// Another session's primary is not this session's — and the schema
+	// refuses a child hung off another session's thread.
 	other := eventsFixture(t, s)
 	status, body = s.do(http.MethodGet, "/v1/sessions/"+other+"/threads/"+primary, nil)
 	wantErr(t, status, body, http.StatusNotFound, "not_found_error")
+	if _, err := s.pool.Exec(context.Background(),
+		`INSERT INTO session_threads (id, session_id, parent_thread_id, agent, agent_name, status)
+		 VALUES ($1, $2, $3, '{"type":"agent"}', 'x', 'idle')`,
+		domain.NewID(domain.PrefixSessionThread).String(), other, primary); err == nil {
+		t.Error("a child in one session accepted a parent from another")
+	}
 	// List validation: the documented default, 1000, is also our cap; page is forward-only.
 	status, body = s.do(http.MethodGet, "/v1/sessions/"+sid+"/threads?limit=1001", nil)
 	wantErr(t, status, body, http.StatusBadRequest, "invalid_request_error")

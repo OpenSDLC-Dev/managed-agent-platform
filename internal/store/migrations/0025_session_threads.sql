@@ -10,7 +10,7 @@
 CREATE TABLE session_threads (
     id               text PRIMARY KEY,
     session_id       text NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
-    parent_thread_id text REFERENCES session_threads(id),  -- NULL for the primary
+    parent_thread_id text,                                 -- NULL for the primary; FK below
     org_id           text NOT NULL DEFAULT 'default',
     workspace_id     text NOT NULL DEFAULT 'default',
     project_id       text NOT NULL DEFAULT 'default',
@@ -24,7 +24,12 @@ CREATE TABLE session_threads (
     -- parent_thread_id is the one discriminator readers use; the agent column
     -- follows it — a child row always carries its snapshot, the primary never
     -- does — so no reader can render one kind as the other.
-    CHECK ((parent_thread_id IS NULL) = (agent IS NULL))
+    CHECK ((parent_thread_id IS NULL) = (agent IS NULL)),
+    -- A parent is a thread of the same session: the FK is composite so a child
+    -- cannot hang off another session's thread. The UNIQUE it references is
+    -- implied by the primary key and exists only to be referenced.
+    UNIQUE (session_id, id),
+    FOREIGN KEY (session_id, parent_thread_id) REFERENCES session_threads (session_id, id)
 );
 -- One primary per session is a schema fact, not a convention.
 CREATE UNIQUE INDEX session_threads_primary_idx ON session_threads (session_id) WHERE parent_thread_id IS NULL;
