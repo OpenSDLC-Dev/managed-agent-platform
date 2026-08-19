@@ -151,12 +151,15 @@ func (e *Executor) processMCP(ctx context.Context, item *queue.Item) (err error)
 	kctx, keeper := e.queue.KeepLease(ctx, item, e.cfg.LeaseTTL, e.cfg.StallTimeout)
 	// One budget for the pass, whatever the thread count: the bound is the
 	// item's, not each thread's, or a coordinator's threads would multiply it.
+	// The catalog reads between dials run under it too — on the parent ctx a
+	// blocked read would outlive both the budget and the keeper's stall
+	// cancel, and the funnel below would never reach keeper.Close.
 	budget, cancel := context.WithTimeout(kctx, e.cfg.MCPPassTimeout)
 	defer cancel()
 	var rows []catalogRow
 	var runErr error
 	for _, th := range threads {
-		pending, err := e.undiscoveredServers(ctx, item.SessionID, th.id, th.servers)
+		pending, err := e.undiscoveredServers(budget, item.SessionID, th.id, th.servers)
 		if err != nil {
 			if kerr := keeper.Close(); kerr != nil {
 				return fmt.Errorf("lease keeper: %w (run: %w)", kerr, err)

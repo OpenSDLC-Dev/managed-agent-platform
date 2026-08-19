@@ -309,8 +309,8 @@ func TestPollFinalizesAnAbandonedWindDown(t *testing.T) {
 	// While the lease is live the wind-down is still its worker's to finish, so a
 	// poll must leave the item alone. This is what makes the finalize below a
 	// consequence of the lapsed lease rather than of the stopping state.
-	if done, err := q.FinalizeAbandoned(ctx, env); err != nil || len(done) != 0 {
-		t.Fatalf("finalize during a live wind-down = %v %v, want nothing", done, err)
+	if done := finalizeAbandoned(t, pool, q, env); len(done) != 0 {
+		t.Fatalf("finalize during a live wind-down = %v, want nothing", done)
 	}
 	if next, err := q.Poll(ctx, env, time.Minute); err != nil || next != nil {
 		t.Fatalf("poll during a live wind-down = %+v %v, want no work", next, err)
@@ -324,9 +324,8 @@ func TestPollFinalizesAnAbandonedWindDown(t *testing.T) {
 		`UPDATE work_items SET lease_expires_at = now() - interval '1 second' WHERE id = $1`, id); err != nil {
 		t.Fatal(err)
 	}
-	done, err := q.FinalizeAbandoned(ctx, env)
-	if err != nil || len(done) != 1 {
-		t.Fatalf("finalize = %v %v, want the one abandoned item's session", done, err)
+	if done := finalizeAbandoned(t, pool, q, env); len(done) != 1 {
+		t.Fatalf("finalize = %v, want the one abandoned item's session", done)
 	}
 	next, err := q.Poll(ctx, env, time.Minute)
 	if err != nil {
@@ -369,8 +368,8 @@ func TestPollFinalizesALeaselessWindDown(t *testing.T) {
 		t.Fatalf("stage the legacy row: %v", err)
 	}
 
-	if done, err := q.FinalizeAbandoned(ctx, env); err != nil || len(done) != 1 || done[0] != sessionID {
-		t.Fatalf("finalize = %v %v, want the legacy row's session", done, err)
+	if done := finalizeAbandoned(t, pool, q, env); len(done) != 1 || done[0] != sessionID {
+		t.Fatalf("finalize = %v, want the legacy row's session", done)
 	}
 	next, err := q.Poll(ctx, env, time.Minute)
 	if err != nil {
@@ -800,5 +799,73 @@ func TestHeartbeatMissingAndMalformed(t *testing.T) {
 	// A valid-but-stale value on a live item is still a mismatch.
 	if _, err := q.Heartbeat(ctx, env, w.ID, "2000-01-01T00:00:00Z", 30); !errors.Is(err, queue.ErrHeartbeatMismatch) {
 		t.Errorf("heartbeat with stale expected = %v, want ErrHeartbeatMismatch", err)
+	}
+}
+
+// finalizeAbandoned drives the two-step the work API runs ahead of a poll:
+// list the candidates, settle each under its own transaction. Returns the
+// sessions of the items this call settled.
+func finalizeAbandoned(t *testing.T, pool *pgxpool.Pool, q *queue.Queue, env domain.ID) []domain.ID {
+	t.Helper()
+	ctx := context.Background()
+	items, err := q.ListAbandoned(ctx, env)
+	if err != nil {
+		t.Fatalf("list abandoned: %v", err)
+	}
+	var done []domain.ID
+	for _, it := range items {
+		tx, err := pool.Begin(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		ok, err := q.FinalizeAbandoned(ctx, tx, env, it.ID)
+		if err != nil {
+			t.Fatalf("finalize %s: %v", it.ID, err)
+		}
+		if err := tx.Commit(ctx); err != nil {
+			t.Fatal(err)
+		}
+		if ok {
+			done = append(done, it.SessionID)
+		}
+	}
+	return done
+}
+
+// The settle re-checks the row under its transaction, so a stale candidate —
+// here one another poll settled between the list and the settle — reports
+// false instead of stopping (and re-arming) the session twice.
+func TestFinalizeAbandonedRechecksUnderTheTransaction(t *testing.T) {
+	ctx := context.Background()
+	pool := pgtest.NewPool(t)
+	q := queue.New(pool)
+	env, id := claimedItem(t, pool, q)
+	if _, err := q.Stop(ctx, env, id, false); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx,
+		`UPDATE work_items SET lease_expires_at = now() - interval '1 second' WHERE id = $1`, id); err != nil {
+		t.Fatal(err)
+	}
+	items, err := q.ListAbandoned(ctx, env)
+	if err != nil || len(items) != 1 {
+		t.Fatalf("list = %v %v, want the one abandoned item", items, err)
+	}
+	// Two polls listed the same candidate; the first settles it.
+	if done := finalizeAbandoned(t, pool, q, env); len(done) != 1 {
+		t.Fatalf("first settle = %v, want the item's session", done)
+	}
+	// The second's guarded flip finds it already stopped and stands down.
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	ok, err := q.FinalizeAbandoned(ctx, tx, env, items[0].ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ok {
+		t.Error("a stale candidate was settled twice, want the recheck to refuse it")
 	}
 }

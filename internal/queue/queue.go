@@ -328,19 +328,20 @@ func (q *Queue) Claim(ctx context.Context, kind Kind, ttl time.Duration) (*Item,
 // new state machine does not write: during a rolling upgrade a not-yet-upgraded
 // replica can still park a never-polled queued item, which has no lease at all,
 // in stopping. Migration 0014 finalizes the ones written before the upgrade;
-// FinalizeAbandoned — run by the work API ahead of every poll, so the
-// re-arm the finalize owes (plan 35 decision 13 iii) happens under the
-// session lock the poll itself cannot take — catches the ones written during
-// it. It takes its rows with SKIP LOCKED so concurrent polls of one
-// environment never block on each other, and is bounded so a poll costs a
-// bounded write even in the pathological case (an environment whose whole
-// fleet died mid-wind-down across many sessions); the remainder drains on
-// the polls that follow, and no row can starve because a finalized one
+// ListAbandoned + FinalizeAbandoned — run by the work API ahead of every
+// poll, so the re-arm the finalize owes (plan 35 decision 13 iii) happens
+// under the session lock the poll itself cannot take, in the same
+// transaction as the flip to stopped — catch the ones written during it.
+// Concurrent polls of one environment serialize per session on that lock,
+// and the loser's guarded flip is a no-op; the list is bounded so a poll
+// costs a bounded read even in the pathological case (an environment whose
+// whole fleet died mid-wind-down across many sessions); the remainder drains
+// on the polls that follow, and no row can starve because a finalized one
 // leaves the set. No ORDER BY: every row in the set is equally abandoned, so
 // which 50 go first does not matter, and ordering would buy a sort the bound
-// exists to avoid. It needs no environment-kind guard of its own: only the
-// work API's Stop produces a stopping row, and that is already scoped to a
-// self_hosted tool_exec item.
+// exists to avoid. They need no environment-kind guard of their own: only
+// the work API's Stop produces a stopping row, and that is already scoped to
+// a self_hosted tool_exec item.
 //
 // Every RE-hand-out mints a fresh work id (#62). A work item's identity is stable
 // only while one worker holds it, because the wire's lifecycle calls carry no
@@ -402,45 +403,64 @@ func (q *Queue) Poll(ctx context.Context, envID domain.ID, reclaim time.Duration
 	return w, nil
 }
 
-// FinalizeAbandoned finalizes the environment's abandoned wind-downs — the
-// stopping tool_exec items whose lease lapsed or never existed (see Poll) —
-// and returns the session ids they belonged to, so the caller can re-arm each
-// session's runnable calls the way the work API's stop does (plan 35 decision
-// 13 iii): a stop the worker never finished is a stop all the same, and the
-// calls the item covered are nobody's otherwise. Run before Poll, so the
-// re-armed item is what the poll hands out. Bounded to 50 per call; the rest
-// drain on the polls that follow.
-func (q *Queue) FinalizeAbandoned(ctx context.Context, envID domain.ID) ([]domain.ID, error) {
+// AbandonedWork names one abandoned wind-down — a stopping tool_exec item
+// whose lease lapsed or never existed (see Poll) — and the session it served.
+type AbandonedWork struct {
+	ID        domain.ID
+	SessionID domain.ID
+}
+
+// ListAbandoned lists the environment's abandoned wind-downs: candidates for
+// FinalizeAbandoned, which re-checks each row under its own transaction — so
+// this is a plain bounded read, and a candidate a concurrent poll settles
+// first is simply not settled twice. Bounded to 50 per call; the rest drain
+// on the polls that follow.
+func (q *Queue) ListAbandoned(ctx context.Context, envID domain.ID) ([]AbandonedWork, error) {
 	rows, err := q.pool.Query(ctx,
-		`WITH abandoned AS (
-		    SELECT id FROM work_items
-		    WHERE environment_id = $1 AND kind = 'tool_exec'
-		      AND state = 'stopping'
-		      AND (lease_expires_at IS NULL OR lease_expires_at < now())
-		    LIMIT 50
-		    FOR UPDATE SKIP LOCKED
-		 )
-		 UPDATE work_items f
+		`SELECT id, session_id FROM work_items
+		 WHERE environment_id = $1 AND kind = 'tool_exec'
+		   AND state = 'stopping'
+		   AND (lease_expires_at IS NULL OR lease_expires_at < now())
+		 LIMIT 50`, envID)
+	if err != nil {
+		return nil, fmt.Errorf("queue: list abandoned %s: %w", envID, err)
+	}
+	defer rows.Close()
+	var out []AbandonedWork
+	for rows.Next() {
+		var id, sid string
+		if err := rows.Scan(&id, &sid); err != nil {
+			return nil, err
+		}
+		out = append(out, AbandonedWork{ID: domain.ID(id), SessionID: domain.ID(sid)})
+	}
+	return out, rows.Err()
+}
+
+// FinalizeAbandoned settles one abandoned wind-down terminally (→ stopped,
+// stopped_at stamped, lease cleared) under the caller's transaction — the
+// transaction that also re-arms the session's runnable calls (plan 35
+// decision 13 iii): a stop the worker never finished is a stop all the same,
+// and the calls the item covered are nobody's otherwise, so the flip and the
+// re-arm it owes commit or fail together — split, a crash between them would
+// strand the calls behind a row already stopped, which no later poll
+// retries. The flip re-checks the abandonment, so a stale candidate — one a
+// concurrent poll settled first — reports false and is left alone.
+func (q *Queue) FinalizeAbandoned(ctx context.Context, db DB, envID, workID domain.ID) (bool, error) {
+	tag, err := db.Exec(ctx,
+		`UPDATE work_items
 		 SET state            = 'stopped',
 		     stopped_at       = now(),
 		     lease_expires_at = NULL,
 		     updated_at       = now()
-		 FROM abandoned a
-		 WHERE f.id = a.id
-		 RETURNING f.session_id`, envID)
+		 WHERE id = $1 AND environment_id = $2 AND kind = 'tool_exec'
+		   AND state = 'stopping'
+		   AND (lease_expires_at IS NULL OR lease_expires_at < now())`,
+		workID, envID)
 	if err != nil {
-		return nil, fmt.Errorf("queue: finalize abandoned %s: %w", envID, err)
+		return false, fmt.Errorf("queue: finalize abandoned %s: %w", workID, err)
 	}
-	defer rows.Close()
-	var out []domain.ID
-	for rows.Next() {
-		var sid string
-		if err := rows.Scan(&sid); err != nil {
-			return nil, err
-		}
-		out = append(out, domain.ID(sid))
-	}
-	return out, rows.Err()
+	return tag.RowsAffected() > 0, nil
 }
 
 // Extend renews the claimant's lease mid-work (long provider streams) and

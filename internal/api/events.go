@@ -435,7 +435,11 @@ func (s *server) sendSessionEvents(r *http.Request) (any, error) {
 			// log, and in the database so both ends read one clock.
 			// The primary's suspension may predate the thread resource — a
 			// session parked on requires_action across that upgrade has the
-			// session event alone — so the session-level idle counts for it too.
+			// session event alone — so the session-level idle counts for it
+			// too, but only when no thread event exists at all: a sibling
+			// moving the fold re-advertises the primary's own ask in a later
+			// session.status_idle, which must not shadow the suspension that
+			// raised the gate.
 			var secs float64
 			err = tx.QueryRow(ctx,
 				`SELECT EXTRACT(EPOCH FROM (clock_timestamp() - created_at))
@@ -444,7 +448,7 @@ func (s *server) sendSessionEvents(r *http.Request) (any, error) {
 				   AND ((type = $2 AND thread_id IS NOT DISTINCT FROM $3::text)
 				        OR (type = $4 AND $3::text IS NULL))
 				   AND payload->'stop_reason'->>'type' = 'requires_action'
-				 ORDER BY seq DESC LIMIT 1`,
+				 ORDER BY (type = $2) DESC, seq DESC LIMIT 1`,
 				id, string(domain.EventSessionThreadStatusIdle), events.NullableThread(tid),
 				string(domain.EventSessionStatusIdle)).Scan(&secs)
 			if err != nil && !errors.Is(err, pgx.ErrNoRows) {

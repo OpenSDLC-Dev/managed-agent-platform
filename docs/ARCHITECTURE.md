@@ -132,8 +132,9 @@ threads — each with its own agent, its own log and its own turn, all on the se
 sandbox. The flow above then reads per thread: a turn is `(session, thread)`-keyed, the
 `requires_action` suspension and the interrupt address one thread (an interrupt naming a
 `session_thread_id` ends that thread alone and leaves the shared exec item; one without
-ends every thread), the exec drivers run the runnable calls of every thread off the one
-`tool_exec` and wake each thread as its own calls are answered, outcome grading runs at
+ends every thread), the exec drivers run only the runnable calls — every thread's sandbox
+calls off the session's one `tool_exec`, the web and MCP lanes on their own items — and
+wake each thread as its own calls are answered, outcome grading runs at
 the session's quiescence, and the session's status is a fold over its threads' (running ≻
 rescheduling ≻ idle; `requires_action` over `end_turn`, `event_ids` unioned). A single-agent
 session is the one-thread case of the same machinery and its wire is unchanged. What is

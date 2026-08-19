@@ -507,24 +507,36 @@ func (s *server) rearm(ctx context.Context, tx pgx.Tx, envID, sessionID domain.I
 	return err
 }
 
-// finalizeAbandoned finalizes the environment's abandoned wind-downs and
-// re-arms each finalized item's session under its row lock.
+// finalizeAbandoned finalizes the environment's abandoned wind-downs, each
+// with the re-arm it owes in the same transaction, under the session row
+// lock stopWork shares: committed together, a crash between them cannot
+// strand the session's runnable calls behind a row already stopped — one
+// still stopping is retried by the next poll. The guarded flip re-checks the
+// candidate under the lock, so racing polls settle and re-arm each session
+// exactly once.
 func (s *server) finalizeAbandoned(ctx context.Context, envID domain.ID) error {
-	sessions, err := s.queue.FinalizeAbandoned(ctx, envID)
+	items, err := s.queue.ListAbandoned(ctx, envID)
 	if err != nil {
 		return err
 	}
-	for _, sid := range sessions {
+	for _, it := range items {
 		tx, err := s.pool.Begin(ctx)
 		if err != nil {
 			return err
 		}
 		err = func() error {
 			defer func() { _ = tx.Rollback(ctx) }()
-			if _, err := tx.Exec(ctx, `SELECT 1 FROM sessions WHERE id = $1 FOR UPDATE`, sid.String()); err != nil {
+			if _, err := tx.Exec(ctx, `SELECT 1 FROM sessions WHERE id = $1 FOR UPDATE`, it.SessionID.String()); err != nil {
 				return err
 			}
-			if err := s.rearm(ctx, tx, envID, sid); err != nil {
+			done, err := s.queue.FinalizeAbandoned(ctx, tx, envID, it.ID)
+			if err != nil {
+				return err
+			}
+			if !done {
+				return nil
+			}
+			if err := s.rearm(ctx, tx, envID, it.SessionID); err != nil {
 				return err
 			}
 			return tx.Commit(ctx)
