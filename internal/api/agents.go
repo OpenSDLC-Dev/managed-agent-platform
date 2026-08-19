@@ -349,14 +349,18 @@ func (s *server) updateAgent(r *http.Request) (any, error) {
 
 	newVersion := current + 1
 	// The roster is replaced as a whole when sent (`null` clears it) and left
-	// exactly as stored when omitted — it never follows later member updates
-	// (docs). `self` pins the version this update produces.
+	// as stored when omitted — it never follows later member updates (docs).
+	// `self` pins the version this update produces, in both cases: a kept
+	// roster's self entry moves from the current version to the new one, so
+	// "self" keeps meaning this coordinator at the version a session resolves.
 	if raw, ok := obj["multiagent"]; ok {
 		if isNull(raw) {
 			spec.Multiagent = nil
 		} else if spec.Multiagent, err = resolveRoster(ctx, tx, raw, id, newVersion); err != nil {
 			return nil, err
 		}
+	} else if spec.Multiagent, err = repinSelf(spec.Multiagent, id, current, newVersion); err != nil {
+		return nil, err
 	}
 	newSpecJSON, err := json.Marshal(spec)
 	if err != nil {

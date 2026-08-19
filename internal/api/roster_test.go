@@ -124,14 +124,24 @@ func TestRosterUpdateSelfAndReplacement(t *testing.T) {
 		t.Errorf("roster after update = %v, want [a, self@2]", got)
 	}
 
-	// Omitted: a name-only update keeps the roster (self stays pinned at 2 —
-	// the roster does not follow the coordinator's own later versions either).
+	// Omitted: a name-only update keeps the roster's members as pinned, but
+	// self moves with the coordinator — it means this coordinator at the
+	// version a session resolves, so a session on version 3 still finds it.
 	status, res = s.do(http.MethodPost, "/v1/agents/"+id, map[string]any{"name": "coordinator-renamed"})
 	if status != http.StatusOK {
 		t.Fatalf("rename: %d %v", status, res)
 	}
-	if got := rosterOf(t, res); len(got) != 2 || got[1]["version"] != float64(2) {
-		t.Errorf("roster after rename = %v, want unchanged [a, self@2]", got)
+	if got := rosterOf(t, res); len(got) != 2 || got[0]["id"] != a || got[1]["version"] != float64(3) {
+		t.Errorf("roster after rename = %v, want [a@1, self@3]", got)
+	}
+	envID := createEnvironment(t, s, map[string]any{"name": "env"})["id"].(string)
+	sess := createSession(t, s, map[string]any{
+		"agent":          map[string]any{"type": "agent_with_overrides", "id": id, "system": "overridden"},
+		"environment_id": envID,
+	})
+	sa, _ := sess["agent"].(map[string]any)
+	if snap := rosterOf(t, sa); len(snap) != 2 || snap[1]["system"] != "overridden" || snap[1]["name"] != "coordinator-renamed" {
+		t.Errorf("session on the kept roster = %v, want the self copy from the overridden version-3 spec", snap)
 	}
 	// Replaced as a whole.
 	status, res = s.do(http.MethodPost, "/v1/agents/"+id, map[string]any{

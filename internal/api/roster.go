@@ -181,6 +181,26 @@ func resolveRoster(ctx context.Context, tx pgx.Tx, raw json.RawMessage, selfID s
 	return json.Marshal(out)
 }
 
+// repinSelf moves a stored roster's `self` entry — the one naming the
+// coordinator (selfID) at the version being superseded (from) — to the version
+// an update that kept the roster produces (to). A roster without one, or no
+// roster, is returned unchanged.
+func repinSelf(stored json.RawMessage, selfID string, from, to int64) (json.RawMessage, error) {
+	if len(stored) == 0 || isNull(stored) {
+		return stored, nil
+	}
+	var roster storedRoster
+	if err := json.Unmarshal(stored, &roster); err != nil {
+		return nil, fmt.Errorf("decode stored roster: %w", err)
+	}
+	for i := range roster.Agents {
+		if roster.Agents[i].ID == selfID && roster.Agents[i].Version == from {
+			roster.Agents[i].Version = to
+		}
+	}
+	return json.Marshal(roster)
+}
+
 // asObjectRaw decodes raw as a JSON object; null and non-objects are errors.
 func asObjectRaw(raw json.RawMessage) (map[string]json.RawMessage, error) {
 	var obj map[string]json.RawMessage
