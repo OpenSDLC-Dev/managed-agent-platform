@@ -72,6 +72,28 @@ func (s *server) getGateConfig(r *http.Request) (any, error) {
 	if err := json.Unmarshal(configJSON, &cfg); err != nil {
 		return nil, err
 	}
+	// Every live child thread's declared servers too (plan 35 decision 14):
+	// each roster member dials its own agent's list, and a sidecar that knew
+	// only the coordinator's would 403 a child's dial.
+	declared := [][]byte{mcpServersJSON}
+	rows, err := tx.Query(ctx,
+		`SELECT agent->'mcp_servers' FROM session_threads
+		  WHERE session_id = $1 AND parent_thread_id IS NOT NULL AND archived_at IS NULL`, sessionID)
+	if err != nil {
+		return nil, err
+	}
+	for rows.Next() {
+		var raw []byte
+		if err := rows.Scan(&raw); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		declared = append(declared, raw)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
 
 	creds, err := vaultresolve.Credentials(ctx, tx, s.cipher, sessionID, vaultIDs)
 	if err != nil {
@@ -101,7 +123,19 @@ func (s *server) getGateConfig(r *http.Request) (any, error) {
 	// credential as unreachable on exactly the hosts this handler just widened
 	// the gate by — and that error is permanent and deduped, so a working
 	// configuration would carry a false one for the life of the session.
-	endpoints, refused := mcpGateEndpoints(cfg.Networking, mcpServersJSON)
+	var endpoints []string
+	var refused int
+	seen := map[string]bool{}
+	for _, raw := range declared {
+		eps, n := mcpGateEndpoints(cfg.Networking, raw)
+		refused += n
+		for _, e := range eps {
+			if !seen[e] {
+				seen[e] = true
+				endpoints = append(endpoints, e)
+			}
+		}
+	}
 	if refused > 0 {
 		// The declaration is dropped silently on the wire — there is no session
 		// event for it, and the sandbox only ever sees the ordinary 403 the gate

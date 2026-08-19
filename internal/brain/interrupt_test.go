@@ -45,10 +45,14 @@ func (h *harness) interrupt(t *testing.T) {
 	}
 	batch := []events.NewEvent{{Type: domain.EventUserInterrupt, Payload: []byte(`{"session_thread_id":null}`)}}
 	batch = append(batch, results...)
-	batch = append(batch, events.StatusChange(h.sessionID, domain.SessionIdle, &domain.StopReason{Type: domain.StopEndTurn})...)
-	idle := domain.SessionIdle
+	pair, moved, err := events.TransitionThread(ctx, tx, h.sessionID, events.ThreadTransition{
+		Status: domain.SessionIdle, Stop: &domain.StopReason{Type: domain.StopEndTurn}, Reemit: true})
+	if err != nil {
+		t.Fatalf("interrupt: %v", err)
+	}
+	batch = append(batch, pair...)
 	if _, err := h.log.AppendInTx(ctx, tx, h.sessionID, batch, events.AppendOptions{
-		SetStatus: &idle,
+		SetStatus: moved,
 		Then: func(ctx context.Context, tx pgx.Tx) error {
 			return h.queue.CancelSession(ctx, tx, h.sessionID)
 		},

@@ -13,6 +13,7 @@ import (
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/events"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/queue"
+	"github.com/jackc/pgx/v5"
 )
 
 // defaultReclaimMs is the wire default for reclaim_older_than_ms: a work item
@@ -442,10 +443,51 @@ func (s *server) stopWork(r *http.Request) error {
 	if err != nil {
 		return err
 	}
-	if _, err := s.queue.Stop(r.Context(), envID, workID, force); err != nil {
+	ctx := r.Context()
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	// The session row lock first (plan 35 decision 13 iii): a one-pass worker
+	// that stops its item after its found set may leave calls a sibling
+	// thread committed under the live item, and the re-arm below must be
+	// serialized with every settlement and trigger that appends calls or
+	// enqueues — not rest on ON CONFLICT's wait-and-recheck. An item outside
+	// the work API's view has no session to lock; Stop reports it.
+	var sessionID, kind string
+	err = tx.QueryRow(ctx, `SELECT session_id, kind FROM work_items WHERE id = $1 AND environment_id = $2`,
+		workID, envID).Scan(&sessionID, &kind)
+	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		return err
+	}
+	if err == nil {
+		if _, err := tx.Exec(ctx, `SELECT 1 FROM sessions WHERE id = $1 FOR UPDATE`, sessionID); err != nil {
+			return err
+		}
+	}
+	w, err := s.queue.StopWith(ctx, tx, envID, workID, force)
+	if err != nil {
 		return mapWorkErr(err)
 	}
-	return nil
+	// A tool_exec that reached stopped with runnable platform calls still on
+	// the log is re-armed as a fresh item of the kind the send trigger would
+	// pick — mcp_exec first, the only driver that can answer one; the runnable
+	// set, so an ask-gated sibling call never loops stop → re-arm → nothing
+	// runnable → stop. A graceful stop that parked the item stopping is not
+	// yet stopped; the worker's own stop after its wind-down lands here again.
+	if w.State == "stopped" && kind == string(queue.ToolExec) {
+		kind, err := execKindFor(ctx, tx, domain.ID(sessionID), nil, nil)
+		if err != nil {
+			return err
+		}
+		if kind != "" {
+			if _, err := s.queue.Enqueue(ctx, tx, envID, domain.ID(sessionID), kind); err != nil {
+				return err
+			}
+		}
+	}
+	return tx.Commit(ctx)
 }
 
 // heartbeatTTL reads desired_ttl_seconds (default 30, clamped to

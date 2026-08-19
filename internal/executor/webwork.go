@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
-	"slices"
 	"strings"
 	"time"
 
@@ -100,58 +99,20 @@ func (e *Executor) processWeb(ctx context.Context, item *queue.Item) (err error)
 	}
 
 	// Commit the results, the follow-on work, and the item's fate together
-	// under the session lock, mirroring process's settlement. Once every web
-	// call is answered: an outstanding MCP call rides a chained mcp_exec, which
-	// takes precedence over the sandbox built-ins for the reason it does
-	// everywhere — the tool_exec that would otherwise come next is the one kind
-	// a BYOC worker claims, and it has no surface to answer an MCP call with;
-	// sandbox built-ins still unanswered ride a chained tool_exec (the second
-	// half of the web-first hold-back); nothing platform or MCP outstanding but
-	// custom calls means the client resumes the turn; a fully-answered set
-	// wakes the brain.
+	// under the session lock, mirroring process's settlement: settleDrain
+	// wakes each thread whose calls are now all answered, then chains — an
+	// outstanding MCP call rides a chained mcp_exec, which takes precedence
+	// over the sandbox built-ins for the reason it does everywhere (the
+	// tool_exec that would otherwise come next is the one kind a BYOC worker
+	// claims, and it has no surface to answer an MCP call with); sandbox
+	// built-ins still runnable ride a chained tool_exec (the second half of
+	// the web-first hold-back); a web call of this lane's own still runnable —
+	// a stall cut the pass short, or a sibling committed one under this live
+	// item — hands THIS item back rather than enqueuing a second (#383);
+	// nothing runnable completes the item.
 	opts := events.AppendOptions{
 		Then: func(ctx context.Context, tx pgx.Tx) error {
-			mcpPending, err := events.HasUnansweredMCPToolUse(ctx, tx, item.SessionID, nil)
-			if err != nil {
-				return err
-			}
-			if mcpPending {
-				if _, err := e.queue.Enqueue(ctx, tx, item.EnvironmentID, item.SessionID, queue.MCPExec); err != nil {
-					return err
-				}
-				return e.queue.Complete(ctx, tx, item)
-			}
-			platformPending, err := events.UnansweredPlatformToolNames(ctx, tx, item.SessionID, nil)
-			if err != nil {
-				return err
-			}
-			if len(platformPending) > 0 {
-				// A web call of this lane's own is still outstanding only when a
-				// stall cut the pass short, and it is chained by handing THIS
-				// item back rather than enqueuing a second: Enqueue is keyed
-				// (session_id, kind) over the live states, and this item is
-				// still live inside this transaction, so a fresh web_exec would
-				// be dropped on conflict and the call would wait for the
-				// abandoned lease to lapse — the mcp_exec driver's rule, for the
-				// same reason (#383).
-				if slices.ContainsFunc(platformPending, toolset.IsWebTool) {
-					return e.queue.Requeue(ctx, tx, item)
-				}
-				if _, err := e.queue.Enqueue(ctx, tx, item.EnvironmentID, item.SessionID, queue.ToolExec); err != nil {
-					return err
-				}
-				return e.queue.Complete(ctx, tx, item)
-			}
-			anyPending, err := events.HasUnansweredToolUse(ctx, tx, item.SessionID, nil)
-			if err != nil {
-				return err
-			}
-			if !anyPending {
-				if _, err := e.queue.Enqueue(ctx, tx, item.EnvironmentID, item.SessionID, queue.ModelTurn); err != nil {
-					return err
-				}
-			}
-			return e.queue.Complete(ctx, tx, item)
+			return e.settleDrain(ctx, tx, item, queue.WebExec, false)
 		},
 	}
 	if _, err := e.log.AppendWith(ctx, item.SessionID, results, opts); err != nil {
@@ -179,7 +140,7 @@ func (e *Executor) processWeb(ctx context.Context, item *queue.Item) (err error)
 // result — except when the context dies mid-call (lease lost, shutdown),
 // where the outcome is untrustworthy and the rest is left for the reclaim.
 func (e *Executor) runWebTools(ctx context.Context, sid domain.ID, progress func()) ([]events.NewEvent, error, error) {
-	uses, err := e.unansweredToolUses(ctx, sid)
+	uses, err := e.runnableToolUses(ctx, sid)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -192,8 +153,19 @@ func (e *Executor) runWebTools(ctx context.Context, sid domain.ID, progress func
 		// internal/executor/files.go): the item is bounded by silence, and a
 		// turn's calls are answered one at a time (#383).
 		progress()
+		// Answered under a thread-scoped interrupt since the scan: skipped, and
+		// cancelled on the keeper's beat if it happens mid-call (decision 9).
+		if answered, err := events.Answered(ctx, e.pool, sid, u.id); err != nil {
+			return results, nil, fmt.Errorf("tool %s (%s): answered check: %w", u.name, u.id, err)
+		} else if answered {
+			continue
+		}
+		cctx, stop := e.answeredWatch(ctx, sid, u.id, e.cfg.LeaseTTL/3)
 		start := time.Now()
-		res := e.runWebTool(ctx, u)
+		res := e.runWebTool(cctx, u)
+		if stop() {
+			continue
+		}
 		toolset.RecordRun(ctx, u.name, time.Since(start), res, ctx.Err())
 		if ctx.Err() != nil {
 			return results, fmt.Errorf("tool %s (%s): %w", u.name, u.id, ctx.Err()), nil
@@ -202,6 +174,7 @@ func (e *Executor) runWebTools(ctx context.Context, sid domain.ID, progress func
 		if err != nil {
 			return results, nil, err
 		}
+		ev.ThreadID, ev.CrossPosted = u.thread, u.crossPosted
 		results = append(results, ev)
 	}
 	// The loop reports as each call starts, so the last one's completion is

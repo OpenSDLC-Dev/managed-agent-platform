@@ -64,6 +64,9 @@ type mcpServerRef struct {
 type catalogRow struct {
 	name string
 	url  string
+	// thread is the thread whose agent declared the server (empty for the
+	// primary): the catalog key is per thread (decision 14).
+	thread domain.ID
 	// tools is the listing, already storable when set — bounded and stripped by
 	// storableTools where it was produced, for the reason reason gives below: a
 	// server chooses it, one listing is bounded only by a whole connection's
@@ -126,7 +129,7 @@ func (e *Executor) processMCP(ctx context.Context, item *queue.Item) (err error)
 	// waiting on this pass, while a listing is wanted by a turn that has not
 	// started. Spending this pass's budget dialling for a catalog would leave
 	// that turn stopped for as long as the dials take.
-	calls, err := e.unansweredMCPToolUses(ctx, item.SessionID)
+	calls, err := e.runnableMCPToolUses(ctx, item.SessionID)
 	if err != nil {
 		return err
 	}
@@ -134,17 +137,38 @@ func (e *Executor) processMCP(ctx context.Context, item *queue.Item) (err error)
 		return e.answerMCPCalls(ctx, item, sess, calls)
 	}
 
-	pending, err := e.undiscoveredServers(ctx, item.SessionID, sess.mcpServers)
+	// Discovery is per thread (plan 35 decision 14): each live thread's agent
+	// declares its own servers, listed under its own key — a server two
+	// threads both declare is dialled once per thread.
+	threads, err := e.liveThreadMCPServers(ctx, item.SessionID, sess.mcpServers)
 	if err != nil {
 		return err
 	}
-
 	// Keep the lease across the dials: a server that answers slowly would
 	// otherwise outlast a fixed TTL and lose the item mid-listing.
 	// Progress is one server reached, not one pass finished — answerMCPCalls says
 	// why the pass being bounded whole is not enough on its own (#383).
 	kctx, keeper := e.queue.KeepLease(ctx, item, e.cfg.LeaseTTL, e.cfg.StallTimeout)
-	rows, runErr := e.discoverServers(kctx, sess.envConfig, sess.vaultIDs, pending, keeper.Progress)
+	var rows []catalogRow
+	var runErr error
+	for _, th := range threads {
+		pending, err := e.undiscoveredServers(ctx, item.SessionID, th.id, th.servers)
+		if err != nil {
+			_ = keeper.Close()
+			return err
+		}
+		if len(pending) == 0 {
+			continue
+		}
+		var found []catalogRow
+		if found, runErr = e.discoverServers(kctx, sess.envConfig, sess.vaultIDs, pending, keeper.Progress); runErr != nil {
+			break
+		}
+		for i := range found {
+			found[i].thread = th.id
+		}
+		rows = append(rows, found...)
+	}
 	if kerr := keeper.Close(); kerr != nil {
 		return fmt.Errorf("lease keeper: %w", kerr)
 	}
@@ -158,13 +182,82 @@ func (e *Executor) processMCP(ctx context.Context, item *queue.Item) (err error)
 	return e.settleMCP(ctx, item, rows)
 }
 
-// readyEndpoints is the url each of this session's usable listings was read at,
+// threadMCPServers is the servers one thread's agent declares: the primary's
+// are the session's resolved agent's (passed in, read once with the session),
+// a child's its snapshot's (decision 14).
+func (e *Executor) threadMCPServers(ctx context.Context, sid, threadID domain.ID, primary []mcpServerRef) ([]mcpServerRef, error) {
+	if threadID == "" {
+		return primary, nil
+	}
+	var raw []byte
+	if err := e.pool.QueryRow(ctx,
+		`SELECT agent->'mcp_servers' FROM session_threads WHERE id = $1 AND session_id = $2`,
+		threadID.String(), sid.String()).Scan(&raw); err != nil {
+		return nil, fmt.Errorf("read thread %s agent: %w", threadID, err)
+	}
+	var servers []mcpServerRef
+	if len(raw) > 0 {
+		if err := json.Unmarshal(raw, &servers); err != nil {
+			return nil, fmt.Errorf("decode thread %s mcp_servers: %w", threadID, err)
+		}
+	}
+	return servers, nil
+}
+
+// threadServers is one live thread with the servers its agent declares.
+type threadServers struct {
+	id      domain.ID // empty for the primary
+	servers []mcpServerRef
+}
+
+// liveThreadMCPServers lists every live thread of the session with its
+// declared servers, the primary first — the units discovery runs for. A
+// session from before the thread resource, with no rows, is its primary
+// alone.
+func (e *Executor) liveThreadMCPServers(ctx context.Context, sid domain.ID, primary []mcpServerRef) ([]threadServers, error) {
+	rows, err := e.pool.Query(ctx,
+		`SELECT CASE WHEN parent_thread_id IS NULL THEN '' ELSE id END, agent->'mcp_servers'
+		   FROM session_threads WHERE session_id = $1 AND archived_at IS NULL
+		  ORDER BY parent_thread_id IS NOT NULL, created_at, id`, sid.String())
+	if err != nil {
+		return nil, fmt.Errorf("read session threads: %w", err)
+	}
+	defer rows.Close()
+	var out []threadServers
+	for rows.Next() {
+		var id string
+		var raw []byte
+		if err := rows.Scan(&id, &raw); err != nil {
+			return nil, fmt.Errorf("read session threads: %w", err)
+		}
+		th := threadServers{id: domain.ID(id), servers: primary}
+		if th.id != "" {
+			th.servers = nil
+			if len(raw) > 0 {
+				if err := json.Unmarshal(raw, &th.servers); err != nil {
+					return nil, fmt.Errorf("decode thread %s mcp_servers: %w", id, err)
+				}
+			}
+		}
+		out = append(out, th)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("read session threads: %w", err)
+	}
+	if len(out) == 0 {
+		out = []threadServers{{servers: primary}}
+	}
+	return out, nil
+}
+
+// readyEndpoints is the url each of one thread's usable listings was read at,
 // by server name. It answers the one question both MCP drivers ask of the
 // catalog: which servers have a listing, and where it came from.
-func (e *Executor) readyEndpoints(ctx context.Context, sid domain.ID) (map[string]string, error) {
+func (e *Executor) readyEndpoints(ctx context.Context, sid, threadID domain.ID) (map[string]string, error) {
 	rows, err := e.pool.Query(ctx,
-		`SELECT server_name, url FROM mcp_catalogs WHERE session_id = $1 AND status = 'ready'`,
-		sid.String())
+		`SELECT server_name, url FROM mcp_catalogs
+		  WHERE session_id = $1 AND thread_id IS NOT DISTINCT FROM $2 AND status = 'ready'`,
+		sid.String(), nullableThread(threadID))
 	if err != nil {
 		return nil, fmt.Errorf("read mcp catalog: %w", err)
 	}
@@ -195,8 +288,8 @@ func (e *Executor) readyEndpoints(ctx context.Context, sid domain.ID) (map[strin
 // that do not exist, so the driver does not depend on that delete having
 // happened. An entry missing either field is skipped: there is nothing to dial
 // and nothing to key a row on.
-func (e *Executor) undiscoveredServers(ctx context.Context, sid domain.ID, declared []mcpServerRef) ([]mcpServerRef, error) {
-	ready, err := e.readyEndpoints(ctx, sid)
+func (e *Executor) undiscoveredServers(ctx context.Context, sid, threadID domain.ID, declared []mcpServerRef) ([]mcpServerRef, error) {
+	ready, err := e.readyEndpoints(ctx, sid, threadID)
 	if err != nil {
 		return nil, err
 	}
@@ -922,10 +1015,21 @@ func (e *Executor) settleMCP(ctx context.Context, item *queue.Item, rows []catal
 	if err := json.Unmarshal(agentJSON, &agent); err != nil {
 		return fmt.Errorf("decode session agent: %w", err)
 	}
-	declared := make(map[string]string, len(agent.MCPServers))
-	for _, s := range agent.MCPServers {
-		declared[s.Name] = s.URL
+	// What each thread declares, re-read under the lock (a child's snapshot
+	// never changes; the primary's resolved agent can).
+	threads, err := e.liveThreadMCPServers(ctx, item.SessionID, agent.MCPServers)
+	if err != nil {
+		return err
 	}
+	declaredBy := make(map[domain.ID]map[string]string, len(threads))
+	for _, th := range threads {
+		m := make(map[string]string, len(th.servers))
+		for _, s := range th.servers {
+			m[s.Name] = s.URL
+		}
+		declaredBy[th.id] = m
+	}
+	declared := func(r catalogRow) bool { return declaredBy[r.thread][r.name] == r.url }
 	// Which servers this session has already been told about, read under the
 	// session row lock this transaction already holds so no other pass can be
 	// between the read and the upsert. Only consulted when there is something to
@@ -933,7 +1037,7 @@ func (e *Executor) settleMCP(ctx context.Context, item *queue.Item, rows []catal
 	var announced map[string]bool
 	var failures []events.NewEvent
 	if slices.ContainsFunc(rows, func(r catalogRow) bool {
-		return r.announceable() && declared[r.name] == r.url
+		return r.announceable() && declared(r)
 	}) {
 		announced, err = announcedServers(ctx, tx, item.SessionID)
 		if err != nil {
@@ -941,7 +1045,7 @@ func (e *Executor) settleMCP(ctx context.Context, item *queue.Item, rows []catal
 		}
 	}
 	for _, r := range rows {
-		if declared[r.name] != r.url {
+		if !declared(r) {
 			continue
 		}
 		// Said out loud on the cadence the server is re-dialled at: once per
@@ -968,6 +1072,7 @@ func (e *Executor) settleMCP(ctx context.Context, item *queue.Item, rows []catal
 			if err != nil {
 				return err
 			}
+			ev.ThreadID = r.thread
 			failures = append(failures, ev)
 			// Marked as we go, not only as read: two declared entries can name
 			// one server at one url — the write path rejects that, the stored
@@ -984,16 +1089,16 @@ func (e *Executor) settleMCP(ctx context.Context, item *queue.Item, rows []catal
 			reason = r.reason
 		}
 		if _, err := tx.Exec(ctx,
-			`INSERT INTO mcp_catalogs (session_id, server_name, url, tools, status, error, fetched_at)
-			 VALUES ($1, $2, $3, $4::jsonb, $5, $6, now())
-			 ON CONFLICT (session_id, server_name) DO UPDATE SET
+			`INSERT INTO mcp_catalogs (session_id, thread_id, server_name, url, tools, status, error, fetched_at)
+			 VALUES ($1, $8, $2, $3, $4::jsonb, $5, $6, now())
+			 ON CONFLICT (session_id, thread_id, server_name) DO UPDATE SET
 			     url = EXCLUDED.url, tools = EXCLUDED.tools, status = EXCLUDED.status,
 			     error = CASE WHEN $7::boolean
 			                  THEN COALESCE(mcp_catalogs.error, EXCLUDED.error)
 			                  ELSE EXCLUDED.error END,
 			     fetched_at = EXCLUDED.fetched_at`,
 			item.SessionID.String(), r.name, r.url, string(toolsJSON), r.status, reason,
-			r.notReached); err != nil {
+			r.notReached, nullableThread(r.thread)); err != nil {
 			return fmt.Errorf("write mcp catalog for %q: %w", r.name, err)
 		}
 	}
@@ -1005,44 +1110,23 @@ func (e *Executor) settleMCP(ctx context.Context, item *queue.Item, rows []catal
 			return fmt.Errorf("append mcp discovery failures: %w", err)
 		}
 	}
-	// An MCP call outstanding takes this item back rather than completing it,
+	// An MCP call runnable takes this item back rather than completing it,
 	// the same first arm the four other settlements have and for the same
 	// reason: only this driver answers an agent.mcp_tool_use. A call committed
 	// while these dials were in flight — the pass runs for minutes — cannot have
-	// been queued behind them, since Enqueue is keyed (session_id, kind) over
-	// the live states and this very item is one; so completing here would leave
-	// the call with nothing scheduled to answer it, the session running, and
-	// archive and delete both refused. Handing the item back is what makes the
-	// next pass find the call and answer it (processMCP answers before it
-	// discovers).
-	mcpPending, err := events.HasUnansweredMCPToolUse(ctx, tx, item.SessionID, nil)
-	if err != nil {
-		return err
-	}
-	if mcpPending {
-		if err := e.queue.Requeue(ctx, tx, item); err != nil {
-			return err
-		}
-		return tx.Commit(ctx)
-	}
-	// The turn is chained on the same condition every other settlement uses.
-	// Discovery is not an answer to a tool call, so ordinarily nothing is
-	// outstanding and the brain is woken here — but mcp_exec and tool_exec are
-	// different queue kinds, so nothing stops one being in flight while the
-	// other settles, and a model_turn sent with an agent.tool_use still
-	// unanswered is a request the Messages API rejects. Whichever settlement
-	// finishes last finds the set answered and wakes the brain, so the gate
-	// costs no wakeup.
-	unanswered, err := events.HasUnansweredToolUse(ctx, tx, item.SessionID, nil)
-	if err != nil {
-		return err
-	}
-	if !unanswered {
-		if _, err := e.queue.Enqueue(ctx, tx, item.EnvironmentID, item.SessionID, queue.ModelTurn); err != nil {
-			return err
-		}
-	}
-	if err := e.queue.Complete(ctx, tx, item); err != nil {
+	// been queued behind them, since Enqueue is keyed over the live states and
+	// this very item is one; so completing here would leave the call with
+	// nothing scheduled to answer it, the session running, and archive and
+	// delete both refused. Handing the item back is what makes the next pass
+	// find the call and answer it (processMCP answers before it discovers).
+	// The wake is per thread: discovery is not an answer to a tool call, so
+	// ordinarily the suspended thread has nothing outstanding and is woken
+	// here — but mcp_exec and tool_exec are different queue kinds, so nothing
+	// stops one being in flight while the other settles, and a model_turn sent
+	// with an agent.tool_use still unanswered is a request the Messages API
+	// rejects. Whichever settlement finishes last finds the thread's set
+	// answered and wakes it, so the gate costs no wakeup.
+	if err := e.settleDrain(ctx, tx, item, queue.MCPExec, false); err != nil {
 		return err
 	}
 	return tx.Commit(ctx)

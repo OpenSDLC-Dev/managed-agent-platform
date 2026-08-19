@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/pgtest"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/queue"
 )
 
@@ -361,9 +362,7 @@ func TestInterruptFreesASessionStrandedIdleOnAPlainToolUse(t *testing.T) {
 	if err := q.Complete(ctx, s.pool, item); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.pool.Exec(ctx, `UPDATE sessions SET status = 'idle' WHERE id = $1`, sessionID); err != nil {
-		t.Fatal(err)
-	}
+	pgtest.SetSessionStatus(t, s.pool, domain.ID(sessionID), "idle")
 
 	// Stranded: the message is accepted, appended, and changes nothing.
 	sendEvents(t, s, sessionID, userMessage("are you still there?"))
@@ -407,10 +406,7 @@ func TestInterruptDoesNotReviveATerminatedSession(t *testing.T) {
 	s := newTestServer(t)
 	sessionID := eventsFixture(t, s)
 	appendToolUse(t, s, sessionID, domain.EventAgentToolUse)
-	if _, err := s.pool.Exec(context.Background(),
-		`UPDATE sessions SET status = 'terminated' WHERE id = $1`, sessionID); err != nil {
-		t.Fatal(err)
-	}
+	pgtest.SetSessionStatus(t, s.pool, domain.ID(sessionID), "terminated")
 
 	sendEvents(t, s, sessionID,
 		map[string]any{"type": "user.interrupt"},

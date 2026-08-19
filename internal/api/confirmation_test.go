@@ -8,6 +8,7 @@ import (
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/events"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/pgtest"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/queue"
 )
 
@@ -34,10 +35,7 @@ func appendGatedToolUse(t *testing.T, s *tserver, sessionID string, typ domain.E
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.pool.Exec(context.Background(),
-		`UPDATE sessions SET status = 'idle' WHERE id = $1`, sessionID); err != nil {
-		t.Fatal(err)
-	}
+	pgtest.SetSessionStatus(t, s.pool, domain.ID(sessionID), "idle")
 	return evs[0].ID.String()
 }
 

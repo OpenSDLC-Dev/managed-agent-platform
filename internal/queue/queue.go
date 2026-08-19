@@ -16,9 +16,12 @@
 // (kind <> 'tool_exec' OR e.kind = 'cloud'). Each Kind below records why it
 // falls where it does.
 //
-// Enqueue is idempotent per (session, kind) while a live item exists, so
-// event-append triggers can fire without double-scheduling; a claim leases the
-// item and an expired lease makes it claimable again.
+// Enqueue is idempotent per (session, thread, kind) while a live item exists,
+// so event-append triggers can fire without double-scheduling; a claim leases
+// the item and an expired lease makes it claimable again. A model_turn is one
+// thread's (plan 35 decision 5; NULL thread = the primary), so sibling threads
+// run turns concurrently; the exec kinds stay session-keyed — one shared
+// sandbox, one item covers every thread's backlog.
 package queue
 
 import (
@@ -91,7 +94,10 @@ type Item struct {
 	ID            domain.ID
 	EnvironmentID domain.ID
 	SessionID     domain.ID
-	Kind          Kind
+	// ThreadID is the thread a model_turn belongs to; empty for the primary
+	// thread and for every session-keyed exec kind.
+	ThreadID domain.ID
+	Kind     Kind
 	// Lease is the claim's expiry as recorded by the database. It is the
 	// claimant's proof of ownership: Extend and Complete match it against
 	// the row (the same optimistic-concurrency shape as the reference work
@@ -173,8 +179,18 @@ func New(pool *pgxpool.Pool) *Queue { return &Queue{pool: pool} }
 
 // Enqueue inserts a queued item unless a live (queued/starting/active) item
 // for the same session and kind exists. It reports whether a new item was
-// created; false means an existing live item already covers the work.
+// created; false means an existing live item already covers the work. The
+// item is the primary thread's (a model_turn) or session-keyed (the exec
+// kinds) — EnqueueThread is the child-thread form.
 func (q *Queue) Enqueue(ctx context.Context, db DB, envID, sessionID domain.ID, kind Kind) (bool, error) {
+	return q.EnqueueThread(ctx, db, envID, sessionID, "", kind)
+}
+
+// EnqueueThread is Enqueue for one thread's model_turn (empty threadID = the
+// primary): the live-dedup key is (session, thread, kind), so each thread has
+// at most one live turn and sibling threads' turns do not suppress each other.
+// Exec kinds are session-keyed and take an empty threadID.
+func (q *Queue) EnqueueThread(ctx context.Context, db DB, envID, sessionID, threadID domain.ID, kind Kind) (bool, error) {
 	// Only executor-consumed work carries a trace context — tool_exec
 	// (consumed by the cloud executor's Claim and the BYOC worker's poll),
 	// web_exec (the executor's web driver), outputs_harvest (the deliverables
@@ -187,11 +203,11 @@ func (q *Queue) Enqueue(ctx context.Context, db DB, envID, sessionID domain.ID, 
 		traceCtx = traceContextArg(ctx)
 	}
 	tag, err := db.Exec(ctx,
-		`INSERT INTO work_items (id, environment_id, session_id, kind, trace_context)
-		 VALUES ($1, $2, $3, $4, $5::jsonb)
-		 ON CONFLICT (session_id, kind) WHERE state IN ('queued', 'starting', 'active')
+		`INSERT INTO work_items (id, environment_id, session_id, thread_id, kind, trace_context)
+		 VALUES ($1, $2, $3, $4, $5, $6::jsonb)
+		 ON CONFLICT (session_id, thread_id, kind) WHERE state IN ('queued', 'starting', 'active')
 		 DO NOTHING`,
-		domain.NewID("work"), envID, sessionID, kind, traceCtx)
+		domain.NewID("work"), envID, sessionID, nullableThread(threadID), kind, traceCtx)
 	if err != nil {
 		return false, fmt.Errorf("queue: enqueue %s for %s: %w", kind, sessionID, err)
 	}
@@ -259,10 +275,10 @@ func (q *Queue) Claim(ctx context.Context, kind Kind, ttl time.Duration) (*Item,
 		     updated_at = now()
 		 FROM picked p
 		 WHERE w.id = p.id
-		 RETURNING w.id, w.environment_id, w.session_id, w.kind, w.lease_expires_at, p.state,
-		           w.trace_context`,
-		kind, ttl.Seconds()).Scan(&it.ID, &it.EnvironmentID, &it.SessionID, &it.Kind, &it.Lease, &prevState,
-		&it.TraceContext)
+		 RETURNING w.id, w.environment_id, w.session_id, COALESCE(w.thread_id, ''), w.kind,
+		           w.lease_expires_at, p.state, w.trace_context`,
+		kind, ttl.Seconds()).Scan(&it.ID, &it.EnvironmentID, &it.SessionID, &it.ThreadID, &it.Kind, &it.Lease,
+		&prevState, &it.TraceContext)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil
 	}
@@ -496,6 +512,35 @@ func (q *Queue) CancelSession(ctx context.Context, db DB, sessionID domain.ID) e
 		return fmt.Errorf("queue: cancel session %s: %w", sessionID, err)
 	}
 	return nil
+}
+
+// CancelThread is CancelSession for one thread's model_turn — a thread-scoped
+// user.interrupt ends that thread's turn and nothing else (plan 35 decision 9):
+// the session-keyed exec items stay live, because a sibling's calls ride on
+// them; the interrupted thread's own in-flight call is dropped by the drivers'
+// answered-means-cancelled check, not by stopping the item.
+func (q *Queue) CancelThread(ctx context.Context, db DB, sessionID, threadID domain.ID) error {
+	if _, err := db.Exec(ctx,
+		`UPDATE work_items
+		 SET state             = 'stopped',
+		     stop_requested_at = COALESCE(stop_requested_at, now()),
+		     stopped_at        = now(),
+		     lease_expires_at  = NULL,
+		     updated_at        = now()
+		 WHERE session_id = $1 AND kind = 'model_turn' AND state <> 'stopped'
+		   AND thread_id IS NOT DISTINCT FROM $2`, sessionID, nullableThread(threadID)); err != nil {
+		return fmt.Errorf("queue: cancel thread %s: %w", threadID, err)
+	}
+	return nil
+}
+
+// nullableThread binds a thread id: NULL for the primary.
+func nullableThread(threadID domain.ID) *string {
+	if threadID == "" {
+		return nil
+	}
+	s := threadID.String()
+	return &s
 }
 
 // Complete marks the item finished, in the caller's transaction when one is

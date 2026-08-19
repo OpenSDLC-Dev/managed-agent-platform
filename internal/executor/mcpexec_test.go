@@ -1202,7 +1202,7 @@ func TestMCPCallPassReportsProgressPerCall(t *testing.T) {
 	if err != nil || !live {
 		t.Fatalf("sessionForRun: live=%v err=%v", live, err)
 	}
-	calls, err := h.exec.unansweredMCPToolUses(context.Background(), item.SessionID)
+	calls, err := h.exec.runnableMCPToolUses(context.Background(), item.SessionID)
 	if err != nil {
 		t.Fatalf("unansweredMCPToolUses: %v", err)
 	}
@@ -1210,13 +1210,13 @@ func TestMCPCallPassReportsProgressPerCall(t *testing.T) {
 		t.Fatalf("calls = %d, want the three that are unanswered", len(calls))
 	}
 
-	ready, err := h.exec.readyEndpoints(context.Background(), item.SessionID)
+	threads, err := h.exec.threadMCPFor(context.Background(), item.SessionID, sess.mcpServers, calls)
 	if err != nil {
-		t.Fatalf("readyEndpoints: %v", err)
+		t.Fatalf("threadMCPFor: %v", err)
 	}
 	var reports int
 	results, faultErr, runErr := h.exec.runMCPTools(context.Background(), sess.envConfig,
-		sess.vaultIDs, sess.mcpServers, ready,
+		sess.vaultIDs, threads,
 		&mcpSpiller{exec: h.exec, sid: item.SessionID, sess: sess},
 		calls, func() { reports++ })
 	if faultErr != nil || runErr != nil {

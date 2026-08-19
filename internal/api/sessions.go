@@ -692,7 +692,14 @@ func (s *server) createSession(r *http.Request) (any, error) {
 		}
 		// The log announces the status the session was born into, after the
 		// initial events it processes in order (placement ours, INFERRED).
-		batch := append(initialEvents, events.StatusChange(domain.ID(id), domain.SessionRunning, nil)...)
+		// Both rows were inserted running above, so the transition moves
+		// nothing and Reemit is what emits the pair.
+		pair, _, err := events.TransitionThread(ctx, tx, domain.ID(id), events.ThreadTransition{
+			Status: domain.SessionRunning, Reemit: true})
+		if err != nil {
+			return nil, err
+		}
+		batch := append(initialEvents, pair...)
 		opts := events.AppendOptions{
 			Then: func(ctx context.Context, tx pgx.Tx) error {
 				_, err := s.queue.Enqueue(ctx, tx, domain.ID(envID), domain.ID(id), queue.ModelTurn)

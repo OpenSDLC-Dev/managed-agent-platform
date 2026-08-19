@@ -88,15 +88,23 @@ func NewLog(pool *pgxpool.Pool) *Log { return &Log{pool: pool} }
 // event log can never disagree, so both change under the one session row lock
 // the append already holds.
 type AppendOptions struct {
+	// ThreadID is the thread the append settles for — the turn's thread, empty
+	// for the primary (plan 35 decision 5): AddUsage folds into its row and
+	// MarkProcessedThrough stamps its own events alone, never a sibling's
+	// queued input.
+	ThreadID domain.ID
 	// SetStatus flips sessions.status alongside the append. The batch should
 	// carry the matching session.status_* event; this option only moves the
-	// resource column.
+	// resource column. TransitionThread, which derives the status from the
+	// threads', writes the column itself — callers hand it the status it
+	// moved to, so the self-committing wrappers count the transition.
 	SetStatus *domain.SessionStatus
-	// AddUsage folds one model turn's usage into sessions.usage.
+	// AddUsage folds one model turn's usage into sessions.usage and the
+	// thread's.
 	AddUsage *domain.ModelUsage
-	// MarkProcessedThrough stamps processed_at on still-unprocessed events
-	// at seq <= the watermark — the brain recording which inbound events its
-	// turn consumed. Zero means no stamping.
+	// MarkProcessedThrough stamps processed_at on the thread's
+	// still-unprocessed events at seq <= the watermark — the brain recording
+	// which inbound events its turn consumed. Zero means no stamping.
 	MarkProcessedThrough int64
 	// MutateOutcomes read-modify-writes sessions.outcome_evaluations under the
 	// same row lock (the AddUsage pattern): the projection changes atomically
@@ -261,15 +269,6 @@ func (l *Log) AppendInTx(ctx context.Context, tx pgx.Tx, sessionID domain.ID, ev
 			sessionID.String(), string(*opts.SetStatus)); err != nil {
 			return nil, err
 		}
-		// The primary thread's status follows the session's: the one thread a
-		// session has until plan 35 slice 3 folds the session's status over
-		// its threads' (decision 4), which inverts this write's direction.
-		if _, err := tx.Exec(ctx,
-			`UPDATE session_threads SET status = $2, updated_at = now()
-			  WHERE session_id = $1 AND parent_thread_id IS NULL`,
-			sessionID.String(), string(*opts.SetStatus)); err != nil {
-			return nil, err
-		}
 	}
 	if opts.AddUsage != nil {
 		// Read-modify-write is race-free here: the session row lock is held.
@@ -288,13 +287,30 @@ func (l *Log) AppendInTx(ctx context.Context, tx pgx.Tx, sessionID domain.ID, ev
 			sessionID.String(), usage); err != nil {
 			return nil, err
 		}
-		// Every model turn is the primary thread's until slice 3 runs child
-		// threads, so its usage is the session's.
-		if _, err := tx.Exec(ctx,
-			`UPDATE session_threads SET usage = $2, updated_at = now()
-			  WHERE session_id = $1 AND parent_thread_id IS NULL`,
-			sessionID.String(), usage); err != nil {
+		// The thread's own usage, under the same lock: the turn's thread
+		// accumulates what its turns spent, the session the sum over all.
+		tid := opts.ThreadID
+		if tid == "" {
+			tid = domain.PrimaryThreadID(sessionID)
+		}
+		var threadRaw []byte
+		err := tx.QueryRow(ctx,
+			`SELECT usage FROM session_threads WHERE id = $1 AND session_id = $2`,
+			tid.String(), sessionID.String()).Scan(&threadRaw)
+		if err != nil && !errors.Is(err, pgx.ErrNoRows) {
 			return nil, err
+		}
+		if err == nil {
+			var threadUsage domain.Usage
+			if err := json.Unmarshal(threadRaw, &threadUsage); err != nil {
+				return nil, fmt.Errorf("decode stored thread usage: %w", err)
+			}
+			threadUsage.Add(*opts.AddUsage)
+			if _, err := tx.Exec(ctx,
+				`UPDATE session_threads SET usage = $2, updated_at = now() WHERE id = $1`,
+				tid.String(), threadUsage); err != nil {
+				return nil, err
+			}
 		}
 	}
 	if opts.MutateOutcomes != nil {
@@ -326,10 +342,13 @@ func (l *Log) AppendInTx(ctx context.Context, tx pgx.Tx, sessionID domain.ID, ev
 		}
 	}
 	if opts.MarkProcessedThrough > 0 {
+		// The thread's own rows: a session-wide stamp would mark a sibling's
+		// queued input processed before any turn of its read it (decision 5).
 		if _, err := tx.Exec(ctx,
 			`UPDATE events SET processed_at = clock_timestamp()
-			 WHERE session_id = $1 AND seq <= $2 AND processed_at IS NULL`,
-			sessionID.String(), opts.MarkProcessedThrough); err != nil {
+			 WHERE session_id = $1 AND seq <= $2 AND processed_at IS NULL
+			   AND thread_id IS NOT DISTINCT FROM $3`,
+			sessionID.String(), opts.MarkProcessedThrough, nullableID(opts.ThreadID)); err != nil {
 			return nil, err
 		}
 	}
@@ -363,7 +382,7 @@ type ListQuery struct {
 	// Scope narrows the rows to one surface (plan 35 decision 2). ScopeAll,
 	// the zero value, reads the whole log — what every internal reader does.
 	Scope    Scope
-	ThreadID domain.ID // the child thread ScopeThread reads
+	ThreadID domain.ID // the thread ScopeThread reads; empty is the primary
 }
 
 // Scope is the surface a list serves. Events are stored once: a child
@@ -374,7 +393,7 @@ type Scope int
 const (
 	ScopeAll     Scope = iota // the whole log
 	ScopeSession              // the session view — also the primary thread's own
-	ScopeThread               // one child thread's own rows
+	ScopeThread               // one thread's own rows: a child's, or with no ThreadID the primary's (what its turn replays)
 )
 
 // List returns events for one session in seq order. It does not check that
@@ -391,7 +410,11 @@ func (l *Log) List(ctx context.Context, sessionID domain.ID, q ListQuery) ([]dom
 	case ScopeSession:
 		sb.WriteString(" AND (thread_id IS NULL OR cross_posted)")
 	case ScopeThread:
-		add("thread_id = ", q.ThreadID.String())
+		if q.ThreadID == "" {
+			sb.WriteString(" AND thread_id IS NULL")
+		} else {
+			add("thread_id = ", q.ThreadID.String())
+		}
 	}
 	if len(q.Types) > 0 {
 		add("type = ANY(", q.Types)

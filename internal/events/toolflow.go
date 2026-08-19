@@ -88,6 +88,29 @@ var unansweredToolUse = `
 		     AND tu.id != ALL($4)
 		     AND NOT ` + answeredBy(3)
 
+// runnableToolUse narrows unansweredToolUse to the calls the platform may run
+// now (plan 35 decision 5): evaluated_permission allow — a call stamped with
+// none, from before the stamp existed, counts as allowed — or ask with an
+// allow confirmation recorded for it, or named by $5 (the allow confirmations
+// of a batch validated but not yet inserted, so the API can decide its
+// resume before appending). Allow-only, so a deny that is not yet answered
+// is never scheduled either. With sibling threads "unanswered" and
+// "runnable" part ways — thread B's allow-policy call must not drag thread
+// A's gated command into the shared sandbox — so every exec driver, the
+// trigger arms that pick its kind and the tool_exec re-arm drain this set.
+var runnableToolUse = unansweredToolUse + `
+		     AND (COALESCE(tu.payload->>'evaluated_permission', 'allow') = 'allow'
+		          OR tu.id = ANY($5)
+		          OR EXISTS (
+		            SELECT 1 FROM events c
+		            WHERE c.session_id = $1 AND c.type = 'user.tool_confirmation'
+		              AND c.payload->>'tool_use_id' = tu.id AND c.payload->>'result' = 'allow'
+		          ))`
+
+// threadClause scopes a tool-use predicate to one thread's own rows, bound as
+// $5: NULL is the primary's (nullableID).
+const threadClause = ` AND tu.thread_id IS NOT DISTINCT FROM $5`
+
 // HasUnansweredToolUse reports whether any tool-use event in the session
 // still lacks a matching result. extraRefs are treated as answered: the ids
 // referenced by results that are validated but not yet inserted, so the API
@@ -96,12 +119,31 @@ func HasUnansweredToolUse(ctx context.Context, q Querier, sessionID domain.ID, e
 	return hasUnansweredToolUse(ctx, q, sessionID, toolUseTypes, extraRefs)
 }
 
+// HasUnansweredThreadToolUse is HasUnansweredToolUse over one thread's own
+// rows (empty threadID = the primary's): whether that thread's turn may
+// resume, which a sibling's outstanding call does not decide.
+func HasUnansweredThreadToolUse(ctx context.Context, q Querier, sessionID, threadID domain.ID, extraRefs []string) (bool, error) {
+	if extraRefs == nil {
+		extraRefs = []string{}
+	}
+	var unanswered bool
+	err := q.QueryRow(ctx,
+		`SELECT EXISTS (SELECT 1 FROM events tu WHERE`+unansweredToolUse+threadClause+`)`,
+		sessionID.String(), toolUseTypes, toolResultTypes, extraRefs, nullableID(threadID)).Scan(&unanswered)
+	if err != nil {
+		return false, fmt.Errorf("unanswered thread tool_use check: %w", err)
+	}
+	return unanswered, nil
+}
+
 // ToolUseRef names one outstanding tool call: the tool-use event's id and its
-// type, which together decide the shape of the result that answers it.
-// CrossPosted is set only by UnansweredThreadToolUses.
+// type, which together decide the shape of the result that answers it, and
+// the thread it was written on (empty for the primary) with whether it was
+// cross-posted — so its answer lands on the same surfaces.
 type ToolUseRef struct {
 	ID          string
 	Type        domain.EventType
+	ThreadID    domain.ID
 	CrossPosted bool
 }
 
@@ -113,9 +155,25 @@ func UnansweredToolUses(ctx context.Context, q Querier, sessionID domain.ID, ext
 	if extraRefs == nil {
 		extraRefs = []string{}
 	}
-	rows, err := q.Query(ctx,
-		`SELECT tu.id, tu.type FROM events tu WHERE`+unansweredToolUse+` ORDER BY tu.seq`,
-		sessionID.String(), toolUseTypes, toolResultTypes, extraRefs)
+	return scanToolUseRefs(q.Query(ctx,
+		`SELECT tu.id, tu.type, COALESCE(tu.thread_id, ''), tu.cross_posted FROM events tu WHERE`+unansweredToolUse+` ORDER BY tu.seq`,
+		sessionID.String(), toolUseTypes, toolResultTypes, extraRefs))
+}
+
+// UnansweredThreadToolUses is UnansweredToolUses for one thread's own rows
+// (empty threadID = the primary's) — what a thread-scoped interrupt answers,
+// and what archiving a child answers before it terminates. extraRefs as
+// above.
+func UnansweredThreadToolUses(ctx context.Context, q Querier, sessionID, threadID domain.ID, extraRefs []string) ([]ToolUseRef, error) {
+	if extraRefs == nil {
+		extraRefs = []string{}
+	}
+	return scanToolUseRefs(q.Query(ctx,
+		`SELECT tu.id, tu.type, COALESCE(tu.thread_id, ''), tu.cross_posted FROM events tu WHERE`+unansweredToolUse+threadClause+` ORDER BY tu.seq`,
+		sessionID.String(), toolUseTypes, toolResultTypes, extraRefs, nullableID(threadID)))
+}
+
+func scanToolUseRefs(rows pgx.Rows, err error) ([]ToolUseRef, error) {
 	if err != nil {
 		return nil, fmt.Errorf("unanswered tool_use list: %w", err)
 	}
@@ -123,33 +181,11 @@ func UnansweredToolUses(ctx context.Context, q Querier, sessionID domain.ID, ext
 	var out []ToolUseRef
 	for rows.Next() {
 		var ref ToolUseRef
-		if err := rows.Scan(&ref.ID, &ref.Type); err != nil {
+		var thread string
+		if err := rows.Scan(&ref.ID, &ref.Type, &thread, &ref.CrossPosted); err != nil {
 			return nil, err
 		}
-		out = append(out, ref)
-	}
-	return out, rows.Err()
-}
-
-// UnansweredThreadToolUses is UnansweredToolUses for one child thread's own
-// rows — what archiving the thread answers before it terminates (plan 35
-// slice 2; slice 3 scopes the rest of these queries per thread). Each ref also
-// reports whether the call was cross-posted, so its answer lands on the same
-// surfaces.
-func UnansweredThreadToolUses(ctx context.Context, q Querier, sessionID, threadID domain.ID) ([]ToolUseRef, error) {
-	rows, err := q.Query(ctx,
-		`SELECT tu.id, tu.type, tu.cross_posted FROM events tu WHERE`+unansweredToolUse+` AND tu.thread_id = $5 ORDER BY tu.seq`,
-		sessionID.String(), toolUseTypes, toolResultTypes, []string{}, threadID.String())
-	if err != nil {
-		return nil, fmt.Errorf("unanswered thread tool_use list: %w", err)
-	}
-	defer rows.Close()
-	var out []ToolUseRef
-	for rows.Next() {
-		var ref ToolUseRef
-		if err := rows.Scan(&ref.ID, &ref.Type, &ref.CrossPosted); err != nil {
-			return nil, err
-		}
+		ref.ThreadID = domain.ID(thread)
 		out = append(out, ref)
 	}
 	return out, rows.Err()
@@ -175,6 +211,27 @@ func HasUnansweredMCPToolUse(ctx context.Context, q Querier, sessionID domain.ID
 	return hasUnansweredToolUse(ctx, q, sessionID, []string{string(domain.EventAgentMCPToolUse)}, extraRefs)
 }
 
+// HasRunnableMCPToolUse is HasUnansweredMCPToolUse over the runnable set: the
+// question the mcp_exec enqueue sites ask, since a gated MCP call still
+// awaiting its human is nothing for the driver to run. extraAllowed are the
+// ids a batch's validated-but-not-yet-inserted allow confirmations release.
+func HasRunnableMCPToolUse(ctx context.Context, q Querier, sessionID domain.ID, extraRefs, extraAllowed []string) (bool, error) {
+	if extraRefs == nil {
+		extraRefs = []string{}
+	}
+	if extraAllowed == nil {
+		extraAllowed = []string{}
+	}
+	var runnable bool
+	err := q.QueryRow(ctx,
+		`SELECT EXISTS (SELECT 1 FROM events tu WHERE`+runnableToolUse+`)`,
+		sessionID.String(), []string{string(domain.EventAgentMCPToolUse)}, toolResultTypes, extraRefs, extraAllowed).Scan(&runnable)
+	if err != nil {
+		return false, fmt.Errorf("runnable mcp tool_use check: %w", err)
+	}
+	return runnable, nil
+}
+
 // UnansweredPlatformToolNames lists, in log order, the tool names of the
 // platform built-in calls HasUnansweredPlatformToolUse counts. The name is
 // what routes the work: web_fetch/web_search run in the executor's own
@@ -182,14 +239,29 @@ func HasUnansweredMCPToolUse(ctx context.Context, q Querier, sessionID domain.ID
 // (docs/plan/15_web-tools.md), so a resume trigger picks its work kind from
 // this list. extraRefs are treated as answered, exactly as above.
 func UnansweredPlatformToolNames(ctx context.Context, q Querier, sessionID domain.ID, extraRefs []string) ([]string, error) {
+	return platformToolNames(ctx, q, sessionID, unansweredToolUse, extraRefs)
+}
+
+// RunnablePlatformToolNames is UnansweredPlatformToolNames over the runnable
+// set — what the exec enqueue sites route on, so an ask-gated sibling call
+// never schedules (or re-arms) a driver that may not run it. extraAllowed as
+// in HasRunnableMCPToolUse.
+func RunnablePlatformToolNames(ctx context.Context, q Querier, sessionID domain.ID, extraRefs, extraAllowed []string) ([]string, error) {
+	if extraAllowed == nil {
+		extraAllowed = []string{}
+	}
+	return platformToolNames(ctx, q, sessionID, runnableToolUse, extraRefs, extraAllowed)
+}
+
+func platformToolNames(ctx context.Context, q Querier, sessionID domain.ID, predicate string, extraRefs []string, more ...any) ([]string, error) {
 	if extraRefs == nil {
 		extraRefs = []string{}
 	}
+	args := append([]any{sessionID.String(), []string{string(domain.EventAgentToolUse)}, toolResultTypes, extraRefs}, more...)
 	rows, err := q.Query(ctx,
-		`SELECT COALESCE(tu.payload->>'name', '') FROM events tu WHERE`+unansweredToolUse+` ORDER BY tu.seq`,
-		sessionID.String(), []string{string(domain.EventAgentToolUse)}, toolResultTypes, extraRefs)
+		`SELECT COALESCE(tu.payload->>'name', '') FROM events tu WHERE`+predicate+` ORDER BY tu.seq`, args...)
 	if err != nil {
-		return nil, fmt.Errorf("unanswered platform tool names: %w", err)
+		return nil, fmt.Errorf("platform tool names: %w", err)
 	}
 	defer rows.Close()
 	var out []string
@@ -199,6 +271,143 @@ func UnansweredPlatformToolNames(ctx context.Context, q Querier, sessionID domai
 			return nil, err
 		}
 		out = append(out, name)
+	}
+	return out, rows.Err()
+}
+
+// ExecClass is the family of exec work the session's runnable calls still
+// need, in the precedence every settlement shares: MCP first — only the
+// platform's MCP driver answers an agent.mcp_tool_use, and a tool_exec is
+// the one kind a BYOC worker claims, so it must never be handed a log with
+// one outstanding; then web — a worker's toolset has no web tools; then the
+// sandbox built-ins. The queue kind is the caller's to name (the events
+// package does not know the queue).
+type ExecClass int
+
+const (
+	ExecNone ExecClass = iota
+	ExecMCP
+	ExecWeb
+	ExecTool
+)
+
+// RunnableExecClass reports which exec family the session's runnable calls
+// call for next (plan 35 decision 5). isWebTool tells the web built-ins from
+// the sandbox ones (the API injects toolset.IsWebTool); answered are the ids
+// the caller's batch already answers, extraAllowed the ones its allow
+// confirmations release.
+func RunnableExecClass(ctx context.Context, q Querier, sessionID domain.ID, answered, extraAllowed []string, isWebTool func(string) bool) (ExecClass, error) {
+	mcp, err := HasRunnableMCPToolUse(ctx, q, sessionID, answered, extraAllowed)
+	if err != nil {
+		return ExecNone, err
+	}
+	if mcp {
+		return ExecMCP, nil
+	}
+	names, err := RunnablePlatformToolNames(ctx, q, sessionID, answered, extraAllowed)
+	if err != nil {
+		return ExecNone, err
+	}
+	if len(names) == 0 {
+		return ExecNone, nil
+	}
+	for _, name := range names {
+		if isWebTool(name) {
+			return ExecWeb, nil
+		}
+	}
+	return ExecTool, nil
+}
+
+// RunnableToolUse is one call an exec driver runs: the use event's id and
+// payload (name and input, or the MCP server and tool), its thread (empty
+// for the primary) and whether it was cross-posted — the result answering it
+// is written on the same thread and cross-posted alike.
+type RunnableToolUse struct {
+	ID          domain.ID
+	Payload     json.RawMessage
+	ThreadID    domain.ID
+	CrossPosted bool
+}
+
+// RunnableToolUses lists, in log order, the runnable calls of one tool-use
+// type — the set a driver drains, across every thread, and re-scans before
+// it completes its item so a call committed under the live item is never
+// stranded.
+func RunnableToolUses(ctx context.Context, q Querier, sessionID domain.ID, useType domain.EventType) ([]RunnableToolUse, error) {
+	rows, err := q.Query(ctx,
+		`SELECT tu.id, tu.payload, COALESCE(tu.thread_id, ''), tu.cross_posted FROM events tu WHERE`+runnableToolUse+` ORDER BY tu.seq`,
+		sessionID.String(), []string{string(useType)}, toolResultTypes, []string{}, []string{})
+	if err != nil {
+		return nil, fmt.Errorf("runnable tool uses: %w", err)
+	}
+	defer rows.Close()
+	var out []RunnableToolUse
+	for rows.Next() {
+		var u RunnableToolUse
+		var id, thread string
+		if err := rows.Scan(&id, &u.Payload, &thread, &u.CrossPosted); err != nil {
+			return nil, err
+		}
+		u.ID, u.ThreadID = domain.ID(id), domain.ID(thread)
+		out = append(out, u)
+	}
+	return out, rows.Err()
+}
+
+// Answered reports whether a result already references the tool use — the
+// drivers' answered-means-cancelled check (decision 9): a thread-scoped
+// interrupt answers the thread's calls itself, so a call found answered just
+// before it runs is skipped, and one answered mid-run is cancelled.
+func Answered(ctx context.Context, q Querier, sessionID domain.ID, useID domain.ID) (bool, error) {
+	var answered bool
+	err := q.QueryRow(ctx,
+		`SELECT `+answeredBy(3)+` FROM events tu WHERE tu.session_id = $1 AND tu.id = $2`,
+		sessionID.String(), useID.String(), toolResultTypes).Scan(&answered)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("answered check: %w", err)
+	}
+	return answered, nil
+}
+
+// ResumableThreads lists the session's running threads whose own calls are
+// all answered — the threads a driver's pass has brought to the point of
+// their next model_turn (decision 5: the executor wakes per thread as each
+// thread's calls become answered). The primary is the empty id, and first. A
+// thread's running status is the gate: an idle thread has a human verdict or
+// a message outstanding, not a tool. A session from before the thread
+// resource, with no rows, is its primary alone at the session's status.
+func ResumableThreads(ctx context.Context, q Querier, sessionID domain.ID) ([]domain.ID, error) {
+	rows, err := q.Query(ctx,
+		`WITH threads AS (
+		   SELECT CASE WHEN parent_thread_id IS NULL THEN '' ELSE id END AS id, status, created_at
+		     FROM session_threads WHERE session_id = $1 AND archived_at IS NULL
+		   UNION ALL
+		   SELECT '', s.status, s.created_at FROM sessions s
+		    WHERE s.id = $1 AND NOT EXISTS (SELECT 1 FROM session_threads WHERE session_id = $1)
+		 )
+		 SELECT t.id FROM threads t
+		  WHERE t.status = 'running'
+		    AND NOT EXISTS (
+		      SELECT 1 FROM events tu WHERE`+unansweredToolUse+`
+		        AND tu.thread_id IS NOT DISTINCT FROM NULLIF(t.id, '')
+		    )
+		  ORDER BY t.id = '' DESC, t.created_at, t.id`,
+		sessionID.String(), toolUseTypes, toolResultTypes, []string{})
+	if err != nil {
+		return nil, fmt.Errorf("resumable threads: %w", err)
+	}
+	defer rows.Close()
+	var out []domain.ID
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		out = append(out, domain.ID(id))
 	}
 	return out, rows.Err()
 }
@@ -397,9 +606,22 @@ func ValidateToolConfirmations(ctx context.Context, q Querier, sessionID domain.
 // left "blocked" forever after its call was answered would wedge the session on
 // the very resume the interrupt exists to restore.
 func UnconfirmedAskEvents(ctx context.Context, q Querier, sessionID domain.ID, extraConfirmed []string) ([]string, error) {
+	return unconfirmedAskEvents(ctx, q, sessionID, extraConfirmed, "")
+}
+
+// UnconfirmedThreadAskEvents is UnconfirmedAskEvents over one thread's own
+// rows (empty threadID = the primary's): the gate that holds that thread,
+// which a sibling's ask does not.
+func UnconfirmedThreadAskEvents(ctx context.Context, q Querier, sessionID, threadID domain.ID, extraConfirmed []string) ([]string, error) {
+	return unconfirmedAskEvents(ctx, q, sessionID, extraConfirmed, ` AND tu.thread_id IS NOT DISTINCT FROM $7`, nullableID(threadID))
+}
+
+func unconfirmedAskEvents(ctx context.Context, q Querier, sessionID domain.ID, extraConfirmed []string, scope string, scopeArgs ...any) ([]string, error) {
 	if extraConfirmed == nil {
 		extraConfirmed = []string{}
 	}
+	args := append([]any{sessionID.String(), confirmableToolUseTypes, string(domain.EvalPermAsk),
+		extraConfirmed, string(domain.EventUserToolConfirm), toolResultTypes}, scopeArgs...)
 	rows, err := q.Query(ctx,
 		`SELECT tu.id FROM events tu
 		 WHERE tu.session_id = $1 AND tu.type = ANY($2)
@@ -410,10 +632,8 @@ func UnconfirmedAskEvents(ctx context.Context, q Querier, sessionID domain.ID, e
 		     WHERE c.session_id = $1 AND c.type = $5
 		       AND c.payload->>'tool_use_id' = tu.id
 		   )
-		   AND NOT `+answeredBy(6)+`
-		 ORDER BY tu.seq`,
-		sessionID.String(), confirmableToolUseTypes, string(domain.EvalPermAsk),
-		extraConfirmed, string(domain.EventUserToolConfirm), toolResultTypes)
+		   AND NOT `+answeredBy(6)+scope+`
+		 ORDER BY tu.seq`, args...)
 	if err != nil {
 		return nil, fmt.Errorf("unconfirmed ask events: %w", err)
 	}
@@ -525,7 +745,8 @@ func InterruptResults(uses []ToolUseRef) ([]NewEvent, error) {
 		if err != nil {
 			return nil, err
 		}
-		out = append(out, NewEvent{Type: answer.result, Payload: payload, ProcessedAt: &now})
+		out = append(out, NewEvent{Type: answer.result, Payload: payload, ProcessedAt: &now,
+			ThreadID: use.ThreadID, CrossPosted: use.CrossPosted})
 	}
 	return out, nil
 }
@@ -587,7 +808,7 @@ func DenialResults(ctx context.Context, q Querier, sessionID domain.ID, evs []Ne
 	for i, d := range denials {
 		ids[i] = d.id
 	}
-	useType, err := toolUseTypesByID(ctx, q, sessionID, ids)
+	uses, err := toolUsesByID(ctx, q, sessionID, ids)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -595,7 +816,8 @@ func DenialResults(ctx context.Context, q Querier, sessionID domain.ID, evs []Ne
 	results := make([]NewEvent, 0, len(denials))
 	answered := make([]string, 0, len(denials))
 	for _, d := range denials {
-		typ, found := useType[d.id]
+		use, found := uses[d.id]
+		typ := use.Type
 		if !found {
 			// Unreachable through the API: ValidateToolConfirmations rejects a
 			// confirmation naming nothing in this session before the batch gets
@@ -616,31 +838,35 @@ func DenialResults(ctx context.Context, q Querier, sessionID domain.ID, evs []Ne
 		if err != nil {
 			return nil, nil, err
 		}
-		results = append(results, NewEvent{Type: answer.result, Payload: payload})
+		// On the refused call's thread, cross-posted as it was: the denial
+		// answers a cross-posted ask on the session view too.
+		results = append(results, NewEvent{Type: answer.result, Payload: payload,
+			ThreadID: use.ThreadID, CrossPosted: use.CrossPosted})
 		answered = append(answered, d.id)
 	}
 	return results, answered, nil
 }
 
-// toolUseTypesByID reads the event types of ids in one round trip. Ids absent
-// from the session are absent from the result rather than an error here — the
-// caller decides what a miss means.
-func toolUseTypesByID(ctx context.Context, q Querier, sessionID domain.ID, ids []string) (map[string]domain.EventType, error) {
+// toolUsesByID reads the event types and threads of ids in one round trip.
+// Ids absent from the session are absent from the result rather than an error
+// here — the caller decides what a miss means.
+func toolUsesByID(ctx context.Context, q Querier, sessionID domain.ID, ids []string) (map[string]ToolUseRef, error) {
 	rows, err := q.Query(ctx,
-		`SELECT id, type FROM events WHERE session_id = $1 AND id = ANY($2)`,
+		`SELECT id, type, COALESCE(thread_id, ''), cross_posted FROM events WHERE session_id = $1 AND id = ANY($2)`,
 		sessionID.String(), ids)
 	if err != nil {
 		return nil, fmt.Errorf("denied tool uses: %w", err)
 	}
 	defer rows.Close()
-	out := make(map[string]domain.EventType, len(ids))
+	out := make(map[string]ToolUseRef, len(ids))
 	for rows.Next() {
-		var id string
-		var typ domain.EventType
-		if err := rows.Scan(&id, &typ); err != nil {
+		var ref ToolUseRef
+		var thread string
+		if err := rows.Scan(&ref.ID, &ref.Type, &thread, &ref.CrossPosted); err != nil {
 			return nil, fmt.Errorf("denied tool uses: %w", err)
 		}
-		out[id] = typ
+		ref.ThreadID = domain.ID(thread)
+		out[ref.ID] = ref
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("denied tool uses: %w", err)

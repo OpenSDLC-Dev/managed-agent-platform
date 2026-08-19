@@ -393,10 +393,7 @@ func newHarnessWith(t *testing.T, provider sandbox.Provider, cfg Config) *harnes
 	// The executor is the cloud hands: it only claims tool_exec work for cloud
 	// environments (self_hosted work is served by a BYOC worker via Poll).
 	sid, envID := pgtest.NewSession(t, pool, "cloud")
-	if _, err := pool.Exec(context.Background(),
-		`UPDATE sessions SET status = 'running' WHERE id = $1`, sid.String()); err != nil {
-		t.Fatal(err)
-	}
+	pgtest.SetSessionStatus(t, pool, sid, "running")
 	// A real (local AES-GCM) cipher under a fixed test key, so the repository
 	// clone path exercises the sealed-token decrypt end to end — the api
 	// harness's twin.

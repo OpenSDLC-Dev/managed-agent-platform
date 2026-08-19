@@ -277,11 +277,12 @@ func (s *server) lockSession(ctx context.Context, tx pgx.Tx, id string) error {
 // terminateThread ends a live child thread: its unanswered tool calls — an
 // idle thread parked on requires_action has them — are closed with error
 // results the way an interrupt closes them, each on the surfaces its call was
-// on; then archived_at is set, status moves to terminated, and the event goes
-// on the child's stream cross-posted to the primary's. The session row is
-// locked by the append; the caller holds the thread row.
+// on; then status moves to terminated — the fold leaves the session where it
+// was, a terminated thread counting for nothing (decision 4) — archived_at is
+// set, and the event goes on the child's stream cross-posted to the primary's.
+// The caller holds the session row lock and the thread row.
 func terminateThread(ctx context.Context, tx pgx.Tx, log *events.Log, row threadRow) (threadRow, error) {
-	uses, err := events.UnansweredThreadToolUses(ctx, tx, domain.ID(row.sessionID), domain.ID(row.id))
+	uses, err := events.UnansweredThreadToolUses(ctx, tx, domain.ID(row.sessionID), domain.ID(row.id), nil)
 	if err != nil {
 		return row, err
 	}
@@ -289,25 +290,42 @@ func terminateThread(ctx context.Context, tx pgx.Tx, log *events.Log, row thread
 	if err != nil {
 		return row, err
 	}
-	for i := range batch {
-		batch[i].ThreadID = domain.ID(row.id)
-		batch[i].CrossPosted = uses[i].CrossPosted
+	var parkedOn *string
+	if err := tx.QueryRow(ctx, `SELECT stop_reason->>'type' FROM session_threads WHERE id = $1`, row.id).
+		Scan(&parkedOn); err != nil {
+		return row, err
+	}
+	pair, moved, err := events.TransitionThread(ctx, tx, domain.ID(row.sessionID), events.ThreadTransition{
+		ThreadID: domain.ID(row.id), Status: domain.SessionTerminated})
+	if err != nil {
+		return row, err
+	}
+	batch = append(batch, pair...)
+	if parkedOn != nil && *parkedOn == string(domain.StopRequiresAction) && moved == nil {
+		// The child was parked on its asks, which the session's idle
+		// stop_reason named in its union: the ask set shrank, so an idle
+		// session re-idles payload-only with what remains (decision 4).
+		folded, stop, err := events.PreviewTransition(ctx, tx, domain.ID(row.sessionID), events.ThreadTransition{
+			ThreadID: domain.ID(row.id), Status: domain.SessionTerminated})
+		if err != nil {
+			return row, err
+		}
+		if folded == domain.SessionIdle {
+			payload := map[string]any{}
+			if stop != nil {
+				payload["stop_reason"] = stop
+			}
+			raw, _ := json.Marshal(payload)
+			batch = append(batch, events.NewEvent{Type: domain.EventSessionStatusIdle, Payload: raw})
+		}
 	}
 	if err := tx.QueryRow(ctx,
-		`UPDATE session_threads SET status = 'terminated', archived_at = now(), updated_at = now()
+		`UPDATE session_threads SET archived_at = now(), updated_at = now()
 		  WHERE id = $1 RETURNING status, archived_at, updated_at`, row.id).
 		Scan(&row.status, &row.archivedAt, &row.updatedAt); err != nil {
 		return row, err
 	}
-	payload, err := json.Marshal(map[string]any{"session_thread_id": row.id, "agent_name": row.agentName})
-	if err != nil {
-		return row, err
-	}
-	batch = append(batch, events.NewEvent{
-		Type: domain.EventSessionThreadStatusTerminated, Payload: payload,
-		ThreadID: domain.ID(row.id), CrossPosted: true,
-	})
-	switch _, err = log.AppendInTx(ctx, tx, domain.ID(row.sessionID), batch, events.AppendOptions{}); {
+	switch _, err = log.AppendInTx(ctx, tx, domain.ID(row.sessionID), batch, events.AppendOptions{SetStatus: moved}); {
 	case errors.Is(err, events.ErrSessionArchived):
 		// A live child under an archived session: unreachable while the
 		// session's archive ends its children first, and a 400 if it ever is.
