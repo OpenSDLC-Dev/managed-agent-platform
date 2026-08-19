@@ -147,7 +147,7 @@ plan's to update when it cites them.
 **Evidence.** The sweep ran as five parallel investigations (session/event types; agent/thread/
 webhook types; toolset and runner behavior; citation durability; Messages/REST residue) plus a
 cross-check that reconciled their file lists and found no contradiction. `make verify` green on the
-bumped pin in WSL at total statement coverage **__COVERAGE__%** (Docker and K8s sandbox suites
+bumped pin in WSL at total statement coverage **91.06%** (Docker and K8s sandbox suites
 included); the toolset, skills, events, executor, worker, brain and api suites were additionally
 run standalone under the new pin.
 
