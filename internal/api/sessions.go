@@ -1232,6 +1232,12 @@ func (s *server) deleteSession(r *http.Request) (any, error) {
 	if _, err := tx.Exec(ctx, store.SessionTombstoneInsertSQL, id); err != nil {
 		return nil, err
 	}
+	// The live children end with the session (decision 12), but their rows
+	// go with it too, so the termination is broadcast below, not appended.
+	liveChildren, err := liveChildThreads(ctx, tx, id)
+	if err != nil {
+		return nil, err
+	}
 	if _, err := tx.Exec(ctx, `DELETE FROM sessions WHERE id = $1`, id); err != nil {
 		return nil, err
 	}
@@ -1249,7 +1255,20 @@ func (s *server) deleteSession(r *http.Request) (any, error) {
 	// The session.deleted event terminates any active event stream. It
 	// cannot be persisted — the log rows just cascaded away with the
 	// session — so it goes out as an ephemeral broadcast, best-effort:
-	// the delete itself has already succeeded.
+	// the delete itself has already succeeded. Each live child's
+	// session.thread_status_terminated goes out first, the same way, on the
+	// child's own stream and cross-posted to the session's.
+	for _, child := range liveChildren {
+		frame := map[string]any{
+			"id":                domain.NewID("sevt").String(),
+			"type":              string(domain.EventSessionThreadStatusTerminated),
+			"processed_at":      time.Now().UTC(),
+			"session_thread_id": child.id,
+			"agent_name":        child.agentName,
+		}
+		_ = s.log.PublishThreadEventFrame(ctx, domain.ID(id), domain.ID(child.id), frame)
+		_ = s.log.PublishEventFrame(ctx, domain.ID(id), frame)
+	}
 	_ = s.log.PublishEventFrame(ctx, domain.ID(id), map[string]any{
 		"id":           domain.NewID("sevt").String(),
 		"type":         "session.deleted",

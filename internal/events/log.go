@@ -488,6 +488,13 @@ func (l *Log) PublishEventFrame(ctx context.Context, sessionID domain.ID, event 
 	return l.publishFrame(ctx, sessionID, "", event)
 }
 
+// PublishThreadEventFrame is PublishEventFrame onto one child thread's own
+// stream (decision 2) — the session stream does not receive it; a caller
+// that wants it on both surfaces publishes twice.
+func (l *Log) PublishThreadEventFrame(ctx context.Context, sessionID, threadID domain.ID, event map[string]any) error {
+	return l.publishFrame(ctx, sessionID, threadID, event)
+}
+
 func utcOrNil(t *time.Time) *time.Time {
 	if t == nil {
 		return nil

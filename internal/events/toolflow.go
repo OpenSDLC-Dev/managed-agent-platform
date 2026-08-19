@@ -98,9 +98,11 @@ func HasUnansweredToolUse(ctx context.Context, q Querier, sessionID domain.ID, e
 
 // ToolUseRef names one outstanding tool call: the tool-use event's id and its
 // type, which together decide the shape of the result that answers it.
+// CrossPosted is set only by UnansweredThreadToolUses.
 type ToolUseRef struct {
-	ID   string
-	Type domain.EventType
+	ID          string
+	Type        domain.EventType
+	CrossPosted bool
 }
 
 // UnansweredToolUses lists, in log order, the tool calls HasUnansweredToolUse
@@ -122,6 +124,30 @@ func UnansweredToolUses(ctx context.Context, q Querier, sessionID domain.ID, ext
 	for rows.Next() {
 		var ref ToolUseRef
 		if err := rows.Scan(&ref.ID, &ref.Type); err != nil {
+			return nil, err
+		}
+		out = append(out, ref)
+	}
+	return out, rows.Err()
+}
+
+// UnansweredThreadToolUses is UnansweredToolUses for one child thread's own
+// rows — what archiving the thread answers before it terminates (plan 35
+// slice 2; slice 3 scopes the rest of these queries per thread). Each ref also
+// reports whether the call was cross-posted, so its answer lands on the same
+// surfaces.
+func UnansweredThreadToolUses(ctx context.Context, q Querier, sessionID, threadID domain.ID) ([]ToolUseRef, error) {
+	rows, err := q.Query(ctx,
+		`SELECT tu.id, tu.type, tu.cross_posted FROM events tu WHERE`+unansweredToolUse+` AND tu.thread_id = $5 ORDER BY tu.seq`,
+		sessionID.String(), toolUseTypes, toolResultTypes, []string{}, threadID.String())
+	if err != nil {
+		return nil, fmt.Errorf("unanswered thread tool_use list: %w", err)
+	}
+	defer rows.Close()
+	var out []ToolUseRef
+	for rows.Next() {
+		var ref ToolUseRef
+		if err := rows.Scan(&ref.ID, &ref.Type, &ref.CrossPosted); err != nil {
 			return nil, err
 		}
 		out = append(out, ref)

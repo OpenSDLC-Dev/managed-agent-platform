@@ -304,7 +304,19 @@ func TestThreadArchive(t *testing.T) {
 	status, body = s.do(http.MethodPost, path+"sthr_0000000000000000000000000/archive", nil)
 	wantErr(t, status, body, http.StatusNotFound, "not_found_error")
 
+	// An idle child parked on requires_action: its cross-posted ask and a
+	// private custom-tool call are closed with error results on the surfaces
+	// each was on, then the thread terminates.
 	idle := insertChild(t, s, sid, "idle")
+	parked, err := events.NewLog(s.pool).Append(context.Background(), domain.ID(sid), []events.NewEvent{
+		{Type: domain.EventAgentToolUse, ThreadID: domain.ID(idle), CrossPosted: true,
+			Payload: []byte(`{"tool_use_id":"toolu_a","name":"bash","input":{},"evaluated_permission":"ask","session_thread_id":null}`)},
+		{Type: domain.EventAgentCustomToolUse, ThreadID: domain.ID(idle),
+			Payload: []byte(`{"custom_tool_use_id":"toolu_b","name":"lookup","input":{},"session_thread_id":null}`)},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
 	status, res := s.do(http.MethodPost, path+idle+"/archive", nil)
 	if status != http.StatusOK || res["status"] != "terminated" || res["archived_at"] == nil {
 		t.Fatalf("archive idle child: %d %v", status, res)
@@ -315,12 +327,25 @@ func TestThreadArchive(t *testing.T) {
 		t.Errorf("second archive: %d %v, want the same archived_at", status, again)
 	}
 	types := s.eventTypes(sid)
-	if len(types) != 1 || types[0] != "session.thread_status_terminated" {
-		t.Errorf("session view after child archive = %v, want the one terminated event", types)
+	if !sameStrings(types, []string{"agent.tool_use", "agent.tool_result", "session.thread_status_terminated"}) {
+		t.Errorf("session view after child archive = %v, want the ask, its closing result and the terminated event", types)
 	}
 	_, cres := s.do(http.MethodGet, path+idle+"/events", nil)
-	if own := listData(t, cres); len(own) != 1 || own[0]["session_thread_id"] != idle || own[0]["agent_name"] != "worker" {
-		t.Errorf("child's own view = %v, want its terminated event", own)
+	own := listData(t, cres)
+	ownTypes := make([]string, 0, len(own))
+	for _, ev := range own {
+		ownTypes = append(ownTypes, ev["type"].(string))
+	}
+	if !sameStrings(ownTypes, []string{"agent.tool_use", "agent.custom_tool_use", "agent.tool_result",
+		"user.custom_tool_result", "session.thread_status_terminated"}) {
+		t.Fatalf("child's own view = %v, want both calls answered before the terminated event", ownTypes)
+	}
+	if own[2]["tool_use_id"] != parked[0].ID.String() || own[2]["is_error"] != true ||
+		own[3]["custom_tool_use_id"] != parked[1].ID.String() || own[3]["processed_at"] == nil {
+		t.Errorf("closing results = %v / %v, want error results answering the parked calls, stamped processed", own[2], own[3])
+	}
+	if own[4]["session_thread_id"] != idle || own[4]["agent_name"] != "worker" {
+		t.Errorf("terminated event = %v", own[4])
 	}
 	if thr := listThreads(t, s, sid); len(thr) != 3 {
 		t.Errorf("threads = %d, want primary + 2 children", len(thr))
@@ -356,6 +381,38 @@ func TestThreadArchive(t *testing.T) {
 	if status, res := s.do(http.MethodDelete, "/v1/sessions/"+sid, nil); status != http.StatusOK {
 		t.Fatalf("delete session: %d %v", status, res)
 	}
+	_ = s.pool.QueryRow(context.Background(), `SELECT count(*) FROM session_threads WHERE session_id = $1`, sid).Scan(&n)
+	if n != 0 {
+		t.Errorf("thread rows after delete = %d, want 0", n)
+	}
+}
+
+// Deleting a session ends its live children too (decision 12) — the rows go
+// with the session, so the termination is broadcast to the open streams, the
+// child's own and the session's, ahead of session.deleted.
+func TestSessionDeleteEndsLiveChildren(t *testing.T) {
+	s := newTestServer(t)
+	sid := eventsFixture(t, s)
+	child := insertChild(t, s, sid, "idle")
+	done := insertChild(t, s, sid, "idle")
+	if status, res := s.do(http.MethodPost, "/v1/sessions/"+sid+"/threads/"+done+"/archive", nil); status != http.StatusOK {
+		t.Fatalf("archive: %d %v", status, res)
+	}
+	childStream := s.stream(t, "/v1/sessions/"+sid+"/threads/"+child+"/stream")
+	sessionStream := s.stream(t, "/v1/sessions/"+sid+"/events/stream")
+	if status, res := s.do(http.MethodDelete, "/v1/sessions/"+sid, nil); status != http.StatusOK {
+		t.Fatalf("delete: %d %v", status, res)
+	}
+	for name, st := range map[string]*sseStream{"child": childStream, "session": sessionStream} {
+		f := st.next(t)
+		if f.name != "session.thread_status_terminated" || f.data["session_thread_id"] != child || f.data["agent_name"] != "worker" {
+			t.Errorf("%s stream first frame = %s %v, want the live child's termination", name, f.name, f.data)
+		}
+		if f := st.next(t); f.name != "session.deleted" {
+			t.Errorf("%s stream second frame = %s, want session.deleted", name, f.name)
+		}
+	}
+	var n int
 	_ = s.pool.QueryRow(context.Background(), `SELECT count(*) FROM session_threads WHERE session_id = $1`, sid).Scan(&n)
 	if n != 0 {
 		t.Errorf("thread rows after delete = %d, want 0", n)

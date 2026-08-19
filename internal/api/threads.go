@@ -260,11 +260,25 @@ func (s *server) lockSession(ctx context.Context, tx pgx.Tx, id string) error {
 	return err
 }
 
-// terminateThread ends a live child thread: archived_at set, status
-// terminated, and the event on the child's stream cross-posted to the
-// primary's. The session row is locked by the append; the caller holds the
-// thread row.
+// terminateThread ends a live child thread: its unanswered tool calls — an
+// idle thread parked on requires_action has them — are closed with error
+// results the way an interrupt closes them, each on the surfaces its call was
+// on; then archived_at is set, status moves to terminated, and the event goes
+// on the child's stream cross-posted to the primary's. The session row is
+// locked by the append; the caller holds the thread row.
 func terminateThread(ctx context.Context, tx pgx.Tx, log *events.Log, row threadRow) (threadRow, error) {
+	uses, err := events.UnansweredThreadToolUses(ctx, tx, domain.ID(row.sessionID), domain.ID(row.id))
+	if err != nil {
+		return row, err
+	}
+	batch, err := events.InterruptResults(uses)
+	if err != nil {
+		return row, err
+	}
+	for i := range batch {
+		batch[i].ThreadID = domain.ID(row.id)
+		batch[i].CrossPosted = uses[i].CrossPosted
+	}
 	if err := tx.QueryRow(ctx,
 		`UPDATE session_threads SET status = 'terminated', archived_at = now(), updated_at = now()
 		  WHERE id = $1 RETURNING status, archived_at, updated_at`, row.id).
@@ -275,35 +289,22 @@ func terminateThread(ctx context.Context, tx pgx.Tx, log *events.Log, row thread
 	if err != nil {
 		return row, err
 	}
-	_, err = log.AppendInTx(ctx, tx, domain.ID(row.sessionID), []events.NewEvent{{
+	batch = append(batch, events.NewEvent{
 		Type: domain.EventSessionThreadStatusTerminated, Payload: payload,
 		ThreadID: domain.ID(row.id), CrossPosted: true,
-	}}, events.AppendOptions{})
+	})
+	_, err = log.AppendInTx(ctx, tx, domain.ID(row.sessionID), batch, events.AppendOptions{})
 	return row, err
 }
 
-// terminateLiveChildren ends every live child of a session whose own end —
-// archive or delete — has come (decision 12). Runs in the caller's
-// transaction before the session is marked archived (the log refuses appends
-// afterwards).
+// terminateLiveChildren ends every live child of a session being archived
+// (decision 12: a child terminates on the session's own end). Runs in the
+// caller's transaction before the session is marked archived (the log refuses
+// appends afterwards). Deletion has no rows to keep — deleteSession broadcasts
+// the same event ephemerally instead.
 func terminateLiveChildren(ctx context.Context, tx pgx.Tx, log *events.Log, sessionID string) error {
-	rows, err := tx.Query(ctx, `SELECT `+threadColumns+` FROM session_threads t JOIN sessions s ON s.id = t.session_id
-	 WHERE t.session_id = $1 AND t.parent_thread_id IS NOT NULL AND t.archived_at IS NULL
-	 ORDER BY t.created_at, t.id FOR UPDATE OF t`, sessionID)
+	children, err := liveChildThreads(ctx, tx, sessionID)
 	if err != nil {
-		return err
-	}
-	var children []threadRow
-	for rows.Next() {
-		row, err := scanThread(rows)
-		if err != nil {
-			rows.Close()
-			return err
-		}
-		children = append(children, row)
-	}
-	rows.Close()
-	if err := rows.Err(); err != nil {
 		return err
 	}
 	for _, child := range children {
@@ -312,6 +313,27 @@ func terminateLiveChildren(ctx context.Context, tx pgx.Tx, log *events.Log, sess
 		}
 	}
 	return nil
+}
+
+// liveChildThreads locks and returns a session's unarchived child threads in
+// creation order. The session row is the caller's to lock first.
+func liveChildThreads(ctx context.Context, tx pgx.Tx, sessionID string) ([]threadRow, error) {
+	rows, err := tx.Query(ctx, `SELECT `+threadColumns+` FROM session_threads t JOIN sessions s ON s.id = t.session_id
+	 WHERE t.session_id = $1 AND t.parent_thread_id IS NOT NULL AND t.archived_at IS NULL
+	 ORDER BY t.created_at, t.id FOR UPDATE OF t`, sessionID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var children []threadRow
+	for rows.Next() {
+		row, err := scanThread(rows)
+		if err != nil {
+			return nil, err
+		}
+		children = append(children, row)
+	}
+	return children, rows.Err()
 }
 
 // threadScope is the events surface a thread serves (decision 2): the
