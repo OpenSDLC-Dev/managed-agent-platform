@@ -9,6 +9,7 @@ import (
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/events"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/pgtest"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/queue"
 )
 
@@ -159,10 +160,7 @@ func TestToolResultWhileRunningEnqueuesNextTurn(t *testing.T) {
 	if err := q.Complete(ctx, s.pool, item); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.pool.Exec(ctx,
-		`UPDATE sessions SET status = 'idle' WHERE id = $1`, sessionID); err != nil {
-		t.Fatal(err)
-	}
+	pgtest.SetSessionStatus(t, s.pool, domain.ID(sessionID), "idle")
 	sendEvents(t, s, sessionID, map[string]any{
 		"type": "user.tool_result", "tool_use_id": toolUseID2,
 	})
@@ -195,10 +193,7 @@ func TestUserMessageDoesNotResumePastAnUnansweredToolUse(t *testing.T) {
 		t.Fatal(err)
 	}
 	// The stranded state: idle, with the intent unanswered.
-	if _, err := s.pool.Exec(ctx,
-		`UPDATE sessions SET status = 'idle' WHERE id = $1`, sessionID); err != nil {
-		t.Fatal(err)
-	}
+	pgtest.SetSessionStatus(t, s.pool, domain.ID(sessionID), "idle")
 
 	sendEvents(t, s, sessionID, userMessage("are you still there?"))
 

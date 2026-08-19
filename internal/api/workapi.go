@@ -13,6 +13,7 @@ import (
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/events"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/queue"
+	"github.com/jackc/pgx/v5"
 )
 
 // defaultReclaimMs is the wire default for reclaim_older_than_ms: a work item
@@ -145,6 +146,14 @@ func (s *server) pollWork(w http.ResponseWriter, r *http.Request) {
 		cancel()
 	}
 	for {
+		// Abandoned wind-downs first: a stopping tool_exec whose worker never
+		// finished is finalized and its session re-armed (plan 35 decision
+		// 13 iii), so the poll below hands the fresh item out. Opportunistic
+		// cleanup: a transient finalize failure must not fail work delivery —
+		// the rows stay stopping and the next poll retries.
+		if err := s.finalizeAbandoned(r.Context(), envID); err != nil {
+			slog.WarnContext(r.Context(), "finalize abandoned wind-downs", "environment", envID, "error", err)
+		}
 		item, err := s.queue.Poll(r.Context(), envID, reclaim)
 		if err != nil {
 			writeError(w, r, err)
@@ -442,8 +451,108 @@ func (s *server) stopWork(r *http.Request) error {
 	if err != nil {
 		return err
 	}
-	if _, err := s.queue.Stop(r.Context(), envID, workID, force); err != nil {
+	ctx := r.Context()
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	// The session row lock first (plan 35 decision 13 iii): a one-pass worker
+	// that stops its item after its found set may leave calls a sibling
+	// thread committed under the live item, and the re-arm below must be
+	// serialized with every settlement and trigger that appends calls or
+	// enqueues — not rest on ON CONFLICT's wait-and-recheck. An item outside
+	// the work API's view has no session to lock; Stop reports it.
+	var sessionID, kind string
+	err = tx.QueryRow(ctx, `SELECT session_id, kind FROM work_items WHERE id = $1 AND environment_id = $2`,
+		workID, envID).Scan(&sessionID, &kind)
+	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		return err
+	}
+	if err == nil {
+		if _, err := tx.Exec(ctx, `SELECT 1 FROM sessions WHERE id = $1 FOR UPDATE`, sessionID); err != nil {
+			return err
+		}
+	}
+	w, err := s.queue.StopWith(ctx, tx, envID, workID, force)
+	if err != nil {
 		return mapWorkErr(err)
+	}
+	// A tool_exec that reached stopped is re-armed. A graceful stop that
+	// parked the item stopping is not yet stopped; the worker's own stop after
+	// its wind-down lands here again, and a wind-down the worker never
+	// finishes is finalized — and re-armed — by the next poll.
+	if w.State == "stopped" && kind == string(queue.ToolExec) {
+		if err := s.rearm(ctx, tx, envID, domain.ID(sessionID)); err != nil {
+			return err
+		}
+	}
+	return tx.Commit(ctx)
+}
+
+// rearm queues a fresh exec item for the session's runnable platform calls
+// after its tool_exec reached stopped (plan 35 decision 13 iii): the kind the
+// send trigger would pick — mcp_exec first, the only driver that can answer
+// one; the runnable set, so an ask-gated sibling call never loops stop →
+// re-arm → nothing runnable → stop. Under the session row lock the caller
+// holds, serialized with every settlement and trigger that appends calls.
+func (s *server) rearm(ctx context.Context, tx pgx.Tx, envID, sessionID domain.ID) error {
+	kind, err := execKindFor(ctx, tx, sessionID, nil, nil)
+	if err != nil {
+		return err
+	}
+	if kind == "" {
+		return nil
+	}
+	_, err = s.queue.Enqueue(ctx, tx, envID, sessionID, kind)
+	return err
+}
+
+// finalizeAbandoned finalizes the environment's abandoned wind-downs, each
+// with the re-arm it owes in the same transaction, under the session row
+// lock stopWork shares: committed together, a crash between them cannot
+// strand the session's runnable calls behind a row already stopped — one
+// still stopping is retried by the next poll. The guarded flip re-checks the
+// candidate under the lock, so racing polls settle and re-arm each session
+// exactly once. The lock is taken SKIP LOCKED: a session a settlement or a
+// send holds is left for the next poll rather than blocking this one past
+// its window.
+func (s *server) finalizeAbandoned(ctx context.Context, envID domain.ID) error {
+	items, err := s.queue.ListAbandoned(ctx, envID)
+	if err != nil {
+		return err
+	}
+	for _, it := range items {
+		tx, err := s.pool.Begin(ctx)
+		if err != nil {
+			return err
+		}
+		err = func() error {
+			defer func() { _ = tx.Rollback(ctx) }()
+			var one int
+			err := tx.QueryRow(ctx, `SELECT 1 FROM sessions WHERE id = $1 FOR UPDATE SKIP LOCKED`,
+				it.SessionID.String()).Scan(&one)
+			if errors.Is(err, pgx.ErrNoRows) {
+				return nil
+			}
+			if err != nil {
+				return err
+			}
+			done, err := s.queue.FinalizeAbandoned(ctx, tx, envID, it.ID)
+			if err != nil {
+				return err
+			}
+			if !done {
+				return nil
+			}
+			if err := s.rearm(ctx, tx, envID, it.SessionID); err != nil {
+				return err
+			}
+			return tx.Commit(ctx)
+		}()
+		if err != nil {
+			return err
+		}
 	}
 	return nil
 }

@@ -42,7 +42,7 @@ type turnResult struct {
 // failure worlds — provider errors surface bare (they become the turn's
 // session.error), brain-side database failures wrap as infra (the turn is
 // abandoned to lease expiry, not reported as a model failure).
-func (b *Brain) streamTurn(ctx context.Context, sid domain.ID, p provider.Provider, req provider.Request) (*turnResult, error) {
+func (b *Brain) streamTurn(ctx context.Context, sid, threadID domain.ID, p provider.Provider, req provider.Request) (*turnResult, error) {
 	stream, err := p.Generate(ctx, req)
 	if err != nil {
 		return nil, fmt.Errorf("model request: %w", err)
@@ -62,9 +62,10 @@ func (b *Brain) streamTurn(ctx context.Context, sid domain.ID, p provider.Provid
 			return nil
 		}
 		// The buffered event carries the preview's reserved id — that id
-		// match is what concludes the start-only preview client-side.
+		// match is what concludes the start-only preview client-side. On
+		// the turn's thread, where the preview went (plan 35 decision 2).
 		_, err := b.log.Append(ctx, sid, []events.NewEvent{
-			{ID: thinkingPreview.EventID(), Type: domain.EventAgentThinking},
+			{ID: thinkingPreview.EventID(), Type: domain.EventAgentThinking, ThreadID: threadID},
 		})
 		thinkingPreview = nil
 		if err != nil {
@@ -94,7 +95,7 @@ func (b *Brain) streamTurn(ctx context.Context, sid domain.ID, p provider.Provid
 			}
 			if thinkingPreview == nil {
 				thinkingIndex = c.Index
-				thinkingPreview, err = b.log.StartPreview(ctx, sid, domain.EventAgentThinking)
+				thinkingPreview, err = b.log.StartPreviewOn(ctx, sid, threadID, domain.EventAgentThinking)
 				if err != nil {
 					return nil, infra("thinking preview: %w", err)
 				}
@@ -125,7 +126,7 @@ func (b *Brain) streamTurn(ctx context.Context, sid domain.ID, p provider.Provid
 				turn.firstTokenAt = time.Now()
 			}
 			if msgPreview == nil {
-				msgPreview, err = b.log.StartPreview(ctx, sid, domain.EventAgentMessage)
+				msgPreview, err = b.log.StartPreviewOn(ctx, sid, threadID, domain.EventAgentMessage)
 				if err != nil {
 					return nil, infra("message preview: %w", err)
 				}

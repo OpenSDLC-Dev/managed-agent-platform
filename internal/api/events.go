@@ -98,28 +98,91 @@ func (s *server) sendSessionEvents(r *http.Request) (any, error) {
 		return nil, errInvalid("%s", err)
 	}
 
+	// Every inbound event addresses one thread (plan 35 decision 9): a
+	// confirmation or result the thread of the call it answers (an explicit
+	// session_thread_id must agree), an interrupt the thread it names or every
+	// live thread, a message / define_outcome / system.message the primary.
+	// Routed here, validated, before the triggers decide per thread.
+	scoped, err := events.RouteInbound(ctx, tx, domain.ID(id), newEvents)
+	if err != nil {
+		return nil, errInvalid("%s", err)
+	}
+
 	// State-machine triggers (the session's turn scheduler, per the plan's
-	// "enqueue model-turn" arrow): a user.message wakes an idle session —
-	// flip to running, say so on the log, queue a turn. A tool result while
-	// running resumes the suspended turn — but only when it completes the
-	// set: the model protocol requires every tool_use answered in the next
-	// turn, so partial results of a parallel tool call keep waiting. The
-	// session never left running, so no new status event. A tool confirmation
-	// resolves a requires_action suspension, and an interrupt ends the turn in
-	// progress — both in the cases below. Everything else only appends (a
+	// "enqueue model-turn" arrow), decided per addressed thread (decision 5) —
+	// the thread's own status is what each arm tests, the session's being a
+	// fold over them (decision 4): a user.message wakes an idle primary
+	// thread — flip it to running, say so on the log, queue its turn. A tool
+	// result while its thread runs resumes the suspended turn — but only when
+	// it completes that thread's set: the model protocol requires every
+	// tool_use answered in the next turn, so partial results of a parallel
+	// tool call keep waiting. The thread never left running, so no new status
+	// event. A tool confirmation resolves a thread's requires_action
+	// suspension, and an interrupt ends the turn in progress on one thread or
+	// all — both in the cases below. Everything else only appends (a
 	// user.message mid-turn is picked up by the brain's end-of-turn watermark
 	// check).
-	var hasUserMessage, hasToolResult, hasConfirmation, hasInterrupt bool
-	for _, ev := range newEvents {
+	type addressed struct{ interrupt, confirmation, toolResult bool }
+	addr := map[domain.ID]*addressed{}
+	at := func(tid domain.ID) *addressed {
+		a := addr[tid]
+		if a == nil {
+			a = &addressed{}
+			addr[tid] = a
+		}
+		return a
+	}
+	var hasUserMessage, hasInterrupt, interruptAll bool
+	for i, ev := range newEvents {
 		switch ev.Type {
 		case domain.EventUserMessage:
 			hasUserMessage = true
 		case domain.EventUserToolResult, domain.EventUserCustomToolRes:
-			hasToolResult = true
+			at(ev.ThreadID).toolResult = true
 		case domain.EventUserToolConfirm:
-			hasConfirmation = true
+			at(ev.ThreadID).confirmation = true
 		case domain.EventUserInterrupt:
 			hasInterrupt = true
+			if scoped[i] {
+				at(ev.ThreadID).interrupt = true
+			} else {
+				interruptAll = true
+			}
+		}
+	}
+	threads, err := liveThreads(ctx, tx, id, status)
+	if err != nil {
+		return nil, err
+	}
+	if interruptAll {
+		for _, th := range threads {
+			at(th.id).interrupt = true
+		}
+	} else if hasInterrupt {
+		// Interrupts that name every live thread one by one — the primary's
+		// own id on a single-agent session, the documented echo of what a
+		// client read off the status events — are the session-wide interrupt
+		// spelled out: the same cancellation of every live item follows, so
+		// the two requests the docs equate leave the work in one state.
+		interruptAll = true
+		for _, th := range threads {
+			interruptAll = interruptAll && at(th.id).interrupt
+		}
+	}
+	now := time.Now().UTC()
+	for i := range newEvents {
+		// A child-scoped interrupt is consumed right here, by this arm: the
+		// child's turn it ends is the only turn that could ever stamp it, so
+		// it is stamped processed on append (a session-wide one is the
+		// primary's next turn's to stamp, as before).
+		if newEvents[i].Type == domain.EventUserInterrupt && newEvents[i].ThreadID != "" {
+			newEvents[i].ProcessedAt = &now
+		}
+	}
+	primaryStatus := status
+	for _, th := range threads {
+		if th.id == "" {
+			primaryStatus = th.status
 		}
 	}
 	// One active outcome at a time, and a file rubric must name a stored,
@@ -128,9 +191,11 @@ func (s *server) sendSessionEvents(r *http.Request) (any, error) {
 	// below), which is the documented way to chain a new outcome, so it
 	// clears the stored-entry half of the check — but only when the interrupt
 	// can actually settle (idle or running): the waiver shares the settling
-	// case's own guard rather than silently depending on it.
-	interruptCanSettle := hasInterrupt &&
-		(status == string(domain.SessionIdle) || status == string(domain.SessionRunning))
+	// case's own guard rather than silently depending on it. Outcomes belong
+	// to the primary thread (decision 15), so only an interrupt that reaches
+	// it settles one.
+	interruptCanSettle := hasInterrupt && at("").interrupt &&
+		(primaryStatus == string(domain.SessionIdle) || primaryStatus == string(domain.SessionRunning))
 	if err := events.ValidateDefineOutcomes(ctx, tx, domain.ID(id), newEvents, interruptCanSettle); err != nil {
 		return nil, errInvalid("%s", err)
 	}
@@ -145,23 +210,49 @@ func (s *server) sendSessionEvents(r *http.Request) (any, error) {
 	// the commit that made them lands. Usually one — but an interrupt that a
 	// user.message in the same batch redirects moves the column twice
 	// (running → idle → running), and SetStatus can only carry the final value.
+	// TransitionThread reports each move it made to the session column.
 	var moves []domain.SessionStatus
-	setStatus := func(st domain.SessionStatus) {
-		moves = append(moves, st)
-		final := st
-		opts.SetStatus = &final
+	moveTo := func(st *domain.SessionStatus) {
+		if st != nil {
+			moves = append(moves, *st)
+			opts.SetStatus = st
+		}
 	}
-	// Set when this batch clears the last requires_action gate: the seconds the
-	// session waited on the human, measured in the database so both ends read one
-	// clock, and recorded only after the resuming transaction commits.
-	var approvalWaitSeconds *float64
-	enqueueTurn := func(ctx context.Context, tx pgx.Tx) error {
-		_, err := s.queue.Enqueue(ctx, tx, envID, domain.ID(id), queue.ModelTurn)
-		return err
+	// transition moves one thread under the lock and appends the pair it emits.
+	transition := func(t events.ThreadTransition) error {
+		pair, moved, err := events.TransitionThread(ctx, tx, domain.ID(id), t)
+		if err != nil {
+			return err
+		}
+		batch = append(batch, pair...)
+		moveTo(moved)
+		return nil
 	}
-	// startWorkCycle is enqueueTurn where the turn begins a *new* cycle rather
-	// than resuming a suspended one — an idle session woken by a message or a new
-	// outcome, and the same pair redirecting a turn an interrupt just ended.
+	// Set when this batch clears a thread's last requires_action gate: the
+	// seconds it waited on the human, measured in the database so both ends
+	// read one clock, and recorded only after the resuming transaction commits.
+	var approvalWaits []float64
+	// The same-transaction work this batch schedules, run in order after the
+	// append: cancels first (an interrupt frees the slot its redirect's own
+	// model_turn needs, and takes the interrupted turn away from whoever was
+	// running it), enqueues after.
+	var cancels, thens []func(ctx context.Context, tx pgx.Tx) error
+	enqueueTurn := func(tid domain.ID) func(ctx context.Context, tx pgx.Tx) error {
+		return func(ctx context.Context, tx pgx.Tx) error {
+			_, err := s.queue.EnqueueThread(ctx, tx, envID, domain.ID(id), tid, queue.ModelTurn)
+			return err
+		}
+	}
+	enqueueExec := func(kind queue.Kind) func(ctx context.Context, tx pgx.Tx) error {
+		return func(ctx context.Context, tx pgx.Tx) error {
+			_, err := s.queue.Enqueue(ctx, tx, envID, domain.ID(id), kind)
+			return err
+		}
+	}
+	// startWorkCycle is the primary's enqueueTurn where the turn begins a *new*
+	// cycle rather than resuming a suspended one — an idle session woken by a
+	// message or a new outcome, and the same pair redirecting a turn an
+	// interrupt just ended.
 	//
 	// It re-attempts the MCP servers the last cycle could not reach, and this
 	// delete is what makes it one. A failed catalog row is an answer rather than
@@ -183,19 +274,14 @@ func (s *server) sendSessionEvents(r *http.Request) (any, error) {
 			`DELETE FROM mcp_catalogs WHERE session_id = $1 AND status = 'failed'`, id); err != nil {
 			return err
 		}
-		return enqueueTurn(ctx, tx)
+		return enqueueTurn("")(ctx, tx)
 	}
 
-	// The confirmation gate: the ask-gated tool uses this session is still
-	// blocked on after applying this batch's confirmations. While it is
-	// non-empty the session stays idle on requires_action — only a confirmation
-	// that clears the LAST ask resumes it. A user.message (or any other input)
-	// posted meanwhile appends and waits for the next replay: waking the turn
-	// past an unresolved tool_use would replay a request the model protocol
-	// rejects, and requires_action resolves only by confirmation
-	// (BetaManagedAgentsSessionRequiresAction). Empty for a session with no
-	// gated tools, so it costs the common path only one indexed query.
-	askBlocking, err := events.UnconfirmedAskEvents(ctx, tx, domain.ID(id), events.ToolConfirmationRefs(newEvents))
+	// Each denial is answered with an error result (the model protocol
+	// requires every tool_use answered before the turn resumes; the denial
+	// shape is an inference — see docs/DIVERGENCES.md), on the refused call's
+	// thread; appended by the arm of that thread below.
+	denyResults, deniedIDs, err := events.DenialResults(ctx, tx, domain.ID(id), newEvents)
 	if err != nil {
 		return nil, err
 	}
@@ -212,270 +298,304 @@ func (s *server) sendSessionEvents(r *http.Request) (any, error) {
 	// that mixes the two must resolve the gate and run the confirmed tools, not
 	// wake the turn on the message past a tool the confirmation just cleared.
 	//
-	// Only the interrupt case ignores askBlocking, because it answers every
-	// outstanding call, gated or not — the set askBlocking would report is
+	// Only the interrupt case ignores the thread's ask gate, because it answers
+	// every outstanding call, gated or not — the set the gate would report is
 	// exactly the set that case is about to clear.
-	switch {
-	case hasInterrupt:
-		// Every tool call still outstanding is answered with an error result.
-		// The model protocol requires every tool_use answered before the
-		// conversation continues and the log is append-only, so a call left
-		// abandoned would poison every future replay — which is the dead end the
-		// interrupt exists to escape, not one it may create. The batch's own
-		// results count as answered, exactly as they do for the message trigger.
-		abandoned, err := events.UnansweredToolUses(ctx, tx, domain.ID(id), events.ToolResultRefs(newEvents))
-		if err != nil {
-			return nil, err
-		}
-		// Only the two statuses v1 ever writes can be interrupted. Nothing sets
-		// terminated or rescheduling today, and neither should be settled from
-		// here if something one day does: terminated has ended and reviving it on
-		// the redirect below would make this the one trigger that un-ends a
-		// session — the user.message case guards against exactly that by
-		// requiring idle — while rescheduling would need semantics no code has
-		// defined yet, and guessing them could leave the column disagreeing with
-		// the log.
-		interruptible := status == string(domain.SessionIdle) || status == string(domain.SessionRunning)
-		// Nothing to stop: an idle session with no outstanding call has no turn
-		// to end, so the event is logged and settles no turn (a non-terminal
-		// outcome still settles below — the flip does not depend on settling). Emitting a
-		// session.status_idle for a session that never left idle would announce a
-		// transition that did not happen.
-		settling := interruptible && (status == string(domain.SessionRunning) || len(abandoned) > 0)
-		if settling {
-			results, err := events.InterruptResults(abandoned)
+	for _, th := range threads {
+		a, tid, status := at(th.id), th.id, th.status
+		isPrimary := tid == ""
+		// The confirmation gate: the ask-gated tool uses this thread is still
+		// blocked on after applying this batch's confirmations. While it is
+		// non-empty the thread stays idle on requires_action — only a
+		// confirmation that clears the LAST ask resumes it. A user.message (or
+		// any other input) posted meanwhile appends and waits for the next
+		// replay: waking the turn past an unresolved tool_use would replay a
+		// request the model protocol rejects, and requires_action resolves only
+		// by confirmation (BetaManagedAgentsSessionRequiresAction). Read only
+		// for the two arms that use it — a confirmation, or an idle primary's
+		// wake — so the other triggers cost no query per live thread.
+		var askBlocking []string
+		if a.confirmation || (isPrimary && (hasUserMessage || hasDefineOutcome) && status == string(domain.SessionIdle)) {
+			blocked, err := events.UnconfirmedThreadAskEvents(ctx, tx, domain.ID(id), tid, events.ToolConfirmationRefs(newEvents))
 			if err != nil {
 				return nil, err
 			}
-			batch = append(batch, results...)
-			// end_turn, not a stop reason of its own: the reference documents an
-			// interrupted turn as ending on the same stop reason as one that
-			// finishes by itself, and the idle stop_reason union has no
-			// interruption variant to carry (docs/DIVERGENCES.md).
-			batch = append(batch, events.StatusChange(domain.ID(id), domain.SessionIdle, &domain.StopReason{Type: domain.StopEndTurn})...)
-			// The event is emitted whenever a turn ends — a stranded or
-			// gate-blocked session is already idle and its clients still need the
-			// new stop reason — but the column only moves when the session was
-			// really running. Writing idle over idle would count a transition
-			// that did not happen, the way a running→running reclaim would.
-			if status == string(domain.SessionRunning) {
-				setStatus(domain.SessionIdle)
-			}
+			askBlocking = blocked
 		}
-		// An active outcome settles with the turn — the docs mark it
-		// interrupted "even if evaluation hadn't started yet", with an empty
-		// outcome_evaluation_start_id when no start fired — freeing the
-		// session for a new define_outcome, possibly one in this same batch
-		// (the documented chaining pattern).
-		if interruptible {
-			ends, flip, err := events.InterruptOutcomes(ctx, tx, domain.ID(id))
+		switch {
+		case a.interrupt:
+			// Every tool call still outstanding on this thread is answered with
+			// an error result. The model protocol requires every tool_use
+			// answered before the conversation continues and the log is
+			// append-only, so a call left abandoned would poison every future
+			// replay — which is the dead end the interrupt exists to escape, not
+			// one it may create. The batch's own results count as answered,
+			// exactly as they do for the message trigger.
+			abandoned, err := events.UnansweredThreadToolUses(ctx, tx, domain.ID(id), tid, events.ToolResultRefs(newEvents))
 			if err != nil {
 				return nil, err
 			}
-			batch = append(batch, ends...)
-			outcomeFlip = flip
-		}
-		// The interrupt leaves nothing outstanding, so a user.message — or a
-		// new user.define_outcome — in the same batch resumes exactly as it
-		// would on any idle session: the documented way to steer a running
-		// agent, or to chain outcomes, in one send.
-		if (hasUserMessage || hasDefineOutcome) && interruptible {
-			batch = append(batch, events.StatusChange(domain.ID(id), domain.SessionRunning, nil)...)
-			setStatus(domain.SessionRunning)
-		}
-		if settling || ((hasUserMessage || hasDefineOutcome) && interruptible) {
-			opts.Then = func(ctx context.Context, tx pgx.Tx) error {
-				// Cancel first, then enqueue: the cancel frees the (session,
-				// kind) slot the redirect's own model_turn needs, and takes the
-				// interrupted turn away from whoever was running it.
-				if settling {
-					if err := s.queue.CancelSession(ctx, tx, domain.ID(id)); err != nil {
-						return err
+			// Only the two statuses v1 ever writes can be interrupted. Nothing sets
+			// terminated or rescheduling today, and neither should be settled from
+			// here if something one day does: terminated has ended and reviving it on
+			// the redirect below would make this the one trigger that un-ends a
+			// session — the user.message case guards against exactly that by
+			// requiring idle — while rescheduling would need semantics no code has
+			// defined yet, and guessing them could leave the column disagreeing with
+			// the log.
+			interruptible := status == string(domain.SessionIdle) || status == string(domain.SessionRunning)
+			// Nothing to stop: an idle thread with no outstanding call has no turn
+			// to end, so the event is logged and settles no turn (a non-terminal
+			// outcome still settles below — the flip does not depend on settling).
+			// Emitting a status_idle for a thread that never left idle would
+			// announce a transition that did not happen.
+			settling := interruptible && (status == string(domain.SessionRunning) || len(abandoned) > 0)
+			if settling {
+				results, err := events.InterruptResults(abandoned)
+				if err != nil {
+					return nil, err
+				}
+				batch = append(batch, results...)
+				// end_turn, not a stop reason of its own: the reference documents an
+				// interrupted turn as ending on the same stop reason as one that
+				// finishes by itself, and the idle stop_reason union has no
+				// interruption variant to carry (docs/DIVERGENCES.md). The thread
+				// event is emitted whenever a turn ends — a stranded or gate-blocked
+				// thread is already idle and its clients still need the new stop
+				// reason — and so is the session's when it stays idle (Reemit);
+				// the column only moves when the fold really changes.
+				if err := transition(events.ThreadTransition{ThreadID: tid, Status: domain.SessionIdle,
+					Stop: &domain.StopReason{Type: domain.StopEndTurn}, Reemit: true}); err != nil {
+					return nil, err
+				}
+				// Cancel first, then enqueue. A session-wide interrupt keeps today's
+				// CancelSession exactly — every live item of every kind, so the
+				// in-flight sandbox command is aborted through the executor's
+				// lease keeper; a thread-scoped one stops that thread's turn alone
+				// and never the shared exec item a sibling's calls ride on — the
+				// drivers drop its in-flight call as answered (decision 9).
+				if interruptAll {
+					if len(cancels) == 0 {
+						cancels = append(cancels, func(ctx context.Context, tx pgx.Tx) error {
+							return s.queue.CancelSession(ctx, tx, domain.ID(id))
+						})
 					}
-				}
-				if hasUserMessage || hasDefineOutcome {
-					return startWorkCycle(ctx, tx)
-				}
-				return nil
-			}
-		}
-	case hasConfirmation && status == string(domain.SessionIdle):
-		// A requires_action suspension resolves. Each denial is answered with
-		// an error result (the model protocol requires every tool_use answered
-		// before the turn resumes; the denial shape is an inference — see
-		// docs/DIVERGENCES.md). If confirmations remain outstanding, the session re-idles
-		// with the shrunken blocking set; once the last ask is resolved it
-		// resumes — running an executor for any still-unanswered allowed tool,
-		// or the brain directly when every gated tool was denied.
-		denyResults, deniedIDs, err := events.DenialResults(ctx, tx, domain.ID(id), newEvents)
-		if err != nil {
-			return nil, err
-		}
-		batch = append(batch, denyResults...)
-
-		if len(askBlocking) > 0 {
-			batch = append(batch, events.StatusChange(domain.ID(id), domain.SessionIdle,
-				&domain.StopReason{Type: domain.StopRequiresAction, EventIDs: idsOf(askBlocking)})...)
-			break
-		}
-		batch = append(batch, events.StatusChange(domain.ID(id), domain.SessionRunning, nil)...)
-		setStatus(domain.SessionRunning)
-		// How long the gate held: the elapsed since the suspension that raised it —
-		// the most recent requires_action idle. Measured under the same row lock the
-		// resume commits under, so it reads a consistent log, and in the database so
-		// both ends read one clock.
-		var secs float64
-		err = tx.QueryRow(ctx,
-			`SELECT EXTRACT(EPOCH FROM (clock_timestamp() - created_at))
-			 FROM events
-			 WHERE session_id = $1 AND type = $2
-			   AND payload->'stop_reason'->>'type' = 'requires_action'
-			 ORDER BY seq DESC LIMIT 1`,
-			id, string(domain.EventSessionStatusIdle)).Scan(&secs)
-		if err != nil && !errors.Is(err, pgx.ErrNoRows) {
-			return nil, err
-		}
-		if err == nil {
-			approvalWaitSeconds = &secs
-		}
-		// Resume the right work. The executor runs only platform built-ins, so
-		// their work item is enqueued only when an allowed one is still
-		// unanswered (denials are already answered) — as web_exec when any of
-		// them is a web tool, else tool_exec, the same web-first choice the
-		// brain's settlement makes and for the same reason: a tool_exec is
-		// visible to a BYOC worker, which implements only the six sandbox tools
-		// and must not see the log while a web call is outstanding. If the only
-		// remaining unanswered tools are client-executed custom tools, enqueue
-		// nothing — the client's user.custom_tool_result resumes the turn
-		// (mirroring the non-ask suspend, which never runs an executor for a
-		// custom-only turn). If every tool is answered (all gated tools
-		// denied), resume the brain directly.
-		//
-		// An outstanding MCP call takes precedence over all of it, and for a
-		// reason none of the three shares: only this platform's mcp_exec driver
-		// answers an agent.mcp_tool_use — a client may post neither the call nor
-		// its result, and a BYOC worker's contract has no MCP surface — so a
-		// resume that schedules anything else leaves that call to nobody. It
-		// also must not be scheduled behind a tool_exec, the one kind a worker
-		// claims, which is the web-first argument above applied to a second
-		// shape the worker cannot answer.
-		//
-		// Both shapes reach here now that the brain offers MCP tools: a
-		// confirmation that releases a gated MCP call — always_ask is the MCP
-		// toolset's default, so most of them are gated — and one that clears a
-		// built-in while an ungated MCP call is outstanding. The arm shipped a
-		// slice ahead of that emission on purpose. The brain and the control
-		// plane are separate deployments, so a rollout runs a new brain against
-		// an old control plane; a brain that emitted an MCP call while some
-		// control-plane replica still lacked this arm would strand whatever that
-		// call was meant to resume — running rather than idle, which is the
-		// worse of the two, since a running session also refuses archive and
-		// delete and only a user.interrupt gets out of it.
-		//
-		// Answered: the calls this batch denies, and the calls its own results
-		// answer. A client may confirm and post an outstanding result in one
-		// send, and that result is validated and about to be appended — as good
-		// as answered, which is why the two sibling arms of this switch pass
-		// ToolResultRefs too. Counting only the denials reads such a call as
-		// outstanding, and both decisions below then go wrong in opposite
-		// directions: a platform call answered here would run an executor pass
-		// with nothing to do, and a client-executed one would leave the turn
-		// unresumed — committed running, everything answered, nothing queued,
-		// and no later trigger, since the tool-result trigger fires on a
-		// subsequent send the client has no reason to make.
-		answered := append(deniedIDs, events.ToolResultRefs(newEvents)...)
-		mcpPending, err := events.HasUnansweredMCPToolUse(ctx, tx, domain.ID(id), answered)
-		if err != nil {
-			return nil, err
-		}
-		if mcpPending {
-			opts.Then = func(ctx context.Context, tx pgx.Tx) error {
-				_, err := s.queue.Enqueue(ctx, tx, envID, domain.ID(id), queue.MCPExec)
-				return err
-			}
-			break
-		}
-		platformPending, err := events.UnansweredPlatformToolNames(ctx, tx, domain.ID(id), answered)
-		if err != nil {
-			return nil, err
-		}
-		if len(platformPending) > 0 {
-			kind := queue.ToolExec
-			for _, name := range platformPending {
-				if toolset.IsWebTool(name) {
-					kind = queue.WebExec
-					break
+				} else {
+					cancels = append(cancels, func(ctx context.Context, tx pgx.Tx) error {
+						return s.queue.CancelThread(ctx, tx, domain.ID(id), tid)
+					})
 				}
 			}
-			opts.Then = func(ctx context.Context, tx pgx.Tx) error {
-				_, err := s.queue.Enqueue(ctx, tx, envID, domain.ID(id), kind)
-				return err
+			if !isPrimary {
+				break
 			}
-			break
-		}
-		anyPending, err := events.HasUnansweredToolUse(ctx, tx, domain.ID(id), answered)
-		if err != nil {
-			return nil, err
-		}
-		if !anyPending {
-			opts.Then = enqueueTurn
-		}
-	case (hasUserMessage || hasDefineOutcome) && status == string(domain.SessionIdle) && len(askBlocking) == 0:
-		// Waking on a message must not step past an unanswered tool call, for
-		// the reason the two enqueue sites above gate on the same check: the
-		// resumed turn would replay an assistant tool_use that no tool_result
-		// answers, a request the model protocol rejects. askBlocking catches
-		// only the ask-gated ones, so an allow-policy tool needs this. The
-		// batch's own results count as answered — this runs before the append,
-		// and a client repairing a session posts the outstanding result and
-		// its next message together — exactly as the two siblings pass theirs.
-		//
-		// With the brain classifying every tool-carrying turn as a suspension
-		// (#181), an idle session should have nothing outstanding, so refusing
-		// here means a log stranded before that fix. It is logged rather than
-		// silent: the message appends unprocessed and the session stays idle,
-		// which no later tool result revives (that trigger requires a running
-		// session). The way out is a user.interrupt in the same batch or before
-		// it — the case at the top of this switch answers the outstanding call
-		// and hands the session back resumable (#68).
-		unanswered, err := events.HasUnansweredToolUse(ctx, tx, domain.ID(id), events.ToolResultRefs(newEvents))
-		if err != nil {
-			return nil, err
-		}
-		if unanswered {
-			slog.WarnContext(ctx, "wake event not resumed: session is idle with an unanswered tool_use",
-				"session_id", id)
-			break
-		}
-		batch = append(batch, events.StatusChange(domain.ID(id), domain.SessionRunning, nil)...)
-		setStatus(domain.SessionRunning)
-		opts.Then = startWorkCycle
-	case hasToolResult && status == string(domain.SessionRunning):
-		answered := events.ToolResultRefs(newEvents)
-		// MCP first here as at the other settlements, and for the reason that
-		// makes it a rule rather than an order: only the platform's own driver
-		// answers an agent.mcp_tool_use, so a result that leaves one
-		// outstanding must schedule that driver. Ordinarily the item is already
-		// live and Enqueue's (session_id, kind) conflict makes this a no-op;
-		// where it is not — a self_hosted session whose worker answers last —
-		// this is the enqueue that keeps the call from waiting on nothing.
-		mcpPending, err := events.HasUnansweredMCPToolUse(ctx, tx, domain.ID(id), answered)
-		if err != nil {
-			return nil, err
-		}
-		if mcpPending {
-			opts.Then = func(ctx context.Context, tx pgx.Tx) error {
-				_, err := s.queue.Enqueue(ctx, tx, envID, domain.ID(id), queue.MCPExec)
-				return err
+			// An active outcome settles with the turn — the docs mark it
+			// interrupted "even if evaluation hadn't started yet", with an empty
+			// outcome_evaluation_start_id when no start fired — freeing the
+			// session for a new define_outcome, possibly one in this same batch
+			// (the documented chaining pattern).
+			if interruptible {
+				ends, flip, err := events.InterruptOutcomes(ctx, tx, domain.ID(id))
+				if err != nil {
+					return nil, err
+				}
+				batch = append(batch, ends...)
+				outcomeFlip = flip
 			}
-			break
+			// The interrupt leaves nothing outstanding, so a user.message — or a
+			// new user.define_outcome — in the same batch resumes exactly as it
+			// would on any idle session: the documented way to steer a running
+			// agent, or to chain outcomes, in one send.
+			if (hasUserMessage || hasDefineOutcome) && interruptible {
+				if err := transition(events.ThreadTransition{Status: domain.SessionRunning}); err != nil {
+					return nil, err
+				}
+				thens = append(thens, startWorkCycle)
+			}
+		case a.confirmation && status == string(domain.SessionIdle):
+			// A requires_action suspension resolves. If confirmations remain
+			// outstanding, the thread re-idles with the shrunken blocking set;
+			// once the last ask is resolved it resumes — running an executor for
+			// any still-runnable allowed tool, or the brain directly when every
+			// gated tool was denied.
+			for _, r := range denyResults {
+				if r.ThreadID == tid {
+					batch = append(batch, r)
+				}
+			}
+			if len(askBlocking) > 0 {
+				if err := transition(events.ThreadTransition{ThreadID: tid, Status: domain.SessionIdle,
+					Stop: &domain.StopReason{Type: domain.StopRequiresAction, EventIDs: idsOf(askBlocking)}, Reemit: true}); err != nil {
+					return nil, err
+				}
+				break
+			}
+			if err := transition(events.ThreadTransition{ThreadID: tid, Status: domain.SessionRunning}); err != nil {
+				return nil, err
+			}
+			// How long the gate held: the elapsed since the suspension that raised
+			// it — this thread's most recent requires_action idle. Measured under
+			// the same row lock the resume commits under, so it reads a consistent
+			// log, and in the database so both ends read one clock.
+			// The primary's suspension may predate the thread resource — a
+			// session parked on requires_action across that upgrade has the
+			// session event alone — so the session-level idle counts for it
+			// too, but only when no thread event exists at all: a sibling
+			// moving the fold re-advertises the primary's own ask in a later
+			// session.status_idle, which must not shadow the suspension that
+			// raised the gate.
+			var secs float64
+			err = tx.QueryRow(ctx,
+				`SELECT EXTRACT(EPOCH FROM (clock_timestamp() - created_at))
+				 FROM events
+				 WHERE session_id = $1
+				   AND ((type = $2 AND thread_id IS NOT DISTINCT FROM $3::text)
+				        OR (type = $4 AND $3::text IS NULL))
+				   AND payload->'stop_reason'->>'type' = 'requires_action'
+				 ORDER BY (type = $2) DESC, seq DESC LIMIT 1`,
+				id, string(domain.EventSessionThreadStatusIdle), events.NullableThread(tid),
+				string(domain.EventSessionStatusIdle)).Scan(&secs)
+			if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+				return nil, err
+			}
+			if err == nil {
+				approvalWaits = append(approvalWaits, secs)
+			}
+			// Resume the right work. The exec drivers run only platform
+			// built-ins and only the runnable set (decision 5), so their work
+			// item is enqueued only when an allowed or confirmed one is still
+			// unanswered (denials are already answered) — as web_exec when any of
+			// them is a web tool, else tool_exec, the same web-first choice the
+			// brain's settlement makes and for the same reason: a tool_exec is
+			// visible to a BYOC worker, which implements only the six sandbox
+			// tools and must not see the log while a web call is outstanding. If
+			// the only remaining unanswered tools are client-executed custom
+			// tools, enqueue nothing — the client's user.custom_tool_result
+			// resumes the turn (mirroring the non-ask suspend, which never runs an
+			// executor for a custom-only turn). If every tool of this thread is
+			// answered (all gated tools denied), resume the brain directly.
+			//
+			// An outstanding MCP call takes precedence over all of it, and for a
+			// reason none of the three shares: only this platform's mcp_exec driver
+			// answers an agent.mcp_tool_use — a client may post neither the call nor
+			// its result, and a BYOC worker's contract has no MCP surface — so a
+			// resume that schedules anything else leaves that call to nobody. It
+			// also must not be scheduled behind a tool_exec, the one kind a worker
+			// claims, which is the web-first argument above applied to a second
+			// shape the worker cannot answer.
+			//
+			// Answered: the calls this batch denies, and the calls its own results
+			// answer. A client may confirm and post an outstanding result in one
+			// send, and that result is validated and about to be appended — as good
+			// as answered, which is why the sibling arms pass ToolResultRefs too.
+			// Counting only the denials reads such a call as outstanding, and both
+			// decisions below then go wrong in opposite directions: a platform call
+			// answered here would run an executor pass with nothing to do, and a
+			// client-executed one would leave the turn unresumed — committed
+			// running, everything answered, nothing queued, and no later trigger,
+			// since the tool-result trigger fires on a subsequent send the client
+			// has no reason to make.
+			answered := append(deniedIDs, events.ToolResultRefs(newEvents)...)
+			kind, err := execKindFor(ctx, tx, domain.ID(id), answered, events.ToolConfirmationRefs(newEvents))
+			if err != nil {
+				return nil, err
+			}
+			if kind != "" {
+				thens = append(thens, enqueueExec(kind))
+			}
+			anyPending, err := events.HasUnansweredThreadToolUse(ctx, tx, domain.ID(id), tid, answered)
+			if err != nil {
+				return nil, err
+			}
+			if !anyPending {
+				thens = append(thens, enqueueTurn(tid))
+			}
+		case isPrimary && (hasUserMessage || hasDefineOutcome) && status == string(domain.SessionIdle) && len(askBlocking) == 0:
+			// Waking on a message must not step past an unanswered tool call, for
+			// the reason the two enqueue sites above gate on the same check: the
+			// resumed turn would replay an assistant tool_use that no tool_result
+			// answers, a request the model protocol rejects. askBlocking catches
+			// only the ask-gated ones, so an allow-policy tool needs this. The
+			// batch's own results count as answered — this runs before the append,
+			// and a client repairing a session posts the outstanding result and
+			// its next message together — exactly as the two siblings pass theirs.
+			//
+			// With the brain classifying every tool-carrying turn as a suspension
+			// (#181), an idle thread should have nothing outstanding, so refusing
+			// here means a log stranded before that fix. It is logged rather than
+			// silent: the message appends unprocessed and the thread stays idle,
+			// which no later tool result revives (that trigger requires a running
+			// thread). The way out is a user.interrupt in the same batch or before
+			// it — the case at the top of this switch answers the outstanding call
+			// and hands the thread back resumable (#68).
+			unanswered, err := events.HasUnansweredThreadToolUse(ctx, tx, domain.ID(id), tid, events.ToolResultRefs(newEvents))
+			if err != nil {
+				return nil, err
+			}
+			if unanswered {
+				slog.WarnContext(ctx, "wake event not resumed: session is idle with an unanswered tool_use",
+					"session_id", id)
+				break
+			}
+			if err := transition(events.ThreadTransition{Status: domain.SessionRunning}); err != nil {
+				return nil, err
+			}
+			thens = append(thens, startWorkCycle)
+		case a.toolResult && status == string(domain.SessionRunning):
+			answered := events.ToolResultRefs(newEvents)
+			// MCP first here as at the other settlements, and for the reason that
+			// makes it a rule rather than an order: only the platform's own driver
+			// answers an agent.mcp_tool_use, so a result that leaves one
+			// runnable must schedule that driver. Ordinarily the item is already
+			// live and Enqueue's (session_id, thread_id, kind) conflict makes this
+			// a no-op; where it is not — a self_hosted session whose worker
+			// answers last — this is the enqueue that keeps the call from waiting
+			// on nothing.
+			mcpPending, err := events.HasRunnableMCPToolUse(ctx, tx, domain.ID(id), answered, nil)
+			if err != nil {
+				return nil, err
+			}
+			if mcpPending {
+				thens = append(thens, enqueueExec(queue.MCPExec))
+			}
+			unanswered, err := events.HasUnansweredThreadToolUse(ctx, tx, domain.ID(id), tid, answered)
+			if err != nil {
+				return nil, err
+			}
+			if !unanswered {
+				thens = append(thens, enqueueTurn(tid))
+			}
 		}
-		unanswered, err := events.HasUnansweredToolUse(ctx, tx, domain.ID(id), answered)
-		if err != nil {
-			return nil, err
+	}
+	if interruptAll {
+		// A session-wide interrupt ends its threads one by one, and each end
+		// re-idles the session with the fold of that moment; the session is
+		// told once, with the fold after the last of them — the earlier
+		// re-idles are dropped. A single-agent session emits one either way.
+		lastIdle := -1
+		for i, ev := range batch {
+			if ev.Type == domain.EventSessionStatusIdle {
+				lastIdle = i
+			}
 		}
-		if !unanswered {
-			opts.Then = enqueueTurn
+		if lastIdle >= 0 {
+			kept := batch[:0:0]
+			for i, ev := range batch {
+				if ev.Type != domain.EventSessionStatusIdle || i == lastIdle {
+					kept = append(kept, ev)
+				}
+			}
+			batch = kept
+		}
+	}
+	if len(cancels)+len(thens) > 0 {
+		opts.Then = func(ctx context.Context, tx pgx.Tx) error {
+			for _, fn := range append(cancels, thens...) {
+				if err := fn(ctx, tx); err != nil {
+					return err
+				}
+			}
+			return nil
 		}
 	}
 
@@ -520,8 +640,8 @@ func (s *server) sendSessionEvents(r *http.Request) (any, error) {
 	for _, st := range moves {
 		events.RecordSessionStatus(ctx, st)
 	}
-	if approvalWaitSeconds != nil {
-		events.RecordApprovalWait(ctx, *approvalWaitSeconds)
+	for _, secs := range approvalWaits {
+		events.RecordApprovalWait(ctx, secs)
 	}
 
 	// The response echoes the posted events only, not the platform's

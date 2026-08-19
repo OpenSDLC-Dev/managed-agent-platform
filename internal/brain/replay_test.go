@@ -304,7 +304,7 @@ func TestPendingInputChainsDefineOutcome(t *testing.T) {
 			t.Fatalf("begin: %v", err)
 		}
 		defer tx.Rollback(context.Background())
-		got, err := pendingInput(context.Background(), tx, sid, watermark)
+		got, err := pendingInput(context.Background(), tx, sid, "", watermark)
 		if err != nil {
 			t.Fatalf("pendingInput: %v", err)
 		}

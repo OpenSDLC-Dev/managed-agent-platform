@@ -91,7 +91,7 @@ func (h *harness) listMCPServer(t *testing.T, server, url string) {
 	if _, err := h.pool.Exec(context.Background(),
 		`INSERT INTO mcp_catalogs (session_id, server_name, url, status)
 		 VALUES ($1, $2, $3, 'ready')
-		 ON CONFLICT (session_id, server_name) DO UPDATE SET url = EXCLUDED.url, status = 'ready'`,
+		 ON CONFLICT (session_id, thread_id, server_name) DO UPDATE SET url = EXCLUDED.url, status = 'ready'`,
 		h.sid.String(), server, url); err != nil {
 		t.Fatalf("write mcp catalog row: %v", err)
 	}

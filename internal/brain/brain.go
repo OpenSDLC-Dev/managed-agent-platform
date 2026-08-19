@@ -14,6 +14,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"slices"
 	"time"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/blob"
@@ -200,15 +201,17 @@ func (b *Brain) runTurn(ctx context.Context, item *queue.Item, claimedAt time.Ti
 		// The previous claimant died mid-turn. Surface the recovery on the
 		// log before replaying, with the lease asserted in the same
 		// transaction: a claimant that already lost the item must not flip
-		// a session another brain has since settled. No SetStatus: claimLiveSession
-		// admitted this turn only because the session is already running, so the
-		// column moves nothing here — and counting a running→running no-op as a
-		// session.status.transitions event would inflate the metric on exactly the
-		// reclaim churn an operator reads it to find.
-		if _, err := b.log.AppendWith(ctx, sid, append(
-			events.StatusChange(sid, domain.SessionRescheduling, nil),
-			events.StatusChange(sid, domain.SessionRunning, nil)...,
-		), events.AppendOptions{
+		// a session another brain has since settled. Both transitions are
+		// forced (the pair is value-independent: claimLiveSession admitted
+		// this turn only because the thread is already running) and the
+		// session's net move is nothing, so AppendTransition counts nothing —
+		// counting a running→running no-op as a session.status.transitions
+		// event would inflate the metric on exactly the reclaim churn an
+		// operator reads it to find.
+		if _, err := b.log.AppendTransition(ctx, sid, nil, []events.ThreadTransition{
+			{ThreadID: item.ThreadID, Status: domain.SessionRescheduling, Force: true},
+			{ThreadID: item.ThreadID, Status: domain.SessionRunning, Force: true},
+		}, events.AppendOptions{
 			Then: func(ctx context.Context, tx pgx.Tx) error {
 				return b.queue.Assert(ctx, tx, item)
 			},
@@ -235,7 +238,10 @@ func (b *Brain) runTurn(ctx context.Context, item *queue.Item, claimedAt time.Ti
 			return b.failTurn(ctx, sid, item, nil, 0, fmt.Sprintf("session outcome state is corrupt: %v", err))
 		}
 	}
-	if active, ok := events.ActiveOutcome(evals); ok && active.Result == domain.OutcomeResultEvaluating {
+	// Grading is the primary thread's (plan 35 decision 15): the evaluation
+	// cycle is scheduled at the session's quiescence onto the primary's turn
+	// with the coordinator's agent, so a child's claim never grades.
+	if active, ok := events.ActiveOutcome(evals); ok && active.Result == domain.OutcomeResultEvaluating && item.ThreadID == "" {
 		return b.runGrading(ctx, item, agent, evals)
 	}
 
@@ -256,7 +262,7 @@ func (b *Brain) runTurn(ctx context.Context, item *queue.Item, claimedAt time.Ti
 		// retry, so a lease-expiry loop would grind forever telling nobody.
 		return b.failTurn(ctx, sid, item, nil, 0, fmt.Sprintf("session mcp server state is corrupt: %v", err))
 	}
-	cat, undiscovered, err := b.loadMCPCatalog(ctx, sid, declared)
+	cat, undiscovered, err := b.loadMCPCatalog(ctx, sid, item.ThreadID, declared)
 	if err != nil {
 		return fmt.Errorf("mcp catalog: %w", err)
 	}
@@ -289,7 +295,9 @@ func (b *Brain) runTurn(ctx context.Context, item *queue.Item, claimedAt time.Ti
 		}
 	}
 
-	history, err := b.log.List(ctx, sid, events.ListQuery{})
+	// The thread's own rows (plan 35 decision 5): a sibling's events — a
+	// child's cross-posted ask included — are not this conversation's.
+	history, err := b.log.List(ctx, sid, events.ListQuery{Scope: events.ScopeThread, ThreadID: item.ThreadID})
 	if err != nil {
 		return fmt.Errorf("replay: %w", err)
 	}
@@ -340,7 +348,7 @@ func (b *Brain) runTurn(ctx context.Context, item *queue.Item, claimedAt time.Ti
 	// so Describe cannot miss; an empty backend would only mean unlabelled
 	// metrics, never a failed turn.
 	desc, _ := b.registry.Describe(agent.Model.ID)
-	sctx, span, err := b.log.StartModelRequest(ctx, sid,
+	sctx, span, err := b.log.StartModelRequestOn(ctx, sid, item.ThreadID,
 		events.Backend{Provider: desc.Protocol, Model: desc.Model})
 	if err != nil {
 		return fmt.Errorf("span start: %w", err)
@@ -357,7 +365,7 @@ func (b *Brain) runTurn(ctx context.Context, item *queue.Item, claimedAt time.Ti
 	)
 
 	kctx, keeper := b.queue.KeepLease(sctx, item, b.cfg.LeaseTTL, 0)
-	turn, streamErr := b.streamTurn(kctx, sid, p, req)
+	turn, streamErr := b.streamTurn(kctx, sid, item.ThreadID, p, req)
 	// The call to the model ended here, whatever happens to the turn from now
 	// on. Everything below is ours — leases, classification, a session-locked
 	// settlement — and none of it belongs in a model-latency metric. The usage
@@ -439,17 +447,39 @@ func (b *Brain) claimLiveSession(ctx context.Context, item *queue.Item) (agentJS
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
+	// The turn is one thread's (plan 35 decision 5): its status, not the
+	// session's fold, is the liveness gate — a sibling's run keeps the session
+	// running while this thread may have been interrupted or archived — and a
+	// child runs its own agent snapshot where the primary reads the session's
+	// resolved agent through (decision 1). A session from before the thread
+	// resource, with no primary row, reads the session's status.
+	tid := item.ThreadID
+	if tid == "" {
+		tid = domain.PrimaryThreadID(item.SessionID)
+	}
 	var status string
-	var archivedAt *time.Time
+	var archivedAt, threadArchivedAt *time.Time
+	var threadAgent []byte
 	err = tx.QueryRow(ctx,
-		`SELECT s.resolved_agent, s.resources, s.outcome_evaluations, s.status, s.archived_at, e.kind
+		`SELECT s.resolved_agent, s.resources, s.outcome_evaluations, COALESCE(t.status, s.status),
+		        s.archived_at, t.archived_at, t.agent, e.kind
 		   FROM sessions s JOIN environments e ON e.id = s.environment_id
+		   LEFT JOIN session_threads t ON t.session_id = s.id AND t.id = $2
 		  WHERE s.id = $1 FOR UPDATE OF s`,
-		item.SessionID.String()).Scan(&agentJSON, &resourcesJSON, &outcomesJSON, &status, &archivedAt, &envKind)
+		item.SessionID.String(), tid.String()).Scan(&agentJSON, &resourcesJSON, &outcomesJSON, &status,
+		&archivedAt, &threadArchivedAt, &threadAgent, &envKind)
 	if err != nil {
 		return nil, nil, nil, "", false, fmt.Errorf("load session: %w", err)
 	}
-	if status != string(domain.SessionRunning) || archivedAt != nil {
+	if item.ThreadID != "" {
+		if threadAgent == nil {
+			// No child row: nothing to run (only the session's delete removes
+			// one, and that cascades the item too — a stray is drained).
+			status = string(domain.SessionTerminated)
+		}
+		agentJSON = threadAgent
+	}
+	if status != string(domain.SessionRunning) || archivedAt != nil || threadArchivedAt != nil {
 		if err := b.queue.Complete(ctx, tx, item); err != nil {
 			return nil, nil, nil, "", false, err
 		}
@@ -471,13 +501,31 @@ var pendingInputTypes = []string{
 	string(domain.EventUserDefineOutcome),
 }
 
-func pendingInput(ctx context.Context, tx pgx.Tx, sid domain.ID, watermark int64) (bool, error) {
+// pendingInput asks it for one thread's own rows (plan 35 decision 5): a
+// sibling's queued input is the sibling's turn to read.
+func pendingInput(ctx context.Context, tx pgx.Tx, sid, threadID domain.ID, watermark int64) (bool, error) {
 	var pending bool
 	err := tx.QueryRow(ctx,
 		`SELECT EXISTS (SELECT 1 FROM events
-		  WHERE session_id = $1 AND type = ANY($2) AND processed_at IS NULL AND seq > $3)`,
-		sid.String(), pendingInputTypes, watermark).Scan(&pending)
+		  WHERE session_id = $1 AND type = ANY($2) AND processed_at IS NULL AND seq > $3
+		    AND thread_id IS NOT DISTINCT FROM $4)`,
+		sid.String(), pendingInputTypes, watermark, events.NullableThread(threadID)).Scan(&pending)
 	return pending, err
+}
+
+// stampThread marks a turn's events as its thread's own (plan 35 decision 2);
+// on a child, what a client must answer is cross-posted — the ask-gated calls
+// and the client-executed custom tool calls, the two the docs name — since the
+// session view is where the human or client who answers them reads (decision
+// 9). An allow-policy built-in is the platform's to run and stays on the
+// child's own log (on cloud; the self_hosted view rule is slice 4).
+func stampThread(evs []events.NewEvent, threadID domain.ID, askIDs []domain.ID) {
+	for i := range evs {
+		evs[i].ThreadID = threadID
+		if threadID != "" && (evs[i].Type == domain.EventAgentCustomToolUse || slices.Contains(askIDs, evs[i].ID)) {
+			evs[i].CrossPosted = true
+		}
+	}
 }
 
 // turnEvents renders the model's turn as its wire events: the buffered
@@ -624,7 +672,9 @@ func (b *Brain) commitTurn(ctx context.Context, sid domain.ID, item *queue.Item,
 		return err
 	}
 	head = append(head, endEv)
+	stampThread(head, item.ThreadID, askIDs)
 	opts := events.AppendOptions{
+		ThreadID:             item.ThreadID,
 		AddUsage:             &usage,
 		MarkProcessedThrough: watermark,
 	}
@@ -665,15 +715,19 @@ func (b *Brain) commitTurn(ctx context.Context, sid domain.ID, item *queue.Item,
 			// on the confirmation POST. Like the running-suspend below, this
 			// commits under the lock with no chain-or-idle decision: the
 			// session is genuinely blocked on human input, and any mid-turn
-			// message stays unprocessed and replays when the gate clears.
-			head = append(head, events.StatusChange(sid, domain.SessionIdle,
-				&domain.StopReason{Type: domain.StopRequiresAction, EventIDs: askIDs})...)
-			idle := domain.SessionIdle
-			opts.SetStatus = &idle
+			// message stays unprocessed and replays when the gate clears. The
+			// thread idles; the session follows only if no sibling runs (plan
+			// 35 decision 4).
 			opts.Then = func(ctx context.Context, tx pgx.Tx) error {
 				return b.queue.Complete(ctx, tx, item)
 			}
-			return b.commitUnderLock(ctx, sid, head, opts)
+			return b.commitUnderLock(ctx, sid, func(ctx context.Context, tx pgx.Tx) ([]events.NewEvent, events.AppendOptions, error) {
+				pair, moved, err := events.TransitionThread(ctx, tx, sid, events.ThreadTransition{
+					ThreadID: item.ThreadID, Status: domain.SessionIdle,
+					Stop: &domain.StopReason{Type: domain.StopRequiresAction, EventIDs: askIDs}})
+				opts.SetStatus = moved
+				return append(head, pair...), opts, err
+			})
 		}
 
 		// Suspend: the session stays running (awaiting a tool is still
@@ -706,7 +760,9 @@ func (b *Brain) commitTurn(ctx context.Context, sid domain.ID, item *queue.Item,
 			}
 			return nil
 		}
-		return b.commitUnderLock(ctx, sid, head, opts)
+		return b.commitUnderLock(ctx, sid, func(context.Context, pgx.Tx) ([]events.NewEvent, events.AppendOptions, error) {
+			return head, opts, nil
+		})
 	}
 
 	// A turn that called no tool: end_turn, and everything else —
@@ -727,7 +783,7 @@ func (b *Brain) commitTurn(ctx context.Context, sid domain.ID, item *queue.Item,
 // chain-or-idle contract, restated there because outcomes fork the idle
 // path.
 func (b *Brain) settle(ctx context.Context, sid domain.ID, item *queue.Item, watermark int64,
-	opts events.AppendOptions, build func(chained bool) ([]events.NewEvent, error)) error {
+	opts events.AppendOptions, idleStop *domain.StopReason, build func(chained bool) ([]events.NewEvent, error)) error {
 
 	tx, err := b.pool.Begin(ctx)
 	if err != nil {
@@ -740,11 +796,11 @@ func (b *Brain) settle(ctx context.Context, sid domain.ID, item *queue.Item, wat
 	}
 
 	// A watermark of zero means the turn failed before replay resolved
-	// anything (corrupt state): chaining on the session's own unprocessed
+	// anything (corrupt state): chaining on the thread's own unprocessed
 	// events would loop the same failure forever.
 	chained := false
 	if watermark > 0 {
-		if chained, err = pendingInput(ctx, tx, sid, watermark); err != nil {
+		if chained, err = pendingInput(ctx, tx, sid, item.ThreadID, watermark); err != nil {
 			return err
 		}
 	}
@@ -752,13 +808,20 @@ func (b *Brain) settle(ctx context.Context, sid domain.ID, item *queue.Item, wat
 	if err != nil {
 		return err
 	}
+	stampThread(batch, item.ThreadID, nil)
+	opts.ThreadID = item.ThreadID
 	if chained {
 		opts.Then = func(ctx context.Context, tx pgx.Tx) error {
 			return b.queue.Requeue(ctx, tx, item)
 		}
 	} else {
-		idle := domain.SessionIdle
-		opts.SetStatus = &idle
+		pair, moved, err := events.TransitionThread(ctx, tx, sid, events.ThreadTransition{
+			ThreadID: item.ThreadID, Status: domain.SessionIdle, Stop: idleStop})
+		if err != nil {
+			return err
+		}
+		batch = append(batch, pair...)
+		opts.SetStatus = moved
 		opts.Then = func(ctx context.Context, tx pgx.Tx) error {
 			return b.queue.Complete(ctx, tx, item)
 		}
@@ -776,9 +839,12 @@ func (b *Brain) settle(ctx context.Context, sid domain.ID, item *queue.Item, wat
 	return nil
 }
 
-// commitUnderLock commits a batch and its options with the session row
-// locked first, for the settlement that has no chain-or-idle decision.
-func (b *Brain) commitUnderLock(ctx context.Context, sid domain.ID, batch []events.NewEvent, opts events.AppendOptions) error {
+// commitUnderLock commits a settlement with the session row locked first,
+// for the settlement that has no chain-or-idle decision: build runs under
+// the lock — a status transition folds the session there (plan 35 decision
+// 4) — and returns the batch and options to append.
+func (b *Brain) commitUnderLock(ctx context.Context, sid domain.ID,
+	build func(ctx context.Context, tx pgx.Tx) ([]events.NewEvent, events.AppendOptions, error)) error {
 	tx, err := b.pool.Begin(ctx)
 	if err != nil {
 		return err
@@ -786,6 +852,10 @@ func (b *Brain) commitUnderLock(ctx context.Context, sid domain.ID, batch []even
 	defer func() { _ = tx.Rollback(ctx) }()
 	if _, err := tx.Exec(ctx,
 		`SELECT 1 FROM sessions WHERE id = $1 FOR UPDATE`, sid.String()); err != nil {
+		return err
+	}
+	batch, opts, err := build(ctx, tx)
+	if err != nil {
 		return err
 	}
 	if _, err := b.log.AppendInTx(ctx, tx, sid, batch, opts); err != nil {
@@ -843,6 +913,7 @@ func (b *Brain) commitFailure(ctx context.Context, sid domain.ID, item *queue.It
 	}
 
 	return b.settle(ctx, sid, item, watermark, events.AppendOptions{MarkProcessedThrough: watermark},
+		&domain.StopReason{Type: domain.StopRetriesExhausted},
 		func(chained bool) ([]events.NewEvent, error) {
 			// retry_status tells the client whether the platform will make
 			// another attempt. A chained turn is one: the session stays
@@ -860,10 +931,6 @@ func (b *Brain) commitFailure(ctx context.Context, sid domain.ID, item *queue.It
 			if err != nil {
 				return nil, err
 			}
-			batch := append(head, events.NewEvent{Type: domain.EventSessionError, Payload: errPayload})
-			if chained {
-				return batch, nil
-			}
-			return append(batch, events.StatusChange(sid, domain.SessionIdle, &domain.StopReason{Type: domain.StopRetriesExhausted})...), nil
+			return append(head, events.NewEvent{Type: domain.EventSessionError, Payload: errPayload}), nil
 		})
 }

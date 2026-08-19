@@ -39,23 +39,21 @@ func (h *harness) wakeOutcomeRubric(t *testing.T, description string, maxIterati
 		"max_iterations": maxIterations,
 		"outcome_id":     outcomeID,
 	})
-	running := domain.SessionRunning
-	_, err := h.log.AppendWith(context.Background(), h.sessionID, append(
+	_, err := h.log.AppendTransition(context.Background(), h.sessionID,
 		[]events.NewEvent{{Type: domain.EventUserDefineOutcome, Payload: payload}},
-		events.StatusChange(h.sessionID, domain.SessionRunning, nil)...,
-	), events.AppendOptions{
-		SetStatus: &running,
-		MutateOutcomes: func(evals []domain.OutcomeEvaluation) ([]domain.OutcomeEvaluation, error) {
-			return append(evals, domain.OutcomeEvaluation{
-				Type: "outcome_evaluation", OutcomeID: outcomeID,
-				Description: description, Result: domain.OutcomeResultPending,
-			}), nil
-		},
-		Then: func(ctx context.Context, tx pgx.Tx) error {
-			_, err := h.queue.Enqueue(ctx, tx, h.envID, h.sessionID, queue.ModelTurn)
-			return err
-		},
-	})
+		[]events.ThreadTransition{{Status: domain.SessionRunning}},
+		events.AppendOptions{
+			MutateOutcomes: func(evals []domain.OutcomeEvaluation) ([]domain.OutcomeEvaluation, error) {
+				return append(evals, domain.OutcomeEvaluation{
+					Type: "outcome_evaluation", OutcomeID: outcomeID,
+					Description: description, Result: domain.OutcomeResultPending,
+				}), nil
+			},
+			Then: func(ctx context.Context, tx pgx.Tx) error {
+				_, err := h.queue.Enqueue(ctx, tx, h.envID, h.sessionID, queue.ModelTurn)
+				return err
+			},
+		})
 	if err != nil {
 		t.Fatalf("wakeOutcome: %v", err)
 	}

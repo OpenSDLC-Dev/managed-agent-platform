@@ -474,81 +474,18 @@ func (e *Executor) process(ctx context.Context, item *queue.Item) (err error) {
 	// Commit the results, the resume, and the item's fate together under the
 	// session lock. The item is completed only when every tool ran: a backend
 	// fault leaves it live so a reclaim retries the tools still unanswered
-	// (the ones that did run are now committed and are skipped).
-	complete := faultErr == nil
-	opts := events.AppendOptions{
-		Then: func(ctx context.Context, tx pgx.Tx) error {
-			// Every state write this claimant makes must prove it still owns the
-			// item. The complete path proves it through Complete; the fault path
-			// commits partial results with nothing else, so it asserts the lease
-			// explicitly — otherwise a claim lost while blocked on the session
-			// lock could still commit a result a reclaiming executor also writes,
-			// duplicating it on the append-only log.
-			if !complete {
-				if err := e.queue.Assert(ctx, tx, item); err != nil {
-					return err
-				}
-			}
-			// A web or MCP call this sandbox pass left unanswered is healed
-			// with a chained work item rather than abandoned: every enqueue
-			// site holds a tool_exec back behind both shapes, so a tool_exec
-			// coexisting with either outstanding is a log no current code
-			// produces — but completing the item over one would strand the
-			// session permanently (HasUnansweredToolUse counts it, so no
-			// model_turn follows either), and the heal is the same chain the
-			// web and MCP drivers run in the other direction.
-			//
-			// MCP first, for the reason it is first everywhere: only this
-			// platform's MCP driver answers an agent.mcp_tool_use, and a
-			// tool_exec is the one kind a BYOC worker can claim — handing it
-			// the log while an MCP call is outstanding shows a customer-hosted
-			// worker a call it has no surface to answer.
-			if complete {
-				mcpPending, err := events.HasUnansweredMCPToolUse(ctx, tx, item.SessionID, nil)
-				if err != nil {
-					return err
-				}
-				if mcpPending {
-					if _, err := e.queue.Enqueue(ctx, tx, item.EnvironmentID, item.SessionID, queue.MCPExec); err != nil {
-						return err
-					}
-					return e.queue.Complete(ctx, tx, item)
-				}
-				names, err := events.UnansweredPlatformToolNames(ctx, tx, item.SessionID, nil)
-				if err != nil {
-					return err
-				}
-				if slices.ContainsFunc(names, toolset.IsWebTool) {
-					if _, err := e.queue.Enqueue(ctx, tx, item.EnvironmentID, item.SessionID, queue.WebExec); err != nil {
-						return err
-					}
-					return e.queue.Complete(ctx, tx, item)
-				}
-			}
-			unanswered, err := events.HasUnansweredToolUse(ctx, tx, item.SessionID, nil)
-			if err != nil {
-				return err
-			}
-			if !unanswered {
-				if _, err := e.queue.Enqueue(ctx, tx, item.EnvironmentID, item.SessionID, queue.ModelTurn); err != nil {
-					return err
-				}
-				// Every use is answered, so this item has nothing left to do
-				// whatever went wrong after the last of them — a stall declared
-				// on the boundary, say. Leaving it live would be worse than
-				// untidy: Enqueue dedupes per (session, kind) while a live item
-				// exists, so the turn just scheduled would find its own
-				// tool_exec swallowed and the session would sit still until the
-				// abandoned lease lapsed.
-				return e.queue.Complete(ctx, tx, item)
-			}
-			if complete {
-				return e.queue.Complete(ctx, tx, item)
-			}
-			return nil
-		},
-	}
-	if _, err := e.log.AppendWith(ctx, item.SessionID, results, opts); err != nil {
+	// (the ones that did run are now committed and are skipped). Every state
+	// write this claimant makes must prove it still owns the item — the
+	// complete path through Complete/Requeue, the fault path by asserting the
+	// lease explicitly, otherwise a claim lost while blocked on the session
+	// lock could still commit a result a reclaiming executor also writes,
+	// duplicating it on the append-only log. What follows — the per-thread
+	// wake, the chain to the web or MCP driver for a call this sandbox pass
+	// cannot answer, the re-scan for a call a sibling committed under this
+	// live item — is settleDrain's, shared with the other drivers.
+	if err := e.commitResults(ctx, item.SessionID, results, func(ctx context.Context, tx pgx.Tx) error {
+		return e.settleDrain(ctx, tx, item, queue.ToolExec, faultErr != nil)
+	}); err != nil {
 		// The diagnosis the branch above built rides along rather than being
 		// replaced. A settlement that fails on the stall path is the worst case
 		// this change has — the results are lost AND the item is left to the
@@ -602,7 +539,7 @@ func (e *Executor) provisionAndRun(ctx context.Context, item *queue.Item, sess s
 	progress()
 	e.materializeFiles(ctx, sb, item.SessionID, sess.files, progress)
 	progress()
-	uses, err := e.unansweredToolUses(ctx, item.SessionID)
+	uses, err := e.runnableToolUses(ctx, item.SessionID)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -799,11 +736,19 @@ func GateTokenRevoker(pool *pgxpool.Pool) sandbox.GateTokenRevoker {
 	return gateTokenMinter{pool: pool}
 }
 
-// runTools runs each unanswered tool use in order, returning the result events
+// runTools runs each runnable tool use in order, returning the result events
 // to append and the first backend fault encountered (nil if all ran). A tool
 // that fails at the tool level (missing file, nonzero exit) still yields a
 // result event — that is the model's to see; only a backend fault (sandbox
 // gone, daemon unreachable) stops the set and leaves the rest unanswered.
+//
+// A call answered under this pass is cancelled (plan 35 decision 9): a
+// thread-scoped interrupt answers its thread's calls itself and never stops
+// the shared item, so each call is checked just before it starts — skipped
+// if answered, a late result for it dropped — and watched on the keeper's
+// beat while it runs, so an interrupted `sleep 3600` costs one beat, not
+// toolset.MaxTimeout, and the sibling calls queued behind it are not held
+// hostage.
 func (e *Executor) runTools(ctx context.Context, sb sandbox.Sandbox, sid domain.ID, uses []toolUse, progress func()) ([]events.NewEvent, error) {
 	// Workdir must match the one the sandbox was provisioned with, so the file
 	// tools resolve a relative path against the same directory bash runs in.
@@ -811,7 +756,19 @@ func (e *Executor) runTools(ctx context.Context, sb sandbox.Sandbox, sid domain.
 	runner := toolset.Runner{Sandbox: sb, Session: sid, Workdir: e.cfg.Workdir}
 	var results []events.NewEvent
 	for _, u := range uses {
-		res, err := runner.Run(ctx, u.id, u.name, u.input)
+		if answered, err := events.Answered(ctx, e.pool, sid, u.id); err != nil {
+			return results, fmt.Errorf("tool %s (%s): answered check: %w", u.name, u.id, err)
+		} else if answered {
+			continue
+		}
+		cctx, stop := e.answeredWatch(ctx, sid, u.id, e.cfg.LeaseTTL/3)
+		res, err := runner.Run(cctx, u.id, u.name, u.input)
+		if stop() {
+			// Answered under it: whatever it returned, or failed with, is a
+			// late result for a call the log already closed.
+			progress()
+			continue
+		}
 		if err != nil {
 			// Backend fault: stop here. The results gathered so far are still
 			// appended so a retry does not re-run them; this tool and any after
@@ -822,6 +779,7 @@ func (e *Executor) runTools(ctx context.Context, sb sandbox.Sandbox, sid domain.
 		if err != nil {
 			return results, err
 		}
+		ev.ThreadID, ev.CrossPosted = u.thread, u.crossPosted
 		results = append(results, ev)
 		// A tool answered: the run is moving, however long the next one takes.
 		progress()

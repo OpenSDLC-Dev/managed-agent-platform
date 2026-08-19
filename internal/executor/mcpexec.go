@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
-	"slices"
 	"time"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
@@ -38,54 +37,72 @@ type mcpToolUse struct {
 	server string
 	name   string
 	input  json.RawMessage
+	// thread is the call's thread (empty for the primary) and crossPosted
+	// whether it was cross-posted: the result answering it is written the
+	// same way, and the endpoint it names is resolved from that thread's
+	// agent (plan 35 decisions 2, 14).
+	thread      domain.ID
+	crossPosted bool
 }
 
-// unansweredMCPToolUses returns the session's agent.mcp_tool_use events that no
-// agent.mcp_tool_result answers, oldest first. Only the platform writes that
-// result — a client may post neither shape, and no BYOC worker sees an MCP call
-// — so unlike the sandbox six there is exactly one answering type to diff
-// against, and a reclaim re-runs only what is still outstanding.
-func (e *Executor) unansweredMCPToolUses(ctx context.Context, sid domain.ID) ([]mcpToolUse, error) {
-	uses, err := e.log.List(ctx, sid, events.ListQuery{
-		Types: []string{string(domain.EventAgentMCPToolUse)}})
+// runnableMCPToolUses returns the session's runnable agent.mcp_tool_use events
+// — unanswered, and allowed or confirmed (plan 35 decision 5) — oldest first
+// across every thread. Only the platform writes the answering
+// agent.mcp_tool_result — a client may post neither shape, and no BYOC worker
+// sees an MCP call — and a reclaim re-runs only what is still outstanding.
+func (e *Executor) runnableMCPToolUses(ctx context.Context, sid domain.ID) ([]mcpToolUse, error) {
+	uses, err := events.RunnableToolUses(ctx, e.pool, sid, domain.EventAgentMCPToolUse)
 	if err != nil {
 		return nil, fmt.Errorf("list mcp tool uses: %w", err)
 	}
-	if len(uses) == 0 {
-		return nil, nil
-	}
-	results, err := e.log.List(ctx, sid, events.ListQuery{
-		Types: []string{string(domain.EventAgentMCPToolResult)}})
-	if err != nil {
-		return nil, fmt.Errorf("list mcp tool results: %w", err)
-	}
-	answered := make(map[string]bool, len(results))
-	for _, r := range results {
-		var ref struct {
-			MCPToolUseID string `json:"mcp_tool_use_id"`
-		}
-		if err := json.Unmarshal(r.Body, &ref); err != nil {
-			return nil, fmt.Errorf("mcp tool result %s: %w", r.ID, err)
-		}
-		answered[ref.MCPToolUseID] = true
-	}
-
 	var out []mcpToolUse
 	for _, u := range uses {
-		if answered[u.ID.String()] {
-			continue
-		}
 		var body struct {
 			Name          string          `json:"name"`
 			MCPServerName string          `json:"mcp_server_name"`
 			Input         json.RawMessage `json:"input"`
 		}
-		if err := json.Unmarshal(u.Body, &body); err != nil {
+		if err := json.Unmarshal(u.Payload, &body); err != nil {
 			return nil, fmt.Errorf("mcp tool use %s: %w", u.ID, err)
 		}
 		out = append(out, mcpToolUse{
 			id: u.ID, server: body.MCPServerName, name: body.Name, input: body.Input,
+			thread: u.ThreadID, crossPosted: u.CrossPosted,
 		})
+	}
+	return out, nil
+}
+
+// threadMCP is what one thread's MCP calls resolve against: the servers its
+// agent declares (name → url) and the catalog listings it has (name → the
+// url the listing was read at).
+type threadMCP struct {
+	declared map[string]string
+	ready    map[string]string
+}
+
+// threadMCPFor resolves each thread named by calls to its declared servers
+// and ready listings — the primary's from the session's resolved agent, a
+// child's from its snapshot (decision 14).
+func (e *Executor) threadMCPFor(ctx context.Context, sid domain.ID, primary []mcpServerRef, calls []mcpToolUse) (map[domain.ID]threadMCP, error) {
+	out := map[domain.ID]threadMCP{}
+	for _, c := range calls {
+		if _, ok := out[c.thread]; ok {
+			continue
+		}
+		declared, err := e.threadMCPServers(ctx, sid, c.thread, primary)
+		if err != nil {
+			return nil, err
+		}
+		ready, err := e.readyEndpoints(ctx, sid, c.thread)
+		if err != nil {
+			return nil, err
+		}
+		endpoints := make(map[string]string, len(declared))
+		for _, s := range declared {
+			endpoints[s.Name] = s.URL
+		}
+		out[c.thread] = threadMCP{declared: endpoints, ready: ready}
 	}
 	return out, nil
 }
@@ -111,13 +128,8 @@ func (e *Executor) unansweredMCPToolUses(ctx context.Context, sid domain.ID) ([]
 // Discovery has no such exception: a listing is re-derivable, so it stays
 // all-or-nothing whichever death it was.
 func (e *Executor) runMCPTools(ctx context.Context, cfg domain.EnvironmentConfig,
-	vaultIDs []string, declared []mcpServerRef, ready map[string]string, spill *mcpSpiller,
+	vaultIDs []string, threads map[domain.ID]threadMCP, spill *mcpSpiller,
 	uses []mcpToolUse, progress func()) ([]events.NewEvent, error, error) {
-
-	endpoints := make(map[string]string, len(declared))
-	for _, s := range declared {
-		endpoints[s.Name] = s.URL
-	}
 
 	var out []events.NewEvent
 	deadline := time.Now().Add(e.cfg.MCPPassTimeout)
@@ -136,12 +148,33 @@ func (e *Executor) runMCPTools(ctx context.Context, cfg domain.EnvironmentConfig
 		if i > 0 && start.After(deadline) {
 			break
 		}
+		// Answered under a thread-scoped interrupt since the scan: skipped, and
+		// cancelled on the keeper's beat if it happens mid-call (decision 9).
+		// A check that fails leaves like the cut-short arm below: answers
+		// already given commit, the item comes back for the rest.
+		if answered, err := events.Answered(ctx, e.pool, spill.sid, u.id); err != nil {
+			if len(out) == 0 {
+				return nil, fmt.Errorf("mcp tool %s (%s): answered check: %w", u.name, u.id, err), nil
+			}
+			slog.ErrorContext(ctx, "executor: mcp pass cut short, its answers committed",
+				"tool_use", u.id, "tool", u.name, "error", err)
+			break
+		} else if answered {
+			continue
+		}
 		res, failure := mcpAnswer{}, mcpFailure{}
-		if endpoint, refusal := callEndpoint(endpoints, ready, u.server); refusal != "" {
+		th := threads[u.thread]
+		if endpoint, refusal := callEndpoint(th.declared, th.ready, u.server); refusal != "" {
 			res = mcpFailed("%s", refusal)
 		} else {
 			var runErr error
-			res, failure, runErr = e.runMCPTool(ctx, cfg, vaultIDs, endpoint, u)
+			cctx, stop := e.answeredWatch(ctx, spill.sid, u.id, e.cfg.LeaseTTL/3)
+			res, failure, runErr = e.runMCPTool(cctx, cfg, vaultIDs, endpoint, u)
+			if stop() {
+				toolset.RecordRun(ctx, mcpToolMetricName, time.Since(start),
+					toolset.Result{IsError: true}, context.Canceled)
+				continue
+			}
 			if runErr != nil {
 				// A call this pass could not even attempt, for a reason that is
 				// not the server's. If earlier calls in the pass were answered,
@@ -187,12 +220,16 @@ func (e *Executor) runMCPTools(ctx context.Context, cfg domain.EnvironmentConfig
 		if err != nil {
 			return out, nil, err
 		}
+		ev.ThreadID, ev.CrossPosted = u.thread, u.crossPosted
 		out = append(out, ev)
 		if failure.message != "" {
 			ev, err := mcpFailureEvent(u.server, failure)
 			if err != nil {
 				return out, nil, err
 			}
+			// On the surfaces the call and its answer are on: the diagnosis
+			// follows the result it explains.
+			ev.ThreadID, ev.CrossPosted = u.thread, u.crossPosted
 			out = append(out, ev)
 		}
 	}
@@ -227,14 +264,14 @@ func (e *Executor) answerMCPCalls(ctx context.Context, item *queue.Item, sess se
 	// The settlement below keeps the calls that answered, so that converges
 	// rather than looping — at the price of calling a third party's tool twice
 	// for the one cut off in flight, every reclaim (#383).
-	ready, err := e.readyEndpoints(ctx, item.SessionID)
+	threads, err := e.threadMCPFor(ctx, item.SessionID, sess.mcpServers, calls)
 	if err != nil {
 		return err
 	}
 	kctx, keeper := e.queue.KeepLease(ctx, item, e.cfg.LeaseTTL, e.cfg.StallTimeout)
 	spill := &mcpSpiller{exec: e, sid: item.SessionID, sess: sess}
 	results, faultErr, runErr := e.runMCPTools(
-		kctx, sess.envConfig, sess.vaultIDs, sess.mcpServers, ready, spill, calls, keeper.Progress)
+		kctx, sess.envConfig, sess.vaultIDs, threads, spill, calls, keeper.Progress)
 	kerr := keeper.Close()
 	// A stall commits what answered, for the reason the tool_exec lane does: an
 	// MCP call that returned ran in *someone else's system*, and discarding its
@@ -266,47 +303,15 @@ func (e *Executor) answerMCPCalls(ctx context.Context, item *queue.Item, sess se
 		faultErr = stallFault(kerr, faultErr)
 	}
 
-	opts := events.AppendOptions{
-		Then: func(ctx context.Context, tx pgx.Tx) error {
-			mcpPending, err := events.HasUnansweredMCPToolUse(ctx, tx, item.SessionID, nil)
-			if err != nil {
-				return err
-			}
-			// Chained by handing this very item back, not by enqueuing a second
-			// one: Enqueue is keyed (session_id, kind) over the live states, so
-			// a fresh mcp_exec raised while this one is still active would be
-			// dropped on conflict and the session would wait on work nobody
-			// queued. The other three arms name a different kind and enqueue.
-			if mcpPending {
-				return e.queue.Requeue(ctx, tx, item)
-			}
-			platformPending, err := events.UnansweredPlatformToolNames(ctx, tx, item.SessionID, nil)
-			if err != nil {
-				return err
-			}
-			if len(platformPending) > 0 {
-				kind := queue.ToolExec
-				if slices.ContainsFunc(platformPending, toolset.IsWebTool) {
-					kind = queue.WebExec
-				}
-				if _, err := e.queue.Enqueue(ctx, tx, item.EnvironmentID, item.SessionID, kind); err != nil {
-					return err
-				}
-				return e.queue.Complete(ctx, tx, item)
-			}
-			anyPending, err := events.HasUnansweredToolUse(ctx, tx, item.SessionID, nil)
-			if err != nil {
-				return err
-			}
-			if !anyPending {
-				if _, err := e.queue.Enqueue(ctx, tx, item.EnvironmentID, item.SessionID, queue.ModelTurn); err != nil {
-					return err
-				}
-			}
-			return e.queue.Complete(ctx, tx, item)
-		},
-	}
-	if _, err := e.log.AppendWith(ctx, item.SessionID, results, opts); err != nil {
+	// The chain is settleDrain's: an MCP call still runnable hands this very
+	// item back rather than enqueuing a second one (Enqueue is keyed over the
+	// live states, so a fresh mcp_exec raised while this one is still active
+	// would be dropped on conflict and the session would wait on work nobody
+	// queued); the other kinds enqueue and complete; each thread whose calls
+	// are all answered is woken.
+	if err := e.commitResults(ctx, item.SessionID, results, func(ctx context.Context, tx pgx.Tx) error {
+		return e.settleDrain(ctx, tx, item, queue.MCPExec, false)
+	}); err != nil {
 		// The stall rides along, as it does in the tool_exec lane: the answers
 		// are lost and the item is left to the lease, and the append error alone
 		// names neither the stall nor the call it cut short.

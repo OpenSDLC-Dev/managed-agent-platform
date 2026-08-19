@@ -306,7 +306,7 @@ func (b *Brain) settleVerdict(ctx context.Context, item *queue.Item, oe *events.
 		// chains — including one that landed between the scheduling commit
 		// and the grading claim, whose seq is below everything this wake
 		// read. A seq-filtered probe would idle past it and strand it forever.
-		chained, err := pendingInput(ctx, tx, sid, 0)
+		chained, err := pendingInput(ctx, tx, sid, "", 0)
 		if err != nil {
 			return err
 		}
@@ -315,9 +315,15 @@ func (b *Brain) settleVerdict(ctx context.Context, item *queue.Item, oe *events.
 				return b.queue.Requeue(ctx, tx, item)
 			}
 		} else {
-			batch = append(batch, events.StatusChange(sid, domain.SessionIdle, &domain.StopReason{Type: domain.StopEndTurn})...)
-			idle := domain.SessionIdle
-			opts.SetStatus = &idle
+			// The grading turn is the primary's (plan 35 decision 15): its
+			// idle folds the session.
+			pair, moved, err := events.TransitionThread(ctx, tx, sid, events.ThreadTransition{
+				Status: domain.SessionIdle, Stop: &domain.StopReason{Type: domain.StopEndTurn}})
+			if err != nil {
+				return err
+			}
+			batch = append(batch, pair...)
+			opts.SetStatus = moved
 			opts.Then = func(ctx context.Context, tx pgx.Tx) error {
 				return b.queue.Complete(ctx, tx, item)
 			}
@@ -357,7 +363,7 @@ func (b *Brain) settleGraderError(ctx context.Context, item *queue.Item, active 
 
 	// Unfiltered for the same reason as settleVerdict: grading marks nothing
 	// processed, so any unprocessed inbound event must chain.
-	chained, err := pendingInput(ctx, tx, sid, 0)
+	chained, err := pendingInput(ctx, tx, sid, "", 0)
 	if err != nil {
 		return err
 	}
@@ -388,9 +394,13 @@ func (b *Brain) settleGraderError(ctx context.Context, item *queue.Item, active 
 			return b.queue.Requeue(ctx, tx, item)
 		}
 	} else {
-		batch = append(batch, events.StatusChange(sid, domain.SessionIdle, &domain.StopReason{Type: domain.StopRetriesExhausted})...)
-		idle := domain.SessionIdle
-		opts.SetStatus = &idle
+		pair, moved, err := events.TransitionThread(ctx, tx, sid, events.ThreadTransition{
+			Status: domain.SessionIdle, Stop: &domain.StopReason{Type: domain.StopRetriesExhausted}})
+		if err != nil {
+			return err
+		}
+		batch = append(batch, pair...)
+		opts.SetStatus = moved
 		opts.Then = func(ctx context.Context, tx pgx.Tx) error {
 			return b.queue.Complete(ctx, tx, item)
 		}
@@ -716,8 +726,11 @@ func mustTextContent(text string) json.RawMessage {
 // input chains first (a mid-turn message answers before the grader runs); an
 // active outcome then schedules its evaluation cycle — the start event and
 // the entry's flip to evaluating commit here, and the model call itself runs
-// on this item's next claim (two-phase, no call under the lock); otherwise
-// the session idles with end_turn exactly as before.
+// on the primary's next claim (two-phase, no call under the lock) — but only
+// when this thread's end_turn is the session's quiescence (plan 35 decision
+// 15: the fold would move to idle end_turn), so a child's own end_turn or
+// the coordinator's park never grades mid-delegation; otherwise the thread
+// idles with end_turn and the session follows the fold.
 func (b *Brain) settleEndTurn(ctx context.Context, sid domain.ID, item *queue.Item, watermark int64,
 	opts events.AppendOptions, head []events.NewEvent) error {
 
@@ -741,12 +754,13 @@ func (b *Brain) settleEndTurn(ctx context.Context, sid domain.ID, item *queue.It
 
 	chained := false
 	if watermark > 0 {
-		if chained, err = pendingInput(ctx, tx, sid, watermark); err != nil {
+		if chained, err = pendingInput(ctx, tx, sid, item.ThreadID, watermark); err != nil {
 			return err
 		}
 	}
 
 	batch := head
+	endTurn := &domain.StopReason{Type: domain.StopEndTurn}
 	switch {
 	case chained:
 		opts.Then = func(ctx context.Context, tx pgx.Tx) error {
@@ -760,12 +774,40 @@ func (b *Brain) settleEndTurn(ctx context.Context, sid domain.ID, item *queue.It
 			}
 		}
 		active, ok := events.ActiveOutcome(evals)
-		if ok && (active.Result == domain.OutcomeResultPending || active.Result == domain.OutcomeResultRunning) {
+		grading := ok && (active.Result == domain.OutcomeResultPending || active.Result == domain.OutcomeResultRunning)
+		if grading {
+			// Only at the session's quiescence (decision 15): while a sibling
+			// still runs or asks, this thread idles like any other below and
+			// grading waits for the last one.
+			folded, stop, perr := events.PreviewTransition(ctx, tx, sid, events.ThreadTransition{
+				ThreadID: item.ThreadID, Status: domain.SessionIdle, Stop: endTurn})
+			if perr != nil {
+				return perr
+			}
+			grading = folded == domain.SessionIdle && stop != nil && stop.Type == domain.StopEndTurn
+		}
+		if grading {
 			startEv, serr := events.NewOutcomeStartEvent(active.OutcomeID, active.Iteration)
 			if serr != nil {
 				return serr
 			}
 			batch = append(batch, startEv)
+			if item.ThreadID != "" {
+				// A child's end_turn is the quiescence: the parked primary
+				// wakes for the grading turn first, then the child idles — in
+				// that order so the session never idles between, exactly as a
+				// single-agent session never does.
+				wake, _, werr := events.TransitionThread(ctx, tx, sid, events.ThreadTransition{Status: domain.SessionRunning})
+				if werr != nil {
+					return werr
+				}
+				park, _, perr := events.TransitionThread(ctx, tx, sid, events.ThreadTransition{
+					ThreadID: item.ThreadID, Status: domain.SessionIdle, Stop: endTurn})
+				if perr != nil {
+					return perr
+				}
+				batch = append(append(batch, wake...), park...)
+			}
 			opts.MutateOutcomes = func(evals []domain.OutcomeEvaluation) ([]domain.OutcomeEvaluation, error) {
 				for i := range evals {
 					if evals[i].OutcomeID == active.OutcomeID {
@@ -784,9 +826,20 @@ func (b *Brain) settleEndTurn(ctx context.Context, sid domain.ID, item *queue.It
 			// stale snapshots. A self_hosted sandbox is unreachable (the
 			// reference worker has no file lane), so grading stays direct: the
 			// item requeues and its next claim runs the grader transcript-only.
+			//
+			// A child's item never carries the grading turn: it completes, and
+			// the primary's turn is enqueued (self_hosted) or left to the
+			// harvest's settlement (cloud), which enqueues the session's — the
+			// primary's — model_turn.
 			opts.Then = func(ctx context.Context, tx pgx.Tx) error {
 				if envKind == string(domain.EnvCloud) {
 					if _, err := b.queue.Enqueue(ctx, tx, item.EnvironmentID, sid, queue.OutputsHarvest); err != nil {
+						return err
+					}
+					return b.queue.Complete(ctx, tx, item)
+				}
+				if item.ThreadID != "" {
+					if _, err := b.queue.Enqueue(ctx, tx, item.EnvironmentID, sid, queue.ModelTurn); err != nil {
 						return err
 					}
 					return b.queue.Complete(ctx, tx, item)
@@ -795,9 +848,13 @@ func (b *Brain) settleEndTurn(ctx context.Context, sid domain.ID, item *queue.It
 			}
 			break
 		}
-		batch = append(batch, events.StatusChange(sid, domain.SessionIdle, &domain.StopReason{Type: domain.StopEndTurn})...)
-		idle := domain.SessionIdle
-		opts.SetStatus = &idle
+		pair, moved, err := events.TransitionThread(ctx, tx, sid, events.ThreadTransition{
+			ThreadID: item.ThreadID, Status: domain.SessionIdle, Stop: endTurn})
+		if err != nil {
+			return err
+		}
+		batch = append(batch, pair...)
+		opts.SetStatus = moved
 		opts.Then = func(ctx context.Context, tx pgx.Tx) error {
 			return b.queue.Complete(ctx, tx, item)
 		}

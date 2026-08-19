@@ -14,12 +14,12 @@ import (
 // kept as the client's raw bytes after validation, so they round-trip
 // byte-for-byte.
 //
-// Divergences (documented in docs/DIVERGENCES.md): session_thread_id must be
-// null/absent until child threads are spawned (plan 35 slice 3). Tool-result
-// references are cross-checked against the log by ValidateToolResults
-// (toolflow.go) — that needs a database, so it runs in the API's send
-// transaction, not here; so do user.define_outcome's single-active check and
-// file-rubric validation (ValidateDefineOutcomes in the API layer).
+// An explicit session_thread_id is validated for shape here and resolved
+// against the log by RouteInbound (route.go). Tool-result references are
+// cross-checked against the log by ValidateToolResults (toolflow.go) — that
+// needs a database, so it runs in the API's send transaction, not here; so
+// do user.define_outcome's single-active check and file-rubric validation
+// (ValidateDefineOutcomes in the API layer).
 
 // NormalizeInbound validates one send batch. envKind is the session's
 // environment kind ("cloud" | "self_hosted"), which gates user.tool_result.
@@ -181,10 +181,13 @@ func normalizeUserInterrupt(obj map[string]json.RawMessage) (NewEvent, error) {
 	if err := allowKeys(obj, "type", "session_thread_id"); err != nil {
 		return NewEvent{}, err
 	}
-	if err := requireNullThread(obj); err != nil {
+	claim, err := threadClaim(obj)
+	if err != nil {
 		return NewEvent{}, err
 	}
-	return newEvent(domain.EventUserInterrupt, fields{"session_thread_id": nullRaw})
+	ev, err := newEvent(domain.EventUserInterrupt, fields{"session_thread_id": nullRaw})
+	ev.ThreadID = claim
+	return ev, err
 }
 
 func normalizeToolConfirmation(obj map[string]json.RawMessage) (NewEvent, error) {
@@ -213,15 +216,18 @@ func normalizeToolConfirmation(obj map[string]json.RawMessage) (NewEvent, error)
 		}
 		denyMessage = raw
 	}
-	if err := requireNullThread(obj); err != nil {
+	claim, err := threadClaim(obj)
+	if err != nil {
 		return NewEvent{}, err
 	}
-	return newEvent(domain.EventUserToolConfirm, fields{
+	ev, err := newEvent(domain.EventUserToolConfirm, fields{
 		"result":            mustJSON(result),
 		"tool_use_id":       mustJSON(toolUseID),
 		"deny_message":      denyMessage,
 		"session_thread_id": nullRaw,
 	})
+	ev.ThreadID = claim
+	return ev, err
 }
 
 // normalizeToolResult covers user.tool_result and user.custom_tool_result,
@@ -249,15 +255,18 @@ func normalizeToolResult(obj map[string]json.RawMessage, typ domain.EventType, r
 		}
 		isError = raw
 	}
-	if err := requireNullThread(obj); err != nil {
+	claim, err := threadClaim(obj)
+	if err != nil {
 		return NewEvent{}, err
 	}
-	return newEvent(typ, fields{
+	ev, err := newEvent(typ, fields{
 		refKey:              mustJSON(ref),
 		"content":           content,
 		"is_error":          isError,
 		"session_thread_id": nullRaw,
 	})
+	ev.ThreadID = claim
+	return ev, err
 }
 
 // Rubric bounds, from the SDK's typed schema and the plan's own choices:
@@ -428,14 +437,27 @@ func isNullRaw(raw json.RawMessage) bool {
 	return string(raw) == "null"
 }
 
-// requireNullThread rejects a non-null session_thread_id: nothing spawns a
-// child thread yet (plan 35 slice 3 lifts this into accept-and-validate), so
-// there is no thread for the field to address (documented divergence).
-func requireNullThread(obj map[string]json.RawMessage) error {
-	if raw, set := obj["session_thread_id"]; set && !isNullRaw(raw) {
-		return fmt.Errorf("session_thread_id must be null: child threads are not spawned yet")
+// threadClaim reads an inbound event's explicit session_thread_id (plan 35
+// decision 9): null or absent is no claim; a string must be a well-formed
+// thread id. The claim rides NewEvent.ThreadID out of normalization for
+// RouteInbound to resolve against the log — a confirmation or result routes
+// by the tool use it answers and the claim must match; an interrupt's claim
+// names the one thread it ends — while the stored payload keeps
+// session_thread_id null, rendered per surface like every thread-addressable
+// event.
+func threadClaim(obj map[string]json.RawMessage) (domain.ID, error) {
+	raw, set := obj["session_thread_id"]
+	if !set || isNullRaw(raw) {
+		return "", nil
 	}
-	return nil
+	var s string
+	if err := json.Unmarshal(raw, &s); err != nil {
+		return "", fmt.Errorf("session_thread_id must be a string or null")
+	}
+	if !domain.ValidWithPrefix(s, domain.PrefixSessionThread) {
+		return "", fmt.Errorf("session_thread_id %q is not a session thread id", s)
+	}
+	return domain.ID(s), nil
 }
 
 // Content-block vocabularies per carrier event.

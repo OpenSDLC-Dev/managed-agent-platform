@@ -208,9 +208,7 @@ func newHarnessWrapped(t *testing.T, sb *fakeSandbox, wrap func(http.Handler) ht
 	ctx := context.Background()
 	pool := pgtest.NewPool(t)
 	sid, envID := pgtest.NewSession(t, pool, "self_hosted")
-	if _, err := pool.Exec(ctx, `UPDATE sessions SET status = 'running' WHERE id = $1`, sid.String()); err != nil {
-		t.Fatal(err)
-	}
+	pgtest.SetSessionStatus(t, pool, sid, "running")
 	workerKey, err := api.IssueEnvironmentKey(ctx, pool, envID.String(), "worker-test")
 	if err != nil {
 		t.Fatalf("issue env key: %v", err)

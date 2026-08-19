@@ -234,6 +234,14 @@ func (q *Queue) Heartbeat(ctx context.Context, envID, workID domain.ID, expected
 // graceful-stopping a stopping item, or stopping a stopped one) is
 // ErrWorkConflict; an item not visible to the work API is ErrWorkNotFound.
 func (q *Queue) Stop(ctx context.Context, envID, workID domain.ID, force bool) (*Work, error) {
+	return q.StopWith(ctx, q.pool, envID, workID, force)
+}
+
+// StopWith is Stop on the caller's db handle, so the control plane can stop
+// an item inside a transaction that holds the session row lock and re-arms
+// the session's remaining runnable calls in the same commit (plan 35
+// decision 13 iii).
+func (q *Queue) StopWith(ctx context.Context, db DB, envID, workID domain.ID, force bool) (*Work, error) {
 	var sql string
 	if force {
 		sql = `UPDATE work_items
@@ -259,7 +267,7 @@ func (q *Queue) Stop(ctx context.Context, envID, workID domain.ID, force bool) (
 		         AND state IN ('queued', 'starting', 'active')
 		       RETURNING ` + workColumns
 	}
-	w, err := scanWork(q.pool.QueryRow(ctx, sql, workID, envID))
+	w, err := scanWork(db.QueryRow(ctx, sql, workID, envID))
 	if err == nil {
 		return w, nil
 	}
@@ -267,7 +275,7 @@ func (q *Queue) Stop(ctx context.Context, envID, workID domain.ID, force bool) (
 		return nil, fmt.Errorf("queue: stop %s: %w", workID, err)
 	}
 	// No row updated: distinguish a missing item from a conflicting state.
-	present, verr := q.visible(ctx, envID, workID)
+	present, verr := q.visibleOn(ctx, db, envID, workID)
 	if verr != nil {
 		return nil, fmt.Errorf("queue: stop %s: %w", workID, verr)
 	}
@@ -319,8 +327,12 @@ func (q *Queue) UpdateMetadata(ctx context.Context, envID, workID domain.ID, ups
 // item (→ ErrWorkNotFound) apart from one whose state-machine precondition
 // simply did not hold (→ mismatch/conflict).
 func (q *Queue) visible(ctx context.Context, envID, workID domain.ID) (bool, error) {
+	return q.visibleOn(ctx, q.pool, envID, workID)
+}
+
+func (q *Queue) visibleOn(ctx context.Context, db DB, envID, workID domain.ID) (bool, error) {
 	var one int
-	err := q.pool.QueryRow(ctx,
+	err := db.QueryRow(ctx,
 		`SELECT 1 FROM work_items WHERE id = $1 AND environment_id = $2`+workAPIScope,
 		workID, envID).Scan(&one)
 	if errors.Is(err, pgx.ErrNoRows) {

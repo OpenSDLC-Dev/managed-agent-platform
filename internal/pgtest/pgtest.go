@@ -267,3 +267,44 @@ func NewSessionInEnv(t *testing.T, pool *pgxpool.Pool, envID domain.ID) (session
 	}
 	return sessionID
 }
+
+// SetSessionStatus moves a fixture session to status the way the platform
+// does — the primary thread's row and the session's column together (plan 35
+// decision 4: the session's status is a fold over its threads', so a fixture
+// that moved the column alone would be read back as its idle primary).
+func SetSessionStatus(t *testing.T, pool *pgxpool.Pool, sessionID domain.ID, status string) {
+	t.Helper()
+	ctx := context.Background()
+	if _, err := pool.Exec(ctx, `UPDATE sessions SET status = $2 WHERE id = $1`, sessionID, status); err != nil {
+		t.Fatalf("fixture status: %v", err)
+	}
+	if _, err := pool.Exec(ctx,
+		`UPDATE session_threads SET status = $2 WHERE session_id = $1 AND parent_thread_id IS NULL`,
+		sessionID, status); err != nil {
+		t.Fatalf("fixture thread status: %v", err)
+	}
+}
+
+// NewChildThread inserts an idle child thread under the session's primary —
+// the test seam plan 35 slice 3 runs the thread substrate through until slice
+// 4's delegation spawns real ones — carrying a minimal agent snapshot (model
+// "fixture-model", no tools) named "worker", and returns its id.
+func NewChildThread(t *testing.T, pool *pgxpool.Pool, sessionID domain.ID) domain.ID {
+	t.Helper()
+	return NewChildThreadWithAgent(t, pool, sessionID, `{"type":"agent","id":"agent_worker","version":1,"name":"worker",`+
+		`"model":{"id":"fixture-model"},"system":"","description":"","tools":[],"mcp_servers":[],"skills":[]}`)
+}
+
+// NewChildThreadWithAgent is NewChildThread with the given SessionThreadAgent
+// snapshot (its name is the thread's agent_name).
+func NewChildThreadWithAgent(t *testing.T, pool *pgxpool.Pool, sessionID domain.ID, agentJSON string) domain.ID {
+	t.Helper()
+	id := domain.NewID("sthr")
+	if _, err := pool.Exec(context.Background(),
+		`INSERT INTO session_threads (id, session_id, parent_thread_id, agent, agent_name, status)
+		 VALUES ($1, $2, $3, $4::jsonb, COALESCE($4::jsonb->>'name', 'worker'), 'idle')`,
+		id, sessionID, domain.PrimaryThreadID(sessionID), agentJSON); err != nil {
+		t.Fatalf("fixture child thread: %v", err)
+	}
+	return id
+}

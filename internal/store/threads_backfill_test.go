@@ -33,6 +33,8 @@ func TestSessionThreadsBackfillsLegacySessions(t *testing.T) {
 		         'env_legacy', 'idle', '{"input_tokens":7}',
 		         '2026-01-02T03:04:05Z', '2026-01-02T03:04:06Z', '2026-01-02T03:04:07Z')`,
 		`INSERT INTO events (id, session_id, seq, type, payload) VALUES ('sevt_legacy', 'sesn_0123456789abcdefghjkmnpqrs', 1, 'user.message', '{}')`,
+		`INSERT INTO events (id, session_id, seq, type, payload) VALUES ('sevt_legacy_idle', 'sesn_0123456789abcdefghjkmnpqrs', 2, 'session.status_idle',
+		         '{"stop_reason":{"type":"requires_action","event_ids":["sevt_legacy"]}}')`,
 	} {
 		if _, err := pool.Exec(ctx, q); err != nil {
 			t.Fatalf("legacy fixture: %v", err)
@@ -71,6 +73,16 @@ func TestSessionThreadsBackfillsLegacySessions(t *testing.T) {
 		archivedAt == nil || !strings.HasPrefix(*archivedAt, "2026-01-02 03:04:07") {
 		t.Errorf("backfilled row = %s %s %s parent=%v agent=%v usage=%s created=%s updated=%s archived=%v",
 			id, name, status, parent, agent, usage, createdAt, updatedAt, archivedAt)
+	}
+	// 0026: the idle primary learned the stop reason its session last
+	// advertised, so the first fold over it is not an idle thread with none.
+	var stop string
+	if err := pool.QueryRow(ctx,
+		`SELECT stop_reason::text FROM session_threads WHERE session_id = 'sesn_0123456789abcdefghjkmnpqrs'`).Scan(&stop); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(stop, `"requires_action"`) || !strings.Contains(stop, `"sevt_legacy"`) {
+		t.Errorf("backfilled stop_reason = %s, want the last session.status_idle's", stop)
 	}
 	// A legacy event row is the primary's and not cross-posted.
 	if err := pool.QueryRow(ctx, `SELECT thread_id, cross_posted FROM events WHERE id = 'sevt_legacy'`).

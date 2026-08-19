@@ -16,9 +16,12 @@
 // (kind <> 'tool_exec' OR e.kind = 'cloud'). Each Kind below records why it
 // falls where it does.
 //
-// Enqueue is idempotent per (session, kind) while a live item exists, so
-// event-append triggers can fire without double-scheduling; a claim leases the
-// item and an expired lease makes it claimable again.
+// Enqueue is idempotent per (session, thread, kind) while a live item exists,
+// so event-append triggers can fire without double-scheduling; a claim leases
+// the item and an expired lease makes it claimable again. A model_turn is one
+// thread's (plan 35 decision 5; NULL thread = the primary), so sibling threads
+// run turns concurrently; the exec kinds stay session-keyed — one shared
+// sandbox, one item covers every thread's backlog.
 package queue
 
 import (
@@ -91,7 +94,10 @@ type Item struct {
 	ID            domain.ID
 	EnvironmentID domain.ID
 	SessionID     domain.ID
-	Kind          Kind
+	// ThreadID is the thread a model_turn belongs to; empty for the primary
+	// thread and for every session-keyed exec kind.
+	ThreadID domain.ID
+	Kind     Kind
 	// Lease is the claim's expiry as recorded by the database. It is the
 	// claimant's proof of ownership: Extend and Complete match it against
 	// the row (the same optimistic-concurrency shape as the reference work
@@ -173,8 +179,18 @@ func New(pool *pgxpool.Pool) *Queue { return &Queue{pool: pool} }
 
 // Enqueue inserts a queued item unless a live (queued/starting/active) item
 // for the same session and kind exists. It reports whether a new item was
-// created; false means an existing live item already covers the work.
+// created; false means an existing live item already covers the work. The
+// item is the primary thread's (a model_turn) or session-keyed (the exec
+// kinds) — EnqueueThread is the child-thread form.
 func (q *Queue) Enqueue(ctx context.Context, db DB, envID, sessionID domain.ID, kind Kind) (bool, error) {
+	return q.EnqueueThread(ctx, db, envID, sessionID, "", kind)
+}
+
+// EnqueueThread is Enqueue for one thread's model_turn (empty threadID = the
+// primary): the live-dedup key is (session, thread, kind), so each thread has
+// at most one live turn and sibling threads' turns do not suppress each other.
+// Exec kinds are session-keyed and take an empty threadID.
+func (q *Queue) EnqueueThread(ctx context.Context, db DB, envID, sessionID, threadID domain.ID, kind Kind) (bool, error) {
 	// Only executor-consumed work carries a trace context — tool_exec
 	// (consumed by the cloud executor's Claim and the BYOC worker's poll),
 	// web_exec (the executor's web driver), outputs_harvest (the deliverables
@@ -187,11 +203,11 @@ func (q *Queue) Enqueue(ctx context.Context, db DB, envID, sessionID domain.ID, 
 		traceCtx = traceContextArg(ctx)
 	}
 	tag, err := db.Exec(ctx,
-		`INSERT INTO work_items (id, environment_id, session_id, kind, trace_context)
-		 VALUES ($1, $2, $3, $4, $5::jsonb)
-		 ON CONFLICT (session_id, kind) WHERE state IN ('queued', 'starting', 'active')
+		`INSERT INTO work_items (id, environment_id, session_id, thread_id, kind, trace_context)
+		 VALUES ($1, $2, $3, $4, $5, $6::jsonb)
+		 ON CONFLICT (session_id, thread_id, kind) WHERE state IN ('queued', 'starting', 'active')
 		 DO NOTHING`,
-		domain.NewID("work"), envID, sessionID, kind, traceCtx)
+		domain.NewID("work"), envID, sessionID, nullableThread(threadID), kind, traceCtx)
 	if err != nil {
 		return false, fmt.Errorf("queue: enqueue %s for %s: %w", kind, sessionID, err)
 	}
@@ -259,10 +275,10 @@ func (q *Queue) Claim(ctx context.Context, kind Kind, ttl time.Duration) (*Item,
 		     updated_at = now()
 		 FROM picked p
 		 WHERE w.id = p.id
-		 RETURNING w.id, w.environment_id, w.session_id, w.kind, w.lease_expires_at, p.state,
-		           w.trace_context`,
-		kind, ttl.Seconds()).Scan(&it.ID, &it.EnvironmentID, &it.SessionID, &it.Kind, &it.Lease, &prevState,
-		&it.TraceContext)
+		 RETURNING w.id, w.environment_id, w.session_id, COALESCE(w.thread_id, ''), w.kind,
+		           w.lease_expires_at, p.state, w.trace_context`,
+		kind, ttl.Seconds()).Scan(&it.ID, &it.EnvironmentID, &it.SessionID, &it.ThreadID, &it.Kind, &it.Lease,
+		&prevState, &it.TraceContext)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil
 	}
@@ -311,18 +327,21 @@ func (q *Queue) Claim(ctx context.Context, kind Kind, ttl time.Duration) (*Item,
 // active (see Stop) — the null-lease arm is not for it, but for the one row the
 // new state machine does not write: during a rolling upgrade a not-yet-upgraded
 // replica can still park a never-polled queued item, which has no lease at all,
-// in stopping. Migration 0014 finalizes the ones written before the upgrade; this
-// catches the ones written during it. The finalize rides along as a data-modifying CTE, which
-// Postgres runs to completion whether or not the main query selects anything, and
-// takes its rows with SKIP LOCKED so concurrent polls of one environment never
-// block on each other. It is bounded so a poll costs a bounded write even in the
-// pathological case (an environment whose whole fleet died mid-wind-down across
-// many sessions); the remainder drains on the polls that follow, and no row can
-// starve because a finalized one leaves the set. No ORDER BY: every row in the
-// set is equally abandoned, so which 50 go first does not matter, and ordering
-// would buy a sort the bound exists to avoid. It needs no environment-kind guard of its own: only the
-// work API's Stop produces a stopping row, and that is already scoped to a
-// self_hosted tool_exec item.
+// in stopping. Migration 0014 finalizes the ones written before the upgrade;
+// ListAbandoned + FinalizeAbandoned — run by the work API ahead of every
+// poll, so the re-arm the finalize owes (plan 35 decision 13 iii) happens
+// under the session lock the poll itself cannot take, in the same
+// transaction as the flip to stopped — catch the ones written during it.
+// Concurrent polls of one environment serialize per session on that lock,
+// and the loser's guarded flip is a no-op; the list is bounded so a poll
+// costs a bounded read even in the pathological case (an environment whose
+// whole fleet died mid-wind-down across many sessions); the remainder drains
+// on the polls that follow, and no row can starve because a finalized one
+// leaves the set. No ORDER BY: every row in the set is equally abandoned, so
+// which 50 go first does not matter, and ordering would buy a sort the bound
+// exists to avoid. They need no environment-kind guard of their own: only
+// the work API's Stop produces a stopping row, and that is already scoped to
+// a self_hosted tool_exec item.
 //
 // Every RE-hand-out mints a fresh work id (#62). A work item's identity is stable
 // only while one worker holds it, because the wire's lifecycle calls carry no
@@ -350,25 +369,7 @@ func (q *Queue) Claim(ctx context.Context, kind Kind, ttl time.Duration) (*Item,
 // if an environment key were misconfigured against a cloud environment.
 func (q *Queue) Poll(ctx context.Context, envID domain.ID, reclaim time.Duration) (*Work, error) {
 	w, err := scanWork(q.pool.QueryRow(ctx,
-		`WITH abandoned AS (
-		    SELECT id FROM work_items
-		    WHERE environment_id = $1 AND kind = 'tool_exec'
-		      AND state = 'stopping'
-		      AND (lease_expires_at IS NULL OR lease_expires_at < now())
-		    LIMIT 50
-		    FOR UPDATE SKIP LOCKED
-		 ),
-		 finalized AS (
-		    UPDATE work_items f
-		    SET state            = 'stopped',
-		        stopped_at       = now(),
-		        lease_expires_at = NULL,
-		        updated_at       = now()
-		    FROM abandoned a
-		    WHERE f.id = a.id
-		    RETURNING f.id
-		 ),
-		 picked AS (
+		`WITH picked AS (
 		    SELECT w.id AS pid FROM work_items w
 		    JOIN environments e ON e.id = w.environment_id
 		    WHERE w.environment_id = $1 AND e.kind = 'self_hosted'
@@ -400,6 +401,66 @@ func (q *Queue) Poll(ctx context.Context, envID domain.ID, reclaim time.Duration
 		return nil, fmt.Errorf("queue: poll %s: %w", envID, err)
 	}
 	return w, nil
+}
+
+// AbandonedWork names one abandoned wind-down — a stopping tool_exec item
+// whose lease lapsed or never existed (see Poll) — and the session it served.
+type AbandonedWork struct {
+	ID        domain.ID
+	SessionID domain.ID
+}
+
+// ListAbandoned lists the environment's abandoned wind-downs: candidates for
+// FinalizeAbandoned, which re-checks each row under its own transaction — so
+// this is a plain bounded read, and a candidate a concurrent poll settles
+// first is simply not settled twice. Bounded to 50 per call; the rest drain
+// on the polls that follow.
+func (q *Queue) ListAbandoned(ctx context.Context, envID domain.ID) ([]AbandonedWork, error) {
+	rows, err := q.pool.Query(ctx,
+		`SELECT id, session_id FROM work_items
+		 WHERE environment_id = $1 AND kind = 'tool_exec'
+		   AND state = 'stopping'
+		   AND (lease_expires_at IS NULL OR lease_expires_at < now())
+		 LIMIT 50`, envID)
+	if err != nil {
+		return nil, fmt.Errorf("queue: list abandoned %s: %w", envID, err)
+	}
+	defer rows.Close()
+	var out []AbandonedWork
+	for rows.Next() {
+		var id, sid string
+		if err := rows.Scan(&id, &sid); err != nil {
+			return nil, err
+		}
+		out = append(out, AbandonedWork{ID: domain.ID(id), SessionID: domain.ID(sid)})
+	}
+	return out, rows.Err()
+}
+
+// FinalizeAbandoned settles one abandoned wind-down terminally (→ stopped,
+// stopped_at stamped, lease cleared) under the caller's transaction — the
+// transaction that also re-arms the session's runnable calls (plan 35
+// decision 13 iii): a stop the worker never finished is a stop all the same,
+// and the calls the item covered are nobody's otherwise, so the flip and the
+// re-arm it owes commit or fail together — split, a crash between them would
+// strand the calls behind a row already stopped, which no later poll
+// retries. The flip re-checks the abandonment, so a stale candidate — one a
+// concurrent poll settled first — reports false and is left alone.
+func (q *Queue) FinalizeAbandoned(ctx context.Context, db DB, envID, workID domain.ID) (bool, error) {
+	tag, err := db.Exec(ctx,
+		`UPDATE work_items
+		 SET state            = 'stopped',
+		     stopped_at       = now(),
+		     lease_expires_at = NULL,
+		     updated_at       = now()
+		 WHERE id = $1 AND environment_id = $2 AND kind = 'tool_exec'
+		   AND state = 'stopping'
+		   AND (lease_expires_at IS NULL OR lease_expires_at < now())`,
+		workID, envID)
+	if err != nil {
+		return false, fmt.Errorf("queue: finalize abandoned %s: %w", workID, err)
+	}
+	return tag.RowsAffected() > 0, nil
 }
 
 // Extend renews the claimant's lease mid-work (long provider streams) and
@@ -496,6 +557,35 @@ func (q *Queue) CancelSession(ctx context.Context, db DB, sessionID domain.ID) e
 		return fmt.Errorf("queue: cancel session %s: %w", sessionID, err)
 	}
 	return nil
+}
+
+// CancelThread is CancelSession for one thread's model_turn — a thread-scoped
+// user.interrupt ends that thread's turn and nothing else (plan 35 decision 9):
+// the session-keyed exec items stay live, because a sibling's calls ride on
+// them; the interrupted thread's own in-flight call is dropped by the drivers'
+// answered-means-cancelled check, not by stopping the item.
+func (q *Queue) CancelThread(ctx context.Context, db DB, sessionID, threadID domain.ID) error {
+	if _, err := db.Exec(ctx,
+		`UPDATE work_items
+		 SET state             = 'stopped',
+		     stop_requested_at = COALESCE(stop_requested_at, now()),
+		     stopped_at        = now(),
+		     lease_expires_at  = NULL,
+		     updated_at        = now()
+		 WHERE session_id = $1 AND kind = 'model_turn' AND state <> 'stopped'
+		   AND thread_id IS NOT DISTINCT FROM $2`, sessionID, nullableThread(threadID)); err != nil {
+		return fmt.Errorf("queue: cancel thread %s: %w", threadID, err)
+	}
+	return nil
+}
+
+// nullableThread binds a thread id: NULL for the primary.
+func nullableThread(threadID domain.ID) *string {
+	if threadID == "" {
+		return nil
+	}
+	s := threadID.String()
+	return &s
 }
 
 // Complete marks the item finished, in the caller's transaction when one is

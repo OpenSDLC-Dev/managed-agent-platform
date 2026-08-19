@@ -265,7 +265,7 @@ func TestSendValidationSweep(t *testing.T) {
 		{"tool_result on cloud env", map[string]any{"events": []any{map[string]any{
 			"type": "user.tool_result", "tool_use_id": "sevt_1"}}}, "self_hosted"},
 		{"thread id rejected", map[string]any{"events": []any{map[string]any{
-			"type": "user.interrupt", "session_thread_id": "sthr_1"}}}, "child threads are not spawned yet"},
+			"type": "user.interrupt", "session_thread_id": "sthr_1"}}}, "does not name a thread in this session"},
 		{"NUL in text", map[string]any{"events": []any{userMessage("a\x00b")}}, "U+0000"},
 		{"system.message alone", map[string]any{"events": []any{map[string]any{
 			"type": "system.message", "content": txt}}}, "immediately follow"},

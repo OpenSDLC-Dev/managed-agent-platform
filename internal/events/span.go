@@ -33,13 +33,27 @@ type Backend struct {
 // records the turn's metrics from the same point, for the same reason. The
 // returned context carries the span for downstream propagation.
 func (l *Log) StartModelRequest(ctx context.Context, sessionID domain.ID, backend Backend) (context.Context, *ModelRequest, error) {
+	return l.StartModelRequestOn(ctx, sessionID, "", backend)
+}
+
+// StartModelRequestOn is StartModelRequest for one thread's turn (plan 35):
+// the start and end events are written on that thread's own log; an empty
+// threadID is the primary.
+func (l *Log) StartModelRequestOn(ctx context.Context, sessionID, threadID domain.ID, backend Backend) (context.Context, *ModelRequest, error) {
+	// A child's turn names its thread, so two concurrent turns of one
+	// session stay distinguishable in a trace.
+	attrs := []attribute.KeyValue{attribute.String("session.id", sessionID.String())}
+	if threadID != "" {
+		attrs = append(attrs, attribute.String("session.thread_id", threadID.String()))
+	}
 	ctx, span := otel.GetTracerProvider().Tracer(tracerName).Start(ctx, "model_request",
 		trace.WithSpanKind(trace.SpanKindClient),
-		trace.WithAttributes(attribute.String("session.id", sessionID.String())))
+		trace.WithAttributes(attrs...))
 	now := time.Now().UTC()
 	evs, err := l.Append(ctx, sessionID, []NewEvent{{
 		Type:        domain.EventSpanModelRequestStart,
 		ProcessedAt: &now,
+		ThreadID:    threadID,
 	}})
 	if err != nil {
 		// No wire event landed, so the exported span must say why it is
@@ -50,7 +64,7 @@ func (l *Log) StartModelRequest(ctx context.Context, sessionID domain.ID, backen
 		return ctx, nil, err
 	}
 	return ctx, &ModelRequest{
-		log: l, sessionID: sessionID, startID: evs[0].ID, span: span,
+		log: l, sessionID: sessionID, threadID: threadID, startID: evs[0].ID, span: span,
 		backend: backend, started: time.Now(),
 	}, nil
 }
@@ -59,6 +73,7 @@ func (l *Log) StartModelRequest(ctx context.Context, sessionID domain.ID, backen
 type ModelRequest struct {
 	log       *Log
 	sessionID domain.ID
+	threadID  domain.ID // the turn's thread; empty for the primary
 	startID   domain.ID
 	span      trace.Span
 	usage     domain.ModelUsage // recorded by ModelDone for Finish's attributes
@@ -143,6 +158,7 @@ func (m *ModelRequest) EndEvent(isError bool, usage domain.ModelUsage) (NewEvent
 		Type:        domain.EventSpanModelRequestEnd,
 		Payload:     payload,
 		ProcessedAt: &now,
+		ThreadID:    m.threadID,
 	}, nil
 }
 

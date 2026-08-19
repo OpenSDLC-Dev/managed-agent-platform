@@ -137,20 +137,18 @@ func newHarnessEnv(t *testing.T, envKind string, scripts [][]provider.Chunk, err
 // running + enqueue, one transaction.
 func (h *harness) wake(t *testing.T, text string) {
 	t.Helper()
-	running := domain.SessionRunning
 	payload, _ := json.Marshal(map[string]any{
 		"content": []map[string]string{{"type": "text", "text": text}},
 	})
-	_, err := h.log.AppendWith(context.Background(), h.sessionID, append(
+	_, err := h.log.AppendTransition(context.Background(), h.sessionID,
 		[]events.NewEvent{{Type: domain.EventUserMessage, Payload: payload}},
-		events.StatusChange(h.sessionID, domain.SessionRunning, nil)...,
-	), events.AppendOptions{
-		SetStatus: &running,
-		Then: func(ctx context.Context, tx pgx.Tx) error {
-			_, err := h.queue.Enqueue(ctx, tx, h.envID, h.sessionID, queue.ModelTurn)
-			return err
-		},
-	})
+		[]events.ThreadTransition{{Status: domain.SessionRunning}},
+		events.AppendOptions{
+			Then: func(ctx context.Context, tx pgx.Tx) error {
+				_, err := h.queue.Enqueue(ctx, tx, h.envID, h.sessionID, queue.ModelTurn)
+				return err
+			},
+		})
 	if err != nil {
 		t.Fatalf("wake: %v", err)
 	}

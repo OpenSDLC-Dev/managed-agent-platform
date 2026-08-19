@@ -19,9 +19,9 @@ thread-unaware. Every scope decision is settled; the design is the plan's fiftee
       `internal/api/roster.go`; inert at runtime until slice 3.
 - [x] Slice 2 — thread resource and the primary thread: migration 0025, `sthr_`, five routes,
       primary-thread status events on every session (decisions 1, 2, 12).
-- [ ] Slice 3 — thread execution substrate: migration 0026, `(session, thread)` turns, the
+- [x] Slice 3 — thread execution substrate: migration 0026, `(session, thread)` turns, the
       status fold, the runnable set, MCP per thread, outcomes on quiescence, interrupts, the
-      `tool_exec` re-arm (decisions 3, 4, 5, 9, 14, 15).
+      `tool_exec` re-arm (decisions 3, 4, 5, 9, 14, 15); child rows via a test seam.
 - [ ] Slice 4 — coordinator delegation, BYOC view rule and worker scan, acceptance transcripts
       (decisions 6, 7, 8, 11, 13). Meets #53's acceptance.
 - [ ] Slice 5 — close-out: HISTORY records, ARCHITECTURE/README, plan → `archived`, #53 closed.
