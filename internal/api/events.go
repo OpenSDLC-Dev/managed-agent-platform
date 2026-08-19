@@ -360,11 +360,8 @@ func (s *server) sendSessionEvents(r *http.Request) (any, error) {
 				// thread is already idle and its clients still need the new stop
 				// reason — and so is the session's when it stays idle (Reemit);
 				// the column only moves when the fold really changes.
-				// A session-wide interrupt re-idles the session once, after its
-				// last thread moved — not once per child it ends.
-				last := th.id == threads[len(threads)-1].id
 				if err := transition(events.ThreadTransition{ThreadID: tid, Status: domain.SessionIdle,
-					Stop: &domain.StopReason{Type: domain.StopEndTurn}, Reemit: !interruptAll || last}); err != nil {
+					Stop: &domain.StopReason{Type: domain.StopEndTurn}, Reemit: true}); err != nil {
 					return nil, err
 				}
 				// Cancel first, then enqueue. A session-wide interrupt keeps today's
@@ -560,6 +557,27 @@ func (s *server) sendSessionEvents(r *http.Request) (any, error) {
 			if !unanswered {
 				thens = append(thens, enqueueTurn(tid))
 			}
+		}
+	}
+	if interruptAll {
+		// A session-wide interrupt ends its threads one by one, and each end
+		// re-idles the session with the fold of that moment; the session is
+		// told once, with the fold after the last of them — the earlier
+		// re-idles are dropped. A single-agent session emits one either way.
+		lastIdle := -1
+		for i, ev := range batch {
+			if ev.Type == domain.EventSessionStatusIdle {
+				lastIdle = i
+			}
+		}
+		if lastIdle >= 0 {
+			kept := batch[:0:0]
+			for i, ev := range batch {
+				if ev.Type != domain.EventSessionStatusIdle || i == lastIdle {
+					kept = append(kept, ev)
+				}
+			}
+			batch = kept
 		}
 	}
 	if len(cancels)+len(thens) > 0 {

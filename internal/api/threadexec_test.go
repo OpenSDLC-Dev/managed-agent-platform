@@ -531,3 +531,33 @@ func TestWorkPollFinalizesAnAbandonedStopAndReArms(t *testing.T) {
 		t.Errorf("the abandoned item = %v, want stopped", old["state"])
 	}
 }
+
+// A session-wide interrupt ending several parked children re-idles the
+// session once, with the fold after the last of them — not once per child.
+func TestSessionWideInterruptReidlesOnce(t *testing.T) {
+	s := newTestServer(t)
+	sid := eventsFixture(t, s)
+	setThread(t, s, domain.PrimaryThreadID(domain.ID(sid)).String(), "idle", `{"type":"end_turn"}`)
+	var asks []string
+	for range 2 {
+		child := insertChild(t, s, sid, "idle")
+		ask := appendOn(t, s, sid, domain.ID(child), true, domain.EventAgentToolUse, askBashCall)
+		setThread(t, s, child, "idle", `{"type":"requires_action","event_ids":["`+ask+`"]}`)
+		asks = append(asks, ask)
+	}
+
+	sendEvents(t, s, sid, map[string]any{"type": "user.interrupt"})
+
+	if n := countEventType(t, s, sid, "session.status_idle"); n != 1 {
+		t.Errorf("session.status_idle count = %d, want 1", n)
+	}
+	if got := stopReasonType(t, lastEventOfType(t, s, sid, "session.status_idle")); got != "end_turn" {
+		t.Errorf("re-idle stop reason = %q, want end_turn (every ask answered)", got)
+	}
+	if n := countEventType(t, s, sid, "session.thread_status_idle"); n != 2 {
+		t.Errorf("thread idle events = %d, want one per child", n)
+	}
+	if n := countEventType(t, s, sid, "agent.tool_result"); n != len(asks) {
+		t.Errorf("results = %d, want both asks answered", n)
+	}
+}
