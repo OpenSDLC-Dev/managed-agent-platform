@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"io/fs"
 	"sort"
 	"strings"
 	"testing"
@@ -288,6 +289,32 @@ func TestFromZipRejects(t *testing.T) {
 				t.Error("FromZip accepted an invalid archive")
 			}
 		})
+	}
+}
+
+// TestFromZipRejectsNonPlainSkillMD: extraction skips a member whose Unix type
+// bits say symlink or FIFO (the reference's zipEntryIsPlain rule, mirrored by
+// Extract), so an archive whose only SKILL.md is such an entry would validate
+// here and then materialize without a manifest. Validation shares the
+// predicate for the one member it requires.
+func TestFromZipRejectsNonPlainSkillMD(t *testing.T) {
+	var buf bytes.Buffer
+	w := zip.NewWriter(&buf)
+	h := &zip.FileHeader{Name: "financial-skill/SKILL.md", Method: zip.Deflate}
+	h.SetMode(0o777 | fs.ModeSymlink)
+	h.CreatorVersion = 3 << 8 // Unix host
+	f, err := w.CreateHeader(h)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.Write([]byte(goodSkillMD)); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := FromZip(buf.Bytes()); err == nil || !strings.Contains(err.Error(), "regular file") {
+		t.Errorf("FromZip = %v, want a rejection naming the non-regular SKILL.md", err)
 	}
 }
 

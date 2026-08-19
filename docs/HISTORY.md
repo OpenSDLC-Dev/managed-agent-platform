@@ -100,7 +100,9 @@ resolved:
   content, no error — the platform's error text had been byte-identical to the reference's old one);
   skill-archive extraction materializes only regular files and directories (`zipEntryIsPlain` — a
   Unix-host symlink/FIFO/device entry is skipped, an `S_IFDIR` entry without the trailing slash is
-  a directory, a non-Unix entry is data whatever its bits); `fsErrorMessage` now answers an unmapped
+  a directory, a non-Unix entry is data whatever its bits — and, a Codex review finding, the upload
+  form now refuses a `SKILL.md` that is such an entry, since it would validate and never
+  materialize); `fsErrorMessage` now answers an unmapped
   error with Go's bare errno text (`read-only file system`) or `"i/o error"`, never `op /abs/path:` —
   the platform's passthrough of the sandbox's strerror lowercases its first rune to match. **No
   change:** `ToolError` typed refusal and `ErrBashTerminated` (in-process API, wording unchanged);
