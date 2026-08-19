@@ -12,9 +12,9 @@ thread-unaware. Every scope decision is settled; the design is the plan's fiftee
 
 ## Tasks
 
-- [ ] **Slice 0 — SDK bump v1.61.0 → v1.63.1** (this PR): pin, pairwise diffs, live labels,
-      registry citations re-read, CONFIRMED entries + issues for the excluded v1.62 surface,
-      HISTORY record; plan → `in-progress`.
+- [x] **Slice 0 — SDK bump v1.61.0 → v1.63.1**: pin, pairwise diffs, live labels, registry
+      citations re-read, registry entries + issues #430–#433 for the excluded v1.62 surface,
+      four v1.63.x toolset/runner behaviors converged, HISTORY record; plan → `in-progress`.
 - [ ] Slice 1 — roster resolution and the session snapshot (design decision 10).
 - [ ] Slice 2 — thread resource and the primary thread: migration 0025, `sthr_`, five routes,
       primary-thread status events on every session (decisions 1, 2, 12).

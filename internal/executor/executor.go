@@ -834,20 +834,22 @@ func (e *Executor) runTools(ctx context.Context, sb sandbox.Sandbox, sid domain.
 // BetaManagedAgentsAgentToolResultEvent and what replay reads back. A
 // SearchResults set (a web_search answer) IS the content — search_result
 // blocks, an empty slice landing as an empty array for a search with no hits.
-// Otherwise empty output (a read of an empty file) becomes an empty content
-// array, never a text block with an empty string — a Messages endpoint rejects
-// an empty text block, and that request is what the brain replays every
-// resume, wedging the session.
+// Otherwise empty output (a read of an empty file) becomes the reference
+// runner's "(no output)" text block (v1.63.0), never a text block with an
+// empty string — a Messages endpoint rejects an empty text block, and that
+// request is what the brain replays every resume, wedging the session.
 func toolResultEvent(useID domain.ID, res toolset.Result) (events.NewEvent, error) {
 	// SanitizeText again at this boundary: the web driver's error text embeds
 	// a backend's err.Error() (which can quote a server-controlled body) and
 	// never passes Runner.dispatch, so this is the last stop before jsonb.
-	var content any = []map[string]any{}
-	text := toolset.SanitizeText(res.Content)
-	switch {
-	case res.SearchResults != nil:
+	var content any
+	if res.SearchResults != nil {
 		content = res.SearchResults
-	case text != "":
+	} else {
+		text := toolset.SanitizeText(res.Content)
+		if text == "" {
+			text = "(no output)"
+		}
 		content = []map[string]any{{"type": "text", "text": text}}
 	}
 	payload, err := json.Marshal(map[string]any{

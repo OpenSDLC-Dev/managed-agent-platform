@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"unicode"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/sandbox"
 )
@@ -61,7 +62,9 @@ func (r Runner) read(ctx context.Context, raw json.RawMessage) (Result, error) {
 		end = e
 	}
 	if end < start {
-		return failf("read: view_range end line %d is before start line %d", in.ViewRange[1], in.ViewRange[0])
+		// An inverted range selects nothing — empty content, not an error, the
+		// reference toolset's answer since v1.63.0 (tools/agenttoolset/fs.go).
+		return succeed("")
 	}
 	return succeed(strings.Join(lines[start:end], "\n"))
 }
@@ -152,8 +155,11 @@ func fileFault(verb, display string, err error) (Result, error) {
 // own strerror text, normalized the way the reference toolset's fsErrorMessage
 // table is — its one mapped case matches fs.ErrPermission, which Go answers
 // for EACCES and EPERM alike, so both strerror spellings take the reference's
-// wording; anything else passes through as raw text does there, and a refusal
-// that carried no reason falls back to the sentinel's own words (plan 23, #306).
+// wording; anything else it answers with Go's own errno text (v1.63.0,
+// agenttoolset.go), which is the shell's strerror in lowercase — "read-only
+// file system", "no space left on device" — so the passthrough lowercases its
+// first rune; and a refusal that carried no reason falls back to the
+// sentinel's own words (plan 23, #306).
 func notWritableReason(err error) string {
 	var pnw *sandbox.PathNotWritableError
 	if !errors.As(err, &pnw) || pnw.Reason == "" {
@@ -163,5 +169,7 @@ func notWritableReason(err error) string {
 		strings.EqualFold(pnw.Reason, "operation not permitted") {
 		return "permission denied"
 	}
-	return pnw.Reason
+	r := []rune(pnw.Reason)
+	r[0] = unicode.ToLower(r[0])
+	return string(r)
 }

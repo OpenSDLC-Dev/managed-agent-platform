@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"strings"
 	"testing"
 )
@@ -70,6 +71,51 @@ func TestExtract(t *testing.T) {
 	}
 	if len(files) != 2 || !strings.Contains(files[0].Path, "/") {
 		t.Errorf("multi extracted = %v", files)
+	}
+}
+
+// TestExtractSkipsNonPlainEntries pins the reference's zipEntryIsPlain rule
+// (agenttoolset/skillarchive.go, v1.63.0): a Unix-host entry whose type bits
+// say symlink or FIFO is skipped, never written out as a regular file holding
+// its link target; a Unix-host directory entry without the trailing slash is
+// a directory, not an empty file; and an entry from a non-Unix host carries
+// no type bits, so its bytes are data whatever its permission bits look like.
+func TestExtractSkipsNonPlainEntries(t *testing.T) {
+	var buf bytes.Buffer
+	w := zip.NewWriter(&buf)
+	add := func(name string, mode fs.FileMode, creator uint16, body string) {
+		t.Helper()
+		h := &zip.FileHeader{Name: name, Method: zip.Deflate}
+		h.SetMode(mode)
+		h.CreatorVersion = creator << 8
+		fw, err := w.CreateHeader(h)
+		if err != nil {
+			t.Fatalf("create %q: %v", name, err)
+		}
+		if _, err := fw.Write([]byte(body)); err != nil {
+			t.Fatalf("write %q: %v", name, err)
+		}
+	}
+	const unix, msdos = 3, 0
+	add("s/SKILL.md", 0o644, unix, "hello")
+	add("s/link", 0o777|fs.ModeSymlink, unix, "SKILL.md")
+	add("s/pipe", 0o644|fs.ModeNamedPipe, unix, "")
+	add("s/dir", 0o755|fs.ModeDir, unix, "")
+	add("s/other", 0o644, msdos, "data")
+	if err := w.Close(); err != nil {
+		t.Fatalf("close zip: %v", err)
+	}
+	files, err := Extract(buf.Bytes())
+	if err != nil {
+		t.Fatalf("extract: %v", err)
+	}
+	got := map[string]string{}
+	for _, f := range files {
+		got[f.Path] = string(f.Data)
+	}
+	want := map[string]string{"SKILL.md": "hello", "other": "data"}
+	if fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Errorf("extracted = %v, want %v", got, want)
 	}
 }
 

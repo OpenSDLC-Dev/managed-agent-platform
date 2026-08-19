@@ -169,10 +169,11 @@ func TestFileSentinelsAreToolErrors(t *testing.T) {
 		{"too large", sandbox.ErrFileTooLarge, "limit"},
 		// The unwritable-target refusal carries the sandbox's own strerror
 		// text, normalized the way the reference's fsErrorMessage table is:
-		// its one mapped case takes the reference's casing, everything else
-		// passes through, and a bare sentinel falls back to its own words
-		// (plan 23, #306).
-		{"not writable", &sandbox.PathNotWritableError{Path: "a.txt", Reason: "Read-only file system"}, "Read-only file system"},
+		// its one mapped case takes the reference's wording, everything else
+		// passes through in Go's errno spelling — lowercase, the way the
+		// reference has rendered an unmapped errno since v1.63.0 — and a
+		// bare sentinel falls back to its own words (plan 23, #306).
+		{"not writable", &sandbox.PathNotWritableError{Path: "a.txt", Reason: "Read-only file system"}, "read-only file system"},
 		{"not writable normalized", &sandbox.PathNotWritableError{Path: "a.txt", Reason: "Permission denied"}, "permission denied"},
 		// EPERM's spelling normalizes too: the reference's table matches
 		// fs.ErrPermission, which Go answers for EACCES and EPERM alike.

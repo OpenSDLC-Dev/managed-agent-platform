@@ -184,9 +184,11 @@ const ArchiveDigestHeader = "x-skill-archive-sha256"
 // Extract opens a stored skill archive (the canonical zip the registry
 // serves) and returns its files with slash-relative paths, the single
 // top-level wrapper directory stripped — the reference worker's extraction
-// semantics with its guards: escape ("slip") refusal and member/byte caps.
-// Only zip is accepted: this platform stores and serves canonical zips, so
-// the reference's tar fallback would be dead code here.
+// semantics with its guards: escape ("slip") refusal, member/byte caps, and
+// only plain members materialized (a Unix-host symlink, FIFO or device entry
+// is skipped, never written out as a file holding its link target). Only
+// zip is accepted: this platform stores and serves canonical zips, so the
+// reference's tar fallback would be dead code here.
 func Extract(data []byte) ([]File, error) {
 	return extractWithLimits(data, MaxMembers, ExtractMaxBytes)
 }
@@ -204,7 +206,7 @@ func extractWithLimits(data []byte, maxMembers int, maxBytes int64) ([]File, err
 	}
 
 	// Every member name must be a safe relative path before any strip/read
-	// decision — one hostile member rejects the whole archive.
+	// decision — one hostile member rejects the whole archive, plain or not.
 	names := make([]string, 0, len(zr.File))
 	for _, f := range zr.File {
 		p := strings.TrimSuffix(f.Name, "/")
@@ -217,7 +219,9 @@ func extractWithLimits(data []byte, maxMembers int, maxBytes int64) ([]File, err
 				return nil, fmt.Errorf("refusing archive member %q", f.Name)
 			}
 		}
-		names = append(names, p)
+		if plain(f) {
+			names = append(names, p)
+		}
 	}
 
 	// Strip the single shared top-level directory when every member sits
@@ -228,7 +232,7 @@ func extractWithLimits(data []byte, maxMembers int, maxBytes int64) ([]File, err
 	remaining := maxBytes
 	var files []File
 	for _, f := range zr.File {
-		if strings.HasSuffix(f.Name, "/") {
+		if !plain(f) || f.Mode().IsDir() {
 			continue
 		}
 		p := f.Name
@@ -253,6 +257,16 @@ func extractWithLimits(data []byte, maxMembers int, maxBytes int64) ([]File, err
 		files = append(files, File{Path: p, Data: data})
 	}
 	return files, nil
+}
+
+// plain reports whether f is a regular file or a directory — the only members
+// extracted, the reference's zipEntryIsPlain rule (v1.63.0). Unix type bits
+// are honoured only for entries a Unix host wrote, which is exactly what
+// zip.FileHeader.Mode observes; every other host's entry is data, and a
+// Unix-host directory entry is one with or without the trailing slash.
+func plain(f *zip.File) bool {
+	m := f.Mode()
+	return m.IsRegular() || m.IsDir()
 }
 
 // topDir returns the single top-level directory shared by every member path,

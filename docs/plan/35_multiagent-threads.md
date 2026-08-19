@@ -23,9 +23,13 @@ was revised in that dialogue; the others stand as proposed):
 
 1. **Bump the SDK pin to v1.63.1 as slice 0.** All managed-agents drift from the pinned
    v1.61.0 landed in one additive release (v1.62.0: advisor, budgets, `session.usage`,
-   cost/server-tool usage fields, `redacted` block, `inference_geo`); v1.63.0 adds only
-   the unrelated dream `output_behavior`, and v1.63.1 changes one client behavior (the
-   tool runner posts "(no output)" for an empty text result — harmless to a server). The
+   cost/server-tool usage fields, `redacted` block, `inference_geo`); v1.63.0 adds the
+   unrelated dream `output_behavior` and changes the reference's *client* toolset
+   behavior (an inverted `view_range` reads empty, non-plain archive members are
+   skipped, fs errors are bare errno text, symlink loops are rejected), and v1.63.1
+   changes one runner behavior (it posts "(no output)" for an empty text result) — no
+   server obligation in either, though where the platform's own toolset had mirrored
+   the old behavior, slice 0 converged it (docs/HISTORY.md's v1.63.1 bump record). The
    v1.61.0 thread surface is a forward-compatible subset: routes and params are
    identical, and the event unions grew only additive members (the thread stream gains
    `session.usage`, the idle stop reason `budget_reached`, the thread agent an advisor

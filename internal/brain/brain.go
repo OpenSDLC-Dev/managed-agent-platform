@@ -633,7 +633,11 @@ func (b *Brain) commitTurn(ctx context.Context, sid domain.ID, item *queue.Item,
 	// with them — the classification is the blocks, not the label. Nothing in
 	// the Messages schema ties the two: max_tokens, stop_sequence, refusal and
 	// a non-compliant end_turn can all arrive over a complete tool block, and
-	// the SDK's own agentic loop reads the blocks for exactly that reason. The
+	// the SDK's own agentic loop reads the blocks for exactly that reason —
+	// though since v1.63.0 it also declines to run *any* call of a cut-off
+	// turn (max_tokens, model_context_window_exceeded), complete ones
+	// included; here a truncated block never reaches this point (below), so
+	// the complete ones run (docs/DIVERGENCES.md, #181). The
 	// intents commit either way (turnEvents emits one tool-intent event per
 	// block), so classifying on the label would idle the session with calls
 	// nothing ever enqueues and leave every later replay carrying a tool_use

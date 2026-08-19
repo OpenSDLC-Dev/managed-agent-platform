@@ -486,6 +486,14 @@ func validateBlock(raw json.RawMessage, allowed map[string]bool) error {
 		if raw, ok := obj["text"]; !ok || isNullRaw(raw) || json.Unmarshal(raw, &s) != nil {
 			return fmt.Errorf("text block requires a string text field")
 		}
+		// The reference API rejects an empty text block in a tool result —
+		// its runner substitutes "(no output)" for one since v1.63.0 — and
+		// every carrier that reaches here is replayed to a Messages endpoint,
+		// which rejects it too, so accepting it would wedge the session
+		// (INFERRED, docs/DIVERGENCES.md).
+		if s == "" {
+			return fmt.Errorf("text block text must not be empty")
+		}
 		return nil
 	case "image":
 		if err := allowKeys(obj, "type", "source"); err != nil {

@@ -52,7 +52,7 @@ func TestDefineOutcomeEchoShape(t *testing.T) {
 	}
 	ev := echo[0]
 	// The persisted event's wire shape, field for field
-	// (BetaManagedAgentsUserDefineOutcomeEvent, anthropic-sdk-go v1.61.0).
+	// (BetaManagedAgentsUserDefineOutcomeEvent, anthropic-sdk-go v1.63.1).
 	wantExactKeys(t, ev, "id", "type", "description", "rubric", "max_iterations",
 		"outcome_id", "processed_at")
 	if !strings.HasPrefix(ev["id"].(string), "sevt_") {

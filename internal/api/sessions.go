@@ -54,6 +54,7 @@ type sessionJSON struct {
 	Resources          []json.RawMessage `json:"resources"`
 	VaultIDs           []string          `json:"vault_ids"`
 	DeploymentID       *string           `json:"deployment_id"` // deployments are post-v1: always null
+	Budget             *json.RawMessage  `json:"budget"`        // budgets are not built: always null (INFERRED, docs/DIVERGENCES.md)
 	CreatedAt          time.Time         `json:"created_at"`
 	UpdatedAt          time.Time         `json:"updated_at"`
 	ArchivedAt         *time.Time        `json:"archived_at"`
