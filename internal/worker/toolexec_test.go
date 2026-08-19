@@ -446,7 +446,7 @@ func TestEmptyToolResultPostsPlaceholder(t *testing.T) {
 	if results[0].IsError {
 		t.Errorf("empty read is not an error: %+v", results[0])
 	}
-	if len(results[0].Content) != 1 || results[0].Content[0]["text"] != toolset.NoOutput {
+	if len(results[0].Content) != 1 || results[0].Content[0]["type"] != "text" || results[0].Content[0]["text"] != toolset.NoOutput {
 		t.Errorf("content = %v, want one text block %q", results[0].Content, toolset.NoOutput)
 	}
 }
