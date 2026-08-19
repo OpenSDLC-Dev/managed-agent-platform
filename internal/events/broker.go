@@ -58,6 +58,11 @@ func (b *Broker) Ready(ctx context.Context) error {
 type Subscription struct {
 	broker    *Broker
 	sessionID domain.ID
+	// threadID is the surface this subscriber previews: empty for the
+	// session stream (primary-thread turns), a child thread's id for that
+	// thread's own stream. Frames ride the broadcast envelope with their
+	// emitting thread and are delivered only to the matching surface.
+	threadID  domain.ID
 	wake      chan struct{}
 	frames    chan json.RawMessage
 	closeOnce sync.Once
@@ -96,9 +101,18 @@ func (s *Subscription) Close() {
 // cannot collide (env_ vs sesn_ prefixes). Callers must Close the
 // subscription.
 func (b *Broker) Subscribe(sessionID domain.ID) *Subscription {
+	return b.SubscribeThread(sessionID, "")
+}
+
+// SubscribeThread is Subscribe for one child thread's stream: the same wake
+// on every append to the session (the subscriber re-reads its own scope),
+// and only that thread's preview frames. An empty threadID is the session
+// stream.
+func (b *Broker) SubscribeThread(sessionID, threadID domain.ID) *Subscription {
 	s := &Subscription{
 		broker:    b,
 		sessionID: sessionID,
+		threadID:  threadID,
 		wake:      make(chan struct{}, 1),
 		frames:    make(chan json.RawMessage, 256),
 	}
@@ -232,6 +246,7 @@ func (b *Broker) dispatch(channel, payload string) {
 	case channelFrames:
 		var m struct {
 			SessionID string          `json:"session_id"`
+			ThreadID  string          `json:"thread_id"`
 			Frame     json.RawMessage `json:"frame"`
 		}
 		if json.Unmarshal([]byte(payload), &m) != nil {
@@ -244,6 +259,11 @@ func (b *Broker) dispatch(channel, payload string) {
 		b.mu.Lock()
 		defer b.mu.Unlock()
 		for s := range b.subs[domain.ID(m.SessionID)] {
+			// Previews belong to one thread's surface; session.deleted ends
+			// every stream of the session alike.
+			if s.threadID.String() != m.ThreadID && ft.Type != "session.deleted" {
+				continue
+			}
 			// A fresh preview generation clears the lossy state: chunk
 			// suppression is per preview, not per connection.
 			if ft.Type == "event_start" {

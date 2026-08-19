@@ -72,6 +72,12 @@ func NewHandler(pool *pgxpool.Pool, blobs blob.Store, cipher secrets.Cipher, ver
 	mux.HandleFunc("GET /v1/sessions/{id}/events", s.handle(identity.RoleViewer, s.listSessionEvents))
 	mux.HandleFunc("GET /v1/sessions/{id}/events/stream", roleGate(identity.RoleViewer, s.streamSessionEvents))
 
+	mux.HandleFunc("GET /v1/sessions/{id}/threads", s.handle(identity.RoleViewer, s.listThreads))
+	mux.HandleFunc("GET /v1/sessions/{id}/threads/{tid}", s.handle(identity.RoleViewer, s.getThread))
+	mux.HandleFunc("POST /v1/sessions/{id}/threads/{tid}/archive", s.handle(identity.RoleDeveloper, s.archiveThread))
+	mux.HandleFunc("GET /v1/sessions/{id}/threads/{tid}/events", s.handle(identity.RoleViewer, s.listThreadEvents))
+	mux.HandleFunc("GET /v1/sessions/{id}/threads/{tid}/stream", roleGate(identity.RoleViewer, s.streamThreadEvents))
+
 	mux.HandleFunc("GET /v1/sessions/{id}/resources", s.handle(identity.RoleViewer, s.listSessionResources))
 	mux.HandleFunc("POST /v1/sessions/{id}/resources", s.handle(identity.RoleDeveloper, s.addSessionResource))
 	mux.HandleFunc("GET /v1/sessions/{id}/resources/{rid}", s.handle(identity.RoleViewer, s.getSessionResource))
@@ -173,6 +179,8 @@ func NewHandler(pool *pgxpool.Pool, blobs blob.Store, cipher secrets.Cipher, ver
 		"/v1/environments", "/v1/environments/{id}", "/v1/environments/{id}/archive",
 		"/v1/sessions", "/v1/sessions/{id}", "/v1/sessions/{id}/archive",
 		"/v1/sessions/{id}/events", "/v1/sessions/{id}/events/stream",
+		"/v1/sessions/{id}/threads", "/v1/sessions/{id}/threads/{tid}", "/v1/sessions/{id}/threads/{tid}/archive",
+		"/v1/sessions/{id}/threads/{tid}/events", "/v1/sessions/{id}/threads/{tid}/stream",
 		"/v1/sessions/{id}/resources", "/v1/sessions/{id}/resources/{rid}",
 		"/v1/vaults", "/v1/vaults/{id}", "/v1/vaults/{id}/archive",
 		"/v1/vaults/{id}/credentials", "/v1/vaults/{id}/credentials/{cid}",

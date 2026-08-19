@@ -56,6 +56,7 @@ func (r matrixRoute) request() string {
 	return strings.NewReplacer(
 		"{id}", id,
 		"{rid}", "sesrsc_nonexistent",
+		"{tid}", "sthr_nonexistent",
 		"{cid}", "vcrd_nonexistent",
 		"{version}", "1",
 	).Replace(r.path)
@@ -94,6 +95,9 @@ func roleMatrix() []matrixRoute {
 		{"DELETE", sesn, d}, {"POST", sesn + "/archive", d},
 		{"GET", sesn + "/events", v}, {"POST", sesn + "/events", d},
 		{"GET", sesn + "/events/stream", v},
+		{"GET", sesn + "/threads", v}, {"GET", sesn + "/threads/{tid}", v},
+		{"POST", sesn + "/threads/{tid}/archive", d},
+		{"GET", sesn + "/threads/{tid}/events", v}, {"GET", sesn + "/threads/{tid}/stream", v},
 		{"GET", sesn + "/resources", v}, {"POST", sesn + "/resources", d},
 		{"GET", sesn + "/resources/{rid}", v},
 		{"POST", sesn + "/resources/{rid}", d}, {"DELETE", sesn + "/resources/{rid}", d},

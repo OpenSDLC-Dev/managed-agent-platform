@@ -67,6 +67,13 @@ type NewEvent struct {
 	Type        domain.EventType
 	Payload     json.RawMessage
 	ProcessedAt *time.Time // nil = queued, awaiting in-order processing
+	// ThreadID is the emitting child thread; zero means the primary thread
+	// (plan 35 decision 2). CrossPosted marks a child's event the session
+	// view — the primary thread's own — also surfaces: a child's status
+	// events, an ask-gated call and the answer to it. Stored once; each
+	// surface filters (ListQuery.Scope).
+	ThreadID    domain.ID
+	CrossPosted bool
 }
 
 // Log is the append-only event store over the shared pool.
@@ -149,8 +156,13 @@ func (l *Log) AppendInTx(ctx context.Context, tx pgx.Tx, sessionID domain.ID, ev
 		}
 	}
 
-	var archivedAt *time.Time
-	err := tx.QueryRow(ctx, `SELECT archived_at FROM sessions WHERE id = $1 FOR UPDATE`, sessionID.String()).Scan(&archivedAt)
+	var (
+		archivedAt *time.Time
+		agentName  *string
+	)
+	err := tx.QueryRow(ctx,
+		`SELECT archived_at, resolved_agent->>'name' FROM sessions WHERE id = $1 FOR UPDATE`,
+		sessionID.String()).Scan(&archivedAt, &agentName)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrSessionNotFound
 	}
@@ -159,6 +171,9 @@ func (l *Log) AppendInTx(ctx context.Context, tx pgx.Tx, sessionID domain.ID, ev
 	}
 	if archivedAt != nil {
 		return nil, ErrSessionArchived
+	}
+	if agentName == nil {
+		agentName = new(string)
 	}
 
 	var seq int64
@@ -177,7 +192,7 @@ func (l *Log) AppendInTx(ctx context.Context, tx pgx.Tx, sessionID domain.ID, ev
 		args []any
 		out  = make([]domain.Event, 0, len(evs))
 	)
-	sb.WriteString(`INSERT INTO events (id, session_id, seq, type, payload, processed_at, created_at) VALUES `)
+	sb.WriteString(`INSERT INTO events (id, session_id, seq, type, payload, processed_at, created_at, thread_id, cross_posted) VALUES `)
 	for i, ev := range evs {
 		seq++
 		id := ev.ID
@@ -187,6 +202,15 @@ func (l *Log) AppendInTx(ctx context.Context, tx pgx.Tx, sessionID domain.ID, ev
 		payload := ev.Payload
 		if len(payload) == 0 {
 			payload = json.RawMessage("{}")
+		}
+		// The primary thread's own lifecycle events name the session's agent:
+		// completed here, under the lock that already read it, so no emitter
+		// carries the name around (StatusChange builds the pair without it).
+		if ev.ThreadID == "" && threadLifecycle[ev.Type] {
+			payload, err = withAgentName(payload, *agentName)
+			if err != nil {
+				return nil, err
+			}
 		}
 		// Platform-emitted events carry a required processed_at on the wire
 		// (only client events are nullable while queued): emission is
@@ -199,11 +223,13 @@ func (l *Log) AppendInTx(ctx context.Context, tx pgx.Tx, sessionID domain.ID, ev
 			sb.WriteString(", ")
 		}
 		n := len(args)
-		fmt.Fprintf(&sb, "($%d, $%d, $%d, $%d, $%d, $%d, clock_timestamp())", n+1, n+2, n+3, n+4, n+5, n+6)
-		args = append(args, id.String(), sessionID.String(), seq, string(ev.Type), payload, utcOrNil(ev.ProcessedAt))
+		fmt.Fprintf(&sb, "($%d, $%d, $%d, $%d, $%d, $%d, clock_timestamp(), $%d, $%d)", n+1, n+2, n+3, n+4, n+5, n+6, n+7, n+8)
+		args = append(args, id.String(), sessionID.String(), seq, string(ev.Type), payload, utcOrNil(ev.ProcessedAt),
+			nullableID(ev.ThreadID), ev.CrossPosted)
 		out = append(out, domain.Event{
 			ID:          id,
 			SessionID:   sessionID,
+			ThreadID:    ev.ThreadID,
 			Seq:         seq,
 			Type:        ev.Type,
 			Body:        payload,
@@ -235,6 +261,15 @@ func (l *Log) AppendInTx(ctx context.Context, tx pgx.Tx, sessionID domain.ID, ev
 			sessionID.String(), string(*opts.SetStatus)); err != nil {
 			return nil, err
 		}
+		// The primary thread's status follows the session's: the one thread a
+		// session has until plan 35 slice 3 folds the session's status over
+		// its threads' (decision 4), which inverts this write's direction.
+		if _, err := tx.Exec(ctx,
+			`UPDATE session_threads SET status = $2, updated_at = now()
+			  WHERE session_id = $1 AND parent_thread_id IS NULL`,
+			sessionID.String(), string(*opts.SetStatus)); err != nil {
+			return nil, err
+		}
 	}
 	if opts.AddUsage != nil {
 		// Read-modify-write is race-free here: the session row lock is held.
@@ -250,6 +285,14 @@ func (l *Log) AppendInTx(ctx context.Context, tx pgx.Tx, sessionID domain.ID, ev
 		usage.Add(*opts.AddUsage)
 		if _, err := tx.Exec(ctx,
 			`UPDATE sessions SET usage = $2, updated_at = now() WHERE id = $1`,
+			sessionID.String(), usage); err != nil {
+			return nil, err
+		}
+		// Every model turn is the primary thread's until slice 3 runs child
+		// threads, so its usage is the session's.
+		if _, err := tx.Exec(ctx,
+			`UPDATE session_threads SET usage = $2, updated_at = now()
+			  WHERE session_id = $1 AND parent_thread_id IS NULL`,
 			sessionID.String(), usage); err != nil {
 			return nil, err
 		}
@@ -317,17 +360,38 @@ type ListQuery struct {
 	AfterSeq                                     *int64
 	Desc                                         bool
 	Limit                                        int // 0 = unlimited
+	// Scope narrows the rows to one surface (plan 35 decision 2). ScopeAll,
+	// the zero value, reads the whole log — what every internal reader does.
+	Scope    Scope
+	ThreadID domain.ID // the child thread ScopeThread reads
 }
+
+// Scope is the surface a list serves. Events are stored once: a child
+// thread's rows carry its thread_id, the primary thread's carry none, and a
+// child's row the session view also surfaces is cross_posted.
+type Scope int
+
+const (
+	ScopeAll     Scope = iota // the whole log
+	ScopeSession              // the session view — also the primary thread's own
+	ScopeThread               // one child thread's own rows
+)
 
 // List returns events for one session in seq order. It does not check that
 // the session exists — callers that need 404 semantics check first.
 func (l *Log) List(ctx context.Context, sessionID domain.ID, q ListQuery) ([]domain.Event, error) {
 	var sb strings.Builder
-	sb.WriteString(`SELECT id, seq, type, payload, processed_at, created_at FROM events WHERE session_id = $1`)
+	sb.WriteString(`SELECT id, seq, type, payload, processed_at, created_at, thread_id FROM events WHERE session_id = $1`)
 	args := []any{sessionID.String()}
 	add := func(clause string, v any) {
 		args = append(args, v)
 		sb.WriteString(" AND " + clause + "$" + strconv.Itoa(len(args)))
+	}
+	switch q.Scope {
+	case ScopeSession:
+		sb.WriteString(" AND (thread_id IS NULL OR cross_posted)")
+	case ScopeThread:
+		add("thread_id = ", q.ThreadID.String())
 	}
 	if len(q.Types) > 0 {
 		add("type = ANY(", q.Types)
@@ -373,13 +437,17 @@ func (l *Log) List(ctx context.Context, sessionID domain.ID, q ListQuery) ([]dom
 		var (
 			ev          domain.Event
 			id, typ     string
+			threadID    *string
 			processedAt *time.Time
 		)
-		if err := rows.Scan(&id, &ev.Seq, &typ, &ev.Body, &processedAt, &ev.CreatedAt); err != nil {
+		if err := rows.Scan(&id, &ev.Seq, &typ, &ev.Body, &processedAt, &ev.CreatedAt, &threadID); err != nil {
 			return nil, err
 		}
 		ev.ID = domain.ID(id)
 		ev.SessionID = sessionID
+		if threadID != nil {
+			ev.ThreadID = domain.ID(*threadID)
+		}
 		ev.Type = domain.EventType(typ)
 		ev.ProcessedAt = utcOrNil(processedAt)
 		ev.CreatedAt = ev.CreatedAt.UTC()
@@ -390,15 +458,22 @@ func (l *Log) List(ctx context.Context, sessionID domain.ID, q ListQuery) ([]dom
 
 // publishFrame broadcasts an ephemeral frame (previews, session.deleted) to
 // live stream subscribers. Frames are never persisted and never replayed.
-func (l *Log) publishFrame(ctx context.Context, sessionID domain.ID, frame any) error {
+func (l *Log) publishFrame(ctx context.Context, sessionID, threadID domain.ID, frame any) error {
 	raw, err := json.Marshal(frame)
 	if err != nil {
 		return err
 	}
-	envelope, err := json.Marshal(map[string]json.RawMessage{
+	env := map[string]json.RawMessage{
 		"session_id": json.RawMessage(`"` + sessionID.String() + `"`),
 		"frame":      raw,
-	})
+	}
+	// The emitting thread rides the envelope (decision 2): the broker hands a
+	// frame only to the subscribers of that thread's surface — the session
+	// stream previews primary-thread turns, a child's stream its own.
+	if threadID != "" {
+		env["thread_id"] = json.RawMessage(`"` + threadID.String() + `"`)
+	}
+	envelope, err := json.Marshal(env)
 	if err != nil {
 		return err
 	}
@@ -410,7 +485,7 @@ func (l *Log) publishFrame(ctx context.Context, sessionID domain.ID, frame any) 
 // session.deleted event, whose row cannot outlive the session) to live
 // stream subscribers without persisting it.
 func (l *Log) PublishEventFrame(ctx context.Context, sessionID domain.ID, event map[string]any) error {
-	return l.publishFrame(ctx, sessionID, event)
+	return l.publishFrame(ctx, sessionID, "", event)
 }
 
 func utcOrNil(t *time.Time) *time.Time {

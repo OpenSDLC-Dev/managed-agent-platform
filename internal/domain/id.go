@@ -32,6 +32,7 @@ const (
 	PrefixSkill         = "skill"
 	PrefixSkillVersion  = "skillver"
 	PrefixOutcome       = "outc"
+	PrefixSessionThread = "sthr"
 	// PrefixEnvironmentKey names an issued worker credential's row. It is
 	// internal-only — never on the /v1 wire, and the reference identifies its
 	// own environment keys by bare UUID on its console's private API — so it
@@ -77,7 +78,18 @@ var knownPrefixes = map[string]bool{
 	PrefixWork: true, PrefixVault: true, PrefixCredential: true, PrefixResource: true,
 	PrefixDeployment: true, PrefixDeploymentRun: true, PrefixFile: true,
 	PrefixSkillVersion: true, PrefixSkill: true, PrefixOutcome: true,
-	altSessionPrefix: true,
+	PrefixSessionThread: true, altSessionPrefix: true,
+}
+
+// PrimaryThreadID is the id of a session's primary thread: sthr_ plus the
+// session id's own token (plan 35 decision 1) — deterministic, so any
+// component can name it without a lookup, backfillable in SQL, valid in the
+// id alphabet, and unique because session ids are. Clients treat it as
+// opaque; the reference's derivation is unrecorded. The session_ wire
+// spelling derives to the same id as its sesn_ form.
+func PrimaryThreadID(sessionID ID) ID {
+	_, token, _ := strings.Cut(string(sessionID), "_")
+	return ID(PrefixSessionThread + "_" + token)
 }
 
 const idRandomBytes = 15

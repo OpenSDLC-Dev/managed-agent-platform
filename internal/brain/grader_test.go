@@ -40,10 +40,10 @@ func (h *harness) wakeOutcomeRubric(t *testing.T, description string, maxIterati
 		"outcome_id":     outcomeID,
 	})
 	running := domain.SessionRunning
-	_, err := h.log.AppendWith(context.Background(), h.sessionID, []events.NewEvent{
-		{Type: domain.EventUserDefineOutcome, Payload: payload},
-		{Type: domain.EventSessionStatusRunning},
-	}, events.AppendOptions{
+	_, err := h.log.AppendWith(context.Background(), h.sessionID, append(
+		[]events.NewEvent{{Type: domain.EventUserDefineOutcome, Payload: payload}},
+		events.StatusChange(h.sessionID, domain.SessionRunning, nil)...,
+	), events.AppendOptions{
 		SetStatus: &running,
 		MutateOutcomes: func(evals []domain.OutcomeEvaluation) ([]domain.OutcomeEvaluation, error) {
 			return append(evals, domain.OutcomeEvaluation{

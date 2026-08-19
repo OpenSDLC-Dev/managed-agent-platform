@@ -658,6 +658,15 @@ func (s *server) createSession(r *http.Request) (any, error) {
 		return nil, err
 	}
 
+	// The primary thread is born with the session (plan 35 decision 1): its
+	// id derived from the session's, no agent of its own (read through
+	// resolved_agent), status and timestamps the session's.
+	if _, err := tx.Exec(ctx,
+		`INSERT INTO session_threads (id, session_id, agent_name, status, created_at, updated_at)
+		 VALUES ($1, $2, $3, $4, $5, $5)`,
+		domain.PrimaryThreadID(domain.ID(id)).String(), id, agent.Name, row.status, row.createdAt); err != nil {
+		return nil, err
+	}
 	// After the session INSERT (the rows FK it), inside the same transaction:
 	// a repo-bearing create either stores every pre-sealed token or creates
 	// nothing.
@@ -683,7 +692,7 @@ func (s *server) createSession(r *http.Request) (any, error) {
 		}
 		// The log announces the status the session was born into, after the
 		// initial events it processes in order (placement ours, INFERRED).
-		batch := append(initialEvents, events.NewEvent{Type: domain.EventSessionStatusRunning})
+		batch := append(initialEvents, events.StatusChange(domain.ID(id), domain.SessionRunning, nil)...)
 		opts := events.AppendOptions{
 			Then: func(ctx context.Context, tx pgx.Tx) error {
 				_, err := s.queue.Enqueue(ctx, tx, domain.ID(envID), domain.ID(id), queue.ModelTurn)
@@ -1175,12 +1184,24 @@ func (s *server) archiveSession(r *http.Request) (any, error) {
 	if err := requireNotRunning(ctx, tx, id, "archiving"); err != nil {
 		return nil, err
 	}
+	// The session's end ends its live child threads (plan 35 decision 12) —
+	// before the archive mark, which closes the log to appends — and the
+	// primary's archived_at mirrors the session's.
+	if err := terminateLiveChildren(ctx, tx, s.log, id); err != nil {
+		return nil, err
+	}
 	row, err := scanSession(tx.QueryRow(ctx,
 		`UPDATE sessions SET
 		   updated_at  = CASE WHEN archived_at IS NULL THEN now() ELSE updated_at END,
 		   archived_at = COALESCE(archived_at, now())
 		 WHERE id = $1 RETURNING `+sessionColumns, id))
 	if err != nil {
+		return nil, err
+	}
+	if _, err := tx.Exec(ctx,
+		`UPDATE session_threads SET archived_at = $2, updated_at = $3
+		  WHERE session_id = $1 AND parent_thread_id IS NULL AND archived_at IS NULL`,
+		id, row.archivedAt, row.updatedAt); err != nil {
 		return nil, err
 	}
 	if err := tx.Commit(ctx); err != nil {

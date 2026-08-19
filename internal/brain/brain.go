@@ -205,10 +205,10 @@ func (b *Brain) runTurn(ctx context.Context, item *queue.Item, claimedAt time.Ti
 		// column moves nothing here — and counting a running→running no-op as a
 		// session.status.transitions event would inflate the metric on exactly the
 		// reclaim churn an operator reads it to find.
-		if _, err := b.log.AppendWith(ctx, sid, []events.NewEvent{
-			{Type: domain.EventSessionStatusRescheduled},
-			{Type: domain.EventSessionStatusRunning},
-		}, events.AppendOptions{
+		if _, err := b.log.AppendWith(ctx, sid, append(
+			events.StatusChange(sid, domain.SessionRescheduling, nil),
+			events.StatusChange(sid, domain.SessionRunning, nil)...,
+		), events.AppendOptions{
 			Then: func(ctx context.Context, tx pgx.Tx) error {
 				return b.queue.Assert(ctx, tx, item)
 			},
@@ -666,13 +666,8 @@ func (b *Brain) commitTurn(ctx context.Context, sid domain.ID, item *queue.Item,
 			// commits under the lock with no chain-or-idle decision: the
 			// session is genuinely blocked on human input, and any mid-turn
 			// message stays unprocessed and replays when the gate clears.
-			stop, err := json.Marshal(map[string]any{"stop_reason": map[string]any{
-				"type": "requires_action", "event_ids": askIDs,
-			}})
-			if err != nil {
-				return err
-			}
-			head = append(head, events.NewEvent{Type: domain.EventSessionStatusIdle, Payload: stop})
+			head = append(head, events.StatusChange(sid, domain.SessionIdle,
+				&domain.StopReason{Type: domain.StopRequiresAction, EventIDs: askIDs})...)
 			idle := domain.SessionIdle
 			opts.SetStatus = &idle
 			opts.Then = func(ctx context.Context, tx pgx.Tx) error {
@@ -869,10 +864,6 @@ func (b *Brain) commitFailure(ctx context.Context, sid domain.ID, item *queue.It
 			if chained {
 				return batch, nil
 			}
-			idlePayload, err := json.Marshal(map[string]any{"stop_reason": map[string]any{"type": "retries_exhausted"}})
-			if err != nil {
-				return nil, err
-			}
-			return append(batch, events.NewEvent{Type: domain.EventSessionStatusIdle, Payload: idlePayload}), nil
+			return append(batch, events.StatusChange(sid, domain.SessionIdle, &domain.StopReason{Type: domain.StopRetriesExhausted})...), nil
 		})
 }

@@ -29,6 +29,13 @@ const migrateLockID int64 = 7355608041991001
 // never use statements Postgres forbids inside a transaction block, e.g.
 // CREATE INDEX CONCURRENTLY — extend the migrator if that day comes.)
 func Migrate(ctx context.Context, pool *pgxpool.Pool) error {
+	return migrate(ctx, pool, "")
+}
+
+// migrate is Migrate stopping after the named migration file when through is
+// set — the test seam for exercising a data backfill against rows written
+// under the schema before it.
+func migrate(ctx context.Context, pool *pgxpool.Pool, through string) error {
 	names, err := fs.Glob(migrationsFS, "migrations/*.sql")
 	if err != nil {
 		return fmt.Errorf("store: list migrations: %w", err)
@@ -71,6 +78,9 @@ func Migrate(ctx context.Context, pool *pgxpool.Pool) error {
 		if _, err := tx.Exec(ctx,
 			`INSERT INTO schema_migrations (version) VALUES ($1)`, version); err != nil {
 			return fmt.Errorf("store: record %s: %w", version, err)
+		}
+		if version == through {
+			break
 		}
 	}
 	return tx.Commit(ctx)

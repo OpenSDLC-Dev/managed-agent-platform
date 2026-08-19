@@ -43,6 +43,19 @@ const (
 	EventSessionDeleted           EventType = "session.deleted"
 )
 
+// Session-thread lifecycle events (plan 35). The four status events mirror
+// session.status_* per thread — emitted on the thread's own stream and, for a
+// child, cross-posted to the primary's; the primary thread's accompany every
+// session.status_* on every session (decision 12), thread event first. Each
+// carries {session_thread_id, agent_name}; _idle adds stop_reason.
+const (
+	EventSessionThreadCreated           EventType = "session.thread_created"
+	EventSessionThreadStatusRunning     EventType = "session.thread_status_running"
+	EventSessionThreadStatusIdle        EventType = "session.thread_status_idle"
+	EventSessionThreadStatusRescheduled EventType = "session.thread_status_rescheduled"
+	EventSessionThreadStatusTerminated  EventType = "session.thread_status_terminated"
+)
+
 // Span (observability) events. These are emitted from the same instrumentation
 // point as the OTel spans so the two never drift.
 const (
@@ -94,7 +107,7 @@ func (t EventType) Persisted() bool {
 type Event struct {
 	ID          ID         // sevt_…
 	SessionID   ID         // sesn_…
-	ThreadID    ID         // optional (multi-agent), zero if none
+	ThreadID    ID         // the emitting child thread; zero on the primary thread's rows
 	Seq         int64      // monotonic per session; (SessionID, Seq) is unique
 	Type        EventType  //
 	Body        []byte     // type-specific JSON (flattened at the wire boundary)

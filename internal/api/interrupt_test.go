@@ -97,8 +97,9 @@ func TestInterruptEndsATurnStuckOnAnUnansweredToolUse(t *testing.T) {
 	if got := s.sessionStatus(sessionID); got != "idle" {
 		t.Errorf("status after interrupt = %q, want idle", got)
 	}
-	want := []string{"user.message", "session.status_running", "agent.tool_use",
-		"user.interrupt", "agent.tool_result", "session.status_idle"}
+	want := []string{"user.message", "session.thread_status_running", "session.status_running",
+		"agent.tool_use", "user.interrupt", "agent.tool_result",
+		"session.thread_status_idle", "session.status_idle"}
 	if got := s.eventTypes(sessionID); !sameStrings(got, want) {
 		t.Fatalf("event log = %v, want %v", got, want)
 	}
@@ -210,9 +211,10 @@ func TestInterruptAndRedirectInOneBatch(t *testing.T) {
 	if got := s.sessionStatus(sessionID); got != "running" {
 		t.Errorf("status after interrupt+redirect = %q, want running", got)
 	}
-	want := []string{"user.message", "session.status_running", "agent.tool_use",
-		"user.interrupt", "user.message", "agent.tool_result",
-		"session.status_idle", "session.status_running"}
+	want := []string{"user.message", "session.thread_status_running", "session.status_running",
+		"agent.tool_use", "user.interrupt", "user.message", "agent.tool_result",
+		"session.thread_status_idle", "session.status_idle",
+		"session.thread_status_running", "session.status_running"}
 	if got := s.eventTypes(sessionID); !sameStrings(got, want) {
 		t.Fatalf("event log = %v, want %v", got, want)
 	}

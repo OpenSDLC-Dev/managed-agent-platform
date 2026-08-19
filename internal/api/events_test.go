@@ -265,7 +265,7 @@ func TestSendValidationSweep(t *testing.T) {
 		{"tool_result on cloud env", map[string]any{"events": []any{map[string]any{
 			"type": "user.tool_result", "tool_use_id": "sevt_1"}}}, "self_hosted"},
 		{"thread id rejected", map[string]any{"events": []any{map[string]any{
-			"type": "user.interrupt", "session_thread_id": "sthr_1"}}}, "threads are deferred"},
+			"type": "user.interrupt", "session_thread_id": "sthr_1"}}}, "child threads are not spawned yet"},
 		{"NUL in text", map[string]any{"events": []any{userMessage("a\x00b")}}, "U+0000"},
 		{"system.message alone", map[string]any{"events": []any{map[string]any{
 			"type": "system.message", "content": txt}}}, "immediately follow"},
@@ -366,10 +366,11 @@ func TestListEventsPagingAndFilters(t *testing.T) {
 		sendEvents(t, s, sid, userMessage(fmt.Sprintf("m%d", i)))
 	}
 	sendEvents(t, s, sid, map[string]any{"type": "user.interrupt"})
-	// Two platform events sit on top of the six posted ones: the first
+	// Four platform events sit on top of the six posted ones: the first
 	// user.message woke the idle session, and the interrupt ended the turn that
-	// woke — m0, session.status_running, m1..m4, user.interrupt,
-	// session.status_idle.
+	// woke, each a primary-thread + session status pair — m0,
+	// session.thread_status_running, session.status_running, m1..m4,
+	// user.interrupt, session.thread_status_idle, session.status_idle.
 
 	// Default: chronological asc, everything, next_page null.
 	status, res := s.do(http.MethodGet, path, nil)
@@ -377,8 +378,8 @@ func TestListEventsPagingAndFilters(t *testing.T) {
 		t.Fatalf("list: %d %v", status, res)
 	}
 	all := listData(t, res)
-	if len(all) != 8 {
-		t.Fatalf("listed %d, want 8", len(all))
+	if len(all) != 10 {
+		t.Fatalf("listed %d, want 10", len(all))
 	}
 	if all[0]["content"].([]any)[0].(map[string]any)["text"] != "m0" {
 		t.Errorf("default order is not chronological: first = %v", all[0])
@@ -387,7 +388,7 @@ func TestListEventsPagingAndFilters(t *testing.T) {
 		t.Errorf("next_page = %q, want null", np)
 	}
 
-	// Cursor walk at limit=2: pages of 2/2/2, opaque next_page in between.
+	// Cursor walk at limit=2: pages of 2/2/2/2/2, opaque next_page in between.
 	var walked []string
 	page := ""
 	for pages := 0; ; pages++ {
@@ -409,8 +410,8 @@ func TestListEventsPagingAndFilters(t *testing.T) {
 			t.Fatal("cursor walk did not terminate")
 		}
 	}
-	if len(walked) != 8 {
-		t.Errorf("cursor walk saw %d events, want 8", len(walked))
+	if len(walked) != 10 {
+		t.Errorf("cursor walk saw %d events, want 10", len(walked))
 	}
 	for i, ev := range all {
 		if walked[i] != ev["id"].(string) {
@@ -421,8 +422,8 @@ func TestListEventsPagingAndFilters(t *testing.T) {
 	// desc reverses.
 	_, res = s.do(http.MethodGet, path+"?order=desc", nil)
 	desc := listData(t, res)
-	if desc[0]["id"] != all[7]["id"] {
-		t.Errorf("desc first = %v, want %v", desc[0]["id"], all[7]["id"])
+	if desc[0]["id"] != all[9]["id"] {
+		t.Errorf("desc first = %v, want %v", desc[0]["id"], all[9]["id"])
 	}
 
 	// types filter, both spellings.
@@ -438,8 +439,8 @@ func TestListEventsPagingAndFilters(t *testing.T) {
 		t.Errorf("bogus type filter returned %v", got)
 	}
 
-	// created_at range: everything strictly after the third event.
-	mid := all[2]["id"].(string)
+	// created_at range: everything strictly after the fourth event.
+	mid := all[3]["id"].(string)
 	var midCreated string
 	err := s.pool.QueryRow(context.Background(),
 		`SELECT to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') FROM events WHERE id = $1`,
@@ -448,12 +449,12 @@ func TestListEventsPagingAndFilters(t *testing.T) {
 		t.Fatal(err)
 	}
 	_, res = s.do(http.MethodGet, path+"?created_at[gt]="+midCreated, nil)
-	if got := listData(t, res); len(got) != 5 {
-		t.Errorf("created_at[gt] mid returned %d, want 5", len(got))
+	if got := listData(t, res); len(got) != 6 {
+		t.Errorf("created_at[gt] mid returned %d, want 6", len(got))
 	}
 	_, res = s.do(http.MethodGet, path+"?created_at[lte]="+midCreated, nil)
-	if got := listData(t, res); len(got) != 3 {
-		t.Errorf("created_at[lte] mid returned %d, want 3", len(got))
+	if got := listData(t, res); len(got) != 4 {
+		t.Errorf("created_at[lte] mid returned %d, want 4", len(got))
 	}
 
 	// Validation.
@@ -622,10 +623,12 @@ func TestStreamLiveTail(t *testing.T) {
 
 	// Batches arrive in order, the platform's reaction to them included: the
 	// interrupt ends the running turn and the message in the same batch starts
-	// the next one, so both status events follow the two posted events.
+	// the next one, so both status pairs — the primary thread's event, then
+	// the session's — follow the two posted events.
 	sendEvents(t, s, sid, userMessage("after-2"), map[string]any{"type": "user.interrupt"})
 	for i, want := range []string{"user.message", "user.interrupt",
-		"session.status_idle", "session.status_running"} {
+		"session.thread_status_idle", "session.status_idle",
+		"session.thread_status_running", "session.status_running"} {
 		if f := st.next(t); f.name != want {
 			t.Errorf("frame %d = %q, want %q", i+2, f.name, want)
 		}

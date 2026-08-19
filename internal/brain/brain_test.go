@@ -141,10 +141,10 @@ func (h *harness) wake(t *testing.T, text string) {
 	payload, _ := json.Marshal(map[string]any{
 		"content": []map[string]string{{"type": "text", "text": text}},
 	})
-	_, err := h.log.AppendWith(context.Background(), h.sessionID, []events.NewEvent{
-		{Type: domain.EventUserMessage, Payload: payload},
-		{Type: domain.EventSessionStatusRunning},
-	}, events.AppendOptions{
+	_, err := h.log.AppendWith(context.Background(), h.sessionID, append(
+		[]events.NewEvent{{Type: domain.EventUserMessage, Payload: payload}},
+		events.StatusChange(h.sessionID, domain.SessionRunning, nil)...,
+	), events.AppendOptions{
 		SetStatus: &running,
 		Then: func(ctx context.Context, tx pgx.Tx) error {
 			_, err := h.queue.Enqueue(ctx, tx, h.envID, h.sessionID, queue.ModelTurn)
@@ -287,7 +287,31 @@ func stopReasonType(t *testing.T, body []byte) string {
 	return p.StopReason.Type
 }
 
+// typesEqual compares a log against the expected sequence written without
+// the primary-thread events: every session.status_* is preceded by its
+// session.thread_status_* (plan 35 decision 12, one rule, pinned by
+// TestStatusEventsComeInPrimaryThreadPairs), so the turn-shape assertions
+// below state the session-level sequence and the pairing is applied here.
+// withPrimaryThread inserts the primary thread's status event before each
+// session status event, as the log records them.
+func withPrimaryThread(types []string) []string {
+	out := make([]string, 0, len(types)*2)
+	for _, ty := range types {
+		switch ty {
+		case "session.status_running":
+			out = append(out, "session.thread_status_running")
+		case "session.status_idle":
+			out = append(out, "session.thread_status_idle")
+		case "session.status_rescheduled":
+			out = append(out, "session.thread_status_rescheduled")
+		}
+		out = append(out, ty)
+	}
+	return out
+}
+
 func typesEqual(got, want []string) bool {
+	want = withPrimaryThread(want)
 	if len(got) != len(want) {
 		return false
 	}

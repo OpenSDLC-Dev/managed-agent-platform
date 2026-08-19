@@ -67,8 +67,8 @@ func TestUserMessageFlipsIdleToRunningAndEnqueues(t *testing.T) {
 		t.Errorf("status after user.message = %q, want running", got)
 	}
 	types := s.eventTypes(sessionID)
-	if len(types) != 2 || types[0] != "user.message" || types[1] != "session.status_running" {
-		t.Errorf("event log = %v, want [user.message session.status_running]", types)
+	if !sameStrings(types, []string{"user.message", "session.thread_status_running", "session.status_running"}) {
+		t.Errorf("event log = %v, want [user.message session.thread_status_running session.status_running]", types)
 	}
 	if n := s.liveWork(sessionID, queue.ModelTurn); n != 1 {
 		t.Errorf("live model_turn items = %d, want 1", n)
@@ -208,7 +208,7 @@ func TestUserMessageDoesNotResumePastAnUnansweredToolUse(t *testing.T) {
 	if n := s.liveWork(sessionID, queue.ModelTurn); n != 0 {
 		t.Errorf("live model_turn items = %d, want 0", n)
 	}
-	want := []string{"user.message", "session.status_running", "agent.tool_use", "user.message"}
+	want := []string{"user.message", "session.thread_status_running", "session.status_running", "agent.tool_use", "user.message"}
 	got := s.eventTypes(sessionID)
 	if len(got) != len(want) {
 		t.Fatalf("event log = %v, want %v", got, want)
