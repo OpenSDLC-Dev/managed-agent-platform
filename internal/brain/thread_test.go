@@ -124,3 +124,58 @@ func TestOutcomeGradesAtSessionQuiescenceNotOnAChildsEndTurn(t *testing.T) {
 		t.Errorf("child's request messages = %+v, want the child's own message alone", childCall.Messages)
 	}
 }
+
+// A child's turn suspending on tools: its ask-gated and client-executed calls
+// are cross-posted — the humans and clients who must answer them read the
+// session view — while an allow-policy built-in the platform runs itself
+// stays on the child's own log (cloud; the self_hosted view rule is slice 4).
+func TestChildTurnCrossPostsOnlyWhatAClientMustAnswer(t *testing.T) {
+	h := newHarnessEnv(t, "cloud", [][]provider.Chunk{{
+		provider.Chunk{Kind: provider.KindToolUse, ToolUse: &provider.ToolUse{
+			ID: "toolu_bash", Name: "bash", Input: json.RawMessage(`{"command":"ls"}`)}},
+		provider.Chunk{Kind: provider.KindToolUse, ToolUse: &provider.ToolUse{
+			ID: "toolu_lookup", Name: "lookup", Input: json.RawMessage(`{"q":"go"}`)}},
+		done("tool_use", 3),
+	}}, nil)
+	pgtest.SetSessionStatus(t, h.pool, h.sessionID, "running")
+	agent := `{"type":"agent","id":"agent_worker","version":1,"name":"worker","model":{"id":"fixture-model"},` +
+		`"system":"","description":"","tools":[{"type":"agent_toolset_20260401"},` +
+		`{"type":"custom","name":"lookup","description":"look things up","input_schema":{"type":"object"}}],` +
+		`"mcp_servers":[],"skills":[]}`
+	child := pgtest.NewChildThreadWithAgent(t, h.pool, h.sessionID, agent)
+	if _, err := h.pool.Exec(context.Background(),
+		`UPDATE session_threads SET status = 'running' WHERE id = $1`, child.String()); err != nil {
+		t.Fatal(err)
+	}
+	payload, _ := json.Marshal(map[string]any{"content": []map[string]string{{"type": "text", "text": "go"}}})
+	if _, err := h.log.Append(context.Background(), h.sessionID, []events.NewEvent{
+		{Type: domain.EventUserMessage, ThreadID: child, Payload: payload}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h.queue.EnqueueThread(context.Background(), h.pool, h.envID, h.sessionID, child, queue.ModelTurn); err != nil {
+		t.Fatal(err)
+	}
+
+	h.runOnce(t)
+
+	view, err := h.log.List(context.Background(), h.sessionID, events.ListQuery{Scope: events.ScopeSession})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var viewTypes []string
+	for _, ev := range view {
+		viewTypes = append(viewTypes, string(ev.Type))
+		if ev.Type == domain.EventAgentCustomToolUse && ev.ThreadID != child {
+			t.Errorf("the child's custom tool use on the session view carries thread %q, want the child's", ev.ThreadID)
+		}
+	}
+	if !typesEqual(viewTypes, []string{"agent.custom_tool_use"}) {
+		t.Errorf("session view = %v, want the child's custom tool use alone (its bash call is the platform's to run)", viewTypes)
+	}
+	if got := h.threadStatus(t, child); got != "running" {
+		t.Errorf("child = %q, want running (suspended on its tools)", got)
+	}
+	if n := h.liveOf(t, queue.ToolExec); n != 1 {
+		t.Errorf("live tool_exec = %d, want the session's one", n)
+	}
+}

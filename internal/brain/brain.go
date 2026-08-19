@@ -514,12 +514,15 @@ func pendingInput(ctx context.Context, tx pgx.Tx, sid, threadID domain.ID, water
 }
 
 // stampThread marks a turn's events as its thread's own (plan 35 decision 2);
-// on a child, the ask-gated calls are cross-posted — the session view is
-// where the human who must answer them reads (decision 9).
+// on a child, what a client must answer is cross-posted — the ask-gated calls
+// and the client-executed custom tool calls, the two the docs name — since the
+// session view is where the human or client who answers them reads (decision
+// 9). An allow-policy built-in is the platform's to run and stays on the
+// child's own log (on cloud; the self_hosted view rule is slice 4).
 func stampThread(evs []events.NewEvent, threadID domain.ID, askIDs []domain.ID) {
 	for i := range evs {
 		evs[i].ThreadID = threadID
-		if threadID != "" && slices.Contains(askIDs, evs[i].ID) {
+		if threadID != "" && (evs[i].Type == domain.EventAgentCustomToolUse || slices.Contains(askIDs, evs[i].ID)) {
 			evs[i].CrossPosted = true
 		}
 	}
