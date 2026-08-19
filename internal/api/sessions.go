@@ -200,6 +200,7 @@ func renderSession(r sessionRow) (sessionJSON, error) {
 // resolution run inside the caller's transaction.
 type querier interface {
 	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
+	Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error)
 }
 
 // overrideSystemMaxRunes is the documented ceiling on an agent_with_overrides

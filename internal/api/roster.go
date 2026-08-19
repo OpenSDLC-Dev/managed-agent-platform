@@ -409,36 +409,65 @@ func snapshotRoster(ctx context.Context, db querier, stored json.RawMessage, sel
 	if err := json.Unmarshal(stored, &roster); err != nil {
 		return nil, fmt.Errorf("decode stored roster: %w", err)
 	}
+	// One statement fetches every pinned member definition; the loop below
+	// keeps the roster's order. Members are distinct, so the map keys by id.
+	type memberRow struct {
+		name string
+		spec domain.AgentSpec
+	}
+	agentIDs, versions := make([]string, 0, len(roster.Agents)), make([]int64, 0, len(roster.Agents))
+	for _, ref := range roster.Agents {
+		if ref.ID != self.ID.String() || ref.Version != self.Version {
+			agentIDs, versions = append(agentIDs, ref.ID), append(versions, ref.Version)
+		}
+	}
+	members := map[string]memberRow{}
+	rows, err := db.Query(ctx,
+		`SELECT v.agent_id, v.name, v.spec
+		   FROM agent_versions v
+		   JOIN unnest($1::text[], $2::bigint[]) AS p(agent_id, version)
+		     ON p.agent_id = v.agent_id AND p.version = v.version`, agentIDs, versions)
+	if err != nil {
+		return nil, err
+	}
+	for rows.Next() {
+		var (
+			id, name string
+			specJSON []byte
+			spec     domain.AgentSpec
+		)
+		if err := rows.Scan(&id, &name, &specJSON); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		if err := json.Unmarshal(specJSON, &spec); err != nil {
+			rows.Close()
+			return nil, fmt.Errorf("decode stored agent spec: %w", err)
+		}
+		members[id] = memberRow{name: name, spec: spec}
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
 	out := sessionRoster{Type: "coordinator", Agents: make([]threadAgentJSON, 0, len(roster.Agents))}
 	for _, ref := range roster.Agents {
 		if ref.ID == self.ID.String() && ref.Version == self.Version {
 			out.Agents = append(out.Agents, selfMember(self))
 			continue
 		}
-		var (
-			name     string
-			specJSON []byte
-		)
-		err := db.QueryRow(ctx,
-			`SELECT name, spec FROM agent_versions WHERE agent_id = $1 AND version = $2`, ref.ID, ref.Version).
-			Scan(&name, &specJSON)
-		if errors.Is(err, pgx.ErrNoRows) {
+		m, ok := members[ref.ID]
+		if !ok {
 			// A pinned version cannot vanish while its agent exists; only a
 			// deleted agent (no such route) could get here.
 			return nil, errInvalid("multiagent member %s version %d not found", ref.ID, ref.Version)
 		}
-		if err != nil {
-			return nil, err
-		}
-		var spec domain.AgentSpec
-		if err := json.Unmarshal(specJSON, &spec); err != nil {
-			return nil, fmt.Errorf("decode stored agent spec: %w", err)
-		}
-		spec.Normalize()
-		if err := validateAgentSpec(spec); err != nil {
+		m.spec.Normalize()
+		if err := validateAgentSpec(m.spec); err != nil {
 			return nil, errInvalid("multiagent member %s: %s", ref.ID, err.Error())
 		}
-		out.Agents = append(out.Agents, threadAgentOf(ref.ID, ref.Version, name, spec))
+		out.Agents = append(out.Agents, threadAgentOf(ref.ID, ref.Version, m.name, m.spec))
 	}
 	return json.Marshal(out)
 }
