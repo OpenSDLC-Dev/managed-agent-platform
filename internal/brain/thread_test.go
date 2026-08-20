@@ -128,7 +128,8 @@ func TestOutcomeGradesAtSessionQuiescenceNotOnAChildsEndTurn(t *testing.T) {
 // A child's turn suspending on tools: its ask-gated and client-executed calls
 // are cross-posted — the humans and clients who must answer them read the
 // session view — while an allow-policy built-in the platform runs itself
-// stays on the child's own log (cloud; the self_hosted view rule is slice 4).
+// stays on the child's own log. The fixture is a cloud session: the row is the
+// same on self_hosted, where the view rule surfaces it without the flag.
 func TestChildTurnCrossPostsOnlyWhatAClientMustAnswer(t *testing.T) {
 	h := newHarnessEnv(t, "cloud", [][]provider.Chunk{{
 		provider.Chunk{Kind: provider.KindToolUse, ToolUse: &provider.ToolUse{

@@ -116,7 +116,11 @@ the blocked `agent.tool_use` events (stamped `evaluated_permission:"ask"`). A cl
 answers each with `user.tool_confirmation{tool_use_id, result:"allow"|"deny",
 deny_message?}`; allow releases the tool to the queue, deny synthesizes an
 `is_error:true` `agent.tool_result` carrying the deny message, and the turn resumes
-either way.
+either way. Every driver re-derives that gate rather than trusting the item it claimed:
+the platform's exec drivers and the BYOC worker alike run only a call stamped `allow` or
+released by a confirmation, so a turn suspended on two asks and released one at a time
+never runs the one no human answered — on every session, single-agent and coordinator
+alike.
 
 **Interrupting.** Not every stall has an owner to wait for: a `self_hosted` worker fleet
 that never comes back, a custom tool the client never answers, a confirmation nobody
@@ -127,7 +131,7 @@ it commits nothing. Sent together with a `user.message`, it is also how a client
 a working agent in one request.
 
 **Session threads** ([plan 35](./plan/35_multiagent-threads.md), in progress). Every session
-has a primary `sthr_` thread and, once slice 4 lands the coordinator's delegation tools, child
+has a primary `sthr_` thread, and a coordinator agent's roster spawns child
 threads — each with its own agent, its own log and its own turn, all on the session's one
 sandbox. The flow above then reads per thread: a turn is `(session, thread)`-keyed, the
 `requires_action` suspension and the interrupt address one thread (an interrupt naming a
@@ -137,10 +141,20 @@ session once), the exec drivers run only the runnable calls — every thread's s
 calls off the session's one `tool_exec`, the web and MCP lanes on their own items — and
 wake each thread as its own calls are answered, outcome grading runs at
 the session's quiescence, and the session's status is a fold over its threads' (running ≻
-rescheduling ≻ idle; `requires_action ≻ retries_exhausted ≻ end_turn`, `event_ids` unioned). A single-agent
+rescheduling ≻ idle; `requires_action ≻ retries_exhausted ≻ end_turn`, `event_ids` unioned).
+Delegation is the settlement's own work rather than any driver's: a coordinator's primary
+thread is offered `create_agent` / `send_to_agent` / `list_agents` / `wait_for_agents` and
+every child `submit_result` / `send_to_parent`, and the transaction that commits the turn
+calling one also does what it asked and answers it there — inserting a thread row, writing
+the `agent.thread_message_sent`/`_received` pair the agents talk through, enqueueing
+whatever turn follows. On a `self_hosted` session the session-level list and stream
+additionally carry every child thread's `agent.tool_use` and the results answering it,
+which is how the thread-unaware BYOC worker sees calls it must run on a thread it knows
+nothing about. A single-agent
 session is the one-thread case of the same machinery and its wire is unchanged. What is
 inferred versus documented is in [DIVERGENCES.md](./DIVERGENCES.md) ("Session status as a
-fold over threads"); this section is rewritten in full when the plan closes.
+fold over threads", "Coordinator delegation", "The `self_hosted` session view"); this
+section is rewritten in full when the plan closes.
 
 **Crash recovery is replay.** Sessions are never bound to a brain: any brain can pick up
 any session's next turn from the log. A sandbox container dying surfaces as one
@@ -251,7 +265,7 @@ Layout order is by layer, as the repo is.
 | `queue/` | The work queue over Postgres (`FOR UPDATE SKIP LOCKED`). Five kinds share `work_items`, and two ways take one: `Claim` is the in-process lane, `Poll` the wire lane that serves exactly a `tool_exec` item on a `self_hosted` environment. That split is what makes the executor and the BYOC worker one protocol at two deployment points. |
 | `executor/` | The platform-managed half of that protocol: pull work, run the built-in toolset in the session's sandbox, append the results the brain resumes on. Also the web and MCP work, which run in its own process for **both** environment kinds, and the outputs harvest, which only a `cloud` session enqueues — a `self_hosted` sandbox has no file lane to snapshot, so its grading stays transcript-only (`brain/grader.go`). |
 | `worker/` | The customer-hosted twin. It holds no database handle and reaches everything over the wire with its environment key — which is what makes "customer compute, zero inbound network access" the same code path as the executor's. |
-| `toolset/` | What the model is offered and how one call runs: the built-in `agent_toolset_20260401` (bash, read, write, edit, glob, grep), the `web_fetch`/`web_search` definitions and the `IsWebTool` predicate that routes them, and the `mcp_toolset` arm — validation, and resolving an entry's `default_config`/`configs[]` against a server's listing. Nothing here knows what a call means for the session; that is the executor's. |
+| `toolset/` | What the model is offered and how one call runs: the built-in `agent_toolset_20260401` (bash, read, write, edit, glob, grep), the `web_fetch`/`web_search` definitions and the `IsWebTool` predicate that routes them, the six delegation tools a coordinator session's threads are offered by role with the `IsDelegationTool` twin, and the `mcp_toolset` arm — validation, and resolving an entry's `default_config`/`configs[]` against a server's listing. Nothing here knows what a call means for the session; that is the executor's. |
 | `sandbox/` | The "hands" boundary: a disposable per-session container, `docker/` and `k8s/` behind one interface with one contract suite (`sandboxtest/`), plus `shell/`, the persistent per-session bash built on the stateless primitives. |
 | `webtool/` | The `web_fetch` / `web_search` seam (`tavily/`, `jina/`). These run in the executor's process on both deployment modes — never in the sandbox, never on the worker, never through the egress gate. |
 | `mcp/` | The MCP client: a thin wrapper over the official go-sdk, whose types never reach the domain layer. Connections are per-work-item, so a crashed executor loses nothing a fresh one cannot rebuild. |

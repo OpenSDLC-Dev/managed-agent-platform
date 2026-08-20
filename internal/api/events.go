@@ -24,6 +24,19 @@ import (
 // package for the inbound contract and docs/DIVERGENCES.md for the documented v1
 // divergences.
 
+// platformExecuted names the built-in tools no client may answer with a
+// user.tool_result: the web tools only this platform's web driver runs, and
+// the six delegation tools the settlement answers in the commit that emits
+// them (plan 35 decision 6). The second half is defence in depth — a
+// delegation call is answered before any client can see it, so a forged
+// answer is already refused as a duplicate — and it is worth having anyway,
+// because the log is append-only and a forged child report is a report the
+// coordinator would act on. It must never cover the sandbox six: a
+// self_hosted worker answering those is the BYOC pull protocol.
+func platformExecuted(name string) bool {
+	return toolset.IsWebTool(name) || toolset.IsDelegationTool(name)
+}
+
 // sendSessionEvents implements POST /v1/sessions/{id}/events. The body is
 // always a batch ({"events":[…]}); the response echoes the persisted events
 // as {"data":[…]} with server-assigned ids.
@@ -86,10 +99,10 @@ func (s *server) sendSessionEvents(r *http.Request) (any, error) {
 	// append-only: accepting a result with a wrong, unknown, or duplicate
 	// reference would poison every future replay with a request the model
 	// protocol rejects, permanently wedging the session — so bad references
-	// are the client's 400, not the session's funeral. IsWebTool marks the
-	// calls only the platform's web driver answers, which closes the
-	// scan-to-commit double-answer window on self_hosted (#222).
-	if err := events.ValidateToolResults(ctx, tx, domain.ID(id), newEvents, toolset.IsWebTool); err != nil {
+	// are the client's 400, not the session's funeral. platformExecuted marks
+	// the calls no client may answer, which closes the scan-to-commit
+	// double-answer window on self_hosted (#222).
+	if err := events.ValidateToolResults(ctx, tx, domain.ID(id), newEvents, platformExecuted); err != nil {
 		return nil, errInvalid("%s", err)
 	}
 	// A confirmation must name a tool use still awaiting one; like a tool
@@ -356,6 +369,34 @@ func (s *server) sendSessionEvents(r *http.Request) (any, error) {
 					return nil, err
 				}
 				batch = append(batch, results...)
+				// A child stopped mid-turn and the report it owed will never
+				// come, so its coordinator is told (plan 35 decision 7) — and
+				// woken when this was the last child it could have been
+				// waiting on, the rule events.WakeOnThreadEnded argues. The
+				// wake goes in before this thread's own idle below, so the
+				// session never folds idle between the two. A session-wide
+				// interrupt says nothing at all: it idles the coordinator in
+				// this same loop, one notice per child would be noise on a
+				// session the human just stopped, and a wake would restart
+				// what the interrupt stopped.
+				if !isPrimary && !interruptAll {
+					notice, err := events.ThreadEnded(domain.ID(id), tid, th.agentName,
+						fmt.Sprintf("[agent %s was interrupted]\n\nIt stopped mid-turn and will not report. "+
+							"Send it new instructions, or archive it to free the slot.", th.agentName))
+					if err != nil {
+						return nil, err
+					}
+					batch = append(batch, notice)
+					pair, moved, woke, err := events.WakeOnThreadEnded(ctx, tx, domain.ID(id), tid)
+					if err != nil {
+						return nil, err
+					}
+					batch = append(batch, pair...)
+					moveTo(moved)
+					if woke {
+						thens = append(thens, enqueueTurn(""))
+					}
+				}
 				// end_turn, not a stop reason of its own: the reference documents an
 				// interrupted turn as ending on the same stop reason as one that
 				// finishes by itself, and the idle stop_reason union has no
@@ -685,23 +726,25 @@ func (s *server) snapshotRubrics(ctx context.Context, defs []events.DefineOutcom
 // listSessionEvents implements GET /v1/sessions/{id}/events with the
 // PageCursor envelope {"data":[…],"next_page":…} (no prev_page on events).
 // The session's view is the primary thread's (plan 35 decision 2): its own
-// rows plus what child threads cross-post.
+// rows plus what child threads cross-post, and on a self_hosted environment
+// their tool calls too, which is all a BYOC worker ever reads (decision 13 i).
 func (s *server) listSessionEvents(r *http.Request) (any, error) {
 	id := normalizeSessionID(r.PathValue("id"))
 	if err := checkID(id, "session"); err != nil {
 		return nil, err
 	}
-	return s.listEvents(r, id, events.ListQuery{Scope: events.ScopeSession}, true, func(ctx context.Context) error {
-		return s.sessionExists(ctx, id)
+	return s.listEvents(r, id, events.ListQuery{Scope: events.ScopeSession}, true, func(ctx context.Context) (bool, error) {
+		return s.sessionSelfHosted(ctx, id)
 	})
 }
 
 // listEvents renders one page of a session's log on the surface scope
 // selects. filters admits the session list's order / types[] / created_at
 // params; the thread lists carry none, so there they are refused rather than
-// silently defaulted. exists resolves the 404 — after the params, so a bad
-// request on a missing resource stays a 400, as every list here answers.
-func (s *server) listEvents(r *http.Request, id string, query events.ListQuery, filters bool, exists func(context.Context) error) (any, error) {
+// silently defaulted. resolve settles the 404 — after the params, so a bad
+// request on a missing resource stays a 400, as every list here answers —
+// and reports whether this surface takes the self_hosted widening.
+func (s *server) listEvents(r *http.Request, id string, query events.ListQuery, filters bool, resolve func(context.Context) (bool, error)) (any, error) {
 	ctx := r.Context()
 	q := r.URL.Query()
 	if !filters {
@@ -761,9 +804,11 @@ func (s *server) listEvents(r *http.Request, id string, query events.ListQuery, 
 		*dst = t
 	}
 
-	if err := exists(ctx); err != nil {
+	wide, err := resolve(ctx)
+	if err != nil {
 		return nil, err
 	}
+	query.ThreadToolCalls = wide
 	evs, err := s.log.List(ctx, domain.ID(id), query)
 	if err != nil {
 		return nil, err
@@ -801,16 +846,16 @@ func (s *server) streamSessionEvents(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, err)
 		return
 	}
-	s.streamEvents(w, r, id, events.ListQuery{Scope: events.ScopeSession}, func(ctx context.Context) error {
-		return s.sessionExists(ctx, id)
+	s.streamEvents(w, r, id, events.ListQuery{Scope: events.ScopeSession}, func(ctx context.Context) (bool, error) {
+		return s.sessionSelfHosted(ctx, id)
 	})
 }
 
 // streamEvents tails one surface of a session's log: scope selects the rows
 // and, through the broker, the preview frames (a thread's frames reach only
-// that thread's subscribers). exists resolves the 404 — after the params, as
-// listEvents does.
-func (s *server) streamEvents(w http.ResponseWriter, r *http.Request, id string, scope events.ListQuery, exists func(context.Context) error) {
+// that thread's subscribers). resolve settles the 404 and the widening — after
+// the params, as listEvents does.
+func (s *server) streamEvents(w http.ResponseWriter, r *http.Request, id string, scope events.ListQuery, resolve func(context.Context) (bool, error)) {
 	ctx := r.Context()
 	q := r.URL.Query()
 
@@ -822,10 +867,12 @@ func (s *server) streamEvents(w http.ResponseWriter, r *http.Request, id string,
 		}
 		previews[v] = true
 	}
-	if err := exists(ctx); err != nil {
+	wide, err := resolve(ctx)
+	if err != nil {
 		writeError(w, r, err)
 		return
 	}
+	scope.ThreadToolCalls = wide
 	sub := s.broker.SubscribeThread(domain.ID(id), scope.ThreadID)
 	defer sub.Close()
 
@@ -950,8 +997,12 @@ func (s *server) streamEvents(w http.ResponseWriter, r *http.Request, id string,
 			}
 			wrote := 0
 			for {
-				evs, err := s.log.List(ctx, domain.ID(id), events.ListQuery{
-					AfterSeq: &lastSeq, Limit: sseWakeBatch, Scope: scope.Scope, ThreadID: scope.ThreadID})
+				// The page copies the subscriber's own surface rather than
+				// rebuilding it, so a narrowing this stream must honour can
+				// never be left behind on the list endpoint alone.
+				page := scope
+				page.AfterSeq, page.Limit = &lastSeq, sseWakeBatch
+				evs, err := s.log.List(ctx, domain.ID(id), page)
 				if err != nil {
 					writeErrorFrame(w, flusher)
 					return
@@ -1056,8 +1107,9 @@ var threadAddressable = map[domain.EventType]bool{
 // fields merged with the id/type/processed_at envelope. Payload bytes pass
 // through untouched, so content blocks round-trip exactly — except
 // session_thread_id, rendered per surface (plan 35 decision 2): a child's
-// cross-posted event seen through the session view names its thread; on the
-// child's own surface the stored null stands.
+// event seen through the session view names its thread — whether it got there
+// by cross-posting or by decision 13's self_hosted widening; on the child's
+// own surface the stored null stands.
 func eventWire(ev domain.Event, scope events.Scope) (json.RawMessage, error) {
 	var out map[string]json.RawMessage
 	if err := json.Unmarshal(ev.Body, &out); err != nil {
@@ -1087,6 +1139,20 @@ func (s *server) sessionExists(ctx context.Context, id string) error {
 		return errNotFound("session %s not found", id)
 	}
 	return err
+}
+
+// sessionSelfHosted reports whether a session's environment is self_hosted —
+// the view rule's whole predicate (plan 35 decision 13 i) — and resolves the
+// same 404 sessionExists does, so the session surfaces pay one round trip for
+// both. The kind is not on the session row, hence the join.
+func (s *server) sessionSelfHosted(ctx context.Context, id string) (bool, error) {
+	var kind string
+	err := s.pool.QueryRow(ctx,
+		`SELECT e.kind FROM sessions s JOIN environments e ON e.id = s.environment_id WHERE s.id = $1`, id).Scan(&kind)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return false, errNotFound("session %s not found", id)
+	}
+	return kind == string(domain.EnvSelfHosted), err
 }
 
 // idsOf converts event id strings to domain ids for a stop reason.

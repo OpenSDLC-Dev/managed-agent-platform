@@ -531,9 +531,11 @@ func validateAgentSpec(spec agentSpec) error {
 
 // maxSkillsPerSession is the reference's published cap, counted across every
 // agent. It binds per agent spec — base spec and session override alike, and
-// each roster member's on its own — until plan 35 slice 4 unions a
-// coordinator session's skills across its threads (decision 11), where the
-// cross-agent count gets its one natural place.
+// each roster member's on its own. A coordinator session materializes the
+// union of those specs' skills into its one sandbox (plan 35 decision 11) and
+// re-counts nothing, so a full roster can put more than the cap in one
+// sandbox: the cross-agent count the reference's wording implies has no home
+// here yet.
 const maxSkillsPerSession = 500
 
 // parseSkills validates skills[]: {type:"anthropic"|"custom", skill_id,

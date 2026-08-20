@@ -123,6 +123,18 @@ func TestNormalizeInboundNullHandling(t *testing.T) {
 	}
 }
 
+// The agent-to-agent message pair is platform-emitted like every other agent.*
+// event (plan 35 decision 6), so a client posting one is told that rather than
+// "unknown event type" — the difference between a wrong endpoint and a typo.
+func TestNormalizeInboundRefusesThreadMessages(t *testing.T) {
+	for _, typ := range []string{"agent.thread_message_sent", "agent.thread_message_received"} {
+		_, err := norm(t, "self_hosted", `{"type":"`+typ+`"}`)
+		if err == nil || !strings.Contains(err.Error(), "emitted by the platform") {
+			t.Errorf("%s: err = %v, want it refused as platform-emitted", typ, err)
+		}
+	}
+}
+
 func TestNormalizeInboundDocumentTextSource(t *testing.T) {
 	// Documents (unlike images) accept the plain-text source kind.
 	_, err := norm(t, "cloud",

@@ -178,3 +178,68 @@ func TestSubscribeThreadFiltersFrames(t *testing.T) {
 		}
 	}
 }
+
+// ThreadToolCalls widens the session view with the child threads' tool calls
+// and the results answering them (plan 35 decision 13 i) — the rows a BYOC
+// worker must see — and with nothing else: a child's message, its MCP call
+// and its custom call stay on its own surface, where the flag changes nothing.
+func TestSessionViewWithThreadToolCalls(t *testing.T) {
+	ctx := context.Background()
+	pool := pgtest.NewPool(t)
+	log := events.NewLog(pool)
+	sid := newThreadedSession(t, pool)
+	child := domain.NewID(domain.PrefixSessionThread)
+
+	if _, err := log.Append(ctx, sid, []events.NewEvent{
+		{Type: domain.EventUserMessage, Payload: text("primary")},
+		{Type: domain.EventAgentMessage, ThreadID: child, Payload: text("child-private")},
+		{Type: domain.EventAgentToolUse, ThreadID: child, Payload: []byte(`{"name":"bash","input":{},"evaluated_permission":"allow"}`)},
+		{Type: domain.EventUserToolResult, ThreadID: child, Payload: []byte(`{"tool_use_id":"sevt_x","content":[]}`)},
+		{Type: domain.EventAgentToolResult, ThreadID: child, Payload: []byte(`{"tool_use_id":"sevt_y","content":[]}`)},
+		{Type: domain.EventAgentMCPToolUse, ThreadID: child, Payload: []byte(`{"name":"mcp__s__t","input":{}}`)},
+		{Type: domain.EventAgentCustomToolUse, ThreadID: child, CrossPosted: true, Payload: []byte(`{"name":"custom","input":{}}`)},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	seqs := func(q events.ListQuery) []int64 {
+		evs, err := log.List(ctx, sid, q)
+		if err != nil {
+			t.Fatal(err)
+		}
+		out := make([]int64, 0, len(evs))
+		for _, ev := range evs {
+			out = append(out, ev.Seq)
+		}
+		return out
+	}
+	three := int64(3)
+	cases := []struct {
+		name string
+		q    events.ListQuery
+		want []int64
+	}{
+		{"condensed", events.ListQuery{Scope: events.ScopeSession}, []int64{1, 7}},
+		{"widened", events.ListQuery{Scope: events.ScopeSession, ThreadToolCalls: true}, []int64{1, 3, 4, 5, 7}},
+		// The widening binds an array ahead of the other filters, so a query
+		// carrying both proves the placeholders still line up.
+		{"widened and typed", events.ListQuery{Scope: events.ScopeSession, ThreadToolCalls: true,
+			Types: []string{"agent.tool_use"}}, []int64{3}},
+		{"widened after 3", events.ListQuery{Scope: events.ScopeSession, ThreadToolCalls: true,
+			AfterSeq: &three}, []int64{4, 5, 7}},
+		{"the child's own surface", events.ListQuery{Scope: events.ScopeThread, ThreadID: child,
+			ThreadToolCalls: true}, []int64{2, 3, 4, 5, 6, 7}},
+	}
+	for _, c := range cases {
+		got := seqs(c.q)
+		if len(got) != len(c.want) {
+			t.Errorf("%s: seqs %v, want %v", c.name, got, c.want)
+			continue
+		}
+		for i := range got {
+			if got[i] != c.want[i] {
+				t.Errorf("%s: seqs %v, want %v", c.name, got, c.want)
+				break
+			}
+		}
+	}
+}

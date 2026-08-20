@@ -26,6 +26,7 @@ import (
 //   - system.message         → appended to the system prompt (documented
 //     assumption; the Messages API has one system slot)
 //   - agent.message          → assistant text blocks
+//   - agent.thread_message_received → user text block naming the sender
 //   - agent.*tool_use        → assistant tool_use block, id = the EVENT id
 //     (the provider-side tool id was discarded at emission; the event id is
 //     the durable name results reference)
@@ -174,6 +175,40 @@ func buildRequest(system string, tools []json.RawMessage, history []domain.Event
 				blocks = append(blocks, blk)
 			}
 
+		case domain.EventAgentThreadMessageReceived:
+			// A message from another thread renders as user-role text, which is
+			// the shape a task notification takes in Claude Code's harness
+			// (plan 35 decision 7). It is a whole message rather than a
+			// tool_result even when it answers a spawn, because the sender's
+			// own delegation call was answered in the commit that made it: this
+			// arrives turns later, out of band, and the bracketed prefix is what
+			// tells the model who is speaking. Deterministic from the payload,
+			// so every replay of this log rebuilds the same block (rendering
+			// ours, INFERRED — docs/DIVERGENCES.md).
+			var p struct {
+				FromAgentName string `json:"from_agent_name"`
+			}
+			if err := json.Unmarshal(ev.Body, &p); err != nil {
+				return req, 0, fmt.Errorf("event %s: %w", ev.ID, err)
+			}
+			// The field is null when the sender is the primary agent, which has
+			// a role rather than a roster name.
+			from := "your coordinator"
+			if p.FromAgentName != "" {
+				from = p.FromAgentName
+			}
+			blk, err := json.Marshal(map[string]any{
+				"type": "text",
+				"text": "[message from " + from + "]\n\n" + contentText(ev.Body),
+			})
+			if err != nil {
+				return req, 0, err
+			}
+			if err := turn("user"); err != nil {
+				return req, 0, err
+			}
+			blocks = append(blocks, blk)
+
 		case domain.EventSystemMessage:
 			var p struct {
 				Content []domain.ContentBlock `json:"content"`
@@ -250,7 +285,11 @@ func buildRequest(system string, tools []json.RawMessage, history []domain.Event
 
 		default:
 			// Lifecycle, spans, interrupts, confirmations: state, not
-			// conversation.
+			// conversation. agent.thread_message_sent is here too, and
+			// deliberately: the sender's own delegation tool_use and the
+			// tool_result answering it already carry the message into its
+			// conversation, so rendering the projection as well would say it
+			// twice (plan 35 decision 6, Design C).
 		}
 	}
 	if err := flush(); err != nil {

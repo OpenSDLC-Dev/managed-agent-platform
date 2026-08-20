@@ -15,10 +15,13 @@ import (
 // and the exec kind the session's runnable calls call for.
 
 // threadState is one live thread as the send triggers see it: its id (empty
-// for the primary) and its own status.
+// for the primary), its own status, and the agent running there — which an
+// interrupt names when it tells the coordinator the child stopped (plan 35
+// decision 7).
 type threadState struct {
-	id     domain.ID
-	status string
+	id        domain.ID
+	status    string
+	agentName string
 }
 
 // liveThreads lists a session's unarchived threads with their statuses, the
@@ -31,7 +34,7 @@ func liveThreads(ctx context.Context, tx pgx.Tx, sessionID, sessionStatus string
 	// so the triggers and the fold derive from one rule (the two travel
 	// together today; the guard keeps them aligned if that ever splits).
 	rows, err := tx.Query(ctx,
-		`SELECT CASE WHEN parent_thread_id IS NULL THEN '' ELSE id END, status
+		`SELECT CASE WHEN parent_thread_id IS NULL THEN '' ELSE id END, status, agent_name
 		   FROM session_threads WHERE session_id = $1 AND archived_at IS NULL
 		     AND status <> 'terminated'
 		  ORDER BY parent_thread_id IS NOT NULL, created_at, id`, sessionID)
@@ -43,7 +46,7 @@ func liveThreads(ctx context.Context, tx pgx.Tx, sessionID, sessionStatus string
 	for rows.Next() {
 		var th threadState
 		var id string
-		if err := rows.Scan(&id, &th.status); err != nil {
+		if err := rows.Scan(&id, &th.status, &th.agentName); err != nil {
 			return nil, err
 		}
 		th.id = domain.ID(id)
@@ -60,10 +63,12 @@ func liveThreads(ctx context.Context, tx pgx.Tx, sessionID, sessionStatus string
 
 // execKindFor picks the exec item a resume schedules for the session's
 // runnable platform calls — events.RunnableExecClass's precedence, named as
-// a queue kind; "" when nothing is runnable. answered are the ids the
-// caller's batch already answers, allowed the ones its confirmations release.
+// a queue kind; "" when nothing is runnable, the delegation calls no driver
+// runs included. answered are the ids the caller's batch already answers,
+// allowed the ones its confirmations release.
 func execKindFor(ctx context.Context, q events.Querier, sessionID domain.ID, answered, allowed []string) (queue.Kind, error) {
-	class, err := events.RunnableExecClass(ctx, q, sessionID, answered, allowed, toolset.IsWebTool)
+	class, err := events.RunnableExecClass(ctx, q, sessionID, answered, allowed,
+		toolset.IsWebTool, toolset.IsDelegationTool)
 	if err != nil {
 		return "", err
 	}

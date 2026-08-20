@@ -1036,12 +1036,39 @@ func TestWorkerProductionHeartbeatCadence(t *testing.T) {
 func TestSessionLiveFetchError(t *testing.T) {
 	h := newHarness(t, &fakeSandbox{})
 	w := NewWorker(h.client, h.prov, Config{EnvironmentID: h.envID.String()}.withDefaults())
-	live, err := w.sessionLive(context.Background(), "sesn_does_not_exist_00000000")
+	live, coordinator, err := w.sessionLive(context.Background(), "sesn_does_not_exist_00000000")
 	if err == nil {
 		t.Fatal("sessionLive returned nil error for a missing session")
 	}
-	if live {
-		t.Error("sessionLive reported a missing session as live")
+	if live || coordinator {
+		t.Errorf("sessionLive on a missing session = (live %v, coordinator %v), want both false", live, coordinator)
+	}
+}
+
+// TestSessionLiveReportsCoordinatorMode: the mode the driver switches on comes
+// from the session snapshot the liveness gate already reads — a non-empty
+// multiagent roster and nothing else. A single-agent session renders
+// "multiagent": null, which is the zero struct rather than a missing field, so
+// the test pins both halves against the same wire read.
+func TestSessionLiveReportsCoordinatorMode(t *testing.T) {
+	h := newHarness(t, &fakeSandbox{})
+	w := NewWorker(h.client, h.prov, Config{EnvironmentID: h.envID.String()}.withDefaults())
+
+	live, coordinator, err := w.sessionLive(context.Background(), h.sid.String())
+	if err != nil {
+		t.Fatalf("sessionLive: %v", err)
+	}
+	if !live || coordinator {
+		t.Errorf("single-agent session = (live %v, coordinator %v), want (true, false)", live, coordinator)
+	}
+
+	h.refRoster(t, rosterMember{name: "researcher"})
+	live, coordinator, err = w.sessionLive(context.Background(), h.sid.String())
+	if err != nil {
+		t.Fatalf("sessionLive after the roster: %v", err)
+	}
+	if !live || !coordinator {
+		t.Errorf("coordinator session = (live %v, coordinator %v), want (true, true)", live, coordinator)
 	}
 }
 

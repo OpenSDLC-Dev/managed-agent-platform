@@ -357,3 +357,54 @@ func TestAFaultedPassStillChainsTheOtherDriver(t *testing.T) {
 		t.Errorf("mcp_exec live = %d, want the chain for B's call", got)
 	}
 }
+
+// The sandbox pass runs no delegation call, whatever puts one in front of it:
+// only the settlement that emitted one can answer it, and the six-tool Runner
+// would answer "unknown tool" — an agent.tool_result telling a coordinator its
+// spawn failed. The guard the BYOC worker's scan already keeps (toolexec.go),
+// on the driver that would otherwise commit that answer.
+func TestSandboxPassNeverRunsADelegationCall(t *testing.T) {
+	sb := &fakeSandbox{}
+	h := newHarness(t, sb)
+	evs := h.suspend(t,
+		`{"name":"create_agent","input":{"agent_name":"researcher","message":"go"},`+
+			`"evaluated_permission":"allow","session_thread_id":null}`,
+		writeUse("out.txt", "hello"))
+
+	if worked, err := h.exec.step(context.Background()); err != nil || !worked {
+		t.Fatalf("step: worked=%v err=%v", worked, err)
+	}
+	if _, _, ok := h.resultFor(t, evs[0].ID); ok {
+		t.Error("the sandbox pass answered a delegation call")
+	}
+	if _, _, ok := h.resultFor(t, evs[1].ID); !ok {
+		t.Error("the sibling write went unanswered")
+	}
+	if sb.files["/workspace/out.txt"] != "hello" {
+		t.Errorf("sandbox files = %v, want the write alone", sb.files)
+	}
+}
+
+// And it arms nothing for one either: a stray delegation call is not runnable
+// work, so the pass that refuses to run it completes its item instead of
+// handing itself back. Classing it as sandbox work would loop — the pass
+// filters it out, answers nothing, and the settlement re-arms the same kind
+// on a session no other trigger will move.
+func TestAStrayDelegationCallReArmsNoDriver(t *testing.T) {
+	h := newHarness(t, &fakeSandbox{})
+	evs := h.suspend(t,
+		`{"name":"create_agent","input":{"agent_name":"researcher","message":"go"},`+
+			`"evaluated_permission":"allow","session_thread_id":null}`)
+
+	if worked, err := h.exec.step(context.Background()); err != nil || !worked {
+		t.Fatalf("step: worked=%v err=%v", worked, err)
+	}
+	if _, _, ok := h.resultFor(t, evs[0].ID); ok {
+		t.Error("the sandbox pass answered a delegation call")
+	}
+	for _, kind := range []queue.Kind{queue.ToolExec, queue.WebExec, queue.MCPExec} {
+		if n := h.liveOf(t, kind); n != 0 {
+			t.Errorf("live %s after the pass = %d, want none — the item is done, not re-armed", kind, n)
+		}
+	}
+}

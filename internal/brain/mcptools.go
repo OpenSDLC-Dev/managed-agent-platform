@@ -29,11 +29,64 @@ type mcpCatalog map[string]json.RawMessage
 // commits as, the permission policy that gates it, and — for an MCP tool — the
 // server and bare name the prefixed model-facing name stands in for, which the
 // wire event carries apart.
+//
+// settlement marks a delegation tool, which commits as an ordinary
+// agent.tool_use and is answered inside the settlement transaction rather than
+// by any driver (plan 35 decision 6). It has to be a property of the class
+// rather than a test on the name, because a single-agent session's agent may
+// declare a custom tool called create_agent and that call is the agent's own:
+// only the class knows whether this thread's role is what put the name there.
 type toolClass struct {
-	kind   domain.EventType
-	policy domain.PermissionPolicyType
-	server string
-	tool   string
+	kind       domain.EventType
+	policy     domain.PermissionPolicyType
+	server     string
+	tool       string
+	settlement bool
+}
+
+// delegationRole is which of the delegation tools a thread is offered, decided
+// by the thread's place in the session rather than by anything its agent
+// declares (plan 35 decision 6). A child is a child whatever its own snapshot
+// says, which is what holds the topology to one level.
+type delegationRole int
+
+const (
+	delegationNone delegationRole = iota
+	delegationCoordinator
+	delegationChild
+)
+
+// delegationTools is the definitions a role is offered, and nothing for a
+// single-agent session.
+func delegationTools(role delegationRole) []json.RawMessage {
+	switch role {
+	case delegationCoordinator:
+		return toolset.CoordinatorTools()
+	case delegationChild:
+		return toolset.WorkerTools()
+	}
+	return nil
+}
+
+// hasRoster reports whether a resolved agent's snapshot carries a non-empty
+// roster — the test that makes a primary thread a coordinator.
+//
+// It decodes rather than measuring: the column stores an explicit JSON null for
+// a single agent, which arrives as a four-byte RawMessage, so a length test
+// would class every single-agent primary as a coordinator. A snapshot that will
+// not decode is treated as no roster, which costs a coordinator its delegation
+// tools rather than letting it spawn against a roster nothing can read — and
+// the roster is written by this platform's own resolution (internal/api/roster.go)
+// and validated there, so an unreadable one is a defect rather than a client's
+// input.
+func hasRoster(raw json.RawMessage) bool {
+	var p struct {
+		Agents []json.RawMessage `json:"agents"`
+	}
+	if json.Unmarshal(raw, &p) != nil {
+		return false
+	}
+	return len(p.Agents) > 0
 }
 
 // The model-facing name of an MCP tool, and the shape a Messages endpoint takes
@@ -172,11 +225,17 @@ func (n *toolNotes) render() []string {
 // that overruns is the agent author's ordering rather than a server's.
 const maxMCPToolBytes = 256 << 10
 
-// resolveTools turns the agent's tools[] and the session's MCP catalog into the
-// two halves of a turn's tool surface: the definitions the model is offered, and
-// the class of each name it may call back. The third return is the notes worth
-// telling an operator — every tool an agent declared and the model was not
-// offered, and why.
+// resolveTools turns the thread's role, the agent's tools[] and the session's
+// MCP catalog into the two halves of a turn's tool surface: the definitions the
+// model is offered, and the class of each name it may call back. The third
+// return is the notes worth telling an operator — every tool an agent declared
+// and the model was not offered, and why.
+//
+// The role's delegation tools are the platform's own and are laid down before
+// anything an agent declared: a coordinator's four on the primary thread of a
+// session with a roster, a child's two on any child, none otherwise (plan 35
+// decision 6). They class as settlement-executed, and being first is what makes
+// an agent's custom tool of one of those names the one that is dropped.
 //
 // Custom tools are Messages-API tool definitions minus the union discriminator;
 // an agent_toolset entry expands to the built-in tools it enables (bash, read,
@@ -184,10 +243,10 @@ const maxMCPToolBytes = 256 << 10
 // the sandbox; an mcp_toolset expands to the tools its server reported, resolved
 // against the entry's default_config and configs[].
 //
-// The agent's own tools are laid down first and the MCP ones after, so a name
-// declared by the agent's author always beats a name a third-party server chose
-// — whatever order tools[] lists them in. That is the only ordering rule here;
-// within each half the declaration order stands.
+// The agent's own tools follow, and the MCP ones last, so a name declared by the
+// agent's author always beats a name a third-party server chose — whatever order
+// tools[] lists them in. Those are the only ordering rules here; within each
+// group the declaration order stands.
 //
 // A note is not a failure. An MCP server that could not be reached, a tool whose
 // prefixed name the endpoint would reject, a name already taken, a configs[]
@@ -197,10 +256,26 @@ const maxMCPToolBytes = 256 << 10
 // over a third party's listing it does not control. The one hard error is a
 // permission policy this platform cannot evaluate, which is the #26 fail-open:
 // defaulting it would run an unconfirmed tool.
-func resolveTools(agent domain.ResolvedAgent, cat mcpCatalog) ([]json.RawMessage, map[string]toolClass, []string, error) {
+func resolveTools(agent domain.ResolvedAgent, cat mcpCatalog, role delegationRole) ([]json.RawMessage, map[string]toolClass, []string, error) {
 	var defs []json.RawMessage
 	class := map[string]toolClass{}
 	var notes toolNotes
+
+	// The name is read back out of the definition rather than listed beside it,
+	// so the set the model is offered and the set it may call back cannot drift
+	// apart: there are at most four of them and they are static.
+	injected := map[string]bool{}
+	for _, def := range delegationTools(role) {
+		var probe struct {
+			Name string `json:"name"`
+		}
+		if err := json.Unmarshal(def, &probe); err != nil {
+			return nil, nil, nil, fmt.Errorf("delegation tool: %w", err)
+		}
+		defs = append(defs, def)
+		class[probe.Name] = toolClass{kind: domain.EventAgentToolUse, settlement: true}
+		injected[probe.Name] = true
+	}
 
 	for _, raw := range agent.Tools {
 		var probe struct {
@@ -214,6 +289,16 @@ func resolveTools(agent domain.ResolvedAgent, cat mcpCatalog) ([]json.RawMessage
 		}
 		switch probe.Type {
 		case "custom":
+			if injected[probe.Name] {
+				// A delegation tool is the platform's, and the model must not
+				// be able to reach an agent's own code through one of their
+				// names. Only this arm can contest one: no built-in is named
+				// like a delegation tool, and every MCP name is mcp__-prefixed,
+				// so neither of the other two expansions can collide.
+				notes.add("the agent's custom tool %q was not offered: the platform's delegation tool of that name shadows it",
+					noteLabel(probe.Name))
+				continue
+			}
 			def, err := json.Marshal(map[string]any{
 				"name": probe.Name, "description": probe.Description, "input_schema": probe.InputSchema,
 			})

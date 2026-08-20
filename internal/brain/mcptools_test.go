@@ -140,7 +140,7 @@ func TestMCPToolsAreOfferedUnderAPrefixedName(t *testing.T) {
 	}}}
 	cat := mcpCatalog{"docs": listingOf(t, mcpTool("search"), mcpTool("fetch"))}
 
-	defs, class, notes, err := resolveTools(agent, cat)
+	defs, class, notes, err := resolveTools(agent, cat, delegationNone)
 	if err != nil {
 		t.Fatalf("resolveTools: %v", err)
 	}
@@ -183,7 +183,7 @@ func TestAnOverlongMCPToolNameCostsOnlyItsOwnTool(t *testing.T) {
 		json.RawMessage(`{"type":"mcp_toolset","mcp_server_name":"docs"}`),
 	}}}
 
-	defs, class, notes, err := resolveTools(agent, cat)
+	defs, class, notes, err := resolveTools(agent, cat, delegationNone)
 	if err != nil {
 		t.Fatalf("resolveTools: %v", err)
 	}
@@ -213,7 +213,7 @@ func TestTwoToolNamesThatSanitizeAlikeContestOneName(t *testing.T) {
 		json.RawMessage(`{"type":"mcp_toolset","mcp_server_name":"docs"}`),
 	}}}
 
-	defs, class, notes, err := resolveTools(agent, cat)
+	defs, class, notes, err := resolveTools(agent, cat, delegationNone)
 	if err != nil {
 		t.Fatalf("resolveTools: %v", err)
 	}
@@ -243,7 +243,7 @@ func TestTheNotesOneTurnWritesAreBounded(t *testing.T) {
 		json.RawMessage(`{"type":"mcp_toolset","mcp_server_name":"docs"}`),
 	}}}
 
-	defs, _, notes, err := resolveTools(agent, cat)
+	defs, _, notes, err := resolveTools(agent, cat, delegationNone)
 	if err != nil {
 		t.Fatalf("resolveTools: %v", err)
 	}
@@ -277,7 +277,7 @@ func TestOneRequestCarriesABoundedSetOfMCPDefinitions(t *testing.T) {
 		json.RawMessage(`{"type":"mcp_toolset","mcp_server_name":"docs"}`),
 	}}}
 
-	defs, class, notes, err := resolveTools(agent, cat)
+	defs, class, notes, err := resolveTools(agent, cat, delegationNone)
 	if err != nil {
 		t.Fatalf("resolveTools: %v", err)
 	}
@@ -336,7 +336,7 @@ func TestANoteQuotesABoundedName(t *testing.T) {
 			agent := domain.ResolvedAgent{AgentSpec: domain.AgentSpec{
 				Tools: []json.RawMessage{json.RawMessage(tc.tools)},
 			}}
-			defs, _, notes, err := resolveTools(agent, tc.cat)
+			defs, _, notes, err := resolveTools(agent, tc.cat, delegationNone)
 			if err != nil {
 				t.Fatalf("resolveTools: %v", err)
 			}
@@ -366,7 +366,7 @@ func TestAnMCPToolLosesAContestedName(t *testing.T) {
 	}}}
 	cat := mcpCatalog{"docs": listingOf(t, mcpTool("search"), mcpTool("fetch"))}
 
-	defs, class, notes, err := resolveTools(agent, cat)
+	defs, class, notes, err := resolveTools(agent, cat, delegationNone)
 	if err != nil {
 		t.Fatalf("resolveTools: %v", err)
 	}
@@ -396,7 +396,7 @@ func TestTwoServersCanContestOneComposedName(t *testing.T) {
 		"a":    listingOf(t, mcpTool("b__c"), mcpTool("d")),
 	}
 
-	defs, class, notes, err := resolveTools(agent, cat)
+	defs, class, notes, err := resolveTools(agent, cat, delegationNone)
 	if err != nil {
 		t.Fatalf("resolveTools: %v", err)
 	}
@@ -420,7 +420,7 @@ func TestAServerWithNoListingOffersNothing(t *testing.T) {
 		json.RawMessage(`{"type":"mcp_toolset","mcp_server_name":"docs"}`),
 	}}}
 
-	defs, class, notes, err := resolveTools(agent, mcpCatalog{})
+	defs, class, notes, err := resolveTools(agent, mcpCatalog{}, delegationNone)
 	if err != nil {
 		t.Fatalf("resolveTools: %v", err)
 	}
@@ -450,7 +450,7 @@ func TestUnknownConfigNamesAreNotedNotFatal(t *testing.T) {
 	}}}
 	cat := mcpCatalog{"docs": listingOf(t, mcpTool("search"))}
 
-	defs, _, notes, err := resolveTools(agent, cat)
+	defs, _, notes, err := resolveTools(agent, cat, delegationNone)
 	if err != nil {
 		t.Fatalf("resolveTools: %v", err)
 	}
@@ -471,7 +471,7 @@ func TestAnUnevaluableMCPPolicyFailsAssembly(t *testing.T) {
 	}}}
 	cat := mcpCatalog{"docs": listingOf(t, mcpTool("search"))}
 
-	if _, _, _, err := resolveTools(agent, cat); err == nil {
+	if _, _, _, err := resolveTools(agent, cat, delegationNone); err == nil {
 		t.Fatal("resolveTools accepted a policy it cannot evaluate")
 	}
 }
@@ -485,7 +485,7 @@ func TestACorruptListingFailsAssembly(t *testing.T) {
 	}}}
 	cat := mcpCatalog{"docs": json.RawMessage(`{"not":"a listing"}`)}
 
-	if _, _, _, err := resolveTools(agent, cat); err == nil {
+	if _, _, _, err := resolveTools(agent, cat, delegationNone); err == nil {
 		t.Fatal("resolveTools accepted a listing it could not decode")
 	}
 }
@@ -523,7 +523,7 @@ func TestAMalformedToolEntryFailsAssembly(t *testing.T) {
 	agent := domain.ResolvedAgent{AgentSpec: domain.AgentSpec{Tools: []json.RawMessage{
 		json.RawMessage(`"not an object"`),
 	}}}
-	if _, _, _, err := resolveTools(agent, nil); err == nil {
+	if _, _, _, err := resolveTools(agent, nil, delegationNone); err == nil {
 		t.Fatal("resolveTools accepted a malformed tools[] entry")
 	}
 }

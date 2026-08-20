@@ -327,7 +327,21 @@ func (b *Brain) runTurn(ctx context.Context, item *queue.Item, claimedAt time.Ti
 	// and every tool the agent declared that the model was not offered is logged
 	// with its reason. It sits below the injection counters deliberately — a
 	// resolve miss is a fact of assembly whatever fails next (skillsinject_test).
-	toolDefs, class, notes, err := resolveTools(agent, cat)
+	//
+	// The delegation tools are injected by the thread's role rather than
+	// declared by an agent (plan 35 decision 6): any child reports back, the
+	// primary of a session whose snapshot carries a roster coordinates, and a
+	// single-agent session is offered neither set. The child arm is tested
+	// first because it is what holds the topology to one level — a child's own
+	// snapshot never earns it the coordinator's four, whatever it carries.
+	role := delegationNone
+	switch {
+	case item.ThreadID != "":
+		role = delegationChild
+	case hasRoster(agent.Multiagent):
+		role = delegationCoordinator
+	}
+	toolDefs, class, notes, err := resolveTools(agent, cat, role)
 	if err != nil {
 		return b.failTurn(ctx, sid, item, nil, 0, fmt.Sprintf("resolve tools: %v", err))
 	}
@@ -424,7 +438,7 @@ func (b *Brain) runTurn(ctx context.Context, item *queue.Item, claimedAt time.Ti
 	// the active span's trace context into the work item so the executor or BYOC
 	// worker that runs it parents its tool spans on this turn — one trace across
 	// the process boundary.
-	return b.settleTurn(sctx, sid, item, span, turn, class, watermark)
+	return b.settleTurn(sctx, sid, item, agent, span, turn, class, watermark)
 }
 
 // claimLiveSession loads the session under its row lock and settles stale
@@ -518,7 +532,13 @@ func pendingInput(ctx context.Context, tx pgx.Tx, sid, threadID domain.ID, water
 // and the client-executed custom tool calls, the two the docs name — since the
 // session view is where the human or client who answers them reads (decision
 // 9). An allow-policy built-in is the platform's to run and stays on the
-// child's own log (on cloud; the self_hosted view rule is slice 4).
+// child's own log — where a self_hosted session's view rule reaches it anyway,
+// without a flag on the row (decision 13 i).
+//
+// It owns the turn's OWN events and nothing else: an event this settlement
+// writes on another thread's log — a spawned child's first input, a report on
+// the primary's — carries its own ThreadID and must be appended past this
+// call, or it is silently re-homed onto the thread that is settling.
 func stampThread(evs []events.NewEvent, threadID domain.ID, askIDs []domain.ID) {
 	for i := range evs {
 		evs[i].ThreadID = threadID
@@ -543,11 +563,17 @@ func stampThread(evs []events.NewEvent, threadID domain.ID, askIDs []domain.ID) 
 // (askIDs) — the events a requires_action suspension blocks on. An ask intent's
 // id is minted here rather than left to the store so the same id can name it in
 // the status_idle stop_reason.
-func turnEvents(turn *turnResult, class map[string]toolClass) (batch []events.NewEvent, kind queue.Kind, askIDs []domain.ID, err error) {
+//
+// A delegation call is the fourth shape (plan 35 decision 6): it commits as an
+// agent.tool_use stamped allow like any platform call, but escalates no work
+// kind — no driver can run it — and comes back as delegated for the settlement
+// to resolve and answer in this same commit. Its id is minted here for the same
+// reason an ask's is: the answer has to name it.
+func turnEvents(turn *turnResult, class map[string]toolClass) (batch []events.NewEvent, kind queue.Kind, askIDs []domain.ID, delegated []delegatedCall, err error) {
 	if len(turn.text) > 0 {
 		content, err := json.Marshal(map[string]any{"content": turn.text})
 		if err != nil {
-			return nil, "", nil, err
+			return nil, "", nil, nil, err
 		}
 		batch = append(batch, events.NewEvent{
 			ID: turn.messageEventID, Type: domain.EventAgentMessage, Payload: content,
@@ -568,6 +594,13 @@ func turnEvents(turn *turnResult, class map[string]toolClass) (batch []events.Ne
 		switch c.kind {
 		case domain.EventAgentToolUse:
 			gated = true
+			// A delegation call escalates nothing: the settlement resolves it
+			// and answers it in this same commit, so there is no work for a
+			// driver to claim and a work item enqueued for one would find
+			// nothing runnable.
+			if c.settlement {
+				break
+			}
 			kind = escalate(kind, queue.ToolExec)
 			if toolset.IsWebTool(tu.Name) {
 				kind = escalate(kind, queue.WebExec)
@@ -591,13 +624,29 @@ func turnEvents(turn *turnResult, class map[string]toolClass) (batch []events.Ne
 			}
 			fields["evaluated_permission"] = perm
 		}
+		if c.settlement {
+			// An injected tool carries no policy, so the ask branch above never
+			// minted one: this is the only mint on this path.
+			id = domain.NewID("sevt")
+			delegated = append(delegated, delegatedCall{eventID: id, name: tu.Name, input: tu.Input})
+		}
 		payload, err := json.Marshal(fields)
 		if err != nil {
-			return nil, "", nil, err
+			return nil, "", nil, nil, err
 		}
 		batch = append(batch, events.NewEvent{ID: id, Type: c.kind, Payload: payload})
 	}
-	return batch, kind, askIDs, nil
+	return batch, kind, askIDs, delegated, nil
+}
+
+// delegatedCall is one settlement-executed delegation call, as turnEvents
+// committed it: the id its agent.tool_result must answer, the tool the model
+// named, and the input it sent. Model order, because the calls of one turn are
+// resolved in the order the model made them.
+type delegatedCall struct {
+	eventID domain.ID
+	name    string
+	input   json.RawMessage
 }
 
 // escalate picks the work kind a turn's whole set of platform calls settles to.
@@ -644,8 +693,12 @@ func execRank(k queue.Kind) int {
 // sides stand down) and the integrity guarantee (a brain that lost its claim
 // rolls the whole turn back; the log never carries a loser's half-turn,
 // whose duplicate tool intents would poison every future replay).
-func (b *Brain) settleTurn(ctx context.Context, sid domain.ID, item *queue.Item, span *events.ModelRequest, turn *turnResult, class map[string]toolClass, watermark int64) error {
-	err := b.commitTurn(ctx, sid, item, span, turn, class, watermark)
+//
+// agent is the turn's own — the session's resolved agent on the primary, a
+// child's snapshot on a child — which the delegation branch reads for the
+// roster it spawns from and the name a child reports under (plan 35 decision 6).
+func (b *Brain) settleTurn(ctx context.Context, sid domain.ID, item *queue.Item, agent domain.ResolvedAgent, span *events.ModelRequest, turn *turnResult, class map[string]toolClass, watermark int64) error {
+	err := b.commitTurn(ctx, sid, item, agent, span, turn, class, watermark)
 	span.Finish(ctx, false, err)
 	if err != nil {
 		return fmt.Errorf("settle: %w", err)
@@ -653,8 +706,8 @@ func (b *Brain) settleTurn(ctx context.Context, sid domain.ID, item *queue.Item,
 	return nil
 }
 
-func (b *Brain) commitTurn(ctx context.Context, sid domain.ID, item *queue.Item, span *events.ModelRequest, turn *turnResult, class map[string]toolClass, watermark int64) error {
-	head, workKind, askIDs, err := turnEvents(turn, class)
+func (b *Brain) commitTurn(ctx context.Context, sid domain.ID, item *queue.Item, agent domain.ResolvedAgent, span *events.ModelRequest, turn *turnResult, class map[string]toolClass, watermark int64) error {
+	head, workKind, askIDs, delegated, err := turnEvents(turn, class)
 	if err != nil {
 		return err
 	}
@@ -702,6 +755,17 @@ func (b *Brain) commitTurn(ctx context.Context, sid domain.ID, item *queue.Item,
 	// its own required-argument error, recoverable where a stranded call is
 	// not (docs/DIVERGENCES.md).
 	if len(turn.toolUses) > 0 {
+		if len(delegated) > 0 {
+			// A delegation call is answered in the commit that emits it,
+			// whatever else the turn holds — no driver can run one — so this
+			// branch owns every shape a turn with one takes, the ask gate and
+			// the mixed exec turn included (plan 35 decision 6). The turn is
+			// settlement-only when every call was a delegation call: a
+			// client-executed custom tool escalates no work kind either, and
+			// chaining past one would replay a tool_use nothing answered.
+			return b.commitDelegatedTurn(ctx, sid, item, agent, head, opts, workKind, askIDs, delegated,
+				len(delegated) == len(turn.toolUses), watermark)
+		}
 		if len(askIDs) > 0 {
 			// A confirmation gate: at least one intent's policy is always_ask.
 			// The whole turn suspends — the session idles with a
@@ -775,9 +839,12 @@ func (b *Brain) commitTurn(ctx context.Context, sid domain.ID, item *queue.Item,
 // settle is the failed turn's settlement: under the session row lock it asks
 // whether input arrived mid-turn, lets the caller build the events that
 // outcome calls for, and commits them together with the status, the
-// watermark, and the work item's fate. Chaining hands our own item back to
-// the queue (a fresh Enqueue would be suppressed by this very item's live
-// slot) and leaves the session running; idling completes the item.
+// watermark, and the work item's fate. A child that idles out of retries
+// tells its coordinator so on the way (plan 35 decision 7): nothing else
+// would, and the coordinator would wait for a report that never comes.
+// Chaining hands our own item back to the queue (a fresh Enqueue would be
+// suppressed by this very item's live slot) and leaves the session running;
+// idling completes the item.
 // Successful tool-less turns settle in settleEndTurn and grading cycles in
 // settleVerdict/settleGraderError (plan 21 slice 3) — same lock, same
 // chain-or-idle contract, restated there because outcomes fork the idle
@@ -800,7 +867,7 @@ func (b *Brain) settle(ctx context.Context, sid domain.ID, item *queue.Item, wat
 	// events would loop the same failure forever.
 	chained := false
 	if watermark > 0 {
-		if chained, err = pendingInput(ctx, tx, sid, item.ThreadID, watermark); err != nil {
+		if chained, err = chainInput(ctx, tx, sid, item.ThreadID, watermark); err != nil {
 			return err
 		}
 	}
@@ -815,15 +882,59 @@ func (b *Brain) settle(ctx context.Context, sid domain.ID, item *queue.Item, wat
 			return b.queue.Requeue(ctx, tx, item)
 		}
 	} else {
+		// A child whose turn is out of retries stops for good, and only a
+		// message on the primary's log says so (plan 35 decision 7). It is
+		// appended past stampThread deliberately — that call owns the turn's
+		// own events, and a cross-thread event carries its own thread — and
+		// the primary is woken before the child idles, so a session whose last
+		// running thread is this one never folds idle in between.
+		wakeParent := false
+		var wokeTo *domain.SessionStatus
+		if item.ThreadID != "" && idleStop != nil && idleStop.Type == domain.StopRetriesExhausted {
+			var agentName string
+			if err := tx.QueryRow(ctx, `SELECT agent_name FROM session_threads WHERE id = $1`,
+				item.ThreadID.String()).Scan(&agentName); err != nil {
+				return err
+			}
+			notice, err := events.ThreadEnded(sid, item.ThreadID, agentName,
+				fmt.Sprintf("[agent %s stopped: its turn exhausted its retries]\n\n"+
+					"Archive it to free the slot, or spawn a replacement.", agentName))
+			if err != nil {
+				return err
+			}
+			// Without the wake a coordinator parked on this child waits for a
+			// report that will never come; with a sibling still working there
+			// is one coming, and that one's arrival wakes it (the rule is
+			// events.WakeOnThreadEnded's, shared by every ending).
+			pair, wokeMoved, woke, err := events.WakeOnThreadEnded(ctx, tx, sid, item.ThreadID)
+			if err != nil {
+				return err
+			}
+			batch = append(append(batch, notice), pair...)
+			wakeParent, wokeTo = woke, wokeMoved
+		}
 		pair, moved, err := events.TransitionThread(ctx, tx, sid, events.ThreadTransition{
 			ThreadID: item.ThreadID, Status: domain.SessionIdle, Stop: idleStop})
 		if err != nil {
 			return err
 		}
 		batch = append(batch, pair...)
+		if moved == nil {
+			// The net of the two transitions, which is what the post-commit
+			// metric counts: the wake may have moved the column that the
+			// child's own idle then left where it was.
+			moved = wokeTo
+		}
 		opts.SetStatus = moved
 		opts.Then = func(ctx context.Context, tx pgx.Tx) error {
-			return b.queue.Complete(ctx, tx, item)
+			if err := b.queue.Complete(ctx, tx, item); err != nil {
+				return err
+			}
+			if !wakeParent {
+				return nil
+			}
+			_, err := b.queue.EnqueueThread(ctx, tx, item.EnvironmentID, sid, "", queue.ModelTurn)
+			return err
 		}
 	}
 

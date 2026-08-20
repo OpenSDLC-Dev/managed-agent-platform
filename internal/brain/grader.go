@@ -86,6 +86,12 @@ func (b *Brain) runGrading(ctx context.Context, item *queue.Item, agent domain.R
 	if err != nil {
 		return fmt.Errorf("grading replay: %w", err)
 	}
+	// The head this cycle read: what lands past it arrived while the grader
+	// ran, and this cycle's settlement is the one that must not idle past it.
+	var watermark int64
+	if n := len(history); n > 0 {
+		watermark = history[n-1].Seq
+	}
 	startID := events.LatestOutcomeStartID(history, active.OutcomeID)
 	d, found := events.FindDefineOutcome(history, active.OutcomeID)
 	if !found {
@@ -94,12 +100,13 @@ func (b *Brain) runGrading(ctx context.Context, item *queue.Item, agent domain.R
 		return b.settleVerdict(ctx, item, nil, active, startID,
 			domain.OutcomeResultFailed,
 			"The outcome's definition event is missing from the session log; the rubric cannot be applied.",
-			domain.ModelUsage{})
+			domain.ModelUsage{}, watermark)
 	}
 
 	p, err := b.registry.Provider(agent.Model.ID)
 	if err != nil {
-		return b.settleGraderError(ctx, item, active, fmt.Sprintf("no provider for grader model %q: %v", agent.Model.ID, err))
+		return b.settleGraderError(ctx, item, active,
+			fmt.Sprintf("no provider for grader model %q: %v", agent.Model.ID, err), watermark)
 	}
 	desc, _ := b.registry.Describe(agent.Model.ID)
 
@@ -159,7 +166,7 @@ func (b *Brain) runGrading(ctx context.Context, item *queue.Item, agent domain.R
 			oe.Finish("", streamErr)
 			return streamErr
 		}
-		err := b.settleGraderError(ctx, item, active, streamErr.Error())
+		err := b.settleGraderError(ctx, item, active, streamErr.Error(), watermark)
 		// The span must carry the grader's failure even when the settlement
 		// committed cleanly (err nil would export a healthy cycle); Join
 		// keeps a settlement failure visible alongside it.
@@ -194,7 +201,7 @@ func (b *Brain) runGrading(ctx context.Context, item *queue.Item, agent domain.R
 	if usage != nil {
 		u = *usage
 	}
-	err = b.settleVerdict(ctx, item, oe, active, startID, result, explanation, u)
+	err = b.settleVerdict(ctx, item, oe, active, startID, result, explanation, u, watermark)
 	oe.Finish(result, err)
 	return err
 }
@@ -203,12 +210,47 @@ func (b *Brain) runGrading(ctx context.Context, item *queue.Item, agent domain.R
 // verdict, never an entry state (the entry goes back to running).
 const verdictNeedsRevision = "needs_revision"
 
+// gradingChain is a grading cycle's chain-or-idle test on the primary thread,
+// and it is the union of the two an agent turn uses — because its halves pull
+// in opposite directions. Inbound input is unfiltered (pendingInput from zero):
+// grading marks nothing processed, the grader consuming no user input, so an
+// event that landed between the scheduling commit and the grading claim — its
+// seq below everything this cycle read — must still chain, where a
+// seq-filtered probe would idle past it and strand it forever. A report is
+// seq-filtered (chainInput from the head this cycle read) because it can be
+// found no other way, an agent.* event being stamped processed_at at write,
+// and because from zero it would match every report the session ever carried.
+//
+// So the halves leave a seam between them — the pre-claim stretch, where a
+// report would be below the watermark and stamped, matched by neither — and
+// what closes it is not this probe but the rule that schedules a cycle at
+// all (settleEndTurn, decision 15): grading starts only where the fold moves
+// the SESSION to idle/end_turn, and requires_action and retries_exhausted
+// both outrank end_turn in that pick, so every live thread is idle on
+// end_turn when the cycle is scheduled. No child is running to report, and a
+// client cannot start one — user.message addresses the primary (decision 9),
+// which is the thread now grading. The one agent.thread_message_received
+// that can still land there is the platform's own ending notice, from a
+// child archived while the cycle runs, and it is bounded rather than
+// stranded: a needs_revision verdict replays the whole log into the
+// coordinator's revision turn, and a terminal one idles the primary with the
+// notice unread on the log, where the next user.message replays it.
+func gradingChain(ctx context.Context, tx pgx.Tx, sid domain.ID, watermark int64) (bool, error) {
+	pending, err := pendingInput(ctx, tx, sid, "", 0)
+	if err != nil || pending {
+		return pending, err
+	}
+	return chainInput(ctx, tx, sid, "", watermark)
+}
+
 // settleVerdict commits one evaluation cycle's outcome: the end event, the
 // entry mutation, and the item's fate — one transaction under the session
-// row lock, mirroring the agent turn's settlement discipline.
+// row lock, mirroring the agent turn's settlement discipline. watermark is the
+// head of the log this cycle read, which is what tells a report that landed
+// while the grader ran from the ones already answered.
 func (b *Brain) settleVerdict(ctx context.Context, item *queue.Item, oe *events.OutcomeEvaluation,
 	active domain.OutcomeEvaluation, startID domain.ID,
-	result, explanation string, usage domain.ModelUsage) error {
+	result, explanation string, usage domain.ModelUsage, watermark int64) error {
 
 	sid := item.SessionID
 	tx, err := b.pool.Begin(ctx)
@@ -301,12 +343,7 @@ func (b *Brain) settleVerdict(ctx context.Context, item *queue.Item, oe *events.
 			return b.queue.Requeue(ctx, tx, item)
 		}
 	default: // satisfied | failed: the session idles — unless input arrived
-		// Grading marks nothing processed (the grader consumes no user input;
-		// only an agent turn can answer it), so ANY unprocessed inbound event
-		// chains — including one that landed between the scheduling commit
-		// and the grading claim, whose seq is below everything this wake
-		// read. A seq-filtered probe would idle past it and strand it forever.
-		chained, err := pendingInput(ctx, tx, sid, "", 0)
+		chained, err := gradingChain(ctx, tx, sid, watermark)
 		if err != nil {
 			return err
 		}
@@ -346,8 +383,8 @@ func (b *Brain) settleVerdict(ctx context.Context, item *queue.Item, oe *events.
 // so no end event is rendered — the entry reverts to running and the session
 // settles exactly like a failed model turn (session.error + retries_exhausted;
 // the platform's no-automatic-retry posture). The outcome resumes with the
-// session's next wake. Ours, INFERRED.
-func (b *Brain) settleGraderError(ctx context.Context, item *queue.Item, active domain.OutcomeEvaluation, msg string) error {
+// session's next wake. Ours, INFERRED. watermark is settleVerdict's.
+func (b *Brain) settleGraderError(ctx context.Context, item *queue.Item, active domain.OutcomeEvaluation, msg string, watermark int64) error {
 	// Owned here, not by the callers: msg lands in a jsonb payload, and
 	// Postgres jsonb rejects NUL (#228's failure mode on any unsanitized path).
 	msg = toolset.SanitizeText(msg)
@@ -361,9 +398,7 @@ func (b *Brain) settleGraderError(ctx context.Context, item *queue.Item, active 
 		return err
 	}
 
-	// Unfiltered for the same reason as settleVerdict: grading marks nothing
-	// processed, so any unprocessed inbound event must chain.
-	chained, err := pendingInput(ctx, tx, sid, "", 0)
+	chained, err := gradingChain(ctx, tx, sid, watermark)
 	if err != nil {
 		return err
 	}
@@ -609,6 +644,11 @@ func parseVerdict(text string) (result, explanation string) {
 // renderTranscript renders the session's conversation-bearing events as the
 // role-labeled plain text the grader reads (shape ours, INFERRED). Long items
 // truncate at graderItemBudget; the whole transcript at graderTranscriptBudget.
+//
+// The agent-to-agent message pair (plan 35) is deliberately not rendered. The
+// grader reads the whole session rather than one thread, so a child's report is
+// already here as that child's own submit_result call, and rendering the
+// coordinator's copy of it would put the same text in twice.
 func renderTranscript(history []domain.Event) string {
 	var sb strings.Builder
 	add := func(role, text string) {
@@ -721,16 +761,59 @@ func mustTextContent(text string) json.RawMessage {
 	return raw
 }
 
+// threadEndedWithoutReport builds the notice a child owes its coordinator
+// when its turn ends having called no submit_result — nil for the primary
+// thread, which has no parent to tell, and for a thread id no row answers to.
+// The text follows ThreadEnded's convention: what happened, then the action
+// still open to the coordinator.
+//
+// The fact is about the turn, not the thread's life, and the wording says so
+// because a child can reach here having already reported: a submit_result
+// delivers and ends its turn, but a message the coordinator sent while that
+// turn ran chains the child one more turn (commitDelegatedTurn's chain
+// check), and if the model answers that message in prose the turn ends here.
+// Telling the coordinator its child yielded without answering is right —
+// nothing else would say so — while "it never reported" would contradict the
+// report the coordinator just read.
+func threadEndedWithoutReport(ctx context.Context, tx pgx.Tx, sid, threadID domain.ID) (*events.NewEvent, error) {
+	if threadID == "" {
+		return nil, nil
+	}
+	var agentName string
+	var child bool
+	err := tx.QueryRow(ctx,
+		`SELECT agent_name, parent_thread_id IS NOT NULL FROM session_threads WHERE id = $1 AND session_id = $2`,
+		threadID.String(), sid.String()).Scan(&agentName, &child)
+	if errors.Is(err, pgx.ErrNoRows) || (err == nil && !child) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	notice, err := events.ThreadEnded(sid, threadID, agentName,
+		fmt.Sprintf("[agent %s ended its turn without reporting]\n\n"+
+			"Nothing was reported on this turn; anything it reported earlier stands. It is idle "+
+			"until you message it — send it what is missing, or archive it to free the slot.", agentName))
+	if err != nil {
+		return nil, err
+	}
+	return &notice, nil
+}
+
 // settleEndTurn is the tool-less turn's settlement, outcome-aware: under the
 // session row lock it decides chain / evaluate / idle, in that order. Pending
-// input chains first (a mid-turn message answers before the grader runs); an
+// input chains first (a mid-turn message answers before the grader runs, and
+// so does a report a child delivered while this turn was running, which is why
+// the test is chainInput's rather than pendingInput's); an
 // active outcome then schedules its evaluation cycle — the start event and
 // the entry's flip to evaluating commit here, and the model call itself runs
 // on the primary's next claim (two-phase, no call under the lock) — but only
 // when this thread's end_turn is the session's quiescence (plan 35 decision
 // 15: the fold would move to idle end_turn), so a child's own end_turn or
 // the coordinator's park never grades mid-delegation; otherwise the thread
-// idles with end_turn and the session follows the fold.
+// idles with end_turn and the session follows the fold. Either way a child
+// that ends here tells its coordinator it stopped without reporting, on the
+// same terms as the other endings (below).
 func (b *Brain) settleEndTurn(ctx context.Context, sid domain.ID, item *queue.Item, watermark int64,
 	opts events.AppendOptions, head []events.NewEvent) error {
 
@@ -754,7 +837,7 @@ func (b *Brain) settleEndTurn(ctx context.Context, sid domain.ID, item *queue.It
 
 	chained := false
 	if watermark > 0 {
-		if chained, err = pendingInput(ctx, tx, sid, item.ThreadID, watermark); err != nil {
+		if chained, err = chainInput(ctx, tx, sid, item.ThreadID, watermark); err != nil {
 			return err
 		}
 	}
@@ -767,6 +850,17 @@ func (b *Brain) settleEndTurn(ctx context.Context, sid domain.ID, item *queue.It
 			return b.queue.Requeue(ctx, tx, item)
 		}
 	default:
+		// This thread's turn is over, so a child's ending is now certain and
+		// its coordinator must be told (plan 35 decision 7): a turn that ends
+		// without a submit_result reports nothing, and every other ending — out
+		// of retries, interrupted, archived — delivers a notice. Without one a
+		// coordinator parked on a wait has nothing left to wake it, which is the
+		// wedge W1 exists to avoid. A submit_result never reaches here: its turn
+		// holds a tool call and settles in commitDelegatedTurn, having reported.
+		notice, err := threadEndedWithoutReport(ctx, tx, sid, item.ThreadID)
+		if err != nil {
+			return err
+		}
 		var evals []domain.OutcomeEvaluation
 		if len(outcomesJSON) > 0 {
 			if err := json.Unmarshal(outcomesJSON, &evals); err != nil {
@@ -796,7 +890,11 @@ func (b *Brain) settleEndTurn(ctx context.Context, sid domain.ID, item *queue.It
 				// A child's end_turn is the quiescence: the parked primary
 				// wakes for the grading turn first, then the child idles — in
 				// that order so the session never idles between, exactly as a
-				// single-agent session never does.
+				// single-agent session never does. Its notice rides ahead of
+				// the wake, so the turn that wake schedules already has it.
+				if notice != nil {
+					batch = append(batch, *notice)
+				}
 				wake, _, werr := events.TransitionThread(ctx, tx, sid, events.ThreadTransition{Status: domain.SessionRunning})
 				if werr != nil {
 					return werr
@@ -848,15 +946,44 @@ func (b *Brain) settleEndTurn(ctx context.Context, sid domain.ID, item *queue.It
 			}
 			break
 		}
+		// The notice and its wake, in the order settle's retries-exhausted
+		// ending takes and for its reason: the coordinator is woken before the
+		// child idles, so a session whose last running thread is this one never
+		// folds idle in between. Whether it wakes at all is
+		// events.WakeOnThreadEnded's rule, the one every ending shares — a
+		// running coordinator chains on the notice by seq instead, and one
+		// with a sibling still working has a report coming that will wake it.
+		woke := false
+		var wokeTo *domain.SessionStatus
+		if notice != nil {
+			pair, wokeMoved, wokeOK, werr := events.WakeOnThreadEnded(ctx, tx, sid, item.ThreadID)
+			if werr != nil {
+				return werr
+			}
+			batch = append(append(batch, *notice), pair...)
+			woke, wokeTo = wokeOK, wokeMoved
+		}
 		pair, moved, err := events.TransitionThread(ctx, tx, sid, events.ThreadTransition{
 			ThreadID: item.ThreadID, Status: domain.SessionIdle, Stop: endTurn})
 		if err != nil {
 			return err
 		}
 		batch = append(batch, pair...)
+		if moved == nil {
+			// The net of the two transitions, as settle computes it: the wake
+			// may have moved the column this thread's own idle then left alone.
+			moved = wokeTo
+		}
 		opts.SetStatus = moved
 		opts.Then = func(ctx context.Context, tx pgx.Tx) error {
-			return b.queue.Complete(ctx, tx, item)
+			if err := b.queue.Complete(ctx, tx, item); err != nil {
+				return err
+			}
+			if !woke {
+				return nil
+			}
+			_, err := b.queue.EnqueueThread(ctx, tx, item.EnvironmentID, sid, "", queue.ModelTurn)
+			return err
 		}
 	}
 
