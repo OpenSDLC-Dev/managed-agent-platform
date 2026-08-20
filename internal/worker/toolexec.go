@@ -189,13 +189,26 @@ func RunSessionTools(ctx context.Context, client sdk.Client, provider sandbox.Pr
 // boundary result) and at most 2N+1 on a reclaim (their answered results are on
 // the wire too) — so one page of 20 finishes in a single round trip up to N=19
 // fresh, N=9 reclaimed, and anything wider simply pages on. A coordinator's
-// walk has no boundary and pages to the log's start; the size is what keeps
-// that walk's cost linear in pages rather than in over-read bytes. Capping the
-// over-read is the cost that matters either way: tool inputs and results carry
-// file contents. It is sent explicitly rather than left to the server's
-// default: the bound is this worker's, and it holds against any
-// wire-compatible control plane.
-const toolScanPageSize = 20
+// walk has no boundary and pages to the log's start, so it reads every one of
+// those events whatever the page size — and there the only thing the size
+// changes is how many round trips it costs. Hence two sizes: the bounded scan
+// keeps 20, where capping the over-read is the cost that matters (tool inputs
+// and results carry file contents), and the full walk asks for the largest page
+// the wire allows, which is the same 1000 the reference runner requests. Both
+// are sent explicitly rather than left to the server's default: the bound is
+// this worker's, and it holds against any wire-compatible control plane.
+const (
+	toolScanPageSize        = 20
+	coordinatorScanPageSize = 1000
+)
+
+// scanPageSize is the page one walk asks for, by the mode it runs in.
+func scanPageSize(coordinator bool) int64 {
+	if coordinator {
+		return coordinatorScanPageSize
+	}
+	return toolScanPageSize
+}
 
 // unansweredToolUses reads the session's event log over the wire and returns the
 // tool calls this worker must run, oldest first: the agent.tool_use events that
@@ -267,12 +280,13 @@ func unansweredToolUses(ctx context.Context, client sdk.Client, sessionID string
 			string(domain.EventUserToolConfirm),
 		},
 		Order: sdk.BetaSessionEventListParamsOrderDesc,
-		Limit: sdk.Int(toolScanPageSize),
+		Limit: sdk.Int(scanPageSize(coordinator)),
 	})
 	answered := map[string]bool{}
 	allowed := map[string]bool{}
 	var out []toolUse
 	var sawUse bool
+	var head string // the newest event the walk saw, its anchor for the re-check below
 scan:
 	for iter.Next() {
 		// Per event, because the walk auto-pages: a turn wide enough to span
@@ -290,6 +304,9 @@ scan:
 		}
 		if err := json.Unmarshal([]byte(iter.Current().RawJSON()), &ev); err != nil {
 			return nil, fmt.Errorf("parse session event: %w", err)
+		}
+		if head == "" {
+			head = ev.ID
 		}
 		switch domain.EventType(ev.Type) {
 		case domain.EventAgentToolUse:
@@ -311,7 +328,20 @@ scan:
 			// allow (the SQL's COALESCE), and an ask waits for a human's allow.
 			// A deny is skipped too — the platform synthesizes its error result,
 			// and running it meanwhile would execute what the policy refused.
-			if ev.EvaluatedPermission != "" && ev.EvaluatedPermission != "allow" && !allowed[ev.ID] {
+			//
+			// The release is bound to "ask" rather than to any confirmation,
+			// which is the whole of the rule: a confirmation is client-supplied
+			// input on the events API, and only the API's own
+			// ValidateToolConfirmations knows it may not name a call that was
+			// never gated. This scan reads the log over the wire and cannot see
+			// that check, so it states the invariant itself rather than
+			// inheriting it — a gate at a trust boundary that depends on a
+			// remote validation is a gate that stops working the day the
+			// validation moves.
+			runnable := ev.EvaluatedPermission == "" ||
+				ev.EvaluatedPermission == string(domain.EvalPermAllow) ||
+				(ev.EvaluatedPermission == string(domain.EvalPermAsk) && allowed[ev.ID])
+			if !runnable {
 				continue
 			}
 			// Not "stop at the first answered use": a turn's tools can be
@@ -336,8 +366,84 @@ scan:
 	if err := iter.Err(); err != nil {
 		return nil, fmt.Errorf("list session events: %w", err)
 	}
+	if coordinator && len(out) > 0 && head != "" {
+		var err error
+		if out, err = dropAnsweredSince(ctx, client, sessionID, head, out, progress); err != nil {
+			return nil, err
+		}
+	}
 	slices.Reverse(out) // the walk collected newest-first; run them in log order
 	return out, nil
+}
+
+// dropAnsweredSince removes from uses any call answered while the walk that
+// found them was still running, and it exists because the walk pages by a
+// cursor on the sequence it started from: page two and everything after it read
+// strictly older events, so a result appended above the cursor mid-walk is
+// invisible to the rest of that walk. The call it answers sits below, still
+// looking unanswered, and the driver would run a command that had already been
+// settled — the plan's answered-means-cancelled rule (decision 9), which the
+// executor keeps under its lock and this worker must keep over the wire.
+//
+// Only a coordinator's walk needs it. A single-agent scan stops at the trailing
+// turn's boundary and spans one turn's events, so its window is a page; a
+// coordinator's spans the whole log by decision 13 (iv), and on a long-lived
+// session that is an arbitrarily wide window for a thread-scoped interrupt —
+// which synthesizes results for exactly these calls — to land inside.
+//
+// One pass, not a loop to quiescence: it reads down to the walk's own anchor, so
+// what remains uncovered is a result landing during this read, which is the same
+// page-wide window the single-agent path has always had and the same one the
+// executor's pre-run check leaves. Removing only ever shrinks the runnable set,
+// so a call this pass misses is run and its late result dropped, exactly as before.
+func dropAnsweredSince(ctx context.Context, client sdk.Client, sessionID, head string,
+	uses []toolUse, progress func()) ([]toolUse, error) {
+	// The same type filter the walk used, not just the result types: the anchor
+	// is whatever event the walk saw first, and a filter that could exclude it
+	// would leave this pass with no stop condition but the start of the log —
+	// the very cost it exists to avoid.
+	iter := client.Beta.Sessions.Events.ListAutoPaging(ctx, sessionID, sdk.BetaSessionEventListParams{
+		Types: []string{
+			string(domain.EventAgentToolUse),
+			string(domain.EventAgentToolResult),
+			string(domain.EventUserToolResult),
+			string(domain.EventUserToolConfirm),
+		},
+		Order: sdk.BetaSessionEventListParamsOrderDesc,
+		Limit: sdk.Int(coordinatorScanPageSize),
+	})
+	answered := map[string]bool{}
+	for iter.Next() {
+		progress()
+		var ev struct {
+			ID        string `json:"id"`
+			Type      string `json:"type"`
+			ToolUseID string `json:"tool_use_id"`
+		}
+		if err := json.Unmarshal([]byte(iter.Current().RawJSON()), &ev); err != nil {
+			return nil, fmt.Errorf("parse session event: %w", err)
+		}
+		if ev.ID == head {
+			break // everything from here down was already in the walk's own view
+		}
+		switch domain.EventType(ev.Type) {
+		case domain.EventAgentToolResult, domain.EventUserToolResult:
+			answered[ev.ToolUseID] = true
+		}
+	}
+	if err := iter.Err(); err != nil {
+		return nil, fmt.Errorf("list session events: %w", err)
+	}
+	if len(answered) == 0 {
+		return uses, nil
+	}
+	kept := uses[:0]
+	for _, u := range uses {
+		if !answered[u.id.String()] {
+			kept = append(kept, u)
+		}
+	}
+	return kept, nil
 }
 
 // postToolResult sends one user.tool_result answering a tool use. Empty tool

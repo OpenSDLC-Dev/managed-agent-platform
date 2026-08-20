@@ -388,7 +388,15 @@ func TestTwoReportsWakeTheIdleParentOnce(t *testing.T) {
 	if n := h.countType(t, "session.status_idle"); n != 0 {
 		t.Errorf("the session idled between a child's report and the parent's wake")
 	}
-	for _, a := range h.answers(t) {
+	// Counted before it is inspected: an unanswered delegation call is the one
+	// thing this settlement may not commit, and a bare range over the answers
+	// would pass on an empty set — leaving every other assertion here true of a
+	// run where the reports were never acknowledged at all.
+	answers := h.answers(t)
+	if len(answers) != 2 {
+		t.Fatalf("answers = %v, want one per report", answers)
+	}
+	for _, a := range answers {
 		if a.isErr || a.text != "Result reported." {
 			t.Errorf("answer = %+v", a)
 		}
@@ -542,6 +550,37 @@ func TestMalformedCoordinatorCallsAreAnswered(t *testing.T) {
 	}
 	if n := len(h.children(t)); n != 0 {
 		t.Errorf("children = %d, want none", n)
+	}
+}
+
+// A thread that calls the other role's tool is answered, not left holding it.
+// The brain offers a child two names and a coordinator four, so the other half
+// is a tool this thread never had — and an unanswered call is the one thing a
+// settlement may not commit: with no result and no enqueue the thread stays
+// running forever, and because the session's status folds over its threads, the
+// session cannot be archived either. Only an interrupt would end it.
+func TestACallFromTheWrongRoleIsAnsweredRatherThanStranded(t *testing.T) {
+	h := newHarness(t, [][]provider.Chunk{{
+		toolCall("t1", "wait_for_agents", `{}`),
+		done("tool_use", 1),
+	}}, nil)
+	child := h.childTurn(t, "do the work")
+	h.runOnce(t)
+
+	got := h.answers(t)
+	if len(got) != 1 {
+		t.Fatalf("answers = %v, want the call answered", got)
+	}
+	if !got[0].isErr || !strings.Contains(got[0].text, "submit_result") {
+		t.Errorf("answer = %+v, want an is_error pointing the child at its own tools", got[0])
+	}
+	// The turn settled, so the child carries on rather than wedging: a chained
+	// turn is queued and nothing spawned.
+	if n := h.liveTurns(t, child); n != 1 {
+		t.Errorf("queued turns = %d, want the settlement to have chained one", n)
+	}
+	if n := len(h.children(t)); n != 1 {
+		t.Errorf("children = %d, want only the child running this turn — a child cannot spawn", n)
 	}
 }
 

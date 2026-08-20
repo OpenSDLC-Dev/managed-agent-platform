@@ -303,6 +303,23 @@ func (h *harness) types(t *testing.T, typ string) []domain.Event {
 	return evs
 }
 
+// newest is the id of the session's most recent event among the four types the
+// tool scan reads — the anchor a walk starting now would record.
+func (h *harness) newest(t *testing.T) string {
+	t.Helper()
+	evs, err := h.log.List(context.Background(), h.sid, events.ListQuery{Types: []string{
+		string(domain.EventAgentToolUse), string(domain.EventAgentToolResult),
+		string(domain.EventUserToolResult), string(domain.EventUserToolConfirm),
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(evs) == 0 {
+		t.Fatal("no scannable event to anchor on")
+	}
+	return evs[len(evs)-1].ID.String()
+}
+
 // liveModelTurns counts the resume work items the control plane enqueued for the
 // session — the observable signal that the brain will wake and continue.
 func (h *harness) liveModelTurns(t *testing.T) int {
@@ -926,6 +943,13 @@ func TestAskGatedUseWaitsForItsVerdict(t *testing.T) {
 		{"an ask a human allowed runs", "ask", "allow", true},
 		{"an ask a human denied never runs", "ask", "deny", false},
 		{"a deny never runs", "deny", "", false},
+		// The API cannot produce this shape — ValidateToolConfirmations refuses a
+		// confirmation that does not name an ask-gated call — so the case exists
+		// to pin the scan's own gate rather than the route's. The scan reads the
+		// log over the wire and cannot see that validation; a release bound to
+		// "any confirmation" rather than to "ask" would run here what the policy
+		// refused.
+		{"a deny a human allowed still never runs", "deny", "allow", false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			h := newHarness(t, &fakeSandbox{})
@@ -949,6 +973,48 @@ func TestAskGatedUseWaitsForItsVerdict(t *testing.T) {
 				t.Fatalf("scan = %v, want nothing runnable", useIDs(got))
 			}
 		})
+	}
+}
+
+// TestAnsweredDuringTheWalkIsNotRun: the coordinator's walk pages by a cursor on
+// the sequence it started from, so a result appended above that cursor while the
+// walk is still running is invisible to the rest of it — the call it answers sits
+// below, still looking unanswered. Running it would execute a command that had
+// already been settled, which is what a thread-scoped interrupt does to a
+// sibling's outstanding call: it synthesizes the result and cancels nothing.
+//
+// The race itself needs an append wedged inside a multi-page walk, which no
+// fixture can time. What is testable is the check that closes it, and on its own
+// contract: given the anchor the walk started from, a call answered above it is
+// dropped, and one answered below it — which the walk saw for itself — is left to
+// the walk's own judgement.
+func TestAnsweredDuringTheWalkIsNotRun(t *testing.T) {
+	h := newHarness(t, &fakeSandbox{})
+	uses := h.suspend(t, writeUse("a.txt", "one"), writeUse("b.txt", "two"))
+	first, second := uses[0].ID, uses[1].ID
+
+	scanned := []toolUse{{id: first, name: "write"}, {id: second, name: "write"}}
+	// The anchor is the newest event the walk saw. Answering past it is exactly
+	// the append the walk cannot see.
+	head := h.newest(t)
+	h.answerAsPlatform(t, second)
+
+	kept, err := dropAnsweredSince(context.Background(), h.client, h.sid.String(), head, scanned, func() {})
+	if err != nil {
+		t.Fatalf("dropAnsweredSince: %v", err)
+	}
+	if got := useIDs(kept); !slices.Equal(got, []string{first.String()}) {
+		t.Errorf("kept = %v, want only the call still outstanding %v", got, first)
+	}
+
+	// Anchored at the head as it now stands, the same result is below the anchor
+	// — the walk's own view — and nothing is dropped a second time.
+	kept, err = dropAnsweredSince(context.Background(), h.client, h.sid.String(), h.newest(t), scanned, func() {})
+	if err != nil {
+		t.Fatalf("dropAnsweredSince: %v", err)
+	}
+	if len(kept) != 2 {
+		t.Errorf("kept = %v, want both left to the walk that already saw the answer", useIDs(kept))
 	}
 }
 

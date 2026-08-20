@@ -2,9 +2,12 @@
 // stateless harness that claims model_turn work, replays the session's event
 // log into a provider request, streams the model's turn back into
 // Anthropic-native events, and drives the session state machine at turn end.
-// It never runs tools in-process — a tool call is an emitted intent event,
+// It runs no agent tool in-process — such a call is an emitted intent event,
 // and the turn resumes when the matching result event lands (a fresh
-// model_turn item enqueued by the control plane). Any brain can pick up any
+// model_turn item enqueued by the control plane). The delegation six are not
+// agent tools but the platform's own, and delegate.go answers them inside the
+// settlement that commits the turn calling them: they touch no sandbox, so
+// there is nothing for a driver to run and nothing to wait for. Any brain can pick up any
 // turn: all durable state is the event log.
 package brain
 
@@ -891,27 +894,27 @@ func (b *Brain) settle(ctx context.Context, sid domain.ID, item *queue.Item, wat
 		wakeParent := false
 		var wokeTo *domain.SessionStatus
 		if item.ThreadID != "" && idleStop != nil && idleStop.Type == domain.StopRetriesExhausted {
-			var agentName string
-			if err := tx.QueryRow(ctx, `SELECT agent_name FROM session_threads WHERE id = $1`,
-				item.ThreadID.String()).Scan(&agentName); err != nil {
-				return err
-			}
-			notice, err := events.ThreadEnded(sid, item.ThreadID, agentName,
-				fmt.Sprintf("[agent %s stopped: its turn exhausted its retries]\n\n"+
-					"Archive it to free the slot, or spawn a replacement.", agentName))
+			notice, err := childEndedNotice(ctx, tx, sid, item.ThreadID, func(agentName string) string {
+				return fmt.Sprintf("[agent %s stopped: its turn exhausted its retries]\n\n"+
+					"Archive it to free the slot, or spawn a replacement.", agentName)
+			})
 			if err != nil {
 				return err
 			}
-			// Without the wake a coordinator parked on this child waits for a
-			// report that will never come; with a sibling still working there
-			// is one coming, and that one's arrival wakes it (the rule is
-			// events.WakeOnThreadEnded's, shared by every ending).
-			pair, wokeMoved, woke, err := events.WakeOnThreadEnded(ctx, tx, sid, item.ThreadID)
-			if err != nil {
-				return err
+			if notice != nil {
+				// Without the wake a coordinator parked on this child waits for a
+				// report that will never come; with a sibling still working there
+				// is one coming, and that one's arrival wakes it (the rule is
+				// events.WakeOnThreadEnded's, shared by every ending). It hangs off
+				// the notice because both answer one question — whether a
+				// coordinator is owed anything by this ending.
+				pair, wokeMoved, woke, err := events.WakeOnThreadEnded(ctx, tx, sid, item.ThreadID)
+				if err != nil {
+					return err
+				}
+				batch = append(append(batch, *notice), pair...)
+				wakeParent, wokeTo = woke, wokeMoved
 			}
-			batch = append(append(batch, notice), pair...)
-			wakeParent, wokeTo = woke, wokeMoved
 		}
 		pair, moved, err := events.TransitionThread(ctx, tx, sid, events.ThreadTransition{
 			ThreadID: item.ThreadID, Status: domain.SessionIdle, Stop: idleStop})

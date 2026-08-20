@@ -776,6 +776,24 @@ func mustTextContent(text string) json.RawMessage {
 // nothing else would say so — while "it never reported" would contradict the
 // report the coordinator just read.
 func threadEndedWithoutReport(ctx context.Context, tx pgx.Tx, sid, threadID domain.ID) (*events.NewEvent, error) {
+	return childEndedNotice(ctx, tx, sid, threadID, func(agentName string) string {
+		return fmt.Sprintf("[agent %s ended its turn without reporting]\n\n"+
+			"Nothing was reported on this turn; anything it reported earlier stands. It is idle "+
+			"until you message it — send it what is missing, or archive it to free the slot.", agentName)
+	})
+}
+
+// childEndedNotice is the read behind every notice a child owes its
+// coordinator, and the rule for when one is owed at all: only a child has a
+// parent to tell, so the primary gets nothing, and a thread id no row answers
+// to names nobody. Both are silences rather than errors — these callers are
+// settling a turn, and a settlement that fails deterministically reclaims onto
+// the same failure for as long as anyone watches.
+//
+// The two callers write different notices over the same read, which is the part
+// that must not drift: what a child's ending is, and whose it is.
+func childEndedNotice(ctx context.Context, tx pgx.Tx, sid, threadID domain.ID,
+	text func(agentName string) string) (*events.NewEvent, error) {
 	if threadID == "" {
 		return nil, nil
 	}
@@ -790,10 +808,7 @@ func threadEndedWithoutReport(ctx context.Context, tx pgx.Tx, sid, threadID doma
 	if err != nil {
 		return nil, err
 	}
-	notice, err := events.ThreadEnded(sid, threadID, agentName,
-		fmt.Sprintf("[agent %s ended its turn without reporting]\n\n"+
-			"Nothing was reported on this turn; anything it reported earlier stands. It is idle "+
-			"until you message it — send it what is missing, or archive it to free the slot.", agentName))
+	notice, err := events.ThreadEnded(sid, threadID, agentName, text(agentName))
 	if err != nil {
 		return nil, err
 	}

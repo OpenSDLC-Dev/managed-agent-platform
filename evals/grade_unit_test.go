@@ -1437,13 +1437,16 @@ func TestNoSessionErrorToleratesOnlyARetriedTransientClone(t *testing.T) {
 }
 
 func TestSpawnedAgent(t *testing.T) {
-	spawn := func(name string) map[string]any {
+	spawn := func(id, name string) map[string]any {
 		return map[string]any{
-			"type": "agent.tool_use", "name": "create_agent",
+			"id": id, "type": "agent.tool_use", "name": "create_agent",
 			"input": map[string]any{"agent_name": name, "message": "ask the archivist for the code"},
 		}
 	}
-	tr := trialWith([]map[string]any{spawn("herald")})
+	answer := func(useID string, isErr bool) map[string]any {
+		return map[string]any{"type": "agent.tool_result", "tool_use_id": useID, "is_error": isErr}
+	}
+	tr := trialWith([]map[string]any{spawn("sevt_1", "herald"), answer("sevt_1", false)})
 
 	if err := SpawnedAgent("herald", Model).Check(t, tr); err != nil {
 		t.Errorf("want pass for the agent that was spawned: %v", err)
@@ -1462,6 +1465,24 @@ func TestSpawnedAgent(t *testing.T) {
 	}
 	if !spawnedAgent("herald")(tr) {
 		t.Error("the premise does not hold for the agent that was spawned")
+	}
+
+	// A call the settlement refused is the model asking wrongly, not a spawn —
+	// and counting it would hold open the premise of the Platform grader beside
+	// this one, which would then red for a malformed call.
+	refused := trialWith([]map[string]any{spawn("sevt_2", "herald"), answer("sevt_2", true)})
+	if err := SpawnedAgent("herald", Model).Check(t, refused); err == nil {
+		t.Error("want failure for a create_agent the settlement answered is_error")
+	}
+	if spawnedAgent("herald")(refused) {
+		t.Error("the premise holds for a spawn the settlement refused")
+	}
+
+	// A settlement answers every delegation call in the commit that emits it, so
+	// an unanswered create_agent is a turn that never settled.
+	unsettled := trialWith([]map[string]any{spawn("sevt_3", "herald")})
+	if err := SpawnedAgent("herald", Model).Check(t, unsettled); err == nil {
+		t.Error("want failure for a create_agent no result answers")
 	}
 }
 

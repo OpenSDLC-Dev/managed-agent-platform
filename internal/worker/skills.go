@@ -87,17 +87,28 @@ func SetupSkills(ctx context.Context, client sdk.Client, sessionID string, sb sa
 	// the version object's TRUSTED name, so the skip probe can never be
 	// redirected by an agent-rewritten marker.
 	resolved := make([]skills.Resolved, 0, len(refs))
-	seen := map[string]bool{}
+	seen := map[string]string{} // skill id -> the version that won
 	misses := 0
 	for _, ref := range refs {
 		// Resolution is per-reference work too — round trips each, and the
 		// dangling ones leave by the continue below without ever reaching the
 		// write loop. A set of them is a run that is moving (#383).
 		progress()
-		if seen[ref.SkillID] {
+		if won, dup := seen[ref.SkillID]; dup {
+			// Same version twice is the roster agreeing with itself and worth
+			// nothing to anyone. Two versions is a member running against a
+			// skill it did not pin, and the materialize log below reports only
+			// the winner — so without this line the collision is invisible in
+			// logs and metrics alike, and the operator's first sign of it is a
+			// member behaving as though its own pin did not exist.
+			if won != ref.Version {
+				slog.WarnContext(ctx, "roster skill version collision; the first reference wins",
+					"session_id", sessionID, "skill_id", ref.SkillID,
+					"materialized_version", won, "dropped_version", ref.Version)
+			}
 			continue
 		}
-		seen[ref.SkillID] = true
+		seen[ref.SkillID] = ref.Version
 		r, err := resolveSkill(ctx, client, ref, progress)
 		if err != nil {
 			skipSkill(ctx, sessionID, ref.SkillID, ref.Version, err)

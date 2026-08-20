@@ -46,7 +46,7 @@ An agent is three independently-swappable pieces:
 | **Brain** (harness) | The loop that calls the model and routes tool calls | **Stateless, horizontally scalable.** If it crashes, any fresh brain replays the log and continues. |
 | **Sandbox** (hands) | A disposable per-session container that runs tools | *Cattle, not pets.* A dying container is one tool-call error, not a lost session. |
 
-Execution is **fully asynchronous through the event log and a work queue.** The brain never runs tools in-process: it emits `agent.tool_use`, an executor pulls that work, runs it inside a sandbox, and posts the result back; the brain wakes and continues. Platform-managed sandboxes and customer-run (BYOC) workers are the **same pull protocol at two deployment points**.
+Execution is **fully asynchronous through the event log and a work queue.** The brain runs no agent tool in-process: it emits `agent.tool_use`, an executor pulls that work, runs it inside a sandbox, and posts the result back; the brain wakes and continues. (Multi-agent delegation is the one exception — those tools touch no sandbox and are answered where the turn commits.) Platform-managed sandboxes and customer-run (BYOC) workers are the **same pull protocol at two deployment points**.
 
 Two security invariants, adopted from the reference design:
 

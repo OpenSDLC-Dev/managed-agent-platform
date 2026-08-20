@@ -314,6 +314,12 @@ func (s *server) sendSessionEvents(r *http.Request) (any, error) {
 	// Only the interrupt case ignores the thread's ask gate, because it answers
 	// every outstanding call, gated or not — the set the gate would report is
 	// exactly the set that case is about to clear.
+	// Whether this batch stops the coordinator itself, read once before the loop
+	// because the child arm below needs it and the loop must not decide it from
+	// the order threads happen to come back in. It covers both spellings: a
+	// session-wide interrupt reaches the primary through the expansion above,
+	// and a thread-scoped one naming the primary keys straight to "".
+	primaryInterrupted := at("").interrupt
 	for _, th := range threads {
 		a, tid, status := at(th.id), th.id, th.status
 		isPrimary := tid == ""
@@ -379,7 +385,16 @@ func (s *server) sendSessionEvents(r *http.Request) (any, error) {
 				// this same loop, one notice per child would be noise on a
 				// session the human just stopped, and a wake would restart
 				// what the interrupt stopped.
-				if !isPrimary && !interruptAll {
+				//
+				// interruptAll is not that test on its own: it means every live
+				// thread was named, so it is false the moment one idle sibling
+				// goes unnamed — and a client that interrupts each *running*
+				// thread has done exactly that. The wake below would then flip
+				// the coordinator this same batch has already idled back to
+				// running and queue it a fresh turn, restarting what the human
+				// stopped. What the rule was always about is whether the
+				// coordinator is still there to be told, so ask that.
+				if !isPrimary && !interruptAll && !primaryInterrupted {
 					notice, err := events.ThreadEnded(domain.ID(id), tid, th.agentName,
 						fmt.Sprintf("[agent %s was interrupted]\n\nIt stopped mid-turn and will not report. "+
 							"Send it new instructions, or archive it to free the slot.", th.agentName))
@@ -1107,9 +1122,15 @@ var threadAddressable = map[domain.EventType]bool{
 // fields merged with the id/type/processed_at envelope. Payload bytes pass
 // through untouched, so content blocks round-trip exactly — except
 // session_thread_id, rendered per surface (plan 35 decision 2): a child's
-// event seen through the session view names its thread — whether it got there
-// by cross-posting or by decision 13's self_hosted widening; on the child's
-// own surface the stored null stands.
+// thread-addressable event seen through the session view names its thread —
+// whether it got there by cross-posting or by decision 13's self_hosted
+// widening; on the child's own surface the stored null stands.
+//
+// "Thread-addressable" is the whole of the qualifier, and it is the wire's
+// rather than ours: the widening also carries the results answering a child's
+// calls, and agent.tool_result declares no session_thread_id at v1.63.1, so a
+// widened one renders unnamed. A worker still correlates it, because the call
+// it answers is named.
 func eventWire(ev domain.Event, scope events.Scope) (json.RawMessage, error) {
 	var out map[string]json.RawMessage
 	if err := json.Unmarshal(ev.Body, &out); err != nil {

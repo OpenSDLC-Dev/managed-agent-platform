@@ -182,6 +182,40 @@ func TestSessionWideInterruptTellsTheCoordinatorNothing(t *testing.T) {
 	}
 }
 
+// One request that stops the coordinator and one of its children must leave the
+// coordinator stopped. The child's ending would otherwise wake it — that is the
+// whole of the ending rule — and the wake would flip the very thread this batch
+// just idled back to running and queue it a fresh turn.
+//
+// It is not the session-wide case in disguise: a session-wide interrupt names no
+// thread, and the every-thread-named spelling requires *every* live thread, so an
+// idle sibling left unnamed is enough to tell them apart. That is the ordinary
+// client pattern — stop everything that is running — which is why this is the
+// shape worth pinning.
+func TestInterruptingThePrimaryAndAChildLeavesTheCoordinatorStopped(t *testing.T) {
+	s := newTestServer(t)
+	sid := eventsFixture(t, s)
+	primary := domain.PrimaryThreadID(domain.ID(sid)).String()
+	setThread(t, s, primary, "running", "null")
+	child := insertChild(t, s, sid, "running")
+	insertChild(t, s, sid, "idle") // live, unnamed, and so not the every-thread case
+	if _, err := s.pool.Exec(context.Background(),
+		`UPDATE sessions SET status = 'running' WHERE id = $1`, sid); err != nil {
+		t.Fatal(err)
+	}
+
+	sendEvents(t, s, sid,
+		map[string]any{"type": "user.interrupt", "session_thread_id": primary},
+		map[string]any{"type": "user.interrupt", "session_thread_id": child})
+
+	if got := s.threadStatus(t, primary); got != "idle" {
+		t.Errorf("coordinator = %q, want the interrupt that stopped it to have stuck", got)
+	}
+	if n := s.liveWork(sid, queue.ModelTurn); n != 0 {
+		t.Errorf("model turns queued = %d, want none — this batch stopped the coordinator", n)
+	}
+}
+
 // noticeText flattens a thread message's single text block.
 func noticeText(t *testing.T, ev map[string]any) string {
 	t.Helper()

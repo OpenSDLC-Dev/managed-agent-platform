@@ -1321,22 +1321,66 @@ func spawnedAgent(name string) func(*Trial) bool {
 	return func(tr *Trial) bool { return slices.Contains(spawnedAgents(tr), name) }
 }
 
-// spawnedAgents returns the agent_name of every create_agent call, in log
-// order. It reads the call and not the answer to it deliberately: the model's
-// half of the claim is that it asked, and a spawn that was asked for and left
-// no thread row is exactly what the Platform grader beside it exists to catch.
+// spawnedAgents returns the agent_name of every create_agent call the
+// settlement answered without an error, in log order.
+//
+// The answer is read, not just the call, and which half of the split that
+// serves is worth stating. A call the settlement refused — a name off the
+// roster, a missing message, the thread cap reached — is the model asking
+// wrongly, and the model's graders should own that. Counting it as a spawn
+// would do the opposite twice over: it would pass this Model grader on a spawn
+// that never happened, and then hold open the premise of the Platform grader
+// beside it, which would red and blame the platform for a malformed call. So
+// what is left to Platform is exactly its own: a spawn the settlement said it
+// performed that left no thread row behind.
 func spawnedAgents(tr *Trial) []string {
+	failed := map[string]bool{}
+	for _, res := range eventsOfType(tr, "agent.tool_result") {
+		if isErr, _ := res["is_error"].(bool); isErr {
+			if id, _ := res["tool_use_id"].(string); id != "" {
+				failed[id] = true
+			}
+		}
+	}
 	var out []string
 	for _, use := range eventsOfType(tr, "agent.tool_use") {
 		if use["name"] != "create_agent" {
 			continue
 		}
+		// An unanswered call is not counted either: a settlement answers every
+		// delegation call in the commit that emits it, so a create_agent with no
+		// result is a turn that never settled — nothing was spawned.
+		id, _ := use["id"].(string)
+		if id == "" || failed[id] || !answeredUse(tr, id) {
+			continue
+		}
 		input, _ := use["input"].(map[string]any)
-		if name, _ := input["agent_name"].(string); name != "" {
+		// Trimmed, because createAgent trims before it resolves the roster: a
+		// spawn asking for " archivist " succeeds and renders agent.name
+		// "archivist" on the threads route, and an untrimmed read here would
+		// call that a Model failure — then, as OnlyIf's premise, skip the
+		// Platform grader that would have checked the thread it really created.
+		if name := strings.TrimSpace(nameOf(input)); name != "" {
 			out = append(out, name)
 		}
 	}
 	return out
+}
+
+// nameOf reads a create_agent call's agent_name.
+func nameOf(input map[string]any) string {
+	name, _ := input["agent_name"].(string)
+	return name
+}
+
+// answeredUse reports whether an agent.tool_result answers the given tool-use id.
+func answeredUse(tr *Trial, useID string) bool {
+	for _, res := range eventsOfType(tr, "agent.tool_result") {
+		if id, _ := res["tool_use_id"].(string); id == useID {
+			return true
+		}
+	}
+	return false
 }
 
 // ThreadPerAgent asserts the session ran a child thread for each named roster
@@ -1362,7 +1406,17 @@ func ThreadPerAgent(names []string, class Class) Grader {
 			threads := tr.stack.listThreads(t, tr.SessionID)
 			var primaries []string
 			for _, th := range threads {
-				if th["parent_thread_id"] == nil {
+				// Presence first, then the value. Reading a missing key as nil
+				// would let a response that dropped the field entirely be graded
+				// as a session full of primaries — and this grader exists to
+				// assert what the route renders, so an absent required field is
+				// the failure rather than the premise.
+				raw, ok := th["parent_thread_id"]
+				if !ok {
+					return fmt.Errorf("thread %v renders no parent_thread_id; the threads route "+
+						"always carries it, null on the primary", th["id"])
+				}
+				if raw == nil {
 					id, _ := th["id"].(string)
 					primaries = append(primaries, id)
 				}

@@ -91,6 +91,27 @@ type delegate struct {
 	out delegation
 }
 
+// wrongRole reports why this thread may not call name, or "" when it may. A
+// child is a child by having a caller peer at all: the primary thread has no
+// roster name, so the zero value is the coordinator.
+//
+// The message names the tool the model should have reached for, because the
+// model can see neither its own role nor the half it was not offered — it has
+// simply called something that is not in front of it, and the only useful
+// answer says what is.
+func (d *delegate) wrongRole(name string) string {
+	child := d.caller.ThreadID != ""
+	switch {
+	case child && toolset.IsCoordinatorTool(name):
+		return fmt.Sprintf("%s belongs to your coordinator, not to you. Report with %s, "+
+			"or send your coordinator a message with %s.", name, toolset.ToolSubmitResult, toolset.ToolSendToParent)
+	case !child && toolset.IsWorkerTool(name):
+		return fmt.Sprintf("%s belongs to the agents you spawn, not to you. You are answering "+
+			"the user directly; to reach an agent use %s.", name, toolset.ToolSendToAgent)
+	}
+	return ""
+}
+
 // waitVerdict is one turn's answer to wait_for_agents.
 type waitVerdict struct {
 	answer string
@@ -104,25 +125,35 @@ func (d *delegate) run(ctx context.Context, tx pgx.Tx, calls []delegatedCall) er
 		var answer string
 		var isErr bool
 		var err error
-		switch call.name {
-		case toolset.ToolCreateAgent:
-			answer, isErr, err = d.createAgent(ctx, tx, call)
-		case toolset.ToolSendToAgent:
-			answer, isErr, err = d.sendToAgent(ctx, tx, call)
-		case toolset.ToolListAgents:
-			answer, isErr, err = d.listAgents(ctx, tx)
-		case toolset.ToolWaitForAgents:
-			answer, isErr, err = d.waitForAgents(ctx, tx)
-		case toolset.ToolSubmitResult:
-			answer, isErr, err = d.submitResult(ctx, tx, call)
-		case toolset.ToolSendToParent:
-			answer, isErr, err = d.sendToParent(ctx, tx, call)
-		default:
-			// Unreachable — the class that marked the call settlement-executed
-			// is built from these six names. Answered rather than skipped all
-			// the same, because an unanswered call is the one thing this
-			// settlement may not commit.
-			answer, isErr = fmt.Sprintf("%q is not a delegation tool.", call.name), true
+		// The role gate, restated where the call is answered rather than only
+		// where the tools are offered. The brain gives each thread one half of
+		// the six, so a name from the other half is a tool this thread never
+		// had — refused here with a result, because every handler past this
+		// point assumes its caller is the role that owns it, and because a
+		// delegation call left unanswered is a thread nothing can end.
+		if wrong := d.wrongRole(call.name); wrong != "" {
+			answer, isErr = wrong, true
+		} else {
+			switch call.name {
+			case toolset.ToolCreateAgent:
+				answer, isErr, err = d.createAgent(ctx, tx, call)
+			case toolset.ToolSendToAgent:
+				answer, isErr, err = d.sendToAgent(ctx, tx, call)
+			case toolset.ToolListAgents:
+				answer, isErr, err = d.listAgents(ctx, tx)
+			case toolset.ToolWaitForAgents:
+				answer, isErr, err = d.waitForAgents(ctx, tx)
+			case toolset.ToolSubmitResult:
+				answer, isErr, err = d.submitResult(ctx, tx, call)
+			case toolset.ToolSendToParent:
+				answer, isErr, err = d.sendToParent(ctx, tx, call)
+			default:
+				// Unreachable — the class that marked the call settlement-executed
+				// is built from these six names. Answered rather than skipped all
+				// the same, because an unanswered call is the one thing this
+				// settlement may not commit.
+				answer, isErr = fmt.Sprintf("%q is not a delegation tool.", call.name), true
+			}
 		}
 		if err != nil {
 			return err
@@ -202,11 +233,30 @@ func (d *delegate) createAgent(ctx context.Context, tx pgx.Tx, call delegatedCal
 		return "", false, err
 	}
 	if live >= maxLiveThreads {
-		return fmt.Sprintf("this session already runs %d agent threads, the maximum. "+
-			"Archive a finished one to free a slot.", live), true, nil
+		// live counts the primary too (decision 8), but list_agents shows the
+		// children alone — so reporting live here would name a number the model
+		// cannot reconcile with anything it can see. It is told the cap, which
+		// is the fact it can act on.
+		return fmt.Sprintf("this session already runs the maximum of %d agent threads "+
+			"(your own included). Archive a finished one to free a slot.", maxLiveThreads), true, nil
 	}
 
+	// The wait cache is stale the moment this turn spawns: a wait that already
+	// answered "nothing to wait for" said so about a session without this child,
+	// and a second wait in the same turn must not repeat it — the tool's own
+	// description tells the model not to conclude before its agents report, and
+	// answering from the cache would tell it the opposite on a log that replays
+	// that answer for the rest of the session.
+	d.waited = nil
+
 	child := domain.NewID("sthr")
+	// created_at is set here rather than left to the column's now(), which is
+	// transaction_timestamp() and so identical for every child a single
+	// settlement spawns — the same hazard events/log.go already avoids with
+	// clock_timestamp(). Without it "creation order" is a tie broken by a random
+	// sthr_ token, and three tools plus a public route claim to present these
+	// threads in the order they were made.
+	//
 	// The scope columns are copied from the session rather than left to their
 	// defaults: a session in a non-default org would otherwise spawn its
 	// children outside its own scope, which is why migration 0025's backfill
@@ -215,8 +265,9 @@ func (d *delegate) createAgent(ctx context.Context, tx pgx.Tx, call delegatedCal
 	// for a thread that is not yet running.
 	if _, err := tx.Exec(ctx,
 		`INSERT INTO session_threads (id, session_id, parent_thread_id, org_id, workspace_id, project_id,
-		                              agent, agent_name, status)
-		 SELECT $1, s.id, $2, s.org_id, s.workspace_id, s.project_id, $3::jsonb, $4, 'running'
+		                              agent, agent_name, status, created_at, updated_at)
+		 SELECT $1, s.id, $2, s.org_id, s.workspace_id, s.project_id, $3::jsonb, $4, 'running',
+		        clock_timestamp(), clock_timestamp()
 		   FROM sessions s WHERE s.id = $5`,
 		child.String(), domain.PrimaryThreadID(d.sid).String(), []byte(member), name, d.sid.String()); err != nil {
 		return "", false, err
@@ -407,7 +458,8 @@ func agentsPhrase(children []childThread) string {
 }
 
 // listAgents renders the session's live child threads. The shape is ours
-// (INFERRED): the id to address, the agent running there, and its status.
+// (INFERRED): the id to address, the agent running there, its status, and — on
+// an idle one — why it stopped.
 func (d *delegate) listAgents(ctx context.Context, tx pgx.Tx) (string, bool, error) {
 	children, err := d.liveChildren(ctx, tx)
 	if err != nil {
@@ -417,10 +469,18 @@ func (d *delegate) listAgents(ctx context.Context, tx pgx.Tx) (string, bool, err
 		SessionThreadID string `json:"session_thread_id"`
 		AgentName       string `json:"agent_name"`
 		Status          string `json:"status"`
+		// Idle says three different things, and the other two tools already tell
+		// them apart: wait_for_agents counts a requires_action child as still
+		// working, and send_to_agent refuses one that exhausted its retries.
+		// Rendering "idle" alone would let a coordinator that polls instead of
+		// waiting read "still needs a human" and "dead" as "finished". The
+		// column is already selected for exactly those two callers.
+		StopReason string `json:"stop_reason,omitempty"`
 	}
 	list := make([]entry, 0, len(children))
 	for _, c := range children {
-		list = append(list, entry{SessionThreadID: c.id.String(), AgentName: c.agentName, Status: c.status})
+		list = append(list, entry{SessionThreadID: c.id.String(), AgentName: c.agentName,
+			Status: c.status, StopReason: c.stop})
 	}
 	raw, err := json.Marshal(list)
 	if err != nil {

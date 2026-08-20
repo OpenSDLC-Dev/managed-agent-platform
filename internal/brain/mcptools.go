@@ -276,6 +276,26 @@ func resolveTools(agent domain.ResolvedAgent, cat mcpCatalog, role delegationRol
 		class[probe.Name] = toolClass{kind: domain.EventAgentToolUse, settlement: true}
 		injected[probe.Name] = true
 	}
+	// Inside a session that delegates, the settlement claims all six names —
+	// but offers only this thread's half. The other half is classed and not
+	// defined, which is the whole point: a model that calls a tool it was never
+	// given gets an error result from the settlement that owns the name, where
+	// an unclassed name would commit as a client-executed custom call no driver
+	// runs and no client declared, leaving the thread running forever. On a
+	// child that is a thread nothing can end, and since the fold keeps such a
+	// session running, the session cannot be archived either — recoverable only
+	// by interrupt.
+	//
+	// Classed before the agent's own tools are read, so an agent that really
+	// declares a custom tool of one of these names still wins it back below,
+	// exactly where the name was not offered to this thread.
+	if role != delegationNone {
+		for _, name := range toolset.AllDelegationTools() {
+			if _, taken := class[name]; !taken {
+				class[name] = toolClass{kind: domain.EventAgentToolUse, settlement: true}
+			}
+		}
+	}
 
 	for _, raw := range agent.Tools {
 		var probe struct {

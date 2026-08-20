@@ -2,6 +2,12 @@
 // platform executes for the model — bash, read, write, edit, glob, grep — run
 // inside the session's sandbox.
 //
+// It also holds a second, unrelated six: the delegation tools of a multi-agent
+// session (delegation.go). Only their names, descriptions and schemas live here.
+// Runner must never be handed one — they touch no sandbox, and the brain's
+// settlement answers them itself (plan 35 decision 6); IsDelegationTool is the
+// predicate every driver consults to keep them out.
+//
 // Two halves. Tools turns an agent's toolset entry into the definitions the
 // model is handed (name, description, input schema); Runner.Run executes one
 // call of a named tool against a sandbox. Nothing here talks to the event log

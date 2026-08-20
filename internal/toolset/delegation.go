@@ -109,6 +109,15 @@ func renderDefs(defs []toolDef) []json.RawMessage {
 	return out
 }
 
+// AllDelegationTools names the six, for a caller that must reason about the
+// half it was not offered as well as the half it was.
+func AllDelegationTools() []string {
+	return []string{
+		ToolCreateAgent, ToolSendToAgent, ToolListAgents, ToolWaitForAgents,
+		ToolSubmitResult, ToolSendToParent,
+	}
+}
+
 // CoordinatorTools returns the four delegation tools the primary thread of a
 // session with a roster is offered, and WorkerTools the two any child is. Both
 // hand back a copy: the bytes are shared and stable, the slice is the caller's
@@ -118,6 +127,24 @@ func CoordinatorTools() []json.RawMessage { return slices.Clone(coordinatorTools
 // WorkerTools returns the two delegation tools of a child thread — see
 // CoordinatorTools.
 func WorkerTools() []json.RawMessage { return slices.Clone(workerTools) }
+
+// IsCoordinatorTool reports whether name is one of the four a coordinator's
+// primary thread is offered, and IsWorkerTool one of the two a child is. They
+// exist so the settlement can tell a call made by the wrong role apart from one
+// made by the right one — the brain offers each thread only its own half, so a
+// name from the other half is the model reaching for a tool it was never given.
+func IsCoordinatorTool(name string) bool {
+	switch name {
+	case ToolCreateAgent, ToolSendToAgent, ToolListAgents, ToolWaitForAgents:
+		return true
+	}
+	return false
+}
+
+// IsWorkerTool reports whether name is one of the two — see IsCoordinatorTool.
+func IsWorkerTool(name string) bool {
+	return name == ToolSubmitResult || name == ToolSendToParent
+}
 
 // IsDelegationTool reports whether name is one of the six. It is the predicate
 // the API's tool-result validation and both workers' scans consult, so that no

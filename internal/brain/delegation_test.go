@@ -8,6 +8,7 @@ import (
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/provider"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/queue"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/toolset"
 )
 
 // agentWithACustomTool is the surface every role test resolves against: one
@@ -62,8 +63,28 @@ func TestDelegationToolsAreInjectedByRole(t *testing.T) {
 					t.Errorf("%s: policy = %q, want none — a platform tool is never gated", name, c.policy)
 				}
 			}
-			if _, spawns := class["create_agent"]; spawns && tc.role != delegationCoordinator {
-				t.Error("create_agent reached a thread that is not a coordinator's primary")
+			// What a thread is *offered* is its role's half alone, which the
+			// defNames check above asserts. What the settlement *claims* is
+			// wider on purpose: inside a session that delegates, all six names
+			// are the platform's, so a call to the half this thread never saw is
+			// answered with an error instead of committing as a client-executed
+			// custom call that no driver runs and no client declared — a thread
+			// left running on one can never end, and the session folding over it
+			// can never be archived.
+			for _, name := range toolset.AllDelegationTools() {
+				c, classed := class[name]
+				if tc.role == delegationNone {
+					if classed {
+						t.Errorf("%s is classed on a session that does not delegate", name)
+					}
+					continue
+				}
+				switch {
+				case !classed:
+					t.Errorf("%s is unclassed; a call to it would strand the thread", name)
+				case !c.settlement:
+					t.Errorf("%s: settlement = false, want the settlement to own every one of the six", name)
+				}
 			}
 		})
 	}

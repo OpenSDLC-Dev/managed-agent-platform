@@ -129,8 +129,14 @@ func coordinatorTeam() Task {
 			// live child thread running that agent under the primary. No other
 			// trial in the suite makes this claim — the session ran more than
 			// one thread, and the threads route says which.
-			OnlyIf(ThreadPerAgent([]string{"archivist", "herald"}, Platform),
-				spawnedAgent("archivist"), spawnedAgent("herald")),
+			// One grader per name, each under its own premise. Pairing both names
+			// into one OnlyIf would make the whole check vacuous the moment
+			// either spawn was missing — including the assertion about the agent
+			// that *was* spawned, whose thread row is the platform claim this
+			// trial exists to make. A partial spawn is the model's miss, and the
+			// SpawnedAgent graders above already own it.
+			OnlyIf(ThreadPerAgent([]string{"archivist"}, Platform), spawnedAgent("archivist")),
+			OnlyIf(ThreadPerAgent([]string{"herald"}, Platform), spawnedAgent("herald")),
 			// Platform, and no premise needed: the core pack has already read the
 			// session's status idle, and that status is a fold over exactly these
 			// rows, so one of them still running is the fold disagreeing with
