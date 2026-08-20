@@ -36,6 +36,18 @@ func outcomeTurnBudget(o *Outcome) time.Duration {
 	return time.Duration(2*cycles+1) * turnTimeout
 }
 
+// rosterTurnBudget bounds one turn of a coordinator session, which is not one
+// turn's work either: a child's idle is not the session's (the status is a fold
+// over its threads), so the coordinator's own turns and a turn or more on every
+// worker it spawns all land inside the single user.message → session.status_idle
+// round trip the harness waits on. One turnTimeout per roster member on top of
+// the coordinator's own keeps the bound in proportion to the threads the roster
+// can run, for the reason outcomeTurnBudget scales with an outcome's cycles: the
+// deadline is there to stop a hung run, not to measure the agents.
+func rosterTurnBudget(roster []RosterMember) time.Duration {
+	return time.Duration(len(roster)+1) * turnTimeout
+}
+
 // maxConfirmRounds caps how many requires_action pauses one turn may raise before
 // the harness gives up. Our permission tasks gate a single call, so one round is
 // the norm and a partial re-idle adds a few more at most; a turn that keeps
@@ -85,6 +97,12 @@ type Task struct {
 	// brain offering the listing as mcp__{server}__{tool}, the executor answering
 	// the call, and the answer reaching the model.
 	MCP *MCPFixture
+	// Roster, when set, makes this task's agent a coordinator: every member is
+	// created as an agent of its own first and the coordinator's multiagent
+	// roster names them, so the session snapshots their definitions and the
+	// brain offers the primary thread the four delegation tools. A member's
+	// strings are filled like any other fixture's.
+	Roster []RosterMember
 	// Turns are the user messages, sent one at a time; each waits for the
 	// session to go idle before the next is sent.
 	Turns []Turn
@@ -233,6 +251,27 @@ type FileFixture struct {
 	MountPath string
 }
 
+// RosterMember is one agent on a coordinator task's roster. The harness creates
+// each as an agent of its own before the coordinator, whose roster pins them by
+// id; the session snapshots their full definitions, and the coordinator spawns
+// one by Name.
+//
+// Three fields, because three are what make a child thread its own agent: the
+// name a spawn addresses it by, the instructions only that thread's request
+// carries, and whether it can touch the shared sandbox at all. A member carries
+// no skills, files or MCP server — each of those chains has a trial of its own,
+// and repeating one here would only pay for it twice.
+type RosterMember struct {
+	Name string
+	// System is the member's system prompt. {{NONCE}} and {{RECALL}} are
+	// substituted, so a member can hold a per-trial secret no other thread has.
+	System string
+	// Toolset gives the member the bare agent_toolset_20260401. Left false it
+	// is offered nothing but its two delegation tools — a worker that can only
+	// answer out of its own system prompt.
+	Toolset bool
+}
+
 // Trial is one execution of a Task: everything a grader is allowed to look at.
 // It is deliberately raw — the transcript as the server framed it, the idles as
 // the stream delivered them — so a grader asserts on the product's output and
@@ -297,7 +336,15 @@ func runTrial(t *testing.T, s *stack, task Task, rec *record) *Trial {
 			Result:      tr.fill(task.MCP.Answer),
 		})
 	}
-	agentID := s.createAgent(t, agentBody(task, s.model, tr, skillRefs, mcpURL))
+	// The members come before the coordinator for a stricter reason than the
+	// server above: a roster entry pins each member at the version it has when
+	// the coordinator is written, so a member that does not exist yet cannot be
+	// named at all. The entries are bare agent ids, the roster's plainest form.
+	var roster []any
+	for _, m := range task.Roster {
+		roster = append(roster, s.createAgent(t, memberBody(m, s.model, tr)))
+	}
+	agentID := s.createAgent(t, agentBody(task, s.model, tr, skillRefs, mcpURL, roster))
 	envID := s.createEnvironment(t, "eval-"+task.ID)
 	// A repository can only be attached at create — the add endpoint is
 	// file-only — so it is resolved here, where a missing credential fails this
@@ -387,11 +434,15 @@ func (s *stack) driveToIdle(t *testing.T, stream *sseStream, turn Turn, tr *Tria
 	rounds := 0
 	// One deadline for the whole turn, not one per await: a model that re-pauses
 	// repeatedly cannot stretch the turn to maxConfirmRounds × turnTimeout and slip
-	// past the suite timeout before the round cap fires. An outcome turn gets the
-	// loop-sized budget instead (see outcomeTurnBudget).
+	// past the suite timeout before the round cap fires. An outcome turn and a
+	// coordinator's turn each get a budget the size of the work they actually
+	// contain (see outcomeTurnBudget, rosterTurnBudget).
 	budget := turnTimeout
-	if turn.Outcome != nil {
+	switch {
+	case turn.Outcome != nil:
 		budget = outcomeTurnBudget(turn.Outcome)
+	case len(tr.Task.Roster) > 0:
+		budget = rosterTurnBudget(tr.Task.Roster)
 	}
 	deadline := time.Now().Add(budget)
 	for {
@@ -441,7 +492,7 @@ func (s *stack) driveToIdle(t *testing.T, stream *sseStream, turn Turn, tr *Tria
 // MODEL_ID: the registry's single route sends MODEL_ID upstream whatever the
 // agent says, so any other string here would be a fiction the transcript then
 // records, naming a model the endpoint never saw.
-func agentBody(task Task, model string, tr *Trial, skills []any, mcpURL string) map[string]any {
+func agentBody(task Task, model string, tr *Trial, skills []any, mcpURL string, roster []any) map[string]any {
 	tools := task.Tools
 	if tools == nil {
 		// The bare agent toolset, whose default permission policy runs every
@@ -472,6 +523,33 @@ func agentBody(task Task, model string, tr *Trial, skills []any, mcpURL string) 
 		body["mcp_servers"] = []any{map[string]any{
 			"type": "url", "name": task.MCP.Name, "url": mcpURL,
 		}}
+	}
+	if len(roster) > 0 {
+		// The roster is what makes this agent a coordinator: the primary thread
+		// of a session created from it is offered the four delegation tools, and
+		// create_agent spawns a member by the name it was created under. A task
+		// with no roster sends no key at all, so its body is the one every
+		// single-agent trial has always produced.
+		body["multiagent"] = map[string]any{"type": "coordinator", "agents": roster}
+	}
+	return body
+}
+
+// memberBody builds one roster member's create-agent request. It is agentBody's
+// small twin rather than a call into it, because a member is deliberately plain:
+// no skills, no MCP server, and no roster of its own (the topology is one level
+// deep). The model string is the same one, for the same reason (see agentBody).
+//
+// tools is always sent, empty for a member that takes no toolset, so the body
+// says what the member was given rather than leaving it to a default.
+func memberBody(m RosterMember, model string, tr *Trial) map[string]any {
+	tools := []any{}
+	if m.Toolset {
+		tools = append(tools, map[string]any{"type": "agent_toolset_20260401"})
+	}
+	body := map[string]any{"name": m.Name, "model": model, "tools": tools}
+	if m.System != "" {
+		body["system"] = tr.fill(m.System)
 	}
 	return body
 }

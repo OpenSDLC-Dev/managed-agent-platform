@@ -1291,6 +1291,150 @@ func readRangeUse(tr *Trial, path string, line int) map[string]any {
 	return nil
 }
 
+// SpawnedAgent asserts the coordinator spawned a named roster agent: a
+// create_agent call whose agent_name is exactly that name.
+//
+// Exact on the field, where a general ToolCalledWith would match a marker
+// anywhere in the input — and a coordinator's message to one worker may well
+// name the other ("ask the archivist for it"), which would report a spawn that
+// never happened and hold open the premise of the Platform-class grader beside
+// it. Class Model: whether to delegate, and to whom, is the model's.
+func SpawnedAgent(name string, class Class) Grader {
+	return Grader{
+		Name:  "spawned-agent:" + name,
+		Class: class,
+		Check: func(_ *testing.T, tr *Trial) error {
+			spawned := spawnedAgents(tr)
+			if slices.Contains(spawned, name) {
+				return nil
+			}
+			return fmt.Errorf("no create_agent call named %q; the coordinator spawned %v", name, spawned)
+		},
+	}
+}
+
+// spawnedAgent is SpawnedAgent's condition, for OnlyIf. The two read the same
+// finder deliberately, as calledWith does for ToolCalledWith: pair them on the
+// same name and the Platform grader falls silent exactly when the Model grader
+// reds, so the two can never disagree about whether the spawn happened.
+func spawnedAgent(name string) func(*Trial) bool {
+	return func(tr *Trial) bool { return slices.Contains(spawnedAgents(tr), name) }
+}
+
+// spawnedAgents returns the agent_name of every create_agent call, in log
+// order. It reads the call and not the answer to it deliberately: the model's
+// half of the claim is that it asked, and a spawn that was asked for and left
+// no thread row is exactly what the Platform grader beside it exists to catch.
+func spawnedAgents(tr *Trial) []string {
+	var out []string
+	for _, use := range eventsOfType(tr, "agent.tool_use") {
+		if use["name"] != "create_agent" {
+			continue
+		}
+		input, _ := use["input"].(map[string]any)
+		if name, _ := input["agent_name"].(string); name != "" {
+			out = append(out, name)
+		}
+	}
+	return out
+}
+
+// ThreadPerAgent asserts the session ran a child thread for each named roster
+// agent — the claim that separates a coordinator session from every other trial
+// in this suite, read off the surface a client reads it from (GET
+// /v1/sessions/{id}/threads) rather than off the transcript that announced it.
+//
+// It grades the shape and not the count: one primary (parent_thread_id null),
+// and for each name at least one child parented to that primary running that
+// agent. A count would pass a session that spawned one agent twice, and a
+// child hanging off a sibling would be a topology this platform refuses to
+// build.
+//
+// Platform, on the premise that the model actually spawned: pair it with a
+// SpawnedAgent over the same names, which owns "the coordinator never
+// delegated", and what is left here is a spawn the model asked for that left no
+// thread to show for it.
+func ThreadPerAgent(names []string, class Class) Grader {
+	return Grader{
+		Name:  "thread-per-agent:" + strings.Join(names, "|"),
+		Class: class,
+		Check: func(t *testing.T, tr *Trial) error {
+			threads := tr.stack.listThreads(t, tr.SessionID)
+			var primaries []string
+			for _, th := range threads {
+				if th["parent_thread_id"] == nil {
+					id, _ := th["id"].(string)
+					primaries = append(primaries, id)
+				}
+			}
+			if len(primaries) != 1 {
+				return fmt.Errorf("%d thread(s) listed, %d of them with parent_thread_id null: "+
+					"a session has exactly one primary thread", len(threads), len(primaries))
+			}
+			primary := primaries[0]
+			var ran []string // the agent behind each child, in list order
+			for _, th := range threads {
+				parent, _ := th["parent_thread_id"].(string)
+				if parent == "" {
+					continue
+				}
+				if parent != primary {
+					return fmt.Errorf("thread %v is parented to %q rather than the primary %q: "+
+						"the topology is deeper than the one level a roster builds", th["id"], parent, primary)
+				}
+				ran = append(ran, threadAgentName(th))
+			}
+			var missing []string
+			for _, want := range names {
+				if !slices.Contains(ran, want) {
+					missing = append(missing, want)
+				}
+			}
+			if len(missing) > 0 {
+				return fmt.Errorf("no child thread ran %v; the session's %d thread(s) ran %v",
+					missing, len(threads), ran)
+			}
+			return nil
+		},
+	}
+}
+
+// EveryThreadIdle asserts every thread the session lists has settled by grading
+// time. It is the thread-level twin of the core pack's session-status-idle: a
+// session's status is a fold over its threads, and the core pack has already
+// read that status idle, so a row still saying running (or terminated, which
+// nothing in a coordinator trial asks for) is the fold disagreeing with the
+// rows it is folded from. No model behavior produces that, which is why it is
+// Platform.
+//
+// It is trivially true of a session that spawned nothing — the primary alone,
+// idle — and that is the right silence: "the coordinator never delegated" is a
+// Model grader's to report.
+func EveryThreadIdle(class Class) Grader {
+	return Grader{
+		Name:  "every-thread-idle",
+		Class: class,
+		Check: func(t *testing.T, tr *Trial) error {
+			for _, th := range tr.stack.listThreads(t, tr.SessionID) {
+				if th["status"] != "idle" {
+					return fmt.Errorf("thread %v (%s) status = %v, want idle once the session has settled",
+						th["id"], threadAgentName(th), th["status"])
+				}
+			}
+			return nil
+		},
+	}
+}
+
+// threadAgentName is the agent a thread row runs, read off the nested agent
+// object the threads route renders. The primary's is the session's own agent;
+// a child's is the roster member snapshotted when it was spawned.
+func threadAgentName(th map[string]any) string {
+	agent, _ := th["agent"].(map[string]any)
+	name, _ := agent["name"].(string)
+	return name
+}
+
 // --- transcript accessors -------------------------------------------------
 //
 // All of these read the raw wire JSON. A missing or reshaped field surfaces as

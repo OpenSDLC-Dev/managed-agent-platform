@@ -40,6 +40,99 @@ func tasks() []Task {
 		editConfig(), needleSearch(), permAllow(), permDeny(),
 		exitCode(), journalMultiturn(), viewRange(), skillAnswer(),
 		fileAnswer(), repoAnswer(), mcpAnswer(), outcomeSatisfy(), outcomeRevise(),
+		coordinatorTeam(),
+	}
+}
+
+// coordinatorTeam is the coordinator topology end to end (plan 35 slice 4): one
+// session, two worker threads, and an answer no single agent could give. Two
+// codes exist in this trial, each reachable by exactly one of the two workers
+// and by nothing else — the archive code is a line in a seeded file the
+// coordinator has no tool to open, the herald code is in a system prompt only
+// the herald's own thread is given — so a final message carrying both means the
+// coordinator spawned both agents as real threads, each ran its own turn under
+// its own agent, both reported, and both reports reached the summary.
+//
+// The turn names no delegation tool, for the reason mcpAnswer's names no MCP
+// tool: what tells the model it may delegate at all is the four tools the brain
+// injects for the primary thread of a session whose snapshot carries a roster,
+// and that injection is the link under test. It does name the two agents, in the
+// coordinator's own system prompt, because nothing else can: the platform
+// surfaces the roster to the model nowhere (list_agents lists live threads, and
+// at turn one there are none), so a coordinator never told its team's names could
+// only find them by spawning a wrong one and reading the error back. Naming them
+// is configuration rather than instruction: which agent to ask for what, and
+// when, is still the model's.
+//
+// The coordinator takes an empty toolset rather than the bare one, and that is
+// what keeps the trial honest: with bash and read it could open the archive file
+// itself and answer having delegated nothing. With its four delegation tools and
+// no others, every fact in its answer came from a child.
+//
+// The two workers are deliberately unlike each other. The archivist has the bare
+// toolset and must read a seeded file — the shared sandbox, reached from a child
+// thread. The herald has no toolset at all and answers out of its own system
+// prompt, which no other thread's request carries: its code is the proof that the
+// child ran as its own agent rather than as a second voice of the coordinator's.
+//
+// Both per-trial tokens are spent as hidden secrets, the nonce included. Two
+// workers need two independent values, the harness offers exactly two, and
+// neither appears in anything the coordinator is told — so this trial demands no
+// marker back: the codes are the assertion, and a coordinator that answered from
+// its own knowledge can spell neither.
+func coordinatorTeam() Task {
+	const archivePath = "/workspace/archive.txt"
+	return Task{
+		ID: "coordinator-team",
+		// Empty rather than nil — the bare toolset would let the coordinator do
+		// the work itself; see above.
+		Tools: []any{},
+		System: "You coordinate a team of two agents: archivist and herald. Neither of them can " +
+			"see this conversation, so tell each what you need from it, and give your answer only " +
+			"once both have reported back.",
+		Roster: []RosterMember{{
+			Name:    "archivist",
+			Toolset: true,
+			System: "You are the archivist. Your team's archive code is the one written in " +
+				archivePath + ". Read that file and report the code exactly as written.",
+		}, {
+			Name: "herald",
+			System: "You are the herald. Your team's herald code is {{RECALL}}. " +
+				"Report it exactly as written.",
+		}},
+		Seeds: []Seed{{Path: archivePath, Content: "archive code: {{NONCE}}\n"}},
+		Turns: []Turn{{Message: "I need both of my team's codes. Reply with one line: " +
+			"CODES <archive code> <herald code>."}},
+		Graders: []Grader{
+			// The model's half, one grader per worker: it must have spawned each
+			// of them by name. These own the "never delegated" miss, which is
+			// what lets the thread-row grader below stay Platform.
+			SpawnedAgent("archivist", Model),
+			SpawnedAgent("herald", Model),
+			// Platform, premised on those same two spawns — spawnedAgent is
+			// SpawnedAgent's condition over the same finder, so the pair can
+			// never disagree about whether the spawn happened. What is left is
+			// the platform's alone: a spawn the model asked for must leave a
+			// live child thread running that agent under the primary. No other
+			// trial in the suite makes this claim — the session ran more than
+			// one thread, and the threads route says which.
+			OnlyIf(ThreadPerAgent([]string{"archivist", "herald"}, Platform),
+				spawnedAgent("archivist"), spawnedAgent("herald")),
+			// Platform, and no premise needed: the core pack has already read the
+			// session's status idle, and that status is a fold over exactly these
+			// rows, so one of them still running is the fold disagreeing with
+			// itself. A session that spawned nothing passes it trivially, which
+			// is the Model graders' window above.
+			EveryThreadIdle(Platform),
+			// Either for both codes, as the other answer-style trials' content
+			// checks are: each code is reachable only through its own worker, so
+			// both of them in the final message is unambiguous platform
+			// evidence — while a missing one is as likely a coordinator that
+			// concluded before its team reported, and the graders above are the
+			// arbiters on that miss.
+			FinalMessageHas("{{NONCE}}", Either),
+			FinalMessageHas("{{RECALL}}", Either),
+		},
 	}
 }
 

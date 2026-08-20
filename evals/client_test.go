@@ -237,6 +237,31 @@ func (s *stack) getSession(t *testing.T, sessionID string) map[string]any {
 	return s.do(t, http.MethodGet, "/v1/sessions/"+sessionID, nil)
 }
 
+// listThreads reads a session's threads off the route a client reads them from
+// — the only surface that says how many threads a session ran, and with what
+// agent on each.
+//
+// One page, where listEvents follows next_page: the platform caps a session at
+// 25 live threads and this list's own default limit is 1000, so a second page
+// is unreachable rather than merely unlikely.
+func (s *stack) listThreads(t *testing.T, sessionID string) []map[string]any {
+	t.Helper()
+	res := s.do(t, http.MethodGet, "/v1/sessions/"+sessionID+"/threads", nil)
+	data, ok := res["data"].([]any)
+	if !ok {
+		t.Fatalf("thread list has no data array: %v", res)
+	}
+	out := make([]map[string]any, 0, len(data))
+	for _, e := range data {
+		th, ok := e.(map[string]any)
+		if !ok {
+			t.Fatalf("thread list entry is not an object: %v", e)
+		}
+		out = append(out, th)
+	}
+	return out
+}
+
 // listEvents reads the whole transcript, following next_page. The page size is
 // the event list's documented maximum; a transcript longer than one page is
 // normal for a multi-turn trial, and a grader that saw only the first page

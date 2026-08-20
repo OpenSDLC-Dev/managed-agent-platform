@@ -49,6 +49,63 @@ new directory and in-repo citations re-pointed in the moving PR (plan
 
 ---
 
+## Coordinator delegation acceptance — real `ant` CLI, real model, cloud and `self_hosted` (plan 35 slice 4, run 2026-08-20) — ✅ passed
+
+The transcript the plan asks for, against a stack built from the branch (compose, its own
+project and its own network) and a live model endpoint. The `ant` CLI was v1.23.0, built
+from the read-only reference checkout.
+
+**Cloud.** `beta:agents create` a `researcher`, then a `lead` whose `--multiagent` roster
+names it — the response echoed the roster eagerly pinned (`{"id":…,"type":"agent","version":1}`),
+slice 1's rule. `beta:sessions create` from `lead`; `beta:sessions:threads list` returned
+the primary alone, `parent_thread_id: null`, its id the session's token under `sthr_`.
+One `user.message` then produced, on the session view and in this order:
+`session.thread_status_running` + `session.status_running`, the coordinator's
+`agent.message` and its `create_agent` `agent.tool_use`, then **`session.thread_created`,
+`agent.thread_message_sent`, the child's cross-posted `session.thread_status_running`**, the
+`create_agent` result, a second turn calling `wait_for_agents`, and the primary parking on
+`session.thread_status_idle`/`end_turn` — with no `session.status_idle`, because a child was
+running (decision 4's fold). The child's own list showed its
+`agent.thread_message_received` (`from_session_thread_id` the primary), its own status
+events carrying `session_thread_id`, its turn's `agent.tool_use` rendered
+`session_thread_id: null` on its own surface, its `agent.thread_message_sent` back
+(`to_session_thread_id` the primary), and its `end_turn` idle. The report then woke the
+parked coordinator — `session.thread_status_running` on the primary — which summarised and
+idled, and only then did **one** `session.status_idle` close the session: decisions 6, 7
+and 4 end to end, on a model this platform never told about threads.
+
+A second task spawned a second child; a `user.interrupt` naming that child's
+`session_thread_id` was accepted and echoed with the thread named and `processed_at`
+already set (the INFERRED stamp-on-append slice 3 registered), and left its sibling and the
+session alone. It settled nothing, because the child had already reported in the seconds
+before it landed — the documented outcome for an interrupt with no turn to end, not a
+demonstration of stopping one; the tests carry that case. Archiving the idle child returned
+`terminated` with `archived_at` set; archiving the primary returned the designed 400,
+"the primary thread cannot be archived; archive the session".
+
+**`self_hosted`.** The same shape with a `toolworker` whose agent carries
+`agent_toolset_20260401`, so the child's turn calls `bash`. The child's `agent.tool_use`
+appeared **on the session-level list carrying its `session_thread_id`** — decision 13 (i)'s
+view rule, the event a cloud session keeps on the child's log alone. `ant beta:worker poll`
+— the reference's own thread-unaware runner, which never calls a thread endpoint — claimed
+the `tool_exec`, found that call, ran it and posted a plain `user.tool_result`; the result
+landed on the child's log, the child reported, the coordinator summarised, and the session
+idled. A worker that does not know threads exist served a child thread, which is the whole
+of reading (a).
+
+Two things this run cost, both repaired and neither in the branch. The compose file pins
+its default network name (`managed-agent-platform_default`) so the executor's gate setting
+can name it verbatim, which means `-p <other-project>` does **not** isolate a second stack:
+this run's first attempt joined an already-running stack's network, where `postgres` and
+`openbao` resolve to whichever container answers, and its brain applied migrations 0025 and
+0026 to that stack's database — leaving a 0.3.0 deployment whose `ON CONFLICT
+(session_id, kind)` no longer matched an index. Both migrations were reverted there and the
+original index and primary key restored, proven by a zero-row insert that still resolves the
+conflict target; the acceptance was then re-run under an override giving it its own network (#438).
+Separately, `deploy/compose/openbao-init.sh` truncates `init.json` with the redirect on
+`bao operator init` before that command can fail, so a failed init leaves an initialized
+vault whose root token is gone and no path forward but new volumes (#439).
+
 ## anthropic-sdk-go v1.63.1 bump — wire-schema verification record (2026-08-19, plan 35 slice 0)
 
 The fourth bump record, and the first since v1.59.0's to move shapes this repo mirrors: v1.62.0
