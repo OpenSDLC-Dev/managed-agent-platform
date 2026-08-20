@@ -49,6 +49,62 @@ new directory and in-repo citations re-pointed in the moving PR (plan
 
 ---
 
+## Multi-agent session threads (plan 35, #53) — archived 2026-08-21, all six slices delivered (#434, #435, #436, #437, #440, #443)
+
+Another of the seams v1 deliberately reserved, now built — scheduled deployments
+and memory stores are still on that list. A session had always been one agent's
+event log; the reference's `sthr_` thread resource says it is a *tree* of them, and
+#53 had sat behind the question of how much of that tree a wire-compatible
+self-hosted platform has to own. The answer this plan settled: all of it except the
+sandbox — a coordinator's agents are concurrent threads on one shared container,
+which is what makes the topology cheap enough to be the default rather than a tier.
+
+The design is the plan's fifteen decisions, and three of them carried the weight.
+**Session status is a fold** over live threads (`running ≻ rescheduling ≻ idle`), so
+a session with four busy children reports one status without any thread knowing
+about the others. **Delegation is settlement-executed**: the six tools touch no
+sandbox, so the transaction that commits the turn calling one also does what it
+asked and answers it there — no work item, no driver, no second round-trip. And
+**the BYOC worker stays thread-unaware**: a `self_hosted` session's session-level
+view widens to carry child threads' `agent.tool_use` and the results answering it,
+so a customer-run worker built against the single-agent wire runs a coordinator
+session's tools without knowing threads exist.
+
+- **Slice 0 — SDK bump v1.61.0 → v1.63.1** (#434). The plan-05/11 ritual: pin,
+  pairwise diffs, three live version labels advanced, every `v1.61.0` evidence label
+  in DIVERGENCES re-read, and registry entries plus issues #430–#433 for the v1.62
+  surface deliberately excluded. Four v1.63.x toolset/runner behaviors converged.
+- **Slice 1 — roster resolution and the session snapshot** (#435). `multiagent`
+  accepted on agent create/update and resolved into stored members; session create
+  snapshots full member definitions, the `self` member from the session's overridden
+  coordinator spec. Inert at runtime — a coordinator session still behaved as a
+  single-agent one, which is what made the slice safe to land alone.
+- **Slice 2 — the thread resource and the primary thread** (#436). Migration 0025,
+  the `sthr_` prefix, five routes, and a backfill giving every existing session a
+  listable primary thread. Thread status events beside the twelve session ones.
+- **Slice 3 — the thread execution substrate** (#437). Migration 0026,
+  `(session, thread)`-keyed turns, the status fold, the runnable set every exec
+  driver re-derives, MCP discovery per thread, outcome grading moved to session
+  quiescence, thread-scoped interrupts, and the `tool_exec` re-arm. Child rows came
+  from a test seam: the substrate was coherent and the wire unchanged before
+  anything could reach it.
+- **Slice 4 — coordinator delegation** (#440). The six tools answered in the commit
+  that emits them, the agent-to-agent message pair, the 25-thread cap, the
+  `self_hosted` view rule and the worker's coordinator-mode scan, and the roster's
+  skills union. Its acceptance ran against the real `ant` CLI and a real model on
+  both deployment kinds, and the `coordinator-team` eval trial ran live. Both those
+  records, and the slice's review rounds, are the sections immediately below.
+- **Slice 5 — close-out** (#443). This record, the ARCHITECTURE and README rewrites,
+  and the plan archived.
+
+What was deliberately left undone is filed, not forgotten: **#441** (the BYOC worker
+does not cancel an in-flight call on its heartbeat the way the executor's keeper
+does) and **#442** (a chain-loop bound, `WakeThread` guard parity, and an ask-gated
+integration test). The inferences this plan had to make — the six tools' schemas and
+answers, the `self_hosted` view widening, the session-status fold — are registered in
+DIVERGENCES.md and tracked by **#78** against a future recording of a real
+coordinator session.
+
 ## Coordinator delegation acceptance — real `ant` CLI, real model, cloud and `self_hosted` (plan 35 slice 4, run 2026-08-20) — ✅ passed
 
 The transcript the plan asks for, against a stack built from the branch (compose, its own
@@ -120,6 +176,102 @@ conflict target; the acceptance was then re-run under an override giving it its 
 Separately, `deploy/compose/openbao-init.sh` truncates `init.json` with the redirect on
 `bao operator init` before that command can fail, so a failed init leaves an initialized
 vault whose root token is gone and no path forward but new volumes (#439).
+
+## Multi-agent session threads (plan 35, #53) — slice 4's review rounds: seven defects the tests never reached, two defects in the tests themselves, and four findings refuted, 2026-08-20
+
+Slice 4 is where the six delegation tools became reachable, and the review rounds
+found what a green gate could not. The defects all lived in states no test drove —
+an interrupt arriving in a particular order, a cache read in the same turn that
+invalidated it, a page served a moment before an append — not in code the tests ran
+and misjudged. Three reviewers ran: the Codex pass, the Claude `/code-review` pass on
+Opus 5, and CodeRabbit, whose three review submissions opened eighteen threads
+between them.
+
+**Seven defects, fixed before merge.**
+
+- **A thread-scoped interrupt naming the primary left the coordinator asleep.**
+  `internal/api/events.go` decided per thread whether a batch stopped the primary, so
+  whether it re-woke depended on the order the threads came back in. The fix reads the
+  primary's own arm **once, before the loop**, which covers both spellings: a
+  session-wide interrupt reaches the primary through the expansion, and a
+  thread-scoped one naming the primary keys straight to `""`.
+- **A delegation tool called by the wrong half of the topology was answered as an
+  unknown tool.** All six names are now classed as settlement work inside a rostered
+  session while each thread is still *offered* only its half, so a cross-half call
+  gets a sentence naming the tool its own half provides instead. The classing runs
+  before the agent's own tools are read, so a genuinely custom tool of that name still
+  wins it back.
+- **`wait_for_agents` could answer from a stale cache.** The wait cache was not
+  invalidated by a spawn in the same turn, so a coordinator that created an agent and
+  immediately waited could be told nothing could still report. Cleared at the child
+  insert.
+- **The BYOC worker's walk could run a call already answered.** A coordinator's walk
+  spans the whole log, so its window is arbitrarily wide and a result can land between
+  a page being served and the walk finishing. `dropAnsweredSince` re-checks from the
+  anchor the walk started at, filtering on **all four** walk types rather than results
+  alone — the anchor may itself be a `tool_use` or a confirmation, and a
+  results-only filter would never encounter it, so the "one bounded pass" claim would
+  have been false.
+- **A `deny` could be released by a confirmation.** The worker's new permission gate
+  read `evaluated_permission != allow || allowed[id]`, which runs a denied call if any
+  allow confirmation names it. Not reachable through the API — `ValidateToolConfirmations`
+  refuses a confirmation naming a non-`ask` call — so this was the driver failing to
+  re-derive a gate the control plane happened to hold. Bound to `ask` explicitly, since
+  the whole point of that check is that the driver trusts nothing upstream.
+- **A missing `session_threads` row faulted the settlement** rather than being treated
+  as "no notice to deliver", which would have failed a turn deterministically instead
+  of degrading.
+- **Two roster members could share a name.** A coordinator spawns a member *by name*,
+  so a duplicate makes the roster ambiguous at the one point that matters. Rejected at
+  snapshot time, naming both members and their indices.
+
+**Three findings refuted with evidence** in those rounds, rather than "fixed" (a fourth is in the last paragraph):
+
+- A `skill_`-prefixed fixture rename: applied, it 404s — `checkSkillID` accepts
+  catalog short names, which is what the fixture uses.
+- A watermark-bounded rescan, offered as a fix for the whole-log walk's cost: it would
+  strand an ask-gated call released while the work item is live. The Claude reviewer
+  reached the same conclusion independently.
+- Asserting an exact child-thread roster in `ThreadPerAgent`: it would turn a model's
+  redundant spawn into a `Platform`-class eval failure, which is a grading error, not a
+  platform defect.
+
+**Two earlier rounds bought tests rather than fixes.** `TestAnsweredDuringTheWalkIsNotRun`
+called `dropAnsweredSince` directly, so it stayed green if the walk stopped calling
+it, passed the wrong anchor, or ran it in the wrong mode;
+`TestTheWalkRechecksThroughTheRealPath` drives the walk itself and wraps the control
+plane to append a result *after* a page has been served — an interleaving nothing can
+time from outside — with both modes in one table. Separately, the verifier's own
+re-run found the cross-half shadowing win-back load-bearing and untested;
+`TestACustomToolNamedLikeTheOtherHalfKeepsItsName` pins both directions. Each was
+proven red first against the untouched production code.
+
+**A later round turned the review on the tests themselves, and found two of them
+lying.** `TestAnsweredDuringTheWalkIsNotRun` reused one slice across both
+`dropAnsweredSince` calls; the helper filters in place (`kept := uses[:0]`), so the
+first call writes through the caller's array, and the case passed only because the
+element it drops is last — drop the first instead and the second assertion would
+have counted a corrupted `[second, second]` as two and passed on garbage. And
+`TestTheWalkRechecksThroughTheRealPath`, written the round before, called `t.Fatalf`
+from its wrapped HTTP handler's goroutine: `t.Fatalf` is `runtime.Goexit`, so an
+append failure there would have abandoned the response and surfaced as a scan error
+or a hang rather than the failure that happened. The same round closed two coverage
+gaps — `wrongRole`'s coordinator arm, whose absence lets a coordinator report to a
+parent it does not have and idle the session with every report unread, and the
+executor fixtures that spelled a delegation name in raw JSON while the guard filtered
+through the constant — and refuted a claim that the duplicate-name refusal had no
+API-level test, which `TestRosterRejectsTwoMembersSharingAName` has had all along.
+
+That same verifier re-run passed the code and failed the registry: `list_agents` had
+gained a `stop_reason` and the shadowing rule had changed, and neither had reached
+DIVERGENCES.md. Both were registered before merge, along with the duplicate-name
+refusal, under the repo's rule that a slice lands its divergences in the PR that
+introduces the behavior.
+
+Two consequences were filed rather than absorbed: **#441** (the BYOC worker does not
+cancel an in-flight call on its heartbeat the way the executor's keeper does — the
+slice-3 changelog fragment was corrected to stop claiming both drivers do) and **#442**
+(a chain-loop bound, `WakeThread` guard parity, and an ask-gated integration test).
 
 ## anthropic-sdk-go v1.63.1 bump — wire-schema verification record (2026-08-19, plan 35 slice 0)
 

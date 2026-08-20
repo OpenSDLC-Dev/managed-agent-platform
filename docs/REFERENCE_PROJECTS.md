@@ -50,5 +50,6 @@ either conflicts with the Anthropic model, the Anthropic model wins.
 The SDK and CLI checkouts track the API's tip and can run ahead of the pin (whatever
 lands next). Wire-compat is judged against the SDK version pinned in `go.mod` (v1.63.1);
 new surface in a checkout is not an invitation to build ahead of the backlog, and pinned
-surface the platform deliberately leaves unbuilt — memory stores, the advisor, budgets,
-threads until plan 35 lands them — is registered in docs/DIVERGENCES.md rather than built.
+surface the platform deliberately leaves unbuilt — memory stores, the advisor, budgets —
+is registered in docs/DIVERGENCES.md rather than built. (Session threads were on that
+list until plan 35 built them.)

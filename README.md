@@ -4,7 +4,7 @@ An open-source, self-hostable platform for **long-horizon AI agents**, written i
 
 Run the whole thing on-prem or in your own VPC — **your data and your compute never leave your boundary**.
 
-> **Status: v0.3.0 — the v1 loop is complete; agents reach MCP servers, and the control plane authenticates people.** A `v*` tag publishes container images and the Helm chart to GHCR, and worker binaries with clamped release notes to the GitHub Release ([docs/RELEASING.md](./docs/RELEASING.md)).
+> **Status: v0.3.0, with multi-agent coordination merged to `main` and unreleased — the v1 loop is complete; agents reach MCP servers, the control plane authenticates people, and a coordinator agent's roster now runs as concurrent session threads.** A `v*` tag publishes container images and the Helm chart to GHCR, and worker binaries with clamped release notes to the GitHub Release ([docs/RELEASING.md](./docs/RELEASING.md)).
 
 What runs today, end to end:
 
@@ -16,6 +16,7 @@ What runs today, end to end:
 - **Outcomes** — a text or file rubric is graded each work cycle, deliverables are harvested into the Files API, and revision feedback runs up to `max_iterations`.
 - **Vaults and egress** — `/v1/vaults` holds cipher-sealed, write-only credentials that a session attaches at create time; a `limited` environment's traffic leaves through a per-session egress gate that enforces `allowed_hosts` and substitutes those credentials on the way out, so the sandbox only ever holds an opaque placeholder.
 - **MCP servers** — declared per agent, discovered, offered to the model and answered under human confirmation by default, with vault credentials matched and expiring OAuth tokens refreshed at the dial.
+- **Multi-agent teams** — a coordinator agent's `multiagent` roster runs as concurrent **session threads** on one shared sandbox, each thread with its own agent, event log, status and stream, matching the reference's `sthr_` thread resource and its `/threads` routes. The coordinator spawns its agents, messages them, lists them and waits on them; they report back, and the session's status is a fold over its threads'. Cloud and BYOC alike — the customer-run worker stays thread-unaware, because the session view it already reads carries the child calls it must run.
 - **Human authentication** — the control plane is a vendor-SDK-free OIDC relying party ([Casdoor](https://casdoor.org) bundled as an optional hardened default, plus a trusted-proxy mode where the cloud terminates auth). It resolves each request to a **principal** whose claims map to one of `admin` · `developer` · `viewer`, and refuses one that maps to none — identity is default-deny.
 
 Machine credentials keep their own lane ahead of identity: `x-api-key`, and every environment key this platform minted, behave identically whether identity is configured or not, which is why the real `ant` CLI — `ant beta:worker` included — drives every machine flow unchanged. (The one exception is a grandfathered key whose operator-chosen value happens to be JWT-shaped; it is refused fail-closed rather than over-authorized, and [docs/self-hosted-security.md](./docs/self-hosted-security.md) §6 says to reissue it before enabling SSO.) Human *login* is the one thing it cannot: this platform deliberately serves no `POST /v1/oauth/token`, so people sign in to their own IdP out of band ([docs/DIVERGENCES.md](./docs/DIVERGENCES.md) registers the divergence). Deploy locally with [docker-compose](./deploy/compose) or to Kubernetes with the [Helm chart](./deploy/helm); [CHANGELOG.md](./CHANGELOG.md) is what landed when, and the [issue tracker](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues) is what's next.
@@ -67,9 +68,9 @@ Progress is tracked in:
 - **[GitHub issues](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues)** — the backlog and open questions.
 - **[STATE.md](./STATE.md)** — the active work and its task progress. The as-built system is [docs/ARCHITECTURE.md](./docs/ARCHITECTURE.md); acceptance and decision records are [docs/HISTORY.md](./docs/HISTORY.md) (older months archive to [docs/history/](./docs/history/)).
 
-Deferred past v1 — **seams reserved, not implemented**, each tracked as an issue. Vaults, skills, files and repository mounting were on this list and have since landed; what remains is:
+Deferred past v1 — **seams reserved, not implemented**, each tracked as an issue. Vaults, skills, files and repository mounting were on this list and have since landed; what remains of that list is:
 
-- Scheduled deployments, memory stores, and multi-agent threads (in progress: [plan 35](./docs/plan/35_multiagent-threads.md), [#53](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/53)).
+- Scheduled deployments and memory stores.
 - The **multi-tenant** half of RBAC and SSO ([#56](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/56), which stays open for it). Single-tenant SSO and the three-role matrix are done.
 - **Repository materialization on BYOC compute** ([#322](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/322)): a `self_hosted` session accepts a `github_repository` resource and mounts nothing, without being told otherwise.
 - **BYOC gate delivery** ([#165](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/165)) and **credential substitution inside TLS** ([#166](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/166)) — until #166, an in-sandbox HTTPS request keeps its vault placeholders rather than having them substituted at egress.
