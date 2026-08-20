@@ -584,6 +584,38 @@ func TestACallFromTheWrongRoleIsAnsweredRatherThanStranded(t *testing.T) {
 	}
 }
 
+// wrongRole has two arms and the test above drives one. This is the other: a
+// coordinator reaching for a worker's tool. It matters as much, because the two
+// halves fail in opposite directions — a stranded child leaves the session
+// unarchivable, while a stranded coordinator leaves the user with no answer and
+// every child's report unread — and because the answer has to name the tool
+// that would have worked, which is a different tool on each side.
+func TestACoordinatorCallingAWorkersToolIsAnsweredToo(t *testing.T) {
+	h := newHarness(t, [][]provider.Chunk{{
+		toolCall("t1", "submit_result", `{"result":"all done"}`),
+		done("tool_use", 1),
+	}}, nil)
+	h.roster(t, "researcher")
+	h.wake(t, "report to yourself")
+	h.runOnce(t)
+
+	got := h.answers(t)
+	if len(got) != 1 {
+		t.Fatalf("answers = %v, want the call answered", got)
+	}
+	if !got[0].isErr || !strings.Contains(got[0].text, "send_to_agent") {
+		t.Errorf("answer = %+v, want an is_error pointing the coordinator at its own tools", got[0])
+	}
+	// Answered, not obeyed: the coordinator's turn is not a child's report, so
+	// nothing ended and its next turn is queued.
+	if s := h.threadStatus(t, domain.PrimaryThreadID(h.sessionID)); s != "running" {
+		t.Errorf("coordinator = %q, want running — an is_error ends no turn", s)
+	}
+	if n := h.liveTurns(t, ""); n != 1 {
+		t.Errorf("coordinator turns queued = %d, want the settlement to have chained one", n)
+	}
+}
+
 // The child's two tools refuse an empty payload the same way.
 func TestMalformedChildCallsAreAnswered(t *testing.T) {
 	h := newHarness(t, [][]provider.Chunk{{

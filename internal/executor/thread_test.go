@@ -358,6 +358,15 @@ func TestAFaultedPassStillChainsTheOtherDriver(t *testing.T) {
 	}
 }
 
+// delegationUse is a spawn call as the brain emits one. It is built from the
+// constant the guard under test filters on (toolset.IsDelegationTool), so a
+// rename cannot leave these fixtures green against a name the executor no longer
+// treats as delegation.
+func delegationUse() string {
+	return `{"name":"` + toolset.ToolCreateAgent + `","input":{"agent_name":"researcher","message":"go"},` +
+		`"evaluated_permission":"allow","session_thread_id":null}`
+}
+
 // The sandbox pass runs no delegation call, whatever puts one in front of it:
 // only the settlement that emitted one can answer it, and the six-tool Runner
 // would answer "unknown tool" — an agent.tool_result telling a coordinator its
@@ -367,8 +376,7 @@ func TestSandboxPassNeverRunsADelegationCall(t *testing.T) {
 	sb := &fakeSandbox{}
 	h := newHarness(t, sb)
 	evs := h.suspend(t,
-		`{"name":"create_agent","input":{"agent_name":"researcher","message":"go"},`+
-			`"evaluated_permission":"allow","session_thread_id":null}`,
+		delegationUse(),
 		writeUse("out.txt", "hello"))
 
 	if worked, err := h.exec.step(context.Background()); err != nil || !worked {
@@ -393,8 +401,7 @@ func TestSandboxPassNeverRunsADelegationCall(t *testing.T) {
 func TestAStrayDelegationCallReArmsNoDriver(t *testing.T) {
 	h := newHarness(t, &fakeSandbox{})
 	evs := h.suspend(t,
-		`{"name":"create_agent","input":{"agent_name":"researcher","message":"go"},`+
-			`"evaluated_permission":"allow","session_thread_id":null}`)
+		delegationUse())
 
 	if worked, err := h.exec.step(context.Background()); err != nil || !worked {
 		t.Fatalf("step: worked=%v err=%v", worked, err)

@@ -253,18 +253,29 @@ func (h *harness) suspend(t *testing.T, uses ...string) []domain.Event {
 // answeredHistory and TestAlreadyAnsweredIsNoOp).
 func (h *harness) answerAsPlatform(t *testing.T, useID domain.ID) {
 	t.Helper()
+	if err := h.answerAsPlatformErr(useID); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// answerAsPlatformErr is answerAsPlatform's error-returning half, for the one
+// caller that runs off the test goroutine: t.Fatalf calls runtime.Goexit, which
+// is only correct on the goroutine running the test — from an HTTP handler it
+// would abandon the response instead of reporting the failure.
+func (h *harness) answerAsPlatformErr(useID domain.ID) error {
 	body, err := json.Marshal(map[string]any{
 		"tool_use_id": useID.String(),
 		"content":     []map[string]any{{"type": "text", "text": "already done"}},
 		"is_error":    false,
 	})
 	if err != nil {
-		t.Fatal(err)
+		return err
 	}
 	if _, err := h.log.AppendWith(context.Background(), h.sid,
 		[]events.NewEvent{{Type: domain.EventAgentToolResult, Payload: body}}, events.AppendOptions{}); err != nil {
-		t.Fatalf("answer %s: %v", useID, err)
+		return fmt.Errorf("answer %s: %w", useID, err)
 	}
+	return nil
 }
 
 // answeredHistory appends n fully-answered agent.tool_use / user.tool_result
@@ -1008,7 +1019,10 @@ func TestAnsweredDuringTheWalkIsNotRun(t *testing.T) {
 	}
 
 	// Anchored at the head as it now stands, the same result is below the anchor
-	// — the walk's own view — and nothing is dropped a second time.
+	// — the walk's own view — and nothing is dropped a second time. The input is
+	// rebuilt rather than reused: dropAnsweredSince filters in place (kept :=
+	// uses[:0]), so the first call has already written through scanned's array.
+	scanned = []toolUse{{id: first, name: "write"}, {id: second, name: "write"}}
 	kept, err = dropAnsweredSince(context.Background(), h.client, h.sid.String(), h.newest(t), scanned, func() {})
 	if err != nil {
 		t.Fatalf("dropAnsweredSince: %v", err)
@@ -1048,6 +1062,9 @@ func TestTheWalkRechecksThroughTheRealPath(t *testing.T) {
 			var h *harness
 			var armed, fired atomic.Bool
 			var answer domain.ID
+			// Buffered, so the handler never blocks and the test goroutine owns the
+			// reporting: a send here happens-before the receive below.
+			injected := make(chan error, 1)
 			h = newHarnessWrapped(t, &fakeSandbox{}, func(next http.Handler) http.Handler {
 				return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 					next.ServeHTTP(w, r)
@@ -1055,7 +1072,7 @@ func TestTheWalkRechecksThroughTheRealPath(t *testing.T) {
 						return
 					}
 					if fired.CompareAndSwap(false, true) {
-						h.answerAsPlatform(t, answer)
+						injected <- h.answerAsPlatformErr(answer)
 					}
 				})
 			})
@@ -1067,7 +1084,12 @@ func TestTheWalkRechecksThroughTheRealPath(t *testing.T) {
 			if err != nil {
 				t.Fatalf("scan: %v", err)
 			}
-			if !fired.Load() {
+			select {
+			case err := <-injected:
+				if err != nil {
+					t.Fatalf("inject the answer mid-walk: %v", err)
+				}
+			default:
 				t.Fatal("the walk asked for no events page; the fixture never got to inject")
 			}
 			if len(got) != tc.wantKept {

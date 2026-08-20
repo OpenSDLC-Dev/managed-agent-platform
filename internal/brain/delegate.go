@@ -514,9 +514,10 @@ func (d *delegate) waitForAgents(ctx context.Context, tx pgx.Tx) (string, bool, 
 		if err != nil {
 			return "", false, err
 		}
-		d.waited = &waitVerdict{answer: answerWaitStarted, park: busy && !unread}
 		if !busy && !unread {
 			d.waited = &waitVerdict{answer: answerNothingToWaitFor}
+		} else {
+			d.waited = &waitVerdict{answer: answerWaitStarted, park: busy && !unread}
 		}
 	}
 	if d.waited.park {
