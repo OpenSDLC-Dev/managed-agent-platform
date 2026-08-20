@@ -132,8 +132,8 @@ a working agent in one request.
 
 **Session threads** ([plan 35](./plan/35_multiagent-threads.md)). Every session has a
 primary `sthr_` thread, and a coordinator agent's roster spawns child threads — each with
-its own agent, its own log and its own turn, all on the session's one sandbox, at most 25
-live at once. The flow above then reads per thread: a turn is `(session, thread)`-keyed, the
+its own agent, its own log and its own turn, all on the session's one sandbox, with at
+most 25 threads live at once and the primary counted among them. The flow above then reads per thread: a turn is `(session, thread)`-keyed, the
 `requires_action` suspension and the interrupt address one thread (an interrupt naming a
 `session_thread_id` ends that thread alone and leaves the shared exec item; one without —
 or one naming every live thread — cancels every thread's live work and re-idles the
@@ -336,17 +336,21 @@ and holds the two OS-touching adapters `gaterun/` declares.
 - **A session is not a context window.** The harness may replay, slice, or rewind the
   event log before feeding the model; context strategy is never baked into an
   irreversible compaction.
-- **A thread is a concurrency boundary, not a security boundary.** Every thread of a
-  session runs its tools in that session's one sandbox, through that session's egress
-  gate, against the vault bindings the session was created with: a child inherits the
-  blast radius of the session that spawned it, and delegation confers nothing that
-  session did not already hold. What a member *may* do is fixed before any delegation
-  call runs — the roster is resolved and snapshotted at session create, and a member's
-  tools, MCP servers and the `permission_policy` declared inside them are read from that
-  snapshot, while `create_agent` carries only a roster name and a task. So a coordinator
-  chooses *which* member runs and *what* it is asked to do, never what it is allowed to
-  do, and the unit of trust stays the session: put on a roster only agents you would
-  have run in that session directly.
+- **A thread is a concurrency boundary, not a security boundary.** A session's threads
+  share the session, and that is the whole of what they share: the one sandbox its
+  sandbox-executed tools run in, the vault bindings fixed when it was created (an update
+  cannot add one), and the environment whose egress policy applies. The lanes that never
+  enter a sandbox are the session's too — web and MCP work runs in the executor process,
+  a delegation call is answered in the settlement itself — so a child inherits the blast
+  radius of the session that spawned it, and delegation confers no authority that session
+  did not already hold. What a member *may* do is set by the roster snapshot taken at
+  session create, which pins each member's tools, MCP servers and the `permission_policy`
+  declared inside them; the one exception is the coordinator's own `self` copy, which a
+  session update patching `agent.tools` or `agent.mcp_servers` rewrites. `create_agent` is
+  honored for a roster name and a task and nothing else, so a coordinator chooses *which*
+  member runs and *what* it is asked to do, never what it is allowed to do: the unit of
+  trust is the session, and a roster should hold only agents you would have run in it
+  directly.
 - **Auth is scoped.** Management calls carry `x-api-key` (hashed at rest,
   rotation-by-restart); workers carry an environment key scoped to exactly one
   environment's work queue — a worker can neither read nor write another environment's

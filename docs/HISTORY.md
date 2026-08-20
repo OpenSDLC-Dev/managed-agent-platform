@@ -184,7 +184,8 @@ found what a green gate could not. The defects all lived in states no test drove
 an interrupt arriving in a particular order, a cache read in the same turn that
 invalidated it, a page served a moment before an append — not in code the tests ran
 and misjudged. Three reviewers ran: the Codex pass, the Claude `/code-review` pass on
-Opus 5, and CodeRabbit, which opened eighteen threads across four rounds.
+Opus 5, and CodeRabbit, whose three review submissions opened eighteen threads
+between them.
 
 **Seven defects, fixed before merge.**
 
@@ -245,7 +246,7 @@ re-run found the cross-half shadowing win-back load-bearing and untested;
 `TestACustomToolNamedLikeTheOtherHalfKeepsItsName` pins both directions. Each was
 proven red first against the untouched production code.
 
-**A fourth round turned the review on the tests themselves, and found two of them
+**A later round turned the review on the tests themselves, and found two of them
 lying.** `TestAnsweredDuringTheWalkIsNotRun` reused one slice across both
 `dropAnsweredSince` calls; the helper filters in place (`kept := uses[:0]`), so the
 first call writes through the caller's array, and the case passed only because the
