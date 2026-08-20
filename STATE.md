@@ -22,9 +22,8 @@ thread-unaware. Every scope decision is settled; the design is the plan's fiftee
 - [x] Slice 3 — thread execution substrate: migration 0026, `(session, thread)` turns, the
       status fold, the runnable set, MCP per thread, outcomes on quiescence, interrupts, the
       `tool_exec` re-arm (decisions 3, 4, 5, 9, 14, 15); child rows via a test seam.
-- [ ] Slice 4 — coordinator delegation (decisions 6, 7, 8, 11, 13): the six tools answered in
+- [x] Slice 4 — coordinator delegation (decisions 6, 7, 8, 11, 13): the six tools answered in
       the commit that emits them, agent-to-agent messages, the `self_hosted` view rule, the
-      coordinator-mode worker scan, the roster's skills union. Code, tests and the
-      `coordinator-team` eval trial in; the `ant` CLI acceptance is run and recorded, the
-      live eval run this slice owes #53 is not.
+      coordinator-mode worker scan, the roster's skills union; the `coordinator-team` eval
+      trial and the `ant` CLI acceptance both run and recorded.
 - [ ] Slice 5 — close-out: HISTORY records, ARCHITECTURE/README, plan → `archived`, #53 closed.

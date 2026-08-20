@@ -69,6 +69,18 @@ func tasks() []Task {
 // itself and answer having delegated nothing. With its four delegation tools and
 // no others, every fact in its answer came from a child.
 //
+// The workers' own prompts do name submit_result, and that asymmetry is the
+// point rather than a lapse. What this trial tests is the coordinator half: that
+// a rostered primary thread is offered tools no agent declared, and that the
+// platform turns a call on one into a real second thread. A worker's prompt is
+// this trial's configuration of the worker, and a real deployment writes it the
+// same way. The first live run settled it empirically: both children spawned,
+// both ran, and both ended their turns having answered in plain text, so the
+// coordinator was told twice that nothing had been reported and said so. The
+// platform did every part of that correctly — which is exactly why leaving the
+// instruction implicit would have graded the model's tool-selection habits
+// rather than the delegation path this slice built.
+//
 // The two workers are deliberately unlike each other. The archivist has the bare
 // toolset and must read a seeded file — the shared sandbox, reached from a child
 // thread. The herald has no toolset at all and answers out of its own system
@@ -94,11 +106,12 @@ func coordinatorTeam() Task {
 			Name:    "archivist",
 			Toolset: true,
 			System: "You are the archivist. Your team's archive code is the one written in " +
-				archivePath + ". Read that file and report the code exactly as written.",
+				archivePath + ". Read that file, then report the code exactly as written by " +
+				"calling submit_result.",
 		}, {
 			Name: "herald",
-			System: "You are the herald. Your team's herald code is {{RECALL}}. " +
-				"Report it exactly as written.",
+			System: "You are the herald. Your team's herald code is {{RECALL}}. Report it " +
+				"exactly as written by calling submit_result.",
 		}},
 		Seeds: []Seed{{Path: archivePath, Content: "archive code: {{NONCE}}\n"}},
 		Turns: []Turn{{Message: "I need both of my team's codes. Reply with one line: " +

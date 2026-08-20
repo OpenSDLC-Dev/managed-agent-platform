@@ -93,6 +93,21 @@ landed on the child's log, the child reported, the coordinator summarised, and t
 idled. A worker that does not know threads exist served a child thread, which is the whole
 of reading (a).
 
+**The eval trial, and what its first live run found.** `coordinator-team` failed on its
+first run against a real model, and every part of that failure was the model's. The
+coordinator was offered four tools no agent had declared and used them: two `create_agent`
+calls, two child threads created and started, `wait_for_agents` returning the park verbatim
+("Wait started. Reports arrive as messages; do not conclude yet."), the primary parked idle
+and woken when the children ended. Neither child called `submit_result` — both answered in
+plain text and ended their turns — so the coordinator was told twice, in the platform's own
+words, that a child had ended its turn without reporting, followed that notice's advice by
+re-messaging both with `send_to_agent`, and finally answered that it could not retrieve the
+codes. The spawn graders and both thread-row graders passed; the two content graders caught
+it. The fix was the trial's, not the platform's: each worker's system prompt now names
+`submit_result` as how it reports, which is configuration a real deployment writes the same
+way, and leaves the coordinator half — the half this slice built — still under test. The
+re-run passed 1/1.
+
 Two things this run cost, both repaired and neither in the branch. The compose file pins
 its default network name (`managed-agent-platform_default`) so the executor's gate setting
 can name it verbatim, which means `-p <other-project>` does **not** isolate a second stack:
