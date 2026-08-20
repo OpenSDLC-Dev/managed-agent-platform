@@ -130,10 +130,10 @@ plane answers whatever the turn left outstanding, settles the session `idle` on
 it commits nothing. Sent together with a `user.message`, it is also how a client redirects
 a working agent in one request.
 
-**Session threads** ([plan 35](./plan/35_multiagent-threads.md), in progress). Every session
-has a primary `sthr_` thread, and a coordinator agent's roster spawns child
-threads — each with its own agent, its own log and its own turn, all on the session's one
-sandbox. The flow above then reads per thread: a turn is `(session, thread)`-keyed, the
+**Session threads** ([plan 35](./plan/35_multiagent-threads.md)). Every session has a
+primary `sthr_` thread, and a coordinator agent's roster spawns child threads — each with
+its own agent, its own log and its own turn, all on the session's one sandbox, at most 25
+live at once. The flow above then reads per thread: a turn is `(session, thread)`-keyed, the
 `requires_action` suspension and the interrupt address one thread (an interrupt naming a
 `session_thread_id` ends that thread alone and leaves the shared exec item; one without —
 or one naming every live thread — cancels every thread's live work and re-idles the
@@ -147,14 +147,14 @@ thread is offered `create_agent` / `send_to_agent` / `list_agents` / `wait_for_a
 every child `submit_result` / `send_to_parent`, and the transaction that commits the turn
 calling one also does what it asked and answers it there — inserting a thread row, writing
 the `agent.thread_message_sent`/`_received` pair the agents talk through, enqueueing
-whatever turn follows. On a `self_hosted` session the session-level list and stream
-additionally carry every child thread's `agent.tool_use` and the results answering it,
-which is how the thread-unaware BYOC worker sees calls it must run on a thread it knows
-nothing about. A single-agent
-session is the one-thread case of the same machinery and its wire is unchanged. What is
-inferred versus documented is in [DIVERGENCES.md](./DIVERGENCES.md) ("Session status as a
-fold over threads", "Coordinator delegation", "The `self_hosted` session view"); this
-section is rewritten in full when the plan closes.
+whatever turn follows. The session's skills are the roster's union, the coordinator's
+references first and each member's after, deduplicated by skill id. On a `self_hosted`
+session the session-level list and stream additionally carry every child thread's
+`agent.tool_use` and the results answering it, which is how the thread-unaware BYOC worker
+sees calls it must run on a thread it knows nothing about. A single-agent session is the
+one-thread case of the same machinery and its wire is unchanged. What is inferred versus
+documented is in [DIVERGENCES.md](./DIVERGENCES.md) ("Session status as a fold over
+threads", "Coordinator delegation", "The `self_hosted` session view").
 
 **Crash recovery is replay.** Sessions are never bound to a brain: any brain can pick up
 any session's next turn from the log. A sandbox container dying surfaces as one
@@ -336,6 +336,17 @@ and holds the two OS-touching adapters `gaterun/` declares.
 - **A session is not a context window.** The harness may replay, slice, or rewind the
   event log before feeding the model; context strategy is never baked into an
   irreversible compaction.
+- **A thread is a concurrency boundary, not a security boundary.** Every thread of a
+  session runs its tools in that session's one sandbox, through that session's egress
+  gate, against the vault bindings the session was created with: a child inherits the
+  blast radius of the session that spawned it, and delegation confers nothing that
+  session did not already hold. What a member *may* do is fixed before any delegation
+  call runs — the roster is resolved and snapshotted at session create, and a member's
+  tools, MCP servers and the `permission_policy` declared inside them are read from that
+  snapshot, while `create_agent` carries only a roster name and a task. So a coordinator
+  chooses *which* member runs and *what* it is asked to do, never what it is allowed to
+  do, and the unit of trust stays the session: put on a roster only agents you would
+  have run in that session directly.
 - **Auth is scoped.** Management calls carry `x-api-key` (hashed at rest,
   rotation-by-restart); workers carry an environment key scoped to exactly one
   environment's work queue — a worker can neither read nor write another environment's
