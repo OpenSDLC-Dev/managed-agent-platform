@@ -1018,6 +1018,68 @@ func TestAnsweredDuringTheWalkIsNotRun(t *testing.T) {
 	}
 }
 
+// TestTheWalkRechecksThroughTheRealPath is TestAnsweredDuringTheWalkIsNotRun's
+// twin one level up: that one pins dropAnsweredSince's own contract, this one
+// pins that the walk actually uses it — with the anchor it walked from, and only
+// in the mode that needs it. Between them, dropping the call, passing the wrong
+// head or running it in the wrong mode all go red.
+//
+// The race is an append landing after a page has been served, which no fixture
+// can time from outside. So the harness wraps the control plane and does the
+// appending itself: the first events list the walk asks for is served, and then,
+// before the reply is anything the walk can act on, a result answers one of the
+// calls that list just reported unanswered. That is exactly the interleaving a
+// thread-scoped interrupt produces on a sibling's outstanding call.
+func TestTheWalkRechecksThroughTheRealPath(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		coordinator bool
+		wantKept    int
+	}{
+		// A coordinator's walk spans the whole log, so the window is arbitrarily
+		// wide and the recheck runs.
+		{"a coordinator's walk drops it", true, 1},
+		// A single-agent walk stops at the trailing turn's boundary; its window
+		// is one page and it keeps today's behaviour, late result dropped on
+		// post rather than on scan.
+		{"a single-agent walk is unchanged", false, 2},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var h *harness
+			var armed, fired atomic.Bool
+			var answer domain.ID
+			h = newHarnessWrapped(t, &fakeSandbox{}, func(next http.Handler) http.Handler {
+				return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					next.ServeHTTP(w, r)
+					if !armed.Load() || r.Method != http.MethodGet || !strings.HasSuffix(r.URL.Path, "/events") {
+						return
+					}
+					if fired.CompareAndSwap(false, true) {
+						h.answerAsPlatform(t, answer)
+					}
+				})
+			})
+			uses := h.suspend(t, writeUse("a.txt", "one"), writeUse("b.txt", "two"))
+			answer = uses[1].ID
+
+			armed.Store(true)
+			got, err := unansweredToolUses(context.Background(), h.client, h.sid.String(), tc.coordinator, func() {})
+			if err != nil {
+				t.Fatalf("scan: %v", err)
+			}
+			if !fired.Load() {
+				t.Fatal("the walk asked for no events page; the fixture never got to inject")
+			}
+			if len(got) != tc.wantKept {
+				t.Fatalf("scan = %v, want %d call(s) runnable", useIDs(got), tc.wantKept)
+			}
+			if tc.coordinator && got[0].id != uses[0].ID {
+				t.Errorf("scan kept %v, want the one still outstanding %v", useIDs(got), uses[0].ID)
+			}
+		})
+	}
+}
+
 // TestRescanIsCoordinatorOnly: a sibling thread can commit tool calls while the
 // worker is running another thread's, and its enqueue is a no-op against the
 // live item — so a one-pass driver would leave them for nobody. A coordinator
