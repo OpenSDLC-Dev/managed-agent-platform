@@ -1062,8 +1062,11 @@ func TestTheWalkRechecksThroughTheRealPath(t *testing.T) {
 			var h *harness
 			var armed, fired atomic.Bool
 			var answer domain.ID
-			// Buffered, so the handler never blocks and the test goroutine owns the
-			// reporting: a send here happens-before the receive below.
+			// The test goroutine does the reporting, because t.Fatalf from a handler
+			// is runtime.Goexit. Buffered so the handler can never block on the send;
+			// what lets the receive below be non-blocking is not the buffer but the
+			// server — the walk cannot return until the handler has returned, and the
+			// send is issued before that.
 			injected := make(chan error, 1)
 			h = newHarnessWrapped(t, &fakeSandbox{}, func(next http.Handler) http.Handler {
 				return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

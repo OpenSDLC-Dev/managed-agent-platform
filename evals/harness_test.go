@@ -43,8 +43,9 @@ func outcomeTurnBudget(o *Outcome) time.Duration {
 // round trip the harness waits on. One turnTimeout per roster member, plus two for
 // the coordinator itself — it spends one turn spawning and, once the reports
 // land, another reading them and answering the user — keeps the bound in
-// proportion to the threads the roster can run, for the reason outcomeTurnBudget scales with an outcome's cycles: the
-// deadline is there to stop a hung run, not to measure the agents.
+// proportion to the threads the roster can run, for the reason outcomeTurnBudget
+// scales with an outcome's cycles: the deadline is there to stop a hung run, not
+// to measure the agents.
 func rosterTurnBudget(roster []RosterMember) time.Duration {
 	return time.Duration(len(roster)+2) * turnTimeout
 }
