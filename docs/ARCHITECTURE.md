@@ -117,10 +117,10 @@ answers each with `user.tool_confirmation{tool_use_id, result:"allow"|"deny",
 deny_message?}`; allow releases the tool to the queue, deny synthesizes an
 `is_error:true` `agent.tool_result` carrying the deny message, and the turn resumes
 either way. Every driver re-derives that gate rather than trusting the item it claimed:
-the platform's exec drivers and the BYOC worker alike run only a call stamped `allow` or
-released by a confirmation, so a turn suspended on two asks and released one at a time
-never runs the one no human answered — on every session, single-agent and coordinator
-alike.
+the platform's exec drivers and the BYOC worker alike run only a call stamped `allow`,
+or one stamped `ask` and released by a confirmation — a `deny` runs on neither — so a
+turn suspended on two asks and released one at a time never runs the one no human
+answered, on every session, single-agent and coordinator alike.
 
 **Interrupting.** Not every stall has an owner to wait for: a `self_hosted` worker fleet
 that never comes back, a custom tool the client never answers, a confirmation nobody

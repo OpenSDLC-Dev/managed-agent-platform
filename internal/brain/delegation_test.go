@@ -135,6 +135,59 @@ func TestACustomToolNamedLikeADelegationToolIsShadowed(t *testing.T) {
 	}
 }
 
+// The shadowing is half-aware, not name-aware. A coordinator is offered the
+// coordinator four, so a custom tool of theirs is dropped by the test above — but
+// submit_result is a child's, offered on no coordinator thread, and that name is
+// the agent's to take.
+//
+// The class has to follow the definition here, and that is the whole reason the
+// six-name classing runs before the agent's own tools are read: a name offered as
+// the agent's own but classed settlement would emit an agent.tool_use the
+// settlement answers by role rather than by running the agent's tool, and a name
+// offered as the agent's own but classed settlement-and-refused would strand the
+// thread on a call no driver runs. Structurally the win-back is what lets the
+// answer come back through the custom-result lane instead.
+func TestACustomToolNamedLikeTheOtherHalfKeepsItsName(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		tool    string
+		role    delegationRole
+		offered []string
+	}{
+		{
+			"a coordinator's own submit_result", toolset.ToolSubmitResult, delegationCoordinator,
+			[]string{"create_agent", "send_to_agent", "list_agents", "wait_for_agents", "submit_result"},
+		},
+		{
+			"a child's own create_agent", toolset.ToolCreateAgent, delegationChild,
+			[]string{"submit_result", "send_to_parent", "create_agent"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			agent := domain.ResolvedAgent{AgentSpec: domain.AgentSpec{Tools: []json.RawMessage{
+				json.RawMessage(`{"type":"custom","name":"` + tc.tool + `","description":"Ours.","input_schema":{"type":"object"}}`),
+			}}}
+
+			defs, class, notes, err := resolveTools(agent, nil, tc.role)
+			if err != nil {
+				t.Fatalf("resolveTools: %v", err)
+			}
+			if got := defNames(t, defs); !slicesEqual(got, tc.offered) {
+				t.Fatalf("offered = %v, want %v — the agent's own tool kept its name", got, tc.offered)
+			}
+			if class[tc.tool].kind != domain.EventAgentCustomToolUse {
+				t.Errorf("kind = %q, want the agent's own custom tool", class[tc.tool].kind)
+			}
+			if class[tc.tool].settlement {
+				t.Error("the settlement claimed a name it does not offer on this thread")
+			}
+			if len(notes) != 0 {
+				t.Errorf("notes = %v, want none — nothing of the platform's was shadowed", notes)
+			}
+		})
+	}
+}
+
 // The roster is stored as an explicit JSON null for a single agent, so a length
 // test alone would class every single-agent primary as a coordinator.
 func TestRosterDetection(t *testing.T) {
