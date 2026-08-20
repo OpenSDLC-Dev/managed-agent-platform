@@ -469,6 +469,26 @@ func snapshotRoster(ctx context.Context, db querier, stored json.RawMessage, sel
 		}
 		out.Agents = append(out.Agents, threadAgentOf(ref.ID, ref.Version, m.name, m.spec))
 	}
+	// A roster addresses its members by name and by nothing else: create_agent
+	// takes an agent_name, the platform surfaces the roster to the model
+	// nowhere, and so a second member sharing a name is a member no coordinator
+	// can ever spawn — the settlement takes the first match and the other is
+	// unreachable for the life of the session. Two agents may share a name (the
+	// resource has no unique constraint and needs none); putting both on one
+	// roster is what cannot work, so it is refused here, where the names are
+	// the pinned ones the coordinator will actually address rather than
+	// whatever the agents are called now. The self member counts: it is on the
+	// roster and answers to a name like any other.
+	byName := map[string]int{}
+	for i, m := range out.Agents {
+		if first, dup := byName[m.Name]; dup {
+			return nil, errInvalid(
+				"multiagent.agents[%d]: agent %s is named %q, like agent %s at index %d; "+
+					"a coordinator spawns a member by name, so two members cannot share one",
+				i, m.ID, m.Name, out.Agents[first].ID, first)
+		}
+		byName[m.Name] = i
+	}
 	return json.Marshal(out)
 }
 

@@ -49,7 +49,8 @@ func (e *Executor) settleDrain(ctx context.Context, tx pgx.Tx, item *queue.Item,
 			return err
 		}
 	}
-	class, err := events.RunnableExecClass(ctx, tx, item.SessionID, nil, nil, toolset.IsWebTool)
+	class, err := events.RunnableExecClass(ctx, tx, item.SessionID, nil, nil,
+		toolset.IsWebTool, toolset.IsDelegationTool)
 	if err != nil {
 		return err
 	}

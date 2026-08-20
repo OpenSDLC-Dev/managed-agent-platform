@@ -545,9 +545,15 @@ func (e *Executor) provisionAndRun(ctx context.Context, item *queue.Item, sess s
 	}
 	// The web tools are the web driver's (webwork.go), never this sandbox
 	// pass's — and normally never even seen here: a tool_exec is enqueued only
-	// after every web call is answered (the web-first hold-back). The filter
-	// keeps a stray one from reaching the Runner's unknown-tool arm.
-	uses = slices.DeleteFunc(uses, func(u toolUse) bool { return toolset.IsWebTool(u.name) })
+	// after every web call is answered (the web-first hold-back). A delegation
+	// call is no driver's at all: the settlement that emits one answers it in
+	// the same commit, so this pass can only ever meet a stray. Both filters
+	// keep such a stray out of the Runner's unknown-tool arm, whose answer
+	// would commit as an agent.tool_result telling a coordinator its spawn
+	// failed — the same one rule the BYOC worker's scan spells (worker/toolexec.go).
+	uses = slices.DeleteFunc(uses, func(u toolUse) bool {
+		return toolset.IsWebTool(u.name) || toolset.IsDelegationTool(u.name)
+	})
 	results, faultErr := e.runTools(ctx, sb, item.SessionID, uses, progress)
 	return results, faultErr, nil
 }
@@ -837,8 +843,9 @@ type sessionRun struct {
 	mcpServers []mcpServerRef
 }
 
-// sessionForRun loads the session's egress policy, its snapshot's skills
-// references, its file and repository mount resources, and its attached vault ids under the
+// sessionForRun loads the session's egress policy, the skill references its
+// snapshot resolves to (the roster's union on a coordinator session, plan 35
+// decision 11), its file and repository mount resources, and its attached vault ids under the
 // session's row lock, and reports whether the session is still live for tool
 // execution. A session that is not running, or has been archived, is stale: its
 // tool_exec item is completed here and false is returned, so a dead session
@@ -884,9 +891,28 @@ func (e *Executor) sessionForRun(ctx context.Context, item *queue.Item) (session
 	var agent struct {
 		Skills     []skillRef     `json:"skills"`
 		MCPServers []mcpServerRef `json:"mcp_servers"`
+		// The roster snapshot, absent on a single-agent session. Only its
+		// members' skills are read here: MCP servers are per thread's agent
+		// (plan 35 decision 14) and the brain dials them, while the sandbox is
+		// shared by every thread, so what is materialized into it is the union
+		// (decision 11).
+		Multiagent struct {
+			Agents []struct {
+				Skills []skillRef `json:"skills"`
+			} `json:"agents"`
+		} `json:"multiagent"`
 	}
 	if err := json.Unmarshal(agentJSON, &agent); err != nil {
 		return sessionRun{}, false, err
+	}
+	// Concatenated in roster order behind the coordinator's own, not
+	// deduplicated here: the materializer already collapses repeats by skill
+	// id with the first occurrence winning, and a skill's landing directory
+	// carries no version — so two members pinning different versions of one
+	// skill share a tree and the earlier reference is what lands.
+	skillRefs := agent.Skills
+	for _, m := range agent.Multiagent.Agents {
+		skillRefs = append(skillRefs, m.Skills...)
 	}
 	var resources []fileRef
 	if err := json.Unmarshal(resourcesJSON, &resources); err != nil {
@@ -901,7 +927,7 @@ func (e *Executor) sessionForRun(ctx context.Context, item *queue.Item) (session
 	return sessionRun{
 		envConfig:  cfg,
 		networking: cfg.Networking,
-		skills:     agent.Skills,
+		skills:     skillRefs,
 		files:      resources,
 		repos:      repos,
 		vaultIDs:   vaultIDs,

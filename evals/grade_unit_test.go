@@ -1,7 +1,12 @@
 package evals
 
 import (
+	"encoding/json"
 	"errors"
+	"maps"
+	"net/http"
+	"net/http/httptest"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -1428,5 +1433,187 @@ func TestNoSessionErrorToleratesOnlyARetriedTransientClone(t *testing.T) {
 				t.Errorf("tolerated = %v, want %v (grader said: %v)", tolerated, tc.tolerated, err)
 			}
 		})
+	}
+}
+
+func TestSpawnedAgent(t *testing.T) {
+	spawn := func(id, name string) map[string]any {
+		return map[string]any{
+			"id": id, "type": "agent.tool_use", "name": "create_agent",
+			"input": map[string]any{"agent_name": name, "message": "ask the archivist for the code"},
+		}
+	}
+	answer := func(useID string, isErr bool) map[string]any {
+		return map[string]any{"type": "agent.tool_result", "tool_use_id": useID, "is_error": isErr}
+	}
+	tr := trialWith([]map[string]any{spawn("sevt_1", "herald"), answer("sevt_1", false)})
+
+	if err := SpawnedAgent("herald", Model).Check(t, tr); err != nil {
+		t.Errorf("want pass for the agent that was spawned: %v", err)
+	}
+	// The archivist is named in the herald's task text and nowhere else, which
+	// is the exact confusion this grader reads the field to avoid.
+	err := SpawnedAgent("archivist", Model).Check(t, tr)
+	if err == nil {
+		t.Fatal("want failure for an agent merely mentioned in another spawn's message")
+	}
+	if !strings.Contains(err.Error(), "herald") {
+		t.Errorf("failure %q does not say who was spawned instead", err)
+	}
+	if spawnedAgent("archivist")(tr) {
+		t.Error("the premise holds for an agent that was never spawned")
+	}
+	if !spawnedAgent("herald")(tr) {
+		t.Error("the premise does not hold for the agent that was spawned")
+	}
+
+	// A call the settlement refused is the model asking wrongly, not a spawn —
+	// and counting it would hold open the premise of the Platform grader beside
+	// this one, which would then red for a malformed call.
+	refused := trialWith([]map[string]any{spawn("sevt_2", "herald"), answer("sevt_2", true)})
+	if err := SpawnedAgent("herald", Model).Check(t, refused); err == nil {
+		t.Error("want failure for a create_agent the settlement answered is_error")
+	}
+	if spawnedAgent("herald")(refused) {
+		t.Error("the premise holds for a spawn the settlement refused")
+	}
+
+	// A settlement answers every delegation call in the commit that emits it, so
+	// an unanswered create_agent is a turn that never settled.
+	unsettled := trialWith([]map[string]any{spawn("sevt_3", "herald")})
+	if err := SpawnedAgent("herald", Model).Check(t, unsettled); err == nil {
+		t.Error("want failure for a create_agent no result answers")
+	}
+}
+
+// The two create-agent bodies the harness builds, offline. The roster arm would
+// otherwise first be exercised by a paid live run; the single-agent arm is here
+// for the stronger reason — it must still send exactly the four keys it sent
+// before rosters existed, since a stray key there would change every other trial
+// in the suite at once.
+func TestAgentBodies(t *testing.T) {
+	tr := &Trial{Nonce: "n0", Recall: "r0"}
+
+	plain := agentBody(Task{ID: "t", System: "be brief"}, "m", tr, nil, "", nil)
+	if got, want := slices.Sorted(maps.Keys(plain)), []string{"model", "name", "system", "tools"}; !slices.Equal(got, want) {
+		t.Errorf("a task with no roster sent keys %v, want %v", got, want)
+	}
+
+	coord := agentBody(Task{ID: "t"}, "m", tr, nil, "", []any{"agent_1", "agent_2"})
+	ma, _ := coord["multiagent"].(map[string]any)
+	if ma["type"] != "coordinator" {
+		t.Errorf("multiagent.type = %v, want coordinator", ma["type"])
+	}
+	if agents, _ := ma["agents"].([]any); len(agents) != 2 || agents[0] != "agent_1" || agents[1] != "agent_2" {
+		t.Errorf("multiagent.agents = %v, want the two member ids as bare strings, in roster order", ma["agents"])
+	}
+
+	worker := memberBody(RosterMember{Name: "archivist", System: "the code is {{RECALL}}", Toolset: true}, "m", tr)
+	if worker["system"] != "the code is r0" {
+		t.Errorf("member system = %v, want the recall token filled", worker["system"])
+	}
+	tools, _ := worker["tools"].([]any)
+	if len(tools) != 1 {
+		t.Fatalf("a member with the toolset was given tools %v, want the one bare toolset", worker["tools"])
+	}
+	if entry, _ := tools[0].(map[string]any); entry["type"] != "agent_toolset_20260401" {
+		t.Errorf("member toolset entry = %v, want the bare agent toolset", tools[0])
+	}
+	// Sent empty rather than omitted: this member is offered its two delegation
+	// tools and nothing else.
+	if got, _ := memberBody(RosterMember{Name: "herald"}, "m", tr)["tools"].([]any); len(got) != 0 {
+		t.Errorf("a member with no toolset was given tools %v", got)
+	}
+}
+
+// threadTrial stands a trial up over a canned threads route. The thread graders
+// read the session's topology off the wire, which is the one thing a
+// hand-written transcript cannot carry — so this serves the page instead, and
+// the graders reach it through the same client every live trial uses.
+func threadTrial(t *testing.T, threads ...map[string]any) *Trial {
+	t.Helper()
+	data := make([]any, len(threads))
+	for i, th := range threads {
+		data[i] = th
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		if err := json.NewEncoder(w).Encode(map[string]any{"data": data}); err != nil {
+			t.Errorf("serve the threads page: %v", err)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	return &Trial{Nonce: "n0", Recall: "r0", SessionID: "sesn_1", stack: &stack{url: srv.URL}}
+}
+
+// threadRow is one row of that page. An empty parent renders the JSON null the
+// primary carries rather than a missing key, because that field is what the
+// graders discriminate on.
+func threadRow(id, parent, agent, status string) map[string]any {
+	row := map[string]any{
+		"id":               id,
+		"type":             "session_thread",
+		"session_id":       "sesn_1",
+		"status":           status,
+		"agent":            map[string]any{"name": agent},
+		"parent_thread_id": nil,
+	}
+	if parent != "" {
+		row["parent_thread_id"] = parent
+	}
+	return row
+}
+
+func TestThreadPerAgent(t *testing.T) {
+	g := ThreadPerAgent([]string{"archivist", "herald"}, Platform)
+	primary := threadRow("sthr_p", "", "lead", "idle")
+
+	both := threadTrial(t, primary,
+		threadRow("sthr_a", "sthr_p", "archivist", "idle"),
+		threadRow("sthr_h", "sthr_p", "herald", "idle"))
+	if err := g.Check(t, both); err != nil {
+		t.Errorf("want pass with a child thread per roster agent: %v", err)
+	}
+
+	one := threadTrial(t, primary, threadRow("sthr_a", "sthr_p", "archivist", "idle"))
+	if err := g.Check(t, one); err == nil {
+		t.Error("want failure when only one of the two workers ran a thread")
+	}
+
+	// The same two agents, but the herald hangs off the archivist rather than
+	// the primary — a depth this platform never builds.
+	deep := threadTrial(t, primary,
+		threadRow("sthr_a", "sthr_p", "archivist", "idle"),
+		threadRow("sthr_h", "sthr_a", "herald", "idle"))
+	if err := g.Check(t, deep); err == nil {
+		t.Error("want failure when a child is parented to a sibling rather than the primary")
+	}
+
+	// Every row a child: the primary is missing from the list entirely.
+	noPrimary := threadTrial(t,
+		threadRow("sthr_a", "sthr_p", "archivist", "idle"),
+		threadRow("sthr_h", "sthr_p", "herald", "idle"))
+	if err := g.Check(t, noPrimary); err == nil {
+		t.Error("want failure when no listed thread is the primary")
+	}
+}
+
+func TestEveryThreadIdle(t *testing.T) {
+	g := EveryThreadIdle(Platform)
+	primary := threadRow("sthr_p", "", "lead", "idle")
+
+	settled := threadTrial(t, primary, threadRow("sthr_a", "sthr_p", "archivist", "idle"))
+	if err := g.Check(t, settled); err != nil {
+		t.Errorf("want pass when every thread is idle: %v", err)
+	}
+
+	running := threadTrial(t, primary, threadRow("sthr_a", "sthr_p", "archivist", "running"))
+	err := g.Check(t, running)
+	if err == nil {
+		t.Fatal("want failure when a child thread is still running")
+	}
+	// The message names the thread that did not settle, because the reader was
+	// not watching the run.
+	if !strings.Contains(err.Error(), "archivist") || !strings.Contains(err.Error(), "sthr_a") {
+		t.Errorf("failure %q names neither the thread nor its agent", err)
 	}
 }

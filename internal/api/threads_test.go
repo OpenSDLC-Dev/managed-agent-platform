@@ -354,9 +354,10 @@ func TestThreadArchive(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// An idle child parked on requires_action: its cross-posted ask and a
-	// private custom-tool call are closed with error results on the surfaces
-	// each was on, then the thread terminates.
+	// An idle child holding an unanswered ask (its row carries no stop reason,
+	// so it is not a child the ending wake counts as busy): its cross-posted
+	// ask and a private custom-tool call are closed with error results on the
+	// surfaces each was on, then the thread terminates.
 	idle := insertChild(t, s, sid, "idle")
 	parked, err := events.NewLog(s.pool).Append(context.Background(), domain.ID(sid), []events.NewEvent{
 		{Type: domain.EventAgentToolUse, ThreadID: domain.ID(idle), CrossPosted: true,
@@ -376,9 +377,15 @@ func TestThreadArchive(t *testing.T) {
 	if status != http.StatusOK || again["archived_at"] != archivedAt {
 		t.Errorf("second archive: %d %v, want the same archived_at", status, again)
 	}
+	// The coordinator's notice comes first: it carries the wake that a child
+	// still worth waiting for would need, and that wake has to land before the
+	// child's own ending or the session folds idle between the two (this child
+	// is not one, so nothing woke here — the order is the same either way).
 	types := s.eventTypes(sid)
-	if !sameStrings(types, []string{"agent.tool_use", "agent.tool_result", "session.thread_status_terminated"}) {
-		t.Errorf("session view after child archive = %v, want the ask, its closing result and the terminated event", types)
+	if !sameStrings(types, []string{"agent.tool_use", "agent.thread_message_received", "agent.tool_result",
+		"session.thread_status_terminated"}) {
+		t.Errorf("session view after child archive = %v, want the ask, the coordinator's notice, the "+
+			"closing result and the terminated event", types)
 	}
 	_, cres := s.do(http.MethodGet, path+idle+"/events", nil)
 	own := listData(t, cres)

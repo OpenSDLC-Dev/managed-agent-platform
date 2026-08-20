@@ -211,8 +211,9 @@ func TestThreadScopedInterruptLeavesTheSharedExecItem(t *testing.T) {
 	}
 	types := s.eventTypes(sid)
 	if !sameStrings(types, []string{"agent.tool_use", "agent.tool_use", "user.interrupt", "agent.tool_result",
-		"session.thread_status_idle"}) {
-		t.Errorf("session view = %v, want A's call answered and A's thread event, no session event", types)
+		"agent.thread_message_received", "session.thread_status_idle"}) {
+		t.Errorf("session view = %v, want A's call answered, its coordinator told, and A's thread event, "+
+			"no session event", types)
 	}
 	res := lastEventOfType(t, s, sid, "agent.tool_result")
 	if res["tool_use_id"] != useA || s.threadOf(t, res["id"].(string)) != a {
@@ -339,7 +340,8 @@ func TestInboundThreadClaimValidation(t *testing.T) {
 // The tool_exec stop re-arm (decision 13 iii): a tool_exec stopped through
 // the work API with runnable platform calls still on the log leaves a fresh
 // queued item of the kind the send trigger would pick — mcp_exec when an MCP
-// call is among them — and one stopped with everything answered leaves none.
+// call is among them — and one stopped with nothing runnable leaves none,
+// whether the log is fully answered, gated, or holding a call no driver runs.
 func TestWorkStopReArmsForRunnableCalls(t *testing.T) {
 	s := newTestServer(t)
 	envID, sid, key := selfHostedWorker(t, s, "ek-rearm")
@@ -384,6 +386,23 @@ func TestWorkStopReArmsForRunnableCalls(t *testing.T) {
 	stopForce(workID)
 	if n := s.liveWork(sid, queue.ToolExec) + s.liveWork(sid, queue.MCPExec) + s.liveWork(sid, queue.WebExec); n != 0 {
 		t.Errorf("live exec items after a stop with nothing runnable = %d, want 0", n)
+	}
+
+	// Nor is a delegation call, which only the settlement that emitted one
+	// answers: no worker and no driver will ever run it, so re-arming for one
+	// would loop stop → re-arm → nothing runnable → stop on a session nobody
+	// is driving. Unreachable today — every such call is answered in its own
+	// commit — and cheap to hold here, where the classification is shared with
+	// the cloud driver's own drain.
+	if _, err := s.pool.Exec(context.Background(),
+		`UPDATE work_items SET state = 'stopped' WHERE session_id = $1 AND state <> 'stopped'`, sid); err != nil {
+		t.Fatal(err)
+	}
+	appendOn(t, s, sid, primary, false, domain.EventAgentToolUse, createAgentCall)
+	workID = s.enqueueAndPoll(t, envID, sid, key)
+	stopForce(workID)
+	if n := s.liveWork(sid, queue.ToolExec) + s.liveWork(sid, queue.MCPExec) + s.liveWork(sid, queue.WebExec); n != 0 {
+		t.Errorf("live exec items after a stop with a stray delegation call = %d, want 0", n)
 	}
 }
 

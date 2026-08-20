@@ -364,7 +364,7 @@ func (w *Worker) handleItem(ctx context.Context, work *sdk.BetaSelfHostedWork, p
 // from it.
 func (w *Worker) runItem(ctx context.Context, work *sdk.BetaSelfHostedWork, prog *progress) (itemOutcome, error) {
 	sessionID := work.Data.ID
-	live, err := w.sessionLive(ctx, sessionID)
+	live, coordinator, err := w.sessionLive(ctx, sessionID)
 	if err != nil {
 		// Could not determine liveness (a transient control-plane error, say):
 		// leave the item for reclaim rather than discarding a possibly-live
@@ -383,11 +383,12 @@ func (w *Worker) runItem(ctx context.Context, work *sdk.BetaSelfHostedWork, prog
 		return outcomeDrain, nil
 	}
 	if err := RunSessionTools(ctx, w.client, w.provider, sessionID, ToolExecConfig{
-		Image:      w.cfg.Image,
-		Workdir:    w.cfg.Workdir,
-		Networking: w.cfg.Networking,
-		Hardening:  w.cfg.Hardening,
-		Progress:   prog.report,
+		Image:       w.cfg.Image,
+		Workdir:     w.cfg.Workdir,
+		Networking:  w.cfg.Networking,
+		Hardening:   w.cfg.Hardening,
+		Coordinator: coordinator,
+		Progress:    prog.report,
 	}); err != nil {
 		// A tool backend-faulted (or the heartbeat cancelled the run): some tools
 		// may be unanswered. Leave the item live for reclaim, matching the
@@ -606,16 +607,22 @@ func leaseLapsed(sinceLastSuccess, ttl time.Duration) bool {
 }
 
 // sessionLive reports whether the session is still a valid target for tool
-// execution — running and not archived. It reads the session over the wire (the
-// worker has no database) and uses the SDK's typed fields: a non-archived
-// session serializes archived_at as null, which unmarshals to the zero time, so
-// ArchivedAt.IsZero() is exactly the null-archived case.
-func (w *Worker) sessionLive(ctx context.Context, sessionID string) (bool, error) {
+// execution — running and not archived — and whether it is a coordinator's,
+// which is the mode the tool-exec driver switches on (plan 35 decision 13 iv).
+// It reads the session over the wire (the worker has no database) and uses the
+// SDK's typed fields: a non-archived session serializes archived_at as null,
+// which unmarshals to the zero time, so ArchivedAt.IsZero() is exactly the
+// null-archived case, and a single-agent session serializes multiagent as null,
+// which unmarshals to the zero struct and so an empty roster. Both answers come
+// from the one read the liveness gate already makes; nothing else in the worker
+// needs the snapshot.
+func (w *Worker) sessionLive(ctx context.Context, sessionID string) (live, coordinator bool, err error) {
 	sess, err := w.client.Beta.Sessions.Get(ctx, sessionID, sdk.BetaSessionGetParams{})
 	if err != nil {
-		return false, err
+		return false, false, err
 	}
-	return sess.Status == sdk.BetaManagedAgentsSessionStatusRunning && sess.ArchivedAt.IsZero(), nil
+	live = sess.Status == sdk.BetaManagedAgentsSessionStatusRunning && sess.ArchivedAt.IsZero()
+	return live, len(sess.Agent.Multiagent.Agents) > 0, nil
 }
 
 // forceStop stops the work item, ignoring a 409 (already stopping/stopped, which

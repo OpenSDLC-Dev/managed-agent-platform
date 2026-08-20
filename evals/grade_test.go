@@ -1291,6 +1291,204 @@ func readRangeUse(tr *Trial, path string, line int) map[string]any {
 	return nil
 }
 
+// SpawnedAgent asserts the coordinator spawned a named roster agent: a
+// create_agent call whose agent_name is exactly that name.
+//
+// Exact on the field, where a general ToolCalledWith would match a marker
+// anywhere in the input — and a coordinator's message to one worker may well
+// name the other ("ask the archivist for it"), which would report a spawn that
+// never happened and hold open the premise of the Platform-class grader beside
+// it. Class Model: whether to delegate, and to whom, is the model's.
+func SpawnedAgent(name string, class Class) Grader {
+	return Grader{
+		Name:  "spawned-agent:" + name,
+		Class: class,
+		Check: func(_ *testing.T, tr *Trial) error {
+			spawned := spawnedAgents(tr)
+			if slices.Contains(spawned, name) {
+				return nil
+			}
+			return fmt.Errorf("no create_agent call named %q; the coordinator spawned %v", name, spawned)
+		},
+	}
+}
+
+// spawnedAgent is SpawnedAgent's condition, for OnlyIf. The two read the same
+// finder deliberately, as calledWith does for ToolCalledWith: pair them on the
+// same name and the Platform grader falls silent exactly when the Model grader
+// reds, so the two can never disagree about whether the spawn happened.
+func spawnedAgent(name string) func(*Trial) bool {
+	return func(tr *Trial) bool { return slices.Contains(spawnedAgents(tr), name) }
+}
+
+// spawnedAgents returns the agent_name of every create_agent call the
+// settlement answered without an error, in log order.
+//
+// The answer is read, not just the call, and which half of the split that
+// serves is worth stating. A call the settlement refused — a name off the
+// roster, a missing message, the thread cap reached — is the model asking
+// wrongly, and the model's graders should own that. Counting it as a spawn
+// would do the opposite twice over: it would pass this Model grader on a spawn
+// that never happened, and then hold open the premise of the Platform grader
+// beside it, which would red and blame the platform for a malformed call. So
+// what is left to Platform is exactly its own: a spawn the settlement said it
+// performed that left no thread row behind.
+func spawnedAgents(tr *Trial) []string {
+	failed := map[string]bool{}
+	for _, res := range eventsOfType(tr, "agent.tool_result") {
+		if isErr, _ := res["is_error"].(bool); isErr {
+			if id, _ := res["tool_use_id"].(string); id != "" {
+				failed[id] = true
+			}
+		}
+	}
+	var out []string
+	for _, use := range eventsOfType(tr, "agent.tool_use") {
+		if use["name"] != "create_agent" {
+			continue
+		}
+		// An unanswered call is not counted either: a settlement answers every
+		// delegation call in the commit that emits it, so a create_agent with no
+		// result is a turn that never settled — nothing was spawned.
+		id, _ := use["id"].(string)
+		if id == "" || failed[id] || !answeredUse(tr, id) {
+			continue
+		}
+		input, _ := use["input"].(map[string]any)
+		// Trimmed, because createAgent trims before it resolves the roster: a
+		// spawn asking for " archivist " succeeds and renders agent.name
+		// "archivist" on the threads route, and an untrimmed read here would
+		// call that a Model failure — then, as OnlyIf's premise, skip the
+		// Platform grader that would have checked the thread it really created.
+		if name := strings.TrimSpace(nameOf(input)); name != "" {
+			out = append(out, name)
+		}
+	}
+	return out
+}
+
+// nameOf reads a create_agent call's agent_name.
+func nameOf(input map[string]any) string {
+	name, _ := input["agent_name"].(string)
+	return name
+}
+
+// answeredUse reports whether an agent.tool_result answers the given tool-use id.
+func answeredUse(tr *Trial, useID string) bool {
+	for _, res := range eventsOfType(tr, "agent.tool_result") {
+		if id, _ := res["tool_use_id"].(string); id == useID {
+			return true
+		}
+	}
+	return false
+}
+
+// ThreadPerAgent asserts the session ran a child thread for each named roster
+// agent — the claim that separates a coordinator session from every other trial
+// in this suite, read off the surface a client reads it from (GET
+// /v1/sessions/{id}/threads) rather than off the transcript that announced it.
+//
+// It grades the shape and not the count: one primary (parent_thread_id null),
+// and for each name at least one child parented to that primary running that
+// agent. A count would pass a session that spawned one agent twice, and a
+// child hanging off a sibling would be a topology this platform refuses to
+// build.
+//
+// Platform, on the premise that the model actually spawned: pair it with a
+// SpawnedAgent over the same names, which owns "the coordinator never
+// delegated", and what is left here is a spawn the model asked for that left no
+// thread to show for it.
+func ThreadPerAgent(names []string, class Class) Grader {
+	return Grader{
+		Name:  "thread-per-agent:" + strings.Join(names, "|"),
+		Class: class,
+		Check: func(t *testing.T, tr *Trial) error {
+			threads := tr.stack.listThreads(t, tr.SessionID)
+			var primaries []string
+			for _, th := range threads {
+				// Presence first, then the value. Reading a missing key as nil
+				// would let a response that dropped the field entirely be graded
+				// as a session full of primaries — and this grader exists to
+				// assert what the route renders, so an absent required field is
+				// the failure rather than the premise.
+				raw, ok := th["parent_thread_id"]
+				if !ok {
+					return fmt.Errorf("thread %v renders no parent_thread_id; the threads route "+
+						"always carries it, null on the primary", th["id"])
+				}
+				if raw == nil {
+					id, _ := th["id"].(string)
+					primaries = append(primaries, id)
+				}
+			}
+			if len(primaries) != 1 {
+				return fmt.Errorf("%d thread(s) listed, %d of them with parent_thread_id null: "+
+					"a session has exactly one primary thread", len(threads), len(primaries))
+			}
+			primary := primaries[0]
+			var ran []string // the agent behind each child, in list order
+			for _, th := range threads {
+				parent, _ := th["parent_thread_id"].(string)
+				if parent == "" {
+					continue
+				}
+				if parent != primary {
+					return fmt.Errorf("thread %v is parented to %q rather than the primary %q: "+
+						"the topology is deeper than the one level a roster builds", th["id"], parent, primary)
+				}
+				ran = append(ran, threadAgentName(th))
+			}
+			var missing []string
+			for _, want := range names {
+				if !slices.Contains(ran, want) {
+					missing = append(missing, want)
+				}
+			}
+			if len(missing) > 0 {
+				return fmt.Errorf("no child thread ran %v; the session's %d thread(s) ran %v",
+					missing, len(threads), ran)
+			}
+			return nil
+		},
+	}
+}
+
+// EveryThreadIdle asserts every thread the session lists has settled by grading
+// time. It is the thread-level twin of the core pack's session-status-idle: a
+// session's status is a fold over its threads, and the core pack has already
+// read that status idle, so a row still saying running (or terminated, which
+// nothing in a coordinator trial asks for) is the fold disagreeing with the
+// rows it is folded from. No model behavior produces that, which is why it is
+// Platform.
+//
+// It is trivially true of a session that spawned nothing — the primary alone,
+// idle — and that is the right silence: "the coordinator never delegated" is a
+// Model grader's to report.
+func EveryThreadIdle(class Class) Grader {
+	return Grader{
+		Name:  "every-thread-idle",
+		Class: class,
+		Check: func(t *testing.T, tr *Trial) error {
+			for _, th := range tr.stack.listThreads(t, tr.SessionID) {
+				if th["status"] != "idle" {
+					return fmt.Errorf("thread %v (%s) status = %v, want idle once the session has settled",
+						th["id"], threadAgentName(th), th["status"])
+				}
+			}
+			return nil
+		},
+	}
+}
+
+// threadAgentName is the agent a thread row runs, read off the nested agent
+// object the threads route renders. The primary's is the session's own agent;
+// a child's is the roster member snapshotted when it was spawned.
+func threadAgentName(th map[string]any) string {
+	agent, _ := th["agent"].(map[string]any)
+	name, _ := agent["name"].(string)
+	return name
+}
+
 // --- transcript accessors -------------------------------------------------
 //
 // All of these read the raw wire JSON. A missing or reshaped field surfaces as

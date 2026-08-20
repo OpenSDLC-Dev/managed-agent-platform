@@ -415,6 +415,40 @@ func TestRosterOverrideRejected(t *testing.T) {
 
 // A member's stored spec answers to the whole-spec caps at session create,
 // as the coordinator's own does (resolveAgent): a pre-cap spec fails there.
+// A roster is addressed by name and by nothing else, so two members sharing one
+// is a member no coordinator could ever spawn: create_agent takes an agent_name,
+// the settlement takes the first match, and the second is unreachable for the
+// life of the session. Two agents may share a name — the resource has no unique
+// constraint — so the refusal belongs where both are on one roster, at the
+// session's snapshot, where the names are the pinned ones the coordinator will
+// actually address.
+func TestRosterRejectsTwoMembersSharingAName(t *testing.T) {
+	s := newTestServer(t)
+	first, second := member(t, s, "twin"), member(t, s, "twin")
+	coord := createAgent(t, s, map[string]any{"name": "coordinator", "model": "claude-opus-4-8",
+		"multiagent": map[string]any{"type": "coordinator", "agents": []any{first, second}}})["id"].(string)
+	envID := createEnvironment(t, s, map[string]any{"name": "env"})["id"].(string)
+
+	status, body := s.do(http.MethodPost, "/v1/sessions", map[string]any{"agent": coord, "environment_id": envID})
+	wantErr(t, status, body, http.StatusBadRequest, "invalid_request_error")
+	msg := errMessage(body)
+	for _, want := range []string{second, first, `"twin"`, "spawns a member by name"} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("message = %q, want it to name %s", msg, want)
+		}
+	}
+
+	// Distinct names on the same two agents are the control: nothing about a
+	// two-member roster is refused, only the collision.
+	ok := createAgent(t, s, map[string]any{"name": "coordinator-2", "model": "claude-opus-4-8",
+		"multiagent": map[string]any{"type": "coordinator",
+			"agents": []any{member(t, s, "alpha"), member(t, s, "beta")}}})["id"].(string)
+	if status, body := s.do(http.MethodPost, "/v1/sessions",
+		map[string]any{"agent": ok, "environment_id": envID}); status != http.StatusOK {
+		t.Errorf("distinct names: status = %d, body %s", status, body)
+	}
+}
+
 func TestRosterMemberValidatedAtSessionCreate(t *testing.T) {
 	s := newTestServer(t)
 	a := member(t, s, "worker-a")

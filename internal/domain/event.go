@@ -30,6 +30,16 @@ const (
 	EventAgentMCPToolUse    EventType = "agent.mcp_tool_use"
 	EventAgentMCPToolResult EventType = "agent.mcp_tool_result"
 	EventAgentCustomToolUse EventType = "agent.custom_tool_use"
+
+	// The agent-to-agent message pair (plan 35 decision 6). _sent is the
+	// observability event on the sender's own stream and _received the delivery
+	// written to the target thread's input stream, so one message is two rows,
+	// one per thread. Each names its peer thread in a field of its own —
+	// to_session_thread_id and from_session_thread_id — rather than in the
+	// envelope's session_thread_id, which neither carries; the agent name beside
+	// it is null when the peer is the primary agent.
+	EventAgentThreadMessageSent     EventType = "agent.thread_message_sent"
+	EventAgentThreadMessageReceived EventType = "agent.thread_message_received"
 )
 
 // Session lifecycle events.

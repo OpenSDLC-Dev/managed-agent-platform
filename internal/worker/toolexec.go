@@ -27,6 +27,13 @@ type ToolExecConfig struct {
 	// the same environment variables the executor reads, so a customer-hosted
 	// sandbox is capped the same way a platform-managed one is.
 	Hardening sandbox.Hardening
+	// Coordinator is set when the session's snapshot carries a multiagent
+	// roster, which the caller reads with its liveness gate. It is the whole of
+	// what this thread-unaware driver knows about threads (plan 35 decision 13
+	// iv): it widens the scan to the log's start and makes the run re-scan
+	// until nothing is left, because concurrent threads can commit calls while
+	// this item is live and their enqueue is a no-op against it.
+	Coordinator bool
 	// Progress, when set, is called each time the run finishes a step — the
 	// sandbox provisioned, the skills or files materialized, a tool answered.
 	// The lease loop watches it to tell a long run from a wedged one (#383);
@@ -44,13 +51,21 @@ type toolUse struct {
 }
 
 // RunSessionTools is the BYOC worker's tool-exec driver: given a session whose
-// turn has suspended for built-in tool calls, it runs every unanswered tool in
-// the session's sandbox and posts a user.tool_result for each back through the
-// session events API. It is the self_hosted twin of the platform executor's
+// turn has suspended for built-in tool calls, it runs every runnable tool call
+// in the session's sandbox and posts a user.tool_result for each back through
+// the session events API. It is the self_hosted twin of the platform executor's
 // per-item processing, with two deployment differences: the transport is HTTP
 // (the worker has no database), and the result event is user.tool_result, not
 // agent.tool_result — the control plane resumes the brain when a result
 // completes the outstanding set, so the worker never enqueues a turn itself.
+//
+// cfg.Coordinator makes the run multi-pass: on a session whose threads run
+// concurrently, one pass is not the item's whole work, because a sibling
+// thread's calls can land while this pass runs and its enqueue is a no-op
+// against the live item. So the found set is answered and the scan repeated
+// until one comes back empty, over the sandbox the first pass provisioned. On a
+// single-agent session the driver keeps its single pass exactly, the window
+// there being closed by the session's own serialization.
 //
 // Results are posted per tool as each completes, so a backend fault partway
 // through leaves the tools that did run answered on the log; a reclaiming pass
@@ -88,7 +103,7 @@ func RunSessionTools(ctx context.Context, client sdk.Client, provider sandbox.Pr
 	// not share a silent interval with the paging scan below. The budget's floor
 	// covers neither (#383).
 	report()
-	uses, err := unansweredToolUses(ctx, client, sessionID, report)
+	uses, err := unansweredToolUses(ctx, client, sessionID, cfg.Coordinator, report)
 	if err != nil {
 		return err
 	}
@@ -118,73 +133,133 @@ func RunSessionTools(ctx context.Context, client sdk.Client, provider sandbox.Pr
 	}
 	report()
 	runner := toolset.Runner{Sandbox: sb, Session: domain.ID(sessionID), Workdir: cfg.Workdir}
-	for _, u := range uses {
-		res, err := runner.Run(ctx, u.id, u.name, u.input)
-		if err != nil {
-			// Backend fault: stop here. The results posted so far stay answered;
-			// this tool and any after it are re-derived on a reclaiming pass.
-			return fmt.Errorf("tool %s (%s): %w", u.name, u.id, err)
+	for {
+		for _, u := range uses {
+			res, err := runner.Run(ctx, u.id, u.name, u.input)
+			if err != nil {
+				// Backend fault: stop here. The results posted so far stay answered;
+				// this tool and any after it are re-derived on a reclaiming pass.
+				return fmt.Errorf("tool %s (%s): %w", u.name, u.id, err)
+			}
+			// The run and the post are two steps, and reporting only after both puts
+			// them in one silent interval — which the floor does not cover. A `bash`
+			// call may legitimately take toolset.MaxTimeout, and posting its result is
+			// a wire round trip to the control plane with no bound of its own, so the
+			// pair can outlast a budget neither half comes close to. The run would then
+			// be cancelled *after* its side effects had happened and *before* its
+			// result was posted, and the reclaim would run the same command again
+			// (#383).
+			report()
+			if err := postToolResult(ctx, client, sessionID, u.id, res); err != nil {
+				return err
+			}
+			report()
 		}
-		// The run and the post are two steps, and reporting only after both puts
-		// them in one silent interval — which the floor does not cover. A `bash`
-		// call may legitimately take toolset.MaxTimeout, and posting its result is
-		// a wire round trip to the control plane with no bound of its own, so the
-		// pair can outlast a budget neither half comes close to. The run would then
-		// be cancelled *after* its side effects had happened and *before* its
-		// result was posted, and the reclaim would run the same command again
-		// (#383).
-		report()
-		if err := postToolResult(ctx, client, sessionID, u.id, res); err != nil {
+		// A single-agent session's window cannot open: its next turn cannot start
+		// before this set's last result lands, so one pass is the whole item and
+		// re-scanning would only cost a round trip.
+		if !cfg.Coordinator {
+			return nil
+		}
+		// A coordinator's threads run concurrently, so a sibling may have
+		// committed calls while the pass above ran — and its enqueue was a no-op
+		// against this live item, leaving nobody else to serve them. Re-scan
+		// until a pass comes back empty. It terminates on progress: every
+		// non-empty pass answers every call it returned, and the calls this
+		// driver never answers (web, ask-gated, delegation) are filtered out of
+		// the found set rather than returned unanswered. The sandbox, skills and
+		// files stay one-shot above — wire-expensive, idempotent and
+		// session-scoped, so nothing a later pass finds can change them.
+		uses, err = unansweredToolUses(ctx, client, sessionID, true, report)
+		if err != nil {
 			return err
 		}
+		if len(uses) == 0 {
+			return nil
+		}
+		// The scan's own boundary, so its last page does not share a silent
+		// interval with the first tool run of the next pass (#383).
 		report()
 	}
-	return nil
 }
 
-// toolScanPageSize is how many events one page of the scan below requests. The
-// walk reads the trailing turn only, which for a turn of N parallel tools is
-// N+1 events on a fresh suspension (the uses plus the boundary result) and at
-// most 2N+1 on a reclaim (their answered results are on the wire too) — so one
-// page of 20 finishes in a single round trip up to N=19 fresh, N=9 reclaimed,
-// and anything wider simply pages on. The size caps what a page over-reads,
-// which is the cost that matters: tool inputs and results carry file contents.
-// It is sent explicitly rather than left to the server's default: the bound is
+// toolScanPageSize is how many events one page of the scan below requests. A
+// single-agent walk reads the trailing turn only, which for a turn of N
+// parallel tools is N+1 events on a fresh suspension (the uses plus the
+// boundary result) and at most 2N+1 on a reclaim (their answered results are on
+// the wire too) — so one page of 20 finishes in a single round trip up to N=19
+// fresh, N=9 reclaimed, and anything wider simply pages on. A coordinator's
+// walk has no boundary and pages to the log's start, so it reads every one of
+// those events whatever the page size — and there the only thing the size
+// changes is how many round trips it costs. Hence two sizes: the bounded scan
+// keeps 20, where capping the over-read is the cost that matters (tool inputs
+// and results carry file contents), and the full walk asks for the largest page
+// the wire allows, which is the same 1000 the reference runner requests. Both
+// are sent explicitly rather than left to the server's default: the bound is
 // this worker's, and it holds against any wire-compatible control plane.
-const toolScanPageSize = 20
+const (
+	toolScanPageSize        = 20
+	coordinatorScanPageSize = 1000
+)
+
+// scanPageSize is the page one walk asks for, by the mode it runs in.
+func scanPageSize(coordinator bool) int64 {
+	if coordinator {
+		return coordinatorScanPageSize
+	}
+	return toolScanPageSize
+}
 
 // unansweredToolUses reads the session's event log over the wire and returns the
-// agent.tool_use events still lacking a result, oldest first — the work this
-// call must run. It mirrors the executor's diff exactly: an agent.tool_use is
-// answered by either an agent.tool_result (a platform executor) or a
-// user.tool_result (this worker), both referencing it by tool_use_id, so both
-// count. This is the third expression of one rule — the canonical answered-set
-// is events.HasUnansweredToolUse (the SQL the control plane resumes on) and
-// executor.runnableToolUses (the executor's DB-backed copy, narrowed since plan
-// 35 slice 3 to the runnable set — the ask-gated calls a sibling thread still
-// holds are not run; this scan follows in slice 4 with the self_hosted view
-// rule); the result types that answer are the shared domain constants below,
-// so a new answering type must be added in all three. A drift here re-runs an answered tool every
-// reclaim, re-posting a result the control plane's ValidateToolResults rejects.
+// tool calls this worker must run, oldest first: the agent.tool_use events that
+// no result answers and no human still owes a verdict on. It mirrors the
+// executor's diff exactly. Answered means either an agent.tool_result (a
+// platform executor) or a user.tool_result (this worker), both referencing the
+// use by tool_use_id, so both count. Runnable narrows that to the calls the
+// platform may run now (plan 35 decision 5): evaluated_permission allow — a
+// call carrying none, from before the stamp existed, counts as allowed — or
+// ask with an allow user.tool_confirmation recorded for it. That narrowing is
+// not a multiagent nicety, and so is not narrowed to a coordinator's sessions
+// the way the boundary below is: one turn can suspend on two asks and be
+// released one at a time on any session at all, and running the sibling a human
+// has not answered executes a command nobody approved. This is the third
+// expression of one rule — the canonical set is events.HasUnansweredToolUse
+// (the SQL the control plane resumes on) and events.RunnableToolUses (which
+// every platform driver drains through); the types that answer and the one
+// that releases are the shared domain constants below, so a new one must be
+// added in all three. A drift here re-runs an answered tool every reclaim,
+// re-posting a result the control plane's ValidateToolResults rejects.
 //
 // Events are parsed from each event's raw wire JSON into a minimal local shape
 // rather than the SDK's typed event union: the union tracks the live API's tip
 // and carries post-slice surface the worker has no need for, so decoding only
-// the four fields this diff needs keeps a schema drift from breaking it.
+// the six fields this diff needs keeps a schema drift from breaking it.
 //
 // Cost: the worker has no database, so it cannot ask the executor's one EXISTS
-// and there is no unanswered-only wire endpoint to ask instead. It bounds the
-// read by walking newest-first and stopping at the trailing turn, rather than
-// paging the session's whole tool history (#76). Two platform invariants make
-// that exact for a turn that suspended on its tools: the brain commits a turn's
-// tool_use events in ONE append (brain.commitTurn), and no later turn's uses
-// reach the log until every outstanding one is answered — every enqueue of a
-// model_turn that follows tool work is gated on events.HasUnansweredToolUse. So
-// in this three-type stream the unanswered set is the newest contiguous run of
-// tool uses, and the first result older than that run is the boundary —
-// everything beyond it is answered. A result always outranks the use it answers
-// (per-session seq is assigned under the session row lock, and a result may only
-// reference a committed use), so walking down, every use meets its answer first.
+// and there is no unanswered-only wire endpoint to ask instead. On a
+// single-agent session it bounds the read by walking newest-first and stopping
+// at the trailing turn, rather than paging the session's whole tool history
+// (#76). Two platform invariants make that exact for a turn that suspended on
+// its tools: the brain commits a turn's tool_use events in ONE append
+// (brain.commitTurn), and no later turn's uses reach the log until every
+// outstanding one is answered — every enqueue of a model_turn that follows tool
+// work is gated on events.HasUnansweredToolUse. So in this stream the unanswered
+// set is the newest contiguous run of tool uses, and the first result older than
+// that run is the boundary — everything beyond it is answered. A result always
+// outranks the use it answers (per-session seq is assigned under the session row
+// lock, and a result may only reference a committed use), so walking down, every
+// use meets its answer first — and a confirmation likewise outranks the call it
+// releases, so the walk has the verdict before it reads the call.
+//
+// coordinator drops that boundary, because both of its premises hold per thread
+// rather than per session (plan 35 decision 13 iv): one thread's turn can
+// suspend while a sibling's calls are still outstanding, so a runnable call can
+// sit arbitrarily far down the log with an answered pair above it, and no stop
+// condition short of the log's start finds it. A coordinator session therefore
+// pays a full walk per claimed item — what the reference pays per attach, and
+// the price of a thread-unaware worker serving child threads at all. The calls
+// it walks are the session view's, which on a self_hosted environment carries
+// every child thread's (decision 13 i).
 //
 // One path used to strand a use outside that run — a turn whose stop reason was
 // not tool_use committed its tool_use events but enqueued no tool_exec, and the
@@ -196,19 +271,22 @@ const toolScanPageSize = 20
 // others. On any log the current code can produce, the bound is exact and the
 // two diffs agree; a log a pre-#181 binary already stranded is the residue
 // neither reaches.
-func unansweredToolUses(ctx context.Context, client sdk.Client, sessionID string, progress func()) ([]toolUse, error) {
+func unansweredToolUses(ctx context.Context, client sdk.Client, sessionID string, coordinator bool, progress func()) ([]toolUse, error) {
 	iter := client.Beta.Sessions.Events.ListAutoPaging(ctx, sessionID, sdk.BetaSessionEventListParams{
 		Types: []string{
 			string(domain.EventAgentToolUse),
 			string(domain.EventAgentToolResult),
 			string(domain.EventUserToolResult),
+			string(domain.EventUserToolConfirm),
 		},
 		Order: sdk.BetaSessionEventListParamsOrderDesc,
-		Limit: sdk.Int(toolScanPageSize),
+		Limit: sdk.Int(scanPageSize(coordinator)),
 	})
 	answered := map[string]bool{}
+	allowed := map[string]bool{}
 	var out []toolUse
 	var sawUse bool
+	var head string // the newest event the walk saw, its anchor for the re-check below
 scan:
 	for iter.Next() {
 		// Per event, because the walk auto-pages: a turn wide enough to span
@@ -216,14 +294,19 @@ scan:
 		// inside a single silent step (#383).
 		progress()
 		var ev struct {
-			ID        string          `json:"id"`
-			Type      string          `json:"type"`
-			Name      string          `json:"name"`
-			Input     json.RawMessage `json:"input"`
-			ToolUseID string          `json:"tool_use_id"`
+			ID                  string          `json:"id"`
+			Type                string          `json:"type"`
+			Name                string          `json:"name"`
+			Input               json.RawMessage `json:"input"`
+			ToolUseID           string          `json:"tool_use_id"`
+			EvaluatedPermission string          `json:"evaluated_permission"`
+			Result              string          `json:"result"`
 		}
 		if err := json.Unmarshal([]byte(iter.Current().RawJSON()), &ev); err != nil {
 			return nil, fmt.Errorf("parse session event: %w", err)
+		}
+		if head == "" {
+			head = ev.ID
 		}
 		switch domain.EventType(ev.Type) {
 		case domain.EventAgentToolUse:
@@ -231,11 +314,34 @@ scan:
 			// A web call (web_fetch/web_search) is never this worker's: it runs
 			// in the platform executor's web driver for every environment kind,
 			// and the enqueue hold-back keeps a polled item from coexisting with
-			// an unanswered one. The filter guards the stray case, so the
-			// six-tool Runner is never fed a name it must answer unknown-tool.
-			// It still marks sawUse — the call belongs to the trailing turn's
-			// run, and the boundary is about turns, not this worker's share.
-			if toolset.IsWebTool(ev.Name) {
+			// an unanswered one. A delegation call is never anyone's to run: the
+			// settlement that emitted it answers it in the same commit. Both
+			// filters guard the stray case, so the six-tool Runner is never fed
+			// a name it must answer unknown-tool — an answer the control plane
+			// would then refuse, faulting the item into a reclaim loop. They
+			// still mark sawUse — the call belongs to the trailing turn's run,
+			// and the boundary is about turns, not this worker's share.
+			if toolset.IsWebTool(ev.Name) || toolset.IsDelegationTool(ev.Name) {
+				continue
+			}
+			// The runnable narrowing, spelled in Go: an absent verdict reads as
+			// allow (the SQL's COALESCE), and an ask waits for a human's allow.
+			// A deny is skipped too — the platform synthesizes its error result,
+			// and running it meanwhile would execute what the policy refused.
+			//
+			// The release is bound to "ask" rather than to any confirmation,
+			// which is the whole of the rule: a confirmation is client-supplied
+			// input on the events API, and only the API's own
+			// ValidateToolConfirmations knows it may not name a call that was
+			// never gated. This scan reads the log over the wire and cannot see
+			// that check, so it states the invariant itself rather than
+			// inheriting it — a gate at a trust boundary that depends on a
+			// remote validation is a gate that stops working the day the
+			// validation moves.
+			runnable := ev.EvaluatedPermission == "" ||
+				ev.EvaluatedPermission == string(domain.EvalPermAllow) ||
+				(ev.EvaluatedPermission == string(domain.EvalPermAsk) && allowed[ev.ID])
+			if !runnable {
 				continue
 			}
 			// Not "stop at the first answered use": a turn's tools can be
@@ -245,17 +351,99 @@ scan:
 				out = append(out, toolUse{id: domain.ID(ev.ID), name: ev.Name, input: ev.Input})
 			}
 		case domain.EventAgentToolResult, domain.EventUserToolResult:
-			if sawUse {
+			if sawUse && !coordinator {
 				break scan // older than the trailing turn: everything past here is answered
 			}
+			answered[ev.ToolUseID] = true
+		case domain.EventUserToolConfirm:
+			// Never touches sawUse or the boundary: a verdict is not a turn's
+			// end, and one recorded above a trailing run belongs to it.
+			if ev.Result == "allow" {
+				allowed[ev.ToolUseID] = true
+			}
+		}
+	}
+	if err := iter.Err(); err != nil {
+		return nil, fmt.Errorf("list session events: %w", err)
+	}
+	if coordinator && len(out) > 0 && head != "" {
+		var err error
+		if out, err = dropAnsweredSince(ctx, client, sessionID, head, out, progress); err != nil {
+			return nil, err
+		}
+	}
+	slices.Reverse(out) // the walk collected newest-first; run them in log order
+	return out, nil
+}
+
+// dropAnsweredSince removes from uses any call answered while the walk that
+// found them was still running, and it exists because the walk pages by a
+// cursor on the sequence it started from: page two and everything after it read
+// strictly older events, so a result appended above the cursor mid-walk is
+// invisible to the rest of that walk. The call it answers sits below, still
+// looking unanswered, and the driver would run a command that had already been
+// settled — the plan's answered-means-cancelled rule (decision 9), which the
+// executor keeps under its lock and this worker must keep over the wire.
+//
+// Only a coordinator's walk needs it. A single-agent scan stops at the trailing
+// turn's boundary and spans one turn's events, so its window is a page; a
+// coordinator's spans the whole log by decision 13 (iv), and on a long-lived
+// session that is an arbitrarily wide window for a thread-scoped interrupt —
+// which synthesizes results for exactly these calls — to land inside.
+//
+// One pass, not a loop to quiescence: it reads down to the walk's own anchor, so
+// what remains uncovered is a result landing during this read, which is the same
+// page-wide window the single-agent path has always had and the same one the
+// executor's pre-run check leaves. Removing only ever shrinks the runnable set,
+// so a call this pass misses is run and its late result dropped, exactly as before.
+func dropAnsweredSince(ctx context.Context, client sdk.Client, sessionID, head string,
+	uses []toolUse, progress func()) ([]toolUse, error) {
+	// The same type filter the walk used, not just the result types: the anchor
+	// is whatever event the walk saw first, and a filter that could exclude it
+	// would leave this pass with no stop condition but the start of the log —
+	// the very cost it exists to avoid.
+	iter := client.Beta.Sessions.Events.ListAutoPaging(ctx, sessionID, sdk.BetaSessionEventListParams{
+		Types: []string{
+			string(domain.EventAgentToolUse),
+			string(domain.EventAgentToolResult),
+			string(domain.EventUserToolResult),
+			string(domain.EventUserToolConfirm),
+		},
+		Order: sdk.BetaSessionEventListParamsOrderDesc,
+		Limit: sdk.Int(coordinatorScanPageSize),
+	})
+	answered := map[string]bool{}
+	for iter.Next() {
+		progress()
+		var ev struct {
+			ID        string `json:"id"`
+			Type      string `json:"type"`
+			ToolUseID string `json:"tool_use_id"`
+		}
+		if err := json.Unmarshal([]byte(iter.Current().RawJSON()), &ev); err != nil {
+			return nil, fmt.Errorf("parse session event: %w", err)
+		}
+		if ev.ID == head {
+			break // everything from here down was already in the walk's own view
+		}
+		switch domain.EventType(ev.Type) {
+		case domain.EventAgentToolResult, domain.EventUserToolResult:
 			answered[ev.ToolUseID] = true
 		}
 	}
 	if err := iter.Err(); err != nil {
 		return nil, fmt.Errorf("list session events: %w", err)
 	}
-	slices.Reverse(out) // the walk collected newest-first; run them in log order
-	return out, nil
+	if len(answered) == 0 {
+		return uses, nil
+	}
+	kept := uses[:0]
+	for _, u := range uses {
+		if !answered[u.id.String()] {
+			kept = append(kept, u)
+		}
+	}
+	return kept, nil
 }
 
 // postToolResult sends one user.tool_result answering a tool use. Empty tool

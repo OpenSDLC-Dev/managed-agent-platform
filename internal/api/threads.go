@@ -10,6 +10,7 @@ import (
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/events"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/queue"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/toolset"
 	"github.com/jackc/pgx/v5"
 )
@@ -250,9 +251,17 @@ func (s *server) archiveThread(r *http.Request) (any, error) {
 	if row.parent == nil {
 		return nil, errInvalid("the primary thread cannot be archived; archive the session")
 	}
+	var woke *domain.SessionStatus
 	if row.archivedAt == nil {
 		if row.status != string(domain.SessionIdle) {
 			return nil, errInvalid("thread %s is %s; only an idle thread can be archived", threadID, row.status)
+		}
+		// Notice and wake first, the child's own ending second — the order a
+		// report takes (delegate.report) and for its reason: a session whose
+		// last live child is this one never folds idle between the two, so no
+		// client sees an idle it never rested at.
+		if woke, err = s.notifyThreadArchived(ctx, tx, row); err != nil {
+			return nil, err
 		}
 		if row, err = terminateThread(ctx, tx, s.log, row); err != nil {
 			return nil, err
@@ -261,7 +270,52 @@ func (s *server) archiveThread(r *http.Request) (any, error) {
 	if err := tx.Commit(ctx); err != nil {
 		return nil, err
 	}
+	if woke != nil {
+		events.RecordSessionStatus(ctx, *woke)
+	}
 	return renderThread(row)
+}
+
+// notifyThreadArchived tells the coordinator that one of its children is gone
+// (plan 35 decision 7): archiving frees the slot, but it also ends a thread
+// the coordinator may still be waiting on, and only a message on the primary's
+// log says so. It is a second append in the archive's own transaction rather
+// than part of terminateThread, which the session's own archive shares — a
+// notice per child there would be noise on a session about to be frozen.
+//
+// It also wakes a coordinator this archive has left with nothing coming —
+// events.WakeOnThreadEnded's rule, which is where that judgement is argued:
+// archiving a child parked on requires_action, with no other child still
+// working, takes away the last thing a wait_for_agents could have parked on.
+// Archiving a child nothing was waiting on stays what it looks like,
+// housekeeping. It returns the session status the wake moved to, for the
+// caller to count after the commit.
+func (s *server) notifyThreadArchived(ctx context.Context, tx pgx.Tx, row threadRow) (*domain.SessionStatus, error) {
+	sid := domain.ID(row.sessionID)
+	notice, err := events.ThreadEnded(sid, domain.ID(row.id), row.agentName,
+		fmt.Sprintf("[agent %s was archived]\n\nIts thread is closed and its slot is free; "+
+			"spawn a replacement if its work is unfinished.", row.agentName))
+	if err != nil {
+		return nil, err
+	}
+	pair, moved, woke, err := events.WakeOnThreadEnded(ctx, tx, sid, domain.ID(row.id))
+	if err != nil {
+		return nil, err
+	}
+	opts := events.AppendOptions{SetStatus: moved}
+	if woke {
+		opts.Then = func(ctx context.Context, tx pgx.Tx) error {
+			var envID string
+			if err := tx.QueryRow(ctx,
+				`SELECT environment_id FROM sessions WHERE id = $1`, sid.String()).Scan(&envID); err != nil {
+				return err
+			}
+			_, err := s.queue.Enqueue(ctx, tx, domain.ID(envID), sid, queue.ModelTurn)
+			return err
+		}
+	}
+	_, err = s.log.AppendInTx(ctx, tx, sid, append([]events.NewEvent{notice}, pair...), opts)
+	return moved, err
 }
 
 // lockSession takes the session row lock (404 when the session is gone).
@@ -430,10 +484,8 @@ func (s *server) listThreadEvents(r *http.Request) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	return s.listEvents(r, sessionID, threadScope(sessionID, threadID), false, func(ctx context.Context) error {
-		_, err := loadThread(ctx, s.pool, sessionID, threadID, false)
-		return err
-	})
+	scope := threadScope(sessionID, threadID)
+	return s.listEvents(r, sessionID, scope, false, s.resolveThreadEvents(sessionID, threadID, scope))
 }
 
 // streamThreadEvents implements GET /v1/sessions/{id}/threads/{tid}/stream.
@@ -443,8 +495,22 @@ func (s *server) streamThreadEvents(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, err)
 		return
 	}
-	s.streamEvents(w, r, sessionID, threadScope(sessionID, threadID), func(ctx context.Context) error {
-		_, err := loadThread(ctx, s.pool, sessionID, threadID, false)
-		return err
-	})
+	scope := threadScope(sessionID, threadID)
+	s.streamEvents(w, r, sessionID, scope, s.resolveThreadEvents(sessionID, threadID, scope))
+}
+
+// resolveThreadEvents settles a thread events request for the two handlers
+// above: the thread's own 404, then the self_hosted widening — which only the
+// primary can take, a child's surface being its own rows rather than the
+// session view the rule widens (plan 35 decision 13 i).
+func (s *server) resolveThreadEvents(sessionID, threadID string, scope events.ListQuery) func(context.Context) (bool, error) {
+	return func(ctx context.Context) (bool, error) {
+		if _, err := loadThread(ctx, s.pool, sessionID, threadID, false); err != nil {
+			return false, err
+		}
+		if scope.Scope != events.ScopeSession {
+			return false, nil
+		}
+		return s.sessionSelfHosted(ctx, sessionID)
+	}
 }

@@ -27,7 +27,8 @@ type skillRef struct {
 
 var skillDigitsRe = regexp.MustCompile(`^[0-9]+$`)
 
-// SetupSkills materializes the session agent's skills into the sandbox — the
+// SetupSkills materializes the session's skills into the sandbox — its agent's
+// own, and on a coordinator session every roster member's beside them — the
 // BYOC twin of the executor's materialization and a re-expression of the
 // reference worker's SetupSkills (anthropic-sdk-go tools/agenttoolset):
 // session GET with the environment key, per skill an alias resolution over
@@ -48,12 +49,30 @@ func SetupSkills(ctx context.Context, client sdk.Client, sessionID string, sb sa
 	var snapshot struct {
 		Agent struct {
 			Skills []skillRef `json:"skills"`
+			// The roster snapshot, absent on a single-agent session. Its
+			// members' skills join the coordinator's own: the session's threads
+			// share one sandbox, so the set materialized into it is the union
+			// (plan 35 decision 11). It costs no extra wire read — the roster
+			// travels in the session this call already loads.
+			Multiagent struct {
+				Agents []struct {
+					Skills []skillRef `json:"skills"`
+				} `json:"agents"`
+			} `json:"multiagent"`
 		} `json:"agent"`
 	}
 	if err := json.Unmarshal([]byte(sess.RawJSON()), &snapshot); err != nil {
 		return fmt.Errorf("parse session for skills: %w", err)
 	}
+	// Concatenated in roster order behind the coordinator's own, not
+	// deduplicated here: the resolution loop below already collapses repeats by
+	// skill id with the first occurrence winning, and a skill's landing
+	// directory carries no version — so two members pinning different versions
+	// of one skill share a tree and the earlier reference is what lands.
 	refs := snapshot.Agent.Skills
+	for _, m := range snapshot.Agent.Multiagent.Agents {
+		refs = append(refs, m.Skills...)
+	}
 	if len(refs) == 0 {
 		return nil
 	}
@@ -68,17 +87,28 @@ func SetupSkills(ctx context.Context, client sdk.Client, sessionID string, sb sa
 	// the version object's TRUSTED name, so the skip probe can never be
 	// redirected by an agent-rewritten marker.
 	resolved := make([]skills.Resolved, 0, len(refs))
-	seen := map[string]bool{}
+	seen := map[string]string{} // skill id -> the version that won
 	misses := 0
 	for _, ref := range refs {
 		// Resolution is per-reference work too — round trips each, and the
 		// dangling ones leave by the continue below without ever reaching the
 		// write loop. A set of them is a run that is moving (#383).
 		progress()
-		if seen[ref.SkillID] {
+		if won, dup := seen[ref.SkillID]; dup {
+			// Same version twice is the roster agreeing with itself and worth
+			// nothing to anyone. Two versions is a member running against a
+			// skill it did not pin, and the materialize log below reports only
+			// the winner — so without this line the collision is invisible in
+			// logs and metrics alike, and the operator's first sign of it is a
+			// member behaving as though its own pin did not exist.
+			if won != ref.Version {
+				slog.WarnContext(ctx, "roster skill version collision; the first reference wins",
+					"session_id", sessionID, "skill_id", ref.SkillID,
+					"materialized_version", won, "dropped_version", ref.Version)
+			}
 			continue
 		}
-		seen[ref.SkillID] = true
+		seen[ref.SkillID] = ref.Version
 		r, err := resolveSkill(ctx, client, ref, progress)
 		if err != nil {
 			skipSkill(ctx, sessionID, ref.SkillID, ref.Version, err)

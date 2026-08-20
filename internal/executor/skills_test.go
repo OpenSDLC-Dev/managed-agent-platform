@@ -86,6 +86,74 @@ func (h *harness) refSkills(t *testing.T, refs ...[2]string) {
 	}
 }
 
+// rosterMember is one member of the coordinator roster a fixture snapshots, in
+// the shape session create stores: a full agent definition, here reduced to the
+// name and skills[] the union is about.
+type rosterMember struct {
+	name   string
+	skills [][2]string
+}
+
+// refRoster makes the session a coordinator's, with the given roster members.
+// The pgtest fixture seeds "multiagent":null (a single-agent session), so every
+// coordinator fixture has to patch it.
+func (h *harness) refRoster(t *testing.T, members ...rosterMember) {
+	t.Helper()
+	agents := make([]map[string]any, len(members))
+	for i, m := range members {
+		refs := make([]map[string]string, len(m.skills))
+		for j, s := range m.skills {
+			refs[j] = map[string]string{"type": "custom", "skill_id": s[0], "version": s[1]}
+		}
+		agents[i] = map[string]any{
+			"type": "agent", "id": "agent_" + m.name, "version": 1, "name": m.name,
+			"model": map[string]string{"id": "fixture-model"}, "system": "", "description": "",
+			"tools": []any{}, "mcp_servers": []any{}, "skills": refs,
+		}
+	}
+	raw, err := json.Marshal(map[string]any{"type": "coordinator", "agents": agents})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h.pool.Exec(context.Background(),
+		`UPDATE sessions SET resolved_agent = jsonb_set(resolved_agent, '{multiagent}', $2::jsonb) WHERE id = $1`,
+		h.sid.String(), raw); err != nil {
+		t.Fatalf("set session roster: %v", err)
+	}
+}
+
+// TestSkillsMaterializeTheRosterUnion: the threads of a coordinator session
+// share one sandbox, so what lands in it is the union of the coordinator's own
+// skills and every roster member's (plan 35 decision 11) — a member-only skill
+// is materialized even though the coordinator never references it, and one both
+// reference is materialized once. The BYOC twin of this test is in
+// internal/worker; both materializers compute the same union from the same
+// snapshot.
+func TestSkillsMaterializeTheRosterUnion(t *testing.T) {
+	sb := &fakeSandbox{}
+	h := newHarness(t, sb)
+	h.seedSkill(t, "skill_union_shared", "100", "shared-notes", map[string]string{"SKILL.md": "# shared"})
+	h.seedSkill(t, "skill_union_member", "100", "member-notes", map[string]string{"SKILL.md": "# member"})
+	h.refSkills(t, [2]string{"skill_union_shared", "100"})
+	h.refRoster(t, rosterMember{name: "researcher", skills: [][2]string{
+		{"skill_union_shared", "100"}, {"skill_union_member", "100"},
+	}})
+	h.suspend(t, writeUse("out.txt", "hello"))
+
+	if _, err := h.exec.step(context.Background()); err != nil {
+		t.Fatalf("step: %v", err)
+	}
+	if got := sb.files["/workspace/skills/shared-notes/SKILL.md"]; got != "# shared" {
+		t.Errorf("the coordinator's own skill = %q, want it materialized", got)
+	}
+	if got := sb.files["/workspace/skills/member-notes/SKILL.md"]; got != "# member" {
+		t.Errorf("the member-only skill = %q, want it materialized", got)
+	}
+	if len(sb.bulkSizes) != 2 {
+		t.Errorf("skill trees written = %v, want 2 (the shared reference is one skill, not two)", sb.bulkSizes)
+	}
+}
+
 func TestMaterializesSkills(t *testing.T) {
 	sb := &fakeSandbox{}
 	h := newHarness(t, sb)

@@ -383,6 +383,22 @@ type ListQuery struct {
 	// the zero value, reads the whole log — what every internal reader does.
 	Scope    Scope
 	ThreadID domain.ID // the thread ScopeThread reads; empty is the primary
+	// ThreadToolCalls widens the session view with the child threads' tool
+	// calls and the results answering them — the rows a BYOC worker must run
+	// and answer, and the only ones it can ever see (plan 35 decision 13 i).
+	// Read only under ScopeSession; the other scopes already carry them.
+	ThreadToolCalls bool
+}
+
+// threadToolCallTypes are the child-thread rows a self_hosted session's view
+// carries on top of the condensed set: the call the worker must run, its own
+// answer, and the platform's synthesized one. The MCP and custom kinds stay
+// out — only the platform's own driver can answer an MCP call, and a custom
+// call is the client's, already cross-posted when a human must release it.
+var threadToolCallTypes = []string{
+	string(domain.EventAgentToolUse),
+	string(domain.EventUserToolResult),
+	string(domain.EventAgentToolResult),
 }
 
 // Scope is the surface a list serves. Events are stored once: a child
@@ -408,7 +424,12 @@ func (l *Log) List(ctx context.Context, sessionID domain.ID, q ListQuery) ([]dom
 	}
 	switch q.Scope {
 	case ScopeSession:
-		sb.WriteString(" AND (thread_id IS NULL OR cross_posted)")
+		if q.ThreadToolCalls {
+			add("(thread_id IS NULL OR cross_posted OR type = ANY(", threadToolCallTypes)
+			sb.WriteString("))")
+		} else {
+			sb.WriteString(" AND (thread_id IS NULL OR cross_posted)")
+		}
 	case ScopeThread:
 		if q.ThreadID == "" {
 			sb.WriteString(" AND thread_id IS NULL")

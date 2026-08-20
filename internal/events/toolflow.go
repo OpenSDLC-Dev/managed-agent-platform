@@ -110,8 +110,9 @@ var runnableToolUse = unansweredToolUse + `
 // threadClause scopes a tool-use predicate to one thread's own rows, bound as
 // $5: NULL is the primary's (nullableID). runnableToolUse binds $5 to its
 // extra allowed ids, so a scan composing the two fragments must renumber one
-// of them — today no call site combines them (the worker's thread-scoped
-// scan is slice 4).
+// of them — no call site does: the drivers drain every thread's runnable
+// calls at once, and the BYOC worker's scan is thread-unaware by design and
+// reads the wire rather than this SQL (plan 35 decision 13 iv).
 const threadClause = ` AND tu.thread_id IS NOT DISTINCT FROM $5`
 
 // HasUnansweredToolUse reports whether any tool-use event in the session
@@ -290,11 +291,23 @@ const (
 )
 
 // RunnableExecClass reports which exec family the session's runnable calls
-// call for next (plan 35 decision 5). isWebTool tells the web built-ins from
-// the sandbox ones (the API injects toolset.IsWebTool); answered are the ids
-// the caller's batch already answers, extraAllowed the ones its allow
-// confirmations release.
-func RunnableExecClass(ctx context.Context, q Querier, sessionID domain.ID, answered, extraAllowed []string, isWebTool func(string) bool) (ExecClass, error) {
+// call for next (plan 35 decision 5). Two predicates split the names, because
+// this package knows none of them: isWebTool tells the web built-ins from the
+// sandbox ones, and isSettlementTool the calls no driver may be armed for at
+// all — the delegation tools the settlement answers in the commit that emits
+// them (the callers inject toolset.IsWebTool and toolset.IsDelegationTool).
+// answered are the ids the caller's batch already answers, extraAllowed the
+// ones its allow confirmations release.
+//
+// Excluding the settlement's own names here rather than at each call site is
+// what keeps every driver and every re-arm agreeing about what is runnable:
+// an unanswered delegation call — which nothing today can produce, every one
+// being answered in its emitting commit — would otherwise class as ExecTool
+// and arm a tool_exec whose pass filters it out and whose settlement re-arms
+// the same kind, a spin loop rather than a wrong answer.
+func RunnableExecClass(ctx context.Context, q Querier, sessionID domain.ID, answered, extraAllowed []string,
+	isWebTool, isSettlementTool func(string) bool) (ExecClass, error) {
+
 	mcp, err := HasRunnableMCPToolUse(ctx, q, sessionID, answered, extraAllowed)
 	if err != nil {
 		return ExecNone, err
@@ -306,15 +319,17 @@ func RunnableExecClass(ctx context.Context, q Querier, sessionID domain.ID, answ
 	if err != nil {
 		return ExecNone, err
 	}
-	if len(names) == 0 {
-		return ExecNone, nil
-	}
+	class := ExecNone
 	for _, name := range names {
-		if isWebTool(name) {
+		switch {
+		case isSettlementTool(name):
+		case isWebTool(name):
 			return ExecWeb, nil
+		default:
+			class = ExecTool
 		}
 	}
-	return ExecTool, nil
+	return class, nil
 }
 
 // RunnableToolUse is one call an exec driver runs: the use event's id and
@@ -476,7 +491,8 @@ func ToolResultRefs(evs []NewEvent) []string {
 // session permanently.
 //
 // platformOwned, when non-nil, names the built-in tools only the platform may
-// answer (the API injects toolset.IsWebTool): a client result for such a call
+// answer — the API injects the web tools and the six delegation tools, whose
+// calls the brain answers inside its own settlement: a client result for such a call
 // is rejected even while it is still unanswered, closing the double-answer
 // window between the executor's web scan and its commit (#222,
 // docs/plan/16_one-answer-per-tool-call.md). It must never cover the sandbox
