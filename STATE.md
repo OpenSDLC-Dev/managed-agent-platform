@@ -13,6 +13,6 @@ record is [docs/HISTORY.md](./docs/HISTORY.md).
 
 - [ ] **#431** — the advisor roster entry, registered by slice 0's SDK bump beside
       #430/#432/#433, which stay open. Its refusal was already enforced; the PR in
-      flight records it as settled, re-trues the registry around it, and closes it.
+      flight records it as settled, corrects the registry around it, and closes it.
 - [ ] **#442** — the four settlement-chain follow-ups the slice-4 review deferred.
 - [ ] **#441** — the BYOC worker's mid-run cancel, per plan 35 decision 9.
