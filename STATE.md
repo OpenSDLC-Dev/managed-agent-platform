@@ -4,8 +4,16 @@ What is being worked on right now, and how far along it is — nothing else. **S
 
 ## Active work
 
-**None.** The three follow-ups taken from plan 35's delivery are closed — #431 by PR
-#444, #442 by #446, #441 by #448 — and what they surfaced but did not close is filed as
-issues #445 and #447. The OpenBao init defect that same acceptance surfaced, #439, is
-closed by #454. [Plan 35](./docs/plan/35_multiagent-threads.md) (#53) archived
-2026-08-21; its delivery record is [docs/HISTORY.md](./docs/HISTORY.md).
+The two follow-ups the plan-35 closeout work filed, taken together because the first is
+what makes the second's record true. Triaged: #445 needs no plan file, #447 does — its
+own body admits three designs and none is obviously right.
+
+## Tasks
+
+- [x] **#445** — the 60 stale `Tracked:` pointers repaired: annotated where the closure was
+      delivery, re-pointed at an open tracker where it orphaned an INFERRED entry, naming what
+      that entry still leaves open. The Format legend now states the rule. CLAUDE.md's post-v1
+      enumeration gives way to the `(post-v1)` title marker and a bounded query. Defects the
+      sweep surfaced outside that scope are filed as issues, not carried here.
+- [ ] **#447** — the session-scoped bound two agents messaging each other cannot escape.
+      Design in progress; the plan file lands with the decision it records.
