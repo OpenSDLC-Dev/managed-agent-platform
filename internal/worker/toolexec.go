@@ -657,6 +657,14 @@ func answeredWatch(ctx context.Context, client sdk.Client, sessionID string, use
 // result that could answer this call is met before the call is, and reaching
 // the call is a complete "no".
 //
+// The invariant is the scan's, not the SQL's: events.answeredBy deliberately
+// correlates on nothing but the id, and a test pins that a result appended
+// above its use still answers it. Nothing writes that order — a client result
+// is made to postdate its use by ValidateToolResults, and every platform writer
+// reads the use off the log before answering it — so on any log this code can
+// produce the walk is exact; it is the same thing the scan's own boundary
+// already rests on, and it would have to be revisited beside it.
+//
 // A fixed look-back would not do. A thread-scoped interrupt answers a whole
 // thread's outstanding calls in one append, so on a turn wider than the window
 // the answer to its oldest call sits behind every sibling's and no page that
