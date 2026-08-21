@@ -109,6 +109,13 @@ type Item struct {
 	// the session was mid-turn when its brain died, so the new claimant
 	// should surface recovery (session.status_rescheduled) before replaying.
 	Reclaimed bool
+	// Chain is how many consecutive times this item has already been handed
+	// back by RequeueSettlement — a delegated turn that answered its own
+	// calls and had nothing left to wait for. It rides on the item rather
+	// than in the claimant, because the next turn of a chain may be claimed
+	// by a different brain. Zero on a fresh item and on every kind but
+	// model_turn; the cap that reads it is internal/brain/delegate.go's.
+	Chain int
 	// TraceContext is the W3C trace context captured at enqueue, so the
 	// claimant can parent its work on the turn that produced it — the same
 	// context a BYOC worker gets from its poll response (see Work). Nil when
@@ -276,9 +283,11 @@ func (q *Queue) Claim(ctx context.Context, kind Kind, ttl time.Duration) (*Item,
 		 FROM picked p
 		 WHERE w.id = p.id
 		 RETURNING w.id, w.environment_id, w.session_id, COALESCE(w.thread_id, ''), w.kind,
-		           w.lease_expires_at, p.state, w.trace_context`,
+		           w.lease_expires_at, p.state, w.trace_context,
+		           CASE WHEN jsonb_typeof(w.metadata->'settlement_chain') = 'number'
+		                THEN (w.metadata->>'settlement_chain')::int ELSE 0 END`,
 		kind, ttl.Seconds()).Scan(&it.ID, &it.EnvironmentID, &it.SessionID, &it.ThreadID, &it.Kind, &it.Lease,
-		&prevState, &it.TraceContext)
+		&prevState, &it.TraceContext, &it.Chain)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil
 	}
@@ -486,11 +495,49 @@ func (q *Queue) Extend(ctx context.Context, item *Item, ttl time.Duration) error
 // (input that arrived mid-turn) and chains it under the item's existing
 // live slot — an Enqueue would be suppressed by it. Requires the lease.
 func (q *Queue) Requeue(ctx context.Context, db DB, item *Item) error {
+	return q.requeue(ctx, db, item, 0)
+}
+
+// RequeueSettlement is Requeue for the one chain nobody feeds. A delegated
+// turn whose calls were all answered in the settlement itself has nothing
+// left to wait for, so it hands its own model_turn straight back — and the
+// shapes that reach it are ones a model repeats, so left alone it loops with
+// no delay, no budget and no end (#442). This records how long the run is;
+// the brain caps it (internal/brain/delegate.go). A chain taken because input
+// arrived mid-turn passes 0: that input is progress, and resetting is what
+// keeps a busy coordinator from tripping a cap meant for a stuck one — as
+// does plain Requeue, which clears the count for the same reason.
+//
+// The count lives in metadata because work_items already has the column, so
+// no migration. It bounds a thread that keeps chaining its own turn with
+// nothing feeding it; a peer waking this thread enqueues a fresh item and so
+// starts a fresh run, deliberately, because a message from another agent is
+// input like any other. Requires the lease, exactly as Requeue does.
+func (q *Queue) RequeueSettlement(ctx context.Context, db DB, item *Item, chain int) error {
+	return q.requeue(ctx, db, item, chain)
+}
+
+// requeue is the shared body of the two above: the lease proof is written
+// once, because a claim's ownership rule must not be able to differ between
+// two paths that both hand an item back.
+//
+// chain is the only difference. A positive count writes the settlement key; 0
+// removes it, which is what makes Requeue's meaning "whatever unfed run was
+// in flight has ended" — any other reason to chain an item is progress. The
+// removal is a no-op on the rows that never carried the key, so a tool_exec
+// item's client-visible metadata is untouched by the executor's own requeue;
+// and since only the delegation settlement passes a positive count, and it
+// only ever holds a model_turn item, the key cannot reach the wire work
+// object either way (workAPIScope is tool_exec only).
+func (q *Queue) requeue(ctx context.Context, db DB, item *Item, chain int) error {
 	tag, err := db.Exec(ctx,
 		`UPDATE work_items
-		 SET state = 'queued', lease_expires_at = NULL, updated_at = now()
+		 SET state = 'queued', lease_expires_at = NULL, updated_at = now(),
+		     metadata = CASE WHEN $3::int > 0
+		                     THEN jsonb_set(metadata, '{settlement_chain}', to_jsonb($3::int), true)
+		                     ELSE metadata - 'settlement_chain' END
 		 WHERE id = $1 AND state = 'active' AND lease_expires_at = $2`,
-		item.ID, item.Lease)
+		item.ID, item.Lease, chain)
 	if err != nil {
 		return fmt.Errorf("queue: requeue %s: %w", item.ID, err)
 	}

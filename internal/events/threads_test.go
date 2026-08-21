@@ -243,3 +243,62 @@ func TestSessionViewWithThreadToolCalls(t *testing.T) {
 		}
 	}
 }
+
+// WakeThread refuses a thread whose replay carries an assistant tool_use no
+// result answers — the guard the API's message trigger gates all three of its
+// enqueues on, which the wake paths (send_to_agent, a child's report, an
+// ending) reached the same transition without (#442 item 2).
+//
+// No product path produces this state: a tool-carrying turn never reaches the
+// end_turn settle (#181), delegation answers every call in the commit that
+// makes it, and a failed turn settles retries_exhausted, which the stop check
+// already refuses. So the test forges it, exactly as the API's own regression
+// test forges its side with pgtest.SetSessionStatus. The answered half is the
+// control: it proves the outstanding call is what refuses, not the fixture.
+func TestWakeThreadRefusesAThreadWithAnUnansweredToolUse(t *testing.T) {
+	ctx := context.Background()
+
+	wake := func(t *testing.T, answered bool) bool {
+		t.Helper()
+		pool := pgtest.NewPool(t)
+		log := events.NewLog(pool)
+		sid := newThreadedSession(t, pool)
+
+		useID := domain.NewID(domain.PrefixEvent)
+		batch := []events.NewEvent{{
+			ID: useID, Type: domain.EventAgentToolUse,
+			Payload: []byte(`{"tool_use_id":"toolu_x","name":"bash","input":{}}`),
+		}}
+		if answered {
+			batch = append(batch, events.NewEvent{
+				Type:    domain.EventUserToolResult,
+				Payload: []byte(`{"tool_use_id":"` + useID.String() + `","content":[]}`),
+			})
+		}
+		if _, err := log.Append(ctx, sid, batch); err != nil {
+			t.Fatal(err)
+		}
+
+		tx, err := pool.Begin(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer func() { _ = tx.Rollback(ctx) }()
+		_, _, woke, err := events.WakeThread(ctx, tx, sid, "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		return woke
+	}
+
+	t.Run("unanswered call refuses the wake", func(t *testing.T) {
+		if wake(t, false) {
+			t.Error("woke a thread whose replay carries an unanswered tool_use — the resumed turn would end in retries_exhausted")
+		}
+	})
+	t.Run("answered call wakes as before", func(t *testing.T) {
+		if !wake(t, true) {
+			t.Error("refused an idle thread with nothing outstanding")
+		}
+	})
+}

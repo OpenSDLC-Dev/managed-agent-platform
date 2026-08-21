@@ -867,3 +867,125 @@ func liveItems(t *testing.T, pool *pgxpool.Pool, sessionID domain.ID) int {
 	}
 	return n
 }
+
+// RequeueSettlement is Requeue plus the consecutive-settlement count the
+// delegation chain is bounded by (#442). It is a fourth lease-asserted write,
+// so it gets the same two tests Requeue has, plus the two things only it does:
+// carry the count forward, and — through plain Requeue — clear it again.
+func TestRequeueSettlementCarriesAndClearsTheCount(t *testing.T) {
+	ctx := context.Background()
+	pool := pgtest.NewPool(t)
+	sessionID, envID := pgtest.NewSession(t, pool, "cloud")
+	q := queue.New(pool)
+
+	if _, err := q.Enqueue(ctx, pool, envID, sessionID, queue.ModelTurn); err != nil {
+		t.Fatal(err)
+	}
+	item, err := q.Claim(ctx, queue.ModelTurn, time.Minute)
+	if err != nil || item == nil {
+		t.Fatalf("claim: %+v %v", item, err)
+	}
+	if item.Chain != 0 {
+		t.Errorf("fresh item Chain = %d, want 0", item.Chain)
+	}
+
+	// The count rides on the item, so the next claimant — which may be a
+	// different brain — sees the same run.
+	if err := q.RequeueSettlement(ctx, pool, item, item.Chain+1); err != nil {
+		t.Fatalf("RequeueSettlement: %v", err)
+	}
+	second, err := q.Claim(ctx, queue.ModelTurn, time.Minute)
+	if err != nil || second == nil {
+		t.Fatalf("claim after settlement requeue: %+v %v", second, err)
+	}
+	if second.ID != item.ID || second.Chain != 1 {
+		t.Fatalf("claim = %s chain %d, want %s chain 1", second.ID, second.Chain, item.ID)
+	}
+	if err := q.RequeueSettlement(ctx, pool, second, second.Chain+1); err != nil {
+		t.Fatalf("RequeueSettlement: %v", err)
+	}
+	third, err := q.Claim(ctx, queue.ModelTurn, time.Minute)
+	if err != nil || third == nil {
+		t.Fatalf("claim: %+v %v", third, err)
+	}
+	if third.Chain != 2 {
+		t.Errorf("Chain = %d, want 2", third.Chain)
+	}
+
+	// Plain Requeue is every other reason to hand an item back, and every
+	// other reason is progress: it clears the run.
+	if err := q.Requeue(ctx, pool, third); err != nil {
+		t.Fatalf("Requeue: %v", err)
+	}
+	fourth, err := q.Claim(ctx, queue.ModelTurn, time.Minute)
+	if err != nil || fourth == nil {
+		t.Fatalf("claim: %+v %v", fourth, err)
+	}
+	if fourth.Chain != 0 {
+		t.Errorf("Chain after a plain requeue = %d, want 0", fourth.Chain)
+	}
+}
+
+// The lease proof is the same one Requeue asserts: a claimant that lost the
+// item cannot hand it back, or two brains would run the same turn.
+func TestRequeueSettlementRequiresTheLease(t *testing.T) {
+	ctx := context.Background()
+	pool := pgtest.NewPool(t)
+	sessionID, envID := pgtest.NewSession(t, pool, "cloud")
+	q := queue.New(pool)
+
+	if _, err := q.Enqueue(ctx, pool, envID, sessionID, queue.ModelTurn); err != nil {
+		t.Fatal(err)
+	}
+	item, err := q.Claim(ctx, queue.ModelTurn, time.Minute)
+	if err != nil || item == nil {
+		t.Fatalf("claim: %+v %v", item, err)
+	}
+	stale := *item
+	stale.Lease = stale.Lease.Add(-time.Hour)
+
+	if err := q.RequeueSettlement(ctx, pool, &stale, 1); !errors.Is(err, queue.ErrLeaseLost) {
+		t.Errorf("RequeueSettlement with a stale lease = %v, want ErrLeaseLost", err)
+	}
+}
+
+// work_items.metadata is a client-visible field on a tool_exec item, and the
+// only reason the settlement count may live there is that nothing writes it
+// onto one: the executor's requeue passes no count, and a zero count removes
+// the key rather than writing it. Asserted on the executor's own kind — a
+// cloud tool_exec, the only tool_exec Claim serves — because a wire-visible
+// self_hosted item is polled, never claimed, so no Requeue can reach it at
+// all. Work.Metadata is map[string]string, so an integer landing here would
+// not merely leak: it would fail the scan.
+func TestRequeueLeavesAToolExecItemsMetadataAlone(t *testing.T) {
+	ctx := context.Background()
+	pool := pgtest.NewPool(t)
+	sessionID, envID := pgtest.NewSession(t, pool, "cloud")
+	q := queue.New(pool)
+
+	if _, err := q.Enqueue(ctx, pool, envID, sessionID, queue.ToolExec); err != nil {
+		t.Fatal(err)
+	}
+	item, err := q.Claim(ctx, queue.ToolExec, time.Minute)
+	if err != nil || item == nil {
+		t.Fatalf("claim: %+v %v", item, err)
+	}
+	if _, err := pool.Exec(ctx,
+		`UPDATE work_items SET metadata = '{"worker":"w-1"}'::jsonb WHERE id = $1`, item.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := q.Requeue(ctx, pool, item); err != nil {
+		t.Fatalf("Requeue: %v", err)
+	}
+
+	var got map[string]any
+	if err := pool.QueryRow(ctx, `SELECT metadata FROM work_items WHERE id = $1`, item.ID).Scan(&got); err != nil {
+		t.Fatal(err)
+	}
+	if got["worker"] != "w-1" {
+		t.Errorf("metadata = %v, want the client's own key kept", got)
+	}
+	if _, ok := got["settlement_chain"]; ok {
+		t.Errorf("metadata = %v, want no settlement_chain on a client-visible item", got)
+	}
+}
