@@ -530,7 +530,11 @@ func postToolResult(ctx context.Context, client sdk.Client, sessionID string, us
 	// Asked of the log rather than read off the message: the status is the
 	// contract, the wording is not. But the status alone is too broad to be the
 	// whole test, so both of the other things that produce a 400 here are ruled
-	// out rather than assumed away. An ask still awaiting its human is ruled out
+	// out rather than assumed away. The rest are deterministic refusals of a
+	// body this driver builds itself — a malformed shape, an unknown field, a
+	// NUL the shared dispatch already sanitizes out — so none can arrive in a
+	// race with an answer; one arriving beside an answer would be skipped with
+	// the wrong reason logged, and the call would still be correctly answered. An ask still awaiting its human is ruled out
 	// by the answer itself — the validator tests answered-ness first, so a call
 	// that has a result is never refused for its gate. An archived session is
 	// not: that refusal is raised before any validation, so it can wear the same
@@ -678,11 +682,14 @@ func answeredWatch(ctx context.Context, client sdk.Client, sessionID string, use
 // maxEvents caps the walk; 0 walks as far as it must. A capped walk that never
 // reaches the use returns false, so a cap can only lose an answer, never invent
 // one — which is why the two optimizing checks may take one and the post's may
-// not. The page is the bounded scan's, not the whole-log walk's: what costs on
-// this log is the over-read, since tool inputs and results carry file contents,
-// and every walk but the uncapped one ends within a turn's width. The uncapped
-// one pays round trips instead on a coordinator's deep log — a price it only
-// ever pays on a path that is already failing, and the price of being exact
+// not. The page is the bounded scan's, not the whole-log walk's, because what
+// costs on this log is the over-read — tool inputs and results carry file
+// contents — and a walk that ends within a turn's width is one round trip
+// either way. Where the walk is deep the choice reverses and this pays round
+// trips instead: up to the cap over the page for a beat watching a call a
+// coordinator's whole-log scan handed back from far down, and the log's length
+// over the page for the uncapped one. Both are the deep-log case alone, one of
+// them only on a path already failing, and both are the price of being exact
 // there rather than merely usually right.
 func answeredOnLog(ctx context.Context, client sdk.Client, sessionID string, useID domain.ID, maxEvents int) (bool, error) {
 	iter := client.Beta.Sessions.Events.ListAutoPaging(ctx, sessionID, sdk.BetaSessionEventListParams{
