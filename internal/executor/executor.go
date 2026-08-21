@@ -754,9 +754,8 @@ func GateTokenRevoker(pool *pgxpool.Pool) sandbox.GateTokenRevoker {
 // if answered, a late result for it dropped — and watched by a goroutine of
 // its own on the keeper's cadence while it runs (answeredWatch, which exists
 // because the keeper itself cannot tell the driver), so an interrupted
-// `sleep 3600` costs one beat, not
-// toolset.MaxTimeout, and the sibling calls queued behind it are not held
-// hostage.
+// `sleep 3600` costs one beat, not toolset.MaxTimeout, and the sibling calls
+// queued behind it are not held hostage.
 func (e *Executor) runTools(ctx context.Context, sb sandbox.Sandbox, sid domain.ID, uses []toolUse, progress func()) ([]events.NewEvent, error) {
 	// Workdir must match the one the sandbox was provisioned with, so the file
 	// tools resolve a relative path against the same directory bash runs in.

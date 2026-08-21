@@ -287,6 +287,14 @@ func (h *harness) answerAsPlatformErr(ctx context.Context, useID domain.ID) erro
 // minted here rather than read back, so the whole history lands in one append.
 func (h *harness) answeredHistory(t *testing.T, n int) {
 	t.Helper()
+	if err := h.answeredHistoryErr(context.Background(), n); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// answeredHistoryErr is answeredHistory's error-returning half, for the one
+// caller that runs off the test goroutine — see answerAsPlatformErr.
+func (h *harness) answeredHistoryErr(ctx context.Context, n int) error {
 	var evs []events.NewEvent
 	for i := 0; i < n; i++ {
 		id := domain.NewID("sevt")
@@ -296,7 +304,7 @@ func (h *harness) answeredHistory(t *testing.T, n int) {
 			"is_error":    false,
 		})
 		if err != nil {
-			t.Fatal(err)
+			return err
 		}
 		evs = append(evs,
 			events.NewEvent{ID: id, Type: domain.EventAgentToolUse,
@@ -304,9 +312,10 @@ func (h *harness) answeredHistory(t *testing.T, n int) {
 			events.NewEvent{Type: domain.EventUserToolResult, Payload: body},
 		)
 	}
-	if _, err := h.log.AppendWith(context.Background(), h.sid, evs, events.AppendOptions{}); err != nil {
-		t.Fatalf("answered history: %v", err)
+	if _, err := h.log.AppendWith(ctx, h.sid, evs, events.AppendOptions{}); err != nil {
+		return fmt.Errorf("answered history: %w", err)
 	}
+	return nil
 }
 
 func (h *harness) types(t *testing.T, typ string) []domain.Event {
@@ -623,8 +632,14 @@ func TestScanPagesATurnWiderThanOnePage(t *testing.T) {
 		t.Fatalf("RunSessionTools: %v", err)
 	}
 
-	if want := int32(2 + tools); reads.Load() != want {
-		t.Errorf("events requests = %d, want %d: two scan pages, and one pre-run check per call (#441)",
+	// Two scan pages, then each call's pre-run answered check (#441). That walk
+	// stops at the call, and the call sits exactly one turn-width from the head
+	// — the results already posted above it, then the sibling uses still below —
+	// so on a turn this wide it costs two pages, and on an ordinary one, one.
+	// Neither term grows with the session's history, which is what this test and
+	// the one above are for.
+	if want := int32(2 + 2*tools); reads.Load() != want {
+		t.Errorf("events requests = %d, want %d: two scan pages, and one two-page pre-run check per call",
 			reads.Load(), want)
 	}
 	results := h.results(t)
@@ -798,11 +813,11 @@ func TestRunSessionToolsReportsProgressPerItem(t *testing.T) {
 	// make (the dangling reference never reaches it, its listing failing first),
 	// the sentinel decision, the one skill written,
 	// the skills pass boundary before its sentinel write, the caller's skills and
-	// files boundaries, and — for the one tool — its run and its posted result,
-	// which are two steps and not one (#383). This session mounts no files, so
-	// that pass returns before any boundary of its own.
-	if reports != 14 {
-		t.Errorf("progress reports = %d, want 14", reports)
+	// files boundaries, and — for the one tool — its pre-run answered check, its
+	// run and its posted result, which are three steps and not one (#383). This
+	// session mounts no files, so that pass returns before any boundary of its own.
+	if reports != 15 {
+		t.Errorf("progress reports = %d, want 15", reports)
 	}
 
 	// A second pass over an unchanged set takes the sentinel skip, which returns
@@ -819,11 +834,11 @@ func TestRunSessionToolsReportsProgressPerItem(t *testing.T) {
 	// bound the set, its own boundary,
 	// the provision, the one reference resolved and its version GET, the one
 	// sentinel read, the
-	// caller's skills and files boundaries, and the tool's run and posted result.
-	// The skip returns before the pass boundary the first run reached, which is
-	// what makes this count one lower than a rewriting pass.
-	if reports != 12 {
-		t.Errorf("unchanged-set reports = %d, want 12", reports)
+	// caller's skills and files boundaries, and the tool's answered check, run and
+	// posted result. The skip returns before the pass boundary the first run
+	// reached, which is what makes this count one lower than a rewriting pass.
+	if reports != 13 {
+		t.Errorf("unchanged-set reports = %d, want 13", reports)
 	}
 }
 
@@ -1454,5 +1469,61 @@ func TestAnArchivedSessionsRefusalIsNeverSkipped(t *testing.T) {
 	}
 	if _, ran := sb.files["/workspace/after.txt"]; ran {
 		t.Error("the pass ran a sibling after the archive refusal was swallowed")
+	}
+}
+
+// TestTheAnsweredWalkPagesToReachTheAnswer is the test the walk-to-the-call
+// rule needs and that every other test here is too shallow to be: it puts more
+// than one page of events between the head and the answer, which is exactly the
+// shape a fixed look-back cannot see and the shape a thread-scoped interrupt
+// makes — it answers a whole thread's outstanding calls in one append, so the
+// answer to the call actually running sits behind every sibling's.
+//
+// The post's read is the one under test, so the walk must be uncapped there:
+// cap it, or stop the walk at one page, and this goes red while everything else
+// stays green.
+func TestTheAnsweredWalkPagesToReachTheAnswer(t *testing.T) {
+	sb := &fakeSandbox{}
+	var h *harness
+	var fired atomic.Bool
+	var answer domain.ID
+	injected := make(chan error, 1)
+	h = newHarnessWrapped(t, sb, func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/events") &&
+				fired.CompareAndSwap(false, true) {
+				// The answer first, then enough above it to bury it several
+				// pages deep — the order a wide interrupt leaves behind.
+				if err := h.answerAsPlatformErr(r.Context(), answer); err != nil {
+					injected <- err
+					return
+				}
+				injected <- h.answeredHistoryErr(r.Context(), 2*answeredScanPageSize)
+			}
+			next.ServeHTTP(w, r)
+		})
+	})
+	uses := h.suspend(t, writeUse("first.txt", "one"), writeUse("second.txt", "two"))
+	answer = uses[0].ID
+
+	if err := RunSessionTools(context.Background(), h.client, h.prov, h.sid.String(), ToolExecConfig{}); err != nil {
+		t.Fatalf("RunSessionTools: %v, want the buried answer found and the duplicate skipped", err)
+	}
+	select {
+	case ierr := <-injected:
+		if ierr != nil {
+			t.Fatalf("bury the answer: %v", ierr)
+		}
+	default:
+		t.Fatal("the driver posted nothing; the fixture never got to inject")
+	}
+
+	for _, got := range h.results(t) {
+		if got.ToolUseID == uses[0].ID.String() {
+			t.Fatalf("a second result was accepted for %q", uses[0].ID)
+		}
+	}
+	if sb.files["/workspace/second.txt"] != "two" {
+		t.Errorf("the sibling did not run after the skip: %v", sb.files)
 	}
 }

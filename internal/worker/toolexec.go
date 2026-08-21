@@ -148,12 +148,24 @@ func RunSessionTools(ctx context.Context, client sdk.Client, provider sandbox.Pr
 			// starting it performs the side effect of a command the log has
 			// already closed. The watch below cannot stand in for it: its first
 			// beat is a beat away, and a quick write is long finished by then.
-			if answered, err := answeredOnLog(ctx, client, sessionID, u.id, answeredPreRunWindow); err != nil {
-				return fmt.Errorf("tool %s (%s): answered check: %w", u.name, u.id, err)
+			answered, err := answeredOnLog(ctx, client, sessionID, u.id, answeredCheckWindow)
+			if err != nil {
+				// Best-effort, like the beat's and unlike the executor's: that
+				// one is a local query, this one crosses a customer boundary,
+				// and faulting the pass on a transient read would hold every
+				// sibling call for a lease TTL — strictly worse than the
+				// behaviour this check improves on. The post's check still
+				// catches an answer this one missed.
+				slog.WarnContext(ctx, "worker: pre-run answered check failed, running the call anyway",
+					"session", sessionID, "tool_use", u.id, "err", err)
 			} else if answered {
 				report()
 				continue
 			}
+			// Its own boundary: the read above and the tool below are two steps,
+			// and a bounded control-plane call must not share a silent interval
+			// with a call that may take toolset.MaxTimeout (#383).
+			report()
 			rctx, stop := answeredWatch(ctx, client, sessionID, u.id, cfg.AnsweredBeat)
 			res, err := runner.Run(rctx, u.id, u.name, u.input)
 			if stop() {
@@ -532,12 +544,26 @@ func postToolResult(ctx context.Context, client sdk.Client, sessionID string, us
 	// fixed. Both reads run at most once per call, and only on a path that is
 	// already failing.
 	if isStatus(err, 400) {
-		if archived, aerr := sessionArchived(ctx, client, sessionID); aerr == nil && !archived {
-			if answered, aerr := answeredOnLog(ctx, client, sessionID, useID, 0); aerr == nil && answered {
+		archived, aerr := sessionArchived(ctx, client, sessionID)
+		if aerr == nil && !archived {
+			answered, qerr := answeredOnLog(ctx, client, sessionID, useID, 0)
+			switch {
+			case qerr == nil && answered:
 				slog.InfoContext(ctx, "worker: tool result dropped, call already answered",
 					"session", sessionID, "tool_use", useID)
 				return nil
+			case qerr != nil:
+				aerr = qerr
 			}
+		}
+		if aerr != nil {
+			// The refusal may well have been the harmless one; this run cannot
+			// tell, so it faults — the safe direction, and the behaviour that
+			// predates this check. Said out loud, because a control plane flaky
+			// enough to fail here turns the skip back into the whole-pass abort
+			// #441 removed, and nothing else would show it.
+			slog.WarnContext(ctx, "worker: could not classify a refused tool result; faulting the pass",
+				"session", sessionID, "tool_use", useID, "err", aerr)
 		}
 	}
 	return fmt.Errorf("post tool result for %s: %w", useID, err)
@@ -557,25 +583,24 @@ const (
 	// ends at the call it asks about rather than at a count, so the page size
 	// is only how many round trips reaching it costs.
 	answeredScanPageSize = 20
-	// answeredPreRunWindow and answeredWatchWindow cap the two checks that are
-	// optimizations — the one before a call starts and the one on each beat.
-	// Both can only lose an answer, never invent one, and losing one is exactly
-	// today's behaviour, so giving up is safe; the post's check is the
-	// correctness backstop and takes no cap.
+	// answeredCheckWindow caps the two checks that are optimizations — the one
+	// before a call starts and the one on each beat. Both can only lose an
+	// answer, never invent one, and losing one is exactly today's behaviour, so
+	// giving up is safe; the post's check is the correctness backstop and takes
+	// no cap.
 	//
-	// They differ because their loops do. The pre-run check runs once per call,
-	// so it takes exactly one page and therefore one round trip: a pass over N
-	// calls costs N reads, not the N-to-2N a walk past the turn's own sibling
-	// uses would. One page covers a call answered while an earlier one in the
-	// same turn ran, which is the window it exists for. A beat runs once every
-	// ten seconds for a single call and can afford to look further; there the
-	// walk normally ends at the call long before the cap, and the cap binds only
-	// where the call is old — a coordinator's scan spans the whole log by
+	// Five hundred events, not one page, because a page-wide window would be
+	// inert on the very turns these checks exist for: the walk passes the
+	// turn's own events on its way down, so for call i of an N-call turn the
+	// call sits exactly N events from the head — i results already posted, then
+	// N-1-i sibling uses, then the call — and any N past the window would make
+	// the check answer "not answered" whatever the log said. Five hundred puts
+	// that limit past any turn a model writes, and still stops the walk where it
+	// stops being worth paying for: a coordinator's scan spans the whole log by
 	// decision 13 (iv) and can hand back a call sitting arbitrarily far down it,
-	// and re-reading that distance every ten seconds for the length of a bash
-	// timeout is a cost the cancellation is not worth.
-	answeredPreRunWindow = answeredScanPageSize
-	answeredWatchWindow  = 500
+	// and re-reading that distance per call and again every ten seconds for the
+	// length of a bash timeout buys nothing the post's check does not.
+	answeredCheckWindow = 500
 )
 
 // answeredWatch is the BYOC twin of the platform executor's answered-means-
@@ -608,7 +633,7 @@ func answeredWatch(ctx context.Context, client sdk.Client, sessionID string, use
 			case <-wctx.Done():
 				return
 			case <-t.C:
-				if ok, err := answeredOnLog(wctx, client, sessionID, useID, answeredWatchWindow); err == nil && ok {
+				if ok, err := answeredOnLog(wctx, client, sessionID, useID, answeredCheckWindow); err == nil && ok {
 					answered = true
 					cancel()
 					return
@@ -645,7 +670,12 @@ func answeredWatch(ctx context.Context, client sdk.Client, sessionID string, use
 // maxEvents caps the walk; 0 walks as far as it must. A capped walk that never
 // reaches the use returns false, so a cap can only lose an answer, never invent
 // one — which is why the two optimizing checks may take one and the post's may
-// not.
+// not. The page is the bounded scan's, not the whole-log walk's: what costs on
+// this log is the over-read, since tool inputs and results carry file contents,
+// and every walk but the uncapped one ends within a turn's width. The uncapped
+// one pays round trips instead on a coordinator's deep log — a price it only
+// ever pays on a path that is already failing, and the price of being exact
+// there rather than merely usually right.
 func answeredOnLog(ctx context.Context, client sdk.Client, sessionID string, useID domain.ID, maxEvents int) (bool, error) {
 	iter := client.Beta.Sessions.Events.ListAutoPaging(ctx, sessionID, sdk.BetaSessionEventListParams{
 		Types: []string{

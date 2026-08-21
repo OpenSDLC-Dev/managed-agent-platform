@@ -270,7 +270,8 @@ introduces the behavior.
 
 Two consequences were filed rather than absorbed: **#441** (the BYOC worker did not
 then cancel an in-flight call once its use was answered, as the executor already did —
-the slice-3 changelog fragment was corrected to stop claiming both drivers do) and **#442**
+the slice-3 changelog fragment was corrected at the time to stop claiming both drivers
+do, and corrected back when they did) and **#442**
 (a chain-loop bound, `WakeThread` guard parity, and an ask-gated integration test).
 
 ## anthropic-sdk-go v1.63.1 bump — wire-schema verification record (2026-08-19, plan 35 slice 0)
