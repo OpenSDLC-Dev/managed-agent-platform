@@ -46,10 +46,20 @@ done
 
 if ! initialized; then
 	echo "initializing openbao (first boot)"
-	bao operator init -format=json >"$INIT_FILE"
+	# A redirect truncates its target before the command runs, so initializing
+	# straight into $INIT_FILE leaves an empty one behind when init fails —
+	# and an empty file is not the *missing* one the elif below recovers
+	# from, so the next run reaches the grep and dies on "no root_token"
+	# against a vault that is initialized and whose root token no longer
+	# exists anywhere. Land the output only once init has succeeded. A
+	# leftover .tmp is deliberately not swept: on the one path where it holds
+	# anything (init wrote its output, then the container died before the mv)
+	# it is the only copy of the root token.
+	bao operator init -format=json >"$INIT_FILE.tmp"
+	mv "$INIT_FILE.tmp" "$INIT_FILE"
 	chmod 600 "$INIT_FILE"
-elif [ ! -f "$INIT_FILE" ]; then
-	echo "openbao is initialized but $INIT_FILE is missing (volume lost?);" >&2
+elif [ ! -s "$INIT_FILE" ]; then
+	echo "openbao is initialized but $INIT_FILE is missing or empty (volume lost?);" >&2
 	echo "re-create the baodata+baoinit volumes together or initialize manually" >&2
 	exit 1
 fi
