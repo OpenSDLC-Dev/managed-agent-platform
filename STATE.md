@@ -4,22 +4,15 @@ What is being worked on right now, and how far along it is — nothing else. **S
 
 ## Active work
 
-**Plan 35's three follow-up issues**, taken in order. No plan file: an adversarial
-review of slice 4 already scoped each one, and none changes a wire shape.
-[Plan 35](./docs/plan/35_multiagent-threads.md) (#53) itself archived 2026-08-21 —
-its delivery record is [docs/HISTORY.md](./docs/HISTORY.md).
+Three issues left open by plan 35's delivery, taken in this order. No plan file — each
+is bounded and already scoped in its own issue, which stays the record of that scope.
+[Plan 35](./docs/plan/35_multiagent-threads.md) (#53) archived 2026-08-21; its delivery
+record is [docs/HISTORY.md](./docs/HISTORY.md).
 
 ## Tasks
 
-- [x] **#431** — the advisor roster entry. Decided at slice 1 and already enforced
-      (`400 entry type must be "agent" or "self"`); this PR re-trues the two
-      [docs/DIVERGENCES.md](./docs/DIVERGENCES.md) entries that described it wrong,
-      re-points the plan-35 `Tracked:` pointers from the closed #53 to #78, and the
-      issue closes with it.
-- [ ] **#442** — bound the settlement chain (the one with a user-visible consequence:
-      a chained `model_turn` starves every other session on a single-brain
-      deployment), align `WakeThread`'s unanswered-`tool_use` guard with the API's,
-      cover `commitDelegatedTurn`'s ask-gated branch, settle the redundant `park` half.
-- [ ] **#441** — the BYOC worker cancels an answered call mid-run, as plan 35
-      decision 9 says it does, and skips a duplicate-result 400 instead of aborting
-      the pass.
+- [ ] **#431** — the advisor roster entry, registered by slice 0's SDK bump beside
+      #430/#432/#433, which stay open. Its refusal was already enforced; the PR in
+      flight records it as settled, re-trues the registry around it, and closes it.
+- [ ] **#442** — the four settlement-chain follow-ups the slice-4 review deferred.
+- [ ] **#441** — the BYOC worker's mid-run cancel, per plan 35 decision 9.
