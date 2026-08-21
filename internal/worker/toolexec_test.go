@@ -34,10 +34,13 @@ func TestMain(m *testing.M) { os.Exit(pgtest.Main(m)) }
 // suffix, letting a test fault one tool of a set while the others succeed.
 // entered/gate (if set) let a test hold a tool mid-run: WriteFile signals
 // entered once and blocks on gate, so the lease loop can be observed while a
-// tool is in flight.
+// tool is in flight. gatePath, if set, narrows that hold to writes for a path
+// with that suffix — the failPath idiom, so one call of a set can be held
+// while its siblings run straight through.
 type fakeSandbox struct {
 	files    map[string]string
 	failPath string
+	gatePath string
 	entered  chan struct{}
 	gate     chan struct{}
 	// delay, if set, is how long each WriteFile takes, so a test can build a run
@@ -96,13 +99,14 @@ func (f *fakeSandbox) WriteFile(ctx context.Context, path string, data []byte) e
 			return ctx.Err()
 		}
 	}
-	if f.entered != nil {
+	held := f.gate != nil && (f.gatePath == "" || strings.HasSuffix(path, f.gatePath))
+	if f.entered != nil && held {
 		select {
 		case f.entered <- struct{}{}:
 		default:
 		}
 	}
-	if f.gate != nil {
+	if held {
 		select {
 		case <-f.gate:
 		case <-ctx.Done():
@@ -1165,5 +1169,189 @@ func TestCoordinatorSkipsDelegationCalls(t *testing.T) {
 	}
 	if want := []string{uses[1].ID.String()}; !slices.Equal(useIDs(got), want) {
 		t.Errorf("scan = %v, want the sandbox tool only %v", useIDs(got), want)
+	}
+}
+
+// TestAnAnsweredCallIsCancelledOnTheWatchBeat is the BYOC twin of the
+// executor's TestAnAnsweredCallIsCancelledOnTheKeeperBeat (plan 35 decision 9).
+// A thread-scoped interrupt answers its thread's calls itself and never stops
+// the shared exec item, so nothing in the worker's lease bookkeeping can tell
+// the driver — the per-call watch has to. Before #441 the held write ran to
+// completion and its result was then refused, aborting the pass.
+func TestAnAnsweredCallIsCancelledOnTheWatchBeat(t *testing.T) {
+	sb := &fakeSandbox{entered: make(chan struct{}, 1), gate: make(chan struct{})}
+	t.Cleanup(func() { close(sb.gate) }) // never blocks a failing run's goroutine forever
+	h := newHarness(t, sb)
+	uses := h.suspend(t, writeUse("held.txt", "one"))
+
+	done := make(chan error, 1)
+	go func() {
+		done <- RunSessionTools(context.Background(), h.client, h.prov, h.sid.String(),
+			ToolExecConfig{AnsweredBeat: 20 * time.Millisecond})
+	}()
+	select {
+	case <-sb.entered:
+	case <-time.After(30 * time.Second):
+		t.Fatal("the tool never started")
+	}
+	// What a thread-scoped interrupt commits: the call answered on the log,
+	// with the shared exec item left live.
+	h.answerAsPlatform(t, uses[0].ID)
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("RunSessionTools: %v, want a cancelled call to be a skip, not a fault", err)
+		}
+	case <-time.After(30 * time.Second):
+		t.Fatal("the watch never cancelled the answered call")
+	}
+	if got := h.results(t); len(got) != 0 {
+		t.Errorf("user.tool_result = %+v, want none — the call already had its answer", got)
+	}
+	if _, wrote := sb.files["/workspace/held.txt"]; wrote {
+		t.Error("the cancelled tool finished its write")
+	}
+}
+
+// TestACancelledCallDoesNotStopItsSiblings: the point of cancelling is that the
+// calls queued behind the answered one are not held hostage for a lease TTL.
+// The pass must carry on rather than fault out, which is what the whole item
+// used to do when the answered call's result was refused.
+func TestACancelledCallDoesNotStopItsSiblings(t *testing.T) {
+	sb := &fakeSandbox{gatePath: "held.txt", entered: make(chan struct{}, 1), gate: make(chan struct{})}
+	t.Cleanup(func() { close(sb.gate) })
+	h := newHarness(t, sb)
+	uses := h.suspend(t, writeUse("held.txt", "one"), writeUse("after.txt", "two"))
+
+	done := make(chan error, 1)
+	go func() {
+		done <- RunSessionTools(context.Background(), h.client, h.prov, h.sid.String(),
+			ToolExecConfig{AnsweredBeat: 20 * time.Millisecond})
+	}()
+	select {
+	case <-sb.entered:
+	case <-time.After(30 * time.Second):
+		t.Fatal("the held tool never started")
+	}
+	h.answerAsPlatform(t, uses[0].ID)
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("RunSessionTools: %v", err)
+		}
+	case <-time.After(30 * time.Second):
+		t.Fatal("the pass never got past the answered call")
+	}
+	results := h.results(t)
+	if len(results) != 1 || results[0].ToolUseID != uses[1].ID.String() {
+		t.Fatalf("user.tool_result = %+v, want exactly the sibling's %q", results, uses[1].ID)
+	}
+	if sb.files["/workspace/after.txt"] != "two" {
+		t.Errorf("the sibling did not run: %v", sb.files)
+	}
+	if n := h.liveModelTurns(t); n != 1 {
+		t.Errorf("model_turn items = %d, want 1 — the set is complete, so the turn resumes", n)
+	}
+}
+
+// TestALateAnswerMakesThePostASkipNotAFault covers the window the watch cannot:
+// an answer landing after its last beat, while the result is already in flight.
+// The control plane refuses the second result (ValidateToolResults), and before
+// #441 that 400 aborted the whole pass — over a call that was done — leaving
+// every sibling behind it for a reclaim. The beat is left at its default here
+// so nothing but the post can catch it.
+func TestALateAnswerMakesThePostASkipNotAFault(t *testing.T) {
+	sb := &fakeSandbox{}
+	var h *harness
+	var fired atomic.Bool
+	var answer domain.ID
+	// The test goroutine reports, because t.Fatalf from a handler is
+	// runtime.Goexit. Buffered so the handler never blocks on the send.
+	injected := make(chan error, 1)
+	h = newHarnessWrapped(t, sb, func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			// Before forwarding, so the control plane sees the answer already
+			// on the log when it validates the result this request carries.
+			if r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/events") &&
+				fired.CompareAndSwap(false, true) {
+				injected <- h.answerAsPlatformErr(answer)
+			}
+			next.ServeHTTP(w, r)
+		})
+	})
+	uses := h.suspend(t, writeUse("first.txt", "one"), writeUse("second.txt", "two"))
+	answer = uses[0].ID
+
+	if err := RunSessionTools(context.Background(), h.client, h.prov, h.sid.String(), ToolExecConfig{}); err != nil {
+		t.Fatalf("RunSessionTools: %v, want the refused duplicate to be a skip", err)
+	}
+	select {
+	case err := <-injected:
+		if err != nil {
+			t.Fatalf("inject the late answer: %v", err)
+		}
+	default:
+		t.Fatal("the driver posted nothing; the fixture never got to inject")
+	}
+
+	results := h.results(t)
+	if len(results) != 1 || results[0].ToolUseID != uses[1].ID.String() {
+		t.Fatalf("user.tool_result = %+v, want only the sibling's %q", results, uses[1].ID)
+	}
+	if n := len(h.types(t, string(domain.EventAgentToolResult))); n != 1 {
+		t.Errorf("agent.tool_result = %d, want the one injected answer", n)
+	}
+	if sb.files["/workspace/second.txt"] != "two" {
+		t.Errorf("the sibling did not run after the skip: %v", sb.files)
+	}
+}
+
+// TestAPostRefusedForAnotherReasonStillFaults: the skip above is bound to the
+// call actually being answered, never to the status alone. An ask-gated call
+// whose human has not confirmed is refused with the same 400, and waving that
+// through would lose the result of a tool that did run. The gate is stamped
+// after the scan and before the post — the same mid-flight injection the late
+// answer above uses — because a call already stamped ask is filtered out of the
+// runnable set and never runs at all.
+func TestAPostRefusedForAnotherReasonStillFaults(t *testing.T) {
+	sb := &fakeSandbox{}
+	var h *harness
+	var fired atomic.Bool
+	var gated domain.ID
+	injected := make(chan error, 1)
+	h = newHarnessWrapped(t, sb, func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/events") &&
+				fired.CompareAndSwap(false, true) {
+				_, err := h.pool.Exec(r.Context(),
+					`UPDATE events SET payload = jsonb_set(payload, '{evaluated_permission}', '"ask"'::jsonb) WHERE id = $1`,
+					gated.String())
+				injected <- err
+			}
+			next.ServeHTTP(w, r)
+		})
+	})
+	uses := h.suspend(t, writeUse("gated.txt", "one"))
+	gated = uses[0].ID
+
+	err := RunSessionTools(context.Background(), h.client, h.prov, h.sid.String(), ToolExecConfig{})
+	select {
+	case ierr := <-injected:
+		if ierr != nil {
+			t.Fatalf("stamp the ask gate: %v", ierr)
+		}
+	default:
+		t.Fatal("the driver posted nothing; the fixture never got to stamp the gate")
+	}
+	if err == nil {
+		t.Fatal("RunSessionTools = nil, want the refusal to fault: the call is not answered")
+	}
+	if !strings.Contains(err.Error(), uses[0].ID.String()) {
+		t.Errorf("error = %v, want it to name the call it could not answer", err)
+	}
+	if got := h.results(t); len(got) != 0 {
+		t.Errorf("user.tool_result = %+v, want none — the post was refused", got)
 	}
 }

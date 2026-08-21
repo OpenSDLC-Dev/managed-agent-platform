@@ -4,7 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"slices"
+	"time"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/sandbox"
@@ -39,6 +41,11 @@ type ToolExecConfig struct {
 	// The lease loop watches it to tell a long run from a wedged one (#383);
 	// a caller that runs the driver directly leaves it nil.
 	Progress func()
+	// AnsweredBeat, when > 0, is how often a call in flight re-checks whether
+	// the log has already answered it; otherwise answeredBeat. A test seam —
+	// production leaves it 0, because the cadence is not a deployment choice
+	// the way the sandbox shape above is.
+	AnsweredBeat time.Duration
 }
 
 // toolUse is one unanswered agent.tool_use the worker must run: the tool-use
@@ -135,7 +142,16 @@ func RunSessionTools(ctx context.Context, client sdk.Client, provider sandbox.Pr
 	runner := toolset.Runner{Sandbox: sb, Session: domain.ID(sessionID), Workdir: cfg.Workdir}
 	for {
 		for _, u := range uses {
-			res, err := runner.Run(ctx, u.id, u.name, u.input)
+			rctx, stop := answeredWatch(ctx, client, sessionID, u.id, cfg.AnsweredBeat)
+			res, err := runner.Run(rctx, u.id, u.name, u.input)
+			if stop() {
+				// Answered while it ran, so whatever it returned — or failed
+				// with — is a late result for a call the log already closed.
+				// Skipping is not a fault: the call has its answer, and posting
+				// a second one is what the control plane refuses (#441).
+				report()
+				continue
+			}
 			if err != nil {
 				// Backend fault: stop here. The results posted so far stay answered;
 				// this tool and any after it are re-derived on a reclaiming pass.
@@ -164,8 +180,9 @@ func RunSessionTools(ctx context.Context, client sdk.Client, provider sandbox.Pr
 		// A coordinator's threads run concurrently, so a sibling may have
 		// committed calls while the pass above ran — and its enqueue was a no-op
 		// against this live item, leaving nobody else to serve them. Re-scan
-		// until a pass comes back empty. It terminates on progress: every
-		// non-empty pass answers every call it returned, and the calls this
+		// until a pass comes back empty. It terminates on progress: every call
+		// a non-empty pass returns ends the pass answered — by this driver, or
+		// by whoever answered it under the watch above — and the calls this
 		// driver never answers (web, ask-gated, delegation) are filtered out of
 		// the found set rather than returned unanswered. The sandbox, skills and
 		// files stay one-shot above — wire-expensive, idempotent and
@@ -395,7 +412,9 @@ scan:
 // what remains uncovered is a result landing during this read, which is the same
 // page-wide window the single-agent path has always had and the same one the
 // executor's pre-run check leaves. Removing only ever shrinks the runnable set,
-// so a call this pass misses is run and its late result dropped, exactly as before.
+// so a call this pass misses is started — and then cancelled by answeredWatch on
+// its next beat, or, for an answer landing after the last beat, dropped by
+// postToolResult when the control plane refuses the second result.
 func dropAnsweredSince(ctx context.Context, client sdk.Client, sessionID, head string,
 	uses []toolUse, progress func()) ([]toolUse, error) {
 	// The same type filter the walk used, not just the result types: the anchor
@@ -471,8 +490,127 @@ func postToolResult(ctx context.Context, client sdk.Client, sessionID string, us
 	_, err := client.Beta.Sessions.Events.Send(ctx, sessionID, sdk.BetaSessionEventSendParams{
 		Events: []sdk.BetaManagedAgentsEventParamsUnion{ev},
 	})
-	if err != nil {
-		return fmt.Errorf("post tool result for %s: %w", useID, err)
+	if err == nil {
+		return nil
 	}
-	return nil
+	// The one refusal that is not this run's fault: the call was answered
+	// between answeredWatch's last beat and this post, so the result the
+	// control plane already holds is the answer and ours is the second one it
+	// must refuse (ValidateToolResults: "already has a result"). Returning the
+	// error would abort the whole pass over a call that is *done*, holding
+	// every sibling behind it for a lease TTL — the executor drops such a
+	// result under its session lock and carries on, and so must this (#441).
+	//
+	// Asked of the log rather than read off the message: the status is the
+	// contract, the wording is not, and a 400 has other causes (an ask still
+	// awaiting its human) that must still fault the run. One bounded read, and
+	// only on a path that is already failing.
+	if isStatus(err, 400) {
+		if answered, aerr := isAnswered(ctx, client, sessionID, useID); aerr == nil && answered {
+			slog.InfoContext(ctx, "worker: tool result dropped, call already answered",
+				"session", sessionID, "tool_use", useID)
+			return nil
+		}
+	}
+	return fmt.Errorf("post tool result for %s: %w", useID, err)
+}
+
+const (
+	// answeredBeat is how often a call in flight asks whether the log has
+	// already answered it. The platform executor asks on LeaseTTL/3; the work
+	// API's lease TTL defaults to 30s, so ten seconds is that same cadence —
+	// written as this driver's own constant because a worker learns the
+	// server's TTL only from a heartbeat response, and this check must not
+	// ride the heartbeat: the beat answers for the lease and the stall budget
+	// alone (#383), and threading the running call's id into it would make it
+	// answer for a third thing.
+	answeredBeat = 10 * time.Second
+	// answeredScanPageSize is how many of the session's newest tool results one
+	// such check reads. It is a single page, never an auto-pager: the answer
+	// this looks for is newer than the call it watches, so anything older than
+	// the page's tail cannot be it. Twenty is generous for that window, because
+	// sandbox tool execution across sibling threads is serial — one
+	// session-keyed tool_exec item at a time, this one — so the only results
+	// that can land beside a running call are the web and MCP drivers' and a
+	// settlement's delegation answers. Overrunning it costs one missed beat,
+	// never a wrong cancel: a result is matched by tool_use_id, so the check
+	// can fail to see an answer but can never invent one.
+	answeredScanPageSize = 20
+)
+
+// answeredWatch is the BYOC twin of the platform executor's answered-means-
+// cancelled check for a call in flight (plan 35 decision 9): a thread-scoped
+// interrupt answers its thread's calls itself and never stops the shared exec
+// item, so neither the item's lease nor this worker's heartbeat can tell the
+// driver — this does, on its own beat. It returns a context cancelled once a
+// result references the use, and a stop func the caller runs when the call
+// returns, which reports whether the watch was what cancelled it.
+//
+// It is a per-call watcher and not a line in the heartbeat loop for the same
+// reason the executor's is not in its lease keeper: the beat would have to be
+// told which call is running, and it already answers for the lease and the
+// stall budget. The check is best-effort — a failed read is one missed beat,
+// never a cancelled call — and runs under the watch's own context, so stopping
+// the watch never waits on a read in flight.
+func answeredWatch(ctx context.Context, client sdk.Client, sessionID string, useID domain.ID, beat time.Duration) (context.Context, func() bool) {
+	wctx, cancel := context.WithCancel(ctx)
+	if beat <= 0 {
+		beat = answeredBeat
+	}
+	done := make(chan struct{})
+	answered := false
+	go func() {
+		defer close(done)
+		t := time.NewTicker(beat)
+		defer t.Stop()
+		for {
+			select {
+			case <-wctx.Done():
+				return
+			case <-t.C:
+				if ok, err := isAnswered(wctx, client, sessionID, useID); err == nil && ok {
+					answered = true
+					cancel()
+					return
+				}
+			}
+		}
+	}()
+	return wctx, func() bool {
+		cancel()
+		<-done // the write to answered happens before this, so reading it is safe
+		return answered
+	}
+}
+
+// isAnswered reports whether some result on the session's log already answers
+// useID, over the wire and in one bounded read. The two types it asks for are
+// the two the scan counts as answering a sandbox call — a platform executor's
+// agent.tool_result and this worker's own user.tool_result — for the reason
+// stated there: those are the only kinds a call this driver may run is ever
+// answered by.
+func isAnswered(ctx context.Context, client sdk.Client, sessionID string, useID domain.ID) (bool, error) {
+	page, err := client.Beta.Sessions.Events.List(ctx, sessionID, sdk.BetaSessionEventListParams{
+		Types: []string{
+			string(domain.EventAgentToolResult),
+			string(domain.EventUserToolResult),
+		},
+		Order: sdk.BetaSessionEventListParamsOrderDesc,
+		Limit: sdk.Int(answeredScanPageSize),
+	})
+	if err != nil {
+		return false, fmt.Errorf("list tool results: %w", err)
+	}
+	for _, e := range page.Data {
+		var ev struct {
+			ToolUseID string `json:"tool_use_id"`
+		}
+		if err := json.Unmarshal([]byte(e.RawJSON()), &ev); err != nil {
+			return false, fmt.Errorf("parse session event: %w", err)
+		}
+		if ev.ToolUseID == useID.String() {
+			return true, nil
+		}
+	}
+	return false, nil
 }
