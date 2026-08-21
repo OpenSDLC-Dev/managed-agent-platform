@@ -63,11 +63,19 @@ fi
 # to leave (#439), `[ -s ]` walks past a truncated one, and `bao` writes
 # root_token LAST — so the likeliest truncation of all lands inside the token,
 # where even a test for the key would see one and read out nothing.
-BAO_TOKEN=$(grep -o '"root_token": *"[^"]*"' "$INIT_FILE" 2>/dev/null | cut -d'"' -f4)
+#
+# grep's stderr is deliberately NOT swallowed, and the [ -f ] is what makes
+# that affordable: an init.json that exists but cannot be READ — an ownership
+# or mode drift after a restore — has to say so, because the recovery printed
+# below destroys the volume holding the only copy of the root token.
+BAO_TOKEN=
+if [ -f "$INIT_FILE" ]; then
+	BAO_TOKEN=$(grep -o '"root_token": *"[^"]*"' "$INIT_FILE" | cut -d'"' -f4)
+fi
 if [ -z "$BAO_TOKEN" ]; then
 	echo "openbao is initialized but $INIT_FILE is missing or unusable (volume lost?);" >&2
 	if [ -s "$INIT_FILE.tmp" ]; then
-		echo "$INIT_FILE.tmp is not empty; check it for the root token before discarding anything" >&2
+		echo "$INIT_FILE.tmp is not empty; check it for a root token, which may be a stale one, before discarding anything" >&2
 	fi
 	echo "re-create the baodata+baoinit volumes together or initialize manually" >&2
 	exit 1
