@@ -4,10 +4,7 @@ What is being worked on right now, and how far along it is — nothing else. **S
 
 ## Active work
 
-**None.** The three issues plan 35's delivery left open are closed: #431 (#444), #442
-(#446) and #441 (#448). [Plan 35](./docs/plan/35_multiagent-threads.md) (#53) archived
+**None.** The three follow-ups taken from plan 35's delivery are closed — #431 by PR
+#444, #442 by #446, #441 by #448 — and what they surfaced but did not close is filed as
+issues #445 and #447. [Plan 35](./docs/plan/35_multiagent-threads.md) (#53) archived
 2026-08-21; its delivery record is [docs/HISTORY.md](./docs/HISTORY.md).
-
-What those three surfaced and did not close is filed: #445 (stale `Tracked:` pointers
-and CLAUDE.md's deferral list) and #447 (two agents messaging each other evade the
-settlement-chain cap, which needs #432's unbuilt session budget).
