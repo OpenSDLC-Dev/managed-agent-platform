@@ -426,10 +426,12 @@ func (s *server) sendSessionEvents(r *http.Request) (any, error) {
 				}
 				// Cancel first, then enqueue. A session-wide interrupt keeps today's
 				// CancelSession exactly — every live item of every kind, so the
-				// in-flight sandbox command is aborted through the executor's
-				// lease keeper; a thread-scoped one stops that thread's turn alone
-				// and never the shared exec item a sibling's calls ride on — the
-				// drivers drop its in-flight call as answered (decision 9).
+				// driver's own context is cancelled and the in-flight sandbox
+				// command with it; a thread-scoped one stops that thread's turn
+				// alone and never the shared exec item a sibling's calls ride on,
+				// so nothing cancels the driver and the answers written here are
+				// what tells it: both drivers watch the call they are running and
+				// drop it once answered (decision 9, #441).
 				if interruptAll {
 					if len(cancels) == 0 {
 						cancels = append(cancels, func(ctx context.Context, tx pgx.Tx) error {

@@ -4,7 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"slices"
+	"time"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/sandbox"
@@ -39,6 +41,11 @@ type ToolExecConfig struct {
 	// The lease loop watches it to tell a long run from a wedged one (#383);
 	// a caller that runs the driver directly leaves it nil.
 	Progress func()
+	// AnsweredBeat, when > 0, is how often a call in flight re-checks whether
+	// the log has already answered it; otherwise answeredBeat. A test seam —
+	// production leaves it 0, because the cadence is not a deployment choice
+	// the way the sandbox shape above is.
+	AnsweredBeat time.Duration
 }
 
 // toolUse is one unanswered agent.tool_use the worker must run: the tool-use
@@ -135,7 +142,42 @@ func RunSessionTools(ctx context.Context, client sdk.Client, provider sandbox.Pr
 	runner := toolset.Runner{Sandbox: sb, Session: domain.ID(sessionID), Workdir: cfg.Workdir}
 	for {
 		for _, u := range uses {
-			res, err := runner.Run(ctx, u.id, u.name, u.input)
+			// The executor's pre-run check, over the wire. A call answered while
+			// an earlier one in this pass ran is one no scan can have seen — both
+			// the walk and dropAnsweredSince read before the pass started — and
+			// starting it performs the side effect of a command the log has
+			// already closed. The watch below cannot stand in for it: its first
+			// beat is a beat away, and a quick write is long finished by then.
+			answered, err := answeredOnLog(ctx, client, sessionID, u.id, answeredCheckWindow)
+			if err != nil {
+				// Best-effort, like the beat's and unlike the executor's: that
+				// one is a local query, this one crosses a customer boundary,
+				// and faulting the pass on a transient read would hold every
+				// sibling call for a lease TTL — strictly worse than the
+				// behaviour this check improves on. The post's check still
+				// catches an answer this one missed.
+				slog.WarnContext(ctx, "worker: pre-run answered check failed, running the call anyway",
+					"session", sessionID, "tool_use", u.id, "err", err)
+			} else if answered {
+				report()
+				continue
+			}
+			// Its own boundary: the read above and the tool below are two steps,
+			// and a bounded control-plane call must not share a silent interval
+			// with a call that may take toolset.MaxTimeout (#383).
+			report()
+			rctx, stop := answeredWatch(ctx, client, sessionID, u.id, cfg.AnsweredBeat)
+			res, err := runner.Run(rctx, u.id, u.name, u.input)
+			if stop() {
+				// Answered while it ran, so whatever it returned — or failed
+				// with — is a late result for a call the log already closed.
+				// Skipping is not a fault: the call has its answer, and posting
+				// a second one is what the control plane refuses (#441).
+				slog.InfoContext(ctx, "worker: tool call cancelled, already answered",
+					"session", sessionID, "tool_use", u.id, "tool", u.name)
+				report()
+				continue
+			}
 			if err != nil {
 				// Backend fault: stop here. The results posted so far stay answered;
 				// this tool and any after it are re-derived on a reclaiming pass.
@@ -164,8 +206,9 @@ func RunSessionTools(ctx context.Context, client sdk.Client, provider sandbox.Pr
 		// A coordinator's threads run concurrently, so a sibling may have
 		// committed calls while the pass above ran — and its enqueue was a no-op
 		// against this live item, leaving nobody else to serve them. Re-scan
-		// until a pass comes back empty. It terminates on progress: every
-		// non-empty pass answers every call it returned, and the calls this
+		// until a pass comes back empty. It terminates on progress: every call
+		// a non-empty pass returns ends the pass answered — by this driver, or
+		// by whoever answered it under the watch above — and the calls this
 		// driver never answers (web, ask-gated, delegation) are filtered out of
 		// the found set rather than returned unanswered. The sandbox, skills and
 		// files stay one-shot above — wire-expensive, idempotent and
@@ -395,7 +438,9 @@ scan:
 // what remains uncovered is a result landing during this read, which is the same
 // page-wide window the single-agent path has always had and the same one the
 // executor's pre-run check leaves. Removing only ever shrinks the runnable set,
-// so a call this pass misses is run and its late result dropped, exactly as before.
+// so a call this pass misses is started — and then cancelled by answeredWatch on
+// its next beat, or, for an answer landing after the last beat, dropped by
+// postToolResult when the control plane refuses the second result.
 func dropAnsweredSince(ctx context.Context, client sdk.Client, sessionID, head string,
 	uses []toolUse, progress func()) ([]toolUse, error) {
 	// The same type filter the walk used, not just the result types: the anchor
@@ -471,8 +516,235 @@ func postToolResult(ctx context.Context, client sdk.Client, sessionID string, us
 	_, err := client.Beta.Sessions.Events.Send(ctx, sessionID, sdk.BetaSessionEventSendParams{
 		Events: []sdk.BetaManagedAgentsEventParamsUnion{ev},
 	})
-	if err != nil {
-		return fmt.Errorf("post tool result for %s: %w", useID, err)
+	if err == nil {
+		return nil
 	}
-	return nil
+	// The one refusal that is not this run's fault: the call was answered
+	// between answeredWatch's last beat and this post, so the result the
+	// control plane already holds is the answer and ours is the second one it
+	// must refuse (ValidateToolResults: "already has a result"). Returning the
+	// error would abort the whole pass over a call that is *done*, holding
+	// every sibling behind it for a lease TTL — the executor drops such a
+	// result under its session lock and carries on, and so must this (#441).
+	//
+	// Asked of the log rather than read off the message: the status is the
+	// contract, the wording is not. But the status alone is too broad to be the
+	// whole test, so both of the other things that produce a 400 here are ruled
+	// out rather than assumed away. The rest are deterministic refusals of a
+	// body this driver builds itself — a malformed shape, an unknown field, a
+	// NUL the shared dispatch already sanitizes out — so none can arrive in a
+	// race with an answer; one arriving beside an answer would be skipped with
+	// the wrong reason logged, and the call would still be correctly answered. An ask still awaiting its human is ruled out
+	// by the answer itself — the validator tests answered-ness first, so a call
+	// that has a result is never refused for its gate. An archived session is
+	// not: that refusal is raised before any validation, so it can wear the same
+	// 400 while the call is answered, and swallowing it would run a whole pass
+	// of tools against a session nobody can write to. Hence the second read,
+	// asked first because it is the cheaper of the two.
+	//
+	// The answered check is uncapped, unlike the two optimizing ones: this is
+	// the last check, so a walk that gives up early does not cost a retry — it
+	// faults the pass over a call that is done, which is the whole thing being
+	// fixed. Both reads run at most once per call, and only on a path that is
+	// already failing.
+	if isStatus(err, 400) {
+		archived, aerr := sessionArchived(ctx, client, sessionID)
+		if aerr == nil && !archived {
+			answered, qerr := answeredOnLog(ctx, client, sessionID, useID, 0)
+			switch {
+			case qerr == nil && answered:
+				slog.InfoContext(ctx, "worker: tool result dropped, call already answered",
+					"session", sessionID, "tool_use", useID)
+				return nil
+			case qerr != nil:
+				aerr = qerr
+			}
+		}
+		if aerr != nil {
+			// The refusal may well have been the harmless one; this run cannot
+			// tell, so it faults — the safe direction, and the behaviour that
+			// predates this check. Said out loud, because a control plane flaky
+			// enough to fail here turns the skip back into the whole-pass abort
+			// #441 removed, and nothing else would show it.
+			slog.WarnContext(ctx, "worker: could not classify a refused tool result; faulting the pass",
+				"session", sessionID, "tool_use", useID, "err", aerr)
+		}
+	}
+	return fmt.Errorf("post tool result for %s: %w", useID, err)
+}
+
+const (
+	// answeredBeat is how often a call in flight asks whether the log has
+	// already answered it. The platform executor asks on LeaseTTL/3; the work
+	// API's lease TTL defaults to 30s, so ten seconds is that same cadence —
+	// written as this driver's own constant because a worker learns the
+	// server's TTL only from a heartbeat response, and this check must not
+	// ride the heartbeat: the beat answers for the lease and the stall budget
+	// alone (#383), and threading the running call's id into it would make it
+	// answer for a third thing.
+	answeredBeat = 10 * time.Second
+	// answeredScanPageSize is the page one answered check asks for. The walk
+	// ends at the call it asks about rather than at a count, so the page size
+	// is only how many round trips reaching it costs.
+	answeredScanPageSize = 20
+	// answeredCheckWindow caps the two checks that are optimizations — the one
+	// before a call starts and the one on each beat. Both can only lose an
+	// answer, never invent one, and losing one is exactly today's behaviour, so
+	// giving up is safe; the post's check is the correctness backstop and takes
+	// no cap.
+	//
+	// Five hundred events, not one page, because a page-wide window would be
+	// inert on the very turns these checks exist for: the walk passes the
+	// turn's own events on its way down, so for call i of an N-call turn the
+	// call sits exactly N events from the head — i results already posted, then
+	// N-1-i sibling uses, then the call — and any N past the window would make
+	// the check answer "not answered" whatever the log said. Five hundred puts
+	// that limit past any turn a model writes, and still stops the walk where it
+	// stops being worth paying for: a coordinator's scan spans the whole log by
+	// decision 13 (iv) and can hand back a call sitting arbitrarily far down it,
+	// and re-reading that distance per call and again every ten seconds for the
+	// length of a bash timeout buys nothing the post's check does not.
+	answeredCheckWindow = 500
+)
+
+// answeredWatch is the BYOC twin of the platform executor's answered-means-
+// cancelled check for a call in flight (plan 35 decision 9): a thread-scoped
+// interrupt answers its thread's calls itself and never stops the shared exec
+// item, so neither the item's lease nor this worker's heartbeat can tell the
+// driver — this does, on its own beat. It returns a context cancelled once a
+// result references the use, and a stop func the caller runs when the call
+// returns, which reports whether the watch was what cancelled it.
+//
+// It is a per-call watcher and not a line in the heartbeat loop for the same
+// reason the executor's is not in its lease keeper: the beat would have to be
+// told which call is running, and it already answers for the lease and the
+// stall budget. The check is best-effort — a failed read is one missed beat,
+// never a cancelled call — and runs under the watch's own context, so stopping
+// the watch never waits on a read in flight.
+func answeredWatch(ctx context.Context, client sdk.Client, sessionID string, useID domain.ID, beat time.Duration) (context.Context, func() bool) {
+	wctx, cancel := context.WithCancel(ctx)
+	if beat <= 0 {
+		beat = answeredBeat
+	}
+	done := make(chan struct{})
+	answered := false
+	go func() {
+		defer close(done)
+		t := time.NewTicker(beat)
+		defer t.Stop()
+		for {
+			select {
+			case <-wctx.Done():
+				return
+			case <-t.C:
+				if ok, err := answeredOnLog(wctx, client, sessionID, useID, answeredCheckWindow); err == nil && ok {
+					answered = true
+					cancel()
+					return
+				}
+			}
+		}
+	}()
+	return wctx, func() bool {
+		cancel()
+		<-done // the write to answered happens before this, so reading it is safe
+		return answered
+	}
+}
+
+// answeredOnLog reports whether some result on the session's log already
+// answers useID, over the wire. It walks newest-first and stops at the use
+// itself, which is what makes it exact rather than a guess about how far back
+// to look: a result always outranks the use it answers — per-session seq is
+// assigned under the session row lock and a result may only reference a
+// committed use, the same invariant the scan's boundary rests on — so every
+// result that could answer this call is met before the call is, and reaching
+// the call is a complete "no".
+//
+// The invariant is the scan's, not the SQL's: events.answeredBy deliberately
+// correlates on nothing but the id, and a test pins that a result appended
+// above its use still answers it. Nothing writes that order — a client result
+// is made to postdate its use by ValidateToolResults, and every platform writer
+// reads the use off the log before answering it — so on any log this code can
+// produce the walk is exact; it is the same thing the scan's own boundary
+// already rests on, and it would have to be revisited beside it.
+//
+// A fixed look-back would not do. A thread-scoped interrupt answers a whole
+// thread's outstanding calls in one append, so on a turn wider than the window
+// the answer to its oldest call sits behind every sibling's and no page that
+// never moves backwards would ever see it.
+//
+// The two result types are the two the scan counts as answering a sandbox call
+// — a platform executor's agent.tool_result and this worker's own
+// user.tool_result — for the reason stated there. agent.tool_use is asked for
+// as well, because it carries the stop condition.
+//
+// maxEvents caps the walk; 0 walks as far as it must. A capped walk that never
+// reaches the use returns false, so a cap can only lose an answer, never invent
+// one — which is why the two optimizing checks may take one and the post's may
+// not. The page is the bounded scan's, not the whole-log walk's, because what
+// costs on this log is the over-read — tool inputs and results carry file
+// contents — and a walk that ends within a turn's width is one round trip
+// either way. Where the walk is deep the choice reverses and this pays round
+// trips instead: up to the cap over the page for a beat watching a call a
+// coordinator's whole-log scan handed back from far down, and the log's length
+// over the page for the uncapped one. Both are the deep-log case alone, one of
+// them only on a path already failing, and both are the price of being exact
+// there rather than merely usually right.
+func answeredOnLog(ctx context.Context, client sdk.Client, sessionID string, useID domain.ID, maxEvents int) (bool, error) {
+	iter := client.Beta.Sessions.Events.ListAutoPaging(ctx, sessionID, sdk.BetaSessionEventListParams{
+		Types: []string{
+			string(domain.EventAgentToolUse),
+			string(domain.EventAgentToolResult),
+			string(domain.EventUserToolResult),
+		},
+		Order: sdk.BetaSessionEventListParamsOrderDesc,
+		Limit: sdk.Int(answeredScanPageSize),
+	})
+	read := 0
+	for {
+		// The cap is tested before Next, never after: the auto-pager fetches the
+		// next page inside Next, so testing after it would pay for a page this
+		// walk has already decided not to read — one round trip per call, doubled.
+		if maxEvents > 0 && read >= maxEvents {
+			return false, nil
+		}
+		if !iter.Next() {
+			break
+		}
+		read++
+		var ev struct {
+			ID        string `json:"id"`
+			ToolUseID string `json:"tool_use_id"`
+		}
+		if err := json.Unmarshal([]byte(iter.Current().RawJSON()), &ev); err != nil {
+			return false, fmt.Errorf("parse session event: %w", err)
+		}
+		// The call itself: a tool_use event carries no tool_use_id, so this and
+		// the answer below can never be the same event.
+		if ev.ID == useID.String() {
+			return false, nil
+		}
+		if ev.ToolUseID == useID.String() {
+			return true, nil
+		}
+	}
+	if err := iter.Err(); err != nil {
+		return false, fmt.Errorf("list session events: %w", err)
+	}
+	return false, nil
+}
+
+// sessionArchived reports whether the session has been archived, which is the
+// one refusal below that wears the same 400 as a duplicate result and can be
+// true at the same time. It is a narrower question than the lease loop's
+// sessionLive, deliberately: a thread-scoped interrupt commonly folds the
+// session idle, and an idle session still accepts an append (the API refuses
+// only an archived one, and before it validates anything).
+func sessionArchived(ctx context.Context, client sdk.Client, sessionID string) (bool, error) {
+	sess, err := client.Beta.Sessions.Get(ctx, sessionID, sdk.BetaSessionGetParams{})
+	if err != nil {
+		return false, fmt.Errorf("get session %s: %w", sessionID, err)
+	}
+	return !sess.ArchivedAt.IsZero(), nil
 }

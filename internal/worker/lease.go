@@ -614,8 +614,8 @@ func leaseLapsed(sinceLastSuccess, ttl time.Duration) bool {
 // which unmarshals to the zero time, so ArchivedAt.IsZero() is exactly the
 // null-archived case, and a single-agent session serializes multiagent as null,
 // which unmarshals to the zero struct and so an empty roster. Both answers come
-// from the one read the liveness gate already makes; nothing else in the worker
-// needs the snapshot.
+// from the one read the liveness gate makes; the driver's own sessionArchived
+// is the only other reader, and asks the narrower question its own doc gives.
 func (w *Worker) sessionLive(ctx context.Context, sessionID string) (live, coordinator bool, err error) {
 	sess, err := w.client.Beta.Sessions.Get(ctx, sessionID, sdk.BetaSessionGetParams{})
 	if err != nil {

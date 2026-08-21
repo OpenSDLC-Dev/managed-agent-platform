@@ -13,6 +13,7 @@ record is [docs/HISTORY.md](./docs/HISTORY.md).
 
 - [x] **#431** — the advisor roster entry: its refusal recorded as settled and the
       registry corrected around it (#444).
-- [ ] **#442** — the four settlement-chain follow-ups the slice-4 review deferred. All
-      four implemented and green locally; PR open.
-- [ ] **#441** — the BYOC worker's mid-run cancel, per plan 35 decision 9.
+- [x] **#442** — the four settlement-chain follow-ups the slice-4 review deferred,
+      with the chain bounded at 25 consecutive turns (#446).
+- [ ] **#441** — the BYOC worker's mid-run cancel, per plan 35 decision 9. Implemented
+      and green locally; PR open.

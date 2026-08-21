@@ -34,10 +34,13 @@ func TestMain(m *testing.M) { os.Exit(pgtest.Main(m)) }
 // suffix, letting a test fault one tool of a set while the others succeed.
 // entered/gate (if set) let a test hold a tool mid-run: WriteFile signals
 // entered once and blocks on gate, so the lease loop can be observed while a
-// tool is in flight.
+// tool is in flight. gatePath, if set, narrows that hold to writes for a path
+// with that suffix — the failPath idiom, so one call of a set can be held
+// while its siblings run straight through.
 type fakeSandbox struct {
 	files    map[string]string
 	failPath string
+	gatePath string
 	entered  chan struct{}
 	gate     chan struct{}
 	// delay, if set, is how long each WriteFile takes, so a test can build a run
@@ -96,13 +99,14 @@ func (f *fakeSandbox) WriteFile(ctx context.Context, path string, data []byte) e
 			return ctx.Err()
 		}
 	}
-	if f.entered != nil {
+	held := f.gate != nil && (f.gatePath == "" || strings.HasSuffix(path, f.gatePath))
+	if f.entered != nil && held {
 		select {
 		case f.entered <- struct{}{}:
 		default:
 		}
 	}
-	if f.gate != nil {
+	if held {
 		select {
 		case <-f.gate:
 		case <-ctx.Done():
@@ -253,7 +257,7 @@ func (h *harness) suspend(t *testing.T, uses ...string) []domain.Event {
 // answeredHistory and TestAlreadyAnsweredIsNoOp).
 func (h *harness) answerAsPlatform(t *testing.T, useID domain.ID) {
 	t.Helper()
-	if err := h.answerAsPlatformErr(useID); err != nil {
+	if err := h.answerAsPlatformErr(context.Background(), useID); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -262,7 +266,7 @@ func (h *harness) answerAsPlatform(t *testing.T, useID domain.ID) {
 // caller that runs off the test goroutine: t.Fatalf calls runtime.Goexit, which
 // is only correct on the goroutine running the test — from an HTTP handler it
 // would abandon the response instead of reporting the failure.
-func (h *harness) answerAsPlatformErr(useID domain.ID) error {
+func (h *harness) answerAsPlatformErr(ctx context.Context, useID domain.ID) error {
 	body, err := json.Marshal(map[string]any{
 		"tool_use_id": useID.String(),
 		"content":     []map[string]any{{"type": "text", "text": "already done"}},
@@ -271,7 +275,7 @@ func (h *harness) answerAsPlatformErr(useID domain.ID) error {
 	if err != nil {
 		return err
 	}
-	if _, err := h.log.AppendWith(context.Background(), h.sid,
+	if _, err := h.log.AppendWith(ctx, h.sid,
 		[]events.NewEvent{{Type: domain.EventAgentToolResult, Payload: body}}, events.AppendOptions{}); err != nil {
 		return fmt.Errorf("answer %s: %w", useID, err)
 	}
@@ -283,6 +287,14 @@ func (h *harness) answerAsPlatformErr(useID domain.ID) error {
 // minted here rather than read back, so the whole history lands in one append.
 func (h *harness) answeredHistory(t *testing.T, n int) {
 	t.Helper()
+	if err := h.answeredHistoryErr(context.Background(), n); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// answeredHistoryErr is answeredHistory's error-returning half, for the one
+// caller that runs off the test goroutine — see answerAsPlatformErr.
+func (h *harness) answeredHistoryErr(ctx context.Context, n int) error {
 	var evs []events.NewEvent
 	for i := 0; i < n; i++ {
 		id := domain.NewID("sevt")
@@ -292,7 +304,7 @@ func (h *harness) answeredHistory(t *testing.T, n int) {
 			"is_error":    false,
 		})
 		if err != nil {
-			t.Fatal(err)
+			return err
 		}
 		evs = append(evs,
 			events.NewEvent{ID: id, Type: domain.EventAgentToolUse,
@@ -300,9 +312,10 @@ func (h *harness) answeredHistory(t *testing.T, n int) {
 			events.NewEvent{Type: domain.EventUserToolResult, Payload: body},
 		)
 	}
-	if _, err := h.log.AppendWith(context.Background(), h.sid, evs, events.AppendOptions{}); err != nil {
-		t.Fatalf("answered history: %v", err)
+	if _, err := h.log.AppendWith(ctx, h.sid, evs, events.AppendOptions{}); err != nil {
+		return fmt.Errorf("answered history: %w", err)
 	}
+	return nil
 }
 
 func (h *harness) types(t *testing.T, typ string) []domain.Event {
@@ -565,6 +578,10 @@ func countEventReads() (*atomic.Int32, func(http.Handler) http.Handler) {
 // at the first result older than the trailing turn's uses. The old
 // oldest-first full scan paged the whole history twice (seven requests here,
 // growing with the session), which is what #76 bounds.
+//
+// The second request is the pre-run answered check, one page per call (#441).
+// It is the count's only other term, and like the scan it does not grow with
+// the session — which is the property this test exists to hold.
 func TestScanIsBoundedByTheTrailingTurn(t *testing.T) {
 	reads, count := countEventReads()
 	sb := &fakeSandbox{}
@@ -576,8 +593,8 @@ func TestScanIsBoundedByTheTrailingTurn(t *testing.T) {
 		t.Fatalf("RunSessionTools: %v", err)
 	}
 
-	if got := reads.Load(); got != 1 {
-		t.Errorf("events requests = %d, want 1 (the scan must not re-page prior history)", got)
+	if got := reads.Load(); got != 2 {
+		t.Errorf("events requests = %d, want 2: the scan, and one pre-run check for the one call", got)
 	}
 	results := h.results(t)
 	if len(results) != 61 {
@@ -615,8 +632,15 @@ func TestScanPagesATurnWiderThanOnePage(t *testing.T) {
 		t.Fatalf("RunSessionTools: %v", err)
 	}
 
-	if got := reads.Load(); got != 2 {
-		t.Errorf("events requests = %d, want 2 (the turn spans two pages, and no more)", got)
+	// Two scan pages, then each call's pre-run answered check (#441). That walk
+	// stops at the call, and the call sits exactly one turn-width from the head
+	// — the results already posted above it, then the sibling uses still below —
+	// so on a turn this wide it costs two pages, and on an ordinary one, one.
+	// Neither term grows with the session's history, which is what this test and
+	// the one above are for.
+	if want := int32(2 + 2*tools); reads.Load() != want {
+		t.Errorf("events requests = %d, want %d: two scan pages, and one two-page pre-run check per call",
+			reads.Load(), want)
 	}
 	results := h.results(t)
 	if len(results) != 30+tools {
@@ -789,11 +813,11 @@ func TestRunSessionToolsReportsProgressPerItem(t *testing.T) {
 	// make (the dangling reference never reaches it, its listing failing first),
 	// the sentinel decision, the one skill written,
 	// the skills pass boundary before its sentinel write, the caller's skills and
-	// files boundaries, and — for the one tool — its run and its posted result,
-	// which are two steps and not one (#383). This session mounts no files, so
-	// that pass returns before any boundary of its own.
-	if reports != 14 {
-		t.Errorf("progress reports = %d, want 14", reports)
+	// files boundaries, and — for the one tool — its pre-run answered check, its
+	// run and its posted result, which are three steps and not one (#383). This
+	// session mounts no files, so that pass returns before any boundary of its own.
+	if reports != 15 {
+		t.Errorf("progress reports = %d, want 15", reports)
 	}
 
 	// A second pass over an unchanged set takes the sentinel skip, which returns
@@ -810,11 +834,11 @@ func TestRunSessionToolsReportsProgressPerItem(t *testing.T) {
 	// bound the set, its own boundary,
 	// the provision, the one reference resolved and its version GET, the one
 	// sentinel read, the
-	// caller's skills and files boundaries, and the tool's run and posted result.
-	// The skip returns before the pass boundary the first run reached, which is
-	// what makes this count one lower than a rewriting pass.
-	if reports != 12 {
-		t.Errorf("unchanged-set reports = %d, want 12", reports)
+	// caller's skills and files boundaries, and the tool's answered check, run and
+	// posted result. The skip returns before the pass boundary the first run
+	// reached, which is what makes this count one lower than a rewriting pass.
+	if reports != 13 {
+		t.Errorf("unchanged-set reports = %d, want 13", reports)
 	}
 }
 
@@ -1075,7 +1099,7 @@ func TestTheWalkRechecksThroughTheRealPath(t *testing.T) {
 						return
 					}
 					if fired.CompareAndSwap(false, true) {
-						injected <- h.answerAsPlatformErr(answer)
+						injected <- h.answerAsPlatformErr(r.Context(), answer)
 					}
 				})
 			})
@@ -1165,5 +1189,341 @@ func TestCoordinatorSkipsDelegationCalls(t *testing.T) {
 	}
 	if want := []string{uses[1].ID.String()}; !slices.Equal(useIDs(got), want) {
 		t.Errorf("scan = %v, want the sandbox tool only %v", useIDs(got), want)
+	}
+}
+
+// TestAnAnsweredCallIsCancelledOnTheWatchBeat is the BYOC twin of the
+// executor's TestAnAnsweredCallIsCancelledOnTheKeeperBeat (plan 35 decision 9).
+// A thread-scoped interrupt answers its thread's calls itself and never stops
+// the shared exec item, so nothing in the worker's lease bookkeeping can tell
+// the driver — the per-call watch has to. Before #441 the held write ran to
+// completion and its result was then refused, aborting the pass.
+func TestAnAnsweredCallIsCancelledOnTheWatchBeat(t *testing.T) {
+	sb := &fakeSandbox{entered: make(chan struct{}, 1), gate: make(chan struct{})}
+	t.Cleanup(func() { close(sb.gate) }) // never blocks a failing run's goroutine forever
+	h := newHarness(t, sb)
+	uses := h.suspend(t, writeUse("held.txt", "one"))
+
+	done := make(chan error, 1)
+	go func() {
+		done <- RunSessionTools(context.Background(), h.client, h.prov, h.sid.String(),
+			ToolExecConfig{AnsweredBeat: 20 * time.Millisecond})
+	}()
+	select {
+	case <-sb.entered:
+	case <-time.After(30 * time.Second):
+		t.Fatal("the tool never started")
+	}
+	// What a thread-scoped interrupt commits: the call answered on the log,
+	// with the shared exec item left live.
+	h.answerAsPlatform(t, uses[0].ID)
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("RunSessionTools: %v, want a cancelled call to be a skip, not a fault", err)
+		}
+	case <-time.After(30 * time.Second):
+		t.Fatal("the watch never cancelled the answered call")
+	}
+	if got := h.results(t); len(got) != 0 {
+		t.Errorf("user.tool_result = %+v, want none — the call already had its answer", got)
+	}
+	if _, wrote := sb.files["/workspace/held.txt"]; wrote {
+		t.Error("the cancelled tool finished its write")
+	}
+}
+
+// TestACancelledCallDoesNotStopItsSiblings: the point of cancelling is that the
+// calls queued behind the answered one are not held hostage for a lease TTL.
+// The pass must carry on rather than fault out, which is what the whole item
+// used to do when the answered call's result was refused.
+func TestACancelledCallDoesNotStopItsSiblings(t *testing.T) {
+	sb := &fakeSandbox{gatePath: "held.txt", entered: make(chan struct{}, 1), gate: make(chan struct{})}
+	t.Cleanup(func() { close(sb.gate) })
+	h := newHarness(t, sb)
+	uses := h.suspend(t, writeUse("held.txt", "one"), writeUse("after.txt", "two"))
+
+	done := make(chan error, 1)
+	go func() {
+		done <- RunSessionTools(context.Background(), h.client, h.prov, h.sid.String(),
+			ToolExecConfig{AnsweredBeat: 20 * time.Millisecond})
+	}()
+	select {
+	case <-sb.entered:
+	case <-time.After(30 * time.Second):
+		t.Fatal("the held tool never started")
+	}
+	h.answerAsPlatform(t, uses[0].ID)
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("RunSessionTools: %v", err)
+		}
+	case <-time.After(30 * time.Second):
+		t.Fatal("the pass never got past the answered call")
+	}
+	results := h.results(t)
+	if len(results) != 1 || results[0].ToolUseID != uses[1].ID.String() {
+		t.Fatalf("user.tool_result = %+v, want exactly the sibling's %q", results, uses[1].ID)
+	}
+	if sb.files["/workspace/after.txt"] != "two" {
+		t.Errorf("the sibling did not run: %v", sb.files)
+	}
+	if n := h.liveModelTurns(t); n != 1 {
+		t.Errorf("model_turn items = %d, want 1 — the set is complete, so the turn resumes", n)
+	}
+}
+
+// TestALateAnswerMakesThePostASkipNotAFault covers the window the watch cannot:
+// an answer landing after its last beat, while the result is already in flight.
+// The control plane refuses the second result (ValidateToolResults), and before
+// #441 that 400 aborted the whole pass — over a call that was done — leaving
+// every sibling behind it for a reclaim. The beat is left at its default here
+// so nothing but the post can catch it.
+func TestALateAnswerMakesThePostASkipNotAFault(t *testing.T) {
+	sb := &fakeSandbox{}
+	var h *harness
+	var fired atomic.Bool
+	var answer domain.ID
+	// The test goroutine reports, because t.Fatalf from a handler is
+	// runtime.Goexit. Buffered so the handler never blocks on the send.
+	injected := make(chan error, 1)
+	h = newHarnessWrapped(t, sb, func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			// Before forwarding, so the control plane sees the answer already
+			// on the log when it validates the result this request carries.
+			if r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/events") &&
+				fired.CompareAndSwap(false, true) {
+				injected <- h.answerAsPlatformErr(r.Context(), answer)
+			}
+			next.ServeHTTP(w, r)
+		})
+	})
+	uses := h.suspend(t, writeUse("first.txt", "one"), writeUse("second.txt", "two"))
+	answer = uses[0].ID
+
+	if err := RunSessionTools(context.Background(), h.client, h.prov, h.sid.String(), ToolExecConfig{}); err != nil {
+		t.Fatalf("RunSessionTools: %v, want the refused duplicate to be a skip", err)
+	}
+	select {
+	case err := <-injected:
+		if err != nil {
+			t.Fatalf("inject the late answer: %v", err)
+		}
+	default:
+		t.Fatal("the driver posted nothing; the fixture never got to inject")
+	}
+
+	results := h.results(t)
+	if len(results) != 1 || results[0].ToolUseID != uses[1].ID.String() {
+		t.Fatalf("user.tool_result = %+v, want only the sibling's %q", results, uses[1].ID)
+	}
+	if n := len(h.types(t, string(domain.EventAgentToolResult))); n != 1 {
+		t.Errorf("agent.tool_result = %d, want the one injected answer", n)
+	}
+	if sb.files["/workspace/second.txt"] != "two" {
+		t.Errorf("the sibling did not run after the skip: %v", sb.files)
+	}
+}
+
+// TestAPostRefusedForAnotherReasonStillFaults: the skip above is bound to the
+// call actually being answered, never to the status alone. An ask-gated call
+// whose human has not confirmed is refused with the same 400, and waving that
+// through would lose the result of a tool that did run. The gate is stamped
+// after the scan and before the post — the same mid-flight injection the late
+// answer above uses — because a call already stamped ask is filtered out of the
+// runnable set and never runs at all.
+func TestAPostRefusedForAnotherReasonStillFaults(t *testing.T) {
+	sb := &fakeSandbox{}
+	var h *harness
+	var fired atomic.Bool
+	var gated domain.ID
+	injected := make(chan error, 1)
+	h = newHarnessWrapped(t, sb, func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/events") &&
+				fired.CompareAndSwap(false, true) {
+				_, err := h.pool.Exec(r.Context(),
+					`UPDATE events SET payload = jsonb_set(payload, '{evaluated_permission}', '"ask"'::jsonb) WHERE id = $1`,
+					gated.String())
+				injected <- err
+			}
+			next.ServeHTTP(w, r)
+		})
+	})
+	uses := h.suspend(t, writeUse("gated.txt", "one"))
+	gated = uses[0].ID
+
+	err := RunSessionTools(context.Background(), h.client, h.prov, h.sid.String(), ToolExecConfig{})
+	select {
+	case ierr := <-injected:
+		if ierr != nil {
+			t.Fatalf("stamp the ask gate: %v", ierr)
+		}
+	default:
+		t.Fatal("the driver posted nothing; the fixture never got to stamp the gate")
+	}
+	if err == nil {
+		t.Fatal("RunSessionTools = nil, want the refusal to fault: the call is not answered")
+	}
+	if !strings.Contains(err.Error(), uses[0].ID.String()) {
+		t.Errorf("error = %v, want it to name the call it could not answer", err)
+	}
+	if got := h.results(t); len(got) != 0 {
+		t.Errorf("user.tool_result = %+v, want none — the post was refused", got)
+	}
+}
+
+// TestACallAnsweredWhileASiblingRanIsNeverStarted is the pre-run half of
+// decision 9, which the executor keeps as an events.Answered before every call.
+// A pass runs its calls one at a time, so a call can be answered after the scan
+// that found it and before its own turn comes — no scan can have seen that, and
+// dropAnsweredSince reads before the pass starts. Starting it anyway performs
+// the side effect of a command the log has already closed, and the watch is no
+// substitute: a quick write finishes long before the first beat.
+func TestACallAnsweredWhileASiblingRanIsNeverStarted(t *testing.T) {
+	sb := &fakeSandbox{gatePath: "held.txt", entered: make(chan struct{}, 1), gate: make(chan struct{})}
+	h := newHarness(t, sb)
+	uses := h.suspend(t, writeUse("held.txt", "one"), writeUse("later.txt", "two"))
+
+	done := make(chan error, 1)
+	go func() {
+		done <- RunSessionTools(context.Background(), h.client, h.prov, h.sid.String(), ToolExecConfig{})
+	}()
+	select {
+	case <-sb.entered:
+	case <-time.After(30 * time.Second):
+		t.Fatal("the held tool never started")
+	}
+	// Answered while the first call holds the pass — the shape a thread-scoped
+	// interrupt commits, and one no scan of this pass could have seen.
+	h.answerAsPlatform(t, uses[1].ID)
+	close(sb.gate)
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("RunSessionTools: %v", err)
+		}
+	case <-time.After(30 * time.Second):
+		t.Fatal("the pass never finished")
+	}
+	if _, ran := sb.files["/workspace/later.txt"]; ran {
+		t.Error("the answered call ran anyway: its side effect happened before the first beat")
+	}
+	results := h.results(t)
+	if len(results) != 1 || results[0].ToolUseID != uses[0].ID.String() {
+		t.Fatalf("user.tool_result = %+v, want only the held call's %q", results, uses[0].ID)
+	}
+}
+
+// TestAnArchivedSessionsRefusalIsNeverSkipped: the duplicate-result skip is a
+// 400 plus evidence, never a 400 alone. An archived session is refused with the
+// same status — and refused *before* any validation, so it can be refused while
+// the call is genuinely answered. Swallowing that would run a whole pass of
+// tools against a session nobody can write to, silently, which is worse than
+// the fault this change removes. TestArchivedSessionPostIsRefusedAndSurfaces
+// covers the plain case; this is the one where both conditions hold at once.
+func TestAnArchivedSessionsRefusalIsNeverSkipped(t *testing.T) {
+	sb := &fakeSandbox{}
+	var h *harness
+	var fired atomic.Bool
+	var answer domain.ID
+	injected := make(chan error, 1)
+	h = newHarnessWrapped(t, sb, func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/events") &&
+				fired.CompareAndSwap(false, true) {
+				// Both at once, before the post is forwarded: the call answered
+				// (so the log says skip) and the session archived (so it must not).
+				if err := h.answerAsPlatformErr(r.Context(), answer); err != nil {
+					injected <- err
+					return
+				}
+				_, err := h.pool.Exec(r.Context(),
+					`UPDATE sessions SET archived_at = now() WHERE id = $1`, h.sid.String())
+				injected <- err
+			}
+			next.ServeHTTP(w, r)
+		})
+	})
+	uses := h.suspend(t, writeUse("out.txt", "hi"), writeUse("after.txt", "next"))
+	answer = uses[0].ID
+
+	err := RunSessionTools(context.Background(), h.client, h.prov, h.sid.String(), ToolExecConfig{})
+	select {
+	case ierr := <-injected:
+		if ierr != nil {
+			t.Fatalf("inject the answer and the archive: %v", ierr)
+		}
+	default:
+		t.Fatal("the driver posted nothing; the fixture never got to inject")
+	}
+	if err == nil {
+		t.Fatal("RunSessionTools = nil, want the archived-session refusal to surface")
+	}
+	if got := h.results(t); len(got) != 0 {
+		t.Errorf("user.tool_result = %+v, want none — every append was refused", got)
+	}
+	if _, ran := sb.files["/workspace/after.txt"]; ran {
+		t.Error("the pass ran a sibling after the archive refusal was swallowed")
+	}
+}
+
+// TestTheAnsweredWalkPagesToReachTheAnswer is the test the walk-to-the-call
+// rule needs and that every other test here is too shallow to be: it puts more
+// than one page of events between the head and the answer, which is exactly the
+// shape a fixed look-back cannot see and the shape a thread-scoped interrupt
+// makes — it answers a whole thread's outstanding calls in one append, so the
+// answer to the call actually running sits behind every sibling's.
+//
+// The post's read is the one under test, so the walk must be uncapped there:
+// cap it, or stop the walk at one page, and this goes red while everything else
+// stays green.
+func TestTheAnsweredWalkPagesToReachTheAnswer(t *testing.T) {
+	sb := &fakeSandbox{}
+	var h *harness
+	var fired atomic.Bool
+	var answer domain.ID
+	injected := make(chan error, 1)
+	h = newHarnessWrapped(t, sb, func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/events") &&
+				fired.CompareAndSwap(false, true) {
+				// The answer first, then enough above it to bury it several
+				// pages deep — the order a wide interrupt leaves behind.
+				if err := h.answerAsPlatformErr(r.Context(), answer); err != nil {
+					injected <- err
+					return
+				}
+				injected <- h.answeredHistoryErr(r.Context(), 2*answeredScanPageSize)
+			}
+			next.ServeHTTP(w, r)
+		})
+	})
+	uses := h.suspend(t, writeUse("first.txt", "one"), writeUse("second.txt", "two"))
+	answer = uses[0].ID
+
+	if err := RunSessionTools(context.Background(), h.client, h.prov, h.sid.String(), ToolExecConfig{}); err != nil {
+		t.Fatalf("RunSessionTools: %v, want the buried answer found and the duplicate skipped", err)
+	}
+	select {
+	case ierr := <-injected:
+		if ierr != nil {
+			t.Fatalf("bury the answer: %v", ierr)
+		}
+	default:
+		t.Fatal("the driver posted nothing; the fixture never got to inject")
+	}
+
+	for _, got := range h.results(t) {
+		if got.ToolUseID == uses[0].ID.String() {
+			t.Fatalf("a second result was accepted for %q", uses[0].ID)
+		}
+	}
+	if sb.files["/workspace/second.txt"] != "two" {
+		t.Errorf("the sibling did not run after the skip: %v", sb.files)
 	}
 }
