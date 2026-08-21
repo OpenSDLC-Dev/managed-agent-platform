@@ -98,8 +98,8 @@ session's tools without knowing threads exist.
   and the plan archived.
 
 What was deliberately left undone is filed, not forgotten: **#441** (the BYOC worker
-does not cancel an in-flight call on its heartbeat the way the executor's keeper
-does) and **#442** (a chain-loop bound, `WakeThread` guard parity, and an ask-gated
+did not then cancel an in-flight call once its use was answered, as the executor
+already did) and **#442** (a chain-loop bound, `WakeThread` guard parity, and an ask-gated
 integration test). The inferences this plan had to make — the six tools' schemas and
 answers, the `self_hosted` view widening, the session-status fold — are registered in
 DIVERGENCES.md and tracked by **#78** against a future recording of a real
@@ -268,9 +268,9 @@ DIVERGENCES.md. Both were registered before merge, along with the duplicate-name
 refusal, under the repo's rule that a slice lands its divergences in the PR that
 introduces the behavior.
 
-Two consequences were filed rather than absorbed: **#441** (the BYOC worker does not
-cancel an in-flight call on its heartbeat the way the executor's keeper does — the
-slice-3 changelog fragment was corrected to stop claiming both drivers do) and **#442**
+Two consequences were filed rather than absorbed: **#441** (the BYOC worker did not
+then cancel an in-flight call once its use was answered, as the executor already did —
+the slice-3 changelog fragment was corrected to stop claiming both drivers do) and **#442**
 (a chain-loop bound, `WakeThread` guard parity, and an ask-gated integration test).
 
 ## anthropic-sdk-go v1.63.1 bump — wire-schema verification record (2026-08-19, plan 35 slice 0)

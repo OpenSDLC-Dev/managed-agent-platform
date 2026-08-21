@@ -142,6 +142,18 @@ func RunSessionTools(ctx context.Context, client sdk.Client, provider sandbox.Pr
 	runner := toolset.Runner{Sandbox: sb, Session: domain.ID(sessionID), Workdir: cfg.Workdir}
 	for {
 		for _, u := range uses {
+			// The executor's pre-run check, over the wire. A call answered while
+			// an earlier one in this pass ran is one no scan can have seen — both
+			// the walk and dropAnsweredSince read before the pass started — and
+			// starting it performs the side effect of a command the log has
+			// already closed. The watch below cannot stand in for it: its first
+			// beat is a beat away, and a quick write is long finished by then.
+			if answered, err := answeredOnLog(ctx, client, sessionID, u.id, answeredPreRunWindow); err != nil {
+				return fmt.Errorf("tool %s (%s): answered check: %w", u.name, u.id, err)
+			} else if answered {
+				report()
+				continue
+			}
 			rctx, stop := answeredWatch(ctx, client, sessionID, u.id, cfg.AnsweredBeat)
 			res, err := runner.Run(rctx, u.id, u.name, u.input)
 			if stop() {
@@ -149,6 +161,8 @@ func RunSessionTools(ctx context.Context, client sdk.Client, provider sandbox.Pr
 				// with — is a late result for a call the log already closed.
 				// Skipping is not a fault: the call has its answer, and posting
 				// a second one is what the control plane refuses (#441).
+				slog.InfoContext(ctx, "worker: tool call cancelled, already answered",
+					"session", sessionID, "tool_use", u.id, "tool", u.name)
 				report()
 				continue
 			}
@@ -502,14 +516,28 @@ func postToolResult(ctx context.Context, client sdk.Client, sessionID string, us
 	// result under its session lock and carries on, and so must this (#441).
 	//
 	// Asked of the log rather than read off the message: the status is the
-	// contract, the wording is not, and a 400 has other causes (an ask still
-	// awaiting its human) that must still fault the run. One bounded read, and
-	// only on a path that is already failing.
+	// contract, the wording is not. But the status alone is too broad to be the
+	// whole test, so both of the other things that produce a 400 here are ruled
+	// out rather than assumed away. An ask still awaiting its human is ruled out
+	// by the answer itself — the validator tests answered-ness first, so a call
+	// that has a result is never refused for its gate. An archived session is
+	// not: that refusal is raised before any validation, so it can wear the same
+	// 400 while the call is answered, and swallowing it would run a whole pass
+	// of tools against a session nobody can write to. Hence the second read,
+	// asked first because it is the cheaper of the two.
+	//
+	// The answered check is uncapped, unlike the two optimizing ones: this is
+	// the last check, so a walk that gives up early does not cost a retry — it
+	// faults the pass over a call that is done, which is the whole thing being
+	// fixed. Both reads run at most once per call, and only on a path that is
+	// already failing.
 	if isStatus(err, 400) {
-		if answered, aerr := isAnswered(ctx, client, sessionID, useID); aerr == nil && answered {
-			slog.InfoContext(ctx, "worker: tool result dropped, call already answered",
-				"session", sessionID, "tool_use", useID)
-			return nil
+		if archived, aerr := sessionArchived(ctx, client, sessionID); aerr == nil && !archived {
+			if answered, aerr := answeredOnLog(ctx, client, sessionID, useID, 0); aerr == nil && answered {
+				slog.InfoContext(ctx, "worker: tool result dropped, call already answered",
+					"session", sessionID, "tool_use", useID)
+				return nil
+			}
 		}
 	}
 	return fmt.Errorf("post tool result for %s: %w", useID, err)
@@ -525,17 +553,29 @@ const (
 	// alone (#383), and threading the running call's id into it would make it
 	// answer for a third thing.
 	answeredBeat = 10 * time.Second
-	// answeredScanPageSize is how many of the session's newest tool results one
-	// such check reads. It is a single page, never an auto-pager: the answer
-	// this looks for is newer than the call it watches, so anything older than
-	// the page's tail cannot be it. Twenty is generous for that window, because
-	// sandbox tool execution across sibling threads is serial — one
-	// session-keyed tool_exec item at a time, this one — so the only results
-	// that can land beside a running call are the web and MCP drivers' and a
-	// settlement's delegation answers. Overrunning it costs one missed beat,
-	// never a wrong cancel: a result is matched by tool_use_id, so the check
-	// can fail to see an answer but can never invent one.
+	// answeredScanPageSize is the page one answered check asks for. The walk
+	// ends at the call it asks about rather than at a count, so the page size
+	// is only how many round trips reaching it costs.
 	answeredScanPageSize = 20
+	// answeredPreRunWindow and answeredWatchWindow cap the two checks that are
+	// optimizations — the one before a call starts and the one on each beat.
+	// Both can only lose an answer, never invent one, and losing one is exactly
+	// today's behaviour, so giving up is safe; the post's check is the
+	// correctness backstop and takes no cap.
+	//
+	// They differ because their loops do. The pre-run check runs once per call,
+	// so it takes exactly one page and therefore one round trip: a pass over N
+	// calls costs N reads, not the N-to-2N a walk past the turn's own sibling
+	// uses would. One page covers a call answered while an earlier one in the
+	// same turn ran, which is the window it exists for. A beat runs once every
+	// ten seconds for a single call and can afford to look further; there the
+	// walk normally ends at the call long before the cap, and the cap binds only
+	// where the call is old — a coordinator's scan spans the whole log by
+	// decision 13 (iv) and can hand back a call sitting arbitrarily far down it,
+	// and re-reading that distance every ten seconds for the length of a bash
+	// timeout is a cost the cancellation is not worth.
+	answeredPreRunWindow = answeredScanPageSize
+	answeredWatchWindow  = 500
 )
 
 // answeredWatch is the BYOC twin of the platform executor's answered-means-
@@ -568,7 +608,7 @@ func answeredWatch(ctx context.Context, client sdk.Client, sessionID string, use
 			case <-wctx.Done():
 				return
 			case <-t.C:
-				if ok, err := isAnswered(wctx, client, sessionID, useID); err == nil && ok {
+				if ok, err := answeredOnLog(wctx, client, sessionID, useID, answeredWatchWindow); err == nil && ok {
 					answered = true
 					cancel()
 					return
@@ -583,34 +623,83 @@ func answeredWatch(ctx context.Context, client sdk.Client, sessionID string, use
 	}
 }
 
-// isAnswered reports whether some result on the session's log already answers
-// useID, over the wire and in one bounded read. The two types it asks for are
-// the two the scan counts as answering a sandbox call — a platform executor's
-// agent.tool_result and this worker's own user.tool_result — for the reason
-// stated there: those are the only kinds a call this driver may run is ever
-// answered by.
-func isAnswered(ctx context.Context, client sdk.Client, sessionID string, useID domain.ID) (bool, error) {
-	page, err := client.Beta.Sessions.Events.List(ctx, sessionID, sdk.BetaSessionEventListParams{
+// answeredOnLog reports whether some result on the session's log already
+// answers useID, over the wire. It walks newest-first and stops at the use
+// itself, which is what makes it exact rather than a guess about how far back
+// to look: a result always outranks the use it answers — per-session seq is
+// assigned under the session row lock and a result may only reference a
+// committed use, the same invariant the scan's boundary rests on — so every
+// result that could answer this call is met before the call is, and reaching
+// the call is a complete "no".
+//
+// A fixed look-back would not do. A thread-scoped interrupt answers a whole
+// thread's outstanding calls in one append, so on a turn wider than the window
+// the answer to its oldest call sits behind every sibling's and no page that
+// never moves backwards would ever see it.
+//
+// The two result types are the two the scan counts as answering a sandbox call
+// — a platform executor's agent.tool_result and this worker's own
+// user.tool_result — for the reason stated there. agent.tool_use is asked for
+// as well, because it carries the stop condition.
+//
+// maxEvents caps the walk; 0 walks as far as it must. A capped walk that never
+// reaches the use returns false, so a cap can only lose an answer, never invent
+// one — which is why the two optimizing checks may take one and the post's may
+// not.
+func answeredOnLog(ctx context.Context, client sdk.Client, sessionID string, useID domain.ID, maxEvents int) (bool, error) {
+	iter := client.Beta.Sessions.Events.ListAutoPaging(ctx, sessionID, sdk.BetaSessionEventListParams{
 		Types: []string{
+			string(domain.EventAgentToolUse),
 			string(domain.EventAgentToolResult),
 			string(domain.EventUserToolResult),
 		},
 		Order: sdk.BetaSessionEventListParamsOrderDesc,
 		Limit: sdk.Int(answeredScanPageSize),
 	})
-	if err != nil {
-		return false, fmt.Errorf("list tool results: %w", err)
-	}
-	for _, e := range page.Data {
+	read := 0
+	for {
+		// The cap is tested before Next, never after: the auto-pager fetches the
+		// next page inside Next, so testing after it would pay for a page this
+		// walk has already decided not to read — one round trip per call, doubled.
+		if maxEvents > 0 && read >= maxEvents {
+			return false, nil
+		}
+		if !iter.Next() {
+			break
+		}
+		read++
 		var ev struct {
+			ID        string `json:"id"`
 			ToolUseID string `json:"tool_use_id"`
 		}
-		if err := json.Unmarshal([]byte(e.RawJSON()), &ev); err != nil {
+		if err := json.Unmarshal([]byte(iter.Current().RawJSON()), &ev); err != nil {
 			return false, fmt.Errorf("parse session event: %w", err)
+		}
+		// The call itself: a tool_use event carries no tool_use_id, so this and
+		// the answer below can never be the same event.
+		if ev.ID == useID.String() {
+			return false, nil
 		}
 		if ev.ToolUseID == useID.String() {
 			return true, nil
 		}
 	}
+	if err := iter.Err(); err != nil {
+		return false, fmt.Errorf("list session events: %w", err)
+	}
 	return false, nil
+}
+
+// sessionArchived reports whether the session has been archived, which is the
+// one refusal below that wears the same 400 as a duplicate result and can be
+// true at the same time. It is a narrower question than the lease loop's
+// sessionLive, deliberately: a thread-scoped interrupt commonly folds the
+// session idle, and an idle session still accepts an append (the API refuses
+// only an archived one, and before it validates anything).
+func sessionArchived(ctx context.Context, client sdk.Client, sessionID string) (bool, error) {
+	sess, err := client.Beta.Sessions.Get(ctx, sessionID, sdk.BetaSessionGetParams{})
+	if err != nil {
+		return false, fmt.Errorf("get session %s: %w", sessionID, err)
+	}
+	return !sess.ArchivedAt.IsZero(), nil
 }

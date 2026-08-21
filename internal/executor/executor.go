@@ -751,8 +751,10 @@ func GateTokenRevoker(pool *pgxpool.Pool) sandbox.GateTokenRevoker {
 // A call answered under this pass is cancelled (plan 35 decision 9): a
 // thread-scoped interrupt answers its thread's calls itself and never stops
 // the shared item, so each call is checked just before it starts — skipped
-// if answered, a late result for it dropped — and watched on the keeper's
-// beat while it runs, so an interrupted `sleep 3600` costs one beat, not
+// if answered, a late result for it dropped — and watched by a goroutine of
+// its own on the keeper's cadence while it runs (answeredWatch, which exists
+// because the keeper itself cannot tell the driver), so an interrupted
+// `sleep 3600` costs one beat, not
 // toolset.MaxTimeout, and the sibling calls queued behind it are not held
 // hostage.
 func (e *Executor) runTools(ctx context.Context, sb sandbox.Sandbox, sid domain.ID, uses []toolUse, progress func()) ([]events.NewEvent, error) {

@@ -152,7 +152,7 @@ func (e *Executor) runWebTools(ctx context.Context, sid domain.ID, progress func
 		// turn's calls are answered one at a time (#383).
 		progress()
 		// Answered under a thread-scoped interrupt since the scan: skipped, and
-		// cancelled on the keeper's beat if it happens mid-call (decision 9).
+		// cancelled by the call's own watch if it happens mid-call (decision 9).
 		// A check that fails is a pass cut short, never answers thrown away:
 		// the calls answered so far were paid for, so they commit and the
 		// item comes back for the rest; with nothing answered it faults.
