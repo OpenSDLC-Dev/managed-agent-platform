@@ -20,6 +20,7 @@ SHELL := /usr/bin/env bash
 .PHONY: build crossbuild vet fmt-check test cover-gate verify eval \
 	changelog changelog-notes changelog-archive \
 	release-tag-check release-images release-chart-check release-chart release-binaries \
+	openbao-init-test \
 	gcp-fmt gcp-validate gcp-split-check gcp-lint gcp-bootstrap-test gcp-dbinit-test gcp-split-check-test gcp-foundation-apply gcp-bootstrap gcp-env-apply gcp-db-init gcp-env-destroy gcp-env-rebuild
 
 build:
@@ -208,6 +209,26 @@ release-binaries:
 	done; \
 	(cd dist && shasum -a 256 worker_$(VERSION)_*.tar.gz > "worker_$(VERSION)_sha256sums.txt"); \
 	ls -l dist/worker_$(VERSION)_*
+
+# ---------------------------------------------------------------------------
+# The bundled OpenBao's init scripts. Outside `verify` for the same reason the
+# GCP targets below are: deployment tooling, never a dependency of the platform
+# or its build. CI runs it in the compose job.
+# ---------------------------------------------------------------------------
+
+# shellcheck has no opinion on the ORDER in which a redirect and the command
+# filling it take effect. Nor does anything else here: the compose job starts
+# postgres, minio, the control plane and the brain and never openbao, and the
+# helm job renders the chart's init script without executing a line of it — so
+# the two scripts that decide whether a self-hosted stack can encrypt anything
+# were the part of this repo nothing ran. #439 was the bill: a failed init left
+# a 0-byte init.json that the recovery branch read as a good one, leaving a
+# vault whose root token existed nowhere and a stack repairable only by
+# destroying its volumes. This RUNS both scripts against a fake `bao` — no
+# Docker, no credentials — and reverts each half of that fix to require the
+# checks guarding it to go red.
+openbao-init-test:
+	python3 deploy/compose/openbao_init_test.py
 
 # ---------------------------------------------------------------------------
 # GCP staging environment (docs/plan/20, Decision 9). Developer tooling for GCP
