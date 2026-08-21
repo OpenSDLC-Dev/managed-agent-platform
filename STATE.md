@@ -4,16 +4,7 @@ What is being worked on right now, and how far along it is — nothing else. **S
 
 ## Active work
 
-Three issues left open by plan 35's delivery, taken in this order. No plan file — each
-is bounded and already scoped in its own issue, which stays the record of that scope.
-[Plan 35](./docs/plan/35_multiagent-threads.md) (#53) archived 2026-08-21; its delivery
-record is [docs/HISTORY.md](./docs/HISTORY.md).
-
-## Tasks
-
-- [x] **#431** — the advisor roster entry: its refusal recorded as settled and the
-      registry corrected around it (#444).
-- [x] **#442** — the four settlement-chain follow-ups the slice-4 review deferred,
-      with the chain bounded at 25 consecutive turns (#446).
-- [ ] **#441** — the BYOC worker's mid-run cancel, per plan 35 decision 9. Implemented
-      and green locally; PR open.
+**None.** The three follow-ups taken from plan 35's delivery are closed — #431 by PR
+#444, #442 by #446, #441 by #448 — and what they surfaced but did not close is filed as
+issues #445 and #447. [Plan 35](./docs/plan/35_multiagent-threads.md) (#53) archived
+2026-08-21; its delivery record is [docs/HISTORY.md](./docs/HISTORY.md).
