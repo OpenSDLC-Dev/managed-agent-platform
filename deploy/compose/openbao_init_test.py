@@ -243,8 +243,9 @@ def shared_region(text):
 def rewrite(source, init_file, reverts=()):
     """`source` with INIT_FILE repointed and `reverts` applied, or None if any
     substitution did not match exactly what it expected."""
-    # A function replacement, not a template: a path is data, and on a Windows
-    # checkout it carries backslashes that re.sub would read as escapes.
+    # A function replacement, not a template: the path is data, and re.sub reads
+    # a backslash or a `\g<...>` in a replacement as syntax. TMPDIR decides this
+    # path, so nothing here gets to assume it is free of either.
     text, n = re.subn(
         r"(?m)^INIT_FILE=.*$",
         lambda _: "INIT_FILE=" + shlex.quote(str(init_file)),
@@ -323,6 +324,8 @@ def run(s, source, reverts=(), deadline=120):
     env["BAO_ADDR"] = "http://openbao:8200"
     env["BAO_PLATFORM_TOKEN"] = PLATFORM_TOKEN
     env["BAO_TRANSIT_KEY"] = TRANSIT_KEY
+    # grep's own diagnostics are asserted on below, and they are translated.
+    env["LC_ALL"] = "C"
     # The scripts export this themselves; a developer's shell must not supply it.
     env.pop("BAO_TOKEN", None)
     proc = subprocess.Popen(
@@ -485,6 +488,23 @@ def main():
             check("%s is unusable" % label, "volume lost?" in r.out, r.out)
             check("%s stops before authenticating" % label,
                   not any(c.startswith("secrets list") for c in s.calls()), s.calls())
+
+        # An init.json that is INTACT but cannot be READ is the state that must not
+        # be reported as a lost volume, because the recovery printed under that
+        # diagnostic destroys the volume holding the only copy of the root token.
+        # Root can read anything, so this is the one check needing a uid that can
+        # be refused; CI's runner is not root, which is where it has to bite.
+        print("an unreadable init.json says why, rather than reading as a lost volume")
+        if os.geteuid() == 0:
+            print("  --   not run: root cannot be refused by any mode (runs in CI, which is not root)")
+        else:
+            s = stack(tmp, "unreadable", initialized=True)
+            s.init_file.write_text(json.dumps({"root_token": ROOT_TOKEN}))
+            s.init_file.chmod(0o000)
+            r = run(s, compose)
+            check("it fails", r.code == 1, r.out)
+            check("the read error reaches the operator", "Permission denied" in r.out, r.out)
+            check("the recovery still follows it", "volume lost?" in r.out, r.out)
 
         # The one path on which the .tmp holds anything worth having: init wrote it
         # and the container died before the move. Sweeping it would destroy the only
