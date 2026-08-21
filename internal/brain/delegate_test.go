@@ -1316,14 +1316,14 @@ func TestSettlementChainBelowTheCapStillChains(t *testing.T) {
 	}, nil)
 	h.roster(t, "researcher")
 	h.wake(t, "delegate")
-	h.setChainCount(t, 24) // maxSettlementChain - 1
+	h.setChainCount(t, 23) // this turn is the 24th; the 25th is the cut
 
 	h.runOnce(t)
 	if s := h.threadStatus(t, domain.PrimaryThreadID(h.sessionID)); s != "running" {
 		t.Errorf("coordinator = %q, want running one turn below the cap", s)
 	}
-	if n := h.chainCount(t); n != 25 {
-		t.Errorf("count = %d, want 25", n)
+	if n := h.chainCount(t); n != 24 {
+		t.Errorf("count = %d, want 24", n)
 	}
 	if n := h.countType(t, "session.error"); n != 0 {
 		t.Errorf("session.error = %d, want none below the cap", n)
@@ -1341,7 +1341,7 @@ func TestSettlementChainIsCutAtTheCap(t *testing.T) {
 	}, nil)
 	h.roster(t, "researcher")
 	h.wake(t, "delegate")
-	h.setChainCount(t, 25) // maxSettlementChain
+	h.setChainCount(t, 24) // this turn is the 25th — maxSettlementChain
 
 	h.runOnce(t)
 	primary := domain.PrimaryThreadID(h.sessionID)
@@ -1358,9 +1358,29 @@ func TestSettlementChainIsCutAtTheCap(t *testing.T) {
 	if len(errs) != 1 {
 		t.Fatalf("session.error = %d, want the one naming the cut chain", len(errs))
 	}
-	body := string(errs[0].Body)
-	if !strings.Contains(body, "delegation_chain_exhausted_error") || !strings.Contains(body, "25") {
-		t.Errorf("session.error = %s, want the coined type and the cap", body)
+	var payload struct {
+		Error struct {
+			Type        string `json:"type"`
+			Message     string `json:"message"`
+			RetryStatus struct {
+				Type string `json:"type"`
+			} `json:"retry_status"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(errs[0].Body, &payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload.Error.Type != "delegation_chain_exhausted_error" {
+		t.Errorf("error type = %q, want delegation_chain_exhausted_error", payload.Error.Type)
+	}
+	if !strings.Contains(payload.Error.Message, "25") {
+		t.Errorf("message = %q, want the count it actually ran", payload.Error.Message)
+	}
+	// Required on every variant of the reference's error union, and carried
+	// by every other session.error this platform writes.
+	if payload.Error.RetryStatus.Type != "exhausted" {
+		t.Errorf("retry_status = %q, want exhausted — nothing will retry on its own",
+			payload.Error.RetryStatus.Type)
 	}
 	if got := h.answers(t); len(got) != 1 || got[0].isErr {
 		t.Errorf("answers = %v, want list_agents answered as usual", got)
@@ -1387,7 +1407,7 @@ func TestInputAtTheCapChainsAnywayAndResetsTheCount(t *testing.T) {
 		}
 	}
 	h.wake(t, "delegate")
-	h.setChainCount(t, 25) // maxSettlementChain
+	h.setChainCount(t, 24) // this turn would otherwise be the cut
 
 	h.runOnce(t)
 	if s := h.threadStatus(t, domain.PrimaryThreadID(h.sessionID)); s != "running" {

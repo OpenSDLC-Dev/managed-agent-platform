@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
 	"github.com/jackc/pgx/v5"
@@ -142,6 +143,15 @@ func WakeThread(ctx context.Context, tx pgx.Tx, sessionID, threadID domain.ID) (
 		return nil, nil, false, err
 	}
 	if unanswered {
+		// Logged, not returned silently, and the one refusal here that is:
+		// the other two mean the thread is running or is waiting on a human,
+		// and whoever answers wakes it. This one means nothing will — the
+		// message is delivered onto a thread no trigger can resume — while
+		// the caller still answers the model "Message sent." An operator
+		// needs the one line that says so, the same line the API's own arm
+		// writes for the same state.
+		slog.WarnContext(ctx, "thread not woken: it is idle with an unanswered tool_use",
+			"session_id", sessionID, "session_thread_id", tid)
 		return nil, nil, false, nil
 	}
 	pair, moved, err = TransitionThread(ctx, tx, sessionID, ThreadTransition{

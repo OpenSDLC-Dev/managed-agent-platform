@@ -494,18 +494,7 @@ func (q *Queue) Extend(ctx context.Context, item *Item, ttl time.Duration) error
 // (input that arrived mid-turn) and chains it under the item's existing
 // live slot — an Enqueue would be suppressed by it. Requires the lease.
 func (q *Queue) Requeue(ctx context.Context, db DB, item *Item) error {
-	tag, err := db.Exec(ctx,
-		`UPDATE work_items
-		 SET state = 'queued', lease_expires_at = NULL, updated_at = now()
-		 WHERE id = $1 AND state = 'active' AND lease_expires_at = $2`,
-		item.ID, item.Lease)
-	if err != nil {
-		return fmt.Errorf("queue: requeue %s: %w", item.ID, err)
-	}
-	if tag.RowsAffected() == 0 {
-		return fmt.Errorf("queue: requeue %s: %w", item.ID, ErrLeaseLost)
-	}
-	return nil
+	return q.requeue(ctx, db, item, 0)
 }
 
 // RequeueSettlement is Requeue for the one chain nobody feeds. A delegated
@@ -515,24 +504,44 @@ func (q *Queue) Requeue(ctx context.Context, db DB, item *Item) error {
 // no delay, no budget and no end (#442). This records how long the run is;
 // the brain caps it (internal/brain/delegate.go). A chain taken because input
 // arrived mid-turn passes 0: that input is progress, and resetting is what
-// keeps a busy coordinator from tripping a cap meant for a stuck one.
+// keeps a busy coordinator from tripping a cap meant for a stuck one — as
+// does plain Requeue, which clears the count for the same reason.
 //
-// The count lives in metadata because work_items already has the column — so
-// no migration — and because a model_turn item is invisible to the work API
-// (workAPIScope is tool_exec only), so nothing written here reaches the wire.
-// Requires the lease, exactly as Requeue does.
+// The count lives in metadata because work_items already has the column, so
+// no migration. It bounds a thread that keeps chaining its own turn with
+// nothing feeding it; a peer waking this thread enqueues a fresh item and so
+// starts a fresh run, deliberately, because a message from another agent is
+// input like any other. Requires the lease, exactly as Requeue does.
 func (q *Queue) RequeueSettlement(ctx context.Context, db DB, item *Item, chain int) error {
+	return q.requeue(ctx, db, item, chain)
+}
+
+// requeue is the shared body of the two above: the lease proof is written
+// once, because a claim's ownership rule must not be able to differ between
+// two paths that both hand an item back.
+//
+// chain is the only difference. A positive count writes the settlement key; 0
+// removes it, which is what makes Requeue's meaning "whatever unfed run was
+// in flight has ended" — any other reason to chain an item is progress. The
+// removal is a no-op on the rows that never carried the key, so a tool_exec
+// item's client-visible metadata is untouched by the executor's own requeue;
+// and since only the delegation settlement passes a positive count, and it
+// only ever holds a model_turn item, the key cannot reach the wire work
+// object either way (workAPIScope is tool_exec only).
+func (q *Queue) requeue(ctx context.Context, db DB, item *Item, chain int) error {
 	tag, err := db.Exec(ctx,
 		`UPDATE work_items
 		 SET state = 'queued', lease_expires_at = NULL, updated_at = now(),
-		     metadata = jsonb_set(metadata, '{settlement_chain}', to_jsonb($3::int), true)
+		     metadata = CASE WHEN $3::int > 0
+		                     THEN jsonb_set(metadata, '{settlement_chain}', to_jsonb($3::int), true)
+		                     ELSE metadata - 'settlement_chain' END
 		 WHERE id = $1 AND state = 'active' AND lease_expires_at = $2`,
 		item.ID, item.Lease, chain)
 	if err != nil {
-		return fmt.Errorf("queue: requeue settlement %s: %w", item.ID, err)
+		return fmt.Errorf("queue: requeue %s: %w", item.ID, err)
 	}
 	if tag.RowsAffected() == 0 {
-		return fmt.Errorf("queue: requeue settlement %s: %w", item.ID, ErrLeaseLost)
+		return fmt.Errorf("queue: requeue %s: %w", item.ID, ErrLeaseLost)
 	}
 	return nil
 }

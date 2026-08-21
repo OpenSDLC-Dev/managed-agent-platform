@@ -53,6 +53,12 @@ const maxLiveThreads = 25
 // are two or three turns — spawn, list, then a wait that parks — so a thread
 // that reaches 25 has stopped making progress rather than working through a
 // roster.
+//
+// What it bounds is one thread chaining its OWN turn with nothing feeding it.
+// A client's message resets the count, and so does a peer agent's, which
+// arrives as a fresh item: two agents messaging each other in a loop are not
+// bounded here and are not meant to be — that is a session-wide budget, not
+// this thread-local one (#447).
 const maxSettlementChain = 25
 
 // maxDelegationText bounds the model-supplied text a delegation call carries
@@ -677,7 +683,7 @@ func (b *Brain) commitDelegatedTurn(ctx context.Context, sid domain.ID, item *qu
 		// feeds, so it is the one that has to be counted. Cutting it idles the
 		// thread instead: the session's fold can then leave running, archive
 		// and delete stop refusing, and a message still resumes the work.
-		capped := chain && item.Chain >= maxSettlementChain
+		capped := chain && item.Chain+1 >= maxSettlementChain
 		byInput := false
 		if idle || capped {
 			// The chain-or-idle check every other terminal settlement makes
@@ -734,11 +740,15 @@ func (b *Brain) commitDelegatedTurn(ctx context.Context, sid domain.ID, item *qu
 		}
 		opts.Then = func(ctx context.Context, tx pgx.Tx) error {
 			if chain {
-				next := item.Chain + 1
+				// Input is progress, and plain Requeue clears the count: the
+				// run being bounded is the one nothing feeds.
+				var err error
 				if byInput {
-					next = 0
+					err = b.queue.Requeue(ctx, tx, item)
+				} else {
+					err = b.queue.RequeueSettlement(ctx, tx, item, item.Chain+1)
 				}
-				if err := b.queue.RequeueSettlement(ctx, tx, item, next); err != nil {
+				if err != nil {
 					return err
 				}
 			} else {
@@ -800,14 +810,22 @@ func chainInput(ctx context.Context, tx pgx.Tx, sid, threadID domain.ID, waterma
 // alone would be indistinguishable from a coordinator that finished, so the
 // operator gets the reason; the model does not, because a session.error never
 // reaches it in replay. It is the thread's own event, stamped and not
-// cross-posted — the same shape failTurn's error takes, since the thread's
-// own status change is what the session view already surfaces.
+// cross-posted — the same shape failTurn's error takes. So on a child thread
+// it reads on that child's own stream, not the session view, exactly as a
+// child's failed turn does; the session view sees the thread's status change.
 func chainCapped(threadID domain.ID, agentName string) (events.NewEvent, error) {
 	payload, err := json.Marshal(map[string]any{"error": map[string]any{
 		"type": "delegation_chain_exhausted_error",
 		"message": fmt.Sprintf("%s ran %d consecutive turns that answered only their own "+
-			"delegation calls, with nothing left to wait for. The thread is idle; send it "+
-			"a message to continue.", agentName, maxSettlementChain),
+			"delegation calls, with nothing left to wait for. The thread is idle; a "+
+			"message, or a report from a child it spawned, resumes it.",
+			agentName, maxSettlementChain),
+		// Required on every variant of the reference's error union, and
+		// carried by every other session.error this platform writes.
+		// "exhausted", not "retrying": the platform will make no further
+		// attempt on its own, which is the whole point of the cut. What
+		// resumes the thread is somebody else's message or a child's report.
+		"retry_status": map[string]any{"type": "exhausted"},
 	}})
 	if err != nil {
 		return events.NewEvent{}, err
