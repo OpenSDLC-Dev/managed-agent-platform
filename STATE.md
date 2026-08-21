@@ -4,9 +4,15 @@ What is being worked on right now, and how far along it is — nothing else. **S
 
 ## Active work
 
-**None.** [Plan 35](./docs/plan/35_multiagent-threads.md) (#53) — multi-agent session
-threads, the coordinator topology — archived 2026-08-21, all six slices delivered. The
-delivery record is [docs/HISTORY.md](./docs/HISTORY.md); the narrative sits in
-[changelog.d/](./changelog.d/) until the next release folds it in.
+Three issues left open by plan 35's delivery, taken in this order. No plan file — each
+is bounded and already scoped in its own issue, which stays the record of that scope.
+[Plan 35](./docs/plan/35_multiagent-threads.md) (#53) archived 2026-08-21; its delivery
+record is [docs/HISTORY.md](./docs/HISTORY.md).
 
-The backlog is GitHub issues; nothing is in flight.
+## Tasks
+
+- [ ] **#431** — the advisor roster entry, registered by slice 0's SDK bump beside
+      #430/#432/#433, which stay open. Its refusal was already enforced; the PR in
+      flight records it as settled, corrects the registry around it, and closes it.
+- [ ] **#442** — the four settlement-chain follow-ups the slice-4 review deferred.
+- [ ] **#441** — the BYOC worker's mid-run cancel, per plan 35 decision 9.
