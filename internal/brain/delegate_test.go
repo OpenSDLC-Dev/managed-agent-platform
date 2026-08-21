@@ -1534,6 +1534,13 @@ func TestACappedChildTellsItsCoordinatorAndWakesIt(t *testing.T) {
 	}}, nil)
 	h.roster(t, "researcher")
 	child := h.childTurn(t, "work on it")
+	// The exact W1 shape: the coordinator parked on a wait leaves an idle
+	// thread stopped on end_turn, which is what the cut has to wake.
+	if _, err := h.pool.Exec(context.Background(),
+		`UPDATE session_threads SET stop_reason = '{"type":"end_turn"}'::jsonb WHERE id = $1`,
+		domain.PrimaryThreadID(h.sessionID).String()); err != nil {
+		t.Fatal(err)
+	}
 	h.setChainCount(t, child, 24) // this turn is the 25th
 
 	h.runOnce(t)
