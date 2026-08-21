@@ -6,5 +6,6 @@ What is being worked on right now, and how far along it is — nothing else. **S
 
 **None.** The three follow-ups taken from plan 35's delivery are closed — #431 by PR
 #444, #442 by #446, #441 by #448 — and what they surfaced but did not close is filed as
-issues #445 and #447. [Plan 35](./docs/plan/35_multiagent-threads.md) (#53) archived
+issues #445 and #447. The OpenBao init defect that same acceptance surfaced, #439, is
+closed by #454. [Plan 35](./docs/plan/35_multiagent-threads.md) (#53) archived
 2026-08-21; its delivery record is [docs/HISTORY.md](./docs/HISTORY.md).
