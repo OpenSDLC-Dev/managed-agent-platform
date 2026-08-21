@@ -284,7 +284,8 @@ func (q *Queue) Claim(ctx context.Context, kind Kind, ttl time.Duration) (*Item,
 		 WHERE w.id = p.id
 		 RETURNING w.id, w.environment_id, w.session_id, COALESCE(w.thread_id, ''), w.kind,
 		           w.lease_expires_at, p.state, w.trace_context,
-		           COALESCE((w.metadata->>'settlement_chain')::int, 0)`,
+		           CASE WHEN jsonb_typeof(w.metadata->'settlement_chain') = 'number'
+		                THEN (w.metadata->>'settlement_chain')::int ELSE 0 END`,
 		kind, ttl.Seconds()).Scan(&it.ID, &it.EnvironmentID, &it.SessionID, &it.ThreadID, &it.Kind, &it.Lease,
 		&prevState, &it.TraceContext, &it.Chain)
 	if errors.Is(err, pgx.ErrNoRows) {

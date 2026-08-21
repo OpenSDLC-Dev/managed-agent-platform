@@ -1236,14 +1236,14 @@ func slicesEq(a, b []string) bool {
 // chainCount reads the consecutive-settlement count off the primary's live
 // model_turn item — queue.RequeueSettlement's own record of how long the
 // current chain is.
-func (h *harness) chainCount(t *testing.T) int {
+func (h *harness) chainCount(t *testing.T, tid domain.ID) int {
 	t.Helper()
 	var n int
 	if err := h.pool.QueryRow(context.Background(),
 		`SELECT COALESCE((metadata->>'settlement_chain')::int, 0) FROM work_items
-		  WHERE session_id = $1 AND kind = 'model_turn' AND thread_id IS NULL
-		    AND state <> 'stopped'`,
-		h.sessionID.String()).Scan(&n); err != nil {
+		  WHERE session_id = $1 AND kind = 'model_turn'
+		    AND thread_id IS NOT DISTINCT FROM $2 AND state <> 'stopped'`,
+		h.sessionID.String(), events.NullableThread(tid)).Scan(&n); err != nil {
 		t.Fatal(err)
 	}
 	return n
@@ -1251,12 +1251,13 @@ func (h *harness) chainCount(t *testing.T) int {
 
 // setChainCount puts the primary's live turn partway into a chain, so a test
 // can reach the cap without paying for the turns that would get there.
-func (h *harness) setChainCount(t *testing.T, n int) {
+func (h *harness) setChainCount(t *testing.T, tid domain.ID, n int) {
 	t.Helper()
 	tag, err := h.pool.Exec(context.Background(),
-		`UPDATE work_items SET metadata = jsonb_set(metadata, '{settlement_chain}', to_jsonb($2::int), true)
-		  WHERE session_id = $1 AND kind = 'model_turn' AND thread_id IS NULL AND state <> 'stopped'`,
-		h.sessionID.String(), n)
+		`UPDATE work_items SET metadata = jsonb_set(metadata, '{settlement_chain}', to_jsonb($3::int), true)
+		  WHERE session_id = $1 AND kind = 'model_turn'
+		    AND thread_id IS NOT DISTINCT FROM $2 AND state <> 'stopped'`,
+		h.sessionID.String(), events.NullableThread(tid), n)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1296,11 +1297,11 @@ func TestSettlementChainCountsItsConsecutiveTurns(t *testing.T) {
 	h.wake(t, "delegate")
 
 	h.runOnce(t)
-	if n := h.chainCount(t); n != 1 {
+	if n := h.chainCount(t, ""); n != 1 {
 		t.Errorf("count after one chained turn = %d, want 1", n)
 	}
 	h.runOnce(t)
-	if n := h.chainCount(t); n != 2 {
+	if n := h.chainCount(t, ""); n != 2 {
 		t.Errorf("count after two chained turns = %d, want 2", n)
 	}
 	if s := h.threadStatus(t, domain.PrimaryThreadID(h.sessionID)); s != "running" {
@@ -1316,13 +1317,13 @@ func TestSettlementChainBelowTheCapStillChains(t *testing.T) {
 	}, nil)
 	h.roster(t, "researcher")
 	h.wake(t, "delegate")
-	h.setChainCount(t, 23) // this turn is the 24th; the 25th is the cut
+	h.setChainCount(t, "", 23) // this turn is the 24th; the 25th is the cut
 
 	h.runOnce(t)
 	if s := h.threadStatus(t, domain.PrimaryThreadID(h.sessionID)); s != "running" {
 		t.Errorf("coordinator = %q, want running one turn below the cap", s)
 	}
-	if n := h.chainCount(t); n != 24 {
+	if n := h.chainCount(t, ""); n != 24 {
 		t.Errorf("count = %d, want 24", n)
 	}
 	if n := h.countType(t, "session.error"); n != 0 {
@@ -1341,7 +1342,7 @@ func TestSettlementChainIsCutAtTheCap(t *testing.T) {
 	}, nil)
 	h.roster(t, "researcher")
 	h.wake(t, "delegate")
-	h.setChainCount(t, 24) // this turn is the 25th — maxSettlementChain
+	h.setChainCount(t, "", 24) // this turn is the 25th — maxSettlementChain
 
 	h.runOnce(t)
 	primary := domain.PrimaryThreadID(h.sessionID)
@@ -1407,13 +1408,13 @@ func TestInputAtTheCapChainsAnywayAndResetsTheCount(t *testing.T) {
 		}
 	}
 	h.wake(t, "delegate")
-	h.setChainCount(t, 24) // this turn would otherwise be the cut
+	h.setChainCount(t, "", 24) // this turn would otherwise be the cut
 
 	h.runOnce(t)
 	if s := h.threadStatus(t, domain.PrimaryThreadID(h.sessionID)); s != "running" {
 		t.Errorf("coordinator = %q, want running: input chains past the cap", s)
 	}
-	if n := h.chainCount(t); n != 0 {
+	if n := h.chainCount(t, ""); n != 0 {
 		t.Errorf("count = %d, want 0 — the chain the input took is not the one being bounded", n)
 	}
 	if n := h.countType(t, "session.error"); n != 0 {
@@ -1491,5 +1492,77 @@ func TestAskGatedDelegatedTurnGatesExecButStillRunsItsChild(t *testing.T) {
 	}
 	if n := h.liveTurns(t, ""); n != 0 {
 		t.Errorf("coordinator turns queued = %d, want none while it waits", n)
+	}
+}
+
+// A turn that wakes another thread scheduled somebody's work, so it is not
+// part of the run being bounded. Without this a coordinator spawning one
+// agent per turn walks straight into the cut: its own requeued item keeps its
+// created_at, so it stays the oldest queued turn and no spawned child runs in
+// between to break the run.
+func TestASpawningTurnIsProgressAndResetsTheCount(t *testing.T) {
+	h := newHarness(t, [][]provider.Chunk{{
+		toolCall("t1", "create_agent", `{"agent_name":"researcher","message":"go"}`),
+		done("tool_use", 1),
+	}}, nil)
+	h.roster(t, "researcher")
+	h.wake(t, "spawn one")
+	h.setChainCount(t, "", 24) // one short of the cut, were this not progress
+
+	h.runOnce(t)
+	if s := h.threadStatus(t, domain.PrimaryThreadID(h.sessionID)); s != "running" {
+		t.Errorf("coordinator = %q, want running: a spawn is progress", s)
+	}
+	if n := h.chainCount(t, ""); n != 0 {
+		t.Errorf("count = %d, want 0 — the spawn reset it", n)
+	}
+	if n := h.countType(t, "session.error"); n != 0 {
+		t.Errorf("session.error = %d, want none", n)
+	}
+}
+
+// A capped child owes its coordinator the notice every other ending owes it.
+// Without one, a coordinator parked on a wait has nothing left to wake it —
+// the W1 wedge — because a child merely going idle is not an ending anyone
+// watches. The child's turn here is a coordinator-only tool, refused by role:
+// an is_error that parks nothing, reports nothing and wakes nobody, so it
+// chains, which is exactly the shape the cap exists for.
+func TestACappedChildTellsItsCoordinatorAndWakesIt(t *testing.T) {
+	h := newHarness(t, [][]provider.Chunk{{
+		toolCall("t1", "list_agents", `{}`),
+		done("tool_use", 1),
+	}}, nil)
+	h.roster(t, "researcher")
+	child := h.childTurn(t, "work on it")
+	h.setChainCount(t, child, 24) // this turn is the 25th
+
+	h.runOnce(t)
+
+	if s := h.threadStatus(t, child); s != "idle" {
+		t.Errorf("child = %q, want idle once its chain is cut", s)
+	}
+	if got := h.threadStop(t, child).Type; got != domain.StopEndTurn {
+		t.Errorf("child stop_reason = %q, want end_turn", got)
+	}
+	if n := h.liveTurns(t, child); n != 0 {
+		t.Errorf("child turns queued = %d, want none", n)
+	}
+
+	// The error is the child's own event, so it reads on the child's stream.
+	errs := h.eventsOfType(t, domain.EventSessionError)
+	if len(errs) != 1 || errs[0].ThreadID != child {
+		t.Fatalf("session.error = %+v, want one on the child's own log", errs)
+	}
+
+	// And the coordinator is told, and given a turn to act on it.
+	texts := h.receivedTexts(t, "")
+	if len(texts) != 1 || !strings.Contains(texts[0], "stopped") {
+		t.Fatalf("coordinator received %v, want the ending notice", texts)
+	}
+	if s := h.threadStatus(t, domain.PrimaryThreadID(h.sessionID)); s != "running" {
+		t.Errorf("coordinator = %q, want woken by the ending", s)
+	}
+	if n := h.liveTurns(t, ""); n != 1 {
+		t.Errorf("coordinator turns queued = %d, want 1 — a wake with no item is a wedge", n)
 	}
 }

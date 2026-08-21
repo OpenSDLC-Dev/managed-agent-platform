@@ -43,7 +43,9 @@ const maxLiveThreads = 25
 // keeps it running, so archive and delete refuse it; and because queue.Claim
 // orders by created_at, which a requeue deliberately does not move, the
 // looping item stays the oldest queued model_turn and starves every other
-// session on a single-brain deployment (#442).
+// session on a single-brain deployment (#442). A turn that woke another
+// thread is excluded: a successful create_agent or send_to_agent
+// scheduled somebody else's work, so it is progress, not a repeat.
 //
 // maxLiveThreads bounds spawn amplification and does not help here: at the
 // cap a create_agent becomes an is_error, which sets neither park nor ended,
@@ -683,7 +685,17 @@ func (b *Brain) commitDelegatedTurn(ctx context.Context, sid domain.ID, item *qu
 		// feeds, so it is the one that has to be counted. Cutting it idles the
 		// thread instead: the session's fold can then leave running, archive
 		// and delete stop refusing, and a message still resumes the work.
-		capped := chain && item.Chain+1 >= maxSettlementChain
+		// A turn that woke another thread scheduled work for somebody,
+		// whatever else it did, so it is not part of the run being bounded —
+		// which is the run that schedules nothing for anybody. This is what
+		// keeps a coordinator spawning one agent per turn away from the cut:
+		// its own requeued item keeps its created_at and stays the oldest
+		// queued turn, so no spawned child runs in between to break the run,
+		// and without this the 24th spawn of a 25-thread roster would trip it.
+		// d.out.wakes holds only the wakes that actually took (delegate.wake),
+		// so a send_to_agent at a child already running counts, as it should.
+		woke := len(d.out.wakes) > 0
+		capped := chain && !woke && item.Chain+1 >= maxSettlementChain
 		byInput := false
 		if idle || capped {
 			// The chain-or-idle check every other terminal settlement makes
@@ -711,6 +723,37 @@ func (b *Brain) commitDelegatedTurn(ctx context.Context, sid domain.ID, item *qu
 				return nil, opts, err
 			}
 			batch = append(batch, ev)
+			// The cut ends a child's work without a report, so it owes its
+			// coordinator the notice every other ending owes it (decision 7).
+			// The two idles this branch was written for do not: a park is the
+			// coordinator's own, and a submit_result already reported. Without
+			// it a coordinator parked on a wait has nothing left to wake it —
+			// WakeOnThreadEnded fires on a child that stopped, and a child
+			// merely going idle is not something anyone else watches. That is
+			// the W1 wedge. Notice, then the wake, then the idle below, in
+			// that order so the session never folds idle in between.
+			notice, nerr := childEndedNotice(ctx, tx, sid, item.ThreadID, func(agentName string) string {
+				return fmt.Sprintf("[agent %s stopped: %d consecutive turns answered only its own "+
+					"delegation calls]\n\nNothing was reported on them; anything it reported earlier "+
+					"stands. It is idle until you message it — send it what is missing, or archive it "+
+					"to free the slot.", agentName, maxSettlementChain)
+			})
+			if nerr != nil {
+				return nil, opts, nerr
+			}
+			if notice != nil {
+				pair, _, parentWoke, werr := events.WakeOnThreadEnded(ctx, tx, sid, item.ThreadID)
+				if werr != nil {
+					return nil, opts, werr
+				}
+				batch = append(append(batch, *notice), pair...)
+				if parentWoke {
+					// Through the same loop every other wake this settlement
+					// takes goes through, so a woken thread never ends up
+					// running with no item.
+					d.out.wakes = append(d.out.wakes, "")
+				}
+			}
 		}
 		switch {
 		case gated:
@@ -740,10 +783,11 @@ func (b *Brain) commitDelegatedTurn(ctx context.Context, sid domain.ID, item *qu
 		}
 		opts.Then = func(ctx context.Context, tx pgx.Tx) error {
 			if chain {
-				// Input is progress, and plain Requeue clears the count: the
-				// run being bounded is the one nothing feeds.
+				// Input and a wake are both progress, and plain Requeue
+				// clears the count: the run being bounded is the one that
+				// neither is fed nor feeds anyone.
 				var err error
-				if byInput {
+				if byInput || woke {
 					err = b.queue.Requeue(ctx, tx, item)
 				} else {
 					err = b.queue.RequeueSettlement(ctx, tx, item, item.Chain+1)
