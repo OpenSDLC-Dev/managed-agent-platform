@@ -11,9 +11,9 @@ own body admits three designs and none is obviously right.
 ## Tasks
 
 - [x] **#445** — the 60 stale `Tracked:` pointers repaired: annotated where the closure was
-      delivery, re-pointed at #78 where it orphaned an INFERRED entry, each naming the
-      recording that would settle it. CLAUDE.md's post-v1 enumeration gives way to the
-      `(post-v1)` title marker and its query. Defects the sweep surfaced outside that scope
-      are filed as issues, not carried here.
+      delivery, re-pointed at an open tracker where it orphaned an INFERRED entry, naming what
+      that entry still leaves open. The Format legend now states the rule. CLAUDE.md's post-v1
+      enumeration gives way to the `(post-v1)` title marker and a bounded query. Defects the
+      sweep surfaced outside that scope are filed as issues, not carried here.
 - [ ] **#447** — the session-scoped bound two agents messaging each other cannot escape.
       Design in progress; the plan file lands with the decision it records.
