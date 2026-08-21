@@ -31,6 +31,10 @@ ConfigMap block scalar it ships inside. The chart's script ends in an unbounded 
 loop, so it is driven only through the branches that exit before reaching it, which is
 exactly the #439 surface it shares with its compose sibling.
 
+Both run under the HOST's /bin/sh, which is dash on CI: POSIX like the image's busybox
+ash without being it. So this establishes POSIX behaviour and not ash-specific
+behaviour, and a bashism would pass here and fail in the container.
+
 Then, because an assertion that cannot go red is a comment, each half of the #439 fix is
 reverted in a scratch copy and the checks guarding it are REQUIRED to fail.
 
@@ -83,10 +87,15 @@ with (S / "calls.log").open("a") as f:
 st = state()
 
 # Unauthenticated, and the only call a vault answers before it is initialized.
+# Real `bao status` exits 2 while the vault is sealed, which an uninitialized one
+# always is, and that 2 is the whole right-hand side of the scripts' readiness
+# loop (`bao status || [ $? -eq 2 ]`) -- exiting 0 here would leave the branch
+# that actually runs on a first boot unexercised.
 if a[:1] == ["status"]:
+    sealed = not st["initialized"]
     if a[1:] == ["-format=json"]:
-        print(json.dumps({"initialized": st["initialized"], "sealed": False}, indent=2))
-    sys.exit(0)
+        print(json.dumps({"initialized": st["initialized"], "sealed": sealed}, indent=2))
+    sys.exit(2 if sealed else 0)
 
 if a[:2] == ["operator", "init"]:
     if (S / "fault.init").exists():
@@ -96,9 +105,11 @@ if a[:2] == ["operator", "init"]:
         save(st)
         die("Error initializing: Vault is already initialized")
     if (S / "fault.truncated").exists():
-        # Some stdout, then death -- the half-written init.json that `[ -s ]`
-        # alone would still read as good.
-        sys.stdout.write('{"unseal_keys_b64": ["k1"], "roo')
+        # Some stdout, then death. Real `bao` writes root_token LAST, so the
+        # likeliest cut is through the token itself: a file carrying the key and
+        # no readable value, which `[ -s ]` and a test for the key both wave
+        # through.
+        sys.stdout.write('{"unseal_keys_b64": ["k1", "k2"], "root_token": "hvs.ab')
         sys.stdout.flush()
         st["initialized"] = True
         save(st)
@@ -165,8 +176,8 @@ REDIRECT = (
     'bao operator init -format=json >"$INIT_FILE"',
 )
 RECOVERY = (
-    "elif ! grep -q '\"root_token\"' \"$INIT_FILE\" 2>/dev/null; then",
-    'elif [ ! -f "$INIT_FILE" ]; then',
+    'if [ -z "$BAO_TOKEN" ]; then',
+    'if [ ! -f "$INIT_FILE" ]; then',
 )
 
 failures = []
@@ -266,6 +277,9 @@ def run(tmp, name, source, initialized=False, transit=False, tokens=None,
         stale.unlink()
     for fault in faults:
         (work / "state" / ("fault." + fault)).touch()
+    # calls.log is per-run for the same reason, so what a reused stack asserts
+    # about is the run just made and not everything it has ever been asked.
+    (work / "state" / "calls.log").write_text("")
 
     script = work / "openbao-init.sh"
     script.write_text(rewrite(source, work / "volume" / "init.json", reverts))
@@ -354,8 +368,9 @@ def main():
         r = run(tmp, "failedinit", compose, faults=("init",))
         r = run(tmp, "failedinit", compose, reuse=r.work)
         check("it fails", r.code == 1, r.out)
-        check("it does not die on the root_token grep", "no root_token in" not in r.out, r.out)
         check("it points at the volume", "volume lost?" in r.out, r.out)
+        check("it stops before authenticating with an empty token",
+              not any(c.startswith("secrets list") for c in r.calls()), r.calls())
 
         # The stacks already stuck this way before the fix: a 0-byte init.json on
         # the volume, which `[ ! -f ]` walked straight past.
@@ -364,19 +379,31 @@ def main():
         r.init_file.touch()
         r = run(tmp, "emptyfile", compose, reuse=r.work)
         check("it fails", r.code == 1, r.out)
-        check("it does not die on the root_token grep", "no root_token in" not in r.out, r.out)
         check("it points at the volume", "volume lost?" in r.out, r.out)
+        check("it stops before authenticating with an empty token",
+              not any(c.startswith("secrets list") for c in r.calls()), r.calls())
 
-        # And the damage class `[ ! -s ]` would have missed: init wrote some of its
-        # output before dying, so the file is neither missing nor empty nor usable.
-        print("a half-written init.json reads as unusable too")
+        # And the damage `[ ! -s ]` would have missed. `bao` writes root_token
+        # LAST, so a truncated init.json most often cuts through the token itself:
+        # a file carrying the key and no readable value, which a test for the key
+        # waves through as readily as `-s` does. Guarding on the extracted token
+        # is what collapses all four cuts into the one state they really are.
+        print("a part-written init.json reads as unusable, wherever it was cut")
         r = run(tmp, "partialfile", compose, faults=("truncated",))
         check("the script fails", r.code not in (0, None), r.out)
         r.tmp_file.replace(r.init_file)  # what the pre-fix redirect would have left
         r = run(tmp, "partialfile", compose, reuse=r.work)
-        check("it fails", r.code == 1, r.out)
-        check("it does not die on the root_token grep", "no root_token in" not in r.out, r.out)
-        check("it points at the volume", "volume lost?" in r.out, r.out)
+        check("a cut inside the token value is unusable", "volume lost?" in r.out, r.out)
+        for label, payload in (
+            ("a cut before the key", '{"unseal_keys_b64": ["k1"], "roo'),
+            ("a cut just after the key", '{"unseal_keys_b64": ["k1"], "root_token"'),
+            ("a key with no value", '{"root_token": ""}'),
+        ):
+            r.init_file.write_text(payload)
+            r = run(tmp, "partialfile", compose, reuse=r.work)
+            check("%s is unusable" % label, "volume lost?" in r.out, r.out)
+            check("%s stops before authenticating" % label,
+                  not any(c.startswith("secrets list") for c in r.calls()), r.calls())
 
         # The one path on which the .tmp holds anything worth having: init wrote it
         # and the container died before the move. Sweeping it would destroy the only
@@ -422,17 +449,17 @@ def main():
         r = run(tmp, "chartfailed", chart, faults=("init",))
         check("a failed init leaves no init.json", not r.init_file.exists(), r.out)
         r = run(tmp, "chartfailed", chart, reuse=r.work)
-        check("the next run does not die on the root_token grep",
-              "no root_token in" not in r.out, r.out)
         check("the next run points at the volume", "volume lost?" in r.out, r.out)
+        check("the next run stops before authenticating",
+              not any(c.startswith("secrets list") for c in r.calls()), r.calls())
         r = run(tmp, "chartempty", chart, initialized=True)
         r.init_file.touch()
         r = run(tmp, "chartempty", chart, reuse=r.work)
         check("an empty init.json reads as unusable", "volume lost?" in r.out, r.out)
         r = run(tmp, "chartpartial", chart, initialized=True)
-        r.init_file.write_text('{"unseal_keys_b64": ["k1"], "roo')
+        r.init_file.write_text('{"unseal_keys_b64": ["k1"], "root_token": "hvs.ab')
         r = run(tmp, "chartpartial", chart, reuse=r.work)
-        check("a half-written init.json reads as unusable", "volume lost?" in r.out, r.out)
+        check("a token cut in half reads as unusable", "volume lost?" in r.out, r.out)
 
         # Every check above is worth exactly what it refuses. Each half of the fix
         # goes back into a scratch copy of each script and the checks guarding it
@@ -443,16 +470,22 @@ def main():
             check("%s: the pre-fix redirect leaves a 0-byte init.json" % label,
                   r.init_file.exists() and r.init_file.stat().st_size == 0, r.out)
 
+            # With the pre-fix guard the recovery never fires, and the run goes on
+            # to authenticate with the empty token it just failed to read — which
+            # is the shape of #439: walked past, then dead somewhere else.
             r = run(tmp, "revert-recovery", source, initialized=True, reverts=[RECOVERY])
             r.init_file.touch()
             r = run(tmp, "revert-recovery", source, reuse=r.work, reverts=[RECOVERY])
             check("%s: the pre-fix `[ -f ]` walks past an empty init.json" % label,
-                  "no root_token in" in r.out, r.out)
+                  "volume lost?" not in r.out, r.out)
+            check("%s: ...and it authenticates with the token it never read" % label,
+                  any(c.startswith("secrets list") for c in r.calls()), r.calls())
 
             r = run(tmp, "revert-both", source, faults=("init",), reverts=[REDIRECT, RECOVERY])
             r = run(tmp, "revert-both", source, reuse=r.work, reverts=[REDIRECT, RECOVERY])
             check("%s: both halves reverted reproduce the dead end #439 reported" % label,
-                  "no root_token in" in r.out, r.out)
+                  "volume lost?" not in r.out and any(c.startswith("secrets list") for c in r.calls()),
+                  "%s\n%s" % (r.out, r.calls()))
 
         print()
         if failures:

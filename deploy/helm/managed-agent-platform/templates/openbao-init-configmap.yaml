@@ -62,7 +62,7 @@ data:
     	echo "initializing openbao (first boot)"
     	# A redirect truncates its target before the command runs, so
     	# initializing straight into $INIT_FILE leaves an empty one behind when
-    	# init fails — which the branch below then has to tell apart from a lost
+    	# init fails — which the guard below then has to tell apart from a lost
     	# volume (#439). Here that is a CrashLoopBackOff rather than one failed
     	# `compose up`, since the kubelet re-runs this on every restart. Land the
     	# output only once init has succeeded; whatever a failed init left in the
@@ -70,11 +70,17 @@ data:
     	bao operator init -format=json >"$INIT_FILE.tmp"
     	mv "$INIT_FILE.tmp" "$INIT_FILE"
     	chmod 600 "$INIT_FILE"
-    elif ! grep -q '"root_token"' "$INIT_FILE" 2>/dev/null; then
-    	# Missing, empty and half-written are one state to an operator and share
-    	# one recovery, so this tests for the token rather than for the file:
-    	# `[ -f ]` walked straight past the 0-byte init.json a failed init used
-    	# to leave, and `[ -s ]` would still walk past a truncated one.
+    fi
+
+    # Missing, empty and part-written are one state to an operator and share
+    # one recovery, so the guard turns on the token the rest of this script
+    # needs rather than on the file holding it. No test of the file can stand
+    # in for that: `[ -f ]` walked straight past the 0-byte init.json a failed
+    # init used to leave (#439), `[ -s ]` walks past a truncated one, and `bao`
+    # writes root_token LAST — so the likeliest truncation of all lands inside
+    # the token, where even a test for the key would see one and read nothing.
+    BAO_TOKEN=$(grep -o '"root_token": *"[^"]*"' "$INIT_FILE" 2>/dev/null | cut -d'"' -f4)
+    if [ -z "$BAO_TOKEN" ]; then
     	echo "openbao is initialized but $INIT_FILE is missing or unusable (volume lost?);" >&2
     	if [ -s "$INIT_FILE.tmp" ]; then
     		echo "$INIT_FILE.tmp is not empty; check it for the root token before discarding anything" >&2
@@ -82,9 +88,6 @@ data:
     	echo "restore the data PVC or initialize manually" >&2
     	exit 1
     fi
-
-    BAO_TOKEN=$(grep -o '"root_token": *"[^"]*"' "$INIT_FILE" | cut -d'"' -f4)
-    [ -n "$BAO_TOKEN" ] || { echo "no root_token in $INIT_FILE" >&2; exit 1; }
     export BAO_TOKEN
 
     if ! bao secrets list -format=json | grep -q '"transit/"'; then

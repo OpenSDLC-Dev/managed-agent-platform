@@ -1076,11 +1076,9 @@ jobs:
       - name: docker compose config is valid
         run: docker compose config --quiet
       # The stack below never starts openbao and the helm job only renders the
-      # chart's copy, so the two scripts deciding whether a self-hosted stack can
-      # encrypt anything are the part of this repo nothing here runs. #439 was a
-      # failed init leaving a 0-byte init.json that the recovery branch read as a
-      # good one. This runs both against a fake `bao`; no Docker, so it is cheap
-      # and it fails before the image build.
+      # chart's copy, so without this nothing here runs either init script; the
+      # Makefile recipe argues it, and #439 is what it cost. No Docker, so it is
+      # cheap and it fails before the image build.
       - name: the openbao bootstrap scripts behave
         working-directory: .
         run: make openbao-init-test
