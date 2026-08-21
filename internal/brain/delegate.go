@@ -34,6 +34,27 @@ import (
 // would make a 26th is the is_error.
 const maxLiveThreads = 25
 
+// maxSettlementChain bounds a run of consecutive turns that chained on
+// nothing but their own settlement answers. Such a turn has nothing left to
+// wait for, so it hands its own model_turn straight back with no delay — and
+// every shape that reaches it is one a model repeats: list_agents, a
+// wait_for_agents answered timed_out, a create_agent maxLiveThreads refused,
+// send_to_parent. Unbounded, the thread never idles, so the session's fold
+// keeps it running, so archive and delete refuse it; and because queue.Claim
+// orders by created_at, which a requeue deliberately does not move, the
+// looping item stays the oldest queued model_turn and starves every other
+// session on a single-brain deployment (#442).
+//
+// maxLiveThreads bounds spawn amplification and does not help here: at the
+// cap a create_agent becomes an is_error, which sets neither park nor ended,
+// so it chains like the rest.
+//
+// The number is generous on purpose. A coordinator's own settlement-only runs
+// are two or three turns — spawn, list, then a wait that parks — so a thread
+// that reaches 25 has stopped making progress rather than working through a
+// roster.
+const maxSettlementChain = 25
+
 // maxDelegationText bounds the model-supplied text a delegation call carries
 // into an event payload — a task, a report, a message. Generous enough that no
 // real instruction is cut, small enough that the text cannot be used as a
@@ -517,6 +538,13 @@ func (d *delegate) waitForAgents(ctx context.Context, tx pgx.Tx) (string, bool, 
 		if !busy && !unread {
 			d.waited = &waitVerdict{answer: answerNothingToWaitFor}
 		} else {
+			// !unread is belt-and-braces: the settlement re-runs this same
+			// chainInput predicate and turns a park with input waiting into a
+			// chain anyway, so a bare park: busy behaves identically today and
+			// no test can tell them apart. It stays because the invariant this
+			// function documents is the wait's own — a wait that has something
+			// to read parks on nothing — and a verdict that says otherwise
+			// would be true only for as long as the downstream check exists.
 			d.waited = &waitVerdict{answer: answerWaitStarted, park: busy && !unread}
 		}
 	}
@@ -645,20 +673,38 @@ func (b *Brain) commitDelegatedTurn(ctx context.Context, sid domain.ID, item *qu
 		park := d.out.park && !gated && settlementOnly
 		chain := !gated && settlementOnly && !park && !d.out.ended
 		idle := !gated && (park || d.out.ended)
-		if idle {
+		// A chain the settlement took on its own answers is the one nobody
+		// feeds, so it is the one that has to be counted. Cutting it idles the
+		// thread instead: the session's fold can then leave running, archive
+		// and delete stop refusing, and a message still resumes the work.
+		capped := chain && item.Chain >= maxSettlementChain
+		byInput := false
+		if idle || capped {
 			// The chain-or-idle check every other terminal settlement makes
 			// (settle, settleEndTurn), for the same reason: input that arrived
 			// past the head this turn replayed has no trigger left once this
 			// thread is idle. A coordinator's send_to_agent to a child that was
 			// running is the case decision 6 promises the child "reads at its
-			// next settle" — this is that settle.
+			// next settle" — this is that settle. A capped turn asks it too:
+			// cutting the chain must not strand input either, and input is the
+			// progress that resets the count.
 			chained, err := chainInput(ctx, tx, sid, item.ThreadID, watermark)
 			if err != nil {
 				return nil, opts, err
 			}
-			if chained {
-				idle, chain = false, true
+			switch {
+			case chained:
+				idle, chain, capped, byInput = false, true, false, true
+			case capped:
+				idle, chain = true, false
 			}
+		}
+		if capped {
+			ev, err := chainCapped(item.ThreadID, agent.Name)
+			if err != nil {
+				return nil, opts, err
+			}
+			batch = append(batch, ev)
 		}
 		switch {
 		case gated:
@@ -688,7 +734,11 @@ func (b *Brain) commitDelegatedTurn(ctx context.Context, sid domain.ID, item *qu
 		}
 		opts.Then = func(ctx context.Context, tx pgx.Tx) error {
 			if chain {
-				if err := b.queue.Requeue(ctx, tx, item); err != nil {
+				next := item.Chain + 1
+				if byInput {
+					next = 0
+				}
+				if err := b.queue.RequeueSettlement(ctx, tx, item, next); err != nil {
 					return err
 				}
 			} else {
@@ -744,4 +794,23 @@ func chainInput(ctx context.Context, tx pgx.Tx, sid, threadID domain.ID, waterma
 		sid.String(), watermark, events.NullableThread(threadID), pendingInputTypes,
 		string(domain.EventAgentThreadMessageReceived)).Scan(&chained)
 	return chained, err
+}
+
+// chainCapped is the session.error a cut settlement chain leaves. An end_turn
+// alone would be indistinguishable from a coordinator that finished, so the
+// operator gets the reason; the model does not, because a session.error never
+// reaches it in replay. It is the thread's own event, stamped and not
+// cross-posted — the same shape failTurn's error takes, since the thread's
+// own status change is what the session view already surfaces.
+func chainCapped(threadID domain.ID, agentName string) (events.NewEvent, error) {
+	payload, err := json.Marshal(map[string]any{"error": map[string]any{
+		"type": "delegation_chain_exhausted_error",
+		"message": fmt.Sprintf("%s ran %d consecutive turns that answered only their own "+
+			"delegation calls, with nothing left to wait for. The thread is idle; send it "+
+			"a message to continue.", agentName, maxSettlementChain),
+	}})
+	if err != nil {
+		return events.NewEvent{}, err
+	}
+	return events.NewEvent{Type: domain.EventSessionError, Payload: payload, ThreadID: threadID}, nil
 }

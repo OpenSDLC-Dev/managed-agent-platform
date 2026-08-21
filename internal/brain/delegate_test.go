@@ -1226,3 +1226,250 @@ func slicesEq(a, b []string) bool {
 	}
 	return true
 }
+
+// Bounding the settlement chain (#442). A turn whose calls were all
+// settlement-executed hands its own model_turn straight back, so nothing
+// outside the model's own choices ends the run — and every shape that reaches
+// it is one a model repeats. The count rides on the item; maxSettlementChain
+// is what reads it.
+
+// chainCount reads the consecutive-settlement count off the primary's live
+// model_turn item — queue.RequeueSettlement's own record of how long the
+// current chain is.
+func (h *harness) chainCount(t *testing.T) int {
+	t.Helper()
+	var n int
+	if err := h.pool.QueryRow(context.Background(),
+		`SELECT COALESCE((metadata->>'settlement_chain')::int, 0) FROM work_items
+		  WHERE session_id = $1 AND kind = 'model_turn' AND thread_id IS NULL
+		    AND state <> 'stopped'`,
+		h.sessionID.String()).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	return n
+}
+
+// setChainCount puts the primary's live turn partway into a chain, so a test
+// can reach the cap without paying for the turns that would get there.
+func (h *harness) setChainCount(t *testing.T, n int) {
+	t.Helper()
+	tag, err := h.pool.Exec(context.Background(),
+		`UPDATE work_items SET metadata = jsonb_set(metadata, '{settlement_chain}', to_jsonb($2::int), true)
+		  WHERE session_id = $1 AND kind = 'model_turn' AND thread_id IS NULL AND state <> 'stopped'`,
+		h.sessionID.String(), n)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tag.RowsAffected() != 1 {
+		t.Fatalf("seed chain count: %d rows, want 1", tag.RowsAffected())
+	}
+}
+
+// threadStop reads a thread's stored stop_reason. The session's own fold can
+// differ — a coordinator idling under a running child leaves the session
+// running — so a thread-level settlement is asserted here, not on the session.
+func (h *harness) threadStop(t *testing.T, tid domain.ID) domain.StopReason {
+	t.Helper()
+	var raw []byte
+	if err := h.pool.QueryRow(context.Background(),
+		`SELECT stop_reason FROM session_threads WHERE id = $1`, tid.String()).Scan(&raw); err != nil {
+		t.Fatal(err)
+	}
+	var sr domain.StopReason
+	if len(raw) > 0 {
+		if err := json.Unmarshal(raw, &sr); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return sr
+}
+
+// Each chained turn adds one to the count, and the item carries it across
+// turns — it has to, because the next turn of a chain may be claimed by a
+// different brain.
+func TestSettlementChainCountsItsConsecutiveTurns(t *testing.T) {
+	h := newHarness(t, [][]provider.Chunk{
+		{toolCall("t1", "list_agents", `{}`), done("tool_use", 1)},
+		{toolCall("t2", "list_agents", `{}`), done("tool_use", 1)},
+	}, nil)
+	h.roster(t, "researcher")
+	h.wake(t, "delegate")
+
+	h.runOnce(t)
+	if n := h.chainCount(t); n != 1 {
+		t.Errorf("count after one chained turn = %d, want 1", n)
+	}
+	h.runOnce(t)
+	if n := h.chainCount(t); n != 2 {
+		t.Errorf("count after two chained turns = %d, want 2", n)
+	}
+	if s := h.threadStatus(t, domain.PrimaryThreadID(h.sessionID)); s != "running" {
+		t.Errorf("coordinator = %q, want running with its next turn queued", s)
+	}
+}
+
+// One turn below the cap still chains: the boundary is the cap itself, not
+// its neighbourhood.
+func TestSettlementChainBelowTheCapStillChains(t *testing.T) {
+	h := newHarness(t, [][]provider.Chunk{
+		{toolCall("t1", "list_agents", `{}`), done("tool_use", 1)},
+	}, nil)
+	h.roster(t, "researcher")
+	h.wake(t, "delegate")
+	h.setChainCount(t, 24) // maxSettlementChain - 1
+
+	h.runOnce(t)
+	if s := h.threadStatus(t, domain.PrimaryThreadID(h.sessionID)); s != "running" {
+		t.Errorf("coordinator = %q, want running one turn below the cap", s)
+	}
+	if n := h.chainCount(t); n != 25 {
+		t.Errorf("count = %d, want 25", n)
+	}
+	if n := h.countType(t, "session.error"); n != 0 {
+		t.Errorf("session.error = %d, want none below the cap", n)
+	}
+}
+
+// At the cap the chain is cut. The thread idles on end_turn — so the fold
+// lets the session leave running, and archive and delete stop refusing — and
+// a session.error says why, which an end_turn alone could not: it is
+// indistinguishable from a coordinator that finished. The call is still
+// answered: the turn is settled, not failed.
+func TestSettlementChainIsCutAtTheCap(t *testing.T) {
+	h := newHarness(t, [][]provider.Chunk{
+		{toolCall("t1", "list_agents", `{}`), done("tool_use", 1)},
+	}, nil)
+	h.roster(t, "researcher")
+	h.wake(t, "delegate")
+	h.setChainCount(t, 25) // maxSettlementChain
+
+	h.runOnce(t)
+	primary := domain.PrimaryThreadID(h.sessionID)
+	if s := h.threadStatus(t, primary); s != "idle" {
+		t.Errorf("coordinator = %q, want idle once the chain is cut", s)
+	}
+	if got := h.threadStop(t, primary).Type; got != domain.StopEndTurn {
+		t.Errorf("stop_reason = %q, want end_turn", got)
+	}
+	if n := h.liveTurns(t, ""); n != 0 {
+		t.Errorf("coordinator turns queued = %d, want none", n)
+	}
+	errs := h.eventsOfType(t, domain.EventSessionError)
+	if len(errs) != 1 {
+		t.Fatalf("session.error = %d, want the one naming the cut chain", len(errs))
+	}
+	body := string(errs[0].Body)
+	if !strings.Contains(body, "delegation_chain_exhausted_error") || !strings.Contains(body, "25") {
+		t.Errorf("session.error = %s, want the coined type and the cap", body)
+	}
+	if got := h.answers(t); len(got) != 1 || got[0].isErr {
+		t.Errorf("answers = %v, want list_agents answered as usual", got)
+	}
+}
+
+// Input is progress, so it chains past the cap and resets the count: the
+// bound exists for a thread nobody is feeding, not for a busy coordinator
+// that has been working for a while.
+func TestInputAtTheCapChainsAnywayAndResetsTheCount(t *testing.T) {
+	h := newHarness(t, [][]provider.Chunk{
+		{toolCall("t1", "list_agents", `{}`), done("tool_use", 1)},
+	}, nil)
+	h.roster(t, "researcher")
+	h.provider.onGenerate = func(call int) {
+		if call != 0 {
+			return
+		}
+		payload, _ := json.Marshal(map[string]any{"content": "keep going"})
+		if _, err := h.log.Append(context.Background(), h.sessionID, []events.NewEvent{
+			{Type: domain.EventUserMessage, Payload: payload},
+		}); err != nil {
+			t.Errorf("mid-turn append: %v", err)
+		}
+	}
+	h.wake(t, "delegate")
+	h.setChainCount(t, 25) // maxSettlementChain
+
+	h.runOnce(t)
+	if s := h.threadStatus(t, domain.PrimaryThreadID(h.sessionID)); s != "running" {
+		t.Errorf("coordinator = %q, want running: input chains past the cap", s)
+	}
+	if n := h.chainCount(t); n != 0 {
+		t.Errorf("count = %d, want 0 — the chain the input took is not the one being bounded", n)
+	}
+	if n := h.countType(t, "session.error"); n != 0 {
+		t.Errorf("session.error = %d, want none: nothing was cut", n)
+	}
+}
+
+// The ask-gated settlement branch (#442 item 3). An ask gate wins for the
+// turn's exec calls, but the delegation calls execute anyway — they are the
+// platform's own and no confirmation exists for them — and the child a gated
+// turn spawned still gets its turn. That last one is the difference between a
+// coordinator that pauses for a human and one that pauses forever.
+func TestAskGatedDelegatedTurnGatesExecButStillRunsItsChild(t *testing.T) {
+	h := newHarness(t, [][]provider.Chunk{{
+		toolCall("t1", "create_agent", `{"agent_name":"researcher","message":"find the papers"}`),
+		toolCall("t2", "bash", `{"command":"ls"}`),
+		done("tool_use", 2),
+	}}, nil)
+	// Default always_allow, bash overridden to always_ask; roster added after,
+	// since h.roster patches multiagent onto whatever spec is stored.
+	agentJSON := `{"type":"agent","id":"agent_x","version":1,"name":"coordinator",
+		"model":{"id":"fixture-model"},"system":"s","description":"",
+		"tools":[{"type":"agent_toolset_20260401","configs":[{"name":"bash","permission_policy":{"type":"always_ask"}}]}],
+		"mcp_servers":[],"skills":[],"multiagent":null}`
+	if _, err := h.pool.Exec(context.Background(),
+		`UPDATE sessions SET resolved_agent = $2 WHERE id = $1`, h.sessionID.String(), agentJSON); err != nil {
+		t.Fatal(err)
+	}
+	h.roster(t, "researcher")
+	h.wake(t, "delegate and look around")
+	h.runOnce(t)
+
+	// The delegation call ran in the settlement; the gated bash did not, and
+	// nothing was enqueued for it.
+	if got := h.answers(t); len(got) != 1 || got[0].isErr {
+		t.Fatalf("answers = %v, want create_agent's alone", got)
+	}
+	if n := h.liveOf(t, queue.ToolExec); n != 0 {
+		t.Errorf("tool_exec = %d, want none: a gated turn enqueues nothing", n)
+	}
+
+	// The coordinator suspends requires_action naming the bash call alone.
+	primary := domain.PrimaryThreadID(h.sessionID)
+	if s := h.threadStatus(t, primary); s != "idle" {
+		t.Errorf("coordinator = %q, want idle awaiting the human", s)
+	}
+	stop := h.threadStop(t, primary)
+	if stop.Type != domain.StopRequiresAction || len(stop.EventIDs) != 1 {
+		t.Fatalf("stop_reason = %+v, want requires_action naming one event", stop)
+	}
+	uses := h.eventsOfType(t, domain.EventAgentToolUse)
+	askID := domain.ID("")
+	for _, u := range uses {
+		var b struct {
+			Name string `json:"name"`
+		}
+		if err := json.Unmarshal(u.Body, &b); err != nil {
+			t.Fatal(err)
+		}
+		if b.Name == "bash" {
+			askID = u.ID
+		}
+	}
+	if askID == "" || stop.EventIDs[0] != askID {
+		t.Errorf("stop_reason names %v, want the bash use %s", stop.EventIDs, askID)
+	}
+
+	// And the child it spawned actually runs.
+	kids := h.children(t)
+	if len(kids) != 1 {
+		t.Fatalf("children = %v, want the spawned researcher", kids)
+	}
+	if n := h.liveTurns(t, kids[0].id); n != 1 {
+		t.Errorf("child turns queued = %d, want 1 — a gated coordinator must not strand its child", n)
+	}
+	if n := h.liveTurns(t, ""); n != 0 {
+		t.Errorf("coordinator turns queued = %d, want none while it waits", n)
+	}
+}

@@ -120,6 +120,30 @@ func WakeThread(ctx context.Context, tx pgx.Tx, sessionID, threadID domain.ID) (
 			return nil, nil, false, nil
 		}
 	}
+	// The last thing the API's message trigger checks before resuming a
+	// thread, checked here for the same reason: a replay carrying an
+	// assistant tool_use no result answers ends the resumed turn in
+	// retries_exhausted. The API gates all three of its enqueues on it
+	// (internal/api/events.go); the wake paths — send_to_agent, a child's
+	// report, an ending — reach the same transition and had no such gate.
+	//
+	// The state is unreachable through the product: #181 routes a
+	// tool-carrying turn away from the end_turn settle, delegation answers
+	// every call in the commit that makes it, and a failed turn settles
+	// retries_exhausted, which the stop check above already refuses. So this
+	// is parity on state nothing should produce, not a live bug — the API's
+	// own regression test has to forge it with pgtest.SetSessionStatus.
+	// Refusing looks like every other refusal here: no wake, no error.
+	// threadID, not tid: the predicate scopes by the events row, and the
+	// primary thread's rows carry thread_id NULL — the derived sthr_ id
+	// matches none of them.
+	unanswered, err := HasUnansweredThreadToolUse(ctx, tx, sessionID, threadID, nil)
+	if err != nil {
+		return nil, nil, false, err
+	}
+	if unanswered {
+		return nil, nil, false, nil
+	}
 	pair, moved, err = TransitionThread(ctx, tx, sessionID, ThreadTransition{
 		ThreadID: threadID, Status: domain.SessionRunning})
 	return pair, moved, err == nil, err
