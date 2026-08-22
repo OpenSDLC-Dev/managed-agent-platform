@@ -15,7 +15,7 @@ written; #447 does, its own body admitting three designs and none obviously righ
       session-status entry and its cadence twin say what the public docs settle — a
       platform-executed tool leaving the session `running` matches the reference, the two
       client-answered lanes are #375's bug. #59 closed as answered.
-- [ ] **#452** — the pointer invariant made executable: the guard, and the 28 bare
-      `Tracked: #78` pointers it requires to name what their own entry still leaves open.
+- [ ] **#452** — the pointer invariant made executable: the guard, and the 33 pointers whose
+      shared tracker still names nothing the entry citing it leaves open.
 - [ ] **#447** — the session-scoped bound two agents messaging each other cannot escape.
       Design in progress; the plan file lands with the decision it records.
