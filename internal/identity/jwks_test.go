@@ -44,8 +44,9 @@ func jwksXVerifier(t *testing.T, idp *identitytest.IdP, clock *identitytest.Cloc
 }
 
 // jwksXVerifierWithClient is jwksXVerifier with the HTTP client spelled out, for
-// the one test that needs a client carrying a production property the fixture's
-// own does not.
+// the two tests the fixture's own client cannot serve as it stands: one adds back
+// a production property it lacks, the other wraps its transport to record what
+// the fetches returned.
 func jwksXVerifierWithClient(t *testing.T, idp *identitytest.IdP, clock *identitytest.Clock, client *http.Client) *identity.Verifier {
 	t.Helper()
 	v, err := identity.New(context.Background(), identity.Config{
@@ -133,6 +134,49 @@ func jwksXAwaitFetch(t *testing.T, idp *identitytest.IdP, n int) {
 		}
 		runtime.Gosched()
 	}
+}
+
+// jwksXFetchRecorder wraps a transport to record what each request through it
+// returned TO THE CLIENT, oldest first, nil for one that came back. A pinned
+// JWKSURL skips discovery, so every request a verifier built here makes is a
+// key-set fetch.
+//
+// The difference from IdP.Fetches is the whole reason this exists. That counter
+// increments at handler entry, so it can only see a request the server actually
+// received — and a fetch its deadline kills before the server accepts it never
+// arrives. That outcome is not a malfunction: it is the deadline doing exactly
+// what the deadline test asks of it. Asserting on the provider's count therefore
+// demands that a request designed to lose a race win it first, which is why it
+// reddened CI under load on diffs containing no Go at all (#381, #422).
+//
+// The client's own outcome carries no such race: getJSON calls Do on the
+// goroutine leading the flight, so RoundTrip is entered before anything can be
+// concluded about the deadline, whichever phase — dial, write, or the wait for
+// headers — the deadline then interrupts.
+type jwksXFetchRecorder struct {
+	rt http.RoundTripper
+
+	mu   sync.Mutex
+	errs []error
+}
+
+func (r *jwksXFetchRecorder) RoundTrip(req *http.Request) (*http.Response, error) {
+	resp, err := r.rt.RoundTrip(req)
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.errs = append(r.errs, err)
+	return resp, err
+}
+
+// attempts returns one entry per fetch that has RETURNED, oldest first — an entry
+// is appended after the wrapped RoundTrip answers, so a fetch still in flight is
+// not among them. The distinction is invisible to the one caller here, whose
+// flight is led by its own goroutine, and would not be to a concurrent one.
+// A copy: the caller reads it while the transport may still be appending.
+func (r *jwksXFetchRecorder) attempts() []error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]error(nil), r.errs...)
 }
 
 // jwksXRelease closes a handler-release channel exactly once, from the test body
@@ -532,7 +576,13 @@ func TestKeySetFetchDeadline(t *testing.T) {
 	t.Parallel()
 	idp := identitytest.NewIdP(t)
 	clock := identitytest.NewClock(jwksXStart)
-	v := jwksXVerifier(t, idp, clock)
+
+	// The fetches are watched at the client rather than at the provider, for the
+	// reason jwksXFetchRecorder states.
+	client := *idp.Client()
+	rec := &jwksXFetchRecorder{rt: client.Transport}
+	client.Transport = rec
+	v := jwksXVerifierWithClient(t, idp, clock, &client)
 
 	known := jwksXToken(t, idp, clock)
 	unknown := jwksXTokenUnderRetiredKey(t, idp, clock)
@@ -540,7 +590,9 @@ func TestKeySetFetchDeadline(t *testing.T) {
 
 	// The one branch a fake clock cannot reach is a real context deadline, so it
 	// is driven by shortening this verifier's own: 50ms instead of the five
-	// seconds production allows.
+	// seconds production allows. Nothing below asserts how far the doomed request
+	// travels inside those 50ms — only that it was made, and that the deadline is
+	// what ended it.
 	restore := identity.SetFetchTimeoutForTest(v, 50*time.Millisecond)
 	defer restore()
 
@@ -551,7 +603,18 @@ func TestKeySetFetchDeadline(t *testing.T) {
 	idp.BlockJWKS(release)
 
 	jwksXVerifyRejected(t, v, unknown, "unknown kid with the key set hanging")
-	jwksXWantFetches(t, idp, 2, "the refresh was attempted and hit its deadline")
+
+	// Two attempts: New's warm-up, then the refresh this rejection led. That the
+	// second ended in the deadline is what separates a refresh that ran out of
+	// time from one the cooldown never let start — a rejection alone looks
+	// identical either way, which is what makes this assertion the test.
+	attempts := rec.attempts()
+	if len(attempts) != 2 {
+		t.Fatalf("fetch attempts = %d, want 2: the warm-up and the refresh the unknown kid led", len(attempts))
+	}
+	if err := attempts[1]; !errors.Is(err, context.DeadlineExceeded) {
+		t.Errorf("refresh attempt returned %v, want context.DeadlineExceeded: the refresh was attempted and hit its deadline", err)
+	}
 
 	// The deadline belongs to the shared flight, not to the caller, and a flight
 	// that timed out leaves the fresh cache it could not replace serving.
