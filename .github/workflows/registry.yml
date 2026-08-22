@@ -37,7 +37,11 @@ permissions:
 
 concurrency:
   group: registry-${{ github.ref }}
-  cancel-in-progress: true
+  # Queued rather than cancelled, for evals.yml's reason: a manual dispatch must
+  # never kill an in-flight nightly. A cancelled run ends `cancelled`, not
+  # `failure`, so the scheduled-failure notification — this workflow's entire
+  # notification mechanism — would not fire and that night's rot would go unsaid.
+  cancel-in-progress: false
 
 jobs:
   registry:
@@ -72,15 +76,34 @@ jobs:
           # Step-scoped, not job-scoped: only this step reads it, and job-level
           # env would hand the token to the third-party actions above too.
           GITHUB_TOKEN: ${{ github.token }}
-        run: make registry-check
-      # A red run is the notification. This makes the findings readable without
-      # opening the log, which matters most for the scheduled run nobody watched.
+        # tee, so the findings reach both the log and the summary below. The
+        # pipe would otherwise report tee's exit status, hence pipefail: a red
+        # run is this workflow's whole notification mechanism.
+        run: |
+          set -o pipefail
+          make registry-check 2>&1 | tee findings.txt
+      # A red run is the notification, and this is what makes it readable
+      # without opening the log — which matters most for the scheduled run
+      # nobody watched. The findings themselves go in: a summary that says
+      # "findings above" with nothing above it is worse than no summary.
       - name: render the findings
         if: always()
         run: |
-          echo '### `docs/DIVERGENCES.md` pointer guard' >> "$GITHUB_STEP_SUMMARY"
-          if [ "${{ job.status }}" = "success" ]; then
-            echo 'Clean: every live tracker names an open issue.' >> "$GITHUB_STEP_SUMMARY"
-          else
-            echo 'Findings above. A live `Tracked: #N` naming a closed issue tells a reader work is outstanding when it is not — demote it to provenance and name the issue that will settle the entry. See changelog.d/README.md and the Format legend at the top of the file.' >> "$GITHUB_STEP_SUMMARY"
-          fi
+          {
+            echo '### `docs/DIVERGENCES.md` pointer guard'
+            case "${{ job.status }}" in
+              success)
+                echo 'Clean: every live tracker names an open issue.'
+                ;;
+              cancelled)
+                echo 'Cancelled before the guard could answer. This is **not** a clean result — re-run it.'
+                ;;
+              *)
+                echo 'A live `Tracked: #N` naming a closed issue tells a reader work is outstanding when it is not. Demote it to provenance — `(delivered)`, or a trailing `landed for #N` clause — and name the issue that will settle the entry. The grammar is the Format legend at the top of the file.'
+                echo
+                echo '```'
+                cat findings.txt 2>/dev/null || echo '(the guard produced no output; read the step log)'
+                echo '```'
+                ;;
+            esac
+          } >> "$GITHUB_STEP_SUMMARY"

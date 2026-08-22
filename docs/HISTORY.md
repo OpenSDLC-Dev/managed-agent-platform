@@ -62,8 +62,8 @@ stale, and it is the smaller one. So `tools/registrycheck` parses the two apart 
 the live head alone. Both false positives the #445 prototype hit are pinned as tests rather than
 described: a tail may legitimately name an open issue (`the transport landed for #45, and the
 fallback itself is #348`), and so may a `(delivered; …)` parenthetical (`#50 (delivered; … the
-open #166)`). A depth-blind `strings.Split(";")` truncates six of the file's heads, because both
-separators occur inside parentheticals; that too is a test, not a comment.
+open #166)`). A depth-blind `strings.Split(";")` truncates twelve of the file's heads, six of which carry a
+comma inside a parenthetical too; that is a test, not a comment.
 
 **Evaluated and rejected: retrofitting provenance to cite plans and PRs instead of issues.** The
 issue's second candidate is right that a plan number and a PR number carry no state to falsify

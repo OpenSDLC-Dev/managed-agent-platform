@@ -76,10 +76,12 @@ func Referenced(src string) []int {
 	return out
 }
 
-// File is the registry this guard is written for. It is the only file in the
-// repository using this pointer grammar: docs/HISTORY.md and
-// docs/plan/04_work-stop-204.md each mention a `Tracked:` clause in prose
-// ABOUT the registry, and widening the scope to every *.md would flag both.
+// File is the registry this guard is written for, and the only file in the
+// repository that uses this pointer grammar — several others mention a
+// `Tracked:` clause in prose ABOUT the registry, none writes one. The scope is
+// narrow because the grammar is this file's convention rather than the repo's:
+// run against any other markdown, every rung that keys on a section heading
+// would report the absence of a section that file was never meant to have.
 const File = "docs/DIVERGENCES.md"
 
 // pointerRe matches an entry's trailing italic pointer clause. It is anchored
@@ -95,16 +97,64 @@ const File = "docs/DIVERGENCES.md"
 // pointer-shape finding.
 var pointerRe = regexp.MustCompile(` \*(Tracked|Landed for):? ([^*]*)\*$`)
 
-var pointerOpenRe = regexp.MustCompile(` \*(Tracked|Landed for):? `)
+var pointerOpenRe = regexp.MustCompile(`(?i) \*(tracked|landed for):?`)
 
-// lineRefRe is the second rot mechanism (#452): a hardcoded intra-file line
-// number. One had drifted 77 lines before #453 replaced it with the entry's
-// name. A name survives an insertion; a line number cannot.
-var lineRefRe = regexp.MustCompile(`\(line \d+\)`)
+// lineRefRe is the second rot mechanism (#452): a hardcoded intra-file
+// cross-reference by line number. One had drifted 77 lines before #453 replaced
+// it with the entry's name. A name survives an insertion; a line number cannot.
+// Singular and plural both, because "(lines 69-71)" rots the same way.
+//
+// A `file.go:285` citation into another file is deliberately NOT this: it names
+// code the reader is being sent to read, and this file's insertions cannot move
+// it. Those churn on their own schedule and are the cited file's problem.
+var lineRefRe = regexp.MustCompile(`\(lines? \d+`)
 
-// segmentRe reads a head segment: an issue number, optionally followed by a
-// parenthetical saying what that issue means for THIS entry.
-var segmentRe = regexp.MustCompile(`^#(\d+)\s*(\(.*\))?$`)
+// entryRe is any list bullet opening in bold. It is deliberately wider than the
+// `- **` the file actually uses: an entry written `* **X**`, or indented, would
+// otherwise not be an entry at all, and every rung would skip it in silence.
+var entryRe = regexp.MustCompile(`^\s*[-*+] \*\*`)
+
+// issueRe reads the number a head segment opens with. What may follow it is
+// one balanced parenthetical and nothing else, which readSegment enforces by
+// scanning rather than by regexp: `(\(.*\))?` is greedy from the first "(" to
+// the last ")", so "#900 (a) — but see #901 (b)" parsed as ONE segment whose
+// parenthetical swallowed #901, and #901 was never state-checked.
+var issueRe = regexp.MustCompile(`^#(\d+)`)
+
+// readSegment parses "#N", optionally followed by one balanced parenthetical,
+// and rejects anything else — including a second issue outside that
+// parenthetical, which is the shape that used to disappear.
+func readSegment(s string) (segment, string) {
+	m := issueRe.FindStringSubmatch(s)
+	if m == nil {
+		return segment{}, fmt.Sprintf("head segment %q does not open with `#N`", s)
+	}
+	n, _ := strconv.Atoi(m[1])
+	rest := strings.TrimSpace(s[len(m[0]):])
+	if rest == "" {
+		return segment{issue: n}, ""
+	}
+	if !strings.HasPrefix(rest, "(") {
+		return segment{}, fmt.Sprintf("head segment %q has text after #%d that is not a parenthetical", s, n)
+	}
+	depth := 0
+	for i, r := range rest {
+		switch r {
+		case '(':
+			depth++
+		case ')':
+			depth--
+		}
+		if depth == 0 {
+			if i != len(rest)-1 {
+				return segment{}, fmt.Sprintf(
+					"head segment %q continues after its parenthetical closes — anything there, a second `#N` above all, is never checked", s)
+			}
+			return segment{issue: n, paren: rest}, ""
+		}
+	}
+	return segment{}, fmt.Sprintf("head segment %q has an unclosed parenthetical", s)
+}
 
 type segment struct {
 	issue int
@@ -114,8 +164,19 @@ type segment struct {
 // delivered reports whether the segment is provenance rather than a live
 // tracker. The marker is the parenthetical's opening word, which is what the
 // Format legend promises a reader.
+// The file writes provenance exactly two ways, "(delivered)" and
+// "(delivered; …)", so the word has to be followed by one of those two
+// delimiters. A prefix test alone read "(delivered-ish)" as provenance and
+// skipped the state check on a live tracker, which is a false negative; the
+// same test read "(Delivered)" as live, which is a false positive.
 func (s segment) delivered() bool {
-	return strings.HasPrefix(strings.TrimPrefix(s.paren, "("), "delivered")
+	const word = "delivered"
+	rest := strings.TrimPrefix(s.paren, "(")
+	if len(rest) < len(word) || !strings.EqualFold(rest[:len(word)], word) {
+		return false
+	}
+	after := rest[len(word):]
+	return after == "" || after[0] == ')' || after[0] == ';'
 }
 
 // says reports whether the parenthetical carries anything. The rung can only
@@ -128,7 +189,9 @@ func (s segment) says() bool {
 type pointer struct {
 	kind string // "Tracked" or "Landed for"
 	head []segment
-	tail string
+	// There is no tail field on purpose. Everything past the first top-level
+	// semicolon is provenance, and provenance is never state-checked — so the
+	// parser splits it off to find the head and then has no further use for it.
 }
 
 type entry struct {
@@ -154,7 +217,7 @@ func parse(src string) ([]entry, string) {
 				inferred = section
 			}
 			continue
-		case !strings.HasPrefix(ln, "- **"):
+		case !entryRe.MatchString(ln):
 			continue
 		}
 		e := entry{line: i + 1, section: section, title: title(ln)}
@@ -174,8 +237,14 @@ func parse(src string) ([]entry, string) {
 	return out, inferred
 }
 
+// title reads the bolded name a finding leads with. It strips whatever bullet
+// entryRe matched rather than a fixed "- **", so an entry written some other way
+// is named in the finding instead of being reported against the bullet itself.
 func title(ln string) string {
-	rest := strings.TrimPrefix(ln, "- **")
+	rest := ln
+	if loc := entryRe.FindStringIndex(ln); loc != nil {
+		rest = ln[loc[1]:]
+	}
 	if i := strings.Index(rest, "**"); i >= 0 {
 		return rest[:i]
 	}
@@ -196,9 +265,6 @@ func parsePointer(kind, body string) (*pointer, string) {
 	}
 	p := &pointer{kind: kind}
 	parts := splitTop(body, ';')
-	if len(parts) > 1 {
-		p.tail = strings.Join(parts[1:], ";")
-	}
 	// A `Landed for` clause is provenance whole, and need not name an issue at
 	// all — one cites a plan file instead. Nothing about it can go stale, so it
 	// has no head to check.
@@ -210,12 +276,11 @@ func parsePointer(kind, body string) (*pointer, string) {
 		if seg == "" {
 			continue
 		}
-		m := segmentRe.FindStringSubmatch(seg)
-		if m == nil {
-			return nil, fmt.Sprintf("head segment %q is not `#N` or `#N (…)`", seg)
+		s, err := readSegment(seg)
+		if err != "" {
+			return nil, err
 		}
-		n, _ := strconv.Atoi(m[1])
-		p.head = append(p.head, segment{issue: n, paren: m[2]})
+		p.head = append(p.head, s)
 	}
 	if len(p.head) == 0 {
 		return nil, "pointer names no issue"
@@ -272,6 +337,14 @@ func splitTop(s string, sep rune) []string {
 func Check(src string, state func(int) (open bool, known bool)) []Finding {
 	entries, inferred := parse(src)
 	var out []Finding
+
+	// The INFERRED rung finds its section by name. Renaming the heading would
+	// therefore switch the rung off rather than fail it, and a rung that can
+	// disappear without saying so is the defect this whole tool is about.
+	if inferred == "" {
+		out = append(out, Finding{1, "inferred-section",
+			"no `## …(INFERRED)…` heading, so the rule that an inference must name the tracker whose recording would settle it has nothing to run against"})
+	}
 
 	// How many distinct entries name each issue as a live tracker. An issue
 	// named by more than one cannot, by itself, say what any single entry
@@ -334,12 +407,14 @@ func Check(src string, state func(int) (open bool, known bool)) []Finding {
 							"%s: #%d is cited as delivered but GitHub does not know it", e.title, s.issue)})
 					case open:
 						out = append(out, Finding{e.line, "provenance-closed", fmt.Sprintf(
-							"%s: #%d is marked delivered but is open again — it is a live tracker now, not provenance", e.title, s.issue)})
+							"%s: #%d is cited as `(delivered)` but is open, so a reader cannot tell whether the entry is settled — "+
+								"if the issue as a whole is still outstanding while this entry's part of it landed, say so with a trailing `landed for #%d` clause instead",
+							e.title, s.issue, s.issue)})
 					}
 				}
 			}
 		}
-		if e.section == inferred && live == 0 {
+		if inferred != "" && e.section == inferred && live == 0 {
 			out = append(out, Finding{e.line, "inferred-pointer", fmt.Sprintf(
 				"%s: an entry in %q must name the open issue whose recording would settle it", e.title, inferred)})
 		}

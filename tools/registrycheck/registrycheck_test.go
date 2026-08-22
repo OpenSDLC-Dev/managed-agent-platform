@@ -89,7 +89,7 @@ func TestEachRungGoesRed(t *testing.T) {
 		old:     "#50 (delivered;",
 		new:     "#242 (delivered;",
 		rule:    "provenance-closed",
-		wantMsg: "is open again",
+		wantMsg: "cited as `(delivered)` but is open",
 	}, {
 		name:    "a shared tracker named without a parenthetical",
 		old:     "*Tracked: #78 (a recording would settle the ordering);",
@@ -125,7 +125,7 @@ func TestEachRungGoesRed(t *testing.T) {
 		old:     "*Tracked: #242.*",
 		new:     "*Tracked: the outcome grader.*",
 		rule:    "pointer-shape",
-		wantMsg: "is not `#N`",
+		wantMsg: "does not open with `#N`",
 	}, {
 		name:    "a tracker GitHub does not know",
 		old:     "*Tracked: #242.*",
@@ -158,6 +158,30 @@ func TestEachRungGoesRed(t *testing.T) {
 		new:     "#99999 (delivered;",
 		rule:    "unknown-issue",
 		wantMsg: "cited as delivered but GitHub does not know it",
+	}, {
+		name:    "a second issue smuggled in after a parenthetical closes",
+		old:     "*Tracked: #242.*",
+		new:     "*Tracked: #242 (a residual) — but see #50.*",
+		rule:    "pointer-shape",
+		wantMsg: "continues after its parenthetical closes",
+	}, {
+		name:    "a label with no space after the colon",
+		old:     "*Tracked: #242.*",
+		new:     "*Tracked:#242.*",
+		rule:    "pointer-shape",
+		wantMsg: "opens but does not close",
+	}, {
+		name:    "a near-miss word demoting a live tracker to provenance",
+		old:     "*Tracked: #242.*",
+		new:     "*Tracked: #50 (delivereds).*",
+		rule:    "live-tracker-open",
+		wantMsg: "demote it to provenance",
+	}, {
+		name:    "a plural line cross-reference",
+		old:     "- **A note** — Not a mismatch.",
+		new:     "- **A note** — Not a mismatch, as the skills block (lines 69-71) is.",
+		rule:    "line-reference",
+		wantMsg: "any insertion above it falsifies",
 	}} {
 		t.Run(tc.name, func(t *testing.T) {
 			if !strings.Contains(doc, tc.old) {
@@ -177,6 +201,12 @@ func TestEachRungGoesRed(t *testing.T) {
 			}
 			if !strings.Contains(hit.Msg, tc.wantMsg) {
 				t.Errorf("message %q does not carry %q", hit.Msg, tc.wantMsg)
+			}
+			// "and on nothing else" is the half of the claim that says a rung
+			// fires for its own reason rather than as a side effect of another
+			// one, so it has to be asserted, not just written down.
+			if len(got) != 1 {
+				t.Errorf("mutation tripped %v; exactly one rung should fire", rules(got))
 			}
 		})
 	}
@@ -234,6 +264,69 @@ func TestAClauseIsNeverSkippedInSilence(t *testing.T) {
 				t.Fatalf("Check went green on %q — a clause it cannot read must never pass", tc.clause)
 			}
 		})
+	}
+}
+
+// TestTheInferredRungCannotDisappearQuietly: the rung finds its section by
+// name, so renaming the heading would switch it off rather than fail it — and a
+// rung that can vanish in silence is the defect this tool exists to catch.
+func TestTheInferredRungCannotDisappearQuietly(t *testing.T) {
+	renamed := strings.Replace(doc, "## Inferences to confirm (INFERRED)", "## Inferences to confirm", 1)
+	got := Check(renamed, state)
+	var saw bool
+	for _, f := range got {
+		if f.Rule == "inferred-section" {
+			saw = true
+		}
+		if f.Rule == "inferred-pointer" {
+			t.Errorf("an entry was blamed against a section that no longer exists: %s", f.Msg)
+		}
+	}
+	if !saw {
+		t.Fatalf("renaming the INFERRED heading turned a rung off in silence; findings = %v", rules(got))
+	}
+}
+
+// TestAnEntryCannotHideBehindItsBullet: entry detection is a text match, so a
+// bullet spelled any other way used to be invisible to every rung at once.
+func TestAnEntryCannotHideBehindItsBullet(t *testing.T) {
+	for _, bullet := range []string{"* ", "  - ", "+ "} {
+		hidden := doc + bullet + "**A hidden inference** — x. *Evidence: code*\n"
+		var saw bool
+		for _, f := range Check(hidden, state) {
+			if f.Rule == "inferred-pointer" {
+				saw = true
+			}
+		}
+		if !saw {
+			t.Errorf("an entry bulleted %q escaped every rung", strings.TrimSpace(bullet))
+		}
+	}
+}
+
+// TestASecondIssueIsNeverSwallowed: the greedy `(\(.*\))?` read everything
+// between the first "(" and the last ")" as one parenthetical, so an issue
+// named after it was never state-checked at all.
+func TestASecondIssueIsNeverSwallowed(t *testing.T) {
+	s, err := readSegment("#78 (a) — but see #50 (b)")
+	if err == "" {
+		t.Fatalf("readSegment accepted a segment naming two issues: %+v", s)
+	}
+	if got, _ := readSegment("#78 (a (nested) b)"); got.issue != 78 || got.paren != "(a (nested) b)" {
+		t.Errorf("a nested parenthetical was misread: %+v", got)
+	}
+}
+
+func TestDeliveredIsAWholeWord(t *testing.T) {
+	for _, provenance := range []string{"(delivered)", "(delivered; a note)", "(Delivered)"} {
+		if !(segment{paren: provenance}).delivered() {
+			t.Errorf("delivered(%q) = false, want true", provenance)
+		}
+	}
+	for _, live := range []string{"(delivereds)", "(delivered-ish)", "(deliverable)", "(the redaction rule)", ""} {
+		if (segment{paren: live}).delivered() {
+			t.Errorf("delivered(%q) = true — a near miss must not demote a live tracker", live)
+		}
 	}
 }
 
