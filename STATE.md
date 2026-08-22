@@ -13,8 +13,9 @@ written; #447 does, its own body admitting three designs and none obviously righ
 - [x] **#450 / #451** — the CONFIRMED and INFERRED headings state their test now: two of the
       four self-contradicting entries move under it, and the rule keeps the other two. The
       session-status entry and its cadence twin say what the public docs settle — a
-      platform-executed tool leaving the session `running` matches the reference, the two
-      client-answered lanes are #375's bug. #59 closed as answered.
+      platform-executed tool leaving the session `running` matches the reference, the
+      custom-tool lane is #375's bug, and a `self_hosted` worker's is a new inference.
+      #59 closed as answered.
 - [ ] **#452** — the pointer invariant made executable: the guard, and the 33 pointers whose
       shared tracker still names nothing the entry citing it leaves open.
 - [ ] **#447** — the session-scoped bound two agents messaging each other cannot escape.

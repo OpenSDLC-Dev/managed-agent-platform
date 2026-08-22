@@ -11,7 +11,7 @@
   first half is right and now says so; the second is wrong. The managed-agents docs make a
   custom-tool result a first-class blocker — the session parks at `session.status_idle` with
   `stop_reason.requires_action` — where this platform stays `running`, so a client written to
-  the published loop waits forever. A `self_hosted` worker's tool result is recorded as the
-  weaker, schema-implied version of the same claim. That is a bug rather than a divergence, so
-  the entry now names #375, which owns it, rather than the catch-all recording tracker, and its
-  cadence twin moves beside it. (#451)
+  the published loop waits forever. That is a bug rather than a divergence, so the entry names
+  #375, which owns it, rather than the catch-all recording tracker, and its cadence twin moves
+  beside it. A `self_hosted` worker's tool result rests on a field description alone, and
+  becomes its own INFERRED entry instead. (#451)
