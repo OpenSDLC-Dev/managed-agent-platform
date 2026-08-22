@@ -4,16 +4,18 @@ What is being worked on right now, and how far along it is — nothing else. **S
 
 ## Active work
 
-The two follow-ups the plan-35 closeout work filed, taken together because the first is
-what makes the second's record true. Triaged: #445 needs no plan file, #447 does — its
-own body admits three designs and none is obviously right.
+The registry follow-ups the #445 pointer sweep filed, and the plan-35 bound it did not.
+Triaged: #450–#452 need no plan file, repairing a file whose conventions are already
+written; #447 does, its own body admitting three designs and none obviously right.
 
 ## Tasks
 
-- [x] **#445** — the 60 stale `Tracked:` pointers repaired: annotated where the closure was
-      delivery, re-pointed at an open tracker where it orphaned an INFERRED entry, naming what
-      that entry still leaves open. The Format legend now states the rule. CLAUDE.md's post-v1
-      enumeration gives way to the `(post-v1)` title marker and a bounded query. Defects the
-      sweep surfaced outside that scope are filed as issues, not carried here.
+- [x] **#450 / #451** — the CONFIRMED and INFERRED headings state their test now: two of the
+      four self-contradicting entries move under it, and the rule keeps the other two. The
+      session-status entry and its cadence twin say what the public docs settle — a
+      platform-executed tool leaving the session `running` matches the reference, the two
+      client-answered lanes are #375's bug. #59 closed as answered.
+- [ ] **#452** — the pointer invariant made executable: the guard, and the 28 bare
+      `Tracked: #78` pointers it requires to name what their own entry still leaves open.
 - [ ] **#447** — the session-scoped bound two agents messaging each other cannot escape.
       Design in progress; the plan file lands with the decision it records.
