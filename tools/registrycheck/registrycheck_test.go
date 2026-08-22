@@ -132,6 +132,32 @@ func TestEachRungGoesRed(t *testing.T) {
 		new:     "*Tracked: #99999.*",
 		rule:    "unknown-issue",
 		wantMsg: "GitHub does not know it",
+	}, {
+		// Each of the four below is a way the guard used to go GREEN on a
+		// broken clause, which is worse than any false positive it could have.
+		name:    "a clause whose interior asterisk stops it matching at all",
+		old:     "*Tracked: #242.*",
+		new:     "*Tracked: #242 (what *this* entry leaves open).*",
+		rule:    "pointer-shape",
+		wantMsg: "opens but does not close",
+	}, {
+		name:    "a clause whose parentheses do not balance",
+		old:     "*Tracked: #242.*",
+		new:     "*Tracked: #242 (a residual)), #99999 (never reached).*",
+		rule:    "pointer-shape",
+		wantMsg: "unbalanced parentheses",
+	}, {
+		name:    "a shared tracker whose parenthetical says nothing",
+		old:     "*Tracked: #78 (a recording would settle the ordering);",
+		new:     "*Tracked: #78 ();",
+		rule:    "shared-parenthetical",
+		wantMsg: "live tracker of 2 entries",
+	}, {
+		name:    "a delivered citation GitHub does not know",
+		old:     "#50 (delivered;",
+		new:     "#99999 (delivered;",
+		rule:    "unknown-issue",
+		wantMsg: "cited as delivered but GitHub does not know it",
 	}} {
 		t.Run(tc.name, func(t *testing.T) {
 			if !strings.Contains(doc, tc.old) {
@@ -185,6 +211,53 @@ func TestSharedIsCountedPerEntry(t *testing.T) {
 		if f.Rule == "shared-parenthetical" {
 			t.Fatalf("a single entry naming #242 twice was read as two entries: %v", f)
 		}
+	}
+}
+
+// TestAClauseIsNeverSkippedInSilence is the property behind two of the rows
+// above, and the one worth stating on its own: for a guard, going green on a
+// clause it could not read is the only unrecoverable outcome. A false positive
+// gets argued in review; a silent skip is indistinguishable from a clean file,
+// and the rotted tracker inside the unread clause is never looked up again.
+func TestAClauseIsNeverSkippedInSilence(t *testing.T) {
+	for _, tc := range []struct{ name, clause string }{
+		{"interior asterisk", "*Tracked: #50 (the *live* half).*"},
+		{"unbalanced parens", "*Tracked: #50 (a)) , #242.*"},
+		{"no closing asterisk", "*Tracked: #50 (a residual)."},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			mutated := strings.Replace(doc, "*Tracked: #242.*", tc.clause, 1)
+			// #50 is closed, so a clause naming it live is rot. Whether the
+			// guard calls that pointer-shape or live-tracker-open is its own
+			// business; saying nothing is not.
+			if got := Check(mutated, state); len(got) == 0 {
+				t.Fatalf("Check went green on %q — a clause it cannot read must never pass", tc.clause)
+			}
+		})
+	}
+}
+
+func TestBalancedRejectsOnlyRealImbalance(t *testing.T) {
+	for _, ok := range []string{"", "#78", "#78 (a; b)", "#55 (delivered; a (nested) b), #50"} {
+		if !balanced(ok) {
+			t.Errorf("balanced(%q) = false, want true", ok)
+		}
+	}
+	for _, bad := range []string{"#78 (a", "#78 a)", "#78 (a)) (b"} {
+		if balanced(bad) {
+			t.Errorf("balanced(%q) = true, want false", bad)
+		}
+	}
+}
+
+func TestSaysWantsContentNotPunctuation(t *testing.T) {
+	for _, empty := range []string{"", "()", "(   )", "(-)", "(;)"} {
+		if (segment{paren: empty}).says() {
+			t.Errorf("says(%q) = true — a parenthetical that says nothing satisfies presence, not purpose", empty)
+		}
+	}
+	if !(segment{paren: "(the redaction rule)"}).says() {
+		t.Error("says() rejected a real parenthetical")
 	}
 }
 
@@ -288,6 +361,46 @@ func TestFetchStatesPaginatesAndFillsGaps(t *testing.T) {
 		if open != tc.open || known != tc.known {
 			t.Errorf("lookup(%d) = (%v,%v), want (%v,%v)", tc.n, open, known, tc.open, tc.known)
 		}
+	}
+}
+
+// TestFetchStatesTellsAbsentFromUnreachable pins the trap the substring test
+// walked into: every error here names the URL it failed on, so a transport
+// failure fetching /issues/404 carries "404" in its message. Issue #404 is a
+// real number in this repository's range.
+func TestFetchStatesTellsAbsentFromUnreachable(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		status  int
+		wantErr bool
+	}{
+		{"a genuinely absent issue", http.StatusNotFound, false},
+		{"the server failing on issue 404", http.StatusInternalServerError, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if strings.Contains(r.URL.Path, "/issues/404") {
+					http.Error(w, `{"message":"nope"}`, tc.status)
+					return
+				}
+				_, _ = w.Write([]byte(`[]`))
+			}))
+			defer srv.Close()
+
+			lookup, err := fetchStates(context.Background(), srv.URL, "o/r", []int{404})
+			if tc.wantErr {
+				if err == nil {
+					t.Fatal("a server error on issue #404 was reported as an absent issue")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("a 404 must be a finding, not a crash: %v", err)
+			}
+			if _, known := lookup(404); known {
+				t.Error("lookup(404) claims to know an issue GitHub does not serve")
+			}
+		})
 	}
 }
 

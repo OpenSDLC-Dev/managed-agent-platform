@@ -26,6 +26,10 @@ on:
       - 'docs/DIVERGENCES.md'
       - 'tools/registrycheck/**'
       - '.github/workflows/registry.yml'
+      # The recipe is this workflow's only executable step, so a PR that edits
+      # it and nothing else changes what the schedule will run tomorrow. Without
+      # this line that PR is the one case the guard never sees.
+      - 'Makefile'
   workflow_dispatch:
 
 permissions:

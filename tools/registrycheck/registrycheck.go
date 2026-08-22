@@ -40,6 +40,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"unicode"
 )
 
 // Finding is one violated rule at one line. Rule is the stable name a failure
@@ -83,10 +84,18 @@ const File = "docs/DIVERGENCES.md"
 
 // pointerRe matches an entry's trailing italic pointer clause. It is anchored
 // at end-of-line because the clause is always the last thing on its line, and
-// [^*] because no clause contains an interior asterisk — both hold for all 113
-// pointers today, and the shape rung fails loudly rather than silently
-// skipping a line that breaks either.
+// [^*] because no clause contains an interior asterisk — both hold for all 114
+// pointers today.
+//
+// A clause that breaks either assumption must not be skipped in silence, which
+// is what a non-match alone would mean: the entry would carry no pointer as far
+// as every later rung is concerned, and a closed tracker inside it would never
+// be looked up. pointerOpenRe is therefore the wider net — anything that opens
+// like a clause — and a line it catches that pointerRe does not is a
+// pointer-shape finding.
 var pointerRe = regexp.MustCompile(` \*(Tracked|Landed for):? ([^*]*)\*$`)
+
+var pointerOpenRe = regexp.MustCompile(` \*(Tracked|Landed for):? `)
 
 // lineRefRe is the second rot mechanism (#452): a hardcoded intra-file line
 // number. One had drifted 77 lines before #453 replaced it with the entry's
@@ -107,6 +116,13 @@ type segment struct {
 // Format legend promises a reader.
 func (s segment) delivered() bool {
 	return strings.HasPrefix(strings.TrimPrefix(s.paren, "("), "delivered")
+}
+
+// says reports whether the parenthetical carries anything. The rung can only
+// check that a clause exists, never that it is honest — but "()" satisfies a
+// bare presence test while saying strictly nothing, and that much is checkable.
+func (s segment) says() bool {
+	return strings.ContainsFunc(strings.Trim(s.paren, "()"), unicode.IsLetter)
 }
 
 type pointer struct {
@@ -149,6 +165,9 @@ func parse(src string) ([]entry, string) {
 			} else {
 				e.ptr = p
 			}
+		} else if pointerOpenRe.MatchString(ln) {
+			e.ptrErr = "pointer clause opens but does not close as `*…*` at the end of the line — " +
+				"an interior `*` does this, and it would leave the clause unchecked"
 		}
 		out = append(out, e)
 	}
@@ -168,6 +187,13 @@ func parsePointer(kind, body string) (*pointer, string) {
 		return nil, "pointer clause does not end with a full stop"
 	}
 	body = strings.TrimSuffix(body, ".")
+	// splitTop splits at paren depth 0, so an unbalanced clause is not a
+	// cosmetic complaint: a stray `)` drives the depth negative and every
+	// separator after it stops being top-level, folding the remaining segments
+	// into the one before them where nothing state-checks them.
+	if !balanced(body) {
+		return nil, "pointer clause has unbalanced parentheses, which would hide the segments after the imbalance"
+	}
 	p := &pointer{kind: kind}
 	parts := splitTop(body, ';')
 	if len(parts) > 1 {
@@ -195,6 +221,24 @@ func parsePointer(kind, body string) (*pointer, string) {
 		return nil, "pointer names no issue"
 	}
 	return p, ""
+}
+
+// balanced reports whether every parenthesis in the clause closes, and none
+// closes before it opens.
+func balanced(s string) bool {
+	depth := 0
+	for _, r := range s {
+		switch r {
+		case '(':
+			depth++
+		case ')':
+			depth--
+		}
+		if depth < 0 {
+			return false
+		}
+	}
+	return depth == 0
 }
 
 // splitTop splits on a separator that is not inside parentheses. Both
@@ -260,7 +304,7 @@ func Check(src string, state func(int) (open bool, known bool)) []Finding {
 					continue
 				}
 				live++
-				if shared[s.issue] > 1 && s.paren == "" {
+				if shared[s.issue] > 1 && !s.says() {
 					out = append(out, Finding{e.line, "shared-parenthetical", fmt.Sprintf(
 						"%s: #%d is the live tracker of %d entries, so naming it alone says nothing about this one — add a parenthetical naming what this entry still leaves open",
 						e.title, s.issue, shared[s.issue])})
@@ -283,7 +327,12 @@ func Check(src string, state func(int) (open bool, known bool)) []Finding {
 					if !s.delivered() {
 						continue
 					}
-					if open, known := state(s.issue); known && open {
+					open, known := state(s.issue)
+					switch {
+					case !known:
+						out = append(out, Finding{e.line, "unknown-issue", fmt.Sprintf(
+							"%s: #%d is cited as delivered but GitHub does not know it", e.title, s.issue)})
+					case open:
 						out = append(out, Finding{e.line, "provenance-closed", fmt.Sprintf(
 							"%s: #%d is marked delivered but is open again — it is a live tracker now, not provenance", e.title, s.issue)})
 					}
