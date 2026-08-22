@@ -168,8 +168,11 @@ func (r *jwksXFetchRecorder) RoundTrip(req *http.Request) (*http.Response, error
 	return resp, err
 }
 
-// attempts returns one entry per fetch attempted so far, oldest first. A copy:
-// the caller reads it while the transport may still be appending.
+// attempts returns one entry per fetch that has RETURNED, oldest first — an entry
+// is appended after the wrapped RoundTrip answers, so a fetch still in flight is
+// not among them. The distinction is invisible to the one caller here, whose
+// flight is led by its own goroutine, and would not be to a concurrent one.
+// A copy: the caller reads it while the transport may still be appending.
 func (r *jwksXFetchRecorder) attempts() []error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
