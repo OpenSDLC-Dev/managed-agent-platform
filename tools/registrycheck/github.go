@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -61,7 +62,13 @@ func fetchStates(ctx context.Context, api, repo string, want []int) (func(int) (
 			// A number the registry cites that GitHub will not serve is a
 			// finding, not a crash: Check reports it as unknown-issue with the
 			// entry that cites it, which is the useful place to read it.
-			if strings.Contains(err.Error(), "404") {
+			//
+			// The status is read from the response, never from the error text.
+			// Every error here names the URL it failed on, so a substring test
+			// for "404" reads a transport failure on issue #404 as an absent
+			// issue — the one number where the difference matters most.
+			var he *statusError
+			if errors.As(err, &he) && he.status == http.StatusNotFound {
 				continue
 			}
 			return nil, err
@@ -98,13 +105,22 @@ func getJSON(ctx context.Context, url string, into any) error {
 		// failure a reader of a red scheduled run would otherwise misread as
 		// the registry having rotted.
 		if remaining := resp.Header.Get("X-RateLimit-Remaining"); remaining == "0" {
-			return fmt.Errorf("GET %s: %s — the GitHub rate limit is exhausted (reset at %s); set GITHUB_TOKEN to raise it",
-				url, resp.Status, resp.Header.Get("X-RateLimit-Reset"))
+			return &statusError{resp.StatusCode, fmt.Sprintf("GET %s: %s — the GitHub rate limit is exhausted (reset at %s); set GITHUB_TOKEN to raise it",
+				url, resp.Status, resp.Header.Get("X-RateLimit-Reset"))}
 		}
-		return fmt.Errorf("GET %s: %s: %s", url, resp.Status, strings.TrimSpace(string(body)))
+		return &statusError{resp.StatusCode, fmt.Sprintf("GET %s: %s: %s", url, resp.Status, strings.TrimSpace(string(body)))}
 	}
 	return json.Unmarshal(body, into)
 }
+
+// statusError carries the HTTP status alongside the message, so a caller can
+// tell a 404 from a transport failure without reading prose.
+type statusError struct {
+	status int
+	msg    string
+}
+
+func (e *statusError) Error() string { return e.msg }
 
 func token() string {
 	for _, k := range []string{"GITHUB_TOKEN", "GH_TOKEN"} {
