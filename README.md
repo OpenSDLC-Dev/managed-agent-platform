@@ -91,6 +91,7 @@ make test                  # unit + contract tests (go test -count=1, with cover
 make vet fmt-check         # lint
 make verify                # the whole Go gate (CI additionally runs its helm, terraform and compose jobs)
 make eval                  # RUN_EVALS=1: the live end-to-end eval suite (real model + sandboxes)
+make registry-check        # ask GitHub whether docs/DIVERGENCES.md's live Tracked: pointers are still open
 ```
 
 Tests come in tiers. The first two run on every PR and call no model; the rest drive a
