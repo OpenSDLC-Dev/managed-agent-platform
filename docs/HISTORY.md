@@ -49,6 +49,80 @@ new directory and in-repo citations re-pointed in the moving PR (plan
 
 ---
 
+## The registry's pointer invariant, made executable (#452) — decisions, 2026-08-22
+
+The narrative is in CHANGELOG.md. What it cannot hold is which of the issue's three candidate
+fixes were taken, why one was not, and the second rot mechanism the work uncovered on the way.
+
+**Adopted: the `Tracked:` / provenance split, enforced rather than restated.** #445 repaired 60
+stale pointers by hand and #453 wrote the rule into the Format legend — `Tracked: #N` names an
+**open** issue; a closed one may appear only as `(delivered)` or a trailing `landed for #N`
+clause. That split is what makes the invariant checkable at all: only the first class can ever go
+stale, and it is the smaller one. So `tools/registrycheck` parses the two apart and state-checks
+the live head alone. Both false positives the #445 prototype hit are pinned as tests rather than
+described: a tail may legitimately name an open issue (`the transport landed for #45, and the
+fallback itself is #348`), and so may a `(delivered; …)` parenthetical (`#50 (delivered; … the
+open #166)`). A depth-blind `strings.Split(";")` truncates six of the file's heads, because both
+separators occur inside parentheticals; that too is a test, not a comment.
+
+**Evaluated and rejected: retrofitting provenance to cite plans and PRs instead of issues.** The
+issue's second candidate is right that a plan number and a PR number carry no state to falsify
+them. But neither does a past-tense issue citation, and the guard is the proof — it never
+state-checks a tail, because `landed for #74` is true whether or not #74 is open. Rewriting 54
+such clauses would cost the reader the identifier they are most likely to want, the issue holding
+the discussion, to buy something the split has already bought. Kept as guidance for new
+provenance, which may cite whichever of the three is most useful: the file already mixes all
+three, and one clause (`*Landed for docs/plan/20_gcp-deployment.md slice 2.*`) names no issue at
+all — which is why the guard requires none of a `Landed for`.
+
+**Adopted: where a tracker is shared, the pointer carries a parenthetical.** #453 gave 51
+pointers a clause naming what their entry still leaves open and left 33 bare, on no principle but
+the accident of which trackers happened to close. The rule that closes the gap is derived rather
+than hardcoded: an issue named as the live tracker by *more than one* entry cannot, by itself,
+say what any single one of them leaves open, so it must carry a parenthetical. That names #78 —
+the recording tracker, live on 82 entries — without the guard ever knowing the number 78, and it
+picked up #56 and #432 by the same reasoning.
+
+**Evaluated and rejected: making the parenthetical rule check truth rather than presence.** It
+cannot. A regex sees that a clause exists, never that it is honest, and the 33 were written by
+reading each entry in full for that reason. The rule is still worth having: it makes the omission
+loud, and an omission is the failure mode that actually occurred.
+
+**What the rule found: five pointers their own issue can no longer settle.** #56 was "Console SSO
+and RBAC" when five entries named it. It is now "Multi-tenant activation (post-v1) — the
+remaining half of the original RBAC/SSO issue", and settles none of them: three record shipped,
+argued divergences with nothing outstanding at all, and the two that do leave something open are
+waiting on a recording, which is #78's job. This is a second rot mechanism and it is invisible to
+an issue-state check — the issue stayed open while its scope moved out from under the pointer.
+Nothing but writing the parenthetical would have surfaced it, which is the strongest argument the
+convention has. The three become provenance (`*Landed for #56's SSO/RBAC half (plan 31 slice
+2).*`) and the two are re-pointed at #78.
+
+**Adopted: the guard is split at the network boundary, not filed on one side of it.** The shape
+rules — clause grammar, an INFERRED entry with no live tracker, the shared-tracker parenthetical,
+and a bare `(line NN)` cross-reference, the mechanism that had drifted 77 lines before #453
+caught it — are offline and free, so they run in the merge gate. They run there as the package's
+own test rather than as a `verify` prerequisite, which is the shape
+`internal/modeltest/docs_test.go` already uses to hold README's tier table to the tree. Only the
+issue-state lookup needs the network, and `make verify` is offline and credential-free by design,
+so that half is `make registry-check`, outside the gate, run by
+`.github/workflows/registry.yml`.
+
+**Evaluated and rejected: the verifier's docs-consistency rung as the guard's only home.** It has
+`Bash` and `gh issue view` is already allowlisted, so it could run this. But the verifier is
+scoped to the change under review, and pointer rot is caused by an event outside every diff —
+someone closing an issue elsewhere. A diff-scoped check would fire only when someone happened to
+touch the registry, which is precisely the silence #452 describes. The rung is the wrong shape
+for a fact that rots on its own.
+
+**Evaluated and rejected: leaving the state rung to the schedule alone.** The issue proposed a
+scheduled workflow beside `evals.yml`, and that is what runs daily. But a schedule only catches
+rot after the fact, and the cheapest moment to fix a pointer aimed at an already-closed issue is
+the PR writing it — so the workflow also runs on pull requests that touch the registry or the
+guard, where it costs five API calls.
+
+---
+
 ## Multi-agent session threads (plan 35, #53) — archived 2026-08-21, all six slices delivered (#434, #435, #436, #437, #440, #443)
 
 Another of the seams v1 deliberately reserved, now built — scheduled deployments

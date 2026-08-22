@@ -16,7 +16,9 @@ written; #447 does, its own body admitting three designs and none obviously righ
       platform-executed tool leaving the session `running` matches the reference, the
       custom-tool lane is #375's bug, and a `self_hosted` worker's is a new inference.
       #59 closed as answered.
-- [ ] **#452** — the pointer invariant made executable: the guard, and the 33 pointers whose
-      shared tracker still names nothing the entry citing it leaves open.
+- [x] **#452** — the pointer invariant made executable. `tools/registrycheck`'s shape rules run
+      in the gate, its issue-state rule on a schedule; the 33 shared-tracker pointers now name
+      what their own entry leaves open, and the five whose tracker had been re-scoped out from
+      under them are re-pointed. Two defects the sweep surfaced are filed as #457 and #458.
 - [ ] **#447** — the session-scoped bound two agents messaging each other cannot escape.
       Design in progress; the plan file lands with the decision it records.
