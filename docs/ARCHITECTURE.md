@@ -500,3 +500,15 @@ a running compose stack and a real model, consented by its own tier variable
 `RUN_LIVE_ACCEPTANCE_TESTS` (whole sessions cost an order of magnitude more than the
 `RUN_LIVE_MODEL_TESTS` single-turn smoke, which therefore must not buy them) with the
 `ACCEPTANCE_*` variables naming the stack's key, model, and base URL.
+
+One more check sits on that same in-gate / out-of-gate seam, over documentation rather
+than code. `tools/registrycheck` holds [DIVERGENCES.md](./DIVERGENCES.md)'s pointers to the
+grammar its own Format legend promises. Most of that grammar is readable from the file alone —
+a clause parses at all, an INFERRED entry has a live tracker, a tracker several entries share
+says what *this* one leaves open, and no cross-reference is a bare line number (one had drifted
+77 lines before anyone noticed) — so those rules run in the gate as that package's own test,
+the shape `internal/modeltest`'s README-tier test already uses. One rule is not readable from
+the file, and it is the one that rots: whether the issue a live `Tracked: #N` names is still
+open, which is an event no file in this repository can see. That half is
+`make registry-check` and [`registry.yml`](../.github/workflows/registry.yml), daily and on
+every pull request that touches the registry.
