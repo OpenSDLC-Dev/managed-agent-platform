@@ -44,6 +44,48 @@ committed `CONTROLPLANE_API_KEY` is a well-known placeholder — anyone who can
 reach the port can drive the API with it. To expose it on the LAN, set a real key
 and `CONTROLPLANE_BIND=0.0.0.0` in `.env`.
 
+## A second stack beside the first
+
+Compose namespaces what it creates by **project**, and the `name:` at the top of
+`docker-compose.yml` makes two checkouts of this repo the same project by default —
+so bringing a branch build up next to a running stack means naming it:
+
+```sh
+docker compose -p mapsecond up --build
+```
+
+That one flag is the whole of the isolation. The executor's gate network and both
+`:local` image tags derive from the project name rather than being pinned, so a
+second stack's gates join its own network and its builds stay its own. Pinning
+them is what once let a branch stack resolve `postgres` to a running stack's
+container and migrate its database
+([#438](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/438)).
+
+The project name scopes the containers, the network, the volumes and the `:local`
+image tags. What it does not scope is **host ports**, and it does not pick a
+different `.env` — two stacks run from the same directory read the same one. The
+published API port is the one you will hit, and it says so at once, so pass the
+override in the shell rather than the file:
+
+```sh
+CONTROLPLANE_PORT=8081 docker compose -p mapsecond up --build
+```
+
+Under `--profile iam` the same goes for `IDP_PORT`. The `observability` profile's
+Jaeger ports are fixed, so two stacks cannot both run that profile unchanged.
+
+Give `-p` to **every** verb, not just `up` — `down`, `logs`, `ps`. Without it the command
+addresses the default project, which is the other stack; see [Teardown](#teardown) for the
+one that loses data.
+
+All of this rides on Compose exposing the *resolved* project name for interpolation, which
+the Compose Specification requires. One version caveat, worth stating because it is silent
+when it bites: **before Compose 2.27.1**, an exported `COMPOSE_PROJECT_NAME` won the
+interpolation while `-p` still named the project, so the stack came up on `mapsecond_default`
+while its executor was told `managed-agent-platform_default` — #438 again, in the half you
+cannot see. Either run 2.27.1 or newer, or pick one mechanism: `-p`, or the environment
+variable, never a different value in each.
+
 ## Configuration
 
 Two files, and each documents its own settings in place rather than here:
@@ -133,7 +175,8 @@ attached) gets a per-session **egress gate** — a forward proxy the sandbox's
 `gate-image` service builds the gate image (`Dockerfile --target gate`) onto
 the host daemon before the executor starts; the executor opts in via
 `CONTROLPLANE_URL` + `EXECUTOR_GATE_IMAGE`, and `SANDBOX_DOCKER_GATE_NETWORK`
-puts the gate on the stack's network so it can fetch its policy from
+puts the gate on **this** stack's own network — derived from the compose project
+name, never pinned; see "A second stack beside the first" — so it can fetch its policy from
 `http://controlplane:8080`. Gate containers are siblings on the host daemon,
 same as the sandboxes that join their network namespace.
 
@@ -251,4 +294,22 @@ docker compose down -v       # also drop the volumes (wipes all data — Postgre
                              # profile that includes the IdP: its user store shares
                              # the Postgres volume, and its signing certificate is
                              # minted afresh on the next boot (see above)
+```
+
+**Every verb takes `-p`, not just `up`.** A bare `docker compose down -v` in a checkout
+you last brought up as `-p mapsecond` addresses the *default* project, so it drops the
+volumes of the stack you were running beside — the one you meant to keep. Tear a second
+stack down the way you raised it: `docker compose -p mapsecond down -v`.
+
+Two of a session's containers are not compose services at all: the sandbox and its egress
+gate are host-daemon siblings the executor creates. `down` does not remove them, and a
+live gate holds an endpoint on the network, so removing that network fails with "has
+active endpoints". Nothing else will collect them either — the reaper deliberately skips
+containers whose session id its database has never seen, which is what stops one stack
+reaping another's. Look before you sweep, because the ownership label carries no project
+component and so matches every stack's on this daemon:
+
+```sh
+docker ps --filter label=dev.opensdlc.managed-agent-platform.session-id \
+          --format '{{.Names}}'   # map-<session> / map-gate-<session>
 ```

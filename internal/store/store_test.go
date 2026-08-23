@@ -1,9 +1,12 @@
 package store_test
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"log"
+	"log/slog"
 	"os"
 	"slices"
 	"strings"
@@ -111,6 +114,92 @@ func TestMigrateIsIdempotent(t *testing.T) {
 	}
 	if applied != wantMigrations {
 		t.Errorf("schema_migrations rows after re-run = %d, want %d", applied, wantMigrations)
+	}
+}
+
+// TestMigrateNamesTheDatabaseItChanges: every binary migrates whatever database
+// it connects to, so one pointed at the wrong Postgres upgrades it without a
+// word — which is how a second compose stack, resolving `postgres` to a running
+// stack's container, once migrated that stack's database (#438). Applying
+// anything must therefore name the database first, and each version as it lands.
+// The connection's password must not ride along into the log.
+func TestMigrateNamesTheDatabaseItChanges(t *testing.T) {
+	dsn := pgtest.FreshDB(t)
+	cfg, err := pgxpool.ParseConfig(dsn)
+	if err != nil {
+		t.Fatalf("parse dsn: %v", err)
+	}
+
+	var buf bytes.Buffer
+	prev := slog.Default()
+	// The stdlib-log save/restore is not optional, for the reason
+	// internal/api's captureWarnings documents: slog.SetDefault reroutes the
+	// standard log package too, and restoring only slog.Default() leaves it
+	// pointing at this finished test's buffer.
+	prevOut, prevFlags := log.Writer(), log.Flags()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
+	defer func() {
+		slog.SetDefault(prev)
+		log.SetOutput(prevOut)
+		log.SetFlags(prevFlags)
+	}()
+
+	pool := open(t, dsn)
+	logged := buf.String()
+	// The configured host is what could not tell two stacks apart, so the log
+	// has to carry the address that actually answered beside it.
+	for _, want := range []string{
+		"database=" + cfg.ConnConfig.Database,
+		"server_addr=",
+		"server_port=",
+		"configured_host=" + cfg.ConnConfig.Host,
+	} {
+		if !strings.Contains(logged, want) {
+			t.Errorf("migration log does not carry %q: %q", want, logged)
+		}
+	}
+	// Every version, not just the first: the incident was a pair of migrations
+	// in the twenties, and a log that named only the earliest would have shown
+	// nothing about it.
+	if got := strings.Count(logged, "store: applying migration"); got != wantMigrations {
+		t.Errorf("migration log names %d versions, want %d: %q", got, wantMigrations, logged)
+	}
+	// Exactly one identity line, however many versions follow it — the guard
+	// that announces once is the whole point, and a run that repeated it per
+	// migration would satisfy every assertion above.
+	if got := strings.Count(logged, "store: migrating database"); got != 1 {
+		t.Errorf("migration log identifies the database %d times, want once: %q", got, logged)
+	}
+	// The address that answered is the half the configured one could not supply:
+	// under pgtest the client dials 127.0.0.1 and the server reports its own
+	// container address, so a line repeating the configured host in both fields
+	// would be back to naming something that cannot tell two stacks apart.
+	if strings.Contains(logged, "server_addr="+cfg.ConnConfig.Host+" ") {
+		t.Errorf("server_addr merely repeats the configured host: %q", logged)
+	}
+	// The password rides in the DSN, so the ways it escapes are a whole
+	// connection string reaching the log, or a password field logged beside the
+	// rest. (Testing for the value itself is no test here: pgtest's is `test`,
+	// a substring of the database name it would be checked against.)
+	for _, forbidden := range []string{"://", "assword"} {
+		if strings.Contains(logged, forbidden) {
+			t.Errorf("migration log carries %q, not just the connection's public parts: %q", forbidden, logged)
+		}
+	}
+
+	// The common case is a process finding nothing to do, and it must stay
+	// silent — a line every binary prints on every restart is one nobody reads.
+	buf.Reset()
+	if err := store.Migrate(context.Background(), pool); err != nil {
+		t.Fatalf("second Migrate: %v", err)
+	}
+	// Named messages rather than an empty buffer: this handler is process-wide,
+	// so asserting total silence would one day fail on somebody else's line and
+	// blame migrations for it.
+	for _, quiet := range []string{"store: migrating database", "store: applying migration"} {
+		if strings.Contains(buf.String(), quiet) {
+			t.Errorf("a migration run with nothing to apply logged %q: %q", quiet, buf.String())
+		}
 	}
 }
 

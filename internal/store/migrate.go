@@ -5,6 +5,7 @@ import (
 	"embed"
 	"fmt"
 	"io/fs"
+	"log/slog"
 	"path"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -57,6 +58,7 @@ func migrate(ctx context.Context, pool *pgxpool.Pool, through string) error {
 		return fmt.Errorf("store: ensure schema_migrations: %w", err)
 	}
 
+	announced := false
 	for _, name := range names { // fs.Glob returns sorted names
 		version := path.Base(name)
 		var applied bool
@@ -66,6 +68,33 @@ func migrate(ctx context.Context, pool *pgxpool.Pool, through string) error {
 			return fmt.Errorf("store: check %s: %w", version, err)
 		}
 		if !applied {
+			// Every binary migrates whatever database it connects to, so one
+			// pointed at the wrong Postgres upgrades it without a word — a
+			// second compose stack, resolving `postgres` to a running stack's
+			// container, is how that happened (#438). Say which database once,
+			// before the first statement runs rather than after the commit, so
+			// a run that fails halfway still names what it was touching.
+			//
+			// Asked of the connection rather than read off the config, because
+			// the config is what could not tell the two apart: both stacks
+			// configure `postgres:5432/managed_agent_platform`, so only the
+			// address that actually answered distinguishes them. Both are
+			// logged — the surprise is precisely that they disagree. Neither
+			// carries the password the DSN holds.
+			if !announced {
+				var db, serverAddr string
+				var serverPort uint16
+				if err := tx.QueryRow(ctx, `SELECT current_database(),
+					coalesce(host(inet_server_addr()), 'unix socket'),
+					coalesce(inet_server_port(), 0)`).Scan(&db, &serverAddr, &serverPort); err != nil {
+					return fmt.Errorf("store: identify database: %w", err)
+				}
+				slog.InfoContext(ctx, "store: migrating database", "database", db,
+					"server_addr", serverAddr, "server_port", serverPort,
+					"configured_host", pool.Config().ConnConfig.Host)
+				announced = true
+			}
+			slog.InfoContext(ctx, "store: applying migration", "version", version)
 			sql, err := migrationsFS.ReadFile(name)
 			if err != nil {
 				return fmt.Errorf("store: read %s: %w", version, err)
