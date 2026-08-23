@@ -368,3 +368,19 @@ func TestTurnEventsMixesDelegationWithExecCalls(t *testing.T) {
 		t.Errorf("delegated names %q, want the committed event %q", delegated[0].eventID, batch[1].ID)
 	}
 }
+
+// The delegation budget is derived, not picked (delegate.go defines it as
+// maxLiveThreads × maxSettlementChain, so no test can assert that without
+// restating the definition), and the suites that exercise the bound sit in
+// brain_test, where they spell 625 as a literal because they cannot see the
+// constant. Pinning the product is what stops the two drifting apart: moving
+// either factor changes this number and fails here.
+func TestSessionDelegationBudgetIsDerived(t *testing.T) {
+	// The literal the brain_test suites seed. Changing either factor is a
+	// deliberate act; this makes it one that also updates those tests and the
+	// docs/DIVERGENCES.md entry that quotes the number.
+	if maxSessionDelegationTurns != 625 {
+		t.Errorf("maxSessionDelegationTurns = %d, want 625 — update the brain_test seeds "+
+			"(setDelegationTurns) and the DIVERGENCES entry with it", maxSessionDelegationTurns)
+	}
+}

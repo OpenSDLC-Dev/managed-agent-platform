@@ -1,0 +1,21 @@
+-- The session delegation bound (#447): how many turns this session has spent
+-- since a client last asked it for anything.
+--
+-- #442's chain cap counts on the claimed work_items row, in its metadata, and
+-- that is precisely why two agents messaging each other escape it: a row's life
+-- is exactly one uninterrupted run of chained turns. EnqueueThread's INSERT
+-- names six columns and metadata is not among them, so every wake from idle
+-- takes the DEFAULT '{}' and starts a run at zero. The count has to survive an
+-- idle, and only the session row does.
+--
+-- It is a projection, not a fold: unlike sessions.status, which foldSession
+-- re-derives, this cannot be rebuilt from the event log alone, so a database
+-- restored from events would start every session at zero. sessions.usage has
+-- the same property, so the precedent is established rather than new — and the
+-- column can be trusted for the same reason usage can: exactly two statements
+-- write it, and both hold the session row lock.
+--
+-- Existing sessions start at 0. That is the safe direction: a session mid-loop
+-- when this lands gets a fresh budget rather than an immediate cut, which is
+-- what an operator would expect from a bound that did not exist a moment ago.
+ALTER TABLE sessions ADD COLUMN delegation_turns integer NOT NULL DEFAULT 0;

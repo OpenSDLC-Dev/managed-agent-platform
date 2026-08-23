@@ -107,6 +107,32 @@ func (t EventType) Inbound() bool {
 	}
 }
 
+// StartsNewWork reports whether this event is somebody outside the session
+// asking it to do something new — the narrower sibling of Inbound, and the
+// reset for the session delegation bound (#447).
+//
+// Inbound cannot serve: it is true for user.tool_result, and on a self_hosted
+// environment every single tool call comes back as a client POST, so a bound
+// reset by Inbound would be zeroed continuously and bound nothing. The split is
+// demand versus answer. A message, an outcome and an operator's system message
+// are demands. A tool result answers a call the session itself made, so it
+// carries the session's own work forward rather than starting new work.
+//
+// user.tool_confirmation is a demand for a reason beyond "a human is present":
+// it is absent from the brain's pendingInputTypes, so without it a human who
+// has just approved a gated call would see the very next turn refused.
+//
+// user.interrupt is excluded deliberately: a stop is not a demand, and counting
+// it would let an operator's own stop action hand the session a fresh budget.
+func (t EventType) StartsNewWork() bool {
+	switch t {
+	case EventUserMessage, EventUserDefineOutcome, EventUserToolConfirm, EventSystemMessage:
+		return true
+	default:
+		return false
+	}
+}
+
 // Persisted reports whether the event is durably stored in the log. The
 // stream-only preview frames (event_start/event_delta) are not.
 func (t EventType) Persisted() bool {
