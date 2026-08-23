@@ -76,8 +76,11 @@ platform's own executor, just deployed elsewhere.
 2. A brain claims it, replays the log into provider messages, and streams the model's
    response — writing `agent.message` / `agent.thinking` events (with opt-in
    `event_start`/`event_delta` SSE previews) and `span.model_request_start/_end`.
-3. A tool call becomes an `agent.tool_use` event plus a `tool_exec` work item; the
-   brain suspends (it holds nothing in memory a crash could lose). A turn carrying a
+3. A sandbox tool call becomes an `agent.tool_use` event plus a `tool_exec` work item;
+   the brain suspends (it holds nothing in memory a crash could lose). Not every call
+   does: an `always_ask` policy suspends the turn with no item at all until a
+   confirmation releases it, an MCP call takes `mcp_exec`, and a delegation call is
+   answered in the settlement that commits the turn. A turn carrying a
    web tool (web_fetch/web_search) enqueues a `web_exec` item instead — the platform
    executor answers the web calls in its own process (both environment kinds, no
    sandbox) and chains the `tool_exec` for any sandbox tools on the same turn, so a

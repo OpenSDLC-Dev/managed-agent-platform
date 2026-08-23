@@ -35,13 +35,15 @@ const NoHeartbeat = "NO_HEARTBEAT"
 const ackStartupLeaseSeconds = 30
 
 // workAPIScope restricts a work-API query to the wire's notion of a work item —
-// a tool_exec item in a self_hosted environment. Two other row kinds share the
-// work_items table and must never be reachable through a worker's
-// environment-key endpoints: model_turn is the brain's own queue (acking one
-// would wedge the brain's turn), and a cloud environment's tool_exec is the
-// platform executor's (force-stopping one would yank it from the executor
-// mid-run). Poll/Claim already scope this way; the lifecycle mutators must
-// match. Append to a `WHERE id = $1 AND environment_id = $2` prefix.
+// a tool_exec item in a self_hosted environment. Every other row in the
+// work_items table must be unreachable through a worker's environment-key
+// endpoints, and two of them are hazards rather than merely out of scope:
+// model_turn is the brain's own queue (acking one would wedge the brain's
+// turn), and a cloud environment's tool_exec is the platform executor's
+// (force-stopping one would yank it from the executor mid-run). It names the
+// hazards rather than counting the kinds, so that adding a kind cannot falsify
+// it. Poll/Claim already scope this way; the lifecycle mutators must match.
+// Append to a `WHERE id = $1 AND environment_id = $2` prefix.
 const workAPIScope = ` AND kind = 'tool_exec'
 	AND EXISTS (SELECT 1 FROM environments e WHERE e.id = environment_id AND e.kind = 'self_hosted')`
 
