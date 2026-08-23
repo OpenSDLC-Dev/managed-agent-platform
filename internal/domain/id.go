@@ -57,9 +57,11 @@ const (
 	PrefixAPIKey = "apikey"
 )
 
-// altSessionPrefix is accepted on input for wire compatibility: some Anthropic
-// surfaces use "session_" instead of "sesn_". We normalize to PrefixSession on
-// generation but recognize both.
+// altSessionPrefix is accepted on input for wire compatibility: the managed-agents
+// work-data schema spells a session id "session_...", so a worker can hand one
+// back to us. Whether the reference itself ACCEPTS that spelling is unobserved —
+// the registry's session-id prefix entry holds that question. We normalize to
+// PrefixSession on generation but recognize both.
 const altSessionPrefix = "session"
 
 // idAlphabet is Crockford base32 (lowercased): the digits and lowercase letters
