@@ -1075,21 +1075,44 @@ jobs:
         run: cp .env.example .env
       - name: docker compose config is valid
         run: docker compose config --quiet
-      # Rendering the same file under a second project name is what catches a
-      # re-pinned network: with the name hard-coded, `-p mapsecond` put the
-      # second stack on the first one's network, where `postgres` answered from
-      # the wrong container and a branch build migrated a running stack's
-      # database (#438). The project-scoped assertion is the load-bearing one —
-      # on the pinned file the two values still agreed with each other, they
-      # were just both the wrong network.
-      - name: a second project gets its own network
+      # Rendering the file under a second project name is what catches a
+      # re-pinned network: with the name hard-coded, `-p other` put the second
+      # stack on the first one's network, where `postgres` answered from the
+      # wrong container and a branch build migrated a running stack's database
+      # (#438). The image tags ride along — they are host-daemon globals the
+      # executor dereferences per gate, so the two that name the gate must agree
+      # and must be the project's own.
+      #
+      # TWO project names, not one: every assertion here is "equals this
+      # project's own name", so a single render would still pass a file that
+      # pinned the literal the test happens to use. The final default-project
+      # assertion is a continuity guard rather than a #438 guard — it holds on
+      # the pinned file too, and exists because the network name now derives
+      # from `name:` at the top of the compose file, so deleting that line would
+      # silently rename the project after the directory and orphan every
+      # existing stack's volumes.
+      - name: a second project gets its own network and images
         run: |
-          cfg="$(docker compose -p mapsecond config --format json)"
-          net="$(printf '%s' "$cfg" | python3 -c 'import json,sys; print(json.load(sys.stdin)["networks"]["default"]["name"])')"
-          gate="$(printf '%s' "$cfg" | python3 -c 'import json,sys; print(json.load(sys.stdin)["services"]["executor"]["environment"]["SANDBOX_DOCKER_GATE_NETWORK"])')"
-          [ "$net" = "mapsecond_default" ] || { echo "a second project's network is '$net', not its own" >&2; exit 1; }
-          [ "$gate" = "$net" ] || { echo "the executor's gate network '$gate' is not the stack's '$net'" >&2; exit 1; }
-          echo "ok: -p mapsecond isolates on $net"
+          assert_project() {
+            p="$1"
+            cfg="$(docker compose -p "$p" config --format json)"
+            get() { printf '%s' "$cfg" | python3 -c "import json,sys; print(json.load(sys.stdin)$1)"; }
+            net="$(get '["networks"]["default"]["name"]')"
+            gate="$(get '["services"]["executor"]["environment"]["SANDBOX_DOCKER_GATE_NETWORK"]')"
+            img="$(get '["services"]["gate-image"]["image"]')"
+            gimg="$(get '["services"]["executor"]["environment"]["EXECUTOR_GATE_IMAGE"]')"
+            [ "$net" = "${p}_default" ] || { echo "project '$p' renders network '$net', not its own" >&2; exit 1; }
+            [ "$gate" = "$net" ] || { echo "project '$p' tells the executor '$gate', not its network '$net'" >&2; exit 1; }
+            [ "$img" = "${p}-gate:local" ] || { echo "project '$p' builds gate image '$img', not its own" >&2; exit 1; }
+            [ "$gimg" = "$img" ] || { echo "project '$p' launches '$gimg' but builds '$img'" >&2; exit 1; }
+            echo "ok: -p $p isolates on $net with $img"
+          }
+          assert_project mapsecond
+          assert_project mapthird
+          defnet="$(docker compose config --format json | python3 -c 'import json,sys; print(json.load(sys.stdin)["networks"]["default"]["name"])')"
+          [ "$defnet" = "managed-agent-platform_default" ] \
+            || { echo "the default project's network is '$defnet' — an existing stack's volumes would be orphaned" >&2; exit 1; }
+          echo "ok: the default project is unchanged"
       # The stack below never starts openbao and the helm job only renders the
       # chart's copy, so without this nothing here runs either init script; the
       # Makefile recipe argues it, and #439 is what it cost. No Docker, so it is

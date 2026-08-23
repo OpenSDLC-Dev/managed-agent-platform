@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"log/slog"
 	"os"
 	"slices"
@@ -131,22 +132,46 @@ func TestMigrateNamesTheDatabaseItChanges(t *testing.T) {
 
 	var buf bytes.Buffer
 	prev := slog.Default()
+	// The stdlib-log save/restore is not optional, for the reason
+	// internal/api's captureWarnings documents: slog.SetDefault reroutes the
+	// standard log package too, and restoring only slog.Default() leaves it
+	// pointing at this finished test's buffer.
+	prevOut, prevFlags := log.Writer(), log.Flags()
 	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
-	defer slog.SetDefault(prev)
+	defer func() {
+		slog.SetDefault(prev)
+		log.SetOutput(prevOut)
+		log.SetFlags(prevFlags)
+	}()
 
 	pool := open(t, dsn)
 	logged := buf.String()
-	for _, want := range []string{cfg.ConnConfig.Database, cfg.ConnConfig.Host, "0001"} {
+	// The configured host is what could not tell two stacks apart, so the log
+	// has to carry the address that actually answered beside it.
+	for _, want := range []string{
+		"database=" + cfg.ConnConfig.Database,
+		"server_addr=",
+		"server_port=",
+		"configured_host=" + cfg.ConnConfig.Host,
+	} {
 		if !strings.Contains(logged, want) {
-			t.Errorf("migration log does not name %q: %q", want, logged)
+			t.Errorf("migration log does not carry %q: %q", want, logged)
 		}
 	}
-	// The password rides in the DSN, so the way it escapes is a whole connection
-	// string reaching the log rather than the host, port and database read off
-	// it. (Testing for the password itself is no test here: pgtest's is `test`,
-	// a substring of the database name it is checked against.)
-	if strings.Contains(logged, "://") {
-		t.Errorf("migration log carries a connection string, not just its parts: %q", logged)
+	// Every version, not just the first: the incident was a pair of migrations
+	// in the twenties, and a log that named only the earliest would have shown
+	// nothing about it.
+	if got := strings.Count(logged, "store: applying migration"); got != wantMigrations {
+		t.Errorf("migration log names %d versions, want %d: %q", got, wantMigrations, logged)
+	}
+	// The password rides in the DSN, so the ways it escapes are a whole
+	// connection string reaching the log, or a password field logged beside the
+	// rest. (Testing for the value itself is no test here: pgtest's is `test`,
+	// a substring of the database name it would be checked against.)
+	for _, forbidden := range []string{"://", "assword"} {
+		if strings.Contains(logged, forbidden) {
+			t.Errorf("migration log carries %q, not just the connection's public parts: %q", forbidden, logged)
+		}
 	}
 
 	// The common case is a process finding nothing to do, and it must stay

@@ -60,11 +60,18 @@ network. Pinning it is what once let a branch stack resolve `postgres` to a
 running stack's container and migrate its database
 ([#438](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/438)).
 
-Two things still cross. The published API port fails to bind, which says so at
-once: give the second stack its own `CONTROLPLANE_PORT`. The `:local` image tags
-are the quiet one — `docker compose build` in either checkout retags them for
-both, and the executor resolves `EXECUTOR_GATE_IMAGE` against the host daemon at
-session time, so a stack can end up running the other's gate build.
+The project name scopes the containers, the network, the volumes and the `:local`
+image tags. What it does not scope is **host ports**, and it does not pick a
+different `.env` — two stacks run from the same directory read the same one. The
+published API port is the one you will hit, and it says so at once, so pass the
+override in the shell rather than the file:
+
+```sh
+CONTROLPLANE_PORT=8081 docker compose -p mapsecond up --build
+```
+
+Under `--profile iam` the same goes for `IDP_PORT`. The `observability` profile's
+Jaeger ports are fixed, so two stacks cannot both run that profile unchanged.
 
 ## Configuration
 
@@ -155,7 +162,8 @@ attached) gets a per-session **egress gate** — a forward proxy the sandbox's
 `gate-image` service builds the gate image (`Dockerfile --target gate`) onto
 the host daemon before the executor starts; the executor opts in via
 `CONTROLPLANE_URL` + `EXECUTOR_GATE_IMAGE`, and `SANDBOX_DOCKER_GATE_NETWORK`
-puts the gate on the stack's network so it can fetch its policy from
+puts the gate on **this** stack's own network — derived from the compose project
+name, never pinned; see "A second stack beside the first" — so it can fetch its policy from
 `http://controlplane:8080`. Gate containers are siblings on the host daemon,
 same as the sandboxes that join their network namespace.
 
