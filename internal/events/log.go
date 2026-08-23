@@ -263,6 +263,33 @@ func (l *Log) AppendInTx(ctx context.Context, tx pgx.Tx, sessionID domain.ID, ev
 		}
 	}
 
+	// The session delegation bound's reset (#447): somebody outside the session
+	// asking it for something new returns its autonomy budget. It rides the
+	// batch and the session row lock this function already holds, so every path
+	// that appends an inbound event resets — the API's send, a worker's tool
+	// result, the deployment trigger — and no caller has to remember to.
+	//
+	// Which types count is domain.EventType.StartsNewWork, and it is narrower
+	// than Inbound on purpose: a tool result answers a call the session itself
+	// made, and on a self_hosted environment every tool call arrives as one.
+	resetDelegation := false
+	for _, ev := range evs {
+		if ev.Type.StartsNewWork() {
+			resetDelegation = true
+			break
+		}
+	}
+	if resetDelegation {
+		// Guarded on > 0 so the overwhelmingly common append — to a session
+		// that has never delegated — does not write the row at all.
+		if _, err := tx.Exec(ctx,
+			`UPDATE sessions SET delegation_turns = 0, updated_at = now()
+			  WHERE id = $1 AND delegation_turns > 0`,
+			sessionID.String()); err != nil {
+			return nil, err
+		}
+	}
+
 	if opts.SetStatus != nil {
 		if _, err := tx.Exec(ctx,
 			`UPDATE sessions SET status = $2, updated_at = now() WHERE id = $1`,

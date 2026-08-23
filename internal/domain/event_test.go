@@ -44,6 +44,56 @@ func TestEventInbound(t *testing.T) {
 	}
 }
 
+// The table is exhaustive over the inbound set on purpose: every exclusion
+// below is load-bearing rather than a default, and the way this rots is
+// somebody "fixing" one of the three false arms to match Inbound().
+func TestEventStartsNewWork(t *testing.T) {
+	cases := []struct {
+		et   EventType
+		want bool
+		why  string
+	}{
+		{EventUserMessage, true, "the plain case: a client asked for something"},
+		{EventUserDefineOutcome, true, "the agent begins work on it immediately"},
+		{EventSystemMessage, true, "an operator reaching the session is a demand too"},
+		{EventUserToolConfirm, true, "a human just approved a gated call, and it is not " +
+			"in pendingInputTypes — without this the very next turn is refused"},
+		{EventUserToolResult, false, "on a self_hosted environment EVERY tool call comes " +
+			"back as a client POST, so resetting here would zero the counter continuously"},
+		{EventUserCustomToolRes, false, "a custom tool's answer is the same case"},
+		{EventUserInterrupt, false, "a stop is not a demand; treating it as one would let " +
+			"an operator's own stop hand the session a fresh budget"},
+	}
+	seen := map[EventType]bool{}
+	for _, c := range cases {
+		seen[c.et] = true
+		if got := c.et.StartsNewWork(); got != c.want {
+			t.Errorf("%q.StartsNewWork() = %v, want %v — %s", c.et, got, c.want, c.why)
+		}
+	}
+	// Every inbound type must be classified here, so a new one cannot join the
+	// taxonomy without someone deciding which side of the bound it falls on.
+	for _, et := range []EventType{
+		EventUserMessage, EventUserInterrupt, EventUserToolConfirm,
+		EventUserCustomToolRes, EventUserToolResult, EventUserDefineOutcome,
+		EventSystemMessage,
+	} {
+		if !seen[et] {
+			t.Errorf("inbound type %q is unclassified by this table", et)
+		}
+	}
+	// Nothing the platform produces can reset a bound on the platform's own
+	// autonomy — that is the whole point of the bound.
+	for _, et := range []EventType{
+		EventAgentMessage, EventAgentToolUse, EventAgentToolResult,
+		EventSessionStatusIdle, EventSessionError,
+	} {
+		if et.StartsNewWork() {
+			t.Errorf("%q is platform-produced and must not start new work", et)
+		}
+	}
+}
+
 func TestEventPersisted(t *testing.T) {
 	if EventStart.Persisted() || EventDelta.Persisted() {
 		t.Errorf("preview frames must not be persisted")

@@ -49,6 +49,83 @@ new directory and in-repo citations re-pointed in the moving PR (plan
 
 ---
 
+## The session delegation bound (#447) — four designs evaluated, three rejected, 2026-08-23
+
+The narrative is in CHANGELOG.md and the wire argument is in DIVERGENCES.md. What neither holds
+is which designs were considered and why three were dropped — and one of the rejections is the
+reason the shipped design needed a migration at all.
+
+**The issue undercounted the problem: there were three escape routes, not two.** #447's body
+names the fresh work-item row (route 1) and the `woke` clearing (route 2). Grounding the design
+found a third: `chainInput` matches a peer's `agent.thread_message_received` past the watermark
+**regardless of `processed_at`**, and input beats the cap. So two threads that both stay
+perpetually `running` never wake each other (`WakeThread` only flips `idle` ones), never insert a
+fresh row, never set `woke` — and still reset the count every single turn. A fix closing only
+routes 1 and 2 would have left the loop alive. All three are one mistake seen from three angles:
+at the layer where `chainInput` and `WakeThread` work, a peer agent's message and a client's
+message are the same event class.
+
+**Rejected: the baton — carry the chain count across the wake instead of rehoming it.** The
+elegant option, and the only one needing no migration: `EnqueueThread` would copy the outgoing
+count into the new row's `metadata` rather than letting it take the `DEFAULT '{}'`. Two leaks
+killed it, both outside the delegation path and so easy to miss. `Brain.settle` — the path every
+*failed* turn and every tool-less turn takes — calls plain `queue.Requeue`, which clears the key,
+so a ping-pong pair on a flaky provider resets its baton on every failed turn and never reaches
+the cap. And `queue.CancelThread` stops the row outright, so an operator interrupting one thread
+would hand the pair a fresh budget. A counter that any unrelated path can zero is not a bound.
+
+**Rejected: derive the count from the log — how many of this thread's last N turns were
+settlement-only.** No migration at all and the cleanest crash story, since it re-reads rather
+than projects. It failed on two counts. Its reset markers include any real tool call by any
+thread, so one unrelated child running `bash` in a poll loop masks a looping pair indefinitely —
+a bound that a busy sibling switches off. And it transcribes `EventType.Inbound()` and the six
+delegation tool names into hand-written SQL matched on `payload->>'name'`, where a seventh
+delegation tool, or a change to `turnEvents`' payload keys, silently converts every delegation
+call into a reset marker and the bound stops existing **with no test failing**.
+
+**Rejected: cut at the settlement rather than refusing at the claim.** Two of the four candidates
+did this, and it is where the sharpest defect was. On a *mixed* turn — one holding both a
+delegation call and a real tool call — the fate block's `gated`, `idle`, `capped` and `chain` are
+all false, so an unguarded cut fires, the `case idle:` arm idles the thread, and `opts.Then`
+still enqueues the `tool_exec`: a sandbox command left in flight against a session that has
+already folded idle and become archivable, with `events.ResumableThreads` selecting only
+`running` threads so nothing would ever read the result. Both settlement-side candidates also had
+to gate `delegate.wake` at the cap so a cut thread would not be re-woken — and that gate makes
+`send_to_agent` answer its byte-pinned `Message sent.` for a message that will schedule nothing,
+the exact lie it already refuses to tell for a target idle on `retries_exhausted`. Refusing at
+the claim needs neither: it never intervenes in a turn's fate, and the peer really is woken.
+
+**Rejected: count only settlement-only turns.** Two candidates did. `commitTurn` computes
+`settlementOnly` as `len(delegated) == len(turn.toolUses)`, so a model that puts one trivial tool
+call in the same turn as each message would never move the counter at all — while spending
+exactly as much. Counting every turn that reaches `commitDelegatedTurn` closes it, and rests on
+an invariant checkable in one sentence: the six delegation tools are the only channel by which
+one thread reaches another, so continuing an agent-to-agent loop *requires* a delegation call.
+
+**Rejected: borrow the reference's `budget_reached` stop reason** (the user's decision,
+2026-08-23, after the evidence below). It would have given operators a first-class,
+machine-readable stop reason for one constant and one `stopRank` entry. Against that: the SDK
+defines `budget_reached` as "the session's tracked list cost reached its budget" and instructs
+the client to "raise the budget to continue" — a recovery that does not exist here, where
+`budget` renders `null` and a POST of one is a 400. Emitting it would hand a reference-compatible
+client a name it knows attached to a quantity we do not measure and a remedy it cannot perform,
+and would spend the rank #432 will want for the real thing. A coined
+`session_delegation_exhausted_error` on a plain `end_turn` is #446's precedent, one level up.
+
+**The reference negative, established rather than assumed.** Five independent sweeps — the pinned
+SDK at v1.63.1, the `ant` CLI, the public docs, and an exhaustive census of every published
+numeric limit rather than a search for guessed field names — agree the reference publishes no
+bound of any kind on agent-to-agent activity. Three findings make that trustworthy: `max_uses`
+existed on the toolset and was *deliberately removed* for managed agents ("the roster entry has
+no `max_uses`, `max_tokens`, or `caching` fields"); the idle stop-reason union is closed at four
+values, none an activity-exhaustion state; and the message events carry no counter of any kind.
+One correction the sweeps produced against an earlier reading: the reference's list cost is not
+purely token-denominated — it prices "Session running time, at $0.08 per hour" — so `budget`
+carries a weak wall-clock denominator. It still counts no exchanges. A methodological caveat
+worth keeping: the 25-concurrent-thread cap is published in the docs and appears **nowhere** in
+the typed schema, so SDK absence is not reference absence, and a schema-only sweep would have
+reported "uncapped" wrongly.
+
 ## The registry's pointer invariant, made executable (#452) — decisions, 2026-08-22
 
 The narrative is in CHANGELOG.md. What it cannot hold is which of the issue's three candidate

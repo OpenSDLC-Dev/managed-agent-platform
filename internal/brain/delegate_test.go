@@ -1266,6 +1266,30 @@ func (h *harness) setChainCount(t *testing.T, tid domain.ID, n int) {
 	}
 }
 
+func (h *harness) delegationTurns(t *testing.T) int {
+	t.Helper()
+	var n int
+	if err := h.pool.QueryRow(context.Background(),
+		`SELECT delegation_turns FROM sessions WHERE id = $1`, h.sessionID.String()).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	return n
+}
+
+// setDelegationTurns puts the session near its delegation budget, so a test can
+// reach the bound without paying for the 625 turns that would get there.
+func (h *harness) setDelegationTurns(t *testing.T, n int) {
+	t.Helper()
+	tag, err := h.pool.Exec(context.Background(),
+		`UPDATE sessions SET delegation_turns = $2 WHERE id = $1`, h.sessionID.String(), n)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tag.RowsAffected() != 1 {
+		t.Fatalf("seed delegation turns: %d rows, want 1", tag.RowsAffected())
+	}
+}
+
 // threadStop reads a thread's stored stop_reason. The session's own fold can
 // differ — a coordinator idling under a running child leaves the session
 // running — so a thread-level settlement is asserted here, not on the session.
@@ -1419,6 +1443,196 @@ func TestInputAtTheCapChainsAnywayAndResetsTheCount(t *testing.T) {
 	}
 	if n := h.countType(t, "session.error"); n != 0 {
 		t.Errorf("session.error = %d, want none: nothing was cut", n)
+	}
+}
+
+// The session delegation bound (#447). #446's cap counts on the work_items
+// row, and a row's life is exactly one run of chained turns — so these cover
+// the count that has to survive an idle, and the three routes by which two
+// agents messaging each other escaped the thread-local one.
+
+func TestADelegatedTurnSpendsFromTheSessionBudget(t *testing.T) {
+	h := newHarness(t, [][]provider.Chunk{
+		{toolCall("t1", "list_agents", `{}`), done("tool_use", 1)},
+	}, nil)
+	h.roster(t, "researcher")
+	h.wake(t, "delegate")
+
+	h.runOnce(t)
+	if n := h.delegationTurns(t); n != 1 {
+		t.Errorf("delegation_turns = %d, want 1 — a delegation turn is autonomous spend", n)
+	}
+}
+
+// The counter must not be restricted to settlement-only turns: a model that
+// puts one trivial tool call in the same turn as each delegation call would
+// otherwise never move it, and that turn is exactly as much autonomous spend.
+func TestAMixedDelegationAndToolTurnSpendsToo(t *testing.T) {
+	h := newHarness(t, [][]provider.Chunk{
+		{toolCall("t1", "list_agents", `{}`), toolCall("t2", "bash", `{"command":"true"}`),
+			done("tool_use", 1)},
+	}, nil)
+	h.roster(t, "researcher")
+	h.wake(t, "delegate")
+
+	h.runOnce(t)
+	if n := h.delegationTurns(t); n != 1 {
+		t.Errorf("delegation_turns = %d, want 1 — a mixed turn spends like any other", n)
+	}
+}
+
+// A client asking for something new returns the budget. This is the remedy the
+// refusal's own message promises, so it has to work from any inbound path.
+func TestAClientMessageReturnsTheDelegationBudget(t *testing.T) {
+	h := newHarness(t, nil, nil)
+	h.setDelegationTurns(t, 400)
+
+	payload, _ := json.Marshal(map[string]any{"content": "carry on"})
+	if _, err := h.log.Append(context.Background(), h.sessionID, []events.NewEvent{
+		{Type: domain.EventUserMessage, Payload: payload},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if n := h.delegationTurns(t); n != 0 {
+		t.Errorf("delegation_turns = %d, want 0 — a client demand returns the budget", n)
+	}
+}
+
+// The sharpest of the reset rules: on a self_hosted environment EVERY tool call
+// comes back as a client POST, so resetting on one would zero the counter
+// continuously and the bound would not exist. This is why domain's predicate is
+// StartsNewWork and not Inbound.
+func TestAToolResultDoesNotReturnTheDelegationBudget(t *testing.T) {
+	h := newHarness(t, nil, nil)
+	h.setDelegationTurns(t, 400)
+
+	payload, _ := json.Marshal(map[string]any{"tool_use_id": "tu_1", "content": "ok"})
+	if _, err := h.log.Append(context.Background(), h.sessionID, []events.NewEvent{
+		{Type: domain.EventUserToolResult, Payload: payload},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if n := h.delegationTurns(t); n != 400 {
+		t.Errorf("delegation_turns = %d, want it untouched at 400 — a tool result answers a "+
+			"call the session itself made, and on self_hosted every one arrives this way", n)
+	}
+}
+
+// The refusal itself, and the property that makes it free: no model request is
+// issued at all.
+func TestTheClaimIsRefusedAtTheDelegationBound(t *testing.T) {
+	h := newHarness(t, [][]provider.Chunk{
+		{toolCall("t1", "list_agents", `{}`), done("tool_use", 1)},
+		{toolCall("t2", "list_agents", `{}`), done("tool_use", 1)},
+	}, nil)
+	h.roster(t, "researcher")
+	h.wake(t, "delegate")
+
+	// One turn runs first, for two reasons the bound depends on. The wake is a
+	// user.message, so it resets the budget — seeding before it would be zeroed
+	// by the very reset that makes this cut recoverable. And that message is
+	// unprocessed until a turn replays it, which is pending input, and pending
+	// input declines the refusal: the bound fires when nobody is asking, which
+	// is only true once the asking has been answered.
+	h.runOnce(t)
+	spent := h.countType(t, "span.model_request_start")
+	if spent == 0 {
+		t.Fatal("the first turn should have run")
+	}
+	h.setDelegationTurns(t, 625) // maxSessionDelegationTurns
+
+	h.runOnce(t)
+	if n := h.countType(t, "span.model_request_start"); n != spent {
+		t.Errorf("model requests = %d, want it unchanged at %d — a refused claim must "+
+			"cost nothing, which is the whole point of refusing at the claim", n, spent)
+	}
+	primary := domain.PrimaryThreadID(h.sessionID)
+	if s := h.threadStatus(t, primary); s != "idle" {
+		t.Errorf("thread = %q, want idle once the session's budget is spent", s)
+	}
+	if got := h.threadStop(t, primary).Type; got != domain.StopEndTurn {
+		t.Errorf("stop_reason = %q, want end_turn — budget_reached is the reference's name "+
+			"for a monetary ceiling and is deliberately not claimed here", got)
+	}
+	if n := h.liveTurns(t, ""); n != 0 {
+		t.Errorf("turns queued = %d, want none — the refused item is completed", n)
+	}
+	errs := h.eventsOfType(t, domain.EventSessionError)
+	if len(errs) != 1 {
+		t.Fatalf("session.error = %d, want the one naming the spent budget", len(errs))
+	}
+	var payload struct {
+		Error struct {
+			Type        string `json:"type"`
+			Message     string `json:"message"`
+			RetryStatus struct {
+				Type string `json:"type"`
+			} `json:"retry_status"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(errs[0].Body, &payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload.Error.Type != "session_delegation_exhausted_error" {
+		t.Errorf("error type = %q, want session_delegation_exhausted_error", payload.Error.Type)
+	}
+	if payload.Error.RetryStatus.Type != "exhausted" {
+		t.Errorf("retry_status = %q, want exhausted", payload.Error.RetryStatus.Type)
+	}
+	if !strings.Contains(payload.Error.Message, "625") {
+		t.Errorf("message = %q, want the budget it actually spent", payload.Error.Message)
+	}
+}
+
+// Route 1 and route 2 together, the regression that fails against main: a
+// peer's wake inserts a FRESH work_items row, whose metadata is DEFAULT '{}',
+// so Claim reads Chain = 0 and #446's cap starts over — while the session
+// counter, which lives on a row no wake replaces, keeps climbing.
+func TestAPeerWakeClearsTheChainCountButNotTheSessionBudget(t *testing.T) {
+	h := newHarness(t, [][]provider.Chunk{
+		{toolCall("t1", "list_agents", `{}`), done("tool_use", 1)},
+	}, nil)
+	h.roster(t, "researcher")
+	h.wake(t, "delegate")
+	h.setChainCount(t, "", 7)
+	h.setDelegationTurns(t, 11)
+
+	h.runOnce(t)
+	// Queue behaviour is unchanged: this is still the thread-local count, and
+	// this test pins that the escape route is still open at that layer.
+	if n := h.chainCount(t, ""); n != 8 {
+		t.Errorf("chain count = %d, want 8 — the thread-local count is unchanged by this work", n)
+	}
+	if n := h.delegationTurns(t); n != 12 {
+		t.Errorf("delegation_turns = %d, want 12 — the session counter climbs regardless", n)
+	}
+}
+
+// Pending input runs the turn instead of refusing. A tool result is not a
+// reset, so a thread holding one unprocessed would be stranded with no trigger
+// left if the bound idled it — the chain-or-idle contract every other terminal
+// settlement honours.
+func TestPendingInputRunsTheTurnInsteadOfRefusing(t *testing.T) {
+	h := newHarness(t, [][]provider.Chunk{
+		{textChunk(1, "done"), done("end_turn", 1)},
+	}, nil)
+	h.wake(t, "delegate")
+	payload, _ := json.Marshal(map[string]any{"tool_use_id": "tu_1", "content": "ok"})
+	if _, err := h.log.Append(context.Background(), h.sessionID, []events.NewEvent{
+		{Type: domain.EventUserToolResult, Payload: payload},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	// After both, so the budget is genuinely spent when the claim is made: the
+	// wake is a reset, and the tool result deliberately is not.
+	h.setDelegationTurns(t, 625) // maxSessionDelegationTurns
+
+	h.runOnce(t)
+	if n := h.countType(t, "session.error"); n != 0 {
+		t.Errorf("session.error = %d, want none — input pending declines the refusal", n)
+	}
+	if n := h.countType(t, "span.model_request_start"); n == 0 {
+		t.Errorf("model requests = 0, want the turn to have actually run")
 	}
 }
 
