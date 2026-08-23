@@ -54,10 +54,11 @@ so bringing a branch build up next to a running stack means naming it:
 docker compose -p mapsecond up --build
 ```
 
-That is the whole knob. The executor's gate network is derived from the project
-name rather than pinned, so the second stack's gates join the second stack's
-network. Pinning it is what once let a branch stack resolve `postgres` to a
-running stack's container and migrate its database
+That one flag is the whole of the isolation. The executor's gate network and both
+`:local` image tags derive from the project name rather than being pinned, so a
+second stack's gates join its own network and its builds stay its own. Pinning
+them is what once let a branch stack resolve `postgres` to a running stack's
+container and migrate its database
 ([#438](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/438)).
 
 The project name scopes the containers, the network, the volumes and the `:local`
@@ -72,6 +73,12 @@ CONTROLPLANE_PORT=8081 docker compose -p mapsecond up --build
 
 Under `--profile iam` the same goes for `IDP_PORT`. The `observability` profile's
 Jaeger ports are fixed, so two stacks cannot both run that profile unchanged.
+
+Give `-p` to **every** verb, not just `up` — `down`, `logs`, `ps`. Without it the command
+addresses the default project, which is the other stack; see [Teardown](#teardown) for the
+one that loses data. This needs a Compose that exposes the resolved project name for
+interpolation, which the Compose Specification requires and which this file already
+depends on elsewhere (`depends_on.required`, Compose 2.20+).
 
 ## Configuration
 
@@ -281,4 +288,22 @@ docker compose down -v       # also drop the volumes (wipes all data — Postgre
                              # profile that includes the IdP: its user store shares
                              # the Postgres volume, and its signing certificate is
                              # minted afresh on the next boot (see above)
+```
+
+**Every verb takes `-p`, not just `up`.** A bare `docker compose down -v` in a checkout
+you last brought up as `-p mapsecond` addresses the *default* project, so it drops the
+volumes of the stack you were running beside — the one you meant to keep. Tear a second
+stack down the way you raised it: `docker compose -p mapsecond down -v`.
+
+Two of a session's containers are not compose services at all: the sandbox and its egress
+gate are host-daemon siblings the executor creates. `down` does not remove them, and a
+live gate holds an endpoint on the network, so removing that network fails with "has
+active endpoints". Nothing else will collect them either — the reaper deliberately skips
+containers whose session id its database has never seen, which is what stops one stack
+reaping another's. Look before you sweep, because the ownership label carries no project
+component and so matches every stack's on this daemon:
+
+```sh
+docker ps --filter label=dev.opensdlc.managed-agent-platform.session-id \
+          --format '{{.Names}}'   # map-<session> / map-gate-<session>
 ```

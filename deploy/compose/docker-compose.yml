@@ -15,7 +15,9 @@ x-app: &app
   build:
     context: ../..
     dockerfile: Dockerfile
-  image: ${COMPOSE_PROJECT_NAME:-managed-agent-platform}:local
+  # Project-scoped like the gate tag and the network below; see the gate-image
+  # service for why a shared tag crosses stacks.
+  image: ${COMPOSE_PROJECT_NAME:?compose did not expose the project name}:local
   environment: &app-env
     # POSTGRES_PASSWORD is embedded in this DSN, so keep it URL-safe (no @ : / ? # % or spaces).
     DATABASE_URL: postgres://map:${POSTGRES_PASSWORD:-map}@postgres:5432/managed_agent_platform?sslmode=disable
@@ -293,10 +295,18 @@ services:
       # interpolation, so deriving the value here names the right network for
       # whichever project this is. Pinning it instead is what made a second
       # stack join the first, where `postgres` answered from the wrong
-      # container (#438).
+      # container (#438) — so do not reintroduce a `networks:` block naming this
+      # network either: nothing here can read a name Compose was given, and the
+      # two would drift apart in silence.
+      #
+      # `:?` rather than a default, because the only Compose that would fall
+      # back is one that does not expose the project name, and there the default
+      # is the pinned literal that caused #438 — a silent second stack on the
+      # first one's network. The spec requires the exposure and CI proves it, so
+      # this never fires; if it ever does, an error beats that.
       CONTROLPLANE_URL: http://controlplane:8080
-      EXECUTOR_GATE_IMAGE: ${COMPOSE_PROJECT_NAME:-managed-agent-platform}-gate:local
-      SANDBOX_DOCKER_GATE_NETWORK: ${COMPOSE_PROJECT_NAME:-managed-agent-platform}_default
+      EXECUTOR_GATE_IMAGE: ${COMPOSE_PROJECT_NAME:?compose did not expose the project name}-gate:local
+      SANDBOX_DOCKER_GATE_NETWORK: ${COMPOSE_PROJECT_NAME:?compose did not expose the project name}_default
       # Web tool backends (docs/plan/15_web-tools.md). Empty TAVILY_API_KEY
       # leaves web_search unconfigured; empty JINA_API_KEY with no
       # WEBFETCH_BASE_URL leaves web_fetch unconfigured (each answers is_error
@@ -335,8 +345,11 @@ services:
   # and a second stack brought up without `--build` finds the tag already there
   # and runs the first stack's build instead of its own. This tag and
   # EXECUTOR_GATE_IMAGE above must stay identical; CI asserts it. Keep a project
-  # name valid as an image-name component — a trailing `-` or `_` renders a
-  # reference the daemon rejects, loudly, before anything starts.
+  # name valid as an image-name component: `docker compose config` accepts a
+  # trailing `-` or `_` and renders the bad reference anyway, but the builder
+  # rejects it before any build work, and it is the plain `<project>:local` tag
+  # above that goes first (a trailing hyphen leaves `<project>--gate:local`
+  # legal while `<project>-:local` is not).
   gate-image:
     build:
       context: ../..

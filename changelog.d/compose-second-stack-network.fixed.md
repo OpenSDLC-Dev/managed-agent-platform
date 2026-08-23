@@ -9,7 +9,8 @@
   adopted rather than recreated, while `-p <name>` gives a second stack its own network,
   containers, volumes and images. CI renders the file under two project names to keep it that
   way. Host ports are what a project name still does not separate, and the compose README says
-  so. Separately, the silence that let the damage through is closed — a process with migrations
-  to apply now names the database, the server address that actually answered and the host it
-  was configured with, and each version, before the first statement runs; finding nothing to
-  apply stays silent. (#438)
+  so. Separately, the migration that did the damage is no longer silent: a process with
+  migrations to apply now names the database, the address that actually answered and the host
+  it was configured with — the two disagreeing is the tell — and each version, before the first
+  statement runs. Only that moment is announced; a process that finds nothing to apply says
+  nothing, as before. (#438)

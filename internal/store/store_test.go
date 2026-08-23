@@ -164,6 +164,19 @@ func TestMigrateNamesTheDatabaseItChanges(t *testing.T) {
 	if got := strings.Count(logged, "store: applying migration"); got != wantMigrations {
 		t.Errorf("migration log names %d versions, want %d: %q", got, wantMigrations, logged)
 	}
+	// Exactly one identity line, however many versions follow it — the guard
+	// that announces once is the whole point, and a run that repeated it per
+	// migration would satisfy every assertion above.
+	if got := strings.Count(logged, "store: migrating database"); got != 1 {
+		t.Errorf("migration log identifies the database %d times, want once: %q", got, logged)
+	}
+	// The address that answered is the half the configured one could not supply:
+	// under pgtest the client dials 127.0.0.1 and the server reports its own
+	// container address, so a line repeating the configured host in both fields
+	// would be back to naming something that cannot tell two stacks apart.
+	if strings.Contains(logged, "server_addr="+cfg.ConnConfig.Host+" ") {
+		t.Errorf("server_addr merely repeats the configured host: %q", logged)
+	}
 	// The password rides in the DSN, so the ways it escapes are a whole
 	// connection string reaching the log, or a password field logged beside the
 	// rest. (Testing for the value itself is no test here: pgtest's is `test`,
@@ -180,8 +193,13 @@ func TestMigrateNamesTheDatabaseItChanges(t *testing.T) {
 	if err := store.Migrate(context.Background(), pool); err != nil {
 		t.Fatalf("second Migrate: %v", err)
 	}
-	if buf.Len() != 0 {
-		t.Errorf("a migration run with nothing to apply logged: %q", buf.String())
+	// Named messages rather than an empty buffer: this handler is process-wide,
+	// so asserting total silence would one day fail on somebody else's line and
+	// blame migrations for it.
+	for _, quiet := range []string{"store: migrating database", "store: applying migration"} {
+		if strings.Contains(buf.String(), quiet) {
+			t.Errorf("a migration run with nothing to apply logged %q: %q", quiet, buf.String())
+		}
 	}
 }
 

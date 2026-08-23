@@ -1101,11 +1101,13 @@ jobs:
             gate="$(get '["services"]["executor"]["environment"]["SANDBOX_DOCKER_GATE_NETWORK"]')"
             img="$(get '["services"]["gate-image"]["image"]')"
             gimg="$(get '["services"]["executor"]["environment"]["EXECUTOR_GATE_IMAGE"]')"
+            app="$(get '["services"]["controlplane"]["image"]')"
             [ "$net" = "${p}_default" ] || { echo "project '$p' renders network '$net', not its own" >&2; exit 1; }
             [ "$gate" = "$net" ] || { echo "project '$p' tells the executor '$gate', not its network '$net'" >&2; exit 1; }
             [ "$img" = "${p}-gate:local" ] || { echo "project '$p' builds gate image '$img', not its own" >&2; exit 1; }
             [ "$gimg" = "$img" ] || { echo "project '$p' launches '$gimg' but builds '$img'" >&2; exit 1; }
-            echo "ok: -p $p isolates on $net with $img"
+            [ "$app" = "${p}:local" ] || { echo "project '$p' builds server image '$app', not its own" >&2; exit 1; }
+            echo "ok: -p $p isolates on $net with $app and $img"
           }
           assert_project mapsecond
           assert_project mapthird
