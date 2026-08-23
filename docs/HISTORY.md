@@ -59,7 +59,8 @@ stale pointers by hand and #453 wrote the rule into the Format legend — `Track
 **open** issue; a closed one may appear only as `(delivered)` or a trailing `landed for #N`
 clause. That split is what makes the invariant checkable at all: only the first class can ever go
 stale, and it is the smaller one. So `tools/registrycheck` parses the two apart and state-checks
-the live head alone. Both false positives the #445 prototype hit are pinned as tests rather than
+the head alone — the live tracker because it must be open, and a `(delivered)` citation because
+GitHub must at least still know it. Both false positives the #445 prototype hit are pinned as tests rather than
 described: a tail may legitimately name an open issue (`the transport landed for #45, and the
 fallback itself is #348`), and so may a `(delivered; …)` parenthetical (`#50 (delivered; … the
 open #166)`). A depth-blind `strings.Split(";")` truncates twelve of the file's heads, six of which carry a

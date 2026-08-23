@@ -507,8 +507,9 @@ grammar its own Format legend promises. Most of that grammar is readable from th
 a clause parses at all, an INFERRED entry has a live tracker, a tracker several entries share
 says what *this* one leaves open, and no cross-reference is a bare line number (one had drifted
 77 lines before anyone noticed) — so those rules run in the gate as that package's own test,
-the shape `internal/modeltest`'s README-tier test already uses. One rule is not readable from
-the file, and it is the one that rots: whether the issue a live `Tracked: #N` names is still
-open, which is an event no file in this repository can see. That half is
+the shape `internal/modeltest`'s README-tier test already uses. What is not readable from the file is
+the part that rots: whether the issue a live `Tracked: #N` names is still open, and whether
+GitHub still knows the issues its provenance cites — events no file in this repository can
+see. That half is
 `make registry-check` and [`registry.yml`](../.github/workflows/registry.yml), daily and on
 every pull request that touches the registry.

@@ -6,7 +6,14 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"time"
 )
+
+// exitUnavailable separates "I could not ask GitHub" from "the registry has
+// rotted", which log.Fatal's exit 1 reports. A scheduled run's summary is read
+// by someone who was not watching, and telling them the registry rotted when
+// GitHub was merely unreachable is the failure this whole tool argues against.
+const exitUnavailable = 2
 
 const usage = `usage:
   registrycheck [-file docs/DIVERGENCES.md] [-issues] [-repo owner/name] [-api URL]
@@ -31,8 +38,16 @@ func main() {
 	}
 	var state func(int) (bool, bool)
 	if *issues {
-		if state, err = fetchStates(context.Background(), *api, *repo, Referenced(string(src))); err != nil {
-			log.Fatal(err)
+		// Bounded, so the run cannot outlive the workflow's own timeout and
+		// die without saying why.
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+		defer cancel()
+		if state, err = fetchStates(ctx, *api, *repo, Referenced(string(src))); err != nil {
+			// exitUnavailable, not 1: "I could not ask GitHub" and "the
+			// registry has rotted" are different facts, and a summary that
+			// cannot tell them apart reports an outage as rot.
+			fmt.Fprintf(os.Stderr, "cannot determine issue state: %v\n", err)
+			os.Exit(exitUnavailable)
 		}
 	}
 	findings := Check(string(src), state)

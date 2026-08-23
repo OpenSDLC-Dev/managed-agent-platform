@@ -95,7 +95,7 @@ const File = "docs/DIVERGENCES.md"
 // be looked up. pointerOpenRe is therefore the wider net — anything that opens
 // like a clause — and a line it catches that pointerRe does not is a
 // pointer-shape finding.
-var pointerRe = regexp.MustCompile(` \*(Tracked|Landed for):? ([^*]*)\*$`)
+var pointerRe = regexp.MustCompile(` \*(Tracked:|Landed for:?) ([^*]*)\*$`)
 
 var pointerOpenRe = regexp.MustCompile(`(?i) \*(tracked|landed for):?`)
 
@@ -205,16 +205,19 @@ type entry struct {
 // parse splits the document into entries. It is deliberately tolerant of
 // everything except the pointer grammar: prose, headings and blank lines are
 // skipped, and only a line opening `- **` is an entry.
-func parse(src string) ([]entry, string) {
+func parse(src string) ([]entry, map[string]bool) {
 	var out []entry
 	section := ""
-	inferred := ""
+	// A set, not the last one seen: holding a single string means a second
+	// INFERRED heading would silently stop the rung applying to the entries
+	// under the first, which is the shape of defect this tool exists to catch.
+	inferred := map[string]bool{}
 	for i, ln := range strings.Split(src, "\n") {
 		switch {
 		case strings.HasPrefix(ln, "## "):
 			section = strings.TrimPrefix(ln, "## ")
 			if strings.Contains(section, "INFERRED") {
-				inferred = section
+				inferred[section] = true
 			}
 			continue
 		case !entryRe.MatchString(ln):
@@ -222,15 +225,16 @@ func parse(src string) ([]entry, string) {
 		}
 		e := entry{line: i + 1, section: section, title: title(ln)}
 		if m := pointerRe.FindStringSubmatch(ln); m != nil {
-			p, err := parsePointer(m[1], m[2])
+			p, err := parsePointer(strings.TrimSuffix(m[1], ":"), m[2])
 			if err != "" {
 				e.ptrErr = err
 			} else {
 				e.ptr = p
 			}
 		} else if pointerOpenRe.MatchString(ln) {
-			e.ptrErr = "pointer clause opens but does not close as `*…*` at the end of the line — " +
-				"an interior `*` does this, and it would leave the clause unchecked"
+			e.ptrErr = "clause opens like a pointer but does not parse as one, so nothing in it would be " +
+				"checked — it must read `*Tracked: …*` (the colon is optional only on the oldest " +
+				"`Landed for` clauses) and close with `*` at the end of the line, with no `*` inside it"
 		}
 		out = append(out, e)
 	}
@@ -341,7 +345,7 @@ func Check(src string, state func(int) (open bool, known bool)) []Finding {
 	// The INFERRED rung finds its section by name. Renaming the heading would
 	// therefore switch the rung off rather than fail it, and a rung that can
 	// disappear without saying so is the defect this whole tool is about.
-	if inferred == "" {
+	if len(inferred) == 0 {
 		out = append(out, Finding{1, "inferred-section",
 			"no `## …(INFERRED)…` heading, so the rule that an inference must name the tracker whose recording would settle it has nothing to run against"})
 	}
@@ -414,9 +418,9 @@ func Check(src string, state func(int) (open bool, known bool)) []Finding {
 				}
 			}
 		}
-		if inferred != "" && e.section == inferred && live == 0 {
+		if inferred[e.section] && live == 0 {
 			out = append(out, Finding{e.line, "inferred-pointer", fmt.Sprintf(
-				"%s: an entry in %q must name the open issue whose recording would settle it", e.title, inferred)})
+				"%s: an entry in %q must name the open issue whose recording would settle it", e.title, e.section)})
 		}
 	}
 

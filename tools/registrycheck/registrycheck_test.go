@@ -139,7 +139,7 @@ func TestEachRungGoesRed(t *testing.T) {
 		old:     "*Tracked: #242.*",
 		new:     "*Tracked: #242 (what *this* entry leaves open).*",
 		rule:    "pointer-shape",
-		wantMsg: "opens but does not close",
+		wantMsg: "does not parse as one",
 	}, {
 		name:    "a clause whose parentheses do not balance",
 		old:     "*Tracked: #242.*",
@@ -169,7 +169,7 @@ func TestEachRungGoesRed(t *testing.T) {
 		old:     "*Tracked: #242.*",
 		new:     "*Tracked:#242.*",
 		rule:    "pointer-shape",
-		wantMsg: "opens but does not close",
+		wantMsg: "does not parse as one",
 	}, {
 		name:    "a near-miss word demoting a live tracker to provenance",
 		old:     "*Tracked: #242.*",
@@ -182,6 +182,15 @@ func TestEachRungGoesRed(t *testing.T) {
 		new:     "- **A note** — Not a mismatch, as the skills block (lines 69-71) is.",
 		rule:    "line-reference",
 		wantMsg: "any insertion above it falsifies",
+	}, {
+		// The colon is what tells `Tracked:` from prose. `:?` made it optional
+		// on both labels, so this typo parsed clean and the tracker inside it
+		// was checked against nothing.
+		name:    "a Tracked clause with no colon",
+		old:     "*Tracked: #242.*",
+		new:     "*Tracked #242.*",
+		rule:    "pointer-shape",
+		wantMsg: "does not parse as one",
 	}} {
 		t.Run(tc.name, func(t *testing.T) {
 			if !strings.Contains(doc, tc.old) {
@@ -327,6 +336,42 @@ func TestDeliveredIsAWholeWord(t *testing.T) {
 		if (segment{paren: live}).delivered() {
 			t.Errorf("delivered(%q) = true — a near miss must not demote a live tracker", live)
 		}
+	}
+}
+
+// TestASecondInferredHeadingDoesNotDisarmTheFirst: `inferred` used to hold the
+// last heading seen, so a second INFERRED section would quietly stop the rung
+// applying to every entry under the first — the same disappearing-rung defect as
+// renaming the heading, one step subtler.
+func TestASecondInferredHeadingDoesNotDisarmTheFirst(t *testing.T) {
+	two := doc + "\n## More inferences (INFERRED)\n\n- **A second-section entry** — *Evidence: code* *Landed for #45.*\n"
+	var first, second bool
+	for _, f := range Check(two, state) {
+		if f.Rule != "inferred-pointer" {
+			continue
+		}
+		if strings.Contains(f.Msg, "A second-section entry") {
+			second = true
+		}
+		if strings.Contains(f.Msg, "One the recording would settle") {
+			first = true
+		}
+	}
+	if !second {
+		t.Error("the entry under the second INFERRED heading was not checked")
+	}
+	// The fixture's first-section entries all carry a live tracker, so none of
+	// them should be reported — but they must still be *checked*. Prove that by
+	// breaking one and watching it surface.
+	broken := strings.Replace(two, "- **One with its own tracker** — *Evidence: code* *Tracked: #242.*",
+		"- **One with its own tracker** — *Evidence: code* *Landed for #45.*", 1)
+	for _, f := range Check(broken, state) {
+		if f.Rule == "inferred-pointer" && strings.Contains(f.Msg, "One with its own tracker") {
+			first = true
+		}
+	}
+	if !first {
+		t.Error("a pointerless entry under the FIRST INFERRED heading escaped the rung once a second heading existed")
 	}
 }
 
