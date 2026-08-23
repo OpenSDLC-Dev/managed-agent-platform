@@ -857,25 +857,32 @@ gcloud projects add-iam-policy-binding "$GCP_PROJECT_ID" \
   --role="projects/$GCP_PROJECT_ID/roles/mapCdRbacWriter"
 ```
 
-The custom role is granted at the **project**, because GKE has no narrower scope for these
-permissions — there is no namespace-scoped or cluster-scoped form of `container.roles.*`. The
-in-cluster basis is what actually bounds the damage: `create` and `update` are still checked
-against it, and it grants nothing outside namespace `map`, so the deploy identity cannot write
-a Role anywhere else that grants anything. `delete` is the one verb the escalation guard does
-not check, and it is here because `--atomic` needs it: a rollback of an upgrade that added an
-RBAC object has to remove it again. A deployment willing to give that up can leave the three
-`delete` permissions out.
+The custom role is granted at the **project**, because GKE offers no narrower scope for these
+permissions: a cluster takes no IAM policy of its own, and IAM has no namespace dimension —
+namespace scoping in GKE is Kubernetes RBAC, which is the basis Role's job.
 
-**Apply the manifest as a principal that already holds these rules**, or one holding
-`escalate` — in practice the human with Owner who stood the cluster up. The deploy identity
-cannot apply its own basis: creating a Role that grants `pods` and `pods/exec` trips the very
-guard this is here to satisfy.
+**What the basis bounds is escalation, and it bounds it completely.** `create` and `update`
+are checked against it, it grants nothing outside namespace `map`, and in any other namespace
+the deploy identity resolves to no rules at all — so it cannot write a Role anywhere that
+grants anything. **What it does not bound is destruction**, and `delete` is not the only verb
+that reaches: the guard checks the rules being *granted* and never compares them with the
+object's previous ones, so an `update` stripping a Role to `rules: []` grants nothing and
+passes. Project-wide, this role can empty or remove a namespaced Role or RoleBinding in any
+cluster in the project. That is denial of service rather than privilege escalation, and far
+narrower than `roles/container.admin` — but it is the residual, and dropping the two `delete`
+permissions would not close it. `delete` is there for `--atomic`, which tears a failed *first*
+install down whole, RBAC objects included.
 
-`kubectl create role` cannot express it: repeated `--verb` flags apply to every `--resource`
-named, which would hand `pods/exec` the three verbs it must not have and make the basis wider
-than the Role it exists to bound. So it is a manifest — unquoted heredoc, so the identity
-loaded in "The deployment's coordinates" is the one bound, and `map` is the namespace the
-workflow installs into:
+`kubectl create role` cannot express the basis: repeated `--verb` flags apply to every
+`--resource` named, which would hand `pods/exec` the three verbs it must not have and make the
+basis wider than the Role it exists to bound. So it is a manifest — unquoted heredoc, so the
+identity loaded in "The deployment's coordinates" is the one bound, and `map` is the namespace
+the workflow installs into.
+
+**Apply it as a principal that already holds these rules**, or one holding both `escalate` and
+`bind` — in practice the human with Owner who stood the cluster up. The deploy identity cannot
+apply its own basis: creating a Role granting `pods` and `pods/exec` trips the very guard this
+exists to satisfy, and the RoleBinding needs `bind` on the Role it references.
 
 ```sh
 kubectl apply -f - <<YAML
