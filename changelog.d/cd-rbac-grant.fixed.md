@@ -7,8 +7,8 @@
   rule resolver cannot see, so closing the first gate only moved the error. Helm patches an
   object only where what it renders differs from what it recorded, so both gates stayed
   invisible across the 45 runs that reached the install step and shut the moment v0.3.0's chart
-  bump restamped `helm.sh/chart` on every rendered object: 23 consecutive runs failed at `helm
-  upgrade` and rolled back, leaving staging seven days behind `main`. A `mapCdRbacWriter`
+  bump restamped `helm.sh/chart` on every rendered object: for seven days afterwards every one
+  of the 23 pushes to `main` failed at `helm upgrade` and rolled back. A `mapCdRbacWriter`
   custom role answers the first gate and an in-cluster basis Role the second — neither granting
   `escalate` or `bind`. [`deploy/gcp/README.md`](./deploy/gcp/README.md) records both, and why
   `roles/container.admin` was refused. (#469)

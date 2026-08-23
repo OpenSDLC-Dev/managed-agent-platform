@@ -758,7 +758,7 @@ would otherwise say they exist:
 | Grant | Scope | Why |
 | --- | --- | --- |
 | `roles/logging.logWriter` | the project | `cloudbuild.yaml` sets `options.logging: CLOUD_LOGGING_ONLY`, which is *mandatory* once a build names its own service account — with a user-specified identity the API refuses a build that would write to the default logs bucket |
-| the `mapCdRbacWriter` custom role, below | the project | the chart renders a namespaced `Role` and `RoleBinding` for the executor, and `roles/container.developer` carries only `get`/`list` on RBAC resources — so `helm upgrade` is refused the moment either object's rendered content changes |
+| the `mapCdRbacWriter` custom role, below | the project | the chart renders a namespaced `Role` and `RoleBinding` for the executor, and `roles/container.developer` carries only `get`/`list` on RBAC resources — so `helm upgrade` is refused the moment either object's rendered content changes. **This role is half the remedy**: an in-cluster basis Role, also below, answers a second gate that Cloud IAM does not reach |
 
 `roles/storage.admin` on the project's `_cloudbuild` staging bucket and
 `roles/serviceusage.serviceUsageConsumer` on the project were also granted to the deploy
@@ -790,22 +790,16 @@ gcloud storage buckets add-iam-policy-binding "gs://${GCP_PROJECT_ID}_cloudbuild
   --member="serviceAccount:$DEPLOY_SERVICE_ACCOUNT" --role=roles/storage.admin
 ```
 
-### The two RBAC gates CD cannot deploy without
-
-The deploy identity holds `roles/container.developer`, which carries `get` and `list` on
-`roles` and `rolebindings` and no write verb at all. That omission is deliberate on Google's
-side: a namespaced deployer able to write RBAC objects could mint itself a Role granting more
-than it holds. This chart renders exactly such a pair —
+**The chart renders a namespaced `Role` and `RoleBinding` for the executor**, and writing
+them is guarded twice, by systems that cannot see each other — which is why closing one gate
+only moves the error. The pair is
 [`executor-rbac.yaml`](../helm/managed-agent-platform/templates/executor-rbac.yaml), carrying
-the `pods` and `pods/exec` verbs the Kubernetes sandbox provider needs — so the deploy
-identity has to be able to write them, and what lets it must be put in place by hand.
+the `pods` and `pods/exec` rules the Kubernetes sandbox provider needs.
 
-**The gap is invisible until a rendered RBAC object changes**, which is what makes it worth
-writing down rather than leaving to the error message. Helm issues a PATCH only where what it
-renders differs from what it recorded, so across the 45 runs that reached the install step it
-never called the API for these two objects and never needed the permission. Releasing v0.3.0
-bumped `Chart.yaml`; `map.labels` stamps `helm.sh/chart` and `app.kubernetes.io/version` onto
-every object the chart renders, including these two; and the next 23 runs died identically:
+**Cloud IAM answers first.** The deploy identity holds `roles/container.developer`, which
+carries `get` and `list` on `roles` and `rolebindings` and no write verb at all —
+deliberately, on Google's side: a namespaced deployer able to write RBAC objects could mint
+itself a Role granting more than it holds.
 
 ```text
 Error: UPGRADE FAILED: release map failed, and has been rolled back due to
@@ -815,26 +809,27 @@ Role: … is forbidden: User "…" cannot patch resource "roles" in API group
 ["container.roles.update"] permission(s) in Cloud IAM …
 ```
 
-This deployment met it late, and for a reason worth knowing: revision 1 was installed by hand
-by someone holding Owner, and CD only ever ran upgrades on top of it. So by the time the first
-chart change put the question, the pipeline had a long green history arguing that nothing
-about its permissions could be wrong. A pipeline that does its own first install meets the
-same wall one step earlier, at `create` rather than `patch`.
-
-**Two gates guard that write, and different systems enforce them** — which is why closing
-the first one only moves the error. Cloud IAM answers first. Kubernetes answers second, and it
-refuses to let a principal write a Role granting permissions the principal does not itself
-hold. What it holds is resolved from **RBAC objects only**: GKE's IAM permissions reach the
-API server through a separate authorization webhook the rule resolver cannot see, so an
-identity carrying every `container.pods.*` permission in Cloud IAM still counts as holding
-nothing here, and the second gate answers like this:
+**Kubernetes answers second**, and its refusal reads as though the first fix was the wrong
+one. Its escalation guard will not let a principal write a Role granting permissions the
+principal does not itself hold, and what it holds is resolved from **RBAC objects only**:
+GKE's IAM permissions reach the API server through a separate authorization webhook the rule
+resolver cannot see. So an identity carrying every `container.pods.*` permission in Cloud IAM
+still counts as holding nothing here.
 
 ```text
 cannot patch "map-managed-agent-platform-executor" with kind Role: … is forbidden: user "…"
 is attempting to grant RBAC permissions not currently held:
 {APIGroups:[""], Resources:["pods"], Verbs:["create" "get" "list" "delete"]}
-{APIGroups:[""], Resources:["pods/exec"], Verbs:["create"]}
+{APIGroups:[""], Resources:["pods/exec"], Verbs:["create"]} && … with kind RoleBinding: …
 ```
+
+**Neither gate is reached until a rendered RBAC object changes.** Helm issues a write only
+where what it renders differs from what it recorded, so a chart whose RBAC objects render
+identically run after run exercises neither permission, and no length of green history is
+evidence that the deploy identity can write them at all. A chart-version bump is the usual way
+it surfaces, since `map.labels` stamps `helm.sh/chart` and `app.kubernetes.io/version` onto
+every object the chart renders, these two included. A pipeline that does its own first install
+meets the same wall one step earlier, at `create` rather than `patch`.
 
 **A custom role rather than `roles/container.admin`, and an in-cluster basis rather than
 `escalate`** — both deliberately. `container.admin` closes both gates at once, because it
@@ -862,13 +857,28 @@ gcloud projects add-iam-policy-binding "$GCP_PROJECT_ID" \
   --role="projects/$GCP_PROJECT_ID/roles/mapCdRbacWriter"
 ```
 
-`kubectl create role` cannot express this one: repeated `--verb` flags apply to every
-`--resource` named, which would hand `pods/exec` the three verbs it must not have and make the
-basis wider than the Role it exists to bound. So it is a manifest, and `map` is the namespace
-the workflow installs into:
+The custom role is granted at the **project**, because GKE has no narrower scope for these
+permissions — there is no namespace-scoped or cluster-scoped form of `container.roles.*`. The
+in-cluster basis is what actually bounds the damage: `create` and `update` are still checked
+against it, and it grants nothing outside namespace `map`, so the deploy identity cannot write
+a Role anywhere else that grants anything. `delete` is the one verb the escalation guard does
+not check, and it is here because `--atomic` needs it: a rollback of an upgrade that added an
+RBAC object has to remove it again. A deployment willing to give that up can leave the three
+`delete` permissions out.
+
+**Apply the manifest as a principal that already holds these rules**, or one holding
+`escalate` — in practice the human with Owner who stood the cluster up. The deploy identity
+cannot apply its own basis: creating a Role that grants `pods` and `pods/exec` trips the very
+guard this is here to satisfy.
+
+`kubectl create role` cannot express it: repeated `--verb` flags apply to every `--resource`
+named, which would hand `pods/exec` the three verbs it must not have and make the basis wider
+than the Role it exists to bound. So it is a manifest — unquoted heredoc, so the identity
+loaded in "The deployment's coordinates" is the one bound, and `map` is the namespace the
+workflow installs into:
 
 ```sh
-kubectl apply -f - <<'YAML'
+kubectl apply -f - <<YAML
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata: { name: map-cd-deployer-rbac-basis, namespace: map }
@@ -890,7 +900,7 @@ roleRef:
 subjects:
   - apiGroup: rbac.authorization.k8s.io
     kind: User
-    name: cd-deployer@PROJECT.iam.gserviceaccount.com
+    name: $DEPLOY_SERVICE_ACCOUNT
 YAML
 ```
 
