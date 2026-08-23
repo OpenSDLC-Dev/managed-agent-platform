@@ -861,20 +861,22 @@ The custom role is granted at the **project**, because GKE offers no narrower sc
 permissions: a cluster takes no IAM policy of its own, and IAM has no namespace dimension —
 namespace scoping in GKE is Kubernetes RBAC, which is the basis Role's job.
 
-**What the basis bounds is escalation.** `create` and `update` are checked against it, and the
-basis grants nothing outside namespace `map` — elsewhere the deploy identity resolves only to
-what every authenticated principal already holds, so the most it could mint there is a Role
-granting what the cluster grants everyone anyway. **What the basis does not bound is
-destruction**, and `delete` is not the only verb that reaches: the guard checks the rules being
-*granted* and never compares them with the object's previous ones, so an `update` stripping a
-Role to `rules: []` grants nothing and passes. Project-wide, then, the deploy identity can
-empty a namespaced Role, and delete a Role or a RoleBinding, in any cluster in the project —
-emptying a *RoleBinding* is the one case still refused, because that guard resolves the
-referenced Role's rules instead. All of it is denial of service rather than privilege
-escalation, since RBAC carries no deny rules and removing a grant can only subtract, and all of
-it is far narrower than `roles/container.admin`. It is the residual, and dropping the two
-`delete` permissions would not close it: `delete` is there for `--atomic`, which tears a failed
-*first* install down whole, RBAC objects included.
+**What the basis bounds is which rules may be granted, not to whom.** `create` and `update` are
+checked against it, and it grants nothing outside namespace `map` — elsewhere the deploy
+identity resolves only to what every authenticated principal already holds, so the most it
+could mint there is a Role granting what the cluster grants everyone anyway. Inside `map` it
+can bind the basis's own rules to a subject of its choosing; the ceiling is on the rules, and
+those are the executor's.
+
+**What the basis does not bound is destruction**, and `delete` is not the only verb that
+reaches: the guard checks the rules being *granted* and never compares them with the object's
+previous ones, so an `update` stripping a Role to `rules: []` grants nothing and passes.
+Project-wide, then, the deploy identity can empty a namespaced Role, and delete a Role or a
+RoleBinding, in any cluster in the project. All of that is denial of service rather than
+privilege escalation, since RBAC carries no deny rules and removing a grant can only subtract,
+and all of it is far narrower than `roles/container.admin`. It is the residual, and dropping
+the two `delete` permissions would not close it: `delete` is there for `--atomic`, which tears
+a failed *first* install down whole, RBAC objects included.
 
 `kubectl create role` cannot express the basis: repeated `--verb` flags apply to every
 `--resource` named, which would hand `pods/exec` the three verbs it must not have and make the
