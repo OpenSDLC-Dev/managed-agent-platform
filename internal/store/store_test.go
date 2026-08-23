@@ -1,9 +1,11 @@
 package store_test
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"slices"
 	"strings"
@@ -111,6 +113,50 @@ func TestMigrateIsIdempotent(t *testing.T) {
 	}
 	if applied != wantMigrations {
 		t.Errorf("schema_migrations rows after re-run = %d, want %d", applied, wantMigrations)
+	}
+}
+
+// TestMigrateNamesTheDatabaseItChanges: every binary migrates whatever database
+// it connects to, so one pointed at the wrong Postgres upgrades it without a
+// word — which is how a second compose stack, resolving `postgres` to a running
+// stack's container, once migrated that stack's database (#438). Applying
+// anything must therefore name the database first, and each version as it lands.
+// The connection's password must not ride along into the log.
+func TestMigrateNamesTheDatabaseItChanges(t *testing.T) {
+	dsn := pgtest.FreshDB(t)
+	cfg, err := pgxpool.ParseConfig(dsn)
+	if err != nil {
+		t.Fatalf("parse dsn: %v", err)
+	}
+
+	var buf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
+	defer slog.SetDefault(prev)
+
+	pool := open(t, dsn)
+	logged := buf.String()
+	for _, want := range []string{cfg.ConnConfig.Database, cfg.ConnConfig.Host, "0001"} {
+		if !strings.Contains(logged, want) {
+			t.Errorf("migration log does not name %q: %q", want, logged)
+		}
+	}
+	// The password rides in the DSN, so the way it escapes is a whole connection
+	// string reaching the log rather than the host, port and database read off
+	// it. (Testing for the password itself is no test here: pgtest's is `test`,
+	// a substring of the database name it is checked against.)
+	if strings.Contains(logged, "://") {
+		t.Errorf("migration log carries a connection string, not just its parts: %q", logged)
+	}
+
+	// The common case is a process finding nothing to do, and it must stay
+	// silent — a line every binary prints on every restart is one nobody reads.
+	buf.Reset()
+	if err := store.Migrate(context.Background(), pool); err != nil {
+		t.Fatalf("second Migrate: %v", err)
+	}
+	if buf.Len() != 0 {
+		t.Errorf("a migration run with nothing to apply logged: %q", buf.String())
 	}
 }
 

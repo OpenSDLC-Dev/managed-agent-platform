@@ -286,11 +286,17 @@ services:
       # Opt into the per-session egress gate — both URL and image must be set;
       # either alone keeps the pre-gate fail-closed behavior (limited = no
       # network). The gate fetches its policy from the controlplane by compose
-      # DNS name, so it joins the stack's network (named explicitly under
-      # `networks:` below) rather than the daemon's default bridge.
+      # DNS name, so it must join this stack's own network rather than the
+      # daemon's default bridge. Compose calls that network `<project>_default`
+      # and offers the resolved project name — whether it came from `-p`, from
+      # COMPOSE_PROJECT_NAME, or from `name:` at the top of this file — for
+      # interpolation, so deriving the value here names the right network for
+      # whichever project this is. Pinning it instead is what made a second
+      # stack join the first, where `postgres` answered from the wrong
+      # container (#438).
       CONTROLPLANE_URL: http://controlplane:8080
       EXECUTOR_GATE_IMAGE: managed-agent-platform-gate:local
-      SANDBOX_DOCKER_GATE_NETWORK: managed-agent-platform_default
+      SANDBOX_DOCKER_GATE_NETWORK: ${COMPOSE_PROJECT_NAME:-managed-agent-platform}_default
       # Web tool backends (docs/plan/15_web-tools.md). Empty TAVILY_API_KEY
       # leaves web_search unconfigured; empty JINA_API_KEY with no
       # WEBFETCH_BASE_URL leaves web_fetch unconfigured (each answers is_error
@@ -434,9 +440,3 @@ volumes:
   baodata:
   baoinit:
   idpca:
-
-networks:
-  # Named explicitly so the executor's SANDBOX_DOCKER_GATE_NETWORK above can
-  # reference it verbatim, whatever COMPOSE_PROJECT_NAME says.
-  default:
-    name: managed-agent-platform_default

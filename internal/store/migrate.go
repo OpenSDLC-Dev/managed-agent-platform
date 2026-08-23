@@ -5,6 +5,7 @@ import (
 	"embed"
 	"fmt"
 	"io/fs"
+	"log/slog"
 	"path"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -57,6 +58,7 @@ func migrate(ctx context.Context, pool *pgxpool.Pool, through string) error {
 		return fmt.Errorf("store: ensure schema_migrations: %w", err)
 	}
 
+	announced := false
 	for _, name := range names { // fs.Glob returns sorted names
 		version := path.Base(name)
 		var applied bool
@@ -66,6 +68,20 @@ func migrate(ctx context.Context, pool *pgxpool.Pool, through string) error {
 			return fmt.Errorf("store: check %s: %w", version, err)
 		}
 		if !applied {
+			// Every binary migrates whatever database it connects to, so one
+			// pointed at the wrong Postgres upgrades it without a word — a
+			// second compose stack, resolving `postgres` to a running stack's
+			// container, is how that happened (#438). Name the database once,
+			// before the first statement runs rather than after the commit, so
+			// a run that fails halfway still says what it was touching. The
+			// parsed config carries the password separately from these fields.
+			if !announced {
+				cc := pool.Config().ConnConfig
+				slog.InfoContext(ctx, "store: migrating database",
+					"host", cc.Host, "port", cc.Port, "database", cc.Database)
+				announced = true
+			}
+			slog.InfoContext(ctx, "store: applying migration", "version", version)
 			sql, err := migrationsFS.ReadFile(name)
 			if err != nil {
 				return fmt.Errorf("store: read %s: %w", version, err)

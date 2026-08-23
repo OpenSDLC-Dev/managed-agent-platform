@@ -44,6 +44,28 @@ committed `CONTROLPLANE_API_KEY` is a well-known placeholder — anyone who can
 reach the port can drive the API with it. To expose it on the LAN, set a real key
 and `CONTROLPLANE_BIND=0.0.0.0` in `.env`.
 
+## A second stack beside the first
+
+Compose namespaces what it creates by **project**, and the `name:` at the top of
+`docker-compose.yml` makes two checkouts of this repo the same project by default —
+so bringing a branch build up next to a running stack means naming it:
+
+```sh
+docker compose -p mapsecond up --build
+```
+
+That is the whole knob. The executor's gate network is derived from the project
+name rather than pinned, so the second stack's gates join the second stack's
+network. Pinning it is what once let a branch stack resolve `postgres` to a
+running stack's container and migrate its database
+([#438](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/438)).
+
+Two things still cross. The published API port fails to bind, which says so at
+once: give the second stack its own `CONTROLPLANE_PORT`. The `:local` image tags
+are the quiet one — `docker compose build` in either checkout retags them for
+both, and the executor resolves `EXECUTOR_GATE_IMAGE` against the host daemon at
+session time, so a stack can end up running the other's gate build.
+
 ## Configuration
 
 Two files, and each documents its own settings in place rather than here:

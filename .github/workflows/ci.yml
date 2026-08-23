@@ -1075,6 +1075,21 @@ jobs:
         run: cp .env.example .env
       - name: docker compose config is valid
         run: docker compose config --quiet
+      # Rendering the same file under a second project name is what catches a
+      # re-pinned network: with the name hard-coded, `-p mapsecond` put the
+      # second stack on the first one's network, where `postgres` answered from
+      # the wrong container and a branch build migrated a running stack's
+      # database (#438). The project-scoped assertion is the load-bearing one —
+      # on the pinned file the two values still agreed with each other, they
+      # were just both the wrong network.
+      - name: a second project gets its own network
+        run: |
+          cfg="$(docker compose -p mapsecond config --format json)"
+          net="$(printf '%s' "$cfg" | python3 -c 'import json,sys; print(json.load(sys.stdin)["networks"]["default"]["name"])')"
+          gate="$(printf '%s' "$cfg" | python3 -c 'import json,sys; print(json.load(sys.stdin)["services"]["executor"]["environment"]["SANDBOX_DOCKER_GATE_NETWORK"])')"
+          [ "$net" = "mapsecond_default" ] || { echo "a second project's network is '$net', not its own" >&2; exit 1; }
+          [ "$gate" = "$net" ] || { echo "the executor's gate network '$gate' is not the stack's '$net'" >&2; exit 1; }
+          echo "ok: -p mapsecond isolates on $net"
       # The stack below never starts openbao and the helm job only renders the
       # chart's copy, so without this nothing here runs either init script; the
       # Makefile recipe argues it, and #439 is what it cost. No Docker, so it is
