@@ -80,11 +80,14 @@ const maxSettlementChain = 25
 //
 // What it does NOT bound, so nobody reads it as a runaway guard: a single agent
 // looping bash forever off one client message is exactly as unbounded as
-// before, and so is a pair that emits one real tool call alongside each message
-// — that pair always has input pending, so the refusal declines to fire. This
-// bounds turns whose product is delegation traffic. A general spend bound is
-// #432's, and is blocked on a per-model price table a self-hosted deployment
-// cannot have.
+// before. A pair emitting one real tool call alongside each message is bounded
+// on a cloud environment but not on a self_hosted one, and the difference is
+// which event answers the call: an executor posts agent.tool_result, which is
+// not pending input, so the refusal fires; a self_hosted client POSTs
+// user.tool_result, which is, so it declines rather than strand the thread.
+// Client-executed custom tools take the self_hosted lane on either kind. A
+// general spend bound is #432's, and is blocked on a per-model price table a
+// self-hosted deployment cannot have.
 const maxSessionDelegationTurns = maxLiveThreads * maxSettlementChain
 
 // maxDelegationText bounds the model-supplied text a delegation call carries
@@ -960,7 +963,10 @@ func runExhausted(threadID domain.ID, agentName string) (events.NewEvent, error)
 // become archivable, with events.ResumableThreads selecting only running
 // threads so nothing would ever read the result. Refusing a claim cannot
 // produce that state: it never intervenes in a turn's fate, it only declines to
-// start one. It also needs no gate on delegate.wake, so send_to_agent still
+// start one, and a thread holding an unanswered tool call has no item to
+// refuse — every enqueue that could reach one is already gated on
+// events.HasUnansweredThreadToolUse (the API's three in internal/api/events.go,
+// the wake paths' in internal/events/threadmsg.go). It also needs no gate on delegate.wake, so send_to_agent still
 // answers its byte-pinned "Message sent." truthfully — the peer really is woken,
 // and it is its own next claim that is refused.
 //
@@ -1015,6 +1021,16 @@ func (b *Brain) cutExhaustedRun(ctx context.Context, sid domain.ID, item *queue.
 		return false, nil
 	}
 
+	// Read before the transitions below move it, so the metric counts a real
+	// change: on a session whose siblings are still running the fold does not
+	// move at all, and an unconditional SetStatus would record a transition to
+	// the status the session already had. The same before/after test every
+	// other settlement here makes.
+	before, err := sessionStatusNow(ctx, tx, sid)
+	if err != nil {
+		return false, err
+	}
+
 	ev, err := runExhausted(item.ThreadID, agent.Name)
 	if err != nil {
 		return false, err
@@ -1054,7 +1070,9 @@ func (b *Brain) cutExhaustedRun(ctx context.Context, sid domain.ID, item *queue.
 		return false, err
 	}
 	opts := events.AppendOptions{ThreadID: item.ThreadID}
-	opts.SetStatus = &after
+	if after != before {
+		opts.SetStatus = &after
+	}
 	opts.Then = func(ctx context.Context, tx pgx.Tx) error {
 		if err := b.queue.Complete(ctx, tx, item); err != nil {
 			return err
@@ -1076,6 +1094,8 @@ func (b *Brain) cutExhaustedRun(ctx context.Context, sid domain.ID, item *queue.
 	if err := tx.Commit(ctx); err != nil {
 		return false, err
 	}
-	events.RecordSessionStatus(ctx, after)
+	if opts.SetStatus != nil {
+		events.RecordSessionStatus(ctx, after)
+	}
 	return true, nil
 }

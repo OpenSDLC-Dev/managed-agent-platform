@@ -21,13 +21,18 @@ func TestEventTypeDomain(t *testing.T) {
 	}
 }
 
+// inboundTypes is the user.*/system.* set as this package's tests know it —
+// maintained by hand, because constants cannot be enumerated at run time.
+// Adding one to event.go and not to this list is the way both tests below rot,
+// which is why there is one list rather than a copy per test.
+var inboundTypes = []EventType{
+	EventUserMessage, EventUserInterrupt, EventUserToolConfirm,
+	EventUserCustomToolRes, EventUserToolResult, EventUserDefineOutcome,
+	EventSystemMessage,
+}
+
 func TestEventInbound(t *testing.T) {
-	inbound := []EventType{
-		EventUserMessage, EventUserInterrupt, EventUserToolConfirm,
-		EventUserCustomToolRes, EventUserToolResult, EventUserDefineOutcome,
-		EventSystemMessage,
-	}
-	for _, et := range inbound {
+	for _, et := range inboundTypes {
 		if !et.Inbound() {
 			t.Errorf("%q should be inbound", et)
 		}
@@ -71,15 +76,16 @@ func TestEventStartsNewWork(t *testing.T) {
 			t.Errorf("%q.StartsNewWork() = %v, want %v — %s", c.et, got, c.want, c.why)
 		}
 	}
-	// Every inbound type must be classified here, so a new one cannot join the
-	// taxonomy without someone deciding which side of the bound it falls on.
-	for _, et := range []EventType{
-		EventUserMessage, EventUserInterrupt, EventUserToolConfirm,
-		EventUserCustomToolRes, EventUserToolResult, EventUserDefineOutcome,
-		EventSystemMessage,
-	} {
+	// Every inbound type this package knows must be classified above, so the
+	// exclusions stay decisions rather than defaults. It catches a type dropped
+	// from the table, not one added to event.go and to neither list — nothing
+	// can enumerate the constants, so inboundTypes is the hand-kept stand-in.
+	for _, et := range inboundTypes {
 		if !seen[et] {
 			t.Errorf("inbound type %q is unclassified by this table", et)
+		}
+		if !et.Inbound() {
+			t.Errorf("%q is in inboundTypes but Inbound() says otherwise", et)
 		}
 	}
 	// Nothing the platform produces can reset a bound on the platform's own
