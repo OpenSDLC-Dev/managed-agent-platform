@@ -20,7 +20,7 @@ SHELL := /usr/bin/env bash
 .PHONY: build crossbuild vet fmt-check test cover-gate verify eval \
 	changelog changelog-notes changelog-archive \
 	release-tag-check release-images release-chart-check release-chart release-binaries \
-	openbao-init-test \
+	openbao-init-test registry-check \
 	gcp-fmt gcp-validate gcp-split-check gcp-lint gcp-bootstrap-test gcp-dbinit-test gcp-split-check-test gcp-foundation-apply gcp-bootstrap gcp-env-apply gcp-db-init gcp-env-destroy gcp-env-rebuild
 
 build:
@@ -128,6 +128,19 @@ changelog-notes:
 
 changelog-archive:
 	@go run ./tools/changelog archive -version "$(VERSION)"
+
+# The registry's pointer guard (#452). Its shape rules already run inside
+# `verify` — they are offline, and `go test ./...` runs tools/registrycheck's
+# own test, which calls Check on the real docs/DIVERGENCES.md. This target is
+# the other half: whether each live `Tracked: #N` still names an OPEN issue,
+# which only GitHub can answer. NOT part of `verify`, for the one reason the
+# gcp-* and eval groups are not either — the gate is offline and
+# credential-free by design, and a check that reaches the network cannot be
+# made to fail honestly inside it. .github/workflows/registry.yml runs this
+# daily and on every PR that touches the registry; GITHUB_TOKEN is optional
+# (the repository is public) and only raises the API rate limit.
+registry-check:
+	go run ./tools/registrycheck -issues
 
 # ---------------------------------------------------------------------------
 # Release publishing (docs/RELEASING.md; plan 27). Like the gcp-* group,

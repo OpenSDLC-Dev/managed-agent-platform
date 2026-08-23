@@ -1,0 +1,122 @@
+name: registry
+
+# The pointer guard over docs/DIVERGENCES.md, on a schedule (#452).
+#
+# `Tracked: #N` is a present-tense claim that work is outstanding. It is written
+# once and falsified later, elsewhere, by an event this repository cannot see —
+# someone closing #N. `make verify` is offline and credential-free by design and
+# so can never notice, which is why 65 of 111 pointers were wrong before anyone
+# looked (#445). The shape half of the guard does run in the gate, as
+# tools/registrycheck's own test; this workflow is the half that needs the
+# network, and it exists so the state half surfaces on the next scheduled run
+# rather than at whoever's next manual sweep.
+#
+# (Scheduled runs are best-effort on GitHub's side: under load they are delayed,
+# and can be dropped. Daily is the cadence asked for, not an SLA.)
+on:
+  schedule:
+    # 23:07 UTC daily. Off the hour deliberately, for the same reason evals.yml
+    # is: GitHub's scheduler is most backed up at :00.
+    - cron: '7 23 * * *'
+  # The scheduled run catches rot that happens after a pointer is written. This
+  # catches the other half — a pointer written at an already-closed issue — at
+  # the moment it is cheapest to fix, and only on the PRs that touch the file.
+  pull_request:
+    paths:
+      - 'docs/DIVERGENCES.md'
+      - 'tools/registrycheck/**'
+      - '.github/workflows/registry.yml'
+      # The recipe is this workflow's only executable step, so a PR that edits
+      # it and nothing else changes what the schedule will run tomorrow. Without
+      # this line that PR is the one case the guard never sees.
+      - 'Makefile'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: registry-${{ github.ref }}
+  # Queued rather than cancelled, for evals.yml's reason: a manual dispatch must
+  # never kill an in-flight nightly. A cancelled run ends `cancelled`, not
+  # `failure`, so the scheduled-failure notification — this workflow's entire
+  # notification mechanism — would not fire and that night's rot would go unsaid.
+  cancel-in-progress: false
+
+jobs:
+  registry:
+    name: registry
+    runs-on: ubuntu-latest
+    # `issues: read` is the whole reason this job cannot live in `make verify`.
+    # The repository is public, so the API answers unauthenticated too — but at
+    # 60 requests an hour per IP, which a shared runner can arrive having spent.
+    # Declared explicitly rather than inherited, so the job's reach is readable
+    # here and does not move with an organisation-level default.
+    permissions:
+      contents: read
+      issues: read
+    timeout-minutes: 10
+    steps:
+      # persist-credentials: false because nothing here pushes, and the one
+      # credential this job wants is passed to the one step that needs it.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      # The command lives in the Makefile — the single executable source.
+      #
+      # There is deliberately no "is the token set?" precheck. The tool fails
+      # rather than skips when it cannot reach GitHub, and names the rate limit
+      # when that is what stopped it; a precheck's tempting shape — skip when
+      # unconfigured — is exactly the failure this workflow exists to prevent.
+      - name: registry pointer guard (GitHub issue state)
+        id: guard
+        env:
+          # Step-scoped, not job-scoped: only this step reads it, and job-level
+          # env would hand the token to the third-party actions above too.
+          GITHUB_TOKEN: ${{ github.token }}
+        # tee, so the findings reach both the log and the summary below. The
+        # pipe would otherwise report tee's exit status, hence pipefail: a red
+        # run is this workflow's whole notification mechanism.
+        #
+        # The exit code is captured before the step fails on it, because the
+        # tool distinguishes two reds — 1 for a rotted registry, 2 for "I could
+        # not ask GitHub" — and `job.status` alone flattens them back into one.
+        run: |
+          set -o pipefail
+          rc=0
+          make registry-check 2>&1 | tee findings.txt || rc=$?
+          echo "rc=$rc" >> "$GITHUB_OUTPUT"
+          exit "$rc"
+      # A red run is the notification, and this is what makes it readable
+      # without opening the log — which matters most for the scheduled run
+      # nobody watched. The findings themselves go in: a summary that says
+      # "findings above" with nothing above it is worse than no summary.
+      - name: render the findings
+        if: always()
+        env:
+          RC: ${{ steps.guard.outputs.rc }}
+          STATUS: ${{ job.status }}
+        run: |
+          {
+            echo '### `docs/DIVERGENCES.md` pointer guard'
+            if [ "$STATUS" = 'cancelled' ]; then
+              echo 'Cancelled before the guard could answer. This is **not** a clean result — re-run it.'
+            elif [ "$RC" = '0' ]; then
+              echo 'Clean: every live tracker names an open issue.'
+            elif [ "$RC" = '2' ]; then
+              echo 'GitHub could not be reached, so the registry was **not** checked. This says nothing about the pointers — re-run it, and read the error below for whether the rate limit is what stopped it.'
+              echo
+              echo '```'
+              cat findings.txt 2>/dev/null || echo '(no output; read the step log)'
+              echo '```'
+            else
+              echo 'A live `Tracked: #N` naming a closed issue tells a reader work is outstanding when it is not. Demote it to provenance — `(delivered)`, or a trailing `landed for #N` clause — and name the issue that will settle the entry. The grammar is the Format legend at the top of the file.'
+              echo
+              echo '```'
+              cat findings.txt 2>/dev/null || echo '(the guard produced no output; read the step log)'
+              echo '```'
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
