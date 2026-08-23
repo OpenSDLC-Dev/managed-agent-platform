@@ -369,14 +369,13 @@ func TestTurnEventsMixesDelegationWithExecCalls(t *testing.T) {
 	}
 }
 
-// The delegation budget is derived, not picked, and the suites that exercise
-// the bound sit in brain_test and spell 625 as a literal because they cannot
-// see the constant. This is what stops the two drifting apart.
+// The delegation budget is derived, not picked (delegate.go defines it as
+// maxLiveThreads × maxSettlementChain, so no test can assert that without
+// restating the definition), and the suites that exercise the bound sit in
+// brain_test, where they spell 625 as a literal because they cannot see the
+// constant. Pinning the product is what stops the two drifting apart: moving
+// either factor changes this number and fails here.
 func TestSessionDelegationBudgetIsDerived(t *testing.T) {
-	if maxSessionDelegationTurns != maxLiveThreads*maxSettlementChain {
-		t.Errorf("maxSessionDelegationTurns = %d, want maxLiveThreads*maxSettlementChain = %d",
-			maxSessionDelegationTurns, maxLiveThreads*maxSettlementChain)
-	}
 	// The literal the brain_test suites seed. Changing either factor is a
 	// deliberate act; this makes it one that also updates those tests and the
 	// docs/DIVERGENCES.md entry that quotes the number.

@@ -119,7 +119,7 @@ the client to "raise the budget to continue" — a recovery that does not exist 
 `budget` renders `null` and a POST of one is a 400. Emitting it would hand a reference-compatible
 client a name it knows attached to a quantity we do not measure and a remedy it cannot perform,
 and would spend the rank #432 will want for the real thing. A coined
-`session_delegation_exhausted_error` on a plain `end_turn` is #446's precedent, one level up.
+`session_delegation_exhausted_error` on a plain `end_turn` is #442's precedent, one level up.
 
 **The reference negative, established rather than assumed.** Five independent sweeps — the pinned
 SDK at v1.63.1, the `ant` CLI, the public docs, and an exhaustive census of every published

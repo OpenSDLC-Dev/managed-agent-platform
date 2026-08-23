@@ -1,7 +1,7 @@
 -- The session delegation bound (#447): how many turns this session has spent
 -- since a client last asked it for anything.
 --
--- #446's chain cap counts on the claimed work_items row, in its metadata, and
+-- #442's chain cap counts on the claimed work_items row, in its metadata, and
 -- that is precisely why two agents messaging each other escape it: a row's life
 -- is exactly one uninterrupted run of chained turns. EnqueueThread's INSERT
 -- names six columns and metadata is not among them, so every wake from idle

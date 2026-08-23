@@ -1446,7 +1446,7 @@ func TestInputAtTheCapChainsAnywayAndResetsTheCount(t *testing.T) {
 	}
 }
 
-// The session delegation bound (#447). #446's cap counts on the work_items
+// The session delegation bound (#447). #442's cap counts on the work_items
 // row, and a row's life is exactly one run of chained turns — so these cover
 // the count that has to survive an idle, and the three routes by which two
 // agents messaging each other escaped the thread-local one.
@@ -1472,11 +1472,10 @@ func TestAMixedDelegationAndToolTurnSpendsToo(t *testing.T) {
 		{toolCall("t1", "list_agents", `{}`), toolCall("t2", "bash", `{"command":"true"}`),
 			done("tool_use", 1)},
 	}, nil)
-	// builtins BEFORE roster, which patches multiagent onto whatever spec is
-	// stored. Without it bash is a name the model was never offered, so the
-	// turn classes it agent.custom_tool_use and settles with workKind "" —
-	// which is the settlement-only shape the test above already covers, not
-	// the mixed one this test is named for.
+	// builtins is what makes this turn mixed rather than a copy of the test
+	// above: without it bash is a name the model was never offered, so the turn
+	// classes it agent.custom_tool_use and settles with workKind "" — the
+	// settlement-only shape, not the mixed one this test is named for.
 	h.builtins(t)
 	h.roster(t, "researcher")
 	h.wake(t, "delegate")
@@ -1597,7 +1596,7 @@ func TestTheClaimIsRefusedAtTheDelegationBound(t *testing.T) {
 }
 
 // Routes 1 and 2 together, on one real send_to_agent — the regression that
-// fails against main. Waking a peer resets #446's cap twice over: the sender's
+// fails against main. Waking a peer resets #442's cap twice over: the sender's
 // own item is plain-Requeued, which clears its count (route 2), and the peer is
 // handed a FRESH work_items row whose metadata takes DEFAULT '{}', so Claim
 // reads Chain = 0 (route 1). Either alone would let a ping-ponging pair run
