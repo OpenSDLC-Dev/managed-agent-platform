@@ -76,9 +76,15 @@ Jaeger ports are fixed, so two stacks cannot both run that profile unchanged.
 
 Give `-p` to **every** verb, not just `up` — `down`, `logs`, `ps`. Without it the command
 addresses the default project, which is the other stack; see [Teardown](#teardown) for the
-one that loses data. This needs a Compose that exposes the resolved project name for
-interpolation, which the Compose Specification requires and which this file already
-depends on elsewhere (`depends_on.required`, Compose 2.20+).
+one that loses data.
+
+All of this rides on Compose exposing the *resolved* project name for interpolation, which
+the Compose Specification requires. One version caveat, worth stating because it is silent
+when it bites: **before Compose 2.27.1**, an exported `COMPOSE_PROJECT_NAME` won the
+interpolation while `-p` still named the project, so the stack came up on `mapsecond_default`
+while its executor was told `managed-agent-platform_default` — #438 again, in the half you
+cannot see. Either run 2.27.1 or newer, or pick one mechanism: `-p`, or the environment
+variable, never a different value in each.
 
 ## Configuration
 

@@ -292,8 +292,10 @@ services:
       # daemon's default bridge. Compose calls that network `<project>_default`
       # and offers the resolved project name — whether it came from `-p`, from
       # COMPOSE_PROJECT_NAME, or from `name:` at the top of this file — for
-      # interpolation, so deriving the value here names the right network for
-      # whichever project this is. Pinning it instead is what made a second
+      # interpolation (before Compose 2.27.1 an exported COMPOSE_PROJECT_NAME
+      # beat `-p` here while `-p` still named the project; the README's second-
+      # stack section says what that costs), so deriving the value names the
+      # right network for whichever project this is. Pinning it instead made a second
       # stack join the first, where `postgres` answered from the wrong
       # container (#438) — so do not reintroduce a `networks:` block naming this
       # network either: nothing here can read a name Compose was given, and the
@@ -355,7 +357,7 @@ services:
       context: ../..
       dockerfile: Dockerfile
       target: gate
-    image: ${COMPOSE_PROJECT_NAME:-managed-agent-platform}-gate:local
+    image: ${COMPOSE_PROJECT_NAME:?compose did not expose the project name}-gate:local
     entrypoint: ["/bin/true"]
     restart: "no"
 
