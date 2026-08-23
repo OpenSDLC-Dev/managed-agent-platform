@@ -49,11 +49,20 @@ new directory and in-repo citations re-pointed in the moving PR (plan
 
 ---
 
-## The session delegation bound (#447) — four designs evaluated, three rejected, 2026-08-23
+## The session delegation bound (#447) — the designs it beat, 2026-08-23
 
 The narrative is in CHANGELOG.md and the wire argument is in DIVERGENCES.md. What neither holds
 is which designs were considered and why three were dropped — and one of the rejections is the
-reason the shipped design needed a migration at all.
+reason the shipped design needed a migration at all. Five rejections are recorded below, and
+they are not all the same kind of thing: the first three are the designs proper, alternatives
+for where the count lives and where the cut falls, of the four evaluated. The last two are a
+counting rule and a naming decision, which arrived attached to those designs and are kept here
+because each was argued and each could be argued back.
+
+The issue's triage called for a plan file, and this section is what stands in for it. A plan
+would have decomposed work that turned out to be one migration and one refusal; what actually
+needed writing down was the alternatives — and a plan file archives on delivery, which is
+exactly when this becomes worth reading.
 
 **The issue undercounted the problem: there were three escape routes, not two.** #447's body
 names the fresh work-item row (route 1) and the `woke` clearing (route 2). Grounding the design

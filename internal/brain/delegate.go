@@ -964,9 +964,13 @@ func runExhausted(threadID domain.ID, agentName string) (events.NewEvent, error)
 // threads so nothing would ever read the result. Refusing a claim cannot
 // produce that state: it never intervenes in a turn's fate, it only declines to
 // start one, and a thread holding an unanswered tool call has no item to
-// refuse — every enqueue that could reach one is already gated on
-// events.HasUnansweredThreadToolUse (the API's three in internal/api/events.go,
-// the wake paths' in internal/events/threadmsg.go). It also needs no gate on delegate.wake, so send_to_agent still
+// refuse. Every enqueue that could reach one is already gated on the same
+// unanswered-call predicate — the API's three (internal/api/events.go), the
+// wake paths' (internal/events/threadmsg.go), and events.ResumableThreads,
+// which is what both exec drivers drain through — and the one site that is
+// not, the API's new-work-cycle arm, rides a user.message or
+// user.define_outcome, which resets this counter in the same transaction. It
+// also needs no gate on delegate.wake, so send_to_agent still
 // answers its byte-pinned "Message sent." truthfully — the peer really is woken,
 // and it is its own next claim that is refused.
 //
@@ -999,7 +1003,10 @@ func (b *Brain) cutExhaustedRun(ctx context.Context, sid domain.ID, item *queue.
 		return false, err
 	}
 	// Re-read under the lock: a client's message may have landed since the
-	// fast path, and its reset is this cut's entire remedy.
+	// fast path, and its reset is this cut's entire remedy. No test reaches the
+	// under-cap return below — it needs a message committed inside the window
+	// between the unlocked read and this lock — so it is the one branch here
+	// resting on the argument rather than on a run.
 	if err := tx.QueryRow(ctx,
 		`SELECT delegation_turns FROM sessions WHERE id = $1`, sid.String()).Scan(&spent); err != nil {
 		return false, err

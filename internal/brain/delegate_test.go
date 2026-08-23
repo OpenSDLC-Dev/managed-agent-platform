@@ -1472,10 +1472,22 @@ func TestAMixedDelegationAndToolTurnSpendsToo(t *testing.T) {
 		{toolCall("t1", "list_agents", `{}`), toolCall("t2", "bash", `{"command":"true"}`),
 			done("tool_use", 1)},
 	}, nil)
+	// builtins BEFORE roster, which patches multiagent onto whatever spec is
+	// stored. Without it bash is a name the model was never offered, so the
+	// turn classes it agent.custom_tool_use and settles with workKind "" —
+	// which is the settlement-only shape the test above already covers, not
+	// the mixed one this test is named for.
+	h.builtins(t)
 	h.roster(t, "researcher")
 	h.wake(t, "delegate")
 
 	h.runOnce(t)
+	// The mix is the point: a real sandbox call, so the settlement takes the
+	// workKind branch rather than the chain branch, and the count must climb
+	// there too.
+	if n := h.liveOf(t, queue.ToolExec); n != 1 {
+		t.Fatalf("tool_exec = %d, want the one bash call — without it this turn is not mixed", n)
+	}
 	if n := h.delegationTurns(t); n != 1 {
 		t.Errorf("delegation_turns = %d, want 1 — a mixed turn spends like any other", n)
 	}
