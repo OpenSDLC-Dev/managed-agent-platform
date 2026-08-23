@@ -248,6 +248,18 @@ func (b *Brain) runTurn(ctx context.Context, item *queue.Item, claimedAt time.Ti
 		return b.runGrading(ctx, item, agent, evals)
 	}
 
+	// The session delegation bound (#447). It sits below the grading fork so a
+	// grading item is never refused — grading is the platform answering a
+	// client's own define_outcome, not autonomous delegation traffic — and
+	// above everything that costs anything: no MCP catalog is loaded, no log is
+	// replayed, and above all no span.model_request_start is appended, which is
+	// what makes a refused claim free rather than merely short.
+	if refused, err := b.cutExhaustedRun(ctx, sid, item, agent); err != nil {
+		return fmt.Errorf("delegation bound: %w", err)
+	} else if refused {
+		return nil
+	}
+
 	// An MCP server the agent declares and this session has never reached has
 	// tools nobody can name yet, so the turn is not assembled at all: it hands
 	// the item back as an mcp_exec and the discovery driver chains the turn once

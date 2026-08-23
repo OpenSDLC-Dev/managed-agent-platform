@@ -59,9 +59,36 @@ const maxLiveThreads = 25
 // What it bounds is one thread chaining its OWN turn with nothing feeding it.
 // A client's message resets the count, and so does a peer agent's, which
 // arrives as a fresh item: two agents messaging each other in a loop are not
-// bounded here and are not meant to be — that is a session-wide budget, not
-// this thread-local one (#447).
+// bounded here and are not meant to be — that is maxSessionDelegationTurns
+// below, which counts on the session row precisely because this one cannot
+// survive the idle a peer's wake goes through (#447).
 const maxSettlementChain = 25
+
+// maxSessionDelegationTurns bounds what a session may spend when nothing
+// outside it is asking for anything: turns that called a delegation tool since
+// a client last made a demand. It is the bound two agents messaging each other
+// cannot escape, and it lives on the sessions row because every cheaper home
+// leaks — a work_items row is reset by the wake that re-queues it, and the
+// `woke` and chainInput predicates both read a peer's message as progress.
+//
+// The number is derived rather than picked: the session may spend what every
+// thread it is permitted to hold could each spend under the thread-local cap.
+// That matters because the arithmetic is not obvious — a coordinator working a
+// 24-child roster over ten rounds, each round costing a report and a re-task,
+// is roughly 480 counted turns with no client input, so a rounder-looking 250
+// would cut legitimate work.
+//
+// What it does NOT bound, so nobody reads it as a runaway guard: a single agent
+// looping bash forever off one client message is exactly as unbounded as
+// before. A pair emitting one real tool call alongside each message is bounded
+// on a cloud environment but not on a self_hosted one, and the difference is
+// which event answers the call: an executor posts agent.tool_result, which is
+// not pending input, so the refusal fires; a self_hosted client POSTs
+// user.tool_result, which is, so it declines rather than strand the thread.
+// Client-executed custom tools take the self_hosted lane on either kind. A
+// general spend bound is #432's, and is blocked on a per-model price table a
+// self-hosted deployment cannot have.
+const maxSessionDelegationTurns = maxLiveThreads * maxSettlementChain
 
 // maxDelegationText bounds the model-supplied text a delegation call carries
 // into an event payload — a task, a report, a message. Generous enough that no
@@ -782,6 +809,27 @@ func (b *Brain) commitDelegatedTurn(ctx context.Context, sid domain.ID, item *qu
 			opts.SetStatus = &after
 		}
 		opts.Then = func(ctx context.Context, tx pgx.Tx) error {
+			// The session delegation bound (#447), counted here because this
+			// is the one commit every delegation call passes through — the
+			// caller's branch owns every shape a turn holding one takes, the
+			// ask gate and the mixed exec turn included. The six delegation
+			// tools are the only channel by which one thread reaches another,
+			// so every turn that continues an agent-to-agent loop is counted:
+			// continuing the loop requires a delegation call.
+			//
+			// Deliberately NOT restricted to settlement-only turns. A model
+			// that puts one trivial bash call in the same turn as each message
+			// would otherwise never move the counter at all — and that turn is
+			// exactly as much autonomous spend as a bare message is.
+			//
+			// The reset is not here: it rides events.AppendInTx, keyed on
+			// domain.EventType.StartsNewWork, so every path that appends a
+			// client demand returns the budget without remembering to.
+			if _, err := tx.Exec(ctx,
+				`UPDATE sessions SET delegation_turns = delegation_turns + 1 WHERE id = $1`,
+				sid.String()); err != nil {
+				return err
+			}
 			if chain {
 				// Input and a wake are both progress, and plain Requeue
 				// clears the count: the run being bounded is the one that
@@ -875,4 +923,186 @@ func chainCapped(threadID domain.ID, agentName string) (events.NewEvent, error) 
 		return events.NewEvent{}, err
 	}
 	return events.NewEvent{Type: domain.EventSessionError, Payload: payload, ThreadID: threadID}, nil
+}
+
+// runExhausted is the session.error a refused claim leaves — chainCapped's
+// session-wide sibling (#447). The type is this platform's own: the reference
+// publishes no bound of any kind on autonomous agent-to-agent activity, so
+// there is no name of theirs to reuse. Its one activity ceiling, `budget`, is
+// a monetary ceiling on tracked list cost, and its `budget_reached` tells a
+// client to raise the budget to continue — a remedy that does not exist here,
+// where `budget` is null and a POST of one is refused. docs/DIVERGENCES.md
+// carries the argument.
+func runExhausted(threadID domain.ID, agentName string) (events.NewEvent, error) {
+	payload, err := json.Marshal(map[string]any{"error": map[string]any{
+		"type": "session_delegation_exhausted_error",
+		"message": fmt.Sprintf("This session spent %d turns calling delegation tools since a "+
+			"client last asked it for anything, so %s was not started. Threads that were "+
+			"running settle and stop. A message to any of them resumes the session with a "+
+			"fresh budget.", maxSessionDelegationTurns, agentName),
+		// "exhausted", not "retrying", for chainCapped's reason: the platform
+		// will make no further attempt on its own. What resumes the session is
+		// somebody outside it asking for something.
+		"retry_status": map[string]any{"type": "exhausted"},
+	}})
+	if err != nil {
+		return events.NewEvent{}, err
+	}
+	return events.NewEvent{Type: domain.EventSessionError, Payload: payload, ThreadID: threadID}, nil
+}
+
+// cutExhaustedRun refuses to start a turn whose session has spent its
+// delegation budget, and reports whether it did (#447).
+//
+// It refuses at the CLAIM rather than cutting at the settlement, which is what
+// keeps the change small and, more importantly, correct. A settlement-side cut
+// has to force idle on a turn that may also hold real tool calls — on a mixed
+// turn the fate block's gated/idle/capped/chain are all false, so the cut would
+// idle the thread while opts.Then still enqueued its tool_exec, leaving a
+// sandbox command in flight against a session that has already folded idle and
+// become archivable, with events.ResumableThreads selecting only running
+// threads so nothing would ever read the result. Refusing a claim cannot
+// produce that state: it never intervenes in a turn's fate, it only declines to
+// start one, and a thread holding an unanswered tool call has no item to
+// refuse. Every enqueue that could reach one is already gated on the same
+// unanswered-call predicate — the API's three (internal/api/events.go), the
+// wake paths' (internal/events/threadmsg.go), and events.ResumableThreads,
+// which is what both exec drivers drain through — and the one site that is
+// not, the API's new-work-cycle arm, rides a user.message or
+// user.define_outcome, which resets this counter in the same transaction. It
+// also needs no gate on delegate.wake, so send_to_agent still
+// answers its byte-pinned "Message sent." truthfully — the peer really is woken,
+// and it is its own next claim that is refused.
+//
+// The refusal terminates rather than oscillating. Threads already mid-turn
+// settle once more and may wake peers as they do today; each of those items is
+// refused at its next claim, so overshoot is bounded at one model request per
+// live thread — which is what the reference documents for its own budget,
+// enforced between model requests rather than mid-request.
+func (b *Brain) cutExhaustedRun(ctx context.Context, sid domain.ID, item *queue.Item,
+	agent domain.ResolvedAgent) (bool, error) {
+	// Fast path, unlocked: one primary-key read of a counter that is zero for
+	// every session that never delegated. A stale read is safe both ways —
+	// under the cap the turn runs, which is what it would have done anyway;
+	// at or over it, the locked re-read below is the one that decides.
+	var spent int
+	if err := b.pool.QueryRow(ctx,
+		`SELECT delegation_turns FROM sessions WHERE id = $1`, sid.String()).Scan(&spent); err != nil {
+		return false, fmt.Errorf("read delegation turns: %w", err)
+	}
+	if spent < maxSessionDelegationTurns {
+		return false, nil
+	}
+
+	tx, err := b.pool.Begin(ctx)
+	if err != nil {
+		return false, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if _, err := tx.Exec(ctx, `SELECT 1 FROM sessions WHERE id = $1 FOR UPDATE`, sid.String()); err != nil {
+		return false, err
+	}
+	// Re-read under the lock: a client's message may have landed since the
+	// fast path, and its reset is this cut's entire remedy. No test reaches the
+	// under-cap return below — it needs a message committed inside the window
+	// between the unlocked read and this lock — so it is the one branch here
+	// resting on the argument rather than on a run.
+	if err := tx.QueryRow(ctx,
+		`SELECT delegation_turns FROM sessions WHERE id = $1`, sid.String()).Scan(&spent); err != nil {
+		return false, err
+	}
+	if spent < maxSessionDelegationTurns {
+		return false, nil
+	}
+	// Pending input is the other reason to run rather than refuse. A client
+	// message cannot reach this check — it reset the counter in the same
+	// append, under this lock — but user.tool_result and user.custom_tool_result
+	// are deliberately not resets, and idling a thread that holds one
+	// unprocessed would strand it with no trigger left, breaking the
+	// chain-or-idle contract every other terminal settlement honours.
+	pending, err := pendingInput(ctx, tx, sid, item.ThreadID, 0)
+	if err != nil {
+		return false, err
+	}
+	if pending {
+		return false, nil
+	}
+
+	// Read before the transitions below move it, so the metric counts a real
+	// change: on a session whose siblings are still running the fold does not
+	// move at all, and an unconditional SetStatus would record a transition to
+	// the status the session already had. The same before/after test every
+	// other settlement here makes.
+	before, err := sessionStatusNow(ctx, tx, sid)
+	if err != nil {
+		return false, err
+	}
+
+	ev, err := runExhausted(item.ThreadID, agent.Name)
+	if err != nil {
+		return false, err
+	}
+	batch := []events.NewEvent{ev}
+	// A refused child ends without a report, so it owes its coordinator the
+	// notice every other ending owes it — the same W1 wedge chainCapped's cut
+	// closes. Notice, then the wake, then the idle, in that order so the
+	// session never folds idle in between.
+	notice, err := childEndedNotice(ctx, tx, sid, item.ThreadID, func(agentName string) string {
+		return fmt.Sprintf("[agent %s stopped: the session spent its delegation budget of %d "+
+			"turns]\n\nNothing was reported on them; anything it reported earlier stands. The "+
+			"whole session is idle until somebody messages it.", agentName, maxSessionDelegationTurns)
+	})
+	if err != nil {
+		return false, err
+	}
+	wokeParent := false
+	if notice != nil {
+		pair, _, parentWoke, werr := events.WakeOnThreadEnded(ctx, tx, sid, item.ThreadID)
+		if werr != nil {
+			return false, werr
+		}
+		batch = append(append(batch, *notice), pair...)
+		wokeParent = parentWoke
+	}
+	pair, _, err := events.TransitionThread(ctx, tx, sid, events.ThreadTransition{
+		ThreadID: item.ThreadID, Status: domain.SessionIdle,
+		Stop: &domain.StopReason{Type: domain.StopEndTurn}})
+	if err != nil {
+		return false, err
+	}
+	batch = append(batch, pair...)
+
+	after, err := sessionStatusNow(ctx, tx, sid)
+	if err != nil {
+		return false, err
+	}
+	opts := events.AppendOptions{ThreadID: item.ThreadID}
+	if after != before {
+		opts.SetStatus = &after
+	}
+	opts.Then = func(ctx context.Context, tx pgx.Tx) error {
+		if err := b.queue.Complete(ctx, tx, item); err != nil {
+			return err
+		}
+		// A woken parent needs an item like any other wake, or it ends up
+		// running with nothing queued. Its own claim is then refused too —
+		// and because childEndedNotice returns nil for the primary, there is
+		// no third hop.
+		if wokeParent {
+			if _, err := b.queue.EnqueueThread(ctx, tx, item.EnvironmentID, sid, "", queue.ModelTurn); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	if _, err := b.log.AppendInTx(ctx, tx, sid, batch, opts); err != nil {
+		return false, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return false, err
+	}
+	if opts.SetStatus != nil {
+		events.RecordSessionStatus(ctx, after)
+	}
+	return true, nil
 }

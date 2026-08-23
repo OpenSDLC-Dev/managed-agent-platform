@@ -21,13 +21,18 @@ func TestEventTypeDomain(t *testing.T) {
 	}
 }
 
+// inboundTypes is the user.*/system.* set as this package's tests know it —
+// maintained by hand, because constants cannot be enumerated at run time.
+// Adding one to event.go and not to this list is the way both tests below rot,
+// which is why there is one list rather than a copy per test.
+var inboundTypes = []EventType{
+	EventUserMessage, EventUserInterrupt, EventUserToolConfirm,
+	EventUserCustomToolRes, EventUserToolResult, EventUserDefineOutcome,
+	EventSystemMessage,
+}
+
 func TestEventInbound(t *testing.T) {
-	inbound := []EventType{
-		EventUserMessage, EventUserInterrupt, EventUserToolConfirm,
-		EventUserCustomToolRes, EventUserToolResult, EventUserDefineOutcome,
-		EventSystemMessage,
-	}
-	for _, et := range inbound {
+	for _, et := range inboundTypes {
 		if !et.Inbound() {
 			t.Errorf("%q should be inbound", et)
 		}
@@ -40,6 +45,57 @@ func TestEventInbound(t *testing.T) {
 	for _, et := range outbound {
 		if et.Inbound() {
 			t.Errorf("%q should not be inbound", et)
+		}
+	}
+}
+
+// The table is exhaustive over the inbound set on purpose: every exclusion
+// below is load-bearing rather than a default, and the way this rots is
+// somebody "fixing" one of the three false arms to match Inbound().
+func TestEventStartsNewWork(t *testing.T) {
+	cases := []struct {
+		et   EventType
+		want bool
+		why  string
+	}{
+		{EventUserMessage, true, "the plain case: a client asked for something"},
+		{EventUserDefineOutcome, true, "the agent begins work on it immediately"},
+		{EventSystemMessage, true, "an operator reaching the session is a demand too"},
+		{EventUserToolConfirm, true, "a human just approved a gated call, and it is not " +
+			"in pendingInputTypes — without this the very next turn is refused"},
+		{EventUserToolResult, false, "on a self_hosted environment EVERY tool call comes " +
+			"back as a client POST, so resetting here would zero the counter continuously"},
+		{EventUserCustomToolRes, false, "a custom tool's answer is the same case"},
+		{EventUserInterrupt, false, "a stop is not a demand; treating it as one would let " +
+			"an operator's own stop hand the session a fresh budget"},
+	}
+	seen := map[EventType]bool{}
+	for _, c := range cases {
+		seen[c.et] = true
+		if got := c.et.StartsNewWork(); got != c.want {
+			t.Errorf("%q.StartsNewWork() = %v, want %v — %s", c.et, got, c.want, c.why)
+		}
+	}
+	// Every inbound type this package knows must be classified above, so the
+	// exclusions stay decisions rather than defaults. It catches a type dropped
+	// from the table, not one added to event.go and to neither list — nothing
+	// can enumerate the constants, so inboundTypes is the hand-kept stand-in.
+	for _, et := range inboundTypes {
+		if !seen[et] {
+			t.Errorf("inbound type %q is unclassified by this table", et)
+		}
+		if !et.Inbound() {
+			t.Errorf("%q is in inboundTypes but Inbound() says otherwise", et)
+		}
+	}
+	// Nothing the platform produces can reset a bound on the platform's own
+	// autonomy — that is the whole point of the bound.
+	for _, et := range []EventType{
+		EventAgentMessage, EventAgentToolUse, EventAgentToolResult,
+		EventSessionStatusIdle, EventSessionError,
+	} {
+		if et.StartsNewWork() {
+			t.Errorf("%q is platform-produced and must not start new work", et)
 		}
 	}
 }
