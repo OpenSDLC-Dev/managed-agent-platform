@@ -6,10 +6,11 @@ What is being worked on right now, and how far along it is — nothing else. **S
 
 **None.** The two follow-ups plan 35's closeout left are delivered: #445's sweep over
 [docs/DIVERGENCES.md](./docs/DIVERGENCES.md)'s pointers, and #447's session delegation
-bound — the one two agents messaging each other cannot escape. Four issues the sweep
-filed on the way are delivered with them: #450 and #451 (the sections state their test),
-#452 (the pointer invariant made executable), #458 (two mirrored entries converged), and
-#457 with #462 (the work API's enqueue trigger is a divergence, and says so).
+bound — the one two agents messaging each other cannot escape. Six issues that work filed
+along the way are delivered too, in four PRs: #450 and #451 (the sections state their
+test), #452 (the pointer invariant made executable), #458 (two mirrored entries
+converged), and #457 with #462 (the work API's enqueue trigger is a divergence, and says
+so).
 
 The bound's record is the registry entry; the three designs it beat, and why each was
 rejected, are in [docs/HISTORY.md](./docs/HISTORY.md).

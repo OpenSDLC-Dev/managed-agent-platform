@@ -121,7 +121,7 @@ client a name it knows attached to a quantity we do not measure and a remedy it 
 and would spend the rank #432 will want for the real thing. A coined
 `session_delegation_exhausted_error` on a plain `end_turn` is #442's precedent, one level up.
 
-**The reference negative, established rather than assumed.** Five independent sweeps — the pinned
+**The reference negative, established rather than assumed.** Four independent sweeps — the pinned
 SDK at v1.63.1, the `ant` CLI, the public docs, and an exhaustive census of every published
 numeric limit rather than a search for guessed field names — agree the reference publishes no
 bound of any kind on agent-to-agent activity. Three findings make that trustworthy: `max_uses`
