@@ -751,13 +751,14 @@ bucket, no staging upload and no Cloud Build API. `cloudbuild.yaml` remains the 
 path's build definition; keep the two saying the same thing, which is why the workflow writes
 its four tags out rather than inferring them.
 
-**One IAM grant lives outside Terraform and the manual Cloud Build path does not work
-without it.** It was made by hand and is recorded here because nothing in the repository
-would otherwise say it exists:
+**Two IAM grants live outside Terraform, and each blocks a different path when it is
+missing.** Both were made by hand and are recorded here because nothing in the repository
+would otherwise say they exist:
 
 | Grant | Scope | Why |
 | --- | --- | --- |
 | `roles/logging.logWriter` | the project | `cloudbuild.yaml` sets `options.logging: CLOUD_LOGGING_ONLY`, which is *mandatory* once a build names its own service account — with a user-specified identity the API refuses a build that would write to the default logs bucket |
+| the `mapCdRbacWriter` custom role, below | the project | the chart renders a namespaced `Role` and `RoleBinding` for the executor, and `roles/container.developer` carries only `get`/`list` on RBAC resources — so `helm upgrade` is refused the moment either object's rendered content changes |
 
 `roles/storage.admin` on the project's `_cloudbuild` staging bucket and
 `roles/serviceusage.serviceUsageConsumer` on the project were also granted to the deploy
@@ -777,8 +778,8 @@ PROJECT_NUMBER-compute@developer.gserviceaccount.com does not have storage.objec
 access to the Google Cloud Storage object. ... PROJECT_cloudbuild
 ```
 
-Reproduce the grants with (the variables come from the loader in "The deployment's
-coordinates" above; `${GCP_PROJECT_ID}` is braced in the bucket name because
+Reproduce the two Cloud Build grants with (the variables come from the loader in "The
+deployment's coordinates" above; `${GCP_PROJECT_ID}` is braced in the bucket name because
 `$GCP_PROJECT_ID_cloudbuild` would be read as one variable name that does not exist, and
 would silently address `gs://_cloudbuild`):
 
@@ -787,6 +788,110 @@ gcloud projects add-iam-policy-binding "$GCP_PROJECT_ID" \
   --member="serviceAccount:$DEPLOY_SERVICE_ACCOUNT" --role=roles/logging.logWriter
 gcloud storage buckets add-iam-policy-binding "gs://${GCP_PROJECT_ID}_cloudbuild" \
   --member="serviceAccount:$DEPLOY_SERVICE_ACCOUNT" --role=roles/storage.admin
+```
+
+### The two RBAC gates CD cannot deploy without
+
+The deploy identity holds `roles/container.developer`, which carries `get` and `list` on
+`roles` and `rolebindings` and no write verb at all. That omission is deliberate on Google's
+side: a namespaced deployer able to write RBAC objects could mint itself a Role granting more
+than it holds. This chart renders exactly such a pair —
+[`executor-rbac.yaml`](../helm/managed-agent-platform/templates/executor-rbac.yaml), carrying
+the `pods` and `pods/exec` verbs the Kubernetes sandbox provider needs — so the deploy
+identity has to be able to write them, and what lets it must be put in place by hand.
+
+**The gap is invisible until a rendered RBAC object changes**, which is what makes it worth
+writing down rather than leaving to the error message. Helm issues a PATCH only where what it
+renders differs from what it recorded, so across the 45 runs that reached the install step it
+never called the API for these two objects and never needed the permission. Releasing v0.3.0
+bumped `Chart.yaml`; `map.labels` stamps `helm.sh/chart` and `app.kubernetes.io/version` onto
+every object the chart renders, including these two; and the next 23 runs died identically:
+
+```text
+Error: UPGRADE FAILED: release map failed, and has been rolled back due to
+rollback-on-failure being set: cannot patch "map-managed-agent-platform-executor" with kind
+Role: … is forbidden: User "…" cannot patch resource "roles" in API group
+"rbac.authorization.k8s.io" in the namespace "map": requires one of
+["container.roles.update"] permission(s) in Cloud IAM …
+```
+
+This deployment met it late, and for a reason worth knowing: revision 1 was installed by hand
+by someone holding Owner, and CD only ever ran upgrades on top of it. So by the time the first
+chart change put the question, the pipeline had a long green history arguing that nothing
+about its permissions could be wrong. A pipeline that does its own first install meets the
+same wall one step earlier, at `create` rather than `patch`.
+
+**Two gates guard that write, and different systems enforce them** — which is why closing
+the first one only moves the error. Cloud IAM answers first. Kubernetes answers second, and it
+refuses to let a principal write a Role granting permissions the principal does not itself
+hold. What it holds is resolved from **RBAC objects only**: GKE's IAM permissions reach the
+API server through a separate authorization webhook the rule resolver cannot see, so an
+identity carrying every `container.pods.*` permission in Cloud IAM still counts as holding
+nothing here, and the second gate answers like this:
+
+```text
+cannot patch "map-managed-agent-platform-executor" with kind Role: … is forbidden: user "…"
+is attempting to grant RBAC permissions not currently held:
+{APIGroups:[""], Resources:["pods"], Verbs:["create" "get" "list" "delete"]}
+{APIGroups:[""], Resources:["pods/exec"], Verbs:["create"]}
+```
+
+**A custom role rather than `roles/container.admin`, and an in-cluster basis rather than
+`escalate`** — both deliberately. `container.admin` closes both gates at once, because it
+carries `container.roles.escalate` and `container.roles.bind`; but those are exactly the verbs
+that let a principal grant more than it holds, which is the entire reason
+`container.developer` withholds RBAC writes, and it brings cluster create and delete along
+with them. The pair below closes the same two gates while granting neither verb. The custom
+role answers Cloud IAM. A small Role holding just the executor's own rules, bound to the
+deploy identity, answers Kubernetes — and doubles as a reviewable ceiling, since it is the
+complete list of what CD is permitted to grant. It is not chart-managed: it is the permission
+that lets the chart be installed, so it cannot come from the chart.
+
+Keep its rules equal to the executor Role's in
+[`executor-rbac.yaml`](../helm/managed-agent-platform/templates/executor-rbac.yaml). Narrowing
+the executor Role is safe to land first; **widening it is not** — the basis is read before the
+patch is applied, so a rule the basis does not yet carry is refused, and CD goes red until a
+human adds it here. That ordering is the ceiling working as intended, not a defect.
+
+```sh
+gcloud iam roles create mapCdRbacWriter --project="$GCP_PROJECT_ID" \
+  --title="MAP CD RBAC writer" --stage=GA \
+  --permissions=container.roles.create,container.roles.update,container.roles.delete,container.roleBindings.create,container.roleBindings.update,container.roleBindings.delete
+gcloud projects add-iam-policy-binding "$GCP_PROJECT_ID" \
+  --member="serviceAccount:$DEPLOY_SERVICE_ACCOUNT" \
+  --role="projects/$GCP_PROJECT_ID/roles/mapCdRbacWriter"
+```
+
+`kubectl create role` cannot express this one: repeated `--verb` flags apply to every
+`--resource` named, which would hand `pods/exec` the three verbs it must not have and make the
+basis wider than the Role it exists to bound. So it is a manifest, and `map` is the namespace
+the workflow installs into:
+
+```sh
+kubectl apply -f - <<'YAML'
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata: { name: map-cd-deployer-rbac-basis, namespace: map }
+rules:
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["create", "get", "list", "delete"]
+  - apiGroups: [""]
+    resources: ["pods/exec"]
+    verbs: ["create"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata: { name: map-cd-deployer-rbac-basis, namespace: map }
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: map-cd-deployer-rbac-basis
+subjects:
+  - apiGroup: rbac.authorization.k8s.io
+    kind: User
+    name: cd-deployer@PROJECT.iam.gserviceaccount.com
+YAML
 ```
 
 [`staging-values.yaml`](./staging-values.yaml) is the versioned input the pipeline reads, and
