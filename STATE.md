@@ -20,5 +20,9 @@ written; #447 does, its own body admitting three designs and none obviously righ
       in the gate, its issue-state rule on a schedule; the 33 shared-tracker pointers now name
       what their own entry leaves open, and the five whose tracker had been re-scoped out from
       under them are re-pointed. Two defects the sweep surfaced are filed as #457 and #458.
+- [x] **#458** — the two entries whose text read as mirrors are converged, and each now says
+      which divergence it is the record of. The skills entry's was the deferral behind the
+      field, whose naming sentence had been deleted when slice 5 closed it; the `expires_at`
+      entry's was the refusal of a past instant that #389 lifted. Neither changes section.
 - [ ] **#447** — the session-scoped bound two agents messaging each other cannot escape.
       Design in progress; the plan file lands with the decision it records.
