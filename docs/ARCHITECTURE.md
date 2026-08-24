@@ -190,7 +190,7 @@ configured the idle tier is disarmed rather than lossy.
 ## Wire-compatibility model
 
 The public REST API mirrors Anthropic's Claude Managed Agents resource model — paths,
-JSON fields, ID prefixes (`agent_` `env_` `sesn_`/`session_` `sevt_` `work_` …),
+JSON fields, ID prefixes (`agent_` `env_` `sesn_` `sevt_` `work_` …),
 pagination and error envelopes, and the `{domain}.{action}` event taxonomy (SSE deltas
 use `content_delta`, not the Messages API's `content_block_delta`). The typed schema in
 the pinned `anthropic-sdk-go` checkout is the ground truth; client behavior comes from
