@@ -39,7 +39,7 @@ stand as proposed; no Managed Agents key is available for decision 4's recording
    catch (plan 35 decision 1's argument, unchanged). Measured cost (a scratch build on
    v1.66.0): one test line (`acceptance/dcf_test.go:54`'s `anthropic.FileMetadata` became
    `BetaFileMetadata` in v1.65.0), the live `v1.63.1` labels to advance (about forty of
-   them in the registry's evidence clauses, a handful in `verifier.md`,
+   them in the registry's evidence clauses, about ten in `verifier.md`,
    `REFERENCE_PROJECTS.md` and code comments; the historical "since v1.63.1" statements
    stay), the HISTORY record, and a citation re-read — the memory files did not move. v1.64.0 also adds a
    fourth actor variant (`service_account_actor`) this platform will never emit.
@@ -216,7 +216,7 @@ below as "spec".
   accepts and ignores `anthropic-beta` (`internal/api/doc.go`); nothing here changes that.
 - **Prefixes**: `memstore_`, `mem_`, `memver_` (SDK comments); `drm_` (dreams guide);
   cursors "a `page_...` value" (docs; the SDK treats `next_page` as opaque,
-  `pagination.go:269-278`).
+  `packages/pagination/pagination.go:269-278`).
 
 ### Documented semantics the design rests on
 
@@ -280,7 +280,7 @@ below as "spec".
 
 `sessions.resources` is wire-shaped jsonb (`0001_init.sql:80`), read by the API
 (`sessionresources.go`), the brain (`brain.go:472-517`, `files.go`, `repos.go`), the
-executor (`executor.go:858-940`) and the worker (`worker/files.go`), each decoding the
+executor (`executor.go:858-937`) and the worker (`worker/files.go`), each decoding the
 array by `type`; only `resourceID`/`checkResourceID` assume an `id`, and the list
 endpoint's cursor is built from the last element's id. The `Sandbox` interface is `ID,
 Exec, ReadFile (4 MiB cap), ReadFileStream, WriteFile, WriteFileStream, WriteFiles,
@@ -407,7 +407,7 @@ the machine lane, a `principal_` id on the identity lane. Next migration `0028`
    and collapses every non-`[a-z0-9]` run to one `-` (documented), then trims a leading
    or trailing hyphen (INFERRED — the documented rule alone would mount "(Notes)" at
    `/mnt/memory/-notes-`; whether "alphanumeric" is ASCII or Unicode is unrecorded, and
-   ASCII is chosen); a name with no alphanumerics slugs to the store id's token (ours).
+   ASCII is chosen); a name with no alphanumerics slugs to the store id's token (INFERRED — recording item 7 asks the reference).
    The slug is computed at attach time from the snapshotted name (renames change later
    sessions only — documented). `/mnt/memory` joins `reservedRepoMounts` and
    `validateRepoMountPath` refuses a repository mount below it — new code, since the
@@ -761,7 +761,7 @@ mutation duty); the matrix rows are `make test` integration tests unless marked 
 - (slice 3) `access` omitted echoes `"read_write"` (INFERRED); the element carries no
   `id` and `GET`/`DELETE …/resources/{rid}` answer 404 for it (INFERRED — the response
   unions carry the variant); the slug's hyphen trim and ASCII alphabet (INFERRED); the
-  same store twice, a slug collision and an all-symbol name are ours (INFERRED —
+  same store twice, a slug collision and an all-symbol name (INFERRED —
   unobserved); an archived store attaches with a 400 (INFERRED); a deleted store's
   attachment is tolerated and hedged (INFERRED — the files precedent); `memory_store` on
   `self_hosted` is a 400 until slice 6 (CONFIRMED, tracked by #52 with a parenthetical);
@@ -798,7 +798,7 @@ In priority order — each settles entries above:
 5. `DELETE …/memories/{id}?expected_content_sha256=<wrong>`: 409 or 412, and the type.
 6. `POST …/memory_versions/{head}/redact`: status and type.
 7. Two attached stores named "Notes" and "notes"; the same store attached twice; a store
-   named "(Notes)" and one named "Ünïcode" — the slug's trim and alphabet.
+   named "(Notes)", one named "Ünïcode" and one named "!!!" — the slug's trim, alphabet and all-symbol fallback.
 8. `GET …/memory_versions` with no `limit`: the page size; a `next_page` value's shape.
 9. Content of 102,401 bytes on create: 400 or 413.
 10. A `secret` from a real poll (redacted): its key set beyond `sessions_token`, and
