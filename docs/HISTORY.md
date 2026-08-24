@@ -2077,6 +2077,15 @@ multi-arch `release-images` (linux/amd64 + arm64), `release-chart` to OCI,
   answers the wire shape `{"data":[],"next_page":null}`. Uninstall and
   namespace deletion clean.
 
+**Amended 2026-08-24 (#425).** The one property this run did not check was link
+form, and the body it certified left 59 repo-root-relative targets across 39
+paths relative. The release page was never broken by them — github.com's
+renderer resolves such a target against the repository at the tag — but the raw
+body the REST API and mirrors serve carried them unresolved. It has been
+re-rendered from the tagged section by the post-#423 tool and replaced in place,
+so the published body is now 89,363 characters against the 85,528 recorded
+above: identical bar those 59 targets, clamped at the same group boundary.
+
 ---
 
 ## The root-owned write residue (#310) — a rejected design and five review rounds, 2026-08-06

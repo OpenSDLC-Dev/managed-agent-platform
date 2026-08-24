@@ -121,12 +121,15 @@ also runs locally, where without `PUSH=1` nothing leaves the machine:
    Keep-a-Changelog groups under GitHub's 125,000-character body cap, then
    a link to the full CHANGELOG.md section (the first cut's absorbed
    backlog exceeds the cap). The section's relative links are rewritten
-   absolute at the tag on the way out: a release body is read off the
-   release page, where a repo-root-relative target resolves against that
-   page and 404s. A link form the rewrite cannot map fails **this step**,
-   after the tag is pushed and therefore after it is immutable, and nothing
-   earlier checks link forms — which is why changelog.d/README.md asks for
-   a glance at them while the fragment is still in review.
+   absolute at the tag on the way out: github.com's release renderer does
+   resolve a repo-root-relative target against the repository at the tag,
+   so the page itself reads correctly, but the raw body the REST API and
+   mirrors serve carries no such base and its `body_html` is root-relative,
+   so the link survives only on github.com. A link form the rewrite cannot
+   map fails **this step**, after the tag is pushed and therefore after it
+   is immutable, and nothing earlier checks link forms — which is why
+   changelog.d/README.md asks for a glance at them while the fragment is
+   still in review.
 3. `make release-images PUSH=1 VERSION=X.Y.Z` — one server build
    (linux/amd64 + arm64; the build stage cross-compiles rather than
    emulating the Go toolchain) pushed as
@@ -145,6 +148,11 @@ also runs locally, where without `PUSH=1` nothing leaves the machine:
 Re-running the workflow on the same tag rebuilds equivalent artifacts from
 the same commit and converges the release, so partial-failure recovery is a
 re-run. (Equivalent, not byte-identical: the base images float and archives
-carry build timestamps.) One first-publish note: packages created by
-`GITHUB_TOKEN` start **private** — flip the four image packages and the chart
-to public once, in the org's package settings, so anonymous pulls work.
+carry build timestamps.) A release body edited in place after the fact is the
+one thing a re-run reverts rather than converges: every step runs the tooling
+as of the tagged commit, so re-running a tag from before a notes fix
+republishes the body that fix removed. v0.2.0, whose links were made absolute
+retroactively for #425, is the live case. One first-publish note: packages
+created by `GITHUB_TOKEN` start **private** — flip the four image packages
+and the chart to public once, in the org's package settings, so anonymous
+pulls work.
