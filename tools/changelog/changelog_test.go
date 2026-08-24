@@ -1,12 +1,15 @@
 package main
 
 import (
+	"errors"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 )
 
@@ -90,6 +93,53 @@ func readFile(t *testing.T, path string) string {
 		t.Fatal(err)
 	}
 	return string(b)
+}
+
+// skipIfStillWritable skips when this runner can write into dir despite the
+// 0o555 its caller just set on it. Two known runners can: root, which on Linux
+// bypasses the write bit through CAP_DAC_OVERRIDE (a capability it can also be
+// running without), and Windows, where os.Chmod only toggles the read-only
+// attribute and a directory does not honour it for its own entries. Either way
+// the refusal the caller's assertion rests on never happens, so the assertion
+// would be vacuous rather than meaningful.
+//
+// Probed rather than read off os.Geteuid or runtime.GOOS, because that list is
+// not closed and neither identity answers anyway: euid is -1 on Windows (#427),
+// and os.Stat reports the mode back as dr-xr-xr-x even where nothing enforces
+// it. So a chmod that succeeds without being enforced — some CIFS and FUSE
+// mounts — skips here instead of reddening, which is the trade #427 asked for;
+// a chmod that outright fails is still the caller's own t.Fatal.
+//
+// A refusal is what lets the assertion run; any other error is an environment
+// fault, and taking one for a refusal would run the assertion against a
+// precondition never established — which can pass for the wrong reason, because
+// the operation under test would then fail on that same fault. Hence the two
+// checks below rather than "err != nil". fs.ErrPermission is EACCES and EPERM
+// and nothing else (syscall.Errno.Is), so EROFS — a refusal Go does not
+// classify as one — is named separately; a mount that turns read-only under a
+// run is the only way dir reaches it, since t.TempDir already wrote there.
+//
+// The five euid-guarded permission-bit tests in internal/sandbox keep their
+// form: they exec /bin/bash as the subject under test, so Windows stops there
+// long before the mode matters.
+func skipIfStillWritable(t *testing.T, dir string) {
+	t.Helper()
+	probe := filepath.Join(dir, ".probe")
+	f, err := os.Create(probe)
+	if err != nil {
+		if !errors.Is(err, fs.ErrPermission) && !errors.Is(err, syscall.EROFS) {
+			t.Fatalf("probing the write denial on %s: %v", dir, err)
+		}
+		return
+	}
+	// Both best-effort: the write already answered the question, and failing the
+	// run over the tidy-up would re-create the class of spurious red this guard
+	// exists to remove. A leftover .probe is harmless — it can only exist where
+	// the create succeeded, which is where removing it is permitted too, and the
+	// caller skips before anything enumerates the directory.
+	_ = f.Close()
+	_ = os.Remove(probe)
+	t.Skip("this runner writes through a 0o555 directory, so this proves nothing")
 }
 
 // The first assembled release: fragments become KaC groups at the top of the
@@ -722,22 +772,19 @@ func TestFirstEverReleaseLinkRef(t *testing.T) {
 // A fragment directory that cannot be modified must fail BEFORE the changelog
 // is written — never a released section with fragments left behind.
 func TestAssembleStagingFailureLeavesEverythingUntouched(t *testing.T) {
-	if os.Geteuid() == 0 {
-		t.Skip("root ignores the write bit, so this proves nothing")
-	}
 	clPath, dir := writeFixture(t, steadyChangelog, map[string]string{"a.added.md": "- A.\n"})
 	// Pre-create .consumed so MkdirAll succeeds and the failure lands on the
 	// rename itself (removing a directory entry needs a writable parent).
-	// chmod-based denial needs a non-root runner: CAP_DAC_OVERRIDE makes the
-	// 0555 below inert, so the rename succeeds and the assertion is vacuous —
-	// hence the skip above, matching internal/sandbox's five prior instances.
 	if err := os.Mkdir(filepath.Join(dir, ".consumed"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.Chmod(dir, 0o555); err != nil {
 		t.Fatal(err)
 	}
+	// Registered before the skip so the mode goes back either way: t.TempDir
+	// cannot empty a directory it may not write.
 	t.Cleanup(func() { _ = os.Chmod(dir, 0o755) })
+	skipIfStillWritable(t, dir)
 	if err := runAssemble(clPath, dir, "0.3.0", "2026-09-01"); err == nil {
 		t.Fatal("want error when fragments cannot be staged")
 	}
@@ -1393,12 +1440,7 @@ func TestRunArchiveFailedArchiveWriteLeavesChangelog(t *testing.T) {
 	if err := os.Mkdir(dir, 0o555); err != nil {
 		t.Fatal(err)
 	}
-	// Root bypasses directory write permission, so the unwritable-dir
-	// precondition cannot be established there.
-	if probe, err := os.Create(filepath.Join(dir, ".probe")); err == nil {
-		probe.Close()
-		t.Skip("process writes through a 0o555 dir (running as root?)")
-	}
+	skipIfStillWritable(t, dir)
 	if err := runArchive(clPath, dir, "0.2.0"); err == nil {
 		t.Fatal("want error from an unwritable archive dir")
 	}
