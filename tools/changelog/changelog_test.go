@@ -92,6 +92,31 @@ func readFile(t *testing.T, path string) string {
 	return string(b)
 }
 
+// skipIfStillWritable skips when this runner can write into dir despite the
+// 0o555 its caller just set on it: root bypasses the write bit through
+// CAP_DAC_OVERRIDE, and on Windows os.Chmod only toggles the read-only
+// attribute, which a directory does not honour for its own entries. Either way
+// the refusal the caller's assertion rests on never happens, so the assertion
+// would be vacuous rather than meaningful.
+//
+// Probed rather than read off os.Geteuid or runtime.GOOS: euid is -1 on Windows
+// and cannot answer there (#427), and os.Stat reports the mode back as
+// dr-xr-xr-x even where nothing enforces it — only attempting the write tells
+// the truth. The five euid-guarded chmod tests in internal/sandbox keep their
+// form: they exec /bin/bash as the subject under test, so Windows stops there
+// long before the mode matters.
+func skipIfStillWritable(t *testing.T, dir string) {
+	t.Helper()
+	probe := filepath.Join(dir, ".probe")
+	f, err := os.Create(probe)
+	if err != nil {
+		return
+	}
+	f.Close()
+	_ = os.Remove(probe)
+	t.Skip("this runner writes through a 0o555 directory, so this proves nothing")
+}
+
 // The first assembled release: fragments become KaC groups at the top of the
 // new section, and the legacy [Unreleased] body follows them byte-for-byte.
 func TestAssembleFirstRelease(t *testing.T) {
@@ -722,22 +747,19 @@ func TestFirstEverReleaseLinkRef(t *testing.T) {
 // A fragment directory that cannot be modified must fail BEFORE the changelog
 // is written — never a released section with fragments left behind.
 func TestAssembleStagingFailureLeavesEverythingUntouched(t *testing.T) {
-	if os.Geteuid() == 0 {
-		t.Skip("root ignores the write bit, so this proves nothing")
-	}
 	clPath, dir := writeFixture(t, steadyChangelog, map[string]string{"a.added.md": "- A.\n"})
 	// Pre-create .consumed so MkdirAll succeeds and the failure lands on the
 	// rename itself (removing a directory entry needs a writable parent).
-	// chmod-based denial needs a non-root runner: CAP_DAC_OVERRIDE makes the
-	// 0555 below inert, so the rename succeeds and the assertion is vacuous —
-	// hence the skip above, matching internal/sandbox's five prior instances.
 	if err := os.Mkdir(filepath.Join(dir, ".consumed"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.Chmod(dir, 0o555); err != nil {
 		t.Fatal(err)
 	}
+	// Registered before the skip so the mode goes back either way: t.TempDir
+	// cannot empty a directory it may not write.
 	t.Cleanup(func() { _ = os.Chmod(dir, 0o755) })
+	skipIfStillWritable(t, dir)
 	if err := runAssemble(clPath, dir, "0.3.0", "2026-09-01"); err == nil {
 		t.Fatal("want error when fragments cannot be staged")
 	}
@@ -1393,12 +1415,7 @@ func TestRunArchiveFailedArchiveWriteLeavesChangelog(t *testing.T) {
 	if err := os.Mkdir(dir, 0o555); err != nil {
 		t.Fatal(err)
 	}
-	// Root bypasses directory write permission, so the unwritable-dir
-	// precondition cannot be established there.
-	if probe, err := os.Create(filepath.Join(dir, ".probe")); err == nil {
-		probe.Close()
-		t.Skip("process writes through a 0o555 dir (running as root?)")
-	}
+	skipIfStillWritable(t, dir)
 	if err := runArchive(clPath, dir, "0.2.0"); err == nil {
 		t.Fatal("want error from an unwritable archive dir")
 	}
