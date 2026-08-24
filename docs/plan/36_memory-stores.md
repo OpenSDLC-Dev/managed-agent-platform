@@ -38,8 +38,10 @@ stand as proposed; no Managed Agents key is available for decision 4's recording
    citing a checkout the repo refuses to read is the doc/code lag the verifier exists to
    catch (plan 35 decision 1's argument, unchanged). Measured cost (a scratch build on
    v1.66.0): one test line (`acceptance/dcf_test.go:54`'s `anthropic.FileMetadata` became
-   `BetaFileMetadata` in v1.65.0), 48 live `v1.63.1` labels to advance, the HISTORY
-   record, and a citation re-read — the memory files did not move. v1.64.0 also adds a
+   `BetaFileMetadata` in v1.65.0), the live `v1.63.1` labels to advance (about forty of
+   them in the registry's evidence clauses, a handful in `verifier.md`,
+   `REFERENCE_PROJECTS.md` and code comments; the historical "since v1.63.1" statements
+   stay), the HISTORY record, and a citation re-read — the memory files did not move. v1.64.0 also adds a
    fourth actor variant (`service_account_actor`) this platform will never emit.
    Rejected: staying on v1.63.1 and citing v1.66.0 worker behavior as "contract, not
    schema" — every worker citation would point at an unpinned HEAD, and DIVERGENCES'
@@ -493,8 +495,8 @@ the machine lane, a `principal_` id on the identity lane. Next migration `0028`
     store never sync and the next remote change overwrites them (documented for
     self-hosted; the reference cloud's filesystem-level enforcement is a divergence we
     register — a per-store read-only bind mount would be new `Spec` plumbing on both
-    backends for a guardrail the reference itself calls "a guardrail for the file tools
-    only, not a sandbox"). The executor and the worker both set the roots from the
+    backends for a guardrail the self-hosted guide itself calls "a guardrail for the file
+    tools only, not a sandbox"). The executor and the worker both set the roots from the
     session's `resources`.
 13. **Threads share the session's stores.** One sandbox per coordinator session (plan 35),
     so every thread sees the same mounts; serial tool execution across siblings keeps the
@@ -583,7 +585,7 @@ over STATE.md; **every slice lands its DIVERGENCES entries in the PR that introd
 behavior**; the last slice archives the plan and closes #52.
 
 0. **SDK bump v1.63.1→v1.66.0** (scope decision 1; the plan-05/11 ritual): pin, pairwise
-   diffs of every mirrored file, `acceptance/dcf_test.go`'s one type rename, the 48 live
+   diffs of every mirrored file, `acceptance/dcf_test.go`'s one type rename, the live `v1.63.1`
    labels advanced, the `secret` entry's evidence clause corrected in place (the v1.66.0
    worker reads it), a CONFIRMED entry for `service_account_actor` (never emitted) and
    for the v1.66.0 `AgentToolConfigUnion`/`BetaFileMetadata` renames as far as they touch
