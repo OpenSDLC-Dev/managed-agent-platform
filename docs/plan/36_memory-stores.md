@@ -1,5 +1,5 @@
 ---
-status: draft
+status: approved
 issue: "#52"
 ---
 
@@ -24,7 +24,8 @@ materialized store with writes flowing back as `session_actor` versions; and a
 the reference's `ant beta:worker poll`, which needs the per-item sessions token this plan
 starts issuing.
 
-Scope decisions, proposed 2026-08-24 (awaiting the user; the design below assumes them):
+Scope decisions, proposed 2026-08-24 and settled with the user on 2026-08-25 (all seven
+stand as proposed; no Managed Agents key is available for decision 4's recording):
 
 1. **Bump the SDK pin to v1.66.0 as slice 0.** Every memory wire type this plan mirrors
    is byte-identical between v1.63.1 and v1.66.0 (`git diff v1.63.1 v1.66.0 --
@@ -62,7 +63,7 @@ Scope decisions, proposed 2026-08-24 (awaiting the user; the design below assume
    fields. It is a model-driven feature of its own (harness references treat it as one:
    Claude Code's auto-dream and Codex's phase-2 consolidation are each a subsystem),
    sitting on top of the storage this plan builds. `/v1/dreams` stays absent (our 404),
-   registered CONFIRMED against a new `(post-v1)` issue; the `drm_` prefix is not added.
+   registered CONFIRMED against #475; the `drm_` prefix is not added.
 4. **The unrecorded behaviors go under #78 unless the user supplies a Managed Agents key.**
    Ten behaviors are stated nowhere (the recording checklist): above all the system
    prompt's "memory section" wording, which a session can only reveal by echoing it. Every
@@ -72,7 +73,7 @@ Scope decisions, proposed 2026-08-24 (awaiting the user; the design below assume
    (plan 21's precedent for outcome events, #261) — and **versions are retained without
    pruning**: the reference keeps versions 30 days "however, the recent versions are always
    kept", a rule with an unstated count; this plan retains every version and files the
-   pruning job as its own issue rather than inventing the count.
+   pruning job as #476 rather than inventing the count.
 6. **A sessions token is minted only for work items whose session attaches a store.**
    The reference says `secret` "May be populated when polling for work", and its worker
    falls back to the environment key "otherwise" (`worker.go:335-339`) — whether the
@@ -709,14 +710,13 @@ mutation duty); the matrix rows are `make test` integration tests unless marked 
 - (slice 0) `service_account_actor` never emitted (CONFIRMED, ours — no service
   accounts). The `secret` entry's evidence corrected in place: the v1.66.0 worker decodes
   it.
-- (slice 1) `/v1/dreams` absent (CONFIRMED, tracked by the new `(post-v1)` issue);
+- (slice 1) `/v1/dreams` absent (CONFIRMED, tracked by #475);
   `memory_store.*` webhooks not delivered (CONFIRMED, #261's sibling); list cursors are
   `k1|…` keyset tokens, not `page_…` (note — opaque either way); the reference's
   400-on-both-beta-headers is not mirrored (note under the existing accept-and-ignore
   rule); archived-store mutation is a 400 (INFERRED — "read-only" without a status);
   `user_actor.user_id` is a `principal_` id (CONFIRMED, ours).
-- (slice 2) versions retained without pruning (CONFIRMED, tracked by the new retention
-  issue); the path-occupancy rule and its 409 are spec-stated (a note, not a
+- (slice 2) versions retained without pruning (CONFIRMED, tracked by #476); the path-occupancy rule and its 409 are spec-stated (a note, not a
   divergence) — rename onto an ancestor/descendant path being the same 409 is INFERRED;
   delete-precondition mismatch is a 409 `memory_precondition_failed_error` (INFERRED —
   the worker accepts 409 or 412); oversized/invalid content is a 400 (INFERRED — 413
@@ -775,7 +775,7 @@ platform choices no recording can confirm or refute, and have none by design.
 ## Known consequences, not fixed here
 
 - **Version growth is unbounded** (scope decision 5): a chatty agent writing a 100 KB
-  memory every turn adds 100 KB per turn to `memory_versions`. The retention issue names
+  memory every turn adds 100 KB per turn to `memory_versions`. #476 names
   the rule to implement (30 days, newest N kept) once N is known or chosen.
 - **Cross-session freshness is one run** (scope decision 7). Two cloud sessions editing
   the same memory concurrently converge at their next runs with the store winning — the
@@ -787,7 +787,7 @@ platform choices no recording can confirm or refute, and have none by design.
   it to stdin, as the reference documents.
 - **`self_hosted` sessions with stores are refused until slice 6**, not degraded — a
   deliberate hard edge so no reference worker fails an item silently in the interim.
-- **The dreams issue inherits a design question**: a consolidation pipeline needs a model
+- **#475 (dreams) inherits a design question**: a consolidation pipeline needs a model
   binding (principle 4 — config-driven, never a hosted model), an internal agent, and a
   clone of a store; none of that is reserved here beyond the tables it would read.
 
