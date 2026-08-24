@@ -89,7 +89,7 @@ stand as proposed; no Managed Agents key is available for decision 4's recording
    sitting on top of the storage this plan builds. `/v1/dreams` stays absent (our 404),
    registered CONFIRMED against #475; the `drm_` prefix is not added.
 4. **The unrecorded behaviors go under #78 unless the user supplies a Managed Agents key.**
-   Fourteen behaviors are stated nowhere (the recording checklist): above all the system
+   Fifteen behaviors are stated nowhere (the recording checklist): above all the system
    prompt's "memory section" wording, which a session can only reveal by echoing it. Every
    one lands INFERRED against #78 with a parenthetical; a recording before slice 4 merges
    converges the entries it settles, one after lands as corrections in place.
@@ -343,9 +343,16 @@ the machine lane, a `principal_` id on the identity lane. Next migration `0028`
    path accept a shape nothing serves).
 3. **Store lifecycle follows vaults.** Archive is the idempotent `archived_at =
    COALESCE(archived_at, now())` returning the store; any mutation of an archived store —
-   update, memory create/update/delete, redact — is a 400 `"memory store %s is archived"`
+   update, memory create/update/delete — is a 400 `"memory store %s is archived"`
    (the vault rule; the reference states only "read-only"), and an archived store cannot
-   be attached (400, the `validateAttachedVaults` shape). Delete is a hard delete with
+   be attached (400, the `validateAttachedVaults` shape). **Redaction is exempt**:
+   archived means no new content, not no compliance erasure of existing content, and
+   archiving is one-way — a block would leave the whole-store hard delete as the only
+   lever, which `RoleDeveloper` holds while `RoleAdmin` could not redact one version.
+   On an archived store the head version is redactable too (nothing can supersede it),
+   and redacting it empties the `memories` row's content to `""` with the empty
+   string's sha so the memory GET stops serving the bytes (INFERRED — recording item 15
+   asks the reference). Delete is a hard delete with
    the `memory_store_deleted` tombstone, cascading memories and versions by FK. A store
    still referenced by sessions' `resources[]` may be deleted (the files precedent,
    DIVERGENCES' files entry): the element stays in the jsonb, later materialization
@@ -408,7 +415,8 @@ the machine lane, a `principal_` id on the identity lane. Next migration `0028`
    with no thread id (the shape has none; plan 35's shared sandbox makes every thread's
    write the session's). `service_account_actor` is never emitted. Redaction (RoleAdmin —
    it is a compliance action) refuses the head version of a live memory with a 400
-   (status unrecorded — INFERRED) and records `redacted_by` the same way. It is the
+   (status unrecorded — INFERRED; on an archived store the head is redactable, decision
+   3) and records `redacted_by` the same way. It is the
    **one in-place mutation** a `memory_versions` row ever takes — nulling `content`,
    `content_sha256`, `content_size_bytes` and `path`, setting `redacted_at` and
    `redacted_by` — and the immutability the introduction promises means exactly that:
@@ -749,7 +757,7 @@ mutation duty); the matrix rows are `make test` integration tests unless marked 
   `ant beta:agents create` with a v1.66.0-shaped `--tools` succeeds (CLI).
 - Slice 1: API contract tests per route — name/description/metadata bounds each a 400;
   the metadata patch (upsert, null-delete, omit-keep); `include_archived`, the inclusive
-  date bounds and keyset paging; archive idempotent, update-after-archive 400, delete
+  date bounds and keyset paging; archive idempotent, update-after-archive 400, redact-after-archive 200 (head included, the memory GET emptied), delete
   tombstone; `created_by` on both auth lanes; the 405 fallbacks; `TestEveryIdentity
   ReachableRouteDeclaresARole`. CLI: `ant beta:memory-stores create|retrieve|update|
   list|archive|delete`.
@@ -828,7 +836,8 @@ mutation duty); the matrix rows are `make test` integration tests unless marked 
   `memory_store.*` webhooks not delivered (CONFIRMED, #261's sibling); list cursors are
   `k1|…` keyset tokens, not `page_…` (note — opaque either way); the reference's
   400-on-both-beta-headers is not mirrored (note under the existing accept-and-ignore
-  rule); archived-store mutation is a 400 (INFERRED — "read-only" without a status);
+  rule); archived-store mutation is a 400 except redaction, which an archived store
+  admits on any version, head included (INFERRED — "read-only" without a status);
   `user_actor.user_id` is a `principal_` id (CONFIRMED, ours).
 - (slice 2) versions retained without pruning (CONFIRMED, tracked by #476); the path-occupancy rule and its 409 are spec-stated (a note, not a
   divergence) — rename onto an ancestor/descendant path being the same 409 is INFERRED;
@@ -891,6 +900,8 @@ In priority order — each settles entries above:
     (`/A`, `/a`, `/ä`): the order and the implied prefix; the same list with `depth=2`.
 14. A memory created at `/.anthropic-memory-store` and one at `/x/.anthropic-memory-store`:
     status of each, and what a self-hosted worker's mount shows beside its marker.
+15. `POST …/memory_versions/{vid}/redact` on an archived store, for a head and a
+    non-head version: status of each, and the memory GET's `content` afterwards.
 
 Every entry marked INFERRED above is one of two kinds, and its parenthetical says which
 (`tools/registrycheck` requires that of an entry sharing a tracker): a wire behavior one
