@@ -38,11 +38,27 @@ stand as proposed; no Managed Agents key is available for decision 4's recording
    citing a checkout the repo refuses to read is the doc/code lag the verifier exists to
    catch (plan 35 decision 1's argument, unchanged). Measured cost (a scratch build on
    v1.66.0): one test line (`acceptance/dcf_test.go:54`'s `anthropic.FileMetadata` became
-   `BetaFileMetadata` in v1.65.0), the live `v1.63.1` labels to advance (about forty of
-   them in the registry's evidence clauses, about ten in `verifier.md`,
-   `REFERENCE_PROJECTS.md` and code comments; the historical "since v1.63.1" statements
-   stay), the HISTORY record, and a citation re-read — the memory files did not move. v1.64.0 also adds a
-   fourth actor variant (`service_account_actor`) this platform will never emit.
+   `BetaFileMetadata` in v1.65.0 — the old name still compiles there as the GA Files
+   type, a different struct, so the break surfaces at the `Beta.Files.List` append
+   below it, not at the declaration), the live `v1.63.1` labels to advance (about forty
+   of them in the registry's evidence clauses, about ten in `verifier.md`,
+   `REFERENCE_PROJECTS.md`, `go.mod`/`go.sum` and code comments; the historical "since
+   v1.63.1" statements stay, and five bare `(v1.63.1)` tags on the `(no output)`
+   placeholder are rewritten to that form so they stop drifting), the HISTORY record,
+   and a citation re-read — the memory files did not move. One behavior change rides
+   with the bump: v1.66.0 splits the built-in tool config into a union whose eight
+   variants each carry a `type` discriminator beside `name` (`betaagent.go:1379-1382`
+   at v1.66.0; the SDK serializes the constant unconditionally, so every v1.66.0 client
+   sends it), which `rejectConfigKeys` (`definitions.go:323-334`) refuses today with a
+   400 — slice 0 accepts `type` when it equals `name` and renders it on the resolved
+   echo (`materialize.go:176-201`), the minimum that keeps the pinned CLI's
+   `agents create` working. The same release puts the web tools' domain lists on the
+   wire (`allowed_domains`, `blocked_domains`, `max_content_tokens`, `user_location`,
+   `betaagent.go:3745-3758, 3928-3941`), which the platform configures operator-side
+   (`WEBTOOL_ALLOWED_DOMAINS`); those keys stay refused, registered CONFIRMED with an
+   issue, and the registry's "configured by no wire field" inference is closed. v1.64.0
+   also adds a fourth actor variant (`service_account_actor`, for the reference's
+   Workload-Identity-Federated writers) this platform will never emit.
    Rejected: staying on v1.63.1 and citing v1.66.0 worker behavior as "contract, not
    schema" — every worker citation would point at an unpinned HEAD, and DIVERGENCES'
    `secret` entry (which says the reference worker "never reads the field") would keep a
@@ -611,10 +627,15 @@ behavior**; the last slice archives the plan and closes #52.
 
 0. **SDK bump v1.63.1→v1.66.0** (scope decision 1; the plan-05/11 ritual): pin, pairwise
    diffs of every mirrored file, `acceptance/dcf_test.go`'s one type rename, the live `v1.63.1`
-   labels advanced, the `secret` entry's evidence clause corrected in place (the v1.66.0
-   worker reads it), a CONFIRMED entry for `service_account_actor` (never emitted) and
-   for the v1.66.0 `AgentToolConfigUnion`/`BetaFileMetadata` renames as far as they touch
-   mirrored shapes, HISTORY record.
+   labels advanced, `type` accepted and echoed on built-in tool configs (the one behavior
+   change; a `type` that differs from `name` is a 400 — INFERRED), the web tools' wire
+   domain keys refused and registered with an issue, the `secret` entry's evidence
+   clause corrected in place (the v1.66.0 worker reads it), the web-domains inference
+   closed and the toolset-echo entry's "byte-identical" evidence rewritten, a CONFIRMED
+   entry for `service_account_actor` (never emitted by this platform) and for the
+   `BetaFileMetadata` rename as far as it touches mirrored shapes, the six `betasession.go`
+   citations in `sessionresources.go` that plan 35's bump left 86 lines stale corrected,
+   HISTORY record.
 1. **Stores** (decisions 1–3, 5, 6, 14): migration `0028_memory_stores.sql`
    (`memory_stores` only), the three prefixes, `/v1/memory_stores` create/get/update/
    list/delete/archive with the vault handler idiom, `created_by`, the metadata patch,
@@ -677,8 +698,13 @@ mutation duty); the matrix rows are `make test` integration tests unless marked 
 - Slice 0: `make verify` green in WSL on the bumped pin; the citation re-read tallied in
   the HISTORY record; the live `v1.63.1` labels advanced — `grep -n v1.63.1` over
   DIVERGENCES.md, REFERENCE_PROJECTS.md, `verifier.md` and the `.go` files finds only
-  "since v1.63.1"-style historical statements; this plan's Ground truth section keeps
-  its labels, which record what was read on 2026-08-24.
+  "since v1.63.1"-style historical statements and the registry's own bump chronicle
+  (its "v1.61.0 → v1.63.1 bump" sentences and the `api.md` drift chain, which gains a
+  link rather than losing one); this plan's Ground truth section keeps its labels, which
+  record what was read on 2026-08-24. A built-in tool config carrying `type` equal to
+  `name` is accepted and echoed with it, one differing from `name` is a 400, and one
+  carrying `allowed_domains` is a 400 naming the key — each shown red first; the pinned
+  `ant beta:agents create` with a v1.66.0-shaped `--tools` succeeds (CLI).
 - Slice 1: API contract tests per route — name/description/metadata bounds each a 400;
   the metadata patch (upsert, null-delete, omit-keep); `include_archived`, the inclusive
   date bounds and keyset paging; archive idempotent, update-after-archive 400, delete
@@ -742,9 +768,13 @@ mutation duty); the matrix rows are `make test` integration tests unless marked 
 
 ## New DIVERGENCES entries (to record as they land)
 
-- (slice 0) `service_account_actor` never emitted (CONFIRMED, ours — no service
-  accounts). The `secret` entry's evidence corrected in place: the v1.66.0 worker decodes
-  it.
+- (slice 0) `service_account_actor` never emitted by this platform (CONFIRMED, ours — no
+  service accounts); `type` on a built-in tool config accepted only when equal to `name`
+  (INFERRED); the web tools' `allowed_domains`/`blocked_domains`/`max_content_tokens`/
+  `user_location` refused with a 400 — configured operator-side (CONFIRMED, tracked by a
+  new issue); the existing web-domains entry closed (the field exists from v1.66.0) and
+  the toolset-echo entry's evidence rewritten. The `secret` entry's evidence corrected in
+  place: the v1.66.0 worker decodes it.
 - (slice 1) `/v1/dreams` absent (CONFIRMED, tracked by #475);
   `memory_store.*` webhooks not delivered (CONFIRMED, #261's sibling); list cursors are
   `k1|…` keyset tokens, not `page_…` (note — opaque either way); the reference's
