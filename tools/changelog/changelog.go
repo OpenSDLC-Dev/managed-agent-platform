@@ -501,8 +501,9 @@ func clampNotes(body, base, version string, cap int) (string, error) {
 // runNotes is the `notes` subcommand; out == "" or "-" writes to stdout. On
 // every render — not only when clamping — the section's relative links are
 // made absolute at the tag (absolutizeLinks), so a link form that cannot be
-// mapped fails the subcommand rather than the published release page. A
-// positive cap then clamps the body. Both need the repository URL, which
+// mapped fails the subcommand rather than shipping a body whose links only
+// github.com's own renderer could resolve. A positive cap then clamps the
+// body. Both need the repository URL, which
 // repoBase reads from the [Unreleased] link reference.
 func runNotes(changelogPath, version, out string, cap int) error {
 	content, err := os.ReadFile(changelogPath)
