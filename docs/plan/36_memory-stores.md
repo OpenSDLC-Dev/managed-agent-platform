@@ -67,9 +67,9 @@ stand as proposed; no Managed Agents key is available for decision 4's recording
    sitting on top of the storage this plan builds. `/v1/dreams` stays absent (our 404),
    registered CONFIRMED against #475; the `drm_` prefix is not added.
 4. **The unrecorded behaviors go under #78 unless the user supplies a Managed Agents key.**
-   Ten behaviors are stated nowhere (the recording checklist): above all the system
+   Thirteen behaviors are stated nowhere (the recording checklist): above all the system
    prompt's "memory section" wording, which a session can only reveal by echoing it. Every
-   one lands INFERRED against #78 with a parenthetical; a recording before slice 3 merges
+   one lands INFERRED against #78 with a parenthetical; a recording before slice 4 merges
    converges the entries it settles, one after lands as corrections in place.
 5. **`memory_store.*` webhooks are not delivered** — this platform delivers no webhooks
    (plan 21's precedent for outcome events, #261) — and **versions are retained without
@@ -108,8 +108,8 @@ Read at `anthropic-sdk-go` v1.63.1 with `git show v1.63.1:<file>`; the four file
 decision 1 names are byte-identical at v1.66.0, `betamemorystorememoryversion.go` differs
 only by the fourth actor, and `betasession.go`/`betadream.go` differ outside the ranges
 cited here (same-size hunks, so the line numbers hold). Official docs fetched 2026-08-24
-(`platform.claude.com/docs/en/managed-agents/memory`, `…/self-hosted-sandboxes`, and the
-`api/beta/memory_stores/**` reference pages). A fourth source sits one hop from the SDK
+(`platform.claude.com/docs/en/managed-agents/memory`, `…/self-hosted-sandboxes`,
+`…/webhooks`, and the `api/beta/memory_stores/**` reference pages). A fourth source sits one hop from the SDK
 checkout: the **OpenAPI spec the SDK is generated from**, whose URL `.stats.yml` carries
 (`storage.googleapis.com/stainless-sdk-openapi-specs/anthropic/anthropic-893a61e9….yml`
 at v1.66.0); it states three behaviors the SDK comments and the docs pages do not, quoted
@@ -347,7 +347,11 @@ the machine lane, a `principal_` id on the identity lane. Next migration `0028`
    (`golang.org/x/text/unicode/norm`, already an indirect dependency, is the one new
    direct import), ≤ 1,024 bytes; content ≤ 102,400 bytes and valid UTF-8 → 400
    otherwise (the reference has a 413 `request_too_large`; whether oversized *content*
-   is a 400 or a 413 is unrecorded — the worker treats both alike — INFERRED 400). The
+   is a 400 or a 413 is unrecorded — the worker treats both alike, `memories.go:1062` —
+   INFERRED 400; this platform's own uploads answer size with the 413 family,
+   `errors.go:19`, and memory content deliberately does not join them, because the
+   reference documents the limit as a validation rule of the memory object rather than
+   of the request — recording item 9 settles it). The
    2,001st memory → 400 `"memory store %s holds 2000 memories"`. Two new error
    constructors beside `errConflict` carry the memory-specific types; the envelope is
    `writeError`'s.
@@ -356,7 +360,8 @@ the machine lane, a `principal_` id on the identity lane. Next migration `0028`
    interleaving — INFERRED byte order); `depth=1` rolls descendants below
    `path_prefix + <first segment>/` into one `memory_prefix` item per segment, in one
    query (a `CASE` on whether the remainder after the prefix contains `/`, `DISTINCT` on
-   the rolled path), other `depth` values 400; `path_prefix` omitted means `/`; `view=full`
+   the rolled path), other `depth` values 400 (INFERRED — the spec gives the parameter
+   no bounds); `path_prefix` omitted means `/`; `view=full`
    caps `limit` at 20 silently (documented). Versions list newest-first by `(created_at,
    id)` descending, default `limit` 20 (unstated — INFERRED from the sibling lists);
    stores newest-first. Cursors are this platform's `base64url("k1|…")` keyset tokens,
@@ -386,11 +391,18 @@ the machine lane, a `principal_` id on the identity lane. Next migration `0028`
    reference's response unions carry the variant, so some handle exists there; the
    recording tries `memory_store_id` as `{rid}`); `POST …/resources` keeps its
    files-only rule; the
-   list endpoint builds its cursor from the last element *with* an id and never emits
-   one derived from a memory element (a latent paging bug the id-less element would
-   trigger). `GET /v1/sessions?memory_store_id=` becomes real: a shape-validated id and
-   `resources @> '[{"type":"memory_store","memory_store_id":$1}]'` (the
-   `fileMountedInEnvironment` precedent), no index until a list needs one.
+   list endpoint's cursor names the last element by a key every element has — the id
+   of a file or repository element, `memstore:<memory_store_id>` for a memory element
+   (unique within one session's `resources` by the same-store-twice 400) — and
+   `indexOfResource` matches either. Today's cursor is the last element's id
+   (`encodeResourceCursor(resourceID(…))`, `sessionresources.go:710`), which an id-less
+   element turns into an empty token the next page's decode refuses; building it from
+   the last *id-bearing* element instead would re-serve every memory element after it,
+   so the key is the fix, not the fallback. `GET /v1/sessions?memory_store_id=` becomes
+   real: a shape-validated id and a containment match on
+   `jsonb_build_array(jsonb_build_object('type','memory_store','memory_store_id',$1))`
+   (the `fileMountedInEnvironment` precedent, `files.go:389-390`), no index until a list
+   needs one.
 8. **Mount path.** `mount_path = "/mnt/memory/" + slug(name)` where `slug` lowercases
    and collapses every non-`[a-z0-9]` run to one `-` (documented), then trims a leading
    or trailing hyphen (INFERRED — the documented rule alone would mount "(Notes)" at
@@ -410,9 +422,13 @@ the machine lane, a `principal_` id on the identity lane. Next migration `0028`
    attributes. The wording is ours (INFERRED; the recording checklist's first item); it
    carries the five documented facts and the two documented mount rules (writes are
    persisted only under the mount path; a `read_only` store refuses writes) and nothing
-   a harness invents — the customer's `instructions` field is the extension point. Until
-   slice 6 the block renders on `cloud` sessions only (the repos-block precedent); slice
-   6 removes the gate. A store deleted after attach still renders from the snapshot,
+   a harness invents — the customer's `instructions` field is the extension point. It
+   lands in slice 4 with the directory it describes, never before: the repositories
+   block's own rule is that a block asserting a mount nothing materialized "would be a
+   false statement to the model" (`brain.go:468-471`, plan 25 decision 8), and plan 25
+   split its slices the same way (wire acceptance first, block and materialization
+   together). Until slice 6 the block renders on `cloud` sessions only (the repos-block
+   precedent); slice 6 removes the gate. A store deleted after attach still renders from the snapshot,
    suffixed with the hedge the repos block uses for a failed clone ("NOT AVAILABLE: the
    memory store no longer exists").
 10. **Cloud materialization is the files pattern, sourced from the store.** On every
@@ -425,17 +441,26 @@ the machine lane, a `principal_` id on the identity lane. Next migration `0028`
     reference keeps in-process; it lives beside the tree it describes because its
     lifetime is exactly the sandbox's (a restored checkpoint has no `/mnt/memory`, the
     reaper syncs then destroys), so it needs no table, no seeding rule and no purge. It
-    is written by root outside every store directory; under `SANDBOX_RUN_AS_USER` the
-    agent cannot alter it, and without that knob a tampered baseline is the same accepted
-    residual the files sentinel already is. A store whose marker is present and matches
+    sits outside every store directory, but the agent can reach it — both backends make
+    a batch's directories inside the sandbox as the sandbox user (`bulkwrite.go:15-27`),
+    so `.sync/` is the agent's whatever uid it runs as — and a tampered baseline is the
+    same accepted residual the files sentinel already is: the worst it does is turn the
+    agent's own writes into recorded conflicts or re-create a memory, since the wipe
+    guard and the compare-and-set (decision 11) hold whatever the baseline says, and the
+    store never loses a version. A store whose marker is present and matches
     is not re-downloaded (one `test -e` chain, the files precedent) — the sync (decision
-    11) reconciles it. Memory files are written with mode `0666` and their directories
-    `0777` so a sandbox running as a non-root uid can write what root materialized: the
-    sandbox's `FileWrite` carries no mode today and both backends fix `0644`
-    (`docker.go:1950`, `k8s.go:1907`), so `FileWrite` gains an optional `Mode`, plumbed
-    through both backends and pinned by the `sandboxtest` contract (the platform's own
-    `write`/`edit` tools reach the sandbox as root and never needed it; a `bash >>` by
-    the agent does). A missing store row is a logged, counted miss
+    11) reconciles it. Memory files are written with mode `0666`: the directories need
+    nothing (made inside the sandbox, they are the sandbox user's on both backends), but
+    the docker daemon lands a batch's *members* root-owned (`docker.go:1450-1458`), and a
+    root-owned `0644` file refuses a non-root agent's in-place `bash >>` even though the
+    file tools' rename-over succeeds — a memory edit lost only on one backend under one
+    knob. `FileWrite` carries no mode today and both backends fix `0644` (the tar header
+    docker's host-side untar restores, `bulkwrite.go:461-465`; the batch's `chmod 0644`
+    line on k8s, `bulkwrite.go:525`; `k8s.go:1907` for the single write), so `FileWrite`
+    gains an optional `Mode`, plumbed through both backends and pinned by the
+    `sandboxtest` contract. Whether `/mnt` itself takes a non-root uid is plan 25's
+    existing condition (docs/self-hosted-security.md §2: "on Docker the image still
+    decides"), unchanged here. A missing store row is a logged, counted miss
     (`memory.resolve.misses`), never a failed run: the directory is not created and the
     brain's hedge (decision 9) tells the agent.
 11. **Sync-back runs at the end of every `tool_exec` run and in the reaper, in three
@@ -594,25 +619,28 @@ behavior**; the last slice archives the plan and closes #52.
    (`memory_stores` only), the three prefixes, `/v1/memory_stores` create/get/update/
    list/delete/archive with the vault handler idiom, `created_by`, the metadata patch,
    the archived-mutation 400. `ant beta:memory-stores *` works.
-2. **Memories and versions** (decisions 1, 4–6, 14): migration `0029_memories.sql`
+2. **Memories and versions** (decisions 1, 4–6, 14, 17): migration `0029_memories.sql`
    (`memories`, `memory_versions`, the unique path index, the `(memory_store_id,
    created_at DESC, id DESC)` versions index), `internal/memsync`'s validation and slug,
    the five memory routes with `view`, precondition and `expected_content_sha256`, the
    ancestor/descendant occupancy check, the list with `path_prefix`/`depth`/prefix
    rollups, the three version routes, actors, the two error types, the 2,000 cap. `ant
-   beta:memory-stores:memories *` and `:memory-versions *` work; the CLI's own suite
-   (`TEST_API_BASE_URL=… go test ./pkg/cmd -run 'TestBetaMemoryStores'`) passes against
-   the server.
-3. **Attachment, filter and prompt** (decisions 7–9, 13): the `memory_store` arm of
+   beta:memory-stores:memories *` and `:memory-versions *` work. (The CLI's generated
+   `TestBetaMemoryStores*` suite is a client-shape check against the Prism mock with
+   placeholder ids — `betamemorystore_test.go:46` passes `memory_store_id` literally —
+   and cannot pass against a wire-correct server, so the server-side proof is the
+   recorded `ant` transcript.)
+3. **Attachment and filter** (decisions 7–8, 13): the `memory_store` arm of
    `parseResourceObject` accepted on `cloud` sessions, the snapshot and slug, the seven
-   400s, the id-less element through list/get/delete and the cursor fix, the
-   `memory_store_id` filter, `/mnt/memory` reserved against repository mounts, the brain
-   block on `cloud`, the fixture prefixes in `sessions_test.go` corrected, DIVERGENCES
-   `:43` carved down a third time and `:44` rewritten in place. Inert in the sandbox:
-   the agent is told about a directory slice 4 fills.
-4. **Cloud materialization and sync** (decisions 10–12, 17–19): `memsync`'s marker,
+   400s, the id-less element through list/get/delete and the cursor key, the
+   `memory_store_id` filter, `/mnt/memory` reserved against repository mounts, the
+   fixture prefixes in `sessions_test.go` corrected, the registry's `POST /v1/sessions
+   (create)` entry carved down a third time and its `memory_store_id` filter entry
+   rewritten in place. Inert for the agent: nothing is mounted and nothing is said to
+   the model about it until slice 4 (decision 9).
+4. **Cloud materialization, sync and prompt** (decisions 9–12, 17–19): `memsync`'s marker,
    baseline, tree hash and `Plan`, `FileWrite.Mode` on both backends and the contract
-   suite, `materializeMemory`, the three-phase run-end sync and the reaper's
+   suite, `materializeMemory`, the brain block on `cloud`, the three-phase run-end sync and the reaper's
    `Attach`-based twin, `Runner.MemoryRoots`/`ReadOnlyRoots` and the two tool refusals,
    telemetry, the two evals, an end-to-end integration test on the docker sandbox
    (attach → materialize → tool write → version row → second session sees it). This
@@ -647,8 +675,10 @@ mutation duty); the matrix rows are `make test` integration tests unless marked 
 (a probe on the live stack) or CLI (a recorded `ant` transcript).
 
 - Slice 0: `make verify` green in WSL on the bumped pin; the citation re-read tallied in
-  the HISTORY record; the registry's `v1.63.1` labels advanced (`grep` count 0 outside
-  historical records).
+  the HISTORY record; the live `v1.63.1` labels advanced — `grep -n v1.63.1` over
+  DIVERGENCES.md, REFERENCE_PROJECTS.md, `verifier.md` and the `.go` files finds only
+  "since v1.63.1"-style historical statements; this plan's Ground truth section keeps
+  its labels, which record what was read on 2026-08-24.
 - Slice 1: API contract tests per route — name/description/metadata bounds each a 400;
   the metadata patch (upsert, null-delete, omit-keep); `include_archived`, the inclusive
   date bounds and keyset paging; archive idempotent, update-after-archive 400, delete
@@ -668,18 +698,21 @@ mutation duty); the matrix rows are `make test` integration tests unless marked 
   `ant beta:memory-stores:memories` and `:memory-versions` subcommand with each of its
   flags (`--view`, `--precondition.*`, `--depth`, `--path-prefix`,
   `--expected-content-sha256`, `--operation`, `--session-id`, a piped YAML body, the
-  positional id form), recorded into HISTORY; the CLI's own `TestBetaMemoryStores*`
-  suite against the server.
+  positional id form), recorded into HISTORY.
 - Slice 3: the seven create-time 400s; the element shape (no `id`, `access` echoed,
   `mount_path` derived, snapshot survives a later rename); list paging with a memory
-  element last on a page; get/delete by rid 404; the filter's containment (a session
-  attaching two stores matches both ids; a deleted store still matches); the brain block
-  on `cloud`, absent on `self_hosted`, hedged for a deleted store; a repository mount at
+  element last on a page and one first on the next — the boundary neither repeats nor
+  skips an element; get/delete by rid 404; the filter's containment (a session
+  attaching two stores matches both ids; a deleted store still matches); no memory
+  block in the request while the attachment is inert; a repository mount at
   or below `/mnt/memory` refused. CLI: `ant beta:sessions create --resource '{type: memory_store, …}'`,
   `beta:sessions:resources list`, `beta:sessions list --memory-store-id`.
 - Slice 4: `memsync.Plan`'s nine-case matrix plus the wipe guard and the lost race; the
   `-z` tree-hash parser on a path with a newline and a backslash; a truncated listing
-  skips the store; `FileWrite.Mode` on the contract suite; materialization idempotence
+  skips the store; the brain block on `cloud`, absent on `self_hosted`, hedged for a
+  deleted store; `FileWrite.Mode` on the contract suite, and under
+  `SANDBOX_RUN_AS_USER` on the docker backend the agent's `bash >>` onto a materialized
+  file and its `bash >` creating a new one beside it both reach the store; materialization idempotence
   via the marker and the miss for a deleted store; the docker integration: a tool write →
   head + version (`session_actor`), a second session's next run sees it, a both-sides
   change takes the store's, two sessions' settles racing on one memory leave one version
@@ -722,19 +755,19 @@ mutation duty); the matrix rows are `make test` integration tests unless marked 
   divergence) — rename onto an ancestor/descendant path being the same 409 is INFERRED;
   delete-precondition mismatch is a 409 `memory_precondition_failed_error` (INFERRED —
   the worker accepts 409 or 412); oversized/invalid content is a 400 (INFERRED — 413
-  possible); memories list in byte-wise path order, `path_prefix` defaults to `/`
-  (INFERRED); versions list default `limit` 20 (INFERRED); redacting the head is a 400
-  (INFERRED).
+  possible); memories list in byte-wise path order, `path_prefix` defaults to `/`, a
+  `depth` other than 0 or 1 is a 400 (INFERRED); versions list default `limit` 20
+  (INFERRED); redacting the head is a 400 (INFERRED).
 - (slice 3) `access` omitted echoes `"read_write"` (INFERRED); the element carries no
   `id` and `GET`/`DELETE …/resources/{rid}` answer 404 for it (INFERRED — the response
   unions carry the variant); the slug's hyphen trim and ASCII alphabet (INFERRED); the
   same store twice, a slug collision and an all-symbol name are ours (INFERRED —
   unobserved); an archived store attaches with a 400 (INFERRED); a deleted store's
-  attachment is tolerated and hedged (INFERRED — the files precedent); the memory block's
-  wording and placement (INFERRED); `memory_store` on `self_hosted` is a 400 until slice
-  6 (CONFIRMED, tracked by #52 with a parenthetical); the `memory_store_id` filter entry
-  rewritten in place.
-- (slice 4) sync at the run boundary rather than a live mount — cross-session visibility
+  attachment is tolerated and hedged (INFERRED — the files precedent); `memory_store` on
+  `self_hosted` is a 400 until slice 6 (CONFIRMED, tracked by #52 with a parenthetical);
+  the `memory_store_id` filter entry rewritten in place.
+- (slice 4) the memory block's wording and placement (INFERRED); sync at the run
+  boundary rather than a live mount — cross-session visibility
   is one run, not "almost immediately", and a `bash` write to a read-only store is
   unsynced rather than refused at the filesystem (CONFIRMED, ours); no delete
   corroboration window, no per-sync delete cap and no deletions mode — the wipe guard
@@ -770,9 +803,20 @@ In priority order — each settles entries above:
 9. Content of 102,401 bytes on create: 400 or 413.
 10. A `secret` from a real poll (redacted): its key set beyond `sessions_token`, and
     whether a storeless session's item carries one at all.
+11. `POST /v1/memory_stores/{archived}` with a new name, and a session create attaching
+    an archived store: status and type of each.
+12. A session whose store is deleted after attach: the session GET's element, and the
+    next run's prompt if one is observable.
+13. `GET …/memories` with no `path_prefix` over paths that differ in case and script
+    (`/A`, `/a`, `/ä`): the order and the implied prefix; the same list with `depth=2`.
 
-Every entry marked INFERRED above maps to one of these items; entries marked *ours* are
-platform choices no recording can confirm or refute, and have none by design.
+Every entry marked INFERRED above is one of two kinds, and its parenthetical says which
+(`tools/registrycheck` requires that of an entry sharing a tracker): a wire behavior one
+of these items records, or a reading of the reference worker's code that a recording
+against the platform cannot reach — the 409-or-412 arms, the token per item, the
+admission matrix, the environment key's refusal on memory routes (the worker's client
+sends the token there, never the key). Entries marked *ours* are platform choices no
+recording can confirm or refute, and have no item by design.
 
 ## Known consequences, not fixed here
 
