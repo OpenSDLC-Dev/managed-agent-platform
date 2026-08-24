@@ -2,8 +2,9 @@
 // `assemble` folds the changelog.d/ fragments — plus any legacy [Unreleased]
 // body — into a new dated section of CHANGELOG.md, `notes` extracts a
 // released section's body for GitHub Release notes — rewriting its relative
-// links absolute at the tag, since that body is read off the release page
-// rather than from the repository — and `archive` moves a
+// links absolute at the tag, since that body is also served raw, where
+// nothing supplies the repository base github.com's own renderer applies on
+// the release page — and `archive` moves a
 // released section to docs/changelog/<version>.md behind an index stub,
 // post-release — byte-reversibly: relative links are re-based for the new
 // location and the inverse rewrite must reproduce the moved section. The ritual that runs them is docs/RELEASING.md; the
@@ -670,10 +671,14 @@ func repoBase(content string) string {
 }
 
 // absolutizeLinks rewrites a notes body's relative link targets to absolute
-// URLs at the release tag. The notes become a GitHub Release body, where a
-// repo-root-relative target resolves against the release page rather than the
-// repository and 404s — which is why clampNotes already writes its own
-// trailer absolute. The two forms changelog.d/README.md permits are the two
+// URLs at the release tag. The notes become a GitHub Release body, and
+// github.com's own renderer does resolve a repo-root-relative target there
+// against the repository at the tag, so the release page reads correctly. The
+// raw body does not: the REST API, `gh release view` and mirrors serve it with
+// no such base, and the API's body_html is root-relative — which is why
+// clampNotes already writes its own trailer absolute. The rewrite is what
+// makes the published body self-contained rather than dependent on the one
+// renderer that supplies the base. The two forms changelog.d/README.md permits are the two
 // mapped here; any other relative destination it sees is refused rather than
 // published broken, the same bargain rebaseLinks makes for docs/changelog/,
 // and so is one it could map but has no [Unreleased] reference to build a
@@ -717,7 +722,8 @@ func absolutizeLinks(section []string, fenced []bool, base, version string) ([]s
 		rewrite := func(ds, de int) error {
 			dest := l[ds:de]
 			// An empty destination has nothing to resolve, and `#anchor` and
-			// absolute targets already read correctly off the release page.
+			// absolute targets already read correctly wherever the body is
+			// served, which is exactly what the rewrite buys the rest.
 			if dest == "" || strings.HasPrefix(dest, "#") || linkSchemeRe.MatchString(dest) {
 				return nil
 			}

@@ -148,11 +148,12 @@ also runs locally, where without `PUSH=1` nothing leaves the machine:
 Re-running the workflow on the same tag rebuilds equivalent artifacts from
 the same commit and converges the release, so partial-failure recovery is a
 re-run. (Equivalent, not byte-identical: the base images float and archives
-carry build timestamps.) A release body edited in place after the fact is the
-one thing a re-run reverts rather than converges: every step runs the tooling
-as of the tagged commit, so re-running a tag from before a notes fix
-republishes the body that fix removed. v0.2.0, whose links were made absolute
-retroactively for #425, is the live case. One first-publish note: packages
+carry build timestamps.) What it converges *to* is the tagged commit's own
+output, so it reverts rather than preserves whatever was edited in place
+afterwards — notes and title, the draft flag, and the assets it re-uploads
+with `--clobber`. For a tag from before a notes fix that means republishing
+the body the fix removed: v0.2.0, whose links were made absolute retroactively
+for #425, is the live case. One first-publish note: packages
 created by `GITHUB_TOKEN` start **private** — flip the four image packages
 and the chart to public once, in the org's package settings, so anonymous
 pulls work.

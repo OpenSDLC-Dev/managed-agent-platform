@@ -1,4 +1,5 @@
-- **Release notes link into the repository, not off the release page** — `make changelog-notes`
+- **Release notes link into the repository at the tag, for readers of the raw body** — `make
+  changelog-notes`
   copied the changelog section verbatim, leaving every repo-root-relative target relative in the
   published body. github.com's release renderer resolves those against the repository at the tag,
   so the page reads correctly — but the raw body is what the REST API, `gh release view` and
