@@ -1,6 +1,8 @@
 package main
 
 import (
+	"errors"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -93,16 +95,27 @@ func readFile(t *testing.T, path string) string {
 }
 
 // skipIfStillWritable skips when this runner can write into dir despite the
-// 0o555 its caller just set on it: root bypasses the write bit through
-// CAP_DAC_OVERRIDE, and on Windows os.Chmod only toggles the read-only
-// attribute, which a directory does not honour for its own entries. Either way
+// 0o555 its caller just set on it. Two known runners can: root, which on Linux
+// bypasses the write bit through CAP_DAC_OVERRIDE (a capability it can also be
+// running without), and Windows, where os.Chmod only toggles the read-only
+// attribute and a directory does not honour it for its own entries. Either way
 // the refusal the caller's assertion rests on never happens, so the assertion
 // would be vacuous rather than meaningful.
 //
-// Probed rather than read off os.Geteuid or runtime.GOOS: euid is -1 on Windows
-// and cannot answer there (#427), and os.Stat reports the mode back as
-// dr-xr-xr-x even where nothing enforces it — only attempting the write tells
-// the truth. The five euid-guarded chmod tests in internal/sandbox keep their
+// Probed rather than read off os.Geteuid or runtime.GOOS, because that list is
+// not closed and neither identity answers anyway: euid is -1 on Windows (#427),
+// and os.Stat reports the mode back as dr-xr-xr-x even where nothing enforces
+// it. So a chmod that succeeds without being enforced — some CIFS and FUSE
+// mounts — skips here instead of reddening, which is the trade #427 asked for;
+// a chmod that outright fails is still the caller's own t.Fatal.
+//
+// Only fs.ErrPermission means the denial took hold (EACCES, EPERM and EROFS all
+// satisfy it). Any other error is an environment fault, and accepting it as a
+// denial would run the assertion against a precondition never established —
+// which can pass for the wrong reason, since the operation under test would
+// then fail on that same fault.
+//
+// The five euid-guarded permission-bit tests in internal/sandbox keep their
 // form: they exec /bin/bash as the subject under test, so Windows stops there
 // long before the mode matters.
 func skipIfStillWritable(t *testing.T, dir string) {
@@ -110,6 +123,9 @@ func skipIfStillWritable(t *testing.T, dir string) {
 	probe := filepath.Join(dir, ".probe")
 	f, err := os.Create(probe)
 	if err != nil {
+		if !errors.Is(err, fs.ErrPermission) {
+			t.Fatalf("probing the write denial on %s: %v", dir, err)
+		}
 		return
 	}
 	f.Close()
