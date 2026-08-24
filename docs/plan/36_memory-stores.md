@@ -30,7 +30,10 @@ stand as proposed; no Managed Agents key is available for decision 4's recording
 1. **Bump the SDK pin to v1.66.0 as slice 0.** Every memory wire type this plan mirrors
    is byte-identical between v1.63.1 and v1.66.0 (`git diff v1.63.1 v1.66.0 --
    betamemorystore.go betamemorystorememory.go betasessionresource.go
-   betaenvironmentwork.go` is empty), so the *schema* needs no bump. What only v1.66.0
+   betaenvironmentwork.go` is empty) except the version type, whose only change is
+   v1.64.0's fourth actor and its `service_account_id` list filter — an arm this
+   platform never emits and a filter it does not implement — so the *schema* needs no
+   bump. What only v1.66.0
    holds is the **reference worker's memory behavior** — `lib/environments/memories.go`
    (the download/sync engine), the `secret` → `sessions_token` decoding in
    `lib/environments/worker.go`, and the file tools' `AllowedRoots`/`ReadOnlyRoots` — the
@@ -47,12 +50,15 @@ stand as proposed; no Managed Agents key is available for decision 4's recording
    placeholder are rewritten to that form so they stop drifting), the HISTORY record,
    and a citation re-read — the memory files did not move. One behavior change rides
    with the bump: v1.66.0 splits the built-in tool config into a union whose eight
-   variants each carry a `type` discriminator beside `name` (`betaagent.go:1379-1382`
-   at v1.66.0; the SDK serializes the constant unconditionally, so every v1.66.0 client
-   sends it), which `rejectConfigKeys` (`definitions.go:323-334`) refuses today with a
-   400 — slice 0 accepts `type` when it equals `name` and renders it on the resolved
-   echo (`materialize.go:176-201`), the minimum that keeps the pinned CLI's
-   `agents create` working. The same release puts the web tools' domain lists on the
+   variants each carry a `type` discriminator beside `name` — required on the response
+   (`betaagent.go:1379-1382` at v1.66.0), optional on the request (`json:"type,omitzero"`,
+   `:1474`; the spec requires only `name`), so a v1.66.0 client *may* send it — the SDK's
+   own generated example does, and the `ant` CLI passes `--tool` JSON through raw, so
+   it sends `type` whenever the operator's value carries it — and `rejectConfigKeys`
+   (`definitions.go:323-334`) answers with a 400 today. Slice 0 accepts `type` when it
+   equals `name` and renders it on the resolved echo unconditionally, request or no
+   request (`materialize.go:176-201`; the response schema requires it), the minimum that
+   keeps a v1.66.0-shaped `agents create` working. The same release puts the web tools' domain lists on the
    wire (`allowed_domains`, `blocked_domains`, `max_content_tokens`, `user_location`,
    `betaagent.go:3745-3758, 3928-3941`), which the platform configures operator-side
    (`WEBTOOL_ALLOWED_DOMAINS`); those keys stay refused, registered CONFIRMED with an
@@ -378,7 +384,12 @@ the machine lane, a `principal_` id on the identity lane. Next migration `0028`
    `writeError`'s.
 5. **Listing.** Memories list in byte-wise path order with a keyset cursor on `path`
    (the reference says "a stable, server-defined order" and "path order" for the
-   interleaving — INFERRED byte order), the `path_prefix` match a literal
+   interleaving — INFERRED byte order); byte order is spelled `COLLATE "C"` on the
+   `path` column, its unique index, the `ORDER BY` and the cursor's `path > $1` — the
+   compose and Helm `postgres:16-alpine` databases report `en_US.utf8`, which musl
+   happens to sort as bytes, but Cloud SQL's glibc `en_US.UTF8` does not, and the
+   executor already pins `LC_ALL=C` on the shell side for the same reason
+   (`harvest.go:45-49`); the `path_prefix` match is a literal
    `left(path, length($1)) = $1` like decision 4's; `depth=1` rolls descendants below
    `path_prefix + <first segment>/` into one `memory_prefix` item per segment, in one
    query (a `CASE` on whether the remainder after the prefix contains `/`, `DISTINCT` on
@@ -397,7 +408,11 @@ the machine lane, a `principal_` id on the identity lane. Next migration `0028`
    with no thread id (the shape has none; plan 35's shared sandbox makes every thread's
    write the session's). `service_account_actor` is never emitted. Redaction (RoleAdmin —
    it is a compliance action) refuses the head version of a live memory with a 400
-   (status unrecorded — INFERRED) and records `redacted_by` the same way.
+   (status unrecorded — INFERRED) and records `redacted_by` the same way. It is the
+   **one in-place mutation** a `memory_versions` row ever takes — nulling `content`,
+   `content_sha256`, `content_size_bytes` and `path`, setting `redacted_at` and
+   `redacted_by` — and the immutability the introduction promises means exactly that:
+   no other statement updates or deletes a version row while its store exists.
 7. **The attachment element has no id.** A `memory_store` element in `sessions.resources`
    is `{type, memory_store_id, access, instructions, name, description, mount_path}` —
    the response variant verbatim, `name`/`description`/`mount_path` snapshotted in the
@@ -488,9 +503,13 @@ the machine lane, a `principal_` id on the identity lane. Next migration `0028`
 11. **Sync-back runs at the end of every `tool_exec` run and in the reaper, in three
     phases around the results transaction.** *Read* (before `commitResults`, no lock
     held): for each attached store, one `Exec` — `cd <mount> && find . -type f ! -path
-    ./.anthropic-memory-store -print0 | sort -z | xargs -0r sha256sum -z` (coreutils the
-    images already provide, as `tar`/`test` are; `-z` so a path's bytes arrive verbatim
-    instead of `sha256sum`'s backslash escaping; `-path`, not `-name`, so only the root
+    ./.anthropic-memory-store -print0 | LC_ALL=C sort -z | xargs -0r sha256sum -z` (GNU
+    coreutils, which the default `debian:stable-slim` image provides as it does
+    `tar`/`test` — BusyBox's `sha256sum` has no `-z`, so an alpine image skips the
+    store's sync with a warning at the first run rather than misparsing; `-z` so a
+    path's bytes arrive verbatim instead of `sha256sum`'s backslash escaping, and the
+    parser reads the listing as a set, so the sort order is a convenience for logs
+    only; `-path`, not `-name`, so only the root
     marker is excluded and a memory of that basename in a subdirectory still syncs;
     `-r` so a marker-only mount — the wiped tree the guard exists for — hashes to an
     empty tree instead of `sha256sum` hashing stdin under the name `-`, which would read
@@ -539,7 +558,10 @@ the machine lane, a `principal_` id on the identity lane. Next migration `0028`
 12. **`read_only` on cloud is enforced by the file tools, exactly as the reference's own
     worker enforces it.** `toolset.Runner` gains `MemoryRoots` (every attached store's
     directory) and `ReadOnlyRoots` (the `read_only` subset — the reference worker's
-    `AllowedRoots`/`ReadOnlyRoots` split): `write` and `edit` refuse a path inside a
+    `AllowedRoots`/`ReadOnlyRoots` split — plus every store whose row is archived when
+    the run's materialization resolves it: archiving makes a store read-only, and a
+    write the sync could only discard is refused up front; a store archived mid-run is
+    caught at settle, which re-reads `archived_at` and pulls only): `write` and `edit` refuse a path inside a
     read-only root with the reference worker's wording ("%s is inside read-only directory
     %s") and any path under `/mnt/memory` outside every memory root ("writes to any other
     path under `/mnt/memory/` fail"); `bash` stays unconfined, its writes to a read-only
@@ -561,9 +583,14 @@ the machine lane, a `principal_` id on the identity lane. Next migration `0028`
     `gatetoken`'s `Mint`/`hashToken` made prefix-parameterized and exported, so the
     32-random-byte Crockford base32 value and its `sha256` are one implementation, not
     two; the prefix stays outside `knownPrefixes` as `gtk_` does — and inserts
-    `work_session_tokens (id, work_id, session_id, token_hash, created_at)` in the
-    statement after `Poll` (which is one autocommit `QueryRow`, not a transaction),
-    superseding any earlier row for the session; `secret = base64url(JSON
+    `work_session_tokens (id, work_id, session_id, token_hash, created_at)` **in the
+    same transaction as the claim**: the poll handler opens a `pgx.Tx`, `Poll`'s one
+    statement runs on it (today it is an autocommit `QueryRow` on the pool; the
+    `Queue` gains a transaction-taking variant with the SQL unchanged), the token row is
+    inserted beside it, and a failed insert rolls the claim back — an item is never
+    leased without the credential its worker needs. A later row for the same session is
+    a plain insert with no retry logic: the earlier one is dead by the join conditions
+    below, since its `work_id` no longer matches a live item; `secret = base64url(JSON
     {"sessions_token": "<wtk_…>"})` renders **on that poll response only**, every other
     path keeping `null` ("null on all other retrieval paths"). `work_id` is **not** a
     foreign key: `Poll` rewrites a work item's id on every re-hand-out (#62), and no table
@@ -762,7 +789,8 @@ mutation duty); the matrix rows are `make test` integration tests unless marked 
   deletes nothing, a failed apply is retried by the next sync, a refused file is
   attempted once until it changes, a read-only store's `write`/`edit` refusal wording,
   a `bash` write to a read-only store never syncs and is overwritten by the next remote
-  change, writes under `/mnt/memory` outside a store refused, the reaper's sync before
+  change, a store archived between two runs refuses `write`/`edit` at the next run and
+  its sync pulls only, writes under `/mnt/memory` outside a store refused, the reaper's sync before
   destroy through `Attach`, a run under `SANDBOX_RUN_AS_USER` can `bash >>` into a file
   root materialized, the restored checkpoint re-materializes; 🔍 both evals opt-in
   green; the telemetry rows.
@@ -773,7 +801,8 @@ mutation duty); the matrix rows are `make test` integration tests unless marked 
   env key refused on the memory routes with a 401, a management key admitted); a token
   scoped to one item's session cannot read a sibling session in the same environment;
   the join conditions — after stop, after lease expiry, after session archive the token
-  401s, and ack does not disturb it; `secret` non-null on poll only, null for a storeless
+  401s, and ack does not disturb it; a token insert made to fail leaves the item
+  unclaimed and the poll a 500 (fault injection on the insert); `secret` non-null on poll only, null for a storeless
   session; the v1.66.0 SDK worker's first heartbeat with the token succeeds (a test built
   on the SDK's `EnvironmentWorker` against the in-process server).
 - Slice 6: the worker integration (download → tool write → upload with precondition →
