@@ -83,7 +83,7 @@ stand as proposed; no Managed Agents key is available for decision 4's recording
    sitting on top of the storage this plan builds. `/v1/dreams` stays absent (our 404),
    registered CONFIRMED against #475; the `drm_` prefix is not added.
 4. **The unrecorded behaviors go under #78 unless the user supplies a Managed Agents key.**
-   Thirteen behaviors are stated nowhere (the recording checklist): above all the system
+   Fourteen behaviors are stated nowhere (the recording checklist): above all the system
    prompt's "memory section" wording, which a session can only reveal by echoing it. Every
    one lands INFERRED against #78 with a parenthetical; a recording before slice 4 merges
    converges the entries it settles, one after lands as corrections in place.
@@ -348,8 +348,10 @@ the machine lane, a `principal_` id on the identity lane. Next migration `0028`
    delete handler and would pin a store to every archived session that ever mounted it.
 4. **Memory writes are one transaction: head row + version row.** A path is occupied
    when a memory exists at it **or at an ancestor or descendant of it** — `/a` and
-   `/a/b` cannot both be files — so create and rename check `path = $1 OR path LIKE $1 ||
-   '/%' OR $1 LIKE path || '/%'` (the unique index alone catches only equality) and
+   `/a/b` cannot both be files — so create and rename check `path = $1 OR left(path,
+   length($1) + 1) = $1 || '/' OR left($1, length(path) + 1) = path || '/'` (the unique
+   index alone catches only equality; never `LIKE` — `_` and `%` are legal path bytes,
+   and a pattern would make `/acb/x` occupy `/a_b`) and
    answer 409 `memory_path_conflict_error {conflicting_memory_id, conflicting_path}`
    (spec-stated for create at an occupied path and rename onto another memory's path;
    rename onto an ancestor/descendant is INFERRED to be the same). Update with a
@@ -361,7 +363,10 @@ the machine lane, a `principal_` id on the identity lane. Next migration `0028`
    version and returns the head (spec). Path validation: leading `/`, ≥ 1 non-empty segment, no `.`/`..`
    segments, no control or format characters (Unicode `Cc`/`Cf`), NFC-normalized
    (`golang.org/x/text/unicode/norm`, already an indirect dependency, is the one new
-   direct import), ≤ 1,024 bytes; content ≤ 102,400 bytes and valid UTF-8 → 400
+   direct import), ≤ 1,024 bytes, and not `/.anthropic-memory-store` — the path the
+   marker (decision 10) occupies in every mount, so a memory there would overwrite it or
+   be overwritten (400; INFERRED — recording item 14 asks what the reference does with
+   it); content ≤ 102,400 bytes and valid UTF-8 → 400
    otherwise (the reference has a 413 `request_too_large`; whether oversized *content*
    is a 400 or a 413 is unrecorded — the worker treats both alike, `memories.go:1062` —
    INFERRED 400; this platform's own uploads answer size with the 413 family,
@@ -373,7 +378,8 @@ the machine lane, a `principal_` id on the identity lane. Next migration `0028`
    `writeError`'s.
 5. **Listing.** Memories list in byte-wise path order with a keyset cursor on `path`
    (the reference says "a stable, server-defined order" and "path order" for the
-   interleaving — INFERRED byte order); `depth=1` rolls descendants below
+   interleaving — INFERRED byte order), the `path_prefix` match a literal
+   `left(path, length($1)) = $1` like decision 4's; `depth=1` rolls descendants below
    `path_prefix + <first segment>/` into one `memory_prefix` item per segment, in one
    query (a `CASE` on whether the remainder after the prefix contains `/`, `DISTINCT` on
    the rolled path), other `depth` values 400 (INFERRED — the spec gives the parameter
@@ -481,10 +487,14 @@ the machine lane, a `principal_` id on the identity lane. Next migration `0028`
     brain's hedge (decision 9) tells the agent.
 11. **Sync-back runs at the end of every `tool_exec` run and in the reaper, in three
     phases around the results transaction.** *Read* (before `commitResults`, no lock
-    held): for each attached store, one `Exec` — `cd <mount> && find . -type f ! -name
-    .anthropic-memory-store -print0 | sort -z | xargs -0 sha256sum -z` (coreutils the
+    held): for each attached store, one `Exec` — `cd <mount> && find . -type f ! -path
+    ./.anthropic-memory-store -print0 | sort -z | xargs -0r sha256sum -z` (coreutils the
     images already provide, as `tar`/`test` are; `-z` so a path's bytes arrive verbatim
-    instead of `sha256sum`'s backslash escaping) — gives the local tree, the baseline
+    instead of `sha256sum`'s backslash escaping; `-path`, not `-name`, so only the root
+    marker is excluded and a memory of that basename in a subdirectory still syncs;
+    `-r` so a marker-only mount — the wiped tree the guard exists for — hashes to an
+    empty tree instead of `sha256sum` hashing stdin under the name `-`, which would read
+    as one local file and turn the guarded wipe into per-file deletions) — gives the local tree, the baseline
     file gives the last-synced state, and `ReadFile` fetches every locally changed file;
     a result with `ExecResult.Truncated` set (2,000 maximal paths can pass
     `MaxOutputBytes`) skips that store's sync with a warning rather than reading the
@@ -714,7 +724,10 @@ mutation duty); the matrix rows are `make test` integration tests unless marked 
 - Slice 2: path validation table (each documented rejection its own case, an NFD path
   among them); content bounds and UTF-8; `view` defaults per endpoint and the `full` cap;
   `depth=1` rollups interleaved in path order across a page boundary; `path_prefix`
-  segment alignment (`/notes/` excludes `/notes-archive/`); occupancy — create at `/a`
+  segment alignment (`/notes/` excludes `/notes-archive/`) and literal metacharacters
+  (`/a_b` neither matches nor is occupied by `/acb/x`; a prefix of `/100%` lists
+  `/100%/x` only); the marker path refused with a 400 and `/x/.anthropic-memory-store`
+  accepted; occupancy — create at `/a`
   with `/a/b` present, create at `/a/b` with `/a` present, rename onto each, all 409;
   an update with neither field 400; precondition 409 and the 200 short-circuit; the
   no-op update writes no version; rename-only appends `modified`; delete precondition
@@ -734,7 +747,9 @@ mutation duty); the matrix rows are `make test` integration tests unless marked 
   or below `/mnt/memory` refused. CLI: `ant beta:sessions create --resource '{type: memory_store, …}'`,
   `beta:sessions:resources list`, `beta:sessions list --memory-store-id`.
 - Slice 4: `memsync.Plan`'s nine-case matrix plus the wipe guard and the lost race; the
-  `-z` tree-hash parser on a path with a newline and a backslash; a truncated listing
+  `-z` tree-hash parser on a path with a newline and a backslash; a marker-only mount
+  hashes to an empty tree and the wipe guard holds (shown red without `-r`); a memory
+  at `/x/.anthropic-memory-store` is hashed, the root marker is not; a truncated listing
   skips the store; the brain block on `cloud`, absent on `self_hosted`, hedged for a
   deleted store; `FileWrite.Mode` on the contract suite, and under
   `SANDBOX_RUN_AS_USER` on the docker backend the agent's `bash >>` onto a materialized
@@ -786,7 +801,8 @@ mutation duty); the matrix rows are `make test` integration tests unless marked 
   delete-precondition mismatch is a 409 `memory_precondition_failed_error` (INFERRED —
   the worker accepts 409 or 412); oversized/invalid content is a 400 (INFERRED — 413
   possible); memories list in byte-wise path order, `path_prefix` defaults to `/`, a
-  `depth` other than 0 or 1 is a 400 (INFERRED); versions list default `limit` 20
+  `depth` other than 0 or 1 is a 400 (INFERRED); a memory at the marker's path
+  `/.anthropic-memory-store` is a 400 (INFERRED); versions list default `limit` 20
   (INFERRED); redacting the head is a 400 (INFERRED).
 - (slice 3) `access` omitted echoes `"read_write"` (INFERRED); the element carries no
   `id` and `GET`/`DELETE …/resources/{rid}` answer 404 for it (INFERRED — the response
@@ -839,6 +855,8 @@ In priority order — each settles entries above:
     next run's prompt if one is observable.
 13. `GET …/memories` with no `path_prefix` over paths that differ in case and script
     (`/A`, `/a`, `/ä`): the order and the implied prefix; the same list with `depth=2`.
+14. A memory created at `/.anthropic-memory-store` and one at `/x/.anthropic-memory-store`:
+    status of each, and what a self-hosted worker's mount shows beside its marker.
 
 Every entry marked INFERRED above is one of two kinds, and its parenthetical says which
 (`tools/registrycheck` requires that of an entry sharing a tracker): a wire behavior one
