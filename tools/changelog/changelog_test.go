@@ -980,10 +980,12 @@ func TestNotes(t *testing.T) {
 	}
 }
 
-// The notes become a GitHub Release body, where a repo-root-relative target
-// resolves against the release page and 404s. Both forms the fragment rules
-// permit are rewritten to an absolute blob URL at the tag — the same job
-// rebaseLinks does for docs/changelog/, which the notes path never had.
+// The notes become a GitHub Release body. github.com's renderer resolves a
+// repo-root-relative target there against the repository at the tag, but the
+// raw body the REST API and mirrors serve carries no such base. Both forms
+// the fragment rules permit are rewritten to an absolute blob URL at the tag
+// — the same job rebaseLinks does for docs/changelog/, which the notes path
+// never had.
 func TestNotesAbsolutizesRelativeLinks(t *testing.T) {
 	cl := "# Changelog\n\n## [Unreleased]\n\n" + unreleasedPointer + `
 
@@ -1025,7 +1027,7 @@ func TestNotesAbsolutizesRelativeLinks(t *testing.T) {
 }
 
 // A relative target the rewrite has no mapping for must fail the notes rather
-// than ship a link that 404s from the release page.
+// than ship a link only github.com's own renderer could resolve.
 func TestNotesRefusesUnmappedRelativeLink(t *testing.T) {
 	cl := "# Changelog\n\n## [Unreleased]\n\n" + unreleasedPointer + `
 

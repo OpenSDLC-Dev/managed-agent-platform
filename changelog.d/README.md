@@ -46,13 +46,15 @@ it in — so an over-long fragment is a paragraph the project maintains forever.
 **Links:** a relative target must be written `](./…)` from the repo root, or
 `](docs/…)`. Those are the only two forms the tooling can rewrite, and it
 rewrites them twice over: `make changelog-notes` makes them absolute at the
-tag, because a release body is read off the release page where a
-repo-root-relative target 404s, and the post-release `make changelog-archive`
-re-bases them when the section moves down to docs/changelog/. Every other
-relative form — `](../…)` and bare `](deploy/…)` alike — is refused rather
-than guessed at, by `absolutizeLinks` and `rebaseLinks` respectively. Absolute
-URLs and `#anchor` targets are always fine, and a link-reference definition
-(`[label]: docs/…`) follows the same rules as an inline target.
+tag, because the release body is also served raw — by the REST API, by `gh
+release view`, by mirrors — where nothing supplies the repository base that
+github.com's own renderer applies on the release page, and the post-release
+`make changelog-archive` re-bases them when the section moves down to
+docs/changelog/. Every other relative form — `](../…)` and bare `](deploy/…)`
+alike — is refused rather than guessed at, by `absolutizeLinks` and
+`rebaseLinks` respectively. Absolute URLs and `#anchor` targets are always
+fine, and a link-reference definition (`[label]: docs/…`) follows the same
+rules as an inline target.
 
 **A bad form now fails the tagged release run**, not merely a later archive:
 `changelog-notes` is the first thing `release.yml` renders after the tag is

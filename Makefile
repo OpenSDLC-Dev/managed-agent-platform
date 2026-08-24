@@ -114,8 +114,9 @@ eval:
 # changelog.d/README.md). NOT part of `verify`: `changelog` rewrites
 # CHANGELOG.md, which only a release PR does, `changelog-notes` exists for
 # the release workflow to extract a section as GitHub Release notes — with
-# its relative links rewritten absolute at the tag, since that body is read
-# off the release page — and
+# its relative links rewritten absolute at the tag, since that body is also
+# served raw, where nothing supplies the repository base github.com's own
+# renderer applies on the release page — and
 # `changelog-archive` moves a released section to docs/changelog/ in the
 # post-release PR (RELEASING.md step 9). The tool's own tests DO run under
 # `make test` (./... includes ./tools/...); only the invocations are
