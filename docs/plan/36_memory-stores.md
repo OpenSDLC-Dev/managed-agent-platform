@@ -69,7 +69,7 @@ stand as proposed; no Managed Agents key is available for decision 4's recording
    schema" — every worker citation would point at an unpinned HEAD, and DIVERGENCES'
    `secret` entry (which says the reference worker "never reads the field") would keep a
    claim the pinned checkout contradicts.
-2. **`self_hosted` memory is in this plan, as its last two slices; until they land, a
+2. **`self_hosted` memory is in this plan, as slices 5 and 6; until they land, a
    `memory_store` resource on a `self_hosted` session is a 400.** The reference's own
    worker at v1.66.0 *fails the work item* when a session has a store and the item carries
    no sessions token (`worker.go:516-528`, `ErrSessionMemoryNoToken`) — the session then
@@ -485,7 +485,10 @@ the machine lane, a `principal_` id on the identity lane. Next migration `0028`
     agent's own writes into recorded conflicts or re-create a memory, since the wipe
     guard and the compare-and-set (decision 11) hold whatever the baseline says, and the
     store never loses a version. A store whose marker is present and matches
-    is not re-downloaded (one `test -e` chain, the files precedent) — the sync (decision
+    is not re-downloaded — "matches" meaning its bytes: the run's first exec `cat`s
+    every attached store's marker (the files precedent's `test -e` chain establishes
+    presence only), and the same bytes feed decision 11's missing-or-altered check, so
+    neither compares presence where content is the question — the sync (decision
     11) reconciles it. Memory files are written with mode `0666`: the directories need
     nothing (made inside the sandbox, they are the sandbox user's on both backends), but
     the docker daemon lands a batch's *members* root-owned (`docker.go:1450-1458`), and a
@@ -498,7 +501,9 @@ the machine lane, a `principal_` id on the identity lane. Next migration `0028`
     `sandboxtest` contract. Whether `/mnt` itself takes a non-root uid is plan 25's
     existing condition (docs/self-hosted-security.md §2: "on Docker the image still
     decides"), unchanged here. A missing store row is a logged, counted miss
-    (`memory.resolve.misses`), never a failed run: the directory is not created and the
+    (`memory.materialized{outcome=not_found}`, the executor's own counter — the brain's
+    `memory.resolve.misses` is the brain's, the split plan 25 made for repositories),
+    never a failed run: the directory is not created and the
     brain's hedge (decision 9) tells the agent.
 11. **Sync-back runs at the end of every `tool_exec` run and in the reaper, in three
     phases around the results transaction.** *Read* (before `commitResults`, no lock
