@@ -79,6 +79,57 @@ row back. That is the right trade for a staging environment and this configurati
 deliberately — but it means a rebuild is proven with a *fresh* credential round-tripping on
 the rebuilt stack, never with an old one surviving.
 
+## Parking it between uses
+
+Destroying is not the only way to stop paying for staging, and for anything short of
+"we are done with this environment" it is the wrong one — it takes the database with it.
+Parking stops the two charges that accrue by the hour and keeps every resource:
+
+```sh
+PROJECT=your-project make gcp-env-stop     # nodes to zero, then the database
+PROJECT=your-project make gcp-env-start    # the database, then the nodes back
+PROJECT=your-project make gcp-env-status   # what is parked, and what it was parked from
+```
+
+These are the one part of this directory that needs **neither Terraform, nor state, nor
+tfvars** — only credentials for the project. That is deliberate: parking is the operation
+you want to perform from whatever machine you happen to be at, including one that has
+never run an apply, and every coordinate is derived from `PROJECT` and `NAME_PREFIX`.
+
+| | parked | keeps billing |
+|---|---|---|
+| both node pools | resized to zero — nodes, boot disks and Cloud NAT's per-VM charge go with them | |
+| Cloud SQL | activation policy `NEVER` | its storage and its IP address |
+| the GKE control plane | | $0.10/cluster-hour, which one zonal cluster's free-tier credit covers |
+| LoadBalancer forwarding rules | | including the console's two |
+
+**Parking the cluster is safe because mode 2 already put every piece of state outside it** —
+Postgres is Cloud SQL, blobs are GCS, the credential cipher is Cloud KMS, and `kubectl get
+pvc -A` is empty by design. Nodes are genuinely disposable, so `start` has no restore step:
+the control plane, etcd, the Deployments and the Helm release records never went away, and
+pods reschedule themselves as soon as there is somewhere to put them. The console lives in
+the same cluster and is parked and revived along with the platform.
+
+**The parked sizes are stored on the cluster, not on your laptop.** `stop` writes each
+pool's node count into a `power-saved-<pool>` cluster resource label before zeroing it, and
+`start` reads them back and removes them — so a colleague on another machine can revive what
+you parked, and `start` restores the size that was actually running rather than a default.
+If the labels are ever missing, `start` refuses and asks for `NODES=<n>` instead of guessing:
+`variables.tf` defaults to two nodes a pool where staging runs one, and a guess in that
+direction doubles the bill the parking was for. Terraform does not declare `resource_labels`
+on this cluster, which is what lets the labels survive an apply.
+
+Order is why these are two commands and not four. Going down, the nodes drain before the
+database goes; coming up, the database is `RUNNABLE` before any pod can land on a new node.
+`make gcp-power-test` runs both orderings against a fake `gcloud`.
+
+**CD skips a parked environment rather than failing on it.** `deploy.yml` checks for those
+same labels after authenticating and, finding them, posts a notice and deploys nothing —
+otherwise every push during a money-saving weekend would go red on the smoke test. It keys
+on the label and not on the node count on purpose: a cluster at zero nodes that nobody
+parked has fallen over, and that still fails loudly. Staging therefore stays at whatever
+commit it was parked on; `gh workflow run deploy.yml --ref main` catches it up.
+
 ## Prerequisites
 
 - A GCP project with billing enabled, and `gcloud auth application-default login`.
@@ -1128,10 +1179,10 @@ the project and is one more `terraform import` away.
 
 ```sh
 make gcp-fmt gcp-validate gcp-split-check gcp-lint \
-     gcp-bootstrap-test gcp-split-check-test gcp-dbinit-test
+     gcp-bootstrap-test gcp-split-check-test gcp-dbinit-test gcp-power-test
 ```
 
-None of them needs credentials, state, or a project, and CI runs all seven on every PR — so
+None of them needs credentials, state, or a project, and CI runs all eight on every PR — so
 neither the configuration nor the tooling can rot silently between the rare runs that
 actually provision anything. `gcp-dbinit-test` is the one with a host requirement: it needs
 Docker, because it starts a real PostgreSQL.
@@ -1141,7 +1192,7 @@ Docker, because it starts a real PostgreSQL.
 `foundation/` declares must carry both guards it can — `prevent_destroy` and, where the kind
 has it, `deletion_policy = "PREVENT"`.
 
-The last three **run** the tooling rather than reading it, because the first four are static
+The last four **run** the tooling rather than reading it, because the first four are static
 and this is a place where static checking has already been insufficient. `gcp-lint` is
 shellcheck, and shellcheck cannot know that `gcloud secrets versions describe` rejects
 `--filter` — it exited 0 on a `bootstrap.sh` that aborted on its first call in every project,
@@ -1175,3 +1226,14 @@ have failed **only** on the real instance — `ALTER ROLE ... NOSUPERUSER` is re
 them off), and `ALTER DATABASE ... OWNER TO` failed with `must be able to SET ROLE` because
 the membership PostgreSQL 16's `CREATE ROLE` implicitly grants its creator does not carry the
 SET option.
+
+`gcp-power-test` is the fourth, and what it checks is a **sequence**, which is precisely what
+shellcheck and a careful read both miss. Two of `env-power.sh`'s claims cost real money if
+they quietly stop holding. `start` must restore the node counts `stop` saved rather than any
+plausible constant — so its scenarios park pools of *different* sizes, which no single number
+can satisfy. And both orderings have to survive refactoring: nodes drained before the
+database stops, the database `RUNNABLE` before any node returns. The fake `gcloud` dies on
+any invocation it does not recognise, so a script that starts calling something new is caught
+rather than silently handed an empty string; the mutations that were run against the suite —
+restoring a constant, inverting each ordering, saving the sizes too late, and reaching for
+`--labels` where only `--update-labels` merges — each turn it red.

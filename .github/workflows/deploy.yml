@@ -260,6 +260,33 @@ jobs:
           # found" — after the images have already been built and pushed.
           install_components: gke-gcloud-auth-plugin
 
+      # `make gcp-env-stop` parks staging by resizing both node pools to zero, so
+      # every push while it is parked would otherwise deploy into a cluster with
+      # nowhere to schedule and go red on the smoke test — turning a deliberate
+      # cost saving into a permanently red CD that everyone learns to ignore.
+      #
+      # The signal is the LABEL, not the node count, and the difference matters:
+      # a cluster at zero nodes with no `power-saved-*` label was not parked by
+      # anyone, it fell over, and that must still fail loudly. Only `stop` writes
+      # those labels and only `start` removes them, so their presence is the
+      # operator's own statement of intent and nothing else's.
+      #
+      # A notice rather than a silent pass: a parked environment that nobody
+      # remembers to revive should be visible in the run, since a green CD is
+      # otherwise indistinguishable from a deployed one.
+      - name: A parked environment is skipped rather than failed
+        shell: bash
+        run: |
+          labels="$(gcloud container clusters describe "$GKE_CLUSTER" \
+            --zone "$GCP_ZONE" --project "$GCP_PROJECT_ID" \
+            --format='value(resourceLabels)')"
+          case "$labels" in
+            *power-saved-*)
+              echo "POWERED_OFF=true" >> "$GITHUB_ENV"
+              echo "::notice::staging is parked ($labels) — nothing was deployed. Revive it with PROJECT=... make gcp-env-start, then re-run this workflow to catch staging up to main."
+              ;;
+          esac
+
       # Submitted from the repository ROOT with `.` as the context, because the
       # Dockerfile builds the whole Go module. `cloudbuild.yaml` turns that one
       # context into four images: controlplane/brain/executor are three tags on a
@@ -296,6 +323,7 @@ jobs:
       # Dockerfile requires. cloudbuild.yaml has to ask for it because the
       # classic builder is what `gcr.io/cloud-builders/docker` still runs.
       - name: Build and push the images
+        if: env.POWERED_OFF != 'true'
         run: |
           # The registry HOST, which is `ARTIFACT_REGISTRY` up to its first
           # slash. Passing the whole HOST/PROJECT/REPOSITORY path here would
@@ -322,8 +350,10 @@ jobs:
           done
 
       - uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
+        if: env.POWERED_OFF != 'true'
 
       - name: Cluster credentials
+        if: env.POWERED_OFF != 'true'
         run: |
           gcloud container clusters get-credentials "$GKE_CLUSTER" \
             --zone "$GCP_ZONE" --project "$GCP_PROJECT_ID"
@@ -338,6 +368,7 @@ jobs:
       # rather than `create`: this runs on every push, and `create` fails the
       # second time. Apply also makes a rotation a re-run of this job.
       - name: Assemble the mode-2 Secret
+        if: env.POWERED_OFF != 'true'
         run: |
           set -euo pipefail
 
@@ -587,6 +618,7 @@ jobs:
       # are safe to interpolate because the guard step rejects a comma —
       # `--set-string` splits on one.
       - name: Deploy the chart
+        if: env.POWERED_OFF != 'true'
         run: |
           set -euo pipefail
           # The chart composes {registry}/{repository}/{component}:{tag}, so the
@@ -623,6 +655,7 @@ jobs:
       # `--set-string` above, in the other syntax: unescaped, jsonpath reads
       # `iam.gke.io/gcp-service-account` as four nested fields and finds nothing.
       - name: The Workload Identity annotations are the ones this deploy meant
+        if: env.POWERED_OFF != 'true'
         run: |
           set -euo pipefail
           bad=0
@@ -659,7 +692,7 @@ jobs:
       # state a bad Secret would produce anyway, and `rollout status` fails the
       # job on it instead of leaving the smoke check to time out.
       - name: Roll the pods onto the rotated Secret
-        if: env.SECRET_CHANGED == 'true'
+        if: env.POWERED_OFF != 'true' && env.SECRET_CHANGED == 'true'
         run: |
           set -euo pipefail
           # By label, like the smoke step: the names come from the release.
@@ -683,6 +716,7 @@ jobs:
       # round trip through the database — and that the API is not answering
       # everyone.
       - name: Smoke — the public API answers
+        if: env.POWERED_OFF != 'true'
         run: |
           set -euo pipefail
 

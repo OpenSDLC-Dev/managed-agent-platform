@@ -1051,6 +1051,12 @@ jobs:
       # exercises it is not a billable cluster. ubuntu-latest ships Docker.
       - name: the database role SQL establishes what it claims
         run: make gcp-dbinit-test
+      # Parking and reviving the environment is a SEQUENCE of gcloud calls, and
+      # the two things worth getting right — restoring the saved node counts
+      # rather than a plausible constant, and the orderings in both directions —
+      # are invisible to shellcheck and to a careful read alike.
+      - name: the power script parks and revives what it claims
+        run: make gcp-power-test
 
   # Local dev stack: validate the compose file, build the image, and smoke-test
   # that the control plane comes up and serves (migrations + auth) and the brain

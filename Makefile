@@ -21,7 +21,8 @@ SHELL := /usr/bin/env bash
 	changelog changelog-notes changelog-archive \
 	release-tag-check release-images release-chart-check release-chart release-binaries \
 	openbao-init-test registry-check \
-	gcp-fmt gcp-validate gcp-split-check gcp-lint gcp-bootstrap-test gcp-dbinit-test gcp-split-check-test gcp-foundation-apply gcp-bootstrap gcp-env-apply gcp-db-init gcp-env-destroy gcp-env-rebuild
+	gcp-fmt gcp-validate gcp-split-check gcp-lint gcp-bootstrap-test gcp-dbinit-test gcp-split-check-test gcp-power-test gcp-foundation-apply gcp-bootstrap gcp-env-apply gcp-db-init gcp-env-destroy gcp-env-rebuild \
+	gcp-env-stop gcp-env-start gcp-env-status
 
 build:
 	go build ./...
@@ -289,10 +290,10 @@ gcp-split-check:
 # in exactly that way. A list of constructs, not an analysis, and honest about
 # it: it catches a recurrence of this class, not every possible one.
 gcp-lint:
-	shellcheck deploy/gcp/bootstrap.sh deploy/gcp/dbinit.sh
+	shellcheck deploy/gcp/bootstrap.sh deploy/gcp/dbinit.sh deploy/gcp/env-power.sh
 	@set -euo pipefail; \
 	found=0; \
-	for f in deploy/gcp/bootstrap.sh deploy/gcp/dbinit.sh; do \
+	for f in deploy/gcp/bootstrap.sh deploy/gcp/dbinit.sh deploy/gcp/env-power.sh; do \
 		if grep -nE '(^|[^[:alnum:]_-])(mapfile|readarray)[[:space:]]|declare[[:space:]]+-[A-Za-z]*A|\$${[A-Za-z_][A-Za-z0-9_]*(\^\^|,,)' "$$f"; then \
 			echo "  ^ in $$f: needs bash 4; macOS ships 3.2" >&2; \
 			found=1; \
@@ -322,6 +323,14 @@ gcp-dbinit-test:
 # to come back red, plus decoys that must stay green.
 gcp-split-check-test:
 	python3 deploy/gcp/check_split_test.py
+
+# Every claim env-power.sh makes is about a SEQUENCE of gcloud calls, and neither
+# shellcheck nor a careful read checks a sequence. The two that cost real money:
+# `start` restoring the sizes `stop` saved rather than a plausible constant, and
+# the two orderings — nodes before the database going down, the database before
+# the nodes coming up. This runs the script against a fake gcloud instead.
+gcp-power-test:
+	python3 deploy/gcp/env_power_test.py
 
 # Adds the first version of each Secret Manager secret — the two database
 # passwords, since #240 retired the GCS HMAC key that was the third value here.
@@ -361,3 +370,21 @@ gcp-env-destroy:
 # and that the foundation's surviving secrets still reconcile against freshly
 # created resources.
 gcp-env-rebuild: gcp-env-destroy gcp-env-apply
+
+# Parking, the cheap counterpart to destroying: the hourly charges stop and every
+# resource — the database above all — stays. Unlike everything else in this
+# group these need neither Terraform nor state nor tfvars, only credentials, so
+# they run from any machine the operator happens to be at. env-power.sh's header
+# says what they park and what keeps billing regardless.
+gcp-env-stop:
+	PROJECT=$(PROJECT) NAME_PREFIX=$(or $(NAME_PREFIX),map) bash deploy/gcp/env-power.sh stop
+
+# NODES is forwarded explicitly rather than left to make's export rules, because
+# the refusal this script prints when the saved sizes are gone tells the operator
+# to set it, and that instruction has to work whichever way they pass it.
+gcp-env-start:
+	PROJECT=$(PROJECT) NAME_PREFIX=$(or $(NAME_PREFIX),map) NODES=$(NODES) \
+		bash deploy/gcp/env-power.sh start
+
+gcp-env-status:
+	PROJECT=$(PROJECT) NAME_PREFIX=$(or $(NAME_PREFIX),map) bash deploy/gcp/env-power.sh status
