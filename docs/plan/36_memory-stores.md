@@ -73,6 +73,21 @@ Scope decisions, proposed 2026-08-24 (awaiting the user; the design below assume
    pruning**: the reference keeps versions 30 days "however, the recent versions are always
    kept", a rule with an unstated count; this plan retains every version and files the
    pruning job as its own issue rather than inventing the count.
+6. **A sessions token is minted only for work items whose session attaches a store.**
+   The reference says `secret` "May be populated when polling for work", and its worker
+   falls back to the environment key "otherwise" (`worker.go:335-339`) — whether the
+   reference populates it always or conditionally is unrecorded (recording item 10).
+   Minting only where it buys something keeps every storeless BYOC session on today's
+   environment-key path, byte-for-byte, and keeps the token table to rows that authorize
+   a memory mount. Rejected: minting on every poll — it hands every environment-key
+   holder a second credential for sessions that have nothing for it to reach.
+7. **Cloud sessions sync at the run boundary; no live mount is built.** The reference's
+   cloud sandbox is a live mount ("sessions on cloud sandboxes see each other's changes
+   almost immediately"); this platform's cloud sessions converge at their next tool runs,
+   the store winning conflicts — the reference's own documented behavior for self-hosted
+   sandboxes, applied to both deployment kinds. It is the plan's most product-visible
+   divergence, so it is put to the owner rather than decided inside design decision 11
+   (which argues the alternatives). A live mount, if ever wanted, is an issue of its own.
 
 Out of scope, besides decisions 3 and 5: the `service_account_actor` variant (no service
 accounts exist here; the three other actors cover every writer), deployments' memory
@@ -86,17 +101,23 @@ harness's memory directory (Claude Code's `projects/<key>/memory/`) into a store
 
 ### Wire shapes
 
-Read at `anthropic-sdk-go` v1.63.1 with `git show v1.63.1:<file>`; every file below is
-byte-identical at v1.66.0 except where marked. Official docs fetched 2026-08-24
+Read at `anthropic-sdk-go` v1.63.1 with `git show v1.63.1:<file>`; the four files scope
+decision 1 names are byte-identical at v1.66.0, `betamemorystorememoryversion.go` differs
+only by the fourth actor, and `betasession.go`/`betadream.go` differ outside the ranges
+cited here (same-size hunks, so the line numbers hold). Official docs fetched 2026-08-24
 (`platform.claude.com/docs/en/managed-agents/memory`, `…/self-hosted-sandboxes`, and the
-`api/beta/memory_stores/**` reference pages).
+`api/beta/memory_stores/**` reference pages). A fourth source sits one hop from the SDK
+checkout: the **OpenAPI spec the SDK is generated from**, whose URL `.stats.yml` carries
+(`storage.googleapis.com/stainless-sdk-openapi-specs/anthropic/anthropic-893a61e9….yml`
+at v1.66.0); it states three behaviors the SDK comments and the docs pages do not, quoted
+below as "spec".
 
 - **Routes** (`api.md:1057-1114`; every path literally carries `?beta=true`, every
   store/memory/version method prepends `anthropic-beta: agent-memory-2026-07-22`,
   `betamemorystore.go:52`): `POST|GET /v1/memory_stores`, `GET|POST|DELETE
   /v1/memory_stores/{id}`, `POST …/{id}/archive`; `POST|GET …/{id}/memories`,
   `GET|POST|DELETE …/{id}/memories/{mid}`; `GET …/{id}/memory_versions[/{vid}]`, `POST
-  …/{id}/memory_versions/{vid}/redact`. Update is `POST` (`betamemorystore.go:85`);
+  …/{id}/memory_versions/{vid}/redact`. Update is `POST` (`betamemorystore.go:86`);
   delete passes params so `expected_content_sha256` rides the query
   (`betamemorystorememory.go:145`). No unarchive, no version create/update/delete.
 - **Store** `BetaManagedAgentsMemoryStore` (`betamemorystore.go:176-216`): `id`
@@ -129,6 +150,14 @@ byte-identical at v1.66.0 except where marked. Official docs fetched 2026-08-24
   and `memory_prefix {path, type}` (`:248-367`) — "a list-time rollup, not a stored
   resource … interleaves with `memory` items in path order." Tombstone `{id,
   type:"memory_deleted"}`: "The memory's version history persists and remains listable."
+  Spec, create: "The path must be unoccupied: if a memory already exists at the path, or
+  the path is an ancestor or descendant of an existing memory's path, the request returns
+  `memory_path_conflict_error` (HTTP 409)"; spec, update: "At least one of `content` or
+  `path` must be provided", "Renaming onto a path occupied by a different memory returns
+  `memory_path_conflict_error` (HTTP 409)", and "An update where every supplied field
+  already matches the stored value is a no-op: it returns 200 with the existing memory
+  and writes no new version". The error's schema is `{type, message, conflicting_path,
+  conflicting_memory_id}` with only `type` required.
 - **Version** `BetaManagedAgentsMemoryVersion` (`betamemorystorememoryversion.go:221-297`):
   `id` (`memver_…`), `type:"memory_version"`, `memory_id`, `memory_store_id`, `operation
   ∈ created|modified|deleted` ("Every non-no-op mutation to a memory appends exactly one
@@ -159,7 +188,9 @@ byte-identical at v1.66.0 except where marked. Official docs fetched 2026-08-24
   propagate") — **no `id`, `created_at` or `updated_at`**, unlike the file (`:176-197`)
   and repository (`:211-245`) variants. `BetaSessionResourceAddParams` wraps only file
   params (`:735-745`) and the update body is only `authorization_token` (`:690-698`):
-  attach is create-time only. Sessions list filter `memory_store_id` — "Filter sessions
+  attach is create-time only. The get and update *response* unions of
+  `…/resources/{rid}` do carry the `memory_store` variant (`:485-568`, `:588-660`), so
+  the reference has some handle that returns one — which handle is unrecorded. Sessions list filter `memory_store_id` — "Filter sessions
   whose resources contain a memory_store with this memory store ID"
   (`betasession.go:2830-2832`).
 - **Work item secret.** `BetaSelfHostedWork.Secret` is required at the pin
@@ -173,8 +204,9 @@ byte-identical at v1.66.0 except where marked. Official docs fetched 2026-08-24
 - **Webhooks**: `memory_store.created|archived|deleted` only (`betawebhook.go:514-515`);
   "Individual memories and memory versions emit no webhook events."
 - **Dreams** (`betadream.go`): `POST|GET /v1/dreams`, `GET …/{id}`, `POST
-  …/{id}/archive|cancel`, header `dreaming-2026-04-21`, id `drm_…`; excluded (scope
-  decision 3).
+  …/{id}/archive|cancel`, header `dreaming-2026-04-21`, id `drm_…`; "the request and
+  response shapes are volatile" is the SDK's own comment (`:132`), the guide's word is
+  "research preview"; excluded (scope decision 3).
 - **Beta headers**: the docs say memory-store endpoints take `agent-memory-2026-07-22`
   *instead of* `managed-agents-2026-04-01` and that "sending both returns a `400`"; the
   CLI's own tests send `--beta message-batches-2024-09-24` on memory calls. This platform
@@ -229,9 +261,12 @@ byte-identical at v1.66.0 except where marked. Official docs fetched 2026-08-24
   corroboration window; a file changed on both sides takes the server's; a file the
   server refuses (400/413) is skipped until its bytes change; a store attached
   `read_only` "pulls but never pushes"; on 409 the local edit loses without retry; the
-  marker's content is `"version 1\n<memory_store_id>"`; the root must not pre-exist;
-  Windows hosts are refused (`O_NOFOLLOW`). It never calls store CRUD or the versions
-  endpoints and never renames. Its token split (`worker.go:339-603`): the per-item
+  marker's content is `"version 1\n<memory_store_id>"`; the root must not pre-exist; a
+  wiped folder (no local files, a baseline of more than one) is re-downloaded, never
+  pushed as deletes (`memories.go:736-740`); one sync sends at most a quarter of the
+  store's files as deletes, clamped to [8, 50]; Windows hosts are refused
+  (`internal/filestore/filestore.go:126`, `O_NOFOLLOW`). It never calls store CRUD or the
+  versions endpoints and never renames. Its token split (`worker.go:339-603`): the per-item
   credential is the bearer for heartbeat, force-stop, `GET /v1/sessions/{id}`, skill
   reads, the event stream/list/send, and every memory call — poll, ack and the poller's
   own stop keep the environment key; the SDK deletes `X-Api-Key` on those calls, so a
@@ -292,15 +327,19 @@ the machine lane, a `principal_` id on the identity lane. Next migration `0028`
    records the missing store per resource (decision 10), and the sync skips it. Rejected:
    a RESTRICT (the environments precedent) — it would need a containment scan in the
    delete handler and would pin a store to every archived session that ever mounted it.
-4. **Memory writes are one transaction: head row + version row.** Create at an existing
-   path → 409 `memory_path_conflict_error {conflicting_memory_id, conflicting_path}`
-   (the type is typed with those fields; its status is unrecorded — INFERRED); rename
-   onto an existing path → the same. Update with a mismatched precondition → 409
-   `memory_precondition_failed_error`, with the documented 200 short-circuit when the
-   stored `content` and `path` already equal the request's; delete with a mismatched
-   `expected_content_sha256` → the same 409 (the reference worker accepts 409 or 412;
-   INFERRED). A no-op update (same content, same path) appends no version and returns
-   the head unchanged. Path validation: leading `/`, ≥ 1 non-empty segment, no `.`/`..`
+4. **Memory writes are one transaction: head row + version row.** A path is occupied
+   when a memory exists at it **or at an ancestor or descendant of it** — `/a` and
+   `/a/b` cannot both be files — so create and rename check `path = $1 OR path LIKE $1 ||
+   '/%' OR $1 LIKE path || '/%'` (the unique index alone catches only equality) and
+   answer 409 `memory_path_conflict_error {conflicting_memory_id, conflicting_path}`
+   (spec-stated for create at an occupied path and rename onto another memory's path;
+   rename onto an ancestor/descendant is INFERRED to be the same). Update with a
+   mismatched precondition → 409 `memory_precondition_failed_error`, with the documented
+   200 short-circuit when the stored `content` and `path` already equal the request's;
+   delete with a mismatched `expected_content_sha256` → the same 409 (the reference
+   worker accepts 409 or 412; INFERRED). An update carrying neither `content` nor `path`
+   is a 400 (spec); one whose supplied fields all match the stored values appends no
+   version and returns the head (spec). Path validation: leading `/`, ≥ 1 non-empty segment, no `.`/`..`
    segments, no control or format characters (Unicode `Cc`/`Cf`), NFC-normalized
    (`golang.org/x/text/unicode/norm`, already an indirect dependency, is the one new
    direct import), ≤ 1,024 bytes; content ≤ 102,400 bytes and valid UTF-8 → 400
@@ -319,7 +358,8 @@ the machine lane, a `principal_` id on the identity lane. Next migration `0028`
    id)` descending, default `limit` 20 (unstated — INFERRED from the sibling lists);
    stores newest-first. Cursors are this platform's `base64url("k1|…")` keyset tokens,
    not `page_…` values — opaque to every client (registered as a note). `include_archived`
-   and `created_at[gte|lte]` reuse the vault list's helpers.
+   reuses the vault list's `parseBoolParam`, `created_at[gte|lte]` the agents list's
+   `parseTimeParam` (`agents.go:397-401`).
 6. **Actors.** A management write records `api_actor {api_key_id: <apikey_ id>}` when a
    machine key authenticated it and `user_actor {user_id: <principal_ id>}` when a human
    did (`principalFrom`'s two lanes — the reference's `user_` prefix is its Console's,
@@ -340,138 +380,186 @@ the machine lane, a `principal_` id on the identity lane. Next migration `0028`
    (scope decision 2; the environment's `kind` is already read `FOR SHARE` at
    `sessions.go:583`). `GET`/`DELETE /v1/sessions/{id}/resources/{rid}` cannot name an
    id-less element, so they keep answering the shape-check 404 (INFERRED — the
-   reference's answer is unobserved); `POST …/resources` keeps its files-only rule; the
+   reference's response unions carry the variant, so some handle exists there; the
+   recording tries `memory_store_id` as `{rid}`); `POST …/resources` keeps its
+   files-only rule; the
    list endpoint builds its cursor from the last element *with* an id and never emits
    one derived from a memory element (a latent paging bug the id-less element would
    trigger). `GET /v1/sessions?memory_store_id=` becomes real: a shape-validated id and
    `resources @> '[{"type":"memory_store","memory_store_id":$1}]'` (the
    `fileMountedInEnvironment` precedent), no index until a list needs one.
-8. **Mount path.** `mount_path = "/mnt/memory/" + slug(name)` where `slug` lowercases,
-   collapses every non-`[a-z0-9]` run to one `-`, and trims leading/trailing hyphens; a
-   name with no alphanumerics slugs to the store id's token (ours — the reference's
-   behavior is unrecorded). The slug is computed at attach time from the snapshotted
-   name (renames change later sessions only — documented). A file or repository mount
-   at or below `/mnt/memory` is refused by the existing `mountPathTaken`/`repoMountBelow`
-   family, so the memory root is never shadowed.
+8. **Mount path.** `mount_path = "/mnt/memory/" + slug(name)` where `slug` lowercases
+   and collapses every non-`[a-z0-9]` run to one `-` (documented), then trims a leading
+   or trailing hyphen (INFERRED — the documented rule alone would mount "(Notes)" at
+   `/mnt/memory/-notes-`; whether "alphanumeric" is ASCII or Unicode is unrecorded, and
+   ASCII is chosen); a name with no alphanumerics slugs to the store id's token (ours).
+   The slug is computed at attach time from the snapshotted name (renames change later
+   sessions only — documented). `/mnt/memory` joins `reservedRepoMounts` and
+   `validateRepoMountPath` refuses a repository mount below it — new code, since the
+   existing checks compare equal paths and look only for a repo *below* a new mount
+   (file mounts cannot reach it: `resolveMountPath` roots them under
+   `/mnt/session/uploads`).
 9. **The brain's "Memory stores" block** sits after the repositories block in
    `buildRequest` (placement INFERRED, like the other three): a lead line and one entry
    per attached store — display name, mount path, access mode, the snapshotted
    description and, when set, the instructions verbatim — assembled from the `resources`
    jsonb the turn already holds, with `memory.injected`/`memory.block_chars` span
    attributes. The wording is ours (INFERRED; the recording checklist's first item); it
-   states the mount rules the reference documents (read the directory before starting,
-   write only under the mount path, a `read_only` store refuses writes) and nothing a
-   harness invents — the customer's `instructions` field is the extension point. Until
+   carries the five documented facts and the two documented mount rules (writes are
+   persisted only under the mount path; a `read_only` store refuses writes) and nothing
+   a harness invents — the customer's `instructions` field is the extension point. Until
    slice 6 the block renders on `cloud` sessions only (the repos-block precedent); slice
    6 removes the gate. A store deleted after attach still renders from the snapshot,
    suffixed with the hedge the repos block uses for a failed clone ("NOT AVAILABLE: the
    memory store no longer exists").
 10. **Cloud materialization is the files pattern, sourced from the store.** On every
     `tool_exec` run, after `materializeFiles`, `materializeMemory` writes each attached
-    store's memories to `<mount_path>/<path>` and the marker
+    store's memories to `<mount_path>/<path>`, the marker
     `<mount_path>/.anthropic-memory-store` = `"version 1\n<memory_store_id>"` (the
     reference worker's marker byte-for-byte, so a sandbox the reference could inspect
-    looks the same), skipping a store whose marker is present and matches (one `test -e`
-    chain, the files precedent) — the sync (decision 11) then reconciles instead of
-    re-downloading. Files are written with mode `0666` and directories `0777` so a
-    sandbox running under `SANDBOX_RUN_AS_USER` can write what root materialized. A
-    missing store row is a logged, counted miss (`memory.resolve.misses`), never a failed
-    run: the directory is not created and the brain's hedge (decision 9) tells the agent.
-    A restored checkpoint has no `/mnt/memory` (plan 24's roots are unchanged — the store
-    is the source of truth, so nothing needs capturing); the next run re-materializes.
-11. **Sync-back runs at the end of every `tool_exec` run and in the reaper, in the
-    results transaction.** After `runTools` and before `commitResults`, for each attached
-    store: one `Exec` — `cd <mount> && find . -type f ! -name .anthropic-memory-store
-    -print0 | sort -z | xargs -0 sha256sum` (coreutils the images already provide, as
-    `tar`/`test` are; output bounded by `MaxOutputBytes`, which fits 2,000 entries with
-    room) — gives the local tree; the baseline is `session_memory_sync (session_id,
-    memory_store_id, path, content_sha256, refused_sha256)` — the `{path → sha}` "as of
-    the last sync" the reference keeps in-process, kept in Postgres here because
-    executors are stateless and any of them may run the next item; the remote state is
-    the store's head rows. The decision table is the reference worker's, applied inside
-    `commitResults`'s `settle` so a tool result and the versions it produced commit
-    together: local changed & remote unchanged → `ReadFile` and write head + version
-    (`session_actor`, `created`/`modified`); remote changed & local unchanged → write the
-    file; changed on both sides → the store wins, the file is overwritten and the
-    conflict counted; locally deleted & remote unchanged since baseline → head deleted
-    and a `deleted` version appended — at the next sync, with no 30 s corroboration
-    window: the run boundary is already a quiescent point (every tool call has returned;
-    the platform's write tool has no temp-file phase), and a background process still
-    writing is the same accepted residual `bash` already is; remotely deleted & local
-    unchanged → the file is removed; remotely deleted & locally edited → re-created
-    (writable store) or kept unsynced (read-only). A `read_only` or archived store, and a
-    store whose marker is missing or altered, is pulled from and never pushed to.
-    Content the store refuses (non-UTF-8, > 102,400 bytes, an invalid path segment, the
-    2,001st memory) is skipped, warned once and remembered in `refused_sha256` until the
-    bytes change — the reference's `refusedSHAs`. The reaper runs the same sync before
-    `captureCheckpoint` + `Destroy`, so nothing a tool wrote after its run returned is
-    lost with the container. Cross-session visibility is therefore one run of each
-    session, against the reference cloud's "almost immediately" (registered). Rejected:
-    intercepting `write`/`edit` in the toolset and committing each call as a version —
-    it misses `bash` and `mv`, which the reference's live mount captures; a FUSE/network
-    mount — a new backend obligation on both sandbox providers for a directory ≤ 200 MB.
+    looks the same), and the **baseline** `/mnt/memory/.sync/<memory_store_id>` — the
+    `{path → sha, refused sha}` map "as of the last download or successful sync" the
+    reference keeps in-process; it lives beside the tree it describes because its
+    lifetime is exactly the sandbox's (a restored checkpoint has no `/mnt/memory`, the
+    reaper syncs then destroys), so it needs no table, no seeding rule and no purge. It
+    is written by root outside every store directory; under `SANDBOX_RUN_AS_USER` the
+    agent cannot alter it, and without that knob a tampered baseline is the same accepted
+    residual the files sentinel already is. A store whose marker is present and matches
+    is not re-downloaded (one `test -e` chain, the files precedent) — the sync (decision
+    11) reconciles it. Memory files are written with mode `0666` and their directories
+    `0777` so a sandbox running as a non-root uid can write what root materialized: the
+    sandbox's `FileWrite` carries no mode today and both backends fix `0644`
+    (`docker.go:1950`, `k8s.go:1907`), so `FileWrite` gains an optional `Mode`, plumbed
+    through both backends and pinned by the `sandboxtest` contract (the platform's own
+    `write`/`edit` tools reach the sandbox as root and never needed it; a `bash >>` by
+    the agent does). A missing store row is a logged, counted miss
+    (`memory.resolve.misses`), never a failed run: the directory is not created and the
+    brain's hedge (decision 9) tells the agent.
+11. **Sync-back runs at the end of every `tool_exec` run and in the reaper, in three
+    phases around the results transaction.** *Read* (before `commitResults`, no lock
+    held): for each attached store, one `Exec` — `cd <mount> && find . -type f ! -name
+    .anthropic-memory-store -print0 | sort -z | xargs -0 sha256sum -z` (coreutils the
+    images already provide, as `tar`/`test` are; `-z` so a path's bytes arrive verbatim
+    instead of `sha256sum`'s backslash escaping) — gives the local tree, the baseline
+    file gives the last-synced state, and `ReadFile` fetches every locally changed file;
+    a result with `ExecResult.Truncated` set (2,000 maximal paths can pass
+    `MaxOutputBytes`) skips that store's sync with a warning rather than reading the
+    missing tail as deletions. *Settle* (inside `commitResults`'s `settle`, so a tool
+    result and the versions it produced commit together — DB writes only, never sandbox
+    I/O under the session row lock): the reference worker's decision table against the
+    store's head rows, every write **conditional on the baseline sha** exactly as the
+    API routes are — `UPDATE memories … WHERE id = $1 AND content_sha256 = $baseline`,
+    `DELETE … WHERE … AND content_sha256 = $baseline`, `INSERT … ON CONFLICT DO NOTHING`
+    with decision 4's ancestor/descendant check — a zero-row result being the conflict
+    arm, so two sessions syncing one store cannot overwrite each other unrecorded. The
+    arms: local changed & remote unchanged → head + version (`session_actor`,
+    `created`/`modified`); changed on both sides, or a lost race → the store wins, the
+    conflict is counted and the pull is scheduled; locally deleted & remote unchanged →
+    head deleted and a `deleted` version appended — at this sync, with no 30 s
+    corroboration window (the run boundary is a quiescent point: every tool call has
+    returned, and the platform's write tool has no temp-file phase) but with the
+    reference's **wipe guard**: no local files and a baseline of more than one → the
+    store is re-downloaded and nothing is deleted, so an `rm -rf` of a mount — the
+    agent's or an injected prompt's — never becomes 2,000 deletions; the reference's
+    per-sync delete cap (a quarter of the store, clamped to [8, 50]) and its
+    `enabled|log_only|disabled` deletions mode are not carried — the cap bounded API
+    round trips inside its 30 s window, and the mode is a knob nobody here asked for.
+    *Apply* (after the commit): remote changes and conflict losers are written to the
+    sandbox, remote deletions removed, and the baseline file rewritten — a failed apply
+    leaves the baseline behind the store, which the next sync sees as "remote changed"
+    and retries. A `read_only` or archived store, and a store whose marker is missing or
+    altered, is pulled from and never pushed to. Content the store refuses (non-UTF-8,
+    > 102,400 bytes, an invalid path segment, the 2,001st memory) is skipped, warned once
+    and remembered in the baseline until the bytes change — the reference's
+    `refusedSHAs`. The reaper runs the same three phases before `captureCheckpoint` +
+    `Destroy`, reaching the container through `Provider.Attach` (it holds no `Sandbox`)
+    and taking the session row lock inside the advisory lock it already holds — the run
+    path takes the advisory lock only inside `provisionSandbox` and releases it before
+    settling, so the two orders cannot invert. Cross-session visibility is therefore one
+    run of each session (scope decision 7). Rejected: intercepting `write`/`edit` in the
+    toolset and committing each call as a version — it misses `bash` and `mv`, which the
+    reference's live mount captures; a FUSE/network mount — a new backend obligation on
+    both sandbox providers for a directory ≤ 200 MB; a Postgres baseline table — it
+    outlives the sandbox it describes and needs seed and purge rules the file has for
+    free.
 12. **`read_only` on cloud is enforced by the file tools, exactly as the reference's own
-    worker enforces it.** `toolset.Runner` gains `ReadOnlyRoots` and `MemoryRoot`: `write`
-    and `edit` refuse a path inside a read-only store's directory with the reference
-    worker's wording ("%s is inside read-only directory %s") and any path under
-    `/mnt/memory` outside an attached store's directory ("writes to any other path under
-    `/mnt/memory/` fail"); `bash` stays unconfined, its writes to a read-only store never
-    sync and the next remote change overwrites them (documented for self-hosted; the
-    reference cloud's filesystem-level enforcement is a divergence we register — a
-    per-store read-only bind mount would be new `Spec` plumbing on both backends for a
-    guardrail the reference itself calls "a guardrail for the file tools only, not a
-    sandbox"). The executor and the worker both set the roots from the session's
-    `resources`.
+    worker enforces it.** `toolset.Runner` gains `MemoryRoots` (every attached store's
+    directory) and `ReadOnlyRoots` (the `read_only` subset — the reference worker's
+    `AllowedRoots`/`ReadOnlyRoots` split): `write` and `edit` refuse a path inside a
+    read-only root with the reference worker's wording ("%s is inside read-only directory
+    %s") and any path under `/mnt/memory` outside every memory root ("writes to any other
+    path under `/mnt/memory/` fail"); `bash` stays unconfined, its writes to a read-only
+    store never sync and the next remote change overwrites them (documented for
+    self-hosted; the reference cloud's filesystem-level enforcement is a divergence we
+    register — a per-store read-only bind mount would be new `Spec` plumbing on both
+    backends for a guardrail the reference itself calls "a guardrail for the file tools
+    only, not a sandbox"). The executor and the worker both set the roots from the
+    session's `resources`.
 13. **Threads share the session's stores.** One sandbox per coordinator session (plan 35),
     so every thread sees the same mounts; serial tool execution across siblings keeps the
     run-end sync race-free; the actor is the session's. Nothing per thread is added.
 14. **Roles**: reads RoleViewer; store create/update/archive/delete and memory
     create/update/delete RoleDeveloper; redact RoleAdmin.
-15. **The sessions token: minted per work item, hashed at rest, accepted on the
-    reference worker's whole matrix** (slice 5). `Poll` mints a `wtk_`-prefixed token
-    (the `gtk_` shape: 32 random bytes, Crockford base32, outside `knownPrefixes`) in the
-    claim transaction, stores `sha256` in `work_session_tokens (id, work_id, session_id,
-    environment_id, token_hash, revoked_at)` — one live row per work item, revoked when
-    the item leaves `leased`/`running` (ack, stop, lease expiry, reclaim mints afresh) or
-    the session is archived — and renders `secret = base64url(JSON {"sessions_token":
-    "<wtk_…>"})` **on the poll response only**; every other path keeps `null` (the SDK's
-    "null on all other retrieval paths"). A new lane middleware resolves a `wtk_` bearer
-    to `(work_id, session_id, environment_id)` and admits it where the v1.66.0 worker
-    sends it: `POST …/work/{work_id}/heartbeat|stop` for its own item, `GET
-    /v1/sessions/{id}` and the session's events list/stream/send for its own session,
-    the skill read paths (workspace-global, as the env key is), and the memory routes for
-    stores its session attaches (a containment check on `resources`, the files lane's
-    scoping). On the memory routes the environment key is refused with a 401 (the
-    reference "reject[s] the environment key"; its status is unrecorded — INFERRED) and a
-    management key is accepted; on every other admitted path the environment key keeps
-    working (our worker and the poller's own stop use it). Lane selection stays by path
-    and token shape: a `wtk_` bearer is a base32 token with no dots, so `LooksLikeJWT`
-    never misroutes it, and `dualAuth` tries the work token before the environment key.
-    #165's vault-credential bundle would be another key in the same JSON envelope; the
-    issue is re-scoped to say so and stays open. Rejected: keeping `secret` null and
-    admitting the environment key on the memory routes — the worker fails the item
-    before its first memory call (ground truth), and a per-item token is also narrower
-    than an environment key that today reads every session in its environment.
+15. **The sessions token: minted per claim for sessions with stores, hashed at rest,
+    valid by join conditions, accepted on the reference worker's whole matrix** (slice
+    5). When the item `Poll` returns belongs to a session whose `resources` hold a
+    `memory_store` (scope decision 6), the poll handler mints a `wtk_`-prefixed token —
+    `gatetoken`'s `Mint`/`hashToken` made prefix-parameterized and exported, so the
+    32-random-byte Crockford base32 value and its `sha256` are one implementation, not
+    two; the prefix stays outside `knownPrefixes` as `gtk_` does — and inserts
+    `work_session_tokens (id, work_id, session_id, token_hash, created_at)` in the
+    statement after `Poll` (which is one autocommit `QueryRow`, not a transaction),
+    superseding any earlier row for the session; `secret = base64url(JSON
+    {"sessions_token": "<wtk_…>"})` renders **on that poll response only**, every other
+    path keeping `null` ("null on all other retrieval paths"). `work_id` is **not** a
+    foreign key: `Poll` rewrites a work item's id on every re-hand-out (#62), and no table
+    references `work_items(id)` today. That is what makes revocation a set of join
+    conditions rather than events — a token authenticates only while `work_items.id =
+    work_id` (a re-hand-out changed it), `lease_expires_at > now()`, `state <> 'stopped'`
+    (the queue's states are `queued|starting|active|stopping|stopped`; ack is the entry
+    transition, so nothing is revoked on ack) and the session is unarchived. A new lane
+    middleware resolves a `wtk_` bearer to `(work_id, session_id, environment_id)` and
+    admits it where the v1.66.0 worker sends it: `POST …/work/{work_id}/heartbeat|stop`
+    for its own item, `GET /v1/sessions/{id}` and the session's events list/stream/send
+    for its own session, the skill read paths (workspace-global, as the env key is), and
+    the memory routes for stores its session attaches (a containment check on
+    `resources`, the files lane's scoping). On the memory routes the environment key is
+    refused with a 401 (the reference "reject[s] the environment key"; its status is
+    unrecorded — INFERRED) and a management key is accepted; on every other admitted path
+    the environment key keeps working (our worker and the poller's own stop use it). Lane
+    selection stays by path and token shape: a `wtk_` bearer is a base32 token with no
+    dots, so `LooksLikeJWT` never misroutes it, and environment keys carry their own
+    `sk-map-env01-` prefix, so `dualAuth` can try the work token first by shape. #165's
+    vault-credential bundle would be another key in the same JSON envelope; the issue is
+    re-scoped to say so and stays open. Rejected: keeping `secret` null and admitting the
+    environment key on the memory routes — the worker fails the item before its first
+    memory call (ground truth), and a per-item token is also narrower than an environment
+    key that today reads every session in its environment.
 16. **The BYOC worker runs the same sync over the wire** (slice 6). `internal/worker`
     decodes the item's `secret`, and `SetupMemory` — the twin of decision 10 — lists each
-    store with `view=full limit=20` through the typed SDK and writes files and the marker
-    into the sandbox it provisioned; after each tool call it runs the decision table with
-    the platform's `memsync` package (decision 17) against a `view=basic limit=100` listing
-    plus per-memory `GET view=full`, uploading with `precondition = the listed sha`,
-    deleting with `expected_content_sha256 = baseline sha`, and treating 409 as "the
-    local edit loses" and 404 on update as "re-create" — the reference's status handling,
-    which the platform's routes produce. Its baseline lives in the worker process, as the
-    reference's does (one worker serves one item start to finish). A missing token with
-    stores attached fails the item the way the reference does (`ErrSessionMemoryNoToken`'s
+    store with `view=full limit=20` through the typed SDK and writes files, marker and
+    baseline into the sandbox it provisioned; after each tool call it runs the decision
+    table with the platform's `memsync` package (decision 17) against a `view=basic
+    limit=100` listing plus per-memory `GET view=full`, uploading with `precondition =
+    the listed sha`, deleting with `expected_content_sha256 = baseline sha`, and treating
+    409 as "the local edit loses" and 404 on update as "re-create" — the reference's
+    status handling, which the platform's routes produce. A missing token with stores
+    attached fails the item the way the reference does (`ErrSessionMemoryNoToken`'s
     text), so the two workers agree on what a session without memory looks like. The
     `self_hosted` 400 (decision 7) is lifted, the brain's gate (decision 9) removed, and
     the real `ant beta:worker poll` (v1.26.1, SDK v1.66.0) serves a session with a store
-    against this server unchanged — the slice's acceptance.
-17. **`internal/memsync` holds what both halves share**: the slug, the marker bytes, the
-    tree-hash command and its parser, the path and content validation the API also uses,
-    and the pure decision table `Plan(local, baseline, remote) → actions` — a logic
-    package under coverage, with the reference worker's nine-case matrix as its contract
-    test. The DB side (executor) and the wire side (worker) apply the actions.
+    against this server unchanged — the slice's acceptance. Rejected: reusing the SDK's
+    own engine (`environments.SessionMemoryStores`, which the worker's client already
+    links) — it syncs a directory on the worker *host* through the SDK's `internal/
+    filestore`, and this worker's tools run inside a sandbox container it provisions
+    (`worker/toolexec.go`), where only `Exec`/`ReadFile`/`WriteFile` reach.
+17. **`internal/memsync` holds what both halves share**, in two steps: slice 2 creates
+    it with the path and content validation the API routes need and the slug (slice 3
+    needs it); slice 4 adds the marker bytes, the baseline file's encoding, the tree-hash
+    command and its parser, and the pure decision table `Plan(local, baseline, remote) →
+    actions` — a logic package under coverage, with the reference worker's nine-case
+    matrix plus the wipe guard and the lost-race arm as its contract test. The DB side
+    (executor) and the wire side (worker) apply the actions.
 18. **Telemetry.** Executor/worker: `memory.materialized` (outcome-labelled),
     `memory.sync.duration`, `memory.sync.actions` (`action ∈ pulled|pushed|deleted|
     conflict|refused`), spans `memory_materialize`/`memory_sync` with
@@ -505,8 +593,9 @@ behavior**; the last slice archives the plan and closes #52.
    the archived-mutation 400. `ant beta:memory-stores *` works.
 2. **Memories and versions** (decisions 1, 4–6, 14): migration `0029_memories.sql`
    (`memories`, `memory_versions`, the unique path index, the `(memory_store_id,
-   created_at DESC, id DESC)` versions index), the five memory routes with `view`,
-   precondition and `expected_content_sha256`, the list with `path_prefix`/`depth`/prefix
+   created_at DESC, id DESC)` versions index), `internal/memsync`'s validation and slug,
+   the five memory routes with `view`, precondition and `expected_content_sha256`, the
+   ancestor/descendant occupancy check, the list with `path_prefix`/`depth`/prefix
    rollups, the three version routes, actors, the two error types, the 2,000 cap. `ant
    beta:memory-stores:memories *` and `:memory-versions *` work; the CLI's own suite
    (`TEST_API_BASE_URL=… go test ./pkg/cmd -run 'TestBetaMemoryStores'`) passes against
@@ -514,28 +603,34 @@ behavior**; the last slice archives the plan and closes #52.
 3. **Attachment, filter and prompt** (decisions 7–9, 13): the `memory_store` arm of
    `parseResourceObject` accepted on `cloud` sessions, the snapshot and slug, the seven
    400s, the id-less element through list/get/delete and the cursor fix, the
-   `memory_store_id` filter, `mountPathTaken` for `/mnt/memory`, the brain block on
-   `cloud`, the fixture prefixes in `sessions_test.go` corrected, DIVERGENCES `:43`
-   carved down a third time and `:44` rewritten in place. Inert in the sandbox: the
-   agent is told about a directory slice 4 fills.
-4. **Cloud materialization and sync** (decisions 10–12, 17–19): `internal/memsync`,
-   migration `0030_session_memory_sync.sql`, `materializeMemory`, the run-end and reaper
-   syncs inside `commitResults`, `Runner.ReadOnlyRoots`/`MemoryRoot` and the two tool
-   refusals, telemetry, the two evals, an end-to-end integration test on the docker
-   sandbox (attach → materialize → tool write → version row → second session sees it).
-   This slice meets #52's cloud acceptance.
-5. **The sessions token** (decision 15): migration `0031_work_session_tokens.sql`,
-   `internal/worktoken` (the `gatetoken` shape), the poll-time mint and `secret`
-   rendering, the lane middleware and its admission matrix, the memory routes' env-key
-   refusal, `internal/worker` reading the secret (using the token only where slice 6
-   needs it), #165 re-scoped. Behavior-neutral for sessions without stores: the v1.66.0
-   worker's heartbeat/stop/session/skills calls now carry the token and succeed as they
-   did with the key.
-6. **BYOC memory** (decision 16): `SetupMemory` and the worker's run-end sync, the
-   `self_hosted` 400 lifted, the brain gate removed, the `ErrSessionMemoryNoToken`
-   twin, an integration test against the in-process API server, and the acceptance
-   transcript of the real `ant beta:worker poll` serving a session with a store. This
-   slice meets #52's `self_hosted` acceptance.
+   `memory_store_id` filter, `/mnt/memory` reserved against repository mounts, the brain
+   block on `cloud`, the fixture prefixes in `sessions_test.go` corrected, DIVERGENCES
+   `:43` carved down a third time and `:44` rewritten in place. Inert in the sandbox:
+   the agent is told about a directory slice 4 fills.
+4. **Cloud materialization and sync** (decisions 10–12, 17–19): `memsync`'s marker,
+   baseline, tree hash and `Plan`, `FileWrite.Mode` on both backends and the contract
+   suite, `materializeMemory`, the three-phase run-end sync and the reaper's
+   `Attach`-based twin, `Runner.MemoryRoots`/`ReadOnlyRoots` and the two tool refusals,
+   telemetry, the two evals, an end-to-end integration test on the docker sandbox
+   (attach → materialize → tool write → version row → second session sees it). This
+   slice meets #52's cloud acceptance.
+5. **The sessions token** (decision 15; scope decision 6): migration
+   `0030_work_session_tokens.sql`, `gatetoken`'s mint/hash exported prefix-generic,
+   `internal/worktoken` (the table and the join-condition `Authenticate`), the
+   poll-time mint for sessions with stores and the `secret` rendering, the lane
+   middleware and its admission matrix, the memory routes' env-key refusal, #165
+   re-scoped. Behavior-neutral by construction: no token is minted for a session without
+   stores, and a `self_hosted` session cannot attach one until slice 6 lifts the 400 — so
+   the lane is reachable only through tests (a test seam writes the element into a
+   `self_hosted` session's `resources`), the way plan 35's slice 3 landed its substrate.
+   Not lifted here on purpose: with the token alone the reference worker would serve a
+   memory session in full, but the platform's own worker would run it with the amnesia
+   the reference refuses.
+6. **BYOC memory** (decision 16): `internal/worker` decoding the secret, `SetupMemory`
+   and the worker's run-end sync, the `self_hosted` 400 lifted, the brain gate removed,
+   the `ErrSessionMemoryNoToken` twin, an integration test against the in-process API
+   server, and the acceptance transcript of the real `ant beta:worker poll` serving a
+   session with a store. This slice meets #52's `self_hosted` acceptance.
 7. **Close-out**: HISTORY acceptance + review-hardening records and the progress summary,
    ARCHITECTURE "Execution flow"/"Wire-compatibility model"/package rows and a
    security-invariant paragraph (what the sessions token can reach, and that `read_only`
@@ -560,35 +655,50 @@ mutation duty); the matrix rows are `make test` integration tests unless marked 
 - Slice 2: path validation table (each documented rejection its own case, an NFD path
   among them); content bounds and UTF-8; `view` defaults per endpoint and the `full` cap;
   `depth=1` rollups interleaved in path order across a page boundary; `path_prefix`
-  segment alignment (`/notes/` excludes `/notes-archive/`); precondition 409 and the 200
-  short-circuit; rename-only appends `modified`; delete precondition 409, 404 after;
+  segment alignment (`/notes/` excludes `/notes-archive/`); occupancy — create at `/a`
+  with `/a/b` present, create at `/a/b` with `/a` present, rename onto each, all 409;
+  an update with neither field 400; precondition 409 and the 200 short-circuit; the
+  no-op update writes no version; rename-only appends `modified`; delete precondition
+  409, 404 after;
   version rows per operation with nulls as specified; redact nulls the four fields, head
-  refused; the 2,000 cap; the actors on both lanes; store delete cascades. CLI: the §7
-  command list from the CLI research (recorded into HISTORY); the CLI's own
-  `TestBetaMemoryStores*` suite against the server.
+  refused; the 2,000 cap; the actors on both lanes; store delete cascades. CLI: every
+  `ant beta:memory-stores:memories` and `:memory-versions` subcommand with each of its
+  flags (`--view`, `--precondition.*`, `--depth`, `--path-prefix`,
+  `--expected-content-sha256`, `--operation`, `--session-id`, a piped YAML body, the
+  positional id form), recorded into HISTORY; the CLI's own `TestBetaMemoryStores*`
+  suite against the server.
 - Slice 3: the seven create-time 400s; the element shape (no `id`, `access` echoed,
   `mount_path` derived, snapshot survives a later rename); list paging with a memory
   element last on a page; get/delete by rid 404; the filter's containment (a session
   attaching two stores matches both ids; a deleted store still matches); the brain block
-  on `cloud`, absent on `self_hosted`, hedged for a deleted store; `mountPathTaken` under
-  `/mnt/memory`. CLI: `ant beta:sessions create --resource '{type: memory_store, …}'`,
+  on `cloud`, absent on `self_hosted`, hedged for a deleted store; a repository mount at
+  or below `/mnt/memory` refused. CLI: `ant beta:sessions create --resource '{type: memory_store, …}'`,
   `beta:sessions:resources list`, `beta:sessions list --memory-store-id`.
-- Slice 4: `memsync.Plan`'s nine-case matrix; materialization idempotence via the marker
-  and the miss for a deleted store; the docker integration: a tool write → head + version
-  (`session_actor`), a second session's next run sees it, a both-sides change takes the
-  store's, a local delete deletes the head and appends `deleted`, a refused file is
+- Slice 4: `memsync.Plan`'s nine-case matrix plus the wipe guard and the lost race; the
+  `-z` tree-hash parser on a path with a newline and a backslash; a truncated listing
+  skips the store; `FileWrite.Mode` on the contract suite; materialization idempotence
+  via the marker and the miss for a deleted store; the docker integration: a tool write →
+  head + version (`session_actor`), a second session's next run sees it, a both-sides
+  change takes the store's, two sessions' settles racing on one memory leave one version
+  and one recorded conflict (the compare-and-set shown red without the `WHERE`), a local
+  delete deletes the head and appends `deleted`, an emptied mount is re-downloaded and
+  deletes nothing, a failed apply is retried by the next sync, a refused file is
   attempted once until it changes, a read-only store's `write`/`edit` refusal wording,
   a `bash` write to a read-only store never syncs and is overwritten by the next remote
   change, writes under `/mnt/memory` outside a store refused, the reaper's sync before
-  destroy, a run under `SANDBOX_RUN_AS_USER` can write what root materialized, the
-  restored checkpoint re-materializes; 🔍 both evals opt-in green; the telemetry rows.
-- Slice 5: token minted once per claim and rotated on reclaim; hash-only at rest; the
-  admission matrix (each row admitted, each non-row refused, the env key refused on the
-  memory routes with a 401, a management key admitted); a token scoped to one item's
-  session cannot read a sibling session in the same environment; revocation on ack/stop/
-  expiry/archive; `secret` non-null on poll only; the v1.66.0 SDK worker's first
-  heartbeat with the token succeeds (a test built on the SDK's `EnvironmentWorker`
-  against the in-process server, with no stores).
+  destroy through `Attach`, a run under `SANDBOX_RUN_AS_USER` can `bash >>` into a file
+  root materialized, the restored checkpoint re-materializes; 🔍 both evals opt-in
+  green; the telemetry rows.
+- Slice 5 (through the test seam — the API still refuses the attachment on
+  `self_hosted`): a token minted only when the claimed session attaches a store, once
+  per claim, superseded on re-hand-out (the old token 401s because the work id moved);
+  hash-only at rest; the admission matrix (each row admitted, each non-row refused, the
+  env key refused on the memory routes with a 401, a management key admitted); a token
+  scoped to one item's session cannot read a sibling session in the same environment;
+  the join conditions — after stop, after lease expiry, after session archive the token
+  401s, and ack does not disturb it; `secret` non-null on poll only, null for a storeless
+  session; the v1.66.0 SDK worker's first heartbeat with the token succeeds (a test built
+  on the SDK's `EnvironmentWorker` against the in-process server).
 - Slice 6: the worker integration (download → tool write → upload with precondition →
   version attributed to the session; 409 loses; 404 re-creates; read-only never pushes;
   missing token fails the item with the reference's text); CLI: the real `ant beta:worker
@@ -603,32 +713,36 @@ mutation duty); the matrix rows are `make test` integration tests unless marked 
   `memory_store.*` webhooks not delivered (CONFIRMED, #261's sibling); list cursors are
   `k1|…` keyset tokens, not `page_…` (note — opaque either way); the reference's
   400-on-both-beta-headers is not mirrored (note under the existing accept-and-ignore
-  rule); versions retained without pruning (CONFIRMED, tracked by the new retention
-  issue); archived-store mutation is a 400 (INFERRED — "read-only" without a status);
+  rule); archived-store mutation is a 400 (INFERRED — "read-only" without a status);
   `user_actor.user_id` is a `principal_` id (CONFIRMED, ours).
-- (slice 2) `memory_path_conflict_error` is a 409 on create-at-existing-path and
-  rename-onto-existing-path (INFERRED); delete-precondition mismatch is a 409
-  `memory_precondition_failed_error` (INFERRED — the worker accepts 409 or 412);
-  oversized/invalid content is a 400 (INFERRED — 413 possible); memories list in
-  byte-wise path order, `path_prefix` defaults to `/` (INFERRED); versions list default
-  `limit` 20 (INFERRED); redacting the head is a 400 (INFERRED).
+- (slice 2) versions retained without pruning (CONFIRMED, tracked by the new retention
+  issue); the path-occupancy rule and its 409 are spec-stated (a note, not a
+  divergence) — rename onto an ancestor/descendant path being the same 409 is INFERRED;
+  delete-precondition mismatch is a 409 `memory_precondition_failed_error` (INFERRED —
+  the worker accepts 409 or 412); oversized/invalid content is a 400 (INFERRED — 413
+  possible); memories list in byte-wise path order, `path_prefix` defaults to `/`
+  (INFERRED); versions list default `limit` 20 (INFERRED); redacting the head is a 400
+  (INFERRED).
 - (slice 3) `access` omitted echoes `"read_write"` (INFERRED); the element carries no
-  `id` and `GET`/`DELETE …/resources/{rid}` answer 404 for it (INFERRED); the same store
-  twice, a slug collision and an all-symbol name are ours (INFERRED — unobserved); an
-  archived store attaches with a 400 (INFERRED); a deleted store's attachment is tolerated
-  and hedged (INFERRED — the files precedent); the memory block's wording and placement
-  (INFERRED); `memory_store` on `self_hosted` is a 400 until slice 6 (CONFIRMED, tracked
-  by #52 with a parenthetical); the `memory_store_id` filter entry rewritten in place.
+  `id` and `GET`/`DELETE …/resources/{rid}` answer 404 for it (INFERRED — the response
+  unions carry the variant); the slug's hyphen trim and ASCII alphabet (INFERRED); the
+  same store twice, a slug collision and an all-symbol name are ours (INFERRED —
+  unobserved); an archived store attaches with a 400 (INFERRED); a deleted store's
+  attachment is tolerated and hedged (INFERRED — the files precedent); the memory block's
+  wording and placement (INFERRED); `memory_store` on `self_hosted` is a 400 until slice
+  6 (CONFIRMED, tracked by #52 with a parenthetical); the `memory_store_id` filter entry
+  rewritten in place.
 - (slice 4) sync at the run boundary rather than a live mount — cross-session visibility
   is one run, not "almost immediately", and a `bash` write to a read-only store is
   unsynced rather than refused at the filesystem (CONFIRMED, ours); no delete
-  corroboration window (CONFIRMED, ours); the marker file matches the reference worker's
-  (note).
-- (slice 5) `secret` populated on poll as `base64url(JSON {"sessions_token"})` (INFERRED —
-  the envelope is read from the reference worker, the reference's other keys are not
-  produced); the env key refused on memory routes with a 401 (INFERRED); the token's
-  admission matrix (INFERRED from the worker's calls); token per work item, not per
-  session (INFERRED from "the bearer for this item's work lifecycle").
+  corroboration window, no per-sync delete cap and no deletions mode — the wipe guard
+  kept (CONFIRMED, ours); the marker file matches the reference worker's (note).
+- (slice 5) `secret` populated on poll as `base64url(JSON {"sessions_token"})`, and only
+  for sessions with stores (INFERRED — the envelope is read from the reference worker,
+  the reference's other keys are not produced, and always-vs-conditional is unrecorded);
+  the env key refused on memory routes with a 401 (INFERRED); the token's admission
+  matrix (INFERRED from the worker's calls); token per work item, not per session
+  (INFERRED from "the bearer for this item's work lifecycle").
 - (slice 6) `file` and `github_repository` on `self_hosted` remain accepted here where the
   reference 400s them ("self-hosted environments accept only `memory_store` resources")
   — an existing superset, now stated (CONFIRMED, ours).
@@ -642,14 +756,18 @@ In priority order — each settles entries above:
    part of its system prompt that mentions `/mnt/memory`.
 2. `GET /v1/sessions/{id}` and `…/resources` with a store attached: `access` when omitted
    (`"read_write"` or `null`), whether `mount_path` is ever `null`, the element's key set.
-3. `GET`/`DELETE …/resources/{rid}` naming a memory element, if any handle exists.
-4. `memories.create` at an existing path, and a rename onto one: status and error type.
+3. `GET`/`DELETE …/resources/{rid}` with the `memory_store_id` as `{rid}`, and with a
+   `sesrsc_` id: which handle, if any, returns the memory element.
+4. A rename onto an ancestor or descendant of another memory's path: status and type
+   (create-at-occupied and rename-onto-occupied are spec-stated).
 5. `DELETE …/memories/{id}?expected_content_sha256=<wrong>`: 409 or 412, and the type.
 6. `POST …/memory_versions/{head}/redact`: status and type.
-7. Two attached stores named "Notes" and "notes"; the same store attached twice.
+7. Two attached stores named "Notes" and "notes"; the same store attached twice; a store
+   named "(Notes)" and one named "Ünïcode" — the slug's trim and alphabet.
 8. `GET …/memory_versions` with no `limit`: the page size; a `next_page` value's shape.
 9. Content of 102,401 bytes on create: 400 or 413.
-10. A `secret` from a real poll (redacted): its key set beyond `sessions_token`.
+10. A `secret` from a real poll (redacted): its key set beyond `sessions_token`, and
+    whether a storeless session's item carries one at all.
 
 Every entry marked INFERRED above maps to one of these items; entries marked *ours* are
 platform choices no recording can confirm or refute, and have none by design.
@@ -659,13 +777,14 @@ platform choices no recording can confirm or refute, and have none by design.
 - **Version growth is unbounded** (scope decision 5): a chatty agent writing a 100 KB
   memory every turn adds 100 KB per turn to `memory_versions`. The retention issue names
   the rule to implement (30 days, newest N kept) once N is known or chosen.
-- **Cross-session freshness is one run.** Two cloud sessions editing the same memory
-  concurrently converge at their next runs with the store winning — the reference's
-  documented self-hosted behavior, slower than its cloud mount.
-- **The sessions token widens `Poll`'s response.** Any environment-key holder polling
-  receives a bearer for the claimed item's session — the reference's model, and narrower
-  than the key itself; the `--on-work` script path pipes it to stdin, as the reference
-  documents.
+- **Cross-session freshness is one run** (scope decision 7). Two cloud sessions editing
+  the same memory concurrently converge at their next runs with the store winning — the
+  reference's documented self-hosted behavior, slower than its cloud mount; the
+  compare-and-set turns the race into a recorded conflict, never a silent overwrite.
+- **The sessions token widens `Poll`'s response for sessions with stores.** An
+  environment-key holder polling such an item receives a bearer for its session — the
+  reference's model, and narrower than the key itself; the `--on-work` script path pipes
+  it to stdin, as the reference documents.
 - **`self_hosted` sessions with stores are refused until slice 6**, not degraded — a
   deliberate hard edge so no reference worker fails an item silently in the interim.
 - **The dreams issue inherits a design question**: a consolidation pipeline needs a model
