@@ -9,6 +9,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 )
 
@@ -109,11 +110,14 @@ func readFile(t *testing.T, path string) string {
 // mounts — skips here instead of reddening, which is the trade #427 asked for;
 // a chmod that outright fails is still the caller's own t.Fatal.
 //
-// Only fs.ErrPermission means the denial took hold (EACCES, EPERM and EROFS all
-// satisfy it). Any other error is an environment fault, and accepting it as a
-// denial would run the assertion against a precondition never established —
-// which can pass for the wrong reason, since the operation under test would
-// then fail on that same fault.
+// A refusal is what lets the assertion run; any other error is an environment
+// fault, and taking one for a refusal would run the assertion against a
+// precondition never established — which can pass for the wrong reason, because
+// the operation under test would then fail on that same fault. Hence the two
+// checks below rather than "err != nil". fs.ErrPermission is EACCES and EPERM
+// and nothing else (syscall.Errno.Is), so EROFS — a refusal Go does not
+// classify as one — is named separately; a mount that turns read-only under a
+// run is the only way dir reaches it, since t.TempDir already wrote there.
 //
 // The five euid-guarded permission-bit tests in internal/sandbox keep their
 // form: they exec /bin/bash as the subject under test, so Windows stops there
@@ -123,12 +127,17 @@ func skipIfStillWritable(t *testing.T, dir string) {
 	probe := filepath.Join(dir, ".probe")
 	f, err := os.Create(probe)
 	if err != nil {
-		if !errors.Is(err, fs.ErrPermission) {
+		if !errors.Is(err, fs.ErrPermission) && !errors.Is(err, syscall.EROFS) {
 			t.Fatalf("probing the write denial on %s: %v", dir, err)
 		}
 		return
 	}
-	f.Close()
+	// Both best-effort: the write already answered the question, and failing the
+	// run over the tidy-up would re-create the class of spurious red this guard
+	// exists to remove. A leftover .probe is harmless — it can only exist where
+	// the create succeeded, which is where removing it is permitted too, and the
+	// caller skips before anything enumerates the directory.
+	_ = f.Close()
 	_ = os.Remove(probe)
 	t.Skip("this runner writes through a 0o555 directory, so this proves nothing")
 }
