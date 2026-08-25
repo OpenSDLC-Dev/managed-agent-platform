@@ -105,8 +105,19 @@ matrix driven with curl against a built `controlplane`) read PASS with notes.
   Also: a `memories/` trailing slash the lane admitted to the mux's 404 is refused; the
   SDK test plants its idle event until the worker returns (its third pass: a failed plant
   ends the run at once and is reported first, and the wall-clock assertion it called
-  flaky under load is gone — the 30 s deadline is the bound); the registry's reading (1)
-  no longer overreads the SDK's "may be".
+  flaky under load is gone — the run context's 30 s deadline is a deadline, not a
+  wall-clock bound: the worker's deferred force-stop still gets a context of its own);
+  the registry's reading (1) no longer overreads the SDK's "may be".
+- *Codex reviewer, fourth pass; the verifier's final run* — the settlement race closed, the
+  window's length pinned at 45 s alive and 61 s dead on both sides (a 30 s mutant had
+  survived), `FinalizeAbandoned`'s own re-check of the window pinned, decision 15's text
+  annotated as landed. One design point carried into slice 6 rather than settled here:
+  the enqueue dedup (`WHERE state IN ('queued', 'starting', 'active')`) lets a send
+  trigger enqueue a replacement exec item while one is `stopping`, so a second worker
+  can run — and, once slice 6 lands, sync memory — while the first's token still flushes.
+  Pre-existing for tool runs since plan 35, and for memory bounded by the sync's sha
+  preconditions; whether `stopping` should bar replacements for `WindDown` is slice 6's
+  call, with the reference worker's own semantics in view.
 
 ## Memory stores end to end — real `ant` CLI, real model, a `cloud` sandbox (plan 36 slice 4, run 2026-08-25) — ✅ passed
 

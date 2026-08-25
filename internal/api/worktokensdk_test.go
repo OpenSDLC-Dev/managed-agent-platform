@@ -95,7 +95,7 @@ func TestSDKWorkerServesAnItemWithTheSessionsToken(t *testing.T) {
 	if err != nil {
 		t.Fatalf("HandleItem with the sessions token: %v", err)
 	}
-	t.Logf("HandleItem returned after %s (the 30 s deadline is the bound; the plant ends it in seconds)", took.Round(time.Millisecond))
+	t.Logf("HandleItem returned after %s (the run context's deadline is 30 s; the plant ends it in seconds)", took.Round(time.Millisecond))
 	var state string
 	var beat *time.Time
 	if err := s.pool.QueryRow(ctx, `SELECT state, last_heartbeat FROM work_items WHERE id = $1`, workID).Scan(&state, &beat); err != nil {

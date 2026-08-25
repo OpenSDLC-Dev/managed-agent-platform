@@ -293,9 +293,10 @@ func TestGracefulStopWithoutALeaseHolderStopsOutright(t *testing.T) {
 // TestPollFinalizesAnAbandonedWindDown: the worker asked to wind down normally
 // stops the item itself, but one that dies mid-wind-down (SIGKILL, a panic, an
 // unreachable control plane) never does — and Poll deliberately never re-offers a
-// stopping item, so nothing else would move it. Its lease still lapses, and that
-// is the signal: the next poll of the environment finalizes the abandoned item
-// rather than leaving it non-terminal forever (#25). It is finalized, never
+// stopping item, so nothing else would move it. Its lease still lapses, and —
+// once WindDown has passed since the request — that is the signal: the next poll
+// of the environment finalizes the abandoned item rather than leaving it
+// non-terminal forever (#25). It is finalized, never
 // handed back as work — the caller asked for it to stop.
 func TestPollFinalizesAnAbandonedWindDown(t *testing.T) {
 	ctx := context.Background()
