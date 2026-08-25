@@ -40,6 +40,17 @@ func decodeObject(r *http.Request) (map[string]json.RawMessage, error) {
 	if len(bytes.TrimSpace(raw)) == 0 {
 		return map[string]json.RawMessage{}, nil
 	}
+	// JSON is UTF-8 (RFC 8259), so this refuses nothing legal — and it sits
+	// here, beside rejectNULBody and for its reason, because no later parser
+	// can: encoding/json silently rewrites an invalid byte in a string to
+	// U+FFFD, so by the time a field validator such as memsync.ValidateContent
+	// runs, the value is already valid and already not what the client sent.
+	// A lone-surrogate escape ("\ud800") is replaced the same way and is
+	// deliberately not covered: that is the decoder's documented behavior on an
+	// escape the client wrote, not a byte it sent.
+	if !utf8.Valid(raw) {
+		return nil, errInvalid("request body must be valid UTF-8")
+	}
 	var obj map[string]json.RawMessage
 	if err := json.Unmarshal(raw, &obj); err != nil {
 		return nil, errInvalid("request body must be a JSON object")

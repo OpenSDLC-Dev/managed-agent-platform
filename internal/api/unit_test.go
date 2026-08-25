@@ -28,16 +28,29 @@ func TestCursorRoundTrip(t *testing.T) {
 	if err != nil || !c.versioned || c.version != 7 || c.dir != dirNext {
 		t.Errorf("version cursor round-trip: %+v, err %v", c, err)
 	}
+	// The path cursor keys the memories list. Its key rides base64url'd INSIDE
+	// the token, which is what lets a path carry the grammar's own separator.
+	path := `/a|b/c\d é`
+	c, err = decodeCursor(encodePathCursor(path))
+	if err != nil || !c.pathKeyed || c.path != path || c.dir != dirNext {
+		t.Errorf("path cursor round-trip: %+v, err %v", c, err)
+	}
 
+	inner := base64.RawURLEncoding.EncodeToString([]byte("/a"))
 	for name, cursor := range map[string]string{
-		"not base64":       "@@@",
-		"wrong prefix":     base64.RawURLEncoding.EncodeToString([]byte("x9|n|t|5|id")),
-		"bad direction":    base64.RawURLEncoding.EncodeToString([]byte("k1|x|t|5|id")),
-		"bad kind":         base64.RawURLEncoding.EncodeToString([]byte("k1|n|z|5")),
-		"missing id":       base64.RawURLEncoding.EncodeToString([]byte("k1|n|t|5|")),
-		"non-numeric time": base64.RawURLEncoding.EncodeToString([]byte("k1|n|t|abc|id")),
-		"zero version":     base64.RawURLEncoding.EncodeToString([]byte("k1|n|v|0")),
-		"extra time parts": base64.RawURLEncoding.EncodeToString([]byte("k1|n|v|5|junk")),
+		"not base64":         "@@@",
+		"wrong prefix":       base64.RawURLEncoding.EncodeToString([]byte("x9|n|t|5|id")),
+		"bad direction":      base64.RawURLEncoding.EncodeToString([]byte("k1|x|t|5|id")),
+		"bad kind":           base64.RawURLEncoding.EncodeToString([]byte("k1|n|z|5")),
+		"missing id":         base64.RawURLEncoding.EncodeToString([]byte("k1|n|t|5|")),
+		"non-numeric time":   base64.RawURLEncoding.EncodeToString([]byte("k1|n|t|abc|id")),
+		"zero version":       base64.RawURLEncoding.EncodeToString([]byte("k1|n|v|0")),
+		"extra time parts":   base64.RawURLEncoding.EncodeToString([]byte("k1|n|v|5|junk")),
+		"path not base64":    base64.RawURLEncoding.EncodeToString([]byte("k1|n|m|!!!")),
+		"empty path":         base64.RawURLEncoding.EncodeToString([]byte("k1|n|m|")),
+		"extra path parts":   base64.RawURLEncoding.EncodeToString([]byte("k1|n|m|" + inner + "|junk")),
+		"unstorable path":    base64.RawURLEncoding.EncodeToString([]byte("k1|n|m|" + base64.RawURLEncoding.EncodeToString([]byte("/a\x00")))),
+		"invalid UTF-8 path": base64.RawURLEncoding.EncodeToString([]byte("k1|n|m|" + base64.RawURLEncoding.EncodeToString([]byte("/a\xff")))),
 	} {
 		if _, err := decodeCursor(cursor); err == nil {
 			t.Errorf("%s: decodeCursor accepted %q", name, cursor)

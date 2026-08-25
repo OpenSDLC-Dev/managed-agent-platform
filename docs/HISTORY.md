@@ -49,6 +49,87 @@ new directory and in-repo citations re-pointed in the moving PR (plan
 
 ---
 
+## Memories and versions — real `ant` CLI against the memory routes (plan 36 slice 2, run 2026-08-25) — ✅ passed
+
+The plan's slice-2 verification row asks for every `ant beta:memory-stores:memories` and
+`:memory-versions` subcommand with each of its flags, recorded into HISTORY. Recorded with `ant`
+v1.26.1 (pinning anthropic-sdk-go v1.66.0) against the branch's own `controlplane` on a throwaway
+Postgres at 7795065 (#485), after the review round below. Two CLI facts the transcript needed:
+Git Bash rewrites a `/notes/a.md` argument into a Windows path before `ant.exe` sees it
+(`MSYS_NO_PATHCONV=1` stops it), and `--precondition` takes the whole object, `type` included.
+
+- Four creates under `/notes/`, `/notes/deep/` and `/todo.md`; a fifth from a **piped YAML body**
+  (`path: /piped.md`, `content: from stdin`); the creates' default projection renders `content`
+  `null`; `retrieve --view full` serves it, and so does `retrieve … <memory-id>` in the **positional
+  form** with no `--view` — retrieve defaults to `full`.
+- `list` walks the five in byte-wise path order; `--path-prefix /notes/ --depth 1` returns
+  `/notes/a.md`, `/notes/b.md` and one `memory_prefix` for `/notes/deep/`; `--limit 1 --max-items -1
+  --view full` auto-pages through the path-keyed cursor, none repeated.
+- Creates at `/notes` and at `/notes/a.md/x` → `409 memory_path_conflict_error`, each naming
+  `/notes/a.md`'s memory; `notes/no-slash` → `400 path must start with "/"`.
+- `update --content alpha2 --precondition '{type: content_sha256, content_sha256: <sha(alpha)>}'` →
+  200 and a `modified` version; the same precondition again → `409 memory_precondition_failed_error`
+  naming both digests; `--content alpha2` once more → 200 with no new version; `--path /notes/a2.md`
+  → a `modified` rename; a flagless update → `400 update requires content or path`.
+- `memory-versions list --memory-id` → `created`, `modified`, `modified`, newest first;
+  `--session-id sesn_…` → an empty page (no session writes yet); `--operation modified --view full
+  --limit 1` → the head with its content; `retrieve --view full` on the `created` version → `alpha`.
+- `redact` on the head → `400 … is the current head … and cannot be redacted`; on the `created`
+  version → 200 with `path`, `content`, `content_sha256`, `content_size_bytes` null and
+  `redacted_at`/`redacted_by` set.
+- `delete --expected-content-sha256 <wrong>` → the same 409; with the right digest →
+  `memory_deleted`; `retrieve` → 404; the lineage now ends in a `deleted` row carrying the path.
+- `memory-stores archive`, then a create → `400 … is archived`; `redact` on `/todo.md`'s head → 200,
+  and `retrieve --view full` reads `content: ""`; `memory-stores delete` → the versions list 404s.
+
+**Review round** (every finding verified against the source before acting):
+
+- *Codex, high* — Go's JSON decoder rewrites an invalid UTF-8 byte to U+FFFD before any validator
+  runs, so `{"content":"<0xff>"}` was accepted and stored altered while the registry claimed a
+  400. Fixed at the one chokepoint every JSON object body passes through, `decodeObject`: a body
+  that is not valid UTF-8 is a 400 before parsing, on every route that decodes a JSON object (the
+  work-stop body's one bool is read outside it and stores nothing; its own `fixed` fragment);
+  raw-body tests prove no memory or version row is written.
+- *Both reviewers, the verifier* — the memory-versions list ignored the `view=full` cap of 20 the
+  SDK documents for both resources. Fixed with the memories list's clamp; tested at 25 versions.
+- *Claude* — the `service_account_id` filter was ignored, so an audit client filtering by a service
+  account got the whole history. Now a filter lane like `api_key_id`'s, answering the empty page a
+  platform that never writes that actor must answer; the registry entry says so.
+- *Claude, the verifier* — three readings unregistered: the type-only precondition's 400, the
+  2,001st memory's 400, explicit nulls on memory bodies. Three INFERRED entries under #78.
+- *Codex* — three INFERRED entries cited recording items that do not exercise their claim (invalid
+  UTF-8 under item 9, a slash-less `path_prefix` under 13, a repeated redaction under 6/15). Each
+  parenthetical now names what the item lacks.
+- *Claude, nits taken* — a lineage index on `(memory_store_id, memory_id, created_at DESC, id
+  DESC)` while 0029 is still unmerged (the filter runs over a history #476 never prunes); two
+  citations corrected; the ARCHITECTURE row says `internal/api` is `memsync`'s only importer until
+  slice 4; a comment stops claiming the collation test pins the handler's clause (the verifier
+  showed the clause cannot go red on the musl fixture — the column's collation is what the test
+  pins). Not taken: selecting `content` under `view=basic` only to discard it — a cost, not a
+  defect, left for a later pass.
+- *CodeRabbit, five threads, all taken* — `memsync.ValidatePath` accepted invalid UTF-8 (an
+  invalid byte ranges as U+FFFD, which neither the Cc/Cf rule nor NFC catches; inert on the API
+  lane behind `decodeObject`, load-bearing for slice 4's sync lane, so a rule of its own now);
+  `getMemory` under an unknown store answered the memory's 404 where every sibling route answers
+  the store's (the test now pins the message on all eight routes); `writeError` asserted error
+  types where the rest of `internal/api` uses `errors.As` (its claim that a lint gate fails was
+  wrong — this repo runs none — the style point stood); a `CHECK` on `memory_versions.operation`,
+  as on every enum column in the schema; `slices.Equal` for a hand-rolled helper.
+- *The implementer's seven declared deviations*, judged by both reviewers and the verifier: refusing
+  a non-NFC path rather than normalizing it (the plan's own rejection table); handlers before tests,
+  discharged by mutation probes; a separate `apiErrorWithFields` type; a slash-less `path_prefix`
+  matched literally (registered); a repeated redaction returning the unchanged row (registered); the
+  type-only precondition refused (now registered); `created_by` rendering null when absent — not a
+  deviation, the spec says "null when no writer is recorded".
+
+**Gate**: `make verify` in WSL at 919ace5 — the branch's last commit but for the one that wrote
+this paragraph — 55 packages `ok`, nothing failed, total statement coverage **90.43%**. The run
+before it, at 7795065, lost one assertion to a timing race in a package the branch does not touch:
+`internal/queue`'s `TestEnqueueNotifiesWorkChannelOnCommit` ("woken before the enqueue committed"),
+green when re-run alone and filed as #486. An earlier run at 6ca82b0 timed out `internal/executor`
+at Go's ten-minute limit while a reviewer's native test run shared the Docker daemon — the same
+contention slice 1 recorded, and the reason the verifier and the gate now run in sequence.
+
 ## Memory stores — real `ant` CLI against `/v1/memory_stores` (plan 36 slice 1, run 2026-08-25) — ✅ passed
 
 The plan's slice-1 verification row asks that `ant beta:memory-stores create|retrieve|update|list|
