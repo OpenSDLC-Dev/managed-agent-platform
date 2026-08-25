@@ -49,6 +49,69 @@ new directory and in-repo citations re-pointed in the moving PR (plan
 
 ---
 
+## Attachment and filter — real `ant` CLI against `resources[]` and the sessions filter (plan 36 slice 3, run 2026-08-25) — ✅ passed
+
+The plan's slice-3 verification row asks for `ant beta:sessions create --resource '{type:
+memory_store, …}'`, `beta:sessions:resources list` and `beta:sessions list --memory-store-id`,
+recorded into HISTORY. Recorded with `ant` v1.26.1 (pinning anthropic-sdk-go v1.66.0) against the
+branch's own `controlplane` on a throwaway Postgres at d2b25c7 (#487). Two CLI facts the transcript
+needed: `--model` takes a mapping (`{id: …}`), not a bare id — the CLI's own error says "string
+was used where mapping is expected" — while `--agent` accepts the id string or `{type: agent, id:
+…}` (the transcript spells the latter); and a resource is one `--resource '{…}'` mapping per
+element, or the `--resource.type`/`--resource.memory-store-id` inner flags for a single one.
+
+- A create with two stores — one `read_only` with `instructions`, one bare — renders the two
+  elements in request order with exactly the seven documented keys and no `id`: `access`
+  `read_only`/`read_write`, `instructions` the string/`null`, `description` the store's/`""`,
+  `mount_path` `/mnt/memory/user-preferences` and `/mnt/memory/notes`. `retrieve` and `resources
+  list` echo them; `resources list --limit 1 --max-items -1` auto-pages across the memory element,
+  neither repeating nor skipping one.
+- `resources retrieve` and `resources delete` with the `memory_store_id` as the resource id → `404
+  session resource … not found`.
+- `memory-stores update --name "Renamed Preferences"`, then `retrieve` → the session still reads
+  `User Preferences` and its mount path: the attach-time snapshot.
+- A second session through the inner-flag form → 200 with the same element shape.
+- `sessions list --memory-store-id` → the one session for the preferences store, both for the
+  notes store, an empty page for a well-formed absent id, `400 memory_store_id must be a valid
+  memory store id` for `memstore_X`.
+- The refusals, each `400 invalid_request_error`: an absent store (`memory store … not found`),
+  the archived one (`… is archived`), the same store twice (`… is attached more than once`),
+  "Notes" beside "notes" (`… both mount at /mnt/memory/notes`), `access: append`, the
+  `self_hosted` environment (`memory_store resources are not supported on self_hosted environments
+  yet`), and a repository at `/mnt/memory/notes` (`mount_path … is reserved for memory stores`).
+- `memory-stores delete` on the notes store, then `retrieve` → the element is kept as snapshotted,
+  and `sessions list --memory-store-id` still returns both sessions.
+
+**Review round** (every finding verified against the source before acting):
+
+- *Claude, high* — the docs commit had swept in four Windows shell-cache binaries (~989 KB) under a
+  literal `%SystemDrive%/` directory that a reviewer's sandbox left unexpanded at the repo root —
+  #338's failure mode in a new spelling. The commit was rewritten without them and
+  `/%SystemDrive%/` joins `.gitignore`'s root-output block.
+- *Both reviewers* — the "no id, no timestamps" claim was asserted with `wantFields`, which
+  tolerates extra keys, so adding an `id` to the element would have stayed green. `wantExactFields`
+  now pins both elements' seven keys.
+- *Codex* — the store row's `FOR SHARE` had no regression test. `TestSessionMemoryAttachLocksTheStoreRow`
+  races an uncommitted archive and an uncommitted delete against the create, committing only once
+  `pg_stat_activity` shows the create waiting on the row lock (the console-key test's technique);
+  the mutant without the lock never waits, and the poll's timeout is how it fails.
+- *Codex* — the fragment said the element is stored "as the reference renders it", crediting the
+  reference with the `access` echo and the slug that are this platform's inferences; it now says
+  "in the reference's response shape" and names the readings as its own. A registry sentence
+  called the wrong two 400s parse-time (the duplicate and the ninth are; the collision is not).
+- *Claude, nits taken* — `resourceID` was left dead by `resourceKey` and is gone; a `sesrsc_` id
+  was minted for every element and discarded for memory ones, so it is minted only where used; a
+  test comment described a cipher-less server the fixture never was; the brain test now seeds a
+  repository beside the memory element, so a decoder tripped by the new shape fails the test
+  rather than falling silent. Not taken: a repository may still mount at `/mnt`, an ancestor of
+  the memory root — not new with this slice (file mounts under `/mnt/session/uploads` have the
+  same shape), and slice 4, where a mount actually lands, is where to decide it.
+
+**Gate**: `make verify` in WSL at 1081654 — the branch's last commit but for the docs-only one that
+wrote this paragraph — 55 packages `ok`, nothing failed, total statement coverage **90.48%**; the
+run at d2b25c7 before the review round read 90.44%. Each ran with no native suite sharing the
+Docker daemon: the verifier, the reviewers and the gate took their turns in sequence.
+
 ## Memories and versions — real `ant` CLI against the memory routes (plan 36 slice 2, run 2026-08-25) — ✅ passed
 
 The plan's slice-2 verification row asks for every `ant beta:memory-stores:memories` and

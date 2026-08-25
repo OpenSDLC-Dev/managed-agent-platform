@@ -12,8 +12,10 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/memsync"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/secrets"
 	"github.com/jackc/pgx/v5"
 	"go.opentelemetry.io/otel"
@@ -58,9 +60,27 @@ const maxReposPerSession = 8
 
 // reservedRepoMounts are mount targets a repository may never take (plan 25
 // decision 3): "/" (extraction over the rootfs breaks the sandbox image
-// contract, and a re-clone's cleared target would be the sandbox itself) and
-// "/tmp" (the ancestor of the executor's in-sandbox staging path).
-var reservedRepoMounts = map[string]bool{"/": true, "/tmp": true}
+// contract, and a re-clone's cleared target would be the sandbox itself),
+// "/tmp" (the ancestor of the executor's in-sandbox staging path) and, from
+// plan 36 (decision 8), memoryMountParent — validateRepoMountPath also refuses
+// anything below it, which the equal-path map cannot express.
+var reservedRepoMounts = map[string]bool{"/": true, "/tmp": true, memoryMountParent: true}
+
+// memoryMountParent is the directory every attached memory store mounts under
+// (the memory guide: "a directory under /mnt/memory/"); a store's own mount is
+// memoryMountParent + "/" + its slug. A file mount cannot reach it
+// (resolveMountPath roots files under /mnt/session/uploads) and a repository
+// mount is refused at or below it, so the parent is the stores' alone.
+const memoryMountParent = "/mnt/memory"
+
+// maxMemoryStoresPerSession is the memory guide's documented cap ("8 stores
+// per session"); the status of the ninth is INFERRED (plan 36 decision 7).
+const maxMemoryStoresPerSession = 8
+
+// maxMemoryInstructionsChars caps a memory attachment's instructions
+// (betasession.go:912 "Max 4096 chars"; the spec's maxLength, so characters,
+// not bytes).
+const maxMemoryInstructionsChars = 4096
 
 // fileResourceJSON is the materialized session file resource
 // (BetaManagedAgentsSessionResource file variant, betasessionresource.go:176-209):
@@ -101,12 +121,35 @@ type checkoutJSON struct {
 	Sha  string `json:"sha,omitempty"`  // commit variant
 }
 
+// memoryResourceJSON is the stored memory_store session resource
+// (BetaManagedAgentsMemoryStoreResource, betasessionresource.go:317-352):
+// exactly {memory_store_id, type, access, description, instructions,
+// mount_path, name} — no id and no timestamps, unlike the file and repository
+// variants (plan 36 decision 7). name, description and mount_path are
+// snapshotted from the store row inside the create transaction ("Later edits
+// to the store's name do not propagate"); access renders the documented
+// default "read_write" when the request omitted it (whether the reference
+// echoes the string or null is INFERRED); instructions renders null when
+// omitted. Stored verbatim as one element of sessions.resources, so the
+// brain, executor and worker decoders — which pick elements by type — pass
+// it over until slice 4 teaches them the mount.
+type memoryResourceJSON struct {
+	Access        string  `json:"access"`
+	Description   string  `json:"description"`
+	Instructions  *string `json:"instructions"`
+	MemoryStoreID string  `json:"memory_store_id"`
+	MountPath     string  `json:"mount_path"`
+	Name          string  `json:"name"`
+	Type          string  `json:"type"`
+}
+
 // resourceKind discriminates the validated resource union.
 type resourceKind int
 
 const (
 	resourceKindFile resourceKind = iota
 	resourceKindRepo
+	resourceKindMemory
 )
 
 // resourceInput is a validated-but-not-yet-materialized resource: a file has
@@ -122,23 +165,33 @@ type resourceInput struct {
 	url      string
 	token    string
 	checkout *checkoutJSON
+	// memory_store variant; mountPath stays empty until the create
+	// transaction snapshots the store (materializeResourceInputs)
+	memoryStoreID string
+	access        string
+	instructions  *string
 }
 
 // parseResourceInputs validates the create-time resources[] union without
-// touching the database: each element must be a supported resource (file or
-// github_repository; memory_store keeps its seam open but stays rejected) with
-// a valid file_id or canonical GitHub URL + token. A file's mount_path
-// resolves (resolveMountPath) under the uploads root — so "data.csv" and
-// "/data.csv" collide the way they will in the sandbox — while a repository's
-// is the literal container path (validateRepoMountPath). Existence of a
-// referenced file is checked later, inside the create transaction
-// (materializeResourceInputs). Cross-resource rules (plan 25 decision 3):
-// uniqueness is judged on the resolved/path.Clean forms so aliases of one
-// directory cannot coexist; no resource may sit at a proper ancestor of a
-// repository's mount (a file there is a non-directory where the clone needs a
-// directory, and nested repos would let a fresh re-clone of the outer clear
-// the inner — a resource inside a repo mount, the supported overlay, stays
-// legal); and a session mounts at most maxReposPerSession repositories.
+// touching the database: each element must be a supported resource (file,
+// github_repository or memory_store) with a valid file_id, canonical GitHub
+// URL + token, or memory_store_id. A file's mount_path resolves
+// (resolveMountPath) under the uploads root — so "data.csv" and "/data.csv"
+// collide the way they will in the sandbox — while a repository's is the
+// literal container path (validateRepoMountPath). Existence of a referenced
+// file, and the store a memory element names, are checked later, inside the
+// create transaction (materializeResourceInputs). Cross-resource rules (plan
+// 25 decision 3): uniqueness is judged on the resolved/path.Clean forms so
+// aliases of one directory cannot coexist; no resource may sit at a proper
+// ancestor of a repository's mount (a file there is a non-directory where the
+// clone needs a directory, and nested repos would let a fresh re-clone of the
+// outer clear the inner — a resource inside a repo mount, the supported
+// overlay, stays legal); and a session mounts at most maxReposPerSession
+// repositories. A memory element has no mount path yet — it is derived from
+// the store's name in the transaction, under memoryMountParent, which no file
+// or repository mount can reach — so it takes only its own two rules here:
+// the same store at most once and at most maxMemoryStoresPerSession of them
+// (plan 36 decision 7).
 func parseResourceInputs(obj map[string]json.RawMessage) ([]resourceInput, error) {
 	raw, ok := obj["resources"]
 	if !ok || isNull(raw) {
@@ -150,11 +203,23 @@ func parseResourceInputs(obj map[string]json.RawMessage) ([]resourceInput, error
 	}
 	out := make([]resourceInput, 0, len(items))
 	seen := make(map[string]bool, len(items))
+	stores := make(map[string]bool, len(items))
 	repos := 0
 	for _, item := range items {
 		in, err := parseResourceItem(item)
 		if err != nil {
 			return nil, err
+		}
+		if in.kind == resourceKindMemory {
+			if stores[in.memoryStoreID] {
+				return nil, errInvalid("memory store %s is attached more than once", in.memoryStoreID)
+			}
+			stores[in.memoryStoreID] = true
+			if len(stores) > maxMemoryStoresPerSession {
+				return nil, errInvalid("a session can attach at most %d memory stores", maxMemoryStoresPerSession)
+			}
+			out = append(out, in)
+			continue
 		}
 		clean := path.Clean(in.mountPath)
 		if seen[clean] {
@@ -174,6 +239,9 @@ func parseResourceInputs(obj map[string]json.RawMessage) ([]resourceInput, error
 			continue
 		}
 		for _, p := range out {
+			if p.kind == resourceKindMemory {
+				continue
+			}
 			if properPathAncestor(path.Clean(p.mountPath), path.Clean(r.mountPath)) {
 				return nil, errInvalid("mount_path %q is an ancestor of repository mount_path %q", p.mountPath, r.mountPath)
 			}
@@ -215,7 +283,7 @@ func parseResourceObject(obj map[string]json.RawMessage) (resourceInput, error) 
 	case "github_repository":
 		return parseRepoResource(obj)
 	case "memory_store":
-		return resourceInput{}, errInvalid("%s resources are not supported yet", typ)
+		return parseMemoryResource(obj)
 	default:
 		return resourceInput{}, errInvalid("resource type %q is not supported", typ)
 	}
@@ -246,6 +314,49 @@ func parseFileResource(obj map[string]json.RawMessage) (resourceInput, error) {
 		mountPath = resolved
 	}
 	return resourceInput{fileID: fileID, mountPath: mountPath}, nil
+}
+
+// parseMemoryResource validates the memory_store create variant
+// (BetaManagedAgentsMemoryStoreResourceParam, betasession.go:896-935:
+// memory_store_id and type required; access and instructions optional, both
+// nullable). The id is checked on shape here and against the store row in the
+// create transaction; an explicit null for access is the omitted case — the
+// documented default, "read_write" — and for instructions the stored null.
+// The SDK never transmits an empty access (omitzero), so "" is refused with
+// every other value outside the enum rather than read as the default.
+func parseMemoryResource(obj map[string]json.RawMessage) (resourceInput, error) {
+	if err := rejectUnknownKeys(obj, "type", "memory_store_id", "access", "instructions"); err != nil {
+		return resourceInput{}, err
+	}
+	id, err := requiredString(obj, "memory_store_id")
+	if err != nil {
+		return resourceInput{}, err
+	}
+	if !domain.ID(id).HasPrefix(domain.PrefixMemoryStore) || !domain.ID(id).Valid() {
+		return resourceInput{}, errInvalid("memory_store_id must be a valid memory store id")
+	}
+	access, set, null, err := stringField(obj, "access")
+	if err != nil {
+		return resourceInput{}, err
+	}
+	if !set || null {
+		access = "read_write"
+	}
+	if access != "read_write" && access != "read_only" {
+		return resourceInput{}, errInvalid(`access must be "read_write" or "read_only"`)
+	}
+	in := resourceInput{kind: resourceKindMemory, memoryStoreID: id, access: access}
+	instructions, set, null, err := stringField(obj, "instructions")
+	if err != nil {
+		return resourceInput{}, err
+	}
+	if set && !null {
+		if utf8.RuneCountInString(instructions) > maxMemoryInstructionsChars {
+			return resourceInput{}, errInvalid("instructions must be at most %d characters", maxMemoryInstructionsChars)
+		}
+		in.instructions = &instructions
+	}
+	return in, nil
 }
 
 // parseRepoResource validates the github_repository create variant
@@ -435,6 +546,9 @@ func validateRepoMountPath(p string) error {
 	if reservedRepoMounts[p] {
 		return errInvalid("mount_path %q is reserved", p)
 	}
+	if strings.HasPrefix(p, memoryMountParent+"/") {
+		return errInvalid("mount_path %q is reserved for memory stores", p)
+	}
 	return nil
 }
 
@@ -539,10 +653,22 @@ func sealRepoTokens(ctx context.Context, cipher secrets.Cipher, inputs []resourc
 func materializeResourceInputs(ctx context.Context, db querier, inputs []resourceInput, now time.Time) ([]json.RawMessage, []string, error) {
 	out := make([]json.RawMessage, 0, len(inputs))
 	var repoIDs []string
+	memoryMounts := map[string]string{}
 	for _, in := range inputs {
-		id := domain.NewID(domain.PrefixResource).String()
 		switch in.kind {
+		case resourceKindMemory:
+			el, err := snapshotMemoryStore(ctx, db, in)
+			if err != nil {
+				return nil, nil, err
+			}
+			// Two stores whose names slug alike would mount over each other.
+			if prev, taken := memoryMounts[el.MountPath]; taken {
+				return nil, nil, errInvalid("memory stores %s and %s both mount at %s", prev, in.memoryStoreID, el.MountPath)
+			}
+			memoryMounts[el.MountPath] = in.memoryStoreID
+			out = append(out, mustJSON(el))
 		case resourceKindRepo:
+			id := domain.NewID(domain.PrefixResource).String()
 			out = append(out, mustJSON(repoResourceJSON{
 				ID: id, CreatedAt: now, MountPath: in.mountPath,
 				Type: "github_repository", UpdatedAt: now,
@@ -553,6 +679,7 @@ func materializeResourceInputs(ctx context.Context, db querier, inputs []resourc
 			if err := fileMustExist(ctx, db, in.fileID); err != nil {
 				return nil, nil, err
 			}
+			id := domain.NewID(domain.PrefixResource).String()
 			out = append(out, mustJSON(fileResourceJSON{
 				ID: id, CreatedAt: now, FileID: in.fileID,
 				MountPath: in.mountPath, Type: "file", UpdatedAt: now,
@@ -560,6 +687,49 @@ func materializeResourceInputs(ctx context.Context, db querier, inputs []resourc
 		}
 	}
 	return out, repoIDs, nil
+}
+
+// snapshotMemoryStore turns a validated memory element into its stored form
+// from the store row, read FOR SHARE so a concurrent archive or delete cannot
+// slip in between this check and the session INSERT (the environment row's
+// precedent in createSession). An unknown or archived store fails the create
+// with a 400, the vault_ids precedent (validateAttachedVaults) rather than the
+// file's 404 — statuses INFERRED, plan 36 decision 7. The mount path is
+// memoryMountParent + "/" + the slug of the snapshotted name (decision 8),
+// falling back to the store id's token for a name with no alphanumerics.
+func snapshotMemoryStore(ctx context.Context, db querier, in resourceInput) (memoryResourceJSON, error) {
+	var name, description string
+	var archivedAt *time.Time
+	err := db.QueryRow(ctx,
+		`SELECT name, description, archived_at FROM memory_stores WHERE id = $1 FOR SHARE`,
+		in.memoryStoreID).Scan(&name, &description, &archivedAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return memoryResourceJSON{}, errInvalid("memory store %s not found", in.memoryStoreID)
+	}
+	if err != nil {
+		return memoryResourceJSON{}, err
+	}
+	if archivedAt != nil {
+		return memoryResourceJSON{}, errInvalid("memory store %s is archived", in.memoryStoreID)
+	}
+	slug := memsync.Slug(name, strings.TrimPrefix(in.memoryStoreID, domain.PrefixMemoryStore+"_"))
+	return memoryResourceJSON{
+		Access: in.access, Description: description, Instructions: in.instructions,
+		MemoryStoreID: in.memoryStoreID, MountPath: memoryMountParent + "/" + slug,
+		Name: name, Type: "memory_store",
+	}, nil
+}
+
+// resourceInputsHaveMemory reports whether any validated input is a memory
+// store — createSession refuses those on a self_hosted environment until
+// slice 6 (plan 36 scope decision 2).
+func resourceInputsHaveMemory(inputs []resourceInput) bool {
+	for _, in := range inputs {
+		if in.kind == resourceKindMemory {
+			return true
+		}
+	}
+	return false
 }
 
 // errRepoSecretsUnavailable answers a repo-bearing create or a token rotation
@@ -707,7 +877,7 @@ func (s *server) listSessionResources(r *http.Request) (any, error) {
 		out.Data = append(out.Data, raw)
 	}
 	if end < len(resources) && len(page) > 0 {
-		c := encodeResourceCursor(resourceID(page[len(page)-1]))
+		c := encodeResourceCursor(resourceKey(page[len(page)-1]))
 		out.NextPage = &c
 	}
 	return out, nil
@@ -994,18 +1164,30 @@ func findResource(resources []json.RawMessage, rid string) json.RawMessage {
 
 func indexOfResource(resources []json.RawMessage, rid string) int {
 	for i, raw := range resources {
-		if resourceID(raw) == rid {
+		if resourceKey(raw) == rid {
 			return i
 		}
 	}
 	return -1
 }
 
-func resourceID(raw json.RawMessage) string {
+// resourceKey names a stored element by something every element has: the id
+// of a file or repository element, "memstore:<memory_store_id>" for a memory
+// element, which carries none (unique within one session's resources by the
+// same-store-twice rule). The list cursor is built from it, so a page ending
+// on a memory element resumes after that element rather than on an empty
+// token; a get or delete by {rid} never reaches a memory element, since
+// checkResourceID admits only sesrsc_ ids (plan 36 decision 7).
+func resourceKey(raw json.RawMessage) string {
 	var o struct {
-		ID string `json:"id"`
+		ID            string `json:"id"`
+		Type          string `json:"type"`
+		MemoryStoreID string `json:"memory_store_id"`
 	}
 	_ = json.Unmarshal(raw, &o)
+	if o.ID == "" && o.Type == "memory_store" {
+		return "memstore:" + o.MemoryStoreID
+	}
 	return o.ID
 }
 

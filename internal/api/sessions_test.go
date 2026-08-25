@@ -494,8 +494,8 @@ func TestSessionCreateValidation(t *testing.T) {
 		"archived environment": {map[string]any{"agent": agentID, "environment_id": archEnv["id"]}, 400, "invalid_request_error"},
 		"github resource missing token": {map[string]any{"agent": agentID, "environment_id": envID,
 			"resources": []any{map[string]any{"type": "github_repository", "url": "https://github.com/x/y"}}}, 400, "invalid_request_error"},
-		"memory resources unsupported": {map[string]any{"agent": agentID, "environment_id": envID,
-			"resources": []any{map[string]any{"type": "memory_store", "memory_store_id": "mem_x"}}}, 400, "invalid_request_error"},
+		"unknown memory store": {map[string]any{"agent": agentID, "environment_id": envID,
+			"resources": []any{map[string]any{"type": "memory_store", "memory_store_id": "memstore_" + strings.Repeat("0", 23) + "1"}}}, 400, "invalid_request_error"},
 		"unknown vault": {map[string]any{"agent": agentID, "environment_id": envID,
 			"vault_ids": []any{"vlt_missing0000000000000000"}}, 400, "invalid_request_error"},
 		"malformed vault id": {map[string]any{"agent": agentID, "environment_id": envID,
@@ -627,13 +627,12 @@ func TestSessionListFiltersAndBidirectionalPagination(t *testing.T) {
 	status, body := s.do(http.MethodGet, "/v1/sessions?statuses[]=zombie", nil)
 	wantErr(t, status, body, http.StatusBadRequest, "invalid_request_error")
 
-	// deployment_id / memory_store_id reference features we don't host: no
-	// session can match, so the result is empty rather than an error.
-	for _, q := range []string{"deployment_id=depl_x", "memory_store_id=memstore_x"} {
-		status, list = s.do(http.MethodGet, "/v1/sessions?"+q, nil)
-		if status != http.StatusOK || len(listData(t, list)) != 0 {
-			t.Errorf("%s: %d %v", q, status, list)
-		}
+	// deployment_id references a feature we don't host: no session can match,
+	// so the result is empty rather than an error. (memory_store_id is real
+	// since plan 36 slice 3 — TestSessionListFiltersByMemoryStore.)
+	status, list = s.do(http.MethodGet, "/v1/sessions?deployment_id=depl_x", nil)
+	if status != http.StatusOK || len(listData(t, list)) != 0 {
+		t.Errorf("deployment_id: %d %v", status, list)
 	}
 
 	// Bidirectional pagination, default order desc.
