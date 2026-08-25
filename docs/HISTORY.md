@@ -56,7 +56,7 @@ passphrase at `/facts/secret.md`, a session attached `read_write` with `instruct
 `user.message` asking for the passphrase and for today's date at `/log/today.md`, the store and
 its versions afterwards, a second session attached `read_only` whose write is refused, and the
 filter listing both. Recorded with `ant` v1.26.1 against the branch's own `controlplane`,
-`brain` and `executor` at b3e2f02 (#PRNUM) — three binaries in WSL on a throwaway Postgres,
+`brain` and `executor` at b3e2f02 (#489) — three binaries in WSL on a throwaway Postgres,
 Docker sandboxes on `debian:stable-slim`, the model from `.env` (`MiniMax-M3` over the
 Anthropic protocol). One CLI fact the first attempt taught: an agent created without
 `--tool '{type: agent_toolset_20260401}'` has no tools, and this model then prints its

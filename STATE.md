@@ -25,7 +25,7 @@ issuing. All seven scope decisions are settled; the design is the plan's ninetee
       occupancy, prefix rollups), the three version routes, actors, eleven registry items.
 - [x] **Slice 3 — attachment and filter** (#487): the id-less `memory_store` element (snapshot,
       slug, the seven 400s), the resources cursor key, the real filter, `/mnt/memory` reserved.
-- [x] **Slice 4 — cloud materialization, sync, block** (#PRNUM): `memsync.Plan`, `FileWrite.Mode`,
+- [x] **Slice 4 — cloud materialization, sync, block** (#489): `memsync.Plan`, `FileWrite.Mode`,
       the executor's and reaper's three-phase sync, the file tools' roots, the brain's block, two evals.
 - [ ] Slice 5 — the sessions token: migration 0030, the `wtk_` lane and its matrix.
 - [ ] Slice 6 — BYOC memory: the worker's decode, `SetupMemory` and sync, the
