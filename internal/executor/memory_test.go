@@ -475,6 +475,54 @@ func TestMemorySyncRefusals(t *testing.T) {
 	}
 }
 
+// TestMemoryRefreshBeforeTheTools: a mount the sandbox already holds is
+// reconciled before the run's tools read it, so a change another session or
+// the API made reaches this session at its next run — the read tool sees it
+// — not at the run after.
+func TestMemoryRefreshBeforeTheTools(t *testing.T) {
+	h, sb := materialized(t, "read_write")
+	if _, err := h.pool.Exec(context.Background(),
+		`UPDATE memories SET content = 'remote v2', content_sha256 = $2 WHERE memory_store_id = $1 AND path = '/notes.md'`,
+		memStoreID, sha256hex([]byte("remote v2"))); err != nil {
+		t.Fatal(err)
+	}
+	h.suspend(t, readUse(memMount+"/notes.md"))
+	if _, err := h.exec.step(context.Background()); err != nil {
+		t.Fatalf("step: %v", err)
+	}
+	results := h.toolResults(t)
+	if last := results[len(results)-1]; last.IsError || !strings.Contains(resultText(last), "remote v2") {
+		t.Errorf("the read answered %+v; want the store's change, landed before the tools", last)
+	}
+	if sb.files[memMount+"/notes.md"] != "remote v2" {
+		t.Errorf("/notes.md = %q", sb.files[memMount+"/notes.md"])
+	}
+}
+
+// TestMemorySyncReplacesADirectoryWithAFile: the agent deletes `/a/b.md` and
+// writes a file at `/a` in one run — a transition the store's occupancy rule
+// allows once the descendant is gone. Deletions settle first, so the create
+// finds the path free; the file is the store's `/a` and the agent's copy
+// stays.
+func TestMemorySyncReplacesADirectoryWithAFile(t *testing.T) {
+	h, sb := materialized(t, "read_write")
+	delete(sb.files, memMount+"/a/b.md")
+	sb.files[memMount+"/a"] = "flat now"
+	h.step(t)
+	if got, _ := h.memoryContent(t, memStoreID, "/a"); got != "flat now" {
+		t.Errorf("the store's /a = %q; the create was judged before the deletion settled", got)
+	}
+	if _, ok := h.memoryContent(t, memStoreID, "/a/b.md"); ok {
+		t.Error("/a/b.md survived its local deletion")
+	}
+	if sb.files[memMount+"/a"] != "flat now" {
+		t.Errorf("the agent's /a = %q after the sync", sb.files[memMount+"/a"])
+	}
+	if got := h.versionsOf(t, memStoreID, "/a/b.md"); !slices.Equal(got, []string{"created/none", "deleted/session_actor"}) {
+		t.Errorf("versions of /a/b.md = %v", got)
+	}
+}
+
 // TestMemorySyncStoreWinsAPrefixConflict: a memory created in the store at
 // an ancestor or a descendant of a file the agent created cannot share the
 // filesystem with it, and left in place the file would block the memory's
@@ -530,15 +578,21 @@ func TestMemorySyncCapRefusesTheCreate(t *testing.T) {
 	if b := baselineOf(t, sb, memStoreID); len(b.Refused) != 0 {
 		t.Errorf("the store's fullness was remembered against the file: %+v", b.Refused)
 	}
-	// `/m/1` deleted locally sorts before `/one-more.md`: its deletion settles
-	// first and the create fits.
+	// Two local deletions make room for two creates in the same settlement,
+	// whichever way the paths sort: deletions settle first.
 	delete(sb.files, memMount+"/m/1")
+	delete(sb.files, memMount+"/m/2")
+	sb.files[memMount+"/a-first.md"] = "sorts before the deletions"
 	h.step(t)
-	if got, _ := h.memoryContent(t, memStoreID, "/one-more.md"); got != "over the cap" {
-		t.Errorf("/one-more.md in the store = %q; the room a deletion made was not used", got)
+	for path, want := range map[string]string{"/one-more.md": "over the cap", "/a-first.md": "sorts before the deletions"} {
+		if got, _ := h.memoryContent(t, memStoreID, path); got != want {
+			t.Errorf("%s in the store = %q; the room a deletion made was not used", path, got)
+		}
 	}
-	if _, ok := h.memoryContent(t, memStoreID, "/m/1"); ok {
-		t.Error("/m/1 survived its local deletion")
+	for _, gone := range []string{"/m/1", "/m/2"} {
+		if _, ok := h.memoryContent(t, memStoreID, gone); ok {
+			t.Errorf("%s survived its local deletion", gone)
+		}
 	}
 }
 
@@ -641,8 +695,10 @@ func TestMemoryStoreMissingOrUntrusted(t *testing.T) {
 // not sync — the sandbox is not one to wait on, and the next run does.
 func TestMemorySyncSkipsAFaultedRun(t *testing.T) {
 	h, sb := materialized(t, "read_write")
-	sb.files[memMount+"/new.md"] = "fresh"
+	// The change lands mid-run: planted before the run, the sync an existing
+	// mount opens with would push it before the fault.
 	sb.failPath = "faulty.txt"
+	sb.faultPlants = map[string]string{memMount + "/new.md": "fresh"}
 	uses := h.suspend(t, writeUse("faulty.txt", "x"))
 	if _, err := h.exec.step(context.Background()); err != nil {
 		t.Fatalf("step: %v", err)

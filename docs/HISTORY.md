@@ -154,7 +154,14 @@ write — it judges the segment naming the path; the wipe-guard test wiped the m
 runs, where the next materialization repairs it before any sync — it wipes inside a run,
 through the reaper's standalone sync, and goes red without the re-stamp; and a rolled-back
 store's partial counts reached the sync span's attributes. The plan's slice-4 rows now say
-which of them #488 holds.
+which of them #488 holds. The PR's bot threads added two, fixed: a mount the sandbox already
+held was reconciled only after the tools ran, so a store's change reached a session one run
+later than decision 7 and the registry say — an existing mount is synced before the tools
+too; and deletions settled in path order behind the creates that needed their room under the
+cap or their path (`/a/b` gone, `/a` written) — deletions settle first. A third, that an
+empty directory holding only an altered marker is re-materialized, is refuted: nothing
+unvouched-for can be pushed from an empty directory, and landing the store there is the wipe
+guard's own rebuild.
 
 Refuted with evidence: a read-only mount "leaving bash modifications visible" — decision 12's
 pull-only mode stops pushes and nothing claims local edits are reverted; the file-tool guard

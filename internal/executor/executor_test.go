@@ -50,6 +50,10 @@ type fakeSandbox struct {
 	// this suffix, so a test can fault one tool of a parallel set while the
 	// others succeed.
 	failPath string
+	// faultPlants are files the fake lands the moment that fault fires, so a
+	// test can make a change that exists only once the run is under way —
+	// after the sync a run opens with, before the one it would end with.
+	faultPlants map[string]string
 	// entered (if set) receives one signal the first time WriteFile is entered,
 	// and gate (if set) blocks WriteFile until closed — together they let a test
 	// hold a tool mid-run to observe the lease keeper renew. gateFrom is the
@@ -229,11 +233,14 @@ func (f *fakeSandbox) WriteFile(ctx context.Context, path string, data []byte) e
 	if f.writeErr != nil {
 		return f.writeErr
 	}
-	if f.failPath != "" && strings.HasSuffix(path, f.failPath) {
-		return fmt.Errorf("backend fault writing %s", path)
-	}
 	if f.files == nil {
 		f.files = map[string]string{}
+	}
+	if f.failPath != "" && strings.HasSuffix(path, f.failPath) {
+		for p, c := range f.faultPlants {
+			f.files[p] = c
+		}
+		return fmt.Errorf("backend fault writing %s", path)
 	}
 	f.files[path] = string(data)
 	return nil

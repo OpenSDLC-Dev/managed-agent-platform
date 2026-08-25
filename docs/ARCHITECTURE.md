@@ -191,7 +191,9 @@ deletions), and the settlement is written back; a listing that fails skips the s
 rather than reading as deletions. A `read_only` or archived store, or a
 directory whose marker was altered, is pulled from and never pushed to, and the file
 tools refuse to write in a `read_only` or archived store (the marker they never see);
-the reaper syncs a sandbox before every tier's action but the deleted tier's. A
+the reaper syncs a sandbox before every tier's action but the deleted tier's, and a run
+whose sandbox already held a mount syncs it before its tools run as well, so a store's
+change reaches a session at its next run rather than the one after. A
 `self_hosted` session cannot attach a store until the plan's slice 6.
 
 **Sandboxes have a lifecycle** (plan 24). Provision is idempotent per session — it

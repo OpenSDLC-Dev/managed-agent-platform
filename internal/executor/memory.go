@@ -110,11 +110,12 @@ func (e *Executor) archivedStores(ctx context.Context, mounts []memoryRef) (map[
 // pull-only (decision 12); a fresh directory gets the store's memories, the
 // marker, and a baseline that says they agree. A missing store row is a
 // logged, counted miss the brain's block hedges; a failed write is logged and
-// tolerated, never fatal to the run.
-func (e *Executor) materializeMemory(ctx context.Context, sb sandbox.Sandbox, sid domain.ID, refs []memoryRef, progress func()) {
+// tolerated, never fatal to the run. It answers how many stores the sandbox
+// already held, for the caller to reconcile before the tools read them.
+func (e *Executor) materializeMemory(ctx context.Context, sb sandbox.Sandbox, sid domain.ID, refs []memoryRef, progress func()) (existing int) {
 	mounts := memoryMounts(refs)
 	if len(mounts) == 0 {
-		return
+		return 0
 	}
 	ctx, span := otel.GetTracerProvider().Tracer(tracerName).Start(ctx, "memory_materialize")
 	defer span.End()
@@ -138,6 +139,8 @@ func (e *Executor) materializeMemory(ctx context.Context, sb sandbox.Sandbox, si
 			landed++
 			slog.InfoContext(ctx, "memory store materialized",
 				"session_id", sid, "memory_store_id", m.MemoryStoreID, "mount_path", m.MountPath)
+		case outcome == memoryOutcomeUnchanged:
+			existing++
 		case outcome == memoryOutcomeUntrusted:
 			slog.WarnContext(ctx, "memory store directory holds files but no trusted marker; not re-materialized, and pull-only until the sandbox is replaced",
 				"session_id", sid, "memory_store_id", m.MemoryStoreID, "mount_path", m.MountPath)
@@ -145,6 +148,7 @@ func (e *Executor) materializeMemory(ctx context.Context, sb sandbox.Sandbox, si
 	}
 	progress()
 	span.SetAttributes(attribute.Int("memory.materialized", landed))
+	return existing
 }
 
 // materializeStore lands one store, answering with its outcome.
@@ -446,7 +450,22 @@ func (e *Executor) settleStore(ctx context.Context, tx pgx.Tx, sid domain.ID, st
 	actorJSON, _ := json.Marshal(map[string]string{"type": "session_actor", "session_id": sid.String()})
 	actor := json.RawMessage(actorJSON)
 	held := len(remote)
+	// Deletions settle first, then the rest in path order: a create needs
+	// the room a deletion makes under the cap, and a file replacing a
+	// directory (`/a/b` gone, `/a` written) needs the descendant's deletion
+	// settled before its occupancy check, or the store would refuse it.
+	ordered := make([]memsync.Action, 0, len(plan.Actions))
 	for _, act := range plan.Actions {
+		if act.Kind == memsync.DeleteRemote {
+			ordered = append(ordered, act)
+		}
+	}
+	for _, act := range plan.Actions {
+		if act.Kind != memsync.DeleteRemote {
+			ordered = append(ordered, act)
+		}
+	}
+	for _, act := range ordered {
 		target := st.ref.MountPath + act.Path
 		switch act.Kind {
 		case memsync.Pull:
@@ -706,7 +725,7 @@ func (ms *memorySync) end() {
 // is committing for: the reaper's, before it checkpoints and destroys an idle
 // session's sandbox (decision 11), so what the agent wrote after its last run
 // — nothing, unless that run faulted — reaches the store before the sandbox
-// goes. Its own transaction takes the session row lock the run's commit would.
+// goes. The resources are read here, since the reaper holds no session.
 func (e *Executor) syncMemoryStandalone(ctx context.Context, sb sandbox.Sandbox, sid domain.ID) error {
 	var resourcesJSON []byte
 	err := e.pool.QueryRow(ctx, `SELECT resources FROM sessions WHERE id = $1`, sid.String()).Scan(&resourcesJSON)
@@ -720,6 +739,16 @@ func (e *Executor) syncMemoryStandalone(ctx context.Context, sb sandbox.Sandbox,
 	if err := json.Unmarshal(resourcesJSON, &refs); err != nil {
 		return err
 	}
+	return e.syncMemoryNow(ctx, sb, sid, refs)
+}
+
+// syncMemoryNow runs the three phases in their own transaction, which takes
+// the session row lock the run's commit would: the reaper's sync, and the
+// run's own before its tools read a mount the sandbox already held — so a
+// store's change reaches a session at its next run rather than the one
+// after (scope decision 7), and a run that faulted before its sync pushes
+// what it wrote at the next.
+func (e *Executor) syncMemoryNow(ctx context.Context, sb sandbox.Sandbox, sid domain.ID, refs []memoryRef) error {
 	ms := e.readMemory(ctx, sb, sid, refs, func() {})
 	if ms == nil {
 		return nil
