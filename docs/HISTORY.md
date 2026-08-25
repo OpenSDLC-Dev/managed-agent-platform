@@ -55,10 +55,10 @@ The plan's slice-3 verification row asks for `ant beta:sessions create --resourc
 memory_store, …}'`, `beta:sessions:resources list` and `beta:sessions list --memory-store-id`,
 recorded into HISTORY. Recorded with `ant` v1.26.1 (pinning anthropic-sdk-go v1.66.0) against the
 branch's own `controlplane` on a throwaway Postgres at d2b25c7 (#487). Two CLI facts the transcript
-needed: `--agent` and `--model` take mappings (`{type: agent, id: …}`, `{id: …}`), not bare ids —
-the CLI's own error says "string was used where mapping is expected" — and a resource is one
-`--resource '{…}'` mapping per element, or the `--resource.type`/`--resource.memory-store-id` inner
-flags for a single one.
+needed: `--model` takes a mapping (`{id: …}`), not a bare id — the CLI's own error says "string
+was used where mapping is expected" — while `--agent` accepts the id string or `{type: agent, id:
+…}` (the transcript spells the latter); and a resource is one `--resource '{…}'` mapping per
+element, or the `--resource.type`/`--resource.memory-store-id` inner flags for a single one.
 
 - A create with two stores — one `read_only` with `instructions`, one bare — renders the two
   elements in request order with exactly the seven documented keys and no `id`: `access`
@@ -107,9 +107,10 @@ flags for a single one.
   the memory root — not new with this slice (file mounts under `/mnt/session/uploads` have the
   same shape), and slice 4, where a mount actually lands, is where to decide it.
 
-**Gate**: `make verify` in WSL at d2b25c7 — 55 packages `ok`, nothing failed, total statement
-coverage **90.44%** — run before the review round and the verifier, in sequence, so no native
-suite shared the Docker daemon with it.
+**Gate**: `make verify` in WSL at 1081654 — the branch's last commit but for the docs-only one that
+wrote this paragraph — 55 packages `ok`, nothing failed, total statement coverage **90.48%**; the
+run at d2b25c7 before the review round read 90.44%. Each ran with no native suite sharing the
+Docker daemon: the verifier, the reviewers and the gate took their turns in sequence.
 
 ## Memories and versions — real `ant` CLI against the memory routes (plan 36 slice 2, run 2026-08-25) — ✅ passed
 

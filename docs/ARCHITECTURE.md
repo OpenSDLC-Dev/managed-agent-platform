@@ -168,7 +168,9 @@ skills: uploaded files, and `github_repository` entries cloned in-process by the
 (go-git, so no `git` binary is in any image). Each is a `sesrsc_` row under
 `/v1/sessions/{id}/resources` with the mount path it lands on; a private repository's
 token is sealed through the same credential cipher the vaults use
-(`session_resource_credentials`). Both halves work the same way at both ends — the
+(`session_resource_credentials`). A memory store (plan 36) rides the same array as an
+id-less element that snapshots the store's name and its `/mnt/memory/<slug>` mount — inert,
+neither materialized nor rendered, until the plan's slice 4. Both halves work the same way at both ends — the
 executor materializes them into the sandbox beside the skills, and the brain renders a
 "Mounted files" / "Mounted repositories" block into the request so the model knows what
 is there. A resource that has gone missing costs its own mount and a log line, never the
