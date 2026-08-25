@@ -4,7 +4,7 @@ An open-source, self-hostable platform for **long-horizon AI agents**, written i
 
 Run the whole thing on-prem or in your own VPC — **your data and your compute never leave your boundary**.
 
-> **Status: v0.3.0, with multi-agent coordination merged to `main` and unreleased — the v1 loop is complete; agents reach MCP servers, the control plane authenticates people, and a coordinator agent's roster now runs as concurrent session threads.** A `v*` tag publishes container images and the Helm chart to GHCR, and worker binaries with clamped release notes to the GitHub Release ([docs/RELEASING.md](./docs/RELEASING.md)).
+> **Status: v0.3.0, with multi-agent coordination merged to `main` and unreleased — the v1 loop is complete; agents reach MCP servers, the control plane authenticates people, a coordinator agent's roster now runs as concurrent session threads, and a session mounts versioned memory stores it reads and writes back.** A `v*` tag publishes container images and the Helm chart to GHCR, and worker binaries with clamped release notes to the GitHub Release ([docs/RELEASING.md](./docs/RELEASING.md)).
 
 What runs today, end to end:
 
@@ -13,6 +13,7 @@ What runs today, end to end:
 - **Your own compute** — BYOC workers run a self-hosted session's tools, with dead-worker recovery and a single OTel trace across the process boundary.
 - **Sandbox lifecycle** — an executor-resident reaper destroys the sandboxes of deleted, archived and terminated **cloud** sessions, and checkpoints an idle one's workspace to object storage, restoring it intact when the next message arrives. A `self_hosted` session's sandbox belongs to its BYOC worker and is never touched.
 - **Session resources** — **skills**, **files** and **GitHub repositories** mount into a session; repositories are cloned platform-side, so the token never enters the container the agent controls.
+- **Memory stores** — a workspace-scoped, versioned collection of text documents attaches through `resources[]`, mounts at `/mnt/memory/<slug>`, and is read and written with the ordinary file tools; every write becomes an attributed, immutable version, and the store stays in sync across the sessions that share it, `cloud` and BYOC alike — the BYOC worker reconciling over the wire with the per-item sessions token its work items carry.
 - **Outcomes** — a text or file rubric is graded each work cycle, deliverables are harvested into the Files API, and revision feedback runs up to `max_iterations`.
 - **Vaults and egress** — `/v1/vaults` holds cipher-sealed, write-only credentials that a session attaches at create time; a `limited` environment's traffic leaves through a per-session egress gate that enforces `allowed_hosts` and substitutes those credentials on the way out, so the sandbox only ever holds an opaque placeholder.
 - **MCP servers** — declared per agent, discovered, offered to the model and answered under human confirmation by default, with vault credentials matched and expiring OAuth tokens refreshed at the dial.
@@ -68,9 +69,9 @@ Progress is tracked in:
 - **[GitHub issues](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues)** — the backlog and open questions.
 - **[STATE.md](./STATE.md)** — the active work and its task progress. The as-built system is [docs/ARCHITECTURE.md](./docs/ARCHITECTURE.md); acceptance and decision records are [docs/HISTORY.md](./docs/HISTORY.md) (older months archive to [docs/history/](./docs/history/)).
 
-Deferred past v1 — **seams reserved, not implemented**, each tracked as an issue. The canonical list is the open issues whose titles carry the `(post-v1)` marker, which [CLAUDE.md](./CLAUDE.md) gives the query for; the notes below single out what most often surprises a reader, and are neither the whole of that set nor confined to it. Vaults, skills, files and repository mounting were on this list and have since landed; what remains includes:
+Deferred past v1 — **seams reserved, not implemented**, each tracked as an issue. The canonical list is the open issues whose titles carry the `(post-v1)` marker, which [CLAUDE.md](./CLAUDE.md) gives the query for; the notes below single out what most often surprises a reader, and are neither the whole of that set nor confined to it. Vaults, skills, files, repository mounting and memory stores were on this list and have since landed; what remains includes:
 
-- Scheduled deployments. Memory stores are landing under [plan 36](./docs/plan/36_memory-stores.md): the `/v1/memory_stores` surface serves, and a session's stores — `cloud` and `self_hosted` alike — are mounted at `/mnt/memory/<slug>`, told to the agent, and synced back when each tool run ends; the BYOC worker mounts a `self_hosted` session's stores from the per-item sessions token its work items carry.
+- Scheduled deployments.
 - The **multi-tenant** half of RBAC and SSO ([#56](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/56), which stays open for it). Single-tenant SSO and the three-role matrix are done.
 - **Repository materialization on BYOC compute** ([#322](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/322)): a `self_hosted` session accepts a `github_repository` resource and mounts nothing, without being told otherwise.
 - **BYOC gate delivery** ([#165](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/165)) and **credential substitution inside TLS** ([#166](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/166)) — until #166, an in-sandbox HTTPS request keeps its vault placeholders rather than having them substituted at egress.
