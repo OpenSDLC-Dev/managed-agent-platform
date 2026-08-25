@@ -318,6 +318,11 @@ func (s *server) getMemory(r *http.Request) (any, error) {
 		`SELECT `+memoryColumns+` FROM memories WHERE id = $1 AND memory_store_id = $2`,
 		memoryID, storeID))
 	if errors.Is(err, pgx.ErrNoRows) {
+		// Read the store second, not first: the hit path is one query, and
+		// the miss still names the store when that is what is missing.
+		if err := s.checkMemoryStore(ctx, storeID); err != nil {
+			return nil, err
+		}
 		return nil, errNotFound("memory %s not found", memoryID)
 	}
 	if err != nil {

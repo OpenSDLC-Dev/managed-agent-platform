@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -162,6 +163,11 @@ func TestMemoryCRUD(t *testing.T) {
 			status, resp := s.do(call.method, call.path, map[string]any{"path": "/x.md", "content": "x"})
 			if status != http.StatusNotFound {
 				t.Errorf("%s %s: status %d (%v)", call.method, call.path, status, resp)
+			}
+			// The message names the store, not the memory or version under it:
+			// the store is what is missing, whichever collection was asked.
+			if msg, _ := resp["error"].(map[string]any)["message"].(string); strings.HasPrefix(missing, "memstore_m") && !strings.Contains(msg, "memory store "+missing) {
+				t.Errorf("%s %s: message %q does not name the store", call.method, call.path, msg)
 			}
 		}
 	}
@@ -472,7 +478,7 @@ func TestMemoryList(t *testing.T) {
 	if status != http.StatusOK {
 		t.Fatalf("list: status %d (%v)", status, body)
 	}
-	if got := memoryPaths(t, body); !equalStrings(got, []string{"/a/also.md", "/a/deep.md", "/b.md", "/c.md"}) {
+	if got := memoryPaths(t, body); !slices.Equal(got, []string{"/a/also.md", "/a/deep.md", "/b.md", "/c.md"}) {
 		t.Errorf("list order = %v, want byte-wise path order", got)
 	}
 	if _, ok := body["next_page"]; !ok {
@@ -512,7 +518,7 @@ func TestMemoryList(t *testing.T) {
 		}
 		query = "/v1/memory_stores/" + store + "/memories?limit=1&page=" + cursor
 	}
-	if !equalStrings(seen, []string{"/a/also.md", "/a/deep.md", "/b.md", "/c.md"}) {
+	if !slices.Equal(seen, []string{"/a/also.md", "/a/deep.md", "/b.md", "/c.md"}) {
 		t.Errorf("paged walk = %v", seen)
 	}
 
@@ -575,15 +581,15 @@ func TestMemoryListPrefixAndDepth(t *testing.T) {
 	}
 
 	// Segment alignment: /notes/ must not reach /notes-archive/.
-	if got := list(t, "path_prefix=%2Fnotes%2F"); !equalStrings(got,
+	if got := list(t, "path_prefix=%2Fnotes%2F"); !slices.Equal(got,
 		[]string{"/notes/a.md", "/notes/deep/b.md", "/notes/deep/c.md"}) {
 		t.Errorf("path_prefix=/notes/ = %v", got)
 	}
 	// Literal metacharacters: neither `_` nor `%` is a wildcard.
-	if got := list(t, "path_prefix="+url.QueryEscape("/a_b")); !equalStrings(got, []string{"/a_b"}) {
+	if got := list(t, "path_prefix="+url.QueryEscape("/a_b")); !slices.Equal(got, []string{"/a_b"}) {
 		t.Errorf("path_prefix=/a_b = %v", got)
 	}
-	if got := list(t, "path_prefix="+url.QueryEscape("/100%")); !equalStrings(got, []string{"/100%/x"}) {
+	if got := list(t, "path_prefix="+url.QueryEscape("/100%")); !slices.Equal(got, []string{"/100%/x"}) {
 		t.Errorf("path_prefix=/100%% = %v", got)
 	}
 	// An omitted prefix means "/", which is every path.
@@ -592,18 +598,18 @@ func TestMemoryListPrefixAndDepth(t *testing.T) {
 	}
 
 	// depth=1 is ls: immediate children, everything deeper rolled up.
-	if got := list(t, "depth=1"); !equalStrings(got, []string{
+	if got := list(t, "depth=1"); !slices.Equal(got, []string{
 		"prefix:/100%/", "prefix:/1000/", "/a_b", "prefix:/acb/",
 		"prefix:/notes-archive/", "prefix:/notes/", "/z.md",
 	}) {
 		t.Errorf("depth=1 at the root = %v", got)
 	}
-	if got := list(t, "depth=1&path_prefix=%2Fnotes%2F"); !equalStrings(got,
+	if got := list(t, "depth=1&path_prefix=%2Fnotes%2F"); !slices.Equal(got,
 		[]string{"/notes/a.md", "prefix:/notes/deep/"}) {
 		t.Errorf("depth=1 under /notes/ = %v", got)
 	}
 	// A prefix rollup can be drilled into by passing it straight back.
-	if got := list(t, "depth=1&path_prefix=%2Fnotes%2Fdeep%2F"); !equalStrings(got,
+	if got := list(t, "depth=1&path_prefix=%2Fnotes%2Fdeep%2F"); !slices.Equal(got,
 		[]string{"/notes/deep/b.md", "/notes/deep/c.md"}) {
 		t.Errorf("drilling into /notes/deep/ = %v", got)
 	}
@@ -625,24 +631,12 @@ func TestMemoryListPrefixAndDepth(t *testing.T) {
 		}
 		query = "/v1/memory_stores/" + store + "/memories?depth=1&limit=2&page=" + cursor
 	}
-	if !equalStrings(seen, []string{
+	if !slices.Equal(seen, []string{
 		"prefix:/100%/", "prefix:/1000/", "/a_b", "prefix:/acb/",
 		"prefix:/notes-archive/", "prefix:/notes/", "/z.md",
 	}) {
 		t.Errorf("the paged depth=1 walk = %v", seen)
 	}
-}
-
-func equalStrings(got, want []string) bool {
-	if len(got) != len(want) {
-		return false
-	}
-	for i := range got {
-		if got[i] != want[i] {
-			return false
-		}
-	}
-	return true
 }
 
 // The documented per-store cap: at 2,000 memories "writes to new memories fail
@@ -801,7 +795,7 @@ func TestMemoryPathsSortUnderTheCCollation(t *testing.T) {
 	if status != http.StatusOK {
 		t.Fatalf("list: status %d (%v)", status, body)
 	}
-	if got := memoryPaths(t, body); !equalStrings(got, []string{"/B.md", "/a.md"}) {
+	if got := memoryPaths(t, body); !slices.Equal(got, []string{"/B.md", "/a.md"}) {
 		t.Errorf("list order = %v, want /B.md before /a.md", got)
 	}
 }

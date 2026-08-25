@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"maps"
@@ -122,15 +123,16 @@ func requestIDFrom(ctx context.Context) string {
 // without leaking internals.
 func writeError(w http.ResponseWriter, r *http.Request, err error) {
 	inner := map[string]string{}
-	if withFields, ok := err.(*apiErrorWithFields); ok {
+	var withFields *apiErrorWithFields
+	if errors.As(err, &withFields) {
 		// Take the extra members off, then carry on with the plain apiError
 		// underneath, so the status and the two shared fields have exactly one
 		// code path whatever the schema added.
 		maps.Copy(inner, withFields.fields)
 		err = &withFields.apiError
 	}
-	ae, ok := err.(*apiError)
-	if !ok {
+	var ae *apiError
+	if !errors.As(err, &ae) {
 		slog.ErrorContext(r.Context(), "internal error", "method", r.Method, "path", r.URL.Path,
 			"request_id", requestIDFrom(r.Context()), "err", err)
 		ae = &apiError{http.StatusInternalServerError, errTypeAPI, "internal server error"}

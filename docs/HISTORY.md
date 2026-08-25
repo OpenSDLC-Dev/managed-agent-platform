@@ -105,6 +105,14 @@ Git Bash rewrites a `/notes/a.md` argument into a Windows path before `ant.exe` 
   showed the clause cannot go red on the musl fixture — the column's collation is what the test
   pins). Not taken: selecting `content` under `view=basic` only to discard it — a cost, not a
   defect, left for a later pass.
+- *CodeRabbit, five threads, all taken* — `memsync.ValidatePath` accepted invalid UTF-8 (an
+  invalid byte ranges as U+FFFD, which neither the Cc/Cf rule nor NFC catches; inert on the API
+  lane behind `decodeObject`, load-bearing for slice 4's sync lane, so a rule of its own now);
+  `getMemory` under an unknown store answered the memory's 404 where every sibling route answers
+  the store's (the test now pins the message on all eight routes); `writeError` asserted error
+  types where the rest of `internal/api` uses `errors.As` (its claim that a lint gate fails was
+  wrong — this repo runs none — the style point stood); a `CHECK` on `memory_versions.operation`,
+  as on every enum column in the schema; `slices.Equal` for a hand-rolled helper.
 - *The implementer's seven declared deviations*, judged by both reviewers and the verifier: refusing
   a non-NFC path rather than normalizing it (the plan's own rejection table); handlers before tests,
   discharged by mutation probes; a separate `apiErrorWithFields` type; a slash-less `path_prefix`

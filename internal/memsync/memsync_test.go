@@ -31,6 +31,7 @@ func TestValidatePath(t *testing.T) {
 		"a control character (Cc)":  "/notes/\u0007bell.md",
 		"a format character (Cf)":   "/notes/rtl\u200e.md",
 		"an NFD path":               "/cafe\u0301.md",
+		"invalid UTF-8":             "/notes/\xff.md",
 		"1025 bytes":                "/" + strings.Repeat("a", 1024),
 		"the marker's path":         "/.anthropic-memory-store",
 	} {

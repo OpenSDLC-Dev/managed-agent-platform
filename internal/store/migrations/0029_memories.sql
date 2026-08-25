@@ -40,8 +40,7 @@ CREATE TABLE memory_versions (
     -- deleted row's own lineage — including its `deleted` version — outlives
     -- the memories row it names.
     memory_id          text NOT NULL,
-    -- created | modified | deleted.
-    operation          text NOT NULL,
+    operation          text NOT NULL CHECK (operation IN ('created', 'modified', 'deleted')),
     -- All four nullable, and null for two different reasons the API separates:
     -- a `deleted` version carries a path but no content, sha or size, and a
     -- redacted version carries none of the four.

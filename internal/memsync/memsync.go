@@ -80,6 +80,11 @@ func ValidatePath(path string) error {
 			return errors.New(`path cannot contain "." or ".." segments`)
 		}
 	}
+	// Load-bearing on the sync lane only, like ValidateContent's: an invalid
+	// byte ranges as U+FFFD, which no rule below would catch.
+	if !utf8.ValidString(path) {
+		return errors.New("path must be valid UTF-8")
+	}
 	for _, r := range path {
 		if unicode.Is(unicode.Cc, r) || unicode.Is(unicode.Cf, r) {
 			return errors.New("path cannot contain control or format characters")
