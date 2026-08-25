@@ -257,8 +257,8 @@ func (q *Queue) StopWith(ctx context.Context, db DB, envID, workID domain.ID, fo
 	} else {
 		// Every CASE reads the row's pre-update state, so all four agree on which
 		// branch they are in. An active item keeps its lease: the worker holds it
-		// while it winds down, and its lapsing is what tells the control plane the
-		// wind-down was abandoned (see Poll).
+		// while it winds down, and its lapsing past WindDown is what tells the
+		// control plane the wind-down was abandoned (see Poll).
 		sql = `UPDATE work_items
 		       SET state             = CASE WHEN state = 'active' THEN 'stopping' ELSE 'stopped' END,
 		           stop_requested_at = COALESCE(stop_requested_at, now()),

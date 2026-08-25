@@ -367,10 +367,11 @@ func TestSessionsTokenJoinConditions(t *testing.T) {
 	if st := status(t, s, http.MethodGet, session, nil, asBearer(token2)); st != http.StatusOK {
 		t.Errorf("the re-hand-out's token = %d, want 200", st)
 	}
-	// An abandoned wind-down: a graceful stop parks the item in stopping, its
-	// lease lapses with its worker inside the minute, and the next poll settles
-	// it stopped — a settlement that revokes the token, since its minute would
-	// otherwise run on while the session is re-armed for another worker.
+	// An abandoned wind-down: a graceful stop parks the item in stopping and
+	// its lease lapses with its worker. Inside WindDown no poll settles it —
+	// a live worker stops heartbeating once it learns of the stop and may
+	// still be flushing — and the token works; past it the poll settles the
+	// item stopped, and the token is dead by the same window.
 	work2 := "/v1/environments/" + envID + "/work/" + workID2
 	if st := status(t, s, http.MethodPost, work2+"/ack", nil, asBearer(key)); st != http.StatusOK {
 		t.Fatalf("ack of the re-hand-out = %d", st)
@@ -387,14 +388,20 @@ func TestSessionsTokenJoinConditions(t *testing.T) {
 	if st := status(t, s, http.MethodGet, session, nil, asBearer(token2)); st != http.StatusOK {
 		t.Errorf("the token of a wind-down whose lease lapsed = %d, want 200 (the minute runs from the request)", st)
 	}
-	s.pollQuery(t, envID, "?block_ms=1", asBearer(key)) // settles the abandoned item
+	s.pollQuery(t, envID, "?block_ms=1", asBearer(key)) // inside the window: nothing to settle
 	var state string
-	var tokens int
-	if err := s.pool.QueryRow(ctx, `SELECT state, (SELECT count(*) FROM work_session_tokens WHERE work_id = $1) FROM work_items WHERE id = $1`, workID2).Scan(&state, &tokens); err != nil || state != "stopped" || tokens != 0 {
-		t.Errorf("after the settlement: state=%q tokens=%d, %v; want stopped with its tokens revoked", state, tokens, err)
+	if err := s.pool.QueryRow(ctx, `SELECT state FROM work_items WHERE id = $1`, workID2).Scan(&state); err != nil || state != "stopping" {
+		t.Errorf("a wind-down inside its window after a poll: state=%q, %v; want still stopping", state, err)
+	}
+	if _, err := s.pool.Exec(ctx, `UPDATE work_items SET stop_requested_at = now() - interval '61 seconds' WHERE id = $1`, workID2); err != nil {
+		t.Fatal(err)
+	}
+	s.pollQuery(t, envID, "?block_ms=1", asBearer(key)) // past it: settled
+	if err := s.pool.QueryRow(ctx, `SELECT state FROM work_items WHERE id = $1`, workID2).Scan(&state); err != nil || state != "stopped" {
+		t.Errorf("a wind-down past its window after a poll: state=%q, %v; want stopped", state, err)
 	}
 	if st := status(t, s, http.MethodGet, session, nil, asBearer(token2)); st != http.StatusUnauthorized {
-		t.Errorf("the token after its wind-down was settled = %d, want 401 (no grace for a worker presumed dead)", st)
+		t.Errorf("the token past its item's window = %d, want 401", st)
 	}
 	// A fresh item for the archived-session condition.
 	enqueueOn(t, s, envID, sessionID)

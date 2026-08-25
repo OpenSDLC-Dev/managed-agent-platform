@@ -407,9 +407,9 @@ and holds the two OS-touching adapters `gaterun/` declares.
   to its end, as one opened with any credential here does: a re-hand-out, a lapsed
   lease or an archive ends it; a stop, graceful or not, leaves it a minute from the
   request (the reference worker learns of the stop at its next heartbeat, then
-  flushes its memory writes for up to 30 s on a context of its own); and the
-  settlement of a wind-down whose lease lapsed revokes it outright, that worker being
-  presumed dead and the session re-armed for another.
+  flushes its memory writes for up to 30 s on a context of its own), and the queue
+  settles a wind-down whose worker went silent only once that same minute
+  (`queue.WindDown`) is over, so no settlement re-arms a session while its token works.
   On the memory routes the environment key itself is refused, a token's write is the
   session's version (`session_actor`), and `read_only` is enforced at the hands on
   both deployment points — the executor's pull-only sync, the reference worker's

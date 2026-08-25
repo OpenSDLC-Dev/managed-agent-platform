@@ -90,17 +90,23 @@ matrix driven with curl against a built `controlplane`) read PASS with notes.
 - *Claude reviewer, second pass* — the grace introduced one edge: the settlement of an
   abandoned wind-down (`FinalizeAbandoned`, a `stopping` item whose lease lapsed) stamps
   `stopped_at`, and the presumed-dead worker's token could run on into the minute in which
-  the session is re-armed for another. The settlement now revokes the item's tokens
-  (`worktoken.Revoke`, the one delete the table sees), pinned beside the heartbeat renewal
-  that carries a token through a long run. The Codex rejections were judged sound on the
-  code; `read_only` at the hands accepted as design.
+  the session is re-armed for another. First closed by a revoke in the settlement; then,
+  when the Codex reviewer's third pass showed that settlement fires on a healthy flush too
+  (the frozen lease lapses 15–30 s after a graceful stop, the flush runs to 45 s), by the
+  queue itself: a wind-down is abandoned only once its lease lapsed *and* `queue.WindDown`
+  has passed since the request — the one constant the token's window reads too — so no
+  delete is needed. The heartbeat renewal that carries a token through a long run is
+  pinned. The Codex rejections were judged sound on the code; `read_only` at the hands
+  accepted as design.
 - *Codex reviewer, second pass* — a grace counted from `stopped_at` left a graceful wind-down
   on its frozen lease (the worker learns of the stop half a TTL later — 15 s for a 30 s
   flush) and let a late settlement restart the clock; it is counted from
   `stop_requested_at` now, for a stopping or stopped item alike, 45 s of the 60 spoken for.
   Also: a `memories/` trailing slash the lane admitted to the mux's 404 is refused; the
-  SDK test plants its idle event until the worker returns and bounds the run at 20 s; the
-  registry's reading (1) no longer overreads the SDK's "may be".
+  SDK test plants its idle event until the worker returns (its third pass: a failed plant
+  ends the run at once and is reported first, and the wall-clock assertion it called
+  flaky under load is gone — the 30 s deadline is the bound); the registry's reading (1)
+  no longer overreads the SDK's "may be".
 
 ## Memory stores end to end — real `ant` CLI, real model, a `cloud` sandbox (plan 36 slice 4, run 2026-08-25) — ✅ passed
 

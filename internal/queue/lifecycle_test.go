@@ -195,8 +195,8 @@ func TestStopForceAndGraceful(t *testing.T) {
 	if stopped.State != "stopping" || stopped.StopRequestedAt == nil || stopped.StoppedAt != nil {
 		t.Errorf("graceful stop returned %+v, want stopping with stop_requested_at and no stopped_at", stopped)
 	}
-	// The lease stays: the worker holds it while it winds down, and its lapsing is
-	// what tells the control plane the wind-down was abandoned.
+	// The lease stays: the worker holds it while it winds down, and its lapsing
+	// past WindDown is what tells the control plane the wind-down was abandoned.
 	if !leaseHeld(t, pool, id) {
 		t.Error("graceful stop cleared the lease the winding-down worker still holds")
 	}
@@ -319,9 +319,19 @@ func TestPollFinalizesAnAbandonedWindDown(t *testing.T) {
 		t.Fatalf("item during a live wind-down = %+v %v, want it left stopping", w, err)
 	}
 
-	// The worker dies without finishing the wind-down: its lease lapses.
+	// The worker dies without finishing the wind-down: its lease lapses. Inside
+	// WindDown that proves nothing — a live worker stops heartbeating the moment
+	// it learns of the stop and flushes what it holds — so the item is left alone.
 	if _, err := pool.Exec(ctx,
 		`UPDATE work_items SET lease_expires_at = now() - interval '1 second' WHERE id = $1`, id); err != nil {
+		t.Fatal(err)
+	}
+	if done := finalizeAbandoned(t, pool, q, env); len(done) != 0 {
+		t.Fatalf("finalize inside the wind-down's minute = %v, want nothing", done)
+	}
+	// Past it, the lapsed lease is the signal.
+	if _, err := pool.Exec(ctx,
+		`UPDATE work_items SET stop_requested_at = now() - interval '61 seconds' WHERE id = $1`, id); err != nil {
 		t.Fatal(err)
 	}
 	if done := finalizeAbandoned(t, pool, q, env); len(done) != 1 {
@@ -844,7 +854,7 @@ func TestFinalizeAbandonedRechecksUnderTheTransaction(t *testing.T) {
 		t.Fatal(err)
 	}
 	if _, err := pool.Exec(ctx,
-		`UPDATE work_items SET lease_expires_at = now() - interval '1 second' WHERE id = $1`, id); err != nil {
+		`UPDATE work_items SET lease_expires_at = now() - interval '1 second', stop_requested_at = now() - interval '61 seconds' WHERE id = $1`, id); err != nil {
 		t.Fatal(err)
 	}
 	items, err := q.ListAbandoned(ctx, env)

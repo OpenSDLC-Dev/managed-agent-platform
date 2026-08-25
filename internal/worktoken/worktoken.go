@@ -12,12 +12,13 @@
 // stored hash-only. It carries neither an expiry nor a revocation column: it
 // is valid while the item it names is live — the join conditions Authenticate
 // runs — so a re-hand-out (a fresh work id, #62), a lapsed lease and a session
-// archive each end it without an event, and a stop ends it a minute after
-// it was requested: the reference worker flushes its unsynced memory writes once the
-// control plane has reported the stop, on a context of its own bounded by 30
-// seconds (lib/environments/memories.go Cleanup), and a token dead at that
-// instant would lose them — a BYOC workdir is removed at the item's end, with
-// no held sandbox to sync from later as a cloud session has. The value itself is
+// archive each end it without an event, and a stop ends it queue.WindDown (a
+// minute) after it was requested: the reference worker flushes its unsynced
+// memory writes once the control plane has reported the stop, on a context of
+// its own bounded by 30 seconds (lib/environments/memories.go Cleanup), and a
+// token dead at that instant would lose them — a BYOC workdir is removed at
+// the item's end, with no held sandbox to sync from later as a cloud session
+// has. The value itself is
 // gatetoken's mint under another prefix, so every internal bearer the
 // platform issues shares one entropy and one alphabet.
 package worktoken
@@ -34,6 +35,7 @@ import (
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/gatetoken"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/queue"
 )
 
 // TokenPrefix marks a sessions token value. Internal-only, never an id on the
@@ -80,31 +82,21 @@ func Secret(token string) string {
 	return base64.RawURLEncoding.EncodeToString(raw)
 }
 
-// Revoke deletes an item's tokens — the one delete the table sees. It is for
-// the settlement of an abandoned wind-down (a stopping item whose lease
-// lapsed): its minute may still be running when the platform presumes the
-// worker dead and, in the same transaction, re-arms the session for another
-// — and two workers must not write a session's memory at once.
-func Revoke(ctx context.Context, db DB, workID string) error {
-	_, err := db.Exec(ctx, `DELETE FROM work_session_tokens WHERE work_id = $1`, workID)
-	return err
-}
-
 // Authenticate resolves a token to its principal, or the zero Principal when
 // the token is unknown or no longer names a live item: the item's id must
 // still be the one the token was minted for (a re-hand-out rewrites it), its
-// lease unexpired while it runs, or its stop requested within the last minute
+// lease unexpired while it runs, or its stop requested within queue.WindDown
 // once it is stopping or stopped (a graceful stop parks an active item in
-// stopping with a lease the heartbeat no longer extends, so the minute counts
+// stopping with a lease the heartbeat no longer extends, so the window counts
 // from the request rather than from the lease or the stop's completion: the
 // wind-down and the post-stop flush both ride it), and its session
-// unarchived.
-//
-// The minute is sized to the reference worker: it learns of a stop at its
-// next heartbeat (half the 30 s TTL), then flushes its unsynced memory writes
-// in one pass bounded by MemoryFlushTimeout (30 s) — 45 s of the 60. Counted
-// from the request, the settlement of an abandoned wind-down cannot restart
-// it, and Revoke ends it there regardless.
+// unarchived. WindDown is sized to the reference worker's flow (its doc), and
+// the queue settles an abandoned wind-down only once the same window has
+// passed, so no settlement re-arms a session while its token still works.
+// The CASE rests on one invariant held two packages away: stop_requested_at
+// is set by every stop but Queue.Complete, and Complete settles only Claim's
+// items — the brain's turns and the cloud executor's tool runs — never a
+// polled one.
 func Authenticate(ctx context.Context, pool *pgxpool.Pool, token string) (Principal, error) {
 	var p Principal
 	err := pool.QueryRow(ctx,
@@ -114,10 +106,10 @@ func Authenticate(ctx context.Context, pool *pgxpool.Pool, token string) (Princi
 		   JOIN sessions s ON s.id = t.session_id
 		  WHERE t.token_hash = $1
 		    AND CASE WHEN w.state IN ('stopping', 'stopped')
-		             THEN w.stop_requested_at > now() - interval '60 seconds'
+		             THEN w.stop_requested_at > now() - make_interval(secs => $2)
 		             ELSE w.lease_expires_at > now() END
 		    AND s.archived_at IS NULL`,
-		gatetoken.HashToken(token)).Scan(&p.WorkID, &p.SessionID, &p.EnvironmentID)
+		gatetoken.HashToken(token), queue.WindDown.Seconds()).Scan(&p.WorkID, &p.SessionID, &p.EnvironmentID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Principal{}, nil
 	}

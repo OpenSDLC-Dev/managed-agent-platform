@@ -9,12 +9,10 @@
 -- token authenticates while work_items.id still equals work_id — every
 -- re-hand-out rewrites the id (#62), which is why work_id is not a foreign
 -- key: the id it names is meant to stop existing — the lease is unexpired
--- while the item runs, or its stop was requested within the last minute once
--- it is stopping or stopped (the worker's wind-down and post-stop memory
--- flush), and the session is unarchived. A superseded row is dead by those
--- conditions and is not deleted, with one exception: an abandoned wind-down's
--- settlement revokes its item's rows, since its minute may still be running
--- as the session is re-armed for another worker. A session delete cascades.
+-- while the item runs, or its stop was requested within the queue's WindDown
+-- (a minute) once it is stopping or stopped (the worker's wind-down and
+-- post-stop memory flush), and the session is unarchived. A superseded row is
+-- dead by those conditions and never deleted; a session delete cascades.
 CREATE TABLE work_session_tokens (
     id          text PRIMARY KEY,
     work_id     text NOT NULL,
