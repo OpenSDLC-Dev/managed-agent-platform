@@ -100,8 +100,9 @@ platform's own executor, just deployed elsewhere.
    session's memory stores with their directories at the run's end (below) — the
    platform executor against the store's rows (the sandbox read before the transaction
    that commits the results, the settlement inside it, the sandbox written after), the
-   BYOC worker against the same routes over the wire; a run that faulted leaves that to
-   the next run (or, on the platform side, the reaper).
+   BYOC worker against the same routes over the wire; a faulted run leaves that to the
+   next run — or, on the platform side, the reaper, while the BYOC worker flushes its
+   writes on the way out instead (below).
 5. The commit that appends the result also enqueues the next `model_turn` — only once
    every tool use in the turn is answered. A brain claims it (brains wake by polling the
    queue; Postgres LISTEN/NOTIFY serves the SSE fan-out, not the brain), replays, and
@@ -191,8 +192,9 @@ and writes the store's rows directly; a `self_hosted` session's BYOC worker does
 same over the wire, through the five memory routes its per-item sessions token admits
 (decision 15), the store landed from a `view=full` listing and reconciled with per-memory
 `GET`s and the routes' own preconditions. The
-directory is reconciled with the store when a tool run ends (a faulted run leaves it to
-the next run, or on `cloud` the reaper), in three phases the shared
+directory is reconciled with the store when a tool run ends (a faulted `cloud` run leaves
+it to the next run or the reaper; the BYOC worker flushes its writes on the way out
+instead, below), in three phases the shared
 rules in `internal/memsync` decide: the tree is hashed in the sandbox, the plan settles
 — inside the transaction that commits a `cloud` run, over the wire against the routes for
 a `self_hosted` one — (a push is a compare-and-set on the head's
@@ -208,10 +210,13 @@ first write the store refuses, and a `bash` write there is withheld at the sync 
 than refused at the tool. On `cloud` the reaper syncs a sandbox before every tier's
 action but the deleted tier's, and a run whose sandbox already held a mount syncs it
 before its tools run as well, so a store's change reaches a session at its next run
-rather than the one after. The BYOC worker has no reaper — its only sync points are the
-two run boundaries, a mount found already present synced before the tools and every run
-synced once at its end — and it fails the item (`ErrSessionMemoryNoToken`) rather than
-run a store session with no token to mount from.
+rather than the one after. The BYOC worker has no reaper, so beyond the two run boundaries — a mount found already
+present synced before the tools, and every run synced once at its clean end — it runs a
+push-only flush on the way out of a faulted or stopped run (the reference worker's
+`FlushWrites`, on a bounded context of its own): a stop force-stops the item with no
+later run to reconcile it, so the flush is the only pass that saves what the agent wrote.
+It fails the item (`ErrSessionMemoryNoToken`) rather than run a store session with no
+token to mount from.
 
 **Sandboxes have a lifecycle** (plan 24). Provision is idempotent per session — it
 returns, heals, or re-creates — and the **reaper in the executor is the single owner of
