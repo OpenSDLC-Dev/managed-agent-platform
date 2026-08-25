@@ -120,6 +120,17 @@ func NewHandler(pool *pgxpool.Pool, blobs blob.Store, cipher secrets.Cipher, ver
 	mux.HandleFunc("POST /v1/memory_stores/{id}", s.handle(identity.RoleDeveloper, s.updateMemoryStore))
 	mux.HandleFunc("DELETE /v1/memory_stores/{id}", s.handle(identity.RoleDeveloper, s.deleteMemoryStore))
 	mux.HandleFunc("POST /v1/memory_stores/{id}/archive", s.handle(identity.RoleDeveloper, s.archiveMemoryStore))
+	mux.HandleFunc("POST /v1/memory_stores/{id}/memories", s.handle(identity.RoleDeveloper, s.createMemory))
+	mux.HandleFunc("GET /v1/memory_stores/{id}/memories", s.handle(identity.RoleViewer, s.listMemories))
+	mux.HandleFunc("GET /v1/memory_stores/{id}/memories/{mid}", s.handle(identity.RoleViewer, s.getMemory))
+	mux.HandleFunc("POST /v1/memory_stores/{id}/memories/{mid}", s.handle(identity.RoleDeveloper, s.updateMemory))
+	mux.HandleFunc("DELETE /v1/memory_stores/{id}/memories/{mid}", s.handle(identity.RoleDeveloper, s.deleteMemory))
+	mux.HandleFunc("GET /v1/memory_stores/{id}/memory_versions", s.handle(identity.RoleViewer, s.listMemoryVersions))
+	mux.HandleFunc("GET /v1/memory_stores/{id}/memory_versions/{vid}", s.handle(identity.RoleViewer, s.getMemoryVersion))
+	// Redaction is admin, alone in this family: it is a compliance action that
+	// destroys history, and the role that holds the credential surfaces is the
+	// one that holds this (plan 36 decision 14).
+	mux.HandleFunc("POST /v1/memory_stores/{id}/memory_versions/{vid}/redact", s.handle(identity.RoleAdmin, s.redactMemoryVersion))
 
 	// The console API — off the /v1 wire, mirroring the reference console's own
 	// private path so a console-facing endpoint has a convention rather than an
@@ -197,6 +208,9 @@ func NewHandler(pool *pgxpool.Pool, blobs blob.Store, cipher secrets.Cipher, ver
 		"/v1/skills/{id}/versions/{version}", "/v1/skills/{id}/versions/{version}/content",
 		"/v1/files", "/v1/files/{id}", "/v1/files/{id}/content",
 		"/v1/memory_stores", "/v1/memory_stores/{id}", "/v1/memory_stores/{id}/archive",
+		"/v1/memory_stores/{id}/memories", "/v1/memory_stores/{id}/memories/{mid}",
+		"/v1/memory_stores/{id}/memory_versions", "/v1/memory_stores/{id}/memory_versions/{vid}",
+		"/v1/memory_stores/{id}/memory_versions/{vid}/redact",
 	} {
 		mux.HandleFunc(pattern, func(w http.ResponseWriter, r *http.Request) {
 			writeError(w, r, methodNotAllowed(r))

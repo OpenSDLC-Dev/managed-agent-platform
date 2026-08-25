@@ -60,6 +60,8 @@ func (r matrixRoute) request() string {
 		"{rid}", "sesrsc_nonexistent",
 		"{tid}", "sthr_nonexistent",
 		"{cid}", "vcrd_nonexistent",
+		"{mid}", "mem_nonexistent",
+		"{vid}", "memver_nonexistent",
 		"{version}", "1",
 	).Replace(r.path)
 }
@@ -70,14 +72,16 @@ func (r matrixRoute) request() string {
 // the credential surfaces, enumerated rather than inferred.
 func roleMatrix() []matrixRoute {
 	const (
-		agent = "/v1/agents/{id}"
-		env   = "/v1/environments/{id}"
-		sesn  = "/v1/sessions/{id}"
-		vault = "/v1/vaults/{id}"
-		cred  = vault + "/credentials/{cid}"
-		skill = "/v1/skills/{id}"
-		file  = "/v1/files/{id}"
-		store = "/v1/memory_stores/{id}"
+		agent   = "/v1/agents/{id}"
+		env     = "/v1/environments/{id}"
+		sesn    = "/v1/sessions/{id}"
+		vault   = "/v1/vaults/{id}"
+		cred    = vault + "/credentials/{cid}"
+		skill   = "/v1/skills/{id}"
+		file    = "/v1/files/{id}"
+		store   = "/v1/memory_stores/{id}"
+		memory  = store + "/memories/{mid}"
+		version = store + "/memory_versions/{vid}"
 	)
 	v, d, a := identity.RoleViewer, identity.RoleDeveloper, identity.RoleAdmin
 
@@ -125,10 +129,15 @@ func roleMatrix() []matrixRoute {
 		{"POST", "/v1/files", d}, {"DELETE", file, d},
 
 		// Memory stores (plan 36 decision 14): reads viewer, the whole
-		// lifecycle developer.
+		// lifecycle developer — memory writes included — and redaction admin,
+		// the one write in the family that destroys history.
 		{"GET", "/v1/memory_stores", v}, {"GET", store, v},
 		{"POST", "/v1/memory_stores", d}, {"POST", store, d},
 		{"DELETE", store, d}, {"POST", store + "/archive", d},
+		{"GET", store + "/memories", v}, {"GET", memory, v},
+		{"POST", store + "/memories", d}, {"POST", memory, d}, {"DELETE", memory, d},
+		{"GET", store + "/memory_versions", v}, {"GET", version, v},
+		{"POST", version + "/redact", a},
 	}
 }
 

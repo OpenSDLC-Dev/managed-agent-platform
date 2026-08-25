@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"maps"
 	"net/http"
 )
 
@@ -22,6 +23,12 @@ const (
 	// 403 permission_error. It exists only for the human lane — a machine key
 	// carries no role, so nothing on the key lane can produce it.
 	errTypePermission = "permission_error"
+	// The memory surface's own two types (plan 36 slice 2), both 409s. Unlike
+	// every other error here they are named by the reference's schema rather
+	// than shared across resources, and the path conflict is the only wire
+	// error in this platform that carries fields beyond type and message.
+	errTypeMemoryPathConflict       = "memory_path_conflict_error"
+	errTypeMemoryPreconditionFailed = "memory_precondition_failed_error"
 )
 
 // apiError is an error that maps onto the Anthropic wire error envelope.
@@ -29,6 +36,18 @@ type apiError struct {
 	status  int
 	errType string
 	message string
+}
+
+// apiErrorWithFields is an apiError whose schema carries members beyond type
+// and message inside the error object. Exactly one does — the memory path
+// conflict, whose {conflicting_path, conflicting_memory_id} tell a sync client
+// which memory blocked the write without a second round trip — so the extra
+// map lives in its own type rather than on apiError, where it would be nil on
+// every other error the platform raises and would turn each of the package's
+// positional apiError literals into a keyed one.
+type apiErrorWithFields struct {
+	apiError
+	fields map[string]string
 }
 
 func (e *apiError) Error() string { return e.message }
@@ -43,6 +62,27 @@ func errNotFound(format string, args ...any) *apiError {
 
 func errConflict(format string, args ...any) *apiError {
 	return &apiError{http.StatusConflict, errTypeInvalidRequest, fmt.Sprintf(format, args...)}
+}
+
+// errMemoryPathConflict is errConflict under the memory surface's own type: a
+// create at an occupied path, or a rename onto one. "Occupied" is wider than
+// equal — an ancestor or a descendant of an existing memory's path occupies it
+// too — so the blocking memory is named rather than left to be guessed at.
+func errMemoryPathConflict(conflictingID, conflictingPath, format string, args ...any) error {
+	return &apiErrorWithFields{
+		apiError: apiError{http.StatusConflict, errTypeMemoryPathConflict, fmt.Sprintf(format, args...)},
+		fields: map[string]string{
+			"conflicting_memory_id": conflictingID,
+			"conflicting_path":      conflictingPath,
+		},
+	}
+}
+
+// errMemoryPrecondition is the 409 an optimistic-concurrency mismatch takes:
+// an update whose `precondition.content_sha256` is stale, or a delete whose
+// `expected_content_sha256` is. The schema carries no extra members.
+func errMemoryPrecondition(format string, args ...any) *apiError {
+	return &apiError{http.StatusConflict, errTypeMemoryPreconditionFailed, fmt.Sprintf(format, args...)}
 }
 
 func errAuth(message string) *apiError {
@@ -81,16 +121,27 @@ func requestIDFrom(ctx context.Context) string {
 // Non-apiError values are internal faults: logged, reported as api_error
 // without leaking internals.
 func writeError(w http.ResponseWriter, r *http.Request, err error) {
+	inner := map[string]string{}
+	if withFields, ok := err.(*apiErrorWithFields); ok {
+		// Take the extra members off, then carry on with the plain apiError
+		// underneath, so the status and the two shared fields have exactly one
+		// code path whatever the schema added.
+		maps.Copy(inner, withFields.fields)
+		err = &withFields.apiError
+	}
 	ae, ok := err.(*apiError)
 	if !ok {
 		slog.ErrorContext(r.Context(), "internal error", "method", r.Method, "path", r.URL.Path,
 			"request_id", requestIDFrom(r.Context()), "err", err)
 		ae = &apiError{http.StatusInternalServerError, errTypeAPI, "internal server error"}
 	}
+	// Last, so no schema's extra member can shadow the two every error carries.
+	inner["type"] = ae.errType
+	inner["message"] = ae.message
 	writeJSON(w, ae.status, map[string]any{
 		"type":       "error",
 		"request_id": requestIDFrom(r.Context()),
-		"error":      map[string]string{"type": ae.errType, "message": ae.message},
+		"error":      inner,
 	})
 }
 

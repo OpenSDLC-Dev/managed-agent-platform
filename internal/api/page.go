@@ -51,6 +51,12 @@ type cursor struct {
 	seqKeyed bool
 	seqDesc  bool
 	seq      int64
+	// path-keyed position (memories); used when pathKeyed is true. The
+	// memories list is the one list ordered by something other than time or a
+	// counter, and its key is not always a memory path: with depth=1 the last
+	// item on a page can be a rolled-up prefix.
+	pathKeyed bool
+	path      string
 }
 
 type pageParams struct {
@@ -109,6 +115,14 @@ func encodeVersionCursor(version int64) string {
 	return base64.RawURLEncoding.EncodeToString([]byte(raw))
 }
 
+// encodePathCursor positions the memories list at a path (or, under depth=1, a
+// rolled-up prefix). The key is base64url'd INSIDE the token because a path may
+// hold any byte but NUL — "|" among them — and the grammar splits on "|".
+func encodePathCursor(path string) string {
+	raw := fmt.Sprintf("k1|%s|m|%s", dirNext, base64.RawURLEncoding.EncodeToString([]byte(path)))
+	return base64.RawURLEncoding.EncodeToString([]byte(raw))
+}
+
 func encodeSeqCursor(desc bool, seq int64) string {
 	order := "a"
 	if desc {
@@ -146,6 +160,18 @@ func decodeCursor(s string) (*cursor, error) {
 			return nil, errInvalid("invalid page cursor")
 		}
 		return &cursor{dir: parts[1], versioned: true, version: version}, nil
+	case "m":
+		if len(parts) != 4 {
+			return nil, errInvalid("invalid page cursor")
+		}
+		path, err := base64.RawURLEncoding.DecodeString(parts[3])
+		// storableText here rather than in parsePageWith, which guards the id
+		// field: a crafted cursor carrying an unstorable byte would otherwise
+		// bind into the keyset comparison as a 500 (#135).
+		if err != nil || len(path) == 0 || !storableText(string(path)) {
+			return nil, errInvalid("invalid page cursor")
+		}
+		return &cursor{dir: parts[1], pathKeyed: true, path: string(path)}, nil
 	case "s":
 		if len(parts) != 5 || (parts[3] != "a" && parts[3] != "d") {
 			return nil, errInvalid("invalid page cursor")
