@@ -10,7 +10,7 @@ fix PR, in order.
 
 ## Tasks
 
-- [ ] **#483** — `TestLongTimeToFirstTokenKeepsLease`: the lease keeper's `Extend` is
+- [x] **#483** — `TestLongTimeToFirstTokenKeepsLease`: the lease keeper's `Extend` is
       bounded by the remaining lease, so the test's 250 ms TTL let a slow UPDATE on a
       loaded fixture Postgres overrun the budget. Scale the TTL to 1500 ms (the
       keeper-budget tests' proven-tolerant value); production's 2 min TTL is unaffected.
