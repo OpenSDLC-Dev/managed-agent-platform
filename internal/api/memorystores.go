@@ -209,7 +209,8 @@ func (s *server) updateMemoryStore(r *http.Request) (any, error) {
 	// about what it means; the SDK's `omitzero` never sends one. Each field
 	// takes the rule its sibling resources already apply: `name` is required,
 	// so null or "" is "cannot be cleared" (updateAgent and updateEnvironment;
-	// updateVault says it of null and lets "" fall to its length check); a null
+	// updateVault says it of null and lets "" fall to "display_name is
+	// required" — registered as INFERRED in docs/DIVERGENCES.md); a null
 	// `description` clears, like its documented "" (updateAgent's description);
 	// a null metadata bag preserves (patchMetadata).
 	if name, set, null, err := stringField(obj, "name"); err != nil {

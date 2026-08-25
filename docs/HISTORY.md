@@ -54,7 +54,8 @@ new directory and in-repo citations re-pointed in the moving PR (plan
 The plan's slice-1 verification row asks that `ant beta:memory-stores create|retrieve|update|list|
 archive|delete` work against this platform. Recorded with the real `ant` CLI v1.26.1 (which pins
 anthropic-sdk-go v1.66.0) against the branch's own `controlplane` on a throwaway Postgres, at
-34c908e (#484), after the review round below. Every command below is the CLI's own spelling — the id
+34c908e (#484), after the reviewers' round below (the later CodeRabbit refinement, 3b899d7, changed
+nothing the transcript exercises). Every command below is the CLI's own spelling — the id
 travels as `--memory-store-id`, `--metadata` takes a YAML mapping, `--include-archived` is a bare flag.
 
 - `create --name "User preferences" --description "What the user likes" --metadata '{team: infra,
@@ -102,7 +103,11 @@ travels as `--memory-store-id`, `--metadata` takes a YAML mapping, `--include-ar
   corrected.
 
 **Gate**: `make verify` in WSL at a831c26 — 54 packages `ok`, 0 `FAIL`, total statement coverage
-90.39%.
+90.39%; on the reviewed code (bdf9a10, the same tree as the merge) — 54 `ok`, 0 `FAIL`, **90.43%**.
+A run in between, at 34c908e, failed only on `internal/mcp`'s `TestListToolsRefusesAResponseTooLargeToRead`,
+the open WSL-only flake #380, which this branch does not touch; another timed out `internal/api` and
+`internal/executor` at Go's ten-minute package limit because the verifier's native run of the same
+suites shared the Docker daemon — the uncontended re-run above is the one that counts.
 
 ---
 
