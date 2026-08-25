@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"path"
 	"strings"
 )
 
@@ -16,7 +17,7 @@ const MarkerName = ".anthropic-memory-store"
 
 // MarkerBytes is the marker's content: a version line and the store id, which
 // is what the reference worker writes and later re-hashes to decide whether a
-// directory it finds is one it stamped (anthropic-cli v1.26.1
+// directory it finds is one it stamped (anthropic-sdk-go v1.66.0
 // lib/environments/memories.go, scanMarker/markerSHA).
 func MarkerBytes(storeID string) []byte {
 	return []byte("version 1\n" + storeID)
@@ -61,12 +62,61 @@ func DecodeBaseline(data []byte) (Baseline, error) {
 // HashTreeCommand is the read phase's one exec: every regular file under the
 // mount but the marker, with its SHA-256, NUL-terminated so any file name
 // survives, and sorted under LC_ALL=C so the listing is in byte order like
-// the store's own. It wants GNU coreutils (`sha256sum -z`, `sort -z`), which
-// the sandbox images this platform ships and tests have; a shell that lacks
-// them fails the exec, and the caller skips that store's sync and says so.
+// the store's own. An absent mount lists nothing and exits 0 — the empty tree
+// the wipe guard then judges. Anything else that goes wrong reaches the
+// caller as a non-zero exit or as something on stderr, and either is a
+// listing not to act on: the pipeline's own status is xargs's, so a `find`
+// that could not enter a directory would otherwise pass as a smaller tree
+// than there is, and a `sha256sum` without `-z` (BusyBox's) as an empty one.
+// It wants GNU coreutils (`sha256sum -z`, `sort -z`), which the sandbox
+// images this platform ships and tests have.
 func HashTreeCommand(mount string) string {
-	return "cd " + shellQuote(mount) + " && find . -type f ! -path " + shellQuote("./"+MarkerName) +
+	m := shellQuote(mount)
+	return "[ -d " + m + " ] || exit 0; cd " + m + " && find . -type f ! -path " + shellQuote("./"+MarkerName) +
 		" -print0 | LC_ALL=C sort -z | xargs -0r sha256sum -z"
+}
+
+// removeCommandBytes bounds one removal command: the sandbox hands a command
+// to its shell as a single argument, which Linux caps at 128 KiB, and 2,000
+// memory paths of up to 1,024 bytes are well past that.
+const removeCommandBytes = 32 << 10
+
+// RemoveCommands is the apply phase's deletions, as one exec or several: the
+// store's removed memories unlinked from the mount, then each one's directory
+// removed as far up as it is empty — never the mount itself, which the
+// relative `rmdir -p` cannot reach — so a memory the store later creates at a
+// removed directory's path (`/a/b` gone, `/a` created, a transition its
+// occupancy rule allows) finds no directory in its way. Paths are the
+// memories' own, `/`-rooted at the mount. An unlink that fails fails its
+// command; the directory pass is best-effort.
+func RemoveCommands(mount string, paths []string) []string {
+	var cmds, files, dirs []string
+	size := 0
+	flush := func() {
+		if len(files) == 0 {
+			return
+		}
+		cmd := "cd " + shellQuote(mount) + " && rm -f -- " + strings.Join(files, " ") + " || exit 1"
+		if len(dirs) > 0 {
+			cmd += "; rmdir -p --ignore-fail-on-non-empty -- " + strings.Join(dirs, " ") + " 2>/dev/null; exit 0"
+		}
+		cmds = append(cmds, cmd)
+		files, dirs, size = nil, nil, 0
+	}
+	for _, p := range paths {
+		rel := strings.TrimPrefix(p, "/")
+		if size+2*len(rel) > removeCommandBytes {
+			flush()
+		}
+		files = append(files, shellQuote(rel))
+		size += len(rel) + 3
+		if dir := path.Dir(rel); dir != "." && (len(dirs) == 0 || dirs[len(dirs)-1] != shellQuote(dir)) {
+			dirs = append(dirs, shellQuote(dir))
+			size += len(dir) + 3
+		}
+	}
+	flush()
+	return cmds
 }
 
 func shellQuote(s string) string {

@@ -50,9 +50,9 @@ func TestMemoryRootsGuardTheFileTools(t *testing.T) {
 	}
 
 	// Inside a read-only store: both writers refuse, naming the root.
-	refused(t, "write", `{"file_path":"/mnt/memory/archive/b.md","content":"x"}`, "read-only memory store directory /mnt/memory/archive")
+	refused(t, "write", `{"file_path":"/mnt/memory/archive/b.md","content":"x"}`, "read-only directory /mnt/memory/archive")
 	refused(t, "write", `{"file_path":"/mnt/memory/archive/new/deep.md","content":"x"}`, "/mnt/memory/archive")
-	refused(t, "edit", `{"file_path":"/mnt/memory/archive/b.md","old_string":"ro","new_string":"rw"}`, "read-only memory store directory")
+	refused(t, "edit", `{"file_path":"/mnt/memory/archive/b.md","old_string":"ro","new_string":"rw"}`, "read-only directory")
 	// A path that only looks like it is inside: a sibling whose name shares the prefix.
 	refused(t, "write", `{"file_path":"/mnt/memory/archive-2/x.md","content":"x"}`, "nothing is mounted at that path")
 	// Under /mnt/memory but in no store — the baselines' directory included.
@@ -61,7 +61,7 @@ func TestMemoryRootsGuardTheFileTools(t *testing.T) {
 	refused(t, "edit", `{"file_path":"/mnt/memory/loose.md","old_string":"loose","new_string":"x"}`, "holds only mounted memory stores")
 	refused(t, "write", `{"file_path":"/mnt/memory","content":"x"}`, "holds only mounted memory stores")
 	// A traversal that resolves into the read-only store is judged resolved.
-	refused(t, "write", `{"file_path":"/mnt/memory/notes/../archive/b.md","content":"x"}`, "read-only memory store directory")
+	refused(t, "write", `{"file_path":"/mnt/memory/notes/../archive/b.md","content":"x"}`, "read-only directory")
 	refused(t, "write", `{"file_path":"../mnt/memory/loose.md","content":"x"}`, "holds only mounted memory stores")
 
 	// A read-write store, and everything outside the tree.

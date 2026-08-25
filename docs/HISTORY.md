@@ -80,10 +80,10 @@ tool calls as prose in its own markup — the transcript kept is the second, too
   is inside read-only memory store directory /mnt/memory/project-notes", and the store's
   `memories list` afterwards is unchanged. `sessions list --memory-store-id` → both sessions.
 
-**Evals** (`RUN_EVALS=1`, the same model, in WSL at b3e2f02): `memory-recall` PASS (16.5 s, two
-tool calls — the read of the mounted passphrase and the answer) and `memory-write` PASS (4.0 s,
-one tool call — the write the sync then pushed, read back through the memories route by the
-`MemorySynced` grader); the pinned set is nineteen.
+**Evals** (`RUN_EVALS=1`, the same model, in WSL at b3e2f02): `memory-recall` PASS (16.62 s —
+the passphrase read from the mounted store) and `memory-write` PASS (4.01 s — the write the sync
+then pushed, read back through the memories route by the `MemorySynced` grader); the pinned set
+is nineteen.
 
 **Gate**: `make verify` in WSL at b3e2f02 — 54 packages `ok`, one `FAIL`: `internal/mcp`'s
 `TestListToolsRefusesAResponseTooLargeToRead`, #380's open WSL2 flake ("socket-buffer luck",
@@ -91,6 +91,63 @@ one tool call — the write the sync then pushed, read back through the memories
 FAIL/FAIL/ok with #380's own message. `make cover-gate` over the run's profile: total statement
 coverage **90.37%**. The verifier, the reviewers and the gate took their turns in sequence, and
 the acceptance stack ran only after the gate had finished with the Docker daemon.
+
+**Review round** — the Codex reviewer (gpt-5.6-sol, xhigh), the Claude reviewer (Opus 5, four
+passes) and the verifier, all against cdd6540, the commit the acceptance above was recorded on;
+the verifier's verdict was FAIL, on the first item. Fixed in the same PR:
+
+- **Every sync push's head row named a version that was never written.** `pushMemory` minted a
+  version id for the head row and `insertSessionVersion` minted another for the version row, so
+  the wire's `memory_version_id` 404'd and a redact of the head never saw a head — the transcript
+  above shows it (`/log/index.md`'s head `memver_57f7…` against its one version `memver_zwmg…`).
+  Both reviewers and the verifier found it; the version row now carries the head's id, and
+  `danglingHeads` pins zero.
+- **A listing that failed read as deletions or as an empty tree.** The hash pipeline's status is
+  `xargs`'s, so a `find` that could not enter a directory listed the rest and exited 0 (the files
+  it hid then read as local deletions), and a `sha256sum` without `-z` (BusyBox's) listed nothing
+  with exit 123 — the same shape as an absent directory, which a one-memory store would answer
+  with a `DeleteRemote`. The command now guards absence itself (`[ -d ] || exit 0`), any stderr
+  or non-zero exit skips the store — at materialization too, which had re-materialized over such
+  a directory — and `memsync/shell_test.go` runs both commands under a real bash.
+- **The wipe-guard rebuild never re-stamped the marker**, so an `rm -rf` of a mount left the
+  directory pull-only for the sandbox's life with every later write withheld in silence; a
+  rebuild re-stamps, as the reference's `stampAndPull` does, and the withheld pushes are counted.
+- **Stores settled in mount order** — a slug of a name that can change between attachments — so
+  two sessions could lock the same rows the opposite way round; store-id order now. And a store
+  whose settlement failed failed the run's commit, re-running every tool for a memory the
+  results never depended on; each store settles in a savepoint and a failure skips it.
+- **The brain rendered any lookup error as "NOT AVAILABLE: the memory store no longer exists"**;
+  a failed lookup renders the line unqualified, the repositories block's rule.
+- **A store-side `/a/b → /a` change could never apply** (`rm -f` left `a/`, and the bulk writer
+  refuses a directory target), and 2,000 removals of 1,024-byte paths were one `rm` past the
+  shell's single-argument cap; removals prune their emptied parents, in bounded commands.
+- **The cap**: a deletion in the same settlement made no room for a create, and the 2,001st
+  memory's refusal was remembered by digest as though the bytes were at fault. Decision 11's
+  text is amended: the store's fullness is its state, retried each run.
+- The eval's bash write detector counted a `cat` of the path as a write, blaming the platform for
+  a model miss; the read-only refusal wording is the reference's `is inside read-only directory`
+  again (decision 12 promised it verbatim; the transcript above shows the earlier wording); the
+  bulk shells' mode pattern admitted a setuid digit and their cleanup `rm -f` lacked `--`; a
+  description's newline could forge a bullet in the brain's block; the executor's pool floor is 4
+  (the reaper pins two connections mid-sync); a failed removal skipped the metrics.
+- Docs: four citations named the CLI where the file is the SDK's `lib/environments/memories.go`;
+  the marker's registry entry said "not a divergence" where the reference leaves an
+  altered-marker directory unsynced and we pull into it (now a CONFIRMED entry of ours); the
+  run-boundary entry misstated the reference's cadence (its worker syncs inside its tool loop,
+  at most every 15 s); ARCHITECTURE and the fragment had the file tools guarding an
+  altered-marker directory (they see `read_only` and archived only), "four" instruments where
+  five land, and the worker using `memsync` "from slice 4"; the evals' timings here are the
+  log's (16.62 s, 4.01 s) and the tool-call counts it does not hold are gone.
+
+Refuted with evidence: a read-only mount "leaving bash modifications visible" — decision 12's
+pull-only mode stops pushes and nothing claims local edits are reverted; the file-tool guard
+"bypassable through symlinks" — lexical by design, `bash` being unconfined and the store
+protected by the sync, which the guard's comment now says. Accepted and recorded: the sync
+buffers a store's changed bytes in memory, bounded by the store's own caps and only for what
+changed (a comment says so); a manifest's partial trailing record and a refusal keyed by a
+non-UTF-8 path (re-read once a run) stay as they are. Owed and filed as #488: the docker
+integration test under `SANDBOX_RUN_AS_USER` and the telemetry assertions the plan's
+verification row named, which this slice did not deliver.
 
 ## Attachment and filter — real `ant` CLI against `resources[]` and the sessions filter (plan 36 slice 3, run 2026-08-25) — ✅ passed
 

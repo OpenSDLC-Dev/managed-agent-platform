@@ -192,18 +192,19 @@ func TestBulkRenameShellSetsAFreshMembersMode(t *testing.T) {
 // A member whose manifest record asks for a mode lands with it — the
 // memory-store files' 0666 (plan 36 decision 10) — after the batched 0644 pass,
 // and only that member: its neighbour still lands 0644, and a record whose
-// mode is not four octal digits is read as the default rather than handed to
-// chmod, since the manifest is a file the sandbox can rewrite.
+// mode is not a permission mode — four octal digits, the first 0, so no
+// setuid, setgid or sticky bit — is read as the default rather than handed
+// to chmod, since the manifest is a file the sandbox can rewrite.
 func TestBulkRenameShellAppliesAMembersMode(t *testing.T) {
 	dir := t.TempDir()
-	members := map[string]string{"rw.md": "RW", "plain.txt": "P", "odd.txt": "O"}
-	manifest, dirList := stageBatchModes(t, dir, members, nil, map[string]string{"rw.md": "0666", "odd.txt": "u+s"})
+	members := map[string]string{"rw.md": "RW", "plain.txt": "P", "odd.txt": "O", "suid.sh": "S"}
+	manifest, dirList := stageBatchModes(t, dir, members, nil, map[string]string{"rw.md": "0666", "odd.txt": "u+s", "suid.sh": "4755"})
 
 	code, stderr := bulkShell(t, sandbox.BulkRenameShell, "__map_bulk_rename", manifest, dirList)
 	if code != 0 {
 		t.Fatalf("exit %d, want 0; stderr: %s", code, stderr)
 	}
-	for name, want := range map[string]os.FileMode{"rw.md": 0o666, "plain.txt": 0o644, "odd.txt": 0o644} {
+	for name, want := range map[string]os.FileMode{"rw.md": 0o666, "plain.txt": 0o644, "odd.txt": 0o644, "suid.sh": 0o644} {
 		info, err := os.Stat(dir + "/" + name)
 		if err != nil {
 			t.Fatalf("stat %s: %v", name, err)

@@ -44,8 +44,10 @@ type memoryMount struct {
 // store still exists (a deleted store keeps its element, decision 7 — the
 // line is hedged rather than dropped, since the mount may still hold what
 // the last materialization landed) and whether it has been archived, which
-// makes it read-only whatever the attachment asked. A store error is a
-// logged, counted miss rendered as if missing, never a failed turn.
+// makes it read-only whatever the attachment asked. A lookup that fails is
+// logged and its line rendered unqualified — the repositories block's rule:
+// no claim rather than a false one, since the executor still materializes
+// and syncs a store the brain merely could not ask about.
 func (b *Brain) resolveMemoryBlock(ctx context.Context, resourcesJSON []byte, envKind string) (string, int, int) {
 	if len(resourcesJSON) == 0 || envKind != "cloud" {
 		return "", 0, 0
@@ -70,10 +72,8 @@ func (b *Brain) resolveMemoryBlock(ctx context.Context, resourcesJSON []byte, en
 			m.missing = true
 			misses++
 		case err != nil:
-			slog.WarnContext(ctx, "memory store not resolved; rendered as unavailable",
+			slog.WarnContext(ctx, "memory store not resolved; rendered unqualified",
 				"memory_store_id", m.MemoryStoreID, "err", err)
-			m.missing = true
-			misses++
 		default:
 			m.archived = archivedAt != nil
 		}
@@ -101,18 +101,21 @@ func recordMemoryResolveMisses(ctx context.Context, n int) {
 // and placement are inferences (docs/DIVERGENCES.md), after the repositories
 // block. It tells the model the two things it cannot learn from the directory
 // alone: that files there persist across sessions through the store, and
-// which stores take no writes.
+// which stores take no writes. The store's name, description and
+// instructions are the API's callers' text, laid on the store's one line —
+// a newline in a description would otherwise start a bullet of its own.
 func renderMemoryBlock(mounts []memoryMount) string {
 	if len(mounts) == 0 {
 		return ""
 	}
+	oneLine := func(s string) string { return strings.Join(strings.Fields(s), " ") }
 	var b strings.Builder
 	b.WriteString("Memory stores. Each store below is mounted as a directory in your sandbox. Read its files to recall what was saved before; create, edit or delete files there to remember things for later — the platform syncs the directory with the store after each of your tool calls, and other sessions attached to the same store see what you save. A read-only store cannot be changed.\n")
 	for _, m := range mounts {
 		b.WriteString("\n- ")
 		b.WriteString(m.MountPath)
 		b.WriteString(" — ")
-		b.WriteString(m.Name)
+		b.WriteString(oneLine(m.Name))
 		access := m.Access
 		if access == "" {
 			access = "read_write"
@@ -126,13 +129,15 @@ func renderMemoryBlock(mounts []memoryMount) string {
 			b.WriteString(", archived")
 		}
 		b.WriteString(")")
-		if m.Description != "" {
+		if d := oneLine(m.Description); d != "" {
 			b.WriteString(": ")
-			b.WriteString(m.Description)
+			b.WriteString(d)
 		}
-		if m.Instructions != nil && *m.Instructions != "" {
-			b.WriteString(" — Instructions: ")
-			b.WriteString(*m.Instructions)
+		if m.Instructions != nil {
+			if in := oneLine(*m.Instructions); in != "" {
+				b.WriteString(" — Instructions: ")
+				b.WriteString(in)
+			}
 		}
 		if m.missing {
 			// Hedged for the repositories block's reason: the store is gone,

@@ -557,9 +557,28 @@ func wroteFile(tr *Trial, path string) bool {
 				return true
 			}
 		case "bash":
-			if cmd, _ := input["command"].(string); strings.Contains(cmd, path) {
+			// A bash write shows in the command's shape, not in the path's
+			// mere mention: a `cat` of the file is a read, and counting it
+			// would send MemorySynced after a memory nobody wrote and call the
+			// miss the platform's.
+			if cmd, _ := input["command"].(string); strings.Contains(cmd, path) && bashWrites(cmd) {
 				return true
 			}
+		}
+	}
+	return false
+}
+
+// bashWrites says whether a command has a construct that writes a file: a
+// redirect, an in-place sed, or one of the copying and touching verbs.
+func bashWrites(cmd string) bool {
+	if strings.Contains(cmd, ">") || strings.Contains(cmd, "sed -i") {
+		return true
+	}
+	for _, tok := range strings.FieldsFunc(cmd, func(r rune) bool { return strings.ContainsRune(" \t\n;&|(", r) }) {
+		switch tok {
+		case "tee", "cp", "mv", "install", "touch", "truncate":
+			return true
 		}
 	}
 	return false

@@ -139,6 +139,15 @@ func TestPlanMatrix(t *testing.T) {
 				if got := res.Next.Refused["/p"] != ""; got != c.keepRefusal {
 					t.Errorf("refusal kept = %v, want %v", got, c.keepRefusal)
 				}
+				// Pull-only mode counts every push it drops, refused bytes
+				// included, so a run that pushed nothing can say why.
+				wantWithheld := 0
+				if pullOnly && ((c.want != nil && c.want.Kind == memsync.Push) || c.skipped) {
+					wantWithheld = 1
+				}
+				if res.Withheld != wantWithheld {
+					t.Errorf("withheld = %d, want %d", res.Withheld, wantWithheld)
+				}
 			})
 		}
 	}

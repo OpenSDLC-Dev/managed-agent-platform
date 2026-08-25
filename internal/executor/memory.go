@@ -59,7 +59,10 @@ const (
 
 func baselinePath(storeID string) string { return path.Join(memorySyncDir, storeID) }
 
-// memoryMounts is the attached stores a run acts on, in mount order so the
+// memoryMounts is the attached stores a run acts on, in store-id order — the
+// one order every session shares, since a mount path is a slug of the name
+// the store had when each session attached it — so two sessions settling the
+// same stores lock their rows the same way round and cannot deadlock, and the
 // passes and their telemetry are reproducible.
 func memoryMounts(refs []memoryRef) []memoryRef {
 	mounts := make([]memoryRef, 0, len(refs))
@@ -68,7 +71,7 @@ func memoryMounts(refs []memoryRef) []memoryRef {
 			mounts = append(mounts, r)
 		}
 	}
-	sort.Slice(mounts, func(i, j int) bool { return mounts[i].MountPath < mounts[j].MountPath })
+	sort.Slice(mounts, func(i, j int) bool { return mounts[i].MemoryStoreID < mounts[j].MemoryStoreID })
 	return mounts
 }
 
@@ -158,10 +161,11 @@ func (e *Executor) materializeStore(ctx context.Context, sb sandbox.Sandbox, m m
 	if err != nil {
 		return memoryOutcomeFailed, err
 	}
-	// A listing with anything in it — or one too long to capture — is a
-	// directory with files and no marker vouching for them. An absent
-	// directory exits non-zero with nothing listed, which is the fresh case.
-	if len(res.Stdout) > 0 || res.Truncated {
+	// A listing with anything in it — or one too long to capture, or one
+	// that failed or complained — is a directory nothing vouches for: files
+	// with no marker, or files the listing could not read. An absent
+	// directory lists nothing and says nothing, which is the fresh case.
+	if len(res.Stdout) > 0 || res.Truncated || res.ExitCode != 0 || strings.TrimSpace(res.Stderr) != "" {
 		return memoryOutcomeUntrusted, nil
 	}
 
@@ -230,19 +234,29 @@ type storeSync struct {
 	// tell it has nothing to write back.
 	raw []byte
 	// contents holds the bytes of every locally changed file, read before
-	// the settlement so a push carries exactly what was hashed.
+	// the settlement so a push carries exactly what was hashed. Its bound is
+	// the store's own (2,000 memories of 100 kB) and only for files that
+	// changed since the baseline — the common run reads none.
 	contents map[string][]byte
 	// skipped marks a store this sync leaves alone: a listing that could not
-	// be read or trusted, or a store whose row is gone.
+	// be read or trusted, a settlement that failed, or a store whose row is
+	// gone.
 	skipped bool
+	// restamp marks a rebuilt directory: the marker goes back with the files.
+	restamp bool
 
-	writes   []sandbox.FileWrite
+	writes []sandbox.FileWrite
+	// removals are memory paths the store deleted, for the apply phase to
+	// unlink.
 	removals []string
 	next     memsync.Baseline
 	counts   memorySyncCounts
 }
 
-type memorySyncCounts struct{ pulled, pushed, deleted, conflict, refused int }
+// memorySyncCounts is a store's sync in numbers; all but withheld — the
+// pushes a pull-only sync dropped, logged rather than measured — are the
+// memory.sync.actions instrument's.
+type memorySyncCounts struct{ pulled, pushed, deleted, conflict, refused, withheld int }
 
 // readMemory is the read phase: each store's tree hash, its baseline and the
 // bytes of what changed. Nil when the session has no stores. The span and
@@ -282,10 +296,12 @@ func (e *Executor) readStore(ctx context.Context, sb sandbox.Sandbox, st *storeS
 	if res.Truncated {
 		return errors.New("the listing overflows the exec output cap")
 	}
-	// A non-zero exit with nothing listed is an absent directory — an empty
-	// tree, which the wipe guard then judges. With something listed it is a
-	// file the hash could not read, and a partial listing is not one to act on.
-	if res.ExitCode != 0 && len(res.Stdout) > 0 {
+	// Anything the listing complains of is a listing not to act on: its
+	// pipeline's status is xargs's, so a directory find could not enter
+	// shows only on stderr, and the files it holds would read as deleted. An
+	// absent directory is an empty listing that says nothing — the empty tree
+	// the wipe guard then judges.
+	if res.ExitCode != 0 || strings.TrimSpace(res.Stderr) != "" {
 		return fmt.Errorf("the listing exited %d: %s", res.ExitCode, strings.TrimSpace(res.Stderr))
 	}
 	st.local, err = memsync.ParseHashTree([]byte(res.Stdout))
@@ -344,8 +360,12 @@ func sha256hex(data []byte) string {
 // run (the session row is already locked by it): each store's row is locked
 // like the API's own writers lock it, its heads listed, the plan made, and
 // every write to the store applied with the compare-and-set the plan carries.
-// Only a database failure is an error; a conflict, a refusal and a vanished
-// store are outcomes, counted and applied. The sandbox is not touched here.
+// A conflict, a refusal and a vanished store are outcomes, counted and
+// applied. Each store settles inside a savepoint of the run's transaction,
+// so a store whose settlement fails is skipped — its baseline kept, its sync
+// retried next run — rather than failing the commit, which would re-run
+// every tool for a memory the run's results never depended on. The sandbox
+// is not touched here.
 func (e *Executor) settleMemory(ctx context.Context, tx pgx.Tx, ms *memorySync) error {
 	if ms == nil {
 		return nil
@@ -354,7 +374,18 @@ func (e *Executor) settleMemory(ctx context.Context, tx pgx.Tx, ms *memorySync) 
 		if st.skipped {
 			continue
 		}
-		if err := e.settleStore(ctx, tx, ms.sid, st); err != nil {
+		sp, err := tx.Begin(ctx)
+		if err != nil {
+			return err
+		}
+		if err := e.settleStore(ctx, sp, ms.sid, st); err != nil {
+			_ = sp.Rollback(ctx)
+			st.skipped = true
+			slog.WarnContext(ctx, "memory store not synced: its settlement failed; retried at the next run",
+				"session_id", ms.sid, "memory_store_id", st.ref.MemoryStoreID, "err", err)
+			continue
+		}
+		if err := sp.Commit(ctx); err != nil {
 			return fmt.Errorf("memory store %s: %w", st.ref.MemoryStoreID, err)
 		}
 	}
@@ -403,6 +434,8 @@ func (e *Executor) settleStore(ctx context.Context, tx pgx.Tx, sid domain.ID, st
 	})
 	st.next = plan.Next
 	st.counts.refused += len(plan.Skipped)
+	st.counts.withheld = plan.Withheld
+	st.restamp = plan.Rebuild
 	if plan.Rebuild {
 		slog.WarnContext(ctx, "memory store directory is empty against a baseline of several files; rebuilt, nothing deleted",
 			"session_id", sid, "memory_store_id", id, "baseline_files", len(st.baseline.Synced))
@@ -427,7 +460,7 @@ func (e *Executor) settleStore(ctx context.Context, tx pgx.Tx, sid domain.ID, st
 				st.counts.conflict++
 			}
 		case memsync.RemoveLocal:
-			st.removals = append(st.removals, target)
+			st.removals = append(st.removals, act.Path)
 			st.counts.deleted++
 		case memsync.DeleteRemote:
 			tag, err := tx.Exec(ctx, `DELETE FROM memories WHERE id = $1 AND content_sha256 = $2`, act.ID, act.BaselineSHA)
@@ -441,9 +474,11 @@ func (e *Executor) settleStore(ctx context.Context, tx pgx.Tx, sid domain.ID, st
 				st.counts.conflict++
 				continue
 			}
-			if err := insertSessionVersion(ctx, tx, id, act.ID, "deleted", act.Path, nil, actor); err != nil {
+			versionID := domain.NewID(domain.PrefixMemoryVersion).String()
+			if err := insertSessionVersion(ctx, tx, versionID, id, act.ID, "deleted", act.Path, nil, actor); err != nil {
 				return err
 			}
+			held-- // room for a create later in this same settlement
 			st.counts.deleted++
 		case memsync.Push:
 			data, ok := st.contents[act.Path]
@@ -469,6 +504,12 @@ func (e *Executor) settleStore(ctx context.Context, tx pgx.Tx, sid domain.ID, st
 			case memoryPushRefused:
 				st.next.Refused[act.Path] = act.LocalSHA
 				st.counts.refused++
+			case memoryPushOverCap:
+				// The store's state, not the file's: not remembered, so the
+				// next run retries it against whatever room deletions made.
+				slog.WarnContext(ctx, "memory not created: the store holds its maximum",
+					"session_id", sid, "memory_store_id", id, "path", act.Path, "cap", memsync.MaxMemoriesPerStore)
+				st.counts.refused++
 			}
 		}
 	}
@@ -479,6 +520,7 @@ const (
 	memoryPushOK       = "ok"
 	memoryPushConflict = "conflict"
 	memoryPushRefused  = "refused"
+	memoryPushOverCap  = "over the cap"
 )
 
 // pushMemory writes one file to the store: a create (act.ID empty) refused by
@@ -486,7 +528,9 @@ const (
 // baseline recorded — the API's own rules and the reference worker's own
 // answers to them (a 409 loses, a 400 or 413 is remembered as refused). The
 // head row is written with the version's id before the version row, which is
-// what a compare-and-set that lands nothing must leave nothing behind.
+// what a compare-and-set that lands nothing must leave nothing behind; the
+// version row then carries that same id, so the head points at a version
+// that exists (a redact's head check and the wire's pointer both read it).
 func (e *Executor) pushMemory(ctx context.Context, tx pgx.Tx, storeID string, act memsync.Action,
 	data []byte, actor json.RawMessage, held *int) (string, error) {
 	content := string(data)
@@ -510,7 +554,7 @@ func (e *Executor) pushMemory(ctx context.Context, tx pgx.Tx, storeID string, ac
 			return memoryPushConflict, nil
 		}
 		if *held >= memsync.MaxMemoriesPerStore {
-			return memoryPushRefused, nil
+			return memoryPushOverCap, nil
 		}
 		memoryID := domain.NewID(domain.PrefixMemory).String()
 		tag, err := tx.Exec(ctx,
@@ -525,7 +569,7 @@ func (e *Executor) pushMemory(ctx context.Context, tx pgx.Tx, storeID string, ac
 			return memoryPushConflict, nil
 		}
 		*held++
-		return memoryPushOK, insertSessionVersion(ctx, tx, storeID, memoryID, "created", act.Path, &content, actor)
+		return memoryPushOK, insertSessionVersion(ctx, tx, versionID, storeID, memoryID, "created", act.Path, &content, actor)
 	}
 	tag, err := tx.Exec(ctx,
 		`UPDATE memories
@@ -539,14 +583,15 @@ func (e *Executor) pushMemory(ctx context.Context, tx pgx.Tx, storeID string, ac
 	if tag.RowsAffected() == 0 {
 		return memoryPushConflict, nil
 	}
-	return memoryPushOK, insertSessionVersion(ctx, tx, storeID, act.ID, "modified", act.Path, &content, actor)
+	return memoryPushOK, insertSessionVersion(ctx, tx, versionID, storeID, act.ID, "modified", act.Path, &content, actor)
 }
 
 // insertSessionVersion is the version row every session write appends, the
 // shape internal/api's insertMemoryVersion writes with a session_actor for
-// its created_by (decision 6; migration 0029 names the columns): a `deleted`
-// version carries its path and nothing else.
-func insertSessionVersion(ctx context.Context, tx pgx.Tx, storeID, memoryID, operation, p string,
+// its created_by (decision 6; migration 0029 names the columns), under the
+// id the head row was given: a `deleted` version carries its path and
+// nothing else.
+func insertSessionVersion(ctx context.Context, tx pgx.Tx, versionID, storeID, memoryID, operation, p string,
 	content *string, actor json.RawMessage) error {
 	var body, sha, size any
 	if content != nil {
@@ -557,17 +602,19 @@ func insertSessionVersion(ctx context.Context, tx pgx.Tx, storeID, memoryID, ope
 		   (id, memory_store_id, memory_id, operation, path, content, content_sha256,
 		    content_size_bytes, created_by)
 		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
-		domain.NewID(domain.PrefixMemoryVersion).String(), storeID, memoryID, operation, p, body, sha, size, actor)
+		versionID, storeID, memoryID, operation, p, body, sha, size, actor)
 	return err
 }
 
 // applyMemory is the apply phase, after the commit: the store's deletions are
-// removed from the directory, then its changes and the new baseline are
-// written in one batch — in that order, because a baseline that no longer
-// names a file still present would push it back as new on the next sync. A
-// write that fails leaves the old baseline, and the next sync re-derives what
-// this one could not land: a push already committed then reads as agreement,
-// a pull as still pending.
+// removed from the directory (and their emptied directories with them), then
+// its changes, the marker if the directory was rebuilt, and the new baseline
+// are written in one batch — in that order, because a baseline that no
+// longer names a file still present would push it back as new on the next
+// sync. A write that fails leaves the old baseline, and the next sync
+// re-derives what this one could not land: a push already committed then
+// reads as agreement, a pull as still pending. What the settlement committed
+// is counted before the sandbox is touched, so a failed apply never hides it.
 func (e *Executor) applyMemory(ctx context.Context, ms *memorySync) {
 	if ms == nil {
 		return
@@ -578,31 +625,39 @@ func (e *Executor) applyMemory(ctx context.Context, ms *memorySync) {
 			continue
 		}
 		id := st.ref.MemoryStoreID
-		if len(st.removals) > 0 {
-			quoted := make([]string, len(st.removals))
-			for i, p := range st.removals {
-				quoted[i] = shellQuote(p)
-			}
-			res, err := ms.sb.Exec(ctx, sandbox.ExecRequest{Command: "rm -f -- " + strings.Join(quoted, " ")})
+		recordMemorySyncActions(ctx, st.counts)
+		if c := st.counts; c.pulled+c.pushed+c.deleted+c.conflict+c.refused+c.withheld > 0 {
+			slog.InfoContext(ctx, "memory store synced",
+				"session_id", ms.sid, "memory_store_id", id, "pulled", c.pulled, "pushed", c.pushed,
+				"deleted", c.deleted, "conflict", c.conflict, "refused", c.refused, "withheld", c.withheld)
+		}
+		removed := true
+		for _, cmd := range memsync.RemoveCommands(st.ref.MountPath, st.removals) {
+			res, err := ms.sb.Exec(ctx, sandbox.ExecRequest{Command: cmd})
 			if err != nil || res.ExitCode != 0 {
 				slog.WarnContext(ctx, "memory deletions not applied; the baseline is kept for the next sync",
 					"session_id", ms.sid, "memory_store_id", id, "err", err, "exit", res.ExitCode, "stderr", strings.TrimSpace(res.Stderr))
-				continue
+				removed = false
+				break
 			}
 		}
-		recordMemorySyncActions(ctx, st.counts)
-		if c := st.counts; c.pulled+c.pushed+c.deleted+c.conflict+c.refused > 0 {
-			slog.InfoContext(ctx, "memory store synced",
-				"session_id", ms.sid, "memory_store_id", id, "pulled", c.pulled, "pushed", c.pushed,
-				"deleted", c.deleted, "conflict", c.conflict, "refused", c.refused)
+		if !removed {
+			continue
 		}
 		// A sync that moved nothing and agrees with the baseline it read has
 		// nothing to write: the common run costs the directory one listing.
 		next := st.next.Encode()
-		if len(st.writes) == 0 && bytes.Equal(next, st.raw) {
+		if len(st.writes) == 0 && !st.restamp && bytes.Equal(next, st.raw) {
 			continue
 		}
-		writes := append(st.writes, sandbox.FileWrite{Path: baselinePath(id), Data: next})
+		writes := st.writes
+		if st.restamp {
+			// A rebuilt directory gets its marker back with its files — the
+			// reference worker's stampAndPull — or it would stay pull-only for
+			// the sandbox's life, the agent's every later write withheld.
+			writes = append(writes, sandbox.FileWrite{Path: path.Join(st.ref.MountPath, memsync.MarkerName), Data: memsync.MarkerBytes(id)})
+		}
+		writes = append(writes, sandbox.FileWrite{Path: baselinePath(id), Data: next})
 		if err := ms.sb.WriteFiles(ctx, writes); err != nil {
 			slog.WarnContext(ctx, "memory changes not applied; the baseline is kept for the next sync",
 				"session_id", ms.sid, "memory_store_id", id, "err", err)

@@ -108,6 +108,20 @@ func (h *harness) versionsOf(t *testing.T, storeID, path string) []string {
 	return out
 }
 
+// danglingHeads counts the store's memories whose memory_version_id names no
+// version row — what the wire's pointer and a redact's head check both need
+// to be zero.
+func (h *harness) danglingHeads(t *testing.T, storeID string) int {
+	t.Helper()
+	var n int
+	if err := h.pool.QueryRow(context.Background(),
+		`SELECT count(*) FROM memories m WHERE m.memory_store_id = $1
+		    AND NOT EXISTS (SELECT 1 FROM memory_versions v WHERE v.id = m.memory_version_id)`, storeID).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	return n
+}
+
 func (h *harness) step(t *testing.T) {
 	t.Helper()
 	h.suspend(t, writeUse("out.txt", "x"))
@@ -210,9 +224,65 @@ func TestMemorySyncPushesLocalChanges(t *testing.T) {
 			t.Errorf("versions of %s = %v, want %v", path, got, want)
 		}
 	}
+	// Each head points at the version the push wrote, not at an id nobody
+	// inserted — the wire's memory_version_id resolves, and a redact of the
+	// head sees a head.
+	if n := h.danglingHeads(t, memStoreID); n != 0 {
+		t.Errorf("%d memories point at a version that was never written", n)
+	}
 	b := baselineOf(t, sb, memStoreID)
 	if b.Synced["/new.md"] != sha256hex([]byte("fresh")) || b.Synced["/notes.md"] != sha256hex([]byte("hello v2")) || len(b.Synced) != 2 {
 		t.Errorf("baseline = %+v", b)
+	}
+}
+
+// TestMemoryMountsOrderByStore: the stores a run acts on come in store-id
+// order, not mount order — the one order every session shares, so two
+// sessions settling the same stores lock their rows the same way round.
+func TestMemoryMountsOrderByStore(t *testing.T) {
+	got := memoryMounts([]memoryRef{
+		{Type: "memory_store", MemoryStoreID: "memstore_b", MountPath: "/mnt/memory/alpha"},
+		{Type: "github_repository", MountPath: "/workspace/x"},
+		{Type: "memory_store", MemoryStoreID: "memstore_a", MountPath: "/mnt/memory/zeta"},
+	})
+	if len(got) != 2 || got[0].MemoryStoreID != "memstore_a" || got[1].MemoryStoreID != "memstore_b" {
+		t.Fatalf("mounts = %+v", got)
+	}
+}
+
+// TestMemorySettleFailureSkipsTheStore: a store whose settlement fails — here
+// a version row the database refuses — is skipped for the run, its baseline
+// kept and its sync retried next time, while the run's own result commits:
+// the tools do not re-run for a memory they never depended on.
+func TestMemorySettleFailureSkipsTheStore(t *testing.T) {
+	h, sb := materialized(t, "read_write")
+	ctx := context.Background()
+	if _, err := h.pool.Exec(ctx, `
+		CREATE OR REPLACE FUNCTION map_test_refuse_version() RETURNS trigger LANGUAGE plpgsql AS $$
+		BEGIN RAISE EXCEPTION 'refused by the test'; END $$;
+		CREATE TRIGGER map_test_refuse_version BEFORE INSERT ON memory_versions
+		  FOR EACH ROW WHEN (NEW.memory_store_id = '`+memStoreID+`') EXECUTE FUNCTION map_test_refuse_version()`); err != nil {
+		t.Fatal(err)
+	}
+	dropTrigger := func() { _, _ = h.pool.Exec(ctx, `DROP TRIGGER IF EXISTS map_test_refuse_version ON memory_versions`) }
+	t.Cleanup(dropTrigger)
+	before := sb.files[baselinePath(memStoreID)]
+	sb.files[memMount+"/new.md"] = "fresh"
+	h.step(t)
+	results := h.toolResults(t)
+	if len(results) == 0 || results[len(results)-1].IsError {
+		t.Fatalf("the run's own result did not commit: %+v", results)
+	}
+	if _, ok := h.memoryContent(t, memStoreID, "/new.md"); ok {
+		t.Error("a push landed through a failed settlement")
+	}
+	if sb.files[baselinePath(memStoreID)] != before {
+		t.Error("the baseline was rewritten for a store whose settlement failed")
+	}
+	dropTrigger()
+	h.step(t)
+	if got, _ := h.memoryContent(t, memStoreID, "/new.md"); got != "fresh" {
+		t.Errorf("/new.md after the retry = %q", got)
 	}
 }
 
@@ -280,22 +350,32 @@ func TestMemorySyncStoreWinsAConflict(t *testing.T) {
 	}
 }
 
-// TestMemorySyncWipeGuard: an emptied directory against a baseline of two
-// files is a wiped mount, not two deletions — both come back, nothing is
-// deleted from the store.
+// TestMemorySyncWipeGuard: an `rm -rf` of the mount — marker and all — against
+// a baseline of two files is a wiped mount, not two deletions: both come
+// back with the marker, nothing is deleted from the store, and the rebuilt
+// directory pushes again at the next run rather than staying pull-only.
 func TestMemorySyncWipeGuard(t *testing.T) {
 	h, sb := materialized(t, "read_write")
 	delete(sb.files, memMount+"/notes.md")
 	delete(sb.files, memMount+"/a/b.md")
+	delete(sb.files, memMount+"/.anthropic-memory-store")
 	h.step(t)
 
 	if sb.files[memMount+"/notes.md"] != "hello" || sb.files[memMount+"/a/b.md"] != "deep" {
 		t.Errorf("the wiped directory was not rebuilt: %v", sb.files)
 	}
+	if got := sb.files[memMount+"/.anthropic-memory-store"]; got != string(memsync.MarkerBytes(memStoreID)) {
+		t.Errorf("the rebuilt directory's marker = %q", got)
+	}
 	for _, path := range []string{"/notes.md", "/a/b.md"} {
 		if _, ok := h.memoryContent(t, memStoreID, path); !ok {
 			t.Errorf("%s was deleted from the store", path)
 		}
+	}
+	sb.files[memMount+"/after.md"] = "written after the rebuild"
+	h.step(t)
+	if got, _ := h.memoryContent(t, memStoreID, "/after.md"); got != "written after the rebuild" {
+		t.Errorf("/after.md in the store = %q; the rebuilt directory stayed pull-only", got)
 	}
 }
 
@@ -384,7 +464,9 @@ func TestMemorySyncRefusals(t *testing.T) {
 }
 
 // TestMemorySyncCapRefusesTheCreate: the 2,001st memory is the API's own
-// refusal, so the sync's create push holds it too.
+// refusal, so the sync's create push holds it too — but the store's fullness
+// is not remembered against the file, and a deletion in the same settlement
+// makes the room the create then takes.
 func TestMemorySyncCapRefusesTheCreate(t *testing.T) {
 	sb := &fakeSandbox{}
 	h := newHarness(t, sb)
@@ -405,29 +487,48 @@ func TestMemorySyncCapRefusesTheCreate(t *testing.T) {
 	if _, ok := h.memoryContent(t, memStoreID, "/one-more.md"); ok {
 		t.Error("the 2,001st memory was created by the sync")
 	}
-	if b := baselineOf(t, sb, memStoreID); b.Refused["/one-more.md"] != sha256hex([]byte("over the cap")) {
-		t.Errorf("the cap refusal was not remembered: %+v", b.Refused)
+	if b := baselineOf(t, sb, memStoreID); len(b.Refused) != 0 {
+		t.Errorf("the store's fullness was remembered against the file: %+v", b.Refused)
+	}
+	// `/m/1` deleted locally sorts before `/one-more.md`: its deletion settles
+	// first and the create fits.
+	delete(sb.files, memMount+"/m/1")
+	h.step(t)
+	if got, _ := h.memoryContent(t, memStoreID, "/one-more.md"); got != "over the cap" {
+		t.Errorf("/one-more.md in the store = %q; the room a deletion made was not used", got)
+	}
+	if _, ok := h.memoryContent(t, memStoreID, "/m/1"); ok {
+		t.Error("/m/1 survived its local deletion")
 	}
 }
 
-// TestMemorySyncSkipsWhatItCannotRead: a listing that overflows the exec
-// output cap skips the store — nothing pushed, nothing pulled, the baseline
-// untouched — because a partial listing would read as deletions.
-func TestMemorySyncSkipsATruncatedListing(t *testing.T) {
-	h, sb := materialized(t, "read_write")
-	before := sb.files[baselinePath(memStoreID)]
-	sb.listTruncated = true
-	sb.files[memMount+"/new.md"] = "fresh"
-	delete(sb.files, memMount+"/a/b.md")
-	h.step(t)
-	if _, ok := h.memoryContent(t, memStoreID, "/new.md"); ok {
-		t.Error("a store with an unreadable listing was pushed to")
-	}
-	if _, ok := h.memoryContent(t, memStoreID, "/a/b.md"); !ok {
-		t.Error("a store with an unreadable listing had a memory deleted")
-	}
-	if sb.files[baselinePath(memStoreID)] != before {
-		t.Error("the baseline was rewritten for a skipped store")
+// TestMemorySyncSkipsAnUnreliableListing: a listing that overflows the exec
+// output cap, or one that complained on stderr — a directory find could not
+// enter, while the pipeline still exited 0 — skips the store: nothing
+// pushed, nothing pulled, nothing deleted, the baseline untouched, because a
+// partial listing reads as deletions.
+func TestMemorySyncSkipsAnUnreliableListing(t *testing.T) {
+	for name, arm := range map[string]func(*fakeSandbox){
+		"truncated":  func(sb *fakeSandbox) { sb.listTruncated = true },
+		"complained": func(sb *fakeSandbox) { sb.listStderr = "find: './a': Permission denied\n" },
+	} {
+		t.Run(name, func(t *testing.T) {
+			h, sb := materialized(t, "read_write")
+			before := sb.files[baselinePath(memStoreID)]
+			arm(sb)
+			sb.files[memMount+"/new.md"] = "fresh"
+			delete(sb.files, memMount+"/a/b.md")
+			h.step(t)
+			if _, ok := h.memoryContent(t, memStoreID, "/new.md"); ok {
+				t.Error("a store with an unreliable listing was pushed to")
+			}
+			if _, ok := h.memoryContent(t, memStoreID, "/a/b.md"); !ok {
+				t.Error("a store with an unreliable listing had a memory deleted")
+			}
+			if sb.files[baselinePath(memStoreID)] != before {
+				t.Error("the baseline was rewritten for a skipped store")
+			}
+		})
 	}
 }
 
@@ -466,6 +567,21 @@ func TestMemoryStoreMissingOrUntrusted(t *testing.T) {
 		}
 		if sb.files[memMount+"/loose.md"] != "already here" {
 			t.Error("the untrusted directory's own file was changed")
+		}
+	})
+	t.Run("listing failed", func(t *testing.T) {
+		// A listing that fails or complains vouches for nothing: the directory
+		// is neither overwritten with the store nor synced from.
+		sb := &fakeSandbox{listStderr: "sh: sha256sum: unrecognized option: z\n"}
+		h := newHarness(t, sb)
+		h.seedMemoryStore(t, memStoreID, "Notes")
+		h.seedMemory(t, memStoreID, "/notes.md", "hello")
+		h.refMemory(t, memStoreID, memMount, "read_write")
+		h.step(t)
+		for _, p := range []string{memMount + "/.anthropic-memory-store", memMount + "/notes.md", baselinePath(memStoreID)} {
+			if _, ok := sb.files[p]; ok {
+				t.Errorf("%s was written over a directory whose listing failed", p)
+			}
 		}
 	})
 	t.Run("store deleted after attach", func(t *testing.T) {

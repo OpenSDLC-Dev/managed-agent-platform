@@ -1,8 +1,8 @@
 // Package memsync holds the memory-store rules that both halves of the sync
 // share (docs/plan/36_memory-stores.md decision 17). Two callers, one copy:
-// internal/api validates what a client writes, and from slice 4 on the
-// executor (which writes rows) and internal/worker (which goes over the wire)
-// reconcile a sandbox directory against a store — a path or a body the routes
+// internal/api validates what a client writes, and the executor (which writes
+// rows, from slice 4) and internal/worker (which goes over the wire, from
+// slice 6) reconcile a sandbox directory against a store — a path or a body the routes
 // would refuse has to be refused locally too, or a run spends a round trip
 // learning it.
 //

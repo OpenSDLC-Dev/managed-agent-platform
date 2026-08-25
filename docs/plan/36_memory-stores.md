@@ -559,9 +559,11 @@ the machine lane, a `principal_` id on the identity lane. Next migration `0028`
     leaves the baseline behind the store, which the next sync sees as "remote changed"
     and retries. A `read_only` or archived store, and a store whose marker is missing or
     altered, is pulled from and never pushed to. Content the store refuses (non-UTF-8,
-    > 102,400 bytes, an invalid path segment, the 2,001st memory) is skipped, warned once
+    > 102,400 bytes, an invalid path segment) is skipped, warned once
     and remembered in the baseline until the bytes change — the reference's
-    `refusedSHAs`. The reaper runs the same three phases before `captureCheckpoint` +
+    `refusedSHAs`; the 2,001st memory is refused and not remembered, the store's
+    fullness being its state rather than the file's, so a later deletion makes room
+    (amended in slice 4's review round). The reaper runs the same three phases before `captureCheckpoint` +
     `Destroy`, reaching the container through `Provider.Attach` (it holds no `Sandbox`)
     and taking the session row lock inside the advisory lock it already holds — the run
     path takes the advisory lock only inside `provisionSandbox` and releases it before

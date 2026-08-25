@@ -77,8 +77,11 @@ type fakeSandbox struct {
 	cmds     []string
 	execHook func(sandbox.ExecRequest) *sandbox.ExecResult
 	// listTruncated marks the memory sync's tree listing as overflowing the
-	// exec output cap, the one answer that must skip a store's sync.
+	// exec output cap, and listStderr is a complaint the listing prints (a
+	// directory find could not enter) while still exiting 0 — the two
+	// answers that must skip a store's sync.
 	listTruncated bool
+	listStderr    string
 	// modes records the Mode each WriteFiles member asked for, by path — the
 	// fake lands no permission bits, so this is where a test reads them.
 	modes map[string]fs.FileMode
@@ -111,10 +114,11 @@ func (f *fakeSandbox) Exec(_ context.Context, req sandbox.ExecRequest) (sandbox.
 		return sandbox.ExecResult{Stdout: out.String()}, nil
 	}
 	// The memory sync's listing (memsync.HashTreeCommand) and its deletions
-	// (`rm -f -- 'p'…`), answered from the in-memory tree so the three-phase
-	// sync runs without a shell: every regular file under the mount but the
-	// marker, digest first, in byte order, NUL-terminated as `sha256sum -z`
-	// prints it; an absent directory is `cd`'s exit 1 with nothing listed.
+	// (memsync.RemoveCommands), answered from the in-memory tree so the
+	// three-phase sync runs without a shell: every regular file under the
+	// mount but the marker, digest first, in byte order, NUL-terminated as
+	// `sha256sum -z` prints it; an absent directory lists nothing and exits 0,
+	// as the command's own `[ -d ]` guard does.
 	if mount, ok := hashTreeMount(req.Command); ok {
 		var paths []string
 		for p := range f.files {
@@ -122,21 +126,22 @@ func (f *fakeSandbox) Exec(_ context.Context, req sandbox.ExecRequest) (sandbox.
 				paths = append(paths, p)
 			}
 		}
-		if len(paths) == 0 && !f.dirExists(mount) {
-			return sandbox.ExecResult{ExitCode: 1, Stderr: "cd: no such file or directory"}, nil
-		}
 		sort.Strings(paths)
 		var out strings.Builder
 		for _, p := range paths {
 			sum := sha256.Sum256([]byte(f.files[p]))
 			out.WriteString(hex.EncodeToString(sum[:]) + "  ." + strings.TrimPrefix(p, mount) + "\x00")
 		}
-		return sandbox.ExecResult{Stdout: out.String(), Truncated: f.listTruncated}, nil
+		return sandbox.ExecResult{Stdout: out.String(), Stderr: f.listStderr, Truncated: f.listTruncated}, nil
 	}
-	if rest, ok := strings.CutPrefix(req.Command, "rm -f -- "); ok {
-		for _, q := range strings.Split(rest, " ") {
+	if rest, ok := strings.CutPrefix(req.Command, "cd '"); ok && strings.Contains(rest, "' && rm -f -- ") {
+		// `cd '<mount>' && rm -f -- 'rel'… || exit 1[; rmdir …]`: the named
+		// files go; the fake has no directories to prune.
+		mount, list, _ := strings.Cut(rest, "' && rm -f -- ")
+		list, _, _ = strings.Cut(list, " || exit 1")
+		for _, q := range strings.Split(list, " ") {
 			p := strings.ReplaceAll(strings.TrimSuffix(strings.TrimPrefix(q, "'"), "'"), `'\''`, "'")
-			delete(f.files, p)
+			delete(f.files, mount+"/"+p)
 		}
 		return sandbox.ExecResult{}, nil
 	}
@@ -164,23 +169,12 @@ func (f *fakeSandbox) Exec(_ context.Context, req sandbox.ExecRequest) (sandbox.
 // hashTreeMount recognizes the memory sync's listing command and returns the
 // mount it lists.
 func hashTreeMount(cmd string) (string, bool) {
-	rest, ok := strings.CutPrefix(cmd, "cd '")
+	rest, ok := strings.CutPrefix(cmd, "[ -d '")
 	if !ok || !strings.Contains(cmd, "sha256sum -z") {
 		return "", false
 	}
-	mount, _, ok := strings.Cut(rest, "' && find")
+	mount, _, ok := strings.Cut(rest, "' ] || exit 0; cd '")
 	return mount, ok
-}
-
-// dirExists says whether the in-memory tree has anything under dir — the
-// fake's notion of a directory, which is only ever implied by its files.
-func (f *fakeSandbox) dirExists(dir string) bool {
-	for p := range f.files {
-		if strings.HasPrefix(p, dir+"/") {
-			return true
-		}
-	}
-	return false
 }
 
 func (f *fakeSandbox) ReadFile(_ context.Context, path string) ([]byte, error) {

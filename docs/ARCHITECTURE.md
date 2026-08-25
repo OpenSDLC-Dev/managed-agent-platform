@@ -95,7 +95,8 @@ platform's own executor, just deployed elsewhere.
    resources (below), runs the tool, and posts the result event (`agent.tool_result`
    platform-managed, `user.tool_result` self-hosted). On the platform-managed side the
    run's end also reconciles the session's memory stores with their directories
-   (below), inside the transaction that commits the results.
+   (below) — the sandbox read before the transaction that commits the results, the
+   settlement inside it, the sandbox written after.
 5. The commit that appends the result also enqueues the next `model_turn` — only once
    every tool use in the turn is answered. A brain claims it (brains wake by polling the
    queue; Postgres LISTEN/NOTIFY serves the SSE fan-out, not the brain), replays, and
@@ -186,9 +187,11 @@ rules in `internal/memsync` decide: the tree is hashed in the sandbox, the plan 
 inside the transaction that commits the run (a push is a compare-and-set on the head's
 digest and appends a `session_actor` version; the store wins a both-sides change; an
 emptied directory against a baseline of several files is re-downloaded, never read as
-deletions), and the settlement is written back. A `read_only` or archived store, or a
+deletions), and the settlement is written back; a listing that fails or complains skips
+the store rather than reading as deletions. A `read_only` or archived store, or a
 directory whose marker was altered, is pulled from and never pushed to, and the file
-tools refuse to write there; the reaper syncs an idle sandbox before it is destroyed. A
+tools refuse to write in a `read_only` or archived store (the marker they never see);
+the reaper syncs a sandbox before every tier's action but the deleted tier's. A
 `self_hosted` session cannot attach a store until the plan's slice 6.
 
 **Sandboxes have a lifecycle** (plan 24). Provision is idempotent per session — it
@@ -311,7 +314,7 @@ Layout order is by layer, as the repo is.
 | `store/` | The Postgres schema. Every table lives in `migrations/`, embedded in the binaries so a deployment needs no migration step. Three properties of `Migrate` are contract rather than detail — one all-or-nothing transaction, an advisory lock, and the filename as the immutable version record — and the schema reserves the multi-tenant columns it does not yet enforce. |
 | `blob/` | The object-storage seam: `s3/` for anything speaking S3, `gcs/` native on Application Default Credentials, one contract suite for both. |
 | `skills/` | Skill-upload validation and canonical-zip normalization, funnelled through one place so the rules cannot drift between entry points. |
-| `memsync/` | What every writer of a memory store agrees on, so the halves of plan 36 cannot drift — `internal/api` today, the executor and the BYOC worker from slice 4 on: the path and content rules every memory write obeys and the mount-path slug (slice 2); the marker, baseline and tree-hash conventions and the pure `Plan(local, baseline, remote)` decision table arrive with the sync (slice 4). |
+| `memsync/` | What every writer of a memory store agrees on, so the halves of plan 36 cannot drift — `internal/api` since slice 2, the executor since slice 4, the BYOC worker from slice 6: the path and content rules every memory write obeys and the mount-path slug; the marker, baseline and tree-hash conventions, the two shell commands the sync runs, and the pure `Plan(local, baseline, remote)` decision table. |
 | `telemetry/` | OTel tracing and metrics init, and W3C trace-context propagation. The `span.*` domain events come from the spans started here, so the two views never drift. |
 | `mimetab/` | The pinned extension → MIME table both writers of the files registry consult, so the serving host never decides a wire-visible value. |
 | `sandbox/backend/` · `blob/backend/` · `secrets/backend/` | Where a deployment's backend is *chosen*, one selector per seam, so every binary constructs it from the same config point. Each is a sibling rather than part of its seam because the seam package holds the interface **and** the sentinel errors backends wrap, so it must not import them. |

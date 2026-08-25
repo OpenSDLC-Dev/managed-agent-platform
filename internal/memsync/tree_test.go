@@ -1,6 +1,8 @@
 package memsync_test
 
 import (
+	"fmt"
+	"slices"
 	"strings"
 	"testing"
 
@@ -60,13 +62,50 @@ func TestBaselineRoundTrip(t *testing.T) {
 
 func TestHashTreeCommand(t *testing.T) {
 	got := memsync.HashTreeCommand("/mnt/memory/notes")
-	want := `cd '/mnt/memory/notes' && find . -type f ! -path './.anthropic-memory-store' -print0 | LC_ALL=C sort -z | xargs -0r sha256sum -z`
+	want := `[ -d '/mnt/memory/notes' ] || exit 0; cd '/mnt/memory/notes' && find . -type f ! -path './.anthropic-memory-store' -print0 | LC_ALL=C sort -z | xargs -0r sha256sum -z`
 	if got != want {
 		t.Fatalf("command =\n%s\nwant\n%s", got, want)
 	}
 	// A mount with a quote in it is still one shell word.
-	if got := memsync.HashTreeCommand("/mnt/it's"); !strings.HasPrefix(got, `cd '/mnt/it'\''s' && `) {
+	if got := memsync.HashTreeCommand("/mnt/it's"); !strings.HasPrefix(got, `[ -d '/mnt/it'\''s' ] || exit 0; cd '/mnt/it'\''s' && `) {
 		t.Fatalf("quoting: %s", got)
+	}
+}
+
+// RemoveCommands: the unlinks, then the parents pruned as far as empty, one
+// command while it fits; a mount's worth of the longest paths is several
+// commands, each well under the shell's single-argument cap, together
+// naming every path once.
+func TestRemoveCommands(t *testing.T) {
+	got := memsync.RemoveCommands("/mnt/memory/notes", []string{"/a/b.md", "/c.md", "/a/d/e.md"})
+	want := []string{`cd '/mnt/memory/notes' && rm -f -- 'a/b.md' 'c.md' 'a/d/e.md' || exit 1; rmdir -p --ignore-fail-on-non-empty -- 'a' 'a/d' 2>/dev/null; exit 0`}
+	if !slices.Equal(got, want) {
+		t.Fatalf("commands =\n%s\nwant\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
+	}
+	if got := memsync.RemoveCommands("/mnt/memory/notes", []string{"/c.md"}); !slices.Equal(got, []string{`cd '/mnt/memory/notes' && rm -f -- 'c.md' || exit 1`}) {
+		t.Fatalf("root-level removal = %q", got)
+	}
+	if got := memsync.RemoveCommands("/mnt/memory/notes", nil); len(got) != 0 {
+		t.Fatalf("nothing to remove = %q", got)
+	}
+
+	paths := make([]string, memsync.MaxMemoriesPerStore)
+	for i := range paths {
+		paths[i] = "/" + fmt.Sprintf("%04d", i) + strings.Repeat("x", memsync.MaxPathBytes-5)
+	}
+	cmds := memsync.RemoveCommands("/mnt/memory/notes", paths)
+	if len(cmds) < 2 {
+		t.Fatalf("%d paths of %d bytes fit one command", len(paths), memsync.MaxPathBytes)
+	}
+	named := 0
+	for _, cmd := range cmds {
+		if len(cmd) > 96<<10 {
+			t.Errorf("a command of %d bytes is past the single-argument cap", len(cmd))
+		}
+		named += strings.Count(cmd, "x'")
+	}
+	if named != len(paths) {
+		t.Errorf("%d paths named across %d commands, want %d", named, len(cmds), len(paths))
 	}
 }
 

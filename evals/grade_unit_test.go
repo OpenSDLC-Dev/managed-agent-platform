@@ -31,6 +31,37 @@ func textBlocks(text string) []any {
 	return []any{map[string]any{"type": "text", "text": text}}
 }
 
+// WritesFile's bash arm needs the command to write, not merely name the
+// path: a `cat` of the file is the recall trial's read, and reading it as a
+// write would hand MemorySynced a miss to blame on the platform.
+func TestWritesFileBashNeedsAWriteConstruct(t *testing.T) {
+	const path = "/mnt/memory/notes/codename.md"
+	bash := func(cmd string) map[string]any {
+		return map[string]any{"type": "agent.tool_use", "name": "bash", "input": map[string]any{"command": cmd}}
+	}
+	for cmd, want := range map[string]bool{
+		"cat " + path:                         false,
+		"ls -l " + path + " && wc -c " + path: false,
+		"echo n0 > " + path:                   true,
+		"printf 'x\\n' >> " + path:            true,
+		"echo n0 | tee " + path:               true,
+		"cp /tmp/draft.md " + path:            true,
+		"sed -i 's/a/b/' " + path:             true,
+		"touch " + path:                       true,
+	} {
+		if got := wroteFile(trialWith([]map[string]any{bash(cmd)}), path); got != want {
+			t.Errorf("%q counted as a write = %v, want %v", cmd, got, want)
+		}
+	}
+	write := map[string]any{"type": "agent.tool_use", "name": "write", "input": map[string]any{"file_path": path, "content": "x"}}
+	if !wroteFile(trialWith([]map[string]any{write}), path) {
+		t.Error("a write tool call was not counted")
+	}
+	if wroteFile(trialWith([]map[string]any{write}), "/mnt/memory/notes/other.md") {
+		t.Error("a write of another file was counted")
+	}
+}
+
 func TestSplitLines(t *testing.T) {
 	cases := []struct {
 		in   string

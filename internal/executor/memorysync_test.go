@@ -97,7 +97,7 @@ func TestMemoryArchivedStoreRefusesWritesAtTheNextRun(t *testing.T) {
 	}
 	results := h.toolResults(t)
 	last := results[len(results)-1]
-	if !last.IsError || !strings.Contains(resultText(last), "read-only memory store directory "+memMount) {
+	if !last.IsError || !strings.Contains(resultText(last), "read-only directory "+memMount) {
 		t.Errorf("the write to an archived store answered %+v; want a read-only refusal", last)
 	}
 	if got := sb.files[memMount+"/notes.md"]; got != "hello" {

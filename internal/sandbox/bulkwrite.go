@@ -537,12 +537,12 @@ __map_bulk_rename() {
   __tmps=(); __dsts=(); __modes=(); __bad=-1
   while IFS= read -r -d '' __t && IFS= read -r -d '' __d && IFS= read -r -d '' __m; do
     if [ ! -f "$__t" ] && [ "$__bad" -lt 0 ]; then __bad=${#__tmps[@]}; fi
-    case "$__m" in [0-7][0-7][0-7][0-7]) ;; *) __m=0644 ;; esac
+    case "$__m" in 0[0-7][0-7][0-7]) ;; *) __m=0644 ;; esac
     __tmps+=("$__t"); __dsts+=("$__d"); __modes+=("$__m")
   done < "$1"
   [ "${#__tmps[@]}" -eq 0 ] && __bad=0
   if [ "$__bad" -ge 0 ]; then
-    [ "${#__tmps[@]}" -eq 0 ] || rm -f "${__tmps[@]}"
+    [ "${#__tmps[@]}" -eq 0 ] || rm -f -- "${__tmps[@]}"
     rm -f "$1" "$2"
     __map_bulk_left "$1" "$2"
     printf 'map-bulk-fail %d\n' "$__bad" >&2
@@ -629,7 +629,7 @@ __map_bulk_discard() {
   __tmps=()
   if [ -f "$1" ]; then
     while IFS= read -r -d '' __t && IFS= read -r -d '' __d && IFS= read -r -d '' __m; do __tmps+=("$__t"); done < "$1"
-    [ "${#__tmps[@]}" -eq 0 ] || rm -f "${__tmps[@]}"
+    [ "${#__tmps[@]}" -eq 0 ] || rm -f -- "${__tmps[@]}"
   fi
   rm -f "$1" "$2"
   __rc=$?

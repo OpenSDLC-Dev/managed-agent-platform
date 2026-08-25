@@ -57,12 +57,15 @@ type Input struct {
 // the applier adds what each action lands (a pull's RemoteSHA, a push's
 // LocalSHA), keeps a DeleteRemote's BaselineSHA when the store refused it,
 // and drops the rest. Skipped lists pushes withheld by a standing refusal;
-// their refusals are already carried in Next. Rebuild is the wipe guard.
+// their refusals are already carried in Next. Withheld counts the pushes
+// pull-only mode dropped — local edits that stay local, which a sync log
+// should say rather than report a quiet run. Rebuild is the wipe guard.
 type Result struct {
-	Rebuild bool
-	Actions []Action
-	Next    Baseline
-	Skipped []string
+	Rebuild  bool
+	Actions  []Action
+	Next     Baseline
+	Skipped  []string
+	Withheld int
 }
 
 // Plan is decision 11's per-path table, the reference worker's syncPath
@@ -101,6 +104,7 @@ func Plan(in Input) Result {
 		push := func(act Action) {
 			switch {
 			case in.PullOnly:
+				res.Withheld++
 			case res.Next.Refused[path] == local:
 				res.Skipped = append(res.Skipped, path)
 			case ValidatePath(path) != nil:
@@ -135,9 +139,10 @@ func Plan(in Input) Result {
 			// The store changed; a local file that differs from it loses.
 			res.Actions = append(res.Actions, Action{Kind: Pull, Path: path, ID: head.ID, RemoteSHA: head.SHA,
 				Conflict: !hasBase || local != base})
-		case local == base:
-			res.Next.Synced[path] = base
 		default:
+			// The store holds the baseline and the file differs from both: a
+			// local edit. (local == base is impossible here — it would equal
+			// the head, the case above.)
 			if in.PullOnly || res.Next.Refused[path] == local || ValidatePath(path) != nil {
 				res.Next.Synced[path] = base
 			}
