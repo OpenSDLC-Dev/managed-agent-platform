@@ -824,11 +824,18 @@ func TestEnqueueNotifiesWorkChannelOnCommit(t *testing.T) {
 	if err := b.Ready(readyCtx); err != nil {
 		t.Fatalf("broker never became ready: %v", err)
 	}
-	// Coverage-start wakes everyone once; drain so the assertions below see
-	// only the enqueue's own NOTIFY (wakes coalesce in a 1-buffered channel).
+	// The listener wakes every subscriber once when LISTEN becomes active
+	// (broker.listen calls setReady then wakeAll), and Ready can return between
+	// those two steps — so this coverage-start wake may still be in flight here.
+	// Wait for it rather than draining non-blocking: a non-blocking drain that
+	// misses it leaves it to arrive inside the pre-commit window below, where it
+	// trips the "woken before the enqueue committed" assertion under load (#486).
+	// After it is drained the 1-buffered channel is empty, so the only wake that
+	// can follow is the enqueue's own commit NOTIFY.
 	select {
 	case <-sub.Wake():
-	default:
+	case <-time.After(10 * time.Second):
+		t.Fatal("coverage-start wake never arrived to be drained")
 	}
 
 	tx, err := pool.Begin(ctx)

@@ -16,7 +16,9 @@ fix PR, in order.
       keeper-budget tests' proven-tolerant value); production's 2 min TTL is unaffected.
       The executor's sibling `TestLeaseRenewedDuringSlowProvision` (300 ms) had the same
       flake — CI surfaced it on this PR — and gets the same 1500 ms fix.
-- [ ] **#486** — `TestEnqueueNotifiesWorkChannelOnCommit`: the LISTEN/NOTIFY wake races
-      the enqueue's commit visibility under load.
+- [x] **#486** — `TestEnqueueNotifiesWorkChannelOnCommit`: the broker wakes every
+      subscriber once when LISTEN activates (`setReady` then `wakeAll`), and `Ready` can
+      return between the two, so the test's non-blocking drain of that coverage-start wake
+      raced it into the pre-commit window. Wait for the wake deterministically instead.
 - [ ] **#490** — `internal/api` / `internal/executor` run within 10% of `go test`'s
       10-min package timeout on a loaded box; an explicit `-timeout` in the `test` recipe.
