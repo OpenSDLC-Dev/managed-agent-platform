@@ -168,6 +168,18 @@ func TestValidateRejectsUnknownFields(t *testing.T) {
 			wantIn: []string{"configs[0].type"},
 		},
 		{
+			// encoding/json reads a JSON null into a string as "", so a null
+			// type would otherwise equal a null name and pass.
+			name:   "a null per-tool type is rejected",
+			entry:  `{"type":"agent_toolset_20260401","configs":[{"name":"bash","type":null}]}`,
+			wantIn: []string{"configs[0].type"},
+		},
+		{
+			name:   "a per-tool type beside a null name is rejected",
+			entry:  `{"type":"agent_toolset_20260401","configs":[{"name":null,"type":""}]}`,
+			wantIn: []string{"configs[0].type"},
+		},
+		{
 			// Only the eight per-tool variants gained the discriminator;
 			// AgentToolsetDefaultConfigParams still carries enabled and
 			// permission_policy and nothing else.

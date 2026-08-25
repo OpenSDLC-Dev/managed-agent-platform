@@ -359,20 +359,24 @@ func rejectConfigKeys(kind string, obj map[string]json.RawMessage, path string, 
 // and there is no way to tell which the client meant: rejecting it beats
 // silently configuring whichever key this platform happens to read (INFERRED —
 // the reference's own answer is unrecorded; docs/DIVERGENCES.md). An absent type
-// is fine, the request marking it omitzero.
+// is fine, the request marking it omitzero. Both are read as *string because
+// encoding/json accepts a JSON null into a plain string as its zero value, and
+// {"name":null,"type":""} would otherwise pass as two equal empty strings.
 func checkToolType(kind string, obj map[string]json.RawMessage, path string) error {
 	raw, ok := obj["type"]
 	if !ok {
 		return nil
 	}
-	var typ string
-	if err := json.Unmarshal(raw, &typ); err != nil {
+	var typ *string
+	if err := json.Unmarshal(raw, &typ); err != nil || typ == nil {
 		return fmt.Errorf("%s: %s.type must be a string", kind, path)
 	}
-	var name string
-	_ = json.Unmarshal(obj["name"], &name)
-	if typ != name {
-		return fmt.Errorf("%s: %s.type is %q but must equal name %q", kind, path, typ, name)
+	var name *string
+	if err := json.Unmarshal(obj["name"], &name); err != nil || name == nil {
+		return fmt.Errorf("%s: %s.type needs a string name to equal", kind, path)
+	}
+	if *typ != *name {
+		return fmt.Errorf("%s: %s.type is %q but must equal name %q", kind, path, *typ, *name)
 	}
 	return nil
 }
