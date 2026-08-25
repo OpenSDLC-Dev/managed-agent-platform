@@ -142,18 +142,18 @@ openbao:
   enabled: false
 
 # The Cloud SQL Auth Proxy, as a native sidecar in all three deployments. What it
-# buys is that the DSN names the instance's CONNECTION NAME instead of its
-# address: a rebuilt Cloud SQL instance gets a new private IP, and the DSN that
-# hard-codes the old one is the third thing a rebuild moves — see "State, and
-# recovering it" in this directory's README. A connection name a rebuild does not
-# change.
+# buys is that no address is written down anywhere: the PROXY is given the
+# instance's connection name, and the DSN then names the proxy's loopback socket
+# rather than the database. A rebuilt Cloud SQL instance gets a new private IP —
+# the third thing a rebuild moves, under "Continuous delivery" in this
+# directory's README — and a connection name is what a rebuild does not change.
 #
 # `instanceConnectionName` is an operator identifier, so the value here is the
 # same NEUTRAL placeholder the three service-account annotations below carry, and
-# the workflow overrides it with `--set-string` from the live instance. Unlike
-# those annotations it needs no read-back check: a dropped override leaves the
-# proxy dialing `your-project:…`, which it refuses at startup, so the pod never
-# becomes ready and `--atomic` rolls the release back. It fails loudly on its own.
+# the workflow overrides it with `--set-string` from the live instance. Like
+# those annotations, the override is READ BACK after the deploy: the proxy's two
+# probes are `/startup` and `/liveness`, and neither dials the instance, so a
+# placeholder that reached a real deploy would not reliably announce itself.
 #
 # `privateIP` is left at the chart's default true, which is what an instance with
 # `ipv4_enabled = false` requires — the shape environment/ builds.
@@ -289,8 +289,9 @@ controlplane:
 
 brain:
   # **Apply this one.** It is the annotation people skip, because it used to exist
-  # only for the Cloud SQL Auth Proxy and this deployment connects to the private
-  # IP directly. #240 ended that: the brain reads file bytes out of the blob bucket
+  # only for the Cloud SQL Auth Proxy, which this deployment did not run. Two
+  # things ended that, and either alone is enough. The proxy is now on, above —
+  # and before it, #240: the brain reads file bytes out of the blob bucket
   # to grade rubrics, and its account is what carries `roles/storage.objectViewer`
   # there. Omitting it does not fail — the render succeeds, the pod starts, and the
   # brain's reads degrade to grading against the outcome description alone. Silent

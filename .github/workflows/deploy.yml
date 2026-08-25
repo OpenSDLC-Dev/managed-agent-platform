@@ -304,7 +304,11 @@ jobs:
       # the authoritative `PROJECT:REGION:INSTANCE`, so no region has to be
       # derived by trimming `$GCP_ZONE` and no string is built here at all —
       # which also means a name that is well-formed but wrong cannot be
-      # manufactured, only reported.
+      # manufactured, only reported. What it costs is a permission: the deploy
+      # identity needs `roles/cloudsql.viewer`, which the three WORKLOAD
+      # identities' `roles/cloudsql.client` does not give it, since the deployer
+      # is not in environment/'s Terraform at all. deploy/gcp/README.md carries
+      # the grant beside the other two that live outside Terraform.
       #
       # The instance is looked up by `$GKE_CLUSTER` because environment/main.tf
       # names the cluster and the instance alike, both `${name_prefix}-staging`.
@@ -318,10 +322,22 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          err="$RUNNER_TEMP/sql-describe.err"
           if ! conn="$(gcloud sql instances describe "$GKE_CLUSTER" \
                          --project "$GCP_PROJECT_ID" \
-                         --format='value(connectionName)')"; then
-            echo "::error::no Cloud SQL instance named '$GKE_CLUSTER' in project '$GCP_PROJECT_ID'. The chart's cloudSQLProxy needs its connection name, and this step looks the instance up under the cluster's name because deploy/gcp/environment/main.tf gives both the same one. If this deployment names them differently, that assumption is what to fix."
+                         --format='value(connectionName)' 2>"$err")"; then
+            sed 's/^/  /' "$err"
+            # A missing grant and a missing instance both exit 1 here, and they
+            # want opposite remedies — so the diagnosis reads gcloud's own words
+            # rather than assuming the likelier of the two.
+            case "$(cat "$err")" in
+              *PERMISSION_DENIED*|*"does not have"*)
+                echo "::error::the deploy identity cannot read Cloud SQL instances in '$GCP_PROJECT_ID'. Resolving the proxy's connection name needs cloudsql.instances.get; grant roles/cloudsql.viewer to the deploy service account. deploy/gcp/README.md records it with the other IAM grants that live outside Terraform." ;;
+              *NOT_FOUND*|*"was not found"*)
+                echo "::error::no Cloud SQL instance named '$GKE_CLUSTER' in project '$GCP_PROJECT_ID'. The chart's cloudSQLProxy needs its connection name, and this step looks the instance up under the cluster's name because deploy/gcp/environment/main.tf gives both the same one. If this deployment names them differently, that assumption is what to fix." ;;
+              *)
+                echo "::error::could not read Cloud SQL instance '$GKE_CLUSTER' in project '$GCP_PROJECT_ID'; gcloud's output is above." ;;
+            esac
             exit 1
           fi
           if [ -z "$conn" ]; then
@@ -724,6 +740,40 @@ jobs:
             exit 1
           fi
           echo "controlplane, brain and executor all carry the expected Workload Identity annotation"
+
+      # The same read-back, for the same reason, on the one other override with
+      # no backstop of its own.
+      #
+      # It was tempting to argue this one away: a dropped `--set-string` leaves
+      # the proxy dialing `your-project:…`, and surely it refuses that at
+      # startup, so the pod never goes Ready and `--atomic` rolls back. But that
+      # is an assumption about WHEN the Cloud SQL Auth Proxy resolves an
+      # instance, which is its business and not a contract — and the two probes
+      # the chart attaches, `/startup` and `/liveness`, neither of them dial the
+      # instance. `/readiness` is the one that does, and it is not used. So a
+      # well-formed name that names nothing may well let the pod go Ready; and
+      # while the DSN still names the database's address directly, the platform
+      # would work, the release would succeed, and the proxy would be wrong in a
+      # way nothing noticed until the cutover made it load-bearing.
+      #
+      # Read back rather than reasoned about, therefore. Exactly three lines,
+      # one per deployment: fewer means the sidecar is missing or the placeholder
+      # survived, and more means the chart grew a use for the name that this
+      # check should be taught about rather than pass silently.
+      - name: The Cloud SQL proxy dials the instance this deploy resolved
+        if: env.POWERED_OFF != 'true'
+        run: |
+          set -euo pipefail
+          n="$(helm get manifest "$HELM_RELEASE" --namespace "$K8S_NAMESPACE" \
+            | grep -cF -- "$SQL_CONNECTION_NAME" || true)"
+          if [ "$n" -ne 3 ]; then
+            echo "::error::the installed release names '$SQL_CONNECTION_NAME' on $n line(s), expected 3 — one per deployment"
+            echo "Zero means the override in the deploy step did not reach the chart," >&2
+            echo "so the proxy is dialing staging-values.yaml's 'your-project:' " >&2
+            echo "placeholder, or the sidecar is not there at all." >&2
+            exit 1
+          fi
+          echo "all three proxies dial $SQL_CONNECTION_NAME"
 
       # Only when the Secret really changed — see the note at the end of the
       # assemble step. On an ordinary push the seven values are identical, this

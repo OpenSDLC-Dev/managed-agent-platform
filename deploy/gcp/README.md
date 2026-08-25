@@ -461,9 +461,12 @@ terraform output -raw  sql_instance_connection_name              # cloudSQLProxy
 ```
 
 The last one is for a deploy you drive by hand. CD does not read it: `deploy.yml` asks the
-Cloud SQL Admin API for the connection name at deploy time, so no instance identifier is
-written into this repository. Why the proxy is the shape this deployment uses, and the one
-migration step that is not automatic, are under "Continuous delivery" below.
+Cloud SQL Admin API for the connection name at deploy time, so no operator's project is
+written into this repository — the placeholder in `staging-values.yaml` neutralises the
+project the way the service-account emails beside it do, and carries only the region and
+instance name that `environment/`'s own public defaults already spell out. Why the proxy is
+the shape this deployment uses, and the one migration step that is not automatic, are under
+"Continuous delivery" below.
 
 **Apply all three.** The brain's annotation used to be the one that was only sometimes
 needed — it existed for the Cloud SQL Auth Proxy (chart: `cloudSQLProxy.enabled`), and under
@@ -829,14 +832,22 @@ bucket, no staging upload and no Cloud Build API. `cloudbuild.yaml` remains the 
 path's build definition; keep the two saying the same thing, which is why the workflow writes
 its four tags out rather than inferring them.
 
-**Two IAM grants live outside Terraform, and each blocks a different path when it is
-missing.** Both were made by hand and are recorded here because nothing in the repository
+**Three IAM grants live outside Terraform, and each blocks a different path when it is
+missing.** All were made by hand and are recorded here because nothing in the repository
 would otherwise say they exist:
 
 | Grant | Scope | Why |
 | --- | --- | --- |
 | `roles/logging.logWriter` | the project | `cloudbuild.yaml` sets `options.logging: CLOUD_LOGGING_ONLY`, which is *mandatory* once a build names its own service account — with a user-specified identity the API refuses a build that would write to the default logs bucket |
 | the `mapCdRbacWriter` custom role, below | the project | the chart renders a namespaced `Role` and `RoleBinding` for the executor, and `roles/container.developer` carries only `get`/`list` on RBAC resources — so `helm upgrade` is refused the moment either object's rendered content changes. **This role is half the remedy**: an in-cluster basis Role, also below, answers a second gate that Cloud IAM does not reach |
+| `roles/cloudsql.viewer` | the project | `deploy.yml` asks the Cloud SQL Admin API for the instance's connection name rather than composing it, which needs `cloudsql.instances.get`. The three *workload* identities' `roles/cloudsql.client` (`environment/iam.tf`) does not cover the deployer, which is not in this repository's Terraform at all. Without it the deploy fails at the resolve step — early, before the image build, but on every push |
+
+The third is what the Cloud SQL Auth Proxy cutover added, and it is read-only:
+
+```sh
+gcloud projects add-iam-policy-binding "$GCP_PROJECT_ID" \
+  --member="serviceAccount:$DEPLOY_SERVICE_ACCOUNT" --role=roles/cloudsql.viewer
+```
 
 `roles/storage.admin` on the project's `_cloudbuild` staging bucket and
 `roles/serviceusage.serviceUsageConsumer` on the project were also granted to the deploy
@@ -1054,7 +1065,7 @@ The way out of that is not to name an address at all, and `cloudSQLProxy.enabled
 in [staging-values.yaml](./staging-values.yaml): each pod runs the Cloud SQL Auth Proxy as a
 sidecar, the proxy is given the instance's **connection name** — which a rebuild does not
 change — and the DSN names the proxy's loopback socket. `deploy.yml` resolves the connection
-name from the Admin API at deploy time, so nothing about the instance is written down here.
+name from the Admin API at deploy time, so no operator's project is written down here.
 
 **The DSN is the half that is not automatic, and it is deliberately not CD's to write** —
 `database-url` is one of the three secrets a human creates out of band, for the reason given
@@ -1063,8 +1074,13 @@ and the order is not optional: the proxy has to be listening before anything is 
 it.
 
 1. Deploy with the proxy on. It starts in all three pods and sits unused; the DSN still names
-   the instance's address, and nothing about connectivity changes. If the proxy cannot start,
-   `--atomic` rolls the release back before any of this is load-bearing.
+   the instance's address, and nothing about connectivity changes. **A proxy that starts is
+   not a proxy that can reach the instance**: its two probes are `/startup` and `/liveness`,
+   neither of which dials, and the chart passes no `--run-connection-test` — so `/startup`
+   answers 200 once the listeners are up, whatever the connection name says. What step 1 does
+   prove is that the right connection name reached the pods, because the deploy reads the
+   rendered manifests back and refuses a release that does not name the instance it resolved.
+   Reachability is first proven in step 2, by the pods themselves.
 2. Point the DSN at it, then re-run the deploy so the pods restart onto the new Secret:
 
    ```sh
@@ -1080,8 +1096,18 @@ it.
    the proxy is a sidecar and not a shared Deployment — the tidier shape would put the
    password and every result on the pod network in cleartext.
 
-   Rolling back is `gcloud secrets versions disable <the new version>` followed by a deploy;
-   the address-based version stays enabled and becomes `latest` again.
+   **This re-run is the pipeline's one unprotected path.** A changed Secret takes the "Roll
+   the pods onto the rotated Secret" step, which runs *after* the release is complete —
+   `--atomic` cannot reach it, so a DSN the platform cannot use leaves the pods crash-looping
+   and the step fails on `rollout status`. The old pod keeps serving while that happens (one
+   replica, and a Deployment never tears the old one down for a new one that will not become
+   ready), so this is a red pipeline rather than an outage.
+   Rolling back means publishing the **previous DSN as a new version** — re-run the
+   address-form command below. Do **not** reach for `gcloud secrets versions disable`:
+   `latest` is an alias for the most recently *created* version, not the most recently
+   enabled one, so disabling the bad version does not promote the good one back. It only
+   makes `latest` unreadable, and the next deploy then dies fetching `database-url` — leaving
+   you unable to deploy at all, mid-incident.
 
 Until step 2 is done, a rebuild still moves `database-url`, and the old address form is what
 to re-compose:
@@ -1118,15 +1144,20 @@ unchanged — and rolls every Deployment in the release when, and only when, the
 actually changed. An ordinary push skips it: the seven values are identical and the rollout
 `helm upgrade` did for the new `image.tag` is the only one.
 
-`database-url` is the exception, because it is **derived** rather than primary: it is
-`postgres://map:<map-db-password>@10.136.0.3:5432/map?sslmode=require`, composed once by hand
-from the secret the table above already calls the platform's password. So rotating
-`map-db-password` is three steps, not one — add the version, re-run `make gcp-db-init` so the
-`ALTER ROLE` lands, then re-compose `database-url` — and skipping the third leaves a value in
-Secret Manager that the database no longer accepts, discovered at the next pod restart.
-(`sslmode=require`, not `disable`: the pod reaches the private IP directly, the same path
-`gcp-db-init` takes. `require` encrypts without verifying the server certificate; the Cloud
-SQL Auth Proxy is the better shape and is the chart's `cloudSQLProxy.enabled`.)
+`database-url` is the exception, because it is **derived** rather than primary: it is composed
+once by hand from the secret the table above already calls the platform's password. So
+rotating `map-db-password` is three steps, not one — add the version, re-run `make
+gcp-db-init` so the `ALTER ROLE` lands, then re-compose `database-url` — and skipping the
+third leaves a value in Secret Manager that the database no longer accepts, discovered at the
+next pod restart.
+
+**Compose it in whichever form is in force**, because the two-step migration under
+"Continuous delivery" moves it once. Before the cutover it is
+`postgres://map:<map-db-password>@10.136.0.3:5432/map?sslmode=require` — the pod reaches the
+private IP directly, the same path `gcp-db-init` takes, and `require` encrypts without
+verifying the server certificate. After it, the host is the proxy's loopback socket and
+`sslmode` is `disable`; re-composing the address form then would quietly undo the cutover,
+and nothing would complain, because the direct path still works.
 
 The five **mode-1** secrets — `postgres-password`, `minio-root-user`, `minio-root-password`,
 `openbao-seal-key`, `openbao-platform-token` — are no longer read by this deploy. They are
