@@ -122,13 +122,13 @@ Git Bash rewrites a `/notes/a.md` argument into a Windows path before `ant.exe` 
   type-only precondition refused (now registered); `created_by` rendering null when absent — not a
   deviation, the spec says "null when no writer is recorded".
 
-**Gate**: `make verify` in WSL at 7795065 — 54 packages `ok`, total statement coverage **90.42%**
-from the run's own profile, and one assertion lost to a timing race in a package the branch does not
-touch: `internal/queue`'s `TestEnqueueNotifiesWorkChannelOnCommit` ("woken before the enqueue
-committed"), green when re-run alone and filed as #486. An earlier run at 6ca82b0 timed out
-`internal/executor` at Go's ten-minute limit while a reviewer's native test run shared the Docker
-daemon — the same contention slice 1 recorded, and the reason the verifier and the gate now run in
-sequence.
+**Gate**: `make verify` in WSL at 919ace5 — the branch's last commit but for the one that wrote
+this paragraph — 55 packages `ok`, nothing failed, total statement coverage **90.43%**. The run
+before it, at 7795065, lost one assertion to a timing race in a package the branch does not touch:
+`internal/queue`'s `TestEnqueueNotifiesWorkChannelOnCommit` ("woken before the enqueue committed"),
+green when re-run alone and filed as #486. An earlier run at 6ca82b0 timed out `internal/executor`
+at Go's ten-minute limit while a reviewer's native test run shared the Docker daemon — the same
+contention slice 1 recorded, and the reason the verifier and the gate now run in sequence.
 
 ## Memory stores — real `ant` CLI against `/v1/memory_stores` (plan 36 slice 1, run 2026-08-25) — ✅ passed
 
