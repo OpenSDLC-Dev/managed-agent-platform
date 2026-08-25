@@ -47,16 +47,26 @@ func TestMemoryStoreCRUD(t *testing.T) {
 	if body["archived_at"] != nil {
 		t.Errorf("archived_at should render null, got %v", body["archived_at"])
 	}
+	if body["updated_at"] != body["created_at"] {
+		t.Errorf("updated_at = %v on create, want created_at %v", body["updated_at"], body["created_at"])
+	}
+	updatedAt := stamp(t, body["updated_at"])
 
-	// Get returns the same shape; unknown and malformed ids 404 alike (checkID).
+	// Get returns the same shape; an unknown well-formed id 404s from the row
+	// lookup, a wrong-prefix or malformed one from checkID before it.
 	if status, got := s.do(http.MethodGet, "/v1/memory_stores/"+id, nil); status != http.StatusOK || got["id"] != id {
 		t.Fatalf("get: status %d (%v)", status, got)
 	}
-	if status, _ := s.do(http.MethodGet, "/v1/memory_stores/memstore_missing00000000000", nil); status != http.StatusNotFound {
-		t.Fatalf("get missing: status %d", status)
-	}
-	if status, _ := s.do(http.MethodGet, "/v1/memory_stores/vlt_wrongprefix", nil); status != http.StatusNotFound {
-		t.Fatalf("get with a wrong prefix: status %d", status)
+	// The NUL case proves checkID runs: without it the byte reaches Postgres,
+	// which refuses it as a 500 rather than a miss.
+	token := strings.Repeat("a", len(strings.TrimPrefix(id, "memstore_")))
+	for _, bad := range []string{
+		"memstore_" + token, "vlt_" + token, "memstore_missing00000000000",
+		"memstore_" + token[1:] + "%00",
+	} {
+		if status, _ := s.do(http.MethodGet, "/v1/memory_stores/"+bad, nil); status != http.StatusNotFound {
+			t.Fatalf("get %s: status %d, want 404", bad, status)
+		}
 	}
 
 	// Update: name and description replace, metadata patches.
@@ -73,12 +83,22 @@ func TestMemoryStoreCRUD(t *testing.T) {
 	if md := body["metadata"].(map[string]any); md["team"] != "infra" {
 		t.Fatalf("metadata not round-tripped: %v", md)
 	}
+	// updated_at advances when name, description or metadata change ...
+	if got := stamp(t, body["updated_at"]); !got.After(updatedAt) {
+		t.Errorf("updated_at = %v after update, want later than %v", got, updatedAt)
+	}
+	updatedAt = stamp(t, body["updated_at"])
 
 	// Archive returns the store with archived_at set and is idempotent; an
 	// archived store still reads, but no longer updates.
 	status, body = s.do(http.MethodPost, "/v1/memory_stores/"+id+"/archive", nil)
 	if status != http.StatusOK || body["archived_at"] == nil {
 		t.Fatalf("archive: status %d (%v)", status, body)
+	}
+	// ... and only then: an archive is not one of the three (the spec's
+	// definition of the field), so it leaves updated_at where the update put it.
+	if got := stamp(t, body["updated_at"]); !got.Equal(updatedAt) {
+		t.Errorf("updated_at = %v after archive, want unchanged %v", got, updatedAt)
 	}
 	first := body["archived_at"]
 	status, body = s.do(http.MethodPost, "/v1/memory_stores/"+id+"/archive", nil)
@@ -112,6 +132,18 @@ func TestMemoryStoreCRUD(t *testing.T) {
 	}
 }
 
+// stamp parses a rendered timestamp; comparing the strings would not do, since
+// RFC 3339 rendering trims trailing zeros from the fraction.
+func stamp(t *testing.T, v any) time.Time {
+	t.Helper()
+	s, _ := v.(string)
+	ts, err := time.Parse(time.RFC3339Nano, s)
+	if err != nil {
+		t.Fatalf("timestamp %v: %v", v, err)
+	}
+	return ts
+}
+
 func TestMemoryStoreValidation(t *testing.T) {
 	s := newTestServer(t)
 
@@ -123,6 +155,7 @@ func TestMemoryStoreValidation(t *testing.T) {
 		"long description":     {"name": "n", "description": strings.Repeat("d", 1025)},
 		"unknown key":          {"name": "n", "surprise": true},
 		"long metadata key":    {"name": "n", "metadata": map[string]string{strings.Repeat("k", 65): "v"}},
+		"empty metadata key":   {"name": "n", "metadata": map[string]string{"": "v"}},
 		"long metadata value":  {"name": "n", "metadata": map[string]string{"k": strings.Repeat("v", 513)}},
 	} {
 		if status, resp := s.do(http.MethodPost, "/v1/memory_stores", body); status != http.StatusBadRequest {
@@ -154,6 +187,7 @@ func TestMemoryStoreValidation(t *testing.T) {
 		"long description":     {"description": strings.Repeat("d", 1025)},
 		"unknown key":          {"surprise": true},
 		"long metadata key":    {"metadata": map[string]string{strings.Repeat("k", 65): "v"}},
+		"empty metadata key":   {"metadata": map[string]string{"": "v"}},
 		"long metadata value":  {"metadata": map[string]string{"k": strings.Repeat("v", 513)}},
 	} {
 		if status, resp := s.do(http.MethodPost, "/v1/memory_stores/"+id, body); status != http.StatusBadRequest {
@@ -232,9 +266,18 @@ func TestMemoryStoreUpdateSemantics(t *testing.T) {
 	if status != http.StatusOK || body["description"] != "again" {
 		t.Fatalf("set description: status %d (%v)", status, body)
 	}
+	status, body = s.do(http.MethodPost, "/v1/memory_stores/"+id, map[string]any{"description": nil})
+	if status != http.StatusOK || body["description"] != "" {
+		t.Fatalf("null description: status %d (%v), want it cleared", status, body)
+	}
+	// updated_at records when name, description or metadata last changed, so
+	// a request that changes none of them — an empty body, a null bag, the
+	// stored values sent back — leaves it where the last real change put it.
+	updatedAt := stamp(t, body["updated_at"])
 	for _, patch := range []map[string]any{
-		{"description": nil, "metadata": nil},
+		{"metadata": nil},
 		{},
+		{"name": "notes", "description": "", "metadata": map[string]any{"team": "infra"}},
 	} {
 		status, got := s.do(http.MethodPost, "/v1/memory_stores/"+id, patch)
 		if status != http.StatusOK {
@@ -245,6 +288,9 @@ func TestMemoryStoreUpdateSemantics(t *testing.T) {
 		}
 		if md := got["metadata"].(map[string]any); md["team"] != "infra" || md["env"] != "prod" || len(md) != 2 {
 			t.Errorf("update with %v changed metadata: %v", patch, md)
+		}
+		if at := stamp(t, got["updated_at"]); !at.Equal(updatedAt) {
+			t.Errorf("update with %v moved updated_at to %v, want %v unchanged", patch, at, updatedAt)
 		}
 	}
 }
@@ -336,6 +382,50 @@ func TestMemoryStoreList(t *testing.T) {
 	} {
 		status, body := s.do(http.MethodGet, "/v1/memory_stores?"+q, nil)
 		wantErr(t, status, body, http.StatusBadRequest, "invalid_request_error")
+	}
+
+	// The limit defaults to 20 and admits 100; and the cursor is the
+	// (created_at, id) pair, not the timestamp alone: with every row on one
+	// timestamp, a page walk still visits each store exactly once, id-descending.
+	for i := 3; i < 21; i++ {
+		ids = append(ids, createMemoryStore(t, s, fmt.Sprintf("store %d", i)))
+	}
+	if _, err := s.pool.Exec(t.Context(), `UPDATE memory_stores SET created_at = now()`); err != nil {
+		t.Fatalf("tie every created_at: %v", err)
+	}
+	status, body = s.do(http.MethodGet, "/v1/memory_stores?include_archived=true", nil)
+	if n := len(listData(t, body)); status != http.StatusOK || n != 20 || nextPage(t, body) == "" {
+		t.Fatalf("default limit: status %d, %d rows, next_page %q — want 20 rows and a cursor", status, n, nextPage(t, body))
+	}
+	status, body = s.do(http.MethodGet, "/v1/memory_stores?include_archived=true&limit=100", nil)
+	if n := len(listData(t, body)); status != http.StatusOK || n != 21 {
+		t.Fatalf("limit=100: status %d, %d rows, want all 21", status, n)
+	}
+	seen = nil
+	query = "/v1/memory_stores?include_archived=true&limit=5"
+	for page := 0; page < 6; page++ {
+		status, body = s.do(http.MethodGet, query, nil)
+		if status != http.StatusOK {
+			t.Fatalf("tied page %d: status %d (%v)", page, status, body)
+		}
+		for _, row := range listData(t, body) {
+			seen = append(seen, row["id"].(string))
+		}
+		cursor := nextPage(t, body)
+		if cursor == "" {
+			break
+		}
+		query = "/v1/memory_stores?include_archived=true&limit=5&page=" + cursor
+	}
+	unique := map[string]bool{}
+	for i, id := range seen {
+		unique[id] = true
+		if i > 0 && seen[i-1] <= id {
+			t.Errorf("tied walk not id-descending at %d: %s then %s", i, seen[i-1], id)
+		}
+	}
+	if len(seen) != 21 || len(unique) != 21 {
+		t.Errorf("tied walk visited %d rows (%d unique), want 21 once each", len(seen), len(unique))
 	}
 }
 

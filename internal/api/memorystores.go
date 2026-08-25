@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"net/http"
 	"time"
 	"unicode"
@@ -202,13 +203,15 @@ func (s *server) updateMemoryStore(r *http.Request) (any, error) {
 	if err := json.Unmarshal(row.metaJSON, &metadata); err != nil {
 		return nil, err
 	}
+	oldName, oldDescription, oldMetadata := row.name, row.description, metadata
 
 	// The spec admits JSON null on all three top-level fields and says nothing
 	// about what it means; the SDK's `omitzero` never sends one. Each field
 	// takes the rule its sibling resources already apply: `name` is required,
-	// so null or "" is "cannot be cleared" (updateAgent, updateEnvironment,
-	// updateVault); a null `description` clears, like its documented ""
-	// (updateAgent's description); a null metadata bag preserves (patchMetadata).
+	// so null or "" is "cannot be cleared" (updateAgent and updateEnvironment;
+	// updateVault says it of null and lets "" fall to its length check); a null
+	// `description` clears, like its documented "" (updateAgent's description);
+	// a null metadata bag preserves (patchMetadata).
 	if name, set, null, err := stringField(obj, "name"); err != nil {
 		return nil, err
 	} else if set {
@@ -244,11 +247,16 @@ func (s *server) updateMemoryStore(r *http.Request) (any, error) {
 		}
 	}
 
-	if err := tx.QueryRow(ctx,
-		`UPDATE memory_stores SET name = $2, description = $3, metadata = $4, updated_at = now()
-		 WHERE id = $1 RETURNING updated_at`,
-		id, row.name, row.description, metadata).Scan(&row.updatedAt); err != nil {
-		return nil, err
+	// updated_at is "when the store's name, description, or metadata was last
+	// modified" (the spec), so a request that modifies none of them — an empty
+	// body, a null bag, the stored values sent back — leaves it alone.
+	if row.name != oldName || row.description != oldDescription || !maps.Equal(metadata, oldMetadata) {
+		if err := tx.QueryRow(ctx,
+			`UPDATE memory_stores SET name = $2, description = $3, metadata = $4, updated_at = now()
+			 WHERE id = $1 RETURNING updated_at`,
+			id, row.name, row.description, metadata).Scan(&row.updatedAt); err != nil {
+			return nil, err
+		}
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return nil, err
@@ -353,13 +361,14 @@ func (s *server) archiveMemoryStore(r *http.Request) (any, error) {
 		return nil, err
 	}
 	// Idempotent, the vault rule: archived_at is set once and never cleared, so
-	// a second archive returns the store with the first call's timestamp and
-	// leaves updated_at where it was.
+	// a second archive returns the store with the first call's timestamp.
+	// Unlike archiveVault this leaves updated_at alone on the first call too:
+	// the spec defines the field as when name, description or metadata last
+	// changed (the OpenAPI spec's BetaManagedAgentsMemoryStore.updated_at), and
+	// an archive changes none of them.
 	var row memoryStoreRow
 	err := s.pool.QueryRow(ctx,
-		`UPDATE memory_stores SET
-		   updated_at  = CASE WHEN archived_at IS NULL THEN now() ELSE updated_at END,
-		   archived_at = COALESCE(archived_at, now())
+		`UPDATE memory_stores SET archived_at = COALESCE(archived_at, now())
 		 WHERE id = $1
 		 RETURNING name, description, metadata, created_at, updated_at, archived_at`, id).
 		Scan(&row.name, &row.description, &row.metaJSON, &row.createdAt, &row.updatedAt, &row.archivedAt)

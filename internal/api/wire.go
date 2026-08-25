@@ -311,6 +311,10 @@ func validateMetadataCaps(md map[string]string) error {
 		return errInvalid("metadata cannot exceed %d pairs", metadataMaxPairs)
 	}
 	for k, v := range md {
+		// The documented range is 1–64: an empty key is below it (#52, plan 36).
+		if k == "" {
+			return errInvalid("metadata keys cannot be empty")
+		}
 		if utf8.RuneCountInString(k) > metadataKeyMax {
 			return errInvalid("metadata keys cannot exceed %d characters", metadataKeyMax)
 		}
