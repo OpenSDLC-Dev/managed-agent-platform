@@ -461,8 +461,8 @@ terraform output -raw  sql_instance_connection_name              # cloudSQLProxy
 ```
 
 The last one is for a deploy you drive by hand. CD does not read it: `deploy.yml` asks the
-Cloud SQL Admin API for the connection name at deploy time, so no operator's project is
-written into this repository — the placeholder in `staging-values.yaml` neutralises the
+Cloud SQL Admin API for the connection name at deploy time, so no operator's project enters
+the deploy configuration — the placeholder in `staging-values.yaml` neutralises the
 project the way the service-account emails beside it do, and carries only the region and
 instance name that `environment/`'s own public defaults already spell out. Why the proxy is
 the shape this deployment uses, and the one migration step that is not automatic, are under
@@ -1069,7 +1069,7 @@ name from the Admin API at deploy time, so no operator's project is written down
 
 **The DSN is the half that is not automatic, and it is deliberately not CD's to write** —
 `database-url` is one of the three secrets a human creates out of band, for the reason given
-under "The three secrets the pipeline reads". So the migration is two steps, in this order,
+above, at "Three of those secrets are not `bootstrap.sh`'s". So the migration is two steps,
 and the order is not optional: the proxy has to be listening before anything is told to use
 it.
 

@@ -331,9 +331,9 @@ jobs:
             # want opposite remedies — so the diagnosis reads gcloud's own words
             # rather than assuming the likelier of the two.
             case "$(cat "$err")" in
-              *PERMISSION_DENIED*|*"does not have"*)
+              *PERMISSION_DENIED*|*"does not have"*|*"not authorized"*|*"HTTPError 403"*)
                 echo "::error::the deploy identity cannot read Cloud SQL instances in '$GCP_PROJECT_ID'. Resolving the proxy's connection name needs cloudsql.instances.get; grant roles/cloudsql.viewer to the deploy service account. deploy/gcp/README.md records it with the other IAM grants that live outside Terraform." ;;
-              *NOT_FOUND*|*"was not found"*)
+              *NOT_FOUND*|*"was not found"*|*"does not exist"*|*"HTTPError 404"*)
                 echo "::error::no Cloud SQL instance named '$GKE_CLUSTER' in project '$GCP_PROJECT_ID'. The chart's cloudSQLProxy needs its connection name, and this step looks the instance up under the cluster's name because deploy/gcp/environment/main.tf gives both the same one. If this deployment names them differently, that assumption is what to fix." ;;
               *)
                 echo "::error::could not read Cloud SQL instance '$GKE_CLUSTER' in project '$GCP_PROJECT_ID'; gcloud's output is above." ;;
@@ -746,15 +746,17 @@ jobs:
       #
       # It was tempting to argue this one away: a dropped `--set-string` leaves
       # the proxy dialing `your-project:…`, and surely it refuses that at
-      # startup, so the pod never goes Ready and `--atomic` rolls back. But that
-      # is an assumption about WHEN the Cloud SQL Auth Proxy resolves an
-      # instance, which is its business and not a contract — and the two probes
-      # the chart attaches, `/startup` and `/liveness`, neither of them dial the
-      # instance. `/readiness` is the one that does, and it is not used. So a
-      # well-formed name that names nothing may well let the pod go Ready; and
-      # while the DSN still names the database's address directly, the platform
-      # would work, the release would succeed, and the proxy would be wrong in a
-      # way nothing noticed until the cutover made it load-bearing.
+      # startup, so the pod never goes Ready and `--atomic` rolls back. It does
+      # not. In the pinned proxy 2.24.1, `Serve` dials nothing unless
+      # `--run-connection-test` is passed, which the chart does not pass; it
+      # launches its listeners and signals startup. None of the three health
+      # endpoints dials either — `/liveness` is unconditional, `/startup`
+      # answers once that signal arrives, and `/readiness` adds only "not
+      # stopped" and "not at max connections". So a well-formed name that names
+      # nothing lets the pod go Ready; and while the DSN still names the
+      # database's address directly, the platform would work, the release would
+      # succeed, and the proxy would be wrong in a way nothing noticed until the
+      # cutover made it load-bearing. #493 tracks giving the chart a real one.
       #
       # Read back rather than reasoned about, therefore. Exactly three lines,
       # one per deployment: fewer means the sidecar is missing or the placeholder
@@ -764,8 +766,11 @@ jobs:
         if: env.POWERED_OFF != 'true'
         run: |
           set -euo pipefail
-          n="$(helm get manifest "$HELM_RELEASE" --namespace "$K8S_NAMESPACE" \
-            | grep -cF -- "$SQL_CONNECTION_NAME" || true)"
+          # Fetched on its own line so that a helm failure dies as a helm
+          # failure: folded into the pipeline below, `|| true` would swallow it
+          # and grep would report zero matches, blaming the override instead.
+          manifest="$(helm get manifest "$HELM_RELEASE" --namespace "$K8S_NAMESPACE")"
+          n="$(printf '%s\n' "$manifest" | grep -cF -- "$SQL_CONNECTION_NAME" || true)"
           if [ "$n" -ne 3 ]; then
             echo "::error::the installed release names '$SQL_CONNECTION_NAME' on $n line(s), expected 3 — one per deployment"
             echo "Zero means the override in the deploy step did not reach the chart," >&2

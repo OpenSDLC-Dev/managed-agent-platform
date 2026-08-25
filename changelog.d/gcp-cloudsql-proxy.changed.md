@@ -2,7 +2,7 @@
   [deploy/gcp/staging-values.yaml](./deploy/gcp/staging-values.yaml), so the control plane,
   brain and executor each get the proxy as a native sidecar, and `deploy.yml` resolves the
   instance's connection name from the Cloud SQL Admin API at deploy time — no operator's
-  project is written into this repository, and no new repository variable is needed. The
+  project enters the deploy configuration, and no new repository variable is needed. The
   point is that a rebuilt Cloud SQL instance gets a new private IP while its connection name
   does not change, so the DSN stops being a thing a rebuild silently invalidates. The
   workloads' IAM was already in place — `environment/` grants all three service accounts
