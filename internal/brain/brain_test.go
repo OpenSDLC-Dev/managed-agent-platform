@@ -1085,15 +1085,22 @@ func TestLongTimeToFirstTokenKeepsLease(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// The lease is sized for a contended fixture Postgres, not for speed. Each
+	// renewal's Extend is bounded by what the lease has left (keeper.go), so a
+	// sub-second TTL — this was 250ms — let one slow UPDATE on a loaded runner
+	// overrun the budget and abandon a healthy turn, the #483 flake. 1500ms
+	// matches the keeper-budget tests, whose Extend tolerates more than a second
+	// of contention; the sleeps below scale with it so the model still thinks
+	// past the whole lease.
 	h := &harness{pool: pool, log: events.NewLog(pool), queue: queue.New(pool),
-		provider: fake, brain: brain.New(pool, reg, nil, brain.Config{LeaseTTL: 250 * time.Millisecond}),
+		provider: fake, brain: brain.New(pool, reg, nil, brain.Config{LeaseTTL: 1500 * time.Millisecond}),
 		sessionID: sid, envID: envID}
 	fake.onGenerate = func(int) {
 		// Well past the original lease, a rival brain must still find
 		// nothing to claim: the keeper has been renewing it while the
 		// model thinks. Without the keeper this claim succeeds and the
 		// turn forks.
-		time.Sleep(400 * time.Millisecond)
+		time.Sleep(2 * time.Second)
 		got, err := h.queue.Claim(context.Background(), queue.ModelTurn, time.Minute)
 		if err != nil {
 			t.Errorf("rival claim: %v", err)
@@ -1101,7 +1108,7 @@ func TestLongTimeToFirstTokenKeepsLease(t *testing.T) {
 		if got != nil {
 			t.Errorf("healthy long turn was reclaimable mid-stream: the lease was not extended")
 		}
-		time.Sleep(200 * time.Millisecond)
+		time.Sleep(300 * time.Millisecond)
 	}
 
 	h.wake(t, "hi")
