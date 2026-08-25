@@ -797,3 +797,83 @@ func equalStrings(a, b []string) bool {
 	}
 	return true
 }
+
+// TestMemoryFlushRescuesWritesOnAStop is the shutdown flush — the reference
+// worker's FlushWrites. A run the control plane stopped never reaches its
+// clean-end sync, and its item is force-stopped with no later run to
+// reconcile, so the deferred flush is the only pass that saves what the agent
+// wrote. It runs on a bounded context of its own, so the cancel a stop
+// already made does not cut it off, and its push carries the sessions token,
+// so the version is the session's.
+func TestMemoryFlushRescuesWritesOnAStop(t *testing.T) {
+	sb := &fakeSandbox{}
+	h := newHarness(t, sb)
+	h.seedMemoryStore(t, memStoreID, "Notes")
+	h.seedMemory(t, memStoreID, "/facts/a.md", "alpha")
+	h.refMemory(t, [3]string{memStoreID, memMount, "read_write"})
+	token := h.sessionsToken(t)
+
+	mounts, err := memoryRefs(context.Background(), h.client, h.sid.String())
+	if err != nil {
+		t.Fatalf("memoryRefs: %v", err)
+	}
+	mem := newMemoryStores(h.client, token, h.sid.String(), sb, mounts)
+	mem.materialize(context.Background(), func() {})
+
+	// The agent's write, made after the last sync the stop cut the run off
+	// before — the write that is lost without the flush.
+	sb.files[memMount+"/log/rescued.md"] = "keep me"
+
+	// The context the run held is already cancelled by the stop; the flush
+	// must push on its own, detached from it.
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	mem.flush(ctx, func() {})
+
+	if got, ok := h.memoryContent(t, memStoreID, "/log/rescued.md"); !ok || got != "keep me" {
+		t.Fatalf("the flush did not save the agent's write: %q ok=%v", got, ok)
+	}
+	if got := h.versionsOf(t, memStoreID, "/log/rescued.md"); !equalStrings(got, []string{"created/session_actor"}) {
+		t.Errorf("flushed version = %v, want [created/session_actor]", got)
+	}
+	// Push-only: it does not delete a memory the run removed locally.
+	if _, ok := h.memoryContent(t, memStoreID, "/facts/a.md"); !ok {
+		t.Errorf("the flush deleted a store memory; it must upload only")
+	}
+}
+
+// TestMemorySyncReportsProgressWithinTheStore keeps the heartbeat fed through
+// a store's wire loops. A large sync makes up to thousands of sequential
+// memory calls; reporting progress only once per store would let a valid sync
+// trip StallTimeout and be reclaimed. Progress is reported while the heads
+// page and after each settlement, so the count outruns the per-store floor.
+func TestMemorySyncReportsProgressWithinTheStore(t *testing.T) {
+	sb := &fakeSandbox{}
+	h := newHarness(t, sb)
+	h.seedMemoryStore(t, memStoreID, "Notes")
+	h.seedMemory(t, memStoreID, "/facts/a.md", "alpha")
+	h.seedMemory(t, memStoreID, "/facts/b.md", "beta")
+	h.seedMemory(t, memStoreID, "/facts/c.md", "gamma")
+	h.refMemory(t, [3]string{memStoreID, memMount, "read_write"})
+	token := h.sessionsToken(t)
+
+	mounts, err := memoryRefs(context.Background(), h.client, h.sid.String())
+	if err != nil {
+		t.Fatalf("memoryRefs: %v", err)
+	}
+	mem := newMemoryStores(h.client, token, h.sid.String(), sb, mounts)
+	mem.materialize(context.Background(), func() {})
+
+	// Two new local files to settle, on top of the three heads to page.
+	sb.files[memMount+"/facts/d.md"] = "delta"
+	sb.files[memMount+"/facts/e.md"] = "epsilon"
+
+	reports := 0
+	mem.sync(context.Background(), func() { reports++ })
+
+	// The floor without in-loop reporting is 2 (once per store, once at the
+	// end). Three heads paged and two files settled push it well past that.
+	if reports < 6 {
+		t.Errorf("sync reported progress %d times; the in-loop reports should outrun the per-store floor of 2", reports)
+	}
+}

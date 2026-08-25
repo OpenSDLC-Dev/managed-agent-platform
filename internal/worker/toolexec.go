@@ -159,11 +159,17 @@ func RunSessionTools(ctx context.Context, client sdk.Client, provider sandbox.Pr
 	// The stores land after the files, the executor's order. A sandbox that
 	// already held a mount is reconciled before the tools read it, so a
 	// store's change reaches this session at its next run rather than the
-	// one after (plan 36 scope decision 7), and a run that faulted before
-	// its sync pushes what it wrote at the next. materialize and sync report
-	// per store and once at the end, so the block bounds itself; a storeless
+	// one after (plan 36 scope decision 7). materialize and sync report per
+	// store and once at the end, so the block bounds itself; a storeless
 	// session's nil block is a no-op the files boundary above already covers.
 	mem := newMemoryStores(client, cfg.SessionsToken, sessionID, sb, memories)
+	// The shutdown flush, deferred so it runs on every exit: the clean end
+	// below, and — the reason it exists — the faults that return before it. A
+	// stop the heartbeat turned into a cancel force-stops the item with no
+	// later run to reconcile, so this push-only pass, on a bounded context of
+	// its own, is the only one that saves what the agent wrote; after a clean
+	// sync it finds nothing to push. The reference worker's FlushWrites.
+	defer mem.flush(ctx, report)
 	if mem.materialize(ctx, report) > 0 {
 		mem.sync(ctx, report)
 	}

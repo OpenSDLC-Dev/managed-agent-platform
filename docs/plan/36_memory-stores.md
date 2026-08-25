@@ -650,7 +650,9 @@ the machine lane, a `principal_` id on the identity lane. Next migration `0028`
     409 as "the local edit loses" and 404 on update as "re-create" — the reference's
     status handling, which the platform's routes produce. *As landed: the cadence is the
     run boundary, the executor's (decision 11) — before the tools when the sandbox already
-    held a mount, and once when the run ends — not the reference's inside-the-loop 15 s;
+    held a mount, and once when the run ends, plus the reference's own push-only `FlushWrites`
+    on a stop or fault (the worker has no reaper, so a stopped run's writes would otherwise be
+    lost with no later run to reconcile) — not the reference's inside-the-loop 15 s;
     an archive, which the token cannot read from the store's row, is learned from the
     store's first refusal (a 400 `is archived`) and turns the rest of that sync pull-only.* A missing token with stores
     attached fails the item the way the reference does (`ErrSessionMemoryNoToken`'s

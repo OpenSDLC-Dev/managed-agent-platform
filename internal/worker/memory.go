@@ -190,7 +190,7 @@ func (m *memoryStores) materialize(ctx context.Context, progress func()) (existi
 		// Reported per store, the files materializer's reason: a store can be
 		// 2,000 files, and the pass has moved whether it landed or was skipped.
 		progress()
-		outcome, err := m.materializeStore(ctx, ref)
+		outcome, err := m.materializeStore(ctx, ref, progress)
 		recordMemoryMaterialized(ctx, outcome)
 		switch {
 		case err != nil:
@@ -218,7 +218,7 @@ func (m *memoryStores) materialize(ctx context.Context, progress func()) (existi
 }
 
 // materializeStore lands one store, answering with its outcome.
-func (m *memoryStores) materializeStore(ctx context.Context, ref memoryRef) (string, error) {
+func (m *memoryStores) materializeStore(ctx context.Context, ref memoryRef, progress func()) (string, error) {
 	marker := path.Join(ref.MountPath, memsync.MarkerName)
 	want := memsync.MarkerBytes(ref.MemoryStoreID)
 	// The marker's bytes, not its presence: the directory is agent-writable,
@@ -245,6 +245,7 @@ func (m *memoryStores) materializeStore(ctx context.Context, ref memoryRef) (str
 	err = m.listMemories(ctx, ref.MemoryStoreID, sdk.BetaManagedAgentsMemoryViewFull, func(mem sdk.BetaManagedAgentsMemory) {
 		writes = append(writes, sandbox.FileWrite{Path: ref.MountPath + mem.Path, Data: []byte(mem.Content), Mode: memoryFileMode})
 		baseline.Synced[mem.Path] = mem.ContentSha256
+		progress()
 	})
 	if isStatus(err, 404) {
 		// The store is gone, or this session no longer attaches it: the
@@ -323,12 +324,12 @@ func (m *memoryStores) sync(ctx context.Context, progress func()) {
 	for _, ref := range m.mounts {
 		progress()
 		st := &storeSync{ref: ref}
-		if err := m.readStore(ctx, st); err != nil {
+		if err := m.readStore(ctx, st, progress); err != nil {
 			slog.WarnContext(ctx, "memory store not synced: its directory could not be read",
 				"session_id", m.sessionID, "memory_store_id", ref.MemoryStoreID, "mount_path", ref.MountPath, "err", err)
 			continue
 		}
-		settled, err := m.settleStore(ctx, st)
+		settled, err := m.settleStore(ctx, st, progress)
 		if err != nil {
 			slog.WarnContext(ctx, "memory store not synced: its settlement failed; retried at the next run",
 				"session_id", m.sessionID, "memory_store_id", ref.MemoryStoreID, "err", err)
@@ -353,10 +354,118 @@ func (m *memoryStores) sync(ctx context.Context, progress func()) {
 		attribute.Int("memory.refused", total.refused))
 }
 
+// memoryFlushTimeout bounds the shutdown flush's own context — the reference
+// worker's MemoryFlushTimeout (anthropic-sdk-go v1.66.0 lib/environments/
+// memories.go): a slow store cannot stall teardown past it, and it stays
+// inside the window the sessions token is still valid after a stop.
+const memoryFlushTimeout = 30 * time.Second
+
+// flush is the push-only shutdown pass — the reference worker's FlushWrites,
+// run once the tools are closed on every exit, clean or not. A run that ended
+// cleanly has already synced (its baseline names what the store holds, so the
+// read below finds nothing to push); a run the control plane stopped, or one
+// that faulted, never reached that sync and its item is force-stopped with no
+// later run to reconcile — so without this pass the memory the agent wrote is
+// lost (the worker has no reaper to catch it, unlike the cloud half). It
+// uploads new and changed files and nothing else: no pulls, no remote
+// deletes, no local removals. Its context is detached from the caller's —
+// which a stop has already cancelled — keeping the trace but bounded fresh by
+// memoryFlushTimeout; it is best-effort and never reported as a failure.
+func (m *memoryStores) flush(ctx context.Context, progress func()) {
+	if m == nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), memoryFlushTimeout)
+	defer cancel()
+	ctx, span := otel.GetTracerProvider().Tracer(tracerName).Start(ctx, "memory_flush")
+	defer span.End()
+	for _, ref := range m.mounts {
+		progress()
+		m.flushStore(ctx, &storeSync{ref: ref}, progress)
+	}
+	progress()
+}
+
+// flushStore uploads one store's new and changed files — the reference
+// worker's flushStore. It reads the directory the way the sync's read phase
+// does, lists the store's heads, and for each changed file creates it, or
+// updates it against the head the baseline recorded, skipping a file the
+// store already holds at those bytes and one that changed on both sides (the
+// store's copy wins there, as it does in a full sync). A read-only store, and
+// a directory whose marker does not vouch for it, upload nothing. It writes no
+// baseline back: a push the next run repeats is a no-op the store answers as
+// agreement, where a baseline written on a torn-down sandbox would not help.
+func (m *memoryStores) flushStore(ctx context.Context, st *storeSync, progress func()) {
+	id := st.ref.MemoryStoreID
+	if st.ref.Access == "read_only" {
+		return
+	}
+	if err := m.readStore(ctx, st, progress); err != nil {
+		slog.WarnContext(ctx, "memory not flushed: its directory could not be read",
+			"session_id", m.sessionID, "memory_store_id", id, "err", err)
+		return
+	}
+	// An untrusted marker uploads nothing (the sync leaves such a directory
+	// as found); nothing changed against the baseline is nothing to push.
+	if !st.markerOK || len(st.contents) == 0 {
+		return
+	}
+	remote := map[string]memsync.Head{}
+	if err := m.listMemories(ctx, id, sdk.BetaManagedAgentsMemoryViewBasic, func(mem sdk.BetaManagedAgentsMemory) {
+		remote[mem.Path] = memsync.Head{ID: mem.ID, SHA: mem.ContentSha256}
+		progress()
+	}); err != nil {
+		slog.WarnContext(ctx, "memory not flushed: the store's heads could not be listed",
+			"session_id", m.sessionID, "memory_store_id", id, "err", err)
+		return
+	}
+	paths := make([]string, 0, len(st.contents))
+	for p := range st.contents {
+		paths = append(paths, p)
+	}
+	sort.Strings(paths)
+	pushed := 0
+	for _, p := range paths {
+		progress()
+		localSHA := st.local[p]
+		head, exists := remote[p]
+		baseSHA, hasBase := st.baseline.Synced[p]
+		if exists && head.SHA == localSHA {
+			continue
+		}
+		if exists && (!hasBase || head.SHA != baseSHA) {
+			slog.WarnContext(ctx, "memory changed both locally and remotely; the flush leaves the remote version",
+				"session_id", m.sessionID, "memory_store_id", id, "path", p)
+			continue
+		}
+		act := memsync.Action{Kind: memsync.Push, Path: p, LocalSHA: localSHA, BaselineSHA: baseSHA}
+		if exists {
+			act.ID = head.ID
+		}
+		outcome, err := m.push(ctx, id, act, st.contents[p])
+		if err != nil {
+			slog.WarnContext(ctx, "memory flush cut off; changed files it had not uploaded are not saved",
+				"session_id", m.sessionID, "memory_store_id", id, "path", p, "err", err)
+			return
+		}
+		switch outcome {
+		case pushOK:
+			pushed++
+		case pushArchived:
+			// The store is archived: no write of this run's will land.
+			return
+		}
+	}
+	if pushed > 0 {
+		slog.InfoContext(ctx, "memory flushed on shutdown",
+			"session_id", m.sessionID, "memory_store_id", id, "pushed", pushed)
+	}
+}
+
 // readStore is the read phase, the executor's readStore: the marker judged,
 // the tree listed and parsed, the baseline decoded, and the bytes of every
 // changed file read up to the content cap.
-func (m *memoryStores) readStore(ctx context.Context, st *storeSync) error {
+func (m *memoryStores) readStore(ctx context.Context, st *storeSync, progress func()) error {
 	mount, id := st.ref.MountPath, st.ref.MemoryStoreID
 	marker, err := m.sb.ReadFile(ctx, path.Join(mount, memsync.MarkerName))
 	st.markerOK = err == nil && bytes.Equal(marker, memsync.MarkerBytes(id))
@@ -409,6 +518,7 @@ func (m *memoryStores) readStore(ctx context.Context, st *storeSync) error {
 		if st.baseline.Synced[p] == sha || st.baseline.Refused[p] == sha {
 			continue
 		}
+		progress()
 		data, err := readCapped(ctx, m.sb, mount+p, memsync.MaxContentBytes)
 		if errors.Is(err, sandbox.ErrFileTooLarge) {
 			st.baseline.Refused[p] = sha
@@ -456,11 +566,12 @@ func sha256hex(data []byte) string {
 // store the routes no longer know — deleted since the attachment (decision 7
 // keeps the element): the directory stays as the agent left it, and nothing
 // is written. An error is a settlement to retry next run.
-func (m *memoryStores) settleStore(ctx context.Context, st *storeSync) (bool, error) {
+func (m *memoryStores) settleStore(ctx context.Context, st *storeSync, progress func()) (bool, error) {
 	id := st.ref.MemoryStoreID
 	remote := map[string]memsync.Head{}
 	err := m.listMemories(ctx, id, sdk.BetaManagedAgentsMemoryViewBasic, func(mem sdk.BetaManagedAgentsMemory) {
 		remote[mem.Path] = memsync.Head{ID: mem.ID, SHA: mem.ContentSha256}
+		progress()
 	})
 	if isStatus(err, 404) {
 		slog.InfoContext(ctx, "memory store not synced: the store no longer exists",
@@ -502,6 +613,7 @@ func (m *memoryStores) settleStore(ctx context.Context, st *storeSync) (bool, er
 		}
 	}
 	for _, act := range ordered {
+		progress()
 		target := st.ref.MountPath + act.Path
 		switch act.Kind {
 		case memsync.Pull:
