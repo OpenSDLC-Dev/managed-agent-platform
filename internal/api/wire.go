@@ -240,8 +240,18 @@ func parseMetadata(obj map[string]json.RawMessage) (map[string]string, error) {
 	if md == nil {
 		md = map[string]string{}
 	}
+	if _, ok := md[""]; ok {
+		return nil, errEmptyMetadataKey
+	}
 	return md, nil
 }
+
+// The documented key range is 1–64 characters. The lower bound is enforced on
+// what a caller sends — a create's bag here, a patch's upserts in
+// splitMetadataPatch — and not on the merged map validateMetadataCaps sees,
+// so a row that acquired an empty key before the bound was checked (#484)
+// stays patchable and `{"": null}` is the way to shed it.
+var errEmptyMetadataKey = errInvalid("metadata keys cannot be empty")
 
 // splitMetadataPatch partitions a metadata patch object into per-key upserts and
 // deletes: a string value upserts the key, an explicit null deletes it, and when
@@ -259,6 +269,9 @@ func splitMetadataPatch(raw json.RawMessage, emptyDeletes bool) (upserts map[str
 		if v == nil || (emptyDeletes && *v == "") {
 			deletes = append(deletes, k)
 			continue
+		}
+		if k == "" {
+			return nil, nil, errEmptyMetadataKey
 		}
 		upserts[k] = *v
 	}
@@ -311,10 +324,6 @@ func validateMetadataCaps(md map[string]string) error {
 		return errInvalid("metadata cannot exceed %d pairs", metadataMaxPairs)
 	}
 	for k, v := range md {
-		// The documented range is 1–64: an empty key is below it (#52, plan 36).
-		if k == "" {
-			return errInvalid("metadata keys cannot be empty")
-		}
 		if utf8.RuneCountInString(k) > metadataKeyMax {
 			return errInvalid("metadata keys cannot exceed %d characters", metadataKeyMax)
 		}

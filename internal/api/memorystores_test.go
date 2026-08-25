@@ -206,6 +206,22 @@ func TestMemoryStoreValidation(t *testing.T) {
 		map[string]any{"metadata": map[string]string{"one-more": "v"}}); status != http.StatusBadRequest {
 		t.Errorf("a patch growing metadata past 16 pairs: status %d (%v)", status, resp)
 	}
+
+	// The empty-key bound is checked on what a caller sends, not on the stored
+	// bag: a row that acquired an empty key before the bound existed stays
+	// patchable, and {"": null} sheds the key.
+	if _, err := s.pool.Exec(t.Context(),
+		`UPDATE memory_stores SET metadata = '{"": "legacy", "k": "v"}' WHERE id = $1`, id); err != nil {
+		t.Fatalf("plant a legacy empty key: %v", err)
+	}
+	status, body = s.do(http.MethodPost, "/v1/memory_stores/"+id, map[string]any{"metadata": map[string]any{"k": "w"}})
+	if md, _ := body["metadata"].(map[string]any); status != http.StatusOK || md[""] != "legacy" || md["k"] != "w" {
+		t.Fatalf("patch beside a legacy empty key: status %d (%v)", status, body)
+	}
+	status, body = s.do(http.MethodPost, "/v1/memory_stores/"+id, map[string]any{"metadata": map[string]any{"": nil}})
+	if md, _ := body["metadata"].(map[string]any); status != http.StatusOK || len(md) != 1 || md["k"] != "w" {
+		t.Fatalf("delete the legacy empty key: status %d (%v)", status, body)
+	}
 }
 
 // TestMemoryStoreUpdateSemantics covers the three-way metadata patch and the
