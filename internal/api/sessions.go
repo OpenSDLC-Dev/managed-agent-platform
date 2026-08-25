@@ -590,6 +590,16 @@ func (s *server) createSession(r *http.Request) (any, error) {
 	if envArchivedAt != nil {
 		return nil, errInvalid("environment %s is archived", envID)
 	}
+	if envKind == "self_hosted" && resourceInputsHaveMemory(resourceInputs) {
+		// Plan 36 scope decision 2: the reference worker fails a work item
+		// whose session has a store but carries no sessions token (v1.66.0
+		// worker.go:516-528), so accepting the attachment here — the
+		// github_repository precedent, #322 — would break every
+		// `ant beta:worker poll` the moment it polled. Refused until slice 6
+		// issues the token; tracked by #52.
+		recordResourceMutation(ctx, resourceOutcomeInvalid, 1)
+		return nil, errInvalid("memory_store resources are not supported on self_hosted environments yet")
+	}
 	if err := validateAttachedVaults(ctx, tx, vaultIDs); err != nil {
 		return nil, err
 	}
@@ -1043,9 +1053,9 @@ func (s *server) listSessions(r *http.Request) (any, error) {
 		}
 	}
 
-	// Deployments and memory stores are post-v1 features: no session can
-	// reference one, so filtering by them yields an empty result, not an error.
-	if q.Get("deployment_id") != "" || q.Get("memory_store_id") != "" {
+	// Deployments are post-v1: no session can reference one, so filtering by
+	// deployment_id yields an empty result, not an error.
+	if q.Get("deployment_id") != "" {
 		return biPageJSON{Data: []any{}}, nil
 	}
 
@@ -1053,6 +1063,18 @@ func (s *server) listSessions(r *http.Request) (any, error) {
 	var args []any
 	if !includeArchived {
 		query += ` AND archived_at IS NULL`
+	}
+	if storeID := q.Get("memory_store_id"); storeID != "" {
+		// "Filter sessions whose resources contain a memory_store with this
+		// memory store ID" (betasession.go:2830): a containment match on the
+		// resources array, the fileMountedInEnvironment precedent (files.go);
+		// no index until a list needs one (plan 36 decision 7). Shape first,
+		// as for agent_id (#135).
+		if !domain.ID(storeID).HasPrefix(domain.PrefixMemoryStore) || !domain.ID(storeID).Valid() {
+			return nil, errInvalid("memory_store_id must be a valid memory store id")
+		}
+		args = append(args, storeID)
+		query += fmt.Sprintf(` AND resources @> jsonb_build_array(jsonb_build_object('type', 'memory_store', 'memory_store_id', $%d::text))`, len(args))
 	}
 	if agentID := q.Get("agent_id"); agentID != "" {
 		// A malformed agent_id can never name a stored agent; reject it on shape

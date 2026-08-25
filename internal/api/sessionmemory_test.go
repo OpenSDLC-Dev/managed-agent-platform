@@ -1,0 +1,326 @@
+package api_test
+
+import (
+	"net/http"
+	"strings"
+	"testing"
+)
+
+// The memory_store arm of sessions.resources (plan 36 slice 3, decisions 7–8;
+// #52): the element is the SDK's BetaManagedAgentsMemoryStoreResource verbatim
+// — no id, no timestamps — with name, description and mount_path snapshotted
+// from the store at attach time, and nothing mounted or said to the agent
+// until slice 4.
+
+func memoryStoreWith(t *testing.T, s *tserver, body map[string]any) string {
+	t.Helper()
+	status, res := s.do(http.MethodPost, "/v1/memory_stores", body)
+	if status != http.StatusOK {
+		t.Fatalf("create memory store: status %d (%v)", status, res)
+	}
+	return res["id"].(string)
+}
+
+func memoryElement(storeID string, extra map[string]any) map[string]any {
+	el := map[string]any{"type": "memory_store", "memory_store_id": storeID}
+	for k, v := range extra {
+		el[k] = v
+	}
+	return el
+}
+
+func TestSessionMemoryStoreAttachment(t *testing.T) {
+	s := newTestServer(t)
+	agentID, envID := fixture(t, s)
+	store := memoryStoreWith(t, s, map[string]any{"name": "User Preferences", "description": "what the user likes"})
+	bare := createMemoryStore(t, s, "Notes")
+
+	sess := createSession(t, s, map[string]any{
+		"agent": agentID, "environment_id": envID,
+		"resources": []any{
+			memoryElement(store, map[string]any{"access": "read_only", "instructions": "consult before answering"}),
+			memoryElement(bare, nil),
+		},
+	})
+	res := resourcesOf(t, sess)
+	if len(res) != 2 {
+		t.Fatalf("resources = %v, want two", res)
+	}
+	// The response variant's exact key set: id-less, unlike file and repo elements.
+	wantFields(t, res[0], "type", "memory_store_id", "access", "description", "instructions", "mount_path", "name")
+	if res[0]["type"] != "memory_store" || res[0]["memory_store_id"] != store {
+		t.Errorf("element = %v, want the memory_store element for %s", res[0], store)
+	}
+	if res[0]["access"] != "read_only" || res[0]["instructions"] != "consult before answering" {
+		t.Errorf("access/instructions = %v/%v, want the request's", res[0]["access"], res[0]["instructions"])
+	}
+	if res[0]["name"] != "User Preferences" || res[0]["description"] != "what the user likes" {
+		t.Errorf("snapshot = %v/%v, want the store's name and description", res[0]["name"], res[0]["description"])
+	}
+	if res[0]["mount_path"] != "/mnt/memory/user-preferences" {
+		t.Errorf("mount_path = %v, want /mnt/memory/user-preferences", res[0]["mount_path"])
+	}
+	// Omitted access is the documented default, echoed as the string; omitted
+	// instructions is null; a store without a description snapshots "".
+	if res[1]["access"] != "read_write" {
+		t.Errorf("default access = %v, want read_write", res[1]["access"])
+	}
+	if v, ok := res[1]["instructions"]; !ok || v != nil {
+		t.Errorf("omitted instructions = %v, want null", v)
+	}
+	if res[1]["description"] != "" || res[1]["mount_path"] != "/mnt/memory/notes" {
+		t.Errorf("bare store element = %v", res[1])
+	}
+
+	// The session GET echoes the same elements, and the snapshot survives a
+	// later rename of the store (documented: "Later edits to the store's name
+	// do not propagate").
+	sid := sess["id"].(string)
+	if status, body := s.do(http.MethodPost, "/v1/memory_stores/"+store, map[string]any{"name": "Renamed"}); status != http.StatusOK {
+		t.Fatalf("rename store: %d (%v)", status, body)
+	}
+	got := resourcesOf(t, createGetSession(t, s, sid))
+	if len(got) != 2 || got[0]["name"] != "User Preferences" || got[0]["mount_path"] != "/mnt/memory/user-preferences" {
+		t.Errorf("session GET after rename = %v, want the attach-time snapshot", got)
+	}
+
+	// The resources list serves the element too, and neither get nor delete
+	// can name it: an id-less element has no {rid}, so both answer the
+	// shape-check 404 — for the memory_store_id as much as for a sesrsc_ id.
+	status, list := s.do(http.MethodGet, "/v1/sessions/"+sid+"/resources", nil)
+	if status != http.StatusOK || len(listData(t, list)) != 2 {
+		t.Errorf("resources list: %d %v", status, list)
+	}
+	for _, rid := range []string{store, "sesrsc_" + strings.Repeat("0", 23) + "1"} {
+		for _, method := range []string{http.MethodGet, http.MethodDelete} {
+			status, body := s.do(method, "/v1/sessions/"+sid+"/resources/"+rid, nil)
+			wantErr(t, status, body, http.StatusNotFound, "not_found_error")
+		}
+	}
+	// Attach is create-time only: the add endpoint keeps its files-only rule.
+	status, body := s.do(http.MethodPost, "/v1/sessions/"+sid+"/resources", memoryElement(bare, nil))
+	wantErr(t, status, body, http.StatusBadRequest, "invalid_request_error")
+
+	// A deleted store's attachment is tolerated: the element stays as
+	// snapshotted (the files precedent; the prompt-side hedge is slice 4's).
+	if status, body := s.do(http.MethodDelete, "/v1/memory_stores/"+bare, nil); status != http.StatusOK {
+		t.Fatalf("delete store: %d (%v)", status, body)
+	}
+	if got := resourcesOf(t, createGetSession(t, s, sid)); len(got) != 2 || got[1]["memory_store_id"] != bare {
+		t.Errorf("session GET after store delete = %v, want the element kept", got)
+	}
+}
+
+// The slug (decision 8): lowercased, every non-[a-z0-9] run one hyphen, a
+// leading or trailing hyphen trimmed, ASCII only, and a name with no
+// alphanumerics falling back to the store id's token.
+func TestSessionMemoryStoreMountPathSlug(t *testing.T) {
+	s := newTestServer(t)
+	agentID, envID := fixture(t, s)
+	symbols := createMemoryStore(t, s, "!!!")
+	for name, want := range map[string]string{
+		"(Notes)":      "/mnt/memory/notes",
+		"Ünïcode":      "/mnt/memory/n-code",
+		"a  b__c":      "/mnt/memory/a-b-c",
+		"2026 Q3 plan": "/mnt/memory/2026-q3-plan",
+	} {
+		store := createMemoryStore(t, s, name)
+		sess := createSession(t, s, map[string]any{
+			"agent": agentID, "environment_id": envID,
+			"resources": []any{memoryElement(store, nil)},
+		})
+		if got := resourcesOf(t, sess)[0]["mount_path"]; got != want {
+			t.Errorf("%q: mount_path = %v, want %s", name, got, want)
+		}
+	}
+	sess := createSession(t, s, map[string]any{
+		"agent": agentID, "environment_id": envID,
+		"resources": []any{memoryElement(symbols, nil)},
+	})
+	if got, want := resourcesOf(t, sess)[0]["mount_path"], "/mnt/memory/"+strings.TrimPrefix(symbols, "memstore_"); got != want {
+		t.Errorf("all-symbol name: mount_path = %v, want %s", got, want)
+	}
+}
+
+// The create-time rejections (decision 7), each a 400 in the standard
+// envelope; the cap and the same-store rule are judged before any row is
+// read, the store's existence and state inside the create transaction.
+func TestSessionMemoryStoreAttachmentRejections(t *testing.T) {
+	s := newTestServer(t)
+	agentID, envID := fixture(t, s)
+	selfHosted := createEnvironment(t, s, map[string]any{"name": "byoc", "config": map[string]any{"type": "self_hosted"}})["id"].(string)
+	store := createMemoryStore(t, s, "Notes")
+	twin := createMemoryStore(t, s, "notes") // slugs collide with store's
+	archived := createMemoryStore(t, s, "Old")
+	if status, body := s.do(http.MethodPost, "/v1/memory_stores/"+archived+"/archive", nil); status != http.StatusOK {
+		t.Fatalf("archive: %d (%v)", status, body)
+	}
+	nine := make([]any, 0, 9)
+	for i := 0; i < 9; i++ {
+		nine = append(nine, memoryElement(createMemoryStore(t, s, "s"+string(rune('a'+i))), nil))
+	}
+
+	for name, tc := range map[string]struct {
+		envID     string
+		resources []any
+		want      string
+	}{
+		"unknown store":   {envID, []any{memoryElement("memstore_"+strings.Repeat("0", 23)+"1", nil)}, "not found"},
+		"archived store":  {envID, []any{memoryElement(archived, nil)}, "is archived"},
+		"nine stores":     {envID, nine, "at most 8"},
+		"the same twice":  {envID, []any{memoryElement(store, nil), memoryElement(store, map[string]any{"access": "read_only"})}, "more than once"},
+		"slug collision":  {envID, []any{memoryElement(store, nil), memoryElement(twin, nil)}, "both mount at /mnt/memory/notes"},
+		"instructions":    {envID, []any{memoryElement(store, map[string]any{"instructions": strings.Repeat("x", 4097)})}, "4096"},
+		"self_hosted":     {selfHosted, []any{memoryElement(store, nil)}, "self_hosted"},
+		"malformed id":    {envID, []any{memoryElement("mem_x", nil)}, "memory_store_id"},
+		"missing id":      {envID, []any{map[string]any{"type": "memory_store"}}, "memory_store_id"},
+		"bad access":      {envID, []any{memoryElement(store, map[string]any{"access": "append"})}, "access"},
+		"output-only key": {envID, []any{memoryElement(store, map[string]any{"mount_path": "/mnt/memory/x"})}, "unknown field"},
+	} {
+		status, body := s.do(http.MethodPost, "/v1/sessions", map[string]any{
+			"agent": agentID, "environment_id": tc.envID, "resources": tc.resources,
+		})
+		wantErr(t, status, body, http.StatusBadRequest, "invalid_request_error")
+		if msg, _ := body["error"].(map[string]any)["message"].(string); !strings.Contains(msg, tc.want) {
+			t.Errorf("%s: message %q does not mention %q", name, msg, tc.want)
+		}
+	}
+
+	// Eight stores, instructions of exactly 4,096 characters, and explicit
+	// nulls for access and instructions are all accepted.
+	eight := nine[:8]
+	eight[0] = memoryElement(eight[0].(map[string]any)["memory_store_id"].(string),
+		map[string]any{"access": nil, "instructions": nil})
+	eight[1] = memoryElement(eight[1].(map[string]any)["memory_store_id"].(string),
+		map[string]any{"instructions": strings.Repeat("ü", 4096)})
+	sess := createSession(t, s, map[string]any{"agent": agentID, "environment_id": envID, "resources": eight})
+	res := resourcesOf(t, sess)
+	if len(res) != 8 || res[0]["access"] != "read_write" || res[0]["instructions"] != nil {
+		t.Errorf("eight stores with nulls = %v", res)
+	}
+}
+
+// The resources-list cursor names the last element by a key every element
+// has — a memory element's is memstore:<id> — so a page boundary on or after
+// a memory element neither repeats nor skips one.
+func TestSessionResourceListPagesAcrossMemoryElements(t *testing.T) {
+	s := newTestServer(t)
+	agentID, envID := fixture(t, s)
+	store := createMemoryStore(t, s, "Notes")
+	fileA, fileB := uploadOneFile(t, s, "a"), uploadOneFile(t, s, "b")
+	sess := createSession(t, s, map[string]any{
+		"agent": agentID, "environment_id": envID,
+		"resources": []any{
+			map[string]any{"type": "file", "file_id": fileA, "mount_path": "/a"},
+			memoryElement(store, nil),
+			map[string]any{"type": "file", "file_id": fileB, "mount_path": "/b"},
+		},
+	})
+	sid := sess["id"].(string)
+
+	walk := func(limit string) []string {
+		t.Helper()
+		var seen []string
+		page := ""
+		for {
+			status, body := s.do(http.MethodGet, "/v1/sessions/"+sid+"/resources?limit="+limit+page, nil)
+			if status != http.StatusOK {
+				t.Fatalf("list: %d (%v)", status, body)
+			}
+			for _, el := range listData(t, body) {
+				if el["type"] == "memory_store" {
+					seen = append(seen, "memstore")
+				} else {
+					seen = append(seen, el["file_id"].(string))
+				}
+			}
+			next, _ := body["next_page"].(string)
+			if next == "" {
+				return seen
+			}
+			page = "&page=" + next
+		}
+	}
+	want := fileA + " memstore " + fileB
+	// limit=2 ends page one on the memory element; limit=1 starts page two on it.
+	for _, limit := range []string{"1", "2", "3"} {
+		if got := strings.Join(walk(limit), " "); got != want {
+			t.Errorf("limit=%s walk = %q, want %q", limit, got, want)
+		}
+	}
+}
+
+// GET /v1/sessions?memory_store_id= is a containment match on the resources
+// array: a session attaching two stores matches both ids, and a deleted store
+// still matches (the element is a snapshot).
+func TestSessionListFiltersByMemoryStore(t *testing.T) {
+	s := newTestServer(t)
+	agentID, envID := fixture(t, s)
+	x, y := createMemoryStore(t, s, "x"), createMemoryStore(t, s, "y")
+	both := createSession(t, s, map[string]any{"agent": agentID, "environment_id": envID,
+		"resources": []any{memoryElement(x, nil), memoryElement(y, nil)}})["id"]
+	onlyX := createSession(t, s, map[string]any{"agent": agentID, "environment_id": envID,
+		"resources": []any{memoryElement(x, nil)}})["id"]
+	createSession(t, s, map[string]any{"agent": agentID, "environment_id": envID})
+
+	ids := func(q string) []any {
+		t.Helper()
+		status, body := s.do(http.MethodGet, "/v1/sessions?memory_store_id="+q, nil)
+		if status != http.StatusOK {
+			t.Fatalf("filter %s: %d (%v)", q, status, body)
+		}
+		var out []any
+		for _, row := range listData(t, body) {
+			out = append(out, row["id"])
+		}
+		return out
+	}
+	if got := ids(x); len(got) != 2 || got[0] != onlyX || got[1] != both {
+		t.Errorf("filter x = %v, want [%v %v] newest first", got, onlyX, both)
+	}
+	if got := ids(y); len(got) != 1 || got[0] != both {
+		t.Errorf("filter y = %v, want [%v]", got, both)
+	}
+	if got := ids("memstore_" + strings.Repeat("0", 23) + "1"); len(got) != 0 {
+		t.Errorf("filter on an absent store = %v, want empty", got)
+	}
+	if status, body := s.do(http.MethodDelete, "/v1/memory_stores/"+y, nil); status != http.StatusOK {
+		t.Fatalf("delete y: %d (%v)", status, body)
+	}
+	if got := ids(y); len(got) != 1 || got[0] != both {
+		t.Errorf("filter on the deleted store = %v, want [%v] still", got, both)
+	}
+	// A malformed id can never name a store: rejected on shape (#135).
+	for _, bad := range []string{"memstore_X", "mem_" + strings.Repeat("a", 24), "memstore_%00"} {
+		status, body := s.do(http.MethodGet, "/v1/sessions?memory_store_id="+bad, nil)
+		wantErr(t, status, body, http.StatusBadRequest, "invalid_request_error")
+	}
+}
+
+// /mnt/memory is reserved: a repository may not mount at it or below it
+// (decision 8); a sibling path stays legal. Validation runs before the
+// cipher check, so a cipher-less test server still answers the 400.
+func TestSessionRepoMountRefusedUnderMemoryRoot(t *testing.T) {
+	s := newTestServer(t)
+	agentID, envID := fixture(t, s)
+	for _, mount := range []string{"/mnt/memory", "/mnt/memory/notes"} {
+		status, body := s.do(http.MethodPost, "/v1/sessions", map[string]any{
+			"agent": agentID, "environment_id": envID,
+			"resources": []any{map[string]any{"type": "github_repository", "url": "https://github.com/x/y",
+				"authorization_token": "t", "mount_path": mount}},
+		})
+		wantErr(t, status, body, http.StatusBadRequest, "invalid_request_error")
+		if msg, _ := body["error"].(map[string]any)["message"].(string); !strings.Contains(msg, "reserved") {
+			t.Errorf("%s: message %q, want the reservation named", mount, msg)
+		}
+	}
+	// A sibling path is not below the parent, and stays legal.
+	sess := createSession(t, s, map[string]any{
+		"agent": agentID, "environment_id": envID,
+		"resources": []any{map[string]any{"type": "github_repository", "url": "https://github.com/x/y",
+			"authorization_token": "t", "mount_path": "/mnt/memoryx"}},
+	})
+	if got := resourcesOf(t, sess)[0]["mount_path"]; got != "/mnt/memoryx" {
+		t.Errorf("/mnt/memoryx: mount_path = %v", got)
+	}
+}
