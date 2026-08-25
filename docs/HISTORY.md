@@ -151,9 +151,9 @@ to v1.63.1 and were missed because that record's audit covered the registry, not
 `betasession.go` did not move in this range, v1.66.0 neither worsened nor fixed them; they are
 corrected here.
 
-**The labels.** 91 literal `v1.63.1` matches across 21 files: **45 live** — 36 in the registry's
+**The labels.** 93 literal `v1.63.1` matches (`git grep -o` at the merge base) across 21 files: **45 live** — 36 in the registry's
 evidence clauses, plus `go.mod`, two `go.sum` lines, `docs/REFERENCE_PROJECTS.md`,
-`.claude/agents/verifier.md` and four code comments — all advanced; **40 historical**, all kept (plan
+`.claude/agents/verifier.md` and four code comments — all advanced; **48 historical**, all kept (plan
 36's and archived plan 35's own from-version statements, the v1.63.1 bump record above, three
 changelog fragments, the registry's own bump chronicle, and the two "since v1.63.1" comments in
 `internal/events`). Six were **ambiguous**, and each got a decision rather than a coin flip. Five bare
@@ -165,8 +165,8 @@ was taken. The sixth, the registry's "unchanged through v1.63.1" durability clau
 `betasessionevent.go`, is advanced to v1.66.0 and strengthened: the file's diff across the whole range
 is not merely comment-only, it is empty.
 
-**One line of repo code changed.** 73 package-qualified SDK identifiers are used across eleven files;
-72 are present at v1.66.0 unchanged. The one break is `acceptance/dcf_test.go:54`'s
+**One line of repo code changed.** 33 distinct root-package SDK identifiers (48 counting the option, param, respjson and ssestream qualifiers) are used across eleven files;
+All but one are present at v1.66.0 unchanged. The one break is `acceptance/dcf_test.go:54`'s
 `[]anthropic.FileMetadata`. The mechanism is worth recording because it is the opposite of what a
 rename usually does: `anthropic.FileMetadata` **still compiles** at v1.66.0 — it is now the *GA* Files
 type, a different struct with `ExpiresAt` and no `Scope` — so the declaration is fine and the compiler
@@ -192,8 +192,8 @@ memory-version actor union will render three of its four arms when plan 36 slice
 **Evidence.**
 
 - The read-only enumeration ran as four parallel investigations (registry citation durability, 85;
-  non-registry citation durability, 57; the `v1.63.1` label classification, 91 matches; the compiled
-  SDK identifier surface, 73 identifiers) plus a direct per-file diff of every changed SDK file, with
+  non-registry citation durability, 57; the `v1.63.1` label classification, 93 matches; the compiled
+  SDK identifier surface, 48 qualified identifiers) plus a direct per-file diff of every changed SDK file, with
   the overlaps re-derived independently. No contradiction survived reconciliation. Every SDK fact
   above was read at a tag with `git show <tag>:<file>`; nothing was checked out.
 - The real `ant` CLI (v1.26.1, which pins SDK v1.66.0; built from the read-only checkout) against

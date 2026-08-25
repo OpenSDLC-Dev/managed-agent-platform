@@ -686,8 +686,9 @@ behavior**; the last slice archives the plan and closes #52.
    domain keys refused and registered with an issue, the `secret` entry's evidence
    clause corrected in place (the v1.66.0 worker reads it), the web-domains inference
    closed and the toolset-echo entry's "byte-identical" evidence rewritten, a CONFIRMED
-   entry for `service_account_actor` (never emitted by this platform) and for the
-   `BetaFileMetadata` rename as far as it touches mirrored shapes, the six `betasession.go`
+   entry for `service_account_actor` (never emitted by this platform) — the
+   `BetaFileMetadata` rename changes no wire byte and the files entries never named the
+   type, so it needs none — the six `betasession.go`
    citations in `sessionresources.go` that plan 35's bump left 86 lines stale corrected,
    HISTORY record.
 1. **Stores** (decisions 1–3, 5, 6, 14): migration `0028_memory_stores.sql`

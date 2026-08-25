@@ -168,10 +168,12 @@ func TestValidateRejectsUnknownFields(t *testing.T) {
 			wantIn: []string{"configs[0].type"},
 		},
 		{
-			// encoding/json reads a JSON null into a string as "", so a null
-			// type would otherwise equal a null name and pass.
-			name:   "a null per-tool type is rejected",
-			entry:  `{"type":"agent_toolset_20260401","configs":[{"name":"bash","type":null}]}`,
+			// encoding/json reads a JSON null into a plain string as "", so
+			// two nulls would compare as two equal empty strings and pass —
+			// a null type beside a real name is caught by the mismatch arm
+			// either way, which is why this case nulls both.
+			name:   "a null per-tool type beside a null name is rejected",
+			entry:  `{"type":"agent_toolset_20260401","configs":[{"name":null,"type":null}]}`,
 			wantIn: []string{"configs[0].type"},
 		},
 		{
