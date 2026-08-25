@@ -460,6 +460,11 @@ terraform output -raw  blob_bucket                               # BLOB_BUCKET
 terraform output -raw  sql_instance_connection_name              # cloudSQLProxy.instanceConnectionName
 ```
 
+The last one is for a deploy you drive by hand. CD does not read it: `deploy.yml` asks the
+Cloud SQL Admin API for the connection name at deploy time, so no instance identifier is
+written into this repository. Why the proxy is the shape this deployment uses, and the one
+migration step that is not automatic, are under "Continuous delivery" below.
+
 **Apply all three.** The brain's annotation used to be the one that was only sometimes
 needed — it existed for the Cloud SQL Auth Proxy (chart: `cloudSQLProxy.enabled`), and under
 the direct-connection path no component uses a Google identity for the database. #240 ended
@@ -1041,9 +1046,45 @@ registry prefix wrong and the render still succeeds; it just names images that d
 and all three pods sit in `ImagePullBackOff`.
 
 **There is a third thing a rebuild moves, and it is not in either file: `database-url`.** A
-recreated Cloud SQL instance gets a **new private IP**, and the DSN below hard-codes the old
-one — so the pipeline would apply a Secret pointing at an address nothing answers on, and
-every pod would fail its first query. Re-compose it before the next deploy:
+recreated Cloud SQL instance gets a **new private IP**, and a DSN that hard-codes the old one
+points the whole platform at an address nothing answers on — the pipeline applies the Secret,
+and every pod fails its first query.
+
+The way out of that is not to name an address at all, and `cloudSQLProxy.enabled` is now on
+in [staging-values.yaml](./staging-values.yaml): each pod runs the Cloud SQL Auth Proxy as a
+sidecar, the proxy is given the instance's **connection name** — which a rebuild does not
+change — and the DSN names the proxy's loopback socket. `deploy.yml` resolves the connection
+name from the Admin API at deploy time, so nothing about the instance is written down here.
+
+**The DSN is the half that is not automatic, and it is deliberately not CD's to write** —
+`database-url` is one of the three secrets a human creates out of band, for the reason given
+under "The three secrets the pipeline reads". So the migration is two steps, in this order,
+and the order is not optional: the proxy has to be listening before anything is told to use
+it.
+
+1. Deploy with the proxy on. It starts in all three pods and sits unused; the DSN still names
+   the instance's address, and nothing about connectivity changes. If the proxy cannot start,
+   `--atomic` rolls the release back before any of this is load-bearing.
+2. Point the DSN at it, then re-run the deploy so the pods restart onto the new Secret:
+
+   ```sh
+   pw="$(gcloud secrets versions access latest --secret=map-db-password \
+           --project="$GCP_PROJECT_ID")"
+   printf '%s' "postgres://map:$pw@127.0.0.1:5432/map?sslmode=disable" \
+     | gcloud secrets versions add database-url \
+         --project="$GCP_PROJECT_ID" --data-file=-
+   ```
+
+   `sslmode=disable` is safe **here and only here**: the hop it describes is a loopback socket
+   inside one pod, and the proxy makes its own encrypted connection onward. That is also why
+   the proxy is a sidecar and not a shared Deployment — the tidier shape would put the
+   password and every result on the pod network in cleartext.
+
+   Rolling back is `gcloud secrets versions disable <the new version>` followed by a deploy;
+   the address-based version stays enabled and becomes `latest` again.
+
+Until step 2 is done, a rebuild still moves `database-url`, and the old address form is what
+to re-compose:
 
 ```sh
 ip="$(terraform -chdir=deploy/gcp/environment output -raw sql_private_ip)"
@@ -1053,10 +1094,6 @@ printf '%s' "postgres://map:$pw@$ip:5432/map?sslmode=require" \
   | gcloud secrets versions add database-url \
       --project="$GCP_PROJECT_ID" --data-file=-
 ```
-
-(Or stop hard-coding an address: the chart's `cloudSQLProxy.enabled` takes the instance
-*connection name*, which a rebuild does not change. That is the better shape and the reason
-the knob exists; this deployment has not moved to it.)
 
 **The `map-platform` Secret is assembled by the pipeline**, because nothing else can: the
 chart writes no Secret in this mode and Terraform holds no secret *values* by design. The

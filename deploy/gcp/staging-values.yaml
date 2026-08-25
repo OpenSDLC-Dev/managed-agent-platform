@@ -116,7 +116,7 @@ image:
 # seven keys the chart's `map.secretsEnv` helper looks for:
 #
 #   controlplane-api-key   the management API key          (Secret Manager)
-#   database-url           the Cloud SQL DSN, sslmode=require (Secret Manager)
+#   database-url           the Cloud SQL DSN                (Secret Manager)
 #   model-providers.json   the model routes, a JSON array   (Secret Manager)
 #   blob-backend           gcs                              (literal)
 #   blob-bucket            the GCS bucket, from BLOB_BUCKET (literal)
@@ -140,6 +140,26 @@ minio:
   enabled: false
 openbao:
   enabled: false
+
+# The Cloud SQL Auth Proxy, as a native sidecar in all three deployments. What it
+# buys is that the DSN names the instance's CONNECTION NAME instead of its
+# address: a rebuilt Cloud SQL instance gets a new private IP, and the DSN that
+# hard-codes the old one is the third thing a rebuild moves — see "State, and
+# recovering it" in this directory's README. A connection name a rebuild does not
+# change.
+#
+# `instanceConnectionName` is an operator identifier, so the value here is the
+# same NEUTRAL placeholder the three service-account annotations below carry, and
+# the workflow overrides it with `--set-string` from the live instance. Unlike
+# those annotations it needs no read-back check: a dropped override leaves the
+# proxy dialing `your-project:…`, which it refuses at startup, so the pod never
+# becomes ready and `--atomic` rolls the release back. It fails loudly on its own.
+#
+# `privateIP` is left at the chart's default true, which is what an instance with
+# `ipv4_enabled = false` requires — the shape environment/ builds.
+cloudSQLProxy:
+  enabled: true
+  instanceConnectionName: your-project:us-central1:map-staging
 
 # Single sign-on (docs/plan/31_console-sso-rbac.md, #56). On GCP the identity
 # provider is Google's: IAP terminates the human login in front of the control
