@@ -61,6 +61,11 @@ model-providers.json
 /executor
 /gate
 /worker
+# A literal `%SystemDrive%` directory: a reviewer's sandboxed Windows shell left
+# the variable unexpanded and wrote its icon cache under it at the repo root,
+# and the same `git add -A` sweep then committed ~1 MB of .db files (plan 36
+# slice 3's review round). Anchored to the root like the binaries above.
+/%SystemDrive%/
 
 # Terraform working directories, state and variable files. The provider plugins,
 # the state and the tfvars are machine-local; .terraform.lock.hcl is NOT ignored

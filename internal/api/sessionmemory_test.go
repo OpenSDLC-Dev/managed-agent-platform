@@ -1,9 +1,13 @@
 package api_test
 
 import (
+	"bytes"
+	"context"
+	"encoding/json"
 	"net/http"
 	"strings"
 	"testing"
+	"time"
 )
 
 // The memory_store arm of sessions.resources (plan 36 slice 3, decisions 7–8;
@@ -46,8 +50,11 @@ func TestSessionMemoryStoreAttachment(t *testing.T) {
 	if len(res) != 2 {
 		t.Fatalf("resources = %v, want two", res)
 	}
-	// The response variant's exact key set: id-less, unlike file and repo elements.
-	wantFields(t, res[0], "type", "memory_store_id", "access", "description", "instructions", "mount_path", "name")
+	// The response variant's exact key set — no id, no timestamps, unlike file
+	// and repo elements — on both the fully specified and the bare element.
+	for _, el := range res {
+		wantExactFields(t, el, "type", "memory_store_id", "access", "description", "instructions", "mount_path", "name")
+	}
 	if res[0]["type"] != "memory_store" || res[0]["memory_store_id"] != store {
 		t.Errorf("element = %v, want the memory_store element for %s", res[0], store)
 	}
@@ -298,8 +305,8 @@ func TestSessionListFiltersByMemoryStore(t *testing.T) {
 }
 
 // /mnt/memory is reserved: a repository may not mount at it or below it
-// (decision 8); a sibling path stays legal. Validation runs before the
-// cipher check, so a cipher-less test server still answers the 400.
+// (decision 8); a sibling path stays legal. The path rule runs at parse time,
+// before the create touches the cipher or the database.
 func TestSessionRepoMountRefusedUnderMemoryRoot(t *testing.T) {
 	s := newTestServer(t)
 	agentID, envID := fixture(t, s)
@@ -322,5 +329,109 @@ func TestSessionRepoMountRefusedUnderMemoryRoot(t *testing.T) {
 	})
 	if got := resourcesOf(t, sess)[0]["mount_path"]; got != "/mnt/memoryx" {
 		t.Errorf("/mnt/memoryx: mount_path = %v", got)
+	}
+}
+
+// TestSessionMemoryAttachLocksTheStoreRow pins the window between reading a
+// store's state and inserting the session — the console-key test's twin for
+// the environment row (TestConsoleKeyIssueLocksTheEnvironmentRow). An
+// uncommitted archive or delete on the store must block the create at its FOR
+// SHARE read, so that when the write lands the create answers for the row as it
+// now is — the archived store's 400, the deleted store's "not found" 400 —
+// rather than attaching a store that is gone. Without the lock the read never
+// waits: the poll below times out, which is exactly how that mutant fails.
+func TestSessionMemoryAttachLocksTheStoreRow(t *testing.T) {
+	for _, tc := range []struct {
+		name, sql, want string
+	}{
+		{"concurrent archive", `UPDATE memory_stores SET archived_at = now() WHERE id = $1`, "is archived"},
+		{"concurrent delete", `DELETE FROM memory_stores WHERE id = $1`, "not found"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := newTestServer(t)
+			ctx := context.Background()
+			agentID, envID := fixture(t, s)
+			store := createMemoryStore(t, s, "raced")
+
+			tx, err := s.pool.Begin(ctx)
+			if err != nil {
+				t.Fatalf("begin the racing transaction: %v", err)
+			}
+			defer func() { _ = tx.Rollback(ctx) }()
+			if _, err := tx.Exec(ctx, tc.sql, store); err != nil {
+				t.Fatalf("racing write: %v", err)
+			}
+
+			// Plain net/http in the goroutine: tserver.do fatals on transport
+			// errors, and t.Fatalf must not run off the test goroutine.
+			type result struct {
+				status int
+				body   map[string]any
+				err    error
+			}
+			done := make(chan result, 1)
+			payload, _ := json.Marshal(map[string]any{"agent": agentID, "environment_id": envID,
+				"resources": []any{memoryElement(store, nil)}})
+			go func() {
+				req, err := http.NewRequest(http.MethodPost, s.url+"/v1/sessions", bytes.NewReader(payload))
+				if err != nil {
+					done <- result{err: err}
+					return
+				}
+				req.Header.Set("x-api-key", testKey)
+				req.Header.Set("content-type", "application/json")
+				res, err := http.DefaultClient.Do(req)
+				if err != nil {
+					done <- result{err: err}
+					return
+				}
+				defer res.Body.Close()
+				var body map[string]any
+				if err := json.NewDecoder(res.Body).Decode(&body); err != nil {
+					done <- result{err: err}
+					return
+				}
+				done <- result{status: res.StatusCode, body: body}
+			}()
+
+			// Commit only once the create is observably waiting on the held row
+			// lock (the poll's own query never matches: its wait_event_type is
+			// null, not Lock).
+			waitSQL := `SELECT EXISTS (
+				SELECT 1 FROM pg_stat_activity
+				WHERE datname = current_database()
+				  AND wait_event_type = 'Lock'
+				  AND query LIKE '%FROM memory_stores%FOR SHARE%')`
+			for deadline := time.Now().Add(10 * time.Second); ; {
+				select {
+				case r := <-done:
+					t.Fatalf("the create answered (%d, err %v) before the racing write committed", r.status, r.err)
+				default:
+				}
+				var waiting bool
+				if err := s.pool.QueryRow(ctx, waitSQL).Scan(&waiting); err != nil {
+					t.Fatalf("poll pg_stat_activity: %v", err)
+				}
+				if waiting {
+					break
+				}
+				if time.Now().After(deadline) {
+					t.Fatal("the create never blocked on the memory store row lock")
+				}
+				time.Sleep(10 * time.Millisecond)
+			}
+			if err := tx.Commit(ctx); err != nil {
+				t.Fatalf("commit the racing write: %v", err)
+			}
+
+			got := <-done
+			if got.err != nil {
+				t.Fatalf("create request: %v", got.err)
+			}
+			wantErr(t, got.status, got.body, http.StatusBadRequest, "invalid_request_error")
+			if msg, _ := got.body["error"].(map[string]any)["message"].(string); !strings.Contains(msg, tc.want) {
+				t.Errorf("message %q does not mention %q", msg, tc.want)
+			}
+		})
 	}
 }

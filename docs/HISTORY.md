@@ -82,6 +82,31 @@ flags for a single one.
 - `memory-stores delete` on the notes store, then `retrieve` → the element is kept as snapshotted,
   and `sessions list --memory-store-id` still returns both sessions.
 
+**Review round** (every finding verified against the source before acting):
+
+- *Claude, high* — the docs commit had swept in four Windows shell-cache binaries (~989 KB) under a
+  literal `%SystemDrive%/` directory that a reviewer's sandbox left unexpanded at the repo root —
+  #338's failure mode in a new spelling. The commit was rewritten without them and
+  `/%SystemDrive%/` joins `.gitignore`'s root-output block.
+- *Both reviewers* — the "no id, no timestamps" claim was asserted with `wantFields`, which
+  tolerates extra keys, so adding an `id` to the element would have stayed green. `wantExactFields`
+  now pins both elements' seven keys.
+- *Codex* — the store row's `FOR SHARE` had no regression test. `TestSessionMemoryAttachLocksTheStoreRow`
+  races an uncommitted archive and an uncommitted delete against the create, committing only once
+  `pg_stat_activity` shows the create waiting on the row lock (the console-key test's technique);
+  the mutant without the lock never waits, and the poll's timeout is how it fails.
+- *Codex* — the fragment said the element is stored "as the reference renders it", crediting the
+  reference with the `access` echo and the slug that are this platform's inferences; it now says
+  "in the reference's response shape" and names the readings as its own. A registry sentence
+  called the wrong two 400s parse-time (the duplicate and the ninth are; the collision is not).
+- *Claude, nits taken* — `resourceID` was left dead by `resourceKey` and is gone; a `sesrsc_` id
+  was minted for every element and discarded for memory ones, so it is minted only where used; a
+  test comment described a cipher-less server the fixture never was; the brain test now seeds a
+  repository beside the memory element, so a decoder tripped by the new shape fails the test
+  rather than falling silent. Not taken: a repository may still mount at `/mnt`, an ancestor of
+  the memory root — not new with this slice (file mounts under `/mnt/session/uploads` have the
+  same shape), and slice 4, where a mount actually lands, is where to decide it.
+
 **Gate**: `make verify` in WSL at d2b25c7 — 55 packages `ok`, nothing failed, total statement
 coverage **90.44%** — run before the review round and the verifier, in sequence, so no native
 suite shared the Docker daemon with it.

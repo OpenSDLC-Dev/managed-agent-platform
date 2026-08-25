@@ -655,7 +655,6 @@ func materializeResourceInputs(ctx context.Context, db querier, inputs []resourc
 	var repoIDs []string
 	memoryMounts := map[string]string{}
 	for _, in := range inputs {
-		id := domain.NewID(domain.PrefixResource).String()
 		switch in.kind {
 		case resourceKindMemory:
 			el, err := snapshotMemoryStore(ctx, db, in)
@@ -669,6 +668,7 @@ func materializeResourceInputs(ctx context.Context, db querier, inputs []resourc
 			memoryMounts[el.MountPath] = in.memoryStoreID
 			out = append(out, mustJSON(el))
 		case resourceKindRepo:
+			id := domain.NewID(domain.PrefixResource).String()
 			out = append(out, mustJSON(repoResourceJSON{
 				ID: id, CreatedAt: now, MountPath: in.mountPath,
 				Type: "github_repository", UpdatedAt: now,
@@ -679,6 +679,7 @@ func materializeResourceInputs(ctx context.Context, db querier, inputs []resourc
 			if err := fileMustExist(ctx, db, in.fileID); err != nil {
 				return nil, nil, err
 			}
+			id := domain.NewID(domain.PrefixResource).String()
 			out = append(out, mustJSON(fileResourceJSON{
 				ID: id, CreatedAt: now, FileID: in.fileID,
 				MountPath: in.mountPath, Type: "file", UpdatedAt: now,
@@ -1187,14 +1188,6 @@ func resourceKey(raw json.RawMessage) string {
 	if o.ID == "" && o.Type == "memory_store" {
 		return "memstore:" + o.MemoryStoreID
 	}
-	return o.ID
-}
-
-func resourceID(raw json.RawMessage) string {
-	var o struct {
-		ID string `json:"id"`
-	}
-	_ = json.Unmarshal(raw, &o)
 	return o.ID
 }
 
