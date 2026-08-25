@@ -441,17 +441,26 @@ func TestMemorySyncRefusals(t *testing.T) {
 	big := strings.Repeat("x", memsync.MaxContentBytes+1)
 	sb.files[memMount+"/big.md"] = big
 	sb.files[memMount+"/bad.md"] = "not utf-8 \xff"
+	// Valid UTF-8 that Postgres text refuses: unrefused, its push would fail
+	// the store's whole settlement, every run, until the sandbox died.
+	sb.files[memMount+"/nul.md"] = "a\x00b"
 	sb.files[memMount+"/bad\x01name"] = "control byte in the name"
 	sb.files[memMount+"/a"] = "occupies /a/b.md's ancestor"
+	sb.files[memMount+"/good.md"] = "fine"
 	h.step(t)
 
-	for _, path := range []string{"/big.md", "/bad.md", "/bad\x01name", "/a"} {
+	// The refusals are the files', not the store's: the good file beside
+	// them is pushed in the same run.
+	if got, _ := h.memoryContent(t, memStoreID, "/good.md"); got != "fine" {
+		t.Errorf("/good.md = %q in the store; the refusals held back the rest", got)
+	}
+	for _, path := range []string{"/big.md", "/bad.md", "/nul.md", "/bad\x01name", "/a"} {
 		if _, ok := h.memoryContent(t, memStoreID, path); ok {
 			t.Errorf("%s reached the store", path)
 		}
 	}
 	b := baselineOf(t, sb, memStoreID)
-	for path, content := range map[string]string{"/big.md": big, "/bad.md": "not utf-8 \xff", "/bad\x01name": "control byte in the name"} {
+	for path, content := range map[string]string{"/big.md": big, "/bad.md": "not utf-8 \xff", "/nul.md": "a\x00b", "/bad\x01name": "control byte in the name"} {
 		if b.Refused[path] != sha256hex([]byte(content)) {
 			t.Errorf("%s not remembered as refused: %+v", path, b.Refused)
 		}

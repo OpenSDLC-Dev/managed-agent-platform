@@ -531,9 +531,6 @@ func (e *Executor) settleStore(ctx context.Context, tx pgx.Tx, sid domain.ID, st
 					st.next.Synced[act.Path] = act.BaselineSHA
 				}
 				st.counts.conflict++
-			case memoryPushRefused:
-				st.next.Refused[act.Path] = act.LocalSHA
-				st.counts.refused++
 			case memoryPushOverCap:
 				// The store's state, not the file's: not remembered, so the
 				// next run retries it against whatever room deletions made.
@@ -549,7 +546,6 @@ func (e *Executor) settleStore(ctx context.Context, tx pgx.Tx, sid domain.ID, st
 const (
 	memoryPushOK       = "ok"
 	memoryPushConflict = "conflict"
-	memoryPushRefused  = "refused"
 	memoryPushOverCap  = "over the cap"
 )
 

@@ -169,7 +169,11 @@ too; and deletions settled in path order behind the creates that needed their ro
 cap or their path (`/a/b` gone, `/a` written) — deletions settle first. A third, that an
 empty directory holding only an altered marker is re-materialized, is refuted: nothing
 unvouched-for can be pushed from an empty directory, and landing the store there is the wipe
-guard's own rebuild.
+guard's own rebuild. The Claude reviewer's thread on the same push found one more, fixed: a
+NUL byte in an agent-written file is valid UTF-8 that Postgres text refuses, so its push
+failed the store's whole savepoint on every later run — `ValidateContent` refuses U+0000
+(inert on the API lane, whose body check already does), so the file is remembered as refused
+by digest and the rest of the store syncs; and the push outcome nothing returned is gone.
 
 Refuted with evidence: a read-only mount "leaving bash modifications visible" — decision 12's
 pull-only mode stops pushes and nothing claims local edits are reverted; the file-tool guard

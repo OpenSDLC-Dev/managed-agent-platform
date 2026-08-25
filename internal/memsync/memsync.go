@@ -106,15 +106,22 @@ func ValidatePath(path string) error {
 }
 
 // ValidateContent holds the other half of decision 4: at most 100 kB of valid
-// UTF-8 text. The UTF-8 half is inert on the API lane — a JSON string decodes
-// to valid UTF-8 by construction — and load-bearing on the sync lane, where
-// the bytes come from a file in a sandbox.
+// UTF-8 text — and text Postgres can hold, which valid UTF-8 does not settle:
+// U+0000 is a legal code point that a text column refuses (SQLSTATE 22021).
+// Both of those halves are inert on the API lane — a JSON string decodes to
+// valid UTF-8 by construction, and the API refuses a NUL anywhere in a body
+// before any field binds — and load-bearing on the sync lane, where the
+// bytes come from a file in a sandbox: unrefused, a NUL in one file would
+// fail its store's whole settlement on every run until the sandbox died.
 func ValidateContent(content string) error {
 	if len(content) > MaxContentBytes {
 		return fmt.Errorf("content cannot exceed %d bytes", MaxContentBytes)
 	}
 	if !utf8.ValidString(content) {
 		return errors.New("content must be valid UTF-8")
+	}
+	if strings.ContainsRune(content, 0) {
+		return errors.New("content must not contain U+0000")
 	}
 	return nil
 }
