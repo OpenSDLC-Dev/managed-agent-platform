@@ -297,6 +297,25 @@ initContainers:
       {{- if .Values.cloudSQLProxy.privateIP }}
       - "--private-ip"
       {{- end }}
+      {{- /* The only thing that makes an unreachable instance fail the deploy.
+             Without it the proxy reports itself started as soon as its listener
+             is up — measured, not assumed: the same image against an instance it
+             cannot even authenticate for still logs "ready for new connections"
+             and keeps running, while the same run with this flag exits 1. With
+             it, `Serve` dials first and returns the error, the container exits
+             non-zero, the startupProbe never passes, and `--atomic` rolls the
+             release back.
+
+             Off by default because it trades one failure for another: a
+             transient Admin API blip at pod start would fail a deploy that had
+             nothing wrong with it. `restartPolicy: Always` softens that — the
+             kubelet restarts the sidecar, so a blip that clears inside the
+             `helm upgrade --wait` timeout still succeeds and only a PERSISTENT
+             failure rolls back — but softening is not removing, and a chart
+             default should not decide that trade for every deployment. #493. */}}
+      {{- if .Values.cloudSQLProxy.connectionTest }}
+      - "--run-connection-test"
+      {{- end }}
       {{- /* The health endpoints are what make the startupProbe below possible;
              they must bind 0.0.0.0 because the kubelet probes the pod's address,
              not its loopback. They serve `/startup`, `/liveness` and

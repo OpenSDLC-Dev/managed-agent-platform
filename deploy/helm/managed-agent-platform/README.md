@@ -176,11 +176,21 @@ project. It refuses an address such as `10.1.2.3` or `db.internal:5432`, and a n
 empty part; it does not look inside the segments — deliberately, because encoding Google's
 own naming rules in a template would refuse a valid name the day Google widens one.
 
-**A well-formed name that names nothing therefore renders, and nothing downstream catches
-it.** The proxy dials only when `--run-connection-test` is passed, which this chart does not
-pass, so it starts its listeners and reports itself up; none of its three health endpoints
-dials either. The pod goes Ready and the release succeeds. Until the application actually
-issues a query, a wrong instance is indistinguishable from a right one — see #493.
+**A well-formed name that names nothing therefore renders, and by default nothing downstream
+catches it.** The proxy starts its listeners and reports itself up without dialing, and none
+of its three health endpoints dials either — `/readiness` included, whatever Google's example
+manifest says about it. The pod goes Ready and the release succeeds. Until the application
+issues its first query, a wrong instance is indistinguishable from a right one.
+
+`cloudSQLProxy.connectionTest=true` closes that: it passes `--run-connection-test`, so the
+proxy dials before reporting up, an unreachable instance exits the container non-zero, and
+`helm upgrade --wait --atomic` rolls the release back instead of completing it. It is off by
+default because it trades that failure for another — a transient Admin API blip at pod start
+becomes a failed deploy. `restartPolicy: Always` softens the trade, since the kubelet retries
+the sidecar and a blip that clears inside the `--wait` timeout still succeeds, but a chart
+default should not make that choice for every deployment. Turn it on wherever a wrong
+instance is the likelier accident than a flaky control plane — which is most pipelines, since
+they substitute the connection name in (#493).
 
 ## Credential cipher (OpenBao)
 

@@ -573,6 +573,12 @@ jobs:
             # onto the pod network without changing anything else visible here.
             echo "$sidecar" | grep -q '"--address' \
               && { echo "$t: an --address flag would take the socket off loopback" >&2; exit 1; }
+            # The connection test stays OFF unless asked for. Defaulting it on
+            # would turn a transient Admin API blip at pod start into a
+            # rolled-back deploy for every chart user, so the default is part of
+            # the contract and not an accident to be discovered in a release.
+            echo "$sidecar" | grep -qF '"--run-connection-test"' \
+              && { echo "$t: --run-connection-test is present without connectionTest=true" >&2; exit 1; }
             # --http-port is deliberately absent from this list: the
             # port-agreement assertion below covers it, and pinning the literal
             # here would fail a coherent move of the flag and both probes to
@@ -593,6 +599,18 @@ jobs:
             --set cloudSQLProxy.privateIP=false --show-only templates/brain-deployment.yaml)"
           echo "$noPrivate" | grep -qF '"--private-ip"' \
             && { echo "privateIP=false left --private-ip in the args" >&2; exit 1; }
+          # ...and connectionTest has to reach ALL THREE, for the same reason the
+          # sidecar itself does: they share one `database-url`, so a proxy proven
+          # to reach the instance in one pod says nothing about the other two.
+          # Without this flag the proxy reports itself up before dialing, which
+          # is what makes a wrong instance connection name deploy green (#493).
+          for t in controlplane brain executor; do
+            withTest="$(helm template t "$CHART" -f "$VALUES" "${on[@]}" \
+              --set cloudSQLProxy.connectionTest=true --show-only "templates/$t-deployment.yaml")"
+            echo "$withTest" | grep -qF '"--run-connection-test"' \
+              || { echo "$t: connectionTest=true did not add --run-connection-test" >&2
+                   echo "$withTest" >&2; exit 1; }
+          done
           # The four render-time refusals. Each is asserted by its own MESSAGE,
           # not merely by a non-zero exit: several of these values would be
           # refused by more than one guard, so an exit code cannot tell which
@@ -618,9 +636,11 @@ jobs:
           # what a bare "at least three colon-separated parts" test accepted.
           # This is a SHAPE check and these rows are its boundary: a
           # well-formed-but-wrong name (`127.0.0.1:5432:x` is three non-empty
-          # parts) is the proxy's to reject at startup, and encoding Google's
-          # own rules for the three parts here would refuse a valid name the day
-          # Google widens one.
+          # parts) passes it and nothing downstream catches it either, because
+          # the proxy reports itself started without dialing — that is what
+          # cloudSQLProxy.connectionTest exists for, asserted above. Encoding
+          # Google's own rules for the three parts here would refuse a valid
+          # name the day Google widens one.
           for bad in 10.1.2.3 127.0.0.1:5432 'a::b' 'proj:us-central1:' '2001:db8::1' 'a:b:c:d:e'; do
             refuses 'must be an instance connection name' \
               "${noDB[@]}" --set cloudSQLProxy.enabled=true \

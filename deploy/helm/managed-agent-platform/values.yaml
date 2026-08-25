@@ -325,11 +325,28 @@ cloudSQLProxy:
   # What the render checks is the SHAPE and only the shape: three or four
   # non-empty colon-separated segments (four for a legacy domain-scoped
   # project, DOMAIN:PROJECT:REGION:INSTANCE). So an address and an empty
-  # segment are refused, and a well-formed name that names nothing is not —
-  # that one the proxy refuses at startup, which is the right place for it:
-  # encoding Google's own naming rules here would refuse a valid name the day
-  # Google widens one.
+  # segment are refused, and encoding Google's own naming rules here would
+  # refuse a valid name the day Google widens one.
+  #
+  # A well-formed name that names nothing is therefore NOT refused, and nothing
+  # downstream refuses it either — the proxy reports itself started without
+  # dialing. Set `connectionTest` below to close that.
   instanceConnectionName: ""
+  # -- Pass `--run-connection-test`, which makes the proxy dial the instance
+  # before reporting itself up, so an instance it cannot reach becomes a
+  # non-zero exit and a rolled-back `helm upgrade --atomic` instead of a pod
+  # that goes ready and fails on its first query.
+  #
+  # Off by default because it trades one failure mode for another: a transient
+  # Admin API blip at pod start would fail a deploy that had nothing wrong with
+  # it. `restartPolicy: Always` softens it — a blip that clears inside the
+  # `--wait` timeout is retried and only a persistent failure rolls back — but
+  # a chart default should not make that trade for every deployment.
+  #
+  # Turn it on where a wrong instance is the likelier accident than a flaky
+  # control plane, which is most of the time for a deployment whose connection
+  # name is substituted in by a pipeline (#493).
+  connectionTest: false
   # -- Pass `--private-ip`, which is what an instance with `ipv4_enabled = false`
   # requires — the shape deploy/gcp/ builds. Turn it off for an instance reached
   # over its public address.

@@ -214,10 +214,16 @@ project. That refuses an address such as `10.1.2.3` or `db.internal:5432`, and a
 an empty part. It does not look inside the segments — deliberately, because encoding
 Google's own naming rules here would refuse a valid name the day Google widens one.
 
-So a well-formed name that names nothing renders, and **nothing downstream catches it**: the
-proxy dials only under `--run-connection-test`, which the chart does not pass, so the pod
-goes Ready and the release succeeds on a wrong instance. Check the value; do not expect a
-failed deploy to check it for you (#493).
+So a well-formed name that names nothing renders, and by default **nothing downstream catches
+it**: the proxy reports itself up without dialing, so the pod goes Ready and the release
+succeeds on a wrong instance.
+
+Set `cloudSQLProxy.connectionTest=true` to make the proxy dial first, which turns an
+unreachable instance into a rolled-back deploy rather than a healthy-looking one. It is off
+by default because it also fails a deploy on a transient Admin API blip; the sidecar's
+`restartPolicy: Always` retries such a blip inside the `--wait` window, so in practice only a
+persistent failure rolls back. Prefer it on wherever the connection name is substituted in by
+a pipeline (#493).
 
 If you must use a shared proxy Service as an interim step, treat the
 database credential as exposed to anything that can watch pod-network traffic, and say so in
