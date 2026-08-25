@@ -49,6 +49,49 @@ new directory and in-repo citations re-pointed in the moving PR (plan
 
 ---
 
+## Memory stores end to end — real `ant` CLI, real model, a `cloud` sandbox (plan 36 slice 4, run 2026-08-25) — ✅ passed
+
+The plan's "End-to-end acceptance" names the cloud half slice 4 records: a store with a
+passphrase at `/facts/secret.md`, a session attached `read_write` with `instructions`, a
+`user.message` asking for the passphrase and for today's date at `/log/today.md`, the store and
+its versions afterwards, a second session attached `read_only` whose write is refused, and the
+filter listing both. Recorded with `ant` v1.26.1 against the branch's own `controlplane`,
+`brain` and `executor` at b3e2f02 (#PRNUM) — three binaries in WSL on a throwaway Postgres,
+Docker sandboxes on `debian:stable-slim`, the model from `.env` (`MiniMax-M3` over the
+Anthropic protocol). One CLI fact the first attempt taught: an agent created without
+`--tool '{type: agent_toolset_20260401}'` has no tools, and this model then prints its
+tool calls as prose in its own markup — the transcript kept is the second, tool-bearing run.
+
+- `memory-stores create` → `memories create --path /facts/secret.md` → `sessions create
+  --resource '{type: memory_store, …, access: read_write, instructions: "Read /facts before
+  answering. Record what you learn under /log."}'` → the element renders with the seven keys.
+- `sessions:events send` with the ask; the session is `idle` 25 s later. Its transcript:
+  `bash ls /mnt/memory/project-notes/ && date` → `facts`; `read …/facts` → the tool's own
+  "is not a regular file"; `bash ls -la` twice; `read /mnt/memory/project-notes/facts/secret.md`
+  → `The secret passphrase is orchid-lantern-42.`; `write …/log/today.md` and `write
+  …/log/index.md` → "wrote 89 bytes" / "wrote 131 bytes"; the final `agent.message` is exactly
+  `orchid-lantern-42`.
+- `memories list --view full` → three memories: `/facts/secret.md` unchanged, `/log/index.md` and
+  `/log/today.md` with the bytes the agent wrote (the date it read, `Tuesday, August 25, 2026`).
+  `memory-versions list --session-id <sesn>` → the two `created` versions, each
+  `created_by: {type: session_actor, session_id: <sesn>}` — the run-end sync's push, attributed.
+- The second session, `access: read_only`: `read …/log/today.md` returns the first session's
+  content; its `write …/log/today.md` → `is_error: true`, "write: /mnt/memory/project-notes/log/today.md
+  is inside read-only memory store directory /mnt/memory/project-notes", and the store's
+  `memories list` afterwards is unchanged. `sessions list --memory-store-id` → both sessions.
+
+**Evals** (`RUN_EVALS=1`, the same model, in WSL at b3e2f02): `memory-recall` PASS (16.5 s, two
+tool calls — the read of the mounted passphrase and the answer) and `memory-write` PASS (4.0 s,
+one tool call — the write the sync then pushed, read back through the memories route by the
+`MemorySynced` grader); the pinned set is nineteen.
+
+**Gate**: `make verify` in WSL at b3e2f02 — 54 packages `ok`, one `FAIL`: `internal/mcp`'s
+`TestListToolsRefusesAResponseTooLargeToRead`, #380's open WSL2 flake ("socket-buffer luck",
+~40% of runs), a package this branch does not touch — three reruns of the package went
+FAIL/FAIL/ok with #380's own message. `make cover-gate` over the run's profile: total statement
+coverage **90.37%**. The verifier, the reviewers and the gate took their turns in sequence, and
+the acceptance stack ran only after the gate had finished with the Docker daemon.
+
 ## Attachment and filter — real `ant` CLI against `resources[]` and the sessions filter (plan 36 slice 3, run 2026-08-25) — ✅ passed
 
 The plan's slice-3 verification row asks for `ant beta:sessions create --resource '{type:
