@@ -382,14 +382,34 @@ func (w *Worker) runItem(ctx context.Context, work *sdk.BetaSelfHostedWork, prog
 		slog.InfoContext(ctx, "worker: session not live, draining work item", "session", sessionID, "work", work.ID)
 		return outcomeDrain, nil
 	}
+	// The item's sessions token, when the control plane issued one — a
+	// session with a memory store — rides the memory calls; the environment
+	// key still authorizes everything else, the lane it was issued for. A
+	// payload that yields no token is logged (never the payload itself) and
+	// the run goes on without one, which for a session with stores is the
+	// drain below.
+	token := sessionsTokenFromSecret(work.Secret)
+	if work.Secret != "" && token == "" {
+		slog.WarnContext(ctx, "worker: the work item carried a secret payload but no sessions token could be read from it",
+			"session", sessionID, "work", work.ID)
+	}
 	if err := RunSessionTools(ctx, w.client, w.provider, sessionID, ToolExecConfig{
-		Image:       w.cfg.Image,
-		Workdir:     w.cfg.Workdir,
-		Networking:  w.cfg.Networking,
-		Hardening:   w.cfg.Hardening,
-		Coordinator: coordinator,
-		Progress:    prog.report,
-	}); err != nil {
+		Image:         w.cfg.Image,
+		Workdir:       w.cfg.Workdir,
+		Networking:    w.cfg.Networking,
+		Hardening:     w.cfg.Hardening,
+		Coordinator:   coordinator,
+		Progress:      prog.report,
+		SessionsToken: token,
+	}); errors.Is(err, ErrSessionMemoryNoToken) {
+		// The reference worker's answer to the same item: failed, then
+		// force-stopped. A reclaim would hand it out without a token again —
+		// the poll mints one only for a session it knows has stores — so the
+		// item is drained rather than left to loop, and the fault recorded.
+		slog.ErrorContext(ctx, "worker: session attaches a memory store but the item carried no sessions token; draining the item",
+			"session", sessionID, "work", work.ID)
+		return outcomeDrain, err
+	} else if err != nil {
 		// A tool backend-faulted (or the heartbeat cancelled the run): some tools
 		// may be unanswered. Leave the item live for reclaim, matching the
 		// executor's partial-fault semantics — do not force-stop it terminally.

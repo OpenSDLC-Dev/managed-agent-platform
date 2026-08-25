@@ -136,15 +136,16 @@ func TestMemoryBlockUnresolvedWhenTheLookupFails(t *testing.T) {
 	}
 }
 
-// TestMemoryBlockSkippedOnSelfHosted: nothing materializes a store on
-// self_hosted until slice 6, so the block is absent even though the elements
-// are present — the repositories block's own rule.
-func TestMemoryBlockSkippedOnSelfHosted(t *testing.T) {
+// TestMemoryBlockRenderedOnSelfHosted: the BYOC worker lands a self_hosted
+// session's stores (plan 36 slice 6), so the block renders there as on
+// cloud — the one resources block that does not follow the repositories
+// block's cloud-only rule.
+func TestMemoryBlockRenderedOnSelfHosted(t *testing.T) {
 	h := newHarnessEnv(t, "self_hosted", [][]provider.Chunk{{textChunk(0, "ok"), done("end_turn", 1)}}, nil)
 	sys := seedMemory(t, h)
-	for _, leaked := range []string{"Memory stores", "/mnt/memory", "consult before answering"} {
-		if strings.Contains(sys, leaked) {
-			t.Errorf("a self_hosted session's prompt names a memory store (%q):\n%s", leaked, sys)
+	for _, want := range []string{"Memory stores.", "/mnt/memory/notes — Notes (read_write)", "consult before answering"} {
+		if !strings.Contains(sys, want) {
+			t.Errorf("a self_hosted session's prompt lacks %q:\n%s", want, sys)
 		}
 	}
 }

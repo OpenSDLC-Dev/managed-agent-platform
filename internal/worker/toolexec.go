@@ -46,6 +46,11 @@ type ToolExecConfig struct {
 	// production leaves it 0, because the cadence is not a deployment choice
 	// the way the sandbox shape above is.
 	AnsweredBeat time.Duration
+	// SessionsToken is the per-item credential the work item's secret carried
+	// (plan 36 decision 15), which the memory routes admit in place of the
+	// environment key; empty for an item that carried none. A session that
+	// attaches a memory store cannot run without it (ErrSessionMemoryNoToken).
+	SessionsToken string
 }
 
 // toolUse is one unanswered agent.tool_use the worker must run: the tool-use
@@ -117,8 +122,20 @@ func RunSessionTools(ctx context.Context, client sdk.Client, provider sandbox.Pr
 	if len(uses) == 0 {
 		return nil
 	}
-	// The scan pages over the wire, and provisioning below can pull a cold
-	// image: two steps the budget must clear one at a time, not together.
+	// The session's memory stores, read before the sandbox exists: an item
+	// that cannot mount them fails here rather than after a container was
+	// paid for — the reference worker's own order.
+	report()
+	memories, err := memoryRefs(ctx, client, sessionID)
+	if err != nil {
+		return err
+	}
+	if len(memories) > 0 && cfg.SessionsToken == "" {
+		return ErrSessionMemoryNoToken
+	}
+	// The memory read above and provisioning below can each cost a round trip
+	// (the read a wire GET, the provision a cold image): two steps the budget
+	// must clear one at a time, not together.
 	report()
 	sb, err := provider.Provision(ctx, sandbox.Spec{
 		SessionID:  domain.ID(sessionID),
@@ -139,7 +156,19 @@ func RunSessionTools(ctx context.Context, client sdk.Client, provider sandbox.Pr
 		return err
 	}
 	report()
+	// The stores land after the files, the executor's order. A sandbox that
+	// already held a mount is reconciled before the tools read it, so a
+	// store's change reaches this session at its next run rather than the
+	// one after (plan 36 scope decision 7), and a run that faulted before
+	// its sync pushes what it wrote at the next. materialize and sync report
+	// per store and once at the end, so the block bounds itself; a storeless
+	// session's nil block is a no-op the files boundary above already covers.
+	mem := newMemoryStores(client, cfg.SessionsToken, sessionID, sb, memories)
+	if mem.materialize(ctx, report) > 0 {
+		mem.sync(ctx, report)
+	}
 	runner := toolset.Runner{Sandbox: sb, Session: domain.ID(sessionID), Workdir: cfg.Workdir}
+	runner.MemoryRoots, runner.ReadOnlyRoots = mem.roots()
 	for {
 		for _, u := range uses {
 			// The executor's pre-run check, over the wire. A call answered while
@@ -201,7 +230,7 @@ func RunSessionTools(ctx context.Context, client sdk.Client, provider sandbox.Pr
 		// before this set's last result lands, so one pass is the whole item and
 		// re-scanning would only cost a round trip.
 		if !cfg.Coordinator {
-			return nil
+			break
 		}
 		// A coordinator's threads run concurrently, so a sibling may have
 		// committed calls while the pass above ran — and its enqueue was a no-op
@@ -218,12 +247,18 @@ func RunSessionTools(ctx context.Context, client sdk.Client, provider sandbox.Pr
 			return err
 		}
 		if len(uses) == 0 {
-			return nil
+			break
 		}
 		// The scan's own boundary, so its last page does not share a silent
 		// interval with the first tool run of the next pass (#383).
 		report()
 	}
+	// The run's end reconciles the stores with what the tools did to their
+	// directories (decision 11) — after the last pass, and only on a run
+	// that did not fault: a fault returns above, and the next run's held-
+	// mount sync carries what this one wrote.
+	mem.sync(ctx, report)
+	return nil
 }
 
 // toolScanPageSize is how many events one page of the scan below requests. A

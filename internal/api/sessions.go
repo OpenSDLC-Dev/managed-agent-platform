@@ -590,16 +590,6 @@ func (s *server) createSession(r *http.Request) (any, error) {
 	if envArchivedAt != nil {
 		return nil, errInvalid("environment %s is archived", envID)
 	}
-	if envKind == "self_hosted" && resourceInputsHaveMemory(resourceInputs) {
-		// Plan 36 scope decision 2: the reference worker fails a work item
-		// whose session has a store but carries no sessions token (v1.66.0
-		// worker.go:516-528), so accepting the attachment here — the
-		// github_repository precedent, #322 — would break every
-		// `ant beta:worker poll` the moment it polled. Refused until slice 6
-		// issues the token; tracked by #52.
-		recordResourceMutation(ctx, resourceOutcomeInvalid, 1)
-		return nil, errInvalid("memory_store resources are not supported on self_hosted environments yet")
-	}
 	if err := validateAttachedVaults(ctx, tx, vaultIDs); err != nil {
 		return nil, err
 	}

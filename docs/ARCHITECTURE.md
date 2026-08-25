@@ -96,11 +96,12 @@ platform's own executor, just deployed elsewhere.
    skills into the freshly provisioned sandbox (`{workdir}/skills/<name>/`, versions
    resolved at use time, per-skill failure tolerated) along with the session's mounted
    resources (below), runs the tool, and posts the result event (`agent.tool_result`
-   platform-managed, `user.tool_result` self-hosted). On the platform-managed side the
-   run's end also reconciles the session's memory stores with their directories
-   (below) — the sandbox read before the transaction that commits the results, the
-   settlement inside it, the sandbox written after; a run that faulted leaves that to
-   the next run or the reaper.
+   platform-managed, `user.tool_result` self-hosted). Either side also reconciles the
+   session's memory stores with their directories at the run's end (below) — the
+   platform executor against the store's rows (the sandbox read before the transaction
+   that commits the results, the settlement inside it, the sandbox written after), the
+   BYOC worker against the same routes over the wire; a run that faulted leaves that to
+   the next run (or, on the platform side, the reaper).
 5. The commit that appends the result also enqueues the next `model_turn` — only once
    every tool use in the turn is answered. A brain claims it (brains wake by polling the
    queue; Postgres LISTEN/NOTIFY serves the SSE fan-out, not the brain), replays, and
@@ -182,10 +183,14 @@ is there. A resource that has gone missing costs its own mount and a log line, n
 turn.
 
 **Memory stores** (plan 36) ride the same array as an id-less element that snapshots
-the store's name and its `/mnt/memory/<slug>` mount. On a `cloud` session the executor
-lands the store's memories there before the tools run — `0666` files beside a marker
-naming the store and a baseline recording what the directory and the store agreed on —
-and the brain renders a "Memory stores" block after the repositories block. The
+the store's name and its `/mnt/memory/<slug>` mount. The sandbox lands the store's
+memories there before the tools run — `0666` files beside a marker naming the store and
+a baseline recording what the directory and the store agreed on — and the brain renders
+a "Memory stores" block after the repositories block. A `cloud` session's executor reads
+and writes the store's rows directly; a `self_hosted` session's BYOC worker does the
+same over the wire, through the five memory routes its per-item sessions token admits
+(decision 15), the store landed from a `view=full` listing and reconciled with per-memory
+`GET`s and the routes' own preconditions. The
 directory is reconciled with the store when a tool run ends (a faulted run leaves it to
 the next run or the reaper), in three phases the shared
 rules in `internal/memsync` decide: the tree is hashed in the sandbox, the plan settles
@@ -198,8 +203,11 @@ directory whose marker was altered, is pulled from and never pushed to, and the 
 tools refuse to write in a `read_only` or archived store (the marker they never see);
 the reaper syncs a sandbox before every tier's action but the deleted tier's, and a run
 whose sandbox already held a mount syncs it before its tools run as well, so a store's
-change reaches a session at its next run rather than the one after. A
-`self_hosted` session cannot attach a store until the plan's slice 6.
+change reaches a session at its next run rather than the one after. The BYOC worker's
+sync has no held sandbox to reconcile at the reaper's tiers — a `self_hosted` workdir is
+removed at the item's end — so it syncs a mount it finds present before the tools and
+once more when the run ends, and fails the item (`ErrSessionMemoryNoToken`) rather than
+run a store session with no token to mount from.
 
 **Sandboxes have a lifecycle** (plan 24). Provision is idempotent per session — it
 returns, heals, or re-creates — and the **reaper in the executor is the single owner of
@@ -499,9 +507,9 @@ transaction commits, so a rolled-back transition counts nothing), time-to-first-
 measured from the work claim in `internal/brain/telemetry.go`, tool-run duration in
 `internal/toolset/telemetry.go`, skills-materialization outcomes/duration in
 `internal/executor/telemetry.go` and `internal/worker/telemetry.go` (same instrument
-names, two scopes), and the executor's memory-store instruments beside them
+names, two scopes), and the memory-store instruments beside them on both meters
 (`memory.materialized`, `memory.sync.actions` by pulled/pushed/deleted/conflict/refused,
-and the two durations). Queue `depth`/`pending`/`workers_polling` are OTLP
+and the two durations — the executor's since slice 4, the worker's since slice 6). Queue `depth`/`pending`/`workers_polling` are OTLP
 observable gauges (`internal/queue/metrics.go`) sampling the same work-stats view the API
 serves — registered once by the control plane, reported per self_hosted environment. A
 configured OTLP endpoint bridges

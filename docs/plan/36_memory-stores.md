@@ -643,12 +643,16 @@ the machine lane, a `principal_` id on the identity lane. Next migration `0028`
 16. **The BYOC worker runs the same sync over the wire** (slice 6). `internal/worker`
     decodes the item's `secret`, and `SetupMemory` — the twin of decision 10 — lists each
     store with `view=full limit=20` through the typed SDK and writes files, marker and
-    baseline into the sandbox it provisioned; after each tool call it runs the decision
+    baseline into the sandbox it provisioned; at the run's boundary it runs the decision
     table with the platform's `memsync` package (decision 17) against a `view=basic
     limit=100` listing plus per-memory `GET view=full`, uploading with `precondition =
     the listed sha`, deleting with `expected_content_sha256 = baseline sha`, and treating
     409 as "the local edit loses" and 404 on update as "re-create" — the reference's
-    status handling, which the platform's routes produce. A missing token with stores
+    status handling, which the platform's routes produce. *As landed: the cadence is the
+    run boundary, the executor's (decision 11) — before the tools when the sandbox already
+    held a mount, and once when the run ends — not the reference's inside-the-loop 15 s;
+    an archive, which the token cannot read from the store's row, is learned from the
+    store's first refusal (a 400 `is archived`) and turns the rest of that sync pull-only.* A missing token with stores
     attached fails the item the way the reference does (`ErrSessionMemoryNoToken`'s
     text), so the two workers agree on what a session without memory looks like. The
     `self_hosted` 400 (decision 7) is lifted, the brain's gate (decision 9) removed, and

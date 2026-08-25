@@ -55,6 +55,11 @@ type fakeSandbox struct {
 
 func (f *fakeSandbox) ID() string { return "fake" }
 func (f *fakeSandbox) Exec(_ context.Context, req sandbox.ExecRequest) (sandbox.ExecResult, error) {
+	// The memory sync's listing and deletions, answered from the in-memory
+	// tree (memory_test.go), so the three-phase sync runs without a shell.
+	if res, ok := f.memoryExec(req.Command); ok {
+		return res, nil
+	}
 	// Reflect real file presence for SetupFiles's mountsPresent probe
 	// (`test -e '<p>' && … && true`), so a deleted mount reports absent and forces
 	// re-materialization. The exact shape match keeps ordinary tool commands on
@@ -807,17 +812,20 @@ func TestRunSessionToolsReportsProgressPerItem(t *testing.T) {
 		ToolExecConfig{Progress: func() { reports++ }}); err != nil {
 		t.Fatalf("RunSessionTools: %v", err)
 	}
-	// The boundary before the scan (whatever the caller did last ends there), the
-	// one event the scan walks and the scan's own boundary, the provision,
+	// The boundary before the scan (whatever the caller did last ends there),
+	// the one event the scan walks and the scan's own boundary, the boundary
+	// that brackets the memory-references read (a wire GET, plan 36 slice 6),
+	// the provision,
 	// the two references resolved plus the version GET the concrete one goes on to
 	// make (the dangling reference never reaches it, its listing failing first),
 	// the sentinel decision, the one skill written,
 	// the skills pass boundary before its sentinel write, the caller's skills and
 	// files boundaries, and — for the one tool — its pre-run answered check, its
 	// run and its posted result, which are three steps and not one (#383). This
-	// session mounts no files, so that pass returns before any boundary of its own.
-	if reports != 15 {
-		t.Errorf("progress reports = %d, want 15", reports)
+	// session mounts no files and no memory stores, so neither pass returns a
+	// boundary of its own.
+	if reports != 16 {
+		t.Errorf("progress reports = %d, want 16", reports)
 	}
 
 	// A second pass over an unchanged set takes the sentinel skip, which returns
@@ -831,14 +839,14 @@ func TestRunSessionToolsReportsProgressPerItem(t *testing.T) {
 		t.Fatalf("second run: %v", err)
 	}
 	// The boundary before the scan, the two events this scan walks before it can
-	// bound the set, its own boundary,
+	// bound the set, its own boundary, the memory-references read boundary,
 	// the provision, the one reference resolved and its version GET, the one
 	// sentinel read, the
 	// caller's skills and files boundaries, and the tool's answered check, run and
 	// posted result. The skip returns before the pass boundary the first run
 	// reached, which is what makes this count one lower than a rewriting pass.
-	if reports != 13 {
-		t.Errorf("unchanged-set reports = %d, want 13", reports)
+	if reports != 14 {
+		t.Errorf("unchanged-set reports = %d, want 14", reports)
 	}
 }
 
