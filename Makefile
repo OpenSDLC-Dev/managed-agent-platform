@@ -71,11 +71,14 @@ fmt-check:
 # 613 s, the api just under at 591 s — and a package that dies at the ceiling
 # reports `panic: test timed out` with a sub-second test "running", which reads
 # like a hang rather than the budget it is. The default is sized for unit tests;
-# these provision containers and migrate a database per test. The per-test
+# these run a fixture container per binary and migrate a fresh database per
+# test, which is where the minutes go. The per-test
 # guards are the real limits — this is only the outer backstop, and a suite that
 # genuinely wedges still fails, three times slower to say so. Raising it costs
 # nothing when tests pass, and a timed-out binary skips the `defer` that removes
-# its pgtest fixture, so the ceiling also fed the next run's contention.
+# its pgtest fixture, so the ceiling also fed the next run's contention. This
+# buys room rather than fixing the cause: the per-test database creation behind
+# the growth, and reaping a fixture whose owner died, are #499.
 test:
 	@set -euo pipefail; \
 	coverpkg="$$(go list ./internal/... | grep -vE '/(pgtest|dockertest|sandboxtest|modeltest|blobtest|gcstest|providertest|secretstest|gcpkmstest|webtooltest|identitytest|mcptest)$$' | paste -sd, -)"; \
