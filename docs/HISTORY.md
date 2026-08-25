@@ -49,7 +49,7 @@ new directory and in-repo citations re-pointed in the moving PR (plan
 
 ---
 
-## Memory stores (plan 36, #52) — archived 2026-08-26, all eight slices delivered (#482, #484, #485, #487, #489, #491, #494)
+## Memory stores (plan 36, #52) — archived 2026-08-26, all eight slices delivered (#482, #484, #485, #487, #489, #491, #494, #496)
 
 Workspace-scoped collections of text documents, attached to a session through `resources[]`,
 mounted at `/mnt/memory/<slug>`, read and written with the ordinary file tools, every write an

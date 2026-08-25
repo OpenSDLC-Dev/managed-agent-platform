@@ -751,7 +751,11 @@ behavior**; the last slice archives the plan and closes #52.
    and the worker's run-end sync, the `self_hosted` 400 lifted, the brain gate removed,
    the `ErrSessionMemoryNoToken` twin, an integration test against the in-process API
    server, and the acceptance transcript of the real `ant beta:worker poll` serving a
-   session with a store. This slice meets #52's `self_hosted` acceptance.
+   session with a store. This slice lands #52's `self_hosted` sync and mount in code.
+   *As landed: the live `ant beta:worker poll` transcript was deferred at close-out and
+   tracked as #495; the wire path is covered instead by the lease-loop integration test,
+   the `cloud` real-model acceptance, and two verifier passes — see the acceptance
+   section's as-landed note below and docs/HISTORY.md.*
 7. **Close-out**: HISTORY acceptance + review-hardening records and the progress summary,
    ARCHITECTURE "Execution flow"/"Wire-compatibility model"/package rows and a
    security-invariant paragraph (what the sessions token can reach, and that `read_only`
@@ -970,3 +974,14 @@ environment, served by the real `ant beta:worker poll --environment-key …` bui
 v1.26.1 checkout: the poll response carries `secret`, the worker's log shows the store
 downloaded to `/mnt/memory/<slug>`, the agent's write uploads with a precondition, and the
 version list shows the session's write.
+
+*As landed: this `self_hosted` live run was deferred at close-out and tracked as #495 —
+the one artifact not produced. The path is otherwise substantiated, all merged:
+`internal/worker/TestMemoryStoreServedThroughTheLeaseLoop` drives the full wire lease loop
+(a real in-process control-plane API over HTTP against a real Postgres, the poll minting
+the token into `secret`, the worker landing the store and pushing the run's write as a
+`session_actor` version); the `cloud` run above exercises the real `ant` CLI and a real
+model over the same `internal/memsync`; and the verifier passed slice 6 twice against the
+reference worker at v1.66.0. The compensating evidence is recorded in docs/HISTORY.md; the
+built harness (the `ant` v1.26.1 checkout and the four slice-6 binaries) is ready for the
+transcript when #495 is run.*
