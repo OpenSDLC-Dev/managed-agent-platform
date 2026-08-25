@@ -280,8 +280,16 @@ jobs:
           labels="$(gcloud container clusters describe "$GKE_CLUSTER" \
             --zone "$GCP_ZONE" --project "$GCP_PROJECT_ID" \
             --format='value(resourceLabels)')"
-          case "$labels" in
-            *power-saved-*)
+          # `value()` renders the map as `key=value;key=value`, so a bare
+          # `*power-saved-*` would also match a VALUE that happens to contain the
+          # prefix — `deployment-note=power-saved-example` would silently stop
+          # deploying to a cluster nobody parked. Prefixing the string with the
+          # separator makes the glob anchor at a key: the first key then follows a
+          # `;` like every other, and a value never can, because a GCP label may
+          # hold only lowercase letters, digits, `-` and `_`. `env-power.sh`
+          # matches the same way, for the same reason.
+          case ";$labels" in
+            *";power-saved-"*)
               echo "POWERED_OFF=true" >> "$GITHUB_ENV"
               echo "::notice::staging is parked ($labels) — nothing was deployed. Revive it with PROJECT=... make gcp-env-start, then re-run this workflow to catch staging up to main."
               ;;

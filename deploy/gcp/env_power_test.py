@@ -554,6 +554,26 @@ def main():
         check("warns that no size is recorded", "warning" in r.out.lower(), r.out)
         check("names the way out", "NODES=" in r.out, r.out)
 
+        print("a label that merely CONTAINS the prefix is not a parked marker")
+        # `value()` renders the map as `key=value;key=value`, so a naive glob for
+        # the prefix also matches a value carrying it. Getting this wrong is worse
+        # in deploy.yml, where the same match decides whether to deploy at all: an
+        # unrelated note would silently stop every deployment to a live cluster.
+        st = new_state(tmp, "decoy", pools={"platform": 0, "sandbox": 0}, sql="STOPPED",
+                       labels={"goog-terraform-provisioned": "true",
+                               "deployment-note": "power-saved-example",
+                               "not-power-saved-test": "1"})
+        r = run(tmp, st, "stop")
+        check("exits 0", r.code == 0, r.out)
+        check("still warns — neither decoy is a marker", "warning" in r.out.lower(), r.out)
+        # And the real thing, beside the decoys, must still register.
+        st = new_state(tmp, "decoyplusreal", pools={"platform": 0, "sandbox": 0}, sql="STOPPED",
+                       labels={"deployment-note": "power-saved-example"},
+                       saved={"platform": 3, "sandbox": 1})
+        r = run(tmp, st, "stop")
+        check("exits 0", r.code == 0, r.out)
+        check("a real marker beside them is recognised", "warning" not in r.out.lower(), r.out)
+
         print("starting what is already running changes nothing")
         st = new_state(tmp, "alreadyup")
         r = run(tmp, st, "start")

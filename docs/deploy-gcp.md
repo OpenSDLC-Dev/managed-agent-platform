@@ -599,8 +599,8 @@ which a deleted service account took with it. Object storage has no credential n
 
 If the goal is to stop paying rather than to be rid of the environment, park it instead:
 `PROJECT=… make gcp-env-stop` resizes every node pool to zero and stops Cloud SQL, keeping
-every resource and the database's contents, and `make gcp-env-start` brings it back at the
-sizes it was parked from. It needs no Terraform, no state and no tfvars — only credentials —
+every resource and the database's contents, and `PROJECT=… make gcp-env-start` brings it
+back at the sizes it was parked from. It needs no Terraform, no state and no tfvars — only credentials —
 so it works from any machine. One caveat belongs here rather than there, because this page
 is about the applies: **do not `terraform apply` while parked.** `node_count` is Terraform's
 and Cloud SQL's `activation_policy` is not, so an apply scales the nodes back up and leaves
