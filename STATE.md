@@ -4,10 +4,19 @@ What is being worked on right now, and how far along it is — nothing else. **S
 
 ## Active work
 
-None.
+Test-suite hardening — three CI flake/timeout issues surfaced during plan 36's gate
+runs (test-environment artifacts, not memory-store behavior). Each lands as its own
+fix PR, in order.
 
 ## Tasks
 
-None in flight. The last delivery was [plan 36](./docs/plan/36_memory-stores.md) (memory stores, #52),
-archived after all eight slices landed; its record is [docs/HISTORY.md](./docs/HISTORY.md). Pick the
-next piece of work from the GitHub issue backlog.
+- [x] **#483** — `TestLongTimeToFirstTokenKeepsLease`: the lease keeper's `Extend` is
+      bounded by the remaining lease, so the test's 250 ms TTL let a slow UPDATE on a
+      loaded fixture Postgres overrun the budget. Scale the TTL to 1500 ms (the
+      keeper-budget tests' proven-tolerant value); production's 2 min TTL is unaffected.
+      The executor's sibling `TestLeaseRenewedDuringSlowProvision` (300 ms) had the same
+      flake — CI surfaced it on this PR — and gets the same 1500 ms fix.
+- [ ] **#486** — `TestEnqueueNotifiesWorkChannelOnCommit`: the LISTEN/NOTIFY wake races
+      the enqueue's commit visibility under load.
+- [ ] **#490** — `internal/api` / `internal/executor` run within 10% of `go test`'s
+      10-min package timeout on a loaded box; an explicit `-timeout` in the `test` recipe.
