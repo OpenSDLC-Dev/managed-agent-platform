@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -641,6 +642,130 @@ func TestMemoryNoTokenFailsTheItem(t *testing.T) {
 	}
 	if got := h.results(t); len(got) != 0 {
 		t.Errorf("results = %+v, want none: the tools must not run", got)
+	}
+}
+
+// TestMemoryPushRefusedIsRememberedUntilBytesChange pins the safe-degrade of
+// an unknown 400 (not the cap, not an archive — a body this platform's own
+// routes never emit, reachable only from a server that words a refusal its
+// own way): the file is refused, recorded so it is not retried, and retried
+// only once its bytes change.
+func TestMemoryPushRefusedIsRememberedUntilBytesChange(t *testing.T) {
+	var refuseNext string
+	wrap := func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if refuseNext != "" && r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/memories") {
+				var body struct{ Path string }
+				peek := &bytes.Buffer{}
+				_ = json.NewDecoder(io.TeeReader(r.Body, peek)).Decode(&body)
+				if body.Path == refuseNext {
+					w.Header().Set("Content-Type", "application/json")
+					w.WriteHeader(http.StatusBadRequest)
+					_, _ = w.Write([]byte(`{"type":"error","error":{"type":"invalid_request_error","message":"the memory server refused this content"}}`))
+					return
+				}
+				r.Body = io.NopCloser(peek)
+			}
+			next.ServeHTTP(w, r)
+		})
+	}
+	sb := &fakeSandbox{}
+	h := newHarnessWrapped(t, sb, wrap)
+	h.seedMemoryStore(t, memStoreID, "Notes")
+	h.seedMemory(t, memStoreID, "/a.md", "alpha")
+	h.refMemory(t, [3]string{memStoreID, memMount, "read_write"})
+	token := h.sessionsToken(t)
+	h.runWith(t, token)
+
+	refuseNext = "/new.md"
+	sb.files[memMount+"/new.md"] = "v1"
+	h.runWith(t, token)
+	if _, ok := h.memoryContent(t, memStoreID, "/new.md"); ok {
+		t.Error("the refused create reached the store")
+	}
+	if got := h.baseline(t, memStoreID).Refused["/new.md"]; got != sha256hex([]byte("v1")) {
+		t.Errorf("refused digest = %q, want sha(v1) remembered", got)
+	}
+
+	// Injection off, bytes unchanged: the refusal is remembered, so nothing
+	// is re-sent (a create now would succeed — the proof it was not tried).
+	refuseNext = ""
+	h.runWith(t, token)
+	if _, ok := h.memoryContent(t, memStoreID, "/new.md"); ok {
+		t.Error("a remembered refusal was retried without a change")
+	}
+
+	// Bytes change: the new digest is not the refused one, so it is retried.
+	sb.files[memMount+"/new.md"] = "v2"
+	h.runWith(t, token)
+	if got, ok := h.memoryContent(t, memStoreID, "/new.md"); !ok || got != "v2" {
+		t.Errorf("after the bytes changed: %q, %v; want v2 pushed", got, ok)
+	}
+	if _, ok := h.baseline(t, memStoreID).Refused["/new.md"]; ok {
+		t.Error("the refusal was not cleared after a successful push")
+	}
+}
+
+// TestMemoryDeleteWithheldWhileArchived pins the DeleteRemote-vs-archive arm:
+// a local deletion against an archived store is refused (the store's 400),
+// withheld with its baseline kept, and propagates only after the unarchive.
+func TestMemoryDeleteWithheldWhileArchived(t *testing.T) {
+	sb := &fakeSandbox{}
+	h := newHarness(t, sb)
+	h.seedMemoryStore(t, memStoreID, "Notes")
+	h.seedMemory(t, memStoreID, "/a.md", "alpha")
+	h.refMemory(t, [3]string{memStoreID, memMount, "read_write"})
+	token := h.sessionsToken(t)
+	h.runWith(t, token)
+
+	if _, err := h.pool.Exec(context.Background(), `UPDATE memory_stores SET archived_at = now() WHERE id = $1`, memStoreID); err != nil {
+		t.Fatal(err)
+	}
+	delete(sb.files, memMount+"/a.md")
+	h.runWith(t, token)
+	if _, ok := h.memoryContent(t, memStoreID, "/a.md"); !ok {
+		t.Error("a delete reached an archived store")
+	}
+	if h.baseline(t, memStoreID).Synced["/a.md"] != sha256hex([]byte("alpha")) {
+		t.Errorf("baseline while archived = %+v, want the memory kept", h.baseline(t, memStoreID))
+	}
+
+	if _, err := h.pool.Exec(context.Background(), `UPDATE memory_stores SET archived_at = NULL WHERE id = $1`, memStoreID); err != nil {
+		t.Fatal(err)
+	}
+	h.runWith(t, token)
+	if _, ok := h.memoryContent(t, memStoreID, "/a.md"); ok {
+		t.Error("the deletion did not propagate after the unarchive")
+	}
+}
+
+// TestMemoryMaterializePagesTheListing pins that the store's whole listing is
+// paged (the full view caps a page at 20) with the sessions token riding every
+// page: a store of 25 memories lands all 25, which page 2 authorized by the
+// env key alone could not.
+func TestMemoryMaterializePagesTheListing(t *testing.T) {
+	sb := &fakeSandbox{}
+	h := newHarness(t, sb)
+	h.seedMemoryStore(t, memStoreID, "Notes")
+	const n = 25
+	for i := 0; i < n; i++ {
+		h.seedMemory(t, memStoreID, fmt.Sprintf("/m/%02d.md", i), fmt.Sprintf("body %d", i))
+	}
+	h.refMemory(t, [3]string{memStoreID, memMount, "read_write"})
+	token := h.sessionsToken(t)
+	h.runWith(t, token)
+
+	landed := 0
+	for i := 0; i < n; i++ {
+		if got := sb.files[fmt.Sprintf("%s/m/%02d.md", memMount, i)]; got == fmt.Sprintf("body %d", i) {
+			landed++
+		}
+	}
+	if landed != n {
+		t.Errorf("landed %d of %d memories; a page beyond the first did not authorize or paginate", landed, n)
+	}
+	if got := len(h.baseline(t, memStoreID).Synced); got != n {
+		t.Errorf("baseline records %d memories, want %d", got, n)
 	}
 }
 

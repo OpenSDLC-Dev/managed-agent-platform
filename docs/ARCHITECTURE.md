@@ -192,21 +192,25 @@ same over the wire, through the five memory routes its per-item sessions token a
 (decision 15), the store landed from a `view=full` listing and reconciled with per-memory
 `GET`s and the routes' own preconditions. The
 directory is reconciled with the store when a tool run ends (a faulted run leaves it to
-the next run or the reaper), in three phases the shared
+the next run, or on `cloud` the reaper), in three phases the shared
 rules in `internal/memsync` decide: the tree is hashed in the sandbox, the plan settles
-inside the transaction that commits the run (a push is a compare-and-set on the head's
+— inside the transaction that commits a `cloud` run, over the wire against the routes for
+a `self_hosted` one — (a push is a compare-and-set on the head's
 digest and appends a `session_actor` version; the store wins a both-sides change; an
 emptied directory against a baseline of several files is re-downloaded, never read as
 deletions), and the settlement is written back; a listing that fails, or holds more
 changed files than a store can, skips the store rather than reading as deletions. A `read_only` or archived store, or a
-directory whose marker was altered, is pulled from and never pushed to, and the file
-tools refuse to write in a `read_only` or archived store (the marker they never see);
-the reaper syncs a sandbox before every tier's action but the deleted tier's, and a run
-whose sandbox already held a mount syncs it before its tools run as well, so a store's
-change reaches a session at its next run rather than the one after. The BYOC worker's
-sync has no held sandbox to reconcile at the reaper's tiers — a `self_hosted` workdir is
-removed at the item's end — so it syncs a mount it finds present before the tools and
-once more when the run ends, and fails the item (`ErrSessionMemoryNoToken`) rather than
+directory whose marker was altered, is pulled from and never pushed to. The file tools
+refuse to write in a `read_only` store on either kind; an archived store is read-only at
+the tools only on `cloud`, where the executor reads `archived_at` from the row — a
+`self_hosted` worker's token cannot read the store, so it learns the archive from the
+first write the store refuses, and a `bash` write there is withheld at the sync rather
+than refused at the tool. On `cloud` the reaper syncs a sandbox before every tier's
+action but the deleted tier's, and a run whose sandbox already held a mount syncs it
+before its tools run as well, so a store's change reaches a session at its next run
+rather than the one after. The BYOC worker has no reaper — its only sync points are the
+two run boundaries, a mount found already present synced before the tools and every run
+synced once at its end — and it fails the item (`ErrSessionMemoryNoToken`) rather than
 run a store session with no token to mount from.
 
 **Sandboxes have a lifecycle** (plan 24). Provision is idempotent per session — it

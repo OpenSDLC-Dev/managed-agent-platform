@@ -582,11 +582,14 @@ func (m *memoryStores) settleStore(ctx context.Context, st *storeSync) (bool, er
 			case pushConflict:
 				if act.ID == "" {
 					// A create the store's occupancy refused: it holds a
-					// memory at an ancestor or descendant of this path, and
-					// a file and a directory cannot share a name. The store
-					// wins, as it wins every both-sides change: the file
-					// goes, and the memory's own pull lands where it was.
-					slog.WarnContext(ctx, "memory file removed: the store holds a memory at an ancestor or descendant path",
+					// memory the file is in the way of — at this exact path
+					// (another session created it since the listing, a race
+					// the executor's row lock forecloses but the wire does
+					// not), or at an ancestor or descendant, where a file and
+					// a directory cannot share a name. Either way the store
+					// wins, as it wins every both-sides change: the file goes,
+					// and the memory's own pull lands where it was.
+					slog.WarnContext(ctx, "memory file removed: the store holds a memory the file is in the way of",
 						"session_id", m.sessionID, "memory_store_id", id, "path", act.Path)
 					st.removals = append(st.removals, act.Path)
 				} else {
