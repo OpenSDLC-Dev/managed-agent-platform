@@ -80,6 +80,8 @@ func TestMintAndAuthenticate(t *testing.T) {
 	}{
 		{"a just-stopped item", `UPDATE work_items SET state = 'stopped', stop_requested_at = now(), stopped_at = now(), lease_expires_at = NULL WHERE id = $1`},
 		{"a stopping item whose frozen lease lapsed", `UPDATE work_items SET state = 'stopping', stop_requested_at = now(), stopped_at = NULL, lease_expires_at = now() - interval '1 second' WHERE id = $1`},
+		// The worker's whole notice-and-flush (15 s + 30 s) fits the window.
+		{"an item whose stop was requested 45 s ago", `UPDATE work_items SET state = 'stopped', stop_requested_at = now() - interval '45 seconds', stopped_at = now(), lease_expires_at = NULL WHERE id = $1`},
 	} {
 		if _, err := pool.Exec(ctx, tc.sql, item.ID.String()); err != nil {
 			t.Fatalf("%s: %v", tc.name, err)

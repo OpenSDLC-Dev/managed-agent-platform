@@ -430,6 +430,9 @@ func (q *Queue) PollOn(ctx context.Context, db DB, envID domain.ID, reclaim time
 // the stop, so the lapse alone proves nothing inside the window. The
 // sessions token (internal/worktoken) lives exactly this long past the
 // request, so no settlement re-arms a session while its token still works.
+// The cost: a session whose worker died mid-wind-down waits this long to be
+// re-armed, where the lease lapse alone would have done in half the time; a
+// death mid-run is still reclaimed by Poll at lease expiry.
 const WindDown = 60 * time.Second
 
 // AbandonedWork names one abandoned wind-down — a stopping tool_exec item

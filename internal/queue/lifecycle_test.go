@@ -329,6 +329,14 @@ func TestPollFinalizesAnAbandonedWindDown(t *testing.T) {
 	if done := finalizeAbandoned(t, pool, q, env); len(done) != 0 {
 		t.Fatalf("finalize inside the wind-down's minute = %v, want nothing", done)
 	}
+	// Forty-five seconds in — the worker's whole notice-and-flush — still nothing.
+	if _, err := pool.Exec(ctx,
+		`UPDATE work_items SET stop_requested_at = now() - interval '45 seconds' WHERE id = $1`, id); err != nil {
+		t.Fatal(err)
+	}
+	if done := finalizeAbandoned(t, pool, q, env); len(done) != 0 {
+		t.Fatalf("finalize 45 s into the wind-down = %v, want nothing", done)
+	}
 	// Past it, the lapsed lease is the signal.
 	if _, err := pool.Exec(ctx,
 		`UPDATE work_items SET stop_requested_at = now() - interval '61 seconds' WHERE id = $1`, id); err != nil {
@@ -853,8 +861,22 @@ func TestFinalizeAbandonedRechecksUnderTheTransaction(t *testing.T) {
 	if _, err := q.Stop(ctx, env, id, false); err != nil {
 		t.Fatal(err)
 	}
+	// The flip re-checks the window itself, whatever a listing said: a lapsed
+	// lease 45 s into the wind-down is refused under the transaction.
 	if _, err := pool.Exec(ctx,
-		`UPDATE work_items SET lease_expires_at = now() - interval '1 second', stop_requested_at = now() - interval '61 seconds' WHERE id = $1`, id); err != nil {
+		`UPDATE work_items SET lease_expires_at = now() - interval '1 second', stop_requested_at = now() - interval '45 seconds' WHERE id = $1`, id); err != nil {
+		t.Fatal(err)
+	}
+	early, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ok, err := q.FinalizeAbandoned(ctx, early, env, id); err != nil || ok {
+		t.Fatalf("finalize inside the window = %v %v, want refused", ok, err)
+	}
+	_ = early.Rollback(ctx)
+	if _, err := pool.Exec(ctx,
+		`UPDATE work_items SET stop_requested_at = now() - interval '61 seconds' WHERE id = $1`, id); err != nil {
 		t.Fatal(err)
 	}
 	items, err := q.ListAbandoned(ctx, env)
