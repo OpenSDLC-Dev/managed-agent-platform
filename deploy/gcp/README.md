@@ -79,6 +79,79 @@ row back. That is the right trade for a staging environment and this configurati
 deliberately — but it means a rebuild is proven with a *fresh* credential round-tripping on
 the rebuilt stack, never with an old one surviving.
 
+## Parking it between uses
+
+Destroying is not the only way to stop paying for staging, and for anything short of
+"we are done with this environment" it is the wrong one — it takes the database with it.
+Parking stops the two charges that dominate the bill and keeps every resource:
+
+```sh
+PROJECT=your-project make gcp-env-stop     # nodes to zero, then the database
+PROJECT=your-project make gcp-env-start    # the database, then the nodes back
+PROJECT=your-project make gcp-env-status   # what is parked, and what it was parked from
+```
+
+These are the one part of this directory that needs **neither Terraform, nor state, nor
+tfvars** — only credentials for the project. That is deliberate: parking is the operation
+you want to perform from whatever machine you happen to be at, including one that has
+never run an apply, and every coordinate is derived from `PROJECT` and `NAME_PREFIX`.
+
+| | parked | keeps billing |
+|---|---|---|
+| both node pools | resized to zero — nodes, boot disks and Cloud NAT's per-VM charge go with them | |
+| Cloud SQL | activation policy `NEVER`, which suspends the instance charge | its storage, and its backups |
+| the GKE control plane | | $0.10/cluster-hour, which one zonal cluster's free-tier credit covers |
+| the two LoadBalancer forwarding rules | | the control plane's and the console's alike |
+
+The last two rows are why "the two charges that dominate the bill" is the honest phrasing
+rather than "everything hourly": the control plane and the forwarding rules bill by the hour
+too. They are small, and taking the forwarding rules down would mean deleting a `Service`,
+which is a change to the workload rather than a power operation. Cloud SQL keeps no IP
+charge here, because `environment/` gives the instance a private address only.
+
+**Parking the cluster is safe because mode 2 already put every piece of state outside it** —
+Postgres is Cloud SQL, blobs are GCS, the credential cipher is Cloud KMS, and `kubectl get
+pvc -A` is empty by design. Nodes are genuinely disposable, so `start` has no restore step:
+the control plane, etcd, the Deployments and the Helm release records never went away, and
+pods reschedule themselves as soon as there is somewhere to put them. The console lives in
+the same cluster and is parked and revived along with the platform.
+
+**The parked sizes are stored on the cluster, not on your laptop.** `stop` writes each
+pool's node count into a `power-saved-<pool>` cluster resource label before zeroing it, and
+`start` restores from them and then clears every one it finds — so a colleague on another
+machine can revive what you parked, and `start` restores the size that was actually running
+rather than a default. If a label is ever missing, `start` refuses the whole revival and
+asks for `NODES=<n>` instead of guessing, before it starts the database: `variables.tf`
+defaults to two nodes a pool, that may not be this deployment's size, and a guess in that
+direction doubles the bill the parking was for. Terraform does not declare `resource_labels`
+on this cluster, which is what lets the labels survive an apply.
+
+One thing to know about that label, because `gcloud`'s flag is misleadingly named:
+`--update-labels` **replaces** the cluster's whole label set rather than merging into it, so
+every write the script makes sends the complete set — its own labels and everyone else's.
+Change that and a stop deletes `goog-terraform-provisioned`, and a resumed stop deletes the
+size the interrupted attempt had already saved.
+
+**Do not `terraform apply` while parked.** `node_count` is declared in
+`environment/main.tf` and Cloud SQL's `activation_policy` is not, so an apply scales the
+pools back up and leaves the database stopped — which is the one ordering this whole
+mechanism exists to prevent. Run `make gcp-env-start` first. If it happens anyway, `start`
+is still the way out: it finds the pools already running, resizes nothing, and clears the
+stale marker that would otherwise keep CD skipping.
+
+Order is why these are two commands and not four. Going down, the nodes drain before the
+database goes; coming up, Cloud SQL reports `RUNNABLE` before any pod can land on a new node.
+`RUNNABLE` is the state the Admin API reports, not a promise that Postgres is accepting
+connections — it is the closest signal available from outside the VPC, and far better than
+not waiting. `make gcp-power-test` asserts both orderings against a fake `gcloud`.
+
+**CD skips a parked environment rather than failing on it.** `deploy.yml` checks for those
+same labels after authenticating and, finding them, posts a notice and deploys nothing —
+otherwise every push during a money-saving weekend would go red on the smoke test. It keys
+on the label and not on the node count on purpose: a cluster at zero nodes that nobody
+parked has fallen over, and that still fails loudly. Staging therefore stays at whatever
+commit it was parked on; `gh workflow run deploy.yml --ref main` catches it up.
+
 ## Prerequisites
 
 - A GCP project with billing enabled, and `gcloud auth application-default login`.
@@ -1128,10 +1201,10 @@ the project and is one more `terraform import` away.
 
 ```sh
 make gcp-fmt gcp-validate gcp-split-check gcp-lint \
-     gcp-bootstrap-test gcp-split-check-test gcp-dbinit-test
+     gcp-bootstrap-test gcp-split-check-test gcp-dbinit-test gcp-power-test
 ```
 
-None of them needs credentials, state, or a project, and CI runs all seven on every PR — so
+None of them needs credentials, state, or a project, and CI runs all eight on every PR — so
 neither the configuration nor the tooling can rot silently between the rare runs that
 actually provision anything. `gcp-dbinit-test` is the one with a host requirement: it needs
 Docker, because it starts a real PostgreSQL.
@@ -1141,7 +1214,7 @@ Docker, because it starts a real PostgreSQL.
 `foundation/` declares must carry both guards it can — `prevent_destroy` and, where the kind
 has it, `deletion_policy = "PREVENT"`.
 
-The last three **run** the tooling rather than reading it, because the first four are static
+The last four **run** the tooling rather than reading it, because the first four are static
 and this is a place where static checking has already been insufficient. `gcp-lint` is
 shellcheck, and shellcheck cannot know that `gcloud secrets versions describe` rejects
 `--filter` — it exited 0 on a `bootstrap.sh` that aborted on its first call in every project,
@@ -1175,3 +1248,28 @@ have failed **only** on the real instance — `ALTER ROLE ... NOSUPERUSER` is re
 them off), and `ALTER DATABASE ... OWNER TO` failed with `must be able to SET ROLE` because
 the membership PostgreSQL 16's `CREATE ROLE` implicitly grants its creator does not carry the
 SET option.
+
+`gcp-power-test` is the fourth, and what it checks is a **sequence**, which is precisely what
+shellcheck and a careful read both miss. Two of `env-power.sh`'s claims cost real money if
+they quietly stop holding. `start` must restore the node counts `stop` saved rather than any
+plausible constant — so its scenarios park pools of *different* sizes, which no single number
+can satisfy. And both orderings have to survive refactoring: nodes drained before the
+database stops, Cloud SQL `RUNNABLE` before any node returns.
+
+The fake `gcloud` dies on any invocation it does not recognise, and checks each `describe`'s
+`--format` as well, because a fake that answers the right question when the wrong one was
+asked cannot catch the script asking it. Four real behaviours are modelled deliberately,
+each one something the script would otherwise get wrong invisibly: `--update-labels`
+**replaces** rather than merges; `--remove-labels` errors on a label that is not there; a
+`value(resourceLabels.<key>)` projection on a missing key prints empty and exits 0 — which is
+what lets `start` tell "no saved size" from "could not ask"; and gcloud on Windows terminates
+its lines CRLF, which left a stray carriage return on every discovered pool name until the
+script stripped it.
+
+Eleven mutations were run against the suite, one per defect the reviews of this change found,
+and every one turns it red: restoring a constant, inverting either ordering, skipping the
+wait, sending only the script's own labels, clearing the marker from the pools this run
+resized rather than from a fresh read, re-saving a resumed stop's zero, dropping the CR
+strip, reading the pool list through a process substitution that cannot see its exit status,
+swallowing the discovery error, accepting `NODES=0`, and resolving sizes pool-by-pool after
+the mutations have already begun.
