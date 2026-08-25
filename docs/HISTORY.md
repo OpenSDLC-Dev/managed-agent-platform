@@ -196,6 +196,14 @@ memory-version actor union will render three of its four arms when plan 36 slice
   SDK identifier surface, 73 identifiers) plus a direct per-file diff of every changed SDK file, with
   the overlaps re-derived independently. No contradiction survived reconciliation. Every SDK fact
   above was read at a tag with `git show <tag>:<file>`; nothing was checked out.
+- The real `ant` CLI (v1.26.1, which pins SDK v1.66.0; built from the read-only checkout) against
+  this branch's controlplane, run natively in WSL on a throwaway Postgres: `beta:agents create
+  --model.id claude-opus-5 --tool '{"type":"agent_toolset_20260401","configs":[{"name":"bash",
+  "type":"bash",…},{"name":"web_fetch","type":"web_fetch",…},{"name":"grep","enabled":false}]}'`
+  → 200, every built-in entry rendered with `"type"` equal to its name, the `grep` entry that was
+  sent without one included, and `beta:agents retrieve` echoing the same; `"type":"read"` on the
+  `bash` entry → 400 `configs[0].type is "read" but must equal name "bash"`; `"allowed_domains"`
+  on `web_fetch` → 400 `unknown field "allowed_domains" in configs[0]` (2026-08-25).
 - `make verify`: TODO-EVIDENCE
 
 ## The session delegation bound (#447) — the designs it beat, 2026-08-23
