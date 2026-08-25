@@ -123,6 +123,12 @@ func (s *server) listMemoryVersions(r *http.Request) (any, error) {
 	if err != nil {
 		return nil, err
 	}
+	// "Listing with view=full caps limit at 20" — the view enum documents that
+	// for a memory_version as much as for a memory, so the clamp listMemories
+	// applies is this list's too, and just as silent.
+	if view == viewFull && page.limit > memoryFullViewLimit {
+		page.limit = memoryFullViewLimit
+	}
 	gte, err := parseTimeParam(q, "created_at[gte]")
 	if err != nil {
 		return nil, err
@@ -135,9 +141,7 @@ func (s *server) listMemoryVersions(r *http.Request) (any, error) {
 	query := `SELECT ` + memoryVersionColumns + ` FROM memory_versions WHERE memory_store_id = $1`
 	args := []any{storeID}
 	// A malformed id can never name a stored row, so it is rejected on shape
-	// rather than bound into the query (#135). api_key_id takes storableText
-	// instead: an apikey_ id is deliberately outside knownPrefixes, being an
-	// off-wire identifier, so the prefix check would refuse every real one.
+	// rather than bound into the query (#135).
 	for _, filter := range []struct{ param, column string }{
 		{"memory_id", "memory_id"},
 		{"session_id", "created_by->>'session_id'"},
@@ -152,12 +156,25 @@ func (s *server) listMemoryVersions(r *http.Request) (any, error) {
 		args = append(args, v)
 		query += fmt.Sprintf(` AND %s = $%d`, filter.column, len(args))
 	}
-	if v := q.Get("api_key_id"); v != "" {
+	// The other two actor lanes take storableText instead of the prefix check:
+	// neither apikey_ nor svac_ is in knownPrefixes — both are off-wire
+	// identifiers — so the shape check would refuse every real one. This
+	// platform emits no service_account_actor, which is exactly why the lane
+	// has to exist: an ignored filter would hand a client that asked for one
+	// service account's writes the store's whole history.
+	for _, filter := range []struct{ param, column string }{
+		{"api_key_id", "created_by->>'api_key_id'"},
+		{"service_account_id", "created_by->>'service_account_id'"},
+	} {
+		v := q.Get(filter.param)
+		if v == "" {
+			continue
+		}
 		if !storableText(v) {
-			return nil, errInvalid("api_key_id must be valid text")
+			return nil, errInvalid("%s must be valid text", filter.param)
 		}
 		args = append(args, v)
-		query += fmt.Sprintf(` AND created_by->>'api_key_id' = $%d`, len(args))
+		query += fmt.Sprintf(` AND %s = $%d`, filter.column, len(args))
 	}
 	if v := q.Get("operation"); v != "" {
 		if v != "created" && v != "modified" && v != "deleted" {

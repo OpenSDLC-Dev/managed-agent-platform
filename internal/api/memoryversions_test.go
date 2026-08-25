@@ -174,6 +174,19 @@ func TestMemoryVersionList(t *testing.T) {
 	if actor, _ := rows[0]["created_by"].(map[string]any); actor["type"] != "session_actor" {
 		t.Errorf("the planted actor renders as %v", rows[0]["created_by"])
 	}
+	// service_account_id reaches the same object. This platform writes no
+	// service_account_actor, which is what the filter has to answer with an
+	// empty page: ignoring it would serve the whole history to a client that
+	// asked for one service account's writes.
+	status, filtered := s.do(http.MethodGet,
+		"/v1/memory_stores/"+store+"/memory_versions?service_account_id=svac_x", nil)
+	if status != http.StatusOK {
+		t.Fatalf("service_account_id filter: status %d (%v)", status, filtered)
+	}
+	if got := listData(t, filtered); len(got) != 0 || nextPage(t, filtered) != "" {
+		t.Errorf("service_account_id filter = %d rows, cursor %q, want an empty page",
+			len(got), nextPage(t, filtered))
+	}
 
 	// Inclusive created_at bounds, at the exact boundary.
 	all := listVersions(t, s, store, "")
@@ -192,6 +205,7 @@ func TestMemoryVersionList(t *testing.T) {
 	for _, q := range []string{
 		"limit=0", "limit=101", "limit=abc", "page=@@@", "view=deep",
 		"operation=renamed", "memory_id=nonsense", "session_id=nonsense",
+		"service_account_id=%00",
 	} {
 		status, body := s.do(http.MethodGet, "/v1/memory_stores/"+store+"/memory_versions?"+q, nil)
 		wantErr(t, status, body, http.StatusBadRequest, "invalid_request_error")
@@ -209,6 +223,16 @@ func TestMemoryVersionList(t *testing.T) {
 	status, body := s.do(http.MethodGet, "/v1/memory_stores/"+bulk+"/memory_versions", nil)
 	if n := len(listData(t, body)); status != http.StatusOK || n != 20 || nextPage(t, body) == "" {
 		t.Fatalf("default limit: status %d, %d rows, cursor %q", status, n, nextPage(t, body))
+	}
+	// "Listing with view=full caps limit at 20" — silently, as it does on the
+	// memories list; view=basic keeps the caller's own limit.
+	status, body = s.do(http.MethodGet, "/v1/memory_stores/"+bulk+"/memory_versions?view=full&limit=100", nil)
+	if n := len(listData(t, body)); status != http.StatusOK || n != 20 || nextPage(t, body) == "" {
+		t.Fatalf("view=full limit: status %d, %d rows, cursor %q — want 20 and a cursor", status, n, nextPage(t, body))
+	}
+	status, body = s.do(http.MethodGet, "/v1/memory_stores/"+bulk+"/memory_versions?view=basic&limit=100", nil)
+	if n := len(listData(t, body)); status != http.StatusOK || n != 25 {
+		t.Fatalf("view=basic limit=100: status %d, %d rows, want 25", status, n)
 	}
 	seen := map[string]bool{}
 	query := "/v1/memory_stores/" + bulk + "/memory_versions?limit=7"

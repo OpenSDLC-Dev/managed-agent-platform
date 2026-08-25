@@ -586,10 +586,12 @@ func (s *server) listMemories(r *http.Request) (any, error) {
 	// prefix match is a literal left(), never LIKE, for occupiedBy's reason.
 	//
 	// COLLATE "C" is spelled once, on the key the subquery builds, and the
-	// outer ORDER BY and cursor comparison inherit it — the derivation
-	// TestMemoryPathsSortUnderTheCCollation pins against the database rather
-	// than assumes. Without it a deployment whose default collation is not
-	// byte order would serve the page in a different order than it pages by.
+	// outer ORDER BY and cursor comparison inherit it. The column carries the
+	// same collation, so the clause restates a derivation Postgres makes on
+	// its own; TestMemoryPathsSortUnderTheCCollation pins the column and an
+	// expression built over it, not this string. Without the collation a
+	// deployment whose default is not byte order would serve the page in a
+	// different order than it pages by.
 	args := []any{storeID, prefix, depth == 1}
 	query := `SELECT DISTINCT ON (key) key, is_prefix, ` + memoryColumns + `
 	  FROM (

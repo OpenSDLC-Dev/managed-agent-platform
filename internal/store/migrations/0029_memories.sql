@@ -63,3 +63,8 @@ CREATE TABLE memory_versions (
 -- The list is per store, newest-first, keyset-paged on (created_at, id).
 CREATE INDEX memory_versions_store_created_idx
     ON memory_versions (memory_store_id, created_at DESC, id DESC);
+
+-- And the same page narrowed to one memory's lineage, over a history nothing
+-- ever prunes (#476).
+CREATE INDEX memory_versions_memory_idx
+    ON memory_versions (memory_store_id, memory_id, created_at DESC, id DESC);

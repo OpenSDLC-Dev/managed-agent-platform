@@ -247,6 +247,41 @@ func TestMemoryContentRules(t *testing.T) {
 	}
 }
 
+// A body carrying a byte that is not valid UTF-8 is refused whole, on create
+// and on update alike. The bodies are sent raw because no marshaler would
+// produce one: encoding/json rewrites such a byte to U+FFFD, and on the way IN
+// it does the same — which is why the refusal has to happen at the decode
+// rather than in memsync.ValidateContent, where the content would already be
+// valid, already altered, and about to be stored.
+func TestMemoryRejectsInvalidUTF8(t *testing.T) {
+	s := newTestServer(t)
+	store := createMemoryStore(t, s, "utf8")
+	id := createMemory(t, s, store, "/notes.md", "clean")["id"].(string)
+
+	status, body := s.do(http.MethodPost, "/v1/memory_stores/"+store+"/memories",
+		"{\"path\":\"/bad.md\",\"content\":\"\xff\"}")
+	wantErr(t, status, body, http.StatusBadRequest, "invalid_request_error")
+	status, body = s.do(http.MethodPost, "/v1/memory_stores/"+store+"/memories/"+id,
+		"{\"content\":\"\xff\"}")
+	wantErr(t, status, body, http.StatusBadRequest, "invalid_request_error")
+
+	// Neither write reached the database: no second memory row, and the
+	// create's version is still the only one in the store's history.
+	var memories int
+	if err := s.pool.QueryRow(t.Context(),
+		`SELECT count(*) FROM memories WHERE memory_store_id = $1`, store).Scan(&memories); err != nil {
+		t.Fatalf("count memories: %v", err)
+	}
+	if n := countVersions(t, s, store); memories != 1 || n != 1 {
+		t.Errorf("after the refused writes: %d memories, %d versions, want 1 and 1", memories, n)
+	}
+	// And the memory still serves the bytes it was created with.
+	if status, got := s.do(http.MethodGet, "/v1/memory_stores/"+store+"/memories/"+id, nil); status != http.StatusOK ||
+		got["content"] != "clean" {
+		t.Fatalf("the memory after the refused update: status %d (%v)", status, got)
+	}
+}
+
 // Occupancy in all four directions (decision 4): a path is taken when a memory
 // sits at it, at an ancestor of it, or at a descendant of it — /a and /a/b
 // cannot both be files — on create and on rename alike.
