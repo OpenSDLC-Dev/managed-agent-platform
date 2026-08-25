@@ -49,6 +49,43 @@ new directory and in-repo citations re-pointed in the moving PR (plan
 
 ---
 
+## Attachment and filter — real `ant` CLI against `resources[]` and the sessions filter (plan 36 slice 3, run 2026-08-25) — ✅ passed
+
+The plan's slice-3 verification row asks for `ant beta:sessions create --resource '{type:
+memory_store, …}'`, `beta:sessions:resources list` and `beta:sessions list --memory-store-id`,
+recorded into HISTORY. Recorded with `ant` v1.26.1 (pinning anthropic-sdk-go v1.66.0) against the
+branch's own `controlplane` on a throwaway Postgres at d2b25c7 (#487). Two CLI facts the transcript
+needed: `--agent` and `--model` take mappings (`{type: agent, id: …}`, `{id: …}`), not bare ids —
+the CLI's own error says "string was used where mapping is expected" — and a resource is one
+`--resource '{…}'` mapping per element, or the `--resource.type`/`--resource.memory-store-id` inner
+flags for a single one.
+
+- A create with two stores — one `read_only` with `instructions`, one bare — renders the two
+  elements in request order with exactly the seven documented keys and no `id`: `access`
+  `read_only`/`read_write`, `instructions` the string/`null`, `description` the store's/`""`,
+  `mount_path` `/mnt/memory/user-preferences` and `/mnt/memory/notes`. `retrieve` and `resources
+  list` echo them; `resources list --limit 1 --max-items -1` auto-pages across the memory element,
+  neither repeating nor skipping one.
+- `resources retrieve` and `resources delete` with the `memory_store_id` as the resource id → `404
+  session resource … not found`.
+- `memory-stores update --name "Renamed Preferences"`, then `retrieve` → the session still reads
+  `User Preferences` and its mount path: the attach-time snapshot.
+- A second session through the inner-flag form → 200 with the same element shape.
+- `sessions list --memory-store-id` → the one session for the preferences store, both for the
+  notes store, an empty page for a well-formed absent id, `400 memory_store_id must be a valid
+  memory store id` for `memstore_X`.
+- The refusals, each `400 invalid_request_error`: an absent store (`memory store … not found`),
+  the archived one (`… is archived`), the same store twice (`… is attached more than once`),
+  "Notes" beside "notes" (`… both mount at /mnt/memory/notes`), `access: append`, the
+  `self_hosted` environment (`memory_store resources are not supported on self_hosted environments
+  yet`), and a repository at `/mnt/memory/notes` (`mount_path … is reserved for memory stores`).
+- `memory-stores delete` on the notes store, then `retrieve` → the element is kept as snapshotted,
+  and `sessions list --memory-store-id` still returns both sessions.
+
+**Gate**: `make verify` in WSL at d2b25c7 — 55 packages `ok`, nothing failed, total statement
+coverage **90.44%** — run before the review round and the verifier, in sequence, so no native
+suite shared the Docker daemon with it.
+
 ## Memories and versions — real `ant` CLI against the memory routes (plan 36 slice 2, run 2026-08-25) — ✅ passed
 
 The plan's slice-2 verification row asks for every `ant beta:memory-stores:memories` and

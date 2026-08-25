@@ -23,7 +23,8 @@ issuing. All seven scope decisions are settled; the design is the plan's ninetee
 - [x] **Slice 2 — memories and versions** (#485): migration 0029, `internal/memsync`'s
       path/content validation and slug, the five memory routes (`view`, preconditions,
       occupancy, prefix rollups), the three version routes, actors, eleven registry items.
-- [ ] Slice 3 — session attachment and the `memory_store_id` filter.
+- [x] **Slice 3 — attachment and filter** (#487): the id-less `memory_store` element (snapshot,
+      slug, the seven 400s), the resources cursor key, the real filter, `/mnt/memory` reserved.
 - [ ] Slice 4 — cloud materialization, run-end sync, the brain's block. Cloud acceptance.
 - [ ] Slice 5 — the sessions token: migration 0030, the `wtk_` lane and its matrix.
 - [ ] Slice 6 — BYOC memory: the worker's decode, `SetupMemory` and sync, the
