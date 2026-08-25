@@ -286,11 +286,16 @@ func resolveToolset(raw json.RawMessage) ([]resolved, error) {
 // path so a client can find the typo. It runs after resolveToolset's typed
 // unmarshal, so every object it revisits has already parsed as the right JSON shape.
 //
-// The accepted keys are anthropic-sdk-go v1.63.1's request (*Params) types in
+// The accepted keys are anthropic-sdk-go v1.66.0's request (*Params) types in
 // betaagent.go: BetaManagedAgentsAgentToolset20260401Params (type/configs/
 // default_config), AgentToolsetDefaultConfigParams (enabled/permission_policy),
-// AgentToolConfigParams (name/enabled/permission_policy), and the always_allow/
-// always_ask policy params (type only).
+// the eight BetaManagedAgents<Tool>ToolConfigParams variants of
+// AgentToolConfigParamsUnion (name/type/enabled/permission_policy), and the
+// always_allow/always_ask policy params (type only). The two web variants carry
+// allowed_domains / blocked_domains and max_content_tokens / user_location as
+// well; those four stay refused, because this platform's egress allow-list is
+// operator-side configuration (WEBTOOL_ALLOWED_DOMAINS) and accepting the field
+// would promise a per-agent policy nothing enforces (docs/DIVERGENCES.md).
 func rejectUnknownToolsetKeys(kind string, raw json.RawMessage) error {
 	top, ok := jsonObject(raw)
 	if !ok {
@@ -319,17 +324,55 @@ func rejectUnknownToolsetKeys(kind string, raw json.RawMessage) error {
 }
 
 // rejectConfigKeys checks a default_config or configs[] object and its nested
-// permission_policy. perTool adds "name", accepted only on a configs[] entry.
+// permission_policy. perTool adds "name", accepted only on a configs[] entry,
+// and — on the built-in kind alone — "type": v1.66.0 split AgentToolConfigParams
+// into a union whose eight variants each tag themselves with the tool's own name
+// in both keys. It is optional on the request and required on the response, so a
+// v1.66.0 client may or may not send it. Neither kind's default_config gained
+// one, and BetaManagedAgentsMCPToolConfigParams did not either.
 func rejectConfigKeys(kind string, obj map[string]json.RawMessage, path string, perTool bool) error {
 	allowed := []string{"enabled", "permission_policy"}
+	builtinTool := perTool && kind == agentToolsetType
 	if perTool {
 		allowed = append(allowed, "name")
+	}
+	if builtinTool {
+		allowed = append(allowed, "type")
 	}
 	if err := rejectKeysOutside(kind, obj, path, allowed...); err != nil {
 		return err
 	}
+	if builtinTool {
+		if err := checkToolType(kind, obj, path); err != nil {
+			return err
+		}
+	}
 	if pp, ok := jsonObject(obj["permission_policy"]); ok {
 		return rejectKeysOutside(kind, pp, path+".permission_policy", "type")
+	}
+	return nil
+}
+
+// checkToolType requires a built-in configs[] entry's discriminator to name the
+// tool the entry configures. The union tags each variant with one constant for
+// both name and type, so an entry whose two disagree names two variants at once
+// and there is no way to tell which the client meant: rejecting it beats
+// silently configuring whichever key this platform happens to read (INFERRED —
+// the reference's own answer is unrecorded; docs/DIVERGENCES.md). An absent type
+// is fine, the request marking it omitzero.
+func checkToolType(kind string, obj map[string]json.RawMessage, path string) error {
+	raw, ok := obj["type"]
+	if !ok {
+		return nil
+	}
+	var typ string
+	if err := json.Unmarshal(raw, &typ); err != nil {
+		return fmt.Errorf("%s: %s.type must be a string", kind, path)
+	}
+	var name string
+	_ = json.Unmarshal(obj["name"], &name)
+	if typ != name {
+		return fmt.Errorf("%s: %s.type is %q but must equal name %q", kind, path, typ, name)
 	}
 	return nil
 }

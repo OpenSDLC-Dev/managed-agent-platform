@@ -166,9 +166,9 @@ func MaterializeTools(tools []json.RawMessage) []json.RawMessage {
 // boundary's job (Validate, ValidateMCPToolset), and a read of an older row
 // must not fail because of what a write once let through. One thing does not
 // survive: an unknown *key* nested inside default_config or a resolved
-// configs[] entry is dropped, because those objects are rebuilt from the three
-// fields the schema defines. Only a row written before that validation existed
-// can carry one, an unknown key at the toolset object's own level is preserved,
+// configs[] entry is dropped, because those objects are rebuilt from the fields
+// the schema defines. Only a row written before that validation existed can
+// carry one, an unknown key at the toolset object's own level is preserved,
 // and the drop is toward the safe reading — a stored `permission_polciy`
 // disappears from the echo and the tool renders with the default policy it
 // actually resolves to. A configs[] entry that resolves to no tool at all is
@@ -286,6 +286,14 @@ func materializeConfigs(kind string, raw, defEnabled, defPolicy json.RawMessage)
 		m := byName[s.name]
 		entry := map[string]json.RawMessage{
 			"name": m.name, "enabled": defEnabled, "permission_policy": defPolicy,
+		}
+		// anthropic-sdk-go v1.66.0 split the built-in per-tool config into a
+		// union whose eight variants mark `type` required, tagged with the same
+		// constant as `name` — so it is rendered from the name rather than
+		// echoed, and rendered whether or not the request carried one. The MCP
+		// arm's BetaManagedAgentsMCPToolConfig gained no such field.
+		if kind == agentToolsetType {
+			entry["type"] = m.name
 		}
 		if m.enabled != nil {
 			entry["enabled"] = m.enabled
