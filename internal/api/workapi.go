@@ -589,6 +589,12 @@ func (s *server) finalizeAbandoned(ctx context.Context, envID domain.ID) error {
 			if !done {
 				return nil
 			}
+			// The settlement's stopped_at must not start a sessions token's
+			// post-stop grace for the worker just presumed dead: revoked here,
+			// before the re-arm hands the session to another.
+			if err := worktoken.Revoke(ctx, tx, it.ID.String()); err != nil {
+				return err
+			}
 			if err := s.rearm(ctx, tx, envID, it.SessionID); err != nil {
 				return err
 			}

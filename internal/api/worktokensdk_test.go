@@ -53,10 +53,12 @@ func TestSDKWorkerServesAnItemWithTheSessionsToken(t *testing.T) {
 	// planted once the worker's stream is up (the stream tails from its open,
 	// never replays), and the runner's idle watchdog (MaxIdle) then returns
 	// the ErrIdleTimeout HandleItem tolerates, seconds in rather than at the
-	// deadline — which still bounds the run if the plant lands too early.
+	// deadline. The idle clock arms only from a streamed event, so the plant
+	// cannot mask a token failure on the stream; one that lands before the
+	// stream is up is missed, and the run then fails at its deadline.
 	planted := time.AfterFunc(3*time.Second, func() {
 		_, _ = events.NewLog(s.pool).Append(ctx, domain.ID(sessionID), []events.NewEvent{{
-			Type: domain.EventSessionStatusIdle,
+			Type:    domain.EventSessionStatusIdle,
 			Payload: []byte(`{"stop_reason":{"type":"end_turn"}}`)}})
 	})
 	defer planted.Stop()

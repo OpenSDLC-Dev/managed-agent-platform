@@ -8,9 +8,13 @@
 -- worker needs. Validity is a set of join conditions rather than a column: a
 -- token authenticates while work_items.id still equals work_id — every
 -- re-hand-out rewrites the id (#62), which is why work_id is not a foreign
--- key: the id it names is meant to stop existing — the lease is unexpired,
--- the item is not stopped, and the session is unarchived. A superseded row
--- is dead by those conditions and never deleted; a session delete cascades.
+-- key: the id it names is meant to stop existing — the lease is unexpired
+-- or the item stopped within the last minute (the worker's post-stop memory
+-- flush), and the session is unarchived. A superseded row is dead by those
+-- conditions and is not deleted, with one exception: an abandoned wind-down's
+-- settlement revokes its item's rows, since the stop it stamps would
+-- otherwise start the grace for a worker presumed dead. A session delete
+-- cascades.
 CREATE TABLE work_session_tokens (
     id          text PRIMARY KEY,
     work_id     text NOT NULL,

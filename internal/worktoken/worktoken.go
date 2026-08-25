@@ -80,6 +80,16 @@ func Secret(token string) string {
 	return base64.RawURLEncoding.EncodeToString(raw)
 }
 
+// Revoke deletes an item's tokens — the one delete the table sees. It is for
+// the settlement of an abandoned wind-down (a stopping item whose lease
+// lapsed): the stopped_at that settlement stamps would otherwise start the
+// post-stop grace for a worker the platform has just presumed dead, in the
+// same transaction that re-arms the session for another.
+func Revoke(ctx context.Context, db DB, workID string) error {
+	_, err := db.Exec(ctx, `DELETE FROM work_session_tokens WHERE work_id = $1`, workID)
+	return err
+}
+
 // Authenticate resolves a token to its principal, or the zero Principal when
 // the token is unknown or no longer names a live item: the item's id must
 // still be the one the token was minted for (a re-hand-out rewrites it), its
@@ -87,6 +97,12 @@ func Secret(token string) string {
 // move an item forward; a graceful stop parks it in stopping with its lease,
 // and the wind-down rides the token; the stopped state starts the grace the
 // worker's post-stop flush needs), and its session unarchived.
+//
+// The minute is sized to the flush: one FlushWrites pass bounded by the
+// reference's MemoryFlushTimeout (30 s), twice over. A graceful stop of an
+// active item rides the frozen lease instead — up to the heartbeat TTL (30 s),
+// as little as nothing — which is one reason the reference worker and this
+// platform's own always force-stop.
 func Authenticate(ctx context.Context, pool *pgxpool.Pool, token string) (Principal, error) {
 	var p Principal
 	err := pool.QueryRow(ctx,

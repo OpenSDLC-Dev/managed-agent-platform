@@ -328,6 +328,20 @@ func TestSessionsTokenJoinConditions(t *testing.T) {
 	if st := status(t, s, http.MethodGet, session, nil, asBearer(token)); st != http.StatusOK {
 		t.Errorf("the token after ack = %d, want 200 (ack is the entry transition)", st)
 	}
+	// A heartbeat's renewal is what carries the token through a long run.
+	if _, err := s.pool.Exec(ctx, `UPDATE work_items SET lease_expires_at = now() + interval '2 seconds' WHERE id = $1`, workID); err != nil {
+		t.Fatal(err)
+	}
+	if st := status(t, s, http.MethodPost, work+"/heartbeat?expected_last_heartbeat=NO_HEARTBEAT", nil, asBearer(token)); st != http.StatusOK {
+		t.Fatalf("heartbeat with the token = %d, want 200", st)
+	}
+	var renewed bool
+	if err := s.pool.QueryRow(ctx, `SELECT lease_expires_at > now() + interval '10 seconds' FROM work_items WHERE id = $1`, workID).Scan(&renewed); err != nil || !renewed {
+		t.Errorf("the heartbeat did not renew the lease (renewed=%v, %v)", renewed, err)
+	}
+	if st := status(t, s, http.MethodGet, session, nil, asBearer(token)); st != http.StatusOK {
+		t.Errorf("the token after the renewal = %d, want 200", st)
+	}
 	if _, err := s.pool.Exec(ctx, `UPDATE work_items SET lease_expires_at = now() - interval '1 second' WHERE id = $1`, workID); err != nil {
 		t.Fatal(err)
 	}
@@ -346,10 +360,45 @@ func TestSessionsTokenJoinConditions(t *testing.T) {
 	if st := status(t, s, http.MethodGet, session, nil, asBearer(token2)); st != http.StatusOK {
 		t.Errorf("the re-hand-out's token = %d, want 200", st)
 	}
-	if _, err := s.pool.Exec(ctx, `UPDATE sessions SET archived_at = now() WHERE id = $1`, sessionID); err != nil {
+	// An abandoned wind-down: a graceful stop parks the item in stopping, its
+	// lease lapses with its worker, and the next poll settles it stopped — a
+	// settlement that revokes the token outright, since the stop it stamps
+	// would otherwise start the post-stop grace for a worker presumed dead.
+	work2 := "/v1/environments/" + envID + "/work/" + workID2
+	if st := status(t, s, http.MethodPost, work2+"/ack", nil, asBearer(key)); st != http.StatusOK {
+		t.Fatalf("ack of the re-hand-out = %d", st)
+	}
+	if st := status(t, s, http.MethodPost, work2+"/heartbeat?expected_last_heartbeat=NO_HEARTBEAT", nil, asBearer(token2)); st != http.StatusOK {
+		t.Fatalf("heartbeat of the re-hand-out = %d", st)
+	}
+	if st := status(t, s, http.MethodPost, work2+"/stop", map[string]any{}, asBearer(token2)); st != http.StatusNoContent {
+		t.Fatalf("graceful stop of the re-hand-out = %d", st)
+	}
+	if _, err := s.pool.Exec(ctx, `UPDATE work_items SET lease_expires_at = now() - interval '1 second' WHERE id = $1`, workID2); err != nil {
 		t.Fatal(err)
 	}
 	if st := status(t, s, http.MethodGet, session, nil, asBearer(token2)); st != http.StatusUnauthorized {
+		t.Errorf("the token of a lapsed wind-down = %d, want 401", st)
+	}
+	s.pollQuery(t, envID, "?block_ms=1", asBearer(key)) // settles the abandoned item
+	var state string
+	var tokens int
+	if err := s.pool.QueryRow(ctx, `SELECT state, (SELECT count(*) FROM work_session_tokens WHERE work_id = $1) FROM work_items WHERE id = $1`, workID2).Scan(&state, &tokens); err != nil || state != "stopped" || tokens != 0 {
+		t.Errorf("after the settlement: state=%q tokens=%d, %v; want stopped with its tokens revoked", state, tokens, err)
+	}
+	if st := status(t, s, http.MethodGet, session, nil, asBearer(token2)); st != http.StatusUnauthorized {
+		t.Errorf("the token after its wind-down was settled = %d, want 401 (no grace for a worker presumed dead)", st)
+	}
+	// A fresh item for the archived-session condition.
+	enqueueOn(t, s, envID, sessionID)
+	_, _, token3 := pollItem(t, s, envID, key)
+	if st := status(t, s, http.MethodGet, session, nil, asBearer(token3)); st != http.StatusOK {
+		t.Fatalf("the fresh item's token = %d, want 200", st)
+	}
+	if _, err := s.pool.Exec(ctx, `UPDATE sessions SET archived_at = now() WHERE id = $1`, sessionID); err != nil {
+		t.Fatal(err)
+	}
+	if st := status(t, s, http.MethodGet, session, nil, asBearer(token3)); st != http.StatusUnauthorized {
 		t.Errorf("the token after its session archived = %d, want 401", st)
 	}
 }

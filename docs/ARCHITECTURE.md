@@ -406,7 +406,9 @@ and holds the two OS-touching adapters `gaterun/` declares.
   the item, by join condition and with no revocation to run: a re-hand-out, a lapsed
   lease or an archive ends it at once; a graceful stop keeps it with the lease while
   the worker winds down; the `stopped` state ends it a minute after `stopped_at`,
-  the reference worker's post-stop memory flush being 30 s on a context of its own.
+  the reference worker's post-stop memory flush being 30 s on a context of its own —
+  unless that stop is the settlement of a wind-down whose lease had already lapsed,
+  which revokes it: that worker is presumed dead and the session re-armed for another.
   On the memory routes the environment key itself is refused, a token's write is the
   session's version (`session_actor`), and `read_only` is enforced at the hands on
   both deployment points — the executor's pull-only sync, the reference worker's

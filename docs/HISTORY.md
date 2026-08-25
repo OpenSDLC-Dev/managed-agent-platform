@@ -85,6 +85,13 @@ matrix driven with curl against a built `controlplane`) read PASS with notes.
 - *Verifier* — the SDK test spent its whole 30 s deadline because no turn ends without a
   brain; an idle end_turn planted once the stream is up ends it through the runner's
   `MaxIdle` within seconds.
+- *Claude reviewer, second pass* — the grace introduced one edge: the settlement of an
+  abandoned wind-down (`FinalizeAbandoned`, a `stopping` item whose lease lapsed) stamps
+  `stopped_at` and would have revived the presumed-dead worker's token for the minute in
+  which the session is re-armed for another. The settlement now revokes the item's tokens
+  (`worktoken.Revoke`, the one delete the table sees), pinned beside the heartbeat renewal
+  that carries a token through a long run. The Codex rejections were judged sound on the
+  code; `read_only` at the hands accepted as design.
 
 ## Memory stores end to end — real `ant` CLI, real model, a `cloud` sandbox (plan 36 slice 4, run 2026-08-25) — ✅ passed
 
