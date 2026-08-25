@@ -1130,7 +1130,7 @@ var threadAddressable = map[domain.EventType]bool{
 //
 // "Thread-addressable" is the whole of the qualifier, and it is the wire's
 // rather than ours: the widening also carries the results answering a child's
-// calls, and agent.tool_result declares no session_thread_id at v1.63.1, so a
+// calls, and agent.tool_result declares no session_thread_id at v1.66.0, so a
 // widened one renders unnamed. A worker still correlates it, because the call
 // it answers is named.
 func eventWire(ev domain.Event, scope events.Scope) (json.RawMessage, error) {

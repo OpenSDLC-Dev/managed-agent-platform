@@ -29,7 +29,7 @@ const maxResourceListLimit = 1000
 
 // defaultMountRoot is the session's uploads directory — the container location
 // every file resource is mounted under, whether the caller supplies a mount_path
-// or not (an omitted one is /mnt/session/uploads/<file_id>; betasession.go:693-717
+// or not (an omitted one is /mnt/session/uploads/<file_id>; betasession.go:787
 // documents that default, and resolveMountPath the rooting of a supplied one).
 const defaultMountRoot = "/mnt/session/uploads/"
 
@@ -38,7 +38,7 @@ const defaultMountRoot = "/mnt/session/uploads/"
 const maxMountPathBytes = 1024
 
 // defaultRepoMountRoot prefixes the default mount for a github_repository
-// resource: /workspace/<repo-name> (betasession.go:730 documents the default;
+// resource: /workspace/<repo-name> (betasession.go:816 documents the default;
 // the <repo-name> derivation — last URL segment, ".git" stripped — is INFERRED,
 // plan 25 decision 3). Unlike file mounts, repo mounts are used literally.
 const defaultRepoMountRoot = "/workspace/"
@@ -93,7 +93,7 @@ type repoResourceJSON struct {
 	Checkout  *checkoutJSON `json:"checkout"` // nullable: renders null when omitted (as-given, plan 25 decision 3)
 }
 
-// checkoutJSON is the branch|commit checkout union (betasession.go:803-807
+// checkoutJSON is the branch|commit checkout union (betasession.go:889-892
 // registers exactly these two variants), stored and rendered as given.
 type checkoutJSON struct {
 	Type string `json:"type"`
@@ -249,7 +249,7 @@ func parseFileResource(obj map[string]json.RawMessage) (resourceInput, error) {
 }
 
 // parseRepoResource validates the github_repository create variant
-// (betasession.go:722-733: authorization_token, type, url required;
+// (betasession.go:806-821: authorization_token, type, url required;
 // mount_path and checkout optional). Validation is create-time-local — no
 // network call proves the repo or the token; the first materialization is the
 // probe (plan 25 decision 3).
@@ -351,7 +351,7 @@ func validRepoURLSegment(s string) bool {
 }
 
 // parseCheckout parses the optional checkout union: {type:"branch", name} |
-// {type:"commit", sha} (betasession.go:803-807 registers exactly these two).
+// {type:"commit", sha} (betasession.go:889-892 registers exactly these two).
 // Omitted or null means the repository's default branch, resolved at clone
 // time — stored and rendered as null (as-given, INFERRED, plan 25 decision 3).
 func parseCheckout(obj map[string]json.RawMessage) (*checkoutJSON, error) {
@@ -395,7 +395,7 @@ func parseCheckout(obj map[string]json.RawMessage) (*checkoutJSON, error) {
 }
 
 // isFullCommitSHA reports whether s is exactly 40 hex characters ("Full commit
-// SHA to check out", betasession.go:575; the 40-hex strictness is INFERRED).
+// SHA to check out", betasession.go:624 and :661; the 40-hex strictness is INFERRED).
 func isFullCommitSHA(s string) bool {
 	if len(s) != 40 {
 		return false

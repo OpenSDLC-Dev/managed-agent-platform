@@ -492,7 +492,7 @@ func dropAnsweredSince(ctx context.Context, client sdk.Client, sessionID, head s
 }
 
 // postToolResult sends one user.tool_result answering a tool use. Empty tool
-// output posts the reference runner's toolset.NoOutput text block (v1.63.1),
+// output posts the reference runner's toolset.NoOutput text block (since v1.63.1),
 // never an empty one: the Sessions API rejects an empty text block, and so
 // does the Messages endpoint the brain's replay hands the content to.
 // is_error is carried through so the model sees a tool-level failure as an

@@ -22,7 +22,7 @@ import (
 // managed-agents resource lists' 100.
 const maxFileListLimit = 1000
 
-// fileJSON is the FileMetadata wire shape (anthropic-sdk-go betafile.go:186-221):
+// fileJSON is the BetaFileMetadata wire shape (anthropic-sdk-go betafile.go:166-201):
 // id/created_at/filename/mime_type/size_bytes all api:"required"; type is the
 // constant "file"; downloadable a plain bool; scope api:"nullable" — a
 // {id, type:"session"} object for files created in a scoping resource's context,
@@ -39,7 +39,7 @@ type fileJSON struct {
 	Scope        *fileScopeJSON `json:"scope"`
 }
 
-// fileScopeJSON is BetaFileScope (betafile.go:133-151): the scoping resource id
+// fileScopeJSON is BetaFileScope (betafile.go:209-227): the scoping resource id
 // and its type ("session").
 type fileScopeJSON struct {
 	ID   string `json:"id"`

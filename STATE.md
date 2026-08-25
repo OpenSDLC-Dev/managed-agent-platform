@@ -4,14 +4,26 @@ What is being worked on right now, and how far along it is — nothing else. **S
 
 ## Active work
 
-**None.** The two follow-ups plan 35's closeout left are delivered: #445's sweep over
-[docs/DIVERGENCES.md](./docs/DIVERGENCES.md)'s pointers, and #447's session delegation
-bound — the one two agents messaging each other cannot escape. Eight issues that work filed
-along the way are delivered too, in five PRs: #450 and #451 (the sections state their
-test), #452 (the pointer invariant made executable), #458 (two mirrored entries
-converged), #457 with #462 (the work API's enqueue trigger is a divergence, and says
-so), and #463 with #465 (the session-id mirror was never observed on the reference at
-all, so it is an inference now; four entries name the recording that settles them).
+[Plan 36](./docs/plan/36_memory-stores.md) (#52) — memory stores: a workspace-scoped
+collection of text documents, attached through `resources[]`, mounted at
+`/mnt/memory/<slug>`, read and written with the ordinary file tools, every write an
+attributed immutable version, in sync across the sessions that share it. Cloud and
+`self_hosted` both, the latter needing the per-item sessions token this plan starts
+issuing. All seven scope decisions are settled; the design is the plan's nineteen decisions.
 
-The bound's record is the registry entry; the three designs it beat, and why each was
-rejected, are in [docs/HISTORY.md](./docs/HISTORY.md).
+## Tasks
+
+- [ ] **Slice 0 — SDK bump v1.63.1 → v1.66.0** (in progress on
+      `feat/plan-36-slice-0-sdk-bump`): pin and pairwise diffs, `acceptance/dcf_test.go`'s
+      one type rename, `type` accepted and echoed on built-in tool configs, the web tools'
+      wire domain keys refused and filed as #481, the live `v1.63.1` labels advanced with
+      85 registry citations re-read, HISTORY record; plan → `in-progress`.
+- [ ] Slice 1 — stores: migration 0028, the three prefixes, `/v1/memory_stores` CRUD.
+- [ ] Slice 2 — memories and versions: migration 0029, `internal/memsync` validation and
+      slug, the five memory routes, the three version routes, actors.
+- [ ] Slice 3 — session attachment and the `memory_store_id` filter.
+- [ ] Slice 4 — cloud materialization, run-end sync, the brain's block. Cloud acceptance.
+- [ ] Slice 5 — the sessions token: migration 0030, the `wtk_` lane and its matrix.
+- [ ] Slice 6 — BYOC memory: the worker's decode, `SetupMemory` and sync, the
+      `self_hosted` 400 lifted. Meets #52's `self_hosted` acceptance.
+- [ ] Slice 7 — close-out: HISTORY, ARCHITECTURE, README, plan → `archived`, #52 closed.
