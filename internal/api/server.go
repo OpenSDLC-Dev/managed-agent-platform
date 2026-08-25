@@ -264,6 +264,7 @@ func NewHandler(pool *pgxpool.Pool, blobs blob.Store, cipher secrets.Cipher, ver
 // management x-api-key); everything else takes the management x-api-key.
 func dispatchAuth(pool *pgxpool.Pool, v *identity.Verifier, next http.Handler) http.Handler {
 	work := requireEnvironmentKey(pool, next)
+	workToken := requireWorkToken(pool, next)
 	mgmt := dispatchManagementAuth(pool, v, next)
 	gate := requireGateToken(pool, next)
 	// Built once and shared by every lane that can reach a human: the verifier
@@ -305,6 +306,11 @@ func dispatchAuth(pool *pgxpool.Pool, v *identity.Verifier, next http.Handler) h
 		// empty session id — not this dispatcher.
 		p := r.URL.EscapedPath()
 		switch {
+		case isWorkTokenBearer(r) && isWorkTokenPath(r, p):
+			// A worker's sessions token, on the families it can reach at all
+			// (worktokenauth.go); first, because its wtk_ shape is what no
+			// other credential carries, so nothing else is misrouted.
+			workToken.ServeHTTP(w, r)
 		case isWorkPath(p):
 			work.ServeHTTP(w, r)
 		case isGateConfigPath(p):

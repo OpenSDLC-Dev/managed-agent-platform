@@ -199,3 +199,16 @@ func TestAuthenticateAfterSessionDeleteCascades(t *testing.T) {
 		t.Errorf("deleted session's token authenticated to %q, want empty", got)
 	}
 }
+
+// TestMintWithPrefixAndHashToken: the one mint under another prefix, and the
+// digest every token table stores (plan 36 decision 15's sessions token).
+func TestMintWithPrefixAndHashToken(t *testing.T) {
+	tok := gatetoken.MintWithPrefix("wtk_")
+	if !strings.HasPrefix(tok, "wtk_") || len(tok) != len(gatetoken.Mint()) {
+		t.Errorf("MintWithPrefix = %q; want a wtk_ token of Mint's length", tok)
+	}
+	sum := sha256.Sum256([]byte(tok))
+	if got := gatetoken.HashToken(tok); got != hex.EncodeToString(sum[:]) {
+		t.Errorf("HashToken = %s; want the token's sha256 hex", got)
+	}
+}

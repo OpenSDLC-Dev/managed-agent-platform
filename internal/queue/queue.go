@@ -377,7 +377,14 @@ func (q *Queue) Claim(ctx context.Context, kind Kind, ttl time.Duration) (*Item,
 // kind, so an item a worker has polled is never also run by the executor even
 // if an environment key were misconfigured against a cloud environment.
 func (q *Queue) Poll(ctx context.Context, envID domain.ID, reclaim time.Duration) (*Work, error) {
-	w, err := scanWork(q.pool.QueryRow(ctx,
+	return q.PollOn(ctx, q.pool, envID, reclaim)
+}
+
+// PollOn is Poll on db — a transaction, when the claim must commit together
+// with a row that depends on it (the work API's sessions token, plan 36
+// decision 15), or the pool. The statement is Poll's, unchanged.
+func (q *Queue) PollOn(ctx context.Context, db DB, envID domain.ID, reclaim time.Duration) (*Work, error) {
+	w, err := scanWork(db.QueryRow(ctx,
 		`WITH picked AS (
 		    SELECT w.id AS pid FROM work_items w
 		    JOIN environments e ON e.id = w.environment_id

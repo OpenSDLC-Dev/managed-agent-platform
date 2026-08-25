@@ -32,17 +32,26 @@ const tokenRandomBytes = 32 // 256 bits of entropy
 // characters (it travels to the gate container as GATE_TOKEN).
 var tokenEncoding = base32.NewEncoding("0123456789abcdefghjkmnpqrstvwxyz").WithPadding(base32.NoPadding)
 
-// Mint returns a fresh opaque token value. It panics only if the system CSPRNG
-// fails, which is unrecoverable for a server that must mint credentials.
-func Mint() string {
+// Mint returns a fresh opaque gate token value.
+func Mint() string { return MintWithPrefix(TokenPrefix) }
+
+// MintWithPrefix returns a fresh opaque token value under prefix — 32 random
+// bytes in the encoding above. It is the one mint for every internal bearer
+// the platform issues (the gate's gtk_, the work item's wtk_ in
+// internal/worktoken), so their entropy and alphabet cannot drift. It panics
+// only if the system CSPRNG fails, which is unrecoverable for a server that
+// must mint credentials.
+func MintWithPrefix(prefix string) string {
 	b := make([]byte, tokenRandomBytes)
 	if _, err := rand.Read(b); err != nil {
 		panic("gatetoken: crypto/rand failed: " + err.Error())
 	}
-	return TokenPrefix + tokenEncoding.EncodeToString(b)
+	return prefix + tokenEncoding.EncodeToString(b)
 }
 
-func hashToken(token string) string {
+// HashToken is the digest stored in place of a token — sha256, hex — shared
+// by every table that keeps one, for MintWithPrefix's reason.
+func HashToken(token string) string {
 	sum := sha256.Sum256([]byte(token))
 	return hex.EncodeToString(sum[:])
 }
@@ -68,7 +77,7 @@ func Ensure(ctx context.Context, pool *pgxpool.Pool, sessionID, token string) er
 	}
 	if _, err := tx.Exec(ctx,
 		`INSERT INTO session_gate_tokens (id, session_id, token_hash) VALUES ($1, $2, $3)`,
-		domain.NewID("gatetok").String(), sessionID, hashToken(token)); err != nil {
+		domain.NewID("gatetok").String(), sessionID, HashToken(token)); err != nil {
 		return err
 	}
 	return tx.Commit(ctx)
@@ -95,7 +104,7 @@ func Authenticate(ctx context.Context, pool *pgxpool.Pool, token string) (string
 		`SELECT t.session_id FROM session_gate_tokens t
 		    JOIN sessions s ON s.id = t.session_id
 		  WHERE t.token_hash = $1 AND t.revoked_at IS NULL AND s.archived_at IS NULL`,
-		hashToken(token)).Scan(&sessionID)
+		HashToken(token)).Scan(&sessionID)
 	if err == pgx.ErrNoRows {
 		return "", nil
 	}

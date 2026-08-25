@@ -89,7 +89,9 @@ platform's own executor, just deployed elsewhere.
    off the Postgres queue (`FOR UPDATE SKIP LOCKED`, lease + reclaim); for a
    `self_hosted` environment a BYOC worker claims the same kind of item over the wire
    work API (`poll`/`ack`/`heartbeat`/`stop`, lease expiry, dead-worker reclaim) — the
-   same pull semantics at two deployment points. Either materializes the agent's
+   same pull semantics at two deployment points; an item whose session attaches a
+   memory store is handed out with a per-item sessions token in its `secret`, the
+   credential the reference worker uses for that item's calls ("Security invariants"). Either materializes the agent's
    skills into the freshly provisioned sandbox (`{workdir}/skills/<name>/`, versions
    resolved at use time, per-skill failure tolerated) along with the session's mounted
    resources (below), runs the tool, and posts the result event (`agent.tool_result`
@@ -304,7 +306,8 @@ Layout order is by layer, as the repo is.
 | `egress/` | The substitution engine that rewrites vault placeholders into secrets, and the host matcher both it and the gate use. It holds no I/O, and that is the invariant to keep. |
 | `gate/` | The per-session forward proxy the sandbox reaches through `HTTP_PROXY`: the enforcement point where the networking policy admits a host and substitution rewrites placeholders on plain HTTP. HTTPS rides through as an opaque CONNECT tunnel. |
 | `gaterun/` | That gate's runtime — firewall, privilege drop, the config fetch-and-swap loop. The OS-touching adapters live in `cmd/gate` behind seams declared here, so everything with logic stays testable off a container. |
-| `gateconfig/` · `gatetoken/` | The internal gate-config endpoint's client and shared wire contract, and the per-session `gtk_` tokens that authenticate to it. Off the public wire, and registered as a divergence. |
+| `gateconfig/` · `gatetoken/` | The internal gate-config endpoint's client and shared wire contract, and the per-session `gtk_` tokens that authenticate to it. Off the public wire, and registered as a divergence. `gatetoken`'s mint and hash are the one implementation every internal bearer uses, `worktoken`'s included. |
+| `worktoken/` | The per-item sessions token (plan 36 decision 15): minted in the poll's claim transaction for an item whose session attaches a memory store, hash-only at rest, rendered as the item's `secret` in the envelope the reference worker decodes, and valid by join conditions on the live item — the id it names, the lease, the state, the session's archive — rather than a revocation column. The lane that admits it is `internal/api`'s. |
 | `vaultresolve/` | Credential resolution at read time: a session's vault ids become the sandbox's placeholder bindings and the gate's decrypted secrets, under one selection rule so the two halves can never disagree, plus a third lane resolving an MCP endpoint's bearer by URL. Current rows every time, so rotation needs no session restart. It also performs the **one write** in this area — the OAuth refresh grant reseals the rotated token onto the credential row under a compare-and-set. |
 | `secrets/` | The credential-cipher seam — `openbao/` in production, `gcpkms/` for GCP, `local/` (AES-256-GCM, one configured master key) for tests **and bao-less minimal deployments** — with the ciphertext persisted by the caller, never here. |
 | `dialguard/` | The SSRF floor under the dials whose URL a **customer** supplied — an agent's `mcp_servers` entry, a vault credential's MCP server or token endpoint. **Not a universal egress check**, and reading it as one misplaces three neighbours: a configured provider or web backend dials with its own ordinary client, the `github_repository` clone's host is pinned to the literal `github.com` by the create-time grammar rather than by an address check, and the per-session gate admits hosts by the environment's network policy. The check runs on the resolved IP at connect time, so DNS rebinding cannot slip past a name that resolved innocently. RFC 1918 is deliberately allowed — this platform runs in the operator's own network. |
@@ -388,7 +391,19 @@ and holds the two OS-touching adapters `gaterun/` declares.
   a **management** operation on the off-wire console API, so an environment key
   can never mint or retire another — but equally, that surface delegates no
   authority the management key did not already hold, and is not a separate
-  permission tier.
+  permission tier. A work item whose session attaches a memory store is handed out
+  with a per-item **sessions token** besides (`wtk_`, plan 36 decision 15): minted in
+  the claim's own transaction, hashed at rest, rendered once in the poll response's
+  `secret`, it is the credential the reference worker uses for that item instead of
+  the environment key, and it reaches only the item's own heartbeat and stop, its own
+  session's read and events, the skill reads, and the memory routes of the stores the
+  session attaches — a sibling session or an unattached store is the same 404 another
+  environment's session gets, everything else a 401 — narrower than the key that
+  polled it. It dies with the item: a re-hand-out, a lapsed lease, a stop or an
+  archive ends it by join condition, with no revocation to run. On the memory routes
+  the environment key itself is refused, a token's write is the session's version
+  (`session_actor`), and `read_only` is the file tools' guardrail rather than the
+  token's: the token reaches an attached store whatever the attachment's access.
 - **Humans authenticate through the deployment's own IdP, and the platform stores no
   authority** (plan 31, #56). Off by default: with `IDENTITY_MODE` unset or `disabled`
   no JWT is accepted anywhere and the surface is the machine-credential platform
