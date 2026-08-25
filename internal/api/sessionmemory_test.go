@@ -116,6 +116,17 @@ func TestSessionMemoryStoreAttachment(t *testing.T) {
 	if got := resourcesOf(t, createGetSession(t, s, sid)); len(got) != 2 || got[1]["memory_store_id"] != bare {
 		t.Errorf("session GET after store delete = %v, want the element kept", got)
 	}
+
+	// A self_hosted session attaches a store the same way (plan 36 slice 6
+	// lifted slice 3's 400): the BYOC worker mounts it from the sessions
+	// token its work items carry.
+	selfHosted := createEnvironment(t, s, map[string]any{"name": "byoc", "config": map[string]any{"type": "self_hosted"}})["id"].(string)
+	byoc := createSession(t, s, map[string]any{
+		"agent": agentID, "environment_id": selfHosted, "resources": []any{memoryElement(store, nil)},
+	})
+	if got := resourcesOf(t, byoc); len(got) != 1 || got[0]["type"] != "memory_store" || got[0]["memory_store_id"] != store {
+		t.Errorf("self_hosted attachment = %v, want the store's element", got)
+	}
 }
 
 // The slug (decision 8): lowercased, every non-[a-z0-9] run one hyphen, a
@@ -155,7 +166,6 @@ func TestSessionMemoryStoreMountPathSlug(t *testing.T) {
 func TestSessionMemoryStoreAttachmentRejections(t *testing.T) {
 	s := newTestServer(t)
 	agentID, envID := fixture(t, s)
-	selfHosted := createEnvironment(t, s, map[string]any{"name": "byoc", "config": map[string]any{"type": "self_hosted"}})["id"].(string)
 	store := createMemoryStore(t, s, "Notes")
 	twin := createMemoryStore(t, s, "notes") // slugs collide with store's
 	archived := createMemoryStore(t, s, "Old")
@@ -178,7 +188,6 @@ func TestSessionMemoryStoreAttachmentRejections(t *testing.T) {
 		"the same twice":  {envID, []any{memoryElement(store, nil), memoryElement(store, map[string]any{"access": "read_only"})}, "more than once"},
 		"slug collision":  {envID, []any{memoryElement(store, nil), memoryElement(twin, nil)}, "both mount at /mnt/memory/notes"},
 		"instructions":    {envID, []any{memoryElement(store, map[string]any{"instructions": strings.Repeat("x", 4097)})}, "4096"},
-		"self_hosted":     {selfHosted, []any{memoryElement(store, nil)}, "self_hosted"},
 		"malformed id":    {envID, []any{memoryElement("mem_x", nil)}, "memory_store_id"},
 		"missing id":      {envID, []any{map[string]any{"type": "memory_store"}}, "memory_store_id"},
 		"bad access":      {envID, []any{memoryElement(store, map[string]any{"access": "append"})}, "access"},

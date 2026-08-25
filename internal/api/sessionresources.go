@@ -720,18 +720,6 @@ func snapshotMemoryStore(ctx context.Context, db querier, in resourceInput) (mem
 	}, nil
 }
 
-// resourceInputsHaveMemory reports whether any validated input is a memory
-// store — createSession refuses those on a self_hosted environment until
-// slice 6 (plan 36 scope decision 2).
-func resourceInputsHaveMemory(inputs []resourceInput) bool {
-	for _, in := range inputs {
-		if in.kind == resourceKindMemory {
-			return true
-		}
-	}
-	return false
-}
-
 // errRepoSecretsUnavailable answers a repo-bearing create or a token rotation
 // on a deployment with no secrets cipher: refused, never stored unencrypted
 // (the errSecretsUnavailable twin, plan 25 decision 2).

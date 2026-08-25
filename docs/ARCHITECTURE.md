@@ -96,11 +96,13 @@ platform's own executor, just deployed elsewhere.
    skills into the freshly provisioned sandbox (`{workdir}/skills/<name>/`, versions
    resolved at use time, per-skill failure tolerated) along with the session's mounted
    resources (below), runs the tool, and posts the result event (`agent.tool_result`
-   platform-managed, `user.tool_result` self-hosted). On the platform-managed side the
-   run's end also reconciles the session's memory stores with their directories
-   (below) — the sandbox read before the transaction that commits the results, the
-   settlement inside it, the sandbox written after; a run that faulted leaves that to
-   the next run or the reaper.
+   platform-managed, `user.tool_result` self-hosted). Either side also reconciles the
+   session's memory stores with their directories at the run's end (below) — the
+   platform executor against the store's rows (the sandbox read before the transaction
+   that commits the results, the settlement inside it, the sandbox written after), the
+   BYOC worker against the same routes over the wire; a faulted run leaves that to the
+   next run — or, on the platform side, the reaper, while the BYOC worker flushes its
+   writes on the way out instead (below).
 5. The commit that appends the result also enqueues the next `model_turn` — only once
    every tool use in the turn is answered. A brain claims it (brains wake by polling the
    queue; Postgres LISTEN/NOTIFY serves the SSE fan-out, not the brain), replays, and
@@ -182,24 +184,39 @@ is there. A resource that has gone missing costs its own mount and a log line, n
 turn.
 
 **Memory stores** (plan 36) ride the same array as an id-less element that snapshots
-the store's name and its `/mnt/memory/<slug>` mount. On a `cloud` session the executor
-lands the store's memories there before the tools run — `0666` files beside a marker
-naming the store and a baseline recording what the directory and the store agreed on —
-and the brain renders a "Memory stores" block after the repositories block. The
-directory is reconciled with the store when a tool run ends (a faulted run leaves it to
-the next run or the reaper), in three phases the shared
+the store's name and its `/mnt/memory/<slug>` mount. The sandbox lands the store's
+memories there before the tools run — `0666` files beside a marker naming the store and
+a baseline recording what the directory and the store agreed on — and the brain renders
+a "Memory stores" block after the repositories block. A `cloud` session's executor reads
+and writes the store's rows directly; a `self_hosted` session's BYOC worker does the
+same over the wire, through the five memory routes its per-item sessions token admits
+(decision 15), the store landed from a `view=full` listing and reconciled with per-memory
+`GET`s and the routes' own preconditions. The
+directory is reconciled with the store when a tool run ends (a faulted `cloud` run leaves
+it to the next run or the reaper; the BYOC worker flushes its writes on the way out
+instead, below), in three phases the shared
 rules in `internal/memsync` decide: the tree is hashed in the sandbox, the plan settles
-inside the transaction that commits the run (a push is a compare-and-set on the head's
+— inside the transaction that commits a `cloud` run, over the wire against the routes for
+a `self_hosted` one — (a push is a compare-and-set on the head's
 digest and appends a `session_actor` version; the store wins a both-sides change; an
 emptied directory against a baseline of several files is re-downloaded, never read as
 deletions), and the settlement is written back; a listing that fails, or holds more
 changed files than a store can, skips the store rather than reading as deletions. A `read_only` or archived store, or a
-directory whose marker was altered, is pulled from and never pushed to, and the file
-tools refuse to write in a `read_only` or archived store (the marker they never see);
-the reaper syncs a sandbox before every tier's action but the deleted tier's, and a run
-whose sandbox already held a mount syncs it before its tools run as well, so a store's
-change reaches a session at its next run rather than the one after. A
-`self_hosted` session cannot attach a store until the plan's slice 6.
+directory whose marker was altered, is pulled from and never pushed to. The file tools
+refuse to write in a `read_only` store on either kind; an archived store is read-only at
+the tools only on `cloud`, where the executor reads `archived_at` from the row — a
+`self_hosted` worker's token cannot read the store, so it learns the archive from the
+first write the store refuses, and a `bash` write there is withheld at the sync rather
+than refused at the tool. On `cloud` the reaper syncs a sandbox before every tier's
+action but the deleted tier's, and a run whose sandbox already held a mount syncs it
+before its tools run as well, so a store's change reaches a session at its next run
+rather than the one after. The BYOC worker has no reaper, so beyond the two run boundaries — a mount found already
+present synced before the tools, and every run synced once at its clean end — it runs a
+push-only flush on the way out of a faulted or stopped run (the reference worker's
+`FlushWrites`, on a bounded context of its own): a stop force-stops the item with no
+later run to reconcile it, so the flush is the only pass that saves what the agent wrote.
+It fails the item (`ErrSessionMemoryNoToken`) rather than run a store session with no
+token to mount from.
 
 **Sandboxes have a lifecycle** (plan 24). Provision is idempotent per session — it
 returns, heals, or re-creates — and the **reaper in the executor is the single owner of
@@ -499,9 +516,9 @@ transaction commits, so a rolled-back transition counts nothing), time-to-first-
 measured from the work claim in `internal/brain/telemetry.go`, tool-run duration in
 `internal/toolset/telemetry.go`, skills-materialization outcomes/duration in
 `internal/executor/telemetry.go` and `internal/worker/telemetry.go` (same instrument
-names, two scopes), and the executor's memory-store instruments beside them
+names, two scopes), and the memory-store instruments beside them on both meters
 (`memory.materialized`, `memory.sync.actions` by pulled/pushed/deleted/conflict/refused,
-and the two durations). Queue `depth`/`pending`/`workers_polling` are OTLP
+and the two durations — the executor's since slice 4, the worker's since slice 6). Queue `depth`/`pending`/`workers_polling` are OTLP
 observable gauges (`internal/queue/metrics.go`) sampling the same work-stats view the API
 serves — registered once by the control plane, reported per self_hosted environment. A
 configured OTLP endpoint bridges

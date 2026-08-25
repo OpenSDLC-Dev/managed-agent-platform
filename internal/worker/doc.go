@@ -11,11 +11,20 @@
 // The whole loop lives here. lease.go polls the work queue, claims an item and
 // heartbeats it (NewWorker and Run, which cmd/worker wires to configuration);
 // toolexec.go is the driver that runs a session's outstanding tools once;
-// files.go and skills.go materialize a session's files and skills into the
-// sandbox before the tools that read them run. client.go builds the SDK client,
-// and only that client ever talks to the platform — a worker holds no database
-// handle, which is the property that lets it run on compute the platform cannot
-// reach.
+// files.go, skills.go and memory.go materialize a session's files, skills and
+// memory stores into the sandbox before the tools that read them run, memory.go
+// reconciling each store with the control plane at the run's boundary (plan 36
+// slice 6, the wire twin of internal/executor/memory.go). client.go builds the
+// SDK client, and only that client ever talks to the platform — a worker holds
+// no database handle, which is the property that lets it run on compute the
+// platform cannot reach.
+//
+// One item carries a second credential besides the environment key: a work item
+// whose session attaches a memory store is handed out with a per-item sessions
+// token (wtk_) in its secret, the only one of the worker's two credentials
+// those routes admit (client.go decodes it; memory.go applies it per call over
+// the environment-key client). Everything else the worker calls still rides the
+// environment key.
 //
 // Two boundaries are worth knowing before changing anything here. The wire is
 // the whole contract, and it is narrow: Poll serves this worker exactly one

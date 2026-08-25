@@ -36,10 +36,11 @@ type memoryMount struct {
 }
 
 // resolveMemoryBlock builds the "Memory stores" system-prompt block from the
-// session's resources[], for cloud environments only: nothing materializes a
-// store on self_hosted until plan 36 slice 6, and the repositories block's
-// rule holds — a mount the sandbox does not have must not be described. It
-// returns the block, the number of stores rendered, and the number of misses.
+// session's resources[], on either environment kind: the executor lands a
+// cloud session's stores and the BYOC worker a self_hosted session's (plan
+// 36 slice 6), so unlike the repositories block there is no sandbox the
+// mount is missing from. It returns the block, the number of stores
+// rendered, and the number of misses.
 //
 // The one lookup per store is for what the element cannot say: whether the
 // store still exists (a deleted store keeps its element, decision 7 — the
@@ -51,8 +52,8 @@ type memoryMount struct {
 // executor still materializes and syncs a store the brain merely could not
 // ask about, and the attachment's access may since have been overtaken by
 // an archive.
-func (b *Brain) resolveMemoryBlock(ctx context.Context, resourcesJSON []byte, envKind string) (string, int, int) {
-	if len(resourcesJSON) == 0 || envKind != "cloud" {
+func (b *Brain) resolveMemoryBlock(ctx context.Context, resourcesJSON []byte) (string, int, int) {
+	if len(resourcesJSON) == 0 {
 		return "", 0, 0
 	}
 	var mounts []memoryMount

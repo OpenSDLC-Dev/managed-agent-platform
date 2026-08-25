@@ -338,9 +338,10 @@ func (b *Brain) runTurn(ctx context.Context, item *queue.Item, claimedAt time.Ti
 	// to miss.
 	reposBlock, reposInjected := b.resolveReposBlock(ctx, sid, resourcesJSON, envKind)
 	// Memory-store injection: a "Memory stores" block after the repositories
-	// block, cloud only (plan 36 decision 9). A deleted store is a counted
-	// miss rendered hedged; the count is flushed now for the skills' reason.
-	memoryBlock, memoryInjected, memoryMisses := b.resolveMemoryBlock(ctx, resourcesJSON, envKind)
+	// block, on both environment kinds (plan 36 decision 9; the worker's half
+	// is slice 6's). A deleted store is a counted miss rendered hedged; the
+	// count is flushed now for the skills' reason.
+	memoryBlock, memoryInjected, memoryMisses := b.resolveMemoryBlock(ctx, resourcesJSON)
 	recordMemoryResolveMisses(ctx, memoryMisses)
 	// The tool surface: what the model may call, and what each name it calls
 	// back means. Both come from the same resolution so the two cannot disagree,
