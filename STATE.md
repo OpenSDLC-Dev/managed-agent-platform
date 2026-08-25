@@ -18,7 +18,8 @@ issuing. All seven scope decisions are settled; the design is the plan's ninetee
       tool configs, the web tools' wire domain keys refused and filed as #481, the live
       `v1.63.1` labels advanced with 85 registry citations re-read, HISTORY record; plan
       → `in-progress`.
-- [ ] Slice 1 — stores: migration 0028, the three prefixes, `/v1/memory_stores` CRUD.
+- [x] **Slice 1 — stores** (#484): migration 0028, the three `mem*` prefixes, the six
+      `/v1/memory_stores` routes on the vault idiom, `created_by`, the six registry items.
 - [ ] Slice 2 — memories and versions: migration 0029, `internal/memsync` validation and
       slug, the five memory routes, the three version routes, actors.
 - [ ] Slice 3 — session attachment and the `memory_store_id` filter.

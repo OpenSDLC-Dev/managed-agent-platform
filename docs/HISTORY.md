@@ -49,6 +49,68 @@ new directory and in-repo citations re-pointed in the moving PR (plan
 
 ---
 
+## Memory stores — real `ant` CLI against `/v1/memory_stores` (plan 36 slice 1, run 2026-08-25) — ✅ passed
+
+The plan's slice-1 verification row asks that `ant beta:memory-stores create|retrieve|update|list|
+archive|delete` work against this platform. Recorded with the real `ant` CLI v1.26.1 (which pins
+anthropic-sdk-go v1.66.0) against the branch's own `controlplane` on a throwaway Postgres, at
+34c908e (#484), after the reviewers' round below (the later CodeRabbit refinement, 3b899d7, changed
+nothing the transcript exercises). Every command below is the CLI's own spelling — the id
+travels as `--memory-store-id`, `--metadata` takes a YAML mapping, `--include-archived` is a bare flag.
+
+- `create --name "User preferences" --description "What the user likes" --metadata '{team: infra,
+  tier: gold}'` → the eight-field `memory_store` object, `archived_at: null`, `updated_at ==
+  created_at`; `retrieve` → the same body.
+- `update --description "" --metadata '{tier: null, env: prod}'` → `description: ""`, metadata
+  `{env: prod, team: infra}` (the null deleted `tier`, the omitted `team` stayed), `updated_at`
+  advanced, `created_at` unchanged.
+- `list --limit 1 --max-items -1` → the CLI auto-paged four stores newest-first through this
+  platform's `k1|` cursor, one per page, none repeated.
+- `archive` → `archived_at` set and **`updated_at` unchanged** (the spec's definition of the field;
+  the first commit bumped it, the review round removed the bump); `archive` again → the same
+  `archived_at`; `update --name Renamed` → `400 memory store … is archived`; `list` omits the store,
+  `list --include-archived` and `retrieve` serve it.
+- `delete` → `{type: memory_store_deleted, id}`; `retrieve` → `404 not_found_error`.
+- A 256-character `--name` → `400 name cannot exceed 255 characters`; `list --limit 101` → `400 limit
+  must be an integer between 1 and 100`.
+
+**Review round** (the reviewers' findings, all verified against the source before acting):
+
+- *Both reviewers, the verifier* — archive advanced `updated_at`, which the OpenAPI spec defines as
+  "when the store's name, description, or metadata was last modified". The vault archive it copied
+  has no such definition to honor. Fixed: archive touches only `archived_at`, and an update that
+  changes none of the three fields (an empty body, a null bag, the stored values sent back) skips
+  the write — asserted on create, after a real update, after archive and across no-op updates.
+- *Codex* — `validateMetadataCaps` checked only the upper bound of the documented 1–64 key range, on
+  every resource with a metadata bag. Fixed; pinned on create and on patch. *CodeRabbit* then made
+  the fix precise: a bound on the merged map would have left any row that acquired an empty key
+  before the check stuck, every patch answering 400 until the caller guessed `{"": null}`. The lower
+  bound is therefore enforced on what a caller sends — a create's bag, a patch's upserts — and a
+  planted legacy key is asserted patchable and deletable, with no cleanup migration needed.
+- *Codex* — the paging test never forced tied timestamps, so `created_at < $t` alone would have
+  passed. Now a 21-row walk with every `created_at` equal, plus the default limit of 20 and
+  `limit=100`.
+- *Both reviewers* — the two "404" ids contained letters outside the id alphabet, so `checkID`
+  refused them before the prefix or the row lookup was consulted. Now a well-formed unknown id
+  reaches `ErrNoRows`, and a NUL-byte id proves `checkID` runs (Postgres would 500 on the byte).
+- *Codex, refuted* — "create must 400 on `description: null` / `metadata: null`, the spec types them
+  non-nullable". The spec types what the SDK sends, and the SDK never sends null; this platform reads
+  a null string or bag as the unset value on every create route (`stringField`, `parseMetadata` —
+  agents, vaults and sessions alike), and a memory-store-only 400 would diverge from that rule, not
+  from the reference, whose answer to an explicit null is unrecorded.
+- *Verifier* — the sessions-list filter entry still called memory stores "unimplemented", README's
+  reserved-seams line still listed them, and the fragment counted an amended entry as new. All three
+  corrected.
+
+**Gate**: `make verify` in WSL at a831c26 — 54 packages `ok`, 0 `FAIL`, total statement coverage
+90.39%; on the reviewed code (bdf9a10, the same tree as the merge) — 54 `ok`, 0 `FAIL`, **90.43%**.
+A run in between, at 34c908e, failed only on `internal/mcp`'s `TestListToolsRefusesAResponseTooLargeToRead`,
+the open WSL-only flake #380, which this branch does not touch; another timed out `internal/api` and
+`internal/executor` at Go's ten-minute package limit because the verifier's native run of the same
+suites shared the Docker daemon — the uncontended re-run above is the one that counts.
+
+---
+
 ## anthropic-sdk-go v1.66.0 bump — wire-schema verification record (2026-08-25, plan 36 slice 0)
 
 The fifth bump record. Unlike v1.63.1's, whose managed-agents content was all schema this platform
