@@ -13,7 +13,7 @@
 // is valid while the item it names is live — the join conditions Authenticate
 // runs — so a re-hand-out (a fresh work id, #62), a lapsed lease and a session
 // archive each end it without an event, and a stop ends it a minute after
-// stopped_at: the reference worker flushes its unsynced memory writes once the
+// it was requested: the reference worker flushes its unsynced memory writes once the
 // control plane has reported the stop, on a context of its own bounded by 30
 // seconds (lib/environments/memories.go Cleanup), and a token dead at that
 // instant would lose them — a BYOC workdir is removed at the item's end, with
@@ -82,9 +82,9 @@ func Secret(token string) string {
 
 // Revoke deletes an item's tokens — the one delete the table sees. It is for
 // the settlement of an abandoned wind-down (a stopping item whose lease
-// lapsed): the stopped_at that settlement stamps would otherwise start the
-// post-stop grace for a worker the platform has just presumed dead, in the
-// same transaction that re-arms the session for another.
+// lapsed): its minute may still be running when the platform presumes the
+// worker dead and, in the same transaction, re-arms the session for another
+// — and two workers must not write a session's memory at once.
 func Revoke(ctx context.Context, db DB, workID string) error {
 	_, err := db.Exec(ctx, `DELETE FROM work_session_tokens WHERE work_id = $1`, workID)
 	return err
@@ -93,16 +93,18 @@ func Revoke(ctx context.Context, db DB, workID string) error {
 // Authenticate resolves a token to its principal, or the zero Principal when
 // the token is unknown or no longer names a live item: the item's id must
 // still be the one the token was minted for (a re-hand-out rewrites it), its
-// lease unexpired unless it stopped within the last minute (ack and heartbeat
-// move an item forward; a graceful stop parks it in stopping with its lease,
-// and the wind-down rides the token; the stopped state starts the grace the
-// worker's post-stop flush needs), and its session unarchived.
+// lease unexpired while it runs, or its stop requested within the last minute
+// once it is stopping or stopped (a graceful stop parks an active item in
+// stopping with a lease the heartbeat no longer extends, so the minute counts
+// from the request rather than from the lease or the stop's completion: the
+// wind-down and the post-stop flush both ride it), and its session
+// unarchived.
 //
-// The minute is sized to the flush: one FlushWrites pass bounded by the
-// reference's MemoryFlushTimeout (30 s), twice over. A graceful stop of an
-// active item rides the frozen lease instead — up to the heartbeat TTL (30 s),
-// as little as nothing — which is one reason the reference worker and this
-// platform's own always force-stop.
+// The minute is sized to the reference worker: it learns of a stop at its
+// next heartbeat (half the 30 s TTL), then flushes its unsynced memory writes
+// in one pass bounded by MemoryFlushTimeout (30 s) — 45 s of the 60. Counted
+// from the request, the settlement of an abandoned wind-down cannot restart
+// it, and Revoke ends it there regardless.
 func Authenticate(ctx context.Context, pool *pgxpool.Pool, token string) (Principal, error) {
 	var p Principal
 	err := pool.QueryRow(ctx,
@@ -111,8 +113,9 @@ func Authenticate(ctx context.Context, pool *pgxpool.Pool, token string) (Princi
 		   JOIN work_items w ON w.id = t.work_id AND w.session_id = t.session_id
 		   JOIN sessions s ON s.id = t.session_id
 		  WHERE t.token_hash = $1
-		    AND (w.state <> 'stopped' AND w.lease_expires_at > now()
-		         OR w.stopped_at > now() - interval '60 seconds')
+		    AND CASE WHEN w.state IN ('stopping', 'stopped')
+		             THEN w.stop_requested_at > now() - interval '60 seconds'
+		             ELSE w.lease_expires_at > now() END
 		    AND s.archived_at IS NULL`,
 		gatetoken.HashToken(token)).Scan(&p.WorkID, &p.SessionID, &p.EnvironmentID)
 	if errors.Is(err, pgx.ErrNoRows) {

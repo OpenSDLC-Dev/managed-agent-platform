@@ -49,29 +49,52 @@ func TestSDKWorkerServesAnItemWithTheSessionsToken(t *testing.T) {
 		MaxIdle:            &idle,
 		MemorySyncInterval: -1,
 	})
-	// No brain runs here, so no turn ends on its own: an idle end_turn is
-	// planted once the worker's stream is up (the stream tails from its open,
-	// never replays), and the runner's idle watchdog (MaxIdle) then returns
-	// the ErrIdleTimeout HandleItem tolerates, seconds in rather than at the
-	// deadline. The idle clock arms only from a streamed event, so the plant
-	// cannot mask a token failure on the stream; one that lands before the
-	// stream is up is missed, and the run then fails at its deadline.
-	planted := time.AfterFunc(3*time.Second, func() {
-		_, _ = events.NewLog(s.pool).Append(ctx, domain.ID(sessionID), []events.NewEvent{{
-			Type:    domain.EventSessionStatusIdle,
-			Payload: []byte(`{"stop_reason":{"type":"end_turn"}}`)}})
-	})
-	defer planted.Stop()
-	started := time.Now()
 	runCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
-	if err := w.HandleItem(runCtx, environments.HandleItemOptions{
+	// No brain runs here, so no turn ends on its own: an idle end_turn is
+	// planted every three seconds until the worker returns — the stream tails
+	// from its open and never replays, so only a plant after it is up counts —
+	// and the runner's idle watchdog (MaxIdle) then returns the ErrIdleTimeout
+	// HandleItem tolerates. The idle clock arms only from a streamed event, so
+	// a plant cannot mask a token failure on the stream.
+	planted := make(chan struct{})
+	var plantErr error
+	go func() {
+		defer close(planted)
+		tick := time.NewTicker(3 * time.Second)
+		defer tick.Stop()
+		for {
+			select {
+			case <-runCtx.Done():
+				return
+			case <-tick.C:
+			}
+			if _, err := events.NewLog(s.pool).Append(ctx, domain.ID(sessionID), []events.NewEvent{{
+				Type:    domain.EventSessionStatusIdle,
+				Payload: []byte(`{"stop_reason":{"type":"end_turn"}}`)}}); err != nil {
+				plantErr = err
+				return
+			}
+		}
+	}()
+	started := time.Now()
+	err := w.HandleItem(runCtx, environments.HandleItemOptions{
 		WorkID: workID, EnvironmentID: envID, SessionID: sessionID,
 		EnvironmentKey: key, WorkSecret: secret.(string),
-	}); err != nil {
+	})
+	took := time.Since(started)
+	cancel()
+	<-planted
+	if err != nil {
 		t.Fatalf("HandleItem with the sessions token: %v", err)
 	}
-	t.Logf("HandleItem returned after %s", time.Since(started).Round(time.Millisecond))
+	if plantErr != nil {
+		t.Errorf("planting the idle event: %v", plantErr)
+	}
+	if took > 20*time.Second {
+		t.Errorf("HandleItem took %s: the idle plant did not end it", took.Round(time.Millisecond))
+	}
+	t.Logf("HandleItem returned after %s", took.Round(time.Millisecond))
 	var state string
 	var beat *time.Time
 	if err := s.pool.QueryRow(ctx, `SELECT state, last_heartbeat FROM work_items WHERE id = $1`, workID).Scan(&state, &beat); err != nil {

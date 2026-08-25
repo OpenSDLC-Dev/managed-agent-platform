@@ -258,6 +258,7 @@ func TestSessionsTokenAdmissionMatrix(t *testing.T) {
 		{http.MethodGet, store + "/memory_versions/" + vid},
 		{http.MethodPost, store + "/memory_versions/" + vid + "/redact"},
 		{http.MethodPatch, store + "/memories/" + mid},
+		{http.MethodGet, store + "/memories/"},
 		{http.MethodGet, store + "%2Fmemories"},
 		{http.MethodGet, "/v1/sessions/" + sessionID + "/%65vents"},
 		{http.MethodPost, store + "/archive"},
@@ -284,9 +285,9 @@ func TestSessionsTokenAdmissionMatrix(t *testing.T) {
 	}
 
 	// Its own item's stop. A graceful stop parks the active item in stopping
-	// with its lease, and the token rides the wind-down; the force-stop that
-	// ends it starts the minute of grace the worker's post-stop memory flush
-	// needs, after which the token is dead.
+	// with a lease the heartbeat no longer extends; the token rides the
+	// wind-down and the post-stop memory flush for a minute from the request,
+	// the lease and the force-stop aside, and is dead after.
 	if st := status(t, s, http.MethodPost, work+"/stop", map[string]any{}, tok); st != http.StatusNoContent {
 		t.Errorf("graceful stop with the token = %d, want 204", st)
 	}
@@ -297,17 +298,23 @@ func TestSessionsTokenAdmissionMatrix(t *testing.T) {
 	if st := status(t, s, http.MethodPost, store+"/memories", map[string]any{"path": "/b.md", "content": "while stopping"}, tok); st/100 != 2 {
 		t.Errorf("a memory write while stopping = %d, want 2xx", st)
 	}
+	if _, err := s.pool.Exec(context.Background(), `UPDATE work_items SET lease_expires_at = now() - interval '1 second' WHERE id = $1`, workID); err != nil {
+		t.Fatal(err)
+	}
+	if st := status(t, s, http.MethodPost, store+"/memories", map[string]any{"path": "/b2.md", "content": "the frozen lease lapsed"}, tok); st/100 != 2 {
+		t.Errorf("a memory write while stopping, the frozen lease lapsed = %d, want 2xx", st)
+	}
 	if st := status(t, s, http.MethodPost, work+"/stop", map[string]any{"force": true}, tok); st != http.StatusNoContent {
 		t.Errorf("force-stop with the token = %d, want 204", st)
 	}
 	if st := status(t, s, http.MethodPost, store+"/memories", map[string]any{"path": "/c.md", "content": "the flush"}, tok); st/100 != 2 {
 		t.Errorf("a memory write in the post-stop grace = %d, want 2xx", st)
 	}
-	if _, err := s.pool.Exec(context.Background(), `UPDATE work_items SET stopped_at = now() - interval '61 seconds' WHERE id = $1`, workID); err != nil {
+	if _, err := s.pool.Exec(context.Background(), `UPDATE work_items SET stop_requested_at = now() - interval '61 seconds' WHERE id = $1`, workID); err != nil {
 		t.Fatal(err)
 	}
 	if st := status(t, s, http.MethodGet, "/v1/sessions/"+sessionID, nil, tok); st != http.StatusUnauthorized {
-		t.Errorf("the token a minute after its item stopped = %d, want 401", st)
+		t.Errorf("the token a minute after its item's stop was requested = %d, want 401", st)
 	}
 }
 
@@ -361,9 +368,9 @@ func TestSessionsTokenJoinConditions(t *testing.T) {
 		t.Errorf("the re-hand-out's token = %d, want 200", st)
 	}
 	// An abandoned wind-down: a graceful stop parks the item in stopping, its
-	// lease lapses with its worker, and the next poll settles it stopped — a
-	// settlement that revokes the token outright, since the stop it stamps
-	// would otherwise start the post-stop grace for a worker presumed dead.
+	// lease lapses with its worker inside the minute, and the next poll settles
+	// it stopped — a settlement that revokes the token, since its minute would
+	// otherwise run on while the session is re-armed for another worker.
 	work2 := "/v1/environments/" + envID + "/work/" + workID2
 	if st := status(t, s, http.MethodPost, work2+"/ack", nil, asBearer(key)); st != http.StatusOK {
 		t.Fatalf("ack of the re-hand-out = %d", st)
@@ -377,8 +384,8 @@ func TestSessionsTokenJoinConditions(t *testing.T) {
 	if _, err := s.pool.Exec(ctx, `UPDATE work_items SET lease_expires_at = now() - interval '1 second' WHERE id = $1`, workID2); err != nil {
 		t.Fatal(err)
 	}
-	if st := status(t, s, http.MethodGet, session, nil, asBearer(token2)); st != http.StatusUnauthorized {
-		t.Errorf("the token of a lapsed wind-down = %d, want 401", st)
+	if st := status(t, s, http.MethodGet, session, nil, asBearer(token2)); st != http.StatusOK {
+		t.Errorf("the token of a wind-down whose lease lapsed = %d, want 200 (the minute runs from the request)", st)
 	}
 	s.pollQuery(t, envID, "?block_ms=1", asBearer(key)) // settles the abandoned item
 	var state string

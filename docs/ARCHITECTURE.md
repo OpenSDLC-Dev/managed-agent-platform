@@ -403,12 +403,13 @@ and holds the two OS-touching adapters `gaterun/` declares.
   them) — a sibling session or an unattached store is the same 404 another
   environment's session gets, everything else a 401 — narrower than the key that
   polled it everywhere but the memories, which are what it exists for. It dies with
-  the item, by join condition and with no revocation to run: a re-hand-out, a lapsed
-  lease or an archive ends it at once; a graceful stop keeps it with the lease while
-  the worker winds down; the `stopped` state ends it a minute after `stopped_at`,
-  the reference worker's post-stop memory flush being 30 s on a context of its own —
-  unless that stop is the settlement of a wind-down whose lease had already lapsed,
-  which revokes it: that worker is presumed dead and the session re-armed for another.
+  the item, by join condition, for every request after — a stream already open runs
+  to its end, as one opened with any credential here does: a re-hand-out, a lapsed
+  lease or an archive ends it; a stop, graceful or not, leaves it a minute from the
+  request (the reference worker learns of the stop at its next heartbeat, then
+  flushes its memory writes for up to 30 s on a context of its own); and the
+  settlement of a wind-down whose lease lapsed revokes it outright, that worker being
+  presumed dead and the session re-armed for another.
   On the memory routes the environment key itself is refused, a token's write is the
   session's version (`session_actor`), and `read_only` is enforced at the hands on
   both deployment points — the executor's pull-only sync, the reference worker's

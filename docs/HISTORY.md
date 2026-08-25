@@ -67,9 +67,10 @@ matrix driven with curl against a built `controlplane`) read PASS with notes.
   the token before the reference worker's post-stop flush (`Cleanup` → `FlushWrites`, 30 s on a
   context of its own), losing every edit since the last 15 s sync — and unlike `cloud`, whose
   held sandbox is synced at the next run's start, a BYOC workdir is removed at the item's end.
-  Fixed as a join condition, not a column: a stopped item's token lives a minute past
-  `stopped_at`. The Codex reviewer's reading of the same conditions — `stopping` keeping the
-  whole matrix — is by design (the wind-down rides the token), now said so and pinned.
+  Fixed as a join condition, not a column: a stopping or stopped item's token lives a minute
+  past the stop's request. The Codex reviewer's reading of the same conditions — `stopping`
+  keeping the whole matrix — is by design (the wind-down rides the token), now said so and
+  pinned.
 - *Claude reviewer* — registry and ARCHITECTURE defects, all reworded: "narrower than the key
   that polled it" (false on the memories), the SDK quote missing its "may be", the reversal
   record the rewrite dropped, and a tracker sentence claiming recording item 10 covers the
@@ -80,18 +81,26 @@ matrix driven with curl against a built `controlplane`) read PASS with notes.
 - *Codex reviewer (gpt-5.6-sol, xhigh)* — two findings evaluated and rejected: an events
   stream open when the token dies runs to its end (true of every credential here — a stream
   authenticates at its open — and the holder polled with an environment key that reads every
-  session's events in the environment anyway); a request body stalled across the token's
-  death is bounded by the server's one-minute `ReadTimeout`, the same for every bearer.
+  session's events in the environment anyway); a request authenticated at its open completes,
+  its lock waits included — the policy for every credential here, so the docs say the token
+  ends for every request after, not "at once".
 - *Verifier* — the SDK test spent its whole 30 s deadline because no turn ends without a
   brain; an idle end_turn planted once the stream is up ends it through the runner's
   `MaxIdle` within seconds.
 - *Claude reviewer, second pass* — the grace introduced one edge: the settlement of an
   abandoned wind-down (`FinalizeAbandoned`, a `stopping` item whose lease lapsed) stamps
-  `stopped_at` and would have revived the presumed-dead worker's token for the minute in
-  which the session is re-armed for another. The settlement now revokes the item's tokens
+  `stopped_at`, and the presumed-dead worker's token could run on into the minute in which
+  the session is re-armed for another. The settlement now revokes the item's tokens
   (`worktoken.Revoke`, the one delete the table sees), pinned beside the heartbeat renewal
   that carries a token through a long run. The Codex rejections were judged sound on the
   code; `read_only` at the hands accepted as design.
+- *Codex reviewer, second pass* — a grace counted from `stopped_at` left a graceful wind-down
+  on its frozen lease (the worker learns of the stop half a TTL later — 15 s for a 30 s
+  flush) and let a late settlement restart the clock; it is counted from
+  `stop_requested_at` now, for a stopping or stopped item alike, 45 s of the 60 spoken for.
+  Also: a `memories/` trailing slash the lane admitted to the mux's 404 is refused; the
+  SDK test plants its idle event until the worker returns and bounds the run at 20 s; the
+  registry's reading (1) no longer overreads the SDK's "may be".
 
 ## Memory stores end to end — real `ant` CLI, real model, a `cloud` sandbox (plan 36 slice 4, run 2026-08-25) — ✅ passed
 

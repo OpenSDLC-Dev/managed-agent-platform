@@ -82,7 +82,7 @@ func memoryRouteForWorker(method, rest string) bool {
 	case 1:
 		return method == http.MethodGet || method == http.MethodPost
 	case 2:
-		return method == http.MethodGet || method == http.MethodPost || method == http.MethodDelete
+		return segs[1] != "" && (method == http.MethodGet || method == http.MethodPost || method == http.MethodDelete)
 	}
 	return false
 }
