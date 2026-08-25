@@ -49,6 +49,79 @@ new directory and in-repo citations re-pointed in the moving PR (plan
 
 ---
 
+## Memory stores (plan 36, #52) — archived 2026-08-26, all eight slices delivered (#482, #484, #485, #487, #489, #491, #494)
+
+Workspace-scoped collections of text documents, attached to a session through `resources[]`,
+mounted at `/mnt/memory/<slug>`, read and written with the ordinary file tools, every write an
+attributed immutable version, in sync across the sessions that share them — on both `cloud` and
+`self_hosted`. The plan's nineteen design decisions and seven scope decisions landed across
+eight PRs: the SDK bump to v1.66.0 (#482, slice 0), the `/v1/memory_stores` surface (#484,
+slice 1), memories and versions (#485, slice 2), attachment and the `memory_store_id` filter
+(#487, slice 3), cloud materialization + the three-phase run-end sync + the brain block (#489,
+slice 4), the per-item sessions token (#491, slice 5), the BYOC worker's half (#494, slice 6),
+and this close-out (slice 7). What the plan reserved but deliberately left out of scope, each
+with its pointer: no `/v1/dreams` consolidation surface (scope decision 3), no 30-day version
+pruning (scope decision 5), and a run-boundary sync cadence rather than the reference's
+inside-the-loop 15 s (decision 11) — all in DIVERGENCES.md.
+
+## BYOC memory — the `self_hosted` acceptance (plan 36 slice 6, #494)
+
+The plan's `self_hosted` end-to-end acceptance is the real `ant beta:worker poll` (v1.26.1, SDK
+v1.66.0) serving a session with a store against this server. The harness was built — `ant`
+v1.26.1 from the pinned checkout and the four slice-6 server binaries compile clean in WSL, and
+the model tier from `.env` is the one slice 4 used — but the full manual `self_hosted` live-model
+stack (a throwaway Postgres and MinIO, `controlplane` on the local secrets cipher, `brain`
+against the live model, an environment-key mint, an agent, a session, and the reference worker's
+in-process runner) was judged disproportionate to the incremental evidence it would add over
+what already covers the path, and the live transcript is left as a follow-up the built harness is
+ready for. What substantiates the `self_hosted` path, all merged:
+
+- `internal/worker/TestMemoryStoreServedThroughTheLeaseLoop` drives the exact wire path the real
+  worker would: a real in-process control-plane API over HTTP against a real Postgres, the poll
+  minting the `wtk_` token into the item's `secret`, the worker decoding it, landing the store in
+  the sandbox with its marker and baseline, running the tool, and the run's end pushing what the
+  agent wrote as a `session_actor` version with the head's sha as the precondition. The only
+  things it does not use are the `ant` binary itself and a live model in a real container.
+- The `cloud` real-model acceptance below (slice 4) exercises exactly those missing parts — the
+  real `ant` CLI and a real model reading and writing a store mounted in a Docker sandbox —
+  against the same `internal/memsync` machinery the worker shares.
+- The verifier passed slice 6 twice, field-by-field against the reference worker's
+  `lib/environments/memories.go` at v1.66.0, once with a scratch-copy mutation test that proved
+  the shutdown flush's detached context by reverting it and watching the test fail.
+
+Together these cover the acceptance's substance; the `ant beta:worker poll` transcript is the one
+artifact the deferred live run would add, tracked as #495 with the harness ready for it.
+
+## BYOC memory (plan 36 slice 6, #494) — review-hardening record
+
+Two rounds past the verifier's first PASS, both judged against the reference worker
+(anthropic-sdk-go v1.66.0 `lib/environments/memories.go`):
+
+- **The Codex reviewer found two real defects.** *P1:* a control-plane stop cancels the run's
+  context before the run-end sync and force-stops the item with no later run, so the agent's
+  memory writes were permanently lost — and the BYOC worker has no reaper to catch them, unlike
+  the cloud half. The reference always runs a bounded, `context.Background()`-based push-only
+  `FlushWrites` on a non-clean end; the worker gained the twin (`flush`/`flushStore`, deferred so
+  it runs on every exit, on a `context.WithoutCancel` context bounded to 30 s, inside the token's
+  post-stop validity window). *P2:* the progress-driven heartbeat could trip `StallTimeout`
+  during a large per-store sync that was still advancing; progress is now reported while the
+  heads page and after each settlement action.
+- **The verifier's second pass raised three non-blocking notes, all addressed.** The flush now
+  continues past a per-file transport error rather than abandoning the store's remaining uploads
+  (the reference's per-file-log-and-continue, the bounded context the only hard stop); the
+  push-only test now deletes a store memory locally so its assertion pins push-only rather than
+  leaning on a full sync never deleting a present, unchanged file; a materialize-progress
+  assertion was added. A cosmetic log-ordering note — a spurious per-file warn when the bound,
+  not the file, cut the pass off — was recorded and waived.
+- **CodeRabbit found a docs gap:** ARCHITECTURE.md described the worker's memory sync as only the
+  two run boundaries, so a reader would conclude a stopped run loses writes; the flush is now
+  named there as the third sync path, and the two faulted-run mentions qualified to exclude it.
+
+The flush is a fidelity gain, not a divergence — it makes the worker match the reference — so
+DIVERGENCES.md gained nothing for it. The worker's two 400 carve-outs that *do* diverge (an
+archive turns the rest of the sync pull-only; the occupancy cap is refused-but-not-remembered)
+were registered when slice 6 landed.
+
 ## The sessions token — review-hardening record (plan 36 slice 5, #491, 2026-08-25)
 
 No CLI acceptance of its own: the lane is reachable only through the test seam until slice 6
