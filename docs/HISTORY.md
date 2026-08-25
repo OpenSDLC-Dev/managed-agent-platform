@@ -85,12 +85,13 @@ the passphrase read from the mounted store) and `memory-write` PASS (4.01 s — 
 then pushed, read back through the memories route by the `MemorySynced` grader); the pinned set
 is nineteen.
 
-**Gate**: `make verify` in WSL at b3e2f02 — 54 packages `ok`, one `FAIL`: `internal/mcp`'s
-`TestListToolsRefusesAResponseTooLargeToRead`, #380's open WSL2 flake ("socket-buffer luck",
-~40% of runs), a package this branch does not touch — three reruns of the package went
-FAIL/FAIL/ok with #380's own message. `make cover-gate` over the run's profile: total statement
-coverage **90.37%**. The verifier, the reviewers and the gate took their turns in sequence, and
-the acceptance stack ran only after the gate had finished with the Docker daemon.
+**Gate**: `make verify` in WSL at 0269af9, the review round's commit — 55 packages `ok`, 0
+`FAIL`, the new bash-backed `memsync` tests among them (their unreadable-directory case skips
+itself under WSL's root and runs on CI's runner); `make cover-gate`: total statement coverage
+**90.40%**. The run at b3e2f02, before the round, had 54 `ok` and one `FAIL`: `internal/mcp`'s
+`TestListToolsRefusesAResponseTooLargeToRead`, #380's open WSL2 flake in a package this branch
+does not touch (three reruns went FAIL/FAIL/ok with #380's own message), and 90.37%. The gate,
+the acceptance stack and the evals took the Docker daemon in turn, never together.
 
 **Review round** — the Codex reviewer (gpt-5.6-sol, xhigh), the Claude reviewer (Opus 5, four
 passes) and the verifier, all against cdd6540, the commit the acceptance above was recorded on;
