@@ -295,6 +295,58 @@ jobs:
               ;;
           esac
 
+      # The chart's Cloud SQL Auth Proxy takes the instance's CONNECTION NAME,
+      # which is an operator identifier — so staging-values.yaml carries only the
+      # same neutral placeholder as the service-account annotations, and the real
+      # value is resolved here.
+      #
+      # Asked of the Admin API rather than composed from parts. `gcloud` returns
+      # the authoritative `PROJECT:REGION:INSTANCE`, so no region has to be
+      # derived by trimming `$GCP_ZONE` and no string is built here at all —
+      # which also means a name that is well-formed but wrong cannot be
+      # manufactured, only reported. What it costs is a permission: the deploy
+      # identity needs `roles/cloudsql.viewer`, which the three WORKLOAD
+      # identities' `roles/cloudsql.client` does not give it, since the deployer
+      # is not in environment/'s Terraform at all. deploy/gcp/README.md carries
+      # the grant beside the other two that live outside Terraform.
+      #
+      # The instance is looked up by `$GKE_CLUSTER` because environment/main.tf
+      # names the cluster and the instance alike, both `${name_prefix}-staging`.
+      # That coupling is real rather than coincidental, but it is an assumption,
+      # so it is checked here and the failure names what it looked for — this
+      # runs BEFORE the image build, like the variable assertions above, so a
+      # deployment that breaks the coupling learns it in seconds rather than
+      # after three minutes of docker push.
+      - name: Resolve the Cloud SQL connection name
+        if: env.POWERED_OFF != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          err="$RUNNER_TEMP/sql-describe.err"
+          if ! conn="$(gcloud sql instances describe "$GKE_CLUSTER" \
+                         --project "$GCP_PROJECT_ID" \
+                         --format='value(connectionName)' 2>"$err")"; then
+            sed 's/^/  /' "$err"
+            # A missing grant and a missing instance both exit 1 here, and they
+            # want opposite remedies — so the diagnosis reads gcloud's own words
+            # rather than assuming the likelier of the two.
+            case "$(cat "$err")" in
+              *PERMISSION_DENIED*|*"does not have"*|*"not authorized"*|*"HTTPError 403"*)
+                echo "::error::the deploy identity cannot read Cloud SQL instances in '$GCP_PROJECT_ID'. Resolving the proxy's connection name needs cloudsql.instances.get; grant roles/cloudsql.viewer to the deploy service account. deploy/gcp/README.md records it with the other IAM grants that live outside Terraform." ;;
+              *NOT_FOUND*|*"was not found"*|*"does not exist"*|*"HTTPError 404"*)
+                echo "::error::no Cloud SQL instance named '$GKE_CLUSTER' in project '$GCP_PROJECT_ID'. The chart's cloudSQLProxy needs its connection name, and this step looks the instance up under the cluster's name because deploy/gcp/environment/main.tf gives both the same one. If this deployment names them differently, that assumption is what to fix." ;;
+              *)
+                echo "::error::could not read Cloud SQL instance '$GKE_CLUSTER' in project '$GCP_PROJECT_ID'; gcloud's output is above." ;;
+            esac
+            exit 1
+          fi
+          if [ -z "$conn" ]; then
+            echo "::error::Cloud SQL instance '$GKE_CLUSTER' reported an empty connection name"
+            exit 1
+          fi
+          echo "SQL_CONNECTION_NAME=$conn" >> "$GITHUB_ENV"
+          echo "the proxy will dial $conn"
+
       # Submitted from the repository ROOT with `.` as the context, because the
       # Dockerfile builds the whole Go module. `cloudbuild.yaml` turns that one
       # context into four images: controlplane/brain/executor are three tags on a
@@ -643,6 +695,7 @@ jobs:
             --set-string "executor.serviceAccount.annotations.iam\.gke\.io/gcp-service-account=$EXECUTOR_SERVICE_ACCOUNT" \
             --set-string "image.tag=$GITHUB_SHA" \
             --set-string "executor.gateImage=$ARTIFACT_REGISTRY/gate:$GITHUB_SHA" \
+            --set-string "cloudSQLProxy.instanceConnectionName=$SQL_CONNECTION_NAME" \
             --wait --atomic --timeout 10m
 
       # Read back what was actually deployed, because the identity half of the
@@ -687,6 +740,45 @@ jobs:
             exit 1
           fi
           echo "controlplane, brain and executor all carry the expected Workload Identity annotation"
+
+      # The same read-back, for the same reason, on the one other override with
+      # no backstop of its own.
+      #
+      # It was tempting to argue this one away: a dropped `--set-string` leaves
+      # the proxy dialing `your-project:…`, and surely it refuses that at
+      # startup, so the pod never goes Ready and `--atomic` rolls back. It does
+      # not. In the pinned proxy 2.24.1, `Serve` dials nothing unless
+      # `--run-connection-test` is passed, which the chart does not pass; it
+      # launches its listeners and signals startup. None of the three health
+      # endpoints dials either — `/liveness` is unconditional, `/startup`
+      # answers once that signal arrives, and `/readiness` adds only "not
+      # stopped" and "not at max connections". So a well-formed name that names
+      # nothing lets the pod go Ready; and while the DSN still names the
+      # database's address directly, the platform would work, the release would
+      # succeed, and the proxy would be wrong in a way nothing noticed until the
+      # cutover made it load-bearing. #493 tracks giving the chart a real one.
+      #
+      # Read back rather than reasoned about, therefore. Exactly three lines,
+      # one per deployment: fewer means the sidecar is missing or the placeholder
+      # survived, and more means the chart grew a use for the name that this
+      # check should be taught about rather than pass silently.
+      - name: The Cloud SQL proxy dials the instance this deploy resolved
+        if: env.POWERED_OFF != 'true'
+        run: |
+          set -euo pipefail
+          # Fetched on its own line so that a helm failure dies as a helm
+          # failure: folded into the pipeline below, `|| true` would swallow it
+          # and grep would report zero matches, blaming the override instead.
+          manifest="$(helm get manifest "$HELM_RELEASE" --namespace "$K8S_NAMESPACE")"
+          n="$(printf '%s\n' "$manifest" | grep -cF -- "$SQL_CONNECTION_NAME" || true)"
+          if [ "$n" -ne 3 ]; then
+            echo "::error::the installed release names '$SQL_CONNECTION_NAME' on $n line(s), expected 3 — one per deployment"
+            echo "Zero means the override in the deploy step did not reach the chart," >&2
+            echo "so the proxy is dialing staging-values.yaml's 'your-project:' " >&2
+            echo "placeholder, or the sidecar is not there at all." >&2
+            exit 1
+          fi
+          echo "all three proxies dial $SQL_CONNECTION_NAME"
 
       # Only when the Secret really changed — see the note at the end of the
       # assemble step. On an ordinary push the seven values are identical, this

@@ -211,9 +211,13 @@ and the bundled Postgres left enabled alongside it.
 The shape check is exactly this: **three or four non-empty colon-separated segments** —
 `PROJECT:REGION:INSTANCE`, or `DOMAIN:PROJECT:REGION:INSTANCE` for a legacy domain-scoped
 project. That refuses an address such as `10.1.2.3` or `db.internal:5432`, and a name with
-an empty part. It does not look inside the segments, so a well-formed name that names
-nothing renders and the proxy rejects it at startup — deliberately, because encoding
+an empty part. It does not look inside the segments — deliberately, because encoding
 Google's own naming rules here would refuse a valid name the day Google widens one.
+
+So a well-formed name that names nothing renders, and **nothing downstream catches it**: the
+proxy dials only under `--run-connection-test`, which the chart does not pass, so the pod
+goes Ready and the release succeeds on a wrong instance. Check the value; do not expect a
+failed deploy to check it for you (#493).
 
 If you must use a shared proxy Service as an interim step, treat the
 database credential as exposed to anything that can watch pod-network traffic, and say so in

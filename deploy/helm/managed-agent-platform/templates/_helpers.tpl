@@ -259,16 +259,21 @@ would never fire for the deployments that need it.
 {{- end }}
 {{- /* Three colon-separated segments, or four for a legacy domain-scoped
        project (`google.com:project:region:instance`) — and every one of them
-       non-empty. The count alone is not enough: `a::b` and `2001:db8::1` both
-       reach three or more segments, and an address with a port
-       (`127.0.0.1:5432:x`) reaches exactly three, so a bare length test accepts
-       the very substitution the message warns against. What all of these have
-       in common is that the proxy rejects them at startup, leaving a pod that
-       never becomes ready and nothing in the release to point at.
+       non-empty. That catches most of what a bad substitution produces: a bare
+       address (`10.1.2.3`), a bare word, and an empty part (`a::b`, `p:r:`).
 
-       This checks the SHAPE and stops there. Google's own rules for the three
-       parts are narrower, and encoding them here would refuse a valid name the
-       day Google widens one — the proxy is the authority on its own argument. */}}
+       It does NOT catch an address WITH a port. `127.0.0.1:5432:x` is three
+       non-empty segments and passes — this is a shape filter, not a backstop,
+       and the distinction matters because nothing downstream catches it
+       either: the proxy dials only under `--run-connection-test`, which this
+       chart does not pass, so the pod goes ready on a name that names nothing.
+       Same for a well-formed name whose project or instance is simply wrong.
+       #493 is that gap.
+
+       Checking the SHAPE and stopping there is deliberate. Google's own rules
+       for the three parts are narrower, and encoding them here would refuse a
+       valid name the day Google widens one — the proxy is the authority on its
+       own argument. */}}
 {{- $segments := splitList ":" .Values.cloudSQLProxy.instanceConnectionName }}
 {{- $empty := false }}
 {{- range $segments }}{{- if eq . "" }}{{- $empty = true }}{{- end }}{{- end }}

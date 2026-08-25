@@ -586,13 +586,12 @@ resource "google_sql_database_instance" "map" {
       # The property is asserted where it is true — pg_stat_ssl on the backend —
       # rather than inferred from the client's request.
       #
-      # That proxy is OPERATOR-SUPPLIED and this configuration does not create
-      # it: nothing here, and no chart template, adds the sidecar. Read this
-      # comment as a description of the topology docs/deploy-gcp.md tells the
-      # operator to build, not as a promise that it exists. Its "in the same
-      # pod, not a shared Deployment" is the load-bearing half — a shared proxy
-      # would put that same sslmode=disable traffic on the pod network in
-      # cleartext.
+      # That proxy is not created here — this is the database, not the
+      # workload — but it is no longer merely a topology an operator is asked
+      # to build: the chart templates the sidecar, and staging-values.yaml
+      # turns it on. "In the same pod, not a shared Deployment" is the
+      # load-bearing half — a shared proxy would put that same sslmode=disable
+      # traffic on the pod network in cleartext.
       ssl_mode = "ENCRYPTED_ONLY"
     }
 

@@ -173,9 +173,14 @@ Postgres left enabled alongside it.
 The shape check is exactly this: **three or four non-empty colon-separated segments** —
 `PROJECT:REGION:INSTANCE`, or `DOMAIN:PROJECT:REGION:INSTANCE` for a legacy domain-scoped
 project. It refuses an address such as `10.1.2.3` or `db.internal:5432`, and a name with an
-empty part; it does not look inside the segments. A well-formed name that names nothing
-therefore renders, and the proxy rejects it at startup — deliberately, because encoding
-Google's own naming rules in a template would refuse a valid name the day Google widens one.
+empty part; it does not look inside the segments — deliberately, because encoding Google's
+own naming rules in a template would refuse a valid name the day Google widens one.
+
+**A well-formed name that names nothing therefore renders, and nothing downstream catches
+it.** The proxy dials only when `--run-connection-test` is passed, which this chart does not
+pass, so it starts its listeners and reports itself up; none of its three health endpoints
+dials either. The pod goes Ready and the release succeeds. Until the application actually
+issues a query, a wrong instance is indistinguishable from a right one — see #493.
 
 ## Credential cipher (OpenBao)
 
