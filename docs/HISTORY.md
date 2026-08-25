@@ -56,10 +56,12 @@ passphrase at `/facts/secret.md`, a session attached `read_write` with `instruct
 `user.message` asking for the passphrase and for today's date at `/log/today.md`, the store and
 its versions afterwards, a second session attached `read_only` whose write is refused, and the
 filter listing both. Recorded with `ant` v1.26.1 against the branch's own `controlplane`,
-`brain` and `executor` at b3e2f02 (#489), and re-recorded the same way at 492916a, the
-PR's last commit, with the same outcome (one log file written that time, `/log/today.md`,
-and the second session's `write` refused with the reference's wording) — three binaries
-in WSL on a throwaway Postgres,
+`brain` and `executor` at b3e2f02 (#489), and re-recorded the same way at 492916a with the
+same outcome (one log file written that time, `/log/today.md`, and the second session's
+`write` refused with the reference's wording); the four code commits after 492916a changed
+the content gate, the held-mount counter, the read phase's bound and the removal budget,
+none of which this transcript exercises differently — three binaries in WSL on a
+throwaway Postgres,
 Docker sandboxes on `debian:stable-slim`, the model from `.env` (`MiniMax-M3` over the
 Anthropic protocol). One CLI fact the first attempt taught: an agent created without
 `--tool '{type: agent_toolset_20260401}'` has no tools, and this model then prints its
@@ -89,15 +91,20 @@ the passphrase read from the mounted store) and `memory-write` PASS (4.01 s — 
 then pushed, read back through the memories route by the `MemorySynced` grader); the pinned set
 is nineteen.
 
-**Gate**: `make verify` in WSL at 492916a, the PR's last commit — 55 packages `ok`, 0 `FAIL`,
-the new bash-backed `memsync` tests among them (their unreadable-directory case skips itself
-under WSL's root and runs on CI's runner); `make cover-gate`: total statement coverage
-**90.38%**. That run needed `GOFLAGS=-timeout=30m`: `internal/api` and `internal/executor`
-have grown to within 10% of `go test`'s 10-minute package default on this box (541 s and
-561 s here; CI's runners fit), and two earlier runs of the gate died at the default with a
-sub-second test "running" — slower, not hung — each leaving the pgtest fixtures its
-timed-out binaries never removed to slow the next; #490 holds the trend and the ways out.
-The run at 0269af9, the review round's commit, had 55 `ok`, 0 `FAIL` and **90.40%**. The run at b3e2f02, before the round, had 54 `ok` and one `FAIL`: `internal/mcp`'s
+**Gate**: `make verify` in WSL at cb899a3, the PR's last code commit — 54 packages `ok` and
+one `FAIL`, `internal/mcp`'s `TestListToolsRefusesAResponseTooLargeToRead`, #380's
+deterministic WSL2 failure in a package this branch does not touch (three isolated reruns
+FAIL with #380's own message, and so does the same test at `origin/main` ca7c5e1 on the same
+box; CI's `coverage` job passes it); `make cover-gate`: total statement coverage **90.45%**.
+The new bash-backed `memsync` tests ran among the `ok` (their unreadable-directory case
+skips itself under WSL's root and runs on CI's runner). The run needed
+`GOFLAGS=-timeout=30m`: `internal/api` took 591 s and `internal/executor` 613 s on this
+8-CPU box — the executor past `go test`'s 10-minute package default now, where CI's runners
+still fit — and two earlier runs of the gate died at the default with a sub-second test
+"running" (slower, not hung), each leaving the pgtest fixtures its timed-out binaries never
+removed to slow the next; #490 holds the trend and the ways out. The runs at 5b436e3 and
+492916a had 55 `ok`, 0 `FAIL` and 90.40% / 90.38%; the review round's commit 0269af9,
+55 `ok`, 0 `FAIL` and 90.40%. The run at b3e2f02, before the round, had 54 `ok` and one `FAIL`: `internal/mcp`'s
 `TestListToolsRefusesAResponseTooLargeToRead`, #380's open WSL2 flake in a package this branch
 does not touch (three reruns went FAIL/FAIL/ok with #380's own message), and 90.37%. The gate,
 the acceptance stack and the evals took the Docker daemon in turn, never together.
