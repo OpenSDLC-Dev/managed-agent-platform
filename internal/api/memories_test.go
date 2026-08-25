@@ -656,9 +656,7 @@ func TestMemoryStoreCapacity(t *testing.T) {
 	}
 	status, body := s.do(http.MethodPost, "/v1/memory_stores/"+store+"/memories",
 		map[string]any{"path": "/one-more.md", "content": "x"})
-	if status != http.StatusBadRequest {
-		t.Fatalf("the 2001st memory: status %d (%v)", status, body)
-	}
+	wantErr(t, status, body, http.StatusBadRequest, "invalid_request_error")
 	if msg, _ := body["error"].(map[string]any)["message"].(string); !strings.Contains(msg, "2000 memories") {
 		t.Errorf("cap message = %q, want it to name the cap", msg)
 	}

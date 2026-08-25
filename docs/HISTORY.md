@@ -59,8 +59,9 @@ Git Bash rewrites a `/notes/a.md` argument into a Windows path before `ant.exe` 
 (`MSYS_NO_PATHCONV=1` stops it), and `--precondition` takes the whole object, `type` included.
 
 - Four creates under `/notes/`, `/notes/deep/` and `/todo.md`; a fifth from a **piped YAML body**
-  (`path: /piped.md`, `content: from stdin`); `retrieve --view full` serves `content`, the default
-  projection renders it `null`; `retrieve … <memory-id>` in the **positional form** works.
+  (`path: /piped.md`, `content: from stdin`); the creates' default projection renders `content`
+  `null`; `retrieve --view full` serves it, and so does `retrieve … <memory-id>` in the **positional
+  form** with no `--view` — retrieve defaults to `full`.
 - `list` walks the five in byte-wise path order; `--path-prefix /notes/ --depth 1` returns
   `/notes/a.md`, `/notes/b.md` and one `memory_prefix` for `/notes/deep/`; `--limit 1 --max-items -1
   --view full` auto-pages through the path-keyed cursor, none repeated.
@@ -86,7 +87,8 @@ Git Bash rewrites a `/notes/a.md` argument into a Windows path before `ant.exe` 
 - *Codex, high* — Go's JSON decoder rewrites an invalid UTF-8 byte to U+FFFD before any validator
   runs, so `{"content":"<0xff>"}` was accepted and stored altered while the registry claimed a
   400. Fixed at the one chokepoint every JSON object body passes through, `decodeObject`: a body
-  that is not valid UTF-8 is a 400 before parsing, on every route (its own `fixed` fragment);
+  that is not valid UTF-8 is a 400 before parsing, on every route that decodes a JSON object (the
+  work-stop body's one bool is read outside it and stores nothing; its own `fixed` fragment);
   raw-body tests prove no memory or version row is written.
 - *Both reviewers, the verifier* — the memory-versions list ignored the `view=full` cap of 20 the
   SDK documents for both resources. Fixed with the memories list's clamp; tested at 25 versions.
