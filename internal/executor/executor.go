@@ -801,7 +801,7 @@ func (e *Executor) runTools(ctx context.Context, sb sandbox.Sandbox, sid domain.
 // blocks (the web driver answers a no-hit search with a text block, so the
 // array is never empty in practice). Otherwise empty output (a read of an
 // empty file) becomes the reference runner's toolset.NoOutput text block
-// (v1.63.1), never a text block with an empty string — a Messages endpoint rejects an empty text block, and that
+// (since v1.63.1), never a text block with an empty string — a Messages endpoint rejects an empty text block, and that
 // request is what the brain replays every resume, wedging the session.
 func toolResultEvent(useID domain.ID, res toolset.Result) (events.NewEvent, error) {
 	// SanitizeText again at this boundary: the web driver's error text embeds

@@ -51,7 +51,7 @@ type dcfRun struct {
 	Explanation string   // the grader's verdict text from the session resource
 	EndResults  []string // span.outcome_evaluation_end results in stream order
 	SawOngoing  bool     // whether a span.outcome_evaluation_ongoing heartbeat arrived
-	Files       []anthropic.FileMetadata
+	Files       []anthropic.BetaFileMetadata
 	Contents    map[string][]byte // filename -> downloaded bytes
 }
 

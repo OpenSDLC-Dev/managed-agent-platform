@@ -49,6 +49,169 @@ new directory and in-repo citations re-pointed in the moving PR (plan
 
 ---
 
+## anthropic-sdk-go v1.66.0 bump — wire-schema verification record (2026-08-25, plan 36 slice 0)
+
+The fifth bump record. Unlike v1.63.1's, whose managed-agents content was all schema this platform
+does not build, this range's weight is **behavior**: v1.66.0 is the release that gives the reference
+worker a memory-store engine, and plan 36 slices 5 and 6 are bound by it. A plan citing a checkout
+the repo refuses to read is the doc/code lag the verifier exists to catch, so the pin moves before
+the plan's first line of memory code. Three releases in the range, all three of v1.64.0/65/66 landing
+inside nine hours on 2026-08-19; **82 files changed, +35,084/−16,789**; endpoint count **131 → 144**
+(`.stats.yml`), the spec and config hashes both moved, and the SDK's own `go.mod`/`go.sum` are
+byte-identical between the tags, so the bump drags in no new module.
+
+**What the range contains.** The thirteen added endpoints are the **GA (non-`?beta=true`) Files and
+Skills routes** v1.65.0 promoted — `POST|GET /v1/files`, `GET /v1/files/{id}[/content]`, `DELETE
+/v1/files/{id}`, `POST|GET /v1/skills`, `GET|DELETE /v1/skills/{id}`, `POST|GET
+/v1/skills/{id}/versions`, `GET|DELETE /v1/skills/{id}/versions/{version}`. No managed-agents route
+was added or removed, and the promotion is routing-neutral here: `internal/api/server.go` already
+registers both families on the bare path, and a Go mux pattern carries no query. The three changes
+that matter to this repo:
+
+- **The built-in tool config became a union** (v1.66.0). `BetaManagedAgentsAgentToolConfig`, a single
+  struct discriminated by an eight-value `name` enum, is replaced by
+  `BetaManagedAgentsAgentToolConfigUnion` with eight variants, one per tool, and the params side by
+  `…ParamsUnion` with eight `Of…` arms. Each variant carries **`type` beside `name`**, and the
+  union's `AsAny()` dispatches on `type`, not `name`. The two web variants additionally carry
+  `allowed_domains`, `blocked_domains`, and `max_content_tokens` (web_fetch) / `user_location`
+  (web_search), with a documented grammar: plain hostnames, at most 64 entries, an empty list
+  rejected, the two lists mutually exclusive.
+- **The reference worker learned memory** (v1.66.0). `lib/environments/memories.go` does not exist at
+  v1.63.1 and is 1,150 lines at v1.66.0 — the download/sync engine, its marker file, its merge rules
+  and its bounds. `lib/environments/worker.go` grew 526 → 811 lines across the range and now
+  **decodes `work.secret`**: URL-safe base64, padded or not, of a JSON object whose `sessions_token` becomes the
+  Bearer for the item's per-session calls; a session with stores and no token **fails the item**.
+  `tools/agenttoolset` gained `AllowedRoots`/`ReadOnlyRoots` and turned `UnrestrictedPaths` into a
+  hard error.
+- **A fourth actor** (v1.64.0). `service_account_actor {service_account_id}` joins the memory-version
+  `created_by`/`redacted_by` union, with a matching `service_account_id` list filter.
+
+**The enumeration.** Every SDK file defining a shape this repo mirrors, `git diff`ed pairwise between
+the tags. **Byte-identical:** `betasessionresource.go`, `betamemorystore.go`,
+`betamemorystorememory.go`, `betaenvironmentwork.go`, `betasessionevent.go`, `betasessionthread.go`,
+`betasessionthreadevent.go`, `betaskill.go`, `betaskillversion.go`, `betavault.go`,
+`betavaultcredential.go`, `betadeployment.go`, `betadeploymentrun.go`, `betaagentversion.go`,
+`betawebhook.go`, `betatunnel.go`, `betatunnelcertificate.go`, `betasessionutil.go`, `betaparse.go`,
+`betamessagebatch.go`, `betamodel.go`, `aliases.go`, `field.go`, `config/**`, `mcp/**`, `option/**`,
+`toolrunner/**`. There is **no `betaoutcome.go`** at either tag — outcome types live in
+`betasession.go` and `betasessionevent.go`. Changed, each resolved:
+
+- *`betaagent.go` (3,155 → 4,774 lines, +2,373/−754)* — the union split above. Verified byte-for-byte
+  unchanged inside it: `BetaManagedAgentsAgentToolsetDefaultConfig`, `BetaManagedAgentsMCPToolConfig`,
+  `BetaManagedAgentsCustomSkill`, and the six tool-input payload types, which only moved.
+  `BetaAgentNewParams`/`BetaAgentUpdateParams` gained **no field** — their only diff is a doc example
+  and the two union renames.
+- *`betasession.go` (16 changed lines, **zero line movement**)* — the `…Union` renames propagated into
+  the `Configs` union comments, plus one model doc example. Every `betasession.go` citation in the
+  repo survives unmoved, which is why the six stale ones found below are a pre-existing defect rather
+  than this bump's.
+- *`betafile.go` (net zero, reordered)* — v1.65.0's GA split: `FileMetadata` → **`BetaFileMetadata`**,
+  `DeletedFile` → `BetaDeletedFile`, `DeletedFileType` → `BetaDeletedFileType`, and `BetaFileScope`
+  moved down. The five `BetaFileService` methods now return the `Beta*` types.
+- *`betamemorystorememoryversion.go` (434 → 470)* — the fourth actor and its filter, in v1.64.0. The
+  `BetaManagedAgentsMemoryVersion` shape itself is otherwise unchanged.
+- *`betaenvironment.go` (+1)* — two doc-comment edits that **newly state** description semantics:
+  "null when unset" on the response, and "Omit to preserve; null clears to null; an empty string is
+  stored as an empty string" on update. Checked against `internal/api/environments.go` and registered
+  as a divergence: this platform's column is non-null `text`, so an unset description is `""` and a
+  null clears to `""`.
+- *`betasessiontoolrunner.go` (+36)* and *`betatoolrunner.go` (+5)* — v1.64.0 behavior: the send
+  retry-window rewrite (retries for the live lease TTL rather than three attempts, carried on the ctx
+  by the new `internal/sendwindow`), `adoptContainer`, the `mid_conv_system` arm dropped, and
+  `NextMessage` no longer yielding the final message twice. Nothing on the wire; the platform's own
+  `internal/worker/lease.go` is the analogue worth comparing when #383's successors come up.
+- *`lib/environments/poller.go` (+53)* — `AutoStop` and an idle-log throttle. Client-side only.
+- *`betamessage.go` (+3,317)* and *`message.go` (+3,679)* — v1.65.0's computer and browser toolsets,
+  entirely Messages-API. 95 exported types added to the former and 103 to the latter; the only
+  removals in either are the `mid_conv_system` block param and its projections.
+  **`BetaStopReason` is unchanged** — the same eight constants at both tags, diffed identical.
+  No managed-agents surface.
+- *`shared/constant/constants.go` (+50 lines, 17 constants added, 1 removed)* — `−MidConvSystem`,
+  `+ServiceAccountActor` (v1.64.0), eleven browser/computer/skill constants (v1.65.0), and the five
+  per-tool `name`/`type` constants `Edit`/`Glob`/`Grep`/`Read`/`Write` (v1.66.0). No
+  `knownPrefixes`-relevant constant moved.
+- *`internal/apierror`, `internal/requestconfig`, `packages/ssestream`* — a new `Error.WorkspaceID`
+  read from an **`anthropic-workspace-id`** response header on both the unary and SSE error paths.
+  A header the reference emits and this platform does not; registered.
+- *`api.md` (1,295 → 1,482)* — the GA rows. Everything below the Messages type index shifts ~+186.
+
+**Citation durability.** `docs/DIVERGENCES.md` carries **85 SDK line citations: 59 hold at v1.66.0,
+25 shifted, 1 gone as cited** (the `api.md` Stop-Work range the work/stop entry already flagged as its
+stale v1.58.0 citation, whose drift chain now reads 656-673 → 683 → 693 → 698 → 884). Every shift is
+mechanical — insertions above the cited line — and each was re-read at its new number before the
+registry was changed. Two citations were broken by **content**, not by line, and those are the
+findings that mattered: the web-domains inference, whose whole premise ("configured by no wire field")
+v1.66.0 falsifies, and the toolset-echo entry's "byte-identical to v1.61.0's — the inter-pin diff
+touches no toolset type", which the union split ended. A third, the accepted-key-set entry, cited a
+type that no longer exists. The other 57 citations in the repo: 38 hold, 5 shifted (the five in plan
+36's own Ground truth, re-numbered with it), 2 changed by content (`internal/api/files.go`'s two
+`betafile.go` citations — the `FileMetadata` type renamed and `BetaFileScope` moved — corrected), 6
+were deliberately anchored at v1.66.0 by the plan and
+become valid the moment this lands, and **6 were already wrong before this bump** — `betasession.go`
+citations in `internal/api/sessionresources.go` comments that drifted +86 when plan 35 moved the pin
+to v1.63.1 and were missed because that record's audit covered the registry, not code comments. Since
+`betasession.go` did not move in this range, v1.66.0 neither worsened nor fixed them; they are
+corrected here.
+
+**The labels.** 93 literal `v1.63.1` matches (`git grep -o` at the merge base) across 21 files: **45 live** — 36 in the registry's
+evidence clauses, plus `go.mod`, two `go.sum` lines, `docs/REFERENCE_PROJECTS.md`,
+`.claude/agents/verifier.md` and four code comments — all advanced; **48 historical**, all kept (plan
+36's and archived plan 35's own from-version statements, the v1.63.1 bump record above, three
+changelog fragments, the registry's own bump chronicle, and the two "since v1.63.1" comments in
+`internal/events`). Six were **ambiguous**, and each got a decision rather than a coin flip. Five bare
+`(v1.63.1)` provenance tags on the `(no output)` placeholder — in `toolset.go`, `executor.go`,
+`executor_test.go`, `toolexec.go` and `toolexec_test.go` — are rewritten to the "since v1.63.1" form
+their two siblings in `internal/events/inbound.go` already use, so they stop drifting at every bump;
+the behavior still holds at v1.66.0, so either reading was factually safe and the one that cannot rot
+was taken. The sixth, the registry's "unchanged through v1.63.1" durability clause on
+`betasessionevent.go`, is advanced to v1.66.0 and strengthened: the file's diff across the whole range
+is not merely comment-only, it is empty.
+
+**One line of repo code changed.** 33 distinct root-package SDK identifiers (48 counting the option, param, respjson and ssestream qualifiers) are used across eleven files;
+All but one are present at v1.66.0 unchanged. The one break is `acceptance/dcf_test.go:54`'s
+`[]anthropic.FileMetadata`. The mechanism is worth recording because it is the opposite of what a
+rename usually does: `anthropic.FileMetadata` **still compiles** at v1.66.0 — it is now the *GA* Files
+type, a different struct with `ExpiresAt` and no `Scope` — so the declaration is fine and the compiler
+reports the failure a screen below, at the `Beta.Files.List` append, where the pager now yields
+`BetaFileMetadata`. Every downstream field read is identical between the two structs, so the fix is
+the declaration alone. The hazard: a blind rename is right *here* and would be silently wrong anywhere
+else the old name appears. There is exactly one occurrence in the repo.
+
+**One behavior change rides with the bump**, and it is wire-visible. `rejectConfigKeys` accepted
+`{enabled, permission_policy}` plus `name` on a `configs[]` entry, so a v1.66.0-shaped `tools` — which
+carries `type` — got a 400 at agent create/update, and again on every stored spec at session create.
+Slice 0 accepts `type` **when it equals `name`** (a mismatch stays a 400, INFERRED: nothing states what
+the reference does when the two disagree) and renders `type` on the resolved echo unconditionally,
+request or no request, because the response union has no other discriminator to dispatch on. The web
+tools' four new keys stay **refused**: the fence here is operator-side (`WEBTOOL_ALLOWED_DOMAINS`), and
+a silently dropped `allowed_domains` would read to its author as a fence in force. That refusal is
+registered CONFIRMED against **#481**, which is where honoring the wire fields will happen; the
+registry's "configured by no wire field" inference is closed in place, rewritten rather than deleted so
+the reversal stays auditable. A fourth entry records `service_account_actor` as an arm this platform
+will **never** emit — there is no service-account identity here and no `svac_` prefix — so the
+memory-version actor union will render three of its four arms when plan 36 slice 2 writes the rows.
+
+**Evidence.**
+
+- The read-only enumeration ran as four parallel investigations (registry citation durability, 85;
+  non-registry citation durability, 57; the `v1.63.1` label classification, 93 matches; the compiled
+  SDK identifier surface, 48 qualified identifiers) plus a direct per-file diff of every changed SDK file, with
+  the overlaps re-derived independently. No contradiction survived reconciliation. Every SDK fact
+  above was read at a tag with `git show <tag>:<file>`; nothing was checked out.
+- The real `ant` CLI (v1.26.1, which pins SDK v1.66.0; built from the read-only checkout) against
+  this branch's controlplane, run natively in WSL on a throwaway Postgres: `beta:agents create
+  --model.id claude-opus-5 --tool '{"type":"agent_toolset_20260401","configs":[{"name":"bash",
+  "type":"bash",…},{"name":"web_fetch","type":"web_fetch",…},{"name":"grep","enabled":false}]}'`
+  → 200, every built-in entry rendered with `"type"` equal to its name, the `grep` entry that was
+  sent without one included, and `beta:agents retrieve` echoing the same; `"type":"read"` on the
+  `bash` entry → 400 `configs[0].type is "read" but must equal name "bash"`; `"allowed_domains"`
+  on `web_fetch` → 400 `unknown field "allowed_domains" in configs[0]` (2026-08-25).
+- `make verify` on the bumped pin, in the WSL Ubuntu clone (Docker and the local kind cluster
+  present, so the store, API and both sandbox suites ran rather than skipped): build, crossbuild,
+  vet and fmt-check clean, 54 packages `ok`, no failure, **total statement coverage 90.42%**
+  against the 90% gate (2026-08-25, branch `feat/plan-36-slice-0-sdk-bump` at 24de645); re-run on
+  the reviewed final commit 3c50fc5 after the review fixes: 54 `ok`, no failure, 90.45%.
+
 ## The session delegation bound (#447) — the designs it beat, 2026-08-23
 
 The narrative is in CHANGELOG.md and the wire argument is in DIVERGENCES.md. What neither holds

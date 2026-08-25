@@ -90,7 +90,7 @@ type Result struct {
 
 // NoOutput is the text block posted for a Result whose Content is empty — a
 // tool that succeeded silently. It is the reference runner's placeholder
-// (v1.63.1: "The Sessions API rejects empty text blocks; a tool that succeeds
+// (its wording since v1.63.1: "The Sessions API rejects empty text blocks; a tool that succeeds
 // silently must still produce a postable result"), and one constant because
 // the executor and the BYOC worker must post the same block for the same
 // empty read.

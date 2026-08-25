@@ -1,5 +1,5 @@
 ---
-status: approved
+status: in-progress
 issue: "#52"
 ---
 
@@ -126,10 +126,14 @@ harness's memory directory (Claude Code's `projects/<key>/memory/`) into a store
 
 ### Wire shapes
 
-Read at `anthropic-sdk-go` v1.63.1 with `git show v1.63.1:<file>`; the four files scope
-decision 1 names are byte-identical at v1.66.0, `betamemorystorememoryversion.go` differs
-only by the fourth actor, and `betasession.go`/`betadream.go` differ outside the ranges
-cited here (same-size hunks, so the line numbers hold). Official docs fetched 2026-08-24
+Read at `anthropic-sdk-go` v1.63.1 with `git show v1.63.1:<file>` and re-anchored at
+v1.66.0 when slice 0 moved the pin: **every line citation below is a v1.66.0 line.** The
+four files scope decision 1 names are byte-identical between the two tags, so their
+numbers never moved; `betamemorystorememoryversion.go` differs only by the fourth actor
+and its list filter, and `api.md` only by the shift the range's unrelated additions
+caused, so those two were re-read and re-numbered; `betasession.go`/`betadream.go` differ
+in same-size hunks outside the ranges cited here, so their line numbers hold at both
+tags. Official docs fetched 2026-08-24
 (`platform.claude.com/docs/en/managed-agents/memory`, `…/self-hosted-sandboxes`,
 `…/webhooks`, and the `api/beta/memory_stores/**` reference pages). A fourth source sits one hop from the SDK
 checkout: the **OpenAPI spec the SDK is generated from**, whose URL `.stats.yml` carries
@@ -137,7 +141,7 @@ checkout: the **OpenAPI spec the SDK is generated from**, whose URL `.stats.yml`
 at v1.66.0); it states three behaviors the SDK comments and the docs pages do not, quoted
 below as "spec".
 
-- **Routes** (`api.md:1057-1114`; every path literally carries `?beta=true`, every
+- **Routes** (`api.md:1243-1301`; every path literally carries `?beta=true`, every
   store/memory/version method prepends `anthropic-beta: agent-memory-2026-07-22`,
   `betamemorystore.go:52`): `POST|GET /v1/memory_stores`, `GET|POST|DELETE
   /v1/memory_stores/{id}`, `POST …/{id}/archive`; `POST|GET …/{id}/memories`,
@@ -183,7 +187,7 @@ below as "spec".
   already matches the stored value is a no-op: it returns 200 with the existing memory
   and writes no new version". The error's schema is `{type, message, conflicting_path,
   conflicting_memory_id}` with only `type` required.
-- **Version** `BetaManagedAgentsMemoryVersion` (`betamemorystorememoryversion.go:221-297`):
+- **Version** `BetaManagedAgentsMemoryVersion` (`betamemorystorememoryversion.go:234-310`):
   `id` (`memver_…`), `type:"memory_version"`, `memory_id`, `memory_store_id`, `operation
   ∈ created|modified|deleted` ("Every non-no-op mutation to a memory appends exactly one
   version row"), `content` (null when `view=basic`, `deleted`, or redacted),
@@ -191,15 +195,15 @@ below as "spec".
   if and only if `redacted_at` is set"), `created_at`, `created_by`, `redacted_at`,
   `redacted_by`. "Retrieving a redacted version returns 200 with `content`, `path`,
   `content_size_bytes`, and `content_sha256` set to `null`; branch on `redacted_at`, not
-  HTTP status." Actor union (`:113-370`, three variants at v1.63.1): `session_actor
+  HTTP status." Actor union (`:114-404`, four variants at the pin): `session_actor
   {session_id}` — "a write made by an agent during a session, through the mounted
   filesystem at `/mnt/memory/`"; `api_actor {api_key_id}` — "This identifies the key, not
   the secret"; `user_actor {user_id}` — "a human user through the Anthropic Console".
   v1.64.0 adds `service_account_actor {service_account_id}` and a `service_account_id`
-  list filter. List params (`:392-418`): `memory_id`, `operation`, `session_id`,
+  list filter. List params (`:426-454`): `memory_id`, `operation`, `session_id`,
   `api_key_id`, `created_at[gte|lte]`, `limit`, `page`, `view` — the docs add the order:
   "`created_at` descending (newest first), with `id` as tiebreak"; no default `limit` is
-  stated. Redact (`:429-434`): no body.
+  stated. Redact (`:465-470`): no body.
 - **Session attachment.** Create param `BetaManagedAgentsMemoryStoreResourceParam`
   (`betasession.go:896-935`): `memory_store_id` (required), `type:"memory_store"`,
   `instructions` ("Rendered into the memory section of the system prompt. Max 4096
@@ -682,8 +686,9 @@ behavior**; the last slice archives the plan and closes #52.
    domain keys refused and registered with an issue, the `secret` entry's evidence
    clause corrected in place (the v1.66.0 worker reads it), the web-domains inference
    closed and the toolset-echo entry's "byte-identical" evidence rewritten, a CONFIRMED
-   entry for `service_account_actor` (never emitted by this platform) and for the
-   `BetaFileMetadata` rename as far as it touches mirrored shapes, the six `betasession.go`
+   entry for `service_account_actor` (never emitted by this platform) — the
+   `BetaFileMetadata` rename changes no wire byte and the files entries never named the
+   type, so it needs none — the six `betasession.go`
    citations in `sessionresources.go` that plan 35's bump left 86 lines stale corrected,
    HISTORY record.
 1. **Stores** (decisions 1–3, 5, 6, 14): migration `0028_memory_stores.sql`
@@ -749,8 +754,9 @@ mutation duty); the matrix rows are `make test` integration tests unless marked 
   the HISTORY record; the live `v1.63.1` labels advanced — `grep -n v1.63.1` over
   DIVERGENCES.md, REFERENCE_PROJECTS.md, `verifier.md` and the `.go` files finds only
   "since v1.63.1"-style historical statements and the registry's own bump chronicle
-  (its "v1.61.0 → v1.63.1 bump" sentences and the `api.md` drift chain, which gains a
-  link rather than losing one); this plan's Ground truth section keeps its labels, which
+  (its "v1.61.0 → v1.63.1 bump" sentences, the `api.md` drift chain, which gains a
+  link rather than losing one, and the entries rewritten by this bump saying what was
+  true at v1.63.1 and what v1.66.0 changed); this plan's Ground truth section keeps its labels, which
   record what was read on 2026-08-24. A built-in tool config carrying `type` equal to
   `name` is accepted and echoed with it, one differing from `name` is a 400, and one
   carrying `allowed_domains` is a 400 naming the key — each shown red first; the pinned

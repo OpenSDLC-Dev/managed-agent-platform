@@ -41,9 +41,29 @@ func TestMaterializeResolvesBothToolsetKinds(t *testing.T) {
 		name: "a supplied per-tool policy overrides the default and is echoed verbatim",
 		in: `{"type":"agent_toolset_20260401","default_config":{"permission_policy":{"type":"always_ask"}},` +
 			`"configs":[{"name":"bash","permission_policy":{"type":"always_allow"}},{"name":"read"}]}`,
-		want: `{"configs":[{"enabled":true,"name":"bash","permission_policy":{"type":"always_allow"}},` +
-			`{"enabled":true,"name":"read","permission_policy":{"type":"always_ask"}}],` +
+		want: `{"configs":[{"enabled":true,"name":"bash","permission_policy":{"type":"always_allow"},"type":"bash"},` +
+			`{"enabled":true,"name":"read","permission_policy":{"type":"always_ask"},"type":"read"}],` +
 			`"default_config":{"enabled":true,"permission_policy":{"type":"always_ask"}},` +
+			`"type":"agent_toolset_20260401"}`,
+	}, {
+		// anthropic-sdk-go v1.66.0 split the built-in per-tool config into a
+		// union whose eight variants mark `type` required on the response, so
+		// the echo renders it whether or not the request carried one — here the
+		// entry sent nothing but its name and inherits the rest.
+		name: "a built-in entry gains the type discriminator it was not sent with",
+		in: `{"type":"agent_toolset_20260401","default_config":{"enabled":false},` +
+			`"configs":[{"name":"grep"}]}`,
+		want: `{"configs":[{"enabled":false,"name":"grep","permission_policy":{"type":"always_allow"},"type":"grep"}],` +
+			`"default_config":{"enabled":false,"permission_policy":{"type":"always_allow"}},` +
+			`"type":"agent_toolset_20260401"}`,
+	}, {
+		// A supplied discriminator is rebuilt from the name rather than carried
+		// through, so it cannot be echoed twice or echoed disagreeing with the
+		// name — Validate has already refused a request where the two differ.
+		name: "a supplied type is echoed once",
+		in:   `{"type":"agent_toolset_20260401","configs":[{"name":"bash","type":"bash"}]}`,
+		want: `{"configs":[{"enabled":true,"name":"bash","permission_policy":{"type":"always_allow"},"type":"bash"}],` +
+			`"default_config":{"enabled":true,"permission_policy":{"type":"always_allow"}},` +
 			`"type":"agent_toolset_20260401"}`,
 	}, {
 		// Duplicate names merge per field the way resolveToolset's override map
@@ -85,7 +105,7 @@ func TestMaterializeResolvesBothToolsetKinds(t *testing.T) {
 		name: "an entry naming no built-in tool is echoed as supplied",
 		in:   `{"type":"agent_toolset_20260401","configs":[{"name":"nope"},{"name":"bash"}]}`,
 		want: `{"configs":[{"name":"nope"},{"enabled":true,"name":"bash",` +
-			`"permission_policy":{"type":"always_allow"}}],"default_config":{"enabled":true,` +
+			`"permission_policy":{"type":"always_allow"},"type":"bash"}],"default_config":{"enabled":true,` +
 			`"permission_policy":{"type":"always_allow"}},"type":"agent_toolset_20260401"}`,
 	}, {
 		// name is optional on this arm (it has been since #26), so a stored
@@ -104,7 +124,7 @@ func TestMaterializeResolvesBothToolsetKinds(t *testing.T) {
 		name: "a non-object configs element keeps its place",
 		in:   `{"type":"agent_toolset_20260401","configs":[null,{"name":"bash","enabled":false}]}`,
 		want: `{"configs":[null,{"enabled":false,"name":"bash",` +
-			`"permission_policy":{"type":"always_allow"}}],"default_config":{"enabled":true,` +
+			`"permission_policy":{"type":"always_allow"},"type":"bash"}],"default_config":{"enabled":true,` +
 			`"permission_policy":{"type":"always_allow"}},"type":"agent_toolset_20260401"}`,
 	}, {
 		// An MCP server names its own tools, so any non-empty name can be real
@@ -205,6 +225,14 @@ func TestValidateMCPToolset(t *testing.T) {
 		name:    "an unknown key on the toolset object is rejected",
 		in:      `{"type":"mcp_toolset","mcp_server_name":"g","allowed_tools":["t"]}`,
 		wantErr: `unknown field "allowed_tools"`,
+	}, {
+		// v1.66.0's per-tool `type` discriminator landed on the eight built-in
+		// variants only: BetaManagedAgentsMCPToolConfig(Params) still carries
+		// name / enabled / permission_policy, so this arm keeps refusing it —
+		// and its echo keeps rendering entries without one.
+		name:    "a per-tool type is rejected on the mcp arm",
+		in:      `{"type":"mcp_toolset","mcp_server_name":"g","configs":[{"name":"t","type":"t"}]}`,
+		wantErr: `unknown field "type" in configs[0]`,
 	}, {
 		name:    "an unknown key inside default_config is rejected",
 		in:      `{"type":"mcp_toolset","mcp_server_name":"g","default_config":{"defer_loading":true}}`,

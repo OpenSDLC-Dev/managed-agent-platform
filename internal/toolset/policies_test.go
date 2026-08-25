@@ -153,6 +153,56 @@ func TestValidateRejectsUnknownFields(t *testing.T) {
 			         "configs":[{"name":"bash","enabled":false,"permission_polciy":{"type":"always_ask"}}]}`,
 			wantIn: []string{"permission_polciy", "configs[0]"},
 		},
+		{
+			// v1.66.0's discriminator has to agree with the name it sits beside:
+			// each of the eight union variants tags both keys with the same tool
+			// constant, so a type naming a different tool selects two variants at
+			// once and there is no way to tell which the client meant.
+			name:   "a per-tool type that disagrees with name is rejected",
+			entry:  `{"type":"agent_toolset_20260401","configs":[{"name":"bash","type":"read"}]}`,
+			wantIn: []string{"configs[0].type", "bash", "read"},
+		},
+		{
+			name:   "a non-string per-tool type is rejected",
+			entry:  `{"type":"agent_toolset_20260401","configs":[{"name":"bash","type":1}]}`,
+			wantIn: []string{"configs[0].type"},
+		},
+		{
+			// encoding/json reads a JSON null into a plain string as "", so
+			// two nulls would compare as two equal empty strings and pass —
+			// a null type beside a real name is caught by the mismatch arm
+			// either way, which is why this case nulls both.
+			name:   "a null per-tool type beside a null name is rejected",
+			entry:  `{"type":"agent_toolset_20260401","configs":[{"name":null,"type":null}]}`,
+			wantIn: []string{"configs[0].type"},
+		},
+		{
+			name:   "a per-tool type beside a null name is rejected",
+			entry:  `{"type":"agent_toolset_20260401","configs":[{"name":null,"type":""}]}`,
+			wantIn: []string{"configs[0].type"},
+		},
+		{
+			// Only the eight per-tool variants gained the discriminator;
+			// AgentToolsetDefaultConfigParams still carries enabled and
+			// permission_policy and nothing else.
+			name:   "type inside default_config is still an unknown field",
+			entry:  `{"type":"agent_toolset_20260401","default_config":{"type":"bash"}}`,
+			wantIn: []string{`unknown field "type"`, "default_config"},
+		},
+		{
+			// v1.66.0 also put the web tools' domain lists on the wire. This
+			// platform configures them operator-side (WEBTOOL_ALLOWED_DOMAINS),
+			// so accepting the field would promise a per-agent policy nothing
+			// here enforces — the refusal is registered in docs/DIVERGENCES.md.
+			name:   "web_fetch allowed_domains is refused",
+			entry:  `{"type":"agent_toolset_20260401","configs":[{"name":"web_fetch","type":"web_fetch","allowed_domains":["docs.example.com"]}]}`,
+			wantIn: []string{"allowed_domains", "configs[0]"},
+		},
+		{
+			name:   "web_search user_location is refused",
+			entry:  `{"type":"agent_toolset_20260401","configs":[{"name":"web_search","user_location":{"type":"approximate","country":"US"}}]}`,
+			wantIn: []string{"user_location", "configs[0]"},
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -185,6 +235,30 @@ func TestValidateAcceptsKnownFields(t *testing.T) {
 	}
 	if pols["bash"] != domain.PolicyAlwaysAllow || pols["read"] != domain.PolicyAlwaysAsk {
 		t.Errorf("policies = %v, want bash=always_allow, read=always_ask", pols)
+	}
+}
+
+// TestValidateAcceptsToolTypeDiscriminator pins the one wire change the
+// anthropic-sdk-go v1.66.0 bump forces on this arm: the per-tool config became
+// a union whose eight variants each carry a `type` beside `name`
+// (BetaManagedAgents<Tool>ToolConfigParams). It is optional on the request —
+// the SDK's own generated example sends it, and the `ant` CLI passes `--tool`
+// JSON through raw — so a v1.66.0 client must not meet a 400, and an entry that
+// omits it must keep working. The discriminator configures nothing, so it
+// changes no policy either way.
+func TestValidateAcceptsToolTypeDiscriminator(t *testing.T) {
+	entry := `{"type":"agent_toolset_20260401","configs":[` +
+		`{"name":"bash","type":"bash","enabled":true,"permission_policy":{"type":"always_ask"}},` +
+		`{"name":"read"}]}`
+	if err := toolset.Validate(json.RawMessage(entry)); err != nil {
+		t.Fatalf("Validate(%s) = %v, want nil", entry, err)
+	}
+	pols, err := toolset.Policies(json.RawMessage(entry))
+	if err != nil {
+		t.Fatalf("Policies: %v", err)
+	}
+	if pols["bash"] != domain.PolicyAlwaysAsk || pols["read"] != domain.PolicyAlwaysAllow {
+		t.Errorf("policies = %v, want bash=always_ask, read=always_allow", pols)
 	}
 }
 

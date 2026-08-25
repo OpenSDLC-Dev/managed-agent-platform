@@ -77,6 +77,50 @@ func TestAgentToolsetRejectsUnknownField(t *testing.T) {
 	}
 }
 
+// A v1.66.0 client may put the per-tool `type` discriminator beside `name` —
+// the SDK's own generated example does, and `ant beta:agents create` passes
+// `--tool` JSON through raw — so a create carrying it must not 400. The echo
+// renders `type` on every built-in entry whether the request sent one or not,
+// because the response union marks it required on all eight variants.
+func TestAgentToolConfigTypeDiscriminator(t *testing.T) {
+	s := newTestServer(t)
+	agent := createAgent(t, s, agentBody(map[string]any{
+		"tools": []any{map[string]any{
+			"type": "agent_toolset_20260401",
+			"configs": []any{
+				map[string]any{"name": "bash", "type": "bash",
+					"permission_policy": map[string]any{"type": "always_ask"}},
+				map[string]any{"name": "web_fetch", "type": "web_fetch", "enabled": false},
+				map[string]any{"name": "grep"}, // no discriminator sent
+			},
+		}},
+	}))
+	assertDiscriminators := func(where string, tools []any) {
+		t.Helper()
+		ts, _ := tools[0].(map[string]any)
+		configs, _ := ts["configs"].([]any)
+		if len(configs) != 3 {
+			t.Fatalf("%s: configs = %v, want three entries", where, ts["configs"])
+		}
+		for i, c := range configs {
+			entry, _ := c.(map[string]any)
+			if entry["type"] == nil || entry["type"] != entry["name"] {
+				t.Errorf("%s: configs[%d] = %v, want type equal to name", where, i, entry)
+			}
+		}
+	}
+	assertDiscriminators("create", agent["tools"].([]any))
+	_, got := s.do(http.MethodGet, "/v1/agents/"+agent["id"].(string), nil)
+	assertDiscriminators("get", got["tools"].([]any))
+
+	// A discriminator naming a different tool than the entry it sits on is a
+	// 400: the union has no variant that reads it.
+	wantAgentRejected(t, s, agentBody(map[string]any{
+		"tools": []any{map[string]any{"type": "agent_toolset_20260401",
+			"configs": []any{map[string]any{"name": "bash", "type": "read"}}}},
+	}), "configs[0].type")
+}
+
 func TestAgentCreateMinimal(t *testing.T) {
 	s := newTestServer(t)
 	res := createAgent(t, s, map[string]any{"name": "helper", "model": "claude-opus-4-8"})
@@ -154,10 +198,18 @@ func TestAgentCreateModelObjectAndFullConfig(t *testing.T) {
 	// Every value the client supplied comes back exactly as it was sent; only
 	// the omitted ones are filled in, because both toolset kinds echo their
 	// configuration resolved (plan 29 slice 1 — the rule itself is pinned by
-	// TestToolsetConfigsEchoResolved). The first entry set every knob, so it is
-	// its own expectation; the bare mcp_toolset gains the MCP default.
+	// TestToolsetConfigsEchoResolved). The first entry set every knob but the
+	// per-tool `type` discriminator the v1.66.0 response union requires, so its
+	// echo grows one; the bare mcp_toolset gains the MCP default.
 	wantTools := []any{
-		tools[0],
+		map[string]any{
+			"type":           "agent_toolset_20260401",
+			"default_config": map[string]any{"enabled": true, "permission_policy": map[string]any{"type": "always_allow"}},
+			"configs": []any{
+				map[string]any{"name": "bash", "type": "bash", "enabled": true,
+					"permission_policy": map[string]any{"type": "always_ask"}},
+			},
+		},
 		tools[1],
 		map[string]any{
 			"type":            "mcp_toolset",
