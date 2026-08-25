@@ -73,12 +73,20 @@ func TestMintAndAuthenticate(t *testing.T) {
 		t.Errorf("an unknown token authenticated as %+v", p)
 	}
 
+	// A just-stopped item keeps its token for a minute: the reference worker's
+	// post-stop memory flush rides it.
+	if _, err := pool.Exec(ctx, `UPDATE work_items SET state = 'stopped', stopped_at = now(), lease_expires_at = NULL WHERE id = $1`, item.ID.String()); err != nil {
+		t.Fatal(err)
+	}
+	if p, err := worktoken.Authenticate(ctx, pool, token); err != nil || p.WorkID != item.ID.String() {
+		t.Errorf("a just-stopped item's token does not authenticate (%+v, %v)", p, err)
+	}
 	// The join conditions, one at a time on the same row.
 	for _, tc := range []struct {
 		name, sql string
 	}{
-		{"a lapsed lease", `UPDATE work_items SET lease_expires_at = now() - interval '1 second' WHERE id = $1`},
-		{"a stopped item", `UPDATE work_items SET lease_expires_at = now() + interval '1 minute', state = 'stopped' WHERE id = $1`},
+		{"a lapsed lease", `UPDATE work_items SET state = 'active', stopped_at = NULL, lease_expires_at = now() - interval '1 second' WHERE id = $1`},
+		{"an item stopped a minute ago", `UPDATE work_items SET state = 'stopped', lease_expires_at = NULL, stopped_at = now() - interval '61 seconds' WHERE id = $1`},
 		{"a re-handed-out item", `UPDATE work_items SET state = 'queued', id = 'work_00000000000000000000000000' WHERE id = $1`},
 	} {
 		if _, err := pool.Exec(ctx, tc.sql, item.ID.String()); err != nil {

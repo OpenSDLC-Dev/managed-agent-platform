@@ -91,7 +91,8 @@ platform's own executor, just deployed elsewhere.
    work API (`poll`/`ack`/`heartbeat`/`stop`, lease expiry, dead-worker reclaim) — the
    same pull semantics at two deployment points; an item whose session attaches a
    memory store is handed out with a per-item sessions token in its `secret`, the
-   credential the reference worker uses for that item's calls ("Security invariants"). Either materializes the agent's
+   credential the reference worker uses for that item's calls ("Security
+   invariants"). Either materializes the agent's
    skills into the freshly provisioned sandbox (`{workdir}/skills/<name>/`, versions
    resolved at use time, per-skill failure tolerated) along with the session's mounted
    resources (below), runs the tool, and posts the result event (`agent.tool_result`
@@ -396,14 +397,21 @@ and holds the two OS-touching adapters `gaterun/` declares.
   the claim's own transaction, hashed at rest, rendered once in the poll response's
   `secret`, it is the credential the reference worker uses for that item instead of
   the environment key, and it reaches only the item's own heartbeat and stop, its own
-  session's read and events, the skill reads, and the memory routes of the stores the
-  session attaches — a sibling session or an unattached store is the same 404 another
+  session's read and events, the skill reads, and the memories of the stores the
+  session attaches (list, create, get, update, delete — the five calls the worker's
+  sync makes; the store's own read, its versions and its lifecycle are not among
+  them) — a sibling session or an unattached store is the same 404 another
   environment's session gets, everything else a 401 — narrower than the key that
-  polled it. It dies with the item: a re-hand-out, a lapsed lease, a stop or an
-  archive ends it by join condition, with no revocation to run. On the memory routes
-  the environment key itself is refused, a token's write is the session's version
-  (`session_actor`), and `read_only` is the file tools' guardrail rather than the
-  token's: the token reaches an attached store whatever the attachment's access.
+  polled it everywhere but the memories, which are what it exists for. It dies with
+  the item, by join condition and with no revocation to run: a re-hand-out, a lapsed
+  lease or an archive ends it at once; a graceful stop keeps it with the lease while
+  the worker winds down; the `stopped` state ends it a minute after `stopped_at`,
+  the reference worker's post-stop memory flush being 30 s on a context of its own.
+  On the memory routes the environment key itself is refused, a token's write is the
+  session's version (`session_actor`), and `read_only` is enforced at the hands on
+  both deployment points — the executor's pull-only sync, the reference worker's
+  read-only roots — rather than by the token: it reaches an attached store whatever
+  the attachment's access.
 - **Humans authenticate through the deployment's own IdP, and the platform stores no
   authority** (plan 31, #56). Off by default: with `IDENTITY_MODE` unset or `disabled`
   no JWT is accepted anywhere and the surface is the machine-credential platform

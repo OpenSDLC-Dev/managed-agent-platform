@@ -15,10 +15,11 @@ import (
 // worker's credential for that item, and this lane admits it exactly where the
 // v1.66.0 worker sends it: the item's own heartbeat and stop, its own session's
 // read and events (list, stream, send), the skill reads (workspace-global, as
-// they are for the environment key), and the memory routes of the stores its
-// session attaches. Every other route refuses it — the rest of the work API
-// stays the environment key's, and a store's lifecycle and every management
-// route stay the management key's. The lane is chosen by path family and token
+// they are for the environment key), and the memories of the stores its
+// session attaches — list, create, get, update, delete, the five calls the
+// worker's memory sync makes. Every other route refuses it — the rest of the
+// work API stays the environment key's; a store's own read, its versions, its
+// lifecycle and every management route stay the management key's. The lane is chosen by path family and token
 // shape (isWorkTokenBearer): a wtk_ prefix is what an environment key
 // (sk-map-env01-…) and a JWT (two dots) can never carry, so the dispatcher
 // tries it first and nothing else is misrouted.
@@ -67,18 +68,21 @@ func splitMemoryStore(p string) (storeID, rest string) {
 }
 
 // memoryRouteForWorker reports whether a method and a path beneath a store are
-// among the memory calls the reference worker makes with its token: the store
-// read, the memories' list/create/get/update/delete, the versions' list/get.
-// The store's own lifecycle (update, delete, archive) and a redaction are not.
+// one of the five memory calls the v1.66.0 reference worker makes with its
+// token (lib/environments/memories.go): the memories' list and create, and a
+// memory's get, update and delete. Nothing else beneath a store is — not the
+// store's own read, not its versions (their history and actors are the
+// management key's to read), not its lifecycle, not a redaction.
 func memoryRouteForWorker(method, rest string) bool {
 	segs := strings.Split(rest, "/")
-	switch {
-	case rest == "":
-		return method == http.MethodGet
-	case segs[0] == "memories" && len(segs) <= 2:
-		return true
-	case segs[0] == "memory_versions" && len(segs) <= 2:
-		return method == http.MethodGet
+	if segs[0] != "memories" {
+		return false
+	}
+	switch len(segs) {
+	case 1:
+		return method == http.MethodGet || method == http.MethodPost
+	case 2:
+		return method == http.MethodGet || method == http.MethodPost || method == http.MethodDelete
 	}
 	return false
 }
@@ -139,10 +143,12 @@ func requireWorkToken(pool *pgxpool.Pool, next http.Handler) http.Handler {
 				writeError(w, r, err)
 				return
 			}
+			// coalesce: a session deleted since Authenticate (its token row
+			// cascades with it) is the unattached store's not-found, not a 500.
 			var attached bool
 			if err := pool.QueryRow(r.Context(),
-				`SELECT resources @> jsonb_build_array(jsonb_build_object('type', 'memory_store', 'memory_store_id', $2::text))
-				   FROM sessions WHERE id = $1`, principal.SessionID, storeID).Scan(&attached); err != nil {
+				`SELECT coalesce((SELECT resources @> jsonb_build_array(jsonb_build_object('type', 'memory_store', 'memory_store_id', $2::text))
+				                    FROM sessions WHERE id = $1), false)`, principal.SessionID, storeID).Scan(&attached); err != nil {
 				writeError(w, r, err)
 				return
 			}

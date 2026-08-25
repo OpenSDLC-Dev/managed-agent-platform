@@ -11,8 +11,13 @@
 // A token is minted once per claim, in the claim's own transaction, and
 // stored hash-only. It carries neither an expiry nor a revocation column: it
 // is valid while the item it names is live — the join conditions Authenticate
-// runs — so a re-hand-out (a fresh work id, #62), a lapsed lease, a stop and
-// a session archive each end it without an event. The value itself is
+// runs — so a re-hand-out (a fresh work id, #62), a lapsed lease and a session
+// archive each end it without an event, and a stop ends it a minute after
+// stopped_at: the reference worker flushes its unsynced memory writes once the
+// control plane has reported the stop, on a context of its own bounded by 30
+// seconds (lib/environments/memories.go Cleanup), and a token dead at that
+// instant would lose them — a BYOC workdir is removed at the item's end, with
+// no held sandbox to sync from later as a cloud session has. The value itself is
 // gatetoken's mint under another prefix, so every internal bearer the
 // platform issues shares one entropy and one alphabet.
 package worktoken
@@ -78,8 +83,10 @@ func Secret(token string) string {
 // Authenticate resolves a token to its principal, or the zero Principal when
 // the token is unknown or no longer names a live item: the item's id must
 // still be the one the token was minted for (a re-hand-out rewrites it), its
-// lease unexpired, its state not stopped (ack and heartbeat move an item
-// forward; stop ends it), and its session unarchived.
+// lease unexpired unless it stopped within the last minute (ack and heartbeat
+// move an item forward; a graceful stop parks it in stopping with its lease,
+// and the wind-down rides the token; the stopped state starts the grace the
+// worker's post-stop flush needs), and its session unarchived.
 func Authenticate(ctx context.Context, pool *pgxpool.Pool, token string) (Principal, error) {
 	var p Principal
 	err := pool.QueryRow(ctx,
@@ -88,8 +95,8 @@ func Authenticate(ctx context.Context, pool *pgxpool.Pool, token string) (Princi
 		   JOIN work_items w ON w.id = t.work_id AND w.session_id = t.session_id
 		   JOIN sessions s ON s.id = t.session_id
 		  WHERE t.token_hash = $1
-		    AND w.lease_expires_at > now()
-		    AND w.state <> 'stopped'
+		    AND (w.state <> 'stopped' AND w.lease_expires_at > now()
+		         OR w.stopped_at > now() - interval '60 seconds')
 		    AND s.archived_at IS NULL`,
 		gatetoken.HashToken(token)).Scan(&p.WorkID, &p.SessionID, &p.EnvironmentID)
 	if errors.Is(err, pgx.ErrNoRows) {

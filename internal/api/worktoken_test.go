@@ -74,6 +74,9 @@ func pollItem(t *testing.T, s *tserver, envID, key string) (workID string, secre
 	if res.StatusCode != http.StatusOK {
 		t.Fatalf("poll = %d: %s", res.StatusCode, body)
 	}
+	if cc := res.Header.Get("Cache-Control"); cc != "no-store" {
+		t.Errorf("the poll's Cache-Control = %q, want no-store (its secret is a credential)", cc)
+	}
 	var item map[string]any
 	if err := json.Unmarshal([]byte(body), &item); err != nil || item == nil {
 		t.Fatalf("poll handed out nothing: %s", body)
@@ -193,10 +196,11 @@ func TestSessionsTokenAdmissionMatrix(t *testing.T) {
 	if st := status(t, s, http.MethodGet, "/v1/skills/"+skill["id"].(string), nil, tok); st != http.StatusOK {
 		t.Errorf("skill read with the token = %d, want 200", st)
 	}
-	// The memory routes of a store its session attaches.
+	// The memories of a store its session attaches — the five calls the
+	// worker's sync makes; the store's own read is not among them.
 	store := "/v1/memory_stores/" + storeID
-	if st := status(t, s, http.MethodGet, store, nil, tok); st != http.StatusOK {
-		t.Errorf("store read with the token = %d, want 200", st)
+	if st := status(t, s, http.MethodGet, store, nil, tok); st != http.StatusUnauthorized {
+		t.Errorf("store read with the token = %d, want 401", st)
 	}
 	res := s.doRaw(http.MethodPost, store+"/memories", map[string]any{"path": "/a.md", "content": "one"}, tok)
 	_, created := readJSON(t, res)
@@ -204,9 +208,10 @@ func TestSessionsTokenAdmissionMatrix(t *testing.T) {
 	if mid == "" {
 		t.Fatalf("memory create with the token: %v", created)
 	}
+	vid := created["memory_version_id"].(string)
 	// The worker's write is the session's version, as the executor's sync
 	// pushes are — never an api_actor.
-	if _, version := s.do(http.MethodGet, store+"/memory_versions/"+created["memory_version_id"].(string), nil); version["created_by"] == nil {
+	if _, version := s.do(http.MethodGet, store+"/memory_versions/"+vid, nil); version["created_by"] == nil {
 		t.Errorf("the worker's version has no actor: %v", version)
 	} else if by := version["created_by"].(map[string]any); by["type"] != "session_actor" || by["session_id"] != sessionID {
 		t.Errorf("the worker's version is by %v; want session_actor %s", by, sessionID)
@@ -218,7 +223,6 @@ func TestSessionsTokenAdmissionMatrix(t *testing.T) {
 		{http.MethodGet, store + "/memories", nil},
 		{http.MethodGet, store + "/memories/" + mid, nil},
 		{http.MethodPost, store + "/memories/" + mid, map[string]any{"content": "two"}},
-		{http.MethodGet, store + "/memory_versions", nil},
 		{http.MethodDelete, store + "/memories/" + mid, nil},
 	} {
 		if st := status(t, s, probe.method, probe.path, probe.body, tok); st/100 != 2 {
@@ -237,8 +241,9 @@ func TestSessionsTokenAdmissionMatrix(t *testing.T) {
 		t.Errorf("a sibling session with the token = %d, want 404", st)
 	}
 
-	// Refused: the rest of the work API, the store's own lifecycle, every
-	// management route, and another environment's item.
+	// Refused: the rest of the work API, the store's own read, versions and
+	// lifecycle, every management route, another environment's item, and an
+	// escaped path that only decodes to an admitted one.
 	otherEnv, _, _ := selfHostedWorker(t, s, "elsewhere")
 	for _, probe := range []struct {
 		method, path string
@@ -249,6 +254,12 @@ func TestSessionsTokenAdmissionMatrix(t *testing.T) {
 		{http.MethodGet, "/v1/environments/" + envID + "/work"},
 		{http.MethodGet, "/v1/environments/" + envID + "/work/poll"},
 		{http.MethodPost, "/v1/environments/" + otherEnv + "/work/" + workID + "/heartbeat?expected_last_heartbeat=NO_HEARTBEAT"},
+		{http.MethodGet, store + "/memory_versions"},
+		{http.MethodGet, store + "/memory_versions/" + vid},
+		{http.MethodPost, store + "/memory_versions/" + vid + "/redact"},
+		{http.MethodPatch, store + "/memories/" + mid},
+		{http.MethodGet, store + "%2Fmemories"},
+		{http.MethodGet, "/v1/sessions/" + sessionID + "/%65vents"},
 		{http.MethodPost, store + "/archive"},
 		{http.MethodPost, store},
 		{http.MethodDelete, store},
@@ -272,12 +283,31 @@ func TestSessionsTokenAdmissionMatrix(t *testing.T) {
 		t.Errorf("the management key on a memory route = %d, want 200", st)
 	}
 
-	// Its own item's stop — after which the token is dead.
+	// Its own item's stop. A graceful stop parks the active item in stopping
+	// with its lease, and the token rides the wind-down; the force-stop that
+	// ends it starts the minute of grace the worker's post-stop memory flush
+	// needs, after which the token is dead.
+	if st := status(t, s, http.MethodPost, work+"/stop", map[string]any{}, tok); st != http.StatusNoContent {
+		t.Errorf("graceful stop with the token = %d, want 204", st)
+	}
+	var state string
+	if err := s.pool.QueryRow(context.Background(), `SELECT state FROM work_items WHERE id = $1`, workID).Scan(&state); err != nil || state != "stopping" {
+		t.Fatalf("after the graceful stop: state=%q, %v; want stopping", state, err)
+	}
+	if st := status(t, s, http.MethodPost, store+"/memories", map[string]any{"path": "/b.md", "content": "while stopping"}, tok); st/100 != 2 {
+		t.Errorf("a memory write while stopping = %d, want 2xx", st)
+	}
 	if st := status(t, s, http.MethodPost, work+"/stop", map[string]any{"force": true}, tok); st != http.StatusNoContent {
-		t.Errorf("stop with the token = %d, want 204", st)
+		t.Errorf("force-stop with the token = %d, want 204", st)
+	}
+	if st := status(t, s, http.MethodPost, store+"/memories", map[string]any{"path": "/c.md", "content": "the flush"}, tok); st/100 != 2 {
+		t.Errorf("a memory write in the post-stop grace = %d, want 2xx", st)
+	}
+	if _, err := s.pool.Exec(context.Background(), `UPDATE work_items SET stopped_at = now() - interval '61 seconds' WHERE id = $1`, workID); err != nil {
+		t.Fatal(err)
 	}
 	if st := status(t, s, http.MethodGet, "/v1/sessions/"+sessionID, nil, tok); st != http.StatusUnauthorized {
-		t.Errorf("the token after its item stopped = %d, want 401", st)
+		t.Errorf("the token a minute after its item stopped = %d, want 401", st)
 	}
 }
 

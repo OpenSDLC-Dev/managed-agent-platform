@@ -27,8 +27,7 @@ issuing. All seven scope decisions are settled; the design is the plan's ninetee
       slug, the seven 400s), the resources cursor key, the real filter, `/mnt/memory` reserved.
 - [x] **Slice 4 — cloud materialization, sync, block** (#489): `memsync.Plan`, `FileWrite.Mode`,
       the executor's and reaper's three-phase sync, the file tools' roots, the brain's block, two evals.
-- [x] **Slice 5 — the sessions token** (#491): migration 0030, `worktoken`, the mint in the
-      claim's transaction, the `wtk_` lane and its matrix, the reference worker's `HandleItem`.
+- [x] **Slice 5 — the sessions token** (#491): migration 0030, `worktoken`, the `wtk_` lane and its matrix.
 - [ ] Slice 6 — BYOC memory: the worker's decode, `SetupMemory` and sync, the
       `self_hosted` 400 lifted. Meets #52's `self_hosted` acceptance.
 - [ ] Slice 7 — close-out: HISTORY, ARCHITECTURE, README, plan → `archived`, #52 closed.

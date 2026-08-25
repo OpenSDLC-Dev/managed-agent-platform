@@ -9,6 +9,9 @@ import (
 	"github.com/anthropics/anthropic-sdk-go"
 	"github.com/anthropics/anthropic-sdk-go/lib/environments"
 	"github.com/anthropics/anthropic-sdk-go/option"
+
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/events"
 )
 
 // TestSDKWorkerServesAnItemWithTheSessionsToken drives the v1.66.0 reference
@@ -46,6 +49,18 @@ func TestSDKWorkerServesAnItemWithTheSessionsToken(t *testing.T) {
 		MaxIdle:            &idle,
 		MemorySyncInterval: -1,
 	})
+	// No brain runs here, so no turn ends on its own: an idle end_turn is
+	// planted once the worker's stream is up (the stream tails from its open,
+	// never replays), and the runner's idle watchdog (MaxIdle) then returns
+	// the ErrIdleTimeout HandleItem tolerates, seconds in rather than at the
+	// deadline — which still bounds the run if the plant lands too early.
+	planted := time.AfterFunc(3*time.Second, func() {
+		_, _ = events.NewLog(s.pool).Append(ctx, domain.ID(sessionID), []events.NewEvent{{
+			Type: domain.EventSessionStatusIdle,
+			Payload: []byte(`{"stop_reason":{"type":"end_turn"}}`)}})
+	})
+	defer planted.Stop()
+	started := time.Now()
 	runCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 	if err := w.HandleItem(runCtx, environments.HandleItemOptions{
@@ -54,6 +69,7 @@ func TestSDKWorkerServesAnItemWithTheSessionsToken(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("HandleItem with the sessions token: %v", err)
 	}
+	t.Logf("HandleItem returned after %s", time.Since(started).Round(time.Millisecond))
 	var state string
 	var beat *time.Time
 	if err := s.pool.QueryRow(ctx, `SELECT state, last_heartbeat FROM work_items WHERE id = $1`, workID).Scan(&state, &beat); err != nil {

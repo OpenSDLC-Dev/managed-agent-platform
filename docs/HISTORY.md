@@ -49,6 +49,43 @@ new directory and in-repo citations re-pointed in the moving PR (plan
 
 ---
 
+## The sessions token — review-hardening record (plan 36 slice 5, #491, 2026-08-25)
+
+No CLI acceptance of its own: the lane is reachable only through the test seam until slice 6
+lifts the `self_hosted` attachment refusal, and the v1.66.0 reference worker's `HandleItem`
+runs against the in-process server in `internal/api/worktokensdk_test.go` instead. The
+verifier at 0ad97c5 (build, vet, fmt, 724 targeted runs green, three of four mutants red, the
+matrix driven with curl against a built `controlplane`) read PASS with notes.
+
+**Review round** (every finding verified against the source before acting):
+- *The Claude reviewer (Opus 5) and the verifier* — the lane admitted the store's own read and
+  its versions' list/get, and the comment and the registry attributed them to the worker,
+  which calls neither (`git grep "Beta.MemoryStores"` at v1.66.0: five sites, all
+  `.Memories.`). Narrowed to those five; a store's history and its actors stay the
+  management key's to read.
+- *Claude reviewer* — a session-wide interrupt (`CancelSession`: `stopped`, lease null) killed
+  the token before the reference worker's post-stop flush (`Cleanup` → `FlushWrites`, 30 s on a
+  context of its own), losing every edit since the last 15 s sync — and unlike `cloud`, whose
+  held sandbox is synced at the next run's start, a BYOC workdir is removed at the item's end.
+  Fixed as a join condition, not a column: a stopped item's token lives a minute past
+  `stopped_at`. The Codex reviewer's reading of the same conditions — `stopping` keeping the
+  whole matrix — is by design (the wind-down rides the token), now said so and pinned.
+- *Claude reviewer* — registry and ARCHITECTURE defects, all reworded: "narrower than the key
+  that polled it" (false on the memories), the SDK quote missing its "may be", the reversal
+  record the rewrite dropped, and a tracker sentence claiming recording item 10 covers the
+  environment key's status on a memory route, which the plan classes as the unrecordable
+  kind. Also: the attachment probe's `ErrNoRows` on a session deleted since `Authenticate`
+  (coalesced to the 404), `Cache-Control: no-store` on the poll as on the two console
+  issuance routes, and the refusal loop widened (redact, versions, escaped paths).
+- *Codex reviewer (gpt-5.6-sol, xhigh)* — two findings evaluated and rejected: an events
+  stream open when the token dies runs to its end (true of every credential here — a stream
+  authenticates at its open — and the holder polled with an environment key that reads every
+  session's events in the environment anyway); a request body stalled across the token's
+  death is bounded by the server's one-minute `ReadTimeout`, the same for every bearer.
+- *Verifier* — the SDK test spent its whole 30 s deadline because no turn ends without a
+  brain; an idle end_turn planted once the stream is up ends it through the runner's
+  `MaxIdle` within seconds.
+
 ## Memory stores end to end — real `ant` CLI, real model, a `cloud` sandbox (plan 36 slice 4, run 2026-08-25) — ✅ passed
 
 The plan's "End-to-end acceptance" names the cloud half slice 4 records: a store with a
