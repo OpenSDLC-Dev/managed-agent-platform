@@ -16,14 +16,33 @@ The two that would cost real money to get wrong:
     Postgres that is still starting. Both are invisible to any static check and
     both are one refactor away from inverting.
 
-The fake models gcloud's argv and the state it mutates: node pool sizes, cluster
-resource labels, and the Cloud SQL activation state. It dies on any invocation it
-does not recognise, which is what makes it notice a script that has started
-calling something new rather than quietly returning an empty string.
+THE FAKE MODELS FOUR THINGS THAT REAL GCLOUD ACTUALLY DOES, each of which the
+script would otherwise get wrong in a way no static check could see:
+
+  - `--update-labels` REPLACES the cluster's label set. It is not a merge,
+    whatever the name suggests: `UpdateLabelsCommon` builds the SetLabelsRequest
+    from the flag's pairs alone and reads the cluster only for its fingerprint
+    (googlecloudsdk/api_lib/container/api_adapter.py). An earlier version of this
+    script assumed a merge, and under that assumption a resumed stop deletes the
+    size the interrupted attempt had already saved.
+  - `--remove-labels` errors on a label that is not there, and on a cluster with
+    no labels at all (`RemoveLabelsCommon`, same file). It is a read-modify-write
+    and therefore safe for deletion — but only if handed keys that exist.
+  - a `value(resourceLabels.<key>)` projection on a MISSING key prints an empty
+    line and exits 0. Verified live. It is the whole basis for `start` being able
+    to tell "no saved size" from "could not ask".
+  - gcloud on Windows terminates its lines CRLF. A pool name read with the CR
+    still attached produces `node pool "platform\r" not found` on every call
+    after the listing — observed against the real cluster, not theorised.
+
+Projections are enforced rather than ignored: a `describe` whose `--format` asks
+for the wrong field is an error here, because a fake that prints the right answer
+to the wrong question cannot catch the script asking it.
 
 Faults are injected by dropping marker files in the state directory, so a
-scenario can fail one specific call — the interesting failures here are partial
-ones, where some pools are already at zero and the saved sizes must survive.
+scenario can fail one specific call. The interesting failures are partial ones,
+where some pools are already parked or already restored and the saved sizes have
+to survive.
 
 Run: make gcp-power-test
 """
@@ -65,6 +84,12 @@ def fault(tag):
     return (S / ("fault." + tag)).exists()
 
 
+def out(line):
+    # Windows gcloud terminates lines CRLF. Under the `crlf` fault this fake does
+    # too, so the script's `tr -d '\r'` is exercised rather than assumed.
+    sys.stdout.write(str(line) + ("\r\n" if fault("crlf") else "\n"))
+
+
 def load():
     return json.loads(DB.read_text())
 
@@ -82,71 +107,91 @@ with (S / "calls.log").open("a") as f:
 if "--project" not in flags:
     die("fake gcloud: call without --project: " + " ".join(a), 2)
 d = load()
-proj = flags["--project"]
-if proj != d["project"]:
-    die("ERROR: (gcloud) project [%s] not found or permission denied." % proj)
+if flags["--project"] != d["project"]:
+    die("ERROR: (gcloud) project [%s] not found or permission denied."
+        % flags["--project"])
 
 
-def projection():
+def projection(expected):
+    """The --format must ask for `expected`; anything else is the script's bug."""
     fmt = flags.get("--format", "")
-    return fmt[len("value("):-1] if fmt.startswith("value(") else fmt
+    if fmt != "value(%s)" % expected:
+        die("fake gcloud: %s expects --format=value(%s), got %r"
+            % (" ".join(pos[:3]), expected, fmt), 2)
 
 
 def cluster(name):
-    return d["clusters"].get(name)
+    c = d["clusters"].get(name)
+    if c is None:
+        die("ERROR: (gcloud) NOT_FOUND: cluster %s" % name)
+    return c
+
+
+def render_labels(labels):
+    return ";".join("%s=%s" % kv for kv in sorted(labels.items()))
 
 
 if pos[:3] == ["container", "clusters", "list"]:
+    projection("location")
+    if fault("list-denied"):
+        die("ERROR: (gcloud.container.clusters.list) ResponseError: code=403, "
+            "message=Required 'container.clusters.list' permission.")
     # `--filter=name=X`; a name that matches nothing prints nothing and exits 0,
     # which is how the script tells "wrong prefix" from "no permission".
     want = flags.get("--filter", "").split("=", 1)[-1]
-    c = cluster(want)
-    if c:
-        print(c["location"])
+    if want in d["clusters"]:
+        out(d["clusters"][want]["location"])
     sys.exit(0)
 
 if pos[:3] == ["container", "clusters", "describe"]:
-    c = cluster(pos[3]) or die("ERROR: (gcloud) NOT_FOUND: cluster %s" % pos[3])
-    p = projection()
-    if p.startswith("resourceLabels."):
-        # A key that is not present prints an empty line, exit 0 -- verified
-        # against the live cluster, and the whole basis for "refuse rather than
-        # guess" being reachable at all.
-        print(c["labels"].get(p[len("resourceLabels."):], ""))
-    elif p == "resourceLabels":
-        print(";".join("%s=%s" % kv for kv in sorted(c["labels"].items())))
+    c = cluster(pos[3])
+    fmt = flags.get("--format", "")
+    if fmt == "value(resourceLabels)":
+        out(render_labels(c["labels"]))
+    elif fmt.startswith("value(resourceLabels."):
+        key = fmt[len("value(resourceLabels."):-1]
+        out(c["labels"].get(key, ""))
     else:
-        die("fake gcloud: unhandled clusters describe projection: " + p, 2)
+        die("fake gcloud: clusters describe: unhandled --format %r" % fmt, 2)
     sys.exit(0)
 
 if pos[:3] == ["container", "clusters", "update"]:
-    c = cluster(pos[3]) or die("ERROR: (gcloud) NOT_FOUND: cluster %s" % pos[3])
+    c = cluster(pos[3])
     if "--update-labels" in flags and "--remove-labels" in flags:
         die("ERROR: (gcloud.container.clusters.update) argument --update-labels: "
-            "At most one of --update-labels | --remove-labels may be specified.", 2)
+            "Exactly one of (--update-labels | --remove-labels) must be specified.", 2)
     if fault("update-labels"):
         die("ERROR: (gcloud.container.clusters.update) UNAVAILABLE: backend error")
     if "--update-labels" in flags:
-        # Merge, not replace: --update-labels adds and overwrites the keys named
-        # and leaves every other one alone. Replacing here would drop
-        # goog-terraform-provisioned, and would also silently make a resumed stop
-        # forget the pool it had already parked.
+        # REPLACE, not merge -- see this file's docstring. Anything the script
+        # leaves out of the flag is deleted from the cluster.
+        new = {}
         for kv in flags["--update-labels"].split(","):
             k, _, v = kv.partition("=")
-            c["labels"][k] = v
+            if not k or not v:
+                die("ERROR: (gcloud.container.clusters.update) argument "
+                    "--update-labels: Bad value [%s]" % kv, 2)
+            new[k] = v
+        c["labels"] = new
     elif "--remove-labels" in flags:
+        if not c["labels"]:
+            die("ERROR: (gcloud.container.clusters.update) No labels found on "
+                "cluster [%s]." % pos[3])
         for k in flags["--remove-labels"].split(","):
-            c["labels"].pop(k, None)
+            if k not in c["labels"]:
+                die("ERROR: (gcloud.container.clusters.update) No label named "
+                    "'%s' found on cluster [%s]." % (k, pos[3]))
+            del c["labels"][k]
     else:
         die("fake gcloud: clusters update with no label flag: " + " ".join(a), 2)
     save(d)
     sys.exit(0)
 
 if pos[:3] == ["container", "clusters", "resize"]:
-    c = cluster(pos[3]) or die("ERROR: (gcloud) NOT_FOUND: cluster %s" % pos[3])
+    c = cluster(pos[3])
     pool = flags["--node-pool"]
     if pool not in c["pools"]:
-        die("ERROR: (gcloud) NOT_FOUND: node pool %s" % pool)
+        die("ERROR: (gcloud) NOT_FOUND: node pool \"%s\" not found" % pool)
     if fault("resize." + pool):
         die("ERROR: (gcloud.container.clusters.resize) UNAVAILABLE: backend error")
     c["pools"][pool] = int(flags["--num-nodes"])
@@ -154,18 +199,32 @@ if pos[:3] == ["container", "clusters", "resize"]:
     sys.exit(0)
 
 if pos[:3] == ["container", "node-pools", "list"]:
-    c = cluster(flags["--cluster"]) or die("ERROR: (gcloud) NOT_FOUND")
-    for name in c["pools"]:
-        print(name)
+    projection("name")
+    c = cluster(flags["--cluster"])
+    names = list(c["pools"])
+    if fault("list-partial"):
+        # A listing that prints some pools and THEN fails -- pagination dying
+        # halfway. The danger is a caller that cannot see the exit status and
+        # parks only what it managed to read.
+        out(names[0])
+        die("ERROR: (gcloud.container.node-pools.list) ResponseError: code=503")
+    for name in names:
+        out(name)
     sys.exit(0)
 
 if pos[:3] == ["container", "node-pools", "describe"]:
-    c = cluster(flags["--cluster"]) or die("ERROR: (gcloud) NOT_FOUND")
-    print(c["pools"][pos[3]])
+    projection("initialNodeCount")
+    c = cluster(flags["--cluster"])
+    if pos[3] not in c["pools"]:
+        die("ERROR: (gcloud) NOT_FOUND: node pool \"%s\" not found" % pos[3])
+    out(c["pools"][pos[3]])
     sys.exit(0)
 
 if pos[:3] == ["sql", "instances", "describe"]:
-    inst = d["sql"].get(pos[3]) or die("ERROR: (gcloud) NOT_FOUND: instance %s" % pos[3])
+    projection("state")
+    inst = d["sql"].get(pos[3])
+    if inst is None:
+        die("ERROR: (gcloud) NOT_FOUND: instance %s" % pos[3])
     inst["describes"] += 1
     # A started instance does not answer immediately. `flip_after` is how many
     # describes it takes to come up, so the wait loop is exercised rather than
@@ -173,11 +232,13 @@ if pos[:3] == ["sql", "instances", "describe"]:
     if inst["state"] == "PENDING" and inst["describes"] >= inst["flip_after"]:
         inst["state"] = "RUNNABLE"
     save(d)
-    print(inst["state"])
+    out(inst["state"])
     sys.exit(0)
 
 if pos[:3] == ["sql", "instances", "patch"]:
-    inst = d["sql"].get(pos[3]) or die("ERROR: (gcloud) NOT_FOUND: instance %s" % pos[3])
+    inst = d["sql"].get(pos[3])
+    if inst is None:
+        die("ERROR: (gcloud) NOT_FOUND: instance %s" % pos[3])
     policy = flags["--activation-policy"]
     if policy == "NEVER":
         inst["state"] = "STOPPED"
@@ -193,6 +254,8 @@ die("fake gcloud: unhandled invocation: " + " ".join(a), 2)
 '''
 
 failures = []
+
+TF_LABEL = {"goog-terraform-provisioned": "true"}
 
 
 class Run:
@@ -211,6 +274,10 @@ class Run:
     def labels(self, cluster="map-staging"):
         return self.db["clusters"][cluster]["labels"]
 
+    def saved(self, cluster="map-staging"):
+        return {k[len("power-saved-"):]: v for k, v in self.labels(cluster).items()
+                if k.startswith("power-saved-")}
+
     def sql(self, inst="map-staging"):
         return self.db["sql"][inst]["state"]
 
@@ -219,11 +286,6 @@ class Run:
         return (self.state / "calls.log").read_text().splitlines()
 
     def first(self, needle):
-        """Index of the first call containing `needle`, or -1.
-
-        Order is the whole point of several assertions below, and comparing
-        indices is the only way to state it.
-        """
         for i, ln in enumerate(self.calls):
             if needle in ln:
                 return i
@@ -232,27 +294,32 @@ class Run:
     def last(self, needle):
         """Index of the last call containing `needle`, or -1.
 
-        Needed where `first` is too weak to say anything: the wait loop's first
-        poll happens before the database is even started, so only the LAST one
-        marks the moment it reported ready.
+        `first` is too weak for most ordering claims here: the wait loop's first
+        poll happens before the database is even started, and a stop that resized
+        one pool before the database and one after would satisfy a `first`-based
+        check while doing exactly the thing the check forbids.
         """
         for i in range(len(self.calls) - 1, -1, -1):
             if needle in self.calls[i]:
                 return i
         return -1
 
+    def count(self, needle):
+        return len([c for c in self.calls if needle in c])
+
 
 def new_state(tmp, name, pools=None, sql="RUNNABLE", flip_after=0,
-              labels=None, project="p", cluster="map-staging"):
+              labels=None, saved=None, project="p", cluster="map-staging"):
     state = pathlib.Path(tempfile.mkdtemp(dir=tmp, prefix=name + "."))
+    lab = dict(TF_LABEL if labels is None else labels)
+    for pool, size in (saved or {}).items():
+        lab["power-saved-" + pool] = str(size)
     db = {
         "project": project,
         "clusters": {
             cluster: {
                 "location": "us-central1-a",
-                # Terraform stamps this one and does not declare resourceLabels,
-                # so it is what a merge has to leave alone.
-                "labels": dict(labels or {"goog-terraform-provisioned": "true"}),
+                "labels": lab,
                 "pools": dict(pools or {"platform": 3, "sandbox": 1}),
             }
         },
@@ -311,20 +378,20 @@ def main():
         check("exits 0", r.code == 0, r.out)
         check("both pools are at zero", r.pools() == {"platform": 0, "sandbox": 0}, r.pools())
         check("the database is stopped", r.sql() == "STOPPED", r.sql())
-        # The ordering claim in the script's header, as an assertion. A pod that
-        # loses its database mid-query is a worse way to stop than a drained one.
-        check("every resize precedes the database patch",
-              r.first("clusters resize") < r.first("sql instances patch"),
-              r.calls)
-        check("the sizes are saved BEFORE the first resize",
+        # Measured against the LAST resize: a stop that drained one pool, stopped
+        # the database, and only then drained the other would satisfy a check on
+        # the first one while doing the thing the ordering forbids.
+        check("EVERY resize precedes the database patch",
+              r.last("clusters resize") < r.first("sql instances patch"), r.calls)
+        check("the sizes are saved before the first resize",
               r.first("--update-labels") < r.first("clusters resize"), r.calls)
 
-        print("the saved sizes are the real ones, and survive the merge")
-        check("platform's size is recorded", r.labels().get("power-saved-platform") == "3", r.labels())
-        check("sandbox's size is recorded", r.labels().get("power-saved-sandbox") == "1", r.labels())
-        # --labels would have replaced; --update-labels merges. Getting this
-        # wrong would strip a label Terraform put there.
-        check("terraform's own label is untouched",
+        print("the saved sizes are the real ones, and no other label is lost")
+        check("platform's size is recorded", r.saved().get("platform") == "3", r.labels())
+        check("sandbox's size is recorded", r.saved().get("sandbox") == "1", r.labels())
+        # --update-labels REPLACES, so preserving this one is the script sending
+        # the complete set rather than gcloud merging on its behalf.
+        check("terraform's own label survives the replace",
               r.labels().get("goog-terraform-provisioned") == "true", r.labels())
 
         print("a start restores exactly what was parked, database first")
@@ -337,18 +404,16 @@ def main():
         check("the database is running", r.sql() == "RUNNABLE", r.sql())
         check("the database is started before any pool is resized",
               r.first("sql instances patch") < r.first("clusters resize"), r.calls)
-        check("the saved sizes are cleared once restored",
-              not any(k.startswith("power-saved-") for k in r.labels()), r.labels())
+        check("the saved sizes are cleared once restored", r.saved() == {}, r.labels())
+        check("and clearing them kept every other label",
+              r.labels() == dict(TF_LABEL), r.labels())
 
         print("start waits for the database instead of trusting the patch")
         st = new_state(tmp, "wait", pools={"platform": 0, "sandbox": 0},
-                       sql="STOPPED", flip_after=3,
-                       labels={"power-saved-platform": "3", "power-saved-sandbox": "1"})
+                       sql="STOPPED", flip_after=3, saved={"platform": 3, "sandbox": 1})
         r = run(tmp, st, "start", env_extra={"SQL_TIMEOUT": "30"})
         check("exits 0", r.code == 0, r.out)
-        check("it polled more than once", len([c for c in r.calls if "sql instances describe" in c]) >= 3, r.calls)
-        # Measured against the LAST poll, not the first: the first one happens
-        # before the instance is even started, so it proves nothing.
+        check("it polled more than once", r.count("sql instances describe") >= 3, r.calls)
         check("no pool was resized before the database reported ready",
               r.first("clusters resize") > r.last("sql instances describe"), r.calls)
         check("both pools are back", r.pools() == {"platform": 3, "sandbox": 1}, r.pools())
@@ -357,31 +422,62 @@ def main():
         # Resizing into a dead Postgres buys nothing but a CrashLoopBackOff and
         # a node bill, so giving up has to mean giving up on the whole start.
         st = new_state(tmp, "nevercomesup", pools={"platform": 0, "sandbox": 0},
-                       sql="STOPPED", flip_after=9999,
-                       labels={"power-saved-platform": "3", "power-saved-sandbox": "1"})
+                       sql="STOPPED", flip_after=9999, saved={"platform": 3, "sandbox": 1})
         r = run(tmp, st, "start")
         check("refuses", r.code != 0, r.out)
         check("resizes nothing", r.first("clusters resize") == -1, r.calls)
         check("the pools stay at zero", r.pools() == {"platform": 0, "sandbox": 0}, r.pools())
         check("the saved sizes are still there for the next attempt",
-              r.labels().get("power-saved-platform") == "3", r.labels())
+              r.saved() == {"platform": "3", "sandbox": "1"}, r.labels())
 
-        print("start refuses to guess when the saved sizes are gone")
+        print("start refuses to guess when a saved size is gone")
         st = new_state(tmp, "noguess", pools={"platform": 0, "sandbox": 0}, sql="STOPPED")
         r = run(tmp, st, "start")
         check("refuses", r.code != 0, r.out)
         check("says why", "refusing to guess" in r.out, r.out)
         check("names the way out", "NODES=" in r.out, r.out)
         check("leaves the pools at zero", r.pools() == {"platform": 0, "sandbox": 0}, r.pools())
+        # The refusal has to come BEFORE the database is started, or "refusing"
+        # has already left the environment part-live and billing.
+        check("and never started the database", r.first("sql instances patch") == -1, r.calls)
+
+        print("...and refuses even when only ONE pool's size is missing")
+        # The dangerous shape: the first pool resolves, so a pool-by-pool check
+        # would restore it and only then discover the second has nothing.
+        st = new_state(tmp, "onemissing", pools={"platform": 0, "sandbox": 0},
+                       sql="STOPPED", saved={"platform": 3})
+        r = run(tmp, st, "start")
+        check("refuses", r.code != 0, r.out)
+        check("names the pool that is missing", "sandbox" in r.out, r.out)
+        check("resizes nothing at all", r.first("clusters resize") == -1, r.calls)
+        check("never started the database", r.first("sql instances patch") == -1, r.calls)
+        check("kept the size it did have", r.saved() == {"platform": "3"}, r.labels())
 
         print("...and takes an explicit size when given one")
+        st = new_state(tmp, "explicit", pools={"platform": 0, "sandbox": 0}, sql="STOPPED")
         r = run(tmp, st, "start", env_extra={"NODES": "2"})
         check("exits 0", r.code == 0, r.out)
         check("uses the size it was given", r.pools() == {"platform": 2, "sandbox": 2}, r.pools())
+        # No power-saved label ever existed here, so there is nothing to remove --
+        # and asking real gcloud to remove an absent label is an error.
+        check("removes no label it never wrote", r.first("--remove-labels") == -1, r.calls)
+        check("the cluster's other labels are untouched", r.labels() == dict(TF_LABEL), r.labels())
 
-        print("a stop interrupted halfway keeps the sizes it had already saved")
+        print("a size that is not a positive integer is refused")
+        for bad in ("0", "-1", "two", "1.5", ""):
+            st = new_state(tmp, "bad" + (bad or "empty"),
+                           pools={"platform": 0, "sandbox": 0}, sql="STOPPED")
+            r = run(tmp, st, "start", env_extra={"NODES": bad})
+            # NODES="" is indistinguishable from unset and takes the refusal path;
+            # both are refusals, which is all this asserts.
+            check("NODES=%r refuses" % bad, r.code != 0, r.out)
+            check("NODES=%r resizes nothing" % bad, r.first("clusters resize") == -1, r.calls)
+
+        print("a stop interrupted halfway keeps the size it had already saved")
         # The failure that would quietly destroy the saved state: the re-run sees
-        # platform already at zero and must not record THAT as its parked size.
+        # platform already at zero and must not record THAT as its parked size --
+        # and because the write REPLACES, it must also carry platform's old value
+        # forward rather than sending sandbox's alone.
         st = new_state(tmp, "halfway")
         r = run(tmp, st, "stop", faults=["resize.sandbox"])
         check("the interrupted run reports failure", r.code != 0, r.out)
@@ -391,11 +487,43 @@ def main():
         r2 = run(tmp, st, "stop")
         check("the re-run finishes the job", r2.code == 0, r2.out)
         check("both pools are parked", r2.pools() == {"platform": 0, "sandbox": 0}, r2.pools())
-        check("platform's ORIGINAL size survived, not the zero it was re-read at",
-              r2.labels().get("power-saved-platform") == "3", r2.labels())
+        check("platform's ORIGINAL size survived the replacing write",
+              r2.saved() == {"platform": "3", "sandbox": "1"}, r2.labels())
+        check("and so did terraform's label",
+              r2.labels().get("goog-terraform-provisioned") == "true", r2.labels())
         r3 = run(tmp, st, "start")
         check("and a start brings both back to where they began",
               r3.pools() == {"platform": 3, "sandbox": 1}, r3.pools())
+
+        print("a start interrupted halfway leaves no label behind on the re-run")
+        # The one that silently disables CD: a leftover power-saved-* label tells
+        # deploy.yml the environment is parked, so every deploy afterwards is
+        # skipped with a notice while staging is fully up. A re-run finds the
+        # restored pool already running and skips it, so a removal list built
+        # from "pools this run resized" would never name it again.
+        st = new_state(tmp, "starthalf", pools={"platform": 0, "sandbox": 0},
+                       sql="STOPPED", saved={"platform": 3, "sandbox": 1})
+        r = run(tmp, st, "start", faults=["resize.sandbox"])
+        check("the interrupted run reports failure", r.code != 0, r.out)
+        check("platform is back", r.pools()["platform"] == 3, r.pools())
+        check("both labels are still there", r.saved() == {"platform": "3", "sandbox": "1"},
+              r.labels())
+        r2 = run(tmp, st, "start")
+        check("the re-run finishes the job", r2.code == 0, r2.out)
+        check("both pools are running", r2.pools() == {"platform": 3, "sandbox": 1}, r2.pools())
+        check("NO parked marker is left behind", r2.saved() == {}, r2.labels())
+        check("and the cluster's other labels are intact", r2.labels() == dict(TF_LABEL),
+              r2.labels())
+
+        print("a stale marker on a fully running cluster is cleaned up by start")
+        # However it got there -- a `terraform apply` while parked scales the
+        # pools back up behind this script's back -- `start` has to be the way out.
+        st = new_state(tmp, "stale", saved={"platform": 3})
+        r = run(tmp, st, "start")
+        check("exits 0", r.code == 0, r.out)
+        check("resizes nothing", r.first("clusters resize") == -1, r.calls)
+        check("clears the stale marker", r.saved() == {}, r.labels())
+        check("keeping every other label", r.labels() == dict(TF_LABEL), r.labels())
 
         print("a failed size save parks nothing")
         # If the sizes cannot be recorded, zeroing the pools would strand them:
@@ -405,16 +533,26 @@ def main():
         check("refuses", r.code != 0, r.out)
         check("resizes nothing", r.first("clusters resize") == -1, r.calls)
         check("the pools are untouched", r.pools() == {"platform": 3, "sandbox": 1}, r.pools())
+        check("the database is untouched", r.sql() == "RUNNABLE", r.sql())
 
         print("stopping what is already parked is a no-op, not a re-save")
         st = new_state(tmp, "already", pools={"platform": 0, "sandbox": 0}, sql="STOPPED",
-                       labels={"power-saved-platform": "3", "power-saved-sandbox": "1"})
+                       saved={"platform": 3, "sandbox": 1})
         r = run(tmp, st, "stop")
         check("exits 0", r.code == 0, r.out)
         check("says so", "already parked" in r.out, r.out)
         check("writes no labels", r.first("--update-labels") == -1, r.calls)
         check("the saved sizes are the original ones",
-              r.labels().get("power-saved-platform") == "3", r.labels())
+              r.saved() == {"platform": "3", "sandbox": "1"}, r.labels())
+
+        print("...but says so out loud when the sizes were never recorded")
+        # Physically parked, no marker: CD will not skip and `start` will refuse.
+        # Reporting a bare "already parked" would hide both.
+        st = new_state(tmp, "parkednomark", pools={"platform": 0, "sandbox": 0}, sql="STOPPED")
+        r = run(tmp, st, "stop")
+        check("exits 0", r.code == 0, r.out)
+        check("warns that no size is recorded", "warning" in r.out.lower(), r.out)
+        check("names the way out", "NODES=" in r.out, r.out)
 
         print("starting what is already running changes nothing")
         st = new_state(tmp, "alreadyup")
@@ -422,10 +560,11 @@ def main():
         check("exits 0", r.code == 0, r.out)
         check("resizes nothing", r.first("clusters resize") == -1, r.calls)
         check("the pools keep their sizes", r.pools() == {"platform": 3, "sandbox": 1}, r.pools())
+        check("removes no label it never wrote", r.first("--remove-labels") == -1, r.calls)
 
         print("status reports without changing anything")
         st = new_state(tmp, "status", pools={"platform": 0, "sandbox": 0}, sql="STOPPED",
-                       labels={"power-saved-platform": "3", "power-saved-sandbox": "1"})
+                       saved={"platform": 3, "sandbox": 1})
         r = run(tmp, st, "status")
         check("exits 0", r.code == 0, r.out)
         check("names both pools", "platform" in r.out and "sandbox" in r.out, r.out)
@@ -434,15 +573,48 @@ def main():
         check("issues no write", not any(w in c for c in r.calls
                                          for w in ("resize", "update", "patch")), r.calls)
 
+        print("a listing that dies halfway parks nothing")
+        # The quiet one: a paginated list that prints `platform` and then fails.
+        # A caller that cannot see the exit status parks only what it read, then
+        # stops the database while the other pool is still serving.
+        st = new_state(tmp, "partial")
+        r = run(tmp, st, "stop", faults=["list-partial"])
+        check("refuses", r.code != 0, r.out)
+        check("resizes nothing", r.first("clusters resize") == -1, r.calls)
+        check("never touches the database", r.first("sql instances patch") == -1, r.calls)
+        check("the pools are untouched", r.pools() == {"platform": 3, "sandbox": 1}, r.pools())
+
+        print("a denied listing is not reported as a missing cluster")
+        st = new_state(tmp, "denied")
+        r = run(tmp, st, "stop", faults=["list-denied"])
+        check("refuses", r.code != 0, r.out)
+        check("shows gcloud's own error", "permission" in r.out.lower(), r.out)
+        check("does not blame NAME_PREFIX", "NAME_PREFIX" not in r.out, r.out)
+
+        print("CRLF line endings do not break pool discovery")
+        # Windows gcloud terminates lines CRLF. With the CR left attached, every
+        # per-pool call after the listing 404s on `platform\r`.
+        st = new_state(tmp, "crlf")
+        r = run(tmp, st, "stop", faults=["crlf"])
+        check("exits 0", r.code == 0, r.out)
+        check("both pools are parked", r.pools() == {"platform": 0, "sandbox": 0}, r.pools())
+        check("the sizes are recorded without a stray CR",
+              r.saved() == {"platform": "3", "sandbox": "1"}, r.labels())
+        r2 = run(tmp, st, "start", faults=["crlf"])
+        check("and a start brings them back", r2.pools() == {"platform": 3, "sandbox": 1},
+              r2.pools())
+        check("clearing the labels works too", r2.saved() == {}, r2.labels())
+
         print("pools are discovered, not hard-coded to platform and sandbox")
         # main.tf declares two today. A third must be parked without this script
         # being edited -- and, just as important, must be RESTORED.
         st = new_state(tmp, "threepools", pools={"platform": 3, "sandbox": 1, "gpu": 5})
         r = run(tmp, st, "stop")
         check("all three are parked", r.pools() == {"platform": 0, "sandbox": 0, "gpu": 0}, r.pools())
-        check("the third one's size is saved", r.labels().get("power-saved-gpu") == "5", r.labels())
+        check("the third one's size is saved", r.saved().get("gpu") == "5", r.labels())
         r2 = run(tmp, st, "start")
-        check("and all three come back", r2.pools() == {"platform": 3, "sandbox": 1, "gpu": 5}, r2.pools())
+        check("and all three come back", r2.pools() == {"platform": 3, "sandbox": 1, "gpu": 5},
+              r2.pools())
 
         print("nothing is hard-coded: the prefix names every resource")
         # Requirement from the ask this script answers -- it has to run against
