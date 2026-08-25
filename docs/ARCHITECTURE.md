@@ -187,8 +187,8 @@ rules in `internal/memsync` decide: the tree is hashed in the sandbox, the plan 
 inside the transaction that commits the run (a push is a compare-and-set on the head's
 digest and appends a `session_actor` version; the store wins a both-sides change; an
 emptied directory against a baseline of several files is re-downloaded, never read as
-deletions), and the settlement is written back; a listing that fails or complains skips
-the store rather than reading as deletions. A `read_only` or archived store, or a
+deletions), and the settlement is written back; a listing that fails skips the store
+rather than reading as deletions. A `read_only` or archived store, or a
 directory whose marker was altered, is pulled from and never pushed to, and the file
 tools refuse to write in a `read_only` or archived store (the marker they never see);
 the reaper syncs a sandbox before every tier's action but the deleted tier's. A

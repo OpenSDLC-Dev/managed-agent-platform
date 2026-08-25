@@ -353,13 +353,18 @@ func TestMemorySyncStoreWinsAConflict(t *testing.T) {
 // TestMemorySyncWipeGuard: an `rm -rf` of the mount — marker and all — against
 // a baseline of two files is a wiped mount, not two deletions: both come
 // back with the marker, nothing is deleted from the store, and the rebuilt
-// directory pushes again at the next run rather than staying pull-only.
+// directory pushes again at the next run rather than staying pull-only. The
+// wipe happens inside a run, after materialization — the reaper's standalone
+// sync is that shape exactly, and a wipe between runs would be repaired by
+// the next materialization before any sync judged it.
 func TestMemorySyncWipeGuard(t *testing.T) {
 	h, sb := materialized(t, "read_write")
 	delete(sb.files, memMount+"/notes.md")
 	delete(sb.files, memMount+"/a/b.md")
 	delete(sb.files, memMount+"/.anthropic-memory-store")
-	h.step(t)
+	if err := h.exec.syncMemoryStandalone(context.Background(), sb, h.sid); err != nil {
+		t.Fatalf("sync: %v", err)
+	}
 
 	if sb.files[memMount+"/notes.md"] != "hello" || sb.files[memMount+"/a/b.md"] != "deep" {
 		t.Errorf("the wiped directory was not rebuilt: %v", sb.files)
@@ -429,8 +434,8 @@ func TestMemorySyncPullOnly(t *testing.T) {
 
 // TestMemorySyncRefusals: what the store would refuse is not pushed and is
 // remembered so it is not re-read every run — a body over 100 kB, invalid
-// UTF-8, a path the store rejects — and a create over an occupied path is a
-// conflict that leaves the file as written.
+// UTF-8, a path the store rejects — and a create at an ancestor of a memory
+// is the conflict the store wins: the file goes, not remembered either way.
 func TestMemorySyncRefusals(t *testing.T) {
 	h, sb := materialized(t, "read_write")
 	big := strings.Repeat("x", memsync.MaxContentBytes+1)
@@ -452,14 +457,49 @@ func TestMemorySyncRefusals(t *testing.T) {
 		}
 	}
 	if _, ok := b.Refused["/a"]; ok {
-		t.Error("an occupancy conflict was recorded as a refusal; it is the store's answer, retried next run")
+		t.Error("an occupancy conflict was recorded as a refusal")
 	}
 	if _, ok := b.Synced["/a"]; ok {
 		t.Error("an occupancy conflict was recorded as synced")
 	}
-	// The files stay as the agent wrote them.
-	if sb.files[memMount+"/big.md"] != big || sb.files[memMount+"/a"] == "" {
+	// The refused files stay as the agent wrote them; the file in the way of
+	// the store's `/a/b.md` is gone, and `/a/b.md` is still there.
+	if sb.files[memMount+"/big.md"] != big {
 		t.Error("a refused file was removed or rewritten")
+	}
+	if _, ok := sb.files[memMount+"/a"]; ok {
+		t.Error("a file at the ancestor of a memory survived the conflict; the store did not win")
+	}
+	if sb.files[memMount+"/a/b.md"] != "deep" {
+		t.Errorf("/a/b.md = %q after the conflict", sb.files[memMount+"/a/b.md"])
+	}
+}
+
+// TestMemorySyncStoreWinsAPrefixConflict: a memory created in the store at
+// an ancestor or a descendant of a file the agent created cannot share the
+// filesystem with it, and left in place the file would block the memory's
+// pull at every later run. The store wins: the file goes, the memory lands.
+func TestMemorySyncStoreWinsAPrefixConflict(t *testing.T) {
+	h, sb := materialized(t, "read_write")
+	h.seedMemory(t, memStoreID, "/e", "the store's e")        // local /e/f.md is under it
+	h.seedMemory(t, memStoreID, "/c/d.md", "the store's c/d") // local /c is above it
+	sb.files[memMount+"/e/f.md"] = "the agent's e/f.md"
+	sb.files[memMount+"/c"] = "the agent's c"
+	h.step(t)
+	for _, gone := range []string{"/e/f.md", "/c"} {
+		if _, ok := sb.files[memMount+gone]; ok {
+			t.Errorf("%s survived the conflict with the store's memory", gone)
+		}
+		if _, ok := h.memoryContent(t, memStoreID, gone); ok {
+			t.Errorf("%s reached the store", gone)
+		}
+	}
+	if sb.files[memMount+"/e"] != "the store's e" || sb.files[memMount+"/c/d.md"] != "the store's c/d" {
+		t.Errorf("the store's memories did not land: %v", sb.files)
+	}
+	b := baselineOf(t, sb, memStoreID)
+	if b.Synced["/e"] != sha256hex([]byte("the store's e")) || b.Synced["/c/d.md"] != sha256hex([]byte("the store's c/d")) || len(b.Refused) != 0 {
+		t.Errorf("baseline = %+v", b)
 	}
 }
 
@@ -503,14 +543,14 @@ func TestMemorySyncCapRefusesTheCreate(t *testing.T) {
 }
 
 // TestMemorySyncSkipsAnUnreliableListing: a listing that overflows the exec
-// output cap, or one that complained on stderr — a directory find could not
-// enter, while the pipeline still exited 0 — skips the store: nothing
+// output cap, or one that failed — a directory find could not enter, which
+// the command's pipefail turns into its exit — skips the store: nothing
 // pushed, nothing pulled, nothing deleted, the baseline untouched, because a
 // partial listing reads as deletions.
 func TestMemorySyncSkipsAnUnreliableListing(t *testing.T) {
 	for name, arm := range map[string]func(*fakeSandbox){
-		"truncated":  func(sb *fakeSandbox) { sb.listTruncated = true },
-		"complained": func(sb *fakeSandbox) { sb.listStderr = "find: './a': Permission denied\n" },
+		"truncated": func(sb *fakeSandbox) { sb.listTruncated = true },
+		"failed":    func(sb *fakeSandbox) { sb.listExit = 1 },
 	} {
 		t.Run(name, func(t *testing.T) {
 			h, sb := materialized(t, "read_write")
@@ -570,9 +610,9 @@ func TestMemoryStoreMissingOrUntrusted(t *testing.T) {
 		}
 	})
 	t.Run("listing failed", func(t *testing.T) {
-		// A listing that fails or complains vouches for nothing: the directory
-		// is neither overwritten with the store nor synced from.
-		sb := &fakeSandbox{listStderr: "sh: sha256sum: unrecognized option: z\n"}
+		// A listing that fails vouches for nothing: the directory is neither
+		// overwritten with the store nor synced from.
+		sb := &fakeSandbox{listExit: 123}
 		h := newHarness(t, sb)
 		h.seedMemoryStore(t, memStoreID, "Notes")
 		h.seedMemory(t, memStoreID, "/notes.md", "hello")

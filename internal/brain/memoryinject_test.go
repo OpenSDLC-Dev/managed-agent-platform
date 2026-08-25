@@ -101,10 +101,12 @@ func TestMemoryBlockInjected(t *testing.T) {
 	}
 }
 
-// TestMemoryBlockUnqualifiedWhenTheLookupFails: a store the brain could not
-// ask about is rendered as attached, with no claim either way — the executor
-// still mounts and syncs it, so "NOT AVAILABLE" would be false.
-func TestMemoryBlockUnqualifiedWhenTheLookupFails(t *testing.T) {
+// TestMemoryBlockUnresolvedWhenTheLookupFails: a store the brain could not
+// ask about is rendered as attached and its state as unresolved — the
+// executor still mounts and syncs it, so "NOT AVAILABLE" would be false, and
+// the attachment's access may have been overtaken by an archive, so it is
+// hedged rather than repeated as fact.
+func TestMemoryBlockUnresolvedWhenTheLookupFails(t *testing.T) {
 	h := newHarnessEnv(t, "cloud", [][]provider.Chunk{{textChunk(0, "ok"), done("end_turn", 1)}}, nil)
 	ctx := context.Background()
 	if _, err := h.pool.Exec(ctx,
@@ -126,8 +128,8 @@ func TestMemoryBlockUnqualifiedWhenTheLookupFails(t *testing.T) {
 		t.Fatal("the provider was never called")
 	}
 	sys := h.provider.calls[0].System
-	if !strings.Contains(sys, "/mnt/memory/notes — Notes (read_write): the user's notes — Instructions: consult before answering") {
-		t.Errorf("the unresolved store is not rendered as attached:\n%s", sys)
+	if !strings.Contains(sys, "/mnt/memory/notes — Notes (read_write): the user's notes — Instructions: consult before answering — the store's state could not be checked this turn: it may have been archived, in which case it is read-only.") {
+		t.Errorf("the unresolved store is not rendered as attached and unresolved:\n%s", sys)
 	}
 	if strings.Contains(sys, "NOT AVAILABLE") || strings.Contains(sys, ", archived)") {
 		t.Errorf("a failed lookup was rendered as a claim:\n%s", sys)

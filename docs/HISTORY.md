@@ -107,9 +107,10 @@ the verifier's verdict was FAIL, on the first item. Fixed in the same PR:
   `xargs`'s, so a `find` that could not enter a directory listed the rest and exited 0 (the files
   it hid then read as local deletions), and a `sha256sum` without `-z` (BusyBox's) listed nothing
   with exit 123 — the same shape as an absent directory, which a one-memory store would answer
-  with a `DeleteRemote`. The command now guards absence itself (`[ -d ] || exit 0`), any stderr
-  or non-zero exit skips the store — at materialization too, which had re-materialized over such
-  a directory — and `memsync/shell_test.go` runs both commands under a real bash.
+  with a `DeleteRemote`. The command now guards absence itself (`[ -d ] || exit 0`), fails under
+  `pipefail` when a stage does, and a non-zero exit skips the store — at materialization too,
+  which had re-materialized over such a directory — and `memsync/shell_test.go` runs both
+  commands under a real bash.
 - **The wipe-guard rebuild never re-stamped the marker**, so an `rm -rf` of a mount left the
   directory pull-only for the sandbox's life with every later write withheld in silence; a
   rebuild re-stamps, as the reference's `stampAndPull` does, and the withheld pushes are counted.
@@ -139,6 +140,21 @@ the verifier's verdict was FAIL, on the first item. Fixed in the same PR:
   altered-marker directory (they see `read_only` and archived only), "four" instruments where
   five land, and the worker using `memsync` "from slice 4"; the evals' timings here are the
   log's (16.62 s, 4.01 s) and the tool-call counts it does not hold are gone.
+
+A second Codex pass on the fix diff and the verifier's re-run found six more, fixed in the same
+PR: a local file at an ancestor or descendant of a memory the store created wedged every later
+apply (the pull's batch failed on a file where a directory had to be) — the store wins, the file
+is removed; the "any stderr skips the sync" rule would have skipped every sync on an image
+whose locale warns on each command — `pipefail` judges the pipeline instead; a mount an agent
+replaced with a symlink would have had listings and removals follow it — both commands
+`cd -P` and refuse a path that resolves elsewhere; the brain's unresolved line repeated the
+attachment's access as fact — it says the store's state could not be checked and may be
+archived; the eval's detector judged the whole command, so a `2>/dev/null` made a `cat` a
+write — it judges the segment naming the path; the wipe-guard test wiped the mount between
+runs, where the next materialization repairs it before any sync — it wipes inside a run,
+through the reaper's standalone sync, and goes red without the re-stamp; and a rolled-back
+store's partial counts reached the sync span's attributes. The plan's slice-4 rows now say
+which of them #488 holds.
 
 Refuted with evidence: a read-only mount "leaving bash modifications visible" — decision 12's
 pull-only mode stops pushes and nothing claims local edits are reverted; the file-tool guard

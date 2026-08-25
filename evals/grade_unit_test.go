@@ -40,14 +40,18 @@ func TestWritesFileBashNeedsAWriteConstruct(t *testing.T) {
 		return map[string]any{"type": "agent.tool_use", "name": "bash", "input": map[string]any{"command": cmd}}
 	}
 	for cmd, want := range map[string]bool{
-		"cat " + path:                         false,
-		"ls -l " + path + " && wc -c " + path: false,
-		"echo n0 > " + path:                   true,
-		"printf 'x\\n' >> " + path:            true,
-		"echo n0 | tee " + path:               true,
-		"cp /tmp/draft.md " + path:            true,
-		"sed -i 's/a/b/' " + path:             true,
-		"touch " + path:                       true,
+		"cat " + path:                                 false,
+		"ls -l " + path + " && wc -c " + path:         false,
+		"cat " + path + " 2>/dev/null":                false,
+		"cat " + path + " && echo ok > /tmp/log":      false,
+		"echo n0 > " + path:                           true,
+		"echo n0 > " + path + " 2>/dev/null":          true,
+		"printf 'x\\n' >> " + path:                    true,
+		"echo n0 | tee " + path:                       true,
+		"cp /tmp/draft.md " + path:                    true,
+		"sed -i 's/a/b/' " + path:                     true,
+		"touch " + path:                               true,
+		"cat /tmp/other.md; mv /tmp/other.md " + path: true,
 	} {
 		if got := wroteFile(trialWith([]map[string]any{bash(cmd)}), path); got != want {
 			t.Errorf("%q counted as a write = %v, want %v", cmd, got, want)

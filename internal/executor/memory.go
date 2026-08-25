@@ -162,10 +162,11 @@ func (e *Executor) materializeStore(ctx context.Context, sb sandbox.Sandbox, m m
 		return memoryOutcomeFailed, err
 	}
 	// A listing with anything in it — or one too long to capture, or one
-	// that failed or complained — is a directory nothing vouches for: files
-	// with no marker, or files the listing could not read. An absent
-	// directory lists nothing and says nothing, which is the fresh case.
-	if len(res.Stdout) > 0 || res.Truncated || res.ExitCode != 0 || strings.TrimSpace(res.Stderr) != "" {
+	// that failed — is a directory nothing vouches for: files with no marker,
+	// files the listing could not read, or a path that is no longer the
+	// directory. An absent directory lists nothing and exits 0, which is the
+	// fresh case.
+	if len(res.Stdout) > 0 || res.Truncated || res.ExitCode != 0 {
 		return memoryOutcomeUntrusted, nil
 	}
 
@@ -296,12 +297,12 @@ func (e *Executor) readStore(ctx context.Context, sb sandbox.Sandbox, st *storeS
 	if res.Truncated {
 		return errors.New("the listing overflows the exec output cap")
 	}
-	// Anything the listing complains of is a listing not to act on: its
-	// pipeline's status is xargs's, so a directory find could not enter
-	// shows only on stderr, and the files it holds would read as deleted. An
-	// absent directory is an empty listing that says nothing — the empty tree
-	// the wipe guard then judges.
-	if res.ExitCode != 0 || strings.TrimSpace(res.Stderr) != "" {
+	// A non-zero exit is a listing not to act on — under the command's
+	// pipefail, a stage that failed: a directory find could not enter, whose
+	// files would otherwise read as deleted; or a mount that is no longer the
+	// directory the store was landed in. An absent directory is an empty
+	// listing that exits 0 — the empty tree the wipe guard then judges.
+	if res.ExitCode != 0 {
 		return fmt.Errorf("the listing exited %d: %s", res.ExitCode, strings.TrimSpace(res.Stderr))
 	}
 	st.local, err = memsync.ParseHashTree([]byte(res.Stdout))
@@ -494,10 +495,20 @@ func (e *Executor) settleStore(ctx context.Context, tx pgx.Tx, sid domain.ID, st
 				st.next.Synced[act.Path] = act.LocalSHA
 				st.counts.pushed++
 			case memoryPushConflict:
-				// A create over an occupied path, or an update the store's head
-				// no longer matches: the file stays as written, unrecorded, so
-				// the next sync judges it against the store's answer.
-				if act.ID != "" {
+				if act.ID == "" {
+					// A create the store's occupancy refused: the store holds
+					// a memory at an ancestor or descendant of this path (a
+					// head at the path itself would have been a pull), and a
+					// file and a directory cannot share a name. The store wins,
+					// as it wins every both-sides change: the file goes, and
+					// the memory's own pull lands where the file was in its way.
+					slog.WarnContext(ctx, "memory file removed: the store holds a memory at an ancestor or descendant path",
+						"session_id", sid, "memory_store_id", id, "path", act.Path)
+					st.removals = append(st.removals, act.Path)
+				} else {
+					// An update the store's head no longer matches: the file
+					// stays as written, unrecorded, so the next sync judges
+					// it against the store's answer.
 					st.next.Synced[act.Path] = act.BaselineSHA
 				}
 				st.counts.conflict++
@@ -674,6 +685,9 @@ func (ms *memorySync) end() {
 	ms.ended = true
 	var c memorySyncCounts
 	for _, st := range ms.stores {
+		if st.skipped {
+			continue // a settlement rolled back counted nothing that landed
+		}
 		c.pulled += st.counts.pulled
 		c.pushed += st.counts.pushed
 		c.deleted += st.counts.deleted

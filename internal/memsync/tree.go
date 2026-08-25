@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"path"
+	"strconv"
 	"strings"
 )
 
@@ -63,17 +64,30 @@ func DecodeBaseline(data []byte) (Baseline, error) {
 // mount but the marker, with its SHA-256, NUL-terminated so any file name
 // survives, and sorted under LC_ALL=C so the listing is in byte order like
 // the store's own. An absent mount lists nothing and exits 0 — the empty tree
-// the wipe guard then judges. Anything else that goes wrong reaches the
-// caller as a non-zero exit or as something on stderr, and either is a
-// listing not to act on: the pipeline's own status is xargs's, so a `find`
-// that could not enter a directory would otherwise pass as a smaller tree
-// than there is, and a `sha256sum` without `-z` (BusyBox's) as an empty one.
-// It wants GNU coreutils (`sha256sum -z`, `sort -z`), which the sandbox
-// images this platform ships and tests have.
+// the wipe guard then judges; a mount that is no longer the directory the
+// store was landed in exits 3 (mountPrelude); and a stage that fails fails
+// the command, under `pipefail`, because the pipeline's own status would be
+// xargs's — a `find` that could not enter a directory would pass as a smaller
+// tree than there is, and a `sha256sum` without `-z` (BusyBox's) as an empty
+// one. Only the exit status is judged: a shell that warns on stderr (an
+// image whose locale is not installed) still lists. It wants bash, which
+// both sandbox backends exec under, and GNU coreutils (`sha256sum -z`,
+// `sort -z`), which the images this platform ships and tests have.
 func HashTreeCommand(mount string) string {
-	m := shellQuote(mount)
-	return "[ -d " + m + " ] || exit 0; cd " + m + " && find . -type f ! -path " + shellQuote("./"+MarkerName) +
+	return mountPrelude(mount, 3) + "set -o pipefail; find . -type f ! -path " + shellQuote("./"+MarkerName) +
 		" -print0 | LC_ALL=C sort -z | xargs -0r sha256sum -z"
+}
+
+// mountPrelude enters the mount for the commands that act inside it. An
+// absent mount is exit 0 — nothing there to list or remove. A mount whose
+// path resolves elsewhere — a component an agent replaced with a symlink,
+// pointing anywhere — is refused with status, so neither a listing nor a
+// removal ever runs outside the directory the store was landed in: `cd -P`
+// resolves the path and leaves the physical one in PWD. (An image whose
+// `/mnt` is itself a symlink is refused the same way, every run, out loud.)
+func mountPrelude(mount string, status int) string {
+	m := shellQuote(mount)
+	return "[ -d " + m + " ] || exit 0; cd -P " + m + ` && [ "$PWD" = ` + m + " ] || exit " + strconv.Itoa(status) + "; "
 }
 
 // removeCommandBytes bounds one removal command: the sandbox hands a command
@@ -87,8 +101,9 @@ const removeCommandBytes = 32 << 10
 // relative `rmdir -p` cannot reach — so a memory the store later creates at a
 // removed directory's path (`/a/b` gone, `/a` created, a transition its
 // occupancy rule allows) finds no directory in its way. Paths are the
-// memories' own, `/`-rooted at the mount. An unlink that fails fails its
-// command; the directory pass is best-effort.
+// memories' own, `/`-rooted at the mount, which mountPrelude first checks is
+// still the directory it was. An unlink that fails fails its command; the
+// directory pass is best-effort.
 func RemoveCommands(mount string, paths []string) []string {
 	var cmds, files, dirs []string
 	size := 0
@@ -96,7 +111,7 @@ func RemoveCommands(mount string, paths []string) []string {
 		if len(files) == 0 {
 			return
 		}
-		cmd := "cd " + shellQuote(mount) + " && rm -f -- " + strings.Join(files, " ") + " || exit 1"
+		cmd := mountPrelude(mount, 1) + "rm -f -- " + strings.Join(files, " ") + " || exit 1"
 		if len(dirs) > 0 {
 			cmd += "; rmdir -p --ignore-fail-on-non-empty -- " + strings.Join(dirs, " ") + " 2>/dev/null; exit 0"
 		}

@@ -77,11 +77,11 @@ type fakeSandbox struct {
 	cmds     []string
 	execHook func(sandbox.ExecRequest) *sandbox.ExecResult
 	// listTruncated marks the memory sync's tree listing as overflowing the
-	// exec output cap, and listStderr is a complaint the listing prints (a
-	// directory find could not enter) while still exiting 0 — the two
-	// answers that must skip a store's sync.
+	// exec output cap, and listExit is a status the listing fails with (a
+	// directory find could not enter, under the command's pipefail) — the
+	// two answers that must skip a store's sync.
 	listTruncated bool
-	listStderr    string
+	listExit      int
 	// modes records the Mode each WriteFiles member asked for, by path — the
 	// fake lands no permission bits, so this is where a test reads them.
 	modes map[string]fs.FileMode
@@ -132,12 +132,17 @@ func (f *fakeSandbox) Exec(_ context.Context, req sandbox.ExecRequest) (sandbox.
 			sum := sha256.Sum256([]byte(f.files[p]))
 			out.WriteString(hex.EncodeToString(sum[:]) + "  ." + strings.TrimPrefix(p, mount) + "\x00")
 		}
-		return sandbox.ExecResult{Stdout: out.String(), Stderr: f.listStderr, Truncated: f.listTruncated}, nil
+		if f.listExit != 0 {
+			return sandbox.ExecResult{ExitCode: f.listExit, Stderr: "find: './a': Permission denied\n"}, nil
+		}
+		return sandbox.ExecResult{Stdout: out.String(), Truncated: f.listTruncated}, nil
 	}
-	if rest, ok := strings.CutPrefix(req.Command, "cd '"); ok && strings.Contains(rest, "' && rm -f -- ") {
-		// `cd '<mount>' && rm -f -- 'rel'… || exit 1[; rmdir …]`: the named
-		// files go; the fake has no directories to prune.
-		mount, list, _ := strings.Cut(rest, "' && rm -f -- ")
+	if rest, ok := strings.CutPrefix(req.Command, "[ -d '"); ok && strings.Contains(rest, "; rm -f -- ") {
+		// memsync.RemoveCommands: the prelude names the mount, then `rm -f --
+		// 'rel'… || exit 1[; rmdir …]`; the named files go, and the fake has
+		// no directories to prune.
+		mount, list, _ := strings.Cut(rest, "' ] || exit 0; ")
+		_, list, _ = strings.Cut(list, "; rm -f -- ")
 		list, _, _ = strings.Cut(list, " || exit 1")
 		for _, q := range strings.Split(list, " ") {
 			p := strings.ReplaceAll(strings.TrimSuffix(strings.TrimPrefix(q, "'"), "'"), `'\''`, "'")
@@ -173,7 +178,7 @@ func hashTreeMount(cmd string) (string, bool) {
 	if !ok || !strings.Contains(cmd, "sha256sum -z") {
 		return "", false
 	}
-	mount, _, ok := strings.Cut(rest, "' ] || exit 0; cd '")
+	mount, _, ok := strings.Cut(rest, "' ] || exit 0; cd -P '")
 	return mount, ok
 }
 

@@ -62,12 +62,12 @@ func TestBaselineRoundTrip(t *testing.T) {
 
 func TestHashTreeCommand(t *testing.T) {
 	got := memsync.HashTreeCommand("/mnt/memory/notes")
-	want := `[ -d '/mnt/memory/notes' ] || exit 0; cd '/mnt/memory/notes' && find . -type f ! -path './.anthropic-memory-store' -print0 | LC_ALL=C sort -z | xargs -0r sha256sum -z`
+	want := `[ -d '/mnt/memory/notes' ] || exit 0; cd -P '/mnt/memory/notes' && [ "$PWD" = '/mnt/memory/notes' ] || exit 3; set -o pipefail; find . -type f ! -path './.anthropic-memory-store' -print0 | LC_ALL=C sort -z | xargs -0r sha256sum -z`
 	if got != want {
 		t.Fatalf("command =\n%s\nwant\n%s", got, want)
 	}
 	// A mount with a quote in it is still one shell word.
-	if got := memsync.HashTreeCommand("/mnt/it's"); !strings.HasPrefix(got, `[ -d '/mnt/it'\''s' ] || exit 0; cd '/mnt/it'\''s' && `) {
+	if got := memsync.HashTreeCommand("/mnt/it's"); !strings.HasPrefix(got, `[ -d '/mnt/it'\''s' ] || exit 0; cd -P '/mnt/it'\''s' && [ "$PWD" = '/mnt/it'\''s' ] || exit 3; `) {
 		t.Fatalf("quoting: %s", got)
 	}
 }
@@ -78,11 +78,12 @@ func TestHashTreeCommand(t *testing.T) {
 // naming every path once.
 func TestRemoveCommands(t *testing.T) {
 	got := memsync.RemoveCommands("/mnt/memory/notes", []string{"/a/b.md", "/c.md", "/a/d/e.md"})
-	want := []string{`cd '/mnt/memory/notes' && rm -f -- 'a/b.md' 'c.md' 'a/d/e.md' || exit 1; rmdir -p --ignore-fail-on-non-empty -- 'a' 'a/d' 2>/dev/null; exit 0`}
+	const prelude = `[ -d '/mnt/memory/notes' ] || exit 0; cd -P '/mnt/memory/notes' && [ "$PWD" = '/mnt/memory/notes' ] || exit 1; `
+	want := []string{prelude + `rm -f -- 'a/b.md' 'c.md' 'a/d/e.md' || exit 1; rmdir -p --ignore-fail-on-non-empty -- 'a' 'a/d' 2>/dev/null; exit 0`}
 	if !slices.Equal(got, want) {
 		t.Fatalf("commands =\n%s\nwant\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
 	}
-	if got := memsync.RemoveCommands("/mnt/memory/notes", []string{"/c.md"}); !slices.Equal(got, []string{`cd '/mnt/memory/notes' && rm -f -- 'c.md' || exit 1`}) {
+	if got := memsync.RemoveCommands("/mnt/memory/notes", []string{"/c.md"}); !slices.Equal(got, []string{prelude + `rm -f -- 'c.md' || exit 1`}) {
 		t.Fatalf("root-level removal = %q", got)
 	}
 	if got := memsync.RemoveCommands("/mnt/memory/notes", nil); len(got) != 0 {

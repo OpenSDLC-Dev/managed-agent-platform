@@ -100,10 +100,35 @@ func TestHashTreeCommandUnderBash(t *testing.T) {
 		t.Fatalf("absent mount: exit %d, stdout %q, stderr %q", code, stdout, stderr)
 	}
 
-	// A directory find cannot enter is a complaint on stderr while the
-	// pipeline's own status stays 0 — why the caller treats anything on
-	// stderr as a listing not to act on. Root enters anything, so only a
-	// non-root run can pin it.
+	// A mount replaced by a symlink — to anywhere — is refused, not listed
+	// through: the files behind the link are somebody else's.
+	link := filepath.Join(t.TempDir(), "link")
+	if err := os.Symlink(mount, link); err != nil {
+		t.Fatal(err)
+	}
+	stdout, _, code = runBash(t, memsync.HashTreeCommand(link))
+	if code != 3 || stdout != "" {
+		t.Fatalf("symlinked mount: exit %d, stdout %q; want exit 3 and nothing", code, stdout)
+	}
+
+	// A shell that warns on stderr — an image whose locale is not installed
+	// — still lists: only the exit status is judged.
+	c := exec.Command("bash", "-c", memsync.HashTreeCommand(mount))
+	c.Env = append(os.Environ(), "LC_ALL=xx_XX.UTF-8")
+	var warned strings.Builder
+	c.Stderr = &warned
+	out, err := c.Output()
+	if err != nil {
+		t.Fatalf("under a broken locale (stderr %q): %v", warned.String(), err)
+	}
+	if got, err := memsync.ParseHashTree(out); err != nil || len(got) != 2 {
+		t.Fatalf("under a broken locale (stderr %q): listing %v, %v", warned.String(), got, err)
+	}
+
+	// A directory find cannot enter fails the command under pipefail —
+	// without it the pipeline's status would be xargs's 0 and the files it
+	// hid would read as deleted. Root enters anything, so only a non-root
+	// run can pin it.
 	if os.Geteuid() == 0 {
 		t.Log("running as root: the unreadable-directory case cannot be exercised")
 		return
@@ -114,8 +139,8 @@ func TestHashTreeCommandUnderBash(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = os.Chmod(locked, 0o755) })
 	stdout, stderr, code = runBash(t, memsync.HashTreeCommand(mount))
-	if stderr == "" {
-		t.Fatalf("an unreadable directory listed silently: exit %d, stdout %q", code, stdout)
+	if code == 0 {
+		t.Fatalf("an unreadable directory listed with exit 0: stdout %q, stderr %q", stdout, stderr)
 	}
 	if strings.Contains(stdout, "./a/b.md") {
 		t.Fatalf("the unreadable directory's file was listed: %q", stdout)
@@ -168,5 +193,19 @@ func TestRemoveCommandsUnderBash(t *testing.T) {
 	cmds := memsync.RemoveCommands(mount, []string{"/x"})
 	if _, _, code := runBash(t, cmds[0]); code == 0 {
 		t.Fatal("removing a directory as a file succeeded")
+	}
+	// A mount replaced by a symlink is refused before anything is unlinked:
+	// a store-side deletion never reaches through it.
+	elsewhere := t.TempDir()
+	plant(t, elsewhere, map[string]string{"victim.md": "not the store's"})
+	link := filepath.Join(t.TempDir(), "link")
+	if err := os.Symlink(elsewhere, link); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, code := runBash(t, memsync.RemoveCommands(link, []string{"/victim.md"})[0]); code != 1 {
+		t.Fatalf("removal through a symlinked mount exited %d, want 1", code)
+	}
+	if !exists(filepath.Join(elsewhere, "victim.md")) {
+		t.Fatal("a removal followed the symlinked mount")
 	}
 }

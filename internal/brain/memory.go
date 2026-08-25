@@ -30,8 +30,9 @@ type memoryMount struct {
 	MountPath     string  `json:"mount_path"`
 
 	// missing marks a store whose row is gone; archived one that takes no
-	// more writes. Neither is in the stored element.
-	missing, archived bool
+	// more writes; unresolved one the lookup failed on, whose archived state
+	// is unknown this turn. None is in the stored element.
+	missing, archived, unresolved bool
 }
 
 // resolveMemoryBlock builds the "Memory stores" system-prompt block from the
@@ -45,9 +46,11 @@ type memoryMount struct {
 // line is hedged rather than dropped, since the mount may still hold what
 // the last materialization landed) and whether it has been archived, which
 // makes it read-only whatever the attachment asked. A lookup that fails is
-// logged and its line rendered unqualified — the repositories block's rule:
-// no claim rather than a false one, since the executor still materializes
-// and syncs a store the brain merely could not ask about.
+// logged and its line says the store's state is unresolved this turn — the
+// repositories block's rule: no claim rather than a false one, since the
+// executor still materializes and syncs a store the brain merely could not
+// ask about, and the attachment's access may since have been overtaken by
+// an archive.
 func (b *Brain) resolveMemoryBlock(ctx context.Context, resourcesJSON []byte, envKind string) (string, int, int) {
 	if len(resourcesJSON) == 0 || envKind != "cloud" {
 		return "", 0, 0
@@ -72,8 +75,9 @@ func (b *Brain) resolveMemoryBlock(ctx context.Context, resourcesJSON []byte, en
 			m.missing = true
 			misses++
 		case err != nil:
-			slog.WarnContext(ctx, "memory store not resolved; rendered unqualified",
+			slog.WarnContext(ctx, "memory store not resolved; rendered as unresolved",
 				"memory_store_id", m.MemoryStoreID, "err", err)
+			m.unresolved = true
 		default:
 			m.archived = archivedAt != nil
 		}
@@ -143,6 +147,9 @@ func renderMemoryBlock(mounts []memoryMount) string {
 			// Hedged for the repositories block's reason: the store is gone,
 			// but the directory may still hold what an earlier run landed.
 			b.WriteString(" — NOT AVAILABLE: the memory store no longer exists, so nothing you save there persists; the path may still hold what was mounted before.")
+		}
+		if m.unresolved {
+			b.WriteString(" — the store's state could not be checked this turn: it may have been archived, in which case it is read-only.")
 		}
 	}
 	return b.String()

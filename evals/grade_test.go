@@ -561,7 +561,7 @@ func wroteFile(tr *Trial, path string) bool {
 			// mere mention: a `cat` of the file is a read, and counting it
 			// would send MemorySynced after a memory nobody wrote and call the
 			// miss the platform's.
-			if cmd, _ := input["command"].(string); strings.Contains(cmd, path) && bashWrites(cmd) {
+			if cmd, _ := input["command"].(string); bashWrites(cmd, path) {
 				return true
 			}
 		}
@@ -569,16 +569,33 @@ func wroteFile(tr *Trial, path string) bool {
 	return false
 }
 
-// bashWrites says whether a command has a construct that writes a file: a
-// redirect, an in-place sed, or one of the copying and touching verbs.
-func bashWrites(cmd string) bool {
-	if strings.Contains(cmd, ">") || strings.Contains(cmd, "sed -i") {
-		return true
-	}
-	for _, tok := range strings.FieldsFunc(cmd, func(r rune) bool { return strings.ContainsRune(" \t\n;&|(", r) }) {
-		switch tok {
-		case "tee", "cp", "mv", "install", "touch", "truncate":
+// bashWrites says whether a command writes the file at path: in the segment
+// of the command that names it (split on `;`, `&`, `|`), a redirect onto the
+// path, an in-place sed, or a copying or touching verb leading the segment
+// — so a `cat` of the path beside a redirect elsewhere is the read it is.
+func bashWrites(cmd, path string) bool {
+	for _, seg := range strings.FieldsFunc(cmd, func(r rune) bool { return r == ';' || r == '|' || r == '&' }) {
+		if !strings.Contains(seg, path) {
+			continue
+		}
+		if strings.Contains(seg, "sed -i") {
 			return true
+		}
+		for rest := seg; ; {
+			i := strings.Index(rest, ">")
+			if i < 0 {
+				break
+			}
+			rest = strings.TrimLeft(rest[i+1:], "> \t")
+			if strings.HasPrefix(rest, path) {
+				return true
+			}
+		}
+		if fields := strings.Fields(seg); len(fields) > 0 {
+			switch fields[0] {
+			case "tee", "cp", "mv", "install", "touch", "truncate":
+				return true
+			}
 		}
 	}
 	return false

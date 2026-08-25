@@ -721,8 +721,9 @@ behavior**; the last slice archives the plan and closes #52.
    suite, `materializeMemory`, the brain block on `cloud`, the three-phase run-end sync and the reaper's
    `Attach`-based twin, `Runner.MemoryRoots`/`ReadOnlyRoots` and the two tool refusals,
    telemetry, the two evals, an end-to-end integration test on the docker sandbox
-   (attach → materialize → tool write → version row → second session sees it). This
-   slice meets #52's cloud acceptance.
+   (attach → materialize → tool write → version row → second session sees it — deferred
+   to #488 when the slice landed; the real-model acceptance in HISTORY covered the path).
+   This slice meets #52's cloud acceptance.
 5. **The sessions token** (decision 15; scope decision 6): migration
    `0030_work_session_tokens.sql`, `gatetoken`'s mint/hash exported prefix-generic,
    `internal/worktoken` (the table and the join-condition `Authenticate`), the
@@ -814,7 +815,10 @@ mutation duty); the matrix rows are `make test` integration tests unless marked 
   its sync pulls only, writes under `/mnt/memory` outside a store refused, the reaper's sync before
   destroy through `Attach`, a run under `SANDBOX_RUN_AS_USER` can `bash >>` into a file
   root materialized, the restored checkpoint re-materializes; 🔍 both evals opt-in
-  green; the telemetry rows.
+  green; the telemetry rows. (As landed: the docker integration, the
+  `SANDBOX_RUN_AS_USER` rows and the telemetry rows are #488; the 0666 mode is pinned
+  by the contract suite, the sync's shell commands by `memsync/shell_test.go` under a
+  real bash, and the rest against the fake sandbox — see HISTORY's slice-4 record.)
 - Slice 5 (through the test seam — the API still refuses the attachment on
   `self_hosted`): a token minted only when the claimed session attaches a store, once
   per claim, superseded on re-hand-out (the old token 401s because the work id moved);
