@@ -204,7 +204,10 @@ memory-version actor union will render three of its four arms when plan 36 slice
   sent without one included, and `beta:agents retrieve` echoing the same; `"type":"read"` on the
   `bash` entry → 400 `configs[0].type is "read" but must equal name "bash"`; `"allowed_domains"`
   on `web_fetch` → 400 `unknown field "allowed_domains" in configs[0]` (2026-08-25).
-- `make verify`: TODO-EVIDENCE
+- `make verify` on the bumped pin, in the WSL Ubuntu clone (Docker and the local kind cluster
+  present, so the store, API and both sandbox suites ran rather than skipped): build, crossbuild,
+  vet and fmt-check clean, 54 packages `ok`, no failure, **total statement coverage 90.42%**
+  against the 90% gate (2026-08-25, branch `feat/plan-36-slice-0-sdk-bump` at 24de645).
 
 ## The session delegation bound (#447) — the designs it beat, 2026-08-23
 
