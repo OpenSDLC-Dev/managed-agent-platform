@@ -80,7 +80,8 @@ ready for. What substantiates the `self_hosted` path, all merged:
   worker would: a real in-process control-plane API over HTTP against a real Postgres, the poll
   minting the `wtk_` token into the item's `secret`, the worker decoding it, landing the store in
   the sandbox with its marker and baseline, running the tool, and the run's end pushing what the
-  agent wrote as a `session_actor` version with the head's sha as the precondition. The only
+  agent wrote as a `session_actor` version (a create for the new path there; the head-sha
+  precondition on the update path is the sibling `TestMemorySyncOverTheWire`'s). The only
   things it does not use are the `ant` binary itself and a live model in a real container.
 - The `cloud` real-model acceptance below (slice 4) exercises exactly those missing parts — the
   real `ant` CLI and a real model reading and writing a store mounted in a Docker sandbox —
