@@ -489,22 +489,31 @@ func TestMemorySyncRefusals(t *testing.T) {
 // the API made reaches this session at its next run — the read tool sees it
 // — not at the run after.
 func TestMemoryRefreshBeforeTheTools(t *testing.T) {
-	h, sb := materialized(t, "read_write")
-	if _, err := h.pool.Exec(context.Background(),
-		`UPDATE memories SET content = 'remote v2', content_sha256 = $2 WHERE memory_store_id = $1 AND path = '/notes.md'`,
-		memStoreID, sha256hex([]byte("remote v2"))); err != nil {
-		t.Fatal(err)
-	}
-	h.suspend(t, readUse(memMount+"/notes.md"))
-	if _, err := h.exec.step(context.Background()); err != nil {
-		t.Fatalf("step: %v", err)
-	}
-	results := h.toolResults(t)
-	if last := results[len(results)-1]; last.IsError || !strings.Contains(resultText(last), "remote v2") {
-		t.Errorf("the read answered %+v; want the store's change, landed before the tools", last)
-	}
-	if sb.files[memMount+"/notes.md"] != "remote v2" {
-		t.Errorf("/notes.md = %q", sb.files[memMount+"/notes.md"])
+	// A directory whose marker was altered is held too: pull-only, but not
+	// a run stale — the docs promise every held mount a current view.
+	for _, alter := range []bool{false, true} {
+		t.Run(map[bool]string{false: "trusted marker", true: "altered marker"}[alter], func(t *testing.T) {
+			h, sb := materialized(t, "read_write")
+			if alter {
+				sb.files[memMount+"/.anthropic-memory-store"] = "version 1\nsomeone else"
+			}
+			if _, err := h.pool.Exec(context.Background(),
+				`UPDATE memories SET content = 'remote v2', content_sha256 = $2 WHERE memory_store_id = $1 AND path = '/notes.md'`,
+				memStoreID, sha256hex([]byte("remote v2"))); err != nil {
+				t.Fatal(err)
+			}
+			h.suspend(t, readUse(memMount+"/notes.md"))
+			if _, err := h.exec.step(context.Background()); err != nil {
+				t.Fatalf("step: %v", err)
+			}
+			results := h.toolResults(t)
+			if last := results[len(results)-1]; last.IsError || !strings.Contains(resultText(last), "remote v2") {
+				t.Errorf("the read answered %+v; want the store's change, landed before the tools", last)
+			}
+			if sb.files[memMount+"/notes.md"] != "remote v2" {
+				t.Errorf("/notes.md = %q", sb.files[memMount+"/notes.md"])
+			}
+		})
 	}
 }
 

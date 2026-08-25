@@ -142,6 +142,10 @@ func (e *Executor) materializeMemory(ctx context.Context, sb sandbox.Sandbox, si
 		case outcome == memoryOutcomeUnchanged:
 			existing++
 		case outcome == memoryOutcomeUntrusted:
+			// Held all the same: the sync before the tools pulls into it
+			// (readMemory judges the marker and makes it pull-only), so
+			// the view the tools get is current, not a run stale.
+			existing++
 			slog.WarnContext(ctx, "memory store directory holds files but no trusted marker; not re-materialized, and pull-only until the sandbox is replaced",
 				"session_id", sid, "memory_store_id", m.MemoryStoreID, "mount_path", m.MountPath)
 		}
