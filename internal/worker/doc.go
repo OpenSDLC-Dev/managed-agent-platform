@@ -21,9 +21,10 @@
 //
 // One item carries a second credential besides the environment key: a work item
 // whose session attaches a memory store is handed out with a per-item sessions
-// token (wtk_) in its secret, the only credential the memory routes admit
-// (client.go decodes it; memory.go applies it per call over the environment-key
-// client). Everything else the worker calls still rides the environment key.
+// token (wtk_) in its secret, the only one of the worker's two credentials
+// those routes admit (client.go decodes it; memory.go applies it per call over
+// the environment-key client). Everything else the worker calls still rides the
+// environment key.
 //
 // Two boundaries are worth knowing before changing anything here. The wire is
 // the whole contract, and it is narrow: Poll serves this worker exactly one
