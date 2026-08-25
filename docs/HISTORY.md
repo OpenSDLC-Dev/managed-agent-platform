@@ -209,7 +209,8 @@ memory-version actor union will render three of its four arms when plan 36 slice
 - `make verify` on the bumped pin, in the WSL Ubuntu clone (Docker and the local kind cluster
   present, so the store, API and both sandbox suites ran rather than skipped): build, crossbuild,
   vet and fmt-check clean, 54 packages `ok`, no failure, **total statement coverage 90.42%**
-  against the 90% gate (2026-08-25, branch `feat/plan-36-slice-0-sdk-bump` at 24de645).
+  against the 90% gate (2026-08-25, branch `feat/plan-36-slice-0-sdk-bump` at 24de645); re-run on
+  the reviewed final commit 3c50fc5 after the review fixes: 54 `ok`, no failure, 90.45%.
 
 ## The session delegation bound (#447) — the designs it beat, 2026-08-23
 

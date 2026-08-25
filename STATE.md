@@ -13,11 +13,11 @@ issuing. All seven scope decisions are settled; the design is the plan's ninetee
 
 ## Tasks
 
-- [ ] **Slice 0 — SDK bump v1.63.1 → v1.66.0** (in progress on
-      `feat/plan-36-slice-0-sdk-bump`): pin and pairwise diffs, `acceptance/dcf_test.go`'s
-      one type rename, `type` accepted and echoed on built-in tool configs, the web tools'
-      wire domain keys refused and filed as #481, the live `v1.63.1` labels advanced with
-      85 registry citations re-read, HISTORY record; plan → `in-progress`.
+- [x] **Slice 0 — SDK bump v1.63.1 → v1.66.0** (#482): pin and pairwise diffs,
+      `acceptance/dcf_test.go`'s one type rename, `type` accepted and echoed on built-in
+      tool configs, the web tools' wire domain keys refused and filed as #481, the live
+      `v1.63.1` labels advanced with 85 registry citations re-read, HISTORY record; plan
+      → `in-progress`.
 - [ ] Slice 1 — stores: migration 0028, the three prefixes, `/v1/memory_stores` CRUD.
 - [ ] Slice 2 — memories and versions: migration 0029, `internal/memsync` validation and
       slug, the five memory routes, the three version routes, actors.
