@@ -52,6 +52,8 @@ func (r matrixRoute) request() string {
 		id = "skill_nonexistent"
 	case "files":
 		id = "file_nonexistent"
+	case "memory_stores":
+		id = "memstore_nonexistent"
 	}
 	return strings.NewReplacer(
 		"{id}", id,
@@ -75,6 +77,7 @@ func roleMatrix() []matrixRoute {
 		cred  = vault + "/credentials/{cid}"
 		skill = "/v1/skills/{id}"
 		file  = "/v1/files/{id}"
+		store = "/v1/memory_stores/{id}"
 	)
 	v, d, a := identity.RoleViewer, identity.RoleDeveloper, identity.RoleAdmin
 
@@ -120,6 +123,12 @@ func roleMatrix() []matrixRoute {
 		// Files, including the content download.
 		{"GET", "/v1/files", v}, {"GET", file, v}, {"GET", file + "/content", v},
 		{"POST", "/v1/files", d}, {"DELETE", file, d},
+
+		// Memory stores (plan 36 decision 14): reads viewer, the whole
+		// lifecycle developer.
+		{"GET", "/v1/memory_stores", v}, {"GET", store, v},
+		{"POST", "/v1/memory_stores", d}, {"POST", store, d},
+		{"DELETE", store, d}, {"POST", store + "/archive", d},
 	}
 }
 

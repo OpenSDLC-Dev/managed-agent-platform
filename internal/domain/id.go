@@ -33,6 +33,12 @@ const (
 	PrefixSkillVersion  = "skillver"
 	PrefixOutcome       = "outc"
 	PrefixSessionThread = "sthr"
+	// The memory family (plan 36 decision 2). A dream's `drm_` is deliberately
+	// absent: this platform serves no /v1/dreams, and admitting the prefix would
+	// make every /v1 path accept a shape nothing serves (#475).
+	PrefixMemoryStore   = "memstore"
+	PrefixMemory        = "mem"
+	PrefixMemoryVersion = "memver"
 	// PrefixEnvironmentKey names an issued worker credential's row. It is
 	// internal-only — never on the /v1 wire, and the reference identifies its
 	// own environment keys by bare UUID on its console's private API — so it
@@ -80,7 +86,8 @@ var knownPrefixes = map[string]bool{
 	PrefixWork: true, PrefixVault: true, PrefixCredential: true, PrefixResource: true,
 	PrefixDeployment: true, PrefixDeploymentRun: true, PrefixFile: true,
 	PrefixSkillVersion: true, PrefixSkill: true, PrefixOutcome: true,
-	PrefixSessionThread: true, altSessionPrefix: true,
+	PrefixSessionThread: true, PrefixMemoryStore: true, PrefixMemory: true,
+	PrefixMemoryVersion: true, altSessionPrefix: true,
 }
 
 // PrimaryThreadID is the id of a session's primary thread: sthr_ plus the

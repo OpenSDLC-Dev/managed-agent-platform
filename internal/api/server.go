@@ -114,6 +114,13 @@ func NewHandler(pool *pgxpool.Pool, blobs blob.Store, cipher secrets.Cipher, ver
 	mux.HandleFunc("DELETE /v1/files/{id}", s.handle(identity.RoleDeveloper, s.deleteFile))
 	mux.HandleFunc("GET /v1/files/{id}/content", roleGate(identity.RoleViewer, s.downloadFile)) // streams the object; not a typed handler
 
+	mux.HandleFunc("POST /v1/memory_stores", s.handle(identity.RoleDeveloper, s.createMemoryStore))
+	mux.HandleFunc("GET /v1/memory_stores", s.handle(identity.RoleViewer, s.listMemoryStores))
+	mux.HandleFunc("GET /v1/memory_stores/{id}", s.handle(identity.RoleViewer, s.getMemoryStore))
+	mux.HandleFunc("POST /v1/memory_stores/{id}", s.handle(identity.RoleDeveloper, s.updateMemoryStore))
+	mux.HandleFunc("DELETE /v1/memory_stores/{id}", s.handle(identity.RoleDeveloper, s.deleteMemoryStore))
+	mux.HandleFunc("POST /v1/memory_stores/{id}/archive", s.handle(identity.RoleDeveloper, s.archiveMemoryStore))
+
 	// The console API — off the /v1 wire, mirroring the reference console's own
 	// private path so a console-facing endpoint has a convention rather than an
 	// invented namespace (internal/api/consoleapi.go). Management x-api-key, via
@@ -189,6 +196,7 @@ func NewHandler(pool *pgxpool.Pool, blobs blob.Store, cipher secrets.Cipher, ver
 		"/v1/skills", "/v1/skills/{id}", "/v1/skills/{id}/versions",
 		"/v1/skills/{id}/versions/{version}", "/v1/skills/{id}/versions/{version}/content",
 		"/v1/files", "/v1/files/{id}", "/v1/files/{id}/content",
+		"/v1/memory_stores", "/v1/memory_stores/{id}", "/v1/memory_stores/{id}/archive",
 	} {
 		mux.HandleFunc(pattern, func(w http.ResponseWriter, r *http.Request) {
 			writeError(w, r, methodNotAllowed(r))
