@@ -20,9 +20,9 @@ fix PR, in order.
       subscriber once when LISTEN activates (`setReady` then `wakeAll`), and `Ready` can
       return between the two, so the test's non-blocking drain of that coverage-start wake
       raced it into the pre-commit window. Wait for the wake deterministically instead.
-- [x] **#490** — `internal/api` / `internal/executor` take ~9.5 min each on a loaded
-      8-CPU box, inside `go test`'s 10-min default but close enough that contention alone
-      has tipped them over — and a binary that dies there skips the `defer` removing its
-      pgtest fixture, feeding the next run. The `test` recipe now passes `-timeout 30m`.
+- [x] **#490** — `internal/api` / `internal/executor` now run about ten minutes each on a
+      loaded 8-CPU box (the executor measured past `go test`'s 10-min default at 613 s),
+      and a binary that dies there skips the `defer` removing its pgtest fixture, feeding
+      the next run. The `test` recipe now passes `-timeout 30m`.
 
 This is the last of the three; STATE.md returns to idle when it merges.

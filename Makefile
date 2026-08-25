@@ -66,9 +66,9 @@ fmt-check:
 # gate, exactly as cmd/ main glue would.
 #
 # -timeout 30m, not go test's 10m default (#490): the two largest
-# Postgres-backed suites, internal/api and internal/executor, take ~9.5 minutes
-# each on a loaded 8-CPU box — inside the default, but close enough that
-# contention alone has tipped them over, and a package that dies at the ceiling
+# Postgres-backed suites, internal/api and internal/executor, now run about ten
+# minutes each on a loaded 8-CPU box — the executor measured past the default at
+# 613 s, the api just under at 591 s — and a package that dies at the ceiling
 # reports `panic: test timed out` with a sub-second test "running", which reads
 # like a hang rather than the budget it is. The default is sized for unit tests;
 # these provision containers and migrate a database per test. The per-test
