@@ -56,7 +56,10 @@ passphrase at `/facts/secret.md`, a session attached `read_write` with `instruct
 `user.message` asking for the passphrase and for today's date at `/log/today.md`, the store and
 its versions afterwards, a second session attached `read_only` whose write is refused, and the
 filter listing both. Recorded with `ant` v1.26.1 against the branch's own `controlplane`,
-`brain` and `executor` at b3e2f02 (#489) — three binaries in WSL on a throwaway Postgres,
+`brain` and `executor` at b3e2f02 (#489), and re-recorded the same way at 492916a, the
+PR's last commit, with the same outcome (one log file written that time, `/log/today.md`,
+and the second session's `write` refused with the reference's wording) — three binaries
+in WSL on a throwaway Postgres,
 Docker sandboxes on `debian:stable-slim`, the model from `.env` (`MiniMax-M3` over the
 Anthropic protocol). One CLI fact the first attempt taught: an agent created without
 `--tool '{type: agent_toolset_20260401}'` has no tools, and this model then prints its
@@ -85,10 +88,15 @@ the passphrase read from the mounted store) and `memory-write` PASS (4.01 s — 
 then pushed, read back through the memories route by the `MemorySynced` grader); the pinned set
 is nineteen.
 
-**Gate**: `make verify` in WSL at 0269af9, the review round's commit — 55 packages `ok`, 0
-`FAIL`, the new bash-backed `memsync` tests among them (their unreadable-directory case skips
-itself under WSL's root and runs on CI's runner); `make cover-gate`: total statement coverage
-**90.40%**. The run at b3e2f02, before the round, had 54 `ok` and one `FAIL`: `internal/mcp`'s
+**Gate**: `make verify` in WSL at 492916a, the PR's last commit — 55 packages `ok`, 0 `FAIL`,
+the new bash-backed `memsync` tests among them (their unreadable-directory case skips itself
+under WSL's root and runs on CI's runner); `make cover-gate`: total statement coverage
+**90.38%**. That run needed `GOFLAGS=-timeout=30m`: `internal/api` and `internal/executor`
+have grown to within 10% of `go test`'s 10-minute package default on this box (541 s and
+561 s here; CI's runners fit), and two earlier runs of the gate died at the default with a
+sub-second test "running" — slower, not hung — each leaving the pgtest fixtures its
+timed-out binaries never removed to slow the next; #490 holds the trend and the ways out.
+The run at 0269af9, the review round's commit, had 55 `ok`, 0 `FAIL` and **90.40%**. The run at b3e2f02, before the round, had 54 `ok` and one `FAIL`: `internal/mcp`'s
 `TestListToolsRefusesAResponseTooLargeToRead`, #380's open WSL2 flake in a package this branch
 does not touch (three reruns went FAIL/FAIL/ok with #380's own message), and 90.37%. The gate,
 the acceptance stack and the evals took the Docker daemon in turn, never together.
