@@ -14,6 +14,8 @@ fix PR, in order.
       bounded by the remaining lease, so the test's 250 ms TTL let a slow UPDATE on a
       loaded fixture Postgres overrun the budget. Scale the TTL to 1500 ms (the
       keeper-budget tests' proven-tolerant value); production's 2 min TTL is unaffected.
+      The executor's sibling `TestLeaseRenewedDuringSlowProvision` (300 ms) had the same
+      flake — CI surfaced it on this PR — and gets the same 1500 ms fix.
 - [ ] **#486** — `TestEnqueueNotifiesWorkChannelOnCommit`: the LISTEN/NOTIFY wake races
       the enqueue's commit visibility under load.
 - [ ] **#490** — `internal/api` / `internal/executor` run within 10% of `go test`'s

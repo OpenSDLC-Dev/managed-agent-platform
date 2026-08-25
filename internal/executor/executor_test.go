@@ -1217,7 +1217,13 @@ func TestLeaseRenewedDuringSlowProvision(t *testing.T) {
 	// reclaims. The keeper starts before Provision, so a run held in Provision
 	// past TTL/3 still has its lease advanced.
 	prov := &fakeProvider{sb: &fakeSandbox{}, entered: make(chan struct{}, 1), gate: make(chan struct{})}
-	h := newHarnessWith(t, prov, Config{LeaseTTL: 300 * time.Millisecond})
+	// The lease is sized for a contended fixture Postgres. The keeper bounds each
+	// Extend by what the lease has left, so a sub-second TTL — this was 300ms —
+	// let a slow UPDATE on a loaded runner overrun the budget and abandon the
+	// renewal, the same #483 flake as the brain's TestLongTimeToFirstTokenKeepsLease.
+	// 1500ms matches the keeper-budget tests' proven-tolerant value; the gated
+	// provision still holds the run well past TTL/3 whatever the TTL.
+	h := newHarnessWith(t, prov, Config{LeaseTTL: 1500 * time.Millisecond})
 	h.suspend(t, writeUse("out.txt", "hi"))
 
 	done := make(chan struct{})
