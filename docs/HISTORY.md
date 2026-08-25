@@ -144,7 +144,9 @@ findings that mattered: the web-domains inference, whose whole premise ("configu
 v1.66.0 falsifies, and the toolset-echo entry's "byte-identical to v1.61.0's — the inter-pin diff
 touches no toolset type", which the union split ended. A third, the accepted-key-set entry, cited a
 type that no longer exists. The other 57 citations in the repo: 38 hold, 5 shifted (the five in plan
-36's own Ground truth, re-numbered with it), 6 were deliberately anchored at v1.66.0 by the plan and
+36's own Ground truth, re-numbered with it), 2 changed by content (`internal/api/files.go`'s two
+`betafile.go` citations — the `FileMetadata` type renamed and `BetaFileScope` moved — corrected), 6
+were deliberately anchored at v1.66.0 by the plan and
 become valid the moment this lands, and **6 were already wrong before this bump** — `betasession.go`
 citations in `internal/api/sessionresources.go` comments that drifted +86 when plan 35 moved the pin
 to v1.63.1 and were missed because that record's audit covered the registry, not code comments. Since
