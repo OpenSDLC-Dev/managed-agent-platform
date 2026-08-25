@@ -93,7 +93,9 @@ platform's own executor, just deployed elsewhere.
    skills into the freshly provisioned sandbox (`{workdir}/skills/<name>/`, versions
    resolved at use time, per-skill failure tolerated) along with the session's mounted
    resources (below), runs the tool, and posts the result event (`agent.tool_result`
-   platform-managed, `user.tool_result` self-hosted).
+   platform-managed, `user.tool_result` self-hosted). On the platform-managed side the
+   run's end also reconciles the session's memory stores with their directories
+   (below), inside the transaction that commits the results.
 5. The commit that appends the result also enqueues the next `model_turn` — only once
    every tool use in the turn is answered. A brain claims it (brains wake by polling the
    queue; Postgres LISTEN/NOTIFY serves the SSE fan-out, not the brain), replays, and
@@ -168,13 +170,26 @@ skills: uploaded files, and `github_repository` entries cloned in-process by the
 (go-git, so no `git` binary is in any image). Each is a `sesrsc_` row under
 `/v1/sessions/{id}/resources` with the mount path it lands on; a private repository's
 token is sealed through the same credential cipher the vaults use
-(`session_resource_credentials`). A memory store (plan 36) rides the same array as an
-id-less element that snapshots the store's name and its `/mnt/memory/<slug>` mount — inert,
-neither materialized nor rendered, until the plan's slice 4. Both halves work the same way at both ends — the
+(`session_resource_credentials`). Both halves work the same way at both ends — the
 executor materializes them into the sandbox beside the skills, and the brain renders a
 "Mounted files" / "Mounted repositories" block into the request so the model knows what
 is there. A resource that has gone missing costs its own mount and a log line, never the
 turn.
+
+**Memory stores** (plan 36) ride the same array as an id-less element that snapshots
+the store's name and its `/mnt/memory/<slug>` mount. On a `cloud` session the executor
+lands the store's memories there before the tools run — `0666` files beside a marker
+naming the store and a baseline recording what the directory and the store agreed on —
+and the brain renders a "Memory stores" block after the repositories block. The
+directory is reconciled with the store when a tool run ends, in three phases the shared
+rules in `internal/memsync` decide: the tree is hashed in the sandbox, the plan settles
+inside the transaction that commits the run (a push is a compare-and-set on the head's
+digest and appends a `session_actor` version; the store wins a both-sides change; an
+emptied directory against a baseline of several files is re-downloaded, never read as
+deletions), and the settlement is written back. A `read_only` or archived store, or a
+directory whose marker was altered, is pulled from and never pushed to, and the file
+tools refuse to write there; the reaper syncs an idle sandbox before it is destroyed. A
+`self_hosted` session cannot attach a store until the plan's slice 6.
 
 **Sandboxes have a lifecycle** (plan 24). Provision is idempotent per session — it
 returns, heals, or re-creates — and the **reaper in the executor is the single owner of
@@ -449,9 +464,11 @@ session-status transition counts and approval (HITL) wait in
 `internal/events/statusmetric.go`/`approvalmetric.go` (both recorded **after** the
 transaction commits, so a rolled-back transition counts nothing), time-to-first-token
 measured from the work claim in `internal/brain/telemetry.go`, tool-run duration in
-`internal/toolset/telemetry.go`, and skills-materialization outcomes/duration in
+`internal/toolset/telemetry.go`, skills-materialization outcomes/duration in
 `internal/executor/telemetry.go` and `internal/worker/telemetry.go` (same instrument
-names, two scopes). Queue `depth`/`pending`/`workers_polling` are OTLP
+names, two scopes), and the executor's memory-store instruments beside them
+(`memory.materialized`, `memory.sync.actions` by pulled/pushed/deleted/conflict/refused,
+and the two durations). Queue `depth`/`pending`/`workers_polling` are OTLP
 observable gauges (`internal/queue/metrics.go`) sampling the same work-stats view the API
 serves — registered once by the control plane, reported per self_hosted environment. A
 configured OTLP endpoint bridges
@@ -482,7 +499,7 @@ new backend inherits the whole battery. The queue still has one production imple
 extraction. The merge gate is `make verify`
 (build, linux/arm cross-compile, vet, gofmt, `go test -count=1`, and **≥90% total
 statement coverage** over the logic packages of `./internal/...`). On top sits the eval
-system (`make eval`, [plan 02](./plan/02_evals-system.md)): seventeen deterministic regression
+system (`make eval`, [plan 02](./plan/02_evals-system.md)): nineteen deterministic regression
 tasks driving whole sessions through the public API against a real model, graded
 code-only with per-trial nonces and Platform/Model/Either failure classing. `repo-answer`
 is the one trial whose expected answer is not nonce-derived — it lives in a fixed private

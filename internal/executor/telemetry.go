@@ -30,6 +30,16 @@ const (
 	MetricReposMaterializeDuration = "repos.materialize.duration"
 	// MetricReposMaterializeBytes is one landed repository's shipped size.
 	MetricReposMaterializeBytes = "repos.materialize.bytes"
+	// MetricMemoryMaterialized counts per-store materialization outcomes
+	// (plan 36 slice 4).
+	MetricMemoryMaterialized = "memory.materialized"
+	// MetricMemoryMaterializeDuration is one whole memory-materialization pass.
+	MetricMemoryMaterializeDuration = "memory.materialize.duration"
+	// MetricMemorySyncActions counts what a run-end sync did, by action —
+	// pulled, pushed, deleted, conflict, refused.
+	MetricMemorySyncActions = "memory.sync.actions"
+	// MetricMemorySyncDuration is one whole sync, its three phases together.
+	MetricMemorySyncDuration = "memory.sync.duration"
 )
 
 // Bounded outcome values — skill/file ids never label metrics (cardinality
@@ -59,7 +69,71 @@ const (
 	repoOutcomeTooLarge  = "too_large"
 	repoOutcomeTimeout   = "timeout"
 	repoOutcomeInternal  = "internal"
+
+	// The memory outcomes: landed, already there with its marker intact, a
+	// store row that is gone, a write that failed, and a directory with files
+	// but no trusted marker — left as found (decision 12).
+	memoryOutcomeOK        = "ok"
+	memoryOutcomeUnchanged = "unchanged"
+	memoryOutcomeNotFound  = "not_found"
+	memoryOutcomeFailed    = "failed"
+	memoryOutcomeUntrusted = "untrusted"
 )
+
+// recordMemoryMaterialized counts one store's outcome, the files recorder's
+// twin.
+func recordMemoryMaterialized(ctx context.Context, outcome string) {
+	counter, err := otel.GetMeterProvider().Meter(meterName).Int64Counter(
+		MetricMemoryMaterialized,
+		metric.WithDescription("Memory stores materialized into sandboxes, by outcome."))
+	if err != nil {
+		return
+	}
+	counter.Add(ctx, 1, metric.WithAttributes(attribute.String("outcome", outcome)))
+}
+
+// recordMemoryMaterializeDuration records one memory-materialization pass.
+func recordMemoryMaterializeDuration(ctx context.Context, d time.Duration) {
+	hist, err := otel.GetMeterProvider().Meter(meterName).Float64Histogram(
+		MetricMemoryMaterializeDuration,
+		metric.WithUnit("s"),
+		metric.WithDescription("Duration of a session's memory-materialization pass."))
+	if err != nil {
+		return
+	}
+	hist.Record(ctx, d.Seconds())
+}
+
+// recordMemorySyncActions counts one store's sync by action; a zero count
+// records nothing, so a quiet sync leaves no series behind.
+func recordMemorySyncActions(ctx context.Context, c memorySyncCounts) {
+	counter, err := otel.GetMeterProvider().Meter(meterName).Int64Counter(
+		MetricMemorySyncActions,
+		metric.WithDescription("Memory-store sync actions, by action."))
+	if err != nil {
+		return
+	}
+	for _, a := range []struct {
+		name string
+		n    int
+	}{{"pulled", c.pulled}, {"pushed", c.pushed}, {"deleted", c.deleted}, {"conflict", c.conflict}, {"refused", c.refused}} {
+		if a.n > 0 {
+			counter.Add(ctx, int64(a.n), metric.WithAttributes(attribute.String("action", a.name)))
+		}
+	}
+}
+
+// recordMemorySyncDuration records one sync, read to apply.
+func recordMemorySyncDuration(ctx context.Context, d time.Duration) {
+	hist, err := otel.GetMeterProvider().Meter(meterName).Float64Histogram(
+		MetricMemorySyncDuration,
+		metric.WithUnit("s"),
+		metric.WithDescription("Duration of a session's memory-store sync, its three phases together."))
+	if err != nil {
+		return
+	}
+	hist.Record(ctx, d.Seconds())
+}
 
 // recordSkillMaterialized counts one skill's outcome. The meter is resolved
 // per call, like internal/toolset's, so telemetry rewiring in tests never

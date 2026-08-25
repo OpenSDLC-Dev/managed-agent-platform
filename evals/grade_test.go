@@ -532,6 +532,65 @@ func ReadsFile(path string, class Class) Grader {
 	}
 }
 
+// WritesFile asserts the agent wrote or edited a file at path — a write or
+// edit tool call naming exactly it, or a bash command mentioning it — the
+// memory-write trial's evidence that the agent used its store.
+func WritesFile(path string, class Class) Grader {
+	return Grader{
+		Name:  "writes-file:" + path,
+		Class: class,
+		Check: func(_ *testing.T, tr *Trial) error {
+			if wroteFile(tr, path) {
+				return nil
+			}
+			return fmt.Errorf("no write, edit or bash tool call wrote %s: the agent never wrote the file", path)
+		},
+	}
+}
+
+func wroteFile(tr *Trial, path string) bool {
+	for _, use := range eventsOfType(tr, "agent.tool_use") {
+		input, _ := use["input"].(map[string]any)
+		switch use["name"] {
+		case "write", "edit":
+			if fp, _ := input["file_path"].(string); fp == path {
+				return true
+			}
+		case "bash":
+			if cmd, _ := input["command"].(string); strings.Contains(cmd, path) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// MemorySynced asserts a file the agent wrote at mountPath reached the trial's
+// memory store as the memory at memoryPath, with sub (after substitution) in
+// its content — the run-end sync's push (plan 36 decision 11). It passes
+// vacuously when the transcript shows no write to the file: WritesFile owns
+// that miss, so a failure here is one the model could not have caused — the
+// agent wrote, and the sync did not carry it.
+func MemorySynced(mountPath, memoryPath, sub string, class Class) Grader {
+	return Grader{
+		Name:  "memory-synced:" + memoryPath,
+		Class: class,
+		Check: func(t *testing.T, tr *Trial) error {
+			if !wroteFile(tr, mountPath) {
+				return nil
+			}
+			content, ok := tr.stack.memoryContent(t, tr.MemoryStoreID, memoryPath)
+			if !ok {
+				return fmt.Errorf("the agent wrote %s but the store holds no memory at %s: the sync did not push it", mountPath, memoryPath)
+			}
+			if want := tr.fill(sub); !strings.Contains(content, want) {
+				return fmt.Errorf("the store's %s = %q, want it to contain %q", memoryPath, content, want)
+			}
+			return nil
+		},
+	}
+}
+
 // ContainerAbsent asserts no sandbox was made for a session whose agent called
 // no tools — the executor must never provision without a tool_exec.
 //

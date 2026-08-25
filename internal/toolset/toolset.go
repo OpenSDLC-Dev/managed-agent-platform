@@ -104,6 +104,16 @@ type Runner struct {
 	// Workdir is where relative tool paths resolve. Empty means the sandbox's
 	// own default, which is where its Exec already runs.
 	Workdir string
+	// MemoryRoots are the session's mounted memory stores and ReadOnlyRoots
+	// the ones attached read_only (plan 36 decision 12). write and edit
+	// refuse a path inside a read-only root, and any path under /mnt/memory
+	// that is inside no root — the tree is the stores' and their baselines',
+	// and a file written beside them would belong to nothing. bash is not
+	// confined: the sync pulls from a read-only store and never pushes to it,
+	// so what bash writes there is overwritten by the store's next change and
+	// never reaches the store.
+	MemoryRoots   []string
+	ReadOnlyRoots []string
 }
 
 // Run executes the named built-in tool. id names this call — the tool-use
@@ -242,6 +252,34 @@ func (r Runner) resolve(p string) string {
 		return path.Clean(p)
 	}
 	return path.Join(r.workdir(), p)
+}
+
+// memoryMountRoot is where memory stores mount (plan 36 decision 8), the tree
+// the roots above carve up.
+const memoryMountRoot = "/mnt/memory"
+
+// unwritable says why a resolved path may not be written by the file tools —
+// the read-only store it is inside, or the reserved tree it is loose in — or
+// "" when it may. display is the path the model used, for the message.
+func (r Runner) unwritable(display, resolved string) string {
+	for _, root := range r.ReadOnlyRoots {
+		if under(resolved, root) {
+			return fmt.Sprintf("%s is inside read-only memory store directory %s", display, root)
+		}
+	}
+	if !under(resolved, memoryMountRoot) {
+		return ""
+	}
+	for _, root := range r.MemoryRoots {
+		if under(resolved, root) {
+			return ""
+		}
+	}
+	return fmt.Sprintf("%s is under %s, which holds only mounted memory stores; nothing is mounted at that path", display, memoryMountRoot)
+}
+
+func under(p, root string) bool {
+	return p == root || strings.HasPrefix(p, root+"/")
 }
 
 // succeed and failf are the two Result shapes; both return a nil error, because

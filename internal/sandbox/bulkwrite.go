@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"fmt"
 	"io"
+	"io/fs"
 	gopath "path"
 	"strconv"
 	"strings"
@@ -29,9 +30,21 @@ import (
 // FileWrite is one member of a bulk write. Path must be absolute and clean
 // (`/a/b`, never `/a/../b` or `/a/b/`), because it also names an entry in the
 // archive that carries it; Data is the file's bytes.
+//
+// Mode is the permission bits a file the batch creates lands with — zero means
+// 0644, what every write landed before the field existed, and only permission
+// bits are accepted: a batch carries no setuid, setgid or sticky bit. It rides
+// both the tar header (what the docker daemon's host-side untar restores, the
+// member being root-owned there) and the manifest (what the rename pass chmods
+// on a backend whose untar ran as the sandbox user under its umask). An
+// existing target's own mode still wins over it where the sandbox user may
+// chmod, as it does for a single write (PreserveModeShell). Memory-store files
+// are the one caller so far: 0666, so a non-root agent can append in place to
+// a root-owned member (docs/plan/36_memory-stores.md decision 10).
 type FileWrite struct {
 	Path string
 	Data []byte
+	Mode fs.FileMode
 }
 
 // BulkWrite is one prepared batch: the archive a backend delivers, the two
@@ -40,8 +53,8 @@ type FileWrite struct {
 // scripts; the batch is replayable, so a delivery that failed can be retried
 // from the same value.
 type BulkWrite struct {
-	// Manifest names the file listing `tmp\0target\0` for every member, and
-	// DirList the deduplicated parent directories. Both land in the workdir,
+	// Manifest names the file listing `tmp\0target\0mode\0` for every member,
+	// and DirList the deduplicated parent directories. Both land in the workdir,
 	// which exists, and both are the archive's first entries — so a delivery that
 	// fails on a later one has still landed what the recovery pass needs. The
 	// rename script removes them.
@@ -50,6 +63,7 @@ type BulkWrite struct {
 
 	files    []FileWrite
 	tmps     []string
+	modes    []fs.FileMode
 	manifest []byte
 	dirs     []byte
 	// stamp is taken once so the archive is byte-identical every time it is
@@ -89,12 +103,22 @@ func NewBulkWrite(workdir string, files []FileWrite) (*BulkWrite, error) {
 		if strings.ContainsRune(f.Path, 0) {
 			return nil, fmt.Errorf("sandbox: bulk write path %q contains a NUL byte", f.Path)
 		}
+		mode := f.Mode
+		if mode == 0 {
+			mode = 0o644
+		}
+		if mode&^fs.ModePerm != 0 {
+			return nil, fmt.Errorf("sandbox: bulk write mode %v for %q is not permission bits", f.Mode, f.Path)
+		}
 		dir := gopath.Dir(f.Path)
 		tmp := gopath.Join(dir, nonce+"-"+strconv.Itoa(i))
 		b.tmps = append(b.tmps, tmp)
+		b.modes = append(b.modes, mode)
 		manifest.WriteString(tmp)
 		manifest.WriteByte(0)
 		manifest.WriteString(f.Path)
+		manifest.WriteByte(0)
+		manifest.WriteString(fmt.Sprintf("%04o", mode))
 		manifest.WriteByte(0)
 		if !seen[dir] {
 			seen[dir] = true
@@ -168,7 +192,7 @@ func (b *BulkWrite) bookkeeping(tw *tar.Writer) error {
 
 func (b *BulkWrite) members(tw *tar.Writer) error {
 	for i, f := range b.files {
-		if err := b.entry(tw, b.tmps[i], f.Data, 0o644); err != nil {
+		if err := b.entry(tw, b.tmps[i], f.Data, int64(b.modes[i])); err != nil {
 			return err
 		}
 	}
@@ -448,7 +472,8 @@ func (b *BulkWrite) EmptyArchive(paths []string, w io.Writer) error {
 // member and for one exec instead of N.
 //
 // Each member is the single write's sequence exactly — set a created file's mode
-// to 0644, refuse a target that is a directory, carry an existing target's mode
+// to 0644 (or the mode its manifest record asks for, one chmod per member that
+// does), refuse a target that is a directory, carry an existing target's mode
 // onto the temporary file, move, then ask again in case something made the target
 // a directory in between — so a batch and a loop of writes land a file
 // identically. Only the batch's *shape* is new: the first failure stops the run,
@@ -504,13 +529,16 @@ func (b *BulkWrite) EmptyArchive(paths []string, w io.Writer) error {
 // a member lands — as it can already swap the temporary file a single write is
 // about to rename. It is the same bound in both cases and it is not a new one:
 // the move runs with the agent's own credentials, so a redirected member reaches
-// nothing the agent could not have written with its own `mv`.
+// nothing the agent could not have written with its own `mv`. The mode field is
+// read the same way — four octal digits or it is 0644 — and a rewritten one
+// chmods a file the agent could chmod itself.
 const BulkRenameShell = PreserveModeShell + bulkLeftShell + `
 __map_bulk_rename() {
-  __tmps=(); __dsts=(); __bad=-1
-  while IFS= read -r -d '' __t && IFS= read -r -d '' __d; do
+  __tmps=(); __dsts=(); __modes=(); __bad=-1
+  while IFS= read -r -d '' __t && IFS= read -r -d '' __d && IFS= read -r -d '' __m; do
     if [ ! -f "$__t" ] && [ "$__bad" -lt 0 ]; then __bad=${#__tmps[@]}; fi
-    __tmps+=("$__t"); __dsts+=("$__d")
+    case "$__m" in [0-7][0-7][0-7][0-7]) ;; *) __m=0644 ;; esac
+    __tmps+=("$__t"); __dsts+=("$__d"); __modes+=("$__m")
   done < "$1"
   [ "${#__tmps[@]}" -eq 0 ] && __bad=0
   if [ "$__bad" -ge 0 ]; then
@@ -524,6 +552,11 @@ __map_bulk_rename() {
   while [ "$__i" -lt "${#__tmps[@]}" ]; do
     chmod 0644 "${__tmps[@]:$__i:100}" 2>/dev/null
     __i=$((__i+100))
+  done
+  __i=0
+  while [ "$__i" -lt "${#__tmps[@]}" ]; do
+    [ "${__modes[$__i]}" = 0644 ] || chmod "${__modes[$__i]}" "${__tmps[$__i]}" 2>/dev/null
+    __i=$((__i+1))
   done
   __code=0; __bad=0; __i=0
   while [ "$__i" -lt "${#__tmps[@]}" ]; do
@@ -595,7 +628,7 @@ const BulkDiscardShell = bulkLeftShell + `
 __map_bulk_discard() {
   __tmps=()
   if [ -f "$1" ]; then
-    while IFS= read -r -d '' __t && IFS= read -r -d '' __d; do __tmps+=("$__t"); done < "$1"
+    while IFS= read -r -d '' __t && IFS= read -r -d '' __d && IFS= read -r -d '' __m; do __tmps+=("$__t"); done < "$1"
     [ "${#__tmps[@]}" -eq 0 ] || rm -f "${__tmps[@]}"
   fi
   rm -f "$1" "$2"

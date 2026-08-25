@@ -3,12 +3,16 @@ package executor
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"slices"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -72,6 +76,12 @@ type fakeSandbox struct {
 	// fault the in-sandbox extraction).
 	cmds     []string
 	execHook func(sandbox.ExecRequest) *sandbox.ExecResult
+	// listTruncated marks the memory sync's tree listing as overflowing the
+	// exec output cap, the one answer that must skip a store's sync.
+	listTruncated bool
+	// modes records the Mode each WriteFiles member asked for, by path — the
+	// fake lands no permission bits, so this is where a test reads them.
+	modes map[string]fs.FileMode
 }
 
 func (f *fakeSandbox) ID() string { return "fake" }
@@ -100,6 +110,36 @@ func (f *fakeSandbox) Exec(_ context.Context, req sandbox.ExecRequest) (sandbox.
 		}
 		return sandbox.ExecResult{Stdout: out.String()}, nil
 	}
+	// The memory sync's listing (memsync.HashTreeCommand) and its deletions
+	// (`rm -f -- 'p'…`), answered from the in-memory tree so the three-phase
+	// sync runs without a shell: every regular file under the mount but the
+	// marker, digest first, in byte order, NUL-terminated as `sha256sum -z`
+	// prints it; an absent directory is `cd`'s exit 1 with nothing listed.
+	if mount, ok := hashTreeMount(req.Command); ok {
+		var paths []string
+		for p := range f.files {
+			if strings.HasPrefix(p, mount+"/") && p != mount+"/.anthropic-memory-store" {
+				paths = append(paths, p)
+			}
+		}
+		if len(paths) == 0 && !f.dirExists(mount) {
+			return sandbox.ExecResult{ExitCode: 1, Stderr: "cd: no such file or directory"}, nil
+		}
+		sort.Strings(paths)
+		var out strings.Builder
+		for _, p := range paths {
+			sum := sha256.Sum256([]byte(f.files[p]))
+			out.WriteString(hex.EncodeToString(sum[:]) + "  ." + strings.TrimPrefix(p, mount) + "\x00")
+		}
+		return sandbox.ExecResult{Stdout: out.String(), Truncated: f.listTruncated}, nil
+	}
+	if rest, ok := strings.CutPrefix(req.Command, "rm -f -- "); ok {
+		for _, q := range strings.Split(rest, " ") {
+			p := strings.ReplaceAll(strings.TrimSuffix(strings.TrimPrefix(q, "'"), "'"), `'\''`, "'")
+			delete(f.files, p)
+		}
+		return sandbox.ExecResult{}, nil
+	}
 	// Reflect real file presence for the executor's mountsPresent probe
 	// (`test -e '<p1>' && test -e '<p2>' && true`), so a deleted mount actually
 	// reports absent and forces re-materialization — an always-true Exec would
@@ -120,6 +160,29 @@ func (f *fakeSandbox) Exec(_ context.Context, req sandbox.ExecRequest) (sandbox.
 	}
 	return sandbox.ExecResult{}, nil
 }
+
+// hashTreeMount recognizes the memory sync's listing command and returns the
+// mount it lists.
+func hashTreeMount(cmd string) (string, bool) {
+	rest, ok := strings.CutPrefix(cmd, "cd '")
+	if !ok || !strings.Contains(cmd, "sha256sum -z") {
+		return "", false
+	}
+	mount, _, ok := strings.Cut(rest, "' && find")
+	return mount, ok
+}
+
+// dirExists says whether the in-memory tree has anything under dir — the
+// fake's notion of a directory, which is only ever implied by its files.
+func (f *fakeSandbox) dirExists(dir string) bool {
+	for p := range f.files {
+		if strings.HasPrefix(p, dir+"/") {
+			return true
+		}
+	}
+	return false
+}
+
 func (f *fakeSandbox) ReadFile(_ context.Context, path string) ([]byte, error) {
 	if f.readErr != nil {
 		return nil, f.readErr
@@ -195,7 +258,11 @@ func (f *fakeSandbox) WriteFileStream(ctx context.Context, path string, src io.R
 // by writing the members in order and stopping at the first failure.
 func (f *fakeSandbox) WriteFiles(ctx context.Context, files []sandbox.FileWrite) error {
 	f.bulkSizes = append(f.bulkSizes, len(files))
+	if f.modes == nil {
+		f.modes = map[string]fs.FileMode{}
+	}
 	for _, w := range files {
+		f.modes[w.Path] = w.Mode
 		if err := f.WriteFile(ctx, w.Path, w.Data); err != nil {
 			return err
 		}

@@ -80,7 +80,11 @@ func (r Runner) write(ctx context.Context, raw json.RawMessage) (Result, error) 
 	if res, bad := badField("write", "file_path", in.FilePath); bad {
 		return res, nil
 	}
-	if err := r.Sandbox.WriteFile(ctx, r.resolve(in.FilePath), []byte(in.Content)); err != nil {
+	p := r.resolve(in.FilePath)
+	if why := r.unwritable(in.FilePath, p); why != "" {
+		return failf("write: %s", why)
+	}
+	if err := r.Sandbox.WriteFile(ctx, p, []byte(in.Content)); err != nil {
 		return fileFault("write", in.FilePath, err)
 	}
 	return succeed(fmt.Sprintf("wrote %d bytes to %s", len(in.Content), in.FilePath))
@@ -101,6 +105,9 @@ func (r Runner) edit(ctx context.Context, raw json.RawMessage) (Result, error) {
 		return res, nil
 	}
 	p := r.resolve(in.FilePath)
+	if why := r.unwritable(in.FilePath, p); why != "" {
+		return failf("edit: %s", why)
+	}
 	data, err := r.Sandbox.ReadFile(ctx, p)
 	if err != nil {
 		return fileFault("edit", in.FilePath, err)

@@ -40,7 +40,51 @@ func tasks() []Task {
 		editConfig(), needleSearch(), permAllow(), permDeny(),
 		exitCode(), journalMultiturn(), viewRange(), skillAnswer(),
 		fileAnswer(), repoAnswer(), mcpAnswer(), outcomeSatisfy(), outcomeRevise(),
-		coordinatorTeam(),
+		coordinatorTeam(), memoryRecall(), memoryWrite(),
+	}
+}
+
+// memoryRecall is the memory chain end to end, store to model (plan 36 slice
+// 4): a passphrase lives only in a memory seeded into a store attached
+// read_only, so a correct answer proves store → session attachment →
+// executor materialization → the brain's Memory-stores block → the agent
+// reading the mount. The Recall token appears in no prompt — only in the
+// memory's bytes.
+func memoryRecall() Task {
+	const mount = "/mnt/memory/notes"
+	return Task{
+		ID: "memory-recall",
+		Memory: &MemoryFixture{Name: "notes", Access: "read_only",
+			Memories: map[string]string{"/passphrase.md": "The secret passphrase is {{RECALL}}."}},
+		Turns: []Turn{{Message: "A memory store is mounted in your sandbox. " +
+			"What is this task's secret passphrase, as saved in your memory? Reply with exactly the passphrase and nothing else."}},
+		Graders: []Grader{
+			// Either for both, as fileAnswer: the passphrase is reachable only
+			// through the mount, so a right answer is unambiguous, while a
+			// missing one may be the model declining to read.
+			ReadsFile(mount+"/passphrase.md", Either),
+			FinalMessageHas("{{RECALL}}", Either),
+		},
+	}
+}
+
+// memoryWrite is the other direction, model to store: the agent is told a
+// fact and asked to save it in its memory store, and the store holding it
+// after the turn proves the run-end sync pushed what the agent wrote
+// (decision 11) with the session as the version's actor.
+func memoryWrite() Task {
+	const mount = "/mnt/memory/notes"
+	return Task{
+		ID:     "memory-write",
+		Memory: &MemoryFixture{Name: "notes", Access: "read_write"},
+		Turns: []Turn{{Message: "Remember this for future sessions: the project's code name is {{RECALL}}. " +
+			"Save it in your memory store as a file named codename.md, then reply with exactly the word saved."}},
+		Graders: []Grader{
+			// Either: a model may decline to write. Platform for the sync: once
+			// the transcript shows the write, only the platform can lose it.
+			WritesFile(mount+"/codename.md", Either),
+			MemorySynced(mount+"/codename.md", "/codename.md", "{{RECALL}}", Platform),
+		},
 	}
 }
 

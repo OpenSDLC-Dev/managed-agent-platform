@@ -194,6 +194,35 @@ func id(t *testing.T, obj map[string]any, what string) string {
 	return v
 }
 
+// createMemoryStore creates a store named after the fixture and seeds its
+// memories through the public routes, returning the store id.
+func (s *stack) createMemoryStore(t *testing.T, mf *MemoryFixture, tr *Trial) string {
+	t.Helper()
+	storeID := id(t, s.do(t, http.MethodPost, "/v1/memory_stores", map[string]any{"name": mf.Name}), "create memory store")
+	for path, content := range mf.Memories {
+		s.do(t, http.MethodPost, "/v1/memory_stores/"+storeID+"/memories",
+			map[string]any{"path": path, "content": tr.fill(content)})
+	}
+	return storeID
+}
+
+// memoryContent reads one memory's content back from a store by path; ok is
+// false when the store holds no memory there. The full view is what carries
+// content, and its documented page cap (20) is above any trial's store.
+func (s *stack) memoryContent(t *testing.T, storeID, path string) (content string, ok bool) {
+	t.Helper()
+	res := s.do(t, http.MethodGet, "/v1/memory_stores/"+storeID+"/memories?view=full&limit=20", nil)
+	data, _ := res["data"].([]any)
+	for _, m := range data {
+		obj, _ := m.(map[string]any)
+		if obj["path"] == path {
+			content, _ = obj["content"].(string)
+			return content, true
+		}
+	}
+	return "", false
+}
+
 func (s *stack) createAgent(t *testing.T, body map[string]any) string {
 	t.Helper()
 	return id(t, s.do(t, http.MethodPost, "/v1/agents", body), "create agent")

@@ -6,11 +6,11 @@
 // would refuse has to be refused locally too, or a run spends a round trip
 // learning it.
 //
-// Slice 2 puts only the path and content rules and the mount slug here. Slice 4
-// adds the rest of the shared half: the marker file's bytes, the baseline
-// file's encoding, the tree-hash command and its parser, and the pure decision
-// table Plan(local, baseline, remote) → actions that both engines apply. None
-// of that exists yet.
+// Slice 2 put the path and content rules and the mount slug here; slice 4 the
+// rest of the shared half: the marker file's bytes, the baseline file's
+// encoding, the tree-hash command and its parser (tree.go), and the pure
+// decision table Plan(local, baseline, remote) → actions that both engines
+// apply (plan.go).
 //
 // Nothing here touches a database, a sandbox or the network — it is text rules
 // over strings, so either caller can use it without carrying the other's
@@ -36,6 +36,12 @@ const (
 	// reason and no other.
 	MaxPathBytes    = 1024
 	MaxContentBytes = 102400
+
+	// MaxMemoriesPerStore is the documented cap: 2,000 memories per store,
+	// past which "writes to new memories fail … Existing memories remain
+	// readable and editable" (the memory guide). The API's create and the
+	// sync's create push both hold it.
+	MaxMemoriesPerStore = 2000
 
 	// markerPath is the path a memory would have to occupy to collide with the
 	// per-mount marker file `.anthropic-memory-store` (decision 10), which
