@@ -545,6 +545,32 @@ def main():
         check("the saved sizes are the original ones",
               r.saved() == {"platform": "3", "sandbox": "1"}, r.labels())
 
+        print("pools already at zero but a running database is NOT already parked")
+        # Reachable by this script's own failure mode: a stop whose Cloud SQL
+        # patch fails leaves exactly this state, and the re-run has to finish the
+        # job. An early exit that looked only at the pools would call it parked,
+        # exit 0, and leave the database billing indefinitely.
+        st = new_state(tmp, "poolsonly", pools={"platform": 0, "sandbox": 0},
+                       sql="RUNNABLE", saved={"platform": 3, "sandbox": 1})
+        r = run(tmp, st, "stop")
+        check("exits 0", r.code == 0, r.out)
+        check("does not claim it was already parked", "already parked" not in r.out, r.out)
+        check("stops the database", r.sql() == "STOPPED", r.sql())
+        check("and keeps the sizes that were already saved",
+              r.saved() == {"platform": "3", "sandbox": "1"}, r.labels())
+
+        print("...and the same, with no saved sizes to carry")
+        # Same shape, but nothing was ever recorded -- so there is nothing to
+        # write, and an empty --update-labels is an error rather than a no-op.
+        st = new_state(tmp, "poolsonlynomark", pools={"platform": 0, "sandbox": 0},
+                       sql="RUNNABLE", labels={})
+        r = run(tmp, st, "stop")
+        check("exits 0", r.code == 0, r.out)
+        check("writes no label at all", r.first("--update-labels") == -1, r.calls)
+        check("says there was nothing to record", "nothing" in r.out.lower()
+              or "no pool sizes" in r.out.lower(), r.out)
+        check("still stops the database", r.sql() == "STOPPED", r.sql())
+
         print("...but says so out loud when the sizes were never recorded")
         # Physically parked, no marker: CD will not skip and `start` will refuse.
         # Reporting a bare "already parked" would hide both.

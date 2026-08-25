@@ -220,6 +220,7 @@ stop)
 	# Then ours. An already-saved size wins over the pool's current count, which
 	# is what makes a resumed stop keep the first attempt's number instead of
 	# recording the zero it left behind.
+	ours=""
 	for p in "${POOLS[@]}"; do
 		keep="$(saved_size "$p")"
 		if [[ -z "$keep" ]]; then
@@ -227,13 +228,23 @@ stop)
 			if [[ "$size" != "0" ]]; then keep="$size"; fi
 		fi
 		if [[ -n "$keep" ]]; then
-			desired="${desired:+${desired},}${LABEL_PREFIX}${p}=${keep}"
+			ours="${ours:+${ours},}${LABEL_PREFIX}${p}=${keep}"
 		fi
 	done
 
-	echo "saving pool sizes on the cluster: ${desired}"
-	g container clusters update "$CLUSTER" --location="$LOCATION" \
-		--update-labels="$desired" --quiet
+	if [[ -z "$ours" ]]; then
+		# Every pool is at zero already and none was ever recorded — someone
+		# scaled them by hand, or a `terraform apply` did. There is nothing to
+		# save, and writing an empty label set is an error rather than a no-op,
+		# so say what the operator is left with instead of implying a save.
+		echo "no pool sizes to record: every pool is already at zero and none was saved" >&2
+		echo "(\`start\` will need NODES=<n>, and CD will not treat this as parked)" >&2
+	else
+		desired="${desired:+${desired},}${ours}"
+		echo "saving pool sizes on the cluster: ${desired}"
+		g container clusters update "$CLUSTER" --location="$LOCATION" \
+			--update-labels="$desired" --quiet
+	fi
 
 	for p in "${POOLS[@]}"; do
 		size="$(pool_size "$p")"
@@ -263,7 +274,6 @@ start)
 	# Resolved for EVERY parked pool before anything is touched, and Cloud SQL is
 	# not started until it is. Refusing halfway would leave the environment part
 	# live and billing while reporting that it refused.
-	existing="$(cluster_labels)"
 	targets=""
 	missing=""
 	for p in "${POOLS[@]}"; do
