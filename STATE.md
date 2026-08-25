@@ -20,7 +20,7 @@ issuing. All seven scope decisions are settled; the design is the plan's ninetee
       → `in-progress`.
 - [x] **Slice 1 — stores** (#484): migration 0028, the three `mem*` prefixes, the six
       `/v1/memory_stores` routes on the vault idiom, `created_by`, the six registry items.
-- [x] **Slice 2 — memories and versions** (#TBD): migration 0029, `internal/memsync`'s
+- [x] **Slice 2 — memories and versions** (#485): migration 0029, `internal/memsync`'s
       path/content validation and slug, the five memory routes (`view`, preconditions,
       occupancy, prefix rollups), the three version routes, actors, eleven registry items.
 - [ ] Slice 3 — session attachment and the `memory_store_id` filter.
