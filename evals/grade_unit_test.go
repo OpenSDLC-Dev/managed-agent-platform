@@ -31,6 +31,43 @@ func textBlocks(text string) []any {
 	return []any{map[string]any{"type": "text", "text": text}}
 }
 
+// WritesFile's bash arm needs the command to write, not merely name the
+// path: a `cat` of the file is the recall trial's read, and reading it as a
+// write would hand MemorySynced a miss to blame on the platform.
+func TestWritesFileBashNeedsAWriteConstruct(t *testing.T) {
+	const path = "/mnt/memory/notes/codename.md"
+	bash := func(cmd string) map[string]any {
+		return map[string]any{"type": "agent.tool_use", "id": "u1", "name": "bash", "input": map[string]any{"command": cmd}}
+	}
+	// Every call here succeeded; what a failed one counts for is its own test.
+	done := map[string]any{"type": "agent.tool_result", "tool_use_id": "u1", "is_error": false}
+	for cmd, want := range map[string]bool{
+		"cat " + path:                                 false,
+		"ls -l " + path + " && wc -c " + path:         false,
+		"cat " + path + " 2>/dev/null":                false,
+		"cat " + path + " && echo ok > /tmp/log":      false,
+		"echo n0 > " + path:                           true,
+		"echo n0 > " + path + " 2>/dev/null":          true,
+		"printf 'x\\n' >> " + path:                    true,
+		"echo n0 | tee " + path:                       true,
+		"cp /tmp/draft.md " + path:                    true,
+		"sed -i 's/a/b/' " + path:                     true,
+		"touch " + path:                               true,
+		"cat /tmp/other.md; mv /tmp/other.md " + path: true,
+	} {
+		if got := wroteFile(trialWith([]map[string]any{bash(cmd), done}), path); got != want {
+			t.Errorf("%q counted as a write = %v, want %v", cmd, got, want)
+		}
+	}
+	write := map[string]any{"type": "agent.tool_use", "id": "u1", "name": "write", "input": map[string]any{"file_path": path, "content": "x"}}
+	if !wroteFile(trialWith([]map[string]any{write, done}), path) {
+		t.Error("a write tool call was not counted")
+	}
+	if wroteFile(trialWith([]map[string]any{write, done}), "/mnt/memory/notes/other.md") {
+		t.Error("a write of another file was counted")
+	}
+}
+
 func TestSplitLines(t *testing.T) {
 	cases := []struct {
 		in   string
@@ -1615,5 +1652,31 @@ func TestEveryThreadIdle(t *testing.T) {
 	// not watching the run.
 	if !strings.Contains(err.Error(), "archivist") || !strings.Contains(err.Error(), "sthr_a") {
 		t.Errorf("failure %q names neither the thread nor its agent", err)
+	}
+}
+
+// TestWroteFileNeedsASuccessfulResult: a command that names the path but
+// failed — a `cp` of a missing file — wrote nothing, and so did one whose
+// result never came.
+func TestWroteFileNeedsASuccessfulResult(t *testing.T) {
+	const path = "/mnt/memory/notes/codename.md"
+	use := func(id string) map[string]any {
+		return map[string]any{"type": "agent.tool_use", "id": id, "name": "bash",
+			"input": map[string]any{"command": "cp /tmp/missing " + path}}
+	}
+	result := func(id string, isErr bool) map[string]any {
+		return map[string]any{"type": "agent.tool_result", "tool_use_id": id, "is_error": isErr}
+	}
+	for name, tc := range map[string]struct {
+		events []map[string]any
+		want   bool
+	}{
+		"succeeded":  {[]map[string]any{use("u1"), result("u1", false)}, true},
+		"failed":     {[]map[string]any{use("u1"), result("u1", true)}, false},
+		"unanswered": {[]map[string]any{use("u1")}, false},
+	} {
+		if got := wroteFile(&Trial{Events: tc.events}, path); got != tc.want {
+			t.Errorf("%s: wroteFile = %v, want %v", name, got, tc.want)
+		}
 	}
 }

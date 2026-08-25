@@ -93,6 +93,14 @@ type Task struct {
 	// runs and the brain injects the Mounted-repositories block. Its url and
 	// token come from the environment, never from the task (see RepoFixture).
 	Repo *RepoFixture
+	// Memory, when set, creates a memory store seeded with the fixture's
+	// memories before the session and attaches it at session create with the
+	// fixture's access, so the executor materializes it under /mnt/memory and
+	// the brain injects the Memory-stores block; what the agent writes there
+	// is synced back to the store when its tool run ends. Exercises the whole
+	// memory chain (plan 36) — store, attachment, materialization, injection,
+	// the run-end sync.
+	Memory *MemoryFixture
 	// MCP, when set, stands up an in-process MCP server before the agent is
 	// created and declares it on the agent's mcp_servers, with an mcp_toolset
 	// naming it. Exercises the whole MCP chain — discovery into mcp_catalogs, the
@@ -253,6 +261,18 @@ type FileFixture struct {
 	MountPath string
 }
 
+// MemoryFixture is one memory store a trial creates and attaches. Name is
+// also the mount's directory — it must already be a slug (lowercase ASCII
+// alphanumerics and hyphens), so the store mounts at /mnt/memory/<Name> and
+// a grader can name the path exactly. Memories seeds the store through the
+// public create route, path → content, with {{RECALL}} substituted. Access
+// is the attachment's: read_only or read_write.
+type MemoryFixture struct {
+	Name     string
+	Access   string
+	Memories map[string]string
+}
+
 // RosterMember is one agent on a coordinator task's roster. The harness creates
 // each as an agent of its own before the coordinator, whose roster pins them by
 // id; the session snapshots their full definitions, and the coordinator spawns
@@ -289,6 +309,9 @@ type Trial struct {
 	// earlier message.
 	Recall    string
 	SessionID string
+	// MemoryStoreID is the store Task.Memory created, for the grader that
+	// reads the store back.
+	MemoryStoreID string
 	// Events is the whole transcript, read back through the list endpoint
 	// after the last turn.
 	Events []map[string]any
@@ -357,6 +380,14 @@ func runTrial(t *testing.T, s *stack, task Task, rec *record) *Trial {
 		resources = append(resources, map[string]any{
 			"type": "github_repository", "url": url,
 			"authorization_token": token, "mount_path": task.Repo.MountPath,
+		})
+	}
+	// A memory store is attached at create too (the memory element has no add
+	// route), seeded first so the materialization has something to land.
+	if task.Memory != nil {
+		tr.MemoryStoreID = s.createMemoryStore(t, task.Memory, tr)
+		resources = append(resources, map[string]any{
+			"type": "memory_store", "memory_store_id": tr.MemoryStoreID, "access": task.Memory.Access,
 		})
 	}
 	tr.SessionID = s.createSession(t, agentID, envID, resources)

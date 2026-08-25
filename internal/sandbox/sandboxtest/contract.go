@@ -1181,6 +1181,9 @@ func Run(t *testing.T, newHarness func(t *testing.T) Harness) {
 			{Path: root + "/scripts/run.sh", Data: []byte("#!/bin/sh\necho hi\n")},
 			{Path: root + "/deep/nested/dir/blob.bin", Data: large},
 			{Path: root + "/empty", Data: nil},
+			// A member asking for a mode: the memory-store files' 0666
+			// (docs/plan/36_memory-stores.md decision 10).
+			{Path: root + "/rw.md", Data: []byte("rw"), Mode: 0o666},
 		}
 		for i := 0; i < 20; i++ {
 			batch = append(batch, sandbox.FileWrite{
@@ -1213,6 +1216,12 @@ func Run(t *testing.T, newHarness func(t *testing.T) Harness) {
 		}
 		if got := fileMode(t, sb, root+"/deep/nested"); got != "755" {
 			t.Errorf("a directory the batch created has mode %s, want 755", got)
+		}
+		// A member's own mode lands whichever side extracted the archive: the
+		// header carries it through a root untar, the manifest through the rename
+		// pass after a sandbox user's untar under its umask.
+		if got := fileMode(t, sb, root+"/rw.md"); got != "666" {
+			t.Errorf("a member written with Mode 0666 has mode %s, want 666", got)
 		}
 
 		// Overwriting truncates rather than merging, and a second batch over the

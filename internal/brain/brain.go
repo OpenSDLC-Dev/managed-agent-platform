@@ -337,6 +337,11 @@ func (b *Brain) runTurn(ctx context.Context, item *queue.Item, claimedAt time.Ti
 	// rendered fact already lives in the stored resource, so there is no join
 	// to miss.
 	reposBlock, reposInjected := b.resolveReposBlock(ctx, sid, resourcesJSON, envKind)
+	// Memory-store injection: a "Memory stores" block after the repositories
+	// block, cloud only (plan 36 decision 9). A deleted store is a counted
+	// miss rendered hedged; the count is flushed now for the skills' reason.
+	memoryBlock, memoryInjected, memoryMisses := b.resolveMemoryBlock(ctx, resourcesJSON, envKind)
+	recordMemoryResolveMisses(ctx, memoryMisses)
 	// The tool surface: what the model may call, and what each name it calls
 	// back means. Both come from the same resolution so the two cannot disagree,
 	// and every tool the agent declared that the model was not offered is logged
@@ -361,7 +366,7 @@ func (b *Brain) runTurn(ctx context.Context, item *queue.Item, claimedAt time.Ti
 		return b.failTurn(ctx, sid, item, nil, 0, fmt.Sprintf("resolve tools: %v", err))
 	}
 	logToolNotes(ctx, sid, notes)
-	req, watermark, err := buildRequest(agent.System, toolDefs, history, skillsBlock, filesBlock, reposBlock)
+	req, watermark, err := buildRequest(agent.System, toolDefs, history, skillsBlock, filesBlock, reposBlock, memoryBlock)
 	if err != nil {
 		return b.failTurn(ctx, sid, item, nil, 0, fmt.Sprintf("replay: %v", err))
 	}
@@ -391,6 +396,8 @@ func (b *Brain) runTurn(ctx context.Context, item *queue.Item, claimedAt time.Ti
 		attribute.Int("files.block_chars", len(filesBlock)),
 		attribute.Int("repos.injected", reposInjected),
 		attribute.Int("repos.block_chars", len(reposBlock)),
+		attribute.Int("memory.injected", memoryInjected),
+		attribute.Int("memory.block_chars", len(memoryBlock)),
 	)
 
 	kctx, keeper := b.queue.KeepLease(sctx, item, b.cfg.LeaseTTL, 0)

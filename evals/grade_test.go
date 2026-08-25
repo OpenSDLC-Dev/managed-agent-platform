@@ -532,6 +532,112 @@ func ReadsFile(path string, class Class) Grader {
 	}
 }
 
+// WritesFile asserts the agent wrote or edited a file at path — a write or
+// edit tool call naming exactly it, or a bash command mentioning it — the
+// memory-write trial's evidence that the agent used its store.
+func WritesFile(path string, class Class) Grader {
+	return Grader{
+		Name:  "writes-file:" + path,
+		Class: class,
+		Check: func(_ *testing.T, tr *Trial) error {
+			if wroteFile(tr, path) {
+				return nil
+			}
+			return fmt.Errorf("no write, edit or bash tool call wrote %s: the agent never wrote the file", path)
+		},
+	}
+}
+
+func wroteFile(tr *Trial, path string) bool {
+	// A write is a call that succeeded: a `cp` of a missing file names the
+	// path and writes nothing, and its error result is the model's miss.
+	succeeded := map[string]bool{}
+	for _, res := range eventsOfType(tr, "agent.tool_result") {
+		id, _ := res["tool_use_id"].(string)
+		isErr, _ := res["is_error"].(bool)
+		succeeded[id] = !isErr
+	}
+	for _, use := range eventsOfType(tr, "agent.tool_use") {
+		if id, _ := use["id"].(string); !succeeded[id] {
+			continue
+		}
+		input, _ := use["input"].(map[string]any)
+		switch use["name"] {
+		case "write", "edit":
+			if fp, _ := input["file_path"].(string); fp == path {
+				return true
+			}
+		case "bash":
+			// A bash write shows in the command's shape, not in the path's
+			// mere mention: a `cat` of the file is a read, and counting it
+			// would send MemorySynced after a memory nobody wrote and call the
+			// miss the platform's.
+			if cmd, _ := input["command"].(string); bashWrites(cmd, path) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// bashWrites says whether a command writes the file at path: in the segment
+// of the command that names it (split on `;`, `&`, `|`), a redirect onto the
+// path, an in-place sed, or a copying or touching verb leading the segment
+// — so a `cat` of the path beside a redirect elsewhere is the read it is.
+func bashWrites(cmd, path string) bool {
+	for _, seg := range strings.FieldsFunc(cmd, func(r rune) bool { return r == ';' || r == '|' || r == '&' }) {
+		if !strings.Contains(seg, path) {
+			continue
+		}
+		if strings.Contains(seg, "sed -i") {
+			return true
+		}
+		for rest := seg; ; {
+			i := strings.Index(rest, ">")
+			if i < 0 {
+				break
+			}
+			rest = strings.TrimLeft(rest[i+1:], "> \t")
+			if strings.HasPrefix(rest, path) {
+				return true
+			}
+		}
+		if fields := strings.Fields(seg); len(fields) > 0 {
+			switch fields[0] {
+			case "tee", "cp", "mv", "install", "touch", "truncate":
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// MemorySynced asserts a file the agent wrote at mountPath reached the trial's
+// memory store as the memory at memoryPath, with sub (after substitution) in
+// its content — the run-end sync's push (plan 36 decision 11). It passes
+// vacuously when the transcript shows no write to the file: WritesFile owns
+// that miss, so a failure here is one the model could not have caused — the
+// agent wrote, and the sync did not carry it.
+func MemorySynced(mountPath, memoryPath, sub string, class Class) Grader {
+	return Grader{
+		Name:  "memory-synced:" + memoryPath,
+		Class: class,
+		Check: func(t *testing.T, tr *Trial) error {
+			if !wroteFile(tr, mountPath) {
+				return nil
+			}
+			content, ok := tr.stack.memoryContent(t, tr.MemoryStoreID, memoryPath)
+			if !ok {
+				return fmt.Errorf("the agent wrote %s but the store holds no memory at %s: the sync did not push it", mountPath, memoryPath)
+			}
+			if want := tr.fill(sub); !strings.Contains(content, want) {
+				return fmt.Errorf("the store's %s = %q, want it to contain %q", memoryPath, content, want)
+			}
+			return nil
+		},
+	}
+}
+
 // ContainerAbsent asserts no sandbox was made for a session whose agent called
 // no tools — the executor must never provision without a tool_exec.
 //

@@ -66,8 +66,18 @@ func bulkShellOut(t *testing.T, shell, fn, manifest, dirList string) (int, strin
 }
 
 // stageBatch writes a manifest and directory list naming each member, and creates
-// the temporary files listed unless the member is in absent.
+// the temporary files listed unless the member is in absent. Every member asks
+// for the default mode; stageBatchModes is the variant that lets one ask
+// otherwise.
 func stageBatch(t *testing.T, dir string, members map[string]string, absent map[string]bool) (string, string) {
+	t.Helper()
+	return stageBatchModes(t, dir, members, absent, nil)
+}
+
+// stageBatchModes is stageBatch with a mode per member (name → the manifest's
+// four octal digits); a member not in modes asks for 0644, as NewBulkWrite
+// writes for a FileWrite without a Mode.
+func stageBatchModes(t *testing.T, dir string, members map[string]string, absent map[string]bool, modes map[string]string) (string, string) {
 	t.Helper()
 	var manifest, dirs bytes.Buffer
 	seen := map[string]bool{}
@@ -86,7 +96,11 @@ func stageBatch(t *testing.T, dir string, members map[string]string, absent map[
 				t.Fatalf("stage %s: %v", tmp, err)
 			}
 		}
-		manifest.WriteString(tmp + "\x00" + target + "\x00")
+		mode := modes[name]
+		if mode == "" {
+			mode = "0644"
+		}
+		manifest.WriteString(tmp + "\x00" + target + "\x00" + mode + "\x00")
 		if !seen[dir] {
 			seen[dir] = true
 			dirs.WriteString(dir + "\x00")
@@ -170,6 +184,33 @@ func TestBulkRenameShellSetsAFreshMembersMode(t *testing.T) {
 		}
 		if got := info.Mode().Perm(); got != 0o644 {
 			t.Errorf("a member the batch created has mode %o, want 644 — set, not inherited", got)
+		}
+	}
+	assertNoTemps(t, dir)
+}
+
+// A member whose manifest record asks for a mode lands with it — the
+// memory-store files' 0666 (plan 36 decision 10) — after the batched 0644 pass,
+// and only that member: its neighbour still lands 0644, and a record whose
+// mode is not a permission mode — four octal digits, the first 0, so no
+// setuid, setgid or sticky bit — is read as the default rather than handed
+// to chmod, since the manifest is a file the sandbox can rewrite.
+func TestBulkRenameShellAppliesAMembersMode(t *testing.T) {
+	dir := t.TempDir()
+	members := map[string]string{"rw.md": "RW", "plain.txt": "P", "odd.txt": "O", "suid.sh": "S"}
+	manifest, dirList := stageBatchModes(t, dir, members, nil, map[string]string{"rw.md": "0666", "odd.txt": "u+s", "suid.sh": "4755"})
+
+	code, stderr := bulkShell(t, sandbox.BulkRenameShell, "__map_bulk_rename", manifest, dirList)
+	if code != 0 {
+		t.Fatalf("exit %d, want 0; stderr: %s", code, stderr)
+	}
+	for name, want := range map[string]os.FileMode{"rw.md": 0o666, "plain.txt": 0o644, "odd.txt": 0o644, "suid.sh": 0o644} {
+		info, err := os.Stat(dir + "/" + name)
+		if err != nil {
+			t.Fatalf("stat %s: %v", name, err)
+		}
+		if got := info.Mode().Perm(); got != want {
+			t.Errorf("%s landed %o, want %o", name, got, want)
 		}
 	}
 	assertNoTemps(t, dir)

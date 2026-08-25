@@ -36,14 +36,14 @@ import (
 //
 // agent.thinking replays as nothing: the wire event carries no content, so
 // thinking is never reconstructed (and v1 never requests extended thinking).
-func buildRequest(system string, tools []json.RawMessage, history []domain.Event, skillsBlock, filesBlock, reposBlock string) (provider.Request, int64, error) {
+func buildRequest(system string, tools []json.RawMessage, history []domain.Event, skillsBlock, filesBlock, reposBlock, memoryBlock string) (provider.Request, int64, error) {
 	req := provider.Request{System: system, Tools: tools}
 	// Startup metadata blocks sit after the agent's own system prompt and before
 	// any runtime system.message text (systemTail), which is appended at the end:
 	// the Level-1 skills block first, then the Mounted-files block, then the
-	// Mounted-repositories block. Placement is an inference
-	// (docs/DIVERGENCES.md).
-	for _, block := range []string{skillsBlock, filesBlock, reposBlock} {
+	// Mounted-repositories block, then the Memory-stores block. Placement is an
+	// inference (docs/DIVERGENCES.md).
+	for _, block := range []string{skillsBlock, filesBlock, reposBlock, memoryBlock} {
 		if block != "" {
 			if req.System != "" {
 				req.System += "\n\n"

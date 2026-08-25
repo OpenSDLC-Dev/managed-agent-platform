@@ -438,7 +438,9 @@ func (e *Executor) process(ctx context.Context, item *queue.Item) (err error) {
 	// losing the lease cancels the work.
 	kctx, keeper := e.queue.KeepLease(ctx, item, e.cfg.LeaseTTL, e.cfg.StallTimeout)
 
-	results, faultErr, runErr := e.provisionAndRun(kctx, item, sess, keeper.Progress)
+	results, ms, faultErr, runErr := e.provisionAndRun(kctx, item, sess, keeper.Progress)
+	// Whatever the paths below decide, the sync's span ends once.
+	defer ms.end(ctx)
 	if kerr := keeper.Close(); kerr != nil {
 		if !errors.Is(kerr, queue.ErrWorkStalled) {
 			// The lease is gone — another executor may already own this item.
@@ -483,8 +485,15 @@ func (e *Executor) process(ctx context.Context, item *queue.Item) (err error) {
 	// wake, the chain to the web or MCP driver for a call this sandbox pass
 	// cannot answer, the re-scan for a call a sibling committed under this
 	// live item — is settleDrain's, shared with the other drivers.
+	//
+	// The memory sync's settle phase rides the same transaction (plan 36
+	// decision 11): the store's rows and the run's results commit together,
+	// and the apply phase writes the sandbox only from what committed.
 	if err := e.commitResults(ctx, item.SessionID, results, func(ctx context.Context, tx pgx.Tx) error {
-		return e.settleDrain(ctx, tx, item, queue.ToolExec, faultErr != nil)
+		if err := e.settleDrain(ctx, tx, item, queue.ToolExec, faultErr != nil); err != nil {
+			return err
+		}
+		return e.settleMemory(ctx, tx, ms)
 	}); err != nil {
 		// The diagnosis the branch above built rides along rather than being
 		// replaced. A settlement that fails on the stall path is the worst case
@@ -497,6 +506,7 @@ func (e *Executor) process(ctx context.Context, item *queue.Item) (err error) {
 		}
 		return fmt.Errorf("append tool results: %w", err)
 	}
+	e.applyMemory(ctx, ms)
 	return faultErr
 }
 
@@ -520,10 +530,10 @@ func consumerSpan(ctx context.Context, item *queue.Item, name string) (context.C
 // append, the first backend fault a tool hit (nil if every tool ran), and a
 // setup error from provisioning or reading the log — which stops the item with
 // nothing committed, distinct from a tool fault, which commits what did run.
-func (e *Executor) provisionAndRun(ctx context.Context, item *queue.Item, sess sessionRun, progress func()) ([]events.NewEvent, error, error) {
+func (e *Executor) provisionAndRun(ctx context.Context, item *queue.Item, sess sessionRun, progress func()) ([]events.NewEvent, *memorySync, error, error) {
 	sb, err := e.provisionSandbox(ctx, item.SessionID, sess, progress)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	// Each step this run finishes tells the keeper the run is alive (#383).
 	// Reported at the boundaries a wedged sandbox call stops the run from
@@ -539,9 +549,21 @@ func (e *Executor) provisionAndRun(ctx context.Context, item *queue.Item, sess s
 	progress()
 	e.materializeFiles(ctx, sb, item.SessionID, sess.files, progress)
 	progress()
+	// Memory stores last: their mounts are reserved against the others
+	// (/mnt/memory), so nothing here can overlay them. A mount the sandbox
+	// already held is reconciled before the tools read it — the store's
+	// changes since the last run land now, and what a faulted run wrote
+	// goes up — so a store's change reaches a session at its next run.
+	if existing := e.materializeMemory(ctx, sb, item.SessionID, sess.memories, progress); existing > 0 {
+		if err := e.syncMemoryNow(ctx, sb, item.SessionID, sess.memories, progress); err != nil {
+			slog.WarnContext(ctx, "memory stores not refreshed before the run; the run's end retries",
+				"session_id", item.SessionID, "err", err)
+		}
+	}
+	progress()
 	uses, err := e.runnableToolUses(ctx, item.SessionID)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	// The web tools are the web driver's (webwork.go), never this sandbox
 	// pass's — and normally never even seen here: a tool_exec is enqueued only
@@ -554,8 +576,15 @@ func (e *Executor) provisionAndRun(ctx context.Context, item *queue.Item, sess s
 	uses = slices.DeleteFunc(uses, func(u toolUse) bool {
 		return toolset.IsWebTool(u.name) || toolset.IsDelegationTool(u.name)
 	})
-	results, faultErr := e.runTools(ctx, sb, item.SessionID, uses, progress)
-	return results, faultErr, nil
+	results, faultErr := e.runTools(ctx, sb, item.SessionID, uses, sess.memories, progress)
+	// The memory sync's read phase (plan 36 decision 11) closes every run
+	// whose tools all answered — a run that faulted or stalled has a sandbox
+	// nothing here should wait on, and the next run, or the reaper, syncs it.
+	var ms *memorySync
+	if faultErr == nil {
+		ms = e.readMemory(ctx, sb, item.SessionID, sess.memories, progress)
+	}
+	return results, ms, faultErr, nil
 }
 
 // provisionSandbox resolves the session's credential env and gate spec and
@@ -756,11 +785,27 @@ func GateTokenRevoker(pool *pgxpool.Pool) sandbox.GateTokenRevoker {
 // because the keeper itself cannot tell the driver), so an interrupted
 // `sleep 3600` costs one beat, not toolset.MaxTimeout, and the sibling calls
 // queued behind it are not held hostage.
-func (e *Executor) runTools(ctx context.Context, sb sandbox.Sandbox, sid domain.ID, uses []toolUse, progress func()) ([]events.NewEvent, error) {
+func (e *Executor) runTools(ctx context.Context, sb sandbox.Sandbox, sid domain.ID, uses []toolUse, memories []memoryRef, progress func()) ([]events.NewEvent, error) {
 	// Workdir must match the one the sandbox was provisioned with, so the file
 	// tools resolve a relative path against the same directory bash runs in.
 	// Empty resolves to sandbox.DefaultWorkdir on both sides.
 	runner := toolset.Runner{Sandbox: sb, Session: sid, Workdir: e.cfg.Workdir}
+	// The memory roots the file tools guard (plan 36 decision 12): every
+	// mounted store, and read-only the ones attached read_only or archived
+	// since — the store's state is read here, per run, because an archive
+	// between two runs must refuse the next run's writes, not merely leave
+	// them unsynced.
+	mounts := memoryMounts(memories)
+	archived, err := e.archivedStores(ctx, mounts)
+	if err != nil {
+		return nil, fmt.Errorf("memory stores: %w", err)
+	}
+	for _, m := range mounts {
+		runner.MemoryRoots = append(runner.MemoryRoots, m.MountPath)
+		if m.Access == "read_only" || archived[m.MemoryStoreID] {
+			runner.ReadOnlyRoots = append(runner.ReadOnlyRoots, m.MountPath)
+		}
+	}
 	var results []events.NewEvent
 	for _, u := range uses {
 		if answered, err := events.Answered(ctx, e.pool, sid, u.id); err != nil {
@@ -840,6 +885,7 @@ type sessionRun struct {
 	skills     []skillRef
 	files      []fileRef
 	repos      []repoRef
+	memories   []memoryRef
 	vaultIDs   []string
 	mcpServers []mcpServerRef
 }
@@ -925,12 +971,17 @@ func (e *Executor) sessionForRun(ctx context.Context, item *queue.Item) (session
 	if err := json.Unmarshal(resourcesJSON, &repos); err != nil {
 		return sessionRun{}, false, err
 	}
+	var memories []memoryRef
+	if err := json.Unmarshal(resourcesJSON, &memories); err != nil {
+		return sessionRun{}, false, err
+	}
 	return sessionRun{
 		envConfig:  cfg,
 		networking: cfg.Networking,
 		skills:     skillRefs,
 		files:      resources,
 		repos:      repos,
+		memories:   memories,
 		vaultIDs:   vaultIDs,
 		mcpServers: agent.MCPServers,
 	}, true, tx.Commit(ctx)

@@ -52,15 +52,9 @@ const (
 	viewFull  = "full"
 )
 
-const (
-	// memoriesPerStore is the documented cap: 2,000 memories per store, past
-	// which "writes to new memories fail … Existing memories remain readable
-	// and editable" (the memory guide).
-	memoriesPerStore = 2000
-	// memoryFullViewLimit is the documented silent clamp: a list with
-	// view=full is "Capped at 20" however large a limit the caller asked for.
-	memoryFullViewLimit = 20
-)
+// memoryFullViewLimit is the documented silent clamp: a list with view=full
+// is "Capped at 20" however large a limit the caller asked for.
+const memoryFullViewLimit = 20
 
 const memoryColumns = `id, path, content, content_sha256, content_size_bytes,
 	memory_version_id, created_at, updated_at`
@@ -273,8 +267,8 @@ func (s *server) createMemory(r *http.Request) (any, error) {
 		`SELECT count(*) FROM memories WHERE memory_store_id = $1`, storeID).Scan(&held); err != nil {
 		return nil, err
 	}
-	if held >= memoriesPerStore {
-		return nil, errInvalid("memory store %s holds %d memories", storeID, memoriesPerStore)
+	if held >= memsync.MaxMemoriesPerStore {
+		return nil, errInvalid("memory store %s holds %d memories", storeID, memsync.MaxMemoriesPerStore)
 	}
 
 	row := memoryRow{

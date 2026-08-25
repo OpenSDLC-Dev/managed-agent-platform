@@ -1,16 +1,16 @@
 // Package memsync holds the memory-store rules that both halves of the sync
 // share (docs/plan/36_memory-stores.md decision 17). Two callers, one copy:
-// internal/api validates what a client writes, and from slice 4 on the
-// executor (which writes rows) and internal/worker (which goes over the wire)
-// reconcile a sandbox directory against a store — a path or a body the routes
+// internal/api validates what a client writes, and the executor (which writes
+// rows, from slice 4) and internal/worker (which goes over the wire, from
+// slice 6) reconcile a sandbox directory against a store — a path or a body the routes
 // would refuse has to be refused locally too, or a run spends a round trip
 // learning it.
 //
-// Slice 2 puts only the path and content rules and the mount slug here. Slice 4
-// adds the rest of the shared half: the marker file's bytes, the baseline
-// file's encoding, the tree-hash command and its parser, and the pure decision
-// table Plan(local, baseline, remote) → actions that both engines apply. None
-// of that exists yet.
+// Slice 2 put the path and content rules and the mount slug here; slice 4 the
+// rest of the shared half: the marker file's bytes, the baseline file's
+// encoding, the tree-hash command and its parser (tree.go), and the pure
+// decision table Plan(local, baseline, remote) → actions that both engines
+// apply (plan.go).
 //
 // Nothing here touches a database, a sandbox or the network — it is text rules
 // over strings, so either caller can use it without carrying the other's
@@ -36,6 +36,12 @@ const (
 	// reason and no other.
 	MaxPathBytes    = 1024
 	MaxContentBytes = 102400
+
+	// MaxMemoriesPerStore is the documented cap: 2,000 memories per store,
+	// past which "writes to new memories fail … Existing memories remain
+	// readable and editable" (the memory guide). The API's create and the
+	// sync's create push both hold it.
+	MaxMemoriesPerStore = 2000
 
 	// markerPath is the path a memory would have to occupy to collide with the
 	// per-mount marker file `.anthropic-memory-store` (decision 10), which
@@ -100,15 +106,22 @@ func ValidatePath(path string) error {
 }
 
 // ValidateContent holds the other half of decision 4: at most 100 kB of valid
-// UTF-8 text. The UTF-8 half is inert on the API lane — a JSON string decodes
-// to valid UTF-8 by construction — and load-bearing on the sync lane, where
-// the bytes come from a file in a sandbox.
+// UTF-8 text — and text Postgres can hold, which valid UTF-8 does not settle:
+// U+0000 is a legal code point that a text column refuses (SQLSTATE 22021).
+// Both of those halves are inert on the API lane — a JSON string decodes to
+// valid UTF-8 by construction, and the API refuses a NUL anywhere in a body
+// before any field binds — and load-bearing on the sync lane, where the
+// bytes come from a file in a sandbox: unrefused, a NUL in one file would
+// fail its store's whole settlement on every run until the sandbox died.
 func ValidateContent(content string) error {
 	if len(content) > MaxContentBytes {
 		return fmt.Errorf("content cannot exceed %d bytes", MaxContentBytes)
 	}
 	if !utf8.ValidString(content) {
 		return errors.New("content must be valid UTF-8")
+	}
+	if strings.ContainsRune(content, 0) {
+		return errors.New("content must not contain U+0000")
 	}
 	return nil
 }

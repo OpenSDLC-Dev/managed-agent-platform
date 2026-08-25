@@ -74,6 +74,7 @@ func TestValidateContent(t *testing.T) {
 		"one byte over":         strings.Repeat("x", 102401),
 		"invalid UTF-8":         "hello \xff world",
 		"a lone surrogate half": "\xed\xa0\x80",
+		"a NUL byte":            "a\x00b", // valid UTF-8; Postgres text refuses it
 	} {
 		if err := memsync.ValidateContent(content); err == nil {
 			t.Errorf("%s: accepted, want a rejection", name)

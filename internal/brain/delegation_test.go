@@ -297,7 +297,7 @@ func TestReplayRendersAReceivedMessage(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			req, _, err := buildRequest("", nil,
-				[]domain.Event{ev(1, domain.EventAgentThreadMessageReceived, tc.body)}, "", "", "")
+				[]domain.Event{ev(1, domain.EventAgentThreadMessageReceived, tc.body)}, "", "", "", "")
 			if err != nil {
 				t.Fatalf("buildRequest: %v", err)
 			}
@@ -323,7 +323,7 @@ func TestReplaySkipsASentMessage(t *testing.T) {
 			`{"content":[{"type":"text","text":"go and look"}],"to_session_thread_id":"sthr_1","to_agent_name":"researcher"}`),
 		ev(2, domain.EventAgentThreadMessageReceived,
 			`{"content":[{"type":"text","text":"done"}],"from_session_thread_id":"sthr_1","from_agent_name":"researcher"}`),
-	}, "", "", "")
+	}, "", "", "", "")
 	if err != nil {
 		t.Fatalf("buildRequest: %v", err)
 	}

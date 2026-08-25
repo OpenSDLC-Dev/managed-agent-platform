@@ -25,6 +25,7 @@ import (
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/blob"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/events"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/sandbox"
 )
 
 // MetricSessionsReaped counts reaped sessions by tier.
@@ -146,6 +147,22 @@ func (e *Executor) reapSession(ctx context.Context, sid domain.ID) error {
 	if tier == tierDeleted && e.blobs != nil {
 		if err := e.blobs.Delete(ctx, blob.SessionCheckpointKey(sid.String())); err != nil {
 			return fmt.Errorf("delete checkpoint blob: %w", err)
+		}
+	}
+	// A memory store's last chance (plan 36 decision 11): what the agent wrote
+	// after its last synced run — nothing, unless that run faulted — reaches
+	// the store before the sandbox is checkpointed or destroyed. Attach
+	// creates nothing, so a session without a live sandbox is skipped; a sync
+	// that cannot reach the database aborts the reap like a failed capture
+	// does, and the next pass retries. A deleted session has no row to read.
+	if tier != tierDeleted {
+		switch sb, err := e.provider.Attach(ctx, sid); {
+		case err == nil:
+			if err := e.syncMemoryStandalone(ctx, sb, sid); err != nil {
+				return fmt.Errorf("memory sync: %w", err)
+			}
+		case !errors.Is(err, sandbox.ErrNotFound):
+			return fmt.Errorf("attach for memory sync: %w", err)
 		}
 	}
 	if tier == tierIdle {

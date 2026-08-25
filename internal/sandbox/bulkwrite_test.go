@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"errors"
 	"io"
+	"io/fs"
 	"strings"
 	"testing"
 	"time"
@@ -58,6 +59,7 @@ func TestBulkWriteArchiveShape(t *testing.T) {
 		{Path: "/workspace/skills/a/scripts/run.sh", Data: []byte("#!/bin/sh\n")},
 		{Path: "/workspace/skills/a/empty", Data: nil},
 		{Path: "/etc/elsewhere.conf", Data: []byte{0x00, 0xff}},
+		{Path: "/mnt/memory/notes/todo.md", Data: []byte("rw"), Mode: 0o666},
 	}
 	b, err := sandbox.NewBulkWrite("/workspace", files)
 	if err != nil {
@@ -85,10 +87,17 @@ func TestBulkWriteArchiveShape(t *testing.T) {
 		t.Errorf("manifest %q must be a temporary name in the workdir", b.Manifest)
 	}
 
-	// The manifest is `tmp\0target\0` per member, in order, and each temporary
-	// file is in its own target's directory under the shared temp prefix.
+	// The manifest is `tmp\0target\0mode\0` per member, in order, and each
+	// temporary file is in its own target's directory under the shared temp
+	// prefix. The mode is the member's own or 0644, in the header and in the
+	// manifest alike: the header is what a root untar restores, the manifest
+	// what the rename pass chmods after a sandbox user's untar under its umask.
 	var wantManifest, wantDirs bytes.Buffer
 	for i, f := range files {
+		mode := "0644"
+		if f.Mode != 0 {
+			mode = "0666"
+		}
 		tmp := got[i+2].name
 		if !strings.HasPrefix(tmp, "/") {
 			tmp = "/" + tmp
@@ -104,17 +113,21 @@ func TestBulkWriteArchiveShape(t *testing.T) {
 		if !bytes.Equal(got[i+2].data, f.Data) {
 			t.Errorf("member %d carries %q, want %q", i, got[i+2].data, f.Data)
 		}
-		if got[i+2].mode != 0o644 {
-			t.Errorf("member %d has mode %o, want 644", i, got[i+2].mode)
+		wantMode := int64(0o644)
+		if f.Mode != 0 {
+			wantMode = int64(f.Mode)
 		}
-		wantManifest.WriteString(tmp + "\x00" + f.Path + "\x00")
+		if got[i+2].mode != wantMode {
+			t.Errorf("member %d has mode %o, want %o", i, got[i+2].mode, wantMode)
+		}
+		wantManifest.WriteString(tmp + "\x00" + f.Path + "\x00" + mode + "\x00")
 	}
 	if !bytes.Equal(got[0].data, wantManifest.Bytes()) {
 		t.Errorf("manifest = %q, want %q", got[0].data, wantManifest.Bytes())
 	}
 	// The directory list is deduplicated — a skill of ten thousand files in three
 	// directories hands `mkdir -p` three arguments, not ten thousand.
-	for _, dir := range []string{"/workspace/skills/a", "/workspace/skills/a/scripts", "/etc"} {
+	for _, dir := range []string{"/workspace/skills/a", "/workspace/skills/a/scripts", "/etc", "/mnt/memory/notes"} {
 		wantDirs.WriteString(dir + "\x00")
 	}
 	if !bytes.Equal(got[1].data, wantDirs.Bytes()) {
@@ -175,6 +188,14 @@ func TestBulkWriteNamesAreUnique(t *testing.T) {
 // A path that is not absolute and clean is refused rather than normalized: it
 // also names an entry in the archive, where `..` would mean something else again.
 func TestBulkWriteRejectsUnusablePaths(t *testing.T) {
+	// A mode that is not permission bits — setuid, a directory bit — is refused
+	// before anything is built: a batch carries files and their permissions,
+	// nothing a sandbox user could not chmod for itself.
+	for _, mode := range []fs.FileMode{fs.ModeSetuid | 0o644, fs.ModeDir | 0o755, fs.ModeSticky} {
+		if _, err := sandbox.NewBulkWrite("/workspace", []sandbox.FileWrite{{Path: "/workspace/x", Mode: mode}}); err == nil {
+			t.Errorf("mode %v accepted", mode)
+		}
+	}
 	// A NUL would split the path's own manifest record and land the member on a
 	// path the caller never named — the one refusal that is about the manifest's
 	// framing rather than about the path being usable.

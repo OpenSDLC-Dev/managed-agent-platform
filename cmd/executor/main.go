@@ -9,10 +9,11 @@
 // Configuration is environment-driven:
 //
 //	DATABASE_URL             Postgres DSN (required; same database as the
-//	                         controlplane and brain). A pool_max_conns below 3
-//	                         is refused: a provision and the reaper can pin a
-//	                         session-lock connection each while their nested
-//	                         queries still need the pool
+//	                         controlplane and brain). A pool_max_conns below 4
+//	                         is refused: a provision pins a session-lock
+//	                         connection and the reaper two (its lock and, mid
+//	                         memory sync, its own transaction) while their
+//	                         nested queries still need the pool
 //	EXECUTOR_IMAGE           sandbox base image (default "debian:stable-slim")
 //	EXECUTOR_WORKDIR         working directory inside the sandbox (default
 //	                         "/workspace")
@@ -284,14 +285,15 @@ func run(ctx context.Context) error {
 		return err
 	}
 	defer pool.Close()
-	// The worst case pins two connections at once — the work loop's provision
-	// holding its session lock while the reaper holds another session's —
-	// and each side still issues transient queries (the gate-token mint and
-	// revoke, the under-lock re-reads), so a third connection must exist for
-	// those to ever proceed. Refuse less at startup instead of wedging
-	// silently under load.
-	if pool.Config().MaxConns < 3 {
-		return fmt.Errorf("DATABASE_URL pool_max_conns = %d: the executor needs at least 3 connections", pool.Config().MaxConns)
+	// The worst case pins three connections at once — the work loop's
+	// provision holding its session lock while the reaper holds another
+	// session's and, inside that, the transaction of the memory sync it runs
+	// before reaping (plan 36) — and each side still issues transient
+	// queries (the gate-token mint and revoke, the under-lock re-reads), so
+	// a fourth connection must exist for those to ever proceed. Refuse less
+	// at startup instead of wedging silently under load.
+	if pool.Config().MaxConns < 4 {
+		return fmt.Errorf("DATABASE_URL pool_max_conns = %d: the executor needs at least 4 connections", pool.Config().MaxConns)
 	}
 
 	provider, err := backend.New(backend.Config{

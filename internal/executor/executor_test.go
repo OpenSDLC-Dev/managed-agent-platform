@@ -3,12 +3,16 @@ package executor
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"slices"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -18,6 +22,7 @@ import (
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/blob/blobtest"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/events"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/memsync"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/pgtest"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/queue"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/sandbox"
@@ -46,6 +51,10 @@ type fakeSandbox struct {
 	// this suffix, so a test can fault one tool of a parallel set while the
 	// others succeed.
 	failPath string
+	// faultPlants are files the fake lands the moment that fault fires, so a
+	// test can make a change that exists only once the run is under way —
+	// after the sync a run opens with, before the one it would end with.
+	faultPlants map[string]string
 	// entered (if set) receives one signal the first time WriteFile is entered,
 	// and gate (if set) blocks WriteFile until closed — together they let a test
 	// hold a tool mid-run to observe the lease keeper renew. gateFrom is the
@@ -72,6 +81,15 @@ type fakeSandbox struct {
 	// fault the in-sandbox extraction).
 	cmds     []string
 	execHook func(sandbox.ExecRequest) *sandbox.ExecResult
+	// listTruncated marks the memory sync's tree listing as overflowing the
+	// exec output cap, and listExit is a status the listing fails with (a
+	// directory find could not enter, under the command's pipefail) — the
+	// two answers that must skip a store's sync.
+	listTruncated bool
+	listExit      int
+	// modes records the Mode each WriteFiles member asked for, by path — the
+	// fake lands no permission bits, so this is where a test reads them.
+	modes map[string]fs.FileMode
 }
 
 func (f *fakeSandbox) ID() string { return "fake" }
@@ -100,6 +118,51 @@ func (f *fakeSandbox) Exec(_ context.Context, req sandbox.ExecRequest) (sandbox.
 		}
 		return sandbox.ExecResult{Stdout: out.String()}, nil
 	}
+	// The memory sync's listing (memsync.HashTreeCommand) and its deletions
+	// (memsync.RemoveCommands), answered from the in-memory tree so the
+	// three-phase sync runs without a shell: every regular file under the
+	// mount but the marker, digest first, in byte order, NUL-terminated as
+	// `sha256sum -z` prints it; an absent directory lists nothing and exits 0,
+	// as the command's own `[ -d ]` guard does.
+	if mount, ok := hashTreeMount(req.Command); ok {
+		var paths []string
+		for p := range f.files {
+			if strings.HasPrefix(p, mount+"/") && p != mount+"/"+memsync.MarkerName {
+				paths = append(paths, p)
+			}
+		}
+		sort.Strings(paths)
+		var out strings.Builder
+		for _, p := range paths {
+			sum := sha256.Sum256([]byte(f.files[p]))
+			out.WriteString(hex.EncodeToString(sum[:]) + "  ." + strings.TrimPrefix(p, mount) + "\x00")
+		}
+		if f.listExit != 0 {
+			return sandbox.ExecResult{ExitCode: f.listExit, Stderr: "find: './a': Permission denied\n"}, nil
+		}
+		return sandbox.ExecResult{Stdout: out.String(), Truncated: f.listTruncated}, nil
+	}
+	if strings.Contains(req.Command, "sha256sum -z") {
+		// A listing whose shape the fake no longer recognizes must not fall
+		// through to the exit-0 path below, where it would read as an empty
+		// directory and arm the wipe guard instead of failing the test.
+		return sandbox.ExecResult{}, fmt.Errorf("fake sandbox: unrecognized memory listing %q", req.Command)
+	}
+	if rest, ok := strings.CutPrefix(req.Command, "[ -d '"); ok && strings.Contains(rest, "; rm -f -- ") {
+		// memsync.RemoveCommands: the prelude names the mount, then `rm -f --
+		// 'rel'… || exit 1[; rmdir …]`; the named files go, and the fake has
+		// no directories to prune.
+		mount, list, _ := strings.Cut(rest, "' ] || exit 0; ")
+		_, list, _ = strings.Cut(list, "; rm -f -- ")
+		list, _, _ = strings.Cut(list, " || exit 1")
+		// The tokens are shell-quoted, so the separator is `' '`, not a
+		// space a path may hold.
+		for _, q := range strings.Split(list, "' '") {
+			p := strings.ReplaceAll(strings.TrimSuffix(strings.TrimPrefix(q, "'"), "'"), `'\''`, "'")
+			delete(f.files, mount+"/"+p)
+		}
+		return sandbox.ExecResult{}, nil
+	}
 	// Reflect real file presence for the executor's mountsPresent probe
 	// (`test -e '<p1>' && test -e '<p2>' && true`), so a deleted mount actually
 	// reports absent and forces re-materialization — an always-true Exec would
@@ -120,6 +183,18 @@ func (f *fakeSandbox) Exec(_ context.Context, req sandbox.ExecRequest) (sandbox.
 	}
 	return sandbox.ExecResult{}, nil
 }
+
+// hashTreeMount recognizes the memory sync's listing command and returns the
+// mount it lists.
+func hashTreeMount(cmd string) (string, bool) {
+	rest, ok := strings.CutPrefix(cmd, "[ -d '")
+	if !ok || !strings.Contains(cmd, "sha256sum -z") {
+		return "", false
+	}
+	mount, _, ok := strings.Cut(rest, "' ] || exit 0; cd -P '")
+	return mount, ok
+}
+
 func (f *fakeSandbox) ReadFile(_ context.Context, path string) ([]byte, error) {
 	if f.readErr != nil {
 		return nil, f.readErr
@@ -167,11 +242,14 @@ func (f *fakeSandbox) WriteFile(ctx context.Context, path string, data []byte) e
 	if f.writeErr != nil {
 		return f.writeErr
 	}
-	if f.failPath != "" && strings.HasSuffix(path, f.failPath) {
-		return fmt.Errorf("backend fault writing %s", path)
-	}
 	if f.files == nil {
 		f.files = map[string]string{}
+	}
+	if f.failPath != "" && strings.HasSuffix(path, f.failPath) {
+		for p, c := range f.faultPlants {
+			f.files[p] = c
+		}
+		return fmt.Errorf("backend fault writing %s", path)
 	}
 	f.files[path] = string(data)
 	return nil
@@ -195,7 +273,11 @@ func (f *fakeSandbox) WriteFileStream(ctx context.Context, path string, src io.R
 // by writing the members in order and stopping at the first failure.
 func (f *fakeSandbox) WriteFiles(ctx context.Context, files []sandbox.FileWrite) error {
 	f.bulkSizes = append(f.bulkSizes, len(files))
+	if f.modes == nil {
+		f.modes = map[string]fs.FileMode{}
+	}
 	for _, w := range files {
+		f.modes[w.Path] = w.Mode
 		if err := f.WriteFile(ctx, w.Path, w.Data); err != nil {
 			return err
 		}
