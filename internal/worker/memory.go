@@ -424,6 +424,9 @@ func (m *memoryStores) flushStore(ctx context.Context, st *storeSync, progress f
 		paths = append(paths, p)
 	}
 	sort.Strings(paths)
+	// The uploads are sequential, not the reference's concurrent uploadAll: a
+	// best-effort bounded flush that saves fewer files under a very large
+	// change set is the accepted cost of the simpler pass.
 	pushed := 0
 	for _, p := range paths {
 		progress()
@@ -444,9 +447,15 @@ func (m *memoryStores) flushStore(ctx context.Context, st *storeSync, progress f
 		}
 		outcome, err := m.push(ctx, id, act, st.contents[p])
 		if err != nil {
-			slog.WarnContext(ctx, "memory flush cut off; changed files it had not uploaded are not saved",
+			// A per-file transport error does not forfeit the files behind it —
+			// the reference's uploadAll logs and moves on; only the flush's own
+			// bound stops the pass.
+			slog.WarnContext(ctx, "memory flush: a file did not upload; continuing with the rest",
 				"session_id", m.sessionID, "memory_store_id", id, "path", p, "err", err)
-			return
+			if ctx.Err() != nil {
+				return
+			}
+			continue
 		}
 		switch outcome {
 		case pushOK:

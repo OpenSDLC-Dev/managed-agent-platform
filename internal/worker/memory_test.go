@@ -823,6 +823,10 @@ func TestMemoryFlushRescuesWritesOnAStop(t *testing.T) {
 	// The agent's write, made after the last sync the stop cut the run off
 	// before — the write that is lost without the flush.
 	sb.files[memMount+"/log/rescued.md"] = "keep me"
+	// And a local deletion the push-only flush must NOT propagate: a full sync
+	// would delete /facts/a.md from the store, so this pins push-only rather
+	// than leaning on a full sync never deleting a present, unchanged file.
+	delete(sb.files, memMount+"/facts/a.md")
 
 	// The context the run held is already cancelled by the stop; the flush
 	// must push on its own, detached from it.
@@ -836,7 +840,7 @@ func TestMemoryFlushRescuesWritesOnAStop(t *testing.T) {
 	if got := h.versionsOf(t, memStoreID, "/log/rescued.md"); !equalStrings(got, []string{"created/session_actor"}) {
 		t.Errorf("flushed version = %v, want [created/session_actor]", got)
 	}
-	// Push-only: it does not delete a memory the run removed locally.
+	// Push-only: the local deletion above is not propagated to the store.
 	if _, ok := h.memoryContent(t, memStoreID, "/facts/a.md"); !ok {
 		t.Errorf("the flush deleted a store memory; it must upload only")
 	}
@@ -862,7 +866,14 @@ func TestMemorySyncReportsProgressWithinTheStore(t *testing.T) {
 		t.Fatalf("memoryRefs: %v", err)
 	}
 	mem := newMemoryStores(h.client, token, h.sid.String(), sb, mounts)
-	mem.materialize(context.Background(), func() {})
+
+	// Materialize reports per memory as it lands the three-file listing, so its
+	// count clears the per-store floor of 2 too.
+	matReports := 0
+	mem.materialize(context.Background(), func() { matReports++ })
+	if matReports < 4 {
+		t.Errorf("materialize reported progress %d times; the in-listing report should outrun the per-store floor of 2", matReports)
+	}
 
 	// Two new local files to settle, on top of the three heads to page.
 	sb.files[memMount+"/facts/d.md"] = "delta"
