@@ -114,7 +114,7 @@ func renderMemoryBlock(mounts []memoryMount) string {
 	}
 	oneLine := func(s string) string { return strings.Join(strings.Fields(s), " ") }
 	var b strings.Builder
-	b.WriteString("Memory stores. Each store below is mounted as a directory in your sandbox. Read its files to recall what was saved before; create, edit or delete files there to remember things for later — the platform syncs the directory with the store after each of your tool calls, and other sessions attached to the same store see what you save. A read-only store cannot be changed.\n")
+	b.WriteString("Memory stores. Each store below is mounted as a directory in your sandbox. Read its files to recall what was saved before; create, edit or delete files there to remember things for later — the platform syncs the directory with the store when each of your tool runs ends, and other sessions attached to the same store see what you save. A read-only store takes no writes: a change made there is not saved.\n")
 	for _, m := range mounts {
 		b.WriteString("\n- ")
 		b.WriteString(m.MountPath)

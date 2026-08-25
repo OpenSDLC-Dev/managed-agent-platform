@@ -78,7 +78,7 @@ func TestMemoryBlockInjected(t *testing.T) {
 	}
 	// The block says what the directory cannot: the files persist through the
 	// store, and a read-only store takes no writes.
-	for _, want := range []string{"syncs the directory with the store", "read-only store cannot be changed"} {
+	for _, want := range []string{"syncs the directory with the store when each of your tool runs ends", "read-only store takes no writes"} {
 		if !strings.Contains(sys, want) {
 			t.Errorf("system prompt missing %q:\n%s", want, sys)
 		}

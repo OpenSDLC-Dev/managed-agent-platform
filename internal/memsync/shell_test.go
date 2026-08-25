@@ -162,16 +162,10 @@ func TestRemoveCommandsUnderBash(t *testing.T) {
 
 	// `/a/b/c.md` and `/e.md` go, and `a/b` with them; `a` stays for `a/d.md`.
 	run("/a/b/c.md", "/e.md")
-	for p, want := range map[string]bool{"a/b/c.md": false, "a/b": false, "e.md": true, "a/d.md": true, "a": true} {
-		if want {
-			continue
+	for p, want := range map[string]bool{"a/b/c.md": false, "a/b": false, "e.md": false, "a/d.md": true, "a": true} {
+		if got := exists(filepath.Join(mount, p)); got != want {
+			t.Errorf("%s exists = %v, want %v", p, got, want)
 		}
-		if exists(filepath.Join(mount, p)) {
-			t.Errorf("%s still exists", p)
-		}
-	}
-	if exists(filepath.Join(mount, "e.md")) || !exists(filepath.Join(mount, "a/d.md")) {
-		t.Fatal("the wrong file went")
 	}
 	// The last file under `a` takes `a` with it; the mount and its marker stay.
 	run("/a/d.md")

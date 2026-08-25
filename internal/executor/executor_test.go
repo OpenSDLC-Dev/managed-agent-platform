@@ -22,6 +22,7 @@ import (
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/blob/blobtest"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/events"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/memsync"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/pgtest"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/queue"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/sandbox"
@@ -126,7 +127,7 @@ func (f *fakeSandbox) Exec(_ context.Context, req sandbox.ExecRequest) (sandbox.
 	if mount, ok := hashTreeMount(req.Command); ok {
 		var paths []string
 		for p := range f.files {
-			if strings.HasPrefix(p, mount+"/") && p != mount+"/.anthropic-memory-store" {
+			if strings.HasPrefix(p, mount+"/") && p != mount+"/"+memsync.MarkerName {
 				paths = append(paths, p)
 			}
 		}
@@ -141,6 +142,12 @@ func (f *fakeSandbox) Exec(_ context.Context, req sandbox.ExecRequest) (sandbox.
 		}
 		return sandbox.ExecResult{Stdout: out.String(), Truncated: f.listTruncated}, nil
 	}
+	if strings.Contains(req.Command, "sha256sum -z") {
+		// A listing whose shape the fake no longer recognizes must not fall
+		// through to the exit-0 path below, where it would read as an empty
+		// directory and arm the wipe guard instead of failing the test.
+		return sandbox.ExecResult{}, fmt.Errorf("fake sandbox: unrecognized memory listing %q", req.Command)
+	}
 	if rest, ok := strings.CutPrefix(req.Command, "[ -d '"); ok && strings.Contains(rest, "; rm -f -- ") {
 		// memsync.RemoveCommands: the prelude names the mount, then `rm -f --
 		// 'rel'… || exit 1[; rmdir …]`; the named files go, and the fake has
@@ -148,7 +155,9 @@ func (f *fakeSandbox) Exec(_ context.Context, req sandbox.ExecRequest) (sandbox.
 		mount, list, _ := strings.Cut(rest, "' ] || exit 0; ")
 		_, list, _ = strings.Cut(list, "; rm -f -- ")
 		list, _, _ = strings.Cut(list, " || exit 1")
-		for _, q := range strings.Split(list, " ") {
+		// The tokens are shell-quoted, so the separator is `' '`, not a
+		// space a path may hold.
+		for _, q := range strings.Split(list, "' '") {
 			p := strings.ReplaceAll(strings.TrimSuffix(strings.TrimPrefix(q, "'"), "'"), `'\''`, "'")
 			delete(f.files, mount+"/"+p)
 		}

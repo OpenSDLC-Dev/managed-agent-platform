@@ -3,6 +3,8 @@ package executor
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"io/fs"
 	"slices"
 	"strings"
@@ -10,6 +12,8 @@ import (
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/events"
+	"github.com/jackc/pgx/v5"
+
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/memsync"
 )
 
@@ -76,7 +80,7 @@ func (h *harness) memoryContent(t *testing.T, storeID, path string) (content str
 	err := h.pool.QueryRow(context.Background(),
 		`SELECT content FROM memories WHERE memory_store_id = $1 AND path = $2`, storeID, path).Scan(&content)
 	if err != nil {
-		if strings.Contains(err.Error(), "no rows") {
+		if errors.Is(err, pgx.ErrNoRows) {
 			return "", false
 		}
 		t.Fatalf("read memory %s: %v", path, err)
@@ -481,6 +485,27 @@ func TestMemorySyncRefusals(t *testing.T) {
 	}
 	if sb.files[memMount+"/a/b.md"] != "deep" {
 		t.Errorf("/a/b.md = %q after the conflict", sb.files[memMount+"/a/b.md"])
+	}
+}
+
+// TestMemorySyncSkipsAFloodedListing: more changed files than a store can
+// hold is not a store's directory — bash can plant anything under the mount
+// — so the run reads none of them and skips the store, baseline kept.
+func TestMemorySyncSkipsAFloodedListing(t *testing.T) {
+	h, sb := materialized(t, "read_write")
+	for i := 0; i <= memsync.MaxMemoriesPerStore; i++ {
+		sb.files[fmt.Sprintf("%s/flood/%d.md", memMount, i)] = "x"
+	}
+	sb.files[memMount+"/notes.md"] = "changed too"
+	h.step(t)
+	if _, ok := h.memoryContent(t, memStoreID, "/flood/0.md"); ok {
+		t.Error("a flooded listing was pushed from")
+	}
+	if got, _ := h.memoryContent(t, memStoreID, "/notes.md"); got != "hello" {
+		t.Errorf("/notes.md = %q; the flooded store was not skipped whole", got)
+	}
+	if b := baselineOf(t, sb, memStoreID); b.Synced["/notes.md"] != sha256hex([]byte("hello")) {
+		t.Errorf("the baseline moved under a skipped store: %+v", b.Synced)
 	}
 }
 

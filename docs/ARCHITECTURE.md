@@ -96,7 +96,8 @@ platform's own executor, just deployed elsewhere.
    platform-managed, `user.tool_result` self-hosted). On the platform-managed side the
    run's end also reconciles the session's memory stores with their directories
    (below) — the sandbox read before the transaction that commits the results, the
-   settlement inside it, the sandbox written after.
+   settlement inside it, the sandbox written after; a run that faulted leaves that to
+   the next run or the reaper.
 5. The commit that appends the result also enqueues the next `model_turn` — only once
    every tool use in the turn is answered. A brain claims it (brains wake by polling the
    queue; Postgres LISTEN/NOTIFY serves the SSE fan-out, not the brain), replays, and
@@ -182,13 +183,14 @@ the store's name and its `/mnt/memory/<slug>` mount. On a `cloud` session the ex
 lands the store's memories there before the tools run — `0666` files beside a marker
 naming the store and a baseline recording what the directory and the store agreed on —
 and the brain renders a "Memory stores" block after the repositories block. The
-directory is reconciled with the store when a tool run ends, in three phases the shared
+directory is reconciled with the store when a tool run ends (a faulted run leaves it to
+the next run or the reaper), in three phases the shared
 rules in `internal/memsync` decide: the tree is hashed in the sandbox, the plan settles
 inside the transaction that commits the run (a push is a compare-and-set on the head's
 digest and appends a `session_actor` version; the store wins a both-sides change; an
 emptied directory against a baseline of several files is re-downloaded, never read as
-deletions), and the settlement is written back; a listing that fails skips the store
-rather than reading as deletions. A `read_only` or archived store, or a
+deletions), and the settlement is written back; a listing that fails, or holds more
+changed files than a store can, skips the store rather than reading as deletions. A `read_only` or archived store, or a
 directory whose marker was altered, is pulled from and never pushed to, and the file
 tools refuse to write in a `read_only` or archived store (the marker they never see);
 the reaper syncs a sandbox before every tier's action but the deleted tier's, and a run

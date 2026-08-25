@@ -549,7 +549,18 @@ func WritesFile(path string, class Class) Grader {
 }
 
 func wroteFile(tr *Trial, path string) bool {
+	// A write is a call that succeeded: a `cp` of a missing file names the
+	// path and writes nothing, and its error result is the model's miss.
+	succeeded := map[string]bool{}
+	for _, res := range eventsOfType(tr, "agent.tool_result") {
+		id, _ := res["tool_use_id"].(string)
+		isErr, _ := res["is_error"].(bool)
+		succeeded[id] = !isErr
+	}
 	for _, use := range eventsOfType(tr, "agent.tool_use") {
+		if id, _ := use["id"].(string); !succeeded[id] {
+			continue
+		}
 		input, _ := use["input"].(map[string]any)
 		switch use["name"] {
 		case "write", "edit":

@@ -80,7 +80,8 @@ tool calls as prose in its own markup — the transcript kept is the second, too
   `created_by: {type: session_actor, session_id: <sesn>}` — the run-end sync's push, attributed.
 - The second session, `access: read_only`: `read …/log/today.md` returns the first session's
   content; its `write …/log/today.md` → `is_error: true`, "write: /mnt/memory/project-notes/log/today.md
-  is inside read-only memory store directory /mnt/memory/project-notes", and the store's
+  is inside read-only directory /mnt/memory/project-notes" (the re-record's wording; the
+  b3e2f02 run said "read-only memory store directory"), and the store's
   `memories list` afterwards is unchanged. `sessions list --memory-store-id` → both sessions.
 
 **Evals** (`RUN_EVALS=1`, the same model, in WSL at b3e2f02): `memory-recall` PASS (16.62 s —
@@ -136,7 +137,7 @@ the verifier's verdict was FAIL, on the first item. Fixed in the same PR:
   text is amended: the store's fullness is its state, retried each run.
 - The eval's bash write detector counted a `cat` of the path as a write, blaming the platform for
   a model miss; the read-only refusal wording is the reference's `is inside read-only directory`
-  again (decision 12 promised it verbatim; the transcript above shows the earlier wording); the
+  again (decision 12 promised it verbatim; the transcript above notes the earlier wording); the
   bulk shells' mode pattern admitted a setuid digit and their cleanup `rm -f` lacked `--`; a
   description's newline could forge a bullet in the brain's block; the executor's pool floor is 4
   (the reaper pins two connections mid-sync); a failed removal skipped the metrics.
@@ -174,6 +175,15 @@ NUL byte in an agent-written file is valid UTF-8 that Postgres text refuses, so 
 failed the store's whole savepoint on every later run — `ValidateContent` refuses U+0000
 (inert on the API lane, whose body check already does), so the file is remembered as refused
 by digest and the rest of the store syncs; and the push outcome nothing returned is gone.
+CodeRabbit's pass and a second Claude thread on the last commits added, fixed: the sync a
+run opens with reported no progress to the lease keeper (the caller's callback now); the
+removal command's budget measured the paths unquoted, where an apostrophe is four bytes
+(the quoted token now); the read phase was bounded only by the listing, so a bash-planted
+flood of files could be read whole into memory (at most a store's worth of changed files,
+each read to the content cap, or the store is skipped); the eval's write detector counted a
+failed `cp`; the brain's block said the sync ran after each tool call; the fake sandbox
+spelled the marker and split removals on spaces; a shell test's table asserted one side;
+the mount root was declared twice; and four doc sentences were qualified.
 
 Refuted with evidence: a read-only mount "leaving bash modifications visible" — decision 12's
 pull-only mode stops pushes and nothing claims local edits are reverted; the file-tool guard

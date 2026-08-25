@@ -120,14 +120,20 @@ func RemoveCommands(mount string, paths []string) []string {
 	}
 	for _, p := range paths {
 		rel := strings.TrimPrefix(p, "/")
-		if size+2*len(rel) > removeCommandBytes {
+		// Measured as emitted — the quoted tokens, an apostrophe four bytes
+		// — since the budget bounds the command, not the paths.
+		file, dir := shellQuote(rel), ""
+		if d := path.Dir(rel); d != "." {
+			dir = shellQuote(d)
+		}
+		if size+len(file)+len(dir)+2 > removeCommandBytes {
 			flush()
 		}
-		files = append(files, shellQuote(rel))
-		size += len(rel) + 3
-		if dir := path.Dir(rel); dir != "." && (len(dirs) == 0 || dirs[len(dirs)-1] != shellQuote(dir)) {
-			dirs = append(dirs, shellQuote(dir))
-			size += len(dir) + 3
+		files = append(files, file)
+		size += len(file) + 1
+		if dir != "" && (len(dirs) == 0 || dirs[len(dirs)-1] != dir) {
+			dirs = append(dirs, dir)
+			size += len(dir) + 1
 		}
 	}
 	flush()

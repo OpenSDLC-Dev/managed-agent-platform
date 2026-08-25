@@ -440,7 +440,7 @@ func (e *Executor) process(ctx context.Context, item *queue.Item) (err error) {
 
 	results, ms, faultErr, runErr := e.provisionAndRun(kctx, item, sess, keeper.Progress)
 	// Whatever the paths below decide, the sync's span ends once.
-	defer ms.end()
+	defer ms.end(ctx)
 	if kerr := keeper.Close(); kerr != nil {
 		if !errors.Is(kerr, queue.ErrWorkStalled) {
 			// The lease is gone — another executor may already own this item.
@@ -555,7 +555,7 @@ func (e *Executor) provisionAndRun(ctx context.Context, item *queue.Item, sess s
 	// changes since the last run land now, and what a faulted run wrote
 	// goes up — so a store's change reaches a session at its next run.
 	if existing := e.materializeMemory(ctx, sb, item.SessionID, sess.memories, progress); existing > 0 {
-		if err := e.syncMemoryNow(ctx, sb, item.SessionID, sess.memories); err != nil {
+		if err := e.syncMemoryNow(ctx, sb, item.SessionID, sess.memories, progress); err != nil {
 			slog.WarnContext(ctx, "memory stores not refreshed before the run; the run's end retries",
 				"session_id", item.SessionID, "err", err)
 		}

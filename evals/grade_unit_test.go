@@ -37,8 +37,10 @@ func textBlocks(text string) []any {
 func TestWritesFileBashNeedsAWriteConstruct(t *testing.T) {
 	const path = "/mnt/memory/notes/codename.md"
 	bash := func(cmd string) map[string]any {
-		return map[string]any{"type": "agent.tool_use", "name": "bash", "input": map[string]any{"command": cmd}}
+		return map[string]any{"type": "agent.tool_use", "id": "u1", "name": "bash", "input": map[string]any{"command": cmd}}
 	}
+	// Every call here succeeded; what a failed one counts for is its own test.
+	done := map[string]any{"type": "agent.tool_result", "tool_use_id": "u1", "is_error": false}
 	for cmd, want := range map[string]bool{
 		"cat " + path:                                 false,
 		"ls -l " + path + " && wc -c " + path:         false,
@@ -53,15 +55,15 @@ func TestWritesFileBashNeedsAWriteConstruct(t *testing.T) {
 		"touch " + path:                               true,
 		"cat /tmp/other.md; mv /tmp/other.md " + path: true,
 	} {
-		if got := wroteFile(trialWith([]map[string]any{bash(cmd)}), path); got != want {
+		if got := wroteFile(trialWith([]map[string]any{bash(cmd), done}), path); got != want {
 			t.Errorf("%q counted as a write = %v, want %v", cmd, got, want)
 		}
 	}
-	write := map[string]any{"type": "agent.tool_use", "name": "write", "input": map[string]any{"file_path": path, "content": "x"}}
-	if !wroteFile(trialWith([]map[string]any{write}), path) {
+	write := map[string]any{"type": "agent.tool_use", "id": "u1", "name": "write", "input": map[string]any{"file_path": path, "content": "x"}}
+	if !wroteFile(trialWith([]map[string]any{write, done}), path) {
 		t.Error("a write tool call was not counted")
 	}
-	if wroteFile(trialWith([]map[string]any{write}), "/mnt/memory/notes/other.md") {
+	if wroteFile(trialWith([]map[string]any{write, done}), "/mnt/memory/notes/other.md") {
 		t.Error("a write of another file was counted")
 	}
 }
@@ -1650,5 +1652,31 @@ func TestEveryThreadIdle(t *testing.T) {
 	// not watching the run.
 	if !strings.Contains(err.Error(), "archivist") || !strings.Contains(err.Error(), "sthr_a") {
 		t.Errorf("failure %q names neither the thread nor its agent", err)
+	}
+}
+
+// TestWroteFileNeedsASuccessfulResult: a command that names the path but
+// failed — a `cp` of a missing file — wrote nothing, and so did one whose
+// result never came.
+func TestWroteFileNeedsASuccessfulResult(t *testing.T) {
+	const path = "/mnt/memory/notes/codename.md"
+	use := func(id string) map[string]any {
+		return map[string]any{"type": "agent.tool_use", "id": id, "name": "bash",
+			"input": map[string]any{"command": "cp /tmp/missing " + path}}
+	}
+	result := func(id string, isErr bool) map[string]any {
+		return map[string]any{"type": "agent.tool_result", "tool_use_id": id, "is_error": isErr}
+	}
+	for name, tc := range map[string]struct {
+		events []map[string]any
+		want   bool
+	}{
+		"succeeded":  {[]map[string]any{use("u1"), result("u1", false)}, true},
+		"failed":     {[]map[string]any{use("u1"), result("u1", true)}, false},
+		"unanswered": {[]map[string]any{use("u1")}, false},
+	} {
+		if got := wroteFile(&Trial{Events: tc.events}, path); got != tc.want {
+			t.Errorf("%s: wroteFile = %v, want %v", name, got, tc.want)
+		}
 	}
 }

@@ -76,6 +76,24 @@ func TestHashTreeCommand(t *testing.T) {
 // command while it fits; a mount's worth of the longest paths is several
 // commands, each well under the shell's single-argument cap, together
 // naming every path once.
+// TestRemoveCommandsBudgetIsTheQuotedCommand: a path's apostrophes are four
+// bytes each once quoted, and the budget bounds the command as emitted.
+func TestRemoveCommandsBudgetIsTheQuotedCommand(t *testing.T) {
+	var paths []string
+	for i := 0; i < 400; i++ {
+		paths = append(paths, fmt.Sprintf("/q/%d-%s.md", i, strings.Repeat("'", 250)))
+	}
+	cmds := memsync.RemoveCommands("/mnt/memory/notes", paths)
+	if len(cmds) < 2 {
+		t.Fatalf("%d commands for %d paths of 1,000 quoted bytes", len(cmds), len(paths))
+	}
+	for _, cmd := range cmds {
+		if len(cmd) > 48<<10 {
+			t.Errorf("a command of %d bytes; the budget measured the paths unquoted", len(cmd))
+		}
+	}
+}
+
 func TestRemoveCommands(t *testing.T) {
 	got := memsync.RemoveCommands("/mnt/memory/notes", []string{"/a/b.md", "/c.md", "/a/d/e.md"})
 	const prelude = `[ -d '/mnt/memory/notes' ] || exit 0; cd -P '/mnt/memory/notes' && [ "$PWD" = '/mnt/memory/notes' ] || exit 1; `

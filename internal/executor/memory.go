@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"path"
 	"sort"
@@ -22,6 +23,7 @@ import (
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/memsync"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/sandbox"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/toolset"
 )
 
 // This file is the platform-managed half of memory stores (plan 36 slice 4,
@@ -43,10 +45,6 @@ type memoryRef struct {
 }
 
 const (
-	// memoryMountRoot is where every store mounts (decision 8); the API keeps
-	// repository mounts out of it, and the file tools refuse a write under it
-	// that is inside no store (toolset.Runner.MemoryRoots).
-	memoryMountRoot = "/mnt/memory"
 	// memorySyncDir holds one baseline file per store, beside the mounts
 	// rather than inside them so it is never a memory and never hashed.
 	memorySyncDir = "/mnt/memory/.sync"
@@ -67,7 +65,7 @@ func baselinePath(storeID string) string { return path.Join(memorySyncDir, store
 func memoryMounts(refs []memoryRef) []memoryRef {
 	mounts := make([]memoryRef, 0, len(refs))
 	for _, r := range refs {
-		if r.Type == "memory_store" && r.MemoryStoreID != "" && strings.HasPrefix(r.MountPath, memoryMountRoot+"/") {
+		if r.Type == "memory_store" && r.MemoryStoreID != "" && strings.HasPrefix(r.MountPath, toolset.MemoryMountRoot+"/") {
 			mounts = append(mounts, r)
 		}
 	}
@@ -332,11 +330,25 @@ func (e *Executor) readStore(ctx context.Context, sb sandbox.Sandbox, st *storeS
 		st.baseline, _ = memsync.DecodeBaseline(nil)
 	}
 	st.contents = map[string][]byte{}
+	changed := 0
+	for p, sha := range st.local {
+		if st.baseline.Synced[p] != sha && st.baseline.Refused[p] != sha {
+			changed++
+		}
+	}
+	// What this reads is bounded by the store's own shape — at most a
+	// store's worth of changed files, each read up to the content cap and
+	// no further — not by what bash could plant under the mount: a listing
+	// with more changed files than a store holds is not a store's directory,
+	// and is skipped this run like a listing that failed.
+	if changed > memsync.MaxMemoriesPerStore {
+		return fmt.Errorf("%d changed files, more than a store holds", changed)
+	}
 	for p, sha := range st.local {
 		if st.baseline.Synced[p] == sha || st.baseline.Refused[p] == sha {
 			continue
 		}
-		data, err := sb.ReadFile(ctx, mount+p)
+		data, err := readCapped(ctx, sb, mount+p, memsync.MaxContentBytes)
 		if errors.Is(err, sandbox.ErrFileTooLarge) {
 			st.baseline.Refused[p] = sha
 			continue
@@ -358,6 +370,17 @@ func (e *Executor) readStore(ctx context.Context, sb sandbox.Sandbox, st *storeS
 		st.contents[p] = data
 	}
 	return nil
+}
+
+// readCapped reads a file of at most maxBytes, ErrFileTooLarge past that —
+// so a file the content cap will refuse is never read in full.
+func readCapped(ctx context.Context, sb sandbox.Sandbox, p string, maxBytes int64) ([]byte, error) {
+	rc, _, err := sb.ReadFileStream(ctx, p, maxBytes)
+	if err != nil {
+		return nil, err
+	}
+	defer rc.Close()
+	return io.ReadAll(rc)
 }
 
 func sha256hex(data []byte) string {
@@ -649,7 +672,7 @@ func (e *Executor) applyMemory(ctx context.Context, ms *memorySync) {
 	if ms == nil {
 		return
 	}
-	defer ms.end()
+	defer ms.end(ctx)
 	for _, st := range ms.stores {
 		if st.skipped {
 			continue
@@ -697,7 +720,7 @@ func (e *Executor) applyMemory(ctx context.Context, ms *memorySync) {
 
 // end closes the sync's span and records its duration, once, whichever phase
 // the sync got to.
-func (ms *memorySync) end() {
+func (ms *memorySync) end(ctx context.Context) {
 	if ms == nil || ms.ended {
 		return
 	}
@@ -717,7 +740,7 @@ func (ms *memorySync) end() {
 		attribute.Int("memory.pulled", c.pulled), attribute.Int("memory.pushed", c.pushed),
 		attribute.Int("memory.deleted", c.deleted), attribute.Int("memory.conflict", c.conflict),
 		attribute.Int("memory.refused", c.refused))
-	recordMemorySyncDuration(context.Background(), time.Since(ms.start))
+	recordMemorySyncDuration(ctx, time.Since(ms.start))
 	ms.span.End()
 }
 
@@ -739,7 +762,7 @@ func (e *Executor) syncMemoryStandalone(ctx context.Context, sb sandbox.Sandbox,
 	if err := json.Unmarshal(resourcesJSON, &refs); err != nil {
 		return err
 	}
-	return e.syncMemoryNow(ctx, sb, sid, refs)
+	return e.syncMemoryNow(ctx, sb, sid, refs, func() {})
 }
 
 // syncMemoryNow runs the three phases in their own transaction, which takes
@@ -748,12 +771,12 @@ func (e *Executor) syncMemoryStandalone(ctx context.Context, sb sandbox.Sandbox,
 // store's change reaches a session at its next run rather than the one
 // after (scope decision 7), and a run that faulted before its sync pushes
 // what it wrote at the next.
-func (e *Executor) syncMemoryNow(ctx context.Context, sb sandbox.Sandbox, sid domain.ID, refs []memoryRef) error {
-	ms := e.readMemory(ctx, sb, sid, refs, func() {})
+func (e *Executor) syncMemoryNow(ctx context.Context, sb sandbox.Sandbox, sid domain.ID, refs []memoryRef, progress func()) error {
+	ms := e.readMemory(ctx, sb, sid, refs, progress)
 	if ms == nil {
 		return nil
 	}
-	defer ms.end()
+	defer ms.end(ctx)
 	tx, err := e.pool.Begin(ctx)
 	if err != nil {
 		return err

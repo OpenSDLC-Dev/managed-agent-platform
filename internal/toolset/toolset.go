@@ -254,9 +254,10 @@ func (r Runner) resolve(p string) string {
 	return path.Join(r.workdir(), p)
 }
 
-// memoryMountRoot is where memory stores mount (plan 36 decision 8), the tree
-// the roots above carve up.
-const memoryMountRoot = "/mnt/memory"
+// MemoryMountRoot is where memory stores mount (plan 36 decision 8), the tree
+// the roots above carve up; the executor mounts under it, and the API keeps
+// repository mounts out of it.
+const MemoryMountRoot = "/mnt/memory"
 
 // unwritable says why a resolved path may not be written by the file tools —
 // the read-only store it is inside, or the reserved tree it is loose in — or
@@ -272,7 +273,7 @@ func (r Runner) unwritable(display, resolved string) string {
 			return fmt.Sprintf("%s is inside read-only directory %s", display, root)
 		}
 	}
-	if !under(resolved, memoryMountRoot) {
+	if !under(resolved, MemoryMountRoot) {
 		return ""
 	}
 	for _, root := range r.MemoryRoots {
@@ -280,7 +281,7 @@ func (r Runner) unwritable(display, resolved string) string {
 			return ""
 		}
 	}
-	return fmt.Sprintf("%s is under %s, which holds only mounted memory stores; nothing is mounted at that path", display, memoryMountRoot)
+	return fmt.Sprintf("%s is under %s, which holds only mounted memory stores; nothing is mounted at that path", display, MemoryMountRoot)
 }
 
 func under(p, root string) bool {
