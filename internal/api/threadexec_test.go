@@ -547,9 +547,9 @@ func TestWorkPollFinalizesAnAbandonedStopAndReArms(t *testing.T) {
 		t.Fatalf("heartbeat: %d %s", res.StatusCode, raw)
 	}
 	wantNoContent(t, s, get+"/stop", key, nil) // graceful: stopping
-	// The worker dies mid-wind-down: its lease lapses.
+	// The worker dies mid-wind-down: its lease lapses, and queue.WindDown passes.
 	if _, err := s.pool.Exec(context.Background(),
-		`UPDATE work_items SET lease_expires_at = now() - interval '1 second' WHERE id = $1`, workID); err != nil {
+		`UPDATE work_items SET lease_expires_at = now() - interval '1 second', stop_requested_at = now() - interval '61 seconds' WHERE id = $1`, workID); err != nil {
 		t.Fatal(err)
 	}
 

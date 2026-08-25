@@ -333,7 +333,9 @@ func (q *Queue) Claim(ctx context.Context, kind Kind, ttl time.Duration) (*Item,
 // it, so the poll settles it terminally (→ stopped, stopped_at stamped, lease
 // cleared) instead of leaving it non-terminal forever (#25). Such an item always
 // carries a lease to lapse, because a graceful stop only enters stopping from
-// active (see Stop) — the null-lease arm is not for it, but for the one row the
+// active (see Stop); the lapse counts only once WindDown has passed since the
+// request, a live worker having stopped heartbeating the moment it learned of
+// the stop. The null-lease arm is not for it, but for the one row the
 // new state machine does not write: during a rolling upgrade a not-yet-upgraded
 // replica can still park a never-polled queued item, which has no lease at all,
 // in stopping. Migration 0014 finalizes the ones written before the upgrade;
@@ -377,7 +379,14 @@ func (q *Queue) Claim(ctx context.Context, kind Kind, ttl time.Duration) (*Item,
 // kind, so an item a worker has polled is never also run by the executor even
 // if an environment key were misconfigured against a cloud environment.
 func (q *Queue) Poll(ctx context.Context, envID domain.ID, reclaim time.Duration) (*Work, error) {
-	w, err := scanWork(q.pool.QueryRow(ctx,
+	return q.PollOn(ctx, q.pool, envID, reclaim)
+}
+
+// PollOn is Poll on db — a transaction, when the claim must commit together
+// with a row that depends on it (the work API's sessions token, plan 36
+// decision 15), or the pool. The statement is Poll's, unchanged.
+func (q *Queue) PollOn(ctx context.Context, db DB, envID domain.ID, reclaim time.Duration) (*Work, error) {
+	w, err := scanWork(db.QueryRow(ctx,
 		`WITH picked AS (
 		    SELECT w.id AS pid FROM work_items w
 		    JOIN environments e ON e.id = w.environment_id
@@ -412,8 +421,23 @@ func (q *Queue) Poll(ctx context.Context, envID domain.ID, reclaim time.Duration
 	return w, nil
 }
 
+// WindDown is what a stopped item's worker gets to finish: a graceful stop's
+// wind-down and, for the reference worker, the memory flush that follows a
+// stop it learns of at its next heartbeat (up to half the 30 s TTL, then one
+// flush pass bounded at 30 s — 45 s of the 60). A stopping item is settled
+// as abandoned only once its lease lapsed AND this has passed since the stop
+// was requested: a live worker stops heartbeating the moment it learns of
+// the stop, so the lapse alone proves nothing inside the window. The
+// sessions token (internal/worktoken) lives exactly this long past the
+// request, so no settlement re-arms a session while its token still works.
+// The cost: a session whose worker died mid-wind-down waits this long to be
+// re-armed, where the lease lapse alone would have done in half the time; a
+// death mid-run is still reclaimed by Poll at lease expiry.
+const WindDown = 60 * time.Second
+
 // AbandonedWork names one abandoned wind-down — a stopping tool_exec item
-// whose lease lapsed or never existed (see Poll) — and the session it served.
+// whose lease lapsed past WindDown, or never existed (see Poll) — and the
+// session it served.
 type AbandonedWork struct {
 	ID        domain.ID
 	SessionID domain.ID
@@ -429,8 +453,10 @@ func (q *Queue) ListAbandoned(ctx context.Context, envID domain.ID) ([]Abandoned
 		`SELECT id, session_id FROM work_items
 		 WHERE environment_id = $1 AND kind = 'tool_exec'
 		   AND state = 'stopping'
-		   AND (lease_expires_at IS NULL OR lease_expires_at < now())
-		 LIMIT 50`, envID)
+		   AND (lease_expires_at IS NULL
+		        OR lease_expires_at < now()
+		           AND (stop_requested_at IS NULL OR stop_requested_at < now() - make_interval(secs => $2)))
+		 LIMIT 50`, envID, WindDown.Seconds())
 	if err != nil {
 		return nil, fmt.Errorf("queue: list abandoned %s: %w", envID, err)
 	}
@@ -464,8 +490,10 @@ func (q *Queue) FinalizeAbandoned(ctx context.Context, db DB, envID, workID doma
 		     updated_at       = now()
 		 WHERE id = $1 AND environment_id = $2 AND kind = 'tool_exec'
 		   AND state = 'stopping'
-		   AND (lease_expires_at IS NULL OR lease_expires_at < now())`,
-		workID, envID)
+		   AND (lease_expires_at IS NULL
+		        OR lease_expires_at < now()
+		           AND (stop_requested_at IS NULL OR stop_requested_at < now() - make_interval(secs => $3)))`,
+		workID, envID, WindDown.Seconds())
 	if err != nil {
 		return false, fmt.Errorf("queue: finalize abandoned %s: %w", workID, err)
 	}

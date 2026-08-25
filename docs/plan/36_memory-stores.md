@@ -617,7 +617,12 @@ the machine lane, a `principal_` id on the identity lane. Next migration `0028`
     conditions rather than events — a token authenticates only while `work_items.id =
     work_id` (a re-hand-out changed it), `lease_expires_at > now()`, `state <> 'stopped'`
     (the queue's states are `queued|starting|active|stopping|stopped`; ack is the entry
-    transition, so nothing is revoked on ack) and the session is unarchived. A new lane
+    transition, so nothing is revoked on ack) and the session is unarchived — as landed,
+    the lease condition holds while the item runs, and once it is stopping or stopped the
+    token lives `queue.WindDown` (60 s) from `stop_requested_at`, the window the reference
+    worker's wind-down and post-stop memory flush need, with the queue settling an
+    abandoned wind-down only past that same window (the slice's review rounds,
+    docs/HISTORY.md). A new lane
     middleware resolves a `wtk_` bearer to `(work_id, session_id, environment_id)` and
     admits it where the v1.66.0 worker sends it: `POST …/work/{work_id}/heartbeat|stop`
     for its own item, `GET /v1/sessions/{id}` and the session's events list/stream/send

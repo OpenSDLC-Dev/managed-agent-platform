@@ -110,6 +110,7 @@ const (
 	ctxKeyEnvironment // the environment a worker's Bearer key is scoped to
 	ctxKeySession     // the session a gate's Bearer token is scoped to
 	ctxKeyIdentity    // the verified human a request authenticated as (plan 31)
+	ctxKeyWorkSession // the session a worker's sessions token is scoped to (plan 36)
 )
 
 func requestIDFrom(ctx context.Context) string {

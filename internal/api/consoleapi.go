@@ -288,10 +288,12 @@ func (s *server) revokeEnvironmentKey(r *http.Request) error {
 	return nil
 }
 
-// noStore forbids caching the response of the one route that hands back a
-// credential. RFC 6749 §5.1 requires it of a token response, and this body is
-// the plaintext's only appearance anywhere — a console BFF or reverse proxy
-// with response retention on must not be the thing that keeps a second copy.
+// noStore forbids caching the response of a route that hands back a
+// credential — the console's key issuance, and the work poll whose `secret`
+// carries a sessions token. RFC 6749 §5.1 requires it of a token response,
+// and this body is the plaintext's only appearance anywhere — a console BFF
+// or reverse proxy with response retention on must not be the thing that
+// keeps a second copy.
 // The headers go on before the handler runs, so they are present whatever the
 // outcome: a rejected request carries no secret, but a header set only on the
 // success path is a header someone eventually gets wrong.

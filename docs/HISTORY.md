@@ -49,6 +49,76 @@ new directory and in-repo citations re-pointed in the moving PR (plan
 
 ---
 
+## The sessions token — review-hardening record (plan 36 slice 5, #491, 2026-08-25)
+
+No CLI acceptance of its own: the lane is reachable only through the test seam until slice 6
+lifts the `self_hosted` attachment refusal, and the v1.66.0 reference worker's `HandleItem`
+runs against the in-process server in `internal/api/worktokensdk_test.go` instead. The
+verifier at 0ad97c5 (build, vet, fmt, 724 targeted runs green, three of four mutants red, the
+matrix driven with curl against a built `controlplane`) read PASS with notes.
+
+**Review round** (every finding verified against the source before acting):
+- *The Claude reviewer (Opus 5) and the verifier* — the lane admitted the store's own read and
+  its versions' list/get, and the comment and the registry attributed them to the worker,
+  which calls neither (`git grep "Beta.MemoryStores"` at v1.66.0: five sites, all
+  `.Memories.`). Narrowed to those five; a store's history and its actors stay the
+  management key's to read.
+- *Claude reviewer* — a session-wide interrupt (`CancelSession`: `stopped`, lease null) killed
+  the token before the reference worker's post-stop flush (`Cleanup` → `FlushWrites`, 30 s on a
+  context of its own), losing every edit since the last 15 s sync — and unlike `cloud`, whose
+  held sandbox is synced at the next run's start, a BYOC workdir is removed at the item's end.
+  Fixed as a join condition, not a column: a stopping or stopped item's token lives a minute
+  past the stop's request. The Codex reviewer's reading of the same conditions — `stopping`
+  keeping the whole matrix — is by design (the wind-down rides the token), now said so and
+  pinned.
+- *Claude reviewer* — registry and ARCHITECTURE defects, all reworded: "narrower than the key
+  that polled it" (false on the memories), the SDK quote missing its "may be", the reversal
+  record the rewrite dropped, and a tracker sentence claiming recording item 10 covers the
+  environment key's status on a memory route, which the plan classes as the unrecordable
+  kind. Also: the attachment probe's `ErrNoRows` on a session deleted since `Authenticate`
+  (coalesced to the 404), `Cache-Control: no-store` on the poll as on the two console
+  issuance routes, and the refusal loop widened (redact, versions, escaped paths).
+- *Codex reviewer (gpt-5.6-sol, xhigh)* — two findings evaluated and rejected: an events
+  stream open when the token dies runs to its end (true of every credential here — a stream
+  authenticates at its open — and the holder polled with an environment key that reads every
+  session's events in the environment anyway); a request authenticated at its open completes,
+  its lock waits included — the policy for every credential here, so the docs say the token
+  ends for every request after, not "at once".
+- *Verifier* — the SDK test spent its whole 30 s deadline because no turn ends without a
+  brain; an idle end_turn planted once the stream is up ends it through the runner's
+  `MaxIdle` within seconds.
+- *Claude reviewer, second pass* — the grace introduced one edge: the settlement of an
+  abandoned wind-down (`FinalizeAbandoned`, a `stopping` item whose lease lapsed) stamps
+  `stopped_at`, and the presumed-dead worker's token could run on into the minute in which
+  the session is re-armed for another. First closed by a revoke in the settlement; then,
+  when the Codex reviewer's third pass showed that settlement fires on a healthy flush too
+  (the frozen lease lapses 15–30 s after a graceful stop, the flush runs to 45 s), by the
+  queue itself: a wind-down is abandoned only once its lease lapsed *and* `queue.WindDown`
+  has passed since the request — the one constant the token's window reads too — so no
+  delete is needed. The heartbeat renewal that carries a token through a long run is
+  pinned. The Codex rejections were judged sound on the code; `read_only` at the hands
+  accepted as design.
+- *Codex reviewer, second pass* — a grace counted from `stopped_at` left a graceful wind-down
+  on its frozen lease (the worker learns of the stop half a TTL later — 15 s for a 30 s
+  flush) and let a late settlement restart the clock; it is counted from
+  `stop_requested_at` now, for a stopping or stopped item alike, 45 s of the 60 spoken for.
+  Also: a `memories/` trailing slash the lane admitted to the mux's 404 is refused; the
+  SDK test plants its idle event until the worker returns (its third pass: a failed plant
+  ends the run at once and is reported first, and the wall-clock assertion it called
+  flaky under load is gone — the run context's 30 s deadline is a deadline, not a
+  wall-clock bound: the worker's deferred force-stop still gets a context of its own);
+  the registry's reading (1) no longer overreads the SDK's "may be".
+- *Codex reviewer, fourth pass; the verifier's final run* — the settlement race closed, the
+  window's length pinned at 45 s alive and 61 s dead on both sides (a 30 s mutant had
+  survived), `FinalizeAbandoned`'s own re-check of the window pinned, decision 15's text
+  annotated as landed. One design point carried into slice 6 rather than settled here:
+  the enqueue dedup (`WHERE state IN ('queued', 'starting', 'active')`) lets a send
+  trigger enqueue a replacement exec item while one is `stopping`, so a second worker
+  can run — and, once slice 6 lands, sync memory — while the first's token still flushes.
+  Pre-existing for tool runs since plan 35, and for memory bounded by the sync's sha
+  preconditions; whether `stopping` should bar replacements for `WindDown` is slice 6's
+  call, with the reference worker's own semantics in view.
+
 ## Memory stores end to end — real `ant` CLI, real model, a `cloud` sandbox (plan 36 slice 4, run 2026-08-25) — ✅ passed
 
 The plan's "End-to-end acceptance" names the cloud half slice 4 records: a store with a

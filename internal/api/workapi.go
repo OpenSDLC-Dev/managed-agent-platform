@@ -13,6 +13,7 @@ import (
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/events"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/queue"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/worktoken"
 	"github.com/jackc/pgx/v5"
 )
 
@@ -54,8 +55,11 @@ type workWire struct {
 	LatestHeartbeatAt *time.Time        `json:"latest_heartbeat_at"`
 	Metadata          map[string]string `json:"metadata"`
 	// Secret is the reference's credential payload for the worker to execute the
-	// item with. It is always null here: injecting credentials needs vaults, which
-	// v1 does not implement (#50).
+	// item with: on the poll response of an item whose session attaches a
+	// memory store, the sessions token in the envelope the reference worker
+	// decodes (internal/worktoken); null on every other retrieval path, and for
+	// every other item (plan 36 decision 15). #165's vault-credential bundle
+	// would be a second key in the same envelope.
 	Secret          *string    `json:"secret"`
 	StartedAt       *time.Time `json:"started_at"`
 	State           string     `json:"state"`
@@ -85,6 +89,44 @@ func toWire(w *queue.Work) workWire {
 		StoppedAt:         utcPtr(w.StoppedAt),
 		Type:              "work",
 	}
+}
+
+// claimWork is the poll's claim: Poll's statement and, for an item whose
+// session attaches a memory store, the sessions token's row, in one
+// transaction — an item is never leased without the credential its worker
+// needs, and a token insert that fails leaves the item unclaimed for the
+// next poll (plan 36 decision 15). The rendered secret comes back beside the
+// item; nil for a storeless session, whose item is what it was before the
+// plan, byte for byte.
+func (s *server) claimWork(ctx context.Context, envID domain.ID, reclaim time.Duration) (*queue.Work, *string, error) {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	item, err := s.queue.PollOn(ctx, tx, envID, reclaim)
+	if err != nil || item == nil {
+		return nil, nil, err
+	}
+	var withStore bool
+	if err := tx.QueryRow(ctx,
+		`SELECT resources @> '[{"type": "memory_store"}]'::jsonb FROM sessions WHERE id = $1`,
+		item.SessionID.String()).Scan(&withStore); err != nil {
+		return nil, nil, err
+	}
+	var secret *string
+	if withStore {
+		token, err := worktoken.Mint(ctx, tx, item.ID.String(), item.SessionID.String())
+		if err != nil {
+			return nil, nil, err
+		}
+		rendered := worktoken.Secret(token)
+		secret = &rendered
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, nil, err
+	}
+	return item, secret, nil
 }
 
 // pollWork is the wire work API's long poll (GET .../work/poll). It hands the
@@ -154,7 +196,7 @@ func (s *server) pollWork(w http.ResponseWriter, r *http.Request) {
 		if err := s.finalizeAbandoned(r.Context(), envID); err != nil {
 			slog.WarnContext(r.Context(), "finalize abandoned wind-downs", "environment", envID, "error", err)
 		}
-		item, err := s.queue.Poll(r.Context(), envID, reclaim)
+		item, secret, err := s.claimWork(r.Context(), envID, reclaim)
 		if err != nil {
 			writeError(w, r, err)
 			return
@@ -166,7 +208,9 @@ func (s *server) pollWork(w http.ResponseWriter, r *http.Request) {
 			for k, v := range item.TraceContext {
 				w.Header().Set(k, v)
 			}
-			writeJSON(w, http.StatusOK, toWire(item))
+			wire := toWire(item)
+			wire.Secret = secret
+			writeJSON(w, http.StatusOK, wire)
 			return
 		}
 		remaining := time.Until(deadline)

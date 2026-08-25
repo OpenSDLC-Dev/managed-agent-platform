@@ -224,8 +224,8 @@ func NewHandler(pool *pgxpool.Pool, blobs blob.Store, cipher secrets.Cipher, ver
 	// redirect. Splitting the routes across nested muxes let those redirects
 	// answer an unauthenticated request before auth ran.
 	mux.HandleFunc("GET /v1/environments/{id}/work", s.handle(identity.RoleNone, s.listWork))
-	mux.HandleFunc("GET /v1/environments/{id}/work/poll", roleGate(identity.RoleNone, s.pollWork))   // emits trace headers; not a typed handler
-	mux.HandleFunc("GET /v1/environments/{id}/work/stats", s.handle(identity.RoleNone, s.statsWork)) // literal segment beats {work_id}
+	mux.HandleFunc("GET /v1/environments/{id}/work/poll", noStore(roleGate(identity.RoleNone, s.pollWork))) // emits trace headers; not a typed handler
+	mux.HandleFunc("GET /v1/environments/{id}/work/stats", s.handle(identity.RoleNone, s.statsWork))        // literal segment beats {work_id}
 	mux.HandleFunc("GET /v1/environments/{id}/work/{work_id}", s.handle(identity.RoleNone, s.getWork))
 	mux.HandleFunc("POST /v1/environments/{id}/work/{work_id}", s.handle(identity.RoleNone, s.updateWork)) // metadata patch
 	mux.HandleFunc("POST /v1/environments/{id}/work/{work_id}/ack", s.handle(identity.RoleNone, s.ackWork))
@@ -264,6 +264,7 @@ func NewHandler(pool *pgxpool.Pool, blobs blob.Store, cipher secrets.Cipher, ver
 // management x-api-key); everything else takes the management x-api-key.
 func dispatchAuth(pool *pgxpool.Pool, v *identity.Verifier, next http.Handler) http.Handler {
 	work := requireEnvironmentKey(pool, next)
+	workToken := requireWorkToken(pool, next)
 	mgmt := dispatchManagementAuth(pool, v, next)
 	gate := requireGateToken(pool, next)
 	// Built once and shared by every lane that can reach a human: the verifier
@@ -305,6 +306,11 @@ func dispatchAuth(pool *pgxpool.Pool, v *identity.Verifier, next http.Handler) h
 		// empty session id — not this dispatcher.
 		p := r.URL.EscapedPath()
 		switch {
+		case isWorkTokenBearer(r) && isWorkTokenPath(r, p):
+			// A worker's sessions token, on the families it can reach at all
+			// (worktokenauth.go); first, because its wtk_ shape is what no
+			// other credential carries, so nothing else is misrouted.
+			workToken.ServeHTTP(w, r)
 		case isWorkPath(p):
 			work.ServeHTTP(w, r)
 		case isGateConfigPath(p):

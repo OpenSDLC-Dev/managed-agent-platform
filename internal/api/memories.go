@@ -107,10 +107,15 @@ func contentDigest(content string) string {
 // under the reference's own actor union: a machine key writes as api_actor
 // carrying the key's row id, a human as user_actor carrying their principal id
 // (the reference's user_ ids are its Console's; ours are principal_, and the
-// difference is registered). session_actor is slice 4's, for a write that
-// arrives through a mounted store; service_account_actor is never emitted.
-// Nil when nothing authenticated the write, which the wire renders as null.
+// difference is registered). session_actor is a write that arrives through
+// a session — the executor's sync (slice 4) and, here, a BYOC worker writing
+// with its sessions token (slice 5), attributed to the session the token is
+// scoped to; service_account_actor is never emitted. Nil when nothing
+// authenticated the write, which the wire renders as null.
 func memoryActor(ctx context.Context) map[string]string {
+	if sid := workSessionFrom(ctx); sid != "" {
+		return map[string]string{"type": "session_actor", "session_id": sid}
+	}
 	if id, _ := ctx.Value(ctxKeyPrincipal).(string); id != "" {
 		return map[string]string{"type": "api_actor", "api_key_id": id}
 	}
