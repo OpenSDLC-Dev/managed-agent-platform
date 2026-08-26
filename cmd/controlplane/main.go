@@ -190,6 +190,14 @@ func run(ctx context.Context) error {
 		ReadTimeout:       time.Minute,
 		IdleTimeout:       2 * time.Minute,
 	}
+	// Memory-version retention (#476): the only background sweep this binary
+	// runs. It is hosted here because this process already holds the pool and
+	// serves every memory route, and because a deployment whose environments
+	// are all self_hosted runs no executor to put it in. Its statement is
+	// idempotent, so a second replica costs a duplicate query and never a
+	// wrong answer; it ends with ctx.
+	go api.StartMemoryRetention(ctx, pool)
+
 	errCh := make(chan error, 1)
 	go func() { errCh <- srv.ListenAndServe() }()
 	slog.Info("controlplane listening", "addr", addr, "version", version.Version)
