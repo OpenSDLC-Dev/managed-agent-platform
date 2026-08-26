@@ -19,51 +19,64 @@ import (
 // recording with every other memory test still green, because none of them
 // reads a meter.
 
+// memoryMetrics is one collection: each counter's points summed by its own
+// attribute, kept apart by instrument so a future action named like an outcome
+// cannot merge the two, and how many histogram points each duration instrument
+// holds.
+type memoryMetrics struct {
+	outcomes  map[string]int64 // memory.materialized, by outcome
+	actions   map[string]int64 // memory.sync.actions, by action
+	durations map[string]int   // point counts, keyed by instrument name
+}
+
 // memoryMeter installs a manual reader for one test and answers with the
-// collector: the counter's points summed by their one attribute, and how many
-// histogram points each duration instrument holds.
-func memoryMeter(t *testing.T) func(t *testing.T) (counts map[string]int64, durations map[string]int) {
+// collector.
+func memoryMeter(t *testing.T) func() memoryMetrics {
 	t.Helper()
 	reader := sdkmetric.NewManualReader()
 	prev := otel.GetMeterProvider()
 	otel.SetMeterProvider(sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader)))
 	t.Cleanup(func() { otel.SetMeterProvider(prev) })
 
-	return func(t *testing.T) (map[string]int64, map[string]int) {
+	sumBy := func(m metricdata.Metrics, key attribute.Key) map[string]int64 {
+		t.Helper()
+		sum, ok := m.Data.(metricdata.Sum[int64])
+		if !ok {
+			t.Fatalf("%s is %T, want an int64 sum", m.Name, m.Data)
+		}
+		out := map[string]int64{}
+		for _, p := range sum.DataPoints {
+			if v, ok := p.Attributes.Value(key); ok {
+				out[v.AsString()] += p.Value
+			}
+		}
+		return out
+	}
+
+	return func() memoryMetrics {
 		t.Helper()
 		var rm metricdata.ResourceMetrics
 		if err := reader.Collect(context.Background(), &rm); err != nil {
 			t.Fatalf("collect: %v", err)
 		}
-		counts, durations := map[string]int64{}, map[string]int{}
+		got := memoryMetrics{outcomes: map[string]int64{}, actions: map[string]int64{}, durations: map[string]int{}}
 		for _, sm := range rm.ScopeMetrics {
 			for _, m := range sm.Metrics {
 				switch m.Name {
-				case MetricMemoryMaterialized, MetricMemorySyncActions:
-					sum, ok := m.Data.(metricdata.Sum[int64])
-					if !ok {
-						t.Fatalf("%s is %T, want an int64 sum", m.Name, m.Data)
-					}
-					// One attribute each — outcome on the materialize
-					// counter, action on the sync one — so the key needs no
-					// instrument prefix and the two never collide.
-					for _, p := range sum.DataPoints {
-						for _, key := range []attribute.Key{"outcome", "action"} {
-							if v, ok := p.Attributes.Value(key); ok {
-								counts[v.AsString()] += p.Value
-							}
-						}
-					}
+				case MetricMemoryMaterialized:
+					got.outcomes = sumBy(m, "outcome")
+				case MetricMemorySyncActions:
+					got.actions = sumBy(m, "action")
 				case MetricMemoryMaterializeDuration, MetricMemorySyncDuration:
 					hist, ok := m.Data.(metricdata.Histogram[float64])
 					if !ok {
 						t.Fatalf("%s is %T, want a float64 histogram", m.Name, m.Data)
 					}
-					durations[m.Name] = len(hist.DataPoints)
+					got.durations[m.Name] = len(hist.DataPoints)
 				}
 			}
 		}
-		return counts, durations
+		return got
 	}
 }
 
@@ -92,18 +105,18 @@ func TestMemoryMaterializeMetrics(t *testing.T) {
 	}
 	h.step(t)
 
-	counts, durations := collect(t)
-	if counts[memoryOutcomeOK] != 1 || counts[memoryOutcomeNotFound] != 1 {
-		t.Errorf("outcome counts = %v, want one ok and one not_found", counts)
+	got := collect()
+	if got.outcomes[memoryOutcomeOK] != 1 || got.outcomes[memoryOutcomeNotFound] != 1 {
+		t.Errorf("outcome counts = %v, want one ok and one not_found", got.outcomes)
 	}
-	if durations[MetricMemoryMaterializeDuration] == 0 {
+	if got.durations[MetricMemoryMaterializeDuration] == 0 {
 		t.Error("no memory-materialize-duration point recorded")
 	}
 
 	h.step(t)
-	counts, _ = collect(t)
-	if counts[memoryOutcomeUnchanged] != 1 {
-		t.Errorf("unchanged = %d after a second run over the same sandbox, want 1 (counts %v)", counts[memoryOutcomeUnchanged], counts)
+	got = collect()
+	if got.outcomes[memoryOutcomeUnchanged] != 1 {
+		t.Errorf("unchanged = %d after a second run over the same sandbox, want 1 (outcomes %v)", got.outcomes[memoryOutcomeUnchanged], got.outcomes)
 	}
 }
 
@@ -137,7 +150,7 @@ func TestMemorySyncActionMetrics(t *testing.T) {
 	h.seedMemory(t, memStoreID, "/c.md", "new remote")
 	h.step(t)
 
-	counts, durations := collect(t)
+	got := collect()
 	want := map[string]int64{
 		"pulled":   2, // the remote create, and the conflict's own overwrite
 		"pushed":   1,
@@ -146,11 +159,11 @@ func TestMemorySyncActionMetrics(t *testing.T) {
 		"refused":  2, // the oversized file, judged by both of the run's syncs
 	}
 	for action, n := range want {
-		if counts[action] != n {
-			t.Errorf("%s = %d, want %d (counts %v)", action, counts[action], n, counts)
+		if got.actions[action] != n {
+			t.Errorf("%s = %d, want %d (actions %v)", action, got.actions[action], n, got.actions)
 		}
 	}
-	if durations[MetricMemorySyncDuration] == 0 {
+	if got.durations[MetricMemorySyncDuration] == 0 {
 		t.Error("no memory-sync-duration point recorded")
 	}
 }

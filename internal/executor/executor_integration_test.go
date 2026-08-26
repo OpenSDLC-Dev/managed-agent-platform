@@ -3,6 +3,7 @@ package executor
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os/exec"
 	"slices"
@@ -195,18 +196,22 @@ func TestHarvestTruncatedListingRealSandbox(t *testing.T) {
 // nonRootUID and nonRootImage are the sandbox-image half of the run below.
 // `debian:stable-slim` cannot serve it: SANDBOX_RUN_AS_USER moves the uid but
 // gives it nothing, and on this backend the image still decides what that uid
-// owns (sandbox.Hardening's RunAsUser doc, docs/self-hosted-security.md §2) —
-// so the platform's own `mkdir -p /mnt/memory` and the persistent shell's
-// state directory are both refused before any memory is reached. The three
-// paths handed over are what the platform itself writes: the workdir, the
-// shell state root, and the resource root the mounts land under.
+// owns (sandbox.Hardening's RunAsUser doc; docs/self-hosted-security.md §2 for
+// the workdir, §4 for the other two paths) — so the platform's own
+// `mkdir -p /mnt/memory` and the persistent shell's state directory are both
+// refused before any memory is reached. The three paths handed over are what
+// the platform itself writes: the workdir, the shell state root, and the
+// resource root the mounts land under.
+//
+// The image deliberately keeps root as its own default user: with a `USER`
+// line the run would be unprivileged whether or not the knob reached the
+// container, and the uid the tool reports below would prove nothing about it.
 const nonRootUID = 10001
 
 const nonRootImage = `FROM debian:stable-slim
 RUN useradd -m -u 10001 app \
  && mkdir -p /workspace /var/lib/map-shell /mnt \
  && chown app:app /workspace /var/lib/map-shell /mnt
-USER app
 `
 
 // TestMemoryRoundTripRealSandboxAsNonRoot is plan 36 slice 4's deferred
@@ -215,26 +220,37 @@ USER app
 // land root-owned; the tools then run as SANDBOX_RUN_AS_USER's uid, append to
 // one in place with `>>` and create another beside it with `>`. The append is
 // the case decision 10's 0666 mode exists for — a root-owned 0644 file would
-// refuse it while the file tools' rename-over would still succeed, so nothing
-// else in this suite would notice the mode going back. The run-end sync then
-// pushes both of the unprivileged shell's writes.
+// refuse it while the file tools' rename-over would still succeed. Two rows
+// already pin that constant's *value* (TestMaterializesMemoryStore and the
+// sandbox contract suite), which a maintainer flipping it would update in
+// lockstep; this is the first that shows why it has to be 0666.
 func TestMemoryRoundTripRealSandboxAsNonRoot(t *testing.T) {
+	provider, err := docker.New(docker.Config{})
+	if err != nil {
+		t.Fatalf("integration test requires Docker: %v", err)
+	}
 	image := "map-nonroot-memory-test:latest"
 	build := exec.Command("docker", "build", "-q", "-t", image, "-")
 	build.Stdin = strings.NewReader(nonRootImage)
 	if out, err := build.CombinedOutput(); err != nil {
 		t.Fatalf("build the non-root sandbox image: %v\n%s", err, out)
 	}
-	provider, err := docker.New(docker.Config{})
-	if err != nil {
-		t.Fatalf("integration test requires Docker: %v", err)
-	}
 	uid := int64(nonRootUID)
 	h := newHarnessWith(t, provider, Config{Image: image, Hardening: sandbox.Hardening{RunAsUser: &uid}})
 	t.Cleanup(func() {
-		sb, err := provider.Provision(context.Background(), sandbox.Spec{SessionID: h.sid, Image: image})
-		if err == nil {
-			_ = sb.Destroy(context.Background())
+		// Attach rather than Provision — the read-only half, so a cleanup can
+		// never create the container it is here to remove — and both failures
+		// are reported: a leaked sandbox poisons the next run on this daemon.
+		sb, err := provider.Attach(context.Background(), h.sid)
+		if errors.Is(err, sandbox.ErrNotFound) {
+			return
+		}
+		if err != nil {
+			t.Errorf("attach for teardown: %v", err)
+			return
+		}
+		if err := sb.Destroy(context.Background()); err != nil {
+			t.Errorf("destroy: %v", err)
 		}
 	})
 
@@ -242,9 +258,9 @@ func TestMemoryRoundTripRealSandboxAsNonRoot(t *testing.T) {
 	h.seedMemory(t, memStoreID, "/notes.md", "hello\n")
 	h.refMemory(t, memStoreID, memMount, "read_write")
 
-	// `id -u` in the same command as the writes: a run that silently landed as
-	// root would prove nothing, so the uid is read off the result rather than
-	// trusted from the Spec.
+	// `id -u` in the same command as the writes: the image's own default user
+	// is root, so this is what says the knob reached the container — and a run
+	// that silently landed as root would prove nothing about the mode.
 	bash, _ := json.Marshal(map[string]any{
 		"name": "bash", "input": map[string]string{
 			"command": "echo appended >> " + memMount + "/notes.md" +

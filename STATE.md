@@ -13,8 +13,8 @@ count the reference leaves unstated is chosen as the newest 5).
 
 - [x] #488 — a meter-reading test for the four memory instruments, and the whole
       memory path through a real Docker container the agent does not own: an
-      unprivileged `>>` onto a root-materialized file, which fails with
-      `Permission denied` if the 0666 mode goes back to 0644
+      unprivileged `>>` onto a root-materialized file, which is the first row to
+      show why that file has to be 0666 rather than pin the constant's value
 - [ ] #78 — plan 36's fifteen recording items into the issue body, as plan 35's
       were when that plan archived; the registry's memory entries already point here
 - [ ] #476 — prune `memory_versions` older than 30 days that are not among their
