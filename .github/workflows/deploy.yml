@@ -299,10 +299,13 @@ jobs:
             # Also on the run SUMMARY, because that is the one place the
             # distinction is visible without opening a log: this run is green
             # and deployed nothing, and in the Actions list it is otherwise
-            # indistinguishable from one that did (#479).
-            echo "### staging is parked — nothing was deployed" >> "$GITHUB_STEP_SUMMARY"
-            echo "" >> "$GITHUB_STEP_SUMMARY"
-            echo "Labels: \`$labels\`. Revive with \`PROJECT=… make gcp-env-start\`, then re-run this workflow to catch staging up to \`main\`." >> "$GITHUB_STEP_SUMMARY"
+            # indistinguishable from one that did (#479). Grouped rather than
+            # three appends, which is registry.yml's shape for the same file.
+            {
+              echo "### staging is parked — nothing was deployed"
+              echo ""
+              echo "Labels: \`$labels\`. Revive with \`PROJECT=… make gcp-env-start\`, then re-run this workflow to catch staging up to \`main\`."
+            } >> "$GITHUB_STEP_SUMMARY"
           fi
 
       # The chart's Cloud SQL Auth Proxy takes the instance's CONNECTION NAME,

@@ -74,9 +74,9 @@ permissions: {}
 # Openers and closers are separate groups, and that is not cosmetic. A group
 # holds at most one running and one pending run, and a third arrival EVICTS the
 # pending one — so with a single group, two deploys landing around 06:17 on a
-# Monday would evict the queued scheduled run, and since only scheduled runs
-# open, the parked environment would go unreported for another week. The evicted
-# run ends `cancelled`, which is grey rather than red, so nothing would say so.
+# Monday would evict the queued scheduled run, and since a deploy-triggered run
+# cannot open, the parked environment would go unreported for another week. The
+# evicted run ends `cancelled`, grey rather than red, so nothing would say so.
 #
 # The cost of splitting them is that an opener and a closer can now overlap, and
 # both may try to close the same issue. `close_all` treats an issue that is
@@ -258,26 +258,36 @@ jobs:
           # stay open forever: the parked branch below stops at "one is already
           # open" and never revisits the rest.
           close_all() {
-            local reason="$1" n closed=0 numbers
+            local reason="$1" n found=0 numbers now
             numbers="$(retry gh issue list --repo "$REPO" --state open \
               --label "$LABEL" --limit 50 --json number --jq '.[].number')"
             for n in $numbers; do
+              found=$((found + 1))
               if gh issue close "$n" --repo "$REPO" --comment "$reason"; then
                 echo "closed #$n"
-                closed=$((closed + 1))
                 continue
               fi
               # An opener and a closer can overlap by design (see the
               # concurrency comment), so losing the race to close is a SUCCESS.
-              # Re-read rather than assume: only a still-open issue is a failure.
-              if retry gh issue view "$n" --repo "$REPO" --json state \
-                   --jq '.state' | grep -qx OPEN; then
-                echo "::error::could not close #$n"
+              # But only a state that was actually READ says so: the confirming
+              # call can fail for the same reason the close did — one CLI, one
+              # token, one API — and treating an unanswered question as "someone
+              # else already did it" is a green run over an issue still standing
+              # open. Nothing here may report success on a read it did not get.
+              if ! now="$(retry gh issue view "$n" --repo "$REPO" --json state \
+                            --jq '.state')"; then
+                echo "::error::could not close #$n, and could not read its state to find out whether something else had"
+                return 1
+              fi
+              if [ "$now" != CLOSED ]; then
+                echo "::error::could not close #$n, and it is still $now"
                 return 1
               fi
               echo "#$n was already closed by a concurrent run"
             done
-            [ "$closed" -gt 0 ] || echo "nothing to close"
+            # Counted from the issues FOUND rather than the ones this run closed,
+            # so a race it lost does not also report having found nothing.
+            [ "$found" -gt 0 ] || echo "nothing to close"
           }
 
           case "$state" in
@@ -292,8 +302,8 @@ jobs:
               # A warning, not a notice, and it names both causes: this cannot
               # tell a deliberate destroy from a cluster name or zone that was
               # changed to something wrong.
-              echo "::warning::no cluster named $GKE_CLUSTER in $GCP_PROJECT_ID. If staging was destroyed on purpose there is nothing left to track; if it was not, GKE_CLUSTER or GCP_ZONE names something that does not exist and deploy.yml will go red on the next push."
-              close_all "No cluster named \`$GKE_CLUSTER\` exists in this project any more, so there is nothing left to park. If that is a surprise, check the \`GKE_CLUSTER\` and \`GCP_ZONE\` repository variables. Closed by $RUN_URL."
+              echo "::warning::no cluster named $GKE_CLUSTER in $GCP_PROJECT_ID (zone $GCP_ZONE). If staging was destroyed on purpose there is nothing left to track; if it was not, one of those three variables names something that does not exist, and deploy.yml will go red on the next push."
+              close_all "No cluster named \`$GKE_CLUSTER\` was found in \`$GCP_PROJECT_ID\` (zone \`$GCP_ZONE\`), so there is nothing left to park. If that is a surprise, check those three repository variables — all three land here when one of them is wrong. Closed by $RUN_URL."
               ;;
             live)
               close_all "The cluster no longer carries a \`power-saved-*\` label, so staging is running again. Closed by $RUN_URL."
