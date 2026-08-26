@@ -4,13 +4,18 @@ What is being worked on right now, and how far along it is — nothing else. **S
 
 ## Active work
 
-None.
+The three plan-36 leftovers that need no decision from anyone, in order: the test
+rows slice 4 deferred (#488), plan 36's recording checklist migrated into the issue
+that now tracks its inferences (#78), and memory version retention (#476, where the
+count the reference leaves unstated is chosen as the newest 5).
 
 ## Tasks
 
-None in flight. The last delivery was the test-suite hardening the plan-36 gate runs
-surfaced — two lease-keeper flakes (#483), the broker's coverage-start wake race (#486),
-and the gate's per-package timeout (#490) — all test-environment fixes, no production
-code. What #490 did not take, reaping a fixture whose owning process died and cutting
-per-test database creation, is #499. Pick the next piece of work from the GitHub issue
-backlog.
+- [x] #488 — a meter-reading test for the four memory instruments, and the whole
+      memory path through a real Docker container the agent does not own: an
+      unprivileged `>>` onto a root-materialized file, which fails with
+      `Permission denied` if the 0666 mode goes back to 0644
+- [ ] #78 — plan 36's fifteen recording items into the issue body, as plan 35's
+      were when that plan archived; the registry's memory entries already point here
+- [ ] #476 — prune `memory_versions` older than 30 days that are not among their
+      memory's newest 5, never a live head, never a deleted memory's lineage

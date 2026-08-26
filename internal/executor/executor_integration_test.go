@@ -3,6 +3,8 @@ package executor
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"os/exec"
 	"slices"
 	"strings"
 	"testing"
@@ -190,27 +192,47 @@ func TestHarvestTruncatedListingRealSandbox(t *testing.T) {
 	}
 }
 
+// nonRootUID and nonRootImage are the sandbox-image half of the run below.
+// `debian:stable-slim` cannot serve it: SANDBOX_RUN_AS_USER moves the uid but
+// gives it nothing, and on this backend the image still decides what that uid
+// owns (sandbox.Hardening's RunAsUser doc, docs/self-hosted-security.md §2) —
+// so the platform's own `mkdir -p /mnt/memory` and the persistent shell's
+// state directory are both refused before any memory is reached. The three
+// paths handed over are what the platform itself writes: the workdir, the
+// shell state root, and the resource root the mounts land under.
+const nonRootUID = 10001
+
+const nonRootImage = `FROM debian:stable-slim
+RUN useradd -m -u 10001 app \
+ && mkdir -p /workspace /var/lib/map-shell /mnt \
+ && chown app:app /workspace /var/lib/map-shell /mnt
+USER app
+`
+
 // TestMemoryRoundTripRealSandboxAsNonRoot is plan 36 slice 4's deferred
 // integration row (#488): the whole memory path through a real container the
 // agent does not own. The store is materialized by the daemon, so its files
-// land root-owned; the tools then run as SANDBOX_RUN_AS_USER's uid and append
-// to one in place with `>>`, which is the case decision 10's 0666 mode exists
-// for — a root-owned 0644 file would refuse that while the file tools'
-// rename-over would still succeed, so nothing else in this suite would notice
-// the mode going back. The run-end sync then pushes what the unprivileged
-// shell wrote.
+// land root-owned; the tools then run as SANDBOX_RUN_AS_USER's uid, append to
+// one in place with `>>` and create another beside it with `>`. The append is
+// the case decision 10's 0666 mode exists for — a root-owned 0644 file would
+// refuse it while the file tools' rename-over would still succeed, so nothing
+// else in this suite would notice the mode going back. The run-end sync then
+// pushes both of the unprivileged shell's writes.
 func TestMemoryRoundTripRealSandboxAsNonRoot(t *testing.T) {
+	image := "map-nonroot-memory-test:latest"
+	build := exec.Command("docker", "build", "-q", "-t", image, "-")
+	build.Stdin = strings.NewReader(nonRootImage)
+	if out, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("build the non-root sandbox image: %v\n%s", err, out)
+	}
 	provider, err := docker.New(docker.Config{})
 	if err != nil {
 		t.Fatalf("integration test requires Docker: %v", err)
 	}
-	// nobody — the uid a deployment setting this knob most plausibly picks,
-	// and not the gate's own, which Hardening.Validate refuses for a gated
-	// sandbox.
-	uid := int64(65534)
-	h := newHarnessWith(t, provider, Config{Image: testImage, Hardening: sandbox.Hardening{RunAsUser: &uid}})
+	uid := int64(nonRootUID)
+	h := newHarnessWith(t, provider, Config{Image: image, Hardening: sandbox.Hardening{RunAsUser: &uid}})
 	t.Cleanup(func() {
-		sb, err := provider.Provision(context.Background(), sandbox.Spec{SessionID: h.sid, Image: testImage})
+		sb, err := provider.Provision(context.Background(), sandbox.Spec{SessionID: h.sid, Image: image})
 		if err == nil {
 			_ = sb.Destroy(context.Background())
 		}
@@ -220,12 +242,14 @@ func TestMemoryRoundTripRealSandboxAsNonRoot(t *testing.T) {
 	h.seedMemory(t, memStoreID, "/notes.md", "hello\n")
 	h.refMemory(t, memStoreID, memMount, "read_write")
 
-	// `id -u` in the same command as the append: a run that silently landed as
+	// `id -u` in the same command as the writes: a run that silently landed as
 	// root would prove nothing, so the uid is read off the result rather than
 	// trusted from the Spec.
 	bash, _ := json.Marshal(map[string]any{
 		"name": "bash", "input": map[string]string{
-			"command": "echo appended >> " + memMount + "/notes.md && echo ran-as-$(id -u)"},
+			"command": "echo appended >> " + memMount + "/notes.md" +
+				" && echo fresh > " + memMount + "/new.md" +
+				" && echo ran-as-$(id -u)"},
 	})
 	h.suspend(t, string(bash))
 	if worked, err := h.exec.step(context.Background()); err != nil || !worked {
@@ -248,16 +272,22 @@ func TestMemoryRoundTripRealSandboxAsNonRoot(t *testing.T) {
 		text = body.Content[0].Text
 	}
 	if body.IsError {
-		t.Fatalf("the append was refused: %q", text)
+		t.Fatalf("a write into the materialized store was refused: %q", text)
 	}
-	if !strings.Contains(text, "ran-as-65534") {
-		t.Fatalf("the tool ran as %q, want uid 65534 — the scenario needs an unprivileged shell", text)
+	if want := fmt.Sprintf("ran-as-%d", nonRootUID); !strings.Contains(text, want) {
+		t.Fatalf("the tool ran as %q, want %q — the scenario needs an unprivileged shell", text, want)
 	}
 
 	if got, _ := h.memoryContent(t, memStoreID, "/notes.md"); got != "hello\nappended\n" {
 		t.Errorf("the store's /notes.md = %q, want the appended line pushed", got)
 	}
+	if got, _ := h.memoryContent(t, memStoreID, "/new.md"); got != "fresh\n" {
+		t.Errorf("the store's /new.md = %q, want the created file pushed", got)
+	}
 	if got := h.versionsOf(t, memStoreID, "/notes.md"); !slices.Equal(got, []string{"created/none", "modified/session_actor"}) {
 		t.Errorf("versions of /notes.md = %v, want the seed plus the session's write", got)
+	}
+	if got := h.versionsOf(t, memStoreID, "/new.md"); !slices.Equal(got, []string{"created/session_actor"}) {
+		t.Errorf("versions of /new.md = %v, want one created by the session", got)
 	}
 }
