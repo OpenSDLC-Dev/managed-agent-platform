@@ -152,6 +152,13 @@ on the label and not on the node count on purpose: a cluster at zero nodes that 
 parked has fallen over, and that still fails loudly. Staging therefore stays at whatever
 commit it was parked on; `gh workflow run deploy.yml --ref main` catches it up.
 
+**Which means a green `deploy` no longer means "deployed".** A parked run is green and
+installed nothing, and in the Actions list it looks exactly like one that shipped. Two things
+close that gap. The parked step writes the fact to the run summary, so it is legible without
+opening a log. And `deploy-alert.yml` — the failure notifier below — reads the run's own
+steps rather than its conclusion, so a parked run never closes an open CD-failure issue: a
+run that deployed nothing is not evidence that anything was fixed.
+
 ## Prerequisites
 
 - A GCP project with billing enabled, and `gcloud auth application-default login`.
@@ -599,6 +606,18 @@ last two lines of it — the build and the install — against **one** staging e
 | replacing the `model-providers` placeholder | a human, once |
 | setting the eleven Actions **variables** below | a human, once, and **before** the first run: until they exist the workflow stops at its second step, so every push to `main` in the meantime is a red run rather than a deployment |
 | build and push the four images → assemble the `map-platform` Secret → `helm upgrade --install` → smoke | **CD** |
+
+**A failed deploy opens an issue**, because it used to notify nobody. `ci` failing blocks a
+merge and is impossible to miss; `deploy` runs after the merge and reports to whoever thinks
+to open the Actions tab — which is how the outage fixed in #469 ran red on every push for
+seven days unnoticed.
+[`deploy-alert.yml`](../../.github/workflows/deploy-alert.yml) listens for `deploy` finishing
+and keeps **one** issue for the outage: opened on the first failure, commented on each
+further one, and closed by the next run that actually deploys. It names the step that failed
+rather than only the run, and it reads the run's steps rather than its conclusion — which is
+what stops a parked run, green and having deployed nothing, from closing an issue nobody has
+fixed. Editing it takes effect only once merged: `workflow_run` runs the copy on the default
+branch, never the PR's.
 
 **Three of those secrets are not `bootstrap.sh`'s.** It owns exactly `<prefix>-db-password`
 and `<prefix>-db-admin-password`, because those are the two Terraform reads back. The three

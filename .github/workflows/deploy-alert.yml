@@ -1,0 +1,126 @@
+name: deploy-alert
+
+# CD failures notify nobody, so this workflow is the notification (#479).
+#
+# `ci` failing blocks a merge and is impossible to miss. `deploy` runs AFTER the
+# merge and reports to no one: a red run is visible only to someone who thinks to
+# open the Actions tab. That is not hypothetical — the outage fixed in #469 ran
+# red on every push for seven days, every one of them `event: push`, so nobody
+# re-ran anything and nobody noticed. Staging silently stopped tracking main for
+# a week.
+#
+# The notification is a GitHub ISSUE rather than a chat webhook, for one reason
+# that outweighs the others: this repository's backlog is already issues, and an
+# issue needs no credential nobody has yet. It is opened on the first failure,
+# commented on each subsequent one, and closed by the next run that actually
+# deploys — so it tracks the outage rather than accumulating one issue per push.
+#
+# `workflow_run` rather than a job inside deploy.yml with `if: failure()`,
+# because the two do not see the same events: a run that is CANCELLED — which
+# deploy.yml's own concurrency comment calls out as the state that wedges a
+# release mid-upgrade — reaches this listener and does not reach an in-run
+# failure job. Note the consequence for changing this file: `workflow_run`
+# workflows execute the version on the DEFAULT BRANCH, so edits here take effect
+# only once merged, and never run against the PR that makes them.
+on:
+  workflow_run:
+    workflows: [deploy]
+    types: [completed]
+
+permissions:
+  contents: read
+  issues: write
+  # Reading the finished run's per-step conclusions is how "parked" is told from
+  # "deployed" below; `workflow_run` itself carries only the overall conclusion.
+  actions: read
+
+# One at a time, never cancelled. Two pushes in quick succession would otherwise
+# race on "does the tracking issue already exist" and open two.
+concurrency:
+  group: deploy-alert
+  cancel-in-progress: false
+
+jobs:
+  notify:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Open, update or close the CD tracking issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          RUN_ID: ${{ github.event.workflow_run.id }}
+          RUN_URL: ${{ github.event.workflow_run.html_url }}
+          RUN_CONCLUSION: ${{ github.event.workflow_run.conclusion }}
+          HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+          EVENT: ${{ github.event.workflow_run.event }}
+          # A fixed title is the whole lookup: no label to create, nothing to
+          # keep in sync, and an exact match rather than a fuzzy search.
+          TITLE: "CD: the deploy workflow is failing on main"
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          # THE DISTINCTION THIS WORKFLOW TURNS ON. deploy.yml skips a parked
+          # staging environment and goes GREEN — deliberately, so that parking
+          # does not read as an outage. The consequence is that `conclusion:
+          # success` no longer means "deployed", and a naive listener would let a
+          # parked run close an issue about a CD failure nobody has fixed. The
+          # run's own steps say which happened: "Deploy the chart" is `success`
+          # when the release was installed and `skipped` when the parked check
+          # short-circuited everything after it.
+          step="$(gh api "repos/$REPO/actions/runs/$RUN_ID/jobs" \
+            --jq '[.jobs[].steps[]? | select(.name == "Deploy the chart") | .conclusion] | first // "absent"')"
+
+          case "$RUN_CONCLUSION" in
+            success|skipped)
+              if [ "$step" = "success" ]; then outcome=deployed; else outcome=parked; fi ;;
+            *) outcome=broken ;;
+          esac
+          echo "run $RUN_ID: conclusion=$RUN_CONCLUSION deploy-step=$step -> $outcome"
+
+          # Exact-title match over open issues. `gh issue list --search` is
+          # fuzzy and would match a human-written issue that merely quotes this
+          # title, so the filtering is done in jq on the exact string. The title
+          # arrives through `env` because gh's `--jq` takes no `--arg`.
+          num="$(gh issue list --repo "$REPO" --state open --limit 100 --json number,title \
+            --jq '[.[] | select(.title == env.TITLE)] | first | .number // empty')"
+
+          case "$outcome" in
+            broken)
+              # Name the step that actually failed: "deploy is red" sends the
+              # reader to the log, "Assemble the mode-2 Secret failed" does not.
+              failed="$(gh api "repos/$REPO/actions/runs/$RUN_ID/jobs" \
+                --jq '[.jobs[].steps[]? | select(.conclusion == "failure") | .name] | first // "(no failing step — the run itself was cancelled or timed out)"')"
+              body="$(printf '%s\n' \
+                "\`deploy\` finished **$RUN_CONCLUSION** on \`${HEAD_SHA:0:7}\` (event: \`$EVENT\`)." \
+                "" \
+                "First failing step: **$failed**" \
+                "" \
+                "Run: $RUN_URL" \
+                "" \
+                "Staging is not tracking \`main\` until this is fixed. This issue is closed automatically by the next run that actually deploys — a run skipped because staging is parked does not count, and will not close it.")"
+              if [ -n "$num" ]; then
+                gh issue comment "$num" --repo "$REPO" --body "$body"
+                echo "commented on #$num"
+              else
+                gh issue create --repo "$REPO" --title "$TITLE" --body "$body"
+              fi
+              ;;
+            deployed)
+              if [ -n "$num" ]; then
+                gh issue close "$num" --repo "$REPO" --comment \
+                  "Deployed successfully on \`${HEAD_SHA:0:7}\`: $RUN_URL"
+                echo "closed #$num"
+              else
+                echo "nothing to close"
+              fi
+              ;;
+            parked)
+              # Deliberately does nothing to the issue, in both directions.
+              # Parking is an operator's decision and nagging about a decision
+              # trains people to ignore the bot; and a run that deployed nothing
+              # is not evidence that a failure was fixed, so it must not close
+              # an open one.
+              echo "staging is parked — nothing deployed, tracking issue left as it is"
+              ;;
+          esac
