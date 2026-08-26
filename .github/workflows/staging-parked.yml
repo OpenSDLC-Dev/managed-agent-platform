@@ -1,0 +1,356 @@
+name: staging-parked
+
+# Staging parked and then FORGOTTEN looks exactly like a healthy staging from
+# the Actions list (#504, the half of #479 that #503 deliberately left).
+#
+# deploy.yml skips its deploying steps while staging is parked and finishes
+# GREEN, and deploy-alert.yml stays silent on such a run in both directions.
+# Both are right: parking is a deliberate cost saving and a bot that nags about
+# a decision someone made on purpose is a bot people mute. What neither can do
+# is get LOUDER as the weeks pass, and forgetting differs from deciding only by
+# elapsed time.
+#
+# It is not only staleness, though the cost is smaller than "it keeps billing"
+# suggests and this file should not overstate it: parking stops what dominates
+# the bill — the nodes, their disks and the database instance — while the two
+# LoadBalancer forwarding rules, Cloud SQL's storage and backups, and object
+# storage go on charging. deploy/gcp/README.md's table is the precise version,
+# including the part this workflow must not repeat as a scare: the control
+# plane's hourly charge is covered by one zonal cluster's free-tier credit.
+#
+# WHY THE CLUSTER AND NOT THE RUN HISTORY. deploy-alert.yml already classifies a
+# run as `parked` from its steps, and reading that here would have needed no
+# cloud credential at all. It is the wrong source: a deploy run exists only when
+# somebody pushes, so a quiet fortnight produces no `parked` run to read — and a
+# quiet fortnight is exactly when an environment gets forgotten. The cluster's
+# own labels are true whether or not anyone has pushed. The two workflows share
+# `.github/scripts/parked.sh` so they can never disagree about the same cluster.
+#
+# WHY THERE IS NO THRESHOLD SETTING. "Parked for longer than intended" needs a
+# duration, and a duration in a config file is a number somebody guessed. This
+# has none: an issue is opened only by a SCHEDULED run (or a deliberate manual
+# dispatch), so a park shorter than the cadence is usually never observed, and
+# once an issue exists its own age is the answer to "how long". Closing is
+# deliberately not gated that way — it runs on every trigger, because an open
+# issue claiming staging is parked when it is not is a false statement in the
+# backlog, and a week is a long time to leave one standing.
+#
+# WHAT THIS WORKFLOW CANNOT TELL YOU. It has no notifier of its own: if it
+# breaks it goes red on a schedule and leaves the issue as it is — stale rather
+# than wrong, which is why every run re-derives its whole answer from the
+# cluster instead of accumulating anything. And it cannot distinguish a cluster
+# DESTROYED on purpose from one it can no longer find because `GKE_CLUSTER` or
+# `GCP_ZONE` was changed to something wrong. Both read as "not found"; both
+# close any standing issue and log a warning saying so, and `deploy.yml` going
+# red on the next push is what separates them.
+on:
+  schedule:
+    # 06:17 UTC on Mondays. Off the hour for registry.yml's reason — GitHub's
+    # scheduler is most backed up at :00 — and weekly rather than daily because
+    # the cadence IS the grace period above.
+    #
+    # Two limits on that guarantee, neither of them this file's to fix. Scheduled
+    # runs are best-effort: under load they are delayed, and they can be dropped.
+    # And GitHub DISABLES a scheduled workflow after 60 days with no activity in
+    # the repository — so in a repository that has gone quiet, which is one of
+    # the ways an environment gets forgotten, the opener stops running too.
+    - cron: '17 6 * * 1'
+  # Not a second opener — a fast CLOSER. Reviving staging is `gcp-env-start`
+  # followed by a deploy, so this retires the issue minutes later instead of
+  # leaving it standing until the next Monday.
+  workflow_run:
+    workflows: [deploy]
+    types: [completed]
+    # Same reason as deploy-alert.yml: `workflow_run` fires for
+    # `workflow_dispatch` on whatever ref was dispatched, and a deploy from a
+    # feature branch says nothing about the environment this tracks.
+    branches: [main]
+  workflow_dispatch:
+
+# Nothing at the workflow level, per deploy.yml: a permission granted here would
+# be inherited by any job added later.
+permissions: {}
+
+# Openers and closers are separate groups, and that is not cosmetic. A group
+# holds at most one running and one pending run, and a third arrival EVICTS the
+# pending one — so with a single group, two deploys landing around 06:17 on a
+# Monday would evict the queued scheduled run, and since a deploy-triggered run
+# cannot open, the parked environment would go unreported for another week. The
+# evicted run ends `cancelled`, grey rather than red, so nothing would say so.
+#
+# The cost of splitting them is that an opener and a closer can now overlap, and
+# both may try to close the same issue. `close_all` treats an issue that is
+# already closed as success rather than assuming it, which is what makes that
+# safe. Two openers still serialise, so nothing can open twice.
+concurrency:
+  group: staging-parked-${{ github.event_name == 'workflow_run' && 'closer' || 'opener' }}
+  cancel-in-progress: false
+
+jobs:
+  check:
+    name: check
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read # actions/checkout, for the shared script
+      issues: write # the tracking issue and its label
+      id-token: write # mint the OIDC token WIF exchanges
+    timeout-minutes: 10
+    # Five of deploy.yml's eleven coordinates — this job reads one cluster and
+    # deploys nothing, so it asks for nothing that could deploy. Repository
+    # VARIABLES rather than literals for deploy.yml's reason: the repository is
+    # public and a committed project, zone and cluster name are a target list.
+    env:
+      GCP_PROJECT_ID: ${{ vars.GCP_PROJECT_ID }}
+      GCP_ZONE: ${{ vars.GCP_ZONE }}
+      GKE_CLUSTER: ${{ vars.GKE_CLUSTER }}
+      WIF_PROVIDER: ${{ vars.WIF_PROVIDER }}
+      DEPLOY_SERVICE_ACCOUNT: ${{ vars.DEPLOY_SERVICE_ACCOUNT }}
+      # The lookup is by LABEL, not by title: a title can be edited by anyone
+      # reading the issue.
+      LABEL: staging-parked
+    steps:
+      # An unset repository variable renders as the EMPTY STRING rather than
+      # failing, and `gcloud container clusters describe "" --zone ""` is a
+      # confusing way to learn that. deploy.yml asserts the same thing for the
+      # same reason; this is the subset this job actually reads. It runs before
+      # the early exit below deliberately: a misconfigured deployment should be
+      # loud on every trigger, not only on the ones that reach the cloud.
+      - name: Require the deployment variables
+        shell: bash
+        run: |
+          bad=""
+          for v in GCP_PROJECT_ID GCP_ZONE GKE_CLUSTER WIF_PROVIDER \
+                   DEPLOY_SERVICE_ACCOUNT; do
+            case "${!v}" in
+              "" | *[[:space:],]*) bad="$bad $v" ;;
+            esac
+          done
+          if [ -n "$bad" ]; then
+            echo "::error::unset, empty or malformed repository variables:$bad — set them under Settings → Secrets and variables → Actions → Variables. What each one names is listed in deploy/gcp/README.md, under The deployment's coordinates."
+            exit 1
+          fi
+
+      # Nothing here pushes, so the token has no reason to outlive the step.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # Asked BEFORE authenticating, because on the commonest trigger the answer
+      # decides that no cloud call is needed at all. `workflow_run` fires on
+      # every merge, and on that trigger this job can only CLOSE — so with no
+      # issue open there is nothing it could do, and minting a cloud
+      # impersonation to discover that is a token exchange and a `gcloud`
+      # install per merge, bought for nothing.
+      - name: Look up the tracking issue
+        id: lookup
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          # Ensured before the lookup, so the query does not depend on how `gh`
+          # answers a filter naming a label that does not exist yet.
+          gh label create "$LABEL" --repo "$REPO" --color FBCA04 \
+            --description "Open while the staging environment is parked (#504)" \
+            >/dev/null 2>&1 || true
+
+          num="$(gh issue list --repo "$REPO" --state open --label "$LABEL" \
+            --limit 10 --json number --jq 'first | .number // empty')"
+          echo "issue=$num" >> "$GITHUB_OUTPUT"
+
+          if [ -z "$num" ] && [ "$GITHUB_EVENT_NAME" = workflow_run ]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "no tracking issue is open and a deploy cannot open one — nothing to do"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+            echo "tracking issue: ${num:-none}"
+          fi
+
+      # The same identity deploy.yml uses, and deliberately not a narrower one:
+      # this needs `container.clusters.get` and nothing else, but a second
+      # service account plus a second WIF binding is cloud-side setup done by
+      # hand, outside this repository's Terraform, for a workflow that reads one
+      # field. The provider's `assertion.ref == 'refs/heads/main'` condition is
+      # satisfied by a schedule and by `workflow_run` — both run the default
+      # branch's copy — and refuses a dispatch from anywhere else.
+      - uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3.0.0
+        if: steps.lookup.outputs.skip != 'true'
+        with:
+          workload_identity_provider: ${{ env.WIF_PROVIDER }}
+          service_account: ${{ env.DEPLOY_SERVICE_ACCOUNT }}
+
+      # No `install_components`: the gke-gcloud-auth-plugin exists so kubectl can
+      # reach the cluster, and this job never talks to the API server.
+      - uses: google-github-actions/setup-gcloud@aa5489c8933f4cc7a4f7d45035b3b1440c9c10db # v3.0.1
+        if: steps.lookup.outputs.skip != 'true'
+        with:
+          project_id: ${{ env.GCP_PROJECT_ID }}
+
+      - name: Reconcile the parked-staging issue with the cluster
+        if: steps.lookup.outputs.skip != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          OPEN_ISSUE: ${{ steps.lookup.outputs.issue }}
+          TITLE: staging is parked and nothing is deploying to it
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          # Three attempts on the READ calls, for deploy-alert.yml's reason, and
+          # deliberately not on the mutating ones: retrying a create that in
+          # fact succeeded files the same thing twice.
+          #
+          # Each attempt's output is CAPTURED and only the successful one is
+          # printed. Running the command bare inside a command substitution — as
+          # the obvious spelling does — leaves a failed attempt's partial stdout
+          # in the pipe, and the caller then parses that joined to the next
+          # attempt's. deploy-alert.yml carries the obvious spelling; the same
+          # hardening there is tracked separately rather than smuggled in here.
+          retry() {
+            local n=0 out
+            until out="$("$@")"; do
+              n=$((n + 1))
+              [ "$n" -lt 3 ] || return 1
+              sleep $((n * 5))
+            done
+            printf '%s\n' "$out"
+          }
+
+          # Retried, unlike deploy.yml's copy of this call, because the schedule
+          # is what this workflow turns on: a single transient 5xx here would
+          # otherwise cost a whole week of silence. A 404 is retried too, which
+          # is deliberate — it costs fifteen seconds on a genuinely destroyed
+          # cluster and it stops a flapping API from masquerading as one, which
+          # now matters because "not found" CLOSES an issue.
+          err="$RUNNER_TEMP/cluster-describe.err"
+          describe() {
+            gcloud container clusters describe "$GKE_CLUSTER" \
+              --zone "$GCP_ZONE" --project "$GCP_PROJECT_ID" \
+              --format='value(resourceLabels)' 2>"$err"
+          }
+
+          gone=0
+          if ! labels="$(retry describe)"; then
+            sed 's/^/  /' "$err"
+            case "$(cat "$err")" in
+              *404*|*[Nn]ot\ found*) gone=1 ;;
+              *)
+                echo "::error::could not read $GKE_CLUSTER's labels, so this run says nothing about whether staging is parked"
+                exit 1 ;;
+            esac
+          fi
+
+          if [ "$gone" = 1 ]; then
+            state=gone
+            labels=""
+          else
+            state="$(bash .github/scripts/parked.sh "$labels")"
+          fi
+          echo "cluster $GKE_CLUSTER is $state (labels: ${labels:-none})"
+
+          RUN_URL="https://github.com/$REPO/actions/runs/$GITHUB_RUN_ID"
+
+          # EVERY open issue carrying the label, not just the first. A second one
+          # — filed by hand, or by two runs that overlapped — would otherwise
+          # stay open forever: the parked branch below stops at "one is already
+          # open" and never revisits the rest.
+          close_all() {
+            local reason="$1" n found=0 numbers now
+            numbers="$(retry gh issue list --repo "$REPO" --state open \
+              --label "$LABEL" --limit 50 --json number --jq '.[].number')"
+            for n in $numbers; do
+              found=$((found + 1))
+              if gh issue close "$n" --repo "$REPO" --comment "$reason"; then
+                echo "closed #$n"
+                continue
+              fi
+              # An opener and a closer can overlap by design (see the
+              # concurrency comment), so losing the race to close is a SUCCESS.
+              # But only a state that was actually READ says so: the confirming
+              # call can fail for the same reason the close did — one CLI, one
+              # token, one API — and treating an unanswered question as "someone
+              # else already did it" is a green run over an issue still standing
+              # open. Nothing here may report success on a read it did not get.
+              if ! now="$(retry gh issue view "$n" --repo "$REPO" --json state \
+                            --jq '.state')"; then
+                echo "::error::could not close #$n, and could not read its state to find out whether something else had"
+                return 1
+              fi
+              if [ "$now" != CLOSED ]; then
+                echo "::error::could not close #$n, and it is still $now"
+                return 1
+              fi
+              echo "#$n was already closed by a concurrent run"
+            done
+            # Counted from the issues FOUND rather than the ones this run closed,
+            # so a race it lost does not also report having found nothing.
+            [ "$found" -gt 0 ] || echo "nothing to close"
+          }
+
+          case "$state" in
+            gone)
+              # Destroyed is not parked — but it is not "still parked" either,
+              # and an issue left open would say the wrong thing forever. The
+              # issue's own body offers `make gcp-env-destroy` as one of the two
+              # answers, so this is the path an operator who took that advice
+              # actually walks; leaving the issue behind would make this
+              # workflow contradict its own instructions.
+              #
+              # A warning, not a notice, and it names both causes: this cannot
+              # tell a deliberate destroy from a cluster name or zone that was
+              # changed to something wrong.
+              echo "::warning::no cluster named $GKE_CLUSTER in $GCP_PROJECT_ID (zone $GCP_ZONE). If staging was destroyed on purpose there is nothing left to track; if it was not, one of those three variables names something that does not exist, and deploy.yml will go red on the next push."
+              close_all "No cluster named \`$GKE_CLUSTER\` was found in \`$GCP_PROJECT_ID\` (zone \`$GCP_ZONE\`), so there is nothing left to park. If that is a surprise, check those three repository variables — all three land here when one of them is wrong. Closed by $RUN_URL."
+              ;;
+            live)
+              close_all "The cluster no longer carries a \`power-saved-*\` label, so staging is running again. Closed by $RUN_URL."
+              ;;
+            parked)
+              # Already said once. Deliberately no further comment: this issue is
+              # a standing flag, not a running commentary, and its age is the
+              # point.
+              if [ -n "$OPEN_ISSUE" ]; then
+                echo "staging is parked and #$OPEN_ISSUE already says so — not repeating it"
+                exit 0
+              fi
+              case "$GITHUB_EVENT_NAME" in
+                schedule|workflow_dispatch) ;;
+                *)
+                  echo "::notice::staging is parked, but a deploy-triggered run does not open the issue — a park shorter than the cadence is meant to pass unremarked"
+                  exit 0 ;;
+              esac
+
+              # Filed unassigned, and that is a choice rather than an oversight.
+              # deploy-alert.yml assigns a CD outage to the run's actor because a
+              # failing push has one; a schedule does not — `github.actor` on a
+              # scheduled run is whoever last edited the cron, which is the wrong
+              # person to page. Opening the issue is itself the notification: it
+              # reaches everyone watching the repository, which is how every
+              # other issue in this backlog reaches anyone.
+              body="$(printf '%s\n' \
+                "The staging cluster \`$GKE_CLUSTER\` carries \`power-saved-*\` labels, so \`make gcp-env-stop\` parked it and nothing has deployed to it since." \
+                "" \
+                "Labels: \`$labels\`" \
+                "" \
+                "First **observed** by $RUN_URL on $(date -u +%Y-%m-%d). Nothing here dates the parking itself — this workflow runs weekly and only a scheduled or hand-dispatched run opens an issue, so it may have started earlier." \
+                "" \
+                "Parking stops the charges that dominate: the nodes, their disks and the database instance. It does not stop all of them — the two LoadBalancer forwarding rules, Cloud SQL's storage and backups, and object storage keep billing for as long as this stands. (The control plane's hourly charge is covered by one zonal cluster's free-tier credit.)" \
+                "" \
+                "Revive it, then catch staging up to \`main\`:" \
+                "" \
+                '```' \
+                "PROJECT=… make gcp-env-start" \
+                "gh workflow run deploy.yml --ref main" \
+                '```' \
+                "" \
+                "If staging is not coming back, \`make gcp-env-destroy\` is the other answer and the cheaper one — this issue closes itself either way." \
+                "" \
+                "It closes automatically: the next run of this workflow that finds the cluster unparked, or gone, closes it, and a completed \`deploy\` is one of its triggers.")"
+
+              url="$(gh issue create --repo "$REPO" --title "$TITLE" --label "$LABEL" --body "$body")"
+              echo "opened $url"
+              ;;
+          esac

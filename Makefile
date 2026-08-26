@@ -20,7 +20,7 @@ SHELL := /usr/bin/env bash
 .PHONY: build crossbuild vet fmt-check test cover-gate verify eval \
 	changelog changelog-notes changelog-archive \
 	release-tag-check release-images release-chart-check release-chart release-binaries \
-	openbao-init-test cd-outcome-test registry-check \
+	openbao-init-test cd-outcome-test parked-test registry-check \
 	gcp-fmt gcp-validate gcp-split-check gcp-lint gcp-bootstrap-test gcp-dbinit-test gcp-split-check-test gcp-power-test gcp-foundation-apply gcp-bootstrap gcp-env-apply gcp-db-init gcp-env-destroy gcp-env-rebuild \
 	gcp-env-stop gcp-env-start gcp-env-status
 
@@ -268,6 +268,15 @@ openbao-init-test:
 cd-outcome-test:
 	shellcheck .github/scripts/cd-outcome.sh
 	python3 .github/scripts/cd_outcome_test.py
+
+# The other one neither PR can execute: deploy.yml and staging-parked.yml both
+# decide from it whether staging is parked, and the rule is "a label KEY
+# beginning with `power-saved-`" — one `;` away from also matching a label
+# VALUE. Kept a separate target from cd-outcome-test rather than folded into it
+# so a red run names which of the two signals moved.
+parked-test:
+	shellcheck .github/scripts/parked.sh
+	python3 .github/scripts/parked_test.py
 
 # ---------------------------------------------------------------------------
 # GCP staging environment (docs/plan/20, Decision 9). Developer tooling for GCP
