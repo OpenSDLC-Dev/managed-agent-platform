@@ -1085,6 +1085,29 @@ jobs:
       # are invisible to shellcheck and to a careful read alike.
       - name: the power script parks and revives what it claims
         run: make gcp-power-test
+      # deploy-alert.yml is the one workflow in this repo that a PR cannot
+      # exercise: `workflow_run` runs the copy on the default branch, so its
+      # first execution is against real issues on `main`. Its classification was
+      # extracted into a script for exactly that reason, and this runs it.
+      - name: the CD outcome classifier decides what it claims
+        run: make cd-outcome-test
+      # The classifier keys on a STEP NAME in deploy.yml, and a rename there
+      # fails nothing on its own: every deploy would classify as `parked`, so no
+      # successful run would ever close a CD issue again. The name is read out of
+      # the notifier rather than restated here, so a rename on either side alone
+      # is what goes red.
+      - name: the step the CD notifier keys on still exists
+        run: |
+          set -euo pipefail
+          want="$(grep -oE 'select\(\.name == "[^"]+"\)' .github/workflows/deploy-alert.yml \
+            | sed 's/.*== "//; s/")$//' | sort -u)"
+          [ "$(printf '%s\n' "$want" | grep -c .)" -eq 1 ] \
+            || { echo "expected deploy-alert.yml to key on exactly one step name, found:" >&2
+                 printf '%s\n' "$want" >&2; exit 1; }
+          grep -qF -- "- name: $want" .github/workflows/deploy.yml \
+            || { echo "deploy-alert.yml keys on a step named '$want' and deploy.yml has none" >&2
+                 exit 1; }
+          echo "ok: deploy.yml still has the step '$want' the CD notifier reads"
 
   # Local dev stack: validate the compose file, build the image, and smoke-test
   # that the control plane comes up and serves (migrations + auth) and the brain

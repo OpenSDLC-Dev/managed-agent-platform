@@ -3,17 +3,11 @@ name: deploy-alert
 # CD failures notify nobody, so this workflow is the notification (#479).
 #
 # `ci` failing blocks a merge and is impossible to miss. `deploy` runs AFTER the
-# merge and reports to no one: a red run is visible only to someone who thinks to
-# open the Actions tab. That is not hypothetical — the outage fixed in #469 ran
-# red on every push for seven days, every one of them `event: push`, so nobody
-# re-ran anything and nobody noticed. Staging silently stopped tracking main for
-# a week.
-#
-# The notification is a GitHub ISSUE rather than a chat webhook, for one reason
-# that outweighs the others: this repository's backlog is already issues, and an
-# issue needs no credential nobody has yet. It is opened on the first failure,
-# commented on each subsequent one, and closed by the next run that actually
-# deploys — so it tracks the outage rather than accumulating one issue per push.
+# merge and reports to no one — the outage recorded in
+# changelog.d/cd-rbac-grant.fixed.md is what that costs. The notification is a
+# GitHub ISSUE because this repository's backlog is already issues and an issue
+# needs no credential nobody has yet; one issue tracks the outage rather than
+# one per push.
 #
 # `workflow_run` rather than a job inside deploy.yml with `if: failure()`,
 # because the two do not see the same events: a run that is CANCELLED — which
@@ -21,21 +15,44 @@ name: deploy-alert
 # release mid-upgrade — reaches this listener and does not reach an in-run
 # failure job. Note the consequence for changing this file: `workflow_run`
 # workflows execute the version on the DEFAULT BRANCH, so edits here take effect
-# only once merged, and never run against the PR that makes them.
+# only once merged, and never run against the PR that makes them. That is also
+# why the classification lives in `.github/scripts/cd-outcome.sh` with a test
+# (`make cd-outcome-test`) rather than inline here: it is the only way those
+# branches execute anywhere but production.
 on:
   workflow_run:
     workflows: [deploy]
     types: [completed]
+    # `workflow_run` fires for `workflow_dispatch` too, on whatever ref was
+    # dispatched. Without this filter a failed deploy dispatched from a feature
+    # branch would open an issue titled "failing on main", and a successful one
+    # would close a real main outage.
+    branches: [main]
 
 permissions:
   contents: read
+  # The issue, its label, and its assignee.
   issues: write
-  # Reading the finished run's per-step conclusions is how "parked" is told from
-  # "deployed" below; `workflow_run` itself carries only the overall conclusion.
+  # Reading a run's per-step conclusions is how "parked" is told from
+  # "deployed"; `workflow_run` itself carries only the overall conclusion.
   actions: read
 
-# One at a time, never cancelled. Two pushes in quick succession would otherwise
-# race on "does the tracking issue already exist" and open two.
+# Serialised, never cancelled — but this workflow does NOT rely on that for
+# correctness, because GitHub's concurrency cannot provide it: a group holds at
+# most one running and one pending run, so a third arrival evicts the pending
+# one, and order within a group is not guaranteed either. An evicted or
+# reordered event would otherwise leave an issue open after CD recovered, or
+# reopen a settled outage from a stale failure. The job therefore reconciles
+# against the newest COMPLETED deploy run rather than trusting the event that
+# woke it, which makes every invocation idempotent and order-independent. The
+# group is here to stop two runs racing to create the same issue, not to make
+# the logic correct.
+#
+# That same reconciliation is this workflow's only backstop against ITSELF
+# failing — a notifier has no notifier. A transient API error leaves the issue
+# stale rather than wrong, and the next deploy's invocation re-derives the whole
+# state from scratch and repairs it. The retries below narrow that window; they
+# do not close it, and nothing here pretends otherwise.
 concurrency:
   group: deploy-alert
   cancel-in-progress: false
@@ -44,67 +61,146 @@ jobs:
   notify:
     runs-on: ubuntu-latest
     steps:
-      - name: Open, update or close the CD tracking issue
+      # The default branch's copy — which is the copy of this workflow that is
+      # running, so the script and its caller can never come from different
+      # commits.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Reconcile the CD tracking issue with the newest deploy run
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
-          RUN_ID: ${{ github.event.workflow_run.id }}
-          RUN_URL: ${{ github.event.workflow_run.html_url }}
-          RUN_CONCLUSION: ${{ github.event.workflow_run.conclusion }}
-          HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
-          EVENT: ${{ github.event.workflow_run.event }}
-          # A fixed title is the whole lookup: no label to create, nothing to
-          # keep in sync, and an exact match rather than a fuzzy search.
+          WOKE_BY: ${{ github.event.workflow_run.id }}
           TITLE: "CD: the deploy workflow is failing on main"
+          # The lookup is by LABEL, not by title: a title can be edited by
+          # anyone reading the issue, and scanning open issues for an exact
+          # string only works while the issue is inside the page fetched.
+          LABEL: cd-failure
         shell: bash
         run: |
           set -euo pipefail
 
-          # THE DISTINCTION THIS WORKFLOW TURNS ON. deploy.yml skips a parked
-          # staging environment and goes GREEN — deliberately, so that parking
-          # does not read as an outage. The consequence is that `conclusion:
-          # success` no longer means "deployed", and a naive listener would let a
-          # parked run close an issue about a CD failure nobody has fixed. The
-          # run's own steps say which happened: "Deploy the chart" is `success`
-          # when the release was installed and `skipped` when the parked check
-          # short-circuited everything after it.
-          step="$(gh api "repos/$REPO/actions/runs/$RUN_ID/jobs" \
-            --jq '[.jobs[].steps[]? | select(.name == "Deploy the chart") | .conclusion] | first // "absent"')"
+          # Three attempts on the READ calls. A notifier that gives up on the
+          # first 502 reports nothing on the day the API is having a bad hour,
+          # which is disproportionately the day CD is red. Deliberately NOT
+          # applied to the mutating calls: retrying a create that in fact
+          # succeeded is how one outage becomes three issues.
+          retry() {
+            local n=0
+            until "$@"; do
+              n=$((n + 1))
+              [ "$n" -lt 3 ] || return 1
+              sleep $((n * 5))
+            done
+          }
 
-          case "$RUN_CONCLUSION" in
-            success|skipped)
-              if [ "$step" = "success" ]; then outcome=deployed; else outcome=parked; fi ;;
-            *) outcome=broken ;;
+          # THE AUTHORITY IS THE NEWEST COMPLETED RUN, NOT THE EVENT. See the
+          # concurrency note above for why the event cannot be trusted to arrive,
+          # or to arrive in order.
+          newest="$(retry gh api "repos/$REPO/actions/workflows/deploy.yml/runs" \
+            -f branch=main -f status=completed -f per_page=1 \
+            --jq '.workflow_runs[0] | "\(.id) \(.run_attempt) \(.conclusion) \(.head_sha) \(.actor.login)"')"
+          read -r RUN_ID RUN_ATTEMPT RUN_CONCLUSION HEAD_SHA ACTOR <<<"$newest"
+          if [ -z "${RUN_ID:-}" ] || [ "$RUN_ID" = "null" ]; then
+            echo "::notice::no completed deploy run on main yet — nothing to reconcile"
+            exit 0
+          fi
+          RUN_URL="https://github.com/$REPO/actions/runs/$RUN_ID"
+          echo "woken by $WOKE_BY; reconciling against $RUN_ID (attempt $RUN_ATTEMPT)"
+
+          # Attempt-pinned. A re-run keeps the run ID and the unversioned jobs
+          # endpoint answers for the LATEST attempt, so an in-flight re-run could
+          # otherwise pair one attempt's conclusion with another attempt's steps.
+          jobs_json="$(retry gh api "repos/$REPO/actions/runs/$RUN_ID/attempts/$RUN_ATTEMPT/jobs")"
+          step="$(printf '%s' "$jobs_json" | jq -r \
+            '[.jobs[].steps[]? | select(.name == "Deploy the chart") | .conclusion] | first // "absent"')"
+          # Did anything actually EXECUTE? A step that reached `success` or
+          # `failure` did; one left `cancelled` or `skipped` did not. This is the
+          # only evidence separating a run cancelled mid-upgrade from one
+          # cancelled while still queued behind a newer merge.
+          ran="$(printf '%s' "$jobs_json" | jq -r \
+            '[.jobs[].steps[]? | select(.conclusion == "success" or .conclusion == "failure")] | length > 0')"
+
+          outcome="$(.github/scripts/cd-outcome.sh "$RUN_CONCLUSION" "$step" "$ran")"
+          echo "conclusion=$RUN_CONCLUSION deploy-step=$step steps-ran=$ran -> $outcome"
+
+          case "$outcome" in
+            parked)
+              # Nothing, in BOTH directions. A run that deployed nothing is not
+              # evidence a failure was fixed, so it must not close an open issue;
+              # and parking is a deliberate operator decision, so it must not
+              # open one either — nagging about a decision teaches people to
+              # ignore the bot.
+              echo "staging is parked — nothing deployed, tracking issue left as it is"
+              exit 0 ;;
+            superseded)
+              echo "run $RUN_ID was cancelled before any step ran — superseded by a newer merge"
+              exit 0 ;;
+            noop)
+              echo "the deploy job declined to run ($RUN_CONCLUSION) — no news either way"
+              exit 0 ;;
           esac
-          echo "run $RUN_ID: conclusion=$RUN_CONCLUSION deploy-step=$step -> $outcome"
 
-          # Exact-title match over open issues. `gh issue list --search` is
-          # fuzzy and would match a human-written issue that merely quotes this
-          # title, so the filtering is done in jq on the exact string. The title
-          # arrives through `env` because gh's `--jq` takes no `--arg`.
-          num="$(gh issue list --repo "$REPO" --state open --limit 100 --json number,title \
-            --jq '[.[] | select(.title == env.TITLE)] | first | .number // empty')"
+          # Only the arms that touch the issue pay for the lookup.
+          gh label create "$LABEL" --repo "$REPO" --color B60205 \
+            --description "Opened automatically when the deploy workflow fails (#479)" \
+            >/dev/null 2>&1 || true
+          num="$(retry gh issue list --repo "$REPO" --state open --label "$LABEL" --limit 10 \
+            --json number --jq 'first | .number // empty')"
+
+          export RUN_URL
+
+          open_or_comment() {
+            local body="$1"
+            if [ -n "$num" ]; then
+              # Never say the same thing twice: a reconciliation triggered by a
+              # LATER event can land on the same newest run, and a bot that
+              # repeats itself is a bot people filter out.
+              local said
+              said="$(retry gh issue view "$num" --repo "$REPO" --json comments \
+                --jq '[.comments[].body] | map(select(contains(env.RUN_URL))) | length')"
+              if [ "$said" != "0" ]; then echo "already reported $RUN_ID on #$num"; return; fi
+              gh issue comment "$num" --repo "$REPO" --body "$body"
+              echo "commented on #$num"
+              return
+            fi
+            # Assigned, not merely filed. An unassigned issue in a repository
+            # whose backlog is already issues is the same silence #479 is about,
+            # one layer up; the assignment is what actually sends someone a
+            # notification. The run's actor is whoever's merge is on the failing
+            # commit. Best-effort: a bot actor, or one without push access,
+            # cannot be assigned, and losing the issue over that is the worse
+            # trade.
+            gh issue create --repo "$REPO" --title "$TITLE" --label "$LABEL" \
+              --assignee "$ACTOR" --body "$body" \
+              || gh issue create --repo "$REPO" --title "$TITLE" --label "$LABEL" --body "$body"
+          }
 
           case "$outcome" in
             broken)
-              # Name the step that actually failed: "deploy is red" sends the
-              # reader to the log, "Assemble the mode-2 Secret failed" does not.
-              failed="$(gh api "repos/$REPO/actions/runs/$RUN_ID/jobs" \
-                --jq '[.jobs[].steps[]? | select(.conclusion == "failure") | .name] | first // "(no failing step — the run itself was cancelled or timed out)"')"
-              body="$(printf '%s\n' \
-                "\`deploy\` finished **$RUN_CONCLUSION** on \`${HEAD_SHA:0:7}\` (event: \`$EVENT\`)." \
+              failed="$(printf '%s' "$jobs_json" | jq -r \
+                '[.jobs[].steps[]? | select(.conclusion == "failure") | .name] | first // "(no failing step — the run was cancelled, timed out, or never started)"')"
+              # Whether staging still tracks `main` depends on WHERE it broke. A
+              # run that died before `helm upgrade` left the cluster on the
+              # previous release; one that failed a check afterwards deployed
+              # this commit and then found something wrong with it. Saying the
+              # first when the second happened sends the reader to the wrong
+              # place.
+              if [ "$step" = "success" ]; then
+                impact="The chart **was installed** on this commit, so the failure is in a check after it: staging is running \`${HEAD_SHA:0:7}\` and something about it is wrong."
+              else
+                impact="The chart was **not** installed, so staging is still on the previous release and is not tracking \`main\` until this is fixed."
+              fi
+              open_or_comment "$(printf '%s\n' \
+                "\`deploy\` finished **$RUN_CONCLUSION** on \`${HEAD_SHA:0:7}\`." \
                 "" \
                 "First failing step: **$failed**" \
                 "" \
                 "Run: $RUN_URL" \
                 "" \
-                "Staging is not tracking \`main\` until this is fixed. This issue is closed automatically by the next run that actually deploys — a run skipped because staging is parked does not count, and will not close it.")"
-              if [ -n "$num" ]; then
-                gh issue comment "$num" --repo "$REPO" --body "$body"
-                echo "commented on #$num"
-              else
-                gh issue create --repo "$REPO" --title "$TITLE" --body "$body"
-              fi
+                "$impact" \
+                "" \
+                "This issue closes automatically on the next run that actually deploys — a run skipped because staging is parked does not count and will not close it.")"
               ;;
             deployed)
               if [ -n "$num" ]; then
@@ -115,12 +211,15 @@ jobs:
                 echo "nothing to close"
               fi
               ;;
-            parked)
-              # Deliberately does nothing to the issue, in both directions.
-              # Parking is an operator's decision and nagging about a decision
-              # trains people to ignore the bot; and a run that deployed nothing
-              # is not evidence that a failure was fixed, so it must not close
-              # an open one.
-              echo "staging is parked — nothing deployed, tracking issue left as it is"
+            miswired)
+              open_or_comment "$(printf '%s\n' \
+                "\`deploy\` succeeded on \`${HEAD_SHA:0:7}\`, but this workflow could not find a step named **Deploy the chart** in it (found: \`$step\`)." \
+                "" \
+                "That step's conclusion is how a real deployment is told from a run skipped because staging is parked. Until the name matches again, **no successful deploy will close a CD issue**." \
+                "" \
+                "Run: $RUN_URL")"
               ;;
+            *)
+              echo "::error::cd-outcome.sh returned an outcome this workflow does not handle: $outcome"
+              exit 1 ;;
           esac

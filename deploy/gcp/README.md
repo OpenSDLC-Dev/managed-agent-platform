@@ -607,17 +607,24 @@ last two lines of it — the build and the install — against **one** staging e
 | setting the eleven Actions **variables** below | a human, once, and **before** the first run: until they exist the workflow stops at its second step, so every push to `main` in the meantime is a red run rather than a deployment |
 | build and push the four images → assemble the `map-platform` Secret → `helm upgrade --install` → smoke | **CD** |
 
-**A failed deploy opens an issue**, because it used to notify nobody. `ci` failing blocks a
-merge and is impossible to miss; `deploy` runs after the merge and reports to whoever thinks
-to open the Actions tab — which is how the outage fixed in #469 ran red on every push for
-seven days unnoticed.
+**A failed deploy opens an issue**, because it used to notify nobody: `ci` failing blocks a
+merge and is impossible to miss, while `deploy` runs after it and reports to whoever thinks
+to open the Actions tab.
 [`deploy-alert.yml`](../../.github/workflows/deploy-alert.yml) listens for `deploy` finishing
-and keeps **one** issue for the outage: opened on the first failure, commented on each
-further one, and closed by the next run that actually deploys. It names the step that failed
-rather than only the run, and it reads the run's steps rather than its conclusion — which is
-what stops a parked run, green and having deployed nothing, from closing an issue nobody has
-fixed. Editing it takes effect only once merged: `workflow_run` runs the copy on the default
-branch, never the PR's.
+and keeps **one** issue for the outage — opened on the first failure and assigned to whoever
+merged it, commented on each further one, closed by the next run that actually deploys. It
+names the step that failed rather than only the run, and it says whether the chart was
+installed before the failure, because that is what decides whether staging is running this
+commit or the previous one. What it will **not** do is read a parked run as a fix: a run
+skipped because staging is parked is green having deployed nothing, so it closes nothing and
+opens nothing.
+
+Two things follow for whoever changes it. Editing it takes effect only once merged —
+`workflow_run` runs the copy on the default branch, never the PR's — which is why the
+classification lives in [`cd-outcome.sh`](../../.github/scripts/cd-outcome.sh) behind
+`make cd-outcome-test`, where it can be run before it is trusted. And renaming `deploy.yml`'s
+**`Deploy the chart`** step is what breaks the parked-versus-deployed distinction, so CI
+fails if that name disappears.
 
 **Three of those secrets are not `bootstrap.sh`'s.** It owns exactly `<prefix>-db-password`
 and `<prefix>-db-admin-password`, because those are the two Terraform reads back. The three

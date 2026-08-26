@@ -20,7 +20,7 @@ SHELL := /usr/bin/env bash
 .PHONY: build crossbuild vet fmt-check test cover-gate verify eval \
 	changelog changelog-notes changelog-archive \
 	release-tag-check release-images release-chart-check release-chart release-binaries \
-	openbao-init-test registry-check \
+	openbao-init-test cd-outcome-test registry-check \
 	gcp-fmt gcp-validate gcp-split-check gcp-lint gcp-bootstrap-test gcp-dbinit-test gcp-split-check-test gcp-power-test gcp-foundation-apply gcp-bootstrap gcp-env-apply gcp-db-init gcp-env-destroy gcp-env-rebuild \
 	gcp-env-stop gcp-env-start gcp-env-status
 
@@ -259,6 +259,15 @@ release-binaries:
 # checks guarding it to go red.
 openbao-init-test:
 	python3 deploy/compose/openbao_init_test.py
+
+# The classifier deploy-alert.yml keys on, run rather than read. It is the one
+# piece of shell in this repo that CANNOT be exercised by the PR that changes
+# it: a `workflow_run` workflow executes the copy on the default branch, so an
+# inline `case` would first run against real issues on `main`. The dangerous
+# defect in a classifier is not a wrong row but a MISSING one — a state that
+# lands in the do-nothing arm and stops the notifier without failing anything.
+cd-outcome-test:
+	python3 .github/scripts/cd_outcome_test.py
 
 # ---------------------------------------------------------------------------
 # GCP staging environment (docs/plan/20, Decision 9). Developer tooling for GCP
