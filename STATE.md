@@ -15,7 +15,8 @@ count the reference leaves unstated is chosen as the newest 5).
       memory path through a real Docker container the agent does not own: an
       unprivileged `>>` onto a root-materialized file, which is the first row to
       show why that file has to be 0666 rather than pin the constant's value
-- [ ] #78 — plan 36's fifteen recording items into the issue body, as plan 35's
-      were when that plan archived; the registry's memory entries already point here
+- [x] #78 — plan 36's fifteen recording items are in the issue body now, as plan
+      35's were when that plan archived; the issue stays open, as the tracker for
+      the twenty registry entries that cite those items
 - [ ] #476 — prune `memory_versions` older than 30 days that are not among their
       memory's newest 5, never a live head, never a deleted memory's lineage
