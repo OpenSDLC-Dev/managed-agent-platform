@@ -341,8 +341,10 @@ gcp-require-project:
 # fmt and validate need no credentials and no state, which is what lets CI run
 # them on every PR: the configuration cannot rot silently between the rare runs
 # that actually touch GCP. `-backend=false` is what keeps that true now that
-# environment/ declares a `backend "gcs"` block: it stops init from trying to
-# reach the bucket, so validate stays offline.
+# environment/ declares a `backend "gcs"` block: it stops init from reaching for
+# the bucket, so no GCS call and no credential are involved. Not the same as
+# offline — init still installs providers from the registry, which is a network
+# call CI makes and which the lock file pins.
 gcp-fmt:
 	$(GCP_TF) fmt -check -recursive deploy/gcp
 

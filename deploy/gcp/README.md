@@ -1390,8 +1390,11 @@ make gcp-fmt gcp-validate gcp-split-check gcp-lint \
 None of them needs credentials, state, or a project, and CI runs all ten on every PR — so
 neither the configuration nor the tooling can rot silently between the rare runs that
 actually provision anything. `gcp-dbinit-test` is the one with a host requirement: it needs
-Docker, because it starts a real PostgreSQL. `gcp-validate` stays offline now that
-`environment/` declares a `backend "gcs"` block because it inits with `-backend=false`.
+Docker, because it starts a real PostgreSQL. `gcp-validate` stays **credential-free** now that
+`environment/` declares a `backend "gcs"` block because it inits with `-backend=false`, which
+skips the backend entirely — no GCS call, no credential, no state. That is not the same as
+offline: `init` still installs the providers, which the lock file pins and which CI fetches
+from the registry like any other dependency.
 
 `gcp-split-check` is the structural enforcement of the two-configuration split:
 `environment/` may not *own* a resource of an unrecoverable kind, and every one
