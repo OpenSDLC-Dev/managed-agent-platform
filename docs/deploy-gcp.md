@@ -627,8 +627,10 @@ rather than failing on it. What follows is the irreversible option.
 PROJECT=… make gcp-env-destroy
 ```
 
-destroys the cluster, Cloud SQL, the bucket and the registry, and leaves `foundation/`
-alone. It is deliberately **not idempotent**: run it twice and the second refuses, because
+destroys the cluster, Cloud SQL, the environment's **blob** bucket and the registry, and
+leaves `foundation/` alone — including the bucket holding `environment/`'s own Terraform
+state, which lives in `foundation/` and carries `prevent_destroy` precisely so that this
+command cannot reach it. It is deliberately **not idempotent**: run it twice and the second refuses, because
 the state is empty by then and Terraform cannot tell an already-destroyed environment from a
 checkout pointed at the wrong bucket — and only one of those quietly leaves a cluster
 billing. Three settings make that possible and are deliberately non-default: the cluster's

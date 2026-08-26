@@ -61,6 +61,14 @@ def build_tree(tmp):
     tf = bin_dir / "terraform"
     tf.write_text(FAKE_TERRAFORM, encoding="utf-8")
     tf.chmod(0o755)
+    # gcp-env-tfvars shells out to gcloud. A fake is not optional here: without
+    # one on PATH the REAL gcloud runs, against whatever project the developer
+    # happens to be authenticated to. Tests do not touch anybody's cloud.
+    gc = bin_dir / "gcloud"
+    gc.write_text("#!/usr/bin/env bash\n"
+                  "echo \"$*\" >>\"$TF_LOG_FILE\"\n"
+                  "printf '9@cloudbuild.gserviceaccount.com'\n", encoding="utf-8")
+    gc.chmod(0o755)
     return tree, bin_dir
 
 
@@ -145,11 +153,18 @@ def main():
         #    still chose the resources, and the coordinate guard could not see
         #    it — so it has to be unreachable from the command line too, which
         #    only `override` achieves.
-        rc, _, calls = run_make(tree, bin_dir, "gcp-env-init",
-                                extra=("TF_STATE_BUCKET=someone-elses-bucket",))
-        check("TF_STATE_BUCKET cannot redirect the backend",
-              all("someone-elses-bucket" not in c for c in calls)
-              and any("bucket=my-proj-map-tfstate" in c for c in calls), str(calls))
+        #    Both variables, because locking only the inner one looked sufficient
+        #    and was not: TF_BACKEND is what the recipes actually pass, so
+        #    overriding IT replaces the whole flag and reaches any bucket at all.
+        for var, value in (
+            ("TF_STATE_BUCKET", "someone-elses-bucket"),
+            ("TF_BACKEND", "-backend-config=bucket=someone-elses-bucket"),
+        ):
+            rc, _, calls = run_make(tree, bin_dir, "gcp-env-init",
+                                    extra=(f"{var}={value}",))
+            check(f"{var} cannot redirect the backend",
+                  all("someone-elses-bucket" not in c for c in calls)
+                  and any("bucket=my-proj-map-tfstate" in c for c in calls), str(calls))
 
         # 3. The coordinate guard, on every target that selects a backend, and
         #    BEFORE terraform is invoked at all — not merely somewhere in the
@@ -227,6 +242,19 @@ def main():
         check("a stray OUT cannot redirect the coordinate check",
               rc != 0 and calls == [] and "project_id" in out,
               f"rc={rc} calls={calls} out={out[:200]}")
+
+        # 8c. ...and the generator pins OUT too, where the consequence is worse:
+        #     generation READS OUT, so a stray one writes the file where
+        #     Terraform will never look while reporting success, and the next
+        #     apply then tells you to run the command that just "worked".
+        env_tfvars = tree / "deploy" / "gcp" / "environment" / "terraform.tfvars"
+        env_tfvars.unlink(missing_ok=True)
+        stray_gen = tree / "stray-generated.tfvars"
+        rc, out, _ = run_make(tree, bin_dir, "gcp-env-tfvars",
+                              stray_out=stray_gen, tfvars=None)
+        check("a stray OUT cannot redirect where the generator writes",
+              env_tfvars.exists() and not stray_gen.exists(),
+              f"rc={rc} real={env_tfvars.exists()} stray={stray_gen.exists()} out={out[:200]}")
 
         # 9. No PROJECT, no bucket name — and nothing run.
         for target in ("gcp-env-init", "gcp-env-apply", "gcp-env-destroy",

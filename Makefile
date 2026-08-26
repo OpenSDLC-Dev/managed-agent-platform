@@ -319,8 +319,14 @@ GCP_TF ?= terraform
 # `override`, not `=`: a plain assignment still loses to `make TF_STATE_BUCKET=…`
 # on the command line, which is the same bypass by another spelling.
 NAME_PREFIX_OR_DEFAULT = $(or $(NAME_PREFIX),map)
+# BOTH are `override`, and the second is not redundant. TF_BACKEND is what the
+# recipes actually pass; overriding it on the command line replaces the whole
+# definition, so `make TF_BACKEND='-backend-config=bucket=other' gcp-env-destroy`
+# reaches an arbitrary bucket no matter how TF_STATE_BUCKET is declared — the
+# same hazard, one variable further out. Locking only the inner one looked
+# sufficient and was not.
 override TF_STATE_BUCKET = $(PROJECT)-$(NAME_PREFIX_OR_DEFAULT)-tfstate
-TF_BACKEND = -backend-config="bucket=$(TF_STATE_BUCKET)"
+override TF_BACKEND = -backend-config="bucket=$(TF_STATE_BUCKET)"
 
 # An empty PROJECT would compose `-map-tfstate`, which is not a legal bucket name
 # and fails several steps later with a message about the bucket rather than about
@@ -445,8 +451,15 @@ gcp-foundation-apply:
 # environment/terraform.tfvars. Run it after gcp-foundation-apply: the Cloud
 # Build account it looks up does not exist until that API is on. Refuses to
 # overwrite an existing file, which may carry settings it does not generate.
+#
+# OUT is pinned here for the same reason gcp-env-vars-match pins it, and the
+# consequence is nastier on this side: generation READS OUT too, so a stray one
+# writes the file somewhere Terraform will never look while reporting success —
+# and the next `make gcp-env-apply` then fails telling you to run
+# `make gcp-env-tfvars`, the command that just appeared to work.
 gcp-env-tfvars: gcp-require-project
 	PROJECT=$(PROJECT) NAME_PREFIX=$(NAME_PREFIX_OR_DEFAULT) KMS_LOCATION=$(KMS_LOCATION) \
+		OUT=deploy/gcp/environment/terraform.tfvars \
 		bash deploy/gcp/tfvars.sh
 
 # Point a checkout at the state and stop, which is the capability the move to a

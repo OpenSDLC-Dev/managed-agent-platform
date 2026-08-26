@@ -182,7 +182,8 @@ def main():
         out = tmp / "d.tfvars"
         r = run(tmp, account="9@cloudbuild.gserviceaccount.com\\n", prefix="alt", out=out)
         got = parse(out) if out.exists() else {}
-        check("NAME_PREFIX reaches the file", got.get("name_prefix") == "alt", str(got))
+        check("NAME_PREFIX reaches the file", got.get("name_prefix") == "alt",
+              f"{r.returncode} {r.stderr} {got}")
 
         # 5. kms_location has to reach the file when it is not the shared default,
         #    because environment/ looks the key ring up by location and foundation/

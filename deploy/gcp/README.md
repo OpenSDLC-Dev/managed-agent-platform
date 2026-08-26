@@ -1317,9 +1317,13 @@ error message suggests, because that command has no bucket to use; this target i
 that still holds the file:**
 
 ```sh
+PROJECT=your-project make gcp-env-tfvars          # FIRST, if this checkout has no terraform.tfvars
 PROJECT=your-project make gcp-env-migrate-state   # answer `yes` when it offers to copy
-PROJECT=your-project make gcp-env-tfvars          # if this checkout has no terraform.tfvars
 ```
+
+The order is not cosmetic: `gcp-env-migrate-state` runs the coordinate guard, and the guard
+refuses a checkout with no `terraform.tfvars` at all — so the migration cannot be the first
+command on the machine that needs it most.
 
 Deliberately not `-input=false`: the confirmation Terraform asks for before copying state is
 the point. Afterwards every machine with credentials shares one state, and the
@@ -1355,7 +1359,11 @@ terraform import google_service_account.brain              "$P/serviceAccounts/m
 terraform import google_service_account.executor           "$P/serviceAccounts/map-executor@your-project.iam.gserviceaccount.com"
 terraform import google_secret_manager_secret.db_password       "$P/secrets/map-db-password"
 terraform import google_secret_manager_secret.db_admin_password "$P/secrets/map-db-admin-password"
-for api in cloudbuild cloudkms iam iamcredentials secretmanager; do
+# The state bucket (#478). Missing it is the worst case in this list, because a
+# bucket name is GLOBAL: the apply does not report "already managed elsewhere",
+# it fails to create a name that is taken — and it is taken by you.
+terraform import google_storage_bucket.tfstate             "your-project/your-project-map-tfstate"
+for api in cloudbuild cloudkms iam iamcredentials secretmanager storage; do
   terraform import "google_project_service.required[\"$api.googleapis.com\"]" "your-project/$api.googleapis.com"
 done
 ```
