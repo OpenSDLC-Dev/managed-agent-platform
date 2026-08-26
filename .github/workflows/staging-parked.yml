@@ -346,7 +346,7 @@ jobs:
                 "gh workflow run deploy.yml --ref main" \
                 '```' \
                 "" \
-                "If staging is not coming back, \`make gcp-env-destroy\` is the other answer and the cheaper one — this issue closes itself either way." \
+                "If staging is not coming back, \`PROJECT=… make gcp-env-destroy\` is the other answer and the cheaper one — this issue closes itself either way." \
                 "" \
                 "It closes automatically: the next run of this workflow that finds the cluster unparked, or gone, closes it, and a completed \`deploy\` is one of its triggers.")"
 

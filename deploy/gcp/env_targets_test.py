@@ -250,6 +250,23 @@ def main():
                               and "-input=false" not in c for c in calls),
               f"rc={rc} calls={calls}")
 
+        # 7b. ...and the other three MUST carry -input=false, which the check
+        #     above only says migrate-state must not. The flag is the reason
+        #     running them before gcp-env-migrate-state is safe: with local state
+        #     present and the backend changed, Terraform asks to migrate, and
+        #     -input=false turns that prompt into a refusal instead of a silent
+        #     adoption of an empty remote state. Asserting only its ABSENCE on
+        #     one recipe leaves it deletable from the three where it is the
+        #     safety property.
+        for target, state in (("gcp-env-init", ""),
+                              ("gcp-env-apply", ""),
+                              ("gcp-env-destroy", "google_container_cluster.map\n")):
+            rc, out, calls = run_make(tree, bin_dir, target, state=state)
+            inits = [c for c in calls if "init" in c.split()]
+            check(f"{target} inits with -input=false, so a migration prompt refuses",
+                  bool(inits) and all("-input=false" in c for c in inits),
+                  f"rc={rc} calls={calls}")
+
         # 8b. The recipe PINS OUT, and popping it from the environment above is
         #     precisely what hid the pin's absence. A stray OUT — left over from
         #     anything — points --check at a file Terraform will not read, and
@@ -275,6 +292,20 @@ def main():
         check("a stray OUT cannot redirect where the generator writes",
               env_tfvars.exists() and not stray_gen.exists(),
               f"rc={rc} real={env_tfvars.exists()} stray={stray_gen.exists()} out={out[:200]}")
+
+        # 8d. ...and the recipe has to PASS KMS_LOCATION, which 8c does not say:
+        #     it asserts where the file is written and never what is in it. Drop
+        #     the assignment and the operator's choice lands on the floor —
+        #     foundation/ keyed in one location, environment/ configured for
+        #     another. That fails at plan rather than silently, but only after a
+        #     tfvars that looks correct has been written and reported as success.
+        env_tfvars.unlink(missing_ok=True)
+        rc, out, _ = run_make(tree, bin_dir, "gcp-env-tfvars", tfvars=None,
+                              extra=("KMS_LOCATION=us-west1",))
+        written = env_tfvars.read_text(encoding="utf-8") if env_tfvars.exists() else ""
+        check("KMS_LOCATION reaches the generated tfvars",
+              rc == 0 and 'kms_location' in written and '"us-west1"' in written,
+              f"rc={rc} written={written[:200]!r} out={out[:200]}")
 
         # 9. No PROJECT, no bucket name — and nothing run.
         for target in ("gcp-env-init", "gcp-env-apply", "gcp-env-destroy",

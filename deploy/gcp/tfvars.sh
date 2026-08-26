@@ -144,24 +144,41 @@ if [[ "${1:-}" == "--check" ]]; then
 	fi
 
 	# One assignment per variable: Terraform rejects a file that assigns the same
-	# one twice, so there is nothing to disambiguate here.
+	# one twice, so `head -1` never has to adjudicate a duplicate.
 	#
-	# Everything Terraform does not read as an assignment is stripped first, and
-	# the two that matter are block comments and heredoc bodies. Both are text a
-	# line-oriented sed treats as live:
+	# What it does have to survive is text Terraform does not read as a top-level
+	# assignment but a line-oriented sed does. Three kinds, each reduced to a
+	# blank line below:
 	#
 	#   /* name_prefix = "acme" */        a comment Terraform never sees
 	#   notes = <<EOT                     a heredoc BODY, likewise
 	#   project_id = "evil"
 	#   EOT
+	#   extra = {                         an object VALUE: Terraform reads
+	#     project_id = "evil"             `extra`, never the key inside it
+	#   }
 	#
-	# Either one read as agreement pairs one environment's bucket with another's
+	# Any of them read as agreement pairs one environment's bucket with another's
 	# resources while the guard says yes, which is the whole failure this exists
 	# to stop. check_split.py strips heredocs for the same reason and learned it
-	# the same way. An unterminated comment or heredoc swallows the rest of the
-	# file, project_id goes missing, and the check refuses — the safe direction,
-	# and the only sane answer for input Terraform would reject as a syntax error.
-	strip_comments() {
+	# the same way.
+	#
+	# Nesting is tracked by bracket DEPTH rather than by indentation, because HCL
+	# does not require an object's attributes to be indented: an indentation rule
+	# reads a nested key written at column 0 as top-level. Refusing indented
+	# assignments instead is no better — Terraform accepts indentation on a real
+	# top-level one, and for name_prefix "not found" means the default below, so
+	# refusing to read one would agree with a prefix the file does not name.
+	#
+	# Braces alone would in fact do, since HCL has no way to write a bare
+	# `key = value` inside a list without an object around it — brackets are
+	# counted because that is what depth means, and no test can tell the two
+	# apart on a file Terraform accepts.
+	#
+	# An unterminated comment, heredoc or bracket swallows the rest of the file,
+	# project_id goes missing, and the check refuses — the safe direction, and the
+	# only sane answer for input Terraform would reject as a syntax error.
+	top_level() {
 		awk '
 			{ line = $0
 			  if (heretag != "") {
@@ -169,6 +186,7 @@ if [[ "${1:-}" == "--check" ]]; then
 			    if (t == heretag) heretag = ""
 			    print ""; next
 			  }
+			  startdepth = depth
 			  out = ""; i = 1
 			  while (i <= length(line)) {
 			    c = substr(line, i, 1); d = substr(line, i, 2)
@@ -186,13 +204,15 @@ if [[ "${1:-}" == "--check" ]]; then
 			      }
 			    }
 			    if (c == "\"") inquote = 1
+			    else if (c == "{" || c == "[") depth++
+			    else if (c == "}" || c == "]") depth--
 			    out = out c; i++
 			  }
-			  print out }
+			  if (startdepth == 0) print out; else print "" }
 		' "$OUT"
 	}
 	tfvar() {
-		strip_comments |
+		top_level |
 			sed -n "s/^[[:space:]]*$1[[:space:]]*=[[:space:]]*\"\([^\"]*\)\".*/\1/p" | head -1
 	}
 	got_project="$(tfvar project_id)"

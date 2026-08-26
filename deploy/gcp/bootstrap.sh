@@ -7,9 +7,14 @@
 # names, IAM bindings and preconditions, and value creation lives here.
 #
 # Run order:
-#     make gcp-foundation-apply     # the secrets exist, empty
-#     make gcp-bootstrap            # this script: they get values
-#     make gcp-env-apply            # reads them, never storing one
+#     make gcp-foundation-apply              # the secrets exist, empty
+#     PROJECT=… make gcp-bootstrap           # this script: they get values
+#     PROJECT=… make gcp-env-tfvars          # writes environment/terraform.tfvars
+#     PROJECT=… make gcp-env-apply           # reads them, never storing one
+#
+# Since #478 `PROJECT` is half the state bucket's name, so the gcp-env-* targets
+# require it; and gcp-env-apply refuses until the tfvars above exists, because
+# PROJECT and that file are two independent inputs that must not disagree.
 #
 # Idempotent by SKIPPING, not by overwriting. The acceptance criterion is
 # reproduce-from-clean, not reproduce-by-overwrite: a secret that already has a
@@ -153,5 +158,5 @@ ensure_password_secret "$db_secret" "the platform's own database role"
 ensure_password_secret "$db_admin_secret" "the Cloud SQL built-in administrator"
 
 echo
-echo "Next: make gcp-env-apply"
-echo "It reads these ephemerally and stores none of them."
+echo "Next: PROJECT=$PROJECT make gcp-env-tfvars    # writes environment/terraform.tfvars"
+echo "Then: PROJECT=$PROJECT make gcp-env-apply     # reads these ephemerally, stores none"

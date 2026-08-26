@@ -469,6 +469,12 @@ gcp-foundation-apply:
 # writes the file somewhere Terraform will never look while reporting success —
 # and the next `make gcp-env-apply` then fails telling you to run
 # `make gcp-env-tfvars`, the command that just appeared to work.
+#
+# Of the three assignments below only NAME_PREFIX does work — it applies the
+# `map` default. Make already exports a variable that came from the command line
+# or the environment into every recipe, so PROJECT and KMS_LOCATION would reach
+# the script without being named here; they are named to keep the script's whole
+# input in one place. Deleting either is a no-op, which is why no test pins it.
 gcp-env-tfvars: gcp-require-project
 	PROJECT=$(PROJECT) NAME_PREFIX=$(NAME_PREFIX_OR_DEFAULT) KMS_LOCATION=$(KMS_LOCATION) \
 		OUT=deploy/gcp/environment/terraform.tfvars \

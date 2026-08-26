@@ -409,6 +409,75 @@ def main():
         check("--check treats an omitted name_prefix as the default it is",
               r.returncode == 0, f"{r.returncode} {r.stderr}")
 
+        # 10a-2. Nesting. A key inside an object VALUE is not an assignment
+        #        Terraform reads — it reads `extra`, and never looks inside — but
+        #        to a line-oriented sed it is indistinguishable from a top-level
+        #        one, and `head -1` hands it the FIRST match. So the nested one
+        #        goes first here: that is the arrangement where the guard used to
+        #        report "evil" and agree with PROJECT=evil, while Terraform would
+        #        have applied against "my-proj".
+        nested_first = ('extra = {\n'
+                        '  project_id = "evil"\n'
+                        '}\n'
+                        'project_id = "my-proj"\n'
+                        'name_prefix = "acme"\n')
+        r = run(tmp, out=fixture(nested_first), project="evil", prefix="acme",
+                args=("--check",))
+        check("--check does not read a project_id nested in an object value",
+              r.returncode == 1 and "project_id" in r.stderr, f"{r.returncode} {r.stderr}")
+
+        #        ...and reads the real one, so closing that hole cannot have been
+        #        done by refusing the whole file.
+        r = run(tmp, out=fixture(nested_first), prefix="acme", args=("--check",))
+        check("...and still reads the top-level project_id below it",
+              r.returncode == 0, f"{r.returncode} {r.stderr}")
+
+        #        Depth is what distinguishes them, not indentation: HCL does not
+        #        require an object's attributes to be indented, so this file is
+        #        the same hazard written flat — and an indentation rule reads it
+        #        as top-level.
+        out = fixture('extra = {\n'
+                      'project_id = "evil"\n'
+                      '}\n'
+                      'project_id = "my-proj"\n'
+                      'name_prefix = "acme"\n')
+        r = run(tmp, out=out, project="evil", prefix="acme", args=("--check",))
+        check("--check is not fooled by a nested key written at column 0",
+              r.returncode == 1 and "project_id" in r.stderr, f"{r.returncode} {r.stderr}")
+
+        #        name_prefix is the sharper half: "not found" means the default,
+        #        so a nested one read as top-level agrees with a prefix the file
+        #        does not name — the wrong-state direction, silently.
+        out = fixture('project_id = "my-proj"\n'
+                      'extra = {\n'
+                      '  name_prefix = "evil"\n'
+                      '}\n')
+        r = run(tmp, out=out, prefix="evil", args=("--check",))
+        check("--check does not read a name_prefix nested in an object value",
+              r.returncode == 1 and "name_prefix" in r.stderr, f"{r.returncode} {r.stderr}")
+
+        #        Refusing indentation instead would have been the wrong fix:
+        #        Terraform accepts an indented top-level assignment, and this one
+        #        has to keep reading as the prefix it names.
+        out = fixture('project_id = "my-proj"\n  name_prefix = "acme"\n')
+        r = run(tmp, out=out, prefix="acme", args=("--check",))
+        check("--check still reads an INDENTED top-level name_prefix",
+              r.returncode == 0, f"{r.returncode} {r.stderr}")
+
+        #        The one structured variable environment/ declares is a list of
+        #        objects, and the real file carries it.
+        out = fixture('project_id = "my-proj"\n'
+                      'name_prefix = "acme"\n'
+                      'master_authorized_cidrs = [\n'
+                      '  {\n'
+                      '    cidr_block   = "10.0.0.0/8"\n'
+                      '    display_name = "office"\n'
+                      '  },\n'
+                      ']\n')
+        r = run(tmp, out=out, prefix="acme", args=("--check",))
+        check("--check passes a file carrying master_authorized_cidrs",
+              r.returncode == 0, f"{r.returncode} {r.stderr}")
+
         # 10b. Comments. `/* */` is the bypass that mattered: an assignment inside
         #      one is invisible to Terraform and was visible to a line-oriented
         #      sed, so the check agreed with a value Terraform never saw. `#` and

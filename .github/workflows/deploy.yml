@@ -26,8 +26,8 @@ name: deploy
 # but a CD job running `terraform apply` would be one bad plan away from
 # destroying the Cloud SQL instance the platform's data lives in, which is the
 # reason that never depended on where the state sat. `make gcp-foundation-apply`,
-# `make gcp-bootstrap`, `make gcp-env-apply` and `make gcp-db-init` stay
-# human-driven; this workflow assumes they have already run. In mode 2 that last
+# `make gcp-bootstrap`, `make gcp-env-tfvars`, `make gcp-env-apply` and
+# `make gcp-db-init` stay human-driven; this workflow assumes they have already run. In mode 2 that last
 # one is not a formality: the DSN in `database-url` names the `map` role, and
 # `gcp-db-init` is the only thing that creates it.
 #

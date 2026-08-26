@@ -54,7 +54,7 @@ sql="$here/dbinit.sql"
 # Anchored to the script, like $sql above, rather than to the repository root.
 # A working-directory-relative default works under `make gcp-db-init` and fails
 # everywhere else, and it fails as `terraform -chdir` not finding the directory
-# — which tf_out reports as "Run 'make gcp-env-apply' first", naming a cause
+# — which tf_out reports as "Run '… make gcp-env-init' first", naming a cause
 # that is not the cause.
 ENV_DIR="${ENV_DIR:-$here/environment}"
 

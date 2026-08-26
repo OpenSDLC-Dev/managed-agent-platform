@@ -629,8 +629,9 @@ PROJECT=… make gcp-env-destroy
 
 destroys the cluster, Cloud SQL, the environment's **blob** bucket and the registry, and
 leaves `foundation/` alone — including the bucket holding `environment/`'s own Terraform
-state, which lives in `foundation/` and carries `prevent_destroy` precisely so that this
-command cannot reach it. It is deliberately **not idempotent**: run it twice and the second refuses, because
+state. What puts that bucket out of this command's reach is that it belongs to
+`foundation/`'s state, which this command never touches; `prevent_destroy` is the separate
+guard, against a `foundation/` destroy, and `foundation/` has no destroy target at all. It is deliberately **not idempotent**: run it twice and the second refuses, because
 the state is empty by then and Terraform cannot tell an already-destroyed environment from a
 checkout pointed at the wrong bucket — and only one of those quietly leaves a cluster
 billing. Three settings make that possible and are deliberately non-default: the cluster's
