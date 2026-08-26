@@ -265,42 +265,45 @@ jobs:
       # nowhere to schedule and go red on the smoke test — turning a deliberate
       # cost saving into a permanently red CD that everyone learns to ignore.
       #
-      # The signal is the LABEL, not the node count, and the difference matters:
-      # a cluster at zero nodes with no `power-saved-*` label was not parked by
-      # anyone, it fell over, and that must still fail loudly. Only `stop` writes
-      # those labels and only `start` removes them, so their presence is the
-      # operator's own statement of intent and nothing else's.
+      # What counts as parked — the LABEL rather than the node count, so that a
+      # cluster at zero nodes nobody parked still fails loudly — is argued once,
+      # in the script both this workflow and staging-parked.yml ask.
       #
       # A notice rather than a silent pass: a parked environment that nobody
       # remembers to revive should be visible in the run, since a green CD is
-      # otherwise indistinguishable from a deployed one.
+      # otherwise indistinguishable from a deployed one. The run summary is as
+      # far as that visibility reaches, though, and staging-parked.yml is the
+      # rest of the answer (#504) — it reads the same labels through the same
+      # script, on a schedule, and keeps an issue open while they are there.
       - name: A parked environment is skipped rather than failed
         shell: bash
         run: |
           labels="$(gcloud container clusters describe "$GKE_CLUSTER" \
             --zone "$GCP_ZONE" --project "$GCP_PROJECT_ID" \
             --format='value(resourceLabels)')"
-          # `value()` renders the map as `key=value;key=value`, so a bare
-          # `*power-saved-*` would also match a VALUE that happens to contain the
-          # prefix — `deployment-note=power-saved-example` would silently stop
-          # deploying to a cluster nobody parked. Prefixing the string with the
-          # separator makes the glob anchor at a key: the first key then follows a
-          # `;` like every other, and a value never can, because a GCP label may
-          # hold only lowercase letters, digits, `-` and `_`. `env-power.sh`
-          # matches the same way, for the same reason.
-          case ";$labels" in
-            *";power-saved-"*)
-              echo "POWERED_OFF=true" >> "$GITHUB_ENV"
-              echo "::notice::staging is parked ($labels) — nothing was deployed. Revive it with PROJECT=... make gcp-env-start, then re-run this workflow to catch staging up to main."
-              # Also on the run SUMMARY, because that is the one place the
-              # distinction is visible without opening a log: this run is green
-              # and deployed nothing, and in the Actions list it is otherwise
-              # indistinguishable from one that did (#479).
-              echo "### staging is parked — nothing was deployed" >> "$GITHUB_STEP_SUMMARY"
-              echo "" >> "$GITHUB_STEP_SUMMARY"
-              echo "Labels: \`$labels\`. Revive with \`PROJECT=… make gcp-env-start\`, then re-run this workflow to catch staging up to \`main\`." >> "$GITHUB_STEP_SUMMARY"
-              ;;
-          esac
+          # Shared with staging-parked.yml rather than spelled out twice: the two
+          # answer opposite halves of one question about the same cluster, so a
+          # disagreement between them is a lie either way round. The rule is "a
+          # label KEY beginning with the prefix", which is one `;` away from also
+          # matching a label VALUE — the script argues it and `make parked-test`
+          # holds it.
+          #
+          # Assigned before it is tested, not called inside the `if`: a
+          # condition is exempt from `-e`, so a script that failed there would
+          # read as "not parked" and deploy into a cluster with nowhere to
+          # schedule. As an assignment the same failure stops the run.
+          state="$(bash .github/scripts/parked.sh "$labels")"
+          if [ "$state" = parked ]; then
+            echo "POWERED_OFF=true" >> "$GITHUB_ENV"
+            echo "::notice::staging is parked ($labels) — nothing was deployed. Revive it with PROJECT=... make gcp-env-start, then re-run this workflow to catch staging up to main."
+            # Also on the run SUMMARY, because that is the one place the
+            # distinction is visible without opening a log: this run is green
+            # and deployed nothing, and in the Actions list it is otherwise
+            # indistinguishable from one that did (#479).
+            echo "### staging is parked — nothing was deployed" >> "$GITHUB_STEP_SUMMARY"
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+            echo "Labels: \`$labels\`. Revive with \`PROJECT=… make gcp-env-start\`, then re-run this workflow to catch staging up to \`main\`." >> "$GITHUB_STEP_SUMMARY"
+          fi
 
       # The chart's Cloud SQL Auth Proxy takes the instance's CONNECTION NAME,
       # which is an operator identifier — so staging-values.yaml carries only the

@@ -1090,6 +1090,11 @@ jobs:
         run: make gcp-power-test
       - name: the CD outcome classifier decides what it claims
         run: make cd-outcome-test
+      # Whether a cluster is parked decides both whether deploy.yml deploys at
+      # all and whether staging-parked.yml files an issue, and the rule is one
+      # `;` away from also matching a label VALUE.
+      - name: the parked-cluster signal reads what it claims
+        run: make parked-test
       # deploy-alert.yml couples to deploy.yml three ways, and all three fail
       # SILENTLY: the trigger stops matching, or every deploy classifies as
       # `parked` so no successful run ever closes a CD issue again. Nor can any
@@ -1128,6 +1133,54 @@ jobs:
             || { echo "$A keys on a step named '$step' and $wf has no such step" >&2; exit 1; }
 
           echo "ok: $wf is named '$trig' and still has the step '$step' the CD notifier reads"
+
+      # One string spans three files: env-power.sh WRITES the parked label,
+      # parked.sh READS it, and two workflows act on the answer. Every
+      # disagreement is silent and each costs something different — a notifier
+      # that never sees a parked cluster, or a deploy that refuses to install
+      # into a running one. The prefix is read out of each file rather than
+      # restated here, so a rename on one side alone is what goes red.
+      - name: the parked-label signal agrees across the files that read and write it
+        run: |
+          set -euo pipefail
+          only() { # the single `NAME="value"` assignment of $2 in file $1
+            local out
+            out="$(grep -oE "^$2=\"[^\"]+\"" "$1" | sed -E 's/^[A-Z_]+="(.*)"$/\1/' | sort -u)"
+            if [ "$(printf '%s\n' "$out" | grep -c .)" -ne 1 ]; then
+              echo "expected exactly one $2 assignment in $1, got: $out" >&2
+              exit 1
+            fi
+            printf '%s' "$out"
+          }
+          reader="$(only .github/scripts/parked.sh PREFIX)"
+          writer="$(only deploy/gcp/env-power.sh LABEL_PREFIX)"
+          [ "$reader" = "$writer" ] \
+            || { echo "parked.sh reads '$reader' but env-power.sh writes '$writer'" >&2; exit 1; }
+
+          # And neither workflow has quietly gone back to its own copy of the
+          # rule, which is how the two would drift apart again. COMMENT lines are
+          # skipped, or both files satisfy this by merely naming the script in
+          # the prose that explains why they share it — which is exactly how a
+          # commented-out step once passed the CD notifier's guard.
+          for f in .github/workflows/deploy.yml .github/workflows/staging-parked.yml; do
+            awk '{ l = $0; sub(/^[[:space:]]+/, "", l)
+                   if (l !~ /^#/ && index(l, "scripts/parked.sh")) found = 1 }
+                 END { exit !found }' "$f" \
+              || { echo "$f no longer asks .github/scripts/parked.sh whether the cluster is parked" >&2
+                   exit 1; }
+          done
+
+          # The closer's trigger, matched against deploy.yml's `name:` rather
+          # than its filename. Broken, the issue still closes — on the next
+          # Monday instead of within minutes — so this guards a degradation
+          # rather than a breakage, and it is here because it is silent.
+          trig="$(grep -oE '^[[:space:]]*workflows: \[.+\]$' .github/workflows/staging-parked.yml \
+            | sed -E 's/.*\[(.*)\]/\1/' | sort -u)"
+          grep -qxF "name: $trig" .github/workflows/deploy.yml \
+            || { echo "staging-parked.yml closes on a workflow named '$trig' and deploy.yml declares a different name" >&2
+                 exit 1; }
+
+          echo "ok: '$reader' is written by env-power.sh, read by parked.sh, and asked for by both workflows"
 
   # Local dev stack: validate the compose file, build the image, and smoke-test
   # that the control plane comes up and serves (migrations + auth) and the brain

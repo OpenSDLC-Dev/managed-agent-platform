@@ -153,11 +153,27 @@ parked has fallen over, and that still fails loudly. Staging therefore stays at 
 commit it was parked on; `gh workflow run deploy.yml --ref main` catches it up.
 
 **Which means a green `deploy` no longer means "deployed".** A parked run is green and
-installed nothing, and in the Actions list it looks exactly like one that shipped. Two things
-close that gap. The parked step writes the fact to the run summary, so it is legible without
-opening a log. And `deploy-alert.yml` — the failure notifier below — reads the run's own
+installed nothing, and in the Actions list it looks exactly like one that shipped. Three
+things close that gap. The parked step writes the fact to the run summary, so it is legible
+without opening a log. `deploy-alert.yml` — the failure notifier below — reads the run's own
 steps rather than its conclusion, so a parked run never closes an open CD-failure issue: a
-run that deployed nothing is not evidence that anything was fixed.
+run that deployed nothing is not evidence that anything was fixed. And
+[`staging-parked.yml`](../../.github/workflows/staging-parked.yml) covers the one thing
+neither of those can, which is time passing.
+
+**Parked and then forgotten** is that third one's subject (#504), and the table above is why
+it is not merely a staleness problem: storage, the control plane and the LoadBalancers keep
+billing. It asks the CLUSTER weekly rather than the deploy history — a deploy run exists only
+when somebody pushes, and a quiet fortnight is exactly when an environment gets forgotten —
+and keeps one issue open while the labels are there. Only the scheduled run opens it, so the
+cadence is the grace period and there is no threshold to tune; it is never commented on
+again, because a standing flag's age is the answer to "how long"; and it closes itself, with
+a completed `deploy` among its triggers so reviving staging retires it in minutes rather than
+by the next Monday. Nobody is assigned — a schedule has no actor, and `github.actor` on one
+is whoever last edited the cron. The rule separating parked from running lives in
+[`.github/scripts/parked.sh`](../../.github/scripts/parked.sh), which `deploy.yml` reads too
+so the two can never disagree about one cluster; `make parked-test` holds it, and CI checks
+that the prefix they read is still the one `env-power.sh` writes.
 
 ## Prerequisites
 
