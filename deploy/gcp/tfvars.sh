@@ -84,6 +84,16 @@ fi
 #
 # So the targets that touch the backend assert the two agree first. Nothing here
 # talks to GCP: it is a comparison between a file and two variables.
+
+# An unrecognised argument is refused rather than ignored. Falling through to
+# generate mode meant `--chek` silently WROTE a file on a fresh checkout — the
+# opposite of what the operator asked for, from a single transposed letter.
+if [[ $# -gt 1 || ( $# -eq 1 && "${1:-}" != "--check" ) ]]; then
+	echo "unknown argument: $*" >&2
+	echo "usage: PROJECT=… $0 [--check]" >&2
+	exit 2
+fi
+
 if [[ "${1:-}" == "--check" ]]; then
 	if [[ ! -e "$OUT" ]]; then
 		echo "no ${OUT}" >&2
@@ -93,14 +103,59 @@ if [[ "${1:-}" == "--check" ]]; then
 		exit 1
 	fi
 
+	# `*.auto.tfvars` is a SECOND source of the same variables, loaded
+	# automatically and after this file, so it can set project_id or name_prefix
+	# where this check cannot see it. Nothing in this repository writes one, so
+	# its presence means somebody layered inputs deliberately — and a guard that
+	# silently stops covering the thing it names is worse than no guard. Refuse
+	# and say so. (`-var` and TF_CLI_ARGS_* can do the same and arrive after this
+	# process has exited; those are out of reach of any check here, and this
+	# comment is the honest limit of what --check promises.)
+	shopt -s nullglob
+	autos=("$(dirname "$OUT")"/*.auto.tfvars "$(dirname "$OUT")"/*.auto.tfvars.json)
+	shopt -u nullglob
+	if [[ ${#autos[@]} -gt 0 ]]; then
+		echo "refusing: ${autos[*]} would be loaded too, after ${OUT}." >&2
+		echo "This check reads only ${OUT}, so it cannot tell you which project_id and" >&2
+		echo "name_prefix Terraform will actually use. Fold them into ${OUT} or remove them." >&2
+		exit 1
+	fi
+
 	# One assignment per variable: Terraform rejects a file that assigns the same
 	# one twice, so there is nothing to disambiguate here.
+	#
+	# Comments are stripped FIRST, and `/* */` is the reason. An assignment inside
+	# a block comment is invisible to Terraform and — before this — visible to a
+	# line-oriented sed, so `project_id = "prod"` beside a commented-out
+	# `name_prefix = "acme"` read as agreeing with NAME_PREFIX=acme while Terraform
+	# used the default. That pairs one environment's bucket with another's
+	# resources with the guard green, which is the whole failure it exists to stop.
+	strip_comments() {
+		awk '
+			{ line = $0; out = ""; i = 1
+			  while (i <= length(line)) {
+			    c = substr(line, i, 1); d = substr(line, i, 2)
+			    if (inblock) { if (d == "*/") { inblock = 0; i += 2 } else i++ ; continue }
+			    if (inquote) { out = out c; if (c == "\\") { out = out substr(line, i+1, 1); i += 2; continue }
+			                   if (c == "\"") inquote = 0; i++; continue }
+			    if (d == "/*") { inblock = 1; i += 2; continue }
+			    if (d == "//" || c == "#") break
+			    if (c == "\"") inquote = 1
+			    out = out c; i++
+			  }
+			  print out }
+		' "$OUT"
+	}
 	tfvar() {
-		sed -n "s/^[[:space:]]*$1[[:space:]]*=[[:space:]]*\"\([^\"]*\)\".*/\1/p" "$OUT" | head -1
+		strip_comments |
+			sed -n "s/^[[:space:]]*$1[[:space:]]*=[[:space:]]*\"\([^\"]*\)\".*/\1/p" | head -1
 	}
 	got_project="$(tfvar project_id)"
 	# Absent means the variables.tf default, which is the same "map" this script
 	# defaults NAME_PREFIX to — so a hand-written tfvars that omits it agrees.
+	# An explicit `name_prefix = ""` reads the same way here, which is imprecise
+	# and harmless: variables.tf requires `^[a-z][a-z0-9-]{0,16}$`, so Terraform
+	# rejects the empty string at plan. A loud failure, not a wrong-state one.
 	got_prefix="$(tfvar name_prefix)"
 	got_prefix="${got_prefix:-map}"
 
@@ -183,9 +238,21 @@ account="${raw##*/}"
 # of variables.tf and requires that what this script accepts is exactly what
 # that regex accepts.
 #
+# It is deliberately a STRICT SUBSET of that regex rather than a copy of it, and
+# the difference is the characters Terraform's pattern happens to allow but a
+# quoted HCL string cannot survive. `[^@ /]` admits `"`, `\`, `$` and `%`, so
+# `x"@y.gserviceaccount.com` passes validation and is then emitted verbatim
+# between quotes — a syntax error, or worse a `${...}`/`%{...}` template that
+# evaluates. No real service account contains any of them: the three shapes GCP
+# issues are PROJECT_NUMBER@cloudbuild, PROJECT_NUMBER-compute@developer, and
+# NAME@PROJECT.iam. Rejecting output that cannot be one of those is the promise
+# this script makes; matching Terraform exactly would be keeping a bug for
+# symmetry. tfvars_test.py asserts the subset direction — that nothing this
+# accepts is rejected by variables.tf — over a corpus, in that direction only.
+#
 # Kept in a variable because `[[ =~ ]]` matches a QUOTED right-hand side as a
 # literal string; an unquoted expansion is the idiom, and `[[` does not word-split.
-ACCOUNT_RE='^[^@ /]+@[^@ /]+\.(iam\.)?gserviceaccount\.com$'
+ACCOUNT_RE='^[A-Za-z0-9._+-]+@[A-Za-z0-9.-]+\.(iam\.)?gserviceaccount\.com$'
 if [[ ! "$account" =~ $ACCOUNT_RE ]]; then
 	echo "the lookup returned '${raw}', which is not a service account email." >&2
 	echo "Expected something like 123456789@cloudbuild.gserviceaccount.com or" >&2

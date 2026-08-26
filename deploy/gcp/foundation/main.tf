@@ -272,8 +272,14 @@ resource "google_storage_bucket" "tfstate" {
   #
   # The same expression is what the Makefile composes from PROJECT and
   # NAME_PREFIX to pass as `-backend-config`, since a backend block cannot
-  # interpolate a variable. If the two ever disagree, `terraform init` fails
-  # saying the bucket does not exist; nothing here can fail quietly.
+  # interpolate a variable. If somebody edits only the Makefile's copy, init
+  # names a bucket that does not exist and fails — but that is not the guarantee
+  # it first looks like: edit only THIS one and the old bucket survives
+  # (`prevent_destroy`) still holding the real state, so init succeeds against
+  # it. What actually keeps an operation off the wrong state is
+  # `gcp-env-vars-match`, which compares the file against the coordinates on
+  # every target that selects a backend. This expression's job is only to spare
+  # an operator from writing the name down twice.
   name     = "${var.project_id}-${var.name_prefix}-tfstate"
   location = var.state_bucket_location
 

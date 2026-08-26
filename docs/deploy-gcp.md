@@ -628,7 +628,10 @@ PROJECT=… make gcp-env-destroy
 ```
 
 destroys the cluster, Cloud SQL, the bucket and the registry, and leaves `foundation/`
-alone. Three settings make that possible and are deliberately non-default: the cluster's
+alone. It is deliberately **not idempotent**: run it twice and the second refuses, because
+the state is empty by then and Terraform cannot tell an already-destroyed environment from a
+checkout pointed at the wrong bucket — and only one of those quietly leaves a cluster
+billing. Three settings make that possible and are deliberately non-default: the cluster's
 `deletion_protection`, Cloud SQL's two separate deletion-protection flags, and the bucket's
 `force_destroy`. All three are correct for staging and wrong for anything holding data
 someone would miss.

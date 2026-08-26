@@ -63,14 +63,23 @@ case "$1 $2" in
   "builds get-default-service-account") ;;
   *) echo "fake gcloud: unexpected call: $*" >&2; exit 99 ;;
 esac
-case " $* " in
-  *" --project=$EXPECT_PROJECT "*) ;;
-  *) echo "fake gcloud: expected --project=$EXPECT_PROJECT in: $*" >&2; exit 98 ;;
-esac
-case " $* " in
-  *" --format=value(serviceAccountEmail) "*) ;;
-  *) echo "fake gcloud: expected --format=value(serviceAccountEmail) in: $*" >&2; exit 97 ;;
-esac
+# Compared per ARGUMENT, not against a flattened "$*": `--project=X --format=Y`
+# passed as one string containing a space would satisfy a substring search and
+# reach real gcloud as a single malformed argument.
+want_project="--project=$EXPECT_PROJECT"
+want_format="--format=value(serviceAccountEmail)"
+seen_project=0
+seen_format=0
+for a in "$@"; do
+  [ "$a" = "$want_project" ] && seen_project=1
+  [ "$a" = "$want_format" ] && seen_format=1
+done
+if [ "$seen_project" -ne 1 ]; then
+  echo "fake gcloud: expected exactly '$want_project' among the arguments: $*" >&2; exit 98
+fi
+if [ "$seen_format" -ne 1 ]; then
+  echo "fake gcloud: expected exactly '$want_format' among the arguments: $*" >&2; exit 97
+fi
 if [ -n "${FAKE_FAIL:-}" ]; then
   printf '%s\n' "$FAKE_FAIL" >&2
   exit 1
@@ -247,45 +256,69 @@ def main():
         check("no PROJECT is a usage error, and calls nothing",
               r.returncode == 2 and not out.exists(), f"{r.returncode} {r.stderr}")
 
-        # 9. The one that matters most, and the one a list of examples cannot
-        #    give you: what the script ACCEPTS must be exactly what Terraform
-        #    accepts, not a superset of it. A looser shell check writes a file
-        #    that only fails later, which is the whole thing this script exists
-        #    to prevent — and `*@*.gserviceaccount.com`, the obvious pattern, is
-        #    such a superset: it takes a second `@` and an empty half. So this
-        #    compares the two decisions over a corpus built out of the ways an
-        #    email can be malformed, and fails on ANY disagreement in either
-        #    direction. The regex side is read out of variables.tf.
-        corpus = [
-            "9@cloudbuild.gserviceaccount.com",
-            "9-compute@developer.gserviceaccount.com",
-            "9@my-proj.iam.gserviceaccount.com",
-            "a@b@c.gserviceaccount.com",          # two @ — regex says no
+        # 9. The property that matters, and the one a list of examples cannot
+        #    give you: **anything the script writes, Terraform accepts**. One
+        #    direction, deliberately. Equality was the first attempt and it was
+        #    wrong: `[^@ /]` admits `"`, `\`, `$` and `%`, so Terraform's own
+        #    regex takes `x"@y.gserviceaccount.com` — which is then emitted
+        #    inside quotes and is not HCL at all. Being STRICTER than Terraform
+        #    is correct there; being LOOSER never is, because looser is what
+        #    writes a file that only fails later.
+        #
+        #    So: no false accepts (checked against the regex read out of
+        #    variables.tf), and separately every shape GCP actually issues is
+        #    still accepted, which is what stops "stricter" drifting into
+        #    "rejects everything".
+        malformed = [
+            "a@b@c.gserviceaccount.com",          # two @
             "@x.gserviceaccount.com",             # empty local part
             "x@.gserviceaccount.com",             # empty domain label
             "x@y.gserviceaccount.com.evil.com",   # suffix is not the end
             "x@ygserviceaccount.com",             # missing the dot
             "x y@z.gserviceaccount.com",          # a space
-            "x@y.z.gserviceaccount.com",
             "x@gserviceaccount.com",
-            "9@developer.gserviceaccount.com",
             "not-an-account",
             "",
+            'x"@y.gserviceaccount.com',           # quote: breaks the HCL string
+            "x\\@y.gserviceaccount.com",          # backslash: an escape
+            "x$@y.gserviceaccount.com",           # $ : ${...} interpolation
+            "x%@y.gserviceaccount.com",           # % : %{...} directive
         ]
-        for i, value in enumerate(corpus):
+        real_forms = [
+            "123456789@cloudbuild.gserviceaccount.com",
+            "123456789-compute@developer.gserviceaccount.com",
+            "svc@my-proj.iam.gserviceaccount.com",
+            "9@y.z.gserviceaccount.com",
+        ]
+        for i, value in enumerate(malformed + real_forms):
             out = tmp / f"d{i}.tfvars"
-            # No trailing newline handling to confuse the comparison: the strip
+            # No trailing-newline handling to confuse the comparison: the strip
             # is tested above, this is about the accept/reject decision alone.
             r = run(tmp, account=value, out=out)
-            script_accepted = out.exists()
-            written = parse(out).get("cloud_build_service_account") if script_accepted else None
-            terraform_accepts = bool(accepts.fullmatch(value))
-            check(f"accept/reject agrees with Terraform for {value!r}",
-                  script_accepted == terraform_accepts
-                  and (not script_accepted or written == value),
-                  f"script {'wrote' if script_accepted else 'refused'} "
-                  f"{written!r}, terraform would "
-                  f"{'accept' if terraform_accepts else 'reject'} it")
+            written = parse(out).get("cloud_build_service_account") if out.exists() else None
+            if value in real_forms:
+                check(f"a real service account is accepted: {value!r}",
+                      written == value, f"wrote {written!r} rc={r.returncode}")
+            else:
+                check(f"never writes what Terraform would reject: {value!r}",
+                      written is None or bool(accepts.fullmatch(written)),
+                      f"wrote {written!r}, which variables.tf "
+                      f"{'accepts' if written and accepts.fullmatch(written) else 'rejects'}")
+
+        # 9a. A DIFFERENT project, and it exists for one reason: every other
+        #     generation case uses "my-proj", so any constant that happens to
+        #     equal it is indistinguishable from the variable. Both of these
+        #     survived the suite until this case existed —
+        #       gcloud … --project=my-proj          (reads the wrong project)
+        #       project_id = "my-proj"              (writes the wrong project)
+        #     and the second is worse than it looks: it is a plausible file
+        #     naming somebody else's project, which then owns the apply.
+        out = tmp / "other.tfvars"
+        r = run(tmp, account="9@cloudbuild.gserviceaccount.com",
+                project="other-project-77", out=out)
+        check("a second project is followed, not a constant that matched the first",
+              out.exists() and parse(out).get("project_id") == "other-project-77",
+              f"{r.returncode} {r.stdout} {r.stderr}")
 
         # 9b. Every value must be QUOTED. parse() above strips quotes, so it
         #     cannot see the difference and neither can any assertion built on
@@ -358,6 +391,59 @@ def main():
         r = run(tmp, out=out, args=("--check",))
         check("--check treats an omitted name_prefix as the default it is",
               r.returncode == 0, f"{r.returncode} {r.stderr}")
+
+        # 10b. Comments. `/* */` is the bypass that mattered: an assignment inside
+        #      one is invisible to Terraform and was visible to a line-oriented
+        #      sed, so the check agreed with a value Terraform never saw. `#` and
+        #      `//` are the same defect in cheaper clothes.
+        for style, text in (
+            ("a block comment",
+             'project_id = "my-proj"\n\n/*\nname_prefix = "acme"\n*/\n'),
+            ("a # comment",
+             'project_id = "my-proj"\n# name_prefix = "acme"\n'),
+            ("a // comment",
+             'project_id = "my-proj"\n// name_prefix = "acme"\n'),
+            ("a trailing block comment on the live line",
+             'project_id = "my-proj"\nname_prefix = "map" /* not "acme" */\n'),
+        ):
+            out = tmp / f"c{abs(hash(style))}.tfvars"
+            out.write_text(text, encoding="utf-8")
+            # NAME_PREFIX=acme: only a checker fooled by the comment agrees.
+            r = run(tmp, out=out, prefix="acme", args=("--check",))
+            check(f"--check is not fooled by {style}",
+                  r.returncode == 1 and "name_prefix" in r.stderr,
+                  f"{r.returncode} {r.stderr}")
+
+        # 10c. A quoted `#` or `/*` is data, not a comment, and stripping it
+        #      would make the checker read the wrong value — the mirror image of
+        #      the bug above, and just as capable of a false refusal.
+        out = tmp / "quoted-hash.tfvars"
+        out.write_text('project_id = "my-proj" # real\nname_prefix = "a#b"\n', encoding="utf-8")
+        r = run(tmp, out=out, prefix="a#b", args=("--check",))
+        check("--check keeps a # that is inside a string",
+              r.returncode == 0, f"{r.returncode} {r.stderr}")
+
+        # 10d. `*.auto.tfvars` is loaded automatically, AFTER this file, and can
+        #      set the same two variables where --check cannot see them. Nothing
+        #      in this repo writes one, so its presence means inputs were layered
+        #      deliberately — and a guard that quietly stops covering what it
+        #      names is worse than no guard.
+        d = tmp / "autodir"
+        d.mkdir()
+        (d / "terraform.tfvars").write_text('project_id = "my-proj"\n', encoding="utf-8")
+        (d / "zz.auto.tfvars").write_text('name_prefix = "acme"\n', encoding="utf-8")
+        r = run(tmp, out=(d / "terraform.tfvars"), args=("--check",))
+        check("--check refuses when a *.auto.tfvars would be loaded too",
+              r.returncode == 1 and "auto.tfvars" in r.stderr, f"{r.returncode} {r.stderr}")
+
+        # 10e. A transposed letter must not turn a check into a write. Falling
+        #      through to generate mode is the wrong default for the one mode
+        #      that has a side effect.
+        out = tmp / "typo.tfvars"
+        r = run(tmp, account="9@cloudbuild.gserviceaccount.com", out=out,
+                args=("--chek",))
+        check("a misspelt mode is refused, not treated as generate",
+              r.returncode == 2 and not out.exists(), f"{r.returncode} {r.stderr}")
 
     if failures:
         print("\n" + "\n".join(failures), file=sys.stderr)

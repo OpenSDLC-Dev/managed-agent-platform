@@ -1281,9 +1281,29 @@ values you already have:
 <project>-<name_prefix>-tfstate      # foundation/main.tf composes it; the Makefile derives it
 ```
 
-`make gcp-env-apply`, `gcp-env-destroy` and `gcp-env-migrate-state` pass it, which is why they
-now require `PROJECT`. If the two derivations ever disagreed, `terraform init` would fail
-saying the bucket does not exist — before anything is planned.
+`make gcp-env-init`, `gcp-env-apply`, `gcp-env-destroy` and `gcp-env-migrate-state` all pass
+it, which is why they now require `PROJECT`. There is deliberately **no override variable**:
+one existed and was removed in review, because an override chooses the bucket while
+`terraform.tfvars` still chooses the resources, and the guard below cannot see it — a way to
+apply one environment's configuration to another's state with everything green.
+
+**The guard is what keeps an operation off the wrong state**, not the derivation. `PROJECT`
+and `NAME_PREFIX` pick the *bucket*; `terraform.tfvars` picks the *resources*; a mismatch is
+not a failure but a success against the wrong environment. So every target that selects a
+backend first asserts the file names the same two values, and refuses before Terraform is
+invoked at all. `make gcp-env-targets-test` holds that wiring, against a fake `terraform`.
+(It reads `terraform.tfvars` only. A `*.auto.tfvars` beside it is refused rather than ignored,
+since Terraform would load it too; `-var` and `TF_CLI_ARGS_*` arrive after the check and are
+beyond its reach — that is the honest limit of what it promises.)
+
+`make gcp-env-destroy` carries a second guard: it refuses when the state is **empty**. A
+remote backend does not make an empty state impossible, it makes it quiet — initialize a
+bucket holding no state object and Terraform starts a fresh one without complaint, and
+destroy then reports success over a running environment, which is #478 wearing the new
+backend. The cost is that destroy is no longer idempotent: an already-destroyed environment
+refuses rather than succeeding over nothing. That trade is deliberate — Terraform cannot tell
+"already gone" from "pointed at the wrong empty bucket", and only one of those bills you for
+a month.
 
 **A checkout has to be pointed at the bucket once before it can read anything**, and that is
 `PROJECT=… make gcp-env-init`. It is the cheap half of what the move buys: a fresh clone with
@@ -1355,10 +1375,11 @@ the project and is one more `terraform import` away.
 
 ```sh
 make gcp-fmt gcp-validate gcp-split-check gcp-lint \
-     gcp-bootstrap-test gcp-split-check-test gcp-dbinit-test gcp-power-test gcp-tfvars-test
+     gcp-bootstrap-test gcp-split-check-test gcp-dbinit-test gcp-power-test \
+     gcp-tfvars-test gcp-env-targets-test
 ```
 
-None of them needs credentials, state, or a project, and CI runs all nine on every PR — so
+None of them needs credentials, state, or a project, and CI runs all ten on every PR — so
 neither the configuration nor the tooling can rot silently between the rare runs that
 actually provision anything. `gcp-dbinit-test` is the one with a host requirement: it needs
 Docker, because it starts a real PostgreSQL. `gcp-validate` stays offline now that
@@ -1369,7 +1390,7 @@ Docker, because it starts a real PostgreSQL. `gcp-validate` stays offline now th
 `foundation/` declares must carry both guards it can — `prevent_destroy` and, where the kind
 has it, `deletion_policy = "PREVENT"`.
 
-The last five **run** the tooling rather than reading it, because the first four are static
+The last six **run** the tooling rather than reading it, because the first four are static
 and this is a place where static checking has already been insufficient. `gcp-lint` is
 shellcheck, and shellcheck cannot know that `gcloud secrets versions describe` rejects
 `--filter` — it exited 0 on a `bootstrap.sh` that aborted on its first call in every project,
