@@ -209,7 +209,7 @@ def main():
               and "gcp-foundation-apply" in r.stderr, f"{r.returncode} {r.stderr}")
 
         # 6. Anything that is not an account must not reach the file: Terraform's
-        #    own validation would reject it, mid-apply.
+        #    own validation rejects it at plan, which also blocks a destroy.
         for junk in ("not-an-account", "", "has space@x.gserviceaccount.com",
                      "projects/p/serviceAccounts/"):
             out = tmp / f"f{abs(hash(junk))}.tfvars"
@@ -364,7 +364,24 @@ def main():
         #     one environment's state while configuring another's. It reads the
         #     file back and compares it to the coordinates that choose the state
         #     bucket, so a disagreement has to be a refusal, not a warning.
-        out = tmp / "chk.tfvars"
+        #
+        #     Every fixture below gets its OWN directory. --check refuses a
+        #     sibling `terraform.tfvars` or `*.auto.tfvars` as a second variable
+        #     source — correctly — so fixtures sharing a directory with the
+        #     generation cases above would trip over each other's files and stop
+        #     testing what their names say.
+        made = [0]
+
+        def fixture(text=None, name="terraform.tfvars"):
+            d = tmp / f"chk{made[0]}"
+            made[0] += 1
+            d.mkdir()
+            p = d / name
+            if text is not None:
+                p.write_text(text, encoding="utf-8")
+            return p
+
+        out = fixture()
         run(tmp, account="9@cloudbuild.gserviceaccount.com", out=out, prefix="acme")
 
         r = run(tmp, out=out, prefix="acme", args=("--check",))
@@ -379,15 +396,14 @@ def main():
         check("--check refuses a PROJECT the file does not name",
               r.returncode == 1 and "project_id" in r.stderr, f"{r.returncode} {r.stderr}")
 
-        r = run(tmp, out=(tmp / "absent.tfvars"), args=("--check",))
+        r = run(tmp, out=fixture(name="absent.tfvars"), args=("--check",))
         check("--check on a missing file names the target that writes it",
               r.returncode == 1 and "gcp-env-tfvars" in r.stderr, f"{r.returncode} {r.stderr}")
 
         # A hand-written tfvars may leave name_prefix out, because variables.tf
         # defaults it to the same "map" this script does. That has to READ as
         # agreement, or the check would refuse the most ordinary file there is.
-        out = tmp / "implicit.tfvars"
-        out.write_text('project_id = "my-proj"\n', encoding="utf-8")
+        out = fixture('project_id = "my-proj"\n')
         r = run(tmp, out=out, args=("--check",))
         check("--check treats an omitted name_prefix as the default it is",
               r.returncode == 0, f"{r.returncode} {r.stderr}")
@@ -406,8 +422,7 @@ def main():
             ("a trailing block comment on the live line",
              'project_id = "my-proj"\nname_prefix = "map" /* not "acme" */\n'),
         ):
-            out = tmp / f"c{abs(hash(style))}.tfvars"
-            out.write_text(text, encoding="utf-8")
+            out = fixture(text)
             # NAME_PREFIX=acme: only a checker fooled by the comment agrees.
             r = run(tmp, out=out, prefix="acme", args=("--check",))
             check(f"--check is not fooled by {style}",
@@ -425,15 +440,24 @@ def main():
             ("an escaped quote before the value",
              'project_id = "my-proj"\n# he said \\"name_prefix\\"\nname_prefix = "zz"\n',
              "zz", True),
-            # An unterminated block comment is a Terraform syntax error, so there
-            # is no right answer to give — only a safe direction. Everything
-            # after it is swallowed, project_id goes missing, and the check
-            # refuses. Asserted so a future rewrite cannot make it fail OPEN.
+            # A heredoc BODY is not configuration either, and a body line that
+            # looks like an assignment is the same false-agreement as a comment.
+            ("a heredoc body that looks like an assignment",
+             'notes = <<EOT\nname_prefix = "acme"\nEOT\n'
+             'project_id = "my-proj"\nname_prefix = "map"\n', "acme", False),
+            ("an indented heredoc, whose terminator is indented too",
+             'notes = <<-EOT\n  name_prefix = "acme"\n  EOT\n'
+             'project_id = "my-proj"\nname_prefix = "map"\n', "map", True),
+            # Unterminated comments and heredocs are Terraform syntax errors, so
+            # there is no right answer to give — only a safe direction.
+            # Everything after is swallowed, project_id goes missing, and the
+            # check refuses. Asserted so a rewrite cannot make it fail OPEN.
             ("an unterminated block comment",
              '/*\nproject_id = "my-proj"\nname_prefix = "map"\n', "map", False),
+            ("an unterminated heredoc",
+             'notes = <<EOT\nproject_id = "my-proj"\nname_prefix = "map"\n', "map", False),
         ):
-            out = tmp / f"q{abs(hash(style))}.tfvars"
-            out.write_text(text, encoding="utf-8")
+            out = fixture(text)
             r = run(tmp, out=out, prefix=prefix, args=("--check",))
             check(f"--check handles {style}",
                   (r.returncode == 0) == want_ok, f"{r.returncode} {r.stderr}")
@@ -450,6 +474,29 @@ def main():
         r = run(tmp, out=(d / "terraform.tfvars"), args=("--check",))
         check("--check refuses when a *.auto.tfvars would be loaded too",
               r.returncode == 1 and "auto.tfvars" in r.stderr, f"{r.returncode} {r.stderr}")
+
+        # ...and the JSON twin of the file being checked, which is the member of
+        # that list you would never think of and the one that actually wins:
+        # terraform.tfvars.json is loaded AFTER terraform.tfvars. Verified
+        # against real Terraform during review — two files, and var.project_id
+        # resolved to the JSON one's value while --check said "agrees".
+        for name, body in (("terraform.tfvars.json", '{"project_id": "other-proj"}\n'),
+                           ("zz.auto.tfvars.json", '{"name_prefix": "acme"}\n')):
+            d = tmp / f"json-{name}"
+            d.mkdir()
+            (d / "terraform.tfvars").write_text('project_id = "my-proj"\n', encoding="utf-8")
+            (d / name).write_text(body, encoding="utf-8")
+            r = run(tmp, out=(d / "terraform.tfvars"), args=("--check",))
+            check(f"--check refuses when a {name} would be loaded too",
+                  r.returncode == 1 and name in r.stderr, f"{r.returncode} {r.stderr}")
+
+        # And the file under check is not mistaken for a second source of itself.
+        d = tmp / "alone"
+        d.mkdir()
+        (d / "terraform.tfvars").write_text('project_id = "my-proj"\n', encoding="utf-8")
+        r = run(tmp, out=(d / "terraform.tfvars"), args=("--check",))
+        check("--check does not refuse the very file it was pointed at",
+              r.returncode == 0, f"{r.returncode} {r.stderr}")
 
         # 10e. A transposed letter must not turn a check into a write. Falling
         #      through to generate mode is the wrong default for the one mode

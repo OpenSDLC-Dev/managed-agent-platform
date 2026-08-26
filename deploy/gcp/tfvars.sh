@@ -111,11 +111,33 @@ if [[ "${1:-}" == "--check" ]]; then
 	# and say so. (`-var` and TF_CLI_ARGS_* can do the same and arrive after this
 	# process has exited; those are out of reach of any check here, and this
 	# comment is the honest limit of what --check promises.)
+	# Terraform auto-loads FOUR shapes, not two, and the list is the whole list
+	# rather than the two obvious members: `terraform.tfvars`,
+	# `terraform.tfvars.json`, `*.auto.tfvars` and `*.auto.tfvars.json`. The JSON
+	# twin of the very file being checked is the one that catches you — it is
+	# loaded AFTER `terraform.tfvars` and wins, so a `terraform.tfvars.json`
+	# saying another project sat beside a matching `terraform.tfvars` and this
+	# check said "agrees". Whichever of them is OUT is the one legitimately here;
+	# anything else beside it is a second source the check cannot see.
+	dir="$(dirname "$OUT")"
 	shopt -s nullglob
-	autos=("$(dirname "$OUT")"/*.auto.tfvars "$(dirname "$OUT")"/*.auto.tfvars.json)
+	others=()
+	# `-e` per candidate rather than trusting nullglob to drop the missing ones:
+	# nullglob only removes patterns that CONTAIN a wildcard, so the two fixed
+	# names stay in the list whether or not they exist, and every check would
+	# refuse against a file that was never there.
+	for f in "$dir"/terraform.tfvars "$dir"/terraform.tfvars.json \
+		"$dir"/*.auto.tfvars "$dir"/*.auto.tfvars.json; do
+		[[ -e "$f" ]] || continue
+		# -ef, not a string compare: OUT and the candidate can name the same
+		# file by different paths, and refusing the file under check as a second
+		# source of itself would make the guard useless in the normal case.
+		[[ "$f" -ef "$OUT" ]] && continue
+		others+=("$f")
+	done
 	shopt -u nullglob
-	if [[ ${#autos[@]} -gt 0 ]]; then
-		echo "refusing: ${autos[*]} would be loaded too, after ${OUT}." >&2
+	if [[ ${#others[@]} -gt 0 ]]; then
+		echo "refusing: ${others[*]} would be loaded too, after ${OUT}." >&2
 		echo "This check reads only ${OUT}, so it cannot tell you which project_id and" >&2
 		echo "name_prefix Terraform will actually use. Fold them into ${OUT} or remove them." >&2
 		exit 1
@@ -124,15 +146,30 @@ if [[ "${1:-}" == "--check" ]]; then
 	# One assignment per variable: Terraform rejects a file that assigns the same
 	# one twice, so there is nothing to disambiguate here.
 	#
-	# Comments are stripped FIRST, and `/* */` is the reason. An assignment inside
-	# a block comment is invisible to Terraform and — before this — visible to a
-	# line-oriented sed, so `project_id = "prod"` beside a commented-out
-	# `name_prefix = "acme"` read as agreeing with NAME_PREFIX=acme while Terraform
-	# used the default. That pairs one environment's bucket with another's
-	# resources with the guard green, which is the whole failure it exists to stop.
+	# Everything Terraform does not read as an assignment is stripped first, and
+	# the two that matter are block comments and heredoc bodies. Both are text a
+	# line-oriented sed treats as live:
+	#
+	#   /* name_prefix = "acme" */        a comment Terraform never sees
+	#   notes = <<EOT                     a heredoc BODY, likewise
+	#   project_id = "evil"
+	#   EOT
+	#
+	# Either one read as agreement pairs one environment's bucket with another's
+	# resources while the guard says yes, which is the whole failure this exists
+	# to stop. check_split.py strips heredocs for the same reason and learned it
+	# the same way. An unterminated comment or heredoc swallows the rest of the
+	# file, project_id goes missing, and the check refuses — the safe direction,
+	# and the only sane answer for input Terraform would reject as a syntax error.
 	strip_comments() {
 		awk '
-			{ line = $0; out = ""; i = 1
+			{ line = $0
+			  if (heretag != "") {
+			    t = line; sub(/^[ \t]+/, "", t); sub(/[ \t]+$/, "", t)
+			    if (t == heretag) heretag = ""
+			    print ""; next
+			  }
+			  out = ""; i = 1
 			  while (i <= length(line)) {
 			    c = substr(line, i, 1); d = substr(line, i, 2)
 			    if (inblock) { if (d == "*/") { inblock = 0; i += 2 } else i++ ; continue }
@@ -140,6 +177,14 @@ if [[ "${1:-}" == "--check" ]]; then
 			                   if (c == "\"") inquote = 0; i++; continue }
 			    if (d == "/*") { inblock = 1; i += 2; continue }
 			    if (d == "//" || c == "#") break
+			    if (d == "<<") {
+			      rest = substr(line, i)
+			      if (match(rest, /^<<-?[A-Za-z_][A-Za-z0-9_]*/)) {
+			        heretag = substr(rest, RSTART, RLENGTH)
+			        sub(/^<<-?/, "", heretag)
+			        break
+			      }
+			    }
 			    if (c == "\"") inquote = 1
 			    out = out c; i++
 			  }

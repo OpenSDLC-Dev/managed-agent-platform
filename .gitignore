@@ -67,9 +67,12 @@ model-providers.json
 # slice 3's review round). Anchored to the root like the binaries above.
 /%SystemDrive%/
 
-# Terraform working directories, state and variable files. The provider plugins,
-# the state and the tfvars are machine-local; .terraform.lock.hcl is NOT ignored
-# — it pins provider versions and belongs in the repo, exactly like go.sum.
+# Terraform working directories, state and variable files. The provider plugins
+# and the tfvars are machine-local, and so is `foundation/`'s state; since #478
+# `environment/`'s authoritative state is a GCS bucket, and a terraform.tfstate
+# beside its .tf files is a pre-migration leftover — still ignored, and still
+# not something to commit. .terraform.lock.hcl is NOT ignored — it pins provider
+# versions and belongs in the repo, exactly like go.sum.
 #
 # Matched ANYWHERE in the tree, not only under deploy/gcp/*/. A path-scoped rule
 # is a trap here, because what it fails to match is a file that routinely holds

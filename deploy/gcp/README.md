@@ -1457,9 +1457,21 @@ left half-created; what it costs is that a `destroy` fails in exactly the same w
 destroy is what you are running when the environment is already up and billing.
 `gcloud builds get-default-service-account` prints `projects/…/serviceAccounts/EMAIL`
 in some versions and the bare email in others, and on Windows it terminates the line CRLF;
-both are handled, and both are asserted against the regex read **out of `variables.tf`**
-rather than restated, so the generator and Terraform cannot drift apart. The refusals are
-tested too: a disabled API names the step that enables it and writes nothing, junk that is not
-an account is refused rather than written, and an existing `terraform.tfvars` is never
-overwritten — it may carry `master_authorized_cidrs`, `iap_backend_service` or `iap_members`,
-and all three decide who can reach the cluster.
+both are handled. What the test asserts is one direction and not equality: **nothing the
+generator writes is rejected by the regex read out of `variables.tf`**, plus every shape GCP
+actually issues is still accepted. Equality was the first attempt and it was wrong — that
+regex admits `"`, `\`, `$` and `%`, none of which survives being emitted inside a quoted HCL
+string, so the generator is deliberately stricter than Terraform. The refusals are tested too:
+a disabled API names the step that enables it and writes nothing, junk that is not an account
+is refused rather than written, and an existing `terraform.tfvars` is never overwritten — it
+may carry `master_authorized_cidrs`, `iap_backend_service` or `iap_members`, and all three
+decide who can reach the cluster.
+
+`gcp-env-targets-test` is the sixth, and it covers the most dangerous code here: the recipes
+that decide whether a `destroy` proceeds. Until it existed they were the only part of this
+directory nothing ran, and every one of these was a one-line, silently-green change — deleting
+a `gcp-env-vars-match` prerequisite, deleting the empty-state refusal, dropping the
+`-backend-config` from an `init`, un-pinning `OUT`, reinstating the removed bucket override.
+It runs `make` itself against a fake `terraform` that logs every invocation, so what is
+checked is the recipe and its prerequisite **order** — that the guard refuses *before*
+Terraform is reached, and that `destroy` is never called over an empty or unreadable state.

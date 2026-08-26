@@ -65,7 +65,8 @@ def build_tree(tmp):
 
 
 def run_make(tree, bin_dir, target, project="my-proj", prefix=None,
-             state="", state_fails=False, extra=(), tfvars='project_id = "my-proj"\n'):
+             state="", state_fails=False, extra=(), tfvars='project_id = "my-proj"\n',
+             stray_out=None):
     """Run one target; return (returncode, stdout+stderr, [terraform calls])."""
     env_dir = tree / "deploy" / "gcp" / "environment"
     tfvars_path = env_dir / "terraform.tfvars"
@@ -88,6 +89,10 @@ def run_make(tree, bin_dir, target, project="my-proj", prefix=None,
     # Never inherited from the developer's shell into an assertion about them.
     for k in ("PROJECT", "NAME_PREFIX", "OUT", "KMS_LOCATION"):
         env.pop(k, None)
+    # ...except when the point IS the inherited one: the recipe pins OUT, and
+    # popping it here is exactly what made the pin's absence invisible.
+    if stray_out is not None:
+        env["OUT"] = str(stray_out)
 
     argv = ["make", "-C", str(tree), target]
     if project is not None:
@@ -189,16 +194,39 @@ def main():
               rc == 0 and called(calls, "destroy"), f"rc={rc} calls={calls}")
 
         # 8. apply and migrate-state reach terraform on the happy path, with the
-        #    guard satisfied.
+        #    guard satisfied — and every one of them carries the BUCKET. Checking
+        #    only that `init` was called leaves `$(TF_BACKEND)` deletable from
+        #    three of the four recipes with the suite still green.
+        bucket = "-backend-config=bucket=my-proj-map-tfstate"
         rc, out, calls = run_make(tree, bin_dir, "gcp-env-apply")
-        check("apply inits with the backend and then applies",
-              rc == 0 and called(calls, "init") and called(calls, "apply"),
+        check("apply inits WITH the backend config and then applies",
+              rc == 0 and any("init" in c.split() and bucket in c for c in calls)
+              and called(calls, "apply"), f"rc={rc} calls={calls}")
+
+        rc, out, calls = run_make(tree, bin_dir, "gcp-env-destroy",
+                                  state="google_container_cluster.map\n")
+        check("destroy inits WITH the backend config",
+              any("init" in c.split() and bucket in c for c in calls),
               f"rc={rc} calls={calls}")
 
         rc, out, calls = run_make(tree, bin_dir, "gcp-env-migrate-state")
-        check("migrate-state inits with -migrate-state and NOT -input=false",
-              rc == 0 and any("-migrate-state" in c and "-input=false" not in c
-                              for c in calls), f"rc={rc} calls={calls}")
+        check("migrate-state inits with -migrate-state, the bucket, and NOT -input=false",
+              rc == 0 and any("-migrate-state" in c and bucket in c
+                              and "-input=false" not in c for c in calls),
+              f"rc={rc} calls={calls}")
+
+        # 8b. The recipe PINS OUT, and popping it from the environment above is
+        #     precisely what hid the pin's absence. A stray OUT — left over from
+        #     anything — points --check at a file Terraform will not read, and
+        #     without the pin it agrees with it. Assert against a stray that
+        #     WOULD agree while the real tfvars does not.
+        stray = tree / "stray.tfvars"
+        stray.write_text('project_id = "somewhere-else"\n', encoding="utf-8")
+        rc, out, calls = run_make(tree, bin_dir, "gcp-env-apply",
+                                  project="somewhere-else", stray_out=stray)
+        check("a stray OUT cannot redirect the coordinate check",
+              rc != 0 and calls == [] and "project_id" in out,
+              f"rc={rc} calls={calls} out={out[:200]}")
 
         # 9. No PROJECT, no bucket name — and nothing run.
         for target in ("gcp-env-init", "gcp-env-apply", "gcp-env-destroy",

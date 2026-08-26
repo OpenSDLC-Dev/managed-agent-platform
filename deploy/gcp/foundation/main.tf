@@ -266,9 +266,12 @@ resource "google_storage_bucket" "tfstate" {
   # and cannot mistype twice — NOT because it is reserved. GCS bucket names are
   # one global namespace and a project id claims nothing in it, so this apply can
   # still fail with "bucket already exists" if somebody else holds the name. That
-  # is a loud, first-apply failure with an obvious fix (pick another NAME_PREFIX,
-  # or set TF_STATE_BUCKET and `bucket` to a name you do own), which is why the
-  # derivation is worth its convenience.
+  # is a loud, first-apply failure with an obvious fix — pick another
+  # NAME_PREFIX, which both sides honour and which costs nothing before anything
+  # has been named — so the derivation is worth its convenience. There is
+  # deliberately no override variable on the Makefile side: one existed and was
+  # removed in review, because an override chooses the bucket while
+  # terraform.tfvars still chooses the resources.
   #
   # The same expression is what the Makefile composes from PROJECT and
   # NAME_PREFIX to pass as `-backend-config`, since a backend block cannot
