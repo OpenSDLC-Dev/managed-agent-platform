@@ -8,10 +8,14 @@ None.
 
 ## Tasks
 
-None in flight. The last deliveries closed out the GCP staging lane: the two things CD
-could not say for itself — a failed `deploy` opens and closes a tracking issue (#479), and
-a parked-then-forgotten environment opens one of its own (#504) — and then `environment/`'s
-Terraform state moved to a bucket, so a destroy is no longer tied to the laptop that
-applied it (#478). None of it is production code; all three landed complete in one PR each
-rather than passing through this file. Pick the next piece of work from the GitHub issue
-backlog.
+None in flight. Two streams closed at once. The GCP staging lane: CD now opens and
+closes its own tracking issue for a failed deploy (#479) and for a parked-then-forgotten
+environment (#504), and `environment/`'s Terraform state moved to a bucket, so a destroy
+is no longer tied to the laptop that applied it (#478) — none of it production code, each
+landing complete in one PR rather than passing through this file. And the three plan-36
+leftovers that needed no decision from anyone: the test rows slice 4 deferred (#488), its
+fifteen recording items folded into the issue tracking its twenty inferences (#78, which
+stays open as that tracker), and memory-version retention (#476), where the count the
+reference withholds is now this platform's own — the newest five. What is left of plan 36
+needs owner decisions or a live run: #475 (dreams), #495 (the deferred `self_hosted`
+acceptance transcript). Pick the next piece of work from the GitHub issue backlog.
