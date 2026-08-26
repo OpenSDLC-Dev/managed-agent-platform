@@ -25,14 +25,19 @@ import (
 // hosts it because that binary already holds the pool and serves every memory
 // route — a deployment whose environments are all self_hosted runs no
 // executor at all.
+//
+// The sweep leans on migration 0029's memory_versions_memory_idx
+// (memory_store_id, memory_id, created_at DESC, id DESC), which makes the
+// per-candidate "newest keep" lookup an index-only scan of exactly keep rows.
+// That index's own comment predates this file and calls the history one
+// "nothing ever prunes"; a merged migration is immutable, so the fact lives
+// here instead. Narrowing or dropping it would turn a seconds-long sweep into
+// one that walks a whole store's history per candidate row.
 const (
 	// memoryVersionRetention is the reference's published window.
 	memoryVersionRetention = 30 * 24 * time.Hour
 	// memoryVersionsKept is the "recent versions" count it leaves unstated.
 	memoryVersionsKept = 5
-	// memoryPruneInterval paces the sweep. The rows it removes are already
-	// past their window by days, so nothing is gained by looking often.
-	memoryPruneInterval = time.Hour
 
 	// MetricMemoryVersionsPruned counts rows the sweep removed. Exported so
 	// the test can assert the exact name; no attributes, because the only
@@ -40,9 +45,17 @@ const (
 	MetricMemoryVersionsPruned = "memory.versions.pruned"
 )
 
-// StartMemoryRetention sweeps until ctx ends. The statement is idempotent and
-// takes no locks a reader would wait on, so two controlplane replicas running
-// it cost a duplicate query and never a wrong answer.
+// memoryPruneInterval paces the sweep. The rows it removes are already past
+// their window by days, so nothing is gained by looking often. A var, not a
+// const, so the test binary can drive a tick without waiting an hour —
+// ssePingInterval's reason, and export_test.go holds the setter.
+var memoryPruneInterval = time.Hour
+
+// StartMemoryRetention sweeps until ctx ends. The statement is idempotent, so
+// two controlplane replicas running it cost a duplicate query and never a
+// wrong answer. It takes row locks only on the rows it deletes, which no plain
+// reader waits on — a redaction's `SELECT … FOR UPDATE` on one of those rows
+// would, for as long as the delete runs.
 func StartMemoryRetention(ctx context.Context, pool *pgxpool.Pool) {
 	t := time.NewTicker(memoryPruneInterval)
 	defer t.Stop()
@@ -52,7 +65,7 @@ func StartMemoryRetention(ctx context.Context, pool *pgxpool.Pool) {
 			return
 		case <-t.C:
 		}
-		n, err := pruneMemoryVersions(ctx, pool, time.Now().Add(-memoryVersionRetention), memoryVersionsKept)
+		n, err := pruneMemoryVersions(ctx, pool, memoryVersionRetention, memoryVersionsKept)
 		switch {
 		case err != nil && ctx.Err() == nil:
 			slog.WarnContext(ctx, "memory version prune incomplete; the next interval retries", "error", err)
@@ -63,33 +76,40 @@ func StartMemoryRetention(ctx context.Context, pool *pgxpool.Pool) {
 	}
 }
 
-// pruneMemoryVersions removes every version older than the cutoff that is not
-// among its memory's newest keep. Two rows are exempt whatever their age:
+// pruneMemoryVersions removes every version older than retention that is not
+// among its memory's newest keep. One row is exempt whatever its age: a live
+// memory's head. It is the newest of its lineage by construction, so the keep
+// window already covers it — the guard is there because a dangling head is a
+// wire 404 on memory_version_id, and this is the one statement that could ever
+// create one.
 //
-//   - A live memory's head. It is the newest of its lineage by construction,
-//     so the keep window already covers it — the guard is here because a
-//     dangling head is a wire 404 on memory_version_id, and this is the one
-//     statement that could ever create one.
-//   - Nothing else. A deleted memory's lineage prunes by the same rule, which
-//     keeps it listable rather than immortal: its newest rows include the
-//     `deleted` version that ends it. The reference's own wording — versions
-//     "persist after the memory is deleted" — is about the delete not
-//     cascading, not about exemption from retention, and its retention rule
-//     names no exception.
+// Nothing else is exempt. A deleted memory's lineage prunes by the same rule,
+// which leaves it listable rather than immortal: no version can be appended to
+// a memory id after its `deleted` one — ids are random and never reused, and a
+// re-create at the same path mints a new memory — so that row is permanently
+// the newest of its lineage and permanently inside the keep window. The
+// reference's own wording, that versions "persist after the memory is
+// deleted", is about the delete not cascading rather than about exemption from
+// retention, and its retention rule names no exception. A redacted version is
+// no exception either, so the record of who erased what ages out with the row
+// it annotates.
 //
-// The cutoff and keep are parameters rather than the constants above so a test
-// can drive a thirty-day rule without waiting thirty days.
-func pruneMemoryVersions(ctx context.Context, pool *pgxpool.Pool, cutoff time.Time, keep int) (int64, error) {
+// The window is a duration the statement subtracts from the database's own
+// clock, never a timestamp computed here: created_at is stamped by Postgres,
+// and every other age predicate in this platform compares against now() for
+// the same reason. retention and keep are parameters so a test can drive the
+// rule in seconds rather than in days.
+func pruneMemoryVersions(ctx context.Context, pool *pgxpool.Pool, retention time.Duration, keep int) (int64, error) {
 	tag, err := pool.Exec(ctx, `
 		DELETE FROM memory_versions v
-		 WHERE v.created_at < $1
+		 WHERE v.created_at < now() - make_interval(secs => $1)
 		   AND NOT EXISTS (SELECT 1 FROM memories m WHERE m.memory_version_id = v.id)
 		   AND v.id NOT IN (
 		        SELECT k.id FROM memory_versions k
 		         WHERE k.memory_store_id = v.memory_store_id
 		           AND k.memory_id = v.memory_id
 		         ORDER BY k.created_at DESC, k.id DESC
-		         LIMIT $2)`, cutoff, keep)
+		         LIMIT $2)`, retention.Seconds(), keep)
 	if err != nil {
 		return 0, err
 	}

@@ -98,7 +98,7 @@ func TestPruneKeepsTheNewestWhateverTheirAge(t *testing.T) {
 	ids := seedVersions(t, pool, memoryID, 9, old, time.Hour)
 	liveMemory(t, pool, memoryID, ids[8], "/notes.md")
 
-	n, err := pruneMemoryVersions(context.Background(), pool, time.Now().Add(-memoryVersionRetention), memoryVersionsKept)
+	n, err := pruneMemoryVersions(context.Background(), pool, memoryVersionRetention, memoryVersionsKept)
 	if err != nil {
 		t.Fatalf("prune: %v", err)
 	}
@@ -130,7 +130,7 @@ func TestPruneSparesTheRecentAndTheFew(t *testing.T) {
 	oldFew := seedVersions(t, pool, quiet, 3, time.Now().Add(-365*24*time.Hour), 24*time.Hour)
 	liveMemory(t, pool, quiet, oldFew[2], "/quiet.md")
 
-	n, err := pruneMemoryVersions(ctx, pool, time.Now().Add(-memoryVersionRetention), memoryVersionsKept)
+	n, err := pruneMemoryVersions(ctx, pool, memoryVersionRetention, memoryVersionsKept)
 	if err != nil {
 		t.Fatalf("prune: %v", err)
 	}
@@ -158,7 +158,7 @@ func TestPruneNeverTakesALiveHead(t *testing.T) {
 	// is the point — the guard must not rest on the keep window covering it.
 	liveMemory(t, pool, memoryID, ids[0], "/notes.md")
 
-	if _, err := pruneMemoryVersions(context.Background(), pool, time.Now().Add(-memoryVersionRetention), memoryVersionsKept); err != nil {
+	if _, err := pruneMemoryVersions(context.Background(), pool, memoryVersionRetention, memoryVersionsKept); err != nil {
 		t.Fatalf("prune: %v", err)
 	}
 	var dangling int
@@ -192,7 +192,7 @@ func TestPruneLeavesADeletedMemoryListable(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	n, err := pruneMemoryVersions(ctx, pool, time.Now().Add(-memoryVersionRetention), memoryVersionsKept)
+	n, err := pruneMemoryVersions(ctx, pool, memoryVersionRetention, memoryVersionsKept)
 	if err != nil {
 		t.Fatalf("prune: %v", err)
 	}
@@ -224,15 +224,14 @@ func TestPruneRecordsWhatItRemoved(t *testing.T) {
 	ids := seedVersions(t, pool, memoryID, 9, time.Now().Add(-90*24*time.Hour), time.Hour)
 	liveMemory(t, pool, memoryID, ids[8], "/notes.md")
 
-	cutoff := time.Now().Add(-memoryVersionRetention)
-	if _, err := pruneMemoryVersions(ctx, pool, cutoff, memoryVersionsKept); err != nil {
+	if _, err := pruneMemoryVersions(ctx, pool, memoryVersionRetention, memoryVersionsKept); err != nil {
 		t.Fatalf("prune: %v", err)
 	}
 	if got := prunedCount(t, reader); got != 4 {
 		t.Errorf("%s = %d, want 4", MetricMemoryVersionsPruned, got)
 	}
 	// The second sweep finds nothing; the counter must not move.
-	if _, err := pruneMemoryVersions(ctx, pool, cutoff, memoryVersionsKept); err != nil {
+	if _, err := pruneMemoryVersions(ctx, pool, memoryVersionRetention, memoryVersionsKept); err != nil {
 		t.Fatalf("second prune: %v", err)
 	}
 	if got := prunedCount(t, reader); got != 4 {
@@ -265,17 +264,70 @@ func prunedCount(t *testing.T, reader *sdkmetric.ManualReader) int64 {
 	return 0
 }
 
-// TestRetentionLoopStopsWithItsContext: the sweep is a goroutine cmd/controlplane
-// starts and never joins, so a cancelled context has to end it.
-func TestRetentionLoopStopsWithItsContext(t *testing.T) {
+// TestRetentionLoopSweepsThenStops drives the loop itself, not just the
+// statement: a tick has to reach the sweep, and a cancelled context has to end
+// it. Without the first half, the loop could stop calling the sweep entirely
+// and every other test here would stay green.
+func TestRetentionLoopSweepsThenStops(t *testing.T) {
+	restore := SetMemoryPruneIntervalForTest(10 * time.Millisecond)
+	t.Cleanup(restore)
+
 	pool := retentionPool(t)
+	memoryID := domain.NewID(domain.PrefixMemory).String()
+	ids := seedVersions(t, pool, memoryID, 9, time.Now().Add(-90*24*time.Hour), time.Hour)
+	liveMemory(t, pool, memoryID, ids[8], "/notes.md")
+
 	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 	done := make(chan struct{})
 	go func() { defer close(done); StartMemoryRetention(ctx, pool) }()
+
+	deadline := time.Now().Add(30 * time.Second)
+	for {
+		if len(surviving(t, pool, memoryID)) == 5 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the loop never swept: survivors = %d, want 5", len(surviving(t, pool, memoryID)))
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+
 	cancel()
 	select {
 	case <-done:
 	case <-time.After(10 * time.Second):
 		t.Fatal("StartMemoryRetention did not return after its context was cancelled")
+	}
+}
+
+// TestPruneAcrossOneStoresMemories is the production shape the single-memory
+// rows do not reach: several memories under one store, their versions
+// interleaved in time, all settled by one statement. Each keeps its own newest
+// five — the correlation is per memory, not per store.
+func TestPruneAcrossOneStoresMemories(t *testing.T) {
+	pool := retentionPool(t)
+	old := time.Now().Add(-90 * 24 * time.Hour)
+	// Interleaved: staggering each memory's start by a fraction of the spacing
+	// mixes their rows in the store-wide order, so a statement that ranked by
+	// store rather than by memory would take the wrong ones.
+	memories := make([]string, 3)
+	for i := range memories {
+		memories[i] = domain.NewID(domain.PrefixMemory).String()
+		ids := seedVersions(t, pool, memories[i], 8, old.Add(time.Duration(i)*time.Minute), time.Hour)
+		liveMemory(t, pool, memories[i], ids[7], fmt.Sprintf("/m%d.md", i))
+	}
+
+	n, err := pruneMemoryVersions(context.Background(), pool, memoryVersionRetention, memoryVersionsKept)
+	if err != nil {
+		t.Fatalf("prune: %v", err)
+	}
+	if n != 9 {
+		t.Errorf("pruned %d, want 9 (three memories of eight, newest five each)", n)
+	}
+	for i, memoryID := range memories {
+		if got := surviving(t, pool, memoryID); len(got) != 5 {
+			t.Errorf("memory %d survivors = %d, want 5", i, len(got))
+		}
 	}
 }

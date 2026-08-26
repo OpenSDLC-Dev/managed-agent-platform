@@ -62,3 +62,12 @@ func SetMaxFileBytesForTest(n int64) (restore func()) {
 	maxFileBytes = n
 	return func() { maxFileBytes = prev }
 }
+
+// SetMemoryPruneIntervalForTest shortens the retention sweep's cadence so a
+// test can observe the loop actually sweeping rather than only returning.
+// Test binary only.
+func SetMemoryPruneIntervalForTest(d time.Duration) (restore func()) {
+	prev := memoryPruneInterval
+	memoryPruneInterval = d
+	return func() { memoryPruneInterval = prev }
+}

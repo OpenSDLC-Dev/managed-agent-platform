@@ -195,8 +195,18 @@ func run(ctx context.Context) error {
 	// serves every memory route, and because a deployment whose environments
 	// are all self_hosted runs no executor to put it in. Its statement is
 	// idempotent, so a second replica costs a duplicate query and never a
-	// wrong answer; it ends with ctx.
-	go api.StartMemoryRetention(ctx, pool)
+	// wrong answer.
+	//
+	// Joined, for the reason the meter deregistration above is ordered: this
+	// defer is registered after `defer pool.Close()`, so LIFO drains the sweep
+	// before the pool it borrows from closes. It cancels rather than only
+	// waiting, because one exit leaves ctx live — a ListenAndServe failure —
+	// and waiting on a loop nothing has told to stop would hang the shutdown
+	// this is here to make orderly.
+	retentionCtx, stopRetention := context.WithCancel(ctx)
+	retentionDone := make(chan struct{})
+	go func() { defer close(retentionDone); api.StartMemoryRetention(retentionCtx, pool) }()
+	defer func() { stopRetention(); <-retentionDone }()
 
 	errCh := make(chan error, 1)
 	go func() { errCh <- srv.ListenAndServe() }()
