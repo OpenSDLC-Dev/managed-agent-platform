@@ -4,13 +4,19 @@ What is being worked on right now, and how far along it is — nothing else. **S
 
 ## Active work
 
-None.
+The three plan-36 leftovers that need no decision from anyone, in order: the test
+rows slice 4 deferred (#488), plan 36's recording checklist migrated into the issue
+that now tracks its inferences (#78), and memory version retention (#476, where the
+count the reference leaves unstated is chosen as the newest 5).
 
 ## Tasks
 
-None in flight. The last deliveries were the two things CD could not say for itself: a
-failed `deploy` now opens and closes a tracking issue (#479), and a staging environment
-parked and then forgotten opens one of its own (#504). Both are GitHub Actions and
-`.github/scripts/` shell with no production code behind them, and both landed complete in
-one PR each rather than passing through this file. Pick the next piece of work from the
-GitHub issue backlog.
+- [x] #488 — a meter-reading test for the four memory instruments, and the whole
+      memory path through a real Docker container the agent does not own: an
+      unprivileged `>>` onto a root-materialized file, which is the first row to
+      show why that file has to be 0666 rather than pin the constant's value
+- [x] #78 — plan 36's fifteen recording items are in the issue body now, as plan
+      35's were when that plan archived; the issue stays open, as the tracker for
+      the twenty registry entries that cite those items
+- [ ] #476 — prune `memory_versions` older than 30 days that are not among their
+      memory's newest 5, never a live head, never a deleted memory's lineage
