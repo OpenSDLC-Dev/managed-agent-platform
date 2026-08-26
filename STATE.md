@@ -8,9 +8,9 @@ None.
 
 ## Tasks
 
-None in flight. The last delivery was the test-suite hardening the plan-36 gate runs
-surfaced — two lease-keeper flakes (#483), the broker's coverage-start wake race (#486),
-and the gate's per-package timeout (#490) — all test-environment fixes, no production
-code. What #490 did not take, reaping a fixture whose owning process died and cutting
-per-test database creation, is #499. Pick the next piece of work from the GitHub issue
-backlog.
+None in flight. The last deliveries were the two things CD could not say for itself: a
+failed `deploy` now opens and closes a tracking issue (#479), and a staging environment
+parked and then forgotten opens one of its own (#504). Both are GitHub Actions and
+`.github/scripts/` shell with no production code behind them, and both landed complete in
+one PR each rather than passing through this file. Pick the next piece of work from the
+GitHub issue backlog.

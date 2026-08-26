@@ -161,16 +161,29 @@ run that deployed nothing is not evidence that anything was fixed. And
 [`staging-parked.yml`](../../.github/workflows/staging-parked.yml) covers the one thing
 neither of those can, which is time passing.
 
-**Parked and then forgotten** is that third one's subject (#504), and the table above is why
-it is not merely a staleness problem: storage, the control plane and the LoadBalancers keep
-billing. It asks the CLUSTER weekly rather than the deploy history — a deploy run exists only
-when somebody pushes, and a quiet fortnight is exactly when an environment gets forgotten —
-and keeps one issue open while the labels are there. Only the scheduled run opens it, so the
-cadence is the grace period and there is no threshold to tune; it is never commented on
-again, because a standing flag's age is the answer to "how long"; and it closes itself, with
-a completed `deploy` among its triggers so reviving staging retires it in minutes rather than
-by the next Monday. Nobody is assigned — a schedule has no actor, and `github.actor` on one
-is whoever last edited the cron. The rule separating parked from running lives in
+**Parked and then forgotten** is that third one's subject (#504), and the "keeps billing"
+column above is why it is not purely a staleness problem — modestly so, which is the honest
+way to put it: what remains is the forwarding rules and the two storage charges, not the
+whole cluster.
+
+It asks the CLUSTER weekly rather than the deploy history — a deploy run exists only when
+somebody pushes, and a quiet fortnight is exactly when an environment gets forgotten — and
+keeps one issue open while the labels are there. Only a scheduled or hand-dispatched run
+opens it, so the cadence is the grace period and there is no threshold to tune; while it
+stands it is never commented on again, because a standing flag's age is the answer to "how
+long"; and it closes itself, with a completed `deploy` among its triggers so reviving staging
+retires it in minutes rather than by the next Monday. Destroying staging closes it too — an
+environment that no longer exists cannot be forgotten, and the issue's own text offers
+`gcp-env-destroy` as one of the two ways out. Nobody is assigned: a schedule has no actor,
+and `github.actor` on one is whoever last edited the cron.
+
+Two bounds worth knowing before relying on it. A cluster it cannot find reads the same
+whether it was destroyed on purpose or `GKE_CLUSTER`/`GCP_ZONE` was changed to something
+wrong; it warns and names both, and `deploy.yml` going red on the next push is what
+separates them. And GitHub disables a scheduled workflow after 60 days without repository
+activity, which is one of the ways a project goes quiet in the first place.
+
+The rule separating parked from running lives in
 [`.github/scripts/parked.sh`](../../.github/scripts/parked.sh), which `deploy.yml` reads too
 so the two can never disagree about one cluster; `make parked-test` holds it, and CI checks
 that the prefix they read is still the one `env-power.sh` writes.
