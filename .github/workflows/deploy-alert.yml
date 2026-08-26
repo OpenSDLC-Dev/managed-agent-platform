@@ -103,10 +103,13 @@ jobs:
           # here, so the `-f` form 404s on every call forever. Nothing in CI can
           # catch that — this line's first execution is on `main`.
           #
-          # Ordered by when each run FINISHED, not by the API's own order: that
-          # is creation order, and re-running an older run raises its attempt
-          # without moving it up, so the most recent deployment attempt is not
-          # always the first entry.
+          # Ordered by `updated_at` — the last state change, which for a
+          # completed run is its completion — rather than by the API's own
+          # order, which is CREATION order: re-running an older run raises its
+          # attempt without moving it up, so the most recent deployment attempt
+          # is not always the first entry. A post-completion metadata touch
+          # could in principle mis-rank one, which costs nothing lasting: the
+          # next event re-derives the whole state from scratch.
           runs="$(retry gh api \
             "repos/$REPO/actions/workflows/$DEPLOY_WORKFLOW/runs?branch=main&status=completed&per_page=$WINDOW" \
             --jq '[.workflow_runs[] | {id, attempt: .run_attempt, conclusion, sha: .head_sha,
