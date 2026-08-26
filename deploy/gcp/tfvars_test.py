@@ -417,11 +417,26 @@ def main():
         # 10c. A quoted `#` or `/*` is data, not a comment, and stripping it
         #      would make the checker read the wrong value — the mirror image of
         #      the bug above, and just as capable of a false refusal.
-        out = tmp / "quoted-hash.tfvars"
-        out.write_text('project_id = "my-proj" # real\nname_prefix = "a#b"\n', encoding="utf-8")
-        r = run(tmp, out=out, prefix="a#b", args=("--check",))
-        check("--check keeps a # that is inside a string",
-              r.returncode == 0, f"{r.returncode} {r.stderr}")
+        for style, text, prefix, want_ok in (
+            ("a # that is inside a string",
+             'project_id = "my-proj" # real\nname_prefix = "a#b"\n', "a#b", True),
+            ("a /* that is inside a string",
+             'project_id = "my-proj"\nname_prefix = "a/*b"\n', "a/*b", True),
+            ("an escaped quote before the value",
+             'project_id = "my-proj"\n# he said \\"name_prefix\\"\nname_prefix = "zz"\n',
+             "zz", True),
+            # An unterminated block comment is a Terraform syntax error, so there
+            # is no right answer to give — only a safe direction. Everything
+            # after it is swallowed, project_id goes missing, and the check
+            # refuses. Asserted so a future rewrite cannot make it fail OPEN.
+            ("an unterminated block comment",
+             '/*\nproject_id = "my-proj"\nname_prefix = "map"\n', "map", False),
+        ):
+            out = tmp / f"q{abs(hash(style))}.tfvars"
+            out.write_text(text, encoding="utf-8")
+            r = run(tmp, out=out, prefix=prefix, args=("--check",))
+            check(f"--check handles {style}",
+                  (r.returncode == 0) == want_ok, f"{r.returncode} {r.stderr}")
 
         # 10d. `*.auto.tfvars` is loaded automatically, AFTER this file, and can
         #      set the same two variables where --check cannot see them. Nothing
