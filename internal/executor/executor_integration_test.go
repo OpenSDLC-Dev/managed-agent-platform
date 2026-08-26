@@ -3,6 +3,7 @@ package executor
 import (
 	"context"
 	"encoding/json"
+	"slices"
 	"strings"
 	"testing"
 
@@ -186,5 +187,77 @@ func TestHarvestTruncatedListingRealSandbox(t *testing.T) {
 	}
 	if got := h.liveOf(t, queue.OutputsHarvest); got != 0 {
 		t.Errorf("outputs_harvest live = %d, want 0 (completed, not left faulting)", got)
+	}
+}
+
+// TestMemoryRoundTripRealSandboxAsNonRoot is plan 36 slice 4's deferred
+// integration row (#488): the whole memory path through a real container the
+// agent does not own. The store is materialized by the daemon, so its files
+// land root-owned; the tools then run as SANDBOX_RUN_AS_USER's uid and append
+// to one in place with `>>`, which is the case decision 10's 0666 mode exists
+// for — a root-owned 0644 file would refuse that while the file tools'
+// rename-over would still succeed, so nothing else in this suite would notice
+// the mode going back. The run-end sync then pushes what the unprivileged
+// shell wrote.
+func TestMemoryRoundTripRealSandboxAsNonRoot(t *testing.T) {
+	provider, err := docker.New(docker.Config{})
+	if err != nil {
+		t.Fatalf("integration test requires Docker: %v", err)
+	}
+	// nobody — the uid a deployment setting this knob most plausibly picks,
+	// and not the gate's own, which Hardening.Validate refuses for a gated
+	// sandbox.
+	uid := int64(65534)
+	h := newHarnessWith(t, provider, Config{Image: testImage, Hardening: sandbox.Hardening{RunAsUser: &uid}})
+	t.Cleanup(func() {
+		sb, err := provider.Provision(context.Background(), sandbox.Spec{SessionID: h.sid, Image: testImage})
+		if err == nil {
+			_ = sb.Destroy(context.Background())
+		}
+	})
+
+	h.seedMemoryStore(t, memStoreID, "Notes")
+	h.seedMemory(t, memStoreID, "/notes.md", "hello\n")
+	h.refMemory(t, memStoreID, memMount, "read_write")
+
+	// `id -u` in the same command as the append: a run that silently landed as
+	// root would prove nothing, so the uid is read off the result rather than
+	// trusted from the Spec.
+	bash, _ := json.Marshal(map[string]any{
+		"name": "bash", "input": map[string]string{
+			"command": "echo appended >> " + memMount + "/notes.md && echo ran-as-$(id -u)"},
+	})
+	h.suspend(t, string(bash))
+	if worked, err := h.exec.step(context.Background()); err != nil || !worked {
+		t.Fatalf("step worked=%v err=%v", worked, err)
+	}
+
+	results := h.types(t, "agent.tool_result")
+	if len(results) != 1 {
+		t.Fatalf("results = %d, want 1", len(results))
+	}
+	var body struct {
+		IsError bool `json:"is_error"`
+		Content []struct {
+			Text string `json:"text"`
+		} `json:"content"`
+	}
+	_ = json.Unmarshal(results[0].Body, &body)
+	text := ""
+	if len(body.Content) > 0 {
+		text = body.Content[0].Text
+	}
+	if body.IsError {
+		t.Fatalf("the append was refused: %q", text)
+	}
+	if !strings.Contains(text, "ran-as-65534") {
+		t.Fatalf("the tool ran as %q, want uid 65534 — the scenario needs an unprivileged shell", text)
+	}
+
+	if got, _ := h.memoryContent(t, memStoreID, "/notes.md"); got != "hello\nappended\n" {
+		t.Errorf("the store's /notes.md = %q, want the appended line pushed", got)
+	}
+	if got := h.versionsOf(t, memStoreID, "/notes.md"); !slices.Equal(got, []string{"created/none", "modified/session_actor"}) {
+		t.Errorf("versions of /notes.md = %v, want the seed plus the session's write", got)
 	}
 }
