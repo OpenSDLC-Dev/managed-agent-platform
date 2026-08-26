@@ -214,10 +214,16 @@ project. That refuses an address such as `10.1.2.3` or `db.internal:5432`, and a
 an empty part. It does not look inside the segments — deliberately, because encoding
 Google's own naming rules here would refuse a valid name the day Google widens one.
 
-So a well-formed name that names nothing renders, and **nothing downstream catches it**: the
-proxy dials only under `--run-connection-test`, which the chart does not pass, so the pod
-goes Ready and the release succeeds on a wrong instance. Check the value; do not expect a
-failed deploy to check it for you (#493).
+So a well-formed name that names nothing renders, and the proxy will not object — it reports
+itself up without dialing. Once the DSN routes through the proxy the platform catches it
+anyway, by pinging the database before it serves and exiting when that fails: the pods
+crash-loop and `--atomic` rolls back. The cost is diagnosis, not a bad release.
+
+`cloudSQLProxy.connectionTest=true` moves that check into the proxy, so the error names the
+instance instead of appearing as three application containers that cannot reach Postgres. It
+matters most while the proxy is enabled but the DSN does **not** route through it yet, where
+nothing exercises the proxy at all. It is a boolean — pass it with `--set`, not
+`--set-string` (#493).
 
 If you must use a shared proxy Service as an interim step, treat the
 database credential as exposed to anything that can watch pod-network traffic, and say so in
