@@ -262,12 +262,18 @@ resource "google_secret_manager_secret" "db_admin_password" {
 # google_storage_bucket of its own for blobs. `prevent_destroy` plus foundation/
 # having no destroy target is the protection here.
 resource "google_storage_bucket" "tfstate" {
-  # Project ids are globally unique, so this name is too — which a bucket name
-  # has to be, across all of GCS. The same expression is what the Makefile
-  # derives from PROJECT and NAME_PREFIX to pass as `-backend-config`, since a
-  # backend block cannot interpolate a variable. If the two ever disagree,
-  # `terraform init` fails saying the bucket does not exist; nothing here can
-  # fail quietly.
+  # Derived from the project id because that is a name the operator already has
+  # and cannot mistype twice — NOT because it is reserved. GCS bucket names are
+  # one global namespace and a project id claims nothing in it, so this apply can
+  # still fail with "bucket already exists" if somebody else holds the name. That
+  # is a loud, first-apply failure with an obvious fix (pick another NAME_PREFIX,
+  # or set TF_STATE_BUCKET and `bucket` to a name you do own), which is why the
+  # derivation is worth its convenience.
+  #
+  # The same expression is what the Makefile composes from PROJECT and
+  # NAME_PREFIX to pass as `-backend-config`, since a backend block cannot
+  # interpolate a variable. If the two ever disagree, `terraform init` fails
+  # saying the bucket does not exist; nothing here can fail quietly.
   name     = "${var.project_id}-${var.name_prefix}-tfstate"
   location = var.state_bucket_location
 

@@ -21,10 +21,11 @@ name: deploy
 #
 # This workflow never runs Terraform. The infrastructure lives in
 # deploy/gcp/foundation/ and deploy/gcp/environment/, whose applies are
-# interactive on purpose and whose state is local by design (plan 20, Decision 9).
-# A CD job running `terraform apply` would have to hold that state somewhere it
-# could reach, and would be one bad plan away from destroying the Cloud SQL
-# instance the platform's data lives in. `make gcp-foundation-apply`,
+# interactive on purpose (plan 20, Decision 9). Reaching the state is no longer
+# the obstacle — since #478 environment/'s lives in a bucket in this project —
+# but a CD job running `terraform apply` would be one bad plan away from
+# destroying the Cloud SQL instance the platform's data lives in, which is the
+# reason that never depended on where the state sat. `make gcp-foundation-apply`,
 # `make gcp-bootstrap`, `make gcp-env-apply` and `make gcp-db-init` stay
 # human-driven; this workflow assumes they have already run. In mode 2 that last
 # one is not a formality: the DSN in `database-url` names the `map` role, and

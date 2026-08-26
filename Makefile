@@ -22,7 +22,7 @@ SHELL := /usr/bin/env bash
 	release-tag-check release-images release-chart-check release-chart release-binaries \
 	openbao-init-test cd-outcome-test parked-test registry-check \
 	gcp-fmt gcp-validate gcp-split-check gcp-lint gcp-bootstrap-test gcp-dbinit-test gcp-split-check-test gcp-power-test gcp-tfvars-test gcp-foundation-apply gcp-bootstrap gcp-env-apply gcp-db-init gcp-env-destroy gcp-env-rebuild \
-	gcp-require-project gcp-env-tfvars gcp-env-migrate-state \
+	gcp-require-project gcp-env-tfvars gcp-env-migrate-state gcp-env-init gcp-env-vars-match \
 	gcp-env-stop gcp-env-start gcp-env-status
 
 build:
@@ -297,11 +297,12 @@ GCP_TF ?= terraform
 # environment/'s state lives in the bucket foundation/ owns (#478), and a backend
 # block cannot interpolate a variable — so the bucket arrives at init time. The
 # name is DERIVED here exactly as foundation/main.tf composes it, rather than
-# recorded as another coordinate: project ids are globally unique, so
-# `<project>-<prefix>-tfstate` is too, and there is nothing for an operator to
-# copy between two places and get wrong. If the two expressions ever disagree,
-# `terraform init` fails saying the bucket does not exist — loudly, and before
-# anything is planned.
+# recorded as another coordinate, so there is nothing for an operator to copy
+# between two places and get wrong. It is not reserved — GCS bucket names are one
+# global namespace and a project id claims nothing in it — so `TF_STATE_BUCKET`
+# overrides the derivation for a deployment whose name was already taken. If the
+# two expressions ever disagree, `terraform init` fails saying the bucket does
+# not exist: loudly, and before anything is planned.
 NAME_PREFIX_OR_DEFAULT = $(or $(NAME_PREFIX),map)
 TF_STATE_BUCKET ?= $(PROJECT)-$(NAME_PREFIX_OR_DEFAULT)-tfstate
 TF_BACKEND = -backend-config="bucket=$(TF_STATE_BUCKET)"
@@ -392,10 +393,12 @@ gcp-power-test:
 
 # The tfvars generator turns one gcloud answer into a value Terraform accepts,
 # and every way that goes wrong — a `projects/…/serviceAccounts/` prefix, a
-# Windows CR — writes a file that looks right and fails validation mid-apply,
-# after a cluster exists. Shellcheck cannot see any of it, so this RUNS the
-# script against a fake gcloud, including the refusals: a disabled API, junk that
-# is not an account, and an existing file that must never be overwritten.
+# Windows CR — writes a file that looks right and fails variable validation. That
+# happens at PLAN, so nothing is half-created; the cost is that it fails a
+# `destroy` the same way, and a destroy is what you are running when the
+# environment is already up and billing. Shellcheck cannot see any of it, so this
+# RUNS the script against a fake gcloud, including the refusals: a disabled API,
+# junk that is not an account, and an existing file never overwritten.
 gcp-tfvars-test:
 	python3 deploy/gcp/tfvars_test.py
 
@@ -422,7 +425,31 @@ gcp-env-tfvars: gcp-require-project
 	PROJECT=$(PROJECT) NAME_PREFIX=$(NAME_PREFIX_OR_DEFAULT) KMS_LOCATION=$(KMS_LOCATION) \
 		bash deploy/gcp/tfvars.sh
 
-gcp-env-apply: gcp-require-project
+# Point a checkout at the state and stop, which is the capability the move to a
+# bucket is FOR and the only one the expensive targets used to hide. Reading an
+# output — which `dbinit.sh` does seven times, and which README quotes for the
+# cluster name, the addresses and the registry — needs an initialized backend,
+# and a partial backend cannot be initialized by the bare `terraform init` that
+# Terraform's own error message suggests: it has no bucket. Without this the
+# only way to get there is a full apply or a destroy, which is an absurd price
+# for `terraform output -raw cluster_name`.
+gcp-env-init: gcp-require-project
+	$(GCP_TF) -chdir=deploy/gcp/environment init -input=false $(TF_BACKEND)
+
+# PROJECT and NAME_PREFIX choose the state BUCKET; terraform.tfvars chooses the
+# RESOURCES. Two independent inputs to one operation, and a disagreement between
+# them is not a failure — it is a success against the wrong state. So assert they
+# agree before init, every time. tfvars.sh --check argues it at length.
+gcp-env-vars-match: gcp-require-project
+	@PROJECT=$(PROJECT) NAME_PREFIX=$(NAME_PREFIX_OR_DEFAULT) \
+		bash deploy/gcp/tfvars.sh --check
+
+# `-input=false` here is doing more than suppressing prompts, and is the reason
+# running this BEFORE gcp-env-migrate-state is safe: on a machine that still
+# holds local state, Terraform detects the backend change and refuses with
+# "Can't ask approval for state migration when interactive input is disabled" —
+# it does not quietly adopt an empty remote state. Verified, not assumed.
+gcp-env-apply: gcp-require-project gcp-env-vars-match
 	$(GCP_TF) -chdir=deploy/gcp/environment init -input=false $(TF_BACKEND)
 	$(GCP_TF) -chdir=deploy/gcp/environment apply
 
@@ -433,7 +460,7 @@ gcp-env-apply: gcp-require-project
 # obstacle. Afterwards every machine with credentials shares one state, and the
 # `terraform.tfstate` left behind locally is a backup to delete once a remote
 # `terraform plan` has come back clean.
-gcp-env-migrate-state: gcp-require-project
+gcp-env-migrate-state: gcp-require-project gcp-env-vars-match
 	$(GCP_TF) -chdir=deploy/gcp/environment init -migrate-state $(TF_BACKEND)
 
 # Creates the platform's database role OUTSIDE cloudsqlsuperuser and asserts it.
@@ -453,8 +480,28 @@ gcp-db-init:
 # destroy and reported success while the environment kept billing. The state is
 # remote now and `make gcp-env-tfvars` regenerates the inputs, so this runs from
 # anywhere with credentials.
-gcp-env-destroy: gcp-require-project
+#
+# The empty-state check is what stops #478 surviving its own fix. A remote
+# backend does not make an EMPTY state impossible — it makes it quiet. Init a
+# bucket that has no state object yet, from a checkout that never held the local
+# one, and Terraform starts a fresh empty state with no complaint; destroy then
+# reports success over a running environment, which is the original bug wearing
+# the new backend. There is no legitimate reason to destroy an empty state, so
+# refuse instead, and name the three things it can mean. `terraform state list`
+# prints nothing and exits 0 on an empty state, so the emptiness is the signal.
+gcp-env-destroy: gcp-require-project gcp-env-vars-match
 	$(GCP_TF) -chdir=deploy/gcp/environment init -input=false $(TF_BACKEND)
+	@if [ -z "$$($(GCP_TF) -chdir=deploy/gcp/environment state list)" ]; then \
+		echo "refusing: $(TF_STATE_BUCKET) holds no state for environment/." >&2; \
+		echo "" >&2; \
+		echo "Destroying an empty state would report success and tear down nothing," >&2; \
+		echo "which is the failure #478 exists to remove. It means one of:" >&2; \
+		echo "  - the environment is already destroyed — then there is nothing to do;" >&2; \
+		echo "  - the state was never migrated, and still sits on the machine that" >&2; \
+		echo "    applied it: run \`make gcp-env-migrate-state\` THERE first;" >&2; \
+		echo "  - PROJECT/NAME_PREFIX name the wrong bucket." >&2; \
+		exit 1; \
+	fi
 	$(GCP_TF) -chdir=deploy/gcp/environment destroy
 
 # The teardown proof of Decision 9, as one target: create -> destroy -> create.

@@ -1090,8 +1090,8 @@ jobs:
         run: make gcp-power-test
       # And the tfvars generator, whose whole job is turning one gcloud answer
       # into a value Terraform accepts — a `projects/…/serviceAccounts/` prefix
-      # or a Windows CR writes a file that looks right and fails validation
-      # mid-apply, after a cluster exists.
+      # or a Windows CR writes a file that looks right and fails variable
+      # validation, which blocks a `destroy` as readily as an apply.
       - name: the tfvars generator writes what Terraform accepts
         run: make gcp-tfvars-test
       - name: the CD outcome classifier decides what it claims

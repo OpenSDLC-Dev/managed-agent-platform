@@ -6,9 +6,10 @@ turn one gcloud answer into a value Terraform will accept, and every way that
 goes wrong is invisible to shellcheck. `gcloud builds get-default-service-account`
 prints `projects/…/serviceAccounts/EMAIL` in some versions and the bare email in
 others; on Windows it terminates the line CRLF. Both produce a file that looks
-right and fails Terraform's own validation later, during an apply that has
-already built a cluster — which is exactly where variables.tf says not to find
-out.
+right and then fails Terraform's own variable validation. That happens during
+planning, so nothing is left half-built — but it fails a `destroy` in exactly
+the same way, and a destroy is what you run against an environment that already
+exists and is billing.
 
 The other half is refusal. An existing terraform.tfvars may carry
 master_authorized_cidrs, iap_backend_service and iap_members, all three of which
@@ -21,6 +22,7 @@ Run: make gcp-tfvars-test
 import os
 import pathlib
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -49,9 +51,25 @@ def terraform_validation_regex():
 
 FAKE_GCLOUD = r"""#!/usr/bin/env bash
 # Answers only the one call tfvars.sh makes; anything else is a test bug.
+#
+# It checks the FLAGS, not just the verb, because the two that matter are exactly
+# the two whose absence still produces a plausible answer. Without --project,
+# gcloud reads the CONFIGURED project and returns another project's build account
+# — syntactically valid, silently wrong, and then granted artifactregistry.writer
+# in a project no build of it will ever run in. Without --format the output shape
+# is whatever the version defaults to. A fake that ignored them would let either
+# deletion pass the whole suite.
 case "$1 $2" in
   "builds get-default-service-account") ;;
   *) echo "fake gcloud: unexpected call: $*" >&2; exit 99 ;;
+esac
+case " $* " in
+  *" --project=$EXPECT_PROJECT "*) ;;
+  *) echo "fake gcloud: expected --project=$EXPECT_PROJECT in: $*" >&2; exit 98 ;;
+esac
+case " $* " in
+  *" --format=value(serviceAccountEmail) "*) ;;
+  *) echo "fake gcloud: expected --format=value(serviceAccountEmail) in: $*" >&2; exit 97 ;;
 esac
 if [ -n "${FAKE_FAIL:-}" ]; then
   printf '%s\n' "$FAKE_FAIL" >&2
@@ -61,7 +79,8 @@ printf '%b' "$FAKE_ACCOUNT"
 """
 
 
-def run(tmp, account=None, fail=None, project="my-proj", prefix=None, out=None, kms=None):
+def run(tmp, account=None, fail=None, project="my-proj", prefix=None, out=None,
+        kms=None, args=()):
     bin_dir = tmp / "bin"
     bin_dir.mkdir(exist_ok=True)
     g = bin_dir / "gcloud"
@@ -79,6 +98,10 @@ def run(tmp, account=None, fail=None, project="my-proj", prefix=None, out=None, 
         env.pop("PROJECT", None)
     else:
         env["PROJECT"] = project
+    # What the fake `gcloud` asserts it was told to look in. Separate from
+    # PROJECT so the fake cannot read the same variable the script does and
+    # agree with itself.
+    env["EXPECT_PROJECT"] = project or ""
     if prefix is not None:
         env["NAME_PREFIX"] = prefix
     else:
@@ -87,8 +110,8 @@ def run(tmp, account=None, fail=None, project="my-proj", prefix=None, out=None, 
     # is the one that has to leave the key out rather than write `= ""`.
     env["KMS_LOCATION"] = kms or ""
     env["OUT"] = str(out or (tmp / "terraform.tfvars"))
-    return subprocess.run(["bash", str(SCRIPT)], capture_output=True, text=True,
-                          env=env, check=False)
+    return subprocess.run(["bash", str(SCRIPT), *args], capture_output=True,
+                          text=True, env=env, check=False)
 
 
 def parse(path):
@@ -223,6 +246,118 @@ def main():
         r = run(tmp, account="9@cloudbuild.gserviceaccount.com\\n", project=None, out=out)
         check("no PROJECT is a usage error, and calls nothing",
               r.returncode == 2 and not out.exists(), f"{r.returncode} {r.stderr}")
+
+        # 9. The one that matters most, and the one a list of examples cannot
+        #    give you: what the script ACCEPTS must be exactly what Terraform
+        #    accepts, not a superset of it. A looser shell check writes a file
+        #    that only fails later, which is the whole thing this script exists
+        #    to prevent — and `*@*.gserviceaccount.com`, the obvious pattern, is
+        #    such a superset: it takes a second `@` and an empty half. So this
+        #    compares the two decisions over a corpus built out of the ways an
+        #    email can be malformed, and fails on ANY disagreement in either
+        #    direction. The regex side is read out of variables.tf.
+        corpus = [
+            "9@cloudbuild.gserviceaccount.com",
+            "9-compute@developer.gserviceaccount.com",
+            "9@my-proj.iam.gserviceaccount.com",
+            "a@b@c.gserviceaccount.com",          # two @ — regex says no
+            "@x.gserviceaccount.com",             # empty local part
+            "x@.gserviceaccount.com",             # empty domain label
+            "x@y.gserviceaccount.com.evil.com",   # suffix is not the end
+            "x@ygserviceaccount.com",             # missing the dot
+            "x y@z.gserviceaccount.com",          # a space
+            "x@y.z.gserviceaccount.com",
+            "x@gserviceaccount.com",
+            "9@developer.gserviceaccount.com",
+            "not-an-account",
+            "",
+        ]
+        for i, value in enumerate(corpus):
+            out = tmp / f"d{i}.tfvars"
+            # No trailing newline handling to confuse the comparison: the strip
+            # is tested above, this is about the accept/reject decision alone.
+            r = run(tmp, account=value, out=out)
+            script_accepted = out.exists()
+            written = parse(out).get("cloud_build_service_account") if script_accepted else None
+            terraform_accepts = bool(accepts.fullmatch(value))
+            check(f"accept/reject agrees with Terraform for {value!r}",
+                  script_accepted == terraform_accepts
+                  and (not script_accepted or written == value),
+                  f"script {'wrote' if script_accepted else 'refused'} "
+                  f"{written!r}, terraform would "
+                  f"{'accept' if terraform_accepts else 'reject'} it")
+
+        # 9b. Every value must be QUOTED. parse() above strips quotes, so it
+        #     cannot see the difference and neither can any assertion built on
+        #     it — but Terraform can: `project_id = my-proj` in a var-file is
+        #     "Variables may not be used here", another file that looks right
+        #     and fails validation. Asserted on the raw text, not the parse.
+        out = tmp / "quoted.tfvars"
+        run(tmp, account="9@cloudbuild.gserviceaccount.com", out=out, kms="europe-west1")
+        assignments = [ln for ln in out.read_text(encoding="utf-8").splitlines()
+                       if ln.strip() and not ln.strip().startswith("#")]
+        check("every generated assignment quotes its value",
+              len(assignments) == 4
+              and all(re.fullmatch(r'\S+ += +"[^"]+"', ln) for ln in assignments),
+              repr(assignments))
+
+        # 9c. The DEFAULT output path, which is the only one production uses —
+        #     `make gcp-env-tfvars` passes no OUT — and which every other case
+        #     here overrides, so without this it could point anywhere and stay
+        #     green. Exercised against a COPY of the script in a scratch tree,
+        #     never with OUT unset against the real one: that would write a
+        #     terraform.tfvars into the checkout on any machine where none
+        #     exists yet, which is most of them, CI included.
+        copy_root = tmp / "copy"
+        (copy_root / "environment").mkdir(parents=True)
+        shutil.copy(SCRIPT, copy_root / SCRIPT.name)
+        env = dict(os.environ)
+        env["PATH"] = f"{tmp / 'bin'}:{env['PATH']}"
+        env["PROJECT"] = env["EXPECT_PROJECT"] = "my-proj"
+        env["FAKE_ACCOUNT"] = "9@cloudbuild.gserviceaccount.com"
+        env.pop("FAKE_FAIL", None)
+        env.pop("NAME_PREFIX", None)
+        env["KMS_LOCATION"] = ""
+        env.pop("OUT", None)
+        subprocess.run(["bash", str(copy_root / SCRIPT.name)], capture_output=True,
+                       text=True, env=env, check=False)
+        landed = copy_root / "environment" / "terraform.tfvars"
+        check("with OUT unset it writes <script dir>/environment/terraform.tfvars",
+              landed.exists()
+              and parse(landed).get("project_id") == "my-proj",
+              f"exists={landed.exists()}")
+
+        # 10. --check: the mode that stops an apply or a destroy running against
+        #     one environment's state while configuring another's. It reads the
+        #     file back and compares it to the coordinates that choose the state
+        #     bucket, so a disagreement has to be a refusal, not a warning.
+        out = tmp / "chk.tfvars"
+        run(tmp, account="9@cloudbuild.gserviceaccount.com", out=out, prefix="acme")
+
+        r = run(tmp, out=out, prefix="acme", args=("--check",))
+        check("--check passes when the file and the coordinates agree",
+              r.returncode == 0, f"{r.returncode} {r.stderr}")
+
+        r = run(tmp, out=out, prefix="map", args=("--check",))
+        check("--check refuses a name_prefix the file does not name",
+              r.returncode == 1 and "name_prefix" in r.stderr, f"{r.returncode} {r.stderr}")
+
+        r = run(tmp, out=out, prefix="acme", project="other-project", args=("--check",))
+        check("--check refuses a PROJECT the file does not name",
+              r.returncode == 1 and "project_id" in r.stderr, f"{r.returncode} {r.stderr}")
+
+        r = run(tmp, out=(tmp / "absent.tfvars"), args=("--check",))
+        check("--check on a missing file names the target that writes it",
+              r.returncode == 1 and "gcp-env-tfvars" in r.stderr, f"{r.returncode} {r.stderr}")
+
+        # A hand-written tfvars may leave name_prefix out, because variables.tf
+        # defaults it to the same "map" this script does. That has to READ as
+        # agreement, or the check would refuse the most ordinary file there is.
+        out = tmp / "implicit.tfvars"
+        out.write_text('project_id = "my-proj"\n', encoding="utf-8")
+        r = run(tmp, out=out, args=("--check",))
+        check("--check treats an omitted name_prefix as the default it is",
+              r.returncode == 0, f"{r.returncode} {r.stderr}")
 
     if failures:
         print("\n" + "\n".join(failures), file=sys.stderr)

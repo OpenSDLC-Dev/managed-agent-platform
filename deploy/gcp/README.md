@@ -222,6 +222,11 @@ PROJECT=your-project make gcp-bootstrap  # fills them
 # nothing on failure, and it refuses to overwrite a tfvars file that already exists.
 PROJECT=your-project make gcp-env-tfvars
 
+# NAME_PREFIX has to be repeated here, and on every later gcp-env-* command, for
+# the reason the next section gives: PROJECT and NAME_PREFIX pick the state
+# BUCKET, while the tfvars file picks the resources. They are checked against
+# each other before anything runs, so forgetting it is a refusal rather than an
+# apply against the other environment's state — but it is still a refusal.
 PROJECT=your-project make gcp-env-apply
 
 # The cluster must be reachable before the next step, which runs inside it.
@@ -649,14 +654,15 @@ outside `cloudsqlsuperuser`, and it asserts the result. Skip it and the pipeline
 green through `helm upgrade` and then fails at the first connection, because the DSN names a
 role the database does not have.
 
-**CD runs no Terraform, and the split is not a phase.** The applies are interactive on
-purpose and the state is local by design (plan 20, Decision 9; "State, and recovering it"
-above) — and it lives in the main checkout, not anywhere a runner could reach. A pipeline
-that ran them would need that state somewhere it could reach, and would be one bad plan away
-from destroying the Cloud SQL instance the platform's data lives in — which `environment/`
-is built to allow, because a staging rebuild has to be one command. So the pipeline assumes
-the environment exists: Terraform, `gcp-bootstrap` and `gcp-db-init` stay human-driven, and
-CD owns exactly **build → push → deploy → smoke**.
+**CD runs no Terraform, and the split is not a phase.** Reachability is no longer the reason
+— since #478 `environment/`'s state is in a bucket in the same project the CD identity
+already federates into ("State, and recovering it" below), so a runner *could* reach it. What
+stands is the other reason, which was always the stronger one: the applies are interactive on
+purpose (plan 20, Decision 9), and a pipeline running them would be one bad plan away from
+destroying the Cloud SQL instance the platform's data lives in — which `environment/` is
+built to allow, because a staging rebuild has to be one command. So the pipeline assumes the
+environment exists: Terraform, `gcp-bootstrap` and `gcp-db-init` stay human-driven, and CD
+owns exactly **build → push → deploy → smoke**.
 
 ### The deployment's coordinates
 
@@ -1279,6 +1285,14 @@ values you already have:
 now require `PROJECT`. If the two derivations ever disagreed, `terraform init` would fail
 saying the bucket does not exist — before anything is planned.
 
+**A checkout has to be pointed at the bucket once before it can read anything**, and that is
+`PROJECT=… make gcp-env-init`. It is the cheap half of what the move buys: a fresh clone with
+credentials can now read the environment — `terraform output -raw cluster_name`, the
+addresses, the registry, and the seven outputs `dbinit.sh` reads — without applying anything.
+A partial backend cannot be initialized by the bare `terraform init` that Terraform's own
+error message suggests, because that command has no bucket to use; this target is where the
+`-backend-config` lives, and it is the only one of the four that changes nothing.
+
 **Moving an existing local state into it is a one-time step, and it must run from the machine
 that still holds the file:**
 
@@ -1417,8 +1431,10 @@ the mutations have already begun.
 
 `gcp-tfvars-test` is the fifth, and it exists because `tfvars.sh`'s whole job is turning one
 gcloud answer into a value Terraform will accept — and every way that goes wrong writes a file
-that *looks* right and fails validation mid-apply, after a cluster and a database already
-exist. `gcloud builds get-default-service-account` prints `projects/…/serviceAccounts/EMAIL`
+that *looks* right and fails variable validation. That happens during planning, so nothing is
+left half-created; what it costs is that a `destroy` fails in exactly the same way, and a
+destroy is what you are running when the environment is already up and billing.
+`gcloud builds get-default-service-account` prints `projects/…/serviceAccounts/EMAIL`
 in some versions and the bare email in others, and on Windows it terminates the line CRLF;
 both are handled, and both are asserted against the regex read **out of `variables.tf`**
 rather than restated, so the generator and Terraform cannot drift apart. The refusals are

@@ -68,7 +68,15 @@ tf_out() {
 	if ! v="$(terraform -chdir="$ENV_DIR" output -raw "$1" 2>&1)"; then
 		echo "could not read terraform output '$1' from $ENV_DIR:" >&2
 		echo "$v" >&2
-		echo "Run 'make gcp-env-apply' first." >&2
+		# Since #478 the state is in a bucket and the backend block is partial, so
+		# a checkout that has never initialized it lands here — including one that
+		# is otherwise complete. `terraform init` on its own cannot fix it (no
+		# bucket), and Terraform's error says to run exactly that, so name the
+		# target that passes the -backend-config rather than leave the operator
+		# following advice that fails.
+		echo "Run 'PROJECT=$PROJECT make gcp-env-init' first — the state is remote and this" >&2
+		echo "checkout has not been pointed at it. (If the environment does not exist yet," >&2
+		echo "'make gcp-env-apply' is the one that creates it.)" >&2
 		exit 1
 	fi
 	[[ -n "$v" ]] || { echo "terraform output '$1' is empty" >&2; exit 1; }

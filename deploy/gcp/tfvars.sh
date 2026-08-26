@@ -29,6 +29,12 @@
 # Run:
 #     PROJECT=your-project make gcp-env-tfvars
 #
+# It has a second mode, `--check`, which reads the file back instead of writing
+# it and asserts it still describes the PROJECT and NAME_PREFIX the caller named.
+# That is not a tidiness check: those two choose the state BUCKET while the file
+# chooses the RESOURCES, so the targets that touch the backend run it first. The
+# long argument is at the mode itself.
+#
 # ORDER: after `make gcp-foundation-apply`. Enabling the Cloud Build API is what
 # creates the default build account, and the foundation is what enables it — on
 # a project where it has never been on, the lookup fails with SERVICE_DISABLED
@@ -50,7 +56,10 @@ OUT="${OUT:-$HERE/environment/terraform.tfvars}"
 
 if [[ -z "$PROJECT" ]]; then
 	cat >&2 <<-EOF
-		usage: PROJECT=your-project $0
+		usage: PROJECT=your-project $0 [--check]
+
+		  (no argument)  generate OUT
+		  --check        assert an existing OUT still describes PROJECT/NAME_PREFIX
 
 		environment:
 		  PROJECT       required — the GCP project holding the environment
@@ -58,6 +67,61 @@ if [[ -z "$PROJECT" ]]; then
 		  OUT           default environment/terraform.tfvars
 	EOF
 	exit 2
+fi
+
+# --check answers the question that the split between "where the state lives" and
+# "what the configuration builds" opens up, and that nothing else asks.
+#
+# The state bucket is chosen from PROJECT and NAME_PREFIX at `terraform init`.
+# The RESOURCES come from project_id and name_prefix in this file. Those are two
+# independent inputs to one operation, and a mismatch is not a failure — it is a
+# success against the wrong state. `PROJECT=b make gcp-env-apply` in a checkout
+# whose tfvars says project a loads b's state and configures a's resources; if
+# both exist, the plan destroys what b's state records and creates it in a. The
+# custom-prefix case is worse because the DOCS walk into it: generate with
+# NAME_PREFIX=acme, then run the documented `PROJECT=... make gcp-env-apply`, and
+# the bucket is `...-map-tfstate` while every resource is an `acme` one.
+#
+# So the targets that touch the backend assert the two agree first. Nothing here
+# talks to GCP: it is a comparison between a file and two variables.
+if [[ "${1:-}" == "--check" ]]; then
+	if [[ ! -e "$OUT" ]]; then
+		echo "no ${OUT}" >&2
+		echo "Terraform evaluates the whole configuration before it will apply OR destroy," >&2
+		echo "and these variables have no default, so it would stop to prompt." >&2
+		echo "Run \`PROJECT=${PROJECT} make gcp-env-tfvars\` first." >&2
+		exit 1
+	fi
+
+	# One assignment per variable: Terraform rejects a file that assigns the same
+	# one twice, so there is nothing to disambiguate here.
+	tfvar() {
+		sed -n "s/^[[:space:]]*$1[[:space:]]*=[[:space:]]*\"\([^\"]*\)\".*/\1/p" "$OUT" | head -1
+	}
+	got_project="$(tfvar project_id)"
+	# Absent means the variables.tf default, which is the same "map" this script
+	# defaults NAME_PREFIX to — so a hand-written tfvars that omits it agrees.
+	got_prefix="$(tfvar name_prefix)"
+	got_prefix="${got_prefix:-map}"
+
+	bad=0
+	if [[ "$got_project" != "$PROJECT" ]]; then
+		echo "${OUT} says project_id = \"${got_project}\", but you passed PROJECT=${PROJECT}." >&2
+		bad=1
+	fi
+	if [[ "$got_prefix" != "$NAME_PREFIX" ]]; then
+		echo "${OUT} says name_prefix = \"${got_prefix}\", but you passed NAME_PREFIX=${NAME_PREFIX}." >&2
+		bad=1
+	fi
+	if [[ "$bad" -ne 0 ]]; then
+		echo >&2
+		echo "Those two choose the state bucket; the file chooses the resources. Applying or" >&2
+		echo "destroying with them disagreeing operates on one environment's state while" >&2
+		echo "configuring another's. Pass the values the file names, or regenerate it." >&2
+		exit 1
+	fi
+	echo "${OUT} agrees with PROJECT=${PROJECT} NAME_PREFIX=${NAME_PREFIX}"
+	exit 0
 fi
 
 # Refused rather than merged, and refused rather than overwritten. An existing
@@ -75,7 +139,14 @@ fi
 
 echo "looking up the Cloud Build default service account in ${PROJECT}"
 err="$(mktemp)"
-trap 'rm -f "$err"' EXIT
+# Set once the destination temporary exists; see the atomic write at the bottom.
+tmp=""
+cleanup() {
+	rm -f "$err"
+	[[ -n "$tmp" ]] && rm -f "$tmp"
+	return 0
+}
+trap cleanup EXIT
 if ! raw="$(gcloud builds get-default-service-account --project="$PROJECT" \
 	--format='value(serviceAccountEmail)' 2>"$err")"; then
 	sed 's/^/  /' "$err" >&2
@@ -102,14 +173,20 @@ raw="$(printf '%s' "$raw" | tr -d '\r')"
 # means it has already caught somebody.
 account="${raw##*/}"
 
-# Checked against the same shape variables.tf enforces, so this cannot write a
-# file that only fails later, during an apply that has already been started.
-valid=0
-case "$account" in
-*[[:space:]/]*) ;;
-*@*.gserviceaccount.com) valid=1 ;;
-esac
-if [[ "$valid" -ne 1 ]]; then
+# The SAME shape variables.tf enforces, character for character — not a looser
+# approximation of it. `*@*.gserviceaccount.com` was the approximation, and it
+# accepted three things Terraform rejects: `a@b@c.gserviceaccount.com` (a second
+# `@`), `@x.gserviceaccount.com` and `x@.gserviceaccount.com` (an empty half).
+# Writing a value Terraform will reject is the one outcome this script exists to
+# prevent, so the check has to be the same check. tfvars_test.py asserts the two
+# agree over a corpus rather than trusting this comment: it reads the regex out
+# of variables.tf and requires that what this script accepts is exactly what
+# that regex accepts.
+#
+# Kept in a variable because `[[ =~ ]]` matches a QUOTED right-hand side as a
+# literal string; an unquoted expansion is the idiom, and `[[` does not word-split.
+ACCOUNT_RE='^[^@ /]+@[^@ /]+\.(iam\.)?gserviceaccount\.com$'
+if [[ ! "$account" =~ $ACCOUNT_RE ]]; then
 	echo "the lookup returned '${raw}', which is not a service account email." >&2
 	echo "Expected something like 123456789@cloudbuild.gserviceaccount.com or" >&2
 	echo "123456789-compute@developer.gserviceaccount.com." >&2
@@ -124,7 +201,14 @@ if [[ "$valid" -ne 1 ]]; then
 	exit 1
 fi
 
-cat >"$OUT" <<-EOF
+# Written beside the destination and moved into place only once it is COMPLETE,
+# because a partial file here is worse than none: this script refuses to
+# overwrite an existing file, so an interrupt between the heredoc and the
+# kms_location append below would leave a plausible-looking tfvars carrying the
+# wrong KMS location, and every retry would refuse to correct it. `mv` within one
+# directory is atomic, which is why the temporary cannot go in /tmp.
+tmp="$(mktemp "${OUT}.XXXXXX")"
+cat >"$tmp" <<-EOF
 	# Generated by deploy/gcp/tfvars.sh. Gitignored: these name one operator's
 	# project, and this repository is public (#356).
 	#
@@ -144,8 +228,14 @@ cat >"$OUT" <<-EOF
 EOF
 
 if [[ -n "$KMS_LOCATION" ]]; then
-	printf 'kms_location                = "%s"\n' "$KMS_LOCATION" >>"$OUT"
+	printf 'kms_location                = "%s"\n' "$KMS_LOCATION" >>"$tmp"
 fi
+
+# The file lands 0600 rather than the umask default, because that is what mktemp
+# makes. Left alone: only the operator running Terraform reads it, and stricter
+# is the safe direction for a file naming a project and a service account.
+mv "$tmp" "$OUT"
+tmp=""
 
 echo "wrote ${OUT}"
 sed 's/^/  /' "$OUT"
