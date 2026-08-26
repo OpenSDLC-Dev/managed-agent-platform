@@ -77,6 +77,7 @@ jobs:
           # anyone reading the issue, and scanning open issues for an exact
           # string only works while the issue is inside the page fetched.
           LABEL: cd-failure
+          MISWIRED_LABEL: cd-notifier-miswired
           # How far back to look for a run that carries news. Parked weekends
           # are the reason this is not 1.
           WINDOW: 12
@@ -178,12 +179,33 @@ jobs:
           MARK="<!-- deploy-alert run:$RUN_ID attempt:$RUN_ATTEMPT -->"
           export MARK
 
-          # Only the arms that touch the issue pay for the lookup.
-          gh label create "$LABEL" --repo "$REPO" --color B60205 \
-            --description "Opened automatically when the deploy workflow fails (#479)" \
-            >/dev/null 2>&1 || true
-          num="$(retry gh issue list --repo "$REPO" --state open --label "$LABEL" --limit 10 \
-            --json number --jq 'first | .number // empty')"
+          ensure_label() {
+            gh label create "$1" --repo "$REPO" --color B60205 --description "$2" \
+              >/dev/null 2>&1 || true
+          }
+          open_issue_with() {
+            retry gh issue list --repo "$REPO" --state open --label "$1" --limit 10 \
+              --json number --jq 'first | .number // empty'
+          }
+
+          # Two labels, because these are two different problems with two
+          # different fixers: `broken` means CD is down, `miswired` means this
+          # notifier has gone blind. Sharing one issue would file a real outage
+          # as a comment under "the notifier can no longer tell deployed from
+          # parked" — a title that sends whoever triages it to the wrong place.
+          #
+          # Both are ensured before either is looked up, so `deployed` can ask
+          # about the one this run did not use without depending on how `gh`
+          # answers a filter naming a label that does not exist.
+          ensure_label "$LABEL" \
+            "Opened automatically when the deploy workflow fails (#479)"
+          ensure_label "$MISWIRED_LABEL" \
+            "Opened automatically when deploy-alert.yml loses the step it keys on (#479)"
+          case "$outcome" in
+            miswired) want_label="$MISWIRED_LABEL" ;;
+            *)        want_label="$LABEL" ;;
+          esac
+          num="$(open_issue_with "$want_label")"
 
           open_or_comment() {
             local title="$1"
@@ -216,7 +238,7 @@ jobs:
             # URL. Any `|| gh issue create` fallback behind that files the
             # outage a second time.
             local url
-            url="$(gh issue create --repo "$REPO" --title "$title" --label "$LABEL" --body "$body")"
+            url="$(gh issue create --repo "$REPO" --title "$title" --label "$want_label" --body "$body")"
             echo "opened $url"
             gh issue edit "${url##*/}" --repo "$REPO" --add-assignee "$ACTOR" >/dev/null 2>&1 \
               || echo "::warning::opened $url but could not assign it to $ACTOR"
@@ -252,13 +274,19 @@ jobs:
                 "This issue closes automatically on the next run that actually deploys — a run skipped because staging is parked does not count and will not close it.")"
               ;;
             deployed)
-              if [ -n "$num" ]; then
-                gh issue close "$num" --repo "$REPO" --comment \
+              # Closes BOTH identities, and the second is not belt-and-braces:
+              # `deployed` requires the step this notifier keys on to have
+              # concluded `success`, which is proof the miswiring is over too.
+              closed=0
+              for l in "$LABEL" "$MISWIRED_LABEL"; do
+                n="$(open_issue_with "$l")"
+                [ -n "$n" ] || continue
+                gh issue close "$n" --repo "$REPO" --comment \
                   "Deployed successfully on \`${HEAD_SHA:0:7}\`: $RUN_URL"
-                echo "closed #$num"
-              else
-                echo "nothing to close"
-              fi
+                echo "closed #$n ($l)"
+                closed=$((closed + 1))
+              done
+              [ "$closed" -gt 0 ] || echo "nothing to close"
               ;;
             miswired)
               open_or_comment "$MISWIRED_TITLE" "$(printf '%s\n' \

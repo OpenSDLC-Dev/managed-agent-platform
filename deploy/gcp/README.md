@@ -624,7 +624,9 @@ nothing done to this file takes effect — or can be tested — until it merges.
 classification sits in [`cd-outcome.sh`](../../.github/scripts/cd-outcome.sh) behind
 `make cd-outcome-test`, and why CI checks the three names the notifier borrows from
 `deploy.yml`: its filename, its `name:`, and the **`Deploy the chart`** step whose conclusion
-separates parked from deployed.
+separates parked from deployed. Should that name go missing at runtime anyway, the notifier
+says so under a label of its own (`cd-notifier-miswired`) rather than filing it as an outage —
+a blind notifier and a broken deploy are different problems for different people.
 
 **Three of those secrets are not `bootstrap.sh`'s.** It owns exactly `<prefix>-db-password`
 and `<prefix>-db-admin-password`, because those are the two Terraform reads back. The three
