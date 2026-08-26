@@ -325,6 +325,16 @@ NAME_PREFIX_OR_DEFAULT = $(or $(NAME_PREFIX),map)
 # reaches an arbitrary bucket no matter how TF_STATE_BUCKET is declared — the
 # same hazard, one variable further out. Locking only the inner one looked
 # sufficient and was not.
+#
+# The rule for which variables need locking, since this moved outward twice
+# before it stopped: everything DOWNSTREAM of the guard's inputs must be locked,
+# and everything upstream must not be. gcp-env-vars-match compares the tfvars
+# against PROJECT and NAME_PREFIX_OR_DEFAULT, so those two — and NAME_PREFIX
+# behind them — move the bucket AND what the guard expects, together; overriding
+# one is just choosing another environment, and a tfvars that disagrees refuses.
+# TF_STATE_BUCKET and TF_BACKEND are past that comparison: they move the bucket
+# alone, leaving the guard checking something it no longer decides. That is the
+# whole difference, and it is why locking them is enough.
 override TF_STATE_BUCKET = $(PROJECT)-$(NAME_PREFIX_OR_DEFAULT)-tfstate
 override TF_BACKEND = -backend-config="bucket=$(TF_STATE_BUCKET)"
 

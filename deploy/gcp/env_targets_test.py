@@ -166,6 +166,26 @@ def main():
                   all("someone-elses-bucket" not in c for c in calls)
                   and any("bucket=my-proj-map-tfstate" in c for c in calls), str(calls))
 
+        # 2b. The other half of that rule, and the reason the two above are the
+        #     ONLY ones locked. A variable UPSTREAM of the guard's comparison —
+        #     here the internal NAME_PREFIX_OR_DEFAULT — moves the bucket and
+        #     what the guard expects together, so overriding it is just choosing
+        #     another environment: it refuses when the tfvars disagrees, and
+        #     works when it agrees. Locking it would break the legitimate
+        #     NAME_PREFIX knob; not locking it is safe for a reason, not by
+        #     omission, and this pins that reason.
+        rc, out, calls = run_make(tree, bin_dir, "gcp-env-init",
+                                  extra=("NAME_PREFIX_OR_DEFAULT=evil",))
+        check("an upstream override still faces the guard",
+              rc != 0 and calls == [] and "name_prefix" in out,
+              f"rc={rc} calls={calls}")
+        rc, out, calls = run_make(tree, bin_dir, "gcp-env-init",
+                                  extra=("NAME_PREFIX_OR_DEFAULT=evil",),
+                                  tfvars='project_id = "my-proj"\nname_prefix = "evil"\n')
+        check("...and is coherent once the tfvars agrees",
+              rc == 0 and any("bucket=my-proj-evil-tfstate" in c for c in calls),
+              f"rc={rc} calls={calls}")
+
         # 3. The coordinate guard, on every target that selects a backend, and
         #    BEFORE terraform is invoked at all — not merely somewhere in the
         #    recipe. Nothing may have run by the time it refuses.
