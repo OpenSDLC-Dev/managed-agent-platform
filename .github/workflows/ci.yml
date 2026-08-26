@@ -518,27 +518,30 @@ jobs:
               --set externalDatabase.url='postgres://u:p@127.0.0.1:5432/x?sslmode=disable'
               --set cloudSQLProxy.enabled=true
               --set cloudSQLProxy.instanceConnectionName=proj:us-central1:inst)
+          # Every assertion in this step reads the proxy's own entry under
+          # `initContainers:` through this filter, not the whole manifest and not
+          # the whole block, and both halves of that are load-bearing.
+          # Manifest-wide, a proxy rendered under `containers:` — losing the
+          # ordering guarantee entirely, since an ordinary container lets the
+          # process race it and crash-loop on a socket that is not listening yet
+          # — leaves every grep still matching something. Block-wide, a SECOND
+          # init container supplies whatever the proxy's entry lost. So the
+          # extraction is anchored to `- name: cloud-sql-proxy` at the exact
+          # indentation a podSpec gives it, and ends at the next entry.
+          sidecarOf() {
+            awk '
+              /^      initContainers:$/ { inInit = 1; next }
+              inInit && /^      [a-zA-Z]/ { inInit = 0 }
+              inInit && /^        - name: / { inProxy = ($0 == "        - name: cloud-sql-proxy") }
+              inInit && inProxy { print }'
+          }
           # All THREE database-opening deployments get it, and that is not
           # symmetry for its own sake: they read one `database-url` Secret key,
           # so a DSN naming the proxy's loopback socket is wrong for any pod
           # that did not get a proxy.
           for t in controlplane brain executor; do
             rendered="$(helm template t "$CHART" -f "$VALUES" "${on[@]}" --show-only "templates/$t-deployment.yaml")"
-            # Every assertion below reads the proxy's own entry under
-            # `initContainers:`, not the whole manifest and not the whole block,
-            # and both halves of that are load-bearing. Manifest-wide, a proxy
-            # rendered under `containers:` — losing the ordering guarantee
-            # entirely, since an ordinary container lets the process race it and
-            # crash-loop on a socket that is not listening yet — leaves every
-            # grep still matching something. Block-wide, a SECOND init container
-            # supplies whatever the proxy's entry lost. So the extraction is
-            # anchored to `- name: cloud-sql-proxy` at the exact indentation a
-            # podSpec gives it, and ends at the next entry.
-            sidecar="$(echo "$rendered" | awk '
-              /^      initContainers:$/ { inInit = 1; next }
-              inInit && /^      [a-zA-Z]/ { inInit = 0 }
-              inInit && /^        - name: / { inProxy = ($0 == "        - name: cloud-sql-proxy") }
-              inInit && inProxy { print }')"
+            sidecar="$(echo "$rendered" | sidecarOf)"
             [ -n "$sidecar" ] \
               || { echo "$t: the proxy is not a native sidecar under initContainers" >&2
                    echo "$rendered" >&2; exit 1; }
@@ -573,6 +576,21 @@ jobs:
             # onto the pod network without changing anything else visible here.
             echo "$sidecar" | grep -q '"--address' \
               && { echo "$t: an --address flag would take the socket off loopback" >&2; exit 1; }
+            # connectionTest is a PAIR — absent unless asked for, present in the
+            # proxy's own args when asked — and the two are asserted together so
+            # a reader can see they are a pair. Both read `$sidecar`, never the
+            # manifest: the flag rendered into the application container, into a
+            # second init container, or into an annotation would satisfy a
+            # manifest-wide grep while dialing nothing. The default half matters
+            # on its own, because switching it on by accident moves every chart
+            # user's failures earlier without anyone choosing that.
+            echo "$sidecar" | grep -qF '"--run-connection-test"' \
+              && { echo "$t: --run-connection-test is present without connectionTest=true" >&2; exit 1; }
+            withTest="$(helm template t "$CHART" -f "$VALUES" "${on[@]}" \
+              --set cloudSQLProxy.connectionTest=true --show-only "templates/$t-deployment.yaml")"
+            echo "$withTest" | sidecarOf | grep -qF '"--run-connection-test"' \
+              || { echo "$t: connectionTest=true did not add --run-connection-test to the sidecar args" >&2
+                   echo "$withTest" >&2; exit 1; }
             # --http-port is deliberately absent from this list: the
             # port-agreement assertion below covers it, and pinning the literal
             # here would fail a coherent move of the flag and both probes to
@@ -618,9 +636,11 @@ jobs:
           # what a bare "at least three colon-separated parts" test accepted.
           # This is a SHAPE check and these rows are its boundary: a
           # well-formed-but-wrong name (`127.0.0.1:5432:x` is three non-empty
-          # parts) is the proxy's to reject at startup, and encoding Google's
-          # own rules for the three parts here would refuse a valid name the day
-          # Google widens one.
+          # parts) passes it and nothing downstream catches it either, because
+          # the proxy reports itself started without dialing — that is what
+          # cloudSQLProxy.connectionTest exists for, asserted above. Encoding
+          # Google's own rules for the three parts here would refuse a valid
+          # name the day Google widens one.
           for bad in 10.1.2.3 127.0.0.1:5432 'a::b' 'proj:us-central1:' '2001:db8::1' 'a:b:c:d:e'; do
             refuses 'must be an instance connection name' \
               "${noDB[@]}" --set cloudSQLProxy.enabled=true \
@@ -851,7 +871,15 @@ jobs:
           echo "$out" | grep -A1 'name: SANDBOX_K8S_TOLERATIONS' | grep -qF 'map.opensdlc.dev/sandbox' \
             || { echo "staging-values.yaml did not reach the executor as a sandbox toleration" >&2
                  echo "$out" | grep -A1 'name: SANDBOX_K8S_TOLERATIONS' >&2; exit 1; }
-          echo "ok: CD values file renders with both halves of the sandbox pair"
+          # The proxy's connection test is pinned here for the same reason as the
+          # pair above: the chart-level tests prove the switch WORKS when set,
+          # and nothing else proves this file still sets it. Drop or misspell
+          # `connectionTest` and staging silently goes back to a proxy that
+          # reports itself up without dialing, with every check in this job green.
+          echo "$out" | grep -qF -- '--run-connection-test' \
+            || { echo "staging-values.yaml no longer turns on cloudSQLProxy.connectionTest" >&2
+                 echo "$out" >&2; exit 1; }
+          echo "ok: CD values file renders with the sandbox pair and the proxy connection test"
       - name: the CD job and the chart agree on the mode-2 Secret's keys
         # Mode 2 splits one contract across two files nothing joins. The deploy
         # job writes seven FILES into a temp dir and `kubectl create secret

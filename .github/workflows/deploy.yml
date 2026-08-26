@@ -746,17 +746,24 @@ jobs:
       #
       # It was tempting to argue this one away: a dropped `--set-string` leaves
       # the proxy dialing `your-project:…`, and surely it refuses that at
-      # startup, so the pod never goes Ready and `--atomic` rolls back. It does
-      # not. In the pinned proxy 2.24.1, `Serve` dials nothing unless
-      # `--run-connection-test` is passed, which the chart does not pass; it
-      # launches its listeners and signals startup. None of the three health
-      # endpoints dials either — `/liveness` is unconditional, `/startup`
-      # answers once that signal arrives, and `/readiness` adds only "not
-      # stopped" and "not at max connections". So a well-formed name that names
-      # nothing lets the pod go Ready; and while the DSN still names the
-      # database's address directly, the platform would work, the release would
-      # succeed, and the proxy would be wrong in a way nothing noticed until the
-      # cutover made it load-bearing. #493 tracks giving the chart a real one.
+      # startup, so the pod never goes Ready and `--atomic` rolls back. By
+      # itself it does not. In the pinned proxy 2.24.1, `Serve` dials nothing
+      # unless `--run-connection-test` is passed; it launches its listeners and
+      # signals startup. None of the three health endpoints dials either —
+      # `/liveness` is unconditional, `/startup` answers once that signal
+      # arrives, and `/readiness` adds only "not stopped" and "not at max
+      # connections". So a well-formed name that names nothing lets the pod go
+      # Ready on the proxy's own account.
+      #
+      # Two things now catch it, and neither makes this check redundant. The
+      # platform pings the database before serving, so once the DSN routes
+      # through the proxy a wrong instance crash-loops the pods. And
+      # staging-values.yaml sets `cloudSQLProxy.connectionTest`, which makes the
+      # proxy dial first and name the instance in its own error. Both answer
+      # "does this name reach anything". This step answers "is this the name the
+      # deploy resolved", which neither of them can see — and it is the only one
+      # of the three that still works while the DSN names the database's address
+      # directly, the state a rebuild recovery puts this deployment back into.
       #
       # Read back rather than reasoned about, therefore. Exactly three lines,
       # one per deployment: fewer means the sidecar is missing or the placeholder

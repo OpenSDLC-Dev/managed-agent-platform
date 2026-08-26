@@ -325,11 +325,43 @@ cloudSQLProxy:
   # What the render checks is the SHAPE and only the shape: three or four
   # non-empty colon-separated segments (four for a legacy domain-scoped
   # project, DOMAIN:PROJECT:REGION:INSTANCE). So an address and an empty
-  # segment are refused, and a well-formed name that names nothing is not —
-  # that one the proxy refuses at startup, which is the right place for it:
-  # encoding Google's own naming rules here would refuse a valid name the day
-  # Google widens one.
+  # segment are refused, and encoding Google's own naming rules here would
+  # refuse a valid name the day Google widens one.
+  #
+  # A well-formed name that names nothing is therefore NOT refused. What catches
+  # it is downstream, and where depends on whether the DSN routes through the
+  # proxy yet — see `connectionTest`.
   instanceConnectionName: ""
+  # -- Pass `--run-connection-test`, which makes the proxy dial the instance
+  # before reporting itself up, so an unreachable instance exits the container
+  # non-zero and `helm upgrade --wait --atomic` rolls the release back.
+  #
+  # It is NOT the only thing between a wrong instance and a green release. Once
+  # `database-url` names the proxy's loopback socket, the platform is its own
+  # check: it pings the database before serving and exits non-zero when that
+  # fails, so the pods crash-loop and the release rolls back regardless. What
+  # that costs is the diagnosis — three application containers unable to reach
+  # Postgres, rather than a proxy naming the instance it could not open.
+  #
+  # It earns its keep in the window where the proxy is enabled but the DSN does
+  # not route through it yet: the deliberate first step of a cutover, where the
+  # proxy runs unused. Nothing exercises it there, so a wrong connection name
+  # stays invisible until the DSN moves — possibly days later, and by then the
+  # change that broke it is no longer the change being deployed.
+  #
+  # Off by default because for a DSN already routing through the proxy it mostly
+  # duplicates that check a second earlier, and moving a failure earlier is not
+  # a decision a chart default should make for every deployment.
+  #
+  # Two things to know before turning it on. It is a BOOLEAN: pass it with
+  # `--set`, never `--set-string`, since the non-empty string "false" is truthy
+  # to Helm and would switch it on (true of every boolean in this file, but this
+  # is the one whose accident fails deploys). And it runs inside the
+  # startupProbe's budget below — a dial that HANGS rather than refusing can
+  # outlast the probe, in which case the kubelet kills the container first and
+  # the operator sees a startup-probe CrashLoopBackOff rather than the proxy's
+  # own "Connection test failed" (#493).
+  connectionTest: false
   # -- Pass `--private-ip`, which is what an instance with `ipv4_enabled = false`
   # requires — the shape deploy/gcp/ builds. Turn it off for an instance reached
   # over its public address.
