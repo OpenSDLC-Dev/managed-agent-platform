@@ -64,11 +64,26 @@ fmt-check:
 # when a suite fails, when a live tier is misconfigured, or only under the
 # opt-in tiers themselves. Counting those measures nothing and dilutes the
 # gate, exactly as cmd/ main glue would.
+#
+# -timeout 30m, not go test's 10m default (#490): the two largest
+# Postgres-backed suites, internal/api and internal/executor, now run about ten
+# minutes each on a loaded 8-CPU box — the executor measured past the default at
+# 613 s, the api just under at 591 s — and a package that dies at the ceiling
+# reports `panic: test timed out` with a sub-second test "running", which reads
+# like a hang rather than the budget it is. The default is sized for unit tests;
+# these run a fixture container per binary and migrate a fresh database per
+# test, which is where the minutes go. The per-test
+# guards are the real limits — this is only the outer backstop, and a suite that
+# genuinely wedges still fails, three times slower to say so. Raising it costs
+# nothing when tests pass, and a timed-out binary skips the `defer` that removes
+# its pgtest fixture, so the ceiling also fed the next run's contention. This
+# buys room rather than fixing the cause: the per-test database creation behind
+# the growth, and reaping a fixture whose owner died, are #499.
 test:
 	@set -euo pipefail; \
 	coverpkg="$$(go list ./internal/... | grep -vE '/(pgtest|dockertest|sandboxtest|modeltest|blobtest|gcstest|providertest|secretstest|gcpkmstest|webtooltest|identitytest|mcptest)$$' | paste -sd, -)"; \
 	set -x; \
-	go test -count=1 -coverpkg="$$coverpkg" -coverprofile=coverage.out ./...
+	go test -count=1 -timeout 30m -coverpkg="$$coverpkg" -coverprofile=coverage.out ./...
 
 # Gates the coverage.out that `make test` (or the CI test step) just wrote —
 # it deliberately does NOT depend on `test`, so CI can run the two as separate
