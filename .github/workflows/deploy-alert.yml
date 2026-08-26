@@ -148,17 +148,21 @@ jobs:
           num="$(retry gh issue list --repo "$REPO" --state open --label "$LABEL" --limit 10 \
             --json number --jq 'first | .number // empty')"
 
-          export RUN_URL
+          # Every body ends with this. Matching on the run URL instead would be
+          # SUBSTRING matching — `…/runs/123` is a prefix of `…/runs/1234` — and
+          # the trailing marker makes the comparison exact by construction.
+          MARK="<!-- deploy-alert run:$RUN_ID -->"
+          export MARK
 
           open_or_comment() {
-            local body="$1"
+            local body="$1"$'\n\n'"$MARK"
             if [ -n "$num" ]; then
               # Never say the same thing twice: a reconciliation triggered by a
               # LATER event can land on the same newest run, and a bot that
               # repeats itself is a bot people filter out.
               local said
               said="$(retry gh issue view "$num" --repo "$REPO" --json comments \
-                --jq '[.comments[].body] | map(select(contains(env.RUN_URL))) | length')"
+                --jq '[.comments[].body] | map(select(contains(env.MARK))) | length')"
               if [ "$said" != "0" ]; then echo "already reported $RUN_ID on #$num"; return; fi
               gh issue comment "$num" --repo "$REPO" --body "$body"
               echo "commented on #$num"
@@ -168,12 +172,20 @@ jobs:
             # whose backlog is already issues is the same silence #479 is about,
             # one layer up; the assignment is what actually sends someone a
             # notification. The run's actor is whoever's merge is on the failing
-            # commit. Best-effort: a bot actor, or one without push access,
-            # cannot be assigned, and losing the issue over that is the worse
-            # trade.
-            gh issue create --repo "$REPO" --title "$TITLE" --label "$LABEL" \
-              --assignee "$ACTOR" --body "$body" \
-              || gh issue create --repo "$REPO" --title "$TITLE" --label "$LABEL" --body "$body"
+            # commit.
+            #
+            # Two calls rather than `create --assignee`, deliberately. A bot
+            # actor, or one without push access, cannot be assigned, and a
+            # single call that fails on the assignee gives no way to know
+            # whether the issue was created first — retrying it would file the
+            # outage twice. Creating first and assigning after can only ever
+            # under-notify, which is recoverable by hand; the other way round
+            # is not.
+            local url
+            url="$(gh issue create --repo "$REPO" --title "$TITLE" --label "$LABEL" --body "$body")"
+            echo "opened $url"
+            gh issue edit "${url##*/}" --repo "$REPO" --add-assignee "$ACTOR" >/dev/null 2>&1 \
+              || echo "::warning::opened $url but could not assign it to $ACTOR"
           }
 
           case "$outcome" in
