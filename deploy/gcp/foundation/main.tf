@@ -58,6 +58,16 @@ resource "google_project_service" "required" {
     "iam.googleapis.com",
     "iamcredentials.googleapis.com",
     "secretmanager.googleapis.com",
+    # Storage is enabled here as well as in environment/, and the duplication is
+    # deliberate on both sides. This configuration now owns the Terraform state
+    # bucket, and it runs FIRST — so relying on environment/'s enablement would
+    # mean the foundation's own apply failing on a fresh project, before the
+    # configuration that turns the API on has ever run. environment/ keeps its
+    # copy for the reason its comment gives about compute: a configuration names
+    # the APIs its own resources call, rather than inheriting somebody else's
+    # side effect. Enabling an enabled service is a no-op and both sides carry
+    # `disable_on_destroy = false`, so two states naming it cannot fight.
+    "storage.googleapis.com",
   ])
   service = each.value
 
@@ -221,6 +231,67 @@ resource "google_secret_manager_secret" "db_admin_password" {
   replication {
     auto {}
   }
+
+  depends_on = [google_project_service.required]
+
+  lifecycle {
+    prevent_destroy = true
+  }
+}
+
+# ---------------------------------------------------------------------------
+# Remote state for environment/ (#478).
+#
+# environment/'s state used to be a file beside its .tf files, which made two of
+# the four operations that need Terraform non-portable — and one of them
+# silently. `terraform destroy` iterates the STATE, so on a machine that does not
+# hold it destroy finds nothing to destroy and reports success while the
+# environment keeps billing. A second `apply` elsewhere plans a create for
+# resources that already exist.
+#
+# The bucket lives HERE and not in environment/ for the one reason that decides
+# everything in this directory: it has to outlive every `make gcp-env-destroy`,
+# and surviving that is what foundation/ means. The circularity argument in
+# README's "State, and recovering it" does not reach it — that argument is about
+# foundation/ bootstrapping its OWN remote state, and foundation/ runs first, so
+# by the time environment/ needs a backend the bucket is already there.
+# foundation/'s state stays local, deliberately and unchanged.
+#
+# It is not in check_split.py's UNRECOVERABLE kinds, and must not be: that list
+# is expressed over KINDS, and environment/ legitimately owns a
+# google_storage_bucket of its own for blobs. `prevent_destroy` plus foundation/
+# having no destroy target is the protection here.
+resource "google_storage_bucket" "tfstate" {
+  # Project ids are globally unique, so this name is too — which a bucket name
+  # has to be, across all of GCS. The same expression is what the Makefile
+  # derives from PROJECT and NAME_PREFIX to pass as `-backend-config`, since a
+  # backend block cannot interpolate a variable. If the two ever disagree,
+  # `terraform init` fails saying the bucket does not exist; nothing here can
+  # fail quietly.
+  name     = "${var.project_id}-${var.name_prefix}-tfstate"
+  location = var.state_bucket_location
+
+  # NOT the blob bucket's `force_destroy = true`. That one holds session files an
+  # acceptance run leaves behind; this one holds the only record of what exists
+  # in the project.
+  force_destroy = false
+
+  # Every write keeps the previous object. Terraform's own locking prevents
+  # concurrent writes; this is for the other failure — a state overwritten by a
+  # bad apply or a mistaken `state rm`, which no lock protects against.
+  versioning {
+    enabled = true
+  }
+
+  # Uniform access, so the bucket's permissions are IAM grants and nothing else,
+  # and no ACL can quietly widen them.
+  uniform_bucket_level_access = true
+
+  # State holds no secret — that is what bootstrap.sh and `password_wo` are for,
+  # and README's "State, and recovering it" says so. It does name every resource
+  # in the environment, which is a map of the deployment and not something to
+  # leave reachable by accident.
+  public_access_prevention = "enforced"
 
   depends_on = [google_project_service.required]
 

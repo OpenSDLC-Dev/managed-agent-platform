@@ -36,3 +36,8 @@ output "db_admin_password_secret" {
   value       = google_secret_manager_secret.db_admin_password.secret_id
   description = "Secret Manager secret id holding the Cloud SQL built-in `postgres` administrator's password. Used by one bootstrap connection and by break-glass access; never by the platform."
 }
+
+output "state_bucket" {
+  value       = google_storage_bucket.tfstate.name
+  description = "Bucket holding environment/'s Terraform state. `make gcp-env-*` derives the same name from PROJECT and NAME_PREFIX rather than reading it here, because `terraform init` needs it before any output can be read; this output is how an operator checks the two agree."
+}

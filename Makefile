@@ -21,7 +21,8 @@ SHELL := /usr/bin/env bash
 	changelog changelog-notes changelog-archive \
 	release-tag-check release-images release-chart-check release-chart release-binaries \
 	openbao-init-test cd-outcome-test parked-test registry-check \
-	gcp-fmt gcp-validate gcp-split-check gcp-lint gcp-bootstrap-test gcp-dbinit-test gcp-split-check-test gcp-power-test gcp-foundation-apply gcp-bootstrap gcp-env-apply gcp-db-init gcp-env-destroy gcp-env-rebuild \
+	gcp-fmt gcp-validate gcp-split-check gcp-lint gcp-bootstrap-test gcp-dbinit-test gcp-split-check-test gcp-power-test gcp-tfvars-test gcp-foundation-apply gcp-bootstrap gcp-env-apply gcp-db-init gcp-env-destroy gcp-env-rebuild \
+	gcp-require-project gcp-env-tfvars gcp-env-migrate-state \
 	gcp-env-stop gcp-env-start gcp-env-status
 
 build:
@@ -293,9 +294,33 @@ parked-test:
 
 GCP_TF ?= terraform
 
+# environment/'s state lives in the bucket foundation/ owns (#478), and a backend
+# block cannot interpolate a variable — so the bucket arrives at init time. The
+# name is DERIVED here exactly as foundation/main.tf composes it, rather than
+# recorded as another coordinate: project ids are globally unique, so
+# `<project>-<prefix>-tfstate` is too, and there is nothing for an operator to
+# copy between two places and get wrong. If the two expressions ever disagree,
+# `terraform init` fails saying the bucket does not exist — loudly, and before
+# anything is planned.
+NAME_PREFIX_OR_DEFAULT = $(or $(NAME_PREFIX),map)
+TF_STATE_BUCKET ?= $(PROJECT)-$(NAME_PREFIX_OR_DEFAULT)-tfstate
+TF_BACKEND = -backend-config="bucket=$(TF_STATE_BUCKET)"
+
+# An empty PROJECT would compose `-map-tfstate`, which is not a legal bucket name
+# and fails several steps later with a message about the bucket rather than about
+# the variable. Every target that needs the backend depends on this.
+gcp-require-project:
+	@if [ -z "$(PROJECT)" ]; then \
+		echo "PROJECT is required — it is half of the state bucket's name." >&2; \
+		echo "Run: PROJECT=your-project make <target>" >&2; \
+		exit 2; \
+	fi
+
 # fmt and validate need no credentials and no state, which is what lets CI run
 # them on every PR: the configuration cannot rot silently between the rare runs
-# that actually touch GCP.
+# that actually touch GCP. `-backend=false` is what keeps that true now that
+# environment/ declares a `backend "gcs"` block: it stops init from trying to
+# reach the bucket, so validate stays offline.
 gcp-fmt:
 	$(GCP_TF) fmt -check -recursive deploy/gcp
 
@@ -323,10 +348,10 @@ gcp-split-check:
 # in exactly that way. A list of constructs, not an analysis, and honest about
 # it: it catches a recurrence of this class, not every possible one.
 gcp-lint:
-	shellcheck deploy/gcp/bootstrap.sh deploy/gcp/dbinit.sh deploy/gcp/env-power.sh
+	shellcheck deploy/gcp/bootstrap.sh deploy/gcp/dbinit.sh deploy/gcp/env-power.sh deploy/gcp/tfvars.sh
 	@set -euo pipefail; \
 	found=0; \
-	for f in deploy/gcp/bootstrap.sh deploy/gcp/dbinit.sh deploy/gcp/env-power.sh; do \
+	for f in deploy/gcp/bootstrap.sh deploy/gcp/dbinit.sh deploy/gcp/env-power.sh deploy/gcp/tfvars.sh; do \
 		if grep -nE '(^|[^[:alnum:]_-])(mapfile|readarray)[[:space:]]|declare[[:space:]]+-[A-Za-z]*A|\$${[A-Za-z_][A-Za-z0-9_]*(\^\^|,,)' "$$f"; then \
 			echo "  ^ in $$f: needs bash 4; macOS ships 3.2" >&2; \
 			found=1; \
@@ -365,6 +390,15 @@ gcp-split-check-test:
 gcp-power-test:
 	python3 deploy/gcp/env_power_test.py
 
+# The tfvars generator turns one gcloud answer into a value Terraform accepts,
+# and every way that goes wrong — a `projects/…/serviceAccounts/` prefix, a
+# Windows CR — writes a file that looks right and fails validation mid-apply,
+# after a cluster exists. Shellcheck cannot see any of it, so this RUNS the
+# script against a fake gcloud, including the refusals: a disabled API, junk that
+# is not an account, and an existing file that must never be overwritten.
+gcp-tfvars-test:
+	python3 deploy/gcp/tfvars_test.py
+
 # Adds the first version of each Secret Manager secret — the two database
 # passwords, since #240 retired the GCS HMAC key that was the third value here.
 # Runs BETWEEN the two applies: the foundation creates the secrets empty,
@@ -380,9 +414,27 @@ gcp-foundation-apply:
 	$(GCP_TF) -chdir=deploy/gcp/foundation init -input=false
 	$(GCP_TF) -chdir=deploy/gcp/foundation apply
 
-gcp-env-apply:
-	$(GCP_TF) -chdir=deploy/gcp/environment init -input=false
+# The two variables environment/ has no default for, written to the gitignored
+# environment/terraform.tfvars. Run it after gcp-foundation-apply: the Cloud
+# Build account it looks up does not exist until that API is on. Refuses to
+# overwrite an existing file, which may carry settings it does not generate.
+gcp-env-tfvars: gcp-require-project
+	PROJECT=$(PROJECT) NAME_PREFIX=$(NAME_PREFIX_OR_DEFAULT) KMS_LOCATION=$(KMS_LOCATION) \
+		bash deploy/gcp/tfvars.sh
+
+gcp-env-apply: gcp-require-project
+	$(GCP_TF) -chdir=deploy/gcp/environment init -input=false $(TF_BACKEND)
 	$(GCP_TF) -chdir=deploy/gcp/environment apply
+
+# The one-time move of an existing LOCAL state into the bucket (#478), and it has
+# to run from the machine that still holds that file — CI cannot do it, and
+# neither can a fresh checkout. Deliberately without `-input=false`: the
+# confirmation Terraform asks for before copying state is the point, not an
+# obstacle. Afterwards every machine with credentials shares one state, and the
+# `terraform.tfstate` left behind locally is a backup to delete once a remote
+# `terraform plan` has come back clean.
+gcp-env-migrate-state: gcp-require-project
+	$(GCP_TF) -chdir=deploy/gcp/environment init -migrate-state $(TF_BACKEND)
 
 # Creates the platform's database role OUTSIDE cloudsqlsuperuser and asserts it.
 # Runs as a Job because environment/ gives Cloud SQL a private address only:
@@ -395,7 +447,14 @@ gcp-db-init:
 # Destroys the staging DATABASE along with everything else, and vault ciphertext
 # lives only in Postgres — retaining the KMS key does not bring a deleted row
 # back. Correct for staging, stated here rather than discovered.
-gcp-env-destroy:
+#
+# It also needs the state and the tfvars, and before #478 that meant it needed
+# THIS machine: on a checkout without the state file, destroy found nothing to
+# destroy and reported success while the environment kept billing. The state is
+# remote now and `make gcp-env-tfvars` regenerates the inputs, so this runs from
+# anywhere with credentials.
+gcp-env-destroy: gcp-require-project
+	$(GCP_TF) -chdir=deploy/gcp/environment init -input=false $(TF_BACKEND)
 	$(GCP_TF) -chdir=deploy/gcp/environment destroy
 
 # The teardown proof of Decision 9, as one target: create -> destroy -> create.

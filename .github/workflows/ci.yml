@@ -1088,6 +1088,12 @@ jobs:
       # are invisible to shellcheck and to a careful read alike.
       - name: the power script parks and revives what it claims
         run: make gcp-power-test
+      # And the tfvars generator, whose whole job is turning one gcloud answer
+      # into a value Terraform accepts — a `projects/…/serviceAccounts/` prefix
+      # or a Windows CR writes a file that looks right and fails validation
+      # mid-apply, after a cluster exists.
+      - name: the tfvars generator writes what Terraform accepts
+        run: make gcp-tfvars-test
       - name: the CD outcome classifier decides what it claims
         run: make cd-outcome-test
       # Whether a cluster is parked decides both whether deploy.yml deploys at
