@@ -263,12 +263,11 @@ would never fire for the deployments that need it.
        address (`10.1.2.3`), a bare word, and an empty part (`a::b`, `p:r:`).
 
        It does NOT catch an address WITH a port. `127.0.0.1:5432:x` is three
-       non-empty segments and passes — this is a shape filter, not a backstop,
-       and the distinction matters because nothing downstream catches it
-       either: the proxy dials only under `--run-connection-test`, which this
-       chart does not pass, so the pod goes ready on a name that names nothing.
-       Same for a well-formed name whose project or instance is simply wrong.
-       #493 is that gap.
+       non-empty segments and passes, as does a well-formed name whose project
+       or instance is simply wrong. This is a shape filter, and what catches
+       the rest is downstream: the application's own startup ping once the DSN
+       routes through the proxy, and `cloudSQLProxy.connectionTest` before
+       that. Neither is this guard's job.
 
        Checking the SHAPE and stopping there is deliberate. Google's own rules
        for the three parts are narrower, and encoding them here would refuse a
@@ -297,22 +296,33 @@ initContainers:
       {{- if .Values.cloudSQLProxy.privateIP }}
       - "--private-ip"
       {{- end }}
-      {{- /* The only thing that makes an unreachable instance fail the deploy.
-             Without it the proxy reports itself started as soon as its listener
-             is up — measured, not assumed: the same image against an instance it
-             cannot even authenticate for still logs "ready for new connections"
-             and keeps running, while the same run with this flag exits 1. With
-             it, `Serve` dials first and returns the error, the container exits
-             non-zero, the startupProbe never passes, and `--atomic` rolls the
-             release back.
+      {{- /* Makes the proxy dial the instance before reporting itself up.
+             Without it the proxy reports started as soon as its listener is
+             bound — measured, not assumed: the same image against an instance
+             it cannot even authenticate for still logs "ready for new
+             connections" and keeps running, while the same run with this flag
+             exits 1.
 
-             Off by default because it trades one failure for another: a
-             transient Admin API blip at pod start would fail a deploy that had
-             nothing wrong with it. `restartPolicy: Always` softens that — the
-             kubelet restarts the sidecar, so a blip that clears inside the
-             `helm upgrade --wait` timeout still succeeds and only a PERSISTENT
-             failure rolls back — but softening is not removing, and a chart
-             default should not decide that trade for every deployment. #493. */}}
+             What it is NOT is the only thing standing between a wrong instance
+             and a green release. Once `database-url` names the proxy's loopback
+             socket, the application is its own reachability check: `store.Open`
+             pings before serving and the process exits non-zero when that
+             fails, so the pods crash-loop and `--atomic` rolls back anyway.
+             What the operator gets there is three application containers
+             failing to reach Postgres, and the work of tracing that back to a
+             proxy pointed at an instance that does not exist.
+
+             Where it is genuinely load-bearing is the window where the proxy is
+             enabled but the DSN does not route through it yet — the deliberate
+             step one of a cutover, where the proxy "runs unused". Nothing
+             touches it there, so a wrong connection name stays invisible until
+             the DSN moves, possibly days later. This flag makes it prove itself
+             immediately.
+
+             Off by default because for a DSN that already routes through the
+             proxy it mostly duplicates a check the application performs a
+             second later, and moving a failure earlier is a choice a chart
+             default should not make for every deployment. #493. */}}
       {{- if .Values.cloudSQLProxy.connectionTest }}
       - "--run-connection-test"
       {{- end }}

@@ -154,20 +154,33 @@ openbao:
 # those annotations, the override is READ BACK after the deploy, because the
 # render cannot tell a placeholder from a real name — both are well-formed.
 #
-# `connectionTest` is ON here, against the chart's default, and the two checks
-# answer different questions. The read-back proves the name the workflow RESOLVED
-# is the name the pods GOT; it cannot tell whether that name reaches anything.
-# The connection test makes the proxy dial before reporting up, so an instance
-# nobody can reach exits the container and `--atomic` rolls the release back
-# rather than completing on three pods that will fail their first query.
+# `connectionTest` is ON here, against the chart's default, and it is worth
+# being exact about what that buys, because it is less than it first appears.
+# The DSN now routes through the proxy, so the platform is already its own
+# reachability check: it pings before serving and exits when that fails, and
+# `--atomic` rolls back. A wrong instance does not deploy green here.
 #
-# The trade the chart declines to make by default is worth taking here: this
-# deployment substitutes the connection name in from the Admin API on every run,
-# so a wrong instance is a likelier accident than a flaky control plane. The one
-# case that gives pause is a deploy run right after `make gcp-env-start`, when
-# Cloud SQL may still be waking — `restartPolicy: Always` covers it, since the
-# kubelet retries the sidecar and the instance has ten minutes of `--wait` to
-# come back before anything rolls back.
+# What the flag buys is WHERE the failure appears. Without it an operator sees
+# three application containers unable to reach Postgres and has to work back to
+# a proxy pointed at the wrong instance; with it the sidecar exits first, naming
+# the instance it could not open. And it covers the one state where nothing else
+# does: a rebuild re-points `database-url` at the instance's address (the
+# recovery this directory's README documents), and the proxy is then unexercised
+# again until the DSN comes back — exactly the blind window the cutover had.
+#
+# The read-back check next to it answers a third question and neither replaces
+# it: that the name the workflow RESOLVED is the name the pods GOT.
+#
+# A deploy run right after `make gcp-env-start` is the case that gives pause,
+# and it is mostly serialised away rather than survived: `env-power.sh start`
+# waits for the instance to reach RUNNABLE before it resizes a node pool, and
+# `deploy.yml` skips every deploying step while the parked label is still there.
+# Do NOT reach for the sidecar's restarts as the answer — the kubelet backs off
+# exponentially, so the retry that would have succeeded can land after `--wait`
+# has given up. RUNNABLE is the Admin API's state and not proof that Postgres
+# accepts connections, so a deploy fired the instant `start` returns can still
+# roll back. Re-run it; rolling back is what `--atomic` did, so nothing is left
+# half-applied.
 #
 # `privateIP` is left at the chart's default true, which is what an instance with
 # `ipv4_enabled = false` requires — the shape environment/ builds.

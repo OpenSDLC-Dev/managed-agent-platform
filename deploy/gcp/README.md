@@ -1075,12 +1075,13 @@ it.
 
 1. Deploy with the proxy on. It starts in all three pods and sits unused; the DSN still names
    the instance's address, and nothing about connectivity changes. **A proxy that starts is
-   not a proxy that can reach the instance**: its two probes are `/startup` and `/liveness`,
-   neither of which dials, and the chart passes no `--run-connection-test` — so `/startup`
-   answers 200 once the listeners are up, whatever the connection name says. What step 1 does
-   prove is that the right connection name reached the pods, because the deploy reads the
-   rendered manifests back and refuses a release that does not name the instance it resolved.
-   Reachability is first proven in step 2, by the pods themselves.
+   not, by itself, a proxy that can reach the instance** — its `/startup` and `/liveness`
+   probes answer once the listeners are up, whatever the connection name says, and neither
+   dials. Two things make step 1 meaningful anyway: the deploy reads the rendered manifests
+   back and refuses a release that does not name the instance it resolved, and
+   `cloudSQLProxy.connectionTest` is on in [staging-values.yaml](./staging-values.yaml), so
+   the proxy dials before reporting up and an unreachable instance rolls the release back
+   here rather than at the cutover.
 2. Point the DSN at it, then re-run the deploy so the pods restart onto the new Secret:
 
    ```sh

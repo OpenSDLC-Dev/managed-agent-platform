@@ -176,21 +176,33 @@ project. It refuses an address such as `10.1.2.3` or `db.internal:5432`, and a n
 empty part; it does not look inside the segments — deliberately, because encoding Google's
 own naming rules in a template would refuse a valid name the day Google widens one.
 
-**A well-formed name that names nothing therefore renders, and by default nothing downstream
-catches it.** The proxy starts its listeners and reports itself up without dialing, and none
-of its three health endpoints dials either — `/readiness` included, whatever Google's example
-manifest says about it. The pod goes Ready and the release succeeds. Until the application
-issues its first query, a wrong instance is indistinguishable from a right one.
+**A well-formed name that names nothing therefore renders**, and the proxy will not object:
+it binds its listener and reports itself up without dialing, and none of its three health
+endpoints dials either — `/readiness` included, whatever Google's example manifest says about
+it.
 
-`cloudSQLProxy.connectionTest=true` closes that: it passes `--run-connection-test`, so the
-proxy dials before reporting up, an unreachable instance exits the container non-zero, and
-`helm upgrade --wait --atomic` rolls the release back instead of completing it. It is off by
-default because it trades that failure for another — a transient Admin API blip at pod start
-becomes a failed deploy. `restartPolicy: Always` softens the trade, since the kubelet retries
-the sidecar and a blip that clears inside the `--wait` timeout still succeeds, but a chart
-default should not make that choice for every deployment. Turn it on wherever a wrong
-instance is the likelier accident than a flaky control plane — which is most pipelines, since
-they substitute the connection name in (#493).
+What catches it is the **application**, once `database-url` names the proxy's loopback
+socket: the platform pings the database before serving and exits non-zero when that fails, so
+the pods crash-loop, never go Ready, and `helm upgrade --wait --atomic` rolls the release
+back. A wrong instance does not deploy green. What it does is deploy *confusingly* — three
+application containers unable to reach Postgres, and the work of tracing that back to a proxy
+pointed at an instance that does not exist.
+
+`cloudSQLProxy.connectionTest=true` moves that check into the proxy, where the error names
+the instance. It passes `--run-connection-test`, so the proxy dials before reporting up and
+an unreachable instance exits the sidecar before the application container starts at all.
+
+Its real value is the window where the proxy is enabled but the DSN does **not** route
+through it yet — the deliberate first step of a cutover, where the proxy runs unused. Nothing
+exercises it there, so a wrong connection name stays invisible until the DSN moves, by which
+time the change that broke it is no longer the change being deployed.
+
+Off by default, because for a DSN already routing through the proxy it mostly duplicates the
+application's own check a second earlier. Two cautions: it is a **boolean** — pass it with
+`--set`, never `--set-string`, since Helm reads the non-empty string `"false"` as true — and
+it runs inside the startupProbe's budget, so a dial that *hangs* rather than refusing can be
+killed by the probe first, showing a CrashLoopBackOff instead of the proxy's own
+`Connection test failed` (#493).
 
 ## Credential cipher (OpenBao)
 
