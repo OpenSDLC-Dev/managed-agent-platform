@@ -1047,7 +1047,10 @@ jobs:
   # no credentials, no state and no GCP project, which is what lets them run on
   # every PR: the configuration would otherwise rot silently between the rare
   # runs that actually touch GCP, and the first symptom would be a failed apply
-  # halfway through provisioning a cluster.
+  # halfway through provisioning a cluster. The job has since collected the rest
+  # of the deploy-side tooling that is checked by RUNNING it rather than reading
+  # it — the bootstrap, database-init, power and CD-notifier scripts — because
+  # they share that property and nothing else in CI would execute them.
   terraform:
     name: terraform
     runs-on: ubuntu-latest
@@ -1085,29 +1088,46 @@ jobs:
       # are invisible to shellcheck and to a careful read alike.
       - name: the power script parks and revives what it claims
         run: make gcp-power-test
-      # deploy-alert.yml is the one workflow in this repo that a PR cannot
-      # exercise: `workflow_run` runs the copy on the default branch, so its
-      # first execution is against real issues on `main`. Its classification was
-      # extracted into a script for exactly that reason, and this runs it.
       - name: the CD outcome classifier decides what it claims
         run: make cd-outcome-test
-      # The classifier keys on a STEP NAME in deploy.yml, and a rename there
-      # fails nothing on its own: every deploy would classify as `parked`, so no
-      # successful run would ever close a CD issue again. The name is read out of
-      # the notifier rather than restated here, so a rename on either side alone
-      # is what goes red.
-      - name: the step the CD notifier keys on still exists
+      # deploy-alert.yml couples to deploy.yml three ways, and all three fail
+      # SILENTLY: the trigger stops matching, or every deploy classifies as
+      # `parked` so no successful run ever closes a CD issue again. Nor can any
+      # of it be caught after merge — `workflow_run` runs the default branch's
+      # copy. Each name is read out of the notifier rather than restated here,
+      # so a rename on either side alone is what goes red.
+      - name: the couplings the CD notifier relies on still hold
         run: |
           set -euo pipefail
-          want="$(grep -oE 'select\(\.name == "[^"]+"\)' .github/workflows/deploy-alert.yml \
-            | sed 's/.*== "//; s/")$//' | sort -u)"
-          [ "$(printf '%s\n' "$want" | grep -c .)" -eq 1 ] \
-            || { echo "expected deploy-alert.yml to key on exactly one step name, found:" >&2
-                 printf '%s\n' "$want" >&2; exit 1; }
-          grep -qF -- "- name: $want" .github/workflows/deploy.yml \
-            || { echo "deploy-alert.yml keys on a step named '$want' and deploy.yml has none" >&2
+          A=.github/workflows/deploy-alert.yml
+          field() { # the value of a `key: value` line, wherever it is indented
+            grep -oE "^[[:space:]]*$1: .+$" "$A" | sed -E "s/^[[:space:]]*$1: //" | sort -u
+          }
+          one() { [ "$(printf '%s\n' "$1" | grep -c .)" -eq 1 ]; }
+
+          wf="$(field DEPLOY_WORKFLOW)"
+          one "$wf" || { echo "expected exactly one DEPLOY_WORKFLOW in $A, got: $wf" >&2; exit 1; }
+          [ -f ".github/workflows/$wf" ] \
+            || { echo "$A reconciles against workflows/$wf and no such workflow file exists" >&2
                  exit 1; }
-          echo "ok: deploy.yml still has the step '$want' the CD notifier reads"
+
+          # `workflows: [deploy]` matches deploy.yml's `name:`, not its filename.
+          trig="$(grep -oE '^[[:space:]]*workflows: \[.+\]$' "$A" | sed -E 's/.*\[(.*)\]/\1/' | sort -u)"
+          one "$trig" || { echo "expected exactly one workflow_run trigger name in $A, got: $trig" >&2; exit 1; }
+          grep -qxF "name: $trig" ".github/workflows/$wf" \
+            || { echo "$A triggers on a workflow named '$trig' and $wf declares a different name" >&2
+                 exit 1; }
+
+          # Anchored, so a step that is commented out fails this too — it would
+          # otherwise satisfy a substring match while breaking the notifier.
+          step="$(field STEP_NAME)"
+          one "$step" || { echo "expected exactly one STEP_NAME in $A, got: $step" >&2; exit 1; }
+          awk -v want="- name: $step" '
+            { line = $0; sub(/^[[:space:]]+/, "", line); if (line == want) found = 1 }
+            END { exit !found }' ".github/workflows/$wf" \
+            || { echo "$A keys on a step named '$step' and $wf has no such step" >&2; exit 1; }
+
+          echo "ok: $wf is named '$trig' and still has the step '$step' the CD notifier reads"
 
   # Local dev stack: validate the compose file, build the image, and smoke-test
   # that the control plane comes up and serves (migrations + auth) and the brain

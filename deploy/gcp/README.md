@@ -611,20 +611,20 @@ last two lines of it — the build and the install — against **one** staging e
 merge and is impossible to miss, while `deploy` runs after it and reports to whoever thinks
 to open the Actions tab.
 [`deploy-alert.yml`](../../.github/workflows/deploy-alert.yml) listens for `deploy` finishing
-and keeps **one** issue for the outage — opened on the first failure and assigned to whoever
-merged it, commented on each further one, closed by the next run that actually deploys. It
-names the step that failed rather than only the run, and it says whether the chart was
-installed before the failure, because that is what decides whether staging is running this
-commit or the previous one. What it will **not** do is read a parked run as a fix: a run
-skipped because staging is parked is green having deployed nothing, so it closes nothing and
-opens nothing.
+and keeps **one** issue for the outage — opened on the first failure and assigned, where it
+can be, to the run's actor; commented on each further one; closed by the next run that
+actually deploys. It names the step that failed rather than only the run, and it says where
+the failure fell relative to `helm upgrade`, because that is what decides whether staging is
+running this commit, the previous one, or part of each. What it will **not** do is read a
+parked run as a fix: a run skipped because staging is parked is green having deployed
+nothing, so it closes nothing and opens nothing.
 
-Two things follow for whoever changes it. Editing it takes effect only once merged —
-`workflow_run` runs the copy on the default branch, never the PR's — which is why the
-classification lives in [`cd-outcome.sh`](../../.github/scripts/cd-outcome.sh) behind
-`make cd-outcome-test`, where it can be run before it is trusted. And renaming `deploy.yml`'s
-**`Deploy the chart`** step is what breaks the parked-versus-deployed distinction, so CI
-fails if that name disappears.
+Changing it is the part that needs care: `workflow_run` runs the default branch's copy, so
+nothing done to this file takes effect — or can be tested — until it merges. That is why the
+classification sits in [`cd-outcome.sh`](../../.github/scripts/cd-outcome.sh) behind
+`make cd-outcome-test`, and why CI checks the three names the notifier borrows from
+`deploy.yml`: its filename, its `name:`, and the **`Deploy the chart`** step whose conclusion
+separates parked from deployed.
 
 **Three of those secrets are not `bootstrap.sh`'s.** It owns exactly `<prefix>-db-password`
 and `<prefix>-db-admin-password`, because those are the two Terraform reads back. The three

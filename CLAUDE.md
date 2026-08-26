@@ -99,7 +99,7 @@ Two invariants the compiler will not catch for you:
 
 > The Go version is `go.mod`'s. Docker is available; `psql` is **not** — reach Postgres through the container.
 
-The Go merge gate has one executable source — the root **`Makefile`**; prose and CI name its targets instead of duplicating commands (CI additionally runs its `helm`, `terraform` and `compose` jobs — chart lint/render, the GCP staging Terraform's credential-free checks, and a compose smoke test — which stay in ci.yml, and a PR needs the whole workflow green):
+The Go merge gate has one executable source — the root **`Makefile`**; prose and CI name its targets instead of duplicating commands (CI additionally runs its `helm`, `terraform` and `compose` jobs — chart lint/render, the GCP staging Terraform's credential-free checks plus the deploy-side scripts CI runs rather than reads, and a compose smoke test — which stay in ci.yml, and a PR needs the whole workflow green):
 
 ```
 make verify               # the whole Go gate: build + crossbuild + vet + fmt-check + test + cover-gate
@@ -108,11 +108,12 @@ make vet fmt-check        # lint
 make test cover-gate      # go test -count=1 with the coverage profile, then the ≥90% gate
 docker compose -f deploy/compose/docker-compose.yml up   # local: controlplane+brain+executor+Postgres+MinIO+OpenBao(+Jaeger)
 make openbao-init-test   # ...and the compose + chart OpenBao init scripts, run against a fake `bao`
+make cd-outcome-test     # ...and the CD failure notifier's classifier, which `workflow_run` would otherwise first run on main
 make gcp-fmt gcp-validate gcp-split-check gcp-lint   # GCP staging Terraform, credential-free
 make gcp-bootstrap-test gcp-split-check-test gcp-dbinit-test gcp-power-test  # ...and its tooling, run rather than read
 ```
 
-The `gcp-*` targets — like `eval`, `openbao-init-test`, `registry-check` (the half of the [docs/DIVERGENCES.md](./docs/DIVERGENCES.md) pointer guard that asks GitHub whether an issue is still open; its shape half runs inside the gate as `tools/registrycheck`'s own test) and the release tooling (`changelog`, `changelog-notes`; [docs/RELEASING.md](./docs/RELEASING.md)) — sit **outside** the gate on purpose: `deploy/gcp/`'s Terraform is developer tooling for GCP deployment (plan 20, Decision 9), never a dependency of the platform, its build, or `make verify`. The eight `gcp-*` checking targets above need no credentials and all run in CI; the apply targets cost money and are interactive by design, and `gcp-env-stop`/`gcp-env-start`/`gcp-env-status` park and revive staging without Terraform, state or tfvars at all. Each recipe says what it is for. Terraform is not installed by this repo, and is not in Homebrew core: `brew install hashicorp/tap/terraform`.
+The `gcp-*` targets — like `eval`, `openbao-init-test`, `cd-outcome-test`, `registry-check` (the half of the [docs/DIVERGENCES.md](./docs/DIVERGENCES.md) pointer guard that asks GitHub whether an issue is still open; its shape half runs inside the gate as `tools/registrycheck`'s own test) and the release tooling (`changelog`, `changelog-notes`; [docs/RELEASING.md](./docs/RELEASING.md)) — sit **outside** the gate on purpose: `deploy/gcp/`'s Terraform is developer tooling for GCP deployment (plan 20, Decision 9), never a dependency of the platform, its build, or `make verify`. The eight `gcp-*` checking targets above need no credentials and all run in CI; the apply targets cost money and are interactive by design, and `gcp-env-stop`/`gcp-env-start`/`gcp-env-status` park and revive staging without Terraform, state or tfvars at all. Each recipe says what it is for. Terraform is not installed by this repo, and is not in Homebrew core: `brew install hashicorp/tap/terraform`.
 
 CI (`.github/workflows/ci.yml`) invokes the same targets, so the gate cannot drift between the docs, the verifier, and the merge check. A second workflow, `registry.yml`, runs `make registry-check` nightly and on any PR touching the registry, the guard or the Makefile — the state rung a credential-free gate cannot hold. The coverage gate is **total statement coverage ≥ 90%** over the **logic packages** under `./internal/...` — `cmd/` main glue and test support are deliberately outside the denominator, and the `test` recipe both computes that denominator and argues the exclusion. `make test` needs Docker (store/API/sandbox suites) and a Kubernetes cluster (the K8s sandbox contract test; a local kind cluster works) — a missing daemon or cluster is a hard failure, not a skip.
 

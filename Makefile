@@ -260,13 +260,13 @@ release-binaries:
 openbao-init-test:
 	python3 deploy/compose/openbao_init_test.py
 
-# The classifier deploy-alert.yml keys on, run rather than read. It is the one
-# piece of shell in this repo that CANNOT be exercised by the PR that changes
-# it: a `workflow_run` workflow executes the copy on the default branch, so an
-# inline `case` would first run against real issues on `main`. The dangerous
-# defect in a classifier is not a wrong row but a MISSING one — a state that
-# lands in the do-nothing arm and stops the notifier without failing anything.
+# The classifier deploy-alert.yml keys on, run rather than read — it is the one
+# piece of shell here that the PR changing it cannot execute (see the script's
+# own header). shellcheck rides along because this is the repo's fourth
+# checked-in shell script and a lint target of its own, for one file, would be
+# more machinery than the line it replaces.
 cd-outcome-test:
+	shellcheck .github/scripts/cd-outcome.sh
 	python3 .github/scripts/cd_outcome_test.py
 
 # ---------------------------------------------------------------------------

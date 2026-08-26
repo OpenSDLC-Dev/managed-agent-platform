@@ -3,8 +3,7 @@ name: deploy-alert
 # CD failures notify nobody, so this workflow is the notification (#479).
 #
 # `ci` failing blocks a merge and is impossible to miss. `deploy` runs AFTER the
-# merge and reports to no one — the outage recorded in
-# changelog.d/cd-rbac-grant.fixed.md is what that costs. The notification is a
+# merge and reports to no one — #469 is what that costs. The notification is a
 # GitHub ISSUE because this repository's backlog is already issues and an issue
 # needs no credential nobody has yet; one issue tracks the outage rather than
 # one per push.
@@ -13,12 +12,14 @@ name: deploy-alert
 # because the two do not see the same events: a run that is CANCELLED — which
 # deploy.yml's own concurrency comment calls out as the state that wedges a
 # release mid-upgrade — reaches this listener and does not reach an in-run
-# failure job. Note the consequence for changing this file: `workflow_run`
-# workflows execute the version on the DEFAULT BRANCH, so edits here take effect
-# only once merged, and never run against the PR that makes them. That is also
-# why the classification lives in `.github/scripts/cd-outcome.sh` with a test
-# (`make cd-outcome-test`) rather than inline here: it is the only way those
-# branches execute anywhere but production.
+# failure job.
+#
+# The consequence for whoever changes this file: `workflow_run` executes the
+# version on the DEFAULT BRANCH, so nothing here runs against the PR that
+# changes it, and its first execution is against real issues on `main`. That is
+# why the classification lives in `.github/scripts/cd-outcome.sh` behind
+# `make cd-outcome-test`. It is also why the API calls below are written
+# defensively: they are the part of this file that no test can reach.
 on:
   workflow_run:
     workflows: [deploy]
@@ -40,19 +41,11 @@ permissions:
 # Serialised, never cancelled — but this workflow does NOT rely on that for
 # correctness, because GitHub's concurrency cannot provide it: a group holds at
 # most one running and one pending run, so a third arrival evicts the pending
-# one, and order within a group is not guaranteed either. An evicted or
-# reordered event would otherwise leave an issue open after CD recovered, or
-# reopen a settled outage from a stale failure. The job therefore reconciles
-# against the newest COMPLETED deploy run rather than trusting the event that
-# woke it, which makes every invocation idempotent and order-independent. The
-# group is here to stop two runs racing to create the same issue, not to make
-# the logic correct.
-#
-# That same reconciliation is this workflow's only backstop against ITSELF
-# failing — a notifier has no notifier. A transient API error leaves the issue
-# stale rather than wrong, and the next deploy's invocation re-derives the whole
-# state from scratch and repairs it. The retries below narrow that window; they
-# do not close it, and nothing here pretends otherwise.
+# one, and order within a group is not guaranteed either. The job therefore
+# reconciles from the deploy history rather than from the event that woke it,
+# which makes every invocation idempotent and order-independent. The group is
+# here to stop two runs racing to create the same issue, not to make the logic
+# correct.
 concurrency:
   group: deploy-alert
   cancel-in-progress: false
@@ -63,19 +56,30 @@ jobs:
     steps:
       # The default branch's copy — which is the copy of this workflow that is
       # running, so the script and its caller can never come from different
-      # commits.
+      # commits. Nothing here pushes, so the token has no reason to outlive the
+      # step (see deploy.yml's checkout for the same argument).
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
-      - name: Reconcile the CD tracking issue with the newest deploy run
+      - name: Reconcile the CD tracking issue with the newest decisive deploy run
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
           WOKE_BY: ${{ github.event.workflow_run.id }}
+          # The two couplings to deploy.yml, named here rather than buried in a
+          # jq expression so CI can read them back and check they still hold.
+          DEPLOY_WORKFLOW: deploy.yml
+          STEP_NAME: Deploy the chart
           TITLE: "CD: the deploy workflow is failing on main"
+          MISWIRED_TITLE: "CD: the deploy notifier can no longer tell deployed from parked"
           # The lookup is by LABEL, not by title: a title can be edited by
           # anyone reading the issue, and scanning open issues for an exact
           # string only works while the issue is inside the page fetched.
           LABEL: cd-failure
+          # How far back to look for a run that carries news. Parked weekends
+          # are the reason this is not 1.
+          WINDOW: 12
         shell: bash
         run: |
           set -euo pipefail
@@ -94,52 +98,82 @@ jobs:
             done
           }
 
-          # THE AUTHORITY IS THE NEWEST COMPLETED RUN, NOT THE EVENT. See the
-          # concurrency note above for why the event cannot be trusted to arrive,
-          # or to arrive in order.
-          newest="$(retry gh api "repos/$REPO/actions/workflows/deploy.yml/runs" \
-            -f branch=main -f status=completed -f per_page=1 \
-            --jq '.workflow_runs[0] | "\(.id) \(.run_attempt) \(.conclusion) \(.head_sha) \(.actor.login)"')"
-          read -r RUN_ID RUN_ATTEMPT RUN_CONCLUSION HEAD_SHA ACTOR <<<"$newest"
-          if [ -z "${RUN_ID:-}" ] || [ "$RUN_ID" = "null" ]; then
+          # THE QUERY GOES IN THE PATH. `gh api` switches the request method to
+          # POST as soon as one `-f` is present, and there is no POST route
+          # here, so the `-f` form 404s on every call forever. Nothing in CI can
+          # catch that — this line's first execution is on `main`.
+          #
+          # Ordered by when each run FINISHED, not by the API's own order: that
+          # is creation order, and re-running an older run raises its attempt
+          # without moving it up, so the most recent deployment attempt is not
+          # always the first entry.
+          runs="$(retry gh api \
+            "repos/$REPO/actions/workflows/$DEPLOY_WORKFLOW/runs?branch=main&status=completed&per_page=$WINDOW" \
+            --jq '[.workflow_runs[] | {id, attempt: .run_attempt, conclusion, sha: .head_sha,
+                                       actor: .actor.login, finished: .updated_at}]
+                  | sort_by(.finished) | reverse')"
+          count="$(printf '%s' "$runs" | jq 'length')"
+          if [ "$count" -eq 0 ]; then
             echo "::notice::no completed deploy run on main yet — nothing to reconcile"
             exit 0
           fi
+          echo "woken by $WOKE_BY; scanning $count completed run(s), newest finished first"
+
+          # Walk back to the newest run that carries NEWS. A parked, superseded
+          # or declined run says nothing in either direction, and stopping at
+          # one would strand an earlier failure whose own notifier died — the
+          # issue would then never be opened at all, which is the bug this
+          # workflow exists to prevent, one level up.
+          outcome=""
+          for i in $(seq 0 $((count - 1))); do
+            read -r RUN_ID RUN_ATTEMPT RUN_CONCLUSION HEAD_SHA ACTOR <<<"$(printf '%s' "$runs" \
+              | jq -r --argjson i "$i" \
+                '.[$i] | "\(.id) \(.attempt) \(.conclusion) \(.sha) \(.actor)"')"
+            case "$RUN_ID" in
+              ''|*[!0-9]*)
+                echo "::warning::run list entry $i has no usable id — skipping"
+                continue ;;
+            esac
+            # An unrecognised conclusion must not become a CD outage: that turns
+            # a read defect, or a shape change in the API, into a false alarm.
+            if [ -z "$RUN_CONCLUSION" ] || [ "$RUN_CONCLUSION" = "null" ]; then
+              echo "::warning::run $RUN_ID is listed completed with no conclusion — skipping it"
+              continue
+            fi
+
+            # Attempt-pinned. A re-run keeps the run ID and the unversioned jobs
+            # endpoint answers for the LATEST attempt, so an in-flight re-run
+            # could otherwise pair one attempt's conclusion with another
+            # attempt's steps.
+            jobs_json="$(retry gh api "repos/$REPO/actions/runs/$RUN_ID/attempts/$RUN_ATTEMPT/jobs")"
+            step="$(printf '%s' "$jobs_json" | jq -r \
+              '[.jobs[].steps[]? | select(.name == env.STEP_NAME) | .conclusion] | first // "absent"')"
+            # Did anything actually EXECUTE? A step that reached `success` or
+            # `failure` did; one left `cancelled` or `skipped` did not. This is
+            # the only evidence separating a run cancelled mid-upgrade from one
+            # cancelled while still queued behind a newer merge.
+            ran="$(printf '%s' "$jobs_json" | jq -r \
+              '[.jobs[].steps[]? | select(.conclusion == "success" or .conclusion == "failure")] | length > 0')"
+
+            outcome="$(bash .github/scripts/cd-outcome.sh "$RUN_CONCLUSION" "$step" "$ran")"
+            echo "  run $RUN_ID attempt $RUN_ATTEMPT: $RUN_CONCLUSION / $STEP_NAME=$step / ran=$ran -> $outcome"
+            case "$outcome" in
+              broken|deployed|miswired) break ;;
+            esac
+            outcome=""
+          done
+
+          if [ -z "$outcome" ]; then
+            echo "::notice::the newest $count completed run(s) carry no news — tracking issue left as it is"
+            exit 0
+          fi
+
           RUN_URL="https://github.com/$REPO/actions/runs/$RUN_ID"
-          echo "woken by $WOKE_BY; reconciling against $RUN_ID (attempt $RUN_ATTEMPT)"
-
-          # Attempt-pinned. A re-run keeps the run ID and the unversioned jobs
-          # endpoint answers for the LATEST attempt, so an in-flight re-run could
-          # otherwise pair one attempt's conclusion with another attempt's steps.
-          jobs_json="$(retry gh api "repos/$REPO/actions/runs/$RUN_ID/attempts/$RUN_ATTEMPT/jobs")"
-          step="$(printf '%s' "$jobs_json" | jq -r \
-            '[.jobs[].steps[]? | select(.name == "Deploy the chart") | .conclusion] | first // "absent"')"
-          # Did anything actually EXECUTE? A step that reached `success` or
-          # `failure` did; one left `cancelled` or `skipped` did not. This is the
-          # only evidence separating a run cancelled mid-upgrade from one
-          # cancelled while still queued behind a newer merge.
-          ran="$(printf '%s' "$jobs_json" | jq -r \
-            '[.jobs[].steps[]? | select(.conclusion == "success" or .conclusion == "failure")] | length > 0')"
-
-          outcome="$(.github/scripts/cd-outcome.sh "$RUN_CONCLUSION" "$step" "$ran")"
-          echo "conclusion=$RUN_CONCLUSION deploy-step=$step steps-ran=$ran -> $outcome"
-
-          case "$outcome" in
-            parked)
-              # Nothing, in BOTH directions. A run that deployed nothing is not
-              # evidence a failure was fixed, so it must not close an open issue;
-              # and parking is a deliberate operator decision, so it must not
-              # open one either — nagging about a decision teaches people to
-              # ignore the bot.
-              echo "staging is parked — nothing deployed, tracking issue left as it is"
-              exit 0 ;;
-            superseded)
-              echo "run $RUN_ID was cancelled before any step ran — superseded by a newer merge"
-              exit 0 ;;
-            noop)
-              echo "the deploy job declined to run ($RUN_CONCLUSION) — no news either way"
-              exit 0 ;;
-          esac
+          # Keyed on the ATTEMPT as well as the run, because two attempts of one
+          # run produce different step data and so a different report; a marker
+          # that ignored the attempt would suppress the second one silently.
+          MARK="<!-- deploy-alert run:$RUN_ID attempt:$RUN_ATTEMPT -->"
+          export MARK
 
           # Only the arms that touch the issue pay for the lookup.
           gh label create "$LABEL" --repo "$REPO" --color B60205 \
@@ -148,21 +182,18 @@ jobs:
           num="$(retry gh issue list --repo "$REPO" --state open --label "$LABEL" --limit 10 \
             --json number --jq 'first | .number // empty')"
 
-          # Every body ends with this. Matching on the run URL instead would be
-          # SUBSTRING matching — `…/runs/123` is a prefix of `…/runs/1234` — and
-          # the trailing marker makes the comparison exact by construction.
-          MARK="<!-- deploy-alert run:$RUN_ID -->"
-          export MARK
-
           open_or_comment() {
-            local body="$1"$'\n\n'"$MARK"
+            local title="$1"
+            local body="$2"$'\n\n'"$MARK"
             if [ -n "$num" ]; then
-              # Never say the same thing twice: a reconciliation triggered by a
-              # LATER event can land on the same newest run, and a bot that
-              # repeats itself is a bot people filter out.
+              # Never say the same thing twice: two invocations can settle on
+              # the same run, and a bot that repeats itself is a bot people
+              # filter out. The BODY is searched as well as the comments — the
+              # first report of a run is the issue body, so checking only
+              # comments would let the next invocation restate it verbatim.
               local said
-              said="$(retry gh issue view "$num" --repo "$REPO" --json comments \
-                --jq '[.comments[].body] | map(select(contains(env.MARK))) | length')"
+              said="$(retry gh issue view "$num" --repo "$REPO" --json body,comments \
+                --jq '([.body] + [.comments[].body]) | map(select(contains(env.MARK))) | length')"
               if [ "$said" != "0" ]; then echo "already reported $RUN_ID on #$num"; return; fi
               gh issue comment "$num" --repo "$REPO" --body "$body"
               echo "commented on #$num"
@@ -174,15 +205,15 @@ jobs:
             # notification. The run's actor is whoever's merge is on the failing
             # commit.
             #
-            # Two calls rather than `create --assignee`, deliberately. A bot
-            # actor, or one without push access, cannot be assigned, and a
-            # single call that fails on the assignee gives no way to know
-            # whether the issue was created first — retrying it would file the
-            # outage twice. Creating first and assigning after can only ever
-            # under-notify, which is recoverable by hand; the other way round
-            # is not.
+            # Two calls rather than `create --assignee`, and this is not
+            # stylistic: on github.com `gh` passes the assignee as a LOGIN, and
+            # `IssueCreate` applies logins AFTER `createIssue` returns. A login
+            # that cannot be assigned — a bot, or someone without push access —
+            # therefore leaves the issue created, exits non-zero, and prints no
+            # URL. Any `|| gh issue create` fallback behind that files the
+            # outage a second time.
             local url
-            url="$(gh issue create --repo "$REPO" --title "$TITLE" --label "$LABEL" --body "$body")"
+            url="$(gh issue create --repo "$REPO" --title "$title" --label "$LABEL" --body "$body")"
             echo "opened $url"
             gh issue edit "${url##*/}" --repo "$REPO" --add-assignee "$ACTOR" >/dev/null 2>&1 \
               || echo "::warning::opened $url but could not assign it to $ACTOR"
@@ -192,18 +223,21 @@ jobs:
             broken)
               failed="$(printf '%s' "$jobs_json" | jq -r \
                 '[.jobs[].steps[]? | select(.conclusion == "failure") | .name] | first // "(no failing step — the run was cancelled, timed out, or never started)"')"
-              # Whether staging still tracks `main` depends on WHERE it broke. A
-              # run that died before `helm upgrade` left the cluster on the
-              # previous release; one that failed a check afterwards deployed
-              # this commit and then found something wrong with it. Saying the
-              # first when the second happened sends the reader to the wrong
-              # place.
-              if [ "$step" = "success" ]; then
-                impact="The chart **was installed** on this commit, so the failure is in a check after it: staging is running \`${HEAD_SHA:0:7}\` and something about it is wrong."
-              else
-                impact="The chart was **not** installed, so staging is still on the previous release and is not tracking \`main\` until this is fixed."
-              fi
-              open_or_comment "$(printf '%s\n' \
+              # Where it broke decides where the reader should look, and there
+              # are three answers, not two. A run that never reached the install
+              # left the cluster on the previous release. One that failed a check
+              # after it deployed this commit. One cancelled or failed DURING
+              # `helm upgrade` may have applied part of it — claiming either
+              # extreme there sends the reader to the wrong place.
+              case "$step" in
+                success)
+                  impact="The chart **was installed** on this commit, so the failure is in a check after it: staging is running \`${HEAD_SHA:0:7}\` and something about it is wrong." ;;
+                skipped|absent)
+                  impact="The chart was **not** installed, so staging is still on the previous release and is not tracking \`main\` until this is fixed." ;;
+                *)
+                  impact="\`$STEP_NAME\` itself ended **$step**, so the release state is **indeterminate**: \`helm upgrade\` may have applied part of this commit. Check \`helm history\` before assuming staging is on either version." ;;
+              esac
+              open_or_comment "$TITLE" "$(printf '%s\n' \
                 "\`deploy\` finished **$RUN_CONCLUSION** on \`${HEAD_SHA:0:7}\`." \
                 "" \
                 "First failing step: **$failed**" \
@@ -224,14 +258,11 @@ jobs:
               fi
               ;;
             miswired)
-              open_or_comment "$(printf '%s\n' \
-                "\`deploy\` succeeded on \`${HEAD_SHA:0:7}\`, but this workflow could not find a step named **Deploy the chart** in it (found: \`$step\`)." \
+              open_or_comment "$MISWIRED_TITLE" "$(printf '%s\n' \
+                "\`deploy\` succeeded on \`${HEAD_SHA:0:7}\`, but this workflow could not find a step named **$STEP_NAME** in it (found: \`$step\`)." \
                 "" \
                 "That step's conclusion is how a real deployment is told from a run skipped because staging is parked. Until the name matches again, **no successful deploy will close a CD issue**." \
                 "" \
                 "Run: $RUN_URL")"
               ;;
-            *)
-              echo "::error::cd-outcome.sh returned an outcome this workflow does not handle: $outcome"
-              exit 1 ;;
           esac

@@ -4,9 +4,7 @@
 # It lives in its own file rather than inline in deploy-alert.yml because a
 # `workflow_run` workflow cannot be exercised before it is merged — it runs the
 # copy on the default branch — so inline logic would first execute against real
-# issues on `main`. This repository already answers that problem the same way for
-# deploy-side shell (`env-power.sh` + `env_power_test.py`, `bootstrap.sh`,
-# `dbinit.sh`): run it rather than read it. `make cd-outcome-test` is the test.
+# issues on `main`. `make cd-outcome-test` is the test.
 #
 # Usage: cd-outcome.sh <run-conclusion> <deploy-step-conclusion> <steps-ran>
 #   run-conclusion         the run's own conclusion, verbatim from the API
@@ -40,8 +38,10 @@ case "$run" in
 			# would ever close an issue again.
 			*) outcome=miswired ;;
 		esac ;;
-	# The deploy job's own `if` declined — a dispatch that was not eligible.
-	# Nothing deployed and nothing broke; there is no news in either direction.
+	# Defensive, not descriptive: today's deploy.yml cannot produce this — its
+	# job carries no `if:` and its non-main guard FAILS rather than skipping. It
+	# is here because a run whose every job skipped deployed nothing and broke
+	# nothing, and the arm that must never be the quiet default is `*`.
 	skipped) outcome=noop ;;
 	cancelled)
 		# Two very different events share this conclusion. deploy.yml queues on
