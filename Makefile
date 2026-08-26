@@ -20,7 +20,7 @@ SHELL := /usr/bin/env bash
 .PHONY: build crossbuild vet fmt-check test cover-gate verify eval \
 	changelog changelog-notes changelog-archive \
 	release-tag-check release-images release-chart-check release-chart release-binaries \
-	openbao-init-test registry-check \
+	openbao-init-test cd-outcome-test registry-check \
 	gcp-fmt gcp-validate gcp-split-check gcp-lint gcp-bootstrap-test gcp-dbinit-test gcp-split-check-test gcp-power-test gcp-foundation-apply gcp-bootstrap gcp-env-apply gcp-db-init gcp-env-destroy gcp-env-rebuild \
 	gcp-env-stop gcp-env-start gcp-env-status
 
@@ -259,6 +259,15 @@ release-binaries:
 # checks guarding it to go red.
 openbao-init-test:
 	python3 deploy/compose/openbao_init_test.py
+
+# The classifier deploy-alert.yml keys on, run rather than read — it is the one
+# piece of shell here that the PR changing it cannot execute (see the script's
+# own header). shellcheck rides along because this is the repo's fourth
+# checked-in shell script and a lint target of its own, for one file, would be
+# more machinery than the line it replaces.
+cd-outcome-test:
+	shellcheck .github/scripts/cd-outcome.sh
+	python3 .github/scripts/cd_outcome_test.py
 
 # ---------------------------------------------------------------------------
 # GCP staging environment (docs/plan/20, Decision 9). Developer tooling for GCP

@@ -152,6 +152,13 @@ on the label and not on the node count on purpose: a cluster at zero nodes that 
 parked has fallen over, and that still fails loudly. Staging therefore stays at whatever
 commit it was parked on; `gh workflow run deploy.yml --ref main` catches it up.
 
+**Which means a green `deploy` no longer means "deployed".** A parked run is green and
+installed nothing, and in the Actions list it looks exactly like one that shipped. Two things
+close that gap. The parked step writes the fact to the run summary, so it is legible without
+opening a log. And `deploy-alert.yml` — the failure notifier below — reads the run's own
+steps rather than its conclusion, so a parked run never closes an open CD-failure issue: a
+run that deployed nothing is not evidence that anything was fixed.
+
 ## Prerequisites
 
 - A GCP project with billing enabled, and `gcloud auth application-default login`.
@@ -599,6 +606,27 @@ last two lines of it — the build and the install — against **one** staging e
 | replacing the `model-providers` placeholder | a human, once |
 | setting the eleven Actions **variables** below | a human, once, and **before** the first run: until they exist the workflow stops at its second step, so every push to `main` in the meantime is a red run rather than a deployment |
 | build and push the four images → assemble the `map-platform` Secret → `helm upgrade --install` → smoke | **CD** |
+
+**A failed deploy opens an issue**, because it used to notify nobody: `ci` failing blocks a
+merge and is impossible to miss, while `deploy` runs after it and reports to whoever thinks
+to open the Actions tab.
+[`deploy-alert.yml`](../../.github/workflows/deploy-alert.yml) listens for `deploy` finishing
+and keeps **one** issue for the outage — opened on the first failure and assigned, where it
+can be, to the run's actor; commented on each further one; closed by the next run that
+actually deploys. It names the step that failed rather than only the run, and it says where
+the failure fell relative to `helm upgrade`, because that is what decides whether staging is
+running this commit, the previous one, or part of each. What it will **not** do is read a
+parked run as a fix: a run skipped because staging is parked is green having deployed
+nothing, so it closes nothing and opens nothing.
+
+Changing it is the part that needs care: `workflow_run` runs the default branch's copy, so
+nothing done to this file takes effect — or can be tested — until it merges. That is why the
+classification sits in [`cd-outcome.sh`](../../.github/scripts/cd-outcome.sh) behind
+`make cd-outcome-test`, and why CI checks the three names the notifier borrows from
+`deploy.yml`: its filename, its `name:`, and the **`Deploy the chart`** step whose conclusion
+separates parked from deployed. Should that name go missing at runtime anyway, the notifier
+says so under a label of its own (`cd-notifier-miswired`) rather than filing it as an outage —
+a blind notifier and a broken deploy are different problems for different people.
 
 **Three of those secrets are not `bootstrap.sh`'s.** It owns exactly `<prefix>-db-password`
 and `<prefix>-db-admin-password`, because those are the two Terraform reads back. The three
