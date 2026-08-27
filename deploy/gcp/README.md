@@ -1282,7 +1282,11 @@ values you already have:
 ```
 
 `make gcp-env-init`, `gcp-env-apply`, `gcp-env-destroy` and `gcp-env-migrate-state` all pass
-it, which is why they now require `PROJECT`. There is deliberately **no override variable**:
+it, which is why they now require `PROJECT` — and so does `gcp-db-init`, which reads seven
+`terraform output` values and therefore selects a state exactly as the writers do. It gets
+there through `gcp-env-init`, which it now depends on: the coordinate guard compares
+`PROJECT` against the tfvars and cannot see which bucket `.terraform` was last pointed at,
+so re-selecting the backend is what makes those reads come from the bucket `PROJECT` names. There is deliberately **no override variable**:
 one existed and was removed in review, because an override chooses the bucket while
 `terraform.tfvars` still chooses the resources, and the guard below cannot see it — a way to
 apply one environment's configuration to another's state with everything green.
@@ -1312,6 +1316,22 @@ addresses, the registry, and the seven outputs `dbinit.sh` reads — without app
 A partial backend cannot be initialized by the bare `terraform init` that Terraform's own
 error message suggests, because that command has no bucket to use; this target is where the
 `-backend-config` lives, and it is the only one of the four that changes nothing.
+
+**Re-pointing a checkout that is already initialized at a different environment** is the one
+case these targets refuse without saying what to do. Terraform answers `Error: Backend
+configuration changed` and names `-migrate-state` or `-reconfigure`; the refusal is correct —
+under `-input=false` it will not adopt or copy a state on a guess — but neither flag is a
+target here. Want the *other* environment's state as it stands, leaving this one alone:
+
+```sh
+PROJECT=other-project terraform -chdir=deploy/gcp/environment init -reconfigure \
+	-backend-config="bucket=other-project-map-tfstate"
+```
+
+`-migrate-state` is the other answer and it COPIES, which is `make gcp-env-migrate-state`'s
+job and not something to reach for while switching environments. Simply deleting
+`deploy/gcp/environment/.terraform/` and re-running `gcp-env-init` works too, and is the
+easier thing to be sure of.
 
 **Moving an existing local state into it is a one-time step, and it must run from the machine
 that still holds the file:**

@@ -271,6 +271,23 @@ def main():
                   bool(inits) and all("-input=false" in c for c in inits),
                   f"rc={rc} calls={calls}")
 
+        # 7c. gcp-db-init must SELECT the backend before it reads anything from
+        #     it. The mismatch loop above cannot see that: it goes green with
+        #     either prerequisite deleted, because the other one still refuses —
+        #     so it proves a guard exists, not that gcp-env-init runs first, and
+        #     that ordering is the whole point of the prerequisite. Assert on the
+        #     FIRST terraform call, which is the init, on the happy path.
+        #
+        #     dbinit.sh stops shortly after, on a missing kubectl or on the fake
+        #     terraform answering `output` with nothing. Both are fine and both
+        #     land after the init, so this reads calls[0] and ignores the rest.
+        rc, out, calls = run_make(tree, bin_dir, "gcp-db-init")
+        first = calls[0] if calls else ""
+        check("gcp-db-init selects the backend before reading an output",
+              bool(calls) and "init" in first.split() and bucket in first
+              and "-input=false" in first,
+              f"rc={rc} first={first!r} calls={len(calls)}")
+
         # 8b. The recipe PINS OUT, and popping it from the environment above is
         #     precisely what hid the pin's absence. A stray OUT — left over from
         #     anything — points --check at a file Terraform will not read, and
@@ -315,9 +332,10 @@ def main():
         # gcp-db-init is deliberately NOT in this list, though it now carries the
         # same prerequisite. dbinit.sh refuses a missing PROJECT on its own, so
         # the assertion would hold with the prerequisite deleted — it would be a
-        # check that cannot fail, which is worse than no check. Its guard is
-        # pinned by the coordinate-mismatch loop above, where removing the
-        # prerequisite does make the suite go red.
+        # check that cannot fail, which is worse than no check. What pins its
+        # prerequisites is 7c, which reads the first terraform call: the
+        # coordinate-mismatch loop alone does not, because deleting either
+        # prerequisite leaves the other refusing and the loop green.
         for target in ("gcp-env-init", "gcp-env-apply", "gcp-env-destroy",
                        "gcp-env-migrate-state", "gcp-env-tfvars"):
             rc, out, calls = run_make(tree, bin_dir, target, project=None)

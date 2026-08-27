@@ -548,6 +548,11 @@ gcp-env-migrate-state: gcp-require-project gcp-env-vars-match
 # backend is what makes the outputs come from the bucket PROJECT names. It is
 # idempotent, and if the two disagree its -input=false refuses rather than
 # silently migrating.
+#
+# The first two are SUBSUMED by the third — gcp-env-init requires both — so only
+# deleting gcp-env-init changes behavior, and that is the one the suite pins.
+# They are named anyway, to read like the four gcp-env-* targets above rather
+# than leave this one looking unguarded.
 gcp-db-init: gcp-require-project gcp-env-vars-match gcp-env-init
 	PROJECT=$(PROJECT) NAME_PREFIX=$(NAME_PREFIX_OR_DEFAULT) NAMESPACE=$(or $(NAMESPACE),map) \
 		bash deploy/gcp/dbinit.sh

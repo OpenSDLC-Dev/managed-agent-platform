@@ -79,9 +79,13 @@ tf_out() {
 		# target that passes the -backend-config rather than leave the operator
 		# following advice that fails.
 		#
-		# `make gcp-db-init` now runs gcp-env-init first, so this path is reached
-		# by invoking this script directly — which is supported, and is exactly
-		# the case that needs to be told which target to run.
+		# `make gcp-db-init` now runs gcp-env-init first, so an uninitialized
+		# backend reaches here only when this script is invoked directly — which
+		# is supported, and is exactly the case that needs telling which target
+		# to run. The advice is not always the cause, though: this block prints
+		# on ANY of the seven output failures, an expired credential and a
+		# renamed output included. That is why Terraform's own error is echoed
+		# immediately above it rather than replaced.
 		echo "Run 'PROJECT=$PROJECT make gcp-env-init' first — the state is remote and this" >&2
 		echo "checkout has not been pointed at it. (If the environment does not exist yet," >&2
 		echo "'make gcp-env-apply' is the one that creates it.)" >&2
