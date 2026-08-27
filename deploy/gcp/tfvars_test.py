@@ -402,12 +402,15 @@ def main():
               r.returncode == 1 and "gcp-env-tfvars" in r.stderr, f"{r.returncode} {r.stderr}")
 
         # A hand-written tfvars may leave name_prefix out, because variables.tf
-        # defaults it to the same "map" this script does. That has to READ as
-        # agreement, or the check would refuse the most ordinary file there is.
+        # defaults it to "map" — so reading an absent one as "map" was RIGHT about
+        # Terraform. It still had to go. The scanner below is not an HCL parser,
+        # and every way it can be wrong ends in a key going missing; defaulting
+        # turned each of those into a silent yes. Presence is required instead, so
+        # a miss refuses. See the three inputs at 10a-3 that reach it for real.
         out = fixture('project_id = "my-proj"\n')
         r = run(tmp, out=out, args=("--check",))
-        check("--check treats an omitted name_prefix as the default it is",
-              r.returncode == 0, f"{r.returncode} {r.stderr}")
+        check("--check refuses a file that omits name_prefix rather than defaulting it",
+              r.returncode == 1 and "name_prefix" in r.stderr, f"{r.returncode} {r.stderr}")
 
         # 10a-2. Nesting. A key inside an object VALUE is not an assignment
         #        Terraform reads — it reads `extra`, and never looks inside — but
@@ -477,6 +480,42 @@ def main():
         r = run(tmp, out=out, prefix="acme", args=("--check",))
         check("--check passes a file carrying master_authorized_cidrs",
               r.returncode == 0, f"{r.returncode} {r.stderr}")
+
+        # 10a-3. The scanner is not an HCL parser, and these are the inputs that
+        #        prove it rather than the ones that flatter it. Terraform accepts
+        #        all three and reads name_prefix = "acme"; the scanner loses
+        #        everything after the poisoned line. The assertion is NOT that it
+        #        parses them — it is that losing the key refuses. While an absent
+        #        name_prefix defaulted to "map", each of these agreed with
+        #        NAME_PREFIX=map against a file naming acme: one environment's
+        #        bucket paired with another's resources, reported as success.
+        poisons = (
+            # The string literals nested inside `${...}` invert this scanner's
+            # idea of being inside a quote, so the bracket is counted as real and
+            # every later line reads as nested inside it.
+            ("a bracket inside an interpolation",
+             'project_id = "my-proj"\n'
+             'iap_backend_service = "${"["}"\n'
+             'name_prefix = "acme"\n'),
+            # The same inversion, reaching a block-comment opener instead.
+            ("a comment opener inside an interpolation",
+             'project_id = "my-proj"\n'
+             'notes = "${"/*"}"\n'
+             'name_prefix = "acme"\n'),
+            # CRLF: the terminator carries a \r, never compares equal to the tag,
+            # and the heredoc swallows the rest of the file.
+            ("a CRLF heredoc whose terminator never matches",
+             'project_id = "my-proj"\r\n'
+             'notes = <<EOT\r\n'
+             'anything\r\n'
+             'EOT\r\n'
+             'name_prefix = "acme"\r\n'),
+        )
+        for label, text in poisons:
+            r = run(tmp, out=fixture(text), prefix="map", args=("--check",))
+            check(f"--check refuses when {label} hides name_prefix",
+                  r.returncode == 1 and "name_prefix" in r.stderr,
+                  f"{r.returncode} {r.stderr}")
 
         # 10b. Comments. `/* */` is the bypass that mattered: an assignment inside
         #      one is invisible to Terraform and was visible to a line-oriented
@@ -563,7 +602,8 @@ def main():
         # And the file under check is not mistaken for a second source of itself.
         d = tmp / "alone"
         d.mkdir()
-        (d / "terraform.tfvars").write_text('project_id = "my-proj"\n', encoding="utf-8")
+        (d / "terraform.tfvars").write_text('project_id = "my-proj"\nname_prefix = "map"\n',
+                                            encoding="utf-8")
         r = run(tmp, out=(d / "terraform.tfvars"), args=("--check",))
         check("--check does not refuse the very file it was pointed at",
               r.returncode == 0, f"{r.returncode} {r.stderr}")

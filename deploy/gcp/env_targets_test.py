@@ -73,7 +73,8 @@ def build_tree(tmp):
 
 
 def run_make(tree, bin_dir, target, project="my-proj", prefix=None,
-             state="", state_fails=False, extra=(), tfvars='project_id = "my-proj"\n',
+             state="", state_fails=False, extra=(),
+             tfvars='project_id = "my-proj"\nname_prefix = "map"\n',
              stray_out=None):
     """Run one target; return (returncode, stdout+stderr, [terraform calls])."""
     env_dir = tree / "deploy" / "gcp" / "environment"
@@ -192,7 +193,7 @@ def main():
         for target in ("gcp-env-init", "gcp-env-apply", "gcp-env-destroy",
                        "gcp-env-migrate-state"):
             rc, out, calls = run_make(tree, bin_dir, target, prefix="acme",
-                                      tfvars='project_id = "my-proj"\n')
+                                      tfvars='project_id = "my-proj"\nname_prefix = "map"\n')
             check(f"{target} refuses a coordinate mismatch before running terraform",
                   rc != 0 and calls == [] and "name_prefix" in out,
                   f"rc={rc} calls={calls}")

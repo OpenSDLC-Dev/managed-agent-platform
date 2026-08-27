@@ -11,12 +11,15 @@
 # instance directly; dbinit.sql asserts the session is encrypted, so a
 # connection that silently fell back to plaintext fails rather than passes.
 #
-# Run order:
+# Run order (since #478 every gcp-env-* and gcp-db-* target needs PROJECT — it is
+# half the state bucket's name, and gcp-env-apply also refuses until the tfvars
+# below exists, those being two inputs that must not disagree):
 #     make gcp-foundation-apply
-#     make gcp-bootstrap             # the two database passwords get values
-#     make gcp-env-apply             # instance, database, `postgres` admin
-#     make gcp-db-init               # this script
-#     helm install ...               # the platform, as the role created here
+#     PROJECT=… make gcp-bootstrap    # the two database passwords get values
+#     PROJECT=… make gcp-env-tfvars   # writes environment/terraform.tfvars
+#     PROJECT=… make gcp-env-apply    # instance, database, `postgres` admin
+#     PROJECT=… make gcp-db-init      # this script
+#     helm install ...                # the platform, as the role created here
 #
 # Idempotent. Re-run it after a rebuild of environment/, and after bootstrap.sh
 # rotates the password — the second case is the whole rotation procedure.

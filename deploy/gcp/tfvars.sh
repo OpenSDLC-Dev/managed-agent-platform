@@ -167,17 +167,22 @@ if [[ "${1:-}" == "--check" ]]; then
 	# does not require an object's attributes to be indented: an indentation rule
 	# reads a nested key written at column 0 as top-level. Refusing indented
 	# assignments instead is no better — Terraform accepts indentation on a real
-	# top-level one, and for name_prefix "not found" means the default below, so
-	# refusing to read one would agree with a prefix the file does not name.
+	# top-level one, and refusing to read one loses it, which is the failure the
+	# presence requirement below exists to catch.
 	#
 	# Braces alone would in fact do, since HCL has no way to write a bare
 	# `key = value` inside a list without an object around it — brackets are
 	# counted because that is what depth means, and no test can tell the two
 	# apart on a file Terraform accepts.
 	#
-	# An unterminated comment, heredoc or bracket swallows the rest of the file,
-	# project_id goes missing, and the check refuses — the safe direction, and the
-	# only sane answer for input Terraform would reject as a syntax error.
+	# This scanner is NOT an HCL parser and does not need to be. It is wrong on at
+	# least three inputs Terraform accepts — `"${"["}"` and `"${"/*"}"`, where the
+	# string literals nested inside an interpolation invert its idea of being
+	# inside a quote, and a CRLF heredoc whose terminator never compares equal.
+	# Every such error, and every unterminated comment, heredoc or bracket, ends
+	# the same way: the rest of the file is swallowed and a key goes missing. What
+	# makes that safe is not the scanner but the rule below — BOTH keys must be
+	# found, so a miss is a refusal rather than a guess.
 	top_level() {
 		awk '
 			{ line = $0
@@ -216,13 +221,33 @@ if [[ "${1:-}" == "--check" ]]; then
 			sed -n "s/^[[:space:]]*$1[[:space:]]*=[[:space:]]*\"\([^\"]*\)\".*/\1/p" | head -1
 	}
 	got_project="$(tfvar project_id)"
-	# Absent means the variables.tf default, which is the same "map" this script
-	# defaults NAME_PREFIX to — so a hand-written tfvars that omits it agrees.
-	# An explicit `name_prefix = ""` reads the same way here, which is imprecise
-	# and harmless: variables.tf requires `^[a-z][a-z0-9-]{0,16}$`, so Terraform
-	# rejects the empty string at plan. A loud failure, not a wrong-state one.
+	# name_prefix must be PRESENT, not defaulted. variables.tf does default it to
+	# "map", so reading an absent one as "map" was correct about Terraform — and
+	# that is exactly what made it dangerous. Every way the scanner above can lose
+	# a line ends in the same place: the key is not found. For project_id "not
+	# found" is the empty string, which matches no PROJECT and refuses. For
+	# name_prefix, defaulting turned every one of those misses into a silent YES.
+	#
+	# That is not hypothetical. Three inputs Terraform accepts reach it — an
+	# interpolation holding a bracket or a comment opener (`"${"["}"`, `"${"/*"}"`,
+	# where the nested string literals invert this scanner's idea of being inside
+	# a quote) and a CRLF file whose heredoc terminator never compares equal. Each
+	# swallowed the rest of the file, and each then agreed with NAME_PREFIX=map
+	# against a file naming something else.
+	#
+	# Requiring presence closes all three at the root, and any fourth nobody has
+	# found: a scanner miss becomes a refusal instead of a wrong-state apply. The
+	# cost is a hand-written tfvars that omits the line, which the generator never
+	# produces and which the message below tells you how to fix.
 	got_prefix="$(tfvar name_prefix)"
-	got_prefix="${got_prefix:-map}"
+	if [[ -z "$got_prefix" ]]; then
+		echo "${OUT} does not set name_prefix, or this check could not read it." >&2
+		echo "It has to be written out. Terraform defaults it to \"map\", but this check" >&2
+		echo "cannot tell a file that omits it from one it failed to parse — and reading" >&2
+		echo "the second as \"map\" is how a bucket gets paired with another environment's" >&2
+		echo "resources. Add: name_prefix = \"${NAME_PREFIX}\"" >&2
+		exit 1
+	fi
 
 	bad=0
 	if [[ "$got_project" != "$PROJECT" ]]; then
