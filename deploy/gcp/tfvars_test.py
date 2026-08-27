@@ -496,12 +496,12 @@ def main():
             # idea of being inside a quote, so the bracket is counted as real and
             # every later line reads as nested inside it. Refused at the
             # interpolation guard now, before the scanner ever sees it.
-            ("a bracket inside an interpolation", "interpolation",
+            ("a bracket inside an interpolation", "template",
              'project_id = "my-proj"\n'
              'iap_backend_service = "${"["}"\n'
              'name_prefix = "acme"\n'),
             # The same inversion, reaching a block-comment opener instead.
-            ("a comment opener inside an interpolation", "interpolation",
+            ("a comment opener inside an interpolation", "template",
              'project_id = "my-proj"\n'
              'notes = "${"/*"}"\n'
              'name_prefix = "acme"\n'),
@@ -537,7 +537,7 @@ def main():
                       'name_prefix = "acme"\n')
         r = run(tmp, out=out, prefix="map", args=("--check",))
         check("--check refuses a phantom block comment rather than reading it",
-              r.returncode == 1 and "interpolation" in r.stderr,
+              r.returncode == 1 and "template" in r.stderr,
               f"{r.returncode} {r.stderr}")
 
         #        B: HCL allows a hyphen in a heredoc tag. The scanner's tag
@@ -578,6 +578,48 @@ def main():
         r = run(tmp, out=fixture(hyphen_proj), args=("--check",))
         check("...and agrees with the project_id that actually applies",
               r.returncode == 0, f"{r.returncode} {r.stderr}")
+
+        #        C: `%{...}` is `${...}`'s twin — a template DIRECTIVE, nesting
+        #        HCL and its strings the same way, so it inverts the quote state
+        #        identically. Refusing only `${` left the whole family reachable
+        #        through the other sigil. check_split.py:123 had already learned
+        #        this about the same two constructs; this file had not.
+        out = fixture('project_id = "my-proj"\n'
+                      'notes = "%{ if "/*" == "x" }y%{ endif }"\n'
+                      '# */ name_prefix = "map"\n'
+                      'name_prefix = "acme"\n')
+        r = run(tmp, out=out, prefix="map", args=("--check",))
+        check("--check refuses a %{...} directive as readily as an interpolation",
+              r.returncode == 1 and "template" in r.stderr,
+              f"{r.returncode} {r.stderr}")
+
+        #        D: the heredoc tag is read as the rest of the line rather than
+        #        matched against a guess at HCL's identifier charset. A hyphen
+        #        defeated the first guess; a Unicode letter defeats the next one.
+        out = fixture('project_id = "my-proj"\n'
+                      'iap_backend_service = <<EÖT\n'
+                      'E\n'
+                      'name_prefix = "evil"\n'
+                      'EÖT\n'
+                      'name_prefix = "acme"\n')
+        r = run(tmp, out=out, prefix="evil", args=("--check",))
+        check("--check is not fooled by a non-ASCII heredoc tag",
+              r.returncode == 1 and "name_prefix" in r.stderr,
+              f"{r.returncode} {r.stderr}")
+
+        #        ...and `<<-` still means an indented heredoc rather than a tag
+        #        beginning with a hyphen, which the rest-of-line rule has to keep
+        #        getting right in all four spellings.
+        for opener, terminator in (("<<EOT", "EOT"), ("<<-EOT", "  EOT"),
+                                   ("<<EO-T", "EO-T"), ("<<-EO-T", "  EO-T")):
+            out = fixture('project_id = "my-proj"\n'
+                          f'notes = {opener}\n'
+                          '  name_prefix = "evil"\n'
+                          f'{terminator}\n'
+                          'name_prefix = "acme"\n')
+            r = run(tmp, out=out, prefix="acme", args=("--check",))
+            check(f"--check closes a {opener} heredoc at its own terminator",
+                  r.returncode == 0, f"{r.returncode} {r.stderr}")
 
         # 10b. Comments. `/* */` is the bypass that mattered: an assignment inside
         #      one is invisible to Terraform and was visible to a line-oriented

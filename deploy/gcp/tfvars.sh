@@ -143,25 +143,35 @@ if [[ "${1:-}" == "--check" ]]; then
 		exit 1
 	fi
 
-	# A template interpolation is refused outright, because the scanner below
-	# cannot read one and does not need to. Inside `"${"["}"` the string literals
-	# nested in the interpolation invert its idea of being inside a quote, so a
-	# bracket or a `/*` in there is counted as real — and a `/*` counted that way
-	# opens a comment Terraform never opened, which the next `*/` (a `*/` sitting
-	# inside a `#` comment will do) closes, handing the rest of that line back as
-	# a top-level assignment holding whatever it likes. That is a key found with
-	# the WRONG value, which the presence rule below cannot catch.
+	# An interpolation `${...}` or a template directive `%{...}` is refused
+	# outright, because the scanner below cannot read one and does not need to.
+	# BOTH, for the reason check_split.py:123 already gives about the same two
+	# constructs: their contents are HCL again, nested strings included. Inside
+	# `"${"["}"` those nested literals invert this scanner's idea of being inside
+	# a quote, so a bracket or a `/*` in there counts as real — and a `/*` counted
+	# that way opens a comment Terraform never opened, which the next `*/` (one
+	# sitting inside a `#` comment will do) closes, handing the rest of that line
+	# back as a top-level assignment holding whatever it likes. That is a key
+	# found with the WRONG value, which the presence rule below cannot catch.
+	# `%{ if "/*" == "x" }` does it identically; handling only `${` left the
+	# defect fully reachable through its twin.
 	#
 	# Refusing costs nothing real: a .tfvars is evaluated with no variables and no
-	# functions in scope, so `${...}` can only ever be a literal written the hard
-	# way. The generator never emits one.
-	# `[$]{` rather than a quoted `${`: the second is what shellcheck warns about
-	# (SC2016), and spelling the `$` as a bracket expression says "literal" to
+	# functions in scope, so either form can only ever be a literal written the
+	# hard way. The generator never emits one.
+	#
+	# `[$%]{` rather than a quoted `${`: the second is what shellcheck warns about
+	# (SC2016), and spelling the sigils as a bracket expression says "literal" to
 	# both grep and the reader without a suppression comment.
-	if grep -q '[$]{' "$OUT"; then
-		echo "refusing: ${OUT} contains a \${...} template interpolation." >&2
+	if grep -q '[$%]{' "$OUT"; then
+		echo "refusing: ${OUT} contains a \${...} or %{...} template." >&2
 		echo "This check cannot read one, and a .tfvars has no variables or functions in" >&2
-		echo "scope, so it can only be a literal written the hard way. Write the literal." >&2
+		echo "scope, so either can only be a literal written the hard way." >&2
+		echo >&2
+		echo "If you wanted a literal \${...} you will have written \$\${...}, which this" >&2
+		echo "refuses too and cannot tell you to rewrite — there is no other spelling." >&2
+		echo "Nothing generated here needs one, so treat it as a file to look at rather" >&2
+		echo "than a rule to work around." >&2
 		exit 1
 	fi
 
@@ -204,14 +214,21 @@ if [[ "${1:-}" == "--check" ]]; then
 	# below, which requires both.
 	#
 	# The dangerous kind is the other kind: an error that hands back a key with
-	# the WRONG value, which presence cannot see. Two were found, and both are
-	# closed above rather than tolerated — the interpolation refusal, and the
-	# hyphen in the heredoc tag. Do not assume that list is complete: it was two
-	# because someone went looking, and the honest statement is that this scanner
-	# is sound against operator error, not against a tfvars written to defeat it.
-	# The file is written by the same person running the command, so that is the
-	# threat model. If a third is ever found, prefer closing it the same way —
-	# refuse the construct — over teaching this awk to parse HCL.
+	# the WRONG value, which presence cannot see. Three were found by attacking
+	# this scanner rather than using it, and each is closed at its source above —
+	# `${...}`, its twin `%{...}`, and the heredoc tag. Each was found only
+	# because someone went looking, and the third was found after a comment here
+	# said there were two, so do not read this as a proof. The honest statement is
+	# that this is sound against operator error and not against a tfvars written
+	# to defeat it — and the file is written by the same person running the
+	# command, which is the whole threat model.
+	#
+	# Prefer closing a fourth the same way, by refusing the construct or by
+	# reading it exactly, over teaching this awk to parse HCL. Where a guess about
+	# HCL is unavoidable, guess in the direction that loses text: a lost key is a
+	# refusal. A UTF-8 BOM is the standing example — it makes project_id read as
+	# empty and the file refuse, which is wrong but harmless, and is left alone
+	# because the alternative is another approximation.
 	top_level() {
 		awk '
 			{ line = $0
@@ -231,14 +248,24 @@ if [[ "${1:-}" == "--check" ]]; then
 			    if (d == "//" || c == "#") break
 			    if (d == "<<") {
 			      rest = substr(line, i)
-			      # The `-` in the class is load-bearing: HCL accepts a hyphen in
-			      # a heredoc tag, and without it `<<EO-T` was read as the tag
-			      # `EO`, so a body line `EO` ended the heredoc early and the
-			      # rest of the body came back as top-level assignments. The
-			      # leading `<<-?` is the indent marker and is stripped below.
-			      if (match(rest, /^<<-?[A-Za-z_][A-Za-z0-9_-]*/)) {
-			        heretag = substr(rest, RSTART, RLENGTH)
+			      # The tag is whatever is left on the line, rather than a
+			      # character class. HCL puts nothing after a heredoc opener — a
+			      # trailing comment there is a syntax error — so the rest of the
+			      # line IS the tag, while any class is a guess at the identifier
+			      # charset HCL accepts. That guess was wrong once already:
+			      # without a hyphen in it, <<EO-T read as the tag EO, so a body
+			      # line EO closed the heredoc early and the rest of the BODY came
+			      # back as top-level assignments. A Unicode tag defeats the next
+			      # guess identically. Trailing CR is trimmed here with the
+			      # whitespace, which leaves a CRLF file exactly where it was: the
+			      # terminator keeps its own CR, never compares equal, and the
+			      # presence rule refuses.
+			      #
+			      # No apostrophes in this awk program: it is single-quoted.
+			      if (match(rest, /^<<-?[^ \t\r]/)) {
+			        heretag = rest
 			        sub(/^<<-?/, "", heretag)
+			        sub(/[ \t\r]+$/, "", heretag)
 			        break
 			      }
 			    }
