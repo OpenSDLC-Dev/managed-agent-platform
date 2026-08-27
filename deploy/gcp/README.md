@@ -812,8 +812,9 @@ The provider is named by **`$WIF_PROVIDER` itself**, whole, and that is not tidi
 condition is the control that survives a branch deleting the workflow's own guard, so a
 command that configured a *different* provider than the one the job exchanges its token at
 would leave the real one unconditioned while reading as though the work were done. A
-hard-coded `github-oidc` in pool `github` does exactly that on any deployment whose
-`WIF_PROVIDER` names another pool or provider — which is now every deployment but this one:
+pool and provider name hard-coded into the command does exactly that wherever `WIF_PROVIDER`
+names a different pair — which is every deployment but whichever one the line was written
+against, and the file does not name that pair for the reason the table above gives:
 
 ```sh
 gcloud iam workload-identity-pools providers update-oidc "$WIF_PROVIDER" \
@@ -822,24 +823,27 @@ gcloud iam workload-identity-pools providers update-oidc "$WIF_PROVIDER" \
 
 **A full resource name goes where the provider ID goes**, and `gcloud` takes the project,
 location and pool out of it, so `--project`, `--location` and `--workload-identity-pool` are
-not needed at all. That is a stronger guarantee than picking the right project by hand: a
-`--project` naming the wrong project does not redirect the command, and neither does an unset
-`core/project`, so nothing an operator's shell is configured with can point this at another
-provider. A provider may live beside the workload rather than in it, and this is what makes
-that safe.
+not needed at all. What that buys is failure modes removed rather than a different target: a
+stray `--project` naming the wrong project does not redirect the command, an unset
+`core/project` does not stop it, and there is no number-to-ID translation step to get wrong.
+The one input left is `$WIF_PROVIDER` itself — the same value the job exchanges its token at
+— which is the property worth having, since a provider may live beside the workload rather
+than in it.
 
 Do **not** rebuild those flags by splitting the name — which is what this file used to tell
 you to do. `$WIF_PROVIDER` carries the project **number**, and no `gcloud iam
-workload-identity-pools` command accepts one: `describe`, `list`, `create`, `create-oidc` and
-`update-oidc`, pools and providers alike, all refuse it before any API call (#508):
+workload-identity-pools` command takes a number in `--project`: `describe`, `list`, `create`,
+`create-oidc` and `update-oidc`, pools and providers alike, refuse it before any API call
+(#508). The number is perfectly good where it already sits, inside the resource name, which
+is exactly why passing that name whole works:
 
 ```text
 ERROR: (gcloud.iam.workload-identity-pools.providers.update-oidc) The value of ``--project''
 flag was set to Project number.To use this command, set it to PROJECT ID instead.
 ```
 
-Where an ID is genuinely wanted, `gcloud projects describe "$number" --format="value(projectId)"`
-translates one; that command, unlike these, does take a number.
+If you need the ID for something else, `gcloud projects describe PROJECT_NUMBER
+--format="value(projectId)"` translates it; that command, unlike these, does take a number.
 
 `ref_type` rides along because a *tag* named `main` would present `refs/tags/main` — not
 equal, so the ref test already rejects it, but stating both makes the intent legible rather
