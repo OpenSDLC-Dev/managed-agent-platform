@@ -258,6 +258,21 @@ def main():
         r2 = run(tmp, "warn-rerun", faults=["warn"], reuse=r.state)
         check("re-run still skips rather than rewriting", "left alone" in r2.out, r2.out)
 
+        print("the next step it prints is one that can actually run")
+        # The last thing an operator sees, at the step where the order changed:
+        # #478 put a target between this script and gcp-env-apply, and made
+        # PROJECT required by both. Nothing pinned this line, so it kept naming a
+        # command that now refuses -- and a stale pointer here costs more than
+        # elsewhere, because there is nothing else on screen to correct it.
+        r = run(tmp, "next-step")
+        check("it names gcp-env-tfvars before gcp-env-apply",
+              "gcp-env-tfvars" in r.out
+              and r.out.index("gcp-env-tfvars") < r.out.index("gcp-env-apply"),
+              r.out)
+        check("and every make command it prints carries PROJECT",
+              all("PROJECT=" in ln for ln in r.out.splitlines() if "make gcp-env-" in ln),
+              r.out)
+
         print()
         if failures:
             print("FAILED: %d check(s)" % len(failures))

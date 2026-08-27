@@ -58,11 +58,13 @@ The run order is in [`deploy/gcp/README.md`](../deploy/gcp/README.md#running-it)
 load-bearing; this is only the shape of it:
 
 ```sh
-make gcp-foundation-apply    # never destroyed — durable identities, KMS, empty secrets
-                             # (re-apply it whenever foundation/ gains a resource)
-make gcp-bootstrap           # fills the secrets
-make gcp-env-apply           # network, cluster, Cloud SQL, bucket, registry
-make gcp-db-init             # the platform's database role — see below
+make gcp-foundation-apply              # never destroyed — durable identities, KMS, empty
+                                       # secrets, and the bucket environment/'s state lives in
+                                       # (re-apply it whenever foundation/ gains a resource)
+PROJECT=… make gcp-bootstrap           # fills the secrets
+PROJECT=… make gcp-env-tfvars          # environment/'s inputs, generated (#478)
+PROJECT=… make gcp-env-apply           # network, cluster, Cloud SQL, bucket, registry
+PROJECT=… make gcp-db-init             # the platform's database role — see below
 gcloud builds submit ...     # the component images
 helm install ...             # the platform
 ```
@@ -77,11 +79,12 @@ without), and authenticating throughout by Workload Identity Federation rather t
 stored GitHub secret. Dispatch is for what a push cannot express: redeploying an unchanged
 commit onto a rebuilt cluster, or finishing a rotation a human made in Secret Manager.
 
-**All four `make` targets above it stay human-driven, and all four are prerequisites of the
+**All five `make` targets above it stay human-driven, and all five are prerequisites of the
 pipeline rather than steps in it** — including `gcp-db-init`, which mode 2 genuinely depends
 on: the DSN in the pre-created Secret names the `map` role, and `dbinit.sql` is the only thing
-that creates it. Terraform stays out of CD because its applies are interactive by design and
-its state is local (plan 20, Decision 9), which leaves the pipeline owning exactly
+that creates it. Terraform stays out of CD because its applies are interactive by design
+(plan 20, Decision 9) and one bad plan destroys the database — not because the state is out
+of reach, which since #478 it is not — which leaves the pipeline owning exactly
 build → push → deploy → smoke. The reasoning, the two out-of-band IAM grants it needs, and
 what an operator still owes a rebuilt environment are in
 [`deploy/gcp/README.md`](../deploy/gcp/README.md#continuous-delivery). Nothing about that
@@ -546,7 +549,9 @@ done
 #    silently: rubric and deliverable reads fall back rather than failing.
 
 # 3. Reconcile Terraform. This is the apply that drops the two map-storage bindings.
-make gcp-env-apply
+#    PROJECT is passed through explicitly: make does not inherit a plain shell
+#    assignment, and since #478 the target needs it to name the state bucket.
+PROJECT="$PROJECT" make gcp-env-apply
 
 # 4. Only once reads and writes are proven on the new path, deactivate and delete
 #    the key. Deactivate first — a key must be INACTIVE before GCS will delete it,
@@ -619,11 +624,17 @@ uses" has the rest — what keeps billing regardless, and why CD skips a parked 
 rather than failing on it. What follows is the irreversible option.
 
 ```sh
-make gcp-env-destroy
+PROJECT=… make gcp-env-destroy
 ```
 
-destroys the cluster, Cloud SQL, the bucket and the registry, and leaves `foundation/`
-alone. Three settings make that possible and are deliberately non-default: the cluster's
+destroys the cluster, Cloud SQL, the environment's **blob** bucket and the registry, and
+leaves `foundation/` alone — including the bucket holding `environment/`'s own Terraform
+state. What puts that bucket out of this command's reach is that it belongs to
+`foundation/`'s state, which this command never touches; `prevent_destroy` is the separate
+guard, against a `foundation/` destroy, and `foundation/` has no destroy target at all. It is deliberately **not idempotent**: run it twice and the second refuses, because
+the state is empty by then and Terraform cannot tell an already-destroyed environment from a
+checkout pointed at the wrong bucket — and only one of those quietly leaves a cluster
+billing. Three settings make that possible and are deliberately non-default: the cluster's
 `deletion_protection`, Cloud SQL's two separate deletion-protection flags, and the bucket's
 `force_destroy`. All three are correct for staging and wrong for anything holding data
 someone would miss.

@@ -11,12 +11,16 @@
 # instance directly; dbinit.sql asserts the session is encrypted, so a
 # connection that silently fell back to plaintext fails rather than passes.
 #
-# Run order:
+# Run order (this script and the power targets always needed PROJECT, for the
+# gcloud calls; since #478 the state-touching gcp-env-* targets need it too,
+# because it is half the state bucket's name — and gcp-env-apply also refuses
+# until the tfvars below exists, those being two inputs that must not disagree):
 #     make gcp-foundation-apply
-#     make gcp-bootstrap             # the two database passwords get values
-#     make gcp-env-apply             # instance, database, `postgres` admin
-#     make gcp-db-init               # this script
-#     helm install ...               # the platform, as the role created here
+#     PROJECT=… make gcp-bootstrap    # the two database passwords get values
+#     PROJECT=… make gcp-env-tfvars   # writes environment/terraform.tfvars
+#     PROJECT=… make gcp-env-apply    # instance, database, `postgres` admin
+#     PROJECT=… make gcp-db-init      # this script
+#     helm install ...                # the platform, as the role created here
 #
 # Idempotent. Re-run it after a rebuild of environment/, and after bootstrap.sh
 # rotates the password — the second case is the whole rotation procedure.
@@ -54,7 +58,7 @@ sql="$here/dbinit.sql"
 # Anchored to the script, like $sql above, rather than to the repository root.
 # A working-directory-relative default works under `make gcp-db-init` and fails
 # everywhere else, and it fails as `terraform -chdir` not finding the directory
-# — which tf_out reports as "Run 'make gcp-env-apply' first", naming a cause
+# — which tf_out reports as "Run '… make gcp-env-init' first", naming a cause
 # that is not the cause.
 ENV_DIR="${ENV_DIR:-$here/environment}"
 
@@ -68,7 +72,23 @@ tf_out() {
 	if ! v="$(terraform -chdir="$ENV_DIR" output -raw "$1" 2>&1)"; then
 		echo "could not read terraform output '$1' from $ENV_DIR:" >&2
 		echo "$v" >&2
-		echo "Run 'make gcp-env-apply' first." >&2
+		# Since #478 the state is in a bucket and the backend block is partial, so
+		# a checkout that has never initialized it lands here — including one that
+		# is otherwise complete. `terraform init` on its own cannot fix it (no
+		# bucket), and Terraform's error says to run exactly that, so name the
+		# target that passes the -backend-config rather than leave the operator
+		# following advice that fails.
+		#
+		# `make gcp-db-init` now runs gcp-env-init first, so an uninitialized
+		# backend reaches here only when this script is invoked directly — which
+		# is supported, and is exactly the case that needs telling which target
+		# to run. The advice is not always the cause, though: this block prints
+		# on ANY of the seven output failures, an expired credential and a
+		# renamed output included. That is why Terraform's own error is echoed
+		# immediately above it rather than replaced.
+		echo "Run 'PROJECT=$PROJECT make gcp-env-init' first — the state is remote and this" >&2
+		echo "checkout has not been pointed at it. (If the environment does not exist yet," >&2
+		echo "'make gcp-env-apply' is the one that creates it.)" >&2
 		exit 1
 	fi
 	[[ -n "$v" ]] || { echo "terraform output '$1' is empty" >&2; exit 1; }

@@ -67,9 +67,12 @@ model-providers.json
 # slice 3's review round). Anchored to the root like the binaries above.
 /%SystemDrive%/
 
-# Terraform working directories, state and variable files. The provider plugins,
-# the state and the tfvars are machine-local; .terraform.lock.hcl is NOT ignored
-# — it pins provider versions and belongs in the repo, exactly like go.sum.
+# Terraform working directories, state and variable files. The provider plugins
+# and the tfvars are machine-local, and so is `foundation/`'s state; since #478
+# `environment/`'s authoritative state is a GCS bucket, and a terraform.tfstate
+# beside its .tf files is a pre-migration leftover — still ignored, and still
+# not something to commit. .terraform.lock.hcl is NOT ignored — it pins provider
+# versions and belongs in the repo, exactly like go.sum.
 #
 # Matched ANYWHERE in the tree, not only under deploy/gcp/*/. A path-scoped rule
 # is a trap here, because what it fails to match is a file that routinely holds
@@ -81,7 +84,14 @@ model-providers.json
 *.tfstate
 *.tfstate.*
 *.tfvars
-*.tfvars.json
+# `*.tfvars.*` rather than just `*.tfvars.json`, for the reason `*.tfstate.*`
+# above is here and one more of its own: tfvars.sh writes through
+# `mktemp "$OUT.XXXXXX"` beside the destination, so that the final `mv` is atomic
+# within one directory. Its EXIT trap removes that file on every exit it can see,
+# but not on SIGKILL or a power loss — and what survives holds the project id and
+# the Cloud Build service-account email. Untracked but NOT ignored is precisely
+# the state in which `git add -A` sweeps a file into a public repository (#356).
+*.tfvars.*
 tfplan
 **/tfplan
 # A generated Helm values file, in case one is written here anyway — the README

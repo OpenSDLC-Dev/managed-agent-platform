@@ -1088,6 +1088,18 @@ jobs:
       # are invisible to shellcheck and to a careful read alike.
       - name: the power script parks and revives what it claims
         run: make gcp-power-test
+      # And the tfvars generator, whose whole job is turning one gcloud answer
+      # into a value Terraform accepts — a `projects/…/serviceAccounts/` prefix
+      # or a Windows CR writes a file that looks right and fails variable
+      # validation, which blocks a `destroy` as readily as an apply.
+      - name: the tfvars generator writes what Terraform accepts
+        run: make gcp-tfvars-test
+      # And the recipes themselves, against a fake terraform — the guards that
+      # decide whether a destroy proceeds were the last unrun thing here, and a
+      # deleted prerequisite is a one-line way to operate on another
+      # environment's state with everything else still green.
+      - name: the gcp-env-* targets guard the state they select
+        run: make gcp-env-targets-test
       - name: the CD outcome classifier decides what it claims
         run: make cd-outcome-test
       # Whether a cluster is parked decides both whether deploy.yml deploys at

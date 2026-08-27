@@ -1,0 +1,475 @@
+#!/usr/bin/env bash
+# Generates environment/terraform.tfvars — the other half of making a destroy or
+# a rebuild portable (#478).
+#
+# Moving the state to a bucket is not enough on its own. Terraform evaluates the
+# whole configuration before it will destroy anything, so a machine with the
+# remote state but no tfvars still cannot run `terraform destroy`: it stops to
+# prompt for the variables that have no default. `*.tfvars` is gitignored — the
+# values name one operator's project and this repository is public (#356) — so a
+# fresh checkout has none, and a generator is the only way to have both.
+#
+# There are exactly TWO such variables, which is why this is a script and not a
+# project:
+#
+#   project_id                   what the operator already typed as PROJECT
+#   cloud_build_service_account  looked up, because it cannot be guessed
+#
+# The second is the reason this is worth automating rather than documenting.
+# Which account a project uses depends on when its FIRST BUILD ran, not on when
+# the project was created, so there is no default that is right — variables.tf
+# argues that at length. And the lookup's output needs handling: gcloud may
+# print `projects/…/serviceAccounts/EMAIL` rather than the bare email, which
+# Terraform's own validation rejects. Pasting it by hand is where that goes
+# wrong; here it is stripped and checked before anything is written.
+#
+# Everything else in variables.tf has a default, so a generated file with these
+# three lines is a complete, appliable configuration.
+#
+# Run:
+#     PROJECT=your-project make gcp-env-tfvars
+#
+# It has a second mode, `--check`, which reads the file back instead of writing
+# it and asserts it still describes the PROJECT and NAME_PREFIX the caller named.
+# That is not a tidiness check: those two choose the state BUCKET while the file
+# chooses the RESOURCES, so the targets that touch the backend run it first. The
+# long argument is at the mode itself.
+#
+# ORDER: after `make gcp-foundation-apply`. Enabling the Cloud Build API is what
+# creates the default build account, and the foundation is what enables it — on
+# a project where it has never been on, the lookup fails with SERVICE_DISABLED
+# rather than printing an account.
+
+set -euo pipefail
+
+PROJECT="${PROJECT:-}"
+NAME_PREFIX="${NAME_PREFIX:-map}"
+# Only written when set. environment/ and foundation/ must agree on this, and
+# both default to us-central1 — so an unset value already agrees, and writing
+# the default explicitly would only create a second place for it to drift. Set
+# it here when the foundation was applied somewhere else. Getting it wrong is
+# loud: environment/ reads the key ring through a data source, so the mismatch
+# fails during PLAN, before anything is created.
+KMS_LOCATION="${KMS_LOCATION:-}"
+HERE="$(cd "$(dirname "$0")" && pwd)"
+OUT="${OUT:-$HERE/environment/terraform.tfvars}"
+
+if [[ -z "$PROJECT" ]]; then
+	cat >&2 <<-EOF
+		usage: PROJECT=your-project $0 [--check]
+
+		  (no argument)  generate OUT
+		  --check        assert an existing OUT still describes PROJECT/NAME_PREFIX
+
+		environment:
+		  PROJECT       required — the GCP project holding the environment
+		  NAME_PREFIX   default "map" — must match what foundation/ was applied with
+		  OUT           default environment/terraform.tfvars
+	EOF
+	exit 2
+fi
+
+# --check answers the question that the split between "where the state lives" and
+# "what the configuration builds" opens up, and that nothing else asks.
+#
+# The state bucket is chosen from PROJECT and NAME_PREFIX at `terraform init`.
+# The RESOURCES come from project_id and name_prefix in this file. Those are two
+# independent inputs to one operation, and a mismatch is not a failure — it is a
+# success against the wrong state. `PROJECT=b make gcp-env-apply` in a checkout
+# whose tfvars says project a loads b's state and configures a's resources; if
+# both exist, the plan destroys what b's state records and creates it in a. The
+# custom-prefix case is worse because the DOCS walk into it: generate with
+# NAME_PREFIX=acme, then run the documented `PROJECT=... make gcp-env-apply`, and
+# the bucket is `...-map-tfstate` while every resource is an `acme` one.
+#
+# So the targets that touch the backend assert the two agree first. Nothing here
+# talks to GCP: it is a comparison between a file and two variables.
+
+# An unrecognised argument is refused rather than ignored. Falling through to
+# generate mode meant `--chek` silently WROTE a file on a fresh checkout — the
+# opposite of what the operator asked for, from a single transposed letter.
+if [[ $# -gt 1 || ( $# -eq 1 && "${1:-}" != "--check" ) ]]; then
+	echo "unknown argument: $*" >&2
+	echo "usage: PROJECT=… $0 [--check]" >&2
+	exit 2
+fi
+
+if [[ "${1:-}" == "--check" ]]; then
+	if [[ ! -e "$OUT" ]]; then
+		echo "no ${OUT}" >&2
+		echo "Terraform evaluates the whole configuration before it will apply OR destroy," >&2
+		echo "and these variables have no default, so it would stop to prompt." >&2
+		echo "Run \`PROJECT=${PROJECT} make gcp-env-tfvars\` first." >&2
+		exit 1
+	fi
+
+	# `*.auto.tfvars` is a SECOND source of the same variables, loaded
+	# automatically and after this file, so it can set project_id or name_prefix
+	# where this check cannot see it. Nothing in this repository writes one, so
+	# its presence means somebody layered inputs deliberately — and a guard that
+	# silently stops covering the thing it names is worse than no guard. Refuse
+	# and say so. (`-var` and TF_CLI_ARGS_* can do the same and arrive after this
+	# process has exited; those are out of reach of any check here, and this
+	# comment is the honest limit of what --check promises.)
+	# Terraform auto-loads FOUR shapes, not two, and the list is the whole list
+	# rather than the two obvious members: `terraform.tfvars`,
+	# `terraform.tfvars.json`, `*.auto.tfvars` and `*.auto.tfvars.json`. The JSON
+	# twin of the very file being checked is the one that catches you — it is
+	# loaded AFTER `terraform.tfvars` and wins, so a `terraform.tfvars.json`
+	# saying another project sat beside a matching `terraform.tfvars` and this
+	# check said "agrees". Whichever of them is OUT is the one legitimately here;
+	# anything else beside it is a second source the check cannot see.
+	dir="$(dirname "$OUT")"
+	shopt -s nullglob
+	others=()
+	# `-e` per candidate rather than trusting nullglob to drop the missing ones:
+	# nullglob only removes patterns that CONTAIN a wildcard, so the two fixed
+	# names stay in the list whether or not they exist, and every check would
+	# refuse against a file that was never there.
+	for f in "$dir"/terraform.tfvars "$dir"/terraform.tfvars.json \
+		"$dir"/*.auto.tfvars "$dir"/*.auto.tfvars.json; do
+		[[ -e "$f" ]] || continue
+		# -ef, not a string compare: OUT and the candidate can name the same
+		# file by different paths, and refusing the file under check as a second
+		# source of itself would make the guard useless in the normal case.
+		[[ "$f" -ef "$OUT" ]] && continue
+		others+=("$f")
+	done
+	shopt -u nullglob
+	if [[ ${#others[@]} -gt 0 ]]; then
+		echo "refusing: ${others[*]} would be loaded too, after ${OUT}." >&2
+		echo "This check reads only ${OUT}, so it cannot tell you which project_id and" >&2
+		echo "name_prefix Terraform will actually use. Fold them into ${OUT} or remove them." >&2
+		exit 1
+	fi
+
+	# An interpolation `${...}` or a template directive `%{...}` is refused
+	# outright, because the scanner below cannot read one and does not need to.
+	# BOTH, for the reason check_split.py:123 already gives about the same two
+	# constructs: their contents are HCL again, nested strings included. Inside
+	# `"${"["}"` those nested literals invert this scanner's idea of being inside
+	# a quote, so a bracket or a `/*` in there counts as real — and a `/*` counted
+	# that way opens a comment Terraform never opened, which the next `*/` (one
+	# sitting inside a `#` comment will do) closes, handing the rest of that line
+	# back as a top-level assignment holding whatever it likes. That is a key
+	# found with the WRONG value, which the presence rule below cannot catch.
+	# `%{ if "/*" == "x" }` does it identically; handling only `${` left the
+	# defect fully reachable through its twin.
+	#
+	# Refusing costs nothing real: a .tfvars is evaluated with no variables and no
+	# functions in scope, so either form can only ever be a literal written the
+	# hard way. The generator never emits one.
+	#
+	# It is a whole-file grep, so a `${` or `%{` inside a COMMENT refuses a file
+	# Terraform would have read. Known, and left: recognising a comment here means
+	# the scanner below, which is the thing this runs before precisely because it
+	# cannot be trusted on input like this. Refusing is the safe direction and the
+	# message says to look at the file rather than work around the rule.
+	#
+	# `[$%]{` rather than a quoted `${`: the second is what shellcheck warns about
+	# (SC2016), and spelling the sigils as a bracket expression says "literal" to
+	# both grep and the reader without a suppression comment.
+	if grep -q '[$%]{' "$OUT"; then
+		echo "refusing: ${OUT} contains a \${...} or %{...} template." >&2
+		echo "This check cannot read one, and a .tfvars has no variables or functions in" >&2
+		echo "scope, so either can only be a literal written the hard way." >&2
+		echo >&2
+		echo "If you wanted a literal \${...} you will have written \$\${...}, which this" >&2
+		echo "refuses too and cannot tell you to rewrite — there is no other spelling." >&2
+		echo "Nothing generated here needs one, so treat it as a file to look at rather" >&2
+		echo "than a rule to work around." >&2
+		exit 1
+	fi
+
+	# One assignment per variable: Terraform rejects a file that assigns the same
+	# one twice, so `head -1` never has to adjudicate a duplicate.
+	#
+	# What it does have to survive is text Terraform does not read as a top-level
+	# assignment but a line-oriented sed does. Three kinds, each reduced to a
+	# blank line below:
+	#
+	#   /* name_prefix = "acme" */        a comment Terraform never sees
+	#   notes = <<EOT                     a heredoc BODY, likewise
+	#   project_id = "evil"
+	#   EOT
+	#   extra = {                         an object VALUE: Terraform reads
+	#     project_id = "evil"             `extra`, never the key inside it
+	#   }
+	#
+	# Any of them read as agreement pairs one environment's bucket with another's
+	# resources while the guard says yes, which is the whole failure this exists
+	# to stop. check_split.py strips heredocs for the same reason and learned it
+	# the same way.
+	#
+	# Nesting is tracked by bracket DEPTH rather than by indentation, because HCL
+	# does not require an object's attributes to be indented: an indentation rule
+	# reads a nested key written at column 0 as top-level. Refusing indented
+	# assignments instead is no better — Terraform accepts indentation on a real
+	# top-level one, and refusing to read one loses it, which is the failure the
+	# presence requirement below exists to catch.
+	#
+	# Braces alone would in fact do, since HCL has no way to write a bare
+	# `key = value` inside a list without an object around it — brackets are
+	# counted because that is what depth means, and no test can tell the two
+	# apart on a file Terraform accepts.
+	#
+	# This scanner is NOT an HCL parser, and two different things keep that from
+	# mattering. Most of its errors LOSE text — an unterminated comment, heredoc
+	# or bracket swallows the rest of the file, a CRLF heredoc terminator never
+	# compares equal to its tag — and a lost key is caught by the presence rule
+	# below, which requires both.
+	#
+	# The dangerous kind is the other kind: an error that hands back a key with
+	# the WRONG value, which presence cannot see. Three were found by attacking
+	# this scanner rather than using it, and each is closed at its source above —
+	# `${...}`, its twin `%{...}`, and the heredoc tag. Each was found only
+	# because someone went looking, and the third was found after a comment here
+	# said there were two, so do not read this as a proof. The honest statement is
+	# that this is sound against operator error and not against a tfvars written
+	# to defeat it — and the file is written by the same person running the
+	# command, which is the whole threat model.
+	#
+	# Prefer closing a fourth the same way, by refusing the construct or by
+	# reading it exactly, over teaching this awk to parse HCL. Where a guess about
+	# HCL is unavoidable, guess in the direction that loses text: a lost key is a
+	# refusal. A UTF-8 BOM is the standing example — it makes project_id read as
+	# empty and the file refuse, which is wrong but harmless, and is left alone
+	# because the alternative is another approximation.
+	top_level() {
+		awk '
+			{ line = $0
+			  if (heretag != "") {
+			    t = line; sub(/^[ \t]+/, "", t); sub(/[ \t]+$/, "", t)
+			    if (t == heretag) heretag = ""
+			    print ""; next
+			  }
+			  startdepth = depth
+			  out = ""; i = 1
+			  while (i <= length(line)) {
+			    c = substr(line, i, 1); d = substr(line, i, 2)
+			    if (inblock) { if (d == "*/") { inblock = 0; i += 2 } else i++ ; continue }
+			    if (inquote) { out = out c; if (c == "\\") { out = out substr(line, i+1, 1); i += 2; continue }
+			                   if (c == "\"") inquote = 0; i++; continue }
+			    if (d == "/*") { inblock = 1; i += 2; continue }
+			    if (d == "//" || c == "#") break
+			    if (d == "<<") {
+			      rest = substr(line, i)
+			      # The tag is whatever is left on the line, rather than a
+			      # character class. HCL puts nothing after a heredoc opener — a
+			      # trailing comment there is a syntax error — so the rest of the
+			      # line IS the tag, while any class is a guess at the identifier
+			      # charset HCL accepts. That guess was wrong once already:
+			      # without a hyphen in it, <<EO-T read as the tag EO, so a body
+			      # line EO closed the heredoc early and the rest of the BODY came
+			      # back as top-level assignments. A Unicode tag defeats the next
+			      # guess identically. Trailing CR is trimmed here with the
+			      # whitespace, which leaves a CRLF file exactly where it was: the
+			      # terminator keeps its own CR, never compares equal, and the
+			      # presence rule refuses.
+			      #
+			      # Two details here are deliberately untestable, so do not read
+			      # a green suite as cover for editing them. The class gates only
+			      # the FIRST character, and differs from a letter-or-underscore
+			      # one solely for openers Terraform rejects; the trim matters
+			      # only for a trailing CR. What carries the fix is `heretag =
+			      # rest`, and that one fails loudly if it is narrowed back.
+			      #
+			      # No apostrophes in this awk program: it is single-quoted.
+			      if (match(rest, /^<<-?[^ \t\r]/)) {
+			        heretag = rest
+			        sub(/^<<-?/, "", heretag)
+			        sub(/[ \t\r]+$/, "", heretag)
+			        break
+			      }
+			    }
+			    if (c == "\"") inquote = 1
+			    else if (c == "{" || c == "[") depth++
+			    else if (c == "}" || c == "]") depth--
+			    out = out c; i++
+			  }
+			  if (startdepth == 0) print out; else print "" }
+		' "$OUT"
+	}
+	tfvar() {
+		top_level |
+			sed -n "s/^[[:space:]]*$1[[:space:]]*=[[:space:]]*\"\([^\"]*\)\".*/\1/p" | head -1
+	}
+	got_project="$(tfvar project_id)"
+	# name_prefix must be PRESENT, not defaulted. variables.tf does default it to
+	# "map", so reading an absent one as "map" was correct about Terraform — and
+	# that is exactly what made it dangerous. Every way the scanner above can lose
+	# a line ends in the same place: the key is not found. For project_id "not
+	# found" is the empty string, which matches no PROJECT and refuses. For
+	# name_prefix, defaulting turned every one of those misses into a silent YES.
+	#
+	# That is not hypothetical. Inputs Terraform accepts reach it — a CRLF file
+	# whose heredoc terminator never compares equal to its tag is the one left
+	# after the two refusals above — and each swallowed the rest of the file, then
+	# agreed with NAME_PREFIX=map against a file naming something else.
+	#
+	# So this catches every way the scanner can LOSE a key, including ones nobody
+	# has found: a miss becomes a refusal instead of a wrong-state apply. It does
+	# not catch a key returned with the wrong value; that is what the two refusals
+	# above are for. The cost is a hand-written tfvars omitting the line, which
+	# the generator never produces.
+	got_prefix="$(tfvar name_prefix)"
+	if [[ -z "$got_prefix" ]]; then
+		echo "${OUT}: this check could not read a name_prefix from it." >&2
+		echo "Either it is not there, or something above it — a heredoc whose terminator" >&2
+		echo "does not match, an unclosed comment or bracket — swallowed it. Terraform" >&2
+		echo "defaults the variable to \"map\", but this check cannot tell those two apart," >&2
+		echo "and reading the second as \"map\" is how one environment's bucket gets paired" >&2
+		echo "with another's resources." >&2
+		echo >&2
+		echo "If the file does not set it, add: name_prefix = \"${NAME_PREFIX}\"" >&2
+		echo "If it does, the line above it is the one to look at." >&2
+		exit 1
+	fi
+
+	bad=0
+	if [[ "$got_project" != "$PROJECT" ]]; then
+		echo "${OUT} says project_id = \"${got_project}\", but you passed PROJECT=${PROJECT}." >&2
+		bad=1
+	fi
+	if [[ "$got_prefix" != "$NAME_PREFIX" ]]; then
+		echo "${OUT} says name_prefix = \"${got_prefix}\", but you passed NAME_PREFIX=${NAME_PREFIX}." >&2
+		bad=1
+	fi
+	if [[ "$bad" -ne 0 ]]; then
+		echo >&2
+		echo "Those two choose the state bucket; the file chooses the resources. Applying or" >&2
+		echo "destroying with them disagreeing operates on one environment's state while" >&2
+		echo "configuring another's. Pass the values the file names, or regenerate it." >&2
+		exit 1
+	fi
+	echo "${OUT} agrees with PROJECT=${PROJECT} NAME_PREFIX=${NAME_PREFIX}"
+	exit 0
+fi
+
+# Refused rather than merged, and refused rather than overwritten. An existing
+# file may carry variables this script knows nothing about — master_authorized_cidrs
+# and the two IAP settings are the ones that matter, since all three change who
+# can reach the cluster — and rewriting it with three lines would silently widen
+# or close that door. There is no --force: the operator who wants a fresh one
+# can delete the file, which is a decision they will have made deliberately.
+if [[ -e "$OUT" ]]; then
+	echo "refusing to overwrite ${OUT}" >&2
+	echo "(it may carry settings this script does not generate — master_authorized_cidrs," >&2
+	echo "iap_backend_service, iap_members. Delete it deliberately if you want a fresh one.)" >&2
+	exit 1
+fi
+
+echo "looking up the Cloud Build default service account in ${PROJECT}"
+err="$(mktemp)"
+# Set once the destination temporary exists; see the atomic write at the bottom.
+tmp=""
+cleanup() {
+	rm -f "$err"
+	[[ -n "$tmp" ]] && rm -f "$tmp"
+	return 0
+}
+trap cleanup EXIT
+if ! raw="$(gcloud builds get-default-service-account --project="$PROJECT" \
+	--format='value(serviceAccountEmail)' 2>"$err")"; then
+	sed 's/^/  /' "$err" >&2
+	case "$(cat "$err")" in
+	*SERVICE_DISABLED* | *"has not been used"* | *"is disabled"*)
+		echo "the Cloud Build API is not enabled in ${PROJECT}, so the account does not exist yet." >&2
+		echo "Run \`PROJECT=${PROJECT} make gcp-foundation-apply\` first — enabling that API is its job." >&2
+		;;
+	*)
+		echo "could not read the Cloud Build default service account." >&2
+		;;
+	esac
+	exit 1
+fi
+
+# gcloud on Windows terminates its lines CRLF, and a value with the CR still
+# attached is written into the file and then rejected by Terraform's validation
+# with an error that shows nothing wrong. env-power.sh strips it for the same
+# reason.
+raw="$(printf '%s' "$raw" | tr -d '\r')"
+
+# `projects/PROJECT/serviceAccounts/EMAIL` in some gcloud versions, the bare
+# email in others. variables.tf's own validation message calls this out, which
+# means it has already caught somebody.
+account="${raw##*/}"
+
+# The SAME shape variables.tf enforces, character for character — not a looser
+# approximation of it. `*@*.gserviceaccount.com` was the approximation, and it
+# accepted three things Terraform rejects: `a@b@c.gserviceaccount.com` (a second
+# `@`), `@x.gserviceaccount.com` and `x@.gserviceaccount.com` (an empty half).
+# Writing a value Terraform will reject is the one outcome this script exists to
+# prevent, so the check has to be the same check. tfvars_test.py asserts the two
+# agree over a corpus rather than trusting this comment: it reads the regex out
+# of variables.tf and requires that what this script accepts is exactly what
+# that regex accepts.
+#
+# It is deliberately a STRICT SUBSET of that regex rather than a copy of it, and
+# the difference is the characters Terraform's pattern happens to allow but a
+# quoted HCL string cannot survive. `[^@ /]` admits `"`, `\`, `$` and `%`, so
+# `x"@y.gserviceaccount.com` passes validation and is then emitted verbatim
+# between quotes — a syntax error, or worse a `${...}`/`%{...}` template that
+# evaluates. No real service account contains any of them: the three shapes GCP
+# issues are PROJECT_NUMBER@cloudbuild, PROJECT_NUMBER-compute@developer, and
+# NAME@PROJECT.iam. Rejecting output that cannot be one of those is the promise
+# this script makes; matching Terraform exactly would be keeping a bug for
+# symmetry. tfvars_test.py asserts the subset direction — that nothing this
+# accepts is rejected by variables.tf — over a corpus, in that direction only.
+#
+# Kept in a variable because `[[ =~ ]]` matches a QUOTED right-hand side as a
+# literal string; an unquoted expansion is the idiom, and `[[` does not word-split.
+ACCOUNT_RE='^[A-Za-z0-9._+-]+@[A-Za-z0-9.-]+\.(iam\.)?gserviceaccount\.com$'
+if [[ ! "$account" =~ $ACCOUNT_RE ]]; then
+	echo "the lookup returned '${raw}', which is not a service account email." >&2
+	echo "Expected something like 123456789@cloudbuild.gserviceaccount.com or" >&2
+	echo "123456789-compute@developer.gserviceaccount.com." >&2
+	# An EMPTY value is the one worth naming, because it does not look like a
+	# failure: `--format='value(KEY)'` prints nothing and exits 0 when KEY is
+	# absent from the response, so a gcloud that renamed the field lands here
+	# rather than erroring above, and the message otherwise points nowhere.
+	if [[ -z "$raw" ]]; then
+		echo "It returned nothing at all: run the command without --format to see" >&2
+		echo "what it does answer — the response key may have been renamed." >&2
+	fi
+	exit 1
+fi
+
+# Written beside the destination and moved into place only once it is COMPLETE,
+# because a partial file here is worse than none: this script refuses to
+# overwrite an existing file, so an interrupt between the heredoc and the
+# kms_location append below would leave a plausible-looking tfvars carrying the
+# wrong KMS location, and every retry would refuse to correct it. `mv` within one
+# directory is atomic, which is why the temporary cannot go in /tmp.
+tmp="$(mktemp "${OUT}.XXXXXX")"
+cat >"$tmp" <<-EOF
+	# Generated by deploy/gcp/tfvars.sh. Gitignored: these name one operator's
+	# project, and this repository is public (#356).
+	#
+	# The two variables with no default, plus name_prefix — which does have one,
+	# and is written anyway so that this file and \`make gcp-env-stop\` cannot
+	# disagree about which environment they mean.
+	#
+	# Everything else in variables.tf has a default, so this is already a
+	# complete configuration. Add your own below to override any of them.
+	# master_authorized_cidrs, iap_backend_service and iap_members are the ones
+	# most deployments set, and all three decide who can reach the cluster; and
+	# kms_location must match what foundation/ was applied with if it is not the
+	# us-central1 both default to.
+	project_id                  = "${PROJECT}"
+	name_prefix                 = "${NAME_PREFIX}"
+	cloud_build_service_account = "${account}"
+EOF
+
+if [[ -n "$KMS_LOCATION" ]]; then
+	printf 'kms_location                = "%s"\n' "$KMS_LOCATION" >>"$tmp"
+fi
+
+# The file lands 0600 rather than the umask default, because that is what mktemp
+# makes. Left alone: only the operator running Terraform reads it, and stricter
+# is the safe direction for a file naming a project and a service account.
+mv "$tmp" "$OUT"
+tmp=""
+
+echo "wrote ${OUT}"
+sed 's/^/  /' "$OUT"

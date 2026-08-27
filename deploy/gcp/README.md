@@ -201,55 +201,33 @@ that the prefix they read is still the one `env-power.sh` writes.
 cat > deploy/gcp/foundation/terraform.tfvars <<'EOF'
 project_id = "your-project"
 EOF
-cp deploy/gcp/foundation/terraform.tfvars deploy/gcp/environment/terraform.tfvars
 
 make gcp-foundation-apply              # never destroyed — creates the secrets EMPTY
+                                       # and the bucket environment/'s state lives in
                                        # (re-apply it when foundation/ GAINS a resource:
                                        #  environment/ reads each one by name and fails
                                        #  the lookup if the apply that creates it has
                                        #  not run — #269's map-brain account, for one)
 PROJECT=your-project make gcp-bootstrap  # fills them
 
-# Only now: the foundation apply above is what enables the Cloud Build API, and the
-# lookup answers SERVICE_DISABLED until it is on.
+# environment/'s own tfvars, generated rather than copied: the one value that
+# cannot be guessed is the Cloud Build account, and the foundation apply above is
+# what enables the API that creates it. Add KMS_LOCATION=… if the foundation was
+# applied outside us-central1, and NAME_PREFIX=… if it was applied with one.
 #
-# If it still says SERVICE_DISABLED, wait a minute and retry: Service Usage can
-# report an API enabled before its serving layer agrees, which is most likely on a
+# If this says SERVICE_DISABLED, wait a minute and retry: Service Usage can report
+# an API enabled before its serving layer agrees, which is most likely on a
 # just-created project. This is the one step in the sequence that is not idempotent
-# by construction, so it is the one worth retrying rather than debugging.
-#
-# Written by replacing rather than appending: Terraform rejects a tfvars file that
-# assigns the same variable twice, so a plain `>>` breaks the second time you run it.
-# The `if` is load-bearing: a bare `sa=$(...)` does NOT stop an interactive
-# shell when the lookup fails, so the block below would go on to delete a good
-# assignment and write an empty one — turning the retryable SERVICE_DISABLED
-# above into a corrupted tfvars file.
-if ! sa="$(gcloud builds get-default-service-account --project your-project)" || [ -z "$sa" ]; then
-  echo "lookup failed — tfvars left untouched; retry the command above" >&2
-else
-  tfvars=deploy/gcp/environment/terraform.tfvars
-  touch "$tfvars"
-  # grep exits 1 when it selects nothing — the valid case where the file held
-  # only this assignment — and 2 on a read error. A blanket `|| true` would treat
-  # a half-read file as an empty one and let the mv below replace a good tfvars
-  # with a truncated one, so only status 1 is accepted. (`rc`, not `status`:
-  # `status` is read-only in zsh, where it is a synonym for `$?`.)
-  rc=0
-  grep -vE '^[[:space:]]*cloud_build_service_account' "$tfvars" > "$tfvars.new" || rc=$?
-  if [ "$rc" -gt 1 ]; then
-    echo "could not read $tfvars — left untouched" >&2
-    rm -f "$tfvars.new"
-  else
-    # ${sa##*/} keeps only the EMAIL. Which form comes back is not fixed —
-    # gcloud 578.0.0 printed a bare email here, and the documented shape is
-    # projects/…/serviceAccounts/EMAIL — and this strips a prefix if present
-    # and leaves a bare email alone, so it does not matter which you get.
-    echo "cloud_build_service_account = \"${sa##*/}\"" >> "$tfvars.new"
-    mv "$tfvars.new" "$tfvars"
-  fi
-fi
+# by construction, so it is the one worth retrying rather than debugging. It writes
+# nothing on failure, and it refuses to overwrite a tfvars file that already exists.
+PROJECT=your-project make gcp-env-tfvars
 
-make gcp-env-apply
+# NAME_PREFIX has to be repeated here, and on every later gcp-env-* command, for
+# the reason the next section gives: PROJECT and NAME_PREFIX pick the state
+# BUCKET, while the tfvars file picks the resources. They are checked against
+# each other before anything runs, so forgetting it is a refusal rather than an
+# apply against the other environment's state — but it is still a refusal.
+PROJECT=your-project make gcp-env-apply
 
 # The cluster must be reachable before the next step, which runs inside it.
 gcloud container clusters get-credentials \
@@ -283,16 +261,17 @@ nowhere else, including not from the machine running Terraform. Re-run it after 
 `environment/` rebuild, and after rotating the password — the second case is the whole
 rotation procedure.
 
-`terraform.tfvars` is gitignored. `name_prefix` and `kms_location` must match between the two
+`terraform.tfvars` is gitignored, which is why `environment/`'s is generated —
+`PROJECT=… make gcp-env-tfvars`, and it takes `NAME_PREFIX` and `KMS_LOCATION` so that the two
+values below reach it. `name_prefix` and `kms_location` must match between the two
 configurations — `environment/` finds the foundation's resources by name, so a mismatch
 surfaces as a missing data source rather than as a wrong-looking value. (`region` does not
 need to match: no foundation resource is regional. `zone` must be inside `environment/`'s
 `region`, which a precondition checks.)
 
-**`bootstrap.sh` is a third consumer of that prefix**, and the only one that is not read from
-a `.tfvars` file: it derives every secret id from the `NAME_PREFIX` environment variable,
-which defaults to `map`. If you set `name_prefix` in
-tfvars, pass it here too —
+**`bootstrap.sh` takes that prefix from the environment** rather than from a `.tfvars` file —
+as `tfvars.sh` and `env-power.sh` do — deriving every secret id from `NAME_PREFIX`, which
+defaults to `map`. If you set `name_prefix` in tfvars, pass it here too —
 
 ```sh
 NAME_PREFIX=acme PROJECT=your-project make gcp-bootstrap
@@ -629,7 +608,8 @@ last two lines of it — the build and the install — against **one** staging e
 | --- | --- |
 | `make gcp-foundation-apply` | a human, interactively |
 | `PROJECT=… make gcp-bootstrap` | a human, once — it fills the two database-password secrets |
-| `make gcp-env-apply` | a human, interactively |
+| `PROJECT=… make gcp-env-tfvars` | a human, once per checkout — `*.tfvars` is gitignored, so a fresh clone has none |
+| `PROJECT=… make gcp-env-apply` | a human, interactively — `PROJECT` names the state bucket as well as the project |
 | `PROJECT=… make gcp-db-init` | a human, after every `environment/` rebuild and every password rotation — **mode 2 genuinely depends on it** |
 | creating `controlplane-api-key`, `database-url` and `model-providers` | a human, once — `bootstrap.sh` does not create these |
 | replacing the `model-providers` placeholder | a human, once |
@@ -674,14 +654,15 @@ outside `cloudsqlsuperuser`, and it asserts the result. Skip it and the pipeline
 green through `helm upgrade` and then fails at the first connection, because the DSN names a
 role the database does not have.
 
-**CD runs no Terraform, and the split is not a phase.** The applies are interactive on
-purpose and the state is local by design (plan 20, Decision 9; "State, and recovering it"
-above) — and it lives in the main checkout, not anywhere a runner could reach. A pipeline
-that ran them would need that state somewhere it could reach, and would be one bad plan away
-from destroying the Cloud SQL instance the platform's data lives in — which `environment/`
-is built to allow, because a staging rebuild has to be one command. So the pipeline assumes
-the environment exists: Terraform, `gcp-bootstrap` and `gcp-db-init` stay human-driven, and
-CD owns exactly **build → push → deploy → smoke**.
+**CD runs no Terraform, and the split is not a phase.** Reachability is no longer the reason
+— since #478 `environment/`'s state is in a bucket in the same project the CD identity
+already federates into ("State, and recovering it" below), so a runner *could* reach it. What
+stands is the other reason, which was always the stronger one: the applies are interactive on
+purpose (plan 20, Decision 9), and a pipeline running them would be one bad plan away from
+destroying the Cloud SQL instance the platform's data lives in — which `environment/` is
+built to allow, because a staging rebuild has to be one command. So the pipeline assumes the
+environment exists: Terraform, `gcp-bootstrap` and `gcp-db-init` stay human-driven, and CD
+owns exactly **build → push → deploy → smoke**.
 
 ### The deployment's coordinates
 
@@ -1280,10 +1261,114 @@ here because it is equally easy to leave at the default and equally expensive to
 
 ## State, and recovering it
 
-State is **local**, deliberately. A remote backend for `foundation/` would have to live in a
-bucket, and a bucket is the kind of thing the foundation exists to own — the bootstrap is
-circular, and the usual fix (a hand-made state bucket outside Terraform) reintroduces the
-untracked resource this split exists to avoid.
+The two halves keep their state in different places, and the asymmetry is the same one that
+runs through this whole directory.
+
+**`environment/`'s state is in a bucket** that `foundation/` owns (#478). It has to be, because
+local state made two of the four Terraform operations non-portable and one of them *silently*:
+`terraform destroy` iterates the state, so on a machine that does not hold it destroy finds
+nothing to destroy and reports **success** while the environment keeps billing. A second
+`apply` elsewhere plans a create for resources that already exist. The bucket lives in the
+foundation for the one reason that decides everything here — it must outlive every
+`make gcp-env-destroy`.
+
+The backend block is **partial**: a backend cannot interpolate a variable, and a bucket name is
+an operator identifier this public repository does not carry (#356), so it arrives at init
+time. Nothing has to be recorded anywhere, because the name is derived on both sides from
+values you already have:
+
+```sh
+<project>-<name_prefix>-tfstate      # foundation/main.tf composes it; the Makefile derives it
+```
+
+`make gcp-env-init`, `gcp-env-apply`, `gcp-env-destroy` and `gcp-env-migrate-state` all pass
+it, which is why they now require `PROJECT` — and so does `gcp-db-init`, which reads seven
+`terraform output` values and therefore selects a state exactly as the writers do. It gets
+there through `gcp-env-init`, which it now depends on: the coordinate guard compares
+`PROJECT` against the tfvars and cannot see which bucket `.terraform` was last pointed at,
+so re-selecting the backend is what makes those reads come from the bucket `PROJECT` names. There is deliberately **no override variable**:
+one existed and was removed in review, because an override chooses the bucket while
+`terraform.tfvars` still chooses the resources, and the guard below cannot see it — a way to
+apply one environment's configuration to another's state with everything green.
+
+**The guard is what keeps an operation off the wrong state**, not the derivation. `PROJECT`
+and `NAME_PREFIX` pick the *bucket*; `terraform.tfvars` picks the *resources*; a mismatch is
+not a failure but a success against the wrong environment. So every target that selects a
+backend first asserts the file names the same two values, and refuses before Terraform is
+invoked at all. `make gcp-env-targets-test` holds that wiring, against a fake `terraform`.
+(It reads `terraform.tfvars` only. A `*.auto.tfvars` beside it is refused rather than ignored,
+since Terraform would load it too; `-var` and `TF_CLI_ARGS_*` arrive after the check and are
+beyond its reach — that is the honest limit of what it promises.)
+
+`make gcp-env-destroy` carries a second guard: it refuses when the state is **empty**. A
+remote backend does not make an empty state impossible, it makes it quiet — initialize a
+bucket holding no state object and Terraform starts a fresh one without complaint, and
+destroy then reports success over a running environment, which is #478 wearing the new
+backend. The cost is that destroy is no longer idempotent: an already-destroyed environment
+refuses rather than succeeding over nothing. That trade is deliberate — Terraform cannot tell
+"already gone" from "pointed at the wrong empty bucket", and only one of those bills you for
+a month.
+
+**A checkout has to be pointed at the bucket once before it can read anything**, and that is
+`PROJECT=… make gcp-env-init`. It is the cheap half of what the move buys: a fresh clone with
+credentials can now read the environment — `terraform output -raw cluster_name`, the
+addresses, the registry, and the seven outputs `dbinit.sh` reads — without applying anything.
+A partial backend cannot be initialized by the bare `terraform init` that Terraform's own
+error message suggests, because that command has no bucket to use; this target is where the
+`-backend-config` lives, and it is the only one of the four that changes nothing.
+
+**Re-pointing a checkout that is already initialized at a different environment** is the one
+case these targets refuse without saying what to do. Terraform answers `Error: Backend
+configuration changed` and names `-migrate-state` or `-reconfigure`; the refusal is correct —
+under `-input=false` it will not adopt or copy a state on a guess — but neither flag is a
+target here. Want the *other* environment's state as it stands, leaving this one alone:
+
+```sh
+PROJECT=other-project terraform -chdir=deploy/gcp/environment init -reconfigure \
+	-backend-config="bucket=other-project-map-tfstate"
+```
+
+`-migrate-state` is the other answer and it COPIES, which is `make gcp-env-migrate-state`'s
+job and not something to reach for while switching environments. Simply deleting
+`deploy/gcp/environment/.terraform/` and re-running `gcp-env-init` works too, and is the
+easier thing to be sure of.
+
+**Moving an existing local state into it is a one-time step, and it must run from the machine
+that still holds the file:**
+
+```sh
+PROJECT=your-project make gcp-env-tfvars          # FIRST, if this checkout has no terraform.tfvars
+PROJECT=your-project make gcp-env-migrate-state   # answer `yes` when it offers to copy
+```
+
+The order is not cosmetic: `gcp-env-migrate-state` runs the coordinate guard, and the guard
+refuses a checkout with no `terraform.tfvars` at all — so the migration cannot be the first
+command on the machine that needs it most.
+
+**If this checkout already has a `terraform.tfvars`, check it names `name_prefix` before
+either command.** Until #478 these instructions said to create it by copying `foundation/`'s,
+which sets `project_id` and nothing else — and the guard now requires `name_prefix` to be
+written out rather than defaulted, because it cannot tell a file that omits it from one it
+failed to parse, and reading the second as `map` is exactly the wrong-state pairing it exists
+to refuse. So on the one machine holding the local state, `gcp-env-tfvars` refuses to
+overwrite the file it finds and `gcp-env-migrate-state` refuses to read it. Neither runs
+Terraform, and the fix is the line the second one names:
+
+```sh
+echo 'name_prefix = "map"' >> deploy/gcp/environment/terraform.tfvars   # or your prefix
+```
+
+Deliberately not `-input=false`: the confirmation Terraform asks for before copying state is
+the point. Afterwards every machine with credentials shares one state, and the
+`terraform.tfstate` left behind locally is a backup to delete once a remote `terraform plan`
+has come back clean. CI does not and must not do this — `deploy/gcp/` stays human-driven.
+
+**`foundation/`'s state stays local**, and that is not an oversight to tidy up later. A remote
+backend for it would have to live in a bucket, and a bucket is the kind of thing the foundation
+exists to own — the bootstrap is circular, and the usual fix (a hand-made state bucket outside
+Terraform) reintroduces the untracked resource this split exists to avoid. The failure mode
+that motivated #478 is also not reachable there: `foundation/` has no destroy target at all,
+its resources carry `prevent_destroy`, and it is applied rarely.
 
 **No secret is in either state file.** That is the point of `bootstrap.sh` and of
 `password_wo`: the two database passwords exist in Secret Manager and nowhere else Terraform
@@ -1307,7 +1392,11 @@ terraform import google_service_account.brain              "$P/serviceAccounts/m
 terraform import google_service_account.executor           "$P/serviceAccounts/map-executor@your-project.iam.gserviceaccount.com"
 terraform import google_secret_manager_secret.db_password       "$P/secrets/map-db-password"
 terraform import google_secret_manager_secret.db_admin_password "$P/secrets/map-db-admin-password"
-for api in cloudbuild cloudkms iam iamcredentials secretmanager; do
+# The state bucket (#478). Missing it is the worst case in this list, because a
+# bucket name is GLOBAL: the apply does not report "already managed elsewhere",
+# it fails to create a name that is taken — and it is taken by you.
+terraform import google_storage_bucket.tfstate             "your-project/your-project-map-tfstate"
+for api in cloudbuild cloudkms iam iamcredentials secretmanager storage; do
   terraform import "google_project_service.required[\"$api.googleapis.com\"]" "your-project/$api.googleapis.com"
 done
 ```
@@ -1327,20 +1416,25 @@ the project and is one more `terraform import` away.
 
 ```sh
 make gcp-fmt gcp-validate gcp-split-check gcp-lint \
-     gcp-bootstrap-test gcp-split-check-test gcp-dbinit-test gcp-power-test
+     gcp-bootstrap-test gcp-split-check-test gcp-dbinit-test gcp-power-test \
+     gcp-tfvars-test gcp-env-targets-test
 ```
 
-None of them needs credentials, state, or a project, and CI runs all eight on every PR — so
+None of them needs credentials, state, or a project, and CI runs all ten on every PR — so
 neither the configuration nor the tooling can rot silently between the rare runs that
 actually provision anything. `gcp-dbinit-test` is the one with a host requirement: it needs
-Docker, because it starts a real PostgreSQL.
+Docker, because it starts a real PostgreSQL. `gcp-validate` stays **credential-free** now that
+`environment/` declares a `backend "gcs"` block because it inits with `-backend=false`, which
+skips the backend entirely — no GCS call, no credential, no state. That is not the same as
+offline: `init` still installs the providers, which the lock file pins and which CI fetches
+from the registry like any other dependency.
 
 `gcp-split-check` is the structural enforcement of the two-configuration split:
 `environment/` may not *own* a resource of an unrecoverable kind, and every one
 `foundation/` declares must carry both guards it can — `prevent_destroy` and, where the kind
 has it, `deletion_policy = "PREVENT"`.
 
-The last four **run** the tooling rather than reading it, because the first four are static
+The last six **run** the tooling rather than reading it, because the first four are static
 and this is a place where static checking has already been insufficient. `gcp-lint` is
 shellcheck, and shellcheck cannot know that `gcloud secrets versions describe` rejects
 `--filter` — it exited 0 on a `bootstrap.sh` that aborted on its first call in every project,
@@ -1399,3 +1493,29 @@ resized rather than from a fresh read, re-saving a resumed stop's zero, dropping
 strip, reading the pool list through a process substitution that cannot see its exit status,
 swallowing the discovery error, accepting `NODES=0`, and resolving sizes pool-by-pool after
 the mutations have already begun.
+
+`gcp-tfvars-test` is the fifth, and it exists because `tfvars.sh`'s whole job is turning one
+gcloud answer into a value Terraform will accept — and every way that goes wrong writes a file
+that *looks* right and fails variable validation. That happens during planning, so nothing is
+left half-created; what it costs is that a `destroy` fails in exactly the same way, and a
+destroy is what you are running when the environment is already up and billing.
+`gcloud builds get-default-service-account` prints `projects/…/serviceAccounts/EMAIL`
+in some versions and the bare email in others, and on Windows it terminates the line CRLF;
+both are handled. What the test asserts is one direction and not equality: **nothing the
+generator writes is rejected by the regex read out of `variables.tf`**, plus every shape GCP
+actually issues is still accepted. Equality was the first attempt and it was wrong — that
+regex admits `"`, `\`, `$` and `%`, none of which survives being emitted inside a quoted HCL
+string, so the generator is deliberately stricter than Terraform. The refusals are tested too:
+a disabled API names the step that enables it and writes nothing, junk that is not an account
+is refused rather than written, and an existing `terraform.tfvars` is never overwritten — it
+may carry `master_authorized_cidrs`, `iap_backend_service` or `iap_members`, and all three
+decide who can reach the cluster.
+
+`gcp-env-targets-test` is the sixth, and it covers the most dangerous code here: the recipes
+that decide whether a `destroy` proceeds. Until it existed they were the only part of this
+directory nothing ran, and every one of these was a one-line, silently-green change — deleting
+a `gcp-env-vars-match` prerequisite, deleting the empty-state refusal, dropping the
+`-backend-config` from an `init`, un-pinning `OUT`, reinstating the removed bucket override.
+It runs `make` itself against a fake `terraform` that logs every invocation, so what is
+checked is the recipe and its prerequisite **order** — that the guard refuses *before*
+Terraform is reached, and that `destroy` is never called over an empty or unreadable state.

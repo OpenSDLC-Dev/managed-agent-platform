@@ -14,6 +14,20 @@ variable "kms_location" {
   default     = "us-central1"
 }
 
+variable "state_bucket_location" {
+  type        = string
+  description = <<-EOT
+    Location for the bucket holding environment/'s Terraform state (#478).
+    Separate from var.kms_location for the same reason that one is separate from
+    a region: a bucket's location is immutable, and the state bucket outlives
+    every environment/ rebuild — including one that moves the environment
+    somewhere else. Multi-region ("US") and dual-region names are accepted by
+    GCS too; a single region is the default because the state is written from
+    one place at a time and read by one apply at a time.
+  EOT
+  default     = "us-central1"
+}
+
 variable "name_prefix" {
   type        = string
   description = <<-EOT
