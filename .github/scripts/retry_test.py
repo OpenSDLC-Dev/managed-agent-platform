@@ -17,8 +17,8 @@ them a liar, two notifiers retrying a different number of times harms nothing.
 That argument holds only while both are correct, and this file is what holds it:
 it scans `.github/workflows/` for `retry` definitions and runs each through the
 same table, so a third copy is covered the day it appears and no copy can regress
-alone — and a definition it cannot parse is refused by name rather than passed
-over, which is the part that keeps "covered" honest.
+alone — and a definition it recognises but cannot parse is refused by name rather
+than passed over, which is the part that keeps "covered" honest.
 
 The extraction is textual because the definition lives inside a workflow's `run:`
 block, where nothing else can reach it: there is no `.sh` file to source and, by
@@ -42,9 +42,14 @@ reports a syntax error instead of testing a fragment.
 
 No regex recognises every way of writing a shell function, so that refusal is a
 backstop rather than a proof, and two rounds of review each found a spelling that
-escaped the previous one. If you are adding a helper and this file refuses it,
-the fix is to spell it the way the other two are spelled, or to teach `DEFN` the
-new shape — not to quietly narrow `LOOKS_LIKE` until the refusal stops.
+escaped the previous one. The ones known to escape it today are all shapes nobody
+would write a notifier's helper in: a definition opened by a `case` arm's `)`,
+one behind `!` or `time`, one inlined into a single-line `run:` value, and
+anything assembled by `eval`. They are written down rather than chased, because
+the chase has no end and each round of it has cost more than the hole it closed.
+If you are adding a helper and this file refuses it, the fix is to spell it the
+way the other two are spelled, or to teach `DEFN` the new shape — not to quietly
+narrow `LOOKS_LIKE` until the refusal stops.
 """
 
 import os
@@ -62,8 +67,10 @@ WORKFLOWS = pathlib.Path(__file__).resolve().parents[1] / "workflows"
 STDERR_MARK = "RETRY-STDERR-MARK"
 
 # The arguments the fake command insists on receiving. `retry "$@"` forwards all
-# of them, and every real call site passes four or more (`gh api URL --jq …`); a
-# helper that forwarded only `"$1"` would otherwise pass every row below.
+# of them, and a helper spelled `"$1"` — dropping everything after the first —
+# would otherwise pass every row below. Most call sites pass several
+# (`gh api URL --jq …`), but `retry describe` in staging-parked.yml passes
+# exactly one, so that site on its own could never have caught such a helper.
 ARGV = ["--marker", "arg with spaces"]
 
 # What the helper is expected to wait between attempts. The driver shadows
@@ -71,10 +78,13 @@ ARGV = ["--marker", "arg with spaces"]
 # 5000 seconds as readily as one of 5 — so it records what it was asked for.
 BACKOFF = [5, 10]
 
-# `run:` introducing a block scalar, which is the only shape this can read. A
-# folded or quoted scalar reaches Actions with its newlines rewritten, so the
-# text here would not be the text that runs; that case is refused below rather
-# than guessed at.
+# `run:` introducing a literal block scalar, which is the only shape this can
+# read. A folded or quoted scalar reaches Actions with its newlines rewritten, so
+# the text here would not be the text that runs; those are refused below rather
+# than guessed at — as long as the definition sits on a line of its own, which is
+# the only way anyone writes one. A whole helper inlined into a single-line
+# `run:` value escapes instead, and is one of the shapes the docstring's last
+# paragraph is about.
 BLOCK_RUN = re.compile(r"^(?P<indent>[ \t]*)run:[ \t]*\|[-+]?[ \t]*$")
 
 # `retry() {`, `retry () {`, `function retry {`, `function retry() {`, each with
@@ -85,11 +95,12 @@ DEFN = re.compile(
 # Deliberately looser than DEFN, and it has to stay that way: it must match the
 # shapes DEFN CANNOT parse, because a line it matches that was not extracted is
 # refused by name and line instead of skipped. Every shape named here was found
-# silently unchecked by a reviewer, one round after the last: an Allman brace on
-# the next line, a subshell body (`retry() ( … )`), a second statement sharing
-# the line, and — the ordinary one that survived two rounds — a whole function
-# written on one line, `retry() { …; }`. That last one is why the tail accepts an
-# opening bracket with anything after it, rather than anchoring on end-of-line.
+# silently unchecked by a reviewer. One round produced the first three together —
+# an Allman brace on the next line, a subshell body (`retry() ( … )`), and a
+# second statement sharing the line — and the round after it produced the
+# ordinary one they had all hidden behind: a whole function written on one line,
+# `retry() { …; }`. That last one is why the tail accepts an opening bracket with
+# anything after it, rather than anchoring on end-of-line.
 LOOKS_LIKE = re.compile(
     # What may sit to the left of the name: the start of the line, a separator,
     # a block opener, or the keyword that introduces one. `(` is in there and is
