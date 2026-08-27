@@ -84,7 +84,14 @@ model-providers.json
 *.tfstate
 *.tfstate.*
 *.tfvars
-*.tfvars.json
+# `*.tfvars.*` rather than just `*.tfvars.json`, for the reason `*.tfstate.*`
+# above is here and one more of its own: tfvars.sh writes through
+# `mktemp "$OUT.XXXXXX"` beside the destination, so that the final `mv` is atomic
+# within one directory. Its EXIT trap removes that file on every exit it can see,
+# but not on SIGKILL or a power loss — and what survives holds the project id and
+# the Cloud Build service-account email. Untracked but NOT ignored is precisely
+# the state in which `git add -A` sweeps a file into a public repository (#356).
+*.tfvars.*
 tfplan
 **/tfplan
 # A generated Helm values file, in case one is written here anyway — the README
