@@ -207,8 +207,8 @@ jobs:
           # printed. Running the command bare inside a command substitution — as
           # the obvious spelling does — leaves a failed attempt's partial stdout
           # in the pipe, and the caller then parses that joined to the next
-          # attempt's. deploy-alert.yml carries the obvious spelling; the same
-          # hardening there is tracked separately rather than smuggled in here.
+          # attempt's. deploy-alert.yml's copy says the same thing; `make
+          # retry-test` runs both rather than trusting either comment.
           retry() {
             local n=0 out
             until out="$("$@")"; do

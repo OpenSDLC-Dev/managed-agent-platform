@@ -1107,6 +1107,13 @@ jobs:
       # `;` away from also matching a label VALUE.
       - name: the parked-cluster signal reads what it claims
         run: make parked-test
+      # Both notifiers retry their READ calls, and both callers capture the
+      # result. The bare spelling of that wrapper feeds a failed attempt's
+      # partial output into the capture (#507), which is a wrong VALUE rather
+      # than an error — and the two copies are deliberately not shared, so
+      # nothing but running each of them keeps them from drifting apart again.
+      - name: neither notifier's retry leaks a failed attempt's output
+        run: make retry-test
       # deploy-alert.yml couples to deploy.yml three ways, and all three fail
       # SILENTLY: the trigger stops matching, or every deploy classifies as
       # `parked` so no successful run ever closes a CD issue again. Nor can any

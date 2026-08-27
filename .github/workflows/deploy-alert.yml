@@ -90,13 +90,22 @@ jobs:
           # which is disproportionately the day CD is red. Deliberately NOT
           # applied to the mutating calls: retrying a create that in fact
           # succeeded is how one outage becomes three issues.
+          #
+          # Each attempt's output is CAPTURED and only the successful one is
+          # printed. Every caller below runs this inside `$(...)`, so the bare
+          # spelling — `until "$@"` — hands the attempt a stdout already wired
+          # to that capture: bytes emitted before a failure stay in it and the
+          # caller parses them joined to the next attempt's. A truncated body
+          # becomes unparseable JSON, and the issue lookup returns `123123`
+          # where it meant "nothing open" (#507).
           retry() {
-            local n=0
-            until "$@"; do
+            local n=0 out
+            until out="$("$@")"; do
               n=$((n + 1))
               [ "$n" -lt 3 ] || return 1
               sleep $((n * 5))
             done
+            printf '%s\n' "$out"
           }
 
           # THE QUERY GOES IN THE PATH. `gh api` switches the request method to
