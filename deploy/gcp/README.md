@@ -808,7 +808,7 @@ cannot reach it. It is one command — **applied to this project**, and recorded
 the provider is not in this repository's Terraform, so this is the only place the command that
 sets it, and the read-back that checks it, are written down:
 
-Every coordinate is taken **out of `$WIF_PROVIDER` itself**, and that is not tidiness. This
+The provider is named by **`$WIF_PROVIDER` itself**, whole, and that is not tidiness. This
 condition is the control that survives a branch deleting the workflow's own guard, so a
 command that configured a *different* provider than the one the job exchanges its token at
 would leave the real one unconditioned while reading as though the work were done. A
@@ -816,29 +816,37 @@ hard-coded `github-oidc` in pool `github` does exactly that on any deployment wh
 `WIF_PROVIDER` names another pool or provider — which is now every deployment but this one:
 
 ```sh
-wif_project="${WIF_PROVIDER#projects/}";                  wif_project="${wif_project%%/*}"
-wif_location="${WIF_PROVIDER#*/locations/}";              wif_location="${wif_location%%/*}"
-wif_pool="${WIF_PROVIDER#*/workloadIdentityPools/}";      wif_pool="${wif_pool%%/*}"
-wif_name="${WIF_PROVIDER##*/providers/}"
-
-gcloud iam workload-identity-pools providers update-oidc "$wif_name" \
-  --project="$wif_project" --location="$wif_location" \
-  --workload-identity-pool="$wif_pool" \
+gcloud iam workload-identity-pools providers update-oidc "$WIF_PROVIDER" \
   --attribute-condition="assertion.repository_owner == 'OpenSDLC-Dev' && assertion.ref == 'refs/heads/main' && assertion.ref_type == 'branch'"
 ```
 
-`--project` gets the project **number** the resource name carries rather than
-`$GCP_PROJECT_ID`; `gcloud` accepts either, and the number is the one that is guaranteed to
-name the project the pool is in — a provider may live beside the workload rather than in it.
+**A full resource name goes where the provider ID goes**, and `gcloud` takes the project,
+location and pool out of it, so `--project`, `--location` and `--workload-identity-pool` are
+not needed at all. That is a stronger guarantee than picking the right project by hand: a
+`--project` naming the wrong project does not redirect the command, and neither does an unset
+`core/project`, so nothing an operator's shell is configured with can point this at another
+provider. A provider may live beside the workload rather than in it, and this is what makes
+that safe.
+
+Do **not** rebuild those flags by splitting the name — which is what this file used to tell
+you to do. `$WIF_PROVIDER` carries the project **number**, and no `gcloud iam
+workload-identity-pools` command accepts one: `describe`, `list`, `create`, `create-oidc` and
+`update-oidc`, pools and providers alike, all refuse it before any API call (#508):
+
+```text
+ERROR: (gcloud.iam.workload-identity-pools.providers.update-oidc) The value of ``--project''
+flag was set to Project number.To use this command, set it to PROJECT ID instead.
+```
+
+Where an ID is genuinely wanted, `gcloud projects describe "$number" --format="value(projectId)"`
+translates one; that command, unlike these, does take a number.
 
 `ref_type` rides along because a *tag* named `main` would present `refs/tags/main` — not
 equal, so the ref test already rejects it, but stating both makes the intent legible rather
-than incidental. Read the live condition back with:
+than incidental. Read the live condition back the same way:
 
 ```sh
-gcloud iam workload-identity-pools providers describe "$wif_name" \
-  --project="$wif_project" --location="$wif_location" \
-  --workload-identity-pool="$wif_pool" \
+gcloud iam workload-identity-pools providers describe "$WIF_PROVIDER" \
   --format="value(attributeCondition,state)"
 ```
 
