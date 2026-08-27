@@ -66,11 +66,12 @@ WORKFLOWS = pathlib.Path(__file__).resolve().parents[1] / "workflows"
 # caller's captured value, which is parsed as JSON or as an issue number.
 STDERR_MARK = "RETRY-STDERR-MARK"
 
-# The arguments the fake command insists on receiving. `retry "$@"` forwards all
-# of them, and a helper spelled `"$1"` — dropping everything after the first —
-# would otherwise pass every row below. Most call sites pass several
+# The arguments the fake command insists on receiving — exactly these two, no
+# more and no fewer, since a helper that APPENDS one (`"$@" --extra`) changes the
+# command as surely as one that drops the rest (`"$1"`), and checking only the
+# values would let the first through. Most call sites pass several
 # (`gh api URL --jq …`), but `retry describe` in staging-parked.yml passes
-# exactly one, so that site on its own could never have caught such a helper.
+# exactly one, so that site on its own could never have caught either.
 ARGV = ["--marker", "arg with spaces"]
 
 # What the helper is expected to wait between attempts. The driver shadows
@@ -167,7 +168,7 @@ exit "$rc"
 FLAKY = """#!/usr/bin/env bash
 # One attempt. It emits its bytes BEFORE failing, which is the entire point: a
 # truncated response and a proxy error page both do exactly that.
-if [ "$1" != "--marker" ] || [ "$2" != "arg with spaces" ]; then
+if [ "$#" -ne 2 ] || [ "$1" != "--marker" ] || [ "$2" != "arg with spaces" ]; then
   printf 'ARGS-LOST(%s)' "$*"
   exit 1
 fi
