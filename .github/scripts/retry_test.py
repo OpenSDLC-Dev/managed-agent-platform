@@ -15,9 +15,10 @@ The two were deliberately NOT extracted into a shared script — unlike
 `parked.sh`, where the two callers disagreeing about one cluster would make one of
 them a liar, two notifiers retrying a different number of times harms nothing.
 That argument holds only while both are correct, and this file is what holds it:
-it finds every `retry` definition under `.github/workflows/` and runs all of them
-through the same table, so a third copy is covered the day it appears and no copy
-can regress alone.
+it scans `.github/workflows/` for `retry` definitions and runs each through the
+same table, so a third copy is covered the day it appears and no copy can regress
+alone — and a definition it cannot parse is refused by name rather than passed
+over, which is the part that keeps "covered" honest.
 
 The extraction is textual because the definition lives inside a workflow's `run:`
 block, where nothing else can reach it: there is no `.sh` file to source and, by
@@ -28,20 +29,22 @@ already live. `staging-parked.yml` adds `workflow_dispatch`, which would run a
 branch's copy, but only against real staging; this table is still where both are
 exercised in anger.
 
-**A helper this cannot parse is refused, not skipped.** A scanner that quietly
-passes over one is worse than no scanner, because CI then reports success over an
-unchecked copy. So the detector is deliberately looser than the parser: both
-workflow extensions are searched, five spellings parse, and anything else that
-looks like a `retry` definition — a brace on the next line, a subshell body, a
-second statement sharing the line — is a hard error naming file and line rather
-than a quiet skip. Extraction is restricted to literal `run: |` scalars for the
-same reason, and every definition survives `bash -n` before it runs, so a cut at
-the wrong `}` reports a syntax error instead of testing a fragment.
+**What this cannot parse, it refuses rather than skips.** A scanner that quietly
+passes over a helper is worse than no scanner, because CI then reports success
+over an unchecked copy. So the detector, `LOOKS_LIKE`, is deliberately looser
+than the parser, `DEFN`: both workflow extensions are searched, `DEFN` takes the
+spellings it lists, and anything `LOOKS_LIKE` recognises that `DEFN` could not
+extract — a brace on the next line, a subshell body, a whole function on one
+line, a second statement sharing the line — is a hard error naming file and line.
+Extraction is restricted to literal `run: |` scalars for the same reason, and
+every definition survives `bash -n` before it runs, so a cut at the wrong `}`
+reports a syntax error instead of testing a fragment.
 
 No regex recognises every way of writing a shell function, so that refusal is a
-backstop rather than a proof. If you are adding a helper and this file refuses
-it, the fix is to spell it the way the other two are spelled, or to teach `DEFN`
-the new shape — not to quietly narrow `LOOKS_LIKE` until the refusal stops.
+backstop rather than a proof, and two rounds of review each found a spelling that
+escaped the previous one. If you are adding a helper and this file refuses it,
+the fix is to spell it the way the other two are spelled, or to teach `DEFN` the
+new shape — not to quietly narrow `LOOKS_LIKE` until the refusal stops.
 """
 
 import os
@@ -81,16 +84,28 @@ DEFN = re.compile(
 )
 # Deliberately looser than DEFN, and it has to stay that way: it must match the
 # shapes DEFN CANNOT parse, because a line it matches that was not extracted is
-# refused by name and line instead of skipped. The gap it exists to close was
-# real — an Allman brace on the next line, a subshell body (`retry() ( … )`), and
-# a second statement sharing the line were all silently unchecked until it did.
+# refused by name and line instead of skipped. Every shape named here was found
+# silently unchecked by a reviewer, one round after the last: an Allman brace on
+# the next line, a subshell body (`retry() ( … )`), a second statement sharing
+# the line, and — the ordinary one that survived two rounds — a whole function
+# written on one line, `retry() { …; }`. That last one is why the tail accepts an
+# opening bracket with anything after it, rather than anchoring on end-of-line.
 LOOKS_LIKE = re.compile(
-    r"(?:^|;)[ \t]*(?:function[ \t]+)?retry[ \t]*(?:\([ \t]*\))?[ \t]*[({]?[ \t]*(?:#.*)?$"
+    # What may sit to the left of the name: the start of the line, a separator,
+    # a block opener, or the keyword that introduces one. `(` is in there and is
+    # safe, because `runs="$(retry gh api …)"` fails the tail below.
+    r"(?:^|[;&|{(]|\b(?:then|do|else)\b)[ \t]*"
+    r"(?:function[ \t]+)?retry[ \t]*(?:\([ \t]*\))?[ \t]*(?:[({]|(?:#.*)?$)"
 )
 
 
 def looks_like_a_definition(line):
     """Does this line open something named `retry`, however it is spelled?"""
+    # A comment is prose, not code. These two workflows discuss `retry()` by name
+    # at some length, and a sentence that happens to read `…; retry()` must not
+    # fail CI over a definition that is not there.
+    if line.lstrip().startswith("#"):
+        return False
     m = LOOKS_LIKE.search(line)
     if not m:
         return False
@@ -253,9 +268,9 @@ def run_case(workdir, definition, case):
         ["bash", str(driver), "bash", str(workdir / "flaky"), *ARGV],
         capture_output=True, text=True, check=False, env=env,
     )
-    # Kept as text on purpose: a helper spelled `sleep 0.5`, or `sleep $BACKOFF`
-    # with the variable unset, would otherwise raise out of the harness with a
-    # traceback instead of failing its row like every other assertion.
+    # Kept as text on purpose: a helper spelled `sleep 0.5` would otherwise raise
+    # out of the harness with a traceback instead of failing its row like every
+    # other assertion. Measured against the version that used int(), which did.
     waited = sleeps.read_text(encoding="utf-8").split()
     return (
         capture.read_text(encoding="utf-8"),
