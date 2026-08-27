@@ -3,8 +3,12 @@
 
 `make retry-test`.
 
-`deploy-alert.yml` and `staging-parked.yml` each wrap their READ calls in a
-three-attempt `retry`, and every caller captures what it prints. The obvious
+`deploy-alert.yml` and `staging-parked.yml` each define a three-attempt `retry`
+and wrap their READ calls in it — every one in `deploy-alert.yml`, and all but
+`staging-parked.yml`'s issue lookup, which sits in an earlier step that defines
+no `retry` at all. Every value `retry` prints lands in a command substitution,
+either directly or by way of `open_issue_with`, which forwards it to one. The
+obvious
 spelling of the helper — `until "$@"` — runs each attempt with stdout already
 connected to that capture, so an attempt that emits bytes before failing leaves
 them in it and the caller parses them joined to the next attempt's. That is #507,
@@ -29,7 +33,8 @@ already live. `staging-parked.yml` adds `workflow_dispatch`, which would run a
 branch's copy, but only against real staging; this table is still where both are
 exercised in anger.
 
-**What this cannot parse, it refuses rather than skips.** A scanner that quietly
+**What this recognises but cannot parse, it refuses rather than skips.** A
+scanner that quietly
 passes over a helper is worse than no scanner, because CI then reports success
 over an unchecked copy. So the detector, `LOOKS_LIKE`, is deliberately looser
 than the parser, `DEFN`: both workflow extensions are searched, `DEFN` takes the
