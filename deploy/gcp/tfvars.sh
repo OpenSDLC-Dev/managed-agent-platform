@@ -160,6 +160,12 @@ if [[ "${1:-}" == "--check" ]]; then
 	# functions in scope, so either form can only ever be a literal written the
 	# hard way. The generator never emits one.
 	#
+	# It is a whole-file grep, so a `${` or `%{` inside a COMMENT refuses a file
+	# Terraform would have read. Known, and left: recognising a comment here means
+	# the scanner below, which is the thing this runs before precisely because it
+	# cannot be trusted on input like this. Refusing is the safe direction and the
+	# message says to look at the file rather than work around the rule.
+	#
 	# `[$%]{` rather than a quoted `${`: the second is what shellcheck warns about
 	# (SC2016), and spelling the sigils as a bracket expression says "literal" to
 	# both grep and the reader without a suppression comment.
@@ -260,6 +266,13 @@ if [[ "${1:-}" == "--check" ]]; then
 			      # whitespace, which leaves a CRLF file exactly where it was: the
 			      # terminator keeps its own CR, never compares equal, and the
 			      # presence rule refuses.
+			      #
+			      # Two details here are deliberately untestable, so do not read
+			      # a green suite as cover for editing them. The class gates only
+			      # the FIRST character, and differs from a letter-or-underscore
+			      # one solely for openers Terraform rejects; the trim matters
+			      # only for a trailing CR. What carries the fix is `heretag =
+			      # rest`, and that one fails loudly if it is narrowed back.
 			      #
 			      # No apostrophes in this awk program: it is single-quoted.
 			      if (match(rest, /^<<-?[^ \t\r]/)) {

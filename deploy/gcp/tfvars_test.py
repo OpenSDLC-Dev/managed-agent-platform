@@ -508,6 +508,13 @@ def main():
             # CRLF: the terminator carries a \r, never compares equal to the tag,
             # and the heredoc swallows the rest of the file. This is the one the
             # presence rule itself catches.
+            #
+            # Read this assertion for what it pins, which is narrower than the
+            # sentence above: that the file does not AGREE. It stays green if the
+            # heredoc closes correctly instead — then name_prefix reads "acme"
+            # and still refuses against map, for a different reason. That is
+            # deliberate rather than sloppy, because the mechanism is not the
+            # contract; either outcome is safe and both must never be agreement.
             ("a CRLF heredoc whose terminator never matches", "name_prefix",
              'project_id = "my-proj"\r\n'
              'notes = <<EOT\r\n'
