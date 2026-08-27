@@ -686,7 +686,7 @@ same against `foundation/`:
 | `GCP_PROJECT_ID` | the project everything else lives in | **not an output** — it is the `project_id` you set in `terraform.tfvars` |
 | `GKE_CLUSTER`, `GCP_ZONE` | the cluster and its zone | `E cluster_name`, `E zone` |
 | `ARTIFACT_REGISTRY` | `HOST/PROJECT/REPOSITORY` — the image prefix. The tag is always the commit SHA, and the chart's `registry`/`repository` split is taken off this one value at its first slash | `E artifact_registry` |
-| `WIF_PROVIDER` | the Workload Identity Federation provider the job's OIDC token is exchanged at | **not in this repository's Terraform** — the pool and provider are created by hand; read the full resource name back with `gcloud iam workload-identity-pools providers describe POOL_PROVIDER … --format="value(name)"` |
+| `WIF_PROVIDER` | the Workload Identity Federation provider the job's OIDC token is exchanged at | **not in this repository's Terraform** — the pool and provider are created by hand; read the full resource name back with `gcloud iam workload-identity-pools providers describe POOL_PROVIDER … --format="value(name)"`, whose elided flags take your project **ID** and refuse its number (see the attribute condition below) |
 | `DEPLOY_SERVICE_ACCOUNT` | the identity that provider lets this repository impersonate | **not in this repository's Terraform** — created by hand alongside the provider, and bound to this repository separately |
 | `BLOB_BUCKET` | the GCS bucket, written into the mode-2 Secret as `blob-bucket` | `E blob_bucket` |
 | `KMS_KEY_NAME` | the CryptoKey resource name, written in as `gcpkms-key-name` | `E kms_key_name` (`F kms_key_name` is the same key) |
@@ -826,9 +826,11 @@ location and pool out of it, so `--project`, `--location` and `--workload-identi
 not needed at all. What that buys is failure modes removed rather than a different target: a
 stray `--project` naming the wrong project does not redirect the command, an unset
 `core/project` does not stop it, and there is no number-to-ID translation step to get wrong.
-The one input left is `$WIF_PROVIDER` itself — the same value the job exchanges its token at
-— which is the property worth having, since a provider may live beside the workload rather
-than in it.
+One it cannot remove: a `core/project` holding the **number** is refused before the name is
+parsed at all, because that check guards every `gcloud iam` command rather than this one's
+arguments — so leave that property on the ID, or unset. The one input left is `$WIF_PROVIDER`
+itself — the same value the job exchanges its token at — which is the property worth having,
+since a provider may live beside the workload rather than in it.
 
 Do **not** rebuild those flags by splitting the name — which is what this file used to tell
 you to do. `$WIF_PROVIDER` carries the project **number**, and no `gcloud iam

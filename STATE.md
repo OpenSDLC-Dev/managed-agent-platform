@@ -15,7 +15,8 @@ is no longer tied to the laptop that applied it (#478) — none of it production
 landing complete in one PR rather than passing through this file, as did both follow-ups
 those reviews spun off: neither notifier's `retry` hands a failed attempt's output to its
 caller any more (#507), and the Workload Identity Federation commands in the deploy notes
-are runnable again, having asked `gcloud` for a project number it has never taken (#508).
+are runnable again, having asked `gcloud` for a project number it never takes in `--project`
+(#508).
 And the three plan-36
 leftovers that needed no decision from anyone: the test rows slice 4 deferred (#488), its
 fifteen recording items folded into the issue tracking its twenty inferences (#78, which
