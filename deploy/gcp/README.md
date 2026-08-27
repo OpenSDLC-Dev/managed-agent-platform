@@ -686,7 +686,7 @@ same against `foundation/`:
 | `GCP_PROJECT_ID` | the project everything else lives in | **not an output** — it is the `project_id` you set in `terraform.tfvars` |
 | `GKE_CLUSTER`, `GCP_ZONE` | the cluster and its zone | `E cluster_name`, `E zone` |
 | `ARTIFACT_REGISTRY` | `HOST/PROJECT/REPOSITORY` — the image prefix. The tag is always the commit SHA, and the chart's `registry`/`repository` split is taken off this one value at its first slash | `E artifact_registry` |
-| `WIF_PROVIDER` | the Workload Identity Federation provider the job's OIDC token is exchanged at | **not in this repository's Terraform** — the pool and provider are created by hand; read the full resource name back with `gcloud iam workload-identity-pools providers describe POOL_PROVIDER … --format="value(name)"` |
+| `WIF_PROVIDER` | the Workload Identity Federation provider the job's OIDC token is exchanged at | **not in this repository's Terraform** — the pool and provider are created by hand; read the full resource name back with `gcloud iam workload-identity-pools providers describe POOL_PROVIDER … --format="value(name)"`, whose elided `--project` takes your project **ID** and refuses its number (see the attribute condition below) |
 | `DEPLOY_SERVICE_ACCOUNT` | the identity that provider lets this repository impersonate | **not in this repository's Terraform** — created by hand alongside the provider, and bound to this repository separately |
 | `BLOB_BUCKET` | the GCS bucket, written into the mode-2 Secret as `blob-bucket` | `E blob_bucket` |
 | `KMS_KEY_NAME` | the CryptoKey resource name, written in as `gcpkms-key-name` | `E kms_key_name` (`F kms_key_name` is the same key) |
@@ -808,37 +808,51 @@ cannot reach it. It is one command — **applied to this project**, and recorded
 the provider is not in this repository's Terraform, so this is the only place the command that
 sets it, and the read-back that checks it, are written down:
 
-Every coordinate is taken **out of `$WIF_PROVIDER` itself**, and that is not tidiness. This
+The provider is named by **`$WIF_PROVIDER` itself**, whole, and that is not tidiness. This
 condition is the control that survives a branch deleting the workflow's own guard, so a
 command that configured a *different* provider than the one the job exchanges its token at
 would leave the real one unconditioned while reading as though the work were done. A
-hard-coded `github-oidc` in pool `github` does exactly that on any deployment whose
-`WIF_PROVIDER` names another pool or provider — which is now every deployment but this one:
+pool and provider name hard-coded into the command does exactly that wherever `WIF_PROVIDER`
+names a different pair — which is every deployment but whichever one the line was written
+against, and the file does not name that pair for the reason the table above gives:
 
 ```sh
-wif_project="${WIF_PROVIDER#projects/}";                  wif_project="${wif_project%%/*}"
-wif_location="${WIF_PROVIDER#*/locations/}";              wif_location="${wif_location%%/*}"
-wif_pool="${WIF_PROVIDER#*/workloadIdentityPools/}";      wif_pool="${wif_pool%%/*}"
-wif_name="${WIF_PROVIDER##*/providers/}"
-
-gcloud iam workload-identity-pools providers update-oidc "$wif_name" \
-  --project="$wif_project" --location="$wif_location" \
-  --workload-identity-pool="$wif_pool" \
+gcloud iam workload-identity-pools providers update-oidc "$WIF_PROVIDER" \
   --attribute-condition="assertion.repository_owner == 'OpenSDLC-Dev' && assertion.ref == 'refs/heads/main' && assertion.ref_type == 'branch'"
 ```
 
-`--project` gets the project **number** the resource name carries rather than
-`$GCP_PROJECT_ID`; `gcloud` accepts either, and the number is the one that is guaranteed to
-name the project the pool is in — a provider may live beside the workload rather than in it.
+**A full resource name goes where the provider ID goes**, and `gcloud` takes the project,
+location and pool out of it, so `--project`, `--location` and `--workload-identity-pool` are
+not needed at all. What that buys is failure modes removed rather than a different target: a
+stray `--project` naming the wrong project does not redirect the command, an unset
+`core/project` does not stop it, and there is no number-to-ID translation step to get wrong.
+One it cannot remove: a `core/project` holding the **number** is refused before the name is
+parsed at all — the check belongs to the `gcloud iam` group rather than to this command — so
+leave that property on the ID, or unset. The one input left is `$WIF_PROVIDER`
+itself — the same value the job exchanges its token at — which is the property worth having,
+since a provider may live beside the workload rather than in it.
+
+Do **not** rebuild those flags by splitting the name — which is what this file used to tell
+you to do. `$WIF_PROVIDER` carries the project **number**, and no `gcloud iam
+workload-identity-pools` command takes a number in `--project`: `describe`, `list`, `create`,
+`create-oidc` and `update-oidc`, pools and providers alike, refuse it before any API call
+(#508). The number is perfectly good where it already sits, inside the resource name, which
+is exactly why passing that name whole works:
+
+```text
+ERROR: (gcloud.iam.workload-identity-pools.providers.update-oidc) The value of ``--project''
+flag was set to Project number.To use this command, set it to PROJECT ID instead.
+```
+
+If you need the ID for something else, `gcloud projects describe PROJECT_NUMBER
+--format="value(projectId)"` translates it; that command, unlike these, does take a number.
 
 `ref_type` rides along because a *tag* named `main` would present `refs/tags/main` — not
 equal, so the ref test already rejects it, but stating both makes the intent legible rather
-than incidental. Read the live condition back with:
+than incidental. Read the live condition back the same way:
 
 ```sh
-gcloud iam workload-identity-pools providers describe "$wif_name" \
-  --project="$wif_project" --location="$wif_location" \
-  --workload-identity-pool="$wif_pool" \
+gcloud iam workload-identity-pools providers describe "$WIF_PROVIDER" \
   --format="value(attributeCondition,state)"
 ```
 
