@@ -533,8 +533,23 @@ gcp-env-migrate-state: gcp-require-project gcp-env-vars-match
 # Runs as a Job because environment/ gives Cloud SQL a private address only:
 # the instance is reachable from the VPC and not from here. Needs kubectl
 # pointed at the cluster — see the get-credentials line in the `zone` output.
-gcp-db-init:
-	PROJECT=$(PROJECT) NAME_PREFIX=$(or $(NAME_PREFIX),map) NAMESPACE=$(or $(NAMESPACE),map) \
+#
+# Guarded like the gcp-env-* targets, and for the reason the comment above
+# gcp-env-init gives: dbinit.sh reads seven `terraform output` values, so it is a
+# backend READER, and a reader picks up whichever bucket the last `init` in
+# deploy/gcp/environment/ selected. Without this, `PROJECT=proj-a make
+# gcp-env-init` followed by `PROJECT=proj-b make gcp-db-init` takes the database
+# host, name and role from proj-a's outputs while dbinit.sh passes proj-b to
+# gcloud for the cluster and the secrets — one half of the operation in each
+# environment, and nothing failing to say so.
+#
+# gcp-env-init is a prerequisite rather than an assumption because the guard
+# alone cannot see what `.terraform` was initialized against; re-selecting the
+# backend is what makes the outputs come from the bucket PROJECT names. It is
+# idempotent, and if the two disagree its -input=false refuses rather than
+# silently migrating.
+gcp-db-init: gcp-require-project gcp-env-vars-match gcp-env-init
+	PROJECT=$(PROJECT) NAME_PREFIX=$(NAME_PREFIX_OR_DEFAULT) NAMESPACE=$(or $(NAMESPACE),map) \
 		bash deploy/gcp/dbinit.sh
 
 # Destroys the staging DATABASE along with everything else, and vault ciphertext

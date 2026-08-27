@@ -78,6 +78,10 @@ tf_out() {
 		# bucket), and Terraform's error says to run exactly that, so name the
 		# target that passes the -backend-config rather than leave the operator
 		# following advice that fails.
+		#
+		# `make gcp-db-init` now runs gcp-env-init first, so this path is reached
+		# by invoking this script directly — which is supported, and is exactly
+		# the case that needs to be told which target to run.
 		echo "Run 'PROJECT=$PROJECT make gcp-env-init' first — the state is remote and this" >&2
 		echo "checkout has not been pointed at it. (If the environment does not exist yet," >&2
 		echo "'make gcp-env-apply' is the one that creates it.)" >&2

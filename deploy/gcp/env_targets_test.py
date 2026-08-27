@@ -190,8 +190,11 @@ def main():
         # 3. The coordinate guard, on every target that selects a backend, and
         #    BEFORE terraform is invoked at all — not merely somewhere in the
         #    recipe. Nothing may have run by the time it refuses.
+        # gcp-db-init is in this list because it READS the backend — seven
+        # `terraform output` calls — so it selects a state the same way the
+        # writers do, and was the one target the guard did not cover.
         for target in ("gcp-env-init", "gcp-env-apply", "gcp-env-destroy",
-                       "gcp-env-migrate-state"):
+                       "gcp-env-migrate-state", "gcp-db-init"):
             rc, out, calls = run_make(tree, bin_dir, target, prefix="acme",
                                       tfvars='project_id = "my-proj"\nname_prefix = "map"\n')
             check(f"{target} refuses a coordinate mismatch before running terraform",
@@ -309,6 +312,12 @@ def main():
               f"rc={rc} written={written[:200]!r} out={out[:200]}")
 
         # 9. No PROJECT, no bucket name — and nothing run.
+        # gcp-db-init is deliberately NOT in this list, though it now carries the
+        # same prerequisite. dbinit.sh refuses a missing PROJECT on its own, so
+        # the assertion would hold with the prerequisite deleted — it would be a
+        # check that cannot fail, which is worse than no check. Its guard is
+        # pinned by the coordinate-mismatch loop above, where removing the
+        # prerequisite does make the suite go red.
         for target in ("gcp-env-init", "gcp-env-apply", "gcp-env-destroy",
                        "gcp-env-migrate-state", "gcp-env-tfvars"):
             rc, out, calls = run_make(tree, bin_dir, target, project=None)

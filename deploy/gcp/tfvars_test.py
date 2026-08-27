@@ -689,7 +689,8 @@ def main():
         #      names is worse than no guard.
         d = tmp / "autodir"
         d.mkdir()
-        (d / "terraform.tfvars").write_text('project_id = "my-proj"\n', encoding="utf-8")
+        (d / "terraform.tfvars").write_text('project_id = "my-proj"\nname_prefix = "map"\n',
+                                            encoding="utf-8")
         (d / "zz.auto.tfvars").write_text('name_prefix = "acme"\n', encoding="utf-8")
         r = run(tmp, out=(d / "terraform.tfvars"), args=("--check",))
         check("--check refuses when a *.auto.tfvars would be loaded too",
@@ -700,11 +701,21 @@ def main():
         # terraform.tfvars.json is loaded AFTER terraform.tfvars. Verified
         # against real Terraform during review — two files, and var.project_id
         # resolved to the JSON one's value while --check said "agrees".
-        for name, body in (("terraform.tfvars.json", '{"project_id": "other-proj"}\n'),
-                           ("zz.auto.tfvars.json", '{"name_prefix": "acme"}\n')):
-            d = tmp / f"json-{name}"
+        #
+        # Two things here are load-bearing and were both wrong once. The
+        # directory must NOT be named after the file being searched for in
+        # stderr — every refusal quotes OUT, so a directory called
+        # `json-terraform.tfvars.json` satisfies `name in r.stderr` whatever the
+        # reason for refusing. And the base file must set name_prefix, or a
+        # deleted sibling-source guard falls through to the presence refusal,
+        # which also exits 1. Together those made this assertion unable to fail.
+        for i, (name, body) in enumerate((
+                ("terraform.tfvars.json", '{"project_id": "other-proj"}\n'),
+                ("zz.auto.tfvars.json", '{"name_prefix": "acme"}\n'))):
+            d = tmp / f"jsoncase{i}"
             d.mkdir()
-            (d / "terraform.tfvars").write_text('project_id = "my-proj"\n', encoding="utf-8")
+            (d / "terraform.tfvars").write_text('project_id = "my-proj"\nname_prefix = "map"\n',
+                                                encoding="utf-8")
             (d / name).write_text(body, encoding="utf-8")
             r = run(tmp, out=(d / "terraform.tfvars"), args=("--check",))
             check(f"--check refuses when a {name} would be loaded too",
