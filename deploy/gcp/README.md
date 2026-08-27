@@ -1325,6 +1325,19 @@ The order is not cosmetic: `gcp-env-migrate-state` runs the coordinate guard, an
 refuses a checkout with no `terraform.tfvars` at all — so the migration cannot be the first
 command on the machine that needs it most.
 
+**If this checkout already has a `terraform.tfvars`, check it names `name_prefix` before
+either command.** Until #478 these instructions said to create it by copying `foundation/`'s,
+which sets `project_id` and nothing else — and the guard now requires `name_prefix` to be
+written out rather than defaulted, because it cannot tell a file that omits it from one it
+failed to parse, and reading the second as `map` is exactly the wrong-state pairing it exists
+to refuse. So on the one machine holding the local state, `gcp-env-tfvars` refuses to
+overwrite the file it finds and `gcp-env-migrate-state` refuses to read it. Neither runs
+Terraform, and the fix is the line the second one names:
+
+```sh
+echo 'name_prefix = "map"' >> deploy/gcp/environment/terraform.tfvars   # or your prefix
+```
+
 Deliberately not `-input=false`: the confirmation Terraform asks for before copying state is
 the point. Afterwards every machine with credentials shares one state, and the
 `terraform.tfstate` left behind locally is a backup to delete once a remote `terraform plan`

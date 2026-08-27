@@ -404,9 +404,11 @@ def main():
         # A hand-written tfvars may leave name_prefix out, because variables.tf
         # defaults it to "map" — so reading an absent one as "map" was RIGHT about
         # Terraform. It still had to go. The scanner below is not an HCL parser,
-        # and every way it can be wrong ends in a key going missing; defaulting
-        # turned each of those into a silent yes. Presence is required instead, so
-        # a miss refuses. See the three inputs at 10a-3 that reach it for real.
+        # and most of the ways it can be wrong LOSE text, so a key goes missing;
+        # defaulting turned each of those into a silent yes. Presence is required
+        # instead, so a miss refuses. See 10a-3 for the inputs that reach it, and
+        # 10a-4 for the other kind — a key returned with the WRONG value, which
+        # presence cannot see and which is refused earlier instead.
         out = fixture('project_id = "my-proj"\n')
         r = run(tmp, out=out, args=("--check",))
         check("--check refuses a file that omits name_prefix rather than defaulting it",
@@ -492,30 +494,90 @@ def main():
         poisons = (
             # The string literals nested inside `${...}` invert this scanner's
             # idea of being inside a quote, so the bracket is counted as real and
-            # every later line reads as nested inside it.
-            ("a bracket inside an interpolation",
+            # every later line reads as nested inside it. Refused at the
+            # interpolation guard now, before the scanner ever sees it.
+            ("a bracket inside an interpolation", "interpolation",
              'project_id = "my-proj"\n'
              'iap_backend_service = "${"["}"\n'
              'name_prefix = "acme"\n'),
             # The same inversion, reaching a block-comment opener instead.
-            ("a comment opener inside an interpolation",
+            ("a comment opener inside an interpolation", "interpolation",
              'project_id = "my-proj"\n'
              'notes = "${"/*"}"\n'
              'name_prefix = "acme"\n'),
             # CRLF: the terminator carries a \r, never compares equal to the tag,
-            # and the heredoc swallows the rest of the file.
-            ("a CRLF heredoc whose terminator never matches",
+            # and the heredoc swallows the rest of the file. This is the one the
+            # presence rule itself catches.
+            ("a CRLF heredoc whose terminator never matches", "name_prefix",
              'project_id = "my-proj"\r\n'
              'notes = <<EOT\r\n'
              'anything\r\n'
              'EOT\r\n'
              'name_prefix = "acme"\r\n'),
         )
-        for label, text in poisons:
+        for label, marker, text in poisons:
             r = run(tmp, out=fixture(text), prefix="map", args=("--check",))
             check(f"--check refuses when {label} hides name_prefix",
-                  r.returncode == 1 and "name_prefix" in r.stderr,
+                  r.returncode == 1 and marker in r.stderr,
                   f"{r.returncode} {r.stderr}")
+
+        # 10a-4. The other kind, and the dangerous one: the scanner hands back a
+        #        key with the WRONG value. Presence cannot see this — the key IS
+        #        found — so each is refused at its source instead. Both families
+        #        were found by attacking the scanner rather than by using it, and
+        #        both agreed with the wrong coordinate before the fixes.
+        #
+        #        A: a `/*` smuggled through an interpolation leaves the scanner
+        #        inside a block comment Terraform never opened; the next `*/` —
+        #        one sitting inside a `#` comment will do — closes it, and the
+        #        rest of that line comes back as a top-level assignment.
+        out = fixture('project_id = "my-proj"\n'
+                      'iap_backend_service = "${"/*"}"\n'
+                      '# */ name_prefix = "map"\n'
+                      'name_prefix = "acme"\n')
+        r = run(tmp, out=out, prefix="map", args=("--check",))
+        check("--check refuses a phantom block comment rather than reading it",
+              r.returncode == 1 and "interpolation" in r.stderr,
+              f"{r.returncode} {r.stderr}")
+
+        #        B: HCL allows a hyphen in a heredoc tag. The scanner's tag
+        #        pattern did not, so `<<EO-T` was read as the tag `EO` and a body
+        #        line `EO` ended the heredoc early — handing the rest of the BODY
+        #        back as top-level assignments. Terraform reads acme; the guard
+        #        read map, and agreed with it.
+        hyphen_tag = ('project_id = "my-proj"\n'
+                      'iap_backend_service = <<EO-T\n'
+                      'EO\n'
+                      'name_prefix = "map"\n'
+                      'EO-T\n'
+                      'name_prefix = "acme"\n')
+        r = run(tmp, out=fixture(hyphen_tag), prefix="map", args=("--check",))
+        check("--check is not fooled by a hyphenated heredoc tag",
+              r.returncode == 1 and "name_prefix" in r.stderr,
+              f"{r.returncode} {r.stderr}")
+
+        #        ...and reads the real assignment, so this was fixed by parsing
+        #        the tag correctly, not by refusing the file.
+        r = run(tmp, out=fixture(hyphen_tag), prefix="acme", args=("--check",))
+        check("...and reads the name_prefix that follows the heredoc",
+              r.returncode == 0, f"{r.returncode} {r.stderr}")
+
+        #        The same family reaches project_id, where the guard agreed with
+        #        a PROJECT naming another project entirely.
+        hyphen_proj = ('iap_backend_service = <<EO-T\n'
+                       'EO\n'
+                       'project_id = "victim"\n'
+                       'EO-T\n'
+                       'project_id = "my-proj"\n'
+                       'name_prefix = "map"\n')
+        r = run(tmp, out=fixture(hyphen_proj), project="victim", args=("--check",))
+        check("--check no longer reads a project_id out of a heredoc body",
+              r.returncode == 1 and "project_id" in r.stderr,
+              f"{r.returncode} {r.stderr}")
+
+        r = run(tmp, out=fixture(hyphen_proj), args=("--check",))
+        check("...and agrees with the project_id that actually applies",
+              r.returncode == 0, f"{r.returncode} {r.stderr}")
 
         # 10b. Comments. `/* */` is the bypass that mattered: an assignment inside
         #      one is invisible to Terraform and was visible to a line-oriented

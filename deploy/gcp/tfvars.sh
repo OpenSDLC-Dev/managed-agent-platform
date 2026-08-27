@@ -143,6 +143,28 @@ if [[ "${1:-}" == "--check" ]]; then
 		exit 1
 	fi
 
+	# A template interpolation is refused outright, because the scanner below
+	# cannot read one and does not need to. Inside `"${"["}"` the string literals
+	# nested in the interpolation invert its idea of being inside a quote, so a
+	# bracket or a `/*` in there is counted as real — and a `/*` counted that way
+	# opens a comment Terraform never opened, which the next `*/` (a `*/` sitting
+	# inside a `#` comment will do) closes, handing the rest of that line back as
+	# a top-level assignment holding whatever it likes. That is a key found with
+	# the WRONG value, which the presence rule below cannot catch.
+	#
+	# Refusing costs nothing real: a .tfvars is evaluated with no variables and no
+	# functions in scope, so `${...}` can only ever be a literal written the hard
+	# way. The generator never emits one.
+	# `[$]{` rather than a quoted `${`: the second is what shellcheck warns about
+	# (SC2016), and spelling the `$` as a bracket expression says "literal" to
+	# both grep and the reader without a suppression comment.
+	if grep -q '[$]{' "$OUT"; then
+		echo "refusing: ${OUT} contains a \${...} template interpolation." >&2
+		echo "This check cannot read one, and a .tfvars has no variables or functions in" >&2
+		echo "scope, so it can only be a literal written the hard way. Write the literal." >&2
+		exit 1
+	fi
+
 	# One assignment per variable: Terraform rejects a file that assigns the same
 	# one twice, so `head -1` never has to adjudicate a duplicate.
 	#
@@ -175,14 +197,21 @@ if [[ "${1:-}" == "--check" ]]; then
 	# counted because that is what depth means, and no test can tell the two
 	# apart on a file Terraform accepts.
 	#
-	# This scanner is NOT an HCL parser and does not need to be. It is wrong on at
-	# least three inputs Terraform accepts — `"${"["}"` and `"${"/*"}"`, where the
-	# string literals nested inside an interpolation invert its idea of being
-	# inside a quote, and a CRLF heredoc whose terminator never compares equal.
-	# Every such error, and every unterminated comment, heredoc or bracket, ends
-	# the same way: the rest of the file is swallowed and a key goes missing. What
-	# makes that safe is not the scanner but the rule below — BOTH keys must be
-	# found, so a miss is a refusal rather than a guess.
+	# This scanner is NOT an HCL parser, and two different things keep that from
+	# mattering. Most of its errors LOSE text — an unterminated comment, heredoc
+	# or bracket swallows the rest of the file, a CRLF heredoc terminator never
+	# compares equal to its tag — and a lost key is caught by the presence rule
+	# below, which requires both.
+	#
+	# The dangerous kind is the other kind: an error that hands back a key with
+	# the WRONG value, which presence cannot see. Two were found, and both are
+	# closed above rather than tolerated — the interpolation refusal, and the
+	# hyphen in the heredoc tag. Do not assume that list is complete: it was two
+	# because someone went looking, and the honest statement is that this scanner
+	# is sound against operator error, not against a tfvars written to defeat it.
+	# The file is written by the same person running the command, so that is the
+	# threat model. If a third is ever found, prefer closing it the same way —
+	# refuse the construct — over teaching this awk to parse HCL.
 	top_level() {
 		awk '
 			{ line = $0
@@ -202,7 +231,12 @@ if [[ "${1:-}" == "--check" ]]; then
 			    if (d == "//" || c == "#") break
 			    if (d == "<<") {
 			      rest = substr(line, i)
-			      if (match(rest, /^<<-?[A-Za-z_][A-Za-z0-9_]*/)) {
+			      # The `-` in the class is load-bearing: HCL accepts a hyphen in
+			      # a heredoc tag, and without it `<<EO-T` was read as the tag
+			      # `EO`, so a body line `EO` ended the heredoc early and the
+			      # rest of the body came back as top-level assignments. The
+			      # leading `<<-?` is the indent marker and is stripped below.
+			      if (match(rest, /^<<-?[A-Za-z_][A-Za-z0-9_-]*/)) {
 			        heretag = substr(rest, RSTART, RLENGTH)
 			        sub(/^<<-?/, "", heretag)
 			        break
@@ -228,24 +262,27 @@ if [[ "${1:-}" == "--check" ]]; then
 	# found" is the empty string, which matches no PROJECT and refuses. For
 	# name_prefix, defaulting turned every one of those misses into a silent YES.
 	#
-	# That is not hypothetical. Three inputs Terraform accepts reach it — an
-	# interpolation holding a bracket or a comment opener (`"${"["}"`, `"${"/*"}"`,
-	# where the nested string literals invert this scanner's idea of being inside
-	# a quote) and a CRLF file whose heredoc terminator never compares equal. Each
-	# swallowed the rest of the file, and each then agreed with NAME_PREFIX=map
-	# against a file naming something else.
+	# That is not hypothetical. Inputs Terraform accepts reach it — a CRLF file
+	# whose heredoc terminator never compares equal to its tag is the one left
+	# after the two refusals above — and each swallowed the rest of the file, then
+	# agreed with NAME_PREFIX=map against a file naming something else.
 	#
-	# Requiring presence closes all three at the root, and any fourth nobody has
-	# found: a scanner miss becomes a refusal instead of a wrong-state apply. The
-	# cost is a hand-written tfvars that omits the line, which the generator never
-	# produces and which the message below tells you how to fix.
+	# So this catches every way the scanner can LOSE a key, including ones nobody
+	# has found: a miss becomes a refusal instead of a wrong-state apply. It does
+	# not catch a key returned with the wrong value; that is what the two refusals
+	# above are for. The cost is a hand-written tfvars omitting the line, which
+	# the generator never produces.
 	got_prefix="$(tfvar name_prefix)"
 	if [[ -z "$got_prefix" ]]; then
-		echo "${OUT} does not set name_prefix, or this check could not read it." >&2
-		echo "It has to be written out. Terraform defaults it to \"map\", but this check" >&2
-		echo "cannot tell a file that omits it from one it failed to parse — and reading" >&2
-		echo "the second as \"map\" is how a bucket gets paired with another environment's" >&2
-		echo "resources. Add: name_prefix = \"${NAME_PREFIX}\"" >&2
+		echo "${OUT}: this check could not read a name_prefix from it." >&2
+		echo "Either it is not there, or something above it — a heredoc whose terminator" >&2
+		echo "does not match, an unclosed comment or bracket — swallowed it. Terraform" >&2
+		echo "defaults the variable to \"map\", but this check cannot tell those two apart," >&2
+		echo "and reading the second as \"map\" is how one environment's bucket gets paired" >&2
+		echo "with another's resources." >&2
+		echo >&2
+		echo "If the file does not set it, add: name_prefix = \"${NAME_PREFIX}\"" >&2
+		echo "If it does, the line above it is the one to look at." >&2
 		exit 1
 	fi
 

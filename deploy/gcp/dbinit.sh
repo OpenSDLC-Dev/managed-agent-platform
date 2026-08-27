@@ -11,9 +11,10 @@
 # instance directly; dbinit.sql asserts the session is encrypted, so a
 # connection that silently fell back to plaintext fails rather than passes.
 #
-# Run order (since #478 every gcp-env-* and gcp-db-* target needs PROJECT — it is
-# half the state bucket's name, and gcp-env-apply also refuses until the tfvars
-# below exists, those being two inputs that must not disagree):
+# Run order (this script and the power targets always needed PROJECT, for the
+# gcloud calls; since #478 the state-touching gcp-env-* targets need it too,
+# because it is half the state bucket's name — and gcp-env-apply also refuses
+# until the tfvars below exists, those being two inputs that must not disagree):
 #     make gcp-foundation-apply
 #     PROJECT=… make gcp-bootstrap    # the two database passwords get values
 #     PROJECT=… make gcp-env-tfvars   # writes environment/terraform.tfvars

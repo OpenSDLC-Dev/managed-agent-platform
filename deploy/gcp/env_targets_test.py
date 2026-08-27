@@ -73,7 +73,7 @@ def build_tree(tmp):
 
 
 def run_make(tree, bin_dir, target, project="my-proj", prefix=None,
-             state="", state_fails=False, extra=(),
+             state="", *, state_fails=False, extra=(),
              tfvars='project_id = "my-proj"\nname_prefix = "map"\n',
              stray_out=None):
     """Run one target; return (returncode, stdout+stderr, [terraform calls])."""
