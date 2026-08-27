@@ -21,19 +21,27 @@ can regress alone.
 
 The extraction is textual because the definition lives inside a workflow's `run:`
 block, where nothing else can reach it: there is no `.sh` file to source and, by
-the decision above, there should not be one. Neither notifier can be run from a
-pull request at all — `deploy-alert.yml` triggers on `workflow_run` and
-`staging-parked.yml` on a `schedule`, and GitHub runs both from the DEFAULT
-branch — so this table is also the only thing that executes either helper before
-it is already live.
+the decision above, there should not be one. `deploy-alert.yml` cannot be run
+from a pull request at all — `workflow_run` executes the DEFAULT branch's copy —
+so for that file this table is the only thing that runs the helper before it is
+already live. `staging-parked.yml` adds `workflow_dispatch`, which would run a
+branch's copy, but only against real staging; this table is still where both are
+exercised in anger.
 
-**Every way of missing a helper fails loudly rather than quietly.** A scanner
-that silently skips one is worse than no scanner, because CI then reports success
-over an unchecked copy. So: both workflow extensions are searched, four spellings
-of the definition are accepted, anything retry-shaped that is NOT inside a `run:`
-block scalar is a hard error rather than a skip, and every extracted definition
-must survive `bash -n` before it is run. Truncating the wrong `}` therefore
-reports a syntax error instead of testing a fragment.
+**A helper this cannot parse is refused, not skipped.** A scanner that quietly
+passes over one is worse than no scanner, because CI then reports success over an
+unchecked copy. So the detector is deliberately looser than the parser: both
+workflow extensions are searched, five spellings parse, and anything else that
+looks like a `retry` definition — a brace on the next line, a subshell body, a
+second statement sharing the line — is a hard error naming file and line rather
+than a quiet skip. Extraction is restricted to literal `run: |` scalars for the
+same reason, and every definition survives `bash -n` before it runs, so a cut at
+the wrong `}` reports a syntax error instead of testing a fragment.
+
+No regex recognises every way of writing a shell function, so that refusal is a
+backstop rather than a proof. If you are adding a helper and this file refuses
+it, the fix is to spell it the way the other two are spelled, or to teach `DEFN`
+the new shape — not to quietly narrow `LOOKS_LIKE` until the refusal stops.
 """
 
 import os
@@ -71,9 +79,25 @@ BLOCK_RUN = re.compile(r"^(?P<indent>[ \t]*)run:[ \t]*\|[-+]?[ \t]*$")
 DEFN = re.compile(
     r"^(?P<indent>[ \t]*)(?:function[ \t]+)?retry[ \t]*(?:\([ \t]*\))?[ \t]*\{[ \t]*(?:#.*)?$"
 )
-# Deliberately looser: anything that even looks like one. A line matching this
-# and not DEFN inside a block scalar is what would have been skipped silently.
-LOOSE = re.compile(r"^[ \t]*(?:function[ \t]+)?retry[ \t]*(?:\([ \t]*\))?[ \t]*\{")
+# Deliberately looser than DEFN, and it has to stay that way: it must match the
+# shapes DEFN CANNOT parse, because a line it matches that was not extracted is
+# refused by name and line instead of skipped. The gap it exists to close was
+# real — an Allman brace on the next line, a subshell body (`retry() ( … )`), and
+# a second statement sharing the line were all silently unchecked until it did.
+LOOKS_LIKE = re.compile(
+    r"(?:^|;)[ \t]*(?:function[ \t]+)?retry[ \t]*(?:\([ \t]*\))?[ \t]*[({]?[ \t]*(?:#.*)?$"
+)
+
+
+def looks_like_a_definition(line):
+    """Does this line open something named `retry`, however it is spelled?"""
+    m = LOOKS_LIKE.search(line)
+    if not m:
+        return False
+    # A bare `retry` alone on a line is a CALL taking no arguments: it matches
+    # the pattern and defines nothing. A bracket, or the `function` keyword, is
+    # what tells the two apart without narrowing the shapes that matter.
+    return any(c in m.group(0) for c in "({") or "function" in m.group(0)
 
 # name, attempts that fail, bytes each failure emits, bytes the success emits,
 # what the caller must end up with, exit status, attempts made, and what the row
@@ -193,12 +217,13 @@ def definitions(path):
     # Silently skipping one is the failure this whole file exists to prevent:
     # CI would report success over an unchecked copy.
     for n, line in enumerate(lines, start=1):
-        if LOOSE.match(line) and n not in covered:
+        if looks_like_a_definition(line) and n not in covered:
             raise SystemExit(
                 f"{path.name}:{n}: this looks like a `retry` definition but is not"
                 " inside a `run: |` block this test can read, or is spelled in a"
                 " way it does not recognise. It would go UNTESTED — move it into"
-                " a literal block scalar, or teach DEFN/BLOCK_RUN its shape."
+                " a literal block scalar and spell it the way the other helpers"
+                " are, or teach DEFN/BLOCK_RUN the new shape."
             )
     return found
 
@@ -228,7 +253,10 @@ def run_case(workdir, definition, case):
         ["bash", str(driver), "bash", str(workdir / "flaky"), *ARGV],
         capture_output=True, text=True, check=False, env=env,
     )
-    waited = [int(x) for x in sleeps.read_text(encoding="utf-8").split()]
+    # Kept as text on purpose: a helper spelled `sleep 0.5`, or `sleep $BACKOFF`
+    # with the variable unset, would otherwise raise out of the harness with a
+    # traceback instead of failing its row like every other assertion.
+    waited = sleeps.read_text(encoding="utf-8").split()
     return (
         capture.read_text(encoding="utf-8"),
         proc.returncode,
@@ -265,12 +293,13 @@ def check(workdir, name, definition):
                 f"  {name} / {label}: a failed attempt's stderr was captured"
                 " into the value the caller parses"
             )
-        want_waits = BACKOFF[: min(fail_times, len(BACKOFF))]
+        want_waits = [str(s) for s in BACKOFF[: min(fail_times, len(BACKOFF))]]
         if waited != want_waits:
             failures.append(
-                f"  {name} / {label}: waited {waited}s between attempts, want"
-                f" {want_waits}s — the backoff is what keeps a retry from"
-                " hammering an API that is already unwell"
+                f"  {name} / {label}: waited [{', '.join(waited)}] between"
+                f" attempts, want [{', '.join(want_waits)}] — the backoff is"
+                " what keeps a retry from hammering an API that is already"
+                " unwell"
             )
     return failures
 
@@ -280,10 +309,13 @@ def main():
     for path in sorted(WORKFLOWS.glob("*.yml")) + sorted(WORKFLOWS.glob("*.yaml")):
         helpers += definitions(path)
 
-    # Two copies is the state this file was written for. Fewer means a helper
-    # was deleted or consolidated into one script, in which case this number is
-    # what says so out loud. It is a floor, not the discovery check — that is
-    # the hard error in definitions(), which no unrecognised spelling escapes.
+    # Two copies is the state this file was written for. Fewer means one was
+    # deleted, or the two were consolidated into a script after all, and this
+    # floor is what says so out loud. It is not the discovery check — that is
+    # the refusal in definitions(), which catches the spellings the parser does
+    # not handle. Neither is a proof: no regex recognises every way of writing a
+    # shell function, so the floor and the refusal are two backstops, not one
+    # guarantee.
     if len(helpers) < 2:
         print(
             f"expected at least 2 `retry` helpers under {WORKFLOWS}, found"
