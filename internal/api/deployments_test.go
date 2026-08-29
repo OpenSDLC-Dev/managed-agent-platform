@@ -310,6 +310,11 @@ func TestDeploymentAgentUnion(t *testing.T) {
 	})
 	if sessionStatus != http.StatusOK {
 		t.Errorf("a session refused the null version a deployment accepts: %d %v", sessionStatus, sessionRes)
+	} else if got := sessionRes["agent"].(map[string]any)["version"]; got != float64(2) {
+		// Not just accepted — pinned to the same version. Accepting while
+		// pinning something else would agree on the status code and disagree
+		// on the reading, which is the mismatch this assertion exists for.
+		t.Errorf("a session pinned %v for a null version, want the latest (2) the deployment pinned", got)
 	}
 
 	// A malformed shape is the request's fault (400); an agent that is simply

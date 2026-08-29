@@ -138,13 +138,6 @@ func resolveDeploymentAgent(ctx context.Context, db querier, raw json.RawMessage
 		if err := rejectUnknownNested(raw, "agent", "type", "id", "version"); err != nil {
 			return ref, err
 		}
-		// An explicit `version: null` reads as omitted and pins the latest.
-		// The schema gives the field no null arm, so refusing it would be
-		// defensible on its own — but this platform already made that call the
-		// other way for a session's agent and for a roster entry, and
-		// registered it (docs/DIVERGENCES.md). A third answer for one field
-		// shape, differing by route, is worse than either reading applied
-		// everywhere.
 		// type is required and is what tells the two object arms apart, so its
 		// absence cannot be read as "agent" — that would let an override
 		// through as a reference with its extra keys dropped.
@@ -171,6 +164,15 @@ func resolveDeploymentAgent(ctx context.Context, db querier, raw json.RawMessage
 		// by the schema it references — and by the SDK param a real client
 		// builds, whose Version is a param.Opt. resolveAgent answers a
 		// session's versionless reference the same way.
+		//
+		// An explicit `version: null` is read as omitted too — the pointer is
+		// nil either way. The schema gives the field no null arm, so refusing
+		// it would be defensible on its own, but this platform already made
+		// that call the other way for a session's agent and for a roster entry
+		// and registered it as a rule about a reference generally, not about
+		// those two routes (docs/DIVERGENCES.md, inside the plan-35 roster
+		// entry). A third answer for one field shape, differing by route, is
+		// worse than either reading applied everywhere.
 		id, version = obj.ID, obj.Version
 	}
 	if err := checkID(id, "agent"); err != nil {
