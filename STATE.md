@@ -13,7 +13,7 @@ What is being worked on right now, and how far along it is — nothing else. **S
   rules), both tables, the `Deployment` domain type, the seven routes, the agent-archive
   refusal (plan decision 7), the `DELETE /v1/environments` message that names the
   deployments blocking it, and every slice-1 registry entry — 1, 2, 7, 8, 12, 15, 16, 19,
-  22, 23, 25, 27, 29, and two the plan did not foresee.
+  22, 23, 25, 27, 29, and three the plan did not foresee.
   [#520](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/520) is slice 3's and
   [#523](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/523) is deferred.
 - **Slice 2** — next: extract `createSessionTx`, behavior-neutral, the plan-36-slice-5 idiom.

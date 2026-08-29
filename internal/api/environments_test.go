@@ -277,18 +277,20 @@ func TestEnvironmentDeleteBlockedBySessions(t *testing.T) {
 
 	// The message names the referent it actually found. It had blamed sessions
 	// for every foreign key on the table, which was harmless while sessions
-	// were the only one that could block.
-	if msg, _ := body["error"].(map[string]any)["message"].(string); !strings.Contains(msg, "sessions") {
-		t.Errorf("a session blocking the delete said %q, want it to name sessions", msg)
+	// were the only one that could block. The whole sentence, not the word:
+	// "sessions" appears in messages that say the opposite too.
+	if msg, _ := body["error"].(map[string]any)["message"].(string); !strings.Contains(msg, "still has sessions; delete them first") {
+		t.Errorf("a session blocking the delete said %q", msg)
 	}
 }
 
-// A deployment blocks the delete too, and unlike a session it can never be
-// cleared: there is no DELETE /v1/deployments and archive is terminal. So the
-// message must name the deployments and must not advise deleting them, which
-// is what the old blame-the-sessions message did twice over — it named the
-// wrong resource and told the operator to do something impossible with it.
-func TestEnvironmentDeleteBlockedByDeployments(t *testing.T) {
+// A live deployment blocks the delete, and the message has to name the remedy
+// that works. It is not the one the sibling refusal trains an operator to
+// reach for: archiving the deployment is what makes the environment
+// permanently undeletable, while pointing it at another environment clears the
+// reference outright. The test does not take the message's word for either —
+// it follows the advice and asserts the delete then succeeds.
+func TestEnvironmentDeleteBlockedByALiveDeploymentCanBeCleared(t *testing.T) {
 	s := newTestServer(t)
 	agentID, envID := fixture(t, s)
 	deploymentID := createDeployment(t, s, deploymentBody(agentID, envID))["id"].(string)
@@ -302,18 +304,119 @@ func TestEnvironmentDeleteBlockedByDeployments(t *testing.T) {
 	if strings.Contains(msg, "session") {
 		t.Errorf("message %q blames sessions for a deployment's foreign key", msg)
 	}
+	if !strings.Contains(msg, "point each at another environment") {
+		t.Errorf("message %q does not name the remedy that works on a live deployment", msg)
+	}
+	// Archiving the environment is the irreversible answer and must not be
+	// offered while the reversible one is available.
+	if strings.Contains(msg, "archive it instead") {
+		t.Errorf("message %q sends the operator to archive the environment when a repoint would do", msg)
+	}
 
-	// Archiving the deployment changes nothing: the foreign key does not read
-	// archived_at, and no route removes the row. The environment is simply not
-	// deletable any more, and the message has to be honest about that rather
-	// than send the operator round a loop.
+	// Follow the advice.
+	other := createEnvironment(t, s, map[string]any{"name": "somewhere-else"})["id"].(string)
+	if status, res := s.do(http.MethodPost, "/v1/deployments/"+deploymentID,
+		map[string]any{"environment_id": other}); status != http.StatusOK {
+		t.Fatalf("point the deployment at another environment: %d %v", status, res)
+	}
+	if status, res := s.do(http.MethodDelete, "/v1/environments/"+envID, nil); status != http.StatusOK {
+		t.Fatalf("delete after the repoint the message advised: %d %v", status, res)
+	}
+}
+
+// An archived deployment is the case where the reference really is permanent:
+// every update is refused, so it can never be moved off the environment, and
+// nothing deletes the row. Here the message must say so and offer the only
+// thing left — and stop offering it once it has been done.
+func TestEnvironmentDeleteBlockedByAnArchivedDeploymentIsPermanent(t *testing.T) {
+	s := newTestServer(t)
+	agentID, envID := fixture(t, s)
+	deploymentID := createDeployment(t, s, deploymentBody(agentID, envID))["id"].(string)
+
+	archived := map[string]any{}
 	if status, res := s.do(http.MethodPost, "/v1/deployments/"+deploymentID+"/archive", nil); status != http.StatusOK {
 		t.Fatalf("archive deployment: %d %v", status, res)
+	} else {
+		archived = res
+	}
+	// Not just a 200: archive is idempotent, so one that stopped stamping
+	// would still answer 200 and leave this testing the live case again.
+	if archived["archived_at"] == nil {
+		t.Fatal("the deployment archived with a null archived_at")
+	}
+	// The repoint the live case relies on is genuinely gone.
+	other := createEnvironment(t, s, map[string]any{"name": "somewhere-else"})["id"].(string)
+	if status, _ := s.do(http.MethodPost, "/v1/deployments/"+deploymentID,
+		map[string]any{"environment_id": other}); status == http.StatusOK {
+		t.Fatal("an archived deployment accepted a repoint, which would make the message's premise false")
+	}
+
+	status, body := s.do(http.MethodDelete, "/v1/environments/"+envID, nil)
+	wantErr(t, status, body, http.StatusBadRequest, "invalid_request_error")
+	msg, _ := body["error"].(map[string]any)["message"].(string)
+	if !strings.Contains(msg, deploymentID) || !strings.Contains(msg, "can no longer be deleted") {
+		t.Errorf("message %q, want it to name the deployment and say the environment is stuck", msg)
+	}
+	if strings.Contains(msg, "point each at another environment") {
+		t.Errorf("message %q advises a repoint an archived deployment refuses", msg)
+	}
+
+	// Follow that advice too, and check it is not then repeated at someone who
+	// has already taken it.
+	if status, res := s.do(http.MethodPost, "/v1/environments/"+envID+"/archive", nil); status != http.StatusOK {
+		t.Fatalf("archive the environment, which is what the message advised: %d %v", status, res)
 	}
 	status, body = s.do(http.MethodDelete, "/v1/environments/"+envID, nil)
 	wantErr(t, status, body, http.StatusBadRequest, "invalid_request_error")
+	if msg, _ := body["error"].(map[string]any)["message"].(string); strings.Contains(msg, "archive it instead") {
+		t.Errorf("message %q tells an already-archived environment to archive itself", msg)
+	}
+}
+
+// The counted and truncated arms, which the two cases above never reach.
+func TestEnvironmentDeleteNamesTheDeploymentsUpToFive(t *testing.T) {
+	s := newTestServer(t)
+	agentID, envID := fixture(t, s)
+	var created []string
+	for range 7 {
+		created = append(created, createDeployment(t, s, deploymentBody(agentID, envID))["id"].(string))
+	}
+
+	_, body := s.do(http.MethodDelete, "/v1/environments/"+envID, nil)
+	msg, _ := body["error"].(map[string]any)["message"].(string)
+	if !strings.Contains(msg, "referenced by 7 deployments") || !strings.Contains(msg, "and 2 more") {
+		t.Errorf("seven blocking deployments: %q", msg)
+	}
+	n := 0
+	for _, id := range created {
+		if strings.Contains(msg, id) {
+			n++
+		}
+	}
+	if n != 5 {
+		t.Errorf("message %q names %d of the seven deployments, want the five the cap allows", msg, n)
+	}
+}
+
+// Postgres reports one violated constraint, and with a session and a deployment
+// both in the way it reports the older foreign key — sessions, from migration
+// 0001. Reading the constraint's name would therefore have told the operator to
+// delete the sessions, which they would do, only to find the delete still
+// refused. The message is built from what is actually there instead.
+func TestEnvironmentDeleteBlockedByBothNamesTheDeployment(t *testing.T) {
+	s := newTestServer(t)
+	agentID, envID := fixture(t, s)
+	deploymentID := createDeployment(t, s, deploymentBody(agentID, envID))["id"].(string)
+	if status, res := s.do(http.MethodPost, "/v1/sessions", map[string]any{
+		"agent": agentID, "environment_id": envID,
+	}); status != http.StatusOK {
+		t.Fatalf("create session: %d %v", status, res)
+	}
+
+	status, body := s.do(http.MethodDelete, "/v1/environments/"+envID, nil)
+	wantErr(t, status, body, http.StatusBadRequest, "invalid_request_error")
 	if msg, _ := body["error"].(map[string]any)["message"].(string); !strings.Contains(msg, deploymentID) {
-		t.Errorf("after archiving the deployment: %q, want it still named", msg)
+		t.Errorf("message %q names no deployment — it followed the constraint the error reported", msg)
 	}
 }
 

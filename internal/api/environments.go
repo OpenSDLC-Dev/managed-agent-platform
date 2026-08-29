@@ -516,37 +516,76 @@ func (s *server) archiveEnvironment(r *http.Request) (any, error) {
 		row.createdAt, row.updatedAt, row.archivedAt), nil
 }
 
-// deploymentsBlockingEnvironment renders the 400 for a delete the deployments
-// foreign key refused. It names them, because "something still references this"
-// is not something an operator can act on, and it does not tell them to remove
-// the deployments: no route deletes one, so the honest advice is to archive the
-// environment instead.
+// environmentStillReferenced renders the 400 for a delete a foreign key
+// refused. It reads what actually references the environment rather than
+// trusting the constraint the error names: Postgres reports one violated
+// constraint, and when both a session and a deployment are in the way it
+// reports the older of the two, so an operator told only about the sessions
+// would clear them and find the delete still refused.
 //
-// No archived_at predicate, deliberately, and this is where the two deployment
-// refusals part company. The agent archive asks which deployments can still
-// fire; a foreign key cannot ask that. Every row counts here, and an archived
-// deployment blocks the delete exactly as a live one does — permanently, since
-// archive is terminal and nothing removes the row.
-func deploymentsBlockingEnvironment(ctx context.Context, db querier, envID string) error {
-	named, total, err := namedDeployments(ctx, db,
+// Which remedy to name is the rest of the work, and getting it wrong is
+// expensive. A live deployment can be pointed at another environment, which
+// clears the reference and lets the delete through. An archived one refuses
+// every update, so it can never be moved and the reference can never be
+// cleared. Sending an operator to archive the environment when a repoint would
+// have done trades a reversible fix for an irreversible one — nothing
+// unarchives an environment either.
+//
+// No archived_at predicate on the naming query, deliberately, and this is where
+// the two deployment refusals part company: the agent archive asks which
+// deployments can still fire, and a foreign key cannot ask that. Every row
+// blocks the delete, archived or not.
+func environmentStillReferenced(ctx context.Context, db querier, envID string) error {
+	named, deployments, err := namedDeployments(ctx, db,
 		`SELECT id, count(*) OVER () FROM deployments
 		  WHERE environment_id = $1
 		  ORDER BY created_at, id LIMIT $2`, envID, blockingDeploymentsNamed)
 	if err != nil {
 		return err
 	}
+	var sessions, stuck int
+	var envArchived bool
+	if err := db.QueryRow(ctx,
+		`SELECT (SELECT count(*) FROM sessions WHERE environment_id = $1),
+		        (SELECT count(*) FROM deployments
+		          WHERE environment_id = $1 AND archived_at IS NOT NULL),
+		        COALESCE((SELECT archived_at IS NOT NULL FROM environments WHERE id = $1), false)`,
+		envID).Scan(&sessions, &stuck, &envArchived); err != nil {
+		return err
+	}
+
+	switch {
+	case deployments == 0 && sessions == 0:
+		// The delete's own statement found a referent and this read did not.
+		// Both can be cleared concurrently — a session deleted, a deployment
+		// repointed — and the two are separate round trips, so say what
+		// happened rather than naming a referent that is no longer there.
+		return errInvalid("environment %s was still referenced when the delete ran; try again", envID)
+	case deployments == 0:
+		return errInvalid("environment %s still has sessions; delete them first", envID)
+	}
+
 	list := strings.Join(named, ", ")
-	if total > len(named) {
-		list = fmt.Sprintf("%s and %d more", list, total-len(named))
+	if deployments > len(named) {
+		list = fmt.Sprintf("%s and %d more", list, deployments-len(named))
 	}
-	if total == 1 {
-		return errInvalid(
-			"environment %s is referenced by deployment %s; deployments cannot be deleted, so archive the environment instead",
-			envID, list)
+	noun := "deployments"
+	if deployments == 1 {
+		noun = "deployment"
 	}
-	return errInvalid(
-		"environment %s is referenced by %d deployments (%s); deployments cannot be deleted, so archive the environment instead",
-		envID, total, list)
+	if stuck == 0 {
+		return errInvalid("environment %s is referenced by %d %s (%s); point each at another environment and the delete will go through",
+			envID, deployments, noun, list)
+	}
+	// Archiving the environment is what is left, and worth naming only while
+	// it has not already been done — the operator who followed this advice
+	// must not be given it again.
+	if envArchived {
+		return errInvalid("environment %s is referenced by %d %s (%s), %d of them archived and so unmovable; it can no longer be deleted",
+			envID, deployments, noun, list, stuck)
+	}
+	return errInvalid("environment %s is referenced by %d %s (%s), %d of them archived and so unmovable; it can no longer be deleted — archive it instead",
+		envID, deployments, noun, list, stuck)
 }
 
 func (s *server) deleteEnvironment(r *http.Request) (any, error) {
@@ -558,15 +597,7 @@ func (s *server) deleteEnvironment(r *http.Request) (any, error) {
 	tag, err := s.pool.Exec(ctx, `DELETE FROM environments WHERE id = $1`, id)
 	var pgErr *pgconn.PgError
 	if errors.As(err, &pgErr) && pgErr.Code == "23503" { // foreign_key_violation
-		// Five tables reference environments and three cascade, so only
-		// sessions and deployments can reach here. Which one did is the
-		// constraint's own name, the branch createSession already takes on
-		// this code — and the two answers are not interchangeable, because a
-		// session can be deleted and a deployment cannot.
-		if strings.Contains(pgErr.ConstraintName, "deployments") {
-			return nil, deploymentsBlockingEnvironment(ctx, s.pool, id)
-		}
-		return nil, errInvalid("environment %s still has sessions; delete them first", id)
+		return nil, environmentStillReferenced(ctx, s.pool, id)
 	}
 	if err != nil {
 		return nil, err

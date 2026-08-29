@@ -813,7 +813,7 @@ archived-deployment 400 (§8.1 entry 11).
 ### 5.3 Two existing handlers this plan must change
 
 - **`DELETE /v1/environments/{id}` reports a lie once deployments exist.**
-  `internal/api/environments.go:523-527` maps **any** `23503` to *"environment %s still has
+  `deleteEnvironment` mapped **any** `23503` to *"environment %s still has
   sessions; delete them first"*. With an FK from `deployments.environment_id`, an operator
   deleting an environment whose only referent is an archived deployment is told to delete
   sessions that do not exist — and since archive is terminal and we ship neither
@@ -821,11 +821,18 @@ archived-deployment 400 (§8.1 entry 11).
   `pgErr.ConstraintName`, the pattern `createSession` already uses
   (`internal/api/sessions.go:650-655`), and names the deployments. With a test.
 
-  One thing the bullet did not follow through on, settled when it landed: since nothing
-  clears the reference, the message must not say "delete them first" either. It names the
-  deployments and points at `POST /v1/environments/{id}/archive` instead, which is the only
-  thing an operator can actually do. Five tables reference `environments` and three cascade,
-  so sessions and deployments are the only two the branch has to tell apart.
+  Two things this bullet got wrong, settled when it landed. **It does not branch on the
+  constraint name.** Postgres reports one violated constraint, and with a session and a
+  deployment both in the way it reports the older one — sessions, from `0001_init.sql` — so
+  the branch would have told the operator to clear sessions that were only half the answer.
+  The message is built from what actually references the environment instead. **And nothing
+  clears the reference is false**: a *live* deployment can be pointed at another environment
+  (`POST /v1/deployments/{id}` writes `environment_id`), which clears it outright. Only an
+  *archived* deployment is permanent, because every update on one is refused. The two need
+  different advice and the difference is expensive — archiving an environment is one-way, so
+  advising it where a repoint would have worked trades a reversible fix for an irreversible
+  one. The message names the repoint while every blocker is live, and archiving only once an
+  archived blocker makes the delete impossible.
 - **`POST /v1/agents/{id}/archive` starts refusing** (§8.3 decision 7): a 400 naming the
   deployments, whenever a deployment with `archived_at IS NULL` pins the agent. An
   *archived* deployment never blocks — it is terminal and can never fire, and blocking on one
