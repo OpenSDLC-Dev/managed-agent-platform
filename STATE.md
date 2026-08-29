@@ -4,23 +4,20 @@ What is being worked on right now, and how far along it is — nothing else. **S
 
 ## Active work
 
-None.
+**Plan 37 — scheduled deployments** ([docs/plan/37_scheduled-deployments.md](./docs/plan/37_scheduled-deployments.md), [#51](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/51)), six slices. A deployment binds an agent to an environment, credentials and initial events; an optional 5-field POSIX cron schedule fires it, and every attempt is one immutable deployment run.
 
 ## Tasks
 
-None in flight. Two streams closed at once. The GCP staging lane: CD now opens and
-closes its own tracking issue for a failed deploy (#479) and for a parked-then-forgotten
-environment (#504), and `environment/`'s Terraform state moved to a bucket, so a destroy
-is no longer tied to the laptop that applied it (#478) — none of it production code, each
-landing complete in one PR rather than passing through this file, as did the three
-follow-ups those reviews spun off: neither notifier's `retry` hands a failed attempt's
-output to its caller any more (#507), the Workload Identity Federation commands in the
-deploy notes are runnable again, having asked `gcloud` for a project number it never takes
-in `--project` (#508), and the operator's coordinates are out of `docs/`, with `make
-identifiers-test` now checking it for the shapes they take (#514). And the three plan-36
-leftovers that needed no decision from anyone: the test rows slice 4 deferred (#488), its
-fifteen recording items folded into the issue tracking its twenty inferences (#78, which
-stays open as that tracker), and memory-version retention (#476), where the count the
-reference withholds is now this platform's own — the newest five. What is left of plan 36
-needs owner decisions or a live run: #475 (dreams), #495 (the deferred `self_hosted`
-acceptance transcript). Pick the next piece of work from the GitHub issue backlog.
+- **Slice 1 — CRUD, the three lifecycle actions, `internal/cron`, migration `0031`.** In
+  flight. Landed so far: the cron engine (Due/Next/Upcoming over one walk, embedded
+  `time/tzdata`, the two DST rules) and both tables. Still owed: the domain types, the
+  seven handlers, the agent-archive refusal decision 7 settled, and the
+  `DELETE /v1/environments` message that has to name the deployments blocking it.
+- **Slice 2** — extract `createSessionTx`, behavior-neutral, the plan-36-slice-5 idiom.
+- **Slice 3** — `sessions.deployment_id` (migration `0032`), the real list filter, `POST /run`.
+- **Slice 4** — the scheduler: tick, claim, fire, auto-pause, catch-up, and
+  `deployment.occurrences.skipped`.
+- **Slice 5** — the two run lists.
+- **Slice 6** — close-out docs: the security-invariant bullets and the README status line.
+
+Not started, and deliberately: webhooks ([#261](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/261)) and budgets ([#432](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/432)) are excluded from the plan and named in it.

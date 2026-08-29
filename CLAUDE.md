@@ -76,6 +76,8 @@ internal/
   secrets/    # credential-cipher seam: Cipher iface + backend/ (selection) + local/ (AES-GCM)
               #   + openbao/ (transit) + gcpkms/ (Cloud KMS)
   skills/     # skill-upload validation + canonical-zip normalization (SKILL.md frontmatter)
+  cron/       # the 5-field POSIX cron engine behind a deployment schedule; embeds
+              #   time/tzdata, because the server image ships no zoneinfo (plan 37)
   queue/      # work queue (Postgres FOR UPDATE SKIP LOCKED; redis optional later)
   identity/   # the human-auth boundary: OIDC / trusted-proxy JWT verifier, claim→role
               #   mapping, bounded JWKS cache (go-jose; no vendor SDK)
