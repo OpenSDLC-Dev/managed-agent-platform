@@ -39,22 +39,48 @@ promise to build #475 here.
 **Six slices**, each landing its own PR, its own `changelog.d/` fragment, its STATE.md
 movement and its registry entries:
 
-1. Deployment CRUD, the four action endpoints, `internal/cron`, migration `0031`.
+1. Deployment CRUD, the **three lifecycle actions** (`/archive`, `/pause`, `/unpause`),
+   `internal/cron`, migration `0031`. `POST /run` is the fourth action endpoint and lands in
+   slice 3, because it needs `createSessionTx` and `sessions.deployment_id` — both of which
+   are slices 2 and 3.
 2. `createSessionTx` extraction — behavior-neutral by construction, the plan-36-slice-5
    idiom, with the whole existing session suite as its regression test.
 3. `sessions.deployment_id` (migration `0032`), the real list filter, `POST /run`.
-4. The scheduler: tick, claim, fire, auto-pause.
-5. Catch-up, collapse accounting, and the run lists.
-6. Docs — ARCHITECTURE process topology, package reference, observability and security
-   invariants; README status line; AGENTS.md; CLAUDE.md's repo-layout tree gains
-   `internal/cron`.
+4. The scheduler: tick, claim, fire, auto-pause — **and catch-up**, because a tick cannot
+   select due work without a rule for what to do with a backlog. §3.6's window is part of
+   the candidate predicate, not a later refinement of it.
+5. The two run lists, and `deployment.occurrences.skipped`.
+6. Close-out docs: the security-invariant bullets and the README status line, both of which
+   describe behavior that only exists once slices 1-5 have all landed.
+
+**Between slices 1 and 4 a schedule is stored, echoed and never fired.** `upcoming_runs_at`
+computes correctly from slice 1 — it is a pure function of the expression — but nothing
+tries the occurrences, so *"Presence enables scheduled execution"* is false in the tree for
+the length of slices 2 and 3. That is stated rather than engineered around: the alternative
+is rejecting `schedule` on create until slice 4 and then relaxing it, which ships a
+validation rule that exists only to be deleted. Plan 36's slices 1-3 shipped the same shape
+of dormant CRUD.
+
+Each slice carries the documentation its own behavior needs, per §9's table — the package
+reference with `internal/cron` in slice 1, the process-topology and observability
+paragraphs with the scheduler in slice 4 — so slice 6 is close-out, not a documentation
+backlog.
 
 ---
 
 ## 2. Ground truth — what the sources actually say
 
-Every claim below is quoted from the local Stainless OpenAPI spec (`anthropic-openapi.yml`)
-or the pinned `anthropic-sdk-go` / `anthropic-cli` checkouts. Quotes attributed to
+Every claim below is quoted from the Stainless OpenAPI spec or the pinned
+`anthropic-sdk-go` / `anthropic-cli` checkouts. **The spec is not in this repository and
+not among the six checkouts** `docs/REFERENCE_PROJECTS.md` names: it is the artifact whose
+URL and hash are in `.stats.yml` at the SDK's pinned tag, fetched to a scratch path. Bare
+`:NNNNN` citations below are line numbers into *that* artifact and resolve only against it —
+convenient while this plan is being read, worthless a version later. So every entry that
+lands in `docs/DIVERGENCES.md` (§8.1) cites the spec **by schema name** instead, the
+convention that file already follows (`docs/DIVERGENCES.md:238-254`); it exists because
+line-range citations there have already drifted four separate times across SDK bumps
+(`docs/DIVERGENCES.md:77`). Rewriting each entry's evidence into schema-name form is part of
+the slice that lands it, where the name can be checked against the spec of the day. Quotes attributed to
 **platform.claude.com** were fetched live on 2026-08-27: `docs.claude.com` now 302-redirects
 there, the section is `managed-agents/*` rather than `agents-and-tools/managed-agents`, and
 appending `.md` to a page path returns clean source markdown. A docs page is the weakest of
@@ -211,16 +237,21 @@ and is not one of them). Each payload is exactly
 
 Checked in the spec and the SDK, found in neither:
 
-- **Daylight-saving semantics.** `grep -iE 'daylight|\bDST\b|nonexistent|ambiguous'` over
-  the whole spec returns one hit, `:14195`, about a non-existent `deployment_id`. The
+- **Daylight-saving semantics.** `grep -iE 'daylight|\bDST\b|non-existent|ambiguous'` over
+  the whole spec returns one hit, `:14195`, about a non-existent `deployment_id`. (Spelled
+  `nonexistent`, the pattern returns zero — the spec hyphenates.) The
   `BetaManagedAgentsSchedule` and `…ScheduleParams` doc comments contain no DST text. The
   only adjacent published statement is *"Literal wall-clock matching in the configured
   timezone"* (`:22780`).
 - **Catch-up, backfill or misfire policy after downtime.**
 - **Overlap or concurrency policy.** `grep -i 'overlap\|concurren'` returns the boilerplate
   409 *"Aborted - The operation was aborted due to concurrency issue"* on every path plus
-  two substantive but unrelated hits at `:3967` and `:3970` (*"Expected last_heartbeat for
-  conditional update (optimistic concurrency)"*). Nothing about deployments.
+  seven substantive hits, none of them deployment-related: `:3967` and `:3970`
+  (work-item `last_heartbeat` preconditions), `:22168` and `:28452` (memory and agent
+  optimistic-concurrency preconditions), `:28274` (agent version, *"prevent concurrent
+  overwrites"*), and `:27373` and `:27434` — the spec's only substantive use of the word,
+  *"Overlapping activity…"*, describing a session's `active_seconds` accounting. Nothing
+  about deployment scheduling.
 - **Retention of run records.** `grep -iE 'retention|retained|purged'` has **exactly one
   hit in the entire spec** — `:8569`, a tunnel-certificate sentence. There is no
   memory-version retention prose in this file, and no run-retention rule.
@@ -259,7 +290,11 @@ INFERRED (§8.1 entry 15).
 
 `timezone` is validated at create and update time by `time.LoadLocation`; an unknown
 identifier is a 400, which is what *"Validated against the IANA timezone database"*
-(`:22794`) requires.
+(`BetaManagedAgentsCronScheduleParams.timezone`) requires. Two of its inputs are refused
+**before** the call, because Go accepts both and neither is an IANA identifier: the empty
+string, which `LoadLocation` reads as UTC while the field is required, and `Local`, which
+resolves to whatever the host is configured for and would make one deployment fire at
+different instants on different replicas.
 
 Two DST rules — a wall clock that does not exist on the spring-forward day is **skipped**,
 a wall clock that occurs twice on the fall-back day **fires twice** — are the two answers a
@@ -281,12 +316,29 @@ guarantee is exercised outside the gate host too.
 ### 3.3 `upcoming_runs_at` and `last_run_at`
 
 `upcoming_runs_at` is computed on every read: five occurrences whenever five exist inside a
-four-year search bound, `[]` once `archived_at` is set, populated while paused — the first
-two behaviors of that triple are published verbatim at `:22765`, the "always five" is not
-(§8.1 entry 16).
+**twelve-year** search bound, `[]` once `archived_at` is set, populated while paused — the
+first two behaviors of that triple are published verbatim on
+`BetaManagedAgentsCronSchedule.upcoming_runs_at`, the "always five" is not (§8.1 entry 16).
+
+The bound is twelve years rather than a round four because the sparsest *satisfiable*
+5-field expression is `0 0 29 2 *`, and the Gregorian rule that 2100 is not a leap year puts
+an **eight-year** gap in it. A four-year window would return `[]` for such a schedule while
+it is active, contradicting the published non-empty rule.
+
+That leaves the expressions with **no** occurrence at all. `0 0 31 2 *` parses, every field
+is in range, and February never has 31 days; `upcoming_runs_at` would be `[]` for an active
+deployment, which is the shape the wire reserves for an archived one. So create and update
+**reject an expression with no occurrence inside the twelve-year bound** with a 400 rather
+than storing a schedule that can never fire. Registered as INFERRED (§8.1 entry 27): the
+reference publishes no validation rule for an unsatisfiable expression, and its own
+non-empty guarantee is the argument that it must have one.
 
 `last_run_at` is **derived, not stored**: `MAX(scheduled_at)` over this deployment's runs
-where the trigger was `schedule` **and** `session_id IS NOT NULL`. Three published rules
+where the trigger was `schedule` **and** `session_id IS NOT NULL`. That second conjunct — a
+fire that failed to create a session does not move the field — is **INFERRED**, not
+published: the schema says *"the most recent scheduled run actually started"* and never says
+what a failed start does (§8.1 entry 13). §7 asserts it with a failed-fire case, because it
+is the half of the expression no source confirms. Three published rules
 fall out of that one expression rather than needing three code paths — *"Manual runs do not
 update this"* (manual runs have no `scheduled_at`), *"preserved after the deployment is
 archived"* (archive touches no run row), and *"Null until one completes"* (no successful
@@ -357,7 +409,14 @@ costs three deployment surfaces (`values.yaml`, `controlplane-deployment.yaml`,
 tune. If an operator asks, the knob is a two-line change then.
 
 Because the collapse is a real loss of intermediate occurrences, it is **counted**, not
-silent: §3.8's `deployment.occurrences.skipped`. Note the loss is bounded and specific —
+silent: §3.8's `deployment.occurrences.skipped`. **The counter rides the claim rather than
+the tick**, or it would count the same collapse once per replica per tick: the winner of
+§4.1 step 3 knows how many occurrences fall between the watermark it read and the one it
+just claimed, and increments by that number inside the transaction it won. A replica that
+loses the claim, or finds nothing due, adds nothing. The one collapse this cannot attribute
+is an occurrence that ages out of the window with no later fire at all — no claim is ever
+won, so nothing counts it — which is the same best-effort boundary §4.1 draws around
+liveness. Note the loss is bounded and specific —
 with a per-occurrence claim and a one-hour window, a tick that runs late *delays* a fire
 rather than dropping it, because the next tick still finds the occurrence due and inside the
 window. What a collapse drops is the older occurrences of a backlog on a schedule finer than
@@ -371,7 +430,7 @@ catch-up window is the only thing that bounds a newly-tightened expression from 
 ### 3.7 Permission policy under a schedule
 
 Agent-toolset defaults are `always_allow` and MCP-toolset defaults are `always_ask`
-(`internal/domain/agent.go:26-28`). A scheduled session whose agent has MCP tools therefore
+(`internal/domain/agent.go:27-29`). A scheduled session whose agent has MCP tools therefore
 parks at 03:00 on a confirmation no human will answer, goes `idle` with a pending ask, and
 is never reaped (`reaper.go:293-295`). We do **not** refuse such a deployment at create time
 — a human who approves during the working day is a legitimate setup, and refusing would be a
@@ -394,9 +453,12 @@ Three instruments, named by exported constants asserted by the tests — the
 `MetricMemoryVersionsPruned` idiom, which exists so a test can pin the exact string
 (`internal/api/memoryretention.go:42-45`):
 
-- `deployment.fires` — counted by outcome (`created`, `failed`) and, on failure, by
-  run-error type. There is no skipped outcome: decision 10 declines the overlap brake, so a
-  due occurrence always attempts a session.
+- `deployment.fires` — counted by outcome: `created`, `failed` (a classified error was
+  recorded, sub-counted by run-error type) and `abandoned` (§4.1 step 7 rolled the whole
+  transaction back, so there is no run row and no error type to label it with). Without the
+  third, an infrastructure failure is invisible in the only place that counts fires. There
+  is no *skipped* outcome: decision 10 declines the overlap brake, so a due occurrence
+  always attempts a session.
 - `deployment.occurrences.skipped` — the §3.6 collapse count, the one number that makes a
   dropped backlog debuggable.
 - `deployment.tick.duration` — a tick that approaches the tick interval is the signal that
@@ -415,10 +477,19 @@ absent from it).
 The scheduler is a **controlplane background sweep** — a ticker calling one stateless
 function — not a fifth binary. §8.3 decision 1 argues the alternative.
 
-Exactly-once across replicas rests on **one unique index and no leader election**, because
-this platform has leader election nowhere: the reference publishes its own idempotency key,
-*"At most one run is recorded per (deployment_id, scheduled_at) pair"* (`:25955`), and a
-partial unique index on exactly that pair is that key.
+The guarantee is **at most one committed run per occurrence**, not one fire per due
+occurrence, and it rests on **one unique index and no leader election**, because this
+platform has leader election nowhere: the reference publishes its own idempotency key,
+*"At most one run is recorded per (deployment_id, scheduled_at) pair"*
+(`BetaManagedAgentsScheduleTriggerContext.scheduled_at`), and a partial unique index on
+exactly that pair is that key.
+
+Stating it as *exactly*-once would overclaim, and the three ways an occurrence gets no run
+are all deliberate: an unclassified failure rolls its claim back (step 7 below), catch-up
+collapses a backlog to its most recent member (§3.6), and an occurrence older than the
+catch-up window is never selected. Liveness is best-effort inside that window; **uniqueness
+is absolute**. §3.8's `deployment.occurrences.skipped` is what makes the difference
+observable.
 
 **There is no advisory lock.** An earlier draft took one, on the reaper's model. The reaper
 needs its lock because it races `provisionSandbox`, a **non-database** actor holding a
@@ -434,16 +505,25 @@ references.
 **The fire, in one transaction:**
 
 1. `BEGIN`.
-2. `INSERT INTO deployment_runs (…, deployment_id, trigger_type='schedule', scheduled_at, agent, session_id=NULL, error=NULL) … ON CONFLICT DO NOTHING RETURNING id`. **Zero rows returned means another replica owns this occurrence** — roll back and return a clean `nil`. No `23505` ever escapes as a 500.
-3. `SAVEPOINT fire`; run `createSessionTx` (slice 2) in the same transaction.
-4. On success: `UPDATE deployment_runs SET session_id = …`; `COMMIT`.
-5. On a **classified** failure (an archived environment, a missing vault, a self-hosted resource): `ROLLBACK TO SAVEPOINT fire` — which discards the half-made session and keeps the claim — then `UPDATE deployment_runs SET error = {type, message}`, auto-pause if the type is one of the fourteen, and `COMMIT`.
-6. On an **unclassified** infrastructure failure: roll the whole transaction back. The occurrence stays unclaimed and the next tick retries it, bounded by the catch-up window.
+2. `SELECT 1 FROM deployments WHERE id = $1 AND archived_at IS NULL AND paused_at IS NULL FOR SHARE`. **Zero rows means the deployment was archived or paused after the candidate scan read it** — roll back, return `nil`. The candidate scan and the fire are separate statements, so without this re-read a fire could create a session for a deployment whose archive had already returned 200, and archive is terminal. Archive, pause and unpause take `FOR UPDATE` on the same row, so the two cannot interleave; this is the discipline decision 7 applies to the agent row, applied here to the deployment's own.
+3. `INSERT INTO deployment_runs (…, deployment_id, trigger_type='schedule', scheduled_at, agent, session_id=NULL, error=NULL) … ON CONFLICT (deployment_id, scheduled_at) WHERE scheduled_at IS NOT NULL DO NOTHING RETURNING id`. **Zero rows returned means another replica owns this occurrence** — roll back and return a clean `nil`. **The conflict target is named on purpose.** A bare `ON CONFLICT DO NOTHING` swallows *every* unique violation — an id collision, a constraint some later migration adds — and reports each as a lost race, which silently drops a fire that should have been a 500. Naming the target means only the occurrence claim is absorbed and anything else still raises.
+4. `SAVEPOINT fire`; run `createSessionTx` (slice 2) in the same transaction.
+5. On success: `UPDATE deployment_runs SET session_id = … WHERE id = $run RETURNING id`. The settlement **must** return exactly one row; zero aborts the transaction rather than committing a run with both columns null. `COMMIT`.
+6. On a **classified** failure (an archived environment, a missing vault, an archived memory store — §5.2 is the inventory): `ROLLBACK TO SAVEPOINT fire` — which discards the half-made session and keeps the claim — then the same one-row-returning `UPDATE … SET error = {type, message}`, auto-pause if the type is one of the fourteen, and `COMMIT`.
+7. On an **unclassified** infrastructure failure: roll the whole transaction back. The occurrence stays unclaimed, and a later tick retries it **only while it is still the most recent due occurrence inside the catch-up window** — once a newer occurrence commits a run, the watermark has passed it and it is counted as collapsed (§4.2), not retried forever.
 
-The savepoint is what makes step 5 possible without a second transaction, and a second
+The savepoint is what makes step 6 possible without a second transaction, and a second
 transaction is what would let a crash leave a run row with `session_id` and `error` both
-null — a shape the reference forbids (`:23230-23271`, *"Exactly one of session_id or error
-is non-null"*).
+null — a shape the reference forbids (`BetaManagedAgentsDeploymentRun`, *"Exactly one of
+session_id or error is non-null"*).
+
+**That invariant is enforced by construction, not by the database, and that is a choice.**
+One transaction plus a settlement that must affect exactly one row leaves no path that
+commits a null/null row; a test asserts it over every branch of §5.2. A database-level
+guarantee is possible but costs more than it buys here: `CHECK` cannot be deferred in
+Postgres, so the only option is a `DEFERRABLE INITIALLY DEFERRED` constraint trigger, and
+one trigger for one invariant on a table with exactly one writer is more machinery than the
+risk warrants.
 
 No cipher call happens at fire time: a `github_repository` resource's `authorization_token`
 is sealed once, at deployment create/update, outside the transaction (§5.1), and the fire
@@ -466,7 +546,25 @@ replicas could never recover it — one misconfigured host silently shifting the
 schedule. With one shared clock that failure class does not exist, and no skew clamp is
 needed.
 
-**No derived state is stored on the deployment row.** Both `last_run_at` (§3.3) and the
+**The watermark is a floor, not a retry queue.** Because it is `MAX(scheduled_at)` over
+committed runs, a later occurrence that commits while an earlier one is rolling back moves
+the floor past the earlier one, and that earlier occurrence is never retried. Two replicas
+firing adjacent occurrences is enough: A claims 10:00 and stalls, B commits 11:00, A rolls
+back. This is bounded and counted rather than fixed — the alternative is durable pending
+claims, a second lifecycle on a table whose whole value is that it holds settled history —
+so §4.1 step 7 says "only while it is still the most recent due occurrence", and the loss
+increments `deployment.occurrences.skipped` like any other collapse.
+
+**One column of scheduling state is stored, and only one:** `schedule_resumed_at`, set from
+the database clock at create and at every unpause. The candidate predicate requires
+`scheduled_at > schedule_resumed_at`. Without it the published unpause rule is
+unimplementable: no run row advances the watermark while a deployment is paused, so a
+deployment paused at 08:00 and unpaused at 10:05 would immediately fire 10:00 — backfilling
+exactly the trigger *"Unpause resumes the schedule from the next scheduled occurrence.
+Missed triggers are not backfilled"* forbids (§3.6). The same column stops a newly created
+deployment from firing occurrences that predate it.
+
+**No other derived state is stored on the deployment row.** Both `last_run_at` (§3.3) and the
 due-watermark (`MAX(scheduled_at)` over *all* scheduled runs, which is what stops a failed
 occurrence being retried every tick) are computed from `deployment_runs` in the candidate
 query, via a `LEFT JOIN LATERAL` over the unique index the plan adds anyway. Two denormalized
@@ -527,7 +625,7 @@ session-create's work**, not because it looks like a read:
 | `GET /v1/deployment_runs` · `/{id}` | `RoleViewer` |
 
 - **Unknown keys** are refused by `rejectUnknownKeys` on create and update, the
-  `createSession` precedent (`internal/api/sessions.go:518-521`) — which is how `budget`
+  `createSession` precedent (`internal/api/sessions.go:517-520`) — which is how `budget`
   becomes a 400 (§8.1 entry 2).
 - **The four action endpoints ignore the request body entirely**: the reference declares no
   `requestBody` and its SDK params carry only the beta header (§2.1), so there is nothing to
@@ -550,6 +648,12 @@ session-create's work**, not because it looks like a read:
   deployment does not configure"* (`internal/api/events.go:728`). Refusing once beats
   failing every nightly fire. Grading on a `self_hosted` environment stays transcript-only,
   the standing behavior of `docs/DIVERGENCES.md:102`.
+- **Archive is terminal for every mutating action.** `POST /v1/deployments/{id}` (update),
+  `/pause`, `/unpause` and `/run` all answer 400 `deployment %s is archived`; `GET` and the
+  list (with `include_archived`) still return the row. Leaving update unspecified would
+  leave an implementer to invent whether hidden configuration stays mutable on a row nothing
+  can ever fire. §8.1 entry 11 covers all four (the reference publishes a status code for
+  none of them).
 - **Archived deployments render `status: "active"`, `paused_reason: null`,
   `upcoming_runs_at: []`, `last_run_at` preserved.** That is forced by composing two
   published sentences — *"Archived deployments report `active` with `archived_at` set"*
@@ -581,13 +685,24 @@ sets the deployment's pause columns. Two published constraints shape the mapping
 | Cause | Run error type | Pauses? |
 |---|---|---|
 | Environment archived (`sessions.go:591`) | `environment_archived_error` | yes |
-| Environment row gone | `environment_not_found_error` | yes |
+| Environment row gone | `environment_not_found_error` | **unreachable** — the FK refuses the delete (§5.3), so no stored deployment can observe it (§8.1 entry 26) |
 | Agent version archived (`sessions.go:310`) | `agent_archived_error` | yes, and only for a roster member (§8.1 entry 18) |
 | Vault missing / archived (`sessions.go:435`) | `vault_not_found_error` / `vault_archived_error` | yes |
 | Memory store archived (`memorystores.go:200`) | `memory_store_archived_error` | yes |
 | File resource gone | `file_not_found_error` | yes |
 | Other resource gone | `session_resource_not_found_error` | yes |
 | Anything unclassified | not recorded — the transaction rolls back and the tick retries | — |
+
+Three of the fourteen pausing types are produced by no path above, each for its own reason
+and each registered: `environment_not_found_error` (the FK, entry 26),
+`workspace_archived_error` and `organization_disabled_error` (scope reserved but not
+enforced, entry 6), and `mcp_egress_blocked_error` (the address guard runs at dial time
+inside the executor, entry 5). `session_creation_rejected_error` is likewise produced by
+nothing: the table routes every unclassified rejection through a full rollback with no run
+row, so the type's non-retryable cause has no mapped source here (entry 14). That is five
+of the sixteen run-error types with no emitter, which is why §7 asserts the
+`paused_error_type` mapping on two properties that can fail rather than against a copy of
+itself.
 
 `skill_not_found_error` is in both unions and is **not** obviously unreachable here, unlike
 the multi-tenant variants: skills are implemented (`skill_`/`skillver_` prefixes,
@@ -620,9 +735,13 @@ archived-deployment 400 (§8.1 entry 11).
   It is a single `UPDATE … RETURNING` on the pool today with no transaction
   (`internal/api/agents.go:578-584`), and it still becomes a transaction as its own
   behavior-neutral step — not for a cascade now, but for the check: between "no deployment
-  pins this agent" and the archive write, a concurrent create could add one. The archive
-  takes `FOR UPDATE` on the agent row and deployment create takes `FOR SHARE`, the
-  discipline `internal/api/sessions.go:583` already applies to the environment row. There is
+  pins this agent" and the archive write, a concurrent write could add one. The archive takes
+  `FOR UPDATE` on the agent row; **both deployment create and deployment update take
+  `FOR SHARE` on the agent they pin**, and update rechecks that it is not archived while
+  holding the lock. Create alone is not enough — `agent` on update *"Cannot be cleared"* but
+  can be repinned, so an update racing the archive would leave a live deployment pinning an
+  archived agent and make entry 18's claim false. This is the discipline
+  `internal/api/sessions.go:583` already applies to the environment row. There is
   no version-level archive route to consider — `POST /v1/agents/{id}/archive` is the only one
   (`internal/api/server.go:55`), and `resolveAgent` refuses an archived agent wholesale
   (`internal/api/sessions.go:309-310`).
@@ -676,12 +795,18 @@ Four conventions the compiler will not enforce:
 - **`scheduled_at` is `timestamptz`**, stated in the DDL comment with its reason: §3.2's
   fall-back rule produces two rows only if the column holds two distinct UTC instants. Stored
   as a local wall clock the second 01:30 collides on the unique index and is silently
-  swallowed — a wrong answer that looks exactly like a right one.
+  swallowed — a wrong answer that looks exactly like a right one. §7 asserts the catalog type
+  directly, because the behavioral test alone cannot prove it.
+- **The DDL comment states the pruning constraint** the run table's double duty creates: the
+  row is history *and* the occurrence claim *and* the watermark, so deleting one newer than
+  the catch-up window un-claims an occurrence a tick can then fire again (§9).
 
 `deployments` stores `paused_at`, `paused_kind` (`'manual' | 'error'`) and
 `paused_error_type` under a `CHECK` admitting all fourteen values; `status` and
-`paused_reason` are rendered from them. It stores **no** `last_run_at` and no watermark
-(§4.2).
+`paused_reason` are rendered from them. It stores exactly one piece of scheduling state,
+`schedule_resumed_at timestamptz NOT NULL` — written from the database clock at create and
+at every unpause, and the reason the published no-backfill-on-unpause rule is implementable
+(§4.2). It stores **no** `last_run_at` and no watermark (§4.2).
 
 ---
 
@@ -731,8 +856,11 @@ the first's transaction commits, using the `reapHookAfterClassify` idiom
 
 **DST.** Fixed-zone contract tables for `America/New_York` and `Australia/Lord_Howe` (a
 30-minute offset, which catches arithmetic that assumes whole hours). The fall-back case
-asserts **two rows with different `scheduled_at`**, which is the assertion that would fail
-if the column were a wall clock. Test against transitions whose rules are decades old rather
+asserts **two rows with different `scheduled_at`**. That behavioral assertion is necessary
+but not sufficient: a driver can round-trip two distinct instants through a
+`timestamp without time zone` column without colliding, so the migration test also asserts
+the catalog type — `information_schema.columns.data_type` for `deployment_runs.scheduled_at`
+is `timestamp with time zone` — which is the only check that actually pins the DDL. Test against transitions whose rules are decades old rather
 than a freshly-changed zone, so a host with slightly stale tzdata does not produce a
 spurious red.
 
@@ -741,7 +869,7 @@ spurious red.
 
 **The `paused_error_type` mapping is asserted on two properties that can fail**, not against
 a literal copy of itself — this repo names that anti-pattern in its own build, *"an
-assertion that cannot fail is a comment"* (`Makefile:348`), and it is worse here because
+assertion that cannot fail is a comment"* (`Makefile:416-417`), and it is worse here because
 five of the fourteen values are produced by nothing (§8.1 entries 4-6, 18, 21). The two
 properties: every value in the Go mapping is admitted by the migration's `CHECK` (queried
 through `pg_get_constraintdef`), and every reachable failure path in §5.2 produces a value
@@ -756,7 +884,11 @@ wiring `api` + `brain` + `executor` + `queue` + a scripted provider + real Docke
 family whose entire justification is wire compatibility would otherwise get zero executable
 proof that the typed SDK can drive it, with a hand-pasted `ant` transcript — which cannot
 regress — as its only end-to-end evidence. The case drives `Deployments.New` / `Get` /
-`List` / `Run` and stops at the run record: no model call, no Docker.
+`List` / `Run` and stops at the run record. "No model call, no Docker" is not automatic:
+`initial_events` is required, and session creation enqueues a `queue.ModelTurn` in the same
+transaction, while `newStack` starts the brain and executor loops — so the case builds its
+stack **without those two consumers**, or drains the queued turn before asserting. Otherwise
+the assertion races a model call it did not intend to make.
 
 **No new eval.** A deployment is control-plane-only; the model never sees one. Plan 36's
 slices 1-3 (also pure CRUD) added none, and its slice 4 added two only because memory
@@ -780,7 +912,14 @@ before re-running.
 
 ### 8.1 Entries for `docs/DIVERGENCES.md`
 
-Format per the file's own legend at `:10`. The head segment of `Tracked:` before the first
+**The entries below are bullets carrying an explicit `Entry N` label, not an ordered list.**
+The numbers are registry identifiers referenced from eighteen places in this document, and
+they are deliberately non-sequential — entry 10 never existed and entry 20 was deleted when
+decision 10 was settled. Under CommonMark only a list's first marker sets its start and the
+rest are renumbered, so an ordered list would render "entry 21" as *8* while every
+cross-reference still said 21. Bullets keep the identifier and the rendered text agreeing.
+
+Format per the file's own legend at `docs/DIVERGENCES.md:10`. The head segment of `Tracked:` before the first
 top-level `;` must name an **open** issue; every INFERRED entry requires a live tracker, and
 where that tracker is shared — #78 above all — it carries a parenthetical naming what *this*
 entry leaves open. Each entry lands in the PR that introduces its behavior.
@@ -797,28 +936,32 @@ entry leaves open. Each entry lands in the PR that introduces its behavior.
 
 **New CONFIRMED entries:**
 
-1. `- **Deployment and deployment-run webhooks — the nine deployment.* / deployment_run.* events are never delivered (plan 37 slice 1)** — The reference emits deployment.created / .updated / .paused / .unpaused / .archived / .deleted and deployment_run.started / .succeeded / .failed, each carrying only {type, id, organization_id, workspace_id}; this platform has no webhook subsystem at all, so none of the nine is delivered. Whatever delivers session.outcome_evaluation_ended will deliver these nine by the same machinery. *Evidence: anthropic-sdk-go betawebhook.go:180 and :272 (two of the nine data types); anthropic-openapi.yml:35175-35179 and :35181-35184 (the nine discriminator entries; :35180 between them is agent.updated), :34909-34919 (the four-field payload, all required); a full-tree grep of this repo finds no webhook code.* *Tracked: #261 (the webhook subsystem itself; the deployment family is the second event group waiting on it, not the first).*`
+- **Entry 1.** `- **Deployment and deployment-run webhooks — the nine deployment.* / deployment_run.* events are never delivered (plan 37 slice 1)** — The reference emits deployment.created / .updated / .paused / .unpaused / .archived / .deleted and deployment_run.started / .succeeded / .failed, each carrying only {type, id, organization_id, workspace_id}; this platform has no webhook subsystem at all, so none of the nine is delivered. Whatever delivers session.outcome_evaluation_ended will deliver these nine by the same machinery. *Evidence: anthropic-sdk-go betawebhook.go:180 and :272 (two of the nine data types); anthropic-openapi.yml:35175-35179 and :35181-35184 (the nine discriminator entries; :35180 between them is agent.updated), :34909-34919 (the four-field payload, all required); a full-tree grep of this repo finds no webhook code.* *Tracked: #261 (the webhook subsystem itself; the deployment family is the second event group waiting on it, not the first).*`
 
-2. `- **POST /v1/deployments and the update route reject budget (plan 37 slice 1)** — The reference stamps a deployment's spend ceiling onto each session it starts; this platform has no session budgets, so budget is absent from both allow-lists and a request carrying it is a 400 unknown field, exactly as POST /v1/sessions answers today. This one breaks a real client path rather than an obscure field: the ant CLI exposes --budget, --budget.max-list-cost and --budget.type on both beta:deployments create and beta:deployments update, so those invocations 400 against this platform. Storing and echoing an unenforced cap would be worse: an operator would believe a ceiling exists. The Deployment object never emits the key, which is the reference's own shape for an unset budget — the one property outside its 16-entry required list, "Absent when no budget is set". *Evidence: anthropic-openapi.yml:22337-22338 (create), :28432-28433 (update), :22986-23003 and :23088-23091 (optional, absent when unset); anthropic-cli pkg/cmd/betadeployment.go:45-49 and :127-135 (create flags), :241-243 and :311-319 (update flags); internal/api/sessions.go rejectUnknownKeys.* *Tracked: #432.*`
+- **Entry 2.** `- **POST /v1/deployments and the update route reject budget (plan 37 slice 1)** — The reference stamps a deployment's spend ceiling onto each session it starts; this platform has no session budgets, so budget is absent from both allow-lists and a request carrying it is a 400 unknown field, exactly as POST /v1/sessions answers today. This one breaks a real client path rather than an obscure field: the ant CLI exposes --budget, --budget.max-list-cost and --budget.type on both beta:deployments create and beta:deployments update, so those invocations 400 against this platform. Storing and echoing an unenforced cap would be worse: an operator would believe a ceiling exists. The Deployment object never emits the key, which is the reference's own shape for an unset budget — the one property outside its 16-entry required list, "Absent when no budget is set". *Evidence: anthropic-openapi.yml:22337-22338 (create), :28432-28433 (update), :22986-23003 and :23088-23091 (optional, absent when unset); anthropic-cli pkg/cmd/betadeployment.go:45-49 and :127-135 (create flags), :241-243 and :311-319 (update flags); internal/api/sessions.go rejectUnknownKeys.* *Tracked: #432.*`
 
-3. `- **Scheduled fires apply no jitter (plan 37 slice 4, decision 6)** — The reference offsets each fire by a small per-schedule jitter to spread a multi-tenant fleet's load. A self-hosted single-organization deployment has nothing to spread, so we fire at the first tick that sees an occurrence due, which lands 0-30 seconds after it and satisfies the reference's own published claim that a run starts "at or shortly after its listed time". scheduled_at still records the exact pre-jitter cron match, so the wire value is identical either way. *Evidence: anthropic-openapi.yml:22765 ("Each fire is offset by a small per-schedule jitter, so a run will actually start at or shortly after its listed time"), :25955 (scheduled_at is the pre-jitter instant); platform.claude.com managed-agents/scheduled-deployments (fetched 2026-08-27 — the 15% / 5-second / 9-minute quantification).*`
+- **Entry 3.** `- **Scheduled fires apply no jitter (plan 37 slice 4, decision 6)** — The reference offsets each fire by a small per-schedule jitter to spread a multi-tenant fleet's load. A self-hosted single-organization deployment has nothing to spread, so we fire at the first tick that sees an occurrence due, which lands 0-30 seconds after it and satisfies the reference's own published claim that a run starts "at or shortly after its listed time". scheduled_at still records the exact pre-jitter cron match, so the wire value is identical either way. *Evidence: anthropic-openapi.yml:22765 ("Each fire is offset by a small per-schedule jitter, so a run will actually start at or shortly after its listed time"), :25955 (scheduled_at is the pre-jitter instant); platform.claude.com managed-agents/scheduled-deployments (fetched 2026-08-27 — the 15% / 5-second / 9-minute quantification).*`
 
-4. `- **session_rate_limited_error is never recorded (plan 37 slice 4)** — The reference throttles session creation and records the rejection as a failed run that does not pause the schedule. This platform imposes no session-creation rate limit at all, so the type's only cause never arises and nothing produces it; it is admitted by the store so a future emitter needs no migration. An earlier draft reused the type to mark a scheduled fire skipped for overlap, which decision 10 declined — this platform installs no overlap brake, so there is no second cause either. *Evidence: anthropic-openapi.yml:26657-26666 ("Session creation was rejected due to rate limiting. The schedule keeps firing; subsequent runs may succeed."), :25892-25907 and :23193-23206 (the type is one of the two the pausing union omits); no rate limiter exists in internal/api.* *Tracked: #46 (per-org rate limiting on the management API; when it lands, this type gains its reference cause).*`
+- **Entry 4.** `- **session_rate_limited_error is never recorded (plan 37 slice 4)** — The reference throttles session creation and records the rejection as a failed run that does not pause the schedule. This platform imposes no session-creation rate limit at all, so the type's only cause never arises and nothing produces it; it is admitted by the store so a future emitter needs no migration. An earlier draft reused the type to mark a scheduled fire skipped for overlap, which decision 10 declined — this platform installs no overlap brake, so there is no second cause either. *Evidence: anthropic-openapi.yml:26657-26666 ("Session creation was rejected due to rate limiting. The schedule keeps firing; subsequent runs may succeed."), :25892-25907 and :23193-23206 (the type is one of the two the pausing union omits); no rate limiter exists in internal/api.* *Tracked: #46 (per-org rate limiting on the management API; when it lands, this type gains its reference cause).*`
 
-5. `- **mcp_egress_blocked_error is never recorded at fire time (plan 37 slice 4)** — The reference fails a run when an MCP server host the agent uses is blocked by the environment's network policy. This platform's address guard runs at dial time inside the executor, not at session creation, so a blocked host surfaces as a tool error inside a running session rather than as a failed deployment run. *Evidence: anthropic-openapi.yml:24904-24920 ("An MCP server host used by the deployment's agent is blocked by the environment's network policy"); internal/dialguard (its three live call sites are the vault probe, the MCP client's DefaultClient and the token-endpoint refresh — none of them session creation).*`
+- **Entry 5.** `- **mcp_egress_blocked_error is never recorded at fire time (plan 37 slice 4)** — The reference fails a run when an MCP server host the agent uses is blocked by the environment's network policy. This platform's address guard runs at dial time inside the executor, not at session creation, so a blocked host surfaces as a tool error inside a running session rather than as a failed deployment run. *Evidence: anthropic-openapi.yml:24904-24920 ("An MCP server host used by the deployment's agent is blocked by the environment's network policy"); internal/dialguard (its three live call sites are the vault probe, the MCP client's DefaultClient and the token-endpoint refresh — none of them session creation).*`
 
-6. `- **workspace_archived_error and organization_disabled_error are never recorded (plan 37 slice 4)** — Both describe a scope this platform reserves but does not enforce: org_id / workspace_id / project_id carry single-tenant defaults on every top-level table, deployments included, and no query filters on them. The store admits both values so a future emitter needs no migration. *Evidence: anthropic-openapi.yml:29161 and :25626 (the two run-error schemas), :23193-23206 (both in the pausing fourteen); internal/store/store.go:34-42 (reserved, not enforced).* *Tracked: #56.*`
+- **Entry 6.** `- **workspace_archived_error and organization_disabled_error are never recorded (plan 37 slice 4)** — Both describe a scope this platform reserves but does not enforce: org_id / workspace_id / project_id carry single-tenant defaults on every top-level table, deployments included, and no query filters on them. The store admits both values so a future emitter needs no migration. *Evidence: anthropic-openapi.yml:29161 and :25626 (the two run-error schemas), :23193-23206 (both in the pausing fourteen); internal/store/store.go:34-42 (reserved, not enforced).* *Tracked: #56.*`
 
-7. `- **The 1,000-scheduled-deployments-per-organization cap is not enforced (plan 37 slice 1)** — The reference caps a customer at 1,000 scheduled deployments and directs the rest to support. A self-hosted operator owns their own capacity, and a limit we cannot tune for them is a limit that only ever fails a legitimate request. The cap appears in neither the spec nor the SDK. *Evidence: platform.claude.com managed-agents/scheduled-deployments (fetched 2026-08-27 — "A maximum of 1,000 scheduled deployments is supported per organization."); anthropic-openapi.yml (no maximum on any deployment count).*`
+- **Entry 7.** `- **The 1,000-scheduled-deployments-per-organization cap is not enforced (plan 37 slice 1)** — The reference caps a customer at 1,000 scheduled deployments and directs the rest to support. A self-hosted operator owns their own capacity, and a limit we cannot tune for them is a limit that only ever fails a legitimate request. The cap appears in neither the spec nor the SDK. *Evidence: platform.claude.com managed-agents/scheduled-deployments (fetched 2026-08-27 — "A maximum of 1,000 scheduled deployments is supported per organization."); anthropic-openapi.yml (no maximum on any deployment count).*`
 
-21. `- **skill_not_found_error is never recorded (plan 37 slice 4)** — Unlike the multi-tenant variants this one has a live surface here: skills are implemented, so an agent's skill reference can genuinely be missing. The fire validates exactly what POST /v1/sessions validates and no more, and session create does not resolve an agent's skill references — so a missing skill fails inside the running session's materialization rather than as a failed deployment run, and the type is produced by nothing. *Evidence: anthropic-openapi.yml:27461 (BetaManagedAgentsSkillNotFoundRunError), :23202 (in the pausing fourteen); internal/api/sessions.go createSession (no skill resolution); internal/executor/telemetry.go (skills materialization outcomes, which is where a missing skill surfaces).*`
+- **Entry 21.** `- **skill_not_found_error is never recorded (plan 37 slice 4)** — Unlike the multi-tenant variants this one has a live surface here: skills are implemented, so an agent's skill reference can genuinely be missing. The fire validates exactly what POST /v1/sessions validates and no more, and session create does not resolve an agent's skill references — so a missing skill fails inside the running session's materialization rather than as a failed deployment run, and the type is produced by nothing. *Evidence: anthropic-openapi.yml:27461 (BetaManagedAgentsSkillNotFoundRunError), :23202 (in the pausing fourteen); internal/api/sessions.go createSession (no skill resolution); internal/executor/telemetry.go (skills materialization outcomes, which is where a missing skill surfaces).*`
 
-22. `- **A deployment configuring resources against a self_hosted environment is accepted and fires (plan 37 slice 1)** — The reference pauses such a deployment with self_hosted_resources_unsupported_error, because a self-hosted environment "cannot mount them". This platform already accepts a superset at session level — file and github_repository alongside memory_store on self_hosted — so the precondition the reference pauses on is not one this platform holds, and the type is produced by nothing. The consequence is real and worth stating: a github_repository on a self_hosted deployment materializes nothing and the agent is not told, so a schedule can produce a session whose repository is absent, every night. That is the standing no-mount of #322 under a timer, not a new gap. *Evidence: anthropic-openapi.yml:26006-26021 (both variants, "The deployment configures resources, but its environment is self-hosted and cannot mount them"), :23205 and :25906 (in both unions); docs/DIVERGENCES.md:127 (the accepted superset) and :104 (the silent no-mount).* *Tracked: #322.*`
+- **Entry 22.** `- **A deployment configuring resources against a self_hosted environment is accepted and fires (plan 37 slice 1)** — The reference pauses such a deployment with self_hosted_resources_unsupported_error, because a self-hosted environment "cannot mount them". This platform already accepts a superset at session level — file and github_repository alongside memory_store on self_hosted — so the precondition the reference pauses on is not one this platform holds, and the type is produced by nothing. The consequence is real and worth stating: a github_repository on a self_hosted deployment materializes nothing and the agent is not told, so a schedule can produce a session whose repository is absent, every night. That is the standing no-mount of #322 under a timer, not a new gap. *Evidence: anthropic-openapi.yml:26006-26021 (both variants, "The deployment configures resources, but its environment is self-hosted and cannot mount them"), :23205 and :25906 (in both unions); docs/DIVERGENCES.md:127 (the accepted superset) and :104 (the silent no-mount).* *Tracked: #322.*`
+- **Entry 25.** `- **Archiving an agent is refused while a deployment pins it, where the reference cascades (plan 37 slice 1, decision 7)** — A docs-page sentence says an archived agent archives its deployments in the same operation. We refuse instead: POST /v1/agents/{agent_id}/archive answers 400 naming the deployments whenever one with archived_at IS NULL pins the agent, and the operator archives those first. The reference behavior we diverge from rests on that single docs sentence — the operation carries summary "Archive Agent" and no description, a spec-wide grep for a cascade finds nothing, and no deployment schema mentions it — so what is confirmed here is our behavior, not theirs. The trade is deliberate: a cascade destroys every schedule pinning an agent in one unrecoverable step, since this platform ships neither unarchive nor DELETE /v1/deployments, while a refusal is recoverable by retrying in the right order. It also makes agent_archived_error unreachable for the deployment's own agent by construction rather than by convention (entry 18). *Evidence: anthropic-openapi.yml (the agent archive operation, summary only, no description); platform.claude.com managed-agents/scheduled-deployments (fetched 2026-08-27 — the cascade sentence); internal/api/agents.go:578-584 (the single UPDATE this converts to a transaction); internal/api/sessions.go:583 (the FOR SHARE discipline the check reuses); internal/api/environments.go:523-527 (the dead end an archived-deployment block would rebuild).* *Tracked: #78 (archive an agent that a deployment pins, and read both the agent and the deployment).*`
+
+- **Entry 26.** `- **environment_not_found_error is never recorded (plan 37 slice 4)** — The reference fails a run when the deployment's environment row is gone. Here it cannot be: deployments.environment_id carries a foreign key, and DELETE /v1/environments refuses while any deployment references it — with a message naming them, which is the other half of this plan's change to that handler. An archived environment is a different type and is reachable. The store admits the value so a future emitter needs no migration. *Evidence: the OpenAPI spec's BetaManagedAgentsEnvironmentNotFoundDeploymentPausedReasonError; internal/api/environments.go:523-527 (the delete refusal this plan makes name deployments); migration 0031_deployments.sql (the FK).* *Tracked: #78 (delete an environment a deployment pins, on the reference, and read the error).*`
+
 
 **Architecture & compatibility notes (not divergences)** — two entries belong in that
 section rather than among the mismatches:
 
-8. `- **No DELETE on /v1/deployments, mirroring the reference's own absence (plan 37 slice 1)** — The reference publishes a deployment.deleted webhook but exposes no delete path: enumerating spec.paths shows post/get on /v1/deployments, get/post on /v1/deployments/{id}, and post alone on archive, pause, unpause and run — no delete method anywhere — and BetaDeploymentService has no Delete. Archive is the terminal verb here as it is there, and unarchive exists in neither. *Evidence: anthropic-openapi.yml:13048, :13355, :13624, :13755, :13886, :14017 (the six paths and their methods); anthropic-sdk-go betadeployment.go:44-176 (New/Get/Update/List/Archive/Pause/Run/Unpause).*`
+- **Entry 8.** `- **No DELETE on /v1/deployments, mirroring the reference's own absence (plan 37 slice 1)** — The reference publishes a deployment.deleted webhook but exposes no delete path: enumerating spec.paths shows post/get on /v1/deployments, get/post on /v1/deployments/{id}, and post alone on archive, pause, unpause and run — no delete method anywhere — and BetaDeploymentService has no Delete. Archive is the terminal verb here as it is there, and unarchive exists in neither. *Evidence: anthropic-openapi.yml:13048, :13355, :13624, :13755, :13886, :14017 (the six paths and their methods); anthropic-sdk-go betadeployment.go:44-176 (New/Get/Update/List/Archive/Pause/Run/Unpause).*`
 
 - The scheduler's exactly-once guarantee across controlplane replicas is the partial unique
   index on `(deployment_id, scheduled_at)` — the reference's own published idempotency key —
@@ -830,31 +973,31 @@ section rather than among the mismatches:
 **New INFERRED entries** (each carries #78 with a parenthetical, per the shared-tracker
 rule):
 
-9. `- **Catch-up after downtime — at most one occurrence, inside a one-hour window (plan 37 slice 5, decision 2)** — Nothing in the spec, the SDK, the CLI or the docs describes what a scheduled deployment does about occurrences missed while the platform was down; a spec-wide grep for catch-up / backfill / misfire returns nothing. The one adjacent published rule is about pause: "Unpause resumes the schedule from the next scheduled occurrence. Missed triggers are not backfilled." We generalize it: a tick fires only the most recent due occurrence per deployment, and only if it falls inside a one-hour window (a package constant, not a knob). A day-long outage on a */5 schedule would otherwise spawn 288 sessions at once, and the reference's own (deployment_id, scheduled_at) key would admit every one of them. The same rule is what bounds a newly-tightened expression from back-firing, since no watermark is stored to reset. *Evidence: platform.claude.com managed-agents/scheduled-deployments (fetched 2026-08-27 — the unpause sentence); anthropic-openapi.yml:25955 (the dedup key, which bounds duplicates but not backlogs); internal/api/deploymentscheduler.go.* *Tracked: #78 (what a real schedule does across a deliberate outage, and what it does when an expression is tightened; note this is the one inference a recording may never settle, since the reference's downtime is not ours to arrange).*`
+- **Entry 9.** `- **Catch-up after downtime — at most one occurrence, inside a one-hour window (plan 37 slice 5, decision 2)** — Nothing in the spec, the SDK, the CLI or the docs describes what a scheduled deployment does about occurrences missed while the platform was down; a spec-wide grep for catch-up / backfill / misfire returns nothing. The one adjacent published rule is about pause: "Unpause resumes the schedule from the next scheduled occurrence. Missed triggers are not backfilled." We generalize it: a tick fires only the most recent due occurrence per deployment, and only if it falls inside a one-hour window (a package constant, not a knob). A day-long outage on a */5 schedule would otherwise spawn 288 sessions at once, and the reference's own (deployment_id, scheduled_at) key would admit every one of them. The same rule is what bounds a newly-tightened expression from back-firing, since no watermark is stored to reset. *Evidence: platform.claude.com managed-agents/scheduled-deployments (fetched 2026-08-27 — the unpause sentence); anthropic-openapi.yml:25955 (the dedup key, which bounds duplicates but not backlogs); internal/api/deploymentscheduler.go.* *Tracked: #78 (what a real schedule does across a deliberate outage, and what it does when an expression is tightened; note this is the one inference a recording may never settle, since the reference's downtime is not ours to arrange).*`
 
-11. `- **POST /v1/deployments/{id}/run on an archived deployment is a 400 (plan 37 slice 3)** — The docs call archive terminal, but publish no status code for a manual run against one, and the spec attaches no operation-specific errors to any deployment endpoint — every path carries the same boilerplate error block. We answer 400 "deployment %s is archived", matching how this platform already refuses to act on an archived resource. Running while merely paused is explicitly allowed and we allow it. *Evidence: anthropic-openapi.yml:14017-14150 (the run path's responses: no archived-specific arm); platform.claude.com managed-agents/scheduled-deployments (fetched 2026-08-27 — "Archive, unlike pause, is terminal"; "Manual runs through the run endpoint are still allowed while paused"); internal/api/memorystores.go:200 (the archived-is-400 precedent).* *Tracked: #78 (archive then run, and record the status).*`
+- **Entry 11.** `- **POST /v1/deployments/{id}/run on an archived deployment is a 400 (plan 37 slice 3)** — The docs call archive terminal, but publish no status code for a manual run against one, and the spec attaches no operation-specific errors to any deployment endpoint — every path carries the same boilerplate error block. We answer 400 "deployment %s is archived", matching how this platform already refuses to act on an archived resource. Running while merely paused is explicitly allowed and we allow it. *Evidence: anthropic-openapi.yml:14017-14150 (the run path's responses: no archived-specific arm); platform.claude.com managed-agents/scheduled-deployments (fetched 2026-08-27 — "Archive, unlike pause, is terminal"; "Manual runs through the run endpoint are still allowed while paused"); internal/api/memorystores.go:200 (the archived-is-400 precedent).* *Tracked: #78 (archive then run, and record the status).*`
 
-12. `- **Pause and unpause are idempotent 200s, unpause does not re-validate the cause, and a body on an action endpoint is ignored (plan 37 slice 1)** — The reference documents neither a conflict for pausing an already-paused deployment nor a precondition failure for unpausing an active one, says nothing about whether unpausing an error-paused deployment is refused while the cause persists, and declares no requestBody on any of the four action endpoints. We answer 200 in all four idempotency cases, returning the resource; unpause clears paused_at and both reason columns unconditionally, and the next scheduled fire re-discovers the cause and re-pauses if it is still there; a request body is neither read nor refused. *Evidence: anthropic-openapi.yml:13755-13886 and :13886-14017 (pause and unpause: no requestBody, no per-endpoint error semantics); anthropic-sdk-go betadeployment.go:2233-2254 (all four params structs carry only the beta header).* *Tracked: #78 (six calls: pause twice, unpause twice, each against an archived deployment, and one with a non-empty body).*`
+- **Entry 12.** `- **Pause and unpause are idempotent 200s, unpause does not re-validate the cause, and a body on an action endpoint is ignored (plan 37 slice 1)** — The reference documents neither a conflict for pausing an already-paused deployment nor a precondition failure for unpausing an active one, says nothing about whether unpausing an error-paused deployment is refused while the cause persists, and declares no requestBody on any of the four action endpoints. We answer 200 in all four idempotency cases, returning the resource; unpause clears paused_at and both reason columns unconditionally, and the next scheduled fire re-discovers the cause and re-pauses if it is still there; a request body is neither read nor refused. *Evidence: anthropic-openapi.yml:13755-13886 and :13886-14017 (pause and unpause: no requestBody, no per-endpoint error semantics); anthropic-sdk-go betadeployment.go:2233-2254 (all four params structs carry only the beta header).* *Tracked: #78 (six calls: pause twice, unpause twice, each against an archived deployment, and one with a non-empty body).*`
 
-13. `- **schedule.last_run_at moves only on a successful scheduled fire (plan 37 slice 4)** — The field is "Time the most recent scheduled run actually started. Null until one completes; preserved after the deployment is archived. Manual runs do not update this." The last two clauses are published and we honor them exactly; what the sentence does not say is what a fire that failed to create a session does to it. We read "started" as "started a session" and leave the field untouched on a failed fire. All three behaviors fall out of one derivation rather than three code paths: last_run_at is MAX(scheduled_at) over this deployment's runs where trigger_type = 'schedule' and session_id IS NOT NULL — manual runs have no scheduled_at, archive touches no run row, and a failed fire's row has a null session_id. *Evidence: anthropic-openapi.yml:22759-22763; internal/api/deployments.go (the LATERAL derivation).* *Tracked: #78 (let a scheduled fire fail against an archived environment, then read the deployment).*`
+- **Entry 13.** `- **schedule.last_run_at moves only on a successful scheduled fire (plan 37 slice 4)** — The field is "Time the most recent scheduled run actually started. Null until one completes; preserved after the deployment is archived. Manual runs do not update this." The last two clauses are published and we honor them exactly; what the sentence does not say is what a fire that failed to create a session does to it. We read "started" as "started a session" and leave the field untouched on a failed fire. All three behaviors fall out of one derivation rather than three code paths: last_run_at is MAX(scheduled_at) over this deployment's runs where trigger_type = 'schedule' and session_id IS NOT NULL — manual runs have no scheduled_at, archive touches no run row, and a failed fire's row has a null session_id. *Evidence: anthropic-openapi.yml:22759-22763; internal/api/deployments.go (the LATERAL derivation).* *Tracked: #78 (let a scheduled fire fail against an archived environment, then read the deployment).*`
 
-14. `- **session_creation_rejected_error does not pause the deployment (plan 37 slice 4)** — The paused-reason union carries fourteen of the run error union's sixteen types, omitting session_rate_limited_error and session_creation_rejected_error. The prose cuts the other way for this one — it is "rejected with a non-retryable validation error", and non-retryable is an argument for stopping the schedule — but the structure settles it: paused_reason.error "Matches the failed run's error.type", and the union contains no member this type could take, so a pause carrying it is unrepresentable. We record the run and keep firing. *Evidence: anthropic-openapi.yml:26468-26477 ("non-retryable validation error"), :23188 ("Matches the failed run's error.type"), :23193-23206 (the fourteen), :25892-25907 (the sixteen).* *Tracked: #78 (record a run of that type and read the deployment's status).*`
+- **Entry 14.** `- **session_creation_rejected_error does not pause the deployment (plan 37 slice 4)** — The paused-reason union carries fourteen of the run error union's sixteen types, omitting session_rate_limited_error and session_creation_rejected_error. The prose cuts the other way for this one — it is "rejected with a non-retryable validation error", and non-retryable is an argument for stopping the schedule — but the structure settles it: paused_reason.error "Matches the failed run's error.type", and the union contains no member this type could take, so a pause carrying it is unrepresentable. We record the run and keep firing. *Evidence: anthropic-openapi.yml:26468-26477 ("non-retryable validation error"), :23188 ("Matches the failed run's error.type"), :23193-23206 (the fourteen), :25892-25907 (the sixteen).* *Tracked: #78 (record a run of that type and read the deployment's status).*`
 
-15. `- **Cron day-of-month and day-of-week are combined with POSIX union semantics, and every minute is an accepted expression (plan 37 slice 1)** — The published dialect fixes the grammar precisely — five fields, DOW 0-7 with both 0 and 7 Sunday, no seconds or year field, no L / W / # / ?, no @daily — but says nothing about the classic POSIX rule that a restricted day-of-month and a restricted day-of-week are OR'd rather than AND'd. The strongest evidence for the union is the dialect's own name: both schemas call it a "5-field POSIX cron schedule", and union is what POSIX specifies. No floor on frequency is published either, so we accept "* * * * *". *Evidence: anthropic-openapi.yml:22740 and :22780 ("5-field POSIX cron"), :22747 and :22787 (the dialect, verbatim, on both schemas); anthropic-sdk-go betadeployment.go:1479-1483; platform.claude.com managed-agents/scheduled-deployments (fetched 2026-08-27 — "Maximum granularity supported is at the minute level"); internal/cron.* *Tracked: #78 (create a deployment with "0 0 13 * 5" and with "* * * * *", and read upcoming_runs_at).*`
+- **Entry 15.** `- **Cron day-of-month and day-of-week are combined with POSIX union semantics, and every minute is an accepted expression (plan 37 slice 1)** — The published dialect fixes the grammar precisely — five fields, DOW 0-7 with both 0 and 7 Sunday, no seconds or year field, no L / W / # / ?, no @daily — but says nothing about the classic POSIX rule that a restricted day-of-month and a restricted day-of-week are OR'd rather than AND'd. The strongest evidence for the union is the dialect's own name: both schemas call it a "5-field POSIX cron schedule", and union is what POSIX specifies. No floor on frequency is published either, so we accept "* * * * *". *Evidence: anthropic-openapi.yml:22740 and :22780 ("5-field POSIX cron"), :22747 and :22787 (the dialect, verbatim, on both schemas); anthropic-sdk-go betadeployment.go:1479-1483; platform.claude.com managed-agents/scheduled-deployments (fetched 2026-08-27 — "Maximum granularity supported is at the minute level"); internal/cron.* *Tracked: #78 (create a deployment with "0 0 13 * 5" and with "* * * * *", and read upcoming_runs_at).*`
 
-16. `- **upcoming_runs_at returns five occurrences whenever five exist (plan 37 slice 1)** — The schema says "Up to 5" and publishes when the array is non-empty and when it is empty; it does not say when fewer than five come back for a live schedule. We return five whenever five exist within a four-year search bound. (The two behaviors the schema does state — non-empty for active and paused deployments, empty once archived_at is set — are implemented as published and are not inferences.) *Evidence: anthropic-openapi.yml:22764-22768; anthropic-sdk-go betadeployment.go:1491-1496 (the same sentence, and no api: tag, making the key optional).* *Tracked: #78 (compare a weekly and a per-minute schedule's arrays on one recording).*`
+- **Entry 16.** `- **upcoming_runs_at returns five occurrences whenever five exist (plan 37 slice 1)** — The schema says "Up to 5" and publishes when the array is non-empty and when it is empty; it does not say when fewer than five come back for a live schedule. We return five whenever five exist within a twelve-year search bound — twelve rather than a round four because 0 0 29 2 * has an eight-year gap across the non-leap year 2100, and a shorter bound would return an empty array for a live schedule the same schema requires to be non-empty. An expression with no occurrence inside that bound is refused at create and update rather than stored (entry 27). (The two behaviors the schema does state — non-empty for active and paused deployments, empty once archived_at is set — are implemented as published and are not inferences.) *Evidence: anthropic-openapi.yml:22764-22768; anthropic-sdk-go betadeployment.go:1491-1496 (the same sentence, and no api: tag, making the key optional).* *Tracked: #78 (compare a weekly and a per-minute schedule's arrays on one recording).*`
 
-17. `- **A deployment is fired only through POST /run and the schedule; sessions cannot name one (plan 37 slice 3)** — The reference's manual trigger context reads "The run was started manually by creating a session directly against the deployment", yet its own session-create params carry no deployment field and no /v1/deployments/{id}/sessions path exists. We take POST /run to be that path, described from the server's point of view, and keep deployment_id out of the session-create allow-list — where a client sending it gets the same 400 it gets today. *Evidence: anthropic-openapi.yml:24862 (the wording), :22412-22456 (create-session params: required agent and environment_id, no deployment field); anthropic-sdk-go betasession.go (SessionNewParams has no deployment field).* *Tracked: #78 (whether any request can set a session's deployment_id directly).*`
+- **Entry 17.** `- **A deployment is fired only through POST /run and the schedule; sessions cannot name one (plan 37 slice 3)** — The reference's manual trigger context reads "The run was started manually by creating a session directly against the deployment", yet its own session-create params carry no deployment field and no /v1/deployments/{id}/sessions path exists. We take POST /run to be that path, described from the server's point of view, and keep deployment_id out of the session-create allow-list — where a client sending it gets the same 400 it gets today. *Evidence: anthropic-openapi.yml:24862 (the wording), :22412-22456 (create-session params: required agent and environment_id, no deployment field); anthropic-sdk-go betasession.go (SessionNewParams has no deployment field).* *Tracked: #78 (whether any request can set a session's deployment_id directly).*`
 
-18. `- **agent_archived_error is recorded for a roster member, never for the deployment's own agent (plan 37 slice 4)** — The type's schema description says "The deployment's agent was archived", while the guide says an archived top-level agent archives the deployment in the same operation with no run recorded, and that this error type is what an archived subagent produces. Both hold only if the type is unreachable for the top-level case, and under decision 7 it is unreachable by construction rather than by convention: a live deployment refuses the archive of the agent it pins, so the deployment's own agent can never become archived while the deployment can still fire. *Evidence: anthropic-openapi.yml:21402-21418 (both variants of the type); platform.claude.com managed-agents/scheduled-deployments (fetched 2026-08-27 — the subagent rule and "In both cases no deployment run is recorded" for the top-level agent); internal/api/agents.go archiveAgent.* *Tracked: #78 (archive a top-level agent and a roster member in turn, and read the run list both times).*`
+- **Entry 18.** `- **agent_archived_error is recorded for a roster member, never for the deployment's own agent (plan 37 slice 4)** — The type's schema description says "The deployment's agent was archived", while the guide says an archived top-level agent archives the deployment in the same operation with no run recorded, and that this error type is what an archived subagent produces. Both hold only if the type is unreachable for the top-level case, and under decision 7 it is unreachable by construction rather than by convention: a live deployment refuses the archive of the agent it pins, so the deployment's own agent can never become archived while the deployment can still fire. *Evidence: anthropic-openapi.yml:21402-21418 (both variants of the type); platform.claude.com managed-agents/scheduled-deployments (fetched 2026-08-27 — the subagent rule and "In both cases no deployment run is recorded" for the top-level agent); internal/api/agents.go archiveAgent.* *Tracked: #78 (archive a top-level agent and a roster member in turn, and read the run list both times).*`
 
-19. `- **Daylight-saving semantics: a nonexistent wall clock is skipped, a doubled one fires twice (plan 37 slice 1)** — Neither machine-readable source says anything about DST: a spec-wide grep for daylight / DST / nonexistent / ambiguous returns one unrelated hit, and the BetaManagedAgentsSchedule and ScheduleParams doc comments carry no DST text. The only adjacent statement is "Literal wall-clock matching in the configured timezone", which decides neither case. Literal wall-clock matching admits exactly two readings per transition, and we take the conventional pair: a 02:30 that does not exist on the spring-forward day is skipped; a 01:30 that occurs twice on the fall-back day fires twice, as two rows with distinct scheduled_at instants. *Evidence: anthropic-openapi.yml:22780 (the one adjacent sentence); anthropic-sdk-go betadeployment.go:1478-1507 (no DST text); internal/cron.* *Tracked: #78 (run a schedule across both transitions in America/New_York and count the runs). A docs-page statement of either rule, if one is found on re-fetch, converts this entry to CONFIRMED in the PR that finds it.*`
+- **Entry 19.** `- **Daylight-saving semantics: a nonexistent wall clock is skipped, a doubled one fires twice (plan 37 slice 1)** — Neither machine-readable source says anything about DST: a spec-wide grep for daylight / DST / nonexistent / ambiguous returns one unrelated hit, and the BetaManagedAgentsSchedule and ScheduleParams doc comments carry no DST text. The only adjacent statement is "Literal wall-clock matching in the configured timezone", which decides neither case. Literal wall-clock matching admits exactly two readings per transition, and we take the conventional pair: a 02:30 that does not exist on the spring-forward day is skipped; a 01:30 that occurs twice on the fall-back day fires twice, as two rows with distinct scheduled_at instants. *Evidence: anthropic-openapi.yml:22780 (the one adjacent sentence); anthropic-sdk-go betadeployment.go:1478-1507 (no DST text); internal/cron.* *Tracked: #78 (run a schedule across both transitions in America/New_York and count the runs). A docs-page statement of either rule, if one is found on re-fetch, converts this entry to CONFIRMED in the PR that finds it.*`
 
-23. `- **A deployment's initial_events must satisfy the same adjacency rule a posted batch does (plan 37 slice 1)** — The reference's deployment initial_events union admits user.message, user.define_outcome and system.message with no stated ordering constraint. This platform routes a deployment's list through events.NormalizeInbound, the same normalizer POST /v1/sessions/{id}/events uses, which requires a system.message to be the final event of the request and to immediately follow a user.message / user.tool_result / user.custom_tool_result. So [user.message, system.message] is accepted and a lone system.message is a 400 — narrower than the union states. Applying one rule at every entry point beats a second normalizer whose ordering could drift from the first. *Evidence: anthropic-openapi.yml:23155-23170 (the three-type params union, no ordering constraint); internal/events/inbound.go:37-45 (the adjacency rule).* *Tracked: #78 (post a deployment whose initial_events is a lone system.message, and record the status).*`
+- **Entry 23.** `- **A deployment's initial_events must satisfy the same adjacency rule a posted batch does (plan 37 slice 1)** — The reference's deployment initial_events union admits user.message, user.define_outcome and system.message with no stated ordering constraint. This platform routes a deployment's list through events.NormalizeInbound, the same normalizer POST /v1/sessions/{id}/events uses, which requires a system.message to be the final event of the request and to immediately follow a user.message / user.tool_result / user.custom_tool_result. So [user.message, system.message] is accepted and a lone system.message is a 400 — narrower than the union states. Applying one rule at every entry point beats a second normalizer whose ordering could drift from the first. *Evidence: anthropic-openapi.yml:23155-23170 (the three-type params union, no ordering constraint); internal/events/inbound.go:37-45 (the adjacency rule).* *Tracked: #78 (post a deployment whose initial_events is a lone system.message, and record the status).*`
 
-24. `- **A fired session inherits the deployment's environment, agent, vaults, resources and initial events — but not its metadata, and carries no title (plan 37 slice 4)** — No source says what a scheduled session's title is, or whether a deployment's metadata is copied onto the sessions it starts. We leave title null and metadata empty. Metadata especially: CLAUDE.md principle 5 names session metadata as the application layer's ownership hook, so a schedule that wrote into it would overwrite the one seam apps are told to use. *Evidence: anthropic-openapi.yml:23057 (deployment metadata) and :22435-22439 (session metadata) — two separate bags with no stated relationship; :22430-22434 (session title is nullable on create).* *Tracked: #78 (fire a schedule and read the resulting session's title and metadata).*`
+- **Entry 24.** `- **A fired session inherits the deployment's environment, agent, vaults, resources and initial events — but not its metadata, and carries no title (plan 37 slice 4)** — No source says what a scheduled session's title is, or whether a deployment's metadata is copied onto the sessions it starts. We leave title null and metadata empty. Metadata especially: CLAUDE.md principle 5 names session metadata as the application layer's ownership hook, so a schedule that wrote into it would overwrite the one seam apps are told to use. *Evidence: anthropic-openapi.yml:23057 (deployment metadata) and :22435-22439 (session metadata) — two separate bags with no stated relationship; :22430-22434 (session title is nullable on create).* *Tracked: #78 (fire a schedule and read the resulting session's title and metadata).*`
+- **Entry 27.** `- **A cron expression with no occurrence is refused at create and update (plan 37 slice 1)** — 0 0 31 2 * parses, every field is in range, and February never has 31 days; the reference publishes no validation rule for such an expression, only that upcoming_runs_at is non-empty for an active deployment — which is unsatisfiable together. We answer 400 rather than storing a schedule that can never fire, searching the same twelve-year bound upcoming_runs_at uses. Twelve years rather than four because 0 0 29 2 * has an eight-year gap across 2100, which a shorter bound would misreport as unsatisfiable. *Evidence: the OpenAPI spec's BetaManagedAgentsCronScheduleParams.expression (the dialect, with no validation rule) and BetaManagedAgentsCronSchedule.upcoming_runs_at ("Non-empty for active and paused deployments"); internal/cron.* *Tracked: #78 (post an unsatisfiable expression to the reference and read the status code).*`
 
-25. `- **Archiving an agent is refused while a deployment pins it, where the reference cascades (plan 37 slice 1, decision 7)** — A docs-page sentence says an archived agent archives its deployments in the same operation. We refuse instead: POST /v1/agents/{agent_id}/archive answers 400 naming the deployments whenever one with archived_at IS NULL pins the agent, and the operator archives those first. The reference behavior we diverge from rests on that single docs sentence — the operation carries summary "Archive Agent" and no description, a spec-wide grep for a cascade finds nothing, and no deployment schema mentions it — so what is confirmed here is our behavior, not theirs. The trade is deliberate: a cascade destroys every schedule pinning an agent in one unrecoverable step, since this platform ships neither unarchive nor DELETE /v1/deployments, while a refusal is recoverable by retrying in the right order. It also makes agent_archived_error unreachable for the deployment's own agent by construction rather than by convention (entry 18). *Evidence: anthropic-openapi.yml (the agent archive operation, summary only, no description); platform.claude.com managed-agents/scheduled-deployments (fetched 2026-08-27 — the cascade sentence); internal/api/agents.go:578-584 (the single UPDATE this converts to a transaction); internal/api/sessions.go:583 (the FOR SHARE discipline the check reuses); internal/api/environments.go:523-527 (the dead end an archived-deployment block would rebuild).* *Tracked: #78 (archive an agent that a deployment pins, and read both the agent and the deployment).*`
 
 ### 8.2 Webhooks — stated plainly
 
@@ -951,8 +1094,8 @@ inheritance.
     session-creation rate limit, no deployment cap), and the reaper reclaims neither a
     `running` session nor an ask-blocked idle one, so a `* * * * *` schedule against a
     non-terminating agent exhausts the sandbox host and nothing stops it (§3.5, §9). The plan
-    answers with observability instead, and §8.1 loses its entry 20: with no brake there is no
-    divergence left to register.
+    answers with observability instead, and the draft registry entry that would have recorded
+    the brake is gone: with no brake there is no divergence to register.
 
 ---
 
@@ -971,7 +1114,12 @@ inheritance.
 - **Run retention or pruning** — the reference publishes no retention rule for run records;
   a spec-wide grep for `retention|retained|purged` has exactly one hit, `:8569`, about tunnel
   certificates. Runs accumulate; an operator prunes on their own schedule, the
-  `0022_principals.sql:23-31` stance.
+  `0022_principals.sql:23-31` stance — **with one constraint stated out loud, because the run
+  row is not only history but the occurrence claim and the watermark**: deleting a row newer
+  than the catch-up window un-claims its occurrence, which a tick can then fire a second
+  time, and deleting the newest row moves the watermark backwards. Prune by
+  `scheduled_at < now() - interval '7 days'` or anything coarser; never by row count, and
+  never inside the window. The DDL comment says so beside the table.
 - **Multi-tenant quotas and per-org rate limits** — the reserved `org_id`/`workspace_id`/
   `project_id` columns stay reserved. #56 and #46.
 - **A `visible_at` delayed-work primitive on `work_items`** — wanted by plan 35's
