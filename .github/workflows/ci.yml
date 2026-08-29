@@ -1114,6 +1114,13 @@ jobs:
       # nothing but running each of them keeps them from drifting apart again.
       - name: neither notifier's retry leaks a failed attempt's output
         run: make retry-test
+      # The repository is public, so the operator's coordinates belong in Actions
+      # variables and nowhere else. #356 enforced that by hand and stopped at
+      # `deploy/`; #514 found a project id, two project numbers, a registry path
+      # and two live LoadBalancer addresses still in docs/. Nothing in the repo
+      # can notice that on its own, which is why it went unnoticed for months.
+      - name: no operator coordinates in the documentation
+        run: make identifiers-test
       # deploy-alert.yml couples to deploy.yml three ways, and all three fail
       # SILENTLY: the trigger stops matching, or every deploy classifies as
       # `parked` so no successful run ever closes a CD issue again. Nor can any

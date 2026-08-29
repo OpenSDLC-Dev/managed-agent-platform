@@ -378,7 +378,7 @@ func TestMissingBucketNameStaysLegal(t *testing.T) {
 		"AtTheLimit":        strings.Repeat("b", maxBucketName),
 		"OverTheLimit":      strings.Repeat("b", maxBucketName*2),
 		"TruncatesToADash":  strings.Repeat("b", maxBucketName-len("-missing-")-len(tag)-1) + "-x",
-		"RealisticLongName": "opensdlc-managed-agents-map-blob-probe2",
+		"RealisticLongName": "your-long-project-name-map-blob-probe2",
 	} {
 		t.Run(name, func(t *testing.T) {
 			got := missingBucketName(base, tag)

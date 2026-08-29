@@ -20,7 +20,7 @@ SHELL := /usr/bin/env bash
 .PHONY: build crossbuild vet fmt-check test cover-gate verify eval \
 	changelog changelog-notes changelog-archive \
 	release-tag-check release-images release-chart-check release-chart release-binaries \
-	openbao-init-test cd-outcome-test parked-test retry-test registry-check \
+	openbao-init-test cd-outcome-test parked-test retry-test identifiers-test registry-check \
 	gcp-fmt gcp-validate gcp-split-check gcp-lint gcp-bootstrap-test gcp-dbinit-test gcp-split-check-test gcp-power-test gcp-tfvars-test gcp-env-targets-test gcp-foundation-apply gcp-bootstrap gcp-env-apply gcp-db-init gcp-env-destroy gcp-env-rebuild \
 	gcp-require-project gcp-env-tfvars gcp-env-migrate-state gcp-env-init gcp-env-vars-match \
 	gcp-env-stop gcp-env-start gcp-env-status
@@ -287,6 +287,16 @@ parked-test:
 # capture, joined to the attempt that worked.
 retry-test:
 	python3 .github/scripts/retry_test.py
+
+# The one that guards a rule rather than a script: #355/#356 parameterised the
+# operator's coordinates out of the repository by hand, the sweep stopped at
+# `deploy/` and `.github/`, and #514 found what it had left in docs/. A rule kept
+# by memory lapses, so this searches the documentation for the two shapes nothing
+# there may legitimately carry — a routable address and a bare project number.
+# It self-tests before it scans, because a broken pattern and a clean repository
+# print the same thing otherwise.
+identifiers-test:
+	python3 .github/scripts/identifiers_test.py
 
 # ---------------------------------------------------------------------------
 # GCP staging environment (docs/plan/20, Decision 9). Developer tooling for GCP
