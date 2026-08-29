@@ -25,16 +25,23 @@ const scheduleExpressionMax = 256
 // A raw that is not an object is left alone: the caller's own unmarshal has
 // already reported that shape error in its own words.
 func rejectUnknownNested(raw json.RawMessage, prefix string, allowed ...string) error {
-	var obj map[string]json.RawMessage
-	if json.Unmarshal(raw, &obj) != nil {
-		return nil
-	}
-	for key := range obj {
+	for key := range nestedKeys(raw) {
 		if !slices.Contains(allowed, key) {
 			return errInvalid("unknown field %q", prefix+"."+key)
 		}
 	}
 	return nil
+}
+
+// nestedKeys decodes a sub-object one level, so a caller can tell an explicit
+// null from an omission where the typed struct cannot. A raw that is not an
+// object decodes to nil, which reads as every key absent.
+func nestedKeys(raw json.RawMessage) map[string]json.RawMessage {
+	var obj map[string]json.RawMessage
+	if json.Unmarshal(raw, &obj) != nil {
+		return nil
+	}
+	return obj
 }
 
 // parseDeploymentSchedule reads the create/update schedule union. It reports
@@ -137,6 +144,13 @@ func resolveDeploymentAgent(ctx context.Context, db querier, raw json.RawMessage
 		}
 		if err := rejectUnknownNested(raw, "agent", "type", "id", "version"); err != nil {
 			return ref, err
+		}
+		// An explicit null is not omission. Unmarshalling leaves Version nil
+		// for both, and the schema types version as a plain integer with no
+		// null arm — so the reference refuses the spelling that omission
+		// accepts, and reading them as the same would lose that.
+		if isNull(nestedKeys(raw)["version"]) {
+			return ref, errInvalid("agent.version must be an integer or omitted")
 		}
 		// type is required and is what tells the two object arms apart, so its
 		// absence cannot be read as "agent" — that would let an override

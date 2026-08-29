@@ -11,6 +11,9 @@ import (
 	"time"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/api"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/blob/blobtest"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/pgtest"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/store"
 )
 
 // deploymentBody is the smallest create body the schema admits: name, agent,
@@ -182,6 +185,9 @@ func TestDeploymentSubObjectsRefuseUnknownKeysAndRequireTheirType(t *testing.T) 
 			"type": "agent", "id": agentID, "system": "an override by another name"}},
 		"agent object without a type": {"agent": map[string]any{"id": agentID}},
 		"agent version below one":     {"agent": map[string]any{"type": "agent", "id": agentID, "version": 0}},
+		// Omitting version pins the latest; spelling it null does not, because
+		// the schema gives the field no null arm.
+		"agent version null": {"agent": map[string]any{"type": "agent", "id": agentID, "version": nil}},
 	}
 	for name, patch := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -455,15 +461,20 @@ func TestDeploymentPauseAndUnpause(t *testing.T) {
 	// Idempotent, and a body on an action endpoint is neither read nor
 	// refused — both halves of what the registry entry claims.
 	pausedAt := storedPausedAt(t, s, id)
+	updatedAt := d["updated_at"]
 	status, again := s.do(http.MethodPost, "/v1/deployments/"+id+"/pause",
 		map[string]any{"nonsense": true, "budget": 9})
 	if status != http.StatusOK || again["status"] != "paused" {
 		t.Fatalf("second pause with a body: %d %v", status, again)
 	}
 	// A second pause must not restamp when the schedule stopped, which is the
-	// only record an operator has of it.
+	// only record an operator has of it — nor updated_at, since nothing about
+	// the row changed. Archive guards its own the same way.
 	if now := storedPausedAt(t, s, id); !now.Equal(pausedAt) {
 		t.Errorf("a second pause moved paused_at from %s to %s", pausedAt, now)
+	}
+	if again["updated_at"] != updatedAt {
+		t.Errorf("a second pause moved updated_at from %v to %v", updatedAt, again["updated_at"])
 	}
 
 	status, d = s.do(http.MethodPost, "/v1/deployments/"+id+"/unpause", nil)
@@ -478,12 +489,16 @@ func TestDeploymentPauseAndUnpause(t *testing.T) {
 	// the resume watermark, which slice 4 makes the floor of the catch-up
 	// scan: a retry that advanced it would silently drop a due occurrence.
 	resumed := storedResumedAt(t, s, id)
+	updatedAt = d["updated_at"]
 	status, d = s.do(http.MethodPost, "/v1/deployments/"+id+"/unpause", map[string]any{"nonsense": true})
 	if status != http.StatusOK || d["status"] != "active" {
 		t.Fatalf("second unpause: %d %v", status, d)
 	}
 	if now := storedResumedAt(t, s, id); !now.Equal(resumed) {
 		t.Errorf("unpausing an active deployment moved schedule_resumed_at from %s to %s", resumed, now)
+	}
+	if d["updated_at"] != updatedAt {
+		t.Errorf("a no-op unpause moved updated_at from %v to %v", updatedAt, d["updated_at"])
 	}
 }
 
@@ -744,6 +759,12 @@ func TestListDeployments(t *testing.T) {
 	status, body = s.do(http.MethodGet, "/v1/deployments?status=active&include_archived=true", nil)
 	wantErr(t, status, body, http.StatusBadRequest, "invalid_request_error")
 
+	// "The two cannot be combined" forbids sending both, whatever the value —
+	// so the refusal is keyed on the parameter being present, not on how the
+	// boolean parses. false and true have to answer alike.
+	status, body = s.do(http.MethodGet, "/v1/deployments?status=active&include_archived=false", nil)
+	wantErr(t, status, body, http.StatusBadRequest, "invalid_request_error")
+
 	status, body = s.do(http.MethodGet, "/v1/deployments?status=nonsense", nil)
 	wantErr(t, status, body, http.StatusBadRequest, "invalid_request_error")
 
@@ -829,6 +850,64 @@ func TestListDeploymentsFilterByAgent(t *testing.T) {
 
 	status, body = s.do(http.MethodGet, "/v1/deployments?agent_id=%00", nil)
 	wantErr(t, status, body, http.StatusBadRequest, "invalid_request_error")
+}
+
+// A page that overflows leaves the sentinel row unread, and the schedule
+// timestamps are then filled by a second query on the same pool. Holding the
+// first connection across the second acquire is a self-deadlock at one
+// connection and pool exhaustion under concurrent paging, so the listing
+// closes its rows explicitly rather than by defer.
+//
+// One connection is the only size at which the hold is observable, and no
+// other test in this package sets the pool size — which is why this bug
+// reached review with a green suite.
+func TestListDeploymentsPagesOnASingleConnection(t *testing.T) {
+	pool, err := store.Open(t.Context(), pgtest.FreshDB(t)+"?pool_max_conns=1")
+	if err != nil {
+		t.Fatalf("open a one-connection pool: %v", err)
+	}
+	t.Cleanup(pool.Close)
+	if err := api.EnsureAPIKey(t.Context(), pool, "test", testKey); err != nil {
+		t.Fatalf("EnsureAPIKey: %v", err)
+	}
+	srv := httptest.NewServer(api.NewHandler(pool, blobtest.Mem(), nil, nil))
+	t.Cleanup(srv.Close)
+	s := &tserver{t: t, url: srv.URL, pool: pool}
+
+	agentID, envID := fixture(t, s)
+	for i := range 3 {
+		body := deploymentBody(agentID, envID)
+		body["name"] = fmt.Sprintf("scheduled %d", i)
+		body["schedule"] = map[string]any{"type": "cron", "expression": "0 9 * * *", "timezone": "UTC"}
+		createDeployment(t, s, body)
+	}
+
+	// limit=2 over three rows: the loop breaks on the third, undrained. The
+	// deadline is on the request rather than on a goroutine, so a regression
+	// aborts the call and fails here — leaving nothing in flight for the
+	// server's own Close to wait on.
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, srv.URL+"/v1/deployments?limit=2", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("x-api-key", testKey)
+	res, err := (&http.Client{Timeout: 20 * time.Second}).Do(req)
+	if err != nil {
+		t.Fatalf("a paged list did not answer on a one-connection pool — the rows were held across fillScheduleTimestamps: %v", err)
+	}
+	defer res.Body.Close()
+	if res.StatusCode != http.StatusOK {
+		t.Fatalf("paged list: %d", res.StatusCode)
+	}
+	var page struct {
+		Data []json.RawMessage `json:"data"`
+	}
+	if err := json.NewDecoder(res.Body).Decode(&page); err != nil {
+		t.Fatal(err)
+	}
+	if len(page.Data) != 2 {
+		t.Errorf("paged list returned %d rows, want 2", len(page.Data))
+	}
 }
 
 // A cursor this listing cannot honor is refused rather than ignored. The

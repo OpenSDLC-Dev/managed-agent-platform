@@ -632,7 +632,13 @@ so §4.1 step 7 says "only while it is still the most recent due occurrence", an
 increments `deployment.occurrences.skipped` like any other collapse.
 
 **One column of scheduling state is stored, and only one:** `schedule_resumed_at`, set from
-the database clock at create and at every unpause. The candidate predicate requires
+the database clock at create and on every unpause **that actually resumes something** —
+that is, one finding the deployment paused. Unpause is an idempotent 200 on an already-active
+deployment, so "at every unpause" would let a retry or a config-management loop advance the
+floor below and silently collapse every occurrence already due; the published sentence
+describes what a *resume* does, not what a no-op call should. The migration's own comment
+still says "at every unpause" and cannot be corrected, being merged and immutable — this
+paragraph is the authority. The candidate predicate requires
 `scheduled_at > schedule_resumed_at`. Without it the published unpause rule is
 unimplementable: no run row advances the watermark while a deployment is paused, so a
 deployment paused at 08:00 and unpaused at 10:05 would immediately fire 10:00 — backfilling
@@ -902,8 +908,9 @@ Six conventions the compiler will not enforce:
 `paused_error_type` under a `CHECK` admitting all fourteen values; `status` and
 `paused_reason` are rendered from them. It stores exactly one piece of scheduling state,
 `schedule_resumed_at timestamptz NOT NULL` — written from the database clock at create and
-at every unpause, and the reason the published no-backfill-on-unpause rule is implementable
-(§4.2). It stores **no** `last_run_at` and no watermark (§4.2).
+on every unpause that finds the deployment paused, and the reason the published
+no-backfill-on-unpause rule is implementable (§4.2, which says why a no-op unpause must
+leave it alone). It stores **no** `last_run_at` and no watermark (§4.2).
 
 ---
 
