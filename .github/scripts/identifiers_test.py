@@ -28,8 +28,10 @@ WHAT IT DOES NOT COVER, stated plainly because the surrounding prose must not
 claim more than this. A bare project id in running text has no shape to match --
 it is a lowercase-hyphen word like any other -- so it is caught only where it
 appears inside one of the structured forms above. IPv6 endpoints, bucket names
-and KMS key names have no rule. This catches four shapes; it is not a proof that
-the repository is clean.
+and KMS key names have no rule. An uppercase `.MD` extension is outside the scan
+entirely, by git's pathspec and by the suffix test alike -- they agree, so the
+check that compares them stays silent about it. This catches four shapes; it is
+not a proof that the repository is clean.
 
 A KNOWN FALSE POSITIVE, recorded rather than worked around. The registry and
 service-account rule flags any project component that is not a placeholder, so a
@@ -46,7 +48,8 @@ CHANGELOG.md and the `changelog.d/` fragments that become it inside the guard.
 The count the run prints is the live number, and no prose here quotes it, because
 a number that tracks the corpus goes stale the next time a document is added. A
 measurement pinned to a named commit does not, and one is quoted below where it
-argues why nothing in this file compares against a count.
+argues why no check here compares against a constant. Checks that compare two
+counts the run measured for itself are a different thing, and there are two.
 
 Source files are outside it, and that is a real gap rather than an oversight:
 #514 found a project id in a Go test fixture too, but every networking test here
@@ -86,13 +89,14 @@ ALLOWED_ADDRESSES = frozenset({"8.8.8.8", "1.1.1.1"})
 # Narrowing the scan is the failure this cannot afford, because it leaves a
 # shorter list and a smaller count that nothing questions. It can happen at every
 # hop — the listing, the exclusion, the read, and the scan of the text itself —
-# so main states what it expects of each hop separately. Deliberately none of
-# those expectations is a count: the corpus legitimately collapses by half at
-# every release, when `make changelog` consumes the fragments in `changelog.d/`
-# (110 documents to 56 across v0.3.0), so any floor high enough to be worth
-# setting fails the release PR that trips it.
+# so main states what it expects of each hop separately, every one of them
+# against something the same run measured. Deliberately none is measured against
+# a CONSTANT: the corpus legitimately collapses by half at every release, when
+# `make changelog` consumes the fragments in `changelog.d/` (110 documents to 56
+# across v0.3.0), so any floor high enough to be worth setting fails the release
+# PR that trips it.
 #
-# These sentinels are the outermost of those checks, and they answer the one
+# These sentinels are the broadest of those checks, and they answer the one
 # question none of the others can: whether this is the right repository at all.
 # They are sentinels rather than an enumeration on purpose — naming every
 # directory that holds markdown would be the unmaintainable list this file
@@ -156,14 +160,26 @@ def violations(line):
     return found
 
 
+# What the scan did, not just what it found. The scan is the one hop no list and
+# no count elsewhere can see through: a filter here changes nothing upstream, so
+# `ok — 115 documents` stays true and stays wrong. The caller restates both of
+# these against what it handed over.
+Scan = collections.namedtuple("Scan", "findings scanned lines")
+
+
 def scan_texts(documents):
     """The scanning half, separated so the self-test can drive it without git."""
-    bad = []
+    findings, scanned, lines = [], [], 0
     for rel, text in documents:
         for n, line in enumerate(text.splitlines(), 1):
+            lines += 1
             for why in violations(line):
-                bad.append(f"{rel}:{n}: {why}")
-    return bad
+                findings.append(f"{rel}:{n}: {why}")
+        # Recorded AFTER the work, never before: an early `continue` inserted
+        # anywhere in this body then loses the attestation along with the lines it
+        # skipped, instead of leaving a receipt for a document it never read.
+        scanned.append(rel)
+    return Scan(findings, scanned, lines)
 
 
 # Named rather than a bare pair: both halves are lists of paths, so a caller that
@@ -208,7 +224,11 @@ def read_documents(root, paths):
     documents, unreadable = [], []
     for rel in paths:
         try:
-            documents.append((rel, (root / rel).read_text(encoding="utf-8")))
+            # Bytes and an explicit decode, not read_text: text mode would
+            # translate CRLF to LF and make the length of what is returned
+            # incomparable with the length of what is on disk. The caller compares
+            # them, and that is what closes a reader which truncates or rewrites.
+            documents.append((rel, (root / rel).read_bytes().decode("utf-8")))
         except (OSError, UnicodeDecodeError) as e:
             unreadable.append(f"{rel}: {type(e).__name__} — not scanned")
     return documents, unreadable
@@ -216,6 +236,11 @@ def read_documents(root, paths):
 
 def selftest():
     """Prove each rule fires and each exemption holds. Rows, not prose.
+
+    Rows are a sample, though, and the difference matters: a rule narrowed to some
+    range no row happens to name still passes every check below. What the rows
+    prove is that each rule is wired in and each exemption is deliberate, not that
+    the rules are complete.
 
     Every value here is invented. See the module docstring: an earlier draft used
     the real coordinates this change removes, in the one file the guard does not
@@ -269,16 +294,21 @@ def selftest():
         if got:
             failures.append(f"FALSE +  {label}: {line!r} -> {got}")
 
-    # The reader and the scanner, driven end to end, so that a scanner which
-    # always returns [] cannot pass while every row above stays green. Over a LONG
-    # document with its only violation on the last line, because coverage within a
-    # file is the narrowing no count of files can see: a reader that truncates the
-    # text, or a scanner that stops after the first few lines, leaves every count
-    # in this file untouched and still reports clean.
-    body = "a line carrying no coordinate at all\n" * 4000
-    planted = body + "LoadBalancer 11.22.33.44 closes it\n"
+    # The reader and the scanner driven end to end, so that a scanner which always
+    # returns [] cannot pass while every row above stays green, and so the line
+    # numbering is proved on something longer than one line. It is deliberately
+    # NOT what guards against truncation: a fixture can only ever be longer than
+    # the documents somebody thought to compare it with, and two tracked documents
+    # are already longer than this one. Truncation is main's job, where the
+    # comparison is against each real file's own size.
+    #
+    # write_bytes, not write_text, for the same reason the reader uses read_bytes:
+    # text mode would translate the newlines on Windows and the round-trip this
+    # asserts would fail on the platform rather than on the code.
+    planted = "a line carrying no coordinate at all\n" * 40
+    planted += "LoadBalancer 11.22.33.44 closes it\n"
     with tempfile.TemporaryDirectory() as tmp:
-        Path(tmp, "deep.md").write_text(planted, encoding="utf-8")
+        Path(tmp, "deep.md").write_bytes(planted.encode("utf-8"))
         documents, unreadable = read_documents(Path(tmp), ["deep.md"])
     if unreadable:
         failures.append(f"READ     the fixture came back unreadable: {unreadable}")
@@ -286,10 +316,13 @@ def selftest():
         failures.append(f"READ     returned {len(documents[0][1])} of "
                         f"{len(planted)} characters")
     else:
-        found = scan_texts(documents)
-        if found != ["deep.md:4001: routable address 11.22.33.44"]:
-            failures.append(f"SCAN     did not reach the last line of a "
-                            f"4001-line document: {found}")
+        scan = scan_texts(documents)
+        if scan.findings != ["deep.md:41: routable address 11.22.33.44"]:
+            failures.append(f"SCAN     did not report the planted last line: "
+                            f"{scan.findings}")
+        if scan.scanned != ["deep.md"] or scan.lines != 41:
+            failures.append(f"SCAN     misreported its own coverage: "
+                            f"{scan.scanned}, {scan.lines} lines")
     return failures
 
 
@@ -327,12 +360,15 @@ def main():
     # exclusion added to the pathspec shrinks `every` and `paths` together, so
     # nothing downstream disagrees and every sentinel is still present. Restated
     # through a second mechanism instead — git's own glob against a suffix test in
-    # Python, two idioms over one set — so narrowing either one alone fails here.
-    missed = sorted(set(p for p in ls_files(root) if p.endswith(".md")) - set(every))
-    if missed:
-        print("a plain listing finds tracked markdown the pathspec did not return, "
-              "so the scan began narrower than the repository:")
-        for p in missed:
+    # Python, two idioms over one set. Compared for equality rather than for what
+    # the pathspec missed, so that narrowing EITHER side alone fails: a suffix
+    # typed `.mdx` empties the restatement and would otherwise disarm this check
+    # without dropping a single document, which is how a guard dies quietly.
+    by_suffix = set(p for p in ls_files(root) if p.endswith(".md"))
+    if by_suffix != set(every):
+        print("git's pathspec and a suffix test disagree about what tracked markdown "
+              "is, so one of the two has been narrowed:")
+        for p in sorted(by_suffix ^ set(every)):
             print(f"  {p}")
         return 1
     missing = [d for d in REQUIRED_DOCUMENTS if d not in paths]
@@ -370,12 +406,43 @@ def main():
               "documents without reporting the difference, so the scan silently "
               "covered less than it chose to")
         return 1
+    # And that each document arrived whole. Bytes on disk against bytes returned,
+    # per document and exactly, which is the only statement here that does not
+    # depend on a fixture being bigger than the largest real file: it catches a
+    # reader that truncates, drops lines, or decodes lossily, at any size.
+    short = []
+    for rel, text in documents:
+        on_disk = (root / rel).stat().st_size
+        returned = len(text.encode("utf-8"))
+        if returned != on_disk:
+            short.append(f"{rel}: {returned} bytes returned of {on_disk} on disk")
+    if short:
+        print("the reader did not return these documents whole, so what was scanned "
+              "is not what the repository holds:")
+        for s in short:
+            print(f"  {s}")
+        return 1
 
-    bad = scan_texts(documents)
-    if bad:
+    scan = scan_texts(documents)
+    # The fourth hop, and the one with nothing upstream to compare against: a
+    # filter applied inside the scan changes no list and no count anywhere else,
+    # so the scan reports what it covered and both halves are restated here. The
+    # line total is recomputed from `documents` rather than taken on trust, which
+    # is what catches a scanner that reads only the first few lines of each file.
+    if set(scan.scanned) != set(paths):
+        print(f"the scan covered {len(set(scan.scanned))} of {len(paths)} documents "
+              "it was given, so it read less than was read for it")
+        return 1
+    expected_lines = sum(len(text.splitlines()) for _, text in documents)
+    if scan.lines != expected_lines:
+        print(f"the scan saw {scan.lines} lines of the {expected_lines} it was given, "
+              "so it stopped short inside the documents it did open")
+        return 1
+
+    if scan.findings:
         print("operator coordinates must be GitHub Actions variables, not repository "
               "content (#355, #356, #514):")
-        for b in bad:
+        for b in scan.findings:
             print(f"  {b}")
         return 1
     print(f"ok — {len(documents)} documents carry none of the four shapes")
