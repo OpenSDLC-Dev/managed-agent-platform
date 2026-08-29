@@ -33,6 +33,16 @@ entirely, by git's pathspec and by the suffix test alike -- they agree, so the
 check that compares them stays silent about it. This catches four shapes; it is
 not a proof that the repository is clean.
 
+NOR DOES IT VERIFY ITSELF PAST A POINT, stated once here so the next reader does
+not go looking for the check that would. Main restates every hop against
+something the same run measured, and between them those reach any narrowing of
+the corpus -- a document, a byte or a line that went missing. They do not reach
+an edit that keeps the arithmetic and changes the meaning: a reader substituting
+one address for another of the same length, a rule narrowed to a range no
+self-test row happens to name, or a scan re-emitting the counts for work it
+skipped. A receipt can always be forged by the code that writes it, and the
+remedy for that class is review, not another restatement.
+
 A KNOWN FALSE POSITIVE, recorded rather than worked around. The registry and
 service-account rule flags any project component that is not a placeholder, so a
 genuinely public third-party project -- a Google sample image path, say -- goes
@@ -49,7 +59,7 @@ The count the run prints is the live number, and no prose here quotes it, becaus
 a number that tracks the corpus goes stale the next time a document is added. A
 measurement pinned to a named commit does not, and one is quoted below where it
 argues why no check here compares against a constant. Checks that compare two
-counts the run measured for itself are a different thing, and there are two.
+counts the run measured for itself are a different thing, and there are three.
 
 Source files are outside it, and that is a real gap rather than an oversight:
 #514 found a project id in a Go test fixture too, but every networking test here
@@ -169,15 +179,18 @@ Scan = collections.namedtuple("Scan", "findings scanned lines")
 
 def scan_texts(documents):
     """The scanning half, separated so the self-test can drive it without git."""
+    # Both receipts are written AFTER the work they attest to, never before, and
+    # at both levels: a `continue` inserted anywhere in either body then loses the
+    # receipt along with the work it skipped, instead of leaving one behind for a
+    # line or a document it never read. The line counter has to obey this as
+    # literally as the path does — incremented at the top of the inner body it
+    # attests to a line the scan is about to skip, which is a receipt for nothing.
     findings, scanned, lines = [], [], 0
     for rel, text in documents:
         for n, line in enumerate(text.splitlines(), 1):
-            lines += 1
             for why in violations(line):
                 findings.append(f"{rel}:{n}: {why}")
-        # Recorded AFTER the work, never before: an early `continue` inserted
-        # anywhere in this body then loses the attestation along with the lines it
-        # skipped, instead of leaving a receipt for a document it never read.
+            lines += 1
         scanned.append(rel)
     return Scan(findings, scanned, lines)
 
@@ -227,7 +240,9 @@ def read_documents(root, paths):
             # Bytes and an explicit decode, not read_text: text mode would
             # translate CRLF to LF and make the length of what is returned
             # incomparable with the length of what is on disk. The caller compares
-            # them, and that is what closes a reader which truncates or rewrites.
+            # them, and that is what closes a reader which truncates, drops lines,
+            # or decodes lossily — every rewrite that changes the length, and no
+            # rewrite that does not.
             documents.append((rel, (root / rel).read_bytes().decode("utf-8")))
         except (OSError, UnicodeDecodeError) as e:
             unreadable.append(f"{rel}: {type(e).__name__} — not scanned")
@@ -302,25 +317,44 @@ def selftest():
     # are already longer than this one. Truncation is main's job, where the
     # comparison is against each real file's own size.
     #
+    # The fixture is built FROM the rows above, so it carries every shape the
+    # detector knows rather than one of them. The round-trip below can only prove
+    # the reader preserved bytes the fixture actually contains, and main's size
+    # comparison only sees a rewrite that changes the length — so a reader that
+    # neutralised a registry path in place, same length, would pass both unless
+    # a registry path is here to be neutralised.
+    #
     # write_bytes, not write_text, for the same reason the reader uses read_bytes:
     # text mode would translate the newlines on Windows and the round-trip this
     # asserts would fail on the platform rather than on the code.
-    planted = "a line carrying no coordinate at all\n" * 40
-    planted += "LoadBalancer 11.22.33.44 closes it\n"
+    fixture = [line for _, line in must_flag]
+    fixture += ["a line carrying no coordinate at all"] * 40
+    fixture += ["LoadBalancer 11.22.33.44 closes it"]
+    planted = "".join(f"{line}\n" for line in fixture)
     with tempfile.TemporaryDirectory() as tmp:
         Path(tmp, "deep.md").write_bytes(planted.encode("utf-8"))
         documents, unreadable = read_documents(Path(tmp), ["deep.md"])
     if unreadable:
         failures.append(f"READ     the fixture came back unreadable: {unreadable}")
     elif documents[0][1] != planted:
-        failures.append(f"READ     returned {len(documents[0][1])} of "
-                        f"{len(planted)} characters")
+        got = documents[0][1]
+        if len(got) == len(planted):
+            # The length matching is the interesting half: this is the rewrite
+            # that main's size comparison cannot see, and only the fixture can.
+            failures.append(f"READ     returned {len(got)} characters as written "
+                            f"but not what was written — the text was rewritten")
+        else:
+            failures.append(f"READ     returned {len(got)} of {len(planted)} "
+                            f"characters")
     else:
         scan = scan_texts(documents)
-        if scan.findings != ["deep.md:41: routable address 11.22.33.44"]:
-            failures.append(f"SCAN     did not report the planted last line: "
+        expected = [f"deep.md:{n}: {why}"
+                    for n, line in enumerate(fixture, 1)
+                    for why in violations(line)]
+        if scan.findings != expected:
+            failures.append(f"SCAN     did not report every planted line: "
                             f"{scan.findings}")
-        if scan.scanned != ["deep.md"] or scan.lines != 41:
+        if scan.scanned != ["deep.md"] or scan.lines != len(fixture):
             failures.append(f"SCAN     misreported its own coverage: "
                             f"{scan.scanned}, {scan.lines} lines")
     return failures
@@ -364,7 +398,19 @@ def main():
     # the pathspec missed, so that narrowing EITHER side alone fails: a suffix
     # typed `.mdx` empties the restatement and would otherwise disarm this check
     # without dropping a single document, which is how a guard dies quietly.
-    by_suffix = set(p for p in ls_files(root) if p.endswith(".md"))
+    #
+    # It runs git itself rather than calling ls_files, and that is the whole point
+    # of it: routed through the same helper, one narrowing inside that helper
+    # shrinks both sides equally and they agree on a corpus neither of them saw.
+    # A restatement sharing a trunk with what it restates is not a restatement.
+    # (`git ls-tree -r HEAD` would be the wrong second mechanism for a different
+    # reason: it reads the commit, so a staged new document fails a check that is
+    # supposed to be about the pathspec.)
+    listed = subprocess.run(
+        ["git", "ls-files", "-z"],
+        cwd=root, capture_output=True, text=True, check=True,
+    ).stdout
+    by_suffix = set(p for p in listed.split("\0") if p.endswith(".md"))
     if by_suffix != set(every):
         print("git's pathspec and a suffix test disagree about what tracked markdown "
               "is, so one of the two has been narrowed:")
