@@ -1,6 +1,7 @@
 package api_test
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -8,6 +9,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 // agentRequiredFields is the full BetaManagedAgentsAgent wire surface; every
@@ -612,4 +615,236 @@ func TestAgentArchive(t *testing.T) {
 	// Archive of an unknown agent → 404.
 	status, body := s.do(http.MethodPost, "/v1/agents/agent_missing/archive", nil)
 	wantErr(t, status, body, http.StatusNotFound, "not_found_error")
+}
+
+// Archiving an agent is refused while a live deployment pins it — where the
+// reference archives those deployments in the same operation (plan 37
+// decision 7). The cascade is what this platform cannot afford: nothing
+// unarchives a deployment and there is no DELETE /v1/deployments, so one
+// mistaken agent archive would destroy every schedule pinning it, past
+// recovery. A refusal is recoverable by retrying in the right order.
+func TestAgentArchiveRefusedWhileADeploymentPinsIt(t *testing.T) {
+	s := newTestServer(t)
+	agentID, envID := fixture(t, s)
+	d := createDeployment(t, s, deploymentBody(agentID, envID))
+	deploymentID := d["id"].(string)
+
+	status, body := s.do(http.MethodPost, "/v1/agents/"+agentID+"/archive", nil)
+	wantErr(t, status, body, http.StatusBadRequest, "invalid_request_error")
+	// The message names the deployment, because "archive those first" is
+	// useless advice without saying which.
+	if msg, _ := body["error"].(map[string]any)["message"].(string); !strings.Contains(msg, deploymentID) {
+		t.Errorf("refusal message %q does not name the blocking deployment %s", msg, deploymentID)
+	}
+
+	// Refused means refused: the agent is untouched, not archived-then-rolled-back.
+	status, got := s.do(http.MethodGet, "/v1/agents/"+agentID, nil)
+	if status != http.StatusOK || got["archived_at"] != nil {
+		t.Errorf("after a refused archive: %d, archived_at %v — want the agent untouched", status, got["archived_at"])
+	}
+
+	// The refusal is about *this* agent, not about a deployment existing
+	// somewhere. Without this, dropping `agent_id = $1` from the query — which
+	// would block every archive in the database while any deployment lives —
+	// passes every other assertion here.
+	bystander := createAgent(t, s, map[string]any{"name": "unpinned", "model": "m"})["id"].(string)
+	if status, res := s.do(http.MethodPost, "/v1/agents/"+bystander+"/archive", nil); status != http.StatusOK {
+		t.Errorf("archiving an agent no deployment pins: %d %v", status, res)
+	}
+
+	// An archived deployment never blocks. It is terminal and can never fire,
+	// and blocking on one would build the dead end §8.3 names — an agent no
+	// operator could ever archive, because nothing clears the deployment.
+	if status, res := s.do(http.MethodPost, "/v1/deployments/"+deploymentID+"/archive", nil); status != http.StatusOK {
+		t.Fatalf("archive deployment: %d %v", status, res)
+	}
+	status, archived := s.do(http.MethodPost, "/v1/agents/"+agentID+"/archive", nil)
+	if status != http.StatusOK {
+		t.Fatalf("archive after the deployment was archived: %d %v", status, archived)
+	}
+	if archived["archived_at"] == nil {
+		t.Error("the agent archived with a null archived_at")
+	}
+}
+
+// The refusal names what an operator has to archive, and stops naming at five.
+// An agent with no deployment cap on it could be pinned by hundreds, and a
+// message that spelled them all out would be unreadable in a terminal — so the
+// count carries the size and the names carry the starting point.
+func TestAgentArchiveRefusalNamesTheDeploymentsUpToFive(t *testing.T) {
+	s := newTestServer(t)
+	agentID, envID := fixture(t, s)
+
+	var created []string
+	for i := range 6 {
+		d := createDeployment(t, s, deploymentBody(agentID, envID))
+		created = append(created, d["id"].(string))
+
+		_, body := s.do(http.MethodPost, "/v1/agents/"+agentID+"/archive", nil)
+		msg, _ := body["error"].(map[string]any)["message"].(string)
+		switch i {
+		case 0:
+			// Singular: one deployment, named, and "it" rather than "them".
+			if !strings.Contains(msg, "pinned by deployment "+created[0]) || !strings.Contains(msg, "archive it first") {
+				t.Errorf("one blocking deployment: %q", msg)
+			}
+		case 1:
+			// Plural, with every id spelled out and no "and N more".
+			if !strings.Contains(msg, "pinned by 2 deployments") || strings.Contains(msg, "more") {
+				t.Errorf("two blocking deployments: %q", msg)
+			}
+			for _, id := range created {
+				if !strings.Contains(msg, id) {
+					t.Errorf("message %q omits %s", msg, id)
+				}
+			}
+		case 5:
+			// Capped: five named, the sixth left to the count. Which five is
+			// the query's business and not asserted here — six rows created in
+			// the same second can share a created_at.
+			if !strings.Contains(msg, "pinned by 6 deployments") || !strings.Contains(msg, "and 1 more") {
+				t.Errorf("six blocking deployments: %q", msg)
+			}
+			n := 0
+			for _, id := range created {
+				if strings.Contains(msg, id) {
+					n++
+				}
+			}
+			if n != 5 {
+				t.Errorf("message %q names %d of the six deployments, want the five the cap allows", msg, n)
+			}
+		}
+	}
+}
+
+// The refusal guards the transition, not the state: an agent that is already
+// archived re-archives idempotently even while a live deployment pins it. That
+// pairing is unreachable through the API — create and update both refuse an
+// archived agent — so the test writes it directly, which is also the only way
+// it can arise: a row from before this rule existed. Refusing there would be a
+// 400 no operator could clear by archiving the agent, because it already is.
+func TestAgentArchiveStaysIdempotentAgainstAPinFromBeforeTheRule(t *testing.T) {
+	s := newTestServer(t)
+	agentID, envID := fixture(t, s)
+	createDeployment(t, s, deploymentBody(agentID, envID))
+
+	// What the pre-rule handler did: stamp the agent and leave the deployment
+	// live beside it.
+	if _, err := s.pool.Exec(t.Context(),
+		`UPDATE agents SET archived_at = now() WHERE id = $1`, agentID); err != nil {
+		t.Fatalf("archive the agent behind the handler's back: %v", err)
+	}
+
+	status, first := s.do(http.MethodPost, "/v1/agents/"+agentID+"/archive", nil)
+	if status != http.StatusOK {
+		t.Fatalf("re-archiving an already-archived agent: %d %v", status, first)
+	}
+	status, second := s.do(http.MethodPost, "/v1/agents/"+agentID+"/archive", nil)
+	if status != http.StatusOK || second["archived_at"] != first["archived_at"] {
+		t.Errorf("second call: %d, archived_at %v — want the stable %v",
+			status, second["archived_at"], first["archived_at"])
+	}
+}
+
+// The check and the write are one transaction, and that is what makes the
+// refusal race-free rather than usually right: a deployment committed while the
+// archive waits for the agent row must still block it.
+//
+// Deterministic rather than timed. The test takes the FOR SHARE a deployment
+// create holds while it resolves its agent, waits until the archive is provably
+// blocked on a lock instead of sleeping and hoping, and only then commits the
+// pin. What catches a regression is the status code, not the wait: an archive
+// that reads the deployments before locking still blocks a moment later, on its
+// own UPDATE, so it reaches the assertion below having read the wrong snapshot
+// and answers 200. The wait is what makes that ordering observable at all.
+func TestAgentArchiveCannotReadPastAConcurrentDeployment(t *testing.T) {
+	s := newTestServer(t)
+	agentID, envID := fixture(t, s)
+	// Created and archived, so the row is there to revive below and this test
+	// need not spell out every NOT NULL column of `deployments`.
+	deploymentID := createDeployment(t, s, deploymentBody(agentID, envID))["id"].(string)
+	if status, res := s.do(http.MethodPost, "/v1/deployments/"+deploymentID+"/archive", nil); status != http.StatusOK {
+		t.Fatalf("archive deployment: %d %v", status, res)
+	}
+
+	ctx := t.Context()
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	var one int
+	if err := tx.QueryRow(ctx, `SELECT 1 FROM agents WHERE id = $1 FOR SHARE`, agentID).Scan(&one); err != nil {
+		t.Fatalf("FOR SHARE on the agent: %v", err)
+	}
+	if _, err := tx.Exec(ctx, `UPDATE deployments SET archived_at = NULL WHERE id = $1`, deploymentID); err != nil {
+		t.Fatalf("revive the deployment: %v", err)
+	}
+
+	// Its own client rather than s.do: a t.Fatalf from this goroutine would be
+	// the wrong kind of failure, and the transport error belongs on the channel.
+	done := make(chan int, 1)
+	go func() {
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, s.url+"/v1/agents/"+agentID+"/archive", nil)
+		if err != nil {
+			done <- 0
+			return
+		}
+		req.Header.Set("x-api-key", testKey)
+		res, err := (&http.Client{Timeout: 30 * time.Second}).Do(req)
+		if err != nil {
+			done <- 0
+			return
+		}
+		_ = res.Body.Close()
+		done <- res.StatusCode
+	}()
+
+	waitUntilBlockedOnALock(t, s.pool, done)
+
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatalf("commit the revived deployment: %v", err)
+	}
+	if status := <-done; status != http.StatusBadRequest {
+		t.Errorf("the archive answered %d, want 400 — it read the deployments before taking the agent lock", status)
+	}
+}
+
+// waitUntilBlockedOnALock returns once another backend on this test's database
+// is waiting on a lock, which is the archive request. Any backend will do: a
+// pgtest database is private to one test, and the only other two connections on
+// it are the poller and the transaction holding the locks, neither of which
+// ever waits. internal/queue/keeperbudget_test.go polls the same broad way for
+// the same reason.
+//
+// The two failure exits are diagnostics for an archive that answered or died
+// early, not the mechanism that catches a broken ordering — that is the caller's
+// status assertion. 15s is generous by roughly fifty times: the wait was
+// measured at under 300ms even under a verified 2.6x host slowdown.
+func waitUntilBlockedOnALock(t *testing.T, pool *pgxpool.Pool, done <-chan int) {
+	t.Helper()
+	// Its own deadline, so a pool that could not hand out a connection fails
+	// here rather than hanging until the package's timeout.
+	ctx, cancel := context.WithTimeout(t.Context(), 15*time.Second)
+	defer cancel()
+	for ctx.Err() == nil {
+		var waiting int
+		if err := pool.QueryRow(ctx,
+			`SELECT count(*) FROM pg_stat_activity
+			  WHERE datname = current_database() AND wait_event_type = 'Lock'
+			    AND pid <> pg_backend_pid()`).Scan(&waiting); err != nil {
+			t.Fatalf("read pg_stat_activity: %v", err)
+		}
+		if waiting > 0 {
+			return
+		}
+		select {
+		case status := <-done:
+			t.Fatalf("the archive answered %d before ever waiting on a lock", status)
+		case <-time.After(20 * time.Millisecond):
+		}
+	}
+	t.Fatal("no backend waited on a lock within 15s — the archive never reached the agent row")
 }

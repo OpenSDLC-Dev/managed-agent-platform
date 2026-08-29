@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
@@ -560,32 +561,131 @@ func (s *server) listAgentVersions(r *http.Request) (any, error) {
 	return out, nil
 }
 
+// blockingDeploymentsNamed caps how many deployment ids a refusal spells out.
+// The reference caps an organization at 1,000 scheduled deployments and we
+// enforce no limit at all, so the list has no natural ceiling; five names the
+// ones an operator will start with and the count tells them how far they have
+// to go.
+const blockingDeploymentsNamed = 5
+
+// refuseDeploymentsPinningAgent answers 400 while a deployment that can still
+// fire pins the agent. The reference archives those deployments in the same
+// operation; this platform refuses instead, because the cascade is
+// unrecoverable here — nothing unarchives a deployment and there is no
+// DELETE /v1/deployments, so one mistaken archive would destroy every schedule
+// pinning the agent past recovery (plan 37 decision 7). Teardown becomes
+// ordered: archive the deployments, then the agent.
+//
+// An archived deployment never blocks. It is terminal and can never fire, and
+// blocking on one would build a dead end of its own — an agent no operator
+// could ever archive, because nothing clears the deployment.
+//
+// count(*) OVER () rather than a second query: a window function is evaluated
+// before LIMIT, so every row carries the exact total and the message can say
+// how many were left unnamed. It is also why LIMIT bounds the output and not
+// the work — the count reads every live deployment of the agent, and the plain
+// agent_id index serves neither the ordering nor the archived_at predicate
+// (#523, deliberately left for a migration that is being written anyway).
+//
+// Runs inside archiveAgent's transaction, which already holds FOR UPDATE on the
+// agent row. The querier parameter would take the pool just as happily, and
+// passing it there would drop that guarantee without a word.
+func refuseDeploymentsPinningAgent(ctx context.Context, db querier, agentID string) error {
+	rows, err := db.Query(ctx,
+		`SELECT id, count(*) OVER () FROM deployments
+		  WHERE agent_id = $1 AND archived_at IS NULL
+		  ORDER BY created_at, id LIMIT $2`, agentID, blockingDeploymentsNamed)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+
+	var named []string
+	var total int
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id, &total); err != nil {
+			return err
+		}
+		named = append(named, id)
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	switch {
+	case total == 0:
+		return nil
+	case total == 1:
+		return errInvalid("agent %s is pinned by deployment %s; archive it first", agentID, named[0])
+	case total > len(named):
+		return errInvalid("agent %s is pinned by %d deployments (%s and %d more); archive them first",
+			agentID, total, strings.Join(named, ", "), total-len(named))
+	default:
+		return errInvalid("agent %s is pinned by %d deployments (%s); archive them first",
+			agentID, total, strings.Join(named, ", "))
+	}
+}
+
 func (s *server) archiveAgent(r *http.Request) (any, error) {
 	ctx := r.Context()
 	id := r.PathValue("id")
 	if err := checkID(id, "agent"); err != nil {
 		return nil, err
 	}
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	// FOR UPDATE, then the check, then the write, all in one transaction, so a
+	// deployment cannot appear between "none pins this agent" and the archive.
+	// Deployment create always takes FOR SHARE on the agent it pins, and a
+	// deployment update takes it whenever the body carries `agent` — those two
+	// are the only paths that can establish a pin, which is what has to be
+	// locked out. An update omitting `agent` rewrites agent_id to the value it
+	// already held and takes no agent lock; it needs none, because the pin it
+	// preserves is already visible to the count below. Locking create alone
+	// would not have been enough: a deployment's agent cannot be cleared but can
+	// be repinned, so a repin racing this would leave a live deployment pinning
+	// an archived agent.
+	var archivedAt *time.Time
+	err = tx.QueryRow(ctx, `SELECT archived_at FROM agents WHERE id = $1 FOR UPDATE`, id).Scan(&archivedAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, errNotFound("agent %s not found", id)
+	}
+	if err != nil {
+		return nil, err
+	}
+	// The refusal guards the transition, so an agent that is already archived
+	// skips it and re-archives idempotently rather than answering 400 about a
+	// state it is already in. Nothing is lost by the skip: create and update
+	// both refuse an archived agent, so no live deployment can come to pin one.
+	if archivedAt == nil {
+		if err := refuseDeploymentsPinningAgent(ctx, tx, id); err != nil {
+			return nil, err
+		}
+	}
+
 	var (
 		name                 string
 		version              int64
 		specJSON, metaJSON   []byte
 		createdAt, updatedAt time.Time
-		archivedAt           *time.Time
 	)
 	// Idempotent: the first archive stamps archived_at; later calls change
 	// nothing (all SET expressions read the pre-update row).
-	err := s.pool.QueryRow(ctx,
+	err = tx.QueryRow(ctx,
 		`UPDATE agents SET
 		   updated_at  = CASE WHEN archived_at IS NULL THEN now() ELSE updated_at END,
 		   archived_at = COALESCE(archived_at, now())
 		 WHERE id = $1
 		 RETURNING name, version, spec, metadata, created_at, updated_at, archived_at`, id).
 		Scan(&name, &version, &specJSON, &metaJSON, &createdAt, &updatedAt, &archivedAt)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return nil, errNotFound("agent %s not found", id)
-	}
 	if err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(ctx); err != nil {
 		return nil, err
 	}
 	spec, metadata, err := decodeSpecAndMetadata(specJSON, metaJSON)

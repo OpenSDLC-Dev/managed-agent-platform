@@ -725,6 +725,17 @@ func TestUpdateDeploymentRepinsTheAgent(t *testing.T) {
 	if got := up["agent"].(map[string]any)["version"]; got != float64(2) {
 		t.Errorf("re-pinned to version %v, want the latest (2)", got)
 	}
+
+	// Repinning to an *archived* agent is refused, the same 400 create answers.
+	// That is load-bearing beyond this route: the agent-archive refusal skips
+	// its check for an agent that is already archived, on the ground that no
+	// route can newly pin one. Create was the only half of that with a test.
+	gone := createAgent(t, s, map[string]any{"name": "gone", "model": "m"})["id"].(string)
+	if status, res := s.do(http.MethodPost, "/v1/agents/"+gone+"/archive", nil); status != http.StatusOK {
+		t.Fatalf("archive the second agent: %d %v", status, res)
+	}
+	status, res := s.do(http.MethodPost, "/v1/deployments/"+id, map[string]any{"agent": gone})
+	wantErr(t, status, res, http.StatusBadRequest, "invalid_request_error")
 }
 
 // The list is newest-first and keyset-paged, excludes archived rows by default,
