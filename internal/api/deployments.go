@@ -493,9 +493,16 @@ func (s *server) updateDeployment(r *http.Request) (any, error) {
 	// initial_events, resources and schedule are full replacements; metadata
 	// alone is a patch.
 	name := d.Name
-	if v, set, _, err := stringField(obj, "name"); err != nil {
+	if v, set, null, err := stringField(obj, "name"); err != nil {
 		return nil, err
 	} else if set {
+		// The fourth field that "cannot be cleared", and it says so in the
+		// same words as the other three: the length bound would answer 400
+		// too, but "must be 1-256 characters" does not tell a caller that null
+		// was the problem.
+		if null {
+			return nil, errInvalid("name cannot be cleared")
+		}
 		name = v
 	}
 	description := d.Description

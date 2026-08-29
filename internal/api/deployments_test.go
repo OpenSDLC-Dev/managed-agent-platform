@@ -1280,7 +1280,7 @@ func TestUpdateDeploymentNullClearsOnlyWhatMayBeCleared(t *testing.T) {
 		t.Errorf("resources = %v after an explicit null, want [] — null clears", got)
 	}
 
-	for _, key := range []string{"initial_events", "environment_id", "agent"} {
+	for _, key := range []string{"initial_events", "environment_id", "agent", "name"} {
 		t.Run(key, func(t *testing.T) {
 			status, res := s.do(http.MethodPost, "/v1/deployments/"+id, map[string]any{key: nil})
 			wantErr(t, status, res, http.StatusBadRequest, "invalid_request_error")
