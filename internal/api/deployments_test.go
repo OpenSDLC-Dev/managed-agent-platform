@@ -4,9 +4,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/api"
 )
 
 // deploymentBody is the smallest create body the schema admits: name, agent,
@@ -832,4 +835,190 @@ func TestDeploymentResourcesEchoWithoutTheToken(t *testing.T) {
 	if strings.Contains(string(stored), "ghp_secret") {
 		t.Error("the repository token is stored in plaintext")
 	}
+}
+
+// A file rubric needs object storage to snapshot into. Refusing it at create
+// beats recording a failed run every night on a deployment that can never
+// grade, so the check runs here rather than at the fire — and this is the only
+// path that reaches it, since the ordinary test server always has storage.
+func TestDeploymentFileRubricNeedsObjectStorage(t *testing.T) {
+	pool := newPoolWithKey(t)
+	srv := httptest.NewServer(api.NewHandler(pool, nil, nil, nil))
+	t.Cleanup(srv.Close)
+	s := &tserver{t: t, url: srv.URL, pool: pool}
+	agentID, envID := fixture(t, s)
+
+	rubric := map[string]any{
+		"type":        "user.define_outcome",
+		"description": "Grade the report.",
+		"rubric":      map[string]any{"type": "file", "file_id": "file_0000000000000000000000gk"},
+	}
+	body := deploymentBody(agentID, envID)
+	body["initial_events"] = []any{rubric}
+	status, res := s.do(http.MethodPost, "/v1/deployments", body)
+	wantErr(t, status, res, http.StatusBadRequest, "invalid_request_error")
+
+	// A text rubric is unaffected — it needs no blob to snapshot.
+	body = deploymentBody(agentID, envID)
+	body["initial_events"] = []any{map[string]any{
+		"type":        "user.define_outcome",
+		"description": "Grade the report.",
+		"rubric":      map[string]any{"type": "text", "text": "The report exists."},
+	}}
+	createDeployment(t, s, body)
+}
+
+// A repository resource on a cipher-less deployment is refused rather than
+// stored: plan 25 decision 2's "never stored unencrypted" applies to a
+// deployment's copy of the token exactly as it does to a session's.
+func TestDeploymentRepositoryNeedsACipher(t *testing.T) {
+	s := newTestServerWithCipher(t, nil)
+	agentID, envID := fixture(t, s)
+
+	body := deploymentBody(agentID, envID)
+	body["resources"] = []any{map[string]any{
+		"type": "github_repository", "url": "https://github.com/acme/orders",
+		"authorization_token": "ghp_secret",
+	}}
+	status, res := s.do(http.MethodPost, "/v1/deployments", body)
+	wantErr(t, status, res, http.StatusInternalServerError, "api_error")
+
+	// The refusal happens before the row is written.
+	var count int
+	if err := s.pool.QueryRow(t.Context(), `SELECT count(*) FROM deployments`).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 0 {
+		t.Errorf("%d deployments were stored despite the refusal", count)
+	}
+}
+
+// vault_ids are validated against live rows, FOR SHARE, so an archive cannot
+// land between the check and the insert.
+func TestDeploymentVaultIDs(t *testing.T) {
+	s := newTestServer(t)
+	agentID, envID := fixture(t, s)
+
+	vaultID := createVault(t, s, "prod-creds")
+
+	body := deploymentBody(agentID, envID)
+	body["vault_ids"] = []any{vaultID}
+	d := createDeployment(t, s, body)
+	if got := d["vault_ids"].([]any); len(got) != 1 || got[0] != vaultID {
+		t.Errorf("vault_ids = %v, want [%s]", d["vault_ids"], vaultID)
+	}
+
+	// Unknown, malformed and archived are each a 400.
+	for name, ids := range map[string][]any{
+		"unknown":   {"vlt_0000000000000000000000"},
+		"malformed": {"not-a-vault"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			bad := deploymentBody(agentID, envID)
+			bad["vault_ids"] = ids
+			status, res := s.do(http.MethodPost, "/v1/deployments", bad)
+			wantErr(t, status, res, http.StatusBadRequest, "invalid_request_error")
+		})
+	}
+
+	if status, res := s.do(http.MethodPost, "/v1/vaults/"+vaultID+"/archive", nil); status != http.StatusOK {
+		t.Fatalf("archive vault: %d %v", status, res)
+	}
+	bad := deploymentBody(agentID, envID)
+	bad["vault_ids"] = []any{vaultID}
+	status, res := s.do(http.MethodPost, "/v1/deployments", bad)
+	wantErr(t, status, res, http.StatusBadRequest, "invalid_request_error")
+
+	// An update replacing vault_ids revalidates them.
+	status, res = s.do(http.MethodPost, "/v1/deployments/"+d["id"].(string),
+		map[string]any{"vault_ids": []any{"vlt_0000000000000000000000"}})
+	wantErr(t, status, res, http.StatusBadRequest, "invalid_request_error")
+}
+
+// The four full-replacement fields replace rather than merge, and an omitted
+// one is preserved — including resources, whose stored form carries a sealed
+// token the echo never shows, so preserving it cannot go through the echo.
+func TestUpdateDeploymentReplacesTheCollections(t *testing.T) {
+	s := newTestServer(t)
+	agentID, envID := fixture(t, s)
+
+	body := deploymentBody(agentID, envID)
+	body["resources"] = []any{map[string]any{
+		"type": "github_repository", "url": "https://github.com/acme/orders",
+		"authorization_token": "ghp_first", "mount_path": "/workspace/orders",
+	}}
+	d := createDeployment(t, s, body)
+	id := d["id"].(string)
+
+	// An update that does not mention resources preserves them — and preserves
+	// the sealed token with them, which a round-trip through the echo would
+	// have dropped.
+	status, up := s.do(http.MethodPost, "/v1/deployments/"+id, map[string]any{"name": "Renamed"})
+	if status != http.StatusOK {
+		t.Fatalf("update: %d %v", status, up)
+	}
+	if rs := up["resources"].([]any); len(rs) != 1 {
+		t.Fatalf("resources = %v after an unrelated update, want the one element preserved", up["resources"])
+	}
+	var stored []byte
+	if err := s.pool.QueryRow(t.Context(),
+		`SELECT resources FROM deployments WHERE id = $1`, id).Scan(&stored); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(stored), "ciphertext") {
+		t.Errorf("the sealed token was lost by an update that did not mention resources: %s", stored)
+	}
+
+	// Replacing resources with an empty list clears them.
+	status, up = s.do(http.MethodPost, "/v1/deployments/"+id, map[string]any{"resources": []any{}})
+	if status != http.StatusOK {
+		t.Fatalf("clear resources: %d %v", status, up)
+	}
+	if rs := up["resources"].([]any); len(rs) != 0 {
+		t.Errorf("resources = %v, want [] after an explicit empty replacement", rs)
+	}
+
+	// initial_events is a full replacement too.
+	status, up = s.do(http.MethodPost, "/v1/deployments/"+id, map[string]any{
+		"initial_events": []any{map[string]any{"type": "system.message", "content": "quietly"}}})
+	if status != http.StatusOK {
+		t.Fatalf("replace initial_events: %d %v", status, up)
+	}
+	ev := up["initial_events"].([]any)
+	if len(ev) != 1 || ev[0].(map[string]any)["type"] != "system.message" {
+		t.Errorf("initial_events = %v, want the single replacement", ev)
+	}
+
+	// And an update cannot empty it: the floor applies to the stored result.
+	status, res := s.do(http.MethodPost, "/v1/deployments/"+id, map[string]any{"initial_events": []any{}})
+	wantErr(t, status, res, http.StatusBadRequest, "invalid_request_error")
+}
+
+// Moving a deployment to another environment revalidates the target, and an
+// archived or unknown one is refused.
+func TestUpdateDeploymentChangesEnvironment(t *testing.T) {
+	s := newTestServer(t)
+	agentID, envID := fixture(t, s)
+	id := createDeployment(t, s, deploymentBody(agentID, envID))["id"].(string)
+
+	other := createEnvironment(t, s, map[string]any{"name": "second-env"})["id"].(string)
+	status, up := s.do(http.MethodPost, "/v1/deployments/"+id,
+		map[string]any{"environment_id": other})
+	if status != http.StatusOK {
+		t.Fatalf("move: %d %v", status, up)
+	}
+	if up["environment_id"] != other {
+		t.Errorf("environment_id = %v, want %s", up["environment_id"], other)
+	}
+
+	status, res := s.do(http.MethodPost, "/v1/deployments/"+id,
+		map[string]any{"environment_id": "env_0000000000000000000000"})
+	wantErr(t, status, res, http.StatusNotFound, "not_found_error")
+
+	if status, res := s.do(http.MethodPost, "/v1/environments/"+envID+"/archive", nil); status != http.StatusOK {
+		t.Fatalf("archive: %d %v", status, res)
+	}
+	status, res = s.do(http.MethodPost, "/v1/deployments/"+id,
+		map[string]any{"environment_id": envID})
+	wantErr(t, status, res, http.StatusBadRequest, "invalid_request_error")
 }
