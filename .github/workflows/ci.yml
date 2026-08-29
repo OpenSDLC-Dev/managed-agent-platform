@@ -1119,7 +1119,7 @@ jobs:
       # `deploy/`; #514 found a project id, two project numbers, a registry path
       # and two live LoadBalancer addresses still in docs/. Nothing in the repo
       # can notice that on its own, which is why it went unnoticed for months.
-      - name: no operator coordinates in the documentation
+      - name: the documentation carries none of the shapes a coordinate takes
         run: make identifiers-test
       # deploy-alert.yml couples to deploy.yml three ways, and all three fail
       # SILENTLY: the trigger stops matching, or every deploy classifies as

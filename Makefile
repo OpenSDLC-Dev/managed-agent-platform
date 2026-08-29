@@ -288,13 +288,13 @@ parked-test:
 retry-test:
 	python3 .github/scripts/retry_test.py
 
-# The one that guards a rule rather than a script: #355/#356 parameterised the
+# The one that checks a rule rather than a script: #355/#356 parameterised the
 # operator's coordinates out of the repository by hand, the sweep stopped at
 # `deploy/` and `.github/`, and #514 found what it had left in docs/. A rule kept
-# by memory lapses, so this searches the documentation for the two shapes nothing
-# there may legitimately carry — a routable address and a bare project number.
-# It self-tests before it scans, because a broken pattern and a clean repository
-# print the same thing otherwise.
+# by memory lapses, so this searches the documentation for the four shapes those
+# coordinates take. It catches shapes, not the rule entire — the script's header
+# says exactly what it cannot see — and it self-tests before it scans, because a
+# broken pattern and a clean repository print the same thing otherwise.
 identifiers-test:
 	python3 .github/scripts/identifiers_test.py
 

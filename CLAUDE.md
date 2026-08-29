@@ -111,7 +111,7 @@ make openbao-init-test   # ...and the compose + chart OpenBao init scripts, run 
 make cd-outcome-test     # ...and the CD failure notifier's classifier, which `workflow_run` would otherwise first run on main
 make parked-test         # ...and the parked-cluster label rule `deploy.yml` and `staging-parked.yml` share
 make retry-test          # ...and the retry wrapper both notifiers copy, lifted out of the workflow YAML and run
-make identifiers-test    # ...and the rule that the operator's coordinates stay in Actions variables, never in docs/
+make identifiers-test    # ...and the documentation, for the four shapes an operator's coordinates take (#356's rule)
 make gcp-fmt gcp-validate gcp-split-check gcp-lint   # GCP staging Terraform, credential-free
 make gcp-bootstrap-test gcp-split-check-test gcp-dbinit-test gcp-power-test gcp-tfvars-test gcp-env-targets-test  # ...and its tooling, run rather than read
 ```

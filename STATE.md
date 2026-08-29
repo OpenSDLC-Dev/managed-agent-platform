@@ -17,7 +17,7 @@ follow-ups those reviews spun off: neither notifier's `retry` hands a failed att
 output to its caller any more (#507), the Workload Identity Federation commands in the
 deploy notes are runnable again, having asked `gcloud` for a project number it never takes
 in `--project` (#508), and the operator's coordinates are out of `docs/`, with `make
-identifiers-test` holding that rule now rather than memory (#514). And the three plan-36
+identifiers-test` now checking it for the shapes they take (#514). And the three plan-36
 leftovers that needed no decision from anyone: the test rows slice 4 deferred (#488), its
 fifteen recording items folded into the issue tracking its twenty inferences (#78, which
 stays open as that tracker), and memory-version retention (#476), where the count the

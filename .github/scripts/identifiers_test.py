@@ -2,39 +2,52 @@
 """Fail if an operator's real coordinates are written into the documentation.
 
 #355/#356 parameterised deployment identifiers out of the repository by hand.
-The sweep reached `deploy/` and `.github/` and stopped there, and nobody noticed
-for months: #514 found a project id, two project numbers, an Artifact Registry
-path and two routable LoadBalancer addresses still sitting in `docs/HISTORY.md`.
-A rule enforced only by memory is a rule that lapses, so this is the enforcing
-half of that fix.
+The sweep reached `deploy/` and `.github/` and stopped there, and nothing in the
+repository could notice, so what it left sat in a public repo for months: #514
+found a project id, two project numbers, an Artifact Registry path and two
+routable LoadBalancer addresses still in `docs/HISTORY.md`. A rule enforced only
+by memory is a rule that lapses. This is the enforcing half of that fix.
 
-WHAT IT LOOKS FOR, and why only these two shapes. A guard cannot search for the
-values themselves -- it would have to contain them, which is the thing being
-prevented. So it searches for two shapes that no documentation in this
-repository has a legitimate reason to carry:
+A guard cannot search for the values themselves -- it would have to contain
+them, which is the thing being prevented -- so it searches for shapes:
 
   - a ROUTABLE IPv4 address. Every address these documents legitimately use is
-    loopback, RFC 1918, link-local, or an RFC 5737 documentation range. A public
-    address in a deployment record is somebody's live endpoint.
-  - a BARE 12-DIGIT INTEGER, which is the shape of a GCP project number. The
-    lookarounds matter: skill version ids in these documents are 16 digits, and
-    a substring match would flag every one of them.
+    loopback, RFC 1918, link-local, multicast, or an RFC 5737 documentation
+    range. A routable one in a deployment record is somebody's live endpoint.
+  - a BARE 12-DIGIT INTEGER, the shape of a GCP project number. The lookarounds
+    are load-bearing: skill version ids in these documents are 16 digits, and a
+    substring match flags every one of them.
+  - an ARTIFACT REGISTRY PATH or `*.iam.gserviceaccount.com` ADDRESS whose
+    project component is not one of this repository's placeholders. This is the
+    shape that leaked a project id in #514, and every legitimate instance today
+    already uses a placeholder, so the rule costs nothing and holds the
+    convention as well. A real project NUMBER in a `cloudbuild`/`developer`
+    service account needs no rule of its own -- it is twelve digits.
 
-Two public resolvers are allowed by value. `8.8.8.8` and `1.1.1.1` are used as
-examples of a well-known third-party service, not as anybody's coordinates.
+WHAT IT DOES NOT COVER, stated plainly because the surrounding prose must not
+claim more than this. A bare project id in running text has no shape to match --
+it is a lowercase-hyphen word like any other -- so it is caught only where it
+appears inside one of the structured forms above. IPv6 endpoints, bucket names
+and KMS key names have no rule. This catches four shapes; it is not a proof that
+the repository is clean.
 
-WHAT IT DELIBERATELY DOES NOT COVER. Markdown only. Widening from `docs/` and
-`deploy/` to every tracked `*.md` was measured first and cost nothing -- not one
-new finding across 113 files -- so the scope is all of them, which is what puts
-CHANGELOG.md and the `changelog.d/` fragments that become it inside the guard.
-Source files are outside it, and that is a real gap rather than an oversight:
-#514 found a project id in a Go test fixture too, but every networking test in
-this repository is full of addresses on purpose, and a guard that cried wolf
-there would be switched off within a week. Prose is where a deployment record
-gets written down; code is where addresses are the subject matter.
+Markdown only, and that scope was measured rather than assumed: widening from
+`docs/` and `deploy/` to every tracked `*.md` produced not one new finding across
+113 files, so the scope is all of them -- which is what puts CHANGELOG.md and the
+`changelog.d/` fragments that become it inside the guard. Source files are
+outside it, and that is a real gap rather than an oversight: #514 found a project
+id in a Go test fixture too, but every networking test here is full of addresses
+on purpose, and a guard that cried wolf there would be switched off within a
+week. Prose is where a deployment record gets written down; code is where
+addresses are the subject matter.
 
-The self-test runs FIRST, on every invocation. Without it a broken pattern
-reports exactly what a clean repository reports, and the silence is
+This file is not scanned either, which is only safe because every fixture below
+is synthetic -- `11.22.33.44` and `123456789012` are nobody's coordinates. An
+earlier draft used the real values this change removes, which republished them in
+the one file the guard cannot see. Keep the fixtures synthetic.
+
+The self-test runs FIRST, before any repository access. Without it a broken
+pattern reports exactly what a clean repository reports, and the silence is
 indistinguishable.
 """
 
@@ -44,10 +57,24 @@ import subprocess
 import sys
 from pathlib import Path
 
-ALLOWED_ADDRESSES = {"8.8.8.8", "1.1.1.1"}
+# Placeholders the documentation already uses where a project belongs. A value
+# outside this set is somebody's real project, which is the whole finding.
+PLACEHOLDER_PROJECTS = frozenset({
+    "your-project", "my-project", "example-project",
+    "PROJECT", "PROJECT_ID", "PROJECT_NUMBER", "P", "p",
+})
 
-IPV4 = re.compile(r"(?<![0-9.])(?:[0-9]{1,3}\.){3}[0-9]{1,3}(?![0-9.])")
+# Allowed by value: famous third-party resolvers, used as examples of a service,
+# never as anybody's coordinate.
+ALLOWED_ADDRESSES = frozenset({"8.8.8.8", "1.1.1.1"})
+
+# The trailing lookahead rejects only a dot that CONTINUES the number. Rejecting
+# any dot would miss an address at the end of a sentence, which is the commonest
+# way prose writes one down.
+IPV4 = re.compile(r"(?<![0-9.])(?:[0-9]{1,3}\.){3}[0-9]{1,3}(?![0-9])(?!\.[0-9])")
 PROJECT_NUMBER = re.compile(r"(?<![0-9])[0-9]{12}(?![0-9])")
+REGISTRY = re.compile(r"[a-z0-9-]+-docker\.pkg\.dev/([A-Za-z0-9_-]+)")
+SERVICE_ACCOUNT = re.compile(r"@([A-Za-z0-9-]+)\.iam\.gserviceaccount\.com")
 
 
 def routable(text):
@@ -58,6 +85,8 @@ def routable(text):
         return False  # 999.999.999.999 and friends are not addresses at all
     if text in ALLOWED_ADDRESSES:
         return False
+    if ip.is_multicast:
+        return False  # 224.0.0.251 and kin answer is_global True but address nobody
     # `is_global` already excludes loopback, RFC 1918, link-local and the RFC 5737
     # documentation ranges — measured, not assumed: an explicit exclusion for the
     # documentation ranges was written first and removing it changed nothing. The
@@ -74,51 +103,82 @@ def violations(line):
             found.append(f"routable address {m.group(0)}")
     for m in PROJECT_NUMBER.finditer(line):
         found.append(f"project number {m.group(0)}")
+    for label, pattern in (("registry path", REGISTRY),
+                           ("service account", SERVICE_ACCOUNT)):
+        for m in pattern.finditer(line):
+            if m.group(1) not in PLACEHOLDER_PROJECTS:
+                found.append(f"{label} naming project {m.group(1)!r}")
     return found
 
 
-def tracked_docs(root):
-    """Every tracked markdown file that is documentation.
-
-    `testdata/` is the only exclusion: those four files are fixtures for the
-    skill-upload suite, not prose anyone reads as a record of a deployment.
-    """
-    out = subprocess.run(
-        ["git", "ls-files", "--", "*.md"],
-        cwd=root, capture_output=True, text=True, check=True,
-    ).stdout.split()
-    return sorted(p for p in out if "/testdata/" not in p)
-
-
-def scan(root):
+def scan_texts(documents):
+    """The scanning half, separated so the self-test can drive it without git."""
     bad = []
-    for rel in tracked_docs(root):
-        path = root / rel
-        try:
-            text = path.read_text(encoding="utf-8", errors="replace")
-        except OSError:
-            continue
+    for rel, text in documents:
         for n, line in enumerate(text.splitlines(), 1):
             for why in violations(line):
                 bad.append(f"{rel}:{n}: {why}")
     return bad
 
 
+def tracked_docs(root):
+    """Every tracked markdown path that is documentation.
+
+    `-z` rather than newlines: a tracked path containing a space would otherwise
+    be split into two nonexistent paths and silently skipped, which is the
+    failure mode this whole file exists to prevent. `testdata` is compared as a
+    path component so a top-level `testdata/` is excluded too.
+    """
+    out = subprocess.run(
+        ["git", "ls-files", "-z", "--", "*.md"],
+        cwd=root, capture_output=True, text=True, check=True,
+    ).stdout
+    paths = [p for p in out.split("\0") if p]
+    return sorted(p for p in paths if "testdata" not in Path(p).parts)
+
+
+def read_documents(root, paths):
+    """(path, text) for each, or a hard error. Never a silent skip.
+
+    A file that cannot be read or decoded is reported as a failure rather than
+    passed over: a guard that reports clean on the documents it could not open is
+    worse than no guard, because it is believed.
+    """
+    documents, unreadable = [], []
+    for rel in paths:
+        try:
+            documents.append((rel, (root / rel).read_text(encoding="utf-8")))
+        except (OSError, UnicodeDecodeError) as e:
+            unreadable.append(f"{rel}: {type(e).__name__} — not scanned")
+    return documents, unreadable
+
+
 def selftest():
-    """Prove each rule fires and each exemption holds. Rows, not prose."""
+    """Prove each rule fires and each exemption holds. Rows, not prose.
+
+    Every value here is invented. See the module docstring: an earlier draft used
+    the real coordinates this change removes, in the one file the guard does not
+    scan.
+    """
     must_flag = [
-        ("a routable address", "LoadBalancer `34.63.227.73:8080`"),
-        ("a routable address, bare", "reached 203.0.114.9 directly"),
-        ("a project number", "project (754963270337) and"),
-        ("a project number, line-initial", "460647310105 was the number"),
+        ("a routable address", "LoadBalancer `11.22.33.44:8080`"),
+        ("a routable address ending a sentence", "The endpoint was 11.22.33.44."),
+        ("a routable address in a list", "reached 11.22.33.44, then stopped"),
+        ("a project number", "project (123456789012) and"),
+        ("a project number, line-initial", "123456789012 was the number"),
+        ("a registry path naming a project",
+         "into us-central1-docker.pkg.dev/a-real-project/map-images"),
+        ("a service account naming a project",
+         "as map-brain@a-real-project.iam.gserviceaccount.com"),
     ]
     must_pass = [
         ("loopback", "listens on 127.0.0.1:8080"),
-        ("RFC 1918", "the private IP 10.136.0.3"),
+        ("RFC 1918", "the private IP 10.1.2.3"),
         ("RFC 1918 172.16/12", "peered at 172.16.0.4"),
         ("RFC 1918 192.168/16", "getent returns 192.168.65.254"),
         ("link-local", "metadata at 169.254.169.254"),
         ("unspecified", "binds 0.0.0.0:8080"),
+        ("multicast", "mDNS at 224.0.0.251"),
         ("RFC 5737 TEST-NET-1", "example 192.0.2.1"),
         ("RFC 5737 TEST-NET-2", "example 198.51.100.7"),
         ("RFC 5737 TEST-NET-3", "example 203.0.113.5"),
@@ -126,7 +186,16 @@ def selftest():
         ("not an address at all", "the invalid 999.999.999.999"),
         ("a 16-digit skill version", "version=1784657206256533 dest=x"),
         ("an 11-digit number", "run 31260884425 was green"),
-        ("a dotted version", "the real `ant` CLI 1.21.0 built"),
+        # Three components, so IPV4 never reaches routable(). It guards the other
+        # direction: widening the pattern to three would light up every version
+        # string in these documents. A FOUR-component version is genuinely
+        # indistinguishable from an address and will be flagged; the allowlist is
+        # the remedy if one is ever written down.
+        ("a three-part version", "the real `ant` CLI 1.21.0 built"),
+        ("a placeholder registry path",
+         "e.g. us-central1-docker.pkg.dev/your-project/map-images"),
+        ("a placeholder service account",
+         "map-controlplane@your-project.iam.gserviceaccount.com"),
     ]
     failures = []
     for label, line in must_flag:
@@ -136,15 +205,16 @@ def selftest():
         got = violations(line)
         if got:
             failures.append(f"FALSE +  {label}: {line!r} -> {got}")
+
+    # scan_texts itself, so that a scanner which always returns [] cannot pass
+    # while every row above stays green.
+    planted = scan_texts([("a.md", "fine\nLoadBalancer 11.22.33.44 here\n")])
+    if planted != ["a.md:2: routable address 11.22.33.44"]:
+        failures.append(f"SCAN     did not report the planted line: {planted}")
     return failures
 
 
 def main():
-    root = Path(subprocess.run(
-        ["git", "rev-parse", "--show-toplevel"],
-        capture_output=True, text=True, check=True,
-    ).stdout.strip())
-
     failures = selftest()
     if failures:
         print("the detector itself is broken, so a clean scan would mean nothing:")
@@ -153,14 +223,30 @@ def main():
         return 1
     print("detector self-test: ok")
 
-    bad = scan(root)
+    root = Path(subprocess.run(
+        ["git", "rev-parse", "--show-toplevel"],
+        capture_output=True, text=True, check=True,
+    ).stdout.strip())
+
+    paths = tracked_docs(root)
+    if not paths:
+        print("no tracked markdown found — the scan would be clean for the wrong reason")
+        return 1
+    documents, unreadable = read_documents(root, paths)
+    if unreadable:
+        print("these documents could not be scanned, so this run proves nothing:")
+        for u in unreadable:
+            print(f"  {u}")
+        return 1
+
+    bad = scan_texts(documents)
     if bad:
         print("operator coordinates must be GitHub Actions variables, not repository "
               "content (#355, #356, #514):")
         for b in bad:
             print(f"  {b}")
         return 1
-    print(f"ok — {len(tracked_docs(root))} documents carry no operator coordinates")
+    print(f"ok — {len(documents)} documents carry none of the four shapes")
     return 0
 
 
