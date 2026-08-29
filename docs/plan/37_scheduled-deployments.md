@@ -5,9 +5,10 @@ issue: "#51"
 
 # Scheduled deployments — a cron-fired deployment and its run history (plan 37)
 
-This plan addresses **#51**, whose title still carries the `(post-v1)` marker: the owner is
-electing to pull it forward, so the PR that starts slice 1 drops that marker from the issue
-title, or the backlog query in CLAUDE.md stops meaning what it says.
+This plan addresses **#51**, which the owner elected to pull forward from post-v1. The
+`(post-v1)` marker was dropped from the issue title while slice 1 was in flight, because the
+backlog query in CLAUDE.md means "not built ahead of" and would otherwise have returned work
+under active development.
 
 A **deployment** binds an agent to an environment, credentials, initial events and an
 optional cron schedule, so the platform starts sessions on its own — no client in the loop
@@ -636,9 +637,12 @@ the database clock at create and on every unpause **that actually resumes someth
 that is, one finding the deployment paused. Unpause is an idempotent 200 on an already-active
 deployment, so "at every unpause" would let a retry or a config-management loop advance the
 floor below and silently collapse every occurrence already due; the published sentence
-describes what a *resume* does, not what a no-op call should. The migration's own comment
-still says "at every unpause" and cannot be corrected, being merged and immutable — this
-paragraph is the authority. The candidate predicate requires
+describes what a *resume* does, not what a no-op call should. `0031_deployments.sql`'s
+comment beside the column still says "at every unpause". It is left as it stands because
+this repo holds a merged migration immutable, and this paragraph is the authority instead —
+a narrow call, since the runner tracks filenames and not content, so a comment-only edit
+would diverge no database; it is the rule that is unconditional, not the risk. The candidate
+predicate requires
 `scheduled_at > schedule_resumed_at`. Without it the published unpause rule is
 unimplementable: no run row advances the watermark while a deployment is paused, so a
 deployment paused at 08:00 and unpaused at 10:05 would immediately fire 10:00 — backfilling

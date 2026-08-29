@@ -185,9 +185,6 @@ func TestDeploymentSubObjectsRefuseUnknownKeysAndRequireTheirType(t *testing.T) 
 			"type": "agent", "id": agentID, "system": "an override by another name"}},
 		"agent object without a type": {"agent": map[string]any{"id": agentID}},
 		"agent version below one":     {"agent": map[string]any{"type": "agent", "id": agentID, "version": 0}},
-		// Omitting version pins the latest; spelling it null does not, because
-		// the schema gives the field no null arm.
-		"agent version null": {"agent": map[string]any{"type": "agent", "id": agentID, "version": nil}},
 	}
 	for name, patch := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -294,6 +291,25 @@ func TestDeploymentAgentUnion(t *testing.T) {
 	d = createDeployment(t, s, body)
 	if got := d["agent"].(map[string]any)["version"]; got != float64(2) {
 		t.Errorf("a versionless reference object pinned version %v, want the latest (2)", got)
+	}
+
+	// An explicit null reads as omitted, which is the platform's registered
+	// reading of this field everywhere it appears — a session's agent and a
+	// roster entry answer the same. The schema gives version no null arm, so
+	// refusing would be defensible; what would not be defensible is one route
+	// refusing while the other two accept.
+	body = deploymentBody(agentID, envID)
+	body["agent"] = map[string]any{"type": "agent", "id": agentID, "version": nil}
+	d = createDeployment(t, s, body)
+	if got := d["agent"].(map[string]any)["version"]; got != float64(2) {
+		t.Errorf("a null version pinned %v, want the latest (2) — null reads as omitted", got)
+	}
+	sessionStatus, sessionRes := s.do(http.MethodPost, "/v1/sessions", map[string]any{
+		"agent":          map[string]any{"type": "agent", "id": agentID, "version": nil},
+		"environment_id": envID,
+	})
+	if sessionStatus != http.StatusOK {
+		t.Errorf("a session refused the null version a deployment accepts: %d %v", sessionStatus, sessionRes)
 	}
 
 	// A malformed shape is the request's fault (400); an agent that is simply
