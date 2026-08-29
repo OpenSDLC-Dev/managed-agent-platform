@@ -59,8 +59,11 @@ func (r deploymentResource) config() deploymentResource {
 }
 
 // deploymentResourcesFrom pairs each validated input with its pre-sealed token
-// and produces the elements to store. sealRepoTokens walks the same inputs in
-// the same order, so the repositories line up by position.
+// and produces the elements to store. sealRepoTokens walks these same inputs in
+// the same order and appends one entry per repository, so sealed is exactly as
+// long as the repositories here and the two line up by position — indexed
+// rather than length-guarded, because a guard would turn a broken invariant
+// into a repository stored without its credential and a 200 saying otherwise.
 func deploymentResourcesFrom(inputs []resourceInput, sealed []sealedToken) []deploymentResource {
 	out := make([]deploymentResource, 0, len(inputs))
 	repo := 0
@@ -70,12 +73,10 @@ func deploymentResourcesFrom(inputs []resourceInput, sealed []sealedToken) []dep
 			el := deploymentResource{
 				Type: "github_repository", URL: in.url,
 				Checkout: in.checkout, MountPath: in.mountPath,
-			}
-			if repo < len(sealed) {
-				el.Token = &sealedTokenJSON{
+				Token: &sealedTokenJSON{
 					Ciphertext: sealed[repo].ciphertext,
 					KeyID:      sealed[repo].keyID,
-				}
+				},
 			}
 			repo++
 			out = append(out, el)

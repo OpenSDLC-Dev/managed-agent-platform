@@ -60,8 +60,12 @@ func TestDeploymentEmitsEverySixteenRequiredKey(t *testing.T) {
 			t.Errorf("required key %q is absent", key)
 		}
 	}
-	if len(required) != 16 {
-		t.Fatalf("the schema's required list has 16 entries, this test pins %d", len(required))
+	// A minimal deployment renders the required set and nothing else — budget,
+	// the seventeenth property, is never emitted — so comparing counts catches
+	// an unregistered added key as well as a dropped one. Comparing the
+	// literal against 16 could not fail: both sides are written here.
+	if len(m) != len(required) {
+		t.Errorf("the object rendered %d keys, want exactly the %d required ones: %v", len(m), len(required), m)
 	}
 }
 

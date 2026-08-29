@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"slices"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -11,6 +12,30 @@ import (
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/cron"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
 )
+
+// scheduleExpressionMax is the expression's published ceiling.
+const scheduleExpressionMax = 256
+
+// rejectUnknownNested applies to a sub-object the additionalProperties: false
+// the reference declares on it, which rejectUnknownKeys only enforces at the
+// top level. The dotted name says which object refused the key, so a typo
+// reads as `unknown field "schedule.timezome"` rather than being dropped and
+// firing a schedule in the wrong zone for months.
+//
+// A raw that is not an object is left alone: the caller's own unmarshal has
+// already reported that shape error in its own words.
+func rejectUnknownNested(raw json.RawMessage, prefix string, allowed ...string) error {
+	var obj map[string]json.RawMessage
+	if json.Unmarshal(raw, &obj) != nil {
+		return nil
+	}
+	for key := range obj {
+		if !slices.Contains(allowed, key) {
+			return errInvalid("unknown field %q", prefix+"."+key)
+		}
+	}
+	return nil
+}
 
 // parseDeploymentSchedule reads the create/update schedule union. It reports
 // whether the key was present and whether it was an explicit null, because
@@ -38,16 +63,30 @@ func parseDeploymentSchedule(obj map[string]json.RawMessage) (expr, tz string, s
 	if err := json.Unmarshal(raw, &body); err != nil {
 		return "", "", true, false, errInvalid("schedule must be an object")
 	}
-	if body.Type != nil && *body.Type != domain.ScheduleCron {
+	if err := rejectUnknownNested(raw, "schedule", "type", "expression", "timezone"); err != nil {
+		return "", "", true, false, err
+	}
+	// All three are required, and type is the union's discriminator rather
+	// than a default we may invent: accepting its absence would echo back a
+	// "cron" the caller never sent.
+	if body.Type == nil {
+		return "", "", true, false, errInvalid("schedule.type is required")
+	}
+	if *body.Type != domain.ScheduleCron {
 		return "", "", true, false, errInvalid(
 			"schedule.type %q is not supported; the only schedule type is %q", *body.Type, domain.ScheduleCron)
 	}
-	// "Both expression and timezone are required when schedule is set."
 	if body.Expression == nil || *body.Expression == "" {
 		return "", "", true, false, errInvalid("schedule.expression is required")
 	}
 	if body.Timezone == nil || *body.Timezone == "" {
 		return "", "", true, false, errInvalid("schedule.timezone is required")
+	}
+	// The published ceiling. A 5-field expression can exceed it through long
+	// comma lists, and the cron parser has no length opinion of its own.
+	if len([]rune(*body.Expression)) > scheduleExpressionMax {
+		return "", "", true, false, errInvalid(
+			"schedule.expression cannot exceed %d characters", scheduleExpressionMax)
 	}
 	expr, tz = *body.Expression, *body.Timezone
 
@@ -96,12 +135,27 @@ func resolveDeploymentAgent(ctx context.Context, db querier, raw json.RawMessage
 		if err := json.Unmarshal(raw, &obj); err != nil {
 			return ref, errInvalid("agent must be an agent id string or an agent reference object")
 		}
-		if obj.Type != nil && *obj.Type != "agent" {
+		if err := rejectUnknownNested(raw, "agent", "type", "id", "version"); err != nil {
+			return ref, err
+		}
+		// type is required and is what tells the two object arms apart, so its
+		// absence cannot be read as "agent" — that would let an override
+		// through as a reference with its extra keys dropped.
+		if obj.Type == nil {
+			return ref, errInvalid("agent.type is required on an agent reference object")
+		}
+		if *obj.Type != "agent" {
 			return ref, errInvalid(
 				"agent.type %q is not supported; a deployment takes an agent reference, not an override", *obj.Type)
 		}
 		if obj.ID == "" {
 			return ref, errInvalid("agent.id is required")
+		}
+		// "Must be at least 1 if specified" — resolveAgent's answer for a
+		// session, so that a zero or negative version is a 400 about the input
+		// rather than a 404 about a version that could never exist.
+		if obj.Version != nil && *obj.Version < 1 {
+			return ref, errInvalid("agent.version must be a positive integer")
 		}
 		// version is optional on the object arm: BetaManagedAgentsAgentParams
 		// requires only type and id, and its version says "Omit to use the

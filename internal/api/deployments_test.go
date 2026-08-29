@@ -93,8 +93,13 @@ func TestDeploymentRejectsBudget(t *testing.T) {
 	s := newTestServer(t)
 	agentID, envID := fixture(t, s)
 
+	// The reference's own budget shape, so the refusal is of a request a real
+	// client would send rather than of an invented one.
 	body := deploymentBody(agentID, envID)
-	body["budget"] = map[string]any{"type": "max_list_cost", "max_list_cost_usd": 5}
+	body["budget"] = map[string]any{
+		"type":          "limit",
+		"max_list_cost": map[string]any{"amount": "2000", "currency": "USD"},
+	}
 	status, res := s.do(http.MethodPost, "/v1/deployments", body)
 	wantErr(t, status, res, http.StatusBadRequest, "invalid_request_error")
 
@@ -155,6 +160,62 @@ func TestDeploymentInitialEventsMustSurviveTheNormalizer(t *testing.T) {
 	status, res := s.do(http.MethodPost, "/v1/deployments/"+id,
 		map[string]any{"initial_events": []any{sys}})
 	wantErr(t, status, res, http.StatusBadRequest, "invalid_request_error")
+}
+
+// Both sub-objects are additionalProperties: false with a required type, and
+// enforcing that one level down is the difference between a typo answering 400
+// and a schedule firing in the wrong zone for months. The dotted name in the
+// message says which object refused the key.
+func TestDeploymentSubObjectsRefuseUnknownKeysAndRequireTheirType(t *testing.T) {
+	s := newTestServer(t)
+	agentID, envID := fixture(t, s)
+
+	cases := map[string]map[string]any{
+		"schedule typo": {"schedule": map[string]any{
+			"type": "cron", "expression": "0 9 * * *", "timezome": "America/New_York"}},
+		"schedule without a type": {"schedule": map[string]any{
+			"expression": "0 9 * * *", "timezone": "UTC"}},
+		"an expression over 256 characters": {"schedule": map[string]any{
+			"type": "cron", "timezone": "UTC",
+			"expression": "0 " + strings.Repeat("1,", 130) + "1 * * *"}},
+		"agent object with an extra key": {"agent": map[string]any{
+			"type": "agent", "id": agentID, "system": "an override by another name"}},
+		"agent object without a type": {"agent": map[string]any{"id": agentID}},
+		"agent version below one":     {"agent": map[string]any{"type": "agent", "id": agentID, "version": 0}},
+	}
+	for name, patch := range cases {
+		t.Run(name, func(t *testing.T) {
+			body := deploymentBody(agentID, envID)
+			for k, v := range patch {
+				body[k] = v
+			}
+			status, res := s.do(http.MethodPost, "/v1/deployments", body)
+			wantErr(t, status, res, http.StatusBadRequest, "invalid_request_error")
+		})
+	}
+
+	// The refusal is the same on update, where the same parsers run.
+	id := createDeployment(t, s, deploymentBody(agentID, envID))["id"].(string)
+	status, res := s.do(http.MethodPost, "/v1/deployments/"+id, map[string]any{
+		"schedule": map[string]any{"type": "cron", "expression": "0 9 * * *",
+			"timezone": "UTC", "enabled": true}})
+	wantErr(t, status, res, http.StatusBadRequest, "invalid_request_error")
+}
+
+// An unsupported method on a deployment path answers 405 like every other /v1
+// family, not the catch-all 404 an unregistered pattern would give — including
+// DELETE, which this surface deliberately does not serve.
+func TestDeploymentPathsAnswer405NotTheCatchAll(t *testing.T) {
+	s := newTestServer(t)
+	agentID, envID := fixture(t, s)
+	id := createDeployment(t, s, deploymentBody(agentID, envID))["id"].(string)
+
+	for _, path := range []string{"/v1/deployments", "/v1/deployments/" + id,
+		"/v1/deployments/" + id + "/archive", "/v1/deployments/" + id + "/pause",
+		"/v1/deployments/" + id + "/unpause"} {
+		status, res := s.do(http.MethodDelete, path, nil)
+		wantErr(t, status, res, http.StatusMethodNotAllowed, "invalid_request_error")
+	}
 }
 
 // "At least 1, maximum 50", and the field is required — the floor is the half
@@ -289,6 +350,10 @@ func TestDeploymentScheduleComputesItsTimestamps(t *testing.T) {
 
 	body := deploymentBody(agentID, envID)
 	body["schedule"] = map[string]any{"type": "cron", "expression": "0 9 * * 1-5", "timezone": "America/Los_Angeles"}
+	// Taken before the request, so the first occurrence has to clear it. The
+	// zero time would be cleared by any timestamp at all, including one in
+	// 2020, and looking forward is this field's whole contract.
+	beforeCreate := time.Now().UTC()
 	d := createDeployment(t, s, body)
 
 	sched, ok := d["schedule"].(map[string]any)
@@ -311,14 +376,14 @@ func TestDeploymentScheduleComputesItsTimestamps(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	var prev time.Time
+	prev := beforeCreate
 	for i, raw := range upcoming {
 		at, err := time.Parse(time.RFC3339, raw.(string))
 		if err != nil {
 			t.Fatalf("occurrence %d: %v", i, err)
 		}
 		if !at.After(prev) {
-			t.Errorf("occurrence %d (%s) is not after the previous (%s)", i, at, prev)
+			t.Errorf("occurrence %d (%s) is not after %s", i, at, prev)
 		}
 		if lt := at.In(loc); lt.Hour() != 9 || lt.Minute() != 0 {
 			t.Errorf("occurrence %d renders locally as %s, want 09:00", i, lt)
@@ -387,10 +452,18 @@ func TestDeploymentPauseAndUnpause(t *testing.T) {
 		t.Errorf("a paused deployment's upcoming_runs_at = %v, want 5", d["schedule"])
 	}
 
-	// Idempotent, and it must not overwrite an existing reason.
-	status, again := s.do(http.MethodPost, "/v1/deployments/"+id+"/pause", nil)
+	// Idempotent, and a body on an action endpoint is neither read nor
+	// refused — both halves of what the registry entry claims.
+	pausedAt := storedPausedAt(t, s, id)
+	status, again := s.do(http.MethodPost, "/v1/deployments/"+id+"/pause",
+		map[string]any{"nonsense": true, "budget": 9})
 	if status != http.StatusOK || again["status"] != "paused" {
-		t.Fatalf("second pause: %d %v", status, again)
+		t.Fatalf("second pause with a body: %d %v", status, again)
+	}
+	// A second pause must not restamp when the schedule stopped, which is the
+	// only record an operator has of it.
+	if now := storedPausedAt(t, s, id); !now.Equal(pausedAt) {
+		t.Errorf("a second pause moved paused_at from %s to %s", pausedAt, now)
 	}
 
 	status, d = s.do(http.MethodPost, "/v1/deployments/"+id+"/unpause", nil)
@@ -400,6 +473,41 @@ func TestDeploymentPauseAndUnpause(t *testing.T) {
 	if d["status"] != "active" || d["paused_reason"] != nil {
 		t.Errorf("after unpause status = %v, paused_reason = %v; want active and null", d["status"], d["paused_reason"])
 	}
+
+	// Unpausing an already-active deployment is a 200 too — and must not move
+	// the resume watermark, which slice 4 makes the floor of the catch-up
+	// scan: a retry that advanced it would silently drop a due occurrence.
+	resumed := storedResumedAt(t, s, id)
+	status, d = s.do(http.MethodPost, "/v1/deployments/"+id+"/unpause", map[string]any{"nonsense": true})
+	if status != http.StatusOK || d["status"] != "active" {
+		t.Fatalf("second unpause: %d %v", status, d)
+	}
+	if now := storedResumedAt(t, s, id); !now.Equal(resumed) {
+		t.Errorf("unpausing an active deployment moved schedule_resumed_at from %s to %s", resumed, now)
+	}
+}
+
+func storedPausedAt(t *testing.T, s *tserver, id string) time.Time {
+	t.Helper()
+	var at *time.Time
+	if err := s.pool.QueryRow(t.Context(),
+		`SELECT paused_at FROM deployments WHERE id = $1`, id).Scan(&at); err != nil {
+		t.Fatal(err)
+	}
+	if at == nil {
+		t.Fatalf("deployment %s has no paused_at", id)
+	}
+	return *at
+}
+
+func storedResumedAt(t *testing.T, s *tserver, id string) time.Time {
+	t.Helper()
+	var at time.Time
+	if err := s.pool.QueryRow(t.Context(),
+		`SELECT schedule_resumed_at FROM deployments WHERE id = $1`, id).Scan(&at); err != nil {
+		t.Fatal(err)
+	}
+	return at
 }
 
 // An auto-pause renders the error variant. Slice 4 writes these columns; the
@@ -428,6 +536,21 @@ func TestDeploymentErrorPauseRendersItsErrorType(t *testing.T) {
 	inner, ok := reason["error"].(map[string]any)
 	if !ok || inner["type"] != "vault_archived_error" {
 		t.Errorf("paused_reason.error = %v, want {\"type\":\"vault_archived_error\"}", reason["error"])
+	}
+
+	// A manual pause on top of an auto-pause must not rewrite the cause: the
+	// error type is the only surviving explanation of why the schedule
+	// stopped, and "manual" would erase it while still reporting paused.
+	status, d = s.do(http.MethodPost, "/v1/deployments/"+id+"/pause", nil)
+	if status != http.StatusOK {
+		t.Fatalf("pause over an error pause: %d %v", status, d)
+	}
+	reason = d["paused_reason"].(map[string]any)
+	if reason["type"] != "error" {
+		t.Fatalf("a manual pause rewrote the reason to %v", reason)
+	}
+	if inner, ok := reason["error"].(map[string]any); !ok || inner["type"] != "vault_archived_error" {
+		t.Errorf("paused_reason.error = %v after a manual pause, want the auto-pause's cause", reason["error"])
 	}
 }
 
@@ -790,6 +913,15 @@ func TestDeploymentBounds(t *testing.T) {
 			}
 			b["vault_ids"] = ids
 		},
+		"environment_id too long": func(b map[string]any) { b["environment_id"] = long(129) },
+		"too many resources": func(b map[string]any) {
+			rs := make([]any, 501)
+			for i := range rs {
+				rs[i] = map[string]any{"type": "file",
+					"file_id": "file_0000000000000000000000gk", "mount_path": fmt.Sprintf("/w/f%d", i)}
+			}
+			b["resources"] = rs
+		},
 	}
 	for name, mutate := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -799,6 +931,15 @@ func TestDeploymentBounds(t *testing.T) {
 			wantErr(t, status, res, http.StatusBadRequest, "invalid_request_error")
 		})
 	}
+}
+
+// errorMessage pairs a run's error type with the message the CHECK requires
+// beside it, and stays null when there is no error.
+func errorMessage(errorType any) any {
+	if errorType == nil {
+		return nil
+	}
+	return fmt.Sprintf("%v recorded by a test fixture", errorType)
 }
 
 // last_run_at is derived: the created_at of the run with the greatest
@@ -814,21 +955,26 @@ func TestLastRunAtIsDerivedFromTheRunHistory(t *testing.T) {
 	sessionID := createSession(t, s, map[string]any{
 		"agent": agentID, "environment_id": envID})["id"].(string)
 
-	insert := func(runID, trigger string, scheduledAt any, session any, createdAt string) {
+	// errorType keeps each fixture in the one shape a committed run may take —
+	// exactly one of session_id and error_type set, which the runs table holds
+	// by construction rather than by a CHECK. The message travels with it
+	// because deployment_runs_error_pair does check that the two agree.
+	insert := func(runID, trigger string, scheduledAt any, session any, errorType any, createdAt string) {
 		t.Helper()
 		if _, err := s.pool.Exec(t.Context(),
 			`INSERT INTO deployment_runs (id, deployment_id, trigger_type, scheduled_at,
-			   agent_id, agent_version, session_id, created_at)
-			 VALUES ($1,$2,$3,$4,$5,1,$6,$7)`,
-			runID, id, trigger, scheduledAt, agentID, session, createdAt); err != nil {
+			   agent_id, agent_version, session_id, error_type, error_message, created_at)
+			 VALUES ($1,$2,$3,$4,$5,1,$6,$7,$8,$9)`,
+			runID, id, trigger, scheduledAt, agentID, session, errorType, errorMessage(errorType), createdAt); err != nil {
 			t.Fatal(err)
 		}
 	}
 
 	// A manual run does not move the field, and neither does a scheduled run
 	// that never started a session.
-	insert("drun_manual", "manual", nil, sessionID, "2026-03-20T10:00:00Z")
-	insert("drun_failed", "schedule", "2026-03-21T09:00:00Z", nil, "2026-03-21T09:00:05Z")
+	insert("drun_manual", "manual", nil, sessionID, nil, "2026-03-20T10:00:00Z")
+	insert("drun_failed", "schedule", "2026-03-21T09:00:00Z", nil,
+		"environment_archived_error", "2026-03-21T09:00:05Z")
 
 	status, d := s.do(http.MethodGet, "/v1/deployments/"+id, nil)
 	if status != http.StatusOK {
@@ -840,7 +986,7 @@ func TestLastRunAtIsDerivedFromTheRunHistory(t *testing.T) {
 
 	// A successful scheduled fire does, and reports created_at — when the run
 	// actually started — not scheduled_at, the pre-jitter cron match.
-	insert("drun_ok", "schedule", "2026-03-19T09:00:00Z", sessionID, "2026-03-19T09:00:07Z")
+	insert("drun_ok", "schedule", "2026-03-19T09:00:00Z", sessionID, nil, "2026-03-19T09:00:07Z")
 	status, d = s.do(http.MethodGet, "/v1/deployments/"+id, nil)
 	if status != http.StatusOK {
 		t.Fatalf("get: %d %v", status, d)
@@ -852,7 +998,7 @@ func TestLastRunAtIsDerivedFromTheRunHistory(t *testing.T) {
 	// Ordering is by scheduled_at, not by created_at: a later occurrence
 	// inserted earlier still wins, which is what "the most recent scheduled
 	// run" names.
-	insert("drun_later_occurrence", "schedule", "2026-03-22T09:00:00Z", sessionID, "2026-03-19T09:00:01Z")
+	insert("drun_later_occurrence", "schedule", "2026-03-22T09:00:00Z", sessionID, nil, "2026-03-19T09:00:01Z")
 	status, d = s.do(http.MethodGet, "/v1/deployments/"+id, nil)
 	if status != http.StatusOK {
 		t.Fatalf("get: %d %v", status, d)
@@ -1139,6 +1285,21 @@ func TestUpdateDeploymentNullClearsOnlyWhatMayBeCleared(t *testing.T) {
 			status, res := s.do(http.MethodPost, "/v1/deployments/"+id, map[string]any{key: nil})
 			wantErr(t, status, res, http.StatusBadRequest, "invalid_request_error")
 		})
+	}
+
+	// metadata is the third answer, and deliberately so: it is a patch rather
+	// than a replacement, and a null patch preserves the bag — the rule the
+	// shared patchMetadata already applies to agents and memory stores.
+	status, up = s.do(http.MethodPost, "/v1/deployments/"+id, map[string]any{"metadata": map[string]any{"team": "ops"}})
+	if status != http.StatusOK {
+		t.Fatalf("set metadata: %d %v", status, up)
+	}
+	status, up = s.do(http.MethodPost, "/v1/deployments/"+id, map[string]any{"metadata": nil})
+	if status != http.StatusOK {
+		t.Fatalf("null metadata: %d %v", status, up)
+	}
+	if md, ok := up["metadata"].(map[string]any); !ok || md["team"] != "ops" {
+		t.Errorf("metadata = %v after an explicit null, want the bag preserved", up["metadata"])
 	}
 }
 

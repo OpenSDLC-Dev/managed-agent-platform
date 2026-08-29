@@ -219,6 +219,8 @@ func NewHandler(pool *pgxpool.Pool, blobs blob.Store, cipher secrets.Cipher, ver
 		"/v1/memory_stores/{id}/memories", "/v1/memory_stores/{id}/memories/{mid}",
 		"/v1/memory_stores/{id}/memory_versions", "/v1/memory_stores/{id}/memory_versions/{vid}",
 		"/v1/memory_stores/{id}/memory_versions/{vid}/redact",
+		"/v1/deployments", "/v1/deployments/{id}", "/v1/deployments/{id}/archive",
+		"/v1/deployments/{id}/pause", "/v1/deployments/{id}/unpause",
 	} {
 		mux.HandleFunc(pattern, func(w http.ResponseWriter, r *http.Request) {
 			writeError(w, r, methodNotAllowed(r))

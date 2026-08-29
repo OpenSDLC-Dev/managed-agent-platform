@@ -332,10 +332,12 @@ func (s *server) listDeployments(r *http.Request) (any, error) {
 		return nil, err
 	}
 	status := q.Get("status")
-	// The two filters are mutually exclusive on the wire: an archived
-	// deployment reports status "active", so combining them would ask for a
-	// set whose membership rule contradicts itself.
-	if status != "" && includeArchived {
+	// "To include archived deployments, use include_archived instead; the two
+	// cannot be combined." Presence, not value: the sentence forbids sending
+	// both, and an archived deployment reports status "active", so the pair
+	// asks for a set whose membership rule contradicts itself however the
+	// boolean reads.
+	if _, sent := q["include_archived"]; status != "" && sent {
 		return nil, errInvalid("status cannot be combined with include_archived")
 	}
 	if status != "" && status != string(domain.DeploymentActive) && status != string(domain.DeploymentPaused) {
@@ -412,6 +414,13 @@ func (s *server) listDeployments(r *http.Request) (any, error) {
 		ds = append(ds, &d)
 		lastT, lastID = d.CreatedAt, string(d.ID)
 	}
+	// Closed here, not left to the deferred close: the loop breaks on the
+	// sentinel row without draining it, and fillScheduleTimestamps then asks
+	// the same pool for a second connection. Holding one while waiting for
+	// another is a self-deadlock at pool_max_conns=1 and pool exhaustion under
+	// concurrent paging. The roster and gate-config readers close explicitly
+	// for the same reason. Close is idempotent, so the defer above still runs.
+	rows.Close()
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
@@ -661,15 +670,29 @@ func (s *server) setDeploymentPause(r *http.Request, pause bool) (any, error) {
 		return nil, err
 	}
 
+	// The resume watermark moves only on a real resume. Unpause is an
+	// idempotent 200 on an already-active deployment, and "resumes the
+	// schedule from the next scheduled occurrence; missed triggers are not
+	// backfilled" describes what a resume does — not what a retry or a
+	// config-management loop should do to a deployment that never stopped.
+	// Advancing it unconditionally would let any repeated call silently
+	// suppress catch-up for every occurrence already due, once slice 4 makes
+	// the column the candidate scan's floor.
 	stmt := `UPDATE deployments SET
 	           paused_at = NULL, paused_kind = NULL, paused_error_type = NULL,
-	           schedule_resumed_at = now(), updated_at = now()
+	           schedule_resumed_at = CASE WHEN paused_at IS NULL
+	                                      THEN schedule_resumed_at ELSE now() END,
+	           updated_at = CASE WHEN paused_at IS NULL THEN updated_at ELSE now() END
 	         WHERE id = $1 RETURNING ` + deploymentColumns
 	if pause {
+		// COALESCE so a second pause neither restamps the instant the schedule
+		// stopped nor overwrites an auto-pause's recorded cause with "manual",
+		// and updated_at guarded the same way archive guards its own — three
+		// idempotent actions, one answer.
 		stmt = `UPDATE deployments SET
 		          paused_at   = COALESCE(paused_at, now()),
 		          paused_kind = COALESCE(paused_kind, 'manual'),
-		          updated_at  = now()
+		          updated_at  = CASE WHEN paused_at IS NULL THEN now() ELSE updated_at END
 		        WHERE id = $1 RETURNING ` + deploymentColumns
 	}
 	d, err := scanDeployment(tx.QueryRow(ctx, stmt, id))

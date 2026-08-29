@@ -158,11 +158,14 @@ func normalizeUserMessage(obj map[string]json.RawMessage) (NewEvent, error) {
 	if err := allowKeys(obj, "type", "content"); err != nil {
 		return NewEvent{}, err
 	}
-	// The SDK's content union accepts a plain string alongside the block
-	// array (OfString); it is stored verbatim so the echo round-trips, and
-	// replay already renders the string form — as one text block, so the
-	// empty string is refused for the same reason an empty text block is
-	// (validateBlock).
+	// A plain string is accepted alongside the block array and stored verbatim
+	// so the echo round-trips; replay renders it as one text block, which is
+	// why the empty string is refused for the same reason an empty text block
+	// is (validateBlock). This is ours, not the SDK's: at the pinned v1.66.0
+	// BetaManagedAgentsUserMessageEventParamsContentUnion has text, image,
+	// document and redacted arms and no string arm, and every reference schema
+	// types this content as an array. Registered in docs/DIVERGENCES.md rather
+	// than tightened, because clients already send it.
 	if raw, ok := obj["content"]; ok && !isNullRaw(raw) {
 		var s string
 		if json.Unmarshal(raw, &s) == nil {
