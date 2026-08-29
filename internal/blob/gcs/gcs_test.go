@@ -366,25 +366,33 @@ func missingBucketName(base, tag string) string {
 	return base + suffix + tag
 }
 
+// realisticRow names the one row in the table below that stands for a real
+// project-derived base rather than a synthetic shape, so the row and the check
+// that it still overflows cannot drift apart.
+const realisticRow = "RealisticLongName"
+
 // TestMissingBucketNameStaysLegal runs in the default tier, because the rule it
 // checks is the live tier's and the live tier is opt-in: without this, a base
 // name long enough to overflow the limit would be found only by whoever happened
 // to configure one, and would surface as a test that passes for the wrong reason
 // rather than as a failure.
-// realisticRow names the one row below that stands for a real project-derived
-// base rather than a synthetic shape, so the table and the check that it still
-// overflows cannot drift apart.
-const realisticRow = "RealisticLongName"
-
 func TestMissingBucketNameStaysLegal(t *testing.T) {
 	const tag = "0123456789abcdef"
-	for name, base := range map[string]string{
+	cases := map[string]string{
 		"Short":            "map-blob",
 		"AtTheLimit":       strings.Repeat("b", maxBucketName),
 		"OverTheLimit":     strings.Repeat("b", maxBucketName*2),
 		"TruncatesToADash": strings.Repeat("b", maxBucketName-len("-missing-")-len(tag)-1) + "-x",
 		realisticRow:       "your-longer-project-name-map-blob-probe2",
-	} {
+	}
+	// Naming the row by a constant stops a rename from disarming the overflow
+	// check below; deleting the row would still compile and still disarm it, so
+	// its presence is asserted rather than assumed.
+	if _, ok := cases[realisticRow]; !ok {
+		t.Fatalf("the %q row is gone, and with it the only case that shows a real "+
+			"project-derived base overflows", realisticRow)
+	}
+	for name, base := range cases {
 		t.Run(name, func(t *testing.T) {
 			got := missingBucketName(base, tag)
 			if len(got) > maxBucketName {

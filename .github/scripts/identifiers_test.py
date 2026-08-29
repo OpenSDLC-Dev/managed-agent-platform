@@ -79,14 +79,15 @@ PLACEHOLDER_PROJECTS = frozenset({
 # never as anybody's coordinate.
 ALLOWED_ADDRESSES = frozenset({"8.8.8.8", "1.1.1.1"})
 
-# Documents the scan must always reach. Losing the scope entirely already fails,
-# but narrowing it — a mistyped pathspec, an exclusion that catches too much —
-# would leave a shorter list and a smaller printed count that nothing checks. One
-# sentinel per directory that must stay in scope, because sentinels only in the
-# root and `docs/` let an exclusion aimed at `changelog.d/` alone cut the corpus
-# from 115 documents to 58 and still report ok, with a planted address in a
-# fragment invisible. If one of these is ever renamed, this fails loudly and the
-# tuple gets edited, which is the right friction for a file meant to be scanned.
+# Narrowing the scan is the failure this cannot afford, because it leaves a
+# shorter list and a smaller count that nothing questions. Two different mistakes
+# narrow it, and they need different guards.
+#
+# A PATHSPEC mistake moves the scan's root — these sentinels catch that, and they
+# are sentinels rather than an enumeration on purpose: naming every directory
+# that holds markdown would be the unmaintainable list this file declines to keep
+# elsewhere. They are not complete and are not claimed to be; the check below is
+# what covers the rest.
 REQUIRED_DOCUMENTS = (
     "CLAUDE.md",
     "STATE.md",
@@ -157,7 +158,10 @@ def scan_texts(documents):
 
 
 def tracked_docs(root):
-    """Every tracked markdown path that is documentation.
+    """Every tracked markdown path, and the subset of it that is documentation.
+
+    Both are returned because the caller checks what the exclusion removed, and
+    it cannot do that from the survivors alone.
 
     `-z` rather than newlines: a tracked path containing a space would otherwise
     be split into two nonexistent paths and silently skipped, which is the
@@ -168,8 +172,8 @@ def tracked_docs(root):
         ["git", "ls-files", "-z", "--", "*.md"],
         cwd=root, capture_output=True, text=True, check=True,
     ).stdout
-    paths = [p for p in out.split("\0") if p]
-    return sorted(p for p in paths if "testdata" not in Path(p).parts)
+    every = sorted(p for p in out.split("\0") if p)
+    return every, [p for p in every if "testdata" not in Path(p).parts]
 
 
 def read_documents(root, paths):
@@ -265,7 +269,7 @@ def main():
         capture_output=True, text=True, check=True,
     ).stdout.strip())
 
-    paths = tracked_docs(root)
+    every, paths = tracked_docs(root)
     if not paths:
         print("no tracked markdown found — the scan would be clean for the wrong reason")
         return 1
@@ -275,6 +279,19 @@ def main():
               "result would mean nothing:")
         for m in missing:
             print(f"  {m}")
+        return 1
+    # The other way the scan narrows is a FILTER mistake — an exclusion widened
+    # past `testdata`. This states what may be dropped independently of the
+    # expression in tracked_docs that drops it, deliberately: two copies of one
+    # rule, so editing either alone fails here rather than quietly shrinking the
+    # corpus. Sentinels cannot cover this, since a subtree they do not live in
+    # can leave scope while all of them are still present.
+    over_excluded = [p for p in every if p not in set(paths) and "testdata" not in p.split("/")]
+    if over_excluded:
+        print("the exclusion dropped documents that are not testdata fixtures, so "
+              "the scan covered less than it should:")
+        for p in over_excluded:
+            print(f"  {p}")
         return 1
     documents, unreadable = read_documents(root, paths)
     if unreadable:
