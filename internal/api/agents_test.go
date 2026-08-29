@@ -613,3 +613,95 @@ func TestAgentArchive(t *testing.T) {
 	status, body := s.do(http.MethodPost, "/v1/agents/agent_missing/archive", nil)
 	wantErr(t, status, body, http.StatusNotFound, "not_found_error")
 }
+
+// Archiving an agent is refused while a live deployment pins it — where the
+// reference archives those deployments in the same operation (plan 37
+// decision 7). The cascade is what this platform cannot afford: nothing
+// unarchives a deployment and there is no DELETE /v1/deployments, so one
+// mistaken agent archive would destroy every schedule pinning it, past
+// recovery. A refusal is recoverable by retrying in the right order.
+func TestAgentArchiveRefusedWhileADeploymentPinsIt(t *testing.T) {
+	s := newTestServer(t)
+	agentID, envID := fixture(t, s)
+	d := createDeployment(t, s, deploymentBody(agentID, envID))
+	deploymentID := d["id"].(string)
+
+	status, body := s.do(http.MethodPost, "/v1/agents/"+agentID+"/archive", nil)
+	wantErr(t, status, body, http.StatusBadRequest, "invalid_request_error")
+	// The message names the deployment, because "archive those first" is
+	// useless advice without saying which.
+	if msg, _ := body["error"].(map[string]any)["message"].(string); !strings.Contains(msg, deploymentID) {
+		t.Errorf("refusal message %q does not name the blocking deployment %s", msg, deploymentID)
+	}
+
+	// Refused means refused: the agent is untouched, not archived-then-rolled-back.
+	status, got := s.do(http.MethodGet, "/v1/agents/"+agentID, nil)
+	if status != http.StatusOK || got["archived_at"] != nil {
+		t.Errorf("after a refused archive: %d, archived_at %v — want the agent untouched", status, got["archived_at"])
+	}
+
+	// An archived deployment never blocks. It is terminal and can never fire,
+	// and blocking on one would build the dead end §8.3 names — an agent no
+	// operator could ever archive, because nothing clears the deployment.
+	if status, res := s.do(http.MethodPost, "/v1/deployments/"+deploymentID+"/archive", nil); status != http.StatusOK {
+		t.Fatalf("archive deployment: %d %v", status, res)
+	}
+	status, archived := s.do(http.MethodPost, "/v1/agents/"+agentID+"/archive", nil)
+	if status != http.StatusOK {
+		t.Fatalf("archive after the deployment was archived: %d %v", status, archived)
+	}
+	if archived["archived_at"] == nil {
+		t.Error("the agent archived with a null archived_at")
+	}
+}
+
+// The refusal names what an operator has to archive, and stops naming at five.
+// An agent with no deployment cap on it could be pinned by hundreds, and a
+// message that spelled them all out would be unreadable in a terminal — so the
+// count carries the size and the names carry the starting point.
+func TestAgentArchiveRefusalNamesTheDeploymentsUpToFive(t *testing.T) {
+	s := newTestServer(t)
+	agentID, envID := fixture(t, s)
+
+	var created []string
+	for i := range 6 {
+		d := createDeployment(t, s, deploymentBody(agentID, envID))
+		created = append(created, d["id"].(string))
+
+		_, body := s.do(http.MethodPost, "/v1/agents/"+agentID+"/archive", nil)
+		msg, _ := body["error"].(map[string]any)["message"].(string)
+		switch i {
+		case 0:
+			// Singular: one deployment, named, and "it" rather than "them".
+			if !strings.Contains(msg, "pinned by deployment "+created[0]) || !strings.Contains(msg, "archive it first") {
+				t.Errorf("one blocking deployment: %q", msg)
+			}
+		case 1:
+			// Plural, with every id spelled out and no "and N more".
+			if !strings.Contains(msg, "pinned by 2 deployments") || strings.Contains(msg, "more") {
+				t.Errorf("two blocking deployments: %q", msg)
+			}
+			for _, id := range created {
+				if !strings.Contains(msg, id) {
+					t.Errorf("message %q omits %s", msg, id)
+				}
+			}
+		case 5:
+			// Capped: five named, the sixth left to the count. Which five is
+			// the query's business and not asserted here — six rows created in
+			// the same second can share a created_at.
+			if !strings.Contains(msg, "pinned by 6 deployments") || !strings.Contains(msg, "and 1 more") {
+				t.Errorf("six blocking deployments: %q", msg)
+			}
+			n := 0
+			for _, id := range created {
+				if strings.Contains(msg, id) {
+					n++
+				}
+			}
+			if n != 5 {
+				t.Errorf("message %q names %d of the six deployments, want the five the cap allows", msg, n)
+			}
+		}
+	}
+}
