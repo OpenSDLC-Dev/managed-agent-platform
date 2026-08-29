@@ -28,10 +28,8 @@ WHAT IT DOES NOT COVER, stated plainly because the surrounding prose must not
 claim more than this. A bare project id in running text has no shape to match --
 it is a lowercase-hyphen word like any other -- so it is caught only where it
 appears inside one of the structured forms above. IPv6 endpoints, bucket names
-and KMS key names have no rule. An uppercase `.MD` extension is outside the scan
-entirely, by git's pathspec and by the suffix test alike -- they agree, so the
-check that compares them stays silent about it. This catches four shapes; it is
-not a proof that the repository is clean.
+and KMS key names have no rule. This catches four shapes; it is not a proof that
+the repository is clean.
 
 NOR DOES IT VERIFY ITSELF PAST A POINT, stated once here so the next reader does
 not go looking for the check that would. Main restates every hop against
@@ -223,7 +221,10 @@ def tracked_docs(root):
     it cannot do that from the survivors alone. `testdata` is compared as a path
     component so a top-level `testdata/` is excluded too.
     """
-    every = sorted(ls_files(root, "*.md"))
+    # `:(icase)` rather than a plain `*.md`: git's pathspec is case-sensitive by
+    # default, so `README.MD` would be tracked, be documentation, and never be
+    # scanned. The suffix test that restates this lowercases for the same reason.
+    every = sorted(ls_files(root, ":(icase)*.md"))
     return Corpus(every, [p for p in every if "testdata" not in Path(p).parts])
 
 
@@ -410,7 +411,7 @@ def main():
         ["git", "ls-files", "-z"],
         cwd=root, capture_output=True, text=True, check=True,
     ).stdout
-    by_suffix = set(p for p in listed.split("\0") if p.endswith(".md"))
+    by_suffix = set(p for p in listed.split("\0") if p.lower().endswith(".md"))
     if by_suffix != set(every):
         print("git's pathspec and a suffix test disagree about what tracked markdown "
               "is, so one of the two has been narrowed:")
