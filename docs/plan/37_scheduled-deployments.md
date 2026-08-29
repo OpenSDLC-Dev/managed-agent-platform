@@ -25,8 +25,8 @@ route exists.
 ## 1. Scope and goal
 
 **In scope.** The ten wire operations across eight paths (§5.1), the `internal/cron`
-expression engine, a controlplane-resident scheduler that fires due occurrences
-exactly once across replicas, the `deployment_runs` history and its two list surfaces,
+expression engine, a controlplane-resident scheduler that fires each due occurrence
+at most once across replicas, the `deployment_runs` history and its two list surfaces,
 the auto-pause on a failed scheduled fire, and `sessions.deployment_id` becoming a real
 column with a real list filter.
 
@@ -431,6 +431,13 @@ layer down. And the span it counts is bounded below by
 occurrences inside a pause were *paused*, not skipped; without the second bound a deployment
 resuming after three days would report the whole paused interval as lost.
 
+Two limits remain, and are named rather than engineered away. A process that dies between the
+`COMMIT` and the increment loses that count — the ordinary cost of a counter that cannot
+enlist in a transaction, and the reason this is an observability signal and not an audit
+trail. And **tightening an expression resets nothing**, so the next winner counts the span
+back to the old watermark under the *new* expression: a daily schedule changed to `*/5`
+reports one large false skip, once.
+
 The one collapse this cannot attribute is an occurrence that ages out of the window with no
 later fire at all — no claim is ever won, so nothing counts it — which is the same
 best-effort boundary §4.1 draws around liveness. Note the loss is bounded and specific —
@@ -489,7 +496,7 @@ absent from it).
 
 ## 4. Architecture
 
-### 4.1 Where a fire happens, and how it is exactly-once
+### 4.1 Where a fire happens, and how one occurrence yields at most one run
 
 The scheduler is a **controlplane background sweep** — a ticker calling one stateless
 function — not a fifth binary. §8.3 decision 1 argues the alternative.
@@ -504,11 +511,15 @@ exactly that pair is that key.
 Stating it as *exactly*-once would overclaim, and the four ways an occurrence gets no run
 are all deliberate: an unclassified failure rolls its claim back (step 7 below), catch-up
 collapses a backlog to its most recent member (§3.6), an occurrence older than the catch-up
-window is never selected, and a pause–unpause cycle shorter than one tick interval discards
-an occurrence that fell due *before* the pause — §4.2's cutoff is a wall-clock instant, not
-a record of what was already owed. Liveness is best-effort inside that window; **uniqueness
-is absolute**. §3.8's `deployment.occurrences.skipped` observes the first two; the last two
-are silent by construction, since no claim is ever won to carry the count.
+window is never selected, and a pause beginning after an occurrence falls due but before the
+tick that would have fired it discards that occurrence — at any duration, since every tick
+inside the pause is skipped and §4.2's cutoff is a wall-clock instant rather than a record of
+what was already owed. Liveness is best-effort inside that window; **uniqueness
+is absolute**. §3.8's `deployment.occurrences.skipped` observes the first two, and the third whenever some
+later fire eventually wins a claim to carry the count — only an occurrence that ages out with
+no later fire at all goes unattributed (§3.6). The fourth it cannot observe by construction:
+§3.6 bounds the count below by `max(watermark, schedule_resumed_at)`, and an occurrence the
+cutoff discards falls below that bound by definition.
 
 **There is no advisory lock.** An earlier draft took one, on the reaper's model. The reaper
 needs its lock because it races `provisionSandbox`, a **non-database** actor holding a
@@ -542,8 +553,8 @@ commits a null/null row; a test asserts it over every branch of §5.2. A databas
 guarantee is possible but costs more than it buys here: `CHECK` cannot be deferred in
 Postgres, so the only option is a `DEFERRABLE INITIALLY DEFERRED` constraint trigger, and
 one trigger for one invariant on a table with two writers — the scheduler's fire and the
-`POST /run` handler (§5.1), which settle through the same one-row-returning `UPDATE` — is
-more machinery than the risk warrants.
+`POST /run` handler, which records a failed manual run the same way (§5.2) — is more
+machinery than the risk warrants.
 
 No cipher call happens at fire time: a `github_repository` resource's `authorization_token`
 is sealed once, at deployment create/update, outside the transaction (§5.1), and the fire
@@ -599,8 +610,8 @@ in the same statement.
 
 A delayed-work column on `work_items` is genuinely wanted — by plan 35's `wait_for_agents`
 sweeper, not by this. Adding it here would touch the platform's hottest table and its
-`ON CONFLICT` dedup index for a feature whose exactly-once story is already a unique index
-on a table only the scheduler writes.
+`ON CONFLICT` dedup index for a feature whose uniqueness story is already a unique index
+on a table two handlers write.
 
 ### 4.4 Concurrency, connections, and a mixed-version fleet
 
@@ -882,9 +893,11 @@ derives from one expression can silently come apart from the one clause no sourc
 after one tick: a committed run row with `session_id` null and
 `error.type = "environment_archived_error"`; `last_run_at` **still null**, which is the
 INFERRED half of the expression (§8.1 entry 13); `paused_kind = 'error'` with
-`paused_error_type` carrying the same value; and — driving a second tick at the same `now`
-— **no second row**, because a failed fire still claims its occurrence (§4.1 step 6 keeps the
-claim). A variant whose failure is *unclassified* asserts the opposite shape: the transaction
+`paused_error_type` carrying the same value. It deliberately does **not** drive a second tick
+to prove the claim survived: the same case leaves the deployment paused, so §4.1 step 2's
+candidate scan skips it on the next tick whether or not the claim survived, and the assertion
+would pass for the wrong reason. The committed row *is* the claim (§6's DDL comment), which
+the first tick already asserts. A variant whose failure is *unclassified* asserts the opposite shape: the transaction
 rolls back whole, no row survives, and the next tick fires the same occurrence again. The
 pair is what pins §4.1's savepoint boundary, which neither case alone can.
 
@@ -904,7 +917,8 @@ spurious red.
 **The `paused_error_type` mapping is asserted on two properties that can fail**, not against
 a literal copy of itself — this repo names that anti-pattern in its own build, *"an
 assertion that cannot fail is a comment"* (`Makefile:416-417`), and it is worse here because
-five of the fourteen values are produced by nothing (§8.1 entries 4-6, 18, 21). The two
+seven of the fourteen values are produced by nothing (§8.1 entries 5, 6, 21, 22, 26 and
+28 — §5.2 does the accounting, and entry 6 covers two of the seven). The two
 properties: every value in the Go mapping is admitted by the migration's `CHECK` (queried
 through `pg_get_constraintdef`), and every reachable failure path in §5.2 produces a value
 in the mapping — one test per reachable path.
@@ -947,9 +961,8 @@ before re-running.
 ### 8.1 Entries for `docs/DIVERGENCES.md`
 
 **The entries below are bullets carrying an explicit `Entry N` label, not an ordered list.**
-The numbers are registry identifiers referenced from twenty-five places elsewhere in this
-document, and
-they are deliberately non-sequential — entry 10 never existed and entry 20 was deleted when
+The numbers are registry identifiers cross-referenced throughout this document, and they
+are deliberately non-sequential — entry 10 never existed and entry 20 was deleted when
 decision 10 was settled. Under CommonMark only a list's first marker sets its start and the
 rest are renumbered, so an ordered list would render "entry 21" as *8* while every
 cross-reference still said 21. Bullets keep the identifier and the rendered text agreeing.
@@ -957,7 +970,8 @@ cross-reference still said 21. Bullets keep the identifier and the rendered text
 Format per the file's own legend at `docs/DIVERGENCES.md:10`. The head segment of `Tracked:` before the first
 top-level `;` must name an **open** issue; every INFERRED entry requires a live tracker, and
 where that tracker is shared — #78 above all — it carries a parenthetical naming what *this*
-entry leaves open. Each entry lands in the PR that introduces its behavior.
+entry leaves open. Each entry lands in the PR that introduces its behavior, which is also where its evidence
+is rewritten from spec line numbers into schema names (§2).
 
 **Rewrites of existing entries:**
 
@@ -993,14 +1007,14 @@ entry leaves open. Each entry lands in the PR that introduces its behavior.
 - **Entry 26.** `- **environment_not_found_error is never recorded (plan 37 slice 4)** — The reference fails a run when the deployment's environment row is gone. Here it cannot be: deployments.environment_id carries a foreign key, and DELETE /v1/environments refuses while any deployment references it — with a message naming them, which is the other half of this plan's change to that handler. An archived environment is a different type and is reachable. The store admits the value so a future emitter needs no migration. *Evidence: the OpenAPI spec's BetaManagedAgentsEnvironmentNotFoundDeploymentPausedReasonError; internal/api/environments.go:523-527 (the delete refusal this plan makes name deployments); migration 0031_deployments.sql (the FK).* *Tracked: #78 (delete an environment a deployment pins, on the reference, and read the error).*`
 
 
-- **Entry 28.** `- **unknown_error is never recorded, and an unclassified fire failure records nothing at all (plan 37 slice 4)** — Both published unions carry unknown_error as an explicit fallback variant — "An unknown or unexpected error caused the run to fail" on the run side, "An unrecognized error auto-paused the deployment" on the pause side — so the reference's answer to an unclassified fire failure is a recorded run that pauses the schedule. We roll the whole transaction back instead: the claim is released and the next tick retries the same occurrence for as long as it stays inside the catch-up window. The trade is deliberate. unknown_error is one of the fourteen pausing types, so emitting it would auto-pause a healthy deployment on a transient database blip, and this platform ships no auto-resume — an operator would have to unpause by hand. A rollback recovers unattended. The cost is that a persistent unclassified failure records nothing, so it is visible only as deployment.fires failing to increment, and its occurrences are dropped once they age out of the window. The store admits the value under the same CHECK as the other thirteen, so a future emitter needs no migration. *Evidence: anthropic-sdk-go betadeploymentrun.go:798-800 and betadeployment.go:1727-1728 (both fallback variants, both documented as fallbacks); no auto-resume exists — /unpause is the only path out of paused (§5.1).* *Tracked: #78 (make a fire fail unclassifiably on the reference, then read the run and the deployment).*`
+- **Entry 28.** `- **unknown_error is never recorded, and an unclassified fire failure records nothing at all (plan 37 slice 4)** — Both published unions carry unknown_error as an explicit fallback variant — "An unknown or unexpected error caused the run to fail" on the run side, "An unrecognized error auto-paused the deployment" on the pause side — so the reference's answer to an unclassified fire failure is a recorded run that pauses the schedule. We roll the whole transaction back instead: the claim is released and the next tick retries the same occurrence — until it succeeds, or until a later occurrence commits and moves §4.2's watermark past it, which on a */5 schedule is the next tick rather than the end of the catch-up window. The trade is deliberate. unknown_error is one of the fourteen pausing types, so emitting it would auto-pause a healthy deployment on a transient database blip, and this platform ships no auto-resume — an operator would have to unpause by hand. A rollback recovers unattended — the deployment, at least, if not always the occurrence. The cost is that the failure leaves no database trace whatever: no run row, last_run_at unmoved, no paused_reason, nothing in either list surface. The only record is telemetry — deployment.fires increments with outcome="abandoned" and the deployment.fire span is still emitted (§3.8). The store admits the value under the same CHECK as the other thirteen, so a future emitter needs no migration. *Evidence: anthropic-sdk-go betadeploymentrun.go:798-800 and betadeployment.go:1726-1728 (both fallback variants, both documented as fallbacks); no auto-resume exists — /unpause is the only path out of paused (§4.2, entry 12).* *Tracked: #78 (make a fire fail unclassifiably on the reference, then read the run and the deployment).*`
 
 **Architecture & compatibility notes (not divergences)** — two entries belong in that
 section rather than among the mismatches:
 
 - **Entry 8.** `- **No DELETE on /v1/deployments, mirroring the reference's own absence (plan 37 slice 1)** — The reference publishes a deployment.deleted webhook but exposes no delete path: enumerating spec.paths shows post/get on /v1/deployments, get/post on /v1/deployments/{id}, and post alone on archive, pause, unpause and run — no delete method anywhere — and BetaDeploymentService has no Delete. Archive is the terminal verb here as it is there, and unarchive exists in neither. *Evidence: anthropic-openapi.yml:13048, :13355, :13624, :13755, :13886, :14017 (the six paths and their methods); anthropic-sdk-go betadeployment.go:44-176 (New/Get/Update/List/Archive/Pause/Run/Unpause).*`
 
-- The scheduler's exactly-once guarantee across controlplane replicas is the partial unique
+- The scheduler's at-most-one-run-per-occurrence guarantee across replicas is the partial unique
   index on `(deployment_id, scheduled_at)` — the reference's own published idempotency key —
   and not leader election, which this platform has nowhere. This sentence goes in
   **`docs/ARCHITECTURE.md`**'s process-topology row beside the sentence it falsifies, not in
@@ -1205,9 +1219,13 @@ inheritance.
   place. It is named here because §8.3 decision 7 cites this same dead end as its reason to
   refuse an agent archive rather than cascade one, and a reason that costly should appear in
   the risk list it creates.
-- **A persistent unclassified fire failure is silent.** Entry 28 trades `unknown_error` for
-  a rollback-and-retry, which recovers from a transient fault unattended; a permanent one
-  writes no run row at all, and shows up only as `deployment.fires` not incrementing.
+- **A persistent unclassified fire failure leaves no database trace.** Entry 28 trades
+  `unknown_error` for a rollback-and-retry, which recovers from a transient fault
+  unattended; a permanent one writes no run row, moves no `last_run_at` and pauses nothing,
+  so both list surfaces stay empty and an operator reading the API sees a deployment that
+  simply never runs. The record is telemetry only — `deployment.fires` with
+  `outcome="abandoned"` and the `deployment.fire` span (§3.8) — which is why that third
+  outcome exists.
 - **Connection budget.** One connection per in-flight fire, now that the advisory lock is
   gone (§4.4). There is no controlplane `pool_max_conns` floor today; if the concurrency
   constant grows, add the startup check `cmd/executor/main.go:288-297` models rather than
