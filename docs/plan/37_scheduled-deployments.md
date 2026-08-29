@@ -820,6 +820,12 @@ archived-deployment 400 (§8.1 entry 11).
   `DELETE /v1/deployments` nor unarchive, nothing clears it. Slice 1 branches on
   `pgErr.ConstraintName`, the pattern `createSession` already uses
   (`internal/api/sessions.go:650-655`), and names the deployments. With a test.
+
+  One thing the bullet did not follow through on, settled when it landed: since nothing
+  clears the reference, the message must not say "delete them first" either. It names the
+  deployments and points at `POST /v1/environments/{id}/archive` instead, which is the only
+  thing an operator can actually do. Five tables reference `environments` and three cascade,
+  so sessions and deployments are the only two the branch has to tell apart.
 - **`POST /v1/agents/{id}/archive` starts refusing** (§8.3 decision 7): a 400 naming the
   deployments, whenever a deployment with `archived_at IS NULL` pins the agent. An
   *archived* deployment never blocks — it is terminal and can never fire, and blocking on one

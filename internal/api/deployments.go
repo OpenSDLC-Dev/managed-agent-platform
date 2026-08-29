@@ -206,6 +206,42 @@ func loadDeployment(ctx context.Context, tx pgx.Tx, id string) (domain.Deploymen
 	return d, nil
 }
 
+// blockingDeploymentsNamed caps how many deployment ids a refusal spells out.
+// The reference caps an organization at 1,000 scheduled deployments and we
+// enforce no limit at all, so the list has no natural ceiling; five names the
+// ones an operator will start with and the count tells them how far they have
+// to go.
+const blockingDeploymentsNamed = 5
+
+// namedDeployments runs a lookup whose first column is a deployment id and
+// whose second is count(*) OVER (), and returns the ids the LIMIT let through
+// beside the exact total. The window function is what makes one query enough:
+// it is evaluated before LIMIT, so every row carries the whole count and the
+// caller's message can say how many it left unnamed.
+//
+// Two refusals name deployments — an agent archive and an environment delete —
+// and they share only this loop. The query and the sentence stay with the
+// handler that owes them, because neither is the same: one asks which
+// deployments can still fire, the other which rows the foreign key can see.
+func namedDeployments(ctx context.Context, db querier, query string, args ...any) ([]string, int, error) {
+	rows, err := db.Query(ctx, query, args...)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer rows.Close()
+
+	var named []string
+	var total int
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id, &total); err != nil {
+			return nil, 0, err
+		}
+		named = append(named, id)
+	}
+	return named, total, rows.Err()
+}
+
 func (s *server) createDeployment(r *http.Request) (any, error) {
 	ctx := r.Context()
 	obj, err := decodeObject(r)

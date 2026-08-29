@@ -561,13 +561,6 @@ func (s *server) listAgentVersions(r *http.Request) (any, error) {
 	return out, nil
 }
 
-// blockingDeploymentsNamed caps how many deployment ids a refusal spells out.
-// The reference caps an organization at 1,000 scheduled deployments and we
-// enforce no limit at all, so the list has no natural ceiling; five names the
-// ones an operator will start with and the count tells them how far they have
-// to go.
-const blockingDeploymentsNamed = 5
-
 // refuseDeploymentsPinningAgent answers 400 while a deployment that can still
 // fire pins the agent. The reference archives those deployments in the same
 // operation; this platform refuses instead, because the cascade is
@@ -580,36 +573,20 @@ const blockingDeploymentsNamed = 5
 // blocking on one would build a dead end of its own — an agent no operator
 // could ever archive, because nothing clears the deployment.
 //
-// count(*) OVER () rather than a second query: a window function is evaluated
-// before LIMIT, so every row carries the exact total and the message can say
-// how many were left unnamed. It is also why LIMIT bounds the output and not
-// the work — the count reads every live deployment of the agent, and the plain
-// agent_id index serves neither the ordering nor the archived_at predicate
-// (#523, deliberately left for a migration that is being written anyway).
+// The LIMIT bounds the output and not the work: the count reads every live
+// deployment of the agent, and the plain agent_id index serves neither the
+// ordering nor the archived_at predicate (#523, deliberately left for a
+// migration that is being written anyway).
 //
 // Runs inside archiveAgent's transaction, which already holds FOR UPDATE on the
 // agent row. The querier parameter would take the pool just as happily, and
 // passing it there would drop that guarantee without a word.
 func refuseDeploymentsPinningAgent(ctx context.Context, db querier, agentID string) error {
-	rows, err := db.Query(ctx,
+	named, total, err := namedDeployments(ctx, db,
 		`SELECT id, count(*) OVER () FROM deployments
 		  WHERE agent_id = $1 AND archived_at IS NULL
 		  ORDER BY created_at, id LIMIT $2`, agentID, blockingDeploymentsNamed)
 	if err != nil {
-		return err
-	}
-	defer rows.Close()
-
-	var named []string
-	var total int
-	for rows.Next() {
-		var id string
-		if err := rows.Scan(&id, &total); err != nil {
-			return err
-		}
-		named = append(named, id)
-	}
-	if err := rows.Err(); err != nil {
 		return err
 	}
 	switch {

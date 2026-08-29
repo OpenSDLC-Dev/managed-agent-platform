@@ -1,10 +1,12 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
@@ -514,6 +516,39 @@ func (s *server) archiveEnvironment(r *http.Request) (any, error) {
 		row.createdAt, row.updatedAt, row.archivedAt), nil
 }
 
+// deploymentsBlockingEnvironment renders the 400 for a delete the deployments
+// foreign key refused. It names them, because "something still references this"
+// is not something an operator can act on, and it does not tell them to remove
+// the deployments: no route deletes one, so the honest advice is to archive the
+// environment instead.
+//
+// No archived_at predicate, deliberately, and this is where the two deployment
+// refusals part company. The agent archive asks which deployments can still
+// fire; a foreign key cannot ask that. Every row counts here, and an archived
+// deployment blocks the delete exactly as a live one does — permanently, since
+// archive is terminal and nothing removes the row.
+func deploymentsBlockingEnvironment(ctx context.Context, db querier, envID string) error {
+	named, total, err := namedDeployments(ctx, db,
+		`SELECT id, count(*) OVER () FROM deployments
+		  WHERE environment_id = $1
+		  ORDER BY created_at, id LIMIT $2`, envID, blockingDeploymentsNamed)
+	if err != nil {
+		return err
+	}
+	list := strings.Join(named, ", ")
+	if total > len(named) {
+		list = fmt.Sprintf("%s and %d more", list, total-len(named))
+	}
+	if total == 1 {
+		return errInvalid(
+			"environment %s is referenced by deployment %s; deployments cannot be deleted, so archive the environment instead",
+			envID, list)
+	}
+	return errInvalid(
+		"environment %s is referenced by %d deployments (%s); deployments cannot be deleted, so archive the environment instead",
+		envID, total, list)
+}
+
 func (s *server) deleteEnvironment(r *http.Request) (any, error) {
 	ctx := r.Context()
 	id := r.PathValue("id")
@@ -523,6 +558,14 @@ func (s *server) deleteEnvironment(r *http.Request) (any, error) {
 	tag, err := s.pool.Exec(ctx, `DELETE FROM environments WHERE id = $1`, id)
 	var pgErr *pgconn.PgError
 	if errors.As(err, &pgErr) && pgErr.Code == "23503" { // foreign_key_violation
+		// Five tables reference environments and three cascade, so only
+		// sessions and deployments can reach here. Which one did is the
+		// constraint's own name, the branch createSession already takes on
+		// this code — and the two answers are not interchangeable, because a
+		// session can be deleted and a deployment cannot.
+		if strings.Contains(pgErr.ConstraintName, "deployments") {
+			return nil, deploymentsBlockingEnvironment(ctx, s.pool, id)
+		}
 		return nil, errInvalid("environment %s still has sessions; delete them first", id)
 	}
 	if err != nil {

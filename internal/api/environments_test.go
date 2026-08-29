@@ -274,6 +274,47 @@ func TestEnvironmentDeleteBlockedBySessions(t *testing.T) {
 	if status != http.StatusOK {
 		t.Fatalf("environment vanished after failed delete: %d", status)
 	}
+
+	// The message names the referent it actually found. It had blamed sessions
+	// for every foreign key on the table, which was harmless while sessions
+	// were the only one that could block.
+	if msg, _ := body["error"].(map[string]any)["message"].(string); !strings.Contains(msg, "sessions") {
+		t.Errorf("a session blocking the delete said %q, want it to name sessions", msg)
+	}
+}
+
+// A deployment blocks the delete too, and unlike a session it can never be
+// cleared: there is no DELETE /v1/deployments and archive is terminal. So the
+// message must name the deployments and must not advise deleting them, which
+// is what the old blame-the-sessions message did twice over — it named the
+// wrong resource and told the operator to do something impossible with it.
+func TestEnvironmentDeleteBlockedByDeployments(t *testing.T) {
+	s := newTestServer(t)
+	agentID, envID := fixture(t, s)
+	deploymentID := createDeployment(t, s, deploymentBody(agentID, envID))["id"].(string)
+
+	status, body := s.do(http.MethodDelete, "/v1/environments/"+envID, nil)
+	wantErr(t, status, body, http.StatusBadRequest, "invalid_request_error")
+	msg, _ := body["error"].(map[string]any)["message"].(string)
+	if !strings.Contains(msg, deploymentID) {
+		t.Errorf("message %q does not name the blocking deployment %s", msg, deploymentID)
+	}
+	if strings.Contains(msg, "session") {
+		t.Errorf("message %q blames sessions for a deployment's foreign key", msg)
+	}
+
+	// Archiving the deployment changes nothing: the foreign key does not read
+	// archived_at, and no route removes the row. The environment is simply not
+	// deletable any more, and the message has to be honest about that rather
+	// than send the operator round a loop.
+	if status, res := s.do(http.MethodPost, "/v1/deployments/"+deploymentID+"/archive", nil); status != http.StatusOK {
+		t.Fatalf("archive deployment: %d %v", status, res)
+	}
+	status, body = s.do(http.MethodDelete, "/v1/environments/"+envID, nil)
+	wantErr(t, status, body, http.StatusBadRequest, "invalid_request_error")
+	if msg, _ := body["error"].(map[string]any)["message"].(string); !strings.Contains(msg, deploymentID) {
+		t.Errorf("after archiving the deployment: %q, want it still named", msg)
+	}
 }
 
 // TestEnvironmentKindIsImmutable pins that an environment's cloud/self_hosted
