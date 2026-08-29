@@ -25,8 +25,8 @@ route exists.
 ## 1. Scope and goal
 
 **In scope.** The ten wire operations across eight paths (§5.1), the `internal/cron`
-expression engine, a controlplane-resident scheduler that fires each due occurrence
-at most once across replicas, the `deployment_runs` history and its two list surfaces,
+expression engine, a controlplane-resident scheduler that commits at most one run per
+due occurrence across replicas, the `deployment_runs` history and its two list surfaces,
 the auto-pause on a failed scheduled fire, and `sessions.deployment_id` becoming a real
 column with a real list filter.
 
@@ -515,9 +515,11 @@ window is never selected, and a pause beginning after an occurrence falls due bu
 tick that would have fired it discards that occurrence — at any duration, since every tick
 inside the pause is skipped and §4.2's cutoff is a wall-clock instant rather than a record of
 what was already owed. Liveness is best-effort inside that window; **uniqueness
-is absolute**. §3.8's `deployment.occurrences.skipped` observes the first two, and the third whenever some
-later fire eventually wins a claim to carry the count — only an occurrence that ages out with
-no later fire at all goes unattributed (§3.6). The fourth it cannot observe by construction:
+is absolute**. §3.8's `deployment.occurrences.skipped` observes the first three, but only ever through a
+fire that wins a claim to carry the count: loss two has one by construction, since the
+collapse *is* a claim, while losses one and three are counted only if some later fire
+eventually wins — an occurrence with no later fire at all goes unattributed either way
+(§3.6). The fourth it cannot observe by construction:
 §3.6 bounds the count below by `max(watermark, schedule_resumed_at)`, and an occurrence the
 cutoff discards falls below that bound by definition.
 
@@ -1007,7 +1009,7 @@ is rewritten from spec line numbers into schema names (§2).
 - **Entry 26.** `- **environment_not_found_error is never recorded (plan 37 slice 4)** — The reference fails a run when the deployment's environment row is gone. Here it cannot be: deployments.environment_id carries a foreign key, and DELETE /v1/environments refuses while any deployment references it — with a message naming them, which is the other half of this plan's change to that handler. An archived environment is a different type and is reachable. The store admits the value so a future emitter needs no migration. *Evidence: the OpenAPI spec's BetaManagedAgentsEnvironmentNotFoundDeploymentPausedReasonError; internal/api/environments.go:523-527 (the delete refusal this plan makes name deployments); migration 0031_deployments.sql (the FK).* *Tracked: #78 (delete an environment a deployment pins, on the reference, and read the error).*`
 
 
-- **Entry 28.** `- **unknown_error is never recorded, and an unclassified fire failure records nothing at all (plan 37 slice 4)** — Both published unions carry unknown_error as an explicit fallback variant — "An unknown or unexpected error caused the run to fail" on the run side, "An unrecognized error auto-paused the deployment" on the pause side — so the reference's answer to an unclassified fire failure is a recorded run that pauses the schedule. We roll the whole transaction back instead: the claim is released and the next tick retries the same occurrence — until it succeeds, or until a later occurrence commits and moves §4.2's watermark past it, which on a */5 schedule is the next tick rather than the end of the catch-up window. The trade is deliberate. unknown_error is one of the fourteen pausing types, so emitting it would auto-pause a healthy deployment on a transient database blip, and this platform ships no auto-resume — an operator would have to unpause by hand. A rollback recovers unattended — the deployment, at least, if not always the occurrence. The cost is that the failure leaves no database trace whatever: no run row, last_run_at unmoved, no paused_reason, nothing in either list surface. The only record is telemetry — deployment.fires increments with outcome="abandoned" and the deployment.fire span is still emitted (§3.8). The store admits the value under the same CHECK as the other thirteen, so a future emitter needs no migration. *Evidence: anthropic-sdk-go betadeploymentrun.go:798-800 and betadeployment.go:1726-1728 (both fallback variants, both documented as fallbacks); no auto-resume exists — /unpause is the only path out of paused (§4.2, entry 12).* *Tracked: #78 (make a fire fail unclassifiably on the reference, then read the run and the deployment).*`
+- **Entry 28.** `- **unknown_error is never recorded, and an unclassified fire failure records nothing at all (plan 37 slice 4)** — Both published unions carry unknown_error as an explicit fallback variant — "An unknown or unexpected error caused the run to fail" on the run side, "An unrecognized error auto-paused the deployment" on the pause side — so the reference's answer to an unclassified fire failure is a recorded run that pauses the schedule. We roll the whole transaction back instead: the claim is released and a later tick retries the same occurrence — but only while it is still the most recent due one, which on a */5 schedule is the five minutes until the next occurrence falls due, not the hour the catch-up window suggests. After that the occurrence is counted as collapsed rather than retried, so a persistent fault abandons every occurrence it touches. The trade is deliberate. unknown_error is one of the fourteen pausing types, so emitting it would auto-pause a healthy deployment on a transient database blip, and this platform ships no auto-resume — an operator would have to unpause by hand. A rollback recovers unattended — the deployment, at least, if not always the occurrence. The cost is that the failure leaves no database trace whatever: no run row, last_run_at unmoved, no paused_reason, nothing in either list surface. The only record is telemetry: the fires counter increments with outcome="abandoned" and the fire span is emitted either way. The store admits the value under the same CHECK as the other thirteen, so a future emitter needs no migration. *Evidence: anthropic-sdk-go betadeploymentrun.go:798-800 and betadeployment.go:1726-1728 (both fallback variants, both documented as fallbacks); no auto-resume exists — of the ten deployment routes only POST /unpause clears the pause columns, and there is no timed or automatic counterpart.* *Tracked: #78 (make a fire fail unclassifiably on the reference, then read the run and the deployment).*`
 
 **Architecture & compatibility notes (not divergences)** — two entries belong in that
 section rather than among the mismatches:
@@ -1222,8 +1224,8 @@ inheritance.
 - **A persistent unclassified fire failure leaves no database trace.** Entry 28 trades
   `unknown_error` for a rollback-and-retry, which recovers from a transient fault
   unattended; a permanent one writes no run row, moves no `last_run_at` and pauses nothing,
-  so both list surfaces stay empty and an operator reading the API sees a deployment that
-  simply never runs. The record is telemetry only — `deployment.fires` with
+  so both list surfaces simply stop growing and an operator reading the API sees a
+  deployment whose runs quietly stop. The record is telemetry only — `deployment.fires` with
   `outcome="abandoned"` and the `deployment.fire` span (§3.8) — which is why that third
   outcome exists.
 - **Connection budget.** One connection per in-flight fire, now that the advisory lock is
