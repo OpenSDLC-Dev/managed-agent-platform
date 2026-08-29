@@ -3855,8 +3855,8 @@ were additionally run standalone under the new pin before the full gate.
 
 The first real execution of `deploy/gcp/`: both Terraform configurations applied against a
 live project, the platform deployed on GKE in mode 1, the acceptance battery driven by the
-**real `ant` CLI 1.21.0**
-built from the read-only checkout, and the teardown proven by destroy → apply. This also
+**real `ant` CLI 1.21.0** built from the read-only checkout, and the teardown proven by
+destroy → apply. This also
 narrows [#75](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/75) — images
 published and a real `helm install` accepted end to end, on GCP rather than generically.
 

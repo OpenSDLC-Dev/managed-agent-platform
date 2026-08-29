@@ -371,14 +371,19 @@ func missingBucketName(base, tag string) string {
 // name long enough to overflow the limit would be found only by whoever happened
 // to configure one, and would surface as a test that passes for the wrong reason
 // rather than as a failure.
+// realisticRow names the one row below that stands for a real project-derived
+// base rather than a synthetic shape, so the table and the check that it still
+// overflows cannot drift apart.
+const realisticRow = "RealisticLongName"
+
 func TestMissingBucketNameStaysLegal(t *testing.T) {
 	const tag = "0123456789abcdef"
 	for name, base := range map[string]string{
-		"Short":             "map-blob",
-		"AtTheLimit":        strings.Repeat("b", maxBucketName),
-		"OverTheLimit":      strings.Repeat("b", maxBucketName*2),
-		"TruncatesToADash":  strings.Repeat("b", maxBucketName-len("-missing-")-len(tag)-1) + "-x",
-		"RealisticLongName": "your-longer-project-name-map-blob-probe2",
+		"Short":            "map-blob",
+		"AtTheLimit":       strings.Repeat("b", maxBucketName),
+		"OverTheLimit":     strings.Repeat("b", maxBucketName*2),
+		"TruncatesToADash": strings.Repeat("b", maxBucketName-len("-missing-")-len(tag)-1) + "-x",
+		realisticRow:       "your-longer-project-name-map-blob-probe2",
 	} {
 		t.Run(name, func(t *testing.T) {
 			got := missingBucketName(base, tag)
@@ -396,8 +401,11 @@ func TestMissingBucketNameStaysLegal(t *testing.T) {
 			// fixture for #514 shortened it by one character to exactly the
 			// room available, which left the case passing on the branch it was
 			// written to avoid — silently, since the three checks above and
-			// statement coverage were all unaffected.
-			if name == "RealisticLongName" && got == base+"-missing-"+tag {
+			// statement coverage were all unaffected. The row is named by a
+			// constant rather than by two copies of a literal: with copies, a
+			// rename of the key disarms this check and nothing says so, which
+			// is the same silent failure it exists to catch.
+			if name == realisticRow && got == base+"-missing-"+tag {
 				t.Errorf("%q (%d chars) no longer truncates, so this case stopped being the one it is named for",
 					base, len(base))
 			}

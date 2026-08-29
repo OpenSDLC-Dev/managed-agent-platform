@@ -45,12 +45,12 @@ same four, all in one file -- so the scope is all of them, which is what puts
 CHANGELOG.md and the `changelog.d/` fragments that become it inside the guard.
 The count the run prints is the live number; this paragraph deliberately quotes
 none, because a number in prose goes stale the next time a document is added.
-Source files are
-outside it, and that is a real gap rather than an oversight: #514 found a project
-id in a Go test fixture too, but every networking test here is full of addresses
-on purpose, and a guard that cried wolf there would be switched off within a
-week. Prose is where a deployment record gets written down; code is where
-addresses are the subject matter.
+
+Source files are outside it, and that is a real gap rather than an oversight:
+#514 found a project id in a Go test fixture too, but every networking test here
+is full of addresses on purpose, and a guard that cried wolf there would be
+switched off within a week. Prose is where a deployment record gets written down;
+code is where addresses are the subject matter.
 
 This file is not scanned either, which is only safe because every fixture below
 is synthetic -- `11.22.33.44` and `123456789012` are nobody's coordinates. An
@@ -81,10 +81,19 @@ ALLOWED_ADDRESSES = frozenset({"8.8.8.8", "1.1.1.1"})
 
 # Documents the scan must always reach. Losing the scope entirely already fails,
 # but narrowing it — a mistyped pathspec, an exclusion that catches too much —
-# would leave a shorter list and a smaller printed count that nothing checks. If
-# one of these is ever renamed, this fails loudly and the list gets edited, which
-# is the correct amount of friction for a file that is meant to always be scanned.
-REQUIRED_DOCUMENTS = ("CLAUDE.md", "STATE.md", "docs/HISTORY.md")
+# would leave a shorter list and a smaller printed count that nothing checks. One
+# sentinel per directory that must stay in scope, because sentinels only in the
+# root and `docs/` let an exclusion aimed at `changelog.d/` alone cut the corpus
+# from 115 documents to 58 and still report ok, with a planted address in a
+# fragment invisible. If one of these is ever renamed, this fails loudly and the
+# tuple gets edited, which is the right friction for a file meant to be scanned.
+REQUIRED_DOCUMENTS = (
+    "CLAUDE.md",
+    "STATE.md",
+    "docs/HISTORY.md",
+    "changelog.d/README.md",
+    "deploy/gcp/README.md",
+)
 
 # The trailing lookahead rejects only a dot that CONTINUES the number. Rejecting
 # any dot would miss an address at the end of a sentence, which is the commonest
