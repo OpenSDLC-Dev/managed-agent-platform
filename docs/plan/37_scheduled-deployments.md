@@ -5,9 +5,10 @@ issue: "#51"
 
 # Scheduled deployments — a cron-fired deployment and its run history (plan 37)
 
-This plan addresses **#51**, whose title still carries the `(post-v1)` marker: the owner is
-electing to pull it forward, so the PR that starts slice 1 drops that marker from the issue
-title, or the backlog query in CLAUDE.md stops meaning what it says.
+This plan addresses **#51**, which the owner elected to pull forward from post-v1. The
+`(post-v1)` marker was dropped from the issue title while slice 1 was in flight, because the
+backlog query in CLAUDE.md means "not built ahead of" and would otherwise have returned work
+under active development.
 
 A **deployment** binds an agent to an environment, credentials, initial events and an
 optional cron schedule, so the platform starts sessions on its own — no client in the loop
@@ -589,6 +590,18 @@ one trigger for one invariant on a table with two writers — the scheduler's fi
 `POST /run` handler, which records a failed manual run the same way (§5.2) — is more
 machinery than the risk warrants.
 
+**One path does break it after the commit, and it is not the writers':
+[#520](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/520).** `session_id` is
+`ON DELETE SET NULL`, so deleting the session nulls the column on a run that has already
+settled — leaving a committed row with neither arm, and dropping it out of `last_run_at`'s
+`session_id IS NOT NULL` filter so that field silently regresses to an older run or to null.
+Nothing observes this in slice 1, which serves no fire and writes no run row, and migration
+`0031` is merged and therefore immutable. Whoever writes the fire owns the fix, and it wants
+a durable success marker — a `succeeded_at` column in slice 3's migration is the obvious
+shape — with the read query and the union arm keyed off that instead of off a link that may
+go stale. Restricting session deletion is the other option and is almost certainly wrong:
+run history is meant to be readable *"independent of the session lifecycle"*.
+
 No cipher call happens at fire time: a `github_repository` resource's `authorization_token`
 is sealed once, at deployment create/update, outside the transaction (§5.1), and the fire
 copies ciphertext.
@@ -620,8 +633,16 @@ so §4.1 step 7 says "only while it is still the most recent due occurrence", an
 increments `deployment.occurrences.skipped` like any other collapse.
 
 **One column of scheduling state is stored, and only one:** `schedule_resumed_at`, set from
-the database clock at create and at every unpause. The candidate predicate requires
-`scheduled_at > schedule_resumed_at`. Without it the published unpause rule is
+the database clock at create and on every unpause **that actually resumes something** —
+that is, one finding the deployment paused. Unpause is an idempotent 200 on an already-active
+deployment, so "at every unpause" would let a retry or a config-management loop advance the
+floor below and silently collapse every occurrence already due; the published sentence
+describes what a *resume* does, not what a no-op call should. `0031_deployments.sql`'s
+comment beside the column still says "at every unpause". It is left as it stands because
+this repo holds a merged migration immutable, and this paragraph is the authority instead —
+a narrow call, since the runner tracks filenames and not content, so a comment-only edit
+would diverge no database; it is the rule that is unconditional, not the risk. The candidate
+predicate requires `scheduled_at > schedule_resumed_at`. Without it the published unpause rule is
 unimplementable: no run row advances the watermark while a deployment is paused, so a
 deployment paused at 08:00 and unpaused at 10:05 would immediately fire 10:00 — backfilling
 exactly the trigger *"Unpause resumes the schedule from the next scheduled occurrence.
@@ -841,8 +862,8 @@ a refusal rather than a cascade (decision 7). So:
 ## 6. Data model
 
 Two migrations, both additive, named here so two parallel worktrees do not both claim
-`0031` (the tip today is `0030_work_session_tokens.sql`, and CLAUDE.md assigns the number
-when the file enters the repo):
+`0031` (which is what it landed as; CLAUDE.md assigns the number when the file enters the
+repo):
 
 - **`0031_deployments.sql`** (slice 1) — `deployments` and `deployment_runs`.
 - **`0032_session_deployment_id.sql`** (slice 3) — `sessions.deployment_id` and
@@ -872,11 +893,16 @@ Six conventions the compiler will not enforce:
   directly, because the behavioral test alone cannot prove it. The table also carries
   `created_at` — a required field on the wire resource, and the instant §3.3's `last_run_at`
   reads.
-- **The run list's other filters get no index of their own** in `0031` — §2.6's `created_at`
-  range, `trigger_type` and `has_error`. The unique index leads with `deployment_id`, which
-  is the selective column and serves a per-deployment listing; a cross-deployment scan over a
-  long history is the case that would want more, and it is left until one exists rather than
-  guessed at now.
+- **The run list gets two indexes and no more** — one for each of its two scans, since
+  `deployment_id` is an optional filter (*"omit to list across all deployments"*) and no
+  single index serves both: a leading `created_at` cannot restrict the filtered scan, and a
+  leading `deployment_id` cannot order the unfiltered one. So `(created_at DESC, id DESC)`
+  and `(deployment_id, created_at DESC, id DESC)`. This bullet originally reasoned that the
+  unique index would serve the filtered listing on its own, which is wrong twice over: that
+  index is **partial** on `scheduled_at IS NOT NULL`, so it does not cover manual runs at
+  all, and it orders by `scheduled_at` rather than by the list's own key. §2.6's remaining
+  filters — `trigger_type` and `has_error` — still get nothing, and that part stands: they
+  are low-cardinality and the composite already bounds the scan.
 - **The DDL comment states the pruning constraint** the run table's double duty creates: the
   row is history *and* the occurrence claim *and* the watermark, so deleting one newer than
   the catch-up window un-claims an occurrence a tick can then fire again (§9).
@@ -885,8 +911,9 @@ Six conventions the compiler will not enforce:
 `paused_error_type` under a `CHECK` admitting all fourteen values; `status` and
 `paused_reason` are rendered from them. It stores exactly one piece of scheduling state,
 `schedule_resumed_at timestamptz NOT NULL` — written from the database clock at create and
-at every unpause, and the reason the published no-backfill-on-unpause rule is implementable
-(§4.2). It stores **no** `last_run_at` and no watermark (§4.2).
+on every unpause that finds the deployment paused, and the reason the published
+no-backfill-on-unpause rule is implementable (§4.2, which says why a no-op unpause must
+leave it alone). It stores **no** `last_run_at` and no watermark (§4.2).
 
 ---
 
@@ -1056,8 +1083,10 @@ is rewritten from spec line numbers into schema names (§2).
 
 - **Entry 28.** `- **unknown_error is never recorded, and an unclassified fire failure records nothing at all (plan 37 slice 4)** — Both published unions carry unknown_error as an explicit fallback variant — "An unknown or unexpected error caused the run to fail" on the run side, "An unrecognized error auto-paused the deployment" on the pause side — so the reference's answer to an unclassified fire failure is a recorded run that pauses the schedule. We roll the whole transaction back instead: the claim is released and a later tick retries the same occurrence — but only while it is still the most recent due one, which on a */5 schedule is the five minutes until the next occurrence falls due, not the hour the catch-up window suggests. After that the occurrence is counted as collapsed rather than retried, so a persistent fault abandons every occurrence it touches. The trade is deliberate. unknown_error is one of the fourteen pausing types, so emitting it would auto-pause a healthy deployment on a transient database blip, and this platform ships no auto-resume — an operator would have to unpause by hand. A rollback recovers unattended — the deployment, at least, if not always the occurrence. The cost is that the failure leaves no database trace whatever: no run row, last_run_at unmoved, no paused_reason, nothing in either list surface. The only record is telemetry: deployment.fires increments with outcome="abandoned" and the deployment.fire span is emitted either way. The store admits the value under the same CHECK as the other thirteen, so a future emitter needs no migration. *Evidence: anthropic-sdk-go betadeploymentrun.go:798-800 and betadeployment.go:1726-1728 (both fallback variants, both documented as fallbacks); no auto-resume exists — of the eight routes on /v1/deployments only POST /unpause clears the pause columns, and there is no timed or automatic counterpart.* *Tracked: #78 (make a fire fail unclassifiably on the reference, then read the run and the deployment).*`
 
-**Architecture & compatibility notes (not divergences)** — two entries belong in that
-section rather than among the mismatches:
+**Architecture & compatibility notes (not divergences)** — one entry below belongs in that
+section rather than among the mismatches, and one fact belongs outside the registry
+altogether. Entry 19, filed below as an inference, joined the section as well once slice 1's
+re-fetch confirmed its two DST rules as a match rather than a mismatch:
 
 - **Entry 8.** `- **No DELETE on /v1/deployments, mirroring the reference's own absence (plan 37 slice 1)** — The reference publishes a deployment.deleted webhook but exposes no delete path: enumerating spec.paths shows post/get on /v1/deployments, get/post on /v1/deployments/{id}, and post alone on archive, pause, unpause and run — no delete method anywhere — and BetaDeploymentService has no Delete. Archive is the terminal verb here as it is there, and unarchive exists in neither. *Evidence: anthropic-openapi.yml:13048, :13355, :13624, :13755, :13886, :14017 (the six paths and their methods); anthropic-sdk-go betadeployment.go:44-176 (New/Get/Update/List/Archive/Pause/Run/Unpause).*`
 
@@ -1091,7 +1120,7 @@ rule):
 
 - **Entry 18.** `- **agent_archived_error is recorded for a roster member, never for the deployment's own agent (plan 37 slice 4)** — The type's schema description says "The deployment's agent was archived", while the guide says an archived top-level agent archives the deployment in the same operation with no run recorded, and that this error type is what an archived subagent produces. Both hold only if the type is unreachable for the top-level case, and under decision 7 it is unreachable by construction rather than by convention: a live deployment refuses the archive of the agent it pins, so the deployment's own agent can never become archived while the deployment can still fire. *Evidence: anthropic-openapi.yml:21402-21418 (both variants of the type); platform.claude.com managed-agents/scheduled-deployments (fetched 2026-08-27 — the subagent rule and "In both cases no deployment run is recorded" for the top-level agent); internal/api/agents.go archiveAgent.* *Tracked: #78 (archive a top-level agent and a roster member in turn, and read the run list both times).*`
 
-- **Entry 19.** `- **Daylight-saving semantics: a nonexistent wall clock is skipped, a doubled one fires twice (plan 37 slice 1)** — Neither machine-readable source says anything about DST: a spec-wide grep for daylight / DST / non-existent / ambiguous returns one unrelated hit, and the BetaManagedAgentsSchedule and ScheduleParams doc comments carry no DST text. The only adjacent statement is "Literal wall-clock matching in the configured timezone", which decides neither case. Literal wall-clock matching admits exactly two readings per transition, and we take the conventional pair: a 02:30 that does not exist on the spring-forward day is skipped; a 01:30 that occurs twice on the fall-back day fires twice, as two rows with distinct scheduled_at instants. *Evidence: anthropic-openapi.yml:22780 (the one adjacent sentence); anthropic-sdk-go betadeployment.go:1478-1507 (no DST text); internal/cron.* *Tracked: #78 (run a schedule across both transitions in America/New_York and count the runs). A docs-page statement of either rule, if one is found on re-fetch, converts this entry to CONFIRMED in the PR that finds it.*`
+- **Entry 19.** `- **Daylight-saving semantics: a nonexistent wall clock is skipped, a doubled one fires twice (plan 37 slice 1)** — Neither machine-readable source says anything about DST: a spec-wide grep for daylight / DST / non-existent / ambiguous returns one unrelated hit, and the BetaManagedAgentsSchedule and ScheduleParams doc comments carry no DST text. The only adjacent statement is "Literal wall-clock matching in the configured timezone", which decides neither case. Literal wall-clock matching admits exactly two readings per transition, and we take the conventional pair: a 02:30 that does not exist on the spring-forward day is skipped; a 01:30 that occurs twice on the fall-back day fires twice, as two rows with distinct scheduled_at instants. *Evidence: anthropic-openapi.yml:22780 (the one adjacent sentence); anthropic-sdk-go betadeployment.go:1478-1507 (no DST text); internal/cron.* *Tracked: #78 (run a schedule across both transitions in America/New_York and count the runs). A docs-page statement of either rule, if one is found on re-fetch, converts this entry to CONFIRMED in the PR that finds it.*` Slice 1 ran that re-fetch and found both rules stated verbatim, so the entry was confirmed as a *match* rather than a mismatch — which lands it in the registry's architecture/compatibility notes, not its CONFIRMED section. "CONFIRMED" above was shorthand for "no longer inferred"; the file reads the word more narrowly than that.
 
 - **Entry 23.** `- **A deployment's initial_events must satisfy the same adjacency rule a posted batch does (plan 37 slice 1)** — The reference's deployment initial_events union admits user.message, user.define_outcome and system.message with no stated ordering constraint. This platform routes a deployment's list through events.NormalizeInbound, the same normalizer POST /v1/sessions/{id}/events uses, which requires a system.message to be the final event of the request and to immediately follow a user.message / user.tool_result / user.custom_tool_result. So [user.message, system.message] is accepted and a lone system.message is a 400 — narrower than the union states. Applying one rule at every entry point beats a second normalizer whose ordering could drift from the first. *Evidence: anthropic-openapi.yml:23155-23170 (the three-type params union, no ordering constraint); internal/events/inbound.go:37-45 (the adjacency rule).* *Tracked: #78 (post a deployment whose initial_events is a lone system.message, and record the status).*`
 

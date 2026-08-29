@@ -452,7 +452,12 @@ const (
 // list (presence, size, the two-type allowlist, the define_outcome and
 // file-document bounds); the per-type field validation runs later through the
 // same NormalizeInbound a posted batch gets.
-func parseInitialEvents(obj map[string]json.RawMessage) ([]json.RawMessage, error) {
+// allowSystemMessage widens the type allowlist by one arm. A deployment's
+// initial_events admits system.message where a session's does not — the
+// reference's two schemas differ by exactly that arm — and a fired session has
+// no client standing by to send one afterwards, which is why the deployment
+// needs it and the session does not.
+func parseInitialEvents(obj map[string]json.RawMessage, allowSystemMessage bool) ([]json.RawMessage, error) {
 	raw, set := obj["initial_events"]
 	if !set || isNull(raw) {
 		return nil, nil
@@ -495,8 +500,16 @@ func parseInitialEvents(obj map[string]json.RawMessage) ([]json.RawMessage, erro
 			}
 		case string(domain.EventUserDefineOutcome):
 			defineOutcomes++
+		case string(domain.EventSystemMessage):
+			if !allowSystemMessage {
+				return nil, errInvalid("initial_events[%d]: %s", i, initialEventsAllowedNote)
+			}
 		default:
-			return nil, errInvalid("initial_events[%d]: %s", i, initialEventsAllowedNote)
+			note := initialEventsAllowedNote
+			if allowSystemMessage {
+				note = deploymentInitialEventsNote
+			}
+			return nil, errInvalid("initial_events[%d]: %s", i, note)
 		}
 	}
 	if defineOutcomes > 1 {
@@ -518,7 +531,7 @@ func (s *server) createSession(r *http.Request) (any, error) {
 		"resources", "vault_ids", "initial_events"); err != nil {
 		return nil, err
 	}
-	rawInitial, err := parseInitialEvents(obj)
+	rawInitial, err := parseInitialEvents(obj, false)
 	if err != nil {
 		return nil, err
 	}

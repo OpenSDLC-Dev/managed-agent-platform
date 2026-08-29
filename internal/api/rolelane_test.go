@@ -54,6 +54,8 @@ func (r matrixRoute) request() string {
 		id = "file_nonexistent"
 	case "memory_stores":
 		id = "memstore_nonexistent"
+	case "deployments":
+		id = "depl_nonexistent"
 	}
 	return strings.NewReplacer(
 		"{id}", id,
@@ -82,6 +84,7 @@ func roleMatrix() []matrixRoute {
 		store   = "/v1/memory_stores/{id}"
 		memory  = store + "/memories/{mid}"
 		version = store + "/memory_versions/{vid}"
+		depl    = "/v1/deployments/{id}"
 	)
 	v, d, a := identity.RoleViewer, identity.RoleDeveloper, identity.RoleAdmin
 
@@ -89,6 +92,13 @@ func roleMatrix() []matrixRoute {
 		// Agents.
 		{"GET", "/v1/agents", v}, {"GET", agent, v}, {"GET", agent + "/versions", v},
 		{"POST", "/v1/agents", d}, {"POST", agent, d}, {"POST", agent + "/archive", d},
+
+		// Deployments. pause and unpause take developer for the same reason
+		// archive does: each rewrites what the schedule will do next.
+		{"GET", "/v1/deployments", v}, {"GET", depl, v},
+		{"POST", "/v1/deployments", d}, {"POST", depl, d},
+		{"POST", depl + "/archive", d},
+		{"POST", depl + "/pause", d}, {"POST", depl + "/unpause", d},
 
 		// Environments. The work API under /v1/environments/{id}/work is a
 		// different lane entirely and is covered by TestEnvironmentKeyLane below.

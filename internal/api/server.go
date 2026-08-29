@@ -61,6 +61,14 @@ func NewHandler(pool *pgxpool.Pool, blobs blob.Store, cipher secrets.Cipher, ver
 	mux.HandleFunc("DELETE /v1/environments/{id}", s.handle(identity.RoleDeveloper, s.deleteEnvironment))
 	mux.HandleFunc("POST /v1/environments/{id}/archive", s.handle(identity.RoleDeveloper, s.archiveEnvironment))
 
+	mux.HandleFunc("POST /v1/deployments", s.handle(identity.RoleDeveloper, s.createDeployment))
+	mux.HandleFunc("GET /v1/deployments", s.handle(identity.RoleViewer, s.listDeployments))
+	mux.HandleFunc("GET /v1/deployments/{id}", s.handle(identity.RoleViewer, s.getDeployment))
+	mux.HandleFunc("POST /v1/deployments/{id}", s.handle(identity.RoleDeveloper, s.updateDeployment))
+	mux.HandleFunc("POST /v1/deployments/{id}/archive", s.handle(identity.RoleDeveloper, s.archiveDeployment))
+	mux.HandleFunc("POST /v1/deployments/{id}/pause", s.handle(identity.RoleDeveloper, s.pauseDeployment))
+	mux.HandleFunc("POST /v1/deployments/{id}/unpause", s.handle(identity.RoleDeveloper, s.unpauseDeployment))
+
 	mux.HandleFunc("POST /v1/sessions", s.handle(identity.RoleDeveloper, s.createSession))
 	mux.HandleFunc("GET /v1/sessions", s.handle(identity.RoleViewer, s.listSessions))
 	mux.HandleFunc("GET /v1/sessions/{id}", s.handle(identity.RoleViewer, s.getSession))
@@ -211,6 +219,8 @@ func NewHandler(pool *pgxpool.Pool, blobs blob.Store, cipher secrets.Cipher, ver
 		"/v1/memory_stores/{id}/memories", "/v1/memory_stores/{id}/memories/{mid}",
 		"/v1/memory_stores/{id}/memory_versions", "/v1/memory_stores/{id}/memory_versions/{vid}",
 		"/v1/memory_stores/{id}/memory_versions/{vid}/redact",
+		"/v1/deployments", "/v1/deployments/{id}", "/v1/deployments/{id}/archive",
+		"/v1/deployments/{id}/pause", "/v1/deployments/{id}/unpause",
 	} {
 		mux.HandleFunc(pattern, func(w http.ResponseWriter, r *http.Request) {
 			writeError(w, r, methodNotAllowed(r))
