@@ -8,6 +8,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 // agentRequiredFields is the full BetaManagedAgentsAgent wire surface; every
@@ -640,6 +642,15 @@ func TestAgentArchiveRefusedWhileADeploymentPinsIt(t *testing.T) {
 		t.Errorf("after a refused archive: %d, archived_at %v — want the agent untouched", status, got["archived_at"])
 	}
 
+	// The refusal is about *this* agent, not about a deployment existing
+	// somewhere. Without this, dropping `agent_id = $1` from the query — which
+	// would block every archive in the database while any deployment lives —
+	// passes every other assertion here.
+	bystander := createAgent(t, s, map[string]any{"name": "unpinned", "model": "m"})["id"].(string)
+	if status, res := s.do(http.MethodPost, "/v1/agents/"+bystander+"/archive", nil); status != http.StatusOK {
+		t.Errorf("archiving an agent no deployment pins: %d %v", status, res)
+	}
+
 	// An archived deployment never blocks. It is terminal and can never fire,
 	// and blocking on one would build the dead end §8.3 names — an agent no
 	// operator could ever archive, because nothing clears the deployment.
@@ -704,4 +715,123 @@ func TestAgentArchiveRefusalNamesTheDeploymentsUpToFive(t *testing.T) {
 			}
 		}
 	}
+}
+
+// The refusal guards the transition, not the state: an agent that is already
+// archived re-archives idempotently even while a live deployment pins it. That
+// pairing is unreachable through the API — create and update both refuse an
+// archived agent — so the test writes it directly, which is also the only way
+// it can arise: a row from before this rule existed. Refusing there would be a
+// 400 no operator could clear by archiving the agent, because it already is.
+func TestAgentArchiveStaysIdempotentAgainstAPinFromBeforeTheRule(t *testing.T) {
+	s := newTestServer(t)
+	agentID, envID := fixture(t, s)
+	createDeployment(t, s, deploymentBody(agentID, envID))
+
+	// What the pre-rule handler did: stamp the agent and leave the deployment
+	// live beside it.
+	if _, err := s.pool.Exec(t.Context(),
+		`UPDATE agents SET archived_at = now() WHERE id = $1`, agentID); err != nil {
+		t.Fatalf("archive the agent behind the handler's back: %v", err)
+	}
+
+	status, first := s.do(http.MethodPost, "/v1/agents/"+agentID+"/archive", nil)
+	if status != http.StatusOK {
+		t.Fatalf("re-archiving an already-archived agent: %d %v", status, first)
+	}
+	status, second := s.do(http.MethodPost, "/v1/agents/"+agentID+"/archive", nil)
+	if status != http.StatusOK || second["archived_at"] != first["archived_at"] {
+		t.Errorf("second call: %d, archived_at %v — want the stable %v",
+			status, second["archived_at"], first["archived_at"])
+	}
+}
+
+// The check and the write are one transaction, and that is what makes the
+// refusal race-free rather than usually right: a deployment committed while the
+// archive waits for the agent row must still block it.
+//
+// Deterministic rather than timed. The test takes the FOR SHARE a deployment
+// create holds while it resolves its agent, waits until the archive is provably
+// blocked on a lock instead of sleeping and hoping, and only then commits the
+// pin. An archive that read the deployments before taking the lock never blocks
+// at all, so the wait ends immediately and says which failure it saw.
+func TestAgentArchiveCannotReadPastAConcurrentDeployment(t *testing.T) {
+	s := newTestServer(t)
+	agentID, envID := fixture(t, s)
+	// Created and archived, so the row is there to revive below and this test
+	// need not spell out every NOT NULL column of `deployments`.
+	deploymentID := createDeployment(t, s, deploymentBody(agentID, envID))["id"].(string)
+	if status, res := s.do(http.MethodPost, "/v1/deployments/"+deploymentID+"/archive", nil); status != http.StatusOK {
+		t.Fatalf("archive deployment: %d %v", status, res)
+	}
+
+	ctx := t.Context()
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	var one int
+	if err := tx.QueryRow(ctx, `SELECT 1 FROM agents WHERE id = $1 FOR SHARE`, agentID).Scan(&one); err != nil {
+		t.Fatalf("FOR SHARE on the agent: %v", err)
+	}
+	if _, err := tx.Exec(ctx, `UPDATE deployments SET archived_at = NULL WHERE id = $1`, deploymentID); err != nil {
+		t.Fatalf("revive the deployment: %v", err)
+	}
+
+	// Its own client rather than s.do: a t.Fatalf from this goroutine would be
+	// the wrong kind of failure, and the transport error belongs on the channel.
+	done := make(chan int, 1)
+	go func() {
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, s.url+"/v1/agents/"+agentID+"/archive", nil)
+		if err != nil {
+			done <- 0
+			return
+		}
+		req.Header.Set("x-api-key", testKey)
+		res, err := (&http.Client{Timeout: 30 * time.Second}).Do(req)
+		if err != nil {
+			done <- 0
+			return
+		}
+		_ = res.Body.Close()
+		done <- res.StatusCode
+	}()
+
+	waitUntilBlockedOnALock(t, s.pool, done)
+
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatalf("commit the revived deployment: %v", err)
+	}
+	if status := <-done; status != http.StatusBadRequest {
+		t.Errorf("the archive answered %d, want 400 — it read the deployments before taking the agent lock", status)
+	}
+}
+
+// waitUntilBlockedOnALock returns once another backend on this test's database
+// is waiting on a lock, which is the archive request. An archive that answers
+// without ever waiting is the regression this exists to catch, so that case
+// fails here rather than reading as a slow machine.
+func waitUntilBlockedOnALock(t *testing.T, pool *pgxpool.Pool, done <-chan int) {
+	t.Helper()
+	deadline := time.Now().Add(15 * time.Second)
+	for time.Now().Before(deadline) {
+		var waiting int
+		if err := pool.QueryRow(t.Context(),
+			`SELECT count(*) FROM pg_stat_activity
+			  WHERE datname = current_database() AND wait_event_type = 'Lock'
+			    AND pid <> pg_backend_pid()`).Scan(&waiting); err != nil {
+			t.Fatalf("read pg_stat_activity: %v", err)
+		}
+		if waiting > 0 {
+			return
+		}
+		select {
+		case status := <-done:
+			t.Fatalf("the archive answered %d without ever waiting on the agent row — its check ran outside the transaction", status)
+		case <-time.After(20 * time.Millisecond):
+		}
+	}
+	t.Fatal("the archive never blocked on the agent row within 15s")
 }

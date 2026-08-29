@@ -826,6 +826,14 @@ archived-deployment 400 (§8.1 entry 11).
   would build exactly the dead end the environment-delete bullet above describes. Teardown
   becomes ordered: archive the deployments, then the agent.
 
+  One carve-out this wording did not anticipate, added when the code landed: an agent that
+  is *already archived* skips the check and re-archives idempotently. The refusal guards the
+  transition, not the state, and refusing there would be the same dead end again — a 400 no
+  operator could clear by archiving the agent, because it already is. The pairing it
+  tolerates is unreachable through the API anyway (create and update both refuse an archived
+  agent), so it can only describe a row from before this rule. Registered in
+  docs/DIVERGENCES.md with the rest of the entry.
+
   It is a single `UPDATE … RETURNING` on the pool today with no transaction
   (`internal/api/agents.go:578-584`), and it still becomes a transaction as its own
   behavior-neutral step — not for a cascade now, but for the check: between "no deployment
@@ -1202,8 +1210,9 @@ inheritance.
    **Settled 2026-08-29**, and it is a third option neither the reference nor the earlier
    draft offered. `POST /v1/agents/{id}/archive` answers 400 naming the deployments whenever
    one with `archived_at IS NULL` pins the agent; an archived deployment never blocks, since
-   it is terminal and can never fire; teardown becomes ordered — deployments first, then the
-   agent (§5.3). It trades an unrecoverable destructive action for a recoverable refusal,
+   it is terminal and can never fire; an already-archived *agent* skips the check and stays
+   idempotent, since the refusal guards the transition rather than the state (§5.3); teardown
+   becomes ordered — deployments first, then the agent (§5.3). It trades an unrecoverable destructive action for a recoverable refusal,
    which is what matters on a platform shipping neither unarchive nor
    `DELETE /v1/deployments`. The cost is a divergence from the reference, whose cascade rests
    on a single docs-page sentence: §8.1 entry 25 is therefore now a confirmed statement about

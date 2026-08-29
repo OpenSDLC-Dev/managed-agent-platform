@@ -116,11 +116,11 @@ func parseDeploymentSchedule(obj map[string]json.RawMessage) (expr, tz string, s
 // than a silently dropped key.
 //
 // FOR SHARE on the agent row, so a concurrent archive cannot land between this
-// check and the write. The refusal that lock exists for is still owed: slice 1
-// has yet to make the agent-archive route take FOR UPDATE and decline while a
-// live deployment pins the agent (plan 37 decision 7). Taking the shared lock
-// here now is what will make that refusal race-free rather than merely usually
-// right — without it, an update could repin an agent the archive just cleared.
+// check and the write. That is what makes the archive's refusal race-free
+// rather than merely usually right: archiveAgent takes FOR UPDATE on the same
+// row before counting the deployments that pin it, and the two lock modes
+// conflict, so neither can read past the other. Without the shared lock here an
+// update could repin an agent the archive had just cleared.
 func resolveDeploymentAgent(ctx context.Context, db querier, raw json.RawMessage) (domain.AgentReference, error) {
 	var ref domain.AgentReference
 

@@ -582,7 +582,14 @@ const blockingDeploymentsNamed = 5
 //
 // count(*) OVER () rather than a second query: a window function is evaluated
 // before LIMIT, so every row carries the exact total and the message can say
-// how many were left unnamed.
+// how many were left unnamed. It is also why LIMIT bounds the output and not
+// the work — the count reads every live deployment of the agent, and the plain
+// agent_id index serves neither the ordering nor the archived_at predicate
+// (#523, deliberately left for a migration that is being written anyway).
+//
+// Runs inside archiveAgent's transaction, which already holds FOR UPDATE on the
+// agent row. The querier parameter would take the pool just as happily, and
+// passing it there would drop that guarantee without a word.
 func refuseDeploymentsPinningAgent(ctx context.Context, db querier, agentID string) error {
 	rows, err := db.Query(ctx,
 		`SELECT id, count(*) OVER () FROM deployments
@@ -631,12 +638,17 @@ func (s *server) archiveAgent(r *http.Request) (any, error) {
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
-	// FOR UPDATE, then the check, then the write, all in one transaction. Both
-	// deployment create and deployment update take FOR SHARE on the agent they
-	// pin, so the two cannot interleave and a deployment cannot appear between
-	// "none pins this agent" and the archive. Create alone would not be enough:
-	// a deployment's agent cannot be cleared but can be repinned, so an update
-	// racing this would leave a live deployment pinning an archived agent.
+	// FOR UPDATE, then the check, then the write, all in one transaction, so a
+	// deployment cannot appear between "none pins this agent" and the archive.
+	// Deployment create always takes FOR SHARE on the agent it pins, and a
+	// deployment update takes it whenever the body carries `agent` — those two
+	// are the only paths that can establish a pin, which is what has to be
+	// locked out. An update omitting `agent` rewrites agent_id to the value it
+	// already held and takes no agent lock; it needs none, because the pin it
+	// preserves is already visible to the count below. Locking create alone
+	// would not have been enough: a deployment's agent cannot be cleared but can
+	// be repinned, so a repin racing this would leave a live deployment pinning
+	// an archived agent.
 	var archivedAt *time.Time
 	err = tx.QueryRow(ctx, `SELECT archived_at FROM agents WHERE id = $1 FOR UPDATE`, id).Scan(&archivedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
