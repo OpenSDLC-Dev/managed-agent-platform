@@ -313,11 +313,17 @@ func TestEnvironmentDeleteBlockedByALiveDeploymentCanBeCleared(t *testing.T) {
 		t.Errorf("message %q sends the operator to archive the environment when a repoint would do", msg)
 	}
 
-	// Follow the advice.
+	// Follow the advice, and check it did what it said: a deployment deleted or
+	// moved somewhere unexpected would clear the reference just as well, and
+	// leave this asserting less than it reads as.
 	other := createEnvironment(t, s, map[string]any{"name": "somewhere-else"})["id"].(string)
-	if status, res := s.do(http.MethodPost, "/v1/deployments/"+deploymentID,
-		map[string]any{"environment_id": other}); status != http.StatusOK {
-		t.Fatalf("point the deployment at another environment: %d %v", status, res)
+	status, moved := s.do(http.MethodPost, "/v1/deployments/"+deploymentID,
+		map[string]any{"environment_id": other})
+	if status != http.StatusOK {
+		t.Fatalf("point the deployment at another environment: %d %v", status, moved)
+	}
+	if moved["environment_id"] != other {
+		t.Errorf("the deployment reports environment_id %v, want %s", moved["environment_id"], other)
 	}
 	if status, res := s.do(http.MethodDelete, "/v1/environments/"+envID, nil); status != http.StatusOK {
 		t.Fatalf("delete after the repoint the message advised: %d %v", status, res)
@@ -333,11 +339,9 @@ func TestEnvironmentDeleteBlockedByAnArchivedDeploymentIsPermanent(t *testing.T)
 	agentID, envID := fixture(t, s)
 	deploymentID := createDeployment(t, s, deploymentBody(agentID, envID))["id"].(string)
 
-	archived := map[string]any{}
-	if status, res := s.do(http.MethodPost, "/v1/deployments/"+deploymentID+"/archive", nil); status != http.StatusOK {
-		t.Fatalf("archive deployment: %d %v", status, res)
-	} else {
-		archived = res
+	status, archived := s.do(http.MethodPost, "/v1/deployments/"+deploymentID+"/archive", nil)
+	if status != http.StatusOK {
+		t.Fatalf("archive deployment: %d %v", status, archived)
 	}
 	// Not just a 200: archive is idempotent, so one that stopped stamping
 	// would still answer 200 and leave this testing the live case again.
@@ -360,11 +364,20 @@ func TestEnvironmentDeleteBlockedByAnArchivedDeploymentIsPermanent(t *testing.T)
 	if strings.Contains(msg, "point each at another environment") {
 		t.Errorf("message %q advises a repoint an archived deployment refuses", msg)
 	}
+	// The advice has to be there before the check below can mean anything: a
+	// message that never offered it would pass that one for free.
+	if !strings.Contains(msg, "archive it instead") {
+		t.Errorf("message %q offers no remedy at all", msg)
+	}
 
 	// Follow that advice too, and check it is not then repeated at someone who
 	// has already taken it.
-	if status, res := s.do(http.MethodPost, "/v1/environments/"+envID+"/archive", nil); status != http.StatusOK {
-		t.Fatalf("archive the environment, which is what the message advised: %d %v", status, res)
+	status, archivedEnv := s.do(http.MethodPost, "/v1/environments/"+envID+"/archive", nil)
+	if status != http.StatusOK {
+		t.Fatalf("archive the environment, which is what the message advised: %d %v", status, archivedEnv)
+	}
+	if archivedEnv["archived_at"] == nil {
+		t.Fatal("the environment archived with a null archived_at")
 	}
 	status, body = s.do(http.MethodDelete, "/v1/environments/"+envID, nil)
 	wantErr(t, status, body, http.StatusBadRequest, "invalid_request_error")
@@ -402,8 +415,11 @@ func TestEnvironmentDeleteNamesTheDeploymentsUpToFive(t *testing.T) {
 // both in the way it reports the older foreign key — sessions, from migration
 // 0001. Reading the constraint's name would therefore have told the operator to
 // delete the sessions, which they would do, only to find the delete still
-// refused. The message is built from what is actually there instead.
-func TestEnvironmentDeleteBlockedByBothNamesTheDeployment(t *testing.T) {
+// refused. The message is built from what is actually there instead — and has
+// to name *both*, since clearing either alone leaves the delete refused. A
+// message that named the deployment and promised the delete would then go
+// through would be the first defect over again with the parties swapped.
+func TestEnvironmentDeleteBlockedByBothNamesEachOfThem(t *testing.T) {
 	s := newTestServer(t)
 	agentID, envID := fixture(t, s)
 	deploymentID := createDeployment(t, s, deploymentBody(agentID, envID))["id"].(string)
@@ -415,8 +431,26 @@ func TestEnvironmentDeleteBlockedByBothNamesTheDeployment(t *testing.T) {
 
 	status, body := s.do(http.MethodDelete, "/v1/environments/"+envID, nil)
 	wantErr(t, status, body, http.StatusBadRequest, "invalid_request_error")
-	if msg, _ := body["error"].(map[string]any)["message"].(string); !strings.Contains(msg, deploymentID) {
+	msg, _ := body["error"].(map[string]any)["message"].(string)
+	if !strings.Contains(msg, deploymentID) {
 		t.Errorf("message %q names no deployment — it followed the constraint the error reported", msg)
+	}
+	if !strings.Contains(msg, "1 session") {
+		t.Errorf("message %q counts no sessions, so the repoint it advises would not be enough", msg)
+	}
+	if !strings.Contains(msg, "delete the sessions") {
+		t.Errorf("message %q advises a repoint alone, which leaves the delete refused", msg)
+	}
+
+	// Both remedies together clear it. Either alone does not, which is what the
+	// message now says.
+	other := createEnvironment(t, s, map[string]any{"name": "somewhere-else"})["id"].(string)
+	if status, res := s.do(http.MethodPost, "/v1/deployments/"+deploymentID,
+		map[string]any{"environment_id": other}); status != http.StatusOK {
+		t.Fatalf("repoint: %d %v", status, res)
+	}
+	if status, _ := s.do(http.MethodDelete, "/v1/environments/"+envID, nil); status != http.StatusBadRequest {
+		t.Errorf("delete after the repoint alone: %d, want it still refused by the session", status)
 	}
 }
 

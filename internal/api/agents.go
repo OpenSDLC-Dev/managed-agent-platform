@@ -582,11 +582,25 @@ func (s *server) listAgentVersions(r *http.Request) (any, error) {
 // agent row. The querier parameter would take the pool just as happily, and
 // passing it there would drop that guarantee without a word.
 func refuseDeploymentsPinningAgent(ctx context.Context, db querier, agentID string) error {
-	named, total, err := namedDeployments(ctx, db,
+	rows, err := db.Query(ctx,
 		`SELECT id, count(*) OVER () FROM deployments
 		  WHERE agent_id = $1 AND archived_at IS NULL
 		  ORDER BY created_at, id LIMIT $2`, agentID, blockingDeploymentsNamed)
 	if err != nil {
+		return err
+	}
+	defer rows.Close()
+
+	var named []string
+	var total int
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id, &total); err != nil {
+			return err
+		}
+		named = append(named, id)
+	}
+	if err := rows.Err(); err != nil {
 		return err
 	}
 	switch {

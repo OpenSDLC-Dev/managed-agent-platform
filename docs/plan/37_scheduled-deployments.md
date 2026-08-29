@@ -818,8 +818,8 @@ archived-deployment 400 (§8.1 entry 11).
   deleting an environment whose only referent is an archived deployment is told to delete
   sessions that do not exist — and since archive is terminal and we ship neither
   `DELETE /v1/deployments` nor unarchive, nothing clears it. Slice 1 branches on
-  `pgErr.ConstraintName`, the pattern `createSession` already uses
-  (`internal/api/sessions.go:650-655`), and names the deployments. With a test.
+  `pgErr.ConstraintName`, the pattern `createSession` already uses, and names the
+  deployments. With a test.
 
   Two things this bullet got wrong, settled when it landed. **It does not branch on the
   constraint name.** Postgres reports one violated constraint, and with a session and a
@@ -831,8 +831,10 @@ archived-deployment 400 (§8.1 entry 11).
   *archived* deployment is permanent, because every update on one is refused. The two need
   different advice and the difference is expensive — archiving an environment is one-way, so
   advising it where a repoint would have worked trades a reversible fix for an irreversible
-  one. The message names the repoint while every blocker is live, and archiving only once an
-  archived blocker makes the delete impossible.
+  one. The message names the repoint while every blocking deployment is live, and archiving
+  only once an archived one makes the delete impossible. It counts the sessions beside them
+  either way: a repoint alone does not clear an environment a session also holds, and
+  promising that it would is the first mistake with the two parties swapped.
 - **`POST /v1/agents/{id}/archive` starts refusing** (§8.3 decision 7): a 400 naming the
   deployments, whenever a deployment with `archived_at IS NULL` pins the agent. An
   *archived* deployment never blocks — it is terminal and can never fire, and blocking on one

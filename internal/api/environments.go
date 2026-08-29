@@ -523,6 +523,10 @@ func (s *server) archiveEnvironment(r *http.Request) (any, error) {
 // reports the older of the two, so an operator told only about the sessions
 // would clear them and find the delete still refused.
 //
+// One statement, so the counts, the classification and the named ids all come
+// from one snapshot. Two would let a deployment created between them turn a
+// "nothing references this any more" read into advice that can never work.
+//
 // Which remedy to name is the rest of the work, and getting it wrong is
 // expensive. A live deployment can be pointed at another environment, which
 // clears the reference and lets the delete through. An archived one refuses
@@ -531,35 +535,41 @@ func (s *server) archiveEnvironment(r *http.Request) (any, error) {
 // have done trades a reversible fix for an irreversible one — nothing
 // unarchives an environment either.
 //
-// No archived_at predicate on the naming query, deliberately, and this is where
-// the two deployment refusals part company: the agent archive asks which
-// deployments can still fire, and a foreign key cannot ask that. Every row
-// blocks the delete, archived or not.
+// Sessions are counted rather than named, and the count is load-bearing: a
+// message that promised the delete would go through after the repoint alone
+// would be false whenever a session blocks too, which is the same defect as
+// blaming the sessions and hiding the deployment, only reversed.
+//
+// The deployment list has no archived_at predicate — every row blocks, and this
+// is where the two deployment refusals part company: the agent archive asks
+// which deployments can still fire, and a foreign key cannot ask that. Archived
+// rows sort first, so the one that makes the delete permanent is named rather
+// than truncated away behind five live ones.
 func environmentStillReferenced(ctx context.Context, db querier, envID string) error {
-	named, deployments, err := namedDeployments(ctx, db,
-		`SELECT id, count(*) OVER () FROM deployments
-		  WHERE environment_id = $1
-		  ORDER BY created_at, id LIMIT $2`, envID, blockingDeploymentsNamed)
-	if err != nil {
-		return err
-	}
-	var sessions, stuck int
+	var sessions, deployments, stuck int
 	var envArchived bool
+	var named []string
 	if err := db.QueryRow(ctx,
 		`SELECT (SELECT count(*) FROM sessions WHERE environment_id = $1),
+		        (SELECT count(*) FROM deployments WHERE environment_id = $1),
 		        (SELECT count(*) FROM deployments
 		          WHERE environment_id = $1 AND archived_at IS NOT NULL),
-		        COALESCE((SELECT archived_at IS NOT NULL FROM environments WHERE id = $1), false)`,
-		envID).Scan(&sessions, &stuck, &envArchived); err != nil {
+		        COALESCE((SELECT archived_at IS NOT NULL FROM environments WHERE id = $1), false),
+		        COALESCE((SELECT array_agg(id) FROM
+		          (SELECT id FROM deployments WHERE environment_id = $1
+		            ORDER BY (archived_at IS NULL), created_at, id LIMIT $2) t), '{}')`,
+		envID, blockingDeploymentsNamed).
+		Scan(&sessions, &deployments, &stuck, &envArchived, &named); err != nil {
 		return err
 	}
 
 	switch {
 	case deployments == 0 && sessions == 0:
 		// The delete's own statement found a referent and this read did not.
-		// Both can be cleared concurrently — a session deleted, a deployment
-		// repointed — and the two are separate round trips, so say what
-		// happened rather than naming a referent that is no longer there.
+		// Sessions and deployments are the only two referents Postgres will not
+		// cascade away, and both can be cleared concurrently — a session
+		// deleted, a deployment repointed. A retry then succeeds, or answers
+		// 404 if the environment went with it.
 		return errInvalid("environment %s was still referenced when the delete ran; try again", envID)
 	case deployments == 0:
 		return errInvalid("environment %s still has sessions; delete them first", envID)
@@ -569,23 +579,37 @@ func environmentStillReferenced(ctx context.Context, db querier, envID string) e
 	if deployments > len(named) {
 		list = fmt.Sprintf("%s and %d more", list, deployments-len(named))
 	}
-	noun := "deployments"
-	if deployments == 1 {
-		noun = "deployment"
+	blockers := fmt.Sprintf("%d %s (%s)", deployments, plural(deployments, "deployment"), list)
+	if sessions > 0 {
+		blockers = fmt.Sprintf("%s and %d %s", blockers, sessions, plural(sessions, "session"))
 	}
-	if stuck == 0 {
-		return errInvalid("environment %s is referenced by %d %s (%s); point each at another environment and the delete will go through",
-			envID, deployments, noun, list)
+
+	if stuck > 0 {
+		// An archived deployment can never be moved, so the delete is out of
+		// reach whatever else is cleared — the sessions included. Archiving the
+		// environment is what is left, and worth naming only while it has not
+		// already been done: the operator who took that advice must not be
+		// given it again.
+		remedy := " — archive it instead"
+		if envArchived {
+			remedy = ""
+		}
+		return errInvalid("environment %s is referenced by %s, %d of them archived and so unmovable; it can no longer be deleted%s",
+			envID, blockers, stuck, remedy)
 	}
-	// Archiving the environment is what is left, and worth naming only while
-	// it has not already been done — the operator who followed this advice
-	// must not be given it again.
-	if envArchived {
-		return errInvalid("environment %s is referenced by %d %s (%s), %d of them archived and so unmovable; it can no longer be deleted",
-			envID, deployments, noun, list, stuck)
+	remedy := "point each at another environment"
+	if sessions > 0 {
+		remedy = "point each deployment at another environment and delete the sessions"
 	}
-	return errInvalid("environment %s is referenced by %d %s (%s), %d of them archived and so unmovable; it can no longer be deleted — archive it instead",
-		envID, deployments, noun, list, stuck)
+	return errInvalid("environment %s is referenced by %s; %s and the delete will go through", envID, blockers, remedy)
+}
+
+// plural is the s-suffix these refusals need and nothing more.
+func plural(n int, noun string) string {
+	if n == 1 {
+		return noun
+	}
+	return noun + "s"
 }
 
 func (s *server) deleteEnvironment(r *http.Request) (any, error) {
