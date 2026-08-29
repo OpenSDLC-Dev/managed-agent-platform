@@ -2,6 +2,7 @@ package domain
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 )
@@ -255,5 +256,41 @@ func TestDeploymentPauseColumnsAreNotOnTheWire(t *testing.T) {
 		if _, ok := m[key]; ok {
 			t.Errorf("%s reached the wire as %s", key, m[key])
 		}
+	}
+}
+
+// Every timestamp renders in UTC. The database hands them back in the
+// connection's zone, so the same instant would otherwise reach one client as
+// 2026-03-19T09:00:07Z and another as 2026-03-19T17:00:07+08:00 — the same
+// moment, a different string, and a spurious diff for anything comparing two
+// reads or a recorded response.
+func TestDeploymentTimestampsRenderInUTC(t *testing.T) {
+	east := time.FixedZone("UTC+8", 8*60*60)
+	at := time.Date(2026, 3, 19, 9, 0, 7, 0, time.UTC).In(east)
+	archived := time.Date(2026, 3, 20, 1, 2, 3, 0, time.UTC).In(east)
+
+	d := minimalDeployment()
+	d.CreatedAt, d.UpdatedAt, d.ArchivedAt = at, at, &archived
+	d.Schedule = &Schedule{
+		Type: ScheduleCron, Expression: "0 9 * * *", Timezone: "UTC",
+		LastRunAt:      &at,
+		UpcomingRunsAt: []time.Time{at},
+	}
+
+	m := mustMarshal(t, d)
+	for _, key := range []string{"created_at", "updated_at", "archived_at"} {
+		if got := field(t, m, key); !strings.HasSuffix(got, `Z"`) {
+			t.Errorf("%s = %s, want a Z-suffixed UTC instant", key, got)
+		}
+	}
+	var sched map[string]json.RawMessage
+	if err := json.Unmarshal(m["schedule"], &sched); err != nil {
+		t.Fatal(err)
+	}
+	if got := string(sched["last_run_at"]); got != `"2026-03-19T09:00:07Z"` {
+		t.Errorf("last_run_at = %s, want \"2026-03-19T09:00:07Z\"", got)
+	}
+	if got := string(sched["upcoming_runs_at"]); got != `["2026-03-19T09:00:07Z"]` {
+		t.Errorf("upcoming_runs_at = %s, want the same instant in UTC", got)
 	}
 }

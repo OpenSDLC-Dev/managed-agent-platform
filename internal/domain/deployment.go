@@ -65,13 +65,28 @@ type Schedule struct {
 	UpcomingRunsAt []time.Time `json:"upcoming_runs_at"`
 }
 
-// MarshalJSON renders an unset UpcomingRunsAt as [] rather than null. The
+// MarshalJSON renders an unset UpcomingRunsAt as [] rather than null — the
 // member is an array whenever it is present, and a client reading "is anything
-// scheduled?" indexes into it.
+// scheduled?" indexes into it — and stamps both timestamps in UTC.
+//
+// The zone is not cosmetic. LastRunAt arrives from the database in whatever
+// zone the connection is set to, and rendering it as +08:00 rather than Z is a
+// different string for the same instant: a client diffing two reads, or an
+// acceptance test comparing against a recorded response, sees a change that
+// did not happen.
 func (s Schedule) MarshalJSON() ([]byte, error) {
 	type alias Schedule
 	if s.UpcomingRunsAt == nil {
 		s.UpcomingRunsAt = []time.Time{}
+	}
+	utc := make([]time.Time, len(s.UpcomingRunsAt))
+	for i, t := range s.UpcomingRunsAt {
+		utc[i] = t.UTC()
+	}
+	s.UpcomingRunsAt = utc
+	if s.LastRunAt != nil {
+		at := s.LastRunAt.UTC()
+		s.LastRunAt = &at
 	}
 	return json.Marshal(alias(s))
 }
@@ -179,6 +194,14 @@ func (d Deployment) MarshalJSON() ([]byte, error) {
 	}
 	if d.Metadata == nil {
 		d.Metadata = map[string]string{}
+	}
+	// UTC for the same reason Schedule.MarshalJSON does it: the database hands
+	// these back in the connection's zone, and the same instant rendered as
+	// +08:00 is a different string from the same instant rendered as Z.
+	d.CreatedAt, d.UpdatedAt = d.CreatedAt.UTC(), d.UpdatedAt.UTC()
+	if d.ArchivedAt != nil {
+		at := d.ArchivedAt.UTC()
+		d.ArchivedAt = &at
 	}
 
 	type alias Deployment

@@ -841,8 +841,8 @@ a refusal rather than a cascade (decision 7). So:
 ## 6. Data model
 
 Two migrations, both additive, named here so two parallel worktrees do not both claim
-`0031` (the tip today is `0030_work_session_tokens.sql`, and CLAUDE.md assigns the number
-when the file enters the repo):
+`0031` (which is what it landed as; CLAUDE.md assigns the number when the file enters the
+repo):
 
 - **`0031_deployments.sql`** (slice 1) — `deployments` and `deployment_runs`.
 - **`0032_session_deployment_id.sql`** (slice 3) — `sessions.deployment_id` and
@@ -872,11 +872,16 @@ Six conventions the compiler will not enforce:
   directly, because the behavioral test alone cannot prove it. The table also carries
   `created_at` — a required field on the wire resource, and the instant §3.3's `last_run_at`
   reads.
-- **The run list's other filters get no index of their own** in `0031` — §2.6's `created_at`
-  range, `trigger_type` and `has_error`. The unique index leads with `deployment_id`, which
-  is the selective column and serves a per-deployment listing; a cross-deployment scan over a
-  long history is the case that would want more, and it is left until one exists rather than
-  guessed at now.
+- **The run list gets two indexes and no more** — one for each of its two scans, since
+  `deployment_id` is an optional filter (*"omit to list across all deployments"*) and no
+  single index serves both: a leading `created_at` cannot restrict the filtered scan, and a
+  leading `deployment_id` cannot order the unfiltered one. So `(created_at DESC, id DESC)`
+  and `(deployment_id, created_at DESC, id DESC)`. This bullet originally reasoned that the
+  unique index would serve the filtered listing on its own, which is wrong twice over: that
+  index is **partial** on `scheduled_at IS NOT NULL`, so it does not cover manual runs at
+  all, and it orders by `scheduled_at` rather than by the list's own key. §2.6's remaining
+  filters — `trigger_type` and `has_error` — still get nothing, and that part stands: they
+  are low-cardinality and the composite already bounds the scan.
 - **The DDL comment states the pruning constraint** the run table's double duty creates: the
   row is history *and* the occurrence claim *and* the watermark, so deleting one newer than
   the catch-up window un-claims an occurrence a tick can then fire again (§9).

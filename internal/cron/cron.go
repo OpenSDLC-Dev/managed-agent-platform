@@ -51,11 +51,15 @@ var (
 	ErrTimezone   = errors.New("invalid timezone")
 )
 
-// searchYears bounds every walk. Twelve rather than a round four because
+// SearchYears bounds every walk. Twelve rather than a round four because
 // "0 0 29 2 *" — the sparsest satisfiable expression — has an eight-year gap
 // across 2100, which is not a leap year; a shorter bound would report a legal
 // schedule as unsatisfiable (plan 37 §3.3).
-const searchYears = 12
+//
+// Exported because the API refuses an expression with no occurrence inside it
+// and has to say how far it looked: "no occurrence in the next N years" is a
+// message an operator can act on, and "never fires" alone is not.
+const SearchYears = 12
 
 // ambiguityMargin is how far outside each bound the walk reaches: it starts
 // this far before `after`'s wall clock and continues this far past the wall
@@ -291,7 +295,7 @@ func (s *schedule) walk(loc *time.Location, after, until time.Time, n int) []tim
 	start := after.Add(-ambiguityMargin).In(loc)
 	y, mo, d := start.Date()
 	h, mi := start.Hour(), start.Minute()
-	lastYear := origin.Year() + searchYears
+	lastYear := origin.Year() + SearchYears
 
 	var out []time.Time
 	// The wall clock past which no candidate can still land in the answer: a
