@@ -199,6 +199,56 @@ func TestDSTHalfHourZone(t *testing.T) {
 	}
 }
 
+func TestDSTFallBackStartingInsideTheRepeatedHour(t *testing.T) {
+	// `after` is 01:40 EDT — the FIRST pass through the repeated hour. The
+	// occurrences that follow it are 01:00 and 01:30 on the second, EST pass:
+	// wall clocks earlier than `after`'s own. A walk that started at `after`'s
+	// wall clock and only stepped forward could never reach them, and would
+	// answer 02:00 EST instead, silently skipping two runs.
+	got, err := cron.Upcoming("*/30 * * * *", "America/New_York",
+		time.Date(2026, 11, 1, 5, 40, 0, 0, time.UTC), 3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertInstants(t, got, []string{
+		"2026-11-01T06:00:00Z", // 01:00 EST
+		"2026-11-01T06:30:00Z", // 01:30 EST
+		"2026-11-01T07:00:00Z", // 02:00 EST
+	})
+}
+
+func TestDueSpansTheRepeatedHour(t *testing.T) {
+	// The same disagreement seen from Due's end. Wall 01:00 maps to 05:00Z and
+	// 06:00Z; the second is past `to`, but wall 01:30's 05:30Z is not. An
+	// out-of-window instant therefore has to be skipped rather than end the
+	// walk — treating it as the end drops every later wall clock in the hour.
+	got, err := cron.Due("*/30 * * * *", "America/New_York",
+		time.Date(2026, 11, 1, 4, 59, 0, 0, time.UTC),
+		time.Date(2026, 11, 1, 5, 59, 0, 0, time.UTC))
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertInstants(t, got, []string{
+		"2026-11-01T05:00:00Z", // 01:00 EDT
+		"2026-11-01T05:30:00Z", // 01:30 EDT
+	})
+}
+
+func TestStepLargerThanTheFieldSelectsOnlyItsFirstValue(t *testing.T) {
+	// The step is an unbounded integer off the wire. Accepting it and letting
+	// the mask loop add it is an out-of-range panic on a create request: the
+	// increment wraps negative and still compares below the field maximum.
+	got, err := cron.Upcoming("1/9223372036854775807 * * * *", "UTC",
+		time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC), 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertInstants(t, got, []string{
+		"2026-01-01T00:01:00Z",
+		"2026-01-01T01:01:00Z",
+	})
+}
+
 func TestUnsatisfiableExpression(t *testing.T) {
 	// 0 0 31 2 * parses, every field is in range, and February never has 31
 	// days. Upcoming returns empty, which is what lets create and update answer

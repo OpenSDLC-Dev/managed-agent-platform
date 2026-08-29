@@ -72,11 +72,17 @@ CREATE TABLE deployments (
         (schedule_expression IS NULL) = (schedule_timezone IS NULL)
     ),
     -- Total rather than clever: every reachable combination is spelled out, so
-    -- a NULL cannot make the constraint vacuously true.
+    -- a NULL cannot make the constraint vacuously true. The kind is compared
+    -- with IS NOT DISTINCT FROM rather than =, and that is the whole of what
+    -- makes it total: a CHECK that evaluates to NULL is one Postgres ADMITS, so
+    -- `paused_kind = 'manual'` against a NULL kind would yield NULL on both
+    -- paused arms and let a paused_at with no kind through — a row renderable
+    -- as neither a manual nor an error pause. The same comparison is what
+    -- confines the kind to those two spellings; there is no separate CHECK.
     CONSTRAINT deployments_paused_shape CHECK (
         (paused_at IS NULL     AND paused_kind IS NULL     AND paused_error_type IS NULL)
-        OR (paused_at IS NOT NULL AND paused_kind = 'manual' AND paused_error_type IS NULL)
-        OR (paused_at IS NOT NULL AND paused_kind = 'error'  AND paused_error_type IS NOT NULL)
+        OR (paused_at IS NOT NULL AND paused_kind IS NOT DISTINCT FROM 'manual' AND paused_error_type IS NULL)
+        OR (paused_at IS NOT NULL AND paused_kind IS NOT DISTINCT FROM 'error'  AND paused_error_type IS NOT NULL)
     ),
     -- All fourteen members of the reference's paused-reason union. Seven of
     -- them are produced by no path in this platform and are admitted anyway,
@@ -196,6 +202,15 @@ CREATE UNIQUE INDEX deployment_runs_occurrence_idx
     ON deployment_runs (deployment_id, scheduled_at)
     WHERE scheduled_at IS NOT NULL;
 
--- The runs list is newest-first, keyset-paged, and usually scoped to one
--- deployment.
+-- The runs list is newest-first and keyset-paged on (created_at, id), and its
+-- deployment_id filter is optional: "Filter to a specific deployment. Omit to
+-- list across all deployments in the workspace." Those are two different scans
+-- and one index cannot serve both — a leading created_at cannot restrict the
+-- filtered scan, and a leading deployment_id cannot order the unfiltered one —
+-- so there is one apiece. Both land here rather than in a later migration
+-- because the filtered shape is published, not anticipated, and an index added
+-- beside the CREATE TABLE costs nothing that one added over a populated table
+-- does not.
 CREATE INDEX deployment_runs_created_idx ON deployment_runs (created_at DESC, id DESC);
+CREATE INDEX deployment_runs_deployment_created_idx
+    ON deployment_runs (deployment_id, created_at DESC, id DESC);

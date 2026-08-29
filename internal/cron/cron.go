@@ -57,11 +57,20 @@ var (
 // schedule as unsatisfiable (plan 37 §3.3).
 const searchYears = 12
 
-// ambiguityLookahead is how far past the n-th occurrence the walk continues
-// before sorting. Wall clocks ascend, but instants do not: on a fall-back day
-// the second 01:30 lands after the first 01:59. No tzdata transition shifts a
-// clock forward by more than two hours, so three is a safe margin.
-const ambiguityLookahead = 3 * time.Hour
+// ambiguityMargin is how far outside each bound the walk reaches: it starts
+// this far before `after`'s wall clock and continues this far past the wall
+// clock that satisfies the request. Wall clocks ascend, but instants do not —
+// on a fall-back day the second 01:30 lands after the first 01:59 — so a
+// candidate whose instant falls outside a bound is skipped rather than taken
+// for the end of the walk, and wall clocks before `after`'s own are still
+// visited because the repeated hour's second pass carries them.
+//
+// The margin has to exceed the largest backward offset jump in tzdata, which
+// is what makes a wall clock's instant lag an earlier wall clock's. Scanning
+// all 598 zones in Go's zoneinfo.zip half-hourly across the thirteen years from
+// 2026 puts that maximum at exactly two hours (Antarctica/Troll, +02 → +00);
+// every other zone moves by an hour or less, and Lord Howe by half of one.
+const ambiguityMargin = 3 * time.Hour
 
 // Due returns every occurrence in (from, to], ascending. The lower bound is
 // exclusive because the scheduler's watermark is the last occurrence it
@@ -222,6 +231,13 @@ func parseField(part string, f fieldSpec, mask *[64]bool) error {
 		}
 		for v := lo; v <= hi; v += step {
 			mask[v] = true
+			// The step comes off the wire and Atoi will hand back math.MaxInt,
+			// so the increment is guarded rather than trusted: v += step would
+			// wrap negative, still satisfy v <= hi, and index the mask out of
+			// range. A step past the field's top selects only its first value.
+			if hi-v < step {
+				break
+			}
 		}
 	}
 	return nil
@@ -267,16 +283,25 @@ func (s *schedule) matchesDay(y int, mo time.Month, d int) bool {
 //
 // until zero means "no upper bound"; n negative means "no count limit".
 func (s *schedule) walk(loc *time.Location, after, until time.Time, n int) []time.Time {
-	start := after.In(loc)
+	// The cursor is a wall clock while both bounds are instants, and a
+	// fall-back is where the two stop agreeing on order — hence the margin at
+	// both ends and the filtering against the instants themselves rather than
+	// against the cursor. See ambiguityMargin.
+	origin := after.In(loc)
+	start := after.Add(-ambiguityMargin).In(loc)
 	y, mo, d := start.Date()
 	h, mi := start.Hour(), start.Minute()
-	lastYear := start.Year() + searchYears
+	lastYear := origin.Year() + searchYears
 
 	var out []time.Time
-	// Wall clocks ascend but instants need not, so collect past the target and
-	// sort at the end. stopAt is set once enough instants exist.
+	// The wall clock past which no candidate can still land in the answer: a
+	// margin beyond `until` for Due, or beyond the n-th instant for Upcoming,
+	// which is only known once that many exist. Zero means "not yet known".
 	var stopAt time.Time
-	haveStop := false
+	if !until.IsZero() {
+		lt := until.In(loc)
+		stopAt = time.Date(lt.Year(), lt.Month(), lt.Day(), lt.Hour(), lt.Minute(), 0, 0, time.UTC).Add(ambiguityMargin)
+	}
 
 	for y <= lastYear {
 		if !s.month[int(mo)] {
@@ -297,20 +322,20 @@ func (s *schedule) walk(loc *time.Location, after, until time.Time, n int) []tim
 		}
 
 		naive := time.Date(y, mo, d, h, mi, 0, 0, time.UTC)
-		if haveStop && naive.After(stopAt) {
+		if !stopAt.IsZero() && naive.After(stopAt) {
 			break
 		}
 		for _, u := range instantsFor(loc, y, mo, d, h, mi) {
-			if !u.After(after) {
+			// Out of bounds either way is skipped, never a stop: within the
+			// margin a later wall clock can still map inside the window, and
+			// an earlier one outside it.
+			if !u.After(after) || (!until.IsZero() && u.After(until)) {
 				continue
-			}
-			if !until.IsZero() && u.After(until) {
-				return sortUnique(out)
 			}
 			out = append(out, u)
 		}
-		if n > 0 && !haveStop && len(out) >= n {
-			stopAt, haveStop = naive.Add(ambiguityLookahead), true
+		if n > 0 && stopAt.IsZero() && len(out) >= n {
+			stopAt = naive.Add(ambiguityMargin)
 		}
 		y, mo, d, h, mi = nextMinute(y, mo, d, h, mi)
 	}
