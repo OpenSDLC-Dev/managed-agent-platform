@@ -343,19 +343,31 @@ non-empty guarantee is the argument that it must have one.
 
 `last_run_at` is **derived, not stored**: the `created_at` of the latest such run —
 `ORDER BY scheduled_at DESC LIMIT 1` over this deployment's runs where the trigger was
-`schedule` **and** `session_id IS NOT NULL`, reading that row's `created_at`. The value is
-`created_at` and not `scheduled_at` because the field is *"the most recent scheduled run
-actually **started**"* while `scheduled_at` is the pre-jitter cron match (§3.4); the row is
-inserted as the fire begins, so `created_at` is the instant the sentence asks for. In steady
-state the two differ by one tick interval, and after an outage by up to the catch-up window
-(§3.6).
+`schedule`, `session_id IS NOT NULL` **and `scheduled_at IS NOT NULL`**, reading that row's
+`created_at`. The value is `created_at` and not `scheduled_at` because the field is *"the
+most recent scheduled run actually **started**"* while `scheduled_at` is the pre-jitter cron
+match (§3.4); the row is inserted as the fire begins, so `created_at` is the instant the
+sentence asks for. The two differ by at most one tick interval in steady state, and after an
+outage by up to the catch-up window (§3.6).
 
-**The ordering column is `scheduled_at` on purpose.** Written as `MAX(created_at)` the
-aggregate has no index to stop early — `created_at` is in none — and a `*/5` schedule
-accumulates something like 105,000 run rows a year on a path §2.6 lets return 100 deployments
-at a time. Ordering by `scheduled_at` is served by the unique index the plan adds anyway
-(§4.2) and selects the *same* row, because a later occurrence is always fired later: catch-up
-skips occurrences and a rollback retries one, but neither reorders them. That second conjunct — a
+**That third conjunct is redundant and load-bearing.** A scheduled run always has a
+`scheduled_at`, so the predicate excludes nothing — but the index §6 adds is *partial*
+(`WHERE scheduled_at IS NOT NULL`), and Postgres will not use a partial index unless the
+query's own `WHERE` clause implies its predicate. Without the conjunct written out the
+planner refuses the index even with `enable_seqscan` off. Measured against the plan's DDL on
+977,000 run rows, a 100-deployment page: **5,179 ms without it, 1.4 ms with**. The
+watermark's `MAX(scheduled_at)` (§4.2) needs no such help — Postgres's own MIN/MAX rewrite
+injects an `IS NOT NULL` for it, which is why only this half has to say it.
+
+**Ordering by `scheduled_at` and taking the maximum `created_at` are not the same query**,
+and the difference is deliberate. Two replicas whose fires overlap can insert an earlier
+occurrence's row *after* a later one's: §4.2's watermark is read in the candidate scan and
+never re-read inside the fire (§4.1 step 2 re-reads only `archived_at` and `paused_at`), and
+§4.4's bounded concurrency can delay a fire past the next tick. `MAX(created_at)` would then
+report whichever fire was inserted last; ordering by `scheduled_at` reports the most recent
+*occurrence*, which is what *"the most recent scheduled run"* names. The two disagree by
+seconds, on a display-only field — the due-watermark is a separate `MAX(scheduled_at)` (§4.2)
+and is untouched by this. That second conjunct — a
 fire that failed to create a session does not move the field — is **INFERRED**, not
 published: the schema says *"the most recent scheduled run actually started"* and never says
 what a failed start does (§8.1 entry 13). §7 asserts it with a failed-fire case, because it
@@ -616,7 +628,9 @@ deployment from firing occurrences that predate it.
 `created_at` of the row the index's greatest `scheduled_at` selects) and the
 due-watermark (`MAX(scheduled_at)` over *all* scheduled runs, which is what stops a failed
 occurrence being retried every tick) are computed from `deployment_runs` in the candidate
-query, via a `LEFT JOIN LATERAL` over the unique index the plan adds anyway. Two denormalized
+query, via a `LEFT JOIN LATERAL` over the unique index the plan adds anyway — the watermark
+reaching it through Postgres's MIN/MAX rewrite, `last_run_at` only because §3.3 spells out
+the `scheduled_at IS NOT NULL` the partial predicate needs. Two denormalized
 columns would be a second source of truth for facts the run table already holds, and any
 path that wrote a run row and forgot the watermark — or committed them in different
 transactions — would desynchronize a schedule from its own history, with the symptom being a
@@ -830,7 +844,7 @@ when the file enters the repo):
 - **`0032_session_deployment_id.sql`** (slice 3) — `sessions.deployment_id` and
   `sessions_deployment_idx`.
 
-Five conventions the compiler will not enforce:
+Six conventions the compiler will not enforce:
 
 - **`deployments` carries the reserved scope columns** `org_id` / `workspace_id` /
   `project_id` as `text NOT NULL DEFAULT 'default'`, with the comment
@@ -854,6 +868,11 @@ Five conventions the compiler will not enforce:
   directly, because the behavioral test alone cannot prove it. The table also carries
   `created_at` — a required field on the wire resource, and the instant §3.3's `last_run_at`
   reads.
+- **The run list's other filters get no index of their own** in `0031` — §2.6's `created_at`
+  range, `trigger_type` and `has_error`. The unique index leads with `deployment_id`, which
+  is the selective column and serves a per-deployment listing; a cross-deployment scan over a
+  long history is the case that would want more, and it is left until one exists rather than
+  guessed at now.
 - **The DDL comment states the pruning constraint** the run table's double duty creates: the
   row is history *and* the occurrence claim *and* the watermark, so deleting one newer than
   the catch-up window un-claims an occurrence a tick can then fire again (§9).
@@ -1052,11 +1071,11 @@ rule):
 
 - **Entry 11.** `- **POST /v1/deployments/{id}/run on an archived deployment is a 400 (plan 37 slice 3)** — The docs call archive terminal, but publish no status code for a manual run against one, and the spec attaches no operation-specific errors to any deployment endpoint — every path carries the same boilerplate error block. We answer 400 "deployment %s is archived", matching how this platform already refuses to act on an archived resource. Running while merely paused is explicitly allowed and we allow it. *Evidence: anthropic-openapi.yml:14017-14150 (the run path's responses: no archived-specific arm); platform.claude.com managed-agents/scheduled-deployments (fetched 2026-08-27 — "Archive, unlike pause, is terminal"; "Manual runs through the run endpoint are still allowed while paused"); internal/api/memorystores.go:200 (the archived-is-400 precedent).* *Tracked: #78 (archive then run, and record the status).*`
 
-- **Entry 29.** `- **Update, pause and unpause on an archived deployment are 400s (plan 37 slice 1)** — Archive is terminal and the reference publishes no status code for acting on an archived deployment through any path; the spec attaches no operation-specific errors to any deployment endpoint. We answer 400 "deployment %s is archived" on update, pause and unpause alike, matching how this platform already refuses to act on an archived resource, while GET and list (with include_archived) still return the row. Leaving update unspecified would leave hidden configuration mutable on a row nothing can ever fire. The manual-run path is the same refusal one slice later (entry 11). *Evidence: anthropic-openapi.yml:13624 (the update path, read by entry 8), :13755-13886 and :13886-14017 (pause and unpause, read by entry 12 for the same premise — no per-endpoint error semantics); platform.claude.com managed-agents/scheduled-deployments (fetched 2026-08-27 — archive described as terminal, with no status code for acting on one).* *Tracked: #78 (update, pause and unpause an archived deployment on the reference, and read the status codes).*`
+- **Entry 29.** `- **Update, pause and unpause on an archived deployment are 400s (plan 37 slice 1)** — Archive is terminal and the reference publishes no status code for acting on an archived deployment through any path; the spec attaches no operation-specific errors to any deployment endpoint. We answer 400 "deployment %s is archived" on update, pause and unpause alike, matching how this platform already refuses to act on an archived resource, while GET and list (with include_archived) still return the row. Leaving update unspecified would leave hidden configuration mutable on a row nothing can ever fire. The manual-run path is the same refusal one slice later (entry 11). *Evidence: anthropic-openapi.yml:13355 (the update path, read by entry 8; :13624 is archive), :13755-13886 and :13886-14017 (pause and unpause, read by entry 12 for the same premise — no per-endpoint error semantics); platform.claude.com managed-agents/scheduled-deployments (fetched 2026-08-27 — archive described as terminal, with no status code for acting on one).* *Tracked: #78 (update, pause and unpause an archived deployment on the reference, and read the status codes).*`
 
 - **Entry 12.** `- **Pause and unpause are idempotent 200s, unpause does not re-validate the cause, and a body on an action endpoint is ignored (plan 37 slice 1)** — The reference documents neither a conflict for pausing an already-paused deployment nor a precondition failure for unpausing an active one, says nothing about whether unpausing an error-paused deployment is refused while the cause persists, and declares no requestBody on any of the four action endpoints. We answer 200 in all four idempotency cases, returning the resource; unpause clears paused_at and both reason columns unconditionally, and the next scheduled fire re-discovers the cause and re-pauses if it is still there; a request body is neither read nor refused. *Evidence: anthropic-openapi.yml:13755-13886 and :13886-14017 (pause and unpause: no requestBody, no per-endpoint error semantics); anthropic-sdk-go betadeployment.go:2233-2254 (all four params structs carry only the beta header).* *Tracked: #78 (six calls: pause twice, unpause twice, each against an archived deployment, and one with a non-empty body).*`
 
-- **Entry 13.** `- **schedule.last_run_at moves only on a successful scheduled fire (plan 37 slice 4)** — The field is "Time the most recent scheduled run actually started. Null until one completes; preserved after the deployment is archived. Manual runs do not update this." The last two clauses are published and we honor them exactly; what the sentence does not say is what a fire that failed to create a session does to it. We read "started" as "started a session" and leave the field untouched on a failed fire. All three behaviors fall out of one derivation rather than three code paths: last_run_at is MAX(created_at) over this deployment's runs where trigger_type = 'schedule' and session_id IS NOT NULL — the trigger filter excludes manual runs, archive touches no run row, and a failed fire's row has a null session_id. created_at rather than scheduled_at because the field says the run "actually started" and scheduled_at is the pre-jitter cron match, which this platform fires 0-30 seconds after in steady state and up to an hour after across a restart that triggers catch-up. The row is selected by ordering on scheduled_at, which the unique index serves and which picks the same row. *Evidence: anthropic-openapi.yml:22759-22763; internal/api/deployments.go (the LATERAL derivation).* *Tracked: #78 (let a scheduled fire fail against an archived environment, then read the deployment).*`
+- **Entry 13.** `- **schedule.last_run_at moves only on a successful scheduled fire (plan 37 slice 4)** — The field is "Time the most recent scheduled run actually started. Null until one completes; preserved after the deployment is archived. Manual runs do not update this." The last two clauses are published and we honor them exactly; what the sentence does not say is what a fire that failed to create a session does to it. We read "started" as "started a session" and leave the field untouched on a failed fire. All three behaviors fall out of one derivation rather than three code paths: last_run_at is MAX(created_at) over this deployment's runs where trigger_type = 'schedule' and session_id IS NOT NULL — the trigger filter excludes manual runs, archive touches no run row, and a failed fire's row has a null session_id. created_at rather than scheduled_at because the field says the run "actually started" and scheduled_at is the pre-jitter cron match, which this platform fires 0-30 seconds after in steady state and up to an hour after across a restart that triggers catch-up. The row is selected by ordering on scheduled_at with an explicit scheduled_at IS NOT NULL, which is what lets the partial unique index serve it; that is not the same query as MAX(created_at), and deliberately so — under overlapping fires it names the most recent occurrence rather than the most recently inserted row. *Evidence: anthropic-openapi.yml:22759-22763; internal/api/deployments.go (the LATERAL derivation).* *Tracked: #78 (let a scheduled fire fail against an archived environment, then read the deployment).*`
 
 - **Entry 14.** `- **session_creation_rejected_error does not pause the deployment (plan 37 slice 4)** — The paused-reason union carries fourteen of the run error union's sixteen types, omitting session_rate_limited_error and session_creation_rejected_error. The prose cuts the other way for this one — it is "rejected with a non-retryable validation error", and non-retryable is an argument for stopping the schedule — but the structure settles it: paused_reason.error "Matches the failed run's error.type", and the union contains no member this type could take, so a pause carrying it is unrepresentable — were one ever recorded, the schedule would keep firing. Nothing here records one: the fire routes every unclassified rejection through a full rollback that leaves no run row at all (entry 28), so the store admits the type and no path emits it. *Evidence: anthropic-openapi.yml:26468-26477 ("non-retryable validation error"), :23188 ("Matches the failed run's error.type"), :23193-23206 (the fourteen), :25892-25907 (the sixteen).* *Tracked: #78 (record a run of that type and read the deployment's status).*`
 
