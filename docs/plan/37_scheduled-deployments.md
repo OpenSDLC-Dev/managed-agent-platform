@@ -589,6 +589,18 @@ one trigger for one invariant on a table with two writers — the scheduler's fi
 `POST /run` handler, which records a failed manual run the same way (§5.2) — is more
 machinery than the risk warrants.
 
+**One path does break it after the commit, and it is not the writers':
+[#520](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/520).** `session_id` is
+`ON DELETE SET NULL`, so deleting the session nulls the column on a run that has already
+settled — leaving a committed row with neither arm, and dropping it out of `last_run_at`'s
+`session_id IS NOT NULL` filter so that field silently regresses to an older run or to null.
+Nothing observes this in slice 1, which serves no fire and writes no run row, and migration
+`0031` is merged and therefore immutable. Whoever writes the fire owns the fix, and it wants
+a durable success marker — a `succeeded_at` column in slice 3's migration is the obvious
+shape — with the read query and the union arm keyed off that instead of off a link that may
+go stale. Restricting session deletion is the other option and is almost certainly wrong:
+run history is meant to be readable *"independent of the session lifecycle"*.
+
 No cipher call happens at fire time: a `github_repository` resource's `authorization_token`
 is sealed once, at deployment create/update, outside the transaction (§5.1), and the fire
 copies ciphertext.
