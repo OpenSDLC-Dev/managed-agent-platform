@@ -33,8 +33,10 @@ the repository is clean.
 
 NOR DOES IT VERIFY ITSELF PAST A POINT, stated once here so the next reader does
 not go looking for the check that would. Main restates every hop against
-something the same run measured, and between them those reach any narrowing of
-the corpus -- a document, a byte or a line that went missing. They do not reach
+something the same run measured, and between them its checks reach any narrowing
+of the corpus -- a document, a byte or a line that went missing -- with the
+sentinels rather than a restatement covering the root itself, since a wrong root
+is the one narrowing both listings agree about. What none of them reaches is
 an edit that keeps the arithmetic and changes the meaning: a reader substituting
 one address for another of the same length, a rule narrowed to a range no
 self-test row happens to name, or a scan re-emitting the counts for work it
@@ -200,15 +202,15 @@ def scan_texts(documents):
 Corpus = collections.namedtuple("Corpus", "every documentation")
 
 
-def ls_files(root, *pathspec):
-    """Tracked paths, optionally narrowed by a pathspec.
+def ls_files(root, pathspec):
+    """Tracked paths matching a pathspec.
 
     `-z` rather than newlines: a tracked path containing a space would otherwise
     be split into two nonexistent paths and silently skipped, which is the
     failure mode this whole file exists to prevent.
     """
     out = subprocess.run(
-        ["git", "ls-files", "-z", "--", *pathspec],
+        ["git", "ls-files", "-z", "--", pathspec],
         cwd=root, capture_output=True, text=True, check=True,
     ).stdout
     return [p for p in out.split("\0") if p]
