@@ -378,7 +378,7 @@ func TestMissingBucketNameStaysLegal(t *testing.T) {
 		"AtTheLimit":        strings.Repeat("b", maxBucketName),
 		"OverTheLimit":      strings.Repeat("b", maxBucketName*2),
 		"TruncatesToADash":  strings.Repeat("b", maxBucketName-len("-missing-")-len(tag)-1) + "-x",
-		"RealisticLongName": "your-long-project-name-map-blob-probe2",
+		"RealisticLongName": "your-longer-project-name-map-blob-probe2",
 	} {
 		t.Run(name, func(t *testing.T) {
 			got := missingBucketName(base, tag)
@@ -390,6 +390,16 @@ func TestMissingBucketNameStaysLegal(t *testing.T) {
 			}
 			if strings.Contains(got, "--") {
 				t.Errorf("%q has an empty label from the truncation", got)
+			}
+			// This row exists to show that a realistic project-derived base
+			// overflows, so it has to actually overflow. Sanitising the old
+			// fixture for #514 shortened it by one character to exactly the
+			// room available, which left the case passing on the branch it was
+			// written to avoid — silently, since the three checks above and
+			// statement coverage were all unaffected.
+			if name == "RealisticLongName" && got == base+"-missing-"+tag {
+				t.Errorf("%q (%d chars) no longer truncates, so this case stopped being the one it is named for",
+					base, len(base))
 			}
 		})
 	}

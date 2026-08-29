@@ -31,10 +31,21 @@ appears inside one of the structured forms above. IPv6 endpoints, bucket names
 and KMS key names have no rule. This catches four shapes; it is not a proof that
 the repository is clean.
 
+A KNOWN FALSE POSITIVE, recorded rather than worked around. The registry and
+service-account rule flags any project component that is not a placeholder, so a
+genuinely public third-party project -- a Google sample image path, say -- goes
+red. That is one entry in PLACEHOLDER_PROJECTS when it first happens, and it is
+left as a loud, obvious failure rather than pre-empted with a list of names
+nobody would maintain. A four-component version string, and a 12-digit timestamp,
+are flagged for the same kind of reason and take the same kind of remedy.
+
 Markdown only, and that scope was measured rather than assumed: widening from
-`docs/` and `deploy/` to every tracked `*.md` produced not one new finding across
-113 files, so the scope is all of them -- which is what puts CHANGELOG.md and the
-`changelog.d/` fragments that become it inside the guard. Source files are
+`docs/` and `deploy/` to every tracked `*.md` produced not one new finding -- the
+same four, all in one file -- so the scope is all of them, which is what puts
+CHANGELOG.md and the `changelog.d/` fragments that become it inside the guard.
+The count the run prints is the live number; this paragraph deliberately quotes
+none, because a number in prose goes stale the next time a document is added.
+Source files are
 outside it, and that is a real gap rather than an oversight: #514 found a project
 id in a Go test fixture too, but every networking test here is full of addresses
 on purpose, and a guard that cried wolf there would be switched off within a
@@ -67,6 +78,13 @@ PLACEHOLDER_PROJECTS = frozenset({
 # Allowed by value: famous third-party resolvers, used as examples of a service,
 # never as anybody's coordinate.
 ALLOWED_ADDRESSES = frozenset({"8.8.8.8", "1.1.1.1"})
+
+# Documents the scan must always reach. Losing the scope entirely already fails,
+# but narrowing it — a mistyped pathspec, an exclusion that catches too much —
+# would leave a shorter list and a smaller printed count that nothing checks. If
+# one of these is ever renamed, this fails loudly and the list gets edited, which
+# is the correct amount of friction for a file that is meant to always be scanned.
+REQUIRED_DOCUMENTS = ("CLAUDE.md", "STATE.md", "docs/HISTORY.md")
 
 # The trailing lookahead rejects only a dot that CONTINUES the number. Rejecting
 # any dot would miss an address at the end of a sentence, which is the commonest
@@ -106,8 +124,16 @@ def violations(line):
     for label, pattern in (("registry path", REGISTRY),
                            ("service account", SERVICE_ACCOUNT)):
         for m in pattern.finditer(line):
-            if m.group(1) not in PLACEHOLDER_PROJECTS:
-                found.append(f"{label} naming project {m.group(1)!r}")
+            project = m.group(1)
+            if project in PLACEHOLDER_PROJECTS:
+                continue
+            # `gcp-sa-*` is Google's own reserved namespace for the service agents
+            # it creates in your project (service-N@gcp-sa-cloudbuild…). The label
+            # is Google's, never an operator's project id, so it can no more be a
+            # coordinate than a multicast address can be an endpoint.
+            if project.startswith("gcp-sa-"):
+                continue
+            found.append(f"{label} naming project {project!r}")
     return found
 
 
@@ -196,6 +222,8 @@ def selftest():
          "e.g. us-central1-docker.pkg.dev/your-project/map-images"),
         ("a placeholder service account",
          "map-controlplane@your-project.iam.gserviceaccount.com"),
+        ("a Google-managed service agent",
+         "granted service-9@gcp-sa-cloudbuild.iam.gserviceaccount.com"),
     ]
     failures = []
     for label, line in must_flag:
@@ -231,6 +259,13 @@ def main():
     paths = tracked_docs(root)
     if not paths:
         print("no tracked markdown found — the scan would be clean for the wrong reason")
+        return 1
+    missing = [d for d in REQUIRED_DOCUMENTS if d not in paths]
+    if missing:
+        print("the scan did not reach documents it must always cover, so a clean "
+              "result would mean nothing:")
+        for m in missing:
+            print(f"  {m}")
         return 1
     documents, unreadable = read_documents(root, paths)
     if unreadable:
