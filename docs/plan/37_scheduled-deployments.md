@@ -365,18 +365,20 @@ occurrence's row *after* a later one's: §4.2's watermark is read in the candida
 never re-read inside the fire (§4.1 step 2 re-reads only `archived_at` and `paused_at`), and
 §4.4's bounded concurrency can delay a fire past the next tick. `MAX(created_at)` would then
 report whichever fire was inserted last; ordering by `scheduled_at` reports the most recent
-*occurrence*, which is what *"the most recent scheduled run"* names. They disagree only when one fire is queued longer than the whole interval to
-the next occurrence, so typically by seconds — and by however much further that queue slips,
-which is the regime `deployment.tick.duration` exists to surface (§4.4). The field is
-display-only either way: the due-watermark is a separate `MAX(scheduled_at)` (§4.2) and is
-untouched by this. The `session_id IS NOT NULL` conjunct — a fire that failed to
-create a session does not move the field — is **INFERRED**, not
-published: the schema says *"the most recent scheduled run actually started"* and never says
-what a failed start does (§8.1 entry 13). §7 asserts it with a failed-fire case, because it
-is the half of the expression no source confirms. Three published rules
-fall out of that one expression rather than needing three code paths — *"Manual runs do not
-update this"* (the trigger filter excludes them), *"preserved after the deployment is
-archived"* (archive touches no run row), and *"Null until one completes"* (no successful
+*occurrence*, which is what *"the most recent scheduled run"* names. They disagree only when
+one fire is queued longer than the whole interval to the next occurrence, so typically by
+seconds — and by however much further that queue slips, which is the regime
+`deployment.tick.duration` exists to surface (§4.4). The field is display-only either way:
+the due-watermark is a separate `MAX(scheduled_at)` (§4.2) and is untouched by this.
+
+The `session_id IS NOT NULL` conjunct — a fire that failed to create a session does not move
+the field — is **INFERRED**, not published: the schema says *"the most recent scheduled run
+actually started"* and never says what a failed start does (§8.1 entry 13). §7 asserts it
+with a failed-fire case, because it is the half of the expression no source confirms.
+
+Three published rules fall out of that one expression rather than needing three code paths —
+*"Manual runs do not update this"* (the trigger filter excludes them), *"preserved after the
+deployment is archived"* (archive touches no run row), and *"Null until one completes"* (no successful
 scheduled run, no maximum).
 
 Both are emitted always, never omitted: `last_run_at: null` and `upcoming_runs_at: []` where
