@@ -93,14 +93,6 @@ func deploymentResourcesFrom(inputs []resourceInput, sealed []sealedToken) []dep
 	return out
 }
 
-// storedDeploymentResources renders the bag for the resources jsonb column.
-func storedDeploymentResources(rs []deploymentResource) []byte {
-	if rs == nil {
-		rs = []deploymentResource{}
-	}
-	return mustJSON(rs)
-}
-
 // echoDeploymentResources is what the response carries.
 func echoDeploymentResources(rs []deploymentResource) []json.RawMessage {
 	out := make([]json.RawMessage, 0, len(rs))

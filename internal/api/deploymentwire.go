@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/events"
 )
 
 // nullableString reads a field whose wire type is string-or-null, which
@@ -43,15 +44,6 @@ func derefOr(s *string, fallback string) string {
 	return *s
 }
 
-// orEmptyRaw keeps a nil list from reaching a jsonb column as `null`, where it
-// would read back as a nil slice and render as null on a required array field.
-func orEmptyRaw(rs []json.RawMessage) []json.RawMessage {
-	if rs == nil {
-		return []json.RawMessage{}
-	}
-	return rs
-}
-
 // principalPtr is the audit-only created_by: the API key or principal that
 // created the row, or nil when the caller is unattributed. createSession's
 // rule, and it matters more on a deployment — a session a schedule fires has
@@ -64,15 +56,26 @@ func principalPtr(ctx context.Context) *string {
 }
 
 // validateDeploymentInitialEvents refuses at create what would otherwise fail
-// at every fire. A file rubric needs object storage to snapshot into, and a
-// deployment configured without it would record a failed run every night
-// instead of being refused once — so the check runs here, with the message the
-// event path already uses, rather than being deferred to the fire.
+// at every fire — twice over, because there are two ways a stored list can be
+// unfirable.
 //
-// The per-type field validation is not repeated: a fire runs the same
-// NormalizeInbound a posted batch gets, and duplicating it here would be a
-// second, drifting copy of the same rules.
+// The first is the list itself. A fire runs events.NormalizeInbound, the same
+// normalizer a posted batch gets, so a list that cannot normalize records a
+// failed run every night forever. That normalizer is called here rather than
+// reimplemented: its rules stay in one place, and its adjacency rule — a
+// system.message last, and immediately after a user.message — makes this
+// platform narrower than the union the reference publishes, which is plan 37
+// §8.1 entry 23. The environment kind it takes is not threaded through:
+// user.tool_result is the only type that kind gates, and parseInitialEvents
+// has already refused every type but the three a deployment admits.
+//
+// The second is a file rubric with no object storage to snapshot into. That
+// one the normalizer cannot see, so it is checked here with the message the
+// event path already uses.
 func (s *server) validateDeploymentInitialEvents(initial []json.RawMessage) error {
+	if _, err := events.NormalizeInbound("", initial); err != nil {
+		return errInvalid("initial_events: %s", err)
+	}
 	if s.blobs != nil {
 		return nil
 	}

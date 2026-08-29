@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -109,14 +110,50 @@ func TestDeploymentInitialEventsAdmitSystemMessageAndSessionsDoNot(t *testing.T)
 	s := newTestServer(t)
 	agentID, envID := fixture(t, s)
 
-	sys := map[string]any{"type": "system.message", "content": "Run quietly."}
+	sys := map[string]any{"type": "system.message",
+		"content": []any{map[string]any{"type": "text", "text": "Run quietly."}}}
+	user := map[string]any{"type": "user.message",
+		"content": []any{map[string]any{"type": "text", "text": "Compile yesterday's orders."}}}
 	body := deploymentBody(agentID, envID)
-	body["initial_events"] = []any{sys}
+	body["initial_events"] = []any{user, sys}
 	createDeployment(t, s, body)
 
 	status, res := s.do(http.MethodPost, "/v1/sessions", map[string]any{
-		"agent": agentID, "environment_id": envID, "initial_events": []any{sys},
+		"agent": agentID, "environment_id": envID, "initial_events": []any{user, sys},
 	})
+	wantErr(t, status, res, http.StatusBadRequest, "invalid_request_error")
+}
+
+// The list has to survive the normalizer that will run at every fire, so it is
+// run once here instead: a system.message that is not last, or that follows
+// nothing, is refused at create rather than recorded as a failed run every
+// night. The rule is events.NormalizeInbound's — called, not copied — and it
+// makes this platform narrower than the union the reference publishes.
+func TestDeploymentInitialEventsMustSurviveTheNormalizer(t *testing.T) {
+	s := newTestServer(t)
+	agentID, envID := fixture(t, s)
+
+	sys := map[string]any{"type": "system.message",
+		"content": []any{map[string]any{"type": "text", "text": "Run quietly."}}}
+	user := map[string]any{"type": "user.message",
+		"content": []any{map[string]any{"type": "text", "text": "Compile yesterday's orders."}}}
+
+	for name, evs := range map[string][]any{
+		"a lone system.message follows nothing": {sys},
+		"a system.message that is not last":     {user, sys, user},
+	} {
+		t.Run(name, func(t *testing.T) {
+			body := deploymentBody(agentID, envID)
+			body["initial_events"] = evs
+			status, res := s.do(http.MethodPost, "/v1/deployments", body)
+			wantErr(t, status, res, http.StatusBadRequest, "invalid_request_error")
+		})
+	}
+
+	// The same rule on update, where the list is a full replacement.
+	id := createDeployment(t, s, deploymentBody(agentID, envID))["id"].(string)
+	status, res := s.do(http.MethodPost, "/v1/deployments/"+id,
+		map[string]any{"initial_events": []any{sys}})
 	wantErr(t, status, res, http.StatusBadRequest, "invalid_request_error")
 }
 
@@ -156,8 +193,10 @@ func TestDeploymentInitialEventsFloorAndCeiling(t *testing.T) {
 	wantErr(t, status, res, http.StatusBadRequest, "invalid_request_error")
 }
 
-// The agent union is narrower than a session's: a bare id pins the latest
-// version, an object must name one, and there is no agent_with_overrides arm.
+// The agent union is narrower than a session's by exactly one arm: there is no
+// agent_with_overrides. Both spellings a deployment does admit resolve as the
+// reference's do — a bare id pins the latest version, and an object pins the
+// version it names or the latest when it names none.
 func TestDeploymentAgentUnion(t *testing.T) {
 	s := newTestServer(t)
 	agentID, envID := fixture(t, s)
@@ -181,6 +220,15 @@ func TestDeploymentAgentUnion(t *testing.T) {
 		t.Errorf("an explicit reference pinned version %v, want 1", got)
 	}
 
+	// version is optional on the object arm — "Omit to use the latest version"
+	// — so the versionless object resolves the same way the bare string does.
+	body = deploymentBody(agentID, envID)
+	body["agent"] = map[string]any{"type": "agent", "id": agentID}
+	d = createDeployment(t, s, body)
+	if got := d["agent"].(map[string]any)["version"]; got != float64(2) {
+		t.Errorf("a versionless reference object pinned version %v, want the latest (2)", got)
+	}
+
 	// A malformed shape is the request's fault (400); an agent that is simply
 	// not there is a 404, which is how resolveAgent already answers a session's
 	// missing agent and how checkID already answers a malformed id.
@@ -189,7 +237,6 @@ func TestDeploymentAgentUnion(t *testing.T) {
 		status  int
 		errType string
 	}{
-		"no version":      {map[string]any{"type": "agent", "id": agentID}, http.StatusBadRequest, "invalid_request_error"},
 		"with overrides":  {map[string]any{"type": "agent_with_overrides", "id": agentID, "system": "x"}, http.StatusBadRequest, "invalid_request_error"},
 		"empty id":        {map[string]any{"type": "agent", "version": 1}, http.StatusBadRequest, "invalid_request_error"},
 		"unknown agent":   {"agent_0000000000000000000000", http.StatusNotFound, "not_found_error"},
@@ -300,6 +347,7 @@ func TestDeploymentScheduleRejections(t *testing.T) {
 		"no timezone":      map[string]any{"type": "cron", "expression": "0 9 * * *"},
 		"no expression":    map[string]any{"type": "cron", "timezone": "UTC"},
 		"unsupported type": map[string]any{"type": "interval", "expression": "0 9 * * *", "timezone": "UTC"},
+		"not an object":    "0 9 * * *",
 	} {
 		t.Run(name, func(t *testing.T) {
 			body := deploymentBody(agentID, envID)
@@ -629,6 +677,62 @@ func TestListDeploymentsFiltersByCreatedAt(t *testing.T) {
 	}
 }
 
+// The documented agent_id filter — "Filter by agent ID" — and the shape rule
+// it shares with the sessions list: a malformed id is a 400 rather than a bind
+// parameter that fails as a 500, while a well-formed id naming nothing filters
+// to an empty page (#135). A filter that is accepted and ignored would answer
+// the wrong set with a 200, which is worse than either.
+func TestListDeploymentsFilterByAgent(t *testing.T) {
+	s := newTestServer(t)
+	agentID, envID := fixture(t, s)
+	otherAgent, _ := fixture(t, s)
+
+	mine := createDeployment(t, s, deploymentBody(agentID, envID))["id"].(string)
+	createDeployment(t, s, deploymentBody(otherAgent, envID))
+
+	status, body := s.do(http.MethodGet, "/v1/deployments?agent_id="+agentID, nil)
+	if status != http.StatusOK {
+		t.Fatalf("agent_id filter: %d %v", status, body)
+	}
+	rows := listData(t, body)
+	if len(rows) != 1 || rows[0]["id"] != mine {
+		t.Errorf("agent_id=%s returned %v, want just %s", agentID, rows, mine)
+	}
+
+	status, body = s.do(http.MethodGet, "/v1/deployments?agent_id=agent_0000000000000000000000", nil)
+	if status != http.StatusOK || len(listData(t, body)) != 0 {
+		t.Errorf("an agent with no deployments returned %d %v, want an empty page", status, body)
+	}
+
+	status, body = s.do(http.MethodGet, "/v1/deployments?agent_id=%00", nil)
+	wantErr(t, status, body, http.StatusBadRequest, "invalid_request_error")
+}
+
+// A cursor this listing cannot honor is refused rather than ignored. The
+// deployments keyset is by created_at and walks forward only, so a version
+// cursor — taken here from the listing that really issues one — would
+// otherwise silently return the first page again.
+func TestListDeploymentsRejectsACursorItCannotHonor(t *testing.T) {
+	s := newTestServer(t)
+	agentID, _ := fixture(t, s)
+	if status, res := s.do(http.MethodPost, "/v1/agents/"+agentID, map[string]any{"system": "v2"}); status != http.StatusOK {
+		t.Fatalf("publish a second agent version: %d %v", status, res)
+	}
+	status, body := s.do(http.MethodGet, "/v1/agents/"+agentID+"/versions?limit=1", nil)
+	if status != http.StatusOK {
+		t.Fatalf("agent versions: %d %v", status, body)
+	}
+	versionCursor := nextPage(t, body)
+	if versionCursor == "" {
+		t.Fatal("the agent versions listing issued no cursor to borrow")
+	}
+
+	for _, cur := range []string{versionCursor, "not-a-cursor"} {
+		status, body := s.do(http.MethodGet, "/v1/deployments?page="+url.QueryEscape(cur), nil)
+		wantErr(t, status, body, http.StatusBadRequest, "invalid_request_error")
+	}
+}
+
 // Every id-shaped path answers a malformed id exactly as it answers an unknown
 // one — checkID's rule, so that a caller cannot probe which ids exist by
 // telling the two apart (#135).
@@ -863,7 +967,7 @@ func TestDeploymentFileRubricNeedsObjectStorage(t *testing.T) {
 	body["initial_events"] = []any{map[string]any{
 		"type":        "user.define_outcome",
 		"description": "Grade the report.",
-		"rubric":      map[string]any{"type": "text", "text": "The report exists."},
+		"rubric":      map[string]any{"type": "text", "content": "The report exists."},
 	}}
 	createDeployment(t, s, body)
 }
@@ -978,20 +1082,64 @@ func TestUpdateDeploymentReplacesTheCollections(t *testing.T) {
 		t.Errorf("resources = %v, want [] after an explicit empty replacement", rs)
 	}
 
-	// initial_events is a full replacement too.
+	// initial_events is a full replacement too. A system.message has to follow
+	// a user.message to survive the normalizer, so the replacement is the pair.
 	status, up = s.do(http.MethodPost, "/v1/deployments/"+id, map[string]any{
-		"initial_events": []any{map[string]any{"type": "system.message", "content": "quietly"}}})
+		"initial_events": []any{
+			map[string]any{"type": "user.message",
+				"content": []any{map[string]any{"type": "text", "text": "again"}}},
+			map[string]any{"type": "system.message",
+				"content": []any{map[string]any{"type": "text", "text": "quietly"}}},
+		}})
 	if status != http.StatusOK {
 		t.Fatalf("replace initial_events: %d %v", status, up)
 	}
 	ev := up["initial_events"].([]any)
-	if len(ev) != 1 || ev[0].(map[string]any)["type"] != "system.message" {
-		t.Errorf("initial_events = %v, want the single replacement", ev)
+	if len(ev) != 2 || ev[1].(map[string]any)["type"] != "system.message" {
+		t.Errorf("initial_events = %v, want the two-event replacement", ev)
 	}
 
 	// And an update cannot empty it: the floor applies to the stored result.
 	status, res := s.do(http.MethodPost, "/v1/deployments/"+id, map[string]any{"initial_events": []any{}})
 	wantErr(t, status, res, http.StatusBadRequest, "invalid_request_error")
+}
+
+// The update params draw a line that the two spellings of "empty" have to
+// respect. vault_ids and resources read "send empty array or null to clear",
+// so an explicit null clears them; initial_events, environment_id and agent
+// read "cannot be cleared", so an explicit null is a 400. Testing null through
+// present() would have passed either way, because present() reports the same
+// false for a key that is absent and a key that is null.
+func TestUpdateDeploymentNullClearsOnlyWhatMayBeCleared(t *testing.T) {
+	s := newTestServer(t)
+	agentID, envID := fixture(t, s)
+
+	body := deploymentBody(agentID, envID)
+	body["vault_ids"] = []any{createVault(t, s, "prod-creds")}
+	body["resources"] = []any{map[string]any{
+		"type": "github_repository", "url": "https://github.com/acme/orders",
+		"authorization_token": "ghp_first", "mount_path": "/workspace/orders",
+	}}
+	id := createDeployment(t, s, body)["id"].(string)
+
+	status, up := s.do(http.MethodPost, "/v1/deployments/"+id,
+		map[string]any{"vault_ids": nil, "resources": nil})
+	if status != http.StatusOK {
+		t.Fatalf("clear with null: %d %v", status, up)
+	}
+	if got := up["vault_ids"].([]any); len(got) != 0 {
+		t.Errorf("vault_ids = %v after an explicit null, want [] — null clears", got)
+	}
+	if got := up["resources"].([]any); len(got) != 0 {
+		t.Errorf("resources = %v after an explicit null, want [] — null clears", got)
+	}
+
+	for _, key := range []string{"initial_events", "environment_id", "agent"} {
+		t.Run(key, func(t *testing.T) {
+			status, res := s.do(http.MethodPost, "/v1/deployments/"+id, map[string]any{key: nil})
+			wantErr(t, status, res, http.StatusBadRequest, "invalid_request_error")
+		})
+	}
 }
 
 // Moving a deployment to another environment revalidates the target, and an

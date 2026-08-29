@@ -77,10 +77,11 @@ func parseDeploymentSchedule(obj map[string]json.RawMessage) (expr, tz string, s
 // than a silently dropped key.
 //
 // FOR SHARE on the agent row, so a concurrent archive cannot land between this
-// check and the write. The archive route takes FOR UPDATE and refuses while a
-// live deployment pins the agent; without the shared lock on this side that
-// refusal would still have a race through it — an update repinning an agent
-// the archive has just cleared.
+// check and the write. The refusal that lock exists for is still owed: slice 1
+// has yet to make the agent-archive route take FOR UPDATE and decline while a
+// live deployment pins the agent (plan 37 decision 7). Taking the shared lock
+// here now is what will make that refusal race-free rather than merely usually
+// right — without it, an update could repin an agent the archive just cleared.
 func resolveDeploymentAgent(ctx context.Context, db querier, raw json.RawMessage) (domain.AgentReference, error) {
 	var ref domain.AgentReference
 
@@ -102,13 +103,13 @@ func resolveDeploymentAgent(ctx context.Context, db querier, raw json.RawMessage
 		if obj.ID == "" {
 			return ref, errInvalid("agent.id is required")
 		}
-		// "An agent object with both id and version specified" — the union's
-		// object arm pins explicitly, and the string arm is how a caller asks
-		// for the latest.
-		if obj.Version == nil {
-			return ref, errInvalid(
-				"agent.version is required on an agent reference object; pass the id as a bare string to pin the latest version")
-		}
+		// version is optional on the object arm: BetaManagedAgentsAgentParams
+		// requires only type and id, and its version says "Omit to use the
+		// latest version". The endpoint prose ("an agent object with both id
+		// and version specified") describes the common case and is outranked
+		// by the schema it references — and by the SDK param a real client
+		// builds, whose Version is a param.Opt. resolveAgent answers a
+		// session's versionless reference the same way.
 		id, version = obj.ID, obj.Version
 	}
 	if err := checkID(id, "agent"); err != nil {

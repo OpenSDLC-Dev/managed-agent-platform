@@ -292,7 +292,7 @@ func (s *server) createDeployment(r *http.Request) (any, error) {
 		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
 		 RETURNING `+deploymentColumns,
 		id, name, derefOr(description, ""), string(agent.ID), agent.Version, envID,
-		vaultIDs, mustJSON(orEmptyRaw(initial)), storedDeploymentResources(stored), metadata,
+		vaultIDs, mustJSON(initial), mustJSON(stored), metadata,
 		nullableText(expr), nullableText(tz), principalPtr(ctx)))
 	if err != nil {
 		return nil, err
@@ -360,6 +360,17 @@ func (s *server) listDeployments(r *http.Request) (any, error) {
 		query += ` AND paused_at IS NOT NULL`
 	case string(domain.DeploymentActive):
 		query += ` AND paused_at IS NULL`
+	}
+	if agentID := q.Get("agent_id"); agentID != "" {
+		// "Filter by agent ID." Shape first, as the sessions list does: a
+		// malformed agent_id can never name a stored agent, and rejecting it
+		// here keeps an unstorable byte from reaching the bind parameter as a
+		// 500 (#135). A well-formed but absent one filters to an empty page.
+		if !domain.ID(agentID).Valid() {
+			return nil, errInvalid("agent_id must be a valid agent id")
+		}
+		args = append(args, agentID)
+		query += fmt.Sprintf(` AND agent_id = $%d`, len(args))
 	}
 	if gte != nil {
 		args = append(args, *gte)
@@ -444,7 +455,9 @@ func (s *server) updateDeployment(r *http.Request) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	resourcesSet := present(obj["resources"])
+	// Key presence, not present(): "send empty array or null to clear".
+	// parseResourceInputs reads a null as no inputs, so the clear falls out.
+	_, resourcesSet := obj["resources"]
 	var sealed []sealedToken
 	if resourcesSet {
 		if sealed, err = s.sealDeploymentRepoTokens(ctx, resourceInputs); err != nil {
@@ -486,9 +499,15 @@ func (s *server) updateDeployment(r *http.Request) (any, error) {
 		}
 	}
 	envID := string(d.EnvironmentID)
-	if v, set, _, err := stringField(obj, "environment_id"); err != nil {
+	if v, set, null, err := stringField(obj, "environment_id"); err != nil {
 		return nil, err
 	} else if set {
+		// "Cannot be cleared" — answered here rather than left to collapse
+		// onto the empty string, which would look up an environment named ""
+		// and report a 404 for a request that is malformed, not missing.
+		if null {
+			return nil, errInvalid("environment_id cannot be cleared")
+		}
 		envID = v
 		if err := requireLiveEnvironment(ctx, tx, envID); err != nil {
 			return nil, err
@@ -498,7 +517,10 @@ func (s *server) updateDeployment(r *http.Request) (any, error) {
 	for _, v := range d.VaultIDs {
 		vaultIDs = append(vaultIDs, string(v))
 	}
-	if present(obj["vault_ids"]) {
+	// "Omit to preserve; send empty array or null to clear" — so the test is
+	// key presence, not present(): an explicit null clears rather than
+	// preserves, and parseVaultIDs already reads it as the empty list.
+	if _, ok := obj["vault_ids"]; ok {
 		if vaultIDs, err = parseVaultIDs(obj); err != nil {
 			return nil, err
 		}
@@ -517,13 +539,19 @@ func (s *server) updateDeployment(r *http.Request) (any, error) {
 		}
 	}
 	storedInitial := d.InitialEvents
-	if present(obj["initial_events"]) {
+	if raw, ok := obj["initial_events"]; ok {
+		// "Omit to preserve. Cannot be cleared." — the one collection of the
+		// three that null does not clear, so null is refused rather than
+		// silently preserving, the way agent's is.
+		if isNull(raw) {
+			return nil, errInvalid("initial_events cannot be cleared")
+		}
 		if err := s.validateDeploymentInitialEvents(initial); err != nil {
 			return nil, err
 		}
 		storedInitial = initial
 	}
-	resourcesJSON := storedDeploymentResources(deploymentResourcesFrom(resourceInputs, sealed))
+	resourcesJSON := mustJSON(deploymentResourcesFrom(resourceInputs, sealed))
 	if !resourcesSet {
 		// Preserve: re-read the column rather than round-tripping the echo,
 		// which has had the sealed tokens stripped out of it.
@@ -563,7 +591,7 @@ func (s *server) updateDeployment(r *http.Request) (any, error) {
 		 WHERE id = $1
 		 RETURNING `+deploymentColumns,
 		id, name, derefOr(description, ""), string(agent.ID), agent.Version, envID,
-		vaultIDs, mustJSON(orEmptyRaw(storedInitial)), resourcesJSON, metadata,
+		vaultIDs, mustJSON(storedInitial), resourcesJSON, metadata,
 		nullableText(newExpr), nullableText(newTZ)))
 	if err != nil {
 		return nil, err
