@@ -1206,9 +1206,9 @@ next pod restart.
 
 **Compose it in whichever form is in force**, because the two-step migration under
 "Continuous delivery" moves it once. Before the cutover it is
-`postgres://map:<map-db-password>@10.136.0.3:5432/map?sslmode=require` — the pod reaches the
-private IP directly, the same path `gcp-db-init` takes, and `require` encrypts without
-verifying the server certificate. After it, the host is the proxy's loopback socket and
+`postgres://map:<map-db-password>@<instance-private-ip>:5432/map?sslmode=require` — the pod
+reaches the private IP directly, the same path `gcp-db-init` takes, and `require`
+encrypts without verifying the server certificate. After it, the host is the proxy's loopback socket and
 `sslmode` is `disable`; re-composing the address form then would quietly undo the cutover,
 and nothing would complain, because the direct path still works.
 

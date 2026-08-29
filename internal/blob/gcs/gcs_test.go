@@ -366,6 +366,11 @@ func missingBucketName(base, tag string) string {
 	return base + suffix + tag
 }
 
+// realisticRow names the one row in the table below that stands for a real
+// project-derived base rather than a synthetic shape, so the row and the check
+// that it still overflows cannot drift apart.
+const realisticRow = "RealisticLongName"
+
 // TestMissingBucketNameStaysLegal runs in the default tier, because the rule it
 // checks is the live tier's and the live tier is opt-in: without this, a base
 // name long enough to overflow the limit would be found only by whoever happened
@@ -373,13 +378,21 @@ func missingBucketName(base, tag string) string {
 // rather than as a failure.
 func TestMissingBucketNameStaysLegal(t *testing.T) {
 	const tag = "0123456789abcdef"
-	for name, base := range map[string]string{
-		"Short":             "map-blob",
-		"AtTheLimit":        strings.Repeat("b", maxBucketName),
-		"OverTheLimit":      strings.Repeat("b", maxBucketName*2),
-		"TruncatesToADash":  strings.Repeat("b", maxBucketName-len("-missing-")-len(tag)-1) + "-x",
-		"RealisticLongName": "opensdlc-managed-agents-map-blob-probe2",
-	} {
+	cases := map[string]string{
+		"Short":            "map-blob",
+		"AtTheLimit":       strings.Repeat("b", maxBucketName),
+		"OverTheLimit":     strings.Repeat("b", maxBucketName*2),
+		"TruncatesToADash": strings.Repeat("b", maxBucketName-len("-missing-")-len(tag)-1) + "-x",
+		realisticRow:       "your-longer-project-name-map-blob-probe2",
+	}
+	// Naming the row by a constant stops a rename from disarming the overflow
+	// check below; deleting the row would still compile and still disarm it, so
+	// its presence is asserted rather than assumed.
+	if _, ok := cases[realisticRow]; !ok {
+		t.Fatalf("the %q row is gone, and with it the only case that shows a real "+
+			"project-derived base overflows", realisticRow)
+	}
+	for name, base := range cases {
 		t.Run(name, func(t *testing.T) {
 			got := missingBucketName(base, tag)
 			if len(got) > maxBucketName {
@@ -390,6 +403,19 @@ func TestMissingBucketNameStaysLegal(t *testing.T) {
 			}
 			if strings.Contains(got, "--") {
 				t.Errorf("%q has an empty label from the truncation", got)
+			}
+			// This row exists to show that a realistic project-derived base
+			// overflows, so it has to actually overflow. Sanitising the old
+			// fixture for #514 shortened it by one character to exactly the
+			// room available, which left the case passing on the branch it was
+			// written to avoid — silently, since the three checks above and
+			// statement coverage were all unaffected. The row is named by a
+			// constant rather than by two copies of a literal: with copies, a
+			// rename of the key disarms this check and nothing says so, which
+			// is the same silent failure it exists to catch.
+			if name == realisticRow && got == base+"-missing-"+tag {
+				t.Errorf("%q (%d chars) no longer truncates, so this case stopped being the one it is named for",
+					base, len(base))
 			}
 		})
 	}

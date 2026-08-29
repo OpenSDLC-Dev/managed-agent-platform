@@ -1,0 +1,502 @@
+#!/usr/bin/env python3
+"""Fail if an operator's real coordinates are written into the documentation.
+
+#355/#356 parameterised deployment identifiers out of the repository by hand.
+The sweep reached `deploy/` and `.github/` and stopped there, and nothing in the
+repository could notice, so what it left sat in a public repo for months: #514
+found a project id, two project numbers, an Artifact Registry path and two
+routable LoadBalancer addresses still in `docs/HISTORY.md`. A rule enforced only
+by memory is a rule that lapses. This is the enforcing half of that fix.
+
+A guard cannot search for the values themselves -- it would have to contain
+them, which is the thing being prevented -- so it searches for shapes:
+
+  - a ROUTABLE IPv4 address. Every address these documents legitimately use is
+    loopback, RFC 1918, link-local, multicast, or an RFC 5737 documentation
+    range. A routable one in a deployment record is somebody's live endpoint.
+  - a BARE 12-DIGIT INTEGER, the shape of a GCP project number. The lookarounds
+    are load-bearing: skill version ids in these documents are 16 digits, and a
+    substring match flags every one of them.
+  - an ARTIFACT REGISTRY PATH or `*.iam.gserviceaccount.com` ADDRESS whose
+    project component is not one of this repository's placeholders. This is the
+    shape that leaked a project id in #514, and every legitimate instance today
+    already uses a placeholder, so the rule costs nothing and holds the
+    convention as well. A real project NUMBER in a `cloudbuild`/`developer`
+    service account needs no rule of its own -- it is twelve digits.
+
+WHAT IT DOES NOT COVER, stated plainly because the surrounding prose must not
+claim more than this. A bare project id in running text has no shape to match --
+it is a lowercase-hyphen word like any other -- so it is caught only where it
+appears inside one of the structured forms above. IPv6 endpoints, bucket names
+and KMS key names have no rule. This catches four shapes; it is not a proof that
+the repository is clean.
+
+NOR DOES IT VERIFY ITSELF PAST A POINT, stated once here so the next reader does
+not go looking for the check that would. Main restates every hop against
+something the same run measured, and between them its checks reach any narrowing
+of the corpus -- a document, a byte or a line that went missing -- with the
+sentinels rather than a restatement covering the root itself, since a wrong root
+is the one narrowing both listings agree about. What none of them reaches is
+an edit that keeps the arithmetic and changes the meaning: a reader substituting
+one address for another of the same length, a rule narrowed to a range no
+self-test row happens to name, or a scan re-emitting the counts for work it
+skipped. A receipt can always be forged by the code that writes it, and the
+remedy for that class is review, not another restatement.
+
+A KNOWN FALSE POSITIVE, recorded rather than worked around. The registry and
+service-account rule flags any project component that is not a placeholder, so a
+genuinely public third-party project -- a Google sample image path, say -- goes
+red. That is one entry in PLACEHOLDER_PROJECTS when it first happens, and it is
+left as a loud, obvious failure rather than pre-empted with a list of names
+nobody would maintain. A four-component version string, and a 12-digit timestamp,
+are flagged for the same kind of reason and take the same kind of remedy.
+
+Markdown only, and that scope was measured rather than assumed: widening from
+`docs/` and `deploy/` to every tracked `*.md` produced not one new finding -- the
+same four, all in one file -- so the scope is all of them, which is what puts
+CHANGELOG.md and the `changelog.d/` fragments that become it inside the guard.
+The count the run prints is the live number, and no prose here quotes it, because
+a number that tracks the corpus goes stale the next time a document is added. A
+measurement pinned to a named commit does not, and one is quoted below where it
+argues why no check here compares against a constant. Checks that compare two
+counts the run measured for itself are a different thing, and there are three.
+
+Source files are outside it, and that is a real gap rather than an oversight:
+#514 found a project id in a Go test fixture too, but every networking test here
+is full of addresses on purpose, and a guard that cried wolf there would be
+switched off within a week. Prose is where a deployment record gets written down;
+code is where addresses are the subject matter.
+
+This file is not scanned either, which is only safe because every fixture below
+is synthetic -- `11.22.33.44` and `123456789012` are nobody's coordinates. An
+earlier draft used the real values this change removes, which republished them in
+the one file the guard cannot see. Keep the fixtures synthetic.
+
+The self-test runs FIRST, before any repository access. Without it a broken
+pattern reports exactly what a clean repository reports, and the silence is
+indistinguishable.
+"""
+
+import collections
+import ipaddress
+import re
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
+
+# Placeholders the documentation already uses where a project belongs. A value
+# outside this set is somebody's real project, which is the whole finding.
+PLACEHOLDER_PROJECTS = frozenset({
+    "your-project", "my-project", "example-project",
+    "PROJECT", "PROJECT_ID", "PROJECT_NUMBER", "P", "p",
+})
+
+# Allowed by value: famous third-party resolvers, used as examples of a service,
+# never as anybody's coordinate.
+ALLOWED_ADDRESSES = frozenset({"8.8.8.8", "1.1.1.1"})
+
+# Narrowing the scan is the failure this cannot afford, because it leaves a
+# shorter list and a smaller count that nothing questions. It can happen at every
+# hop — the listing, the exclusion, the read, and the scan of the text itself —
+# so main states what it expects of each hop separately, every one of them
+# against something the same run measured. Deliberately none is measured against
+# a CONSTANT: the corpus legitimately collapses by half at every release, when
+# `make changelog` consumes the fragments in `changelog.d/` (110 documents to 56
+# across v0.3.0), so any floor high enough to be worth setting fails the release
+# PR that trips it.
+#
+# These sentinels are the broadest of those checks, and they answer the one
+# question none of the others can: whether this is the right repository at all.
+# They are sentinels rather than an enumeration on purpose — naming every
+# directory that holds markdown would be the unmaintainable list this file
+# declines to keep elsewhere — and they are not complete, nor claimed to be.
+REQUIRED_DOCUMENTS = (
+    "CLAUDE.md",
+    "STATE.md",
+    "docs/HISTORY.md",
+    "changelog.d/README.md",
+    "deploy/gcp/README.md",
+)
+
+# The trailing lookahead rejects only a dot that CONTINUES the number. Rejecting
+# any dot would miss an address at the end of a sentence, which is the commonest
+# way prose writes one down.
+IPV4 = re.compile(r"(?<![0-9.])(?:[0-9]{1,3}\.){3}[0-9]{1,3}(?![0-9])(?!\.[0-9])")
+PROJECT_NUMBER = re.compile(r"(?<![0-9])[0-9]{12}(?![0-9])")
+REGISTRY = re.compile(r"[a-z0-9-]+-docker\.pkg\.dev/([A-Za-z0-9_-]+)")
+SERVICE_ACCOUNT = re.compile(r"@([A-Za-z0-9-]+)\.iam\.gserviceaccount\.com")
+
+
+def routable(text):
+    """The address in `text`, if it is one and it is somebody's real endpoint."""
+    try:
+        ip = ipaddress.ip_address(text)
+    except ValueError:
+        return False  # 999.999.999.999 and friends are not addresses at all
+    if text in ALLOWED_ADDRESSES:
+        return False
+    if ip.is_multicast:
+        return False  # 224.0.0.251 and kin answer is_global True but address nobody
+    # `is_global` already excludes loopback, RFC 1918, link-local and the RFC 5737
+    # documentation ranges — measured, not assumed: an explicit exclusion for the
+    # documentation ranges was written first and removing it changed nothing. The
+    # TEST-NET rows in the self-test are what hold that, so a runtime that ever
+    # disagrees goes red here rather than quietly flagging every example address.
+    return ip.is_global
+
+
+def violations(line):
+    """Every reason this one line should not be in the repository."""
+    found = []
+    for m in IPV4.finditer(line):
+        if routable(m.group(0)):
+            found.append(f"routable address {m.group(0)}")
+    for m in PROJECT_NUMBER.finditer(line):
+        found.append(f"project number {m.group(0)}")
+    for label, pattern in (("registry path", REGISTRY),
+                           ("service account", SERVICE_ACCOUNT)):
+        for m in pattern.finditer(line):
+            project = m.group(1)
+            if project in PLACEHOLDER_PROJECTS:
+                continue
+            # `gcp-sa-*` is Google's own reserved namespace for the service agents
+            # it creates in your project (service-N@gcp-sa-cloudbuild…). The label
+            # is Google's, never an operator's project id, so it can no more be a
+            # coordinate than a multicast address can be an endpoint.
+            if project.startswith("gcp-sa-"):
+                continue
+            found.append(f"{label} naming project {project!r}")
+    return found
+
+
+# What the scan did, not just what it found. The scan is the one hop no list and
+# no count elsewhere can see through: a filter here changes nothing upstream, so
+# `ok — 115 documents` stays true and stays wrong. The caller restates both of
+# these against what it handed over.
+Scan = collections.namedtuple("Scan", "findings scanned lines")
+
+
+def scan_texts(documents):
+    """The scanning half, separated so the self-test can drive it without git."""
+    # Both receipts are written AFTER the work they attest to, never before, and
+    # at both levels: a `continue` inserted anywhere in either body then loses the
+    # receipt along with the work it skipped, instead of leaving one behind for a
+    # line or a document it never read. The line counter has to obey this as
+    # literally as the path does — incremented at the top of the inner body it
+    # attests to a line the scan is about to skip, which is a receipt for nothing.
+    findings, scanned, lines = [], [], 0
+    for rel, text in documents:
+        for n, line in enumerate(text.splitlines(), 1):
+            for why in violations(line):
+                findings.append(f"{rel}:{n}: {why}")
+            lines += 1
+        scanned.append(rel)
+    return Scan(findings, scanned, lines)
+
+
+# Named rather than a bare pair: both halves are lists of paths, so a caller that
+# unpacked them the wrong way round would widen the scan to include `testdata` and
+# empty the over-exclusion check by construction — a swap with no type error, no
+# runtime error, and a count nobody would question.
+Corpus = collections.namedtuple("Corpus", "every documentation")
+
+
+def ls_files(root, pathspec):
+    """Tracked paths matching a pathspec.
+
+    `-z` rather than newlines: a tracked path containing a space would otherwise
+    be split into two nonexistent paths and silently skipped, which is the
+    failure mode this whole file exists to prevent.
+    """
+    out = subprocess.run(
+        ["git", "ls-files", "-z", "--", pathspec],
+        cwd=root, capture_output=True, text=True, check=True,
+    ).stdout
+    return [p for p in out.split("\0") if p]
+
+
+def tracked_docs(root):
+    """Every tracked markdown path, and the subset of it that is documentation.
+
+    Both are returned because the caller checks what the exclusion removed, and
+    it cannot do that from the survivors alone. `testdata` is compared as a path
+    component so a top-level `testdata/` is excluded too.
+    """
+    # `:(icase)` rather than a plain `*.md`: git's pathspec is case-sensitive by
+    # default, so `README.MD` would be tracked, be documentation, and never be
+    # scanned. The suffix test that restates this lowercases for the same reason.
+    every = sorted(ls_files(root, ":(icase)*.md"))
+    return Corpus(every, [p for p in every if "testdata" not in Path(p).parts])
+
+
+def read_documents(root, paths):
+    """(path, text) for each, or a hard error. Never a silent skip.
+
+    A file that cannot be read or decoded is reported as a failure rather than
+    passed over: a guard that reports clean on the documents it could not open is
+    worse than no guard, because it is believed.
+    """
+    documents, unreadable = [], []
+    for rel in paths:
+        try:
+            # Bytes and an explicit decode, not read_text: text mode would
+            # translate CRLF to LF and make the length of what is returned
+            # incomparable with the length of what is on disk. The caller compares
+            # them, and that is what closes a reader which truncates, drops lines,
+            # or decodes lossily — every rewrite that changes the length, and no
+            # rewrite that does not.
+            documents.append((rel, (root / rel).read_bytes().decode("utf-8")))
+        except (OSError, UnicodeDecodeError) as e:
+            unreadable.append(f"{rel}: {type(e).__name__} — not scanned")
+    return documents, unreadable
+
+
+def selftest():
+    """Prove each rule fires and each exemption holds. Rows, not prose.
+
+    Rows are a sample, though, and the difference matters: a rule narrowed to some
+    range no row happens to name still passes every check below. What the rows
+    prove is that each rule is wired in and each exemption is deliberate, not that
+    the rules are complete.
+
+    Every value here is invented. See the module docstring: an earlier draft used
+    the real coordinates this change removes, in the one file the guard does not
+    scan.
+    """
+    must_flag = [
+        ("a routable address", "LoadBalancer `11.22.33.44:8080`"),
+        ("a routable address ending a sentence", "The endpoint was 11.22.33.44."),
+        ("a routable address in a list", "reached 11.22.33.44, then stopped"),
+        ("a project number", "project (123456789012) and"),
+        ("a project number, line-initial", "123456789012 was the number"),
+        ("a registry path naming a project",
+         "into us-central1-docker.pkg.dev/a-real-project/map-images"),
+        ("a service account naming a project",
+         "as map-brain@a-real-project.iam.gserviceaccount.com"),
+    ]
+    must_pass = [
+        ("loopback", "listens on 127.0.0.1:8080"),
+        ("RFC 1918", "the private IP 10.1.2.3"),
+        ("RFC 1918 172.16/12", "peered at 172.16.0.4"),
+        ("RFC 1918 192.168/16", "getent returns 192.168.65.254"),
+        ("link-local", "metadata at 169.254.169.254"),
+        ("unspecified", "binds 0.0.0.0:8080"),
+        ("multicast", "mDNS at 224.0.0.251"),
+        ("RFC 5737 TEST-NET-1", "example 192.0.2.1"),
+        ("RFC 5737 TEST-NET-2", "example 198.51.100.7"),
+        ("RFC 5737 TEST-NET-3", "example 203.0.113.5"),
+        ("allowed public resolver", "resolves via 8.8.8.8 and 1.1.1.1"),
+        ("not an address at all", "the invalid 999.999.999.999"),
+        ("a 16-digit skill version", "version=1784657206256533 dest=x"),
+        ("an 11-digit number", "run 31260884425 was green"),
+        # Three components, so IPV4 never reaches routable(). It guards the other
+        # direction: widening the pattern to three would light up every version
+        # string in these documents. A FOUR-component version is genuinely
+        # indistinguishable from an address and will be flagged; the allowlist is
+        # the remedy if one is ever written down.
+        ("a three-part version", "the real `ant` CLI 1.21.0 built"),
+        ("a placeholder registry path",
+         "e.g. us-central1-docker.pkg.dev/your-project/map-images"),
+        ("a placeholder service account",
+         "map-controlplane@your-project.iam.gserviceaccount.com"),
+        ("a Google-managed service agent",
+         "granted service-9@gcp-sa-cloudbuild.iam.gserviceaccount.com"),
+    ]
+    failures = []
+    for label, line in must_flag:
+        if not violations(line):
+            failures.append(f"MISSED   {label}: {line!r}")
+    for label, line in must_pass:
+        got = violations(line)
+        if got:
+            failures.append(f"FALSE +  {label}: {line!r} -> {got}")
+
+    # The reader and the scanner driven end to end, so that a scanner which always
+    # returns [] cannot pass while every row above stays green, and so the line
+    # numbering is proved on something longer than one line. It is deliberately
+    # NOT what guards against truncation: a fixture can only ever be longer than
+    # the documents somebody thought to compare it with, and two tracked documents
+    # are already longer than this one. Truncation is main's job, where the
+    # comparison is against each real file's own size.
+    #
+    # The fixture is built FROM the rows above, so it carries every shape the
+    # detector knows rather than one of them. The round-trip below can only prove
+    # the reader preserved bytes the fixture actually contains, and main's size
+    # comparison only sees a rewrite that changes the length — so a reader that
+    # neutralised a registry path in place, same length, would pass both unless
+    # a registry path is here to be neutralised.
+    #
+    # write_bytes, not write_text, for the same reason the reader uses read_bytes:
+    # text mode would translate the newlines on Windows and the round-trip this
+    # asserts would fail on the platform rather than on the code.
+    fixture = [line for _, line in must_flag]
+    fixture += ["a line carrying no coordinate at all"] * 40
+    fixture += ["LoadBalancer 11.22.33.44 closes it"]
+    planted = "".join(f"{line}\n" for line in fixture)
+    with tempfile.TemporaryDirectory() as tmp:
+        Path(tmp, "deep.md").write_bytes(planted.encode("utf-8"))
+        documents, unreadable = read_documents(Path(tmp), ["deep.md"])
+    if unreadable:
+        failures.append(f"READ     the fixture came back unreadable: {unreadable}")
+    elif documents[0][1] != planted:
+        got = documents[0][1]
+        if len(got) == len(planted):
+            # The length matching is the interesting half: this is the rewrite
+            # that main's size comparison cannot see, and only the fixture can.
+            failures.append(f"READ     returned {len(got)} characters as written "
+                            f"but not what was written — the text was rewritten")
+        else:
+            failures.append(f"READ     returned {len(got)} of {len(planted)} "
+                            f"characters")
+    else:
+        scan = scan_texts(documents)
+        expected = [f"deep.md:{n}: {why}"
+                    for n, line in enumerate(fixture, 1)
+                    for why in violations(line)]
+        if scan.findings != expected:
+            failures.append(f"SCAN     did not report every planted line: "
+                            f"{scan.findings}")
+        if scan.scanned != ["deep.md"] or scan.lines != len(fixture):
+            failures.append(f"SCAN     misreported its own coverage: "
+                            f"{scan.scanned}, {scan.lines} lines")
+    return failures
+
+
+def main():
+    failures = selftest()
+    if failures:
+        print("the detector itself is broken, so a clean scan would mean nothing:")
+        for f in failures:
+            print(f"  {f}")
+        return 1
+    print("detector self-test: ok")
+
+    root = Path(subprocess.run(
+        ["git", "rev-parse", "--show-toplevel"],
+        capture_output=True, text=True, check=True,
+    ).stdout.strip())
+
+    corpus = tracked_docs(root)
+    every, paths = corpus.every, corpus.documentation
+    if not paths:
+        print("no tracked markdown found — the scan would be clean for the wrong reason")
+        return 1
+    # First, that the two halves are the halves they are named for. The
+    # documentation is a subset of every tracked path by definition, so this can
+    # only fail if they changed places — which is what makes the Corpus field names
+    # load-bearing rather than advisory, since a namedtuple still unpacks
+    # positionally and the old mistype is still writable. It is checked before
+    # anything reads either half, so a swap is reported as a swap rather than as
+    # whichever later check happens to notice the shape of it.
+    if not set(paths) <= set(every):
+        print("the scanned set is not a subset of the tracked set, so the two halves "
+              "of the corpus have changed places")
+        return 1
+    # The listing is the first hop, and the sentinels cannot see past it: an
+    # exclusion added to the pathspec shrinks `every` and `paths` together, so
+    # nothing downstream disagrees and every sentinel is still present. Restated
+    # through a second mechanism instead — git's own glob against a suffix test in
+    # Python, two idioms over one set. Compared for equality rather than for what
+    # the pathspec missed, so that narrowing EITHER side alone fails: a suffix
+    # typed `.mdx` empties the restatement and would otherwise disarm this check
+    # without dropping a single document, which is how a guard dies quietly.
+    #
+    # It runs git itself rather than calling ls_files, and that is the whole point
+    # of it: routed through the same helper, one narrowing inside that helper
+    # shrinks both sides equally and they agree on a corpus neither of them saw.
+    # A restatement sharing a trunk with what it restates is not a restatement.
+    # (`git ls-tree -r HEAD` would be the wrong second mechanism for a different
+    # reason: it reads the commit, so a staged new document fails a check that is
+    # supposed to be about the pathspec.)
+    listed = subprocess.run(
+        ["git", "ls-files", "-z"],
+        cwd=root, capture_output=True, text=True, check=True,
+    ).stdout
+    by_suffix = set(p for p in listed.split("\0") if p.lower().endswith(".md"))
+    if by_suffix != set(every):
+        print("git's pathspec and a suffix test disagree about what tracked markdown "
+              "is, so one of the two has been narrowed:")
+        for p in sorted(by_suffix ^ set(every)):
+            print(f"  {p}")
+        return 1
+    missing = [d for d in REQUIRED_DOCUMENTS if d not in paths]
+    if missing:
+        print("the scan did not reach documents it must always cover, so a clean "
+              "result would mean nothing:")
+        for m in missing:
+            print(f"  {m}")
+        return 1
+    # The other way the scan narrows is a FILTER mistake — an exclusion widened
+    # past `testdata`. This states what may be dropped independently of the
+    # expression in tracked_docs that drops it, deliberately: two copies of one
+    # rule, so editing either alone fails here rather than quietly shrinking the
+    # corpus. Sentinels cannot cover this, since a subtree they do not live in
+    # can leave scope while all of them are still present.
+    over_excluded = [p for p in every if p not in set(paths) and "testdata" not in p.split("/")]
+    if over_excluded:
+        print("the exclusion dropped documents that are not testdata fixtures, so "
+              "the scan covered less than it should:")
+        for p in over_excluded:
+            print(f"  {p}")
+        return 1
+    documents, unreadable = read_documents(root, paths)
+    if unreadable:
+        print("these documents could not be scanned, so this run proves nothing:")
+        for u in unreadable:
+            print(f"  {u}")
+        return 1
+    # The read is the third hop, and it is the one that can lose a document
+    # without anybody's list changing. Exact rather than approximate: everything
+    # selected is either read or reported, so the two numbers agree today by
+    # construction, and a skip introduced later disagrees by exactly what it lost.
+    if len(documents) != len(paths):
+        print(f"the reader returned {len(documents)} of {len(paths)} selected "
+              "documents without reporting the difference, so the scan silently "
+              "covered less than it chose to")
+        return 1
+    # And that each document arrived whole. Bytes on disk against bytes returned,
+    # per document and exactly, which is the only statement here that does not
+    # depend on a fixture being bigger than the largest real file: it catches a
+    # reader that truncates, drops lines, or decodes lossily, at any size.
+    short = []
+    for rel, text in documents:
+        on_disk = (root / rel).stat().st_size
+        returned = len(text.encode("utf-8"))
+        if returned != on_disk:
+            short.append(f"{rel}: {returned} bytes returned of {on_disk} on disk")
+    if short:
+        print("the reader did not return these documents whole, so what was scanned "
+              "is not what the repository holds:")
+        for s in short:
+            print(f"  {s}")
+        return 1
+
+    scan = scan_texts(documents)
+    # The fourth hop, and the one with nothing upstream to compare against: a
+    # filter applied inside the scan changes no list and no count anywhere else,
+    # so the scan reports what it covered and both halves are restated here. The
+    # line total is recomputed from `documents` rather than taken on trust, which
+    # is what catches a scanner that reads only the first few lines of each file.
+    if set(scan.scanned) != set(paths):
+        print(f"the scan covered {len(set(scan.scanned))} of {len(paths)} documents "
+              "it was given, so it read less than was read for it")
+        return 1
+    expected_lines = sum(len(text.splitlines()) for _, text in documents)
+    if scan.lines != expected_lines:
+        print(f"the scan saw {scan.lines} lines of the {expected_lines} it was given, "
+              "so it stopped short inside the documents it did open")
+        return 1
+
+    if scan.findings:
+        print("operator coordinates must be GitHub Actions variables, not repository "
+              "content (#355, #356, #514):")
+        for b in scan.findings:
+            print(f"  {b}")
+        return 1
+    print(f"ok — {len(documents)} documents carry none of the four shapes")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

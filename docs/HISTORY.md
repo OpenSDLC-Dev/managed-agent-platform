@@ -2587,16 +2587,15 @@ recorded here rather than smoothed over.
 ## GCP continuous delivery — the mode-2 build → deploy → smoke sequence, by hand (run 2026-08-08) — ✅ passed
 
 Every step `.github/workflows/deploy.yml` performs was run by hand against the real
-project first, and the workflow then written to match what ran. Project
-`hh-opensdlc-managed-agents` (754963270337), zone `us-central1-a`, cluster
-`map-staging`, namespace `map`, release `map`, **mode 2** (Cloud SQL + GCS + Cloud
-KMS behind `existingSecret: map-platform`).
+project first, and the workflow then written to match what ran. Against the staging
+coordinates the workflow reads — `GCP_PROJECT_ID`, `GCP_ZONE`, `GKE_CLUSTER` —
+namespace `map`, release `map`, **mode 2** (Cloud SQL + GCS + Cloud KMS behind
+`existingSecret: map-platform`).
 
 - `gcloud builds submit --config deploy/gcp/cloudbuild.yaml --service-account=…cd-deployer@…`
   built all four images — controlplane/brain/executor as three tags on one build,
-  plus `--target gate` — in **2m16s**, into
-  `us-central1-docker.pkg.dev/hh-opensdlc-managed-agents/map-images`. Two things
-  had to be fixed for it to run at all and are the `Fixed` half of this change:
+  plus `--target gate` — in **2m16s**, into the `ARTIFACT_REGISTRY` prefix. Two
+  things had to be fixed for it to run at all and are the `Fixed` half of this change:
   `DOCKER_BUILDKIT=1` on both docker steps (the Dockerfile's
   `FROM --platform=$BUILDPLATFORM` is BuildKit-only) and
   `options.logging: CLOUD_LOGGING_ONLY` (mandatory once a build names its own
@@ -2604,11 +2603,11 @@ KMS behind `existingSecret: map-platform`).
 - `helm upgrade --install map … -f deploy/gcp/staging-values.yaml --wait --atomic
   --timeout 10m` returned 0; **all three Deployments** (controlplane, brain,
   executor) reached Ready.
-- Smoke against the controlplane LoadBalancer `34.63.227.73:8080`:
+- Smoke against the controlplane LoadBalancer, port 8080:
   `GET /v1/agents?limit=1` answered **200** with the management key and **401**
   without one — the round trip that also proves Cloud SQL is reachable.
 - The console half (`managed-agent-console`) deployed to the same cluster:
-  rollout green, LoadBalancer `34.45.173.145`, in-pod `/api/health?deep=1` **200**
+  rollout green, its own LoadBalancer up, in-pod `/api/health?deep=1` **200**
   with `platform.reachable: true` against the in-cluster control plane
   `http://map-managed-agent-platform-controlplane.map.svc.cluster.local:8080`,
   anonymous `GET /` **307** to `/login`, public `/api/health` **200** with
@@ -3268,8 +3267,8 @@ sandboxes).
 
 ## GCP mode-2 acceptance — Cloud SQL + GCS + Cloud KMS on GKE, real `ant` CLI (run 2026-08-03) — ✅ passed
 
-The production-shaped half of plan 20, run end to end against the live project
-`opensdlc-managed-agents`: the platform on GKE with **no bundled services at all**, every
+The production-shaped half of plan 20, run end to end against the live staging
+project: the platform on GKE with **no bundled services at all**, every
 credential in a pre-created Secret, and each backing service reached with this deployment's
 own credential rather than the operator's — three different kinds of credential, itemised
 below, because flattening them into "its service account" would not be true of Cloud SQL.
@@ -3855,9 +3854,9 @@ were additionally run standalone under the new pin before the full gate.
 ## GCP staging environment (#20 slice 4b) — acceptance record (2026-08-02)
 
 The first real execution of `deploy/gcp/`: both Terraform configurations applied against a
-live project (`opensdlc-managed-agents`, project number 460647310105), the platform
-deployed on GKE in mode 1, the acceptance battery driven by the **real `ant` CLI 1.21.0**
-built from the read-only checkout, and the teardown proven by destroy → apply. This also
+live project, the platform deployed on GKE in mode 1, the acceptance battery driven by the
+**real `ant` CLI 1.21.0** built from the read-only checkout, and the teardown proven by
+destroy → apply. This also
 narrows [#75](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/75) — images
 published and a real `helm install` accepted end to end, on GCP rather than generically.
 
