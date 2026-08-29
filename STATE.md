@@ -11,8 +11,8 @@ What is being worked on right now, and how far along it is — nothing else. **S
 - **Slice 1 — CRUD, the three lifecycle actions, `internal/cron`, migration `0031`.** In
   flight. Landed: the cron engine (Due/Next/Upcoming over one walk, embedded `time/tzdata`,
   the two DST rules), both tables, the `Deployment` domain type, the seven routes, and
-  the agent-archive refusal (plan decision 7), and every slice-1 registry entry whose
-  behavior has landed — 1, 2, 7, 8, 12, 15, 16, 19, 22, 23, 25, 27, 29, plus two the plan
+  the agent-archive refusal (plan decision 7), plus every slice-1 registry entry whose
+  behavior has landed — 1, 2, 7, 8, 12, 15, 16, 19, 22, 23, 25, 27, 29, and two the plan
   did not foresee. Still owed: the `DELETE /v1/environments` message naming the deployments
   that block it, a change to that resource's own handler.
   [#520](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/520) is slice 3's.

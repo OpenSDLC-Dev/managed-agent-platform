@@ -1,6 +1,7 @@
 package api_test
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -753,8 +754,10 @@ func TestAgentArchiveStaysIdempotentAgainstAPinFromBeforeTheRule(t *testing.T) {
 // Deterministic rather than timed. The test takes the FOR SHARE a deployment
 // create holds while it resolves its agent, waits until the archive is provably
 // blocked on a lock instead of sleeping and hoping, and only then commits the
-// pin. An archive that read the deployments before taking the lock never blocks
-// at all, so the wait ends immediately and says which failure it saw.
+// pin. What catches a regression is the status code, not the wait: an archive
+// that reads the deployments before locking still blocks a moment later, on its
+// own UPDATE, so it reaches the assertion below having read the wrong snapshot
+// and answers 200. The wait is what makes that ordering observable at all.
 func TestAgentArchiveCannotReadPastAConcurrentDeployment(t *testing.T) {
 	s := newTestServer(t)
 	agentID, envID := fixture(t, s)
@@ -810,15 +813,25 @@ func TestAgentArchiveCannotReadPastAConcurrentDeployment(t *testing.T) {
 }
 
 // waitUntilBlockedOnALock returns once another backend on this test's database
-// is waiting on a lock, which is the archive request. An archive that answers
-// without ever waiting is the regression this exists to catch, so that case
-// fails here rather than reading as a slow machine.
+// is waiting on a lock, which is the archive request. Any backend will do: a
+// pgtest database is private to one test, and the only other two connections on
+// it are the poller and the transaction holding the locks, neither of which
+// ever waits. internal/queue/keeperbudget_test.go polls the same broad way for
+// the same reason.
+//
+// The two failure exits are diagnostics for an archive that answered or died
+// early, not the mechanism that catches a broken ordering — that is the caller's
+// status assertion. 15s is generous by roughly fifty times: the wait was
+// measured at under 300ms even under a verified 2.6x host slowdown.
 func waitUntilBlockedOnALock(t *testing.T, pool *pgxpool.Pool, done <-chan int) {
 	t.Helper()
-	deadline := time.Now().Add(15 * time.Second)
-	for time.Now().Before(deadline) {
+	// Its own deadline, so a pool that could not hand out a connection fails
+	// here rather than hanging until the package's timeout.
+	ctx, cancel := context.WithTimeout(t.Context(), 15*time.Second)
+	defer cancel()
+	for ctx.Err() == nil {
 		var waiting int
-		if err := pool.QueryRow(t.Context(),
+		if err := pool.QueryRow(ctx,
 			`SELECT count(*) FROM pg_stat_activity
 			  WHERE datname = current_database() AND wait_event_type = 'Lock'
 			    AND pid <> pg_backend_pid()`).Scan(&waiting); err != nil {
@@ -829,9 +842,9 @@ func waitUntilBlockedOnALock(t *testing.T, pool *pgxpool.Pool, done <-chan int) 
 		}
 		select {
 		case status := <-done:
-			t.Fatalf("the archive answered %d without ever waiting on the agent row — its check ran outside the transaction", status)
+			t.Fatalf("the archive answered %d before ever waiting on a lock", status)
 		case <-time.After(20 * time.Millisecond):
 		}
 	}
-	t.Fatal("the archive never blocked on the agent row within 15s")
+	t.Fatal("no backend waited on a lock within 15s — the archive never reached the agent row")
 }
