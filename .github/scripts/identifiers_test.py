@@ -62,6 +62,7 @@ pattern reports exactly what a clean repository reports, and the silence is
 indistinguishable.
 """
 
+import collections
 import ipaddress
 import re
 import subprocess
@@ -80,14 +81,14 @@ PLACEHOLDER_PROJECTS = frozenset({
 ALLOWED_ADDRESSES = frozenset({"8.8.8.8", "1.1.1.1"})
 
 # Narrowing the scan is the failure this cannot afford, because it leaves a
-# shorter list and a smaller count that nothing questions. Two different mistakes
-# narrow it, and they need different guards.
+# shorter list and a smaller count that nothing questions. Three mistakes narrow
+# it, and no one guard covers all three.
 #
 # A PATHSPEC mistake moves the scan's root — these sentinels catch that, and they
 # are sentinels rather than an enumeration on purpose: naming every directory
 # that holds markdown would be the unmaintainable list this file declines to keep
-# elsewhere. They are not complete and are not claimed to be; the check below is
-# what covers the rest.
+# elsewhere. They are not complete and are not claimed to be; the two checks in
+# main cover what they miss.
 REQUIRED_DOCUMENTS = (
     "CLAUDE.md",
     "STATE.md",
@@ -95,6 +96,14 @@ REQUIRED_DOCUMENTS = (
     "changelog.d/README.md",
     "deploy/gcp/README.md",
 )
+
+# And the floor under all of them, on the number actually scanned rather than on
+# any one step. The sentinels cover the pathspec and the exclusion check covers
+# the filter, one hop of the pipeline each, so a narrowing introduced at a third —
+# a future filter, a skip added to the reader — passes both. Set well under the
+# live count, because this is a floor and not an assertion about the corpus: it is
+# here to catch a collapse, not a deletion.
+MINIMUM_DOCUMENTS = 100
 
 # The trailing lookahead rejects only a dot that CONTINUES the number. Rejecting
 # any dot would miss an address at the end of a sentence, which is the commonest
@@ -157,6 +166,14 @@ def scan_texts(documents):
     return bad
 
 
+
+# Named rather than a bare pair: both halves are lists of paths, so a caller that
+# unpacked them the wrong way round would widen the scan to include `testdata` and
+# empty the over-exclusion check by construction — a swap with no type error, no
+# runtime error, and a count nobody would question.
+Corpus = collections.namedtuple("Corpus", "every documentation")
+
+
 def tracked_docs(root):
     """Every tracked markdown path, and the subset of it that is documentation.
 
@@ -173,7 +190,7 @@ def tracked_docs(root):
         cwd=root, capture_output=True, text=True, check=True,
     ).stdout
     every = sorted(p for p in out.split("\0") if p)
-    return every, [p for p in every if "testdata" not in Path(p).parts]
+    return Corpus(every, [p for p in every if "testdata" not in Path(p).parts])
 
 
 def read_documents(root, paths):
@@ -269,7 +286,8 @@ def main():
         capture_output=True, text=True, check=True,
     ).stdout.strip())
 
-    every, paths = tracked_docs(root)
+    corpus = tracked_docs(root)
+    every, paths = corpus.every, corpus.documentation
     if not paths:
         print("no tracked markdown found — the scan would be clean for the wrong reason")
         return 1
@@ -293,11 +311,24 @@ def main():
         for p in over_excluded:
             print(f"  {p}")
         return 1
+    # The reverse containment, one line, because it is what makes the Corpus field
+    # names load-bearing rather than advisory: the documentation is a subset of
+    # every tracked path by definition, so two halves that changed places fail here
+    # rather than quietly scanning the fixtures and emptying the check above.
+    if not set(paths) <= set(every):
+        print("the scanned set is not a subset of the tracked set, so the two halves "
+              "of the corpus have changed places")
+        return 1
     documents, unreadable = read_documents(root, paths)
     if unreadable:
         print("these documents could not be scanned, so this run proves nothing:")
         for u in unreadable:
             print(f"  {u}")
+        return 1
+    if len(documents) < MINIMUM_DOCUMENTS:
+        print(f"only {len(documents)} documents reached the scan, below the floor of "
+              f"{MINIMUM_DOCUMENTS} — something narrowed it, and a clean result here "
+              "would say nothing about the documents that fell out")
         return 1
 
     bad = scan_texts(documents)
