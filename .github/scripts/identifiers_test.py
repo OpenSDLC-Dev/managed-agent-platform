@@ -43,8 +43,10 @@ Markdown only, and that scope was measured rather than assumed: widening from
 `docs/` and `deploy/` to every tracked `*.md` produced not one new finding -- the
 same four, all in one file -- so the scope is all of them, which is what puts
 CHANGELOG.md and the `changelog.d/` fragments that become it inside the guard.
-The count the run prints is the live number; this paragraph deliberately quotes
-none, because a number in prose goes stale the next time a document is added.
+The count the run prints is the live number, and no prose here quotes it, because
+a number that tracks the corpus goes stale the next time a document is added. A
+measurement pinned to a named commit does not, and one is quoted below where it
+argues why nothing in this file compares against a count.
 
 Source files are outside it, and that is a real gap rather than an oversight:
 #514 found a project id in a Go test fixture too, but every networking test here
@@ -67,6 +69,7 @@ import ipaddress
 import re
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 # Placeholders the documentation already uses where a project belongs. A value
@@ -81,14 +84,19 @@ PLACEHOLDER_PROJECTS = frozenset({
 ALLOWED_ADDRESSES = frozenset({"8.8.8.8", "1.1.1.1"})
 
 # Narrowing the scan is the failure this cannot afford, because it leaves a
-# shorter list and a smaller count that nothing questions. Three mistakes narrow
-# it, and no one guard covers all three.
+# shorter list and a smaller count that nothing questions. It can happen at every
+# hop — the listing, the exclusion, the read, and the scan of the text itself —
+# so main states what it expects of each hop separately. Deliberately none of
+# those expectations is a count: the corpus legitimately collapses by half at
+# every release, when `make changelog` consumes the fragments in `changelog.d/`
+# (110 documents to 56 across v0.3.0), so any floor high enough to be worth
+# setting fails the release PR that trips it.
 #
-# A PATHSPEC mistake moves the scan's root — these sentinels catch that, and they
-# are sentinels rather than an enumeration on purpose: naming every directory
-# that holds markdown would be the unmaintainable list this file declines to keep
-# elsewhere. They are not complete and are not claimed to be; the two checks in
-# main cover what they miss.
+# These sentinels are the outermost of those checks, and they answer the one
+# question none of the others can: whether this is the right repository at all.
+# They are sentinels rather than an enumeration on purpose — naming every
+# directory that holds markdown would be the unmaintainable list this file
+# declines to keep elsewhere — and they are not complete, nor claimed to be.
 REQUIRED_DOCUMENTS = (
     "CLAUDE.md",
     "STATE.md",
@@ -96,14 +104,6 @@ REQUIRED_DOCUMENTS = (
     "changelog.d/README.md",
     "deploy/gcp/README.md",
 )
-
-# And the floor under all of them, on the number actually scanned rather than on
-# any one step. The sentinels cover the pathspec and the exclusion check covers
-# the filter, one hop of the pipeline each, so a narrowing introduced at a third —
-# a future filter, a skip added to the reader — passes both. Set well under the
-# live count, because this is a floor and not an assertion about the corpus: it is
-# here to catch a collapse, not a deletion.
-MINIMUM_DOCUMENTS = 100
 
 # The trailing lookahead rejects only a dot that CONTINUES the number. Rejecting
 # any dot would miss an address at the end of a sentence, which is the commonest
@@ -166,7 +166,6 @@ def scan_texts(documents):
     return bad
 
 
-
 # Named rather than a bare pair: both halves are lists of paths, so a caller that
 # unpacked them the wrong way round would widen the scan to include `testdata` and
 # empty the over-exclusion check by construction — a swap with no type error, no
@@ -174,22 +173,28 @@ def scan_texts(documents):
 Corpus = collections.namedtuple("Corpus", "every documentation")
 
 
+def ls_files(root, *pathspec):
+    """Tracked paths, optionally narrowed by a pathspec.
+
+    `-z` rather than newlines: a tracked path containing a space would otherwise
+    be split into two nonexistent paths and silently skipped, which is the
+    failure mode this whole file exists to prevent.
+    """
+    out = subprocess.run(
+        ["git", "ls-files", "-z", "--", *pathspec],
+        cwd=root, capture_output=True, text=True, check=True,
+    ).stdout
+    return [p for p in out.split("\0") if p]
+
+
 def tracked_docs(root):
     """Every tracked markdown path, and the subset of it that is documentation.
 
     Both are returned because the caller checks what the exclusion removed, and
-    it cannot do that from the survivors alone.
-
-    `-z` rather than newlines: a tracked path containing a space would otherwise
-    be split into two nonexistent paths and silently skipped, which is the
-    failure mode this whole file exists to prevent. `testdata` is compared as a
-    path component so a top-level `testdata/` is excluded too.
+    it cannot do that from the survivors alone. `testdata` is compared as a path
+    component so a top-level `testdata/` is excluded too.
     """
-    out = subprocess.run(
-        ["git", "ls-files", "-z", "--", "*.md"],
-        cwd=root, capture_output=True, text=True, check=True,
-    ).stdout
-    every = sorted(p for p in out.split("\0") if p)
+    every = sorted(ls_files(root, "*.md"))
     return Corpus(every, [p for p in every if "testdata" not in Path(p).parts])
 
 
@@ -264,11 +269,27 @@ def selftest():
         if got:
             failures.append(f"FALSE +  {label}: {line!r} -> {got}")
 
-    # scan_texts itself, so that a scanner which always returns [] cannot pass
-    # while every row above stays green.
-    planted = scan_texts([("a.md", "fine\nLoadBalancer 11.22.33.44 here\n")])
-    if planted != ["a.md:2: routable address 11.22.33.44"]:
-        failures.append(f"SCAN     did not report the planted line: {planted}")
+    # The reader and the scanner, driven end to end, so that a scanner which
+    # always returns [] cannot pass while every row above stays green. Over a LONG
+    # document with its only violation on the last line, because coverage within a
+    # file is the narrowing no count of files can see: a reader that truncates the
+    # text, or a scanner that stops after the first few lines, leaves every count
+    # in this file untouched and still reports clean.
+    body = "a line carrying no coordinate at all\n" * 4000
+    planted = body + "LoadBalancer 11.22.33.44 closes it\n"
+    with tempfile.TemporaryDirectory() as tmp:
+        Path(tmp, "deep.md").write_text(planted, encoding="utf-8")
+        documents, unreadable = read_documents(Path(tmp), ["deep.md"])
+    if unreadable:
+        failures.append(f"READ     the fixture came back unreadable: {unreadable}")
+    elif documents[0][1] != planted:
+        failures.append(f"READ     returned {len(documents[0][1])} of "
+                        f"{len(planted)} characters")
+    else:
+        found = scan_texts(documents)
+        if found != ["deep.md:4001: routable address 11.22.33.44"]:
+            failures.append(f"SCAN     did not reach the last line of a "
+                            f"4001-line document: {found}")
     return failures
 
 
@@ -291,6 +312,29 @@ def main():
     if not paths:
         print("no tracked markdown found — the scan would be clean for the wrong reason")
         return 1
+    # First, that the two halves are the halves they are named for. The
+    # documentation is a subset of every tracked path by definition, so this can
+    # only fail if they changed places — which is what makes the Corpus field names
+    # load-bearing rather than advisory, since a namedtuple still unpacks
+    # positionally and the old mistype is still writable. It is checked before
+    # anything reads either half, so a swap is reported as a swap rather than as
+    # whichever later check happens to notice the shape of it.
+    if not set(paths) <= set(every):
+        print("the scanned set is not a subset of the tracked set, so the two halves "
+              "of the corpus have changed places")
+        return 1
+    # The listing is the first hop, and the sentinels cannot see past it: an
+    # exclusion added to the pathspec shrinks `every` and `paths` together, so
+    # nothing downstream disagrees and every sentinel is still present. Restated
+    # through a second mechanism instead — git's own glob against a suffix test in
+    # Python, two idioms over one set — so narrowing either one alone fails here.
+    missed = sorted(set(p for p in ls_files(root) if p.endswith(".md")) - set(every))
+    if missed:
+        print("a plain listing finds tracked markdown the pathspec did not return, "
+              "so the scan began narrower than the repository:")
+        for p in missed:
+            print(f"  {p}")
+        return 1
     missing = [d for d in REQUIRED_DOCUMENTS if d not in paths]
     if missing:
         print("the scan did not reach documents it must always cover, so a clean "
@@ -311,24 +355,20 @@ def main():
         for p in over_excluded:
             print(f"  {p}")
         return 1
-    # The reverse containment, one line, because it is what makes the Corpus field
-    # names load-bearing rather than advisory: the documentation is a subset of
-    # every tracked path by definition, so two halves that changed places fail here
-    # rather than quietly scanning the fixtures and emptying the check above.
-    if not set(paths) <= set(every):
-        print("the scanned set is not a subset of the tracked set, so the two halves "
-              "of the corpus have changed places")
-        return 1
     documents, unreadable = read_documents(root, paths)
     if unreadable:
         print("these documents could not be scanned, so this run proves nothing:")
         for u in unreadable:
             print(f"  {u}")
         return 1
-    if len(documents) < MINIMUM_DOCUMENTS:
-        print(f"only {len(documents)} documents reached the scan, below the floor of "
-              f"{MINIMUM_DOCUMENTS} — something narrowed it, and a clean result here "
-              "would say nothing about the documents that fell out")
+    # The read is the third hop, and it is the one that can lose a document
+    # without anybody's list changing. Exact rather than approximate: everything
+    # selected is either read or reported, so the two numbers agree today by
+    # construction, and a skip introduced later disagrees by exactly what it lost.
+    if len(documents) != len(paths):
+        print(f"the reader returned {len(documents)} of {len(paths)} selected "
+              "documents without reporting the difference, so the scan silently "
+              "covered less than it chose to")
         return 1
 
     bad = scan_texts(documents)
