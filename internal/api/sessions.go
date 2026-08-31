@@ -641,8 +641,9 @@ type createdSession struct {
 // recordCreated is the post-commit half every committer shares — the status
 // metric for a session born running, and the resource-mutation metric with
 // its log line. Called only after a successful Commit, because both observe
-// committed state; createSession and runDeployment are the two callers, and
-// one copy is what keeps a metric added here firing for both.
+// committed state; createSession, runDeployment and the scheduler's fire are
+// the three callers, and one copy is what keeps a metric added here firing
+// for all of them.
 func (c createdSession) recordCreated(ctx context.Context) {
 	if c.initialEvents > 0 {
 		events.RecordSessionStatus(ctx, domain.SessionRunning)

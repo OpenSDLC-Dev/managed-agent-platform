@@ -32,6 +32,14 @@ type server struct {
 	emitting sync.Map
 }
 
+// newServer is the assembly NewHandler and StartDeploymentScheduler share: a
+// scheduled fire is a full session creation, so the scheduler needs the same
+// server the handlers run on — minus the mux and the verifier, which are
+// HTTP's.
+func newServer(pool *pgxpool.Pool, blobs blob.Store, cipher secrets.Cipher) *server {
+	return &server{pool: pool, log: events.NewLog(pool), broker: events.NewBroker(pool), queue: queue.New(pool), blobs: blobs, cipher: cipher}
+}
+
 // NewHandler assembles the control-plane HTTP surface over the given pool.
 // blobs is the object store backing skill archives; nil deploys without
 // object storage — everything serves except the storage-backed skill routes,
@@ -44,7 +52,7 @@ type server struct {
 // request shape but one: requireAPIKey refuses a repeated x-api-key field in
 // every mode, deliberately (see dispatchManagementAuth).
 func NewHandler(pool *pgxpool.Pool, blobs blob.Store, cipher secrets.Cipher, verifier *identity.Verifier) http.Handler {
-	s := &server{pool: pool, log: events.NewLog(pool), broker: events.NewBroker(pool), queue: queue.New(pool), blobs: blobs, cipher: cipher}
+	s := newServer(pool, blobs, cipher)
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("POST /v1/agents", s.handle(identity.RoleDeveloper, s.createAgent))

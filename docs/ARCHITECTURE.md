@@ -57,7 +57,7 @@ Postgres, all coordination through it:
 
 | Binary | Role |
 |---|---|
-| `controlplane` | The wire-compatible REST surface: resource CRUD, the event log endpoints (POST/list/SSE), the work API for BYOC workers, auth (management `x-api-key`, worker environment keys), and the session state machine. It also runs the one background sweep no request drives — memory-version retention (#476), hourly, cancelled and drained before the pool closes. |
+| `controlplane` | The wire-compatible REST surface: resource CRUD, the event log endpoints (POST/list/SSE), the work API for BYOC workers, auth (management `x-api-key`, worker environment keys), and the session state machine. It also runs the two background sweeps no request drives — memory-version retention (#476), hourly, and the deployment scheduler (plan 37), every 30 seconds — both cancelled and drained before the pool closes. The scheduler's at-most-one-run-per-occurrence guarantee across replicas is the partial unique index on `(deployment_id, scheduled_at)` — the reference's own published idempotency key — not leader election, which this platform has nowhere; and its clock is Postgres's, one `SELECT now()` per tick, so a replica with a skewed clock cannot shift what fires. |
 | `brain` | The harness pool. Claims `model_turn` work, replays the session's event log to rebuild context, calls the model provider, writes the resulting events, enqueues tool work, suspends. |
 | `executor` | The built-in sandbox worker for platform-managed (`cloud`) environments. Claims `tool_exec` work, runs the tool inside the session's sandbox container, posts `agent.tool_result`. Also claims `web_exec` work — web_fetch/web_search, run in its own process with no sandbox, for **both** environment kinds — `outputs_harvest` work, the deliverables snapshot of `/mnt/session/outputs/` a cloud session's outcome-grading cycle begins with, and `mcp_exec` work — both halves of the MCP path, likewise in its own process with no sandbox and for **both** environment kinds: the discovery that fills `mcp_catalogs`, enqueued when a turn suspends for a declared server with no row, and the tool call itself, enqueued when the brain routes an `mcp__{server}__{tool}` the model asked for. |
 | `worker` | The distributable BYOC worker for `self_hosted` environments. Same pull protocol as the executor, run on customer compute, posting `user.tool_result` — the real `ant beta:worker` works against the same API. |
@@ -519,7 +519,15 @@ measured from the work claim in `internal/brain/telemetry.go`, tool-run duration
 `internal/executor/telemetry.go` and `internal/worker/telemetry.go` (same instrument
 names, two scopes), and the memory-store instruments beside them on both meters
 (`memory.materialized`, `memory.sync.actions` by pulled/pushed/deleted/conflict/refused,
-and the two durations — the executor's since slice 4, the worker's since slice 6). Queue `depth`/`pending`/`workers_polling` are OTLP
+and the two durations — the executor's since slice 4, the worker's since slice 6). The
+deployment scheduler roots its own trace the way a `model_turn` does — a tick has no
+inbound request — as span `deployment.tick` with one `deployment.fire` child per attempt
+(red only when abandoned: a run recorded with an error is a fire the platform handled),
+and carries three instruments in `internal/api/deploymentscheduler.go`: `deployment.fires`
+by outcome (`created`/`failed` sub-attributed by error.type/`abandoned`),
+`deployment.occurrences.skipped` (the catch-up collapse count, added by the claim's winner
+after its commit so a rollback cannot double-count), and `deployment.tick.duration`, the
+gauge of when one sweep has outgrown its 30-second interval. Queue `depth`/`pending`/`workers_polling` are OTLP
 observable gauges (`internal/queue/metrics.go`) sampling the same work-stats view the API
 serves — registered once by the control plane, reported per self_hosted environment. A
 configured OTLP endpoint bridges

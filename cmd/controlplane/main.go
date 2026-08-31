@@ -190,12 +190,14 @@ func run(ctx context.Context) error {
 		ReadTimeout:       time.Minute,
 		IdleTimeout:       2 * time.Minute,
 	}
-	// Memory-version retention (#476): the only background sweep this binary
-	// runs. It is hosted here because this process already holds the pool and
-	// serves every memory route, and because a deployment whose environments
-	// are all self_hosted runs no executor to put it in. Its statement is
-	// idempotent, so a second replica costs a duplicate query and never a
-	// wrong answer.
+	// Memory-version retention (#476) and the deployment scheduler (plan 37):
+	// the two background sweeps this binary runs. Both are hosted here because
+	// this process already holds the pool and serves the routes they belong
+	// to, and because a deployment whose environments are all self_hosted runs
+	// no executor to put them in. Both are replica-safe: the retention
+	// statement is idempotent, and the scheduler's occurrence claim is a
+	// unique-index insert, so a second replica costs a duplicate query or a
+	// briefly-blocked loser and never a wrong answer.
 	//
 	// Joined, for the reason the meter deregistration above is ordered: this
 	// defer is registered after `defer pool.Close()`, so LIFO drains the sweep
@@ -203,10 +205,12 @@ func run(ctx context.Context) error {
 	// waiting, because one exit leaves ctx live — a ListenAndServe failure —
 	// and waiting on a loop nothing has told to stop would hang the shutdown
 	// this is here to make orderly.
-	retentionCtx, stopRetention := context.WithCancel(ctx)
+	sweepCtx, stopSweeps := context.WithCancel(ctx)
 	retentionDone := make(chan struct{})
-	go func() { defer close(retentionDone); api.StartMemoryRetention(retentionCtx, pool) }()
-	defer func() { stopRetention(); <-retentionDone }()
+	go func() { defer close(retentionDone); api.StartMemoryRetention(sweepCtx, pool) }()
+	schedulerDone := make(chan struct{})
+	go func() { defer close(schedulerDone); api.StartDeploymentScheduler(sweepCtx, pool, blobs, cipher) }()
+	defer func() { stopSweeps(); <-retentionDone; <-schedulerDone }()
 
 	errCh := make(chan error, 1)
 	go func() { errCh <- srv.ListenAndServe() }()

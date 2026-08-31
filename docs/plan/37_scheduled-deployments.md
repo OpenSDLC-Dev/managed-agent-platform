@@ -12,7 +12,7 @@ under active development.
 
 A **deployment** binds an agent to an environment, credentials, initial events and an
 optional cron schedule, so the platform starts sessions on its own — no client in the loop
-at 09:00. A **deployment run** is the immutable record of one such attempt: it names the
+at 09:00. A **deployment run** is the persistent record of one such attempt: it names the
 session that was created, or the error that stopped it, and nothing else. At drafting the
 seam is reserved and nothing more: `internal/domain/id.go:29-30` already carries
 `PrefixDeployment = "depl"` and `PrefixDeploymentRun = "drun"` in `knownPrefixes`

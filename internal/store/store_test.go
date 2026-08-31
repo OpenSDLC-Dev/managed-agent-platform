@@ -101,6 +101,22 @@ func TestOpenMigratesFreshDatabase(t *testing.T) {
 	}
 }
 
+// A wall-clock column would round-trip the DST fall-back's two instants
+// without colliding, so internal/api's behavioral two-rows assertion cannot
+// pin the DDL alone — only the catalog type can (plan 37 §7).
+func TestDeploymentRunScheduledAtIsTimestamptz(t *testing.T) {
+	pool := open(t, pgtest.FreshDB(t))
+	var typ string
+	if err := pool.QueryRow(context.Background(), `
+		SELECT data_type FROM information_schema.columns
+		 WHERE table_name = 'deployment_runs' AND column_name = 'scheduled_at'`).Scan(&typ); err != nil {
+		t.Fatal(err)
+	}
+	if typ != "timestamp with time zone" {
+		t.Fatalf("deployment_runs.scheduled_at is %q, want timestamp with time zone", typ)
+	}
+}
+
 func TestMigrateIsIdempotent(t *testing.T) {
 	pool := open(t, pgtest.FreshDB(t))
 	ctx := context.Background()

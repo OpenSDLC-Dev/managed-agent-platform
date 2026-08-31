@@ -632,13 +632,27 @@ func (s *server) updateDeployment(r *http.Request) (any, error) {
 // archived_at, later calls change nothing. It leaves the pause columns exactly
 // as it found them — an archived deployment reports "active" whatever they
 // say, and nothing unarchives, so nothing can observe them again.
+//
+// The write is a transaction only for the lock_timeout: a fire in flight
+// holds the row FOR SHARE for the length of its session creation, and this
+// UPDATE would otherwise wait on it indefinitely — a wedged fire should
+// surface as a failed request, not a hang (§4.1 step 2). SET LOCAL needs a
+// transaction to be local to.
 func (s *server) archiveDeployment(r *http.Request) (any, error) {
 	ctx := r.Context()
 	id := r.PathValue("id")
 	if err := checkID(id, "deployment"); err != nil {
 		return nil, err
 	}
-	d, err := scanDeployment(s.pool.QueryRow(ctx,
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if err := setDeploymentLockWait(ctx, tx); err != nil {
+		return nil, err
+	}
+	d, err := scanDeployment(tx.QueryRow(ctx,
 		`UPDATE deployments SET
 		   updated_at  = CASE WHEN archived_at IS NULL THEN now() ELSE updated_at END,
 		   archived_at = COALESCE(archived_at, now())
@@ -648,6 +662,9 @@ func (s *server) archiveDeployment(r *http.Request) (any, error) {
 		return nil, errNotFound("deployment %s not found", id)
 	}
 	if err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(ctx); err != nil {
 		return nil, err
 	}
 	return finishDeployment(ctx, s.pool, d)
@@ -683,6 +700,12 @@ func (s *server) setDeploymentPause(r *http.Request, pause bool) (any, error) {
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
+	// Bounds the wait on a fire in flight, which holds the row FOR SHARE for
+	// the length of its session creation (§4.1 step 2) — archiveDeployment's
+	// reason, applied to the FOR UPDATE below.
+	if err := setDeploymentLockWait(ctx, tx); err != nil {
+		return nil, err
+	}
 	if _, err := loadDeployment(ctx, tx, id); err != nil {
 		return nil, err
 	}
