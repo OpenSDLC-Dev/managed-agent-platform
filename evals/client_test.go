@@ -98,6 +98,15 @@ func (s *stack) uploadSkill(t *testing.T, sf SkillFixture, tr *Trial) string {
 	for path, content := range sf.Files {
 		part(path, content)
 	}
+	// display_title is explicit and per-attempt: left off, the server defaults
+	// it to the frontmatter name, which is constant across a task's attempts,
+	// and skills_custom_display_title_uq would 400 a retry's re-upload — an
+	// Either failure aborted into a fake Platform red. The title is create-form
+	// metadata only; the Level-1 block and the materialized directory both come
+	// from the frontmatter name, so the model sees the same skill either way.
+	if err := mw.WriteField("display_title", sf.Name+"-"+tr.Nonce); err != nil {
+		t.Fatalf("write display_title: %v", err)
+	}
 	if err := mw.Close(); err != nil {
 		t.Fatalf("close multipart: %v", err)
 	}

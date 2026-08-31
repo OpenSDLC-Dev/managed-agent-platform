@@ -243,7 +243,7 @@ func TranscriptCarriesNoRepoToken() Grader {
 // The passphrase cannot be registered from here alone, because it is not known
 // until something clones. This function makes the attempt so that the value is
 // in the set before the first trial runs — a trial that aborts in its drive
-// records through runAndGrade's defer without any grader having run — but the
+// records through gradeAttempt's defer without any grader having run — but the
 // attempt is best effort, and the guarantee comes from repoPassphraseValue
 // registering the value itself the moment it first resolves, wherever that is.
 func repoSecrets() []string {
@@ -327,7 +327,7 @@ func clonePassphrase() (string, error) {
 	// Bounded, because the alternative is not a slow run but a lost one: a
 	// blackholed route leaves this clone hanging until `go test -timeout` panics
 	// the process from testing's alarm goroutine, and that is the one exit that
-	// never runs runAndGrade's deferred recordTrial — so the wedged run would
+	// never runs gradeAttempt's deferred recordTrial — so the wedged run would
 	// spend its whole budget and still write no evidence for the trial that
 	// wedged. Generous for a fixture of a few kilobytes; short against 120m.
 	ctx, cancel := context.WithTimeout(context.Background(), cloneOracleTimeout)
