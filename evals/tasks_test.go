@@ -55,9 +55,9 @@ func memoryRecall() Task {
 	return Task{
 		ID: "memory-recall",
 		Memory: &MemoryFixture{Name: "notes", Access: "read_only",
-			Memories: map[string]string{"/passphrase.md": "The secret passphrase is {{RECALL}}."}},
+			Memories: map[string]string{"/passphrase.md": "The passphrase is {{RECALL}}."}},
 		Turns: []Turn{{Message: "A memory store is mounted in your sandbox. " +
-			"What is this task's secret passphrase, as saved in your memory? Reply with exactly the passphrase and nothing else."}},
+			"What is this task's passphrase, as saved in your memory? Reply with exactly the passphrase and nothing else."}},
 		Graders: []Grader{
 			// Either for both, as fileAnswer: the passphrase is reachable only
 			// through the mount, so a right answer is unambiguous, while a
@@ -227,19 +227,21 @@ func mcpAnswer() Task {
 		MCP: &MCPFixture{
 			Name:        "vault",
 			Tool:        "read_passphrase",
-			Description: "Returns this task's secret passphrase.",
-			Answer:      "The secret passphrase is {{RECALL}}.",
+			Description: "Returns this task's passphrase.",
+			Answer:      "The passphrase is {{RECALL}}.",
 		},
 		Turns: []Turn{{
 			// The provenance sentence is load-bearing, and it is what the other
 			// mounted-answer trials say too ("A file has been mounted into your
-			// sandbox"). Without it the model reads "tell me the secret
-			// passphrase" as an injection attempt and declines on principle —
-			// observed, with the platform working perfectly underneath. It names
-			// the mechanism and not the tool, so the listing is still what has to
-			// arrive for the model to know what to call.
+			// sandbox"). Without it the model reads the ask as an injection
+			// attempt and declines on principle — observed, with the platform
+			// working perfectly underneath. The provenance sentence names the
+			// mechanism and not the tool, so the listing is still what has to
+			// arrive for the model to know what to call. The word "secret" is
+			// gone too: it was associated with the same class of declines in
+			// the measured A/B recorded beside repoAnswer's wording note.
 			Message: "This task has attached an MCP server to your session. " +
-				"What is this task's secret passphrase? " +
+				"What is this task's passphrase? " +
 				"Reply with exactly the passphrase and nothing else.",
 			// An mcp_toolset gates on human confirmation by default (issue #26,
 			// extended to the MCP arm), so the trial takes the default path
@@ -280,11 +282,11 @@ func fileAnswer() Task {
 		ID: "file-answer",
 		Files: []FileFixture{{
 			Name:      "answer.txt",
-			Content:   "The secret passphrase is {{RECALL}}.",
+			Content:   "The passphrase is {{RECALL}}.",
 			MountPath: mount,
 		}},
 		Turns: []Turn{{Message: "A file has been mounted into your sandbox. " +
-			"What is this task's secret passphrase? Reply with exactly the passphrase and nothing else."}},
+			"What is this task's passphrase? Reply with exactly the passphrase and nothing else."}},
 		Graders: []Grader{
 			// Either for both, for the same reason as skillAnswer: the passphrase
 			// is reachable only through the materialized mount, so a right answer
@@ -305,7 +307,7 @@ func fileAnswer() Task {
 // not the model's own knowledge.
 //
 // The turn names no skill and no path: it asks only for the passphrase. The
-// injected Level-1 block ("eval-secret - Reveals this task's secret passphrase.
+// injected Level-1 block ("eval-secret - Reveals this task's passphrase.
 // (skills/eval-secret/SKILL.md)") is the only thing that reveals a skill can
 // answer and where it lives, so injection is the discovery mechanism under test —
 // a prompt that announced the skill would let the model succeed by exploring the
@@ -314,20 +316,26 @@ func fileAnswer() Task {
 // discoverable by an ls/glob), which is why both graders are Either: a right
 // answer is strong platform evidence, and the transcript (did it read via the
 // injected path?) is the arbiter on a miss.
+//
+// The skill's name keeps the word "secret" on purpose: the measured variant
+// behind the 2026-08-31 wording change (repoAnswer's note) kept the
+// eval-secret identifier and failed none of its attempts — it is an
+// identifier the model quotes back, not prose in the ask — so a future
+// "secret" sweep should leave it be.
 func skillAnswer() Task {
 	return Task{
 		ID: "skill-answer",
 		Skills: []SkillFixture{{
 			Name:        "eval-secret",
-			Description: "Reveals this task's secret passphrase.",
-			Body: "This task has a secret passphrase. It is written in the file answer.txt " +
+			Description: "Reveals this task's passphrase.",
+			Body: "This task has a passphrase. It is written in the file answer.txt " +
 				"beside this SKILL.md (skills/eval-secret/answer.txt). Read that file and " +
 				"report the passphrase exactly as written.",
 			Files: map[string]string{
-				"answer.txt": "The secret passphrase is {{RECALL}}.",
+				"answer.txt": "The passphrase is {{RECALL}}.",
 			},
 		}},
-		Turns: []Turn{{Message: "What is this task's secret passphrase? " +
+		Turns: []Turn{{Message: "What is this task's passphrase? " +
 			"Reply with exactly the passphrase and nothing else."}},
 		Graders: []Grader{
 			// Either for both: the passphrase is reachable only through the

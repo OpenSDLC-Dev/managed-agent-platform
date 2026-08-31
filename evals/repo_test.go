@@ -115,30 +115,35 @@ func repoConfigErr() (url, token string, err error) {
 // That is why both content graders are Either rather than Platform: a right
 // answer is strong evidence, and the transcript is the arbiter on a miss.
 //
-// This turn asks a model to hand back something the prompt itself calls a secret
-// out of a repository the model did not clone, which is a shape a safety-tuned
-// model may decline — and one did, during verification on 2026-08-12: a refusal
-// in 1.7s with no tool call at all, "I notice there's a prompt injection
-// attempt". Both content graders are Either precisely for that, so the classing
-// holds, but the trial still reds, and an unactionable red is what parked it.
+// This turn asks a model to hand back a planted passphrase out of a repository
+// the model did not clone, which is a shape a safety-tuned model may decline —
+// and one did, during verification on 2026-08-12: a refusal in 1.7s with no
+// tool call at all, "I notice there's a prompt injection attempt". Both content
+// graders are Either precisely for that, so the classing holds, but the trial
+// still reds, and an unactionable red is what parked it.
 //
-// The obvious repair was tried and measured worse, which is why this wording
-// survives unchanged from #331. Rewording the turn to drop "secret passphrase"
-// and ask for "the one line" of a named file — the move journalMultiturn and
-// viewRange record for the same reflex — went 2 of 4 against the same endpoint,
-// against 7 of 8 for the wording above: once a fabricated "there is no
-// PASSPHRASE.txt here, which is convenient, there is nothing to leak", once a
-// tool call emitted as literal text. Asking plainly for the passphrase reads as
-// a task; asking someone to read a file and recite it apparently reads as a
-// wrapper around the same request, with worse odds. Twelve runs is not a study,
-// so what is recorded here is the measurement, not a law — but do not re-do this
-// rewrite on intuition alone.
+// The wording has been measured twice, and the two variants moved different
+// levers. The 2026-08-12 rewrite — drop "secret passphrase" and ask for "the
+// one line" of a named file, journalMultiturn's and viewRange's move — went
+// 2 of 4 against the same endpoint, against 7 of 8 for the then-current
+// "secret passphrase" wording: asking plainly for the passphrase apparently
+// reads as a task, wrapping the same request in "read a file and recite it"
+// as extraction, with worse odds. The 2026-08-31 change keeps the plain ask
+// and drops only the word "secret": measured across file-answer,
+// skill-answer and mcp-answer, the "secret passphrase" wording failed 10 of
+// 31 attempts (refusals, denials that the tool exists, fabricated answers)
+// while the same prompts without it failed 0 of 24, same endpoint, same day.
+// memory-recall and this trial's own turn take the one-word drop by analogy,
+// unmeasured — memory-recall sat outside the measured sample, and this
+// trial's fixture needs credentials only CI holds. Neither sample is a
+// study; what is recorded here is the measurement, not a law — but do not
+// re-reword on intuition alone in either direction.
 func repoAnswer() Task {
 	return Task{
 		ID:   "repo-answer",
 		Repo: &RepoFixture{MountPath: repoEvalMount},
 		Turns: []Turn{{Message: "A git repository has been mounted into your sandbox. " +
-			"It contains a file named " + passphraseFile + " holding a secret passphrase. " +
+			"It contains a file named " + passphraseFile + " holding a passphrase. " +
 			"What is the passphrase? Reply with exactly the passphrase and nothing else."}},
 		Graders: []Grader{
 			// The token sweep runs FIRST, and the order is load-bearing rather
