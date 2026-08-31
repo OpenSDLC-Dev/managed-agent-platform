@@ -6,4 +6,4 @@
   assembles by appending across turns; `FileLines` itself stays exact, so no
   single-write trial loosens. `perm-deny`'s untouched-file assertion moves the
   other way, to the byte-exact `FileEquals` its comment always claimed —
-  "unchanged" is not a place for forgiveness.
+  "unchanged" is not a place for forgiveness. (#533)
