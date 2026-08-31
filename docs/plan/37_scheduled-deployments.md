@@ -42,9 +42,9 @@ movement and its registry entries:
 
 1. Deployment CRUD, the **three lifecycle actions** (`/archive`, `/pause`, `/unpause`),
    `internal/cron`, migration `0031`. `POST /run` is the fourth action endpoint and lands in
-   slice 3, because it needs `createSessionTx` and `sessions.deployment_id` — both of which
+   slice 3, because it needs `createSessionInTx` and `sessions.deployment_id` — both of which
    are slices 2 and 3.
-2. `createSessionTx` extraction — behavior-neutral by construction, the plan-36-slice-5
+2. `createSessionInTx` extraction — behavior-neutral by construction, the plan-36-slice-5
    idiom, with the whole existing session suite as its regression test.
 3. `sessions.deployment_id` (migration `0032`), the real list filter, `POST /run`.
 4. The scheduler: tick, claim, fire, auto-pause — **and catch-up**, because a tick cannot
@@ -569,9 +569,9 @@ references.
 **The fire, in one transaction:**
 
 1. `BEGIN`.
-2. `SELECT 1 FROM deployments WHERE id = $1 AND archived_at IS NULL AND paused_at IS NULL FOR SHARE`. **Zero rows means the deployment was archived or paused after the candidate scan read it** — roll back, return `nil`. The candidate scan and the fire are separate statements, so without this re-read a fire could create a session for a deployment whose archive had already returned 200, and archive is terminal. Archive, pause and unpause take `FOR UPDATE` on the same row, so the two cannot interleave; this is the discipline decision 7 applies to the agent row, applied here to the deployment's own. The cost is latency, and it is one-directional: a fire in flight blocks a concurrent pause or archive for the length of its `createSessionTx`, so those three handlers set a short `lock_timeout` and surface a wedged fire as a failed request rather than an indefinite hang.
-3. `INSERT INTO deployment_runs (…, deployment_id, trigger_type='schedule', scheduled_at, agent, session_id=NULL, error=NULL) … ON CONFLICT (deployment_id, scheduled_at) WHERE scheduled_at IS NOT NULL DO NOTHING RETURNING id`. **Zero rows returned means another replica owns this occurrence** — roll back and return a clean `nil`. **The conflict target is named on purpose.** A bare `ON CONFLICT DO NOTHING` swallows *every* unique violation — an id collision, a constraint some later migration adds — and reports each as a lost race, which silently drops a fire that should have been a 500. Naming the target means only the occurrence claim is absorbed and anything else still raises. **And zero rows is not always immediate.** Against a *committed* conflicting row the insert returns zero rows at once; against one a concurrent replica has inserted and not yet committed, Postgres has no snapshot to test and waits on that transaction's id until it ends — which here is the winner's whole fire, `createSessionTx` included. **The fire's own transaction therefore sets a short `lock_timeout`** — step 2 gives one to archive, pause and unpause, which is the other side of this contention and not this side of it — and a `55P03` raised by this statement is read as a lost claim rather than an error: roll back, return `nil`. Being transaction-scoped it covers step 2's `FOR SHARE` too, where a timeout means the same thing by a different route: another writer holds the deployment row, so this tick does not fire it. Without it a loser holds a connection for the winner's entire fire, and §4.4's budget would be short by one connection per replica per contested occurrence.
-4. `SAVEPOINT fire`; run `createSessionTx` (slice 2) in the same transaction.
+2. `SELECT 1 FROM deployments WHERE id = $1 AND archived_at IS NULL AND paused_at IS NULL FOR SHARE`. **Zero rows means the deployment was archived or paused after the candidate scan read it** — roll back, return `nil`. The candidate scan and the fire are separate statements, so without this re-read a fire could create a session for a deployment whose archive had already returned 200, and archive is terminal. Archive, pause and unpause take `FOR UPDATE` on the same row, so the two cannot interleave; this is the discipline decision 7 applies to the agent row, applied here to the deployment's own. The cost is latency, and it is one-directional: a fire in flight blocks a concurrent pause or archive for the length of its `createSessionInTx`, so those three handlers set a short `lock_timeout` and surface a wedged fire as a failed request rather than an indefinite hang.
+3. `INSERT INTO deployment_runs (…, deployment_id, trigger_type='schedule', scheduled_at, agent, session_id=NULL, error=NULL) … ON CONFLICT (deployment_id, scheduled_at) WHERE scheduled_at IS NOT NULL DO NOTHING RETURNING id`. **Zero rows returned means another replica owns this occurrence** — roll back and return a clean `nil`. **The conflict target is named on purpose.** A bare `ON CONFLICT DO NOTHING` swallows *every* unique violation — an id collision, a constraint some later migration adds — and reports each as a lost race, which silently drops a fire that should have been a 500. Naming the target means only the occurrence claim is absorbed and anything else still raises. **And zero rows is not always immediate.** Against a *committed* conflicting row the insert returns zero rows at once; against one a concurrent replica has inserted and not yet committed, Postgres has no snapshot to test and waits on that transaction's id until it ends — which here is the winner's whole fire, `createSessionInTx` included. **The fire's own transaction therefore sets a short `lock_timeout`** — step 2 gives one to archive, pause and unpause, which is the other side of this contention and not this side of it — and a `55P03` raised by this statement is read as a lost claim rather than an error: roll back, return `nil`. Being transaction-scoped it covers step 2's `FOR SHARE` too, where a timeout means the same thing by a different route: another writer holds the deployment row, so this tick does not fire it. Without it a loser holds a connection for the winner's entire fire, and §4.4's budget would be short by one connection per replica per contested occurrence.
+4. `SAVEPOINT fire`; run `createSessionInTx` (slice 2) in the same transaction.
 5. On success: `UPDATE deployment_runs SET session_id = … WHERE id = $run RETURNING id`. The settlement **must** return exactly one row; zero aborts the transaction rather than committing a run with both columns null. `COMMIT`.
 6. On a **classified** failure (an archived environment, a missing vault, an archived memory store — §5.2 is the inventory): `ROLLBACK TO SAVEPOINT fire` — which discards the half-made session and keeps the claim — then the same one-row-returning `UPDATE … SET error = {type, message}`, auto-pause if the type is one of the fourteen, and `COMMIT`.
 7. On an **unclassified** infrastructure failure: roll the whole transaction back. The occurrence stays unclaimed, and a later tick retries it **only while it is still the most recent due occurrence inside the catch-up window** — once a newer occurrence commits a run, the watermark has passed it and it is counted as collapsed (§4.2), not retried forever.
@@ -673,7 +673,7 @@ on a table two handlers write.
 ### 4.4 Concurrency, connections, and a mixed-version fleet
 
 A fire is a full session creation — `resolveAgent`, a `FOR SHARE` on the environment row
-(`internal/api/sessions.go:583`), the resource materialization and the initial-event append.
+(`internal/api/sessions.go:654`), the resource materialization and the initial-event append.
 Thirty of them serialized behind one tick will overrun the 30-second interval (§3.4). The tick
 therefore fires with a small bounded concurrency (a constant, with the reason in its
 comment), and `deployment.tick.duration` is the instrument that says when the constant is
@@ -776,7 +776,7 @@ sets the deployment's pause columns. Two published constraints shape the mapping
 
 | Cause | Run error type | Pauses? |
 |---|---|---|
-| Environment archived (`sessions.go:591`) | `environment_archived_error` | yes |
+| Environment archived (`sessions.go:662`) | `environment_archived_error` | yes |
 | Environment row gone | `environment_not_found_error` | **unreachable** — the FK refuses the delete (§5.3), so no stored deployment can observe it (§8.1 entry 26) |
 | Agent version archived (`sessions.go:310`) | `agent_archived_error` | yes, and only for a roster member (§8.1 entry 18) |
 | Vault missing / archived (`sessions.go:435`) | `vault_not_found_error` / `vault_archived_error` | yes |
@@ -858,7 +858,7 @@ archived-deployment 400 (§8.1 entry 11).
   holding the lock. Create alone is not enough — `agent` on update *"Cannot be cleared"* but
   can be repinned, so an update racing the archive would leave a live deployment pinning an
   archived agent and make entry 18's claim false. This is the discipline
-  `internal/api/sessions.go:583` already applies to the environment row. There is
+  `internal/api/sessions.go:654` already applies to the environment row. There is
   no version-level archive route to consider — `POST /v1/agents/{id}/archive` is the only one
   (`internal/api/server.go:55`), and `resolveAgent` refuses an archived agent wholesale
   (`internal/api/sessions.go:309-310`).
@@ -1333,7 +1333,7 @@ inheritance.
   gone (§4.4). There is no controlplane `pool_max_conns` floor today; if the concurrency
   constant grows, add the startup check `cmd/executor/main.go:288-297` models rather than
   letting the pool wedge silently.
-- **The `createSessionTx` extraction is a refactor of the platform's most load-bearing
+- **The `createSessionInTx` extraction is a refactor of the platform's most load-bearing
   handler.** Bounded by landing it alone, behavior-neutral, in slice 2, with the entire
   existing session suite as its regression test — the plan-36-slice-5 idiom.
 - **Test wall-clock in `internal/api`** — ~9.5 minutes already against a 30-minute ceiling

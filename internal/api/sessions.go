@@ -590,37 +590,96 @@ func (s *server) createSession(r *http.Request) (any, error) {
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
+	created, err := s.createSessionInTx(ctx, tx, createSessionIn{
+		envID: envID, agentRaw: agentRaw, title: title, metadata: metadata,
+		resourceInputs: resourceInputs, sealedTokens: sealedTokens,
+		vaultIDs: vaultIDs, rawInitial: rawInitial,
+	})
+	if err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, err
+	}
+	if created.initialEvents > 0 {
+		events.RecordSessionStatus(ctx, domain.SessionRunning)
+	}
+	if created.resources > 0 {
+		recordResourceMutation(ctx, resourceOutcomeOK, created.resources)
+		slog.InfoContext(ctx, "session created with resources",
+			"session_id", created.row.id, "resource_count", created.resources)
+	}
+	return renderSession(created.row)
+}
+
+// createSessionIn is what a session create needs once its caller's
+// transaction is open. The HTTP-surface gates have already run: metadata is
+// parseMetadata's map (never nil, caps checked), sealedTokens pairs
+// positionally with resourceInputs' repositories (sealRepoTokens' output —
+// sealing dials the cipher, which must not run under the row locks taken
+// below), and rawInitial passed parseInitialEvents' structural caps; the
+// per-type normalization runs inside, where the environment's kind is known.
+// created_by is deliberately not a field: it is read from ctx (principalFrom),
+// so a caller with no authenticated principal creates the session
+// unattributed.
+type createSessionIn struct {
+	envID          string
+	agentRaw       json.RawMessage
+	title          string
+	metadata       map[string]string
+	resourceInputs []resourceInput
+	sealedTokens   []sealedToken
+	vaultIDs       []string
+	rawInitial     []json.RawMessage
+}
+
+// createdSession is what the committing caller still needs afterwards: the
+// row to render, and the two counts the post-commit metrics key off.
+type createdSession struct {
+	row           sessionRow
+	resources     int
+	initialEvents int
+}
+
+// createSessionInTx creates a session — environment check, agent resolution,
+// resource materialization, the session/thread/credential inserts, initial
+// events — inside the caller's transaction, and never commits it (the InTx
+// suffix is events.AppendInTx's; this package's …Tx helpers open their own).
+// Extracted from createSession so a caller already mid-transaction (the
+// deployment fire, plan 37) can create a session too; Begin, Commit and
+// post-commit observability stay with the caller.
+func (s *server) createSessionInTx(ctx context.Context, tx pgx.Tx, in createSessionIn) (createdSession, error) {
 	var envArchivedAt *time.Time
 	var envKind string
-	err = tx.QueryRow(ctx,
-		`SELECT archived_at, kind FROM environments WHERE id = $1 FOR SHARE`, envID).Scan(&envArchivedAt, &envKind)
+	err := tx.QueryRow(ctx,
+		`SELECT archived_at, kind FROM environments WHERE id = $1 FOR SHARE`, in.envID).Scan(&envArchivedAt, &envKind)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return nil, errNotFound("environment %s not found", envID)
+		return createdSession{}, errNotFound("environment %s not found", in.envID)
 	}
 	if err != nil {
-		return nil, err
+		return createdSession{}, err
 	}
 	if envArchivedAt != nil {
-		return nil, errInvalid("environment %s is archived", envID)
+		return createdSession{}, errInvalid("environment %s is archived", in.envID)
 	}
-	if err := validateAttachedVaults(ctx, tx, vaultIDs); err != nil {
-		return nil, err
+	if err := validateAttachedVaults(ctx, tx, in.vaultIDs); err != nil {
+		return createdSession{}, err
 	}
 
-	agent, err := s.resolveAgent(ctx, tx, agentRaw)
+	agent, err := s.resolveAgent(ctx, tx, in.agentRaw)
 	if err != nil {
-		return nil, err
+		return createdSession{}, err
 	}
 	agentJSON, err := json.Marshal(agent)
 	if err != nil {
-		return nil, err
+		return createdSession{}, err
 	}
 
 	now := time.Now().UTC()
-	resources, repoIDs, err := materializeResourceInputs(ctx, tx, resourceInputs, now)
+	resources, repoIDs, err := materializeResourceInputs(ctx, tx, in.resourceInputs, now)
 	if err != nil {
 		recordResourceMutation(ctx, resourceOutcomeFor(err), 1)
-		return nil, err
+		return createdSession{}, err
 	}
 	resourcesJSON := mustJSON(resources)
 
@@ -628,10 +687,10 @@ func (s *server) createSession(r *http.Request) (any, error) {
 	// posted batch gets, before the row exists (fail fast); the DB-backed
 	// outcome checks run after the insert, against the fresh row.
 	var initialEvents []events.NewEvent
-	if len(rawInitial) > 0 {
-		initialEvents, err = events.NormalizeInbound(envKind, rawInitial)
+	if len(in.rawInitial) > 0 {
+		initialEvents, err = events.NormalizeInbound(envKind, in.rawInitial)
 		if err != nil {
-			return nil, errInvalid("initial_events: %s", err)
+			return createdSession{}, errInvalid("initial_events: %s", err)
 		}
 	}
 
@@ -647,28 +706,28 @@ func (s *server) createSession(r *http.Request) (any, error) {
 		status = string(domain.SessionRunning)
 	}
 	row := sessionRow{
-		id: id, agentJSON: agentJSON, environmentID: envID,
-		status: status, title: title,
-		metaJSON: mustJSON(metadata), usageJSON: []byte(`{}`), resourcesJSON: resourcesJSON,
+		id: id, agentJSON: agentJSON, environmentID: in.envID,
+		status: status, title: in.title,
+		metaJSON: mustJSON(in.metadata), usageJSON: []byte(`{}`), resourcesJSON: resourcesJSON,
 		outcomesJSON: []byte(`[]`),
-		vaultIDs:     vaultIDs,
+		vaultIDs:     in.vaultIDs,
 	}
 	err = tx.QueryRow(ctx,
 		`INSERT INTO sessions (id, agent_id, agent_version, resolved_agent, environment_id,
 		   status, title, metadata, resources, vault_ids, created_by)
 		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
 		 RETURNING created_at, updated_at`,
-		id, agent.ID, agent.Version, agentJSON, envID, row.status, title, metadata, resourcesJSON, vaultIDs, createdBy).
+		id, agent.ID, agent.Version, agentJSON, in.envID, row.status, in.title, in.metadata, resourcesJSON, in.vaultIDs, createdBy).
 		Scan(&row.createdAt, &row.updatedAt)
 	var pgErr *pgconn.PgError
 	if errors.As(err, &pgErr) && pgErr.Code == "23503" { // foreign_key_violation backstop
 		if strings.Contains(pgErr.ConstraintName, "environment") {
-			return nil, errNotFound("environment %s not found", envID)
+			return createdSession{}, errNotFound("environment %s not found", in.envID)
 		}
-		return nil, errNotFound("agent %s version %d not found", agent.ID, agent.Version)
+		return createdSession{}, errNotFound("agent %s version %d not found", agent.ID, agent.Version)
 	}
 	if err != nil {
-		return nil, err
+		return createdSession{}, err
 	}
 
 	// The primary thread is born with the session (plan 35 decision 1): its
@@ -678,15 +737,15 @@ func (s *server) createSession(r *http.Request) (any, error) {
 		`INSERT INTO session_threads (id, session_id, agent_name, status, created_at, updated_at)
 		 VALUES ($1, $2, $3, $4, $5, $5)`,
 		domain.PrimaryThreadID(domain.ID(id)).String(), id, agent.Name, row.status, row.createdAt); err != nil {
-		return nil, err
+		return createdSession{}, err
 	}
 	// After the session INSERT (the rows FK it), inside the same transaction:
 	// a repo-bearing create either stores every pre-sealed token or creates
 	// nothing.
 	if len(repoIDs) > 0 {
-		if err := insertSessionResourceCredentials(ctx, tx, id, repoIDs, sealedTokens); err != nil {
+		if err := insertSessionResourceCredentials(ctx, tx, id, repoIDs, in.sealedTokens); err != nil {
 			recordResourceMutation(ctx, resourceOutcomeFor(err), 1)
-			return nil, err
+			return createdSession{}, err
 		}
 		slog.InfoContext(ctx, "session repository credentials sealed",
 			"session_id", id, "repos", len(repoIDs))
@@ -694,14 +753,14 @@ func (s *server) createSession(r *http.Request) (any, error) {
 
 	if len(initialEvents) > 0 {
 		if err := events.ValidateDefineOutcomes(ctx, tx, domain.ID(id), initialEvents, false); err != nil {
-			return nil, errInvalid("initial_events: %s", err)
+			return createdSession{}, errInvalid("initial_events: %s", err)
 		}
 		defs, err := events.DefineOutcomes(initialEvents)
 		if err != nil {
-			return nil, errInvalid("initial_events: %s", err)
+			return createdSession{}, errInvalid("initial_events: %s", err)
 		}
 		if err := s.snapshotRubrics(ctx, defs); err != nil {
-			return nil, err
+			return createdSession{}, err
 		}
 		// The log announces the status the session was born into, after the
 		// initial events it processes in order (placement ours, INFERRED).
@@ -710,12 +769,12 @@ func (s *server) createSession(r *http.Request) (any, error) {
 		pair, _, err := events.TransitionThread(ctx, tx, domain.ID(id), events.ThreadTransition{
 			Status: domain.SessionRunning, Reemit: true})
 		if err != nil {
-			return nil, err
+			return createdSession{}, err
 		}
 		batch := append(initialEvents, pair...)
 		opts := events.AppendOptions{
 			Then: func(ctx context.Context, tx pgx.Tx) error {
-				_, err := s.queue.Enqueue(ctx, tx, domain.ID(envID), domain.ID(id), queue.ModelTurn)
+				_, err := s.queue.Enqueue(ctx, tx, domain.ID(in.envID), domain.ID(id), queue.ModelTurn)
 				return err
 			},
 		}
@@ -728,28 +787,17 @@ func (s *server) createSession(r *http.Request) (any, error) {
 			}
 		}
 		if _, err := s.log.AppendInTx(ctx, tx, domain.ID(id), batch, opts); err != nil {
-			return nil, err
+			return createdSession{}, err
 		}
 		row.outcomesJSON = nil // re-read below: MutateOutcomes moved it
 		if err := tx.QueryRow(ctx,
 			`SELECT outcome_evaluations, updated_at FROM sessions WHERE id = $1`, id).
 			Scan(&row.outcomesJSON, &row.updatedAt); err != nil {
-			return nil, err
+			return createdSession{}, err
 		}
 	}
 
-	if err := tx.Commit(ctx); err != nil {
-		return nil, err
-	}
-	if len(initialEvents) > 0 {
-		events.RecordSessionStatus(ctx, domain.SessionRunning)
-	}
-	if len(resources) > 0 {
-		recordResourceMutation(ctx, resourceOutcomeOK, len(resources))
-		slog.InfoContext(ctx, "session created with resources",
-			"session_id", id, "resource_count", len(resources))
-	}
-	return renderSession(row)
+	return createdSession{row: row, resources: len(resources), initialEvents: len(initialEvents)}, nil
 }
 
 func mustJSON(v any) []byte {

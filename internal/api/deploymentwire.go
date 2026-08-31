@@ -45,7 +45,7 @@ func derefOr(s *string, fallback string) string {
 }
 
 // principalPtr is the audit-only created_by: the API key or principal that
-// created the row, or nil when the caller is unattributed. createSession's
+// created the row, or nil when the caller is unattributed. createSessionInTx's
 // rule, and it matters more on a deployment — a session a schedule fires has
 // no creator at all, so the deployment row is where the trail survives.
 func principalPtr(ctx context.Context) *string {
