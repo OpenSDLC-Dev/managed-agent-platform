@@ -122,19 +122,22 @@ func repoConfigErr() (url, token string, err error) {
 // graders are Either precisely for that, so the classing holds, but the trial
 // still reds, and an unactionable red is what parked it.
 //
-// The wording has been measured twice, in opposite directions. The 2026-08-12
-// rewrite — ask for "the one line" of a named file instead of the passphrase,
-// journalMultiturn's and viewRange's move — went 2 of 4 against the same
-// endpoint, against 7 of 8 for the then-current wording: asking plainly for
-// the passphrase reads as a task, wrapping the same request in "read a file
-// and recite it" reads as extraction, with worse odds. The 2026-08-31 change
-// is the other axis, keeping the plain ask and dropping only the word
-// "secret": across the three locally-runnable answer trials the "secret
-// passphrase" wording failed 10 of 31 attempts (refusals, denials the tool
-// exists, fabricated answers) while the same prompts with "secret" dropped
-// failed 0 of 24, same endpoint, same day. Neither sample is a study; what is
-// recorded here is the measurement, not a law — but do not re-reword on
-// intuition alone in either direction.
+// The wording has been measured twice, and the two variants moved different
+// levers. The 2026-08-12 rewrite — drop "secret passphrase" and ask for "the
+// one line" of a named file, journalMultiturn's and viewRange's move — went
+// 2 of 4 against the same endpoint, against 7 of 8 for the then-current
+// "secret passphrase" wording: asking plainly for the passphrase apparently
+// reads as a task, wrapping the same request in "read a file and recite it"
+// as extraction, with worse odds. The 2026-08-31 change keeps the plain ask
+// and drops only the word "secret": measured across file-answer,
+// skill-answer and mcp-answer, the "secret passphrase" wording failed 10 of
+// 31 attempts (refusals, denials that the tool exists, fabricated answers)
+// while the same prompts without it failed 0 of 24, same endpoint, same day.
+// memory-recall and this trial's own turn take the one-word drop by analogy,
+// unmeasured — memory-recall sat outside the measured sample, and this
+// trial's fixture needs credentials only CI holds. Neither sample is a
+// study; what is recorded here is the measurement, not a law — but do not
+// re-reword on intuition alone in either direction.
 func repoAnswer() Task {
 	return Task{
 		ID:   "repo-answer",

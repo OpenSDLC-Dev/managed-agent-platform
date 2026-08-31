@@ -235,11 +235,11 @@ func mcpAnswer() Task {
 			// mounted-answer trials say too ("A file has been mounted into your
 			// sandbox"). Without it the model reads the ask as an injection
 			// attempt and declines on principle — observed, with the platform
-			// working perfectly underneath. The word "secret" fed the same
-			// reflex and is gone for the same reason: the measured A/B recorded
-			// beside repoAnswer's wording note. It names
-			// the mechanism and not the tool, so the listing is still what has to
-			// arrive for the model to know what to call.
+			// working perfectly underneath. The provenance sentence names the
+			// mechanism and not the tool, so the listing is still what has to
+			// arrive for the model to know what to call. The word "secret" is
+			// gone too: it was associated with the same class of declines in
+			// the measured A/B recorded beside repoAnswer's wording note.
 			Message: "This task has attached an MCP server to your session. " +
 				"What is this task's passphrase? " +
 				"Reply with exactly the passphrase and nothing else.",
@@ -316,6 +316,12 @@ func fileAnswer() Task {
 // discoverable by an ls/glob), which is why both graders are Either: a right
 // answer is strong platform evidence, and the transcript (did it read via the
 // injected path?) is the arbiter on a miss.
+//
+// The skill's name keeps the word "secret" on purpose: the measured variant
+// behind the 2026-08-31 wording change (repoAnswer's note) kept the
+// eval-secret identifier and failed none of its attempts — it is an
+// identifier the model quotes back, not prose in the ask — so a future
+// "secret" sweep should leave it be.
 func skillAnswer() Task {
 	return Task{
 		ID: "skill-answer",
