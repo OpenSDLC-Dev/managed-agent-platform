@@ -87,7 +87,7 @@ func fireCount(t *testing.T, rm metricdata.ResourceMetrics, outcome, errType str
 			for _, dp := range s.DataPoints {
 				got := map[string]string{}
 				for _, kv := range dp.Attributes.ToSlice() {
-					got[string(kv.Key)] = kv.Value.Emit()
+					got[string(kv.Key)] = kv.Value.String()
 				}
 				if got["outcome"] == outcome && (errType == "" || got["error.type"] == errType) {
 					return dp.Value
@@ -438,6 +438,9 @@ func TestSchedulerUnclassifiedFailureLeavesNoTrace(t *testing.T) {
 	restore := api.SetDeploymentFireHookInFireForTest(func() error {
 		return errors.New("the database blipped")
 	})
+	// Cleanup as well as the explicit restore below: a t.Fatal between the
+	// two would otherwise leak the package-level hook into later tests.
+	t.Cleanup(restore)
 	now := time.Date(2026, 3, 12, 9, 0, 10, 0, time.UTC)
 	if err := api.SchedulerTick(t.Context(), s.pool, now); err == nil {
 		t.Fatal("tick returned nil; an abandoned fire must surface as the tick's error")
@@ -710,6 +713,10 @@ func TestSchedulerSchedulingStateChangeBetweenScanAndFire(t *testing.T) {
 			t.Errorf("swap expression: %v", err)
 		}
 	})
+	// Cleanup as well as the explicit restores in this test's sequence: a
+	// t.Fatal between an install and its restore would otherwise leak the
+	// package-level hook into later tests.
+	t.Cleanup(restore)
 	if err := api.SchedulerTick(t.Context(), s.pool, time.Date(2026, 3, 12, 9, 0, 30, 0, time.UTC)); err != nil {
 		t.Fatalf("tick: %v", err)
 	}
@@ -776,6 +783,9 @@ func TestSchedulerLostRaceShapesPastTheClaim(t *testing.T) {
 	restore := api.SetDeploymentFireHookInFireForTest(func() error {
 		return &pgconn.PgError{Code: "40P01", Message: "deadlock detected"}
 	})
+	// Cleanup as well as the explicit restores between phases: a t.Fatal in
+	// either phase would otherwise leak the package-level hook.
+	t.Cleanup(restore)
 	if err := api.SchedulerTick(t.Context(), s.pool, now); err != nil {
 		t.Errorf("a deadlock victim surfaced as the tick's error: %v", err)
 	}
@@ -787,6 +797,7 @@ func TestSchedulerLostRaceShapesPastTheClaim(t *testing.T) {
 	restore = api.SetDeploymentFireHookInFireForTest(func() error {
 		return &pgconn.PgError{Code: "55P03", Message: "lock timeout"}
 	})
+	t.Cleanup(restore)
 	if err := api.SchedulerTick(t.Context(), s.pool, now.Add(30*time.Second)); err == nil {
 		t.Error("a deep lock timeout returned nil; it must surface as a counted abandonment")
 	}

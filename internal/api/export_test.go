@@ -116,8 +116,9 @@ func SetDeploymentLockWaitForTest(d time.Duration) (restore func()) {
 // transaction's open and its deployment re-read, so a test can archive or
 // pause the deployment in that exact window. Test binary only.
 func SetDeploymentFireHookAfterBeginForTest(f func()) (restore func()) {
+	prev := deploymentFireHookAfterBegin
 	deploymentFireHookAfterBegin = f
-	return func() { deploymentFireHookAfterBegin = nil }
+	return func() { deploymentFireHookAfterBegin = prev }
 }
 
 // SetDeploymentFireHookInFireForTest installs a hook under SAVEPOINT fire
@@ -125,8 +126,9 @@ func SetDeploymentFireHookAfterBeginForTest(f func()) (restore func()) {
 // the unclassified whole-rollback arm, and for holding a winner's claim
 // uncommitted while a competing caller runs. Test binary only.
 func SetDeploymentFireHookInFireForTest(f func() error) (restore func()) {
+	prev := deploymentFireHookInFire
 	deploymentFireHookInFire = f
-	return func() { deploymentFireHookInFire = nil }
+	return func() { deploymentFireHookInFire = prev }
 }
 
 // DeploymentSkipScanCapForTest exposes the saturation bound of the skipped

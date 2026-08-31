@@ -4,7 +4,7 @@ What is being worked on right now, and how far along it is — nothing else. **S
 
 ## Active work
 
-**Plan 37 — scheduled deployments** ([docs/plan/37_scheduled-deployments.md](./docs/plan/37_scheduled-deployments.md), [#51](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/51)), six slices. A deployment binds an agent to an environment, credentials and initial events; an optional 5-field POSIX cron schedule fires it, and every attempt is one persistent deployment run.
+**Plan 37 — scheduled deployments** ([docs/plan/37_scheduled-deployments.md](./docs/plan/37_scheduled-deployments.md), [#51](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/51)), six slices. A deployment binds an agent to an environment, credentials and initial events; an optional 5-field POSIX cron schedule fires it, and a settled attempt is one persistent deployment run.
 
 ## Tasks
 
