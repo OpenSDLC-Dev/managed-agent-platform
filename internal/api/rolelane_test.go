@@ -56,6 +56,8 @@ func (r matrixRoute) request() string {
 		id = "memstore_nonexistent"
 	case "deployments":
 		id = "depl_nonexistent"
+	case "deployment_runs":
+		id = "drun_nonexistent"
 	}
 	return strings.NewReplacer(
 		"{id}", id,
@@ -101,6 +103,8 @@ func roleMatrix() []matrixRoute {
 		{"POST", depl + "/pause", d}, {"POST", depl + "/unpause", d},
 		// run takes developer because it does session-create's work (§5.1).
 		{"POST", depl + "/run", d},
+		// The run record surface is read-only and viewer, like every list.
+		{"GET", "/v1/deployment_runs", v}, {"GET", "/v1/deployment_runs/{id}", v},
 
 		// Environments. The work API under /v1/environments/{id}/work is a
 		// different lane entirely and is covered by TestEnvironmentKeyLane below.

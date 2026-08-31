@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strconv"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -203,4 +204,163 @@ func deploymentSessionIn(deplID, envID, agentID string, agentVersion int,
 		rawInitial:     rawInitial,
 		deploymentID:   &deplID,
 	}, nil
+}
+
+// runColumns is the stored run row in scanRun's order.
+const runColumns = `id, deployment_id, trigger_type, scheduled_at, session_id,
+	error_type, error_message, agent_id, agent_version, created_at`
+
+// scanRun renders a stored run row. A successful run whose session was later
+// deleted comes back with session_id null AND error null — the session link is
+// ON DELETE SET NULL, and there is nothing truer to render in its place. The
+// run stays a legible success (a null error is the success arm's signature);
+// only the link is gone. Durable success lives in succeeded_at, which the wire
+// object does not carry (#520; the docs/DIVERGENCES.md entry).
+func scanRun(row pgx.Row) (domain.DeploymentRun, error) {
+	var (
+		run             domain.DeploymentRun
+		sessionID       *string
+		errType, errMsg *string
+		agentID         string
+		agentVersion    int
+	)
+	if err := row.Scan(&run.ID, &run.DeploymentID, &run.TriggerContext.Type,
+		&run.TriggerContext.ScheduledAt, &sessionID, &errType, &errMsg,
+		&agentID, &agentVersion, &run.CreatedAt); err != nil {
+		return run, err
+	}
+	// scheduled_at is non-null exactly when trigger_type is 'schedule' (0031's
+	// CHECK), which is exactly when the wire's schedule context requires it.
+	if sessionID != nil {
+		sid := domain.ID(*sessionID)
+		run.SessionID = &sid
+	}
+	if errType != nil {
+		run.Error = &domain.RunError{Type: *errType, Message: *errMsg}
+	}
+	run.Agent = domain.AgentReference{Type: "agent", ID: domain.ID(agentID), Version: agentVersion}
+	return run, nil
+}
+
+func (s *server) getDeploymentRun(r *http.Request) (any, error) {
+	ctx := r.Context()
+	id := r.PathValue("id")
+	if err := checkID(id, "deployment run"); err != nil {
+		return nil, err
+	}
+	run, err := scanRun(s.pool.QueryRow(ctx,
+		`SELECT `+runColumns+` FROM deployment_runs WHERE id = $1`, id))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, errNotFound("deployment run %s not found", id)
+	}
+	if err != nil {
+		return nil, err
+	}
+	return run, nil
+}
+
+// listDeploymentRuns is GET /v1/deployment_runs: newest-first over
+// deployment_runs_created_idx, or deployment_runs_deployment_created_idx when
+// the deployment_id filter is present, keyset-paged like the deployments list.
+func (s *server) listDeploymentRuns(r *http.Request) (any, error) {
+	ctx := r.Context()
+	q := r.URL.Query()
+	// The one list whose published cap is 1000, not maxLimit (§2.6).
+	page, err := parsePageMax(q, maxRunLimit)
+	if err != nil {
+		return nil, err
+	}
+
+	query := `SELECT ` + runColumns + ` FROM deployment_runs WHERE true`
+	var args []any
+	if deplID := q.Get("deployment_id"); deplID != "" {
+		// Shape first, as the sessions list does: a malformed id can never
+		// name a stored deployment, and rejecting it keeps an unstorable byte
+		// from reaching the bind parameter as a 500 (#135). A well-formed but
+		// absent one is the published rule: "Filtering by a non-existent
+		// deployment_id returns 200 with empty data."
+		if !domain.ID(deplID).Valid() {
+			return nil, errInvalid("deployment_id must be a valid deployment id")
+		}
+		args = append(args, deplID)
+		query += fmt.Sprintf(` AND deployment_id = $%d`, len(args))
+	}
+	if tt := q.Get("trigger_type"); tt != "" {
+		if tt != "schedule" && tt != "manual" {
+			return nil, errInvalid(`trigger_type must be "schedule" or "manual"`)
+		}
+		args = append(args, tt)
+		query += fmt.Sprintf(` AND trigger_type = $%d`, len(args))
+	}
+	if he := q.Get("has_error"); he != "" {
+		v, err := strconv.ParseBool(he)
+		if err != nil {
+			return nil, errInvalid("has_error must be true or false")
+		}
+		// Published as "true for runs with non-null error, false for runs
+		// with non-null session_id" — but the false arm keys off succeeded_at,
+		// the durable success marker, never the session link: a success whose
+		// session was later deleted has a null session_id and must not fall
+		// out of the success set (#520, migration 0032).
+		if v {
+			query += ` AND error_type IS NOT NULL`
+		} else {
+			query += ` AND succeeded_at IS NOT NULL`
+		}
+	}
+	// All four comparators, the session-events precedent; a fixed order so the
+	// SQL text is deterministic.
+	for _, f := range []struct{ key, op string }{
+		{"created_at[gte]", ">="}, {"created_at[lte]", "<="},
+		{"created_at[gt]", ">"}, {"created_at[lt]", "<"},
+	} {
+		t, err := parseTimeParam(q, f.key)
+		if err != nil {
+			return nil, err
+		}
+		if t != nil {
+			args = append(args, *t)
+			query += fmt.Sprintf(` AND created_at %s $%d`, f.op, len(args))
+		}
+	}
+	if page.cur != nil {
+		if page.cur.versioned || page.cur.dir != dirNext {
+			return nil, errInvalid("invalid page cursor")
+		}
+		args = append(args, page.cur.t, page.cur.id)
+		query += fmt.Sprintf(` AND (created_at, id) < ($%d, $%d)`, len(args)-1, len(args))
+	}
+	args = append(args, page.limit+1)
+	query += fmt.Sprintf(` ORDER BY created_at DESC, id DESC LIMIT $%d`, len(args))
+
+	rows, err := s.pool.Query(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	out := pageJSON{Data: []any{}}
+	var lastT time.Time
+	var lastID string
+	fetched := 0
+	for rows.Next() {
+		fetched++
+		if fetched > page.limit {
+			break
+		}
+		run, err := scanRun(rows)
+		if err != nil {
+			return nil, err
+		}
+		out.Data = append(out.Data, run)
+		lastT, lastID = run.CreatedAt, string(run.ID)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if fetched > page.limit {
+		c := encodeTimeCursor(dirNext, lastT, lastID)
+		out.NextPage = &c
+	}
+	return out, nil
 }

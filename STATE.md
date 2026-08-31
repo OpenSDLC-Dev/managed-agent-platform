@@ -10,22 +10,23 @@ What is being worked on right now, and how far along it is — nothing else. **S
 
 - **Slice 1 — CRUD, the three lifecycle actions, `internal/cron`, migration `0031`.** Done:
   the cron engine, both tables, the `Deployment` domain type, the seven routes, the
-  agent-archive refusal (plan decision 7), the `DELETE /v1/environments` message that
-  names the deployments, and the slice-1 registry entries (plus four §8.1 drafted none
-  for). [#523](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/523) deferred.
+  agent-archive refusal (plan decision 7), the `DELETE /v1/environments` message, the
+  slice-1 registry entries.
+  [#523](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/523) deferred.
 - **Slices 2 + 3 — the seam, then the manual trigger.** Done: `createSessionInTx`
   (behavior-neutral extraction), then `POST /run` — run row + session + settlement in one
   transaction, classified failures as error-bearing 200 runs, `sessions.deployment_id`
-  and the durable `succeeded_at` (migration `0032`;
-  [#520](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/520)'s read-path
-  half — its render half is slice 5's), the real list filter, three registry entries.
+  and the durable `succeeded_at` (migration `0032`,
+  [#520](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/520)), the real
+  list filter, three registry entries.
 - **Slice 4 — the scheduler.** Done: the controlplane tick (30s, DB clock), the
   unique-index occurrence claim, the fire (savepoint, settle, auto-pause on the
   fourteen), the one-hour catch-up collapse, `lock_timeout` on the fire and the row's
-  four writers, the three instruments (`deployment.fires`, `deployment.occurrences.skipped`,
-  `deployment.tick.duration`), spans `deployment.tick`/`deployment.fire`, and the
-  slice-4 registry entries.
-- **Slice 5** — next: the two run lists.
+  four writers, the three instruments and two spans, the slice-4 registry entries.
+- **Slice 5 — the two run lists.** Done: `GET /v1/deployment_runs` (+`/{id}`) at viewer,
+  the published filters (`deployment_id` 200-empty rule, `trigger_type`, `has_error` off
+  the durable marker — #520's render half closed), the 1000 limit cap, keyset paging,
+  the SDK-driven acceptance case, one registry entry.
 - **Slice 6** — close-out docs: the security-invariant bullets and the README status line.
 
 Not started, and deliberately: webhooks ([#261](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/261)) and budgets ([#432](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/432)) are excluded from the plan and named in it.

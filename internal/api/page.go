@@ -30,6 +30,12 @@ const (
 	// so this is our compatible upper bound (some cap is needed — an unbounded
 	// limit is a query-cost risk), not a proven reference cap.
 	maxEventLimit = 1000
+	// The deployment-runs list publishes its own cap — "Default 20, maximum
+	// 1000" — so unlike maxEventLimit this one is the reference's stated
+	// number, not our compatible upper bound. The shared maxLimit would 400 a
+	// legal limit=500 in the exact place a "did my schedule fire?" client
+	// pages (plan 37 §5.1).
+	maxRunLimit = 1000
 )
 
 // cursor directions: fetch rows after the position (next) or before it (prev).

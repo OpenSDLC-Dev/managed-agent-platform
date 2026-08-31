@@ -4,9 +4,12 @@ import (
 	"context"
 	"net/http"
 	"net/url"
+	"slices"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/api"
 )
 
 // runDeployment fires a manual run and fails the test on a non-200. The body
@@ -403,4 +406,300 @@ func TestDeletingTheSessionDoesNotUnsettleTheRun(t *testing.T) {
 	if succeededAt == nil {
 		t.Errorf("succeeded_at was lost with the session; the marker must be durable")
 	}
+
+	// The read surface renders the stale link honestly: session_id null AND
+	// error null — the published "exactly one is non-null" cannot survive
+	// session deletion, and a null error is what keeps the run a legible
+	// success (#520; the docs/DIVERGENCES.md entry).
+	status, got := s.do(http.MethodGet, "/v1/deployment_runs/"+runID, nil)
+	if status != http.StatusOK {
+		t.Fatalf("get run after session delete: status %d, body %v", status, got)
+	}
+	wantFields(t, got, "type", "id", "deployment_id", "trigger_context",
+		"session_id", "error", "agent", "created_at")
+	if got["session_id"] != nil {
+		t.Errorf("session_id = %v, want null after the session's deletion", got["session_id"])
+	}
+	if got["error"] != nil {
+		t.Errorf("error = %v, want null — the run is still a success", got["error"])
+	}
+
+	// And the has_error filter keys off the durable marker, not the stale
+	// link: the run stays in the success set and out of the failure set.
+	for _, c := range []struct {
+		param string
+		want  bool
+	}{{"has_error=false", true}, {"has_error=true", false}} {
+		status, res := s.do(http.MethodGet, "/v1/deployment_runs?"+c.param, nil)
+		if status != http.StatusOK {
+			t.Fatalf("list runs ?%s: status %d, body %v", c.param, status, res)
+		}
+		found := false
+		for _, item := range res["data"].([]any) {
+			if item.(map[string]any)["id"] == runID {
+				found = true
+			}
+		}
+		if found != c.want {
+			t.Errorf("?%s finds the deleted-session run: %v, want %v", c.param, found, c.want)
+		}
+	}
+}
+
+// listRuns fetches GET /v1/deployment_runs with the given query and fails on a
+// non-200.
+func listRuns(t *testing.T, s *tserver, query string) map[string]any {
+	t.Helper()
+	path := "/v1/deployment_runs"
+	if query != "" {
+		path += "?" + query
+	}
+	status, res := s.do(http.MethodGet, path, nil)
+	if status != http.StatusOK {
+		t.Fatalf("list runs %q: status %d, body %v", query, status, res)
+	}
+	return res
+}
+
+// runIDs projects a list page to its data ids, in page order.
+func runIDs(t *testing.T, res map[string]any) []string {
+	t.Helper()
+	data, ok := res["data"].([]any)
+	if !ok {
+		t.Fatalf("data is %T, want an array", res["data"])
+	}
+	ids := make([]string, 0, len(data))
+	for _, item := range data {
+		ids = append(ids, item.(map[string]any)["id"].(string))
+	}
+	return ids
+}
+
+// The runs list: newest-first, keyset-paged, and each published filter — the
+// deployment_id 200-empty rule included — against one seeded population of
+// six runs across four deployments (three manual successes, one manual
+// success elsewhere, one scheduled success, one manual failure).
+func TestDeploymentRunsListFiltersAndPages(t *testing.T) {
+	s := newTestServer(t)
+	agentID, envID := fixture(t, s)
+
+	dA := createDeployment(t, s, deploymentBody(agentID, envID))["id"].(string)
+	var aRuns []string
+	for range 3 {
+		aRuns = append(aRuns, runDeployment(t, s, dA)["id"].(string))
+	}
+	dB := createDeployment(t, s, deploymentBody(agentID, envID))["id"].(string)
+	runDeployment(t, s, dB)
+
+	// One scheduled fire, driven at a fixed instant (the slice-4 idiom).
+	dC := createDeployment(t, s, scheduledBody(agentID, envID, "30 9 * * *", "UTC"))["id"].(string)
+	setResumedAt(t, s, dC, time.Date(2026, 3, 12, 8, 0, 0, 0, time.UTC))
+	if err := api.SchedulerTick(t.Context(), s.pool, time.Date(2026, 3, 12, 9, 30, 30, 0, time.UTC)); err != nil {
+		t.Fatalf("scheduler tick: %v", err)
+	}
+	scheduledRunID := scheduledRuns(t, s, dC)[0].id
+
+	// One failed manual run: its own environment, archived before the fire.
+	envFail := createEnvironment(t, s, map[string]any{"name": "runs-list-fail-env"})["id"].(string)
+	dD := createDeployment(t, s, deploymentBody(agentID, envFail))["id"].(string)
+	if status, res := s.do(http.MethodPost, "/v1/environments/"+envFail+"/archive", nil); status != http.StatusOK {
+		t.Fatalf("archive environment: status %d, body %v", status, res)
+	}
+	failedRun := runDeployment(t, s, dD)
+	if failedRun["error"] == nil {
+		t.Fatalf("the archived-environment run settled without an error: %v", failedRun)
+	}
+	failedRunID := failedRun["id"].(string)
+
+	// The list's published order, read back from the store it pages over.
+	var expected []string
+	rows, err := s.pool.Query(t.Context(),
+		`SELECT id FROM deployment_runs ORDER BY created_at DESC, id DESC`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			t.Fatal(err)
+		}
+		expected = append(expected, id)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	if len(expected) != 6 {
+		t.Fatalf("seeded %d runs, want 6", len(expected))
+	}
+
+	// The whole list, in one page: created_at descending, next_page null.
+	full := listRuns(t, s, "")
+	wantFields(t, full, "data", "next_page")
+	if got := runIDs(t, full); !slices.Equal(got, expected) {
+		t.Errorf("list order = %v, want %v", got, expected)
+	}
+	if full["next_page"] != nil {
+		t.Errorf("next_page = %v on a complete page, want null", full["next_page"])
+	}
+
+	// The scheduled run renders its occurrence in the list, not just the get.
+	for _, item := range full["data"].([]any) {
+		run := item.(map[string]any)
+		if run["id"] != scheduledRunID {
+			continue
+		}
+		tc := run["trigger_context"].(map[string]any)
+		if tc["type"] != "schedule" || tc["scheduled_at"] != "2026-03-12T09:30:00Z" {
+			t.Errorf("scheduled run's trigger_context = %v, want the 09:30 occurrence", tc)
+		}
+	}
+
+	// Keyset walk at limit=2: three pages, no duplicate, no skip.
+	var walked []string
+	query := "limit=2"
+	for pages := 0; ; pages++ {
+		if pages > 3 {
+			t.Fatalf("the cursor walk did not terminate: %v", walked)
+		}
+		res := listRuns(t, s, query)
+		walked = append(walked, runIDs(t, res)...)
+		next, _ := res["next_page"].(string)
+		if next == "" {
+			break
+		}
+		query = "limit=2&page=" + url.QueryEscape(next)
+	}
+	if !slices.Equal(walked, expected) {
+		t.Errorf("cursor walk = %v, want %v", walked, expected)
+	}
+
+	// deployment_id: a real one isolates, an absent well-formed one is the
+	// published 200-with-empty-data, a malformed one is a 400 (#135).
+	got := runIDs(t, listRuns(t, s, "deployment_id="+dA))
+	slices.Sort(got)
+	want := slices.Clone(aRuns)
+	slices.Sort(want)
+	if !slices.Equal(got, want) {
+		t.Errorf("deployment_id=%s = %v, want %v", dA, got, want)
+	}
+	if got := runIDs(t, listRuns(t, s, "deployment_id=depl_nonexistent")); len(got) != 0 {
+		t.Errorf("a non-existent deployment_id returned %v, want empty data", got)
+	}
+	status, res := s.do(http.MethodGet, "/v1/deployment_runs?deployment_id=not-an-id", nil)
+	wantErr(t, status, res, http.StatusBadRequest, "invalid_request_error")
+
+	// trigger_type: the enum filters, anything else is a 400.
+	if got := runIDs(t, listRuns(t, s, "trigger_type=schedule")); !slices.Equal(got, []string{scheduledRunID}) {
+		t.Errorf("trigger_type=schedule = %v, want %v", got, []string{scheduledRunID})
+	}
+	if got := runIDs(t, listRuns(t, s, "trigger_type=manual")); len(got) != 5 {
+		t.Errorf("trigger_type=manual returned %d runs, want 5", len(got))
+	}
+	status, res = s.do(http.MethodGet, "/v1/deployment_runs?trigger_type=cron", nil)
+	wantErr(t, status, res, http.StatusBadRequest, "invalid_request_error")
+
+	// has_error: true is the failure set, false the success set.
+	if got := runIDs(t, listRuns(t, s, "has_error=true")); !slices.Equal(got, []string{failedRunID}) {
+		t.Errorf("has_error=true = %v, want %v", got, []string{failedRunID})
+	}
+	if got := runIDs(t, listRuns(t, s, "has_error=false")); len(got) != 5 || slices.Contains(got, failedRunID) {
+		t.Errorf("has_error=false = %v, want the 5 successes", got)
+	}
+	status, res = s.do(http.MethodGet, "/v1/deployment_runs?has_error=maybe", nil)
+	wantErr(t, status, res, http.StatusBadRequest, "invalid_request_error")
+
+	// The four created_at comparators, split at a middle run's own rendered
+	// timestamp: gte keeps it, gt drops it, lte/lt mirror.
+	boundary := full["data"].([]any)[2].(map[string]any)["created_at"].(string)
+	for _, c := range []struct {
+		op   string
+		want []string
+	}{
+		{"gte", expected[:3]}, {"gt", expected[:2]},
+		{"lte", expected[2:]}, {"lt", expected[3:]},
+	} {
+		q := url.Values{"created_at[" + c.op + "]": {boundary}}.Encode()
+		if got := runIDs(t, listRuns(t, s, q)); !slices.Equal(got, c.want) {
+			t.Errorf("created_at[%s]=%s = %v, want %v", c.op, boundary, got, c.want)
+		}
+	}
+	status, res = s.do(http.MethodGet, "/v1/deployment_runs?"+url.Values{"created_at[gte]": {"yesterday"}}.Encode(), nil)
+	wantErr(t, status, res, http.StatusBadRequest, "invalid_request_error")
+
+	// The published cap is 1000, not the shared 100 (§2.6): 500 is legal,
+	// 1001 and 0 are not.
+	listRuns(t, s, "limit=500")
+	status, res = s.do(http.MethodGet, "/v1/deployment_runs?limit=1001", nil)
+	wantErr(t, status, res, http.StatusBadRequest, "invalid_request_error")
+	status, res = s.do(http.MethodGet, "/v1/deployment_runs?limit=0", nil)
+	wantErr(t, status, res, http.StatusBadRequest, "invalid_request_error")
+}
+
+// The single read renders both settled arms: a manual success and a scheduled
+// failure, plus the two not-found spellings.
+func TestDeploymentRunReadRendersBothArms(t *testing.T) {
+	s := newTestServer(t)
+	agentID, envID := fixture(t, s)
+
+	dManual := createDeployment(t, s, deploymentBody(agentID, envID))["id"].(string)
+	posted := runDeployment(t, s, dManual)
+	manualID := posted["id"].(string)
+
+	status, run := s.do(http.MethodGet, "/v1/deployment_runs/"+manualID, nil)
+	if status != http.StatusOK {
+		t.Fatalf("get manual run: status %d, body %v", status, run)
+	}
+	wantFields(t, run, "type", "id", "deployment_id", "trigger_context",
+		"session_id", "error", "agent", "created_at")
+	if run["type"] != "deployment_run" || run["id"] != manualID || run["deployment_id"] != dManual {
+		t.Errorf("identity fields = %v/%v/%v", run["type"], run["id"], run["deployment_id"])
+	}
+	if run["session_id"] != posted["session_id"] || run["error"] != nil {
+		t.Errorf("success arm = (%v, %v), want (%v, null)", run["session_id"], run["error"], posted["session_id"])
+	}
+	tc := run["trigger_context"].(map[string]any)
+	if tc["type"] != "manual" {
+		t.Errorf("trigger_context.type = %v, want manual", tc["type"])
+	}
+	if _, ok := tc["scheduled_at"]; ok {
+		t.Errorf("a manual context must not carry scheduled_at: %v", tc)
+	}
+	agent := run["agent"].(map[string]any)
+	if agent["type"] != "agent" || agent["id"] != agentID || agent["version"] != float64(1) {
+		t.Errorf("agent = %v, want the pinned reference", agent)
+	}
+
+	// A scheduled failure: the fire finds its environment archived.
+	envSched := createEnvironment(t, s, map[string]any{"name": "runs-get-sched-env"})["id"].(string)
+	dSched := createDeployment(t, s, scheduledBody(agentID, envSched, "30 9 * * *", "UTC"))["id"].(string)
+	if status, res := s.do(http.MethodPost, "/v1/environments/"+envSched+"/archive", nil); status != http.StatusOK {
+		t.Fatalf("archive environment: status %d, body %v", status, res)
+	}
+	setResumedAt(t, s, dSched, time.Date(2026, 3, 12, 8, 0, 0, 0, time.UTC))
+	if err := api.SchedulerTick(t.Context(), s.pool, time.Date(2026, 3, 12, 9, 30, 30, 0, time.UTC)); err != nil {
+		t.Fatalf("scheduler tick: %v", err)
+	}
+	schedID := scheduledRuns(t, s, dSched)[0].id
+
+	status, run = s.do(http.MethodGet, "/v1/deployment_runs/"+schedID, nil)
+	if status != http.StatusOK {
+		t.Fatalf("get scheduled run: status %d, body %v", status, run)
+	}
+	if run["session_id"] != nil {
+		t.Errorf("session_id = %v on a failed run, want null", run["session_id"])
+	}
+	re, _ := run["error"].(map[string]any)
+	if re["type"] != "environment_archived_error" || re["message"] == "" {
+		t.Errorf("error = %v, want environment_archived_error with a message", run["error"])
+	}
+	tc = run["trigger_context"].(map[string]any)
+	if tc["type"] != "schedule" || tc["scheduled_at"] != "2026-03-12T09:30:00Z" {
+		t.Errorf("trigger_context = %v, want the 09:30 schedule occurrence", tc)
+	}
+
+	status, res := s.do(http.MethodGet, "/v1/deployment_runs/drun_nonexistent", nil)
+	wantErr(t, status, res, http.StatusNotFound, "not_found_error")
+	status, res = s.do(http.MethodGet, "/v1/deployment_runs/not-an-id", nil)
+	wantErr(t, status, res, http.StatusNotFound, "not_found_error")
 }
