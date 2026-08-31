@@ -38,7 +38,17 @@ func TestEvals(t *testing.T) {
 // and is never retried, and an abort (a t.Fatal) has already reddened the test
 // before any retry could be weighed.
 func runAndGrade(t *testing.T, s *stack, task Task) {
-	rec, failures := gradeAttempt(t, s, task, 0)
+	verdict(t, func(attempt int) (*record, []failure) {
+		return gradeAttempt(t, s, task, attempt)
+	})
+}
+
+// verdict is the retry flow — first attempt, the gate, the reported retry —
+// pure over its grade closure so the offline tests can drive it with canned
+// attempts (TestVerdictRecordsBothAttemptsOfARetriedTask); gradeAttempt
+// supplies the real one.
+func verdict(t *testing.T, grade func(attempt int) (*record, []failure)) {
+	rec, failures := grade(0)
 	if !retryEarned(failures) {
 		rec.Pass = len(failures) == 0
 		recordTrial(*rec)
@@ -50,22 +60,24 @@ func runAndGrade(t *testing.T, s *stack, task Task) {
 	for _, f := range failures {
 		t.Logf("attempt 1 [%s] %s: %s — model non-compliance, retrying", f.Class, f.Grader, f.Error)
 	}
-	retry, failures := gradeAttempt(t, s, task, 2)
+	retry, failures := grade(2)
 	retry.Pass = len(failures) == 0
 	recordTrial(*retry)
 	failFor(t, failures)
 }
 
-// retryEarned is the retry gate: at least one failure, none of them Platform
-// class. A clean attempt has nothing to retry, and a Platform failure must
-// stand exactly once — retrying our own bug would be measuring the dice
-// instead of the platform.
+// retryEarned is the retry gate: at least one failure, every one of them
+// Either or Model class — spelled as a whitelist, not "anything but Platform",
+// so a malformed or future class stands rather than earning a retry nobody
+// designed for it. A clean attempt has nothing to retry, and a Platform
+// failure must stand exactly once — retrying our own bug would be measuring
+// the dice instead of the platform.
 func retryEarned(fs []failure) bool {
 	if len(fs) == 0 {
 		return false
 	}
 	for _, f := range fs {
-		if f.Class == string(Platform) {
+		if f.Class != string(Either) && f.Class != string(Model) {
 			return false
 		}
 	}
@@ -117,6 +129,11 @@ func gradeAttempt(t *testing.T, s *stack, task Task, attempt int) (*record, []fa
 		if rec.Session != "" && rec.events == nil {
 			rec.events = s.tryListEvents(rec.Session)
 		}
+		// The spend is charged even to an abort: the summary's totals promise
+		// every attempt's tokens, and the fetched transcript carries them. On a
+		// post-runTrial abort this recomputes the same numbers from the same
+		// events; on a drive abort it is the only accounting the attempt gets.
+		rec.Tokens = sumTokens(&Trial{Events: rec.events})
 		rec.Pass = false
 		recordTrial(*rec)
 	}()
@@ -135,18 +152,18 @@ func gradeAttempt(t *testing.T, s *stack, task Task, attempt int) (*record, []fa
 	// Every grader runs even after one fails: a trial that stopped at the first
 	// failure would report "the file was wrong" and hide that the session also
 	// errored and the tokens were never counted. Triage wants the whole picture,
-	// and the run has already been paid for.
-	var failures []failure
+	// and the run has already been paid for — which is also why each verdict
+	// lands straight on the record rather than in a local: a later grader's
+	// t.Fatal must not erase the failures already in hand from the abort record.
 	for _, g := range append(corePack(task), task.Graders...) {
 		if err := g.Check(t, tr); err != nil {
-			failures = append(failures, failure{
+			rec.Failures = append(rec.Failures, failure{
 				Grader: g.Name, Class: string(g.Class), Error: err.Error(),
 			})
 		}
 	}
-	rec.Failures = failures
 	completed = true
-	return rec, failures
+	return rec, rec.Failures
 }
 
 // sumTokens totals the trial's model spend from the transcript's

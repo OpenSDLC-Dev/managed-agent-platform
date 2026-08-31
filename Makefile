@@ -120,10 +120,11 @@ verify: build crossbuild vet fmt-check test cover-gate
 #     per-turn timeout inside the harness is the real guard, this is the outer
 #     backstop — sized so the worst case of every task's own budget (5m per
 #     ordinary turn, more for an outcome loop) still fits without the test
-#     binary panicking mid-trial and losing the report.
+#     binary panicking mid-trial and losing the report, with headroom for the
+#     one retry a model-classed failure earns (at most double, never a loop).
 #
 # Artifacts land in evals/artifacts/ (gitignored): report.json, summary.md, and
-# one transcript per failed trial.
+# one transcript per failed attempt (a retried-then-failed task leaves two).
 eval:
 	RUN_EVALS=1 go test -count=1 -v -timeout 120m ./evals/...
 

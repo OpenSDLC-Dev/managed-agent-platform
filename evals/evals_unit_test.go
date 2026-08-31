@@ -1,27 +1,28 @@
 package evals
 
 import (
-	"encoding/json"
-	"strings"
 	"testing"
 )
 
 // The retry gate: a failed attempt earns the task's one retry exactly when the
-// model alone is implicated — every failure Either or Model class. Any
-// Platform-class failure is the signal the suite exists for and is never
-// retried (plan 02's classing line), and a clean attempt has nothing to retry.
+// model alone is implicated — every failure Either or Model class. Any other
+// class is a reason to stand: Platform is the signal the suite exists for
+// (plan 02's classing line), and an empty or unknown class is a harness bug,
+// not a licence to reroll it.
 func TestRetryEarnedOnlyForModelClassFailures(t *testing.T) {
-	f := func(class Class) failure { return failure{Grader: "g", Class: string(class), Error: "e"} }
+	f := func(class string) failure { return failure{Grader: "g", Class: class, Error: "e"} }
 	for name, tc := range map[string]struct {
 		failures []failure
 		want     bool
 	}{
 		"no failures":         {nil, false},
-		"either only":         {[]failure{f(Either)}, true},
-		"model only":          {[]failure{f(Model)}, true},
-		"either and model":    {[]failure{f(Either), f(Model)}, true},
-		"platform only":       {[]failure{f(Platform)}, false},
-		"platform among them": {[]failure{f(Either), f(Platform)}, false},
+		"either only":         {[]failure{f("E")}, true},
+		"model only":          {[]failure{f("M")}, true},
+		"either and model":    {[]failure{f("E"), f("M")}, true},
+		"platform only":       {[]failure{f("P")}, false},
+		"platform among them": {[]failure{f("E"), f("P")}, false},
+		"an empty class":      {[]failure{f("")}, false},
+		"an unknown class":    {[]failure{f("E"), f("X")}, false},
 	} {
 		if got := retryEarned(tc.failures); got != tc.want {
 			t.Errorf("%s: retryEarned = %v, want %v", name, got, tc.want)
@@ -29,84 +30,55 @@ func TestRetryEarnedOnlyForModelClassFailures(t *testing.T) {
 	}
 }
 
-// A retried task appears as two records; the headline count must judge the
-// final attempts only, while the spend lines still charge both — the run paid
-// for both. The superseded attempt keeps its detail section: the failed first
-// try's evidence is what triage reads.
-func TestRenderSummaryReportsRetriedAttempts(t *testing.T) {
-	rep := report{
-		Model:    "test-model",
-		Endpoint: "gw.example.com:443",
-		Records: []record{
-			{Task: "repo-answer", Session: "sesn_a1", Pass: false, Attempt: 1,
-				ElapsedMS: 2000, Tokens: tokens{Input: 100, Output: 10},
-				Failures: []failure{{Grader: "repo-passphrase-answered", Class: "E", Error: "refused"}}},
-			{Task: "repo-answer", Session: "sesn_a2", Pass: true, Attempt: 2,
-				ElapsedMS: 3000, Tokens: tokens{Input: 110, Output: 12}},
-			{Task: "echo-notool", Session: "sesn_b", Pass: true,
-				ElapsedMS: 1000, Tokens: tokens{Input: 20, Output: 5}},
-		},
-	}
-	out := renderSummary(rep)
+// The retry flow itself, offline through verdict's grade seam: a first attempt
+// failing on model behavior is recorded as the superseded attempt 1 (flushed
+// before the retry starts), the retry runs exactly once as attempt 2, and a
+// passing retry greens the task — this test reddening is itself the assertion
+// that the superseded failures go to the log, not to t.Errorf.
+func TestVerdictRecordsBothAttemptsOfARetriedTask(t *testing.T) {
+	withScratchRecorder(t)
 
-	for _, want := range []string{
-		"2/2 passed", // final attempts only: the superseded attempt is no trial of its own
-		"| repo-answer | FAIL (retried) |",
-		"| repo-answer | PASS (retry) |",
-		"| echo-notool | PASS |",
-		"230 in / 27 out", // both attempts' spend counts
-		"## repo-answer (session `sesn_a1`, attempt 1 — retried)",
-		"[E] repo-passphrase-answered",
-		"transcript-repo-answer-sesn_a1.json",
-	} {
-		if !strings.Contains(out, want) {
-			t.Errorf("summary missing %q\n---\n%s", want, out)
+	var calls []int
+	verdict(t, func(attempt int) (*record, []failure) {
+		calls = append(calls, attempt)
+		if len(calls) == 1 {
+			fs := []failure{{Grader: "final-message-has:x", Class: "E", Error: "refused"}}
+			return &record{Task: "task", Session: "sesn_1", Attempt: attempt, Failures: fs}, fs
 		}
+		return &record{Task: "task", Session: "sesn_2", Attempt: attempt}, nil
+	})
+
+	if len(calls) != 2 || calls[0] != 0 || calls[1] != 2 {
+		t.Fatalf("grade calls = %v, want [0 2] — one first attempt, one retry", calls)
 	}
-	// The passing retry gets no detail section, like any passing record.
-	if strings.Contains(out, "## repo-answer (session `sesn_a2`") {
-		t.Error("summary should not emit a detail section for the passing retry")
+	recs := recorder.rep.Records
+	if len(recs) != 2 {
+		t.Fatalf("recorded %d records, want the superseded attempt and the retry", len(recs))
+	}
+	if recs[0].Attempt != 1 || recs[0].Pass || recs[0].Session != "sesn_1" {
+		t.Errorf("first record = %+v, want the superseded attempt 1, failed", recs[0])
+	}
+	if recs[1].Attempt != 2 || !recs[1].Pass || recs[1].Session != "sesn_2" {
+		t.Errorf("second record = %+v, want the passing attempt 2", recs[1])
 	}
 }
 
-// A failed retry is judged like any failed trial, and its detail names the
-// attempt so the two same-task sections read apart.
-func TestRenderSummaryFailedRetry(t *testing.T) {
-	rep := report{Records: []record{
-		{Task: "mcp-answer", Session: "sesn_c1", Pass: false, Attempt: 1,
-			Failures: []failure{{Grader: "final-message-has:x", Class: "E", Error: "empty"}}},
-		{Task: "mcp-answer", Session: "sesn_c2", Pass: false, Attempt: 2,
-			Failures: []failure{{Grader: "final-message-has:x", Class: "E", Error: "refused"}}},
-	}}
-	out := renderSummary(rep)
-	for _, want := range []string{
-		"0/1 passed",
-		"| mcp-answer | FAIL (retried) |",
-		"| mcp-answer | FAIL (retry) |",
-		"## mcp-answer (session `sesn_c1`, attempt 1 — retried)",
-		"## mcp-answer (session `sesn_c2`, attempt 2 — the retry)",
-	} {
-		if !strings.Contains(out, want) {
-			t.Errorf("summary missing %q\n---\n%s", want, out)
-		}
-	}
-}
+// The common path stays the common shape: a clean first attempt records once,
+// as the sole attempt, and never consults the retry.
+func TestVerdictCleanAttemptRecordsOnce(t *testing.T) {
+	withScratchRecorder(t)
 
-// attempt stays off the wire for the common case: a task that ran once
-// serializes exactly as before the field existed.
-func TestRecordAttemptOmittedWhenZero(t *testing.T) {
-	plain, err := json.Marshal(record{Task: "t"})
-	if err != nil {
-		t.Fatal(err)
+	var calls []int
+	verdict(t, func(attempt int) (*record, []failure) {
+		calls = append(calls, attempt)
+		return &record{Task: "task", Session: "sesn_1", Attempt: attempt}, nil
+	})
+
+	if len(calls) != 1 {
+		t.Fatalf("grade calls = %v, want exactly one attempt", calls)
 	}
-	if strings.Contains(string(plain), "attempt") {
-		t.Errorf("a sole attempt should not serialize an attempt field: %s", plain)
-	}
-	retried, err := json.Marshal(record{Task: "t", Attempt: 1})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(string(retried), `"attempt":1`) {
-		t.Errorf("a superseded attempt should serialize attempt:1: %s", retried)
+	recs := recorder.rep.Records
+	if len(recs) != 1 || recs[0].Attempt != 0 || !recs[0].Pass {
+		t.Fatalf("records = %+v, want one passing sole-attempt record", recs)
 	}
 }

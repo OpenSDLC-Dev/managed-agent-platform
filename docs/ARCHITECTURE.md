@@ -552,7 +552,11 @@ extraction. The merge gate is `make verify`
 statement coverage** over the logic packages of `./internal/...`). On top sits the eval
 system (`make eval`, [plan 02](./plan/02_evals-system.md)): nineteen deterministic regression
 tasks driving whole sessions through the public API against a real model, graded
-code-only with per-trial nonces and Platform/Model/Either failure classing. `repo-answer`
+code-only with per-trial nonces and Platform/Model/Either failure classing. The classing
+decides retries: an attempt failing only on Model/Either graders earns one fresh attempt
+before the run reds, reported in the summary's headline and records, while a
+Platform-class failure always stands — so a green nightly means "no platform signal",
+not "no model wobble". `repo-answer`
 is the one trial whose expected answer is not nonce-derived — it lives in a fixed private
 GitHub fixture repository, whose privacy stands in for the nonce a fixed remote cannot
 carry (#358). The registered set is pinned by an offline test, so adding or dropping a trial
