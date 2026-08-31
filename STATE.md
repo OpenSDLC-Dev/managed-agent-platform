@@ -21,8 +21,8 @@ What is being worked on right now, and how far along it is — nothing else. **S
   half — its render half is slice 5's), the real list filter, three registry entries.
 - **Slice 4 — the scheduler.** Done: the controlplane tick (30s, DB clock), the
   unique-index occurrence claim, the fire (savepoint, settle, auto-pause on the
-  fourteen), the one-hour catch-up collapse, `lock_timeout` on the fire and the three
-  actions, the three instruments (`deployment.fires`, `deployment.occurrences.skipped`,
+  fourteen), the one-hour catch-up collapse, `lock_timeout` on the fire and the row's
+  four writers, the three instruments (`deployment.fires`, `deployment.occurrences.skipped`,
   `deployment.tick.duration`), spans `deployment.tick`/`deployment.fire`, and the
   slice-4 registry entries.
 - **Slice 5** — next: the two run lists.

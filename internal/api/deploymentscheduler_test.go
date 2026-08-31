@@ -8,7 +8,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgconn"
+	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/api"
 )
@@ -733,6 +737,127 @@ func TestSchedulerSchedulingStateChangeBetweenScanAndFire(t *testing.T) {
 	}
 	if runs := scheduledRuns(t, s, floorID); len(runs) != 0 {
 		t.Fatalf("a fire ran an occurrence behind the restamped resume floor: %v", runs)
+	}
+	restore()
+
+	// A replaced timezone alone — the same wall-clock expression names a
+	// different instant under it, so the occurrence is equally stale.
+	tzID := createDeployment(t, s, scheduledBody(agentID, envID, "0 9 * * *", "UTC"))["id"].(string)
+	setResumedAt(t, s, tzID, time.Date(2026, 3, 14, 0, 0, 0, 0, time.UTC))
+	restore = api.SetDeploymentFireHookAfterBeginForTest(func() {
+		if _, err := s.pool.Exec(context.Background(),
+			`UPDATE deployments SET schedule_timezone = 'America/New_York' WHERE id = $1`, tzID); err != nil {
+			t.Errorf("swap timezone: %v", err)
+		}
+	})
+	defer restore()
+	if err := api.SchedulerTick(t.Context(), s.pool, time.Date(2026, 3, 14, 9, 0, 30, 0, time.UTC)); err != nil {
+		t.Fatalf("tick: %v", err)
+	}
+	if runs := scheduledRuns(t, s, tzID); len(runs) != 0 {
+		t.Fatalf("a fire ran an occurrence of a replaced timezone: %v", runs)
+	}
+}
+
+// The two lost-race codes part ways past the claim phase, and each half is
+// pinned: a synthetic 40P01 from inside the fire is the quiet retry a
+// deadlock victim earns (its transaction committed nothing), while a 55P03
+// there is a diagnosable contention fault and must surface as a counted
+// abandonment — swallowing it would make a wedged environment row
+// indistinguishable from "nothing was due".
+func TestSchedulerLostRaceShapesPastTheClaim(t *testing.T) {
+	collect := collectMetrics(t)
+	s := newTestServer(t)
+	agentID, envID := fixture(t, s)
+	deplID := createDeployment(t, s, scheduledBody(agentID, envID, "0 9 * * *", "UTC"))["id"].(string)
+	setResumedAt(t, s, deplID, time.Date(2026, 3, 12, 0, 0, 0, 0, time.UTC))
+	now := time.Date(2026, 3, 12, 9, 0, 10, 0, time.UTC)
+
+	restore := api.SetDeploymentFireHookInFireForTest(func() error {
+		return &pgconn.PgError{Code: "40P01", Message: "deadlock detected"}
+	})
+	if err := api.SchedulerTick(t.Context(), s.pool, now); err != nil {
+		t.Errorf("a deadlock victim surfaced as the tick's error: %v", err)
+	}
+	restore()
+	if runs := scheduledRuns(t, s, deplID); len(runs) != 0 {
+		t.Fatalf("a deadlock victim left a run row: %v", runs)
+	}
+
+	restore = api.SetDeploymentFireHookInFireForTest(func() error {
+		return &pgconn.PgError{Code: "55P03", Message: "lock timeout"}
+	})
+	if err := api.SchedulerTick(t.Context(), s.pool, now.Add(30*time.Second)); err == nil {
+		t.Error("a deep lock timeout returned nil; it must surface as a counted abandonment")
+	}
+	restore()
+	if runs := scheduledRuns(t, s, deplID); len(runs) != 0 {
+		t.Fatalf("an abandoned fire left a run row: %v", runs)
+	}
+	if got := fireCount(t, collect(), "abandoned", ""); got != 1 {
+		t.Errorf("fires{outcome=abandoned} = %d, want 1 (the 55P03, not the 40P01)", got)
+	}
+}
+
+// The uncapped skipped branch — a floor already inside the window — computes
+// the exact count from the due list, no saturating walk involved.
+func TestSchedulerSteadyStateSkippedCountIsExact(t *testing.T) {
+	collect := collectMetrics(t)
+	s := newTestServer(t)
+	agentID, envID := fixture(t, s)
+	deplID := createDeployment(t, s, scheduledBody(agentID, envID, "*/10 * * * *", "UTC"))["id"].(string)
+	setResumedAt(t, s, deplID, time.Date(2026, 3, 12, 9, 0, 0, 0, time.UTC))
+
+	// The floor (09:00) is 35 minutes old against a one-hour window, so the
+	// clamp never engages; 09:10 and 09:20 collapse under the 09:30 fire.
+	if err := api.SchedulerTick(t.Context(), s.pool, time.Date(2026, 3, 12, 9, 35, 30, 0, time.UTC)); err != nil {
+		t.Fatalf("tick: %v", err)
+	}
+	runs := scheduledRuns(t, s, deplID)
+	if len(runs) != 1 || !runs[0].scheduledAt.Equal(time.Date(2026, 3, 12, 9, 30, 0, 0, time.UTC)) {
+		t.Fatalf("runs = %v, want exactly the 09:30 occurrence", runs)
+	}
+	if got := skippedCount(t, collect()); got != 2 {
+		t.Errorf("occurrences.skipped = %d, want the exact 2", got)
+	}
+}
+
+// An idle sweep exports no span at all — 2,880 empty root traces a day per
+// replica would bury the fires an operator looks for — while a firing sweep
+// roots deployment.tick with its deployment.fire child.
+func TestSchedulerIdleTickExportsNoSpan(t *testing.T) {
+	recorder := tracetest.NewSpanRecorder()
+	prev := otel.GetTracerProvider()
+	otel.SetTracerProvider(sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(recorder)))
+	t.Cleanup(func() { otel.SetTracerProvider(prev) })
+
+	s := newTestServer(t)
+	agentID, envID := fixture(t, s)
+	deplID := createDeployment(t, s, scheduledBody(agentID, envID, "0 9 * * *", "UTC"))["id"].(string)
+
+	// Nothing is due: the resume floor (stamped at create, "now") is not
+	// before this past instant, so the candidate contributes no fire.
+	if err := api.SchedulerTick(t.Context(), s.pool, time.Date(2026, 3, 12, 9, 0, 30, 0, time.UTC)); err != nil {
+		t.Fatalf("idle tick: %v", err)
+	}
+	names := map[string]int{}
+	for _, sp := range recorder.Ended() {
+		names[sp.Name()]++
+	}
+	if names["deployment.tick"] != 0 || names["deployment.fire"] != 0 {
+		t.Fatalf("an idle sweep exported scheduler spans: %v", names)
+	}
+
+	setResumedAt(t, s, deplID, time.Date(2026, 3, 12, 0, 0, 0, 0, time.UTC))
+	if err := api.SchedulerTick(t.Context(), s.pool, time.Date(2026, 3, 12, 9, 0, 30, 0, time.UTC)); err != nil {
+		t.Fatalf("firing tick: %v", err)
+	}
+	names = map[string]int{}
+	for _, sp := range recorder.Ended() {
+		names[sp.Name()]++
+	}
+	if names["deployment.tick"] != 1 || names["deployment.fire"] != 1 {
+		t.Fatalf("a firing sweep exported %v, want one deployment.tick and one deployment.fire", names)
 	}
 }
 
