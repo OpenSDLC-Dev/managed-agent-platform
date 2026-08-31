@@ -1054,8 +1054,9 @@ func errorMessage(errorType any) any {
 }
 
 // last_run_at is derived: the created_at of the run with the greatest
-// scheduled_at, counting only scheduled runs that actually started a session.
-// Slice 4 writes these rows; the derivation is slice 1's.
+// scheduled_at, counting only scheduled runs that succeeded — judged from
+// succeeded_at, the durable marker, never the session link (#520). Slice 4
+// writes these rows; the derivation is slice 1's.
 func TestLastRunAtIsDerivedFromTheRunHistory(t *testing.T) {
 	s := newTestServer(t)
 	agentID, envID := fixture(t, s)
@@ -1069,14 +1070,20 @@ func TestLastRunAtIsDerivedFromTheRunHistory(t *testing.T) {
 	// errorType keeps each fixture in the one shape a committed run may take —
 	// exactly one of session_id and error_type set, which the runs table holds
 	// by construction rather than by a CHECK. The message travels with it
-	// because deployment_runs_error_pair does check that the two agree.
+	// because deployment_runs_error_pair does check that the two agree, and a
+	// session-bearing fixture is stamped succeeded_at the way every writer
+	// settles a success — the durable marker last_run_at reads (#520).
 	insert := func(runID, trigger string, scheduledAt any, session any, errorType any, createdAt string) {
 		t.Helper()
+		var succeededAt any
+		if session != nil {
+			succeededAt = createdAt
+		}
 		if _, err := s.pool.Exec(t.Context(),
 			`INSERT INTO deployment_runs (id, deployment_id, trigger_type, scheduled_at,
-			   agent_id, agent_version, session_id, error_type, error_message, created_at)
-			 VALUES ($1,$2,$3,$4,$5,1,$6,$7,$8,$9)`,
-			runID, id, trigger, scheduledAt, agentID, session, errorType, errorMessage(errorType), createdAt); err != nil {
+			   agent_id, agent_version, session_id, error_type, error_message, created_at, succeeded_at)
+			 VALUES ($1,$2,$3,$4,$5,1,$6,$7,$8,$9,$10)`,
+			runID, id, trigger, scheduledAt, agentID, session, errorType, errorMessage(errorType), createdAt, succeededAt); err != nil {
 			t.Fatal(err)
 		}
 	}

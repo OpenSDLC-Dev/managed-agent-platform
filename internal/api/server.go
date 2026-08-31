@@ -68,6 +68,9 @@ func NewHandler(pool *pgxpool.Pool, blobs blob.Store, cipher secrets.Cipher, ver
 	mux.HandleFunc("POST /v1/deployments/{id}/archive", s.handle(identity.RoleDeveloper, s.archiveDeployment))
 	mux.HandleFunc("POST /v1/deployments/{id}/pause", s.handle(identity.RoleDeveloper, s.pauseDeployment))
 	mux.HandleFunc("POST /v1/deployments/{id}/unpause", s.handle(identity.RoleDeveloper, s.unpauseDeployment))
+	// RoleDeveloper because it does session-create's work, not because it
+	// looks like a read (plan 37 §5.1).
+	mux.HandleFunc("POST /v1/deployments/{id}/run", s.handle(identity.RoleDeveloper, s.runDeployment))
 
 	mux.HandleFunc("POST /v1/sessions", s.handle(identity.RoleDeveloper, s.createSession))
 	mux.HandleFunc("GET /v1/sessions", s.handle(identity.RoleViewer, s.listSessions))
@@ -221,6 +224,7 @@ func NewHandler(pool *pgxpool.Pool, blobs blob.Store, cipher secrets.Cipher, ver
 		"/v1/memory_stores/{id}/memory_versions/{vid}/redact",
 		"/v1/deployments", "/v1/deployments/{id}", "/v1/deployments/{id}/archive",
 		"/v1/deployments/{id}/pause", "/v1/deployments/{id}/unpause",
+		"/v1/deployments/{id}/run",
 	} {
 		mux.HandleFunc(pattern, func(w http.ResponseWriter, r *http.Request) {
 			writeError(w, r, methodNotAllowed(r))

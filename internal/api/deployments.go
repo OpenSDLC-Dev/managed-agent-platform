@@ -118,7 +118,10 @@ func scanDeployment(row pgx.Row) (domain.Deployment, error) {
 // the one expression rather than needing three branches: manual runs do not
 // update the field (the trigger filter), it survives archiving (archive
 // touches no run row), and it is null until one completes (no rows, no
-// maximum).
+// maximum). Success is judged from succeeded_at, never from session_id: the
+// session link is ON DELETE SET NULL, so keying off it let a deleted session
+// pull the field backwards to an older run — reporting false about a run that
+// did start (#520, migration 0032).
 //
 // The `scheduled_at IS NOT NULL` conjunct is redundant against trigger_type
 // and load-bearing anyway: the occurrence index is partial on exactly that
@@ -151,7 +154,7 @@ func fillScheduleTimestamps(ctx context.Context, db querier, ds []*domain.Deploy
 		   FROM deployment_runs
 		  WHERE deployment_id = ANY($1)
 		    AND trigger_type = 'schedule'
-		    AND session_id IS NOT NULL
+		    AND succeeded_at IS NOT NULL
 		    AND scheduled_at IS NOT NULL
 		  ORDER BY deployment_id, scheduled_at DESC`, ids)
 	if err != nil {

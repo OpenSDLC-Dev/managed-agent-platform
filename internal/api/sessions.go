@@ -54,7 +54,7 @@ type sessionJSON struct {
 	OutcomeEvaluations []json.RawMessage `json:"outcome_evaluations"`
 	Resources          []json.RawMessage `json:"resources"`
 	VaultIDs           []string          `json:"vault_ids"`
-	DeploymentID       *string           `json:"deployment_id"` // deployments are post-v1: always null
+	DeploymentID       *string           `json:"deployment_id"` // set only by a deployment fire; null otherwise
 	Budget             *json.RawMessage  `json:"budget"`        // budgets are not built: always null (INFERRED, docs/DIVERGENCES.md)
 	CreatedAt          time.Time         `json:"created_at"`
 	UpdatedAt          time.Time         `json:"updated_at"`
@@ -80,18 +80,19 @@ type sessionRow struct {
 	resourcesJSON        []byte
 	outcomesJSON         []byte
 	vaultIDs             []string
+	deploymentID         *string
 	createdAt, updatedAt time.Time
 	archivedAt           *time.Time
 }
 
 const sessionColumns = `id, resolved_agent, environment_id, status, title,
-	metadata, usage, resources, outcome_evaluations, vault_ids, created_at, updated_at, archived_at`
+	metadata, usage, resources, outcome_evaluations, vault_ids, deployment_id, created_at, updated_at, archived_at`
 
 func scanSession(row pgx.Row) (sessionRow, error) {
 	var r sessionRow
 	err := row.Scan(&r.id, &r.agentJSON, &r.environmentID, &r.status, &r.title,
 		&r.metaJSON, &r.usageJSON, &r.resourcesJSON, &r.outcomesJSON, &r.vaultIDs,
-		&r.createdAt, &r.updatedAt, &r.archivedAt)
+		&r.deploymentID, &r.createdAt, &r.updatedAt, &r.archivedAt)
 	return r, err
 }
 
@@ -191,7 +192,7 @@ func renderSession(r sessionRow) (sessionJSON, error) {
 		ID: r.id, Type: "session", Agent: agent, EnvironmentID: r.environmentID,
 		Status: r.status, Title: r.title, Metadata: metadata, Usage: usage,
 		Stats: statsJSON{}, OutcomeEvaluations: outcomes,
-		Resources: resources, VaultIDs: r.vaultIDs,
+		Resources: resources, VaultIDs: r.vaultIDs, DeploymentID: r.deploymentID,
 		CreatedAt: r.createdAt.UTC(), UpdatedAt: r.updatedAt.UTC(), ArchivedAt: utcPtr(r.archivedAt),
 	}, nil
 }
@@ -307,7 +308,8 @@ func (s *server) resolveAgent(ctx context.Context, db querier, raw json.RawMessa
 		}
 	}
 	if archivedAt != nil {
-		return snap, errInvalid("agent %s is archived", agentID)
+		return snap, classified("agent_archived_error",
+			errInvalid("agent %s is archived", agentID))
 	}
 
 	var spec agentSpec
@@ -429,10 +431,10 @@ func validateAttachedVaults(ctx context.Context, tx pgx.Tx, ids []string) error 
 	for _, id := range ids {
 		at, ok := archivedAt[id]
 		if !ok {
-			return errInvalid("vault %s not found", id)
+			return classified("vault_not_found_error", errInvalid("vault %s not found", id))
 		}
 		if at != nil {
-			return errInvalid("vault %s is archived", id)
+			return classified("vault_archived_error", errInvalid("vault %s is archived", id))
 		}
 	}
 	return nil
@@ -621,7 +623,8 @@ func (s *server) createSession(r *http.Request) (any, error) {
 // per-type normalization runs inside, where the environment's kind is known.
 // created_by is deliberately not a field: it is read from ctx (principalFrom),
 // so a caller with no authenticated principal creates the session
-// unattributed.
+// unattributed. deploymentID is set only by a deployment fire — the create
+// surface has no deployment field on the wire and rejects the key.
 type createSessionIn struct {
 	envID          string
 	agentRaw       json.RawMessage
@@ -631,6 +634,7 @@ type createSessionIn struct {
 	sealedTokens   []sealedToken
 	vaultIDs       []string
 	rawInitial     []json.RawMessage
+	deploymentID   *string
 }
 
 // createdSession is what the committing caller still needs afterwards: the
@@ -660,7 +664,8 @@ func (s *server) createSessionInTx(ctx context.Context, tx pgx.Tx, in createSess
 		return createdSession{}, err
 	}
 	if envArchivedAt != nil {
-		return createdSession{}, errInvalid("environment %s is archived", in.envID)
+		return createdSession{}, classified("environment_archived_error",
+			errInvalid("environment %s is archived", in.envID))
 	}
 	if err := validateAttachedVaults(ctx, tx, in.vaultIDs); err != nil {
 		return createdSession{}, err
@@ -711,13 +716,14 @@ func (s *server) createSessionInTx(ctx context.Context, tx pgx.Tx, in createSess
 		metaJSON: mustJSON(in.metadata), usageJSON: []byte(`{}`), resourcesJSON: resourcesJSON,
 		outcomesJSON: []byte(`[]`),
 		vaultIDs:     in.vaultIDs,
+		deploymentID: in.deploymentID,
 	}
 	err = tx.QueryRow(ctx,
 		`INSERT INTO sessions (id, agent_id, agent_version, resolved_agent, environment_id,
-		   status, title, metadata, resources, vault_ids, created_by)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+		   status, title, metadata, resources, vault_ids, created_by, deployment_id)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
 		 RETURNING created_at, updated_at`,
-		id, agent.ID, agent.Version, agentJSON, in.envID, row.status, in.title, in.metadata, resourcesJSON, in.vaultIDs, createdBy).
+		id, agent.ID, agent.Version, agentJSON, in.envID, row.status, in.title, in.metadata, resourcesJSON, in.vaultIDs, createdBy, in.deploymentID).
 		Scan(&row.createdAt, &row.updatedAt)
 	var pgErr *pgconn.PgError
 	if errors.As(err, &pgErr) && pgErr.Code == "23503" { // foreign_key_violation backstop
@@ -1104,16 +1110,22 @@ func (s *server) listSessions(r *http.Request) (any, error) {
 		}
 	}
 
-	// Deployments are post-v1: no session can reference one, so filtering by
-	// deployment_id yields an empty result, not an error.
-	if q.Get("deployment_id") != "" {
-		return biPageJSON{Data: []any{}}, nil
-	}
-
 	query := `SELECT ` + sessionColumns + ` FROM sessions WHERE true`
 	var args []any
 	if !includeArchived {
 		query += ` AND archived_at IS NULL`
+	}
+	if deplID := q.Get("deployment_id"); deplID != "" {
+		// "Filter sessions created by this deployment ID": an equality on the
+		// column only a fire writes, served by the partial
+		// sessions_deployment_idx (the predicate is implied by the equality).
+		// Shape first, the memory_store_id rule beside it: a valid-but-absent
+		// id filters to the published 200-with-empty page.
+		if !domain.ID(deplID).HasPrefix(domain.PrefixDeployment) || !domain.ID(deplID).Valid() {
+			return nil, errInvalid("deployment_id must be a valid deployment id")
+		}
+		args = append(args, deplID)
+		query += fmt.Sprintf(` AND deployment_id = $%d`, len(args))
 	}
 	if storeID := q.Get("memory_store_id"); storeID != "" {
 		// "Filter sessions whose resources contain a memory_store with this
