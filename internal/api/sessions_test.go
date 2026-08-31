@@ -627,9 +627,8 @@ func TestSessionListFiltersAndBidirectionalPagination(t *testing.T) {
 	status, body := s.do(http.MethodGet, "/v1/sessions?statuses[]=zombie", nil)
 	wantErr(t, status, body, http.StatusBadRequest, "invalid_request_error")
 
-	// deployment_id references a feature we don't host: no session can match,
-	// so the result is empty rather than an error. (memory_store_id is real
-	// since plan 36 slice 3 — TestSessionListFiltersByMemoryStore.)
+	// A shape-valid deployment_id no deployment holds filters to the published
+	// empty page (the real filter's own tests live in deploymentruns_test.go).
 	status, list = s.do(http.MethodGet, "/v1/sessions?deployment_id=depl_x", nil)
 	if status != http.StatusOK || len(listData(t, list)) != 0 {
 		t.Errorf("deployment_id: %d %v", status, list)

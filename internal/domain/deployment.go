@@ -217,3 +217,54 @@ func (d Deployment) MarshalJSON() ([]byte, error) {
 		PausedReason: d.Reason(),
 	})
 }
+
+// RunError is the {type, message} a failed deployment run records — one of the
+// sixteen members of the reference's run-error union (0031 spells them out).
+type RunError struct {
+	Type    string `json:"type"`
+	Message string `json:"message"`
+}
+
+// TriggerContext says what fired a run: {"type": "manual"} for POST /run,
+// {"type": "schedule", "scheduled_at": …} for the cron scheduler. The manual
+// context carries no scheduled_at at all — the reference closes both objects
+// with additionalProperties: false — which is what omitempty renders. The
+// same omitempty cuts the other way on the schedule variant, where the wire
+// REQUIRES scheduled_at: a renderer that builds one must set the pointer,
+// because a forgotten nil is silently omitted rather than failing loudly.
+type TriggerContext struct {
+	Type        string     `json:"type"` // "schedule" | "manual"
+	ScheduledAt *time.Time `json:"scheduled_at,omitempty"`
+}
+
+// DeploymentRun is BetaManagedAgentsDeploymentRun: "a persistent, append-only
+// record of a single deployment execution. Records session creation success or
+// failure — no session lifecycle tracking." Exactly one of SessionID and Error
+// is non-null on a settled row — the writers' construction, not a CHECK
+// (0031). SessionID can revert to null after settlement when its session is
+// deleted, which is why success is judged from the stored succeeded_at and
+// never from this link (#520).
+type DeploymentRun struct {
+	ID             ID             `json:"id"` // drun_…
+	DeploymentID   ID             `json:"deployment_id"`
+	TriggerContext TriggerContext `json:"trigger_context"`
+	SessionID      *ID            `json:"session_id"`
+	Error          *RunError      `json:"error"`
+	Agent          AgentReference `json:"agent"`
+	CreatedAt      time.Time      `json:"created_at"`
+}
+
+// MarshalJSON adds the constant type and renders the timestamp in UTC,
+// Deployment.MarshalJSON's rule.
+func (r DeploymentRun) MarshalJSON() ([]byte, error) {
+	r.CreatedAt = r.CreatedAt.UTC()
+	if r.TriggerContext.ScheduledAt != nil {
+		at := r.TriggerContext.ScheduledAt.UTC()
+		r.TriggerContext.ScheduledAt = &at
+	}
+	type alias DeploymentRun
+	return json.Marshal(struct {
+		Type string `json:"type"`
+		alias
+	}{Type: "deployment_run", alias: alias(r)})
+}

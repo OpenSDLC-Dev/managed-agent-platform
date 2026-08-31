@@ -99,6 +99,8 @@ func roleMatrix() []matrixRoute {
 		{"POST", "/v1/deployments", d}, {"POST", depl, d},
 		{"POST", depl + "/archive", d},
 		{"POST", depl + "/pause", d}, {"POST", depl + "/unpause", d},
+		// run takes developer because it does session-create's work (§5.1).
+		{"POST", depl + "/run", d},
 
 		// Environments. The work API under /v1/environments/{id}/work is a
 		// different lane entirely and is covered by TestEnvironmentKeyLane below.

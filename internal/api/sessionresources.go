@@ -704,13 +704,17 @@ func snapshotMemoryStore(ctx context.Context, db querier, in resourceInput) (mem
 		`SELECT name, description, archived_at FROM memory_stores WHERE id = $1 FOR SHARE`,
 		in.memoryStoreID).Scan(&name, &description, &archivedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return memoryResourceJSON{}, errInvalid("memory store %s not found", in.memoryStoreID)
+		// A missing store is §5.2's "other resource gone" arm; only an
+		// archived one has a type of its own.
+		return memoryResourceJSON{}, classified("session_resource_not_found_error",
+			errInvalid("memory store %s not found", in.memoryStoreID))
 	}
 	if err != nil {
 		return memoryResourceJSON{}, err
 	}
 	if archivedAt != nil {
-		return memoryResourceJSON{}, errInvalid("memory store %s is archived", in.memoryStoreID)
+		return memoryResourceJSON{}, classified("memory_store_archived_error",
+			errInvalid("memory store %s is archived", in.memoryStoreID))
 	}
 	slug := memsync.Slug(name, strings.TrimPrefix(in.memoryStoreID, domain.PrefixMemoryStore+"_"))
 	return memoryResourceJSON{
@@ -763,7 +767,7 @@ func fileMustExist(ctx context.Context, db querier, fileID string) error {
 	var exists bool
 	err := db.QueryRow(ctx, `SELECT true FROM files WHERE id = $1`, fileID).Scan(&exists)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return errNotFound("file %s not found", fileID)
+		return classified("file_not_found_error", errNotFound("file %s not found", fileID))
 	}
 	return err
 }

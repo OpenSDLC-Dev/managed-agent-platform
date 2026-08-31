@@ -902,8 +902,11 @@ Six conventions the compiler will not enforce:
   and `organization_disabled_error` admissible values rather than nonsense (§8.1 entry 6).
 - **`deployments.created_by text`**, audit-only and never on the wire, as
   `0001_init.sql:82-85` and `0028_memory_stores.sql:17-19` carry it. It matters more here
-  than usual: a fired session's `created_by` is NULL (§9), so the deployment row is the only
-  place the audit trail survives.
+  than usual: a session the *schedule* fires has a NULL `created_by` (§9), so the deployment
+  row is the only place that trail survives. (Slice 3 scoped this sentence, which used to say
+  "a fired session" unqualified: a *manual* run is an authenticated request, and
+  `createSessionInTx`'s ctx read attributes its session to the caller who fired it — the
+  audit answer to who caused the row — with a test pinning the attribution.)
 - **The unique index is partial and is not `CONCURRENTLY`**:
   `UNIQUE (deployment_id, scheduled_at) WHERE scheduled_at IS NOT NULL`. Manual runs have no
   `scheduled_at`, and while Postgres admits unlimited NULLs in a plain unique index, the

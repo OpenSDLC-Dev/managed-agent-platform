@@ -1054,8 +1054,9 @@ func errorMessage(errorType any) any {
 }
 
 // last_run_at is derived: the created_at of the run with the greatest
-// scheduled_at, counting only scheduled runs that actually started a session.
-// Slice 4 writes these rows; the derivation is slice 1's.
+// scheduled_at, counting only scheduled runs that succeeded — judged from
+// succeeded_at, the durable marker, never the session link (#520). Slice 4
+// writes these rows; the derivation is slice 1's.
 func TestLastRunAtIsDerivedFromTheRunHistory(t *testing.T) {
 	s := newTestServer(t)
 	agentID, envID := fixture(t, s)
@@ -1068,24 +1069,29 @@ func TestLastRunAtIsDerivedFromTheRunHistory(t *testing.T) {
 
 	// errorType keeps each fixture in the one shape a committed run may take —
 	// exactly one of session_id and error_type set, which the runs table holds
-	// by construction rather than by a CHECK. The message travels with it
+	// by construction rather than by a CHECK; the message travels with it
 	// because deployment_runs_error_pair does check that the two agree.
-	insert := func(runID, trigger string, scheduledAt any, session any, errorType any, createdAt string) {
+	// succeededAt is explicit — and distinct from createdAt on every
+	// successful row — so the assertions can tell the durable marker from the
+	// session link AND from the reported instant (#520): a derivation keyed
+	// off session_id, or one returning succeeded_at instead of created_at,
+	// each fails a fixture below.
+	insert := func(runID, trigger string, scheduledAt any, session any, errorType any, createdAt string, succeededAt any) {
 		t.Helper()
 		if _, err := s.pool.Exec(t.Context(),
 			`INSERT INTO deployment_runs (id, deployment_id, trigger_type, scheduled_at,
-			   agent_id, agent_version, session_id, error_type, error_message, created_at)
-			 VALUES ($1,$2,$3,$4,$5,1,$6,$7,$8,$9)`,
-			runID, id, trigger, scheduledAt, agentID, session, errorType, errorMessage(errorType), createdAt); err != nil {
+			   agent_id, agent_version, session_id, error_type, error_message, created_at, succeeded_at)
+			 VALUES ($1,$2,$3,$4,$5,1,$6,$7,$8,$9,$10)`,
+			runID, id, trigger, scheduledAt, agentID, session, errorType, errorMessage(errorType), createdAt, succeededAt); err != nil {
 			t.Fatal(err)
 		}
 	}
 
 	// A manual run does not move the field, and neither does a scheduled run
 	// that never started a session.
-	insert("drun_manual", "manual", nil, sessionID, nil, "2026-03-20T10:00:00Z")
+	insert("drun_manual", "manual", nil, sessionID, nil, "2026-03-20T10:00:00Z", "2026-03-20T10:00:01Z")
 	insert("drun_failed", "schedule", "2026-03-21T09:00:00Z", nil,
-		"environment_archived_error", "2026-03-21T09:00:05Z")
+		"environment_archived_error", "2026-03-21T09:00:05Z", nil)
 
 	status, d := s.do(http.MethodGet, "/v1/deployments/"+id, nil)
 	if status != http.StatusOK {
@@ -1096,8 +1102,14 @@ func TestLastRunAtIsDerivedFromTheRunHistory(t *testing.T) {
 	}
 
 	// A successful scheduled fire does, and reports created_at — when the run
-	// actually started — not scheduled_at, the pre-jitter cron match.
-	insert("drun_ok", "schedule", "2026-03-19T09:00:00Z", sessionID, nil, "2026-03-19T09:00:07Z")
+	// actually started — not scheduled_at (the pre-jitter cron match) and not
+	// succeeded_at (the settlement instant, deliberately distinct here). A
+	// session-linked row that never settled succeeded_at — a shape only
+	// direct SQL can produce, since the settlement writes both together — is
+	// ignored even at a greater scheduled_at: the marker decides, never the
+	// link (#520).
+	insert("drun_ok", "schedule", "2026-03-19T09:00:00Z", sessionID, nil, "2026-03-19T09:00:07Z", "2026-03-19T09:00:09Z")
+	insert("drun_link_only", "schedule", "2026-03-20T09:00:00Z", sessionID, nil, "2026-03-20T09:00:05Z", nil)
 	status, d = s.do(http.MethodGet, "/v1/deployments/"+id, nil)
 	if status != http.StatusOK {
 		t.Fatalf("get: %d %v", status, d)
@@ -1109,7 +1121,7 @@ func TestLastRunAtIsDerivedFromTheRunHistory(t *testing.T) {
 	// Ordering is by scheduled_at, not by created_at: a later occurrence
 	// inserted earlier still wins, which is what "the most recent scheduled
 	// run" names.
-	insert("drun_later_occurrence", "schedule", "2026-03-22T09:00:00Z", sessionID, nil, "2026-03-19T09:00:01Z")
+	insert("drun_later_occurrence", "schedule", "2026-03-22T09:00:00Z", sessionID, nil, "2026-03-19T09:00:01Z", "2026-03-19T09:00:03Z")
 	status, d = s.do(http.MethodGet, "/v1/deployments/"+id, nil)
 	if status != http.StatusOK {
 		t.Fatalf("get: %d %v", status, d)
