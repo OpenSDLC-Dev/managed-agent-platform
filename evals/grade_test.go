@@ -220,30 +220,62 @@ func corePack(task Task) []Grader {
 // trailing newline: a model that prints line by line emits one and a model that
 // joins on "\n" does not, and both did the task. Everything else stays exact —
 // extra lines, reordering, stray prose and leading whitespace all fail — so this
-// forgives the convention without forgiving the content. Tasks that genuinely
-// need byte-equality (an edit that must preserve a file verbatim) want a
-// different grader.
+// forgives the convention without forgiving the content. A file the model
+// assembles by appending across turns wants FileLinesIgnoringBlanks; tasks that
+// genuinely need byte-equality (a file that must be left untouched) want
+// FileEquals.
 func FileLines(path string, want []string, class Class) Grader {
+	return fileLines("file-lines:", path, want, class, false)
+}
+
+// FileLinesIgnoringBlanks is FileLines with blank lines dropped before the
+// comparison, for the one file shape where they are expected noise: a file the
+// model assembles by appending across turns. `printf '\nentry\n' >>` against a
+// file that already ends in a newline leaves an empty line between entries, and
+// the 2026-09-01 manual run red journal-multiturn's retry on exactly that, with
+// every platform signal (first line unchanged, second below it) intact. The
+// forgiveness is deliberately not FileLines' own: on a single-write file a
+// blank line is not append hygiene, and keeping the strict grader strict costs
+// nothing there — dual review argued a uniform version down to this scope.
+// Content stays exact (whitespace-only lines, stray prose, reordering and
+// missing lines all fail), and want must be non-empty and blank-free, since a
+// blank can never survive to the got side.
+func FileLinesIgnoringBlanks(path string, want []string, class Class) Grader {
+	return fileLines("file-lines-ignoring-blanks:", path, want, class, true)
+}
+
+func fileLines(prefix, path string, want []string, class Class, ignoreBlanks bool) Grader {
 	return Grader{
-		Name:  "file-lines:" + path,
+		Name:  prefix + path,
 		Class: class,
 		Check: func(t *testing.T, tr *Trial) error {
 			raw, err := tr.readFile(t, tr.fill(path))
 			if err != nil {
 				return fmt.Errorf("read %s: %w", path, err)
 			}
-			got := splitLines(string(raw))
 			w := make([]string, len(want))
 			for i, s := range want {
 				w[i] = tr.fill(s)
 			}
-			if !slices.Equal(got, w) {
-				return fmt.Errorf("%s has %d line(s) %q, want %d line(s) %q",
-					path, len(got), got, len(w), w)
-			}
-			return nil
+			return lineMismatch(path, string(raw), w, ignoreBlanks)
 		},
 	}
+}
+
+// lineMismatch is the FileLines comparison, separated so both contracts are
+// testable without a sandbox to read from.
+func lineMismatch(path, raw string, want []string, ignoreBlanks bool) error {
+	got := splitLines(raw)
+	label := "line(s)"
+	if ignoreBlanks {
+		got = slices.DeleteFunc(got, func(s string) bool { return s == "" })
+		label = "non-blank line(s)"
+	}
+	if !slices.Equal(got, want) {
+		return fmt.Errorf("%s has %d %s %q, want %d line(s) %q",
+			path, len(got), label, got, len(want), want)
+	}
+	return nil
 }
 
 // splitLines splits a text file into lines, ignoring a trailing newline. An
@@ -1288,7 +1320,7 @@ func MCPEvaluatedPermissionAsk(server, tool string, class Class) Grader {
 // true, since that grader checks the permission *stamp* and not that a
 // suspension happened. In perm-allow the gated call must produce its file
 // (FileLines) and carry the stamp; in perm-deny the seeded file must be
-// *unchanged* (FileLines, Platform), so an unconfirmed append that actually runs
+// *unchanged* (FileEquals, Platform), so an unconfirmed append that actually runs
 // reds there, and the stamp is checked too. Blaming the platform here instead
 // would misread the harness giving up on a model that re-pauses past
 // maxConfirmRounds (harness_test.go) as a bridge fault.

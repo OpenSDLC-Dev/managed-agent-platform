@@ -655,7 +655,10 @@ func permDeny() Task {
 			// and the deny path needs that covered as much as the allow path does.
 			EvaluatedPermissionAsk("bash", Platform),
 			ConfirmedResult("bash", []string{"APPEND_{{NONCE}}"}, true, "DENY_{{NONCE}}", Platform),
-			FileLines("notes.txt", []string{"ORIGINAL_{{NONCE}}"}, Platform),
+			// FileEquals, not FileLines: "unchanged" is a byte claim, and the
+			// forgiveness the FileLines graders extend to a model's own work
+			// product has no business in a file nothing was allowed to touch.
+			FileEquals("notes.txt", "ORIGINAL_{{NONCE}}\n", Platform),
 			FinalMessageHas("DENIED:{{NONCE}}", Either),
 		},
 	}
@@ -763,7 +766,7 @@ func journalMultiturn() Task {
 				"DONE2:{{NONCE}} followed by my reference code from the first message."},
 		},
 		Graders: []Grader{
-			FileLines("journal.txt", []string{"entry-one-{{NONCE}}", "entry-two-{{NONCE}}"}, Either),
+			FileLinesIgnoringBlanks("journal.txt", []string{"entry-one-{{NONCE}}", "entry-two-{{NONCE}}"}, Either),
 			FileEquals(provenancePath, provenance, Platform),
 			EventCountAtLeast("user.message", 2, Platform),
 			EventAfterUserMessage("agent.tool_use", 2, Either),
