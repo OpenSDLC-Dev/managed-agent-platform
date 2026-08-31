@@ -8,15 +8,16 @@ What is being worked on right now, and how far along it is — nothing else. **S
 
 ## Tasks
 
-- **Slice 1 — CRUD, the three lifecycle actions, `internal/cron`, migration `0031`.** In
-  flight. Landed: the cron engine (Due/Next/Upcoming over one walk, embedded `time/tzdata`,
-  the two DST rules), both tables, the `Deployment` domain type, the seven routes, and
-  the agent-archive refusal (plan decision 7), plus every slice-1 registry entry whose
-  behavior has landed — 1, 2, 7, 8, 12, 15, 16, 19, 22, 23, 25, 27, 29, and two the plan
-  did not foresee. Still owed: the `DELETE /v1/environments` message naming the deployments
-  that block it, a change to that resource's own handler.
-  [#520](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/520) is slice 3's.
-- **Slice 2** — extract `createSessionTx`, behavior-neutral, the plan-36-slice-5 idiom.
+- **Slice 1 — CRUD, the three lifecycle actions, `internal/cron`, migration `0031`.** Done:
+  the cron engine (Due/Next/Upcoming over one walk, embedded `time/tzdata`, the two DST
+  rules), both tables, the `Deployment` domain type, the seven routes, the agent-archive
+  refusal (plan decision 7), the `DELETE /v1/environments` message that names the
+  deployments blocking it, and every slice-1 registry entry — 1, 2, 7, 8, 12, 15, 16, 19,
+  22, 23, 25, 27, 29 — plus four more §8.1 drafted no entry for, one of them plan 35's,
+  surfaced here on a typed object.
+  [#520](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/520) is slice 3's and
+  [#523](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/523) is deferred.
+- **Slice 2** — next: extract `createSessionTx`, behavior-neutral, the plan-36-slice-5 idiom.
 - **Slice 3** — `sessions.deployment_id` (migration `0032`), the real list filter, `POST /run`.
 - **Slice 4** — the scheduler: tick, claim, fire, auto-pause, catch-up, and
   `deployment.occurrences.skipped`.

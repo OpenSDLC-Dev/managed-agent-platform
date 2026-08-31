@@ -206,6 +206,13 @@ func loadDeployment(ctx context.Context, tx pgx.Tx, id string) (domain.Deploymen
 	return d, nil
 }
 
+// blockingDeploymentsNamed caps how many deployment ids a refusal spells out.
+// The reference caps an organization at 1,000 scheduled deployments and we
+// enforce no limit at all, so the list has no natural ceiling; five names the
+// ones an operator will start with and the count tells them how far they have
+// to go.
+const blockingDeploymentsNamed = 5
+
 func (s *server) createDeployment(r *http.Request) (any, error) {
 	ctx := r.Context()
 	obj, err := decodeObject(r)

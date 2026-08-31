@@ -1,10 +1,12 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
@@ -514,6 +516,102 @@ func (s *server) archiveEnvironment(r *http.Request) (any, error) {
 		row.createdAt, row.updatedAt, row.archivedAt), nil
 }
 
+// environmentStillReferenced renders the 400 for a delete a foreign key
+// refused. It reads what actually references the environment rather than
+// trusting the constraint the error names: Postgres reports one violated
+// constraint, and when both a session and a deployment are in the way it
+// reports the older of the two, so an operator told only about the sessions
+// would clear them and find the delete still refused.
+//
+// One statement, so the counts, the classification and the named ids all come
+// from one snapshot. Two would let a deployment created between them turn a
+// "nothing references this any more" read into advice that can never work.
+//
+// Which remedy to name is the rest of the work, and getting it wrong is
+// expensive. A live deployment can be pointed at another environment, which
+// clears the reference and lets the delete through. An archived one refuses
+// every update, so it can never be moved and the reference can never be
+// cleared. Sending an operator to archive the environment when a repoint would
+// have done trades a reversible fix for an irreversible one — nothing
+// unarchives an environment either.
+//
+// Sessions are counted rather than named, and the count is load-bearing: a
+// message that promised the delete would go through after the repoint alone
+// would be false whenever a session blocks too, which is the same defect as
+// blaming the sessions and hiding the deployment, only reversed.
+//
+// The deployment list has no archived_at predicate — every row blocks, and this
+// is where the two deployment refusals part company: the agent archive asks
+// which deployments can still fire, and a foreign key cannot ask that. Archived
+// rows sort first, so the one that makes the delete permanent is named rather
+// than truncated away behind five live ones.
+func environmentStillReferenced(ctx context.Context, db querier, envID string) error {
+	var sessions, deployments, stuck int
+	var envArchived bool
+	var named []string
+	if err := db.QueryRow(ctx,
+		`SELECT (SELECT count(*) FROM sessions WHERE environment_id = $1),
+		        (SELECT count(*) FROM deployments WHERE environment_id = $1),
+		        (SELECT count(*) FROM deployments
+		          WHERE environment_id = $1 AND archived_at IS NOT NULL),
+		        COALESCE((SELECT archived_at IS NOT NULL FROM environments WHERE id = $1), false),
+		        COALESCE((SELECT array_agg(id) FROM
+		          (SELECT id FROM deployments WHERE environment_id = $1
+		            ORDER BY (archived_at IS NULL), created_at, id LIMIT $2) t), '{}')`,
+		envID, blockingDeploymentsNamed).
+		Scan(&sessions, &deployments, &stuck, &envArchived, &named); err != nil {
+		return err
+	}
+
+	switch {
+	case deployments == 0 && sessions == 0:
+		// The delete's own statement found a referent and this read did not.
+		// Sessions and deployments are the only two referents Postgres will not
+		// cascade away, and both can be cleared concurrently — a session
+		// deleted, a deployment repointed. A retry then succeeds, or answers
+		// 404 if the environment went with it.
+		return errInvalid("environment %s was still referenced when the delete ran; try again", envID)
+	case deployments == 0:
+		return errInvalid("environment %s still has sessions; delete them first", envID)
+	}
+
+	list := strings.Join(named, ", ")
+	if deployments > len(named) {
+		list = fmt.Sprintf("%s and %d more", list, deployments-len(named))
+	}
+	blockers := fmt.Sprintf("%d %s (%s)", deployments, plural(deployments, "deployment"), list)
+	if sessions > 0 {
+		blockers = fmt.Sprintf("%s and %d %s", blockers, sessions, plural(sessions, "session"))
+	}
+
+	if stuck > 0 {
+		// An archived deployment can never be moved, so the delete is out of
+		// reach whatever else is cleared — the sessions included. Archiving the
+		// environment is what is left, and worth naming only while it has not
+		// already been done: the operator who took that advice must not be
+		// given it again.
+		remedy := " — archive it instead"
+		if envArchived {
+			remedy = ""
+		}
+		return errInvalid("environment %s is referenced by %s, %d of them archived and so unmovable; it can no longer be deleted%s",
+			envID, blockers, stuck, remedy)
+	}
+	remedy := "point each at another environment"
+	if sessions > 0 {
+		remedy = "point each deployment at another environment and delete the sessions"
+	}
+	return errInvalid("environment %s is referenced by %s; %s and the delete will go through", envID, blockers, remedy)
+}
+
+// plural is the s-suffix these refusals need and nothing more.
+func plural(n int, noun string) string {
+	if n == 1 {
+		return noun
+	}
+	return noun + "s"
+}
+
 func (s *server) deleteEnvironment(r *http.Request) (any, error) {
 	ctx := r.Context()
 	id := r.PathValue("id")
@@ -523,7 +621,7 @@ func (s *server) deleteEnvironment(r *http.Request) (any, error) {
 	tag, err := s.pool.Exec(ctx, `DELETE FROM environments WHERE id = $1`, id)
 	var pgErr *pgconn.PgError
 	if errors.As(err, &pgErr) && pgErr.Code == "23503" { // foreign_key_violation
-		return nil, errInvalid("environment %s still has sessions; delete them first", id)
+		return nil, environmentStillReferenced(ctx, s.pool, id)
 	}
 	if err != nil {
 		return nil, err
