@@ -602,3 +602,156 @@ func TestSchedulerPausingTypesMatchTheMigrationCheck(t *testing.T) {
 		}
 	}
 }
+
+// The auto-pause deadlock, resolved as a lost race: a loser blocked on the
+// winner's uncommitted claim still holds FOR SHARE on the deployment row, so
+// a winner whose classified failure reaches the auto-pause UPDATE waits on
+// that share lock — a cycle Postgres breaks with 40P01 against either side.
+// Both ticks must return nil, and the occurrence must still settle: whichever
+// side survives (or the next entrant, when the winner was the victim)
+// records the error run and pauses the deployment.
+func TestSchedulerAutoPauseDeadlockResolvesCleanly(t *testing.T) {
+	s := newTestServer(t)
+	agentID, envID := fixture(t, s)
+	deplID := createDeployment(t, s, scheduledBody(agentID, envID, "0 12 * * *", "UTC"))["id"].(string)
+	occurrence := time.Date(2026, 3, 12, 12, 0, 0, 0, time.UTC)
+	setResumedAt(t, s, deplID, occurrence.Add(-time.Hour))
+	if code, res := s.do(http.MethodPost, "/v1/environments/"+envID+"/archive", nil); code != http.StatusOK {
+		t.Fatalf("archive environment: %d %v", code, res)
+	}
+
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	var held bool
+	restoreHook := api.SetDeploymentFireHookInFireForTest(func() error {
+		if !held {
+			held = true
+			close(entered)
+			<-release
+		}
+		return nil
+	})
+	defer restoreHook()
+
+	winnerErr := make(chan error, 1)
+	go func() {
+		winnerErr <- api.SchedulerTick(context.Background(), s.pool, occurrence.Add(2*time.Second))
+	}()
+	<-entered
+
+	loserErr := make(chan error, 1)
+	go func() {
+		loserErr <- api.SchedulerTick(context.Background(), s.pool, occurrence.Add(3*time.Second))
+	}()
+	// Release the winner only once the loser is genuinely blocked on the
+	// claim — the deadlock needs both waiters in place.
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		var waiting int
+		if err := s.pool.QueryRow(t.Context(), `
+			SELECT count(*) FROM pg_stat_activity
+			 WHERE datname = current_database() AND wait_event_type = 'Lock'
+			   AND query LIKE '%INSERT INTO deployment_runs%'`).Scan(&waiting); err != nil {
+			t.Fatal(err)
+		}
+		if waiting >= 1 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the second caller never blocked on the claim")
+		}
+	}
+	close(release)
+
+	if err := <-winnerErr; err != nil {
+		t.Errorf("the winning tick returned %v, want nil — a deadlock victim is a lost race", err)
+	}
+	if err := <-loserErr; err != nil {
+		t.Errorf("the losing tick returned %v, want nil — a deadlock victim is a lost race", err)
+	}
+
+	// Whichever side survived, the occurrence settles: run a follow-up tick
+	// for the case where both transactions were torn down before settling.
+	if err := api.SchedulerTick(t.Context(), s.pool, occurrence.Add(30*time.Second)); err != nil {
+		t.Fatalf("follow-up tick: %v", err)
+	}
+	runs := scheduledRuns(t, s, deplID)
+	if len(runs) != 1 {
+		t.Fatalf("got %d runs, want exactly 1 — the deadlock must not duplicate or drop the occurrence", len(runs))
+	}
+	if runs[0].errType == nil || *runs[0].errType != "environment_archived_error" {
+		t.Errorf("error_type = %v, want environment_archived_error", runs[0].errType)
+	}
+	if code, d := s.do(http.MethodGet, "/v1/deployments/"+deplID, nil); code != http.StatusOK || d["status"] != "paused" {
+		t.Errorf("deployment = %d %v, want paused", code, d["status"])
+	}
+}
+
+// The fire's re-read covers the scheduling state, not only archive/pause: an
+// occurrence computed from a schedule that an update has since replaced, or
+// one behind a resume floor a pause/unpause round-trip restamped, is stale —
+// "missed triggers are not backfilled" — and the fire lets it go.
+func TestSchedulerSchedulingStateChangeBetweenScanAndFire(t *testing.T) {
+	s := newTestServer(t)
+	agentID, envID := fixture(t, s)
+
+	// A replaced expression: the tick computed 09:00 from the old schedule;
+	// the fire finds a different one and stands down.
+	exprID := createDeployment(t, s, scheduledBody(agentID, envID, "0 9 * * *", "UTC"))["id"].(string)
+	setResumedAt(t, s, exprID, time.Date(2026, 3, 12, 0, 0, 0, 0, time.UTC))
+	restore := api.SetDeploymentFireHookAfterBeginForTest(func() {
+		if _, err := s.pool.Exec(context.Background(),
+			`UPDATE deployments SET schedule_expression = '30 4 * * *' WHERE id = $1`, exprID); err != nil {
+			t.Errorf("swap expression: %v", err)
+		}
+	})
+	if err := api.SchedulerTick(t.Context(), s.pool, time.Date(2026, 3, 12, 9, 0, 30, 0, time.UTC)); err != nil {
+		t.Fatalf("tick: %v", err)
+	}
+	restore()
+	if runs := scheduledRuns(t, s, exprID); len(runs) != 0 {
+		t.Fatalf("a fire ran an occurrence of a replaced schedule: %v", runs)
+	}
+
+	// A restamped resume floor: the occurrence fell behind it in the window
+	// between the scan and the fire.
+	floorID := createDeployment(t, s, scheduledBody(agentID, envID, "0 9 * * *", "UTC"))["id"].(string)
+	setResumedAt(t, s, floorID, time.Date(2026, 3, 13, 0, 0, 0, 0, time.UTC))
+	restore = api.SetDeploymentFireHookAfterBeginForTest(func() {
+		setResumedAt(t, s, floorID, time.Date(2026, 3, 13, 9, 30, 0, 0, time.UTC))
+	})
+	defer restore()
+	if err := api.SchedulerTick(t.Context(), s.pool, time.Date(2026, 3, 13, 9, 0, 30, 0, time.UTC)); err != nil {
+		t.Fatalf("tick: %v", err)
+	}
+	if runs := scheduledRuns(t, s, floorID); len(runs) != 0 {
+		t.Fatalf("a fire ran an occurrence behind the restamped resume floor: %v", runs)
+	}
+}
+
+// A cold backlog is bounded twice over: the fire lookup is clamped to the
+// catch-up window (a months-old */1 schedule must not walk every minute since
+// its creation on every tick), and the skipped count saturates at the scan
+// cap rather than enumerating the backlog exactly.
+func TestSchedulerColdStartBacklogIsBoundedAndSaturates(t *testing.T) {
+	collect := collectMetrics(t)
+	s := newTestServer(t)
+	agentID, envID := fixture(t, s)
+	deplID := createDeployment(t, s, scheduledBody(agentID, envID, "* * * * *", "UTC"))["id"].(string)
+	setResumedAt(t, s, deplID, time.Date(2026, 1, 26, 0, 0, 0, 0, time.UTC))
+
+	start := time.Now()
+	if err := api.SchedulerTick(t.Context(), s.pool, time.Date(2026, 3, 12, 9, 0, 30, 0, time.UTC)); err != nil {
+		t.Fatalf("tick: %v", err)
+	}
+	if took := time.Since(start); took > 30*time.Second {
+		t.Errorf("tick over a 45-day backlog took %s; the clamp exists so it never walks the backlog", took)
+	}
+	runs := scheduledRuns(t, s, deplID)
+	if len(runs) != 1 || !runs[0].scheduledAt.Equal(time.Date(2026, 3, 12, 9, 0, 0, 0, time.UTC)) {
+		t.Fatalf("runs = %v, want exactly the most recent occurrence", runs)
+	}
+	if got := skippedCount(t, collect()); got != int64(api.DeploymentSkipScanCapForTest()) {
+		t.Errorf("occurrences.skipped = %d, want the saturated cap %d", got, api.DeploymentSkipScanCapForTest())
+	}
+}

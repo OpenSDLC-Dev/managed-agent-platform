@@ -522,7 +522,8 @@ names, two scopes), and the memory-store instruments beside them on both meters
 and the two durations — the executor's since slice 4, the worker's since slice 6). The
 deployment scheduler roots its own trace the way a `model_turn` does — a tick has no
 inbound request — as span `deployment.tick` with one `deployment.fire` child per attempt
-(red only when abandoned: a run recorded with an error is a fire the platform handled),
+(an idle sweep exports no span; red only when abandoned: a run recorded with an error is
+a fire the platform handled),
 and carries three instruments in `internal/api/deploymentscheduler.go`: `deployment.fires`
 by outcome (`created`/`failed` sub-attributed by error.type/`abandoned`),
 `deployment.occurrences.skipped` (the catch-up collapse count, added by the claim's winner

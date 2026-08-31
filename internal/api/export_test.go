@@ -127,6 +127,11 @@ func SetDeploymentFireHookInFireForTest(f func() error) (restore func()) {
 	return func() { deploymentFireHookInFire = nil }
 }
 
+// DeploymentSkipScanCapForTest exposes the saturation bound of the skipped
+// count so the cold-backlog test asserts against the constant rather than a
+// copy of its value. Test binary only.
+func DeploymentSkipScanCapForTest() int { return deploymentSkipScanCap }
+
 // DeploymentPausingErrorTypesForTest exposes the paused-reason union mapping
 // so the test can assert it against the migration's CHECK constraint. Test
 // binary only.

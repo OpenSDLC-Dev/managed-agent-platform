@@ -96,6 +96,14 @@ var deploymentTickInterval = 30 * time.Second
 // upgrade. A var only for the test setter.
 var deploymentCatchupWindow = time.Hour
 
+// deploymentSkipScanCap bounds the walk that counts a collapse. The count's
+// floor is deliberately not the window (§3.6 — a backlog spanning months is
+// still the operator's loss to see), but enumerating it must be bounded, or
+// the count itself becomes the cost the window exists to avoid. Past the cap
+// the counter saturates: at that magnitude the signal is the size class, not
+// the digit.
+const deploymentSkipScanCap = 1000
+
 // deploymentLockWait is the lock_timeout the fire's transaction sets, and the
 // one archive, pause and unpause set (§4.1 steps 2-3). The fire's side reads
 // a 55P03 as a lost claim: a competing replica's uncommitted claim blocks the
@@ -175,14 +183,25 @@ func StartDeploymentScheduler(ctx context.Context, pool *pgxpool.Pool, blobs blo
 	}
 }
 
+// deploymentFire is one due occurrence a tick decided to fire: the schedule
+// pair it was computed from rides along so the fire's re-read can tell a
+// replaced schedule from the one this occurrence belongs to.
+type deploymentFire struct {
+	deploymentID string
+	expr, tz     string
+	occ          time.Time
+	skipped      int64
+}
+
 // deploymentTick runs one sweep at the given instant: scan the candidates,
 // compute each one's most recent due occurrence, and fire the ones inside the
-// catch-up window. The tick roots its own trace — there is no HTTP request,
-// so no inbound traceparent — and each fire's span is its child.
+// catch-up window. A tick that fires roots its own trace — there is no HTTP
+// request, so no inbound traceparent — with each fire's span a child; an idle
+// sweep exports no span at all (2,880 empty root traces a day per replica
+// would bury the fires an operator looks for), while the duration histogram
+// records either way.
 func (s *server) deploymentTick(ctx context.Context, now time.Time) error {
 	start := time.Now()
-	ctx, span := otel.GetTracerProvider().Tracer(apiTracerName).Start(ctx, "deployment.tick")
-	defer span.End()
 	defer func() { recordDeploymentTickDuration(ctx, time.Since(start)) }()
 
 	// The watermark — MAX(scheduled_at) over committed runs, served by the
@@ -201,12 +220,7 @@ func (s *server) deploymentTick(ctx context.Context, now time.Time) error {
 		return err
 	}
 	defer rows.Close()
-	type fire struct {
-		deploymentID string
-		occ          time.Time
-		skipped      int64
-	}
-	var fires []fire
+	var fires []deploymentFire
 	for rows.Next() {
 		var (
 			id, expr, tz string
@@ -230,7 +244,19 @@ func (s *server) deploymentTick(ctx context.Context, now time.Time) error {
 		if !lower.Before(now) {
 			continue
 		}
-		due, err := cron.Due(expr, tz, lower, now)
+		// The fire lookup is clamped to the catch-up window: an occurrence at
+		// or below now-window can never fire, so walking a months-old backlog
+		// to find the one candidate would be pure cost — a cold */1 schedule
+		// would otherwise enumerate every minute since its creation, on every
+		// tick, until its first commit establishes a watermark. Due's lower
+		// bound is exclusive, so everything returned is strictly inside the
+		// window and the most recent element is the fire — the same occurrence
+		// the unclamped walk would have chosen, found without the walk.
+		fireFloor := lower
+		if w := now.Add(-deploymentCatchupWindow); w.After(fireFloor) {
+			fireFloor = w
+		}
+		due, err := cron.Due(expr, tz, fireFloor, now)
 		if err != nil {
 			// Unreachable for a stored schedule — create and update refuse
 			// an expression Upcoming cannot walk — and joined rather than
@@ -240,22 +266,30 @@ func (s *server) deploymentTick(ctx context.Context, now time.Time) error {
 		if len(due) == 0 {
 			continue
 		}
-		// At most the single most recent due occurrence fires, and only
-		// inside the window; the ones it passed over are the skipped count
-		// the winner will carry (§3.6). An occurrence that aged out of the
-		// window with no later fire at all is never selected and never
+		// At most the single most recent due occurrence fires; the ones it
+		// passed over are the skipped count the winner will carry, bounded
+		// below by the unclamped floor (§3.6). An occurrence that aged out of
+		// the window with no later fire at all is never selected and never
 		// counted — the best-effort boundary §4.1 draws around liveness.
 		occ := due[len(due)-1]
-		if !occ.After(now.Add(-deploymentCatchupWindow)) {
-			continue
+		skipped := int64(len(due) - 1)
+		if fireFloor.After(lower) {
+			if skipped, err = occurrencesSkipped(expr, tz, lower, occ); err != nil {
+				return fmt.Errorf("deployment %s: %w", id, err)
+			}
 		}
-		fires = append(fires, fire{deploymentID: id, occ: occ, skipped: int64(len(due) - 1)})
+		fires = append(fires, deploymentFire{deploymentID: id, expr: expr, tz: tz, occ: occ, skipped: skipped})
 	}
 	if err := rows.Err(); err != nil {
 		return err
 	}
 	rows.Close()
+	if len(fires) == 0 {
+		return nil
+	}
 
+	ctx, span := otel.GetTracerProvider().Tracer(apiTracerName).Start(ctx, "deployment.tick")
+	defer span.End()
 	sem := make(chan struct{}, deploymentFireConcurrency)
 	var (
 		wg   sync.WaitGroup
@@ -265,10 +299,10 @@ func (s *server) deploymentTick(ctx context.Context, now time.Time) error {
 	for _, f := range fires {
 		wg.Add(1)
 		sem <- struct{}{}
-		go func(f fire) {
+		go func(f deploymentFire) {
 			defer wg.Done()
 			defer func() { <-sem }()
-			if err := s.fireScheduled(ctx, f.deploymentID, f.occ, f.skipped); err != nil {
+			if err := s.fireScheduled(ctx, f); err != nil {
 				mu.Lock()
 				errs = append(errs, err)
 				mu.Unlock()
@@ -279,22 +313,47 @@ func (s *server) deploymentTick(ctx context.Context, now time.Time) error {
 	return errors.Join(errs...)
 }
 
+// occurrencesSkipped counts the occurrences in (lower, occ) — what a fire at
+// occ passed over — walking at most deploymentSkipScanCap of them. Only the
+// clamped path calls it; when the floor is inside the window the due list
+// already holds the exact count.
+func occurrencesSkipped(expr, tz string, lower, occ time.Time) (int64, error) {
+	batch, err := cron.Upcoming(expr, tz, lower, deploymentSkipScanCap)
+	if err != nil {
+		return 0, err
+	}
+	var n int64
+	for _, t := range batch {
+		if !t.Before(occ) {
+			break
+		}
+		n++
+	}
+	return n, nil
+}
+
 // fireScheduled wraps one fire in its span and settles the post-commit
 // observability: the fires counter by outcome, and — only when the claim
 // committed — the skipped count it carried. An abandoned fire is the one red
 // span: a run the platform recorded, error and all, is a fire it handled
 // correctly.
-func (s *server) fireScheduled(ctx context.Context, deploymentID string, occ time.Time, skipped int64) error {
+func (s *server) fireScheduled(ctx context.Context, f deploymentFire) error {
 	ctx, span := otel.GetTracerProvider().Tracer(apiTracerName).Start(ctx, "deployment.fire",
 		trace.WithAttributes(
-			attribute.String("deployment.id", deploymentID),
+			attribute.String("deployment.id", f.deploymentID),
 			attribute.String("trigger_type", "schedule"),
-			attribute.String("scheduled_at", occ.UTC().Format(time.RFC3339)),
+			attribute.String("scheduled_at", f.occ.UTC().Format(time.RFC3339)),
 		))
 	defer span.End()
 
-	outcome, errType, err := s.fireScheduledTx(ctx, deploymentID, occ)
+	outcome, errType, err := s.fireScheduledTx(ctx, f)
 	switch {
+	case err != nil && isLostRace(err):
+		// A lost race surfacing from any statement of the fire — not only
+		// the claim: a deadlock victim's whole transaction is rolled back,
+		// so nothing was committed and the occurrence is retried or already
+		// another actor's. Quiet, like any other lost claim.
+		return nil
 	case err != nil:
 		if ctx.Err() != nil {
 			// A shutdown mid-fire aborts the transaction; the occurrence
@@ -305,13 +364,13 @@ func (s *server) fireScheduled(ctx context.Context, deploymentID string, occ tim
 		span.SetStatus(codes.Error, err.Error())
 		recordDeploymentFire(ctx, fireOutcomeAbandoned, "")
 		slog.ErrorContext(ctx, "deployment fire abandoned: no run row was recorded",
-			"deployment_id", deploymentID, "scheduled_at", occ, "error", err)
+			"deployment_id", f.deploymentID, "scheduled_at", f.occ, "error", err)
 		return err
 	case outcome == fireOutcomeLost:
 		return nil
 	default:
 		recordDeploymentFire(ctx, outcome, errType)
-		recordDeploymentOccurrencesSkipped(ctx, skipped)
+		recordDeploymentOccurrencesSkipped(ctx, f.skipped)
 		return nil
 	}
 }
@@ -323,7 +382,7 @@ func (s *server) fireScheduled(ctx context.Context, deploymentID string, occ tim
 // savepoint is what makes the classified arm possible without a second
 // transaction, and a second transaction is what would let a crash leave a
 // run row with both columns null — the shape the reference forbids.
-func (s *server) fireScheduledTx(ctx context.Context, deploymentID string, occ time.Time) (outcome, errType string, err error) {
+func (s *server) fireScheduledTx(ctx context.Context, f deploymentFire) (outcome, errType string, err error) {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return "", "", err
@@ -355,18 +414,32 @@ func (s *server) fireScheduledTx(ctx context.Context, deploymentID string, occ t
 		agentVersion          int
 		vaultIDs              []string
 		initial, rawResources []byte
+		curExpr, curTZ        *string
+		curResumedAt          time.Time
 	)
 	err = tx.QueryRow(ctx, `
-		SELECT environment_id, agent_id, agent_version, vault_ids, initial_events, resources
+		SELECT environment_id, agent_id, agent_version, vault_ids, initial_events, resources,
+		       schedule_expression, schedule_timezone, schedule_resumed_at
 		  FROM deployments
 		 WHERE id = $1 AND archived_at IS NULL AND paused_at IS NULL
-		 FOR SHARE`, deploymentID).
-		Scan(&envID, &agentID, &agentVersion, &vaultIDs, &initial, &rawResources)
-	if errors.Is(err, pgx.ErrNoRows) || isLockTimeout(err) {
+		 FOR SHARE`, f.deploymentID).
+		Scan(&envID, &agentID, &agentVersion, &vaultIDs, &initial, &rawResources,
+			&curExpr, &curTZ, &curResumedAt)
+	if errors.Is(err, pgx.ErrNoRows) || isLostRace(err) {
 		return fireOutcomeLost, "", nil
 	}
 	if err != nil {
 		return "", "", err
+	}
+	// The scheduling state may have moved in the same window: an update can
+	// have replaced or removed the schedule this occurrence was computed
+	// from, and a pause/unpause round-trip restamps the resume floor above
+	// it — an occurrence behind that floor is exactly what "missed triggers
+	// are not backfilled" forbids. Any of those makes the occurrence stale,
+	// not this fire's to run; the next tick recomputes under the row as it
+	// now stands.
+	if curExpr == nil || curTZ == nil || *curExpr != f.expr || *curTZ != f.tz || !f.occ.After(curResumedAt) {
+		return fireOutcomeLost, "", nil
 	}
 
 	// The claim. The conflict target is named on purpose: a bare DO NOTHING
@@ -384,15 +457,15 @@ func (s *server) fireScheduledTx(ctx context.Context, deploymentID string, occ t
 		VALUES ($1, $2, 'schedule', $3, $4, $5)
 		ON CONFLICT (deployment_id, scheduled_at) WHERE scheduled_at IS NOT NULL DO NOTHING
 		RETURNING id, created_at`,
-		runID, deploymentID, occ, agentID, agentVersion).Scan(&claimed, &createdAt)
-	if errors.Is(err, pgx.ErrNoRows) || isLockTimeout(err) {
+		runID, f.deploymentID, f.occ, agentID, agentVersion).Scan(&claimed, &createdAt)
+	if errors.Is(err, pgx.ErrNoRows) || isLostRace(err) {
 		return fireOutcomeLost, "", nil
 	}
 	if err != nil {
 		return "", "", err
 	}
 
-	in, err := deploymentSessionIn(deploymentID, envID, agentID, agentVersion, vaultIDs, initial, rawResources)
+	in, err := deploymentSessionIn(f.deploymentID, envID, agentID, agentVersion, vaultIDs, initial, rawResources)
 	if err != nil {
 		return "", "", err
 	}
@@ -437,7 +510,7 @@ func (s *server) fireScheduledTx(ctx context.Context, deploymentID string, occ t
 			if _, err := tx.Exec(ctx, `
 				UPDATE deployments
 				   SET paused_at = now(), paused_kind = 'error', paused_error_type = $1, updated_at = now()
-				 WHERE id = $2`, re.typ, deploymentID); err != nil {
+				 WHERE id = $2`, re.typ, f.deploymentID); err != nil {
 				return "", "", err
 			}
 		}
@@ -466,11 +539,18 @@ func setDeploymentLockWait(ctx context.Context, tx pgx.Tx) error {
 	return err
 }
 
-// isLockTimeout reports a Postgres 55P03 — lock_not_available, the shape a
-// SET LOCAL lock_timeout failure takes.
-func isLockTimeout(err error) bool {
+// isLostRace reports the two shapes a lost race takes under row contention:
+// 55P03 (lock_not_available — this transaction's lock_timeout gave up) and
+// 40P01 (deadlock_detected — Postgres chose this transaction as the victim
+// and rolled it back). The deadlock is reachable, not theoretical: a loser
+// blocked on the winner's uncommitted claim still holds its FOR SHARE on the
+// deployment row, so a winner whose classified failure reaches the auto-pause
+// UPDATE waits on that share lock — a cycle the deadlock detector resolves in
+// about a second, choosing either side. Both codes mean the same thing here:
+// nothing was committed, and the occurrence is retried or already owned.
+func isLostRace(err error) bool {
 	var pgErr *pgconn.PgError
-	return errors.As(err, &pgErr) && pgErr.Code == "55P03"
+	return errors.As(err, &pgErr) && (pgErr.Code == "55P03" || pgErr.Code == "40P01")
 }
 
 func recordDeploymentFire(ctx context.Context, outcome, errType string) {
