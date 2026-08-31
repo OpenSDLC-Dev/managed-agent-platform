@@ -509,16 +509,21 @@ func ReadsSkillFile(name, file string, class Class) Grader {
 // files analog of ReadsSkillFile, keyed on the absolute mount path rather than
 // a skills/<name>/ directory.
 //
-// A read is any successful call whose shape covers the file — success required
-// as wroteFile requires it, since a failed cat named the file and read nothing.
-// Three shapes count: a read whose file_path resolves to the mount path under
-// the toolset's rule (absolute or workdir-relative, readRangeUse's two
-// spellings); a grep rooted at the file or an ancestor directory, which reads
-// contents where glob returns names and no bytes; and a bash command carrying
-// the file's basename — the basename and not the whole path, because the
-// sandbox shell keeps state across calls, so `cd` then `cat` legitimately
-// splits the path across two commands. A write or edit naming the path stays a
-// miss, for ReadsSkillFile's reason: a stray mention reads nothing.
+// A read is any successful call whose shape covers the file — success
+// required, as the write grader draws the same line for writes: a failed cat
+// named the file and read nothing. Three shapes count: a read whose file_path
+// resolves to the mount path under the toolset's rule (absolute or
+// workdir-relative, readRangeUse's two spellings); a grep rooted at the file
+// or an ancestor directory whose result carried matches — grep reads contents
+// where glob returns names and no bytes, but its "no matches" success put none
+// of them in front of the model; and a bash command carrying the file's
+// basename. The bash arm is deliberately loose evidence: the sandbox shell
+// keeps state across calls, so `cd` then `cat` splits the path across two
+// commands and the basename is the only fragment guaranteed to appear — the
+// rule cannot see the shell's cwd, so a bare `cat` of a same-named file
+// elsewhere also counts, and the trial's answer grader stays the load-bearing
+// proof. A write or edit naming the path stays a miss, for ReadsSkillFile's
+// reason: a stray mention reads nothing.
 func ReadsFile(path string, class Class) Grader {
 	return Grader{
 		Name:  "reads-file:" + path,
@@ -526,10 +531,11 @@ func ReadsFile(path string, class Class) Grader {
 		Check: func(_ *testing.T, tr *Trial) error {
 			for _, use := range eventsOfType(tr, "agent.tool_use") {
 				id, _ := use["id"].(string)
-				if res := resultFor(tr, id); res == nil || !okResult(res) {
+				res := resultFor(tr, id)
+				if res == nil || !okResult(res) {
 					continue
 				}
-				if readCovers(use, path) {
+				if readCovers(use, res, path) {
 					return nil
 				}
 			}
@@ -538,20 +544,27 @@ func ReadsFile(path string, class Class) Grader {
 	}
 }
 
-// readCovers is ReadsFile's per-call rule: whether this one tool call's shape
-// covers the file at p.
-func readCovers(use map[string]any, p string) bool {
+// readCovers is ReadsFile's per-call rule: whether this one successful tool
+// call's shape covers the file at p. res is the call's own result — the grep
+// arm reads it, because grep spells "the pattern was nowhere under the root"
+// as a success (GlobPathList keeps the same sentinel out for the same reason).
+func readCovers(use, res map[string]any, p string) bool {
 	input, _ := use["input"].(map[string]any)
 	switch use["name"] {
 	case "read":
 		fp, _ := input["file_path"].(string)
-		return fp != "" && resolveInWorkdir(fp) == p
+		return resolveInWorkdir(fp) == p
 	case "grep":
+		if textOf(res) == "no matches" {
+			return false
+		}
 		root := sandbox.DefaultWorkdir
 		if rp, _ := input["path"].(string); rp != "" {
 			root = resolveInWorkdir(rp)
 		}
-		return root == p || strings.HasPrefix(p, root+"/")
+		// TrimSuffix so the one root Clean leaves slashed — "/" — still covers,
+		// rather than building a "//" prefix no path carries.
+		return root == p || strings.HasPrefix(p, strings.TrimSuffix(root, "/")+"/")
 	case "bash":
 		cmd, _ := input["command"].(string)
 		return strings.Contains(cmd, path.Base(p))

@@ -1681,14 +1681,16 @@ func TestWroteFileNeedsASuccessfulResult(t *testing.T) {
 	}
 }
 
-// ReadsFile must count every shape a real read takes: the toolset resolves a
-// relative read path against the workdir, grep reads contents under its root
-// where glob returns names and no bytes, and the sandbox shell keeps state
-// across bash calls, so `cd` then `cat` legitimately splits the mount path
-// across two commands with only the basename in the one that reads. It must
-// still reject name-dropping that reads nothing — a glob, a write naming the
-// path, a grep rooted elsewhere — and, as wroteFile requires for writes, a
-// call that failed or was never answered.
+// ReadsFile must count the read shapes the toolset admits: a relative read
+// path resolves against the workdir, a grep that matched reads contents under
+// its root where glob returns names and no bytes, and the sandbox shell keeps
+// state across bash calls, so `cd` then `cat` legitimately splits the mount
+// path across two commands — which is why the bash arm matches the basename
+// alone, cwd-blind, a deliberate looseness the answer grader beside it
+// carries. It must still reject name-dropping that reads nothing — a glob, a
+// write naming the path, a grep rooted elsewhere or one whose answer was "no
+// matches" — and, as the write grader requires for writes, a call that failed
+// or was never answered.
 func TestReadsFileCountsEachReadShape(t *testing.T) {
 	const file = "/workspace/fixture/PASSPHRASE.txt"
 	g := ReadsFile(file, Either)
@@ -1716,12 +1718,24 @@ func TestReadsFileCountsEachReadShape(t *testing.T) {
 			use("u1", "bash", map[string]any{"command": "cd /workspace/fixture"}), result("u1", false),
 			use("u2", "bash", map[string]any{"command": "cat PASSPHRASE.txt"}), result("u2", false),
 		}, true},
-		"a bash that never names the file":       {one("bash", map[string]any{"command": "ls -la /workspace/fixture"}), false},
-		"a grep rooted at an ancestor":           {one("grep", map[string]any{"pattern": "passphrase", "path": "/workspace/fixture"}), true},
-		"a grep rooted at the file itself":       {one("grep", map[string]any{"pattern": ".", "path": file}), true},
-		"a grep of the default root":             {one("grep", map[string]any{"pattern": "passphrase"}), true},
-		"a grep of a relative root":              {one("grep", map[string]any{"pattern": "passphrase", "path": "fixture"}), true},
-		"a grep rooted elsewhere":                {one("grep", map[string]any{"pattern": "passphrase", "path": "/workspace/other"}), false},
+		"a bash that never names the file": {one("bash", map[string]any{"command": "ls -la /workspace/fixture"}), false},
+		// The rule's deliberate cost, not an oversight: the grader cannot see
+		// the persistent shell's cwd, so the basename counts wherever the
+		// command ran — the answer grader beside it carries correctness.
+		"a bash cat of the basename alone":     {one("bash", map[string]any{"command": "cat PASSPHRASE.txt"}), true},
+		"a grep rooted at an ancestor":         {one("grep", map[string]any{"pattern": "passphrase", "path": "/workspace/fixture"}), true},
+		"a grep rooted at the file itself":     {one("grep", map[string]any{"pattern": ".", "path": file}), true},
+		"a grep rooted at the filesystem root": {one("grep", map[string]any{"pattern": "passphrase", "path": "/"}), true},
+		"a grep of the default root":           {one("grep", map[string]any{"pattern": "passphrase"}), true},
+		"a grep of a relative root":            {one("grep", map[string]any{"pattern": "passphrase", "path": "fixture"}), true},
+		"a grep rooted elsewhere":              {one("grep", map[string]any{"pattern": "passphrase", "path": "/workspace/other"}), false},
+		// Covering root, empty answer: grep spells "the pattern was nowhere
+		// under the root" as a success, and it put no bytes before the model.
+		"a grep that matched nothing": {[]map[string]any{
+			use("u1", "grep", map[string]any{"pattern": "passphrase", "path": "/workspace/fixture"}),
+			{"type": "agent.tool_result", "tool_use_id": "u1", "is_error": false,
+				"content": textBlocks("no matches")},
+		}, false},
 		"a grep rooted at a non-ancestor prefix": {one("grep", map[string]any{"pattern": "passphrase", "path": "/workspace/fix"}), false},
 		"a glob that would list the file":        {one("glob", map[string]any{"pattern": "**/*.txt", "path": "/workspace/fixture"}), false},
 		"a write naming the path":                {one("write", map[string]any{"file_path": file, "content": "x"}), false},
