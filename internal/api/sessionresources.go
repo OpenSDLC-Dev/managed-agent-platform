@@ -692,7 +692,7 @@ func materializeResourceInputs(ctx context.Context, db querier, inputs []resourc
 // snapshotMemoryStore turns a validated memory element into its stored form
 // from the store row, read FOR SHARE so a concurrent archive or delete cannot
 // slip in between this check and the session INSERT (the environment row's
-// precedent in createSession). An unknown or archived store fails the create
+// precedent in createSessionInTx). An unknown or archived store fails the create
 // with a 400, the vault_ids precedent (validateAttachedVaults) rather than the
 // file's 404 — statuses INFERRED, plan 36 decision 7. The mount path is
 // memoryMountParent + "/" + the slug of the snapshotted name (decision 8),

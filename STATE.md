@@ -17,7 +17,7 @@ What is being worked on right now, and how far along it is — nothing else. **S
   surfaced here on a typed object.
   [#520](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/520) is slice 3's and
   [#523](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/523) is deferred.
-- **Slice 2 — `createSessionTx`.** Done: `POST /v1/sessions`' transaction body is one
+- **Slice 2 — `createSessionInTx`.** Done: `POST /v1/sessions`' transaction body is one
   function inside a caller-owned transaction; behavior-neutral, the whole session suite
   as its regression.
 - **Slice 3** — next: `sessions.deployment_id` (migration `0032`), the real list filter, `POST /run`.

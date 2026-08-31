@@ -735,7 +735,7 @@ func (s *server) sealDeploymentRepoTokens(ctx context.Context, inputs []resource
 
 // requireLiveEnvironment holds the environment row FOR SHARE so a concurrent
 // delete or archive cannot slip between the check and the write, the discipline
-// createSession applies to the same row.
+// createSessionInTx applies to the same row.
 func requireLiveEnvironment(ctx context.Context, tx pgx.Tx, envID string) error {
 	var archivedAt *time.Time
 	err := tx.QueryRow(ctx, `SELECT archived_at FROM environments WHERE id = $1 FOR SHARE`, envID).Scan(&archivedAt)

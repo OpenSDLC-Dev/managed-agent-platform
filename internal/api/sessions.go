@@ -590,7 +590,7 @@ func (s *server) createSession(r *http.Request) (any, error) {
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
-	created, err := s.createSessionTx(ctx, tx, createSessionIn{
+	created, err := s.createSessionInTx(ctx, tx, createSessionIn{
 		envID: envID, agentRaw: agentRaw, title: title, metadata: metadata,
 		resourceInputs: resourceInputs, sealedTokens: sealedTokens,
 		vaultIDs: vaultIDs, rawInitial: rawInitial,
@@ -601,7 +601,7 @@ func (s *server) createSession(r *http.Request) (any, error) {
 	if err := tx.Commit(ctx); err != nil {
 		return nil, err
 	}
-	if created.row.status == string(domain.SessionRunning) {
+	if created.initialEvents > 0 {
 		events.RecordSessionStatus(ctx, domain.SessionRunning)
 	}
 	if created.resources > 0 {
@@ -612,10 +612,16 @@ func (s *server) createSession(r *http.Request) (any, error) {
 	return renderSession(created.row)
 }
 
-// createSessionIn is what a session create needs once its caller's transaction
-// is open. Parsing, metadata caps and token sealing have already happened —
+// createSessionIn is what a session create needs once its caller's
+// transaction is open. The HTTP-surface gates have already run: metadata is
+// parseMetadata's map (never nil, caps checked), sealedTokens pairs
+// positionally with resourceInputs' repositories (sealRepoTokens' output —
 // sealing dials the cipher, which must not run under the row locks taken
-// below.
+// below), and rawInitial passed parseInitialEvents' structural caps; the
+// per-type normalization runs inside, where the environment's kind is known.
+// created_by is deliberately not a field: it is read from ctx (principalFrom),
+// so a caller with no authenticated principal creates the session
+// unattributed.
 type createSessionIn struct {
 	envID          string
 	agentRaw       json.RawMessage
@@ -628,20 +634,21 @@ type createSessionIn struct {
 }
 
 // createdSession is what the committing caller still needs afterwards: the
-// row to render, and the materialized resource count for the post-commit
-// metric.
+// row to render, and the two counts the post-commit metrics key off.
 type createdSession struct {
-	row       sessionRow
-	resources int
+	row           sessionRow
+	resources     int
+	initialEvents int
 }
 
-// createSessionTx creates a session — environment check, agent resolution,
+// createSessionInTx creates a session — environment check, agent resolution,
 // resource materialization, the session/thread/credential inserts, initial
-// events — inside the caller's transaction, and never commits it. Extracted
-// from createSession so a caller already mid-transaction (the deployment
-// fire, plan 37) can create a session too; Begin, Commit and post-commit
-// observability stay with the caller.
-func (s *server) createSessionTx(ctx context.Context, tx pgx.Tx, in createSessionIn) (createdSession, error) {
+// events — inside the caller's transaction, and never commits it (the InTx
+// suffix is events.AppendInTx's; this package's …Tx helpers open their own).
+// Extracted from createSession so a caller already mid-transaction (the
+// deployment fire, plan 37) can create a session too; Begin, Commit and
+// post-commit observability stay with the caller.
+func (s *server) createSessionInTx(ctx context.Context, tx pgx.Tx, in createSessionIn) (createdSession, error) {
 	var envArchivedAt *time.Time
 	var envKind string
 	err := tx.QueryRow(ctx,
@@ -790,7 +797,7 @@ func (s *server) createSessionTx(ctx context.Context, tx pgx.Tx, in createSessio
 		}
 	}
 
-	return createdSession{row: row, resources: len(resources)}, nil
+	return createdSession{row: row, resources: len(resources), initialEvents: len(initialEvents)}, nil
 }
 
 func mustJSON(v any) []byte {
