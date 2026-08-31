@@ -656,7 +656,7 @@ func permDeny() Task {
 			EvaluatedPermissionAsk("bash", Platform),
 			ConfirmedResult("bash", []string{"APPEND_{{NONCE}}"}, true, "DENY_{{NONCE}}", Platform),
 			// FileEquals, not FileLines: "unchanged" is a byte claim, and the
-			// blank-line forgiveness FileLines extends to a model's own work
+			// forgiveness the FileLines graders extend to a model's own work
 			// product has no business in a file nothing was allowed to touch.
 			FileEquals("notes.txt", "ORIGINAL_{{NONCE}}\n", Platform),
 			FinalMessageHas("DENIED:{{NONCE}}", Either),
