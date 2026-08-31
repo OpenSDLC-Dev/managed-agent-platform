@@ -80,8 +80,9 @@ func TestSplitLines(t *testing.T) {
 		{"a\nb", []string{"a", "b"}},
 		{"a\nb\n", []string{"a", "b"}},
 		// The splitter surfaces a blank interior line; dropping it is
-		// FileLines' forgiveness, not the splitter's business — its other
-		// caller (the glob path-list grader) must see every record.
+		// FileLinesIgnoringBlanks' forgiveness, not the splitter's business —
+		// its other callers (strict FileLines, the glob path-list grader)
+		// must see every record.
 		{"a\n\nb", []string{"a", "", "b"}},
 	}
 	for _, c := range cases {
@@ -99,31 +100,42 @@ func TestSplitLines(t *testing.T) {
 	}
 }
 
-// FileLines forgives blank lines: `printf '\nentry\n' >>` against a file that
-// already ends in a newline leaves an empty line between entries, and the
-// 2026-09-01 manual run red journal-multiturn's retry on exactly that shape
-// with every platform signal intact. Content stays exact — a whitespace-only
-// line, stray prose, reordering and a missing line all still fail.
-func TestFileLinesForgivesBlankLinesOnly(t *testing.T) {
+// Each boundary here pins one of the rules the two FileLines definitions
+// state; the why lives on FileLinesIgnoringBlanks' doc comment.
+func TestLineMismatchForgivesBlanksOnlyWhenAsked(t *testing.T) {
 	want := []string{"entry-one-n0", "entry-two-n0"}
-	for _, raw := range []string{
-		"entry-one-n0\nentry-two-n0\n",
-		"entry-one-n0\n\nentry-two-n0\n", // the observed printf-append shape
-		"\nentry-one-n0\n\n\nentry-two-n0\n\n",
-	} {
-		if err := lineMismatch("journal.txt", raw, want); err != nil {
-			t.Errorf("lineMismatch(%q) = %v, want pass", raw, err)
-		}
+
+	// The observed printf-append shape: strict mode reds it, the forgiving
+	// mode exists for it.
+	const appended = "entry-one-n0\n\nentry-two-n0\n"
+	if err := lineMismatch("journal.txt", appended, want, false); err == nil {
+		t.Error("strict mode should fail on an interior blank line")
 	}
-	for _, raw := range []string{
-		"entry-one-n0\n \nentry-two-n0\n", // a whitespace-only line is content
-		"entry-one-n0\nstray\nentry-two-n0\n",
-		"entry-two-n0\nentry-one-n0\n",
-		"entry-one-n0\n",
-		"",
-	} {
-		if err := lineMismatch("journal.txt", raw, want); err == nil {
-			t.Errorf("lineMismatch(%q) = nil, want failure", raw)
+	if err := lineMismatch("journal.txt", appended, want, true); err != nil {
+		t.Errorf("forgiving mode should pass the appended shape: %v", err)
+	}
+	if err := lineMismatch("journal.txt", "\nentry-one-n0\n\n\nentry-two-n0\n\n", want, true); err != nil {
+		t.Errorf("forgiving mode should pass blanks anywhere: %v", err)
+	}
+
+	// The clean shape passes both modes; everything below fails both.
+	for _, mode := range []bool{false, true} {
+		if err := lineMismatch("journal.txt", "entry-one-n0\nentry-two-n0\n", want, mode); err != nil {
+			t.Errorf("mode=%v: the exact lines should pass: %v", mode, err)
+		}
+		for _, raw := range []string{
+			"entry-one-n0\n \nentry-two-n0\n",            // a whitespace-only line is content
+			" entry-one-n0\nentry-two-n0\n",              // leading whitespace is content
+			"entry-one-n0 \nentry-two-n0\n",              // trailing whitespace is content
+			"entry-one-n0\nentry-one-n0\nentry-two-n0\n", // a duplicated entry
+			"entry-one-n0\nstray\nentry-two-n0\n",
+			"entry-two-n0\nentry-one-n0\n",
+			"entry-one-n0\n",
+			"",
+		} {
+			if err := lineMismatch("journal.txt", raw, want, mode); err == nil {
+				t.Errorf("mode=%v: lineMismatch(%q) = nil, want failure", mode, raw)
+			}
 		}
 	}
 }

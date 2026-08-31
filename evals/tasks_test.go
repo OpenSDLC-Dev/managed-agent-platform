@@ -766,7 +766,7 @@ func journalMultiturn() Task {
 				"DONE2:{{NONCE}} followed by my reference code from the first message."},
 		},
 		Graders: []Grader{
-			FileLines("journal.txt", []string{"entry-one-{{NONCE}}", "entry-two-{{NONCE}}"}, Either),
+			FileLinesIgnoringBlanks("journal.txt", []string{"entry-one-{{NONCE}}", "entry-two-{{NONCE}}"}, Either),
 			FileEquals(provenancePath, provenance, Platform),
 			EventCountAtLeast("user.message", 2, Platform),
 			EventAfterUserMessage("agent.tool_use", 2, Either),
