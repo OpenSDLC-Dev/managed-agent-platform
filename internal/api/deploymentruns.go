@@ -1,15 +1,16 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
-	"log/slog"
+	"fmt"
 	"net/http"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
-	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/events"
 )
 
 // runError tags an apiError with the run-error type a deployment run records
@@ -61,46 +62,51 @@ func (s *server) runDeployment(r *http.Request) (any, error) {
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
-	// FOR SHARE, not loadDeployment's FOR UPDATE: manual runs have no
-	// occurrence to claim, so two may fire concurrently — while a concurrent
-	// archive (FOR UPDATE on this row) still cannot slip between this read
-	// and the settlement. Paused is deliberately not checked: "manual runs
-	// through the run endpoint are still allowed while paused" (§8.1 entry
-	// 11). The raw resources column rides along because scanDeployment's
-	// stored form is the credential-free echo, and the fire copies ciphertext
-	// (§5.1) — the cipher is never dialed here.
-	var rawResources []byte
-	d, err := scanDeployment(tx.QueryRow(ctx,
-		`SELECT `+deploymentColumns+` FROM deployments WHERE id = $1 FOR SHARE`, id))
+	// One FOR SHARE read of exactly what the fire consumes — the raw
+	// resources column included, because scanDeployment's stored form is the
+	// credential-free echo, and the fire copies ciphertext (§5.1): the cipher
+	// is never dialed here. FOR SHARE, not loadDeployment's FOR UPDATE:
+	// manual runs have no occurrence to claim, so two may fire concurrently,
+	// while a concurrent archive (FOR UPDATE on this row) still cannot slip
+	// between this read and the settlement. Paused is deliberately not
+	// checked: "manual runs through the run endpoint are still allowed while
+	// paused" (§8.1 entry 11).
+	var (
+		envID, agentID        string
+		agentVersion          int
+		vaultIDs              []string
+		initial, rawResources []byte
+		archivedAt            *time.Time
+	)
+	err = tx.QueryRow(ctx,
+		`SELECT environment_id, agent_id, agent_version, vault_ids, initial_events, resources, archived_at
+		   FROM deployments WHERE id = $1 FOR SHARE`, id).
+		Scan(&envID, &agentID, &agentVersion, &vaultIDs, &initial, &rawResources, &archivedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, errNotFound("deployment %s not found", id)
 	}
 	if err != nil {
 		return nil, err
 	}
-	if d.ArchivedAt != nil {
+	if archivedAt != nil {
 		return nil, errInvalid("deployment %s is archived", id)
-	}
-	if err := tx.QueryRow(ctx,
-		`SELECT resources FROM deployments WHERE id = $1`, id).Scan(&rawResources); err != nil {
-		return nil, err
 	}
 
 	run := domain.DeploymentRun{
 		ID:             domain.NewID(domain.PrefixDeploymentRun),
-		DeploymentID:   d.ID,
+		DeploymentID:   domain.ID(id),
 		TriggerContext: domain.TriggerContext{Type: "manual"},
-		Agent:          d.Agent,
+		Agent:          domain.AgentReference{Type: "agent", ID: domain.ID(agentID), Version: agentVersion},
 	}
 	if err := tx.QueryRow(ctx,
 		`INSERT INTO deployment_runs (id, deployment_id, trigger_type, agent_id, agent_version)
 		 VALUES ($1, $2, 'manual', $3, $4)
 		 RETURNING created_at`,
-		run.ID, d.ID, string(d.Agent.ID), d.Agent.Version).Scan(&run.CreatedAt); err != nil {
+		run.ID, id, agentID, agentVersion).Scan(&run.CreatedAt); err != nil {
 		return nil, err
 	}
 
-	in, err := deploymentSessionIn(d, rawResources)
+	in, err := deploymentSessionIn(id, envID, agentID, agentVersion, vaultIDs, initial, rawResources)
 	if err != nil {
 		return nil, err
 	}
@@ -116,11 +122,10 @@ func (s *server) runDeployment(r *http.Request) (any, error) {
 		if _, err := tx.Exec(ctx, `ROLLBACK TO SAVEPOINT fire`); err != nil {
 			return nil, err
 		}
-		run.Error = &domain.RunError{Type: re.typ, Message: re.err.Error()}
 		// The run row survives the savepoint rollback — it was inserted
-		// before the savepoint — so this settlement updates a row this
-		// transaction proved exists.
-		if _, err := tx.Exec(ctx,
+		// before the savepoint.
+		run.Error = &domain.RunError{Type: re.typ, Message: re.err.Error()}
+		if err := settleRun(ctx, tx,
 			`UPDATE deployment_runs SET error_type = $1, error_message = $2 WHERE id = $3`,
 			re.typ, re.err.Error(), run.ID); err != nil {
 			return nil, err
@@ -128,7 +133,7 @@ func (s *server) runDeployment(r *http.Request) (any, error) {
 	} else {
 		sid := domain.ID(created.row.id)
 		run.SessionID = &sid
-		if _, err := tx.Exec(ctx,
+		if err := settleRun(ctx, tx,
 			`UPDATE deployment_runs SET session_id = $1, succeeded_at = now() WHERE id = $2`,
 			created.row.id, run.ID); err != nil {
 			return nil, err
@@ -139,78 +144,63 @@ func (s *server) runDeployment(r *http.Request) (any, error) {
 		return nil, err
 	}
 	if fireErr == nil {
-		// The post-commit halves createSession keeps for itself, because a
-		// fired session is the same session: the status metric and the
-		// resource-mutation metric observe the committed state.
-		if created.initialEvents > 0 {
-			events.RecordSessionStatus(ctx, domain.SessionRunning)
-		}
-		if created.resources > 0 {
-			recordResourceMutation(ctx, resourceOutcomeOK, created.resources)
-			slog.InfoContext(ctx, "session created with resources",
-				"session_id", created.row.id, "resource_count", created.resources)
-		}
+		created.recordCreated(ctx)
 	}
 	return run, nil
 }
 
-// deploymentSessionIn hydrates a session create from the deployment row: the
-// fire validates exactly what POST /v1/sessions validates and no more, the
-// parse stage having run at deployment create/update. The metadata bag is
-// deliberately empty and the title unset — session metadata is the
-// application layer's hook, not the schedule's (§8.1 entry 24) — and
-// created_by stays NULL by construction, createSessionInTx reading the
-// principal from a ctx that carries none of the deployment creator's.
-func deploymentSessionIn(d domain.Deployment, rawResources []byte) (createSessionIn, error) {
+// settleRun runs one settlement UPDATE and holds it to plan §4.1's rule: the
+// settlement must affect exactly one row, because zero would commit a run
+// with neither arm set — the shape the reference forbids. Unreachable here,
+// where the row was inserted before the savepoint in this same transaction,
+// and checked anyway: slice 4's scheduler settles an ON CONFLICT-claimed row,
+// where zero is a real outcome, and its settlement must not drift from this
+// one.
+func settleRun(ctx context.Context, tx pgx.Tx, sql string, args ...any) error {
+	tag, err := tx.Exec(ctx, sql, args...)
+	if err != nil {
+		return err
+	}
+	if n := tag.RowsAffected(); n != 1 {
+		return fmt.Errorf("run settlement affected %d rows, want exactly 1", n)
+	}
+	return nil
+}
+
+// deploymentSessionIn hydrates a session create from the deployment's stored
+// columns: the fire validates exactly what POST /v1/sessions validates and no
+// more, the parse stage having run at deployment create/update. The metadata
+// bag is deliberately empty and the title unset — session metadata is the
+// application layer's hook, not the deployment's (§8.1 entry 24). created_by
+// is left to createSessionInTx's ctx read: a manual run therefore attributes
+// the session to the caller who fired it — the request is authenticated, and
+// created_by is the audit answer to who caused a row to exist — while a
+// scheduled fire, whose ticker ctx carries no principal, creates
+// unattributed (plan §9's NULL is the schedule's, not this path's).
+func deploymentSessionIn(deplID, envID, agentID string, agentVersion int,
+	vaultIDs []string, initial, rawResources []byte) (createSessionIn, error) {
 	var stored []deploymentResource
 	if err := json.Unmarshal(rawResources, &stored); err != nil {
 		return createSessionIn{}, err
 	}
-	inputs, sealed := sessionInputsFrom(stored)
-	vaultIDs := make([]string, 0, len(d.VaultIDs))
-	for _, vid := range d.VaultIDs {
-		vaultIDs = append(vaultIDs, string(vid))
+	inputs, sealed, err := sessionInputsFrom(stored)
+	if err != nil {
+		return createSessionIn{}, err
 	}
-	deplID := string(d.ID)
+	var rawInitial []json.RawMessage
+	if err := json.Unmarshal(initial, &rawInitial); err != nil {
+		return createSessionIn{}, err
+	}
 	return createSessionIn{
-		envID: string(d.EnvironmentID),
+		envID: envID,
 		agentRaw: mustJSON(map[string]any{
-			"type": "agent", "id": string(d.Agent.ID), "version": d.Agent.Version,
+			"type": "agent", "id": agentID, "version": agentVersion,
 		}),
 		metadata:       map[string]string{},
 		resourceInputs: inputs,
 		sealedTokens:   sealed,
 		vaultIDs:       vaultIDs,
-		rawInitial:     d.InitialEvents,
+		rawInitial:     rawInitial,
 		deploymentID:   &deplID,
 	}, nil
-}
-
-// sessionInputsFrom is deploymentResourcesFrom's inverse at fire time: the
-// stored elements become the validated inputs a session create takes, and a
-// repository's sealed token is copied as ciphertext. The positional pairing is
-// deploymentResourcesFrom's own, walked back the other way.
-func sessionInputsFrom(stored []deploymentResource) ([]resourceInput, []sealedToken) {
-	var inputs []resourceInput
-	var sealed []sealedToken
-	for _, r := range stored {
-		switch r.Type {
-		case "github_repository":
-			inputs = append(inputs, resourceInput{
-				kind: resourceKindRepo, url: r.URL,
-				checkout: r.Checkout, mountPath: r.MountPath,
-			})
-			sealed = append(sealed, sealedToken{ciphertext: r.Token.Ciphertext, keyID: r.Token.KeyID})
-		case "memory_store":
-			inputs = append(inputs, resourceInput{
-				kind: resourceKindMemory, memoryStoreID: r.MemoryStoreID,
-				access: r.Access, instructions: r.Instructions,
-			})
-		default:
-			inputs = append(inputs, resourceInput{
-				kind: resourceKindFile, fileID: r.FileID, mountPath: r.MountPath,
-			})
-		}
-	}
-	return inputs, sealed
 }

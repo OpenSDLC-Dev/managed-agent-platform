@@ -228,7 +228,10 @@ type RunError struct {
 // TriggerContext says what fired a run: {"type": "manual"} for POST /run,
 // {"type": "schedule", "scheduled_at": …} for the cron scheduler. The manual
 // context carries no scheduled_at at all — the reference closes both objects
-// with additionalProperties: false — which is what omitempty renders.
+// with additionalProperties: false — which is what omitempty renders. The
+// same omitempty cuts the other way on the schedule variant, where the wire
+// REQUIRES scheduled_at: a renderer that builds one must set the pointer,
+// because a forgotten nil is silently omitted rather than failing loudly.
 type TriggerContext struct {
 	Type        string     `json:"type"` // "schedule" | "manual"
 	ScheduledAt *time.Time `json:"scheduled_at,omitempty"`

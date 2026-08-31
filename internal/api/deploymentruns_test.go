@@ -97,6 +97,18 @@ func TestDeploymentRunCreatesASessionAndRendersTheRun(t *testing.T) {
 		t.Errorf("succeeded_at is null on a successful run")
 	}
 
+	// A manual run is attributed: the request is authenticated, so the fired
+	// session's audit column names the caller's principal. Only a scheduled
+	// fire — no caller at 09:00 — creates unattributed (plan §9).
+	var createdBy *string
+	if err := s.pool.QueryRow(context.Background(),
+		`SELECT created_by FROM sessions WHERE id = $1`, sessionID).Scan(&createdBy); err != nil {
+		t.Fatalf("read created_by: %v", err)
+	}
+	if createdBy == nil || *createdBy == "" {
+		t.Errorf("created_by is unset on a manually fired session; the /run caller is its cause and the audit trail should name them")
+	}
+
 	// The action endpoint reads no request body: garbage is neither parsed
 	// nor refused, per the reference's bodyless action params.
 	status, res := s.do(http.MethodPost, "/v1/deployments/"+deplID+"/run", "{not json")
@@ -362,15 +374,13 @@ func TestDeletingTheSessionDoesNotUnsettleTheRun(t *testing.T) {
 		// A fired session is born running (the deployment's initial events)
 		// and a running session refuses deletion; park it idle first — the
 		// deletion rule is not what this test is about.
-		for _, table := range []string{"sessions", "session_threads"} {
-			col := "id"
-			if table == "session_threads" {
-				col = "session_id"
-			}
-			if _, err := s.pool.Exec(context.Background(),
-				`UPDATE `+table+` SET status = 'idle' WHERE `+col+` = $1`, id); err != nil {
-				t.Fatalf("park %s idle in %s: %v", id, table, err)
-			}
+		if _, err := s.pool.Exec(context.Background(),
+			`UPDATE sessions SET status = 'idle' WHERE id = $1`, id); err != nil {
+			t.Fatalf("park session %s idle: %v", id, err)
+		}
+		if _, err := s.pool.Exec(context.Background(),
+			`UPDATE session_threads SET status = 'idle' WHERE session_id = $1`, id); err != nil {
+			t.Fatalf("park %s's threads idle: %v", id, err)
 		}
 		if status, res := s.do(http.MethodDelete, "/v1/sessions/"+id, nil); status != http.StatusOK {
 			t.Fatalf("delete session %s: status %d, body %v", id, status, res)

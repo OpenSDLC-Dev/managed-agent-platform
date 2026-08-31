@@ -2,6 +2,7 @@ package api
 
 import (
 	"encoding/json"
+	"fmt"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
 )
@@ -92,6 +93,40 @@ func deploymentResourcesFrom(inputs []resourceInput, sealed []sealedToken) []dep
 		}
 	}
 	return out
+}
+
+// sessionInputsFrom is deploymentResourcesFrom's inverse at fire time: the
+// stored elements become the validated inputs a session create takes, and a
+// repository's sealed token is copied as ciphertext — the cipher is never
+// dialed at fire time. The positional pairing is deploymentResourcesFrom's
+// own, walked back the other way; the type switch is total over what that
+// function writes, and anything else is corrupt storage, refused rather than
+// misread as a file.
+func sessionInputsFrom(stored []deploymentResource) ([]resourceInput, []sealedToken, error) {
+	var inputs []resourceInput
+	var sealed []sealedToken
+	for _, r := range stored {
+		switch r.Type {
+		case "github_repository":
+			inputs = append(inputs, resourceInput{
+				kind: resourceKindRepo, url: r.URL,
+				checkout: r.Checkout, mountPath: r.MountPath,
+			})
+			sealed = append(sealed, sealedToken{ciphertext: r.Token.Ciphertext, keyID: r.Token.KeyID})
+		case "memory_store":
+			inputs = append(inputs, resourceInput{
+				kind: resourceKindMemory, memoryStoreID: r.MemoryStoreID,
+				access: r.Access, instructions: r.Instructions,
+			})
+		case "file":
+			inputs = append(inputs, resourceInput{
+				kind: resourceKindFile, fileID: r.FileID, mountPath: r.MountPath,
+			})
+		default:
+			return nil, nil, fmt.Errorf("stored deployment resource has unknown type %q", r.Type)
+		}
+	}
+	return inputs, sealed, nil
 }
 
 // echoDeploymentResources is what the response carries.

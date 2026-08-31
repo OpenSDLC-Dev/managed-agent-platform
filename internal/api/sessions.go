@@ -603,14 +603,7 @@ func (s *server) createSession(r *http.Request) (any, error) {
 	if err := tx.Commit(ctx); err != nil {
 		return nil, err
 	}
-	if created.initialEvents > 0 {
-		events.RecordSessionStatus(ctx, domain.SessionRunning)
-	}
-	if created.resources > 0 {
-		recordResourceMutation(ctx, resourceOutcomeOK, created.resources)
-		slog.InfoContext(ctx, "session created with resources",
-			"session_id", created.row.id, "resource_count", created.resources)
-	}
+	created.recordCreated(ctx)
 	return renderSession(created.row)
 }
 
@@ -643,6 +636,22 @@ type createdSession struct {
 	row           sessionRow
 	resources     int
 	initialEvents int
+}
+
+// recordCreated is the post-commit half every committer shares — the status
+// metric for a session born running, and the resource-mutation metric with
+// its log line. Called only after a successful Commit, because both observe
+// committed state; createSession and runDeployment are the two callers, and
+// one copy is what keeps a metric added here firing for both.
+func (c createdSession) recordCreated(ctx context.Context) {
+	if c.initialEvents > 0 {
+		events.RecordSessionStatus(ctx, domain.SessionRunning)
+	}
+	if c.resources > 0 {
+		recordResourceMutation(ctx, resourceOutcomeOK, c.resources)
+		slog.InfoContext(ctx, "session created with resources",
+			"session_id", c.row.id, "resource_count", c.resources)
+	}
 }
 
 // createSessionInTx creates a session — environment check, agent resolution,
