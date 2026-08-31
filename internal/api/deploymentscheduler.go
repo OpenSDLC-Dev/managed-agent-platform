@@ -220,7 +220,10 @@ func (s *server) deploymentTick(ctx context.Context, now time.Time) error {
 		return err
 	}
 	defer rows.Close()
-	var fires []deploymentFire
+	var (
+		fires    []deploymentFire
+		scanErrs []error
+	)
 	for rows.Next() {
 		var (
 			id, expr, tz string
@@ -259,9 +262,12 @@ func (s *server) deploymentTick(ctx context.Context, now time.Time) error {
 		due, err := cron.Due(expr, tz, fireFloor, now)
 		if err != nil {
 			// Unreachable for a stored schedule — create and update refuse
-			// an expression Upcoming cannot walk — and joined rather than
-			// swallowed if it ever happens.
-			return fmt.Errorf("deployment %s: %w", id, err)
+			// an expression Upcoming cannot walk — but joined rather than
+			// returned: one poisoned row (a zone a tzdata bump dropped, a
+			// hand-written migration) must cost that deployment its fires,
+			// never the whole fleet's.
+			scanErrs = append(scanErrs, fmt.Errorf("deployment %s: %w", id, err))
+			continue
 		}
 		if len(due) == 0 {
 			continue
@@ -275,7 +281,8 @@ func (s *server) deploymentTick(ctx context.Context, now time.Time) error {
 		skipped := int64(len(due) - 1)
 		if fireFloor.After(lower) {
 			if skipped, err = occurrencesSkipped(expr, tz, lower, occ); err != nil {
-				return fmt.Errorf("deployment %s: %w", id, err)
+				scanErrs = append(scanErrs, fmt.Errorf("deployment %s: %w", id, err))
+				continue
 			}
 		}
 		fires = append(fires, deploymentFire{deploymentID: id, expr: expr, tz: tz, occ: occ, skipped: skipped})
@@ -285,12 +292,23 @@ func (s *server) deploymentTick(ctx context.Context, now time.Time) error {
 	}
 	rows.Close()
 	if len(fires) == 0 {
-		return nil
+		return errors.Join(scanErrs...)
+	}
+
+	// The fire concurrency is clamped to the pool: pgxpool's default MaxConns
+	// is max(4, NumCPU), so on a small host the constant alone could pin
+	// every connection for up to a contended fire's lock_timeout, queueing
+	// each HTTP handler behind the sweep (§4.4's budget). Two are always left
+	// for the rest of the process — the SSE broker holds one for its LISTEN
+	// loop whenever a subscriber exists.
+	concurrency := deploymentFireConcurrency
+	if m := int(s.pool.Config().MaxConns) - 2; m < concurrency {
+		concurrency = max(1, m)
 	}
 
 	ctx, span := otel.GetTracerProvider().Tracer(apiTracerName).Start(ctx, "deployment.tick")
 	defer span.End()
-	sem := make(chan struct{}, deploymentFireConcurrency)
+	sem := make(chan struct{}, concurrency)
 	var (
 		wg   sync.WaitGroup
 		mu   sync.Mutex
@@ -310,7 +328,7 @@ func (s *server) deploymentTick(ctx context.Context, now time.Time) error {
 		}(f)
 	}
 	wg.Wait()
-	return errors.Join(errs...)
+	return errors.Join(append(scanErrs, errs...)...)
 }
 
 // occurrencesSkipped counts the occurrences in (lower, occ) — what a fire at
@@ -348,11 +366,17 @@ func (s *server) fireScheduled(ctx context.Context, f deploymentFire) error {
 
 	outcome, errType, err := s.fireScheduledTx(ctx, f)
 	switch {
-	case err != nil && isLostRace(err):
-		// A lost race surfacing from any statement of the fire — not only
-		// the claim: a deadlock victim's whole transaction is rolled back,
-		// so nothing was committed and the occurrence is retried or already
-		// another actor's. Quiet, like any other lost claim.
+	case err != nil && isDeadlockVictim(err):
+		// A deadlock victim from any statement of the fire — the auto-pause
+		// UPDATE is the reachable one — had its whole transaction rolled
+		// back: nothing was committed, and the occurrence is retried or
+		// already another actor's. Quiet, like a lost claim. A 55P03 is
+		// deliberately NOT caught here: outside the two claim-phase
+		// statements (which read it locally), a lock timeout deep in the
+		// session create is a diagnosable contention fault, and swallowing
+		// it would make a wedged environment row indistinguishable from
+		// "nothing was due" — it falls through to abandoned, counted and
+		// logged, exactly as §4.1 scopes the quiet reading to the claim.
 		return nil
 	case err != nil:
 		if ctx.Err() != nil {
@@ -450,14 +474,13 @@ func (s *server) fireScheduledTx(ctx context.Context, f deploymentFire) (outcome
 	// Postgres waits on the winner's transaction until lock_timeout fires,
 	// and that 55P03 is read as the same lost claim by a different route.
 	runID := domain.NewID(domain.PrefixDeploymentRun)
-	var claimed string
-	var createdAt time.Time
+	var claimed int
 	err = tx.QueryRow(ctx, `
 		INSERT INTO deployment_runs (id, deployment_id, trigger_type, scheduled_at, agent_id, agent_version)
 		VALUES ($1, $2, 'schedule', $3, $4, $5)
 		ON CONFLICT (deployment_id, scheduled_at) WHERE scheduled_at IS NOT NULL DO NOTHING
-		RETURNING id, created_at`,
-		runID, f.deploymentID, f.occ, agentID, agentVersion).Scan(&claimed, &createdAt)
+		RETURNING 1`,
+		runID, f.deploymentID, f.occ, agentID, agentVersion).Scan(&claimed)
 	if errors.Is(err, pgx.ErrNoRows) || isLostRace(err) {
 		return fireOutcomeLost, "", nil
 	}
@@ -539,18 +562,26 @@ func setDeploymentLockWait(ctx context.Context, tx pgx.Tx) error {
 	return err
 }
 
-// isLostRace reports the two shapes a lost race takes under row contention:
-// 55P03 (lock_not_available — this transaction's lock_timeout gave up) and
-// 40P01 (deadlock_detected — Postgres chose this transaction as the victim
-// and rolled it back). The deadlock is reachable, not theoretical: a loser
-// blocked on the winner's uncommitted claim still holds its FOR SHARE on the
-// deployment row, so a winner whose classified failure reaches the auto-pause
-// UPDATE waits on that share lock — a cycle the deadlock detector resolves in
-// about a second, choosing either side. Both codes mean the same thing here:
-// nothing was committed, and the occurrence is retried or already owned.
+// isLostRace reports the two shapes a lost claim takes at the claim phase —
+// the FOR SHARE re-read and the claim insert, the two statements §4.1 names:
+// 55P03 (lock_not_available — this transaction's lock_timeout gave up waiting
+// on the winner) and 40P01 (deadlock_detected — Postgres chose this
+// transaction as the victim and rolled it back). Both mean nothing was
+// committed and the occurrence is retried or already owned.
 func isLostRace(err error) bool {
 	var pgErr *pgconn.PgError
 	return errors.As(err, &pgErr) && (pgErr.Code == "55P03" || pgErr.Code == "40P01")
+}
+
+// isDeadlockVictim reports a 40P01 alone — the one lost-race shape that can
+// surface past the claim phase. The deadlock is reachable, not theoretical: a
+// loser blocked on the winner's uncommitted claim still holds its FOR SHARE
+// on the deployment row, so a winner whose classified failure reaches the
+// auto-pause UPDATE waits on that share lock — a cycle the deadlock detector
+// resolves in about a second, choosing either side.
+func isDeadlockVictim(err error) bool {
+	var pgErr *pgconn.PgError
+	return errors.As(err, &pgErr) && pgErr.Code == "40P01"
 }
 
 func recordDeploymentFire(ctx context.Context, outcome, errType string) {

@@ -494,6 +494,13 @@ func (s *server) updateDeployment(r *http.Request) (any, error) {
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
+	// The fourth writer of the deployment row takes the same bound the other
+	// three do: a fire in flight holds the row FOR SHARE for its whole
+	// session creation, and the FOR UPDATE below must not wait on it forever
+	// (§4.1 step 2's reason, applied to update).
+	if err := setDeploymentLockWait(ctx, tx); err != nil {
+		return nil, err
+	}
 	d, err := loadDeployment(ctx, tx, id)
 	if err != nil {
 		return nil, err

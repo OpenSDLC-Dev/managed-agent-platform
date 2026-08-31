@@ -660,6 +660,7 @@ func TestSchedulerAutoPauseDeadlockResolvesCleanly(t *testing.T) {
 		if time.Now().After(deadline) {
 			t.Fatal("the second caller never blocked on the claim")
 		}
+		time.Sleep(10 * time.Millisecond)
 	}
 	close(release)
 
@@ -718,7 +719,13 @@ func TestSchedulerSchedulingStateChangeBetweenScanAndFire(t *testing.T) {
 	floorID := createDeployment(t, s, scheduledBody(agentID, envID, "0 9 * * *", "UTC"))["id"].(string)
 	setResumedAt(t, s, floorID, time.Date(2026, 3, 13, 0, 0, 0, 0, time.UTC))
 	restore = api.SetDeploymentFireHookAfterBeginForTest(func() {
-		setResumedAt(t, s, floorID, time.Date(2026, 3, 13, 9, 30, 0, 0, time.UTC))
+		// t.Errorf, not the t.Fatal-ing helper: the hook runs on a fire
+		// goroutine, where Fatal's Goexit is documented misuse.
+		if _, err := s.pool.Exec(context.Background(),
+			`UPDATE deployments SET schedule_resumed_at = $1 WHERE id = $2`,
+			time.Date(2026, 3, 13, 9, 30, 0, 0, time.UTC), floorID); err != nil {
+			t.Errorf("restamp resume floor: %v", err)
+		}
 	})
 	defer restore()
 	if err := api.SchedulerTick(t.Context(), s.pool, time.Date(2026, 3, 13, 9, 0, 30, 0, time.UTC)); err != nil {
@@ -726,6 +733,35 @@ func TestSchedulerSchedulingStateChangeBetweenScanAndFire(t *testing.T) {
 	}
 	if runs := scheduledRuns(t, s, floorID); len(runs) != 0 {
 		t.Fatalf("a fire ran an occurrence behind the restamped resume floor: %v", runs)
+	}
+}
+
+// One poisoned schedule costs its own deployment its fires, never the
+// fleet's: a stored timezone the walk cannot load (a tzdata bump, a
+// hand-written migration — create and update refuse it, so only SQL can
+// plant it) surfaces as the tick's error while every healthy deployment
+// still fires.
+func TestSchedulerOnePoisonedScheduleDoesNotStopTheSweep(t *testing.T) {
+	s := newTestServer(t)
+	agentID, envID := fixture(t, s)
+	healthyID := createDeployment(t, s, scheduledBody(agentID, envID, "0 9 * * *", "UTC"))["id"].(string)
+	setResumedAt(t, s, healthyID, time.Date(2026, 3, 12, 0, 0, 0, 0, time.UTC))
+	poisonedID := createDeployment(t, s, scheduledBody(agentID, envID, "0 9 * * *", "UTC"))["id"].(string)
+	setResumedAt(t, s, poisonedID, time.Date(2026, 3, 12, 0, 0, 0, 0, time.UTC))
+	if _, err := s.pool.Exec(t.Context(),
+		`UPDATE deployments SET schedule_timezone = 'Not/AZone' WHERE id = $1`, poisonedID); err != nil {
+		t.Fatal(err)
+	}
+
+	err := api.SchedulerTick(t.Context(), s.pool, time.Date(2026, 3, 12, 9, 0, 30, 0, time.UTC))
+	if err == nil {
+		t.Error("tick returned nil; the poisoned row must surface, not vanish")
+	}
+	if runs := scheduledRuns(t, s, healthyID); len(runs) != 1 {
+		t.Fatalf("the healthy deployment got %d runs, want 1 — a poisoned sibling must not stop the sweep", len(runs))
+	}
+	if runs := scheduledRuns(t, s, poisonedID); len(runs) != 0 {
+		t.Fatalf("the poisoned deployment fired: %v", runs)
 	}
 }
 

@@ -78,10 +78,12 @@ func SetMemoryPruneIntervalForTest(d time.Duration) (restore func()) {
 // SchedulerTick runs exactly one deployment-scheduler tick against the pool
 // at the given instant. The production loop is a ticker calling this with the
 // database's own clock (SELECT now()), so a test that drives now covers every
-// branch without a wall clock. blobs and cipher are nil: nothing a fire does
-// dials either — tokens are ciphertext copied as-is, and file resources
-// reference rows, not blobs — and the arms that would need them are driven
-// through the HTTP surface instead. Test binary only.
+// branch without a wall clock. blobs and cipher are nil: the cipher is never
+// dialed by a fire (tokens are ciphertext copied as-is), and blobs only by
+// one shape — initial_events carrying a file-rubric define_outcome, whose
+// snapshot dials the store — so a test firing that shape through this seam
+// gets the unclassified blobs-unconfigured arm, not a snapshot. Test binary
+// only.
 func SchedulerTick(ctx context.Context, pool *pgxpool.Pool, now time.Time) error {
 	return newServer(pool, nil, nil).deploymentTick(ctx, now)
 }
