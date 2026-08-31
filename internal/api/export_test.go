@@ -1,8 +1,11 @@
 package api
 
 import (
+	"context"
 	"net"
 	"time"
+
+	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/dialguard"
 )
@@ -70,4 +73,76 @@ func SetMemoryPruneIntervalForTest(d time.Duration) (restore func()) {
 	prev := memoryPruneInterval
 	memoryPruneInterval = d
 	return func() { memoryPruneInterval = prev }
+}
+
+// SchedulerTick runs exactly one deployment-scheduler tick against the pool
+// at the given instant. The production loop is a ticker calling this with the
+// database's own clock (SELECT now()), so a test that drives now covers every
+// branch without a wall clock. blobs and cipher are nil: the cipher is never
+// dialed by a fire (tokens are ciphertext copied as-is), and blobs only by
+// one shape — initial_events carrying a file-rubric define_outcome, whose
+// snapshot dials the store — so a test firing that shape through this seam
+// gets the unclassified blobs-unconfigured arm, not a snapshot. Test binary
+// only.
+func SchedulerTick(ctx context.Context, pool *pgxpool.Pool, now time.Time) error {
+	return newServer(pool, nil, nil).deploymentTick(ctx, now)
+}
+
+// SetDeploymentTickIntervalForTest shortens the scheduler's cadence so the
+// one wall-clock test can watch the ticker actually fire. Test binary only.
+func SetDeploymentTickIntervalForTest(d time.Duration) (restore func()) {
+	prev := deploymentTickInterval
+	deploymentTickInterval = d
+	return func() { deploymentTickInterval = prev }
+}
+
+// SetDeploymentCatchupWindowForTest narrows the catch-up window so the
+// aged-out branch can be driven with near-now instants. Test binary only.
+func SetDeploymentCatchupWindowForTest(d time.Duration) (restore func()) {
+	prev := deploymentCatchupWindow
+	deploymentCatchupWindow = d
+	return func() { deploymentCatchupWindow = prev }
+}
+
+// SetDeploymentLockWaitForTest shortens the fire's lock_timeout so the
+// lost-claim-by-timeout branch resolves in test time. Test binary only.
+func SetDeploymentLockWaitForTest(d time.Duration) (restore func()) {
+	prev := deploymentLockWait
+	deploymentLockWait = d
+	return func() { deploymentLockWait = prev }
+}
+
+// SetDeploymentFireHookAfterBeginForTest installs a hook between the fire
+// transaction's open and its deployment re-read, so a test can archive or
+// pause the deployment in that exact window. Test binary only.
+func SetDeploymentFireHookAfterBeginForTest(f func()) (restore func()) {
+	prev := deploymentFireHookAfterBegin
+	deploymentFireHookAfterBegin = f
+	return func() { deploymentFireHookAfterBegin = prev }
+}
+
+// SetDeploymentFireHookInFireForTest installs a hook under SAVEPOINT fire
+// whose error is handled exactly as a session-create failure — the seam for
+// the unclassified whole-rollback arm, and for holding a winner's claim
+// uncommitted while a competing caller runs. Test binary only.
+func SetDeploymentFireHookInFireForTest(f func() error) (restore func()) {
+	prev := deploymentFireHookInFire
+	deploymentFireHookInFire = f
+	return func() { deploymentFireHookInFire = prev }
+}
+
+// DeploymentSkipScanCapForTest exposes the saturation bound of the skipped
+// count so the cold-backlog test asserts against the constant rather than a
+// copy of its value. Test binary only.
+func DeploymentSkipScanCapForTest() int { return deploymentSkipScanCap }
+
+// DeploymentPausingErrorTypesForTest exposes the paused-reason union mapping
+// so the test can assert it against the migration's CHECK constraint. Test
+// binary only.
+func DeploymentPausingErrorTypesForTest() []string {
+	types := make([]string, 0, len(deploymentPausingErrorTypes))
+	for t := range deploymentPausingErrorTypes {
+		types = append(types, t)
+	}
+	return types
 }
