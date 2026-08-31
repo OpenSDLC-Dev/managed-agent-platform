@@ -3,6 +3,7 @@ package evals
 import (
 	"encoding/json"
 	"fmt"
+	"path"
 	"regexp"
 	"slices"
 	"strings"
@@ -507,29 +508,78 @@ func ReadsSkillFile(name, file string, class Class) Grader {
 // ReadsFile asserts the agent read a mounted file at its mount path — the
 // files analog of ReadsSkillFile, keyed on the absolute mount path rather than
 // a skills/<name>/ directory.
+//
+// A read is any successful call whose shape covers the file — success
+// required, as the write grader draws the same line for writes: a failed cat
+// named the file and read nothing. Three shapes count: a read whose file_path
+// resolves to the mount path under the toolset's rule (absolute or
+// workdir-relative, readRangeUse's two spellings); a grep rooted at the file
+// or an ancestor directory whose result carried matches — grep reads contents
+// where glob returns names and no bytes, but its "no matches" success put none
+// of them in front of the model; and a bash command carrying the file's
+// basename. The bash arm is deliberately loose evidence: the sandbox shell
+// keeps state across calls, so `cd` then `cat` splits the path across two
+// commands and the basename is the only fragment guaranteed to appear — the
+// rule cannot see the shell's cwd, so a bare `cat` of a same-named file
+// elsewhere also counts, and the trial's answer grader stays the load-bearing
+// proof. A write or edit naming the path stays a miss, for ReadsSkillFile's
+// reason: a stray mention reads nothing.
 func ReadsFile(path string, class Class) Grader {
 	return Grader{
 		Name:  "reads-file:" + path,
 		Class: class,
 		Check: func(_ *testing.T, tr *Trial) error {
 			for _, use := range eventsOfType(tr, "agent.tool_use") {
-				input, _ := use["input"].(map[string]any)
-				switch use["name"] {
-				case "read":
-					// Exact mount-path match: a read of a different path that merely
-					// contains the mount string is not evidence this file was read.
-					if fp, _ := input["file_path"].(string); fp == path {
-						return nil
-					}
-				case "bash":
-					if cmd, _ := input["command"].(string); strings.Contains(cmd, path) {
-						return nil
-					}
+				id, _ := use["id"].(string)
+				res := resultFor(tr, id)
+				if res == nil || !okResult(res) {
+					continue
+				}
+				if readCovers(use, res, path) {
+					return nil
 				}
 			}
-			return fmt.Errorf("no read or bash tool call read %s: the agent never read the mounted file", path)
+			return fmt.Errorf("no read, grep or bash tool call read %s: the agent never read the mounted file", path)
 		},
 	}
+}
+
+// readCovers is ReadsFile's per-call rule: whether this one successful tool
+// call's shape covers the file at p. res is the call's own result — the grep
+// arm reads it, because grep spells "the pattern was nowhere under the root"
+// as a success (GlobPathList keeps the same sentinel out for the same reason).
+func readCovers(use, res map[string]any, p string) bool {
+	input, _ := use["input"].(map[string]any)
+	switch use["name"] {
+	case "read":
+		fp, _ := input["file_path"].(string)
+		return resolveInWorkdir(fp) == p
+	case "grep":
+		if textOf(res) == "no matches" {
+			return false
+		}
+		root := sandbox.DefaultWorkdir
+		if rp, _ := input["path"].(string); rp != "" {
+			root = resolveInWorkdir(rp)
+		}
+		// TrimSuffix so the one root Clean leaves slashed — "/" — still covers,
+		// rather than building a "//" prefix no path carries.
+		return root == p || strings.HasPrefix(p, strings.TrimSuffix(root, "/")+"/")
+	case "bash":
+		cmd, _ := input["command"].(string)
+		return strings.Contains(cmd, path.Base(p))
+	}
+	return false
+}
+
+// resolveInWorkdir mirrors the toolset's resolve rule with the default
+// workdir: slash paths, since the sandbox is a Linux container, and a relative
+// path roots at the workdir.
+func resolveInWorkdir(p string) string {
+	if path.IsAbs(p) {
+		return path.Clean(p)
+	}
+	return path.Join(sandbox.DefaultWorkdir, p)
 }
 
 // WritesFile asserts the agent wrote or edited a file at path — a write or

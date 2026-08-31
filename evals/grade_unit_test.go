@@ -1680,3 +1680,83 @@ func TestWroteFileNeedsASuccessfulResult(t *testing.T) {
 		}
 	}
 }
+
+// ReadsFile must count the read shapes the toolset admits: a relative read
+// path resolves against the workdir, a grep that matched reads contents under
+// its root where glob returns names and no bytes, and the sandbox shell keeps
+// state across bash calls, so `cd` then `cat` legitimately splits the mount
+// path across two commands — which is why the bash arm matches the basename
+// alone, cwd-blind, a deliberate looseness the answer grader beside it
+// carries. It must still reject name-dropping that reads nothing — a glob, a
+// write naming the path, a grep rooted elsewhere or one whose answer was "no
+// matches" — and, as the write grader requires for writes, a call that failed
+// or was never answered.
+func TestReadsFileCountsEachReadShape(t *testing.T) {
+	const file = "/workspace/fixture/PASSPHRASE.txt"
+	g := ReadsFile(file, Either)
+	use := func(id, name string, input map[string]any) map[string]any {
+		return map[string]any{"type": "agent.tool_use", "id": id, "name": name, "input": input}
+	}
+	result := func(id string, isErr bool) map[string]any {
+		return map[string]any{"type": "agent.tool_result", "tool_use_id": id, "is_error": isErr}
+	}
+	one := func(name string, input map[string]any) []map[string]any {
+		return []map[string]any{use("u1", name, input), result("u1", false)}
+	}
+	for name, tc := range map[string]struct {
+		events []map[string]any
+		read   bool
+	}{
+		"a read of the mount path":                {one("read", map[string]any{"file_path": file}), true},
+		"a read of its workdir-relative spelling": {one("read", map[string]any{"file_path": "fixture/PASSPHRASE.txt"}), true},
+		"a read of an uncleaned spelling":         {one("read", map[string]any{"file_path": "./fixture/PASSPHRASE.txt"}), true},
+		"a read of a same-named file elsewhere":   {one("read", map[string]any{"file_path": "/tmp/PASSPHRASE.txt"}), false},
+		"a read of a sibling":                     {one("read", map[string]any{"file_path": "/workspace/fixture/README.md"}), false},
+		"a bash cat of the mount path":            {one("bash", map[string]any{"command": "cat " + file}), true},
+		"a bash cd-and-cat in one command":        {one("bash", map[string]any{"command": "cd /workspace/fixture && cat PASSPHRASE.txt"}), true},
+		"a bash cd-and-cat split across two calls": {[]map[string]any{
+			use("u1", "bash", map[string]any{"command": "cd /workspace/fixture"}), result("u1", false),
+			use("u2", "bash", map[string]any{"command": "cat PASSPHRASE.txt"}), result("u2", false),
+		}, true},
+		"a bash that never names the file": {one("bash", map[string]any{"command": "ls -la /workspace/fixture"}), false},
+		// The rule's deliberate cost, not an oversight: the grader cannot see
+		// the persistent shell's cwd, so the basename counts wherever the
+		// command ran — the answer grader beside it carries correctness.
+		"a bash cat of the basename alone":     {one("bash", map[string]any{"command": "cat PASSPHRASE.txt"}), true},
+		"a grep rooted at an ancestor":         {one("grep", map[string]any{"pattern": "passphrase", "path": "/workspace/fixture"}), true},
+		"a grep rooted at the file itself":     {one("grep", map[string]any{"pattern": ".", "path": file}), true},
+		"a grep rooted at the filesystem root": {one("grep", map[string]any{"pattern": "passphrase", "path": "/"}), true},
+		"a grep of the default root":           {one("grep", map[string]any{"pattern": "passphrase"}), true},
+		"a grep of a relative root":            {one("grep", map[string]any{"pattern": "passphrase", "path": "fixture"}), true},
+		"a grep rooted elsewhere":              {one("grep", map[string]any{"pattern": "passphrase", "path": "/workspace/other"}), false},
+		// Covering root, empty answer: grep spells "the pattern was nowhere
+		// under the root" as a success, and it put no bytes before the model.
+		"a grep that matched nothing": {[]map[string]any{
+			use("u1", "grep", map[string]any{"pattern": "passphrase", "path": "/workspace/fixture"}),
+			{"type": "agent.tool_result", "tool_use_id": "u1", "is_error": false,
+				"content": textBlocks("no matches")},
+		}, false},
+		"a grep rooted at a non-ancestor prefix": {one("grep", map[string]any{"pattern": "passphrase", "path": "/workspace/fix"}), false},
+		"a glob that would list the file":        {one("glob", map[string]any{"pattern": "**/*.txt", "path": "/workspace/fixture"}), false},
+		"a write naming the path":                {one("write", map[string]any{"file_path": file, "content": "x"}), false},
+		"a failed read of the mount path":        {[]map[string]any{use("u1", "read", map[string]any{"file_path": file}), result("u1", true)}, false},
+		"a failed bash cat":                      {[]map[string]any{use("u1", "bash", map[string]any{"command": "cat " + file}), result("u1", true)}, false},
+		"a read that was never answered":         {[]map[string]any{use("u1", "read", map[string]any{"file_path": file})}, false},
+		"no tool calls at all":                   {nil, false},
+	} {
+		err := g.Check(t, trialWith(tc.events))
+		if got := err == nil; got != tc.read {
+			t.Errorf("%s: counted as a read = %v, want %v (grader said: %v)", name, got, tc.read, err)
+		}
+	}
+
+	// A mount outside the workdir is not covered by a default-root grep: the
+	// toolset roots one at /workspace, which cannot reach /mnt.
+	mnt := ReadsFile("/mnt/session/uploads/answer.txt", Either)
+	defaultRoot := trialWith([]map[string]any{
+		use("u1", "grep", map[string]any{"pattern": "passphrase"}), result("u1", false),
+	})
+	if err := mnt.Check(t, defaultRoot); err == nil {
+		t.Error("a default-root grep cannot read a /mnt mount and must not count")
+	}
+}
