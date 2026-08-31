@@ -527,7 +527,7 @@ and carries three instruments in `internal/api/deploymentscheduler.go`: `deploym
 by outcome (`created`/`failed` sub-attributed by error.type/`abandoned`),
 `deployment.occurrences.skipped` (the catch-up collapse count, added by the claim's winner
 after its commit so a rollback cannot double-count), and `deployment.tick.duration`, the
-gauge of when one sweep has outgrown its 30-second interval. Queue `depth`/`pending`/`workers_polling` are OTLP
+signal that one sweep has outgrown its 30-second interval. Queue `depth`/`pending`/`workers_polling` are OTLP
 observable gauges (`internal/queue/metrics.go`) sampling the same work-stats view the API
 serves — registered once by the control plane, reported per self_hosted environment. A
 configured OTLP endpoint bridges
