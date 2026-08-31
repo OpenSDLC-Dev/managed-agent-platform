@@ -6,7 +6,8 @@ import (
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/modeltest"
 )
 
-// TestEvals is the suite. One stack for the run, one session per task.
+// TestEvals is the suite. One stack for the run, one session per attempt —
+// which is one per task, except the retried task that used two.
 //
 // The gate is modeltest.Endpoint rather than a bare env check, so an opted-in
 // run with a rotted .env fails here instead of skipping — a suite that quietly
@@ -28,39 +29,95 @@ func TestEvals(t *testing.T) {
 	}
 }
 
-// runAndGrade drives one trial and grades it, guaranteeing the trial reaches the
-// report even when it aborts.
+// runAndGrade drives a task to its verdict: one trial, and — when the first
+// attempt fails on model behavior alone — the one retry plan 02 reserves for
+// model non-compliance ([M], extended to [E] since the evidence cannot separate
+// the two either), reported rather than silent. The superseded attempt keeps
+// its record, its transcript and a log line; only the fresh attempt's verdict
+// reds the run. Any Platform-class failure is the signal this suite exists for
+// and is never retried, and an abort (a t.Fatal) has already reddened the test
+// before any retry could be weighed.
+func runAndGrade(t *testing.T, s *stack, task Task) {
+	rec, failures := gradeAttempt(t, s, task, 0)
+	if !retryEarned(failures) {
+		rec.Pass = len(failures) == 0
+		recordTrial(*rec)
+		failFor(t, failures)
+		return
+	}
+	rec.Attempt, rec.Pass = 1, false
+	recordTrial(*rec)
+	for _, f := range failures {
+		t.Logf("attempt 1 [%s] %s: %s — model non-compliance, retrying", f.Class, f.Grader, f.Error)
+	}
+	retry, failures := gradeAttempt(t, s, task, 2)
+	retry.Pass = len(failures) == 0
+	recordTrial(*retry)
+	failFor(t, failures)
+}
+
+// retryEarned is the retry gate: at least one failure, none of them Platform
+// class. A clean attempt has nothing to retry, and a Platform failure must
+// stand exactly once — retrying our own bug would be measuring the dice
+// instead of the platform.
+func retryEarned(fs []failure) bool {
+	if len(fs) == 0 {
+		return false
+	}
+	for _, f := range fs {
+		if f.Class == string(Platform) {
+			return false
+		}
+	}
+	return true
+}
+
+// failFor reds the test with the class-first line per failure — the terminal
+// spelling of what the record already carries. The class leads the message: it
+// is the first thing a reader needs to know, because it decides whether this
+// is a bug to fix or a model to re-prompt.
+func failFor(t *testing.T, fs []failure) {
+	for _, f := range fs {
+		t.Errorf("[%s] %s: %s", f.Class, f.Grader, f.Error)
+	}
+}
+
+// gradeAttempt drives one trial and grades it, returning the failures for the
+// caller to judge — red the run, or spend the task's one retry — and
+// guaranteeing the trial reaches the report even when it aborts. attempt is
+// stamped into the record up front (0 for a first attempt; the caller upgrades
+// it to 1 only if a retry supersedes it) so an abort mid-retry still records
+// which attempt it was.
 //
 // The abort matters because t.Fatal is runtime.Goexit: it unwinds the goroutine
 // running deferred functions but nothing else. runTrial fatals on a drive
 // failure (a turn that never goes idle — a timeout — or an API error), and a
-// grader can fatal through a helper. A trailing recordTrial would be unwound
-// past on either, dropping the trial from report.json entirely — and a timeout
-// is both the likeliest real failure and the one triage most needs to see. The
-// deferred record turns that silent drop into a recorded Platform failure; the
-// `completed` flag distinguishes a clean finish from an abort so the abort is
-// not misreported as a pass with no graders run.
+// grader can fatal through a helper. On either, the caller never gets to record
+// the attempt — the unwind skips it — so the deferred record turns that silent
+// drop into a recorded Platform failure instead; the `completed` flag is what
+// tells the abort apart from a clean finish whose recording is the caller's.
 //
 // On an abort the happy-path transcript capture below is skipped too, so the
 // defer fetches the transcript best-effort: a drive timeout is the failure the
 // artifacts most need to make inspectable, and without this its transcript would
 // be dropped (writeArtifacts skips a record whose events are nil). The fetch is
 // non-fatal because it runs inside the unwinding t.Fatal.
-func runAndGrade(t *testing.T, s *stack, task Task) {
-	rec := &record{Task: task.ID}
+func gradeAttempt(t *testing.T, s *stack, task Task, attempt int) (*record, []failure) {
+	rec := &record{Task: task.ID, Attempt: attempt}
 	completed := false
 	defer func() {
-		if !completed {
-			rec.Failures = append(rec.Failures, failure{
-				Grader: "trial-aborted", Class: string(Platform),
-				Error: "the trial aborted before grading finished (a drive timeout or API " +
-					"error, or a grader's t.Fatal); see the go test output for the fatal error",
-			})
-			if rec.Session != "" && rec.events == nil {
-				rec.events = s.tryListEvents(rec.Session)
-			}
+		if completed {
+			return
 		}
-		rec.Pass = len(rec.Failures) == 0
+		rec.Failures = append(rec.Failures, failure{
+			Grader: "trial-aborted", Class: string(Platform),
+			Error: "the trial aborted before grading finished (a drive timeout or API " +
+				"error, or a grader's t.Fatal); see the go test output for the fatal error",
+		})
+		if rec.Session != "" && rec.events == nil {
+			rec.events = s.tryListEvents(rec.Session)
+		}
+		rec.Pass = false
 		recordTrial(*rec)
 	}()
 
@@ -79,18 +136,17 @@ func runAndGrade(t *testing.T, s *stack, task Task) {
 	// failure would report "the file was wrong" and hide that the session also
 	// errored and the tokens were never counted. Triage wants the whole picture,
 	// and the run has already been paid for.
+	var failures []failure
 	for _, g := range append(corePack(task), task.Graders...) {
 		if err := g.Check(t, tr); err != nil {
-			rec.Failures = append(rec.Failures, failure{
+			failures = append(failures, failure{
 				Grader: g.Name, Class: string(g.Class), Error: err.Error(),
 			})
-			// The class leads the message: it is the first thing a reader needs
-			// to know, because it decides whether this is a bug to fix or a
-			// model to re-prompt.
-			t.Errorf("[%s] %s: %v", g.Class, g.Name, err)
 		}
 	}
+	rec.Failures = failures
 	completed = true
+	return rec, failures
 }
 
 // sumTokens totals the trial's model spend from the transcript's

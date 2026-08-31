@@ -37,11 +37,14 @@ type tokens struct {
 	Output int64 `json:"output_tokens"`
 }
 
-// record is one trial's outcome.
+// record is one trial's outcome — or one attempt's, when a task earned its
+// retry: 1 is the superseded first attempt, 2 the retry whose verdict stands,
+// 0 (omitted) the common sole attempt.
 type record struct {
 	Task      string    `json:"task"`
 	Session   string    `json:"session"`
 	Pass      bool      `json:"pass"`
+	Attempt   int       `json:"attempt,omitempty"`
 	ElapsedMS int64     `json:"elapsed_ms"`
 	ToolCalls int       `json:"tool_calls"`
 	Tokens    tokens    `json:"tokens"`
@@ -312,12 +315,17 @@ func writeArtifacts() error {
 // tested without a model, a database or Docker.
 func renderSummary(rep report) string {
 	var b strings.Builder
-	pass := 0
+	pass, total := 0, 0
 	var totalMS int64
 	var tok tokens
 	for _, r := range rep.Records {
-		if r.Pass {
-			pass++
+		// A superseded attempt is no trial of its own — the retry's verdict
+		// stands for the task — but its time and tokens were spent all the same.
+		if r.Attempt != 1 {
+			total++
+			if r.Pass {
+				pass++
+			}
 		}
 		totalMS += r.ElapsedMS
 		tok.Input += r.Tokens.Input
@@ -327,7 +335,7 @@ func renderSummary(rep report) string {
 	fmt.Fprintf(&b, "# Eval run\n\n")
 	fmt.Fprintf(&b, "- Model: `%s`\n", rep.Model)
 	fmt.Fprintf(&b, "- Endpoint: `%s`\n", rep.Endpoint)
-	fmt.Fprintf(&b, "- Result: **%d/%d passed**\n", pass, len(rep.Records))
+	fmt.Fprintf(&b, "- Result: **%d/%d passed**\n", pass, total)
 	fmt.Fprintf(&b, "- Elapsed: %.1fs · Tokens: %d in / %d out\n\n",
 		float64(totalMS)/1000, tok.Input, tok.Output)
 
@@ -338,18 +346,32 @@ func renderSummary(rep report) string {
 		if !r.Pass {
 			result = "FAIL"
 		}
+		switch r.Attempt {
+		case 1:
+			result += " (retried)"
+		case 2:
+			result += " (retry)"
+		}
 		classes := failureClasses(r.Failures)
 		fmt.Fprintf(&b, "| %s | %s | %.1fs | %d | %s |\n",
 			r.Task, result, float64(r.ElapsedMS)/1000, r.ToolCalls, classes)
 	}
 
 	// The detail section only lists failures — a green run's summary is the
-	// table and nothing else.
+	// table and nothing else. A retried task's two sections read apart by the
+	// attempt tag beside the session id.
 	for _, r := range rep.Records {
 		if r.Pass {
 			continue
 		}
-		fmt.Fprintf(&b, "\n## %s (session `%s`)\n\n", r.Task, r.Session)
+		head := fmt.Sprintf("## %s (session `%s`)", r.Task, r.Session)
+		switch r.Attempt {
+		case 1:
+			head = fmt.Sprintf("## %s (session `%s`, attempt 1 — retried)", r.Task, r.Session)
+		case 2:
+			head = fmt.Sprintf("## %s (session `%s`, attempt 2 — the retry)", r.Task, r.Session)
+		}
+		fmt.Fprintf(&b, "\n%s\n\n", head)
 		for _, f := range r.Failures {
 			fmt.Fprintf(&b, "- **[%s] %s** — %s\n", f.Class, f.Grader, f.Error)
 		}
