@@ -79,7 +79,10 @@ func TestSplitLines(t *testing.T) {
 		{"a\n", []string{"a"}},
 		{"a\nb", []string{"a", "b"}},
 		{"a\nb\n", []string{"a", "b"}},
-		{"a\n\nb", []string{"a", "", "b"}}, // a blank interior line is content
+		// The splitter surfaces a blank interior line; dropping it is
+		// FileLines' forgiveness, not the splitter's business — its other
+		// caller (the glob path-list grader) must see every record.
+		{"a\n\nb", []string{"a", "", "b"}},
 	}
 	for _, c := range cases {
 		got := splitLines(c.in)
@@ -92,6 +95,35 @@ func TestSplitLines(t *testing.T) {
 				t.Errorf("splitLines(%q) = %q, want %q", c.in, got, c.want)
 				break
 			}
+		}
+	}
+}
+
+// FileLines forgives blank lines: `printf '\nentry\n' >>` against a file that
+// already ends in a newline leaves an empty line between entries, and the
+// 2026-09-01 manual run red journal-multiturn's retry on exactly that shape
+// with every platform signal intact. Content stays exact — a whitespace-only
+// line, stray prose, reordering and a missing line all still fail.
+func TestFileLinesForgivesBlankLinesOnly(t *testing.T) {
+	want := []string{"entry-one-n0", "entry-two-n0"}
+	for _, raw := range []string{
+		"entry-one-n0\nentry-two-n0\n",
+		"entry-one-n0\n\nentry-two-n0\n", // the observed printf-append shape
+		"\nentry-one-n0\n\n\nentry-two-n0\n\n",
+	} {
+		if err := lineMismatch("journal.txt", raw, want); err != nil {
+			t.Errorf("lineMismatch(%q) = %v, want pass", raw, err)
+		}
+	}
+	for _, raw := range []string{
+		"entry-one-n0\n \nentry-two-n0\n", // a whitespace-only line is content
+		"entry-one-n0\nstray\nentry-two-n0\n",
+		"entry-two-n0\nentry-one-n0\n",
+		"entry-one-n0\n",
+		"",
+	} {
+		if err := lineMismatch("journal.txt", raw, want); err == nil {
+			t.Errorf("lineMismatch(%q) = nil, want failure", raw)
 		}
 	}
 }
