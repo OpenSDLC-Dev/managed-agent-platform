@@ -583,7 +583,7 @@ func TestDeploymentRunsListFiltersAndPages(t *testing.T) {
 	if !slices.Equal(got, want) {
 		t.Errorf("deployment_id=%s = %v, want %v", dA, got, want)
 	}
-	if got := runIDs(t, listRuns(t, s, "deployment_id=depl_nonexistent")); len(got) != 0 {
+	if got := runIDs(t, listRuns(t, s, "deployment_id=depl_absent123")); len(got) != 0 {
 		t.Errorf("a non-existent deployment_id returned %v, want empty data", got)
 	}
 	status, res := s.do(http.MethodGet, "/v1/deployment_runs?deployment_id=not-an-id", nil)
@@ -698,7 +698,9 @@ func TestDeploymentRunReadRendersBothArms(t *testing.T) {
 		t.Errorf("trigger_context = %v, want the 09:30 schedule occurrence", tc)
 	}
 
-	status, res := s.do(http.MethodGet, "/v1/deployment_runs/drun_nonexistent", nil)
+	// Two not-found spellings: a well-formed id that names nothing reaches
+	// the query's no-rows arm; a malformed one stops at checkID. Same 404.
+	status, res := s.do(http.MethodGet, "/v1/deployment_runs/drun_absent123", nil)
 	wantErr(t, status, res, http.StatusNotFound, "not_found_error")
 	status, res = s.do(http.MethodGet, "/v1/deployment_runs/not-an-id", nil)
 	wantErr(t, status, res, http.StatusNotFound, "not_found_error")
