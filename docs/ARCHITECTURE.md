@@ -462,12 +462,13 @@ and holds the two OS-touching adapters `gaterun/` declares.
   a schedule is nobody, and inventing an attribution would falsify the one column
   audits read.
 - **A schedule does not bypass the permission policy.** A scheduled session whose
-  agent's tools default `always_ask` (the MCP toolset does) parks at fire time on a
-  confirmation no human is awake to answer: it goes idle with a pending ask and is
-  never reaped — one unreapable session per occurrence until a human answers or
-  archives them. Deployment create deliberately does not refuse the combination, since
-  a human who approves during the working day is a legitimate setup; the accrual is
-  the operator's to watch, not the platform's to prevent.
+  agent's tools default `always_ask` (the MCP toolset does) has nobody awake to
+  approve: when the model requests such a tool, the session goes idle on a pending
+  confirmation and stays unreapable while that ask is pending — sessions accruing
+  night after night until a human answers, interrupts or archives them. Deployment
+  create deliberately does not refuse the combination, since a human who approves
+  during the working day is a legitimate setup; the accrual is the operator's to
+  watch, not the platform's to prevent.
 - **The container is the boundary.** Tools run inside the per-session sandbox with no
   host filesystem access; the toolset does no lexical path confinement that a `bash`
   call could walk around, because the container itself is the wall. That wall is
