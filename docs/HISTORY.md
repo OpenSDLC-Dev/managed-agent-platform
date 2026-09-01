@@ -49,6 +49,28 @@ new directory and in-repo citations re-pointed in the moving PR (plan
 
 ---
 
+## Scheduled deployments (plan 37, #51) — archived 2026-09-01, all six slices delivered (#517, #519, #522, #524, #529, #531, #532, #535)
+
+A **deployment** binds an agent to an environment, credentials, resources and initial
+events; `POST /run` fires it by hand, an optional 5-field POSIX cron schedule
+(`internal/cron`, POSIX union semantics, DST literal wall-clock matching) fires it on the
+clock, and every settled attempt is one persistent `drun_` run row. The plan's slices
+landed as: the cron engine and migration `0031` (#517), the seven `/v1/deployments`
+routes with the agent-archive refusal and the environment-delete message (#519, #522,
+#524, slice 1), the `createSessionInTx` extraction (#529, slice 2), `POST /run` +
+`sessions.deployment_id` + the durable `succeeded_at` (#531, slice 3 — migration `0032`,
+#520's read-path half), the scheduler — 30s tick on every replica, DB clock, the
+partial-unique-index occurrence claim, savepoint settlement, auto-pause on the fourteen
+pausing types, one-hour bounded catch-up, three instruments and two spans (#532,
+slice 4) — and the two run lists with #520's render half (#535, slice 5). This close-out
+is slice 6. What the plan deliberately excluded is named in it and filed: webhooks
+(#261), budgets (#432), jitter, an overlap brake, and the reference's 1,000-deployment
+cap — the wire consequences all registered in DIVERGENCES.md (thirty-three plan-37
+entries), with #78 tracking the recordings that would settle the inferences and #523 the
+deferred agent-archive index.
+
+---
+
 ## Memory stores (plan 36, #52) — archived 2026-08-26, all eight slices delivered (#482, #484, #485, #487, #489, #491, #494, #496)
 
 Workspace-scoped collections of text documents, attached to a session through `resources[]`,

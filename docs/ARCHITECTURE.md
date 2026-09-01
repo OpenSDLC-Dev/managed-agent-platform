@@ -455,6 +455,19 @@ and holds the two OS-touching adapters `gaterun/` declares.
 - **Sessions are not bound to an end-user.** Scoping keys are org/workspace/project
   (reserved, single-tenant defaults in v1); end-user ownership is an application-layer
   concern hooked on session `metadata` and the audit-only `created_by`.
+- **A scheduled fire creates unattributed, and the NULL is the audit answer.**
+  `created_by` records who caused a row to exist: a manual `POST /run` is an
+  authenticated request and attributes its session to the caller, while the scheduler's
+  ticker carries no principal, so a scheduled session's `created_by` is NULL by design —
+  a schedule is nobody, and inventing an attribution would falsify the one column
+  audits read.
+- **A schedule does not bypass the permission policy.** A scheduled session whose
+  agent's tools default `always_ask` (the MCP toolset does) parks at fire time on a
+  confirmation no human is awake to answer: it goes idle with a pending ask and is
+  never reaped — one unreapable session per occurrence until a human answers or
+  archives them. Deployment create deliberately does not refuse the combination, since
+  a human who approves during the working day is a legitimate setup; the accrual is
+  the operator's to watch, not the platform's to prevent.
 - **The container is the boundary.** Tools run inside the per-session sandbox with no
   host filesystem access; the toolset does no lexical path confinement that a `bash`
   call could walk around, because the container itself is the wall. That wall is
