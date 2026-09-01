@@ -49,7 +49,7 @@ new directory and in-repo citations re-pointed in the moving PR (plan
 
 ---
 
-## Scheduled deployments (plan 37, #51) — archived 2026-09-01, all six slices delivered (#517, #519, #522, #524, #529, #531, #532, #535)
+## Scheduled deployments (plan 37, #51) — archived 2026-09-01, all six slices delivered (#517, #519, #522, #524, #529, #531, #532, #535, #536)
 
 A **deployment** binds an agent to an environment, credentials, resources and initial
 events; `POST /run` fires it by hand, an optional 5-field POSIX cron schedule
@@ -63,7 +63,7 @@ routes with the agent-archive refusal and the environment-delete message (#519, 
 partial-unique-index occurrence claim, savepoint settlement, auto-pause on the fourteen
 pausing types, one-hour bounded catch-up, three instruments and two spans (#532,
 slice 4) — and the two run lists with #520's render half (#535, slice 5). This close-out
-is slice 6. What the plan deliberately excluded is named in it and filed: webhooks
+(#536) is slice 6. What the plan deliberately excluded is named in it and filed: webhooks
 (#261), budgets (#432), jitter, an overlap brake, and the reference's 1,000-deployment
 cap — the wire consequences all registered in DIVERGENCES.md (thirty-three plan-37
 entries), with #78 tracking the recordings that would settle the inferences and #523 the

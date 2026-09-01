@@ -459,8 +459,9 @@ and holds the two OS-touching adapters `gaterun/` declares.
   `created_by` records who caused a row to exist: a manual `POST /run` is an
   authenticated request and attributes its session to the caller, while the scheduler's
   ticker carries no principal, so a scheduled session's `created_by` is NULL by design —
-  a schedule is nobody, and inventing an attribution would falsify the one column
-  audits read.
+  a schedule is nobody, and inventing an attribution would falsify the column. The
+  trail survives one hop away: the deployment's own `created_by` names who scheduled
+  it, and the fired session links back to it through `deployment_id`.
 - **A schedule does not bypass the permission policy.** A scheduled session whose
   agent's tools default `always_ask` (the MCP toolset does) has nobody awake to
   approve: when the model requests such a tool, the session goes idle on a pending
