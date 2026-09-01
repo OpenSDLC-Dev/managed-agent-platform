@@ -24,9 +24,8 @@ What is being worked on right now, and how far along it is — nothing else. **S
   fourteen), the one-hour catch-up collapse, `lock_timeout` on the fire and the row's
   four writers, the three instruments and two spans, the slice-4 registry entries.
 - **Slice 5 — the two run lists.** Done: `GET /v1/deployment_runs` (+`/{id}`) at viewer,
-  the published filters (`deployment_id` 200-empty rule, `trigger_type`, `has_error` off
-  the durable marker — #520's render half closed), the 1000 limit cap, keyset paging,
-  the SDK-driven acceptance case, one registry entry.
+  the published filters (`has_error` off the durable marker — #520's render half
+  closed), the 1000 cap, keyset paging, the SDK acceptance case, one registry entry.
 - **Slice 6** — close-out docs: the security-invariant bullets and the README status line.
 
 Not started, and deliberately: webhooks ([#261](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/261)) and budgets ([#432](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/432)) are excluded from the plan and named in it.

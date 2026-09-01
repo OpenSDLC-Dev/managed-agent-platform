@@ -292,6 +292,8 @@ func (s *server) listDeploymentRuns(r *http.Request) (any, error) {
 		args = append(args, tt)
 		query += fmt.Sprintf(` AND trigger_type = $%d`, len(args))
 	}
+	// Hand-parsed rather than parseBoolParam, which cannot tell an absent
+	// key from false — and absent means no filter at all.
 	if he := q.Get("has_error"); he != "" {
 		v, err := strconv.ParseBool(he)
 		if err != nil {
@@ -324,7 +326,13 @@ func (s *server) listDeploymentRuns(r *http.Request) (any, error) {
 		}
 	}
 	if page.cur != nil {
-		if page.cur.versioned || page.cur.dir != dirNext {
+		// Every non-time cursor kind is rejected, not just the version one:
+		// a seq or path cursor decodes with a zero time and an empty id, and
+		// binding those would render an empty 200 page — end-of-history —
+		// where the reference publishes 400 for an invalid cursor. The
+		// sibling time-keyed lists share the narrower check and the same
+		// hole (#534).
+		if page.cur.versioned || page.cur.seqKeyed || page.cur.pathKeyed || page.cur.dir != dirNext {
 			return nil, errInvalid("invalid page cursor")
 		}
 		args = append(args, page.cur.t, page.cur.id)

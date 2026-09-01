@@ -2,6 +2,7 @@ package api_test
 
 import (
 	"context"
+	"encoding/base64"
 	"net/http"
 	"net/url"
 	"slices"
@@ -354,7 +355,7 @@ func TestDeletingTheSessionDoesNotUnsettleTheRun(t *testing.T) {
 	if err := s.pool.QueryRow(context.Background(),
 		`INSERT INTO deployment_runs (id, deployment_id, trigger_type, scheduled_at,
 		    agent_id, agent_version, session_id, succeeded_at)
-		 VALUES ('drun_testscheduled01', $1, 'schedule', $2, $3, 1, $4, now())
+		 VALUES ('drun_testsched01', $1, 'schedule', $2, $3, 1, $4, now())
 		 RETURNING id`,
 		deplID, scheduledAt, agentID, schedSession).Scan(&schedRunID); err != nil {
 		t.Fatalf("insert scheduled run fixture: %v", err)
@@ -533,8 +534,9 @@ func TestDeploymentRunsListFiltersAndPages(t *testing.T) {
 		t.Fatalf("seeded %d runs, want 6", len(expected))
 	}
 
-	// The whole list, in one page: created_at descending, next_page null.
-	full := listRuns(t, s, "")
+	// The whole list, in one page, at the published maximum limit — 1000 is
+	// legal here where the shared cap would 400 it (§2.6).
+	full := listRuns(t, s, "limit=1000")
 	wantFields(t, full, "data", "next_page")
 	if got := runIDs(t, full); !slices.Equal(got, expected) {
 		t.Errorf("list order = %v, want %v", got, expected)
@@ -627,13 +629,54 @@ func TestDeploymentRunsListFiltersAndPages(t *testing.T) {
 	status, res = s.do(http.MethodGet, "/v1/deployment_runs?"+url.Values{"created_at[gte]": {"yesterday"}}.Encode(), nil)
 	wantErr(t, status, res, http.StatusBadRequest, "invalid_request_error")
 
-	// The published cap is 1000, not the shared 100 (§2.6): 500 is legal,
-	// 1001 and 0 are not.
-	listRuns(t, s, "limit=500")
+	// The published cap is 1000, not the shared 100 (§2.6) — the full-list
+	// fetch above already proved limit=1000 legal; past it and zero are not.
 	status, res = s.do(http.MethodGet, "/v1/deployment_runs?limit=1001", nil)
 	wantErr(t, status, res, http.StatusBadRequest, "invalid_request_error")
 	status, res = s.do(http.MethodGet, "/v1/deployment_runs?limit=0", nil)
 	wantErr(t, status, res, http.StatusBadRequest, "invalid_request_error")
+
+	// A cursor this list cannot honor — an event-list seq cursor, a memories
+	// path cursor, an agent-versions version cursor, or plain garbage — is
+	// the published 400, never an empty 200 page (#534).
+	for _, cur := range []string{
+		base64.RawURLEncoding.EncodeToString([]byte("k1|n|s|a|5")),
+		base64.RawURLEncoding.EncodeToString([]byte("k1|n|m|" + base64.RawURLEncoding.EncodeToString([]byte("p")))),
+		base64.RawURLEncoding.EncodeToString([]byte("k1|n|v|3")),
+		"not-a-cursor",
+	} {
+		status, res = s.do(http.MethodGet, "/v1/deployment_runs?page="+url.QueryEscape(cur), nil)
+		wantErr(t, status, res, http.StatusBadRequest, "invalid_request_error")
+	}
+
+	// Unsupported methods answer the wire's 405 envelope, not the mux's
+	// plain-text fallback.
+	for _, path := range []string{"/v1/deployment_runs", "/v1/deployment_runs/drun_absent123"} {
+		status, res = s.do(http.MethodPost, path, nil)
+		wantErr(t, status, res, http.StatusMethodNotAllowed, "invalid_request_error")
+	}
+
+	// Keyset, not offset: a run fired between two page fetches lands at the
+	// head of the list and must neither appear mid-walk nor displace a row
+	// out of the remaining pages.
+	res = listRuns(t, s, "limit=2")
+	interleaved := runIDs(t, res)
+	next, _ := res["next_page"].(string)
+	if next == "" {
+		t.Fatalf("no second page to walk")
+	}
+	newRun := runDeployment(t, s, dB)["id"].(string)
+	for next != "" {
+		res = listRuns(t, s, "limit=2&page="+url.QueryEscape(next))
+		interleaved = append(interleaved, runIDs(t, res)...)
+		next, _ = res["next_page"].(string)
+	}
+	if !slices.Equal(interleaved, expected) {
+		t.Errorf("walk across an interleaved insert = %v, want the pre-insert %v", interleaved, expected)
+	}
+	if got := runIDs(t, listRuns(t, s, "limit=1000")); len(got) != 7 || got[0] != newRun {
+		t.Errorf("after the insert the full list = %v, want %s newest of 7", got, newRun)
+	}
 }
 
 // The single read renders both settled arms: a manual success and a scheduled
