@@ -80,6 +80,9 @@ func NewHandler(pool *pgxpool.Pool, blobs blob.Store, cipher secrets.Cipher, ver
 	// looks like a read (plan 37 §5.1).
 	mux.HandleFunc("POST /v1/deployments/{id}/run", s.handle(identity.RoleDeveloper, s.runDeployment))
 
+	mux.HandleFunc("GET /v1/deployment_runs", s.handle(identity.RoleViewer, s.listDeploymentRuns))
+	mux.HandleFunc("GET /v1/deployment_runs/{id}", s.handle(identity.RoleViewer, s.getDeploymentRun))
+
 	mux.HandleFunc("POST /v1/sessions", s.handle(identity.RoleDeveloper, s.createSession))
 	mux.HandleFunc("GET /v1/sessions", s.handle(identity.RoleViewer, s.listSessions))
 	mux.HandleFunc("GET /v1/sessions/{id}", s.handle(identity.RoleViewer, s.getSession))
@@ -233,6 +236,7 @@ func NewHandler(pool *pgxpool.Pool, blobs blob.Store, cipher secrets.Cipher, ver
 		"/v1/deployments", "/v1/deployments/{id}", "/v1/deployments/{id}/archive",
 		"/v1/deployments/{id}/pause", "/v1/deployments/{id}/unpause",
 		"/v1/deployments/{id}/run",
+		"/v1/deployment_runs", "/v1/deployment_runs/{id}",
 	} {
 		mux.HandleFunc(pattern, func(w http.ResponseWriter, r *http.Request) {
 			writeError(w, r, methodNotAllowed(r))

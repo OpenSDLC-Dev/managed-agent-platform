@@ -17,6 +17,10 @@
 //     stack, docs/plan/21_outcomes.md's acceptance) whose brain calls a real
 //     model. It is never part of `make test`'s default path.
 //
+// A third case, TestDeploymentsSDK, replays no doc example and shares no
+// harness: it drives the deployment family (plan 37) through the same typed
+// client against the control plane alone — no brain, no executor, no sandbox.
+//
 // The evals suite (../evals) deliberately speaks raw map[string]any so a wire
 // regression cannot hide inside a struct tag; this package is its complement,
 // proving the same wire through the SDK a real integration would use.
