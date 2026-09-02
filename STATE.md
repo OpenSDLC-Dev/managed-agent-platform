@@ -18,7 +18,7 @@ recording reached only part of what they ask. Plan 37 (#51) archived 2026-09-01.
 
 - [x] Correct the three wire behaviors the recording proved wrong: work-API
       cross-environment 403, agent-update null/empty-body no-op, interrupt result text
-- [x] Reconcile every recorded finding into the registry — three entries left
-      INFERRED as argued divergences (#540, #541, #545), two proved to match us
-      outright, three registered readings were refuted, and nine mismatches now
-      belong to the issues that own them (#539, #542, #543, #544, #546-#550)
+- [x] Reconcile every recorded finding into the registry — three entries moved
+      out of INFERRED into CONFIRMED as argued divergences (#540, #541, #545),
+      two proved to match us outright, four registered readings were refuted,
+      and ten mismatches now belong to issues (#539, #542-#544, #546-#550, #553)
