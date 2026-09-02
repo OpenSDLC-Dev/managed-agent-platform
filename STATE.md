@@ -11,14 +11,14 @@ stores, files, skills, vaults, deployments and permission gating. Findings were
 compared entry-by-entry against [docs/DIVERGENCES.md](./docs/DIVERGENCES.md) and
 adversarially verified; 13 of 16 proposed code changes were rejected on that
 second pass, which is why only the confirmed-wrong ones land. #78 stays open
-past this work — 124 registry entries name it as their tracker and the recording
-reached only part of what they ask. Plan 37 (#51) archived 2026-09-01.
+past this work — over 120 registry entries name it as their tracker and the
+recording reached only part of what they ask. Plan 37 (#51) archived 2026-09-01.
 
 ## Tasks
 
 - [x] Correct the three wire behaviors the recording proved wrong: work-API
       cross-environment 403, agent-update null/empty-body no-op, interrupt result text
-- [x] Reconcile every recorded finding into the registry: three entries the
-      recording settled and moved out of INFERRED (#540, #541, #545), one
-      inference narrowed to what it actually proves, and four mismatches handed
-      to the issues that now own them (#539, #542, #543, #544)
+- [x] Reconcile every recorded finding into the registry — three entries left
+      INFERRED as argued divergences (#540, #541, #545), two proved to match us
+      outright, three registered readings were refuted, and nine mismatches now
+      belong to the issues that own them (#539, #542, #543, #544, #546-#550)
