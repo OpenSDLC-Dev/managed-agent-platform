@@ -8,11 +8,11 @@ What is being worked on right now, and how far along it is — nothing else. **S
 endpoint.** A recording session against the live endpoint (2026-09-02, ~US$0.15 of
 model spend) covered the Work API, turn semantics, multiagent threads, memory
 stores, files, skills, vaults, deployments and permission gating. It was compared
-entry-by-entry against [docs/DIVERGENCES.md](./docs/DIVERGENCES.md), and every
-change that landed was re-checked adversarially first: three behaviors were wrong
-on the wire and are corrected, and the rest is reconciled into the registry or
-into the ten issues that own it. The comparison is not exhausted — much of it
-never got that second pass, so the recording still holds signal. #78 stays open
+entry-by-entry against [docs/DIVERGENCES.md](./docs/DIVERGENCES.md). Three
+behaviors were wrong on the wire and are corrected, each re-checked adversarially
+before it landed; the rest is reconciled into the registry or into the ten issues
+that own it. The comparison is not exhausted — much of it never got that second
+pass, so the recording still holds signal. #78 stays open
 past this work — over 120 registry entries name it as their tracker and the
 recording reached only part of what they ask. Plan 37 (#51) archived 2026-09-01.
 
