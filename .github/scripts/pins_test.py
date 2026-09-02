@@ -404,6 +404,8 @@ def selftest():
             scan("selftest.yml", text)
             failures.append(f"ACCEPTED {label}: expected a refusal, got none")
         except SystemExit:
+            # The refusal IS the pass condition for these rows: each is a shape
+            # that must stop the run rather than be counted or reported.
             pass
 
     # The parser must also SEE what it passes, or an exemption and a blind spot
