@@ -88,12 +88,20 @@ func (h *harness) memoryContent(t *testing.T, storeID, path string) (content str
 	return content, true
 }
 
-// versionsOf lists a path's versions oldest first as "operation/actor-type".
+// versionsOf lists a path's versions as a sorted list of "operation/actor-type",
+// so a want literal is written sorted too. Sorted rather than in write order,
+// because memory_versions carries no write-order key: created_at defaults to
+// now(), which Postgres freezes at BEGIN, so a settlement's own versions tie
+// exactly, and the tiebreak behind a tie is 120 random bits of memver_ id.
+// Across transactions the wall clock alone separates them, and #525 is one such
+// pair that came back reversed. Sorting costs no coverage: a settlement plans at
+// most one action per path (internal/memsync's Plan), so a path's versions are
+// the test's own script, never an order the sync decides.
 func (h *harness) versionsOf(t *testing.T, storeID, path string) []string {
 	t.Helper()
 	rows, err := h.pool.Query(context.Background(),
 		`SELECT operation, coalesce(created_by->>'type', 'none'), coalesce(created_by->>'session_id', '')
-		   FROM memory_versions WHERE memory_store_id = $1 AND path = $2 ORDER BY created_at, id`, storeID, path)
+		   FROM memory_versions WHERE memory_store_id = $1 AND path = $2`, storeID, path)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -109,6 +117,7 @@ func (h *harness) versionsOf(t *testing.T, storeID, path string) []string {
 		}
 		out = append(out, op+"/"+actor)
 	}
+	slices.Sort(out)
 	return out
 }
 
