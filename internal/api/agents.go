@@ -323,14 +323,18 @@ func (s *server) updateAgent(r *http.Request) (any, error) {
 	// still 404s on a missing agent, refuses an archived one, and honours the
 	// precondition it carries.
 	//
-	// The test is the body's SHAPE, not whether the merge would change anything:
-	// only the two recorded forms short-circuit. Bodies that name a mutating
-	// field but leave the value equal — {"metadata": {}} on a metadata-less
-	// agent, {"name": "<the current name>"} — still bump the version and write a
-	// snapshot, exactly as before this change. That is deliberate: the recording
-	// pins {} and {"version": null}, and nothing else, so every unpinned body
-	// keeps the behavior it already had rather than inheriting a guess. Whether
-	// the reference compares values too is unrecorded.
+	// The test is the body's SHAPE, not whether the merge would change anything.
+	// THREE bodies reach it, because the condition reads key presence and not
+	// value: {} and {"version": null}, both recorded, and a version-only body
+	// carrying an integer, which is ours by the same reasoning — the precondition
+	// above has already accepted or rejected it, so nothing is left for it to do
+	// — and which did bump before this change. Bodies that name a mutating field
+	// but leave the value equal — {"metadata": {}} on a metadata-less agent,
+	// {"name": "<the current name>"} — still bump and write a snapshot, exactly
+	// as before. That much is deliberate: outside the version-only case the
+	// recording pins nothing, so an unpinned body keeps the behavior it had
+	// rather than inheriting a guess about value comparison, which the reference
+	// is unrecorded on.
 	//
 	// Returning without committing is deliberate: the deferred Rollback releases
 	// the FOR UPDATE lock, and there is nothing to commit.
