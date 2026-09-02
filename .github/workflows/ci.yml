@@ -1121,6 +1121,13 @@ jobs:
       # can notice that on its own, which is why it went unnoticed for months.
       - name: the documentation carries none of the shapes a coordinate takes
         run: make identifiers-test
+      # The other rule `.github/` states and nothing enforced. A retargeted tag
+      # runs attacker-chosen code in jobs that hold a live credential, which is
+      # why every `uses:` here is a commit SHA — but #472 added two workflows
+      # that were not, both bot reviewers said so, and the PR merged anyway. A
+      # rule only a reviewer holds is one a generated workflow walks past.
+      - name: every action a workflow runs is pinned to a commit
+        run: make pins-test
       # deploy-alert.yml couples to deploy.yml three ways, and all three fail
       # SILENTLY: the trigger stops matching, or every deploy classifies as
       # `parked` so no successful run ever closes a CD issue again. Nor can any

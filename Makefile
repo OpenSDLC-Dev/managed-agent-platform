@@ -20,7 +20,7 @@ SHELL := /usr/bin/env bash
 .PHONY: build crossbuild vet fmt-check test cover-gate verify eval \
 	changelog changelog-notes changelog-archive \
 	release-tag-check release-images release-chart-check release-chart release-binaries \
-	openbao-init-test cd-outcome-test parked-test retry-test identifiers-test registry-check \
+	openbao-init-test cd-outcome-test parked-test retry-test identifiers-test pins-test registry-check \
 	gcp-fmt gcp-validate gcp-split-check gcp-lint gcp-bootstrap-test gcp-dbinit-test gcp-split-check-test gcp-power-test gcp-tfvars-test gcp-env-targets-test gcp-foundation-apply gcp-bootstrap gcp-env-apply gcp-db-init gcp-env-destroy gcp-env-rebuild \
 	gcp-require-project gcp-env-tfvars gcp-env-migrate-state gcp-env-init gcp-env-vars-match \
 	gcp-env-stop gcp-env-start gcp-env-status
@@ -298,6 +298,15 @@ retry-test:
 # broken pattern and a clean repository print the same thing otherwise.
 identifiers-test:
 	python3 .github/scripts/identifiers_test.py
+
+# And the second rule kept only by memory, which lapsed the same way:
+# `.github/dependabot.yml` says every action is pinned to a commit SHA, #472
+# added two workflows that were not, and nothing in the repository could notice
+# — so four mutable tags sat in jobs holding an OAuth token until Dependabot
+# offered to swap one of them for another (#518). Shape only: it cannot ask
+# whether a SHA is the release its comment names, which is Dependabot's half.
+pins-test:
+	python3 .github/scripts/pins_test.py
 
 # ---------------------------------------------------------------------------
 # GCP staging environment (docs/plan/20, Decision 9). Developer tooling for GCP
