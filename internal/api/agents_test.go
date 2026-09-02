@@ -413,9 +413,23 @@ func TestAgentUpdateOptimisticVersioning(t *testing.T) {
 		t.Errorf("empty update rewrote updated_at: %v, want %v", updated["updated_at"], before)
 	}
 
+	// The recorded shape of that no-op is {"version": null} on its own — the
+	// exact request the reference answered with an unchanged version and
+	// updated_at. Asserted separately from the {"version": null, "name": …}
+	// case above, which exercises the *inferred* half (null means omission, so
+	// a body that also mutates still applies).
+	status, updated = s.do(http.MethodPost, "/v1/agents/"+id, map[string]any{"version": nil})
+	if status != http.StatusOK {
+		t.Fatalf("null-only update: %d %v", status, updated)
+	}
+	if updated["version"] != float64(4) || updated["updated_at"] != before {
+		t.Errorf("null-only update = version %v / updated_at %v, want 4 / %v (no bump)",
+			updated["version"], updated["updated_at"], before)
+	}
+
 	// A version-only body carries a precondition and no mutation, so it is the
-	// same no-op. The recording pins this for the null value; a matching integer
-	// is ours by the same reasoning (docs/DIVERGENCES.md).
+	// same no-op. The recording pins this for the null value above; a matching
+	// integer is ours by the same reasoning (docs/DIVERGENCES.md).
 	status, updated = s.do(http.MethodPost, "/v1/agents/"+id, map[string]any{"version": 4})
 	if status != http.StatusOK || updated["version"] != float64(4) {
 		t.Errorf("version-only update: %d %v, want 200 and version 4", status, updated)
@@ -425,10 +439,11 @@ func TestAgentUpdateOptimisticVersioning(t *testing.T) {
 	status, body = s.do(http.MethodPost, "/v1/agents/"+id, map[string]any{"version": 1})
 	wantErr(t, status, body, http.StatusConflict, "invalid_request_error")
 
-	// Four versions, not seven: the no-ops wrote no snapshots.
+	// Four versions, not seven: the three no-op requests above each used to bump
+	// the version and write a snapshot, and now write none.
 	_, versions := s.do(http.MethodGet, "/v1/agents/"+id+"/versions", nil)
 	if entries := listData(t, versions); len(entries) != 4 {
-		t.Errorf("snapshots = %d, want 4 (no-ops wrote none)", len(entries))
+		t.Errorf("snapshots = %d, want 4 (the three no-ops wrote none)", len(entries))
 	}
 
 	// Unknown agent → 404.

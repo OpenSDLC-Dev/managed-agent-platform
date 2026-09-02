@@ -80,11 +80,19 @@ func TestWorkPollRequiresEnvironmentKey(t *testing.T) {
 	// "Token not authorized for this environment" (recorded 2026-09-02, #78 — and
 	// an unknown environment id answers the same way, not 404).
 	t.Run("key for other env", func(t *testing.T) {
+		// The message is the reference's own, so it is pinned verbatim rather
+		// than left to wantErr's status-and-type check: an unknown environment
+		// id must be indistinguishable from a real one the key does not cover,
+		// which only a message comparison can hold.
 		for _, env := range []string{otherEnv, "env_01UnknownEnvIdXXXXXXXXXXXX"} {
 			res, raw := s.poll(t, env, map[string]string{"Authorization": "Bearer " + key})
 			var body map[string]any
 			_ = json.Unmarshal([]byte(raw), &body)
 			wantErr(t, res.StatusCode, body, http.StatusForbidden, "permission_error")
+			inner, _ := body["error"].(map[string]any)
+			if msg, _ := inner["message"].(string); msg != "Token not authorized for this environment" {
+				t.Errorf("%s: message = %q, want the reference's recorded wording", env, msg)
+			}
 			if res.Header.Get("request-id") == "" {
 				t.Error("work-API error responses must carry a request-id header")
 			}
