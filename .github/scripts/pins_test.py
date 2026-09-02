@@ -32,12 +32,10 @@ WHAT IT CANNOT SEE, stated plainly so the surrounding prose claims no more:
     long after upstream fixed something in it. That is the cost the pairing with
     Dependabot buys back, and the reason the version comment is mandatory.
   - `persist-credentials: false`, the companion clause of the same policy. Three
-    `actions/checkout` call sites lack it today, so a rule for it would go red on
-    work this guard is not about; it is a separate rule and needs its own change.
-  - a `uses:` written INSIDE a `run: |` block -- a workflow that writes a
-    workflow. That text is not an action this repository runs, so it is out of
-    scope; it is still refused if it looks like a real reference, because a real
-    one landing there is far more likely to be this parser losing its place.
+    `actions/checkout` call sites lack it today (#558), so a rule for it would go
+    red on work this guard is not about. It needs its own change, and that issue
+    is where the decision lives -- a docstring can explain a deferral but cannot
+    track one.
   - anything outside `.github/workflows/`: a composite action's own `uses:`, or a
     reusable workflow held in another repository.
 
@@ -46,6 +44,16 @@ half the rule lives in a COMMENT, and every YAML parser discards comments on the
 way to a value. A parsed `uses:` can say `owner/repo@<sha>` and never say which
 release that SHA is. The other guards under this directory read text for their
 own reasons; this one has no alternative, and it keeps them all stdlib-only.
+
+WHAT COUNTS AS A `uses:` AT ALL, since reading text means deciding that here.
+A step's `uses:` is a mapping KEY, so the scan anchors on key position: `uses:`
+opening a line, with or without the `- ` that opens a list item. The token in
+any other position is a value -- `grep -n "uses:" file` in a `run:` line is the
+one this repository is most likely to write -- and is none of this guard's
+business. That leaves one shape anchoring alone would walk past: a step written
+in YAML flow style (`steps: [{uses: owner/repo@v4}]`) is a real step in a
+position the anchor does not reach, so a token followed by something that reads
+as an action reference is refused by name rather than skipped, wherever it sits.
 
 EXEMPTIONS, recorded rather than discovered later. Two `uses:` forms can never
 carry a commit SHA -- a local action or reusable workflow (`./…`) and a container
@@ -73,18 +81,31 @@ WORKFLOWS = pathlib.Path(__file__).resolve().parents[1] / "workflows"
 # guard was written for, which are all the second.
 USES_KEY = re.compile(r"^(?P<indent>[ \t]*)(?:-[ \t]+)?uses:[ \t]*(?P<value>\S.*?)[ \t]*$")
 
-# Deliberately looser, and it must stay that way: it matches what USES_KEY
-# cannot, so a reference this parser fails to place is reported rather than
-# skipped. The lookbehind is load-bearing -- `causes:` in a comment in
-# staging-parked.yml matches a bare `uses:` search, and a guard that flags it
-# gets narrowed by whoever fixes that, which is how the real rule goes with it.
-USES_TOKEN = re.compile(r"(?<![A-Za-z0-9_])uses:")
+# Deliberately looser, and it must stay that way: it matches the key-position
+# spellings USES_KEY cannot parse -- a quoted key, a space before the colon, a
+# value on the following line -- so each is reported by name rather than skipped.
+USES_CANDIDATE = re.compile(r"^[ \t]*(?:-[ \t]+)?[\"']?uses[\"']?[ \t]*:")
+
+# An action reference away from key position, which is the one thing the anchor
+# above must not be trusted to cover: a flow-style step (`steps: [{uses: …}]`)
+# is a real step, and walking past one is how this guard would report `ok` over
+# an unpinned action. The lookbehind keeps `causes:` out of it.
+STRAY_REFERENCE = re.compile(
+    r"(?<![A-Za-z0-9_])uses[\"']?[ \t]*:[ \t]*[\"']?(?P<value>[\w.-]+/[\w./-]+@\S+)"
+)
 
 # Any key introducing a literal or folded block scalar, not just `run:`. The
 # workflows use three (`run:`, `if:`, `additional_permissions:`), and the
 # constraint is the same for all of them: their body is data, not YAML mapping
 # keys, so a `uses:` inside one is text rather than a step.
-BLOCK_SCALAR = re.compile(r"^(?P<indent>[ \t]*)(?:-[ \t]+)?[A-Za-z_][\w.-]*:[ \t]*[|>][-+0-9]*[ \t]*$")
+#
+# `lead` spans the `- ` of a list item deliberately. The body of `- run: |` is
+# what is indented past the KEY, not past the dash: measuring to the dash makes
+# every sibling key of that step (`uses:`, `with:`, `env:`) look like body, and
+# a real reference then disappears into a block scalar that never existed.
+BLOCK_SCALAR = re.compile(
+    r"^(?P<lead>[ \t]*(?:-[ \t]+)?)[A-Za-z_][\w.-]*[ \t]*:[ \t]*[|>][-+0-9]*[ \t]*(?:#.*)?$"
+)
 
 # An action reference that can be pinned: `owner/repo@ref`, with the optional
 # subdirectory a composite action or a remote reusable workflow adds.
@@ -132,9 +153,9 @@ def in_block_scalar(lines):
         if not m:
             i += 1
             continue
-        # The body is everything more-indented than the key, blank lines
+        # The body is everything more-indented than the KEY, blank lines
         # included, up to the first line that returns to the key's column.
-        key_indent = len(m.group("indent").expandtabs())
+        key_indent = len(m.group("lead"))
         j = i + 1
         while j < len(lines):
             line = lines[j]
@@ -146,23 +167,29 @@ def in_block_scalar(lines):
     return inside
 
 
+def reads_as_reference(code):
+    """Does this line name something that would be an action reference?"""
+    m = USES_KEY.match(code)
+    if m:
+        value = m.group("value").strip("\"'")
+        if value.startswith(EXEMPT) or REFERENCE.match(value):
+            return True
+    return bool(STRAY_REFERENCE.search(code))
+
+
 def references(name, lines):
     """Every action reference in one workflow, refusing what it cannot place."""
     body = in_block_scalar(lines)
     found = []
     for n, line in enumerate(lines):
-        code, comment = split_comment(line)
-        if not USES_TOKEN.search(code):
-            continue
+        code, _ = split_comment(line)
         where = f"{name}:{n + 1}"
-        m = USES_KEY.match(code)
         if n in body:
             # A `uses:` in block-scalar text is shell or an expression, not a
-            # step -- unless it parses as a real reference, in which case the
+            # step -- unless it reads as a real reference, in which case the
             # likelier reading by far is that this parser lost its place, and
             # a reference it never checked is exactly what it exists to prevent.
-            if m and (m.group("value").startswith(EXEMPT)
-                      or REFERENCE.match(m.group("value").strip("\"'"))):
+            if reads_as_reference(code):
                 raise SystemExit(
                     f"{where}: this reads as an action reference but sits inside a"
                     " block scalar, where this guard would never check it. Either"
@@ -170,13 +197,25 @@ def references(name, lines):
                     " writing a workflow — in which case say so here."
                 )
             continue
+        if not USES_CANDIDATE.match(code):
+            # Not a step key. Only one thing here can still be a step: a
+            # reference in flow style, which the anchor cannot reach.
+            if STRAY_REFERENCE.search(code):
+                raise SystemExit(
+                    f"{where}: this names an action away from the `uses:` key this"
+                    " guard reads, so its pin would go UNCHECKED. Write the step in"
+                    " block style, or teach USES_CANDIDATE the new shape."
+                )
+            continue
+        m = USES_KEY.match(code)
         if not m:
             raise SystemExit(
                 f"{where}: this names `uses:` in a shape this guard cannot read,"
                 " so its pin would go UNCHECKED. Spell it the way the other steps"
                 " are, or teach USES_KEY the new shape."
             )
-        found.append(Reference(n + 1, m.group("value").strip("\"'"), comment))
+        found.append(Reference(n + 1, m.group("value").strip("\"'"),
+                               split_comment(line)[1]))
     return found
 
 
@@ -232,6 +271,11 @@ def selftest():
          "      - uses: helm/kind-action@ef37e7f390d99f746eb8b610417061a60e82a6cc # v1.14\n"),
         ("a comment that explains before it names the release",
          "      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # pinned, v7.0.1\n"),
+        # The sibling key of a list-item block scalar. Measuring the body from
+        # the dash rather than the key swallowed this whole step, and a real
+        # unpinned action went with it.
+        ("a step whose sibling key opens a block scalar",
+         "      - if: >\n          github.event_name == 'push'\n        uses: actions/checkout@v4\n"),
     ]
     must_pass = [
         ("a pinned action, list-item form",
@@ -250,8 +294,17 @@ def selftest():
          "    uses: ./.github/workflows/reusable.yml\n"),
         ("a container, which pins by a different mechanism",
          "      - uses: docker://alpine:3.20\n"),
+        ("a pinned step whose sibling key opens a block scalar",
+         "      - if: >\n          github.event_name == 'push'\n"
+         "        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1\n"),
         ("shell text inside a block scalar",
          "      - run: |\n          grep uses: x.yml\n"),
+        # The line this repository is most likely to write, and an early draft
+        # aborted the whole run on it while claiming `run:` was out of scope.
+        ("the token in a single-line shell value",
+         '      - run: grep -n "uses:" .github/workflows/ci.yml\n'),
+        ("a word ending in the token, in code position",
+         "      - run: echo causes: x\n"),
         ("a comment that merely contains the token",
          "      # it names both causes: this cannot\n"),
         ("a folded block scalar's body",
@@ -264,10 +317,21 @@ def selftest():
     must_refuse = [
         ("a reference this parser cannot place",
          "      - uses:\n          - actions/checkout@v4\n"),
+        ("a quoted key, which USES_KEY does not read",
+         '      - "uses": actions/checkout@v4\n'),
+        ("a space before the colon, which USES_KEY does not read",
+         "      - uses : actions/checkout@v4\n"),
+        ("a step written in flow style, which the key anchor cannot reach",
+         "    steps: [{uses: actions/checkout@v4}]\n"),
         ("a real reference the block-scalar scan swallowed",
          "      - run: |\n          uses: actions/checkout@v4\n"),
         ("a local action the block-scalar scan swallowed",
          "      - run: |\n          uses: ./.github/actions/thing\n"),
+        # A comment after the block-scalar header is valid YAML. A header this
+        # scan fails to recognise turns its body into mapping keys, which reads
+        # as a finding in a file that has none.
+        ("a block scalar whose header carries a comment",
+         "      - run: | # why\n          uses: actions/checkout@v4\n"),
     ]
 
     failures = []
@@ -292,8 +356,7 @@ def selftest():
             pass
 
     # The parser must also SEE what it passes, or an exemption and a blind spot
-    # are the same result. Every must_pass row that names a step is one
-    # reference; the four that are comment or block-scalar text are none.
+    # are the same result. The first must_pass row is one step and one reference.
     seen = len(references("selftest.yml", must_pass[0][1].splitlines()))
     if seen != 1:
         failures.append(f"COUNT    a single pinned step read as {seen} references")
@@ -301,13 +364,16 @@ def selftest():
 
 
 def workflows():
-    """The workflow files, listed twice over so a narrowing of either fails.
+    """The workflow files, listed twice over so a NARROWING of the glob fails.
 
-    The glob is what the scan walks; git is what the repository says is there.
-    Compared for equality rather than for what one of them missed, because the
-    ways this guard dies quietly are symmetrical: a file the glob stops matching
-    (a `.yaml` suffix, say) leaves the scan clean over less, and one git stops
-    tracking is a workflow that still runs and is no longer anybody's to review.
+    The glob is what the scan walks; git is what the repository says is there,
+    and the asymmetry between them is deliberate. A file git tracks that the
+    glob no longer matches is how this guard dies quietly -- a `.yaml` dropped
+    from the pattern leaves the scan printing `ok` over less -- so that
+    direction is fatal. The other direction is not a narrowing at all: a
+    workflow written and not yet `git add`ed is work in progress, and failing
+    that run with an accusation of narrowing teaches a reader to distrust the
+    message. It is scanned along with the rest.
     """
     globbed = sorted(set(WORKFLOWS.glob("*.yml")) | set(WORKFLOWS.glob("*.yaml")))
     listed = subprocess.run(
@@ -315,10 +381,11 @@ def workflows():
         cwd=WORKFLOWS, capture_output=True, text=True, check=True,
     ).stdout
     tracked = set(p for p in listed.split("\0") if p)
-    if tracked != set(p.name for p in globbed):
+    missed = sorted(tracked - set(p.name for p in globbed))
+    if missed:
         raise SystemExit(
-            "the glob and git disagree about what a workflow is, so one of them"
-            f" has been narrowed: {sorted(tracked ^ set(p.name for p in globbed))}"
+            "git tracks workflows this scan's glob does not match, so the glob has"
+            f" been narrowed and they would go unchecked: {missed}"
         )
     return globbed
 
