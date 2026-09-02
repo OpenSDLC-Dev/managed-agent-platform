@@ -263,15 +263,13 @@ func (s *server) updateAgent(r *http.Request) (any, error) {
 	}
 	// version is the optimistic-concurrency check, and it is opt-in: supplied, the
 	// update must match the stored version (which is at least 1); *omitted*, the
-	// update applies unconditionally. An explicit null is not omission — the wire
-	// types the field as an integer, so accepting null would silently drop the
-	// check for a client that serialized a nil pointer.
+	// update applies unconditionally. An explicit null is omission — a 2026-09-02
+	// recording answered {"version": null} with 200 and an unchanged version
+	// (#78), which reverses the argument this code used to make from the wire
+	// typing the field as an integer.
 	var expected *int64
-	if raw, ok := obj["version"]; ok {
+	if raw, ok := obj["version"]; ok && !isNull(raw) {
 		var v int64
-		if isNull(raw) {
-			return nil, errInvalid("version must be an integer")
-		}
 		if err := json.Unmarshal(raw, &v); err != nil {
 			return nil, errInvalid("version must be an integer")
 		}
@@ -317,6 +315,31 @@ func (s *server) updateAgent(r *http.Request) (any, error) {
 	spec, metadata, err := decodeSpecAndMetadata(specJSON, metaJSON)
 	if err != nil {
 		return nil, err
+	}
+	// A body that names no mutating field is a no-op, not a version bump: the
+	// reference answers {} and {"version": null} with 200 and an unchanged
+	// version, updated_at and snapshot list (recorded 2026-09-02, #78). It runs
+	// after the existence, archived and optimistic checks above, so a no-op body
+	// still 404s on a missing agent, refuses an archived one, and honours the
+	// precondition it carries.
+	//
+	// The test is the body's SHAPE, not whether the merge would change anything.
+	// THREE bodies reach it, because the condition reads key presence and not
+	// value: {} and {"version": null}, both recorded, and a version-only body
+	// carrying an integer, which is ours by the same reasoning — the precondition
+	// above has already accepted or rejected it, so nothing is left for it to do
+	// — and which did bump before this change. Bodies that name a mutating field
+	// but leave the value equal — {"metadata": {}} on a metadata-less agent,
+	// {"name": "<the current name>"} — still bump and write a snapshot, exactly
+	// as before. That much is deliberate: outside the version-only case the
+	// recording pins nothing, so an unpinned body keeps the behavior it had
+	// rather than inheriting a guess about value comparison, which the reference
+	// is unrecorded on.
+	//
+	// Returning without committing is deliberate: the deferred Rollback releases
+	// the FOR UPDATE lock, and there is nothing to commit.
+	if _, hasVersion := obj["version"]; len(obj) == 0 || (len(obj) == 1 && hasVersion) {
+		return renderAgent(id, name, current, spec, metadata, createdAt, updatedAt, archivedAt), nil
 	}
 	newName, set, null, err := stringField(obj, "name")
 	if err != nil {

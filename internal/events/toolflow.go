@@ -741,10 +741,26 @@ var toolUseAnswer = map[domain.EventType]struct {
 	domain.EventAgentMCPToolUse:    {domain.EventAgentMCPToolResult, "mcp_tool_use_id", false},
 }
 
-// InterruptResultText is what an abandoned call is answered with. Never an empty
-// text block: a Messages endpoint rejects one, and that request is what every
-// later replay of this session sends.
-const InterruptResultText = "The user interrupted this tool call before it returned a result."
+// InterruptResultText is what an abandoned call is answered with, copied
+// verbatim from the reference: a 2026-09-02 recording interrupted a live bash
+// call and the reference answered it with this exact sentence (issue #78). Never
+// an empty text block: a Messages endpoint rejects one, and that request is what
+// every later replay of this session sends.
+//
+// The recording covers the agent.tool_use family only. The custom-tool and MCP
+// families reuse this string because one constant is what keeps the three arms
+// from drifting; that reuse is ours, not observed.
+//
+// Note what the second sentence does that the wording it replaced did not: it
+// tells the model to retry the very call the user just abandoned, and being on
+// the append-only log it says so again in every later replay of the session. It
+// is kept anyway, because the reference chose it and matching the reference is
+// this constant's whole job — a client that reads the text at all reads the
+// reference's. Whether the model actually retries is a prompt-level question
+// the reference answers for itself and this platform is not free to second-guess
+// here; if it ever becomes a problem, the fix belongs in how the brain frames
+// the interrupted turn, not in diverging on the recorded string.
+const InterruptResultText = "Tool execution was interrupted before completion. Please retry."
 
 // InterruptResults answers each tool call a user.interrupt abandons — the set
 // UnansweredToolUses returns — with an error result. The turn cannot end without
@@ -763,9 +779,12 @@ const InterruptResultText = "The user interrupted this tool call before it retur
 // package already owns — which result type answers which use type, under which
 // reference key — and one definition is what keeps them from drifting apart.
 //
-// That an interrupt answers the calls at all, and in this shape, is an inference:
-// the reference documents the interrupt's stop reason, not what it writes for
-// the calls it abandons (docs/DIVERGENCES.md).
+// For the agent.tool_use family this is now recorded rather than inferred: the
+// reference answers an abandoned call with an agent.tool_result carrying
+// is_error true, exactly one text block, a tool_use_id naming the tool-use
+// *event* id, and a populated processed_at — all four of which this already
+// wrote. What stays inferred is the custom-tool and MCP arms, which no recording
+// covers (docs/DIVERGENCES.md).
 func InterruptResults(uses []ToolUseRef) ([]NewEvent, error) {
 	now := time.Now().UTC()
 	out := make([]NewEvent, 0, len(uses))

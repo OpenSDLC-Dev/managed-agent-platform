@@ -351,31 +351,39 @@ func TestAgentUpdateOptimisticVersioning(t *testing.T) {
 	status, body := s.do(http.MethodPost, "/v1/agents/"+id, map[string]any{"version": 0, "name": "v2"})
 	wantErr(t, status, body, http.StatusBadRequest, "invalid_request_error")
 
-	// An explicit null is not omission: the wire types version as an integer, and
-	// only *omitting* it means "apply unconditionally". Silently accepting null
-	// would drop the concurrency check for a client that serialized a nil pointer.
-	status, body = s.do(http.MethodPost, "/v1/agents/"+id, map[string]any{"version": nil, "name": "v2"})
-	wantErr(t, status, body, http.StatusBadRequest, "invalid_request_error")
+	// An explicit null IS omission. A 2026-09-02 recording of the reference
+	// answered {"version": null} with 200 and an unchanged version (#78), which
+	// reversed the argument this test used to make from param.Opt's null-vs-omitted
+	// distinction. Carrying another field alongside it, the update applies
+	// unconditionally — the null simply asks for no concurrency check.
+	status, updated := s.do(http.MethodPost, "/v1/agents/"+id, map[string]any{"version": nil, "name": "v2"})
+	if status != http.StatusOK {
+		t.Fatalf("null version: %d %v", status, updated)
+	}
+	if updated["version"] != float64(2) || updated["name"] != "v2" {
+		t.Errorf("null version = %v/%v, want 2/v2", updated["version"], updated["name"])
+	}
 
-	// Happy path: version 1 → 2; omitted fields preserved.
-	status, updated := s.do(http.MethodPost, "/v1/agents/"+id, map[string]any{"version": 1, "name": "renamed"})
+	// Happy path: version 2 → 3; omitted fields preserved.
+	status, updated = s.do(http.MethodPost, "/v1/agents/"+id, map[string]any{"version": 2, "name": "renamed"})
 	if status != http.StatusOK {
 		t.Fatalf("update: %d %v", status, updated)
 	}
-	if updated["version"] != float64(2) || updated["name"] != "renamed" {
-		t.Errorf("version/name = %v/%v, want 2/renamed", updated["version"], updated["name"])
+	if updated["version"] != float64(3) || updated["name"] != "renamed" {
+		t.Errorf("version/name = %v/%v, want 3/renamed", updated["version"], updated["name"])
 	}
 	if updated["system"] != "keep me" {
 		t.Errorf("omitted system was not preserved: %v", updated["system"])
 	}
 
-	// Stale version → 409 with the error envelope.
+	// Stale version → 409 with the error envelope. The reference's recorded 409
+	// carried a mutating field too, so this stays our shape for a stale check.
 	status, body = s.do(http.MethodPost, "/v1/agents/"+id, map[string]any{"version": 1, "name": "loser"})
 	wantErr(t, status, body, http.StatusConflict, "invalid_request_error")
 
 	// The conflicting update changed nothing.
 	_, got := s.do(http.MethodGet, "/v1/agents/"+id, nil)
-	if got["name"] != "renamed" || got["version"] != float64(2) {
+	if got["name"] != "renamed" || got["version"] != float64(3) {
 		t.Errorf("state changed after 409: %v", got)
 	}
 
@@ -385,19 +393,57 @@ func TestAgentUpdateOptimisticVersioning(t *testing.T) {
 	if status != http.StatusOK {
 		t.Fatalf("update without version: %d %v", status, updated)
 	}
-	if updated["version"] != float64(3) || updated["name"] != "unconditional" {
-		t.Errorf("version/name = %v/%v, want 3/unconditional", updated["version"], updated["name"])
+	if updated["version"] != float64(4) || updated["name"] != "unconditional" {
+		t.Errorf("version/name = %v/%v, want 4/unconditional", updated["version"], updated["name"])
 	}
 
-	// A field-less update is a legal no-op patch, and it still bumps the version
-	// and snapshots — the same as a version-only body always did. Reachable with an
-	// empty body only because version became optional, so it is pinned here.
+	// A body that names no mutating field is a true no-op: 200, and version,
+	// updated_at and the snapshot list are all left alone. Recorded on the
+	// reference 2026-09-02 for both {} and {"version": null} (#78) — it used to
+	// bump the version and write a snapshot for each such call.
+	before := updated["updated_at"]
 	status, updated = s.do(http.MethodPost, "/v1/agents/"+id, map[string]any{})
 	if status != http.StatusOK {
 		t.Fatalf("empty update: %d %v", status, updated)
 	}
 	if updated["version"] != float64(4) || updated["name"] != "unconditional" {
-		t.Errorf("version/name = %v/%v, want 4/unconditional", updated["version"], updated["name"])
+		t.Errorf("version/name = %v/%v, want 4/unconditional (no bump)", updated["version"], updated["name"])
+	}
+	if updated["updated_at"] != before {
+		t.Errorf("empty update rewrote updated_at: %v, want %v", updated["updated_at"], before)
+	}
+
+	// The recorded shape of that no-op is {"version": null} on its own — the
+	// exact request the reference answered with an unchanged version and
+	// updated_at. Asserted separately from the {"version": null, "name": …}
+	// case above, which exercises the *inferred* half (null means omission, so
+	// a body that also mutates still applies).
+	status, updated = s.do(http.MethodPost, "/v1/agents/"+id, map[string]any{"version": nil})
+	if status != http.StatusOK {
+		t.Fatalf("null-only update: %d %v", status, updated)
+	}
+	if updated["version"] != float64(4) || updated["updated_at"] != before {
+		t.Errorf("null-only update = version %v / updated_at %v, want 4 / %v (no bump)",
+			updated["version"], updated["updated_at"], before)
+	}
+
+	// A version-only body carries a precondition and no mutation, so it is the
+	// same no-op. The recording pins this for the null value above; a matching
+	// integer is ours by the same reasoning (docs/DIVERGENCES.md).
+	status, updated = s.do(http.MethodPost, "/v1/agents/"+id, map[string]any{"version": 4})
+	if status != http.StatusOK || updated["version"] != float64(4) {
+		t.Errorf("version-only update: %d %v, want 200 and version 4", status, updated)
+	}
+
+	// ...and it still honours the precondition it carries.
+	status, body = s.do(http.MethodPost, "/v1/agents/"+id, map[string]any{"version": 1})
+	wantErr(t, status, body, http.StatusConflict, "invalid_request_error")
+
+	// Four versions, not seven: the three no-op requests above each used to bump
+	// the version and write a snapshot, and now write none.
+	_, versions := s.do(http.MethodGet, "/v1/agents/"+id+"/versions", nil)
+	if entries := listData(t, versions); len(entries) != 4 {
+		t.Errorf("snapshots = %d, want 4 (the three no-ops wrote none)", len(entries))
 	}
 
 	// Unknown agent → 404.

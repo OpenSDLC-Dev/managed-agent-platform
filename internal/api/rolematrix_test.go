@@ -154,16 +154,29 @@ func TestAnEncodedPathCannotSlipPastTheWorkLane(t *testing.T) {
 		"/v1/environments/" + envID + "/%77ork/poll",
 		"/internal/v1/gate/%63onfig",
 	} {
-		// 403 permission_error specifically, not merely "some refusal": that pair
-		// is requireRole turning the request away on the identity lane. A 401
-		// authentication_error would mean a machine lane answered, and a 404 that
-		// no route matched — either would mean this test is no longer exercising
-		// the path it was written for, and the invariant would go unguarded while
-		// the test still passed.
-		status, errType := laneStatus(t, s.bearer(http.MethodGet, path, admin, nil))
+		// 403 permission_error carrying the identity lane's OWN message, not
+		// merely "some refusal": that triple is requireRole turning the request
+		// away on the identity lane. A 401 authentication_error would mean a
+		// machine lane answered, and a 404 that no route matched — either would
+		// mean this test is no longer exercising the path it was written for, and
+		// the invariant would go unguarded while the test still passed.
+		//
+		// The message is asserted because the status pair stopped discriminating:
+		// workScope now refuses a wrong-environment caller with 403
+		// permission_error too (recorded 2026-09-02, #78), and nothing on the
+		// identity lane sets the request's environment, so dropping RoleNone from
+		// these routes would let the admin token reach workScope and be refused
+		// there with the identical pair — green test, unguarded invariant. Only
+		// the message tells the two refusals apart.
+		status, errType, body := laneRead(t, s.bearer(http.MethodGet, path, admin, nil))
 		if status != http.StatusForbidden || errType != "permission_error" {
 			t.Errorf("GET %s as an admin: status %d, error %q; want 403 permission_error — the encoded spelling takes the human lane, and RoleNone is what closes it",
 				path, status, errType)
+			continue
+		}
+		if msg := laneMessage(t, body); msg != "this route is not available to SSO-authenticated callers" {
+			t.Errorf("GET %s as an admin: message %q; want the identity lane's own refusal — another 403 here means the request got past requireRole and was turned away deeper in",
+				path, msg)
 		}
 	}
 }

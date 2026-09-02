@@ -451,16 +451,28 @@ func TestEnvironmentKeyValueBindsToOneEnvironment(t *testing.T) {
 		t.Errorf("one key value authenticated %d of 2 environments, want exactly 1: A=%d %q, B=%d %q",
 			authenticated, resA.StatusCode, rawA, resB.StatusCode, rawB)
 	}
-	// And the environment it did not authenticate refused it as an auth failure,
-	// with the same envelope any unknown key gets — not a 403, not a leak of
-	// which of the two rows the lookup happened to pick.
+	// The environment it did not authenticate refuses it as a *scope* failure,
+	// which is what the reference does: a recording (2026-09-02, #78) answers a
+	// live key aimed at an environment it does not cover with 403
+	// permission_error, and answers a garbage bearer with 401
+	// authentication_error — so the two are deliberately distinguishable there.
+	//
+	// This assertion previously demanded the 401, to keep a wrong-environment
+	// refusal indistinguishable from an unknown key. That property is given up
+	// here in favour of matching the reference, and the trade is narrow: the
+	// reference reveals that a token is genuine, but not *which* environment it
+	// covers — a real-but-uncovered id and a nonexistent one answer with the
+	// same message (pinned in TestWorkPollRequiresEnvironmentKey) — and a caller
+	// holding a valid key already learns it is genuine from the environment it
+	// does cover, which is the 200 above. What this test exists for is unchanged:
+	// one key value authenticates exactly one environment.
 	refused, rawRefused := resA, rawA
 	if resA.StatusCode == http.StatusOK {
 		refused, rawRefused = resB, rawB
 	}
 	var body map[string]any
 	_ = json.Unmarshal([]byte(rawRefused), &body)
-	wantErr(t, refused.StatusCode, body, http.StatusUnauthorized, "authentication_error")
+	wantErr(t, refused.StatusCode, body, http.StatusForbidden, "permission_error")
 }
 
 // TestSecondLiveEnvironmentKeyIsAccepted is the schema half of the model change,

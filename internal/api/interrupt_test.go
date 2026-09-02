@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"net/http"
-	"strings"
 	"testing"
 	"time"
 
@@ -25,11 +24,15 @@ func (s *tserver) environmentID(sessionID string) string {
 }
 
 // abandonedText reads the one text block off a synthesized interrupt result and
-// checks it says what happened. The block matters beyond its prose: an absent or
-// empty content array is a request the Messages endpoint rejects, and that
-// request is what every later replay of this session sends. The assertion is on
-// the shape and the subject, not the exact wording, so rephrasing the sentence
-// stays a docs change rather than a test change.
+// checks it is the sentence the reference writes. The block matters beyond its
+// prose: an absent or empty content array is a request the Messages endpoint
+// rejects, and that request is what every later replay of this session sends.
+//
+// The wording is asserted exactly, and as a literal rather than against
+// events.InterruptResultText — comparing a constant to itself pins nothing. It
+// is no longer ours to rephrase: a 2026-09-02 recording of the reference shows
+// this exact sentence answering an abandoned agent.tool_use, so a change here is
+// a wire change, not a docs change.
 func abandonedText(t *testing.T, ev map[string]any) {
 	t.Helper()
 	blocks, ok := ev["content"].([]any)
@@ -41,8 +44,8 @@ func abandonedText(t *testing.T, ev map[string]any) {
 		t.Fatalf("interrupt result content block = %v, want a text block", blocks[0])
 	}
 	text, _ := block["text"].(string)
-	if !strings.Contains(strings.ToLower(text), "interrupt") {
-		t.Errorf("interrupt result text = %q, want it to say the call was interrupted", text)
+	if text != "Tool execution was interrupted before completion. Please retry." {
+		t.Errorf("interrupt result text = %q, want the reference's recorded sentence", text)
 	}
 }
 

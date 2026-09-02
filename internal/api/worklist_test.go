@@ -141,11 +141,13 @@ func TestWorkListAuthAndEmpty(t *testing.T) {
 	_, _, keyB := selfHostedWorker(t, s, "ek-wl-auth-b")
 	listA := "/v1/environments/" + envA + "/work"
 
-	// Management key and a key for another environment are both rejected.
+	// Management key and a key for another environment are both rejected — but
+	// differently: the management key never authenticates on this lane (401),
+	// while a live key naming another environment is a scope failure (403).
 	st, body := readJSON(t, s.doRaw(http.MethodGet, listA, nil, map[string]string{"x-api-key": testKey}))
 	wantErr(t, st, body, http.StatusUnauthorized, "authentication_error")
 	st, body = readJSON(t, s.doRaw(http.MethodGet, listA, nil, map[string]string{"Authorization": "Bearer " + keyB}))
-	wantErr(t, st, body, http.StatusUnauthorized, "authentication_error")
+	wantErr(t, st, body, http.StatusForbidden, "permission_error")
 
 	// The env's own key on an empty queue: 200 with an empty data array.
 	st, body = readJSON(t, s.doRaw(http.MethodGet, listA, nil, map[string]string{"Authorization": "Bearer " + keyA}))
