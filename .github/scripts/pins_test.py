@@ -21,8 +21,10 @@ WHAT IT CHECKS, which is a SHAPE and not an identity:
     rewritten the version comment alongside since 2022 -- but because a reader
     does: forty hex characters say nothing about what is running, so without the
     comment the diff that moves an action is unreviewable. Every other pin in
-    this repository carries one. A two-part or bare-major comment is refused
-    deliberately: `# v7` names a moving pointer, not the release the SHA is.
+    this repository carries one. A comment that is not exactly three parts is
+    refused deliberately -- `# v7` names a moving pointer rather than a release,
+    and `# v1.2.3.4` is not a version this ecosystem issues -- while a
+    prerelease tail (`# v1.2.3-rc.1`) passes.
 
 WHAT IT CANNOT SEE, stated plainly so the surrounding prose claims no more:
 
@@ -60,8 +62,11 @@ any other position is a value -- `grep -n "uses:" file` in a `run:` line is the
 one this repository is most likely to write -- and is none of this guard's
 business. That leaves one shape anchoring alone would walk past: a step written
 in YAML flow style (`steps: [{uses: owner/repo@v4}]`) is a real step in a
-position the anchor does not reach, so a token followed by something that reads
-as an action reference is refused by name rather than skipped, wherever it sits.
+position the anchor does not reach, so a token followed ON THE SAME LINE by
+something that reads as an action reference is refused by name rather than
+skipped. Same line, and no further: a flow mapping broken across two lines is
+reached by neither rule, and belongs to the residual class below rather than to
+this one.
 
 EXEMPTIONS, recorded rather than discovered later. Two `uses:` forms can never
 carry a commit SHA -- a local action or reusable workflow (`./…`) and a container
@@ -83,7 +88,10 @@ over quietly certifying something it cannot read:
   - a step written in flow style (`steps: [{uses: …}]`), for the same reason;
   - an UPPERCASE SHA, which resolves to the same commit and is refused anyway --
     two spellings of one pin is one too many, and Dependabot rewrites only the
-    one it wrote.
+    one it wrote;
+  - a `run:` written as a multi-line PLAIN scalar whose continuation happens to
+    read like a reference. Only block scalars are tracked as bodies, which every
+    `run:` in this repository is.
 
 AND WHAT COULD STILL SLIP PAST, because the count this prints is a coverage
 claim and not a proof: a `uses:` in some shape neither the key anchor nor the
@@ -327,6 +335,14 @@ def selftest():
          '      - uses: "evil/action@3d3c42e5aac5ba805825da76410c181273ba90b1#v1.2.3"\n'),
         ("a hash smuggled into an unquoted ref",
          "      - uses: evil/action@3d3c42e5aac5ba805825da76410c181273ba90b1#v1.2.3\n"),
+        # And the quoted half of that split on its own. Deleting the quote
+        # tracking leaves every other row green and certifies THIS one, because
+        # a `#` after a space reads as a comment everywhere except inside a
+        # scalar. Harmless in effect -- a space is illegal in a git ref, so the
+        # value could never resolve -- and one silent regression away from not
+        # being, which is the whole reason the row is here.
+        ("a hash behind a space, inside a quoted ref",
+         '      - uses: "evil/action@3d3c42e5aac5ba805825da76410c181273ba90b1 # v1.2.3"\n'),
     ]
     must_pass = [
         ("a pinned action, list-item form",
@@ -433,7 +449,11 @@ def workflows():
         ["git", "ls-files", "-z", "--", "*.yml", "*.yaml"],
         cwd=WORKFLOWS, capture_output=True, text=True, check=True,
     ).stdout
-    tracked = set(p for p in listed.split("\0") if p)
+    # Top level only. git's pathspec matches recursively, and Actions reads no
+    # workflow from a subdirectory of this one -- so a tracked file a level down
+    # is not a workflow, and must not be reported as a glob that stopped
+    # matching one.
+    tracked = set(p for p in listed.split("\0") if p and "/" not in p)
     missed = sorted(tracked - set(p.name for p in globbed))
     if missed:
         raise SystemExit(
