@@ -16,21 +16,27 @@ enforcing half of that fix: the rule now fails a build instead of a reviewer.
 WHAT IT CHECKS, which is a SHAPE and not an identity:
 
   - the ref is a 40-character lowercase hex commit SHA, not a tag or a branch;
-  - a trailing comment names a three-part release (`# v7.0.1`), because a bare
-    SHA is how a pin rots unrefreshed -- Dependabot reads that comment to know
-    what the pin is a pin OF, and every one of this repository's pins carries
-    one. A two-part or bare-major comment is refused deliberately: `# v7` names
-    a moving pointer rather than the release the SHA is.
+  - a trailing comment names a three-part release (`# v7.0.1`). NOT because
+    Dependabot needs one -- it refreshes a bare SHA pin perfectly well, and has
+    rewritten the version comment alongside since 2022 -- but because a reader
+    does: forty hex characters say nothing about what is running, so without the
+    comment the diff that moves an action is unreviewable. Every other pin in
+    this repository carries one. A two-part or bare-major comment is refused
+    deliberately: `# v7` names a moving pointer, not the release the SHA is.
 
 WHAT IT CANNOT SEE, stated plainly so the surrounding prose claims no more:
 
   - whether the SHA IS the release its comment names. That needs the network,
     which a gate cannot have; a comment reading `# v7.0.1` beside some other
-    project's commit passes here. Dependabot is what keeps the two honest.
+    project's commit passes here. Dependabot rewrites the comment when it moves
+    a pin, which keeps the two aligned most of the time and not all of it -- it
+    has open cases where the comment goes stale. So that pairing is a habit, not
+    a proof, and review is what closes this one.
   - whether the pinned commit deserves trust. A pin freezes code; it does not
     review it, and freezing is also how a workflow keeps running a stale action
     long after upstream fixed something in it. That is the cost the pairing with
-    Dependabot buys back, and the reason the version comment is mandatory.
+    Dependabot buys back, and the reason a pin without an updater is worse than
+    no pin at all.
   - `persist-credentials: false`, the companion clause of the same policy. Three
     `actions/checkout` call sites lack it today (#558), so a rule for it would go
     red on work this guard is not about. It needs its own change, and that issue
@@ -39,11 +45,13 @@ WHAT IT CANNOT SEE, stated plainly so the surrounding prose claims no more:
   - anything outside `.github/workflows/`: a composite action's own `uses:`, or a
     reusable workflow held in another repository.
 
-IT READS THE TEXT, NOT THE PARSED YAML, and that is forced rather than chosen:
-half the rule lives in a COMMENT, and every YAML parser discards comments on the
-way to a value. A parsed `uses:` can say `owner/repo@<sha>` and never say which
-release that SHA is. The other guards under this directory read text for their
-own reasons; this one has no alternative, and it keeps them all stdlib-only.
+IT READS THE TEXT, NOT THE PARSED YAML. Half the rule lives in a COMMENT, and a
+parsed `uses:` can say `owner/repo@<sha>` while saying nothing about which
+release that SHA is. That is a trade rather than a necessity, and it is worth
+naming the other side: a comment-preserving parser, or a structural parse
+correlated back to the source, would both do this properly. Both are a
+dependency, and the stdlib has no YAML parser at all -- so the guards in this
+directory read text, and the paragraph below is what that costs.
 
 WHAT COUNTS AS A `uses:` AT ALL, since reading text means deciding that here.
 A step's `uses:` is a mapping KEY, so the scan anchors on key position: `uses:`
@@ -61,6 +69,28 @@ carry a commit SHA -- a local action or reusable workflow (`./…`) and a contai
 means a guard that flagged them would look correct forever and then go red on the
 first legitimate one. A `docker://` image is not required to carry a digest here;
 that would be a different rule about a different supply chain.
+
+WHAT IT REFUSES THAT IS NEVERTHELESS VALID, recorded rather than worked around.
+Reading text means drawing a line, and the line belongs in writing. Each of
+these is loud and says what to do instead, which is the trade this guard takes
+over quietly certifying something it cannot read:
+
+  - an input literally named `uses` under a step's `with:`, indistinguishable
+    from a step key without tracking which block a line sits in;
+  - a step whose `uses:` is a YAML ALIAS (`uses: *checkout`). Actions has
+    supported anchors since September 2025, and an alias resolves nowhere in
+    the text and carries no release comment at the use site;
+  - a step written in flow style (`steps: [{uses: …}]`), for the same reason;
+  - an UPPERCASE SHA, which resolves to the same commit and is refused anyway --
+    two spellings of one pin is one too many, and Dependabot rewrites only the
+    one it wrote.
+
+AND WHAT COULD STILL SLIP PAST, because the count this prints is a coverage
+claim and not a proof: a `uses:` in some shape neither the key anchor nor the
+reference search recognises is walked over in silence. Both were widened by
+review already -- a quoted key, a space before the colon, a flow mapping, a `#`
+smuggled into a ref -- and neither is a closed set. The remedy for that class is
+the next reviewer, not another regex.
 
 It self-tests before it scans, because a broken pattern and a clean repository
 print the same thing otherwise, and it refuses rather than skips: a line naming
@@ -134,15 +164,29 @@ class Reference:
 
 
 def split_comment(text):
-    """A line's value and its trailing comment.
+    """A line's value and its trailing comment, by YAML's own rule for `#`.
 
-    Splits on the first `#`, which is safe for this key: no action reference,
-    ref or release contains one, so anything from there on is the comment.
+    A `#` opens a comment only at the start of a line or after whitespace, and
+    never inside a quoted scalar. Both halves are load-bearing rather than
+    pedantic, and splitting on the first `#` instead is a way to certify a
+    mutable tag as a pin: `#` is a legal character in a git ref --
+    git-check-ref-format forbids a long list and not this one -- so
+
+        uses: "owner/action@<40 hex>#v1.2.3"
+
+    reaches Actions as one ref naming a TAG, while a naive split reads a
+    40-character SHA with a tidy release comment sitting beside it.
     """
-    hash_at = text.find("#")
-    if hash_at < 0:
-        return text.rstrip(), ""
-    return text[:hash_at].rstrip(), text[hash_at:].strip()
+    quote = ""
+    for i, ch in enumerate(text):
+        if quote:
+            if ch == quote:
+                quote = ""
+        elif ch in "\"'":
+            quote = ch
+        elif ch == "#" and (i == 0 or text[i - 1] in " \t"):
+            return text[:i].rstrip(), text[i:].strip()
+    return text.rstrip(), ""
 
 
 def in_block_scalar(lines):
@@ -182,7 +226,7 @@ def references(name, lines):
     body = in_block_scalar(lines)
     found = []
     for n, line in enumerate(lines):
-        code, _ = split_comment(line)
+        code, comment = split_comment(line)
         where = f"{name}:{n + 1}"
         if n in body:
             # A `uses:` in block-scalar text is shell or an expression, not a
@@ -214,8 +258,7 @@ def references(name, lines):
                 " so its pin would go UNCHECKED. Spell it the way the other steps"
                 " are, or teach USES_KEY the new shape."
             )
-        found.append(Reference(n + 1, m.group("value").strip("\"'"),
-                               split_comment(line)[1]))
+        found.append(Reference(n + 1, m.group("value").strip("\"'"), comment))
     return found
 
 
@@ -231,7 +274,8 @@ def violation(ref):
                 " ref — a tag or branch can be retargeted onto other code")
     if not RELEASE.match(ref.comment):
         return (f"`{m.group('action')}` is pinned to a commit but names no release"
-                " — add a trailing `# vX.Y.Z` so Dependabot can refresh it")
+                " — add a trailing `# vX.Y.Z`, without which forty hex characters"
+                " say nothing about what runs and the pin cannot be reviewed")
     return None
 
 
@@ -276,6 +320,13 @@ def selftest():
         # unpinned action went with it.
         ("a step whose sibling key opens a block scalar",
          "      - if: >\n          github.event_name == 'push'\n        uses: actions/checkout@v4\n"),
+        # `#` is legal in a git ref, so both of these reach Actions as ONE ref
+        # naming a tag. Splitting on the first `#` instead reads a 40-character
+        # SHA with a tidy release comment beside it, and certifies the tag.
+        ("a hash smuggled into a quoted ref",
+         '      - uses: "evil/action@3d3c42e5aac5ba805825da76410c181273ba90b1#v1.2.3"\n'),
+        ("a hash smuggled into an unquoted ref",
+         "      - uses: evil/action@3d3c42e5aac5ba805825da76410c181273ba90b1#v1.2.3\n"),
     ]
     must_pass = [
         ("a pinned action, list-item form",
