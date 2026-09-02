@@ -450,6 +450,18 @@ func TestPollReservesWithoutTransition(t *testing.T) {
 	if !domain.ID(w.ID).HasPrefix("work") {
 		t.Errorf("work id %q not work_-prefixed", w.ID)
 	}
+	// The reservation runs for the window the poll asked for. Poll stamps both
+	// columns from one statement's now(), so the row states that duration exactly
+	// — the reclaim argument is pinned here rather than by outliving it.
+	var reserved float64
+	if err := pool.QueryRow(ctx,
+		`SELECT extract(epoch from lease_expires_at - updated_at)::float8
+		 FROM work_items WHERE id = $1`, w.ID).Scan(&reserved); err != nil {
+		t.Fatal(err)
+	}
+	if reserved != time.Minute.Seconds() {
+		t.Errorf("poll reserved the item for %gs, want %gs", reserved, time.Minute.Seconds())
+	}
 
 	// Reserved: a second poll inside the window hands out nothing.
 	if got, err := q.Poll(ctx, envID, time.Minute); err != nil || got != nil {
