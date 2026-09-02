@@ -194,6 +194,27 @@ func TestParallelClaimsNeverShareAnItem(t *testing.T) {
 	}
 }
 
+// lapseLease expires the item's lease on the database clock and returns the new
+// value. Claim and Poll decide expiry in SQL (lease_expires_at < now()), so a
+// test reaches the reclaim window by backdating the column instead of sleeping
+// out a lease short enough that CI load carries it past first (#537).
+//
+// A caller holding an Item assigns the result back into Lease: Extend, Assert
+// and Complete prove ownership by matching that copy against the row, so a stale
+// one reports a lease lost to nobody. And the column is backdated rather than
+// cleared because Poll re-offers a lapsed reservation under a fresh work id only
+// while it is set — a NULL lease is the never-polled row, and keeps its id.
+func lapseLease(t *testing.T, pool *pgxpool.Pool, id domain.ID) time.Time {
+	t.Helper()
+	var lease time.Time
+	if err := pool.QueryRow(context.Background(),
+		`UPDATE work_items SET lease_expires_at = now() - interval '1 second'
+		 WHERE id = $1 RETURNING lease_expires_at`, id).Scan(&lease); err != nil {
+		t.Fatalf("lapse lease: %v", err)
+	}
+	return lease
+}
+
 func TestExpiredLeaseIsReclaimed(t *testing.T) {
 	ctx := context.Background()
 	pool := pgtest.NewPool(t)
@@ -203,7 +224,7 @@ func TestExpiredLeaseIsReclaimed(t *testing.T) {
 	if _, err := q.Enqueue(ctx, pool, envID, sessionID, queue.ModelTurn); err != nil {
 		t.Fatal(err)
 	}
-	item, err := q.Claim(ctx, queue.ModelTurn, 50*time.Millisecond)
+	item, err := q.Claim(ctx, queue.ModelTurn, time.Minute)
 	if err != nil || item == nil {
 		t.Fatalf("claim: %+v %v", item, err)
 	}
@@ -213,7 +234,7 @@ func TestExpiredLeaseIsReclaimed(t *testing.T) {
 		t.Fatalf("claim before expiry: %+v %v", got, err)
 	}
 
-	time.Sleep(60 * time.Millisecond)
+	item.Lease = lapseLease(t, pool, item.ID)
 	re, err := q.Claim(ctx, queue.ModelTurn, time.Minute)
 	if err != nil || re == nil {
 		t.Fatalf("claim after expiry: %+v %v", re, err)
@@ -416,7 +437,7 @@ func TestPollReservesWithoutTransition(t *testing.T) {
 	if _, err := q.Enqueue(ctx, pool, envID, sessionID, queue.ToolExec); err != nil {
 		t.Fatal(err)
 	}
-	w, err := q.Poll(ctx, envID, 50*time.Millisecond)
+	w, err := q.Poll(ctx, envID, time.Minute)
 	if err != nil || w == nil {
 		t.Fatalf("poll: %+v %v", w, err)
 	}
@@ -429,6 +450,18 @@ func TestPollReservesWithoutTransition(t *testing.T) {
 	if !domain.ID(w.ID).HasPrefix("work") {
 		t.Errorf("work id %q not work_-prefixed", w.ID)
 	}
+	// The reservation runs for the window the poll asked for. Poll stamps both
+	// columns from one statement's now(), so the row states that duration exactly
+	// — the reclaim argument is pinned here rather than by outliving it.
+	var reserved float64
+	if err := pool.QueryRow(ctx,
+		`SELECT extract(epoch from lease_expires_at - updated_at)::float8
+		 FROM work_items WHERE id = $1`, w.ID).Scan(&reserved); err != nil {
+		t.Fatal(err)
+	}
+	if reserved != time.Minute.Seconds() {
+		t.Errorf("poll reserved the item for %gs, want %gs", reserved, time.Minute.Seconds())
+	}
 
 	// Reserved: a second poll inside the window hands out nothing.
 	if got, err := q.Poll(ctx, envID, time.Minute); err != nil || got != nil {
@@ -436,7 +469,7 @@ func TestPollReservesWithoutTransition(t *testing.T) {
 	}
 	// Reservation lapses: a later poll re-offers the same still-queued item — the
 	// same row, under a fresh identity (TestEveryReHandOutMintsAFreshWorkIdentity).
-	time.Sleep(60 * time.Millisecond)
+	lapseLease(t, pool, w.ID)
 	re, err := q.Poll(ctx, envID, time.Minute)
 	if err != nil || re == nil {
 		t.Fatalf("poll after reclaim window: %+v %v", re, err)
