@@ -21,8 +21,11 @@ const (
 	errTypeRequestTooLarge = "request_too_large" // 413, per the public API docs
 	// errTypePermission is the identity lane's denial (#56, plan 31). It is the
 	// reference's own taxonomy rather than an invention: its scope failures are
-	// 403 permission_error. It exists only for the human lane — a machine key
-	// carries no role, so nothing on the key lane can produce it.
+	// 403 permission_error. It is NOT confined to the human lane — a 2026-09-02
+	// recording shows the reference answering an environment key with
+	// permission_error on at least two conditions, a key naming another
+	// environment and a key whose OAuth scope does not cover the route (#78), and
+	// the work API's own scope check now returns it too.
 	errTypePermission = "permission_error"
 	// The memory surface's own two types (plan 36 slice 2), both 409s. Unlike
 	// every other error here they are named by the reference's schema rather

@@ -62,7 +62,6 @@ func TestWorkPollRequiresEnvironmentKey(t *testing.T) {
 		"management key only":   {envID, map[string]string{"x-api-key": testKey}},
 		"invalid bearer":        {envID, map[string]string{"Authorization": "Bearer nope"}},
 		"empty bearer":          {envID, map[string]string{"Authorization": "Bearer "}},
-		"key for other env":     {otherEnv, map[string]string{"Authorization": "Bearer " + key}},
 	}
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -75,6 +74,22 @@ func TestWorkPollRequiresEnvironmentKey(t *testing.T) {
 			}
 		})
 	}
+
+	// A key that authenticates but names another environment is a scope failure,
+	// not an authentication failure: the reference answers 403 permission_error
+	// "Token not authorized for this environment" (recorded 2026-09-02, #78 — and
+	// an unknown environment id answers the same way, not 404).
+	t.Run("key for other env", func(t *testing.T) {
+		for _, env := range []string{otherEnv, "env_01UnknownEnvIdXXXXXXXXXXXX"} {
+			res, raw := s.poll(t, env, map[string]string{"Authorization": "Bearer " + key})
+			var body map[string]any
+			_ = json.Unmarshal([]byte(raw), &body)
+			wantErr(t, res.StatusCode, body, http.StatusForbidden, "permission_error")
+			if res.Header.Get("request-id") == "" {
+				t.Error("work-API error responses must carry a request-id header")
+			}
+		}
+	})
 }
 
 // TestWorkPollEmptyQueueReturnsNull pins the empty-poll shape: an authenticated
@@ -669,7 +684,8 @@ func wantNoContent(t *testing.T, s *tserver, path, key string, reqBody map[strin
 
 // TestWorkLifecycleRoutesScopeAndMethod pins that the new lifecycle routes share
 // the work-API auth boundary — a key scoped to another environment is rejected
-// (401) — and that a known route reached with the wrong method is the wire 405.
+// (403 permission_error, the reference's own answer) — and that a known route
+// reached with the wrong method is the wire 405.
 func TestWorkLifecycleRoutesScopeAndMethod(t *testing.T) {
 	s := newTestServer(t)
 	envID, sessionID, key := selfHostedWorker(t, s, "ek-scope")
@@ -688,7 +704,7 @@ func TestWorkLifecycleRoutesScopeAndMethod(t *testing.T) {
 		{http.MethodPost, base + "/stop"},
 	} {
 		res, body, _ := s.workReq(t, tc.method, tc.path, otherKey, nil)
-		wantErr(t, res.StatusCode, body, http.StatusUnauthorized, "authentication_error")
+		wantErr(t, res.StatusCode, body, http.StatusForbidden, "permission_error")
 	}
 
 	// Wrong method on a known lifecycle route is the wire 405, not a 404.
@@ -811,11 +827,12 @@ func TestWorkStats(t *testing.T) {
 		t.Errorf("management key on stats = %d, want 401", res.StatusCode)
 	}
 
-	// Scoping: a key for another environment cannot read this one's stats.
+	// Scoping: a key for another environment cannot read this one's stats. A
+	// scope failure, so 403 — see TestWorkPollRequiresEnvironmentKey.
 	otherEnv, _, _ := selfHostedWorker(t, s, "ek-stats-other")
 	res = s.doRaw(http.MethodGet, "/v1/environments/"+otherEnv+"/work/stats", nil, auth)
 	res.Body.Close()
-	if res.StatusCode != http.StatusUnauthorized {
-		t.Errorf("cross-env key on stats = %d, want 401", res.StatusCode)
+	if res.StatusCode != http.StatusForbidden {
+		t.Errorf("cross-env key on stats = %d, want 403", res.StatusCode)
 	}
 }

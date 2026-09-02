@@ -4,10 +4,23 @@ What is being worked on right now, and how far along it is — nothing else. **S
 
 ## Active work
 
-**None.** Plan 37 (scheduled deployments, #51) archived 2026-09-01 — all six slices
-delivered. The delivery record is [docs/HISTORY.md](./docs/HISTORY.md) and the
-[changelog.d/](./changelog.d/) fragments awaiting the next release.
+**#78 — confirming documented wire assumptions against a real managed-agents
+endpoint.** A recording session against the live endpoint (2026-09-02, ~US$0.15 of
+model spend) covered the Work API, turn semantics, multiagent threads, memory
+stores, files, skills, vaults, deployments and permission gating. Findings were
+compared entry-by-entry against [docs/DIVERGENCES.md](./docs/DIVERGENCES.md) and
+adversarially verified; 13 of 16 proposed code changes were rejected on that
+second pass, which is why only the confirmed-wrong ones land. Plan 37 (#51)
+archived 2026-09-01.
 
 ## Tasks
 
-None.
+- [x] Record the endpoint and reconcile the findings against the registry
+- [x] Correct the three wire behaviors the recording proved wrong: work-API
+      cross-environment 403, agent-update null/empty-body no-op, interrupt result text
+- [ ] Follow-ups, each its own PR: the reference rejects a cron with both
+      day-of-month and day-of-week restricted (we union them); `GET /v1/files`
+      omits the `next_page` key the reference always sends; heartbeat's
+      `expected_last_heartbeat` is optional upstream (we require it — likely to be
+      registered as a deliberate divergence rather than fixed); memory-surface
+      items still under review

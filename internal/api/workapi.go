@@ -355,7 +355,11 @@ const (
 func (s *server) workScope(r *http.Request) (envID, workID domain.ID, err error) {
 	e := r.PathValue("id")
 	if environmentFrom(r.Context()) != e {
-		return "", "", errAuth("environment key is not valid for this environment")
+		// A key that authenticated but names another environment is a scope
+		// failure, not an authentication one. The reference answers 403
+		// permission_error with this message, and answers an unknown environment
+		// id the same way rather than 404 (recorded 2026-09-02, #78).
+		return "", "", errForbidden("Token not authorized for this environment")
 	}
 	return domain.ID(e), domain.ID(r.PathValue("work_id")), nil
 }
