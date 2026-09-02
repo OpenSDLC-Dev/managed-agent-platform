@@ -838,9 +838,8 @@ func TestWorkStats(t *testing.T) {
 	// Scoping: a key for another environment cannot read this one's stats. A
 	// scope failure, so 403 — see TestWorkPollRequiresEnvironmentKey.
 	otherEnv, _, _ := selfHostedWorker(t, s, "ek-stats-other")
-	res = s.doRaw(http.MethodGet, "/v1/environments/"+otherEnv+"/work/stats", nil, auth)
-	res.Body.Close()
-	if res.StatusCode != http.StatusForbidden {
-		t.Errorf("cross-env key on stats = %d, want 403", res.StatusCode)
-	}
+	status, body := readJSON(t, s.doRaw(http.MethodGet, "/v1/environments/"+otherEnv+"/work/stats", nil, auth))
+	// The error type as well as the status: a 403 carrying authentication_error
+	// would satisfy the status alone, and the pair is what workScope promises.
+	wantErr(t, status, body, http.StatusForbidden, "permission_error")
 }
