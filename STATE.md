@@ -11,7 +11,7 @@ stores, files, skills, vaults, deployments and permission gating. Findings were
 compared entry-by-entry against [docs/DIVERGENCES.md](./docs/DIVERGENCES.md) and
 adversarially verified; 13 of 16 proposed code changes were rejected on that
 second pass, which is why only the confirmed-wrong ones land. #78 stays open
-past this work — 126 registry entries name it as their tracker and the recording
+past this work — 124 registry entries name it as their tracker and the recording
 reached only part of what they ask. Plan 37 (#51) archived 2026-09-01.
 
 ## Tasks
