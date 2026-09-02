@@ -750,6 +750,16 @@ var toolUseAnswer = map[domain.EventType]struct {
 // The recording covers the agent.tool_use family only. The custom-tool and MCP
 // families reuse this string because one constant is what keeps the three arms
 // from drifting; that reuse is ours, not observed.
+//
+// Note what the second sentence does that the wording it replaced did not: it
+// tells the model to retry the very call the user just abandoned, and being on
+// the append-only log it says so again in every later replay of the session. It
+// is kept anyway, because the reference chose it and matching the reference is
+// this constant's whole job — a client that reads the text at all reads the
+// reference's. Whether the model actually retries is a prompt-level question
+// the reference answers for itself and this platform is not free to second-guess
+// here; if it ever becomes a problem, the fix belongs in how the brain frames
+// the interrupted turn, not in diverging on the recorded string.
 const InterruptResultText = "Tool execution was interrupted before completion. Please retry."
 
 // InterruptResults answers each tool call a user.interrupt abandons — the set

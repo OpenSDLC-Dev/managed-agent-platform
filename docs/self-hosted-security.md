@@ -68,7 +68,15 @@ tests and the reference design commits to.
   neither drive another environment's queue nor read or write another
   environment's sessions. A worker probing a session id it does not own gets the
   **same 404** as a nonexistent id (`requireEnvironmentKeyForSession`), so it
-  cannot even learn that another environment's sessions exist.
+  cannot even learn that another environment's sessions exist. What the work
+  queue does disclose, since 2026-09-02, is that a key is genuine: a live key
+  aimed at an environment it does not cover answers **403** `permission_error`
+  where a garbage bearer answers 401, because the reference answers that way and
+  this platform matches it ([#78](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/78)).
+  Which environments exist is still withheld — a real-but-uncovered id and a
+  nonexistent one return the identical message, pinned verbatim by a test — and
+  a caller holding a live key already learns it is genuine from the environment
+  it does cover.
 
 - **The sandbox is minimally privileged toward the orchestrator.** On
   Kubernetes the sandbox pod is created with `automountServiceAccountToken:

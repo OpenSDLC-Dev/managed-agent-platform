@@ -93,14 +93,20 @@ func errAuth(message string) *apiError {
 	return &apiError{http.StatusUnauthorized, errTypeAuthentication, message}
 }
 
-// errForbidden is the identity lane's denial: the caller authenticated, and the
-// role their provider gave them is not enough for this route.
+// errForbidden is the authenticated-but-not-permitted denial: the credential is
+// genuine, and what it authorizes does not cover this route. Most callers are the
+// identity lane, where "what it authorizes" is the role the caller's provider
+// gave them; workScope is the exception, refusing an environment key that names
+// another environment (recorded against the reference 2026-09-02, #78), so this
+// is not a human-lane-only constructor.
 //
 // Like errAuth it takes a plain string rather than a format, and for a sharper
-// reason: the message names the ROLE THE ROUTE REQUIRES and never the caller's.
-// Telling a viewer "you are a viewer" turns every 403 into a probe that maps the
-// caller's own authority, and telling them nothing at all leaves an operator
-// unable to explain the denial. Naming the requirement does neither.
+// reason: the message names WHAT THE ROUTE REQUIRES and never what the caller
+// holds. Telling a viewer "you are a viewer" turns every 403 into a probe that
+// maps the caller's own authority, and telling them nothing at all leaves an
+// operator unable to explain the denial. Naming the requirement does neither —
+// which is also why workScope's message names the environment mismatch without
+// saying which environment the key does cover.
 func errForbidden(message string) *apiError {
 	return &apiError{http.StatusForbidden, errTypePermission, message}
 }
