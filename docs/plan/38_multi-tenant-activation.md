@@ -51,9 +51,9 @@ built, and four entries in `docs/DIVERGENCES.md` still cite it — `:118`-`:121`
    organization-creation surface: nothing in the sources gives an organization a *management*
    surface this platform must mirror, and activating it later is additive — every row and
    every predicate already carries the column.
-3. **Stamp, do not drop, the four write-only scope column sets** on `events`, `work_items`,
-   `session_threads` and `principals`. `principals` stays deliberately **unstamped** because
-   the row is not the authority (§6.2); the other three are stamped by copy from the session.
+3. **Keep — do not drop — the four write-only scope column sets** on `events`, `work_items`,
+   `session_threads` and `principals`. Three are stamped by copy from the session;
+   `principals` stays unstamped because the row is not the authority (§6.2).
    Dropping is irreversible and forecloses per-workspace event and work aggregates.
    (`environment_keys` is a fifth table whose columns also stay at the default. It is excluded
    for §6.1's *different* reason — the environment is the authority — not by this decision.)
@@ -102,7 +102,9 @@ rule rather than reconstruct it from the slices.
    pinned checkout: `anthropic-cli/pkg/cmd/workspace_test.go:18` (`TestWorkspaceIDHeader`)
    runs `ant --api-key k --workspace-id wrkspc_flag models list` and asserts the server saw
    the header, and `:50` (`TestWorkspaceIDHeaderOnWorker`) asserts the same on a Bearer
-   environment-key `beta:worker poll`.
+   environment-key `beta:worker poll`. That first test's second case (`:24`) also shows the
+   header has an **`ANTHROPIC_WORKSPACE_ID` environment source**, which is worth a deployment
+   knowing: a worker or a client can be pointed at a workspace without a command line.
 5. **Enforcement is application-level predicates, with a source-reading completeness guard and
    a database write floor.** Row-level security is rejected on evidence (§6.6). The guard is
    `internal/api/rolematrix_test.go`'s mechanism applied to the same class of problem; the
@@ -184,8 +186,11 @@ issue; none is a blocker under decision 1.
   that the join is hard.
 - **Per-organization quotas and limits** (decision 7): #46, `docs/DIVERGENCES.md:95`'s 500 GB
   file quota, `:140`'s 1,000-scheduled-deployments cap, and the docs' 100-workspaces cap.
-  Their "arbitrary on a single-tenant deployment" rationale expires here and is **re-argued**
-  on operator-owned capacity (§7.6), not implemented.
+  **Only `:95` argues from single-tenancy** — a fixed 500 GB ceiling would be arbitrary on a
+  single-tenant deployment — so that half expires here and is **re-argued** (§7.6) on the
+  operator-owns-its-own-disk half the same entry already states. `:140` carries no tenancy
+  word at all: its operator-owned-capacity reason survives this plan unchanged. Neither is
+  implemented.
 - **Webhooks (#261).** All 44 spec webhook event data schemas require `organization_id` and
   `workspace_id` (§4.2), but the reference SDK exposes
   verification only — no registration, list or delete endpoints. This plan makes #261's
@@ -222,11 +227,15 @@ appeal to one.
 Public docs fetched 2026-09-03 — the whole set this plan cites:
 `/docs/en/build-with-claude/workspaces`, `/docs/en/manage-claude/authentication`,
 `/docs/en/api/overview`, `/docs/en/managed-agents/skills` and
-`/docs/en/managed-agents/environments`. **Four** pages returned literal `Not Found` bodies:
-three Admin API api-keys pages — list under two URL spellings
-(`/en/api/admin/api-keys/list`, `/en/api/admin-api/api-keys/list-api-keys`) and **retrieve**
-(`/en/api/admin/api-keys/retrieve`, the one that would carry the `scope` enum) — plus
-`/en/api/managed-agents/overview`. `/en/api/admin/workspaces/retrieve` returned 200. **These
+`/docs/en/managed-agents/environments`; plus, fetched 2026-09-04 and complete, the two Admin
+API api-keys pages `/docs/en/api/admin/api_keys/list` and
+`/docs/en/api/admin/api_keys/retrieve` — spelled with an **underscore**, which is the spelling
+the workspaces and authentication pages themselves link. An earlier pass recorded both as
+`Not Found` under hyphenated spellings — `api-keys`, the list tried twice — which were guesses;
+the retrieve page is what settles the api-key `scope` field (§4.2). The skills
+page was re-read the same day for its display-name derivation (§7.5). **One** page returns a
+literal `Not Found` body, re-checked 2026-09-04: `/docs/en/api/managed-agents/overview`.
+`/en/api/admin/workspaces/retrieve` returned 200. **These
 pages live outside the repository**, so a line citation into one is this plan's working index
 rather than a coordinate a reviewer can re-check: every quotation is verbatim so a re-fetch
 finds it by string, and the registry entries the slices add use the registry's own style for a
@@ -302,12 +311,15 @@ fetched page — slug, fetch date, quoted sentence (`docs/DIVERGENCES.md:140`, `
   its own comment says "per-request workspace selection (the anthropic-workspace-id header) is
   not supported for federation tokens". Accepting the literal `default` on input is therefore
   ours, and slice 1 registers it as such.
-- **Organization-id format is internally inconsistent**, from three sources: a bare UUID in
-  the workspaces doc's own response-header example (`anthropic-organization-id:
-  0d0e7a3b-52f1-4c7e-9a51-3f6f2f7c1b9e`, `:852`) and in the CLI's `/v1/oauth/token` response
-  model (`anthropic-cli/pkg/cmd/cmd_auth.go:62-65`, `tokenOrganization{UUID string
-  \`json:"uuid"\`}`), against a tagged `org_011CZkZZAe0sMna4vkBdtrfx` in the spec's
-  `BetaWebhookEvent` `data` example. Nothing settles which the wire carries. **INFERRED.**
+- **Organization-id format: two different fields, not one inconsistency.** The *response
+  header*'s documented value is a bare UUID — the workspaces doc's own example is
+  `anthropic-organization-id: 0d0e7a3b-52f1-4c7e-9a51-3f6f2f7c1b9e` (`:852`), and the CLI's
+  `/v1/oauth/token` response model reads the same value out of `organization.uuid`
+  (`anthropic-cli/pkg/cmd/cmd_auth.go:62-65`). The tagged `org_011CZkZZAe0sMna4vkBdtrfx` is
+  the **webhook body**'s `data.organization_id`, a payload field on a different surface (the
+  spec's `BetaWebhookEvent` example, whose in-checkout twin the organization-behavior bullet
+  below cites). So the header's shape is documented by example rather than unsettled, and §5
+  item 3 records on the live wire the value the docs already illustrate.
 - **Workspace-scoped resources.** The doc's list is explicitly non-exhaustive: "Resources
   scoped to workspaces **include**: Files … Message Batches … Skills" (`:828-832`). The same
   page carries the plan's best managed-agents evidence, uncited by the sizing that preceded
@@ -325,11 +337,21 @@ fetched page — slug, fetch date, quoted sentence (`docs/DIVERGENCES.md:140`, `
   is recorded here rather than as a registry entry.
 - **Skills split by source**, from the skills page:22 — a custom skill is "uploaded to **your
   workspace**", while "**Anthropic pre-built skills are already available in every
-  workspace**". The same page:24 adds that an explicit display name "doesn't need to be unique
-  within your workspace", where the pinned SDK still spells the field `display_title`
-  (`betaskill.go:128`, `:177`, `:226`) and this platform enforces uniqueness (§7.5).
-- **Archiving a workspace archives its keys** (workspaces doc), and the archive endpoint is
-  `POST /v1/organizations/workspaces/{id}/archive` (`:355`).
+  workspace**". The same page:24 settles the display name in one sentence: "These examples omit
+  the optional `display_name` field, so the skill's display name is derived from the `name`
+  field in `SKILL.md`. An explicit `display_name` can be up to 255 characters and doesn't need
+  to be unique within your workspace." So the derivation this platform performs is the
+  reference's own and the 255-character bound is documented; what diverges is the uniqueness
+  *enforcement*, and the field **name** stays in dispute — the pinned SDK spells it
+  `display_title` (`betaskill.go:128`, `:177`, `:226`). All three go to `:200` (§7.5).
+- **Archiving a workspace archives its keys, but no status is recorded for the refusal.**
+  Archiving "archives every API key created for that workspace within seconds" (workspaces
+  doc), and the authentication doc's key-types table says a workspace key "Stops working when …
+  its workspace is archived"; the archive endpoint is
+  `POST /v1/organizations/workspaces/{id}/archive` (`:355`). **The refusal is documented; its
+  status is not** — the only status either page gives is for an *expired* key ("After a key
+  expires, requests made with it return a `401 authentication_error`"), which is what §6.1
+  aligns to and §5's last item exists to record.
 - **Four archive/disable schemas**, verified by name in the fetched spec: two pause reasons
   requiring only `type` — `BetaManagedAgentsWorkspaceArchivedDeploymentPausedReasonError`
   ("The deployment's workspace was archived."),
@@ -349,7 +371,9 @@ fetched page — slug, fetch date, quoted sentence (`docs/DIVERGENCES.md:140`, `
   model requests" (`betasessionevent.go:1228-1230`); `organization_disabled_error` above; all
   **44** webhook event data schemas requiring `organization_id` and `workspace_id` alike, the
   tagged `org_011CZkZZAe0sMna4vkBdtrfx` / `wrkspc_011CZkZaBF1tNoB5wlCeusgy` pair riding
-  `BetaWebhookEvent`'s `data` example (*counting rule:
+  `BetaWebhookEvent`'s `data` example — and, because §4.1's own rule prefers an in-checkout
+  twin to a spec example, the identical literals in
+  `anthropic-sdk-go/betawebhook_test.go:21`'s `TestBetaWebhookUnwrap` payload (*counting rule:
   `grep -c 'json:"organization_id" api:"required"' anthropic-sdk-go/betawebhook.go` → 44, same
   for `workspace_id`; `:68` and `:91` are representative sites, and `BetaWebhookEventData`
   itself is a bare 44-variant `oneOf` with no example of its own*); and the
@@ -362,11 +386,19 @@ fetched page — slug, fetch date, quoted sentence (`docs/DIVERGENCES.md:140`, `
   ground truth. This platform has three **org-wide** roles and no per-workspace granularity at
   all, which is §3's fine-grained exclusion. So `:115`'s divergence *grows* along a second axis
   — per-workspace granularity — rather than changing its count of seven.
-- **The api-key `scope` field exists and discriminates**, contrary to "unrecorded": "both
-  report `null` for the Default Workspace, as API keys also do for all-workspaces keys; an API
-  key's `scope` field tells the two apart and, for a key bound to one workspace, carries that
-  workspace's real ID" (workspaces doc:1010). Only its **enum values** are unrecorded, all
-  three api-keys documentation pages being gone — the retrieve page among them (§4.1).
+- **The api-key `scope` field is fully documented, and it is not an enum.** The Retrieve API Key
+  page (fetched 2026-09-04, §4.1) gives it as "`scope: object or object` — Where the API key
+  belongs: its Workspace (`{"type": "workspace", "workspace_id": "wrkspc_..."}`, with the
+  Workspace's real ID even when it is the organization's default Workspace), or the organization
+  (`{"type": "organization"}`) for a principal-bound API key that has no Workspace", of which
+  variant it adds "Only a principal-bound API key can have this scope"; the top-level field
+  reads "`workspace_id: string or null` — **Deprecated**: Use `scope` instead." The workspaces
+  doc:1010 says what the null means — "both report `null` for the Default Workspace, as API keys
+  also do for all-workspaces keys" — which is the evidence behind §7.6's key-kinds entry.
+  **None of this is a registry item**: the Admin API's `api_keys` resource is not a surface this
+  platform mirrors, the console key routes being plan 31's own dialect (§3). Under decision 5
+  every key minted here corresponds to the `workspace` variant, and the `organization` variant
+  has no counterpart: a consequence of that decision, not a divergence.
 - **A cross-organization/workspace mismatch *is* given a status by the SDK, three times, and
   it is 400** — not 404. `betamessage.go:8994`: "Either way: same workspace, same platform; a
   mismatch is a 400."; `betamessage.go:15698-15704` and `betamessagebatch.go:707-713`: "Must be
@@ -399,12 +431,16 @@ fetched page — slug, fetch date, quoted sentence (`docs/DIVERGENCES.md:140`, `
    those paths has no description, and both header names are absent from the spec entirely.
 3. What a **single-workspace key sending a header naming another existing workspace** does —
    200-ignored ("always runs there") or 404 (the access clause). §4.2 names both readings.
-4. The **api-key `scope` field's enum values**.
-5. Which **organization-id format** the response header carries.
-6. When **`anthropic-organization-id` is absent** — the docs give absence conditions for the
+4. Which **organization-id format** the response header carries **on the live wire** — the
+   workspaces doc illustrates a bare UUID in its own example (§4.2), so §5 item 3 confirms
+   that shape rather than discovering it.
+5. When **`anthropic-organization-id` is absent** — the docs give absence conditions for the
    workspace header only, so emitting the two on one schedule is a choice, not a mirrored rule.
 
-Items 1-5 are what §5's recording exists to close. Item 6 is registered as ours.
+Items 1-4 are what §5's recording exists to close. Item 5 is registered as ours. §5 carries two
+further observations with no entry here: the console's own workspace administration (its item 5,
+which gates slice 6) and the status an archived workspace's credential is refused with (item 6,
+whose absence from the reference's pages §4.2 records in place).
 
 ### 4.4 Platform as-is
 
@@ -442,8 +478,12 @@ Items 1-5 are what §5's recording exists to close. Item 6 is registered as ours
   `internal/store/store.go:37-38`'s inheritance sentence is untrue for exactly these two.
 - **The one already-tenant-keyed index** is `skills_custom_display_title_uq` on
   `(org_id, workspace_id, display_title) WHERE source = 'custom'` (`0007_skills.sql:24-26`) —
-  which degenerates to `(display_title)` today because no row stamps scope. No trigger,
-  function, RLS policy or CHECK anywhere references the three columns.
+  which degenerates to `(display_title)` today because no row stamps scope. **The one unique
+  index on a scoped table that is not tenant-keyed** is `files_scope_filename_idx ON files
+  (scope_id, filename) WHERE scope_id IS NOT NULL` (`0017_outputs_harvest.sql:15-16`), safe only
+  because `scope_id` holds a session id — exactly the property §3's #266 bullet guards, and the
+  reason a workspace-scoped upload path would make harvested filenames collide across tenants.
+  No trigger, function, RLS policy or CHECK anywhere references the three columns.
 - **Ten list handlers build SQL on a literal `WHERE true` base**, but that literal is the
   insertion point for only **eight** of them: `agents.go:430`, `deployments.go:365`,
   `environments.go:431`, `files.go:215`, `memorystores.go:291`, `sessions.go:1123`,
@@ -516,9 +556,10 @@ plan carries the corrections so the verifier's docs rung does not flag them:
 
 Decision 6. This is an account action creating real credentials in a real organization, in the
 shape of #378's 2026-08-13 console capture, so only the user can perform it. **Slice 1 does not
-start until items 1-5 exist** — the same provision plan 31 made for #378, whose capture still
-anchors four registry entries (`:118`-`:121`). Capture request and response headers and full
-error bodies throughout; a second workspace and one key bound to it are the whole setup.
+start until items 1-4 and 6 exist** — the same provision plan 31 made for #378, whose capture
+still anchors four registry entries (`:118`-`:121`). Item 5 gates slice 6 instead, and item 6
+rides on the archive item 5 performs. Capture request and response headers and full error bodies
+throughout; a second workspace and one key bound to it are the whole setup.
 
 What to capture, and what each observation converts:
 
@@ -526,10 +567,10 @@ What to capture, and what each observation converts:
    session naming a `memory_store_id` that exists in workspace A. Record **status, error
    `type` and the exact `message`**. Repeat for one more family (an `environment_id` on
    `POST /v1/sessions`) to see whether the answer is per-field or uniform.
-   → converts §4.3 item 1: the planned INFERRED entry for "a cross-tenant resource read and a
-   cross-tenant create-time reference both answer the absent-id 404" becomes CONFIRMED at
-   whatever the reference actually answers — and if that is a 400, §8-D10 and §7.4's refusal
-   shape change with it, which is why this is the recording's first item.
+   → converts §4.3 item 1: §7.4's entry for "a cross-tenant resource read and a cross-tenant
+   create-time reference both answer the absent-id 404" lands **CONFIRMED** at whatever the
+   reference actually answers rather than INFERRED — and if that is a 400, §8-D10 and §7.4's
+   refusal shape change with it, which is why this is the recording's first item.
 2. **Whether an environment Bearer key resolves a workspace on the work routes.** Poll
    `GET /v1/environments/{id}/work/poll` with an environment key and read the response's
    `anthropic-workspace-id` header (present or absent). Then send the same poll with an
@@ -539,7 +580,7 @@ What to capture, and what each observation converts:
 3. **The organization-id format.** Read `anthropic-organization-id` off any Managed Agents
    route's response (a session create is enough) and record the literal value — bare UUID or
    `org_`-tagged.
-   → converts §4.3 item 5: the CONFIRMED divergence for this platform emitting `default` gains
+   → converts §4.3 item 4: the CONFIRMED divergence for this platform emitting `default` gains
    the real shape it diverges from, and needs no INFERRED format fallback beside it (§7.1).
 4. **A single-workspace key sending a header naming another workspace.** With workspace B's
    key (bound to B) send `anthropic-workspace-id: <A>` on a Managed Agents read. Record
@@ -548,14 +589,7 @@ What to capture, and what each observation converts:
    → converts §4.3 item 3. §6.2's header rule and slice 6's acceptance step (d) are written
    against this observation; until it exists, "narrow only" is **ours**, and the 400-malformed
    and unknown-404 arms are the only CONFIRMED halves.
-5. **The api-key `scope` field's enum values, if reachable.** If the account can list or
-   retrieve Admin API keys at all (all three documentation pages are gone — §4.1 — but the
-   endpoints may still answer), record one workspace-bound key and one all-workspaces key and
-   the `scope` values they carry.
-   → converts §4.3 item 4. The field's *function* is already documented (§4.2), so the entry
-   this closes is narrow; if unreachable, the entry lands INFERRED on the enum values alone
-   and nothing in this plan depends on it (decision 5 mints no such key class).
-6. **The console's own workspace administration** — the one item that gates **slice 6**, not
+5. **The console's own workspace administration** — the one item that gates **slice 6**, not
    slice 1, and is captured in the same sitting because creating workspace B in the console is
    already step one of this setup. Record that create's request and response, the workspace
    listing, and an archive. `docs/DIVERGENCES.md:79` justifies the whole `/api/` dialect by its
@@ -564,11 +598,19 @@ What to capture, and what each observation converts:
    capture behind them.
    → if unreachable, slice 6 registers the two new routes as ours in *shape* as well as in
    placement, rather than presenting them as mirrored.
+6. **An archived workspace's credentials**, last of all, because it destroys the setup: after
+   item 5's archive of throwaway workspace B, call a Managed Agents read with B's management
+   key and `GET /v1/environments/{id}/work/poll` with B's environment key, recording the
+   **status and error `type`** for each.
+   → converts §6.1's archived-workspace refusal from an alignment with the documented
+   *expired*-key status (§4.2) into CONFIRMED at whatever the reference answers — a deliberate
+   divergence if that is not a 401 `authentication_error`. It gates slice 1 because §6.1's rule
+   lands there.
 
 If item 1 comes back as a 400, that is a plan change, not a detail: §7.4's byte-identical-404
-refusal, its per-statement-kind assertions and D10's five-answer split are all keyed to it, and
-the slice-4 PR must carry the correction. Items 2-6 change registry entries and one acceptance
-step, not the architecture.
+refusal, its per-statement-kind assertions and D10's split of refusal answers are all keyed to
+it, and the slice-4 PR must carry the correction. Items 2-6 change registry entries and one
+acceptance step, not the architecture.
 
 ## 6. Architecture
 
@@ -595,9 +637,12 @@ drift, no backfill. Those columns therefore stay unread and unstamped, said out 
 omission reads as deliberate. Tokens 3 and 4 never declare a tenant; they inherit.
 
 **An archived workspace fails the resolution.** A credential resolving to a workspace with
-`archived_at` set is refused exactly as an inactive key is (401 `authentication_error` on the
-key lanes; the fail-closed no-authority refusal on the identity lane), which is the reference's
-own rule (§4.2).
+`archived_at` set is refused exactly as an inactive key is: 401 `authentication_error` on the
+key lanes, the fail-closed no-authority refusal on the identity lane. **The refusal is the
+reference's own rule; the status is our alignment with its expired-key rule** — the reference
+documents that archiving a workspace stops its keys working but records a status only for an
+*expired* key (§4.2). §5's item 6 observes the archived case and converts this to CONFIRMED, a
+deliberate divergence if the reference answers otherwise.
 
 **Background paths have no credential and copy instead of deriving.** The deployment scheduler
 is the only session-create path with no request principal — its own comment says so
@@ -633,10 +678,12 @@ the reservation comment at `:39-42`) stay reserved and unread — decision 3's o
 and the reason for it.
 
 **The fail-closed arm, as a checkable condition rather than a hope** (decision 4): claim
-unconfigured **and exactly one workspace row** → that workspace, so every existing
-single-tenant SSO deployment keeps working untouched. Claim unconfigured **and more than one
-workspace row** → 403 naming the missing configuration. A configured claim resolving to no
-live workspace → no authority.
+unconfigured **and exactly one live workspace** (`archived_at IS NULL`) → that workspace, so
+every existing single-tenant SSO deployment keeps working untouched. Claim unconfigured **and
+more than one live workspace** → 403 naming the missing configuration. A configured claim
+resolving to no live workspace → no authority. **Live rows, not rows**: archive deletes nothing
+(§6.9), so counting rows would lock every human out of a deployment for ever the moment one
+throwaway workspace had been created and archived.
 
 **One header rule for every lane.** `anthropic-workspace-id` may only *narrow* to a workspace
 the credential already covers.
@@ -660,7 +707,7 @@ stamp — `withRequestID` at `internal/api/server.go:699`, the header set at `:7
 and error alike, absent when the request fails before authentication completes. For
 `anthropic-workspace-id` that schedule is the documented one; for
 `anthropic-organization-id` **no absence rule is recorded anywhere**, so emitting it on the
-same schedule is ours and is registered (§4.3 item 6).
+same schedule is ours and is registered (§4.3 item 5).
 
 ### 6.3 The predicate, and where it goes
 
@@ -766,14 +813,18 @@ scope predicate has exactly that shape. So `internal/api/scopematrix_test.go`:
    hand-written list — the mechanism `internal/domain/docs_test.go` uses for the prefix set,
    and for the same reason (that kind of list has drifted twice). A bare `org_id` grep will not
    do: it returns 19 lines of which 5 are prose, an index and a backfill (§4.4). So the
-   derivation is two rules, both stated in the test: **(i)** a `CREATE TABLE <name> ( … )`
-   block whose body declares `org_id`, and **(ii)** an `ALTER TABLE <name> ADD COLUMN … org_id`
-   — a new scoped table arrives as (i) in a new migration, and because a merged migration is
-   immutable an *existing* table gaining scope columns can arrive only as (ii); both shapes
-   must enrol automatically, which is the property this step promises. Rule
+   derivation is two rules, both stated in the test, and **both keyed on all three columns, not
+   on `org_id` alone**: **(i)** a `CREATE TABLE <name> ( … )` block whose body declares
+   `org_id`, `workspace_id` *and* `project_id`, and **(ii)** an `ALTER TABLE <name> ADD COLUMN`
+   set declaring the same three — a new scoped table arrives as (i) in a new migration, and
+   because a merged migration is immutable an *existing* table gaining scope columns can arrive
+   only as (ii); both shapes must enrol automatically, which is the property this step promises.
+   All three, because slice 1's own `workspaces` table declares `org_id` and nothing else
+   (§7.1): the registry is the referent of every predicate, not a referrer, and an `org_id`-only
+   rule would enrol it into a check it can never satisfy. Rule
    (ii) has **no instance in the merged tree** — all 14 declarations sit inside `CREATE TABLE`
-   bodies and no migration carries an `ADD COLUMN … org_id` — so it is proved by a synthetic
-   fixture rather than by the tree (§7.2).
+   bodies and no migration carries an `ADD COLUMN` of these columns — so it is proved by a
+   synthetic fixture rather than by the tree (§7.2).
 3. For every SQL literal naming a scoped table after `FROM` / `JOIN` / `INSERT INTO` /
    `UPDATE` / `DELETE FROM`, requires one of:
    - **(a)** the three-column predicate;
@@ -788,7 +839,12 @@ scope predicate has exactly that shape. So `internal/api/scopematrix_test.go`:
      `skill_id`. All of those pass a naive rule (b) with no scope term anywhere. So (b) is
      satisfied only when the parent id is itself the id the handler already resolved under
      scope — which the guard checks by requiring the file to contain a scoped read of that
-     parent table, and which slice 4 makes true statement by statement;
+     parent table, and which slice 4 makes true statement by statement. **The check stays
+     file-local deliberately**: a rule the guard cannot evaluate statically is a comment, not a
+     rule. So the five statements whose parent is resolved in a *different* file are rule-(d)
+     exemptions naming their resolver, never (b) admissions — `internal/api/workapi.go:515`,
+     `internal/api/envkeys.go:121`, `:132` and `:163`, and `internal/api/threadstate.go:38`
+     (each on the exemption list below);
    - **(b′)** a read of a scoped table **by its own primary key inside a package with no
      request scope** — `internal/brain`, `internal/executor` and `internal/vaultresolve`, whose
      by-id reads are unscoped **by design** (§6.7). Examples: `internal/brain/brain.go:500-505`,
@@ -807,6 +863,15 @@ scope predicate has exactly that shape. So `internal/api/scopematrix_test.go`:
      that constraint's carrier. Without this rule the whole work-API surface — 28 scoped-table
      mentions across `internal/queue`'s 15 statements — falls through to (d), putting the
      exemption list past the length a reviewer reads;
+   - **(f)** a statement in `internal/events` constrained on a **session id or thread id** —
+     `FROM sessions WHERE id = $1`, or `WHERE session_id = $1` on `events` and
+     `session_threads`. Rule (e)'s shape for rule (e)'s reason: the package has no request
+     scope, and a session id reaches it only from a caller who resolved it under rule (a) or
+     (b′). `internal/events/log.go:171-173`'s `SELECT archived_at, resolved_agent->>'name' FROM
+     sessions WHERE id = $1 FOR UPDATE` is the case to classify under it in the slice that lands
+     the guard. Without this rule ~49 of `internal/events`' **51** scoped-table mentions across
+     its **59** statements (§4.5) fall to (d) — everything but the `INSERT INTO events` that
+     rule (c) admits and `outcomes.go:118`'s `FROM files`, which slice 4 gives a predicate;
    - **(d)** an entry on the **exemption list carrying a one-line reason**.
 4. **Fails closed on a dynamically composed table name**, and only on that. The stronger rule
    ("any SQL-looking literal it cannot parse") is not available: 72 fragment-concatenation
@@ -819,27 +884,34 @@ scope predicate has exactly that shape. So `internal/api/scopematrix_test.go`:
 5. Adds one rule the table-based check cannot express: the **jsonb snapshot reference columns**
    on `sessions` and `deployments` (§6.7).
 
-**The exemption list is the deliverable, not a loophole** — a reviewer reads fourteen commented
+**The exemption list is the deliverable, not a loophole** — a reviewer reads nineteen commented
 entries instead of auditing 206 statements. Its permanent members, each with its reason:
-`queue.Claim` (`internal/queue/queue.go:265`) and the self_hosted gauge
-(`internal/queue/metrics.go:91`); the due-deployment scan
+`queue.Claim` (`internal/queue/queue.go:265`) and the self_hosted gauge (the literal at
+`internal/queue/metrics.go:92`); the due-deployment scan
 (`internal/api/deploymentscheduler.go:211-218`); the retention sweep
 (`internal/api/memoryretention.go:109-118`); the **five** credential resolvers of §6.3; the
 boot catalog import (`internal/api/skillsimport.go:95-96`, `:100`, `:127-130` — the three
 statements inside `importSkillDir`, which opens at `:74`); the reaper's by-id classification
-reads (`internal/executor/reaper.go:255-266` and the tombstone read at `:269`); and the two
-no-FK tables' writers — `store.SessionTombstoneInsertSQL` (`internal/store/store.go:59-62`) and
-`internal/executor/checkpoint.go:205-210`.
+reads (`internal/executor/reaper.go:255-266`) and the tombstone read beside them (`:269`); the
+two no-FK tables' writers — `store.SessionTombstoneInsertSQL` (`internal/store/store.go:59-62`)
+and `internal/executor/checkpoint.go:205-210`; and the **five cross-file parent resolutions**
+rule (b)'s file-local check cannot admit, each naming where its parent *is* resolved:
+`internal/api/workapi.go:515` (`SELECT session_id, kind FROM work_items WHERE id = $1 AND
+environment_id = $2` — that environment id is the env-key choke point's own, §6.1);
+`internal/api/envkeys.go:121`, `:132` and `:163`, whose environment is gated by
+`consoleEnvironment` (`internal/api/consoleapi.go:138`, statement `:145`, which slice 4 gives
+the predicate — §7.4); and `internal/api/threadstate.go:38`, whose session is the one
+`sendSessionEvents` (`internal/api/events.go:43`) locked at `:77-81` in the same transaction.
 
 **The terminal check is a pinned count, not a minimality claim.** "The list contains nothing
-but the platform-wide sweepers" cannot hold against a target set that admits ~50
-rule-(b′) mentions and 28 rule-(e) ones (mention counts, §4.5) on their own named rules rather
-than on the predicate. So slice 6 asserts the list's **exact length and exact membership**
-instead — the **fourteen** permanent members named above, and no other: adding an entry then
-requires editing a number and a name in a test, which is a deliberate, reviewed edit rather
-than a silent one. Between slices 2 and 5 the list is longer by the entries parked with the
-slice that removes them, and each of those names that slice, so the count at any slice is the
-fourteen plus what the not-yet-landed slices still owe.
+but the platform-wide sweepers" cannot hold against a target set that admits ~50 rule-(b′)
+mentions, 28 rule-(e) ones and ~49 rule-(f) ones (mention counts, §4.5) on their own named
+rules rather than on the predicate. So slice 6 asserts the list's **exact length and exact
+membership** instead — the **nineteen** permanent members named above, and no other: adding an
+entry then requires editing a number and a name in a test, which is a deliberate, reviewed edit
+rather than a silent one. Between slices 2 and 5 the list is longer by the entries parked with
+the slice that removes them, and each of those names that slice, so the count at any slice is
+the nineteen plus what the not-yet-landed slices still owe.
 
 **The guard's own TDD comes first.** Before any statement is fixed, the guard runs against the
 *current* tree and must report the leaks §4.4 and §7.5 enumerate — the four worker-lane skill
@@ -940,7 +1012,7 @@ key either rebinds A's row into B (if `DO UPDATE` sets `workspace_id`) or leaves
 bootstrap key authenticating into A (if it does not). Either outcome is silent, and the global
 uniqueness additionally makes a collision an existence oracle: the second workspace's boot
 fails. Slice 1 resolves it explicitly: **the conflict target gains the workspace**, so the
-upsert sets `workspace_id` on adoption and the log line at `:121-122` — which already warns
+upsert sets `workspace_id` on adoption and the log line at `:122-123` — which already warns
 when adopting a console-issued key — gains the previous workspace when it differs. A
 same-workspace re-configuration is unchanged; a cross-workspace one is a loud adoption, and the
 test asserts both.
@@ -1039,16 +1111,18 @@ columns. · The three header rejections, message-for-message, on every scope-bea
 `--api-key` plus a matching `anthropic-workspace-id` is 200; another workspace answers with the
 same body as an unknown one. · Both response headers on a 200 and on an authenticated 4xx; both
 absent on a 401 that fails before authentication. · A credential resolving to an archived
-workspace is refused. · Identity: one workspace row and no claim → that workspace; two rows and
-no claim → 403 naming the configuration; a claim resolving to nothing → no authority. ·
+workspace is refused. · Identity: one live workspace and no claim → that workspace; an archived
+second workspace beside it changes nothing; two **live** workspaces and no claim → 403 naming
+the configuration; a claim resolving to nothing → no authority. ·
 `EnsureAPIKey`: re-configuring a value that exists in another workspace adopts it loudly and
 lands it in the configured workspace; a same-workspace rotation is unchanged; the archive-by-name
 does not touch another workspace's key of the same name. · Migration replay over a populated
 database leaves every row at `default` and inserts exactly one workspace. ·
-**`TestTenancyColumnsHaveSingleTenantDefaults` (`internal/store/store_test.go:636-651`) passes
-unedited and is extended from 3 tables to all 14** — it is the upgrade-compatibility pin and the
-pin that `org_id`/`project_id` stay constant; a separate enforcement suite is added beside it
-rather than editing it.
+**`TestTenancyColumnsHaveSingleTenantDefaults` (`internal/store/store_test.go:636-651`) is
+extended from 3 tables to all 14** — widening the table loop at `:641`, which is an edit to that
+test and the only one it takes: its assertion is unchanged, because it is the
+upgrade-compatibility pin and the pin that `org_id`/`project_id` stay constant. Enforcement is a
+separate suite beside it.
 
 **Docs.** `changelog.d/` · STATE.md (plan enters `in-progress`) · plan frontmatter →
 `in-progress` · README.md's development/configuration notes and the `internal/identity` package
@@ -1060,8 +1134,17 @@ cover **both** halves (no response header; the request header accepted and ignor
 `server.go:699` cited and `Tracked: #56` naming this slice), so slice 1 rewrites it into the
 *delivered* behavior: both response headers emitted wherever a scope resolves, the request
 header honored under the narrow-only rule, and its #56 tracker pointer closes.
-**Add** CONFIRMED for the request-header semantics with its two unconditional bodies, and for
-the two response headers with the organization header's absence schedule marked as ours. **Add**
+**What matches the reference is not a divergence and stays out of the divergence sections**: the
+two unconditional request-header bodies — 400 on a malformed value, 404 on a workspace that does
+not exist — are reproduced verbatim, as is the workspace response header's documented emission
+schedule, so both belong in `:45`'s rewritten non-mismatch half, or in the registry's
+architecture-and-compatibility notes, which exist for exactly this class
+(`docs/DIVERGENCES.md:14-17`, against the CONFIRMED section's own charter at `:35`: "Mismatches
+with the managed-agents wire taken by choice"). What is **added** as a divergence is only the
+mismatch: `anthropic-organization-id` emitted on the workspace header's schedule, no absence
+rule for it being recorded anywhere; the reference's "required with a multi-workspace API key"
+arm registered as **unreachable**, decision 5 minting no such credential; and §6.2's fourth arm
+as INFERRED — a real workspace the credential does not cover answering the identical 404. **Add**
 CONFIRMED that the default workspace keeps the literal id `default` where the reference's
 Default Workspace is `wrkspc_`-prefixed, and that this platform additionally accepts the literal
 `default` **in the header** — a lenient parse of ours, since `anthropic-sdk-go/config/federation.go:77-86` speaks
@@ -1086,7 +1169,7 @@ statements it fails on. Behavior-preserving: the values stamped are the ones the
 already supplied.
 
 **Changes.** `internal/api/scopematrix_test.go` per §6.5 — full target set, both table-set
-derivation rules, rules (a)-(e) including (b′), the table-name fail-closed rule, exemption list
+derivation rules, rules (a)-(f) including (b′), the table-name fail-closed rule, exemption list
 shipped complete. · `internal/events/log.go:203` stamps the triple — the scope source is free,
 because `AppendInTx` already holds the session row `FOR UPDATE` two statements earlier at
 `:171-173`. · `internal/queue/queue.go:212-217` becomes an `INSERT … SELECT` against `sessions`
@@ -1104,20 +1187,27 @@ stamps it; the transaction already reads the session at `:244-246`. ·
 adds the three columns to the fire's existing `FOR SHARE` re-read and passes them into
 `createSessionInTx` (`:506`); the manual-run twin at `internal/api/deploymentruns.go:82-85` does
 the same. · The scheduler's **other two** background statements get entries rather than being
-left to the bulk: `INSERT INTO deployment_runs …` (`deploymentscheduler.go:479`) copies the
-deployment's scope, and the failure `UPDATE deployments` (`:534-537`) is keyed on the id the
-`FOR SHARE` re-read already resolved under scope, satisfying rule (b) — both stated, neither
-silently exempt. · `internal/store/store.go:34-42` corrected: the inheritance sentence gains its
+left to the bulk, and both on the same ground: the run claim `INSERT INTO deployment_runs …`
+(`deploymentscheduler.go:479`) and the failure `UPDATE deployments` (`:534-536`) are each keyed
+on the `deployment_id` the fire's `FOR SHARE` re-read resolved under scope at `:444-451`, which
+is rule (b). The run insert **cannot** copy the deployment's scope: no column in
+`deployment_runs` holds one (`0031_deployments.sql:127`, the `CREATE TABLE`) — the same fact
+that makes §7.4 give the run list and the run get a join. The manual-run twin,
+`INSERT INTO deployment_runs` at `internal/api/deploymentruns.go:103` under the `FOR SHARE`
+re-read at `:82-85`, gets an entry on the same ground. None of the three is silently exempt.
+· `internal/store/store.go:34-42` corrected: the inheritance sentence gains its
 two exceptions (`deleted_sessions`, `session_checkpoints`), and "does not yet enforce" is left
 alone until slice 4.
 
 **Tests.** The guard against the **current** tree reports the known leaks (§6.5). · Synthetic
 fixtures: compliant statement, missing predicate, missing insert columns, a parent-id-only
 read that must now fail rule (b), a root-table-by-own-PK read in `internal/brain` that must
-pass rule (b′), an `environment_id`-only read in `internal/queue` that must pass rule (e), an
-`ALTER TABLE … ADD COLUMN … org_id` that must enrol a fifteenth table under derivation rule
-(ii) — the rule with no instance in the merged tree (§6.5) — and a dynamically composed table
-name: eight verdicts. · **Two assertions, not
+pass rule (b′), an `environment_id`-only read in `internal/queue` that must pass rule (e), a
+session-id-constrained read in `internal/events` that must pass rule (f), an `ALTER TABLE … ADD
+COLUMN` of all three scope columns that must enrol a fifteenth table under derivation rule
+(ii) — the rule with no instance in the merged tree (§6.5) — a `CREATE TABLE` declaring `org_id`
+alone, the `workspaces` shape, which must **not** enrol, and a dynamically composed table
+name: ten verdicts. · **Two assertions, not
 one, because five of the tables the sizing named carry no scope columns at all.** *Stamping* is
 asserted on `events`, `work_items`, `session_threads` (primary and child) and harvested `files`
 — the four tables that have columns to stamp. *Inheritance* is asserted behaviorally: a
@@ -1172,7 +1262,10 @@ one does.
 **Changes.** The list builders, which do not take one uniform edit (§4.4): **eight** take the
 predicate in place at their `WHERE true` base; `deploymentruns.go:274` gains a
 `JOIN deployments d ON d.id = r.deployment_id` and the predicate on `d`, because
-`deployment_runs` carries no scope columns and its `deployment_id` filter is optional (`:276`);
+`deployment_runs` carries no scope columns and its `deployment_id` filter is optional (`:276`) —
+**and its by-id twin takes the same join**, `getDeploymentRun` (`:245`, statement `:252`,
+`SELECT runColumns FROM deployment_runs WHERE id = $1`), which no rule admits and no bulk edit
+reaches: a run id alone would otherwise read across workspaces;
 `memories.go:611`'s enforceable point is the parent memory-store read (`:135`, `:165`), its
 `WHERE true` sitting on a derived table; and the **eleventh** builder, `listThreads`
 (`threads.go:133`), scopes through the parent session by way of its `sessionExists` gate
@@ -1201,6 +1294,13 @@ version→skill (`skills.go:409`, `:572`), vault credential→vault (`vaultcrede
 **not** `:181`, which is `loadThread`'s join-based by-id read, the rule-(b) case §6.5 names),
 environment key→environment (`consoleapi.go:204`).
 
+· **The console's environment existence check is a tenant gate too**, and the whole gate for two
+routes: `consoleEnvironment` (`internal/api/consoleapi.go:138`, statement `:145`,
+`SELECT true FROM environments WHERE id = $1`) is where `listEnvironmentKeys` (`:231`) and
+`revokeEnvironmentKey` (`:267`) resolve `{environment_id}`, so without the predicate an admin in
+one workspace lists — and revokes — another's worker credentials. It gains the predicate here,
+beside `consoleapi.go:204`.
+
 · **Two have no existing site and must be created**: agent spec→skills, because `parseSkills`
 is shape-only (`internal/api/wire.go:565-569` the doc, `:570` the func) and `agents.go` has
 **zero** `FROM skills` statements, so a foreign-workspace `skill_id` would resolve silently at
@@ -1226,8 +1326,14 @@ says otherwise**, in which case this PR carries the correction. · Guard target 
 
 **Tests.** Per resource family and **per statement kind** (get / list / update / archive /
 delete), the cross-workspace answer is byte-identical to the absent-id answer: status, error
-type, message, envelope. · Per cross-reference, a create naming a foreign id is refused with the
-absent-id answer — including the three new checks. · The **two-tenant mirror test** (§6.5). · A
+type, message, envelope — the deployment-run **get** among them, not only the run list, since
+both reach their scope solely through the `deployments` join. · The console environment-key
+listing and **revoke** are each refused across workspaces, the gate being `consoleEnvironment`
+alone. · A non-default workspace's key still lists the `anthropic`-source catalog through
+`GET /v1/skills` (`skills.go:237`): the carve-out is asserted on the management list here, as
+slice 5 asserts it on the worker lanes. · Per cross-reference, a create naming a foreign id is
+refused with the absent-id answer — including the three new checks. · The **two-tenant mirror
+test** (§6.5). · A
 list in B never returns A's rows at any page boundary or filter combination, and a keyset cursor
 minted in A is not a window into A. · The events list, the SSE stream and the append path each
 answer 404 for another workspace's session. · The brain/executor by-id reads are exercised end to
@@ -1241,13 +1347,19 @@ PR**: `internal/store/store.go:34` ("does not yet enforce") and `:37-38`,
 multi-tenant columns it does not yet enforce") and `:456`'s parenthetical, `CLAUDE.md:36`'s
 parenthetical and `:85`'s layout line. The principle halves stay verbatim — scoping is
 org/workspace/project and never a user, the adk `AppName`+`UserID` divergence, the
-`created_by`/`metadata` hooks. · Registry: re-argue `:19`'s parenthetical; **add INFERRED** that a
-cross-tenant resource read and a cross-tenant create-time reference both answer the absent-id
-404, recording **both** sides of the evidence — the reference's own existence-hiding precedent
-("the same response as for any unknown workspace", authentication doc) and the counter-evidence
-that the only recorded org/workspace mismatch status is a **400** on `fallback_credit_token`
-(§4.2) — so a later reviewer can see how the 404 was chosen, and cross-referencing
+`created_by`/`metadata` hooks. · Registry: re-argue `:19`'s parenthetical; **add an entry** for a
+cross-tenant resource read and a cross-tenant create-time reference both answering the absent-id
+404 — **CONFIRMED, not INFERRED**, because §5 item 1 observed the reference's own answer before
+slice 1 ever started: a deliberate divergence if the reference answers 400 and this platform
+keeps its 404, a compatibility note if it answers 404 too. Either way the entry keeps **both**
+sides of the evidence that shaped the choice — the reference's existence-hiding precedent ("the
+same response as for any unknown workspace", authentication doc) against the only recorded
+org/workspace mismatch status, a **400** on `fallback_credit_token` (§4.2) — and cross-references
 `docs/DIVERGENCES.md:28`, this tree's one recorded cross-scope refusal (403 on the work API).
+**INFERRED only in the residual case** that item 1 proved unreachable, and then with **#78** as
+its tracker: an INFERRED entry naming no open issue is a `registry-check` finding
+(`tools/registrycheck/registrycheck.go:421-423` — "an entry in … must name the open issue whose
+recording would settle it").
 
 ### 7.5 Slice 5 — the leaks inheritance does not cover
 
@@ -1355,12 +1467,19 @@ ends on a schema no deployment reaches.
 per environment (skills are workspace-global)" *is* the defect — to the per-workspace rule plus
 the `anthropic`-source carve-out, keeping its INFERRED label and #78 pointer because the
 reference's own server-side auth scope for these routes stays unrecorded; **rewrite** `:200`,
-which the public skills page settles in part rather than unsettling. That page (fetched
-2026-09-03) **corroborates the workspace as the scope** — an explicit display name "doesn't need
-to be unique within your workspace" (`skills page:24`) — so `:200`'s per-workspace framing is
+which the public skills page settles in part rather than unsettling. Two of that entry's three
+"unrecorded" claims fall to one sentence on that page (`skills page:24`, quoted verbatim in
+§4.2, re-read 2026-09-04): the display name "is derived from the `name` field in `SKILL.md`" when
+the optional field is omitted — exactly what this platform does, so **derivation is neither
+unrecorded nor a divergence** — and an explicit one "can be up to 255 characters and doesn't need
+to be unique within your workspace", which both **corroborates the workspace as the scope** and
+settles uniqueness. So `:200`'s per-workspace framing is
 right and its *enforcement* is what diverges: the reference requires no uniqueness, this
 platform 400s a duplicate, which becomes a **CONFIRMED deliberate divergence** rather than an
-inference. What stays INFERRED is narrower than the entry claims today: the case-sensitivity and
+inference. The documented 255-character bound is recorded beside it, against the 4 KiB this
+platform bounds the form field at (`internal/api/skillsupload.go:21`) — a fact the entry states,
+not a check this slice adds. What stays INFERRED is narrower than the entry claims today: the
+case-sensitivity and
 the duplicate error's shape. The one open drift is the field **name** — the pinned SDK spells it
 `display_title` (`betaskill.go:128`) where that page says `display_name` — which keeps `:200`'s
 #78 pointer and needs no recording of its own, since two sources already disagree in writing;
@@ -1408,8 +1527,10 @@ someone updates one of them", a future decision 2 cancels. That comment is on th
 leaving it would ship a document predicting a future the plan declined. · `renderAPIKey`
 (`internal/api/consoleapikeys.go:108`, `WorkspaceID: nil` at `:113`) populates `WorkspaceID` from
 the row, discharging the promise at `:48-50` ("so #56 can populate them without a shape change").
-`Principal` stays null and is re-argued on principle 5. No `scope` field is invented (decision 5;
-its enum values are unrecorded regardless). · `parseScope` (`internal/api/environments.go:217-230`)
+`Principal` stays null and is re-argued on principle 5. No `scope` field is invented: decision 5
+mints only the reference's workspace-bound class, and the documented field belongs to the Admin
+API's `api_keys` resource, which §3 declines (§4.2). ·
+`parseScope` (`internal/api/environments.go:217-230`)
 keeps refusing `account`, on the new reason of §8-D8; the message at `:227` loses "yet". · The
 archive cascade of §6.9, including `workspace_archived_error`. · **OTel `org`/`workspace`
 attributes at the same-source instrumentation point, which is two places, not one.** The span and
@@ -1420,7 +1541,7 @@ and today carries `session.id` and `session.thread_id`; the metrics half is
 stated at `:35-37`. `ModelRequest` carries no scope today, so this is scope plumbing into the
 brain's request object plus one attribute pair at each end — priced as such, not as a one-liner —
 and one more pair on the queue gauges (`internal/queue/metrics.go`, whose self_hosted scan is
-the statement at `:91`), which is what makes
+the SQL literal at `:92`, under the `Query` call at `:91`), which is what makes
 the queue-fairness non-goal diagnosable. **No tenant field is added to any `span.*` event
 payload**: no reference field exists, and inventing one would be a wire invention at the very
 point principle 3 requires the two views not to drift. · The exemption list's **pinned count and
@@ -1460,9 +1581,11 @@ which is the step that proves administration is a capability rather than a resou
 the reference's**, whose behavior for a workspace-bound key sending a foreign header is what §5
 item 4 records (and if the recording says 200-ignored, this step and §6.2's fourth bullet change
 together); (e) `ant --api-key <B key> --workspace-id B` succeeds and `--workspace-id default` is
-404; (f) `ant beta:worker poll --environment-key <B env key> --workspace-id <B>` polls B's queue
-and reads B's skills but not the default workspace's — the direct regression test for the leak
-this plan exists to close.
+404; (f) `ant beta:worker poll --environment-id <B env> --environment-key <B env key>
+--workspace-id <B>` polls B's queue and reads B's skills but not the default workspace's — the
+direct regression test for the leak this plan exists to close. (The pinned CLI's worker poll
+requires `--environment-id` beside the key: `anthropic-cli/pkg/cmd/workspace_test.go:64-66`
+passes both.)
 
 **Docs.** `changelog.d/` · STATE.md back to none · plan frontmatter → `archived`;
 `docs/HISTORY.md` receives the progress summary and the acceptance record · README.md:75 — the
@@ -1494,8 +1617,10 @@ new issue.
 **Re-argue the twelve entries that actually cite single-tenancy as their reason**, which is a
 derived set, not a remembered one: `grep -nE "single-tenan|single organization|single-organization"
 docs/DIVERGENCES.md` → `:19`, `:45` (slice 1's, already rewritten there), `:50`, `:56`, `:93`,
-`:95` (the 500 GB per-org quota — "arbitrary on a single-tenant deployment" is replaced by
-operator-owned capacity), `:121`, `:143`, `:146`, `:228`, `:234`, `:239`. **Separately**, each
+`:95` (the 500 GB per-org quota, whose clause about a fixed ceiling being arbitrary on a
+single-tenant deployment gives way to the operator-owns-its-own-disk reason the same entry
+already carries — the words are paraphrased here, not quoted),
+`:121`, `:143`, `:146`, `:228`, `:234`, `:239`. **Separately**, each
 with its own stated reason rather than a single-tenancy premise it does not contain, revisit
 `:78` (environment worker-key *issuance*, which contains no tenancy word at all), `:79`, `:115`,
 `:118`, `:140` (the 1,000-scheduled-deployments cap) and `:147` — for `:115` the divergence
@@ -1524,13 +1649,13 @@ isn't scoped to a specific workspace"); the 100-workspaces cap, unenforced with 
 `workspace_archived_error` run-error message wording as ours; and the environment `scope`
 default's tie to organization type. **Add to the architecture-notes section, not INFERRED**: the
 five shared substrates of §6.10 — they are platform architecture, not inferences a recording
-could settle. **Add** INFERRED in exactly one place, and only conditionally: the api-key `scope`
-field's **enum values** (its function is documented — §4.2), if §5 item 5 proved unreachable.
-The other two candidates a draft would put here are **not** INFERRED by slice 6, because §5's
-recording closed them before slice 1: the environment Bearer key's workspace resolution on the
-work routes (item 2) and the organization-id format (item 3) land CONFIRMED at what was
-observed, and only an unreachable observation demotes one — which slice 1 records at the time,
-not slice 6 six PRs later. And per `docs/HISTORY.md:866-874` — #56's *last*
+could settle. **Add no INFERRED entry at all.** The two candidates a draft would put here are
+**not** INFERRED by slice 6, because §5's recording closed them before slice 1: the environment
+Bearer key's workspace resolution on the work routes (item 2) and the organization-id format
+(item 3) land CONFIRMED at what was observed, and only an unreachable observation demotes one —
+which slice 1 records at the time, not slice 6 six PRs later. A third candidate is gone
+outright: the api-key `scope` field is fully documented and belongs to a resource this platform
+does not mirror (§4.2). And per `docs/HISTORY.md:866-874` — #56's *last*
 scope change silently rotted five registry pointers **while the issue stayed open**, a rot no
 issue-state check can see — this PR re-reads every #56 reference by hand: **the registry's nine**
 (`grep -nE "#56([^0-9]|$)" docs/DIVERGENCES.md` → `:28`, `:45`, `:114`, `:115`, `:116`, `:121`,
@@ -1654,8 +1779,12 @@ picking one globally would override a recording.
 **D11 — The guard's completeness claim is a pinned exemption list, not a minimality assertion.**
 *Rejected:* "the list contains nothing but the platform-wide sweepers", which cannot hold once
 the target set includes the ~50 rule-(b′) root-table-by-own-PK mentions in brain, executor and
-vaultresolve and the 28-mention (15-statement) `internal/queue` work-API surface — without rules (b′) and (e) each of those
-classes would have to enter through (d), and the assertion would be false the day it landed. *Rejected:* shrinking the target set to
+vaultresolve, the 28-mention (15-statement) `internal/queue` work-API surface, and the ~49
+session-keyed mentions rule (f) admits in `internal/events` (51 mentions across 59 statements) —
+without rules (b′), (e) and (f) each of those classes would have to enter through (d), and the
+assertion would be false the day it landed. What is pinned instead is **nineteen** entries by
+count and by name (§6.5), five of them the cross-file parent resolutions rule (b)'s file-local
+check deliberately cannot admit. *Rejected:* shrinking the target set to
 `api` + `events` + `queue` and admitting brain/executor later — same end state, but the four
 non-handler inserts would then be caught by the plan's memory rather than by the mechanism.
 Pinned count plus pinned membership gets both: brain and executor are in scope from slice 2, and
@@ -1731,8 +1860,8 @@ unbootable with no repair path — the failure mode `0013` was written to avoid.
   interpretation" — and the same warning rides the two new variables.
 - **Decision 4's cliff is an operational surprise.** Creating a second workspace refuses every
   human until `IDENTITY_CLAIM_WORKSPACES` is configured. Bounded by the release note and by the
-  fail-closed arm being a *checkable* condition (exactly one workspace row) rather than a
-  configured default that can rot.
+  fail-closed arm being a *checkable* condition (exactly one **live** workspace row) rather than
+  a configured default that can rot.
 - **Slice 4 is one large PR by design** — the ten list builders, the by-id reads, ~15
   cross-reference checks — because a half-scoped read surface means a scoped session resolving an
   unscoped agent. It may be split by table family if review load demands it, and that is safe
@@ -1747,8 +1876,10 @@ unbootable with no repair path — the failure mode `0013` was written to avoid.
   frozen-org credentials is cheap while re-keying later is not. #550 must split work-API
   admission by route on the very routes slice 5 touches; its 2026-09-02 recording is live
   evidence for the work API's **refusal statuses** (`docs/DIVERGENCES.md:28`, the 403 body and
-  the `work.poll.wrong-env.cloud` fixture) and carries no tenancy-header observation at all —
-  those semantics rest on the public docs, which is precisely why §5 item 2 exists. This plan
+  the `work.poll.wrong-env.cloud` fixture), and as far as that entry's citation of it shows it
+  carries no tenancy-header observation — the recording lives outside this tree and was not
+  re-read for this plan. So those semantics rest on the public docs, which is precisely why §5
+  item 2 exists. This plan
   assumes both issues stay independent and says so, so a later conflict is a known decision
   rather than a surprise.
 
@@ -1756,10 +1887,11 @@ unbootable with no repair path — the failure mode `0013` was written to avoid.
 
 None on scope: the eight decisions of §1 settle appetite, the organization level, the write-only
 columns, the SSO cliff, the credential model, the recording, the limits and the ordering. What
-remains open is **evidence, not choice** — the six NOT OBSERVED items of §4.3, five of which §5's
-recording is scheduled to close before slice 1, and the sixth (`anthropic-organization-id`'s
-absence schedule) registered as ours. §5's sixth item gates slice 6 rather than slice 1, and its
-failure changes a registry label, not the design. Two smaller evidence threads ride along
+remains open is **evidence, not choice** — the **five** NOT OBSERVED items of §4.3, four of which
+§5's recording is scheduled to close before slice 1, and the fifth
+(`anthropic-organization-id`'s absence schedule) registered as ours. Of §5's **six** recording
+items, five gate slice 1 (items 1-4 and 6); item 5 gates slice 6 instead, and its failure
+changes a registry label, not the design. Two smaller evidence threads ride along
 without blocking anything: the skill display field's **name** — `display_title` in the pinned
 SDK against `display_name` on the public skills page, two written sources disagreeing, so
 `docs/DIVERGENCES.md:200` keeps its #78 pointer (§7.5) — and the environment `scope` default's
