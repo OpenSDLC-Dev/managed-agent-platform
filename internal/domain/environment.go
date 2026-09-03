@@ -32,7 +32,11 @@ type Networking struct {
 
 // EnvironmentConfig is the sandbox spec. Packages maps a package manager
 // ("apt","cargo","gem","go","npm","pip") to a list of packages (optionally
-// version-pinned).
+// version-pinned). It carries no slot for the wire's packages.type
+// discriminator (#382): that key is a render-time-only concern the API
+// layer stamps on and off (api.packagesTypeEcho) — this map must never
+// store it, or internal/executor's and the gate config endpoint's decode of
+// this same field breaks.
 type EnvironmentConfig struct {
 	Type       EnvironmentKind     `json:"type"`
 	Packages   map[string][]string `json:"packages,omitempty"`

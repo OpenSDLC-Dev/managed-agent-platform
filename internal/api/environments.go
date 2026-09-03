@@ -31,13 +31,20 @@ type environmentJSON struct {
 }
 
 // Normalized config shapes: responses always carry the full required surface
-// (cloud → networking + all six package lists; self_hosted → type only).
+// (cloud → networking + all six package lists; self_hosted → type only). A
+// rendered cloud response's packages object additionally carries
+// "type":"packages" — stamped onto the raw JSON map by packagesTypeEcho at
+// render time, never decoded into or persisted through packagesJSON below.
 type cloudConfigJSON struct {
 	Type       string          `json:"type"`
 	Networking json.RawMessage `json:"networking"`
 	Packages   packagesJSON    `json:"packages"`
 }
 
+// packagesJSON is the six package-manager lists as stored — it has no Type
+// field. The wire discriminator "type":"packages" (#382) is a render-time-
+// only addition: packagesTypeEcho stamps it onto the raw JSON map after
+// normalizeEnvConfig returns, so it never round-trips through this struct.
 type packagesJSON struct {
 	Apt   []string `json:"apt"`
 	Cargo []string `json:"cargo"`
@@ -181,12 +188,25 @@ func parseNetworking(raw, prior json.RawMessage) (json.RawMessage, error) {
 
 // parsePackages merges a packages patch onto base: managers present in the
 // patch replace their list (null clears), absent managers keep base values.
+// "type" is not a manager — it's the reference's discriminator sibling
+// (packagesJSON has no field for it; see packagesTypeEcho), and the only
+// value it ever admits is the JSON string "packages".
 func parsePackages(raw json.RawMessage, base packagesJSON) (packagesJSON, error) {
 	var byManager map[string]json.RawMessage
 	if err := json.Unmarshal(raw, &byManager); err != nil || byManager == nil {
 		return base, errInvalid("packages must map package managers to lists of packages")
 	}
 	for manager, rawList := range byManager {
+		if manager == "type" {
+			// Present requires exactly "packages"; null and "" fall through
+			// here too — json.Unmarshal into &typ leaves "" for null, same as
+			// a literal empty string, and both already fail typ != "packages".
+			var typ string
+			if json.Unmarshal(rawList, &typ) != nil || typ != "packages" {
+				return base, errInvalid(`packages.type must be "packages"`)
+			}
+			continue
+		}
 		list := []string{}
 		if !isNull(rawList) {
 			if err := json.Unmarshal(rawList, &list); err != nil {
@@ -236,9 +256,66 @@ func renderEnvironment(id, name, description string, config []byte, metadata map
 	}
 	return environmentJSON{
 		ID: id, Type: "environment", Name: name, Description: description,
-		Config: config, Scope: "organization", Metadata: metadata,
+		Config: packagesTypeEcho(config), Scope: "organization", Metadata: metadata,
 		CreatedAt: createdAt.UTC(), UpdatedAt: updatedAt.UTC(), ArchivedAt: utcPtr(archivedAt),
 	}
+}
+
+// packagesTypeEcho stamps "type":"packages" onto a cloud config's packages
+// object at render time — every create/get/list/update/archive response
+// goes through here, via renderEnvironment. The reference SDK types this key
+// as a discriminator sibling to the six manager lists, admitting only the
+// literal "packages" (anthropic-sdk-go v1.66.0 betaenvironment.go
+// BetaPackages.Type / BetaPackagesParams.Type, #382); packagesJSON has no
+// field for it, and parsePackages validates but never persists it (see its
+// own comment). That the reference's own response always renders the field
+// is unobserved (docs/DIVERGENCES.md, INFERRED); this platform does so
+// unconditionally.
+//
+// It works on maps of json.RawMessage rather than decoding through
+// cloudConfigJSON/packagesJSON: an earlier version that round-tripped through
+// those typed structs silently dropped any field the current normalizer
+// doesn't know about (a future top-level key, a future package manager) and
+// rewrote a stored "packages": null into an object of null lists (unmarshal
+// into a struct field is a silent no-op for JSON null, so nothing there
+// distinguished the two). Editing only the "packages" sub-map's "type" key in
+// place keeps both: every other field survives unchanged as a JSON value —
+// key order and whitespace are not preserved, since re-marshaling a
+// map[string]json.RawMessage re-sorts keys and HTML-escapes a raw &, < or >
+// inside any sibling value. self_hosted configs have no packages object and
+// pass through untouched (this function returns config unmodified, with no
+// marshal at all), as does anything that doesn't decode as an object at the
+// level being read — including a "packages" that is null or otherwise not an
+// object — unreachable through this platform's own writes, reachable only by
+// a direct DB write bypassing them.
+func packagesTypeEcho(config []byte) []byte {
+	var top map[string]json.RawMessage
+	if err := json.Unmarshal(config, &top); err != nil {
+		return config
+	}
+	var typ string
+	if raw, ok := top["type"]; !ok || json.Unmarshal(raw, &typ) != nil || typ != string(domain.EnvCloud) {
+		return config
+	}
+	rawPackages, ok := top["packages"]
+	if !ok {
+		return config
+	}
+	var pkgs map[string]json.RawMessage
+	if err := json.Unmarshal(rawPackages, &pkgs); err != nil || pkgs == nil {
+		return config
+	}
+	pkgs["type"] = json.RawMessage(`"packages"`)
+	newPackages, err := json.Marshal(pkgs)
+	if err != nil {
+		return config
+	}
+	top["packages"] = newPackages
+	out, err := json.Marshal(top)
+	if err != nil {
+		return config
+	}
+	return out
 }
 
 func (s *server) createEnvironment(r *http.Request) (any, error) {
