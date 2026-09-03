@@ -160,6 +160,17 @@ files through tool calls is cut off mid-call by a cap sized for chat, and the
 turn fails with `model_request_failed_error` after retries. It must be positive —
 an explicit zero is rejected at startup rather than read as "the default".
 
+An `anthropic` route may also set `flatten_search_results: true` if its endpoint
+rejects `search_result` blocks inside a replayed `web_search` tool_result — MiniMax's
+Anthropic-protocol endpoint does, answering `400 invalid params, invalid tool_result
+content` and ending the turn with `retries_exhausted`
+([#565](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/565)). It
+rewrites each `search_result` block to text (the same rendering the openai adapter
+always applies) before the request leaves the adapter; every other content block
+passes through unchanged. Default off, and rejected at startup on a `protocol: openai`
+route, since that adapter already flattens unconditionally — see docs/DIVERGENCES.md
+for why the default is off.
+
 ## The sandbox and the Docker socket
 
 The executor runs each session's tools in a per-session sandbox container. Under

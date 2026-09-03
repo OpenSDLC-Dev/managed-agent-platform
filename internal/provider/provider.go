@@ -38,12 +38,22 @@ type Config struct {
 	// adapter's own default — anthropic sends its required-field fallback,
 	// openai omits the field so the endpoint's default applies.
 	MaxTokens int64
+	// FlattenSearchResults flattens search_result blocks inside replayed
+	// tool_result content to text (via SearchResultText) before the request
+	// leaves the anthropic adapter. Valid only on protocol: anthropic routes
+	// — openai always flattens (provider/openai), so the flag would be a
+	// no-op there. Default off: a conformant Anthropic Messages endpoint
+	// needs no flattening, and the flag exists only for an endpoint that
+	// rejects the block (#565), not as the adapter's default behavior — see
+	// docs/DIVERGENCES.md.
+	FlattenSearchResults bool
 }
 
 // Request is one model turn in Anthropic Messages semantics. Content and
 // tool definitions stay as raw Anthropic wire JSON so the anthropic-protocol
-// adapter is near-zero-conversion; lossy mappings are confined to the
-// non-Anthropic adapters (see provider/openai).
+// adapter is near-zero-conversion by default; lossy mappings are confined to
+// the non-Anthropic adapters (see provider/openai) except where a route
+// opts the anthropic adapter into one (FlattenSearchResults, above).
 type Request struct {
 	System    string
 	Messages  []Message
@@ -184,6 +194,14 @@ func NewRegistry(routes []Route, factories map[string]Factory) (*Registry, error
 		// comma-ok test and panic a turn instead of failing construction.
 		if r.factories[route.Config.Protocol] == nil {
 			return nil, fmt.Errorf("route %q uses unknown protocol %q", route.Model, route.Config.Protocol)
+		}
+		// After the protocol checks above, so a route with no protocol (or an
+		// invalid one) fails with that error rather than this one. Checked
+		// here rather than only in LoadRoutes so a route built programmatically
+		// (evals, acceptance) is held to the same invariant as one loaded from
+		// config.
+		if route.Config.FlattenSearchResults && route.Config.Protocol != "anthropic" {
+			return nil, fmt.Errorf("route %q: flatten_search_results is only valid on protocol: anthropic routes", route.Model)
 		}
 		// The registry owns its config copies: Headers is a reference
 		// type, and sharing it with the caller's Route slice would let a

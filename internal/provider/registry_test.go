@@ -18,7 +18,7 @@ func fakeFactory(cfg provider.Config) (provider.Provider, error) {
 	return &fakeProvider{cfg: cfg}, nil
 }
 
-var factories = map[string]provider.Factory{"anthropic": fakeFactory}
+var factories = map[string]provider.Factory{"anthropic": fakeFactory, "openai": fakeFactory}
 
 func TestRegistryRouting(t *testing.T) {
 	reg, err := provider.NewRegistry([]provider.Route{
@@ -213,6 +213,12 @@ func TestRegistryValidation(t *testing.T) {
 		{"missing base_url", []provider.Route{{Model: "m", Config: provider.Config{Protocol: "anthropic"}}}},
 		{"missing protocol", []provider.Route{{Model: "m", Config: provider.Config{BaseURL: "http://x"}}}},
 		{"unknown protocol", []provider.Route{{Model: "m", Config: provider.Config{Protocol: "carrier-pigeon", BaseURL: "http://x"}}}},
+		// A known, valid protocol that just isn't anthropic — proves the
+		// check fires on its own rather than only ever riding along with the
+		// unknown-protocol error above, and holds a route built
+		// programmatically (bypassing LoadRoutes) to the same invariant.
+		{"flatten_search_results on an openai route", []provider.Route{{Model: "m", Config: provider.Config{
+			Protocol: "openai", BaseURL: "http://x", FlattenSearchResults: true}}}},
 		{"duplicate route", []provider.Route{
 			{Model: "m", Config: provider.Config{Protocol: "anthropic", BaseURL: "http://x"}},
 			{Model: "m", Config: provider.Config{Protocol: "anthropic", BaseURL: "http://y"}},
