@@ -614,16 +614,22 @@ func plural(n int, noun string) string {
 
 // deleteEnvironment hard-deletes an environment. A self_hosted environment
 // whose work queue still holds undrained tool_exec items is refused first —
-// 409, in the reference's own sentence (recorded 2026-09-02, #546). work_items
-// cascades from environments, so the queue is the one referent the delete
-// would take with it silently. The items' sessions refuse the delete too,
-// through their foreign key, but that message blames the sessions and sends an
-// operator to delete them — and their queued work with them. ?force=true lifts
-// the queue refusal and only that: no query parameter overrides the sessions'.
+// 409, in the reference's own sentence (recorded 2026-09-02, #546).
 //
-// The check is a read before the delete rather than a lock across both, and
-// the gap is safe: an item enqueued in it belongs to a session, whose foreign
-// key refuses the delete that follows.
+// It is a refusal this platform already made, in the wrong words. work_items
+// cascades from environments, but every item carries a session, a session
+// holds its environment through a foreign key that does not cascade, and
+// nothing moves a session between environments — so the delete raised 23503
+// before any cascade could run. What it said was that the environment still
+// had sessions, and clearing those is exactly what cascades the queue away:
+// the loss the reference refuses in order to prevent. The row that argument
+// does not cover is an item whose environment differs from its session's,
+// which the schema permits and no enqueue path produces.
+//
+// ?force=true lifts the queue refusal and only that. On the reference the
+// forced delete answers 200; here the sessions refuse it in their own words,
+// so force exchanges one refusal for another rather than deleting — the
+// divergence docs/DIVERGENCES.md registers.
 func (s *server) deleteEnvironment(r *http.Request) (any, error) {
 	ctx := r.Context()
 	id := r.PathValue("id")
@@ -636,19 +642,24 @@ func (s *server) deleteEnvironment(r *http.Request) (any, error) {
 	}
 	if !force {
 		// "The queue" is what the work API serves — tool_exec on a self_hosted
-		// environment, queue's workAPIScope — and an item has drained once it
-		// is stopped. A missing environment reads as kind '' and falls through
-		// to the delete's own 404.
+		// environment, queue's workAPIScope — and an item is drained once it is
+		// stopped, the boundary queue.StopWork's own force arm draws. A missing
+		// environment reads as kind '' and falls through to the delete's 404.
+		//
+		// The read is not locked against the delete below. The gap is safe
+		// because every enqueue takes the environment from the session's own
+		// row, so an item landing in it has a session here, whose foreign key
+		// refuses the delete.
 		var kind string
-		var undrained int
+		var undrained bool
 		if err := s.pool.QueryRow(ctx,
 			`SELECT COALESCE((SELECT kind FROM environments WHERE id = $1), ''),
-			        (SELECT count(*) FROM work_items
-			          WHERE environment_id = $1 AND kind = 'tool_exec' AND state <> 'stopped')`,
+			        EXISTS (SELECT 1 FROM work_items
+			                 WHERE environment_id = $1 AND kind = 'tool_exec' AND state <> 'stopped')`,
 			id).Scan(&kind, &undrained); err != nil {
 			return nil, err
 		}
-		if kind == string(domain.EnvSelfHosted) && undrained > 0 {
+		if kind == string(domain.EnvSelfHosted) && undrained {
 			return nil, errConflict("Cannot delete self-hosted environment with work in the queue. " +
 				"Either archive the environment first to allow the queue to drain, or use force=true to delete immediately.")
 		}

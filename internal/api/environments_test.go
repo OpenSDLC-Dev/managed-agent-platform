@@ -7,6 +7,9 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/queue"
 )
 
 // environmentRequiredFields is the BetaEnvironment wire surface (all
@@ -482,12 +485,14 @@ func TestEnvironmentKindIsImmutable(t *testing.T) {
 
 // The reference refuses to delete a self_hosted environment whose work queue
 // still holds items, in a sentence this platform now repeats (recorded
-// 2026-09-02, #546): work_items cascades from environments, so the queue is
-// what an unguarded delete takes with it silently. force=true lifts that
-// refusal and only that — the items' sessions still hold the environment
-// through their foreign key, so a delete forced past the queue lands on the
-// sessions' refusal, which names them. The test follows force there rather
-// than stopping at the 409, and checks the queue survived both.
+// 2026-09-02, #546). It is a refusal we already made in the wrong words: the
+// items' sessions hold the environment through a foreign key, so the delete
+// was refused for having sessions, and clearing those is what cascades the
+// queue away — the loss the reference refuses in order to prevent. force=true
+// lifts the queue refusal and only that, so a delete forced past it lands on
+// the sessions' refusal instead of succeeding as it does on the reference. The
+// test follows force there rather than stopping at the 409, and checks the
+// queue survived both.
 func TestEnvironmentDeleteRefusesASelfHostedQueueUnlessForced(t *testing.T) {
 	s := newTestServer(t)
 	envID, sessionID, _ := selfHostedWorker(t, s, "ek-delete")
@@ -518,31 +523,79 @@ func TestEnvironmentDeleteRefusesASelfHostedQueueUnlessForced(t *testing.T) {
 	}
 }
 
-// The refusal is the reference's, so it reaches exactly what the reference's
-// sentence names: a self-hosted environment, and work still in its queue. A
-// cloud environment's tool_exec is the platform executor's, not a worker's
-// queue, and a stopped item has drained — both fall through to the delete,
-// which the sessions then refuse in their own words.
+// The refusal reaches exactly what the reference's sentence names, and each of
+// the three predicates that decide it gets its own arm — a narrowed one would
+// otherwise pass on the case above, which enqueues a queued tool_exec on a
+// self_hosted environment and so satisfies all three at once.
+//
+//   - kind self_hosted: a cloud environment's tool_exec is the platform
+//     executor's queue, not a worker's, and the sentence does not speak for it.
+//   - kind tool_exec: the four platform-executed kinds never reach the wire
+//     (queue's workAPIScope), so a self_hosted environment holding only a
+//     model_turn holds nothing a worker could drain.
+//   - state: an item is drained once stopped, so a stopped one does not refuse
+//     and an active one — mid-flight, and the costliest to lose — does.
+//
+// The three that must not refuse fall through to the delete, which the
+// sessions then refuse in their own words.
 func TestEnvironmentDeleteQueueRefusalIsSelfHostedAndUndrainedOnly(t *testing.T) {
 	s := newTestServer(t)
+	const queueSentence = "work in the queue"
 
+	// A cloud environment's queued tool_exec.
 	agentID, cloudEnv := fixture(t, s)
 	enqueueToolExec(t, s, agentID, cloudEnv)
 	status, body := s.do(http.MethodDelete, "/v1/environments/"+cloudEnv, nil)
 	wantErr(t, status, body, http.StatusBadRequest, "invalid_request_error")
-	if msg, _ := body["error"].(map[string]any)["message"].(string); strings.Contains(msg, "work in the queue") {
+	if msg, _ := body["error"].(map[string]any)["message"].(string); strings.Contains(msg, queueSentence) {
 		t.Errorf("a cloud environment's queued tool_exec drew the self-hosted refusal: %q", msg)
 	}
 
-	envID, sessionID, _ := selfHostedWorker(t, s, "ek-drained")
-	enqueueOn(t, s, envID, sessionID)
-	if _, err := s.pool.Exec(context.Background(),
-		`UPDATE work_items SET state = 'stopped', stopped_at = now() WHERE environment_id = $1`, envID); err != nil {
+	// A self_hosted environment whose only item is the brain's own model_turn.
+	turnEnv, turnSession, _ := selfHostedWorker(t, s, "ek-modelturn")
+	if _, err := queue.New(s.pool).Enqueue(context.Background(), s.pool,
+		domain.ID(turnEnv), domain.ID(turnSession), queue.ModelTurn); err != nil {
 		t.Fatal(err)
 	}
+	status, body = s.do(http.MethodDelete, "/v1/environments/"+turnEnv, nil)
+	wantErr(t, status, body, http.StatusBadRequest, "invalid_request_error")
+	if msg, _ := body["error"].(map[string]any)["message"].(string); strings.Contains(msg, queueSentence) {
+		t.Errorf("a model_turn, which no worker polls, drew the refusal: %q", msg)
+	}
+
+	// A self_hosted tool_exec that has drained.
+	envID, sessionID, _ := selfHostedWorker(t, s, "ek-drained")
+	enqueueOn(t, s, envID, sessionID)
+	setWorkState(t, s, envID, "stopped")
 	status, body = s.do(http.MethodDelete, "/v1/environments/"+envID, nil)
 	wantErr(t, status, body, http.StatusBadRequest, "invalid_request_error")
-	if msg, _ := body["error"].(map[string]any)["message"].(string); strings.Contains(msg, "work in the queue") {
+	if msg, _ := body["error"].(map[string]any)["message"].(string); strings.Contains(msg, queueSentence) {
 		t.Errorf("a drained queue drew the refusal: %q", msg)
+	}
+
+	// A self_hosted tool_exec a worker is running right now. Nothing is queued
+	// here, so a refusal that only counted 'queued' rows would let this delete
+	// through — and it is the item whose loss costs most.
+	liveEnv, liveSession, _ := selfHostedWorker(t, s, "ek-active")
+	enqueueOn(t, s, liveEnv, liveSession)
+	setWorkState(t, s, liveEnv, "active")
+	status, body = s.do(http.MethodDelete, "/v1/environments/"+liveEnv, nil)
+	wantErr(t, status, body, http.StatusConflict, "invalid_request_error")
+	if msg, _ := body["error"].(map[string]any)["message"].(string); !strings.Contains(msg, queueSentence) {
+		t.Errorf("an active item did not draw the refusal: %q", msg)
+	}
+}
+
+// setWorkState drives the environment's work items to one state directly. The
+// lifecycle that would reach it needs a worker's ack and heartbeat, which is a
+// different subject than the delete's own predicate (the same seam
+// worktoken_test.go uses to archive a session).
+func setWorkState(t *testing.T, s *tserver, envID, state string) {
+	t.Helper()
+	if _, err := s.pool.Exec(context.Background(),
+		`UPDATE work_items SET state = $2,
+		   stopped_at = CASE WHEN $2 = 'stopped' THEN now() ELSE stopped_at END
+		 WHERE environment_id = $1`, envID, state); err != nil {
+		t.Fatal(err)
 	}
 }
