@@ -4584,9 +4584,11 @@ only a third against ours, plus a claim that understated this platform's own gat
 escapes by clearing `HTTP_PROXY`, when it installs owner-match iptables before it ever
 serves the proxy, so such a process is dropped rather than let out.
 
-Six issues came out of the review passes rather than the recording: #577, #578, #579,
-#581, #582, and the registration of the pre-existing #576. That is more than the
-recording pass produced unaided.
+Seven issues came out of the review passes rather than the recording: #577, #578,
+#579, #581, #582, the registration of the pre-existing #576, and #584 — a collision
+between a repository named `skills` and the skills materialization root, raised as an
+unverified risk and real on verification. That is more than the recording pass produced
+unaided.
 
 **The transferable rule, now written into the INFERRED preamble as a three-way routing
 test:** settling an inference has three ends — confirmed and we match, confirmed and we
