@@ -5,25 +5,26 @@ What is being worked on right now, and how far along it is — nothing else. **S
 ## Active work
 
 **#78 — confirming documented wire assumptions against a real managed-agents
-endpoint.** Two recording waves now, 785 request/response pairs for about US$1.02,
-kept outside this repo in a private archive because they are bytes observed once at
-cost. The first (2026-09-02) covered the Work API, turn semantics, multiagent
-threads, memory stores, files, skills, vaults, deployments and permission gating;
-the second (2026-09-03) took the tiers that needed model spend, an environment key,
-or a resource we lacked. #78 stays open past this work — 117 registry entries still
-name it as their tracker and the recordings reached only part of what they ask, and
-the larger debt is now analysis rather than recording: 72 comparison rows from the
-first wave have still never been read. Plan 37 (#51) archived 2026-09-01.
+endpoint.** Two recording sessions, 785 request/response pairs for about US$1.02, in
+a private archive: bytes observed once, at cost. 2026-09-02 covered the Work API,
+turn semantics, multiagent threads, memory stores, files, skills, vaults, deployments
+and permission gating; 2026-09-03 ran two waves, one free over console-cookie
+questions and one of 281 pairs against the tiers needing model spend, an environment
+key, or a resource we lacked. #78 stays open past this work — 112 registry entries
+still name it as their live tracker, and the debt is now analysis rather than
+recording: 72 comparison rows have never been read. Plan 37 (#51) archived 2026-09-01.
 
 ## Tasks
 
-- [x] Correct the three wire behaviors the first wave proved wrong: work-API
+- [x] Correct the three wire behaviors 2026-09-02 proved wrong: work-API
       cross-environment 403, agent-update null/empty-body no-op, interrupt result text
-- [x] Reconcile the first wave into the registry — three entries moved out of
-      INFERRED into CONFIRMED as argued divergences (#540, #541, #545), two proved
-      to match us outright, four registered readings were refuted, and ten
-      mismatches now belong to issues (#539, #542-#544, #546-#550, #553)
-- [x] Reconcile the second wave — fifteen entries settled, two narrowed, one
-      dissolved; eight mismatches now belong to issues (#570-#574, #577-#579)
-      and the `list_cost` unit to #432. Three of the eight came from the
-      reviewer: recording what the reference does is not checking what we do
+- [x] Reconcile 2026-09-02 into the registry — three entries moved out of INFERRED
+      into CONFIRMED as argued divergences (#540, #541, #545), two proved to match
+      us outright, four registered readings were refuted, and ten mismatches now
+      belong to issues (#539, #542-#544, #546-#550, #553)
+- [x] Reconcile 2026-09-03's second wave — fifteen archive comparison entries
+      settled, two narrowed, one dissolved, which touched twenty registry entries;
+      ten mismatches belong to issues (#570-#574, #577-#579, #581-#582), the
+      `list_cost` unit to #432, and #576 is registered where it was not
+- [ ] Read the 72 un-analysed comparison rows from 2026-09-02 — the recording
+      backlog is nearly exhausted and this one has never been touched

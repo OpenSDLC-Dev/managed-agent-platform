@@ -4563,3 +4563,35 @@ enters the sandbox and the egress gate is never involved; only the platform half
 with BYOC materialization deferred to #322 and the brain's environment-kind gate keeping
 that gap honest rather than silent; and a clone that fails surfaces as a `session.error`
 and leaves the session running with its other repositories mounted.
+
+## Second recording wave, registry reconciliation (#575) — review-hardening record (2026-09-04)
+
+Twenty registry entries were rewritten from a 281-pair recording of the live
+managed-agents endpoint. Two review passes found twenty defects between them, and
+**seventeen were one defect repeated**: the recording was read carefully, our own code
+was not read at all, and the entry was then filed as "confirmed, and we match".
+
+The verifier found five, of which the load-bearing one was a sentence claiming
+`isSkillReadPath` "admits exactly the subtree the reference serves" — inside an entry
+whose own first half says we additionally serve a route the reference answers 403 to.
+The Codex reviewer found three more, each a mismatch recorded as a match:
+`credential_host_unreachable_error` (we fire from a gate-config fetch against the live
+policy, not at session start against a creation snapshot), the context-overflow
+settlement, and the session-scoped `file_id`. The Claude reviewer found nine more of
+the same shape, including two entries that recorded a reference property and compared
+only a third against ours, plus a claim that understated this platform's own gate —
+`cmd/gate` was described as an environment-variable forward proxy a hostile process
+escapes by clearing `HTTP_PROXY`, when it installs owner-match iptables before it ever
+serves the proxy, so such a process is dropped rather than let out.
+
+Six issues came out of the review passes rather than the recording: #577, #578, #579,
+#581, #582, and the registration of the pre-existing #576. That is more than the
+recording pass produced unaided.
+
+**The transferable rule, now written into the INFERRED preamble as a three-way routing
+test:** settling an inference has three ends — confirmed and we match, confirmed and we
+differ on purpose, or we are simply wrong — and only reading our code decides which.
+Recording what the reference does is not checking what we do. `tools/registrycheck`
+enforces the mechanical half and caught two entries settled in place and left in the
+wrong section, but it cannot catch a prose claim about our own behavior; only a reader
+with the source open can.
