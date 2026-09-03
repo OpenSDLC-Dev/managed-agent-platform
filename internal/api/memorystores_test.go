@@ -317,6 +317,7 @@ func TestMemoryStoreList(t *testing.T) {
 	for i := 0; i < 3; i++ {
 		ids = append(ids, createMemoryStore(t, s, fmt.Sprintf("store %d", i)))
 	}
+	stampCreatedAt(t, s, "memory_stores", ids...)
 	if status, body := s.do(http.MethodPost, "/v1/memory_stores/"+ids[0]+"/archive", nil); status != http.StatusOK {
 		t.Fatalf("archive: status %d (%v)", status, body)
 	}
