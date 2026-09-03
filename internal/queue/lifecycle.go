@@ -55,6 +55,34 @@ type HeartbeatResult struct {
 	TTLSeconds    int64
 }
 
+// HasUndrainedWork reports whether the environment's work queue still holds an
+// item a worker could be handed or is already holding — work-API scope (see
+// workAPIScope), minus the items that have reached 'stopped'. It answers false
+// for an environment that does not exist, and for every cloud environment,
+// because a cloud tool_exec is the platform executor's queue rather than a
+// worker's and the scope excludes it.
+//
+// It lives here rather than in the one handler that asks (the environment
+// delete's refusal, #546) so that the wire's notion of the queue is defined
+// once. A hand-written copy in internal/api would drift the day this scope
+// changes, and would drift silently: the delete would start refusing on rows
+// no worker can drain, or stop refusing on rows one is running.
+//
+// "Undrained" is the boundary Stop's own force arm draws, and it is wider than
+// Stats' depth on purpose — depth counts the unreserved backlog a worker could
+// poll next, while a delete has to account for the leased item a worker is
+// running right now, which is the one whose loss costs most.
+func (q *Queue) HasUndrainedWork(ctx context.Context, envID domain.ID) (bool, error) {
+	var undrained bool
+	if err := q.pool.QueryRow(ctx,
+		`SELECT EXISTS (SELECT 1 FROM work_items
+		                 WHERE environment_id = $1`+workAPIScope+`
+		                   AND state <> 'stopped')`, envID).Scan(&undrained); err != nil {
+		return false, fmt.Errorf("queue: undrained work %s: %w", envID, err)
+	}
+	return undrained, nil
+}
+
 // GetWork returns one work item visible to the work API (see workAPIScope), or
 // ErrWorkNotFound.
 func (q *Queue) GetWork(ctx context.Context, envID, workID domain.ID) (*Work, error) {
