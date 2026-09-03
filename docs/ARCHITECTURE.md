@@ -269,11 +269,11 @@ Model access is **config-driven**: a provider is constructed from `protocol`
 (`anthropic` | `openai`) + `model` + `base_url` + `api_key` (+ optional headers), and a
 `model_providers` routing table maps an agent's model string to a provider instance.
 The Anthropic-protocol adapter is near-zero-conversion and works against any endpoint
-speaking Anthropic Messages; the OpenAI-compatible adapter is the platform's one lossy
-conversion seam, confined to `internal/provider/openai` and tested hard. Its
+speaking Anthropic Messages; the OpenAI-compatible adapter is the platform's lossy
+conversion seam by default, confined to `internal/provider/openai` and tested hard. Its
 `search_result` rendering lives in `internal/provider` rather than that package, so the
-anthropic adapter can share it under a route's opt-in `flatten_search_results` (#565)
-without becoming lossy by default. Providers are
+anthropic adapter can share it under the one route-level exception, a route's opt-in
+`flatten_search_results` (#565), without becoming lossy by default. Providers are
 built with `WithoutEnvironmentDefaults`, so ambient `ANTHROPIC_*` credentials can never
 leak to a configured third-party endpoint.
 

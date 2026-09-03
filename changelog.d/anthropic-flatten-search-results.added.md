@@ -6,6 +6,6 @@
   `search_result` block is rewritten to text using the rendering shared with
   `internal/provider/openai` (`provider.SearchResultText`); every other content block,
   the string form of `tool_result` content, and a block the rendering cannot parse all
-  pass through unchanged. Default off, and rejected at config load on a
-  `protocol: openai` route, which already flattens unconditionally — see
+  pass through unchanged. Default off; on a `protocol: openai` route, which already
+  flattens unconditionally, the provider registry refuses it at startup — see
   [docs/DIVERGENCES.md](./docs/DIVERGENCES.md) for why.
