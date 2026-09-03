@@ -612,11 +612,46 @@ func plural(n int, noun string) string {
 	return noun + "s"
 }
 
+// deleteEnvironment hard-deletes an environment. A self_hosted environment
+// whose work queue still holds undrained tool_exec items is refused first —
+// 409, in the reference's own sentence (recorded 2026-09-02, #546). work_items
+// cascades from environments, so the queue is the one referent the delete
+// would take with it silently. The items' sessions refuse the delete too,
+// through their foreign key, but that message blames the sessions and sends an
+// operator to delete them — and their queued work with them. ?force=true lifts
+// the queue refusal and only that: no query parameter overrides the sessions'.
+//
+// The check is a read before the delete rather than a lock across both, and
+// the gap is safe: an item enqueued in it belongs to a session, whose foreign
+// key refuses the delete that follows.
 func (s *server) deleteEnvironment(r *http.Request) (any, error) {
 	ctx := r.Context()
 	id := r.PathValue("id")
 	if err := checkID(id, "environment"); err != nil {
 		return nil, err
+	}
+	force, err := parseBoolParam(r.URL.Query(), "force")
+	if err != nil {
+		return nil, err
+	}
+	if !force {
+		// "The queue" is what the work API serves — tool_exec on a self_hosted
+		// environment, queue's workAPIScope — and an item has drained once it
+		// is stopped. A missing environment reads as kind '' and falls through
+		// to the delete's own 404.
+		var kind string
+		var undrained int
+		if err := s.pool.QueryRow(ctx,
+			`SELECT COALESCE((SELECT kind FROM environments WHERE id = $1), ''),
+			        (SELECT count(*) FROM work_items
+			          WHERE environment_id = $1 AND kind = 'tool_exec' AND state <> 'stopped')`,
+			id).Scan(&kind, &undrained); err != nil {
+			return nil, err
+		}
+		if kind == string(domain.EnvSelfHosted) && undrained > 0 {
+			return nil, errConflict("Cannot delete self-hosted environment with work in the queue. " +
+				"Either archive the environment first to allow the queue to drain, or use force=true to delete immediately.")
+		}
 	}
 	tag, err := s.pool.Exec(ctx, `DELETE FROM environments WHERE id = $1`, id)
 	var pgErr *pgconn.PgError

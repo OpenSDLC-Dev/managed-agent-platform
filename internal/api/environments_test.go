@@ -1,6 +1,7 @@
 package api_test
 
 import (
+	"context"
 	"net/http"
 	"reflect"
 	"strings"
@@ -476,5 +477,72 @@ func TestEnvironmentKindIsImmutable(t *testing.T) {
 		map[string]any{"config": map[string]any{"type": "self_hosted"}})
 	if status != http.StatusOK {
 		t.Errorf("same-kind config update rejected: status %d", status)
+	}
+}
+
+// The reference refuses to delete a self_hosted environment whose work queue
+// still holds items, in a sentence this platform now repeats (recorded
+// 2026-09-02, #546): work_items cascades from environments, so the queue is
+// what an unguarded delete takes with it silently. force=true lifts that
+// refusal and only that — the items' sessions still hold the environment
+// through their foreign key, so a delete forced past the queue lands on the
+// sessions' refusal, which names them. The test follows force there rather
+// than stopping at the 409, and checks the queue survived both.
+func TestEnvironmentDeleteRefusesASelfHostedQueueUnlessForced(t *testing.T) {
+	s := newTestServer(t)
+	envID, sessionID, _ := selfHostedWorker(t, s, "ek-delete")
+	enqueueOn(t, s, envID, sessionID)
+
+	status, body := s.do(http.MethodDelete, "/v1/environments/"+envID, nil)
+	wantErr(t, status, body, http.StatusConflict, "invalid_request_error")
+	const want = "Cannot delete self-hosted environment with work in the queue. " +
+		"Either archive the environment first to allow the queue to drain, or use force=true to delete immediately."
+	if msg, _ := body["error"].(map[string]any)["message"].(string); msg != want {
+		t.Errorf("refusal = %q, want the reference's sentence", msg)
+	}
+
+	status, body = s.do(http.MethodDelete, "/v1/environments/"+envID+"?force=true", nil)
+	wantErr(t, status, body, http.StatusBadRequest, "invalid_request_error")
+	if msg, _ := body["error"].(map[string]any)["message"].(string); !strings.Contains(msg, "still has sessions; delete them first") {
+		t.Errorf("the forced delete was refused with %q, want the sessions' refusal", msg)
+	}
+
+	var queued int
+	if err := s.pool.QueryRow(context.Background(),
+		`SELECT count(*) FROM work_items WHERE environment_id = $1 AND kind = 'tool_exec' AND state = 'queued'`,
+		envID).Scan(&queued); err != nil {
+		t.Fatal(err)
+	}
+	if queued != 1 {
+		t.Errorf("queued tool_exec items after two refused deletes = %d, want 1", queued)
+	}
+}
+
+// The refusal is the reference's, so it reaches exactly what the reference's
+// sentence names: a self-hosted environment, and work still in its queue. A
+// cloud environment's tool_exec is the platform executor's, not a worker's
+// queue, and a stopped item has drained — both fall through to the delete,
+// which the sessions then refuse in their own words.
+func TestEnvironmentDeleteQueueRefusalIsSelfHostedAndUndrainedOnly(t *testing.T) {
+	s := newTestServer(t)
+
+	agentID, cloudEnv := fixture(t, s)
+	enqueueToolExec(t, s, agentID, cloudEnv)
+	status, body := s.do(http.MethodDelete, "/v1/environments/"+cloudEnv, nil)
+	wantErr(t, status, body, http.StatusBadRequest, "invalid_request_error")
+	if msg, _ := body["error"].(map[string]any)["message"].(string); strings.Contains(msg, "work in the queue") {
+		t.Errorf("a cloud environment's queued tool_exec drew the self-hosted refusal: %q", msg)
+	}
+
+	envID, sessionID, _ := selfHostedWorker(t, s, "ek-drained")
+	enqueueOn(t, s, envID, sessionID)
+	if _, err := s.pool.Exec(context.Background(),
+		`UPDATE work_items SET state = 'stopped', stopped_at = now() WHERE environment_id = $1`, envID); err != nil {
+		t.Fatal(err)
+	}
+	status, body = s.do(http.MethodDelete, "/v1/environments/"+envID, nil)
+	wantErr(t, status, body, http.StatusBadRequest, "invalid_request_error")
+	if msg, _ := body["error"].(map[string]any)["message"].(string); strings.Contains(msg, "work in the queue") {
+		t.Errorf("a drained queue drew the refusal: %q", msg)
 	}
 }
