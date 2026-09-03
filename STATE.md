@@ -10,7 +10,7 @@ kept outside this repo in a private archive because they are bytes observed once
 cost. The first (2026-09-02) covered the Work API, turn semantics, multiagent
 threads, memory stores, files, skills, vaults, deployments and permission gating;
 the second (2026-09-03) took the tiers that needed model spend, an environment key,
-or a resource we lacked. #78 stays open past this work — over 120 registry entries
+or a resource we lacked. #78 stays open past this work — 117 registry entries still
 name it as their tracker and the recordings reached only part of what they ask, and
 the larger debt is now analysis rather than recording: 72 comparison rows from the
 first wave have still never been read. Plan 37 (#51) archived 2026-09-01.
