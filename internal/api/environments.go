@@ -612,9 +612,27 @@ func plural(n int, noun string) string {
 	return noun + "s"
 }
 
+// selfHostedQueueRefusal is the reference's 409 when the environment's work
+// queue still holds an item a worker could be handed or is running, and nil
+// when it does not. What counts as the queue is queue.HasUndrainedWork's to
+// define rather than this package's — it is the wire's own scope, so it
+// answers false for a cloud environment and for one that does not exist, and
+// the 404 is left to the delete.
+func (s *server) selfHostedQueueRefusal(ctx context.Context, envID string) error {
+	undrained, err := s.queue.HasUndrainedWork(ctx, domain.ID(envID))
+	if err != nil {
+		return err
+	}
+	if !undrained {
+		return nil
+	}
+	return errConflict("Cannot delete self-hosted environment with work in the queue. " +
+		"Either archive the environment first to allow the queue to drain, or use force=true to delete immediately.")
+}
+
 // deleteEnvironment hard-deletes an environment. A self_hosted environment
-// whose work queue still holds undrained tool_exec items is refused first —
-// 409, in the reference's own sentence (recorded 2026-09-02, #546).
+// whose work queue still holds undrained items is refused — 409, in the
+// reference's own sentence (recorded 2026-09-02, #546).
 //
 // It is a refusal this platform already made, in the wrong words. work_items
 // cascades from environments, but every item carries a session, a session
@@ -622,9 +640,16 @@ func plural(n int, noun string) string {
 // nothing moves a session between environments — so the delete raised 23503
 // before any cascade could run. What it said was that the environment still
 // had sessions, and clearing those is exactly what cascades the queue away:
-// the loss the reference refuses in order to prevent. The row that argument
-// does not cover is an item whose environment differs from its session's,
-// which the schema permits and no enqueue path produces.
+// the loss the reference refuses in order to prevent.
+//
+// Which is why the queue is read on both sides of the delete rather than
+// locked across it. Before, so the refusal never rides on a foreign key that
+// a row the schema permits — an item whose environment differs from its
+// session's, which no enqueue path produces — would not raise. After, because
+// a live session's first enqueue can land in the gap between the two, and
+// there the sessions' refusal would send an operator to delete the sessions,
+// taking that item with them. Locking instead would invert this handler's
+// lock order against every enqueue path, which takes the session row first.
 //
 // ?force=true lifts the queue refusal and only that. On the reference the
 // forced delete answers 200; here the sessions refuse it in their own words,
@@ -641,32 +666,18 @@ func (s *server) deleteEnvironment(r *http.Request) (any, error) {
 		return nil, err
 	}
 	if !force {
-		// "The queue" is what the work API serves — tool_exec on a self_hosted
-		// environment, queue's workAPIScope — and an item is drained once it is
-		// stopped, the boundary queue.StopWork's own force arm draws. A missing
-		// environment reads as kind '' and falls through to the delete's 404.
-		//
-		// The read is not locked against the delete below. The gap is safe
-		// because every enqueue takes the environment from the session's own
-		// row, so an item landing in it has a session here, whose foreign key
-		// refuses the delete.
-		var kind string
-		var undrained bool
-		if err := s.pool.QueryRow(ctx,
-			`SELECT COALESCE((SELECT kind FROM environments WHERE id = $1), ''),
-			        EXISTS (SELECT 1 FROM work_items
-			                 WHERE environment_id = $1 AND kind = 'tool_exec' AND state <> 'stopped')`,
-			id).Scan(&kind, &undrained); err != nil {
+		if err := s.selfHostedQueueRefusal(ctx, id); err != nil {
 			return nil, err
-		}
-		if kind == string(domain.EnvSelfHosted) && undrained {
-			return nil, errConflict("Cannot delete self-hosted environment with work in the queue. " +
-				"Either archive the environment first to allow the queue to drain, or use force=true to delete immediately.")
 		}
 	}
 	tag, err := s.pool.Exec(ctx, `DELETE FROM environments WHERE id = $1`, id)
 	var pgErr *pgconn.PgError
 	if errors.As(err, &pgErr) && pgErr.Code == "23503" { // foreign_key_violation
+		if !force {
+			if err := s.selfHostedQueueRefusal(ctx, id); err != nil {
+				return nil, err
+			}
+		}
 		return nil, environmentStillReferenced(ctx, s.pool, id)
 	}
 	if err != nil {
