@@ -24,5 +24,6 @@ first wave have still never been read. Plan 37 (#51) archived 2026-09-01.
       to match us outright, four registered readings were refuted, and ten
       mismatches now belong to issues (#539, #542-#544, #546-#550, #553)
 - [x] Reconcile the second wave — fifteen entries settled, two narrowed, one
-      dissolved; five mismatches now belong to issues (#570-#574) and the
-      `list_cost` unit to #432
+      dissolved; eight mismatches now belong to issues (#570-#574, #577-#579)
+      and the `list_cost` unit to #432. Three of the eight came from the
+      reviewer: recording what the reference does is not checking what we do
