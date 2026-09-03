@@ -114,7 +114,7 @@ make cd-outcome-test     # ...and the CD failure notifier's classifier, which `w
 make parked-test         # ...and the parked-cluster label rule `deploy.yml` and `staging-parked.yml` share
 make retry-test          # ...and the retry wrapper both notifiers copy, lifted out of the workflow YAML and run
 make identifiers-test    # ...and the documentation, for the four shapes an operator's coordinates take (#356's rule)
-make pins-test           # ...and every `uses:` in .github/workflows/, for the commit-SHA pin dependabot.yml requires
+make pins-test           # ...and every `uses:` in .github/workflows/, for the commit-SHA pin dependabot.yml requires, and every `actions/checkout` for the `persist-credentials: false` beside it
 make gcp-fmt gcp-validate gcp-split-check gcp-lint   # GCP staging Terraform, credential-free
 make gcp-bootstrap-test gcp-split-check-test gcp-dbinit-test gcp-power-test gcp-tfvars-test gcp-env-targets-test  # ...and its tooling, run rather than read
 ```
