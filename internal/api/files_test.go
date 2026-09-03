@@ -316,6 +316,7 @@ func TestFileList(t *testing.T) {
 		created := s.uploadFile(t, fmt.Sprintf("f%d.bin", i), &oct, fmt.Sprintf("body-%d", i))
 		ids = append(ids, created["id"].(string))
 	}
+	stampCreatedAt(t, s, "files", ids...)
 
 	// Full list: newest-first (created_at desc), so the last uploaded is first.
 	status, body := s.do("GET", "/v1/files", nil)

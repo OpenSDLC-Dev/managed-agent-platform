@@ -563,6 +563,7 @@ func TestAgentListPagination(t *testing.T) {
 		res := createAgent(t, s, map[string]any{"name": fmt.Sprintf("a%d", i), "model": "m"})
 		ids = append(ids, res["id"].(string))
 	}
+	stampCreatedAt(t, s, "agents", ids...)
 
 	status, page1 := s.do(http.MethodGet, "/v1/agents?limit=2", nil)
 	if status != http.StatusOK {

@@ -204,6 +204,7 @@ func TestEnvironmentListPaginationAndArchive(t *testing.T) {
 	e1 := createEnvironment(t, s, map[string]any{"name": "e1"})
 	e2 := createEnvironment(t, s, map[string]any{"name": "e2"})
 	e3 := createEnvironment(t, s, map[string]any{"name": "e3"})
+	stampCreatedAt(t, s, "environments", e1["id"].(string), e2["id"].(string), e3["id"].(string))
 
 	status, page1 := s.do(http.MethodGet, "/v1/environments?limit=2", nil)
 	if status != http.StatusOK {

@@ -207,6 +207,23 @@ func TestAPIKeyListingIsABareArrayWithEveryRow(t *testing.T) {
 		map[string]any{"status": api.KeyStatusArchived}); code != http.StatusOK {
 		t.Fatalf("archive: %d %v", code, obj)
 	}
+	// The bootstrap row is seeded at boot, milliseconds before these two are
+	// issued, and "newest first" is part of what this pins — so the three are
+	// stamped a second apart rather than left to that margin (#561). The
+	// bootstrap is named here the way the assertion below finds it, by its null
+	// creator, which is not the ordering under test.
+	var (
+		bootstrapID string
+		seeded      int
+	)
+	if err := s.pool.QueryRow(t.Context(),
+		`SELECT count(*), min(id) FROM api_keys WHERE created_by IS NULL`).Scan(&seeded, &bootstrapID); err != nil {
+		t.Fatalf("find the bootstrap key: %v", err)
+	}
+	if seeded != 1 {
+		t.Fatalf("%d keys have a null creator; the stamp below would leave the others at their own now()", seeded)
+	}
+	stampCreatedAt(t, s, "api_keys", bootstrapID, first, second)
 
 	rows := listAPIKeys(t, s)
 	if rowByID(rows, first) == nil {

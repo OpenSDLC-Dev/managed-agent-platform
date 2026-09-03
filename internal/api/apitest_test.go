@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -190,4 +191,55 @@ func nextPage(t *testing.T, body map[string]any) string {
 	}
 	s, _ := v.(string)
 	return s
+}
+
+// stampCreatedAt assigns the named rows the timestamps their listing orders on:
+// a second apart, in the order named, oldest first, from one now() and in one
+// statement.
+//
+// A list these tests assert positions in orders on `created_at`, with the row
+// id as the tiebreak behind it; `created_at` defaults to now() and the id is
+// 120 random bits — so a test naming rows by position holds only while the wall
+// clock stays monotonic across the writes that made them. Measured here, those
+// writes leave 1.5 to 6 ms between rows, and #411 recorded this hardware's
+// database clock stepping 20 ms backwards: larger than every one of those gaps
+// (#561). Where the order is the wire contract a test exists to pin it cannot
+// be sorted away, so it is assigned instead — the remedy #551 settled on.
+//
+// The session event list is the one caller ordering on something else, `seq`.
+// It takes a stamp for its created_at range filters alone, and says so there.
+//
+// One statement and one now(), never a loop: re-reading the clock per row lets
+// a slow round trip hand an older row a later timestamp, reintroducing exactly
+// what this removes. spreadCreatedAt says the same for environment keys, though
+// it takes its rows newest first — the reverse of this one.
+//
+// The newest row lands a second in the past rather than at now(), so a row
+// written after the stamp outranks all of them by a second instead of by the
+// milliseconds a request leaves. Two tests depend on that: they insert a row
+// mid-pagination and require it at the head.
+//
+// Only created_at moves: a stamped row's updated_at stays where it was, so a
+// test comparing the two must not read a stamped row.
+//
+// The table is interpolated because a table name cannot be a bind parameter;
+// every caller passes a literal.
+func stampCreatedAt(t *testing.T, s *tserver, table string, oldestFirst ...string) {
+	t.Helper()
+	ages := make([]float64, len(oldestFirst))
+	for i := range oldestFirst {
+		ages[i] = float64(len(oldestFirst) - i)
+	}
+	tag, err := s.pool.Exec(t.Context(),
+		fmt.Sprintf(`UPDATE %s r SET created_at = now() - make_interval(secs => n.age)
+		               FROM unnest($1::text[], $2::float8[]) AS n(id, age)
+		              WHERE r.id = n.id`, table),
+		oldestFirst, ages)
+	if err != nil {
+		t.Fatalf("stamp %s %v: %v", table, oldestFirst, err)
+	}
+	if tag.RowsAffected() != int64(len(oldestFirst)) {
+		t.Fatalf("stamped %d %s rows, want %d (ids %v)",
+			tag.RowsAffected(), table, len(oldestFirst), oldestFirst)
+	}
 }

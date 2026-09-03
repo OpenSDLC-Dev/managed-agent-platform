@@ -278,6 +278,7 @@ func TestSessionListFiltersByMemoryStore(t *testing.T) {
 	onlyX := createSession(t, s, map[string]any{"agent": agentID, "environment_id": envID,
 		"resources": []any{memoryElement(x, nil)}})["id"]
 	createSession(t, s, map[string]any{"agent": agentID, "environment_id": envID})
+	stampCreatedAt(t, s, "sessions", both.(string), onlyX.(string))
 
 	ids := func(q string) []any {
 		t.Helper()

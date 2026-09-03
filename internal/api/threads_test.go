@@ -407,6 +407,11 @@ func TestThreadArchive(t *testing.T) {
 	if thr := listThreads(t, s, sid); len(thr) != 3 {
 		t.Errorf("threads = %d, want primary + 2 children", len(thr))
 	}
+	// Creation order is what the cursor walks, and these three were written
+	// 4 to 6 ms apart by three separate settlements — less than the clock step
+	// #411 recorded — so it is assigned rather than left to the clock (#561).
+	stampCreatedAt(t, s, "session_threads", primary, running, idle)
+
 	// The list pages in creation order on a forward-only cursor: primary,
 	// running, idle; a cursor from another list shape is refused.
 	var walked []string
