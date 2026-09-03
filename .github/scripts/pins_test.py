@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Fail if a workflow runs an action that is not pinned to a commit SHA.
+"""Fail if a workflow runs an unpinned action, or keeps a credential it checked out with.
 
 `.github/dependabot.yml` states the rule and the reason: the workflows pin every
 action to a commit SHA, because a retargeted `v4` runs attacker-chosen code in a
@@ -13,7 +13,7 @@ findings unresolved -- put four mutable tags back: `actions/checkout@v4` and
 could and offered to move one mutable tag to another (#518). This is the
 enforcing half of that fix: the rule now fails a build instead of a reviewer.
 
-WHAT IT CHECKS, which is a SHAPE and not an identity:
+WHAT IT CHECKS, which is a SHAPE and, in one place, an identity:
 
   - the ref is a 40-character lowercase hex commit SHA, not a tag or a branch;
   - a trailing comment names a three-part release (`# v7.0.1`). NOT because
@@ -25,6 +25,19 @@ WHAT IT CHECKS, which is a SHAPE and not an identity:
     refused deliberately -- `# v7` names a moving pointer rather than a release,
     and `# v1.2.3.4` is not a version this ecosystem issues -- while a
     prerelease tail (`# v1.2.3-rc.1`) passes.
+  - every `actions/checkout` step carries `persist-credentials: false` under its
+    own `with:`. checkout v6 and later leave `GITHUB_TOKEN` in a credentials
+    file wired into the job's git config, so without the input every step after
+    it — a `make` recipe, a generated action, a model's tool calls — runs with a
+    repository credential nothing asked for, and one that OUTRANKS whatever
+    credential a later step supplies for itself: `http.<server>.extraheader`
+    replaces the header git would derive from a remote URL, so a token another
+    action minted never reaches the wire. This half of the same policy was also
+    applied by hand and kept by memory, and by the time anything enforced it
+    three call sites had never carried it while a released changelog said every
+    one did (#558). The action is matched case-INSENSITIVELY: `Actions/Checkout`
+    resolves to the same action, and an identity a spelling walks past is a rung
+    that prints `ok` over the one step it exists to read.
 
 WHAT IT CANNOT SEE, stated plainly so the surrounding prose claims no more:
 
@@ -39,11 +52,15 @@ WHAT IT CANNOT SEE, stated plainly so the surrounding prose claims no more:
     long after upstream fixed something in it. That is the cost the pairing with
     Dependabot buys back, and the reason a pin without an updater is worse than
     no pin at all.
-  - `persist-credentials: false`, the companion clause of the same policy. Three
-    `actions/checkout` call sites lack it today (#558), so a rule for it would go
-    red on work this guard is not about. It needs its own change, and that issue
-    is where the decision lives -- a docstring can explain a deferral but cannot
-    track one.
+  - whether a job actually NEEDS the credential it is being made to drop. A
+    workflow that pushes has to keep it, and this rung would fail that workflow
+    rather than read its mind. Nothing here pushes over git; the day something
+    does, its exemption belongs in this file beside the two below, argued --
+    which is the one place the last version of this rule was never written down.
+  - a credential persisted by anything other than `actions/checkout`: a `git
+    config` in a `run:`, a token written into the environment, some second
+    action that clones. This reads one action's one input, and the policy it
+    stands for is wider than the part a text scan can reach.
   - anything outside `.github/workflows/`: a composite action's own `uses:`, or a
     reusable workflow held in another repository.
 
@@ -68,12 +85,31 @@ skipped. Same line, and no further: a flow mapping broken across two lines is
 reached by neither rule, and belongs to the residual class below rather than to
 this one.
 
+WHAT COUNTS AS THAT STEP'S `with:`, since the input rung has to find a block
+without a parser. A step's keys share one COLUMN -- `uses:`'s own, measured past
+the `- ` of a list item and not before it, for the reason BLOCK_SCALAR's `lead`
+gives -- and the step runs from the line carrying that dash to the last line
+indented past the column. BOTH directions are walked, because YAML fixes no key
+order: `with:` may sit ABOVE `uses:`, and a forward-only extent would report a
+compliant step as a violation. Inside that extent `with:` is the key at exactly
+the column, and its inputs are the lines at the column the first of them sets.
+Everything else belongs to somebody else: a comment sets no column, a block
+scalar's body is data rather than keys, and a key nested under an input is not
+an input. Each of those is a way `persist-credentials` reaches a diff, reads as
+compliant, and never reaches checkout -- so each stops the run.
+
 EXEMPTIONS, recorded rather than discovered later. Two `uses:` forms can never
 carry a commit SHA -- a local action or reusable workflow (`./…`) and a container
 (`docker://…`) -- so both pass. Neither exists in this repository today, which
 means a guard that flagged them would look correct forever and then go red on the
 first legitimate one. A `docker://` image is not required to carry a digest here;
-that would be a different rule about a different supply chain.
+that would be a different rule about a different supply chain. And a comment
+explaining `persist-credentials: false` is deliberately NOT required, unlike the
+release comment above: that one exists because forty hex characters say nothing,
+where this line says what it is and what it is set to. A required comment would
+compel a justification rather than carry information, and `ci.yml`'s four
+verbatim copies of one are what that produces. Most call sites carry one anyway,
+above the step or inside the block, and neither placement is wrong.
 
 WHAT IT REFUSES THAT IS NEVERTHELESS VALID, recorded rather than worked around.
 Reading text means drawing a line, and the line belongs in writing. Each of
@@ -92,13 +128,67 @@ over quietly certifying something it cannot read:
   - a `run:` written as a multi-line PLAIN scalar whose continuation happens to
     read like a reference. Only block scalars are tracked as bodies, which every
     `run:` in this repository is.
+  - a step whose `- ` sits ALONE on its line, its keys beginning on the next. A
+    dash written that way fixes no column for the keys under it -- they may sit
+    at any indent past it -- so the input rung cannot say which `with:` belongs
+    to which step, and refuses instead of guessing. Every step here writes its
+    first key beside the dash.
+  - a step's inputs written as a FLOW MAPPING on the line below `with:`
+    (`with:` then `{persist-credentials: false}`), which is valid and can even
+    be compliant. It is refused for the same reason as the same mapping written
+    beside the key: one line holding a whole collection is a thing this scan
+    reads as text and cannot look inside, and the alternative to refusing it is
+    certifying it unread.
+  - any OTHER line of a checkout step that this scan cannot read as one plain
+    `key: value` or `- value` -- a quoted key (`"fetch-depth": 1`), a key holding
+    a space, an explicit `? ` key, or a flow collection broken across lines
+    (`sparse-checkout: [a,` / `b]`). All valid, and none of them saying anything
+    about the credential. They are refused because the NEIGHBOURS are how this
+    rung is fooled and not the input it looks for: a line this scan cannot read
+    is a value it never looks at, and one line of a two-line value reads as an
+    input of its own. A refusal here is loud and rare; the alternative is
+    reading a `persist-credentials` that YAML never parsed. One shape stays
+    counted rather than refused -- a continuation that itself reads as
+    `key: value`, like `b: c]` -- because it is readable by the same rule that
+    makes every ordinary input readable, and the quote rule is what stands
+    between it and the credential.
+  - a value whose CLOSING quote this scan misreads because `split_comment` ran
+    first. That function's `#` rule is naive about escapes, so
+    `fetch-depth: "a\\" # x"` -- valid, compliant, closed -- is truncated
+    mid-scalar and then refused as unterminated. The safe direction, and left
+    alone rather than fixed here: `split_comment` is the pin rung's too, and
+    this is not the change to alter what that rung reads.
 
 AND WHAT COULD STILL SLIP PAST, because the count this prints is a coverage
 claim and not a proof: a `uses:` in some shape neither the key anchor nor the
 reference search recognises is walked over in silence. Both were widened by
 review already -- a quoted key, a space before the colon, a flow mapping, a `#`
-smuggled into a ref -- and neither is a closed set. The remedy for that class is
-the next reviewer, not another regex.
+smuggled into a ref -- and neither is a closed set. One member of it is worth
+naming because review found it rather than imagined it: a QUOTED SCALAR SPANNING
+LINES is one YAML value and several lines of text, so a `uses:` written inside
+one is counted as a step that does not exist, and a whole-step ALIAS
+(`- *checkout`) is a step that exists and is not counted. In a CHECKOUT STEP the
+first is attacked head-on rather than admitted, because there it decides whether
+the credential is dropped: every line of the step, from its opening dash to its
+last, must be one this scan can read as `key: value` or `- value`, and none may
+leave open a quoted scalar this scan can find the start of. Review drove that rule through three
+rounds -- the quote hid at the input column, then one level under an input, then
+on a plain `name:` above `with:` where it swallowed the `with:` line itself and
+the step parsed with no inputs at all -- and it hid behind an anchor, a tag and a
+flow opener, each of which keeps node position open ahead of the quote.
+
+It is a rule about where a quote may open, though, and NOT a proof that none
+does: deciding whether a multi-line scalar crosses a block is what a YAML scanner
+is for, and this is a line-at-a-time reader with the refusals to match. One
+opening it still walks past is known and named rather than left to be found
+again -- a quote after a KEY INSIDE A FLOW COLLECTION (`sparse-checkout: {a: "1`)
+opens a position this scan reaches the front of and not the inside of. It is
+left because no checkout input takes a flow mapping, so no ordinary edit writes
+one, and the reach it buys an author who can write it is a rung they could
+delete instead. The pin rung above admits this whole class in the same words and
+does not even refuse it. So: every geometry review has produced is refused bar
+that one, the residual is open, and what closes it is a real scanner or the next
+reviewer -- not another regex.
 
 It self-tests before it scans, because a broken pattern and a clean repository
 print the same thing otherwise, and it refuses rather than skips: a line naming
@@ -117,7 +207,12 @@ WORKFLOWS = pathlib.Path(__file__).resolve().parents[1] / "workflows"
 # opens a step (`- uses: …`) and the keyed form that follows a `- name:` line.
 # Anchoring on only the first misses every reference in the two workflows this
 # guard was written for, which are all the second.
-USES_KEY = re.compile(r"^(?P<indent>[ \t]*)(?:-[ \t]+)?uses:[ \t]*(?P<value>\S.*?)[ \t]*$")
+#
+# `lead` spans the `- ` for BLOCK_SCALAR's reason, restated because the input
+# rung stands on it: a step's other keys sit past the KEY, not past the dash, so
+# a column measured to the dash makes every sibling of a list-item step look
+# like something nested under it.
+USES_KEY = re.compile(r"^(?P<lead>[ \t]*(?:-[ \t]+)?)uses:[ \t]*(?P<value>\S.*?)[ \t]*$")
 
 # Deliberately looser, and it must stay that way: it matches the key-position
 # spellings USES_KEY cannot parse -- a quoted key, a space before the colon, a
@@ -161,14 +256,67 @@ RELEASE = re.compile(r"^#[ \t]*v\d+\.\d+\.\d+(?![\w.])")
 # The two forms with no SHA to pin. Neither occurs here yet; see the docstring.
 EXEMPT = ("./", "docker://")
 
+# The one action whose input this guard reads. Compared case-folded, because
+# `Actions/Checkout@…` runs the same action and must not slip the rung.
+CHECKOUT = "actions/checkout"
+
+# The input itself, strict, and its deliberately looser twin -- USES_KEY and
+# USES_CANDIDATE's arrangement, for USES_CANDIDATE's reason: the loose one
+# matches the spellings the strict one cannot parse (a quoted key, a space
+# before the colon, a value on the next line) so each is refused by name rather
+# than passed over. Both are matched against the CODE half of a line, never the
+# raw text -- except inside a block scalar, where a `#` is body and not a
+# comment, and the raw line is what a reader sees.
+# The loose one is also case-INSENSITIVE, which the strict one is not, and the
+# asymmetry is the point: the runner reads an input name case-insensitively, so
+# `Persist-Credentials:` is the input -- but a second spelling of one input is
+# one too many, for the uppercase SHA's reason. Matching it loosely and refusing
+# it strictly is what turns it into a refusal that names the shape, instead of a
+# finding that says the input is absent when it is sitting right there.
+PC_INPUT = re.compile(r"^[ \t]*persist-credentials:[ \t]*(?P<value>\S.*?)[ \t]*$")
+PC_CANDIDATE = re.compile(r"^[ \t]*[\"']?persist-credentials[\"']?[ \t]*:", re.IGNORECASE)
+
+# EVERY input in a checkout's `with:`, not only the one this rung is about --
+# because the shape of its NEIGHBOURS is how the rung is fooled. A plain
+# `key: value`, and nothing else, is what the scan can read one line at a time.
+INPUT_KEY = re.compile(r"^[ \t]*[\w.-]+[ \t]*:[ \t]*(?P<value>.*?)[ \t]*$")
+
+# A sequence item, which carries a value the same way a `key:` does. Needed only
+# so that a quote opening inside one is seen; nothing here writes a sequence.
+SEQ_ITEM = re.compile(r"^[ \t]*-[ \t]+(?P<value>.*?)[ \t]*$")
+
+# The block the input has to sit in, in the same strict/loose pair. `lead` spans
+# the dash for USES_KEY's reason; `value` is non-empty only in flow style
+# (`with: {…}`), which is one line this scan cannot look inside.
+WITH_KEY = re.compile(r"^(?P<lead>[ \t]*(?:-[ \t]+)?)with:[ \t]*(?P<value>.*?)[ \t]*$")
+WITH_CANDIDATE = re.compile(r"^[ \t]*(?:-[ \t]+)?[\"']?with[\"']?[ \t]*:")
+
+# The `- ` that opens a step. Walking BACKWARD from `uses:` needs it: the step
+# begins at the line carrying a dash whose lead lands on the step's own column.
+LIST_ITEM = re.compile(r"^(?P<lead>[ \t]*-[ \t]+)")
+
+# The one value that satisfies the rule, and the one that says outright it does
+# not. checkout's own reader also accepts `False`/`FALSE`; they are refused for
+# the uppercase SHA's reason -- two spellings of one value is one too many --
+# and because a refusal names what to write instead.
+PERSIST_OK = "false"
+PERSIST_KEPT = "true"
+
 
 class Reference:
-    """One `uses:` key: where it is, what it names, and what follows it."""
+    """One `uses:` key: where it is, what it names, and what follows it.
 
-    def __init__(self, line, value, comment):
+    `column` is the step's own key column, which the input rung needs and the
+    pin rung does not read. The line NUMBER is 1-based to print; the index into
+    `lines` is `line - 1`, and the input rung derives it rather than carrying a
+    second field that could disagree with the first.
+    """
+
+    def __init__(self, line, value, comment, column):
         self.line = line
         self.value = value
         self.comment = comment
+        self.column = column
 
 
 def split_comment(text):
@@ -229,9 +377,8 @@ def reads_as_reference(code):
     return bool(STRAY_REFERENCE.search(code))
 
 
-def references(name, lines):
+def references(name, lines, body):
     """Every action reference in one workflow, refusing what it cannot place."""
-    body = in_block_scalar(lines)
     found = []
     for n, line in enumerate(lines):
         code, comment = split_comment(line)
@@ -266,7 +413,8 @@ def references(name, lines):
                 " so its pin would go UNCHECKED. Spell it the way the other steps"
                 " are, or teach USES_KEY the new shape."
             )
-        found.append(Reference(n + 1, m.group("value").strip("\"'"), comment))
+        found.append(Reference(n + 1, m.group("value").strip("\"'"), comment,
+                               len(m.group("lead"))))
     return found
 
 
@@ -287,10 +435,321 @@ def violation(ref):
     return None
 
 
+def is_checkout(ref):
+    """Is this reference the one action whose input the second rung reads?"""
+    m = REFERENCE.match(ref.value)
+    return bool(m) and m.group("action").lower() == CHECKOUT
+
+
+def quoted_value(code):
+    """This line's value, if it opens a quoted scalar -- otherwise None.
+
+    A quote opens a scalar only where a NODE may start, which is why the value
+    has to be found before a quote means anything: `ref: don't` is a plain
+    scalar holding an apostrophe, and a scan looking for quote characters
+    anywhere would refuse it. Two shapes carry a value here, an input and a
+    sequence item.
+
+    Node position is not simply the first character of that value, though, and
+    every token that can sit in front of the quote is one more way past this
+    rule: an anchor (`&x "1`), a tag (`!!str "1`), and the openers and
+    separators of a flow collection (`["1`) all keep the position open. Each is
+    stripped, repeatedly, before the quote is looked for.
+    """
+    m = INPUT_KEY.match(code) or SEQ_ITEM.match(code)
+    value = m.group("value") if m else ""
+    while value:
+        if value[0] in "[{,":
+            value = value[1:].lstrip()
+        elif value[0] in "&!" and (" " in value or "\t" in value):
+            value = value.split(None, 1)[1].lstrip() if len(value.split(None, 1)) > 1 else ""
+        else:
+            break
+    return value if value[:1] in ("\"", "'") else None
+
+
+def closes_on_its_line(value):
+    """Does this value's quoted scalar end on the line it started on?
+
+    Comparing the first character to the last is not enough, and the shape that
+    proves it is one escape past the shape this check was added for. YAML's two
+    quotings escape differently, and BOTH can end a line on what reads as a
+    closing quote while the scalar runs on: `'it''` holds one apostrophe and is
+    still open, and so is `"1\\"`. Either one then donates its next line to this
+    scan as an input that YAML never saw -- which is the whole fail-open again.
+    """
+    quote, i = value[0], 1
+    if quote == "'":
+        # A doubled quote is one apostrophe; a lone one ends the scalar.
+        while i < len(value):
+            if value[i] != "'":
+                i += 1
+            elif i + 1 < len(value) and value[i + 1] == "'":
+                i += 2
+            else:
+                return True
+        return False
+    # Double-quoted: a backslash escapes whatever follows it, itself included.
+    while i < len(value):
+        if value[i] == "\\":
+            i += 2
+        elif value[i] == '"':
+            return True
+        else:
+            i += 1
+    return False
+
+
+def code_of(lines, body, n):
+    """The comparable text of line `n`: its code, or its whole self in a body.
+
+    A `#` inside a block scalar is body text rather than a comment, so a line
+    the block-scalar scan claims is compared raw. Everywhere else the trailing
+    comment is dropped first, which is what keeps `# persist-credentials: false
+    because nothing here pushes` -- four workflows write it -- from reading as
+    the input it is explaining.
+    """
+    return lines[n] if n in body else split_comment(lines[n])[0]
+
+
+def step_extent(name, lines, body, ref):
+    """The half-open range of line indexes belonging to one step.
+
+    Walked in BOTH directions from `uses:`, because YAML fixes no key order: a
+    step may name `with:` above `uses:`, and a forward-only extent would call
+    that compliant step a violation. See the docstring's `with:` paragraph.
+    """
+    index, column = ref.line - 1, ref.column
+    where = f"{name}:{ref.line}"
+
+    # Backward. The step opens at the dash whose lead lands on this column --
+    # which, in the list-item form, is the `uses:` line itself.
+    start = index
+    if not (LIST_ITEM.match(lines[index]) and
+            len(LIST_ITEM.match(lines[index]).group("lead")) == column):
+        while start > 0:
+            start -= 1
+            code = code_of(lines, body, start)
+            if not code.strip():
+                continue  # A blank or a comment sets no column and ends nothing.
+            opener = LIST_ITEM.match(lines[start])
+            if opener and len(opener.group("lead")) == column:
+                break
+            if len(code) - len(code.lstrip()) < column and start not in body:
+                raise SystemExit(
+                    f"{where}: this step's keys run past the line that should open"
+                    " it — a `- ` alone on its line fixes no column for what follows"
+                    " it, so this guard cannot tell whose `with:` is whose. Write the"
+                    " step's first key beside its dash, the way the others are."
+                )
+        else:
+            raise SystemExit(
+                f"{where}: this `uses:` opens no step this guard can find — nothing"
+                " above it carries the `- ` its column belongs to. Write the step"
+                " the way the others are, or teach LIST_ITEM the new shape."
+            )
+
+    # Forward. The step ends at the first line of CODE indented less than the
+    # column, which is the next step's dash or the end of the `steps:` list.
+    end = index + 1
+    while end < len(lines):
+        code = code_of(lines, body, end)
+        if code.strip() and end not in body and \
+                len(code) - len(code.lstrip()) < column:
+            break
+        end += 1
+    return start, end
+
+
+def with_block(name, lines, body, ref, start, end):
+    """The index of this step's `with:` key, or None, refusing what it cannot place."""
+    found = []
+    for n in range(start, end):
+        if n in body:
+            continue
+        code = split_comment(lines[n])[0]
+        if not WITH_CANDIDATE.match(code):
+            continue
+        where = f"{name}:{n + 1}"
+        m = WITH_KEY.match(code)
+        if not m:
+            raise SystemExit(
+                f"{where}: this names `with:` in a shape this guard cannot read, so"
+                " the step's inputs would go UNCHECKED. Spell it the way the other"
+                " steps do, or teach WITH_KEY the new shape."
+            )
+        if m.group("value"):
+            raise SystemExit(
+                f"{where}: this step's `with:` is written in flow style, which this"
+                " guard reads as one line and cannot look inside, so"
+                " `persist-credentials` would go UNCHECKED. Write the inputs in"
+                " block style, or teach WITH_KEY the new shape."
+            )
+        if len(m.group("lead")) != ref.column:
+            raise SystemExit(
+                f"{where}: this names `with:` at a column that is not this step's,"
+                " so this guard cannot tell whose inputs these are. Line it up with"
+                " the step's other keys."
+            )
+        if found:
+            raise SystemExit(
+                f"{where}: this step names `with:` twice, and YAML keeps one of"
+                " them — which one is not something this guard can decide (the"
+                f" other is at {name}:{found[0] + 1}). Write the inputs once."
+            )
+        found.append(n)
+    return found[0] if found else None
+
+
+def input_lines(lines, body, block, end, column):
+    """The line indexes that are inputs of the `with:` at `block`.
+
+    An input is a line at the column the FIRST input sets. A comment sets no
+    column (it would otherwise orphan the real input, which `ci.yml` puts three
+    comment lines above), a block scalar's body is data, and a key nested deeper
+    than the first input is not a sibling of it.
+    """
+    inputs, at = [], None
+    for n in range(block + 1, end):
+        if n in body:
+            continue
+        code = split_comment(lines[n])[0]
+        if not code.strip():
+            continue
+        indent = len(code) - len(code.lstrip())
+        if indent <= column:
+            break
+        if at is None:
+            at = indent
+        if indent == at:
+            inputs.append(n)
+    return inputs
+
+
+def credential_violation(name, lines, body, ref):
+    """Why this checkout keeps the job's credential, or None if it drops it.
+
+    Refusals come first and findings second, deliberately: a
+    `persist-credentials` this guard can see but cannot place reads as compliant
+    in a diff and reaches checkout never, which is worse than one plainly absent.
+    """
+    if not is_checkout(ref):
+        return None
+    start, end = step_extent(name, lines, body, ref)
+    block = with_block(name, lines, body, ref, start, end)
+    inputs = input_lines(lines, body, block, end, ref.column) if block is not None else []
+
+    # Read the NEIGHBOURS before reading the input, because a neighbour is how
+    # this rung is fooled. A value opening a quote it does not close runs on
+    # into the next line, and YAML then reads BOTH as one scalar: written as
+    #
+    #     fetch-depth: "1
+    #     persist-credentials: false"
+    #
+    # there is no `persist-credentials` input at all -- checkout defaults it to
+    # true and keeps the credential -- while a scan reading one line at a time
+    # sees a tidy `false` on the second. That is the fail-OPEN this whole rung
+    # exists to prevent, so an input this scan cannot read on its own line stops
+    # the run whether or not it is the one being looked for.
+    #
+    # It runs over the WHOLE STEP, not the `with:` block and not the input
+    # column, because those are two more places the opening quote can hide. One
+    # level deeper, under an input of its own, it is past everything that
+    # measures the input column -- and ABOVE `with:`, on an ordinary `name:`,
+    # it swallows the `with:` line itself, so the step parses with no inputs at
+    # all while this scan reads a block that YAML never saw. Both still land
+    # their tail on the input column, spelled exactly like the answer.
+    #
+    # And every line of the step has to be READABLE, not just the inputs: a key
+    # this scan cannot parse (quoted, spaced, an explicit `? `) carries a value
+    # it therefore never looks at, which is the same hole reached by spelling.
+    for n in range(start, end):
+        if n in body:
+            continue
+        code = split_comment(lines[n])[0]
+        if not code.strip():
+            continue
+        where = f"{name}:{n + 1}"
+        if not (INPUT_KEY.match(code) or SEQ_ITEM.match(code)):
+            raise SystemExit(
+                f"{where}: this step holds a line this guard cannot read as one"
+                " `key: value` — a flow mapping, a quoted or spaced key, or a shape"
+                " not tried before. A line it cannot read is a value it cannot"
+                " look at, and `persist-credentials` cannot be checked around one."
+                " Write the step's lines as plain `key: value`."
+            )
+        value = quoted_value(code)
+        if value is not None and not closes_on_its_line(value):
+            raise SystemExit(
+                f"{where}: this opens a quote it does not close on this line, so"
+                " YAML reads it and the line below as ONE value and this guard"
+                " reads them as two — which is how a `persist-credentials` that"
+                " YAML never parsed reads as compliant here. Close the quote, or"
+                " write the value on one line."
+            )
+
+    value, at = None, None
+    for n in range(start, end):
+        if not PC_CANDIDATE.match(code_of(lines, body, n)):
+            continue
+        where = f"{name}:{n + 1}"
+        if n not in inputs:
+            raise SystemExit(
+                f"{where}: this names `persist-credentials` where checkout never"
+                " reads it — not as an input at this step's `with:` column. It"
+                " reads as compliant in a diff and does nothing. Move it under"
+                " `with:`, or teach PC_INPUT the new shape."
+            )
+        m = PC_INPUT.match(split_comment(lines[n])[0])
+        if not m:
+            raise SystemExit(
+                f"{where}: this names `persist-credentials` in a shape this guard"
+                " cannot read, so the credential it sets would go UNCHECKED. Spell"
+                " it the way the other checkouts do, or teach PC_INPUT the new"
+                " shape."
+            )
+        if value is not None:
+            raise SystemExit(
+                f"{where}: this step sets `persist-credentials` twice, and YAML"
+                " keeps one of them — which one is not something this guard can"
+                f" decide (the other is at {at}). Set it once."
+            )
+        value, at = m.group("value").strip("\"'"), where
+
+    if value is None:
+        return ("`actions/checkout` does not set `persist-credentials: false` —"
+                " checkout leaves the job's token in a credentials file wired into"
+                " its git config, where it outranks any credential a later step"
+                " supplies for itself")
+    if value == PERSIST_OK:
+        return None
+    if value == PERSIST_KEPT:
+        return ("`actions/checkout` sets `persist-credentials: true`, so the job"
+                " keeps a live repository credential after the step — nothing here"
+                " pushes over git, and something that did would need its exemption"
+                " argued in this guard")
+    raise SystemExit(
+        f"{at}: `persist-credentials` is set to `{value}`, which this guard cannot"
+        " read as `false`. Write `false` — an expression resolves somewhere a gate"
+        " cannot follow, and a second spelling of one value is one too many."
+    )
+
+
+def violations(name, lines):
+    """One workflow's references, and every finding against them."""
+    body = in_block_scalar(lines)
+    refs = references(name, lines, body)
+    found = []
+    for ref in refs:
+        for why in (violation(ref), credential_violation(name, lines, body, ref)):
+            if why is not None:
+                found.append((ref.line, why))
+    return refs, found
+
+
 def scan(name, text):
     """One workflow's violations, as (line, why)."""
-    return [(r.line, why) for r in references(name, text.splitlines())
-            if (why := violation(r)) is not None]
+    return violations(name, text.splitlines())[1]
 
 
 def selftest():
@@ -302,6 +761,14 @@ def selftest():
     parser cannot place stops the run rather than leaving CI green over it.
     """
     step = "    steps:\n      - name: a step\n"
+    # Two real pins, so every row says which rung it is about. The input rung
+    # reads `actions/checkout` and nothing else, so a row about PIN shape names
+    # the other action: otherwise each would need a `with:` block it is not
+    # about, and a failure could not be attributed to one rung. Keep it that
+    # way -- swapping `other` back to checkout makes five rows fail for the
+    # wrong reason and teaches the next reader to distrust the suite.
+    pin = "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1"
+    other = "actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0"
     must_flag = [
         ("a mutable major tag, list-item form",
          "      - uses: actions/checkout@v4\n"),
@@ -343,16 +810,38 @@ def selftest():
         # being, which is the whole reason the row is here.
         ("a hash behind a space, inside a quoted ref",
          '      - uses: "evil/action@3d3c42e5aac5ba805825da76410c181273ba90b1 # v1.2.3"\n'),
+        # The input rung. Every row below is correctly PINNED, so the only rung
+        # that can fire on it is this one — which is how the two stay
+        # distinguishable without changing what a row is.
+        ("a checkout that names no inputs at all",
+         f"      - uses: {pin}\n"),
+        ("a checkout whose `with:` names other inputs and not this one",
+         f"      - uses: {pin}\n        with:\n          fetch-depth: 0\n"),
+        ("a checkout in the keyed form, whose `with:` names other inputs",
+         step + f"        uses: {pin}\n        with:\n          fetch-depth: 1\n"),
+        ("a checkout that keeps the credential on purpose",
+         f"      - uses: {pin}\n        with:\n          persist-credentials: true\n"),
+        # The two directions the step extent can leak. Both were a way for one
+        # step's input to certify another step, which is the whole reason the
+        # extent is measured rather than guessed.
+        ("a second checkout the first one's input does not cover",
+         f"      - uses: {pin}\n        with:\n          persist-credentials: false\n"
+         f"      - uses: {pin}\n        with:\n          fetch-depth: 0\n"),
+        ("a checkout borrowing the next step's input",
+         f"      - uses: {pin}\n      - uses: {other}\n        with:\n"
+         "          persist-credentials: false\n"),
+        ("a spelling of the action that resolves to the same action",
+         "      - uses: Actions/Checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1\n"),
     ]
     must_pass = [
         ("a pinned action, list-item form",
-         "      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1\n"),
+         f"      - uses: {other}\n"),
         ("a pinned action, keyed form",
          step + "        uses: anthropics/claude-code-action@fa2b2666b747000bf42767d1f332065b375e3c8f # v1.0.214\n"),
         ("a pinned action, quoted",
-         '      - uses: "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1" # v7.0.1\n'),
+         '      - uses: "actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e" # v7.0.0\n'),
         ("a release comment with prose after it",
-         "      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1, see #96\n"),
+         f"      - uses: {other}, see #96\n"),
         ("a remote reusable workflow, which pins like an action",
          "    uses: o/r/.github/workflows/w.yml@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1\n"),
         ("a local action, which has no SHA to pin",
@@ -363,7 +852,7 @@ def selftest():
          "      - uses: docker://alpine:3.20\n"),
         ("a pinned step whose sibling key opens a block scalar",
          "      - if: >\n          github.event_name == 'push'\n"
-         "        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1\n"),
+         f"        uses: {other}\n"),
         ("shell text inside a block scalar",
          "      - run: |\n          grep uses: x.yml\n"),
         # The line this repository is most likely to write, and an early draft
@@ -377,7 +866,29 @@ def selftest():
         ("a folded block scalar's body",
          "      - if: >\n          contains(github.event.uses: no)\n"),
         ("a block scalar the next key closes",
-         "      - run: |\n          echo uses: nothing\n      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1\n"),
+         f"      - run: |\n          echo uses: nothing\n      - uses: {other}\n"),
+        # The input rung's false-positive guards. None of these can fail against
+        # the pre-rung code, which passes everything; they fail against a rung
+        # that reads the wrong block, the wrong column, or the wrong action.
+        ("a checkout that carries the input, list-item form",
+         f"      - uses: {pin}\n        with:\n          persist-credentials: false\n"),
+        ("a checkout that carries it beside another input, keyed form",
+         step + f"        uses: {pin}\n        with:\n          fetch-depth: 1\n"
+         "          persist-credentials: false\n"),
+        ("the input above the `uses:` it belongs to, which YAML allows",
+         step + "        with:\n          persist-credentials: false\n"
+         f"        uses: {pin}\n"),
+        ("the input under the comment that explains it",
+         f"      - uses: {pin}\n        with:\n"
+         "          # Nothing here pushes, so the token has no reason to outlive it.\n"
+         "          persist-credentials: false\n"),
+        ("the explanation above the step, where four workflows write it",
+         "      # persist-credentials: false because nothing here pushes.\n"
+         f"      - uses: {pin}\n        with:\n          persist-credentials: false\n"),
+        ("another action's `with:`, which this rung has no business in",
+         f"      - uses: {other}\n        with:\n          go-version-file: go.mod\n"),
+        ("a quoted value, which is the same value",
+         f"      - uses: {pin}\n        with:\n          persist-credentials: 'false'\n"),
     ]
     # Shapes that must stop the run rather than pass or be counted. Each was a
     # way for a reference to go unchecked while the scan still printed `ok`.
@@ -399,6 +910,112 @@ def selftest():
         # as a finding in a file that has none.
         ("a block scalar whose header carries a comment",
          "      - run: | # why\n          uses: actions/checkout@v4\n"),
+        # The input rung's refusals. Each is a way `persist-credentials` reaches
+        # a diff, reads as compliant to a human, and reaches checkout never — so
+        # each stops the run instead of being counted as either result.
+        ("a `with:` written in flow style, which this guard reads as one line",
+         f"      - uses: {pin}\n        with: {{persist-credentials: false}}\n"),
+        ("a `with:` indented past the step's own keys",
+         step + f"        uses: {pin}\n          with:\n"
+         "            persist-credentials: false\n"),
+        ("a second `with:`, which YAML resolves and this guard cannot",
+         f"      - uses: {pin}\n        with:\n          fetch-depth: 0\n"
+         "        with:\n          persist-credentials: false\n"),
+        ("the input under a key that is not `with:`",
+         f"      - uses: {pin}\n        env:\n          persist-credentials: false\n"),
+        ("the input named inside a block scalar, where checkout never reads it",
+         f"      - uses: {pin}\n        with:\n          ssh-key: |\n"
+         "            persist-credentials: false\n"),
+        ("the input nested under another input, which is not an input",
+         f"      - uses: {pin}\n        with:\n          ssh-key:\n"
+         "            persist-credentials: false\n"),
+        ("a quoted key, which PC_INPUT does not read",
+         f"      - uses: {pin}\n        with:\n"
+         '          "persist-credentials": false\n'),
+        # The runner reads this one as the input; the guard refuses it by name
+        # rather than reporting the input absent while it sits there.
+        ("a second spelling of the key, which the runner would honour",
+         f"      - uses: {pin}\n        with:\n"
+         "          Persist-Credentials: false\n"),
+        ("a space before the colon, which PC_INPUT does not read",
+         f"      - uses: {pin}\n        with:\n          persist-credentials : false\n"),
+        ("a value that resolves somewhere this guard cannot follow",
+         f"      - uses: {pin}\n        with:\n"
+         "          persist-credentials: ${{ inputs.persist }}\n"),
+        ("a second spelling of the one value",
+         f"      - uses: {pin}\n        with:\n"
+         '          persist-credentials: "False"\n'),
+        ("the input set twice, which YAML resolves and this guard cannot",
+         f"      - uses: {pin}\n        with:\n          persist-credentials: false\n"
+         "          persist-credentials: true\n"),
+        # Valid YAML, and a compliant checkout — refused anyway, because the
+        # dash fixes no column for the keys below it. The row is here so the
+        # refusal the docstring records is one the suite actually holds.
+        ("a step whose dash sits alone on its line",
+         f"      -\n        uses: {pin}\n        with:\n"
+         "          persist-credentials: false\n"),
+        ("the inputs written as a flow mapping below `with:`",
+         f"      - uses: {pin}\n        with:\n"
+         "          {persist-credentials: false}\n"),
+        # The one that read as COMPLIANT before it was refused: YAML joins these
+        # two lines into `fetch-depth: "1 persist-credentials: false"`, so there
+        # is no such input and checkout keeps the credential, while a scan
+        # reading a line at a time finds a tidy `false` on the second. Removing
+        # the quote check puts that fail-open straight back.
+        ("a quoted value that runs on into the next line",
+         f"      - uses: {pin}\n        with:\n"
+         '          fetch-depth: "1\n'
+         '          persist-credentials: false"\n'),
+        # And the same attack one escape deeper, which a first-character-to-last
+        # closure test reads as closed. Both of these END on a quote and are
+        # still open: `''` is one apostrophe, `\\"` is one double quote. Each
+        # then donates the line below as an input YAML never saw.
+        ("a value ending on an escaped quote, single",
+         f"      - uses: {pin}\n        with:\n"
+         "          fetch-depth: 'it''\n"
+         "          persist-credentials: false'\n"),
+        ("a value ending on an escaped quote, double",
+         f"      - uses: {pin}\n        with:\n"
+         '          fetch-depth: "1\\"\n'
+         '          persist-credentials: false"\n'),
+        # And deeper again: the quote need not open on an INPUT. Nested under
+        # one, it is past every rule that measures the input column — and its
+        # tail still lands back on that column, spelled like the answer. This is
+        # why the quote check reads the whole block and not the inputs.
+        ("a quote opened under an input, whose tail lands on the input column",
+         f"      - uses: {pin}\n        with:\n          ssh-key:\n"
+         '            x: "1\n'
+         '          persist-credentials: false"\n'),
+        ("the same, opened by a sequence item",
+         f"      - uses: {pin}\n        with:\n          ssh-key:\n"
+         '            - "1\n'
+         '          persist-credentials: false"\n'),
+        # Three families review found after the first quote rule, each a way the
+        # quote is not where the rule looked. They are one row apiece rather than
+        # ten: what makes them distinct is WHERE the position stays open, and a
+        # rule closing one member closes its siblings.
+        ("a quote behind an anchor, which keeps node position open",
+         f"      - uses: {pin}\n        with:\n"
+         '          fetch-depth: &a "1\n'
+         '          persist-credentials: false"\n'),
+        ("a quote behind a flow opener",
+         f"      - uses: {pin}\n        with:\n"
+         '          sparse-checkout: ["1\n'
+         '          persist-credentials: false\n'
+         '          x: y"]\n'),
+        # The one needing no exotic syntax at all, and the reason the scan runs
+        # from the step's first line: this swallows the `with:` LINE, so the step
+        # parses with no inputs whatever while the scan reads a block YAML never
+        # saw.
+        ("a quote on a step key above `with:`",
+         f"      - uses: {pin}\n"
+         '        name: "1\n'
+         "        with:\n"
+         '          persist-credentials: false"\n'),
+        ("a key this scan cannot read, carrying a value it therefore cannot see",
+         f"      - uses: {pin}\n        with:\n          ssh-key:\n"
+         '            a b: "1\n'
+         '          persist-credentials: false"\n'),
     ]
 
     failures = []
@@ -425,10 +1042,19 @@ def selftest():
             pass
 
     # The parser must also SEE what it passes, or an exemption and a blind spot
-    # are the same result. The first must_pass row is one step and one reference.
-    seen = len(references("selftest.yml", must_pass[0][1].splitlines()))
+    # are the same result. The first must_pass row is one step and one reference,
+    # and the first must_flag input row is one step and one checkout — the same
+    # claim for the rung whose silence would otherwise be indistinguishable from
+    # a repository that checks nothing out.
+    lines = must_pass[0][1].splitlines()
+    seen = len(references("selftest.yml", lines, in_block_scalar(lines)))
     if seen != 1:
         failures.append(f"COUNT    a single pinned step read as {seen} references")
+    lines = f"      - uses: {pin}\n".splitlines()
+    checkouts = [r for r in references("selftest.yml", lines, in_block_scalar(lines))
+                 if is_checkout(r)]
+    if len(checkouts) != 1:
+        failures.append(f"COUNT    a single checkout step read as {len(checkouts)}")
     return failures
 
 
@@ -478,28 +1104,32 @@ def main():
               "for the wrong reason")
         return 1
 
-    found, checked = [], 0
+    found, checked, checkouts = [], 0, 0
     for path in paths:
         lines = path.read_text(encoding="utf-8").splitlines()
-        refs = references(path.name, lines)
+        refs, why = violations(path.name, lines)
         checked += len(refs)
-        for ref in refs:
-            why = violation(ref)
-            if why is not None:
-                found.append(f"{path.name}:{ref.line}: {why}")
+        checkouts += sum(1 for ref in refs if is_checkout(ref))
+        found.extend(f"{path.name}:{line}: {reason}" for line, reason in why)
     if not checked:
         print(f"{len(paths)} workflows and not one `uses:` between them — this "
               "guard read something other than the workflows")
         return 1
+    if not checkouts:
+        print(f"{len(paths)} workflows and not one `actions/checkout` between "
+              "them — the input rung read nothing and would print `ok` forever")
+        return 1
     if found:
-        print("an action runs from a ref that can be moved onto other code, which "
-              ".github/dependabot.yml's opening comment is the rule against:")
+        print("a workflow breaks one of the two rules this guard holds — an "
+              "action running from a ref that can be moved onto other code, or a "
+              "checkout leaving its credential behind:")
         for f in found:
             print(f"  {f}")
         return 1
     # The counts are the coverage claim: a scan that narrowed to fewer files or
     # fewer references still prints `ok`, and only these numbers say over what.
-    print(f"ok: {checked} `uses:` across {len(paths)} workflows, every one pinned")
+    print(f"ok: {checked} `uses:` across {len(paths)} workflows, every one pinned; "
+          f"{checkouts} of them check out, every one dropping the credential")
     return 0
 
 
