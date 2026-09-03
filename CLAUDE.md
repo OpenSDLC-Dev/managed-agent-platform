@@ -183,4 +183,4 @@ Concretely here: "add validation" → write the failing test for invalid input f
 - **TDD** for anything with behavior: contract test first, then implement. This matters most for provider adapters, event/JSON round-trips against the wire schema, sandbox providers, and the work-queue lease state machine.
 - Keep files focused and small; one clear responsibility per package.
 - Provider-, sandbox-, and queue-backend variability lives behind interfaces with a **shared contract test suite** — every new backend must pass the same suite.
-- Confine lossy conversions to a single package (`provider/openai`) and test them hard; the Anthropic-protocol provider should be near-zero-conversion.
+- Confine lossy conversions to `provider/openai` and the `search_result` rendering it shares with `provider/anthropic` (`provider.SearchResultText`), and test them hard; the Anthropic-protocol provider stays near-zero-conversion and applies that rendering only when a route opts into `flatten_search_results`.

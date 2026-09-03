@@ -269,8 +269,11 @@ Model access is **config-driven**: a provider is constructed from `protocol`
 (`anthropic` | `openai`) + `model` + `base_url` + `api_key` (+ optional headers), and a
 `model_providers` routing table maps an agent's model string to a provider instance.
 The Anthropic-protocol adapter is near-zero-conversion and works against any endpoint
-speaking Anthropic Messages; the OpenAI-compatible adapter is the platform's one lossy
-conversion seam, confined to `internal/provider/openai` and tested hard. Providers are
+speaking Anthropic Messages; the OpenAI-compatible adapter is the platform's lossy
+conversion seam by default, confined to `internal/provider/openai` and tested hard. Its
+`search_result` rendering lives in `internal/provider` rather than that package, so the
+anthropic adapter can share it under the one route-level exception, a route's opt-in
+`flatten_search_results` (#565), without becoming lossy by default. Providers are
 built with `WithoutEnvironmentDefaults`, so ambient `ANTHROPIC_*` credentials can never
 leak to a configured third-party endpoint.
 
@@ -308,7 +311,7 @@ Layout order is by layer, as the repo is.
 | Package | What it owns |
 |---|---|
 | `brain/` | The stateless orchestration loop: claim a `model_turn`, replay the log into a provider request, stream the turn back as events, drive the session state machine at turn end. It runs no *agent* tool in-process — such a call is an emitted intent, and the turn resumes when the result event lands. The exception is the delegation six, which are the platform's own and are answered inside the settlement that emits them (plan 35 decision 6). |
-| `provider/` | Model backends behind Anthropic Messages semantics, constructed purely from configuration. `anthropic/` works against **any** endpoint speaking Anthropic Messages; `openai/` is the platform's one lossy seam and confines every conversion; `providertest/` is the contract suite both must pass. |
+| `provider/` | Model backends behind Anthropic Messages semantics, constructed purely from configuration. `anthropic/` works against **any** endpoint speaking Anthropic Messages, unless a route opts into flattening `search_result` (`flatten_search_results`, #565); `openai/` is the platform's one lossy seam by default and confines every other conversion; `providertest/` is the contract suite both must pass. |
 | `queue/` | The work queue over Postgres (`FOR UPDATE SKIP LOCKED`). Five kinds share `work_items`, and two ways take one: `Claim` is the in-process lane, `Poll` the wire lane that serves exactly a `tool_exec` item on a `self_hosted` environment. That split is what makes the executor and the BYOC worker one protocol at two deployment points. |
 | `executor/` | The platform-managed half of that protocol: pull work, run the built-in toolset in the session's sandbox, append the results the brain resumes on. Also the web and MCP work, which run in its own process for **both** environment kinds, and the outputs harvest, which only a `cloud` session enqueues — a `self_hosted` sandbox has no file lane to snapshot, so its grading stays transcript-only (`brain/grader.go`). |
 | `worker/` | The customer-hosted twin. It holds no database handle and reaches everything over the wire with its environment key — which is what makes "customer compute, zero inbound network access" the same code path as the executor's. |

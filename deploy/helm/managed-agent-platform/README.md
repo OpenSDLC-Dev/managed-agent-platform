@@ -71,7 +71,7 @@ helm install map ./deploy/helm/managed-agent-platform \
 array to the file the brain reads (`MODEL_PROVIDERS_PATH`); its `api_key` is stored
 in the chart's Secret. Each entry is `model` (route key, `"*"` = default),
 `protocol`, `base_url`, and `api_key`, plus optional `upstream_model` / `headers` /
-`stall_timeout` / `max_tokens` — no other keys. `stall_timeout` is a Go duration bounding how long
+`stall_timeout` / `max_tokens` / `flatten_search_results` — no other keys. `stall_timeout` is a Go duration bounding how long
 that endpoint may send nothing at all before the turn is abandoned (default 10
 minutes; every byte received buys the budget back, so it never ends a healthy
 turn — [#121](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/121)).
@@ -79,7 +79,13 @@ turn — [#121](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/12
 the anthropic adapter sends 8192 and the openai adapter defers to the endpoint); it
 must be positive — zero or negative fails the brain at startup rather than silently
 taking the default — and worth sizing up for routes whose agents write whole files
-through tool calls. `base_url` is the API root — the adapter appends `/v1/messages`
+through tool calls. `flatten_search_results` (`protocol: anthropic` routes only —
+rejected at startup on `protocol: openai`, which always flattens) rewrites
+`search_result` blocks inside a replayed `web_search` tool_result to text before the
+request leaves the adapter, for an endpoint that rejects the block (MiniMax does —
+[#565](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/565)); default
+off (see docs/DIVERGENCES.md for why). `base_url` is
+the API root — the adapter appends `/v1/messages`
 (anthropic) or `/v1/chat/completions` (openai), so omit a trailing `/v1`. (The loader
 also accepts `api_key_env`, but the chart injects no extra
 env into the brain, so supply `api_key` here.) See `internal/provider` for the schema.
