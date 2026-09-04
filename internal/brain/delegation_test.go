@@ -369,6 +369,90 @@ func TestTurnEventsMixesDelegationWithExecCalls(t *testing.T) {
 	}
 }
 
+// A name absent from class entirely — not a declared custom tool, not a
+// platform tool this thread's role owns, not one of the six — commits as an
+// ordinary agent.tool_use, stamped deny — the platform is answering it
+// unknown in this same commit, not authorizing it — and is handed to the
+// settlement to answer rather than parked as agent.custom_tool_use for a
+// client that will never post a result (#567). Deny, not allow, matters past
+// this platform's own drivers: a self_hosted worker built to the reference
+// contract streams agent.tool_use directly and may own this very name in its
+// registered toolset (a disabled "edit" is still "edit" to a worker running
+// the standard set) — an "allow" stamp would tell it to run what the
+// settlement already denied.
+func TestTurnEventsAnswersANameNotInClass(t *testing.T) {
+	turn := &turnResult{toolUses: []provider.ToolUse{
+		{ID: "toolu_1", Name: "edit", Input: json.RawMessage(`{"file_path":"/tmp/x"}`)},
+	}}
+
+	batch, kind, askIDs, delegated, err := turnEvents(turn, map[string]toolClass{})
+	if err != nil {
+		t.Fatalf("turnEvents: %v", err)
+	}
+	if kind != "" {
+		t.Errorf("work kind = %q, want none — nothing runs an unoffered name", kind)
+	}
+	if len(askIDs) != 0 {
+		t.Errorf("askIDs = %v, want none", askIDs)
+	}
+	if len(batch) != 1 {
+		t.Fatalf("%d events, want one", len(batch))
+	}
+	ev := batch[0]
+	if ev.Type != domain.EventAgentToolUse {
+		t.Errorf("event type = %q, want %q — not agent.custom_tool_use", ev.Type, domain.EventAgentToolUse)
+	}
+	var p struct {
+		Name                string `json:"name"`
+		EvaluatedPermission string `json:"evaluated_permission"`
+	}
+	if err := json.Unmarshal(ev.Payload, &p); err != nil {
+		t.Fatalf("payload: %v", err)
+	}
+	if p.Name != "edit" {
+		t.Errorf("name = %q, want edit", p.Name)
+	}
+	if p.EvaluatedPermission != string(domain.EvalPermDeny) {
+		t.Errorf("evaluated_permission = %q, want deny — the platform denied a name it never offered", p.EvaluatedPermission)
+	}
+	if len(delegated) != 1 {
+		t.Fatalf("delegated = %v, want the call handed to the settlement", delegated)
+	}
+	if delegated[0].eventID != ev.ID || delegated[0].name != "edit" {
+		t.Errorf("delegated[0] = %+v, want it to name event %s", delegated[0], ev.ID)
+	}
+	if !delegated[0].unoffered {
+		t.Error("delegated[0].unoffered = false, want true — this is not one of the six names")
+	}
+}
+
+// The other half of the six delegation names is classed settlement-executed
+// by resolveTools whether or not this role's own half is offered
+// (mcptools.go's role != delegationNone loop), so a child reaching for a
+// coordinator tool must never fall into turnEvents' !offered branch — that
+// would answer it "unknown tool" instead of routing it to wrongRole, which is
+// the message that actually tells the model what to reach for instead.
+func TestTurnEventsOtherHalfIsNotUnoffered(t *testing.T) {
+	_, class, _, err := resolveTools(agentWithACustomTool(), nil, delegationChild)
+	if err != nil {
+		t.Fatalf("resolveTools: %v", err)
+	}
+	turn := &turnResult{toolUses: []provider.ToolUse{
+		{ID: "toolu_1", Name: "create_agent", Input: json.RawMessage(`{}`)},
+	}}
+
+	_, _, _, delegated, err := turnEvents(turn, class)
+	if err != nil {
+		t.Fatalf("turnEvents: %v", err)
+	}
+	if len(delegated) != 1 {
+		t.Fatalf("delegated = %v, want the call handed to the settlement", delegated)
+	}
+	if delegated[0].unoffered {
+		t.Error("delegated[0].unoffered = true, want false — create_agent is classed, just not offered to a child")
+	}
+}
+
 // The delegation budget is derived, not picked (delegate.go defines it as
 // maxLiveThreads × maxSettlementChain, so no test can assert that without
 // restating the definition), and the suites that exercise the bound sit in

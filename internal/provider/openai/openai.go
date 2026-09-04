@@ -3,7 +3,10 @@
 // interface. Unlike the anthropic adapter, which is near-verbatim, this is the
 // platform's lossy seam: the internal Request is Anthropic-native, so every turn
 // is translated to OpenAI wire on the way out and back on the way in. All of that
-// conversion is confined here and tested against a fake Chat Completions server.
+// conversion is confined here and tested against a fake Chat Completions server
+// — except its search_result rendering, provider.SearchResultText, which lives
+// in the parent package so provider/anthropic's opt-in flatten_search_results
+// can share it (#565).
 //
 // base_url is the API root, the same convention as the anthropic provider: the
 // adapter appends /v1/chat/completions. Set it to e.g. https://api.openai.com or
@@ -342,7 +345,9 @@ func decodeContent(raw json.RawMessage) (string, bool, error) {
 // toolResultText flattens an Anthropic tool_result content (a string, or an
 // array of blocks) into the plain text OpenAI's tool message carries. A
 // search_result block (a web_search answer) flattens to text via
-// searchResultText; any other non-text block (e.g. an image) has no
+// provider.SearchResultText (shared with provider/anthropic's opt-in
+// flatten_search_results route flag, #565, so the two adapters render one
+// identically); any other non-text block (e.g. an image) has no
 // representation in an OpenAI tool message, so it fails loudly rather than
 // silently vanishing — matching how an unsupported top-level content block is
 // handled.
@@ -365,7 +370,7 @@ func toolResultText(raw json.RawMessage) (string, error) {
 		case "text":
 			parts = append(parts, b.Text)
 		case "search_result":
-			flat, err := searchResultText(b)
+			flat, err := provider.SearchResultText(b.Title, b.Source, b.Content)
 			if err != nil {
 				return "", err
 			}
@@ -380,38 +385,6 @@ func toolResultText(raw json.RawMessage) (string, error) {
 		}
 	}
 	return strings.Join(parts, ""), nil
-}
-
-// searchResultText renders one search_result block as plain text: the title
-// and source URL on a header line, then each of the block's text blocks on its
-// own newline-terminated line, so consecutive results stay separated after the
-// caller's plain join. The structure (citations config, block boundaries) is
-// dropped — a documented lossy conversion, confined to this package. The wire
-// union says the inner content is text blocks only, so anything else is an
-// upstream bug and fails loudly.
-func searchResultText(b contentBlock) (string, error) {
-	var source string
-	if len(bytes.TrimSpace(b.Source)) > 0 {
-		if err := json.Unmarshal(b.Source, &source); err != nil {
-			return "", fmt.Errorf("search_result source must be a URL string: %w", err)
-		}
-	}
-	var inner []contentBlock
-	if len(bytes.TrimSpace(b.Content)) > 0 {
-		if err := json.Unmarshal(b.Content, &inner); err != nil {
-			return "", err
-		}
-	}
-	var sb strings.Builder
-	fmt.Fprintf(&sb, "%s (%s)\n", b.Title, source)
-	for _, c := range inner {
-		if c.Type != "text" {
-			return "", fmt.Errorf("unsupported block %q inside search_result content (text only)", c.Type)
-		}
-		sb.WriteString(c.Text)
-		sb.WriteString("\n")
-	}
-	return sb.String(), nil
 }
 
 func compactJSON(raw json.RawMessage) (string, error) {

@@ -75,9 +75,14 @@ brain:
   # api_key, plus optional upstream_model / headers / stall_timeout — a Go duration
   # bounding how long that endpoint may send nothing at all before the turn is abandoned
   # (default 10m; every byte received buys the budget back, so it never ends a healthy
-  # turn, only a wedged one — #121) — and max_tokens, the default output cap for turns
+  # turn, only a wedged one — #121) — max_tokens, the default output cap for turns
   # that set none themselves (omitted, anthropic sends 8192 and openai defers to the
-  # endpoint; must be positive — zero or negative fails the brain at startup). (The loader also accepts api_key_env,
+  # endpoint; must be positive — zero or negative fails the brain at startup) — and
+  # flatten_search_results, protocol: anthropic routes only (rejected at startup on
+  # protocol: openai, which always flattens): rewrites search_result blocks inside a
+  # replayed web_search tool_result to text before the request leaves the adapter, for
+  # an endpoint that rejects the block (MiniMax does — #565); default off (see
+  # docs/DIVERGENCES.md for why). (The loader also accepts api_key_env,
   # but this chart injects no extra env into the brain, so supply api_key here instead.)
   # No other keys — the loader rejects unknown fields. Contains api_key, so it is stored
   # in a Secret. REQUIRED (at least one route). base_url is the API ROOT — the adapter

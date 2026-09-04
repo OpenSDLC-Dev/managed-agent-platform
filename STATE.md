@@ -10,9 +10,9 @@ a private archive: bytes observed once, at cost. 2026-09-02 covered the Work API
 turn semantics, multiagent threads, memory stores, files, skills, vaults, deployments
 and permission gating; 2026-09-03 ran two waves, one free over console-cookie
 questions and one of 281 pairs against the tiers needing model spend, an environment
-key, or a resource we lacked. #78 stays open past this work — 113 registry entries
+key, or a resource we lacked. #78 stays open past this work — 115 registry entries
 still name it as their live tracker, and the debt is now analysis rather than
-recording: 72 comparison rows have never been read. Plan 37 (#51) archived 2026-09-01.
+recording: 72 comparison rows have never been read. Plan 38 (#263) archived 2026-09-04.
 
 ## Tasks
 
@@ -23,8 +23,8 @@ recording: 72 comparison rows have never been read. Plan 37 (#51) archived 2026-
       us outright, four registered readings were refuted, and ten mismatches now
       belong to issues (#539, #542-#544, #546-#550, #553)
 - [x] Reconcile 2026-09-03's second wave — fifteen archive comparison entries
-      settled, two narrowed, one dissolved, which touched twenty registry entries;
-      ten mismatches belong to issues (#570-#574, #577-#579, #581-#582), the
-      `list_cost` unit to #432, and #576 is registered where it was not
+      settled, two narrowed, one dissolved, touching 24 registry entries;
+      thirteen mismatches are now issues (#570-#574, #577-#579, #581-#582,
+      #589-#591), the `list_cost` unit is on #432, and #576 is registered
 - [ ] Read the 72 un-analysed comparison rows from 2026-09-02 — the recording
       backlog is nearly exhausted and this one has never been touched

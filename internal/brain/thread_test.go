@@ -125,6 +125,50 @@ func TestOutcomeGradesAtSessionQuiescenceNotOnAChildsEndTurn(t *testing.T) {
 	}
 }
 
+// The idle harvest waits for the session's own quiescence, not a thread's
+// (docs/plan/38 decision 6, reusing plan 21 decision 15's rule for grading).
+// Three turns, three folds, one harvest: the primary's end_turn under a running
+// child leaves the session running; the child's own end_turn wakes the
+// coordinator to read its ending notice, which leaves it running too; only the
+// coordinator's last turn folds the session idle, and that is where the
+// snapshot is taken.
+func TestNoHarvestUntilTheSessionItselfIdles(t *testing.T) {
+	h := newHarnessEnv(t, "cloud", [][]provider.Chunk{
+		agentReply("delegated the work"),
+		agentReply("worker done"),
+		agentReply("all done"),
+	}, nil)
+	h.wake(t, "build me a deck")
+	h.childTurn(t, "build the model")
+
+	h.runOnce(t) // the primary's turn ends; the child still runs
+	if got := h.status(t); got != "running" {
+		t.Fatalf("session after the primary's end_turn = %q, want running (the child still runs)", got)
+	}
+	if n := h.liveOf(t, queue.OutputsHarvest); n != 0 {
+		t.Fatalf("live outputs_harvest = %d, want 0 under a running child", n)
+	}
+
+	h.runOnce(t) // the child's turn ends, waking the coordinator on its notice
+	if got := h.status(t); got != "running" {
+		t.Fatalf("session after the child's end_turn = %q, want running (its coordinator was woken)", got)
+	}
+	if n := h.liveOf(t, queue.OutputsHarvest); n != 0 {
+		t.Fatalf("live outputs_harvest = %d, want 0 while the woken coordinator runs", n)
+	}
+
+	h.runOnce(t) // the coordinator's own ending: the session's quiescence
+	if got := h.status(t); got != "idle" {
+		t.Fatalf("session = %q, want idle", got)
+	}
+	if n := h.liveOf(t, queue.OutputsHarvest); n != 1 {
+		t.Fatalf("live outputs_harvest = %d, want 1 at quiescence", n)
+	}
+	if h.harvestChainGrading(t) {
+		t.Error("chain_grading = true; no outcome is grading this session")
+	}
+}
+
 // A child's turn suspending on tools: its ask-gated and client-executed calls
 // are cross-posted — the humans and clients who must answer them read the
 // session view — while an allow-policy built-in the platform runs itself

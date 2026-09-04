@@ -49,6 +49,18 @@ new directory and in-repo citations re-pointed in the moving PR (plan
 
 ---
 
+## Idle outputs harvest acceptance (plan 38, #263, run 2026-09-04) — ✅ passed
+
+Verified against a docker-compose stack built from `feat/idle-outputs-harvest` @ cbc652b (the review-hardened revision — idle harvests attach to a live sandbox rather than provisioning one; the shipped tip adds three edge-case correctness fixes — transient-attach propagation, a corrupt-agent-state skip, and a grading-takeover requeue — that do not touch this harvested happy path), driving Anthropic's own `eval-driven-agent-development` workshop (`src/create-slides.ts`, `@anthropic-ai/sdk` 0.93.0, `ANTHROPIC_BASE_URL=http://localhost:8080`, the workshop agent on `claude-sonnet-4-6`), **without** the `HARVEST_VIA_OUTCOME` workaround.
+
+`create-slides food` on a plain session (`sesn_jet01k8b2fnzn7k4tztf0mx4`): the agent wrote its deck under `/mnt/session/outputs/`, the session folded to `idle` with stop_reason `end_turn`, and **no `span.outcome_evaluation_*` or `user.define_outcome` event appeared**. `GET /v1/files?scope_id=<session>&limit=100` then listed `output.pptx` (37,253 bytes, `scope: {type: "session"}`, `downloadable: true`) — the harvest attached to the session's still-live sandbox, walked `/mnt/session/outputs/`, and published, with no outcome cycle. The same workshop against `main` returned `{"data":[]}` through its 10-retry backoff (issue #263's 2026-09-03 comment). An earlier run of the same case against the pre-revision base 0f0239c listed both `output.pptx` and `build_pptx.py`.
+
+The existing outcome path is unchanged: the harness suites `TestOutcomeCloudSettlementChainsHarvest` (grading still chains a harvest, asserting `chain_grading=true`), `TestHarvestDiscardsWhenCycleSettled` (an interrupt mid-grading-harvest still discards) and `TestOutcomeInterruptDuringGrading` stay green.
+
+Verifier subagent (pinned model) on cbc652b: PASS, `make verify` green at 90.12% total statement coverage, the three new guards (no-provision idle harvest, corrupt-state drain, delegation-bound harvest) mutation-checked. Dual review (Codex `gpt-5.6-sol`; Claude review as an Opus 5 Workflow agent): the revision answered five findings from the review of the base commit; the remaining notes were addressed before merge (see the PR). The two API-side idle folds (`user.interrupt`, last-running-thread archive) are out of scope and tracked by #586.
+
+---
+
 ## Scheduled deployments (plan 37, #51) — archived 2026-09-01, all six slices delivered (#517, #519, #522, #524, #529, #531, #532, #535, #536)
 
 A **deployment** binds an agent to an environment, credentials, resources and initial
@@ -4566,10 +4578,13 @@ and leaves the session running with its other repositories mounted.
 
 ## Second recording wave, registry reconciliation (#575) — review-hardening record (2026-09-04)
 
-Twenty registry entries were rewritten from a 281-pair recording of the live
-managed-agents endpoint. Four review passes found twenty-seven defects between them, and
-**thirteen were one defect repeated**: the recording was read carefully, our own code
-was not read at all, and the entry was then filed as "confirmed, and we match".
+Twenty-four registry entries were rewritten from a 281-pair recording of the live
+managed-agents endpoint. Five review passes found 33 defects between them — five,
+three, fifteen, four and six — and **fourteen of the 33 were one defect repeated**:
+the recording was read carefully, our own code was not read at all, and the entry was
+then filed as "confirmed, and we match". Those fourteen came one from the verifier,
+three from Codex, nine from the Claude reviewer, none from the fourth pass and one
+more from the verifier's second run.
 
 The verifier found five, of which the load-bearing one was a sentence claiming
 `isSkillReadPath` "admits exactly the subtree the reference serves" — inside an entry
@@ -4577,18 +4592,19 @@ whose own first half says we additionally serve a route the reference answers 40
 The Codex reviewer found three more, each a mismatch recorded as a match:
 `credential_host_unreachable_error` (we fire from a gate-config fetch against the live
 policy, not at session start against a creation snapshot), the context-overflow
-settlement, and the session-scoped `file_id`. The Claude reviewer found nine more of
-the same shape, including two entries that recorded a reference property and compared
-only a third against ours, plus a claim that understated this platform's own gate —
+settlement, and the session-scoped `file_id`. The Claude reviewer found fifteen, nine of
+them the same shape, including two entries that recorded a reference property and
+compared only a third against ours, plus a claim that understated this platform's own
+gate —
 `cmd/gate` was described as an environment-variable forward proxy a hostile process
 escapes by clearing `HTTP_PROXY`, when it installs owner-match iptables before it ever
 serves the proxy, so such a process is dropped rather than let out.
 
-Seven issues came out of the review passes rather than the recording: #577, #578,
-#579, #581, #582, the registration of the pre-existing #576, and #584 — a collision
-between a repository named `skills` and the skills materialization root, raised as an
-unverified risk and real on verification. That is more than the recording pass produced
-unaided.
+Ten issues came out of the review passes rather than the recording: #577, #578, #579,
+#581, #582, the registration of the pre-existing #576, #584 — a collision between a
+repository named `skills` and the skills materialization root, raised as an unverified
+risk and real on verification — and #589, #590 and #591 from the fifth pass. That is
+more than the recording pass produced unaided.
 
 A fourth pass put six agents on six of this PR's own factual claims, each told to
 refute its claim and to default to refuted when unsure. Two held — the `unrestricted`
@@ -4611,6 +4627,30 @@ So the defect has a mirror, and the mirror is the more expensive one. Assuming w
 *match* without reading our code leaves a wrong entry in a document; assuming we
 *differ* without reading it files an issue against working behavior. #581's path half
 was exactly that, and it took an agent instructed to disbelieve the entry to find it.
+
+A fifth pass, the verifier re-run after the fourth, found six more — and one was the
+original defect again, in the entry nobody had thought to reread. The OAuth-refresh
+entry records two reference behaviors, a past `expires_at` refused with a 400 and a
+failing token endpoint that stays silent on the wire, and compares neither against this
+platform, which differs on both: it accepts the past date, and it answers a failed
+refresh with `mcp_authentication_failed_error` where the reference sent the stale token
+and succeeded. Those are #589 and #590. The other five findings were bookkeeping the
+earlier passes had left behind: an entry count stale in three documents; a `Tracked:`
+clause that had moved two live residuals *into* the provenance tail the guard never
+state-checks, one of them a recorded mismatch with no issue at all (now #591); totals in
+this very record that did not add up; a section placement worth arguing rather than
+fixing; and two comparison rows the archive counted as settled that had reached neither
+the analysis file nor the registry.
+
+Those two rows are worth their own line, because they settled in opposite directions.
+Mixed-turn permission gating — whether an `always_allow` tool runs while an
+`always_ask` confirmation from the same turn is outstanding — is the reference's own
+behavior, gate for gate, so that entry left the divergences for the compatibility notes
+and gave up its tracker. A blocked domain's answer to the model is the other way: the
+reference returns a readable `is_error` tool result naming `url_not_allowed` and the
+field that blocked it, which is the shape this platform already produces for a
+different reason, and the divergence it keeps on purpose is that the fence is the
+operator's rather than the agent's.
 
 **The transferable rule, now written into the INFERRED preamble as a three-way routing
 test:** settling an inference has three ends — confirmed and we match, confirmed and we

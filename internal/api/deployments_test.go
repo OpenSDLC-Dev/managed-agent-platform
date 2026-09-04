@@ -752,6 +752,7 @@ func TestListDeployments(t *testing.T) {
 		body["name"] = fmt.Sprintf("deployment %d", i)
 		ids = append(ids, createDeployment(t, s, body)["id"].(string))
 	}
+	stampCreatedAt(t, s, "deployments", ids...)
 	paused := ids[0]
 	archived := ids[1]
 	if status, res := s.do(http.MethodPost, "/v1/deployments/"+paused+"/pause", nil); status != http.StatusOK {

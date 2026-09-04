@@ -26,29 +26,19 @@ func listVersions(t *testing.T, s *tserver, storeID, query string) []map[string]
 	return listData(t, body)
 }
 
-// stampVersions gives named version rows the timestamps the listing will order
-// on, a second apart, oldest first, from a single now(). The order of these rows
-// is the wire contract the test below exists to pin, so it cannot be sidestepped
-// by comparing a sorted list the way #525 was — and it cannot be left to the
-// clock either: `created_at` defaults to now(), the listing orders on
+// stampVersions is stampCreatedAt for one memory store's versions, with the
+// guarantee this listing needs on top: every row of the store must be named,
+// which is why the count is checked. One left out keeps its own now() and lands
+// inside the stamped band, a second newest, silently moving every position the
+// caller then asserts on. Three are named by the id their own responses
+// returned and the fourth by exclusion, as the call site's query shows.
+//
+// The order of these rows is the wire contract the test below exists to pin, so
+// it cannot be sidestepped by comparing a sorted list the way #525 was, and it
+// cannot be left to the clock either — the listing orders on
 // `created_at DESC, id DESC`, four HTTP requests leave a few milliseconds
 // between rows (#551 carries the measurements), and #411 recorded this
-// hardware's database clock stepping 20ms backwards. Behind a tie the tiebreak
-// is 120 random bits of memver_ id.
-//
-// So the timestamps are assigned rather than padded, which is what makes the
-// dependence go away instead of only getting a wider window: one statement, one
-// now(), and every row named — three of them by the id their own responses
-// returned, the fourth by exclusion, as the call site explains.
-// spreadCreatedAt does the same for environment keys, and states there why a
-// per-row UPDATE would reintroduce what it removes: it re-reads the clock, so a
-// slow round trip can hand an older row a later timestamp. It takes its ids
-// newest first, the reverse of this one, so the two cannot be copied across
-// without flipping the order.
-//
-// Every row of the store has to be named, which is why the count is checked:
-// one left out keeps its own now() and lands inside the stamped band, a second
-// newest, silently moving every position the caller then asserts on.
+// hardware's database clock stepping 20ms backwards.
 //
 // What this does give up is worth naming: the listing's order no longer comes
 // from the platform's own now(), so the test stops witnessing that successive
@@ -67,22 +57,7 @@ func stampVersions(t *testing.T, s *tserver, storeID string, oldestFirst ...stri
 		t.Fatalf("%s holds %d version rows and %d were named; an unnamed row keeps its own now()",
 			storeID, held, len(oldestFirst))
 	}
-	ages := make([]float64, len(oldestFirst))
-	for i := range oldestFirst {
-		ages[i] = float64(len(oldestFirst) - 1 - i)
-	}
-	tag, err := s.pool.Exec(t.Context(),
-		`UPDATE memory_versions v SET created_at = now() - make_interval(secs => n.age)
-		   FROM unnest($1::text[], $2::float8[]) AS n(id, age)
-		  WHERE v.memory_store_id = $3 AND v.id = n.id`,
-		oldestFirst, ages, storeID)
-	if err != nil {
-		t.Fatalf("stamp the versions of %s: %v", storeID, err)
-	}
-	if tag.RowsAffected() != int64(len(oldestFirst)) {
-		t.Fatalf("stamped %d version rows of %s, want %d (ids %v)",
-			tag.RowsAffected(), storeID, len(oldestFirst), oldestFirst)
-	}
+	stampCreatedAt(t, s, "memory_versions", oldestFirst...)
 }
 
 func TestMemoryVersionsPerOperation(t *testing.T) {
@@ -210,6 +185,39 @@ func TestMemoryVersionsPerOperation(t *testing.T) {
 				t.Errorf("%s %s: status %d (%v)", call.method, call.path, status, body)
 			}
 		}
+	}
+
+	// The other half of the order the handler is contracted to produce: `id
+	// DESC` behind a tie, which rows a second apart never reach and which
+	// nothing pinned before (#561). The two newest versions are moved onto one
+	// instant and must come back id-descending. Last in the test, because it
+	// moves a position everything above reads.
+	//
+	// That instant is the stamped band's own maximum, read back from the rows
+	// rather than taken from a second now() — which would make this case turn
+	// on the clock advancing between two statements, the very dependence the
+	// stamp above removes.
+	//
+	// What it catches is a reversed tiebreak, not an absent one: with no id
+	// term Postgres may return a tie in any order, so there would be nothing
+	// there to assert. And which id is the greater is asked of the database
+	// rather than compared in Go, so the assertion means the same under any
+	// collation the test cluster is built with.
+	pair := []string{wrote[2], tombstoneID}
+	if _, err := s.pool.Exec(t.Context(),
+		`UPDATE memory_versions SET created_at =
+		   (SELECT max(created_at) FROM memory_versions WHERE memory_store_id = $2)
+		  WHERE id = ANY($1)`, pair, store); err != nil {
+		t.Fatalf("tie the two newest versions: %v", err)
+	}
+	var hi, lo string
+	if err := s.pool.QueryRow(t.Context(),
+		`SELECT max(id), min(id) FROM memory_versions WHERE id = ANY($1)`, pair).Scan(&hi, &lo); err != nil {
+		t.Fatalf("order the tied ids: %v", err)
+	}
+	if head := listVersions(t, s, store, ""); head[0]["id"] != hi || head[1]["id"] != lo {
+		t.Errorf("tied versions came back %v then %v, want %s then %s (id descending)",
+			head[0]["id"], head[1]["id"], hi, lo)
 	}
 }
 

@@ -18,17 +18,20 @@ import (
 // all before its turn is abandoned; absent takes DefaultStallTimeout.
 // `max_tokens` is the default output cap for turns that set none themselves;
 // absent keeps the adapter's own default (a pointer so an explicit 0 is a
-// config error, not a silent "default").
+// config error, not a silent "default"). `flatten_search_results` (see
+// Config.FlattenSearchResults) is valid only on protocol: anthropic routes —
+// enforced in NewRegistry, like every other route-level check, not here.
 type routeFile struct {
-	Model         string            `json:"model"`
-	Protocol      string            `json:"protocol"`
-	BaseURL       string            `json:"base_url"`
-	UpstreamModel string            `json:"upstream_model"`
-	APIKey        string            `json:"api_key"`
-	APIKeyEnv     string            `json:"api_key_env"`
-	Headers       map[string]string `json:"headers"`
-	StallTimeout  string            `json:"stall_timeout"`
-	MaxTokens     *int64            `json:"max_tokens"`
+	Model                string            `json:"model"`
+	Protocol             string            `json:"protocol"`
+	BaseURL              string            `json:"base_url"`
+	UpstreamModel        string            `json:"upstream_model"`
+	APIKey               string            `json:"api_key"`
+	APIKeyEnv            string            `json:"api_key_env"`
+	Headers              map[string]string `json:"headers"`
+	StallTimeout         string            `json:"stall_timeout"`
+	MaxTokens            *int64            `json:"max_tokens"`
+	FlattenSearchResults bool              `json:"flatten_search_results"`
 }
 
 // LoadRoutes reads a model_providers JSON file into registry routes.
@@ -96,13 +99,14 @@ func LoadRoutes(path string) ([]Route, error) {
 		routes = append(routes, Route{
 			Model: rf.Model,
 			Config: Config{
-				Protocol:     rf.Protocol,
-				Model:        rf.UpstreamModel,
-				BaseURL:      rf.BaseURL,
-				APIKey:       key,
-				Headers:      rf.Headers,
-				StallTimeout: stall,
-				MaxTokens:    maxTokens,
+				Protocol:             rf.Protocol,
+				Model:                rf.UpstreamModel,
+				BaseURL:              rf.BaseURL,
+				APIKey:               key,
+				Headers:              rf.Headers,
+				StallTimeout:         stall,
+				MaxTokens:            maxTokens,
+				FlattenSearchResults: rf.FlattenSearchResults,
 			},
 		})
 	}

@@ -272,6 +272,7 @@ func TestSessionsListFiltersByDeployment(t *testing.T) {
 	if plain["deployment_id"] != nil {
 		t.Errorf("a plain session renders deployment_id = %v, want an explicit null", plain["deployment_id"])
 	}
+	stampCreatedAt(t, s, "sessions", first, second)
 
 	status, page := s.do(http.MethodGet, "/v1/sessions?deployment_id="+deplA, nil)
 	if status != http.StatusOK {
@@ -533,6 +534,15 @@ func TestDeploymentRunsListFiltersAndPages(t *testing.T) {
 	if len(expected) != 6 {
 		t.Fatalf("seeded %d runs, want 6", len(expected))
 	}
+	// Freeze the order the store already chose rather than impose one — this
+	// test reads its expectation from the same ORDER BY the handler uses, so
+	// creation order is not what it pins. What the stamp buys is a second
+	// between rows: the created_at boundary below cannot land on a tie, and the
+	// run inserted mid-walk is newer than all six by more than the milliseconds
+	// a request leaves (#561).
+	oldestFirst := slices.Clone(expected)
+	slices.Reverse(oldestFirst)
+	stampCreatedAt(t, s, "deployment_runs", oldestFirst...)
 
 	// The whole list, in one page, at the published maximum limit — 1000 is
 	// legal here where the shared cap would 400 it (§2.6).

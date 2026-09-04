@@ -389,6 +389,18 @@ func (p *fakeProvider) attachCount() int {
 	return len(p.attached)
 }
 
+// markRunning makes Attach find a live sandbox for the session without a
+// Provision — a session that already ran tools and still holds its sandbox,
+// which is what an idle harvest reuses rather than creating one.
+func (p *fakeProvider) markRunning(sid domain.ID) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.running == nil {
+		p.running = map[domain.ID]bool{}
+	}
+	p.running[sid] = true
+}
+
 func (p *fakeProvider) Reap(_ context.Context, sid domain.ID) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()

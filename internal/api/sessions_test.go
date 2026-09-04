@@ -603,6 +603,7 @@ func TestSessionListFiltersAndBidirectionalPagination(t *testing.T) {
 		res := createSession(t, s, map[string]any{"agent": agentID, "environment_id": envID})
 		ids = append(ids, res["id"].(string))
 	}
+	stampCreatedAt(t, s, "sessions", ids...)
 	createSession(t, s, map[string]any{"agent": otherID, "environment_id": envID})
 
 	// agent_id filter.

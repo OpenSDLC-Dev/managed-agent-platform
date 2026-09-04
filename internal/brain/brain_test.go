@@ -201,6 +201,25 @@ func (h *harness) liveOf(t *testing.T, kind queue.Kind) int {
 	return n
 }
 
+// harvestChainGrading reads the trigger flag off the session's live
+// outputs_harvest item — true for the grading cycle's own harvest, false for
+// the one a session's idle asked for (docs/plan/38).
+func (h *harness) harvestChainGrading(t *testing.T) bool {
+	t.Helper()
+	var v *bool
+	if err := h.pool.QueryRow(context.Background(),
+		`SELECT (metadata->>'chain_grading')::bool FROM work_items
+		  WHERE session_id=$1 AND kind='outputs_harvest'
+		    AND state IN ('queued', 'starting', 'active')`,
+		h.sessionID.String()).Scan(&v); err != nil {
+		t.Fatal(err)
+	}
+	if v == nil {
+		t.Fatal("the live outputs_harvest item carries no chain_grading key")
+	}
+	return *v
+}
+
 // retryStatus reads the retry_status variant of the session's last
 // session.error event.
 func (h *harness) retryStatus(t *testing.T) string {
@@ -876,6 +895,7 @@ func TestParallelToolCallsResumeOnFullSet(t *testing.T) {
 		{toolUseChunk("toolu_a", "lookup"), toolUseChunk("toolu_b", "lookup"), done("tool_use", 3)},
 		{textChunk(0, "both done"), done("end_turn", 2)},
 	}, nil)
+	h.customTool(t, "lookup")
 	h.wake(t, "do two things")
 	h.runOnce(t)
 
@@ -1260,6 +1280,7 @@ func TestNullToolInputBecomesEmptyObject(t *testing.T) {
 					done("tool_use", 1),
 				},
 			}, nil)
+			h.customTool(t, "noop")
 			h.wake(t, "call it")
 			h.runOnce(t)
 
@@ -1671,8 +1692,14 @@ func TestWedgedEndpointEndsTheTurnOnTheLog(t *testing.T) {
 	if !strings.Contains(string(evs[0].Body), provider.ErrStalled.Error()) {
 		t.Errorf("session.error body = %s, want it to name the stall", evs[0].Body)
 	}
-	if n := h.liveWork(t); n != 0 {
-		t.Errorf("%d work items live after the wedged turn, want 0", n)
+	// No turn is left: the wedge ended the work rather than looping it. The one
+	// item this cloud session does leave is the idle harvest its fold now
+	// schedules (docs/plan/38) — finished work, not a retry.
+	if n := h.liveOf(t, queue.ModelTurn); n != 0 {
+		t.Errorf("%d model_turn items live after the wedged turn, want 0", n)
+	}
+	if n := h.liveOf(t, queue.OutputsHarvest); n != 1 {
+		t.Errorf("outputs_harvest live = %d, want 1 (the session folded idle)", n)
 	}
 }
 
@@ -1777,5 +1804,90 @@ func TestRunDrainsAndStops(t *testing.T) {
 	}
 	if got := h.status(t); got != "idle" {
 		t.Errorf("status after Run = %q", got)
+	}
+}
+
+// The idle harvest fires from every settlement that folds a session idle, not
+// only the one a successful turn takes (docs/plan/38 decision 4, #263): a turn
+// that ran out of retries leaves deliverables an earlier turn wrote, and the
+// docs' "after the session goes idle" language names no stop reason.
+func TestRetriesExhaustedIdleEnqueuesOutputsHarvest(t *testing.T) {
+	h := newHarnessEnv(t, "cloud", [][]provider.Chunk{
+		{textChunk(0, "partial")},
+	}, []error{errors.New("upstream 529")})
+	h.wake(t, "hi")
+	h.runOnce(t)
+
+	if got := h.status(t); got != "idle" {
+		t.Fatalf("status = %q, want idle", got)
+	}
+	if n := h.liveOf(t, queue.OutputsHarvest); n != 1 {
+		t.Fatalf("live outputs_harvest = %d, want 1 (the failed turn still idled the session)", n)
+	}
+	if h.harvestChainGrading(t) {
+		t.Error("chain_grading = true; no outcome is grading this session")
+	}
+	if n := h.liveOf(t, queue.ModelTurn); n != 0 {
+		t.Errorf("live model_turn = %d, want 0 (the turn is over)", n)
+	}
+}
+
+// ...and only at the session's own quiescence: a child out of retries under a
+// still-working sibling leaves the session running, so nothing is harvested
+// yet (the rule plan 21 decision 15 set for grading, reused here).
+func TestChildRetriesExhaustedUnderRunningSiblingSkipsHarvest(t *testing.T) {
+	h := newHarnessEnv(t, "cloud", [][]provider.Chunk{
+		{textChunk(0, "partial")},
+	}, []error{errors.New("upstream 529")})
+	h.childTurn(t, "find the papers")
+	h.childTurn(t, "draft the summary")
+
+	h.runOnce(t) // the older child's turn, which fails
+
+	if got := h.status(t); got != "running" {
+		t.Fatalf("session = %q, want running (a sibling is still working)", got)
+	}
+	if n := h.liveOf(t, queue.OutputsHarvest); n != 0 {
+		t.Errorf("live outputs_harvest = %d, want 0 (the session has not idled)", n)
+	}
+}
+
+// A permission ask idles the session too — requires_action, not end_turn — and
+// the gate reads the fold, never the stop reason: whatever the agent wrote
+// before it asked is a deliverable the caller can fetch while it waits.
+func TestPermissionAskIdleEnqueuesOutputsHarvest(t *testing.T) {
+	for _, tc := range []struct {
+		envKind string
+		want    int
+	}{{"cloud", 1}, {"self_hosted", 0}} {
+		t.Run(tc.envKind, func(t *testing.T) {
+			h := newHarnessEnv(t, tc.envKind, [][]provider.Chunk{
+				{
+					provider.Chunk{Kind: provider.KindToolUse, ToolUse: &provider.ToolUse{
+						ID: "toolu_side", Name: "bash", Input: json.RawMessage(`{"command":"ls"}`)}},
+					done("tool_use", 3),
+				},
+			}, nil)
+			agentJSON := `{"type":"agent","id":"agent_x","version":1,"name":"n",
+				"model":{"id":"fixture-model"},"system":"do the task","description":"",
+				"tools":[{"type":"agent_toolset_20260401","default_config":{"permission_policy":{"type":"always_ask"}}}],
+				"mcp_servers":[],"skills":[],"multiagent":null}`
+			if _, err := h.pool.Exec(context.Background(),
+				`UPDATE sessions SET resolved_agent = $2 WHERE id = $1`, h.sessionID.String(), agentJSON); err != nil {
+				t.Fatal(err)
+			}
+			h.wake(t, "list the files")
+			h.runOnce(t)
+
+			if got := h.status(t); got != "idle" {
+				t.Fatalf("status = %q, want idle awaiting confirmation", got)
+			}
+			if n := h.liveOf(t, queue.OutputsHarvest); n != tc.want {
+				t.Fatalf("live outputs_harvest = %d, want %d", n, tc.want)
+			}
+			if tc.want == 1 && h.harvestChainGrading(t) {
+				t.Error("chain_grading = true; no outcome is grading this session")
+			}
+		})
 	}
 }

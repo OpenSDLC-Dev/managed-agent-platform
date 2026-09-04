@@ -12,6 +12,7 @@ import (
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/blob"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/pgtest"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/queue"
 )
 
@@ -36,11 +37,38 @@ func (h *harness) seedOutcome(t *testing.T, result string) {
 	}
 }
 
+// enqueueHarvest schedules the grading cycle's own harvest, as
+// settleEndTurn's grading branch does.
 func (h *harness) enqueueHarvest(t *testing.T) {
 	t.Helper()
-	if _, err := h.queue.Enqueue(context.Background(), h.pool, h.envID, h.sid, queue.OutputsHarvest); err != nil {
+	if _, err := h.queue.EnqueueOutputsHarvest(context.Background(), h.pool, h.envID, h.sid, true); err != nil {
 		t.Fatal(err)
 	}
+}
+
+// enqueueIdleHarvest schedules the harvest a session's idle fold asks for, as
+// the brain's enqueueIdleHarvest does — no outcome need exist, and the session
+// is idle rather than running by the time the item is claimed.
+func (h *harness) enqueueIdleHarvest(t *testing.T) {
+	t.Helper()
+	pgtest.SetSessionStatus(t, h.pool, h.sid, "idle")
+	if _, err := h.queue.EnqueueOutputsHarvest(context.Background(), h.pool, h.envID, h.sid, false); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// chainGradingOf reads the live outputs_harvest item's chain_grading flag — how
+// a test tells a requeued grading harvest from the idle-tagged item it began as.
+func (h *harness) chainGradingOf(t *testing.T) bool {
+	t.Helper()
+	var cg bool
+	if err := h.pool.QueryRow(context.Background(),
+		`SELECT COALESCE((metadata->>'chain_grading')::bool, false)
+		   FROM work_items WHERE session_id=$1 AND kind='outputs_harvest' AND state != 'stopped'`,
+		h.sid.String()).Scan(&cg); err != nil {
+		t.Fatal(err)
+	}
+	return cg
 }
 
 type fileRow struct {
@@ -172,19 +200,23 @@ func TestHarvestReportsProgressAsItStages(t *testing.T) {
 	}
 
 	var reports int
-	files, err := h.exec.collectOutputs(ctx, item, sess, func() { reports++ })
+	provisioned, err := h.exec.provisionSandbox(ctx, item.SessionID, sess, func() {})
+	if err != nil {
+		t.Fatalf("provisionSandbox: %v", err)
+	}
+	files, err := h.exec.collectOutputs(ctx, item, provisioned, func() { reports++ })
 	if err != nil {
 		t.Fatalf("collectOutputs: %v", err)
 	}
 	if len(files) != 3 {
 		t.Fatalf("staged = %d, want 3", len(files))
 	}
-	// One per staged file, the three provisioning steps, the sandbox and the
-	// listing before them, and the boundary that reports the last file staging
-	// — an exact count, because a report that quietly stops being made is the
-	// failure this test exists to catch.
-	if reports != 9 {
-		t.Errorf("progress reports = %d, want 9 (3 provisioning steps, sandbox, listing, %d files, pass boundary)",
+	// One per staged file, the listing before them, and the boundary that
+	// reports the last file staging — an exact count over collectOutputs' own
+	// steps (the sandbox arrives already provisioned), because a report that
+	// quietly stops being made is the failure this test exists to catch.
+	if reports != 5 {
+		t.Errorf("progress reports = %d, want 5 (listing, %d files, pass boundary)",
 			reports, len(files))
 	}
 }
@@ -534,5 +566,370 @@ func TestParseListingSortsDedupesAndReportsRejects(t *testing.T) {
 	}
 	if want := []string{"/abs", "../up", "\xffraw.bin"}; !slices.Equal(rejected, want) {
 		t.Errorf("rejected = %q, want %q", rejected, want)
+	}
+}
+
+// A session that idles with no outcome ever defined harvests all the same
+// (docs/plan/38, #263): the deliverables reach the files registry, and nothing
+// chains a turn — there is no grading cycle waiting on this snapshot.
+func TestIdleHarvestPublishesSnapshotWithoutChainingATurn(t *testing.T) {
+	sb := &fakeSandbox{files: map[string]string{
+		outputsDir + "/build_deck.py": "print()",
+		outputsDir + "/output.pptx":   "deck bytes",
+	}}
+	h := newHarness(t, sb)
+	// The session ran tools and still holds its sandbox — what an idle harvest
+	// reuses; it provisions nothing of its own (see TestToollessIdleHarvestNeverProvisions).
+	h.prov.markRunning(h.sid)
+	h.enqueueIdleHarvest(t)
+
+	h.stepOnce(t)
+
+	rows := h.fileRows(t)
+	if len(rows) != 2 {
+		t.Fatalf("files rows = %d, want 2: %+v", len(rows), rows)
+	}
+	if h.prov.provisions != 0 {
+		t.Errorf("Provision called %d times, want 0 (an idle harvest reuses a live sandbox)", h.prov.provisions)
+	}
+	for _, r := range rows {
+		if !r.downloadable || r.scopeType != "session" || r.scopeID != h.sid.String() {
+			t.Errorf("%s: downloadable=%v scope=%q/%q", r.filename, r.downloadable, r.scopeType, r.scopeID)
+		}
+		if got := h.blobBytes(t, r.id); got != sb.files[outputsDir+"/"+r.filename] {
+			t.Errorf("%s: blob bytes = %q", r.filename, got)
+		}
+	}
+	if got := h.liveOf(t, queue.ModelTurn); got != 0 {
+		t.Errorf("model_turn live = %d, want 0 (nothing is grading this snapshot)", got)
+	}
+	if got := h.liveOf(t, queue.OutputsHarvest); got != 0 {
+		t.Errorf("outputs_harvest live = %d, want 0 (completed)", got)
+	}
+}
+
+// The fence is not "any non-evaluating state discards": an idle harvest on a
+// session whose earlier outcome already settled still publishes, because what
+// decides the discard is the item's own trigger, not the absence of a live
+// cycle.
+func TestIdleHarvestIgnoresUnrelatedTerminalOutcome(t *testing.T) {
+	sb := &fakeSandbox{files: map[string]string{outputsDir + "/report.json": "v1"}}
+	h := newHarness(t, sb)
+	h.prov.markRunning(h.sid)
+	h.seedOutcome(t, domain.OutcomeResultSatisfied)
+	h.enqueueIdleHarvest(t)
+
+	h.stepOnce(t)
+
+	if rows := h.fileRows(t); len(rows) != 1 {
+		t.Errorf("files rows = %+v, want the one deliverable", rows)
+	}
+	if got := h.liveOf(t, queue.ModelTurn); got != 0 {
+		t.Errorf("model_turn live = %d, want 0 (the outcome settled long ago)", got)
+	}
+}
+
+// The decision-2 race, end to end. An idle-tagged item is still queued when a
+// fresh outcome reaches its own grading enqueue: the two flavors share one live
+// slot, so that enqueue is swallowed and the stale item is all the cycle has.
+// Reading the session's live outcome state before the item's tag is what makes
+// it serve — it publishes and chains the grading turn, instead of completing
+// silently and stranding the outcome in evaluating forever.
+func TestFreshOutcomeGradingReclaimsAStaleIdleHarvestSlot(t *testing.T) {
+	sb := &fakeSandbox{files: map[string]string{outputsDir + "/report.json": "v1"}}
+	h := newHarness(t, sb)
+	// The fresh outcome's own agent turn ran and left a live sandbox, which the
+	// reclaimed idle item reuses to publish the grader's snapshot.
+	h.prov.markRunning(h.sid)
+	h.enqueueIdleHarvest(t)
+
+	// What settleEndTurn's grading branch commits on the next turn: the entry
+	// flips to evaluating and its own harvest enqueue runs — and finds the
+	// idle-tagged item still live.
+	h.seedOutcome(t, domain.OutcomeResultEvaluating)
+	pgtest.SetSessionStatus(t, h.pool, h.sid, "running")
+	created, err := h.queue.EnqueueOutputsHarvest(context.Background(), h.pool, h.envID, h.sid, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if created {
+		t.Fatal("the grading enqueue created a second item; the two flavors must share one live slot")
+	}
+
+	h.stepOnce(t)
+
+	if rows := h.fileRows(t); len(rows) != 1 {
+		t.Errorf("files rows = %+v, want the deliverable the grader will read", rows)
+	}
+	if got := h.liveOf(t, queue.ModelTurn); got != 1 {
+		t.Errorf("model_turn live = %d, want 1 (the grading turn the fresh cycle waits on)", got)
+	}
+	if got := h.liveOf(t, queue.OutputsHarvest); got != 0 {
+		t.Errorf("outputs_harvest live = %d, want 0 (completed)", got)
+	}
+}
+
+// The idle carve-out in sessionForRun admits an idle session and nothing more:
+// a terminated one still drains its item without reading a sandbox.
+func TestIdleHarvestDeadSessionDrains(t *testing.T) {
+	sb := &fakeSandbox{files: map[string]string{outputsDir + "/report.json": "v1"}}
+	h := newHarness(t, sb)
+	h.enqueueIdleHarvest(t)
+	pgtest.SetSessionStatus(t, h.pool, h.sid, "terminated")
+
+	h.stepOnce(t)
+
+	if rows := h.fileRows(t); len(rows) != 0 {
+		t.Errorf("files rows = %d, want 0 (a dead session never harvests)", len(rows))
+	}
+	if got := h.liveOf(t, queue.OutputsHarvest); got != 0 {
+		t.Errorf("outputs_harvest live = %d, want 0 (drained)", got)
+	}
+	if got := h.liveOf(t, queue.ModelTurn); got != 0 {
+		t.Errorf("model_turn live = %d, want 0", got)
+	}
+}
+
+// The cost guard (docs/plan/38 decision 8, #263 review): a tool-less cloud
+// session that idles has no live sandbox, and an idle harvest must not spin one
+// up just to walk an empty outputs tree. Provision is wired to fail, so a
+// stray provisioning attempt is a loud test failure rather than a silent cost;
+// the item still completes, and a previous snapshot is left untouched (no walk,
+// no replace).
+func TestToollessIdleHarvestNeverProvisions(t *testing.T) {
+	sb := &fakeSandbox{files: map[string]string{outputsDir + "/report.json": "v1"}}
+	h := newHarness(t, sb)
+	h.prov.provisionErr = errors.New("Provision must not be called for a tool-less idle harvest")
+	// No markRunning: the session never ran a tool, so Attach finds nothing.
+	prev := domain.NewID(domain.PrefixFile)
+	if _, err := h.pool.Exec(context.Background(),
+		`INSERT INTO files (id, filename, mime_type, size_bytes, downloadable, scope_type, scope_id)
+		 VALUES ($1, 'earlier.txt', 'text/plain', 2, true, 'session', $2)`,
+		prev.String(), h.sid.String()); err != nil {
+		t.Fatal(err)
+	}
+	h.enqueueIdleHarvest(t)
+
+	h.stepOnce(t)
+
+	if h.prov.provisions != 0 {
+		t.Errorf("Provision called %d times, want 0 — a tool-less idle harvest must reach no sandbox", h.prov.provisions)
+	}
+	rows := h.fileRows(t)
+	if len(rows) != 1 || rows[0].id != prev.String() {
+		t.Errorf("rows = %+v, want only the pre-existing snapshot (no walk, no delete-all)", rows)
+	}
+	if got := h.liveOf(t, queue.OutputsHarvest); got != 0 {
+		t.Errorf("outputs_harvest live = %d, want 0 (completed as a no-op, not reclaim-looping)", got)
+	}
+	if got := h.liveOf(t, queue.ModelTurn); got != 0 {
+		t.Errorf("model_turn live = %d, want 0", got)
+	}
+}
+
+// Corrupt outcome state must not wedge an idle harvest (#263 review). runTurn
+// idles a session whose outcome_evaluations will not decode ("session outcome
+// state is corrupt"), which now schedules an idle harvest; that harvest reads
+// the same undecodable column, and treating the decode failure as a fault would
+// reclaim-loop it forever. It settles as a no-op instead.
+func TestIdleHarvestOnCorruptOutcomeStateDrains(t *testing.T) {
+	sb := &fakeSandbox{files: map[string]string{outputsDir + "/report.json": "v1"}}
+	h := newHarness(t, sb)
+	if _, err := h.pool.Exec(context.Background(),
+		`UPDATE sessions SET outcome_evaluations = '{}'::jsonb WHERE id = $1`, h.sid.String()); err != nil {
+		t.Fatal(err)
+	}
+	h.enqueueIdleHarvest(t)
+
+	h.stepOnce(t)
+
+	if got := h.liveOf(t, queue.OutputsHarvest); got != 0 {
+		t.Errorf("outputs_harvest live = %d, want 0 (completed, not reclaim-looping on corrupt state)", got)
+	}
+	if rows := h.fileRows(t); len(rows) != 0 {
+		t.Errorf("files rows = %d, want 0 (nothing published)", len(rows))
+	}
+}
+
+// A storage-less deploy has nothing to publish and, on this trigger, nothing to
+// chain either — so the item completes and the session stays idle, where the
+// grading flavor would still have chained its turn.
+func TestIdleHarvestWithoutBlobStoreCompletesSilently(t *testing.T) {
+	sb := &fakeSandbox{files: map[string]string{outputsDir + "/report.json": "v1"}}
+	h := newHarness(t, sb)
+	h.exec = New(h.pool, h.log, h.queue, h.prov, nil, h.cipher, Config{})
+	prev := domain.NewID(domain.PrefixFile)
+	if _, err := h.pool.Exec(context.Background(),
+		`INSERT INTO files (id, filename, mime_type, size_bytes, downloadable, scope_type, scope_id)
+		 VALUES ($1, 'earlier.txt', 'text/plain', 2, true, 'session', $2)`,
+		prev.String(), h.sid.String()); err != nil {
+		t.Fatal(err)
+	}
+	h.enqueueIdleHarvest(t)
+
+	h.stepOnce(t)
+
+	rows := h.fileRows(t)
+	if len(rows) != 1 || rows[0].id != prev.String() {
+		t.Errorf("rows = %+v, want only the pre-existing snapshot", rows)
+	}
+	if got := h.liveOf(t, queue.ModelTurn); got != 0 {
+		t.Errorf("model_turn live = %d, want 0 (no cycle to chain)", got)
+	}
+	if got := h.liveOf(t, queue.OutputsHarvest); got != 0 {
+		t.Errorf("outputs_harvest live = %d, want 0 (completed)", got)
+	}
+}
+
+// A transient Attach fault is NOT "no sandbox" (docs/plan/38 decision 8, #263
+// review): a one-off Docker inspect hiccup or a K8s API timeout must be
+// propagated so the lease-recovery reclaim retries the harvest, not silently
+// taken for an empty session that drops its only harvest. ErrNotFound alone
+// no-ops; anything else faults and leaves the item live.
+func TestIdleHarvestTransientAttachErrorReclaims(t *testing.T) {
+	sb := &fakeSandbox{files: map[string]string{outputsDir + "/report.json": "v1"}}
+	h := newHarness(t, sb)
+	// The session did write deliverables and still holds its sandbox, but Attach
+	// faults transiently rather than answering ErrNotFound.
+	h.prov.markRunning(h.sid)
+	h.prov.attachErr = errors.New("docker inspect: connection reset")
+	var faulted error
+	h.exec.onFault = func(_ *queue.Item, err error) { faulted = err }
+	h.enqueueIdleHarvest(t)
+
+	h.stepOnce(t)
+
+	if faulted == nil {
+		t.Fatal("no fault reported for a transient Attach error (it was taken for no-sandbox and dropped)")
+	}
+	if got := h.liveOf(t, queue.OutputsHarvest); got != 1 {
+		t.Errorf("outputs_harvest live = %d, want 1 (a transient reclaims, not silently drops)", got)
+	}
+	if rows := h.fileRows(t); len(rows) != 0 {
+		t.Errorf("files rows = %d, want 0 (nothing published on a faulted attach)", len(rows))
+	}
+	if got := h.liveOf(t, queue.ModelTurn); got != 0 {
+		t.Errorf("model_turn live = %d, want 0", got)
+	}
+}
+
+// Corrupt resolved_agent must not wedge an idle harvest (#263 review). An idle
+// attach-only pass reads none of the environment config, resolved agent or
+// resources — it attaches by session id alone — so sessionForRun skips those
+// decodes for it. runTurn already idles a session whose resolved_agent will not
+// decode, which is what scheduled this harvest; re-decoding it here and faulting
+// would reclaim-loop it forever, exactly as the outcome-decode fault would.
+func TestIdleHarvestOnCorruptAgentStateDrains(t *testing.T) {
+	sb := &fakeSandbox{files: map[string]string{outputsDir + "/report.json": "v1"}}
+	h := newHarness(t, sb)
+	// A bare JSON string where sessionForRun's agent struct is expected: the
+	// decode that faults is resolved_agent, before any sandbox is touched.
+	if _, err := h.pool.Exec(context.Background(),
+		`UPDATE sessions SET resolved_agent = '"bad"'::jsonb WHERE id = $1`, h.sid.String()); err != nil {
+		t.Fatal(err)
+	}
+	var faulted error
+	h.exec.onFault = func(_ *queue.Item, err error) { faulted = err }
+	h.enqueueIdleHarvest(t)
+
+	h.stepOnce(t)
+
+	if faulted != nil {
+		t.Errorf("idle harvest faulted on corrupt resolved_agent: %v (it must skip the decode it does not need)", faulted)
+	}
+	if got := h.liveOf(t, queue.OutputsHarvest); got != 0 {
+		t.Errorf("outputs_harvest live = %d, want 0 (drained, not reclaim-looping on corrupt agent state)", got)
+	}
+	if rows := h.fileRows(t); len(rows) != 0 {
+		t.Errorf("files rows = %d, want 0 (nothing published)", len(rows))
+	}
+}
+
+// The decode-skip is gated to idle harvests alone: a grading harvest provisions
+// a fresh sandbox and needs the full run state, so it must still decode it. Pin
+// that its provision carries the environment's networking, which only a decode
+// surfaces — an over-broad skip would provision with an empty spec. Guards the
+// `!item.ChainGrading` half of the sessionForRun carve-out (removing it fails
+// this test).
+func TestGradingHarvestStillDecodesTheRunState(t *testing.T) {
+	sb := &fakeSandbox{files: map[string]string{outputsDir + "/report.json": "v1"}}
+	h := newHarness(t, sb)
+	if _, err := h.pool.Exec(context.Background(),
+		`UPDATE environments SET config = '{"type":"cloud","networking":{"type":"limited","allowed_hosts":["example.com"]}}'
+		   WHERE id = $1`, h.envID.String()); err != nil {
+		t.Fatal(err)
+	}
+	h.seedOutcome(t, domain.OutcomeResultEvaluating)
+	h.enqueueHarvest(t)
+
+	h.stepOnce(t)
+
+	if got := h.prov.lastSpec.Networking.Type; got != domain.NetLimited {
+		t.Errorf("grading harvest provision networking = %q, want %q (the run state must be decoded, not skipped)",
+			got, domain.NetLimited)
+	}
+	if got := h.liveOf(t, queue.ModelTurn); got != 1 {
+		t.Errorf("model_turn live = %d, want 1 (grading still chains its turn)", got)
+	}
+}
+
+// The decision-2 reclaim race when the sandbox is GONE (#263 review). An
+// idle-tagged item holds the one live harvest slot; a fresh outcome turns
+// evaluating and its own grading enqueue is swallowed by that slot. But this
+// pass attaches to no live sandbox (none running), so it walked nothing — and
+// chaining the grader against a stale or empty snapshot is exactly what the
+// pre-idle design (which always provisioned) never did. The settlement requeues
+// the item as a grading harvest instead; once it can provision, it publishes a
+// fresh snapshot and chains the grader then. (The live-sandbox variant,
+// TestFreshOutcomeGradingReclaimsAStaleIdleHarvestSlot, chains immediately.)
+func TestNoLiveSandboxGradingCollisionRequeuesInsteadOfGradingStale(t *testing.T) {
+	sb := &fakeSandbox{files: map[string]string{outputsDir + "/report.json": "fresh"}}
+	h := newHarness(t, sb)
+	// No markRunning: an idle attach finds no live sandbox to walk.
+	h.enqueueIdleHarvest(t)
+
+	// The fresh outcome reaches evaluating; its grading enqueue is swallowed by
+	// the idle item's live slot (the two flavors share one).
+	h.seedOutcome(t, domain.OutcomeResultEvaluating)
+	pgtest.SetSessionStatus(t, h.pool, h.sid, "running")
+	created, err := h.queue.EnqueueOutputsHarvest(context.Background(), h.pool, h.envID, h.sid, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if created {
+		t.Fatal("the grading enqueue created a second item; the flavors must share one live slot")
+	}
+
+	// Settle the stale, no-sandbox idle item: it must NOT chain the grader.
+	h.stepOnce(t)
+
+	if got := h.liveOf(t, queue.ModelTurn); got != 0 {
+		t.Errorf("model_turn live = %d, want 0 (no grader chained against a snapshot never walked)", got)
+	}
+	if rows := h.fileRows(t); len(rows) != 0 {
+		t.Errorf("files rows = %d, want 0 (nothing walked, nothing published)", len(rows))
+	}
+	if got := h.liveOf(t, queue.OutputsHarvest); got != 1 {
+		t.Fatalf("outputs_harvest live = %d, want 1 (requeued as grading, not completed)", got)
+	}
+	if !h.chainGradingOf(t) {
+		t.Error("requeued harvest chain_grading = false, want true (it must provision and walk on its next claim)")
+	}
+
+	// The requeued grading harvest provisions a sandbox, walks the current tree,
+	// publishes it, and chains the grader.
+	h.stepOnce(t)
+
+	if rows := h.fileRows(t); len(rows) != 1 || rows[0].filename != "report.json" {
+		t.Errorf("files rows = %+v, want the freshly-walked snapshot", rows)
+	}
+	if h.prov.provisions != 1 {
+		t.Errorf("Provision called %d times, want 1 (the requeued grading harvest provisions)", h.prov.provisions)
+	}
+	if got := h.liveOf(t, queue.ModelTurn); got != 1 {
+		t.Errorf("model_turn live = %d, want 1 (grader chained after a fresh walk)", got)
+	}
+	if got := h.liveOf(t, queue.OutputsHarvest); got != 0 {
+		t.Errorf("outputs_harvest live = %d, want 0 (completed)", got)
 	}
 }
