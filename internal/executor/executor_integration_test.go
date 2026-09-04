@@ -222,7 +222,7 @@ func TestPackagesRealSandboxWithAStubbedApt(t *testing.T) {
 	if err != nil {
 		t.Fatalf("integration test requires Docker: %v", err)
 	}
-	h := newHarnessWith(t, provider, Config{Image: testImage})
+	h := newHarnessWith(t, provider, Config{Image: testImage, Hardening: defaultHardening()})
 	t.Cleanup(func() {
 		sb, err := provider.Provision(context.Background(), sandbox.Spec{SessionID: h.sid, Image: testImage})
 		if err == nil {
@@ -232,8 +232,11 @@ func TestPackagesRealSandboxWithAStubbedApt(t *testing.T) {
 
 	// Pre-provision through the same provider and a matching spec, so the
 	// executor's own provision adopts this container and finds the stub.
+	// Hardening is bound here, at create, and never re-applied by the
+	// adoption — so it is the platform's default one, the same as the live
+	// row below runs under.
 	ctx := context.Background()
-	sb, err := provider.Provision(ctx, sandbox.Spec{SessionID: h.sid, Image: testImage})
+	sb, err := provider.Provision(ctx, sandbox.Spec{SessionID: h.sid, Image: testImage, Hardening: defaultHardening()})
 	if err != nil {
 		t.Fatalf("pre-provision the sandbox: %v", err)
 	}
@@ -296,7 +299,12 @@ func TestLivePackageInstallRealApt(t *testing.T) {
 	if err != nil {
 		t.Fatalf("integration test requires Docker: %v", err)
 	}
-	h := newHarnessWith(t, provider, Config{Image: testImage})
+	// Under the platform's DEFAULT capability drop, not the zero Hardening the
+	// other rows run with: DefaultCapDrop takes CAP_SETUID and CAP_SETGID, the
+	// two apt's own privilege drop to `_apt` needs, so a zero Hardening here
+	// would pass an apt command that fails on every real deployment (the
+	// compose acceptance of plan 40 found exactly that).
+	h := newHarnessWith(t, provider, Config{Image: testImage, Hardening: defaultHardening()})
 	t.Cleanup(func() {
 		sb, err := provider.Provision(context.Background(), sandbox.Spec{SessionID: h.sid, Image: testImage})
 		if err == nil {
@@ -328,6 +336,13 @@ func TestLivePackageInstallRealApt(t *testing.T) {
 	if len(body.Content) == 0 || !strings.Contains(body.Content[0].Text, "jq-") {
 		t.Errorf("result = %+v, want jq's own version banner", body.Content)
 	}
+}
+
+// defaultHardening is what a deployment that sets no SANDBOX_* knob applies
+// (sandbox.HardeningFromEnv's answer to an empty environment), which is the
+// posture the package rows must prove the install under.
+func defaultHardening() sandbox.Hardening {
+	return sandbox.Hardening{CapDrop: slices.Clone(sandbox.DefaultCapDrop)}
 }
 
 // lastResultText is the text of the most recent tool result — the shape both

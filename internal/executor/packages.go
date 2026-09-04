@@ -113,8 +113,19 @@ var packageManagers = []packageManager{
 			// own included. Unconditional, and before the update: an install's
 			// idempotence is a property of a command that ran to completion,
 			// not of one the deadline killed (decision 2).
+			//
+			// APT::Sandbox::User=root keeps apt's acquire methods as root. apt
+			// otherwise drops them to `_apt`, which takes CAP_SETUID and
+			// CAP_SETGID — the two the platform's own default hardening drops
+			// (sandbox.DefaultCapDrop) and a gated sandbox always drops — so
+			// without it every fetch dies with `setgroups 65534 failed` and
+			// `Method http has died unexpectedly`, on the default deployment
+			// and not merely a hardened one. apt's sandbox guards a host from
+			// its fetchers; inside a container that already is the platform's
+			// sandbox it guards nothing this platform relies on.
+			const noSandbox = "-o APT::Sandbox::User=root"
 			return "export DEBIAN_FRONTEND=noninteractive; dpkg --configure -a; " +
-				"apt-get update -q && apt-get install -y -q " + quoteEntries(entries)
+				"apt-get " + noSandbox + " update -q && apt-get " + noSandbox + " install -y -q " + quoteEntries(entries)
 		},
 	},
 	{

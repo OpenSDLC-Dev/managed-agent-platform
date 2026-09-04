@@ -103,7 +103,8 @@ func TestInstallsEveryManagerInTheReferencesOrder(t *testing.T) {
 
 	want := []string{
 		wrap("command -v apt-get >/dev/null 2>&1 || exit 127; export DEBIAN_FRONTEND=noninteractive; " +
-			"dpkg --configure -a; apt-get update -q && apt-get install -y -q 'jq'"),
+			"dpkg --configure -a; apt-get -o APT::Sandbox::User=root update -q && " +
+			"apt-get -o APT::Sandbox::User=root install -y -q 'jq'"),
 		wrap("command -v cargo >/dev/null 2>&1 || exit 127; cargo install --root /usr/local 'hyperfine@1.18.0'"),
 		wrap("command -v gem >/dev/null 2>&1 || exit 127; gem install --no-document 'rails:7.1.0'"),
 		wrap("command -v go >/dev/null 2>&1 || exit 127; " +
