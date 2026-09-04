@@ -592,6 +592,14 @@ func stampThread(evs []events.NewEvent, threadID domain.ID, askIDs []domain.ID) 
 // kind — no driver can run it — and comes back as delegated for the settlement
 // to resolve and answer in this same commit. Its id is minted here for the same
 // reason an ask's is: the answer has to name it.
+//
+// A name absent from class entirely — the model was not offered it under any
+// role — takes the same shape as a delegation call rather than a fifth of its
+// own: delegatedCall.unoffered marks it so d.run answers it "unknown tool"
+// instead of dispatching one of the six (#567). This is deliberately distinct
+// from the settlement-executed-but-unoffered case just above (a coordinator
+// reaching for a worker's tool, or the reverse): that name IS in class — every
+// role classes all six, offered or not — so it keeps going to wrongRole.
 func turnEvents(turn *turnResult, class map[string]toolClass) (batch []events.NewEvent, kind queue.Kind, askIDs []domain.ID, delegated []delegatedCall, err error) {
 	if len(turn.text) > 0 {
 		content, err := json.Marshal(map[string]any{"content": turn.text})
@@ -608,9 +616,15 @@ func turnEvents(turn *turnResult, class map[string]toolClass) (batch []events.Ne
 		}
 		c, offered := class[tu.Name]
 		if !offered {
-			// A name the model was not offered — treat it as client-executed so
-			// the platform never runs a tool it does not recognise as its own.
-			c.kind = domain.EventAgentCustomToolUse
+			// A name the model was not offered: not a declared custom tool (a
+			// client would answer that one), not a platform tool this thread's
+			// role owns. The platform must still never run it, but parking it as
+			// agent.custom_tool_use strands the thread on a client that will
+			// never post a result (#567) — so it takes a delegation call's
+			// shape instead: an ordinary agent.tool_use, stamped deny (below,
+			// where perm is picked) and answered inline by the settlement rather
+			// than by any driver.
+			c = toolClass{kind: domain.EventAgentToolUse, settlement: true}
 		}
 		var id domain.ID
 		gated := false
@@ -640,7 +654,22 @@ func turnEvents(turn *turnResult, class map[string]toolClass) (batch []events.Ne
 		}
 		if gated {
 			perm := domain.EvalPermAllow
-			if c.policy == domain.PolicyAlwaysAsk {
+			switch {
+			case !offered:
+				// #567: a name the model was not offered was denied, not
+				// allowed — the settlement answers it "unknown" in this same
+				// commit, but that answer is only this platform's own; a
+				// self_hosted worker built to the reference contract streams
+				// agent.tool_use directly and may own this very name in its
+				// own registered toolset (a disabled "edit" is still "edit"
+				// to a worker running the standard set), and does not treat
+				// an agent.tool_result as answered (it dedups on
+				// user.tool_result/user.custom_tool_result alone). An "allow"
+				// stamp would tell such a worker to run what this platform
+				// already refused; "deny" is the value the reference
+				// documents such a worker never executes but still yields.
+				perm = domain.EvalPermDeny
+			case c.policy == domain.PolicyAlwaysAsk:
 				perm = domain.EvalPermAsk
 				id = domain.NewID("sevt")
 				askIDs = append(askIDs, id)
@@ -651,7 +680,9 @@ func turnEvents(turn *turnResult, class map[string]toolClass) (batch []events.Ne
 			// An injected tool carries no policy, so the ask branch above never
 			// minted one: this is the only mint on this path.
 			id = domain.NewID("sevt")
-			delegated = append(delegated, delegatedCall{eventID: id, name: tu.Name, input: tu.Input})
+			delegated = append(delegated, delegatedCall{
+				eventID: id, name: tu.Name, input: tu.Input, unoffered: !offered,
+			})
 		}
 		payload, err := json.Marshal(fields)
 		if err != nil {
@@ -670,6 +701,12 @@ type delegatedCall struct {
 	eventID domain.ID
 	name    string
 	input   json.RawMessage
+	// unoffered marks a name absent from class entirely (#567) — not one of
+	// the six, whichever half this thread owns. d.run answers it before
+	// wrongRole or the six-way switch ever sees it: both assume a genuine
+	// delegation call, and dispatching an arbitrary hallucinated name into
+	// createAgent or the rest on their say-so is not what either promises.
+	unoffered bool
 }
 
 // escalate picks the work kind a turn's whole set of platform calls settles to.
@@ -779,13 +816,14 @@ func (b *Brain) commitTurn(ctx context.Context, sid domain.ID, item *queue.Item,
 	// not (docs/DIVERGENCES.md).
 	if len(turn.toolUses) > 0 {
 		if len(delegated) > 0 {
-			// A delegation call is answered in the commit that emits it,
-			// whatever else the turn holds — no driver can run one — so this
-			// branch owns every shape a turn with one takes, the ask gate and
-			// the mixed exec turn included (plan 35 decision 6). The turn is
-			// settlement-only when every call was a delegation call: a
-			// client-executed custom tool escalates no work kind either, and
-			// chaining past one would replay a tool_use nothing answered.
+			// A delegation call — or a name the model was not offered at all
+			// (#567) — is answered in the commit that emits it, whatever else
+			// the turn holds — no driver can run either — so this branch owns
+			// every shape a turn with one takes, the ask gate and the mixed exec
+			// turn included (plan 35 decision 6). The turn is settlement-only
+			// when every call was one of these: a client-executed custom tool
+			// escalates no work kind either, and chaining past one would replay
+			// a tool_use nothing answered.
 			return b.commitDelegatedTurn(ctx, sid, item, agent, head, opts, workKind, askIDs, delegated,
 				len(delegated) == len(turn.toolUses), watermark)
 		}

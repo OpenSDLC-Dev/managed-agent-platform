@@ -313,15 +313,15 @@ func TestACorruptMCPServerSpecFailsTheTurn(t *testing.T) {
 	}
 }
 
-// A name the model was never offered is treated as client-executed: the
-// platform must not run a tool it does not recognise as its own, and a
-// client-executed intent is the arm that strands nothing — it waits for a
-// result the client posts, or for the interrupt that ends the turn. This slice
-// is what makes the branch reachable in ordinary use: an MCP tool the model saw
-// on an earlier turn can go unoffered on a later one (its server's listing
-// failed, its name lost a contest, the request's definition budget ran out) and
-// the model calls it anyway.
-func TestAToolTheModelWasNotOfferedIsClientExecuted(t *testing.T) {
+// A name the model was never offered is answered inline as unknown rather
+// than parked as agent.custom_tool_use: no client declared it, so nothing
+// would ever post a result, and the settlement's own answer is what lets the
+// model self-correct instead of stranding the session forever (#567). This
+// slice is what makes the branch reachable in ordinary use: an MCP tool the
+// model saw on an earlier turn can go unoffered on a later one (its server's
+// listing failed, its name lost a contest, the request's definition budget
+// ran out) and the model calls it anyway.
+func TestAToolTheModelWasNotOfferedIsAnsweredUnknown(t *testing.T) {
 	h := newHarness(t, [][]provider.Chunk{{
 		toolUseChunk("toolu_1", "mcp__docs__search"),
 		done("tool_use", 3),
@@ -337,17 +337,26 @@ func TestAToolTheModelWasNotOfferedIsClientExecuted(t *testing.T) {
 	if n := len(h.eventsOfType(t, domain.EventAgentMCPToolUse)); n != 0 {
 		t.Errorf("agent.mcp_tool_use events = %d, want 0 — the platform must not run what it did not offer", n)
 	}
-	custom := h.eventsOfType(t, domain.EventAgentCustomToolUse)
-	if len(custom) != 1 {
-		t.Fatalf("agent.custom_tool_use events = %d, want 1", len(custom))
+	if n := len(h.eventsOfType(t, domain.EventAgentCustomToolUse)); n != 0 {
+		t.Errorf("agent.custom_tool_use events = %d, want 0 — no client declared this name (#567)", n)
+	}
+	got := h.answers(t)
+	if len(got) != 1 || !got[0].isErr {
+		t.Fatalf("answers = %v, want one is_error", got)
+	}
+	if !strings.Contains(got[0].text, `unknown tool "mcp__docs__search"`) {
+		t.Errorf("answer text = %q, want it to name the unknown tool", got[0].text)
 	}
 	for _, k := range []queue.Kind{queue.MCPExec, queue.WebExec, queue.ToolExec} {
 		if got := h.liveOf(t, k); got != 0 {
-			t.Errorf("%s items = %d, want 0 — the client answers a custom tool", k, got)
+			t.Errorf("%s items = %d, want 0 — nothing was offered to run", k, got)
 		}
 	}
 	if got := h.status(t); got != "running" {
-		t.Errorf("status = %q, want running (waiting on the client's result)", got)
+		t.Errorf("status = %q, want running — nothing here waits on a client", got)
+	}
+	if n := h.liveOf(t, queue.ModelTurn); n != 1 {
+		t.Errorf("model_turn items = %d, want the settlement's own chained turn", n)
 	}
 }
 

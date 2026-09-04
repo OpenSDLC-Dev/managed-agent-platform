@@ -876,6 +876,7 @@ func TestParallelToolCallsResumeOnFullSet(t *testing.T) {
 		{toolUseChunk("toolu_a", "lookup"), toolUseChunk("toolu_b", "lookup"), done("tool_use", 3)},
 		{textChunk(0, "both done"), done("end_turn", 2)},
 	}, nil)
+	h.customTool(t, "lookup")
 	h.wake(t, "do two things")
 	h.runOnce(t)
 
@@ -1260,6 +1261,7 @@ func TestNullToolInputBecomesEmptyObject(t *testing.T) {
 					done("tool_use", 1),
 				},
 			}, nil)
+			h.customTool(t, "noop")
 			h.wake(t, "call it")
 			h.runOnce(t)
 

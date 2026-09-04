@@ -91,6 +91,11 @@ func TestToolUseNULIsStripped(t *testing.T) {
 		}},
 		done("tool_use", 2),
 	}}, nil)
+	// Declared under the NUL-stripped name: sanitization runs before the
+	// class lookup (stream.go), so this is the name the call is matched
+	// against, and it must stay client-executed rather than fall into
+	// #567's unoffered path.
+	h.customTool(t, "make_coffee")
 	h.wake(t, "hi")
 	h.runOnce(t)
 
@@ -157,6 +162,7 @@ func TestToolInputLoneSurrogateIsLaundered(t *testing.T) {
 		}},
 		done("tool_use", 2),
 	}}, nil)
+	h.customTool(t, "custom_thing")
 	h.wake(t, "hi")
 	h.runOnce(t)
 
@@ -182,6 +188,7 @@ func TestToolInputInvalidUTF8IsLaundered(t *testing.T) {
 		}},
 		done("tool_use", 2),
 	}}, nil)
+	h.customTool(t, "custom_thing")
 	h.wake(t, "hi")
 	h.runOnce(t)
 
@@ -335,6 +342,7 @@ func TestToolInputKeyNULIsStripped(t *testing.T) {
 		}},
 		done("tool_use", 2),
 	}}, nil)
+	h.customTool(t, "custom_thing")
 	h.wake(t, "hi")
 	h.runOnce(t)
 
