@@ -4579,9 +4579,9 @@ and leaves the session running with its other repositories mounted.
 ## Second recording wave, registry reconciliation (#575) — review-hardening record (2026-09-04)
 
 Twenty-four registry entries were rewritten from a 281-pair recording of the live
-managed-agents endpoint. Eleven review passes found 65 defects between them — five,
-three, fifteen, four, six, one, seven, five, five, eleven and three — and **twenty of the
-65 were one defect repeated**: the recording was read carefully, our own code was not read at all, and the
+managed-agents endpoint. Twelve review passes found 66 defects between them — five,
+three, fifteen, four, six, one, seven, five, five, eleven, three and one — and **twenty of
+the 66 were one defect repeated**: the recording was read carefully, our own code was not read at all, and the
 entry was then filed as "confirmed, and we match". Those twenty came one from the
 verifier's first run, three from Codex, nine from the Claude reviewer, none from the
 refute-first pass, one each from the verifier's second through sixth runs, and two from
@@ -4832,6 +4832,16 @@ states the route-by-route split and leaves the four-route tally to the entry tha
 it. A third note needed no change and is recorded because it is a trap: CodeRabbit's check
 was green on a review it never performed, its rate limit having been reached, so a green
 mark there is not a review and is not counted as one.
+
+The twelfth pass found one defect, two words long, and they were written by the fix for
+the eleventh: the rewritten first half said the recorded 69-character name was "offered
+and called", where the long-name session's only listing carries no tool event at all — the
+names appear inside the `agent.message` in which the model echoes its own tool list. It
+was offered and echoed, never called, and the entry's *second* half had said so correctly
+all along. So the last finding of the exercise is a first-half sentence claiming more than
+the bytes hold, in the entry whose first half had just been rewritten for exactly that,
+and the fix is two words. There is no better illustration of why the rule above had to be
+made mechanical.
 
 That is the shape of the whole exercise, stated once more because it took eleven passes to
 see it plainly. The defect was never carelessness about our code — by the fourth pass our
