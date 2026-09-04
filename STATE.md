@@ -10,7 +10,7 @@ a private archive: bytes observed once, at cost. 2026-09-02 covered the Work API
 turn semantics, multiagent threads, memory stores, files, skills, vaults, deployments
 and permission gating; 2026-09-03 ran two waves, one free over console-cookie
 questions and one of 281 pairs against the tiers needing model spend, an environment
-key, or a resource we lacked. #78 stays open past this work — 112 registry entries
+key, or a resource we lacked. #78 stays open past this work — 113 registry entries
 still name it as their live tracker, and the debt is now analysis rather than
 recording: 72 comparison rows have never been read. Plan 37 (#51) archived 2026-09-01.
 

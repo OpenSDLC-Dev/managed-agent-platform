@@ -4567,8 +4567,8 @@ and leaves the session running with its other repositories mounted.
 ## Second recording wave, registry reconciliation (#575) — review-hardening record (2026-09-04)
 
 Twenty registry entries were rewritten from a 281-pair recording of the live
-managed-agents endpoint. Two review passes found twenty defects between them, and
-**seventeen were one defect repeated**: the recording was read carefully, our own code
+managed-agents endpoint. Four review passes found twenty-seven defects between them, and
+**thirteen were one defect repeated**: the recording was read carefully, our own code
 was not read at all, and the entry was then filed as "confirmed, and we match".
 
 The verifier found five, of which the load-bearing one was a sentence claiming
@@ -4589,6 +4589,28 @@ Seven issues came out of the review passes rather than the recording: #577, #578
 between a repository named `skills` and the skills materialization root, raised as an
 unverified risk and real on verification. That is more than the recording pass produced
 unaided.
+
+A fourth pass put six agents on six of this PR's own factual claims, each told to
+refute its claim and to default to refuted when unsure. Two held — the `unrestricted`
+address floor and the clone shape. Four did not, in three shapes the earlier passes had
+not shown. The `cmd/gate` security sentence, itself already a correction of an
+overstatement in the other direction, was right about the mechanism down to the rule
+order and the verification step, and wrong to state it unconditionally: a gate is
+provisioned only for a `limited` or vault-attached session on a deployment configured
+for one, so the `unrestricted` session the recording exercised had no firewall to be
+dropped by. The skills entry claimed a **path** divergence that does not exist — the
+bullet is relative to a workdir defaulting to `/workspace`, so it names exactly the
+root the reference advertises, and only the template differs. The cache-creation reading
+mistook a running session total for a per-turn one; re-derived over the archive, all 37
+nested readings inside an event listing equal that listing's running span sum, and this
+platform already accumulates the same way. And STATE.md's tracker count was off by one
+from the moment it was written, because a text match for the pointer clause misses a
+head whose `#78` is its second segment; `tools/registrycheck`'s own parser yields 113.
+
+So the defect has a mirror, and the mirror is the more expensive one. Assuming we
+*match* without reading our code leaves a wrong entry in a document; assuming we
+*differ* without reading it files an issue against working behavior. #581's path half
+was exactly that, and it took an agent instructed to disbelieve the entry to find it.
 
 **The transferable rule, now written into the INFERRED preamble as a three-way routing
 test:** settling an inference has three ends — confirmed and we match, confirmed and we
