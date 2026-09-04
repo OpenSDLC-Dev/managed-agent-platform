@@ -4579,9 +4579,9 @@ and leaves the session running with its other repositories mounted.
 ## Second recording wave, registry reconciliation (#575) — review-hardening record (2026-09-04)
 
 Twenty-four registry entries were rewritten from a 281-pair recording of the live
-managed-agents endpoint. Ten review passes found 62 defects between them — five,
-three, fifteen, four, six, one, seven, five, five and eleven — and **twenty of the 62 were
-one defect repeated**: the recording was read carefully, our own code was not read at all, and the
+managed-agents endpoint. Eleven review passes found 65 defects between them — five,
+three, fifteen, four, six, one, seven, five, five, eleven and three — and **twenty of the
+65 were one defect repeated**: the recording was read carefully, our own code was not read at all, and the
 entry was then filed as "confirmed, and we match". Those twenty came one from the
 verifier's first run, three from Codex, nine from the Claude reviewer, none from the
 refute-first pass, one each from the verifier's second through sixth runs, and two from
@@ -4729,7 +4729,11 @@ platform admits outright where the reference refused it — and "a route it had 
 200 minutes earlier" tied the revoked key to the live one when three keys were revoked at
 teardown and the archive redacts which answered. Both were inherited from the analysis
 file rather than derived. The fact is now rewritten in **both** halves, and the tally is
-stated rather than asserted.
+stated rather than asserted. Its remaining two were notes that changed files all the
+same, which is why the sequence assigns that pass five: the 404-versus-405 difference had
+been written as a claim about the `/v1/` namespace rather than as one route's difference
+with neither side holding a house rule, and this record still read as though the
+contradiction had been resolved when only half of it had.
 
 The tenth pass is the automated reviewer, running on each push rather than on request,
 and it found eleven across three batches — the largest count after the Claude reviewer's,
@@ -4753,6 +4757,18 @@ extraction, so the sentinel's question is live on both paths — and the recordi
 against the argument the paragraph drew from it, re-extracting from a local mount being a
 copy rather than a download. The file-mount entry's "does not stream bytes into a
 container at all" was scoped for the same reason.
+
+And then the ninth pass's lesson recurred inside the tenth pass's own fix, twice, which is
+the last thing worth recording here. Both corrected paragraphs were written below an
+earlier sentence that still said the refuted thing: the skills entry opened "The reference
+re-downloads and re-extracts every skill each work item" — true of the toolset, false of
+the managed sandbox the paragraph two thousand characters later had just split out — and
+the egress entry's first mention of the floor asserted a "private/reserved" class that the
+sentences after it now say was never probed beyond link-local. Neither was caught by a
+reviewer. Both were caught by re-reading the whole entry after fixing part of it, which is
+the only method that has worked on this defect: **a claim is not corrected until every
+sentence that states it has been rewritten**, and the sentence a reader reaches first is
+the one that has to be true.
 
 Two of the eleven are worth keeping for what they say about this record's own claims. The
 first is that **the ninth pass's defect had already recurred in a second entry** while
@@ -4786,7 +4802,38 @@ two "we are simply wrong" issues named only in body prose where the guard cannot
 (#576, #582), two live `#78` residuals inside another issue's `Tracked:` parenthetical
 rather than heads of their own, and the count sentence in this record.
 
-That is the shape of the whole exercise, stated once more because it took ten passes to
+The eleventh pass is the verifier again, and it found the *other* defect a fifth time, in
+a third entry, on a line neither the ninth pass's fix nor the tenth pass's sweep had
+touched. The `Offering an MCP tool to the model` entry's first half was byte-identical to
+main's: the reference "gives the model a **bare** tool name", and `mcp__{server}__{tool}`
+is "**ours and forced by architecture**", with the collision rule and one of the five
+drop reasons resting on that premise. Some two thousand characters later, in the same
+line, the half this PR appended says the recording overturns exactly that — the name the
+reference shows the model is composed, the prefix is reserved at agent create, and there
+is no 64-character ceiling. Two bolds contradicting each other in one entry a reader
+meets top to bottom.
+
+That is five instances, each in a different entry: the resource-lifecycle entry (ninth
+pass), the Level-1 entry (tenth), the skills entry's opening clause and the egress entry's
+first mention of the floor (both caught while fixing the tenth), and now this one. By this
+point every one of those claims had been checked against the bytes, so the pattern is not
+carelessness about what is true. It is that **a correction gets written where the new
+evidence is discussed, and the sentence that first states the claim is somewhere else** —
+usually above it, usually in bold, and always the one a reader reaches first. So the rule
+the whole exercise reduces to is mechanical rather than attitudinal: after settling an
+inference, find every sentence in the entry that states the old claim and rewrite each of
+them, beginning with the earliest.
+
+Its other two findings changed files as well. The ninth pass's tally of five had a
+narration naming three, now reconciled — the missing two were notes that nonetheless
+changed the tree. And the skill-reads entry claimed one environment key "produced four
+different refusals" directly above an enumeration listing two 403s and a 200; it now
+states the route-by-route split and leaves the four-route tally to the entry that carries
+it. A third note needed no change and is recorded because it is a trap: CodeRabbit's check
+was green on a review it never performed, its rate limit having been reached, so a green
+mark there is not a review and is not counted as one.
+
+That is the shape of the whole exercise, stated once more because it took eleven passes to
 see it plainly. The defect was never carelessness about our code — by the fourth pass our
 code was being read line by line. It was that **the recording's own account was the last
 thing anybody checked**, because it arrived as the authority and everything downstream
