@@ -4663,3 +4663,286 @@ enters the sandbox and the egress gate is never involved; only the platform half
 with BYOC materialization deferred to #322 and the brain's environment-kind gate keeping
 that gap honest rather than silent; and a clone that fails surfaces as a `session.error`
 and leaves the session running with its other repositories mounted.
+
+## Second recording wave, registry reconciliation (#575) — review-hardening record (2026-09-04)
+
+Twenty-four registry entries were rewritten from a 281-pair recording of the live
+managed-agents endpoint. Twelve review passes found 66 defects between them — five,
+three, fifteen, four, six, one, seven, five, five, eleven, three and one — and **twenty of
+the 66 were one defect repeated**: the recording was read carefully, our own code was not read at all, and the
+entry was then filed as "confirmed, and we match". Those twenty came one from the
+verifier's first run, three from Codex, nine from the Claude reviewer, none from the
+refute-first pass, one each from the verifier's second through sixth runs, and two from
+the automated reviewer on the pushed branch.
+A finding is counted here when it changed a file in this repository — which is why the
+verifier's third run contributes one of the four it raised, its other three having been
+answered in the pull request rather than in the tree.
+
+The verifier found five, of which the load-bearing one was a sentence claiming
+`isSkillReadPath` "admits exactly the subtree the reference serves" — inside an entry
+whose own first half says we additionally serve a route the reference answers 403 to.
+The Codex reviewer found three more, each a mismatch recorded as a match:
+`credential_host_unreachable_error` (we fire from a gate-config fetch against the live
+policy, not at session start against a creation snapshot), the context-overflow
+settlement, and the session-scoped `file_id`. The Claude reviewer found fifteen, nine of
+them the same shape, including two entries that recorded a reference property and
+compared only a third against ours, plus a claim that understated this platform's own
+gate —
+`cmd/gate` was described as an environment-variable forward proxy a hostile process
+escapes by clearing `HTTP_PROXY`, when it installs owner-match iptables before it ever
+serves the proxy, so such a process is dropped rather than let out.
+
+Ten issues came out of the review passes rather than the recording: five of them
+(#577, #578, #579, #581, #582) from the Codex and Claude passes, the registration of
+the pre-existing #576, then #584 — a collision between a repository named `skills`
+and the skills materialization root, raised as an unverified risk and real on
+verification — and finally #589, #590 and #591 from the fifth pass. That is more
+than the recording pass produced unaided.
+
+A fourth pass put six agents on six of this PR's own factual claims, each told to
+refute its claim and to default to refuted when unsure. Two held — the `unrestricted`
+address floor and the clone shape. Four did not, in three shapes the earlier passes had
+not shown. The `cmd/gate` security sentence, itself already a correction of an
+overstatement in the other direction, was right about the mechanism down to the rule
+order and the verification step, and wrong to state it unconditionally: a gate is
+provisioned only for a `limited` or vault-attached session on a deployment configured
+for one, so the `unrestricted` session the recording exercised had no firewall to be
+dropped by. The skills entry claimed a **path** divergence that does not exist — the
+bullet is relative to a workdir defaulting to `/workspace`, so it names exactly the
+root the reference advertises, and only the template differs. The cache-creation reading
+mistook a running session total for a per-turn one; re-derived over the archive, all 37
+nested readings inside an event listing equal that listing's running span sum, and this
+platform already accumulates the same way. And STATE.md's tracker count was off by one
+from the moment it was written, because a text match for the pointer clause misses a
+head whose `#78` is a later comma segment: `tools/registrycheck`'s own parser gave 113
+there against the naive 112. The merged file has three such heads, and after the tenth
+pass promoted two more `#78` residuals out of the parentheticals that hid them from the
+guard it carries 117 — the figure STATE.md states, derived with the parser's grammar
+rather than a text match.
+
+So the defect has a mirror, and the mirror is the more expensive one. Assuming we
+*match* without reading our code leaves a wrong entry in a document; assuming we
+*differ* without reading it files an issue against working behavior. #581's path half
+was exactly that, and it took an agent instructed to disbelieve the entry to find it.
+
+A fifth pass, the verifier re-run after the fourth, found six more — and one was the
+original defect again, in the entry nobody had thought to reread. The OAuth-refresh
+entry records two reference behaviors, a past `expires_at` refused with a 400 and a
+failing token endpoint that stays silent on the wire, and compares neither against this
+platform, which differs on both: it accepts the past date, and it answers a failed
+refresh with `mcp_authentication_failed_error` where the reference sent the stale token
+and succeeded. Those are #589 and #590. The other five findings were bookkeeping the
+earlier passes had left behind: an entry count stale in three documents; a `Tracked:`
+clause that had moved two live residuals *into* the provenance tail the guard never
+state-checks, one of them a recorded mismatch with no issue at all (now #591); totals in
+this very record that did not add up; a section placement worth arguing rather than
+fixing; and two comparison rows the archive counted as settled that had reached neither
+the analysis file nor the registry.
+
+Those two rows are worth their own line, because they settled in opposite directions.
+Mixed-turn permission gating — whether an `always_allow` tool runs while an
+`always_ask` confirmation from the same turn is outstanding — is the reference's own
+behavior, gate for gate, so that entry left the divergences for the compatibility notes
+and gave up its tracker. A blocked domain's answer to the model is the other way: the
+reference returns a readable `is_error` tool result naming `url_not_allowed` and the
+field that blocked it, which is the shape this platform already produces for a
+different reason, and the divergence it keeps on purpose is that the fence is the
+operator's rather than the agent's.
+
+The sixth pass is the one to keep, because of where it found the defect. Answering the
+fifth pass's mildest finding — an entry sitting in INFERRED though most of it was
+settled — meant adding one sentence to justify the placement, and that sentence said
+"three of those four are confirmed and matched" having read our source for one of the
+three. Of the other two, one was true by luck; the other was not true at all. The
+reference distinguishes a revoked environment key from a live one out of scope by
+message text alone, at one status and one type, while `authenticateEnvironmentKey` sends
+unknown, revoked and expired down a single branch **on purpose** — "so a probing client
+learns nothing about which of them it hit" — and no live-key-out-of-scope state exists
+here to compare against, no scope model being built. Two deliberate positions, recorded
+as a match.
+
+So the defect is not a lapse that better attention retires. It reappeared in a sentence
+written *to answer a finding about that same entry*, at the fifth attempt, under a rule
+this PR itself added to prevent it. The one thing that has reliably caught it is a
+reader who opens our source with the entry's claim in hand and expects it to be wrong —
+which is what the verifier and the refute-first pass both are, and what re-reading the
+recording is not.
+
+The seventh pass makes the sixth's point twice over. Sent to attack the replacement
+sentence on the assumption that it too was wrong, it found that the conclusion had become
+right while the *reason* was still asserted: "there is no live-key-out-of-scope state here
+to compare against at all" is contradicted by our own code twice — `/v1/agents` under a
+Bearer environment key falls to the management lane and answers 401 `missing x-api-key
+header` for a live key and a revoked one alike, which is the same collapse by a second
+route rather than an absence, and `workScope` already calls a key naming another
+environment "a scope failure, not an authentication one". What is missing is named OAuth
+scopes, not an authority model. The same pass also found the citation overreaching — #550's
+body proposes a work-API admission split and says nothing of this surface, so the registry
+was deferring to an issue that would not retire the gap when closed; the issue's scope has
+been widened to match rather than the claim narrowed to fit.
+
+It also turned up a wire difference nobody had **compared** — the reference's 404 was
+recorded sixteen times over — inside the fact this record had already called true-by-luck: the reference answers `DELETE /v1/agents/{id}` a 404
+`not_found_error`, where this platform answers a 405 `invalid_request_error` from the
+method-less fallback. Capability matched, wire did not. It gets no issue, because the
+pinned SDK's agent service exposes no delete at all and no typed client can reach it — but
+"agents cannot be deleted here either" had stood as a match for two passes.
+
+The eighth pass is the one that should have come first. Sent to attack the same two
+sentences a fourth time, it did something no earlier pass had: it opened the recording's
+own probe index and read **which route each probe hit**. Every prior pass, this one's
+author included, had checked the entry against our code and taken its account of the
+recording on trust. The premise did not survive. "Separated by message text alone at one
+status and one type" was a pairing of two probes on two different routes — a live key
+outside its scope answers 403 `permission_error` on the skills routes and 401
+`authentication_error` on `/v1/agents`, so the reference's refusal is route-dependent and
+no recorded route carries both states. Worse, the entry gave as the reason we *differ* an
+anti-oracle posture that the work-API-auth entry, 165 lines above it in the same file,
+records this platform **giving up in order to match** — two entries with opposite verdicts
+on one recorded property, which is the single thing a divergence registry exists to
+prevent. The corrected fact is smaller and duller: the reference's
+refusal is route-dependent, the envelope matches on two of the four routes and differs on
+the other two, and one absence is under all of it — no named-OAuth-scope vocabulary, which
+is #550's gap.
+
+The ninth pass is the one that stings, because the fix was the failure. Told the premise
+was unsupported, this author wrote a correct account — and **appended** it, leaving the
+refuted sentence standing byte-identical in the entry's first half. The entry then stated
+a wire fact in bold and, some 1,500 characters later in the same paragraph, said that fact
+was wrong. A reader skims the bold half. Two more claims went with it: "the envelope
+matches wherever the recording reached" is falsified by two of the four routes the
+recording reached — `GET /v1/skills` is management-only here, so an environment key draws
+a 401 where the reference answers 403 `permission_error`, and `GET /v1/skills/{id}` this
+platform admits outright where the reference refused it — and "a route it had reached with
+200 minutes earlier" tied the revoked key to the live one when three keys were revoked at
+teardown and the archive redacts which answered. Both were inherited from the analysis
+file rather than derived. The fact is now rewritten in **both** halves, and the tally is
+stated rather than asserted. Its remaining two were notes that changed files all the
+same, which is why the sequence assigns that pass five: the 404-versus-405 difference had
+been written as a claim about the `/v1/` namespace rather than as one route's difference
+with neither side holding a house rule, and this record still read as though the
+contradiction had been resolved when only half of it had.
+
+The tenth pass is the automated reviewer, running on each push rather than on request,
+and it found eleven across three batches — the largest count after the Claude reviewer's,
+on a diff five passes had already been over. Two were the repeated defect. One was a
+claim that the reference's address floor "is exactly `dialguard.IPAllowed`", written
+without opening `internal/dialguard/dialguard.go`, whose package comment says the guard
+covers loopback, link-local, the unspecified address and multicast and **deliberately
+admits RFC 1918** because the on-prem premise puts legitimate endpoints on the operator's
+own private network — and the probe recorded was `169.254.169.254`, link-local, so only
+the half our floor does cover was ever observed. The other was the skills paragraph
+asserting the reference "does not stage skills into a sandbox at all", refuted by the
+Level-1 entry *this same wave added*: `/workspace/skills/` holds the extracted trees while
+only the zips sit on the FUSE mount at `/mnt/skills`.
+
+Chasing that second one turned up the sharper version no reviewer had raised. **"The
+reference" is two implementations here, and the entry had been reading one recording
+against both.** The SDK's agent toolset really does re-fetch per work item
+(`Skills.Versions.Download` into `{workdir}/skills/{dirname}`); the platform-managed
+sandbox the recording observed replaces that fetch with the mount. Neither skips the
+extraction, so the sentinel's question is live on both paths — and the recording runs
+against the argument the paragraph drew from it, re-extracting from a local mount being a
+copy rather than a download. The file-mount entry's "does not stream bytes into a
+container at all" was scoped for the same reason.
+
+And then the ninth pass's lesson recurred inside the tenth pass's own fix, twice, which is
+the last thing worth recording here. Both corrected paragraphs were written below an
+earlier sentence that still said the refuted thing: the skills entry opened "The reference
+re-downloads and re-extracts every skill each work item" — true of the toolset, false of
+the managed sandbox the paragraph two thousand characters later had just split out — and
+the egress entry's first mention of the floor asserted a "private/reserved" class that the
+sentences after it now say was never probed beyond link-local. Neither was caught by a
+reviewer. Both were caught by re-reading the whole entry after fixing part of it, which is
+the only method that has worked on this defect: **a claim is not corrected until every
+sentence that states it has been rewritten**, and the sentence a reader reaches first is
+the one that has to be true.
+
+Two of the eleven are worth keeping for what they say about this record's own claims. The
+first is that **the ninth pass's defect had already recurred in a second entry** while
+that pass was busy fixing the first: the Level-1 skill-injection entry was titled "the
+block format and placement are inferred" and opened "the exact template is captured by no
+source", with text appended below quoting the reference's template verbatim and stating
+that this recording falsifies that sentence. A correction appended, the refuted sentence
+left standing, one entry over from where it had just been fixed. The second is that **this
+PR broke the routing rule it added**: the `DELETE /v1/agents/{id}` 405-against-404
+mismatch was recorded with no tracker and an exemption argued from client reachability —
+no typed client can reach it — which is precisely the "a bug is not a divergence to be
+argued" shape the new INFERRED preamble forbids two sections above. It is #592 now, and
+the argument moved to the issue where it can be weighed.
+
+One finding went the other way, and it is the mirror worth recording: the reviewer read a
+citation naming two listings, concluded the entry's "all three listings are
+forward-chronological" was wrong, and proposed a rewrite to "both listings" — which would
+have introduced an error. The recording's own index settles it: batch2 idx 41, 43 and 44
+are three listings, and the citation was what was short, having omitted
+`session.events.list.mixed-perm-after-confirm` along with the session-create and send
+probes. The count was right; the evidence for it was not written down. Fixed by completing
+the citation to all seven probes rather than by trusting either the entry or the
+suggestion — the same discipline the rest of this record is about, applied for once in the
+entry's favour.
+
+The remaining bookkeeping: a function named in an entry that exists nowhere in the tree
+(`snapshotResources` for `materializeResourceInputs`, raised twice), a first-wave quote
+re-announced as a second-wave finding under a title dated a day late, a clause whose
+grammatical subject made a statement about this platform read as one about the reference,
+two "we are simply wrong" issues named only in body prose where the guard cannot see them
+(#576, #582), two live `#78` residuals inside another issue's `Tracked:` parenthetical
+rather than heads of their own, and the count sentence in this record.
+
+The eleventh pass is the verifier again, and it found the *other* defect a fifth time, in
+a third entry, on a line neither the ninth pass's fix nor the tenth pass's sweep had
+touched. The `Offering an MCP tool to the model` entry's first half was byte-identical to
+main's: the reference "gives the model a **bare** tool name", and `mcp__{server}__{tool}`
+is "**ours and forced by architecture**", with the collision rule and one of the five
+drop reasons resting on that premise. Some two thousand characters later, in the same
+line, the half this PR appended says the recording overturns exactly that — the name the
+reference shows the model is composed, the prefix is reserved at agent create, and there
+is no 64-character ceiling. Two bolds contradicting each other in one entry a reader
+meets top to bottom.
+
+That is five instances, each in a different entry: the resource-lifecycle entry (ninth
+pass), the Level-1 entry (tenth), the skills entry's opening clause and the egress entry's
+first mention of the floor (both caught while fixing the tenth), and now this one. By this
+point every one of those claims had been checked against the bytes, so the pattern is not
+carelessness about what is true. It is that **a correction gets written where the new
+evidence is discussed, and the sentence that first states the claim is somewhere else** —
+usually above it, usually in bold, and always the one a reader reaches first. So the rule
+the whole exercise reduces to is mechanical rather than attitudinal: after settling an
+inference, find every sentence in the entry that states the old claim and rewrite each of
+them, beginning with the earliest.
+
+Its other two findings changed files as well. The ninth pass's tally of five had a
+narration naming three, now reconciled — the missing two were notes that nonetheless
+changed the tree. And the skill-reads entry claimed one environment key "produced four
+different refusals" directly above an enumeration listing two 403s and a 200; it now
+states the route-by-route split and leaves the four-route tally to the entry that carries
+it. A third note needed no change and is recorded because it is a trap: CodeRabbit's check
+was green on a review it never performed, its rate limit having been reached, so a green
+mark there is not a review and is not counted as one.
+
+The twelfth pass found one defect, two words long, and they were written by the fix for
+the eleventh: the rewritten first half said the recorded 69-character name was "offered
+and called", where the long-name session's only listing carries no tool event at all — the
+names appear inside the `agent.message` in which the model echoes its own tool list. It
+was offered and echoed, never called, and the entry's *second* half had said so correctly
+all along. So the last finding of the exercise is a first-half sentence claiming more than
+the bytes hold, in the entry whose first half had just been rewritten for exactly that,
+and the fix is two words. There is no better illustration of why the rule above had to be
+made mechanical.
+
+That is the shape of the whole exercise, stated once more because eleven passes were
+needed to see it plainly — and a twelfth to show that seeing it plainly is not the same
+as being finished with it. The defect was never carelessness about our code — by the
+fourth pass our code was being read line by line. It was that **the recording's own
+account was the last thing anybody checked**, because it arrived as the authority and
+everything downstream inherited it. A registry entry has two halves, and this project
+had built five kinds of scrutiny for one of them.
+
+**The transferable rule, now written into the INFERRED preamble as a three-way routing
+test:** settling an inference has three ends — confirmed and we match, confirmed and we
+differ on purpose, or we are simply wrong — and only reading our code decides which.
+Recording what the reference does is not checking what we do. `tools/registrycheck`
+enforces the mechanical half and caught two entries settled in place and left in the
+wrong section, but it cannot catch a prose claim about our own behavior; only a reader
+with the source open can.
