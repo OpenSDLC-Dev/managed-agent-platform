@@ -3,7 +3,7 @@ status: draft
 issue: "#56"
 ---
 
-# Multi-tenant activation — the workspace becomes a real scoping key (plan 38)
+# Multi-tenant activation — the workspace becomes a real scoping key (plan 40)
 
 Resolves **#56**. Today the reserved tenancy columns are decoration. Fourteen tables carry
 `org_id`/`workspace_id`/`project_id` as `text NOT NULL DEFAULT 'default'`; **exactly two
@@ -474,7 +474,7 @@ whose absence from the reference's pages §4.2 records in place).
   (`0007:9`), `files` (`0008:11`), `vaults` (`0011:10`), `principals` (`0022:43`),
   `session_threads` (`0025:14`), `memory_stores` (`0028:10`), `deployments` (`0031:16`).
   *Counting rule: `grep -n org_id internal/store/migrations/*.sql` returns **19** lines (20 once
-  slice 1's `0033_workspaces.sql` lands — §6.5 step 2) in 9
+  slice 1's `0034_workspaces.sql` lands — §6.5 step 2) in 9
   files; five are not column definitions — `0001:6` (prose), `0007:25` (the partial index),
   `0013:43` (prose) and `0025:44`, `:46` (the backfill).* Eleven child tables inherit through a
   foreign key. **Two inherit nothing**: `deleted_sessions` (`0018:12-16`, no `REFERENCES` by
@@ -769,7 +769,7 @@ Two carve-outs live inside the predicate itself:
 
 A new migration adds a **composite** `FOREIGN KEY (org_id, workspace_id) REFERENCES workspaces
 (org_id, id)` to the **nine root tables** — the `UNIQUE (org_id, id)` such a key requires is
-declared in the `workspaces` table itself, in slice 1's `0033_workspaces.sql` (§7.1), because a
+declared in the `workspaces` table itself, in slice 1's `0034_workspaces.sql` (§7.1), because a
 merged migration cannot be edited to add it afterwards: `agents`, `environments`, `sessions`, `api_keys`, `skills`, `files`,
 `vaults`, `memory_stores`, `deployments`. Composite, not `workspace_id` alone: a single-column
 key would leave `org_id` on rows looking authoritative while nothing validated it — the exact
@@ -838,7 +838,7 @@ scope predicate has exactly that shape. So `internal/api/scopematrix_test.go`:
    hand-written list — the mechanism `internal/domain/docs_test.go` uses for the prefix set,
    and for the same reason (that kind of list has drifted twice). A bare `org_id` grep will not
    do: it returns 19 lines of which 5 are prose, an index and a backfill (§4.4) — 20 once slice
-   1's `0033` lands, its `org_id` the one declaration the three-column rules read past. So the
+   1's `0034` lands, its `org_id` the one declaration the three-column rules read past. So the
    derivation is two rules, both stated in the test, and **both keyed on all three columns, not
    on `org_id` alone**: **(i)** a `CREATE TABLE <name> ( … )` block whose body declares
    `org_id`, `workspace_id` *and* `project_id`, and **(ii)** an `ALTER TABLE <name> ADD COLUMN`
@@ -1130,8 +1130,8 @@ entries.
 the registry holds the default workspace as a *recognised* row rather than a created one; both
 response headers are emitted. Behavior changes only in the header surface.
 
-**Changes.** Migration `0033_workspaces.sql` (next free number: the directory ends at
-`0032_session_deployment_id.sql`) — `workspaces (id text PRIMARY KEY, org_id text NOT NULL
+**Changes.** Migration `0034_workspaces.sql` (next free number: the directory ends at
+`0033_skills_display_name.sql`) — `workspaces (id text PRIMARY KEY, org_id text NOT NULL
 DEFAULT 'default', name text NOT NULL, created_at timestamptz NOT NULL DEFAULT now(),
 archived_at timestamptz, UNIQUE (org_id, id))` plus `INSERT … VALUES ('default', 'default',
 'Default Workspace')`. Its header states the change and notes that `0001_init.sql:6-10`,
@@ -1314,7 +1314,7 @@ a newly created resource would be invisible to its own creator.
 segment's are the same value until slice 6 lets them differ (§7.6). ·
 `envkeys.go:93` and `principals.go:37-44` deliberately leave their columns at the defaults, with
 a comment each so the omission reads as deliberate (§6.1, §6.2). · `skillsimport.go:94-96` is
-exempted, not changed. · Migration `0034_workspace_fk.sql`: the normalizing UPDATEs, then the
+exempted, not changed. · Migration `0035_workspace_fk.sql`: the normalizing UPDATEs, then the
 nine composite foreign keys of §6.4, with the lock name, the lock cost and the exclusion reasons
 in its header. · Guard target extends to `internal/api` inserts.
 
@@ -1324,7 +1324,7 @@ management key carries its issuer's workspace. · An environment key minted for 
 second-workspace environment authenticates into that workspace (the derive-don't-copy decision).
 · The composite key refuses an insert naming a nonexistent workspace, and one naming a real
 workspace under the wrong `org_id`, on three representative tables. · Catalog skills stay at
-`default` after a boot import in a multi-workspace database. · Migration `0034` replays over a
+`default` after a boot import in a multi-workspace database. · Migration `0035` replays over a
 populated database, and the per-table `count(*) … WHERE org_id <> 'default'` assertions hold
 after the normalizing UPDATEs.
 
@@ -1489,7 +1489,7 @@ patch**'s locked read (`internal/api/consoleapikeys.go:239`,
 *revoke* route: `server.go:192-194` registers POST and GET on the collection and POST on the
 item only, so revocation is a `status` patch through this same handler) —
 without them a workspace-bound key can rename or archive another workspace's management key by
-id. · Migration `0035_api_keys_one_live_scoped.sql`: `LOCK TABLE api_keys IN SHARE MODE; DROP
+id. · Migration `0036_api_keys_one_live_scoped.sql`: `LOCK TABLE api_keys IN SHARE MODE; DROP
 INDEX IF EXISTS api_keys_one_live_unissued; CREATE UNIQUE INDEX api_keys_one_live_unissued ON
 api_keys (org_id, workspace_id, project_id, name) WHERE status = 'active' AND created_by IS
 NULL;` — 0024's index under 0024's predicate (§4.5). Widening a unique key cannot fail on
@@ -1543,9 +1543,9 @@ the existing 400. · A management key lists, patches and revokes only its own wo
 Two workspaces may each hold a live env-var-managed key named `bootstrap`; rotating one leaves
 the other active. · A vault credential read, a credential update, a vault delete, a skill
 delete and a file download are each refused across workspaces with the absent-id answer, and the
-corresponding blob object survives. · Migration `0035` replays over a database holding keys in
+corresponding blob object survives. · Migration `0036` replays over a database holding keys in
 several workspaces. · **`TestKeyRotationMigrationRepairsExistingDuplicates`' rewind list
-(`internal/store/store_test.go:533-545`) must gain `0035`** — it drops
+(`internal/store/store_test.go:533-545`) must gain `0036`** — it drops
 `api_keys_one_live_unissued` *by name* (`:534`) and deletes 0013/0021/0024 from
 `schema_migrations` (`:541-544`) before replaying, so without the addition its replay silently
 ends on a schema no deployment reaches.
