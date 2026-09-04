@@ -19,10 +19,11 @@ recording of the live endpoint (163 entries, US$0), kept in the private
       refusal in `internal/api` (slices 2-3).
 - [x] Three-way version resolution in brain and executor; `skver_` minted with
       `skillver_` accepted on input; CLAUDE.md's prefix list (slice 4).
-- [x] `docs/DIVERGENCES.md` — the recording settles several entries this change
-      touches. (`changelog.d/` fragments written; README needs none, describing no
-      wire shape.)
-- [x] `make verify` green: 57 packages, total statement coverage 90.15%.
-- [ ] Dual code review, the verifier, and the plan's section 6 acceptance runs
-      (`ant` CLI end-to-end; the three `anthropic-cwc-workshops` examples that
-      upload skills, on a current `anthropic` release with no `0.97.0` pin).
+- [x] `docs/DIVERGENCES.md` entries and the `changelog.d/` fragments. README
+      needs none: it describes no wire shape.
+- [x] `make verify` green over 57 packages, coverage gate held. No figure is
+      recorded here: the container-backed suites move the third digit run to run.
+- [x] Section 6 acceptance — the `ant` CLI and the SDK clients, on current
+      releases with no `anthropic==0.97.0` pin. Recorded in docs/HISTORY.md.
+- [x] Dual review (Codex, Claude) and the verifier: PASS with findings, no blockers.
+- [ ] The review fix set, then re-verify, then the PR.

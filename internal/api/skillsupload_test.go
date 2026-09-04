@@ -4,6 +4,7 @@ import (
 	"net/http"
 	"strings"
 	"testing"
+	"unicode/utf8"
 )
 
 // The create form's GA shape (plan 39 decisions 7 and 8), every case a byte the
@@ -41,6 +42,24 @@ func TestSkillCreateDisplayName(t *testing.T) {
 		t.Fatalf("255-character display_name: %d %v", status, obj)
 	}
 	ct, body = skillFormRaw(t, skillMDPart(), [2]string{"display_name", strings.Repeat("n", 256)})
+	status, obj = s.doForm("POST", "/v1/skills", ct, body)
+	wantErrMsg(t, status, obj, http.StatusBadRequest, "invalid_request_error",
+		"display_name must be at most 255 characters long")
+
+	// The unit is characters, as the sentence says: 255 CJK ones are 765 bytes
+	// and still accepted, whole, and 256 are still the refusal. The rows above
+	// cannot see this — in ASCII the two units coincide.
+	cjk := strings.Repeat("名", 255)
+	ct, body = skillFormRaw(t, skillMDPart(), [2]string{"display_name", cjk})
+	status, obj = s.doForm("POST", "/v1/skills", ct, body)
+	if status != http.StatusOK {
+		t.Fatalf("255-character multi-byte display_name: %d %v", status, obj)
+	}
+	if obj["display_name"] != cjk {
+		t.Errorf("display_name round-tripped as %d characters, want the 255 sent",
+			utf8.RuneCountInString(obj["display_name"].(string)))
+	}
+	ct, body = skillFormRaw(t, skillMDPart(), [2]string{"display_name", strings.Repeat("名", 256)})
 	status, obj = s.doForm("POST", "/v1/skills", ct, body)
 	wantErrMsg(t, status, obj, http.StatusBadRequest, "invalid_request_error",
 		"display_name must be at most 255 characters long")

@@ -13,6 +13,7 @@ import (
 	"net/http/httptest"
 	"net/textproto"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/api"
@@ -27,6 +28,16 @@ description: Reads and explains financial statements.
 ---
 
 # Financial skill
+`
+
+// testRenamedSkillMD is the fixture under a second name, for the versions that
+// may not carry one and the skill that may.
+const testRenamedSkillMD = `---
+name: renamed-skill
+description: The same skill under a new name.
+---
+
+# Renamed
 `
 
 type upFile struct{ name, content string }
@@ -582,6 +593,48 @@ func TestSkillVersionCreateAndLatestTracking(t *testing.T) {
 	wantErr(t, status, obj, http.StatusNotFound, "not_found_error")
 }
 
+// TestSkillVersionRefusesRenamedFrontmatter pins the reference's
+// name-consistency rule (plan 39 §2, recording 54): a skill's frontmatter name
+// is the one every version shares, and a version that renames it is refused
+// rather than landing a second name — two names on one skill materialize into
+// two directories, so the rule is what keeps a pin's landing place stable.
+func TestSkillVersionRefusesRenamedFrontmatter(t *testing.T) {
+	s := newTestServer(t)
+	created := s.createSkill(t)
+	id, _ := created["id"].(string)
+	v1, _ := created["latest_version_id"].(string)
+	stored := s.blobs.Len()
+
+	ct, body := skillForm(t, nil, []upFile{{name: "renamed-skill/SKILL.md", content: testRenamedSkillMD}})
+	status, obj := s.doForm("POST", "/v1/skills/"+id+"/versions", ct, body)
+	wantErrMsg(t, status, obj, http.StatusBadRequest, "invalid_request_error",
+		"Skill name 'renamed-skill' in SKILL.md must be consistent across all versions "+
+			"for a given `skill_id`. Expected 'financial-skill'.")
+
+	// The refusal lands nothing: no version row, no archive, and the skill
+	// still points at the only version it has.
+	status, versions := s.do("GET", "/v1/skills/"+id+"/versions", nil)
+	if status != http.StatusOK || len(listData(t, versions)) != 1 {
+		t.Errorf("after the refused rename: %d %v, want only the original version", status, versions)
+	}
+	if n := s.blobs.Len(); n != stored {
+		t.Errorf("refused rename left %d objects in storage, want %d", n, stored)
+	}
+	if _, skill := s.do("GET", "/v1/skills/"+id, nil); skill["latest_version_id"] != v1 {
+		t.Errorf("latest_version_id = %v, want the unchanged %q", skill["latest_version_id"], v1)
+	}
+
+	// What is refused is the rename, not the second version: the same name
+	// still versions the skill.
+	ct, body = skillForm(t, nil, []upFile{
+		{name: "financial-skill/SKILL.md", content: testSkillMD},
+		{name: "financial-skill/v2.txt", content: "second"},
+	})
+	if status, obj := s.doForm("POST", "/v1/skills/"+id+"/versions", ct, body); status != http.StatusOK {
+		t.Fatalf("same-name version: %d %v", status, obj)
+	}
+}
+
 func TestSkillVersionListLimits(t *testing.T) {
 	s := newTestServer(t)
 	created := s.createSkill(t)
@@ -840,6 +893,167 @@ func TestFailedPutCommitsNoRows(t *testing.T) {
 	}
 	if _, skill := ok.do("GET", "/v1/skills/"+id, nil); skill["latest_version_id"] != v1 {
 		t.Errorf("latest_version_id = %v, want unchanged %q", skill["latest_version_id"], v1)
+	}
+}
+
+// cancelGate is a Store whose Delete honors its context, as every real backend
+// does, and holds the first call open so a test can disconnect the request the
+// sweep is running under while the rest of it is still to come.
+type cancelGate struct {
+	blob.Store
+	held   chan struct{}
+	resume chan struct{}
+	once   sync.Once
+}
+
+func (g *cancelGate) Delete(ctx context.Context, key string) error {
+	g.once.Do(func() {
+		close(g.held)
+		<-g.resume
+	})
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	return g.Store.Delete(ctx, key)
+}
+
+// TestSkillDeleteSweepsArchivesAfterTheClientDisconnects: both deletes commit
+// their rows and then sweep the archives those rows named. A client or a proxy
+// that gives up in between must not turn the plan's accepted "rare orphan" into
+// every archive of a many-versioned skill, which is what a sweep running on the
+// request's own context does — so it runs on one the disconnect cannot reach.
+func TestSkillDeleteSweepsArchivesAfterTheClientDisconnects(t *testing.T) {
+	cases := []struct {
+		name          string
+		path          func(id, versionID string) string
+		wantRemaining int
+	}{
+		{"the whole skill", func(id, _ string) string { return "/v1/skills/" + id }, 0},
+		{"one version", func(id, vid string) string {
+			return "/v1/skills/" + id + "/versions/" + vid
+		}, 2},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			pool := newPoolWithKey(t)
+			working := blobtest.Mem()
+			okSrv := httptest.NewServer(api.NewHandler(pool, working, nil, nil))
+			t.Cleanup(okSrv.Close)
+			ok := &tserver{t: t, url: okSrv.URL, pool: pool, blobs: working}
+
+			// Three versions, so the skill delete sweeps a set rather than one
+			// object — the case a proxy timeout can realistically outlive.
+			created := ok.createSkill(t)
+			id, _ := created["id"].(string)
+			v1, _ := created["latest_version_id"].(string)
+			for _, extra := range []string{"second", "third"} {
+				ct, body := skillForm(t, nil, []upFile{
+					{name: "financial-skill/SKILL.md", content: testSkillMD},
+					{name: "financial-skill/" + extra + ".txt", content: extra},
+				})
+				if status, obj := ok.doForm("POST", "/v1/skills/"+id+"/versions", ct, body); status != http.StatusOK {
+					t.Fatalf("seed version %s: %d %v", extra, status, obj)
+				}
+			}
+			if n := working.Len(); n != 3 {
+				t.Fatalf("seeded %d archives, want 3", n)
+			}
+
+			// The disconnect stands in for the client or proxy going away: it
+			// cancels the very context the handler is running on, and reports
+			// back so the sweep resumes only once it truly is cancelled.
+			gate := &cancelGate{Store: working, held: make(chan struct{}), resume: make(chan struct{})}
+			disconnect, cancelled := make(chan struct{}), make(chan struct{})
+			inner := api.NewHandler(pool, gate, nil, nil)
+			gateSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				ctx, cancel := context.WithCancel(r.Context())
+				defer cancel()
+				go func() {
+					<-disconnect
+					cancel()
+					close(cancelled)
+				}()
+				inner.ServeHTTP(w, r.WithContext(ctx))
+			}))
+			t.Cleanup(gateSrv.Close)
+
+			done := make(chan int, 1)
+			go func() {
+				gated := &tserver{t: t, url: gateSrv.URL, pool: pool, blobs: working}
+				status, _ := gated.do("DELETE", tc.path(id, v1), nil)
+				done <- status
+			}()
+			<-gate.held
+			close(disconnect)
+			<-cancelled
+			close(gate.resume)
+			if status := <-done; status != http.StatusOK {
+				t.Fatalf("delete = %d, want 200", status)
+			}
+
+			if n := working.Len(); n != tc.wantRemaining {
+				t.Errorf("%d archives left in storage, want %d: the sweep followed the "+
+					"client out instead of finishing the rows it had already deleted",
+					n, tc.wantRemaining)
+			}
+		})
+	}
+}
+
+// TestSkillDeleteAnswersShapeAndExistenceWithoutStorage: DELETE is the one
+// skills route that needed no object storage before the cascade gave it a
+// sweep, so a deployment without storage must still answer for a skill that
+// does not exist, or that the API does not manage, before it reports the
+// absence of somewhere to sweep.
+func TestSkillDeleteAnswersShapeAndExistenceWithoutStorage(t *testing.T) {
+	pool := newPoolWithKey(t)
+	srv := httptest.NewServer(api.NewHandler(pool, nil, nil, nil))
+	t.Cleanup(srv.Close)
+	s := &tserver{t: t, url: srv.URL, pool: pool}
+
+	status, obj := s.do("DELETE", "/v1/skills/skill_0123456789abcdefghjkmnpq", nil)
+	wantErr(t, status, obj, http.StatusNotFound, "not_found_error")
+
+	s.insertAnthropicSkill(t, "xlsx", "Excel", "20250929")
+	status, obj = s.do("DELETE", "/v1/skills/xlsx", nil)
+	wantErr(t, status, obj, http.StatusBadRequest, "invalid_request_error")
+}
+
+// TestLegacySkillWithNoVersions: deleting a skill's only version was allowed
+// before decision 6, and migration 0033 drops an index rather than rewriting
+// rows, so an upgraded database still holds skills carrying none. The wire's
+// "Always set" latest_version_id is the empty string for such a row rather than
+// an error, /versions/latest is the 404 no version answers, and adding a
+// version is the way back — under a name of its own, nothing being left for the
+// name-consistency rule to be consistent with.
+func TestLegacySkillWithNoVersions(t *testing.T) {
+	s := newTestServer(t)
+	created := s.createSkill(t)
+	id, _ := created["id"].(string)
+	// Exactly the state the pre-decision-6 delete left: versions gone,
+	// latest_version blanked, the skill row still there.
+	if _, err := s.pool.Exec(t.Context(),
+		`DELETE FROM skill_versions WHERE skill_id = $1`, id); err != nil {
+		t.Fatalf("strip versions: %v", err)
+	}
+	if _, err := s.pool.Exec(t.Context(),
+		`UPDATE skills SET latest_version = NULL WHERE id = $1`, id); err != nil {
+		t.Fatalf("blank latest_version: %v", err)
+	}
+
+	status, obj := s.do("GET", "/v1/skills/"+id, nil)
+	if status != http.StatusOK || obj["latest_version_id"] != "" {
+		t.Fatalf("skill with no versions = %d %v, want 200 and an empty latest_version_id", status, obj)
+	}
+	status, obj = s.do("GET", "/v1/skills/"+id+"/versions/latest", nil)
+	wantErr(t, status, obj, http.StatusNotFound, "not_found_error")
+
+	ct, body := skillForm(t, nil, []upFile{{name: "renamed-skill/SKILL.md", content: testRenamedSkillMD}})
+	if status, obj := s.doForm("POST", "/v1/skills/"+id+"/versions", ct, body); status != http.StatusOK {
+		t.Fatalf("version on a skill with none: %d %v", status, obj)
+	}
+	if _, skill := s.do("GET", "/v1/skills/"+id, nil); skill["latest_version_id"] == "" {
+		t.Errorf("latest_version_id still empty after the recovering version: %v", skill)
 	}
 }
 

@@ -177,6 +177,12 @@ func (e *Executor) skipSkill(ctx context.Context, sid domain.ID, skillID, versio
 // digits?" is what made a pinned id resolve silently to the newest version and
 // materialize the wrong archive.
 //
+// The id arm asks for a well-formed id, not merely a prefixed one: nothing
+// validates a stored pin's shape on the way in, so skver_ followed by an
+// unstorable byte would otherwise bind into the query and fail in the driver
+// (SQLSTATE 22021), recorded as a materialization failure rather than the
+// dangling reference it is.
+//
 // The numeric stays the internal identity (decision 3), so the blob key, the
 // sentinel and skills.BlobKey are untouched by id addressing.
 func (e *Executor) resolveSkillVersion(ctx context.Context, ref skillRef) (string, error) {
@@ -195,7 +201,7 @@ func (e *Executor) resolveSkillVersion(ctx context.Context, ref skillRef) (strin
 			return "", fmt.Errorf("%w: no versions to resolve %q against", errSkillNotFound, ref.Version)
 		}
 		return *latest, nil
-	case domain.ID(ref.Version).HasPrefix(domain.PrefixSkillVersion):
+	case domain.ID(ref.Version).HasPrefix(domain.PrefixSkillVersion) && domain.ID(ref.Version).Valid():
 		var version string
 		err := e.pool.QueryRow(ctx,
 			`SELECT version FROM skill_versions WHERE skill_id = $1 AND id = $2`,

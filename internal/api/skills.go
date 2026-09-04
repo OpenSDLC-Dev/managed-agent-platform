@@ -26,8 +26,12 @@ import (
 // became display_name, the bare `source` string became an object, and the
 // numeric latest_version became latest_version_id holding the version row's id.
 //
-// latest_version_id is documented "Always set", and decision 6 is what makes
-// that true here: a skill can no longer reach zero versions through the API.
+// latest_version_id is documented "Always set", and decision 6 keeps it so from
+// here on: a skill can no longer reach zero versions through the API. A
+// database upgraded from before it can still hold one, deleting the only
+// version having been allowed then and 0033 dropping an index rather than
+// rewriting rows; such a skill renders the empty string, and adding a version
+// is the way back.
 type skillJSON struct {
 	Type            string          `json:"type"`
 	ID              string          `json:"id"`
@@ -171,9 +175,10 @@ func (s *server) resolveSkillVersion(ctx context.Context, skillID, slot string) 
 }
 
 // skillLatestVersionIDExpr renders latest_version_id for a skills query: the id
-// of the row the skill's numeric latest_version names. The empty string is
-// unreachable through the API (decision 6) but is what a row planted with no
-// versions renders, because the field is required on the wire.
+// of the row the skill's numeric latest_version names. The empty string is what
+// a skill with no versions renders, the field being required on the wire —
+// unreachable through the API since decision 6, but not in a database upgraded
+// from before it, where deleting the only version was allowed.
 const skillLatestVersionIDExpr = `COALESCE(
 	(SELECT v.id FROM skill_versions v
 	 WHERE v.skill_id = s.id AND v.version = s.latest_version), '')`
@@ -250,8 +255,8 @@ func (s *server) createSkill(r *http.Request) (any, error) {
 		return nil, err
 	}
 	// display_name is optional and derives from the SKILL.md frontmatter name
-	// when omitted; it is capped at 255 bytes by the form parser and, since the
-	// GA rename, not unique.
+	// when omitted; it is capped at 255 characters by the form parser and,
+	// since the GA rename, not unique.
 	displayName := bundle.Name
 	if up.displayNameSet {
 		if up.displayName == "" || !storableText(up.displayName) {
@@ -418,10 +423,6 @@ func (s *server) deleteSkill(r *http.Request) (any, error) {
 	if err := checkSkillID(id); err != nil {
 		return nil, err
 	}
-	// The sweep needs somewhere to sweep.
-	if s.blobs == nil {
-		return nil, errSkillsUnavailable
-	}
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return nil, err
@@ -444,6 +445,13 @@ func (s *server) deleteSkill(r *http.Request) (any, error) {
 	if source != "custom" {
 		return nil, errInvalid("anthropic skills are managed by the platform, not this API")
 	}
+	// The sweep needs somewhere to sweep — asked after shape and existence, so
+	// that a deployment without object storage still answers an unknown or
+	// unmanaged id the way it did before the cascade gave this route archives
+	// to remove at all.
+	if s.blobs == nil {
+		return nil, errSkillsUnavailable
+	}
 	rows, err := tx.Query(ctx,
 		`DELETE FROM skill_versions WHERE skill_id = $1 RETURNING version`, id)
 	if err != nil {
@@ -461,8 +469,13 @@ func (s *server) deleteSkill(r *http.Request) (any, error) {
 	}
 	// The rows are gone; the archives follow best-effort, the same ordering a
 	// single version delete uses (rare orphans are accepted; GC is a non-goal).
+	// The sweep outlives the request on purpose: it is N sequential deletes
+	// with nothing left to answer the client with, so on the request's own
+	// context a proxy timeout would orphan not the odd archive the plan
+	// accepts but every one the skill still had.
+	sweep := context.WithoutCancel(ctx)
 	for _, v := range versions {
-		s.deleteOrphanedObject(ctx, skillBlobKey(id, v))
+		s.deleteOrphanedObject(sweep, skillBlobKey(id, v))
 	}
 	slog.InfoContext(ctx, "skill deleted", "skill_id", id, "versions", len(versions))
 	return map[string]string{"id": id, "type": "skill_deleted"}, nil
@@ -514,6 +527,13 @@ func (s *server) createSkillVersion(r *http.Request) (any, error) {
 			// same-microsecond loser cannot touch the winner's archive.
 			return nil, errConflict("a version with the same identifier was minted concurrently; retry")
 		}
+		var rejected *apiError
+		if errors.As(err, &rejected) {
+			// The name-consistency refusal: a bad SKILL.md like any other, so
+			// it counts as a rejected upload rather than a platform failure.
+			recordSkillUpload(ctx, skillOutcomeInvalid, 0)
+			return nil, err
+		}
 		recordSkillUpload(ctx, skillOutcomeError, 0)
 		return nil, err
 	}
@@ -538,6 +558,27 @@ func (s *server) insertSkillVersion(ctx context.Context, id, vid, version string
 	var have string
 	if err := tx.QueryRow(ctx, `SELECT id FROM skills WHERE id = $1 FOR UPDATE`, id).Scan(&have); err != nil {
 		return time.Time{}, err // pgx.ErrNoRows when the skill vanished
+	}
+	// The frontmatter name is one skill's forever, and a version that renames
+	// it is refused with the reference's own sentence (plan 39 §2, recording
+	// 54): two names on one skill would materialize into two directories, so a
+	// pin's landing place would depend on which version answered it. Every
+	// version shares the name by this very rule, so any row answers — except in
+	// a database upgraded across this change, where nothing enforced it before,
+	// and LIMIT 1 then picks an arbitrary one of the names a skill accumulated;
+	// deleting the odd version is the recovery. Reading it under the parent lock
+	// is what stops two concurrent creates on a skill left with no versions from
+	// each establishing a different one.
+	var named string
+	switch err := tx.QueryRow(ctx,
+		`SELECT name FROM skill_versions WHERE skill_id = $1 LIMIT 1`, id).Scan(&named); {
+	case errors.Is(err, pgx.ErrNoRows): // nothing to be consistent with yet
+	case err != nil:
+		return time.Time{}, err
+	case named != bundle.Name:
+		return time.Time{}, errInvalid(
+			"Skill name '%s' in SKILL.md must be consistent across all versions "+
+				"for a given `skill_id`. Expected '%s'.", bundle.Name, named)
 	}
 	var createdAt time.Time
 	if err := tx.QueryRow(ctx,
@@ -749,8 +790,11 @@ func (s *server) deleteSkillVersion(r *http.Request) (any, error) {
 		return nil, err
 	}
 	// The row is gone; the archive follows best-effort (plan: rare orphans
-	// are accepted, GC is a non-goal).
-	s.deleteOrphanedObject(ctx, skillBlobKey(id, version))
+	// are accepted, GC is a non-goal), and outside the request's cancellation
+	// for the same reason the cascade's sweep is: the row cannot come back, so
+	// a client that gave up after the commit must not decide whether the
+	// object it named goes with it.
+	s.deleteOrphanedObject(context.WithoutCancel(ctx), skillBlobKey(id, version))
 	slog.InfoContext(ctx, "skill version deleted", "skill_id", id, "version", version)
 	// The deleted object's id, like every other id on this surface since the GA
 	// convergence, is the version row's — the numeric no longer appears on the

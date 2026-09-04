@@ -183,7 +183,9 @@ immutable, so `0007`'s now-stale comment is corrected by the new code and a new 
 never by editing it.
 
 **Decision 7 — `display_name` replaces `display_title` on input and output, and uniqueness
-goes.** The create form accepts `display_name`, caps it at 255 bytes rather than 4096, and
+goes.** The create form accepts `display_name`, caps it at 255 characters rather than 4096
+(runes, not bytes: the recorded refusal sentence says characters, so a multi-byte name
+under the cap must be accepted), and
 derives it from the frontmatter `name` when omitted. The partial unique index
 `skills_custom_display_title_uq` is dropped in a new migration: the recording shows two
 skills sharing a `display_name` [3, 4], and refusing a create the reference accepts is a

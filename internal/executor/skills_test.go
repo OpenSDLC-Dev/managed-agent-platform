@@ -414,6 +414,9 @@ func TestMaterializePinnedVersion(t *testing.T) {
 // setVersionID spells out a seeded version row's id. seedSkill derives one from
 // a hash, which no test can name, and the whole point of the three-way resolver
 // is that a client addresses a version BY that id.
+// setVersionID plants an id on a seeded version row. The tokens are drawn from
+// the alphabet NewID emits, because the resolver now asks for a well-formed id
+// rather than a merely prefixed one.
 func (h *harness) setVersionID(t *testing.T, skillID, version, versionID string) {
 	t.Helper()
 	if _, err := h.pool.Exec(context.Background(),
@@ -448,7 +451,7 @@ func TestResolveSkillVersionAddressingForms(t *testing.T) {
 	// A second skill, so a version id belonging to another skill can be shown
 	// not to resolve — the reference refuses one (plan 39 §2, recording 105).
 	h.seedSkill(t, "skill_res_other", "100", "other-skill", map[string]string{"SKILL.md": "x"})
-	h.setVersionID(t, "skill_res_other", "100", "skver_oth100")
+	h.setVersionID(t, "skill_res_other", "100", "skver_extra100")
 
 	cases := []struct {
 		name, version, want string
@@ -459,8 +462,8 @@ func TestResolveSkillVersionAddressingForms(t *testing.T) {
 		{name: "legacy skillver_ id", version: "skillver_res200", want: "200"},
 		{name: "id naming the latest version", version: "skver_res300", want: "300"},
 		{name: "legacy numeric pin", version: "100", want: "100"},
-		{name: "another skill's version id", version: "skver_oth100", wantErr: true},
-		{name: "unknown version id", version: "skver_nosuchversion", wantErr: true},
+		{name: "another skill's version id", version: "skver_extra100", wantErr: true},
+		{name: "unknown version id", version: "skver_absent", wantErr: true},
 		{name: "neither alias, id nor digits", version: "bogus", wantErr: true},
 		{name: "empty version", version: "", wantErr: true},
 	}
@@ -489,6 +492,23 @@ func TestResolveSkillVersionAddressingForms(t *testing.T) {
 	}
 }
 
+// TestResolveSkillVersionRejectsMalformedIDBeforeItBinds: a stored pin is
+// whatever the agent's skills[] carried — parseSkills checks no shape on
+// `version` — so a value that merely starts skver_ can hold bytes no id ever
+// has. Rejecting it on shape is what keeps it out of a bind parameter, where an
+// unstorable byte answers SQLSTATE 22021 and the skip is recorded as a
+// materialization failure rather than the dangling reference it is.
+func TestResolveSkillVersionRejectsMalformedIDBeforeItBinds(t *testing.T) {
+	h := newHarness(t, &fakeSandbox{})
+	h.seedSkill(t, "skill_malformed", "100", "malformed-skill", map[string]string{"SKILL.md": "v1"})
+
+	_, err := h.exec.resolveSkillVersion(context.Background(),
+		skillRef{SkillID: "skill_malformed", Version: "skver_\x00"})
+	if !errors.Is(err, errSkillNotFound) {
+		t.Fatalf("a NUL-bearing version id failed with %v, want errSkillNotFound", err)
+	}
+}
+
 // TestMaterializeVersionPinnedByID is plan 39's acceptance bullet: a skill
 // pinned by its skver_ id materializes THAT version's files. Against the
 // pre-change resolver the pin fell through to "latest" and v2's bytes landed
@@ -497,10 +517,10 @@ func TestMaterializeVersionPinnedByID(t *testing.T) {
 	sb := &fakeSandbox{}
 	h := newHarness(t, sb)
 	h.seedSkill(t, "skill_mat_idpin", "100", "id-pinned-skill", map[string]string{"SKILL.md": "v1"})
-	h.setVersionID(t, "skill_mat_idpin", "100", "skver_idpin100")
+	h.setVersionID(t, "skill_mat_idpin", "100", "skver_mat100")
 	h.seedSkill(t, "skill_mat_idpin", "200", "id-pinned-skill", map[string]string{"SKILL.md": "v2"})
-	h.setVersionID(t, "skill_mat_idpin", "200", "skver_idpin200")
-	h.refSkills(t, [2]string{"skill_mat_idpin", "skver_idpin100"})
+	h.setVersionID(t, "skill_mat_idpin", "200", "skver_mat200")
+	h.refSkills(t, [2]string{"skill_mat_idpin", "skver_mat100"})
 	h.suspend(t, writeUse("out.txt", "x"))
 
 	if _, err := h.exec.step(context.Background()); err != nil {

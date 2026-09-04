@@ -7,6 +7,7 @@ import (
 	"mime"
 	"mime/multipart"
 	"net/http"
+	"unicode/utf8"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/skills"
 )
@@ -17,11 +18,13 @@ import (
 // for multipart framing.
 const maxSkillBodyBytes = 32 << 20
 
-// maxDisplayNameBytes bounds the one plain-text form field. 255 is the
-// reference's own cap: the 2026-09-04 recording accepts a 255-character
-// display_name and refuses a 256-character one with the message reproduced
-// below (plan 39, decision 7).
-const maxDisplayNameBytes = 255
+// maxDisplayNameChars bounds the one plain-text form field. 255 is the
+// reference's own cap and characters is its own unit: the 2026-09-04 recording
+// accepts a 255-character display_name and refuses a 256-character one with the
+// message reproduced below (plan 39, decision 7). Counting bytes instead would
+// refuse a 100-character CJK name the reference accepts, and say something
+// false about it while doing so.
+const maxDisplayNameChars = 255
 
 // skillUpload is a decoded multipart skill upload, one entry per files[]
 // part. Paths are the raw path-qualified filenames the client sent.
@@ -103,12 +106,16 @@ func parseSkillUpload(r *http.Request, allowDisplayName bool) (*skillUpload, err
 			if up.displayNameSet {
 				return nil, errInvalid("duplicate display_name field")
 			}
-			data, err := io.ReadAll(io.LimitReader(part, maxDisplayNameBytes+1))
+			// The reader admits a character's widest encoding, because a
+			// bound counted in characters cannot be applied to bytes already
+			// truncated: cut at 255 of them, a multi-byte name over the cap
+			// would arrive under it.
+			data, err := io.ReadAll(io.LimitReader(part, maxDisplayNameChars*utf8.UTFMax+1))
 			if err != nil {
 				return nil, mapSkillBodyErr(err)
 			}
-			if len(data) > maxDisplayNameBytes {
-				return nil, errInvalid("display_name must be at most %d characters long", maxDisplayNameBytes)
+			if utf8.RuneCount(data) > maxDisplayNameChars {
+				return nil, errInvalid("display_name must be at most %d characters long", maxDisplayNameChars)
 			}
 			up.displayName = string(data)
 			up.displayNameSet = true

@@ -104,6 +104,11 @@ func (b *Brain) resolveSkillsBlock(ctx context.Context, agent domain.ResolvedAge
 // string is the legacy numeric pin, taken verbatim. Anything else addresses no
 // version and is a miss. Asking only "is it digits?" is what made a pinned id
 // resolve silently to the newest version instead of the pinned one.
+//
+// The id arm asks for a well-formed id, not merely a prefixed one: nothing
+// validates a stored pin's shape on the way in, so skver_ followed by an
+// unstorable byte would otherwise bind into the query and fail in the driver
+// (SQLSTATE 22021) where the miss below was intended.
 func (b *Brain) resolveSkillMeta(ctx context.Context, skillID, version string) (string, string, error) {
 	var row pgx.Row
 	switch {
@@ -122,7 +127,7 @@ func (b *Brain) resolveSkillMeta(ctx context.Context, skillID, version string) (
 		row = b.pool.QueryRow(ctx,
 			`SELECT name, description FROM skill_versions WHERE skill_id = $1 AND version = $2`,
 			skillID, *latest)
-	case domain.ID(version).HasPrefix(domain.PrefixSkillVersion):
+	case domain.ID(version).HasPrefix(domain.PrefixSkillVersion) && domain.ID(version).Valid():
 		row = b.pool.QueryRow(ctx,
 			`SELECT name, description FROM skill_versions WHERE skill_id = $1 AND id = $2`,
 			skillID, version)
