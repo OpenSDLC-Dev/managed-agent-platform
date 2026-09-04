@@ -4579,12 +4579,13 @@ and leaves the session running with its other repositories mounted.
 ## Second recording wave, registry reconciliation (#575) — review-hardening record (2026-09-04)
 
 Twenty-four registry entries were rewritten from a 281-pair recording of the live
-managed-agents endpoint. Nine review passes found 51 defects between them — five,
-three, fifteen, four, six, one, seven, five and five — and **eighteen of the 51 were one
-defect repeated**: the recording was read carefully, our own code was not read at all, and the
-entry was then filed as "confirmed, and we match". Those eighteen came one from the
+managed-agents endpoint. Ten review passes found 62 defects between them — five,
+three, fifteen, four, six, one, seven, five, five and eleven — and **twenty of the 62 were
+one defect repeated**: the recording was read carefully, our own code was not read at all, and the
+entry was then filed as "confirmed, and we match". Those twenty came one from the
 verifier's first run, three from Codex, nine from the Claude reviewer, none from the
-refute-first pass, and one each from the verifier's second through sixth runs.
+refute-first pass, one each from the verifier's second through sixth runs, and two from
+the automated reviewer on the pushed branch.
 A finding is counted here when it changed a file in this repository — which is why the
 verifier's third run contributes one of the four it raised, its other three having been
 answered in the pull request rather than in the tree.
@@ -4625,7 +4626,11 @@ mistook a running session total for a per-turn one; re-derived over the archive,
 nested readings inside an event listing equal that listing's running span sum, and this
 platform already accumulates the same way. And STATE.md's tracker count was off by one
 from the moment it was written, because a text match for the pointer clause misses a
-head whose `#78` is its second segment; `tools/registrycheck`'s own parser yields 113.
+head whose `#78` is a later comma segment: `tools/registrycheck`'s own parser gave 113
+there against the naive 112. The merged file has three such heads, and after the tenth
+pass promoted two more `#78` residuals out of the parentheticals that hid them from the
+guard it carries 117 — the figure STATE.md states, derived with the parser's grammar
+rather than a text match.
 
 So the defect has a mirror, and the mirror is the more expensive one. Assuming we
 *match* without reading our code leaves a wrong entry in a document; assuming we
@@ -4726,7 +4731,62 @@ teardown and the archive redacts which answered. Both were inherited from the an
 file rather than derived. The fact is now rewritten in **both** halves, and the tally is
 stated rather than asserted.
 
-That is the shape of the whole exercise, stated once more because it took nine passes to
+The tenth pass is the automated reviewer, running on each push rather than on request,
+and it found eleven across three batches — the largest count after the Claude reviewer's,
+on a diff five passes had already been over. Two were the repeated defect. One was a
+claim that the reference's address floor "is exactly `dialguard.IPAllowed`", written
+without opening `internal/dialguard/dialguard.go`, whose package comment says the guard
+covers loopback, link-local, the unspecified address and multicast and **deliberately
+admits RFC 1918** because the on-prem premise puts legitimate endpoints on the operator's
+own private network — and the probe recorded was `169.254.169.254`, link-local, so only
+the half our floor does cover was ever observed. The other was the skills paragraph
+asserting the reference "does not stage skills into a sandbox at all", refuted by the
+Level-1 entry *this same wave added*: `/workspace/skills/` holds the extracted trees while
+only the zips sit on the FUSE mount at `/mnt/skills`.
+
+Chasing that second one turned up the sharper version no reviewer had raised. **"The
+reference" is two implementations here, and the entry had been reading one recording
+against both.** The SDK's agent toolset really does re-fetch per work item
+(`Skills.Versions.Download` into `{workdir}/skills/{dirname}`); the platform-managed
+sandbox the recording observed replaces that fetch with the mount. Neither skips the
+extraction, so the sentinel's question is live on both paths — and the recording runs
+against the argument the paragraph drew from it, re-extracting from a local mount being a
+copy rather than a download. The file-mount entry's "does not stream bytes into a
+container at all" was scoped for the same reason.
+
+Two of the eleven are worth keeping for what they say about this record's own claims. The
+first is that **the ninth pass's defect had already recurred in a second entry** while
+that pass was busy fixing the first: the Level-1 skill-injection entry was titled "the
+block format and placement are inferred" and opened "the exact template is captured by no
+source", with text appended below quoting the reference's template verbatim and stating
+that this recording falsifies that sentence. A correction appended, the refuted sentence
+left standing, one entry over from where it had just been fixed. The second is that **this
+PR broke the routing rule it added**: the `DELETE /v1/agents/{id}` 405-against-404
+mismatch was recorded with no tracker and an exemption argued from client reachability —
+no typed client can reach it — which is precisely the "a bug is not a divergence to be
+argued" shape the new INFERRED preamble forbids two sections above. It is #592 now, and
+the argument moved to the issue where it can be weighed.
+
+One finding went the other way, and it is the mirror worth recording: the reviewer read a
+citation naming two listings, concluded the entry's "all three listings are
+forward-chronological" was wrong, and proposed a rewrite to "both listings" — which would
+have introduced an error. The recording's own index settles it: batch2 idx 41, 43 and 44
+are three listings, and the citation was what was short, having omitted
+`session.events.list.mixed-perm-after-confirm` along with the session-create and send
+probes. The count was right; the evidence for it was not written down. Fixed by completing
+the citation to all seven probes rather than by trusting either the entry or the
+suggestion — the same discipline the rest of this record is about, applied for once in the
+entry's favour.
+
+The remaining bookkeeping: a function named in an entry that exists nowhere in the tree
+(`snapshotResources` for `materializeResourceInputs`, raised twice), a first-wave quote
+re-announced as a second-wave finding under a title dated a day late, a clause whose
+grammatical subject made a statement about this platform read as one about the reference,
+two "we are simply wrong" issues named only in body prose where the guard cannot see them
+(#576, #582), two live `#78` residuals inside another issue's `Tracked:` parenthetical
+rather than heads of their own, and the count sentence in this record.
+
+That is the shape of the whole exercise, stated once more because it took ten passes to
 see it plainly. The defect was never carelessness about our code — by the fourth pass our
 code was being read line by line. It was that **the recording's own account was the last
 thing anybody checked**, because it arrived as the authority and everything downstream
