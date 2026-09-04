@@ -4579,12 +4579,12 @@ and leaves the session running with its other repositories mounted.
 ## Second recording wave, registry reconciliation (#575) — review-hardening record (2026-09-04)
 
 Twenty-four registry entries were rewritten from a 281-pair recording of the live
-managed-agents endpoint. Eight review passes found 46 defects between them — five,
-three, fifteen, four, six, one, seven and five — and **seventeen of the 46 were one
+managed-agents endpoint. Nine review passes found 51 defects between them — five,
+three, fifteen, four, six, one, seven, five and five — and **eighteen of the 51 were one
 defect repeated**: the recording was read carefully, our own code was not read at all, and the
-entry was then filed as "confirmed, and we match". Those seventeen came one from the
+entry was then filed as "confirmed, and we match". Those eighteen came one from the
 verifier's first run, three from Codex, nine from the Claude reviewer, none from the
-refute-first pass, and one each from the verifier's second, third, fourth and fifth runs.
+refute-first pass, and one each from the verifier's second through sixth runs.
 A finding is counted here when it changed a file in this repository — which is why the
 verifier's third run contributes one of the four it raised, its other three having been
 answered in the pull request rather than in the tree.
@@ -4707,11 +4707,26 @@ no recorded route carries both states. Worse, the entry gave as the reason we *d
 anti-oracle posture that the work-API-auth entry, 165 lines above it in the same file,
 records this platform **giving up in order to match** — two entries with opposite verdicts
 on one recorded property, which is the single thing a divergence registry exists to
-prevent. The corrected fact is smaller and duller: the envelope matches everywhere the
-recording reached, the message text is ours, and the one absent capability is the
-named-OAuth-scope vocabulary #550 owns.
+prevent. The corrected fact is smaller and duller: the reference's
+refusal is route-dependent, the envelope matches on two of the four routes and differs on
+the other two, and one absence is under all of it — no named-OAuth-scope vocabulary, which
+is #550's gap.
 
-That is the shape of the whole exercise, stated once more because it took eight passes to
+The ninth pass is the one that stings, because the fix was the failure. Told the premise
+was unsupported, this author wrote a correct account — and **appended** it, leaving the
+refuted sentence standing byte-identical in the entry's first half. The entry then stated
+a wire fact in bold and, some 1,500 characters later in the same paragraph, said that fact
+was wrong. A reader skims the bold half. Two more claims went with it: "the envelope
+matches wherever the recording reached" is falsified by two of the four routes the
+recording reached — `GET /v1/skills` is management-only here, so an environment key draws
+a 401 where the reference answers 403 `permission_error`, and `GET /v1/skills/{id}` this
+platform admits outright where the reference refused it — and "a route it had reached with
+200 minutes earlier" tied the revoked key to the live one when three keys were revoked at
+teardown and the archive redacts which answered. Both were inherited from the analysis
+file rather than derived. The fact is now rewritten in **both** halves, and the tally is
+stated rather than asserted.
+
+That is the shape of the whole exercise, stated once more because it took nine passes to
 see it plainly. The defect was never carelessness about our code — by the fourth pass our
 code was being read line by line. It was that **the recording's own account was the last
 thing anybody checked**, because it arrived as the authority and everything downstream
