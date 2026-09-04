@@ -4579,12 +4579,12 @@ and leaves the session running with its other repositories mounted.
 ## Second recording wave, registry reconciliation (#575) — review-hardening record (2026-09-04)
 
 Twenty-four registry entries were rewritten from a 281-pair recording of the live
-managed-agents endpoint. Five review passes found 33 defects between them — five,
-three, fifteen, four and six — and **fourteen of the 33 were one defect repeated**:
+managed-agents endpoint. Six review passes found 34 defects between them — five,
+three, fifteen, four, six and one — and **fifteen of the 34 were one defect repeated**:
 the recording was read carefully, our own code was not read at all, and the entry was
-then filed as "confirmed, and we match". Those fourteen came one from the verifier,
-three from Codex, nine from the Claude reviewer, none from the fourth pass and one
-more from the verifier's second run.
+then filed as "confirmed, and we match". Those fifteen came one from the verifier, three
+from Codex, nine from the Claude reviewer, none from the fourth pass, and one each from
+the verifier's second and third runs.
 
 The verifier found five, of which the load-bearing one was a sentence claiming
 `isSkillReadPath` "admits exactly the subtree the reference serves" — inside an entry
@@ -4651,6 +4651,25 @@ reference returns a readable `is_error` tool result naming `url_not_allowed` and
 field that blocked it, which is the shape this platform already produces for a
 different reason, and the divergence it keeps on purpose is that the fence is the
 operator's rather than the agent's.
+
+The sixth pass is the one to keep, because of where it found the defect. Answering the
+fifth pass's mildest finding — an entry sitting in INFERRED though most of it was
+settled — meant adding one sentence to justify the placement, and that sentence said
+"three of those four are confirmed and matched" having read our source for one of the
+three. Of the other two, one was true by luck; the other was not true at all. The
+reference distinguishes a revoked environment key from a live one out of scope by
+message text alone, at one status and one type, while `authenticateEnvironmentKey` sends
+unknown, revoked and expired down a single branch **on purpose** — "so a probing client
+learns nothing about which of them it hit" — and no live-key-out-of-scope state exists
+here to compare against, no scope model being built. Two deliberate positions, recorded
+as a match.
+
+So the defect is not a lapse that better attention retires. It reappeared in a sentence
+written *to answer a finding about that same entry*, at the fifth attempt, under a rule
+this PR itself added to prevent it. The one thing that has reliably caught it is a
+reader who opens our source with the entry's claim in hand and expects it to be wrong —
+which is what the verifier and the refute-first pass both are, and what re-reading the
+recording is not.
 
 **The transferable rule, now written into the INFERRED preamble as a three-way routing
 test:** settling an inference has three ends — confirmed and we match, confirmed and we
