@@ -4843,12 +4843,13 @@ the bytes hold, in the entry whose first half had just been rewritten for exactl
 and the fix is two words. There is no better illustration of why the rule above had to be
 made mechanical.
 
-That is the shape of the whole exercise, stated once more because it took eleven passes to
-see it plainly. The defect was never carelessness about our code — by the fourth pass our
-code was being read line by line. It was that **the recording's own account was the last
-thing anybody checked**, because it arrived as the authority and everything downstream
-inherited it. A registry entry has two halves, and this project had built five kinds of
-scrutiny for one of them.
+That is the shape of the whole exercise, stated once more because eleven passes were
+needed to see it plainly — and a twelfth to show that seeing it plainly is not the same
+as being finished with it. The defect was never carelessness about our code — by the
+fourth pass our code was being read line by line. It was that **the recording's own
+account was the last thing anybody checked**, because it arrived as the authority and
+everything downstream inherited it. A registry entry has two halves, and this project
+had built five kinds of scrutiny for one of them.
 
 **The transferable rule, now written into the INFERRED preamble as a three-way routing
 test:** settling an inference has three ends — confirmed and we match, confirmed and we
