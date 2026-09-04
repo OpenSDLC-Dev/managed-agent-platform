@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
 
@@ -407,5 +408,110 @@ func TestMaterializePinnedVersion(t *testing.T) {
 	}
 	if got := sb.files["/workspace/skills/pinned-skill/SKILL.md"]; got != "v1" {
 		t.Errorf("pinned version = %q, want the pinned v1", got)
+	}
+}
+
+// setVersionID spells out a seeded version row's id. seedSkill derives one from
+// a hash, which no test can name, and the whole point of the three-way resolver
+// is that a client addresses a version BY that id.
+func (h *harness) setVersionID(t *testing.T, skillID, version, versionID string) {
+	t.Helper()
+	if _, err := h.pool.Exec(context.Background(),
+		`UPDATE skill_versions SET id = $3 WHERE skill_id = $1 AND version = $2`,
+		skillID, version, versionID); err != nil {
+		t.Fatalf("set version id %s: %v", versionID, err)
+	}
+}
+
+// TestResolveSkillVersionAddressingForms pins the three-way resolution the GA
+// shape needs (plan 39 decision 5): the literal "latest", a version id in
+// either the minted skver_ or the legacy skillver_ spelling, and the legacy
+// numeric pin. Everything else is a dangling reference — a skip, never a fault.
+//
+// It is a mutation test for the silent-wrong-answer bug. The resolver this
+// replaces asked one question — is the version all digits? — so every id form
+// below fell through to the "latest" branch and resolved to the NEWEST version.
+// Each id row here names a version that is deliberately not the latest, so the
+// old resolver returns "300" where the client pinned "100", and the
+// unresolvable rows return "300" where nothing should resolve at all.
+func TestResolveSkillVersionAddressingForms(t *testing.T) {
+	h := newHarness(t, &fakeSandbox{})
+	ctx := context.Background()
+
+	// Three versions of one skill; latest_version lands on 300.
+	h.seedSkill(t, "skill_res_pin", "100", "resolved-skill", map[string]string{"SKILL.md": "v1"})
+	h.setVersionID(t, "skill_res_pin", "100", "skver_res100")
+	h.seedSkill(t, "skill_res_pin", "200", "resolved-skill", map[string]string{"SKILL.md": "v2"})
+	h.setVersionID(t, "skill_res_pin", "200", "skillver_res200")
+	h.seedSkill(t, "skill_res_pin", "300", "resolved-skill", map[string]string{"SKILL.md": "v3"})
+	h.setVersionID(t, "skill_res_pin", "300", "skver_res300")
+	// A second skill, so a version id belonging to another skill can be shown
+	// not to resolve — the reference refuses one (plan 39 §2, recording 105).
+	h.seedSkill(t, "skill_res_other", "100", "other-skill", map[string]string{"SKILL.md": "x"})
+	h.setVersionID(t, "skill_res_other", "100", "skver_oth100")
+
+	cases := []struct {
+		name, version, want string
+		wantErr             bool
+	}{
+		{name: "latest alias", version: "latest", want: "300"},
+		{name: "minted skver_ id", version: "skver_res100", want: "100"},
+		{name: "legacy skillver_ id", version: "skillver_res200", want: "200"},
+		{name: "id naming the latest version", version: "skver_res300", want: "300"},
+		{name: "legacy numeric pin", version: "100", want: "100"},
+		{name: "another skill's version id", version: "skver_oth100", wantErr: true},
+		{name: "unknown version id", version: "skver_nosuchversion", wantErr: true},
+		{name: "neither alias, id nor digits", version: "bogus", wantErr: true},
+		{name: "empty version", version: "", wantErr: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := h.exec.resolveSkillVersion(ctx, skillRef{SkillID: "skill_res_pin", Version: tc.version})
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("version %q resolved to %q, want a dangling reference", tc.version, got)
+				}
+				// A reference that cannot be addressed is not-found, the
+				// tolerated skip — never a transient failure that would read as
+				// an outage on the outcome metric.
+				if !errors.Is(err, errSkillNotFound) {
+					t.Errorf("version %q failed with %v, want errSkillNotFound", tc.version, err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("version %q: %v", tc.version, err)
+			}
+			if got != tc.want {
+				t.Errorf("version %q resolved to %q, want %q", tc.version, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestMaterializeVersionPinnedByID is plan 39's acceptance bullet: a skill
+// pinned by its skver_ id materializes THAT version's files. Against the
+// pre-change resolver the pin fell through to "latest" and v2's bytes landed
+// in the sandbox under the pinned version's name.
+func TestMaterializeVersionPinnedByID(t *testing.T) {
+	sb := &fakeSandbox{}
+	h := newHarness(t, sb)
+	h.seedSkill(t, "skill_mat_idpin", "100", "id-pinned-skill", map[string]string{"SKILL.md": "v1"})
+	h.setVersionID(t, "skill_mat_idpin", "100", "skver_idpin100")
+	h.seedSkill(t, "skill_mat_idpin", "200", "id-pinned-skill", map[string]string{"SKILL.md": "v2"})
+	h.setVersionID(t, "skill_mat_idpin", "200", "skver_idpin200")
+	h.refSkills(t, [2]string{"skill_mat_idpin", "skver_idpin100"})
+	h.suspend(t, writeUse("out.txt", "x"))
+
+	if _, err := h.exec.step(context.Background()); err != nil {
+		t.Fatalf("step: %v", err)
+	}
+	if got := sb.files["/workspace/skills/id-pinned-skill/SKILL.md"]; got != "v1" {
+		t.Errorf("id-pinned version = %q, want the pinned v1", got)
+	}
+	// The sentinel keeps recording the concrete numeric version (decision 3):
+	// the blob key and the skip probe are unchanged by id addressing.
+	if sentinel := sb.files["/workspace/skills/"+skills.SentinelName]; !strings.Contains(sentinel, `"100"`) {
+		t.Errorf("sentinel = %q, want the resolved numeric version", sentinel)
 	}
 }

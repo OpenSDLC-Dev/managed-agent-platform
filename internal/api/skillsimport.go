@@ -9,12 +9,20 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"regexp"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/blob"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/skills"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
+
+// skillImportVersionRe is the operator import's own version validation: the
+// checkout's commit date, YYYYMMDD. It deliberately does NOT share the
+// {version} path slot's patterns. That slot widened to version ids and the
+// "latest" alias (plan 39 decision 4), and widening it must not quietly let an
+// operator import a skill under a version string nothing can address as one.
+var skillImportVersionRe = regexp.MustCompile(`^[0-9]{1,32}$`)
 
 // ImportSummary reports one operator-import run.
 type ImportSummary struct {
@@ -40,7 +48,7 @@ func ImportAnthropicSkills(ctx context.Context, pool *pgxpool.Pool, blobs blob.S
 	if blobs == nil {
 		return sum, errors.New("object storage is not configured; the import needs somewhere to put archives")
 	}
-	if !skillVersionRe.MatchString(version) {
+	if !skillImportVersionRe.MatchString(version) {
 		return sum, fmt.Errorf("version %q must be a digit string (the checkout's commit date, YYYYMMDD)", version)
 	}
 	for _, dir := range dirs {

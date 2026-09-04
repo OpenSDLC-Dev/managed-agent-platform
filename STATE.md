@@ -4,11 +4,25 @@ What is being worked on right now, and how far along it is — nothing else. **S
 
 ## Active work
 
-**none.** Nothing is in flight. Plan 38 (#263 — session outputs harvested at idle
-without an outcome) landed and is archived; its delivery record is
-[docs/HISTORY.md](./docs/HISTORY.md) and its [changelog.d/](./changelog.d/) fragment.
-The backlog is [GitHub issues](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues).
+**Plan 39 — Skills converged onto the GA wire shape** ([docs/plan/39_skills-ga-shape.md](./docs/plan/39_skills-ga-shape.md), #566).
+The reference's 2026-08-27 migration renamed the Skills wire fields and changed how a
+version is addressed; this platform still served the pre-migration shape, so no released
+SDK could create a skill here in either direction. Design is pinned to a 2026-09-04
+recording of the live endpoint (163 entries, US$0), kept in the private
+`managed-agents-wire-recordings` repository.
 
 ## Tasks
 
-_None — no active work._
+- [x] Plan written; ground truth recorded and verified against the raw bytes.
+- [x] SDK pin to v1.70.1 and the BYOC worker's id-based resolution (slice 1).
+- [x] Wire shapes, create form, list ceiling, delete cascade and the only-version
+      refusal in `internal/api` (slices 2-3).
+- [x] Three-way version resolution in brain and executor; `skver_` minted with
+      `skillver_` accepted on input; CLAUDE.md's prefix list (slice 4).
+- [x] `docs/DIVERGENCES.md` — the recording settles several entries this change
+      touches. (`changelog.d/` fragments written; README needs none, describing no
+      wire shape.)
+- [x] `make verify` green: 57 packages, total statement coverage 90.15%.
+- [ ] Dual code review, the verifier, and the plan's section 6 acceptance runs
+      (`ant` CLI end-to-end; the three `anthropic-cwc-workshops` examples that
+      upload skills, on a current `anthropic` release with no `0.97.0` pin).

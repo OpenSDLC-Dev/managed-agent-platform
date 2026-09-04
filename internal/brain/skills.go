@@ -22,6 +22,11 @@ import (
 // Exported so the telemetry contract test can assert the exact name.
 const MetricSkillResolveMisses = "skills.resolve.misses"
 
+// skillVersionAlias is the one alias the wire admits for a skill version: the
+// newest one at use time. Everything else a stored pin can hold is concrete —
+// a version id, or the legacy numeric.
+const skillVersionAlias = "latest"
+
 var skillDigitsRe = regexp.MustCompile(`^[0-9]+$`)
 
 // skillRef is the minimal shape of one resolved-agent skills[] entry — the
@@ -43,9 +48,9 @@ type skillMeta struct {
 }
 
 // resolveSkillsBlock resolves the agent's skills[] into the Level-1 system-prompt
-// block: per skill, resolve the version at request-assembly time (a digit string
-// verbatim, else "latest" against the registry's latest_version) and read
-// name+description from the resolved version, then render the block. A reference
+// block: per skill, resolve the version at request-assembly time (see
+// resolveSkillMeta for the three addressing forms) and read name+description
+// from the resolved version, then render the block. A reference
 // that cannot be resolved — a dangling id/version, or a store blip — is logged
 // and skipped, never fatal to the turn (the same late-bound tolerance
 // materialization applies, plan design decision 7). Returns the rendered block,
@@ -91,11 +96,18 @@ func (b *Brain) resolveSkillsBlock(ctx context.Context, agent domain.ResolvedAge
 }
 
 // resolveSkillMeta resolves one reference to the resolved version's name and
-// description. Version resolution mirrors the executor: a digit string is
-// already concrete; anything else ("latest") resolves against the skill's
-// latest_version column.
+// description. Version addressing mirrors the executor's, in three explicit
+// forms (plan 39 decision 5): the literal "latest" resolves against the skill's
+// latest_version column at request-assembly time; a version id — the GA skver_
+// spelling or the legacy skillver_ one — names that row directly, scoped to the
+// skill so another skill's version id does not resolve; and an all-digits
+// string is the legacy numeric pin, taken verbatim. Anything else addresses no
+// version and is a miss. Asking only "is it digits?" is what made a pinned id
+// resolve silently to the newest version instead of the pinned one.
 func (b *Brain) resolveSkillMeta(ctx context.Context, skillID, version string) (string, string, error) {
-	if !skillDigitsRe.MatchString(version) {
+	var row pgx.Row
+	switch {
+	case version == skillVersionAlias:
 		var latest *string
 		err := b.pool.QueryRow(ctx, `SELECT latest_version FROM skills WHERE id = $1`, skillID).Scan(&latest)
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -107,12 +119,23 @@ func (b *Brain) resolveSkillMeta(ctx context.Context, skillID, version string) (
 		if latest == nil {
 			return "", "", fmt.Errorf("skill %s has no version to resolve %q against", skillID, version)
 		}
-		version = *latest
+		row = b.pool.QueryRow(ctx,
+			`SELECT name, description FROM skill_versions WHERE skill_id = $1 AND version = $2`,
+			skillID, *latest)
+	case domain.ID(version).HasPrefix(domain.PrefixSkillVersion):
+		row = b.pool.QueryRow(ctx,
+			`SELECT name, description FROM skill_versions WHERE skill_id = $1 AND id = $2`,
+			skillID, version)
+	case skillDigitsRe.MatchString(version):
+		row = b.pool.QueryRow(ctx,
+			`SELECT name, description FROM skill_versions WHERE skill_id = $1 AND version = $2`,
+			skillID, version)
+	default:
+		return "", "", fmt.Errorf("skill %s version %q is neither %q, a version id nor a version number",
+			skillID, version, skillVersionAlias)
 	}
 	var name, description string
-	err := b.pool.QueryRow(ctx,
-		`SELECT name, description FROM skill_versions WHERE skill_id = $1 AND version = $2`,
-		skillID, version).Scan(&name, &description)
+	err := row.Scan(&name, &description)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return "", "", fmt.Errorf("skill %s version %s not found", skillID, version)
 	}
