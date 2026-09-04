@@ -39,7 +39,7 @@ Two standing product decisions travel with these principles: **v1's first-class 
 
 ## Wire-compatibility rules
 
-- Mirror Anthropic's resource model, paths, JSON fields, and **ID prefixes**: `agent_` `env_` `sesn_` (accept a `session_` alias on input too — a lenient parse of ours, unobserved on the reference) `sevt_` `work_` `vlt_` `vcrd_` `sesrsc_` `depl_` `drun_` `file_` `skill_` `skillver_` `outc_` `sthr_` `memstore_` `mem_` `memver_` — `knownPrefixes` in `internal/domain/id.go` is the list, and a test fails this line if it drifts from it.
+- Mirror Anthropic's resource model, paths, JSON fields, and **ID prefixes**: `agent_` `env_` `sesn_` (accept a `session_` alias on input too — a lenient parse of ours, unobserved on the reference) `sevt_` `work_` `vlt_` `vcrd_` `sesrsc_` `depl_` `drun_` `file_` `skill_` `skver_` (accept the legacy `skillver_` spelling on input too) `outc_` `sthr_` `memstore_` `mem_` `memver_` — `knownPrefixes` in `internal/domain/id.go` is the list, and a test fails this line if it drifts from it.
 - Accept and ignore `anthropic-version` / `anthropic-beta` headers; honor `?beta=true` where the reference does.
 - Auth: management via `x-api-key`; workers via environment key (`Authorization: Bearer`, scoped to one environment's work queue).
 - Event taxonomy is `{domain}.{action}` — see [docs/plan/01_v1-managed-agent-platform.md](./docs/plan/01_v1-managed-agent-platform.md)'s Component 2 for the full list. SSE deltas use `content_delta` (NOT Messages API's `content_block_delta`).
@@ -114,7 +114,7 @@ make cd-outcome-test     # ...and the CD failure notifier's classifier, which `w
 make parked-test         # ...and the parked-cluster label rule `deploy.yml` and `staging-parked.yml` share
 make retry-test          # ...and the retry wrapper both notifiers copy, lifted out of the workflow YAML and run
 make identifiers-test    # ...and the documentation, for the four shapes an operator's coordinates take (#356's rule)
-make pins-test           # ...and every `uses:` in .github/workflows/, for the commit-SHA pin dependabot.yml requires
+make pins-test           # ...and every `uses:` in .github/workflows/, for the commit-SHA pin dependabot.yml requires, and every `actions/checkout` for the `persist-credentials: false` beside it
 make gcp-fmt gcp-validate gcp-split-check gcp-lint   # GCP staging Terraform, credential-free
 make gcp-bootstrap-test gcp-split-check-test gcp-dbinit-test gcp-power-test gcp-tfvars-test gcp-env-targets-test  # ...and its tooling, run rather than read
 ```
@@ -183,4 +183,4 @@ Concretely here: "add validation" → write the failing test for invalid input f
 - **TDD** for anything with behavior: contract test first, then implement. This matters most for provider adapters, event/JSON round-trips against the wire schema, sandbox providers, and the work-queue lease state machine.
 - Keep files focused and small; one clear responsibility per package.
 - Provider-, sandbox-, and queue-backend variability lives behind interfaces with a **shared contract test suite** — every new backend must pass the same suite.
-- Confine lossy conversions to a single package (`provider/openai`) and test them hard; the Anthropic-protocol provider should be near-zero-conversion.
+- Confine lossy conversions to `provider/openai` and the `search_result` rendering it shares with `provider/anthropic` (`provider.SearchResultText`), and test them hard; the Anthropic-protocol provider stays near-zero-conversion and applies that rendering only when a route opts into `flatten_search_results`.

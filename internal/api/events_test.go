@@ -381,6 +381,24 @@ func TestListEventsPagingAndFilters(t *testing.T) {
 	if len(all) != 10 {
 		t.Fatalf("listed %d, want 10", len(all))
 	}
+	// The list pages on seq, which is monotonic per session, so nothing above
+	// or in the walk below needs the clock. The created_at comparators further
+	// down do: they take a boundary off one event and count both sides, which
+	// holds only while created_at rises with seq across the settlements that
+	// wrote these ten. Each row takes its own clock_timestamp() as it is
+	// inserted, so what would break that is the same backwards step of the
+	// database clock as everywhere else here (#411), answered the same way
+	// (#561).
+	//
+	// Stamping costs the emitter's own guarantee no coverage: that created_at
+	// never runs backwards against seq is pinned where it is engineered, by
+	// TestAppendConcurrentSeqIntegrity in internal/events, under lock
+	// contention this test does not produce.
+	seqOrder := make([]string, 0, len(all))
+	for _, ev := range all {
+		seqOrder = append(seqOrder, ev["id"].(string))
+	}
+	stampCreatedAt(t, s, "events", seqOrder...)
 	if all[0]["content"].([]any)[0].(map[string]any)["text"] != "m0" {
 		t.Errorf("default order is not chronological: first = %v", all[0])
 	}

@@ -902,3 +902,71 @@ func TestFinalizeAbandonedRechecksUnderTheTransaction(t *testing.T) {
 		t.Error("a stale candidate was settled twice, want the recheck to refuse it")
 	}
 }
+
+// HasUndrainedWork answers the environment delete's refusal (#546), so it is
+// scoped exactly as the rest of the work API is — and each clause of that scope
+// gets its own case, since a single queued self_hosted tool_exec satisfies them
+// all at once and would pin none of them.
+func TestHasUndrainedWork(t *testing.T) {
+	ctx := context.Background()
+	pool := pgtest.NewPool(t)
+	q := queue.New(pool)
+
+	// Nothing enqueued, and an environment that does not exist.
+	sessionID, env := pgtest.NewSession(t, pool, "self_hosted")
+	assertUndrained(t, q, ctx, env, false, "an empty queue")
+	assertUndrained(t, q, ctx, domain.NewID("env"), false, "an environment that does not exist")
+
+	// A queued tool_exec is work a worker could be handed.
+	if _, err := q.Enqueue(ctx, pool, env, sessionID, queue.ToolExec); err != nil {
+		t.Fatal(err)
+	}
+	assertUndrained(t, q, ctx, env, true, "a queued tool_exec")
+
+	// Still undrained while a worker holds it: polled, acked, then heartbeating.
+	w, err := q.Poll(ctx, env, time.Minute)
+	if err != nil || w == nil {
+		t.Fatalf("poll: %+v %v", w, err)
+	}
+	if _, err := q.Ack(ctx, env, w.ID); err != nil {
+		t.Fatal(err)
+	}
+	assertUndrained(t, q, ctx, env, true, "an acked (starting) item")
+	if _, err := q.Heartbeat(ctx, env, w.ID, queue.NoHeartbeat, 60); err != nil {
+		t.Fatal(err)
+	}
+	assertUndrained(t, q, ctx, env, true, "an active item a worker is running")
+
+	// Stopped is drained. Stop's force arm is what draws that boundary, so it is
+	// what the test uses to reach it.
+	if _, err := q.Stop(ctx, env, w.ID, true); err != nil {
+		t.Fatal(err)
+	}
+	assertUndrained(t, q, ctx, env, false, "a stopped item")
+
+	// A model_turn is the brain's own queue: no worker polls it, so it is not
+	// work the delete's refusal speaks for.
+	turnSession, turnEnv := pgtest.NewSession(t, pool, "self_hosted")
+	if _, err := q.Enqueue(ctx, pool, turnEnv, turnSession, queue.ModelTurn); err != nil {
+		t.Fatal(err)
+	}
+	assertUndrained(t, q, ctx, turnEnv, false, "a queued model_turn")
+
+	// A cloud tool_exec is the platform executor's queue, not a worker's.
+	cloudSession, cloudEnv := pgtest.NewSession(t, pool, "cloud")
+	if _, err := q.Enqueue(ctx, pool, cloudEnv, cloudSession, queue.ToolExec); err != nil {
+		t.Fatal(err)
+	}
+	assertUndrained(t, q, ctx, cloudEnv, false, "a cloud tool_exec")
+}
+
+func assertUndrained(t *testing.T, q *queue.Queue, ctx context.Context, envID domain.ID, want bool, what string) {
+	t.Helper()
+	got, err := q.HasUndrainedWork(ctx, envID)
+	if err != nil {
+		t.Fatalf("%s: %v", what, err)
+	}
+	if got != want {
+		t.Errorf("%s: undrained = %v, want %v", what, got, want)
+	}
+}

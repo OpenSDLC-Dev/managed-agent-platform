@@ -60,6 +60,37 @@ func TestSessionAltPrefixAccepted(t *testing.T) {
 	}
 }
 
+// TestSkillVersionAltPrefixAccepted pins plan 39 decision 9: skver_ is what a
+// fresh version id is minted as, and skillver_ — every id this platform minted
+// before the GA convergence, and the id agent configs already pin by — is
+// accepted on input forever. Rewriting those rows would dangle every stored
+// pin, so both spellings have to answer for the same resource.
+func TestSkillVersionAltPrefixAccepted(t *testing.T) {
+	if got := NewID(PrefixSkillVersion).Prefix(); got != "skver" {
+		t.Errorf("a minted skill-version id carries prefix %q, want %q", got, "skver")
+	}
+	legacy := ID("skillver_abc123")
+	if !legacy.HasPrefix(PrefixSkillVersion) {
+		t.Errorf("the legacy skillver_ spelling should satisfy HasPrefix(PrefixSkillVersion)")
+	}
+	// The alternate form must not leak into other resource checks — skill_ and
+	// skillver_ are different resources whose spellings share a stem.
+	if legacy.HasPrefix(PrefixSkill) {
+		t.Errorf("a skillver_ id must not report the skill prefix")
+	}
+	if ID("session_abc123").HasPrefix(PrefixSkillVersion) {
+		t.Errorf("the session alias must not satisfy the skill-version prefix")
+	}
+	// Both spellings are wire-acceptable id shapes, so a path or query filter
+	// carrying either reaches the store rather than 404ing on shape.
+	token := idEncoding.EncodeToString(make([]byte, idRandomBytes))
+	for _, id := range []ID{ID(PrefixSkillVersion + "_" + token), ID(altSkillVersionPrefix + "_" + token)} {
+		if !id.Valid() {
+			t.Errorf("%q should be Valid", id)
+		}
+	}
+}
+
 func TestPrefixEmptyWhenNoUnderscore(t *testing.T) {
 	if got := ID("nounderscore").Prefix(); got != "" {
 		t.Errorf("Prefix() = %q, want empty", got)
@@ -87,7 +118,7 @@ func TestIDValid(t *testing.T) {
 		PrefixAgent, PrefixEnvironment, PrefixSession, PrefixEvent, PrefixWork,
 		PrefixVault, PrefixResource, PrefixDeployment, PrefixDeploymentRun,
 		PrefixFile, PrefixSkill, PrefixSkillVersion, PrefixMemoryStore,
-		PrefixMemory, PrefixMemoryVersion, altSessionPrefix,
+		PrefixMemory, PrefixMemoryVersion, altSessionPrefix, altSkillVersionPrefix,
 	} {
 		id := ID(prefix + "_" + idEncoding.EncodeToString(make([]byte, idRandomBytes)))
 		if !id.Valid() {

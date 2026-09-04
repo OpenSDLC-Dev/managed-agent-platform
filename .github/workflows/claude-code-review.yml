@@ -30,6 +30,14 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 1
+          # Same argument as claude.yml's, which see: the action supplies its
+          # own token, and the credential checkout persists would otherwise
+          # outrank it rather than merely sit there unused. What differs here
+          # is what then runs on the action's token instead of this job's —
+          # a fetch of `origin/<base>` the action itself makes, not a step in
+          # this file, to restore `.claude/` and CLAUDE.md from the base branch
+          # before it trusts them, a PR head being untrusted input.
+          persist-credentials: false
 
       - name: Run Claude Code Review
         id: claude-review

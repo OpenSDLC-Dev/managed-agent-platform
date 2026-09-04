@@ -10,6 +10,5 @@
   rows (`FAIL (retried)`, `PASS (retry)`), the headline count judges final
   attempts only, and the token totals still charge both. This is what stops a
   single stochastic refusal from a live endpoint redding the nightly while
-  keeping every genuine platform signal loud. Skill fixtures now upload with a
-  per-attempt `display_title`, so a retried skill trial re-uploads cleanly
-  instead of tripping the title-uniqueness rule. (#528)
+  keeping every genuine platform signal loud. A retried skill trial re-uploads
+  its fixture unchanged, display names no longer being unique. (#528)

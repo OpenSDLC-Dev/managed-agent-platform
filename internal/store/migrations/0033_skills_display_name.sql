@@ -1,0 +1,28 @@
+-- 0033_skills_display_name: display_name is not unique (plan 39, decision 7).
+--
+-- The 2026-08-27 reference migration renamed display_title to display_name and
+-- dropped its uniqueness with it: the 2026-09-04 recording creates two skills
+-- carrying the same display_name and both succeed. 0007's partial unique index
+-- therefore refuses creates the reference accepts, and refusing a create the
+-- reference accepts is a harder break than accepting one it refuses.
+--
+-- A row written before this change can also be far longer than the 255 characters
+-- the create form now accepts: the pre-convergence field was bounded at 4096 bytes.
+-- Nothing truncates it. The cap is a create-time bound, not a response-schema one —
+-- the GA SDK types display_name as a plain string — so such a row still renders and
+-- parses; it simply could not be created today. Rewriting user-chosen text in a
+-- migration would lose more than it buys.
+--
+-- The column keeps its 0007 name. Only the wire field was renamed, and the two
+-- are decoupled everywhere else in this schema; renaming the column would buy a
+-- second immutable migration and change nothing a client can observe.
+--
+-- 0007's comment on skill_versions also predates decision 6: the API now
+-- cascades a skill delete over its versions in one transaction and refuses to
+-- delete a skill's only version, so the delete order the comment describes is
+-- inverted. The absent ON DELETE CASCADE is still deliberate, and for a
+-- stronger reason than the comment gave — the handler sweeps each version's
+-- archive out of object storage as it goes, and a database-level cascade would
+-- drop the rows behind it and orphan every archive.
+
+DROP INDEX IF EXISTS skills_custom_display_title_uq;

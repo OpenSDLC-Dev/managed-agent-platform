@@ -559,13 +559,13 @@ func isSessionEventsPath(p string) bool {
 // isSkillReadPath reports whether p is a skill read route: /v1/skills/{id},
 // its versions list, a version get, or the /content download. A GET on these
 // is what the reference worker's SetupSkills performs with its environment
-// key (resolve "latest" over the versions list → version get → download), so
-// they join the dual-auth set; skills are workspace-global resources every
-// environment's sandboxes consume, so a valid key from any environment may
-// read them — there is no per-environment scoping to enforce. The collection
-// list /v1/skills and every mutation stay management-only. Like the other
-// predicates this sees the escaped path, so a %2F can never smuggle a skills
-// segment past the router's view.
+// key (a version get resolving whatever the pin says, then a download by the
+// concrete id it answered with), so they join the dual-auth set; skills are
+// workspace-global resources every environment's sandboxes consume, so a valid
+// key from any environment may read them — there is no per-environment scoping
+// to enforce. The collection list /v1/skills and every mutation stay
+// management-only. Like the other predicates this sees the escaped path, so a
+// %2F can never smuggle a skills segment past the router's view.
 func isSkillReadPath(p string) bool {
 	const prefix = "/v1/skills/"
 	if !strings.HasPrefix(p, prefix) {

@@ -2,7 +2,8 @@
 // protocol to the provider interface, via the official SDK with a
 // configurable base URL — an enterprise gateway, a proxy, or a self-hosted
 // model are all just configuration. Requests pass through near-verbatim:
-// content blocks and tool definitions are the Anthropic wire shapes already.
+// content blocks and tool definitions are the Anthropic wire shapes already —
+// unless a route opts into flatten_search_results (searchresult.go).
 package anthropic
 
 import (
@@ -74,11 +75,12 @@ func New(cfg provider.Config) (provider.Provider, error) {
 	}
 	client := sdk.NewClient(opts...)
 	return &anthropicProvider{
-		client:    client,
-		model:     cfg.Model,
-		stall:     cfg.StallTimeout,
-		maxTokens: cfg.MaxTokens,
-		redact:    provider.NewRedactor(cfg),
+		client:               client,
+		model:                cfg.Model,
+		stall:                cfg.StallTimeout,
+		maxTokens:            cfg.MaxTokens,
+		flattenSearchResults: cfg.FlattenSearchResults,
+		redact:               provider.NewRedactor(cfg),
 	}, nil
 }
 
@@ -91,6 +93,11 @@ type anthropicProvider struct {
 	// maxTokens is the route's default output cap for turns that set none;
 	// zero takes defaultMaxTokens.
 	maxTokens int64
+	// flattenSearchResults is the route's opt-in accommodation for an
+	// endpoint that rejects search_result blocks inside replayed tool_result
+	// content (#565); see flattenSearchResults in searchresult.go. Default
+	// false keeps the adapter near-zero-conversion.
+	flattenSearchResults bool
 	// The SDK's API error quotes the whole response body and the request URL,
 	// so both an echoed credential and one carried in base_url reach its text.
 	redact provider.Redactor
@@ -125,9 +132,13 @@ func (p *anthropicProvider) Generate(ctx context.Context, req provider.Request) 
 		if err != nil {
 			return nil, err
 		}
+		content := m.Content
+		if p.flattenSearchResults {
+			content = flattenSearchResults(content)
+		}
 		wire, err := json.Marshal(map[string]json.RawMessage{
 			"role":    role,
-			"content": m.Content,
+			"content": content,
 		})
 		if err != nil {
 			return nil, fmt.Errorf("messages[%d]: %w", i, err)

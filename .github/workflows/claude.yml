@@ -29,6 +29,17 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 1
+          # `claude-code-action` mints its own GitHub App token and rewrites
+          # origin to carry it. It also tries to drop the credential checkout
+          # leaves behind, and misses: v6+ wires the header in through
+          # `includeIf.gitdir`, the action looks for `include.path`, and its
+          # log says "No existing authentication headers to remove" while the
+          # header is still live. So this line is corrective, not decorative —
+          # without it a header carrying THIS job's token outranks the token
+          # the action minted, on every request the action and the model make.
+          # Tag mode also reads from origin before that rewrite, which is
+          # anonymous here because the repository is public.
+          persist-credentials: false
 
       - name: Run Claude Code
         id: claude

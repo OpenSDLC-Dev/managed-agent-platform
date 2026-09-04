@@ -113,6 +113,26 @@ func (h *harness) builtins(t *testing.T) {
 	}
 }
 
+// customTool declares one custom tool by name on the fixture agent, so a call
+// to it stays client-executed. Several tests use an arbitrary name purely as a
+// stand-in for "some tool call the client answers" and need it declared to
+// keep exercising that lane rather than falling into #567's unoffered-name one.
+func (h *harness) customTool(t *testing.T, name string) {
+	t.Helper()
+	def, err := json.Marshal([]map[string]any{{
+		"type": "custom", "name": name, "description": "d",
+		"input_schema": map[string]any{"type": "object"},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h.pool.Exec(context.Background(),
+		`UPDATE sessions SET resolved_agent = jsonb_set(resolved_agent, '{tools}', $2::jsonb) WHERE id = $1`,
+		h.sessionID.String(), def); err != nil {
+		t.Fatalf("custom tool fixture: %v", err)
+	}
+}
+
 // runningChild plants a child thread already running — what gives a
 // wait_for_agents something to wait for.
 func (h *harness) runningChild(t *testing.T) domain.ID {
@@ -457,6 +477,16 @@ func TestSubmitResultSharingItsTurnWithAToolCallReportsNothing(t *testing.T) {
 		done("tool_use", 2),
 	}}, nil)
 	child := h.childTurn(t, "do the work")
+	// lookup is only a stand-in for "some client call sharing the turn"; it
+	// must stay client-executed rather than falling into #567's unoffered
+	// path, or this turn would settle as delegation-only and end up in the
+	// wrong branch entirely.
+	if _, err := h.pool.Exec(context.Background(),
+		`UPDATE session_threads SET agent = jsonb_set(agent, '{tools}',
+		   '[{"type":"custom","name":"lookup","description":"d","input_schema":{"type":"object"}}]'::jsonb)
+		 WHERE id = $1`, child.String()); err != nil {
+		t.Fatal(err)
+	}
 	h.runOnce(t)
 
 	got := h.answers(t)
@@ -613,6 +643,406 @@ func TestACoordinatorCallingAWorkersToolIsAnsweredToo(t *testing.T) {
 	}
 	if n := h.liveTurns(t, ""); n != 1 {
 		t.Errorf("coordinator turns queued = %d, want the settlement to have chained one", n)
+	}
+}
+
+// A name the model was not offered at all is answered inline rather than
+// parked: no client declared it, so nothing would ever post a result and the
+// session would run forever (#567). The turn chains straight to the model's
+// next request, the same way an all-settlement delegation turn does.
+func TestAnUnofferedNameChainsToTheCallersNextTurn(t *testing.T) {
+	h := newHarness(t, [][]provider.Chunk{
+		{toolCall("t1", "edit", `{"file_path":"/tmp/x","command":"view"}`), done("tool_use", 1)},
+		agentReply("fixed it"),
+	}, nil)
+	h.wake(t, "edit the file")
+	h.runOnce(t)
+
+	got := h.answers(t)
+	if len(got) != 1 || !got[0].isErr {
+		t.Fatalf("answers = %v, want one is_error", got)
+	}
+	if !strings.Contains(got[0].text, `unknown tool "edit"`) || !strings.Contains(got[0].text, "not offered") {
+		t.Errorf("answer text = %q, want it to name the unknown tool", got[0].text)
+	}
+	primary := domain.PrimaryThreadID(h.sessionID)
+	if s := h.threadStatus(t, primary); s != "running" {
+		t.Errorf("primary = %q, want running with its next turn queued", s)
+	}
+	if n := h.liveTurns(t, ""); n != 1 {
+		t.Fatalf("queued turns = %d, want the settlement to have chained one", n)
+	}
+	if got := h.status(t); got != "running" {
+		t.Errorf("session = %q, want running — nothing here is waiting on a client", got)
+	}
+
+	// The chained turn actually runs and the model can see the error: decode
+	// the second request's own messages, rather than merely counting that a
+	// second request happened, so the assistant's tool_use and the matching
+	// tool_result are pinned together with the right id and text.
+	h.runOnce(t)
+	if n := len(h.provider.calls); n != 2 {
+		t.Fatalf("model requests = %d, want a second turn to have run", n)
+	}
+	type block struct {
+		Type      string `json:"type"`
+		ID        string `json:"id"`
+		Name      string `json:"name"`
+		ToolUseID string `json:"tool_use_id"`
+		IsError   bool   `json:"is_error"`
+		Content   []struct {
+			Text string `json:"text"`
+		} `json:"content"`
+	}
+	var useID string
+	var resultSeen bool
+	for _, msg := range h.provider.calls[1].Messages {
+		var blocks []block
+		if err := json.Unmarshal(msg.Content, &blocks); err != nil {
+			t.Fatalf("message content: %v", err)
+		}
+		for _, b := range blocks {
+			if b.Type == "tool_use" && b.Name == "edit" {
+				useID = b.ID
+			}
+			if b.Type == "tool_result" && useID != "" && b.ToolUseID == useID {
+				resultSeen = true
+				if !b.IsError {
+					t.Error("tool_result is_error = false, want true")
+				}
+				if len(b.Content) == 0 || !strings.Contains(b.Content[0].Text, `unknown tool "edit"`) ||
+					!strings.Contains(b.Content[0].Text, "not offered") {
+					t.Errorf("tool_result content = %+v, want the unknown-tool text", b.Content)
+				}
+			}
+		}
+	}
+	if useID == "" {
+		t.Fatal("the second request carries no assistant tool_use block for edit")
+	}
+	if !resultSeen {
+		t.Error("the second request carries no tool_result matching the tool_use id")
+	}
+	if got := h.status(t); got != "idle" {
+		t.Errorf("session = %q, want idle once the model self-corrected", got)
+	}
+}
+
+// The issue's own reproduction is a worker thread, not the coordinator: the
+// call, its answer, and the re-queued turn all belong to the CHILD's own
+// log — the coordinator never sees them and never wakes for them, exactly as
+// a declared client-executed call on a child would not wake it either.
+func TestAnUnofferedNameOnAChildThreadChainsThatChildsOwnTurn(t *testing.T) {
+	h := newHarness(t, [][]provider.Chunk{
+		{toolCall("t1", "edit", `{"file_path":"/tmp/x","command":"view"}`), done("tool_use", 1)},
+		agentReply("fixed it"),
+	}, nil)
+	child := h.childTurn(t, "edit the file")
+	h.runOnce(t)
+
+	got := h.answers(t)
+	if len(got) != 1 || !got[0].isErr {
+		t.Fatalf("answers = %v, want one is_error", got)
+	}
+	if !strings.Contains(got[0].text, `unknown tool "edit"`) || !strings.Contains(got[0].text, "not offered") {
+		t.Errorf("answer text = %q, want it to name the unknown tool", got[0].text)
+	}
+	uses := h.eventsOfType(t, domain.EventAgentToolUse)
+	if len(uses) != 1 || uses[0].ThreadID != child {
+		t.Fatalf("agent.tool_use events = %+v, want the one call on the child's own log", uses)
+	}
+	results := h.eventsOfType(t, domain.EventAgentToolResult)
+	if len(results) != 1 || results[0].ThreadID != child {
+		t.Fatalf("agent.tool_result events = %+v, want the one answer on the child's own log", results)
+	}
+	if n := h.liveTurns(t, child); n != 1 {
+		t.Errorf("child turns queued = %d, want the settlement to have chained its own", n)
+	}
+	if n := h.liveTurns(t, ""); n != 0 {
+		t.Errorf("primary turns queued = %d, want none — the coordinator never ran", n)
+	}
+	if s := h.threadStatus(t, child); s != "running" {
+		t.Errorf("child = %q, want running with its next turn queued", s)
+	}
+
+	// The child self-corrects on its own; nothing about this involves the
+	// primary, which was never even given a turn.
+	h.runOnce(t)
+	if n := len(h.provider.calls); n != 2 {
+		t.Fatalf("model requests = %d, want the child's second turn to have run", n)
+	}
+	if s := h.threadStatus(t, child); s != "idle" {
+		t.Errorf("child = %q, want idle once it self-corrected", s)
+	}
+}
+
+// #567 round 4 blocker: the committed event must read evaluated_permission
+// "deny", not "allow" — this platform's own drivers never re-run an already
+// answered call regardless of that stamp, but a self_hosted worker built to
+// the reference contract streams agent.tool_use directly, owns "edit" in its
+// own registered toolset whether or not this agent's config disabled it, and
+// does not treat an agent.tool_result as answered (it dedups only on
+// user.tool_result/user.custom_tool_result). Stamped "allow", such a worker
+// would run the call the settlement already refused and post its own result
+// for one the platform had already closed out. "deny" is the value the
+// reference documents such a worker never executes but still yields.
+func TestAnUnofferedCallIsStampedDenyNotAllow(t *testing.T) {
+	h := newHarness(t, [][]provider.Chunk{
+		{toolCall("t1", "edit", `{"file_path":"/tmp/x"}`), done("tool_use", 1)},
+	}, nil)
+	h.wake(t, "edit the file")
+	h.runOnce(t)
+
+	uses := h.eventsOfType(t, domain.EventAgentToolUse)
+	if len(uses) != 1 {
+		t.Fatalf("agent.tool_use events = %d, want 1", len(uses))
+	}
+	var p struct {
+		EvaluatedPermission string `json:"evaluated_permission"`
+	}
+	if err := json.Unmarshal(uses[0].Body, &p); err != nil {
+		t.Fatalf("payload: %v", err)
+	}
+	if p.EvaluatedPermission != string(domain.EvalPermDeny) {
+		t.Errorf("evaluated_permission = %q, want deny", p.EvaluatedPermission)
+	}
+	for _, k := range []queue.Kind{queue.ToolExec, queue.WebExec, queue.MCPExec} {
+		if n := h.liveOf(t, k); n != 0 {
+			t.Errorf("%s items = %d, want none — nothing runs an unoffered name", k, n)
+		}
+	}
+}
+
+// #567 round 5: the unknown-tool answer must quote the name exactly as the
+// model sent it. delegationText's own TrimSpace is right for a message or a
+// report — prose nobody reads back the padding of — but wrong for a
+// diagnostic naming an identifier: a name that genuinely carries leading or
+// trailing whitespace must be reported as it was called, not silently
+// tidied into a name that was never actually offered either.
+func TestAnUnofferedNameWithWhitespaceIsQuotedExactly(t *testing.T) {
+	h := newHarness(t, [][]provider.Chunk{
+		{toolCall("t1", " edit ", `{}`), done("tool_use", 1)},
+	}, nil)
+	h.wake(t, "do something")
+	h.runOnce(t)
+
+	got := h.answers(t)
+	if len(got) != 1 || !got[0].isErr {
+		t.Fatalf("answers = %v, want one is_error", got)
+	}
+	want := `unknown tool " edit ": not offered to this agent`
+	if got[0].text != want {
+		t.Errorf("answer text = %q, want %q — the exact identifier, not trimmed", got[0].text, want)
+	}
+}
+
+// #567 round 5: bounding the raw name to maxDelegationText before %q quotes
+// it lets the rendered result blow past that bound — %q escapes every quote,
+// backslash and control byte, so a name built from them can render two to
+// four times its own length — and appending "[truncated]" after the cap
+// exceeds it further still. The final, fully rendered text — the fixed
+// prefix and suffix, the quoting, and the truncation marker all included —
+// must never exceed the bound the stored result is supposed to keep.
+func TestAnOversizedUnofferedNameKeepsTheStoredResultBounded(t *testing.T) {
+	const boundBytes = 16 << 10 // mirrors delegate.go's unexported maxDelegationText
+	name := strings.Repeat(`"`, boundBytes)
+	h := newHarness(t, [][]provider.Chunk{
+		{toolCall("t1", name, `{}`), done("tool_use", 1)},
+	}, nil)
+	h.wake(t, "do something")
+	h.runOnce(t)
+
+	got := h.answers(t)
+	if len(got) != 1 || !got[0].isErr {
+		t.Fatalf("answers = %v, want one is_error", got)
+	}
+	if n := len(got[0].text); n > boundBytes {
+		t.Errorf("stored result = %d bytes, want at most %d — %%q's own escaping and the "+
+			"truncation marker must land inside the bound, not past it", n, boundBytes)
+	}
+}
+
+// Unlike a declared client-executed call sharing its turn with submit_result
+// (TestSubmitResultSharingItsTurnWithAToolCallReportsNothing, refused because
+// a real client call would be left outstanding), an unoffered call is
+// answered in this very commit — nothing is left for submit_result to
+// strand, so the report still succeeds and the child still ends its turn.
+func TestSubmitResultSharingItsTurnWithAnUnofferedCallStillReports(t *testing.T) {
+	h := newHarness(t, [][]provider.Chunk{{
+		toolUseChunk("t1", "edit"),
+		toolCall("t2", "submit_result", `{"result":"done"}`),
+		done("tool_use", 2),
+	}}, nil)
+	child := h.childTurn(t, "do the work")
+	h.runOnce(t)
+
+	got := h.answers(t)
+	if len(got) != 2 {
+		t.Fatalf("answers = %v, want both calls answered", got)
+	}
+	if !got[0].isErr || !strings.Contains(got[0].text, `unknown tool "edit"`) {
+		t.Errorf("answer 0 = %+v, want the unoffered call's error", got[0])
+	}
+	if got[1].isErr || got[1].text != "Result reported." {
+		t.Errorf("answer 1 = %+v, want the report to succeed", got[1])
+	}
+	if s := h.threadStatus(t, child); s != "idle" {
+		t.Errorf("child = %q, want idle — it reported", s)
+	}
+	if n := h.liveTurns(t, child); n != 0 {
+		t.Errorf("reported child still has %d turn(s) queued", n)
+	}
+}
+
+// The six names are classed settlement-executed only when a session
+// delegates (mcptools.go's role != delegationNone guard); a plain
+// single-agent session classes none of them, so one of the six hallucinated
+// here is exactly as unoffered as any other name and must not reach
+// createAgent's roster logic.
+func TestCreateAgentOnANonDelegatingSessionIsAnsweredUnknown(t *testing.T) {
+	h := newHarness(t, [][]provider.Chunk{{
+		toolCall("t1", "create_agent", `{"agent_name":"researcher","message":"go"}`),
+		done("tool_use", 1),
+	}}, nil)
+	h.wake(t, "hello")
+	h.runOnce(t)
+
+	got := h.answers(t)
+	if len(got) != 1 || !got[0].isErr {
+		t.Fatalf("answers = %v, want one is_error", got)
+	}
+	if !strings.Contains(got[0].text, `unknown tool "create_agent"`) || !strings.Contains(got[0].text, "not offered") {
+		t.Errorf("answer text = %q, want the generic unoffered wording, not createAgent's roster message", got[0].text)
+	}
+	if n := len(h.children(t)); n != 0 {
+		t.Errorf("children = %d, want none — createAgent must never have run", n)
+	}
+}
+
+// A mixed turn: the unoffered call is answered in the same commit, and the
+// real call escalates its work item exactly as it would alone — the
+// settlement does not strand a real call behind an imaginary one. edit is
+// disabled the way production-ready-agent's financial-analyst disables it
+// (#567's reproduction); bash stays enabled.
+func TestAnUnofferedNameAlongsideARealCallStillRunsTheRealOne(t *testing.T) {
+	h := newHarness(t, [][]provider.Chunk{{
+		toolCall("t1", "edit", `{"file_path":"/tmp/x","command":"view"}`),
+		toolCall("t2", "bash", `{"command":"ls"}`),
+		done("tool_use", 2),
+	}}, nil)
+	agentJSON := `{"type":"agent","id":"agent_x","version":1,"name":"financial-analyst",
+		"model":{"id":"fixture-model"},"system":"s","description":"",
+		"tools":[{"type":"agent_toolset_20260401","configs":[{"name":"edit","enabled":false}]}],
+		"mcp_servers":[],"skills":[],"multiagent":null}`
+	if _, err := h.pool.Exec(context.Background(),
+		`UPDATE sessions SET resolved_agent = $2 WHERE id = $1`, h.sessionID.String(), agentJSON); err != nil {
+		t.Fatal(err)
+	}
+	h.wake(t, "look around")
+	h.runOnce(t)
+
+	got := h.answers(t)
+	if len(got) != 1 || !got[0].isErr {
+		t.Fatalf("answers = %v, want the unoffered call's alone — bash still awaits its own result", got)
+	}
+	if !strings.Contains(got[0].text, `unknown tool "edit"`) || !strings.Contains(got[0].text, "not offered") {
+		t.Errorf("answer text = %q, want it to name the unknown tool", got[0].text)
+	}
+	if n := h.liveOf(t, queue.ToolExec); n != 1 {
+		t.Errorf("tool_exec = %d, want the real bash call enqueued", n)
+	}
+	primary := domain.PrimaryThreadID(h.sessionID)
+	if s := h.threadStatus(t, primary); s != "running" {
+		t.Errorf("primary = %q, want running — suspended on the real call", s)
+	}
+	if n := h.liveTurns(t, ""); n != 0 {
+		t.Errorf("queued model turns = %d, want none — the turn is suspended on tool_exec, not chained", n)
+	}
+}
+
+// The ask gate still wins over an unoffered call sharing its turn: the
+// confirmation is what a client can act on, and the unoffered call has
+// nothing left for a human to confirm — it is already answered.
+func TestAnUnofferedNameAlongsideAnAlwaysAskCallStillGates(t *testing.T) {
+	h := newHarness(t, [][]provider.Chunk{{
+		toolCall("t1", "edit", `{"file_path":"/tmp/x","command":"view"}`),
+		toolCall("t2", "bash", `{"command":"ls"}`),
+		done("tool_use", 2),
+	}}, nil)
+	agentJSON := `{"type":"agent","id":"agent_x","version":1,"name":"financial-analyst",
+		"model":{"id":"fixture-model"},"system":"s","description":"",
+		"tools":[{"type":"agent_toolset_20260401","configs":[
+			{"name":"edit","enabled":false},
+			{"name":"bash","permission_policy":{"type":"always_ask"}}]}],
+		"mcp_servers":[],"skills":[],"multiagent":null}`
+	if _, err := h.pool.Exec(context.Background(),
+		`UPDATE sessions SET resolved_agent = $2 WHERE id = $1`, h.sessionID.String(), agentJSON); err != nil {
+		t.Fatal(err)
+	}
+	h.wake(t, "look around")
+	h.runOnce(t)
+
+	got := h.answers(t)
+	if len(got) != 1 || !got[0].isErr {
+		t.Fatalf("answers = %v, want the unoffered call's alone — bash awaits a human", got)
+	}
+	if !strings.Contains(got[0].text, `unknown tool "edit"`) || !strings.Contains(got[0].text, "not offered") {
+		t.Errorf("answer text = %q, want it to name the unknown tool", got[0].text)
+	}
+	if n := h.liveOf(t, queue.ToolExec); n != 0 {
+		t.Errorf("tool_exec = %d, want none — a gated turn enqueues nothing", n)
+	}
+	primary := domain.PrimaryThreadID(h.sessionID)
+	if s := h.threadStatus(t, primary); s != "idle" {
+		t.Errorf("primary = %q, want idle awaiting the human", s)
+	}
+	stop := h.threadStop(t, primary)
+	if stop.Type != domain.StopRequiresAction || len(stop.EventIDs) != 1 {
+		t.Fatalf("stop_reason = %+v, want requires_action naming one event", stop)
+	}
+	uses := h.eventsOfType(t, domain.EventAgentToolUse)
+	askID := domain.ID("")
+	for _, u := range uses {
+		var b struct {
+			Name string `json:"name"`
+		}
+		if err := json.Unmarshal(u.Body, &b); err != nil {
+			t.Fatal(err)
+		}
+		if b.Name == "bash" {
+			askID = u.ID
+		}
+	}
+	if askID == "" || stop.EventIDs[0] != askID {
+		t.Errorf("stop_reason names %v, want the bash use %s", stop.EventIDs, askID)
+	}
+}
+
+// The other half of the six names is classed settlement-executed whether or
+// not this role's own half is offered (mcptools.go's role != delegationNone
+// loop), so a child reaching for a coordinator tool must still get
+// wrongRole's answer, not #567's "unknown tool" one — the two paths only
+// look alike because both answer inline and chain.
+func TestTheOtherHalfsNameIsAnsweredByWrongRoleNotUnoffered(t *testing.T) {
+	h := newHarness(t, [][]provider.Chunk{{
+		toolCall("t1", "create_agent", `{"agent_name":"researcher","message":"go"}`),
+		done("tool_use", 1),
+	}}, nil)
+	child := h.childTurn(t, "do the work")
+	h.runOnce(t)
+
+	got := h.answers(t)
+	if len(got) != 1 || !got[0].isErr {
+		t.Fatalf("answers = %v, want one is_error", got)
+	}
+	if strings.Contains(got[0].text, "not offered") || strings.Contains(got[0].text, "unknown tool") {
+		t.Errorf("answer = %q, want wrongRole's message — the other half is classed, not unoffered", got[0].text)
+	}
+	if !strings.Contains(got[0].text, "submit_result") {
+		t.Errorf("answer = %q, want it to point the child at its own tools", got[0].text)
+	}
+	if s := h.threadStatus(t, child); s != "running" {
+		t.Errorf("child = %q, want running — a refused call ends nothing", s)
 	}
 }
 
@@ -932,6 +1362,7 @@ func TestWaitSharingItsTurnWithAClientToolCallDoesNotPark(t *testing.T) {
 		toolCall("t2", "wait_for_agents", `{}`),
 		done("tool_use", 2),
 	}}, nil)
+	h.customTool(t, "lookup")
 	h.roster(t, "researcher")
 	h.runningChild(t)
 	h.wake(t, "coordinate")
@@ -1401,6 +1832,14 @@ func TestSettlementChainIsCutAtTheCap(t *testing.T) {
 	if !strings.Contains(payload.Error.Message, "25") {
 		t.Errorf("message = %q, want the count it actually ran", payload.Error.Message)
 	}
+	// #567 round 5: this run is 25 consecutive successful list_agents calls —
+	// each one a real, settlement-owned tool call — so "ran no tool" would be
+	// false of it specifically; the message must describe the condition that
+	// actually holds (settlement-owned answers, nothing external to wait for)
+	// rather than claim no tool ran at all.
+	if strings.Contains(payload.Error.Message, "ran no tool") {
+		t.Errorf("message = %q, want no claim that no tool ran — list_agents is a tool", payload.Error.Message)
+	}
 	// Required on every variant of the reference's error union, and carried
 	// by every other session.error this platform writes.
 	if payload.Error.RetryStatus.Type != "exhausted" {
@@ -1446,6 +1885,188 @@ func TestInputAtTheCapChainsAnywayAndResetsTheCount(t *testing.T) {
 	}
 }
 
+// A chain of turns that answered nothing but an unoffered name is bounded by
+// the same per-thread cap as a chain of genuine delegation calls — the run
+// being bounded is "answered by this settlement with nothing feeding it",
+// whichever kind of call that was (#567). One turn below the cap still
+// chains, exactly as TestSettlementChainBelowTheCapStillChains does for a
+// genuine delegation chain.
+func TestUnofferedOnlyChainBelowTheCapStillChains(t *testing.T) {
+	h := newHarness(t, [][]provider.Chunk{
+		{toolCall("t1", "edit", `{"file_path":"/tmp/x"}`), done("tool_use", 1)},
+	}, nil)
+	h.wake(t, "edit the file")
+	h.setChainCount(t, "", 23) // this turn is the 24th; the 25th is the cut
+
+	h.runOnce(t)
+	primary := domain.PrimaryThreadID(h.sessionID)
+	if s := h.threadStatus(t, primary); s != "running" {
+		t.Errorf("primary = %q, want running one turn below the cap", s)
+	}
+	if n := h.chainCount(t, ""); n != 24 {
+		t.Errorf("count = %d, want 24", n)
+	}
+	if n := h.countType(t, "session.error"); n != 0 {
+		t.Errorf("session.error = %d, want none below the cap", n)
+	}
+	if n := h.delegationTurns(t); n != 0 {
+		t.Errorf("delegation_turns = %d, want 0 — no genuine delegation call was made", n)
+	}
+}
+
+// At the cap, an unoffered-only chain is cut exactly as a genuine one is
+// (TestSettlementChainIsCutAtTheCap): the same chainCapped session.error, the
+// same idle end_turn, because the run being bounded is "answered by this
+// settlement with nothing feeding it" regardless of which kind of call that
+// was (#567 round 4) — only the delegation *budget* stays genuine-only
+// (TestUnofferedOnlyChainBelowTheCapStillChains's sibling below-cap
+// assertion). The message itself must not claim a kind that was not there:
+// this chain is all unoffered names, so it must not read "delegation calls".
+func TestUnofferedOnlyChainIsCutAtTheCap(t *testing.T) {
+	h := newHarness(t, [][]provider.Chunk{
+		{toolCall("t1", "edit", `{"file_path":"/tmp/x"}`), done("tool_use", 1)},
+	}, nil)
+	h.wake(t, "edit the file")
+	h.setChainCount(t, "", 24) // this turn is the 25th — maxSettlementChain
+
+	h.runOnce(t)
+	primary := domain.PrimaryThreadID(h.sessionID)
+	if s := h.threadStatus(t, primary); s != "idle" {
+		t.Errorf("primary = %q, want idle once the chain is cut", s)
+	}
+	if got := h.threadStop(t, primary).Type; got != domain.StopEndTurn {
+		t.Errorf("stop_reason = %q, want end_turn", got)
+	}
+	if n := h.liveTurns(t, ""); n != 0 {
+		t.Errorf("primary turns queued = %d, want none", n)
+	}
+	errs := h.eventsOfType(t, domain.EventSessionError)
+	if len(errs) != 1 {
+		t.Fatalf("session.error = %d, want the one naming the cut chain", len(errs))
+	}
+	var payload struct {
+		Error struct {
+			Type    string `json:"type"`
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(errs[0].Body, &payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload.Error.Type != "delegation_chain_exhausted_error" {
+		t.Errorf("error type = %q, want delegation_chain_exhausted_error", payload.Error.Type)
+	}
+	if strings.Contains(payload.Error.Message, "answered only their own delegation calls") ||
+		!strings.Contains(payload.Error.Message, "never offered") {
+		t.Errorf("message = %q, want the kind-agnostic wording, not a claim this chain ran "+
+			"delegation calls exclusively", payload.Error.Message)
+	}
+	got := h.answers(t)
+	if len(got) != 1 || !got[0].isErr {
+		t.Errorf("answers = %v, want the unoffered call answered as usual", got)
+	}
+	if n := h.delegationTurns(t); n != 0 {
+		t.Errorf("delegation_turns = %d, want 0 — the budget was never spent", n)
+	}
+}
+
+// The W1 wedge (#567 round 4 blocker): a child's chain can be capped by a
+// turn of either kind regardless of what kind built the 24 turns before it,
+// and the cap's own notice-and-wake must fire either way — a coordinator
+// parked in a wait_for_agents (idle on end_turn, waiting on this very child)
+// has nothing else that will ever wake it once the child stops. This is the
+// case the bug actually shipped: 24 genuine delegation turns, then the 25th
+// call is a name the agent was never offered — under the old
+// "capped && genuine" gate, genuine described only this last turn, so this
+// exact history idled the child with no notice and no parent wake.
+func TestChainCapWakesTheParkedParentWhenTheCappingTurnIsUnoffered(t *testing.T) {
+	h := newHarness(t, [][]provider.Chunk{{
+		toolCall("t1", "edit", `{"file_path":"/tmp/x"}`),
+		done("tool_use", 1),
+	}}, nil)
+	h.roster(t, "researcher")
+	child := h.childTurn(t, "work on it")
+	// The coordinator parked on a wait_for_agents for this very child: idle
+	// on end_turn, with nothing else left to wake it once the child stops.
+	if _, err := h.pool.Exec(context.Background(),
+		`UPDATE session_threads SET stop_reason = '{"type":"end_turn"}'::jsonb WHERE id = $1`,
+		domain.PrimaryThreadID(h.sessionID).String()); err != nil {
+		t.Fatal(err)
+	}
+	// The 24 turns this represents were genuine delegation calls; the 25th,
+	// run below, is not — only the capping turn's own kind decided the old
+	// bug, so what actually built the count up to here does not need to run.
+	h.setChainCount(t, child, 24)
+
+	h.runOnce(t)
+
+	if s := h.threadStatus(t, child); s != "idle" {
+		t.Errorf("child = %q, want idle once its chain is cut", s)
+	}
+	errs := h.eventsOfType(t, domain.EventSessionError)
+	if len(errs) != 1 || errs[0].ThreadID != child {
+		t.Fatalf("session.error = %+v, want one on the child's own log", errs)
+	}
+	texts := h.receivedTexts(t, "")
+	if len(texts) != 1 || !strings.Contains(texts[0], "stopped") {
+		t.Fatalf("coordinator received %v, want the ending notice", texts)
+	}
+	if s := h.threadStatus(t, domain.PrimaryThreadID(h.sessionID)); s != "running" {
+		t.Errorf("coordinator = %q, want woken by the ending", s)
+	}
+	if n := h.liveTurns(t, ""); n != 1 {
+		t.Errorf("coordinator turns queued = %d, want 1 — a wake with no item is a wedge", n)
+	}
+}
+
+// The inverse history: 24 unoffered-only turns, then a genuine call caps the
+// chain. Under the old "capped && genuine" gate this case did notice and
+// wake — genuine described the capping turn alone, and it happened to be
+// true — but the message it wrote claimed the whole chain "answered only
+// their own delegation calls", which was false for 24 of its 25 turns. The
+// fix's wording no longer names a kind at all, so it is accurate here too.
+func TestChainCapNoticeIsAccurateWhenTheCappingTurnIsGenuineButTheHistoryWasNot(t *testing.T) {
+	h := newHarness(t, [][]provider.Chunk{{
+		toolCall("t1", "list_agents", `{}`),
+		done("tool_use", 1),
+	}}, nil)
+	h.roster(t, "researcher")
+	child := h.childTurn(t, "work on it")
+	if _, err := h.pool.Exec(context.Background(),
+		`UPDATE session_threads SET stop_reason = '{"type":"end_turn"}'::jsonb WHERE id = $1`,
+		domain.PrimaryThreadID(h.sessionID).String()); err != nil {
+		t.Fatal(err)
+	}
+	// The 24 turns this represents were unoffered names; the 25th, run below,
+	// is a genuine delegation call — the inverse of the test above.
+	h.setChainCount(t, child, 24)
+
+	h.runOnce(t)
+
+	errs := h.eventsOfType(t, domain.EventSessionError)
+	if len(errs) != 1 || errs[0].ThreadID != child {
+		t.Fatalf("session.error = %+v, want one on the child's own log", errs)
+	}
+	var payload struct {
+		Error struct{ Message string } `json:"error"`
+	}
+	if err := json.Unmarshal(errs[0].Body, &payload); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(payload.Error.Message, "answered only their own delegation calls") ||
+		!strings.Contains(payload.Error.Message, "never offered") {
+		t.Errorf("message = %q, want the kind-agnostic wording, not a claim this chain ran "+
+			"delegation calls exclusively — 24 of these 25 turns were unoffered names",
+			payload.Error.Message)
+	}
+	if s := h.threadStatus(t, domain.PrimaryThreadID(h.sessionID)); s != "running" {
+		t.Errorf("coordinator = %q, want woken by the ending", s)
+	}
+	if n := h.liveTurns(t, ""); n != 1 {
+		t.Errorf("coordinator turns queued = %d, want 1 — a wake with no item is a wedge", n)
+	}
+}
+
 // The session delegation bound (#447). #442's cap counts on the work_items
 // row, and a row's life is exactly one run of chained turns — so these cover
 // the count that has to survive an idle, and the three routes by which two
@@ -1473,9 +2094,10 @@ func TestAMixedDelegationAndToolTurnSpendsToo(t *testing.T) {
 			done("tool_use", 1)},
 	}, nil)
 	// builtins is what makes this turn mixed rather than a copy of the test
-	// above: without it bash is a name the model was never offered, so the turn
-	// classes it agent.custom_tool_use and settles with workKind "" — the
-	// settlement-only shape, not the mixed one this test is named for.
+	// above: without it bash is a name the model was never offered, so it is
+	// answered inline as unknown too (#567) and the turn settles
+	// settlement-only with workKind "" — not the mixed shape this test is
+	// named for.
 	h.builtins(t)
 	h.roster(t, "researcher")
 	h.wake(t, "delegate")
@@ -1489,6 +2111,119 @@ func TestAMixedDelegationAndToolTurnSpendsToo(t *testing.T) {
 	}
 	if n := h.delegationTurns(t); n != 1 {
 		t.Errorf("delegation_turns = %d, want 1 — a mixed turn spends like any other", n)
+	}
+}
+
+// A turn that mixes an unoffered name with a genuine delegation call still
+// spends exactly once (#567): the unoffered call contributes nothing extra
+// to the count, and the real call is what makes this turn autonomous spend
+// at all — same as TestADelegatedTurnSpendsFromTheSessionBudget, with a
+// second, unrelated hallucination riding along.
+func TestAMixedUnofferedAndDelegationTurnStillSpendsOnce(t *testing.T) {
+	h := newHarness(t, [][]provider.Chunk{
+		{toolCall("t1", "edit", `{"file_path":"/tmp/x"}`), toolCall("t2", "list_agents", `{}`),
+			done("tool_use", 2)},
+	}, nil)
+	h.roster(t, "researcher")
+	h.wake(t, "delegate")
+
+	h.runOnce(t)
+	if n := h.delegationTurns(t); n != 1 {
+		t.Errorf("delegation_turns = %d, want 1 — the genuine call still spends, the unoffered one does not double it", n)
+	}
+}
+
+// The budget bounds agent-to-agent activity specifically: a turn mixing an
+// unoffered name with a real sandbox call is exactly as much "a session that
+// never delegates" as one with no unoffered call at all, so it must never
+// spend the budget — contrast TestAMixedDelegationAndToolTurnSpendsToo, where
+// the same shape with a genuine delegation call in place of the unoffered
+// name does spend.
+func TestAnUnofferedNameAlongsideBashNeverSpendsTheSessionBudget(t *testing.T) {
+	h := newHarness(t, [][]provider.Chunk{{
+		toolCall("t1", "edit", `{"file_path":"/tmp/x"}`),
+		toolCall("t2", "bash", `{"command":"ls"}`),
+		done("tool_use", 2),
+	}}, nil)
+	// edit disabled and bash left enabled, as in
+	// TestAnUnofferedNameAlongsideARealCallStillRunsTheRealOne: plain
+	// h.builtins would offer edit too, and an offered edit is not this
+	// test's point at all.
+	agentJSON := `{"type":"agent","id":"agent_x","version":1,"name":"n",
+		"model":{"id":"fixture-model"},"system":"s","description":"",
+		"tools":[{"type":"agent_toolset_20260401","configs":[{"name":"edit","enabled":false}]}],
+		"mcp_servers":[],"skills":[],"multiagent":null}`
+	if _, err := h.pool.Exec(context.Background(),
+		`UPDATE sessions SET resolved_agent = $2 WHERE id = $1`, h.sessionID.String(), agentJSON); err != nil {
+		t.Fatal(err)
+	}
+	h.wake(t, "look around")
+
+	h.runOnce(t)
+	if n := h.liveOf(t, queue.ToolExec); n != 1 {
+		t.Fatalf("tool_exec = %d, want the real bash call enqueued — without it this turn is not mixed", n)
+	}
+	if n := h.delegationTurns(t); n != 0 {
+		t.Errorf("delegation_turns = %d, want 0 — no genuine delegation call was made", n)
+	}
+}
+
+// #567 round 5: a wrong-role call is classed (resolveTools classes all six
+// names on any delegating thread, offered or not) but was never actually
+// offered to this role — !dc.unoffered alone cannot tell that apart from a
+// genuine call, so the budget must check wrongRole too. A child reaching for
+// its coordinator's create_agent, mixed with a real bash call every turn,
+// must never spend the budget — the same shape as
+// TestAnUnofferedNameAlongsideBashNeverSpendsTheSessionBudget, with a
+// cross-half name standing in for an unclassed one.
+func TestAChildCallingTheCoordinatorsToolAlongsideBashNeverSpendsTheSessionBudget(t *testing.T) {
+	h := newHarness(t, [][]provider.Chunk{{
+		toolCall("t1", "create_agent", `{"agent_name":"researcher","message":"go"}`),
+		toolCall("t2", "bash", `{"command":"ls"}`),
+		done("tool_use", 2),
+	}}, nil)
+	child := h.childTurn(t, "look around")
+	agentJSON := `{"type":"agent","id":"agent_child","version":1,"name":"worker",
+		"model":{"id":"fixture-model"},"system":"","description":"",
+		"tools":[{"type":"agent_toolset_20260401"}],
+		"mcp_servers":[],"skills":[]}`
+	if _, err := h.pool.Exec(context.Background(),
+		`UPDATE session_threads SET agent = $2 WHERE id = $1`, child.String(), agentJSON); err != nil {
+		t.Fatal(err)
+	}
+
+	h.runOnce(t)
+	if n := h.liveOf(t, queue.ToolExec); n != 1 {
+		t.Fatalf("tool_exec = %d, want the real bash call enqueued — without it this turn is not mixed", n)
+	}
+	if n := h.delegationTurns(t); n != 0 {
+		t.Errorf("delegation_turns = %d, want 0 — create_agent was never offered to this child", n)
+	}
+}
+
+// The chain cap makes no such distinction (item.Chain counts a wrong-role
+// call exactly as it counts an unoffered or a genuine one, #567 round 4), so
+// a child spending its whole chain on nothing but create_agent hits the same
+// shared cap TestUnofferedOnlyChainIsCutAtTheCap does — but the session-wide
+// budget, which does distinguish, must stay at 0 throughout.
+func TestAChildCallingTheCoordinatorsToolAloneHitsTheChainCapNeverTheSessionBudget(t *testing.T) {
+	h := newHarness(t, [][]provider.Chunk{
+		{toolCall("t1", "create_agent", `{"agent_name":"researcher","message":"go"}`), done("tool_use", 1)},
+	}, nil)
+	child := h.childTurn(t, "work on it")
+	h.setChainCount(t, child, 24) // this turn is the 25th — maxSettlementChain
+
+	h.runOnce(t)
+	if s := h.threadStatus(t, child); s != "idle" {
+		t.Errorf("child = %q, want idle once its chain is cut", s)
+	}
+	errs := h.eventsOfType(t, domain.EventSessionError)
+	if len(errs) != 1 || errs[0].ThreadID != child {
+		t.Fatalf("session.error = %+v, want one on the child's own log", errs)
+	}
+	if n := h.delegationTurns(t); n != 0 {
+		t.Errorf("delegation_turns = %d, want 0 — create_agent was never offered to this child, "+
+			"whatever the shared chain cap independently did", n)
 	}
 }
 
@@ -1592,6 +2327,36 @@ func TestTheClaimIsRefusedAtTheDelegationBound(t *testing.T) {
 	}
 	if !strings.Contains(payload.Error.Message, "625") {
 		t.Errorf("message = %q, want the budget it actually spent", payload.Error.Message)
+	}
+}
+
+// The delegation-bound refusal is the fifth brain settlement that folds a
+// session idle (docs/plan/38 decision 4): on a cloud env it harvests the
+// deliverables the exhausted run wrote, exactly as the other four folds do.
+func TestDelegationBoundRefusalHarvestsOnCloud(t *testing.T) {
+	h := newHarnessEnv(t, "cloud", [][]provider.Chunk{
+		{toolCall("t1", "list_agents", `{}`), done("tool_use", 1)},
+		{toolCall("t2", "list_agents", `{}`), done("tool_use", 1)},
+	}, nil)
+	h.roster(t, "researcher")
+	h.wake(t, "delegate")
+	h.runOnce(t) // one turn runs and is answered, so the next claim is the one refused
+	h.setDelegationTurns(t, 625)
+
+	h.runOnce(t)
+
+	primary := domain.PrimaryThreadID(h.sessionID)
+	if s := h.threadStatus(t, primary); s != "idle" {
+		t.Fatalf("thread = %q, want idle once the budget is spent", s)
+	}
+	if s := h.status(t); s != "idle" {
+		t.Fatalf("session = %q, want idle", s)
+	}
+	if n := h.liveOf(t, queue.OutputsHarvest); n != 1 {
+		t.Fatalf("live outputs_harvest = %d, want 1 (the refusal folds the session idle)", n)
+	}
+	if h.harvestChainGrading(t) {
+		t.Error("chain_grading = true; no outcome is grading this session")
 	}
 }
 
@@ -1891,5 +2656,55 @@ func TestACappedChildTellsItsCoordinatorAndWakesIt(t *testing.T) {
 	}
 	if n := h.liveTurns(t, ""); n != 1 {
 		t.Errorf("coordinator turns queued = %d, want 1 — a wake with no item is a wedge", n)
+	}
+}
+
+// The idle harvest's third site (docs/plan/38 decision 4): a delegated turn
+// settles through commitDelegatedTurn, and the cut chain is one of the folds it
+// can end in. The coordinator idles, the session with it, and the deliverables
+// it wrote before the cut are harvested like any other session's.
+func TestCappedDelegationChainEnqueuesOutputsHarvest(t *testing.T) {
+	h := newHarnessEnv(t, "cloud", [][]provider.Chunk{
+		{toolCall("t1", "list_agents", `{}`), done("tool_use", 1)},
+	}, nil)
+	h.roster(t, "researcher")
+	h.wake(t, "delegate")
+	h.setChainCount(t, "", 24) // this turn is the 25th — maxSettlementChain
+
+	h.runOnce(t)
+
+	if s := h.status(t); s != "idle" {
+		t.Fatalf("session = %q, want idle once the chain is cut", s)
+	}
+	if n := h.liveOf(t, queue.OutputsHarvest); n != 1 {
+		t.Fatalf("live outputs_harvest = %d, want 1", n)
+	}
+	if h.harvestChainGrading(t) {
+		t.Error("chain_grading = true; no outcome is grading this session")
+	}
+}
+
+// ...and the same gate excludes a coordinator that parks while its children
+// keep working: its own thread idles, the session does not, so there is no
+// snapshot to take yet.
+func TestParkedCoordinatorWithLiveChildrenSkipsHarvest(t *testing.T) {
+	h := newHarnessEnv(t, "cloud", [][]provider.Chunk{{
+		toolCall("t1", "create_agent", `{"agent_name":"researcher","message":"find the papers"}`),
+		toolCall("t2", "wait_for_agents", `{}`),
+		done("tool_use", 2),
+	}}, nil)
+	h.roster(t, "researcher")
+	h.wake(t, "coordinate the work")
+
+	h.runOnce(t)
+
+	if s := h.threadStatus(t, domain.PrimaryThreadID(h.sessionID)); s != "idle" {
+		t.Fatalf("coordinator = %q, want idle on the wait", s)
+	}
+	if s := h.status(t); s != "running" {
+		t.Fatalf("session = %q, want running while its child runs", s)
+	}
+	if n := h.liveOf(t, queue.OutputsHarvest); n != 0 {
+		t.Errorf("live outputs_harvest = %d, want 0 (the session has not idled)", n)
 	}
 }

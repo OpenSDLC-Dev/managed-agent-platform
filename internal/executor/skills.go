@@ -30,12 +30,17 @@ type skillRef struct {
 // so a missing skill or version surfaces here as a logged skip.
 var errSkillNotFound = errors.New("skill not found")
 
+// skillVersionAlias is the one alias the wire admits for a skill version: the
+// newest one at use time. Everything else a stored pin can hold is concrete —
+// a version id, or the legacy numeric.
+const skillVersionAlias = "latest"
+
 var skillDigitsRe = regexp.MustCompile(`^[0-9]+$`)
 
 // materializeSkills lands the session agent's skills under {workdir}/skills/
 // in the provisioned sandbox — the reference worker's SetupSkills semantics
 // at the platform-managed deployment point: versions resolved at use time
-// (an alias like "latest" against the registry's latest_version), archives
+// (see resolveSkillVersion for the three addressing forms), archives
 // read from object storage, extraction under the reference guards, and
 // per-skill failure logged and skipped, never fatal to the tool run. A
 // sentinel file records the resolved set so re-entrant provisioning of a
@@ -160,27 +165,60 @@ func (e *Executor) skipSkill(ctx context.Context, sid domain.ID, skillID, versio
 		"session_id", sid, "skill_id", skillID, "version", version, "err", err)
 }
 
-// resolveSkillVersion resolves one reference to a concrete version: an
-// all-digits version is already concrete; anything else ("latest" — the
-// snapshot keeps the alias verbatim) resolves against the registry's
-// latest_version at use time, the reference's late-binding semantics.
+// resolveSkillVersion resolves one reference to the concrete numeric version
+// that names the archive in object storage. A stored pin takes three forms
+// (plan 39 decision 5): the literal "latest" — the snapshot keeps the alias
+// verbatim — resolves against the registry's latest_version at use time, the
+// reference's late-binding semantics; a version id, in the GA skver_ spelling
+// or the legacy skillver_ one, is translated to its row's numeric version,
+// scoped to the skill so another skill's version id does not resolve; and an
+// all-digits version is already concrete. Anything else addresses no version
+// and is a dangling reference, skipped like any other. Asking only "is it
+// digits?" is what made a pinned id resolve silently to the newest version and
+// materialize the wrong archive.
+//
+// The id arm asks for a well-formed id, not merely a prefixed one: nothing
+// validates a stored pin's shape on the way in, so skver_ followed by an
+// unstorable byte would otherwise bind into the query and fail in the driver
+// (SQLSTATE 22021), recorded as a materialization failure rather than the
+// dangling reference it is.
+//
+// The numeric stays the internal identity (decision 3), so the blob key, the
+// sentinel and skills.BlobKey are untouched by id addressing.
 func (e *Executor) resolveSkillVersion(ctx context.Context, ref skillRef) (string, error) {
-	if skillDigitsRe.MatchString(ref.Version) {
+	switch {
+	case ref.Version == skillVersionAlias:
+		var latest *string
+		err := e.pool.QueryRow(ctx,
+			`SELECT latest_version FROM skills WHERE id = $1`, ref.SkillID).Scan(&latest)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return "", errSkillNotFound
+		}
+		if err != nil {
+			return "", err
+		}
+		if latest == nil {
+			return "", fmt.Errorf("%w: no versions to resolve %q against", errSkillNotFound, ref.Version)
+		}
+		return *latest, nil
+	case domain.ID(ref.Version).HasPrefix(domain.PrefixSkillVersion) && domain.ID(ref.Version).Valid():
+		var version string
+		err := e.pool.QueryRow(ctx,
+			`SELECT version FROM skill_versions WHERE skill_id = $1 AND id = $2`,
+			ref.SkillID, ref.Version).Scan(&version)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return "", fmt.Errorf("%w: version id %s", errSkillNotFound, ref.Version)
+		}
+		if err != nil {
+			return "", err
+		}
+		return version, nil
+	case skillDigitsRe.MatchString(ref.Version):
 		return ref.Version, nil
+	default:
+		return "", fmt.Errorf("%w: version %q is neither %q, a version id nor a version number",
+			errSkillNotFound, ref.Version, skillVersionAlias)
 	}
-	var latest *string
-	err := e.pool.QueryRow(ctx,
-		`SELECT latest_version FROM skills WHERE id = $1`, ref.SkillID).Scan(&latest)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return "", errSkillNotFound
-	}
-	if err != nil {
-		return "", err
-	}
-	if latest == nil {
-		return "", fmt.Errorf("%w: no versions to resolve %q against", errSkillNotFound, ref.Version)
-	}
-	return *latest, nil
 }
 
 // skillVersionMeta reads a version row's materialization name and the archive

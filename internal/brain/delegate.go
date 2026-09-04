@@ -19,6 +19,11 @@ import (
 // holds — so a spawn's thread row, its child's queued turn and the events
 // announcing both land together or not at all.
 //
+// A name the model was not offered at all rides the same machinery
+// (delegatedCall.unoffered, #567): nothing else in the platform will ever run
+// it or answer it either, so it is settled here too, with its own dedicated
+// answer rather than any of the six handlers below.
+//
 // Two rules hold this together and every branch below keeps them. First,
 // every call is answered by an agent.tool_result in this same commit: an
 // unanswered one is in the exec drivers' runnable set, and the runner would
@@ -178,6 +183,21 @@ type waitVerdict struct {
 // events and then its answer, so the batch reads as the turn happened.
 func (d *delegate) run(ctx context.Context, tx pgx.Tx, calls []delegatedCall) error {
 	for _, call := range calls {
+		if call.unoffered {
+			// Not one of the six: the model called a name nothing offered it
+			// at all (#567). wrongRole and the switch below both assume a
+			// genuine delegation call, so this is answered here instead of
+			// either — otherwise a hallucinated "create_agent" in a
+			// single-agent session would attempt to spawn a roster member
+			// that does not exist rather than being told the name is unknown.
+			ev, err := delegationAnswer(call.eventID, unknownToolAnswer(call.name), true)
+			if err != nil {
+				return err
+			}
+			ev.ThreadID = d.caller.ThreadID
+			d.out.events = append(d.out.events, ev)
+			continue
+		}
 		var answer string
 		var isErr bool
 		var err error
@@ -255,6 +275,26 @@ func delegationText(s string) string {
 		s = toolset.TruncateRunes(s, maxDelegationText) + "[truncated]"
 	}
 	return s
+}
+
+// unknownToolAnswer is the is_error text answering a call to a name the
+// model was not offered (#567): unknown tool %q: not offered to this agent.
+// Unlike delegationText, which trims and bounds a message or a report before
+// it is used, this quotes the name exactly as the model sent it — no
+// TrimSpace, which would misreport a name that genuinely carries leading or
+// trailing whitespace as one that does not — and bounds the fully rendered
+// text rather than the raw name: %q escapes every quote, backslash and
+// control byte in the name, so a name built from those can render two to
+// four times its own length, and bounding the raw name first (as
+// delegationText does) would let the quoted, prefixed, truncation-marked
+// result exceed maxDelegationText by exactly that expansion.
+func unknownToolAnswer(name string) string {
+	const suffix = "[truncated]"
+	text := fmt.Sprintf("unknown tool %q: not offered to this agent", toolset.SanitizeText(name))
+	if len(text) > maxDelegationText {
+		text = toolset.TruncateRunes(text, maxDelegationText-len(suffix)) + suffix
+	}
+	return text
 }
 
 // createAgent spawns a roster member as a new thread. The order of the writes
@@ -658,7 +698,8 @@ func (d *delegate) wake(ctx context.Context, tx pgx.Tx, target domain.ID) error 
 }
 
 // commitDelegatedTurn settles a turn that called at least one delegation
-// tool. The calls run inside the append transaction and are answered there,
+// tool, or a name the model was not offered at all (#567 — delegated carries
+// both). The calls run inside the append transaction and are answered there,
 // whatever else the turn holds; what the commit schedules is decided by the
 // turn's own shape, in this order:
 //
@@ -681,7 +722,7 @@ func (d *delegate) wake(ctx context.Context, tx pgx.Tx, target domain.ID) error 
 func (b *Brain) commitDelegatedTurn(ctx context.Context, sid domain.ID, item *queue.Item,
 	agent domain.ResolvedAgent, head []events.NewEvent, opts events.AppendOptions,
 	workKind queue.Kind, askIDs []domain.ID, delegated []delegatedCall,
-	settlementOnly bool, watermark int64) error {
+	settlementOnly bool, watermark int64, envKind string) error {
 
 	return b.commitUnderLock(ctx, sid, func(ctx context.Context, tx pgx.Tx) ([]events.NewEvent, events.AppendOptions, error) {
 		before, err := sessionStatusNow(ctx, tx, sid)
@@ -691,6 +732,27 @@ func (b *Brain) commitDelegatedTurn(ctx context.Context, sid domain.ID, item *qu
 		d := &delegate{sid: sid, agent: agent, watermark: watermark, settlementOnly: settlementOnly}
 		if item.ThreadID != "" {
 			d.caller = events.ThreadPeer{ThreadID: item.ThreadID, AgentName: agent.Name}
+		}
+		// Whether this turn made at least one genuine delegation call — the
+		// session-wide delegation budget's own distinction (#567): a turn whose
+		// delegated set is entirely names the model was not offered spent no
+		// delegation budget, whatever else it did. !dc.unoffered alone is not
+		// enough: resolveTools classes the *other* half's names too (so a
+		// cross-half call is answered wrongRole rather than "unknown"), so a
+		// child calling create_agent is !unoffered but was never offered
+		// create_agent — d.wrongRole is the same check d.run itself answers the
+		// call with, so a call this budget counts is exactly a call d.run will
+		// actually dispatch to one of the six handlers. The per-thread chain cap
+		// below makes neither distinction — item.Chain counts a turn of any of
+		// the three kinds, and so does its cut — because that count exists for a
+		// thread nobody is feeding, which every one of them is equally; only the
+		// session-wide count is scoped to delegation specifically.
+		genuine := false
+		for _, dc := range delegated {
+			if !dc.unoffered && d.wrongRole(dc.name) == "" {
+				genuine = true
+				break
+			}
 		}
 		if err := d.run(ctx, tx, delegated); err != nil {
 			return nil, opts, err
@@ -745,6 +807,14 @@ func (b *Brain) commitDelegatedTurn(ctx context.Context, sid domain.ID, item *qu
 			}
 		}
 		if capped {
+			// The chain is bounded identically whether it ran on delegation
+			// calls or on unoffered ones (below), and item.Chain counts every
+			// turn of either kind — so this notice fires on the chain's shape,
+			// never on this turn's kind (#567): a child capped by an unoffered
+			// call after a run of genuine ones must still be reported and its
+			// parent woken, or the W1 wedge the comments below rule out is back.
+			// chainCapped's own message is worded to name no kind, so it
+			// stays accurate whichever mix actually built the chain.
 			ev, err := chainCapped(item.ThreadID, agent.Name)
 			if err != nil {
 				return nil, opts, err
@@ -760,10 +830,11 @@ func (b *Brain) commitDelegatedTurn(ctx context.Context, sid domain.ID, item *qu
 			// the W1 wedge. Notice, then the wake, then the idle below, in
 			// that order so the session never folds idle in between.
 			notice, nerr := childEndedNotice(ctx, tx, sid, item.ThreadID, func(agentName string) string {
-				return fmt.Sprintf("[agent %s stopped: %d consecutive turns answered only its own "+
-					"delegation calls]\n\nNothing was reported on them; anything it reported earlier "+
-					"stands. It is idle until you message it — send it what is missing, or archive it "+
-					"to free the slot.", agentName, maxSettlementChain)
+				return fmt.Sprintf("[agent %s stopped: %d consecutive turns resolved entirely by "+
+					"settlement-owned answers — delegation calls, names it was never offered — with "+
+					"no external input and no newly woken thread]\n\nNothing was reported on them; "+
+					"anything it reported earlier stands. It is idle until you message it — send it "+
+					"what is missing, or archive it to free the slot.", agentName, maxSettlementChain)
 			})
 			if nerr != nil {
 				return nil, opts, nerr
@@ -825,9 +896,30 @@ func (b *Brain) commitDelegatedTurn(ctx context.Context, sid domain.ID, item *qu
 			// The reset is not here: it rides events.AppendInTx, keyed on
 			// domain.EventType.StartsNewWork, so every path that appends a
 			// client demand returns the budget without remembering to.
-			if _, err := tx.Exec(ctx,
-				`UPDATE sessions SET delegation_turns = delegation_turns + 1 WHERE id = $1`,
-				sid.String()); err != nil {
+			//
+			// Gated on genuine (#567): a turn whose delegated set holds no call
+			// this thread's own role was actually offered — every name unknown
+			// to class entirely, every name that belongs to the other half, or
+			// a mix of the two — made no delegation call at all, so it must not
+			// spend a budget that exists to bound agent-to-agent activity — a
+			// session that only ever hallucinates tool names, or a child that
+			// only ever reaches for its coordinator's half, would otherwise be
+			// refused session_delegation_exhausted_error despite never once
+			// reaching a call one of the six handlers actually ran.
+			if genuine {
+				if _, err := tx.Exec(ctx,
+					`UPDATE sessions SET delegation_turns = delegation_turns + 1 WHERE id = $1`,
+					sid.String()); err != nil {
+					return err
+				}
+			}
+			// The idle harvest (docs/plan/38 decision 4), gated on the net fold
+			// this settlement reconciled above rather than on which switch case
+			// took: a park, a cut chain, a child that ended without reporting
+			// and a permission ask all leave the session idle the same way, and
+			// a chained turn or a fold under a still-running sibling leaves
+			// SetStatus nil — which is exactly the exclusion the gate wants.
+			if err := b.enqueueIdleHarvest(ctx, tx, item, sid, opts.SetStatus, envKind); err != nil {
 				return err
 			}
 			if chain {
@@ -908,9 +1000,17 @@ func chainInput(ctx context.Context, tx pgx.Tx, sid, threadID domain.ID, waterma
 func chainCapped(threadID domain.ID, agentName string) (events.NewEvent, error) {
 	payload, err := json.Marshal(map[string]any{"error": map[string]any{
 		"type": "delegation_chain_exhausted_error",
-		"message": fmt.Sprintf("%s ran %d consecutive turns that answered only their own "+
-			"delegation calls, with nothing left to wait for. The thread is idle; a "+
-			"message, or a report from a child it spawned, resumes it.",
+		// Names no kind, because the chain this counts is either kind and a run
+		// can mix them turn to turn (#567): "delegation calls" alone would
+		// misdescribe a chain an unoffered name built any part of. Nor does it
+		// say "ran no tool": every one of these turns did run a tool —
+		// list_agents, wait_for_agents and the rest are real calls the
+		// settlement itself answers — what none of them did is leave anything
+		// running outside this thread's own settlement to wait for.
+		"message": fmt.Sprintf("%s ran %d consecutive turns resolved entirely by settlement-owned "+
+			"answers — delegation calls, names it was never offered — with no external input and "+
+			"no newly woken thread. The thread is idle; a message, or a report from a child it "+
+			"spawned, resumes it.",
 			agentName, maxSettlementChain),
 		// Required on every variant of the reference's error union, and
 		// carried by every other session.error this platform writes.
@@ -980,7 +1080,7 @@ func runExhausted(threadID domain.ID, agentName string) (events.NewEvent, error)
 // live thread — which is what the reference documents for its own budget,
 // enforced between model requests rather than mid-request.
 func (b *Brain) cutExhaustedRun(ctx context.Context, sid domain.ID, item *queue.Item,
-	agent domain.ResolvedAgent) (bool, error) {
+	agent domain.ResolvedAgent, envKind string) (bool, error) {
 	// Fast path, unlocked: one primary-key read of a counter that is zero for
 	// every session that never delegated. A stale read is safe both ways —
 	// under the cap the turn runs, which is what it would have done anyway;
@@ -1082,6 +1182,14 @@ func (b *Brain) cutExhaustedRun(ctx context.Context, sid domain.ID, item *queue.
 	}
 	opts.Then = func(ctx context.Context, tx pgx.Tx) error {
 		if err := b.queue.Complete(ctx, tx, item); err != nil {
+			return err
+		}
+		// This refusal is the fifth brain settlement that folds a session idle,
+		// so it harvests like the other four (docs/plan/38 decision 4): the
+		// deliverables the exhausted run wrote before its budget ran out reach
+		// the Files API. Gated on the same reconciled fold — SetStatus is nil
+		// when a sibling keeps the session running — and cloud-only.
+		if err := b.enqueueIdleHarvest(ctx, tx, item, sid, opts.SetStatus, envKind); err != nil {
 			return err
 		}
 		// A woken parent needs an item like any other wake, or it ends up

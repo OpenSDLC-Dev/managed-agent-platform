@@ -278,13 +278,11 @@ func resolveTools(agent domain.ResolvedAgent, cat mcpCatalog, role delegationRol
 	}
 	// Inside a session that delegates, the settlement claims all six names —
 	// but offers only this thread's half. The other half is classed and not
-	// defined, which is the whole point: a model that calls a tool it was never
-	// given gets an error result from the settlement that owns the name, where
-	// an unclassed name would commit as a client-executed custom call no driver
-	// runs and no client declared, leaving the thread running forever. On a
-	// child that is a thread nothing can end, and since the fold keeps such a
-	// session running, the session cannot be archived either — recoverable only
-	// by interrupt.
+	// defined, which is what earns a model reaching for it wrongRole's answer
+	// — naming the tool it should have reached for instead — rather than
+	// #567's generic "unknown tool": an unclassed name is answered safely
+	// either way now, just less usefully, since the settlement would have no
+	// way to know it was one of the six at all.
 	//
 	// Classed before the agent's own tools are read, so an agent that really
 	// declares a custom tool of one of these names still wins it back below,

@@ -946,7 +946,10 @@ func (b *Brain) settleEndTurn(ctx context.Context, sid domain.ID, item *queue.It
 			// primary's — model_turn.
 			opts.Then = func(ctx context.Context, tx pgx.Tx) error {
 				if envKind == string(domain.EnvCloud) {
-					if _, err := b.queue.Enqueue(ctx, tx, item.EnvironmentID, sid, queue.OutputsHarvest); err != nil {
+					// Tagged as the grading flavor: its settlement chains the
+					// grading turn, where the idle trigger's harvest publishes
+					// and stops (docs/plan/38 decision 2).
+					if _, err := b.queue.EnqueueOutputsHarvest(ctx, tx, item.EnvironmentID, sid, true); err != nil {
 						return err
 					}
 					return b.queue.Complete(ctx, tx, item)
@@ -994,6 +997,9 @@ func (b *Brain) settleEndTurn(ctx context.Context, sid domain.ID, item *queue.It
 			if err := b.queue.Complete(ctx, tx, item); err != nil {
 				return err
 			}
+			if err := b.enqueueIdleHarvest(ctx, tx, item, sid, moved, envKind); err != nil {
+				return err
+			}
 			if !woke {
 				return nil
 			}
@@ -1012,4 +1018,32 @@ func (b *Brain) settleEndTurn(ctx context.Context, sid domain.ID, item *queue.It
 		events.RecordSessionStatus(ctx, *opts.SetStatus)
 	}
 	return nil
+}
+
+// enqueueIdleHarvest schedules a deliverables snapshot when a settlement folds
+// the whole session idle (docs/plan/38, #263). All five settlements that can
+// perform that fold call it from inside the transaction committing the fold —
+// this file's end_turn branch, settle's retries-exhausted branch, commitTurn's
+// confirmation gate, commitDelegatedTurn, and cutExhaustedRun's delegation-bound
+// refusal — so a crash before the commit leaves nothing behind and one after
+// leaves the item durably queued.
+//
+// moved is the caller's own net session-level fold, non-nil only when the
+// status column actually changed. That is what makes this session-level
+// quiescence rather than one thread's idle, with no separate check for a
+// sibling still running or for a coordinator this ending woke: a wake folds the
+// session to running, so a woken ending and a fold to idle are structurally
+// exclusive. The stop reason is deliberately not consulted — the reference docs
+// say "after the session goes idle" and distinguish no reason, so a
+// requires_action gate and a retries_exhausted fault harvest like an end_turn.
+// envKind excludes self_hosted for the reason the grading harvest already does:
+// the platform cannot reach a BYOC sandbox, whatever scheduled the pass.
+func (b *Brain) enqueueIdleHarvest(ctx context.Context, tx pgx.Tx, item *queue.Item,
+	sid domain.ID, moved *domain.SessionStatus, envKind string) error {
+
+	if moved == nil || *moved != domain.SessionIdle || envKind != string(domain.EnvCloud) {
+		return nil
+	}
+	_, err := b.queue.EnqueueOutputsHarvest(ctx, tx, item.EnvironmentID, sid, false)
+	return err
 }

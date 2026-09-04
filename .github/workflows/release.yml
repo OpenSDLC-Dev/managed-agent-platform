@@ -26,6 +26,16 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
+          # This job publishes, but never over git: docker/login-action, `helm
+          # registry login` and every `gh release` call below take their
+          # credential explicitly, and nothing pushes a commit or a tag — the
+          # maintainer pushes the tag that triggers this. So the only git call
+          # left needing the network is the `git fetch origin main` in the tag
+          # sanity step, and without the persisted token that is an anonymous
+          # read: correct while this repository is public, and the first line
+          # to revisit if it ever is not. It runs before anything publishes,
+          # so were it ever to fail it aborts a run that has shipped nothing.
+          persist-credentials: false
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod

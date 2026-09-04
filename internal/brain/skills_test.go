@@ -3,11 +3,13 @@ package brain
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/pgtest"
+	"github.com/jackc/pgx/v5/pgconn"
 )
 
 func TestRenderSkillsBlock(t *testing.T) {
@@ -35,12 +37,16 @@ func TestRenderSkillsBlock(t *testing.T) {
 	}
 }
 
-// seedSkill inserts a skill and one version row directly.
+// seedSkill inserts a skill and one version row directly. Called again for the
+// same skill it adds a version and moves latest_version onto it, the way the
+// registry does — a skill with several versions is what version addressing is
+// about.
 func seedSkill(t *testing.T, b *Brain, id, version, name, description string) {
 	t.Helper()
 	ctx := context.Background()
 	if _, err := b.pool.Exec(ctx,
-		`INSERT INTO skills (id, source, display_title, latest_version) VALUES ($1, 'custom', $2, $3)`,
+		`INSERT INTO skills (id, source, display_title, latest_version) VALUES ($1, 'custom', $2, $3)
+		 ON CONFLICT (id) DO UPDATE SET latest_version = EXCLUDED.latest_version`,
 		id, name, version); err != nil {
 		t.Fatalf("seed skill %s: %v", id, err)
 	}
@@ -110,5 +116,146 @@ func TestResolveSkillsBlock(t *testing.T) {
 	}})
 	if injected != 0 || misses != 1 {
 		t.Errorf("versionless latest = injected %d misses %d, want 0/1", injected, misses)
+	}
+}
+
+// setVersionID spells out a seeded version row's id. seedSkill derives one from
+// a hash, which no test can name, and the whole point of the three-way resolver
+// is that a client addresses a version BY that id.
+// setVersionID plants an id on a seeded version row. The tokens are drawn from
+// the alphabet NewID emits, because the resolver now asks for a well-formed id
+// rather than a merely prefixed one.
+func setVersionID(t *testing.T, b *Brain, skillID, version, versionID string) {
+	t.Helper()
+	if _, err := b.pool.Exec(context.Background(),
+		`UPDATE skill_versions SET id = $3 WHERE skill_id = $1 AND version = $2`,
+		skillID, version, versionID); err != nil {
+		t.Fatalf("set version id %s: %v", versionID, err)
+	}
+}
+
+// TestResolveSkillMetaAddressingForms pins the three-way resolution the GA
+// shape needs (plan 39 decision 5): the literal "latest", a version id in
+// either the minted skver_ or the legacy skillver_ spelling, and the legacy
+// numeric pin. Everything else is a miss.
+//
+// It is a mutation test for the silent-wrong-answer bug. The resolver this
+// replaces asked one question — is the version all digits? — so every id form
+// below fell through to the "latest" branch and was served the NEWEST version
+// under the name of the pinned one. Each id row here names a version that is
+// deliberately not the latest, so the old resolver answers "third" where the
+// client asked for "first", and the unresolvable rows answer "third" where the
+// client asked for something that does not exist at all.
+func TestResolveSkillMetaAddressingForms(t *testing.T) {
+	pool := pgtest.NewPool(t)
+	b := &Brain{pool: pool}
+	ctx := context.Background()
+
+	// Three versions of one skill; latest_version lands on 300. Descriptions,
+	// not names, carry the version identity: the reference requires the
+	// frontmatter name to be identical across a skill's versions.
+	seedSkill(t, b, "skill_pin", "100", "pinned", "first")
+	setVersionID(t, b, "skill_pin", "100", "skver_pn100")
+	seedSkill(t, b, "skill_pin", "200", "pinned", "second")
+	setVersionID(t, b, "skill_pin", "200", "skillver_pn200")
+	seedSkill(t, b, "skill_pin", "300", "pinned", "third")
+	setVersionID(t, b, "skill_pin", "300", "skver_pn300")
+	// A second skill, so a version id belonging to another skill can be shown
+	// not to resolve — the reference refuses one (plan 39 §2, recording 105).
+	seedSkill(t, b, "skill_other", "100", "other", "elsewhere")
+	setVersionID(t, b, "skill_other", "100", "skver_extra100")
+
+	cases := []struct {
+		name, version, wantDesc string
+		wantErr                 bool
+	}{
+		{name: "latest alias", version: "latest", wantDesc: "third"},
+		{name: "minted skver_ id", version: "skver_pn100", wantDesc: "first"},
+		{name: "legacy skillver_ id", version: "skillver_pn200", wantDesc: "second"},
+		{name: "id naming the latest version", version: "skver_pn300", wantDesc: "third"},
+		{name: "legacy numeric pin", version: "100", wantDesc: "first"},
+		{name: "another skill's version id", version: "skver_extra100", wantErr: true},
+		{name: "unknown version id", version: "skver_absent", wantErr: true},
+		{name: "unknown numeric pin", version: "999", wantErr: true},
+		{name: "neither alias, id nor digits", version: "bogus", wantErr: true},
+		{name: "empty version", version: "", wantErr: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			name, desc, err := b.resolveSkillMeta(ctx, "skill_pin", tc.version)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("version %q resolved to %q/%q, want an unresolved miss",
+						tc.version, name, desc)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("version %q: %v", tc.version, err)
+			}
+			if name != "pinned" {
+				t.Errorf("name = %q, want %q", name, "pinned")
+			}
+			if desc != tc.wantDesc {
+				t.Errorf("version %q resolved to description %q, want %q",
+					tc.version, desc, tc.wantDesc)
+			}
+		})
+	}
+}
+
+// TestResolveSkillMetaRejectsMalformedIDBeforeItBinds: a stored pin is whatever
+// the agent's skills[] carried — parseSkills checks no shape on `version` — so
+// a value that merely starts skver_ can hold bytes no id ever has. Rejecting it
+// on shape is what keeps it out of a bind parameter, where an unstorable byte
+// answers SQLSTATE 22021 (a driver failure, reported as a store blip) in place
+// of the miss a pin naming no version was always meant to be.
+func TestResolveSkillMetaRejectsMalformedIDBeforeItBinds(t *testing.T) {
+	pool := pgtest.NewPool(t)
+	b := &Brain{pool: pool}
+	seedSkill(t, b, "skill_malformed", "100", "malformed", "first")
+
+	_, _, err := b.resolveSkillMeta(context.Background(), "skill_malformed", "skver_\x00")
+	if err == nil {
+		t.Fatal("a NUL-bearing version id resolved")
+	}
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) {
+		t.Fatalf("the malformed pin reached the database: %v", err)
+	}
+}
+
+// TestResolveSkillsBlockInjectsIDPinnedVersion is the same fix seen from the
+// caller: an agent pinning a version by its id gets THAT version's metadata in
+// the Level-1 block, and an unresolvable pin is one counted miss rather than a
+// quietly substituted newest version.
+func TestResolveSkillsBlockInjectsIDPinnedVersion(t *testing.T) {
+	pool := pgtest.NewPool(t)
+	b := &Brain{pool: pool}
+	ctx := context.Background()
+
+	seedSkill(t, b, "skill_inj", "100", "injected", "the pinned one")
+	setVersionID(t, b, "skill_inj", "100", "skver_ver100")
+	seedSkill(t, b, "skill_inj", "200", "injected", "the newest one")
+	setVersionID(t, b, "skill_inj", "200", "skver_ver200")
+
+	block, injected, misses := b.resolveSkillsBlock(ctx, domain.ResolvedAgent{
+		AgentSpec: domain.AgentSpec{Skills: []json.RawMessage{ref(t, "skill_inj", "skver_ver100")}},
+	})
+	if injected != 1 || misses != 0 {
+		t.Fatalf("id pin = injected %d misses %d, want 1/0", injected, misses)
+	}
+	if !strings.Contains(block, "the pinned one") {
+		t.Errorf("block = %q, want the pinned version's description", block)
+	}
+	if strings.Contains(block, "the newest one") {
+		t.Errorf("an id pin was served the newest version: %q", block)
+	}
+
+	_, injected, misses = b.resolveSkillsBlock(ctx, domain.ResolvedAgent{
+		AgentSpec: domain.AgentSpec{Skills: []json.RawMessage{ref(t, "skill_inj", "skver_absent")}},
+	})
+	if injected != 0 || misses != 1 {
+		t.Errorf("dangling id pin = injected %d misses %d, want 0/1", injected, misses)
 	}
 }

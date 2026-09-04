@@ -26,24 +26,78 @@ func listVersions(t *testing.T, s *tserver, storeID, query string) []map[string]
 	return listData(t, body)
 }
 
+// stampVersions is stampCreatedAt for one memory store's versions, with the
+// guarantee this listing needs on top: every row of the store must be named,
+// which is why the count is checked. One left out keeps its own now() and lands
+// inside the stamped band, a second newest, silently moving every position the
+// caller then asserts on. Three are named by the id their own responses
+// returned and the fourth by exclusion, as the call site's query shows.
+//
+// The order of these rows is the wire contract the test below exists to pin, so
+// it cannot be sidestepped by comparing a sorted list the way #525 was, and it
+// cannot be left to the clock either — the listing orders on
+// `created_at DESC, id DESC`, four HTTP requests leave a few milliseconds
+// between rows (#551 carries the measurements), and #411 recorded this
+// hardware's database clock stepping 20ms backwards.
+//
+// What this does give up is worth naming: the listing's order no longer comes
+// from the platform's own now(), so the test stops witnessing that successive
+// versions get increasing timestamps. Nothing asserts that today and no logic
+// enforces it — the column simply defaults to now() — while the contract the
+// test does pin, that the handler returns them newest first, is exercised
+// exactly as before. Inverting the handler's ORDER BY still fails this test.
+func stampVersions(t *testing.T, s *tserver, storeID string, oldestFirst ...string) {
+	t.Helper()
+	var held int
+	if err := s.pool.QueryRow(t.Context(),
+		`SELECT count(*) FROM memory_versions WHERE memory_store_id = $1`, storeID).Scan(&held); err != nil {
+		t.Fatalf("count the versions of %s: %v", storeID, err)
+	}
+	if held != len(oldestFirst) {
+		t.Fatalf("%s holds %d version rows and %d were named; an unnamed row keeps its own now()",
+			storeID, held, len(oldestFirst))
+	}
+	stampCreatedAt(t, s, "memory_versions", oldestFirst...)
+}
+
 func TestMemoryVersionsPerOperation(t *testing.T) {
 	s := newTestServer(t)
 	store := createMemoryStore(t, s, "history")
 	created := createMemory(t, s, store, "/notes.md", "one")
 	id := created["id"].(string)
 
-	// Every non-no-op mutation appends exactly one row.
-	if status, body := s.do(http.MethodPost, "/v1/memory_stores/"+store+"/memories/"+id,
-		map[string]any{"content": "two"}); status != http.StatusOK {
-		t.Fatalf("update: status %d (%v)", status, body)
+	// Every non-no-op mutation appends exactly one row, and all but the delete
+	// name in their response the row they appended.
+	status, updated := s.do(http.MethodPost, "/v1/memory_stores/"+store+"/memories/"+id,
+		map[string]any{"content": "two"})
+	if status != http.StatusOK {
+		t.Fatalf("update: status %d (%v)", status, updated)
 	}
-	if status, body := s.do(http.MethodPost, "/v1/memory_stores/"+store+"/memories/"+id,
-		map[string]any{"path": "/renamed.md"}); status != http.StatusOK {
-		t.Fatalf("rename: status %d (%v)", status, body)
+	status, renamed := s.do(http.MethodPost, "/v1/memory_stores/"+store+"/memories/"+id,
+		map[string]any{"path": "/renamed.md"})
+	if status != http.StatusOK {
+		t.Fatalf("rename: status %d (%v)", status, renamed)
 	}
 	if status, body := s.do(http.MethodDelete, "/v1/memory_stores/"+store+"/memories/"+id, nil); status != http.StatusOK {
 		t.Fatalf("delete: status %d (%v)", status, body)
 	}
+
+	// The delete answers `{id, type}` and names no version, so its row is taken
+	// by exclusion. Not by its `deleted` operation: that is what the assertions
+	// below are about, and picking the row by the property under test would
+	// leave them asserting the pick.
+	wrote := []string{
+		created["memory_version_id"].(string),
+		updated["memory_version_id"].(string),
+		renamed["memory_version_id"].(string),
+	}
+	var tombstoneID string
+	if err := s.pool.QueryRow(t.Context(),
+		`SELECT id FROM memory_versions WHERE memory_store_id = $1 AND id <> ALL($2)`,
+		store, wrote).Scan(&tombstoneID); err != nil {
+		t.Fatalf("find the version the delete wrote: %v", err)
+	}
+	stampVersions(t, s, store, append(wrote, tombstoneID)...)
 
 	rows := listVersions(t, s, store, "view=full")
 	if len(rows) != 4 {
@@ -131,6 +185,39 @@ func TestMemoryVersionsPerOperation(t *testing.T) {
 				t.Errorf("%s %s: status %d (%v)", call.method, call.path, status, body)
 			}
 		}
+	}
+
+	// The other half of the order the handler is contracted to produce: `id
+	// DESC` behind a tie, which rows a second apart never reach and which
+	// nothing pinned before (#561). The two newest versions are moved onto one
+	// instant and must come back id-descending. Last in the test, because it
+	// moves a position everything above reads.
+	//
+	// That instant is the stamped band's own maximum, read back from the rows
+	// rather than taken from a second now() — which would make this case turn
+	// on the clock advancing between two statements, the very dependence the
+	// stamp above removes.
+	//
+	// What it catches is a reversed tiebreak, not an absent one: with no id
+	// term Postgres may return a tie in any order, so there would be nothing
+	// there to assert. And which id is the greater is asked of the database
+	// rather than compared in Go, so the assertion means the same under any
+	// collation the test cluster is built with.
+	pair := []string{wrote[2], tombstoneID}
+	if _, err := s.pool.Exec(t.Context(),
+		`UPDATE memory_versions SET created_at =
+		   (SELECT max(created_at) FROM memory_versions WHERE memory_store_id = $2)
+		  WHERE id = ANY($1)`, pair, store); err != nil {
+		t.Fatalf("tie the two newest versions: %v", err)
+	}
+	var hi, lo string
+	if err := s.pool.QueryRow(t.Context(),
+		`SELECT max(id), min(id) FROM memory_versions WHERE id = ANY($1)`, pair).Scan(&hi, &lo); err != nil {
+		t.Fatalf("order the tied ids: %v", err)
+	}
+	if head := listVersions(t, s, store, ""); head[0]["id"] != hi || head[1]["id"] != lo {
+		t.Errorf("tied versions came back %v then %v, want %s then %s (id descending)",
+			head[0]["id"], head[1]["id"], hi, lo)
 	}
 }
 
@@ -268,7 +355,17 @@ func TestMemoryVersionRedact(t *testing.T) {
 	}
 	head := updated["memory_version_id"].(string)
 	rows := listVersions(t, s, store, "view=full")
-	older := rows[1]["id"].(string)
+	if len(rows) != 2 {
+		t.Fatalf("versions = %v, want the create and the update", rows)
+	}
+	// The superseded row is named rather than taken by position. Two requests
+	// write these rows about 3ms apart, and the listing orders on wall time, so
+	// index 1 is only probably the older one (#551). The head's id is already in
+	// hand, which settles it without an order at all.
+	older := rows[0]["id"].(string)
+	if older == head {
+		older = rows[1]["id"].(string)
+	}
 
 	// "A version that is the current head of a live memory cannot be redacted."
 	status, body := s.do(http.MethodPost, "/v1/memory_stores/"+store+"/memory_versions/"+head+"/redact", nil)

@@ -23,7 +23,8 @@ func TestLoadRoutes(t *testing.T) {
 	path := writeConfig(t, `[
 	  {"model": "claude-opus-4-8", "protocol": "anthropic", "base_url": "http://gw-a",
 	   "upstream_model": "upstream-opus", "api_key": "sk-inline",
-	   "headers": {"x-route": "pool-1"}, "stall_timeout": "90s", "max_tokens": 32768},
+	   "headers": {"x-route": "pool-1"}, "stall_timeout": "90s", "max_tokens": 32768,
+	   "flatten_search_results": true},
 	  {"model": "*", "protocol": "anthropic", "base_url": "http://gw-default",
 	   "api_key_env": "TEST_GW_KEY"}
 	]`)
@@ -47,6 +48,9 @@ func TestLoadRoutes(t *testing.T) {
 	if a.Config.MaxTokens != 32768 {
 		t.Errorf("max_tokens = %d, want 32768", a.Config.MaxTokens)
 	}
+	if !a.Config.FlattenSearchResults {
+		t.Errorf("flatten_search_results = false, want true")
+	}
 	if routes[1].Config.APIKey != "sk-from-env" {
 		t.Errorf("api_key_env not resolved: %+v", routes[1].Config)
 	}
@@ -57,6 +61,9 @@ func TestLoadRoutes(t *testing.T) {
 	}
 	if routes[1].Config.MaxTokens != 0 {
 		t.Errorf("max_tokens = %d on a route that set none, want the zero that means the adapter default", routes[1].Config.MaxTokens)
+	}
+	if routes[1].Config.FlattenSearchResults {
+		t.Errorf("flatten_search_results = true on a route that set none, want false")
 	}
 
 	// The loaded routes construct a working registry.

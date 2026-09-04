@@ -305,6 +305,10 @@ identifiers-test:
 # — so four mutable tags sat in jobs holding an OAuth token until Dependabot
 # offered to swap one of them for another (#518). Shape only: whether a SHA IS
 # the release its comment names needs the network, which a gate has not got.
+# It holds the companion clause too — every `actions/checkout` drops the job's
+# credential — which lapsed further still: three call sites never carried it
+# while a released changelog said every one did (#558). That clause's own prose
+# lives in the script's docstring, since Dependabot has no half in it.
 pins-test:
 	python3 .github/scripts/pins_test.py
 

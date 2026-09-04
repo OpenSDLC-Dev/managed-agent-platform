@@ -137,6 +137,10 @@ func TestKeysetPaginationSurvivesConcurrentInsert(t *testing.T) {
 	for i := 0; i < 3; i++ {
 		ids = append(ids, createAgent(t, s, map[string]any{"name": "k", "model": "m"})["id"].(string))
 	}
+	// Stamped before the cursor is taken, so the newcomer below is newer than
+	// all three by a clear second rather than by the milliseconds the requests
+	// happened to leave.
+	stampCreatedAt(t, s, "agents", ids...)
 	status, page1 := s.do(http.MethodGet, "/v1/agents?limit=2", nil)
 	if status != http.StatusOK {
 		t.Fatalf("page 1: %d", status)

@@ -1121,12 +1121,16 @@ jobs:
       # can notice that on its own, which is why it went unnoticed for months.
       - name: the documentation carries none of the shapes a coordinate takes
         run: make identifiers-test
-      # The other rule `.github/` states and nothing enforced. A retargeted tag
-      # runs attacker-chosen code in jobs that hold a live credential, which is
-      # why every `uses:` here is a commit SHA — but #472 added two workflows
+      # The other two rules `.github/` states and nothing enforced. A retargeted
+      # tag runs attacker-chosen code in jobs that hold a live credential, which
+      # is why every `uses:` here is a commit SHA — but #472 added two workflows
       # that were not, both bot reviewers said so, and the PR merged anyway. A
-      # rule only a reviewer holds is one a generated workflow walks past.
-      - name: every action a workflow runs is pinned to a commit
+      # rule only a reviewer holds is one a generated workflow walks past. Its
+      # companion — every checkout drops the job's credential — went further
+      # still: a released changelog said every checkout in the repository had
+      # gained it while one already had not, and #472 then added two more that
+      # had not either (#558). That is what a rule kept by memory looks like.
+      - name: every workflow pins its actions and drops its checkout credential
         run: make pins-test
       # deploy-alert.yml couples to deploy.yml three ways, and all three fail
       # SILENTLY: the trigger stops matching, or every deploy classifies as
@@ -1338,26 +1342,33 @@ jobs:
           (cd "$workdir" && zip -qr skill.zip demo-skill)
           created="$(curl -sf -H "x-api-key: $key" -F 'files[]=@'"$workdir"'/skill.zip' "$base")"
           id="$(echo "$created" | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])')"
-          ver="$(echo "$created" | python3 -c 'import json,sys; print(json.load(sys.stdin)["latest_version"])')"
+          # GA addresses a version by its id and nothing else: the skill carries
+          # latest_version_id, and a version object no longer holds a number at all.
+          ver="$(echo "$created" | python3 -c 'import json,sys; print(json.load(sys.stdin)["latest_version_id"])')"
           echo "created $id version $ver"
           curl -sf -H "x-api-key: $key" "$base?source=custom" | grep -q "$id"
           curl -sf -H "x-api-key: $key" "$base/$id" > /dev/null
-          # Second version via the loose path-qualified form.
+          # Second version via the loose path-qualified form. Its frontmatter name
+          # matches the skill's, which the name-consistency rule requires.
           v2="$(curl -sf -H "x-api-key: $key" -F 'files[]=@'"$workdir"'/demo-skill/SKILL.md;filename=demo-skill/SKILL.md' "$base/$id/versions" \
-            | python3 -c 'import json,sys; print(json.load(sys.stdin)["version"])')"
+            | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])')"
           n="$(curl -sf -H "x-api-key: $key" "$base/$id/versions" | python3 -c 'import json,sys; print(len(json.load(sys.stdin)["data"]))')"
           [ "$n" = "2" ] || { echo "expected 2 versions, got $n" >&2; exit 1; }
-          # The download streams the stored archive unmodified.
+          # The download streams the stored archive unmodified, addressed by id.
           curl -sf -H "x-api-key: $key" "$base/$id/versions/$ver/content" -o "$workdir/down.zip"
           cmp "$workdir/skill.zip" "$workdir/down.zip"
-          code="$(curl -s -o /dev/null -w '%{http_code}' -X DELETE -H "x-api-key: $key" "$base/$id")"
-          [ "$code" = "400" ] || { echo "expected 400 deleting a skill with versions, got $code" >&2; exit 1; }
-          curl -sf -X DELETE -H "x-api-key: $key" "$base/$id/versions/$ver" > /dev/null
+          # One of two versions deletes; the last one is refused, because a skill
+          # may never reach zero versions — deleting the skill is what removes it.
           curl -sf -X DELETE -H "x-api-key: $key" "$base/$id/versions/$v2" > /dev/null
+          code="$(curl -s -o /dev/null -w '%{http_code}' -X DELETE -H "x-api-key: $key" "$base/$id/versions/$ver")"
+          [ "$code" = "400" ] || { echo "expected 400 deleting a skill's only version, got $code" >&2; exit 1; }
+          # The skill delete cascades over the version still standing.
           curl -sf -X DELETE -H "x-api-key: $key" "$base/$id" > /dev/null
           code="$(curl -s -o /dev/null -w '%{http_code}' -H "x-api-key: $key" "$base/$id")"
           [ "$code" = "404" ] || { echo "expected 404 after delete, got $code" >&2; exit 1; }
-          echo "ok: upload (zip + loose), list, download byte-compare, ordered delete"
+          code="$(curl -s -o /dev/null -w '%{http_code}' -H "x-api-key: $key" "$base/$id/versions/$ver")"
+          [ "$code" = "404" ] || { echo "expected 404 for a cascaded version, got $code" >&2; exit 1; }
+          echo "ok: upload (zip + loose), list, download byte-compare, only-version refusal, cascade"
       - name: tear down
         if: always()
         run: docker compose down -v

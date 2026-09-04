@@ -31,13 +31,20 @@ type environmentJSON struct {
 }
 
 // Normalized config shapes: responses always carry the full required surface
-// (cloud → networking + all six package lists; self_hosted → type only).
+// (cloud → networking + all six package lists; self_hosted → type only). A
+// rendered cloud response's packages object additionally carries
+// "type":"packages" — stamped onto the raw JSON map by packagesTypeEcho at
+// render time, never decoded into or persisted through packagesJSON below.
 type cloudConfigJSON struct {
 	Type       string          `json:"type"`
 	Networking json.RawMessage `json:"networking"`
 	Packages   packagesJSON    `json:"packages"`
 }
 
+// packagesJSON is the six package-manager lists as stored — it has no Type
+// field. The wire discriminator "type":"packages" (#382) is a render-time-
+// only addition: packagesTypeEcho stamps it onto the raw JSON map after
+// normalizeEnvConfig returns, so it never round-trips through this struct.
 type packagesJSON struct {
 	Apt   []string `json:"apt"`
 	Cargo []string `json:"cargo"`
@@ -181,12 +188,25 @@ func parseNetworking(raw, prior json.RawMessage) (json.RawMessage, error) {
 
 // parsePackages merges a packages patch onto base: managers present in the
 // patch replace their list (null clears), absent managers keep base values.
+// "type" is not a manager — it's the reference's discriminator sibling
+// (packagesJSON has no field for it; see packagesTypeEcho), and the only
+// value it ever admits is the JSON string "packages".
 func parsePackages(raw json.RawMessage, base packagesJSON) (packagesJSON, error) {
 	var byManager map[string]json.RawMessage
 	if err := json.Unmarshal(raw, &byManager); err != nil || byManager == nil {
 		return base, errInvalid("packages must map package managers to lists of packages")
 	}
 	for manager, rawList := range byManager {
+		if manager == "type" {
+			// Present requires exactly "packages"; null and "" fall through
+			// here too — json.Unmarshal into &typ leaves "" for null, same as
+			// a literal empty string, and both already fail typ != "packages".
+			var typ string
+			if json.Unmarshal(rawList, &typ) != nil || typ != "packages" {
+				return base, errInvalid(`packages.type must be "packages"`)
+			}
+			continue
+		}
 		list := []string{}
 		if !isNull(rawList) {
 			if err := json.Unmarshal(rawList, &list); err != nil {
@@ -236,9 +256,66 @@ func renderEnvironment(id, name, description string, config []byte, metadata map
 	}
 	return environmentJSON{
 		ID: id, Type: "environment", Name: name, Description: description,
-		Config: config, Scope: "organization", Metadata: metadata,
+		Config: packagesTypeEcho(config), Scope: "organization", Metadata: metadata,
 		CreatedAt: createdAt.UTC(), UpdatedAt: updatedAt.UTC(), ArchivedAt: utcPtr(archivedAt),
 	}
+}
+
+// packagesTypeEcho stamps "type":"packages" onto a cloud config's packages
+// object at render time — every create/get/list/update/archive response
+// goes through here, via renderEnvironment. The reference SDK types this key
+// as a discriminator sibling to the six manager lists, admitting only the
+// literal "packages" (anthropic-sdk-go v1.66.0 betaenvironment.go
+// BetaPackages.Type / BetaPackagesParams.Type, #382); packagesJSON has no
+// field for it, and parsePackages validates but never persists it (see its
+// own comment). That the reference's own response always renders the field
+// is unobserved (docs/DIVERGENCES.md, INFERRED); this platform does so
+// unconditionally.
+//
+// It works on maps of json.RawMessage rather than decoding through
+// cloudConfigJSON/packagesJSON: an earlier version that round-tripped through
+// those typed structs silently dropped any field the current normalizer
+// doesn't know about (a future top-level key, a future package manager) and
+// rewrote a stored "packages": null into an object of null lists (unmarshal
+// into a struct field is a silent no-op for JSON null, so nothing there
+// distinguished the two). Editing only the "packages" sub-map's "type" key in
+// place keeps both: every other field survives unchanged as a JSON value —
+// key order and whitespace are not preserved, since re-marshaling a
+// map[string]json.RawMessage re-sorts keys and HTML-escapes a raw &, < or >
+// inside any sibling value. self_hosted configs have no packages object and
+// pass through untouched (this function returns config unmodified, with no
+// marshal at all), as does anything that doesn't decode as an object at the
+// level being read — including a "packages" that is null or otherwise not an
+// object — unreachable through this platform's own writes, reachable only by
+// a direct DB write bypassing them.
+func packagesTypeEcho(config []byte) []byte {
+	var top map[string]json.RawMessage
+	if err := json.Unmarshal(config, &top); err != nil {
+		return config
+	}
+	var typ string
+	if raw, ok := top["type"]; !ok || json.Unmarshal(raw, &typ) != nil || typ != string(domain.EnvCloud) {
+		return config
+	}
+	rawPackages, ok := top["packages"]
+	if !ok {
+		return config
+	}
+	var pkgs map[string]json.RawMessage
+	if err := json.Unmarshal(rawPackages, &pkgs); err != nil || pkgs == nil {
+		return config
+	}
+	pkgs["type"] = json.RawMessage(`"packages"`)
+	newPackages, err := json.Marshal(pkgs)
+	if err != nil {
+		return config
+	}
+	top["packages"] = newPackages
+	out, err := json.Marshal(top)
+	if err != nil {
+		return config
+	}
+	return out
 }
 
 func (s *server) createEnvironment(r *http.Request) (any, error) {
@@ -612,15 +689,72 @@ func plural(n int, noun string) string {
 	return noun + "s"
 }
 
+// selfHostedQueueRefusal is the reference's 409 when the environment's work
+// queue still holds an item a worker could be handed or is running, and nil
+// when it does not. What counts as the queue is queue.HasUndrainedWork's to
+// define rather than this package's — it is the wire's own scope, so it
+// answers false for a cloud environment and for one that does not exist, and
+// the 404 is left to the delete.
+func (s *server) selfHostedQueueRefusal(ctx context.Context, envID string) error {
+	undrained, err := s.queue.HasUndrainedWork(ctx, domain.ID(envID))
+	if err != nil {
+		return err
+	}
+	if !undrained {
+		return nil
+	}
+	return errConflict("Cannot delete self-hosted environment with work in the queue. " +
+		"Either archive the environment first to allow the queue to drain, or use force=true to delete immediately.")
+}
+
+// deleteEnvironment hard-deletes an environment. A self_hosted environment
+// whose work queue still holds undrained items is refused — 409, in the
+// reference's own sentence (recorded 2026-09-02, #546).
+//
+// It is a refusal this platform already made, in the wrong words. work_items
+// cascades from environments, but every item carries a session, a session
+// holds its environment through a foreign key that does not cascade, and
+// nothing moves a session between environments — so the delete raised 23503
+// before any cascade could run. What it said was that the environment still
+// had sessions, and clearing those is exactly what cascades the queue away:
+// the loss the reference refuses in order to prevent.
+//
+// Which is why the queue is read on both sides of the delete rather than
+// locked across it. Before, so the refusal never rides on a foreign key that
+// a row the schema permits — an item whose environment differs from its
+// session's, which no enqueue path produces — would not raise. After, because
+// a live session's first enqueue can land in the gap between the two, and
+// there the sessions' refusal would send an operator to delete the sessions,
+// taking that item with them. Locking instead would invert this handler's
+// lock order against every enqueue path, which takes the session row first.
+//
+// ?force=true lifts the queue refusal and only that. On the reference the
+// forced delete answers 200; here the sessions refuse it in their own words,
+// so force exchanges one refusal for another rather than deleting — the
+// divergence docs/DIVERGENCES.md registers.
 func (s *server) deleteEnvironment(r *http.Request) (any, error) {
 	ctx := r.Context()
 	id := r.PathValue("id")
 	if err := checkID(id, "environment"); err != nil {
 		return nil, err
 	}
+	force, err := parseBoolParam(r.URL.Query(), "force")
+	if err != nil {
+		return nil, err
+	}
+	if !force {
+		if err := s.selfHostedQueueRefusal(ctx, id); err != nil {
+			return nil, err
+		}
+	}
 	tag, err := s.pool.Exec(ctx, `DELETE FROM environments WHERE id = $1`, id)
 	var pgErr *pgconn.PgError
 	if errors.As(err, &pgErr) && pgErr.Code == "23503" { // foreign_key_violation
+		if !force {
+			if err := s.selfHostedQueueRefusal(ctx, id); err != nil {
+				return nil, err
+			}
+		}
 		return nil, environmentStillReferenced(ctx, s.pool, id)
 	}
 	if err != nil {

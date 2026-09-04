@@ -5,6 +5,11 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"slices"
 	"strings"
 	"testing"
 
@@ -154,36 +159,190 @@ func TestSkillsMaterializeTheRosterUnion(t *testing.T) {
 	}
 }
 
-// TestSkillResolutionReportsPerRoundTrip: resolving one reference is not one
-// round trip, and the per-reference report above it does not cover what happens
-// inside. An alias is resolved by *walking every version* the control plane has
-// — the pager fetching as it goes — and a version GET follows that. Reporting
-// once around the whole resolution would put an unbounded number of wire calls
-// inside one silent interval, which is precisely the shape a stall budget cannot
-// tell apart from a wedge (#383).
-//
-// Counted rather than timed, and driven at resolveSkill directly: the
-// materialization test above exercises this path but asserts nothing about it,
-// so without this test the reports inside could be deleted with every suite
-// still green.
-func TestSkillResolutionReportsPerRoundTrip(t *testing.T) {
-	h := newHarness(t, &fakeSandbox{})
-	for _, v := range []string{"100", "200", "300"} {
-		h.seedSkill(t, "walk-me", v, "walk-notes", map[string]string{"SKILL.md": "ok"})
-	}
+// gaVersion is one version in the stub registry below: the id that addresses it
+// on the GA wire, the pre-GA numeric this platform still accepts as a pin, and
+// the archive both forms serve.
+type gaVersion struct {
+	id      string
+	numeric string
+	body    string
+	archive []byte
+}
 
-	var reports int
-	r, err := resolveSkill(context.Background(), h.client,
-		skillRef{SkillID: "walk-me", Version: "latest"}, func() { reports++ })
-	if err != nil {
-		t.Fatalf("resolveSkill: %v", err)
+// gaRegistry is a stand-in control plane speaking the GA skills wire: it
+// resolves the {version} slot the way plan 39's recording pinned it — an id,
+// the alias "latest", and (this platform's registered legacy form, decision 4)
+// the numeric — and records the token each route was addressed by. The worker's
+// half of that contract is what the test below is about, and driving it against
+// a server whose slot is the plan's rather than this repo's pins the worker's
+// rule independently of the API half.
+type gaRegistry struct {
+	skillID   string
+	skillName string
+	versions  []gaVersion
+	pin       string   // the version the stub session's skills[] pins
+	echo      string   // the id the retrieve answers with, whatever was asked for
+	retrieves []string // the {version} tokens the retrieve route saw, in order
+	downloads []string // ... and the /content route
+}
+
+// gaSkill builds a three-version registry, newest last. The oldest version
+// carries a skillver_ id — a row minted before the GA rename, which decision 9
+// keeps addressable forever — and the two newer ones the skver_ minted since.
+func gaSkill(t *testing.T) *gaRegistry {
+	t.Helper()
+	g := &gaRegistry{skillID: "ga-skill", skillName: "ga-notes"}
+	for i, id := range []string{"skillver_stub01", "skver_stub02", "skver_stub03"} {
+		body := fmt.Sprintf("# v%d", i+1)
+		g.versions = append(g.versions, gaVersion{
+			id:      id,
+			numeric: fmt.Sprintf("17591780106411%02d", i+1),
+			body:    body,
+			archive: skillArchive(t, g.skillName, map[string]string{"SKILL.md": body}),
+		})
 	}
-	if r.Version != "300" {
-		t.Errorf("resolved version = %q, want the newest of the three", r.Version)
+	return g
+}
+
+// find resolves one {version} slot value the way the GA routes do.
+func (g *gaRegistry) find(token string) (gaVersion, bool) {
+	if token == "latest" {
+		return g.versions[len(g.versions)-1], true
 	}
-	if want := 4; reports != want {
-		t.Errorf("progress reports = %d, want %d (one per version walked, plus the version GET behind them)",
-			reports, want)
+	for _, v := range g.versions {
+		if token == v.id || token == v.numeric {
+			return v, true
+		}
+	}
+	return gaVersion{}, false
+}
+
+func gaNotFound(w http.ResponseWriter) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusNotFound)
+	io.WriteString(w, `{"type":"error","error":{"type":"not_found_error","message":"not found"}}`)
+}
+
+// materialize runs the worker's whole skills pass against the stub with pin in
+// the session's skills[], and returns the sandbox it wrote into.
+func (g *gaRegistry) materialize(t *testing.T, pin string) *fakeSandbox {
+	t.Helper()
+	g.pin = pin
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /v1/sessions/{id}", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprintf(w, `{"type":"session","id":%q,"agent":{"skills":[{"type":"custom","skill_id":%q,"version":%q}]}}`,
+			r.PathValue("id"), g.skillID, g.pin)
+	})
+	mux.HandleFunc("GET /v1/skills/{skill}/versions/{version}", func(w http.ResponseWriter, r *http.Request) {
+		token := r.PathValue("version")
+		g.retrieves = append(g.retrieves, token)
+		v, ok := g.find(token)
+		if !ok {
+			gaNotFound(w)
+			return
+		}
+		id := v.id
+		if g.echo != "" {
+			id = g.echo
+		}
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprintf(w, `{"type":"skill_version","id":%q,"skill_id":%q,"name":%q,"description":"stub","created_at":"2026-09-04T00:00:00Z"}`,
+			id, r.PathValue("skill"), g.skillName)
+	})
+	mux.HandleFunc("GET /v1/skills/{skill}/versions/{version}/content", func(w http.ResponseWriter, r *http.Request) {
+		token := r.PathValue("version")
+		g.downloads = append(g.downloads, token)
+		v, ok := g.find(token)
+		if !ok {
+			gaNotFound(w)
+			return
+		}
+		w.Header().Set(skills.ArchiveDigestHeader, skills.Digest(v.archive))
+		w.Header().Set("Content-Type", "application/zip")
+		w.Write(v.archive)
+	})
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+
+	sb := &fakeSandbox{}
+	if err := SetupSkills(context.Background(), NewClient(srv.URL, "env-key"),
+		"sesn_stub", sb, "/workspace", func() {}); err != nil {
+		t.Fatalf("SetupSkills: %v", err)
+	}
+	return sb
+}
+
+// TestSkillPinResolvesByForm pins the worker's three-way resolution of a stored
+// skills[] pin (plan 39 decision 5). The alias goes to the retrieve, which is
+// the only thing that resolves it, and the download rides the concrete id it
+// answers with — the reference worker's own rule (anthropic-sdk-go
+// tools/agenttoolset/skills.go). An id and the pre-GA numeric are already the
+// addressing token and are carried through verbatim.
+//
+// The two id rows are the regression the plan is built on: the two-way "digits
+// or else" test this replaces read a pinned version id as the alias "latest"
+// and materialized the NEWEST version instead of the pinned one — a wrong
+// answer rather than a refusal, and invisible to the agent that pinned it. So
+// every row asserts the landed *content*, not just the tokens: the three
+// versions of the one skill share a name, hence a landing directory, exactly as
+// GA's immutable per-skill slug forces.
+func TestSkillPinResolvesByForm(t *testing.T) {
+	cases := []struct {
+		name string
+		pin  func(*gaRegistry) string
+		want int // index of the version whose archive must land
+		// downloadsBy is the token /content must be addressed by, which is the
+		// pin itself for every already-concrete form and the resolved id for
+		// the alias.
+		downloadsBy func(*gaRegistry) string
+	}{
+		{"the alias latest", func(*gaRegistry) string { return "latest" }, 2,
+			func(g *gaRegistry) string { return g.versions[2].id }},
+		{"a skver_ id", func(g *gaRegistry) string { return g.versions[1].id }, 1,
+			func(g *gaRegistry) string { return g.versions[1].id }},
+		{"a legacy skillver_ id", func(g *gaRegistry) string { return g.versions[0].id }, 0,
+			func(g *gaRegistry) string { return g.versions[0].id }},
+		{"a legacy numeric pin", func(g *gaRegistry) string { return g.versions[1].numeric }, 1,
+			func(g *gaRegistry) string { return g.versions[1].numeric }},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			g := gaSkill(t)
+			pin := c.pin(g)
+			sb := g.materialize(t, pin)
+
+			if got, want := sb.files["/workspace/skills/ga-notes/SKILL.md"], g.versions[c.want].body; got != want {
+				t.Errorf("materialized SKILL.md = %q, want %q: the pin %q must land the version it names, never the newest",
+					got, want, pin)
+			}
+			if want := []string{pin}; !slices.Equal(g.retrieves, want) {
+				t.Errorf("retrieve addressed %v, want %v: the pin reaches the retrieve verbatim", g.retrieves, want)
+			}
+			if want := []string{c.downloadsBy(g)}; !slices.Equal(g.downloads, want) {
+				t.Errorf("download addressed %v, want %v", g.downloads, want)
+			}
+		})
+	}
+}
+
+// TestSkillPinnedIDOutranksTheRetrievesEcho: an id pin addresses the download
+// itself, rather than being replaced by whatever id the retrieve answered with.
+// The worker already refuses an archive whose bytes disagree with the digest
+// its download advertises; a pin is the same kind of promise one layer up, and
+// this worker runs in the customer's own infrastructure at the far end of a
+// network. So a retrieve answering a *different* version's id may not redirect
+// the download the way an alias legitimately does.
+func TestSkillPinnedIDOutranksTheRetrievesEcho(t *testing.T) {
+	g := gaSkill(t)
+	g.echo = g.versions[2].id // whatever is asked for, answer with the newest
+	sb := g.materialize(t, g.versions[0].id)
+
+	if got, want := sb.files["/workspace/skills/ga-notes/SKILL.md"], g.versions[0].body; got != want {
+		t.Errorf("materialized SKILL.md = %q, want the pinned version's %q", got, want)
+	}
+	if want := []string{g.versions[0].id}; !slices.Equal(g.downloads, want) {
+		t.Errorf("download addressed %v, want the pinned %v", g.downloads, want)
 	}
 }
 
@@ -194,14 +353,17 @@ func TestSetupSkillsOverTheWire(t *testing.T) {
 		"SKILL.md":  "# wire",
 		"ref/a.txt": "aaa",
 	})
-	h.refSkills(t, [2]string{"wire-one", "latest"})
+	// Pinned by the numeric form this platform's {version} slot accepts; the
+	// alias and the two id forms are pinned against the GA wire in
+	// TestSkillPinResolvesByForm.
+	h.refSkills(t, [2]string{"wire-one", "100"})
 	h.suspend(t, writeUse("out.txt", "hello"))
 
 	if err := h.run(); err != nil {
 		t.Fatalf("run: %v", err)
 	}
 	// The skill landed through the environment-key wire path — session GET,
-	// versions list (alias resolution), version get, /content download.
+	// version get, /content download.
 	if got := sb.files["/workspace/skills/wire-notes/SKILL.md"]; got != "# wire" {
 		t.Errorf("SKILL.md = %q", got)
 	}
@@ -218,7 +380,7 @@ func TestSetupSkillsOverTheWire(t *testing.T) {
 		t.Errorf("materializing a two-file skill made WriteFiles calls of sizes %v, want exactly one of size 2",
 			sb.bulkSizes)
 	}
-	// "latest" resolved client-side to the newest numeric version.
+	// The sentinel records the token the download was addressed by.
 	sentinel := sb.files["/workspace/skills/"+skills.SentinelName]
 	if !strings.Contains(sentinel, `"100"`) {
 		t.Errorf("sentinel = %q", sentinel)
@@ -301,7 +463,7 @@ func TestSetupSkillsTolerance(t *testing.T) {
 	h := newHarness(t, sb)
 	h.seedSkill(t, "wire-good", "100", "good-wire", map[string]string{"SKILL.md": "ok"})
 	h.refSkills(t,
-		[2]string{"wire-gone", "latest"},
+		[2]string{"wire-gone", "100"},
 		[2]string{"wire-good", "100"},
 	)
 	h.suspend(t, writeUse("out.txt", "hello"))

@@ -27,8 +27,8 @@ func TestSetupSkillsMetrics(t *testing.T) {
 	h.seedSkill(t, "wire-met-bad", "100", "corrupt-wire", map[string]string{"SKILL.md": "m"})
 	h.swapArchive(t, "wire-met-bad", "100", "corrupt-wire", map[string]string{"SKILL.md": "swapped"})
 	h.refSkills(t,
-		[2]string{"wire-met-one", "latest"},
-		[2]string{"wire-met-gone", "latest"},
+		[2]string{"wire-met-one", "100"},
+		[2]string{"wire-met-gone", "100"},
 		[2]string{"wire-met-bad", "100"},
 	)
 	h.suspend(t, writeUse("out.txt", "x"))
