@@ -1,5 +1,5 @@
 ---
-status: in-progress
+status: archived
 issue: "#566"
 ---
 
@@ -260,7 +260,7 @@ One PR, four commits, in this order — each compiles and keeps `make verify` gr
    resolves by id through `Versions.Get`/`Versions.Download` instead of reading the deleted
    `Version` field. Contract tests for the worker's three-way resolution.
 2. **The wire shapes and the create form.** `skillJSON`, `skillVersionJSON`, `parseSkillUpload`
-   (`display_name`, 255-byte cap, unknown parts ignored), the list ceiling, `renderSkill`.
+   (`display_name`, 255-character cap, unknown parts ignored), the list ceiling, `renderSkill`.
    A migration dropping `skills_custom_display_title_uq`.
 3. **Version addressing and delete semantics.** The `{version}` slot's four accepted forms and
    the two verbatim alias-refusal messages; the importer's own regex; the skill-delete cascade
