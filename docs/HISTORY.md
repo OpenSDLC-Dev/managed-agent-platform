@@ -4579,15 +4579,15 @@ and leaves the session running with its other repositories mounted.
 ## Second recording wave, registry reconciliation (#575) — review-hardening record (2026-09-04)
 
 Twenty-four registry entries were rewritten from a 281-pair recording of the live
-managed-agents endpoint. Seven review passes found 41 defects between them — five,
-three, fifteen, four, six, one and seven — and **sixteen of the 41 were one defect
-repeated**: the recording was read carefully, our own code was not read at all, and the
-entry was then filed as "confirmed, and we match". Those sixteen came one from the
-verifier, three from Codex, nine from the Claude reviewer, none from the fourth pass, and
-one each from the verifier's second, third and fourth runs. A finding is counted here
-when it changed a file in this repository, which is why the third pass counts one against
-the four it raised — its other three were answered in the pull request rather than in the
-tree.
+managed-agents endpoint. Eight review passes found 46 defects between them — five,
+three, fifteen, four, six, one, seven and five — and **seventeen of the 46 were one
+defect repeated**: the recording was read carefully, our own code was not read at all, and the
+entry was then filed as "confirmed, and we match". Those seventeen came one from the
+verifier's first run, three from Codex, nine from the Claude reviewer, none from the
+refute-first pass, and one each from the verifier's second, third, fourth and fifth runs.
+A finding is counted here when it changed a file in this repository — which is why the
+verifier's third run contributes one of the four it raised, its other three having been
+answered in the pull request rather than in the tree.
 
 The verifier found five, of which the load-bearing one was a sentence claiming
 `isSkillReadPath` "admits exactly the subtree the reference serves" — inside an entry
@@ -4688,12 +4688,35 @@ body proposes a work-API admission split and says nothing of this surface, so th
 was deferring to an issue that would not retire the gap when closed; the issue's scope has
 been widened to match rather than the claim narrowed to fit.
 
-It also turned up a wire difference nobody had recorded, inside the fact this record had
-already called true-by-luck: the reference answers `DELETE /v1/agents/{id}` a 404
+It also turned up a wire difference nobody had **compared** — the reference's 404 was
+recorded sixteen times over — inside the fact this record had already called true-by-luck: the reference answers `DELETE /v1/agents/{id}` a 404
 `not_found_error`, where this platform answers a 405 `invalid_request_error` from the
 method-less fallback. Capability matched, wire did not. It gets no issue, because the
 pinned SDK's agent service exposes no delete at all and no typed client can reach it — but
 "agents cannot be deleted here either" had stood as a match for two passes.
+
+The eighth pass is the one that should have come first. Sent to attack the same two
+sentences a fourth time, it did something no earlier pass had: it opened the recording's
+own probe index and read **which route each probe hit**. Every prior pass, this one's
+author included, had checked the entry against our code and taken its account of the
+recording on trust. The premise did not survive. "Separated by message text alone at one
+status and one type" was a pairing of two probes on two different routes — a live key
+outside its scope answers 403 `permission_error` on the skills routes and 401
+`authentication_error` on `/v1/agents`, so the reference's refusal is route-dependent and
+no recorded route carries both states. Worse, the entry gave as the reason we *differ* an
+anti-oracle posture that the work-API-auth entry, 165 lines above it in the same file,
+records this platform **giving up in order to match** — two entries with opposite verdicts
+on one recorded property, which is the single thing a divergence registry exists to
+prevent. The corrected fact is smaller and duller: the envelope matches everywhere the
+recording reached, the message text is ours, and the one absent capability is the
+named-OAuth-scope vocabulary #550 owns.
+
+That is the shape of the whole exercise, stated once more because it took eight passes to
+see it plainly. The defect was never carelessness about our code — by the fourth pass our
+code was being read line by line. It was that **the recording's own account was the last
+thing anybody checked**, because it arrived as the authority and everything downstream
+inherited it. A registry entry has two halves, and this project had built five kinds of
+scrutiny for one of them.
 
 **The transferable rule, now written into the INFERRED preamble as a three-way routing
 test:** settling an inference has three ends — confirmed and we match, confirmed and we
