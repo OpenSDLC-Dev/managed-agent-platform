@@ -533,6 +533,174 @@ func TestAnMCPOnlyTunnelIsHeldToTheAddressFloor(t *testing.T) {
 	}
 }
 
+// The gate half of allow_package_managers, driven end to end through the proxy,
+// so what is asserted is a request that arrived rather than a predicate that
+// returned true.
+//
+// The curated set is pointed at this test's own origin for the duration
+// (gate.UsePackageRegistries): the real set names public registries, which a
+// proxy test can neither resolve nor dial. Which hosts the real one holds — and
+// which it deliberately does not — is asserted at the policy, in
+// TestThePackageRegistrySetOpensOnlyUnderItsFlag and its unrecorded-ecosystem
+// sibling.
+//
+// Every row lifts the address floor, because an httptest origin is on loopback
+// and the floor refuses loopback; the floor has a test of its own below.
+func TestGateAdmitsAPackageRegistryOnlyUnderItsFlag(t *testing.T) {
+	origin := echoOrigin(t)
+	defer origin.Close()
+	registry := hostOf(t, origin.URL)
+	// A name the request never targets. Two httptest servers would not do: both
+	// listen on 127.0.0.1 and differ only by port.
+	const elsewhere = "pypi.example.com"
+
+	for name, tc := range map[string]struct {
+		net        domain.Networking
+		registries []string
+		want       int
+	}{
+		"the flag admits the registry": {
+			domain.Networking{Type: domain.NetLimited, AllowPackageManagers: true},
+			[]string{registry}, http.StatusOK,
+		},
+		"without it the same host is refused": {
+			domain.Networking{Type: domain.NetLimited},
+			[]string{registry}, http.StatusForbidden,
+		},
+		"and a host the set does not name, either way": {
+			domain.Networking{Type: domain.NetLimited, AllowPackageManagers: true},
+			[]string{elsewhere}, http.StatusForbidden,
+		},
+		// The flag widens; it does not replace. An operator's own list still
+		// admits what it always did.
+		"allowed_hosts still admits its own": {
+			domain.Networking{
+				Type: domain.NetLimited, AllowPackageManagers: true,
+				AllowedHosts: []string{registry},
+			},
+			[]string{elsewhere}, http.StatusOK,
+		},
+		// An unrecognized policy admits nothing, and a widening flag beside it
+		// does not make it recognized.
+		"an unknown policy stays closed": {
+			domain.Networking{Type: "bogus", AllowPackageManagers: true},
+			[]string{registry}, http.StatusForbidden,
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			gate.UsePackageRegistries(t, tc.registries...)
+			g := gate.New(gate.Config{
+				Networking: tc.net,
+				IPAllowed:  func(net.IP) error { return nil },
+			})
+			gsrv := httptest.NewServer(g)
+			defer gsrv.Close()
+
+			resp, err := proxyClient(t, gsrv.URL, nil).Get(origin.URL)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer resp.Body.Close()
+			if resp.StatusCode != tc.want {
+				t.Errorf("status = %d, want %d", resp.StatusCode, tc.want)
+			}
+		})
+	}
+}
+
+// A dial the curated registry set is the only reason for is held to the
+// platform's address floor, exactly as an MCP-only dial is: neither host is one
+// an operator vouched for by listing it, so a poisoned or rebound answer must
+// not reach a link-local or loopback address. An operator's own entry for the
+// same host is dialled unfloored, which is the precedence admit() encodes.
+func TestAPackageRegistryOnlyDialIsHeldToTheAddressFloor(t *testing.T) {
+	origin := echoOrigin(t)
+	defer origin.Close()
+	host := hostOf(t, origin.URL)
+
+	for name, tc := range map[string]struct {
+		net  domain.Networking
+		want int
+	}{
+		// The origin is on loopback, which the real floor refuses.
+		"the floor refuses a registry-only dial": {
+			domain.Networking{Type: domain.NetLimited, AllowPackageManagers: true},
+			http.StatusBadGateway,
+		},
+		// The same address, admitted by the operator's own list, is dialled.
+		"and leaves an operator's own host alone": {
+			domain.Networking{
+				Type: domain.NetLimited, AllowPackageManagers: true,
+				AllowedHosts: []string{host},
+			},
+			http.StatusOK,
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			gate.UsePackageRegistries(t, host)
+			// No IPAllowed override: this is the production floor.
+			g := gate.New(gate.Config{Networking: tc.net})
+			gsrv := httptest.NewServer(g)
+			defer gsrv.Close()
+
+			resp, err := proxyClient(t, gsrv.URL, nil).Get(origin.URL)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer resp.Body.Close()
+			if resp.StatusCode != tc.want {
+				t.Errorf("status = %d, want %d", resp.StatusCode, tc.want)
+			}
+		})
+	}
+}
+
+// The same widening over CONNECT, which is the handler a package manager
+// actually uses: every registry the recording probed answers on https. The two
+// handlers admit through one policy but dial on their own, so a flag honored in
+// one of them is not thereby honored in both.
+func TestGateTunnelsAPackageRegistryOnlyUnderItsFlag(t *testing.T) {
+	origin := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, "wheel-ok")
+	}))
+	defer origin.Close()
+	host := hostOf(t, origin.URL)
+
+	// The floor is lifted, because the origin is on loopback; that a
+	// registry-only dial is floored at all is the plain-HTTP test above.
+	cfg := gate.Config{
+		Networking: domain.Networking{Type: domain.NetLimited, AllowPackageManagers: true},
+		IPAllowed:  func(net.IP) error { return nil },
+	}
+
+	gate.UsePackageRegistries(t, host)
+	open := httptest.NewServer(gate.New(cfg))
+	defer open.Close()
+	resp, err := proxyClient(t, open.URL, origin).Get(origin.URL)
+	if err != nil {
+		t.Fatalf("the registry was not tunnelled under its flag: %v", err)
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(body) != "wheel-ok" {
+		t.Errorf("tunnelled body = %q, want the origin's own", body)
+	}
+
+	// The same set and the same origin with the flag off: refused by the policy,
+	// which Go surfaces as the CONNECT's own status text.
+	cfg.Networking = domain.Networking{Type: domain.NetLimited}
+	shut := httptest.NewServer(gate.New(cfg))
+	defer shut.Close()
+	if _, err := proxyClient(t, shut.URL, origin).Get(origin.URL); err == nil {
+		t.Fatal("the tunnel was established without allow_package_managers")
+	} else if got := err.Error(); !strings.Contains(got, http.StatusText(http.StatusForbidden)) {
+		t.Errorf("tunnel error = %v, want the 403 of a policy refusal", err)
+	}
+}
+
 // The declared endpoints are read, never written to: a policy that appended them
 // onto the config's own AllowedHosts array would hand the next reader of that
 // slice a list it never configured.

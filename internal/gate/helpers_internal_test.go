@@ -7,6 +7,7 @@ import (
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/dialguard"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/egress"
 )
 
 func TestDefaultTransportConfig(t *testing.T) {
@@ -146,5 +147,100 @@ func TestTheMCPSetNormalizesAHostLikeTheOperatorsList(t *testing.T) {
 	}
 	if ok, _ := p.admit("evil.mcp.example.com", "8443"); ok {
 		t.Error("a subdomain of the declared host was admitted")
+	}
+}
+
+// UsePackageRegistries points the curated allow-set at hosts a test can serve,
+// for the duration of the test. The real set names public registries, which a
+// proxy test can neither resolve nor dial, and the arm worth driving through the
+// proxy is the one where the request goes through — so the seam exists, but only
+// under `go test`: this is a _test.go file, and the shipped gate has no way to
+// reach it. Install it before gate.New, which is where newPolicy reads the set.
+//
+// Swapping a package-level variable is safe only while this package's tests run
+// sequentially, which today they all do. A test that calls t.Parallel() and one
+// that calls this would race, and the loser would be judged against the other's
+// set — so give such a test its own policy through newPolicy instead.
+func UsePackageRegistries(t *testing.T, hosts ...string) {
+	t.Helper()
+	saved := packageRegistries
+	packageRegistries = egress.NewHostSet(hosts)
+	t.Cleanup(func() { packageRegistries = saved })
+}
+
+// allow_package_managers opens the curated package-registry set beyond the
+// operator's own allowed_hosts. Driven at the policy for the same reason the MCP
+// set's normalization is — the set names real public registries, which a proxy
+// test can neither resolve nor dial. What the proxy does with the answer is
+// TestGateAdmitsAPackageRegistryOnlyUnderItsFlag's.
+//
+// The second return value is asserted everywhere, not just the first: it is what
+// puts the dial under the address floor, and a set that admitted a registry
+// without marking it would open a hole no status code shows.
+func TestThePackageRegistrySetOpensOnlyUnderItsFlag(t *testing.T) {
+	limited := func(flag bool) domain.Networking {
+		return domain.Networking{Type: domain.NetLimited, AllowPackageManagers: flag}
+	}
+	for name, tc := range map[string]struct {
+		net                 domain.Networking
+		host, port          string
+		wantOK, wantWidened bool
+	}{
+		"the flag opens the index":             {limited(true), "pypi.org", "443", true, true},
+		"and the wheel CDN beside it":          {limited(true), "files.pythonhosted.org", "443", true, true},
+		"without the flag the index is shut":   {limited(false), "pypi.org", "443", false, false},
+		"nor is the CDN open without it":       {limited(false), "files.pythonhosted.org", "443", false, false},
+		"a control host is refused either way": {limited(true), "example.com", "443", false, false},
+		// Host-shaped, not endpoint-shaped: the recording's probes say which
+		// hosts the flag opens and nothing about a port, and an operator's own
+		// entry opens every port on its host. The MCP set is the port-scoped one,
+		// because an agent author declares an endpoint.
+		"the registry is open on any port": {limited(true), "pypi.org", "8080", true, true},
+		// Exact hosts, no suffix rule: `files.pythonhosted.org` is an entry, not
+		// evidence that `*.pythonhosted.org` is one.
+		"a subdomain of a registry is not the registry": {limited(true), "evil.pypi.org", "443", false, false},
+		"nor is the CDN's parent domain":                {limited(true), "pythonhosted.org", "443", false, false},
+		// A widening flag cannot make an unrecognized policy recognized, and
+		// `unrestricted` already admits every host without the floor.
+		"an unknown policy stays closed": {
+			domain.Networking{Type: "bogus", AllowPackageManagers: true}, "pypi.org", "443", false, false},
+		"unrestricted admits it unfloored": {
+			domain.Networking{Type: domain.NetUnrestricted, AllowPackageManagers: true}, "pypi.org", "443", true, false},
+		// The operator's own list is consulted first, so a registry an operator
+		// also listed is dialled as the operator's host — unfloored, because
+		// listing it is the vouching the floor stands in for.
+		"an operator's own entry wins, and is not floored": {
+			domain.Networking{Type: domain.NetLimited, AllowPackageManagers: true,
+				AllowedHosts: []string{"pypi.org"}}, "pypi.org", "443", true, false},
+	} {
+		t.Run(name, func(t *testing.T) {
+			ok, widened := newPolicy(tc.net, nil).admit(tc.host, tc.port)
+			if ok != tc.wantOK || widened != tc.wantWidened {
+				t.Errorf("admit(%q, %q) = (%v, %v), want (%v, %v)",
+					tc.host, tc.port, ok, widened, tc.wantOK, tc.wantWidened)
+			}
+		})
+	}
+}
+
+// The set is what a recording sized, not what the reference's prose implies. The
+// pinned SDK says "public package registries (PyPI, npm, etc.)" and the public
+// docs say "such as PyPI and npm", but the only probe of the flag tried three
+// URLs — two Python hosts and a control — so every other ecosystem's registry is
+// unevidenced and stays shut (#594). A guessed entry would widen a `limited`
+// sandbox past the reference, which is the one direction this gate must not err
+// in, so the absences are asserted rather than left to the list's own reading.
+func TestThePackageRegistrySetAdmitsNoEcosystemNobodyRecorded(t *testing.T) {
+	p := newPolicy(domain.Networking{Type: domain.NetLimited, AllowPackageManagers: true}, nil)
+	for _, host := range []string{
+		"registry.npmjs.org", "registry.yarnpkg.com", // npm
+		"crates.io", "index.crates.io", "static.crates.io", // cargo
+		"rubygems.org", "index.rubygems.org", // gem
+		"proxy.golang.org", "sum.golang.org", // go
+		"archive.ubuntu.com", "security.ubuntu.com", "deb.debian.org", // apt
+	} {
+		if ok, _ := p.admit(host, "443"); ok {
+			t.Errorf("admit(%q) = true, but no recording sizes it — the flag must fail closed on it (#594)", host)
+		}
 	}
 }

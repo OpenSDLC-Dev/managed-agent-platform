@@ -78,10 +78,11 @@ type Config struct {
 	// declares MCP servers at. They widen a `limited` policy that sets
 	// allow_mcp_servers and nothing else — see newPolicy.
 	MCPServerEndpoints []string
-	// IPAllowed is the address floor a dial admitted only by MCPServerEndpoints
-	// is held to, run on the resolved address. Nil selects dialguard.IPAllowed,
-	// which is what the platform's own MCP client uses on the same declarations;
-	// a test overrides it to reach a loopback server.
+	// IPAllowed is the address floor a dial admitted only by a widening flag —
+	// MCPServerEndpoints, or the package registries Networking opens — is held
+	// to, run on the resolved address. Nil selects dialguard.IPAllowed, which is
+	// what the platform's own MCP client uses on the same declarations; a test
+	// overrides it to reach a loopback server.
 	IPAllowed     func(net.IP) error
 	Credentials   []egress.Credential
 	OnUnreachable func(host string, placeholders []string)
@@ -118,35 +119,35 @@ type Gate struct {
 	tunnelIdle    time.Duration
 }
 
-// mcpGuardKey marks a request whose destination only the agent's own MCP
-// declarations admitted. It rides the context because the address floor has to
-// run on the *resolved* address, which is the dialer's business and not the
-// handler's — a name that resolves into a refused class, or one that resolves
-// differently on the second lookup, is exactly what a pre-dial check misses.
-type mcpGuardKey struct{}
+// floorGuardKey marks a request only a widening flag admitted — the agent's own
+// MCP declarations, or the curated package registries. It rides the context
+// because the address floor has to run on the *resolved* address, which is the
+// dialer's business and not the handler's — a name that resolves into a refused
+// class, or one that resolves differently on the second lookup, is exactly what
+// a pre-dial check misses.
+type floorGuardKey struct{}
 
 // guardTheDial marks ctx so the dialer under it holds the connection to the
 // address floor.
 func guardTheDial(ctx context.Context) context.Context {
-	return context.WithValue(ctx, mcpGuardKey{}, struct{}{})
+	return context.WithValue(ctx, floorGuardKey{}, struct{}{})
 }
 
 // newDialer is the one dialer the gate opens every socket through — both
 // handlers, and the transport under handlePlain.
 //
-// The floor runs only for a dial the agent's own declarations admitted:
-// `allowed_hosts` is an operator's list and this proxy is the operator's own
-// egress, so narrowing that half would be a plan 12 decision rather than this
-// one. ControlContext rather than Control, because the marker is what tells the
-// two apart and only the context carries it; Go calls it once per candidate
-// address, so a dual-stack or multi-A name is judged on every address it is
-// actually about to connect to.
+// The floor runs only for a dial a widening flag admitted: `allowed_hosts` is an
+// operator's list and this proxy is the operator's own egress, so narrowing that
+// half would be a plan 12 decision rather than this one. ControlContext rather
+// than Control, because the marker is what tells the two apart and only the
+// context carries it; Go calls it once per candidate address, so a dual-stack or
+// multi-A name is judged on every address it is actually about to connect to.
 func newDialer(ipAllowed func(net.IP) error) *net.Dialer {
 	floor := dialguard.Control(ipAllowed)
 	return &net.Dialer{
 		Timeout: dialTimeout,
 		ControlContext: func(ctx context.Context, network, address string, c syscall.RawConn) error {
-			if ctx.Value(mcpGuardKey{}) == nil {
+			if ctx.Value(floorGuardKey{}) == nil {
 				return nil
 			}
 			return floor(network, address, c)
@@ -213,13 +214,13 @@ func (g *Gate) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 func (g *Gate) handleConnect(w http.ResponseWriter, r *http.Request) {
 	target := addrWithPort(r.Host, "443")
 	host, port := hostOnly(target), portOnly(target)
-	ok, mcpOnly := g.policy.admit(host, port)
+	ok, widenedOnly := g.policy.admit(host, port)
 	if !ok {
 		http.Error(w, "host not permitted by the environment's networking policy", http.StatusForbidden)
 		return
 	}
 	ctx := r.Context()
-	if mcpOnly {
+	if widenedOnly {
 		ctx = guardTheDial(ctx)
 	}
 	upstream, err := g.dial(ctx, "tcp", target)
@@ -347,14 +348,14 @@ func (g *Gate) handlePlain(w http.ResponseWriter, r *http.Request) {
 	// carries the same two halves and is normalized the same way.
 	target := addrWithPort(r.URL.Host, defaultPort(r.URL.Scheme))
 	host, port := hostOnly(target), portOnly(target)
-	ok, mcpOnly := g.policy.admit(host, port)
+	ok, widenedOnly := g.policy.admit(host, port)
 	if !ok {
 		http.Error(w, "host not permitted by the environment's networking policy", http.StatusForbidden)
 		return
 	}
 
 	ctx := r.Context()
-	if mcpOnly {
+	if widenedOnly {
 		ctx = guardTheDial(ctx)
 	}
 	out := r.Clone(ctx)
