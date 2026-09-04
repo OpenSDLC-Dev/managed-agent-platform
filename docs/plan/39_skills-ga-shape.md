@@ -52,8 +52,10 @@ batches, taken through the console's same-origin proxy against the live endpoint
 model turns). Bracketed numbers are entry indices there.
 
 **The Skill object has exactly seven keys** — `type`, `id`, `display_name`, `source` (an
-object `{"type": "custom"|"anthropic"}`), `latest_version_id` (a `skver_…` id), `created_at`,
-`updated_at` [0, 2, 16]. `display_title`, `latest_version` and a bare-string `source` appear
+object; its `type` read `custom` or `anthropic` in everything recorded here, and the public
+docs list `anthropic_example` and `plugin` beside them — the list *filter* is the narrower
+pair, which is the distinction the List parameters note below turns on), `latest_version_id`
+(a `skver_…` id), `created_at`, `updated_at` [0, 2, 16]. `display_title`, `latest_version` and a bare-string `source` appear
 nowhere in the GA lane.
 
 **The SkillVersion object has exactly six keys** — `type`, `id`, `skill_id`, `name`,

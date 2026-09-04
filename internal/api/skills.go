@@ -564,14 +564,18 @@ func (s *server) insertSkillVersion(ctx context.Context, id, vid, version string
 	// 54): two names on one skill would materialize into two directories, so a
 	// pin's landing place would depend on which version answered it. Every
 	// version shares the name by this very rule, so any row answers — except in
-	// a database upgraded across this change, where nothing enforced it before,
-	// and LIMIT 1 then picks an arbitrary one of the names a skill accumulated;
-	// deleting the odd version is the recovery. Reading it under the parent lock
-	// is what stops two concurrent creates on a skill left with no versions from
-	// each establishing a different one.
+	// a database upgraded across this change, where nothing enforced it before
+	// and a skill may hold several. The newest version's name is the one that
+	// wins there, by the same length-then-lexical order the delete path
+	// recomputes latest_version with, so the answer is at least deterministic
+	// and is the name a client last chose; deleting the odd version is the
+	// recovery. Reading it under the parent lock is what stops two concurrent
+	// creates on a skill left with no versions from each establishing a
+	// different one.
 	var named string
 	switch err := tx.QueryRow(ctx,
-		`SELECT name FROM skill_versions WHERE skill_id = $1 LIMIT 1`, id).Scan(&named); {
+		`SELECT name FROM skill_versions WHERE skill_id = $1
+		 ORDER BY length(version) DESC, version DESC LIMIT 1`, id).Scan(&named); {
 	case errors.Is(err, pgx.ErrNoRows): // nothing to be consistent with yet
 	case err != nil:
 		return time.Time{}, err

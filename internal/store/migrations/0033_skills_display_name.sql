@@ -6,6 +6,13 @@
 -- therefore refuses creates the reference accepts, and refusing a create the
 -- reference accepts is a harder break than accepting one it refuses.
 --
+-- A row written before this change can also be far longer than the 255 characters
+-- the create form now accepts: the pre-convergence field was bounded at 4096 bytes.
+-- Nothing truncates it. The cap is a create-time bound, not a response-schema one —
+-- the GA SDK types display_name as a plain string — so such a row still renders and
+-- parses; it simply could not be created today. Rewriting user-chosen text in a
+-- migration would lose more than it buys.
+--
 -- The column keeps its 0007 name. Only the wire field was renamed, and the two
 -- are decoupled everywhere else in this schema; renaming the column would buy a
 -- second immutable migration and change nothing a client can observe.
