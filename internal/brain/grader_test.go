@@ -194,6 +194,9 @@ func TestOutcomeCloudSettlementChainsHarvest(t *testing.T) {
 	if n := h.liveOf(t, queue.OutputsHarvest); n != 1 {
 		t.Errorf("live outputs_harvest items = %d, want 1", n)
 	}
+	if !h.harvestChainGrading(t) {
+		t.Error("chain_grading = false on a grading cycle's own harvest; its settlement must chain the grading turn")
+	}
 	if n := h.liveOf(t, queue.ModelTurn); n != 0 {
 		t.Errorf("live model_turn items = %d, want 0 (the harvest chains the grading turn)", n)
 	}
@@ -732,5 +735,63 @@ func TestOutcomeGraderDeliverableSizeMismatchListsOnly(t *testing.T) {
 	}
 	if strings.Contains(user, "## liar.txt") || strings.Contains(user, longer) {
 		t.Errorf("mismatched deliverable was inlined: %q", user)
+	}
+}
+
+// The idle trigger's first site (docs/plan/38, #263): a cloud session that ends
+// its turn and folds idle harvests its deliverables with no outcome anywhere in
+// the picture — which is what the reference docs describe, and what a session
+// that never sent user.define_outcome got nothing of before.
+func TestEndTurnWithNoOutcomeHarvestsAtIdle(t *testing.T) {
+	h := newHarnessEnv(t, "cloud", [][]provider.Chunk{agentReply("wrote the deck")}, nil)
+	h.wake(t, "build me a deck")
+	h.runOnce(t)
+
+	if got := h.status(t); got != "idle" {
+		t.Fatalf("status = %q, want idle", got)
+	}
+	if n := h.liveOf(t, queue.OutputsHarvest); n != 1 {
+		t.Fatalf("live outputs_harvest = %d, want 1", n)
+	}
+	if h.harvestChainGrading(t) {
+		t.Error("chain_grading = true; an idle with no outcome chains no grading turn")
+	}
+	if n := h.liveOf(t, queue.ModelTurn); n != 0 {
+		t.Errorf("live model_turn = %d, want 0 (nothing is waiting on this snapshot)", n)
+	}
+}
+
+// self_hosted harvests on neither trigger: the platform cannot reach a BYOC
+// sandbox, whatever scheduled the pass (docs/DIVERGENCES.md's self_hosted entry).
+func TestEndTurnOnSelfHostedNeverHarvests(t *testing.T) {
+	h := newHarness(t, [][]provider.Chunk{agentReply("wrote the deck")}, nil)
+	h.wake(t, "build me a deck")
+	h.runOnce(t)
+
+	if got := h.status(t); got != "idle" {
+		t.Fatalf("status = %q, want idle", got)
+	}
+	if n := h.liveOf(t, queue.OutputsHarvest); n != 0 {
+		t.Errorf("live outputs_harvest = %d, want 0 (no file lane on self_hosted)", n)
+	}
+}
+
+// A woken ending is not an idle one: a child that ends without reporting wakes
+// its coordinator in the same commit, so the session folds to running and
+// nothing is harvested. The gate needs no separate guard for this — `woke` and
+// a session-level fold to idle are structurally exclusive — and this pins it.
+func TestChildEndingThatWakesItsCoordinatorSkipsHarvest(t *testing.T) {
+	h := newHarnessEnv(t, "cloud", [][]provider.Chunk{agentReply("I looked, and found nothing")}, nil)
+	child := h.childTurn(t, "find the papers")
+	h.runOnce(t)
+
+	if s := h.threadStatus(t, child); s != "idle" {
+		t.Errorf("child = %q, want idle on its own end_turn", s)
+	}
+	if s := h.status(t); s != "running" {
+		t.Fatalf("session = %q, want running with its woken coordinator", s)
+	}
+	if n := h.liveOf(t, queue.OutputsHarvest); n != 0 {
+		t.Errorf("live outputs_harvest = %d, want 0 (the session did not idle)", n)
 	}
 }

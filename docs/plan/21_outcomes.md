@@ -318,7 +318,7 @@ Decision 6).
    half-in (growth-past-cap and aggregate-cap-selection tests included).
    Harvest is scoped to sessions with outcomes in this plan (the deliverables surface is
    documented on the outcomes page); generalizing to every session is a follow-up issue
-   slice 5 files. `self_hosted` environments get no harvest — the platform cannot reach
+   slice 5 files — #263, designed in docs/plan/38_idle-outputs-harvest.md. `self_hosted` environments get no harvest — the platform cannot reach
    a BYOC sandbox, and the reference worker has no file lane at all (plan 08's finding)
    — recorded as a deliberate divergence in the same PR.
 9. **Not conversation-gated.** Outcomes work on both environment kinds — on

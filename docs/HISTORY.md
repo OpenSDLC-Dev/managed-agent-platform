@@ -49,6 +49,18 @@ new directory and in-repo citations re-pointed in the moving PR (plan
 
 ---
 
+## Idle outputs harvest acceptance (plan 38, #263, run 2026-09-04) — ✅ passed
+
+Verified against a docker-compose stack built from `feat/idle-outputs-harvest` @ cbc652b (the review-hardened revision — idle harvests attach to a live sandbox rather than provisioning one; the shipped tip adds three edge-case correctness fixes — transient-attach propagation, a corrupt-agent-state skip, and a grading-takeover requeue — that do not touch this harvested happy path), driving Anthropic's own `eval-driven-agent-development` workshop (`src/create-slides.ts`, `@anthropic-ai/sdk` 0.93.0, `ANTHROPIC_BASE_URL=http://localhost:8080`, the workshop agent on `claude-sonnet-4-6`), **without** the `HARVEST_VIA_OUTCOME` workaround.
+
+`create-slides food` on a plain session (`sesn_jet01k8b2fnzn7k4tztf0mx4`): the agent wrote its deck under `/mnt/session/outputs/`, the session folded to `idle` with stop_reason `end_turn`, and **no `span.outcome_evaluation_*` or `user.define_outcome` event appeared**. `GET /v1/files?scope_id=<session>&limit=100` then listed `output.pptx` (37,253 bytes, `scope: {type: "session"}`, `downloadable: true`) — the harvest attached to the session's still-live sandbox, walked `/mnt/session/outputs/`, and published, with no outcome cycle. The same workshop against `main` returned `{"data":[]}` through its 10-retry backoff (issue #263's 2026-09-03 comment). An earlier run of the same case against the pre-revision base 0f0239c listed both `output.pptx` and `build_pptx.py`.
+
+The existing outcome path is unchanged: the harness suites `TestOutcomeCloudSettlementChainsHarvest` (grading still chains a harvest, asserting `chain_grading=true`), `TestHarvestDiscardsWhenCycleSettled` (an interrupt mid-grading-harvest still discards) and `TestOutcomeInterruptDuringGrading` stay green.
+
+Verifier subagent (pinned model) on cbc652b: PASS, `make verify` green at 90.12% total statement coverage, the three new guards (no-provision idle harvest, corrupt-state drain, delegation-bound harvest) mutation-checked. Dual review (Codex `gpt-5.6-sol`; Claude review as an Opus 5 Workflow agent): the revision answered five findings from the review of the base commit; the remaining notes were addressed before merge (see the PR). The two API-side idle folds (`user.interrupt`, last-running-thread archive) are out of scope and tracked by #586.
+
+---
+
 ## Scheduled deployments (plan 37, #51) — archived 2026-09-01, all six slices delivered (#517, #519, #522, #524, #529, #531, #532, #535, #536)
 
 A **deployment** binds an agent to an environment, credentials, resources and initial

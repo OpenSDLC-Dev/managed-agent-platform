@@ -1,13 +1,17 @@
 package executor
 
-// The outputs_harvest consumer (docs/plan/21_outcomes.md, Decision 8). When a
-// cloud session's turn settles into an outcome-grading cycle, the brain
-// enqueues one outputs_harvest item instead of the grading turn directly; this
-// file walks /mnt/session/outputs/ in the session's sandbox, publishes the
-// tree into the files registry as a per-path snapshot, and chains the grading
-// model_turn — so the grader (and, through GET /v1/files, the caller) sees the
-// deliverables as they stood when the cycle began. The kind is internal: Poll
-// never serves it, so nothing of this appears on the worker wire.
+// The outputs_harvest consumer (docs/plan/21_outcomes.md Decision 8, extended
+// by docs/plan/38). A cloud session's brain enqueues one outputs_harvest item
+// for either of two reasons: a turn settling into an outcome-grading cycle
+// (in place of the grading turn, which this file chains once the snapshot is
+// in, so the grader never reads a stale one), or the session simply folding
+// idle with no outcome at all (nothing to chain — the snapshot is the point).
+// Either way this file walks /mnt/session/outputs/ in the session's sandbox and
+// publishes the tree into the files registry as a per-path snapshot, so the
+// caller sees the deliverables through GET /v1/files. The work is identical
+// whichever trigger scheduled it; only settleHarvest branches. The kind is
+// internal: Poll never serves it, so nothing of this appears on the worker
+// wire.
 
 import (
 	"context"
@@ -31,8 +35,8 @@ import (
 
 // outputsDir is where a session's deliverables live inside the sandbox: files
 // the agent leaves under it are harvested into the files registry when a
-// grading cycle begins. The path matches the reference's documented outputs
-// directory.
+// grading cycle begins, and when the session goes idle. The path matches the
+// reference's documented outputs directory.
 const outputsDir = "/mnt/session/outputs"
 
 // harvestListScript enumerates the regular files under outputsDir as
@@ -80,6 +84,16 @@ type harvestFile struct {
 // the item in one transaction. Any fault leaves the item for reclaim with the
 // previous snapshot intact — the registry moves only when a whole new snapshot
 // commits.
+//
+// How it reaches the sandbox depends on the trigger (docs/plan/38 decision 8).
+// A grading harvest (ChainGrading) provisions one — the grader needs a current
+// snapshot, so a session whose sandbox was reaped gets a fresh one. An
+// idle-triggered harvest never provisions: it fires on every cloud idle, and
+// spinning up a container to walk an empty /mnt/session/outputs on a plain
+// text-only session would make ordinary sessions pay for a feature they never
+// use. It reuses a sandbox only if one is already live (the session just ran
+// tools and wrote deliverables); with none it settles as a no-op, publishing
+// nothing and replacing nothing.
 func (e *Executor) processHarvest(ctx context.Context, item *queue.Item) (err error) {
 	ctx, span := consumerSpan(ctx, item, "outputs_harvest")
 	defer func() {
@@ -99,17 +113,32 @@ func (e *Executor) processHarvest(ctx context.Context, item *queue.Item) (err er
 		// A storage-less deploy cannot publish deliverables (the same posture
 		// as materializeFiles): skip the snapshot — leaving any previous one
 		// untouched, since there is nothing to replace it with — but still
-		// chain the grading turn, so the outcome settles transcript-only
-		// instead of stalling the session.
-		slog.WarnContext(ctx, "executor: no blob store configured; outputs harvest skipped, grading proceeds transcript-only",
-			"session", item.SessionID)
+		// settle, so a grading cycle chains its turn and runs transcript-only
+		// instead of stalling the session, and an idle-triggered pass simply
+		// completes.
+		//
+		// A grading harvest expected storage to be there, so its skip is a
+		// warning an operator should see; an idle harvest fires on every cloud
+		// idle, so on a blob-less deploy it is the ordinary case, not a
+		// misconfiguration — log it at debug (item 6 of the #263 review).
+		if item.ChainGrading {
+			slog.WarnContext(ctx, "executor: no blob store configured; grading outputs harvest skipped",
+				"session", item.SessionID)
+		} else {
+			slog.DebugContext(ctx, "executor: no blob store configured; idle outputs harvest skipped",
+				"session", item.SessionID)
+		}
 		return e.settleHarvest(ctx, item, nil, false)
 	}
 
 	// Keep the lease from provisioning through the reads: a large tree can
 	// outlast a fixed TTL, and losing the lease mid-stage cancels the work.
 	kctx, keeper := e.queue.KeepLease(ctx, item, e.cfg.LeaseTTL, e.cfg.StallTimeout)
-	files, runErr := e.collectOutputs(kctx, item, sess, keeper.Progress)
+	sb, walk, runErr := e.harvestSandbox(kctx, item, sess, keeper.Progress)
+	var files []harvestFile
+	if runErr == nil && walk {
+		files, runErr = e.collectOutputs(kctx, item, sb, keeper.Progress)
+	}
 	if kerr := keeper.Close(); kerr != nil {
 		e.discardStaged(ctx, files)
 		return fmt.Errorf("lease keeper: %w", kerr)
@@ -117,18 +146,52 @@ func (e *Executor) processHarvest(ctx context.Context, item *queue.Item) (err er
 	if runErr != nil {
 		return runErr
 	}
-	return e.settleHarvest(ctx, item, files, true)
+	// walk is also the replace flag: a pass that read no sandbox replaces
+	// nothing, so an idle harvest that found no live sandbox leaves the
+	// previous snapshot in place rather than deleting it (docs/plan/38
+	// decision 6).
+	return e.settleHarvest(ctx, item, files, walk)
 }
 
-// collectOutputs lists the outputs tree and stages every admitted file's bytes
-// into the blob store at its final key. On error the staged objects are
-// deleted — a snapshot either stages whole or leaves no residue.
+// harvestSandbox obtains the sandbox this harvest reads, and reports whether
+// there is one to walk (docs/plan/38 decision 8). A grading harvest provisions;
+// an idle one only attaches to a live sandbox and, finding none (ErrNotFound),
+// returns (nil, false, nil) so the caller settles a no-op. Any OTHER attach
+// error is propagated, never swallowed: it is a transient fault (a Docker
+// inspect hiccup, a K8s API timeout), not "no sandbox", so the lease-recovery
+// reclaim must retry it — exactly as a grading harvest's provision error is
+// retried. Taking it for no-sandbox would silently drop the session's only
+// harvest on a one-off fault.
+func (e *Executor) harvestSandbox(ctx context.Context, item *queue.Item, sess sessionRun, progress func()) (sandbox.Sandbox, bool, error) {
+	if item.ChainGrading {
+		sb, err := e.provisionSandbox(ctx, item.SessionID, sess, progress)
+		if err != nil {
+			return nil, false, err
+		}
+		progress()
+		return sb, true, nil
+	}
+	sb, err := e.provider.Attach(ctx, item.SessionID)
+	switch {
+	case errors.Is(err, sandbox.ErrNotFound):
+		return nil, false, nil
+	case err != nil:
+		return nil, false, fmt.Errorf("attach session sandbox: %w", err)
+	}
+	progress()
+	return sb, true, nil
+}
+
+// collectOutputs lists the outputs tree in the given sandbox and stages every
+// admitted file's bytes into the blob store at its final key. On error the
+// staged objects are deleted — a snapshot either stages whole or leaves no
+// residue.
 //
 // progress is called as each step lands, because this is the other lane that
 // reads a sandbox and so the other lane a wedged call can park (#383): a large
 // tree legitimately takes a while, and only a per-file report tells that apart
 // from a read that will never return.
-func (e *Executor) collectOutputs(ctx context.Context, item *queue.Item, sess sessionRun, progress func()) (_ []harvestFile, err error) {
+func (e *Executor) collectOutputs(ctx context.Context, item *queue.Item, sb sandbox.Sandbox, progress func()) (_ []harvestFile, err error) {
 	var staged []harvestFile
 	defer func() {
 		if err != nil {
@@ -138,11 +201,6 @@ func (e *Executor) collectOutputs(ctx context.Context, item *queue.Item, sess se
 		}
 	}()
 
-	sb, err := e.provisionSandbox(ctx, item.SessionID, sess, progress)
-	if err != nil {
-		return nil, err
-	}
-	progress()
 	res, err := sb.Exec(ctx, sandbox.ExecRequest{Command: harvestListScript})
 	if err != nil {
 		return nil, fmt.Errorf("list outputs: %w", err)
@@ -220,12 +278,14 @@ func (e *Executor) collectOutputs(ctx context.Context, item *queue.Item, sess se
 }
 
 // settleHarvest is the harvest's single registry transaction: under the
-// session row lock, replace the session's snapshot rows, enqueue the grading
-// model_turn, and complete the item — all or nothing. The fence is the outcome
-// entry still being `evaluating`: a cycle that settled while the harvest ran
-// (a user.interrupt flips the entry and cancels the queue in its own
-// transaction) wins outright, mirroring the brain's settleVerdict rule —
-// nothing of this harvest commits and the staged bytes are discarded.
+// session row lock, replace the session's snapshot rows, chain the grading
+// model_turn where one is waiting, and complete the item — all or nothing.
+// The fence has three arms (docs/plan/38 decision 2), described where it is
+// applied below; the one it has always had is the outcome entry still being
+// `evaluating`, so that a grading cycle which settled while the harvest ran (a
+// user.interrupt flips the entry and cancels the queue in its own transaction)
+// wins outright, mirroring the brain's settleVerdict rule — nothing of that
+// harvest commits and the staged bytes are discarded.
 func (e *Executor) settleHarvest(ctx context.Context, item *queue.Item, files []harvestFile, replace bool) (err error) {
 	published := false
 	defer func() {
@@ -249,10 +309,52 @@ func (e *Executor) settleHarvest(ctx context.Context, item *queue.Item, files []
 	var evals []domain.OutcomeEvaluation
 	if len(evalsJSON) > 0 {
 		if err := json.Unmarshal(evalsJSON, &evals); err != nil {
-			return fmt.Errorf("decode stored outcome_evaluations: %w", err)
+			// A grading harvest cannot settle without the outcome it grades, so
+			// a decode failure there is a genuine fault. An idle harvest never
+			// reads the outcome — its publish-or-no-op arm ignores it — and must
+			// not fault on one: a session whose outcome state is corrupt is one
+			// runTurn already idled for that same corruption ("session outcome
+			// state is corrupt"), which is what scheduled this idle harvest, so
+			// faulting here would reclaim-loop it forever (#263 review). Treat
+			// the undecodable state as no active outcome and settle.
+			if item.ChainGrading {
+				return fmt.Errorf("decode stored outcome_evaluations: %w", err)
+			}
+			evals = nil
 		}
 	}
-	if active, ok := events.ActiveOutcome(evals); !ok || active.Result != domain.OutcomeResultEvaluating {
+	// Live outcome state first, the item's own tag second (docs/plan/38
+	// decision 2). Reading the tag first would be wrong twice over. An outcome
+	// that is evaluating right now owns this pass whichever trigger enqueued
+	// it: the two flavors share one live slot per session, so a grading cycle
+	// starting while an idle-tagged item is still queued has its own enqueue
+	// silently swallowed, and refusing to serve it would strand that outcome in
+	// evaluating forever. And once nothing is evaluating, the outcome column
+	// can no longer tell a cycle a user.interrupt settled mid-harvest (discard,
+	// the fence this has always been) from a session that never had an outcome
+	// at all (publish) — only the tag can, which is why it exists.
+	active, ok := events.ActiveOutcome(evals)
+	grading := ok && active.Result == domain.OutcomeResultEvaluating
+	switch {
+	case grading && !replace && !item.ChainGrading:
+		// Grading takeover on an idle-tagged item that walked no sandbox
+		// (docs/plan/38 decision 2): the idle item held the one live harvest slot
+		// when a fresh outcome turned evaluating, so the cycle's own enqueue was
+		// swallowed and this stale item is all it has — but an idle attach found
+		// no live sandbox, so replace is false and nothing was freshly collected.
+		// Chaining the grader here would grade a stale or empty snapshot (before
+		// the idle trigger existed a grading harvest always provisioned, so this
+		// never arose). Hand the item back as a grading harvest instead: its next
+		// claim provisions a sandbox, walks a current tree, publishes it, and
+		// chains the grader then. The !ChainGrading guard is load-bearing: a
+		// grading-tagged item reaching here with replace=false is the blob-less
+		// deploy, which must still chain the grader transcript-only (below), not
+		// requeue.
+		if err := e.queue.RequeueAsGrading(ctx, tx, item); err != nil {
+			return err
+		}
+		return tx.Commit(ctx)
+	case !grading && item.ChainGrading:
 		if err := e.queue.Complete(ctx, tx, item); err != nil {
 			return err
 		}
@@ -291,14 +393,21 @@ func (e *Executor) settleHarvest(ctx context.Context, item *queue.Item, files []
 			}
 		}
 	}
-	// The one settlement that wakes the brain without first asking whether an
-	// MCP call is outstanding, and deliberately: a harvest runs inside the
-	// outcome cycle, after the turn has already ended, and the only producer of
-	// an agent.mcp_tool_use is the brain inside a turn — so there is no call
-	// here to schedule ahead of this. Said rather than left implicit, because
-	// the six sites that *do* ask are a set someone will count again.
-	if _, err := e.queue.Enqueue(ctx, tx, item.EnvironmentID, item.SessionID, queue.ModelTurn); err != nil {
-		return err
+	// Only a live grading cycle is waiting on this snapshot. A harvest a
+	// session's idle asked for publishes and stops: chaining a turn there would
+	// wake a session nobody asked to resume.
+	//
+	// The chaining branch is the one settlement that wakes the brain without
+	// first asking whether an MCP call is outstanding, and deliberately: a
+	// grading harvest runs inside the outcome cycle, after the turn has already
+	// ended, and the only producer of an agent.mcp_tool_use is the brain inside
+	// a turn — so there is no call here to schedule ahead of this. Said rather
+	// than left implicit, because the six sites that *do* ask are a set someone
+	// will count again.
+	if grading {
+		if _, err := e.queue.Enqueue(ctx, tx, item.EnvironmentID, item.SessionID, queue.ModelTurn); err != nil {
+			return err
+		}
 	}
 	if err := e.queue.Complete(ctx, tx, item); err != nil {
 		return err
