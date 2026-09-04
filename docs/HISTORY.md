@@ -4579,12 +4579,15 @@ and leaves the session running with its other repositories mounted.
 ## Second recording wave, registry reconciliation (#575) — review-hardening record (2026-09-04)
 
 Twenty-four registry entries were rewritten from a 281-pair recording of the live
-managed-agents endpoint. Six review passes found 34 defects between them — five,
-three, fifteen, four, six and one — and **fifteen of the 34 were one defect repeated**:
-the recording was read carefully, our own code was not read at all, and the entry was
-then filed as "confirmed, and we match". Those fifteen came one from the verifier, three
-from Codex, nine from the Claude reviewer, none from the fourth pass, and one each from
-the verifier's second and third runs.
+managed-agents endpoint. Seven review passes found 41 defects between them — five,
+three, fifteen, four, six, one and seven — and **sixteen of the 41 were one defect
+repeated**: the recording was read carefully, our own code was not read at all, and the
+entry was then filed as "confirmed, and we match". Those sixteen came one from the
+verifier, three from Codex, nine from the Claude reviewer, none from the fourth pass, and
+one each from the verifier's second, third and fourth runs. A finding is counted here
+when it changed a file in this repository, which is why the third pass counts one against
+the four it raised — its other three were answered in the pull request rather than in the
+tree.
 
 The verifier found five, of which the load-bearing one was a sentence claiming
 `isSkillReadPath` "admits exactly the subtree the reference serves" — inside an entry
@@ -4671,6 +4674,26 @@ this PR itself added to prevent it. The one thing that has reliably caught it is
 reader who opens our source with the entry's claim in hand and expects it to be wrong —
 which is what the verifier and the refute-first pass both are, and what re-reading the
 recording is not.
+
+The seventh pass makes the sixth's point twice over. Sent to attack the replacement
+sentence on the assumption that it too was wrong, it found that the conclusion had become
+right while the *reason* was still asserted: "there is no live-key-out-of-scope state here
+to compare against at all" is contradicted by our own code twice — `/v1/agents` under a
+Bearer environment key falls to the management lane and answers 401 `missing x-api-key
+header` for a live key and a revoked one alike, which is the same collapse by a second
+route rather than an absence, and `workScope` already calls a key naming another
+environment "a scope failure, not an authentication one". What is missing is named OAuth
+scopes, not an authority model. The same pass also found the citation overreaching — #550's
+body proposes a work-API admission split and says nothing of this surface, so the registry
+was deferring to an issue that would not retire the gap when closed; the issue's scope has
+been widened to match rather than the claim narrowed to fit.
+
+It also turned up a wire difference nobody had recorded, inside the fact this record had
+already called true-by-luck: the reference answers `DELETE /v1/agents/{id}` a 404
+`not_found_error`, where this platform answers a 405 `invalid_request_error` from the
+method-less fallback. Capability matched, wire did not. It gets no issue, because the
+pinned SDK's agent service exposes no delete at all and no typed client can reach it — but
+"agents cannot be deleted here either" had stood as a match for two passes.
 
 **The transferable rule, now written into the INFERRED preamble as a three-way routing
 test:** settling an inference has three ends — confirmed and we match, confirmed and we
