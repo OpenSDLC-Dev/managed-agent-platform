@@ -67,6 +67,9 @@ func TestEnvironmentConfigUpdatePreservesOmittedFields(t *testing.T) {
 			"networking": map[string]any{
 				"type":          "limited",
 				"allowed_hosts": []any{"internal.corp"},
+				// Packages under limited networking need the flag (plan 40
+				// decision 9); this fixture is about the merge, not that rule.
+				"allow_package_managers": true,
 			},
 			"packages": map[string]any{"pip": []any{"requests"}},
 		},

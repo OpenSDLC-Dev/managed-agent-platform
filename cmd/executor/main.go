@@ -26,10 +26,13 @@
 //	                         duration, default "30m"). No off switch, and floored
 //	                         at the longest single step this binary can name plus
 //	                         a minute for the kill and the answer that follow it:
-//	                         "11m" for one bash tool's timeout, or
-//	                         EXECUTOR_REPO_CLONE_TIMEOUT plus a minute where that
-//	                         is longer, since one clone is one silent interval.
-//	                         The floor holds for the default too: a clone budget
+//	                         "11m" for one bash tool's timeout, or the longer of
+//	                         EXECUTOR_REPO_CLONE_TIMEOUT and
+//	                         EXECUTOR_PACKAGE_INSTALL_TIMEOUT plus a minute where
+//	                         that is longer, since one clone and one manager's
+//	                         install are each one silent interval — and the
+//	                         refusal names whichever of the two set the floor.
+//	                         The floor holds for the default too: a step budget
 //	                         the default cannot clear fails startup until this is
 //	                         set. A budget under that step makes every reclaim
 //	                         stall at the same place
@@ -54,6 +57,11 @@
 //	                         abandoned and surfaces as a session.error
 //	EXECUTOR_REPO_CLONE_TIMEOUT     per-repository clone deadline (default 5m);
 //	                         past it the clone is abandoned the same way
+//	EXECUTOR_PACKAGE_INSTALL_TIMEOUT  deadline for ONE package manager's install
+//	                         of the environment's config.packages (default 10m);
+//	                         past it that manager is killed and surfaces as a
+//	                         session.error with reason "timeout", and the
+//	                         session's other managers still install
 //	EXECUTOR_MCP_PASS_TIMEOUT       budget for one mcp_exec pass (default 5m),
 //	                         whether it is listing a session's MCP servers or
 //	                         running a turn's calls; what it does not reach is
@@ -216,7 +224,8 @@ func run(ctx context.Context) error {
 	for env, dst := range map[string]*time.Duration{
 		"EXECUTOR_LEASE_TTL": &cfg.LeaseTTL, "EXECUTOR_POLL_INTERVAL": &cfg.PollInterval,
 		"EXECUTOR_REAP_INTERVAL": &cfg.ReapInterval, "EXECUTOR_REPO_CLONE_TIMEOUT": &cfg.RepoCloneTimeout,
-		"EXECUTOR_MCP_PASS_TIMEOUT": &cfg.MCPPassTimeout,
+		"EXECUTOR_MCP_PASS_TIMEOUT":        &cfg.MCPPassTimeout,
+		"EXECUTOR_PACKAGE_INSTALL_TIMEOUT": &cfg.PackageInstallTimeout,
 	} {
 		if v := os.Getenv(env); v != "" {
 			d, err := time.ParseDuration(v)
@@ -228,21 +237,28 @@ func run(ctx context.Context) error {
 	}
 	// The stall budget is parsed apart from the loop above because its refusals
 	// are its own (toolset.ParseStallTimeout), and floored against the longest
-	// single step THIS binary can name. A bash call is that step everywhere; a
-	// repository clone is the executor's own, and it is the sharper one — the
-	// materialization reports once per repository and gives each clone the whole
-	// of RepoCloneTimeout, so an operator who raises that knob for a large
-	// monorepo past the stall budget makes every reclaim cancel the same clone
-	// at the same point (#383). Read after the loop, so the clone budget it is
-	// compared against is the configured one.
+	// single step THIS binary can name. A bash call is that step everywhere; the
+	// executor's own two are a repository clone and one package manager's
+	// install, and both are sharper — each is reported once and then given its
+	// whole budget, so an operator who raises either past the stall budget makes
+	// every reclaim cancel the same step at the same point (#383, plan 40
+	// decision 5). LongestStep picks which of the two to compare against and
+	// which knob the refusal names, so an operator is told about the budget they
+	// actually raised. Read after the loop, so both are the configured values;
+	// an unset one is zero here and cannot lower the floor, since each default
+	// is at most toolset.MaxTimeout, which StallFloor already clears.
+	step := toolset.LongestStep(
+		toolset.NamedStep{Name: "EXECUTOR_REPO_CLONE_TIMEOUT", D: cfg.RepoCloneTimeout},
+		toolset.NamedStep{Name: "EXECUTOR_PACKAGE_INSTALL_TIMEOUT", D: cfg.PackageInstallTimeout},
+	)
 	if v := os.Getenv("EXECUTOR_STALL_TIMEOUT"); v != "" {
 		if cfg.StallTimeout, err = toolset.ParseStallTimeout(
-			"EXECUTOR_STALL_TIMEOUT", v, cfg.RepoCloneTimeout); err != nil {
+			"EXECUTOR_STALL_TIMEOUT", v, step.D); err != nil {
 			return err
 		}
 	} else if err := toolset.CheckStallDefault(
-		"EXECUTOR_STALL_TIMEOUT", "EXECUTOR_REPO_CLONE_TIMEOUT",
-		executor.DefaultStallTimeout, cfg.RepoCloneTimeout); err != nil {
+		"EXECUTOR_STALL_TIMEOUT", step.Name,
+		executor.DefaultStallTimeout, step.D); err != nil {
 		return err
 	}
 	// Unset takes the 24h default; an explicit "0" disables the idle tier

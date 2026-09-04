@@ -457,8 +457,10 @@ func TestNullFieldLeniency(t *testing.T) {
 	env := createEnvironment(t, s, map[string]any{
 		"name": "e", "description": nil, "scope": "organization",
 		"config": map[string]any{
-			"type":       "cloud",
-			"networking": map[string]any{"type": "limited"},
+			"type": "cloud",
+			// The flag is what lets packages ride with limited networking (plan
+			// 40 decision 9); this case is about the null lists beside it.
+			"networking": map[string]any{"type": "limited", "allow_package_managers": true},
 			"packages": map[string]any{
 				"apt": []any{"jq"}, "cargo": nil, "gem": []any{}, "go": []any{"golang.org/x/tools"},
 				"npm": []any{"left-pad"}, "pip": []any{"requests"},

@@ -35,9 +35,10 @@ const DefaultStallBudget = 3 * MaxTimeout
 // reclaim re-runs the same step and is cancelled at the same point, with no
 // error ever reaching the session (#383). MaxTimeout is the step every
 // deployment has — one `bash` call — and longestStep names any longer one a
-// caller knows about, which for the executor is a repository clone: one clone
-// is a single silent interval of exactly RepoCloneTimeout, an operator-raisable
-// knob with no relation to this budget until it is given one. The steps only a
+// caller knows about, which for the executor is a repository clone or one
+// package manager's install (LongestStep picks between them): each is a single
+// silent interval of exactly its own knob, operator-raisable with no relation
+// to this budget until it is given one. The steps only a
 // deployment can measure — a cold image pull, a large checkpoint restore — stay
 // its own to clear.
 func StallFloor(longestStep time.Duration) time.Duration {
@@ -53,6 +54,35 @@ func StallFloor(longestStep time.Duration) time.Duration {
 		return math.MaxInt64
 	}
 	return longestStep + time.Minute
+}
+
+// NamedStep is one operator-raisable step a caller can offer the floor: how
+// long it may take, and the environment variable that set it.
+type NamedStep struct {
+	Name string
+	D    time.Duration
+}
+
+// LongestStep picks the step that sets the floor from the ones the caller
+// knows about, so the refusals below can blame the knob that actually raised
+// it. A caller with a single step needs neither this nor a name; a caller with
+// two — the executor's repository clone and its package install (plan 40
+// decision 5) — would otherwise have to choose between naming one knob in
+// every refusal and comparing against a step that is not the longest.
+//
+// A tie goes to the earlier argument: both are equally the floor, and ordering
+// by the argument list at least makes the refusal reproducible. A step nobody
+// set (a zero duration) is returned named all the same, because StallFloor
+// already treats anything under MaxTimeout as MaxTimeout — there is no case
+// where an unset knob needs a different answer from a short one.
+func LongestStep(steps ...NamedStep) NamedStep {
+	var longest NamedStep
+	for i, s := range steps {
+		if i == 0 || s.D > longest.D {
+			longest = s
+		}
+	}
+	return longest
 }
 
 // ParseStallTimeout reads a stall budget from the environment variable named by

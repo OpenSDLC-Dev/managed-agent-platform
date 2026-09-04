@@ -1,6 +1,9 @@
 package domain
 
-import "time"
+import (
+	"strings"
+	"time"
+)
 
 // EnvironmentKind is where sessions in this environment run.
 type EnvironmentKind string
@@ -59,4 +62,18 @@ type Environment struct {
 	CreatedAt   time.Time         `json:"created_at"`
 	UpdatedAt   time.Time         `json:"updated_at"`
 	ArchivedAt  *time.Time        `json:"archived_at"`
+}
+
+// ValidPackageEntry reports whether entry may be handed to its package manager
+// as one argument. Two shapes are refused, and only two: the empty string,
+// which no manager can install, and one beginning with '-', which every
+// manager reads as an option rather than a package — `--index-url=…` passed to
+// `pip install` would redirect the whole install, and no quoting can stop it,
+// because the entry is a single argument either way. Everything else (a pin,
+// `@`, `:`, whitespace) is the manager's own syntax and passes through verbatim.
+// The API applies this at create and update; the executor applies it again
+// before building a command, so a row stored before the rule is refused at
+// install rather than passed (docs/plan/40_environment-packages.md decision 6).
+func ValidPackageEntry(entry string) bool {
+	return entry != "" && !strings.HasPrefix(entry, "-")
 }

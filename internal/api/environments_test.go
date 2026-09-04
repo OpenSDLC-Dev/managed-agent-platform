@@ -3,6 +3,7 @@ package api_test
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"reflect"
 	"strings"
@@ -96,6 +97,10 @@ func TestEnvironmentCreateSelfHostedAndLimitedCloud(t *testing.T) {
 			"networking": map[string]any{
 				"type":          "limited",
 				"allowed_hosts": []any{"api.example.com", "*.internal.example.com"},
+				// Packages under limited networking need this flag, on the
+				// reference and here alike (plan 40 decision 9); without it
+				// this create is a 400, which is its own test below.
+				"allow_package_managers": true,
 			},
 			"packages": map[string]any{"pip": []any{"requests==2.32.0"}},
 		},
@@ -110,6 +115,9 @@ func TestEnvironmentCreateSelfHostedAndLimitedCloud(t *testing.T) {
 	wantFields(t, nw, "allowed_hosts", "allow_mcp_servers", "allow_package_managers")
 	if nw["allow_mcp_servers"] != false {
 		t.Errorf("allow_mcp_servers default = %v, want false", nw["allow_mcp_servers"])
+	}
+	if nw["allow_package_managers"] != true {
+		t.Errorf("allow_package_managers = %v, want true (as sent)", nw["allow_package_managers"])
 	}
 	pkgs, _ := cfg["packages"].(map[string]any)
 	wantFields(t, pkgs, "type", "apt", "cargo", "gem", "go", "npm", "pip")
@@ -446,6 +454,237 @@ func TestEnvironmentPackagesTypeRejectsBadValues(t *testing.T) {
 		msg, _ := errObj["message"].(string)
 		if want := `packages.type must be "packages"`; msg != want {
 			t.Errorf("type=%v: message = %q, want %q", badType, msg, want)
+		}
+	}
+}
+
+// packagesNeedTheFlag is the refusal decision 9 names, verbatim — the tests
+// assert the whole string, because a client reads it to learn which of the two
+// remedies (set the flag, clear the lists) it has.
+const packagesNeedTheFlag = "packages require networking.allow_package_managers to be true under limited networking"
+
+// wantPackagesRefusal asserts the 400 and its exact message.
+func wantPackagesRefusal(t *testing.T, what string, status int, body map[string]any) {
+	t.Helper()
+	wantErr(t, status, body, http.StatusBadRequest, "invalid_request_error")
+	if msg := errMessage(body); msg != packagesNeedTheFlag {
+		t.Errorf("%s: message = %q, want %q", what, msg, packagesNeedTheFlag)
+	}
+}
+
+// legacyLimitedPackagesEnv writes a row of the shape stored before this rule
+// existed: limited networking, no allow_package_managers, a non-empty pip
+// list. It goes straight through the pool because no request can produce one
+// any more — which is exactly what makes the row worth testing.
+func legacyLimitedPackagesEnv(t *testing.T, s *tserver, name string) string {
+	t.Helper()
+	id := createEnvironment(t, s, map[string]any{"name": name})["id"].(string)
+	const config = `{"type":"cloud","networking":{"type":"limited","allowed_hosts":["internal.corp"],` +
+		`"allow_mcp_servers":false,"allow_package_managers":false},` +
+		`"packages":{"apt":[],"cargo":[],"gem":[],"go":[],"npm":[],"pip":["requests"]}}`
+	if _, err := s.pool.Exec(context.Background(),
+		`UPDATE environments SET config = $2 WHERE id = $1`, id, config); err != nil {
+		t.Fatal(err)
+	}
+	return id
+}
+
+// TestEnvironmentPackagesUnderLimitedNetworking covers the create half of
+// decision 9 (#576): the refusal, the flag that lifts it, and the two shapes
+// the rule was never about — limited with every list empty, and packages under
+// unrestricted networking.
+func TestEnvironmentPackagesUnderLimitedNetworking(t *testing.T) {
+	s := newTestServer(t)
+	for name, tc := range map[string]struct {
+		config  map[string]any
+		refused bool
+	}{
+		"limited with pip and no flag": {map[string]any{
+			"type":       "cloud",
+			"networking": map[string]any{"type": "limited"},
+			"packages":   map[string]any{"pip": []any{"requests"}},
+		}, true},
+		// Every manager triggers it, not pip alone.
+		"limited with apt and no flag": {map[string]any{
+			"type":       "cloud",
+			"networking": map[string]any{"type": "limited", "allowed_hosts": []any{"internal.corp"}},
+			"packages":   map[string]any{"apt": []any{"jq"}},
+		}, true},
+		"limited with the flag explicitly off": {map[string]any{
+			"type":       "cloud",
+			"networking": map[string]any{"type": "limited", "allow_package_managers": false},
+			"packages":   map[string]any{"npm": []any{"left-pad"}},
+		}, true},
+		"limited with the flag": {map[string]any{
+			"type":       "cloud",
+			"networking": map[string]any{"type": "limited", "allow_package_managers": true},
+			"packages":   map[string]any{"pip": []any{"requests"}},
+		}, false},
+		// The non-empty reading (decision 9): every stored cloud config carries
+		// all six lists, so mere presence cannot be what "specifies packages"
+		// means.
+		"limited with empty lists": {map[string]any{
+			"type":       "cloud",
+			"networking": map[string]any{"type": "limited"},
+			"packages":   map[string]any{"pip": []any{}, "apt": nil},
+		}, false},
+		"unrestricted with packages": {map[string]any{
+			"type":     "cloud",
+			"packages": map[string]any{"apt": []any{"jq"}},
+		}, false},
+	} {
+		status, body := s.do(http.MethodPost, "/v1/environments",
+			map[string]any{"name": name, "config": tc.config})
+		if !tc.refused {
+			if status != http.StatusOK {
+				t.Errorf("%s: status %d, want 200 (%v)", name, status, body)
+			}
+			continue
+		}
+		wantPackagesRefusal(t, name, status, body)
+	}
+}
+
+// TestEnvironmentPackagesFlagCheckedOnTheMergedUpdate: the check runs on the
+// merged config, so each half arriving alone is refused — packages added to a
+// limited environment, and a packaged environment switched to limited.
+func TestEnvironmentPackagesFlagCheckedOnTheMergedUpdate(t *testing.T) {
+	s := newTestServer(t)
+
+	limited := createEnvironment(t, s, map[string]any{
+		"name":   "limited-no-packages",
+		"config": map[string]any{"type": "cloud", "networking": map[string]any{"type": "limited"}},
+	})["id"].(string)
+	status, body := s.do(http.MethodPost, "/v1/environments/"+limited, map[string]any{
+		"config": map[string]any{"type": "cloud", "packages": map[string]any{"pip": []any{"requests"}}},
+	})
+	wantPackagesRefusal(t, "packages added to a limited environment", status, body)
+
+	packaged := createEnvironment(t, s, map[string]any{
+		"name":   "unrestricted-with-packages",
+		"config": map[string]any{"type": "cloud", "packages": map[string]any{"pip": []any{"requests"}}},
+	})["id"].(string)
+	status, body = s.do(http.MethodPost, "/v1/environments/"+packaged, map[string]any{
+		"config": map[string]any{"type": "cloud", "networking": map[string]any{"type": "limited"}},
+	})
+	wantPackagesRefusal(t, "packaged environment switched to limited", status, body)
+
+	// The same switch carrying the flag goes through.
+	status, updated := s.do(http.MethodPost, "/v1/environments/"+packaged, map[string]any{
+		"config": map[string]any{"type": "cloud", "networking": map[string]any{
+			"type": "limited", "allow_package_managers": true}},
+	})
+	if status != http.StatusOK {
+		t.Fatalf("switch to limited with the flag: %d %v", status, updated)
+	}
+	cfg, _ := updated["config"].(map[string]any)
+	if nw, _ := cfg["networking"].(map[string]any); nw["allow_package_managers"] != true {
+		t.Errorf("allow_package_managers = %v, want true", cfg["networking"])
+	}
+}
+
+// TestEnvironmentLegacyLimitedPackagesRow: a row stored before this rule still
+// reads, and every config patch on it is refused — including one that never
+// mentions packages — until the operator takes one of the two remedies the
+// message names.
+func TestEnvironmentLegacyLimitedPackagesRow(t *testing.T) {
+	s := newTestServer(t)
+	id := legacyLimitedPackagesEnv(t, s, "legacy")
+
+	status, got := s.do(http.MethodGet, "/v1/environments/"+id, nil)
+	if status != http.StatusOK {
+		t.Fatalf("get on a legacy row: %d %v", status, got)
+	}
+
+	status, body := s.do(http.MethodPost, "/v1/environments/"+id, map[string]any{
+		"config": map[string]any{"type": "cloud", "networking": map[string]any{
+			"type": "limited", "allowed_hosts": []any{"other.corp"}}},
+	})
+	wantPackagesRefusal(t, "allowed_hosts-only patch on a legacy row", status, body)
+
+	// A patch that carries no config at all never reaches the check: the row is
+	// awkward, not bricked.
+	status, renamed := s.do(http.MethodPost, "/v1/environments/"+id, map[string]any{"name": "legacy-renamed"})
+	if status != http.StatusOK || renamed["name"] != "legacy-renamed" {
+		t.Fatalf("rename of a legacy row: %d %v", status, renamed)
+	}
+
+	// Remedy one: set the flag. The stored list survives it.
+	status, fixed := s.do(http.MethodPost, "/v1/environments/"+id, map[string]any{
+		"config": map[string]any{"type": "cloud", "networking": map[string]any{
+			"type": "limited", "allow_package_managers": true}},
+	})
+	if status != http.StatusOK {
+		t.Fatalf("setting the flag on a legacy row: %d %v", status, fixed)
+	}
+	cfg, _ := fixed["config"].(map[string]any)
+	pkgs, _ := cfg["packages"].(map[string]any)
+	if pip, _ := pkgs["pip"].([]any); len(pip) != 1 || pip[0] != "requests" {
+		t.Errorf("pip lost by the remedy: %v", pkgs["pip"])
+	}
+
+	// Remedy two: clear the lists, on a second row of the same shape.
+	other := legacyLimitedPackagesEnv(t, s, "legacy-cleared")
+	status, cleared := s.do(http.MethodPost, "/v1/environments/"+other, map[string]any{
+		"config": map[string]any{"type": "cloud", "packages": map[string]any{"pip": []any{}}},
+	})
+	if status != http.StatusOK {
+		t.Fatalf("clearing the list on a legacy row: %d %v", status, cleared)
+	}
+	cfg, _ = cleared["config"].(map[string]any)
+	pkgs, _ = cfg["packages"].(map[string]any)
+	if pip, _ := pkgs["pip"].([]any); len(pip) != 0 {
+		t.Errorf("pip not cleared: %v", pkgs["pip"])
+	}
+}
+
+// TestEnvironmentPackageEntriesValidated covers decision 6: an entry that is
+// empty or reads as an option is refused at create and at update, naming its
+// manager; everything else is the manager's own syntax and passes verbatim.
+func TestEnvironmentPackageEntriesValidated(t *testing.T) {
+	s := newTestServer(t)
+	id := createEnvironment(t, s, map[string]any{"name": "entries"})["id"].(string)
+
+	for _, manager := range []string{"apt", "cargo", "gem", "go", "npm", "pip"} {
+		for _, bad := range []string{"", "-e"} {
+			want := fmt.Sprintf(`packages.%s entries must be non-empty and must not begin with "-"`, manager)
+			config := map[string]any{"type": "cloud", "packages": map[string]any{manager: []any{bad}}}
+
+			status, body := s.do(http.MethodPost, "/v1/environments",
+				map[string]any{"name": "bad-entry", "config": config})
+			wantErr(t, status, body, http.StatusBadRequest, "invalid_request_error")
+			if msg := errMessage(body); msg != want {
+				t.Errorf("create %s=%q: message = %q, want %q", manager, bad, msg, want)
+			}
+
+			status, body = s.do(http.MethodPost, "/v1/environments/"+id, map[string]any{"config": config})
+			wantErr(t, status, body, http.StatusBadRequest, "invalid_request_error")
+			if msg := errMessage(body); msg != want {
+				t.Errorf("update %s=%q: message = %q, want %q", manager, bad, msg, want)
+			}
+		}
+	}
+
+	// The reference's own pin examples, plus an entry whose '-' is not leading:
+	// the executor quotes each entry whole, so it is one argument either way.
+	good := map[string]any{
+		"type":  "packages",
+		"pip":   []any{"sqlalchemy==2.0.30"},
+		"cargo": []any{"hyperfine@1.18.0"},
+		"gem":   []any{"rails:7.1.0"},
+		"go":    []any{"golang.org/x/tools/cmd/goimports@latest"},
+		"apt":   []any{"pkg -e"},
+	}
+	env := createEnvironment(t, s, map[string]any{"name": "good-entries",
+		"config": map[string]any{"type": "cloud", "packages": good}})
+	cfg, _ := env["config"].(map[string]any)
+	pkgs, _ := cfg["packages"].(map[string]any)
+	for manager, want := range good {
+		if manager == "type" {
+			continue
+		}
+		if !reflect.DeepEqual(pkgs[manager], want) {
+			t.Errorf("packages.%s = %v, want %v", manager, pkgs[manager], want)
 		}
 	}
 }

@@ -81,6 +81,19 @@ type fakeSandbox struct {
 	// fault the in-sandbox extraction).
 	cmds     []string
 	execHook func(sandbox.ExecRequest) *sandbox.ExecResult
+	// execErr, when set, is the backend fault Exec answers with — the arm no
+	// ExecResult can express: the sandbox gone, the daemon unreachable, the
+	// context cancelled. execErrOn narrows it to commands containing that
+	// substring, so a test can fault one pass's exec and leave the rest of the
+	// run working. The command is recorded either way.
+	execErr   error
+	execErrOn string
+	// probeOut, if set, is what the package-install probe answers
+	// (packages.go's root-and-writable check). Empty answers "ok", so an
+	// ordinary fake sandbox is the rooted, writable one the install pass needs
+	// — the fake would otherwise answer every command with an empty stdout and
+	// make the probe's unrecognized-answer arm the default.
+	probeOut string
 	// listTruncated marks the memory sync's tree listing as overflowing the
 	// exec output cap, and listExit is a status the listing fails with (a
 	// directory find could not enter, under the command's pipefail) — the
@@ -95,10 +108,19 @@ type fakeSandbox struct {
 func (f *fakeSandbox) ID() string { return "fake" }
 func (f *fakeSandbox) Exec(_ context.Context, req sandbox.ExecRequest) (sandbox.ExecResult, error) {
 	f.cmds = append(f.cmds, req.Command)
+	if f.execErr != nil && (f.execErrOn == "" || strings.Contains(req.Command, f.execErrOn)) {
+		return sandbox.ExecResult{}, f.execErr
+	}
 	if f.execHook != nil {
 		if res := f.execHook(req); res != nil {
 			return *res, nil
 		}
+	}
+	if req.Command == packagesProbeCommand {
+		if f.probeOut != "" {
+			return sandbox.ExecResult{Stdout: f.probeOut + "\n"}, nil
+		}
+		return sandbox.ExecResult{Stdout: "ok\n"}, nil
 	}
 	// The harvest's listing: synthesize the NUL-separated relative paths from
 	// the in-memory tree (or a forged/truncated listing when a test sets one).
