@@ -722,7 +722,7 @@ func (d *delegate) wake(ctx context.Context, tx pgx.Tx, target domain.ID) error 
 func (b *Brain) commitDelegatedTurn(ctx context.Context, sid domain.ID, item *queue.Item,
 	agent domain.ResolvedAgent, head []events.NewEvent, opts events.AppendOptions,
 	workKind queue.Kind, askIDs []domain.ID, delegated []delegatedCall,
-	settlementOnly bool, watermark int64) error {
+	settlementOnly bool, watermark int64, envKind string) error {
 
 	return b.commitUnderLock(ctx, sid, func(ctx context.Context, tx pgx.Tx) ([]events.NewEvent, events.AppendOptions, error) {
 		before, err := sessionStatusNow(ctx, tx, sid)
@@ -913,6 +913,15 @@ func (b *Brain) commitDelegatedTurn(ctx context.Context, sid domain.ID, item *qu
 					return err
 				}
 			}
+			// The idle harvest (docs/plan/38 decision 4), gated on the net fold
+			// this settlement reconciled above rather than on which switch case
+			// took: a park, a cut chain, a child that ended without reporting
+			// and a permission ask all leave the session idle the same way, and
+			// a chained turn or a fold under a still-running sibling leaves
+			// SetStatus nil — which is exactly the exclusion the gate wants.
+			if err := b.enqueueIdleHarvest(ctx, tx, item, sid, opts.SetStatus, envKind); err != nil {
+				return err
+			}
 			if chain {
 				// Input and a wake are both progress, and plain Requeue
 				// clears the count: the run being bounded is the one that
@@ -1071,7 +1080,7 @@ func runExhausted(threadID domain.ID, agentName string) (events.NewEvent, error)
 // live thread — which is what the reference documents for its own budget,
 // enforced between model requests rather than mid-request.
 func (b *Brain) cutExhaustedRun(ctx context.Context, sid domain.ID, item *queue.Item,
-	agent domain.ResolvedAgent) (bool, error) {
+	agent domain.ResolvedAgent, envKind string) (bool, error) {
 	// Fast path, unlocked: one primary-key read of a counter that is zero for
 	// every session that never delegated. A stale read is safe both ways —
 	// under the cap the turn runs, which is what it would have done anyway;
@@ -1173,6 +1182,14 @@ func (b *Brain) cutExhaustedRun(ctx context.Context, sid domain.ID, item *queue.
 	}
 	opts.Then = func(ctx context.Context, tx pgx.Tx) error {
 		if err := b.queue.Complete(ctx, tx, item); err != nil {
+			return err
+		}
+		// This refusal is the fifth brain settlement that folds a session idle,
+		// so it harvests like the other four (docs/plan/38 decision 4): the
+		// deliverables the exhausted run wrote before its budget ran out reach
+		// the Files API. Gated on the same reconciled fold — SetStatus is nil
+		// when a sibling keeps the session running — and cloud-only.
+		if err := b.enqueueIdleHarvest(ctx, tx, item, sid, opts.SetStatus, envKind); err != nil {
 			return err
 		}
 		// A woken parent needs an item like any other wake, or it ends up

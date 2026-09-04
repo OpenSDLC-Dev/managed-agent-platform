@@ -414,6 +414,51 @@ func TestRequeueHandsTheItemBack(t *testing.T) {
 	}
 }
 
+// RequeueAsGrading hands an idle-tagged outputs_harvest item back with its
+// chain_grading flag flipped to true, so its next claim provisions and walks a
+// fresh snapshot before chaining the grader (docs/plan/38 decision 2's
+// no-live-sandbox reclaim race). The row keeps its identity; only the flag
+// changes, and the pre-requeue lease is dead.
+func TestRequeueAsGradingFlipsTheFlagAndHandsItBack(t *testing.T) {
+	ctx := context.Background()
+	pool := pgtest.NewPool(t)
+	sessionID, envID := pgtest.NewSession(t, pool, "cloud")
+	q := queue.New(pool)
+
+	if _, err := q.EnqueueOutputsHarvest(ctx, pool, envID, sessionID, false); err != nil {
+		t.Fatal(err)
+	}
+	item, err := q.Claim(ctx, queue.OutputsHarvest, time.Minute)
+	if err != nil || item == nil {
+		t.Fatalf("claim: %+v %v", item, err)
+	}
+	if item.ChainGrading {
+		t.Fatal("the idle-tagged item claimed as ChainGrading=true")
+	}
+
+	if err := q.RequeueAsGrading(ctx, pool, item); err != nil {
+		t.Fatalf("RequeueAsGrading: %v", err)
+	}
+	re, err := q.Claim(ctx, queue.OutputsHarvest, time.Minute)
+	if err != nil || re == nil {
+		t.Fatalf("claim after requeue: %+v %v", re, err)
+	}
+	if re.ID != item.ID {
+		t.Errorf("requeued claim = %s, want %s (the row keeps its identity)", re.ID, item.ID)
+	}
+	if !re.ChainGrading {
+		t.Error("requeued item ChainGrading = false, want true (the flag must flip to the grading flavor)")
+	}
+
+	// The pre-requeue lease is dead; the fresh one completes.
+	if err := q.Complete(ctx, pool, item); err == nil {
+		t.Error("Complete with the pre-requeue lease succeeded")
+	}
+	if err := q.Complete(ctx, pool, re); err != nil {
+		t.Errorf("Complete with the fresh lease: %v", err)
+	}
+}
+
 // TestPollReservesWithoutTransition pins the wire work API's poll: it hands out
 // the oldest queued tool_exec item for one environment as a soft reservation —
 // the item stays queued (ack transitions it) and a second poll inside the
@@ -1027,5 +1072,63 @@ func TestRequeueLeavesAToolExecItemsMetadataAlone(t *testing.T) {
 	}
 	if _, ok := got["settlement_chain"]; ok {
 		t.Errorf("metadata = %v, want no settlement_chain on a client-visible item", got)
+	}
+}
+
+// EnqueueOutputsHarvest is Enqueue for the harvest kind plus the one fact the
+// executor's settlement needs and the session row cannot supply: which of the
+// two triggers scheduled it (docs/plan/38). The flag rides the same metadata
+// column the settlement count does, so it survives the claim that a different
+// executor may take, and the dedup key is unchanged — the two flavors share
+// one live slot per session.
+func TestOutputsHarvestCarriesItsTriggerThroughAClaim(t *testing.T) {
+	ctx := context.Background()
+	pool := pgtest.NewPool(t)
+	sessionID, envID := pgtest.NewSession(t, pool, "cloud")
+	q := queue.New(pool)
+
+	for _, chainGrading := range []bool{true, false} {
+		created, err := q.EnqueueOutputsHarvest(ctx, pool, envID, sessionID, chainGrading)
+		if err != nil {
+			t.Fatalf("EnqueueOutputsHarvest(%v): %v", chainGrading, err)
+		}
+		if !created {
+			t.Fatalf("EnqueueOutputsHarvest(%v) reported not created", chainGrading)
+		}
+		// The live slot is one per (session, thread, kind) whichever trigger
+		// enqueued it: a second enqueue while one is live is swallowed, which
+		// is exactly why the settlement cannot read the flag alone.
+		again, err := q.EnqueueOutputsHarvest(ctx, pool, envID, sessionID, !chainGrading)
+		if err != nil {
+			t.Fatalf("second EnqueueOutputsHarvest: %v", err)
+		}
+		if again {
+			t.Error("a second enqueue while one is live reported created")
+		}
+
+		item, err := q.Claim(ctx, queue.OutputsHarvest, time.Minute)
+		if err != nil || item == nil {
+			t.Fatalf("claim: %+v %v", item, err)
+		}
+		if item.ChainGrading != chainGrading {
+			t.Errorf("ChainGrading = %v, want %v", item.ChainGrading, chainGrading)
+		}
+		if err := q.Complete(ctx, pool, item); err != nil {
+			t.Fatalf("Complete: %v", err)
+		}
+	}
+
+	// An item enqueued by the pre-#263 code carries no key at all, and a
+	// rolling deploy's new reader must read that as the grading flavor's
+	// opposite only where nothing is evaluating — false, the COALESCE default.
+	if _, err := q.Enqueue(ctx, pool, envID, sessionID, queue.OutputsHarvest); err != nil {
+		t.Fatal(err)
+	}
+	old, err := q.Claim(ctx, queue.OutputsHarvest, time.Minute)
+	if err != nil || old == nil {
+		t.Fatalf("claim: %+v %v", old, err)
+	}
+	if old.ChainGrading {
+		t.Error("an item with no chain_grading key claimed as ChainGrading=true")
 	}
 }

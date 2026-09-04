@@ -59,12 +59,13 @@ const (
 	// sandbox — for cloud AND self_hosted sessions alike. Poll never serves
 	// it; the official worker implements only the six sandbox tools.
 	WebExec Kind = "web_exec"
-	// OutputsHarvest is the deliverables harvest (docs/plan/21_outcomes.md,
-	// Decision 8): the cloud executor snapshots /mnt/session/outputs/ into
-	// the files registry before a grading pass. Internal-only — the brain
-	// enqueues it for cloud environments alone, and Poll never serves it (a
-	// self_hosted sandbox is unreachable from the platform; the reference
-	// worker has no file lane).
+	// OutputsHarvest is the deliverables harvest (docs/plan/21_outcomes.md
+	// Decision 8, docs/plan/38): the cloud executor snapshots
+	// /mnt/session/outputs/ into the files registry, before a grading pass or
+	// whenever the session folds idle — Item.ChainGrading says which, since
+	// only the first chains a turn. Internal-only — the brain enqueues it for
+	// cloud environments alone, and Poll never serves it (a self_hosted sandbox
+	// is unreachable from the platform; the reference worker has no file lane).
 	OutputsHarvest Kind = "outputs_harvest"
 	// MCPExec is the MCP work (docs/plan/29_mcp-toolset.md): the executor's
 	// MCP driver discovers a session's MCP servers' tools into mcp_catalogs,
@@ -116,6 +117,17 @@ type Item struct {
 	// by a different brain. Zero on a fresh item and on every kind but
 	// model_turn; the cap that reads it is internal/brain/delegate.go's.
 	Chain int
+	// ChainGrading marks the harvest a grading cycle scheduled — the one whose
+	// settlement chains the grading turn — apart from the one a session's idle
+	// scheduled, which publishes and stops (docs/plan/38). It rides on the item
+	// for Chain's reason (the claimant may be a different executor) and because
+	// the session row cannot answer it: once an outcome is no longer
+	// evaluating, a cycle that a user.interrupt settled and a session that
+	// never had an outcome look identical there. False on a fresh item and on
+	// every kind but outputs_harvest; the settlement that reads it is
+	// internal/executor/harvest.go's, and it reads the live outcome state
+	// first — see settleHarvest.
+	ChainGrading bool
 	// TraceContext is the W3C trace context captured at enqueue, so the
 	// claimant can parent its work on the turn that produced it — the same
 	// context a BYOC worker gets from its poll response (see Work). Nil when
@@ -232,6 +244,29 @@ func (q *Queue) EnqueueThread(ctx context.Context, db DB, envID, sessionID, thre
 	return created, nil
 }
 
+// EnqueueOutputsHarvest is Enqueue for the deliverables harvest, stamping the
+// one fact its settlement cannot recover from the session row: which trigger
+// scheduled it (docs/plan/38). chainGrading marks a grading cycle's own
+// harvest — the one whose settlement chains the grading turn; a session's idle
+// passes false, and that harvest publishes and stops. The flag rides
+// work_items.metadata, the column the settlement count already uses, so the
+// kind, its dispatch and the schema are all unchanged — and so is the live
+// dedup key, which means the two flavors share one live slot per session and
+// the settlement must reconcile a stale flag against live outcome state rather
+// than trust it (internal/executor/harvest.go's settleHarvest).
+func (q *Queue) EnqueueOutputsHarvest(ctx context.Context, db DB, envID, sessionID domain.ID, chainGrading bool) (bool, error) {
+	tag, err := db.Exec(ctx,
+		`INSERT INTO work_items (id, environment_id, session_id, kind, trace_context, metadata)
+		 VALUES ($1, $2, $3, $4, $5::jsonb, jsonb_build_object('chain_grading', $6::bool))
+		 ON CONFLICT (session_id, thread_id, kind) WHERE state IN ('queued', 'starting', 'active')
+		 DO NOTHING`,
+		domain.NewID("work"), envID, sessionID, OutputsHarvest, traceContextArg(ctx), chainGrading)
+	if err != nil {
+		return false, fmt.Errorf("queue: enqueue %s for %s: %w", OutputsHarvest, sessionID, err)
+	}
+	return tag.RowsAffected() == 1, nil
+}
+
 // traceContextArg captures the active span's W3C trace context (traceparent/
 // tracestate) as a JSON string for the work item's trace_context column, so an
 // executor or worker that later runs the item can parent its tool-execution
@@ -285,9 +320,10 @@ func (q *Queue) Claim(ctx context.Context, kind Kind, ttl time.Duration) (*Item,
 		 RETURNING w.id, w.environment_id, w.session_id, COALESCE(w.thread_id, ''), w.kind,
 		           w.lease_expires_at, p.state, w.trace_context,
 		           CASE WHEN jsonb_typeof(w.metadata->'settlement_chain') = 'number'
-		                THEN (w.metadata->>'settlement_chain')::int ELSE 0 END`,
+		                THEN (w.metadata->>'settlement_chain')::int ELSE 0 END,
+		           COALESCE((w.metadata->>'chain_grading')::bool, false)`,
 		kind, ttl.Seconds()).Scan(&it.ID, &it.EnvironmentID, &it.SessionID, &it.ThreadID, &it.Kind, &it.Lease,
-		&prevState, &it.TraceContext, &it.Chain)
+		&prevState, &it.TraceContext, &it.Chain, &it.ChainGrading)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil
 	}
@@ -543,6 +579,30 @@ func (q *Queue) Requeue(ctx context.Context, db DB, item *Item) error {
 // input like any other. Requires the lease, exactly as Requeue does.
 func (q *Queue) RequeueSettlement(ctx context.Context, db DB, item *Item, chain int) error {
 	return q.requeue(ctx, db, item, chain)
+}
+
+// RequeueAsGrading hands a claimed outputs_harvest item back as a grading
+// harvest: it re-queues the row and flips its chain_grading flag to true, so the
+// next claim provisions a sandbox and walks a current snapshot before chaining
+// the grader (docs/plan/38 decision 2). It is the settlement's escape from the
+// reclaim race where an idle-tagged item that found no live sandbox is asked to
+// serve a grading cycle it collected nothing for — chaining the grader there
+// would grade a stale or empty snapshot. Requires the lease, exactly as Requeue
+// does, and writes that proof the same way.
+func (q *Queue) RequeueAsGrading(ctx context.Context, db DB, item *Item) error {
+	tag, err := db.Exec(ctx,
+		`UPDATE work_items
+		 SET state = 'queued', lease_expires_at = NULL, updated_at = now(),
+		     metadata = jsonb_set(metadata, '{chain_grading}', 'true'::jsonb, true)
+		 WHERE id = $1 AND state = 'active' AND lease_expires_at = $2`,
+		item.ID, item.Lease)
+	if err != nil {
+		return fmt.Errorf("queue: requeue as grading %s: %w", item.ID, err)
+	}
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("queue: requeue as grading %s: %w", item.ID, ErrLeaseLost)
+	}
+	return nil
 }
 
 // requeue is the shared body of the two above: the lease proof is written

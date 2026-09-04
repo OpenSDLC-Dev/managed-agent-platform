@@ -228,7 +228,7 @@ func (b *Brain) runTurn(ctx context.Context, item *queue.Item, claimedAt time.Ti
 		// Deterministic: the same bytes fail the same way on every retry,
 		// so a lease-expiry loop would grind forever without ever telling
 		// anyone. Fail the turn visibly instead.
-		return b.failTurn(ctx, sid, item, nil, 0, fmt.Sprintf("session agent state is corrupt: %v", err))
+		return b.failTurn(ctx, sid, item, nil, 0, fmt.Sprintf("session agent state is corrupt: %v", err), envKind)
 	}
 
 	// A grading wake: the settlement that scheduled an evaluation cycle
@@ -238,7 +238,7 @@ func (b *Brain) runTurn(ctx context.Context, item *queue.Item, claimedAt time.Ti
 	var evals []domain.OutcomeEvaluation
 	if len(outcomesJSON) > 0 {
 		if err := json.Unmarshal(outcomesJSON, &evals); err != nil {
-			return b.failTurn(ctx, sid, item, nil, 0, fmt.Sprintf("session outcome state is corrupt: %v", err))
+			return b.failTurn(ctx, sid, item, nil, 0, fmt.Sprintf("session outcome state is corrupt: %v", err), envKind)
 		}
 	}
 	// Grading is the primary thread's (plan 35 decision 15): the evaluation
@@ -254,7 +254,7 @@ func (b *Brain) runTurn(ctx context.Context, item *queue.Item, claimedAt time.Ti
 	// above everything that costs anything: no MCP catalog is loaded, no log is
 	// replayed, and above all no span.model_request_start is appended, which is
 	// what makes a refused claim free rather than merely short.
-	if refused, err := b.cutExhaustedRun(ctx, sid, item, agent); err != nil {
+	if refused, err := b.cutExhaustedRun(ctx, sid, item, agent, envKind); err != nil {
 		return fmt.Errorf("delegation bound: %w", err)
 	} else if refused {
 		return nil
@@ -275,7 +275,7 @@ func (b *Brain) runTurn(ctx context.Context, item *queue.Item, claimedAt time.Ti
 		// Deterministic, exactly as the agent decode above is: this is a spec
 		// this platform stored, and re-reading it fails the same way on every
 		// retry, so a lease-expiry loop would grind forever telling nobody.
-		return b.failTurn(ctx, sid, item, nil, 0, fmt.Sprintf("session mcp server state is corrupt: %v", err))
+		return b.failTurn(ctx, sid, item, nil, 0, fmt.Sprintf("session mcp server state is corrupt: %v", err), envKind)
 	}
 	cat, undiscovered, err := b.loadMCPCatalog(ctx, sid, item.ThreadID, declared)
 	if err != nil {
@@ -364,19 +364,19 @@ func (b *Brain) runTurn(ctx context.Context, item *queue.Item, claimedAt time.Ti
 	}
 	toolDefs, class, notes, err := resolveTools(agent, cat, role)
 	if err != nil {
-		return b.failTurn(ctx, sid, item, nil, 0, fmt.Sprintf("resolve tools: %v", err))
+		return b.failTurn(ctx, sid, item, nil, 0, fmt.Sprintf("resolve tools: %v", err), envKind)
 	}
 	logToolNotes(ctx, sid, notes)
 	req, watermark, err := buildRequest(agent.System, toolDefs, history, skillsBlock, filesBlock, reposBlock, memoryBlock)
 	if err != nil {
-		return b.failTurn(ctx, sid, item, nil, 0, fmt.Sprintf("replay: %v", err))
+		return b.failTurn(ctx, sid, item, nil, 0, fmt.Sprintf("replay: %v", err), envKind)
 	}
 
 	p, err := b.registry.Provider(agent.Model.ID)
 	if err != nil {
 		// A model with no route is a configuration error, not a transient
 		// fault: fail the turn visibly rather than retry forever.
-		return b.failTurn(ctx, sid, item, nil, watermark, fmt.Sprintf("no provider for model %q", agent.Model.ID))
+		return b.failTurn(ctx, sid, item, nil, watermark, fmt.Sprintf("no provider for model %q", agent.Model.ID), envKind)
 	}
 
 	// The route resolved above, named for telemetry. Provider() just succeeded,
@@ -428,12 +428,12 @@ func (b *Brain) runTurn(ctx context.Context, item *queue.Item, claimedAt time.Ti
 			span.Finish(sctx, true, streamErr)
 			return streamErr
 		}
-		return b.failTurn(sctx, sid, item, span, watermark, streamErr.Error())
+		return b.failTurn(sctx, sid, item, span, watermark, streamErr.Error(), envKind)
 	}
 	if turn.stopReason == "tool_use" && len(turn.toolUses) == 0 {
 		// A tool_use stop with no tool blocks has nothing to wait for and
 		// nothing to chain — settling either way would wedge or spin.
-		return b.failTurn(sctx, sid, item, span, watermark, "model stopped for tool_use without any tool_use block")
+		return b.failTurn(sctx, sid, item, span, watermark, "model stopped for tool_use without any tool_use block", envKind)
 	}
 	if turn.stopReason == "refusal" && len(turn.toolUses) > 0 {
 		// A refusal is terminal, and its tool calls are not ours to run: the
@@ -461,7 +461,7 @@ func (b *Brain) runTurn(ctx context.Context, item *queue.Item, claimedAt time.Ti
 	// the active span's trace context into the work item so the executor or BYOC
 	// worker that runs it parents its tool spans on this turn — one trace across
 	// the process boundary.
-	return b.settleTurn(sctx, sid, item, agent, span, turn, class, watermark)
+	return b.settleTurn(sctx, sid, item, agent, span, turn, class, watermark, envKind)
 }
 
 // claimLiveSession loads the session under its row lock and settles stale
@@ -757,8 +757,8 @@ func execRank(k queue.Kind) int {
 // agent is the turn's own — the session's resolved agent on the primary, a
 // child's snapshot on a child — which the delegation branch reads for the
 // roster it spawns from and the name a child reports under (plan 35 decision 6).
-func (b *Brain) settleTurn(ctx context.Context, sid domain.ID, item *queue.Item, agent domain.ResolvedAgent, span *events.ModelRequest, turn *turnResult, class map[string]toolClass, watermark int64) error {
-	err := b.commitTurn(ctx, sid, item, agent, span, turn, class, watermark)
+func (b *Brain) settleTurn(ctx context.Context, sid domain.ID, item *queue.Item, agent domain.ResolvedAgent, span *events.ModelRequest, turn *turnResult, class map[string]toolClass, watermark int64, envKind string) error {
+	err := b.commitTurn(ctx, sid, item, agent, span, turn, class, watermark, envKind)
 	span.Finish(ctx, false, err)
 	if err != nil {
 		return fmt.Errorf("settle: %w", err)
@@ -766,7 +766,7 @@ func (b *Brain) settleTurn(ctx context.Context, sid domain.ID, item *queue.Item,
 	return nil
 }
 
-func (b *Brain) commitTurn(ctx context.Context, sid domain.ID, item *queue.Item, agent domain.ResolvedAgent, span *events.ModelRequest, turn *turnResult, class map[string]toolClass, watermark int64) error {
+func (b *Brain) commitTurn(ctx context.Context, sid domain.ID, item *queue.Item, agent domain.ResolvedAgent, span *events.ModelRequest, turn *turnResult, class map[string]toolClass, watermark int64, envKind string) error {
 	head, workKind, askIDs, delegated, err := turnEvents(turn, class)
 	if err != nil {
 		return err
@@ -825,7 +825,7 @@ func (b *Brain) commitTurn(ctx context.Context, sid domain.ID, item *queue.Item,
 			// escalates no work kind either, and chaining past one would replay
 			// a tool_use nothing answered.
 			return b.commitDelegatedTurn(ctx, sid, item, agent, head, opts, workKind, askIDs, delegated,
-				len(delegated) == len(turn.toolUses), watermark)
+				len(delegated) == len(turn.toolUses), watermark, envKind)
 		}
 		if len(askIDs) > 0 {
 			// A confirmation gate: at least one intent's policy is always_ask.
@@ -844,7 +844,13 @@ func (b *Brain) commitTurn(ctx context.Context, sid domain.ID, item *queue.Item,
 			// thread idles; the session follows only if no sibling runs (plan
 			// 35 decision 4).
 			opts.Then = func(ctx context.Context, tx pgx.Tx) error {
-				return b.queue.Complete(ctx, tx, item)
+				if err := b.queue.Complete(ctx, tx, item); err != nil {
+					return err
+				}
+				// The gate reads opts.SetStatus, which the builder below
+				// assigns before AppendInTx runs this closure — the same
+				// deferred read commitDelegatedTurn's Then makes.
+				return b.enqueueIdleHarvest(ctx, tx, item, sid, opts.SetStatus, envKind)
 			}
 			return b.commitUnderLock(ctx, sid, func(ctx context.Context, tx pgx.Tx) ([]events.NewEvent, events.AppendOptions, error) {
 				pair, moved, err := events.TransitionThread(ctx, tx, sid, events.ThreadTransition{
@@ -910,7 +916,7 @@ func (b *Brain) commitTurn(ctx context.Context, sid domain.ID, item *queue.Item,
 // settleVerdict/settleGraderError (plan 21 slice 3) — same lock, same
 // chain-or-idle contract, restated there because outcomes fork the idle
 // path.
-func (b *Brain) settle(ctx context.Context, sid domain.ID, item *queue.Item, watermark int64,
+func (b *Brain) settle(ctx context.Context, sid domain.ID, item *queue.Item, watermark int64, envKind string,
 	opts events.AppendOptions, idleStop *domain.StopReason, build func(chained bool) ([]events.NewEvent, error)) error {
 
 	tx, err := b.pool.Begin(ctx)
@@ -991,6 +997,9 @@ func (b *Brain) settle(ctx context.Context, sid domain.ID, item *queue.Item, wat
 			if err := b.queue.Complete(ctx, tx, item); err != nil {
 				return err
 			}
+			if err := b.enqueueIdleHarvest(ctx, tx, item, sid, moved, envKind); err != nil {
+				return err
+			}
 			if !wakeParent {
 				return nil
 			}
@@ -1053,7 +1062,7 @@ const maxFailureMessage = 8 << 10
 // failed request cannot strand an accepted message on an idle session. Span
 // end, error, status, and item fate commit atomically under the session
 // lock, with the lease proof, exactly like a successful settle.
-func (b *Brain) failTurn(ctx context.Context, sid domain.ID, item *queue.Item, span *events.ModelRequest, watermark int64, msg string) error {
+func (b *Brain) failTurn(ctx context.Context, sid domain.ID, item *queue.Item, span *events.ModelRequest, watermark int64, msg, envKind string) error {
 	// The message may quote endpoint bytes (an error body, a stream error),
 	// and a NUL there would fault the session.error append — the failure
 	// path failing, the same wedge one level up (#228).
@@ -1067,14 +1076,14 @@ func (b *Brain) failTurn(ctx context.Context, sid domain.ID, item *queue.Item, s
 	if len(msg) > maxFailureMessage {
 		msg = toolset.TruncateRunes(msg, maxFailureMessage) + "[truncated]"
 	}
-	err := b.commitFailure(ctx, sid, item, span, watermark, msg)
+	err := b.commitFailure(ctx, sid, item, span, watermark, msg, envKind)
 	if span != nil {
 		span.Finish(ctx, true, err)
 	}
 	return err
 }
 
-func (b *Brain) commitFailure(ctx context.Context, sid domain.ID, item *queue.Item, span *events.ModelRequest, watermark int64, msg string) error {
+func (b *Brain) commitFailure(ctx context.Context, sid domain.ID, item *queue.Item, span *events.ModelRequest, watermark int64, msg, envKind string) error {
 	var head []events.NewEvent
 	if span != nil {
 		endEv, err := span.EndEvent(true, domain.ModelUsage{})
@@ -1084,7 +1093,7 @@ func (b *Brain) commitFailure(ctx context.Context, sid domain.ID, item *queue.It
 		head = append(head, endEv)
 	}
 
-	return b.settle(ctx, sid, item, watermark, events.AppendOptions{MarkProcessedThrough: watermark},
+	return b.settle(ctx, sid, item, watermark, envKind, events.AppendOptions{MarkProcessedThrough: watermark},
 		&domain.StopReason{Type: domain.StopRetriesExhausted},
 		func(chained bool) ([]events.NewEvent, error) {
 			// retry_status tells the client whether the platform will make

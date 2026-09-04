@@ -13,8 +13,9 @@
 // call itself, mcpspill.go for an answer too large to inline, mcpcred.go for
 // the credential — likewise both kinds, since only this platform's driver
 // answers an MCP call). The fourth, outputs_harvest (harvest.go), is a cloud
-// session's alone: it snapshots the deliverables out of the sandbox to open an
-// outcome-grading cycle, and a self_hosted sandbox has no file lane to read.
+// session's alone: it snapshots the deliverables out of the sandbox — to open
+// an outcome-grading cycle, or simply because the session went idle
+// (docs/plan/38) — and a self_hosted sandbox has no file lane to read.
 // What goes INTO a sandbox lives beside them — skills.go, files.go, repos.go
 // and repoclone.go (go-git, so no git binary is a runtime dependency).
 //
@@ -924,11 +925,32 @@ func (e *Executor) sessionForRun(ctx context.Context, item *queue.Item) (session
 		return sessionRun{}, false, err
 	}
 
-	if status != string(domain.SessionRunning) || archivedAt != nil {
+	// Running is the live state for every kind but one. An outputs_harvest is
+	// the exception because a session's idle is now a reason to schedule one
+	// (docs/plan/38, #263): that item is claimed precisely because the session
+	// just stopped working, so requiring running would drain every one of them
+	// unread. The carve-out is exactly idle — a terminated, archived or deleted
+	// session still drains — and no other kind gains a state.
+	live := status == string(domain.SessionRunning) ||
+		(item.Kind == queue.OutputsHarvest && status == string(domain.SessionIdle))
+	if !live || archivedAt != nil {
 		if err := e.queue.Complete(ctx, tx, item); err != nil {
 			return sessionRun{}, false, err
 		}
 		return sessionRun{}, false, tx.Commit(ctx)
+	}
+
+	// An idle-triggered outputs harvest attaches to a live sandbox by session id
+	// alone (docs/plan/38 decision 8) and reads none of the environment config,
+	// resolved agent, or resources decoded below. Decoding them would fault the
+	// item on a session whose agent/resource JSON will not decode — and runTurn
+	// already idled such a session for that same corruption, which is what
+	// scheduled this harvest, so faulting here would reclaim-loop it forever
+	// (#263 review), the same wedge the settleHarvest outcome-decode tolerance
+	// closes. A grading harvest still decodes: it provisions a fresh sandbox and
+	// needs the full run state.
+	if item.Kind == queue.OutputsHarvest && !item.ChainGrading {
+		return sessionRun{}, true, tx.Commit(ctx)
 	}
 
 	var cfg domain.EnvironmentConfig

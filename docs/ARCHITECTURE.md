@@ -59,7 +59,7 @@ Postgres, all coordination through it:
 |---|---|
 | `controlplane` | The wire-compatible REST surface: resource CRUD, the event log endpoints (POST/list/SSE), the work API for BYOC workers, auth (management `x-api-key`, worker environment keys), and the session state machine. It also runs the two background sweeps no request drives — memory-version retention (#476), hourly, and the deployment scheduler (plan 37), every 30 seconds — both cancelled and drained before the pool closes. The scheduler's at-most-one-run-per-occurrence guarantee across replicas is the partial unique index on `(deployment_id, scheduled_at)` — the reference's own published idempotency key — not leader election, which this platform has nowhere; and its clock is Postgres's, one `SELECT now()` per tick, so a replica with a skewed clock cannot shift what fires. |
 | `brain` | The harness pool. Claims `model_turn` work, replays the session's event log to rebuild context, calls the model provider, writes the resulting events, enqueues tool work, suspends. |
-| `executor` | The built-in sandbox worker for platform-managed (`cloud`) environments. Claims `tool_exec` work, runs the tool inside the session's sandbox container, posts `agent.tool_result`. Also claims `web_exec` work — web_fetch/web_search, run in its own process with no sandbox, for **both** environment kinds — `outputs_harvest` work, the deliverables snapshot of `/mnt/session/outputs/` a cloud session's outcome-grading cycle begins with, and `mcp_exec` work — both halves of the MCP path, likewise in its own process with no sandbox and for **both** environment kinds: the discovery that fills `mcp_catalogs`, enqueued when a turn suspends for a declared server with no row, and the tool call itself, enqueued when the brain routes an `mcp__{server}__{tool}` the model asked for. |
+| `executor` | The built-in sandbox worker for platform-managed (`cloud`) environments. Claims `tool_exec` work, runs the tool inside the session's sandbox container, posts `agent.tool_result`. Also claims `web_exec` work — web_fetch/web_search, run in its own process with no sandbox, for **both** environment kinds — `outputs_harvest` work, the deliverables snapshot of `/mnt/session/outputs/` a cloud session takes when an outcome-grading cycle begins and when a brain settlement folds the session idle, and `mcp_exec` work — both halves of the MCP path, likewise in its own process with no sandbox and for **both** environment kinds: the discovery that fills `mcp_catalogs`, enqueued when a turn suspends for a declared server with no row, and the tool call itself, enqueued when the brain routes an `mcp__{server}__{tool}` the model asked for. |
 | `worker` | The distributable BYOC worker for `self_hosted` environments. Same pull protocol as the executor, run on customer compute, posting `user.tool_result` — the real `ant beta:worker` works against the same API. |
 
 Processes never talk to each other directly. The brain and the executors communicate
@@ -120,6 +120,28 @@ sandbox — grading is transcript-only there). The grading claim runs one grader
 rubric + deliverables + transcript, no tools — and settles the verdict under the
 session lock: satisfied/failed/max_iterations idle the session, needs_revision feeds
 the grader's findings back and runs another agent cycle.
+
+**Deliverables at idle** (plan 38). Grading is not the only reason to harvest: five more
+settlements enqueue an `outputs_harvest` when they fold a *cloud* session to idle, with no
+outcome required (#263) — `settleEndTurn`'s tool-less ending, `settle`'s
+retries-exhausted fault, `commitTurn`'s confirmation gate, `commitDelegatedTurn`'s
+park, cut chain or gated ending, and `cutExhaustedRun`'s delegation-bound refusal. (The
+two that end an outcome cycle, `settleVerdict` and `settleGraderError`, fold idle too and
+deliberately do not: that cycle's own harvest already published the tree, and only a
+tool-less grader call ran since.) The two idle folds the *API* makes — a `user.interrupt`
+and the archive of a session's last running thread — are out of scope here and tracked by
+#586: a session folded idle by either harvests nothing under this plan. The five share
+one gate (`brain.enqueueIdleHarvest`) keyed on each site's own net session-level fold, so
+a thread idling under a busy sibling schedules nothing. The work item's `metadata` carries
+which trigger scheduled it (`queue.Item.ChainGrading`) because the session row cannot say,
+and the executor branches on it: a grading harvest provisions a sandbox — the grader needs
+a current snapshot — while an idle one only attaches to a live one and no-ops when none is
+up, so a tool-less session that never ran a container is left untouched (never provisioned
+just to walk an empty tree). That settlement reads the live outcome state first: a cycle
+that turned `evaluating` while an idle-triggered item was queued is served by it, since the
+two flavors share one live item per session — chaining the grader when it walked a live
+sandbox, or requeuing itself as a grading harvest (which provisions on its next claim) when
+it found none, so the grader never reads a snapshot the pass did not freshly collect.
 
 **Permissions / human-in-the-loop.** A tool whose resolved `permission_policy` is
 `always_ask` suspends the session *before* execution: the brain writes
@@ -313,7 +335,7 @@ Layout order is by layer, as the repo is.
 | `brain/` | The stateless orchestration loop: claim a `model_turn`, replay the log into a provider request, stream the turn back as events, drive the session state machine at turn end. It runs no *agent* tool in-process — such a call is an emitted intent, and the turn resumes when the result event lands. The exception is the delegation six, which are the platform's own and are answered inside the settlement that emits them (plan 35 decision 6) — and a name the model was never offered at all, answered the same way with an `is_error` result so the model can self-correct (#567). |
 | `provider/` | Model backends behind Anthropic Messages semantics, constructed purely from configuration. `anthropic/` works against **any** endpoint speaking Anthropic Messages, unless a route opts into flattening `search_result` (`flatten_search_results`, #565); `openai/` is the platform's one lossy seam by default and confines every other conversion; `providertest/` is the contract suite both must pass. |
 | `queue/` | The work queue over Postgres (`FOR UPDATE SKIP LOCKED`). Five kinds share `work_items`, and two ways take one: `Claim` is the in-process lane, `Poll` the wire lane that serves exactly a `tool_exec` item on a `self_hosted` environment. That split is what makes the executor and the BYOC worker one protocol at two deployment points. |
-| `executor/` | The platform-managed half of that protocol: pull work, run the built-in toolset in the session's sandbox, append the results the brain resumes on. Also the web and MCP work, which run in its own process for **both** environment kinds, and the outputs harvest, which only a `cloud` session enqueues — a `self_hosted` sandbox has no file lane to snapshot, so its grading stays transcript-only (`brain/grader.go`). |
+| `executor/` | The platform-managed half of that protocol: pull work, run the built-in toolset in the session's sandbox, append the results the brain resumes on. Also the web and MCP work, which run in its own process for **both** environment kinds, and the outputs harvest, which only a `cloud` session enqueues — on either trigger, grading or idle — because a `self_hosted` sandbox has no file lane to snapshot, so its grading stays transcript-only and its deliverables never reach the Files API (`brain/grader.go`). |
 | `worker/` | The customer-hosted twin. It holds no database handle and reaches everything over the wire with its environment key — which is what makes "customer compute, zero inbound network access" the same code path as the executor's. |
 | `toolset/` | What the model is offered and how one call runs: the built-in `agent_toolset_20260401` (bash, read, write, edit, glob, grep), the `web_fetch`/`web_search` definitions and the `IsWebTool` predicate that routes them, the six delegation tools a coordinator session's threads are offered by role with the `IsDelegationTool` twin, and the `mcp_toolset` arm — validation, and resolving an entry's `default_config`/`configs[]` against a server's listing. Nothing here knows what a call means for the session; that is the executor's. |
 | `sandbox/` | The "hands" boundary: a disposable per-session container, `docker/` and `k8s/` behind one interface with one contract suite (`sandboxtest/`), plus `shell/`, the persistent per-session bash built on the stateless primitives. |

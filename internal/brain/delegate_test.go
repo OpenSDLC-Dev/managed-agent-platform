@@ -2330,6 +2330,36 @@ func TestTheClaimIsRefusedAtTheDelegationBound(t *testing.T) {
 	}
 }
 
+// The delegation-bound refusal is the fifth brain settlement that folds a
+// session idle (docs/plan/38 decision 4): on a cloud env it harvests the
+// deliverables the exhausted run wrote, exactly as the other four folds do.
+func TestDelegationBoundRefusalHarvestsOnCloud(t *testing.T) {
+	h := newHarnessEnv(t, "cloud", [][]provider.Chunk{
+		{toolCall("t1", "list_agents", `{}`), done("tool_use", 1)},
+		{toolCall("t2", "list_agents", `{}`), done("tool_use", 1)},
+	}, nil)
+	h.roster(t, "researcher")
+	h.wake(t, "delegate")
+	h.runOnce(t) // one turn runs and is answered, so the next claim is the one refused
+	h.setDelegationTurns(t, 625)
+
+	h.runOnce(t)
+
+	primary := domain.PrimaryThreadID(h.sessionID)
+	if s := h.threadStatus(t, primary); s != "idle" {
+		t.Fatalf("thread = %q, want idle once the budget is spent", s)
+	}
+	if s := h.status(t); s != "idle" {
+		t.Fatalf("session = %q, want idle", s)
+	}
+	if n := h.liveOf(t, queue.OutputsHarvest); n != 1 {
+		t.Fatalf("live outputs_harvest = %d, want 1 (the refusal folds the session idle)", n)
+	}
+	if h.harvestChainGrading(t) {
+		t.Error("chain_grading = true; no outcome is grading this session")
+	}
+}
+
 // Routes 1 and 2 together, on one real send_to_agent — the regression that
 // fails against main. Waking a peer resets #442's cap twice over: the sender's
 // own item is plain-Requeued, which clears its count (route 2), and the peer is
@@ -2626,5 +2656,55 @@ func TestACappedChildTellsItsCoordinatorAndWakesIt(t *testing.T) {
 	}
 	if n := h.liveTurns(t, ""); n != 1 {
 		t.Errorf("coordinator turns queued = %d, want 1 — a wake with no item is a wedge", n)
+	}
+}
+
+// The idle harvest's third site (docs/plan/38 decision 4): a delegated turn
+// settles through commitDelegatedTurn, and the cut chain is one of the folds it
+// can end in. The coordinator idles, the session with it, and the deliverables
+// it wrote before the cut are harvested like any other session's.
+func TestCappedDelegationChainEnqueuesOutputsHarvest(t *testing.T) {
+	h := newHarnessEnv(t, "cloud", [][]provider.Chunk{
+		{toolCall("t1", "list_agents", `{}`), done("tool_use", 1)},
+	}, nil)
+	h.roster(t, "researcher")
+	h.wake(t, "delegate")
+	h.setChainCount(t, "", 24) // this turn is the 25th — maxSettlementChain
+
+	h.runOnce(t)
+
+	if s := h.status(t); s != "idle" {
+		t.Fatalf("session = %q, want idle once the chain is cut", s)
+	}
+	if n := h.liveOf(t, queue.OutputsHarvest); n != 1 {
+		t.Fatalf("live outputs_harvest = %d, want 1", n)
+	}
+	if h.harvestChainGrading(t) {
+		t.Error("chain_grading = true; no outcome is grading this session")
+	}
+}
+
+// ...and the same gate excludes a coordinator that parks while its children
+// keep working: its own thread idles, the session does not, so there is no
+// snapshot to take yet.
+func TestParkedCoordinatorWithLiveChildrenSkipsHarvest(t *testing.T) {
+	h := newHarnessEnv(t, "cloud", [][]provider.Chunk{{
+		toolCall("t1", "create_agent", `{"agent_name":"researcher","message":"find the papers"}`),
+		toolCall("t2", "wait_for_agents", `{}`),
+		done("tool_use", 2),
+	}}, nil)
+	h.roster(t, "researcher")
+	h.wake(t, "coordinate the work")
+
+	h.runOnce(t)
+
+	if s := h.threadStatus(t, domain.PrimaryThreadID(h.sessionID)); s != "idle" {
+		t.Fatalf("coordinator = %q, want idle on the wait", s)
+	}
+	if s := h.status(t); s != "running" {
+		t.Fatalf("session = %q, want running while its child runs", s)
+	}
+	if n := h.liveOf(t, queue.OutputsHarvest); n != 0 {
+		t.Errorf("live outputs_harvest = %d, want 0 (the session has not idled)", n)
 	}
 }
