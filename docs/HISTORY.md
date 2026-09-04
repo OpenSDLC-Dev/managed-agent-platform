@@ -4600,11 +4600,12 @@ gate —
 escapes by clearing `HTTP_PROXY`, when it installs owner-match iptables before it ever
 serves the proxy, so such a process is dropped rather than let out.
 
-Ten issues came out of the review passes rather than the recording: #577, #578, #579,
-#581, #582, the registration of the pre-existing #576, #584 — a collision between a
-repository named `skills` and the skills materialization root, raised as an unverified
-risk and real on verification — and #589, #590 and #591 from the fifth pass. That is
-more than the recording pass produced unaided.
+Ten issues came out of the review passes rather than the recording: five of them
+(#577, #578, #579, #581, #582) from the Codex and Claude passes, the registration of
+the pre-existing #576, then #584 — a collision between a repository named `skills`
+and the skills materialization root, raised as an unverified risk and real on
+verification — and finally #589, #590 and #591 from the fifth pass. That is more
+than the recording pass produced unaided.
 
 A fourth pass put six agents on six of this PR's own factual claims, each told to
 refute its claim and to default to refuted when unsure. Two held — the `unrestricted`
