@@ -10,6 +10,7 @@ import (
 	"regexp"
 	"time"
 
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/sandbox"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/skills"
 	sdk "github.com/anthropics/anthropic-sdk-go"
@@ -25,18 +26,22 @@ type skillRef struct {
 	Version string `json:"version"`
 }
 
+// skillDigitsRe matches the pre-GA numeric pin this platform still accepts
+// (plan 39 decision 4). The other two forms a stored pin holds need no pattern:
+// a version id is domain.ID.HasPrefix, which recognizes both spellings, and the
+// alias "latest" is what is left.
 var skillDigitsRe = regexp.MustCompile(`^[0-9]+$`)
 
 // SetupSkills materializes the session's skills into the sandbox — its agent's
 // own, and on a coordinator session every roster member's beside them — the
 // BYOC twin of the executor's materialization and a re-expression of the
 // reference worker's SetupSkills (anthropic-sdk-go tools/agenttoolset):
-// session GET with the environment key, per skill an alias resolution over
-// the versions list (newest numeric wins), a version GET for the name, the
-// /content download, and extraction under the reference guards — all wire,
-// no database, writing through the sandbox file API instead of the host
-// filesystem. Per-skill failure is logged and skipped, never fatal; only the
-// session read fails the call, mirroring the reference. A sentinel under
+// session GET with the environment key, per skill a version GET that resolves
+// the pin and carries the name, the /content download, and extraction under
+// the reference guards — all wire, no database, writing through the sandbox
+// file API instead of the host filesystem. Per-skill failure is logged and
+// skipped, never fatal; only the session read fails the call, mirroring the
+// reference. A sentinel under
 // {workdir}/skills/ records the resolved set so a reclaiming pass over a
 // live sandbox skips rewriting unchanged skills (the reference re-extracts
 // every time, but its workdir is host-shared across sessions and cleaned per
@@ -90,7 +95,7 @@ func SetupSkills(ctx context.Context, client sdk.Client, sessionID string, sb sa
 	seen := map[string]string{} // skill id -> the version that won
 	misses := 0
 	for _, ref := range refs {
-		// Resolution is per-reference work too — round trips each, and the
+		// Resolution is per-reference work too — one round trip each, and the
 		// dangling ones leave by the continue below without ever reaching the
 		// write loop. A set of them is a run that is moving (#383).
 		progress()
@@ -109,7 +114,7 @@ func SetupSkills(ctx context.Context, client sdk.Client, sessionID string, sb sa
 			continue
 		}
 		seen[ref.SkillID] = ref.Version
-		r, err := resolveSkill(ctx, client, ref, progress)
+		r, err := resolveSkill(ctx, client, ref)
 		if err != nil {
 			skipSkill(ctx, sessionID, ref.SkillID, ref.Version, err)
 			misses++
@@ -189,64 +194,52 @@ func skipSkill(ctx context.Context, sessionID, skillID, version string, err erro
 		"session_id", sessionID, "skill_id", skillID, "version", version, "err", err)
 }
 
-// resolveSkillVersion resolves one reference the reference worker's way: an
-// all-digits version is already concrete; anything else ("latest") lists the
-// skill's versions and picks the newest numeric one client-side.
-func resolveSkillVersion(ctx context.Context, client sdk.Client, ref skillRef, progress func()) (string, error) {
-	if skillDigitsRe.MatchString(ref.Version) {
-		return ref.Version, nil
+// resolveSkillVersion is the three-way classification of one stored pin (plan
+// 39 decision 5): it returns the token the /content download is addressed by,
+// given the pin and the version the retrieve answered it with.
+//
+// It replaces a two-way "digits or else" test that read anything non-numeric as
+// the alias "latest" — so a pin by version id, the GA way to pin one, was
+// served the NEWEST version instead of the pinned one. That is a wrong answer
+// rather than a refusal, which is why it is a resolution rule and not a
+// validation one.
+func resolveSkillVersion(pinned string, retrieved *sdk.BetaSkillVersion) string {
+	switch {
+	case skillDigitsRe.MatchString(pinned):
+		// The pre-GA numeric pin this platform still accepts (decision 4). It
+		// is not an id, so the retrieve's answer cannot stand in for it; both
+		// this platform's /content route and the reference's take the numeric
+		// verbatim, so it is carried through.
+		return pinned
+	case domain.ID(pinned).HasPrefix(domain.PrefixSkillVersion):
+		// Already concrete and already the addressing token, in either
+		// spelling. Taken from the pin rather than the retrieve's echo, so what
+		// lands is the version the agent named whatever answers for it.
+		return pinned
+	default:
+		// The alias "latest", which is all that is left: a pin naming no
+		// version at all never reaches here, the retrieve having refused it.
+		// Only the retrieve resolves the alias, so the download rides the
+		// concrete id it answered with — the reference worker's own rule
+		// (anthropic-sdk-go tools/agenttoolset/skills.go).
+		return retrieved.ID
 	}
-	iter := client.Beta.Skills.Versions.ListAutoPaging(ctx, ref.SkillID, sdk.BetaSkillVersionListParams{})
-	best := ""
-	for iter.Next() {
-		// One reference can be many wire round trips: the alias is resolved by
-		// walking every version, and the pager fetches a page per Next. Reporting
-		// only around the whole resolution would put an unbounded number of them
-		// inside one silent interval — the rule this change is built on, applied
-		// to the one loop in this file that is not over items (#383).
-		progress()
-		if v := iter.Current().Version; skillDigitsRe.MatchString(v) && numericGreater(v, best) {
-			best = v
-		}
-	}
-	if err := iter.Err(); err != nil {
-		return "", err
-	}
-	if best == "" {
-		return "", fmt.Errorf("skill %q has no concrete version to resolve %q against", ref.SkillID, ref.Version)
-	}
-	return best, nil
 }
 
-// numericGreater orders decimal version strings without overflow:
-// length-then-lexical (the reference's rule — versions are epoch or date
-// digit strings, so this equals numeric order).
-func numericGreater(a, b string) bool {
-	if len(a) != len(b) {
-		return len(a) > len(b)
-	}
-	return a > b
-}
-
-// resolveSkill resolves one reference to {version, trusted directory}: the
-// concrete version (digits verbatim, or the newest for an alias) and a version
-// GET for the name, from which the landing directory is derived. The name
-// comes from the version object, never the sandbox, so it is safe to drive the
-// skip probe with.
-func resolveSkill(ctx context.Context, client sdk.Client, ref skillRef, progress func()) (skills.Resolved, error) {
-	version, err := resolveSkillVersion(ctx, client, ref, progress)
-	if err != nil {
-		return skills.Resolved{}, err
-	}
-	// The version GET is a second round trip behind whatever the line above
-	// cost, so it gets its own interval rather than sharing that one.
-	progress()
-	v, err := client.Beta.Skills.Versions.Get(ctx, version, sdk.BetaSkillVersionGetParams{SkillID: ref.SkillID})
+// resolveSkill resolves one reference to {addressing token, trusted directory}
+// in a single round trip: the version retrieve takes every accepted form of a
+// pin — the alias, an id, the legacy numeric — and answers with the name the
+// landing directory is derived from. The name comes from the version object,
+// never the sandbox, so it is safe to drive the skip probe with.
+func resolveSkill(ctx context.Context, client sdk.Client, ref skillRef) (skills.Resolved, error) {
+	v, err := client.Beta.Skills.Versions.Get(ctx, ref.Version, sdk.BetaSkillVersionGetParams{SkillID: ref.SkillID})
 	if err != nil {
 		return skills.Resolved{}, err
 	}
 	return skills.Resolved{
-		ID: ref.SkillID, Version: version, Dir: skills.TargetDir(v.Name, ref.SkillID),
+		ID:      ref.SkillID,
+		Version: resolveSkillVersion(ref.Version, v),
+		Dir:     skills.TargetDir(v.Name, ref.SkillID),
 	}, nil
 }
 

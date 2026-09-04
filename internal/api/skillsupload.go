@@ -7,6 +7,7 @@ import (
 	"mime"
 	"mime/multipart"
 	"net/http"
+	"unicode/utf8"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/skills"
 )
@@ -17,15 +18,20 @@ import (
 // for multipart framing.
 const maxSkillBodyBytes = 32 << 20
 
-// maxDisplayTitleBytes bounds the one plain-text form field.
-const maxDisplayTitleBytes = 4 << 10
+// maxDisplayNameChars bounds the one plain-text form field. 255 is the
+// reference's own cap and characters is its own unit: the 2026-09-04 recording
+// accepts a 255-character display_name and refuses a 256-character one with the
+// message reproduced below (plan 39, decision 7). Counting bytes instead would
+// refuse a 100-character CJK name the reference accepts, and say something
+// false about it while doing so.
+const maxDisplayNameChars = 255
 
 // skillUpload is a decoded multipart skill upload, one entry per files[]
 // part. Paths are the raw path-qualified filenames the client sent.
 type skillUpload struct {
-	displayTitle    string
-	displayTitleSet bool
-	files           []skills.File
+	displayName    string
+	displayNameSet bool
+	files          []skills.File
 }
 
 // totalBytes is the received content size, for the upload metrics.
@@ -57,10 +63,17 @@ func (u *skillUpload) bundle() (*skills.Bundle, error) {
 }
 
 // parseSkillUpload reads a multipart/form-data body of files[] parts (plus
-// display_title on the create form). Unknown fields are rejected like
-// decodeObject's unknown keys; a files[] part without a filename is rejected
-// (the reference's tolerance is unrecorded — docs/DIVERGENCES.md).
-func parseSkillUpload(r *http.Request, allowDisplayTitle bool) (*skillUpload, error) {
+// display_name on the create form).
+//
+// Unknown parts are IGNORED rather than rejected (plan 39, decision 8). The
+// recording shows a create carrying a stray display_title part succeeding with
+// its name derived from the frontmatter, exactly as if the part were absent —
+// which is only true if unknown parts in general are tolerated. The observed
+// evidence covers that one field name; the registry entry says so.
+//
+// files[] stays required. A files[] part without a filename is still rejected
+// (the reference's tolerance there is unrecorded — docs/DIVERGENCES.md).
+func parseSkillUpload(r *http.Request, allowDisplayName bool) (*skillUpload, error) {
 	mt, params, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
 	if err != nil || mt != "multipart/form-data" || params["boundary"] == "" {
 		return nil, errInvalid("request must be multipart/form-data with one files[] part per file")
@@ -78,8 +91,8 @@ func parseSkillUpload(r *http.Request, allowDisplayTitle bool) (*skillUpload, er
 		if err != nil {
 			return nil, mapSkillBodyErr(err)
 		}
-		switch part.FormName() {
-		case "files[]":
+		switch name := part.FormName(); {
+		case name == "files[]":
 			filename := rawPartFilename(part)
 			if filename == "" {
 				return nil, errInvalid("files[] part is missing a filename")
@@ -89,28 +102,32 @@ func parseSkillUpload(r *http.Request, allowDisplayTitle bool) (*skillUpload, er
 				return nil, mapSkillBodyErr(err)
 			}
 			up.files = append(up.files, skills.File{Path: filename, Data: data})
-		case "display_title":
-			if !allowDisplayTitle {
-				return nil, errInvalid(`unknown form field "display_title"`)
+		case name == "display_name" && allowDisplayName:
+			if up.displayNameSet {
+				return nil, errInvalid("duplicate display_name field")
 			}
-			if up.displayTitleSet {
-				return nil, errInvalid("duplicate display_title field")
-			}
-			data, err := io.ReadAll(io.LimitReader(part, maxDisplayTitleBytes+1))
+			// The reader admits a character's widest encoding, because a
+			// bound counted in characters cannot be applied to bytes already
+			// truncated: cut at 255 of them, a multi-byte name over the cap
+			// would arrive under it.
+			data, err := io.ReadAll(io.LimitReader(part, maxDisplayNameChars*utf8.UTFMax+1))
 			if err != nil {
 				return nil, mapSkillBodyErr(err)
 			}
-			if len(data) > maxDisplayTitleBytes {
-				return nil, errInvalid("display_title is longer than %d bytes", maxDisplayTitleBytes)
+			if utf8.RuneCount(data) > maxDisplayNameChars {
+				return nil, errInvalid("display_name must be at most %d characters long", maxDisplayNameChars)
 			}
-			up.displayTitle = string(data)
-			up.displayTitleSet = true
-		default:
-			return nil, errInvalid("unknown form field %q", part.FormName())
+			up.displayName = string(data)
+			up.displayNameSet = true
 		}
+		// Every other part is ignored, display_name on the version form (which
+		// defines no such field) included.
 	}
 	if len(up.files) == 0 {
-		return nil, errInvalid("no files uploaded: send one files[] part per file")
+		// The reference's own wording, and also what a part named bare "files"
+		// gets: it is not files[], so it is ignored, and the form then carries
+		// no file part at all.
+		return nil, errInvalid("files[]: Field required")
 	}
 	return &up, nil
 }

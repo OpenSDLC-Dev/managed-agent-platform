@@ -60,7 +60,7 @@ func TestSkillUploadAndDownloadMetrics(t *testing.T) {
 		t.Fatalf("flat-basename upload = %d, want 400", status)
 	}
 	id, _ := created["id"].(string)
-	version, _ := created["latest_version"].(string)
+	version, _ := created["latest_version_id"].(string)
 	res := s.doRaw("GET", "/v1/skills/"+id+"/versions/"+version+"/content", nil,
 		map[string]string{"x-api-key": testKey})
 	res.Body.Close()

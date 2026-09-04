@@ -48,15 +48,20 @@ func TestImportAnthropicSkills(t *testing.T) {
 	if len(byID) != 2 || alpha == nil || byID["beta-notes"] == nil {
 		t.Fatalf("imported ids = %v", byID)
 	}
-	if alpha["source"] != "anthropic" || alpha["latest_version"] != "20260101" ||
-		alpha["display_title"] != "alpha-notes" {
+	src, _ := alpha["source"].(map[string]any)
+	if src == nil || src["type"] != "anthropic" || alpha["display_name"] != "alpha-notes" {
 		t.Errorf("alpha-notes = %v", alpha)
+	}
+	// latest_version_id names a version id now, so the date it stands for is
+	// read from the row it names.
+	if got := s.versionNumber(t, "alpha-notes", alpha["latest_version_id"].(string)); got != "20260101" {
+		t.Errorf("alpha-notes latest_version_id names version %q, want 20260101", got)
 	}
 
 	// The version object carries the frontmatter extraction, and its archive
 	// downloads like any uploaded skill's.
 	status, v := s.do("GET", "/v1/skills/alpha-notes/versions/20260101", nil)
-	if status != http.StatusOK || v["name"] != "alpha-notes" || v["directory"] != "alpha-notes" {
+	if status != http.StatusOK || v["name"] != "alpha-notes" || v["skill_id"] != "alpha-notes" {
 		t.Fatalf("version get: %d %v", status, v)
 	}
 	res := s.doRaw("GET", "/v1/skills/alpha-notes/versions/20260101/content", nil,
@@ -89,8 +94,11 @@ func TestImportAnthropicSkills(t *testing.T) {
 		t.Fatalf("newer version: %v %+v", err, sum)
 	}
 	status, skill := s.do("GET", "/v1/skills/alpha-notes", nil)
-	if status != http.StatusOK || skill["latest_version"] != "20260102" {
-		t.Errorf("after newer import: %v", skill)
+	if status != http.StatusOK {
+		t.Fatalf("after newer import: %d %v", status, skill)
+	}
+	if got := s.versionNumber(t, "alpha-notes", skill["latest_version_id"].(string)); got != "20260102" {
+		t.Errorf("after newer import, latest_version_id names %q, want 20260102", got)
 	}
 	status, versions := s.do("GET", "/v1/skills/alpha-notes/versions", nil)
 	if status != http.StatusOK || len(listData(t, versions)) != 2 {
@@ -105,8 +113,11 @@ func TestImportAnthropicSkills(t *testing.T) {
 		t.Fatalf("older backfill: %v %+v", err, sum)
 	}
 	status, skill = s.do("GET", "/v1/skills/alpha-notes", nil)
-	if status != http.StatusOK || skill["latest_version"] != "20260102" {
-		t.Errorf("older backfill regressed latest_version: %v", skill)
+	if status != http.StatusOK {
+		t.Fatalf("after older backfill: %d %v", status, skill)
+	}
+	if got := s.versionNumber(t, "alpha-notes", skill["latest_version_id"].(string)); got != "20260102" {
+		t.Errorf("older backfill regressed latest_version to %q, want 20260102", got)
 	}
 }
 
@@ -126,9 +137,14 @@ func TestImportAnthropicSkillsFailures(t *testing.T) {
 		t.Errorf("healthy dir did not import: %d %v", status, skill)
 	}
 
-	// A malformed version string is rejected up front.
-	if _, err := api.ImportAnthropicSkills(ctx, s.pool, s.blobs, importDirs("alpha-notes"), "latest"); err == nil {
-		t.Error("accepted a non-digit version")
+	// A malformed version string is rejected up front. The importer keeps its
+	// own regex for exactly this: the {version} PATH slot widened to version
+	// ids and the "latest" alias (plan 39 decision 4), and an import must not
+	// widen with it — an imported skill's version is a date, and nothing else.
+	for _, version := range []string{"latest", "skver_0123456789abcdefghjkmnpq", "skillver_abc", "2026-01-01"} {
+		if _, err := api.ImportAnthropicSkills(ctx, s.pool, s.blobs, importDirs("alpha-notes"), version); err == nil {
+			t.Errorf("accepted the non-date version %q", version)
+		}
 	}
 	// A missing directory is a per-dir failure, not a panic.
 	sum, err = api.ImportAnthropicSkills(ctx, s.pool, s.blobs, importDirs("no-such-dir"), "20260103")

@@ -19,7 +19,7 @@ func TestSkillReadsEnvironmentKeyLane(t *testing.T) {
 
 	created := s.createSkill(t)
 	id, _ := created["id"].(string)
-	version, _ := created["latest_version"].(string)
+	version, _ := created["latest_version_id"].(string)
 
 	// The four read routes serve an environment key.
 	for _, path := range []string{

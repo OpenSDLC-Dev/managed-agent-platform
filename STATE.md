@@ -12,7 +12,8 @@ and permission gating; 2026-09-03 ran two waves, one free over console-cookie
 questions and one of 281 pairs against the tiers needing model spend, an environment
 key, or a resource we lacked. #78 stays open past this work — 117 registry entries
 still name it as their live tracker, and the debt is now analysis rather than
-recording: 72 comparison rows have never been read. Plan 38 (#263) archived 2026-09-04.
+recording: 72 comparison rows have never been read. Plan 38 (#263) archived
+2026-09-04, and plan 39 (#566, Skills on the GA wire shape) with its delivering PR.
 
 ## Tasks
 

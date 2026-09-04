@@ -49,6 +49,94 @@ new directory and in-repo citations re-pointed in the moving PR (plan
 
 ---
 
+## Skills GA wire shape — the `ant` CLI, and the SDK clients #566 named (plan 39, #566, run 2026-09-04) — ✅ passed
+
+Verified against two docker-compose stacks built from `feat/skills-ga-shape` @ 98de5c4 — the
+reviewed commit, on which the review fix set then landed and the gate re-ran. Each stack came
+up beside the developer stack on its own project name and port and was torn down after
+(`applying migration version=0033_skills_display_name.sql` in both logs).
+
+**The REST surface, driven by the real `ant` CLI v1.30.0 and curl** — fourteen checks, all
+passed. The skill object is exactly the seven GA keys (`type`, `id`, `display_name`,
+`source`, `latest_version_id`, `created_at`, `updated_at`) and the version object exactly
+six, with `directory` and `version` gone; `display_title` appears in none of the 22 captured
+bodies and the numeric `latest_version` in none either. `source` is an object. The bare and
+`?beta=true` responses are byte-identical for the list, a skill and a version (276 / 248 /
+208 bytes), which is what makes ignoring the parameter the right reading rather than a gap.
+
+**The headline fix, on the wire.** `GET …/versions/skver_9nyg80hceft8m8vsq358wks4` returned
+`"description":"acceptance skill alpha"` — the *older*, pinned version — while
+`…/versions/latest` returned the newer id. Before this change all three execution halves
+classified any non-digit pin as `latest`, so a GA client pinning by id was served the newest
+version instead: a wrong answer rather than a refusal, and invisible from outside the sandbox.
+
+Behaviour beside it: deleting a skill's only version is refused `400` with the reference's own
+sentence and destroys nothing (the version still `GET`s `200` afterwards); `DELETE
+/v1/skills/{id}` cascades, after which the skill, both version ids and `/content` all `404`;
+the download carries `Content-Disposition: attachment; filename*=utf-8''acc-alpha.zip` in the
+recorded form, plus this platform's additive `X-Skill-Archive-Sha256`, which matched a
+`shasum -a 256` of the downloaded bytes; both skills lists answer `limit=1001` with the
+identical `limit must be between 1 and 1000` (and `limit=1000` with `200`); two skills sharing
+one `display_name` both succeed, the uniqueness 0033 drops.
+
+**The SDK clients, which is what #566 actually reported broken.** Anthropic's own
+`agent-decomposition` workshop ran against the stack on Python `anthropic==1.3.0` — a current
+release resolved from the example's own `anthropic>=0.45.0`, with no `0.97.0` pin anywhere —
+and `uv run deploy starter` uploaded five skills and created the agent and environment.
+`BetaSkill` parsed with `display_name` and `latest_version_id` populated.
+
+The load-bearing evidence is the *second* run of the same command. `upload_skills` decides
+whether a skill already exists by reading `display_name` off `skills.list()`, and that lookup
+sits inside a bare `except Exception: pass` — so a broken read fails silently by creating
+duplicates. It matched all five instead, took the `versions.create` branch, and advanced
+`latest_version_id` from `skver_kemmxn19a8nyc66yjx2035xg` to `skver_qvvqwbsdm8d28ngqkr53z0rk`.
+
+On the JavaScript side, `research-desk`'s raw-fetch `uploadSkill` returned `200` and parsed as
+`{id, latest_version_id}` with a real `skver_` id rather than the `"latest"` fallback a missing
+field produces; and `@anthropic-ai/sdk@0.123.0`, whose `BetaSkill` declares both fields
+**required**, round-tripped `create` and `list` cleanly and attached a skill to an agent as
+`{"skill_id":…,"type":"custom","version":"latest"}`. `ANTHROPIC_BASE_URL` reaches a
+self-hosted stack: `anthropic/_client.py:210-218` reads it before computing
+`base_url_is_explicit`, so it also suppresses the profile override.
+
+Three workshop examples were migrated to the GA field names in scratch copies to run this
+(`agent-battle`, `agent-decomposition`, `research-desk` in both its source and `solutions/`
+tree). Those live in a separate repository and are not part of this change; the migration is
+recorded here as acceptance evidence, not delivered by it.
+
+Not covered, and named rather than implied: no agent *session* ran, because none of the three
+examples reaches one without a real model credential — this run exercises the control plane,
+which is the whole of what plan 39 changes. `research-desk` additionally needs a browser and
+live SEC/PyPI reachability from inside the sandbox.
+
+**Verification and review.** The verifier subagent (pinned model) returned PASS with findings
+and no blockers on 98de5c4: it re-ran `make verify` itself (57 packages, zero `FAIL`, the
+coverage gate held), stood up its own stack from that commit for 35 further probes — including
+a row hand-renamed to `skillver_` in Postgres, to prove the legacy spelling still resolves and
+renders unchanged — checked all six wire shapes field-by-field against anthropic-sdk-go
+v1.70.1, and mutation-tested the three resolvers by reverting each to the pre-change rule
+(brain: "an id pin was served the newest version"; executor: `"skver_res100" resolved to
+"300", want "100"`; worker: `retrieve addressed [latest], want [skver_stub02]`).
+
+Dual review — Codex `gpt-5.6-sol` (407k tokens, ~20 minutes) and the Claude reviewer — returned
+nineteen findings between them. Nine were fixed before merge; one was refuted with evidence
+(`internal/store/store.go:76` runs migrations before the process serves, so the un-dropped
+index that finding's scenario needed is unreachable); the rest are recorded as out of scope.
+The two that mattered most were found by different reviewers: a version name-consistency
+rejection the recording documents and the code had never implemented, and a `display_name`
+cap counted in bytes behind a recorded message promising characters.
+
+A tenth fix was specified and then **disproved by the agent applying it**, which is the record
+worth keeping. The malformed-id guard added to the brain and executor was specified for the
+BYOC worker too, on the reasoning that a rejected pin would fall to a miss. The worker's
+`default` arm is not a miss — it returns the retrieve's echo — so the guard would have
+reintroduced exactly the substitution this plan exists to kill, proven by running it:
+`download addressed [skver_stub03], want the pinned [skillver_stub01]`. The asymmetry is
+principled: brain and executor read this platform's own database, where every id is Crockford
+by construction, while the worker carries a token to a server that owns its own id shapes.
+
+---
+
 ## Idle outputs harvest acceptance (plan 38, #263, run 2026-09-04) — ✅ passed
 
 Verified against a docker-compose stack built from `feat/idle-outputs-harvest` @ cbc652b (the review-hardened revision — idle harvests attach to a live sandbox rather than provisioning one; the shipped tip adds three edge-case correctness fixes — transient-attach propagation, a corrupt-agent-state skip, and a grading-takeover requeue — that do not touch this harvested happy path), driving Anthropic's own `eval-driven-agent-development` workshop (`src/create-slides.ts`, `@anthropic-ai/sdk` 0.93.0, `ANTHROPIC_BASE_URL=http://localhost:8080`, the workshop agent on `claude-sonnet-4-6`), **without** the `HARVEST_VIA_OUTCOME` workaround.

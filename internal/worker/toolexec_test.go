@@ -804,7 +804,7 @@ func TestRunSessionToolsReportsProgressPerItem(t *testing.T) {
 	sb := &fakeSandbox{}
 	h := newHarness(t, sb)
 	h.seedSkill(t, "prog-good", "100", "prog-notes", map[string]string{"SKILL.md": "ok"})
-	h.refSkills(t, [2]string{"prog-gone", "latest"}, [2]string{"prog-good", "100"})
+	h.refSkills(t, [2]string{"prog-gone", "100"}, [2]string{"prog-good", "100"})
 	h.suspend(t, writeUse("out.txt", "hello"))
 
 	var reports int
@@ -816,16 +816,15 @@ func TestRunSessionToolsReportsProgressPerItem(t *testing.T) {
 	// the one event the scan walks and the scan's own boundary, the boundary
 	// that brackets the memory-references read (a wire GET, plan 36 slice 6),
 	// the provision,
-	// the two references resolved plus the version GET the concrete one goes on to
-	// make (the dangling reference never reaches it, its listing failing first),
-	// the sentinel decision, the one skill written,
+	// the two references resolved — one version GET each, the dangling one's
+	// answering 404 — the sentinel decision, the one skill written,
 	// the skills pass boundary before its sentinel write, the caller's skills and
 	// files boundaries, and — for the one tool — its pre-run answered check, its
 	// run and its posted result, which are three steps and not one (#383). This
 	// session mounts no files and no memory stores, so neither pass returns a
 	// boundary of its own.
-	if reports != 16 {
-		t.Errorf("progress reports = %d, want 16", reports)
+	if reports != 15 {
+		t.Errorf("progress reports = %d, want 15", reports)
 	}
 
 	// A second pass over an unchanged set takes the sentinel skip, which returns
@@ -840,13 +839,12 @@ func TestRunSessionToolsReportsProgressPerItem(t *testing.T) {
 	}
 	// The boundary before the scan, the two events this scan walks before it can
 	// bound the set, its own boundary, the memory-references read boundary,
-	// the provision, the one reference resolved and its version GET, the one
-	// sentinel read, the
+	// the provision, the one reference resolved, the one sentinel read, the
 	// caller's skills and files boundaries, and the tool's answered check, run and
 	// posted result. The skip returns before the pass boundary the first run
 	// reached, which is what makes this count one lower than a rewriting pass.
-	if reports != 14 {
-		t.Errorf("unchanged-set reports = %d, want 14", reports)
+	if reports != 13 {
+		t.Errorf("unchanged-set reports = %d, want 13", reports)
 	}
 }
 

@@ -30,7 +30,7 @@ const (
 	PrefixDeploymentRun = "drun"
 	PrefixFile          = "file"
 	PrefixSkill         = "skill"
-	PrefixSkillVersion  = "skillver"
+	PrefixSkillVersion  = "skver"
 	PrefixOutcome       = "outc"
 	PrefixSessionThread = "sthr"
 	// The memory family (plan 36 decision 2). A dream's `drm_` is deliberately
@@ -70,6 +70,16 @@ const (
 // PrefixSession on generation but recognize both.
 const altSessionPrefix = "session"
 
+// altSkillVersionPrefix is accepted on input forever (plan 39 decision 9). It
+// is the prefix this platform minted for a skill version before the reference's
+// GA convergence renamed it skver_, and the rows that carry it are not
+// rewritten: an agent's skills[] pins a version by id, so rewriting would
+// dangle every stored pin. Those rows therefore still render a skillver_ id on
+// the wire, which a GA client round-trips correctly because the id is opaque to
+// it. As with the session alias we normalize to PrefixSkillVersion on
+// generation and recognize both.
+const altSkillVersionPrefix = "skillver"
+
 // idAlphabet is Crockford base32 (lowercased): the digits and lowercase letters
 // minus i, l, o, u, no padding. It is both what NewID emits and what Valid
 // accepts in a token, so a stored id and an accepted one cannot drift. 15 random
@@ -79,15 +89,16 @@ const idAlphabet = "0123456789abcdefghjkmnpqrstvwxyz"
 var idEncoding = base32.NewEncoding(idAlphabet).WithPadding(base32.NoPadding)
 
 // knownPrefixes is the resource-id prefix set the API accepts on a path or an
-// id-shaped query parameter. altSessionPrefix is included so the session_ wire
-// spelling validates alongside sesn_.
+// id-shaped query parameter. Both alternates are included so the session_ wire
+// spelling validates alongside sesn_, and the skillver_ ids already stored
+// alongside skver_.
 var knownPrefixes = map[string]bool{
 	PrefixAgent: true, PrefixEnvironment: true, PrefixSession: true, PrefixEvent: true,
 	PrefixWork: true, PrefixVault: true, PrefixCredential: true, PrefixResource: true,
 	PrefixDeployment: true, PrefixDeploymentRun: true, PrefixFile: true,
 	PrefixSkillVersion: true, PrefixSkill: true, PrefixOutcome: true,
 	PrefixSessionThread: true, PrefixMemoryStore: true, PrefixMemory: true,
-	PrefixMemoryVersion: true, altSessionPrefix: true,
+	PrefixMemoryVersion: true, altSessionPrefix: true, altSkillVersionPrefix: true,
 }
 
 // PrimaryThreadID is the id of a session's primary thread: sthr_ plus the
@@ -122,14 +133,22 @@ func (id ID) Prefix() string {
 	return ""
 }
 
-// HasPrefix reports whether id carries the given resource prefix. The Session
-// prefix additionally accepts the alternate "session_" form for wire compat.
+// HasPrefix reports whether id carries the given resource prefix. Two prefixes
+// additionally accept an alternate form on input: Session takes "session_" for
+// wire compat, and SkillVersion takes "skillver_", the spelling stored rows
+// still carry.
 func (id ID) HasPrefix(prefix string) bool {
 	p := id.Prefix()
 	if p == prefix {
 		return true
 	}
-	return prefix == PrefixSession && p == altSessionPrefix
+	switch prefix {
+	case PrefixSession:
+		return p == altSessionPrefix
+	case PrefixSkillVersion:
+		return p == altSkillVersionPrefix
+	}
+	return false
 }
 
 // Valid reports whether id is a well-formed resource identifier: a known

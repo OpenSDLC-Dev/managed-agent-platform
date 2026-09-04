@@ -5,7 +5,7 @@ go 1.26.0
 require (
 	cloud.google.com/go/kms v1.33.0
 	cloud.google.com/go/storage v1.56.0
-	github.com/anthropics/anthropic-sdk-go v1.66.0
+	github.com/anthropics/anthropic-sdk-go v1.70.1
 	github.com/go-git/go-billy/v5 v5.9.1
 	github.com/go-git/go-git/v5 v5.19.2
 	github.com/go-jose/go-jose/v4 v4.1.4

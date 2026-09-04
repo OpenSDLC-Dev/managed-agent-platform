@@ -39,7 +39,7 @@ Two standing product decisions travel with these principles: **v1's first-class 
 
 ## Wire-compatibility rules
 
-- Mirror Anthropic's resource model, paths, JSON fields, and **ID prefixes**: `agent_` `env_` `sesn_` (accept a `session_` alias on input too — a lenient parse of ours, unobserved on the reference) `sevt_` `work_` `vlt_` `vcrd_` `sesrsc_` `depl_` `drun_` `file_` `skill_` `skillver_` `outc_` `sthr_` `memstore_` `mem_` `memver_` — `knownPrefixes` in `internal/domain/id.go` is the list, and a test fails this line if it drifts from it.
+- Mirror Anthropic's resource model, paths, JSON fields, and **ID prefixes**: `agent_` `env_` `sesn_` (accept a `session_` alias on input too — a lenient parse of ours, unobserved on the reference) `sevt_` `work_` `vlt_` `vcrd_` `sesrsc_` `depl_` `drun_` `file_` `skill_` `skver_` (accept the legacy `skillver_` spelling on input too) `outc_` `sthr_` `memstore_` `mem_` `memver_` — `knownPrefixes` in `internal/domain/id.go` is the list, and a test fails this line if it drifts from it.
 - Accept and ignore `anthropic-version` / `anthropic-beta` headers; honor `?beta=true` where the reference does.
 - Auth: management via `x-api-key`; workers via environment key (`Authorization: Bearer`, scoped to one environment's work queue).
 - Event taxonomy is `{domain}.{action}` — see [docs/plan/01_v1-managed-agent-platform.md](./docs/plan/01_v1-managed-agent-platform.md)'s Component 2 for the full list. SSE deltas use `content_delta` (NOT Messages API's `content_block_delta`).
