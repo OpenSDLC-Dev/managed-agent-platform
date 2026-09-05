@@ -169,7 +169,8 @@ issue; none is a blocker under decision 1.
   signature), so every tenant's `vault_credentials.secret_ciphertext` is sealed under one
   deployment key — one local AES-256-GCM key, one OpenBao transit key, or one Cloud KMS key. A
   missed predicate on that table is therefore credential *disclosure*, not metadata
-  disclosure, which is why §7.5 gives those statements their own named guard rule. A
+  disclosure, which is why §7.5 enumerates every statement on it by hand rather than leaving
+  them to slice 4's bulk, and why §6.5's rule (g) covers the table from slice 2. A
   per-tenant key envelope would change the `Cipher` interface and its shared contract suite
   (`internal/secrets/secretstest`).
 - **Queue fairness, named as distinct from rate limiting.** `queue.Claim` is one global FIFO —
@@ -399,7 +400,7 @@ fetched page — slug, fetch date, quoted sentence (`docs/DIVERGENCES.md:147`, `
   an inference, because the reference documents no wording a recording could settle it against.
   `docs/DIVERGENCES.md:151` and `:152` are the precedent for the neighbouring class (a run-error
   type nothing here records) and sit in the CONFIRMED section (`:35`), not the INFERRED one
-  (`:165`).
+  (`:166`).
 - **The organization has observable behavior**, which is why decision 2 rests on the absence of
   a *management* surface rather than on the absence of behavior:
   `BetaManagedAgentsBillingError` — "The caller's **organization** or workspace cannot make
@@ -603,7 +604,7 @@ item 5, which gates slice 6) at §7.6, and the archived-workspace refusal (item 
   costs no documentation edit. The validator is `domain.ValidWithPrefix`, already used on a
   console path at `internal/api/consoleapikeys.go:202`.
 - **No non-test Go composes a table name.** Fragment concatenation, by contrast, is pervasive:
-  **75** lines in the five target packages' non-test files place a backtick-quoted string
+  **77** lines in the target packages' non-test files place a backtick-quoted string
   adjacent to a `+`, including `internal/events/toolflow.go:72` (`func answeredBy` — a
   *function returning a SQL predicate*, spliced at **six** sites: `:89`, `:378`, `:403`, `:527`,
   `:610`, `:679`), the predicate
@@ -642,7 +643,7 @@ plan carries the corrections so the verifier's docs rung does not flag them:
    counts — one statement can contribute several (`internal/api/threads.go:133-134` yields both
    `FROM session_threads` and `JOIN sessions`) — where 211 is a **statement** count; by the
    statement rule `internal/queue` holds 18, `internal/events` 59, and brain, executor and
-   vaultresolve 75 together, and later sections spend each figure in its own unit. *That rule as an
+   vaultresolve 77 together (29, 44 and 4), and later sections spend each figure in its own unit. *That rule as an
    expression: `grep -roE "(FROM|JOIN|INSERT INTO|UPDATE|DELETE FROM) (<the 14 names>)([^_a-z]|$)"
    --include=*.go <pkg>` minus `_test.go` lines.* Create-time
    cross-references are ~16 sites, not 6, and **three have no existing site at all** (§7.4).
@@ -1034,9 +1035,12 @@ scope predicate has exactly that shape. So `internal/api/scopematrix_test.go`:
 
 1. **Walks every non-test Go file in `internal/api`, `internal/events`, `internal/queue`,
    `internal/executor`, `internal/brain` and `internal/vaultresolve` from its first landing** —
-   the target set **from slice 2**, six packages. `internal/vaultresolve` is in it because rule
-   (b′) names it and its two statements (`credentials.go:139`, `mcp.go:85`) would otherwise sit
-   unclassified for four slices. Everything not yet scoped goes on the exemption list **with
+   the target set **from slice 2**, six packages. `internal/vaultresolve` is in it because its
+   **four** statements would otherwise sit unclassified for four slices: the two `vaults` joins
+   (`credentials.go:139`, `mcp.go:85`) and the two keyed on a credential row's own id
+   (`mcprefresh.go:222`, `:418`). All four name `vault_credentials`, so all four ride rule (g),
+   not (b′) — the package's scoped-table *mention* count is 2 (§4.5) and its *statement* count
+   is 4, which is the pair of units that made the smaller number look like the whole of it. Everything not yet scoped goes on the exemption list **with
    the slice that fixes it named**, so the guard passes between slices. Slice 5 widens the walk
    once, to every non-test file under `internal/` (§7.5) — which is what brings `internal/store`
    into view, and why the two no-FK writers on the exemption list below sit outside the six
@@ -1110,10 +1114,7 @@ scope predicate has exactly that shape. So `internal/api/scopematrix_test.go`:
      `:754`, `:785`, but at least eight statements in those two packages are keyed on
      `session_id` rather than on a primary key — `brain/brain.go:546`, `brain/delegate.go:326`,
      `:446`, `:985`, `brain/repos.go:92`, `executor/mcpwork.go:229`, `executor/packages.go:553`,
-     `executor/repos.go:378` — and the same shape recurs one level down in
-     `internal/vaultresolve`, whose two statements (`credentials.go:139`, `mcp.go:85`) are
-     `WHERE c.vault_id = ANY($1)` joins on an *unscoped child*, which rule (g) admits by
-     borrowing this constraint. A by-own-PK-only rule admits none of those ten, and no other rule
+     `executor/repos.go:378`. A by-own-PK-only rule admits none of those eight, and no other rule
      reaches them: rule (f) has exactly the right shape and the same justification but names
      `internal/events` alone. So the rule is stated on the **property that makes it safe** — the
      package holds no request scope, and every id reaching it came from a caller who resolved it
@@ -1147,11 +1148,13 @@ scope predicate has exactly that shape. So `internal/api/scopematrix_test.go`:
    - **(g)** a scoped read of that child's **parent, in the same function**: rule (b)'s shape,
      applied where there is no column to predicate on. **In a package that holds no request
      scope there is no scope to read the parent under**, so rule (b′)'s constraint stands in for
-     it there, for the same reason it does on a scoped table: `internal/vaultresolve`'s two
-     `vault_credentials` reads (`credentials.go:139`, `mcp.go:85`) join `vaults` and constrain
-     `c.vault_id = ANY($1)` on ids their caller resolved under scope, and that is what admits
-     them. In `internal/api`, where the scope does reach the statement, only the scoped parent
-     read will do. Two routes fail it today, and slice 4 fixes both. `getMemoryVersion` (`internal/api/memoryversions.go:98`) reads
+     it there, for the same reason it does on a scoped table — and it has to cover **all four** of
+     `internal/vaultresolve`'s `vault_credentials` statements, not just the two that look like
+     joins: `credentials.go:139` and `mcp.go:85` join `vaults` and constrain
+     `c.vault_id = ANY($1)` on parent ids their caller resolved under scope, and
+     `mcprefresh.go:222` and `:418` are keyed on a credential row's own id — an id those first
+     two resolved. In `internal/api`, where the scope does reach the statement, only the scoped
+     parent read will do. Two routes fail it today, and slice 4 fixes both. `getMemoryVersion` (`internal/api/memoryversions.go:98`) reads
      `memory_versions` with no store probe anywhere in its body, defaulting to full content
      (`viewFull`), so a store id and version id from another workspace would return that
      workspace's memory verbatim. `getMemory` (`memories.go:317`) probes only on the **miss**
@@ -1159,10 +1162,9 @@ scope predicate has exactly that shape. So `internal/api/scopematrix_test.go`:
      checked. Both were written under a parent obligation the plan stated in prose; this rule is
      the reason a third one cannot be written the same way.
 4. **Fails closed on a dynamically composed table name**, and only on that. The stronger rule
-   ("any SQL-looking literal it cannot parse") is not available: 107 fragment-concatenation
-   sites in the target packages say otherwise, one of them a function returning a predicate
-   (§4.4). *Counting rule: non-test lines under the six target packages carrying a `+` beside a
-   string literal that holds a SQL keyword.* The table name after
+   ("any SQL-looking literal it cannot parse") is not available: the **77** fragment-concatenation
+   lines §4.4 counts, under the rule stated there, say otherwise — one of them a function
+   returning a predicate. The table name after
    `FROM`/`JOIN`/`INSERT INTO`/`UPDATE`/`DELETE FROM` is always a
    literal today — nothing in non-test `internal/` composes one, verified — so this rule is
    satisfiable now and a later refactor that interpolates a table name fails here. The guard's
@@ -1557,7 +1559,12 @@ alone until slice 5 (§7.4).
 **Tests.** The guard against the **current** tree reports the known leaks (§6.5). · Synthetic
 fixtures: compliant statement, missing predicate, missing insert columns, a parent-id-only
 read that must now fail rule (b), a root-table-by-own-PK read in `internal/brain` that must
-pass rule (b′), an `environment_id`-only read in `internal/queue` that must pass rule (e), a
+pass rule (b′) **and a `session_id`-keyed one beside it that must pass it too** — the shape a
+by-own-PK-only reading would have refused — **plus an unscoped-child read in
+`internal/vaultresolve` keyed on a caller-resolved id, which rule (g)'s no-request-scope arm
+must admit while the same read in `internal/api` must fail**, so a too-wide implementation of
+either arm is caught and not only a too-narrow one; an `environment_id`-only read in
+`internal/queue` that must pass rule (e), a
 session-id-constrained read in `internal/events` that must pass rule (f), an `ALTER TABLE … ADD
 COLUMN` of all three scope columns that must enrol a fifteenth table under derivation rule
 (ii) — the rule with no instance in the merged tree (§6.5) — a `CREATE TABLE` declaring `org_id`
@@ -1569,7 +1576,7 @@ the same parent in a *different* function of the same file, which must fail beca
 not in the resolving function — the file-local→same-function tightening of finding-fixed rule
 (b)), and **an unscoped-child pair** (a read of a table declaring none of the three but
 referencing one that does, once with its parent's scoped read in the same function and once
-without, which must pass and fail respectively — rule (g)): fourteen verdicts. · **Two assertions, not
+without, which must pass and fail respectively — rule (g)): seventeen verdicts. · **Two assertions, not
 one, because five of the tables the sizing named carry no scope columns at all.** *Stamping* is
 asserted on `events`, `work_items`, `session_threads` (primary and child) and harvested `files`
 — the four tables that have columns to stamp. *Inheritance* is asserted behaviorally as well as
@@ -1605,6 +1612,7 @@ a comment each so the omission reads as deliberate (§6.1, §6.2). · `skillsimp
 exempted, not changed. · Migration `0035_workspace_fk.sql`: the normalizing UPDATEs, then the
 nine composite foreign keys of §6.4, with the lock name, the lock cost and the exclusion reasons
 in its header. · The guard's target set does not grow here — it was complete at slice 2 — but
+`internal/api`'s inserts come **off the exemption list**, admitted now by rule (c).
 
 **Tests.** Per scoped table, a create by a second-workspace credential lands a row carrying that
 workspace — table-driven over resource families, not one test per statement. · A console-issued
@@ -1731,7 +1739,8 @@ unscoped by design. · Every existing single-workspace test still passes with a 
 populated in the same database.
 
 **Docs.** `changelog.d/` · STATE.md · **the "does not yet enforce" sentences stay for one more
-slice** — `internal/store/store.go:34` and `:37-38`, `internal/domain/session.go:44-45`,
+slice** — all seven coordinates: `internal/store/store.go:34` and `:37-38`,
+`internal/domain/session.go:44-45`,
 `docs/ARCHITECTURE.md:368` (the `store/` row's "reserves the multi-tenant columns it does not
 yet enforce") and `:485`'s parenthetical, `CLAUDE.md:36`'s parenthetical and `:85`'s layout
 line. They are still true here: §7.5's enumerated by-id reads on `vaults`, `vault_credentials`,
@@ -1839,7 +1848,10 @@ are enumerated here rather than left to slice 4's bulk:
 - `internal/api/auth.go:129-132`, `EnsureAPIKey`'s archive-by-name (§6.8).
 - Guard target: every non-test file under `internal/`. `vault_credentials` needs no rule of its
   own — it is one of §6.5's eleven unscoped children and rule (g) has covered it since slice 2;
-  what happens here is that its six statements come **off the exemption list**.
+  what happens here is that `internal/api`'s twelve statements on it come **off the exemption
+  list**: the nine this section names by hand, plus `vaultcredentials.go:164`, `:175` and
+  `:440`, which already constrain `vault_id` and need only the scoped `vaults` read slice 4
+  gives their handlers.
 
 **Tests.** **The failing test comes first, and it does not exist today in either direction**:
 `internal/api/skillsauth_test.go:14` (`TestSkillReadsEnvironmentKeyLane`) issues its environment
@@ -1863,10 +1875,10 @@ several workspaces. · **`TestKeyRotationMigrationRepairsExistingDuplicates`' re
 `schema_migrations` (`:541-544`) before replaying, so without the addition its replay silently
 ends on a schema no deployment reaches.
 
-**Docs.** `changelog.d/` · STATE.md · **the six "does not yet enforce" claims flip here**, where
-they finally become false: `internal/store/store.go:34` and `:37-38`,
-`internal/domain/session.go:44-45`, `docs/ARCHITECTURE.md:368` and `:485`, `CLAUDE.md:36` and
-`:85` (§7.4 says why they wait for this slice). · Registry: **rewrite the two entries carrying the clause
+**Docs.** `changelog.d/` · STATE.md · **the "does not yet enforce" claims flip here**, where they
+finally become false — seven coordinates across five files: `internal/store/store.go:34` and
+`:37-38`, `internal/domain/session.go:44-45`, `docs/ARCHITECTURE.md:368` and `:485`,
+`CLAUDE.md:36` and `:85` (§7.4 says why they wait for this slice). · Registry: **rewrite the two entries carrying the clause
 "scopes nothing per environment (skills are workspace-global)"** — `:163`, which #575's
 2026-09-03 recording promoted from INFERRED to CONFIRMED, and `:64`, plan 39's twin from the
 2026-09-04 recording — to the per-workspace rule plus the `anthropic`-source carve-out. **Both
@@ -1950,7 +1962,7 @@ the row, discharging the promise at `:48-50` ("so #56 can populate them without 
 mints only the reference's workspace-bound class, and the documented field belongs to the Admin
 API's `api_keys` resource, which §3 declines (§4.2). ·
 `parseScope` (`internal/api/environments.go:302-314`)
-keeps refusing `account`, on the new reason of §8-D8; the message at `:247` loses "yet". · The
+keeps refusing `account`, on the new reason of §8-D8; the message at `:311` loses "yet". · The
 archive cascade of §6.9, including `workspace_archived_error`. · **OTel `org`/`workspace`
 attributes at the same-source instrumentation point, which is two places, not one.** The span and
 the `span.*` wire event are opened together in `internal/events/span.go:35`
@@ -2048,11 +2060,11 @@ with its own stated reason rather than a single-tenancy premise it does not cont
 **grows** rather than shifts, and its recorded count of **seven** org/account-level roles stands
 unchanged: what the workspaces doc adds is a second axis, five *workspace-level* roles with
 documented inheritance (§4.2), so three org-wide roles with no per-workspace granularity is a
-wider gap under real tenancy, covered by §3's fine-grained exclusion. **Leave `:266`'s organization clause intact** —
+wider gap under real tenancy, covered by §3's fine-grained exclusion. **Leave `:267`'s organization clause intact** —
 "v1 answers only for `default` and 404s anything else *before* the environment lookup, naming
 the organization in the message" describes the `{organization_id}` segment, which decision 2
 freezes and `consoleOrganization` preserves, so striking it would delete an accurate record.
-`:266` gains **nothing** about workspaces: its path is the environment-token dialect
+`:267` gains **nothing** about workspaces: its path is the environment-token dialect
 (`/api/oauth/organizations/{organization_id}/environments/{environment_id}/tokens…`, `:86`),
 which carries no `{workspace}` segment at all. The workspace half's new behavior — resolved
 against the registry, constrained by the caller's scope only without the administration
@@ -2225,9 +2237,9 @@ Pinned count plus pinned membership gets both: brain and executor are in scope f
 growth is a reviewed edit.
 
 **D12 — The guard fails closed on a composed *table name* only.** *Rejected:* failing closed on
-any unparseable SQL literal, which the tree does not satisfy — 107 fragment-concatenation sites
-(§6.5 states the counting rule), one of them a function returning a predicate (§4.4). The
-narrow rule is satisfiable today and still catches the refactor that would defeat the scanner.
+any unparseable SQL literal, which the tree does not satisfy — 77 fragment-concatenation lines
+under §4.4's stated rule, one of them a function returning a predicate. The narrow rule is
+satisfiable today and still catches the refactor that would defeat the scanner.
 
 **D13 — The write floor normalizes before it constrains.** *Rejected:* asserting "every existing
 row holds `'default'`" from the column default, which nothing establishes: no CHECK, and the pin
@@ -2257,9 +2269,10 @@ unbootable with no repair path — the failure mode `0013` was written to avoid.
   than a code path.
 - **A single missed predicate on `vault_credentials` is credential disclosure, not metadata
   disclosure**, because `secrets.Cipher.Encrypt` has no per-tenant key
-  (`internal/secrets/secrets.go:38`) and there is no second envelope to fail. Bounded by §7.5's
-  named guard rule for that table, by replacing the Go-side `row.vaultID != vaultID` comparison
-  (`internal/api/vaultcredentials.go:241`, `:320`) with an in-statement predicate, by naming the
+  (`internal/secrets/secrets.go:38`) and there is no second envelope to fail. Bounded by rule (g),
+  which covers the table from slice 2 because it is one of §6.5's eleven unscoped children; by
+  §7.5 replacing the Go-side `row.vaultID != vaultID` comparison
+  (`internal/api/vaultcredentials.go:241`, `:320`) with a scoped `vaults` join; by naming the
   one credential **write** that carries no parent term at all
   (`internal/api/vaultvalidate.go:171-173`), and by a registered non-goal that says so plainly.
 - **The guard cannot check a predicate's argument.** `workspace_id = $1` bound to the environment
