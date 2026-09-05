@@ -44,9 +44,12 @@ type HostSet struct {
 // have passed CanonicalEntry below. One that did not is not rejected here — it
 // is keyed as it canonicalizes, and what that costs depends on the entry. Every
 // one of them matches exactly the string it was written as and nothing else, so
-// the question is whether a request host can ever be that string:
-// "https://x.com" and "x.com:443" cannot be — net/http parses neither into a
-// host — while "::1" and "_acme.example.com" can, and match. A nil or empty list
+// the question is whether a request host can ever be that string. "https://x.com"
+// and "x.com:443" cannot: the gate splits the port off before it asks (hostOnly
+// on a CONNECT authority, url.Hostname on a plain-HTTP one), and the one shape
+// that survives that split carrying a colon — a bracketed authority like
+// "[x.com:443]:443" — is refused by http.ReadRequest before any handler runs.
+// "::1" and "_acme.example.com" can be a request host, and match. A nil or empty list
 // matches nothing.
 func NewHostSet(entries []string) *HostSet {
 	s := &HostSet{exact: make(map[string]struct{}, len(entries))}
@@ -468,9 +471,10 @@ func hasEmptyLabel(host string) bool {
 // allowed_hosts writer reaches it through CanonicalEntry, and the executor's
 // WEBTOOL_ALLOWED_DOMAINS fails startup on the first bad entry, because an
 // out-of-grammar entry matches exactly the string it was written as and nothing
-// else, and no request host can be that string — net/http parses neither a URL
-// nor a bracketed authority carrying a colon into a host — so a typo reads as the
-// operator's fence when it is really a hole in it.
+// else, and no request host can be that string: the gate hands the matcher a host
+// with the port already split off, and the bracketed authority that survives that
+// split carrying a colon is refused by http.ReadRequest first. So a typo reads as
+// the operator's fence when it is really a hole in it.
 func ValidateHostEntry(h string) error { return validateHostEntry(h, h) }
 
 // validateHostEntry is ValidateHostEntry with the spelling to report split from
