@@ -3,7 +3,7 @@ status: draft
 issue: "#56"
 ---
 
-# Multi-tenant activation — the workspace becomes a real scoping key (plan 41)
+# Multi-tenant activation — the workspace becomes a real scoping key (plan 42)
 
 Resolves **#56**. Today the reserved tenancy columns are decoration. Fourteen tables carry
 `org_id`/`workspace_id`/`project_id` as `text NOT NULL DEFAULT 'default'`; **exactly two

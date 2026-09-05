@@ -28,7 +28,7 @@ its delivering PR, and plan 40 (#353, environment packages, folding in #576)
       settled, two narrowed, one dissolved, touching 24 registry entries;
       thirteen mismatches are now issues (#570-#574, #577-#579, #581-#582,
       #589-#591), the `list_cost` unit is on #432, and #576 is registered
-- [x] Record the two-workspace capture plan 41 (#56) gated slice 1 on — items 1-5
+- [x] Record the two-workspace capture plan 42 (#56) gated slice 1 on — items 1-5
       in full, item 6 on its key lane; the gate lifts, one half stays unreachable
 - [ ] Read the 72 un-analysed comparison rows from 2026-09-02 — the recording
       backlog is nearly exhausted and this one has never been touched
