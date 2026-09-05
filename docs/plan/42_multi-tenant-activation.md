@@ -139,12 +139,16 @@ summarised:
   `GET /v1/organizations/workspaces?limit=10&include_archived=false`,
   `POST /v1/organizations/workspaces/{id}/archive`, `/members` add/update/remove,
   `ant beta:organization:workspaces …`, and `client.beta.organization.workspaces` (workspaces
-  doc lines 144-810, fetched 2026-09-03) — while being **absent from every pinned checkout**
+  doc lines 144-810, fetched 2026-09-03) — and **absent from the checkouts this plan cites**
   (no `betaorganization*.go` or `betaworkspace*.go` in `anthropic-sdk-go` v1.66.0; no
-  organization command among the 85 files of `anthropic-cli/pkg/cmd`; none of the fetched
-  spec's 96 paths matches `/organizations|workspace|api_key/i`). Checkout silence is drift, and
-  this repo's resolution order puts public docs first, so slice 6 registers two divergences for
-  the shape it declines (§7.6).
+  organization command among the 85 files of `anthropic-cli/pkg/cmd` at v1.26.1; none of the
+  fetched spec's 96 paths matches `/organizations|workspace|api_key/i`) but **typed at the pins
+  since**: `go.mod:8`'s v1.70.1 ships seventeen `betaorganization*.go` files, among them
+  `betaorganizationworkspace.go` (`v1/organizations/workspaces`, `/{id}`, `/{id}/archive`) and
+  `betaorganizationworkspacemember.go`, and the CLI at v1.31.0 the matching `pkg/cmd`
+  commands (§4.1 on the pin gap). Silence at the cited tags was drift the next tags closed;
+  the shape was known from the docs either way, so slice 6 registers two divergences for the
+  shape it declines (§7.6).
 
 Added by this plan, each with its reason. Each becomes a registered non-goal with its own
 issue; none is a blocker under decision 1.
@@ -239,16 +243,17 @@ appeal to one.
 
 **Every `file:line` here is as of this branch's merge base, and one file has already moved
 three times under it.** `docs/self-hosted-security.md` gained ~72 lines in a single merge while
-this plan was in review, staling twenty citations at once; `docs/DIVERGENCES.md` shifted three
-entries by one, and `internal/api/environments.go` moved by ~65. Each was re-derived rather
+this plan was in review, staling twenty citations at once; `docs/DIVERGENCES.md` shifted six
+entries and its INFERRED heading by one, and `internal/api/environments.go` moved by ~65. Each was re-derived rather
 than left, but the class does not close — so before spending any coordinate in this plan, grep
 for the string it names rather than trusting the number, and re-derive any count from the rule
 printed beside it. The counting rules are in the plan for exactly that reason; the coordinates
 are a convenience that decays.
 
 **The 2026-09-05 tenancy recording** (§5) is cited by file and entry index — `batch8.json`
-idx *N* for the console and environment-key lanes, `batch9.curl.txt:N` for the key lane, where
-*N* is the line the probe's `###PROBE` marker sits on. Both live in
+idx *N* for the console and environment-key lanes, `batch9.json` idx *N* for the five console
+calls the key-lane session made to set itself up, `batch9.curl.txt:N` for the key lane, where
+*N* is the line the probe's `###PROBE` marker sits on. All three live in
 `OpenSDLC-Dev/managed-agents-wire-recordings` under `2026-09-05/`, alongside `FINDINGS8.md`,
 which carries the evidence and — for three claims — says plainly which bytes are *not* there.
 That repository is **private**, so these are working coordinates for someone who can open it
@@ -755,10 +760,12 @@ correction is owed. What the recording *did* change:
 - **§6.1's archived-workspace refusal is CONFIRMED** at exactly the status it was aligned to.
 - **§7.6's two console routes are confirmed in shape**, not merely in placement, so the
   contingency in item 5 above — registering them as ours in shape — does not fire.
-- **One new deliberate divergence**, from item 4's bytes: the reference's foreign-workspace 404
-  echoes a *decoded UUID* rather than the id it was sent, and produces one even for an id
-  belonging to no workspace. Ours echoes what it was given. §6.2 states the rule; the registry
-  carries the entry.
+- **Four deliberate divergences the bytes made visible**, none of them a correction. Item 2's:
+  the reference ignores the workspace header on the work lane and stamps no tenancy header
+  there, where our one rule does both — §6.2's pair. Item 4's: the reference's foreign-workspace
+  404 echoes a *decoded UUID* rather than the id it was sent, and produces one even for an id
+  belonging to no workspace; ours echoes what it was given. The fourth is the third finding
+  below. §6.2 states the rules; slice 1 registers all four (§7.1).
 - **Three findings nobody asked for**, none of which changes a slice: rate-limit buckets are
   organization-wide rather than per workspace (which is decision 7's premise, now evidenced
   rather than assumed); `/v1/environments` stamps no tenancy headers even on 200; and the
@@ -768,9 +775,12 @@ correction is owed. What the recording *did* change:
 **One half of item 6 is NOT OBSERVED and stays so**: an *environment* key belonging to an
 archived workspace. The console's mint endpoint could not reach an environment in a
 non-default workspace, so no environment token was ever bound to a workspace that could then
-be archived. §6.1's rule covers both lanes; only the key lane is confirmed. Tracked as part of
-#56's own recording debt rather than #78's, because it needs this plan's own two-workspace
-setup to ask.
+be archived. §6.1's rule covers both lanes; only the key lane is confirmed. **Tracked under
+#78**, with the other assumptions awaiting bytes, not under #56: #56 closes when this plan
+delivers, and a debt tracked there would close with it unobserved. Slice 1 registers the lane
+as INFERRED with that pointer (§7.1); the probe it waits for is an environment token minted
+in a non-default workspace, which needs a route to such an environment this recording did
+not find.
 
 ## 6. Architecture
 
@@ -882,8 +892,8 @@ the credential already covers.
   **CONFIRMED** (`batch9.curl.txt:79`).
 - a **real workspace the credential does not cover** → the identical 404 body, so existence
   never leaks. **CONFIRMED 2026-09-05** — it is a 404, not the inert 200 the contrary reading
-  allowed ("always runs there", the header "Optional for other API keys"), and the covered and
-  uncovered answers are indistinguishable on both sides (`batch9.curl.txt:24` against `:79`).
+  allowed ("always runs there", the header "Optional for other API keys"), and the uncovered and
+  unknown answers are indistinguishable on both sides (`batch9.curl.txt:24` against `:79`).
   **What differs is what the body echoes**, and that is a divergence rather than a detail: the
   reference prints a *decoded UUID* — it prints one even for `wrkspc_01AAAAAAAAAAAAAAAAAAAAAA`,
   an id belonging to no workspace, so it is decoding the input rather than looking it up. (That
@@ -1099,7 +1109,8 @@ scope predicate has exactly that shape. So `internal/api/scopematrix_test.go`:
    stand-in arm. Inside it, (g) asks each for its parent's scoped read in the same function, and
    **which ones already have it is what the guard's first run against the current tree reports**,
    not what this plan lists by hand, and **this plan states no total for it**. Reading found
-   `getMemoryVersion` and `getMemory` (slice 4, below), then `getSkillVersion` and
+   `getMemoryVersion` and `getMemory` (slice 4, below) — and, once rule (b) anchored on
+   position, `listMemoryVersions` beside them — then `getSkillVersion` and
    `downloadSkillVersion`, whose only `skills` read is `resolveSkillVersion`'s `latest` arm in
    another function, then the vault-credential reads, then — a reading later, and now folded
    into §7.5's list with them — the deployment-run pair and the two vault-credential writes.
@@ -1129,18 +1140,31 @@ scope predicate has exactly that shape. So `internal/api/scopematrix_test.go`:
      `downloadSkillVersion` have none in their own bodies, which is why (g) fails them today and
      why slice 5 adds the same-shape probe to both. **The check is `*ast.FuncDecl`-local,
      not file-local**: the guard walks each function and requires the scoped parent read to be
-     present in that same body. A file-local check let a compliant statement in one function
-     mask an unsafe statement of the same shape in another — the false negative this rule
-     closes. A rule the guard cannot evaluate statically is a comment, not a rule — and that,
-     not the function boundary, is where the line falls. **A call in this body to a pinned
-     parent-checking helper is static** and admits the statement — but only if the call
+     in that same body **and to dominate the statement** — one test, stated below for the helper
+     call, holding for the direct read too, since a probe inlined in a miss branch after the
+     read is `getMemory`'s leak in another spelling. A file-local check let a compliant
+     statement in one function mask an unsafe statement of the same shape in another — the
+     false negative this rule closes. A rule the guard cannot evaluate statically is a comment,
+     not a rule — and that, not the function boundary, is where the line falls. **A call in this
+     body to a pinned parent-checking helper is static** and admits the statement — but only if
+     the call
      **dominates** it: earlier in the same body, and outside any branch the statement itself is
      outside of. **Presence alone would admit the leak this rule exists to catch.**
      `getMemory` is the proof: its `checkMemoryStore` call is in its own body, and useless there
      — it sits inside the `ErrNoRows` branch *after* the read (`memories.go:317`, call at
      `:322`), so a hit answers before the store is checked and a presence test would wave it
      through. Dominance is position in the AST, which the guard can compute; it is not
-     reachability, which it cannot. The helper set is pinned from **slice 2** as the
+     reachability, which it cannot. Two consequences of anchoring on position, both stated so
+     the guard's author does not have to choose. A call in an `if` statement's init clause —
+     `if err := s.checkMemoryStore(ctx, storeID); err != nil { return nil, err }`, the shape
+     every probe in this tree takes — sits at the `if`'s own position, outside its body, and
+     dominates what follows the `if`. And the statement the guard anchors is the one holding
+     the table name, the literal, not the one executing it: a query built before the probe
+     and run after it is refused. `listMemoryVersions` is that case — its `memory_versions`
+     literal is at `memoryversions.go:141`, its probe at `:206`, its execution at `:209` — a
+     false positive the guard cannot tell from the leak, which slice 4 answers by moving the
+     probe ahead of the literal rather than by teaching the guard to follow a string through
+     variables. The helper set is pinned from **slice 2** as the
      parent-*reading* helpers, each asserted to read its parent and answer absent when there is
      none; the scope predicate inside them arrives in **slice 4** with every other read, and the
      contract becomes the full one — a foreign parent gets the absent-id answer — then. Adding a
@@ -1192,7 +1216,12 @@ scope predicate has exactly that shape. So `internal/api/scopematrix_test.go`:
    And for every SQL literal naming an **unscoped child table** — step 2's second set, which no
    predicate rule can reach — requires:
    - **(g)** a scoped read of that child's **parent, in the same function**: rule (b)'s shape,
-     applied where there is no column to predicate on. **Where a package holds no request scope
+     applied where there is no column to predicate on — or the parent's scoped **insert**,
+     dominating the statement the same way, which is the create route's shape: `agents.go:159`
+     inserts `agents` before `:165` inserts `agent_versions`, and `insertSkill` inserts `skills`
+     (`skills.go:298`) before `skill_versions` (`:304`). A parent row the same body just created
+     under scope is this workspace's by construction, and without this arm both would be the
+     guard's false positives. **Where a package holds no request scope
      there is no scope to read the parent under**, so whichever arm admits that package's
      *scoped-table* statements admits its unscoped-child ones too — (b′) in `internal/brain`,
      `internal/executor` and `internal/vaultresolve`, (e) in `internal/queue`, (f) in
@@ -1211,7 +1240,9 @@ scope predicate has exactly that shape. So `internal/api/scopematrix_test.go`:
      `lockMemoryStoreForWrite` (`:148`) and `checkMemoryStore` (`:162`) are the three pinned
      helpers, and the routes that call one of them first are admitted rather than exempted.
      Two things that is **not**: a route whose call does not dominate (`getMemory`, below,
-     until slice 4 moves its probe ahead of the read), and the surface's own helper `FuncDecl`s
+     until slice 4 moves its probe ahead of the read; `listMemoryVersions`, whose probe at
+     `memoryversions.go:206` follows the literal at `:141` though it precedes the execution at
+     `:209`, until slice 4 moves it ahead of the literal), and the surface's own helper `FuncDecl`s
      — `occupiedBy` (`:178`, statement `:180`) and `insertMemoryVersion` (`:196`, statement
      `:207`) hold no parent read and call no pinned helper, so the guard names them and a slice
      takes them. Which is the point: the rule reaches what reading did not. **How many in-api
@@ -1535,7 +1566,8 @@ separate suite beside it.
 `in-progress` · README.md's development/configuration notes and the `internal/identity` package
 doc beside `config.go:26-29` for the two new `IDENTITY_*` names — **not**
 `docs/ARCHITECTURE.md:466`, which mentions only `IDENTITY_MODE` and enumerates neither existing
-name, so there is no list for them to join; if ARCHITECTURE is to carry them, `:460-465` is
+name, so there is no list for them to join; if ARCHITECTURE is to carry them, `:465-470` — the
+bullet's sentence naming `IDENTITY_MODE` — is
 *extended*. · Registry: **rewrite** `:47` — this plan's own PR already recast that entry to
 cover **both** halves (no response header; the request header accepted and ignored, with
 `server.go:699` cited and `Tracked: #56` naming this slice), so slice 1 rewrites it into the
@@ -1565,7 +1597,9 @@ divergence, *not* INFERRED) that this platform emits `default` as its organizati
 format fallback is needed, that observation having succeeded. **Add** the archived-workspace
 refusal (§6.1) as a **note in the non-mismatch half**: §5 item 6 recorded the reference
 answering the same 401 `authentication_error`, so this is convergence, not divergence — with
-the environment-key half named as the remaining unobserved lane. **Add** the two divergences the
+the environment-key half **added as INFERRED (tracked #78)**: that lane's rule is ours until a
+recording binds an environment token to an archivable workspace (§5.1), and #78 rather than
+#56 because #56 closes with this plan. **Add** the two divergences the
 recording itself produced: that our foreign-workspace 404 **echoes the id it was given** where
 the reference echoes a decoded UUID (§6.2), and that we **accept the literal `default` in the
 header** where the reference answers 400 (§6.2) — the second is the header half of the same
@@ -1656,7 +1690,13 @@ the same parent in a *different* function of the same file, which must fail beca
 not in the resolving function — the file-local→same-function tightening of finding-fixed rule
 (b)), and **an unscoped-child pair** (a read of a table declaring none of the three but
 referencing one that does, once with its parent's scoped read in the same function and once
-without, which must pass and fail respectively — rule (g)): seventeen verdicts. · **Two assertions, not
+without, which must pass and fail respectively — rule (g)), **a dominance triple** (a pinned-helper
+call after the statement, one inside a branch the statement is outside of, and one in an `if`
+init clause ahead of it — the first two must fail and the third pass, so a presence test cannot
+satisfy the suite), and **a parent-insert pair** (a child insert after its parent's scoped insert
+in the same body, which must pass rule (g)'s insert arm, and the same child insert with no
+parent statement at all, which must fail): twenty-two verdicts, one per outcome asserted above,
+a pair that asserts one outcome counting once. · **Two assertions, not
 one, because five of the tables the sizing named carry no scope columns at all.** *Stamping* is
 asserted on `events`, `work_items`, `session_threads` (primary and child) and harvested `files`
 — the four tables that have columns to stamp. *Inheritance* is asserted behaviorally as well as
@@ -1796,8 +1836,10 @@ gets its slice (§6.5). The deployment-run pair is here by its join: `getDeploym
 is what satisfies (g) for both. Then `getMemoryVersion`
 (`internal/api/memoryversions.go:98`) gains the scoped `memory_stores` probe it has never had,
 and `getMemory`'s probe (`memories.go:322`) moves ahead of its read so a hit is checked as the
-miss already is. The probe is the existing `checkMemoryStore`, which slice 4 has just given the
-predicate, so neither is a new query shape — only a call the parent obligation always implied.
+miss already is; `listMemoryVersions`' probe (`memoryversions.go:206`) moves ahead of the literal
+it already precedes in execution (`:141`, run at `:209`) — no behaviour changes, and rule (b)'s
+anchor is satisfied. The probe is the existing `checkMemoryStore`, which slice 4 has just given
+the predicate, so none is a new query shape — only a call the parent obligation always implied.
 
 **Tests.** Per resource family and **per statement kind** (get / list / update / archive /
 delete), the cross-workspace answer is byte-identical to the absent-id answer: status, error
@@ -2446,8 +2488,9 @@ two entries still tracking #56.
 
 **What is still open is one half of one item and two small threads.** An *environment* key
 belonging to an archived workspace was not reachable (§5.1), so §6.1's rule for that lane is
-ours rather than mirrored; and the reference's answer for a multi-workspace key sent with no
-header was not reachable either, so §6.2's SSO-lane 400 keeps its INFERRED label and its #78
-pointer. Riding along without blocking anything: the environment `scope` default's tie to
+ours rather than mirrored — INFERRED, pointed at #78; and the reference's answer for a
+multi-workspace key sent with no header was not reachable either, so §6.2's SSO-lane 400 keeps
+its INFERRED label and the same pointer. Riding along without blocking anything: the
+environment `scope` default's tie to
 organization type (§8-D8). The skill display field's **name**, which an earlier draft carried as
 a second such thread, is no longer one — plan 39 settled it as `display_name` (§4.2).

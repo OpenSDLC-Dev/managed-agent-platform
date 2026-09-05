@@ -5,12 +5,12 @@ What is being worked on right now, and how far along it is — nothing else. **S
 ## Active work
 
 **#78 — confirming documented wire assumptions against a real managed-agents endpoint.**
-Four recording days, 1,248 request/response pairs for about US$1.12: bytes observed
+Four recording days, 1,301 request/response pairs for about US$1.12: bytes observed
 once, at cost, in a private archive. 2026-09-02 covered the Work API, turn semantics,
 multiagent threads, memory stores, files, skills, vaults, deployments and permission
 gating; 2026-09-03 ran two waves, one free and one of 281 pairs; 2026-09-04 settled the
 skills GA wire shape; 2026-09-05 added #594's batch and #56's, the latter the first
-**two-workspace** capture. #78 stays open — 117 registry entries name it as their live
+**multi-workspace** capture. #78 stays open — 117 registry entries name it as their live
 tracker, and the debt is now analysis rather than recording. Plan 38 (#263) archived
 2026-09-04; plans 39 (#566, skills GA) and 40 (#353, environment packages, folding in
 #576) 2026-09-05.
@@ -27,7 +27,7 @@ tracker, and the debt is now analysis rather than recording. Plan 38 (#263) arch
       settled, two narrowed, one dissolved, touching 24 registry entries;
       thirteen mismatches are now issues (#570-#574, #577-#579, #581-#582,
       #589-#591), the `list_cost` unit is on #432, and #576 is registered
-- [x] Record the two-workspace capture plan 42 (#56) gated slice 1 on — items 1-5
+- [x] Record the multi-workspace capture plan 42 (#56) gated slice 1 on — items 1-5
       in full, item 6 on its key lane; the gate lifts, one half stays unreachable
 - [ ] Read the 72 un-analysed comparison rows from 2026-09-02 — the recording
       backlog is nearly exhausted and this one has never been touched
