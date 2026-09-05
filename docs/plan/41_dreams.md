@@ -547,8 +547,10 @@ with I/O, splits into a claim transaction, an unlocked rendering phase, and that
 transaction, so a cancel landing during the render finds the row free, and one landing
 during the write waits on the row for at most the handler's `lock_timeout` and, if it
 does not clear, fails the request (the 500 an unmapped error gets), which the SDK retries
-on its own (`requestconfig.go:265-272`) — against a `running` dream by then, through the
-interrupt path. The locked read repeats the scan's predicate, so a candidate list taken
+on its own (`requestconfig.go:265-272`) — against whatever the write left: a `running`
+dream, through the interrupt path; a `failed` one after a classified failure, the 400 of
+§5.1; a `pending` one after a rollback, canceled outright. The locked read repeats the
+scan's predicate, so a candidate list taken
 before another replica's claim finds the row excluded rather than claiming it again
 (§4.2). `step` reads `(status, stage, attempts, updated_at, session_id)` and, when a
 session exists, its `status`, `archived_at` and `usage` (`internal/api/sessions.go:88-89`;
@@ -634,7 +636,7 @@ instruments: `dream.transitions` (by `to` status), `dream.stage_turns` (by stage
 with the deployment handlers' `SET LOCAL lock_timeout` (`deployments.go:643-660`, a
 55P03 surfacing as a failed request rather than a hang — the one transaction a cancel can
 wait on is the start's write transaction, bounded by the clone's size (§4.2); the failed
-request is retried by the SDK and lands against the `running` dream, §4.1), and on a
+request is retried by the SDK and lands against whatever the write left, §4.1), and on a
 `pending` dream sets `canceled`, `ended_at` and `closed_at` and is done. On a `running`
 dream it sets `canceled` and `ended_at` and **runs the interrupt** on the session in the
 same transaction — the whole interrupt arm of `sendSessionEvents`
@@ -998,7 +1000,10 @@ Until this slice lands, `POST /v1/dreams` refuses `output_behavior.type: update_
 with a 400 `invalid_request_error` (§1 slice 1): the hold index below ships in migration
 `0034`, but no row sets `target_memory_store_id` before the slice that gives the
 behavior a runtime path, so neither an in-place dream the runner cannot start nor a raw
-unique-violation 500 can occur in between. The start arm skips step 4 and mounts the
+unique-violation 500 can occur in between. The refusal is tested before the target rule
+below, so until slice 4 every `update_existing` body gets the one 400; and it is
+wire-visible for as long as it stands — a request the reference accepts — so the
+rewritten `:135` entry records it (§8.1) and slice 4 removes it from there. The start arm skips step 4 and mounts the
 input store `read_write`; `outputs[]` names the input store once `running`. The hold: **at most one live `update_existing`
 dream per target store** — `pending`, `running`, or terminal and not yet closed —
 enforced by a partial unique index on `dreams (target_memory_store_id) WHERE
@@ -1126,8 +1131,8 @@ the renderer in `internal/transcript`; no test-support package is added, so the 
 
 - **Routes (slice 1)**, `internal/api/dreams_test.go` over `pgtest`: each create rejection
   its own case (cardinality, ids, model, instructions bounds, an unknown key at the top
-  level and inside each nested arm, the `update_existing` target rule, and the 400 every
-  `update_existing` body gets until slice 4 lifts it); the echo of both
+  level and inside each nested arm, and the 400 every `update_existing` body gets until
+  slice 4 lifts it — the target rule's own 400 is slice 4's case); the echo of both
   `model` forms; the list's ordering,
   paging, `include_archived`, both `statuses` spellings, the exclusive bounds; archive and
   cancel over every status, idempotence included; 404s for malformed and unknown ids; the
@@ -1142,7 +1147,8 @@ the renderer in `internal/transcript`; no test-support package is added, so the 
   the dream back into the scan), a cancel landing during the render phase (the write
   transaction finds `canceled`, deletes the blobs, changes nothing), a cancel arriving
   while the write transaction holds the row (55P03 at the handler's `lock_timeout`, and
-  the retried cancel interrupting the now-`running` dream), a second replica whose
+  the retried cancel interrupting the now-`running` dream, or canceling outright the
+  `pending` one a rollback left), a second replica whose
   candidate list predates the first's claim finding no row to claim, the status read
   before the ask read (an ask-and-idle commit landed between the two reads is still
   caught), a claimant that
@@ -1182,7 +1188,8 @@ the renderer in `internal/transcript`; no test-support package is added, so the 
   per source (each role's text, a tool input, a tool result, the `INDEX.md` preview,
   `instructions`), as §3.2 requires; the per-transcript cap with the `INDEX.md` record of
   what was elided.
-- **The hold (slice 4)**: two in-place dreams on one store, the second a 409 naming the
+- **The hold (slice 4)**: the slice-1 refusal lifted and the target rule's 400 in its
+  place; two in-place dreams on one store, the second a 409 naming the
   first and carrying `x-should-retry: false`; the hold kept through every terminal status
   until the closing arm stamps `closed_at`, and released then — with the session deleted
   at the database level too; a dream canceled while `pending` releasing it at once; a
@@ -1217,7 +1224,9 @@ the renderer in `internal/transcript`; no test-support package is added, so the 
 
 To rewrite (slice 1): the `:135` entry becomes **"`/v1/dreams` is served (plan 41)"**, a
 CONFIRMED-section entry recording what converged and what did not — the same "converged
-entry stays in the CONFIRMED section" convention the header describes. The `:46`
+entry stays in the CONFIRMED section" convention the header describes — and, until
+slice 4 strikes the clause, that `output_behavior.type: update_existing` is refused with
+a 400 the reference does not give (§5.3). The `:46`
 beta-header entry gains a clause for `dreaming-2026-04-21` only; `anthropic-workspace-id`
 already has its own entry at `:47` (§2.2).
 
@@ -1433,7 +1442,7 @@ states the alternative it beat.
   to tens of seconds for 100 transcripts): the claim is one row change, the write is
   bounded database work (the clone, the file rows, the session), and a cancel between
   them lands and wins; one during the write waits at most the handler's `lock_timeout`
-  and lands on the SDK's retry, against a `running` dream (§4.1, §4.2). A candidate list
+  and lands on the SDK's retry, against whatever the write left (§4.1, §4.2). A candidate list
   older than another replica's claim finds the row excluded under the lock. What the window costs
   instead is a soft lease — a claimant that crashes leaves its dream out of every scan
   for `dreamStartLease` (5 min) and burns one of `dreamStartAttempts` (5); the `FOR
