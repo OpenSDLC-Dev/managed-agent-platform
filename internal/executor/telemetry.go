@@ -40,6 +40,11 @@ const (
 	MetricMemorySyncActions = "memory.sync.actions"
 	// MetricMemorySyncDuration is one whole sync, its three phases together.
 	MetricMemorySyncDuration = "memory.sync.duration"
+	// MetricPackagesInstalled counts per-manager install outcomes
+	// (plan 40 decision 5).
+	MetricPackagesInstalled = "packages.installed"
+	// MetricPackagesInstallDuration is one whole package-install pass.
+	MetricPackagesInstallDuration = "packages.install.duration"
 )
 
 // Bounded outcome values — skill/file ids never label metrics (cardinality
@@ -78,6 +83,14 @@ const (
 	memoryOutcomeNotFound  = "not_found"
 	memoryOutcomeFailed    = "failed"
 	memoryOutcomeUntrusted = "untrusted"
+
+	// The package-install outcomes. The four failure values are the
+	// session.error's own reasons (packages.go), spelled once so a dashboard
+	// and an event never disagree; ok and skipped have no wire twin — skipped
+	// is the sentinel's answer that this sandbox has already settled the list.
+	packageOutcomeOK      = "ok"
+	packageOutcomeSkipped = "skipped"
+	packageOutcomeInvalid = packageReasonInvalid
 )
 
 // recordMemoryMaterialized counts one store's outcome, the files recorder's
@@ -202,6 +215,35 @@ func recordReposMaterializeDuration(ctx context.Context, d time.Duration) {
 		MetricReposMaterializeDuration,
 		metric.WithUnit("s"),
 		metric.WithDescription("Duration of a session's repository-materialization pass."))
+	if err != nil {
+		return
+	}
+	hist.Record(ctx, d.Seconds())
+}
+
+// recordPackageInstalled counts one manager's install outcome. The manager is
+// an attribute rather than part of the metric name, and it is bounded — the
+// six the reference names — so it stays within the cardinality rule the
+// outcome values follow.
+func recordPackageInstalled(ctx context.Context, manager, outcome string) {
+	counter, err := otel.GetMeterProvider().Meter(meterName).Int64Counter(
+		MetricPackagesInstalled,
+		metric.WithDescription("Environment package lists installed into sandboxes, by manager and outcome."))
+	if err != nil {
+		return
+	}
+	counter.Add(ctx, 1, metric.WithAttributes(
+		attribute.String("manager", manager),
+		attribute.String("outcome", outcome)))
+}
+
+// recordPackagesInstallDuration records one package-install pass, every
+// manager together.
+func recordPackagesInstallDuration(ctx context.Context, d time.Duration) {
+	hist, err := otel.GetMeterProvider().Meter(meterName).Float64Histogram(
+		MetricPackagesInstallDuration,
+		metric.WithUnit("s"),
+		metric.WithDescription("Duration of a session's package-install pass."))
 	if err != nil {
 		return
 	}

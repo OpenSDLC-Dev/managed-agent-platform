@@ -164,6 +164,12 @@ func (e *Executor) processHarvest(ctx context.Context, item *queue.Item) (err er
 // harvest on a one-off fault.
 func (e *Executor) harvestSandbox(ctx context.Context, item *queue.Item, sess sessionRun, progress func()) (sandbox.Sandbox, bool, error) {
 	if item.ChainGrading {
+		// The harvest reads the sandbox and runs no tools, so it installs
+		// nothing (plan 40 decision 2): a grading provision that repeated the
+		// environment's package install would spend up to six install budgets
+		// on a pass that only lists and reads files. sess is this function's
+		// own copy, so clearing the field reaches no other lane.
+		sess.packages = nil
 		sb, err := e.provisionSandbox(ctx, item.SessionID, sess, progress)
 		if err != nil {
 			return nil, false, err

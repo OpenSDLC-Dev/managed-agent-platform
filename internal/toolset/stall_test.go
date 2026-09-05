@@ -126,3 +126,34 @@ func TestParseStallTimeoutAcceptsTheFloorItself(t *testing.T) {
 		}
 	}
 }
+
+// TestLongestStepNamesTheKnobThatSetTheFloor: the refusals name one knob, so a
+// caller with several operator-raisable steps has to hand over the one that
+// actually raised the floor — telling an operator about their clone budget
+// when it was the package-install budget that pushed the floor past their
+// stall setting is a refusal they cannot act on (plan 40 decision 5).
+func TestLongestStepNamesTheKnobThatSetTheFloor(t *testing.T) {
+	clone := toolset.NamedStep{Name: "EXECUTOR_REPO_CLONE_TIMEOUT", D: 5 * time.Minute}
+	install := toolset.NamedStep{Name: "EXECUTOR_PACKAGE_INSTALL_TIMEOUT", D: 45 * time.Minute}
+	if got := toolset.LongestStep(clone, install); got != install {
+		t.Errorf("LongestStep(5m clone, 45m install) = %+v, want the install", got)
+	}
+	if got := toolset.LongestStep(install, clone); got != install {
+		t.Errorf("LongestStep(45m install, 5m clone) = %+v, want the install whatever the order", got)
+	}
+	// A tie goes to the earlier step: both are equally the floor, and picking
+	// by argument order at least makes the refusal reproducible.
+	same := toolset.NamedStep{Name: "OTHER", D: 5 * time.Minute}
+	if got := toolset.LongestStep(clone, same); got != clone {
+		t.Errorf("LongestStep(tie) = %+v, want the first of the two", got)
+	}
+	// One step, and one that is not set at all: still answered by name, so a
+	// caller never has to special-case the count.
+	if got := toolset.LongestStep(clone); got != clone {
+		t.Errorf("LongestStep(one) = %+v, want it back", got)
+	}
+	unset := toolset.NamedStep{Name: "UNSET"}
+	if got := toolset.LongestStep(unset); got != unset {
+		t.Errorf("LongestStep(zero-duration step) = %+v, want it back named", got)
+	}
+}

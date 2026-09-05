@@ -121,11 +121,12 @@ executor:
   leaseTTL: ""       # EXECUTOR_LEASE_TTL, e.g. "15m"; empty uses the binary default
   pollInterval: ""   # EXECUTOR_POLL_INTERVAL, e.g. "500ms"; empty uses the binary default
   reapInterval: ""   # EXECUTOR_REAP_INTERVAL, e.g. "60s"; empty uses the binary default (1m)
-  stallTimeout: ""   # EXECUTOR_STALL_TIMEOUT, e.g. "30m": how long a claimed item may report no progress before it is cancelled and its lease left to lapse for another executor to reclaim; empty uses the binary default (30m). Minimum "11m" (one bash tool's 10m timeout, plus the kill and the answer that follow it), rising with repoCloneTimeout where that is longer since one clone is a single silent interval (a clone budget the 30m default cannot clear fails startup until this is set); raise it further where image pulls are slow, a budget under the longest healthy step making every reclaim stall at the same place
+  stallTimeout: ""   # EXECUTOR_STALL_TIMEOUT, e.g. "30m": how long a claimed item may report no progress before it is cancelled and its lease left to lapse for another executor to reclaim; empty uses the binary default (30m). Minimum "11m" (one bash tool's 10m timeout, plus the kill and the answer that follow it), rising with repoCloneTimeout or packageInstallTimeout where either is longer since each is a single silent interval (a budget the 30m default cannot clear fails startup until this is set); raise it further where image pulls are slow, a budget under the longest healthy step making every reclaim stall at the same place
   checkpointMaxBytes: ""   # EXECUTOR_CHECKPOINT_MAX_BYTES in bytes; empty uses the binary default (2 GiB)
   repoCloneMaxBytes: ""    # EXECUTOR_REPO_CLONE_MAX_BYTES in bytes, per repository; empty uses the binary default (1 GiB)
   repoCloneTimeout: ""     # EXECUTOR_REPO_CLONE_TIMEOUT, e.g. "5m", per repository; empty uses the binary default (5m)
   mcpPassTimeout: ""  # EXECUTOR_MCP_PASS_TIMEOUT, e.g. "2m", per mcp_exec pass — discovery across a session's MCP servers, execution across a turn's calls; empty uses the binary default (5m)
+  packageInstallTimeout: ""  # EXECUTOR_PACKAGE_INSTALL_TIMEOUT, e.g. "10m", per manager's config.packages install (plan 40); empty uses the binary default (10m). Joins repoCloneTimeout in the stall floor, so a value long enough to become the longest single step needs stallTimeout raised with it
   sandboxIdleTTL: ""       # EXECUTOR_SANDBOX_IDLE_TTL, e.g. "24h"; "0" disables the idle tier; empty uses the binary default (24h)
   # -- Base image for the per-session sandbox pods the executor launches.
   sandboxImage: "debian:stable-slim"

@@ -245,6 +245,12 @@ services:
       # never answers from holding every other session's work behind it. Empty =
       # the binary's default, 5m.
       EXECUTOR_MCP_PASS_TIMEOUT: ${EXECUTOR_MCP_PASS_TIMEOUT:-}
+      # One manager's install of an environment's config.packages (plan 40). Six
+      # managers is six of these, not one shared, and each joins the repository
+      # clone in the stall-budget floor, so a value long enough to become the
+      # longest single step needs EXECUTOR_STALL_TIMEOUT raised with it. Empty =
+      # the binary's default, 10m.
+      EXECUTOR_PACKAGE_INSTALL_TIMEOUT: ${EXECUTOR_PACKAGE_INSTALL_TIMEOUT:-}
       # Sandbox containment (#65). The executor applies its own defaults when
       # these are unset — 512 processes, 2 CPUs, and the NET_RAW/SETUID/SETGID
       # drops — so they are here to be *lowered* or turned off (0, or `none` for

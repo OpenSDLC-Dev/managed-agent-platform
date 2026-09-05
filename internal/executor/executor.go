@@ -193,6 +193,17 @@ type Config struct {
 	// tolerated clone failures (too_large / timeout), never as a failed run.
 	RepoCloneTimeout  time.Duration
 	RepoCloneMaxBytes int64
+	// PackageInstallTimeout is the Exec deadline for ONE manager's install of
+	// the environment's config.packages (packages.go): six managers is six
+	// budgets, not one shared between them, because each is a separate silent
+	// interval the stall bound must clear. It defaults to toolset.MaxTimeout —
+	// the longest step the default stall budget already clears — so raising it
+	// far enough that one manager's budget becomes the longest step past the
+	// stall budget (default 30m) refuses startup until EXECUTOR_STALL_TIMEOUT
+	// rises with it (EXECUTOR_PACKAGE_INSTALL_TIMEOUT; plan 40 decision 5). Past
+	// it the install is killed and surfaces as a session.error with reason
+	// `timeout`, never as a failed run.
+	PackageInstallTimeout time.Duration
 	// MCPPassTimeout bounds one mcp_exec pass — the discovery half across all of
 	// the session's MCP servers, and the execution half across all of a turn's
 	// outstanding calls — for the reason the clone budgets exist: both walk
@@ -253,6 +264,9 @@ func (c Config) withDefaults() Config {
 	}
 	if c.RepoCloneMaxBytes <= 0 {
 		c.RepoCloneMaxBytes = 1 << 30
+	}
+	if c.PackageInstallTimeout <= 0 {
+		c.PackageInstallTimeout = toolset.MaxTimeout
 	}
 	if c.MCPPassTimeout <= 0 {
 		c.MCPPassTimeout = 5 * time.Minute
@@ -672,6 +686,16 @@ func (e *Executor) provisionSandbox(ctx context.Context, sessionID domain.ID, se
 			return nil, fmt.Errorf("restore checkpoint: %w", err)
 		}
 	}
+	// The environment's packages, inside this same hold and after the restore
+	// (plan 40 decision 2): the lock is what keeps a reclaiming executor
+	// waiting on the lapsed holder's install rather than racing its apt-get for
+	// the dpkg lock, with no sandbox-side lock an arbitrary image would have to
+	// supply. Only a backend fault from the sandbox comes back here — a
+	// manager that cannot install is a session.error the client reads, and the
+	// session runs on (decision 4).
+	if err := e.installPackages(ctx, sb, sessionID, sess.packages, progress); err != nil {
+		return nil, fmt.Errorf("install packages: %w", err)
+	}
 	return sb, nil
 }
 
@@ -883,6 +907,11 @@ type sessionRun struct {
 	// self_hosted one needs the kind, which lives on the config (mcpwork.go).
 	envConfig  domain.EnvironmentConfig
 	networking domain.Networking
+	// packages is the environment's config.packages, lifted out of envConfig so
+	// the one lane that must NOT install can clear it (harvest.go). A
+	// sessionRun built by hand — every test that does not care — installs
+	// nothing.
+	packages   map[string][]string
 	skills     []skillRef
 	files      []fileRef
 	repos      []repoRef
@@ -1000,6 +1029,7 @@ func (e *Executor) sessionForRun(ctx context.Context, item *queue.Item) (session
 	return sessionRun{
 		envConfig:  cfg,
 		networking: cfg.Networking,
+		packages:   cfg.Packages,
 		skills:     skillRefs,
 		files:      resources,
 		repos:      repos,

@@ -49,6 +49,135 @@ new directory and in-repo citations re-pointed in the moving PR (plan
 
 ---
 
+## Environment packages installed into the sandbox (plan 40, #353, #576) — archived 2026-09-05, delivered in one PR (#600)
+
+`config.packages` had been accepted, validated, stored and echoed since the environment
+routes shipped, and read by nothing: a client following the reference docs got a 200
+environment and an agent whose first `import pandas` raised, which is how two of
+Anthropic's own cwc-workshops failed here. The install is now an executor
+materialization pass — one `Sandbox.Exec` per non-empty manager, in the reference's
+alphabetical order, before the skills and inside the session advisory lock
+`provisionSandbox` already holds, so a reclaiming executor waits on a lapsed holder's
+pass instead of racing its `apt-get` for the dpkg lock. Four decisions shaped what a
+client sees. A `/tmp/.map-packages` sentinel records what each manager settled, which
+makes a later provision a no-op and a changed list a fresh attempt, and caps an
+unchanged failing list at three attempts per sandbox; it sits outside the checkpoint
+roots on purpose, so a restored sandbox — a fresh container — installs again. Failure
+is surfaced, never fatal: a `session.error` of the platform's own
+`environment_package_install_error`, with six reasons and a `retry_status` that flips to
+`exhausted` at the cap, carrying the manager's own output tail sanitized,
+URL-redacted (every URL cut to `scheme://host`, so a credential in the userinfo or the
+query is dropped) and bounded at 8 KiB — the one `session.error` here whose text is
+sandbox-controlled, which is what those three bounds are for. One cheap probe refuses a
+non-root or read-only sandbox up front rather than paying six timeouts of `Permission
+denied`. And #576's create-time 400 landed with it, refusing `packages` under `limited`
+networking without `allow_package_managers` on the merged config, so the shape cannot
+arrive in two halves.
+
+Verification: eighteen executor unit tests
+(`internal/executor/packages_test.go`) pin the order and every command byte for byte,
+the quoting of an entry containing a quote and a `; rm -rf /`, the per-manager skip and
+the reinstall on a changed list, the attempt cap and the `exhausted` re-emission, every
+reason, the dedupe (including a second failing list not swallowed by the first's
+history), the sanitize and the URL-redaction of userinfo and query credentials alike,
+the backend-fault arm, the empty config,
+the grading harvest installing nothing, and the sentinel path lying under none of the
+checkpoint roots. Beside them a real-container test drives the whole seam end to end
+against a `debian:stable-slim` sandbox with a stubbed `apt-get`, recording the argv the
+pass hands it and the sentinel it leaves, with no public-internet dependency the default
+`make test` must not gain. The acceptance the issue asked for is the
+`RUN_LIVE_PACKAGE_TESTS` consent tier (README's table): a run installs a real `jq`
+from the Debian mirror and then answers `jq --version` through a `bash` tool call.
+
+Compose acceptance (run 2026-09-05, twice): the executor rebuilt from the branch and
+recreated alone on the user's running stack (`EXECUTOR_IMAGE=cwc-sandbox-pptx`, Docker
+backend, the platform's default hardening), an environment with `apt: [jq]` and `pip:
+[cowsay==6.1]`, a `claude-haiku-4-5` bash agent asked to run `jq --version` and `import
+cowsay`. **The first run failed apt and found a defect the Go rows had hidden**: pip
+installed `cowsay` (`/usr/local/lib/python3.12/site-packages/cowsay`, the sentinel
+recording `installed: true`), while apt recorded one deduped `session.error` — `setgroups
+65534 failed`, `seteuid 42 failed`, `Method http has died unexpectedly` — because apt drops
+its acquire methods to `_apt`, which takes the `CAP_SETUID`/`CAP_SETGID` that
+`sandbox.DefaultCapDrop` removes on every deployment that sets no `SANDBOX_CAP_DROP`, and
+the live row had run under a zero `Hardening`. Both `apt-get` invocations now carry
+`-o APT::Sandbox::User=root`, and both real-container rows provision under the default
+capability drop; mutating the option back to `_apt` fails the live row with the stack's
+exact error, restoring it passes (14.9 s). **The second run passed**: both tool results
+`is_error: false`, `jq-1.7` and `cowsay-import-ok`, no `session.error`, the session idle
+in 15 s with a sentinel of `apt` and `pip` each `installed: true, attempts: 1`. The
+sessions, environments and agents were deleted or archived afterwards and the reaper
+removed both sandboxes.
+
+Review hardening: the verifier caught the branch's own gate red — the apt fix added
+`-o APT::Sandbox::User=root` but left one quoting test asserting the old `apt-get install`
+prefix — and that main had moved under the branch (#597 merged nine minutes after the last
+commit, closing #591 and turning four #591 doc claims and the registry pointer stale). The
+branch was rebased onto #597 and those claims reconciled: the gate now honors
+`allow_package_managers` for Python, so `pip` reaches PyPI under `limited` today and the
+other five ecosystems wait on #594, and #576's own registry pointer moved to the egress
+entry's `landed for` tail so `make registry-check` stays green. The Codex and Claude
+reviews converged on three real defects, all fixed: the `session.error` message redacted
+only URL userinfo up to the first `@`, missing a password containing `@` and a query-string
+credential — now every URL is cut to `scheme://host` by the MCP path's own `redactURL`; the
+error dedupe keyed on `(manager, reason, retry_status.type)` alone, so a second failing list
+was swallowed by the first's history — a non-secret list digest now keys it, and the same
+digest replaced the plaintext entry list in the agent-readable `/tmp/.map-packages`
+sentinel, so a credential in a package URL is no longer catable from inside the sandbox; and
+`EXECUTOR_PACKAGE_INSTALL_TIMEOUT`, read by the binary, was wired through neither compose nor
+the chart, unlike its two sibling budgets. Refuted with evidence: a claimed NUL-entry 500
+(the request-wide `rejectNULBody` guard already 400s it, now pinned by a test); a
+forged-negative-attempts bypass of the retry cap (equivalent to deleting the untrusted
+sentinel, which is already allowed); and the non-root/read-only probe re-running per tool
+call (a deliberately-tested tradeoff on a rare misconfiguration). One residual is
+tracked as #598: the session advisory lock does not serialize an install against a crashed
+or cancelled holder whose in-sandbox command outlives the lock — a property every
+materialization pass shares, bounded here by `dpkg --configure -a` and the three-attempt
+cap.
+
+A second review pass over the hardened commit confirmed those fixes and found more. Four
+were fixed: the message redaction reached only `http(s)` URLs, so a non-http VCS entry's
+userinfo (`git+ssh://token@…`) survived — now `anySchemeUserinfoRe` drops any scheme's
+userinfo beside `redactURL`; a valid but very large list would overflow Linux's ~128 KiB
+single-`execve`-argument ceiling and fault the install at exec startup rather than fail it,
+reclaim-looping the item — the API now caps a manager's list at 16 KiB; the sandbox probe
+`Exec` carried no timeout, so a wedged shell could hang provisioning on the outer lease
+alone — it now shares the install budget; and a settled session's per-turn skip pass was
+recording the install-duration histogram, polluting it with near-zero samples — the
+histogram is now recorded only when an install ran. The deeper credential-containment
+residuals share one root and one home, #599: the install command carries any package-URL
+credential in the process argv (readable from the sandbox `/proc`, and on Kubernetes
+persisted in the `pods/exec` audit log), and `packages_digest` must hash the whole entry —
+credential included, so a fixed credential re-triggers an install — which makes it an
+unsalted oracle for a weak credential to an environment-key holder. #599 removes inline
+credentials at the source (out-of-band injection), which closes both and lets the digest be
+computed over a credential-free form; the argv exposure is a property the `Exec` seam shares
+with every tool call, and is documented in docs/self-hosted-security.md meanwhile.
+
+A third pass over that commit fixed three more, each mutation-proved. The non-http
+userinfo redactor stopped at the first `@`, so a password containing `@` in a VCS URL
+leaked its tail — the class is now greedy to the first authority terminator (`/`, `?` or
+`#`), dropping the userinfo whole while leaving an `@` in a pathless query alone. The
+16 KiB per-manager cap the second pass added bounds entry bytes, not the assembled
+command: `go` emits one invocation per entry, so a small-byte list can still assemble a
+command past the single-`execve`-argument ceiling, as can a row stored before the cap
+existed and only now activated — the executor bounds the assembled command itself
+(`maxInstallCommandBytes`), recording a terminal `invalid` error rather than faulting into
+a reclaim loop. A third redaction residual joins #599's class: the trailing punctuation
+`redactURL` reattaches to keep a sentence readable leaks a credential's trailing-punctuation
+suffix — its whole value only if the credential is nothing but those characters.
+
+Deferred: the reference's cross-session install cache — a per-environment image keyed on
+the packages hash, which Kubernetes has no build primitive for and which would join the
+sandbox adoption comparison — is #595, so packages install per sandbox here. Left open
+beside it: #594, the gate's package-registry allow-set for the five non-Python ecosystems
+(#591 landed the Python hosts, `pypi.org` and `files.pythonhosted.org`, in #597 just after
+this branch was cut), until which a `limited` session's `apt`/`npm`/`cargo`/`gem`/`go`
+install reaches a registry only through `allowed_hosts` while `pip` reaches PyPI through
+the flag; and five of the six registry entries this plan added are inferences naming #78
+for the recording that would settle them.
+
+---
+
 ## Skills GA wire shape — the `ant` CLI, and the SDK clients #566 named (plan 39, #566, run 2026-09-04) — ✅ passed
 
 Verified against two docker-compose stacks built from `feat/skills-ga-shape` @ 98de5c4 — the

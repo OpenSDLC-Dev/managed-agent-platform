@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/modeltest"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/queue"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/sandbox"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/sandbox/docker"
@@ -191,6 +192,174 @@ func TestHarvestTruncatedListingRealSandbox(t *testing.T) {
 	if got := h.liveOf(t, queue.OutputsHarvest); got != 0 {
 		t.Errorf("outputs_harvest live = %d, want 0 (completed, not left faulting)", got)
 	}
+}
+
+// aptStubPath is where the stub below is planted. /usr/local/sbin precedes
+// /usr/bin on the default PATH of a Debian container, so the pass's
+// `command -v apt-get` and the install itself both find the stub rather than
+// the real apt-get — which is what lets this row drive the whole seam without
+// reaching a package mirror.
+const aptStubPath = "/usr/local/sbin/apt-get"
+
+// aptStub records the argv it is handed, one invocation per line, and succeeds.
+const aptStub = `#!/bin/sh
+echo "$*" >> /tmp/apt-get.argv
+exit 0
+`
+
+// TestPackagesRealSandboxWithAStubbedApt drives plan 40's install pass end to
+// end through a real Docker container: a real provision, a real Exec of the
+// real command string, a real sentinel written by the real WriteFile — with
+// only apt-get itself replaced, so the row needs no network at all. That
+// matters twice over: `make test` must not gain a dependency on a public
+// package mirror, and no other test under internal/ covers this seam whole.
+//
+// It also pins the skip, which is the half a unit test on a fake sandbox
+// cannot claim about a real one: the second item's provision finds the
+// sentinel this one left and runs nothing.
+func TestPackagesRealSandboxWithAStubbedApt(t *testing.T) {
+	provider, err := docker.New(docker.Config{})
+	if err != nil {
+		t.Fatalf("integration test requires Docker: %v", err)
+	}
+	h := newHarnessWith(t, provider, Config{Image: testImage, Hardening: defaultHardening()})
+	t.Cleanup(func() {
+		sb, err := provider.Provision(context.Background(), sandbox.Spec{SessionID: h.sid, Image: testImage})
+		if err == nil {
+			_ = sb.Destroy(context.Background())
+		}
+	})
+
+	// Pre-provision through the same provider and a matching spec, so the
+	// executor's own provision adopts this container and finds the stub.
+	// Hardening is bound here, at create, and never re-applied by the
+	// adoption — so it is the platform's default one, the same as the live
+	// row below runs under.
+	ctx := context.Background()
+	sb, err := provider.Provision(ctx, sandbox.Spec{SessionID: h.sid, Image: testImage, Hardening: defaultHardening()})
+	if err != nil {
+		t.Fatalf("pre-provision the sandbox: %v", err)
+	}
+	if err := sb.WriteFiles(ctx, []sandbox.FileWrite{
+		{Path: aptStubPath, Data: []byte(aptStub), Mode: 0o755},
+	}); err != nil {
+		t.Fatalf("plant the apt-get stub: %v", err)
+	}
+
+	h.setPackages(t, map[string][]string{"apt": {"jq", "curl"}})
+	bash, _ := json.Marshal(map[string]any{
+		"name": "bash", "input": map[string]string{"command": "cat /tmp/apt-get.argv; cat " + packagesSentinelPath},
+	})
+	h.suspend(t, string(bash))
+	h.stepOnce(t)
+
+	text := lastResultText(t, h)
+	for _, want := range []string{"update -q", "install -y -q jq curl"} {
+		if !strings.Contains(text, want) {
+			t.Errorf("the stub recorded %q, want a line %q", text, want)
+		}
+	}
+	var recs map[string]packageRecord
+	for _, line := range strings.Split(text, "\n") {
+		if strings.HasPrefix(line, "{") {
+			if err := json.Unmarshal([]byte(line), &recs); err != nil {
+				t.Fatalf("decode the sentinel %q: %v", line, err)
+			}
+		}
+	}
+	if rec := recs["apt"]; !rec.Installed || rec.Attempts != 1 || rec.Digest != packagesDigest([]string{"jq", "curl"}) {
+		t.Errorf("sentinel apt = %+v, want the list installed in one attempt (from %q)", rec, text)
+	}
+
+	// A second item on the same list must add nothing to the stub's record.
+	count, _ := json.Marshal(map[string]any{
+		"name": "bash", "input": map[string]string{"command": "wc -l < /tmp/apt-get.argv"},
+	})
+	h.suspend(t, string(count))
+	h.stepOnce(t)
+	if got := strings.TrimSpace(lastResultText(t, h)); got != "2" {
+		t.Errorf("the stub was called %s times in total, want 2 — the second item must install nothing", got)
+	}
+}
+
+// TestLivePackageInstallRealApt is the acceptance #353 asks for, behind its own
+// consent variable: a real `apt-get install jq` into a real sandbox, then a
+// `bash` tool call proving jq answers. It is the only tier that reaches a
+// public package mirror (deb.debian.org), which is why it is opt-in rather
+// than part of the gate.
+//
+// TierEnabled rather than Endpoint: this tier calls no model, so demanding the
+// MODEL_* configuration Endpoint resolves would fail a correctly configured
+// opt-in.
+func TestLivePackageInstallRealApt(t *testing.T) {
+	if !modeltest.TierEnabled("RUN_LIVE_PACKAGE_TESTS") {
+		t.Skip("RUN_LIVE_PACKAGE_TESTS is not set: skipping the real apt-get install (no package mirror is reached)")
+	}
+	provider, err := docker.New(docker.Config{})
+	if err != nil {
+		t.Fatalf("integration test requires Docker: %v", err)
+	}
+	// Under the platform's DEFAULT capability drop, not the zero Hardening the
+	// other rows run with: DefaultCapDrop takes CAP_SETUID and CAP_SETGID, the
+	// two apt's own privilege drop to `_apt` needs, so a zero Hardening here
+	// would pass an apt command that fails on every real deployment (the
+	// compose acceptance of plan 40 found exactly that).
+	h := newHarnessWith(t, provider, Config{Image: testImage, Hardening: defaultHardening()})
+	t.Cleanup(func() {
+		sb, err := provider.Provision(context.Background(), sandbox.Spec{SessionID: h.sid, Image: testImage})
+		if err == nil {
+			_ = sb.Destroy(context.Background())
+		}
+	})
+
+	h.setPackages(t, map[string][]string{"apt": {"jq"}})
+	bash, _ := json.Marshal(map[string]any{
+		"name": "bash", "input": map[string]string{"command": "jq --version"},
+	})
+	h.suspend(t, string(bash))
+	h.stepOnce(t)
+
+	if errs := h.packageErrors(t); len(errs) != 0 {
+		t.Fatalf("the install reported %+v, want none", errs)
+	}
+	if text := lastResultText(t, h); !strings.Contains(text, "jq-") {
+		t.Errorf("result = %q, want jq's own version banner", text)
+	}
+}
+
+// defaultHardening carries the default capability posture — sandbox.DefaultCapDrop,
+// the drop HardeningFromEnv applies when SANDBOX_CAP_DROP is unset — which is what
+// the package rows must prove the install under (apt needs the SETUID/SETGID this
+// drops). It sets only the cap posture, not HardeningFromEnv's pid/CPU defaults,
+// which do not bear on whether an install succeeds.
+func defaultHardening() sandbox.Hardening {
+	return sandbox.Hardening{CapDrop: slices.Clone(sandbox.DefaultCapDrop)}
+}
+
+// lastResultText is the text of the most recent tool result — the shape both
+// package rows above read their evidence out of.
+func lastResultText(t *testing.T, h *harness) string {
+	t.Helper()
+	results := h.types(t, "agent.tool_result")
+	if len(results) == 0 {
+		t.Fatal("no tool result was appended")
+	}
+	var body struct {
+		IsError bool `json:"is_error"`
+		Content []struct {
+			Text string `json:"text"`
+		} `json:"content"`
+	}
+	if err := json.Unmarshal(results[len(results)-1].Body, &body); err != nil {
+		t.Fatalf("decode the tool result: %v", err)
+	}
+	if len(body.Content) == 0 {
+		t.Fatalf("the tool result carried no content: %+v", body)
+	}
+	if body.IsError {
+		t.Fatalf("the tool call failed: %q", body.Content[0].Text)
+	}
+	return body.Content[0].Text
 }
 
 // nonRootUID and nonRootImage are the sandbox-image half of the run below.

@@ -120,11 +120,48 @@ func normalizeEnvConfig(raw json.RawMessage, existing []byte) (kind string, norm
 				return "", nil, err
 			}
 		}
+		if err := checkPackagesNetworking(base); err != nil {
+			return "", nil, err
+		}
 		normalized, err = json.Marshal(base)
 		return typ, normalized, err
 	default:
 		return "", nil, errInvalid(`config.type must be "cloud" or "self_hosted"`)
 	}
+}
+
+// checkPackagesNetworking is the reference's create-time refusal: "If the
+// environment uses `limited` networking, also set
+// `networking.allow_package_managers` to `true`; otherwise the request is
+// rejected with a 400 error" — which its networking section restates as
+// applying "whenever the environment specifies `packages` … even if the
+// registry hosts are listed in `allowed_hosts`". An install the gate can only
+// refuse is better refused at the request.
+//
+// "Specifies" is read as a non-empty list, not a present key: every stored
+// cloud config carries all six lists (normalizeEnvConfig's own base fills
+// them), so key presence would refuse every limited environment ever created
+// here. The message is ours, and names both remedies the caller has.
+//
+// It runs on the merged config, after both blocks are parsed, so the two halves
+// of the offending shape cannot arrive separately: an update that adds packages
+// to a limited environment and one that switches a packaged environment to
+// limited are refused exactly as a create is. The consequence worth knowing is
+// for rows stored before this rule — any config patch on one is refused, even a
+// patch that touches only allowed_hosts, because the merge carries the stored
+// lists into the check. A patch setting the flag, or clearing the lists, is
+// what lifts it; a patch with no config at all never reaches here.
+func checkPackagesNetworking(cfg cloudConfigJSON) error {
+	var nw limitedNetworkJSON
+	if json.Unmarshal(cfg.Networking, &nw) != nil ||
+		nw.Type != string(domain.NetLimited) || nw.AllowPackageManagers {
+		return nil
+	}
+	p := cfg.Packages
+	if len(p.Apt)+len(p.Cargo)+len(p.Gem)+len(p.Go)+len(p.Npm)+len(p.Pip) == 0 {
+		return nil
+	}
+	return errInvalid("packages require networking.allow_package_managers to be true under limited networking")
 }
 
 // parseNetworking validates a networking object strictly (unknown fields are
@@ -229,9 +266,36 @@ func parsePackages(raw json.RawMessage, base packagesJSON) (packagesJSON, error)
 		default:
 			return base, errInvalid("unknown package manager %q", manager)
 		}
+		// Checked after the switch, so an unknown manager is named as such
+		// rather than blamed for its entries. domain.ValidPackageEntry is the
+		// predicate the executor applies again before building a command, so
+		// the two cannot drift.
+		total := 0
+		for _, entry := range list {
+			if !domain.ValidPackageEntry(entry) {
+				return base, errInvalid(`packages.%s entries must be non-empty and must not begin with "-"`, manager)
+			}
+			total += len(entry)
+		}
+		// A fast bound on entry bytes: the executor hands one manager's whole
+		// list to a single `bash -c` argument, which Linux caps near 128 KiB, and
+		// a list past that faults at exec startup and reclaim-loops the item. This
+		// is not the whole guard — `go` expands to one invocation per entry, so
+		// the assembled command can exceed the ceiling while the entry bytes stay
+		// small; the executor bounds the assembled command itself
+		// (maxInstallCommandBytes). This cap keeps a request cheap to reject and a
+		// real list (a few kilobytes) well clear of both.
+		if total > maxPackagesManagerBytes {
+			return base, errInvalid("packages.%s is too large: %d bytes exceeds the %d-byte limit", manager, total, maxPackagesManagerBytes)
+		}
 	}
 	return base, nil
 }
+
+// maxPackagesManagerBytes bounds the summed length of one manager's entries. See
+// parsePackages for why it exists and why it sits well under Linux's ~128 KiB
+// single-argument ceiling.
+const maxPackagesManagerBytes = 16 << 10
 
 // parseScope enforces v1's single-tenant posture: only the default
 // "organization" scope is accepted.
