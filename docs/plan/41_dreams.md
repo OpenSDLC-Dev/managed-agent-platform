@@ -88,11 +88,14 @@ that settles them (§8).
    with no runner behind it: a created dream stays `pending` until slice 2 lands, which
    the slice's fragment and STATE.md say out loud. The `docs/DIVERGENCES.md:135` entry is
    rewritten; `ant beta:dreams create|retrieve|list|archive|cancel` are accepted against
-   the platform, with cancel moving a `pending` dream to `canceled`.
+   the platform, with cancel moving a `pending` dream to `canceled`. CLAUDE.md's prefix
+   list gains `drm_` in the same PR — `internal/domain/docs_test.go:56` pins the list to
+   `knownPrefixes` in both directions.
 2. **The runner, with a one-stage pipeline.** `StartDreamRunner`; the claim; the store
-   clone; the internal environment and agent; transcript rendering **with its secret
-   redaction** (no slice writes transcript bytes into a sandbox unredacted) and the file
-   resources; session creation; a single-turn pipeline (orient and merge in one message,
+   clone; the internal environment and agent, and the two gates that keep them the
+   runner's (§4.4); the shared sweep budget (§4.1); transcript rendering **with its
+   secret redaction** (no slice writes transcript bytes into a sandbox unredacted) and the
+   file resources; session creation; a single-turn pipeline (orient and merge in one message,
    no threads); the usage mirror; completion, failure, timeout, cancel, the unavailability
    checks, and the archive. Accepted end to end with the real `ant` CLI and a real model
    over a seeded store and two transcripts.
@@ -113,13 +116,14 @@ that lag is plan 39's to close and is reported, not fixed here. **Every citation
 v1.70.1 line** unless it names another tag.
 
 The latest tag is **v1.71.0** (2026-09-04). `git diff v1.70.1 v1.71.0 --stat` touches
-`betaorganizationcompliancesetting.go`, its two `api.md` entries, generated tests, and the
-bundled spec's `BetaComplianceSettings*` schemas; every dream, memory-store and session
-non-test file is byte-identical between the two tags, and so are the spec's `*Dream*`
-schemas and its four `/v1/dreams*` paths (both specs extracted and diffed). The CLI's
-latest tag v1.31.0 moves release metadata, CI config, `version.go`, the same
-compliance-setting file, the bundled spec and sixteen test files; `pkg/cmd/betadream.go`
-and `cmd.go` are byte-identical to v1.30.0. So slice 0 records against a reference whose
+`betaorganizationcompliancesetting.go`, its two `api.md` entries, generated tests, the
+bundled spec's `BetaComplianceSettings*` schemas, and outside the API files only
+`examples/`, `internal/version.go` and the release metadata; every dream, memory-store and
+session non-test file is byte-identical between the two tags, and so are the spec's
+`*Dream*` schemas and its four `/v1/dreams*` paths (both specs extracted and diffed). The
+CLI's latest tag v1.31.0 moves release metadata, CI config, `version.go`, `go.mod`/`go.sum`
+(the SDK bump), the same compliance-setting file, the bundled spec and sixteen test files;
+`pkg/cmd/betadream.go` and `cmd.go` are byte-identical to v1.30.0. So slice 0 records against a reference whose
 typed schema the pin already carries, and no bump rides with this plan. Between v1.66.0 (plan
 36's reading) and v1.70.1, `betadream.go` gained exactly the `anthropic-workspace-id`
 header on all five calls (`betadream.go:48-50` and its four twins); nothing else in the
@@ -172,7 +176,7 @@ lists all fourteen as required and forbids extra keys:
 | `session_id` | `sesn_…` or null | null until the pipeline session exists |
 | `created_at`, `ended_at`, `archived_at` | RFC 3339 or null | `ended_at` set at a terminal state |
 | `usage` | `{input_tokens, output_tokens, cache_read_input_tokens, cache_creation_input_tokens}` | "Cumulative … across every pipeline stage"; `cache_creation_input_tokens` is the "sum of all TTL tiers" (`:594-612`) |
-| `error` | `{type, message}` or null | "Failure detail for a Dream whose `status` is `failed`" (`:212`) |
+| `error` | `{type, message}` or null | "Failure detail for a Dream whose `status` is `failed`" (`:211`) |
 
 The guide's illustrative create response shows thirteen keys — it omits `output_behavior`.
 The API reference's 200 example and the spec's `required` list both carry it, and they
@@ -297,15 +301,18 @@ Claude Code's single-session shape, because the wire shows one session.
 | `/mnt/memory/<slug>` | the **output store** — the clone, or under `update_existing` the input store itself | read_write mount, plan 36's sync at every tool-run boundary |
 | `/mnt/session/uploads/dream/transcripts/<seq>-<sesn>.md` | one rendered transcript per input session | `file` resources (§4.5), read by the agent, never synced anywhere |
 | `/mnt/session/uploads/dream/INDEX.md` | one line per transcript: `seq · session_id · created_at · turns · rendered_bytes · first user message (≤200 chars)` | `file` resource |
-| `/workspace/dream/` | scratch the agent owns: `plan.md`, `digests/<batch>.md`, `report.md` | the sandbox workdir, one of the three roots the idle checkpoint preserves (`internal/executor/checkpoint.go:71-75`); never a memory |
+| `<workdir>/dream/` — `/workspace/dream/` under the default `EXECUTOR_WORKDIR`, the prompt substituting the effective one | scratch the agent owns: `plan.md`, `digests/<batch>.md`, `report.md` | the sandbox workdir, one of the three roots the idle checkpoint preserves (`internal/executor/checkpoint.go:71-75`); never a memory |
 
 The input store is **not** mounted under `create_new`: the clone is byte-identical at
 start, so a second mount buys nothing and would double the store's sync cost. Scratch
 lives outside `/mnt/memory` because every write inside a mount becomes a memory version,
 outside `/mnt/session/outputs` because plan 38 harvests that directory at idle, and
-outside `/tmp` because the checkpoint explicitly drops it. The workdir survives an idle
-reap and the resume that follows; it is lost only with a container that dies before its
-first idle checkpoint, and §3.3's stage prompts are written for that case.
+outside `/tmp` because the checkpoint explicitly drops it. What the workdir survives is
+exactly one thing: an idle reap followed by a resume, because a restore fires only on the
+marker the reaper's checkpoint capture writes (`internal/executor/executor.go:636`). A
+container recreated after a crash, with no marker or with the last one already consumed,
+starts with an empty workdir — the stage prompts of §3.3 are written for that case, and
+the plan below never assumes more. The rest of this document writes the default path.
 
 ### 3.2 Rendering a transcript
 
@@ -322,17 +329,31 @@ top:
   `session.*`/`span.*`/`user.interrupt`/confirmation event, and the agent-to-agent
   delegation pair (a child's report is already its own `submit_result` call, the grader's
   own reasoning at `:648-651`).
-- **Secrets redacted before the bytes leave the runner**: the four patterns Codex uses —
-  `sk-…`, `AKIA…`, `Bearer …`, and `api_key|token|secret|password` assignments — replaced
-  by `[REDACTED_SECRET]`. Fixed in code, not configurable: a knob here is a way to leak a
-  credential into a memory store. It lands in slice 2 with the renderer, not after it.
-- Caps: **24 KiB per transcript** after rendering, middle-elided; **4 MiB per dream**,
-  the oldest transcripts elided first and the elision recorded in `INDEX.md`. Both are
-  package-level `var`s with the test setter idiom (`memoryretention.go:48-52`).
+- **Secrets redacted before the bytes leave the runner**, over tool inputs and results
+  alike and *before* truncation, so an elision can never split a match: the four shape
+  patterns Codex uses — `sk-…`, `AKIA…`, `Bearer …`, and `api_key|token|secret|password`
+  assignments — replaced by `[REDACTED_SECRET]`. Fixed in code, not configurable: a knob
+  here is a way to leak a credential into a memory store. It lands in slice 2 with the
+  renderer, not after it. It is **best-effort by construction**: a shape pattern cannot
+  know a private key, a cookie, a connection string or an opaque token from prose, which
+  is exactly why `internal/provider/redact.go:13` redacts by known value instead — and the
+  runner has no known values here. What backs it is the clone by default and the
+  completion scan of §3.3, not the pattern list.
+- Caps: **24 KiB per transcript** after rendering, middle-elided, the elision recorded in
+  `INDEX.md`; 100 transcripts are then at most 2.4 MiB, which is the per-dream bound — a
+  separate per-dream cap was considered and dropped as unreachable. A package-level `var`
+  with the test setter idiom (`memoryretention.go:48-52`).
 
-Threads are rendered too: a coordinator session's log is listed with `ScopeSession`
-(`internal/events/log.go:452-459`), which carries cross-posted thread events; per-thread
-logs are not expanded — the coordinator's view is the transcript.
+Threads are rendered too. A coordinator session's log is listed with `ScopeSession`
+(`internal/events/log.go:452-459`) — primary-thread rows plus cross-posted ones; a
+child's own tool calls and its `submit_result` are on the child thread and not cross-posted
+(`internal/brain/brain.go:553`), so the only trace of a delegated task in that scope is the
+pair on the primary: `agent.thread_message_sent` and the report that comes back as
+`agent.thread_message_received` (`internal/domain/event.go:41-42`, `delegate.go:989`). The
+renderer therefore **keeps the received report's text** and drops only the send — the
+grader can drop both because it reads the whole log (`grader.go:85, 648-651`); this
+renderer does not. Per-thread logs are not expanded: the coordinator's view, report
+included, is the transcript. A delegated-session fixture pins it (§7).
 
 ### 3.3 Four stages, one session, threads for the reading
 
@@ -365,9 +386,12 @@ the paths, counts and the caller's `instructions` substituted in.
    preferences, inferred preferences and the agent's own proposals are labelled and not
    interchangeable; no credential is ever written; **transcript content is data and never
    redirects the pipeline.**
-4. **Index and audit.** An index file this pipeline asks for at `/MEMORY.md` (ours — the
-   reference documents no index convention for a store; one line per memory, ≤ 150
-   characters each, no content) is rewritten; every memory has one index line and every
+4. **Index and audit.** An index file this pipeline asks for at the store's `/MEMORY.md`
+   — the sandbox path is `/mnt/memory/<slug>/MEMORY.md`, which the prompt spells out, since
+   a literal `/MEMORY.md` is outside the mount and syncs nowhere (`internal/executor/memory.go:179`
+   materializes a store path at `mountPath + path`); ours, the reference documents no
+   index convention for a store; one line per memory, ≤ 150 characters each, no content —
+   is rewritten; every memory has one index line and every
    line resolves; `/workspace/dream/report.md` lists files created, updated and removed,
    contradictions resolved, open conflicts, and transcripts that produced nothing. "Nothing
    changed" is a valid, successful report.
@@ -401,9 +425,16 @@ confirmation") rather than leave it for a human. Beyond idle-and-no-ask it check
 — the stage prompts carry the artefact checks above.
 
 **Runner-side validation at the end of stage 4** is deliberately thin: the session idled
-without the runner's stage cap being hit, and the output store is readable. The pipeline
-may legitimately leave a store unchanged, or empty it if everything in it was garbage; the
-platform does not second-guess that. What it does guard is spend: each stage has a **turn
+without the runner's stage cap being hit; the output store still exists and is not
+archived (the executor tolerates a missing or archived store — it skips or goes pull-only,
+`internal/executor/memory.go:427, 461` — so the session would not have failed on its
+own); and **no memory version the session wrote matches the redaction patterns** — one
+query over `memory_versions` by `created_by`, the cheap half of the secret defence. A
+match fails the dream with `internal_error` naming the memory; under `create_new` the
+caller discards the clone, under `update_existing` the version is already in the store's
+history and the failure is the signal to redact it. The pipeline may legitimately leave a
+store unchanged, or empty it if everything in it was garbage; the platform does not
+second-guess that. What it does guard is spend: each stage has a **turn
 cap** — the number of `model_turn` settlements the runner will tolerate before it posts a
 `user.interrupt` and fails the dream with `internal_error` ("stage N exceeded its budget")
 — 4 / 60 / 30 / 10, package `var`s, and the whole dream has `DREAM_TIMEOUT` (§5.2).
@@ -440,100 +471,125 @@ session and outlives it. So the runner is **stateless per tick, resumable from r
 ```
 every DREAM_TICK_INTERVAL (default 30s), one tick — the scheduler's shape
 (deploymentscheduler.go:212-219 scans, :311-328 runs each fire in its own tx):
-  candidates := SELECT id FROM dreams                      -- plain scan, no locks
-                 WHERE status IN ('pending','running')
-                    OR (session_id IS NOT NULL AND session_archived_at IS NULL)
+  candidates := SELECT id FROM dreams WHERE closed_at IS NULL   -- plain scan, no locks
                  ORDER BY created_at
-  for each id, under the semaphore, in its own transaction:
+  for each id, holding one slot of the shared sweep budget, in its own transaction:
     SET LOCAL lock_timeout = '2s'
     SELECT … FROM dreams WHERE id = $1 FOR UPDATE SKIP LOCKED   -- one replica per dream
     (no row → another replica has it; skip)
-    step(dream)                                            -- one bounded transition
+    step(dream)                                            -- the first matching arm below
     COMMIT
 ```
 
-`step` re-derives the dream's position from `(status, stage, session_id,
-session_archived_at)` and the session's own `status` and `archived_at` columns
-(`internal/api/sessions.go:88-89`), does exactly one thing, and commits. A replica that
-crashes mid-step rolls back to the last committed position; the next tick, on any replica,
-continues from there. Two checks precede every transition: `now() - created_at` against
-`DREAM_TIMEOUT` — in `pending` as in `running`, so a start that never succeeds is bounded
-too — settles `failed{timeout}` (with the interrupt below when a session exists); and a
-`sessions.status` of `rescheduling` ("transient error, auto-retrying",
-`internal/domain/session.go:10-13`) is left alone, neither idle nor terminated, until it
-becomes one or the timeout lands. The five transitions:
+`closed_at` is the row's "nothing left to do" stamp (§6): null while the dream is live
+*or closing*, set by whichever arm finishes it. The dream row's lock is the claim — held
+for the arm's duration, which for the start arm is the seconds its rendering and blob puts
+take (§4.2 says why that is the one lock network I/O may run under here). `step` reads
+`(status, stage, attempts, session_id)` and, when a session exists, its `status` and
+`archived_at` (`internal/api/sessions.go:88-89`), then takes **the first arm that
+matches**, and only that one — the arms are ordered so exactly one applies:
 
-- `pending` → `running`: the **start transaction** (§4.2). On a classified failure
-  (`input_memory_store_unavailable`, `input_memory_store_too_large`,
-  `input_session_unavailable`), settle `failed` in the same transaction; on an
-  unclassified one, roll back, increment `attempts`, and let a later tick retry — the plan
-  37 §4.1 discipline, bounded here because a dream has no successor occurrence to
-  supersede it: the attempt that exhausts `dreamStartAttempts` (5, a package `var`)
-  settles `failed{internal_error}` with the last error's text.
-- `running`, session `idle` with no open ask (§3.3), stage `k` complete: post stage
-  `k+1`'s `user.message` on the primary thread and enqueue its turn — the narrow recipe
-  `createSessionInTx` already runs for initial events (`sessions.go:766-800`:
-  `NormalizeInbound` → `TransitionThread` → `AppendInTx` with an `Enqueue` in `Then`),
-  lifted into a helper the runner and the create share; **not** a factoring of
-  `sendSessionEvents`' 680-line body (`internal/api/events.go:43-722`), which the runner
-  does not need. Advance `stage`, refresh `usage`.
-- `running`, session `idle` with no open ask, stage 4 complete: `completed`,
-  `ended_at = now()`, final usage; the session's archive is the fifth transition's.
-- `running`, any tick: refresh `usage` from `sessions.usage`; check the input store and
-  every input session still exist and the store is not archived → interrupt and
-  `failed{input_*_unavailable}`; check the stage's turn cap → interrupt and
-  `failed{internal_error}`; a session that went `terminated` → `failed{internal_error}`
-  with the session's last error text; a session a caller archived between stages
-  (`archived_at` set — `requireNotRunning` admits an idle one) or deleted (`session_id`
-  null) → `failed{internal_error}`; an open ask → interrupt and `failed{internal_error}`
-  (§3.3); a session whose `resources` no longer name the output store (a caller's
-  `DELETE …/resources/{rid}`) → interrupt and `failed{internal_error}`. A detached
-  *transcript* mount is not checked: the stage reads one file fewer.
-- **terminal, session not yet archived** (`completed`, `failed` or `canceled` with
-  `session_id IS NOT NULL AND session_archived_at IS NULL`): refresh `usage` once more,
-  and once the session is not `running` archive it (`archiveSession`'s body,
-  `sessions.go:1276`, behind `requireNotRunning`, `:1261`), stamp `session_archived_at`,
-  and delete the runner-owned file rows (§4.5). `session_archived_at` is denormalized
-  onto the dream row because the hold index of §6 must read it, and a partial index
-  cannot read `sessions`.
+1. **Closing** — `status` terminal, `closed_at IS NULL`. No session (a dream canceled while
+   `pending`, or failed at start): stamp `closed_at`. Otherwise: refresh `usage`; a
+   session found `running` gets the interrupt again (idempotent, and the only way out of
+   a `rescheduling` that turned into a turn after cancel — the interrupt arm settles
+   neither `terminated` nor `rescheduling`, `internal/api/events.go:357-365`); a session
+   `running` or `rescheduling` waits for the next tick; anything else is archived
+   (`archiveSession`'s body, `sessions.go:1276`, behind `requireNotRunning`, `:1261`),
+   the file rows are deleted (§4.5), `closed_at` is stamped. A session deleted at the
+   database level (`session_id` null, `ON DELETE SET NULL`) skips the archive and closes
+   the same way, so nothing depends on the nullable foreign key.
+2. **Timed out** — `now() - created_at > DREAM_TIMEOUT`, in `pending` as in `running`, so
+   a start that never succeeds is bounded too: `failed{timeout}`, the interrupt when a
+   session exists; arm 1 closes it on a later tick.
+3. **Pending** — the **start** (§4.2), under a savepoint. A classified failure
+   (`input_memory_store_unavailable`, `input_memory_store_too_large`,
+   `input_session_unavailable`) settles `failed` and `closed_at` in the same commit; an
+   unclassified one rolls back to the savepoint and commits `attempts + 1` — the plan 37
+   §4.1 discipline, bounded here because a dream has no successor occurrence to supersede
+   it: the attempt that exhausts `dreamStartAttempts` (5, a package `var`) settles
+   `failed{internal_error}` with the last error's text.
+4. **Running, unavailable** — the input store missing or archived, an input session
+   missing, **the output store missing or archived** (the executor tolerates both, so the
+   session would not fail on its own, `internal/executor/memory.go:427, 461`), or the
+   session gone at the database level (`session_id` null): interrupt where a session
+   exists, `failed{input_*_unavailable}` or `failed{internal_error}`.
+5. **Running, ended badly** — session `terminated`: `failed{internal_error}` with the
+   session's last error text.
+6. **Running, over budget** — the stage's turn cap exceeded: interrupt,
+   `failed{internal_error}`.
+7. **Running, busy** — session `running` or `rescheduling` ("transient error,
+   auto-retrying", `internal/domain/session.go:10-13`): refresh `usage`, nothing else.
+8. **Running, idle with an open ask** (§3.3): interrupt, `failed{internal_error}`.
+9. **Running, idle, stage `k < 4` complete**: post stage `k+1`'s `user.message` on the
+   primary thread and enqueue its turn — the narrow recipe `createSessionInTx` already
+   runs for initial events (`sessions.go:766-800`: `NormalizeInbound` →
+   `TransitionThread` → `AppendInTx` with an `Enqueue` in `Then`), lifted into a helper
+   the runner and the create share; **not** a factoring of `sendSessionEvents`' 680-line
+   body (`internal/api/events.go:43-722`). Advance `stage`, refresh `usage`.
+10. **Running, idle, stage 4 complete**: the end-of-stage-4 checks of §3.3 (output store
+    live, no secret in the session's versions) → `completed`, `ended_at = now()`, final
+    usage — or `failed{internal_error}`; arm 1 archives and closes on a later tick.
 
-Concurrency inside a tick is a semaphore clamped to the pool as the scheduler's is
-(`deploymentscheduler.go:298-307`), but the two sweeps share one budget rather than each
-taking `MaxConns - 2`: the runner's clamp is `min(dreamConcurrency,
-MaxConns - 2 - deploymentFireConcurrency)`, floor 1, `dreamConcurrency` default 2 — a
-dream's step is a start transaction of seconds, not a fire of milliseconds, and two at a
-time is plenty for a job measured in hours. A tick that changes nothing exports no span;
-one that transitions a dream roots a trace and records a child span per dream, the
-scheduler's rule (`:196-202`). Three instruments: `dream.transitions` (by `to` status),
-`dream.stage_turns` (by stage), `dream.tick_duration`.
+A replica that crashes mid-arm rolls back to the last committed position; the next tick,
+on any replica, continues from there.
 
-**Cancel is a request-side transition, not a tick.** `POST …/cancel` on a `pending` dream
-sets `canceled` and `ended_at` and is done. On a `running` dream it sets `canceled` and
-`ended_at` and appends `user.interrupt` to the session in the same transaction (the one
-path that both settles the turn and stops the work items, `internal/api/events.go:345-472`);
-the fifth transition, on a later tick, mirrors the final usage and archives the session
-once it is idle. That is the reference's "usage might continue to update for a few
-seconds" made concrete, and the same two-phase shape a `failed` dream's session gets.
+**The sweep budget is one semaphore for both sweeps**, not two clamps: the scheduler's
+own `MaxConns - 2` clamp (`deploymentscheduler.go:298-307`) becomes an acquisition from a
+process-wide `sweepBudget` of `max(1, MaxConns - 2)` slots that the runner draws from
+too, so the reservation the scheduler's comment protects — two connections for the rest
+of the process — holds with both sweeps running; a tick may find zero slots and skip.
+The runner never holds more than `dreamConcurrency` slots (default 2 — a start arm is
+seconds, not a fire's milliseconds, and two at a time is plenty for a job measured in
+hours). A tick that changes nothing exports no span; one that transitions a dream roots a
+trace and records a child span per dream, the scheduler's rule (`:196-202`). Three
+instruments: `dream.transitions` (by `to` status), `dream.stage_turns` (by stage),
+`dream.tick_duration`.
 
-### 4.2 The start transaction
+**Cancel is a request-side transition, not a tick.** `POST …/cancel` opens a transaction
+with the deployment handlers' `SET LOCAL lock_timeout` (`deployments.go:643-660`, a
+55P03 surfacing as a failed request rather than a hang behind a start arm), and on a
+`pending` dream sets `canceled`, `ended_at` and `closed_at` and is done. On a `running`
+dream it sets `canceled` and `ended_at` and **runs the interrupt** on the session in the
+same transaction — the whole interrupt arm of `sendSessionEvents`
+(`internal/api/events.go:345-472`: settle the outstanding calls, cancel the queued work,
+transition the thread, wake a parent, update the outcomes), lifted into
+`interruptSessionInTx` and shared with the handler, never a bare event append, which
+would stop nothing. Arm 1, on a later tick, mirrors the final usage and archives the
+session once it is idle. That is the reference's "usage might continue to update for a
+few seconds" made concrete, and the same two-phase shape a `failed` dream's session gets.
 
-The network I/O runs **before** the transaction opens, the `sealRepoTokens` rule
-(`internal/api/sessionresources.go:619-623`: nothing with a network round trip runs under
-the row locks a session create holds). So the step reads the input sessions' logs, renders
-the transcripts (§3.2), mints a `file_` id per rendered file and **puts every blob**
-(`blob.FilesKey`), and mints the pipeline session's `sesn_` id — then opens one
-transaction, `SET LOCAL lock_timeout = '2s'` (plan 37 §4.1 step 3's answer to a
-concurrent archive blocking on the `FOR SHARE` rows), in this order, so a dream is
-`running` only with everything it needs:
+### 4.2 The start arm
+
+The start arm runs inside the tick's transaction, which already holds the dream row
+`FOR UPDATE` (§4.1) — that lock is the claim that keeps two replicas from rendering and
+uploading the same dream's transcripts side by side. Its network I/O — reading the input
+sessions' logs, rendering the transcripts (§3.2), minting a `file_` id per rendered file
+and **putting every blob** (`blob.FilesKey`), minting the pipeline session's `sesn_` id —
+runs **first**, under that one lock alone, and only then does a `SAVEPOINT start` open
+the writes that take the `FOR SHARE` rows. That keeps the `sealRepoTokens` rule
+(`internal/api/sessionresources.go:619-623`: no network round trip under the session and
+environment row locks a create holds) — the dream row's lock blocks nothing but that
+dream's own cancel and archive handlers, which set the lock timeout of §4.1 and fail
+loudly rather than wait. The savepoint is the scheduler's own idiom
+(`deploymentscheduler.go:495`): a start that fails rolls back to it, and the outer
+transaction still commits `attempts + 1` or the classified failure. Inside the
+savepoint, in this order, so a dream is `running` only with everything it needs:
 
 1. `SELECT … FROM memory_stores WHERE id = $1 FOR SHARE` — missing or archived →
-   `input_memory_store_unavailable`; `SUM(content_size_bytes)` over its memories against
-   `DREAM_MAX_INPUT_BYTES` → `input_memory_store_too_large`.
+   `input_memory_store_unavailable`; `COALESCE(SUM(content_size_bytes), 0)` over its
+   memories against `DREAM_MAX_INPUT_BYTES` → `input_memory_store_too_large`.
 2. `SELECT id FROM sessions WHERE id = ANY($1)` — any missing → `input_session_unavailable`.
    Archived input sessions are accepted: their logs are intact (INFERRED; recording item 6).
-3. **Ensure the internal environment and agent** (§4.4) — `INSERT … ON CONFLICT DO NOTHING`
-   on a fixed id, so a first dream on a fresh platform creates them and every later one
-   finds them.
+3. **Ensure the internal environment and agent** (§4.4) through the create handlers'
+   own insert bodies — `createAgent`'s writes `agents` *and* `agent_versions` version 1
+   together (`internal/api/agents.go:157-168`; a session's foreign key points at the
+   version row, `0001_init.sql:29, 88`), `createEnvironment`'s the environment — lifted
+   into `insertAgentInTx`/`insertEnvironmentInTx` that take a fixed id and the `internal`
+   flag, with `ON CONFLICT DO NOTHING` on both rows, so a first dream on a fresh platform
+   creates them and every later one finds them. The runner hands them the *request-form*
+   specs of §4.3, and the normalization is the handlers' own (`resolveRoster`,
+   `parseNetworking`, `Normalize`); no hand-written row.
 4. **Clone the store** (`create_new` only): a new `memory_stores` row — `name` is the
    input's name followed by ` (dream <token>)`, `<token>` the dream id's suffix, with the
    *input's* portion truncated so the whole stays inside `memoryStoreNameMax` (255 runes,
@@ -547,12 +603,13 @@ concurrent archive blocking on the `FOR SHARE` rows), in this order, so a dream 
    `memories`, one for `memory_versions` — each memory with a fresh `mem_` id minted in Go
    and one `created` version attributed `{"type":"session_actor","session_id":<the
    pre-minted pipeline session id>}`. No `occupiedBy` or count check: a valid store's paths
-   are already mutually non-occupying and within the cap. A 2,000-memory clone is nine
-   statements, not four thousand.
+   are already mutually non-occupying and within the cap. A 2,000-memory clone is ten
+   statements — the store row, four batches of memories, four of versions, and the
+   `SELECT` — not four thousand.
 5. **Insert the `files` rows** — the `INSERT INTO files` half of `insertFile`
    (`internal/api/files.go:121`), the blobs already in place — one per transcript plus
-   `INDEX.md`. A row's `name` is `dream/<drm>/<seq>-<sesn>.md`, so `GET /v1/files` stays
-   legible while the dream runs (§4.5); the resource's `mount_path` in step 6 is a
+   `INDEX.md`. A row's `filename` is `dream/<drm>/<seq>-<sesn>.md`, so `GET /v1/files`
+   stays legible while the dream runs (§4.5); the resource's `mount_path` in step 6 is a
    different field, `dream/transcripts/<seq>-<sesn>.md`, so the sandbox path stays short.
 6. **Create the pipeline session** through `createSessionInTx` (`sessions.go:665`) with
    `createSessionIn{id: <the pre-minted id>, internal: true, envID: <internal env>,
@@ -568,10 +625,12 @@ concurrent archive blocking on the `FOR SHARE` rows), in this order, so a dream 
    (`deploymentruns.go:176-180`); the dream row carries its own `created_by` for audit.
 7. `UPDATE dreams SET status='running', stage=1, session_id, outputs, updated …`.
 
-A rolled-back start leaves the pre-put blobs orphaned; the step deletes them best-effort
-on the way out (`deleteOrphanedFile`, the same handling `insertFile` gives its own failed
-commit), and the next attempt mints fresh ids rather than reuse anything. A leaked blob is
-unreferenced bytes, never a wrong answer.
+A start rolled back to its savepoint leaves the pre-put blobs orphaned; the arm deletes
+them best-effort on the way out (`deleteOrphanedFile`, the handling `insertFile` gives
+its own failed commit), and the next attempt mints fresh ids rather than reuse anything.
+A replica that crashes between the puts and the commit orphans up to 101 objects for
+that attempt, which the repository already accepts for files ("rare orphans accepted, GC
+a non-goal", `files.go:298-300`): unreferenced bytes, never a wrong answer.
 
 The reference reports `outputs[]` "shortly after" `running`; this platform reports it in
 the same commit, which no client can distinguish except by never seeing the empty-outputs
@@ -588,8 +647,8 @@ name. The answer is already built: `agent_with_overrides` overrides `model` and 
 the session's overridden coordinator spec" — so a coordinator whose roster is exactly
 `[{"type":"self"}]` runs every thread under the session's overrides too.
 
-The internal agent, created once with a fixed id — shown as **stored**, not as a request
-would spell it, because the raw `INSERT` of §4.2 step 3 bypasses the create handler:
+The internal agent, created once with a fixed id, in the **request form** the create
+handler's insert body normalizes (§4.2 step 3):
 
 ```
 name:       "dream"
@@ -600,27 +659,29 @@ tools:      [{type: agent_toolset_20260401,
               configs: [{type: web_fetch,  name: web_fetch,  enabled: false},
                         {type: web_search, name: web_search, enabled: false}]}]
 mcp_servers: [], skills: []
-multiagent: {type: coordinator,
-             agents: [{id: <this fixed id>, type: agent, version: 1}]}   -- see below
+multiagent: {type: coordinator, agents: [{type: self}]}
 internal:   true
 ```
 
-`{"type":"self"}` is the *request* spelling: `resolveRoster` rewrites it to the agent's
+`{"type":"self"}` is a request spelling only: `resolveRoster` rewrites it to the agent's
 own id and version before storage (`internal/api/roster.go:158`), and `snapshotRoster`
 recognizes the self member by that id-and-version match, never by a marker (`:456`) — a
-literal `{"type":"self"}` in the row would decode to an empty id and fail the first
-session with "multiagent member … not found" (`:461-464`). The row is therefore written
-in the stored shape, and a test pins it — and the environment's `config` — against what
-`createAgent` and `parseNetworking` (`internal/api/environments.go:171`) would have
-produced from the request forms.
+literal `{"type":"self"}` written by hand would decode to an empty id and fail the first
+session with "multiagent member … not found" (`:461-464`). That, and the normalized
+fields a stored spec carries beyond the request (`description`, the networking booleans,
+the package arrays), is why the rows go through the handlers' bodies and no plan text
+tries to spell the stored shape.
 
-`bash`, `read`, `write`, `edit`, `glob`, `grep` stay on; the two web tools are off. A
-dream's `model` — string or `{id, speed}` — becomes the override verbatim, so the
-pipeline session's `agent.model` echoes it and its `self` copies inherit it. `speed` rides
-along and is ignored by every provider here, as it is for agents today.
+`bash`, `read`, `write`, `edit`, `glob`, `grep` stay on; the two web tools are off.
+`bash` stays because the merge stage deletes and moves memory files and no file tool can
+(`write`/`edit` create and change; nothing removes), which is the one reason the prompt's
+write jail is not a code jail (§3.4). A dream's `model` — string or `{id, speed}` —
+becomes the override verbatim, so the pipeline session's `agent.model` echoes it and its
+`self` copies inherit it. `speed` rides along and is ignored by every provider here, as it
+is for agents today.
 
-The internal environment, likewise fixed-id: `kind: cloud`, `config.networking` stored as
-`{"type":"limited","allowed_hosts":[]}` — no egress at all — `packages: {}`,
+The internal environment, likewise fixed-id and through its handler's body: `kind: cloud`,
+`networking: {type: limited, allowed_hosts: []}` — no egress at all — `packages: {}`,
 `internal: true`. `cloud` is not a choice: a `self_hosted` environment's work is pulled by
 a customer-hosted worker the platform neither owns nor can assume exists, and the
 platform's own pipeline cannot depend on one. (Memory stores themselves work on both
@@ -637,25 +698,36 @@ for an internal row — the agent's get, update, versions and archive (`GET
 id, `agents.go:225`), the environment's get, update, delete and archive
 (`internal/api/server.go:58-69` is the route set). The ids are not secret — a dream's
 pipeline session renders `agent.id` and `environment_id` to any viewer
-(`sessions.go:88-89`) — so the two paths that *use* an id are gated too: session create
-refuses an internal agent or environment with the same 404 unless `createSessionIn.internal`
-is set, which only the runner sets (§4.2 step 6), and `POST /v1/deployments` naming the
-internal agent is a 404 at `deploymentparse.go:184`'s resolve. Without that gate any
-developer key could open sessions on an always-allow agent no operator created or can see.
-The rows are unlisted, unretrievable, and resolvable by the runner alone.
+(`sessions.go:88-89`) — so **every resolver of an agent or environment id refuses an
+internal row** outside the runner, through one predicate the four of them share: session
+create (`resolveAgent`, `sessions.go:289`, and the environment read at `:669`), refused
+unless `createSessionIn.internal` is set, which only the runner sets (§4.2 step 6);
+deployment create, both its agent (`deploymentparse.go:184`) and its environment
+(`requireLiveEnvironment`, `deployments.go:769`, which today checks `archived_at` alone);
+and roster member resolution (`roster.go:169`), where the internal agent would otherwise
+fail later as a nested coordinator with a different error. Each answers the same 404.
+Without that gate any developer key could open sessions on an always-allow agent no
+operator created or can see. The rows are unlisted, unretrievable, and resolvable by the
+runner alone.
 
-The pipeline **session** carries no flag: it is listed, retrievable, streamable and
-archivable like any session, because the reference exposes it and documents streaming it.
-Its `agent.id` names a row `GET /v1/agents/{id}` refuses; the spec's own description of a
-thread's agent as possibly "an inline-defined (ephemeral) agent snapshot" suggests the
-reference's pipeline agent is equally unretrievable (recording item 1 asks). A caller may
-archive or delete the pipeline session mid-run, and between stages the session is `idle`,
-which `requireNotRunning` admits: an archive succeeds, the next stage's post would be
-refused as read-only (`internal/api/events.go:90-92`), and the tick settles the dream
-`failed{internal_error}` ("pipeline session archived") instead of posting; a delete
-cascades the work items and the tick reads the null `session_id` the same way ("pipeline
-session deleted"). A caller who detaches the output store from the session mid-run gets
-the same settlement (§4.1).
+The pipeline **session** carries no flag and is listed, retrievable and streamable like
+any session, because the reference exposes it and documents streaming it. Its `agent.id`
+names a row `GET /v1/agents/{id}` refuses; the spec's own description of a thread's agent
+as possibly "an inline-defined (ephemeral) agent snapshot" suggests the reference's
+pipeline agent is equally unretrievable (recording item 1 asks). **It is read-only to the
+public API while the dream owns it** — every mutation a developer key could otherwise
+make (`POST …/events`, which wakes an idle primary and enqueues a turn, `events.go:124`;
+`POST /v1/sessions/{id}`, which can swap tools and MCP servers, `sessions.go:976`;
+`DELETE`; `…/archive`; `…/threads/{tid}/archive`; the three resource mutations) answers
+400 `invalid_request_error` ("session is owned by dream drm_…") while a dream names the
+session and has no `closed_at`, found through `dreams_session_idx` (§6) by one
+`requireNotDreamOwned` check in each handler. The runner's helpers skip the check. The
+reason is the hidden agent's policy: an `always_allow` toolset with `bash` in a session
+anyone could steer would let a caller run whatever they liked under the platform's own
+agent and, under `update_existing`, write it into the store the hold exists to protect.
+Once the dream closes the session is archived and read-only anyway. Registered as ours
+(§8.1); recording item 2 asks what the reference answers to a send on a running pipeline
+session.
 
 ### 4.5 Transcripts as file resources
 
@@ -671,10 +743,12 @@ attached at session create with a `mount_path` that `resolveMountPath` roots und
 by `materializeFiles` (`internal/executor/files.go:51`) before the first tool runs. So
 rendered transcripts land at `/mnt/session/uploads/dream/transcripts/<seq>-<sesn>.md`,
 one resource each, plus `INDEX.md` (the row's `name` and the resource's `mount_path` are
-two fields, §4.2 step 5). The rows are the runner's: inserted by the start step, and
-**deleted by the terminal transition that archives the session** (§4.1) — the transcripts
-are derivable from the input sessions, and a hundred rows per dream should not accumulate
-in `GET /v1/files`. While the dream runs they are visible there; afterwards the archived
+two fields, §4.2 step 5). The rows are the runner's: inserted by the start arm, and
+**deleted by the closing arm** (§4.1) — the rows in its transaction, the objects after
+its commit, best-effort, the way `deleteFile` orders the two (`internal/api/files.go:290-300`;
+the repository has no referential blob deletion and accepts a rare orphan) — because the
+transcripts are derivable from the input sessions, and a hundred rows per dream should
+not accumulate in `GET /v1/files`. While the dream runs they are visible there; afterwards the archived
 session's `resources[]` keeps naming file ids that 404, plan 08 decision 2's accepted
 dangling reference (`docs/DIVERGENCES.md:288` cites it; the executor tolerates the dangle,
 `internal/executor/files.go:37-40`). §8.1 registers both halves.
@@ -692,9 +766,11 @@ dream-aware executor seam — both are new surface for what an existing one alre
 | `failed` | `ended_at`, `usage`, `error{type,message}` | interrupted if running, then archived | "left as-is with whatever was written before failure" | deleted |
 | `canceled` | `ended_at`, `usage` (refreshed by the next tick), `error: null` | interrupted, archived once idle | "left as-is" | deleted |
 
-The session column in every row is the fifth transition's work (§4.1): once the session
-is not running it is archived, `session_archived_at` is stamped on the dream row, and the
-file rows go — for `failed` and `canceled` exactly as for `completed`.
+The session and file-row columns in every row are the closing arm's work (§4.1 arm 1):
+once the session is neither running nor rescheduling it is archived, the file rows and
+objects go, and `closed_at` is stamped — for `failed` and `canceled` exactly as for
+`completed`; a dream that never had a session (canceled while `pending`, or failed at
+start) is closed in the same commit that ends it.
 
 Archive (`POST …/archive`) sets `archived_at` on a terminal dream and touches nothing
 else — not the session, not the store, matching the guide. Delete does not exist on the
@@ -748,10 +824,16 @@ timestamps as RFC 3339 UTC, and `usage` as the four flat fields with
 
 ### 5.2 Create-time validation and the error inventory
 
-At create: exactly one `memory_store` input and one `sessions` input; 1–100 session ids,
-each `sesn_`/`session_`-shaped, no duplicates; `memory_store_id` `memstore_`-shaped;
-`model` through `parseModel` (`internal/api/wire.go:349` — string or object, non-empty
-id, `speed` one of the two; the spec's 256-character id bound is **not** enforced, here
+At create: the body and **every nested object** — the `model` object form, both `inputs[]`
+arms, both `output_behavior` arms — checked against its allowed-key set before any shared
+parser sees it, because the spec puts `additionalProperties: false` on each and
+`parseModel` decodes with a plain `json.Unmarshal` that ignores an unknown key
+(`wire.go:349-352`); one negative test per arm. Then: exactly one `memory_store` input
+and one `sessions` input; 1–100 session ids, each `sesn_`/`session_`-shaped, no
+duplicates; `memory_store_id` `memstore_`-shaped; `model` through `parseModel`
+(`internal/api/wire.go:349` — string or object, non-empty id (the spec's string arm has
+no `minLength`, so the empty-string rejection is INFERRED, recording item 6), `speed` one
+of the two; the spec's 256-character id bound is **not** enforced, here
 or on the agent and session surfaces that share the parser, and slice 1 leaves the shared
 parser alone and registers the leniency once for all three, §8.1); `instructions` 1–4,096
 characters or null; `output_behavior.type` one of the two, and under `update_existing` the
@@ -773,24 +855,24 @@ The error types this platform produces, and when:
 | `error.type` | produced by |
 | --- | --- |
 | `timeout` | the tick, `now() - created_at > DREAM_TIMEOUT`, in `pending` as in `running` |
-| `internal_error` | a stage over its turn cap; a terminated pipeline session; a pipeline session deleted, archived, or with the output store detached; an open confirmation ask; an unclassified start failure on its `dreamStartAttempts`-th attempt (5); an unroutable model |
-| `input_memory_store_too_large` | the start transaction's size sum |
-| `input_memory_store_unavailable` | the start transaction, or any tick, finding the store missing or archived |
-| `input_session_unavailable` | the start transaction, or any tick, finding an input session missing |
+| `internal_error` | a stage over its turn cap; a terminated pipeline session; a pipeline session gone at the database level; the output store missing or archived; an open confirmation ask; a secret pattern in a version the session wrote; an unclassified start failure on its `dreamStartAttempts`-th attempt (5); an unroutable model |
+| `input_memory_store_too_large` | the start arm's size sum |
+| `input_memory_store_unavailable` | the start arm, or any tick, finding the store missing or archived |
+| `input_session_unavailable` | the start arm, or any tick, finding an input session missing |
 | `memory_store_org_limit_exceeded` | **never** — this platform has no organization store cap |
 
 ### 5.3 `update_existing` (slice 4)
 
-The start transaction skips step 4 and mounts the input store `read_write`; `outputs[]`
+The start arm skips step 4 and mounts the input store `read_write`; `outputs[]`
 names the input store once `running`. The hold: **at most one live `update_existing`
-dream per target store** — `pending`, `running`, or terminal with its pipeline session
-not yet archived — enforced by a partial unique index on `dreams (target_memory_store_id)
-WHERE status IN ('pending','running') OR (session_id IS NOT NULL AND session_archived_at
-IS NULL)` (§6). That one predicate is both windows the spec names (§2.4): "canceled with
-its final writes still landing" and "just finished (`completed`/`failed`) and its
-execution is still closing" are, here, the fifth transition's not-yet-archived session,
-for every terminal status alike; a dream canceled while still `pending` never had a
-session and releases the hold at once. A create that collides answers **409
+dream per target store** — `pending`, `running`, or terminal and not yet closed —
+enforced by a partial unique index on `dreams (target_memory_store_id) WHERE closed_at IS
+NULL` (§6). That one predicate is both windows the spec names (§2.4): "canceled with its
+final writes still landing" and "just finished (`completed`/`failed`) and its execution
+is still closing" are, here, the closing arm's not-yet-archived session, for every
+terminal status alike, and it depends on nothing nullable — a dream canceled while still
+`pending`, or failed at start, is closed in the same commit and releases the hold at
+once. A create that collides answers **409
 `conflict_error`** with the holding dream's id in the message, the spec's
 `BetaTargetStoreHeldError` verbatim, **and the `x-should-retry: false` header** the spec
 attaches — load-bearing, not decoration: the SDK retries a 409 twice unless that header
@@ -810,7 +892,8 @@ which is what plan 36 built and the reason in-place consolidation is acceptable 
 
 ## 6. Data model
 
-Migration `0034_dreams.sql`, five statements — three for the table, two column additions:
+Migration `0034_dreams.sql`, six statements — the table and its three indexes, two column
+additions:
 
 ```sql
 CREATE TABLE dreams (
@@ -819,7 +902,7 @@ CREATE TABLE dreams (
     workspace_id            text NOT NULL DEFAULT 'default',
     project_id              text NOT NULL DEFAULT 'default',
     status                  text NOT NULL CHECK (status IN ('pending','running','completed','failed','canceled')),
-    -- The pipeline position the tick resumes from: 0 before the start transaction,
+    -- The pipeline position the tick resumes from: 0 before the start arm,
     -- 1..4 while running, the last stage reached at a terminal state.
     stage                   smallint NOT NULL DEFAULT 0,
     -- Unclassified start failures so far; dreamStartAttempts bounds them (§4.1).
@@ -834,10 +917,11 @@ CREATE TABLE dreams (
     target_memory_store_id  text,
     outputs                 jsonb NOT NULL DEFAULT '[]'::jsonb,
     session_id              text REFERENCES sessions(id) ON DELETE SET NULL,
-    -- Stamped by the terminal transition that archives the session (§4.1).
-    -- Denormalized on purpose: the hold index below must read it, and a
-    -- partial index cannot read sessions. Not a join to "simplify" later.
-    session_archived_at     timestamptz,
+    -- "Nothing left to do": the session archived (or never existed) and the
+    -- file rows gone. Stamped by the arm that finishes the dream (§4.1); null
+    -- while the dream is live or closing. The sweep and the hold index read
+    -- it, and neither depends on the nullable session_id above.
+    closed_at               timestamptz,
     usage                   jsonb NOT NULL DEFAULT '{"input_tokens":0,"output_tokens":0,"cache_read_input_tokens":0,"cache_creation_input_tokens":0}'::jsonb,
     error                   jsonb,                   -- {type, message} or null
     created_by              text,                    -- audit only, as on every resource
@@ -846,24 +930,26 @@ CREATE TABLE dreams (
     ended_at                timestamptz,
     archived_at             timestamptz,
     CONSTRAINT dreams_terminal_ended CHECK ((status IN ('completed','failed','canceled')) = (ended_at IS NOT NULL)),
-    CONSTRAINT dreams_error_shape    CHECK (error IS NULL OR status = 'failed')
+    CONSTRAINT dreams_error_shape    CHECK (error IS NULL OR status = 'failed'),
+    CONSTRAINT dreams_closed_terminal CHECK (closed_at IS NULL OR status IN ('completed','failed','canceled'))
 );
 CREATE INDEX dreams_created_idx ON dreams (created_at DESC, id DESC);
+-- The session-mutation gate's lookup (§4.4): which dream owns a session.
+CREATE INDEX dreams_session_idx ON dreams (session_id) WHERE session_id IS NOT NULL;
 -- The update_existing hold (§5.3): one live in-place dream per target store —
--- pending, running, or any terminal whose pipeline session is not yet archived.
+-- pending, running, or any terminal not yet closed.
 CREATE UNIQUE INDEX dreams_target_hold_idx ON dreams (target_memory_store_id)
-    WHERE target_memory_store_id IS NOT NULL
-      AND (status IN ('pending','running')
-           OR (session_id IS NOT NULL AND session_archived_at IS NULL));
+    WHERE target_memory_store_id IS NOT NULL AND closed_at IS NULL;
 
 ALTER TABLE agents       ADD COLUMN internal boolean NOT NULL DEFAULT false;
 ALTER TABLE environments ADD COLUMN internal boolean NOT NULL DEFAULT false;
 ```
 
 `session_id` is `ON DELETE SET NULL` for the reason plan 37 §4.1 gives for runs: a
-session's lifecycle is the caller's, and a dream must remain readable after its session is
-gone. The tick reads a null `session_id` on a `running` dream as "pipeline session
-deleted" (§4.4). The output store is *not* a foreign key: the guide says the dream never
+session's lifecycle outlives the dream's, and a dream must remain readable after its
+session is gone. While the dream owns the session the API refuses the delete (§4.4), so
+a null `session_id` on an unclosed dream means a database-level deletion, which the tick
+settles or closes without it (§4.1). The output store is *not* a foreign key: the guide says the dream never
 touches it after the fact and the caller may delete it while the dream is `completed`;
 `outputs[]` keeps naming the id, as a session's resource snapshot keeps a deleted store's
 (`docs/DIVERGENCES.md:288`).
@@ -882,8 +968,9 @@ the renderer in `internal/transcript`; no test-support package is added, so the 
 `test` recipe is untouched.
 
 - **Routes (slice 1)**, `internal/api/dreams_test.go` over `pgtest`: each create rejection
-  its own case (cardinality, ids, model, instructions bounds, unknown key, the
-  `update_existing` target rule); the echo of both `model` forms; the list's ordering,
+  its own case (cardinality, ids, model, instructions bounds, an unknown key at the top
+  level and inside each nested arm, the `update_existing` target rule); the echo of both
+  `model` forms; the list's ordering,
   paging, `include_archived`, both `statuses` spellings, the exclusive bounds; archive and
   cancel over every status, idempotence included; 404s for malformed and unknown ids; the
   role gates. A golden test pins the resource's JSON — all fourteen keys, `output_behavior`
@@ -891,33 +978,41 @@ the renderer in `internal/transcript`; no test-support package is added, so the 
 - **The state machine and the tick (slice 2)**: the tick is driven directly
   (`dreamTickInterval` setter, `memoryretention.go:48-52`'s idiom) against a real
   Postgres with no brain running; a session's idle/running/terminated transitions are
-  written by the test the way the brain would write them. Cases: the start transaction's
-  three classified failures, an unclassified rollback with its orphan blobs deleted, and
-  the `dreamStartAttempts`-th failure settling `internal_error`; the clone — counts, paths,
+  written by the test the way the brain would write them. Cases: the start arm's three
+  classified failures closing the dream in one commit, an unclassified rollback to the
+  savepoint that still commits `attempts + 1` and deletes its orphan blobs, and the
+  `dreamStartAttempts`-th failure settling `internal_error`; the clone — counts, paths,
   contents, digests, one `created` version per memory with the `session_actor` naming the
-  session created after it; the stored agent and environment rows against what the
-  handlers would write from the request forms; the file rows, their `name`s and their
-  mount paths; the session's `agent_with_overrides` snapshot carrying the dream's model
-  and the `self` roster; internal ids refused at `POST /v1/sessions`, `POST
-  /v1/deployments` and every id-addressed agent and environment route, versions included;
-  each stage transition posting exactly one message, and none over an open ask; the usage
-  mirror and its cache-creation sum; timeout in `pending` and in `running`, unavailability
-  mid-run, the stage cap, a terminated, `rescheduling`, deleted and archived session, a
-  detached output store — each `error.type` or its absence; cancel of a pending dream,
-  cancel of a running one (the interrupt is appended, the archive waits for idle), and at
-  every terminal the session archived, `session_archived_at` stamped and the file rows
-  gone. **Two replicas**: two ticks on one dream, the loser skipped by `SKIP LOCKED`,
+  session created after it; the agent and environment rows, `agent_versions` version 1
+  included, byte-equal to what the handlers write from the same request forms; the file
+  rows, their `filename`s and their mount paths; the session's `agent_with_overrides`
+  snapshot carrying the dream's model and the `self` roster; internal ids refused by all
+  four resolvers (session create, deployment agent and environment, roster member) and by
+  every id-addressed agent and environment route, versions included; every public
+  mutation of the owned session refused (events, update, delete, archive, thread archive,
+  the three resource routes) while its reads and stream still answer, and admitted again
+  once closed; each arm of the decision table exactly once per tick, and none over an open
+  ask; the usage mirror and its cache-creation sum; timeout in `pending` and in
+  `running`, an input store, input session and output store made unavailable mid-run, the
+  stage cap, a terminated and a `rescheduling` session, a session deleted at the database
+  level — each `error.type` or its absence; a planted secret in a written version failing
+  completion; cancel of a pending dream (closed at once), cancel of a running one (the
+  interrupt runs, the archive waits for idle) and of a `rescheduling` one (re-interrupted
+  when it turns running); and at every terminal the session archived, the file rows and
+  their objects gone (`GET /v1/files/{id}` 404 *and* `blob.Get` not found) and `closed_at`
+  stamped. **Two replicas**: two ticks on one dream, the loser skipped by `SKIP LOCKED`,
   asserted by row state after both commit.
 - **Rendering (slice 2; the caps in slice 3)**, `internal/transcript`: golden files for the role labels and
-  the drop list; the tool-result and input truncation; the elision marker; the four
-  redaction patterns, each with a fixture that *forces* the substitution — a fixture the
-  unredacted code passes proves nothing; the per-transcript and per-dream caps with the
-  `INDEX.md` record of what was elided.
+  the drop list, including a delegated session whose child report survives and whose send
+  does not; the tool-result and input truncation; the elision marker; the four redaction
+  patterns, each with a fixture that *forces* the substitution — a fixture the unredacted
+  code passes proves nothing — and one whose secret straddles the truncation point; the
+  per-transcript cap with the `INDEX.md` record of what was elided.
 - **The hold (slice 4)**: two in-place dreams on one store, the second a 409 naming the
   first and carrying `x-should-retry: false`; the hold kept through every terminal status
-  until the session's archive stamps `session_archived_at`, and released then; a dream
-  canceled while `pending` releasing it at once; a `create_new` dream on the same store
-  holding nothing.
+  until the closing arm stamps `closed_at`, and released then — with the session deleted
+  at the database level too; a dream canceled while `pending` releasing it at once; a
+  `create_new` dream on the same store holding nothing.
 - **Live tiers**: the `RUN_EVALS` suite (`make eval`) — a seeded store (three memories, one
   stale, one duplicated) and two recorded transcripts; graders check the output store
   merged the duplicate, replaced the stale fact with the transcript's newer one, wrote no
@@ -945,35 +1040,45 @@ beta-header entry gains a clause for `dreaming-2026-04-21` only; `anthropic-work
 already has its own entry at `:47` (§2.2).
 
 New, by section. **Notes (not divergences)**: `outputs[]` and `session_id` populated in
-the same commit that moves the dream to `running`; the hold's release is the session's
-archive, one predicate for both windows the spec names (§5.3). **CONFIRMED (ours,
-argued)**: `memory_store_org_limit_exceeded` is never produced (no cap exists); the
-pipeline runs on a hidden internal agent and environment, unlisted and unretrievable,
-resolvable by the runner alone (scope decision 3, §4.4); the pipeline session's
-`created_by` is null; transcripts are `file` resources visible in `GET /v1/files` while the
-dream runs and deleted at its end, after which the archived session's `resources[]` names
-ids that 404 (§4.5); the clone's memory versions carry `session_actor` naming the pipeline
-session; the output store is named `<input> (dream <token>)`; the model is not validated
-at create, and `parseModel` enforces no id length on any surface (§5.2); `speed` is
-accepted, echoed and never validated against a model catalogue, so a combination the
-reference rejects at create succeeds here (decision 11); the stage design, caps and
-redaction of §3 (harness-informed, not wire). **INFERRED (a recording item each)**:
-exactly one `memory_store` and one `sessions` input (item 7); a missing or archived store
-and a missing session at create are 400 `invalid_request_error` (item 6); archived input
-sessions are accepted (item 6); duplicate session ids are a 400 (item 6); an
-`update_existing` target other than the dream's own `memory_store` input is a 400 (item
-6); which model/speed combinations the reference refuses (item 6); `update_existing`'s
-`outputs[]` names the input store (item 10); the pipeline session appears in `GET
-/v1/sessions` and its agent id does not resolve (item 1); a canceled dream's session ends
-`idle`, not `terminated` (item 5).
+the same commit that moves the dream to `running`; the hold's release is the dream's
+close, one predicate for both windows the spec names (§5.3). **CONFIRMED (ours,
+argued)** — the choices no recording can move, because they follow from what this
+platform has or lacks: `memory_store_org_limit_exceeded` is never produced (no cap
+exists); the pipeline session is read-only to the public API while the dream owns it
+(§4.4 — the hidden agent's policy demands it whatever the reference does); the model is
+not validated at create, and `parseModel` enforces no id length on any surface (§5.2);
+`speed` is accepted, echoed and never validated against a model catalogue, so a
+combination the reference rejects at create succeeds here (decision 11); the list accepts
+bare `statuses` beside `statuses[]`, a lenient parse of ours like the `session_` alias —
+one entry covering the sessions list, which already does (`sessions.go:1116`), and this
+one; the stage design, caps and redaction of §3 (harness-informed, not wire).
+**INFERRED (a recording item each)** — every choice the recording *can* settle stays
+here until slice 0 has run, whatever this plan expects the answer to be: the pipeline
+runs on an internal agent and environment that neither list nor `GET …/{id}` show (item
+1); the pipeline session appears in `GET /v1/sessions` and its agent id does not resolve
+(item 1); the session's `created_by` is null (item 1); transcripts are `file` resources
+visible in `GET /v1/files` while the dream runs and deleted at its end, after which the
+archived session's `resources[]` names ids that 404 (items 1, 2); the output store's
+`name` is `<input> (dream <token>)`, its `description` copied, its `metadata` empty, and
+its clone versions carry `operation: created` with a `session_actor` naming the pipeline
+session (item 3); exactly one `memory_store` and one `sessions` input (item 7); a missing
+or archived store and a missing session at create are 400 `invalid_request_error` (item
+6); archived input sessions are accepted (item 6); duplicate session ids are a 400 (item
+6); an empty-string `model` is a 400 (item 6); an `update_existing` target other than the
+dream's own `memory_store` input is a 400 (item 6); which model/speed combinations the
+reference refuses (item 6); `update_existing`'s `outputs[]` names the input store (item
+10); a canceled dream's session ends `idle`, not `terminated` (item 5); what a send to a
+running pipeline session answers (item 2).
 
 The INFERRED entries' tracker is **#78**, the recording tracker, which stays open and
 already carries the registry's other unsettled inferences; each entry therefore carries
 the parenthetical `tools/registrycheck` requires of an entry sharing a tracker, naming
 its recording item. Slice 0 converts the ones it settles before slice 1 opens, so most
 land CONFIRMED on arrival. The rewritten `:135` entry keeps `*Tracked: #475*` only while
-#475 is open: the close-out PR demotes the pointer to provenance (`(delivered)`), or
-`make registry-check` goes red the day the issue closes (§9).
+#475 is open: the close-out PR rewrites the pointer as a trailing `landed for #475`
+clause — the provenance form the guard accepts while the issue is still open
+(`tools/registrycheck/registrycheck.go:396-402` rejects `(delivered)` on an open issue and
+a live tracker on a closed one) — and #475 is closed after that PR merges (§9).
 
 ### 8.2 Recording checklist (slice 0; `ant --format raw` on every call, the archive's recorder conventions)
 
@@ -985,8 +1090,8 @@ In priority order — each settles entries above:
    /v1/sessions` — is the pipeline session listed, and `GET …/threads` — did it use threads.
 2. The pipeline session's event stream, start to end: the stage shape, the tools called,
    how transcripts and the store are read and written, whether the system prompt is
-   visible by asking (a `user.message` cannot be sent to it if it is archived — record
-   what a send answers).
+   visible by asking — a `user.message` sent while the dream is `running` (what it
+   answers: accepted, refused, and with what status) and again once it is archived.
 3. The output store: `name`, `description`, `metadata`, and `GET …/memory_versions` on it
    — the clone versions' `operation` and `created_by`.
 4. `outputs[]` polled every second from create: whether an empty-outputs `running` state is
@@ -997,9 +1102,9 @@ In priority order — each settles entries above:
    archived store; a `sesn_` that does not exist; a `sesn_` that exists but is archived
    (expect 200 — the platform accepts it); 101 session ids; 0 session ids; a
    duplicated id; two `memory_store` inputs; no `memory_store` input; no `sessions` input;
-   `update_existing` naming another store; an unknown body key; `instructions` of 4,097
-   characters; an unsupported model id; `speed: fast` on a model that supports it and one
-   that does not.
+   `update_existing` naming another store; an unknown body key, and one inside the
+   `model` object; `instructions` of 4,097 characters; `model: ""`; an unsupported model
+   id; `speed: fast` on a model that supports it and one that does not.
 7. The cardinality rule: whether the reference accepts two `sessions` inputs (merged?) or
    refuses them.
 8. `include_archived` omitted vs `true`; `statuses[]` bracketed vs bare; `limit` omitted
@@ -1012,20 +1117,23 @@ In priority order — each settles entries above:
 11. Delete an input session and archive the input store while a dream runs — the failure
     type and how long it takes to surface.
 
-### 8.3 Decisions — five settled with the owner, nine standing recommendations
+### 8.3 Decisions — five settled with the owner, ten standing recommendations
 
 The owner settled decisions 2, 3, 7, 9 and 14 on 2026-09-05 — the preamble's five scope
 decisions, in this list's order 14, 9, 2, 7, 3 — and each is marked below with what was
-chosen. The other nine were put as recommendations and drew no objection. Every entry
+chosen. The other ten were put as recommendations and drew no objection. Every entry
 states the alternative it beat.
 
 1. **Host the runner in `cmd/controlplane`** (§4.1), not a sixth binary and not the
    brain: the brain is stateless per turn and holds no blob store or cipher; the
    controlplane already runs two sweeps on the same argument. **Stateless ticks, no
-   lease**: every transition is one committed row change under `FOR UPDATE SKIP LOCKED`,
-   so there is nothing to renew and nothing a crash can leave half-done. Rejected: a
-   `claimed_by`/`lease_expires_at` pair — the only lease idiom here is the queue's, bound
-   to `work_items`, and a dream is not one.
+   lease**: every arm is one committed row change under the dream row's `FOR UPDATE SKIP
+   LOCKED`, which is also the claim the start arm's rendering and uploads run under, so
+   there is nothing to renew and nothing a crash can leave half-done beyond orphaned
+   objects the repository already tolerates. Rejected: a `claimed_by`/`lease_expires_at`
+   pair — the only lease idiom here is the queue's, bound to `work_items`, and a dream is
+   not one; preparing before the lock — two replicas would render and upload the same
+   dream side by side on every tick.
 2. **One internal agent with a `self` roster, one internal environment, both hidden**
    (§4.3, §4.4). **Settled 2026-09-05** — the owner's decision on visibility; the `self`
    mechanism is what makes one agent row enough. Rejected: one agent pair per model (a row per distinct
@@ -1040,16 +1148,17 @@ states the alternative it beat.
    the work from the event stream the guide says to watch).
 4. **Transcripts as `file` resources** (§4.5). Rejected: `document` blocks; a new
    resource kind; a dream-aware executor seam.
-5. **Clone in the start transaction, `session_actor` attribution, the ` (dream <token>)`
+5. **Clone in the start arm, `session_actor` attribution, the ` (dream <token>)`
    name** (§4.2). Rejected: a null actor (the version would be the one unattributed write
    in a store whose every other write is attributed); an `api_actor` naming the creating
    key (the key did not write the bytes; the session will); the input's name unchanged
    (indistinguishable in a list, and a caller who mounts both gets the slug-collision
    400). The pre-minted session id this needs is the one change to `createSessionIn`
    the runner asks for beyond the internal bypass (§4.2 step 6).
-6. **Cancel appends the interrupt and lets the next tick finish** (§4.1) — the reference's
+6. **Cancel runs the interrupt and lets the closing arm finish** (§4.1) — the reference's
    own "usage might continue to update" window, and the only order that never archives a
-   running session.
+   running session. Rejected: appending the `user.interrupt` event alone, which settles
+   no call and cancels no work item.
 7. **`update_existing` last, with the hold as a partial unique index** (§5.3).
    **Settled 2026-09-05** on scope; the index is plan 37's occurrence-claim idiom applied
    to a store, and its predicate is the session's archive, so the spec's two release
@@ -1073,6 +1182,11 @@ states the alternative it beat.
     the title with slice 1. 41 is the next free number; `docs/plan/` already holds two
     files numbered 40 (`40_environment-packages.md`, `40_multi-tenant-activation.md`), a
     pre-existing collision reported to the owner, not this plan's to fix.
+15. **The pipeline session is read-only to the public API while the dream owns it**
+    (§4.4), reads and streaming excepted. Rejected: leaving it mutable (a developer key
+    could steer an `always_allow` agent with `bash` into any store, `update_existing`'s
+    included); hiding the session as the agent is hidden (the reference exposes it and
+    documents streaming it).
 
 ---
 
@@ -1112,40 +1226,48 @@ states the alternative it beat.
   store lock — the platform's own cap, not the guide's 10,000 (§3.3); `DREAM_MAX_INPUT_BYTES`
   (64 MiB default) keeps the transaction and the sandbox mount inside what plan 36's
   materializer already handles.
-- **The start transaction's lock window.** It holds `FOR SHARE` on the input store and
-  the internal environment for the clone's duration, so a concurrent archive of either
-  waits; the blob puts run before it opens, its `lock_timeout` is 2s, and at most
-  `dreamConcurrency` (2) starts run at once (§4.1, §4.2). A start that loses the lock
-  race rolls back and counts one attempt.
-- **Scratch dies with the container.** `/workspace/dream` rides the idle checkpoint, not
-  a container that dies mid-stage before any checkpoint exists; the stage prompts open by
-  checking the previous stage's artefact and redoing what is missing (§3.3), so the cost
-  is a repeated stage, bounded by its turn cap, never a silent merge over an empty
-  `digests/`.
+- **The start arm's lock window.** The dream row is locked for the arm's whole duration —
+  rendering and blob puts included, seconds to tens of seconds for 100 transcripts — and
+  blocks only that dream's cancel and archive, which time out loudly; the `FOR SHARE`
+  locks on the input store and the internal environment are taken only inside the
+  savepoint, after the I/O, and at most `dreamConcurrency` (2) starts run at once (§4.1,
+  §4.2). A start that loses a lock race rolls back to the savepoint and counts one attempt.
+- **Scratch dies with the container.** `/workspace/dream` rides the idle checkpoint, and
+  only that: a container recreated after a crash restores nothing unless a reaper-written
+  marker is waiting, and a marker is consumed by the resume it serves (§3.1). The stage
+  prompts open by checking the previous stage's artefact and redoing what is missing
+  (§3.3), so the cost is a repeated stage, bounded by its turn cap, never a silent merge
+  over an empty `digests/`.
 - **A caller deletes the pipeline session or the output store mid-run.** The tick reads
   the null `session_id` and fails the dream; a deleted output store fails the next sync
   the way it fails any session's, and the tick settles `internal_error` on the terminated
   session. Neither corrupts the input store, which is never mounted under `create_new`.
 - **The hidden rows are still rows.** A migration-level `internal` flag is invisible to
-  every list and get, but a database operator can archive them; the start transaction's
+  every list and get, but a database operator can archive them; the start arm's
   `ON CONFLICT DO NOTHING` re-creates a deleted pair and *fails* on an archived one — the
   runner logs the id and the dream stays `pending`. A follow-up can un-archive by hand;
   nothing else in the platform can.
 - **Prompt injection through transcripts and `instructions`.** The pipeline reads
-  third-party text by design. The defences that hold in code are the clone by default, no
-  egress, no MCP, and redaction before the bytes enter the sandbox; the "data" rule for
-  transcripts, the bounded steering rule for `instructions`, and the write jail to the
-  store and scratch are the prompt's, with only the file tools' `/mnt/memory` rule behind
-  them (§3.4). A hostile transcript can still degrade the output store's content — which
-  is why the default writes a clone the caller reviews and can discard.
+  third-party text by design, on an `always_allow` agent that keeps `bash` (§4.3 says
+  why). The defences that hold in code are the clone by default, no egress, no MCP, the
+  session-mutation gate (§4.4), the best-effort shape redaction before the bytes enter the
+  sandbox and the completion scan of the versions the session wrote (§3.3); the "data"
+  rule for transcripts, the bounded steering rule for `instructions`, and the write jail
+  to the store and scratch are the prompt's, with only the file tools' `/mnt/memory` rule
+  behind them (§3.4). What no defence here closes: a hostile transcript can degrade the
+  output store's content, waste the dream's budget, or probe the sandbox from inside —
+  which is why the default writes a clone the caller reviews and can discard, and why
+  `update_existing` is the last slice.
 
 ### Documentation this plan owes
 
 Each slice: its `changelog.d/` fragment, STATE.md's Active work and Tasks, the registry
-entries of §8.1. Slice 2 additionally: docs/ARCHITECTURE.md — the process topology gains
+entries of §8.1. Slice 1 additionally: CLAUDE.md's wire-prefix list (`drm_`). Slice 2
+additionally: docs/ARCHITECTURE.md — the process topology gains
 the runner beside the scheduler, the execution flow gains "a dream's pipeline session", and
 the package reference gains `internal/transcript`; README.md's status line and feature
 list. Slice 0: the recording session's README in the private archive and the HISTORY
 record CLAUDE.md reserves for acceptance and review-hardening. Close-out: this plan to
 `archived`, the progress summary to docs/HISTORY.md, the `:135` entry's `*Tracked: #475*`
-demoted to `(delivered)` in the same PR, then #475 closed.
+rewritten as a trailing `landed for #475` in the same PR (§8.1), and #475 closed once it
+merges.
