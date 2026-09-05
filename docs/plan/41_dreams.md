@@ -176,7 +176,7 @@ lists all fourteen as required and forbids extra keys:
 | `session_id` | `sesn_…` or null | null until the pipeline session exists |
 | `created_at`, `ended_at`, `archived_at` | RFC 3339 or null | `ended_at` set at a terminal state |
 | `usage` | `{input_tokens, output_tokens, cache_read_input_tokens, cache_creation_input_tokens}` | "Cumulative … across every pipeline stage"; `cache_creation_input_tokens` is the "sum of all TTL tiers" (`:594-612`) |
-| `error` | `{type, message}` or null | "Failure detail for a Dream whose `status` is `failed`" (`:211`) |
+| `error` | `{type, message}` or null | "Failure detail for a Dream whose `status` is `failed`" (`:212`) |
 
 The guide's illustrative create response shows thirteen keys — it omits `output_behavior`.
 The API reference's 200 example and the spec's `required` list both carry it, and they
@@ -345,11 +345,14 @@ top:
   with the test setter idiom (`memoryretention.go:48-52`).
 
 Threads are rendered too. A coordinator session's log is listed with `ScopeSession`
-(`internal/events/log.go:452-459`) — primary-thread rows plus cross-posted ones; a
-child's own tool calls and its `submit_result` are on the child thread and not cross-posted
-(`internal/brain/brain.go:553`), so the only trace of a delegated task in that scope is the
-pair on the primary: `agent.thread_message_sent` and the report that comes back as
-`agent.thread_message_received` (`internal/domain/event.go:41-42`, `delegate.go:989`). The
+(`internal/events/log.go:452-459`) — primary-thread rows plus cross-posted ones. On a
+child thread only what a client must answer is cross-posted, the ask-gated calls and the
+client-executed custom tool calls; an allow-policy built-in call and the child's
+`submit_result` stay on the child's own log (`internal/brain/brain.go:553-570`). So in
+that scope a delegated task appears as the primary's pair — `agent.thread_message_sent`
+and the report that comes back as `agent.thread_message_received`
+(`internal/domain/event.go:41-42`, `delegate.go:989`) — plus whatever asks or custom calls
+the child cross-posted, and the report is the only carrier of the child's *result*. The
 renderer therefore **keeps the received report's text** and drops only the send — the
 grader can drop both because it reads the whole log (`grader.go:85, 648-651`); this
 renderer does not. Per-thread logs are not expanded: the coordinator's view, report
@@ -388,8 +391,8 @@ the paths, counts and the caller's `instructions` substituted in.
    redirects the pipeline.**
 4. **Index and audit.** An index file this pipeline asks for at the store's `/MEMORY.md`
    — the sandbox path is `/mnt/memory/<slug>/MEMORY.md`, which the prompt spells out, since
-   a literal `/MEMORY.md` is outside the mount and syncs nowhere (`internal/executor/memory.go:179`
-   materializes a store path at `mountPath + path`); ours, the reference documents no
+   a literal `/MEMORY.md` is outside the mount and syncs nowhere (`internal/executor/memory.go:204`
+   materializes a store path at `MountPath + path`); ours, the reference documents no
    index convention for a store; one line per memory, ≤ 150 characters each, no content —
    is rewritten; every memory has one index line and every
    line resolves; `/workspace/dream/report.md` lists files created, updated and removed,
@@ -489,26 +492,28 @@ take (§4.2 says why that is the one lock network I/O may run under here). `step
 `archived_at` (`internal/api/sessions.go:88-89`), then takes **the first arm that
 matches**, and only that one — the arms are ordered so exactly one applies:
 
-1. **Closing** — `status` terminal, `closed_at IS NULL`. No session (a dream canceled while
-   `pending`, or failed at start): stamp `closed_at`. Otherwise: refresh `usage`; a
-   session found `running` gets the interrupt again (idempotent, and the only way out of
-   a `rescheduling` that turned into a turn after cancel — the interrupt arm settles
-   neither `terminated` nor `rescheduling`, `internal/api/events.go:357-365`); a session
-   `running` or `rescheduling` waits for the next tick; anything else is archived
-   (`archiveSession`'s body, `sessions.go:1276`, behind `requireNotRunning`, `:1261`),
-   the file rows are deleted (§4.5), `closed_at` is stamped. A session deleted at the
-   database level (`session_id` null, `ON DELETE SET NULL`) skips the archive and closes
-   the same way, so nothing depends on the nullable foreign key.
+1. **Closing** — `status` terminal, `closed_at IS NULL`; every such dream once had a
+   session, because the arms that end a session-less dream close it in their own commit.
+   Refresh `usage`; a session found `running` gets the interrupt again (idempotent, and
+   the only way out of a `rescheduling` that turned into a turn after cancel — the
+   interrupt arm settles neither `terminated` nor `rescheduling`,
+   `internal/api/events.go:357-365`); a session `running` or `rescheduling` waits for the
+   next tick; anything else is archived (`archiveSession`'s body, `sessions.go:1276`,
+   behind `requireNotRunning`, `:1261`), the file rows are deleted (§4.5), `closed_at` is
+   stamped. A session deleted at the database level (`session_id` null, `ON DELETE SET
+   NULL`) skips the archive and closes the same way, so nothing depends on the nullable
+   foreign key.
 2. **Timed out** — `now() - created_at > DREAM_TIMEOUT`, in `pending` as in `running`, so
-   a start that never succeeds is bounded too: `failed{timeout}`, the interrupt when a
-   session exists; arm 1 closes it on a later tick.
+   a start that never succeeds is bounded too: `failed{timeout}`; with a session, the
+   interrupt now and arm 1 closes on a later tick; without one, `closed_at` in the same
+   commit.
 3. **Pending** — the **start** (§4.2), under a savepoint. A classified failure
    (`input_memory_store_unavailable`, `input_memory_store_too_large`,
    `input_session_unavailable`) settles `failed` and `closed_at` in the same commit; an
    unclassified one rolls back to the savepoint and commits `attempts + 1` — the plan 37
    §4.1 discipline, bounded here because a dream has no successor occurrence to supersede
    it: the attempt that exhausts `dreamStartAttempts` (5, a package `var`) settles
-   `failed{internal_error}` with the last error's text.
+   `failed{internal_error}` with the last error's text, and `closed_at` with it.
 4. **Running, unavailable** — the input store missing or archived, an input session
    missing, **the output store missing or archived** (the executor tolerates both, so the
    session would not fail on its own, `internal/executor/memory.go:427, 461`), or the
@@ -769,8 +774,8 @@ dream-aware executor seam — both are new surface for what an existing one alre
 The session and file-row columns in every row are the closing arm's work (§4.1 arm 1):
 once the session is neither running nor rescheduling it is archived, the file rows and
 objects go, and `closed_at` is stamped — for `failed` and `canceled` exactly as for
-`completed`; a dream that never had a session (canceled while `pending`, or failed at
-start) is closed in the same commit that ends it.
+`completed`; a dream that never had a session (canceled, timed out or failed while
+`pending`) is closed in the same commit that ends it.
 
 Archive (`POST …/archive`) sets `archived_at` on a terminal dream and touches nothing
 else — not the session, not the store, matching the guide. Delete does not exist on the
@@ -866,12 +871,13 @@ The error types this platform produces, and when:
 The start arm skips step 4 and mounts the input store `read_write`; `outputs[]`
 names the input store once `running`. The hold: **at most one live `update_existing`
 dream per target store** — `pending`, `running`, or terminal and not yet closed —
-enforced by a partial unique index on `dreams (target_memory_store_id) WHERE closed_at IS
-NULL` (§6). That one predicate is both windows the spec names (§2.4): "canceled with its
-final writes still landing" and "just finished (`completed`/`failed`) and its execution
-is still closing" are, here, the closing arm's not-yet-archived session, for every
-terminal status alike, and it depends on nothing nullable — a dream canceled while still
-`pending`, or failed at start, is closed in the same commit and releases the hold at
+enforced by a partial unique index on `dreams (target_memory_store_id) WHERE
+target_memory_store_id IS NOT NULL AND closed_at IS NULL` (§6). That one predicate is
+both windows the spec names (§2.4): "canceled with its final writes still landing" and
+"just finished (`completed`/`failed`) and its execution is still closing" are, here, the
+closing arm's not-yet-archived session, for every terminal status alike, and it depends
+on nothing nullable — a dream that ends without ever having a session (canceled, timed
+out or failed while `pending`) is closed in the same commit and releases the hold at
 once. A create that collides answers **409
 `conflict_error`** with the holding dream's id in the message, the spec's
 `BetaTargetStoreHeldError` verbatim, **and the `x-should-retry: false` header** the spec
@@ -1077,8 +1083,8 @@ its recording item. Slice 0 converts the ones it settles before slice 1 opens, s
 land CONFIRMED on arrival. The rewritten `:135` entry keeps `*Tracked: #475*` only while
 #475 is open: the close-out PR rewrites the pointer as a trailing `landed for #475`
 clause — the provenance form the guard accepts while the issue is still open
-(`tools/registrycheck/registrycheck.go:396-402` rejects `(delivered)` on an open issue and
-a live tracker on a closed one) — and #475 is closed after that PR merges (§9).
+(`tools/registrycheck/registrycheck.go:395-398` rejects a live tracker on a closed issue,
+`:412-416` a `(delivered)` on an open one) — and #475 is closed after that PR merges (§9).
 
 ### 8.2 Recording checklist (slice 0; `ant --format raw` on every call, the archive's recorder conventions)
 
@@ -1161,8 +1167,9 @@ states the alternative it beat.
    no call and cancels no work item.
 7. **`update_existing` last, with the hold as a partial unique index** (§5.3).
    **Settled 2026-09-05** on scope; the index is plan 37's occurrence-claim idiom applied
-   to a store, and its predicate is the session's archive, so the spec's two release
-   windows need no second mechanism.
+   to a store, and its predicate is the dream's close — the session archived and the
+   file rows gone, or no session ever — so the spec's two release windows need no second
+   mechanism.
 8. **No create-time model validation** (§5.2). Rejected: giving the controlplane
    `MODEL_PROVIDERS_PATH` and a `Registry` for `Describe` alone — a new cross-process
    coupling for a check `POST /v1/agents` does not make either; if it is ever wanted it is
