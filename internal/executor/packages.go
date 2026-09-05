@@ -429,8 +429,11 @@ func packageMessage(out string) string {
 }
 
 // anySchemeUserinfoRe matches the userinfo of a URL of any scheme, for the
-// non-http schemes redactURL leaves alone.
-var anySchemeUserinfoRe = regexp.MustCompile(`([a-zA-Z][a-zA-Z0-9+.\-]*://)[^\s/@]+@`)
+// non-http schemes redactURL leaves alone. The `[^\s/]+@` class is greedy and
+// stops only at the authority delimiter (`/`), so it consumes to the LAST `@`
+// before the host — a password containing `@` (`user:p@ss@host`) is dropped
+// whole, mirroring how a URL parser splits userinfo from host.
+var anySchemeUserinfoRe = regexp.MustCompile(`([a-zA-Z][a-zA-Z0-9+.\-]*://)[^\s/]+@`)
 
 // probeSandboxForPackages answers decision 7's question, returning the reason the pass
 // must be refused or "" to proceed. An answer the probe cannot have produced —

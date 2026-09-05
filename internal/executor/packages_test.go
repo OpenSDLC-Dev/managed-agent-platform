@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/queue"
@@ -136,6 +137,38 @@ func TestInstallsEveryManagerInTheReferencesOrder(t *testing.T) {
 		if !rec.Installed || rec.Attempts != 1 {
 			t.Errorf("sentinel[%s] = %+v, want installed after one attempt", name, rec)
 		}
+	}
+}
+
+// TestTheProbeAndInstallCarryTheConfiguredBudget pins that the pass bounds every
+// sandbox call it makes by PackageInstallTimeout: the probe (a shell wedged
+// answering it must not hang provisioning on the outer lease alone) and each
+// manager's install. Nothing else defends the probe's Timeout.
+func TestTheProbeAndInstallCarryTheConfiguredBudget(t *testing.T) {
+	const budget = 7 * time.Minute
+	sb := &fakeSandbox{}
+	h := newHarnessWith(t, &fakeProvider{sb: sb}, Config{PackageInstallTimeout: budget})
+	h.setPackages(t, map[string][]string{"apt": {"jq"}})
+	h.suspend(t, writeUse("out.txt", "hello"))
+	h.stepOnce(t)
+
+	var probeN, installN int
+	for i, c := range sb.cmds {
+		switch {
+		case c == packagesProbeCommand:
+			probeN++
+			if sb.execTimeouts[i] != budget {
+				t.Errorf("probe timeout = %s, want %s", sb.execTimeouts[i], budget)
+			}
+		case strings.HasPrefix(c, "set -o pipefail; { "):
+			installN++
+			if sb.execTimeouts[i] != budget {
+				t.Errorf("install timeout = %s, want %s", sb.execTimeouts[i], budget)
+			}
+		}
+	}
+	if probeN != 1 || installN != 1 {
+		t.Fatalf("saw %d probes and %d installs, want 1 each", probeN, installN)
 	}
 }
 
@@ -471,7 +504,9 @@ func TestTheFailureMessageIsSanitizedAndRedacted(t *testing.T) {
 // because the userinfo-only redactor it replaced leaked two shapes a manager
 // really echoes: a password containing '@' (redacted only up to the first '@')
 // and a credential in the query rather than the userinfo (`?token=`, a pip/npm
-// convention). Reducing every URL to scheme://host closes both.
+// convention). Reducing every URL to scheme://host closes both; a non-http
+// scheme's userinfo — including a password containing '@' — is dropped by
+// anySchemeUserinfoRe's greedy match to the last '@' before the authority.
 func TestPackageMessageRedactsEveryCredentialForm(t *testing.T) {
 	for _, tc := range []struct {
 		name, in, leak, keep string
@@ -480,6 +515,7 @@ func TestPackageMessageRedactsEveryCredentialForm(t *testing.T) {
 		{"password with @", "auth https://user:p@sSWORD@host.example/x 401", "sSWORD", "https://host.example"},
 		{"query token", "GET https://host.example/simple?token=SECRETTOK 403", "SECRETTOK", "https://host.example"},
 		{"non-http scheme userinfo", "cloning git+ssh://deploy:KEY123@repo.example/x.git failed", "KEY123", "git+ssh://***@repo.example/x.git"},
+		{"non-http password with @", "cloning git+ssh://deploy:p@sSWORD@repo.example/x.git failed", "sSWORD", "git+ssh://***@repo.example/x.git"},
 		{"nul", "boom\x00tail", "\x00", "boomtail"},
 		{"benign url kept as host", "could not reach https://pypi.org/simple/", "", "https://pypi.org"},
 	} {

@@ -79,8 +79,12 @@ type fakeSandbox struct {
 	// cmds records every Exec command in order; execHook, when set and
 	// answering non-nil, overrides one command's result (the restore tests
 	// fault the in-sandbox extraction).
-	cmds     []string
-	execHook func(sandbox.ExecRequest) *sandbox.ExecResult
+	cmds []string
+	// execTimeouts records the Timeout of every Exec, parallel to cmds, so a
+	// test can pin that the probe and each install carry the configured budget
+	// (a wedged probe must not hang provisioning on the outer lease alone).
+	execTimeouts []time.Duration
+	execHook     func(sandbox.ExecRequest) *sandbox.ExecResult
 	// execErr, when set, is the backend fault Exec answers with — the arm no
 	// ExecResult can express: the sandbox gone, the daemon unreachable, the
 	// context cancelled. execErrOn narrows it to commands containing that
@@ -108,6 +112,7 @@ type fakeSandbox struct {
 func (f *fakeSandbox) ID() string { return "fake" }
 func (f *fakeSandbox) Exec(_ context.Context, req sandbox.ExecRequest) (sandbox.ExecResult, error) {
 	f.cmds = append(f.cmds, req.Command)
+	f.execTimeouts = append(f.execTimeouts, req.Timeout)
 	if f.execErr != nil && (f.execErrOn == "" || strings.Contains(req.Command, f.execErrOn)) {
 		return sandbox.ExecResult{}, f.execErr
 	}
