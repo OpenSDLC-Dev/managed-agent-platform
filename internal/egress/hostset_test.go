@@ -120,3 +120,38 @@ func TestValidateHostEntry(t *testing.T) {
 		}
 	}
 }
+
+// Case folding a hostname is an ASCII operation; anything else is a different
+// name. Unicode maps U+0130 onto plain "i", so a Unicode fold would collapse
+// these onto their ASCII twins — and Go's HTTP stack would then dial the IDNA
+// form, a name anyone may register. Every entry on the matching side is ASCII by
+// ValidateHostEntry's grammar, so the alias can only ever be the request's, and
+// refusing to match it is the whole job (#606).
+func TestAnIDNAliasIsNotItsASCIITwin(t *testing.T) {
+	set := egress.NewHostSet([]string{"github.com", "pypi.org", "api.example.com"})
+	for _, alias := range []string{
+		"gİthub.com", // U+0130 -> "i" under a Unicode fold
+		"pypİ.org",
+		"apİ.example.com",
+	} {
+		if egress.NormalizeHost(alias) == egress.NormalizeHost("github.com") ||
+			set.Match(alias) {
+			t.Errorf("%q matched an ASCII entry: NormalizeHost gave %q", alias, egress.NormalizeHost(alias))
+		}
+	}
+}
+
+// ...while the ASCII folding the grammar does need keeps working, trailing dot
+// and all.
+func TestASCIIFoldingStillNormalizes(t *testing.T) {
+	for _, tc := range []struct{ in, want string }{
+		{"API.Example.Com", "api.example.com"},
+		{"example.com.", "example.com"},
+		{"  Example.COM.  ", "example.com"},
+		{"GITHUB.COM", "github.com"},
+	} {
+		if got := egress.NormalizeHost(tc.in); got != tc.want {
+			t.Errorf("NormalizeHost(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+}

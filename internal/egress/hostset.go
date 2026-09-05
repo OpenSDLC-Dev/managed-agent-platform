@@ -112,13 +112,47 @@ func (s *HostSet) CoversEntry(entry string) bool {
 	return s.Match(entry)
 }
 
-// NormalizeHost lowercases and strips a single trailing FQDN dot so
+// NormalizeHost folds a host's case and strips a single trailing FQDN dot so
 // "Example.com." and "example.com" compare equal. Exported because the gate's
 // MCP endpoint set has to answer a host exactly the way this package's HostSet
 // does (internal/gate, policy.go) while staying an exact-match map.
+//
+// It folds **ASCII only**, the way DNS does, and that is the security-relevant
+// half. strings.ToLower folds by Unicode, and Unicode maps several non-ASCII
+// letters onto ASCII ones — it lowercases U+0130 (LATIN CAPITAL LETTER I WITH
+// DOT ABOVE) to plain "i", so "gİthub.com" and "github.com" would share one key.
+// They are not one host: Go's HTTP stack resolves the first through IDNA to
+// "xn--github-qyd.com", a name anyone may register. Folding by Unicode therefore
+// let a request to the IDN pass an admission check written for the ASCII name,
+// and — because Engine.Substitute selects a credential through this same
+// matcher — collect that name's secret on the way out.
+//
+// Nearly every entry on the matching side is ASCII by construction:
+// ValidateHostEntry accepts only letters, digits and "-" per label, and it
+// guards a credential's allowed_hosts, the MCP endpoints the control plane
+// forwards, WEBTOOL_ALLOWED_DOMAINS and this platform's own
+// PackageRegistryHosts. An environment's networking.allowed_hosts is the
+// exception — parseNetworking stores that list as arbitrary strings — so an
+// operator can write a U-label there, and a differently-cased spelling of it
+// stops matching. That is a real narrowing, not none: it errs toward a refusal,
+// which is the direction this gate must err in, but the honest claim is
+// "narrows only into refusal", never "narrows nothing" (#609).
+//
+// internal/vaultresolve's lowerHost folds this way, for this reason.
+// internal/mcp's sameHost does not — it still compares with strings.EqualFold —
+// which is a sibling inconsistency rather than a second instance of this bug,
+// since its clients refuse redirects; #609 carries it.
 func NormalizeHost(h string) string {
-	h = strings.ToLower(strings.TrimSpace(h))
-	return strings.TrimSuffix(h, ".")
+	h = strings.TrimSuffix(strings.TrimSpace(h), ".")
+	var b strings.Builder
+	for i := range len(h) {
+		c := h[i]
+		if c >= 'A' && c <= 'Z' {
+			c += 'a' - 'A'
+		}
+		b.WriteByte(c)
+	}
+	return b.String()
 }
 
 // hasEmptyLabel reports whether host contains an empty DNS label — a leading dot,

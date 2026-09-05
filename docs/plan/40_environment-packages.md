@@ -8,6 +8,10 @@ issue: "#353"
 > gate's package-registry allow-set — landed for Python in #591 (#597, which merged
 > to main just after this branch was cut) — grows to the other five ecosystems in
 > #594. The progress summary is in docs/HISTORY.md.
+>
+> **Superseded since archival:** #594 sized that allow-set at **thirty hosts**
+> across nine ecosystems, plus source forges and container registries. Every
+> mention below of "the other five ecosystems" is the state at archival, not now.
 
 # Environment `config.packages` installed into the sandbox (plan 40)
 
