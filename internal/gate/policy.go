@@ -90,28 +90,107 @@ func newPolicy(net domain.Networking, mcpEndpoints []string) *policy {
 	}
 }
 
-// admit reports whether a request to host:port may go out at all, and whether a
-// widening flag is the only reason it may — which is what puts the dial under
-// the address floor.
+// admit reports which of the policy's sets let a request to host:port out, or
+// admitNone if none did. The class is the answer rather than a bare yes because
+// what happens below the handler depends on which set it was — the address floor
+// and, for one of them, the rooted lookup.
 //
-// The operator's own list is consulted first, so a registry or endpoint an
-// operator also listed is dialled as the operator's host, unfloored: naming it
-// in allowed_hosts is the vouching the floor stands in for.
-func (p *policy) admit(host, port string) (ok, widenedOnly bool) {
+// A host can sit in more than one set, so the order is a precedence rule and
+// both steps of it are load-bearing. The operator's own list is consulted
+// first, so a registry or endpoint an operator also listed is dialled as the
+// operator's host, unfloored: putting it in allowed_hosts is the vouching the
+// floor stands in for. A `*.` entry counts as that vouching too — an operator
+// who opens a family has opened its members, so `*.org` carries `pypi.org` out
+// of the registry class and into the operator's own, floor and rooting alike.
+// The registry set is then consulted before the MCP set, so a curated host an
+// agent *also* declares an MCP server at keeps the rooted lookup. The two
+// classes agree on the floor and differ only there, so reading a host as the
+// registry's can only harden its dial — while the other order let an agent
+// author switch #596's fix off on a grant that is the operator's, by declaring
+// an endpoint at a host the operator's own flag had opened.
+func (p *policy) admit(host, port string) admission {
 	if p.admitAll {
-		return true, false
+		return admitUnrestricted
 	}
 	if p.allowed.Match(host) {
-		return true, false
-	}
-	if _, declared := p.mcp[endpointKey(host, port)]; declared {
-		return true, true
+		return admitOperator
 	}
 	if p.packages.Match(host) {
-		return true, true
+		return admitRegistry
 	}
-	return false, false
+	if _, declared := p.mcp[endpointKey(host, port)]; declared {
+		return admitMCP
+	}
+	return admitNone
 }
+
+// admission is which of the policy's sets let a request out. It is one value
+// rather than a bool because the gate asks two different questions of one
+// lookup, and they do not have the same answer.
+type admission uint8
+
+const (
+	admitNone         admission = iota // refused
+	admitUnrestricted                  // every host, under `unrestricted`
+	admitOperator                      // the operator's own allowed_hosts
+	admitMCP                           // an endpoint the session's agent declared
+	admitRegistry                      // a package registry this platform curates
+)
+
+// floored reports whether the dial is held to the platform's address floor.
+// Both widening flags admit a name no operator vouched for, so both are.
+//
+// It is written as the two exemptions rather than as the members so that the
+// floor is what a class gets unless someone writes down why it should not. Two
+// classes of caller depend on that direction: an admitting set added later is
+// floored until its author says otherwise, and so is the zero value — a
+// context no handler marked, which is to say a dial that reached the dialler
+// without passing admit at all, and therefore the last one to trust with an
+// unfloored socket.
+func (a admission) floored() bool { return a != admitUnrestricted && a != admitOperator }
+
+// rooted reports whether the gate resolves the name absolutely — appending the
+// trailing dot that makes a resolver skip its `search` list (#596).
+//
+// Only the registry class. The distinction is not fussiness: it is where the
+// vulnerability actually lives. `allow_package_managers` admits a *fixed list
+// this platform authors*, so a search-domain collision — `pypi.org` answering
+// as `pypi.org.svc.cluster.local` on an RFC 1918 address the floor admits by
+// design — is the one way that flag can be turned into reach the list never
+// granted. Rooting closes it outright, and cannot cost anything: every entry is
+// a public multi-label FQDN.
+//
+// The other two classes are left resolving as they always did. For
+// `allow_mcp_servers` that is a narrowing rather than a clean answer, and it is
+// #601's to settle. The host it admits is one an agent author *names*, so a
+// search answer wins that author nothing they could not have by naming the
+// internal host outright — but a *credential* is a different matter, and that
+// is the part the narrowing leaves open. Two paths carry one, by two different
+// rules, and both match on a **name** while the socket goes to an address: the
+// gate substitutes on plain HTTP when the request host matches a credential's
+// own allowed_hosts (internal/egress; a CONNECT tunnel is opaque, so HTTPS
+// keeps its placeholder), and the executor dials the declared URL itself under
+// a bearer matched by the credential's mcp_server_url
+// (internal/vaultresolve). Either way the secret is chosen for the declared
+// host and then delivered wherever the search list sends the dial — and
+// declaring the internal host outright would not have obtained it, because
+// neither matching rule would have matched. What it can also cross is an
+// operator who reads a declaration's public-looking spelling as where the
+// session will connect.
+//
+// The reason to leave it here rather than root it anyway is that rooting breaks
+// a configuration this platform permits — not the single-label declaration, which
+// rootedName leaves alone whatever the class, but the *relative* multi-label
+// name only a resolver's search list completes, such as the Kubernetes
+// `<service>.<namespace>` spelling `nexus.infra:8080` that
+// egress.ValidateHostEntry accepts like any other entry. Telling that apart
+// from a public name is what `ndots` exists to guess at, so it is a policy
+// decision and not a predicate.
+//
+// And `allowed_hosts` is the operator's own list resolving through the
+// operator's own resolver: second-guessing it narrows reach, buys no floor, and
+// would be a plan 12 policy decision rather than this fix.
+func (a admission) rooted() bool { return a == admitRegistry }
 
 // endpointKey is how one host and port are spelled in the MCP set, on the way in
 // and on the way out, so a declaration and the request that uses it need not be
