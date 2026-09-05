@@ -139,11 +139,13 @@ func (s *HostSet) CoversEntry(entry string) bool {
 // "narrows only into refusal", never "narrows nothing" (#609).
 //
 // internal/vaultresolve's lowerHost and internal/mcp's sameHost fold this way,
-// for this reason; sameHost was the last of the three to, in #609's first half.
-// They differ only past a "%": those two leave a scoped address's zone
-// identifier exactly as written, because it selects a local interface and is
-// case-sensitive, while this one folds its whole input. Nothing here selects an
-// interface — a host reaching this matcher is a name to be resolved.
+// for this reason; sameHost joined them in #609's first half. Only the folding
+// is shared — each also normalizes what its own callers need, and this one is
+// alone in trimming space and a trailing dot. The folds differ past a "%":
+// those two leave a scoped address's zone identifier exactly as written,
+// because it selects a local interface and is case-sensitive, while this one
+// folds its whole input. Nothing here selects an interface — a host reaching
+// this matcher is a name to be resolved.
 func NormalizeHost(h string) string {
 	h = strings.TrimSuffix(strings.TrimSpace(h), ".")
 	var b strings.Builder
