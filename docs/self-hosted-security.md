@@ -256,8 +256,8 @@ One platform feature is incompatible with a non-root uid, and says so rather tha
 failing six times over: a cloud environment's `config.packages` cannot be
 installed, because every manager writes under `/usr` or `/var`. The executor
 probes the sandbox before the first manager runs and, finding it non-root,
-records one `session.error` with reason `sandbox_not_root` and runs no manager at
-all. The session itself runs on, without the packages.
+records a `session.error` with reason `sandbox_not_root` and runs no manager at
+all (an invalid entry, if the config also has one, adds its own `invalid` error). The session itself runs on, without the packages.
 
 **The platform runs nothing in your container as anyone but that user** — no
 privileged exec, anywhere, and one place had to be designed around to keep it
