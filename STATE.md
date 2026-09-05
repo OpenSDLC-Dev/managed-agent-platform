@@ -5,13 +5,13 @@ What is being worked on right now, and how far along it is — nothing else. **S
 ## Active work
 
 **#78 — confirming documented wire assumptions against a real managed-agents
-endpoint.** Two recording sessions, 785 request/response pairs for about US$1.02, in
+endpoint.** Four recording days, 1,248 request/response pairs for about US$1.12, in
 a private archive: bytes observed once, at cost. 2026-09-02 covered the Work API,
 turn semantics, multiagent threads, memory stores, files, skills, vaults, deployments
 and permission gating; 2026-09-03 ran two waves, one free over console-cookie
 questions and one of 281 pairs against the tiers needing model spend, an environment
-key, or a resource we lacked; a third day, 2026-09-05, whose seventh batch spent
-US$0.09 probing 80 hosts to settle #594. #78 stays open past this work — 117
+key, or a resource we lacked; 2026-09-04 and 2026-09-05 followed up, the latter
+settling #594 with 80 host probes for US$0.09. #78 stays open past this work — 117
 registry entries still name it as their live tracker, and the debt is now analysis
 rather than recording: 72 comparison rows have never been read. Plan 38 (#263) archived
 2026-09-04, plan 39 (#566, Skills on the GA wire shape) with its delivering PR, and

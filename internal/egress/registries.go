@@ -16,12 +16,23 @@ import "slices"
 // there is no suffix rule to model and a HostSet of plain names is the right
 // shape.
 //
-// **Read the list before assuming what the flag means.** Two of its groups are
-// not package registries at all: it opens source forges — `github.com` included
-// — and container registries. Neither is suggested by the flag's name or by the
+// **Read the list before assuming what the flag means.** Much of it is not
+// package registries. Two whole groups are not: it opens source forges —
+// `github.com` included — and container registries. Two further entries are
+// binary-distribution hosts sitting inside groups named for a registry:
+// `nodejs.org` is the Node runtime's own download host, and
+// `download.docker.com` is Docker CE's apt and yum repository rather than an
+// image registry. None of that is suggested by the flag's name or by the
 // reference's own wording ("public package registries (such as PyPI and npm)"),
 // and an operator reasoning about a `limited` sandbox's reach needs to know it.
 // docs/self-hosted-security.md says so where an operator will read it.
+//
+// What the two admitted container registries do *not* buy is a working image
+// pull. `ghcr.io` and `registry-1.docker.io` answer manifests, but the blob
+// hosts they redirect layer downloads to are outside the set — the recording
+// refused `pkg-containers.githubusercontent.com`, which is where GHCR sends
+// them. No probe ran an actual `docker pull`, so how far one gets is unmeasured;
+// what is measured is that the layer host is refused.
 //
 // The list also does not track `config.packages`' six managers: Composer and
 // Maven are open though neither is one of them, while apt reaches Ubuntu's
@@ -32,9 +43,10 @@ import "slices"
 // one declaring nothing did.
 //
 // **Thirty is a lower bound, not the reference's list.** Eighty hosts were
-// probed; these thirty answered. NuGet, Dart, Hex, CocoaPods, conda, Alpine,
-// CRAN, CPAN, jsDelivr, unpkg and SourceForge were probed and refused, so they
-// are absent by evidence rather than by omission — but a host nobody has probed
+// probed; these thirty answered. NuGet, Dart, Hex, CocoaPods, Deno, conda,
+// Alpine, CRAN, CPAN, Clojars, jsDelivr, unpkg and SourceForge were probed and
+// refused, so they are absent by evidence rather than by omission — but a host
+// nobody has probed
 // is simply unknown, and stays out. Guessing one would widen a `limited`
 // sandbox past the reference on the strength of a name that merely looked
 // obvious, which is the one direction this gate must not err in: a host this

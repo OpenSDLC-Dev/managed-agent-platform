@@ -1,6 +1,7 @@
 package egress_test
 
 import (
+	"net"
 	"slices"
 	"strings"
 	"testing"
@@ -42,6 +43,26 @@ func TestNoPackageRegistryEntryIsAWildcard(t *testing.T) {
 	for _, host := range egress.PackageRegistryHosts() {
 		if strings.ContainsRune(host, '*') {
 			t.Errorf("%q is a suffix rule, but the set is matched by exact host (#594)", host)
+		}
+	}
+}
+
+// Only the registry class is resolved absolutely at the dial, and policy.go
+// justifies doing it class-wide with "every entry is a public multi-label
+// FQDN": rootedName hands back a single-label name or an IP literal untouched,
+// so such an entry would be silently exempt from the rooting while looking like
+// it had it. ValidateHostEntry accepts an IPv4 literal as a host entry, and an
+// internal mirror's short name is exactly the kind of thing a later commit adds
+// — so the invariant the rooting rests on is asserted here rather than assumed
+// (#596).
+func TestEveryPackageRegistryEntryIsAMultiLabelName(t *testing.T) {
+	for _, host := range egress.PackageRegistryHosts() {
+		if net.ParseIP(host) != nil {
+			t.Errorf("%q is an IP literal, which rootedName leaves unrooted (#596)", host)
+			continue
+		}
+		if !strings.Contains(host, ".") {
+			t.Errorf("%q is a single label, which rootedName leaves unrooted (#596)", host)
 		}
 	}
 }

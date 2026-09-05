@@ -581,12 +581,34 @@ package registries. It opens **source forges** — `github.com`,
 **container registries** — `ghcr.io`, `registry-1.docker.io`,
 `auth.docker.io`, `download.docker.com`. An agent under `limited` with this
 flag set can therefore clone any public repository hosted on those three
-forges, and pull any public image from Docker Hub or GHCR — reach neither the
-flag's name nor the reference's own wording ("public package registries (such
-as PyPI and npm)") suggests. Other forges and registries are not open:
-`sourceforge.net` was probed and refused, and `quay.io` is simply absent. If
-that is more reach than you want, leave the flag off and put the registry hosts
-your builds actually need in `allowed_hosts`, where they are yours to choose.
+forges — reach neither the flag's name nor the reference's own wording ("public
+package registries (such as PyPI and npm)") suggests. Other forges are not
+open: `sourceforge.net` was probed and refused.
+
+The container registries are the narrower half, and worth reading precisely.
+`ghcr.io` and `registry-1.docker.io` answer authentication and manifests, but
+the hosts they redirect *layer* downloads to are outside the set —
+`pkg-containers.githubusercontent.com`, where GHCR sends them, was probed and
+refused, and Docker Hub's blob hosts are not in the list either. No probe ran an
+actual `docker pull`, so treat "how far does a pull get" as unmeasured; what is
+measured is that the layer host is refused. `quay.io` is absent entirely.
+
+**A second port-shaped surprise.** The set matches by **host, on any port** —
+that is this platform's reading of the reference, which widens by "registries"
+where it widens the MCP set by "endpoints", and a CONNECT tunnel is admitted on
+whatever port its authority names. So the flag does not merely permit `git
+clone` over HTTPS: a sandbox can open a raw TCP tunnel to `github.com:22`, or to
+any other port on any of the thirty. Size the outbound channel by that, not by
+what a package manager would use.
+
+If that is more reach than you want, the way out is **not** simply clearing the
+flag: an environment whose `config.packages` has any non-empty list is refused
+at create *and update* under `limited` networking without it, with `packages
+require networking.allow_package_managers to be true under limited networking`
+— and because the check runs on the merged config, even a patch touching only
+`allowed_hosts` is refused. Empty `config.packages` first, then clear the flag,
+then list the registry hosts your builds actually need in `allowed_hosts`, where
+they are yours to choose.
 
 The rest is Python, npm, Rust, Ruby, Go, PHP, Java and apt, and two details
 there will bite a build. Matching is by **exact host**: `test.pypi.org` and the
@@ -595,8 +617,20 @@ and there is no suffix rule anywhere in the list. And apt is **Ubuntu's alone**
 — `archive.ubuntu.com`, `security.ubuntu.com`, `ppa.launchpad.net` — so
 `apt-get` on a Debian base image reaches no mirror at all, and neither
 `ports.ubuntu.com` (non-amd64) nor `esm.ubuntu.com` is open.
-`internal/egress/registries.go` is the list, with the refusals recorded beside
-each group.
+
+**That collides with this platform's own default**, and it is the first thing
+most operators will hit. The default sandbox image is `debian:stable-slim` —
+`EXECUTOR_IMAGE`, `executor.sandboxImage` in the chart, and the compose stack
+all ship it — whose `sources.list` points at `deb.debian.org`, which the set
+refuses. So a stock `limited` environment declaring `packages.apt` fails every
+install, and it fails in a way the API pushes you toward: declaring `packages`
+under `limited` *requires* `allow_package_managers`, so the flag will be on and
+still buy nothing for apt. Two remedies, both yours: run an Ubuntu base image
+instead, or add the Debian mirrors to `allowed_hosts`, which needs no flag.
+
+`internal/egress/registries.go` is the list. Several groups carry the refusals
+that bound them in place; the rest are in that file's header comment, which is
+where the exact-host evidence lives.
 
 Thirty is a **lower bound**, not parity: eighty hosts were probed and these
 thirty answered, so a host nobody has probed stays out. That asymmetry is

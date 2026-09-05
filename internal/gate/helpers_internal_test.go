@@ -234,6 +234,21 @@ func TestThePackageRegistrySetOpensOnlyUnderItsFlag(t *testing.T) {
 	}
 }
 
+// The golden list in internal/egress compares strings, and the table above spot-
+// checks four of the thirty. Neither would notice an entry HostSet can never
+// match — an empty label, a stray leading dot — added to the list and to the
+// golden literal alike: it would be silently dead, admitting nothing, while both
+// tests stayed green and the refusal test never looked at it. So every entry is
+// driven through the policy that actually consults it.
+func TestEveryPackageRegistryEntryReallyAdmits(t *testing.T) {
+	p := newPolicy(domain.Networking{Type: domain.NetLimited, AllowPackageManagers: true}, nil)
+	for _, host := range egress.PackageRegistryHosts() {
+		if got := p.admit(host, "443"); got != admitRegistry {
+			t.Errorf("admit(%q) = %v, want admitRegistry — the entry is in the list but matches nothing", host, got)
+		}
+	}
+}
+
 // Every host below was probed in the recording that sized the set and observed
 // gate-refused — most of them one label away from an admitted sibling. They are
 // asserted rather than left to the list's own reading because each is exactly
