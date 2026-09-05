@@ -49,7 +49,7 @@ new directory and in-repo citations re-pointed in the moving PR (plan
 
 ---
 
-## Environment packages installed into the sandbox (plan 40, #353, #576) — archived 2026-09-05, delivered in one PR (#PR)
+## Environment packages installed into the sandbox (plan 40, #353, #576) — archived 2026-09-05, delivered in one PR (#600)
 
 `config.packages` had been accepted, validated, stored and echoed since the environment
 routes shipped, and read by nothing: a client following the reference docs got a 200
