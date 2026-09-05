@@ -327,9 +327,11 @@ func TestLivePackageInstallRealApt(t *testing.T) {
 	}
 }
 
-// defaultHardening is what a deployment that sets no SANDBOX_* knob applies
-// (sandbox.HardeningFromEnv's answer to an empty environment), which is the
-// posture the package rows must prove the install under.
+// defaultHardening carries the default capability posture — sandbox.DefaultCapDrop,
+// the drop HardeningFromEnv applies when SANDBOX_CAP_DROP is unset — which is what
+// the package rows must prove the install under (apt needs the SETUID/SETGID this
+// drops). It sets only the cap posture, not HardeningFromEnv's pid/CPU defaults,
+// which do not bear on whether an install succeeds.
 func defaultHardening() sandbox.Hardening {
 	return sandbox.Hardening{CapDrop: slices.Clone(sandbox.DefaultCapDrop)}
 }
