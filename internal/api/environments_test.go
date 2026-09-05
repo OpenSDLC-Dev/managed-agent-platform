@@ -701,6 +701,23 @@ func TestEnvironmentPackageEntriesValidated(t *testing.T) {
 	}
 }
 
+// TestEnvironmentPackagesManagerTooLarge covers the size cap: the executor hands
+// one manager's whole list to a single bash -c argument, which Linux caps near
+// 128 KiB, so an over-large list is refused at create rather than faulting the
+// install at exec startup and reclaim-looping the item.
+func TestEnvironmentPackagesManagerTooLarge(t *testing.T) {
+	s := newTestServer(t)
+	big := strings.Repeat("a", 20000) // one valid entry past the 16 KiB per-manager cap
+	config := map[string]any{"type": "cloud", "packages": map[string]any{"pip": []any{big}}}
+
+	status, body := s.do(http.MethodPost, "/v1/environments",
+		map[string]any{"name": "big-pkgs", "config": config})
+	wantErr(t, status, body, http.StatusBadRequest, "invalid_request_error")
+	if msg := errMessage(body); !strings.Contains(msg, "packages.pip is too large") {
+		t.Errorf("message = %q, want it to name packages.pip as too large", msg)
+	}
+}
+
 func TestEnvironmentCreateValidation(t *testing.T) {
 	s := newTestServer(t)
 	cases := []struct {

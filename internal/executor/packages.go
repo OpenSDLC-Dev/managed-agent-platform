@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"log/slog"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -284,11 +285,18 @@ func (e *Executor) installPackages(ctx context.Context, sb sandbox.Sandbox, sid 
 
 	ctx, span := otel.GetTracerProvider().Tracer(tracerName).Start(ctx, "packages_install")
 	defer span.End()
-	start := time.Now()
-	defer func() { recordPackagesInstallDuration(ctx, time.Since(start)) }()
 
 	recs := readPackageSentinel(ctx, sb)
 	var ran, skipped, failed int
+	start := time.Now()
+	defer func() {
+		// Only a pass that actually installed belongs in the duration histogram;
+		// a settled session's per-turn skip pass would otherwise dominate it with
+		// near-zero samples and hide the real install times (review).
+		if ran > 0 {
+			recordPackagesInstallDuration(ctx, time.Since(start))
+		}
+	}()
 	defer func() {
 		span.SetAttributes(
 			attribute.Int("packages.managers", ran),
@@ -334,7 +342,7 @@ func (e *Executor) installPackages(ctx context.Context, sb sandbox.Sandbox, sid 
 		if !probed {
 			probed = true
 			progress()
-			reason, err := probeSandboxForPackages(ctx, sb)
+			reason, err := probeSandboxForPackages(ctx, sb, e.cfg.PackageInstallTimeout)
 			if err != nil {
 				return err
 			}
@@ -407,20 +415,33 @@ func packageFailureReason(res sandbox.ExecResult) string {
 // http(s) URL to scheme://host, so a credential in the userinfo OR the query
 // (`?token=…`, a pip/npm convention) is dropped — not merely the userinfo up to
 // the first '@', which a password containing '@' would defeat and a query
-// credential would slip past entirely.
+// credential would slip past entirely. anySchemeUserinfoRe then drops the
+// userinfo of a non-http URL too (`git+ssh://token@…`, a legitimate pip/npm VCS
+// entry), which redactURL — anchored on `http(s)://` — does not reach. A query
+// credential in a non-http URL, and one whose `http(s)://` scheme the in-shell
+// `tail -c` cut off, are the residuals #599's out-of-band credential injection
+// closes at the source.
 func packageMessage(out string) string {
 	msg := urlInText.ReplaceAllStringFunc(out, redactURL)
+	msg = anySchemeUserinfoRe.ReplaceAllString(msg, "$1***@")
 	msg = toolset.SanitizeText(msg)
 	return toolset.TruncateRunes(msg, maxPackageMessage)
 }
+
+// anySchemeUserinfoRe matches the userinfo of a URL of any scheme, for the
+// non-http schemes redactURL leaves alone.
+var anySchemeUserinfoRe = regexp.MustCompile(`([a-zA-Z][a-zA-Z0-9+.\-]*://)[^\s/@]+@`)
 
 // probeSandboxForPackages answers decision 7's question, returning the reason the pass
 // must be refused or "" to proceed. An answer the probe cannot have produced —
 // a shell so broken it printed something else — proceeds with a log line
 // rather than inventing a reason for the wire: the install's own failure is
 // then the honest diagnosis.
-func probeSandboxForPackages(ctx context.Context, sb sandbox.Sandbox) (string, error) {
-	res, err := sb.Exec(ctx, sandbox.ExecRequest{Command: packagesProbeCommand})
+func probeSandboxForPackages(ctx context.Context, sb sandbox.Sandbox, timeout time.Duration) (string, error) {
+	// Bounded by the same budget as an install: the probe is trivial, but a
+	// container whose shell wedges answering it must not hang provisioning on the
+	// outer lease alone (review).
+	res, err := sb.Exec(ctx, sandbox.ExecRequest{Command: packagesProbeCommand, Timeout: timeout})
 	if err != nil {
 		return "", err
 	}

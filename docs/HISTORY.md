@@ -134,6 +134,25 @@ or cancelled holder whose in-sandbox command outlives the lock — a property ev
 materialization pass shares, bounded here by `dpkg --configure -a` and the three-attempt
 cap.
 
+A second review pass over the hardened commit confirmed those fixes and found more. Four
+were fixed: the message redaction reached only `http(s)` URLs, so a non-http VCS entry's
+userinfo (`git+ssh://token@…`) survived — now `anySchemeUserinfoRe` drops any scheme's
+userinfo beside `redactURL`; a valid but very large list would overflow Linux's ~128 KiB
+single-`execve`-argument ceiling and fault the install at exec startup rather than fail it,
+reclaim-looping the item — the API now caps a manager's list at 16 KiB; the sandbox probe
+`Exec` carried no timeout, so a wedged shell could hang provisioning on the outer lease
+alone — it now shares the install budget; and a settled session's per-turn skip pass was
+recording the install-duration histogram, polluting it with near-zero samples — the
+histogram is now recorded only when an install ran. The deeper credential-containment
+residuals share one root and one home, #599: the install command carries any package-URL
+credential in the process argv (readable from the sandbox `/proc`, and on Kubernetes
+persisted in the `pods/exec` audit log), and `packages_digest` must hash the whole entry —
+credential included, so a fixed credential re-triggers an install — which makes it an
+unsalted oracle for a weak credential to an environment-key holder. #599 removes inline
+credentials at the source (out-of-band injection), which closes both and lets the digest be
+computed over a credential-free form; the argv exposure is a property the `Exec` seam shares
+with every tool call, and is documented in docs/self-hosted-security.md meanwhile.
+
 Deferred: the reference's cross-session install cache — a per-environment image keyed on
 the packages hash, which Kubernetes has no build primitive for and which would join the
 sandbox adoption comparison — is #595, so packages install per sandbox here. Left open

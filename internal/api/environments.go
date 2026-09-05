@@ -270,14 +270,30 @@ func parsePackages(raw json.RawMessage, base packagesJSON) (packagesJSON, error)
 		// rather than blamed for its entries. domain.ValidPackageEntry is the
 		// predicate the executor applies again before building a command, so
 		// the two cannot drift.
+		total := 0
 		for _, entry := range list {
 			if !domain.ValidPackageEntry(entry) {
 				return base, errInvalid(`packages.%s entries must be non-empty and must not begin with "-"`, manager)
 			}
+			total += len(entry)
+		}
+		// The executor hands one manager's whole list to a single `bash -c`
+		// argument, and Linux caps one execve argument near 128 KiB. A list past
+		// that would fault the install at exec startup — and, faulting rather than
+		// failing, reclaim-loop the item — so it is refused here, well under the
+		// limit (quoting can quadruple a pathological entry). A real list is a few
+		// kilobytes.
+		if total > maxPackagesManagerBytes {
+			return base, errInvalid("packages.%s is too large: %d bytes exceeds the %d-byte limit", manager, total, maxPackagesManagerBytes)
 		}
 	}
 	return base, nil
 }
+
+// maxPackagesManagerBytes bounds the summed length of one manager's entries. See
+// parsePackages for why it exists and why it sits well under Linux's ~128 KiB
+// single-argument ceiling.
+const maxPackagesManagerBytes = 16 << 10
 
 // parseScope enforces v1's single-tenant posture: only the default
 // "organization" scope is accepted.

@@ -479,6 +479,7 @@ func TestPackageMessageRedactsEveryCredentialForm(t *testing.T) {
 		{"userinfo", "fetching https://deploy:s3cr3t@pkgs.example.com/x failed", "s3cr3t", "https://pkgs.example.com"},
 		{"password with @", "auth https://user:p@sSWORD@host.example/x 401", "sSWORD", "https://host.example"},
 		{"query token", "GET https://host.example/simple?token=SECRETTOK 403", "SECRETTOK", "https://host.example"},
+		{"non-http scheme userinfo", "cloning git+ssh://deploy:KEY123@repo.example/x.git failed", "KEY123", "git+ssh://***@repo.example/x.git"},
 		{"nul", "boom\x00tail", "\x00", "boomtail"},
 		{"benign url kept as host", "could not reach https://pypi.org/simple/", "", "https://pypi.org"},
 	} {

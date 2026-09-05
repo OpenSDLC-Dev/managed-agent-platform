@@ -180,6 +180,18 @@ a manager the image does not carry is a `session.error` with reason
 `manager_missing` rather than an install. The `debian:stable-slim` default
 carries `apt-get` and none of the other five.
 
+One caveat if a package entry embeds a credential — a private registry URL such
+as `pip: ["git+https://user:token@host/repo"]`. The install runs it in the
+sandbox, so the credential is in that process's argv: a same-sandbox agent can
+read it from `/proc` while the install runs, and on **Kubernetes** the argv is
+part of the exec request the apiserver audit log records for `pods/exec`. The
+platform keeps the credential out of the durable session state — the install's
+`session.error` message has its URLs redacted, and the `/tmp` sentinel stores a
+digest, not the entries — but it cannot keep it out of the argv while a package
+manager needs it there. Prefer high-entropy deploy tokens over reusable
+passwords, and be aware of the exec-audit exposure; injecting credentials out of
+band (netrc / `.npmrc`) so they never reach argv is tracked in #599.
+
 Two things do degrade silently rather than fail, both about file **modes** and
 neither about the correctness of a file's contents. A write preserves the target's
 permission bits by reading them with `stat -c %a` (so a script stays executable
