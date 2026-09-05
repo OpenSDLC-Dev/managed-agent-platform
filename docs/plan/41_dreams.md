@@ -499,7 +499,7 @@ matches**, and only that one — the arms are ordered so exactly one applies:
    else, `rescheduling` included, is archived (`archiveSession`'s body, `sessions.go:1276`,
    behind `requireNotRunning`, `:1261`, which refuses `running` alone — the registry's
    positive claim that an auto-retrying session can be archived is load-bearing and
-   pinned, `sessions_test.go:854-858`; the interrupt arm would not have settled it,
+   pinned, `sessions_test.go:854-871`; the interrupt arm would not have settled it,
    `internal/api/events.go:357-365`, and need not); then the file rows are deleted by
    `dream_id` (§4.5), and `closed_at` is stamped. A session deleted at the database level
    (`session_id` null, `ON DELETE SET NULL`) skips the archive and closes the same way,
@@ -1021,8 +1021,9 @@ the renderer in `internal/transcript`; no test-support package is added, so the 
   four resolvers (session create, deployment agent and environment, roster member) and by
   every id-addressed agent and environment route, versions included; every public
   mutation of the owned session refused (events, update, delete, archive, thread archive,
-  the three resource routes) and `DELETE /v1/files/{id}` on a transcript refused while
-  its reads and stream still answer, and admitted again once closed; the closing arm
+  the three resource routes) while its reads and stream still answer, and admitted again
+  once closed; `DELETE /v1/files/{id}` on a transcript refused while the dream is open,
+  and answering 404 after the close because the row is gone; the closing arm
   deleting the file rows and objects with the session gone at the database level; each
   arm of the decision table exactly once per tick, and none over an open
   ask; the usage mirror and its cache-creation sum; timeout in `pending` and in
@@ -1030,8 +1031,9 @@ the renderer in `internal/transcript`; no test-support package is added, so the 
   stage cap, a terminated and a `rescheduling` session, a session deleted at the database
   level — each `error.type` or its absence; a planted secret in a written version failing
   completion; cancel of a pending dream (closed at once), cancel of a running one (the
-  interrupt runs, the archive waits for idle) and of a `rescheduling` one (re-interrupted
-  when it turns running); and at every terminal the session archived, the file rows and
+  interrupt runs, the archive waits for idle) and of a `rescheduling` one (archived by
+  the closing arm while still `rescheduling`; re-interrupted first if it turned `running`
+  before the tick); and at every terminal the session archived, the file rows and
   their objects gone (`GET /v1/files/{id}` 404 *and* `blob.Get` not found) and `closed_at`
   stamped. **Two replicas**: two ticks on one dream, the loser skipped by `SKIP LOCKED`,
   asserted by row state after both commit.
