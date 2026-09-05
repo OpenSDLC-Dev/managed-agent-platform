@@ -991,57 +991,59 @@ func TestBearerOriginComparison(t *testing.T) {
 		{name: "zone against no zone", endpoint: "http://[fe80::1%25eth0]:8080/rpc", target: "http://[fe80::1]:8080/rpc"},
 		{name: "address folds, zone does not", endpoint: "http://[FE80::1%25eth0]:8080/rpc", target: "http://[fe80::1%25eth0]:8080/rpc", attach: true},
 
-		// Case folding a hostname is an ASCII operation, and the sigma orbit is
-		// why: Unicode folds σ and ς together while IDNA punycodes them to two
-		// different names, so folding the whole string calls two domains one
-		// origin and sends the bearer to the second. This transport sits above
-		// the IDNA encoding net/http does, so what it compares is the U-label,
-		// exactly as written here.
+		// Two spellings name one origin when IDNA says they do, and these rows
+		// are the two halves of that. The sigmas are the half that must stay
+		// apart: Unicode folds σ and ς together while Go's non-transitional
+		// lookup punycodes them to two registrable names, so any comparison
+		// that merges them sends the bearer to the second. This transport sits
+		// above the IDNA encoding net/http does, so what it compares is the
+		// U-label, exactly as written here.
 		{name: "the two sigmas are two domains", endpoint: "http://\u03c3.example:8080/rpc", target: "http://\u03c2.example:8080/rpc",
 			wrong: "IDNA lookup is non-transitional, so these punycode to xn--4xa.example and xn--3xa.example — two names, two owners"},
-		// The cost, pinned so nobody reverts the fold to buy it back, and sized
-		// as what it is: every orbit EqualFold merged that IDNA also collapses,
-		// of which UTS46's compatibility mappings for U+212A and U+017F are two
-		// shapes and an ordinary capital is the common one. Each of these pairs
-		// really is one domain after IDNA, and the credential is now withheld
-		// from a server it was resolved for. Accepted deliberately: no
-		// byte-level rule separates these from the sigmas, and a withheld
-		// bearer costs a 401 where a shared one costs the secret.
-		{name: "a capital in a non-ASCII label is the cost's ordinary shape", endpoint: "http://B\u00dcCHER.example:8080/rpc", target: "http://b\u00fccher.example:8080/rpc",
-			wrong: "IDNA maps both to xn--bcher-kva.example, so this withholds from the right server — and it is the whole cased non-ASCII alphabet, not two exotic characters"},
-		{name: "the Kelvin sign is the accepted cost", endpoint: "http://\u212a.example:8080/rpc", target: "http://k.example:8080/rpc",
-			wrong: "IDNA maps U+212A to k, so this withholds from the right server — accepted, because ASCII folding is what keeps the sigmas apart"},
-		{name: "the long s is the same accepted cost", endpoint: "http://\u017ftrasse.example:8080/rpc", target: "http://strasse.example:8080/rpc",
-			wrong: "IDNA maps U+017F to s, so this is strasse.example either way — a withhold, like the Kelvin row, not a prevented leak"},
+		// The other half, and the reason plan 43 stopped folding in ASCII: each
+		// of these pairs really is one domain, and an ASCII fold called them two
+		// and withheld the credential from the very server it was resolved for.
+		// A capital in a non-ASCII label is the everyday shape; UTS46's
+		// compatibility mappings for U+212A and U+017F are two more; a U-label
+		// against its own A-label is the same question asked in punycode.
+		{name: "a capital in a non-ASCII label names one host", endpoint: "http://B\u00dcCHER.example:8080/rpc", target: "http://b\u00fccher.example:8080/rpc", attach: true,
+			wrong: "IDNA maps both to xn--bcher-kva.example, so refusing this withholds a credential from its own server"},
+		{name: "the Kelvin sign is a k", endpoint: "http://\u212a.example:8080/rpc", target: "http://k.example:8080/rpc", attach: true,
+			wrong: "UTS46 maps U+212A onto k, so this is k.example either way and the bearer belongs on it"},
+		{name: "the long s is an s", endpoint: "http://\u017ftrasse.example:8080/rpc", target: "http://strasse.example:8080/rpc", attach: true,
+			wrong: "UTS46 maps U+017F onto s, so this is strasse.example either way"},
+		{name: "a U-label and its A-label are one host", endpoint: "http://b\u00fccher.example:8080/rpc", target: "http://xn--bcher-kva.example:8080/rpc", attach: true,
+			wrong: "the A-label is what the socket goes to, so the two spellings cannot be two origins"},
 		{name: "an IDN still folds on its ASCII half", endpoint: "http://b\u00fccher.EXAMPLE:8080/rpc", target: "http://b\u00fccher.example:8080/rpc", attach: true,
 			wrong: "the ASCII letters of a mixed name must still fold, or the credential is withheld from its own server"},
-		// Both operands of the fold, its inclusive range, and both directions of
-		// the length guard — each of which a single token can break while every
-		// row above still passes. The hosts spell "A-Z" because that is the
-		// range: the rows above happen to carry an "A" but no "Z", so only the
-		// upper bound was actually unpinned. Every row above also spells its
-		// capitals on the endpoint side, so folding one operand and not the
-		// other passed them all while withholding from any request whose own
-		// URL carries capitals; and every length-differing row above has the
-		// request host the longer one, so a guard weakened to "request longer"
-		// would become a prefix match and pass them too.
-		{name: "the fold's range is inclusive at both ends, endpoint side", endpoint: "http://A-Z.example:8080/rpc", target: "http://a-z.example:8080/rpc", attach: true,
-			wrong: "the endpoint operand must fold the whole A-Z range, or a credential is withheld from its own server over a letter at the range's edge"},
-		{name: "the fold's range is inclusive at both ends, request side", endpoint: "http://a-z.example:8080/rpc", target: "http://A-Z.example:8080/rpc", attach: true,
-			wrong: "the fold must apply to both operands over the whole range, or a request spelled in capitals is refused its own credential"},
+		// U+0130 is the pair that motivates internal/egress's CanonicalLookup and
+		// is *not* one of these: strings.ToLower maps it onto "i", IDNA does not
+		// (xn--i-9bb.example), and it must stay a different origin.
+		{name: "a dotted capital I is not an i", endpoint: "http://\u0130.example:8080/rpc", target: "http://i.example:8080/rpc",
+			wrong: "IDNA punycodes U+0130 to xn--i-9bb.example, a name of its own"},
+		// Both operands, and the ASCII fold's inclusive range, exercised through
+		// the delegation rather than assumed: egress.CanonicalHost still folds
+		// ASCII case for a name IDNA has nothing to say about, and these rows
+		// fail if it stops doing so on either side. The hosts spell "A-Z"
+		// because that is the range, and because every other case row here
+		// spells its capitals on the endpoint side alone.
+		{name: "the ASCII fold still applies, endpoint side", endpoint: "http://A-Z.example:8080/rpc", target: "http://a-z.example:8080/rpc", attach: true,
+			wrong: "an ASCII name must still fold, or a credential is withheld from its own server over a letter's case"},
+		{name: "the ASCII fold still applies, request side", endpoint: "http://a-z.example:8080/rpc", target: "http://A-Z.example:8080/rpc", attach: true,
+			wrong: "the fold must apply to both operands, or a request spelled in capitals is refused its own credential"},
 		{name: "a request host is not admitted by being a prefix of the endpoint", endpoint: "https://example.com.evil.test/rpc", target: "https://example.com/rpc",
-			wrong: "the length guard must reject both directions; a prefix match would put evil.test's credential on a request to example.com"},
+			wrong: "a prefix is not an origin; matching one would put evil.test's credential on a request to example.com"},
 
-		// The zoned branch folds its address half too, and that half is not
-		// always hex: a percent-escaped host reaches this code with an ordinary
-		// name before the "%". url.Parse turns "http://ex%CF%83%25z.test/" into
-		// the host "ex\u03c3%z.test", so the pre-"%" comparison sees "ex\u03c3"
-		// against "ex\u03c2" — the sigmas again. A host with a literal "%" is
-		// not a name the transport would resolve, so this row is what fails when
-		// only the unzoned call site is folded in ASCII, rather than a second
-		// leak witness in its own right.
-		{name: "the zoned branch folds its address in ASCII too", endpoint: "http://ex\u03c3%25z.test:8080/rpc", target: "http://ex\u03c2%25z.test:8080/rpc",
-			wrong: "both call sites must fold the same way; reverting this one alone leaves the sigmas merged"},
+		// The zoned branch canonicalizes its address half too, and that half is
+		// not always hex: a percent-escaped host reaches this code with an
+		// ordinary name before the "%". url.Parse turns "http://ex%CF%83%25z.test/"
+		// into the host "ex\u03c3%z.test", so the pre-"%" comparison sees
+		// "ex\u03c3" against "ex\u03c2" — the sigmas again. A host with a literal
+		// "%" is not a name the transport would resolve, so this row is what
+		// fails when only the unzoned call site is canonicalized, rather than a
+		// second leak witness in its own right.
+		{name: "the zoned branch canonicalizes its address too", endpoint: "http://ex\u03c3%25z.test:8080/rpc", target: "http://ex\u03c2%25z.test:8080/rpc",
+			wrong: "both call sites must compare the same way; reverting this one alone leaves the sigmas merged"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()

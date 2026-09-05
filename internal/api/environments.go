@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"slices"
 	"strings"
 	"time"
 
@@ -168,6 +169,16 @@ func checkPackagesNetworking(cfg cloudConfigJSON) error {
 // rejected — a typo'd allowed_hosts must not silently lock all egress open or
 // closed). When both the patch and prior are "limited", omitted fields keep
 // their prior values.
+//
+// Each allowed_hosts entry is held to the same grammar a credential's is, and a
+// Unicode entry is stored as its A-label (canonicalAllowedHost, over
+// egress.CanonicalEntry). This list was unvalidated until plan 43, which is why
+// the check runs on what a patch newly supplies rather than on the merged list,
+// and skips an entry the row already holds: refusing an update over what an
+// earlier one stored would take a stored environment's egress away for a field
+// nobody is changing, and would refuse the read-modify-write every client does.
+// The reference publishes no grammar for this field and documents no rejection
+// for it, so the 400 is ours and is registered in DIVERGENCES.
 func parseNetworking(raw, prior json.RawMessage) (json.RawMessage, error) {
 	var obj map[string]json.RawMessage
 	if err := json.Unmarshal(raw, &obj); err != nil || obj == nil {
@@ -203,6 +214,23 @@ func parseNetworking(raw, prior json.RawMessage) (json.RawMessage, error) {
 				}
 				if hosts == nil {
 					hosts = []string{}
+				}
+				// Only what this patch newly supplies. An entry the row
+				// already holds is carried through as it stands, because a
+				// client that GETs a config and POSTs it back — the ordinary
+				// read-modify-write — would otherwise be refused on a value
+				// this API handed it one call earlier. Rows written before this
+				// check are not migrated (plan 43 decision 4), and that promise
+				// is worth nothing if echoing the row back breaks it.
+				for i, h := range hosts {
+					if slices.Contains(prev.AllowedHosts, h) {
+						continue
+					}
+					canonical, err := canonicalAllowedHost(h)
+					if err != nil {
+						return nil, err
+					}
+					hosts[i] = canonical
 				}
 				out.AllowedHosts = hosts
 			case "allow_mcp_servers":

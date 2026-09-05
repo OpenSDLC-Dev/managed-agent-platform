@@ -40,6 +40,7 @@ import (
 	"time"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/dialguard"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/egress"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/telemetry"
 	sdk "github.com/modelcontextprotocol/go-sdk/mcp"
 )
@@ -1008,40 +1009,6 @@ func (t *limitedTransport) give(n int64) {
 	t.budget += n
 }
 
-// withBearer returns a shallow copy of client that sends the Authorization
-// header to endpoint's origin and to nothing else.
-//
-// Two separate things keep one server's credential away from another, and each
-// answers a leak the other does not.
-//
-// The **copy** is defence in depth on a client that may be shared — the
-// package-level DefaultClient is — where installing the transport in place would
-// put this token on every later connection made through it. Today it is a second
-// copy rather than the protecting one: Connect runs withResponseLimit first and
-// that already returns a copy, so this function never receives the caller's own
-// client. It is kept because the ordering it depends on is one line away.
-//
-// The **origin check** is because net/http's own protection does not apply
-// here. net/http strips Authorization when a redirect changes origin, but only
-// from headers set on the outbound request; a header a RoundTripper adds is
-// invisible to that logic, so there is nothing for it to strip and on a 307 to
-// another host the wrapper simply runs again and puts the token on the new
-// request. Injecting only for the origin the credential was resolved for closes
-// that without depending on the caller's redirect policy — which stays the
-// caller's: DefaultClient refuses redirects for its own reasons (replaying a
-// request to a target the per-dial guard vets but never approved), and a
-// caller supplying its own client owns that decision. What this package
-// guarantees either way is narrower and is the part that matters: a credential
-// resolved for one server is offered to that server and to no other.
-//
-// The comparison is textual — scheme, and host case-insensitively in ASCII —
-// which every way of being wrong fails closed. url.Parse lowercases the scheme and keeps
-// userinfo out of Host, so those cannot cause a false match; the forms that do
-// differ textually while naming the same origin (an explicit :443, a trailing
-// dot, a capital in a non-ASCII label) drop the token rather than send it, and
-// the request fails as
-// unauthenticated instead of leaking. A normalizing comparison would trade that
-// direction for the other one.
 // withTraceContext puts W3C trace context on every request this client sends,
 // as HTTP headers, which is the one propagation route that does not depend on
 // the SDK giving a caller somewhere to put it.
@@ -1092,6 +1059,41 @@ func (t *traceTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	return base.RoundTrip(req)
 }
 
+// withBearer returns a shallow copy of client that sends the Authorization
+// header to endpoint's origin and to nothing else.
+//
+// Two separate things keep one server's credential away from another, and each
+// answers a leak the other does not.
+//
+// The **copy** is defence in depth on a client that may be shared — the
+// package-level DefaultClient is — where installing the transport in place would
+// put this token on every later connection made through it. Today it is a second
+// copy rather than the protecting one: Connect runs withResponseLimit first and
+// that already returns a copy, so this function never receives the caller's own
+// client. It is kept because the ordering it depends on is one line away.
+//
+// The **origin check** is because net/http's own protection does not apply
+// here. net/http strips Authorization when a redirect changes origin, but only
+// from headers set on the outbound request; a header a RoundTripper adds is
+// invisible to that logic, so there is nothing for it to strip and on a 307 to
+// another host the wrapper simply runs again and puts the token on the new
+// request. Injecting only for the origin the credential was resolved for closes
+// that without depending on the caller's redirect policy — which stays the
+// caller's: DefaultClient refuses redirects for its own reasons (replaying a
+// request to a target the per-dial guard vets but never approved), and a
+// caller supplying its own client owns that decision. What this package
+// guarantees either way is narrower and is the part that matters: a credential
+// resolved for one server is offered to that server and to no other.
+//
+// The comparison is textual — scheme, and host by canonical name — which every
+// way of being wrong fails closed. url.Parse lowercases the scheme and keeps
+// userinfo out of Host, so those cannot cause a false match; the forms that do
+// differ textually while naming the same origin (an explicit :443, a trailing
+// dot) drop the token rather than send it, and the request fails as
+// unauthenticated instead of leaking. sameHost normalizes exactly one thing —
+// which spelling of a name it is — because there a textual difference is not an
+// origin difference at all; normalizing anything else would trade the closed
+// direction for the open one.
 func withBearer(client *http.Client, token string, endpoint *url.URL) *http.Client {
 	copied := *client
 	copied.Transport = &bearerTransport{
@@ -1103,93 +1105,56 @@ func withBearer(client *http.Client, token string, endpoint *url.URL) *http.Clie
 	return &copied
 }
 
-// sameHost compares two URL hosts the way DNS and IPv6 respectively require:
-// case-insensitively — in ASCII only, for the reason asciiEqualFold argues
-// below — except for a scoped address's zone identifier, which is locally
-// significant and may distinguish two interfaces that differ only in case. Folding the whole string is the one way this comparison could match
-// two origins that are not the same one — the direction that leaks rather than
-// withholds — so the zone is split off and compared exactly.
+// sameHost reports whether two URL hosts name one origin. It compares the way
+// DNS and IPv6 respectively require: by canonical name, except for a scoped
+// address's zone identifier, which is locally significant and may distinguish
+// two interfaces that differ only in case, and so is compared byte for byte.
+// Calling two origins one is the direction that leaks rather than withholds,
+// which is why the zone is split off rather than folded with the rest.
+//
+// The name comparison is egress.CanonicalHost, shared with internal/egress and
+// internal/vaultresolve (#609, plan 43). Case folding is not the answer in
+// either direction, and that helper argues the whole rule rather than having it
+// restated here; what this function adds around it is the port and the zone.
 //
 // An empty port is dropped from both sides first, because net/http drops it
 // from the request: http.NewRequest normalizes "host:" to "host", so an
 // endpoint written that way would be compared against a request that no longer
 // spells it that way and the header would be withheld from the very server it
-// was resolved for.
+// was resolved for. A port that is present is compared as written, and a
+// trailing dot is not stripped: both are differences that withhold rather than
+// leak, which is the direction this whole comparison errs in.
+//
+// Splitting the port also strips the brackets around an IPv6 literal, so what is
+// compared is the address itself — "::1", not "[::1]" — which is what
+// url.Hostname hands the dialler. Both sides reach here through url.Parse, and
+// it produces only the bracketed spelling for a literal, so the strip makes this
+// agree with what net/http dials rather than widening what counts as one origin.
+//
+// One comparison covers a scoped address too, without a branch for it.
+// CanonicalHost splits at the first "%" and appends the zone byte for byte, and
+// canonicalName cannot emit a "%" — it folds bytes or returns punycode — so the
+// first "%" of the result is exactly that boundary. Comparing the two whole
+// strings therefore says what comparing address and zone separately would, and
+// it says it in one place rather than three.
 func sameHost(a, b string) bool {
-	a, b = trimEmptyPort(a), trimEmptyPort(b)
-	az, bz := strings.IndexByte(a, '%'), strings.IndexByte(b, '%')
-	if az < 0 && bz < 0 {
-		return asciiEqualFold(a, b)
-	}
-	if az < 0 || bz < 0 {
+	ah, ap := splitPort(trimEmptyPort(a))
+	bh, bp := splitPort(trimEmptyPort(b))
+	if ap != bp {
 		return false
 	}
-	return asciiEqualFold(a[:az], b[:bz]) && a[az:] == b[bz:]
+	return egress.CanonicalHost(ah) == egress.CanonicalHost(bh)
 }
 
-// asciiEqualFold is strings.EqualFold restricted to ASCII: a deliberately
-// conservative origin predicate, not a full hostname comparison. It exists for
-// the reason the zone identifier is split off above, applied to the host
-// itself. strings.EqualFold folds by Unicode, and the Greek sigmas share a fold
-// orbit IDNA keeps apart — Go's non-transitional lookup punycodes "σ.example"
-// to "xn--4xa.example" and "ς.example" to "xn--3xa.example", two names that can
-// belong to two people — so folding by Unicode calls two domains one origin and
-// the bearer goes to the second.
-//
-// Size the cost honestly. It is not two exotic characters: it is every orbit
-// EqualFold merged that IDNA also collapses, which is most of them. "Ä.example"
-// and "ä.example" are one domain after IDNA ("xn--4ca.example" either way) and
-// this calls them two, as it does "Д"/"д", U+212A against "k", and U+017F
-// against "s". Two kinds of pair are outside it, in opposite directions: the
-// sigmas, the orbit IDNA does *not* collapse, which is the whole point; and
-// U+0130, which EqualFold never merged with "i" in the first place — that is a
-// lowercase mapping, not a fold orbit, so it costs nothing here even though it
-// is exactly the example that motivates internal/egress's NormalizeHost. The
-// change also stops calling two different invalid UTF-8 bytes equal, which
-// EqualFold does by decoding both to U+FFFD.
-//
-// Both the leak and the cost need an origin the caller did not spell: Connect
-// parses cfg.URL and hands that same string to the transport, so only a
-// redirect or a caller's own client can make the two sides differ, and the
-// clients built here refuse redirects. On that path a withheld bearer costs a
-// 401 and a wrongly-shared one costs the secret, which is the direction to err
-// in. It is not the only way to err less: comparing idna.Lookup.ToASCII on both
-// sides separates the sigmas *and* folds every legitimate pair, which is what
-// net/http itself does to decide whether Authorization survives a redirect.
-// #609 carries that question, because the same choice settles what an
-// environment's allowed_hosts should be validated against.
-//
-// Comparing bytes is safe because ASCII folding preserves length, unlike a
-// Unicode one, and because no non-ASCII code point's UTF-8 encoding contains a
-// byte in 0x41-0x5A — lead bytes are 0xC2-0xF4 and continuation bytes 0x80-0xBF
-// — so the fold cannot reach inside a multi-byte character.
-//
-// internal/egress's NormalizeHost and internal/vaultresolve's lowerHost fold the
-// same way, for the same reason; those three are what #609 audited, and it rules
-// internal/identity's isLoopbackHost out separately — that one folds by Unicode
-// too, but only against a fixed localhost/loopback allowlist no mapping aliases
-// into. The zoned call above needs the fold as much as the unzoned one, which is
-// not obvious: a scoped IPv6 address is hex before the "%" and would fold the
-// same either way, but a percent-escaped host reaches that branch too —
-// url.Parse reads "http://ex%CF%83%25z.test/" as the host "exσ%z.test" — so its
-// address half can be an ordinary name, sigma and all.
-func asciiEqualFold(a, b string) bool {
-	if len(a) != len(b) {
-		return false
+// splitPort separates an authority's port from its host, leaving a host that
+// carries no port — a bare name, or a bracketed or scoped IPv6 literal — whole.
+// IDNA refuses a string holding a colon, so the split has to happen before the
+// name is canonicalized rather than after.
+func splitPort(hp string) (host, port string) {
+	if h, p, err := net.SplitHostPort(hp); err == nil {
+		return h, p
 	}
-	for i := range len(a) {
-		x, y := a[i], b[i]
-		if x >= 'A' && x <= 'Z' {
-			x += 'a' - 'A'
-		}
-		if y >= 'A' && y <= 'Z' {
-			y += 'a' - 'A'
-		}
-		if x != y {
-			return false
-		}
-	}
-	return true
+	return hp, ""
 }
 
 // trimEmptyPort is net/http's removeEmptyPort, which is unexported there. The

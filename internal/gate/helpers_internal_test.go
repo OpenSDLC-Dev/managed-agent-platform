@@ -369,7 +369,7 @@ func TestRootedNameLeavesEverythingThatIsNotADNSNameAlone(t *testing.T) {
 		// curated set holds.
 		{"pypi.org:443", "pypi.org.:443"},
 		{"files.pythonhosted.org:80", "files.pythonhosted.org.:80"},
-		// A spelling the host set admits (NormalizeHost lowercases) and the
+		// A spelling the host set admits (CanonicalLookup lowercases) and the
 		// resolver answers case-insensitively, so it must root like any other.
 		{"PYPI.ORG:443", "PYPI.ORG.:443"},
 		// Already absolute — so this is idempotent, and a request the sandbox
@@ -631,5 +631,120 @@ func TestARegistryRequestLeavesAHandlerRooted(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// handleConnect admits a host by its canonical name, so it has to dial that
+// name: the two can differ by a whole name rather than by case, and dialling
+// what the sandbox typed would leave every widening the canonical comparison
+// buys a promise the connection does not keep. handlePlain has no equivalent
+// row because it never calls Gate.dial with the request's authority —
+// net/http canonicalizes the address before the gate's dialler sees it, which
+// TestARegistryRequestLeavesAHandlerRooted already drives through both paths.
+func TestConnectDialsTheNameItAdmitted(t *testing.T) {
+	g := New(Config{Networking: domain.Networking{
+		Type: domain.NetLimited,
+		// The scoped entries carry the zone exactly as the request spells it:
+		// a zone names a local interface and is case-sensitive, so neither the
+		// admission nor the dial folds it. They are a *stored* configuration,
+		// not one a create could write — CanonicalEntry refuses an entry holding
+		// a ":" — so what these rows pin is the path a row from before plan 43
+		// takes, which parseNetworking carries through unchanged.
+		AllowedHosts: []string{"xn--bcher-kva.example", "example.com",
+			"fe80::1%Eth0", "fe80::1%25Eth0"},
+	}})
+	var saw string
+	g.dial = rootedDial(func(_ context.Context, _, addr string) (net.Conn, error) {
+		saw = addr
+		return nil, errSpyDial
+	})
+
+	for name, tc := range map[string]struct{ authority, want string }{
+		"a U-label is dialled as the A-label that admitted it": {
+			"b\u00fccher.example:443", "xn--bcher-kva.example:443"},
+		"a soft hyphen is dropped rather than looked up": {
+			"exa\u00admple.com:443", "example.com:443"},
+		"an ideographic full stop is dialled as a dot": {
+			"example\u3002com:443", "example.com:443"},
+		"an ASCII host is dialled exactly as it was typed": {
+			"example.com:443", "example.com:443"},
+		// A zone identifier names a local interface and is case-sensitive, so
+		// the canonical name of a scoped address keeps it byte for byte — and,
+		// since the same function decides admission, an entry naming %Eth0 no
+		// longer admits a request for %eth0 either. Both spellings a CONNECT
+		// authority can carry are driven: hostOnly splits the brackets off but
+		// decodes nothing, so the "%25" of a URI-form zone reaches the dial as
+		// written too.
+		"a scoped address keeps its zone exactly": {
+			"[fe80::1%Eth0]:443", "[fe80::1%Eth0]:443"},
+		"a percent-encoded zone is not decoded either": {
+			"[fe80::1%25Eth0]:443", "[fe80::1%25Eth0]:443"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			saw = ""
+			r := httptest.NewRequest(http.MethodGet, "http://example.com/", nil)
+			r.Method, r.Host = http.MethodConnect, tc.authority
+			w := httptest.NewRecorder()
+			g.handleConnect(w, r)
+			if w.Code != http.StatusBadGateway {
+				t.Fatalf("CONNECT %s answered %d, want %d — the request never reached the dial",
+					tc.authority, w.Code, http.StatusBadGateway)
+			}
+			if saw != tc.want {
+				t.Errorf("CONNECT %s dialled %q, want %q", tc.authority, saw, tc.want)
+			}
+		})
+	}
+}
+
+// A CONNECT authority made only of code points UTS46 deletes canonicalizes to
+// the empty string, and net.JoinHostPort("", "443") is ":443" — an address Go's
+// resolver reads as the unspecified one, so the dial would leave for a
+// destination the policy never saw and, on this host, a local service. The
+// authority goes out as written instead, and fails to resolve as it did before
+// there was a canonical dial at all. Driven under `unrestricted`, the only
+// policy that admits such a host: `limited` refuses an empty canonical name at
+// the matcher.
+func TestAnAuthorityThatCanonicalizesAwayIsDialledAsWritten(t *testing.T) {
+	g := New(Config{Networking: domain.Networking{Type: domain.NetUnrestricted}})
+	var saw string
+	g.dial = rootedDial(func(_ context.Context, _, addr string) (net.Conn, error) {
+		saw = addr
+		return nil, errSpyDial
+	})
+
+	r := httptest.NewRequest(http.MethodGet, "http://example.com/", nil)
+	r.Method, r.Host = http.MethodConnect, "\u00ad:443"
+	w := httptest.NewRecorder()
+	g.handleConnect(w, r)
+
+	if w.Code != http.StatusBadGateway {
+		t.Fatalf("CONNECT answered %d, want %d — the request never reached the dial",
+			w.Code, http.StatusBadGateway)
+	}
+	if want := "\u00ad:443"; saw != want {
+		t.Errorf("dialled %q, want %q — an empty canonical host is the unspecified address", saw, want)
+	}
+}
+
+// The MCP endpoint map answers a host the way the HostSet does, and it is not a
+// no-op for it to do so: admit hands endpointKey the host the sandbox wrote,
+// which never passed the control plane's entry grammar. A declaration and a
+// request that name one host in two alphabets have to meet.
+func TestTheMCPSetAnswersAHostByItsCanonicalName(t *testing.T) {
+	p := newPolicy(
+		domain.Networking{Type: domain.NetLimited, AllowMCPServers: true},
+		[]string{"xn--bcher-kva.example:8443"})
+
+	for _, host := range []string{
+		"xn--bcher-kva.example", "b\u00fccher.example", "B\u00dcCHER.example", "b\u00fccher.example.",
+	} {
+		if got := p.admit(host, "8443"); got != admitMCP {
+			t.Errorf("admit(%q, 8443) = %v, want %v", host, got, admitMCP)
+		}
+	}
+	// A different name is still a different name.
+	if got := p.admit("b\u00fccher.example.evil", "8443"); got != admitNone {
+		t.Errorf("a neighbouring name gave %v", got)
 	}
 }

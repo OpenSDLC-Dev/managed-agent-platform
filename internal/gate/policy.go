@@ -196,9 +196,12 @@ func (a admission) rooted() bool { return a == admitRegistry }
 // and on the way out, so a declaration and the request that uses it need not be
 // spelled identically.
 //
-// The host goes through egress.NormalizeHost — the very function an operator's
+// The host goes through egress.CanonicalLookup — the very function an operator's
 // allowed_hosts are matched by, not a copy of it — so the two lists cannot drift
-// apart on what makes two names one. The port drops leading zeros because that
+// apart on what makes two names one. That is why it moved with them in plan 43:
+// a HostSet that compares canonical names beside a map that compares folded ones
+// would answer a U-label request differently depending on which list held the
+// host. The port drops leading zeros because that
 // is what the connection will do: a URL may carry `:0443`, and Go's dialer
 // resolves it to 443, so keying on the digits as written would refuse a request
 // on the strength of a spelling that changes nothing about where it goes.
@@ -208,7 +211,7 @@ func (a admission) rooted() bool { return a == admitRegistry }
 // spec. mcpEndpoint refuses a wildcard today, and a map cannot become one
 // however that changes.
 func endpointKey(host, port string) string {
-	return egress.NormalizeHost(host) + ":" + strings.TrimLeft(port, "0")
+	return egress.CanonicalLookup(host) + ":" + strings.TrimLeft(port, "0")
 }
 
 // hopByHop are the connection-scoped headers a forwarding proxy must not pass

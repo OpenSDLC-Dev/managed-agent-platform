@@ -279,7 +279,44 @@ func (g *Gate) handleConnect(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	ctx := withAdmission(r.Context(), how)
-	upstream, err := g.dial(ctx, "tcp", target)
+	// Dial the name that was admitted, not the one the sandbox typed. Admission
+	// compares canonical names, so the two can differ by a whole name rather
+	// than by case alone: the Kelvin sign U+212A before ".example" (not the
+	// letter K, which the ASCII fold already merged with "k"),
+	// "exa\u00admple.com" and "example\u3002com" all canonicalize onto their
+	// ASCII spellings. Dialling the raw authority would be fail-closed rather
+	// than unsafe — a resolver answers "no such host" for a U-label — but it
+	// would make every widening this comparison buys a promise the connection
+	// does not keep. A scoped address keeps its zone: CanonicalHost splits at
+	// the "%" so an interface name is never case-folded. handlePlain needs no
+	// equivalent — net/http canonicalizes the address itself before the gate's
+	// dialer sees it.
+	//
+	// An empty port means the authority did not split into a host and a port,
+	// and both shapes that produce one reach here: "example.com:", which
+	// SplitHostPort accepts with an empty port, and "[::1]", which addrWithPort
+	// double-brackets into "[[::1]]:443" and SplitHostPort then refuses, leaving
+	// hostOnly holding the whole string. Rebuilding either would hand the dialer
+	// an address more malformed than the one the sandbox wrote, and the dial
+	// error and the address floor would both then report that instead. It goes
+	// out as written, and fails as it does today.
+	// An empty canonical name is the other authority the substitution has to
+	// decline. UTS46 deletes the ignorable code points outright, so an authority
+	// written as one SOFT HYPHEN canonicalizes to "", and JoinHostPort("", port)
+	// is ":port" — an address Go's resolver reads as the unspecified one, which
+	// is a destination the policy never admitted and, on this host, a local
+	// service. The authority goes out as written instead, and fails to resolve
+	// as it did before there was a canonical dial at all.
+	//
+	// Reaching this needs a request line whose authority differs from its Host
+	// header, since net/http answers 400 to a malformed Host header before any
+	// handler runs — which a sandbox writing its own CONNECT can do trivially,
+	// and which is how it was driven against a real listener.
+	dialAddr := target
+	if canonical := egress.CanonicalHost(host); port != "" && canonical != "" {
+		dialAddr = net.JoinHostPort(canonical, port)
+	}
+	upstream, err := g.dial(ctx, "tcp", dialAddr)
 	if err != nil {
 		http.Error(w, "cannot reach host", http.StatusBadGateway)
 		return

@@ -135,13 +135,16 @@ func TestMCPCredentialMatchingKeepsAnIPv6ZoneCase(t *testing.T) {
 	}
 }
 
-// Case folding a host name is an ASCII operation. Unicode's is not the same
-// operation and maps several letters onto ASCII ones — strings.ToLower turns
-// U+0130 (İ) into a plain "i" — so folding by Unicode would put an IDN and an
-// unrelated ASCII domain into one key and send that credential's token to
-// whichever of them an agent named. They are not one host: Go's HTTP stack
-// resolves the IDN through IDNA to xn--i-9bb.example.
-func TestMCPCredentialMatchingFoldsHostCaseAsASCIINotAsUnicode(t *testing.T) {
+// What makes two hostnames one name is IDNA, not case folding, so a credential
+// is selected by comparing A-labels (#609, plan 43). Both directions are
+// asserted here, because each is a different way to be wrong: merging two names
+// sends a token to a server the credential was not registered for, and
+// separating two spellings of one name withholds it from the very server it was
+// resolved for.
+func TestMCPCredentialMatchingComparesHostsByTheirALabel(t *testing.T) {
+	// strings.ToLower maps U+0130 (İ) onto a plain "i", and Unicode folding
+	// merges the two Greek sigmas. IDNA does neither — İ.example punycodes to
+	// xn--i-9bb.example and the sigmas to xn--4xa/xn--3xa — so these stay apart.
 	const idn = "https://İ.example/mcp"
 	if vaultresolve.MatchesMCPServerForTest(idn, "https://i.example/mcp") {
 		t.Error("a credential for İ.example was matched to i.example, a different DNS name")
@@ -149,9 +152,24 @@ func TestMCPCredentialMatchingFoldsHostCaseAsASCIINotAsUnicode(t *testing.T) {
 	if vaultresolve.MatchesMCPServerForTest(idn, "https://I.example/mcp") {
 		t.Error("a credential for İ.example was matched to I.example, a different DNS name")
 	}
-	// The ASCII fold itself still has to work, or the guard above is just a
-	// comparison that never matches anything.
+	if vaultresolve.MatchesMCPServerForTest("https://σ.example/mcp", "https://ς.example/mcp") {
+		t.Error("a credential for σ.example was matched to ς.example, a different DNS name")
+	}
+	// The other direction. An ASCII name's case is still not significant, or the
+	// guards above are just a comparison that never matches anything — and a
+	// Unicode name's spelling is not significant either, which is what an ASCII
+	// fold alone could not say.
 	if !vaultresolve.MatchesMCPServerForTest("https://MCP.Example/mcp", "https://mcp.example/mcp") {
 		t.Error("an ASCII host's case is not significant and must still fold")
+	}
+	const idnCred = "https://bücher.example/mcp"
+	for _, req := range []string{
+		"https://bücher.example/mcp",
+		"https://BÜCHER.example/mcp",
+		"https://xn--bcher-kva.example/mcp",
+	} {
+		if !vaultresolve.MatchesMCPServerForTest(idnCred, req) {
+			t.Errorf("a credential for bücher.example was not matched to %q, which is the same host", req)
+		}
 	}
 }
