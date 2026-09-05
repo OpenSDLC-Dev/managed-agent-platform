@@ -66,18 +66,21 @@ roots on purpose, so a restored sandbox — a fresh container — installs again
 is surfaced, never fatal: a `session.error` of the platform's own
 `environment_package_install_error`, with six reasons and a `retry_status` that flips to
 `exhausted` at the cap, carrying the manager's own output tail sanitized,
-userinfo-redacted and bounded at 8 KiB — the one `session.error` here whose text is
+URL-redacted (every URL cut to `scheme://host`, so a credential in the userinfo or the
+query is dropped) and bounded at 8 KiB — the one `session.error` here whose text is
 sandbox-controlled, which is what those three bounds are for. One cheap probe refuses a
 non-root or read-only sandbox up front rather than paying six timeouts of `Permission
 denied`. And #576's create-time 400 landed with it, refusing `packages` under `limited`
 networking without `allow_package_managers` on the merged config, so the shape cannot
 arrive in two halves.
 
-Verification: sixteen executor unit tests
+Verification: eighteen executor unit tests
 (`internal/executor/packages_test.go`) pin the order and every command byte for byte,
 the quoting of an entry containing a quote and a `; rm -rf /`, the per-manager skip and
 the reinstall on a changed list, the attempt cap and the `exhausted` re-emission, every
-reason, the dedupe, the sanitize and redaction, the backend-fault arm, the empty config,
+reason, the dedupe (including a second failing list not swallowed by the first's
+history), the sanitize and the URL-redaction of userinfo and query credentials alike,
+the backend-fault arm, the empty config,
 the grading harvest installing nothing, and the sentinel path lying under none of the
 checkpoint roots. Beside them a real-container test drives the whole seam end to end
 against a `debian:stable-slim` sandbox with a stubbed `apt-get`, recording the argv the
@@ -105,13 +108,41 @@ in 15 s with a sentinel of `apt` and `pip` each `installed: true, attempts: 1`. 
 sessions, environments and agents were deleted or archived afterwards and the reaper
 removed both sandboxes.
 
+Review hardening: the verifier caught the branch's own gate red — the apt fix added
+`-o APT::Sandbox::User=root` but left one quoting test asserting the old `apt-get install`
+prefix — and that main had moved under the branch (#597 merged nine minutes after the last
+commit, closing #591 and turning four #591 doc claims and the registry pointer stale). The
+branch was rebased onto #597 and those claims reconciled: the gate now honors
+`allow_package_managers` for Python, so `pip` reaches PyPI under `limited` today and the
+other five ecosystems wait on #594, and #576's own registry pointer moved to the egress
+entry's `landed for` tail so `make registry-check` stays green. The Codex and Claude
+reviews converged on three real defects, all fixed: the `session.error` message redacted
+only URL userinfo up to the first `@`, missing a password containing `@` and a query-string
+credential — now every URL is cut to `scheme://host` by the MCP path's own `redactURL`; the
+error dedupe keyed on `(manager, reason, retry_status.type)` alone, so a second failing list
+was swallowed by the first's history — a non-secret list digest now keys it, and the same
+digest replaced the plaintext entry list in the agent-readable `/tmp/.map-packages`
+sentinel, so a credential in a package URL is no longer catable from inside the sandbox; and
+`EXECUTOR_PACKAGE_INSTALL_TIMEOUT`, read by the binary, was wired through neither compose nor
+the chart, unlike its two sibling budgets. Refuted with evidence: a claimed NUL-entry 500
+(the request-wide `rejectNULBody` guard already 400s it, now pinned by a test); a
+forged-negative-attempts bypass of the retry cap (equivalent to deleting the untrusted
+sentinel, which is already allowed); and the non-root/read-only probe re-running per tool
+call (a deliberately-tested tradeoff on a rare misconfiguration). One residual is
+tracked as #598: the session advisory lock does not serialize an install against a crashed
+or cancelled holder whose in-sandbox command outlives the lock — a property every
+materialization pass shares, bounded here by `dpkg --configure -a` and the three-attempt
+cap.
+
 Deferred: the reference's cross-session install cache — a per-environment image keyed on
 the packages hash, which Kubernetes has no build primitive for and which would join the
 sandbox adoption comparison — is #595, so packages install per sandbox here. Left open
-beside it: #591, the gate's package-registry allow-set, without which a `limited`
-session's install reaches a registry only through `allowed_hosts`; and five of the six
-registry entries this plan added are inferences naming #78 for the recording that would
-settle them.
+beside it: #594, the gate's package-registry allow-set for the five non-Python ecosystems
+(#591 landed the Python hosts, `pypi.org` and `files.pythonhosted.org`, in #597 just after
+this branch was cut), until which a `limited` session's `apt`/`npm`/`cargo`/`gem`/`go`
+install reaches a registry only through `allowed_hosts` while `pip` reaches PyPI through
+the flag; and five of the six registry entries this plan added are inferences naming #78
+for the recording that would settle them.
 
 ---
 

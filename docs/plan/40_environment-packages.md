@@ -5,8 +5,9 @@ issue: "#353"
 
 > **Archived — completed.** Delivered in one PR, closing #353 and #576 together; the
 > reference's cross-session install cache (decision 2) is deferred to #595, and the
-> gate's package-registry allow-set stays #591. The progress summary is in
-> docs/HISTORY.md.
+> gate's package-registry allow-set — landed for Python in #591 (#597, which merged
+> to main just after this branch was cut) — grows to the other five ecosystems in
+> #594. The progress summary is in docs/HISTORY.md.
 
 # Environment `config.packages` installed into the sandbox (plan 40)
 
@@ -39,7 +40,8 @@ because an install that can only be refused at the gate is better refused at the
 
 Delivered in one PR that closes #353 and #576 together and re-points the registry entry
 that names the latter (slice 3). Not delivered: the reference's cross-session install
-cache (decision 2), the gate's package-registry allow-set (#591), and anything for
+cache (decision 2), the gate's package-registry allow-set for the five non-Python
+ecosystems (#594 — #591 landed the Python hosts in #597), and anything for
 `self_hosted` environments (decision 8).
 
 ## 2. Ground truth (pinned 2026-09-05)
@@ -61,7 +63,7 @@ if the registry hosts are listed in `allowed_hosts`". The page says nothing abou
 happens when an install fails, how long one may take, what a `packages` list may contain, or
 whether a package change reaches a session already running.
 
-**The SDK** (anthropic-sdk-go v1.66.0, betaenvironment.go): `BetaPackages` is six
+**The SDK** (anthropic-sdk-go v1.70.1, betaenvironment.go): `BetaPackages` is six
 `[]string` fields plus the `type` discriminator #382 settled; the doc comment on the params
 says "You are responsible for validating the package and version exist" (:270, :618 —
 echoed by the `ant` CLI's flag help), which is about existence, not syntax. Its
@@ -88,9 +90,11 @@ process group. The container is created from `spec.Image` with a `bash` hold-ope
 entrypoint; `Hardening.ReadOnlyRootfs` leaves only `WritablePaths` writable and
 `Hardening.RunAsUser` runs everything as that uid — both bound at create and not re-applied
 to an adopted sandbox. A `limited` session's egress goes through its gate where one is
-configured, which admits `allowed_hosts` and the MCP endpoints and (until #591) nothing for
-`allow_package_managers`; where no gate is configured — every Kubernetes deployment, and a
-Docker deployment that has not opted in — a `limited` sandbox has no route out at all. The
+configured, which admits `allowed_hosts`, the MCP endpoints and — since #597 honored
+`allow_package_managers` — the recorded package-registry hosts (Python's `pypi.org` and
+`files.pythonhosted.org`; the other five ecosystems wait on #594); where no gate is
+configured — every Kubernetes deployment, and a Docker deployment that has not opted in — a
+`limited` sandbox has no route out at all. The
 queue admits one live `tool_exec` per session, but a reclaim can overlap the lapsed holder's
 still-running pass. The checkpoint (plan 24) preserves the workdir, the shell state root
 and the outputs root; `/tmp` is deliberately not preserved. `StallTimeout` bounds an item's
@@ -277,7 +281,8 @@ the gate.
 
 - The reference's cross-session install cache (a per-environment image keyed by the
   packages hash) — a follow-up issue, filed by the delivering PR.
-- #591, the gate's package-registry allow-set.
+- #594, the gate's package-registry allow-set for the five non-Python ecosystems
+  (#591 landed the Python hosts in #597).
 - BYOC (`self_hosted`) package installation.
 - Any `packages.type` question — settled by #382/#583.
 
@@ -305,9 +310,10 @@ the gate.
    and `make test` must not gain; and behind `RUN_LIVE_PACKAGE_TESTS=1` (a consent-only
    tier, added to README's table) the real `apt: [jq]` install on that image, then a
    `bash` tool call proving `jq` answers — the acceptance the issue asks for.
-3. **Docs** — docs/DIVERGENCES.md: new INFERRED entries for D2, D3, D4, D6, D9, D10,
-   each naming #78 as its live tracker with a parenthetical (the entries' own issues are
-   closed by this PR and cannot be trackers), and the egress-gate entry amended — its
+3. **Docs** — docs/DIVERGENCES.md: a CONFIRMED entry for D2 (the no-cross-session-cache
+   divergence, naming #595) and INFERRED entries for D3, D4, D6, D9, D10, each naming #78
+   as its live tracker with a parenthetical (the entries' own issues are closed by this
+   PR and cannot be trackers), and the egress-gate entry amended — its
    create-time sentence to the past tense, #576 moved from the `Tracked:` head to the
    `landed for` tail — so `make registry-check` stays green; docs/ARCHITECTURE.md's
    execution-flow step 4; docs/self-hosted-security.md §2 and §4 (D7);

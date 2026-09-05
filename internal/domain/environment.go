@@ -71,6 +71,9 @@ type Environment struct {
 // `pip install` would redirect the whole install, and no quoting can stop it,
 // because the entry is a single argument either way. Everything else (a pin,
 // `@`, `:`, whitespace) is the manager's own syntax and passes through verbatim.
+// A NUL is not this predicate's concern: the API's rejectNULBody (wire.go)
+// refuses it anywhere in the request body before this runs, and jsonb could not
+// store it, so no stored row ever carries one to the executor.
 // The API applies this at create and update; the executor applies it again
 // before building a command, so a row stored before the rule is refused at
 // install rather than passed (docs/plan/40_environment-packages.md decision 6).

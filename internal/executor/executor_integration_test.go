@@ -267,7 +267,7 @@ func TestPackagesRealSandboxWithAStubbedApt(t *testing.T) {
 			}
 		}
 	}
-	if rec := recs["apt"]; !rec.Installed || rec.Attempts != 1 || !slices.Equal(rec.Packages, []string{"jq", "curl"}) {
+	if rec := recs["apt"]; !rec.Installed || rec.Attempts != 1 || rec.Digest != packagesDigest([]string{"jq", "curl"}) {
 		t.Errorf("sentinel apt = %+v, want the list installed in one attempt (from %q)", rec, text)
 	}
 

@@ -154,7 +154,10 @@ func TestPackageEntriesAreOneArgvMemberWhateverTheyContain(t *testing.T) {
 	if len(got) != 1 {
 		t.Fatalf("install commands = %d, want 1", len(got))
 	}
-	if want := `apt-get install -y -q 'it'\''s a package' '; rm -rf /'`; !strings.Contains(got[0], want) {
+	// Anchored at `install`, not `apt-get`, so the assertion is about the entries
+	// being one argv member each and survives options between the two (the
+	// APT::Sandbox::User=root the capability drop needs).
+	if want := `install -y -q 'it'\''s a package' '; rm -rf /'`; !strings.Contains(got[0], want) {
 		t.Errorf("command = %s, want it to contain %s", got[0], want)
 	}
 }
@@ -276,6 +279,44 @@ func TestARepeatedFailureIsOneEventUntilItIsExhausted(t *testing.T) {
 	}
 	if rec := sentinel(t, sb)["apt"]; rec.Attempts != 3 || rec.Installed {
 		t.Errorf("sentinel = %+v, want three spent attempts and no install", rec)
+	}
+}
+
+// TestADifferentFailingListIsNotSuppressedByTheFirst is the dedupe's list
+// identity: a client that changes a manager's list after the first list
+// exhausted must see the new list fail, not silence. The dedupe keys on the
+// list digest as well as (manager, reason, retry_status), the way the clone
+// error keys on its resource id — without that, the first list's history would
+// swallow every later failure of the same manager and reason.
+func TestADifferentFailingListIsNotSuppressedByTheFirst(t *testing.T) {
+	sb := &fakeSandbox{execHook: failInstall(sandbox.ExecResult{ExitCode: 100, Stdout: "boom\n"})}
+	h := newHarness(t, sb)
+
+	// First list: fail it to exhaustion (retrying, then exhausted).
+	h.setPackages(t, map[string][]string{"apt": {"nosuchpkg"}})
+	for i := 1; i <= 3; i++ {
+		h.suspend(t, writeUse(fmt.Sprintf("a%d.txt", i), "x"))
+		h.stepOnce(t)
+	}
+	if n := len(h.packageErrors(t)); n != 2 {
+		t.Fatalf("after the first list: package errors = %d, want 2 (retrying, exhausted)", n)
+	}
+
+	// A different list, same manager and same failure reason: a fresh attempt
+	// with its own count, and a fresh event rather than one the first suppresses.
+	h.setPackages(t, map[string][]string{"apt": {"othertypo"}})
+	h.suspend(t, writeUse("b.txt", "y"))
+	h.stepOnce(t)
+
+	errs := h.packageErrors(t)
+	if len(errs) != 3 {
+		t.Fatalf("after the second list: package errors = %d, want 3 — the new list's failure must not be deduped away: %+v", len(errs), errs)
+	}
+	if rs, _ := errs[2]["retry_status"].(map[string]any); rs["type"] != "retrying" {
+		t.Errorf("third error retry_status = %+v, want retrying (the second list's first attempt)", rs)
+	}
+	if d, _ := errs[2]["packages_digest"].(string); d != packagesDigest([]string{"othertypo"}) {
+		t.Errorf("third error packages_digest = %q, want the second list's digest", d)
 	}
 }
 
@@ -421,8 +462,35 @@ func TestTheFailureMessageIsSanitizedAndRedacted(t *testing.T) {
 	if strings.Contains(msg, "s3cr3t") {
 		t.Errorf("message %q carries the credential the manager echoed", msg)
 	}
-	if want := "https://***@pkgs.example.com/simple/x"; !strings.Contains(msg, want) {
-		t.Errorf("message = %q, want it to keep the URL with %q", msg, want)
+	if want := "https://pkgs.example.com"; !strings.Contains(msg, want) {
+		t.Errorf("message = %q, want it to keep the URL reduced to %q", msg, want)
+	}
+}
+
+// TestPackageMessageRedactsEveryCredentialForm pins packageMessage directly,
+// because the userinfo-only redactor it replaced leaked two shapes a manager
+// really echoes: a password containing '@' (redacted only up to the first '@')
+// and a credential in the query rather than the userinfo (`?token=`, a pip/npm
+// convention). Reducing every URL to scheme://host closes both.
+func TestPackageMessageRedactsEveryCredentialForm(t *testing.T) {
+	for _, tc := range []struct {
+		name, in, leak, keep string
+	}{
+		{"userinfo", "fetching https://deploy:s3cr3t@pkgs.example.com/x failed", "s3cr3t", "https://pkgs.example.com"},
+		{"password with @", "auth https://user:p@sSWORD@host.example/x 401", "sSWORD", "https://host.example"},
+		{"query token", "GET https://host.example/simple?token=SECRETTOK 403", "SECRETTOK", "https://host.example"},
+		{"nul", "boom\x00tail", "\x00", "boomtail"},
+		{"benign url kept as host", "could not reach https://pypi.org/simple/", "", "https://pypi.org"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := packageMessage(tc.in)
+			if tc.leak != "" && strings.Contains(got, tc.leak) {
+				t.Errorf("packageMessage(%q) = %q, still leaks %q", tc.in, got, tc.leak)
+			}
+			if !strings.Contains(got, tc.keep) {
+				t.Errorf("packageMessage(%q) = %q, want it to keep %q", tc.in, got, tc.keep)
+			}
+		})
 	}
 }
 

@@ -195,6 +195,10 @@ spec:
             - name: EXECUTOR_MCP_PASS_TIMEOUT
               value: {{ . | quote }}
             {{- end }}
+            {{- with .Values.executor.packageInstallTimeout }}
+            - name: EXECUTOR_PACKAGE_INSTALL_TIMEOUT
+              value: {{ . | quote }}
+            {{- end }}
             {{- /* Not `with`: template truthiness folds the numeric 0 — the
                  documented DISABLE value — into "unset", silently arming the
                  24h default. toString first, so 0 survives as "0". */}}

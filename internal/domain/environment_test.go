@@ -5,6 +5,8 @@ import "testing"
 // The two refusals are exactly the shapes no manager can take as a package: the
 // empty string, and an option. Every pin syntax the reference's own table shows
 // passes, as does whitespace — quoting makes an entry one argument either way.
+// A NUL is not tested here: the API's rejectNULBody refuses it before this runs
+// (see the API entry-validation test), so this predicate never has to.
 func TestValidPackageEntry(t *testing.T) {
 	for entry, want := range map[string]bool{
 		"":                        false,

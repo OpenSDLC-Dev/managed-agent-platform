@@ -197,11 +197,12 @@ type Config struct {
 	// the environment's config.packages (packages.go): six managers is six
 	// budgets, not one shared between them, because each is a separate silent
 	// interval the stall bound must clear. It defaults to toolset.MaxTimeout —
-	// the longest step the default stall budget already clears — so an
-	// operator who raises it for a heavy apt list must raise EXECUTOR_STALL_TIMEOUT
-	// with it or startup refuses (EXECUTOR_PACKAGE_INSTALL_TIMEOUT; plan 40
-	// decision 5). Past it the install is killed and surfaces as a
-	// session.error with reason `timeout`, never as a failed run.
+	// the longest step the default stall budget already clears — so raising it
+	// far enough that one manager's budget becomes the longest step past the
+	// stall budget (default 30m) refuses startup until EXECUTOR_STALL_TIMEOUT
+	// rises with it (EXECUTOR_PACKAGE_INSTALL_TIMEOUT; plan 40 decision 5). Past
+	// it the install is killed and surfaces as a session.error with reason
+	// `timeout`, never as a failed run.
 	PackageInstallTimeout time.Duration
 	// MCPPassTimeout bounds one mcp_exec pass — the discovery half across all of
 	// the session's MCP servers, and the execution half across all of a turn's
@@ -265,7 +266,7 @@ func (c Config) withDefaults() Config {
 		c.RepoCloneMaxBytes = 1 << 30
 	}
 	if c.PackageInstallTimeout <= 0 {
-		c.PackageInstallTimeout = 10 * time.Minute
+		c.PackageInstallTimeout = toolset.MaxTimeout
 	}
 	if c.MCPPassTimeout <= 0 {
 		c.MCPPassTimeout = 5 * time.Minute

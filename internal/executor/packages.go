@@ -2,10 +2,10 @@ package executor
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"log/slog"
-	"regexp"
-	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -69,13 +69,19 @@ const packageOutputTailBytes = 8 << 10
 // command produced.
 const maxPackageMessage = 8 << 10
 
-// packageRecord is one manager's line in the sentinel: the list it last
-// attempted, whether that attempt installed, and how many attempts that list
-// has had in this sandbox.
+// packageRecord is one manager's line in the sentinel: a digest of the list it
+// last attempted, whether that attempt installed, and how many attempts that
+// list has had in this sandbox.
+//
+// The digest, not the list itself: the sentinel is agent-readable (it lives in
+// /tmp of the sandbox the agent's tools run in), and a pip or npm entry may
+// legitimately be a URL carrying a management-key credential, which must not
+// become catable from inside the sandbox. The skip check and the error dedupe
+// need only to tell one list from another, which a digest does (decision 2/4).
 type packageRecord struct {
-	Packages  []string `json:"packages"`
-	Installed bool     `json:"installed"`
-	Attempts  int      `json:"attempts"`
+	Digest    string `json:"digest"`
+	Installed bool   `json:"installed"`
+	Attempts  int    `json:"attempts"`
 }
 
 // packageManager is one of the six the reference names. install builds the
@@ -187,6 +193,19 @@ func packagePreflight(bin string) string {
 	return "command -v " + bin + " >/dev/null 2>&1 || exit 127"
 }
 
+// packagesDigest reduces a manager's list to the value the agent-readable
+// sentinel and the error dedupe compare, so neither has to carry the entries
+// themselves. NUL-joined so that no concatenation of entries collides with a
+// different list (["a","bc"] and ["ab","c"] differ).
+func packagesDigest(entries []string) string {
+	h := sha256.New()
+	for _, e := range entries {
+		h.Write([]byte(e))
+		h.Write([]byte{0})
+	}
+	return hex.EncodeToString(h.Sum(nil))
+}
+
 // quoteEntries single-quotes every entry, so a list element is one argv member
 // whatever it contains.
 func quoteEntries(entries []string) string {
@@ -234,12 +253,6 @@ var packageProbeMessages = map[string]string{
 	packageReasonNotRoot:  "the sandbox does not run as root, so no package manager can install into it",
 	packageReasonReadOnly: "the sandbox's root filesystem is read-only, so no package manager can install into it",
 }
-
-// urlUserinfoRe finds the userinfo of anything URL-shaped. A pip or npm entry
-// may legitimately be a URL carrying a credential, and a manager echoes its
-// arguments — so the one session.error whose text is sandbox-controlled must
-// not become the one that publishes a token (decision 4).
-var urlUserinfoRe = regexp.MustCompile(`([a-zA-Z][a-zA-Z0-9+.\-]*://)[^\s/@]+@`)
 
 // installPackages installs the environment's config.packages into the freshly
 // provisioned sandbox, in the reference's alphabetical order, one Exec per
@@ -289,8 +302,9 @@ func (e *Executor) installPackages(ctx context.Context, sb sandbox.Sandbox, sid 
 		if len(entries) == 0 {
 			continue
 		}
+		digest := packagesDigest(entries)
 		rec, seen := recs[m.name]
-		if seen && slices.Equal(rec.Packages, entries) {
+		if seen && rec.Digest == digest {
 			// Settled, or out of attempts: either way this sandbox is done
 			// with this list until it changes.
 			if rec.Installed || rec.Attempts >= packageInstallAttempts {
@@ -312,7 +326,7 @@ func (e *Executor) installPackages(ctx context.Context, sb sandbox.Sandbox, sid 
 			// makes a refused entry acceptable, so telling a client to wait
 			// for a retry would be a lie.
 			e.emitPackageInstallError(ctx, sid, m.name, packageReasonInvalid,
-				"an entry is empty or begins with '-', which a package manager reads as an option rather than a package", true)
+				"an entry is empty or begins with '-', which a package manager reads as an option rather than a package", digest, true)
 			continue
 		}
 		// The probe is lazy: it costs an Exec, and a pass whose every manager
@@ -330,7 +344,7 @@ func (e *Executor) installPackages(ctx context.Context, sb sandbox.Sandbox, sid 
 				// Recorded once, with no manager, and running none: six
 				// timeouts' worth of "Permission denied" tell a client
 				// nothing the probe has not already said.
-				e.emitPackageInstallError(ctx, sid, "", reason, packageProbeMessages[reason], true)
+				e.emitPackageInstallError(ctx, sid, "", reason, packageProbeMessages[reason], "", true)
 				return nil
 			}
 		}
@@ -343,7 +357,7 @@ func (e *Executor) installPackages(ctx context.Context, sb sandbox.Sandbox, sid 
 			return err
 		}
 		ran++
-		rec.Packages = slices.Clone(entries)
+		rec.Digest = digest
 		rec.Attempts++
 		reason := packageFailureReason(res)
 		rec.Installed = reason == ""
@@ -359,7 +373,7 @@ func (e *Executor) installPackages(ctx context.Context, sb sandbox.Sandbox, sid 
 			slog.WarnContext(ctx, "packages not installed",
 				"session_id", sid, "manager", m.name, "reason", reason, "attempts", rec.Attempts)
 			e.emitPackageInstallError(ctx, sid, m.name, reason, packageMessage(res.Stdout),
-				rec.Attempts >= packageInstallAttempts)
+				digest, rec.Attempts >= packageInstallAttempts)
 		}
 		recs[m.name] = rec
 		writePackageSentinel(ctx, sb, sid, recs)
@@ -383,12 +397,20 @@ func packageFailureReason(res sandbox.ExecResult) string {
 	}
 }
 
-// packageMessage is the kept tail of a manager's own output on its way onto
-// the event log: NUL-stripped, because a NUL would fault the jsonb append and
-// a faulted item reclaim-loops; URL userinfo redacted; and bounded.
+// packageMessage is the kept tail of a manager's own output on its way onto the
+// event log: URL credentials redacted, NUL-stripped (a NUL would fault the
+// jsonb append and reclaim-loop the item), and bounded. This is the one
+// session.error whose text a sandbox controls (decision 4), so redaction is not
+// optional.
+//
+// redactURL is the MCP path's own redactor (mcpwork.go): it reduces every
+// http(s) URL to scheme://host, so a credential in the userinfo OR the query
+// (`?token=…`, a pip/npm convention) is dropped — not merely the userinfo up to
+// the first '@', which a password containing '@' would defeat and a query
+// credential would slip past entirely.
 func packageMessage(out string) string {
-	msg := toolset.SanitizeText(out)
-	msg = urlUserinfoRe.ReplaceAllString(msg, "$1***@")
+	msg := urlInText.ReplaceAllStringFunc(out, redactURL)
+	msg = toolset.SanitizeText(msg)
 	return toolset.TruncateRunes(msg, maxPackageMessage)
 }
 
@@ -446,19 +468,23 @@ func writePackageSentinel(ctx context.Context, sb sandbox.Sandbox, sid domain.ID
 }
 
 // emitPackageInstallError appends the session.error variant for a refused or
-// failed install, deduped on (manager, reason, retry_status.type) — a repeated
-// identical failure is one event, a reason flip is a new one, and the attempt
-// that exhausts the cap re-emits under the flipped retry_status. The work
+// failed install, deduped on (manager, reason, retry_status.type, digest) — a
+// repeated identical failure of the same list is one event, a reason flip is a
+// new one, the attempt that exhausts the cap re-emits under the flipped
+// retry_status, and a *different* list that fails the same way is a new event
+// rather than one the first list's history suppresses. The list identity is the
+// digest, mirroring the clone error's (resource_id, reason) key. The work
 // item's lease already makes this executor the session's single writer, so the
 // check-then-append needs no further guarding, and emission is best effort:
 // failing to record the error must not turn a tolerated install failure into a
 // failed run (the emitRepoCloneError precedent).
 //
-// The entry list is deliberately not carried: the environment's config already
-// holds it for a management key, while the events subtree is also readable
-// with an environment key, and the manager plus the output tail name what
-// failed (decision 4).
-func (e *Executor) emitPackageInstallError(ctx context.Context, sid domain.ID, manager, reason, message string, exhausted bool) {
+// The entry list itself is deliberately not carried — only its digest: the
+// environment's config already holds the list for a management key, while the
+// events subtree is also readable with an environment key, and the manager plus
+// the output tail name what failed (decision 4). digest is empty for the
+// sandbox-level reasons, which are the sandbox's rather than a list's.
+func (e *Executor) emitPackageInstallError(ctx context.Context, sid domain.ID, manager, reason, message, digest string, exhausted bool) {
 	// Required on every variant of the reference's error union. `exhausted`
 	// where nothing the session can do will change the answer: the attempt cap
 	// is spent, the entry is refused, or the sandbox itself cannot install.
@@ -467,16 +493,17 @@ func (e *Executor) emitPackageInstallError(ctx context.Context, sid domain.ID, m
 		retryStatus = "exhausted"
 	}
 	var already bool
-	// COALESCE, because the sandbox-level reasons carry no manager at all and
-	// a NULL would never compare equal to the '' this passes for them.
+	// COALESCE, because the sandbox-level reasons carry neither a manager nor a
+	// digest and a NULL would never compare equal to the '' this passes for them.
 	err := e.pool.QueryRow(ctx, `SELECT EXISTS(
 		SELECT 1 FROM events
 		 WHERE session_id = $1 AND type = 'session.error'
 		   AND payload->'error'->>'type' = $2
 		   AND COALESCE(payload->'error'->>'manager', '') = $3
 		   AND payload->'error'->>'reason' = $4
-		   AND payload->'error'->'retry_status'->>'type' = $5)`,
-		sid.String(), packageInstallErrorType, manager, reason, retryStatus).Scan(&already)
+		   AND payload->'error'->'retry_status'->>'type' = $5
+		   AND COALESCE(payload->'error'->>'packages_digest', '') = $6)`,
+		sid.String(), packageInstallErrorType, manager, reason, retryStatus, digest).Scan(&already)
 	if err != nil {
 		slog.WarnContext(ctx, "checking for an existing package install error failed",
 			"session_id", sid, "manager", manager, "err", err)
@@ -493,6 +520,11 @@ func (e *Executor) emitPackageInstallError(ctx context.Context, sid domain.ID, m
 	}
 	if manager != "" {
 		errObj["manager"] = manager
+	}
+	// A non-secret list fingerprint, so a client (and this dedupe) can tell one
+	// failing list from another. Absent for the sandbox-level reasons.
+	if digest != "" {
+		errObj["packages_digest"] = digest
 	}
 	payload, err := json.Marshal(map[string]any{"error": errObj})
 	if err != nil {

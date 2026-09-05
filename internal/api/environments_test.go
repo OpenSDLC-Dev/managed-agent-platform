@@ -665,6 +665,18 @@ func TestEnvironmentPackageEntriesValidated(t *testing.T) {
 		}
 	}
 
+	// A NUL entry is refused too — but by the request-wide rejectNULBody guard
+	// (wire.go), not this predicate, so it is a clean 400 naming the path rather
+	// than a 500 at the jsonb store. Pinned here so a future change to either
+	// guard cannot let a NUL through to Postgres.
+	nulConfig := map[string]any{"type": "cloud", "packages": map[string]any{"pip": []any{"pkg\x00"}}}
+	status, body := s.do(http.MethodPost, "/v1/environments",
+		map[string]any{"name": "nul-entry", "config": nulConfig})
+	wantErr(t, status, body, http.StatusBadRequest, "invalid_request_error")
+	if msg := errMessage(body); !strings.Contains(msg, "U+0000") {
+		t.Errorf("create with a NUL entry: message = %q, want it to name U+0000", msg)
+	}
+
 	// The reference's own pin examples, plus an entry whose '-' is not leading:
 	// the executor quotes each entry whole, so it is one argument either way.
 	good := map[string]any{
