@@ -683,10 +683,11 @@ three columns join that projection and pass into `createSessionInTx`. The manual
 the same on its own `FOR SHARE` re-read (`internal/api/deploymentruns.go:82-85`). The brain and
 executor consumers already re-read the session under a row lock at the top of every item
 (`internal/brain/brain.go:500-505`, `internal/executor/executor.go:916-920`), so scope joins
-those column lists at zero extra round trip — which is why **none** of `queue.Item` (`:93`),
+those column lists at zero extra round trip — which is why **none** of `queue.Item`
+(`internal/queue/queue.go:94`),
 `Claim`'s own `RETURNING` list (`internal/queue/queue.go:320-324`) or `workColumns` (`:170`,
 the wire projection every Work-returning query selects) grows a field. Those are three
-independent decisions and all three are "no" (§8-D6).
+independent decisions and all three are "no" (§8-D6, which cites the same declaration).
 
 ### 6.2 The human lane, and the header rule
 
@@ -857,11 +858,14 @@ scope predicate has exactly that shape. So `internal/api/scopematrix_test.go`:
 
 1. **Walks every non-test Go file in `internal/api`, `internal/events`, `internal/queue`,
    `internal/executor`, `internal/brain` and `internal/vaultresolve` from its first landing** —
-   the full target set, six packages. `internal/vaultresolve` is in it because rule (b′) names
-   it and its two statements (`credentials.go:139`, `mcp.go:85`) would otherwise sit
+   the target set **from slice 2**, six packages. `internal/vaultresolve` is in it because rule
+   (b′) names it and its two statements (`credentials.go:139`, `mcp.go:85`) would otherwise sit
    unclassified for four slices. Everything not yet scoped goes on the exemption list **with
-   the slice that fixes it named**, so the guard passes between slices and no package is added
-   by memory later.
+   the slice that fixes it named**, so the guard passes between slices. Slice 5 widens the walk
+   once, to every non-test file under `internal/` (§7.5) — which is what brings `internal/store`
+   into view, and why the two no-FK writers on the exemption list below sit outside the six
+   until then. That widening is a named step in a slice, which is the whole of the rule: **no
+   package is added by memory**, and none is added silently.
 2. **Derives the scoped-table set from `internal/store/migrations/*.sql`**, not from a
    hand-written list — the mechanism `internal/domain/docs_test.go` uses for the prefix set,
    and for the same reason (that kind of list has drifted twice). A bare `org_id` grep will not
@@ -1128,7 +1132,11 @@ it alone.
 **`EnsureAPIKey`'s archive-by-name needs the predicate.** `UPDATE api_keys SET status =
 'archived' WHERE name = $1 AND key_hash <> $2 AND status = 'active' AND created_by IS NULL`
 (`auth.go:129-132`) — without a workspace term, a bootstrap rotation in one workspace archives
-another's key of the same name.
+another's key of the same name. **This one lands in slice 5, not slice 1**, because its test
+cannot be written before then: the fixture needs two live env-var-managed keys of the same name
+in different workspaces, and `0024:77-78`'s `api_keys_one_live_unissued` is keyed on `name`
+alone until slice 5's `0036` rescopes it, so the second key cannot be inserted at all. The other
+two corrections above are testable on slice 1's schema and land there.
 
 ### 6.9 What archiving a workspace does, and does not do
 
@@ -1190,8 +1198,10 @@ fail-closed arm · the header rule (§6.2) · the two scope-derived response hea
 the five credential resolvers of §6.1 (`requireAPIKey`, `resolveEnvironmentKey` — the shared
 function, so both env-key middlewares carry it, `requireWorkToken`, `requireGateToken`,
 `requireIdentity`) after scope resolves, with
-`withRequestID` (`internal/api/server.go:699`) keeping only its request-id stamp · the three
-`EnsureAPIKey` corrections of §6.8, whose signature
+`withRequestID` (`internal/api/server.go:699`) keeping only its request-id stamp · the **two**
+`EnsureAPIKey` corrections of §6.8 this slice can test — the workspace-bearing conflict target
+and the `created_by` marker reaching the request; the third, the archive-by-name predicate,
+lands in slice 5 beside the migration that makes it testable (§6.8, §7.5) — whose signature
 gains the bootstrap key's workspace — `cmd/controlplane/main.go:128` is the only **production**
 call site and passes `(ctx, pool, "bootstrap", bootKey)` today, but 24 further call sites live
 in six `internal/api` test files and three more outside them (`acceptance/deployments_test.go:26`,
@@ -1223,8 +1233,7 @@ selecting one of the two → that workspace; with a header selecting a workspace
 (foreign or nonexistent) → the identical 404; with a header selecting an **archived** member →
 refused. ·
 `EnsureAPIKey`: re-configuring a value that exists in another workspace adopts it loudly and
-lands it in the configured workspace; a same-workspace rotation is unchanged; the archive-by-name
-does not touch another workspace's key of the same name. · Migration replay over a populated
+lands it in the configured workspace; a same-workspace rotation is unchanged. · Migration replay over a populated
 database leaves every row at `default` and inserts exactly one workspace. ·
 **`TestTenancyColumnsHaveSingleTenantDefaults` (`internal/store/store_test.go:636-651`) is
 extended from 3 tables to all 14** — widening the table loop at `:641`, which is an edit to that
