@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"regexp"
 	"strconv"
@@ -57,6 +58,16 @@ const packagesSentinelPath = "/tmp/.map-packages"
 // every tool call; a transient failure still gets two more chances
 // (decision 2).
 const packageInstallAttempts = 3
+
+// maxInstallCommandBytes bounds the assembled command handed to one Exec. It
+// is one execve argument, which Linux caps near 128 KiB (MAX_ARG_STRLEN); a
+// command past that faults at exec startup rather than running, and a fault
+// reclaim-loops the item. The API's per-manager byte cap does not bound this:
+// it counts entry bytes, while `go` emits one `go install` per entry (far more
+// than the entry's own bytes), and a row stored before that cap existed never
+// passed it. This is the backstop, set below the ceiling with room for the
+// pipefail/tail wrapper.
+const maxInstallCommandBytes = 120 << 10
 
 // packageOutputTailBytes is what the install command's own pipeline keeps —
 // the LAST bytes of the combined output, which is the failure, where Exec's
@@ -337,6 +348,20 @@ func (e *Executor) installPackages(ctx context.Context, sb sandbox.Sandbox, sid 
 				"an entry is empty or begins with '-', which a package manager reads as an option rather than a package", digest, true)
 			continue
 		}
+		// The assembled command is one execve argument, which Linux caps near
+		// 128 KiB. `go`'s per-entry amplification or a row stored before the
+		// API's byte cap existed can exceed it, faulting the install at exec
+		// startup and reclaim-looping the item. Refused terminally here, before
+		// the probe, exactly like an invalid entry.
+		cmd := m.command(entries)
+		if len(cmd) > maxInstallCommandBytes {
+			failed++
+			recordPackageInstalled(ctx, m.name, packageOutcomeInvalid)
+			e.emitPackageInstallError(ctx, sid, m.name, packageReasonInvalid,
+				fmt.Sprintf("the assembled install command is %d bytes, over the %d-byte exec-argument limit", len(cmd), maxInstallCommandBytes),
+				digest, true)
+			continue
+		}
 		// The probe is lazy: it costs an Exec, and a pass whose every manager
 		// is settled or refused must run none at all.
 		if !probed {
@@ -358,7 +383,7 @@ func (e *Executor) installPackages(ctx context.Context, sb sandbox.Sandbox, sid 
 		}
 		progress()
 		res, err := sb.Exec(ctx, sandbox.ExecRequest{
-			Command: m.command(entries),
+			Command: cmd,
 			Timeout: e.cfg.PackageInstallTimeout,
 		})
 		if err != nil {
@@ -417,10 +442,12 @@ func packageFailureReason(res sandbox.ExecResult) string {
 // the first '@', which a password containing '@' would defeat and a query
 // credential would slip past entirely. anySchemeUserinfoRe then drops the
 // userinfo of a non-http URL too (`git+ssh://token@…`, a legitimate pip/npm VCS
-// entry), which redactURL — anchored on `http(s)://` — does not reach. A query
-// credential in a non-http URL, and one whose `http(s)://` scheme the in-shell
-// `tail -c` cut off, are the residuals #599's out-of-band credential injection
-// closes at the source.
+// entry), which redactURL — anchored on `http(s)://` — does not reach. Three
+// residuals remain, all closed at the source by #599's out-of-band credential
+// injection: a query credential in a non-http URL; one whose `http(s)://` scheme
+// the in-shell `tail -c` cut off; and a run of trailing punctuation
+// (`.,:;!?)]}"'`) redactURL reattaches to keep the sentence readable, which
+// leaks only when a credential is made entirely of those characters.
 func packageMessage(out string) string {
 	msg := urlInText.ReplaceAllStringFunc(out, redactURL)
 	msg = anySchemeUserinfoRe.ReplaceAllString(msg, "$1***@")
@@ -429,11 +456,13 @@ func packageMessage(out string) string {
 }
 
 // anySchemeUserinfoRe matches the userinfo of a URL of any scheme, for the
-// non-http schemes redactURL leaves alone. The `[^\s/]+@` class is greedy and
-// stops only at the authority delimiter (`/`), so it consumes to the LAST `@`
-// before the host — a password containing `@` (`user:p@ss@host`) is dropped
-// whole, mirroring how a URL parser splits userinfo from host.
-var anySchemeUserinfoRe = regexp.MustCompile(`([a-zA-Z][a-zA-Z0-9+.\-]*://)[^\s/]+@`)
+// non-http schemes redactURL leaves alone. The class excludes every character
+// that ends an authority — `/`, `?` and `#` — so the greedy `+` runs to the
+// LAST `@` before the first of them: a password containing `@`
+// (`user:p@ss@host`) is dropped whole, while an `@` in a pathless query or
+// fragment (`scheme://host?owner=a@b`) ends the authority before the `@` and is
+// left alone, mirroring how a URL parser splits userinfo from host.
+var anySchemeUserinfoRe = regexp.MustCompile(`([a-zA-Z][a-zA-Z0-9+.\-]*://)[^\s/?#]+@`)
 
 // probeSandboxForPackages answers decision 7's question, returning the reason the pass
 // must be refused or "" to proceed. An answer the probe cannot have produced —

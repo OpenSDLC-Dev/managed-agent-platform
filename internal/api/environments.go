@@ -277,12 +277,14 @@ func parsePackages(raw json.RawMessage, base packagesJSON) (packagesJSON, error)
 			}
 			total += len(entry)
 		}
-		// The executor hands one manager's whole list to a single `bash -c`
-		// argument, and Linux caps one execve argument near 128 KiB. A list past
-		// that would fault the install at exec startup — and, faulting rather than
-		// failing, reclaim-loop the item — so it is refused here, well under the
-		// limit (quoting can quadruple a pathological entry). A real list is a few
-		// kilobytes.
+		// A fast bound on entry bytes: the executor hands one manager's whole
+		// list to a single `bash -c` argument, which Linux caps near 128 KiB, and
+		// a list past that faults at exec startup and reclaim-loops the item. This
+		// is not the whole guard — `go` expands to one invocation per entry, so
+		// the assembled command can exceed the ceiling while the entry bytes stay
+		// small; the executor bounds the assembled command itself
+		// (maxInstallCommandBytes). This cap keeps a request cheap to reject and a
+		// real list (a few kilobytes) well clear of both.
 		if total > maxPackagesManagerBytes {
 			return base, errInvalid("packages.%s is too large: %d bytes exceeds the %d-byte limit", manager, total, maxPackagesManagerBytes)
 		}

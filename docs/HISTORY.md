@@ -153,6 +153,19 @@ credentials at the source (out-of-band injection), which closes both and lets th
 computed over a credential-free form; the argv exposure is a property the `Exec` seam shares
 with every tool call, and is documented in docs/self-hosted-security.md meanwhile.
 
+A third pass over that commit fixed three more, each mutation-proved. The non-http
+userinfo redactor stopped at the first `@`, so a password containing `@` in a VCS URL
+leaked its tail — the class is now greedy to the first authority terminator (`/`, `?` or
+`#`), dropping the userinfo whole while leaving an `@` in a pathless query alone. The
+16 KiB per-manager cap the second pass added bounds entry bytes, not the assembled
+command: `go` emits one invocation per entry, so a small-byte list can still assemble a
+command past the single-`execve`-argument ceiling, as can a row stored before the cap
+existed and only now activated — the executor bounds the assembled command itself
+(`maxInstallCommandBytes`), recording a terminal `invalid` error rather than faulting into
+a reclaim loop. A third redaction residual joins #599's class: the trailing punctuation
+`redactURL` reattaches to keep a sentence readable leaks only when a credential is made
+entirely of those characters.
+
 Deferred: the reference's cross-session install cache — a per-environment image keyed on
 the packages hash, which Kubernetes has no build primitive for and which would join the
 sandbox adoption comparison — is #595, so packages install per sandbox here. Left open

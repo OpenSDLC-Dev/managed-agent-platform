@@ -384,6 +384,65 @@ func TestInstallFailureReasons(t *testing.T) {
 	}
 }
 
+// TestAnAssembledCommandTooLongForExecIsRefusedTerminally closes two gaps the
+// API's per-manager byte cap cannot: `go` emits one `go install` per entry, so a
+// list whose names sum under that cap still assembles a command far past the
+// ~128 KiB single-execve-argument ceiling; and a row stored before the cap
+// existed never passed it. Either would fault at exec startup and reclaim-loop
+// the item — the executor refuses it terminally instead.
+func TestAnAssembledCommandTooLongForExecIsRefusedTerminally(t *testing.T) {
+	entries := make([]string, 3000)
+	nameSum := 0
+	for i := range entries {
+		entries[i] = fmt.Sprintf("g%d", i)
+		nameSum += len(entries[i])
+	}
+	// The gap: the names sum well under the API's 16 KiB per-manager cap, yet
+	// `go`'s per-entry amplification puts the assembled command over the limit.
+	if nameSum >= 16<<10 {
+		t.Fatalf("test setup: name-sum %d is not under the API cap; use fewer entries", nameSum)
+	}
+	var goMgr packageManager
+	for _, m := range packageManagers {
+		if m.name == "go" {
+			goMgr = m
+		}
+	}
+	if got := len(goMgr.command(entries)); got <= maxInstallCommandBytes {
+		t.Fatalf("test setup: assembled command %d not over the %d limit; add entries", got, maxInstallCommandBytes)
+	}
+
+	sb := &fakeSandbox{}
+	h := newHarness(t, sb)
+	h.setPackages(t, map[string][]string{"go": entries})
+	h.suspend(t, writeUse("out.txt", "hello"))
+	h.stepOnce(t)
+
+	if got := installCmds(sb); len(got) != 0 {
+		t.Fatalf("install commands = %d, want none — refused before exec", len(got))
+	}
+	if n := probes(sb); n != 0 {
+		t.Errorf("probes = %d, want 0: a doomed manager is refused before the probe", n)
+	}
+	errs := h.packageErrors(t)
+	if len(errs) != 1 {
+		t.Fatalf("package errors = %d, want 1: %+v", len(errs), errs)
+	}
+	if errs[0]["reason"] != packageReasonInvalid || errs[0]["manager"] != "go" {
+		t.Errorf("error = %+v, want reason invalid on go", errs[0])
+	}
+	if rs, _ := errs[0]["retry_status"].(map[string]any); rs["type"] != "exhausted" {
+		t.Errorf("retry_status = %+v, want exhausted: nothing in the session's life shortens the command", rs)
+	}
+	if msg, _ := errs[0]["message"].(string); !strings.Contains(msg, "exec-argument limit") {
+		t.Errorf("message = %q, want it to name the exec-argument limit", msg)
+	}
+	// The pass committed rather than faulting: the item is not left to reclaim.
+	if n := len(h.types(t, "agent.tool_result")); n != 1 {
+		t.Errorf("tool results = %d, want 1: a terminal refusal commits the turn", n)
+	}
+}
+
 // TestAnInvalidEntryIsRefusedWithoutRunningAnything is decision 6's executor
 // half: the API refuses these at create, but a row stored before that rule must
 // be refused here rather than handed to a manager that would read it as an
@@ -516,6 +575,7 @@ func TestPackageMessageRedactsEveryCredentialForm(t *testing.T) {
 		{"query token", "GET https://host.example/simple?token=SECRETTOK 403", "SECRETTOK", "https://host.example"},
 		{"non-http scheme userinfo", "cloning git+ssh://deploy:KEY123@repo.example/x.git failed", "KEY123", "git+ssh://***@repo.example/x.git"},
 		{"non-http password with @", "cloning git+ssh://deploy:p@sSWORD@repo.example/x.git failed", "sSWORD", "git+ssh://***@repo.example/x.git"},
+		{"non-http pathless query, not userinfo", "cloning git+ssh://repo.example?owner=dev@example.net failed", "", "git+ssh://repo.example"},
 		{"nul", "boom\x00tail", "\x00", "boomtail"},
 		{"benign url kept as host", "could not reach https://pypi.org/simple/", "", "https://pypi.org"},
 	} {
