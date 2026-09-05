@@ -483,7 +483,7 @@ is why the clone-by-default, not the jail, is what bounds a prompt that fails (�
 
 ## 4. Architecture
 
-### 4.1 The runner — a controlplane sweep with no lease
+### 4.1 The runner — a controlplane sweep with no owner lease
 
 The runner is a **controlplane background sweep**, started beside the deployment
 scheduler and the retention job (`cmd/controlplane/main.go:208-213`), for the reasons
@@ -689,7 +689,7 @@ best-effort on the way out (`deleteOrphanedFile`, the handling `insertFile` give
 failed commit), and the next attempt mints fresh ids rather than reuse anything. A
 replica that crashes between the puts and the commit orphans up to 101 objects for that
 attempt, which the repository already accepts for files ("rare orphans accepted, GC a
-non-goal", `files.go:298-300`): unreferenced bytes, never a wrong answer.
+non-goal", `files.go:297-300`): unreferenced bytes, never a wrong answer.
 
 The reference reports `outputs[]` "shortly after" `running`; this platform reports it in
 the same commit, which no client can distinguish except by never seeing the empty-outputs
@@ -1120,8 +1120,10 @@ the renderer in `internal/transcript`; no test-support package is added, so the 
   the drop list, including a delegated session whose child report survives and whose send
   does not; the tool-result and input truncation; the elision marker; the four redaction
   patterns, each with a fixture that *forces* the substitution — a fixture the unredacted
-  code passes proves nothing — and one whose secret straddles the truncation point; the
-  per-transcript cap with the `INDEX.md` record of what was elided.
+  code passes proves nothing — one whose secret straddles the truncation point, and one
+  per source (each role's text, a tool input, a tool result, the `INDEX.md` preview,
+  `instructions`), as §3.2 requires; the per-transcript cap with the `INDEX.md` record of
+  what was elided.
 - **The hold (slice 4)**: two in-place dreams on one store, the second a 409 naming the
   first and carrying `x-should-retry: false`; the hold kept through every terminal status
   until the closing arm stamps `closed_at`, and released then — with the session deleted
