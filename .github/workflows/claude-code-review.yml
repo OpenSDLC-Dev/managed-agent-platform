@@ -12,12 +12,14 @@ on:
 
 jobs:
   claude-review:
-    # Optional: Filter by PR author
-    # if: |
-    #   github.event.pull_request.user.login == 'external-contributor' ||
-    #   github.event.pull_request.user.login == 'new-developer' ||
-    #   github.event.pull_request.author_association == 'FIRST_TIME_CONTRIBUTOR'
-
+    # Dependabot's PRs skip the review rather than fail it. A run Dependabot
+    # triggers sees only Dependabot secrets, so CLAUDE_CODE_OAUTH_TOKEN is
+    # empty there, and the action refuses a bot actor it was not told to
+    # allow — it failed #603 and #604 at that gate before reading a line.
+    # Nothing is lost: a SHA bump's check is `make pins-test`. The predicate
+    # is `github.actor` because that is what selects the secret source, so
+    # a maintainer's push to a Dependabot branch still gets reviewed.
+    if: github.actor != 'dependabot[bot]'
     runs-on: ubuntu-latest
     permissions:
       contents: read
