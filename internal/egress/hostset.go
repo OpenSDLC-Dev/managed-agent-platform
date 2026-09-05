@@ -127,13 +127,21 @@ func (s *HostSet) CoversEntry(entry string) bool {
 // and — because Engine.Substitute selects a credential through this same
 // matcher — collect that name's secret on the way out.
 //
-// Every entry on the matching side is already ASCII: ValidateHostEntry accepts
-// only letters, digits and "-" per label, and it is the single grammar for an
-// operator's allowed_hosts, a credential's, WEBTOOL_ALLOWED_DOMAINS and this
-// platform's own PackageRegistryHosts. So ASCII folding cannot cost a match that
-// should have happened — only a non-ASCII request host stops matching an ASCII
-// entry, which is the whole point. internal/vaultresolve's lowerHost and
-// internal/mcp's sameHost make the same argument for the same reason (#606).
+// Nearly every entry on the matching side is ASCII by construction:
+// ValidateHostEntry accepts only letters, digits and "-" per label, and it
+// guards a credential's allowed_hosts, the MCP endpoints the control plane
+// forwards, WEBTOOL_ALLOWED_DOMAINS and this platform's own
+// PackageRegistryHosts. An environment's networking.allowed_hosts is the
+// exception — parseNetworking stores that list as arbitrary strings — so an
+// operator can write a U-label there, and a differently-cased spelling of it
+// stops matching. That is a real narrowing, not none: it errs toward a refusal,
+// which is the direction this gate must err in, but the honest claim is
+// "narrows only into refusal", never "narrows nothing" (#609).
+//
+// internal/vaultresolve's lowerHost folds this way, for this reason.
+// internal/mcp's sameHost does not — it still compares with strings.EqualFold —
+// which is a sibling inconsistency rather than a second instance of this bug,
+// since its clients refuse redirects; #609 carries it.
 func NormalizeHost(h string) string {
 	h = strings.TrimSuffix(strings.TrimSpace(h), ".")
 	var b strings.Builder
