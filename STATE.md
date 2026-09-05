@@ -11,11 +11,11 @@ turn semantics, multiagent threads, memory stores, files, skills, vaults, deploy
 and permission gating; 2026-09-03 ran two waves, one free over console-cookie
 questions and one of 281 pairs against the tiers needing model spend, an environment
 key, or a resource we lacked; 2026-09-04 and 2026-09-05 followed up, the latter
-settling #594 with 80 host probes for US$0.09. #78 stays open past this work — 117
-registry entries still name it as their live tracker, and the debt is now analysis
-rather than recording: 72 comparison rows have never been read. Plan 38 (#263) archived
-2026-09-04, plan 39 (#566, Skills on the GA wire shape) with its delivering PR, and
-plan 40 (#353, environment packages, folding in #576) 2026-09-05 with its own.
+settling #594 for US$0.09. #78 stays open past this work — 117 registry entries still
+name it as their live tracker, and the debt is now analysis rather than recording: 72
+comparison rows have never been read. Plan 38 (#263) archived 2026-09-04, plan 39
+(#566, Skills on the GA wire shape) with its delivering PR, and plan 40 (#353,
+environment packages, folding in #576) 2026-09-05 with its own.
 
 ## Tasks
 
