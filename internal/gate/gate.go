@@ -119,18 +119,77 @@ type Gate struct {
 	tunnelIdle    time.Duration
 }
 
-// floorGuardKey marks a request only a widening flag admitted — the agent's own
-// MCP declarations, or the curated package registries. It rides the context
-// because the address floor has to run on the *resolved* address, which is the
-// dialer's business and not the handler's — a name that resolves into a refused
-// class, or one that resolves differently on the second lookup, is exactly what
-// a pre-dial check misses.
-type floorGuardKey struct{}
+// admissionKey carries how the policy admitted a request down to the dialer. It
+// rides the context because both things done with it happen below the handler:
+// the address floor has to run on the *resolved* address — a name that resolves
+// into a refused class, or differently on the second lookup, is exactly what a
+// pre-dial check misses — and the name is rooted at the moment it is dialled,
+// after the Host header and any TLS ServerName are already fixed from the
+// spelling the sandbox sent.
+type admissionKey struct{}
 
-// guardTheDial marks ctx so the dialer under it holds the connection to the
-// address floor.
-func guardTheDial(ctx context.Context) context.Context {
-	return context.WithValue(ctx, floorGuardKey{}, struct{}{})
+// withAdmission marks ctx with how the request was admitted.
+func withAdmission(ctx context.Context, a admission) context.Context {
+	return context.WithValue(ctx, admissionKey{}, a)
+}
+
+// admissionOf reads it back. An unmarked context reads as admitNone, which is
+// floored and unrooted: a dial that reached the dialler without passing admit
+// is the last one to hand an unfloored socket, and it carries no name anyone
+// vouched for to root.
+func admissionOf(ctx context.Context) admission {
+	a, _ := ctx.Value(admissionKey{}).(admission)
+	return a
+}
+
+// rootedName appends the trailing dot that makes a resolver answer a name
+// absolutely, skipping the `search` list and the `ndots` rule it would otherwise
+// try first (#596). It is applied to the dial address and nowhere else, so
+// nothing the origin sees changes.
+//
+// Everything that is not a resolvable multi-label DNS name is returned
+// untouched, because for those a trailing dot can only break:
+//   - what net.SplitHostPort refuses is left as it came. That is not a
+//     hypothetical branch: addrWithPort double-brackets an already-bracketed
+//     host, so a CONNECT to `[::1]` hands this `[[::1]]:443`, which
+//     SplitHostPort rejects and which the dial will fail on for its own
+//     reasons. Rooting must not be what turns that into a different failure.
+//   - an address literal has no name to resolve. A colon is the whole test for
+//     the IPv6 spellings — SplitHostPort has taken the brackets off by here, and
+//     a bracket cannot survive it — and it catches a zone-scoped `fe80::1%eth0`,
+//     which net.ParseIP rejects. What is left carrying a dot and no colon is
+//     IPv4, which ParseIP does answer for.
+//   - a name with no dot is left alone, which covers both a single label —
+//     where one resolves at all the search answer *is* the intended answer, so
+//     rooting it resolves nothing — and the empty host of an address like
+//     `:443`, which needs no test of its own.
+//   - a name already rooted is left alone, so this is idempotent.
+func rootedName(addr string) string {
+	host, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		return addr
+	}
+	if strings.HasSuffix(host, ".") || strings.Contains(host, ":") {
+		return addr
+	}
+	if !strings.Contains(host, ".") || net.ParseIP(host) != nil {
+		return addr
+	}
+	return net.JoinHostPort(host+".", port)
+}
+
+// rootedDial wraps the gate's one dialer so a dial the registry set alone
+// admitted resolves its name absolutely. It wraps the dialer rather than living
+// in the handlers because the transport under handlePlain dials on its own —
+// one wrapper is what covers both paths.
+func rootedDial(base func(ctx context.Context, network, addr string) (net.Conn, error),
+) func(ctx context.Context, network, addr string) (net.Conn, error) {
+	return func(ctx context.Context, network, addr string) (net.Conn, error) {
+		if admissionOf(ctx).rooted() {
+			addr = rootedName(addr)
+		}
+		return base(ctx, network, addr)
+	}
 }
 
 // newDialer is the one dialer the gate opens every socket through — both
@@ -147,7 +206,7 @@ func newDialer(ipAllowed func(net.IP) error) *net.Dialer {
 	return &net.Dialer{
 		Timeout: dialTimeout,
 		ControlContext: func(ctx context.Context, network, address string, c syscall.RawConn) error {
-			if ctx.Value(floorGuardKey{}) == nil {
+			if !admissionOf(ctx).floored() {
 				return nil
 			}
 			return floor(network, address, c)
@@ -161,7 +220,7 @@ func New(cfg Config) *Gate {
 	if ipAllowed == nil {
 		ipAllowed = dialguard.IPAllowed
 	}
-	dial := newDialer(ipAllowed).DialContext
+	dial := rootedDial(newDialer(ipAllowed).DialContext)
 	headerTimeout := cfg.ResponseHeaderTimeout
 	if headerTimeout <= 0 {
 		headerTimeout = defaultResponseHeaderTimeout
@@ -214,15 +273,12 @@ func (g *Gate) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 func (g *Gate) handleConnect(w http.ResponseWriter, r *http.Request) {
 	target := addrWithPort(r.Host, "443")
 	host, port := hostOnly(target), portOnly(target)
-	ok, widenedOnly := g.policy.admit(host, port)
-	if !ok {
+	how := g.policy.admit(host, port)
+	if how == admitNone {
 		http.Error(w, "host not permitted by the environment's networking policy", http.StatusForbidden)
 		return
 	}
-	ctx := r.Context()
-	if widenedOnly {
-		ctx = guardTheDial(ctx)
-	}
+	ctx := withAdmission(r.Context(), how)
 	upstream, err := g.dial(ctx, "tcp", target)
 	if err != nil {
 		http.Error(w, "cannot reach host", http.StatusBadGateway)
@@ -348,16 +404,13 @@ func (g *Gate) handlePlain(w http.ResponseWriter, r *http.Request) {
 	// carries the same two halves and is normalized the same way.
 	target := addrWithPort(r.URL.Host, defaultPort(r.URL.Scheme))
 	host, port := hostOnly(target), portOnly(target)
-	ok, widenedOnly := g.policy.admit(host, port)
-	if !ok {
+	how := g.policy.admit(host, port)
+	if how == admitNone {
 		http.Error(w, "host not permitted by the environment's networking policy", http.StatusForbidden)
 		return
 	}
 
-	ctx := r.Context()
-	if widenedOnly {
-		ctx = guardTheDial(ctx)
-	}
+	ctx := withAdmission(r.Context(), how)
 	out := r.Clone(ctx)
 	out.RequestURI = "" // must be empty on a client request
 	unreachable := map[string]struct{}{}

@@ -578,7 +578,23 @@ recording sizes them
 Neither flag reads `config.packages`; setting the flag is the whole grant. A
 request only a flag admits is held to the platform's own address floor (no
 loopback, no link-local, no cloud metadata) on the resolved address — which
-`allowed_hosts`, being your own list, deliberately is not. **For the default
+`allowed_hosts`, being your own list, deliberately is not. The registry list
+gets one thing more, because it is the list neither you nor an agent author
+wrote: its names are resolved **absolutely** — a trailing dot on the dial
+address alone, so nothing the origin sees changes — which keeps the gate's own
+`search` domains from sitting between the admission check and the connection,
+where a cluster answering `pypi.org.<search-domain>` out of an internal zone
+would turn a two-host grant into reach the list never gave
+([#596](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/596)).
+Your `allowed_hosts` and an agent's MCP endpoints resolve through your resolver
+exactly as before, because an in-cluster name there that only your search list
+completes — `nexus.infra`, say — is one somebody meant. For MCP that leaves a
+residual you should know about: a declaration's public-looking spelling is not
+a promise about where the session connects, and a credential is chosen for that
+name and then delivered wherever the dial lands — by the gate, substituting on
+plain HTTP, and by the executor on its own dial to the same URL
+([#601](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/601)).
+**For the default
 (non-`limited`) case, egress is unrestricted**: a default Docker sandbox
 gets `NetworkMode: bridge`, and the Kubernetes sandbox pod carries no
 `NetworkPolicy`. If your agents should not reach the open internet or your
