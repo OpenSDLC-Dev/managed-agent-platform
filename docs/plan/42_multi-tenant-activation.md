@@ -15,10 +15,11 @@ lines — those two, four doc-comment lines (`internal/store/store.go:36` and `:
 `internal/api/consoleapikeys.go:31` and `:48`) and one wire field (`:59`).* `internal/store/store.go:34` says the situation in as
 many words: "The schema also carries multi-tenancy it does not yet enforce".
 
-End state: **the workspace is a real isolation unit.** Every credential resolves to exactly
-one workspace at authentication time; every statement against a scoped table carries the
-scope triple as a predicate, is keyed on an id its own function already resolved under scope,
-or is a named exemption a reviewer signed off; every insert stamps it; every create-time cross-reference asserts
+End state: **the workspace is a real isolation unit.** Every request runs in exactly one
+workspace, its credential's or the one its header narrows to; every statement against a scoped
+table carries the scope triple as a predicate, is keyed on an id its own function already
+resolved under scope, or is a named exemption a reviewer signed off; every insert stamps it;
+every create-time cross-reference asserts
 the referenced row is in the caller's workspace; and a resource in another workspace is
 byte-identically indistinguishable from one that does not exist. The one deliberately-global
 worker read — the `/v1/skills/{id}` family on the environment-key and `wtk_` lanes
@@ -1567,7 +1568,7 @@ separate suite beside it.
 doc beside `config.go:26-29` for the two new `IDENTITY_*` names — **not**
 `docs/ARCHITECTURE.md:466`, which mentions only `IDENTITY_MODE` and enumerates neither existing
 name, so there is no list for them to join; if ARCHITECTURE is to carry them, `:465-470` — the
-bullet's sentence naming `IDENTITY_MODE` — is
+bullet's opening and its sentence naming `IDENTITY_MODE` — is
 *extended*. · Registry: **rewrite** `:47` — this plan's own PR already recast that entry to
 cover **both** halves (no response header; the request header accepted and ignored, with
 `server.go:699` cited and `Tracked: #56` naming this slice), so slice 1 rewrites it into the

@@ -28,6 +28,6 @@ tracker, and the debt is now analysis rather than recording. Plan 38 (#263) arch
       thirteen mismatches are now issues (#570-#574, #577-#579, #581-#582,
       #589-#591), the `list_cost` unit is on #432, and #576 is registered
 - [x] Record the multi-workspace capture plan 42 (#56) gated slice 1 on — items 1-5
-      in full, item 6 on its key lane; the gate lifts, one half stays unreachable
+      in full, item 6 on its key lane; the gate lifts, its environment-key half unobserved
 - [ ] Read the 72 un-analysed comparison rows from 2026-09-02 — the recording
       backlog is nearly exhausted and this one has never been touched
