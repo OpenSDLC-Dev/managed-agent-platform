@@ -7,13 +7,14 @@ import "slices"
 // grouped by ecosystem, which is also how it grows.
 //
 // Every entry was observed admitted on a `limited` environment with
-// `allowed_hosts: []` and the flag on, and observed refused on the same
-// environment with the flag off — so no host here is attributed to the flag
-// without its own control. Matching is by **exact host**: the same recording
-// refused `test-files.pythonhosted.org`, `test.pypi.org`, `pythonhosted.org`,
-// `npmjs.org`, `www.npmjs.com`, `registry.npmjs.com` and `golang.org` while
-// admitting their siblings, so there is no suffix rule to model and a HostSet
-// of plain names is the right shape.
+// `allowed_hosts: []` and the flag on, and observed refused on a sibling
+// environment of that same shape with the flag off — so no host here is
+// attributed to the flag without its own control. Matching is by **exact
+// host**: the same recording refused `test-files.pythonhosted.org`,
+// `test.pypi.org`, `pythonhosted.org`, `npmjs.org`, `www.npmjs.com`,
+// `registry.npmjs.com` and `golang.org` while admitting their siblings, so
+// there is no suffix rule to model and a HostSet of plain names is the right
+// shape.
 //
 // **Read the list before assuming what the flag means.** Two of its groups are
 // not package registries at all: it opens source forges — `github.com` included
@@ -24,12 +25,11 @@ import "slices"
 //
 // The list also does not track `config.packages`' six managers: Composer and
 // Maven are open though neither is one of them, while apt reaches Ubuntu's
-// archives and PPAs alone: Debian's three mirrors are refused, and so are five
-// more of Ubuntu's own. And the
-// widening is independent of what `config.packages` declares: across the
-// seventeen hosts that arm probed, an environment declaring
-// `npm: ["left-pad"]` admitted and refused exactly what one declaring
-// nothing did.
+// archives and PPAs alone — Debian's three mirrors are refused, and so are five
+// more of Ubuntu's own. And the widening is independent of what
+// `config.packages` declares: across the seventeen hosts that arm probed, an
+// environment declaring `npm: ["left-pad"]` admitted and refused exactly what
+// one declaring nothing did.
 //
 // **Thirty is a lower bound, not the reference's list.** Eighty hosts were
 // probed; these thirty answered. NuGet, Dart, Hex, CocoaPods, conda, Alpine,
