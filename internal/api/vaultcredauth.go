@@ -356,10 +356,12 @@ func parseCredNetworking(raw json.RawMessage) (json.RawMessage, error) {
 		if len(hosts) > credentialAllowedHosts {
 			return nil, errInvalid("allowed_hosts cannot exceed %d entries", credentialAllowedHosts)
 		}
-		for _, h := range hosts {
-			if err := validateAllowedHost(h); err != nil {
+		for i, h := range hosts {
+			e, err := canonicalAllowedHost(h)
+			if err != nil {
 				return nil, err
 			}
+			hosts[i] = e
 		}
 		return json.Marshal(struct {
 			Type         string   `json:"type"`
@@ -388,16 +390,24 @@ func validateEndpointURL(raw, field string) error {
 	return nil
 }
 
-// validateAllowedHost enforces the documented entry grammar: a bare hostname,
-// an IPv4 address, or a "*."-prefixed wildcard — no URLs, ports, paths, or
-// IPv6. (IPv4 is hostname-shaped, so one label check covers both.)
-func validateAllowedHost(h string) error {
+// canonicalAllowedHost enforces the documented entry grammar — a bare hostname,
+// an IPv4 address, or a "*."-prefixed wildcard, no URLs, ports, paths or IPv6
+// (IPv4 is hostname-shaped, so one label check covers both) — and returns the
+// form to store.
+//
+// An entry written as a Unicode name is stored as its A-label, so a credential
+// registered for "bücher.example" holds "xn--bcher-kva.example" and matches a
+// request however the sandbox spells that host. The reference's published
+// grammar names neither Unicode nor punycode, so both the acceptance and the
+// echo are ours and are registered in DIVERGENCES (plan 43, #609).
+func canonicalAllowedHost(h string) (string, error) {
 	// The grammar lives with its matcher (internal/egress, the shared
 	// HostSet); this wrapper only recasts the failure as a wire 400.
-	if err := egress.ValidateHostEntry(h); err != nil {
-		return errInvalid("%s", err)
+	e, err := egress.CanonicalEntry(h)
+	if err != nil {
+		return "", errInvalid("%s", err)
 	}
-	return nil
+	return e, nil
 }
 
 // timeField parses an optional RFC 3339 field; explicit null yields nil.

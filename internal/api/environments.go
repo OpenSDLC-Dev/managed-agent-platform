@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/egress"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 )
@@ -168,6 +169,15 @@ func checkPackagesNetworking(cfg cloudConfigJSON) error {
 // rejected — a typo'd allowed_hosts must not silently lock all egress open or
 // closed). When both the patch and prior are "limited", omitted fields keep
 // their prior values.
+//
+// Each allowed_hosts entry is held to the same grammar a credential's is, and a
+// Unicode entry is stored as its A-label (egress.CanonicalEntry). This list was
+// unvalidated until plan 43, which is why the check is on the entries the patch
+// carries rather than on the merged list: refusing an update because of what an
+// earlier one stored would take a stored environment's egress away over a row
+// nobody is touching. The reference publishes no grammar for this field and
+// documents no rejection for it, so the 400 is ours and is registered in
+// DIVERGENCES.
 func parseNetworking(raw, prior json.RawMessage) (json.RawMessage, error) {
 	var obj map[string]json.RawMessage
 	if err := json.Unmarshal(raw, &obj); err != nil || obj == nil {
@@ -203,6 +213,17 @@ func parseNetworking(raw, prior json.RawMessage) (json.RawMessage, error) {
 				}
 				if hosts == nil {
 					hosts = []string{}
+				}
+				// Only what this patch supplies. A stored list is left as it
+				// is — rows written before this check are not migrated (plan
+				// 43), so an update that does not touch allowed_hosts is never
+				// refused for what an earlier one stored.
+				for i, h := range hosts {
+					canonical, err := egress.CanonicalEntry(h)
+					if err != nil {
+						return nil, errInvalid("%s", err)
+					}
+					hosts[i] = canonical
 				}
 				out.AllowedHosts = hosts
 			case "allow_mcp_servers":

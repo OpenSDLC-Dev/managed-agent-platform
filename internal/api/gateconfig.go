@@ -251,7 +251,11 @@ func mcpEndpoint(raw string) (string, bool) {
 	if !ok {
 		return "", false
 	}
-	return egress.NormalizeHost(host) + ":" + port, true
+	// The same spelling the gate's endpointKey produces, by the same functions:
+	// a no-op beyond the fold today, because ValidateHostEntry above refuses a
+	// non-ASCII host, but the two sides must agree by construction rather than
+	// by both happening to see ASCII.
+	return egress.CanonicalHost(egress.NormalizeHost(host)) + ":" + port, true
 }
 
 // endpointPort is the port half of an endpoint: the url's own, or the one a

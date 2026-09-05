@@ -633,3 +633,48 @@ func TestARegistryRequestLeavesAHandlerRooted(t *testing.T) {
 		})
 	}
 }
+
+// handleConnect admits a host by its canonical name, so it has to dial that
+// name: the two can differ by a whole name rather than by case, and dialling
+// what the sandbox typed would leave every widening the canonical comparison
+// buys a promise the connection does not keep. handlePlain has no equivalent
+// row because it never calls Gate.dial with the request's authority —
+// net/http canonicalizes the address before the gate's dialler sees it, which
+// TestARegistryRequestLeavesAHandlerRooted already drives through both paths.
+func TestConnectDialsTheNameItAdmitted(t *testing.T) {
+	g := New(Config{Networking: domain.Networking{
+		Type:         domain.NetLimited,
+		AllowedHosts: []string{"xn--bcher-kva.example", "example.com"},
+	}})
+	var saw string
+	g.dial = rootedDial(func(_ context.Context, _, addr string) (net.Conn, error) {
+		saw = addr
+		return nil, errSpyDial
+	})
+
+	for name, tc := range map[string]struct{ authority, want string }{
+		"a U-label is dialled as the A-label that admitted it": {
+			"b\u00fccher.example:443", "xn--bcher-kva.example:443"},
+		"a soft hyphen is dropped rather than looked up": {
+			"exa\u00admple.com:443", "example.com:443"},
+		"an ideographic full stop is dialled as a dot": {
+			"example\u3002com:443", "example.com:443"},
+		"an ASCII host is dialled exactly as it was typed": {
+			"example.com:443", "example.com:443"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			saw = ""
+			r := httptest.NewRequest(http.MethodGet, "http://example.com/", nil)
+			r.Method, r.Host = http.MethodConnect, tc.authority
+			w := httptest.NewRecorder()
+			g.handleConnect(w, r)
+			if w.Code != http.StatusBadGateway {
+				t.Fatalf("CONNECT %s answered %d, want %d — the request never reached the dial",
+					tc.authority, w.Code, http.StatusBadGateway)
+			}
+			if saw != tc.want {
+				t.Errorf("CONNECT %s dialled %q, want %q", tc.authority, saw, tc.want)
+			}
+		})
+	}
+}

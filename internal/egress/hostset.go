@@ -17,6 +17,8 @@ import (
 	"fmt"
 	"net"
 	"strings"
+
+	"golang.org/x/net/idna"
 )
 
 // HostSet matches a request host against an allowed_hosts list in the grammar
@@ -37,19 +39,22 @@ type HostSet struct {
 }
 
 // NewHostSet builds a matcher from allowed_hosts entries. Entries are assumed to
-// have passed the API's validateAllowedHost; malformed entries simply never
-// match. A nil or empty list matches nothing.
+// have passed CanonicalEntry below; malformed entries simply never match. A nil
+// or empty list matches nothing.
 func NewHostSet(entries []string) *HostSet {
 	s := &HostSet{exact: make(map[string]struct{}, len(entries))}
 	for _, e := range entries {
+		// NormalizeHost first, for the trim that makes the prefix visible;
+		// CanonicalHost only after the "*." is off, because an asterisk is a
+		// disallowed rune to IDNA and would fail every wildcard entry.
 		e = NormalizeHost(e)
 		if rest, ok := strings.CutPrefix(e, "*."); ok {
-			if rest != "" {
+			if rest = CanonicalHost(rest); rest != "" {
 				s.suffixes = append(s.suffixes, rest)
 			}
 			continue
 		}
-		if e != "" {
+		if e = CanonicalHost(e); e != "" {
 			s.exact[e] = struct{}{}
 		}
 	}
@@ -66,7 +71,12 @@ func (s *HostSet) Match(host string) bool {
 	if s == nil {
 		return false
 	}
-	host = NormalizeHost(host)
+	// In this order, and not the other one: IDNA maps U+3002, U+FF0E and U+FF61
+	// onto ".", so canonicalizing *creates* label boundaries. A host led by an
+	// ideographic full stop carries no empty label as written and carries one
+	// once converted, and the converted string is exactly what this check exists
+	// to keep away from the "*.example.com" suffix test below.
+	host = CanonicalHost(NormalizeHost(host))
 	if host == "" || hasEmptyLabel(host) {
 		return false
 	}
@@ -99,6 +109,7 @@ func (s *HostSet) CoversEntry(entry string) bool {
 	}
 	entry = NormalizeHost(entry)
 	if rest, ok := strings.CutPrefix(entry, "*."); ok {
+		rest = CanonicalHost(rest)
 		if rest == "" || hasEmptyLabel(rest) {
 			return false
 		}
@@ -113,44 +124,33 @@ func (s *HostSet) CoversEntry(entry string) bool {
 }
 
 // NormalizeHost folds a host's case and strips a single trailing FQDN dot so
-// "Example.com." and "example.com" compare equal. Exported because the gate's
-// MCP endpoint set has to answer a host exactly the way this package's HostSet
-// does (internal/gate, policy.go) while staying an exact-match map.
+// "Example.com." and "example.com" compare equal. It folds **ASCII only**, the
+// way DNS does, and it never rejects anything.
 //
-// It folds **ASCII only**, the way DNS does, and that is the security-relevant
-// half. strings.ToLower folds by Unicode, and Unicode maps several non-ASCII
-// letters onto ASCII ones — it lowercases U+0130 (LATIN CAPITAL LETTER I WITH
-// DOT ABOVE) to plain "i", so "gİthub.com" and "github.com" would share one key.
-// They are not one host: Go's HTTP stack resolves the first through IDNA to
-// "xn--github-qyd.com", a name anyone may register. Folding by Unicode therefore
-// let a request to the IDN pass an admission check written for the ASCII name,
-// and — because Engine.Substitute selects a credential through this same
-// matcher — collect that name's secret on the way out.
+// It is not the comparison: CanonicalHost is, and callers deciding whether two
+// spellings name one host want that one. This is the trim CanonicalHost opens
+// with, the answer it gives for everything that is not a name, and the answer it
+// falls back to when canonicalization fails. It stays exported because the
+// gate's MCP endpoint set has to answer a host exactly the way this package's
+// HostSet does (internal/gate, policy.go) while staying an exact-match map.
 //
-// Nearly every entry on the matching side is ASCII by construction:
-// ValidateHostEntry accepts only letters, digits and "-" per label, and it
-// guards a credential's allowed_hosts, the MCP endpoints the control plane
-// forwards, WEBTOOL_ALLOWED_DOMAINS and this platform's own
-// PackageRegistryHosts. An environment's networking.allowed_hosts is the
-// exception — parseNetworking stores that list as arbitrary strings — so an
-// operator can write a U-label there, and a differently-cased spelling of it
-// stops matching. That is a real narrowing, not none: it errs toward a refusal,
-// which is the direction this gate must err in, but the honest claim is
-// "narrows only into refusal", never "narrows nothing" (#609).
-//
-// internal/vaultresolve's lowerHost and internal/mcp's sameHost fold this way,
-// for this reason; sameHost joined them in #609's first half. Only the folding
-// is shared — each also normalizes what its own callers need, and this one is
-// alone in trimming space and a trailing dot. The folds differ past a "%":
-// those two leave a scoped address's zone identifier exactly as written,
-// because it selects a local interface and is case-sensitive, while this one
-// folds its whole input, a zone identifier included. Read that as unaddressed
-// rather than impossible: an entry in the unvalidated networking.allowed_hosts
-// named above could carry one, and so could a CONNECT authority naming a scoped
-// address, and folding it would call two interfaces one (#609).
+// It folds its whole input, a port, a "*." prefix and an IPv6 zone identifier
+// included, where internal/vaultresolve's lowerHost and internal/mcp's sameHost
+// leave a zone exactly as written because it selects a local interface. Read
+// that as unaddressed rather than impossible: an entry in an environment's
+// networking.allowed_hosts could carry one, and so could a CONNECT authority
+// naming a scoped address, and folding it would call two interfaces one (#609).
 func NormalizeHost(h string) string {
-	h = strings.TrimSuffix(strings.TrimSpace(h), ".")
+	return foldASCII(strings.TrimSuffix(strings.TrimSpace(h), "."))
+}
+
+// foldASCII lowercases the ASCII letters of h and copies every other byte. No
+// non-ASCII code point's UTF-8 encoding contains a byte in 0x41-0x5A — lead
+// bytes are 0xC2-0xF4 and continuation bytes 0x80-0xBF — so the fold cannot
+// reach inside a multi-byte character, and it preserves length.
+func foldASCII(h string) string {
 	var b strings.Builder
+	b.Grow(len(h))
 	for i := range len(h) {
 		c := h[i]
 		if c >= 'A' && c <= 'Z' {
@@ -159,6 +159,114 @@ func NormalizeHost(h string) string {
 		b.WriteByte(c)
 	}
 	return b.String()
+}
+
+// maxCanonicalHost bounds what CanonicalHost will hand to IDNA. A sandbox writes
+// the CONNECT authority itself and net/http bounds that only by MaxHeaderBytes,
+// so a megabyte-long U-label is reachable: canonicalizing one costs tens of
+// milliseconds where the fold costs milliseconds. Nothing is lost by refusing to
+// spend that — a name this long cannot resolve.
+const maxCanonicalHost = 255
+
+// CanonicalHost returns the form of a host that two spellings of one name agree
+// on. It is the comparison this package, internal/vaultresolve and internal/mcp
+// share, and the reason it is not a case fold is that case folding is not what
+// makes two hostnames one name — IDNA is.
+//
+// Folding by Unicode is unsafe: strings.EqualFold merges the two Greek sigmas,
+// which Go's non-transitional lookup punycodes to "xn--4xa" and "xn--3xa", two
+// names that can belong to two people. Folding by ASCII is safe but withholds
+// far more than #611 claimed: it separates every orbit EqualFold merged that
+// IDNA also collapses, so "Ä.example" and "ä.example" are called two hosts when
+// they are one ("xn--4ca.example" either way), and so are "Д"/"д", U+212A and
+// "k", U+017F and "s". Comparing A-labels gets both directions right, and it is
+// injective on registrable names: sweeping all 1,112,064 code points through
+// idna.Lookup.ToASCII produced 140,873 distinct A-labels, none of which moved or
+// collided when fed back.
+//
+// What it must not do is rewrite strings that are not names. The Lookup profile
+// validates, and it refuses shapes this platform accepts today: ":" and "["
+// (an authority carrying its port, a bracketed or bare IPv6 literal), "_" (an
+// internal-DNS spelling), and — the surprise — a plain-ASCII label with hyphens
+// in positions 3 and 4, so "s3--us-west-2.example.com" errors while
+// ValidateHostEntry accepts it. Every one of those takes the fold, by the error
+// path below rather than by a guard of its own: a guard would have been dead
+// code, which mutation testing is how we found out. An IPv4 literal needs no arm
+// either way — idna returns it unchanged, measured.
+//
+// The error path is the sharp edge. ToASCII returns a value *and* an error, and
+// the value can be a different real hostname: "xn--pypi-.org" comes back as
+// ("pypi.org", err), so an implementation that canonicalizes and drops the error
+// makes an entry admit a domain nobody typed. The returned string is therefore
+// discarded whenever the error is non-nil, on the entry side and the lookup side
+// alike, so the two can never disagree about which alphabet they are in.
+//
+// The ASCII branch is a cost guard and nothing more, which is worth saying
+// plainly: an all-ASCII host either passes idna unchanged or is refused by it,
+// so removing that branch changes no output and no test can tell — it is there
+// because idna costs 128ns against the fold's 43ns on a path the gate runs for
+// every request. net/http has the same branch for the same reason, but its one
+// does not case-fold, so copying the function rather than the shape would undo
+// the fold #611 landed. Plan 43 argues the whole design.
+//
+// It folds but does not trim or de-root, so each caller keeps the normalization
+// its own callers need: this package pairs it with NormalizeHost, while
+// internal/mcp's sameHost deliberately does not, because a trailing dot there is
+// a difference that drops the token rather than sends it.
+func CanonicalHost(h string) string {
+	h = foldASCII(h)
+	if h == "" || len(h) > maxCanonicalHost {
+		return h
+	}
+	if isASCII(h) {
+		return h
+	}
+	a, err := idna.Lookup.ToASCII(h)
+	if err != nil {
+		return h
+	}
+	return a
+}
+
+// CanonicalEntry validates one allowed_hosts entry and returns the form to
+// store. An entry written as a Unicode name is stored as its A-label, so the
+// stored list holds one spelling per host and a later comparison needs no
+// conversion; an ASCII entry is returned exactly as written, because rewriting
+// those would change what every existing environment reads back for no gain.
+//
+// The wildcard prefix is cut before conversion and restored after, because an
+// asterisk is a rune IDNA refuses — which is also why CanonicalHost cannot be
+// handed a wildcard.
+func CanonicalEntry(h string) (string, error) {
+	e := h
+	if !isASCII(e) {
+		rest, wildcard := strings.CutPrefix(e, "*.")
+		a, err := idna.Lookup.ToASCII(rest)
+		if err != nil {
+			return "", fmt.Errorf("allowed_hosts entry %q is not a hostname: %w", h, err)
+		}
+		if wildcard {
+			a = "*." + a
+		}
+		e = a
+	}
+	if err := ValidateHostEntry(e); err != nil {
+		return "", err
+	}
+	return e, nil
+}
+
+// isASCII reports whether s is entirely ASCII. It selects CanonicalHost's cost
+// guard, never a different answer: for a valid ASCII name ToASCII returns the
+// fold's own string, and for the shapes it refuses the fold is what the error
+// path would have returned anyway.
+func isASCII(s string) bool {
+	for i := range len(s) {
+		if s[i] >= 0x80 {
+			return false
+		}
+	}
+	return true
 }
 
 // hasEmptyLabel reports whether host contains an empty DNS label — a leading dot,

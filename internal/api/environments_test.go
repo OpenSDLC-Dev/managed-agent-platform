@@ -1216,3 +1216,118 @@ func setWorkState(t *testing.T, s *tserver, envID, state string) {
 		t.Fatal(err)
 	}
 }
+
+// An environment's allowed_hosts is held to the same entry grammar a
+// credential's is, and a Unicode entry is stored as its A-label (plan 43,
+// #609). The list was unvalidated before, so both the refusal and the rewrite
+// are ours: the reference publishes no grammar for this field and documents no
+// rejection for it, and DIVERGENCES carries both.
+func TestEnvironmentAllowedHostsAreHeldToTheEntryGrammar(t *testing.T) {
+	s := newTestServer(t)
+	for name, tc := range map[string]struct {
+		entry, stored string // stored == "" means the entry is refused
+	}{
+		"a scheme is not a hostname":           {"https://x.example.com", ""},
+		"a port is not part of the name":       {"x.example.com:443", ""},
+		"an inner wildcard is not a prefix":    {"a.*.example.com", ""},
+		"a bare wildcard names nothing":        {"*", ""},
+		"an IPv6 literal is not accepted":      {"::1", ""},
+		"an underscore is not a hostname rune": {"_acme.example.com", ""},
+		"a malformed IPv4 is neither":          {"999.999.999.999", ""},
+		// A Unicode name IDNA itself refuses — a trailing hyphen inside the
+		// label — which the ASCII label loop alone would never have seen.
+		"a Unicode name IDNA refuses":   {"\u00e4-.example", ""},
+		"a bare hostname is kept":       {"api.example.com", "api.example.com"},
+		"case is not what makes a name": {"API.example.com", "API.example.com"},
+		"a wildcard keeps its prefix":   {"*.internal.example.com", "*.internal.example.com"},
+		"an IPv4 literal is a host":     {"192.0.2.1", "192.0.2.1"},
+		"a U-label is stored as its A-label": {
+			"b\u00fccher.example", "xn--bcher-kva.example"},
+		"a wildcard U-label is cut before it is converted": {
+			"*.B\u00dcCHER.example", "*.xn--bcher-kva.example"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			status, body := s.do(http.MethodPost, "/v1/environments", map[string]any{
+				"name": name,
+				"config": map[string]any{"type": "cloud", "networking": map[string]any{
+					"type": "limited", "allowed_hosts": []any{tc.entry}}},
+			})
+			if tc.stored == "" {
+				if status != http.StatusBadRequest {
+					t.Fatalf("%q: status %d, want 400 (%v)", tc.entry, status, body)
+				}
+				return
+			}
+			if status != http.StatusOK {
+				t.Fatalf("%q: status %d, want 200 (%v)", tc.entry, status, body)
+			}
+			if got := storedAllowedHosts(t, body); len(got) != 1 || got[0] != tc.stored {
+				t.Errorf("%q stored as %v, want [%q]", tc.entry, got, tc.stored)
+			}
+		})
+	}
+}
+
+// storedAllowedHosts reads the list back out of an environment response.
+func storedAllowedHosts(t *testing.T, body map[string]any) []string {
+	t.Helper()
+	cfg, _ := body["config"].(map[string]any)
+	nw, _ := cfg["networking"].(map[string]any)
+	raw, _ := nw["allowed_hosts"].([]any)
+	got := make([]string, len(raw))
+	for i, h := range raw {
+		got[i], _ = h.(string)
+	}
+	return got
+}
+
+// The grammar runs on the entries a patch supplies, never on the merged list.
+// Rows written before plan 43 are not migrated, so an update that leaves
+// allowed_hosts alone must not be refused for what an earlier one stored —
+// otherwise the check would take a working environment's egress away over a
+// field nobody is touching.
+func TestEnvironmentAllowedHostsCheckedOnThePatchNotTheStoredList(t *testing.T) {
+	s := newTestServer(t)
+	id := createEnvironment(t, s, map[string]any{"name": "pre-plan-43"})["id"].(string)
+	const legacy = `{"type":"cloud","networking":{"type":"limited",` +
+		`"allowed_hosts":["internal.corp:8080"],"allow_mcp_servers":false,` +
+		`"allow_package_managers":false},` +
+		`"packages":{"apt":[],"cargo":[],"gem":[],"go":[],"npm":[],"pip":[]}}`
+	if _, err := s.pool.Exec(context.Background(),
+		`UPDATE environments SET config = $2 WHERE id = $1`, id, legacy); err != nil {
+		t.Fatal(err)
+	}
+
+	// A patch that never mentions allowed_hosts goes through, and what the row
+	// holds survives it.
+	status, updated := s.do(http.MethodPost, "/v1/environments/"+id, map[string]any{
+		"config": map[string]any{"type": "cloud", "networking": map[string]any{
+			"type": "limited", "allow_mcp_servers": true}},
+	})
+	if status != http.StatusOK {
+		t.Fatalf("a patch that leaves allowed_hosts alone: %d %v", status, updated)
+	}
+	if got := storedAllowedHosts(t, updated); len(got) != 1 || got[0] != "internal.corp:8080" {
+		t.Errorf("the stored list became %v, want the row left as it was", got)
+	}
+
+	// A patch that does supply the list is held to the grammar...
+	status, body := s.do(http.MethodPost, "/v1/environments/"+id, map[string]any{
+		"config": map[string]any{"type": "cloud", "networking": map[string]any{
+			"type": "limited", "allowed_hosts": []any{"still.bad.example:443"}}},
+	})
+	if status != http.StatusBadRequest {
+		t.Fatalf("a patch supplying a bad entry: %d %v", status, body)
+	}
+	// ...and a good one replaces the row's list with the canonical spelling.
+	status, fixed := s.do(http.MethodPost, "/v1/environments/"+id, map[string]any{
+		"config": map[string]any{"type": "cloud", "networking": map[string]any{
+			"type": "limited", "allowed_hosts": []any{"b\u00fccher.example"}}},
+	})
+	if status != http.StatusOK {
+		t.Fatalf("a patch supplying a good entry: %d %v", status, fixed)
+	}
+	if got := storedAllowedHosts(t, fixed); len(got) != 1 || got[0] != "xn--bcher-kva.example" {
+		t.Errorf("the patched list = %v, want [\"xn--bcher-kva.example\"]", got)
+	}
+}

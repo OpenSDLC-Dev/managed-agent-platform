@@ -4,6 +4,11 @@ What is being worked on right now, and how far along it is — nothing else. **S
 
 ## Active work
 
+**Plan 43 (#609) — one host comparison, canonicalized.** Three hand-rolled ASCII
+case folds become one `egress.CanonicalHost` comparing IDNA A-labels, and an
+environment's `networking.allowed_hosts` — arbitrary strings until now — is
+validated on the way in. First half merged as #611; docs/plan/43 has the rest.
+
 **#78 — confirming documented wire assumptions against a real managed-agents
 endpoint.** Four recording days, 1,248 request/response pairs for about US$1.12, in
 a private archive: bytes observed once, at cost. 2026-09-02 covered the Work API,
@@ -11,23 +16,16 @@ turn semantics, multiagent threads, memory stores, files, skills, vaults, deploy
 and permission gating; 2026-09-03 ran two waves, one free over console-cookie
 questions and one of 281 pairs against the tiers needing model spend, an environment
 key, or a resource we lacked; 2026-09-04 and 2026-09-05 followed up, the latter
-settling #594 for US$0.09. #78 stays open past this work — 117 registry entries still
-name it as their live tracker, and the debt is now analysis rather than recording: 72
-comparison rows have never been read. Plan 38 (#263) archived 2026-09-04, plan 39
-(#566, Skills on the GA wire shape) with its delivering PR, and plan 40 (#353,
-environment packages, folding in #576) 2026-09-05 with its own.
+settling #594 for US$0.09. #78 stays open past this work: 117 registry entries name
+it as their live tracker, and 72 comparison rows have never been read.
 
 ## Tasks
 
-- [x] Correct the three wire behaviors 2026-09-02 proved wrong: work-API
-      cross-environment 403, agent-update null/empty-body no-op, interrupt result text
-- [x] Reconcile 2026-09-02 into the registry — three entries moved out of INFERRED
-      into CONFIRMED as argued divergences (#540, #541, #545), two proved to match
-      us outright, four registered readings were refuted, and ten mismatches now
-      belong to issues (#539, #542-#544, #546-#550, #553)
-- [x] Reconcile 2026-09-03's second wave — fifteen archive comparison entries
-      settled, two narrowed, one dissolved, touching 24 registry entries;
-      thirteen mismatches are now issues (#570-#574, #577-#579, #581-#582,
-      #589-#591), the `list_cost` unit is on #432, and #576 is registered
-- [ ] Read the 72 un-analysed comparison rows from 2026-09-02 — the recording
-      backlog is nearly exhausted and this one has never been touched
+- [x] Reconcile 2026-09-02 into the registry (#540, #541, #545 to CONFIRMED, four
+      registered readings refuted, ten mismatches now issues #539, #542-#544,
+      #546-#550, #553) and 2026-09-03's second wave (24 entries touched, thirteen
+      mismatches now #570-#574, #577-#579, #581-#582, #589-#591, `list_cost` on #432)
+- [x] Plan 43: `CanonicalHost` and `CanonicalEntry`, the five call sites, the
+      environment and credential `allowed_hosts` checks, the canonical CONNECT dial
+- [ ] Plan 43: verifier, dual review, PR, CI green, squash merge
+- [ ] Read the 72 un-analysed comparison rows from 2026-09-02

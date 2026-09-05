@@ -385,6 +385,12 @@ func TestCredentialValidationRules(t *testing.T) {
 			"networking": map[string]any{"type": "limited", "allowed_hosts": []string{"::1"}}},
 		"IPv4-mapped IPv6": {"type": "environment_variable", "secret_name": "K", "secret_value": "v",
 			"networking": map[string]any{"type": "limited", "allowed_hosts": []string{"::ffff:10.0.0.1"}}},
+		"underscore label": {"type": "environment_variable", "secret_name": "K", "secret_value": "v",
+			"networking": map[string]any{"type": "limited", "allowed_hosts": []string{"_acme.x.com"}}},
+		// A Unicode name IDNA itself refuses: the trailing hyphen is inside the
+		// label, where the ASCII grammar alone would never have looked.
+		"unicode name IDNA refuses": {"type": "environment_variable", "secret_name": "K", "secret_value": "v",
+			"networking": map[string]any{"type": "limited", "allowed_hosts": []string{"\u00e4-.example"}}},
 		"missing access_token":   {"type": "mcp_oauth", "mcp_server_url": "https://m.example.com"},
 		"mcp missing server_url": {"type": "mcp_oauth", "access_token": "at"},
 		"mcp bad server_url":     {"type": "mcp_oauth", "mcp_server_url": "notaurl", "access_token": "at"},
@@ -850,5 +856,31 @@ func TestCredentialList(t *testing.T) {
 	status, body = s.do("GET", "/v1/vaults/"+vaultID+"/credentials?include_archived=true", nil)
 	if status != http.StatusOK || len(body["data"].([]any)) != 2 {
 		t.Fatalf("include_archived: status %d (%v)", status, body)
+	}
+}
+
+// A credential entry written as a Unicode name is stored — and echoed — as its
+// A-label, so the stored list holds one spelling per host however the sandbox
+// later writes it (plan 43, #609). An ASCII entry is stored exactly as typed:
+// case is not what tells two names apart, and the matcher folds it.
+func TestCredentialAllowedHostsStoreTheALabel(t *testing.T) {
+	s := newTestServer(t)
+	vaultID := createVault(t, s, "idn")
+
+	auth := envVarAuth("IDN_KEY")
+	auth["networking"] = map[string]any{"type": "limited", "allowed_hosts": []string{
+		"b\u00fccher.example", "*.B\u00dcCHER.example", "API.example.com", "192.0.2.1"}}
+	body := createCredential(t, s, vaultID, auth)
+
+	nw := body["auth"].(map[string]any)["networking"].(map[string]any)
+	raw := nw["allowed_hosts"].([]any)
+	want := []string{"xn--bcher-kva.example", "*.xn--bcher-kva.example", "API.example.com", "192.0.2.1"}
+	if len(raw) != len(want) {
+		t.Fatalf("allowed_hosts = %v, want %v", raw, want)
+	}
+	for i, w := range want {
+		if raw[i] != w {
+			t.Errorf("allowed_hosts[%d] = %v, want %q", i, raw[i], w)
+		}
 	}
 }

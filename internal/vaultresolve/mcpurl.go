@@ -1,9 +1,12 @@
 package vaultresolve
 
 import (
+	"net"
 	"net/url"
 	"strconv"
 	"strings"
+
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/egress"
 )
 
 // normalizeMCPURL renders one URL into the form two of them are compared in, or
@@ -82,37 +85,34 @@ func normalizeMCPURL(raw string) (string, bool) {
 	return key, true
 }
 
-// lowerHost folds a host's case the way DNS does — ASCII only — leaving an IPv6
-// zone identifier alone.
+// lowerHost renders the host half of an authority in the form two spellings of
+// one host agree on, leaving an IPv6 zone identifier alone.
 //
-// ASCII only is the security-relevant half. strings.ToLower folds by Unicode, and
-// Unicode maps several non-ASCII letters onto ASCII ones: it lowercases U+0130
-// (LATIN CAPITAL LETTER I WITH DOT ABOVE) to plain "i", so "İ.example" and
-// "i.example" would share one key. They are not one host — Go's HTTP stack
-// resolves the first through IDNA to "xn--i-9bb.example" — so a credential
-// registered for the IDN would be selected for the ASCII domain and its token
-// sent there. Case folding a hostname is an ASCII operation; anything else is a
-// different name.
+// The comparison is egress.CanonicalHost, shared with internal/egress and
+// internal/mcp (#609, plan 43): ASCII case for a name IDNA has nothing to say
+// about, and the A-label otherwise, so a credential registered for
+// "bücher.example" is selected for a request written "BÜCHER.example" or
+// "xn--bcher-kva.example" and not for a different name that merely folds onto it
+// under Unicode. What this adds around it is the port split, because a
+// credential key carries the port and IDNA refuses a string holding one.
 //
 // The zone identifier is left as written for the same reason internal/mcp's
 // sameHost leaves it: it is locally significant and may distinguish two
 // interfaces that differ only in case.
 func lowerHost(host string) string {
-	end := len(host)
-	if i := strings.IndexByte(host, '%'); i >= 0 {
-		end = i
+	if h, p, err := net.SplitHostPort(host); err == nil {
+		return net.JoinHostPort(canonicalAddr(h), p)
 	}
-	var b strings.Builder
-	b.Grow(len(host))
-	for i := 0; i < end; i++ {
-		c := host[i]
-		if 'A' <= c && c <= 'Z' {
-			c += 'a' - 'A'
-		}
-		b.WriteByte(c)
+	return canonicalAddr(host)
+}
+
+// canonicalAddr canonicalizes a bare host, holding a scoped address's zone
+// identifier out of it.
+func canonicalAddr(h string) string {
+	if i := strings.IndexByte(h, '%'); i >= 0 {
+		return egress.CanonicalHost(h[:i]) + h[i:]
 	}
-	b.WriteString(host[end:])
-	return b.String()
+	return egress.CanonicalHost(h)
 }
 
 // matchesMCPServer reports whether a credential registered for credURL is the
