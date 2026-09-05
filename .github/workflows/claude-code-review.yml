@@ -16,9 +16,10 @@ jobs:
     # triggers sees only Dependabot secrets, so CLAUDE_CODE_OAUTH_TOKEN is
     # empty there, and the action refuses a bot actor it was not told to
     # allow — it failed #603 and #604 at that gate before reading a line.
-    # Nothing is lost: a SHA bump's check is `make pins-test`. The predicate
-    # is `github.actor` because that is what selects the secret source, so
-    # a maintainer's push to a Dependabot branch still gets reviewed.
+    # What a Dependabot PR keeps is `make pins-test`, the pin-shape check;
+    # that the SHA is the tagged commit stays the merger's to confirm. The
+    # predicate is `github.actor` because that is what selects the secret
+    # source, so a maintainer's push to a Dependabot branch is still reviewed.
     if: github.actor != 'dependabot[bot]'
     runs-on: ubuntu-latest
     permissions:

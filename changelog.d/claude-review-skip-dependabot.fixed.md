@@ -4,6 +4,8 @@
   refuses a bot actor unless allow-listed — so the `claude-review` check went red on #603 and
   #604 before reading a line of either diff, and would have on every Dependabot PR after them.
   The job now carries `if: github.actor != 'dependabot[bot]'`: the check is skipped rather than
-  failed, a SHA bump's real check stays `make pins-test`, and a maintainer's own push to a
-  Dependabot branch still gets reviewed, since `github.actor` is then the human. It is not a
-  required check, so nothing was ever blocked; the red X was noise.
+  failed, and a maintainer's own push to a Dependabot branch is still reviewed, since
+  `github.actor` is then the human. A Dependabot PR keeps `make pins-test`, which checks the
+  pin's shape, not that the SHA is the tagged commit — that stays the merger's to confirm.
+  Branch protection never required the check (only `ci` and `coverage` are), so nothing was
+  blocked; the red X was noise.
