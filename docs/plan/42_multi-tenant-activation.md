@@ -240,7 +240,7 @@ appeal to one.
 idx *N* for the console and environment-key lanes, `batch9.curl.txt:N` for the key lane, where
 *N* is the line the probe's `###PROBE` marker sits on. Both live in
 `OpenSDLC-Dev/managed-agents-wire-recordings` under `2026-09-05/`, alongside `FINDINGS8.md`,
-which carries the evidence and — for two claims — says plainly which bytes are *not* there.
+which carries the evidence and — for three claims — says plainly which bytes are *not* there.
 That repository is **private**, so these are working coordinates for someone who can open it
 rather than ones a public reviewer can re-check; every claim citing them is stated so that a
 re-recording of the same probe checks it. The `batchN.index.txt` beside each log maps probe
@@ -851,12 +851,14 @@ the credential already covers.
   status is **INFERRED** (tracked #78), and it is **distinct from decision 4's 403** — the 403
   is a missing server-side *configuration*, this is a missing per-request *selection*. §5's
   recording did **not** reach the reference's own answer for a multi-workspace key sent with no
-  header, the model this follows, so the status stays INFERRED. It did establish that such a
-  credential exists: an org-level key create refusing both discriminators names all three forms
-  — `Provide workspace_id (a workspace key), principal_id (an identity-linked key), or both (an
-  identity-linked key bound to a workspace).` — so the unbound `principal_id` form is the
-  multi-workspace class, and minting one needs a principal id this recording had no way to
-  obtain. Tracked #78.
+  header, the model this follows, so the status stays INFERRED. It did evidence that such a
+  credential exists, at one remove: an org-level key create refusing both discriminators names
+  all three forms — `Provide workspace_id (a workspace key), principal_id (an identity-linked
+  key), or both (an identity-linked key bound to a workspace).` — so the unbound `principal_id`
+  form is the multi-workspace class, and minting one needs a principal id this recording had no
+  way to obtain. That message is the third of FINDINGS8's three byte-less claims (§4.1): it is
+  recorded there as a session note, so this reading rests on the note rather than on retained
+  bytes. Tracked #78.
 - malformed → 400 `invalid_request_error`, the reference's message verbatim (§4.2). "Malformed"
   is a real check: `domain.ValidWithPrefix(v, domain.PrefixWorkspace)` or the literal
   `default`. **CONFIRMED** — the docs state this arm unconditionally, and 2026-09-05 records it
