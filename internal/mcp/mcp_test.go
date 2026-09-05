@@ -990,6 +990,32 @@ func TestBearerOriginComparison(t *testing.T) {
 		{name: "zone differing only in case", endpoint: "http://[fe80::1%25eth0]:8080/rpc", target: "http://[fe80::1%25ETH0]:8080/rpc"},
 		{name: "zone against no zone", endpoint: "http://[fe80::1%25eth0]:8080/rpc", target: "http://[fe80::1]:8080/rpc"},
 		{name: "address folds, zone does not", endpoint: "http://[FE80::1%25eth0]:8080/rpc", target: "http://[fe80::1%25eth0]:8080/rpc", attach: true},
+
+		// Case folding a hostname is an ASCII operation. Unicode's fold orbits
+		// merge characters that IDNA keeps apart, so folding the whole string
+		// calls two domains one origin and sends the bearer to the second. This
+		// transport sits above the IDNA encoding net/http does, so what it
+		// compares is the U-label, exactly as written here.
+		{name: "the two sigmas are two domains", endpoint: "http://\u03c3.example:8080/rpc", target: "http://\u03c2.example:8080/rpc",
+			wrong: "IDNA lookup is non-transitional, so these punycode to xn--4xa.example and xn--3xa.example"},
+		{name: "a long s is not an s", endpoint: "http://\u017ftrasse.example:8080/rpc", target: "http://strasse.example:8080/rpc",
+			wrong: "U+017F is in \"s\"'s fold orbit but not its IDNA mapping, so these are two registrable names"},
+		// The cost, pinned so nobody reverts the fold to buy it back. U+212A is
+		// folded onto "k" by IDNA as well as by Unicode, so these two really are
+		// one domain and the credential is withheld from it. A withheld bearer
+		// costs a 401; a wrongly-shared one costs the secret.
+		{name: "the Kelvin sign is the accepted cost", endpoint: "http://\u212a.example:8080/rpc", target: "http://k.example:8080/rpc",
+			wrong: "IDNA maps U+212A to k, so this withholds from the right server — accepted, because ASCII folding is what keeps the sigmas apart"},
+		{name: "an IDN still folds on its ASCII half", endpoint: "http://b\u00fccher.EXAMPLE:8080/rpc", target: "http://b\u00fccher.example:8080/rpc", attach: true,
+			wrong: "the ASCII letters of a mixed name must still fold, or the credential is withheld from its own server"},
+
+		// The zoned branch folds its address half too, and that half is not
+		// always hex: a percent-escaped host reaches this code with an ordinary
+		// name before the "%". url.Parse turns "http://ex%C5%BF%25z.test/" into
+		// the host "ex\u017f%z.test", so the pre-"%" comparison sees "ex\u017f"
+		// against "exs" — a pair Unicode folds together and IDNA does not.
+		{name: "the zoned branch folds its address in ASCII too", endpoint: "http://ex\u017f%25z.test:8080/rpc", target: "http://exs%25z.test:8080/rpc",
+			wrong: "folding the address half by Unicode merges two names that punycode differently, which is the leak this whole comparison exists to refuse"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()

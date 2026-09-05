@@ -1118,12 +1118,61 @@ func sameHost(a, b string) bool {
 	a, b = trimEmptyPort(a), trimEmptyPort(b)
 	az, bz := strings.IndexByte(a, '%'), strings.IndexByte(b, '%')
 	if az < 0 && bz < 0 {
-		return strings.EqualFold(a, b)
+		return asciiEqualFold(a, b)
 	}
 	if az < 0 || bz < 0 {
 		return false
 	}
-	return strings.EqualFold(a[:az], b[:bz]) && a[az:] == b[bz:]
+	return asciiEqualFold(a[:az], b[:bz]) && a[az:] == b[bz:]
+}
+
+// asciiEqualFold is strings.EqualFold restricted to ASCII, which is the whole of
+// what a hostname comparison is. It exists for the reason the zone identifier is
+// split off above, applied to the host itself: strings.EqualFold folds by
+// Unicode, and Unicode's fold orbits merge characters that IDNA keeps apart. It
+// equates the two Greek sigmas and the long s — "σ.example" with "ς.example",
+// "ſtrasse.example" with "strasse.example" — while Go's non-transitional IDNA
+// lookup punycodes each pair to two different A-labels. Two hosts that fold
+// together under Unicode can therefore be two different domains, and calling
+// them one origin is the leak direction: the bearer goes to the second.
+//
+// The cost is one case in the other direction, and it is deliberate. U+212A
+// (KELVIN SIGN) is folded onto "k" by both Unicode and IDNA, so "K.example" and
+// "k.example" really are one domain and this comparison now withholds the
+// credential from it. Withholding costs a 401; the sigma case costs the secret.
+//
+// Note the vulnerable pairs are the *fold orbits*, not the lowercase mappings:
+// strings.EqualFold does not merge U+0130 with "i" the way strings.ToLower does,
+// so the example that motivates internal/egress's NormalizeHost is not one here.
+// Comparing bytes is safe because ASCII folding preserves length, unlike a
+// Unicode one, and because no non-ASCII code point's UTF-8 encoding contains a
+// byte in 0x41-0x5A — lead bytes are 0xC2-0xF4 and continuation bytes 0x80-0xBF
+// — so the fold cannot reach inside a multi-byte character.
+//
+// internal/egress's NormalizeHost and internal/vaultresolve's lowerHost fold the
+// same way, for the same reason; this was the last of the three that did not
+// (#609). The zoned call above needs it as much as the unzoned one, which is
+// not obvious: a scoped IPv6 address is hex before the "%" and would fold the
+// same either way, but a percent-escaped host reaches that branch too —
+// url.Parse reads "http://ex%C5%BF%25z.test/" as the host "ex\u017f%z.test" —
+// so its address half can be an ordinary name after all.
+func asciiEqualFold(a, b string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range len(a) {
+		x, y := a[i], b[i]
+		if x >= 'A' && x <= 'Z' {
+			x += 'a' - 'A'
+		}
+		if y >= 'A' && y <= 'Z' {
+			y += 'a' - 'A'
+		}
+		if x != y {
+			return false
+		}
+	}
+	return true
 }
 
 // trimEmptyPort is net/http's removeEmptyPort, which is unexported there. The
