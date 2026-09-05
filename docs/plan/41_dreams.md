@@ -568,7 +568,7 @@ same transaction — the whole interrupt arm of `sendSessionEvents`
 transition the thread, wake a parent, update the outcomes), lifted into
 `interruptSessionInTx` and shared with the handler, never a bare event append, which
 would stop nothing. Arm 1, on a later tick, mirrors the final usage and archives the
-session once it is idle. That is the reference's "usage might continue to update for a
+session as soon as it is not `running`. That is the reference's "usage might continue to update for a
 few seconds" made concrete, and the same two-phase shape a `failed` dream's session gets.
 
 ### 4.2 The start arm
@@ -789,10 +789,11 @@ dream-aware executor seam — both are new surface for what an existing one alre
 | --- | --- | --- | --- | --- |
 | `completed` | `ended_at`, final `usage`, `error: null` | archived | as the pipeline left it | deleted |
 | `failed` | `ended_at`, `usage`, `error{type,message}` | interrupted if running, then archived | "left as-is with whatever was written before failure" | deleted |
-| `canceled` | `ended_at`, `usage` (refreshed by the next tick), `error: null` | interrupted, archived once idle | "left as-is" | deleted |
+| `canceled` | `ended_at`, `usage` (refreshed by the next tick), `error: null` | interrupted, archived once not running | "left as-is" | deleted |
 
 The session and file-row columns in every row are the closing arm's work (§4.1 arm 1):
-once the session is neither running nor rescheduling it is archived, the file rows and
+once the session is not `running` — `idle`, `terminated` or `rescheduling` alike, the
+set `requireNotRunning` admits — it is archived, the file rows and
 objects go, and `closed_at` is stamped — for `failed` and `canceled` exactly as for
 `completed`; a dream that never had a session (canceled, timed out or failed while
 `pending`) is closed in the same commit that ends it.
@@ -1031,7 +1032,7 @@ the renderer in `internal/transcript`; no test-support package is added, so the 
   stage cap, a terminated and a `rescheduling` session, a session deleted at the database
   level — each `error.type` or its absence; a planted secret in a written version failing
   completion; cancel of a pending dream (closed at once), cancel of a running one (the
-  interrupt runs, the archive waits for idle) and of a `rescheduling` one (archived by
+  interrupt runs, the archive waits for not-running) and of a `rescheduling` one (archived by
   the closing arm while still `rescheduling`; re-interrupted first if it turned `running`
   before the tick); and at every terminal the session archived, the file rows and
   their objects gone (`GET /v1/files/{id}` 404 *and* `blob.Get` not found) and `closed_at`
