@@ -1098,9 +1098,13 @@ scope predicate has exactly that shape. So `internal/api/scopematrix_test.go`:
    eleven names substituted for the fourteen.* Outside `internal/api` they ride rule (g)'s
    stand-in arm. Inside it, (g) asks each for its parent's scoped read in the same function, and
    **which ones already have it is what the guard's first run against the current tree reports**,
-   not what this plan lists by hand — §6.5 names only the two that fail outright
-   (`getMemoryVersion`, `getMemory`) because those two were found by reading, and finding the
-   rest that way is the job the mechanism exists to take over. Two members have **no** statement
+   not what this plan lists by hand. Reading found **seven** in-api routes that fail (g) today,
+   and they were found in two different places: `getMemoryVersion` and `getMemory` below, which
+   §7.4 fixes in slice 4, and the five §7.5 already enumerates for slice 5 — `getSkillVersion`
+   and `downloadSkillVersion`, which run no `skills` probe at all, and `getVaultCredential`,
+   `updateVaultCredential` and `validateVaultCredential`, which read `vault_credentials` with
+   no `vaults` read in the function. Seven found by reading, spread over two sections, is exactly
+   the job the mechanism exists to take over. Two members have **no** statement
    in the six packages at all: `session_gate_tokens` and `work_session_tokens` live in
    `internal/gatetoken` and `internal/worktoken`, which the walk reaches only when slice 5 widens
    it to every non-test file under `internal/`.
@@ -1117,10 +1121,12 @@ scope predicate has exactly that shape. So `internal/api/scopematrix_test.go`:
      same function*: they join `sessions` and take the scope predicate on that alias in the
      statement itself (slice 4). The skill-version reads (`internal/api/skills.go:641`, `:711`,
      `:868`) carry `skill_id` with no scope term and look like the same class, but they read
-     `skill_versions`, which declares none of the three — outside the target set (step 2), and
-     enforced instead at the `SELECT … FROM skills` parent probe each route runs: `skills.go:634`
-     for `listSkillVersions`, `:750` for `deleteSkillVersion`, and the same-shape probe slice 5
-     adds to `getSkillVersion` and `downloadSkillVersion`. **The check is `*ast.FuncDecl`-local,
+     `skill_versions`, which declares none of the three — an **unscoped child** (step 2), so it
+     leaves rule (b) for rule (g), which asks the same thing of it: the `SELECT … FROM skills`
+     parent probe each route runs, scoped, in the same function. `skills.go:634` for
+     `listSkillVersions` and `:750` for `deleteSkillVersion` have one; `getSkillVersion` and
+     `downloadSkillVersion` have none at all, which is why they are two of the seven routes (g)
+     fails today and why slice 5 adds the same-shape probe to both. **The check is `*ast.FuncDecl`-local,
      not file-local**: the guard walks each function and requires the scoped parent read to be
      present in that same body. A file-local check let a compliant statement in one function
      mask an unsafe statement of the same shape in another — the false negative this rule
@@ -1185,7 +1191,8 @@ scope predicate has exactly that shape. So `internal/api/scopematrix_test.go`:
      `c.vault_id = ANY($1)` on parent ids their caller resolved under scope, and
      `mcprefresh.go:222` and `:418` are keyed on a credential row's own id — an id those first
      two resolved. In `internal/api`, where the scope does reach the statement, only the scoped
-     parent read will do. Two routes fail it today, and slice 4 fixes both. `getMemoryVersion` (`internal/api/memoryversions.go:98`) reads
+     parent read will do. Seven in-api routes fail it today (step 2); slice 4 fixes the two here
+     and slice 5 the five §7.5 enumerates. `getMemoryVersion` (`internal/api/memoryversions.go:98`) reads
      `memory_versions` with no store probe anywhere in its body, defaulting to full content
      (`viewFull`), so a store id and version id from another workspace would return that
      workspace's memory verbatim. `getMemory` (`memories.go:317`) probes only on the **miss**
@@ -1209,7 +1216,7 @@ entries instead of auditing 211 statements. Its permanent members, **each its ow
 where this paragraph says otherwise, each with its reason:
 `queue.Claim` (`internal/queue/queue.go:300`) and the self_hosted gauge (the literal at
 `internal/queue/metrics.go:92`); the **deployment scheduler's background lane** — one entry for
-its **five** statements, none of which any rule can admit because the lane holds no credential
+its **six** statements, none of which any rule can admit because the lane holds no credential
 and the scope comes *out* of these reads rather than into them: on `deployments`, the due scan
 (`internal/api/deploymentscheduler.go:211-218`), the fire's `FOR SHARE` re-read (`:444-451`)
 and the failure `UPDATE` (`:534-536`); on `deployment_runs`, whose enrolment as an unscoped
@@ -1588,7 +1595,8 @@ slice 4 gives the predicate; the scheduler's claim does not, for the same creden
 reason its `deployments` statements do not, so it **joins the background-lane exemption**
 rather than sitting outside the rules. So do the two settle statements the earlier draft
 missed entirely — `UPDATE deployment_runs …` at `:524` and `:546`, both keyed on the run id
-the claim returned. That is five statements in one entry, not three, and it is the same fact
+the claim returned. That is six statements in one entry, not three — three on `deployments` and
+three on `deployment_runs` — and it is the same fact
 that makes §7.4 give the run list and the run get a join. Each carries the comment naming the
 scoped re-read it rides on, so none is silently unaccounted for.
 · `internal/store/store.go:34-42` corrected: the inheritance sentence gains its
@@ -1748,8 +1756,8 @@ shape: `errNotFound` with the message and status the absent id already gets — 
 nothing distinguishing "another workspace's" from "does not exist". **§5's recording confirmed
 this is the reference's own shape** (§4.3 item 1), so no correction is owed here. · `internal/api`'s
 reads come **off the exemption list** — again a shrinking list, not a growing target — and rule
-(b) starts refusing bare parent-id inheritance. · **The two
-unscoped-child routes rule (g) fails** (§6.5): `getMemoryVersion`
+(b) starts refusing bare parent-id inheritance. · **The two rule-(g) failures this slice owns**
+(§6.5 counts seven in all; the other five are §7.5's, in slice 5): `getMemoryVersion`
 (`internal/api/memoryversions.go:98`) gains the scoped `memory_stores` probe it has never had,
 and `getMemory`'s probe (`memories.go:322`) moves ahead of its read so a hit is checked as the
 miss already is. The probe is the existing `checkMemoryStore`, which slice 4 has just given the
