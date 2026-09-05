@@ -144,8 +144,10 @@ func (s *HostSet) CoversEntry(entry string) bool {
 // alone in trimming space and a trailing dot. The folds differ past a "%":
 // those two leave a scoped address's zone identifier exactly as written,
 // because it selects a local interface and is case-sensitive, while this one
-// folds its whole input. Nothing here selects an interface — a host reaching
-// this matcher is a name to be resolved.
+// folds its whole input, a zone identifier included. Read that as unaddressed
+// rather than impossible: an entry in the unvalidated networking.allowed_hosts
+// named above could carry one, and so could a CONNECT authority naming a scoped
+// address, and folding it would call two interfaces one (#609).
 func NormalizeHost(h string) string {
 	h = strings.TrimSuffix(strings.TrimSpace(h), ".")
 	var b strings.Builder

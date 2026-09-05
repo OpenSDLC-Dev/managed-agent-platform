@@ -1034,8 +1034,8 @@ func (t *limitedTransport) give(n int64) {
 // guarantees either way is narrower and is the part that matters: a credential
 // resolved for one server is offered to that server and to no other.
 //
-// The comparison is textual — scheme, and host case-insensitively — which every
-// way of being wrong fails closed. url.Parse lowercases the scheme and keeps
+// The comparison is textual — scheme, and host case-insensitively in ASCII —
+// which every way of being wrong fails closed. url.Parse lowercases the scheme and keeps
 // userinfo out of Host, so those cannot cause a false match; the forms that do
 // differ textually while naming the same origin (an explicit :443, a trailing
 // dot, a capital in a non-ASCII label) drop the token rather than send it, and
@@ -1136,11 +1136,17 @@ func sameHost(a, b string) bool {
 // belong to two people — so folding by Unicode calls two domains one origin and
 // the bearer goes to the second.
 //
-// Size the cost honestly: it is every cased non-ASCII letter, not a handful of
-// exotic ones. "Ä.example" and "ä.example" are one domain after IDNA
-// ("xn--4ca.example" either way) and this calls them two, as it does for U+212A
-// against "k" and U+017F against "s". It also stops calling two different
-// invalid UTF-8 bytes equal, which EqualFold does by decoding both to U+FFFD.
+// Size the cost honestly. It is not two exotic characters: it is every orbit
+// EqualFold merged that IDNA also collapses, which is most of them. "Ä.example"
+// and "ä.example" are one domain after IDNA ("xn--4ca.example" either way) and
+// this calls them two, as it does "Д"/"д", U+212A against "k", and U+017F
+// against "s". Two kinds of pair are outside it, in opposite directions: the
+// sigmas, the orbit IDNA does *not* collapse, which is the whole point; and
+// U+0130, which EqualFold never merged with "i" in the first place — that is a
+// lowercase mapping, not a fold orbit, so it costs nothing here even though it
+// is exactly the example that motivates internal/egress's NormalizeHost. The
+// change also stops calling two different invalid UTF-8 bytes equal, which
+// EqualFold does by decoding both to U+FFFD.
 //
 // Both the leak and the cost need an origin the caller did not spell: Connect
 // parses cfg.URL and hands that same string to the transport, so only a
@@ -1156,10 +1162,7 @@ func sameHost(a, b string) bool {
 // Comparing bytes is safe because ASCII folding preserves length, unlike a
 // Unicode one, and because no non-ASCII code point's UTF-8 encoding contains a
 // byte in 0x41-0x5A — lead bytes are 0xC2-0xF4 and continuation bytes 0x80-0xBF
-// — so the fold cannot reach inside a multi-byte character. Note also that the
-// vulnerable pairs are fold *orbits*, not lowercase mappings: EqualFold does not
-// merge U+0130 with "i" the way strings.ToLower does, so the example that
-// motivates internal/egress's NormalizeHost is not one here.
+// — so the fold cannot reach inside a multi-byte character.
 //
 // internal/egress's NormalizeHost and internal/vaultresolve's lowerHost fold the
 // same way, for the same reason; those three are what #609 audited, and it rules

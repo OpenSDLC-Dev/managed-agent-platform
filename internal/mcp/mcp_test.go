@@ -1000,13 +1000,13 @@ func TestBearerOriginComparison(t *testing.T) {
 		{name: "the two sigmas are two domains", endpoint: "http://\u03c3.example:8080/rpc", target: "http://\u03c2.example:8080/rpc",
 			wrong: "IDNA lookup is non-transitional, so these punycode to xn--4xa.example and xn--3xa.example — two names, two owners"},
 		// The cost, pinned so nobody reverts the fold to buy it back, and sized
-		// as what it is: every cased non-ASCII letter, of which UTS46's
-		// compatibility mappings for U+212A and U+017F are two further shapes.
-		// Each of these pairs really is one domain after IDNA, and the
-		// credential is now withheld from a server it was resolved for.
-		// Accepted deliberately: no byte-level rule separates these from the
-		// sigmas, and a withheld bearer costs a 401 where a shared one costs
-		// the secret.
+		// as what it is: every orbit EqualFold merged that IDNA also collapses,
+		// of which UTS46's compatibility mappings for U+212A and U+017F are two
+		// shapes and an ordinary capital is the common one. Each of these pairs
+		// really is one domain after IDNA, and the credential is now withheld
+		// from a server it was resolved for. Accepted deliberately: no
+		// byte-level rule separates these from the sigmas, and a withheld
+		// bearer costs a 401 where a shared one costs the secret.
 		{name: "a capital in a non-ASCII label is the cost's ordinary shape", endpoint: "http://B\u00dcCHER.example:8080/rpc", target: "http://b\u00fccher.example:8080/rpc",
 			wrong: "IDNA maps both to xn--bcher-kva.example, so this withholds from the right server — and it is the whole cased non-ASCII alphabet, not two exotic characters"},
 		{name: "the Kelvin sign is the accepted cost", endpoint: "http://\u212a.example:8080/rpc", target: "http://k.example:8080/rpc",
@@ -1015,14 +1015,20 @@ func TestBearerOriginComparison(t *testing.T) {
 			wrong: "IDNA maps U+017F to s, so this is strasse.example either way — a withhold, like the Kelvin row, not a prevented leak"},
 		{name: "an IDN still folds on its ASCII half", endpoint: "http://b\u00fccher.EXAMPLE:8080/rpc", target: "http://b\u00fccher.example:8080/rpc", attach: true,
 			wrong: "the ASCII letters of a mixed name must still fold, or the credential is withheld from its own server"},
-		// Both sides of the fold, and both directions of the length guard. Every
-		// row above spells the capitals on the endpoint side, so folding only
-		// one argument would pass them all while withholding from any request
-		// whose own URL carries capitals; and every length-differing row above
-		// has the request host the longer one, so a guard weakened to "request
-		// longer" would become a prefix match and pass them too.
-		{name: "the request side folds as well as the endpoint side", endpoint: "http://example.com:8080/rpc", target: "http://EXAMPLE.COM:8080/rpc", attach: true,
-			wrong: "the fold must apply to both arguments, or a request spelled in capitals is refused its own credential"},
+		// Both operands of the fold, its inclusive range, and both directions of
+		// the length guard — each of which a single token can break while every
+		// row above still passes. The hosts spell "A-Z" because that is the
+		// range: the rows above happen to carry an "A" but no "Z", so only the
+		// upper bound was actually unpinned. Every row above also spells its
+		// capitals on the endpoint side, so folding one operand and not the
+		// other passed them all while withholding from any request whose own
+		// URL carries capitals; and every length-differing row above has the
+		// request host the longer one, so a guard weakened to "request longer"
+		// would become a prefix match and pass them too.
+		{name: "the fold's range is inclusive at both ends, endpoint side", endpoint: "http://A-Z.example:8080/rpc", target: "http://a-z.example:8080/rpc", attach: true,
+			wrong: "the endpoint operand must fold the whole A-Z range, or a credential is withheld from its own server over a letter at the range's edge"},
+		{name: "the fold's range is inclusive at both ends, request side", endpoint: "http://a-z.example:8080/rpc", target: "http://A-Z.example:8080/rpc", attach: true,
+			wrong: "the fold must apply to both operands over the whole range, or a request spelled in capitals is refused its own credential"},
 		{name: "a request host is not admitted by being a prefix of the endpoint", endpoint: "https://example.com.evil.test/rpc", target: "https://example.com/rpc",
 			wrong: "the length guard must reject both directions; a prefix match would put evil.test's credential on a request to example.com"},
 
