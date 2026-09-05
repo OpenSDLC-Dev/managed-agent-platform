@@ -163,8 +163,8 @@ command past the single-`execve`-argument ceiling, as can a row stored before th
 existed and only now activated — the executor bounds the assembled command itself
 (`maxInstallCommandBytes`), recording a terminal `invalid` error rather than faulting into
 a reclaim loop. A third redaction residual joins #599's class: the trailing punctuation
-`redactURL` reattaches to keep a sentence readable leaks only when a credential is made
-entirely of those characters.
+`redactURL` reattaches to keep a sentence readable leaks a credential's trailing-punctuation
+suffix — its whole value only if the credential is nothing but those characters.
 
 Deferred: the reference's cross-session install cache — a per-environment image keyed on
 the packages hash, which Kubernetes has no build primitive for and which would join the

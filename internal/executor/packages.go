@@ -447,7 +447,8 @@ func packageFailureReason(res sandbox.ExecResult) string {
 // injection: a query credential in a non-http URL; one whose `http(s)://` scheme
 // the in-shell `tail -c` cut off; and a run of trailing punctuation
 // (`.,:;!?)]}"'`) redactURL reattaches to keep the sentence readable, which
-// leaks only when a credential is made entirely of those characters.
+// leaks a credential's trailing-punctuation suffix (its whole value only if the
+// credential is nothing but those characters).
 func packageMessage(out string) string {
 	msg := urlInText.ReplaceAllStringFunc(out, redactURL)
 	msg = anySchemeUserinfoRe.ReplaceAllString(msg, "$1***@")
