@@ -1126,20 +1126,25 @@ func sameHost(a, b string) bool {
 	return asciiEqualFold(a[:az], b[:bz]) && a[az:] == b[bz:]
 }
 
-// asciiEqualFold is strings.EqualFold restricted to ASCII, which is the whole of
-// what a hostname comparison is. It exists for the reason the zone identifier is
-// split off above, applied to the host itself: strings.EqualFold folds by
-// Unicode, and Unicode's fold orbits merge characters that IDNA keeps apart. It
-// equates the two Greek sigmas and the long s — "σ.example" with "ς.example",
-// "ſtrasse.example" with "strasse.example" — while Go's non-transitional IDNA
-// lookup punycodes each pair to two different A-labels. Two hosts that fold
-// together under Unicode can therefore be two different domains, and calling
-// them one origin is the leak direction: the bearer goes to the second.
+// asciiEqualFold is strings.EqualFold restricted to ASCII. That is not the whole
+// of what a hostname comparison is — two spellings IDNA maps onto one name still
+// compare false here — but it is the conservative half of one, and it errs in
+// the only direction this predicate may err in. It exists for the reason the
+// zone identifier is split off above, applied to the host itself: EqualFold
+// folds by Unicode, and some of those fold orbits merge characters that IDNA
+// keeps apart. The Greek sigmas are the case that matters — Go's
+// non-transitional lookup punycodes "σ.example" to "xn--4xa.example" and
+// "ς.example" to "xn--3xa.example", two names that can belong to two people —
+// so folding them together calls two domains one origin, and the bearer goes to
+// the second.
 //
-// The cost is one case in the other direction, and it is deliberate. U+212A
-// (KELVIN SIGN) is folded onto "k" by both Unicode and IDNA, so "K.example" and
-// "k.example" really are one domain and this comparison now withholds the
-// credential from it. Withholding costs a 401; the sigma case costs the secret.
+// Most fold orbits are not like that, and refusing them costs rather than
+// saves. UTS46 maps U+212A (KELVIN SIGN) and U+017F (LONG S) onto "k" and "s",
+// so "K.example" and "k.example", "ſtrasse.example" and "strasse.example", each
+// really are one domain, and this comparison now withholds the credential from
+// servers it was resolved for. That trade is deliberate and one-directional: a
+// withheld bearer costs a 401, a wrongly-shared one costs the secret, and no
+// byte-level rule can separate the sigma orbit from the other two.
 //
 // Note the vulnerable pairs are the *fold orbits*, not the lowercase mappings:
 // strings.EqualFold does not merge U+0130 with "i" the way strings.ToLower does,
@@ -1154,8 +1159,8 @@ func sameHost(a, b string) bool {
 // (#609). The zoned call above needs it as much as the unzoned one, which is
 // not obvious: a scoped IPv6 address is hex before the "%" and would fold the
 // same either way, but a percent-escaped host reaches that branch too —
-// url.Parse reads "http://ex%C5%BF%25z.test/" as the host "ex\u017f%z.test" —
-// so its address half can be an ordinary name after all.
+// url.Parse reads "http://ex%CF%83%25z.test/" as the host "ex\u03c3%z.test"
+// — so its address half can be an ordinary name, sigma and all.
 func asciiEqualFold(a, b string) bool {
 	if len(a) != len(b) {
 		return false
