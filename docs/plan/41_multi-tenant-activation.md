@@ -3,7 +3,7 @@ status: draft
 issue: "#56"
 ---
 
-# Multi-tenant activation — the workspace becomes a real scoping key (plan 40)
+# Multi-tenant activation — the workspace becomes a real scoping key (plan 41)
 
 Resolves **#56**. Today the reserved tenancy columns are decoration. Fourteen tables carry
 `org_id`/`workspace_id`/`project_id` as `text NOT NULL DEFAULT 'default'`; **exactly two
@@ -34,10 +34,11 @@ intermediate release can be misconfigured into a half-enforced multi-tenant depl
 is a sequencing property, not merely an ordering preference, and it is the plan's answer to
 "is an intermediate release leaky?".
 
-**Slice 1 does not start until the live recording of §5 exists.** This mirrors plan 31's own
-provision for #378: the console-key surface there was shaped by a real capture before it was
-built, and four entries in `docs/DIVERGENCES.md` still cite it — `:125`-`:128`. *Counting rule:
-`grep -c "#378" docs/DIVERGENCES.md` → 4.*
+**Slice 1 did not start until the live recording of §5 existed; it was taken 2026-09-05 and
+the gate is lifted** (§5.1). This mirrors plan 31's own provision for #378: the console-key
+surface there was shaped by a real capture before it was built, and four entries in
+`docs/DIVERGENCES.md` still cite it — `:125`-`:128`. *Counting rule: `grep -c "#378"
+docs/DIVERGENCES.md` → 4.*
 
 ---
 
@@ -68,10 +69,14 @@ built, and four entries in `docs/DIVERGENCES.md` still cite it — `:125`-`:128`
    grows an `OR caller_is_super` arm.
 6. **A live multi-workspace console/API recording will be made before slice 1** — an account
    action the user performs, in the shape of #378's 2026-08-13 capture. Slice 1 is gated on
-   it. §5 lists exactly what to capture and which entries it converts.
+   it. §5 lists exactly what to capture and which entries it converts. **Taken 2026-09-05;
+   all six items recorded, the gate lifted** (§5.1).
 7. **The reference's per-organization limits stay unenforced** — 100 workspaces, 500 GB of
    files, 1,000 scheduled deployments — re-argued on operator-owned capacity rather than on
-   single-tenancy. Enforcement belongs to #46.
+   single-tenancy. Enforcement belongs to #46. The recording adds a supporting fact the
+   decision did not have: the reference's *rate* limits are organization-wide too, one counter
+   decrementing across workspaces inside a window (§5.1), so per-workspace metering is not a
+   thing this platform is failing to mirror.
 8. **#56 lands first**, assuming independence from #46 and #550; whichever lands second
    inherits the other's tests. #56's own title carries the `(post-v1)` marker that CLAUDE.md
    makes the whole deferral list, so decision 1 is the explicit go-ahead that lifts it for this
@@ -231,6 +236,18 @@ this repo does not carry; the registry states no citation convention (its format
 sets none, and both styles appear in it), so this is a choice for new entries rather than an
 appeal to one.
 
+**The 2026-09-05 tenancy recording** (§5) is cited by file and entry index — `batch8.json`
+idx *N* for the console and environment-key lanes, `batch9.curl.txt:N` for the key lane, where
+*N* is the line the probe's `###PROBE` marker sits on. Both live in
+`OpenSDLC-Dev/managed-agents-wire-recordings` under `2026-09-05/`, alongside `FINDINGS8.md`,
+which carries the evidence and — for two claims — says plainly which bytes are *not* there.
+That repository is **private**, so these are working coordinates for someone who can open it
+rather than ones a public reviewer can re-check; every claim citing them is stated so that a
+re-recording of the same probe checks it. The `batchN.index.txt` beside each log maps probe
+name to index, which is how a citation survives a renumbering — as one already has: these two
+batches landed as 7 and 8, and were renumbered to 8 and 9 when another session's batch 7
+reached the repository first.
+
 Public docs fetched 2026-09-03 — the whole set this plan cites:
 `/docs/en/build-with-claude/workspaces`, `/docs/en/manage-claude/authentication`,
 `/docs/en/api/overview`, `/docs/en/managed-agents/skills` and
@@ -284,16 +301,19 @@ fetched page — slug, fetch date, quoted sentence (`docs/DIVERGENCES.md:147`, `
   any unknown workspace." **Two of that sentence's three arms are unconditional of any key** —
   the malformed value and the workspace that does not exist; the *access* arm names "the key's
   user or service account", i.e. an identity-linked key class decision 5 mints none of, which is
-  why §6.2's fourth bullet is INFERRED rather than CONFIRMED. A fourth arm, on the omission
+  why §6.2's fourth bullet was INFERRED from these pages alone. **§5's fourth item observed that
+  arm directly on a workspace-scoped key** and it holds there too, so the bullet is CONFIRMED
+  from the wire rather than from this sentence (§4.3 item 3). A fourth arm, on the omission
   side, is conditioned on that same class: "If a request made with a key that isn't scoped to a workspace omits
   the header, the API returns a 400 `invalid_request_error`" — "anthropic-workspace-id is
   required when authenticating with an identity-linked API key; send the id of the workspace
   this request acts in." (`:310-320`).
-- **What the docs do *not* say, and §6.2 therefore infers.** For the single-workspace class —
+- **What the docs do *not* say, and §6.2 therefore inferred.** For the single-workspace class —
   the one this platform mints — nothing records what a header naming a *different existing*
   workspace does. "Always runs there" and "Optional for other API keys" read as *inert*; the
   404 clause's second half ("the key's user or service account doesn't have access to it")
-  reads as *refused*. Both readings are live; §5 records this as the recording's fourth item.
+  reads as *refused*. Both readings were live until §5's fourth item settled them:
+  **refused, 404** (§4.3 item 3). The docs are still silent; the wire is not.
 - **Two response headers** (api/overview:128-129). `anthropic-organization-id`: "The ID of the
   organization that the API key or access token used in the request belongs to." — one
   sentence, **no absence rule recorded**. `anthropic-workspace-id`: "The `wrkspc_`-prefixed ID
@@ -325,8 +345,9 @@ fetched page — slug, fetch date, quoted sentence (`docs/DIVERGENCES.md:147`, `
   (`anthropic-cli/pkg/cmd/cmd_auth.go:62-65`). The tagged `org_011CZkZZAe0sMna4vkBdtrfx` is
   the **webhook body**'s `data.organization_id`, a payload field on a different surface (the
   spec's `BetaWebhookEvent` example, whose in-checkout twin the organization-behavior bullet
-  below cites). So the header's shape rests on one documented example rather than a stated
-  rule, and §5 item 3 records on the live wire the value that example illustrates.
+  below cites). So the header's shape rested on one documented example rather than a stated
+  rule; **§5 item 3 recorded the live wire and it is that shape** — a bare UUID, on both lanes
+  (§4.3 item 4).
 - **Workspace-scoped resources.** The doc's list is explicitly non-exhaustive: "Resources
   scoped to workspaces **include**: Files … Message Batches … Skills" (`:828-832`). The same
   page carries the plan's best managed-agents evidence, uncited by the sizing that preceded
@@ -362,7 +383,8 @@ fetched page — slug, fetch date, quoted sentence (`docs/DIVERGENCES.md:147`, `
   `POST /v1/organizations/workspaces/{id}/archive` (`:355`). **The refusal is documented; its
   status is not** — the only status either page gives is for an *expired* key ("After a key
   expires, requests made with it return a `401 authentication_error`"), which is what §6.1
-  aligns to and §5's last item exists to record. **The Default Workspace is exempt from
+  aligned to and **§5's last item recorded: that same 401 `authentication_error`, with the
+  unknown-key message verbatim** (§6.1). **The Default Workspace is exempt from
   archiving entirely**: it "cannot be renamed, archived, or deleted" (workspaces doc, re-read
   2026-09-05, the FAQ repeating it verbatim), the rule §7.6's archive handler mirrors.
 - **Four archive/disable schemas**, verified by name in the fetched spec: two pause reasons
@@ -435,11 +457,23 @@ fetched page — slug, fetch date, quoted sentence (`docs/DIVERGENCES.md:147`, `
   project plumbing, and three memory-store path examples
   (`betamemorystorememory.go:208`, `:342`, `:418`).
 
-### 4.3 NOT OBSERVED, and therefore INFERRED wherever this plan decides it
+### 4.3 What was NOT OBSERVED — and what the 2026-09-05 recording answered
+
+Five gaps stood open when this plan was drafted. **§5's recording ran on 2026-09-05 and closed
+all five** — the four it was scoped for, and the fifth as a by-product. Each is stated as the
+question it was, then the answer and where the bytes are. None of them changed the
+architecture; the plan changes they *did* force are listed in §5.
 
 1. The status and message for a **cross-tenant resource id** on a managed-agents route (the
    SDK states the `memory_store_id` requirement without its rejection; the only recorded
    mismatch status is `fallback_credit_token`'s 400, on a different kind of value).
+   → **404 `not_found_error`, and indistinguishable from an absent id.** Workspace B reading
+   A's memory store and reading an id that exists nowhere produce the same status, the same
+   error type and the same message template, differing only in the id the caller supplied
+   (`batch8.json` idx 5, 7). A session create naming a foreign `environment_id` and one naming
+   an absent one likewise agree (idx 18, 19). Both families answer the same way, so the
+   per-field/uniform question is settled uniform. **CONFIRMED**, and §7.4's byte-identical-404
+   and D10 stand as written.
 2. Whether an **environment Bearer key resolves a workspace on the work routes**, and how a
    foreign `anthropic-workspace-id` answers there. The spec's `authorization` parameter on
    those paths has no description, and both header names are absent from the spec entirely. The
@@ -447,19 +481,43 @@ fetched page — slug, fetch date, quoted sentence (`docs/DIVERGENCES.md:147`, `
    named scopes**, two of them workspace-level (`workspace:developer`, `workspace:skills`), and
    admission is per route rather than per API (`docs/DIVERGENCES.md:163`). So a workspace
    dimension exists on that credential; whether a *response* names it, and what a foreign header
-   does there, are still unobserved.
+   does there, were still unobserved.
+   → **It does not, and the work lane ignores the header entirely.** The mint response grants
+   `{"type": "ccr_env", "actions": ["poll","list","stats"], "environment_id": …}` with no
+   workspace in it (`batch8.json` idx 37); a successful poll carries `request-id` and **neither**
+   tenancy header (idx 27); and a foreign, own or malformed `anthropic-workspace-id` all return
+   200 (idx 28-30) where the same malformed value is a 400 on the key lane. **CONFIRMED**, and
+   it is the strongest possible support for §6.1's choice to derive that lane's scope from the
+   `environments` row: the reference's own credential carries no workspace to derive from.
 3. What a **single-workspace key sending a header naming another existing workspace** does —
    200-ignored ("always runs there") or 404 (the access clause). §4.2 names both readings.
+   → **404**, the access clause, not 200-ignored (`batch9.curl.txt:24`). The other arms, in
+   full bytes: malformed → 400 with the documented message verbatim (`:63`), an unknown but
+   well-formed `wrkspc_` id → 404 (`:79`), an empty value → 200 ignored (`:111`), the key's own
+   workspace → 200 (`:40`). **CONFIRMED**, and §6.2's narrow-only rule now mirrors an observed
+   refusal rather than choosing between two readings.
 4. Which **organization-id format** the response header carries **on the live wire** — the
-   workspaces doc illustrates a bare UUID in its own example (§4.2), so §5 item 3 confirms
-   that shape rather than discovering it.
+   workspaces doc illustrates a bare UUID in its own example (§4.2), so §5 item 3 was expected
+   to confirm that shape rather than discover it.
+   → **A bare UUID**, on both the cookie and key lanes (`batch8.json` idx 0,
+   `batch9.curl.txt:1`). Its companion `anthropic-workspace-id` is the `wrkspc_` form and names
+   the workspace the request resolved to, not the one it asked for. **CONFIRMED**; §7.1 needs
+   no INFERRED format fallback.
 5. When **`anthropic-organization-id` is absent** — the docs give absence conditions for the
    workspace header only, so emitting the two on one schedule is a choice, not a mirrored rule.
+   → **The reference stamps by how far the request got, in four tiers**, and `batch8.json`
+   sorts into them without a remainder: anything that reached the route carries the rate-limit
+   headers *and* both tenancy headers, 2xx and 4xx alike (idx 0, 1, 3, 5, 6, 7, 12, 18, 19);
+   field-level validation carries the two tenancy headers only (idx 8, 9); a body-parse failure
+   carries nothing but `request-id` (idx 10, 11, 13-17, 20, 21); a pre-auth 401 carries nothing
+   at all (idx 2). **It is also per route**: `/v1/environments` returns **200 with none of them**
+   (idx 4, 23, 26) while `/v1/memory_stores` and `/v1/agents` on the same lane seconds apart
+   carry the full set. So our one schedule remains **ours** — but it is now a documented
+   simplification of an observed rule rather than an unmirrored invention, and the registry
+   entry says which.
 
-Items 1-4 are what §5's recording exists to close. Item 5 is registered as ours. §5 carries two
-further observations with no entry here: the console's own workspace administration (its item 5,
-which gates slice 6) and the status an archived workspace's credential is refused with (item 6,
-whose absence from the reference's pages §4.2 records in place).
+§5's two further items are answered in place: the console's own workspace administration (its
+item 5, which gates slice 6) at §7.6, and the archived-workspace refusal (item 6) at §6.1.
 
 ### 4.4 Platform as-is
 
@@ -578,7 +636,11 @@ plan carries the corrections so the verifier's docs rung does not flag them:
    --include=*.go <pkg>` minus `_test.go` lines.* Create-time
    cross-references are ~16 sites, not 6, and **three have no existing site at all** (§7.4).
 
-## 5. Recording needed before slice 1
+## 5. The recording that gated slice 1 — taken 2026-09-05
+
+> **Done. The gate is lifted** — §5.1 has the outcome and what it changed. What follows is the
+> specification the recording was run against, kept because each item names what its
+> observation converts, and §4.3's answers are keyed to those items.
 
 Decision 6. This is an account action creating real credentials in a real organization, in the
 shape of #378's 2026-08-13 console capture, so only the user can perform it. **Slice 1 does not
@@ -643,6 +705,44 @@ refusal, its per-statement-kind assertions and D10's split of refusal answers ar
 it, and the slice-4 PR must carry the correction. Items 2-6 change registry entries and one
 acceptance step, not the architecture.
 
+### 5.1 Done, 2026-09-05 — the gate is lifted
+
+**All six items were recorded; slice 1 is unblocked and slice 6's item 5 is answered too.**
+07:13:03Z-07:43:18Z, at US$0 — every probe is a control-plane call, and no model turn ran.
+Three throwaway workspaces (`plan40-tenancy-recording-A/B/C`) were created and archived inside
+the half hour; three credential lanes were driven, the third of them by `curl` because a
+browser cannot reach it (CORS preflight on `POST` to `api.anthropic.com` answers 405, and
+script may read only two response headers on a `GET`). Every credential minted — three
+workspace API keys, two environment tokens — was revoked or archived and its death verified.
+`batch8.json`, `batch9.json`, `batch9.curl.txt` and `FINDINGS8.md`, cited as §4.1 sets out.
+
+**Item 1 came back a 404**, so the architecture stands unchanged: §7.4's byte-identical-404
+refusal, its per-statement-kind assertions and D10 are all as drafted, and no slice-4
+correction is owed. What the recording *did* change:
+
+- **§4.3's five open items are all CONFIRMED**, with the fifth — the header schedule — turning
+  out to be answerable after all. Our one schedule stays ours, now as a stated simplification
+  of a four-tier, per-route rule rather than an unmirrored invention.
+- **§6.1's archived-workspace refusal is CONFIRMED** at exactly the status it was aligned to.
+- **§7.6's two console routes are confirmed in shape**, not merely in placement, so the
+  contingency in item 5 above — registering them as ours in shape — does not fire.
+- **One new deliberate divergence**, from item 4's bytes: the reference's foreign-workspace 404
+  echoes a *decoded UUID* rather than the id it was sent, and produces one even for an id
+  belonging to no workspace. Ours echoes what it was given. §6.2 states the rule; the registry
+  carries the entry.
+- **Three findings nobody asked for**, none of which changes a slice: rate-limit buckets are
+  organization-wide rather than per workspace (which is decision 7's premise, now evidenced
+  rather than assumed); `/v1/environments` stamps no tenancy headers even on 200; and the
+  literal string `default` is *rejected* in `anthropic-workspace-id`, so this platform
+  accepting it (§7.1) is genuinely ours and is registered as such.
+
+**One half of item 6 is NOT OBSERVED and stays so**: an *environment* key belonging to an
+archived workspace. The console's mint endpoint could not reach an environment in a
+non-default workspace, so no environment token was ever bound to a workspace that could then
+be archived. §6.1's rule covers both lanes; only the key lane is confirmed. Tracked as part of
+#56's own recording debt rather than #78's, because it needs this plan's own two-workspace
+setup to ask.
+
 ## 6. Architecture
 
 ### 6.1 The scope, and where it enters
@@ -669,11 +769,16 @@ omission reads as deliberate. Tokens 3 and 4 never declare a tenant; they inheri
 
 **An archived workspace fails the resolution.** A credential resolving to a workspace with
 `archived_at` set is refused exactly as an inactive key is: 401 `authentication_error` on the
-key lanes, the fail-closed no-authority refusal on the identity lane. **The refusal is the
-reference's own rule; the status is our alignment with its expired-key rule** — the reference
-documents that archiving a workspace stops its keys working but records a status only for an
-*expired* key (§4.2). §5's item 6 observes the archived case and converts this to CONFIRMED, a
-deliberate divergence if the reference answers otherwise; slice 1 registers it (§7.1).
+key lanes, the fail-closed no-authority refusal on the identity lane. **CONFIRMED on the key
+lane, 2026-09-05**: archiving workspace C and calling with its key answers `401`
+`authentication_error` `"API key is invalid."` with `request_id: null` and no tenancy headers —
+byte-for-byte what an unknown key gets, with and without the workspace header
+(`batch9.curl.txt:150`, `:166`; reproduced on workspaces A and B). So the alignment this plan
+chose is the reference's own answer, not merely a defensible reading of its expired-key rule,
+and the message is a template worth matching too: the reference does not distinguish an
+archived tenant from a bad credential, which is the right disclosure. **The environment-key
+half stays NOT OBSERVED** (§5.1) — that lane's rule is ours until a recording can bind an
+environment token to an archivable workspace. Slice 1 registers both halves (§7.1).
 
 **Background paths have no credential and copy instead of deriving.** The deployment scheduler
 is the only session-create path with no request principal — its own comment says so
@@ -728,17 +833,34 @@ the credential already covers.
   workspace its header names (§4.2); but the SSO lane has no exact reference counterpart, so the
   status is **INFERRED** (tracked #78), and it is **distinct from decision 4's 403** — the 403
   is a missing server-side *configuration*, this is a missing per-request *selection*. §5's
-  recording can observe the reference's own answer for a multi-workspace key sent with no header,
-  the model this follows.
+  recording did **not** reach the reference's own answer for a multi-workspace key sent with no
+  header, the model this follows, so the status stays INFERRED. It did establish that such a
+  credential exists: an org-level key create refusing both discriminators names all three forms
+  — `Provide workspace_id (a workspace key), principal_id (an identity-linked key), or both (an
+  identity-linked key bound to a workspace).` — so the unbound `principal_id` form is the
+  multi-workspace class, and minting one needs a principal id this recording had no way to
+  obtain. Tracked #78.
 - malformed → 400 `invalid_request_error`, the reference's message verbatim (§4.2). "Malformed"
   is a real check: `domain.ValidWithPrefix(v, domain.PrefixWorkspace)` or the literal
-  `default`. **CONFIRMED** — the docs state this arm unconditionally.
+  `default`. **CONFIRMED** — the docs state this arm unconditionally, and 2026-09-05 records it
+  (`batch9.curl.txt:63`). **Accepting the literal `default` is ours**: the reference answers
+  that exact 400 for it (`:95`), as it does for a bare UUID (`:134`). We accept it because
+  `default` is this deployment's own frozen workspace id (§7.1), which the reference has no
+  equivalent of; registered.
 - an **unknown** workspace → 404 `not_found_error` ``Workspace `<id>` not found.``
-  **CONFIRMED**.
+  **CONFIRMED** (`batch9.curl.txt:79`).
 - a **real workspace the credential does not cover** → the identical 404 body, so existence
-  never leaks. **INFERRED**, and the entry says so with the contrary reading named: for the
-  single-workspace class the docs say the key "always runs there" and the header is "Optional
-  for other API keys", which reads as inert (200). §5 item 4 settles it.
+  never leaks. **CONFIRMED 2026-09-05** — it is a 404, not the inert 200 the contrary reading
+  allowed ("always runs there", the header "Optional for other API keys"), and the covered and
+  uncovered answers are indistinguishable on both sides (`batch9.curl.txt:24` against `:79`).
+  **What differs is what the body echoes**, and that is a divergence rather than a detail: the
+  reference prints a *decoded UUID* — it prints one even for `wrkspc_01AAAAAAAAAAAAAAAAAAAAAA`,
+  an id belonging to no workspace, so it is decoding the input rather than looking it up. (That
+  the decode of a live workspace's id equals that workspace's own `compartment_id` field was
+  seen once and its bytes not retained; `FINDINGS8.md` marks it INFERRED, and nothing here
+  rests on it.) Ours echoes the id it was given. Both keep existence from leaking, which is the
+  property that matters; ours does it without echoing a value it did not receive, and without
+  owing a decoder. Registered.
 - The reference's "required with a multi-workspace API key" arm is **unreachable**, because
   decision 5 mints no such credential. Registered as out of scope rather than unimplemented.
 
@@ -759,8 +881,15 @@ wrapper order is `withRequestID(withTracing(dispatchAuth(…)))` (`server.go:283
 executes before any lane resolves the scope, which each lane attaches only to the context it
 passes to its `next` (e.g. `auth.go:207`); `withRequestID` keeps its request-id stamp alone. For
 `anthropic-workspace-id` that schedule is the documented one; for
-`anthropic-organization-id` **no absence rule is recorded anywhere**, so emitting it on the
-same schedule is ours and is registered (§4.3 item 5).
+`anthropic-organization-id` no absence rule is *documented* anywhere, and the 2026-09-05
+recording shows the reference does not run one schedule at all — it stamps in four tiers by how
+far a request got, and skips both headers entirely on `/v1/environments` even at 200 (§4.3 item
+5). **Our single schedule is therefore a deliberate simplification**, and a strictly wider one:
+every authenticated response of every route carries both headers, so wherever the reference
+stamps them we do too, and we stamp on some responses where it does not — a body-parse failure,
+and every `/v1/environments` call. A client that reads the headers when present is unaffected;
+one that infers *anything* from their absence would be reading a rule the reference does not
+publish. Registered (§4.3 item 5).
 
 ### 6.3 The predicate, and where it goes
 
@@ -1148,7 +1277,10 @@ half-defined cascade ships:
   key scoped to it (§6.8) — can never be locked out. Everything below describes archiving a
   *non-default* workspace.
 - **Credentials stop working**: any credential resolving to the workspace fails the scope
-  resolution (§6.1) — the reference's documented behavior.
+  resolution (§6.1) — the reference's documented behavior, and **observed 2026-09-05** on the
+  key lane, down to the message an unknown key gets (`batch9.curl.txt:150`).
+- **The workspace stays listed under `?include_archived=true`** and drops out of the plain
+  listing (§7.6) — the reference's own listing behavior, and the reason the row survives.
 - **Deployments pause** with `workspace_archived_error`; a run attempted in an archived
   workspace fails with the run-error twin. `0031_deployments.sql:98`, `:105`, `:176`, `:185`'s
   CHECK lists already admit both values, so no migration is needed — exactly as
@@ -1178,7 +1310,8 @@ entries.
 
 ### 7.1 Slice 1 — the workspace registry, and scope on the request
 
-**Gated on §5's recording.** **Goal.** Every credential resolves exactly one `domain.Scope`;
+**Was gated on §5's recording; taken 2026-09-05, so this slice is clear to start** (§5.1).
+**Goal.** Every credential resolves exactly one `domain.Scope`;
 the registry holds the default workspace as a *recognised* row rather than a created one; both
 response headers are emitted. Behavior changes only in the header surface.
 
@@ -1268,18 +1401,25 @@ Default Workspace is `wrkspc_`-prefixed, and that this platform additionally acc
 only to the token-exchange body (§4.2); rewriting the seeded id would be an `UPDATE` across
 every scoped table including `events` for a cosmetic gain. **Add** CONFIRMED (deliberate
 divergence, *not* INFERRED) that this platform emits `default` as its organization id, naming
-**the format §5 item 3's recording observed** as the shape it diverges from; INFERRED on the
-format only in the one case where that observation proved unreachable. **Add** the
-archived-workspace refusal (§6.1) against §5 item 6's observation: a CONFIRMED deliberate
-divergence if the reference answers other than 401 `authentication_error`, a note in the
-non-mismatch half if it answers the same. **Add** a divergence for the human
+**the bare UUID §5 item 3's recording observed** as the shape it diverges from — no INFERRED
+format fallback is needed, that observation having succeeded. **Add** the archived-workspace
+refusal (§6.1) as a **note in the non-mismatch half**: §5 item 6 recorded the reference
+answering the same 401 `authentication_error`, so this is convergence, not divergence — with
+the environment-key half named as the remaining unobserved lane. **Add** the two divergences the
+recording itself produced: that our foreign-workspace 404 **echoes the id it was given** where
+the reference echoes a decoded UUID (§6.2), and that we **accept the literal `default` in the
+header** where the reference answers 400 (§6.2) — the second is the header half of the same
+leniency `:19` records for the id, and belongs beside it rather than as its own entry.
+**Add** a divergence for the human
 lane's claim-plus-header membership: what has no reference counterpart is the *claim mechanism*,
 not membership itself — the reference manages it through `POST /v1/organizations/workspaces/{id}/members`
 and `ant beta:organization:workspaces:members add|update|remove` (workspaces doc:449-810). And
 **add** as INFERRED (tracked #78) that a human identity spanning **more than one live workspace**
 with no `anthropic-workspace-id` header is refused **400 `invalid_request_error`** — ours because
 the SSO lane has no reference twin, modelled on the reference's multi-workspace-key header rule
-(§4.2) and distinct from decision 4's unconfigured-claim 403; §5's recording observes the model.
+(§4.2) and distinct from decision 4's unconfigured-claim 403. **§5's recording did not reach the
+model** — minting a multi-workspace key needs a principal id it had no way to obtain (§6.2) — so
+this one stays INFERRED with its #78 pointer intact.
 **Amend** `:19` rather than adding a second entry for `project_id`: `:19` already records
 org/workspace/project as the reserved keys with single-tenant defaults, so "platform-only,
 frozen at `default`, no reference counterpart at any level" belongs *there*, and slice 4's
@@ -1467,8 +1607,8 @@ step 1).
 
 · `requireSameTenantIDs` and the snapshot invariant of §6.7, plus its guard rule. · Refusal
 shape: `errNotFound` with the message and status the absent id already gets — no new error type,
-nothing distinguishing "another workspace's" from "does not exist" — **unless §5's recording
-says otherwise**, in which case this PR carries the correction. · Guard target extends to
+nothing distinguishing "another workspace's" from "does not exist". **§5's recording confirmed
+this is the reference's own shape** (§4.3 item 1), so no correction is owed here. · Guard target extends to
 `internal/api` reads, and rule (b) starts refusing bare parent-id inheritance. · **The two
 unscoped-child routes rule (g) fails** (§6.5): `getMemoryVersion`
 (`internal/api/memoryversions.go:98`) gains the scoped `memory_stores` probe it has never had,
@@ -1507,17 +1647,17 @@ parenthetical and `:85`'s layout line. The principle halves stay verbatim — sc
 org/workspace/project and never a user, the adk `AppName`+`UserID` divergence, the
 `created_by`/`metadata` hooks. · Registry: re-argue `:19`'s parenthetical; **add an entry** for a
 cross-tenant resource read and a cross-tenant create-time reference both answering the absent-id
-404 — **CONFIRMED, not INFERRED**, because §5 item 1 observed the reference's own answer before
-slice 1 ever started: a deliberate divergence if the reference answers 400 and this platform
-keeps its 404, a compatibility note if it answers 404 too. Either way the entry keeps **both**
-sides of the evidence that shaped the choice — the reference's existence-hiding precedent ("the
+404 — **CONFIRMED, and a compatibility note rather than a divergence**, because §5 item 1
+observed the reference's own answer before slice 1 ever started and **it is a 404 on both
+families**, indistinguishable from an absent id (§4.3 item 1). The entry keeps **both** sides of
+the evidence that shaped the choice — the reference's existence-hiding precedent ("the
 same response as for any unknown workspace", authentication doc) against the only recorded
-org/workspace mismatch status, a **400** on `fallback_credit_token` (§4.2) — and cross-references
-`docs/DIVERGENCES.md:28`, this tree's one recorded cross-scope refusal (403 on the work API).
-**INFERRED only in the residual case** that item 1 proved unreachable, and then with **#78** as
-its tracker: an INFERRED entry naming no open issue is a `registry-check` finding
-(`tools/registrycheck/registrycheck.go:421-423` — "an entry in … must name the open issue whose
-recording would settle it").
+org/workspace mismatch status, a **400** on `fallback_credit_token` (§4.2), which the recording
+now shows does not generalise — and cross-references `docs/DIVERGENCES.md:28`, this tree's one
+recorded cross-scope refusal (403 on the work API). No INFERRED residual and no #78 pointer:
+the observation succeeded, so an entry naming no open issue is correct here rather than a
+`registry-check` finding (`tools/registrycheck/registrycheck.go:421-423` — the rule binds
+INFERRED entries only).
 
 ### 7.5 Slice 5 — the leaks inheritance does not cover
 
@@ -1654,7 +1794,22 @@ statement is enforced.
 **Changes.** Workspace administration on the console dialect that already carries the segments,
 not the `/v1/organizations/workspaces` Admin API §3 records as a non-goal against a known shape:
 `POST|GET /api/console/organizations/{org}/workspaces` and a workspace archive **that rejects
-`workspace_id == "default"` before any mutation** — the seeded Default Workspace cannot be
+`workspace_id == "default"` before any mutation**. **The path shapes are CONFIRMED, 2026-09-05**
+(§5 item 5): the reference's own console answers `POST|GET
+/api/console/organizations/{org}/workspaces` (`batch9.json` idx 0, `batch8.json` idx 32),
+`POST …/workspaces/{ws}/archive` returning the workspace with `archived_at` set (`batch8.json`
+idx 31), and `POST …/workspaces/{ws}/api_keys` (`batch9.json` idx 1) — so these two routes are
+mirrored in shape as well as in placement, and item 5's contingency (registering them as ours in
+shape) does not fire. Three details worth carrying. Its listing **omits archived workspaces** and
+takes `?include_archived=true` to include them (`batch9.json` idx 4) — **we mirror that**, and
+it is why the archive is a soft one (§6.9). Its key object carries `scope: {"type":
+"workspace", "workspace_id": …}` beside a nullable `principal`, the same two discriminators §6.8
+reasons about. And its listing **omits the Default Workspace entirely** — absent from the live
+listing and from `?include_archived=true` alike, while that workspace is live and serving
+requests (`batch8.json` idx 32, 36; `batch9.json` idx 4). **We diverge there and list it**:
+under decision 2 this deployment's `default` is not a hidden bootstrap row but the workspace
+nearly every operator will only ever have, and a listing that hides the single workspace in use
+is a worse surface than a faithful one. Registered. The seeded Default Workspace cannot be
 archived, mirroring the reference (it "cannot be renamed, archived, or deleted", workspaces doc,
 §4.2); this keeps the bootstrap key's `default` resource scope (§6.8) and every `default`-bound
 credential from ever being locked out by an archive (§6.9). The refusal is a **400
@@ -1740,10 +1895,10 @@ the bootstrap key; (b) run the bootstrap order above — create workspace B with
 key, read B's minted id from the response, and issue B's first key at B's own console path —
 which is the step that proves administration is a capability rather than a resource scope; (c)
 `ant --api-key <B key> beta:agents list` shows none of the default workspace's agents; (d)
-`ant --api-key <bootstrap> --workspace-id <B>` is **404 — pinning *our* narrow-only rule, not
-the reference's**, whose behavior for a workspace-bound key sending a foreign header is what §5
-item 4 records (and if the recording says 200-ignored, this step and §6.2's fourth bullet change
-together); (e) `ant --api-key <B key> --workspace-id B` succeeds and `--workspace-id default` is
+`ant --api-key <bootstrap> --workspace-id <B>` is **404 — pinning *our* narrow-only rule, which
+§5 item 4 showed is also the reference's**: a workspace-bound key sending a foreign header gets
+a 404 there too (§4.3 item 3), so this step now pins a mirrored rule rather than a chosen one,
+and the 200-ignored contingency that hung over it and §6.2's fourth bullet does not fire; (e) `ant --api-key <B key> --workspace-id B` succeeds and `--workspace-id default` is
 404; (f) `ant beta:worker poll --environment-id <B env> --environment-key <B env key>
 --workspace-id <B>` polls B's queue and reads B's skills but not the default workspace's — the
 direct regression test for the leak this plan exists to close. (The pinned CLI's worker poll
@@ -1818,8 +1973,9 @@ five shared substrates of §6.10 — they are platform architecture, not inferen
 could settle. **Add no INFERRED entry at all.** The two candidates a draft would put here are
 **not** INFERRED by slice 6, because §5's recording closed them before slice 1: the environment
 Bearer key's workspace resolution on the work routes (item 2) and the organization-id format
-(item 3) land CONFIRMED at what was observed, and only an unreachable observation demotes one —
-which slice 1 records at the time, not slice 6 six PRs later. A third candidate is gone
+(item 3) both landed CONFIRMED at what was observed (§4.3) — the credential carries no workspace
+at all, and the header is a bare UUID. Neither observation proved unreachable, so the demotion
+path this sentence reserved is unused. A third candidate is gone
 outright: the api-key `scope` field is fully documented and belongs to a resource this platform
 does not mirror (§4.2). And per `docs/HISTORY.md:966-974` — #56's *last*
 scope change silently rotted five registry pointers **while the issue stayed open**, a rot no
@@ -1935,12 +2091,14 @@ refusal already in this tree outside the work API is a 404
 it, the SDK's three statements that an org/workspace mismatch is a **400**
 (`betamessage.go:8994`, `:15698-15704`; `betamessagebatch.go:707-713`) — on
 `fallback_credit_token`, an opaque credit code rather than a resource-id reference, which is why
-the extrapolation is arguable and why §5 item 1 exists to settle it. The other answers stay as
+the extrapolation was arguable and why §5 item 1 existed to settle it. **It did: the reference
+answers 404 on both resource families** (§4.3 item 1), so the 400 does not generalise off that
+opaque credit code and this decision keeps its 404 on the reference's own authority. The other answers stay as
 the tree decided them: the work API's **403** `permission_error` "Token not authorized for this
 environment" is untouched, because it is environment-level and pinned to a 2026-09-02 recording
 (#78 — `internal/api/workapi.go:362`, `workapi_test.go:78-99`, which also pins that an unknown
 environment id answers identically); the header cases answer 400/404 per the documented bodies
-(CONFIRMED for the two documented arms, the fourth arm INFERRED — §6.2); the console segments
+(CONFIRMED for all four arms now, the fourth from §5's recording rather than the docs — §6.2); the console segments
 answer 404, preserving today's shape. Four answers each
 tracing to a recording or to an existing surface's own behavior is not an inconsistency —
 picking one globally would override a recording.
@@ -2038,9 +2196,11 @@ unbootable with no repair path — the failure mode `0013` was written to avoid.
   because no second workspace exists until slice 6; the plan should not lean on "nobody has
   configured it yet" across merges without saying so out loud, which is what the sequencing
   property in the opening does.
-- **§5's recording can invalidate a decision, not just an entry.** If a cross-tenant resource id
-  answers 400 on the reference, §7.4's refusal shape and D10's split change. That is the reason
-  slice 1 is gated on the recording rather than merely informed by it.
+- **§5's recording could have invalidated a decision, not just an entry** — which is why slice 1
+  was gated on it rather than merely informed by it. **Retired 2026-09-05**: the cross-tenant
+  resource id answers 404, so §7.4's refusal shape and D10's split stand (§5.1). The residual
+  risk this leaves is smaller and named at §5.1: one half of item 6, an environment key belonging
+  to an archived workspace, is still unobserved, and §6.1's rule for that lane is ours.
 - **#46 and #550 overlap** (decision 8). #46 (per-org rate limiting, priority medium, no
   `post-v1` marker) already specifies keying on the reserved org scope, so landing it on
   frozen-org credentials is cheap while re-keying later is not. #550 must split work-API
@@ -2048,8 +2208,10 @@ unbootable with no repair path — the failure mode `0013` was written to avoid.
   evidence for the work API's **refusal statuses** (`docs/DIVERGENCES.md:28`, the 403 body and
   the `work.poll.wrong-env.cloud` fixture), and as far as that entry's citation of it shows it
   carries no tenancy-header observation — the recording lives outside this tree and was not
-  re-read for this plan. So those semantics rest on the public docs, which is precisely why §5
-  item 2 exists. This plan
+  re-read for this plan. So those semantics rested on the public docs, which is precisely why §5
+  item 2 existed — and it has since answered: that credential carries no workspace at all, and
+  the work lane ignores the workspace header (§4.3 item 2), which is a stronger footing for
+  slice 5 than the docs gave. This plan
   assumes both issues stay independent and says so, so a later conflict is a known decision
   rather than a surprise.
 
@@ -2057,15 +2219,21 @@ unbootable with no repair path — the failure mode `0013` was written to avoid.
 
 None on scope: the eight decisions of §1 settle appetite, the organization level, the write-only
 columns, the SSO cliff, the credential model, the recording, the limits and the ordering. What
-remains open is **evidence, not choice** — the **five** NOT OBSERVED items of §4.3, four of which
-§5's recording is scheduled to close before slice 1, and the fifth
-(`anthropic-organization-id`'s absence schedule) registered as ours. Of §5's **six** recording
-items, five gate slice 1 (items 1-4 and 6); item 5 gates slice 6 instead, and a failed *capture*
-of it changes a registry label, not the design — a failed *create* is no recording at all (§5).
-**Nothing the 2026-09-03 and 2026-09-04 recordings settled closes any of those items**: they
-reached the environment key's OAuth scopes and the skills wire shape, never a second workspace,
-and the registry's second wave (#575) left `:47` and `:153` as the only two entries still
-tracking #56. One smaller evidence thread rides along without blocking anything: the environment
-`scope` default's tie to organization type (§8-D8). The skill display field's **name**, which an
-earlier draft carried as a second such thread, is no longer one — plan 39 settled it as
-`display_name` (§4.2).
+remained open was **evidence, not choice** — the **five** NOT OBSERVED items of §4.3 — and
+**§5's recording of 2026-09-05 closed all five**, including the fifth
+(`anthropic-organization-id`'s absence schedule), which turned out to be observable after all
+even though it had been registered as ours; it stays ours, now as a stated simplification of a
+four-tier rule (§4.3 item 5). All six of §5's recording items were captured, so neither the
+slice-1 gate (items 1-4 and 6) nor the slice-6 one (item 5) is outstanding. **Nothing the
+2026-09-03 and 2026-09-04 recordings settled closed any of those items** — they reached the
+environment key's OAuth scopes and the skills wire shape, never a second workspace — which is
+what 2026-09-05 was for, and the registry's second wave (#575) left `:47` and `:153` as the only
+two entries still tracking #56.
+
+**What is still open is one half of one item and two small threads.** An *environment* key
+belonging to an archived workspace was not reachable (§5.1), so §6.1's rule for that lane is
+ours rather than mirrored; and the reference's answer for a multi-workspace key sent with no
+header was not reachable either, so §6.2's SSO-lane 400 keeps its INFERRED label and its #78
+pointer. Riding along without blocking anything: the environment `scope` default's tie to
+organization type (§8-D8). The skill display field's **name**, which an earlier draft carried as
+a second such thread, is no longer one — plan 39 settled it as `display_name` (§4.2).
