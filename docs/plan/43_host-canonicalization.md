@@ -30,7 +30,7 @@ v0.57.0 and the pinned SDK v1.70.1, not reasoned about.
 | `σ.example` / `ς.example` | same | different | `xn--4xa` / `xn--3xa` | **no** — the leak |
 | `Ä.example` / `ä.example` | same | different | both `xn--4ca.example` | yes |
 | `Д.example` / `д.example` | same | different | both `xn--d1a.example` | yes |
-| `K.example` (U+212A) / `k.example` | same | different | both `k.example` | yes |
+| U+212A (the Kelvin sign) before `.example` / `k.example` | same | different | both `k.example` | yes |
 | `ſtrasse.example` / `strasse.example` | same | different | both `strasse.example` | yes |
 | `İ.example` (U+0130) / `i.example` | different | different | `xn--i-9bb` / `i` | no |
 
@@ -44,6 +44,12 @@ Every one of the 1,112,064 Unicode code points was swept through
 produced were fed back through. **Zero** moved, and **zero** collided with
 another A-label. Every merge the sweep found is a UTS46 equivalence class — one
 name, several spellings. So canonicalizing cannot introduce a leak.
+
+Four of those A-labels — the ones made from U+2135–U+2138 — *error* on the way
+back rather than returning cleanly. The string they return is the string they
+were given, so nothing moves and `CanonicalHost`'s error fallback answers the
+same either way; "zero moved" is the exact claim, and it is not the same claim as
+"the round trip is clean".
 
 ### But `idna.Lookup.ToASCII` refuses inputs this platform accepts today
 
@@ -132,16 +138,29 @@ Its rules, in order. Each exists because a measurement demanded it.
    inside the canonicalizer would silently widen the one path that sends a
    bearer token. The fold must lowercase: `net/http`'s equivalent does not, and
    copying the function rather than the shape would undo #611.
-2. **Cap the length.** A host over 255 bytes is returned folded, uncanonicalized.
-   A sandbox writes the CONNECT authority and `net/http` bounds it only by
-   `MaxHeaderBytes`; a 1 MB U-label authority costs 22.6 ms through IDNA against
-   2.1 ms through the fold. A longer name cannot resolve anyway.
-3. **ASCII fast path — a cost guard, and nothing more.** If every byte is below
-   0x80, return the fold. This branch changes no output and no test can tell:
-   an all-ASCII host either passes `ToASCII` unchanged or is refused by it and
-   takes rule 4's fallback to the same folded string. It is there because IDNA
-   costs 127.7 ns against the fold's 42.6 ns on a path the gate runs for every
-   request, and it is commented as claiming cost rather than correctness.
+2. **Cap the length, at 1024 bytes.** A host over the cap is returned folded,
+   uncanonicalized, and an *entry* over it is refused. A sandbox writes the
+   CONNECT authority and `net/http` bounds it only by `MaxHeaderBytes`; a 1 MB
+   U-label authority costs 22.6 ms through IDNA against 2.1 ms through the fold.
+   The number is four — UTF-8's widest code point — times the 253 bytes a
+   resolvable name's A-label holds, because punycode emits at least one byte per
+   input code point. A cap at 255 would have been wrong, and measurably: three
+   45-rune `ä` labels are 284 bytes of UTF-8 and a 167-byte A-label, a name that
+   resolves. Above the cap the empty-label check still has to hold on its own,
+   which is why `hasEmptyLabel` counts U+3002, U+FF0E and U+FF61 as separators —
+   measured, a 287-byte host led by U+3002 carried no ASCII empty label and
+   walked straight through a `*.example.com` boundary.
+3. **ASCII branch — a cost guard that turned out to carry a rule.** If every
+   byte is below 0x80, return the fold. It was written for cost: IDNA costs
+   127.7 ns against the fold's 42.6 ns on a path the gate runs for every
+   request, and nearly every all-ASCII host either passes `ToASCII` unchanged or
+   is refused by it and reaches the same folded string through rule 4. One
+   family does neither. A label of `xn--` whose punycode payload is empty is
+   **rewritten, with no error**: measured, `ToASCII("xn--.example")` is
+   `(".example", nil)` and `ToASCII("a.xn--.z")` is `("a..z", nil)`. Without this
+   branch a malformed A-label would become a string carrying an empty label —
+   the one shape rule 4's own reordering exists to keep away from a wildcard
+   boundary. The branch is therefore load-bearing, and the code says so.
 4. **Otherwise canonicalize.** `idna.Lookup.ToASCII`. **On error, discard the
    returned string entirely** and fall back to the ASCII fold of the original —
    on both the entry side and the lookup side, so the two can never desynchronize.
@@ -159,11 +178,15 @@ changed meaning.
 
 ### Where it is called
 
-- **`NewHostSet` and `CoversEntry`: after `strings.CutPrefix(e, "*.")`, never
-  before.** Both call `NormalizeHost` first today, and `ToASCII("*.example.com")`
-  errors on U+002A. Canonicalizing inside `NormalizeHost` would break every
-  wildcard entry in all eight lists that feed a `HostSet`. This is the single
-  most likely implementation mistake in the whole change.
+- **`NewHostSet` and `CoversEntry`: convert the remainder after
+  `strings.CutPrefix(e, "*.")`.** `ToASCII("*.example.com")` errors on U+002A,
+  so the conversion has to see the entry with its prefix off or a Unicode
+  wildcard never becomes an A-label at all. Mutation testing sorted out which
+  half of that is load-bearing: converting the *whole* entry before the cut as
+  well turns out to be harmless, because the asterisk's error sends
+  `CanonicalHost` back to the fold and `CutPrefix` sees the same string. The
+  mistake to guard against is dropping the conversion after the cut, and a
+  named row fails for it.
 - **`Match`: canonicalize the whole host, then run `hasEmptyLabel` on the
   canonical value, not the raw one.** IDNA maps U+3002, U+FF0E and U+FF61 to
   `.`, so it *creates* label boundaries: `。example.com` canonicalizes to
@@ -175,12 +198,15 @@ changed meaning.
   it. Both split the zone identifier off before calling, so a scoped address's
   `%eth0` is compared exactly and only the address half is canonicalized.
 - **`endpointKey`, in both spellings** (`internal/gate/policy.go` and
-  `internal/api/gateconfig.go`), moves with them. It is a no-op beyond the fold
-  today — `ValidateHostEntry` refuses a non-ASCII host on that path, so no
-  mutation test can catch either one, and both are commented as such — but a
-  `HostSet` comparing canonical names beside a map comparing folded ones would
-  answer one request two ways depending on which list held the host, which is
-  exactly what `endpointKey`'s own comment promises cannot happen.
+  `internal/api/gateconfig.go`), moves with them, and the two spellings are not
+  the same kind of change. The gate's is **observable**: `policy.admit` hands it
+  the host the sandbox wrote, which never passed any entry grammar, so a session
+  declaring `xn--bcher-kva.example:8443` and a request written `bücher.example`
+  meet only because of it — measured, and covered by a test. The control plane's
+  is a no-op today, because `mcpEndpoint` runs `ValidateHostEntry` two lines
+  above and that refuses a non-ASCII host; it moves anyway so the two sides agree
+  by construction rather than by both happening to see ASCII, and its comment
+  says exactly that.
 
 ### Validation
 
@@ -193,11 +219,16 @@ typed, case included, because the matcher folds. A conversion error is the
 entry's rejection, never a fallback: an entry is written once and matched
 forever, so `xn--pypi-.org` must not become a `pypi.org` nobody typed.
 
-Both API lists call it. The environment's is `parseNetworking`, which create and
-update share, so one call covers both write paths; the credential's is
+All three writers call it. The environment's is `parseNetworking`, which create
+and update share, so one call covers both write paths; the credential's is
 `vaultcredauth.go`'s `canonicalAllowedHost` (was `validateAllowedHost`, renamed
-because it now returns the form to store). Per decision 4 the environment check
-runs on the entries the patch supplies rather than on the merged list — refusing
+because it now returns the form to store); the third is `cmd/executor`'s
+`splitDomains` over `WEBTOOL_ALLOWED_DOMAINS`, which otherwise would have been
+the one list that refused at startup the Unicode name the matcher canonicalizes.
+Per decision 4 the environment check runs on the entries the patch newly supplies
+rather than on the merged list, and carries through an entry the row already
+holds so the ordinary read-modify-write is not refused on a value this API
+returned one call earlier — refusing
 an update over what an earlier one stored would take a working environment's
 egress away for a field nobody is touching.
 
@@ -251,18 +282,31 @@ Three, all INFERRED, in `docs/DIVERGENCES.md`:
   list. The gate dialing the canonical name narrows the admitted-versus-dialled
   gap to the name; #601 closes the name-versus-address half by resolving once.
 - **`NormalizeHost` folding a zone identifier**, so that `fe80::1%eth0` and
-  `fe80::1%ETH0` are one host in `internal/egress` but two in the other. Rule 3
-  routes zoned addresses to the fold, so this plan neither fixes nor worsens it;
-  it stays recorded on #609.
+  `fe80::1%ETH0` are one host on the *admission* side but two in
+  `internal/mcp` and `internal/vaultresolve`. `CanonicalHost` splits at the first
+  `%` and returns the remainder untouched, so nothing this plan adds folds a
+  zone — the gate dials a scoped address with its interface name as the sandbox
+  wrote it. What stays is `NormalizeHost`'s own fold, which admission still runs;
+  it is recorded on #609.
 - **Migrating stored rows** (decision 4), and any cap on the number of entries —
   the reference publishes one for credentials (16) and none for environments, and
   neither is this issue's subject.
 
 ## Definition of done
 
-`make verify` green; the shared helper covered by mutation tests that each fail
-for the row that names them, including one per rule above (the wildcard cut, the
-post-canonicalization empty-label check, the discarded error on the mangling
-input, the lowercasing fast path); the three divergences registered; a
-`changelog.d/` fragment; and the verifier plus both reviewers run per the
-repository's ritual.
+`make verify` green; the shared helper and every call site covered by mutation
+tests that each fail for the row that names them — one per rule above, including
+the conversion after the wildcard cut, the post-canonicalization empty-label
+check, the discarded error on the mangling input, the lowercasing fast path, the
+length cap in both directions, the zone identifier, and the canonical dial; the
+three divergences registered; a `changelog.d/` fragment; and the verifier plus
+both reviewers run per the repository's ritual.
+
+Two mutants survive, and both are stated rather than hidden. Canonicalizing the
+whole entry *before* the wildcard cut changes no output, because the asterisk's
+error sends `CanonicalHost` back to the fold — the conversion after the cut is
+the half that matters, and it has its own row. And dropping `NewHostSet`'s
+empty-label check removes only keys that could never have matched, since `Match`
+refuses an empty label on the request side first; it is defence in depth, and no
+test can distinguish it. The control plane's `endpointKey` is the third, argued
+where it is called.

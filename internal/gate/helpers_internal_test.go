@@ -643,8 +643,13 @@ func TestARegistryRequestLeavesAHandlerRooted(t *testing.T) {
 // TestARegistryRequestLeavesAHandlerRooted already drives through both paths.
 func TestConnectDialsTheNameItAdmitted(t *testing.T) {
 	g := New(Config{Networking: domain.Networking{
-		Type:         domain.NetLimited,
-		AllowedHosts: []string{"xn--bcher-kva.example", "example.com"},
+		Type: domain.NetLimited,
+		// The scoped entry is spelled in lower case because the *admission*
+		// side folds a zone identifier whole (egress.NormalizeHost, an
+		// asymmetry recorded on #609); the dial is what must not, and that is
+		// the row below.
+		AllowedHosts: []string{"xn--bcher-kva.example", "example.com",
+			"fe80::1%eth0", "fe80::1%25eth0"},
 	}})
 	var saw string
 	g.dial = rootedDial(func(_ context.Context, _, addr string) (net.Conn, error) {
@@ -661,6 +666,15 @@ func TestConnectDialsTheNameItAdmitted(t *testing.T) {
 			"example\u3002com:443", "example.com:443"},
 		"an ASCII host is dialled exactly as it was typed": {
 			"example.com:443", "example.com:443"},
+		// A zone identifier names a local interface and is case-sensitive, so
+		// the canonical name of a scoped address keeps it byte for byte. Both
+		// spellings a CONNECT authority can carry are driven: hostOnly splits
+		// the brackets off but decodes nothing, so the "%25" of a URI-form zone
+		// reaches the dial as written too.
+		"a scoped address keeps its zone exactly": {
+			"[fe80::1%Eth0]:443", "[fe80::1%Eth0]:443"},
+		"a percent-encoded zone is not decoded either": {
+			"[fe80::1%25Eth0]:443", "[fe80::1%25Eth0]:443"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			saw = ""
@@ -676,5 +690,27 @@ func TestConnectDialsTheNameItAdmitted(t *testing.T) {
 				t.Errorf("CONNECT %s dialled %q, want %q", tc.authority, saw, tc.want)
 			}
 		})
+	}
+}
+
+// The MCP endpoint map answers a host the way the HostSet does, and it is not a
+// no-op for it to do so: admit hands endpointKey the host the sandbox wrote,
+// which never passed the control plane's entry grammar. A declaration and a
+// request that name one host in two alphabets have to meet.
+func TestTheMCPSetAnswersAHostByItsCanonicalName(t *testing.T) {
+	p := newPolicy(
+		domain.Networking{Type: domain.NetLimited, AllowMCPServers: true},
+		[]string{"xn--bcher-kva.example:8443"})
+
+	for _, host := range []string{
+		"xn--bcher-kva.example", "b\u00fccher.example", "B\u00dcCHER.example", "b\u00fccher.example.",
+	} {
+		if got := p.admit(host, "8443"); got != admitMCP {
+			t.Errorf("admit(%q, 8443) = %v, want %v", host, got, admitMCP)
+		}
+	}
+	// A different name is still a different name.
+	if got := p.admit("b\u00fccher.example.evil", "8443"); got != admitNone {
+		t.Errorf("a neighbouring name gave %v", got)
 	}
 }

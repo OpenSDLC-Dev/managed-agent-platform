@@ -281,14 +281,27 @@ func (g *Gate) handleConnect(w http.ResponseWriter, r *http.Request) {
 	ctx := withAdmission(r.Context(), how)
 	// Dial the name that was admitted, not the one the sandbox typed. Admission
 	// compares canonical names, so the two can differ by a whole name rather
-	// than by case alone: "K.example" (U+212A), "exa\u00admple.com" and
-	// "example\u3002com" all canonicalize onto "example.com". Dialling the raw
-	// authority would be fail-closed rather than unsafe — a resolver answers
-	// "no such host" for a U-label — but it would make every widening this
-	// comparison buys a promise the connection does not keep. handlePlain needs
-	// no equivalent: net/http canonicalizes the address itself before the
-	// gate's dialer sees it.
-	upstream, err := g.dial(ctx, "tcp", net.JoinHostPort(egress.CanonicalHost(host), port))
+	// than by case alone: the Kelvin sign U+212A before ".example" (not the
+	// letter K, which the ASCII fold already merged with "k"),
+	// "exa\u00admple.com" and "example\u3002com" all canonicalize onto their
+	// ASCII spellings. Dialling the raw authority would be fail-closed rather
+	// than unsafe — a resolver answers "no such host" for a U-label — but it
+	// would make every widening this comparison buys a promise the connection
+	// does not keep. A scoped address keeps its zone: CanonicalHost splits at
+	// the "%" so an interface name is never case-folded. handlePlain needs no
+	// equivalent — net/http canonicalizes the address itself before the gate's
+	// dialer sees it.
+	//
+	// An authority SplitHostPort refused leaves port empty, and hostOnly hands
+	// back the whole string; rebuilding that would produce an address more
+	// malformed than the one the sandbox wrote, which the dial error and the
+	// address floor would then both report. It goes out as written, and fails
+	// as it does today.
+	dialAddr := target
+	if port != "" {
+		dialAddr = net.JoinHostPort(egress.CanonicalHost(host), port)
+	}
+	upstream, err := g.dial(ctx, "tcp", dialAddr)
 	if err != nil {
 		http.Error(w, "cannot reach host", http.StatusBadGateway)
 		return

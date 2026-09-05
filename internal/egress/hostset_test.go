@@ -204,7 +204,7 @@ func TestCanonicalHostLeavesWhatIsNotANameToTheFold(t *testing.T) {
 	for _, tc := range []struct{ in, want, why string }{
 		{"::1", "::1", "a bare IPv6 literal: idna refuses U+003A"},
 		{"[::1]", "[::1]", "a bracketed one: idna refuses U+005B"},
-		{"FE80::1%Eth0", "fe80::1%eth0", "a scoped address, folded whole as this package always has"},
+		{"FE80::1%Eth0", "fe80::1%Eth0", "a scoped address: the address folds, the zone names an interface and does not"},
 		{"Example.com:8080", "example.com:8080", "an authority still carrying its port"},
 		{"_acme.Example.com", "_acme.example.com", "idna refuses U+005F, internal DNS does not"},
 		{"S3--us-west-2.example.com", "s3--us-west-2.example.com", "idna's CheckHyphens refuses \"--\" in positions 3-4"},
@@ -263,12 +263,20 @@ func TestAWildcardIsCanonicalizedAfterItsPrefix(t *testing.T) {
 	}
 }
 
-// IDNA maps U+3002, U+FF0E and U+FF61 onto ".", so canonicalizing *creates*
-// label boundaries. The empty-label check has to run on the canonical value or
-// a leading fullwidth stop walks straight through a wildcard's boundary.
+// Canonicalizing *creates* empty labels, so the check has to run on the
+// canonical value. Two ways it happens, and only the second witnesses the order:
+// IDNA maps U+3002, U+FF0E and U+FF61 onto "." — which hasEmptyLabel now maps
+// too, so those are caught either way — and it *deletes* the ignorable code
+// points outright, which nothing but the conversion can reveal. Measured, a lone
+// SOFT HYPHEN label canonicalizes "\u00ad.example.com" to ".example.com".
 func TestAnEmptyLabelIsJudgedAfterCanonicalization(t *testing.T) {
 	set := egress.NewHostSet([]string{"*.example.com"})
-	for _, h := range []string{"\u3002example.com", "\u3002\u3002example.com"} {
+	for _, h := range []string{
+		"\u3002example.com", "\u3002\u3002example.com",
+		"\u00ad.example.com",   // SOFT HYPHEN: deleted, leaving an empty label
+		"\u200b.example.com",   // ZERO WIDTH SPACE, likewise
+		"a.\u00ad.example.com", // and inside, giving "a..example.com"
+	} {
 		if set.Match(h) {
 			t.Errorf("%q matched *.example.com; it canonicalizes to %q",
 				h, egress.CanonicalHost(egress.NormalizeHost(h)))
@@ -309,13 +317,136 @@ func TestCanonicalEntryStoresOneSpellingPerHost(t *testing.T) {
 	}
 }
 
-// A host longer than a name can be is folded and left alone: a sandbox writes
-// the CONNECT authority itself, and canonicalizing a megabyte of U-labels costs
-// orders of magnitude more than folding it.
+// A host longer than any name can encode to is folded and left alone: a sandbox
+// writes the CONNECT authority itself, and canonicalizing a megabyte of U-labels
+// costs orders of magnitude more than folding it.
 func TestCanonicalHostLeavesAnOverlongNameToTheFold(t *testing.T) {
-	long := strings.Repeat("\u00e4", 200) + ".EXAMPLE"
-	want := strings.Repeat("\u00e4", 200) + ".example"
+	long := strings.Repeat("\u00e4", 600) + ".EXAMPLE"
+	want := strings.Repeat("\u00e4", 600) + ".example"
+	if len(long) <= 1024 {
+		t.Fatalf("the fixture is %d bytes; it has to exceed the cap", len(long))
+	}
 	if got := egress.CanonicalHost(long); got != want {
 		t.Errorf("a %d-byte host was canonicalized rather than folded", len(long))
+	}
+}
+
+// The cost cap is a cap on what reaches IDNA, and it must not become a cap on
+// what canonicalizes: a U-label is longer in UTF-8 than the A-label made of it,
+// so a name that resolves perfectly well can be hundreds of bytes as written.
+// Three 45-rune labels are 284 bytes and a 167-byte A-label.
+func TestTheCostCapDoesNotRefuseANameThatResolves(t *testing.T) {
+	label := strings.Repeat("\u00e4", 45)
+	long := strings.Join([]string{label, label, label}, ".") + ".example.com"
+	if len(long) <= 255 {
+		t.Fatalf("the fixture is %d bytes; it has to exceed the old 255-byte cap to mean anything", len(long))
+	}
+	got := egress.CanonicalHost(long)
+	if !strings.HasPrefix(got, "xn--") {
+		t.Errorf("CanonicalHost(%d-byte name) = %q, want its A-label", len(long), got)
+	}
+	// ...and the entry side agrees with it, which is the whole point: an entry
+	// stored as an A-label the matcher cannot produce could never match.
+	e, err := egress.CanonicalEntry(long)
+	if err != nil {
+		t.Fatalf("CanonicalEntry(%d-byte name) = %v", len(long), err)
+	}
+	if !egress.NewHostSet([]string{e}).Match(long) {
+		t.Errorf("an entry stored as %q stopped matching the spelling it was written as", e)
+	}
+}
+
+// Above the cap nothing is converted — and the empty-label check still has to
+// hold, because IDNA's three full stops are label separators whether or not the
+// conversion ran. Measured: a 287-byte host led by U+3002 carried no ASCII empty
+// label and walked through the wildcard's boundary.
+func TestAnOverlongHostCannotWalkThroughAWildcardBoundary(t *testing.T) {
+	label := strings.Repeat("\u00e4", 200)
+	long := "\u3002" + strings.Join([]string{label, label, label}, ".") + ".example.com"
+	if len(long) <= 1024 {
+		t.Fatalf("the fixture is %d bytes; it has to exceed the cap", len(long))
+	}
+	if egress.NewHostSet([]string{"*.example.com"}).Match(long) {
+		t.Errorf("a %d-byte host led by an ideographic full stop matched *.example.com", len(long))
+	}
+	// A real label before the stop is a real boundary, cap or no cap.
+	if !egress.NewHostSet([]string{"*.example.com"}).Match("evil\u3002example.com") {
+		t.Error("a fullwidth stop between two labels is a label boundary and should match")
+	}
+	// An entry that long is refused rather than stored half-converted.
+	if _, err := egress.CanonicalEntry(strings.Repeat("\u00e4", 600) + ".example"); err == nil {
+		t.Error("CanonicalEntry accepted an entry longer than a hostname can be")
+	}
+}
+
+// A scoped address's zone identifier names a local interface and is
+// case-sensitive. CanonicalHost canonicalizes the address and leaves the zone
+// exactly as written, which is what lets the gate dial one without changing
+// which interface it means.
+func TestCanonicalHostNeverRewritesAZoneIdentifier(t *testing.T) {
+	for _, tc := range []struct{ in, want string }{
+		{"FE80::1%Eth0", "fe80::1%Eth0"},
+		{"fe80::1%ETH0", "fe80::1%ETH0"},
+		{"B\u00dcCHER.example%Eth0", "xn--bcher-kva.example%Eth0"},
+	} {
+		if got := egress.CanonicalHost(tc.in); got != tc.want {
+			t.Errorf("CanonicalHost(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+}
+
+// The ASCII branch is not only a cost guard. idna REWRITES an "xn--" label whose
+// punycode payload is empty and returns no error, so without the branch a
+// malformed A-label would become a string carrying an empty label — the one
+// shape Match exists to keep away from a wildcard's boundary.
+func TestAnEmptyPunycodePayloadIsNotRewritten(t *testing.T) {
+	for _, tc := range []struct{ in, want string }{
+		{"xn--.example", "xn--.example"},
+		{"XN--.EXAMPLE", "xn--.example"},
+		{"example.xn--", "example.xn--"},
+		{"a.xn--.z", "a.xn--.z"},
+	} {
+		if got := egress.CanonicalHost(tc.in); got != tc.want {
+			t.Errorf("CanonicalHost(%q) = %q, want %q — idna answers this family "+
+				"with a rewritten string and no error", tc.in, got, tc.want)
+		}
+	}
+	// The consequence at the matcher: the label stays a label rather than
+	// becoming an empty one, so the host is judged as the name it is.
+	if !egress.NewHostSet([]string{"*.example.com"}).Match("xn--.example.com") {
+		t.Error("xn--.example.com stopped matching *.example.com; it is a subdomain of it")
+	}
+}
+
+// An entry that fails the grammar after conversion is reported as the operator
+// wrote it. A 400 quoting punycode nobody typed cannot be found in the config it
+// came from.
+func TestACanonicalizationFailureQuotesWhatWasTyped(t *testing.T) {
+	for _, in := range []string{"b\u00fccher.example.", "\u3002example.com", "\u00e4-.example"} {
+		_, err := egress.CanonicalEntry(in)
+		if err == nil {
+			t.Errorf("CanonicalEntry(%q) was accepted", in)
+			continue
+		}
+		if !strings.Contains(err.Error(), in) {
+			t.Errorf("CanonicalEntry(%q) reported %v, which does not name what was written", in, err)
+		}
+		if strings.Contains(err.Error(), "xn--") {
+			t.Errorf("CanonicalEntry(%q) reported %v, quoting punycode the operator never typed", in, err)
+		}
+	}
+}
+
+// Canonicalizing creates label boundaries, so an entry can arrive holding no
+// empty label and leave holding one. Such a key can never match; it is dropped
+// rather than stored dead.
+func TestAnEntryThatCanonicalizesToAnEmptyLabelIsDropped(t *testing.T) {
+	for _, e := range []string{"\u3002example.com", "*.\u3002example.com"} {
+		set := egress.NewHostSet([]string{e})
+		for _, h := range []string{"example.com", ".example.com", "a.example.com", e} {
+			if set.Match(h) {
+				t.Errorf("a set holding %q matched %q", e, h)
+			}
+		}
 	}
 }

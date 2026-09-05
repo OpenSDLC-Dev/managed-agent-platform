@@ -1009,41 +1009,6 @@ func (t *limitedTransport) give(n int64) {
 	t.budget += n
 }
 
-// withBearer returns a shallow copy of client that sends the Authorization
-// header to endpoint's origin and to nothing else.
-//
-// Two separate things keep one server's credential away from another, and each
-// answers a leak the other does not.
-//
-// The **copy** is defence in depth on a client that may be shared — the
-// package-level DefaultClient is — where installing the transport in place would
-// put this token on every later connection made through it. Today it is a second
-// copy rather than the protecting one: Connect runs withResponseLimit first and
-// that already returns a copy, so this function never receives the caller's own
-// client. It is kept because the ordering it depends on is one line away.
-//
-// The **origin check** is because net/http's own protection does not apply
-// here. net/http strips Authorization when a redirect changes origin, but only
-// from headers set on the outbound request; a header a RoundTripper adds is
-// invisible to that logic, so there is nothing for it to strip and on a 307 to
-// another host the wrapper simply runs again and puts the token on the new
-// request. Injecting only for the origin the credential was resolved for closes
-// that without depending on the caller's redirect policy — which stays the
-// caller's: DefaultClient refuses redirects for its own reasons (replaying a
-// request to a target the per-dial guard vets but never approved), and a
-// caller supplying its own client owns that decision. What this package
-// guarantees either way is narrower and is the part that matters: a credential
-// resolved for one server is offered to that server and to no other.
-//
-// The comparison is textual — scheme, and host by canonical name — which every
-// way of being wrong fails closed. url.Parse lowercases the scheme and keeps
-// userinfo out of Host, so those cannot cause a false match; the forms that do
-// differ textually while naming the same origin (an explicit :443, a trailing
-// dot) drop the token rather than send it, and the request fails as
-// unauthenticated instead of leaking. sameHost normalizes exactly one thing —
-// which spelling of a name it is — because there a textual difference is not an
-// origin difference at all; normalizing anything else would trade the closed
-// direction for the open one.
 // withTraceContext puts W3C trace context on every request this client sends,
 // as HTTP headers, which is the one propagation route that does not depend on
 // the SDK giving a caller somewhere to put it.
@@ -1094,6 +1059,41 @@ func (t *traceTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	return base.RoundTrip(req)
 }
 
+// withBearer returns a shallow copy of client that sends the Authorization
+// header to endpoint's origin and to nothing else.
+//
+// Two separate things keep one server's credential away from another, and each
+// answers a leak the other does not.
+//
+// The **copy** is defence in depth on a client that may be shared — the
+// package-level DefaultClient is — where installing the transport in place would
+// put this token on every later connection made through it. Today it is a second
+// copy rather than the protecting one: Connect runs withResponseLimit first and
+// that already returns a copy, so this function never receives the caller's own
+// client. It is kept because the ordering it depends on is one line away.
+//
+// The **origin check** is because net/http's own protection does not apply
+// here. net/http strips Authorization when a redirect changes origin, but only
+// from headers set on the outbound request; a header a RoundTripper adds is
+// invisible to that logic, so there is nothing for it to strip and on a 307 to
+// another host the wrapper simply runs again and puts the token on the new
+// request. Injecting only for the origin the credential was resolved for closes
+// that without depending on the caller's redirect policy — which stays the
+// caller's: DefaultClient refuses redirects for its own reasons (replaying a
+// request to a target the per-dial guard vets but never approved), and a
+// caller supplying its own client owns that decision. What this package
+// guarantees either way is narrower and is the part that matters: a credential
+// resolved for one server is offered to that server and to no other.
+//
+// The comparison is textual — scheme, and host by canonical name — which every
+// way of being wrong fails closed. url.Parse lowercases the scheme and keeps
+// userinfo out of Host, so those cannot cause a false match; the forms that do
+// differ textually while naming the same origin (an explicit :443, a trailing
+// dot) drop the token rather than send it, and the request fails as
+// unauthenticated instead of leaking. sameHost normalizes exactly one thing —
+// which spelling of a name it is — because there a textual difference is not an
+// origin difference at all; normalizing anything else would trade the closed
+// direction for the open one.
 func withBearer(client *http.Client, token string, endpoint *url.URL) *http.Client {
 	copied := *client
 	copied.Transport = &bearerTransport{
@@ -1125,7 +1125,12 @@ func withBearer(client *http.Client, token string, endpoint *url.URL) *http.Clie
 // spells it that way and the header would be withheld from the very server it
 // was resolved for. A port that is present is compared as written, and a
 // trailing dot is not stripped: both are differences that withhold rather than
-// leak, and withBearer's comment says why that is the direction to err in.
+// leak, which is the direction this whole comparison errs in.
+//
+// Splitting the port also strips the brackets around a literal, so "[abc]:80"
+// and "abc:80" are one origin here where folding the whole string kept them
+// apart. That merge is origin-true rather than a widening — url.Hostname strips
+// the brackets too, so net/http dials both spellings identically.
 func sameHost(a, b string) bool {
 	ah, ap := splitPort(trimEmptyPort(a))
 	bh, bp := splitPort(trimEmptyPort(b))

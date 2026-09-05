@@ -1331,3 +1331,48 @@ func TestEnvironmentAllowedHostsCheckedOnThePatchNotTheStoredList(t *testing.T) 
 		t.Errorf("the patched list = %v, want [\"xn--bcher-kva.example\"]", got)
 	}
 }
+
+// The ordinary read-modify-write: a client GETs a config and POSTs it back. A
+// row stored before plan 43 holds an entry today's grammar refuses, and echoing
+// it must not be a 400 on a value this API handed the client one call earlier —
+// decision 4 promises those rows keep working, and the promise is worth nothing
+// if reading one back breaks it.
+func TestEnvironmentAllowedHostsSurviveAReadModifyWrite(t *testing.T) {
+	s := newTestServer(t)
+	id := createEnvironment(t, s, map[string]any{"name": "round-trip"})["id"].(string)
+	const legacy = `{"type":"cloud","networking":{"type":"limited",` +
+		`"allowed_hosts":["internal.corp:8080","_acme.example.com"],"allow_mcp_servers":false,` +
+		`"allow_package_managers":false},` +
+		`"packages":{"apt":[],"cargo":[],"gem":[],"go":[],"npm":[],"pip":[]}}`
+	if _, err := s.pool.Exec(context.Background(),
+		`UPDATE environments SET config = $2 WHERE id = $1`, id, legacy); err != nil {
+		t.Fatal(err)
+	}
+
+	status, got := s.do(http.MethodGet, "/v1/environments/"+id, nil)
+	if status != http.StatusOK {
+		t.Fatalf("get: %d %v", status, got)
+	}
+	status, echoed := s.do(http.MethodPost, "/v1/environments/"+id, map[string]any{
+		"description": "unchanged config, new description",
+		"config":      got["config"],
+	})
+	if status != http.StatusOK {
+		t.Fatalf("posting back the config this API just returned: %d %v", status, echoed)
+	}
+	if hosts := storedAllowedHosts(t, echoed); len(hosts) != 2 ||
+		hosts[0] != "internal.corp:8080" || hosts[1] != "_acme.example.com" {
+		t.Errorf("the echoed list = %v, want the row's own entries carried through", hosts)
+	}
+
+	// An entry the row does not hold is still judged, in the same patch as one
+	// it does — carrying the stored ones through is not a way to smuggle a new
+	// one past the grammar.
+	status, body := s.do(http.MethodPost, "/v1/environments/"+id, map[string]any{
+		"config": map[string]any{"type": "cloud", "networking": map[string]any{
+			"type": "limited", "allowed_hosts": []any{"internal.corp:8080", "brand.new:9090"}}},
+	})
+	if status != http.StatusBadRequest {
+		t.Fatalf("a patch adding a new bad entry beside a stored one: %d %v", status, body)
+	}
+}

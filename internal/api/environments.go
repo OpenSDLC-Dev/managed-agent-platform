@@ -6,11 +6,11 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"slices"
 	"strings"
 	"time"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
-	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/egress"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 )
@@ -171,13 +171,14 @@ func checkPackagesNetworking(cfg cloudConfigJSON) error {
 // their prior values.
 //
 // Each allowed_hosts entry is held to the same grammar a credential's is, and a
-// Unicode entry is stored as its A-label (egress.CanonicalEntry). This list was
-// unvalidated until plan 43, which is why the check is on the entries the patch
-// carries rather than on the merged list: refusing an update because of what an
-// earlier one stored would take a stored environment's egress away over a row
-// nobody is touching. The reference publishes no grammar for this field and
-// documents no rejection for it, so the 400 is ours and is registered in
-// DIVERGENCES.
+// Unicode entry is stored as its A-label (canonicalAllowedHost, over
+// egress.CanonicalEntry). This list was unvalidated until plan 43, which is why
+// the check runs on what a patch newly supplies rather than on the merged list,
+// and skips an entry the row already holds: refusing an update over what an
+// earlier one stored would take a stored environment's egress away for a field
+// nobody is changing, and would refuse the read-modify-write every client does.
+// The reference publishes no grammar for this field and documents no rejection
+// for it, so the 400 is ours and is registered in DIVERGENCES.
 func parseNetworking(raw, prior json.RawMessage) (json.RawMessage, error) {
 	var obj map[string]json.RawMessage
 	if err := json.Unmarshal(raw, &obj); err != nil || obj == nil {
@@ -214,14 +215,20 @@ func parseNetworking(raw, prior json.RawMessage) (json.RawMessage, error) {
 				if hosts == nil {
 					hosts = []string{}
 				}
-				// Only what this patch supplies. A stored list is left as it
-				// is — rows written before this check are not migrated (plan
-				// 43), so an update that does not touch allowed_hosts is never
-				// refused for what an earlier one stored.
+				// Only what this patch newly supplies. An entry the row
+				// already holds is carried through as it stands, because a
+				// client that GETs a config and POSTs it back — the ordinary
+				// read-modify-write — would otherwise be refused on a value
+				// this API handed it one call earlier. Rows written before this
+				// check are not migrated (plan 43 decision 4), and that promise
+				// is worth nothing if echoing the row back breaks it.
 				for i, h := range hosts {
-					canonical, err := egress.CanonicalEntry(h)
+					if slices.Contains(prev.AllowedHosts, h) {
+						continue
+					}
+					canonical, err := canonicalAllowedHost(h)
 					if err != nil {
-						return nil, errInvalid("%s", err)
+						return nil, err
 					}
 					hosts[i] = canonical
 				}

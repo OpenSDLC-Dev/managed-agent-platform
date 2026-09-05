@@ -8,9 +8,11 @@
 // have to be told it. It holds no I/O, and that is the invariant to preserve:
 // internal/gate drives it against real HTTP requests — constructing the
 // substitution engine (gate.go) and calling Substitute for header and body
-// locations — while internal/gate/policy.go reuses NewHostSet and
-// NormalizeHost for the environment's allowed-host policy, and
-// internal/vaultresolve supplies the credentials read from the store.
+// locations — while internal/gate/policy.go reuses NewHostSet and CanonicalHost
+// for the environment's allowed-host policy, and internal/vaultresolve supplies
+// the credentials read from the store. CanonicalHost is also what
+// internal/vaultresolve and internal/mcp compare their own hosts with, so all
+// three answer "are these one host?" with one function.
 package egress
 
 import (
@@ -34,8 +36,8 @@ import (
 // label depth (a.example.com, a.b.example.com), the one residual the SDK wording
 // does not pin (recorded in DIVERGENCES).
 type HostSet struct {
-	exact    map[string]struct{} // hostnames and IPv4 literals, lowercased
-	suffixes []string            // wildcard suffixes, lowercased, no leading "*."
+	exact    map[string]struct{} // hostnames and IPv4 literals, canonical (see CanonicalHost)
+	suffixes []string            // wildcard suffixes, canonical, no leading "*."
 }
 
 // NewHostSet builds a matcher from allowed_hosts entries. Entries are assumed to
@@ -44,17 +46,27 @@ type HostSet struct {
 func NewHostSet(entries []string) *HostSet {
 	s := &HostSet{exact: make(map[string]struct{}, len(entries))}
 	for _, e := range entries {
-		// NormalizeHost first, for the trim that makes the prefix visible;
-		// CanonicalHost only after the "*." is off, because an asterisk is a
-		// disallowed rune to IDNA and would fail every wildcard entry.
+		// NormalizeHost first, for the trim that makes the prefix visible,
+		// then CanonicalHost on the remainder once the "*." is off. Converting
+		// before the cut instead would be harmless rather than wrong — an
+		// asterisk is a rune idna refuses, so the error fallback returns the
+		// same folded string — but converting *after* it is what makes a
+		// Unicode wildcard work at all, and mutation testing is what sorted the
+		// two apart.
 		e = NormalizeHost(e)
 		if rest, ok := strings.CutPrefix(e, "*."); ok {
-			if rest = CanonicalHost(rest); rest != "" {
+			// Judged after canonicalization for the reason Match's is: IDNA
+			// creates label boundaries, so an entry arrives here holding no
+			// empty label and can leave holding one. Such a key could never
+			// match — Match refuses an empty label on the request side first —
+			// so dropping it changes no answer. It keeps a dead key out of the
+			// set rather than leaving the other side to make it harmless.
+			if rest = CanonicalHost(rest); rest != "" && !hasEmptyLabel(rest) {
 				s.suffixes = append(s.suffixes, rest)
 			}
 			continue
 		}
-		if e = CanonicalHost(e); e != "" {
+		if e = CanonicalHost(e); e != "" && !hasEmptyLabel(e) {
 			s.exact[e] = struct{}{}
 		}
 	}
@@ -149,6 +161,9 @@ func NormalizeHost(h string) string {
 // bytes are 0xC2-0xF4 and continuation bytes 0x80-0xBF — so the fold cannot
 // reach inside a multi-byte character, and it preserves length.
 func foldASCII(h string) string {
+	if !hasUpperASCII(h) {
+		return h
+	}
 	var b strings.Builder
 	b.Grow(len(h))
 	for i := range len(h) {
@@ -161,12 +176,20 @@ func foldASCII(h string) string {
 	return b.String()
 }
 
-// maxCanonicalHost bounds what CanonicalHost will hand to IDNA. A sandbox writes
-// the CONNECT authority itself and net/http bounds that only by MaxHeaderBytes,
-// so a megabyte-long U-label is reachable: canonicalizing one costs tens of
-// milliseconds where the fold costs milliseconds. Nothing is lost by refusing to
-// spend that — a name this long cannot resolve.
-const maxCanonicalHost = 255
+// maxCanonicalHost bounds what CanonicalHost and CanonicalEntry will hand to
+// IDNA. A sandbox writes the CONNECT authority itself and net/http bounds that
+// only by MaxHeaderBytes, so a megabyte-long U-label is reachable:
+// canonicalizing one costs tens of milliseconds where the fold costs
+// milliseconds.
+//
+// The number is four — the most bytes UTF-8 spends on one code point — times the
+// 253 a resolvable name's A-label can hold. Punycode emits at least one output
+// byte per input code point, so nothing longer than this can encode to a name
+// that resolves, whatever it holds. Setting it at 253 instead would be wrong by
+// the same arithmetic run backwards, and measurably so: three 45-rune "ä" labels
+// are 284 bytes of UTF-8 and a 167-byte A-label, a name that resolves perfectly
+// well and that a 255-byte cap refused to canonicalize.
+const maxCanonicalHost = 1024
 
 // CanonicalHost returns the form of a host that two spellings of one name agree
 // on. It is the comparison this package, internal/vaultresolve and internal/mcp
@@ -189,10 +212,13 @@ const maxCanonicalHost = 255
 // (an authority carrying its port, a bracketed or bare IPv6 literal), "_" (an
 // internal-DNS spelling), and — the surprise — a plain-ASCII label with hyphens
 // in positions 3 and 4, so "s3--us-west-2.example.com" errors while
-// ValidateHostEntry accepts it. Every one of those takes the fold, by the error
-// path below rather than by a guard of its own: a guard would have been dead
-// code, which mutation testing is how we found out. An IPv4 literal needs no arm
-// either way — idna returns it unchanged, measured.
+// ValidateHostEntry accepts it. Every one of those comes back folded, and none
+// needs an arm of its own: each is ASCII, so the branch below returns before
+// idna runs, and each would reach the same string by the error path if that
+// branch were deleted. A guard for them would have been dead code, which
+// mutation testing is how we found out. An IPv4 literal is the same story from
+// the other side — idna returns it unchanged, measured. That equivalence is not
+// general, though; the branch's own paragraph names the family where it fails.
 //
 // The error path is the sharp edge. ToASCII returns a value *and* an error, and
 // the value can be a different real hostname: "xn--pypi-.org" comes back as
@@ -201,19 +227,40 @@ const maxCanonicalHost = 255
 // discarded whenever the error is non-nil, on the entry side and the lookup side
 // alike, so the two can never disagree about which alphabet they are in.
 //
-// The ASCII branch is a cost guard and nothing more, which is worth saying
-// plainly: an all-ASCII host either passes idna unchanged or is refused by it,
-// so removing that branch changes no output and no test can tell — it is there
-// because idna costs 128ns against the fold's 43ns on a path the gate runs for
-// every request. net/http has the same branch for the same reason, but its one
+// The ASCII branch was written as a cost guard — idna costs 128ns against the
+// fold's 43ns, on a path the gate runs for every request — and it turns out to
+// carry a correctness rule as well, which is worth stating because the cost
+// reading alone invites deleting it. Nearly every all-ASCII host either passes
+// idna unchanged or is refused by it. One family does neither: a label of "xn--"
+// whose punycode payload is empty is REWRITTEN, and no error is returned.
+// Measured, ToASCII answers "xn--.example" with (".example", nil) and "a.xn--.z"
+// with ("a..z", nil). Without this branch a malformed A-label would become a
+// string carrying an empty label, which is the one shape Match exists to keep
+// away from a wildcard's boundary. net/http has the same branch, but its one
 // does not case-fold, so copying the function rather than the shape would undo
 // the fold #611 landed. Plan 43 argues the whole design.
+//
+// A scoped address keeps its zone identifier byte for byte. The zone names a
+// local interface, it is case-sensitive, and folding it would call two
+// interfaces one — so unlike NormalizeHost, which folds its whole input, this
+// splits at the first "%" and returns the remainder untouched. That is what lets
+// the gate dial the canonical name of a scoped address without changing which
+// interface it means.
 //
 // It folds but does not trim or de-root, so each caller keeps the normalization
 // its own callers need: this package pairs it with NormalizeHost, while
 // internal/mcp's sameHost deliberately does not, because a trailing dot there is
 // a difference that drops the token rather than sends it.
 func CanonicalHost(h string) string {
+	if i := strings.IndexByte(h, '%'); i >= 0 {
+		return canonicalName(h[:i]) + h[i:]
+	}
+	return canonicalName(h)
+}
+
+// canonicalName is CanonicalHost on a string already known to carry no zone
+// identifier.
+func canonicalName(h string) string {
 	h = foldASCII(h)
 	if h == "" || len(h) > maxCanonicalHost {
 		return h
@@ -237,9 +284,23 @@ func CanonicalHost(h string) string {
 // The wildcard prefix is cut before conversion and restored after, because an
 // asterisk is a rune IDNA refuses — which is also why CanonicalHost cannot be
 // handed a wildcard.
+//
+// The length cap CanonicalHost keeps applies here too, and it is what keeps the
+// two sides able to meet: without it an operator could store an entry converted
+// from a U-label the matcher would never convert, so the entry could not match
+// the very spelling it was written as. Refusing is the right answer for an
+// entry where falling back is the right answer for a lookup — nothing that long
+// can name a host that resolves.
+//
+// A failure names the entry as the operator wrote it, never the A-label made of
+// it: a 400 quoting punycode nobody typed cannot be found in the config it came
+// from.
 func CanonicalEntry(h string) (string, error) {
 	e := h
 	if !isASCII(e) {
+		if len(e) > maxCanonicalHost {
+			return "", fmt.Errorf("allowed_hosts entry %q is longer than a hostname can be", h)
+		}
 		rest, wildcard := strings.CutPrefix(e, "*.")
 		a, err := idna.Lookup.ToASCII(rest)
 		if err != nil {
@@ -250,16 +311,27 @@ func CanonicalEntry(h string) (string, error) {
 		}
 		e = a
 	}
-	if err := ValidateHostEntry(e); err != nil {
+	if err := validateHostEntry(e, h); err != nil {
 		return "", err
 	}
 	return e, nil
 }
 
-// isASCII reports whether s is entirely ASCII. It selects CanonicalHost's cost
-// guard, never a different answer: for a valid ASCII name ToASCII returns the
-// fold's own string, and for the shapes it refuses the fold is what the error
-// path would have returned anyway.
+// hasUpperASCII reports whether folding s would change it, so a host already
+// written in lower case — the common case on a path the gate runs for every
+// request — keeps its own string instead of an identical copy.
+func hasUpperASCII(s string) bool {
+	for i := range len(s) {
+		if s[i] >= 'A' && s[i] <= 'Z' {
+			return true
+		}
+	}
+	return false
+}
+
+// isASCII reports whether s is entirely ASCII. It selects CanonicalHost's ASCII
+// branch, which is not merely a shortcut — see that function's comment for the
+// "xn--" family idna rewrites without returning an error.
 func isASCII(s string) bool {
 	for i := range len(s) {
 		if s[i] >= 0x80 {
@@ -269,11 +341,19 @@ func isASCII(s string) bool {
 	return true
 }
 
+// idnaFullStops are the three code points UTS46 maps onto "." beside "." itself.
+// hasEmptyLabel counts them as separators because it also runs on hosts
+// CanonicalHost left alone — one over the length cap, or one whose conversion
+// failed — where that mapping has not happened. Measured: a 287-byte host led by
+// U+3002 was too long to canonicalize, carried no ASCII empty label, and so
+// walked straight through the "*.example.com" boundary this check exists to hold.
+var idnaFullStops = strings.NewReplacer("\u3002", ".", "\uff0e", ".", "\uff61", ".")
+
 // hasEmptyLabel reports whether host contains an empty DNS label — a leading dot,
 // a trailing dot (beyond the one NormalizeHost strips), or a ".." run. Such a
 // string is not a valid hostname and must not match, least of all a wildcard.
 func hasEmptyLabel(host string) bool {
-	for _, label := range strings.Split(host, ".") {
+	for _, label := range strings.Split(idnaFullStops.Replace(host), ".") {
 		if label == "" {
 			return true
 		}
@@ -288,14 +368,19 @@ func hasEmptyLabel(host string) bool {
 // WEBTOOL_ALLOWED_DOMAINS fails startup on the first bad entry, because an
 // out-of-grammar entry silently matches nothing (a typo would read as the
 // operator's fence when it is really a hole in it, or a deny-all).
-func ValidateHostEntry(h string) error {
+func ValidateHostEntry(h string) error { return validateHostEntry(h, h) }
+
+// validateHostEntry is ValidateHostEntry with the spelling to report split from
+// the spelling to check, so CanonicalEntry can hold an entry to the grammar in
+// its A-label form and still quote the operator's own.
+func validateHostEntry(h, display string) error {
 	badf := func() error {
-		return fmt.Errorf("allowed_hosts entry %q is not a hostname, IPv4 address, or *.-wildcard", h)
+		return fmt.Errorf("allowed_hosts entry %q is not a hostname, IPv4 address, or *.-wildcard", display)
 	}
 	wildcard := strings.HasPrefix(h, "*.")
 	host := strings.TrimPrefix(h, "*.")
 	if host == "" || strings.Contains(host, "*") {
-		return fmt.Errorf("allowed_hosts entry %q: a wildcard must be a \"*.\" prefix on a hostname", h)
+		return fmt.Errorf("allowed_hosts entry %q: a wildcard must be a \"*.\" prefix on a hostname", display)
 	}
 	// A ":" is never part of the grammar — it is a port or an IPv6 literal,
 	// including IPv4-mapped forms like "::ffff:10.0.0.1" that net.ParseIP
@@ -307,7 +392,7 @@ func ValidateHostEntry(h string) error {
 	// is rejected), and a wildcard applies to hostnames only — never an IP.
 	if ip := net.ParseIP(host); ip != nil {
 		if wildcard {
-			return fmt.Errorf("allowed_hosts entry %q: a \"*.\" wildcard applies to hostnames, not IP addresses", h)
+			return fmt.Errorf("allowed_hosts entry %q: a \"*.\" wildcard applies to hostnames, not IP addresses", display)
 		}
 		return nil
 	}
