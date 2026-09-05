@@ -322,19 +322,8 @@ func TestLivePackageInstallRealApt(t *testing.T) {
 	if errs := h.packageErrors(t); len(errs) != 0 {
 		t.Fatalf("the install reported %+v, want none", errs)
 	}
-	results := h.types(t, "agent.tool_result")
-	var body struct {
-		IsError bool `json:"is_error"`
-		Content []struct {
-			Text string `json:"text"`
-		} `json:"content"`
-	}
-	_ = json.Unmarshal(results[len(results)-1].Body, &body)
-	if body.IsError {
-		t.Fatalf("`jq --version` failed after the install: %+v", body)
-	}
-	if len(body.Content) == 0 || !strings.Contains(body.Content[0].Text, "jq-") {
-		t.Errorf("result = %+v, want jq's own version banner", body.Content)
+	if text := lastResultText(t, h); !strings.Contains(text, "jq-") {
+		t.Errorf("result = %q, want jq's own version banner", text)
 	}
 }
 
