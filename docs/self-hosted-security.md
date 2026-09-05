@@ -27,7 +27,7 @@ deliberate divergences from the reference are in
 | **Linux capabilities** | **By default** drops `NET_RAW`/`SETUID`/`SETGID` from every sandbox and forbids privilege escalation (`SANDBOX_CAP_DROP`, `ALL` accepted); a **gated** sandbox drops those three whatever the config says — the `NET_ADMIN` holders are the gate container/sidecar and the K8s netsetup init container, below | Widening or narrowing the drop set; AppArmor/SELinux profiles |
 | **Syscall filtering** | On **Kubernetes**, sets `seccompProfile: RuntimeDefault` on every sandbox pod, always — covering the sandbox container, the gate sidecar and the netsetup init container. Not configurable, and it is the runtime's own curated filter, not one the platform authors. Docker containers already receive their runtime's default | Not disabling it out of band (a node whose runtime has no default profile refuses the pod); AppArmor/SELinux, which are still yours |
 | **Read-only root filesystem** | Set on request (`SANDBOX_READONLY_ROOTFS`), with writable mounts arranged over every path the platform itself writes (workdir, `/tmp`, the shell state root, the file-resource mount root) | Deciding to turn it on, and shipping an image that tolerates one |
-| **Sandbox egress** | `limited` = `allowed_hosts`, plus the `host:port` endpoints the session's agent declares MCP servers at when the environment sets `allow_mcp_servers`, through the per-session egress gate (both backends, executor opt-in); without the gate `limited` **fails closed** (no route out); default networking is unrestricted | Firewalling / `NetworkPolicy` for the default (non-`limited`) case |
+| **Sandbox egress** | `limited` = `allowed_hosts`, plus — each under its own flag — the `host:port` endpoints the session's agent declares MCP servers at (`allow_mcp_servers`) and the curated package registries `pypi.org` and `files.pythonhosted.org` (`allow_package_managers`), through the per-session egress gate (both backends, executor opt-in); without the gate `limited` **fails closed** (no route out); default networking is unrestricted | Firewalling / `NetworkPolicy` for the default (non-`limited`) case |
 | **Runtime isolation** | Sets `runtimeClassName` on sandbox pods (`SANDBOX_K8S_RUNTIME_CLASS`; the chart's `sandboxRuntimeClass`) | Running gVisor/Kata on the nodes and naming it; on Docker, a daemon-level runtime or userns-remap |
 | **Sandbox placement** | On **Kubernetes**, puts your `nodeSelector` and `tolerations` on every sandbox pod (`SANDBOX_K8S_NODE_SELECTOR` / `SANDBOX_K8S_TOLERATIONS`; the chart's `sandboxPlacement`), and refuses a malformed one at startup | Building the node pool, labelling and tainting it, and keeping the platform's own workloads off it |
 | **Environment-key lifecycle** | Server-generated secrets, hash-only storage, one key per host with a one-year expiry, individual revocation, per-environment scope | Provisioning keys, rotation cadence, transport secrecy |
@@ -530,13 +530,20 @@ roll both work.
 ### 5. Egress restriction
 
 For a `limited` environment, egress is already enforced by the platform
-(above) — `allowed_hosts` through the per-session gate where it runs, and the
-endpoints the agent declares MCP servers at if you set `allow_mcp_servers`;
-no-route-out elsewhere, with the CNI caveats noted. `allow_mcp_servers` is the
-one place an *agent author* rather than you widens a `limited` environment, so
-it is scoped to the exact `host:port` each declaration names and a request only
-it admits is still held to the platform's own address floor (no loopback, no
-link-local, no cloud metadata) on the resolved address. **For the default
+(above) — `allowed_hosts` through the per-session gate where it runs, plus
+whatever its two widening flags open; no-route-out elsewhere, with the CNI
+caveats noted. `allow_mcp_servers` is the one place an *agent author* rather
+than you widens a `limited` environment, so it is scoped to the exact
+`host:port` each declaration names. `allow_package_managers` widens by a list
+neither of you wrote — the platform's own, which is `pypi.org` and
+`files.pythonhosted.org` and nothing else, so `pip` reaches its index and its
+wheel CDN while npm, cargo, gem, go and apt registries stay refused until a
+recording sizes them
+([#594](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/594)).
+Neither flag reads `config.packages`; setting the flag is the whole grant. A
+request only a flag admits is held to the platform's own address floor (no
+loopback, no link-local, no cloud metadata) on the resolved address — which
+`allowed_hosts`, being your own list, deliberately is not. **For the default
 (non-`limited`) case, egress is unrestricted**: a default Docker sandbox
 gets `NetworkMode: bridge`, and the Kubernetes sandbox pod carries no
 `NetworkPolicy`. If your agents should not reach the open internet or your

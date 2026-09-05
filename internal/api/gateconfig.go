@@ -344,13 +344,25 @@ func (s *server) emitUnreachableCredentials(ctx context.Context, sessionID strin
 	if net.Type != domain.NetLimited {
 		return
 	}
-	// The gate admits the agent's declared MCP hosts too when the policy says so
-	// (mcpGateEndpoints), and a credential naming one of them is reachable there.
+	// The gate admits more than allowed_hosts when the policy says so — the
+	// agent's declared MCP hosts (mcpGateEndpoints) and the curated package
+	// registries — and a credential naming one of those is reachable there.
 	// Judged on the host alone: a credential's allowed_hosts carry no port, so
 	// this is the coarser of the two questions the gate asks and errs toward not
 	// reporting a conflict — the direction that matters for an advisory error
-	// that is emitted once and never retracted.
-	policy := egress.NewHostSet(slices.Concat(net.AllowedHosts, mcpHosts))
+	// that is emitted once and never retracted. The registry set is read from the
+	// function the gate builds its own from, so within a build the two cannot
+	// disagree. Across a rolling upgrade they can — a live session keeps the gate
+	// image it started on while the control plane is replaced — and what that
+	// costs is bounded to this advisory arriving when it should not, or not
+	// arriving when it should. Never to what the sandbox reaches: the gate
+	// enforces the set it compiled and is always self-consistent, so the wire
+	// carries the flag and not the list.
+	var registries []string
+	if net.AllowPackageManagers {
+		registries = egress.PackageRegistryHosts()
+	}
+	policy := egress.NewHostSet(slices.Concat(net.AllowedHosts, mcpHosts, registries))
 	for _, c := range creds {
 		if c.unrestricted {
 			continue // no allowed_hosts of its own; reach is the environment's call

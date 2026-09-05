@@ -513,7 +513,8 @@ passwords and this IdP is published.
   set on them; select by the provider's `dev.opensdlc.managed-agent-platform.session-id`
   label) egress to the control-plane and Postgres Services. Setting `executor.gateImage`
   gives `limited` and vault-attached sessions a first-class egress gate (below), which
-  enforces `allowed_hosts` but deliberately does not police in-cluster reachability for
+  enforces `allowed_hosts` plus whatever its `allow_mcp_servers` and
+  `allow_package_managers` flags open, but deliberately does not police in-cluster reachability for
   unrestricted sessions — the NetworkPolicy advice stands either way.
 - **Pod Security Admission and the gate/limited paths.** With `executor.gateImage` unset, a
   `networking.type: limited` session gets a sandbox Pod with a `NET_ADMIN` init container

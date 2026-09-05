@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/egress"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/events"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/pgtest"
 )
@@ -214,5 +215,36 @@ func TestACredentialOnADeclaredMCPHostIsNotUnreachable(t *testing.T) {
 		hostsOf([]string{"mcp.example.com:443"}), probes)
 	if n := unreachableEventCount(t, s, other); n != 0 {
 		t.Errorf("with the MCP host the emitter wrote %d events, want 0", n)
+	}
+}
+
+// The same rule for the other widening flag: allow_package_managers opens the
+// curated registry set at the gate, so a credential scoped to one of those hosts
+// is reachable and must not be reported unreachable. The flag is what decides,
+// not the host — with it off the very same credential is a real conflict, which
+// is what makes this assertion different from a test that never fires.
+func TestACredentialOnAPackageRegistryHostIsNotUnreachable(t *testing.T) {
+	pool := pgtest.NewPool(t)
+	s := &server{pool: pool, log: events.NewLog(pool)}
+	registry := egress.PackageRegistryHosts()[0]
+	probes := []unreachableProbe{{
+		credentialID: "vcrd_pkg", vaultID: "vlt_x",
+		allowedHosts: []string{registry},
+	}}
+	limited := func(flag bool) domain.Networking {
+		return domain.Networking{Type: domain.NetLimited, AllowPackageManagers: flag,
+			AllowedHosts: []string{"env.example.com"}}
+	}
+
+	off, _ := pgtest.NewSession(t, pool, "cloud")
+	s.emitUnreachableCredentials(context.Background(), string(off), limited(false), nil, probes)
+	if n := unreachableEventCount(t, s, off); n != 1 {
+		t.Fatalf("without the flag the emitter wrote %d events, want 1", n)
+	}
+
+	on, _ := pgtest.NewSession(t, pool, "cloud")
+	s.emitUnreachableCredentials(context.Background(), string(on), limited(true), nil, probes)
+	if n := unreachableEventCount(t, s, on); n != 0 {
+		t.Errorf("with the flag the emitter wrote %d events, want 0", n)
 	}
 }
