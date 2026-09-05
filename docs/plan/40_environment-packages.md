@@ -8,6 +8,10 @@ issue: "#353"
 > gate's package-registry allow-set — landed for Python in #591 (#597, which merged
 > to main just after this branch was cut) — grows to the other five ecosystems in
 > #594. The progress summary is in docs/HISTORY.md.
+>
+> **Superseded since archival:** #594 sized that allow-set at **thirty hosts**
+> across nine ecosystems, plus source forges and container registries. Every
+> mention below of "the other five ecosystems" is the state at archival, not now.
 
 # Environment `config.packages` installed into the sandbox (plan 40)
 
@@ -92,9 +96,7 @@ entrypoint; `Hardening.ReadOnlyRootfs` leaves only `WritablePaths` writable and
 to an adopted sandbox. A `limited` session's egress goes through its gate where one is
 configured, which admits `allowed_hosts`, the MCP endpoints and — since #597 honored
 `allow_package_managers` — the recorded package-registry hosts (Python's `pypi.org` and
-`files.pythonhosted.org`; the other five ecosystems wait on #594 — **superseded:** #594
-sized the set at thirty hosts across nine ecosystems plus source forges and container
-registries); where no gate is
+`files.pythonhosted.org`; the other five ecosystems wait on #594); where no gate is
 configured — every Kubernetes deployment, and a Docker deployment that has not opted in — a
 `limited` sandbox has no route out at all. The
 queue admits one live `tool_exec` per session, but a reclaim can overlap the lapsed holder's

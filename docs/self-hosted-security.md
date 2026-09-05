@@ -580,10 +580,17 @@ package registries. It opens **source forges** — `github.com`,
 `objects.githubusercontent.com`, `gitlab.com`, `bitbucket.org` — and
 **container registries** — `ghcr.io`, `registry-1.docker.io`,
 `auth.docker.io`, `download.docker.com`. An agent under `limited` with this
-flag set can therefore clone any public repository hosted on those three
-forges — reach neither the flag's name nor the reference's own wording ("public
-package registries (such as PyPI and npm)") suggests. Other forges are not
-open: `sourceforge.net` was probed and refused.
+flag set reaches every one of those hosts — reach neither the flag's name nor
+the reference's own wording ("public package registries (such as PyPI and
+npm)") suggests. Other forges are not open: `sourceforge.net` was probed and
+refused.
+
+Take the forge half as **measured host reach, not a demonstrated `git clone`**.
+GitHub's pack host `codeload.github.com` and object host
+`objects.githubusercontent.com` are admitted beside the apex, so a clone is very
+likely whole; but no probe ran one, and for GitLab and Bitbucket only the apex
+was probed at all. Plan for the reach, and verify the workflow yourself if you
+are relying on it.
 
 The container registries are the narrower half, and worth reading precisely.
 `ghcr.io` and `registry-1.docker.io` answer authentication and manifests, but
