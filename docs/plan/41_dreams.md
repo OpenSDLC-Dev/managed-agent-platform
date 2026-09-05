@@ -85,8 +85,10 @@ that settles them (§8).
    before slice 1 opens. The SDK pin stays at v1.70.1 (§2.1).
 1. **The surface and the storage.** Migration `0034`, `PrefixDream`, the five routes,
    create-time validation, the list, and the two lifecycle actions over a state machine
-   with no runner behind it: a created dream stays `pending` until slice 2 lands, which
-   the slice's fragment and STATE.md say out loud. The `docs/DIVERGENCES.md:135` entry is
+   with no runner behind it: a created dream stays `pending` until slice 2 lands, and
+   `output_behavior.type: update_existing` is refused with a 400 `invalid_request_error`
+   ("not available yet on this platform") until slice 4 lifts the refusal (§5.3) — both
+   transitional states the slice's fragment and STATE.md say out loud. The `docs/DIVERGENCES.md:135` entry is
    rewritten; `ant beta:dreams create|retrieve|list|archive|cancel` are accepted against
    the platform, with cancel moving a `pending` dream to `canceled`. CLAUDE.md's prefix
    list gains `drm_` in the same PR — `internal/domain/docs_test.go:56` pins the list to
@@ -445,9 +447,16 @@ sees it.
 
 **What the runner reads before it advances a stage** is the session's `status` and one
 more thing: `events.UnconfirmedAskEvents` (`internal/events/toolflow.go:652`), read
-*before* the status the way the reaper orders the two reads
-(`internal/executor/reaper.go:236-251`), because an `idle` session with an open ask is
-mid-turn, not done. Under the internal agent's `always_allow` policy an ask is a bug, so
+*after* the status, because an `idle` session with an open ask is mid-turn, not done.
+The order is the reverse of the reaper's (`internal/executor/reaper.go:236-251`), because
+the races differ: the reaper reads asks first against an *answer* landing between its
+reads — one transaction that answers the ask, enqueues the work and flips the session
+`running` — and this session can receive no answer (§4.4 refuses every send). What can
+land here is an ask's *creation*, which the brain commits together with the flip to
+`idle` (`internal/brain/brain.go:855-861`), so a status read that returns `idle` is
+followed by an ask read that sees every ask there will be; asks first would let the
+creation land between the reads and both come back permissive. Under the internal
+agent's `always_allow` policy an ask is a bug, so
 the runner fails the dream with `internal_error` ("pipeline session asked for
 confirmation") rather than leave it for a human. Beyond idle-and-no-ask it checks nothing
 — the stage prompts carry the artefact checks above.
@@ -520,18 +529,28 @@ every DREAM_TICK_INTERVAL (default 30s), one tick — the scheduler's shape
                  ORDER BY created_at
   for each id, holding one slot of the shared sweep budget, in its own transaction:
     SET LOCAL lock_timeout = '2s'
-    SELECT … FROM dreams WHERE id = $1 FOR UPDATE SKIP LOCKED   -- one replica per dream
-    (no row → another replica has it; skip)
+    SELECT … FROM dreams WHERE id = $1 AND closed_at IS NULL     -- the scan's predicate
+                 AND NOT (status = 'pending' AND attempts > 0    -- again, under the lock
+                          AND updated_at > now() - dreamStartLease)
+                 FOR UPDATE SKIP LOCKED                           -- one replica per dream
+    (no row → another replica holds it, or claimed or closed it since the scan; skip)
     step(dream)                                            -- the first matching arm below
     COMMIT
 ```
 
 `closed_at` is the row's "nothing left to do" stamp (§6): null while the dream is live
-*or closing*, set by whichever arm finishes it. Every transaction above is short — a row
-read, one bounded change, commit — and **no row lock is ever held across network I/O**:
-the start arm, the one arm with I/O, splits into a claim transaction, an unlocked
-rendering phase, and a write transaction (§4.2), so a cancel landing mid-start finds the
-row free. `step` reads `(status, stage, attempts, updated_at, session_id)` and, when a
+*or closing*, set by whichever arm finishes it. Every transaction above is a row read and
+one bounded change — except the start's write transaction, which also carries the clone,
+the file rows and the session create, database work bounded by `DREAM_MAX_INPUT_BYTES`
+(§4.2) — and **no row lock is ever held across network I/O**: the start arm, the one arm
+with I/O, splits into a claim transaction, an unlocked rendering phase, and that write
+transaction, so a cancel landing during the render finds the row free, and one landing
+during the write waits on the row for at most the handler's `lock_timeout` and, if it
+does not clear, fails the request (the 500 an unmapped error gets), which the SDK retries
+on its own (`requestconfig.go:265-272`) — against a `running` dream by then, through the
+interrupt path. The locked read repeats the scan's predicate, so a candidate list taken
+before another replica's claim finds the row excluded rather than claiming it again
+(§4.2). `step` reads `(status, stage, attempts, updated_at, session_id)` and, when a
 session exists, its `status`, `archived_at` and `usage` (`internal/api/sessions.go:88-89`;
 the brain folds every thread's turn into `sessions.usage`, `internal/events/log.go:102-104`,
 so "refresh `usage`" below is a copy of that column), then
@@ -566,7 +585,9 @@ exactly one applies:
    discipline, bounded here because a dream has no successor occurrence to supersede
    it: the claim that exhausts `dreamStartAttempts` (5, a package `var`) settles
    `failed{internal_error}` with the last error's text, and `closed_at` with it. A
-   replica that crashes mid-rendering burns one attempt and the lease; nothing else.
+   replica that crashes mid-rendering burns one attempt and the lease; nothing else. A
+   replica whose candidate list predates another's claim finds the row excluded by the
+   locked read (§4.1) and claims nothing.
 4. **Running, unavailable** — the input store missing or archived, an input session
    missing, **the output store missing or archived** (the executor tolerates both, so the
    session would not fail on its own, `internal/executor/memory.go:427, 461`), or the
@@ -611,8 +632,9 @@ instruments: `dream.transitions` (by `to` status), `dream.stage_turns` (by stage
 
 **Cancel is a request-side transition, not a tick.** `POST …/cancel` opens a transaction
 with the deployment handlers' `SET LOCAL lock_timeout` (`deployments.go:643-660`, a
-55P03 surfacing as a failed request rather than a hang — every tick transaction is short
-now, so the timeout is a backstop, not a path a cancel is expected to take), and on a
+55P03 surfacing as a failed request rather than a hang — the one transaction a cancel can
+wait on is the start's write transaction, bounded by the clone's size (§4.2); the failed
+request is retried by the SDK and lands against the `running` dream, §4.1), and on a
 `pending` dream sets `canceled`, `ended_at` and `closed_at` and is done. On a `running`
 dream it sets `canceled` and `ended_at` and **runs the interrupt** on the session in the
 same transaction — the whole interrupt arm of `sendSessionEvents`
@@ -628,13 +650,15 @@ few seconds" made concrete, and the same two-phase shape a `failed` dream's sess
 The start arm is three phases, because its network I/O may run under no row lock at all
 — not the session and environment rows (the `sealRepoTokens` rule,
 `internal/api/sessionresources.go:619-623`), and not the dream row either, or a cancel
-issued during a start would time out instead of landing (§2.6 promises an immediate
+issued during a start's I/O would time out instead of landing (§2.6 promises an immediate
 cancel of a `pending` dream):
 
 - **Claim** — the tick's transaction of §4.1: the row `FOR UPDATE SKIP LOCKED`, still
-  `pending`, `attempts + 1`, `updated_at = now()`, commit. Two replicas cannot both claim
-  (the lock), and a claimed dream leaves every replica's candidate scan for
-  `dreamStartLease` (5 min) — the *soft lease* of §8.3 decision 1: one constant against
+  `pending` and not under a live claim (the scan's exclusion, repeated under the lock),
+  `attempts + 1`, `updated_at = now()`, commit. Two replicas cannot both claim — the lock
+  against a contender at the same instant, the repeated predicate against one whose
+  candidate list predates the claim — and a claimed dream leaves every replica's
+  candidate scan for `dreamStartLease` (5 min) — the *soft lease* of §8.3 decision 1: one constant against
   `updated_at`, no owner column, no renewal, because the phase it covers is seconds and a
   crashed claimant costs one attempt and one lease, never a stuck dream.
 - **Render**, unlocked, on the arm's own budget slot: read the input sessions' logs
@@ -970,8 +994,12 @@ The error types this platform produces, and when:
 
 ### 5.3 `update_existing` (slice 4)
 
-The start arm skips step 4 and mounts the input store `read_write`; `outputs[]`
-names the input store once `running`. The hold: **at most one live `update_existing`
+Until this slice lands, `POST /v1/dreams` refuses `output_behavior.type: update_existing`
+with a 400 `invalid_request_error` (§1 slice 1): the hold index below ships in migration
+`0034`, but no row sets `target_memory_store_id` before the slice that gives the
+behavior a runtime path, so neither an in-place dream the runner cannot start nor a raw
+unique-violation 500 can occur in between. The start arm skips step 4 and mounts the
+input store `read_write`; `outputs[]` names the input store once `running`. The hold: **at most one live `update_existing`
 dream per target store** — `pending`, `running`, or terminal and not yet closed —
 enforced by a partial unique index on `dreams (target_memory_store_id) WHERE
 target_memory_store_id IS NOT NULL AND closed_at IS NULL` (§6). That one predicate is
@@ -1098,7 +1126,8 @@ the renderer in `internal/transcript`; no test-support package is added, so the 
 
 - **Routes (slice 1)**, `internal/api/dreams_test.go` over `pgtest`: each create rejection
   its own case (cardinality, ids, model, instructions bounds, an unknown key at the top
-  level and inside each nested arm, the `update_existing` target rule); the echo of both
+  level and inside each nested arm, the `update_existing` target rule, and the 400 every
+  `update_existing` body gets until slice 4 lifts it); the echo of both
   `model` forms; the list's ordering,
   paging, `include_archived`, both `statuses` spellings, the exclusive bounds; archive and
   cancel over every status, idempotence included; 404s for malformed and unknown ids; the
@@ -1111,7 +1140,12 @@ the renderer in `internal/transcript`; no test-support package is added, so the 
   classified failures closing the dream in one commit, an unclassified rollback to the
   claim that survives it (`attempts + 1` committed, the blobs deleted, the lease aging
   the dream back into the scan), a cancel landing during the render phase (the write
-  transaction finds `canceled`, deletes the blobs, changes nothing), a claimant that
+  transaction finds `canceled`, deletes the blobs, changes nothing), a cancel arriving
+  while the write transaction holds the row (55P03 at the handler's `lock_timeout`, and
+  the retried cancel interrupting the now-`running` dream), a second replica whose
+  candidate list predates the first's claim finding no row to claim, the status read
+  before the ask read (an ask-and-idle commit landed between the two reads is still
+  caught), a claimant that
   crashes mid-render (the dream re-enters the scan after `dreamStartLease`), and the
   `dreamStartAttempts`-th failure settling `internal_error`; the clone — counts, paths,
   contents, digests, one `created` version per memory with the `session_actor` naming the
@@ -1281,7 +1315,8 @@ states the alternative it beat.
    in one transaction, renders unlocked, and writes in another, so nothing renews, no
    lock spans I/O, and a crash leaves nothing half-done beyond orphaned objects the
    repository already tolerates. The claim is a committed `attempts + 1` whose
-   `updated_at` keeps the dream out of every scan for `dreamStartLease` — one constant, no
+   `updated_at` keeps the dream out of every scan, and out of the locked read a stale scan
+   leads to, for `dreamStartLease` — one constant, no
    owner column, no renewal, because the phase it covers is seconds. Rejected: a
    `claimed_by`/`lease_expires_at` pair with renewal — the only such idiom here is the
    queue's, bound to `work_items`, and a dream is not one; preparing with no claim at all
@@ -1395,8 +1430,11 @@ states the alternative it beat.
   (64 MiB default) keeps the transaction and the sandbox mount inside what plan 36's
   materializer already handles.
 - **The start arm's claim window.** No lock spans the rendering and blob puts (seconds
-  to tens of seconds for 100 transcripts): the claim and the write are two short
-  transactions, and a cancel in between lands and wins (§4.2). What the window costs
+  to tens of seconds for 100 transcripts): the claim is one row change, the write is
+  bounded database work (the clone, the file rows, the session), and a cancel between
+  them lands and wins; one during the write waits at most the handler's `lock_timeout`
+  and lands on the SDK's retry, against a `running` dream (§4.1, §4.2). A candidate list
+  older than another replica's claim finds the row excluded under the lock. What the window costs
   instead is a soft lease — a claimant that crashes leaves its dream out of every scan
   for `dreamStartLease` (5 min) and burns one of `dreamStartAttempts` (5); the `FOR
   SHARE` locks on the input store and the internal environment are held only inside the
