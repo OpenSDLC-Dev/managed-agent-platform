@@ -284,6 +284,33 @@ func TestThePackageRegistrySetStillRefusesWhatTheRecordingSawRefused(t *testing.
 	}
 }
 
+// Admission is the step that gates everything after it, which is what made the
+// Unicode fold worth fixing before this set shipped rather than after. A request
+// to an IDN alias of a curated host normalized onto that host, so the gate
+// admitted it — and only an admitted request reaches the substitution engine,
+// where a credential scoped to the ASCII name would then be handed to a dial Go
+// resolves, via IDNA, to a wholly different and registerable domain. The alias
+// must be refused outright (#606).
+func TestAnIDNAliasOfACuratedHostIsNotAdmitted(t *testing.T) {
+	p := newPolicy(domain.Networking{Type: domain.NetLimited, AllowPackageManagers: true}, nil)
+	for _, alias := range []string{
+		"g\u0130thub.com", // U+0130 folds to "i" under Unicode, not under DNS
+		"pyp\u0130.org",
+		"crates.\u0130o",
+	} {
+		if got := p.admit(alias, "443"); got != admitNone {
+			t.Errorf("admit(%q) = %v, want admitNone — it is not the ASCII host it folds to (#606)", alias, got)
+		}
+	}
+
+	// The ASCII spellings, upper-cased and dotted, still resolve to the entry.
+	for _, real := range []string{"GitHub.com", "PyPI.org.", "crates.io"} {
+		if got := p.admit(real, "443"); got != admitRegistry {
+			t.Errorf("admit(%q) = %v, want admitRegistry — ASCII folding must still work", real, got)
+		}
+	}
+}
+
 // String names the class in a failure message. It lives in the test file because
 // only a test ever formats an admission: the gate switches on it, never prints
 // it, and a Stringer no production path can reach would be dead weight in

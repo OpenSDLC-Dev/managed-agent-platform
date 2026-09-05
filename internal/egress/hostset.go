@@ -112,13 +112,39 @@ func (s *HostSet) CoversEntry(entry string) bool {
 	return s.Match(entry)
 }
 
-// NormalizeHost lowercases and strips a single trailing FQDN dot so
+// NormalizeHost folds a host's case and strips a single trailing FQDN dot so
 // "Example.com." and "example.com" compare equal. Exported because the gate's
 // MCP endpoint set has to answer a host exactly the way this package's HostSet
 // does (internal/gate, policy.go) while staying an exact-match map.
+//
+// It folds **ASCII only**, the way DNS does, and that is the security-relevant
+// half. strings.ToLower folds by Unicode, and Unicode maps several non-ASCII
+// letters onto ASCII ones — it lowercases U+0130 (LATIN CAPITAL LETTER I WITH
+// DOT ABOVE) to plain "i", so "gİthub.com" and "github.com" would share one key.
+// They are not one host: Go's HTTP stack resolves the first through IDNA to
+// "xn--github-qyd.com", a name anyone may register. Folding by Unicode therefore
+// let a request to the IDN pass an admission check written for the ASCII name,
+// and — because Engine.Substitute selects a credential through this same
+// matcher — collect that name's secret on the way out.
+//
+// Every entry on the matching side is already ASCII: ValidateHostEntry accepts
+// only letters, digits and "-" per label, and it is the single grammar for an
+// operator's allowed_hosts, a credential's, WEBTOOL_ALLOWED_DOMAINS and this
+// platform's own PackageRegistryHosts. So ASCII folding cannot cost a match that
+// should have happened — only a non-ASCII request host stops matching an ASCII
+// entry, which is the whole point. internal/vaultresolve's lowerHost and
+// internal/mcp's sameHost make the same argument for the same reason (#606).
 func NormalizeHost(h string) string {
-	h = strings.ToLower(strings.TrimSpace(h))
-	return strings.TrimSuffix(h, ".")
+	h = strings.TrimSuffix(strings.TrimSpace(h), ".")
+	var b strings.Builder
+	for i := range len(h) {
+		c := h[i]
+		if c >= 'A' && c <= 'Z' {
+			c += 'a' - 'A'
+		}
+		b.WriteByte(c)
+	}
+	return b.String()
 }
 
 // hasEmptyLabel reports whether host contains an empty DNS label — a leading dot,
