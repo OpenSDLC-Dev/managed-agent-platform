@@ -169,8 +169,8 @@ issue; none is a blocker under decision 1.
   signature), so every tenant's `vault_credentials.secret_ciphertext` is sealed under one
   deployment key — one local AES-256-GCM key, one OpenBao transit key, or one Cloud KMS key. A
   missed predicate on that table is therefore credential *disclosure*, not metadata
-  disclosure, which is why §7.5 enumerates every statement on it by hand rather than leaving
-  them to slice 4's bulk, and why §6.5's rule (g) covers the table from slice 2. A
+  disclosure, which is why §7.5 enumerates its `internal/api` statements by hand rather than
+  leaving them to slice 4's bulk, and why §6.5's rule (g) covers the table from slice 2. A
   per-tenant key envelope would change the `Cipher` interface and its shared contract suite
   (`internal/secrets/secretstest`).
 - **Queue fairness, named as distinct from rate limiting.** `queue.Claim` is one global FIFO —
@@ -1038,9 +1038,12 @@ scope predicate has exactly that shape. So `internal/api/scopematrix_test.go`:
    the target set **from slice 2**, six packages. `internal/vaultresolve` is in it because its
    **four** statements would otherwise sit unclassified for four slices: the two `vaults` joins
    (`credentials.go:139`, `mcp.go:85`) and the two keyed on a credential row's own id
-   (`mcprefresh.go:222`, `:418`). All four name `vault_credentials`, so all four ride rule (g),
-   not (b′) — the package's scoped-table *mention* count is 2 (§4.5) and its *statement* count
-   is 4, which is the pair of units that made the smaller number look like the whole of it. Everything not yet scoped goes on the exemption list **with
+   (`mcprefresh.go:222`, `:418`). The rules divide them by *literal*, not by statement, which is
+   how the two units come apart here: all four name `vault_credentials`, an unscoped child, so
+   four literals ride rule (g); the first two additionally name `vaults` after `JOIN`, and those
+   two literals — the package's whole scoped-table mention count of 2 (§4.5) — ride rule (b′).
+   Reading the smaller number as the package's statement count is what hid `mcprefresh.go`'s
+   two from every rule at once. Everything not yet scoped goes on the exemption list **with
    the slice that fixes it named**, so the guard passes between slices. Slice 5 widens the walk
    once, to every non-test file under `internal/` (§7.5) — which is what brings `internal/store`
    into view, and why the two no-FK writers on the exemption list below sit outside the six
@@ -1077,8 +1080,9 @@ scope predicate has exactly that shape. So `internal/api/scopematrix_test.go`:
    later slice fixes riding the exemption list until it does. Naming a subset here and leaving
    the rest to inheritance would make step 2's promise — that both sets are derived, not
    remembered — false for the second one, and would drop the member carrying the worst blast
-   radius: `vault_credentials`, which is why §7.5 enumerates its statements by hand instead of
-   leaving them to slice 4's bulk.
+   radius: `vault_credentials`, which is why §7.5 enumerates its `internal/api` statements by
+   hand instead of leaving them to slice 4's bulk (its four in `internal/vaultresolve` are named
+   in step 1 above).
 3. For every SQL literal naming a scoped table after `FROM` / `JOIN` / `INSERT INTO` /
    `UPDATE` / `DELETE FROM`, requires one of:
    - **(a)** the three-column predicate;
@@ -1746,7 +1750,7 @@ yet enforce") and `:485`'s parenthetical, `CLAUDE.md:36`'s parenthetical and `:8
 line. They are still true here: §7.5's enumerated by-id reads on `vaults`, `vault_credentials`,
 `skills` and `files` are unscoped until that slice closes them, and a doc asserting enforcement
 one slice early is the overclaim the verifier's docs rung exists to catch. Slice 5 flips all
-six. The principle halves stay verbatim whenever they flip — scoping is org/workspace/project
+seven. The principle halves stay verbatim whenever they flip — scoping is org/workspace/project
 and never a user, the adk `AppName`+`UserID` divergence, the `created_by`/`metadata` hooks.
 · Registry: re-argue `:19`'s parenthetical; **add an entry** for a
 cross-tenant resource read and a cross-tenant create-time reference both answering the absent-id
@@ -1876,7 +1880,7 @@ several workspaces. · **`TestKeyRotationMigrationRepairsExistingDuplicates`' re
 ends on a schema no deployment reaches.
 
 **Docs.** `changelog.d/` · STATE.md · **the "does not yet enforce" claims flip here**, where they
-finally become false — seven coordinates across five files: `internal/store/store.go:34` and
+finally become false — seven coordinates across four files: `internal/store/store.go:34` and
 `:37-38`, `internal/domain/session.go:44-45`, `docs/ARCHITECTURE.md:368` and `:485`,
 `CLAUDE.md:36` and `:85` (§7.4 says why they wait for this slice). · Registry: **rewrite the two entries carrying the clause
 "scopes nothing per environment (skills are workspace-global)"** — `:163`, which #575's
