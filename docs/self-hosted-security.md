@@ -580,11 +580,13 @@ package registries. It opens **source forges** — `github.com`,
 `objects.githubusercontent.com`, `gitlab.com`, `bitbucket.org` — and
 **container registries** — `ghcr.io`, `registry-1.docker.io`,
 `auth.docker.io`, `download.docker.com`. An agent under `limited` with this
-flag set can therefore clone any public repository and pull any public image,
-which neither the flag's name nor the reference's own wording ("public package
-registries (such as PyPI and npm)") suggests. If that is more reach than you
-want, leave the flag off and put the registry hosts your builds actually need
-in `allowed_hosts`, where they are yours to choose.
+flag set can therefore clone any public repository hosted on those three
+forges, and pull any public image from Docker Hub or GHCR — reach neither the
+flag's name nor the reference's own wording ("public package registries (such
+as PyPI and npm)") suggests. Other forges and registries are not open:
+`sourceforge.net` was probed and refused, and `quay.io` is simply absent. If
+that is more reach than you want, leave the flag off and put the registry hosts
+your builds actually need in `allowed_hosts`, where they are yours to choose.
 
 The rest is Python, npm, Rust, Ruby, Go, PHP, Java and apt, and two details
 there will bite a build. Matching is by **exact host**: `test.pypi.org` and the
