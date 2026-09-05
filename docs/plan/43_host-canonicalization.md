@@ -211,12 +211,16 @@ true of the callers that only ever wanted the lookup form.
 - **`NewHostSet` and `CoversEntry`: convert the remainder after
   `strings.CutPrefix(e, "*.")`.** `ToASCII("*.example.com")` errors on U+002A,
   so the conversion has to see the entry with its prefix off or a Unicode
-  wildcard never becomes an A-label at all. Mutation testing sorted out which
-  half of that is load-bearing: converting the *whole* entry before the cut as
-  well turns out to be harmless, because the asterisk's error sends
-  `CanonicalHost` back to the fold and `CutPrefix` sees the same string. The
-  mistake to guard against is dropping the conversion after the cut, and a
-  named row fails for it.
+  wildcard never becomes an A-label at all. Mutation testing sorted out three
+  claims here, and the middle one was wrong the first time it was argued.
+  *Converting* the whole entry before the cut as well would indeed be harmless,
+  because the asterisk's error sends `CanonicalHost` back to the fold and
+  `CutPrefix` sees the same string. Running the whole **lookup** form there is
+  not, because `CanonicalLookup` also de-roots and de-rooting does not survive
+  repetition: it takes one trailing dot off per pass, so a second pass turns the
+  entry `example.com..`, whose last label is empty, into the live key
+  `example.com`. And dropping the conversion after the cut breaks a Unicode
+  wildcard outright. A named row fails for each of the two mistakes.
 - **`Match`: canonicalize the whole host, then run `hasEmptyLabel` on the
   canonical value, not the raw one.** IDNA maps U+3002, U+FF0E and U+FF61 to
   `.`, so it *creates* label boundaries: `。example.com` canonicalizes to
@@ -335,11 +339,16 @@ length cap in both directions, the zone identifier, and the canonical dial; the
 three divergences registered; a `changelog.d/` fragment; and the verifier plus
 both reviewers run per the repository's ritual.
 
-Three mutants survive, and each is stated rather than hidden. Canonicalizing the
-whole entry *before* the wildcard cut changes no output, because the asterisk's
-error sends `CanonicalHost` back to the fold — the conversion after the cut is
-the half that matters, and it has its own row. And dropping `NewHostSet`'s
-empty-label check removes only keys that could never have matched, since `Match`
-refuses an empty label on the request side first; it is defence in depth, and no
-test can distinguish it. The third is the control plane's `endpointKey`, argued
-where it is called.
+Two mutants survive, and each is stated rather than hidden. Dropping
+`NewHostSet`'s empty-label check removes only keys that could never have matched,
+since `Match` refuses an empty label on the request side first; it is defence in
+depth, and no test can distinguish it. The other is the control plane's
+`endpointKey`, argued where it is called.
+
+A third was claimed as a survivor here and the claim was false — recorded rather
+than quietly dropped, because the error is the instructive part. Running the
+whole lookup form before the wildcard cut as well as after was argued to be
+output-equivalent; it is not, because de-rooting does not survive repetition, and
+the entry `example.com..` becomes the live key `example.com` under it. What hid
+the difference was a test gap on the entry side, not an inert mutant. Both are
+closed.

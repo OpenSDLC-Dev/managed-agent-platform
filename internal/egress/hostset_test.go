@@ -193,6 +193,18 @@ func TestARootedSpellingIsTheSameHost(t *testing.T) {
 	if !egress.NewHostSet([]string{"*.internal.example.com\u3002"}).Match("a.internal.example.com") {
 		t.Error("a wildcard entry written with an ideographic full stop was dropped")
 	}
+	// An entry whose final label is empty is dropped, not laundered into a name.
+	// De-rooting is the step that cannot be repeated — CanonicalLookup takes one
+	// dot off per pass — so an implementation running it before the "*." cut as
+	// well as after turns each of these into a live key.
+	for _, e := range []string{
+		"example.com..", "example.com\u3002\u3002", "*.internal.example.com..",
+	} {
+		s := egress.NewHostSet([]string{e})
+		if s.Match("example.com") || s.Match("a.internal.example.com") {
+			t.Errorf("an entry written %q became a live key; its last label is empty", e)
+		}
+	}
 }
 
 // Two spellings of one name are one host. Each pair here is a single domain

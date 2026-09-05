@@ -1127,10 +1127,11 @@ func withBearer(client *http.Client, token string, endpoint *url.URL) *http.Clie
 // trailing dot is not stripped: both are differences that withhold rather than
 // leak, which is the direction this whole comparison errs in.
 //
-// Splitting the port also strips the brackets around a literal, so "[abc]:80"
-// and "abc:80" are one origin here where folding the whole string kept them
-// apart. That merge is origin-true rather than a widening — url.Hostname strips
-// the brackets too, so net/http dials both spellings identically.
+// Splitting the port also strips the brackets around an IPv6 literal, so what is
+// compared is the address itself — "::1", not "[::1]" — which is what
+// url.Hostname hands the dialler. Both sides reach here through url.Parse, and
+// it produces only the bracketed spelling for a literal, so the strip makes this
+// agree with what net/http dials rather than widening what counts as one origin.
 func sameHost(a, b string) bool {
 	ah, ap := splitPort(trimEmptyPort(a))
 	bh, bp := splitPort(trimEmptyPort(b))

@@ -44,18 +44,23 @@ type HostSet struct {
 // have passed CanonicalEntry below. One that did not is not rejected here — it
 // is keyed as it canonicalizes, and what that costs depends on the entry:
 // "https://x.com" matches nothing, "x.com:443" matches only a request host
-// spelled with a colon in it — an address no dial can complete — while "::1"
-// and "_acme.example.com" match themselves exactly. A nil or empty list
+// spelled with a colon in it, which is a host no request reaching here can be —
+// while "::1" and "_acme.example.com" match themselves exactly. A nil or empty list
 // matches nothing.
 func NewHostSet(entries []string) *HostSet {
 	s := &HostSet{exact: make(map[string]struct{}, len(entries))}
 	for _, e := range entries {
 		// Trim first, so the prefix is visible, then CanonicalLookup on the
-		// remainder once the "*." is off. Converting before the cut instead
-		// would be harmless rather than wrong — an asterisk is a rune idna
-		// refuses, so the error fallback returns the same folded string — but
-		// converting *after* it is what makes a Unicode wildcard work at all,
-		// and mutation testing is what sorted the two apart.
+		// remainder once the "*." is off. Running the lookup form before the cut
+		// as well is not redundant but wrong, and only measurement separates the
+		// two halves of why. Converting alone would be harmless — an asterisk is
+		// a rune idna refuses, so the error fallback returns the same folded
+		// string — but CanonicalLookup also de-roots, and de-rooting does not
+		// survive being repeated: it takes one trailing dot off per pass, so a
+		// second pass turns the entry "example.com.." — whose last label is
+		// empty — into the live key "example.com". Converting *after* the cut is
+		// what makes a Unicode wildcard work at all. Mutation testing sorted the
+		// three apart.
 		e = strings.TrimSpace(e)
 		if rest, ok := strings.CutPrefix(e, "*."); ok {
 			// Judged after canonicalization for the reason Match's is: IDNA
@@ -398,8 +403,9 @@ func hasEmptyLabel(host string) bool {
 // WEBTOOL_ALLOWED_DOMAINS fails startup on the first bad entry, because an
 // out-of-grammar entry matches only the literal string it was written as: a URL
 // matches nothing, and a "host:port" matches only a request host spelled with a
-// colon in it — an address no dial can complete — so a typo reads as the
-// operator's fence when it is really a hole in it.
+// colon in it, which every path into the matcher rejects first — net/http will
+// not parse such an authority — so a typo reads as the operator's fence when it
+// is really a hole in it.
 func ValidateHostEntry(h string) error { return validateHostEntry(h, h) }
 
 // validateHostEntry is ValidateHostEntry with the spelling to report split from
