@@ -990,6 +990,58 @@ func TestBearerOriginComparison(t *testing.T) {
 		{name: "zone differing only in case", endpoint: "http://[fe80::1%25eth0]:8080/rpc", target: "http://[fe80::1%25ETH0]:8080/rpc"},
 		{name: "zone against no zone", endpoint: "http://[fe80::1%25eth0]:8080/rpc", target: "http://[fe80::1]:8080/rpc"},
 		{name: "address folds, zone does not", endpoint: "http://[FE80::1%25eth0]:8080/rpc", target: "http://[fe80::1%25eth0]:8080/rpc", attach: true},
+
+		// Case folding a hostname is an ASCII operation, and the sigma orbit is
+		// why: Unicode folds σ and ς together while IDNA punycodes them to two
+		// different names, so folding the whole string calls two domains one
+		// origin and sends the bearer to the second. This transport sits above
+		// the IDNA encoding net/http does, so what it compares is the U-label,
+		// exactly as written here.
+		{name: "the two sigmas are two domains", endpoint: "http://\u03c3.example:8080/rpc", target: "http://\u03c2.example:8080/rpc",
+			wrong: "IDNA lookup is non-transitional, so these punycode to xn--4xa.example and xn--3xa.example — two names, two owners"},
+		// The cost, pinned so nobody reverts the fold to buy it back, and sized
+		// as what it is: every orbit EqualFold merged that IDNA also collapses,
+		// of which UTS46's compatibility mappings for U+212A and U+017F are two
+		// shapes and an ordinary capital is the common one. Each of these pairs
+		// really is one domain after IDNA, and the credential is now withheld
+		// from a server it was resolved for. Accepted deliberately: no
+		// byte-level rule separates these from the sigmas, and a withheld
+		// bearer costs a 401 where a shared one costs the secret.
+		{name: "a capital in a non-ASCII label is the cost's ordinary shape", endpoint: "http://B\u00dcCHER.example:8080/rpc", target: "http://b\u00fccher.example:8080/rpc",
+			wrong: "IDNA maps both to xn--bcher-kva.example, so this withholds from the right server — and it is the whole cased non-ASCII alphabet, not two exotic characters"},
+		{name: "the Kelvin sign is the accepted cost", endpoint: "http://\u212a.example:8080/rpc", target: "http://k.example:8080/rpc",
+			wrong: "IDNA maps U+212A to k, so this withholds from the right server — accepted, because ASCII folding is what keeps the sigmas apart"},
+		{name: "the long s is the same accepted cost", endpoint: "http://\u017ftrasse.example:8080/rpc", target: "http://strasse.example:8080/rpc",
+			wrong: "IDNA maps U+017F to s, so this is strasse.example either way — a withhold, like the Kelvin row, not a prevented leak"},
+		{name: "an IDN still folds on its ASCII half", endpoint: "http://b\u00fccher.EXAMPLE:8080/rpc", target: "http://b\u00fccher.example:8080/rpc", attach: true,
+			wrong: "the ASCII letters of a mixed name must still fold, or the credential is withheld from its own server"},
+		// Both operands of the fold, its inclusive range, and both directions of
+		// the length guard — each of which a single token can break while every
+		// row above still passes. The hosts spell "A-Z" because that is the
+		// range: the rows above happen to carry an "A" but no "Z", so only the
+		// upper bound was actually unpinned. Every row above also spells its
+		// capitals on the endpoint side, so folding one operand and not the
+		// other passed them all while withholding from any request whose own
+		// URL carries capitals; and every length-differing row above has the
+		// request host the longer one, so a guard weakened to "request longer"
+		// would become a prefix match and pass them too.
+		{name: "the fold's range is inclusive at both ends, endpoint side", endpoint: "http://A-Z.example:8080/rpc", target: "http://a-z.example:8080/rpc", attach: true,
+			wrong: "the endpoint operand must fold the whole A-Z range, or a credential is withheld from its own server over a letter at the range's edge"},
+		{name: "the fold's range is inclusive at both ends, request side", endpoint: "http://a-z.example:8080/rpc", target: "http://A-Z.example:8080/rpc", attach: true,
+			wrong: "the fold must apply to both operands over the whole range, or a request spelled in capitals is refused its own credential"},
+		{name: "a request host is not admitted by being a prefix of the endpoint", endpoint: "https://example.com.evil.test/rpc", target: "https://example.com/rpc",
+			wrong: "the length guard must reject both directions; a prefix match would put evil.test's credential on a request to example.com"},
+
+		// The zoned branch folds its address half too, and that half is not
+		// always hex: a percent-escaped host reaches this code with an ordinary
+		// name before the "%". url.Parse turns "http://ex%CF%83%25z.test/" into
+		// the host "ex\u03c3%z.test", so the pre-"%" comparison sees "ex\u03c3"
+		// against "ex\u03c2" — the sigmas again. A host with a literal "%" is
+		// not a name the transport would resolve, so this row is what fails when
+		// only the unzoned call site is folded in ASCII, rather than a second
+		// leak witness in its own right.
+		{name: "the zoned branch folds its address in ASCII too", endpoint: "http://ex\u03c3%25z.test:8080/rpc", target: "http://ex\u03c2%25z.test:8080/rpc",
+			wrong: "both call sites must fold the same way; reverting this one alone leaves the sigmas merged"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()

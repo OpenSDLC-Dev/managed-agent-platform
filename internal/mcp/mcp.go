@@ -1034,11 +1034,12 @@ func (t *limitedTransport) give(n int64) {
 // guarantees either way is narrower and is the part that matters: a credential
 // resolved for one server is offered to that server and to no other.
 //
-// The comparison is textual — scheme, and host case-insensitively — which every
-// way of being wrong fails closed. url.Parse lowercases the scheme and keeps
+// The comparison is textual — scheme, and host case-insensitively in ASCII —
+// which every way of being wrong fails closed. url.Parse lowercases the scheme and keeps
 // userinfo out of Host, so those cannot cause a false match; the forms that do
 // differ textually while naming the same origin (an explicit :443, a trailing
-// dot) drop the token rather than send it, and the request fails as
+// dot, a capital in a non-ASCII label) drop the token rather than send it, and
+// the request fails as
 // unauthenticated instead of leaking. A normalizing comparison would trade that
 // direction for the other one.
 // withTraceContext puts W3C trace context on every request this client sends,
@@ -1103,9 +1104,9 @@ func withBearer(client *http.Client, token string, endpoint *url.URL) *http.Clie
 }
 
 // sameHost compares two URL hosts the way DNS and IPv6 respectively require:
-// case-insensitively, except for a scoped address's zone identifier, which is
-// locally significant and may distinguish two interfaces that differ only in
-// case. Folding the whole string is the one way this comparison could match
+// case-insensitively — in ASCII only, for the reason asciiEqualFold argues
+// below — except for a scoped address's zone identifier, which is locally
+// significant and may distinguish two interfaces that differ only in case. Folding the whole string is the one way this comparison could match
 // two origins that are not the same one — the direction that leaks rather than
 // withholds — so the zone is split off and compared exactly.
 //
@@ -1118,12 +1119,77 @@ func sameHost(a, b string) bool {
 	a, b = trimEmptyPort(a), trimEmptyPort(b)
 	az, bz := strings.IndexByte(a, '%'), strings.IndexByte(b, '%')
 	if az < 0 && bz < 0 {
-		return strings.EqualFold(a, b)
+		return asciiEqualFold(a, b)
 	}
 	if az < 0 || bz < 0 {
 		return false
 	}
-	return strings.EqualFold(a[:az], b[:bz]) && a[az:] == b[bz:]
+	return asciiEqualFold(a[:az], b[:bz]) && a[az:] == b[bz:]
+}
+
+// asciiEqualFold is strings.EqualFold restricted to ASCII: a deliberately
+// conservative origin predicate, not a full hostname comparison. It exists for
+// the reason the zone identifier is split off above, applied to the host
+// itself. strings.EqualFold folds by Unicode, and the Greek sigmas share a fold
+// orbit IDNA keeps apart — Go's non-transitional lookup punycodes "σ.example"
+// to "xn--4xa.example" and "ς.example" to "xn--3xa.example", two names that can
+// belong to two people — so folding by Unicode calls two domains one origin and
+// the bearer goes to the second.
+//
+// Size the cost honestly. It is not two exotic characters: it is every orbit
+// EqualFold merged that IDNA also collapses, which is most of them. "Ä.example"
+// and "ä.example" are one domain after IDNA ("xn--4ca.example" either way) and
+// this calls them two, as it does "Д"/"д", U+212A against "k", and U+017F
+// against "s". Two kinds of pair are outside it, in opposite directions: the
+// sigmas, the orbit IDNA does *not* collapse, which is the whole point; and
+// U+0130, which EqualFold never merged with "i" in the first place — that is a
+// lowercase mapping, not a fold orbit, so it costs nothing here even though it
+// is exactly the example that motivates internal/egress's NormalizeHost. The
+// change also stops calling two different invalid UTF-8 bytes equal, which
+// EqualFold does by decoding both to U+FFFD.
+//
+// Both the leak and the cost need an origin the caller did not spell: Connect
+// parses cfg.URL and hands that same string to the transport, so only a
+// redirect or a caller's own client can make the two sides differ, and the
+// clients built here refuse redirects. On that path a withheld bearer costs a
+// 401 and a wrongly-shared one costs the secret, which is the direction to err
+// in. It is not the only way to err less: comparing idna.Lookup.ToASCII on both
+// sides separates the sigmas *and* folds every legitimate pair, which is what
+// net/http itself does to decide whether Authorization survives a redirect.
+// #609 carries that question, because the same choice settles what an
+// environment's allowed_hosts should be validated against.
+//
+// Comparing bytes is safe because ASCII folding preserves length, unlike a
+// Unicode one, and because no non-ASCII code point's UTF-8 encoding contains a
+// byte in 0x41-0x5A — lead bytes are 0xC2-0xF4 and continuation bytes 0x80-0xBF
+// — so the fold cannot reach inside a multi-byte character.
+//
+// internal/egress's NormalizeHost and internal/vaultresolve's lowerHost fold the
+// same way, for the same reason; those three are what #609 audited, and it rules
+// internal/identity's isLoopbackHost out separately — that one folds by Unicode
+// too, but only against a fixed localhost/loopback allowlist no mapping aliases
+// into. The zoned call above needs the fold as much as the unzoned one, which is
+// not obvious: a scoped IPv6 address is hex before the "%" and would fold the
+// same either way, but a percent-escaped host reaches that branch too —
+// url.Parse reads "http://ex%CF%83%25z.test/" as the host "exσ%z.test" — so its
+// address half can be an ordinary name, sigma and all.
+func asciiEqualFold(a, b string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range len(a) {
+		x, y := a[i], b[i]
+		if x >= 'A' && x <= 'Z' {
+			x += 'a' - 'A'
+		}
+		if y >= 'A' && y <= 'Z' {
+			y += 'a' - 'A'
+		}
+		if x != y {
+			return false
+		}
+	}
+	return true
 }
 
 // trimEmptyPort is net/http's removeEmptyPort, which is unexported there. The

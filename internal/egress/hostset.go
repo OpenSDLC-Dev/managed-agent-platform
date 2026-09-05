@@ -138,10 +138,16 @@ func (s *HostSet) CoversEntry(entry string) bool {
 // which is the direction this gate must err in, but the honest claim is
 // "narrows only into refusal", never "narrows nothing" (#609).
 //
-// internal/vaultresolve's lowerHost folds this way, for this reason.
-// internal/mcp's sameHost does not — it still compares with strings.EqualFold —
-// which is a sibling inconsistency rather than a second instance of this bug,
-// since its clients refuse redirects; #609 carries it.
+// internal/vaultresolve's lowerHost and internal/mcp's sameHost fold this way,
+// for this reason; sameHost joined them in #609's first half. Only the folding
+// is shared — each also normalizes what its own callers need, and this one is
+// alone in trimming space and a trailing dot. The folds differ past a "%":
+// those two leave a scoped address's zone identifier exactly as written,
+// because it selects a local interface and is case-sensitive, while this one
+// folds its whole input, a zone identifier included. Read that as unaddressed
+// rather than impossible: an entry in the unvalidated networking.allowed_hosts
+// named above could carry one, and so could a CONNECT authority naming a scoped
+// address, and folding it would call two interfaces one (#609).
 func NormalizeHost(h string) string {
 	h = strings.TrimSuffix(strings.TrimSpace(h), ".")
 	var b strings.Builder
