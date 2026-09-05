@@ -5,18 +5,16 @@ What is being worked on right now, and how far along it is — nothing else. **S
 ## Active work
 
 **#78 — confirming documented wire assumptions against a real managed-agents
-endpoint.** Two recording sessions, 785 request/response pairs for about US$1.02, in
-a private archive: bytes observed once, at cost. 2026-09-02 covered the Work API,
-turn semantics, multiagent threads, memory stores, files, skills, vaults, deployments
-and permission gating; 2026-09-03 ran two waves, one free over console-cookie
-questions and one of 281 pairs against the tiers needing model spend, an environment
-key, or a resource we lacked. #78 stays open past this work — 117 registry entries
-still name it as their live tracker, and the debt is now analysis rather than
-recording: 72 comparison rows have never been read. A third session on 2026-09-05
-added batches for #594 and #56, the latter the first **two-workspace** capture.
-Plan 38 (#263) archived 2026-09-04, plan 39 (#566, Skills on the GA wire shape) with
-its delivering PR, and plan 40 (#353, environment packages, folding in #576)
-2026-09-05 with its own.
+endpoint.** Three recording sessions in a private archive: bytes observed once, at
+cost. 2026-09-02 covered the Work API, turn semantics, multiagent threads, memory
+stores, files, skills, vaults, deployments and permission gating; 2026-09-03 ran two
+waves, one free and one of 281 pairs against the tiers needing model spend, an
+environment key, or a resource we lacked; 2026-09-05 added #594's and #56's batches,
+the latter the first **two-workspace** capture. #78 stays open past this work — 117
+registry entries still name it as their live tracker, and the debt is now analysis
+rather than recording. Plan 38 (#263) archived 2026-09-04, plan 39 (#566, Skills on
+the GA wire shape) with its delivering PR, and plan 40 (#353, environment packages,
+folding in #576) 2026-09-05 with its own.
 
 ## Tasks
 
@@ -30,7 +28,7 @@ its delivering PR, and plan 40 (#353, environment packages, folding in #576)
       settled, two narrowed, one dissolved, touching 24 registry entries;
       thirteen mismatches are now issues (#570-#574, #577-#579, #581-#582,
       #589-#591), the `list_cost` unit is on #432, and #576 is registered
-- [x] Record the two-workspace capture plan 41 (#56) gated slice 1 on — all six
-      items answered, lifting the gate; one half of one item stays unreachable
+- [x] Record the two-workspace capture plan 41 (#56) gated slice 1 on — items 1-5
+      in full, item 6 on its key lane; the gate lifts, one half stays unreachable
 - [ ] Read the 72 un-analysed comparison rows from 2026-09-02 — the recording
       backlog is nearly exhausted and this one has never been touched

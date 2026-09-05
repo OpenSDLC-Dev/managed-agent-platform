@@ -70,7 +70,7 @@ docs/DIVERGENCES.md` → 4.*
 6. **A live multi-workspace console/API recording will be made before slice 1** — an account
    action the user performs, in the shape of #378's 2026-08-13 capture. Slice 1 is gated on
    it. §5 lists exactly what to capture and which entries it converts. **Taken 2026-09-05;
-   all six items recorded, the gate lifted** (§5.1).
+   items 1-5 recorded in full and item 6 on one of its two lanes, the gate lifted** (§5.1).
 7. **The reference's per-organization limits stay unenforced** — 100 workspaces, 500 GB of
    files, 1,000 scheduled deployments — re-argued on operator-owned capacity rather than on
    single-tenancy. Enforcement belongs to #46. The recording adds a supporting fact the
@@ -471,9 +471,13 @@ architecture; the plan changes they *did* force are listed in §5.
    A's memory store and reading an id that exists nowhere produce the same status, the same
    error type and the same message template, differing only in the id the caller supplied
    (`batch8.json` idx 5, 7). A session create naming a foreign `environment_id` and one naming
-   an absent one likewise agree (idx 18, 19). Both families answer the same way, so the
-   per-field/uniform question is settled uniform. **CONFIRMED**, and §7.4's byte-identical-404
-   and D10 stand as written.
+   an absent one likewise agree (idx 18, 19). **CONFIRMED**, and §7.4's byte-identical-404 and
+   D10 stand as written. **The per-field question is only half settled**: what was recorded is
+   one *read* family and one *create-time reference* family, both answering the same way. A
+   second create-time field was attempted and could not be reached — `memory_store_id` is not a
+   session-create field at all, and the reference rejects it as an unknown field before any
+   tenancy check (idx 20, 21). So "uniform across create-time reference fields" rests on one
+   field, and a second one is worth recording whenever a route offers it.
 2. Whether an **environment Bearer key resolves a workspace on the work routes**, and how a
    foreign `anthropic-workspace-id` answers there. The spec's `authorization` parameter on
    those paths has no description, and both header names are absent from the spec entirely. The
@@ -505,16 +509,23 @@ architecture; the plan changes they *did* force are listed in §5.
    no INFERRED format fallback.
 5. When **`anthropic-organization-id` is absent** — the docs give absence conditions for the
    workspace header only, so emitting the two on one schedule is a choice, not a mirrored rule.
-   → **The reference stamps by how far the request got, in four tiers**, and `batch8.json`
-   sorts into them without a remainder: anything that reached the route carries the rate-limit
-   headers *and* both tenancy headers, 2xx and 4xx alike (idx 0, 1, 3, 5, 6, 7, 12, 18, 19);
-   field-level validation carries the two tenancy headers only (idx 8, 9); a body-parse failure
-   carries nothing but `request-id` (idx 10, 11, 13-17, 20, 21); a pre-auth 401 carries nothing
-   at all (idx 2). **It is also per route**: `/v1/environments` returns **200 with none of them**
-   (idx 4, 23, 26) while `/v1/memory_stores` and `/v1/agents` on the same lane seconds apart
-   carry the full set. So our one schedule remains **ours** — but it is now a documented
-   simplification of an observed rule rather than an unmirrored invention, and the registry
-   entry says which.
+   → **The reference has no single schedule. Two axes decide it, and route comes first.**
+   `batch8.json`'s 38 entries fall into five header combinations:
+
+   | headers | entries | what they are |
+   |---|---|---|
+   | rate-limit + `anthropic-organization-id` + `anthropic-workspace-id` | 0, 1, 3, 5, 6, 7, 12, 18, 19 | reached the route on `/v1/memory_stores`, `/v1/agents`, `/v1/sessions` — 2xx **and** 4xx alike |
+   | the two tenancy headers only | 8, 9 | field-level validation on those same routes |
+   | rate-limit + `anthropic-organization-id`, **no** workspace header | 31, 32, 35, 36 | the console dialect's organization-level routes, which have no workspace to name |
+   | `request-id` only | 4, 10, 11, 13-17, 20-30, 33, 34, 37 | body-parse failures on the tenancy-stamping routes, **and every response** from `/v1/environments`, the work-poll lane and the `/api/oauth/…` token routes |
+   | nothing at all | 2 | the pre-auth 401 |
+
+   So **whether a route stamps at all is decided first** — `/v1/environments` returns 200 with
+   none of them (idx 4, 23, 26) while `/v1/memory_stores` and `/v1/agents` on the same lane
+   seconds apart carry the full set — and only *within* a stamping route does how far the
+   request got decide which headers appear. Our one schedule remains **ours**: a documented
+   simplification of a two-axis rule rather than an unmirrored invention, and strictly wider
+   than it (see §6.2). The registry entry says so.
 
 §5's two further items are answered in place: the console's own workspace administration (its
 item 5, which gates slice 6) at §7.6, and the archived-workspace refusal (item 6) at §6.1.
@@ -707,13 +718,16 @@ acceptance step, not the architecture.
 
 ### 5.1 Done, 2026-09-05 — the gate is lifted
 
-**All six items were recorded; slice 1 is unblocked and slice 6's item 5 is answered too.**
-07:13:03Z-07:43:18Z, at US$0 — every probe is a control-plane call, and no model turn ran.
-Three throwaway workspaces (`plan40-tenancy-recording-A/B/C`) were created and archived inside
-the half hour; three credential lanes were driven, the third of them by `curl` because a
-browser cannot reach it (CORS preflight on `POST` to `api.anthropic.com` answers 405, and
-script may read only two response headers on a `GET`). Every credential minted — three
-workspace API keys, two environment tokens — was revoked or archived and its death verified.
+**Items 1-5 were recorded in full and item 6 on one of its two lanes; slice 1 is unblocked and
+slice 6's item 5 is answered too.** 07:13:03Z-07:43:18Z, at US$0 — every probe is a
+control-plane call, and no model turn ran. Three throwaway workspaces
+(`plan40-tenancy-recording-A/B/C`) were created and archived inside the half hour; three
+credential lanes were driven, the third of them by `curl` because a browser cannot reach it
+(CORS preflight on `POST` to `api.anthropic.com` answers 405, and script may read only two
+response headers on a `GET`). Every credential minted — three workspace API keys, two
+environment tokens — was revoked or archived and refused afterwards; **the bytes for one of
+those five refusals are in the archive** (`batch9.curl.txt:150`, workspace C's key), the other
+four being attested by `FINDINGS8.md` from runs whose output was header-filtered.
 `batch8.json`, `batch9.json`, `batch9.curl.txt` and `FINDINGS8.md`, cited as §4.1 sets out.
 
 **Item 1 came back a 404**, so the architecture stands unchanged: §7.4's byte-identical-404
@@ -864,6 +878,31 @@ the credential already covers.
 - The reference's "required with a multi-workspace API key" arm is **unreachable**, because
   decision 5 mints no such credential. Registered as out of scope rather than unimplemented.
 
+**On the work lane this one rule is a deliberate divergence, and §5's recording is why we know.**
+The reference ignores `anthropic-workspace-id` there entirely — foreign, own and malformed
+values all answer 200 — and stamps neither tenancy header on the response (§4.3 item 2). We
+apply the same rule we apply everywhere: an environment key resolves a scope from its
+environment's row, so a foreign value is a 404 and both headers are stamped. **Two divergences,
+both chosen rather than overlooked**, and slice 1 registers them together:
+
+- **One rule beats five.** A header that narrows on four lanes and is silently ignored on the
+  fifth is the shape a reader gets wrong, and getting it wrong on the work lane means a BYOC
+  worker quietly polling the wrong tenant's queue. The rule is uniform because a scoping rule
+  with an exception is the kind that leaks.
+- **The credential *does* resolve a workspace here**, unlike the reference's, whose token
+  grants one environment and three verbs and names no tenant at all (§4.3 item 2). So we have a
+  workspace to stamp and a workspace to compare against; the reference does not, which is a
+  sufficient explanation for its ignoring the header and stamping nothing, and not a reason for
+  us to.
+
+The cost is bounded and worth naming: a client that sends a *foreign* workspace header to a
+work route gets 404 here and 200 there. The `ant` CLI can produce that request — it forwards
+whatever `--workspace-id` it is given, on the worker lane as on the management one
+(`anthropic-cli` v1.26.1 `pkg/cmd/workspace_test.go:18-74`) — but only when its operator names
+a workspace other than the one the environment belongs to, which is precisely the request this
+plan exists to refuse. A worker polling its own environment is unaffected whether it sends the
+header or omits it.
+
 Both response headers are stamped **inside each credential resolver** — `requireAPIKey`
 (`internal/api/auth.go:181`), `resolveEnvironmentKey` (`envauth.go:44`), `requireWorkToken`
 (`worktokenauth.go:99`), `requireGateToken` (`gateauth.go:21`) and `requireIdentity`
@@ -882,14 +921,15 @@ executes before any lane resolves the scope, which each lane attaches only to th
 passes to its `next` (e.g. `auth.go:207`); `withRequestID` keeps its request-id stamp alone. For
 `anthropic-workspace-id` that schedule is the documented one; for
 `anthropic-organization-id` no absence rule is *documented* anywhere, and the 2026-09-05
-recording shows the reference does not run one schedule at all — it stamps in four tiers by how
-far a request got, and skips both headers entirely on `/v1/environments` even at 200 (§4.3 item
-5). **Our single schedule is therefore a deliberate simplification**, and a strictly wider one:
-every authenticated response of every route carries both headers, so wherever the reference
-stamps them we do too, and we stamp on some responses where it does not — a body-parse failure,
-and every `/v1/environments` call. A client that reads the headers when present is unaffected;
-one that infers *anything* from their absence would be reading a rule the reference does not
-publish. Registered (§4.3 item 5).
+recording shows the reference does not run one schedule at all — whether a route stamps comes
+first, and only within a stamping route does how far the request got decide which headers
+appear (§4.3 item 5). **Our single schedule is therefore a deliberate simplification**, and a
+strictly wider one: every authenticated response of every route carries both headers, so
+wherever the reference stamps them we do too, and we stamp on responses where it does not — a
+body-parse failure, every `/v1/environments` call, the work-poll lane, and the console dialect's
+organization-level routes, where the reference stamps the organization alone. A client that
+reads the headers when present is unaffected; one that infers *anything* from their absence
+would be reading a rule the reference does not publish. Registered (§4.3 item 5).
 
 ### 6.3 The predicate, and where it goes
 
@@ -1394,7 +1434,10 @@ with the managed-agents wire taken by choice"). What is **added** as a divergenc
 mismatch: `anthropic-organization-id` emitted on the workspace header's schedule, no absence
 rule for it being recorded anywhere; the reference's "required with a multi-workspace API key"
 arm registered as **unreachable**, decision 5 minting no such credential; and §6.2's fourth arm
-as INFERRED — a real workspace the credential does not cover answering the identical 404. **Add**
+as **CONFIRMED** — a real workspace the credential does not cover answering the identical 404,
+which §5 item 4 observed directly. **Add** the work lane's two deliberate divergences (§6.2):
+we honor `anthropic-workspace-id` and stamp both tenancy headers there, where the reference
+ignores the header and stamps neither. **Add**
 CONFIRMED that the default workspace keeps the literal id `default` where the reference's
 Default Workspace is `wrkspc_`-prefixed, and that this platform additionally accepts the literal
 `default` **in the header** — a lenient parse of ours, since `anthropic-sdk-go/config/federation.go:77-86` speaks
@@ -2082,7 +2125,7 @@ reference behavior nothing records today.
 migration — exactly as `:153` predicted. The emitted half's `message` is ours and registered.
 
 **D10 — Cross-tenant refusal follows the split the tree already decided on evidence, rather than
-unifying it — and the 404 arm is INFERRED against real counter-evidence.** `/v1` resource routes
+unifying it — and the 404 arm is CONFIRMED against what looked like real counter-evidence.** `/v1` resource routes
 and create-time references answer **404**, byte-identical to absent. That is a choice, and the
 entry records both sides: *for* it, the reference's own existence-hiding precedent ("the same
 response as for any unknown workspace", authentication doc) and the fact that every cross-scope
@@ -2223,8 +2266,9 @@ remained open was **evidence, not choice** — the **five** NOT OBSERVED items o
 **§5's recording of 2026-09-05 closed all five**, including the fifth
 (`anthropic-organization-id`'s absence schedule), which turned out to be observable after all
 even though it had been registered as ours; it stays ours, now as a stated simplification of a
-four-tier rule (§4.3 item 5). All six of §5's recording items were captured, so neither the
-slice-1 gate (items 1-4 and 6) nor the slice-6 one (item 5) is outstanding. **Nothing the
+two-axis rule (§4.3 item 5). Items 1-5 were captured in full and item 6 on its key lane, which
+is what both gates needed: neither the slice-1 gate (items 1-4 and 6) nor the slice-6 one
+(item 5) is outstanding. **Nothing the
 2026-09-03 and 2026-09-04 recordings settled closed any of those items** — they reached the
 environment key's OAuth scopes and the skills wire shape, never a second workspace — which is
 what 2026-09-05 was for, and the registry's second wave (#575) left `:47` and `:153` as the only
