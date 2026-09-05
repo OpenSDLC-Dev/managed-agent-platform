@@ -473,7 +473,7 @@ cap** — the number of model turns, **every thread's counted**, the runner will
 before it posts a `user.interrupt` and fails the dream with `internal_error` ("stage N
 exceeded its budget") — 4 / 300 / 30 / 10, package `var`s, and the whole dream has
 `DREAM_TIMEOUT` (§5.2). The count is one query: the session's `span.model_request_end`
-events (`internal/domain/event.go:75`; every turn on every thread ends in one, a thread's
+events (`internal/domain/event.go:75`; every settled turn on every thread ends in one, a thread's
 with its `thread_id` set) whose `seq` follows the stage's opening `user.message` — the
 latest `user.message` on the primary thread, the runner being its only author while the
 dream is open (§4.4) — so no column tracks it. Stage 2's cap is sized for its fan-out:
@@ -1390,7 +1390,7 @@ states the alternative it beat.
   budget. The batch size is a `var`; the read count is not. The 100-transcript acceptance
   run (§7) records the wall clock so the expectation is measured, not assumed.
 - **The clone's size.** 2,000 memories × 100 kB is 200 MB read in one `SELECT` and
-  re-inserted in batches of 500 under one store lock (§4.2 step 4) — the platform's own
+  re-inserted in batches of 500 under one store lock (§4.2 steps 1 and 4) — the platform's own
   cap, not the guide's 10,000 (§3.3); `DREAM_MAX_INPUT_BYTES`
   (64 MiB default) keeps the transaction and the sandbox mount inside what plan 36's
   materializer already handles.
