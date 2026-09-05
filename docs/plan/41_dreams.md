@@ -94,13 +94,13 @@ that settles them (§8).
 2. **The runner, with a one-stage pipeline.** `StartDreamRunner`; the claim; the store
    clone; the internal environment and agent, and the gates that keep them the
    runner's (§4.4); the shared sweep budget (§4.1); transcript rendering **with its
-   secret redaction** (no slice writes transcript bytes into a sandbox unredacted) and the
+   secret redaction and its caps** (no slice writes transcript bytes into a sandbox unredacted) and the
    file resources; session creation; a single-turn pipeline (orient and merge in one message,
    no threads); the usage mirror; completion, failure, timeout, cancel, the unavailability
    checks, and the archive. Accepted end to end with the real `ant` CLI and a real model
    over a seeded store and two transcripts.
-3. **The full pipeline.** The four stages of §3, digest threads, the rendering caps,
-   output validation, the report; the evals that grade consolidation quality; a second
+3. **The full pipeline.** The four stages of §3, digest threads, output validation, the
+   report; the evals that grade consolidation quality; a second
    acceptance run at the 100-transcript bound.
 4. **`update_existing`.** The in-place path, the hold, and its 409.
 
@@ -457,15 +457,28 @@ without the runner's stage cap being hit; the output store still exists and is n
 archived (the executor tolerates a missing or archived store — it skips or goes pull-only,
 `internal/executor/memory.go:427, 461` — so the session would not have failed on its
 own); and **no memory version the session wrote matches the redaction patterns** — one
-query over `memory_versions` by `created_by`, the cheap half of the secret defence. A
+query over `memory_versions` by `created_by` **and `created_at` later than the pipeline
+session's own**, the cheap half of the secret defence. The time bound keeps the clone out
+of the scan: under `create_new` the start arm's write transaction attributes every cloned
+version to the same actor (§4.2 step 4) and stamps them and the session row with its one
+`now()`, so the caller's pre-existing content — an example key inside a memory, say —
+cannot fail a dream that wrote nothing wrong; only the versions the session made later,
+in the clone or in place, are read. A
 match fails the dream with `internal_error` naming the memory; under `create_new` the
 caller discards the clone, under `update_existing` the version is already in the store's
 history and the failure is the signal to redact it. The pipeline may legitimately leave a
 store unchanged, or empty it if everything in it was garbage; the platform does not
 second-guess that. What it does guard is spend: each stage has a **turn
-cap** — the number of `model_turn` settlements the runner will tolerate before it posts a
-`user.interrupt` and fails the dream with `internal_error` ("stage N exceeded its budget")
-— 4 / 60 / 30 / 10, package `var`s, and the whole dream has `DREAM_TIMEOUT` (§5.2).
+cap** — the number of model turns, **every thread's counted**, the runner will tolerate
+before it posts a `user.interrupt` and fails the dream with `internal_error` ("stage N
+exceeded its budget") — 4 / 300 / 30 / 10, package `var`s, and the whole dream has
+`DREAM_TIMEOUT` (§5.2). The count is one query: the session's `span.model_request_end`
+events (`internal/domain/event.go:75`; every turn on every thread ends in one, a thread's
+with its `thread_id` set) whose `seq` follows the stage's opening `user.message` — the
+latest `user.message` on the primary thread, the runner being its only author while the
+dream is open (§4.4) — so no column tracks it. Stage 2's cap is sized for its fan-out:
+thirteen digest threads each reading eight transcripts and writing one digest is about
+130 turns, and the coordinator's spawns and waits a few dozen more (§9).
 
 ### 3.4 What is configurable
 
@@ -476,14 +489,15 @@ stripped), the redaction, the two text rules, and the one code-level jail there 
 `write` and `edit` refuse a `/mnt/memory` path outside a mounted store
 (`internal/toolset/memoryroots_test.go`). The write jail to the store mount and
 `/workspace/dream` is otherwise the **prompt's** under `create_new`: `bash` is unguarded
-everywhere (an in-place run has no `bash`, §4.3, and there the jail is code), which
+everywhere (an in-place run has no `bash`, §4.3, and there the memory half of the jail
+is code), which
 is why the clone-by-default, not the jail, is what bounds a prompt that fails (§9).
 
 ---
 
 ## 4. Architecture
 
-### 4.1 The runner — a controlplane sweep with no owner lease
+### 4.1 The runner — a controlplane sweep with one soft lease
 
 The runner is a **controlplane background sweep**, started beside the deployment
 scheduler and the retention job (`cmd/controlplane/main.go:208-213`), for the reasons
@@ -518,7 +532,9 @@ read, one bounded change, commit — and **no row lock is ever held across netwo
 the start arm, the one arm with I/O, splits into a claim transaction, an unlocked
 rendering phase, and a write transaction (§4.2), so a cancel landing mid-start finds the
 row free. `step` reads `(status, stage, attempts, updated_at, session_id)` and, when a
-session exists, its `status` and `archived_at` (`internal/api/sessions.go:88-89`), then
+session exists, its `status`, `archived_at` and `usage` (`internal/api/sessions.go:88-89`;
+the brain folds every thread's turn into `sessions.usage`, `internal/events/log.go:102-104`,
+so "refresh `usage`" below is a copy of that column), then
 takes **the first arm that matches**, and only that one — the arms are ordered so
 exactly one applies:
 
@@ -558,8 +574,8 @@ exactly one applies:
    exists, `failed{input_*_unavailable}` or `failed{internal_error}`.
 5. **Running, ended badly** — session `terminated`: `failed{internal_error}` with the
    session's last error text.
-6. **Running, over budget** — the stage's turn cap exceeded: interrupt,
-   `failed{internal_error}`.
+6. **Running, over budget** — the stage's turn cap exceeded, every thread's turns
+   counted (§3.3): interrupt, `failed{internal_error}`.
 7. **Running, busy** — session `running` or `rescheduling` ("transient error,
    auto-retrying", `internal/domain/session.go:10-13`): refresh `usage`, nothing else.
 8. **Running, idle with an open ask** (§3.3): interrupt, `failed{internal_error}`.
@@ -738,9 +754,12 @@ one reason the prompt's write jail is not a code jail there (§3.4) — and the 
 what makes that acceptable. **Under `update_existing` the session runs without `bash`**:
 the `agent_with_overrides` `tools` override (the same override list `model` and `system`
 ride on, `sessions.go:256-268`) adds `{type: bash, name: bash, enabled: false}`, and with
-only the file tools left the jail *is* code — `write`/`edit` refuse any `/mnt/memory`
-path outside a mounted store, and the workdir is the only other writable tree
-(`internal/toolset/memoryroots_test.go`). §5.3 says what the merge stage does instead of
+only the file tools left the jail around memory *is* code — `write`/`edit` refuse any
+`/mnt/memory` path outside a mounted store (`unwritable`,
+`internal/toolset/toolset.go:270-285`), so no store but the caller's own can be written.
+The rest of the container stays writable and holds no memory: the workdir the prompt
+names, `/tmp`, and `/mnt/session/outputs`, where a stray write is harvested at idle as a
+session output, never a memory (§3.1). §5.3 says what the merge stage does instead of
 deleting. A dream's `model` — string or `{id, speed}` —
 becomes the override verbatim, so the pipeline session's `agent.model` echoes it and its
 `self` copies inherit it. `speed` rides along and is ignored by every provider here, as it
@@ -977,10 +996,13 @@ canceled in-place dream "is left as-is with whatever was written before failure"
 write is a version, so the caller can read the history back through the versions API,
 which is what plan 36 built and the reason in-place consolidation is acceptable at all.
 
-**The hard write boundary.** An in-place run mounts the caller's own store read-write
-under an `always_allow` agent that reads hostile text by design, so the session runs
-**without `bash`** (§4.3): the only writable paths are then the store mount and the
-workdir, enforced by the file tools' code, not by the prompt. The merge stage loses
+**The write boundary around memory.** An in-place run mounts the caller's own store
+read-write under an `always_allow` agent that reads hostile text by design, so the
+session runs **without `bash`** (§4.3): the file tools then refuse every `/mnt/memory`
+path outside the mounted store in code, so no memory but the mounted store's can be
+written — the caller's other stores are out of reach whatever the transcripts say —
+while the confinement of scratch to the workdir stays the prompt's, as §3.4 and §9 state;
+the other writable trees hold no memory. The merge stage loses
 deletion and renaming with it, and the prompt's in-place variant says what to do
 instead: a memory to retire is rewritten as a one-line tombstone naming its successor
 and listed under *to remove* in `report.md` and in `/MEMORY.md`'s trailing section; the
@@ -1109,14 +1131,16 @@ the renderer in `internal/transcript`; no test-support package is added, so the 
   `running`, an input store, input session and output store made unavailable mid-run, the
   stage cap, a terminated and a `rescheduling` session, a session deleted at the database
   level — each `error.type` or its absence; a planted secret in a written version failing
-  completion; cancel of a pending dream (closed at once), cancel of a running one (the
+  completion, and one already in the input store before the clone not failing it; the
+  stage cap tripped by thread turns alone while the primary stays under it; cancel of a
+  pending dream (closed at once), cancel of a running one (the
   interrupt runs, the archive waits for not-running) and of a `rescheduling` one (archived by
   the closing arm while still `rescheduling`; re-interrupted first if it turned `running`
   before the tick); and at every terminal the session archived, the file rows and
   their objects gone (`GET /v1/files/{id}` 404 *and* `blob.Get` not found) and `closed_at`
   stamped. **Two replicas**: two ticks on one dream, the loser skipped by `SKIP LOCKED`,
   asserted by row state after both commit.
-- **Rendering (slice 2; the caps in slice 3)**, `internal/transcript`: golden files for the role labels and
+- **Rendering (slice 2)**, `internal/transcript`: golden files for the role labels and
   the drop list, including a delegated session whose child report survives and whose send
   does not; the tool-result and input truncation; the elision marker; the four redaction
   patterns, each with a fixture that *forces* the substitution — a fixture the unredacted
@@ -1349,9 +1373,12 @@ states the alternative it beat.
 
 - **The model window.** A batch of eight 24 KiB transcripts is about 50k tokens of tool
   results in one thread; the merge stage reads up to 13 digests of 4 KiB — 52 KiB, one
-  per batch — plus the store. Both fit a 200k window with room; the caps are `var`s if a
-  deployment's model is smaller. A stage that overflows terminates the session, which the
-  tick settles as `internal_error` — visible, not silent.
+  per batch — plus the store files `plan.md` routes it to, read through the mount one
+  tool call at a time, never inlined. The batch and the digests fit a 200k window with
+  room; the caps are `var`s if a deployment's model is smaller, and a store whose routed
+  files alone overflow one is bounded by nothing but `DREAM_MAX_INPUT_BYTES` (§4.7). A
+  stage that overflows terminates the session, which the tick settles as
+  `internal_error` — visible, not silent.
 - **Cost.** A 100-transcript dream is roughly 2.4 MiB of rendered input read once in the
   threads plus the merge; the stage turn caps bound the tool loop, `DREAM_TIMEOUT` bounds
   the wall clock, and `usage` reports the exact spend. The evals tier prices its own run.
@@ -1362,8 +1389,9 @@ states the alternative it beat.
   digest writes through one container: minutes at a second or two each, against a 2h
   budget. The batch size is a `var`; the read count is not. The 100-transcript acceptance
   run (§7) records the wall clock so the expectation is measured, not assumed.
-- **The clone's size.** 2,000 memories × 100 kB is 200 MB of `INSERT … SELECT` under one
-  store lock — the platform's own cap, not the guide's 10,000 (§3.3); `DREAM_MAX_INPUT_BYTES`
+- **The clone's size.** 2,000 memories × 100 kB is 200 MB read in one `SELECT` and
+  re-inserted in batches of 500 under one store lock (§4.2 step 4) — the platform's own
+  cap, not the guide's 10,000 (§3.3); `DREAM_MAX_INPUT_BYTES`
   (64 MiB default) keeps the transaction and the sandbox mount inside what plan 36's
   materializer already handles.
 - **The start arm's claim window.** No lock spans the rendering and blob puts (seconds
