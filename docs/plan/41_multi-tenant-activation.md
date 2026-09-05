@@ -516,8 +516,8 @@ architecture; the plan changes they *did* force are listed in §5.
    |---|---|---|
    | rate-limit + `anthropic-organization-id` + `anthropic-workspace-id` | 0, 1, 3, 5, 6, 7, 12, 18, 19 | reached the route on `/v1/memory_stores`, `/v1/agents`, `/v1/sessions` — 2xx **and** 4xx alike |
    | the two tenancy headers only | 8, 9 | field-level validation on those same routes |
-   | rate-limit + `anthropic-organization-id`, **no** workspace header | 31, 32, 35, 36 | the console dialect's organization-level routes, which have no workspace to name |
-   | `request-id` only | 4, 10, 11, 13-17, 20-30, 33, 34, 37 | body-parse failures on the tenancy-stamping routes, **and every response** from `/v1/environments`, the work-poll lane and the `/api/oauth/…` token routes |
+   | rate-limit + `anthropic-organization-id`, **no** workspace header | 31, 32, 35, 36 | the console dialect's 200s, which stamp the organization alone — even where the path names a workspace (31, 35 are workspace archives) |
+   | `request-id` only | 4, 10, 11, 13-17, 20-30, 33, 34, 37 | three unlike things: body-parse failures on the tenancy-stamping routes (10, 11, 13-17, 20, 21); **every** response from three families that never stamp — `/v1/environments` (4, 23, 25, 26), the work-poll lane (24, 27-30), `/api/oauth/…` (22, 37); and the console dialect's 404s (33, 34) |
    | nothing at all | 2 | the pre-auth 401 |
 
    So **whether a route stamps at all is decided first** — `/v1/environments` returns 200 with
@@ -726,8 +726,10 @@ credential lanes were driven, the third of them by `curl` because a browser cann
 (CORS preflight on `POST` to `api.anthropic.com` answers 405, and script may read only two
 response headers on a `GET`). Every credential minted — three workspace API keys, two
 environment tokens — was revoked or archived and refused afterwards; **the bytes for one of
-those five refusals are in the archive** (`batch9.curl.txt:150`, workspace C's key), the other
-four being attested by `FINDINGS8.md` from runs whose output was header-filtered.
+those five refusals are in the archive** (`batch9.curl.txt:150`, workspace C's key). The other
+four are attested by `FINDINGS8.md` alone: keys A and B from runs it records as
+header-filtered, and the two environment tokens from post-revocation probes it does not
+describe. Both refusals are stated there as observed; neither has bytes here.
 `batch8.json`, `batch9.json`, `batch9.curl.txt` and `FINDINGS8.md`, cited as §4.1 sets out.
 
 **Item 1 came back a 404**, so the architecture stands unchanged: §7.4's byte-identical-404
@@ -736,7 +738,8 @@ correction is owed. What the recording *did* change:
 
 - **§4.3's five open items are all CONFIRMED**, with the fifth — the header schedule — turning
   out to be answerable after all. Our one schedule stays ours, now as a stated simplification
-  of a four-tier, per-route rule rather than an unmirrored invention.
+  of a two-axis rule — route first, then how far the request got — rather than an unmirrored
+  invention.
 - **§6.1's archived-workspace refusal is CONFIRMED** at exactly the status it was aligned to.
 - **§7.6's two console routes are confirmed in shape**, not merely in placement, so the
   contingency in item 5 above — registering them as ours in shape — does not fire.

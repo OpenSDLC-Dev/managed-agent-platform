@@ -5,16 +5,16 @@ What is being worked on right now, and how far along it is — nothing else. **S
 ## Active work
 
 **#78 — confirming documented wire assumptions against a real managed-agents
-endpoint.** Three recording sessions in a private archive: bytes observed once, at
+endpoint.** Four recording sessions in a private archive: bytes observed once, at
 cost. 2026-09-02 covered the Work API, turn semantics, multiagent threads, memory
 stores, files, skills, vaults, deployments and permission gating; 2026-09-03 ran two
-waves, one free and one of 281 pairs against the tiers needing model spend, an
-environment key, or a resource we lacked; 2026-09-05 added #594's and #56's batches,
-the latter the first **two-workspace** capture. #78 stays open past this work — 117
-registry entries still name it as their live tracker, and the debt is now analysis
-rather than recording. Plan 38 (#263) archived 2026-09-04, plan 39 (#566, Skills on
-the GA wire shape) with its delivering PR, and plan 40 (#353, environment packages,
-folding in #576) 2026-09-05 with its own.
+waves, one free and one of 281 pairs against the paid tiers; 2026-09-04 settled the
+skills GA wire shape; 2026-09-05 added #594's and #56's batches, the latter the first
+**two-workspace** capture. #78 stays open past this work — 117 registry entries still
+name it as their live tracker, and the debt is now analysis rather than recording.
+Plan 38 (#263) archived 2026-09-04, plan 39 (#566, Skills on the GA wire shape) with
+its delivering PR, and plan 40 (#353, environment packages, folding in #576)
+2026-09-05 with its own.
 
 ## Tasks
 
