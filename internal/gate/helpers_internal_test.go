@@ -208,6 +208,11 @@ func TestThePackageRegistrySetOpensOnlyUnderItsFlag(t *testing.T) {
 		// evidence that `*.pythonhosted.org` is one.
 		"a subdomain of a registry is not the registry": {limited(true), "evil.pypi.org", "443", admitNone},
 		"nor is the CDN's parent domain":                {limited(true), "pythonhosted.org", "443", admitNone},
+		// The set reaches past package registries, and the two groups that do
+		// are classified like the rest — floored and resolved absolutely, not
+		// waved through because they are famous.
+		"a source forge is the registry class too": {limited(true), "github.com", "443", admitRegistry},
+		"and so is a container registry":           {limited(true), "ghcr.io", "443", admitRegistry},
 		// A widening flag cannot make an unrecognized policy recognized, and
 		// `unrestricted` already admits every host without the floor.
 		"an unknown policy stays closed": {
@@ -229,24 +234,79 @@ func TestThePackageRegistrySetOpensOnlyUnderItsFlag(t *testing.T) {
 	}
 }
 
-// The set is what a recording sized, not what the reference's prose implies. The
-// pinned SDK says "public package registries (PyPI, npm, etc.)" and the public
-// docs say "such as PyPI and npm", but the only probe of the flag tried three
-// URLs — two Python hosts and a control — so every other ecosystem's registry is
-// unevidenced and stays shut (#594). A guessed entry would widen a `limited`
-// sandbox past the reference, which is the one direction this gate must not err
-// in, so the absences are asserted rather than left to the list's own reading.
-func TestThePackageRegistrySetAdmitsNoEcosystemNobodyRecorded(t *testing.T) {
+// The golden list in internal/egress compares strings, and the table above spot-
+// checks four of the thirty. Neither would notice an entry HostSet can never
+// match — an empty label, a stray leading dot — added to the list and to the
+// golden literal alike: it would be silently dead, admitting nothing, while both
+// tests stayed green and the refusal test never looked at it. So every entry is
+// driven through the policy that actually consults it.
+func TestEveryPackageRegistryEntryReallyAdmits(t *testing.T) {
+	p := newPolicy(domain.Networking{Type: domain.NetLimited, AllowPackageManagers: true}, nil)
+	for _, host := range egress.PackageRegistryHosts() {
+		if got := p.admit(host, "443"); got != admitRegistry {
+			t.Errorf("admit(%q) = %v, want admitRegistry — the entry is in the list but matches nothing", host, got)
+		}
+	}
+}
+
+// Every host below was probed in the recording that sized the set and observed
+// gate-refused — most of them one label away from an admitted sibling. They are
+// asserted rather than left to the list's own reading because each is exactly
+// what a later contributor would add for symmetry: the apex under an admitted
+// pair, the test instance beside the real one, the other distribution's mirror,
+// the ecosystem whose neighbours are all open. A guessed entry widens a
+// `limited` sandbox past the reference, which is the one direction this gate
+// must not err in (#594).
+func TestThePackageRegistrySetStillRefusesWhatTheRecordingSawRefused(t *testing.T) {
 	p := newPolicy(domain.Networking{Type: domain.NetLimited, AllowPackageManagers: true}, nil)
 	for _, host := range []string{
-		"registry.npmjs.org", "registry.yarnpkg.com", // npm
-		"crates.io", "index.crates.io", "static.crates.io", // cargo
-		"rubygems.org", "index.rubygems.org", // gem
-		"proxy.golang.org", "sum.golang.org", // go
-		"archive.ubuntu.com", "security.ubuntu.com", "deb.debian.org", // apt
+		// Apexes and test instances beside an admitted name.
+		"test.pypi.org", "test-files.pythonhosted.org", "pypi.python.org",
+		"npmjs.org", "www.npmjs.com", "registry.npmjs.com", "yarnpkg.com",
+		"golang.org",
+		// Siblings on a shared domain: raw. and objects. are open, these are not.
+		"gist.githubusercontent.com", "pkg-containers.githubusercontent.com",
+		// The alias a client is redirected away from, where the target is open.
+		"index.docker.io",
+		// apt is Ubuntu's alone, and not all of Ubuntu's.
+		"deb.debian.org", "ftp.debian.org", "cdn-aws.deb.debian.org",
+		"ports.ubuntu.com", "azure.archive.ubuntu.com", "esm.ubuntu.com",
+		"changelogs.ubuntu.com", "keyserver.ubuntu.com",
+		// Whole ecosystems whose neighbours are open.
+		"api.nuget.org", "pub.dev", "hex.pm", "cdn.cocoapods.org", "deno.land",
+		"cran.r-project.org", "metacpan.org", "dl-cdn.alpinelinux.org",
+		"conda.anaconda.org", "clojars.org", "search.maven.org", "oss.sonatype.org",
+		"cdn.jsdelivr.net", "unpkg.com", "sourceforge.net",
 	} {
 		if got := p.admit(host, "443"); got != admitNone {
-			t.Errorf("admit(%q) = %v, but no recording sizes it — the flag must fail closed on it (#594)", host, got)
+			t.Errorf("admit(%q) = %v, but the recording saw it refused — the flag must fail closed on it (#594)", host, got)
+		}
+	}
+}
+
+// Admission is the step that gates everything after it, which is what made the
+// Unicode fold worth fixing before this set shipped rather than after. A request
+// to an IDN alias of a curated host normalized onto that host, so the gate
+// admitted it — and only an admitted request reaches the substitution engine,
+// where a credential scoped to the ASCII name would then be handed to a dial Go
+// resolves, via IDNA, to a wholly different and registerable domain. The alias
+// must be refused outright (#606).
+func TestAnIDNAliasOfACuratedHostIsNotAdmitted(t *testing.T) {
+	p := newPolicy(domain.Networking{Type: domain.NetLimited, AllowPackageManagers: true}, nil)
+	for _, alias := range []string{
+		"g\u0130thub.com", // U+0130 folds to "i" under Unicode, not under DNS
+		"pyp\u0130.org",
+		"crates.\u0130o",
+	} {
+		if got := p.admit(alias, "443"); got != admitNone {
+			t.Errorf("admit(%q) = %v, want admitNone — it is not the ASCII host it folds to (#606)", alias, got)
+		}
+	}
+
+	// The ASCII spellings, upper-cased and dotted, still resolve to the entry.
+	for _, real := range []string{"GitHub.com", "PyPI.org.", "crates.io"} {
+		if got := p.admit(real, "443"); got != admitRegistry {
+			t.Errorf("admit(%q) = %v, want admitRegistry — ASCII folding must still work", real, got)
 		}
 	}
 }

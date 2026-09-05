@@ -27,7 +27,7 @@ deliberate divergences from the reference are in
 | **Linux capabilities** | **By default** drops `NET_RAW`/`SETUID`/`SETGID` from every sandbox and forbids privilege escalation (`SANDBOX_CAP_DROP`, `ALL` accepted); a **gated** sandbox drops those three whatever the config says — the `NET_ADMIN` holders are the gate container/sidecar and the K8s netsetup init container, below | Widening or narrowing the drop set; AppArmor/SELinux profiles |
 | **Syscall filtering** | On **Kubernetes**, sets `seccompProfile: RuntimeDefault` on every sandbox pod, always — covering the sandbox container, the gate sidecar and the netsetup init container. Not configurable, and it is the runtime's own curated filter, not one the platform authors. Docker containers already receive their runtime's default | Not disabling it out of band (a node whose runtime has no default profile refuses the pod); AppArmor/SELinux, which are still yours |
 | **Read-only root filesystem** | Set on request (`SANDBOX_READONLY_ROOTFS`), with writable mounts arranged over every path the platform itself writes (workdir, `/tmp`, the shell state root, the file-resource mount root) | Deciding to turn it on, and shipping an image that tolerates one |
-| **Sandbox egress** | `limited` = `allowed_hosts`, plus — each under its own flag — the `host:port` endpoints the session's agent declares MCP servers at (`allow_mcp_servers`) and the curated package registries `pypi.org` and `files.pythonhosted.org` (`allow_package_managers`), through the per-session egress gate (both backends, executor opt-in); without the gate `limited` **fails closed** (no route out); default networking is unrestricted | Firewalling / `NetworkPolicy` for the default (non-`limited`) case |
+| **Sandbox egress** | `limited` = `allowed_hosts`, plus — each under its own flag — the `host:port` endpoints the session's agent declares MCP servers at (`allow_mcp_servers`) and the platform's curated 30-host package-registry set, which reaches source forges and container registries too (`allow_package_managers`; §5), through the per-session egress gate (both backends, executor opt-in); without the gate `limited` **fails closed** (no route out); default networking is unrestricted | Firewalling / `NetworkPolicy` for the default (non-`limited`) case |
 | **Runtime isolation** | Sets `runtimeClassName` on sandbox pods (`SANDBOX_K8S_RUNTIME_CLASS`; the chart's `sandboxRuntimeClass`) | Running gVisor/Kata on the nodes and naming it; on Docker, a daemon-level runtime or userns-remap |
 | **Sandbox placement** | On **Kubernetes**, puts your `nodeSelector` and `tolerations` on every sandbox pod (`SANDBOX_K8S_NODE_SELECTOR` / `SANDBOX_K8S_TOLERATIONS`; the chart's `sandboxPlacement`), and refuses a malformed one at startup | Building the node pool, labelling and tainting it, and keeping the platform's own workloads off it |
 | **Environment-key lifecycle** | Server-generated secrets, hash-only storage, one key per host with a one-year expiry, individual revocation, per-environment scope | Provisioning keys, rotation cadence, transport secrecy |
@@ -570,12 +570,84 @@ whatever its two widening flags open; no-route-out elsewhere, with the CNI
 caveats noted. `allow_mcp_servers` is the one place an *agent author* rather
 than you widens a `limited` environment, so it is scoped to the exact
 `host:port` each declaration names. `allow_package_managers` widens by a list
-neither of you wrote — the platform's own, which is `pypi.org` and
-`files.pythonhosted.org` and nothing else, so `pip` reaches its index and its
-wheel CDN while npm, cargo, gem, go and apt registries stay refused until a
-recording sizes them
+neither of you wrote — the platform's own, thirty hosts each observed admitted
+by the reference under this flag and refused without it
 ([#594](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/594)).
-Neither flag reads `config.packages`; setting the flag is the whole grant. A
+
+**Read that list before deciding the flag is narrow.** It is not confined to
+package registries. It opens **source forges** — `github.com`,
+`api.github.com`, `codeload.github.com`, `raw.githubusercontent.com`,
+`objects.githubusercontent.com`, `gitlab.com`, `bitbucket.org` — and
+**container registries** — `ghcr.io`, `registry-1.docker.io`,
+`auth.docker.io`, `download.docker.com`. An agent under `limited` with this
+flag set reaches every one of those hosts — reach neither the flag's name nor
+the reference's own wording ("public package registries (such as PyPI and
+npm)") suggests. Other forges are not open: `sourceforge.net` was probed and
+refused.
+
+Take the forge half as **measured host reach, not a demonstrated `git clone`**.
+GitHub's pack host `codeload.github.com` and object host
+`objects.githubusercontent.com` are admitted beside the apex, so a clone is very
+likely whole; but no probe ran one, and for GitLab and Bitbucket only the apex
+was probed at all. Plan for the reach, and verify the workflow yourself if you
+are relying on it.
+
+The container registries are the narrower half, and worth reading precisely.
+`ghcr.io` and `registry-1.docker.io` answer authentication and manifests, but
+the hosts they redirect *layer* downloads to are outside the set —
+`pkg-containers.githubusercontent.com`, where GHCR sends them, was probed and
+refused, and Docker Hub's blob hosts are not in the list either. No probe ran an
+actual `docker pull`, so treat "how far does a pull get" as unmeasured; what is
+measured is that the layer host is refused. `quay.io` is absent entirely.
+
+**A second port-shaped surprise.** The set matches by **host, on any port** —
+that is this platform's reading of the reference, which widens by "registries"
+where it widens the MCP set by "endpoints", and a CONNECT tunnel is admitted on
+whatever port its authority names. So the flag does not merely permit `git
+clone` over HTTPS: a sandbox can open a raw TCP tunnel to `github.com:22`, or to
+any other port on any of the thirty. Size the outbound channel by that, not by
+what a package manager would use.
+
+If that is more reach than you want, the way out is **not** simply clearing the
+flag: an environment whose `config.packages` has any non-empty list is refused
+at create *and update* under `limited` networking without it, with `packages
+require networking.allow_package_managers to be true under limited networking`
+— and because the check runs on the merged config, even a patch touching only
+`allowed_hosts` is refused. Empty `config.packages` first, then clear the flag,
+then list the registry hosts your builds actually need in `allowed_hosts`, where
+they are yours to choose.
+
+The rest is Python, npm, Rust, Ruby, Go, PHP, Java and apt, and two details
+there will bite a build. Matching is by **exact host**: `test.pypi.org` and the
+`pythonhosted.org` apex are refused where `files.pythonhosted.org` is admitted,
+and there is no suffix rule anywhere in the list. And apt is **Ubuntu's alone**
+— `archive.ubuntu.com`, `security.ubuntu.com`, `ppa.launchpad.net` — so
+`apt-get` on a Debian base image reaches no mirror at all, and neither
+`ports.ubuntu.com` (non-amd64) nor `esm.ubuntu.com` is open.
+
+**That collides with this platform's own default**, and it is the first thing
+most operators will hit. The default sandbox image is `debian:stable-slim` —
+`EXECUTOR_IMAGE`, `executor.sandboxImage` in the chart, and the compose stack
+all ship it — whose `sources.list` points at `deb.debian.org`, which the set
+refuses. So a stock `limited` environment declaring `packages.apt` fails every
+install, and it fails in a way the API pushes you toward: declaring `packages`
+under `limited` *requires* `allow_package_managers`, so the flag will be on and
+still buy nothing for apt. Two remedies, both yours: run an Ubuntu base image
+instead, or add the Debian mirrors to `allowed_hosts`, which needs no flag.
+
+`internal/egress/registries.go` is the list. Several groups carry the refusals
+that bound them in place; the rest are in that file's header comment, which is
+where the exact-host evidence lives.
+
+Thirty is a **lower bound**, not parity: eighty hosts were probed and these
+thirty answered, so a host nobody has probed stays out. That asymmetry is
+deliberate — omitting a host the reference admits costs a build, while adding
+one it refuses widens your sandbox past the thing this platform exists to
+match.
+
+Neither flag reads `config.packages`; setting the flag is the whole grant — an
+environment declaring `npm: ["left-pad"]` opened and refused exactly what one
+declaring nothing did, across every host that arm probed. A
 request only a flag admits is held to the platform's own address floor (no
 loopback, no link-local, no cloud metadata) on the resolved address — which
 `allowed_hosts`, being your own list, deliberately is not. The registry list
@@ -584,7 +656,7 @@ wrote: its names are resolved **absolutely** — a trailing dot on the dial
 address alone, so nothing the origin sees changes — which keeps the gate's own
 `search` domains from sitting between the admission check and the connection,
 where a cluster answering `pypi.org.<search-domain>` out of an internal zone
-would turn a two-host grant into reach the list never gave
+would turn a curated grant into reach the list never gave
 ([#596](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/596)).
 Your `allowed_hosts` and an agent's MCP endpoints resolve through your resolver
 exactly as before, because an in-cluster name there that only your search list

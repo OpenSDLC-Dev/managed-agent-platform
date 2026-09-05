@@ -222,3 +222,31 @@ func TestEngineSubstitute(t *testing.T) {
 		}
 	})
 }
+
+// The sharp end of #606: Substitute selects a credential through the same
+// matcher the gate admits with, so a Unicode fold would hand a secret scoped to
+// an ASCII host to a request bound for the IDN spelling of it — which Go dials
+// as a wholly different, registerable name. The placeholder must survive
+// untouched.
+func TestACredentialDoesNotFollowAnIDNAliasOfItsHost(t *testing.T) {
+	eng := egress.NewEngine([]egress.Credential{{
+		Placeholder: "vltph_gh",
+		Secret:      "s3cret-token",
+		Hosts:       egress.NewHostSet([]string{"github.com"}),
+		Header:      true,
+	}})
+
+	const req = "Authorization: Bearer vltph_gh"
+	out, _ := eng.Substitute("g\u0130thub.com", egress.LocationHeader, req)
+	if out != req {
+		t.Errorf("Substitute to the IDN alias = %q, want the placeholder left alone", out)
+	}
+	if strings.Contains(out, "s3cret-token") {
+		t.Error("the github.com secret was sent to an IDN alias of that host (#606)")
+	}
+
+	// The real host still gets its secret, or the fold has overshot.
+	if out, _ := eng.Substitute("GitHub.com", egress.LocationHeader, req); !strings.Contains(out, "s3cret-token") {
+		t.Errorf("Substitute to the ASCII host = %q, want the secret substituted", out)
+	}
+}

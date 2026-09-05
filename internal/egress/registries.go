@@ -4,24 +4,113 @@ import "slices"
 
 // packageRegistryHosts is the curated set `limited` networking's
 // allow_package_managers opens, beyond the operator's own allowed_hosts. It is
-// grouped by ecosystem, which is also how it grows: a new ecosystem is a new
-// group, once a recording has sized it (#594).
+// grouped by ecosystem, which is also how it grows.
 //
-// Two entries, because two is what any evidence names. The reference publishes
-// no list — its docs and the pinned SDK say only "public package registries
-// (PyPI, npm, etc.)" — and the one recording of the flag probed three URLs:
-// under `{"type":"limited","allowed_hosts":[]}` the flag turned `pypi.org` and
-// `files.pythonhosted.org` from 403 into 200, while an `example.com` control
-// stayed 403 either way. npm, cargo, gem, go and apt were never probed, so
-// their registry hosts are absent rather than chosen.
+// Every entry was observed admitted on a `limited` environment with
+// `allowed_hosts: []` and the flag on, and observed refused on a sibling
+// environment of that same shape with the flag off — so no host here is
+// attributed to the flag without its own control. Matching is by **exact
+// host**: the same recording refused `test-files.pythonhosted.org`,
+// `test.pypi.org`, `pythonhosted.org`, `npmjs.org`, `www.npmjs.com`,
+// `registry.npmjs.com` and `golang.org` while admitting their siblings, so
+// there is no suffix rule to model and a HostSet of plain names is the right
+// shape.
 //
-// Guessing them would widen a `limited` sandbox past the reference on the
-// strength of a hostname that merely looked obvious, which is the one direction
-// this gate must not err in: a host this set omits is refused, never leaked.
+// **Read the list before assuming what the flag means.** Much of it is not
+// package registries. Two whole groups are not: it opens source forges —
+// `github.com` included — and container registries. Two further entries are
+// binary-distribution hosts sitting inside groups named for a registry:
+// `nodejs.org` is the Node runtime's own download host, and
+// `download.docker.com` is Docker CE's apt and yum repository rather than an
+// image registry. None of that is suggested by the flag's name or by the
+// reference's own wording ("public package registries (such as PyPI and npm)"),
+// and an operator reasoning about a `limited` sandbox's reach needs to know it.
+// docs/self-hosted-security.md says so where an operator will read it.
+//
+// What the two admitted container registries do *not* buy is a working image
+// pull. `ghcr.io` and `registry-1.docker.io` answer manifests, but the blob
+// hosts they redirect layer downloads to are outside the set — the recording
+// refused `pkg-containers.githubusercontent.com`, which is where GHCR sends
+// them. No probe ran an actual `docker pull`, so how far one gets is unmeasured;
+// what is measured is that the layer host is refused.
+//
+// The list also does not track `config.packages`' six managers: Composer and
+// Maven are open though neither is one of them, while apt reaches Ubuntu's
+// archives and PPAs alone — Debian's three mirrors are refused, and so are five
+// more of Ubuntu's own. And the widening is independent of what
+// `config.packages` declares: across the seventeen hosts that arm probed, an
+// environment declaring `npm: ["left-pad"]` admitted and refused exactly what
+// one declaring nothing did.
+//
+// **Thirty is a lower bound, not the reference's list.** Eighty hosts were
+// probed; these thirty answered. NuGet, Dart, Hex, CocoaPods, Deno, conda,
+// Alpine, CRAN, CPAN, Clojars, jsDelivr, unpkg and SourceForge were probed and
+// refused, so they are absent by evidence rather than by omission — but a host
+// nobody has probed
+// is simply unknown, and stays out. Guessing one would widen a `limited`
+// sandbox past the reference on the strength of a name that merely looked
+// obvious, which is the one direction this gate must not err in: a host this
+// set omits is refused, never leaked.
 var packageRegistryHosts = []string{
-	// Python — the index and the wheel CDN (recorded 2026-09-03).
+	// Python — the index and the wheel CDN.
 	"pypi.org",
 	"files.pythonhosted.org",
+
+	// npm and Node — the two registries and the runtime's own download host.
+	"registry.npmjs.org",
+	"registry.yarnpkg.com",
+	"nodejs.org",
+
+	// Rust — the API, the sparse index, and the crate CDN.
+	"crates.io",
+	"index.crates.io",
+	"static.crates.io",
+
+	// Ruby — the site and the compact index.
+	"rubygems.org",
+	"index.rubygems.org",
+
+	// Go — the module proxy and the checksum database.
+	"proxy.golang.org",
+	"sum.golang.org",
+
+	// apt — Ubuntu only, and only these three. Debian's deb.debian.org,
+	// ftp.debian.org and cdn-aws.deb.debian.org are refused, as are
+	// ports.ubuntu.com, azure.archive.ubuntu.com, esm.ubuntu.com,
+	// changelogs.ubuntu.com and keyserver.ubuntu.com.
+	"archive.ubuntu.com",
+	"security.ubuntu.com",
+	"ppa.launchpad.net",
+
+	// PHP — Composer's registry, though `packages` names no PHP manager.
+	"packagist.org",
+
+	// Java — Maven Central by both its names, and the Gradle plugin portal.
+	// `packages` names no Java manager either. search.maven.org and
+	// oss.sonatype.org are refused.
+	"repo.maven.apache.org",
+	"repo1.maven.org",
+	"plugins.gradle.org",
+
+	// Source forges. Not package registries, and open anyway — this is the
+	// half of the flag its name does not describe. gist.githubusercontent.com
+	// and pkg-containers.githubusercontent.com are refused, so this is a list
+	// of hosts and not of GitHub.
+	"github.com",
+	"api.github.com",
+	"raw.githubusercontent.com",
+	"codeload.github.com",
+	"objects.githubusercontent.com",
+	"gitlab.com",
+	"bitbucket.org",
+
+	// Container registries — the other half the name does not describe.
+	// index.docker.io is refused where registry-1.docker.io, the host a client
+	// is redirected to, is admitted.
+	"ghcr.io",
+	"registry-1.docker.io",
+	"auth.docker.io",
+	"download.docker.com",
 }
 
 // PackageRegistryHosts returns that set, as a fresh slice so no caller can grow

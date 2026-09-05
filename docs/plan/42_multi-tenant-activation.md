@@ -152,7 +152,7 @@ issue; none is a blocker under decision 1.
 - **Per-tenant sandbox isolation.** One executor's Docker daemon or Kubernetes namespace runs
   every tenant's containers it serves; the reaper's candidate set is that endpoint's own
   `Owned` list, not a database sweep (`internal/executor/reaper.go:3-9`).
-  `docs/self-hosted-security.md:37` and `:1128-1138` already state the daemon is one trust
+  `docs/self-hosted-security.md:37` and `:1200-1210` already state the daemon is one trust
   domain and the `ours` label "guards against *accidents*". That stays true and becomes
   materially louder.
 - **Per-tenant object-storage isolation.** Blob keys carry no tenant:
@@ -236,6 +236,15 @@ follows the precedent of `docs/DIVERGENCES.md:153`, which cites
 this repo does not carry; the registry states no citation convention (its format note at `:10`
 sets none, and both styles appear in it), so this is a choice for new entries rather than an
 appeal to one.
+
+**Every `file:line` here is as of this branch's merge base, and one file has already moved
+three times under it.** `docs/self-hosted-security.md` gained ~72 lines in a single merge while
+this plan was in review, staling twenty citations at once; `docs/DIVERGENCES.md` shifted three
+entries by one, and `internal/api/environments.go` moved by ~65. Each was re-derived rather
+than left, but the class does not close — so before spending any coordinate in this plan, grep
+for the string it names rather than trusting the number, and re-derive any count from the rule
+printed beside it. The counting rules are in the plan for exactly that reason; the coordinates
+are a convenience that decays.
 
 **The 2026-09-05 tenancy recording** (§5) is cited by file and entry index — `batch8.json`
 idx *N* for the console and environment-key lanes, `batch9.curl.txt:N` for the key lane, where
@@ -2029,13 +2038,13 @@ passes both.)
 multi-tenant bullet leaves "Deferred past v1 — seams reserved, not implemented" and its
 capability joins what runs today · **AGENTS.md needs no tenancy edit**: it carries no tenancy
 claim at all across its 12 lines and defers to CLAUDE.md · `docs/self-hosted-security.md` — the
-literal `organizations/default` console runbook paths (`:693`, `:701`, `:705`, `:707` for
-environment tokens; `:1020`, `:1027`, `:1031`, `:1034` for management keys — three curls each), plus
+literal `organizations/default` console runbook paths (`:765`, `:773`, `:777`, `:779` for
+environment tokens; `:1092`, `:1099`, `:1103`, `:1106` for management keys — three curls each), plus
 the now workspace-bounded "anyone holding the management `x-api-key` can mint worker keys"
-(`:715`) and "a management key can mint management keys" (`:1013`); a **new requirement
-beside `:854`** — one Casdoor organization even under platform multi-tenancy (§9); and a **new
+(`:787`) and "a management key can mint management keys" (`:1085`); a **new requirement
+beside `:926`** — one Casdoor organization even under platform multi-tenancy (§9); and a **new
 "Reserved seams and tracked gaps" entry** for what row scoping still does not isolate, a section
-that today names four gaps (`:1145`, `:1156`, `:1179`, `:1190`) and no tenancy entry at all.
+that today names four gaps (`:1217`, `:1228`, `:1251`, `:1262`) and no tenancy entry at all.
 · **The "single-tenant tampering residual" relabelling is two registry entries by that exact
 phrase, plus a third entry that carries the same bound in different words.**
 `grep -n "single-tenant tampering residual" docs/DIVERGENCES.md` returns `:245` and `:251` only;
@@ -2105,8 +2114,8 @@ issue-state check can see — this PR re-reads every #56 reference by hand: **th
 (`grep -nE "#56([^0-9]|$)" docs/DIVERGENCES.md` → `:28`, `:47`, `:121`, `:122`, `:123`, `:128`,
 `:153`, `:181`, `:184`; the regex's trailing class is what keeps #565/#566/#567 out of the set,
 and `:47` joined it in this plan's own PR),
-`docs/self-hosted-security.md:779` and
-`:1170`, `docs/ARCHITECTURE.md:466`, and **`README.md:76`**. Archived plans (31, 32, 37) and
+`docs/self-hosted-security.md:851` and
+`:1242`, `docs/ARCHITECTURE.md:466`, and **`README.md:76`**. Archived plans (31, 32, 37) and
 released changelog sections (`docs/changelog/0.3.0.md`) are deliberately left as historical text.
 
 ## 8. Decisions, and the alternatives they beat
@@ -2256,18 +2265,18 @@ unbootable with no repair path — the failure mode `0013` was written to avoid.
 
 - **Row scoping is not compute isolation, and the security doc must get louder, not corrected.**
   One executor's daemon or namespace runs every tenant's containers
-  (`internal/executor/reaper.go:3-9`); `docs/self-hosted-security.md:37` and `:1128-1138`
+  (`internal/executor/reaper.go:3-9`); `docs/self-hosted-security.md:37` and `:1200-1210`
   already call it one trust domain. That statement stays true and now means one team's sandboxes
   sit beside another's. Bounded by decision 1 (administrative separation, not adversarial
   co-tenancy), §3's registered non-goal, and the new "Reserved seams" entry.
 - **Multi-tenancy invites a second Casdoor organization, which re-opens an unpatched 9.x CVE.**
-  `docs/self-hosted-security.md:854` voids CVE-2026-9094 (cross-organization escalation) purely
+  `docs/self-hosted-security.md:926` voids CVE-2026-9094 (cross-organization escalation) purely
   because the bundled Casdoor seeds exactly one populated organization with public signup off —
   "there is no second tenant to escalate across". Nothing here falsifies that, but the natural
   next step an operator takes reopens it on a path the deployment cannot close. Bounded by an
   explicit requirement in slice 6: **platform workspaces are not Casdoor organizations**; the
   workspace claim is a claim within the one Casdoor org, and `IDENTITY_ROLE_MAP` keys stay
-  spelled `map/<group>` (`:878-879`), so a tenancy-aware role map touches the same string. Plan
+  spelled `map/<group>` (`:950-951`), so a tenancy-aware role map touches the same string. Plan
   31's fifth exclusion — "the platform never calls the IdP — it only verifies tokens"
   (`docs/plan/31_console-sso-rbac.md:124-126`) — is what keeps this a configuration risk rather
   than a code path.
@@ -2296,10 +2305,10 @@ unbootable with no repair path — the failure mode `0013` was written to avoid.
   ~89.95% cannot pass as "90.0" (`Makefile:94-96`, the recipe at `:98-105`) — over `./internal/...` minus twelve named
   test-support packages (`Makefile:85`). Every scope check adds a refusal branch needing a test,
   and it all lands in `internal/api`: 19,117 production against 28,564 test lines, and 520 test
-  functions of the tree's **2,516**. *Counting rules: `wc -l` over `internal/api/*.go` split on
+  functions of the tree's **2,523**. *Counting rules: `wc -l` over `internal/api/*.go` split on
   the `_test.go` suffix; `grep -h "^func Test"` over `internal/api`'s test files for 520, and
   over every `*_test.go` in the tree **excluding `.claude/`** — whose worktree copies would
-  otherwise double the denominator — for 2,516.* The suite already runs about ten minutes, which
+  otherwise double the denominator — for 2,523.* The suite already runs about ten minutes, which
   is why `go test`'s timeout was raised to 30m (#490, `Makefile:69`) and why a timed-out binary
   leaks pgtest fixtures into the next run (#499). Bounded by: extend existing tests with a second
   workspace rather than adding database-per-test cases; let the guard carry completeness so
