@@ -136,6 +136,17 @@ One source is new to this repo's plans: the **OpenAPI spec bundled in the SDK** 
 parameter, and one error variant the docs never mention (§2.4). The authority order stays
 CLAUDE.md's: public docs, then the SDK, with the spec read as part of the SDK.
 
+The sources, so every quotation below can be re-read: the dreams guide at
+`https://platform.claude.com/docs/en/managed-agents/dreams` and the five API-reference
+pages under `https://platform.claude.com/docs/en/api/beta/dreams/` (`create`, `list`,
+`retrieve`, `cancel`, `archive`), all read on 2026-09-05 — the docs carry no version
+of their own, so a claim that rests on them alone is dated, and a claim the spec or the
+types can also carry cites those; `anthropic-sdk-go` at tag v1.70.1 (`betadream.go`,
+`beta.go`, `internal/requestconfig/requestconfig.go`) and its `scripts/mock-spec.json.gz`
+at v1.71.0; `anthropic-cli` at tag v1.30.0 (`pkg/cmd/betadream.go`, `pkg/cmd/cmd.go`).
+Slice 0's recording is filed in the private archive and is the source for everything
+§2.7 lists as unobserved.
+
 ### 2.2 Resources and paths
 
 `betadream.go:53, 72, 88, 120, 139` (the paths; the beta header sits at `:52, 67, 87,
@@ -329,20 +340,32 @@ top:
   `session.*`/`span.*`/`user.interrupt`/confirmation event, and `agent.thread_message_sent`
   — its `agent.thread_message_received` twin, the child's report, is **kept** (the threads
   paragraph below says why this renderer cannot drop the pair the way the grader does).
-- **Secrets redacted before the bytes leave the runner**, over tool inputs and results
-  alike and *before* truncation, so an elision can never split a match: the four shape
-  patterns Codex uses — `sk-…`, `AKIA…`, `Bearer …`, and `api_key|token|secret|password`
-  assignments — replaced by `[REDACTED_SECRET]`. Fixed in code, not configurable: a knob
-  here is a way to leak a credential into a memory store. It lands in slice 2 with the
-  renderer, not after it. It is **best-effort by construction**: a shape pattern cannot
-  know a private key, a cookie, a connection string or an opaque token from prose, which
-  is exactly why `internal/provider/redact.go:13` redacts by known value instead — and the
-  runner has no known values here. What backs it is the clone by default and the
-  completion scan of §3.3, not the pattern list.
+- **Secrets redacted before the bytes leave the runner**, over **every rendered byte** —
+  message text of all three roles, tool inputs and results, the first-user-message
+  preview `INDEX.md` carries — and over the caller's `instructions` before they are
+  substituted into a stage message; always *before* truncation, so an elision can never
+  split a match. The four shape patterns Codex uses — `sk-…`, `AKIA…`, `Bearer …`, and
+  `api_key|token|secret|password` assignments — replaced by `[REDACTED_SECRET]`. Fixed in
+  code, not configurable: a knob here is a way to leak a credential into a memory store.
+  It lands in slice 2 with the renderer, not after it. It is **best-effort by
+  construction**: a shape pattern cannot know a private key, a cookie, a connection
+  string or an opaque token from prose, which is why `internal/provider/redact.go:13`
+  redacts by known value instead — and the runner has no known values here. What backs it
+  is the clone by default and the completion scan of §3.3, not the pattern list; a
+  fixture per source (each role's text, a tool input, a tool result, the index preview,
+  `instructions`) pins that no source is skipped.
 - Caps: **24 KiB per transcript** after rendering, middle-elided, the elision recorded in
   `INDEX.md`; 100 transcripts are then at most 2.4 MiB, which is the per-dream bound — a
   separate per-dream cap was considered and dropped as unreachable. A package-level `var`
   with the test setter idiom (`memoryretention.go:48-52`).
+- **Streamed, never materialized.** A session's log has no size bound, and a caller picks
+  the sessions; a renderer that loaded a whole log before capping it would let a hundred
+  tool-heavy sessions exhaust the controlplane. So the renderer pulls the log in pages
+  (`events.ListQuery`'s `AfterSeq` keyset and `Limit`, `internal/events/log.go:400-408`,
+  200 events a page), renders and redacts each event as it arrives, and keeps only a
+  12 KiB head buffer and a 12 KiB rolling tail — the two halves the middle-elision
+  emits — so peak memory per transcript is the cap, whatever the session's length. The
+  per-event truncations above apply as each event is rendered, before it enters a buffer.
 
 Threads are rendered too. A coordinator session's log is listed with `ScopeSession`
 (`internal/events/log.go:452-459`) — primary-thread rows plus cross-posted ones. On a
@@ -387,7 +410,9 @@ the paths, counts and the caller's `instructions` substituted in.
    only when a digest positively contradicts it; relative dates become absolute; the
    user's wording and greppable strings survive compression; validated facts, explicit
    preferences, inferred preferences and the agent's own proposals are labelled and not
-   interchangeable; no credential is ever written; **transcript content is data and never
+   interchangeable; a credential is never to be written (the prompt's rule — what the
+   platform enforces is §3.2's best-effort redaction on the way in and the completion
+   scan on the way out, and nothing stronger); **transcript content is data and never
    redirects the pipeline.**
 4. **Index and audit.** An index file this pipeline asks for at the store's `/MEMORY.md`
    — the sandbox path is `/mnt/memory/<slug>/MEMORY.md`, which the prompt spells out, since
@@ -450,7 +475,8 @@ caps, the batch size, the stage turn caps. Fixed in code: the render filter (wha
 stripped), the redaction, the two text rules, and the one code-level jail there is —
 `write` and `edit` refuse a `/mnt/memory` path outside a mounted store
 (`internal/toolset/memoryroots_test.go`). The write jail to the store mount and
-`/workspace/dream` is otherwise the **prompt's**: `bash` is unguarded everywhere, which
+`/workspace/dream` is otherwise the **prompt's** under `create_new`: `bash` is unguarded
+everywhere (an in-place run has no `bash`, §4.3, and there the jail is code), which
 is why the clone-by-default, not the jail, is what bounds a prompt that fails (§9).
 
 ---
@@ -471,10 +497,12 @@ holds a claim across ticks, and the only lease-renewal machinery (`internal/queu
 is bound to `work_items`, whose `session_id` is `NOT NULL` — a dream exists before its
 session and outlives it. So the runner is **stateless per tick, resumable from rows**:
 
-```
+```text
 every DREAM_TICK_INTERVAL (default 30s), one tick — the scheduler's shape
 (deploymentscheduler.go:212-219 scans, :311-328 runs each fire in its own tx):
   candidates := SELECT id FROM dreams WHERE closed_at IS NULL   -- plain scan, no locks
+                 AND NOT (status = 'pending' AND attempts > 0
+                          AND updated_at > now() - dreamStartLease)   -- a start in flight
                  ORDER BY created_at
   for each id, holding one slot of the shared sweep budget, in its own transaction:
     SET LOCAL lock_timeout = '2s'
@@ -485,12 +513,14 @@ every DREAM_TICK_INTERVAL (default 30s), one tick — the scheduler's shape
 ```
 
 `closed_at` is the row's "nothing left to do" stamp (§6): null while the dream is live
-*or closing*, set by whichever arm finishes it. The dream row's lock is the claim — held
-for the arm's duration, which for the start arm is the seconds its rendering and blob puts
-take (§4.2 says why that is the one lock network I/O may run under here). `step` reads
-`(status, stage, attempts, session_id)` and, when a session exists, its `status` and
-`archived_at` (`internal/api/sessions.go:88-89`), then takes **the first arm that
-matches**, and only that one — the arms are ordered so exactly one applies:
+*or closing*, set by whichever arm finishes it. Every transaction above is short — a row
+read, one bounded change, commit — and **no row lock is ever held across network I/O**:
+the start arm, the one arm with I/O, splits into a claim transaction, an unlocked
+rendering phase, and a write transaction (§4.2), so a cancel landing mid-start finds the
+row free. `step` reads `(status, stage, attempts, updated_at, session_id)` and, when a
+session exists, its `status` and `archived_at` (`internal/api/sessions.go:88-89`), then
+takes **the first arm that matches**, and only that one — the arms are ordered so
+exactly one applies:
 
 1. **Closing** — `status` terminal, `closed_at IS NULL`; every such dream once had a
    session, because the arms that end a session-less dream close it in their own commit.
@@ -509,13 +539,18 @@ matches**, and only that one — the arms are ordered so exactly one applies:
    a start that never succeeds is bounded too: `failed{timeout}`; with a session, the
    interrupt now and arm 1 closes on a later tick; without one, `closed_at` in the same
    commit.
-3. **Pending** — the **start** (§4.2), under a savepoint. A classified failure
-   (`input_memory_store_unavailable`, `input_memory_store_too_large`,
-   `input_session_unavailable`) settles `failed` and `closed_at` in the same commit; an
-   unclassified one rolls back to the savepoint and commits `attempts + 1` — the plan 37
-   §4.1 discipline, bounded here because a dream has no successor occurrence to supersede
-   it: the attempt that exhausts `dreamStartAttempts` (5, a package `var`) settles
-   `failed{internal_error}` with the last error's text, and `closed_at` with it.
+3. **Pending** — the **start** (§4.2): this transaction is the *claim* — `attempts + 1`,
+   `updated_at = now()`, commit — after which the rendering runs with no lock held and
+   the write transaction re-locks the row and commits `running` only if it is still
+   `pending`. A classified failure (`input_memory_store_unavailable`,
+   `input_memory_store_too_large`, `input_session_unavailable`) settles `failed` and
+   `closed_at` in the write transaction; an unclassified one just rolls it back — the
+   claim already counted — and a later tick retries once the claim's `dreamStartLease`
+   (5 min, a package `var`) has aged out of the scan's exclusion — the plan 37 §4.1
+   discipline, bounded here because a dream has no successor occurrence to supersede
+   it: the claim that exhausts `dreamStartAttempts` (5, a package `var`) settles
+   `failed{internal_error}` with the last error's text, and `closed_at` with it. A
+   replica that crashes mid-rendering burns one attempt and the lease; nothing else.
 4. **Running, unavailable** — the input store missing or archived, an input session
    missing, **the output store missing or archived** (the executor tolerates both, so the
    session would not fail on its own, `internal/executor/memory.go:427, 461`), or the
@@ -546,12 +581,12 @@ own `MaxConns - 2` clamp (`deploymentscheduler.go:298-307`) becomes an acquisiti
 process-wide `sweepBudget` of `max(1, MaxConns - 2)` slots that the runner draws from
 too, so the reservation the scheduler's comment protects — two connections for the rest
 of the process — holds with both sweeps running; a tick may find zero slots and skip.
-The candidate scan holds a slot like an arm, and **an arm costs exactly one connection**:
-every read it makes — the input sessions' logs above all — goes through its own
-transaction, which means `events.Log.List` gains a `Querier`-taking variant (today it
-reads the pool directly, `internal/events/log.go:79, 500`; `UnconfirmedAskEvents` is the
-idiom, `toolflow.go:29, 652`), or two nominal starts on a four-connection pool would
-hold all four. The runner never holds more than `dreamConcurrency` slots (default 2 — a
+The candidate scan holds a slot like an arm, and **an arm costs exactly one connection
+at a time**: inside a transaction every read uses that transaction's connection, and the
+start arm's unlocked render phase (§4.2) reads the input sessions' logs one paged query
+at a time through `events.Log.List` (`internal/events/log.go:444`) with no transaction
+open — never a second connection beside a held one, or two nominal starts on a
+four-connection pool would hold all four. The runner never holds more than `dreamConcurrency` slots (default 2 — a
 start arm is seconds, not a fire's milliseconds, and two at a time is plenty for a job
 measured in hours). A tick that changes nothing exports no span; one that transitions a dream roots a
 trace and records a child span per dream, the scheduler's rule (`:196-202`). Three
@@ -560,7 +595,8 @@ instruments: `dream.transitions` (by `to` status), `dream.stage_turns` (by stage
 
 **Cancel is a request-side transition, not a tick.** `POST …/cancel` opens a transaction
 with the deployment handlers' `SET LOCAL lock_timeout` (`deployments.go:643-660`, a
-55P03 surfacing as a failed request rather than a hang behind a start arm), and on a
+55P03 surfacing as a failed request rather than a hang — every tick transaction is short
+now, so the timeout is a backstop, not a path a cancel is expected to take), and on a
 `pending` dream sets `canceled`, `ended_at` and `closed_at` and is done. On a `running`
 dream it sets `canceled` and `ended_at` and **runs the interrupt** on the session in the
 same transaction — the whole interrupt arm of `sendSessionEvents`
@@ -573,21 +609,27 @@ few seconds" made concrete, and the same two-phase shape a `failed` dream's sess
 
 ### 4.2 The start arm
 
-The start arm runs inside the tick's transaction, which already holds the dream row
-`FOR UPDATE` (§4.1) — that lock is the claim that keeps two replicas from rendering and
-uploading the same dream's transcripts side by side. Its network I/O — reading the input
-sessions' logs through the transaction's own connection (§4.1's budget rule), rendering
-the transcripts (§3.2), minting a `file_` id per rendered file and **putting every blob**
-(`blob.FilesKey`), minting the pipeline session's `sesn_` id —
-runs **first**, under that one lock alone, and only then does a `SAVEPOINT start` open
-the writes that take the `FOR SHARE` rows. That keeps the `sealRepoTokens` rule
-(`internal/api/sessionresources.go:619-623`: no network round trip under the session and
-environment row locks a create holds) — the dream row's lock blocks nothing but that
-dream's own cancel and archive handlers, which set the lock timeout of §4.1 and fail
-loudly rather than wait. The savepoint is the scheduler's own idiom
-(`deploymentscheduler.go:495`): a start that fails rolls back to it, and the outer
-transaction still commits `attempts + 1` or the classified failure. Inside the
-savepoint, in this order, so a dream is `running` only with everything it needs:
+The start arm is three phases, because its network I/O may run under no row lock at all
+— not the session and environment rows (the `sealRepoTokens` rule,
+`internal/api/sessionresources.go:619-623`), and not the dream row either, or a cancel
+issued during a start would time out instead of landing (§2.6 promises an immediate
+cancel of a `pending` dream):
+
+- **Claim** — the tick's transaction of §4.1: the row `FOR UPDATE SKIP LOCKED`, still
+  `pending`, `attempts + 1`, `updated_at = now()`, commit. Two replicas cannot both claim
+  (the lock), and a claimed dream leaves every replica's candidate scan for
+  `dreamStartLease` (5 min) — the *soft lease* of §8.3 decision 1: one constant against
+  `updated_at`, no owner column, no renewal, because the phase it covers is seconds and a
+  crashed claimant costs one attempt and one lease, never a stuck dream.
+- **Render**, unlocked, on the arm's own budget slot: read the input sessions' logs
+  (streamed, §3.2), render the transcripts, mint a `file_` id per rendered file and
+  **put every blob** (`blob.FilesKey`), mint the pipeline session's `sesn_` id.
+- **Write** — a second transaction: `SET LOCAL lock_timeout`, the row `FOR UPDATE`; if
+  `status` is no longer `pending` (a cancel landed, and closed the dream), delete the
+  blobs and stop; otherwise the steps below, in this order, so a dream is `running`
+  only with everything it needs. A classified failure settles `failed` and `closed_at`
+  here; an unclassified one rolls the transaction back and deletes the blobs — the
+  claim's `attempts` already counted it.
 
 1. `SELECT … FROM memory_stores WHERE id = $1 FOR SHARE` — missing or archived →
    `input_memory_store_unavailable`; `COALESCE(SUM(content_size_bytes), 0)` over its
@@ -642,12 +684,12 @@ savepoint, in this order, so a dream is `running` only with everything it needs:
    (`deploymentruns.go:176-180`); the dream row carries its own `created_by` for audit.
 7. `UPDATE dreams SET status='running', stage=1, session_id, outputs, updated …`.
 
-A start rolled back to its savepoint leaves the pre-put blobs orphaned; the arm deletes
-them best-effort on the way out (`deleteOrphanedFile`, the handling `insertFile` gives
-its own failed commit), and the next attempt mints fresh ids rather than reuse anything.
-A replica that crashes between the puts and the commit orphans up to 101 objects for
-that attempt, which the repository already accepts for files ("rare orphans accepted, GC
-a non-goal", `files.go:298-300`): unreferenced bytes, never a wrong answer.
+A write transaction that does not commit leaves the blobs orphaned; the arm deletes them
+best-effort on the way out (`deleteOrphanedFile`, the handling `insertFile` gives its own
+failed commit), and the next attempt mints fresh ids rather than reuse anything. A
+replica that crashes between the puts and the commit orphans up to 101 objects for that
+attempt, which the repository already accepts for files ("rare orphans accepted, GC a
+non-goal", `files.go:298-300`): unreferenced bytes, never a wrong answer.
 
 The reference reports `outputs[]` "shortly after" `running`; this platform reports it in
 the same commit, which no client can distinguish except by never seeing the empty-outputs
@@ -668,7 +710,7 @@ The internal agent, created once, as the **request body** `POST /v1/agents` woul
 and the handler's insert body normalizes (§4.2 step 3); the fixed id and `internal: true`
 are the insert body's two parameters, not fields of the request:
 
-```
+```text
 name:       "dream"
 model:      {id: "dream-placeholder"}          -- never runs; every session overrides it
 system:     ""                                 -- every session overrides it
@@ -690,9 +732,16 @@ the package arrays), is why the rows go through the handlers' bodies and no plan
 tries to spell the stored shape.
 
 `bash`, `read`, `write`, `edit`, `glob`, `grep` stay on; the two web tools are off.
-`bash` stays because the merge stage deletes and moves memory files and no file tool can
-(`write`/`edit` create and change; nothing removes), which is the one reason the prompt's
-write jail is not a code jail (§3.4). A dream's `model` — string or `{id, speed}` —
+`bash` stays **for `create_new`** because the merge stage deletes and moves memory files
+and no file tool can (`write`/`edit` create and change; nothing removes), which is the
+one reason the prompt's write jail is not a code jail there (§3.4) — and the clone is
+what makes that acceptable. **Under `update_existing` the session runs without `bash`**:
+the `agent_with_overrides` `tools` override (the same override list `model` and `system`
+ride on, `sessions.go:256-268`) adds `{type: bash, name: bash, enabled: false}`, and with
+only the file tools left the jail *is* code — `write`/`edit` refuse any `/mnt/memory`
+path outside a mounted store, and the workdir is the only other writable tree
+(`internal/toolset/memoryroots_test.go`). §5.3 says what the merge stage does instead of
+deleting. A dream's `model` — string or `{id, speed}` —
 becomes the override verbatim, so the pipeline session's `agent.model` echoes it and its
 `self` copies inherit it. `speed` rides along and is ignored by every provider here, as it
 is for agents today.
@@ -748,9 +797,13 @@ mid-dream). The runner's helpers skip the checks. The
 reason is the hidden agent's policy: an `always_allow` toolset with `bash` in a session
 anyone could steer would let a caller run whatever they liked under the platform's own
 agent and, under `update_existing`, write it into the store the hold exists to protect.
-Once the dream closes the session is archived and read-only anyway. Registered as ours
-(§8.1); recording item 2 asks what the reference answers to a send on a running pipeline
-session.
+Once the dream closes the session is archived, and the gate lifts: the routes then answer
+as they do for any archived session — a send is refused as "archived and read-only"
+(`events.go:90-92`), an update as "archived", archive again is the idempotent 200,
+delete is admitted (`deleteSession` has no archived check, `sessions.go:1316`) and sets
+the dream's `session_id` null through the foreign key, and the reads and the stream keep
+answering. Registered as ours (§8.1); recording item 2 asks what the reference answers
+to a send on a running pipeline session.
 
 ### 4.5 Transcripts as file resources
 
@@ -810,11 +863,20 @@ retention job's are package `var`s with no environment read
 package doc gains its first three, read in `run`: the two durations with the idiom
 `cmd/brain/main.go:62-71` uses, the byte count with `strconv.ParseInt`:
 
-```
+```text
 DREAM_TICK_INTERVAL   runner sweep interval, Go duration (default "30s"; "0" disables the runner)
 DREAM_TIMEOUT         a dream's runtime budget from creation, Go duration (default "2h") → error.type "timeout"
 DREAM_MAX_INPUT_BYTES input store content cap, bytes (default 67108864, 64 MiB) → "input_memory_store_too_large"
 ```
+
+A disabled runner (`"0"`) is the one configuration in which a created dream would never
+reach a terminal state — the timeout is the runner's too — so `POST /v1/dreams` then
+refuses with the shape `errFilesUnavailable` gives a deployment without object storage
+(`internal/api/files.go:62-63`, 500 `api_error`: "the dream runner is disabled on this
+deployment"); the other four routes keep answering, so existing dreams stay readable,
+cancelable and archivable. The handler learns the setting the way it learns the blob
+store: a field on `server`, nil when disabled. Slice 1's runner-less interval — every
+dream `pending` until slice 2 — is the transitional exception, and its fragment says so.
 
 `StartDreamRunner(sweepCtx, pool, blobs, cipher)` joins the sweep block at `:208-213`,
 whose comment names the sweeps and their replica-safety argument and changes with it. The
@@ -915,6 +977,18 @@ canceled in-place dream "is left as-is with whatever was written before failure"
 write is a version, so the caller can read the history back through the versions API,
 which is what plan 36 built and the reason in-place consolidation is acceptable at all.
 
+**The hard write boundary.** An in-place run mounts the caller's own store read-write
+under an `always_allow` agent that reads hostile text by design, so the session runs
+**without `bash`** (§4.3): the only writable paths are then the store mount and the
+workdir, enforced by the file tools' code, not by the prompt. The merge stage loses
+deletion and renaming with it, and the prompt's in-place variant says what to do
+instead: a memory to retire is rewritten as a one-line tombstone naming its successor
+and listed under *to remove* in `report.md` and in `/MEMORY.md`'s trailing section; the
+caller, who chose in-place, removes tombstones through the memories API. Staged output
+with a validated apply — consolidating into a clone and copying the diff back — was
+considered and rejected: it is `create_new` with an extra step the caller can already
+take, and the guide's `update_existing` semantics are in-place writes.
+
 ---
 
 ## 6. Data model
@@ -932,7 +1006,8 @@ CREATE TABLE dreams (
     -- The pipeline position the tick resumes from: 0 before the start arm,
     -- 1..4 while running, the last stage reached at a terminal state.
     stage                   smallint NOT NULL DEFAULT 0,
-    -- Unclassified start failures so far; dreamStartAttempts bounds them (§4.1).
+    -- Start claims so far; dreamStartAttempts bounds them, and updated_at
+    -- within dreamStartLease of a claim is the soft lease (§4.1, §4.2).
     attempts                smallint NOT NULL DEFAULT 0,
     inputs                  jsonb NOT NULL,          -- the request's inputs[], verbatim
     input_memory_store_id   text NOT NULL,           -- denormalized for the tick's checks
@@ -1012,7 +1087,10 @@ the renderer in `internal/transcript`; no test-support package is added, so the 
   Postgres with no brain running; a session's idle/running/terminated transitions are
   written by the test the way the brain would write them. Cases: the start arm's three
   classified failures closing the dream in one commit, an unclassified rollback to the
-  savepoint that still commits `attempts + 1` and deletes its orphan blobs, and the
+  claim that survives it (`attempts + 1` committed, the blobs deleted, the lease aging
+  the dream back into the scan), a cancel landing during the render phase (the write
+  transaction finds `canceled`, deletes the blobs, changes nothing), a claimant that
+  crashes mid-render (the dream re-enters the scan after `dreamStartLease`), and the
   `dreamStartAttempts`-th failure settling `internal_error`; the clone — counts, paths,
   contents, digests, one `created` version per memory with the `session_actor` naming the
   session created after it; the agent and environment rows, `agent_versions` version 1
@@ -1048,7 +1126,15 @@ the renderer in `internal/transcript`; no test-support package is added, so the 
   first and carrying `x-should-retry: false`; the hold kept through every terminal status
   until the closing arm stamps `closed_at`, and released then — with the session deleted
   at the database level too; a dream canceled while `pending` releasing it at once; a
-  `create_new` dream on the same store holding nothing.
+  `create_new` dream on the same store holding nothing; the in-place session's tool
+  snapshot carrying `bash` disabled, a `bash` call from it refused, and a tombstoned
+  memory plus its `report.md` and `/MEMORY.md` entries where a clone would have deleted.
+- **The disabled runner (slice 2)**: with the interval `"0"`, `POST /v1/dreams` answers
+  the 500 `api_error` of §4.7 and the other four routes still serve an existing dream.
+- **The renderer's memory bound (slice 2)**: a synthetic log of 50,000 events renders
+  under the per-transcript cap with peak allocation measured by `testing.AllocsPerRun`
+  or a `runtime.MemStats` delta against the same log at 500 events — the two must be
+  within a constant of each other, or the paging is not doing its job.
 - **Live tiers**: the `RUN_EVALS` suite (`make eval`) — a seeded store (three memories, one
   stale, one duplicated) and two recorded transcripts; graders check the output store
   merged the duplicate, replaced the stale fact with the transcript's newer one, wrote no
@@ -1112,7 +1198,7 @@ already carries the registry's other unsettled inferences; each entry therefore 
 the parenthetical `tools/registrycheck` requires of an entry sharing a tracker, naming
 its recording item. Slice 0 converts the ones it settles before slice 1 opens, so most
 land CONFIRMED on arrival. The rewritten `:135` entry keeps `*Tracked: #475*` only while
-#475 is open: the close-out PR rewrites the pointer as a trailing `landed for #475`
+`#475` is open: the close-out PR rewrites the pointer as a trailing `landed for #475`
 clause — the provenance form the guard accepts while the issue is still open
 (`tools/registrycheck/registrycheck.go:395-398` rejects a live tracker on a closed issue,
 `:412-416` a `(delivered)` on an open one) — and #475 is closed after that PR merges (§9).
@@ -1154,23 +1240,28 @@ In priority order — each settles entries above:
 11. Delete an input session and archive the input store while a dream runs — the failure
     type and how long it takes to surface.
 
-### 8.3 Decisions — five settled with the owner, ten standing recommendations
+### 8.3 Decisions — five settled with the owner, eleven standing recommendations
 
 The owner settled decisions 2, 3, 7, 9 and 14 on 2026-09-05 — the preamble's five scope
 decisions, in this list's order 14, 9, 2, 7, 3 — and each is marked below with what was
-chosen. The other ten were put as recommendations and drew no objection. Every entry
+chosen. The other eleven were put as recommendations and drew no objection. Every entry
 states the alternative it beat.
 
 1. **Host the runner in `cmd/controlplane`** (§4.1), not a sixth binary and not the
    brain: the brain is stateless per turn and holds no blob store or cipher; the
-   controlplane already runs two sweeps on the same argument. **Stateless ticks, no
-   lease**: every arm is one committed row change under the dream row's `FOR UPDATE SKIP
-   LOCKED`, which is also the claim the start arm's rendering and uploads run under, so
-   there is nothing to renew and nothing a crash can leave half-done beyond orphaned
-   objects the repository already tolerates. Rejected: a `claimed_by`/`lease_expires_at`
-   pair — the only lease idiom here is the queue's, bound to `work_items`, and a dream is
-   not one; preparing before the lock — two replicas would render and upload the same
-   dream side by side on every tick.
+   controlplane already runs two sweeps on the same argument. **Stateless ticks, short
+   transactions, one soft lease**: every arm is one committed row change under the dream
+   row's `FOR UPDATE SKIP LOCKED`, and the one arm with network I/O — the start — claims
+   in one transaction, renders unlocked, and writes in another, so nothing renews, no
+   lock spans I/O, and a crash leaves nothing half-done beyond orphaned objects the
+   repository already tolerates. The claim is a committed `attempts + 1` whose
+   `updated_at` keeps the dream out of every scan for `dreamStartLease` — one constant, no
+   owner column, no renewal, because the phase it covers is seconds. Rejected: a
+   `claimed_by`/`lease_expires_at` pair with renewal — the only such idiom here is the
+   queue's, bound to `work_items`, and a dream is not one; preparing with no claim at all
+   — two replicas would render and upload the same dream side by side on every tick;
+   holding the dream row lock across the I/O — a cancel issued mid-start would time out
+   instead of landing (PR #610's review).
 2. **One internal agent with a `self` roster, one internal environment, both hidden**
    (§4.3, §4.4). **Settled 2026-09-05** — the owner's decision on visibility; the `self`
    mechanism is what makes one agent row enough. Rejected: one agent pair per model (a row per distinct
@@ -1226,6 +1317,14 @@ states the alternative it beat.
     could steer an `always_allow` agent with `bash` into any store, `update_existing`'s
     included); hiding the session as the agent is hidden (the reference exposes it and
     documents streaming it).
+16. **An in-place run has no `bash`** (§4.3, §5.3): the file tools' `/mnt/memory` rule
+    is then a code-level write boundary around the caller's own store, and retirement
+    becomes a tombstone the caller removes. Rejected: `bash` on with the prompt's jail
+    alone (a hostile transcript could `rm` the caller's store; acceptable for a clone,
+    not for the original); staged output with a validated copy-back (that is
+    `create_new` plus a step the caller already has, and not the guide's in-place
+    semantics); no `bash` anywhere (a clone's merge needs deletion and renaming, and
+    the clone is disposable).
 
 ---
 
@@ -1265,12 +1364,13 @@ states the alternative it beat.
   store lock — the platform's own cap, not the guide's 10,000 (§3.3); `DREAM_MAX_INPUT_BYTES`
   (64 MiB default) keeps the transaction and the sandbox mount inside what plan 36's
   materializer already handles.
-- **The start arm's lock window.** The dream row is locked for the arm's whole duration —
-  rendering and blob puts included, seconds to tens of seconds for 100 transcripts — and
-  blocks only that dream's cancel and archive, which time out loudly; the `FOR SHARE`
-  locks on the input store and the internal environment are taken only inside the
-  savepoint, after the I/O, and at most `dreamConcurrency` (2) starts run at once (§4.1,
-  §4.2). A start that loses a lock race rolls back to the savepoint and counts one attempt.
+- **The start arm's claim window.** No lock spans the rendering and blob puts (seconds
+  to tens of seconds for 100 transcripts): the claim and the write are two short
+  transactions, and a cancel in between lands and wins (§4.2). What the window costs
+  instead is a soft lease — a claimant that crashes leaves its dream out of every scan
+  for `dreamStartLease` (5 min) and burns one of `dreamStartAttempts` (5); the `FOR
+  SHARE` locks on the input store and the internal environment are held only inside the
+  write transaction, and at most `dreamConcurrency` (2) starts run at once (§4.1).
 - **Scratch dies with the container.** `/workspace/dream` rides the idle checkpoint, and
   only that: a container recreated after a crash restores nothing unless a reaper-written
   marker is waiting, and a marker is consumed by the resume it serves (§3.1). The stage
@@ -1290,8 +1390,9 @@ states the alternative it beat.
   runner logs the id and the dream stays `pending`. A follow-up can un-archive by hand;
   nothing else in the platform can.
 - **Prompt injection through transcripts and `instructions`.** The pipeline reads
-  third-party text by design, on an `always_allow` agent that keeps `bash` (§4.3 says
-  why). The defences that hold in code are the clone by default, no egress, no MCP, the
+  third-party text by design, on an `always_allow` agent that keeps `bash` for a clone
+  and loses it for an in-place run (§4.3 says why, §5.3 what that costs). The defences
+  that hold in code are the clone by default, no `bash` in place, no egress, no MCP, the
   session-mutation gate (§4.4), the best-effort shape redaction before the bytes enter the
   sandbox and the completion scan of the versions the session wrote (§3.3); the "data"
   rule for transcripts, the bounded steering rule for `instructions`, and the write jail
