@@ -1098,13 +1098,13 @@ scope predicate has exactly that shape. So `internal/api/scopematrix_test.go`:
    eleven names substituted for the fourteen.* Outside `internal/api` they ride rule (g)'s
    stand-in arm. Inside it, (g) asks each for its parent's scoped read in the same function, and
    **which ones already have it is what the guard's first run against the current tree reports**,
-   not what this plan lists by hand. Reading found **seven** in-api routes that fail (g) today,
-   and they were found in two different places: `getMemoryVersion` and `getMemory` below, which
-   §7.4 fixes in slice 4, and the five §7.5 already enumerates for slice 5 — `getSkillVersion`
-   and `downloadSkillVersion`, which run no `skills` probe at all, and `getVaultCredential`,
-   `updateVaultCredential` and `validateVaultCredential`, which read `vault_credentials` with
-   no `vaults` read in the function. Seven found by reading, spread over two sections, is exactly
-   the job the mechanism exists to take over. Two members have **no** statement
+   not what this plan lists by hand, and **this plan states no total for it**. Reading found
+   `getMemoryVersion` and `getMemory` (slice 4, below), then `getSkillVersion` and
+   `downloadSkillVersion`, whose only `skills` read is `resolveSkillVersion`'s `latest` arm in
+   another function, then the vault-credential routes §7.5 enumerates, then the deployment-run
+   pair and two more vault-credential writes. Four readings, four larger answers — which is the
+   argument for the mechanism rather than a list, and the reason the exemption list's length is
+   pinned at slice 6, after the guard has enumerated what reading kept missing. Two members have **no** statement
    in the six packages at all: `session_gate_tokens` and `work_session_tokens` live in
    `internal/gatetoken` and `internal/worktoken`, which the walk reaches only when slice 5 widens
    it to every non-test file under `internal/`.
@@ -1125,15 +1125,20 @@ scope predicate has exactly that shape. So `internal/api/scopematrix_test.go`:
      leaves rule (b) for rule (g), which asks the same thing of it: the `SELECT … FROM skills`
      parent probe each route runs, scoped, in the same function. `skills.go:634` for
      `listSkillVersions` and `:750` for `deleteSkillVersion` have one; `getSkillVersion` and
-     `downloadSkillVersion` have none at all, which is why they are two of the seven routes (g)
-     fails today and why slice 5 adds the same-shape probe to both. **The check is `*ast.FuncDecl`-local,
+     `downloadSkillVersion` have none in their own bodies, which is why (g) fails them today and
+     why slice 5 adds the same-shape probe to both. **The check is `*ast.FuncDecl`-local,
      not file-local**: the guard walks each function and requires the scoped parent read to be
      present in that same body. A file-local check let a compliant statement in one function
      mask an unsafe statement of the same shape in another — the false negative this rule
-     closes. A rule the guard cannot evaluate statically is a comment, not a rule, so a
-     statement whose parent is resolved in a **different function** — a sibling handler or a
-     shared helper, and *a fortiori* a different file — is a rule-(d) exemption naming its
-     resolver, never a (b) admission. In the current tree those are exactly the five cross-file
+     closes. A rule the guard cannot evaluate statically is a comment, not a rule — and that,
+     not the function boundary, is where the line falls. **A call in this body to a pinned
+     parent-checking helper is static** and admits the statement: the guard holds the helper set
+     by name, so adding one is a reviewed edit and each member's contract (it refuses a foreign
+     parent with the absent-id answer) is asserted by its own test. What it cannot see, and
+     therefore refuses, is a parent resolved **with nothing in this body at all** — a sibling
+     handler earlier in the request path, or a helper this function never calls. Those are
+     rule-(d) exemptions naming their resolver, never (b) admissions. In the current tree they
+     are exactly the five cross-file
      resolutions (`internal/api/workapi.go:515`, `internal/api/envkeys.go:121`, `:132` and
      `:163`, and `internal/api/threadstate.go:38`), all on the exemption list below;
    - **(b′)** a read in a package with **no request scope** — `internal/brain`,
@@ -1190,9 +1195,19 @@ scope predicate has exactly that shape. So `internal/api/scopematrix_test.go`:
      joins: `credentials.go:139` and `mcp.go:85` join `vaults` and constrain
      `c.vault_id = ANY($1)` on parent ids their caller resolved under scope, and
      `mcprefresh.go:222` and `:418` are keyed on a credential row's own id — an id those first
-     two resolved. In `internal/api`, where the scope does reach the statement, only the scoped
-     parent read will do. Seven in-api routes fail it today (step 2); slice 4 fixes the two here
-     and slice 5 the five §7.5 enumerates. `getMemoryVersion` (`internal/api/memoryversions.go:98`) reads
+     two resolved. In `internal/api`, where the scope does reach the statement, it takes the
+     scoped parent read or the pinned-helper call rule (b) admits — which is what the memory
+     routes rely on: their probes are `lockMemoryStore` (`memories.go:132`),
+     `lockMemoryStoreForWrite` (`:148`) and `checkMemoryStore`, so those three are pinned
+     helpers from slice 2 and the routes are admitted rather than exempted. **How many in-api
+     routes fail (g) against the current tree is not a number this plan states**, and that is
+     deliberate: reading found the ones below and §7.5's, four separate readings each found more
+     than the last, and an enumeration by hand over 67 child mentions is exactly the work the
+     guard exists to do once. The guard's first run is the enumeration (§6.5's TDD note); every
+     route it names and no slice yet fixes gets an exemption entry with its slice, which is why
+     the pinned count is asserted at slice 6 rather than now. Two are named here because this is
+     where reading found them; §7.4 lists what slice 4 actually owns.
+     `getMemoryVersion` (`internal/api/memoryversions.go:98`) reads
      `memory_versions` with no store probe anywhere in its body, defaulting to full content
      (`viewFull`), so a store id and version id from another workspace would return that
      workspace's memory verbatim. `getMemory` (`memories.go:317`) probes only on the **miss**
@@ -1245,7 +1260,10 @@ mentions, 31 rule-(e) ones and ~49 rule-(f) ones (mention counts, §4.5) on thei
 rules rather than on the predicate. So slice 6 asserts the list's **exact length and exact
 membership** instead — the **nineteen** permanent members named above, and no other: adding an
 entry then requires editing a number and a name in a test, which is a deliberate, reviewed edit
-rather than a silent one. Between slices 2 and 5 the list is longer by the entries parked with
+rather than a silent one. **Nineteen is what reading found, and slice 6 asserts what the guard
+produced** — if its first run (slice 2) turns up a statement no slice fixes, that entry is the
+reviewed edit this mechanism is built to force, not a hole in it. The number is pinned at the
+end for exactly that reason. Between slices 2 and 5 the list is longer by the entries parked with
 the slice that removes them, and each of those names that slice, so the count at any slice is
 the nineteen plus what the not-yet-landed slices still owe.
 
@@ -1756,8 +1774,11 @@ shape: `errNotFound` with the message and status the absent id already gets — 
 nothing distinguishing "another workspace's" from "does not exist". **§5's recording confirmed
 this is the reference's own shape** (§4.3 item 1), so no correction is owed here. · `internal/api`'s
 reads come **off the exemption list** — again a shrinking list, not a growing target — and rule
-(b) starts refusing bare parent-id inheritance. · **The two rule-(g) failures this slice owns**
-(§6.5 counts seven in all; the other five are §7.5's, in slice 5): `getMemoryVersion`
+(b) starts refusing bare parent-id inheritance. · **The rule-(g) failures this slice owns** — the
+ones reading found on tables slice 4 already touches; the guard's run names the rest and each
+gets its slice (§6.5). The deployment-run pair is here by its join: `getDeploymentRun` and
+`listDeploymentRuns` have no `deployments` read of any kind today, and the join this slice adds
+is what satisfies (g) for both. Then `getMemoryVersion`
 (`internal/api/memoryversions.go:98`) gains the scoped `memory_stores` probe it has never had,
 and `getMemory`'s probe (`memories.go:322`) moves ahead of its read so a hit is checked as the
 miss already is. The probe is the existing `checkMemoryStore`, which slice 4 has just given the
@@ -1829,10 +1850,14 @@ a scoped table:
   slice, not slice 4's cross-reference list, because it is the *lane's* gate rather than a
   create-time check.
 - `getSkillVersion` (`:692`, statement `:711`) and `downloadSkillVersion` (`:840`, statement
-  `:868`) have **no parent check at all** today; each gains one in the same shape as `:634`.
-  These two and the three vault-credential routes below — `getVaultCredential`,
-  `updateVaultCredential` (two reads) and `validateVaultCredential` — are five of the seven
-  routes rule (g) fails against the current tree (§6.5); slice 4 owns the other two.
+  `:868`) have **no `skills` read in their own bodies** today — `resolveSkillVersion`'s `latest`
+  arm reads one (`:151-152`) but is another function, and a concrete-version slot reads none at
+  all; each gains a probe in the same shape as `:634`.
+  These two and the vault-credential routes below — `getVaultCredential`,
+  `updateVaultCredential` (two reads), `validateVaultCredential`, and the two writes
+  `archiveVaultCredential` (`:511-516`) and `deleteVaultCredential` (`:540`), whose bare
+  `vault_id = $2` term is not what (g) accepts — are the rule-(g) failures this slice owns.
+  §6.5 states no total for the set and says why.
 
 The in-repo remediation pattern is the adjacent file lane, which solved this and documents the
 contrast: admit to the lane, narrow inside the handler, fail closed to 404
