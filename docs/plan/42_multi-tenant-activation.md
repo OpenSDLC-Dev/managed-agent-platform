@@ -721,16 +721,18 @@ acceptance step, not the architecture.
 **Items 1-5 were recorded in full and item 6 on one of its two lanes; slice 1 is unblocked and
 slice 6's item 5 is answered too.** 07:13:03Z-07:43:18Z, at US$0 — every probe is a
 control-plane call, and no model turn ran. Three throwaway workspaces
-(`plan40-tenancy-recording-A/B/C`) were created and archived inside the half hour; three
-credential lanes were driven, the third of them by `curl` because a browser cannot reach it
-(CORS preflight on `POST` to `api.anthropic.com` answers 405, and script may read only two
-response headers on a `GET`). Every credential minted — three workspace API keys, two
-environment tokens — was revoked or archived and refused afterwards; **the bytes for one of
-those five refusals are in the archive** (`batch9.curl.txt:150`, workspace C's key). The other
-four are attested by `FINDINGS8.md` alone: keys A and B from runs it records as
-header-filtered, and the two environment tokens from post-revocation probes it does not
-describe. Both refusals are stated there as observed; neither has bytes here.
-`batch8.json`, `batch9.json`, `batch9.curl.txt` and `FINDINGS8.md`, cited as §4.1 sets out.
+(`plan40-tenancy-recording-A/B/C` — names created on the wire while this plan was numbered
+40, so they stay verbatim; renaming them would falsify the bytes) were created and archived
+inside the half hour; three credential lanes were driven, the third of them by `curl`
+because a browser cannot reach it (CORS preflight on `POST` to `api.anthropic.com` answers
+405, and script may read only two response headers on a `GET`). Every credential minted —
+three workspace API keys, two environment tokens — was revoked or archived and refused
+afterwards; **the bytes for one of those five refusals are in the archive**
+(`batch9.curl.txt:150`, workspace C's key). The other four are attested by `FINDINGS8.md`
+alone: keys A and B from runs it records as header-filtered, and the two environment tokens
+from post-revocation probes it does not describe. Both refusals are stated there as
+observed; neither has bytes here. `batch8.json`, `batch9.json`, `batch9.curl.txt` and
+`FINDINGS8.md`, cited as §4.1 sets out.
 
 **Item 1 came back a 404**, so the architecture stands unchanged: §7.4's byte-identical-404
 refusal, its per-statement-kind assertions and D10 are all as drafted, and no slice-4
