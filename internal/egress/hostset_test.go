@@ -427,7 +427,20 @@ func TestAnEmptyLabelIsJudgedAfterCanonicalization(t *testing.T) {
 
 // A Unicode entry is stored as its A-label so the stored list holds one
 // spelling per host; an ASCII entry is stored exactly as written.
-func TestCanonicalEntryStoresOneSpellingPerHost(t *testing.T) {
+func TestCanonicalEntryStoresOneAlphabetPerHost(t *testing.T) {
+	// One alphabet, not one spelling: an ASCII entry is stored exactly as typed,
+	// case included, and it is the matcher that folds two spellings into one
+	// host. Rewriting them would change what every existing environment reads
+	// back for no gain.
+	for _, e := range []string{"API.example", "api.example", "Api.Example"} {
+		got, err := egress.CanonicalEntry(e)
+		if err != nil || got != e {
+			t.Errorf("CanonicalEntry(%q) = %q, %v; an ASCII entry is stored as typed", e, got, err)
+		}
+	}
+	if !egress.NewHostSet([]string{"API.example"}).Match("api.example") {
+		t.Error("the matcher must fold the two spellings the store keeps apart")
+	}
 	for _, tc := range []struct {
 		in, want string
 		ok       bool

@@ -369,9 +369,15 @@ func canonicalName(h string) string {
 // The length cap CanonicalHost keeps applies to the conversion, and that is
 // exactly where it is needed: without it an operator could store an entry
 // converted from a U-label the matcher would never convert, so the entry could
-// not match the spelling it was written as. An ASCII entry over the cap needs no
-// such arm — both sides fold it and neither converts it, so they still meet —
-// and is stored as typed.
+// not match the spelling it was written as.
+//
+// An ASCII entry over the cap needs no arm here, since nothing converts it on
+// either side — but do not read that as the two sides meeting. Match refuses a
+// host over the cap outright, so such an entry matches nothing spelled the way it
+// is written: measured, a 1030-byte ASCII entry is stored as typed and its own
+// spelling is refused. It is stored rather than refused because refusing would
+// add a rejection this API has never had, and would still not be the rule the
+// wording invites — a hostname's limit is 253 bytes, not this one.
 //
 // It is not a DNS length check, and nothing here is. An entry can still name a
 // label over 63 bytes or a name over 253: measured, 58 "ä" runes convert to a

@@ -307,6 +307,11 @@ func (g *Gate) handleConnect(w http.ResponseWriter, r *http.Request) {
 	// is a destination the policy never admitted and, on this host, a local
 	// service. The authority goes out as written instead, and fails to resolve
 	// as it did before there was a canonical dial at all.
+	//
+	// Reaching this needs a request line whose authority differs from its Host
+	// header, since net/http answers 400 to a malformed Host header before any
+	// handler runs — which a sandbox writing its own CONNECT can do trivially,
+	// and which is how it was driven against a real listener.
 	dialAddr := target
 	if canonical := egress.CanonicalHost(host); port != "" && canonical != "" {
 		dialAddr = net.JoinHostPort(canonical, port)

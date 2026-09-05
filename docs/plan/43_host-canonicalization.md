@@ -146,8 +146,13 @@ Its rules, in order. Each exists because a measurement demanded it.
    bearer token. The fold must lowercase: `net/http`'s equivalent does not, and
    copying the function rather than the shape would undo #611.
 2. **Cap the length, at 1024 bytes.** A host over the cap is returned folded,
-   uncanonicalized, and a *Unicode entry* over it is refused — an ASCII one needs
-   no arm, since neither side converts it and both fold it, so they still meet.
+   uncanonicalized, and a *Unicode entry* over it is refused. An ASCII entry over
+   it needs no arm, since neither side converts it — but that is not the two
+   sides meeting: `Match` refuses a host over the cap outright, so such an entry
+   matches nothing spelled the way it is written (measured, a 1030-byte ASCII
+   entry is stored and its own spelling refused). It is stored rather than
+   refused because refusing would add a rejection this API has never had, and
+   would still not be a hostname-length rule, which is 253 bytes.
    A sandbox writes the
    CONNECT authority and `net/http` bounds it only by `MaxHeaderBytes`; a 1 MB
    U-label authority costs 22.6 ms through IDNA against 2.1 ms through the fold.
