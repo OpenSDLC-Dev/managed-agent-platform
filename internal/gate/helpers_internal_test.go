@@ -208,6 +208,11 @@ func TestThePackageRegistrySetOpensOnlyUnderItsFlag(t *testing.T) {
 		// evidence that `*.pythonhosted.org` is one.
 		"a subdomain of a registry is not the registry": {limited(true), "evil.pypi.org", "443", admitNone},
 		"nor is the CDN's parent domain":                {limited(true), "pythonhosted.org", "443", admitNone},
+		// The set reaches past package registries, and the two groups that do
+		// are classified like the rest — floored and resolved absolutely, not
+		// waved through because they are famous.
+		"a source forge is the registry class too": {limited(true), "github.com", "443", admitRegistry},
+		"and so is a container registry":           {limited(true), "ghcr.io", "443", admitRegistry},
 		// A widening flag cannot make an unrecognized policy recognized, and
 		// `unrestricted` already admits every host without the floor.
 		"an unknown policy stays closed": {
@@ -229,24 +234,37 @@ func TestThePackageRegistrySetOpensOnlyUnderItsFlag(t *testing.T) {
 	}
 }
 
-// The set is what a recording sized, not what the reference's prose implies. The
-// pinned SDK says "public package registries (PyPI, npm, etc.)" and the public
-// docs say "such as PyPI and npm", but the only probe of the flag tried three
-// URLs — two Python hosts and a control — so every other ecosystem's registry is
-// unevidenced and stays shut (#594). A guessed entry would widen a `limited`
-// sandbox past the reference, which is the one direction this gate must not err
-// in, so the absences are asserted rather than left to the list's own reading.
-func TestThePackageRegistrySetAdmitsNoEcosystemNobodyRecorded(t *testing.T) {
+// Every host below was probed in the recording that sized the set and observed
+// gate-refused — most of them one label away from an admitted sibling. They are
+// asserted rather than left to the list's own reading because each is exactly
+// what a later contributor would add for symmetry: the apex under an admitted
+// pair, the test instance beside the real one, the other distribution's mirror,
+// the ecosystem whose neighbours are all open. A guessed entry widens a
+// `limited` sandbox past the reference, which is the one direction this gate
+// must not err in (#594).
+func TestThePackageRegistrySetStillRefusesWhatTheRecordingSawRefused(t *testing.T) {
 	p := newPolicy(domain.Networking{Type: domain.NetLimited, AllowPackageManagers: true}, nil)
 	for _, host := range []string{
-		"registry.npmjs.org", "registry.yarnpkg.com", // npm
-		"crates.io", "index.crates.io", "static.crates.io", // cargo
-		"rubygems.org", "index.rubygems.org", // gem
-		"proxy.golang.org", "sum.golang.org", // go
-		"archive.ubuntu.com", "security.ubuntu.com", "deb.debian.org", // apt
+		// Apexes and test instances beside an admitted name.
+		"test.pypi.org", "test-files.pythonhosted.org", "pypi.python.org",
+		"npmjs.org", "www.npmjs.com", "registry.npmjs.com", "yarnpkg.com",
+		"golang.org",
+		// Siblings on a shared domain: raw. and objects. are open, these are not.
+		"gist.githubusercontent.com", "pkg-containers.githubusercontent.com",
+		// The alias a client is redirected away from, where the target is open.
+		"index.docker.io",
+		// apt is Ubuntu's alone, and not all of Ubuntu's.
+		"deb.debian.org", "ftp.debian.org", "cdn-aws.deb.debian.org",
+		"ports.ubuntu.com", "azure.archive.ubuntu.com", "esm.ubuntu.com",
+		"changelogs.ubuntu.com", "keyserver.ubuntu.com",
+		// Whole ecosystems whose neighbours are open.
+		"api.nuget.org", "pub.dev", "hex.pm", "cdn.cocoapods.org", "deno.land",
+		"cran.r-project.org", "metacpan.org", "dl-cdn.alpinelinux.org",
+		"conda.anaconda.org", "clojars.org", "search.maven.org", "oss.sonatype.org",
+		"cdn.jsdelivr.net", "unpkg.com", "sourceforge.net",
 	} {
 		if got := p.admit(host, "443"); got != admitNone {
-			t.Errorf("admit(%q) = %v, but no recording sizes it — the flag must fail closed on it (#594)", host, got)
+			t.Errorf("admit(%q) = %v, but the recording saw it refused — the flag must fail closed on it (#594)", host, got)
 		}
 	}
 }
