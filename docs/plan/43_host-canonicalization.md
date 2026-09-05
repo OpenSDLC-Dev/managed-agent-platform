@@ -1,5 +1,5 @@
 ---
-status: in-progress
+status: archived
 issue: "#609"
 ---
 
@@ -37,13 +37,20 @@ v0.57.0 and the pinned SDK v1.70.1, not reasoned about.
 The ASCII fold gets row 1 right and rows 2–5 wrong. A-label comparison gets all
 six right.
 
-### A-label comparison is injective on registrable names
+### No two code points merge, and the conversion is stable on its own output
 
 Every one of the 1,112,064 Unicode code points was swept through
 `idna.Lookup.ToASCII("a"+cp+"z.example")`; the 140,873 distinct A-labels
 produced were fed back through. **Zero** moved, and **zero** collided with
 another A-label. Every merge the sweep found is a UTS46 equivalence class — one
-name, several spellings. So canonicalizing cannot introduce a leak.
+name, several spellings.
+
+That is the claim, and it is narrower than "injective". One code point sits in
+one label position, and each output is fed back once, so what the sweep answers
+is the question the orbits above raise — whether two code points can be brought
+together — and not whether two arbitrary multi-code-point names can be. It also
+says nothing about registrability: `idna.Lookup` verifies neither DNS lengths nor
+that anyone could register what it returns.
 
 Four of those A-labels — the ones made from U+2135–U+2138 — *error* on the way
 back rather than returning cleanly. The string they return is the string they
@@ -221,16 +228,39 @@ true of the callers that only ever wanted the lookup form.
   entry `example.com..`, whose last label is empty, into the live key
   `example.com`. And dropping the conversion after the cut breaks a Unicode
   wildcard outright. A named row fails for each of the two mistakes.
-- **`Match`: canonicalize the whole host, then run `hasEmptyLabel` on the
-  canonical value, not the raw one.** IDNA maps U+3002, U+FF0E and U+FF61 to
-  `.`, so it *creates* label boundaries: `。example.com` canonicalizes to
-  `.example.com`, which would then satisfy `HasSuffix(host, ".example.com")` and
-  slip past the `*.example.com` boundary that `Match`'s doc comment exists to
-  guard.
+- **`Match`: refuse a host over the cap, then canonicalize the whole of what is
+  left and run `hasEmptyLabel` on the canonical value, not the raw one.** IDNA
+  maps U+3002, U+FF0E and U+FF61 to `.`, so it *creates* label boundaries:
+  `。example.com` canonicalizes to `.example.com`, which would then satisfy
+  `HasSuffix(host, ".example.com")` and slip past the `*.example.com` boundary
+  that `Match`'s doc comment exists to guard.
+
+  The refusal above the cap is not a cost guard but the same rule again, and it
+  was missing until the review found it. Above the cap nothing is converted, so
+  the comparison ran on raw bytes — and raw bytes carry a label that is empty
+  only after UTS46 deletes what fills it. Measured: 507 SOFT HYPHENs before
+  `.example.com` is 1026 bytes, carries no ASCII empty label, and matched
+  `*.example.com`, while the same host seven soft hyphens long is refused. Since
+  no host a request can resolve is written that long — an A-label holds 253
+  bytes — refusing outright is both the fail-closed answer and the one the cap's
+  own comment had been promising.
+- **The trim belongs to the whole entry, and the de-rooting stops at the zone.**
+  Both are `canonicalDeRooted`, the lookup form without the trim.
+  `CanonicalLookup` trims and then calls it; `NewHostSet` and `CoversEntry` trim
+  the entry once and call it on the halves. Trimming below the `*.` cut instead
+  lands *inside* the entry: measured, `*. example.com` became a live wildcard
+  over `example.com` where it used to key ` example.com` and match nothing. And
+  the de-rooting splits at `%` the way `CanonicalHost` does, because the dot it
+  removes belongs to the name — otherwise `fe80::1%eth0.` and `fe80::1%eth0`
+  become one interface.
 - **`vaultresolve.lowerHost` and `mcp.sameHost`** delegate to it, keeping their
-  own extra normalization (the empty-port trim, the exact zone comparison) around
-  it. Both split the zone identifier off before calling, so a scoped address's
-  `%eth0` is compared exactly and only the address half is canonicalized.
+  own extra normalization — the empty-port trim, the port split — around it.
+  Neither splits the zone identifier itself, though both did at first: review
+  showed the split was the function they were wrapping. `CanonicalHost` splits at
+  the first `%` and appends the remainder byte for byte, and `canonicalName`
+  cannot emit a `%`, so the first `%` of the result is exactly that boundary and
+  comparing the whole strings says what comparing the halves would. Three copies
+  of the zone rule became one.
 - **`endpointKey`, in both spellings** (`internal/gate/policy.go` and
   `internal/api/gateconfig.go`), moves with them, and the two spellings are not
   the same kind of change. The gate's is **observable**: `policy.admit` hands it
@@ -276,6 +306,14 @@ none of them with an error. The dial takes the canonical
 name. The CONNECT tunnel is opaque and the client inside it sends its own SNI, so
 nothing above the socket observes the change; and without it the widening is a
 false promise, since `net.Dialer` on a raw U-label answers "no such host".
+
+The substitution declines one authority, and review is how that was found. UTS46
+deletes the ignorable code points outright, so an authority written as a single
+SOFT HYPHEN canonicalizes to the empty string, and `net.JoinHostPort("", "443")`
+is `":443"` — which Go's resolver reads as the *unspecified* address, a
+destination the policy never admitted and, on the gate's own host, a local
+service. An empty canonical name therefore leaves the authority as written, which
+fails to resolve exactly as it did before there was a canonical dial at all.
 
 ## What this costs, stated plainly
 
@@ -334,10 +372,13 @@ Three, all INFERRED, in `docs/DIVERGENCES.md`:
 `make verify` green; the shared helper and every call site covered by mutation
 tests that each fail for the row that names them — one per rule above, including
 the conversion after the wildcard cut, the post-canonicalization empty-label
-check, the discarded error on the mangling input, the lowercasing fast path, the
-length cap in both directions, the zone identifier, and the canonical dial; the
-three divergences registered; a `changelog.d/` fragment; and the verifier plus
-both reviewers run per the repository's ritual.
+check, the refusal above the cap, the trim that stays above the cut, the
+de-rooting that stops at the zone, the discarded error on the mangling input, the
+lowercasing fast path, the length cap in both directions, the zone identifier,
+and the canonical dial; the three divergences registered; a `changelog.d/`
+fragment; and the verifier plus both reviewers run per the repository's ritual.
+
+Thirty-three mutants across the two suites, thirty-one killed.
 
 Two mutants survive, and each is stated rather than hidden. Dropping
 `NewHostSet`'s empty-label check removes only keys that could never have matched,

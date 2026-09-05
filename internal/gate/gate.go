@@ -300,9 +300,16 @@ func (g *Gate) handleConnect(w http.ResponseWriter, r *http.Request) {
 	// an address more malformed than the one the sandbox wrote, and the dial
 	// error and the address floor would both then report that instead. It goes
 	// out as written, and fails as it does today.
+	// An empty canonical name is the other authority the substitution has to
+	// decline. UTS46 deletes the ignorable code points outright, so an authority
+	// written as one SOFT HYPHEN canonicalizes to "", and JoinHostPort("", port)
+	// is ":port" — an address Go's resolver reads as the unspecified one, which
+	// is a destination the policy never admitted and, on this host, a local
+	// service. The authority goes out as written instead, and fails to resolve
+	// as it did before there was a canonical dial at all.
 	dialAddr := target
-	if port != "" {
-		dialAddr = net.JoinHostPort(egress.CanonicalHost(host), port)
+	if canonical := egress.CanonicalHost(host); port != "" && canonical != "" {
+		dialAddr = net.JoinHostPort(canonical, port)
 	}
 	upstream, err := g.dial(ctx, "tcp", dialAddr)
 	if err != nil {

@@ -216,6 +216,13 @@ func mcpEndpoint(raw string) (string, bool) {
 	// A declaration this platform would refuse to dial is not a promise of reach
 	// either: admitting its host would hand the sandbox a host the flag never
 	// named.
+	//
+	// One consequence is worth naming rather than leaving to be rediscovered.
+	// The grammar below refuses a non-ASCII host, so a server declared as a
+	// U-label never enters the set, while every allowed_hosts list accepts one
+	// and stores its A-label (plan 43). Widening what the *gate admits* is a
+	// different decision from validating an operator's list, so this stays as it
+	// was; #614 tracks it.
 	u, err := url.Parse(raw)
 	if err != nil || (u.Scheme != "http" && u.Scheme != "https") {
 		return "", false

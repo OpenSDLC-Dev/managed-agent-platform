@@ -1113,11 +1113,9 @@ func withBearer(client *http.Client, token string, endpoint *url.URL) *http.Clie
 // which is why the zone is split off rather than folded with the rest.
 //
 // The name comparison is egress.CanonicalHost, shared with internal/egress and
-// internal/vaultresolve (#609, plan 43). Case folding is not what makes two
-// hostnames one name — folding by Unicode merges the two Greek sigmas, which
-// IDNA punycodes to two registrable names, and folding by ASCII separates
-// "Ä.example" from "ä.example", which IDNA calls one. That helper argues the
-// whole rule; what this function adds around it is the port and the zone.
+// internal/vaultresolve (#609, plan 43). Case folding is not the answer in
+// either direction, and that helper argues the whole rule rather than having it
+// restated here; what this function adds around it is the port and the zone.
 //
 // An empty port is dropped from both sides first, because net/http drops it
 // from the request: http.NewRequest normalizes "host:" to "host", so an
@@ -1132,20 +1130,20 @@ func withBearer(client *http.Client, token string, endpoint *url.URL) *http.Clie
 // url.Hostname hands the dialler. Both sides reach here through url.Parse, and
 // it produces only the bracketed spelling for a literal, so the strip makes this
 // agree with what net/http dials rather than widening what counts as one origin.
+//
+// One comparison covers a scoped address too, without a branch for it.
+// CanonicalHost splits at the first "%" and appends the zone byte for byte, and
+// canonicalName cannot emit a "%" — it folds bytes or returns punycode — so the
+// first "%" of the result is exactly that boundary. Comparing the two whole
+// strings therefore says what comparing address and zone separately would, and
+// it says it in one place rather than three.
 func sameHost(a, b string) bool {
 	ah, ap := splitPort(trimEmptyPort(a))
 	bh, bp := splitPort(trimEmptyPort(b))
 	if ap != bp {
 		return false
 	}
-	az, bz := strings.IndexByte(ah, '%'), strings.IndexByte(bh, '%')
-	if az < 0 && bz < 0 {
-		return egress.CanonicalHost(ah) == egress.CanonicalHost(bh)
-	}
-	if az < 0 || bz < 0 {
-		return false
-	}
-	return egress.CanonicalHost(ah[:az]) == egress.CanonicalHost(bh[:bz]) && ah[az:] == bh[bz:]
+	return egress.CanonicalHost(ah) == egress.CanonicalHost(bh)
 }
 
 // splitPort separates an authority's port from its host, leaving a host that

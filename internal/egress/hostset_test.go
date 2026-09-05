@@ -207,6 +207,92 @@ func TestARootedSpellingIsTheSameHost(t *testing.T) {
 	}
 }
 
+// A host over the cost cap is refused, not compared. The raw bytes reach the
+// suffix test otherwise, and they can carry a label that is empty only after
+// UTS46 deletes what fills it — so the over-cap spelling of a host matched a
+// wildcard that the same host, short enough to convert, is refused by.
+func TestAnOverCapHostIsRefusedRatherThanComparedRaw(t *testing.T) {
+	set := egress.NewHostSet([]string{"*.example.com", "example.com"})
+	// 507 SOFT HYPHENs is 1014 bytes, so this host is 1026 — over the cap, and
+	// ".example.com" once UTS46 has deleted every one of them.
+	sneaky := strings.Repeat("\u00ad", 507) + ".example.com"
+	if len(sneaky) <= 1024 {
+		t.Fatalf("fixture is %d bytes; it has to be over the cap to drive this", len(sneaky))
+	}
+	if set.Match(sneaky) {
+		t.Error("an over-cap host whose canonical form is \".example.com\" matched *.example.com")
+	}
+	// The same shape under the cap, for the contrast that makes the row mean
+	// something: it is refused by the empty-label check after conversion.
+	if set.Match(strings.Repeat("\u00ad", 7) + ".example.com") {
+		t.Error("a convertible host whose canonical form carries an empty label matched")
+	}
+	// And an over-cap host that is a perfectly good name is refused too, which
+	// is the cost of the rule and is stated rather than hidden.
+	if set.Match(strings.Repeat("\u00e4", 600) + ".example.com") {
+		t.Error("an over-cap host matched by its raw bytes; the cap refuses a lookup")
+	}
+}
+
+// The trim belongs to the whole entry, before the "*." comes off. Trimming the
+// remainder instead lands inside the entry and turns a malformed wildcard into a
+// live one over the domain it names.
+func TestAWildcardPrefixIsNotTrimmedIntoTheName(t *testing.T) {
+	for _, e := range []string{"*. example.com", "*.\texample.com", "*. example.com "} {
+		if egress.NewHostSet([]string{e}).Match("a.example.com") {
+			t.Errorf("the entry %q became a live wildcard over example.com", e)
+		}
+	}
+}
+
+// De-rooting belongs to the name half. A zone identifier names a local
+// interface, and two zones that differ only in a trailing dot are two
+// interfaces — so the dot CanonicalLookup strips is never taken from one.
+func TestDeRootingNeverReachesIntoAZoneIdentifier(t *testing.T) {
+	for _, tc := range []struct{ in, want string }{
+		{"fe80::1%eth0.", "fe80::1%eth0."},
+		{"fe80::1%eth0", "fe80::1%eth0"},
+		{"example.com.%eth0", "example.com%eth0"},
+	} {
+		if got := egress.CanonicalLookup(tc.in); got != tc.want {
+			t.Errorf("CanonicalLookup(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+}
+
+// The cap is measured on the string that gets converted, so the write side and
+// the matcher agree about which entries are too long. Measured on the entry as a
+// whole instead, the two were a "*." apart: a 1025-byte wildcard entry was
+// refused here while NewHostSet converted its 1023-byte remainder.
+func TestTheEntryCapIsMeasuredOnWhatIsConverted(t *testing.T) {
+	// 506 SOFT HYPHENs is 1012 bytes; with "example.com" the remainder is 1023
+	// and the whole entry 1025.
+	rest := strings.Repeat("\u00ad", 506) + "example.com"
+	entry := "*." + rest
+	if len(rest) > 1024 || len(entry) <= 1024 {
+		t.Fatalf("fixture straddles the wrong boundary: rest %d, entry %d", len(rest), len(entry))
+	}
+	got, err := egress.CanonicalEntry(entry)
+	if err != nil {
+		t.Fatalf("CanonicalEntry(%d-byte wildcard) = %v; its remainder is under the cap", len(entry), err)
+	}
+	if got != "*.example.com" {
+		t.Errorf("CanonicalEntry stored %q, want %q", got, "*.example.com")
+	}
+}
+
+// The ASCII branch is broader than conversion, and that is deliberate rather
+// than incidental: ToASCII rewrites a label of "xn--" with an empty payload into
+// nothing, so converting would turn this host into ".example.com" and the dial
+// would leave for a name the sandbox did not write. Keeping the raw form means
+// the host stays matchable, which is the compatibility net/http's own branch
+// keeps too. The row exists so the breadth is pinned rather than assumed.
+func TestAnEmptyPunycodePayloadStaysMatchable(t *testing.T) {
+	if !egress.NewHostSet([]string{"*.example.com"}).Match("xn--.example.com") {
+		t.Error("xn--.example.com stopped matching *.example.com; the ASCII branch is what keeps it")
+	}
+}
+
 // Two spellings of one name are one host. Each pair here is a single domain
 // after IDNA and was two under the ASCII fold this replaces, so each is a
 // credential the platform used to withhold from the server it was resolved for.
@@ -367,9 +453,9 @@ func TestCanonicalEntryStoresOneSpellingPerHost(t *testing.T) {
 	}
 }
 
-// A host longer than any name can encode to is folded and left alone: a sandbox
-// writes the CONNECT authority itself, and canonicalizing a megabyte of U-labels
-// costs orders of magnitude more than folding it.
+// A host over the cost cap is folded and left alone: a sandbox writes the CONNECT
+// authority itself, and canonicalizing one costs about ten times what folding it
+// does (22.6ms against 2.1ms, measured in plan 43).
 func TestCanonicalHostLeavesAnOverlongNameToTheFold(t *testing.T) {
 	long := strings.Repeat("\u00e4", 600) + ".EXAMPLE"
 	want := strings.Repeat("\u00e4", 600) + ".example"
@@ -406,11 +492,22 @@ func TestTheCostCapDoesNotRefuseANameThatResolves(t *testing.T) {
 	}
 }
 
-// Above the cap nothing is converted — and the empty-label check still has to
-// hold, because IDNA's three full stops are label separators whether or not the
-// conversion ran. Measured: a 287-byte host led by U+3002 carried no ASCII empty
-// label and walked through the wildcard's boundary.
+// When the conversion does not run, the empty-label check still has to hold,
+// because IDNA's three full stops are label separators whether or not it ran.
+// The live case is a host the conversion *refuses*: measured,
+// idna.Lookup.ToASCII errors on "\u3002-bad-.example.com" for the hyphens
+// bracketing its second label, so CanonicalHost hands back the fold with U+3002
+// intact — a string whose first label is empty to IDNA and non-empty to
+// strings.Split, and which ends in ".example.com" either way.
 func TestAnOverlongHostCannotWalkThroughAWildcardBoundary(t *testing.T) {
+	for _, h := range []string{
+		"\u3002-bad-.example.com", "\uff0e-bad-.example.com", "\uff61-bad-.example.com",
+		"\u3002_x.example.com",
+	} {
+		if egress.NewHostSet([]string{"*.example.com"}).Match(h) {
+			t.Errorf("%q matched *.example.com; its first label is empty to IDNA", h)
+		}
+	}
 	label := strings.Repeat("\u00e4", 200)
 	long := "\u3002" + strings.Join([]string{label, label, label}, ".") + ".example.com"
 	if len(long) <= 1024 {

@@ -98,21 +98,14 @@ func normalizeMCPURL(raw string) (string, bool) {
 //
 // The zone identifier is left as written for the same reason internal/mcp's
 // sameHost leaves it: it is locally significant and may distinguish two
-// interfaces that differ only in case.
+// interfaces that differ only in case. CanonicalHost does that itself — it splits
+// at the first "%" and appends the remainder byte for byte — so nothing here
+// repeats the split.
 func lowerHost(host string) string {
 	if h, p, err := net.SplitHostPort(host); err == nil {
-		return net.JoinHostPort(canonicalAddr(h), p)
+		return net.JoinHostPort(egress.CanonicalHost(h), p)
 	}
-	return canonicalAddr(host)
-}
-
-// canonicalAddr canonicalizes a bare host, holding a scoped address's zone
-// identifier out of it.
-func canonicalAddr(h string) string {
-	if i := strings.IndexByte(h, '%'); i >= 0 {
-		return egress.CanonicalHost(h[:i]) + h[i:]
-	}
-	return egress.CanonicalHost(h)
+	return egress.CanonicalHost(host)
 }
 
 // matchesMCPServer reports whether a credential registered for credURL is the

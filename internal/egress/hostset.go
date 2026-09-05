@@ -42,25 +42,31 @@ type HostSet struct {
 
 // NewHostSet builds a matcher from allowed_hosts entries. Entries are assumed to
 // have passed CanonicalEntry below. One that did not is not rejected here — it
-// is keyed as it canonicalizes, and what that costs depends on the entry:
-// "https://x.com" matches nothing, "x.com:443" matches only a request host
-// spelled with a colon in it, which is a host no request reaching here can be —
-// while "::1" and "_acme.example.com" match themselves exactly. A nil or empty list
+// is keyed as it canonicalizes, and what that costs depends on the entry. Every
+// one of them matches exactly the string it was written as and nothing else, so
+// the question is whether a request host can ever be that string:
+// "https://x.com" and "x.com:443" cannot be — net/http parses neither into a
+// host — while "::1" and "_acme.example.com" can, and match. A nil or empty list
 // matches nothing.
 func NewHostSet(entries []string) *HostSet {
 	s := &HostSet{exact: make(map[string]struct{}, len(entries))}
 	for _, e := range entries {
-		// Trim first, so the prefix is visible, then CanonicalLookup on the
-		// remainder once the "*." is off. Running the lookup form before the cut
-		// as well is not redundant but wrong, and only measurement separates the
-		// two halves of why. Converting alone would be harmless — an asterisk is
-		// a rune idna refuses, so the error fallback returns the same folded
-		// string — but CanonicalLookup also de-roots, and de-rooting does not
-		// survive being repeated: it takes one trailing dot off per pass, so a
-		// second pass turns the entry "example.com.." — whose last label is
-		// empty — into the live key "example.com". Converting *after* the cut is
-		// what makes a Unicode wildcard work at all. Mutation testing sorted the
-		// three apart.
+		// The entry is trimmed once, here, and canonicalDeRooted is what runs
+		// on the halves — not CanonicalLookup, which would trim again. That
+		// second trim is not harmless: it lands *inside* the entry, so
+		// "*. example.com" would key the live suffix "example.com" where it
+		// used to key " example.com" and match nothing. Measured, and the
+		// reason the trim cannot live below the cut.
+		//
+		// Running the whole lookup form before the cut as well is wrong for a
+		// second reason, and only measurement separates the two. Converting
+		// early would be harmless — an asterisk is a rune idna refuses, so the
+		// error fallback returns the same folded string — but de-rooting does
+		// not survive being repeated: it takes one trailing dot off per pass,
+		// so a second pass turns the entry "example.com.." — whose last label
+		// is empty — into the live key "example.com". Converting *after* the
+		// cut is what makes a Unicode wildcard work at all. Mutation testing
+		// sorted the three apart.
 		e = strings.TrimSpace(e)
 		if rest, ok := strings.CutPrefix(e, "*."); ok {
 			// Judged after canonicalization for the reason Match's is: IDNA
@@ -69,12 +75,12 @@ func NewHostSet(entries []string) *HostSet {
 			// match — Match refuses an empty label on the request side first —
 			// so dropping it changes no answer. It keeps a dead key out of the
 			// set rather than leaving the other side to make it harmless.
-			if rest = CanonicalLookup(rest); rest != "" && !hasEmptyLabel(rest) {
+			if rest = canonicalDeRooted(rest); rest != "" && !hasEmptyLabel(rest) {
 				s.suffixes = append(s.suffixes, rest)
 			}
 			continue
 		}
-		if e = CanonicalLookup(e); e != "" && !hasEmptyLabel(e) {
+		if e = canonicalDeRooted(e); e != "" && !hasEmptyLabel(e) {
 			s.exact[e] = struct{}{}
 		}
 	}
@@ -89,6 +95,17 @@ func NewHostSet(entries []string) *HostSet {
 // A nil set (a credential resolved without a host list) matches nothing.
 func (s *HostSet) Match(host string) bool {
 	if s == nil {
+		return false
+	}
+	// A host over the cost cap is refused rather than compared. CanonicalHost
+	// hands back the raw bytes for one, and raw bytes can carry a label that is
+	// empty only after UTS46 deletes what fills it: measured, 507 SOFT HYPHENs
+	// before ".example.com" is 1026 bytes, carries no ASCII empty label, and
+	// satisfies the "*.example.com" suffix test that the same host seven soft
+	// hyphens long is refused by. Refusing is what the cap's own comment
+	// promises for a lookup, and no host a request can resolve is written this
+	// long — the A-label of a resolvable name holds 253 bytes.
+	if len(host) > maxCanonicalHost {
 		return false
 	}
 	// Judged on the canonical form, not the written one: IDNA maps U+3002,
@@ -129,7 +146,7 @@ func (s *HostSet) CoversEntry(entry string) bool {
 	}
 	entry = strings.TrimSpace(entry)
 	if rest, ok := strings.CutPrefix(entry, "*."); ok {
-		rest = CanonicalLookup(rest)
+		rest = canonicalDeRooted(rest)
 		if rest == "" || hasEmptyLabel(rest) {
 			return false
 		}
@@ -162,17 +179,33 @@ func (s *HostSet) CoversEntry(entry string) bool {
 // staying an exact-match map. Two names for one comparison is how those two
 // drift apart.
 //
-// It trims and de-roots where CanonicalHost does neither, and it inherits that
-// function's handling of a scoped address: the zone identifier is left byte for
-// byte, because it names a local interface and is case-sensitive. Folding it —
-// which the fold-then-trim helper this replaced did — called two interfaces one,
-// and #609 recorded that as unaddressed; it is addressed now, on the admission
-// side as well as at the dial. internal/vaultresolve's lowerHost and
-// internal/mcp's sameHost do not use this function at all: they keep their own
-// normalization around CanonicalHost, because a trailing dot there is a
-// difference that withholds a token rather than sends it.
+// It trims and de-roots where CanonicalHost does neither, and like that
+// function it leaves a scoped address's zone identifier byte for byte, because
+// the zone names a local interface and is case-sensitive. Folding it — which the
+// fold-then-trim helper this replaced did — called two interfaces one, and #609
+// recorded that as unaddressed; it is addressed now, on the admission side as
+// well as at the dial. internal/vaultresolve's lowerHost and internal/mcp's
+// sameHost do not use this function at all: they keep their own normalization
+// around CanonicalHost, because a trailing dot there is a difference that
+// withholds a token rather than sends it.
 func CanonicalLookup(h string) string {
-	return strings.TrimSuffix(CanonicalHost(strings.TrimSpace(h)), ".")
+	return canonicalDeRooted(strings.TrimSpace(h))
+}
+
+// canonicalDeRooted is CanonicalLookup without the trim, for the callers that
+// have already trimmed and must not trim again — NewHostSet and CoversEntry,
+// which trim the whole entry before cutting a "*." off it, and where trimming
+// the remainder instead would turn "*. example.com" into a live wildcard.
+//
+// It repeats CanonicalHost's split rather than wrapping it, because the dot it
+// removes belongs to the name: TrimSuffix over the whole string would take a dot
+// off a zone identifier, and two zones that differ only in a trailing dot are two
+// interfaces.
+func canonicalDeRooted(h string) string {
+	if i := strings.IndexByte(h, '%'); i >= 0 {
+		return strings.TrimSuffix(canonicalName(h[:i]), ".") + h[i:]
+	}
+	return strings.TrimSuffix(canonicalName(h), ".")
 }
 
 // foldASCII lowercases the ASCII letters of h and copies every other byte. No
@@ -208,8 +241,15 @@ func foldASCII(h string) string {
 // cover is deletion: UTS46 *removes* the ignorable code points outright, so an
 // input of any length at all can map to a short name. Measured, 10,000 SOFT
 // HYPHENs before "example.com" canonicalize to "example.com", and this cap
-// refuses to find that out. Above it the fold is returned instead, which is
-// fail-closed for a lookup and, in CanonicalEntry, a refusal.
+// refuses to find that out.
+//
+// So each caller above the cap has to say what it does with a host it cannot
+// convert, and each says the fail-closed thing. CanonicalHost returns the fold,
+// which is what the dial wants: the authority goes out as the sandbox wrote it.
+// CanonicalEntry refuses. HostSet.Match refuses too, and separately, because
+// comparing the raw bytes is not fail-closed — a label that UTS46 would empty
+// out is not empty as written, and the raw form walked a wildcard boundary the
+// converted one is refused at.
 //
 // What the number must not be is small. A 255-byte cap was measurably wrong:
 // three 45-rune "ä" labels are 284 bytes of UTF-8 and a 167-byte A-label, an
@@ -228,10 +268,14 @@ const maxCanonicalHost = 1024
 // far more than #611 claimed: it separates every orbit EqualFold merged that
 // IDNA also collapses, so "Ä.example" and "ä.example" are called two hosts when
 // they are one ("xn--4ca.example" either way), and so are "Д"/"д", U+212A and
-// "k", U+017F and "s". Comparing A-labels gets both directions right, and it is
-// injective on registrable names: sweeping all 1,112,064 code points through
-// idna.Lookup.ToASCII produced 140,873 distinct A-labels, none of which moved or
-// collided when fed back.
+// "k", U+017F and "s". Comparing A-labels gets both directions right. The sweep
+// behind that: all 1,112,064 code points through idna.Lookup.ToASCII produced
+// 140,873 distinct A-labels, none of which moved or collided when fed back. Read
+// it for what it is — one code point per label, fed back once. It shows no two
+// code points merge and that the conversion is stable on its own output, which is
+// what the orbits above needed answering; it is not a proof over arbitrary
+// multi-code-point names, and idna.Lookup checks neither DNS lengths nor whether
+// anyone could register the result.
 //
 // What it must not do is rewrite strings that are not names. The Lookup profile
 // validates, and it refuses shapes this platform accepts today: ":" and "["
@@ -260,11 +304,16 @@ const maxCanonicalHost = 1024
 // idna unchanged or is refused by it. One family does neither: a label of "xn--"
 // whose punycode payload is empty is REWRITTEN, and no error is returned.
 // Measured, ToASCII answers "xn--.example" with (".example", nil) and "a.xn--.z"
-// with ("a..z", nil). Without this branch a malformed A-label would become a
-// string carrying an empty label, which is the one shape Match exists to keep
-// away from a wildcard's boundary. net/http has the same branch, but its one
-// does not case-fold, so copying the function rather than the shape would undo
-// the fold #611 landed. Plan 43 argues the whole design.
+// with ("a..z", nil). What the branch protects is the destination: the gate dials
+// this function's answer, so without it a CONNECT to "xn--.example" would leave
+// for ".example" — a name the sandbox never wrote. Be exact about the direction,
+// because the guard reads like a matcher rule and is not one. Relative to
+// converting, keeping the raw form is *broader*: the converted string carries an
+// empty label and Match would refuse it, while the raw one reaches the suffix
+// test, so "xn--.example.com" does match "*.example.com" here. That is the
+// compatibility net/http keeps too — its idnaASCII has the same branch, though
+// its one does not case-fold, so copying the function rather than the shape would
+// undo the fold #611 landed. Plan 43 argues the whole design.
 //
 // A scoped address keeps its zone identifier byte for byte. The zone names a
 // local interface, it is case-sensitive, and folding it would call two
@@ -303,10 +352,12 @@ func canonicalName(h string) string {
 }
 
 // CanonicalEntry validates one allowed_hosts entry and returns the form to
-// store. An entry written as a Unicode name is stored as its A-label, so the
-// stored list holds one spelling per host and a later comparison needs no
-// conversion; an ASCII entry is returned exactly as written, because rewriting
-// those would change what every existing environment reads back for no gain.
+// store. An entry written as a Unicode name is stored as its A-label, so a later
+// comparison needs no conversion; an ASCII entry is returned exactly as written,
+// case included, because rewriting those would change what every existing
+// environment reads back for no gain. The store therefore holds one *alphabet*
+// per host, not one spelling — "API.example" and "api.example" are both kept as
+// typed, and it is the matcher that folds them into one host.
 //
 // The wildcard prefix is cut before conversion and restored after, because an
 // asterisk is a rune IDNA refuses — which is also why CanonicalHost cannot be
@@ -331,10 +382,15 @@ func canonicalName(h string) string {
 func CanonicalEntry(h string) (string, error) {
 	e := h
 	if !isASCII(e) {
-		if len(e) > maxCanonicalHost {
-			return "", fmt.Errorf("allowed_hosts entry %q is longer than a hostname can be", h)
-		}
+		// The cap is measured on the string that gets converted, which is the
+		// remainder after the "*." cut — the same string NewHostSet converts.
+		// Measuring it on the whole entry instead put the two sides a prefix
+		// apart: a 1025-byte wildcard entry was refused here while NewHostSet
+		// converted its 1023-byte remainder and installed a live wildcard.
 		rest, wildcard := strings.CutPrefix(e, "*.")
+		if len(rest) > maxCanonicalHost {
+			return "", fmt.Errorf("allowed_hosts entry %q is too long to canonicalize", h)
+		}
 		a, err := idna.Lookup.ToASCII(rest)
 		if err != nil {
 			return "", fmt.Errorf("allowed_hosts entry %q is not a hostname: %w", h, err)
@@ -388,7 +444,17 @@ var idnaFullStops = strings.NewReplacer("\u3002", ".", "\uff0e", ".", "\uff61", 
 // a trailing dot (beyond the one CanonicalLookup strips), or a ".." run. Such a
 // string is not a valid hostname and must not match, least of all a wildcard.
 func hasEmptyLabel(host string) bool {
-	for _, label := range strings.Split(idnaFullStops.Replace(host), ".") {
+	// The three are all non-ASCII, so an ASCII host cannot hold one and the
+	// replacer has nothing to do — and it is not free: strings.Replacer builds a
+	// fresh buffer and string on every call it is given, never returning its
+	// input. Measured on an exact match, which is the gate's per-request path:
+	// 92.71 ns/op and 4 allocations without this guard, 54.42 and 1 with it.
+	// After a successful conversion the host is always ASCII, so what remains is
+	// exactly the case that needs it — a host CanonicalHost declined to convert.
+	if !isASCII(host) {
+		host = idnaFullStops.Replace(host)
+	}
+	for _, label := range strings.Split(host, ".") {
 		if label == "" {
 			return true
 		}
@@ -401,11 +467,10 @@ func hasEmptyLabel(host string) bool {
 // wildcard on a hostname. It is the single source for the grammar — every
 // allowed_hosts writer reaches it through CanonicalEntry, and the executor's
 // WEBTOOL_ALLOWED_DOMAINS fails startup on the first bad entry, because an
-// out-of-grammar entry matches only the literal string it was written as: a URL
-// matches nothing, and a "host:port" matches only a request host spelled with a
-// colon in it, which every path into the matcher rejects first — net/http will
-// not parse such an authority — so a typo reads as the operator's fence when it
-// is really a hole in it.
+// out-of-grammar entry matches exactly the string it was written as and nothing
+// else, and no request host can be that string — net/http parses neither a URL
+// nor a bracketed authority carrying a colon into a host — so a typo reads as the
+// operator's fence when it is really a hole in it.
 func ValidateHostEntry(h string) error { return validateHostEntry(h, h) }
 
 // validateHostEntry is ValidateHostEntry with the spelling to report split from

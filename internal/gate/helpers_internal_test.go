@@ -646,7 +646,10 @@ func TestConnectDialsTheNameItAdmitted(t *testing.T) {
 		Type: domain.NetLimited,
 		// The scoped entries carry the zone exactly as the request spells it:
 		// a zone names a local interface and is case-sensitive, so neither the
-		// admission nor the dial folds it.
+		// admission nor the dial folds it. They are a *stored* configuration,
+		// not one a create could write — CanonicalEntry refuses an entry holding
+		// a ":" — so what these rows pin is the path a row from before plan 43
+		// takes, which parseNetworking carries through unchanged.
 		AllowedHosts: []string{"xn--bcher-kva.example", "example.com",
 			"fe80::1%Eth0", "fe80::1%25Eth0"},
 	}})
@@ -691,6 +694,36 @@ func TestConnectDialsTheNameItAdmitted(t *testing.T) {
 				t.Errorf("CONNECT %s dialled %q, want %q", tc.authority, saw, tc.want)
 			}
 		})
+	}
+}
+
+// A CONNECT authority made only of code points UTS46 deletes canonicalizes to
+// the empty string, and net.JoinHostPort("", "443") is ":443" — an address Go's
+// resolver reads as the unspecified one, so the dial would leave for a
+// destination the policy never saw and, on this host, a local service. The
+// authority goes out as written instead, and fails to resolve as it did before
+// there was a canonical dial at all. Driven under `unrestricted`, the only
+// policy that admits such a host: `limited` refuses an empty canonical name at
+// the matcher.
+func TestAnAuthorityThatCanonicalizesAwayIsDialledAsWritten(t *testing.T) {
+	g := New(Config{Networking: domain.Networking{Type: domain.NetUnrestricted}})
+	var saw string
+	g.dial = rootedDial(func(_ context.Context, _, addr string) (net.Conn, error) {
+		saw = addr
+		return nil, errSpyDial
+	})
+
+	r := httptest.NewRequest(http.MethodGet, "http://example.com/", nil)
+	r.Method, r.Host = http.MethodConnect, "\u00ad:443"
+	w := httptest.NewRecorder()
+	g.handleConnect(w, r)
+
+	if w.Code != http.StatusBadGateway {
+		t.Fatalf("CONNECT answered %d, want %d — the request never reached the dial",
+			w.Code, http.StatusBadGateway)
+	}
+	if want := "\u00ad:443"; saw != want {
+		t.Errorf("dialled %q, want %q — an empty canonical host is the unspecified address", saw, want)
 	}
 }
 

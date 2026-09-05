@@ -49,6 +49,94 @@ new directory and in-repo citations re-pointed in the moving PR (plan
 
 ---
 
+## One host comparison, canonicalized (plan 43, #609) — archived 2026-09-06, delivered in one PR (#613)
+
+Three packages each carried a hand-rolled ASCII case fold to decide whether two
+hostnames named one host — `internal/egress`, `internal/vaultresolve` and
+`internal/mcp`. Case folding cannot answer that question in either direction: it
+separates `Ä.example` from `ä.example`, which IDNA calls one name, while folding
+by Unicode instead merges the two Greek sigmas, which `idna.Lookup` punycodes to
+`xn--4xa` and `xn--3xa` — two registrable names that can belong to two people.
+#611 closed the second direction and paid for it with the first. `CanonicalHost`
+closes both by comparing IDNA A-labels. The sweep behind it is narrower than
+"injective" and is stated that way: all 1,112,064 code points through
+`idna.Lookup.ToASCII("a"+cp+"z.example")` produced 140,873 distinct A-labels,
+none of which moved or collided when fed back — one code point per label, fed
+back once, which answers whether two code points can be brought together and not
+whether two arbitrary names can.
+
+Three facts about `golang.org/x/net/idna` shaped the code, each measured rather
+than assumed. `ToASCII` returns a **different real hostname** beside its error —
+`xn--pypi-.org` yields `("pypi.org", err)` — so the returned string is discarded
+whenever the error is non-nil, on the entry side and the lookup side alike.
+`ToASCII` **rewrites some all-ASCII input with no error at all** —
+`xn--.example` yields `(".example", nil)` — which is why the ASCII fast path is
+load-bearing: the gate dials this function's answer, so without the branch a
+CONNECT to `xn--.example` would leave for `.example`, a name the sandbox never
+wrote. And UTS46 both **creates** label boundaries (U+3002, U+FF0E, U+FF61 map
+onto `.`) and **deletes** code points outright (SOFT HYPHEN, ZWSP, variation
+selectors), so no byte length proves an input cannot name a resolvable host:
+10,000 soft hyphens before `example.com` canonicalize to `example.com`. The
+1024-byte cap is documented as a cost bound rather than a proof, and its floor is
+measured too — a 255-byte cap refused three 45-rune `ä` labels, an ordinary name
+whose A-label is 167 bytes.
+
+Four decisions were the repository owner's: compare A-labels rather than fold
+harder; validate an environment's `networking.allowed_hosts` at create and update
+rather than at read; leave stored rows unmigrated and unvalidated, checking only
+what a patch newly supplies so the ordinary read-modify-write is not a 400; and
+accept a U-label entry while storing its A-label on both lists, so an operator
+reads back punycode they did not type. The gate dials the canonical name rather
+than the authority the sandbox wrote, since admission and connection could
+otherwise name two different hosts.
+
+Two things landed that the plan had not scoped. Collapsing `NormalizeHost` into
+`CanonicalLookup` reordered the de-rooting to run *after* canonicalization — the
+old order could not see a trailing U+3002 and left an empty label the matcher
+then refused — and, because the lookup form delegates to `CanonicalHost`, an IPv6
+zone identifier stopped being folded at admission as well as at the dial, closing
+a gap the plan had listed as out of scope.
+
+Review-hardening record. Four rounds against three independent reviewers, and
+every finding was reproduced by measurement before it was acted on or refuted.
+The behavioural defects the last two rounds found are the ones worth recording,
+because each was invisible to the tests as written. A CONNECT authority made only
+of ignorable code points canonicalizes to the empty string, and
+`net.JoinHostPort("", "443")` is `":443"` — the unspecified address, a
+destination no policy admitted; the substitution now declines an empty canonical
+name. A host over the cost cap was compared as raw bytes, and raw bytes carry a
+label that is empty only after UTS46 deletes what fills it: 507 soft hyphens
+before `.example.com` walked a wildcard boundary that the same host, short enough
+to convert, is refused at; `Match` refuses above the cap now. Moving the trim
+inside the lookup form put it *below* the `*.` cut, so `*. example.com` became a
+live wildcard over `example.com`; the trim belongs to the whole entry, and a
+de-rooting helper without it serves the halves. The de-rooting itself reached
+into a zone identifier, contradicting the invariant beside it. And the entry
+side measured its cap on the whole entry while the matcher converts the
+remainder, so a 1025-byte wildcard was refused at write time and honoured from a
+stored row.
+
+Two claims of the implementer's own were falsified and retired rather than
+patched: that the ASCII fast path is output-equivalent, and that a mutant
+canonicalizing before the wildcard cut changes no output — de-rooting does not
+survive repetition, so it turns the entry `example.com..` into the live key
+`example.com`. A third, that a byte cap can prove an input cannot name a
+resolvable host, was falsified twice independently. Two reviewer findings were
+refuted by measurement and are recorded as refuted: a `host:port` entry does
+match exactly one request host, but no request can carry it (`http.ReadRequest`
+refuses the bracketed authority), and applying the cost cap to ASCII entries
+would add a rejection this API never had without bounding anything to a
+DNS-legal length.
+
+Verification: `make verify` green, total statement coverage above the 90% gate.
+Thirty-three mutants across two suites, each applied and reverted in a scratch
+copy, thirty-one killed by named rows. Two survive deliberately and are argued in
+the plan — `NewHostSet`'s empty-label guard removes only keys `Match` would
+refuse anyway, and the control plane's `endpointKey` is a genuine no-op because
+`ValidateHostEntry` runs two lines above it.
+
+---
+
 ## Environment packages installed into the sandbox (plan 40, #353, #576) — archived 2026-09-05, delivered in one PR (#600)
 
 `config.packages` had been accepted, validated, stored and echoed since the environment
