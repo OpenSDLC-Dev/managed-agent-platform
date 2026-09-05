@@ -155,8 +155,9 @@ import (
 // splitDomains parses the comma-separated WEBTOOL_ALLOWED_DOMAINS value. Empty
 // segments are dropped so a trailing comma cannot smuggle a match-nothing
 // entry, and every entry must pass the allowed-hosts grammar: an out-of-grammar
-// entry silently matches nothing (a typo would read as the operator's fence
-// when it is really a hole in it, or a deny-all), so it fails startup instead.
+// entry matches only the literal string it was written as, so a typo reads as
+// the operator's fence when it is really a hole in it — it fails startup
+// instead.
 //
 // It goes through the same front end the two API lists do, so this third
 // allowed-hosts list accepts a Unicode name and holds its A-label — otherwise an

@@ -292,11 +292,14 @@ func (g *Gate) handleConnect(w http.ResponseWriter, r *http.Request) {
 	// equivalent — net/http canonicalizes the address itself before the gate's
 	// dialer sees it.
 	//
-	// An authority SplitHostPort refused leaves port empty, and hostOnly hands
-	// back the whole string; rebuilding that would produce an address more
-	// malformed than the one the sandbox wrote, which the dial error and the
-	// address floor would then both report. It goes out as written, and fails
-	// as it does today.
+	// An empty port means the authority did not split into a host and a port,
+	// and both shapes that produce one reach here: "example.com:", which
+	// SplitHostPort accepts with an empty port, and "[::1]", which addrWithPort
+	// double-brackets into "[[::1]]:443" and SplitHostPort then refuses, leaving
+	// hostOnly holding the whole string. Rebuilding either would hand the dialer
+	// an address more malformed than the one the sandbox wrote, and the dial
+	// error and the address floor would both then report that instead. It goes
+	// out as written, and fails as it does today.
 	dialAddr := target
 	if port != "" {
 		dialAddr = net.JoinHostPort(egress.CanonicalHost(host), port)

@@ -70,7 +70,7 @@ plain-ASCII or IP shapes — not one is an IDN.
 `xn--paypal-.com` → `paypal.com` and `api.xn--corp-.internal` →
 `api.corp.internal`. An implementation that canonicalizes and drops the error
 makes a stored entry admit a domain nobody typed. `NewHostSet` and
-`NormalizeHost` have no error channel, which is exactly the shape that invites
+`CanonicalLookup` have no error channel, which is exactly the shape that invites
 this mistake.
 
 ### net/http does not do what #611's commit message says it does
@@ -132,23 +132,30 @@ Its rules, in order. Each exists because a measurement demanded it.
 
 1. **Fold to ASCII lowercase first, and do nothing else to the string.**
    `CanonicalHost` does not trim whitespace and does not strip a trailing dot:
-   that is `NormalizeHost`'s job, and a caller composes the two when it wants
-   both. `internal/mcp` is why — it treats a trailing dot as a deliberate
+   that is `CanonicalLookup`'s job, which wraps it for the callers wanting both.
+   `internal/mcp` is why — it treats a trailing dot as a deliberate
    fail-closed difference ("drop the token rather than send it"), so de-rooting
    inside the canonicalizer would silently widen the one path that sends a
    bearer token. The fold must lowercase: `net/http`'s equivalent does not, and
    copying the function rather than the shape would undo #611.
 2. **Cap the length, at 1024 bytes.** A host over the cap is returned folded,
-   uncanonicalized, and an *entry* over it is refused. A sandbox writes the
+   uncanonicalized, and a *Unicode entry* over it is refused — an ASCII one needs
+   no arm, since neither side converts it and both fold it, so they still meet.
+   A sandbox writes the
    CONNECT authority and `net/http` bounds it only by `MaxHeaderBytes`; a 1 MB
    U-label authority costs 22.6 ms through IDNA against 2.1 ms through the fold.
-   The number is four — UTF-8's widest code point — times the 253 bytes a
-   resolvable name's A-label holds, because punycode emits at least one byte per
-   input code point. A cap at 255 would have been wrong, and measurably: three
-   45-rune `ä` labels are 284 bytes of UTF-8 and a 167-byte A-label, a name that
-   resolves. Above the cap the empty-label check still has to hold on its own,
+   It is a cost bound, not a proof. 4 × 253 is 1012 — UTF-8's widest code point
+   against the bytes an A-label holds — which covers every input whose code
+   points survive UTS46 one for one, and 1024 rounds it up; but UTS46 *deletes*
+   the ignorable code points, so an input of any length can map to a short name
+   (measured: 10,000 soft hyphens before `example.com` canonicalize to
+   `example.com`, and the cap declines to find that out). What the number must
+   not be is small: a 255-byte cap was measurably wrong, because three 45-rune
+   `ä` labels are 284 bytes of UTF-8 and a 167-byte A-label — an ordinary name
+   the matcher then could not produce while the entry side stored it. Above the
+   cap the empty-label check still has to hold on its own,
    which is why `hasEmptyLabel` counts U+3002, U+FF0E and U+FF61 as separators —
-   measured, a 287-byte host led by U+3002 carried no ASCII empty label and
+   measured, an over-cap host led by U+3002 carried no ASCII empty label and
    walked straight through a `*.example.com` boundary.
 3. **ASCII branch — a cost guard that turned out to carry a rule.** If every
    byte is below 0x80, return the fold. It was written for cost: IDNA costs
@@ -172,9 +179,32 @@ and rule 4 returns the same string the guard would have. Dead code a test cannot
 distinguish is worse than no code, so it went, and the comment beside rule 4
 says where those shapes are handled instead.
 
-`NormalizeHost` stays exactly as it is and keeps its name. `CanonicalHost` is a
-new function, so every call site opts in deliberately rather than inheriting a
-changed meaning.
+### `NormalizeHost` becomes `CanonicalLookup`, and the order inside it flips
+
+The design started with `NormalizeHost` untouched — fold, then strip one
+trailing dot — and every caller composing it with `CanonicalHost` by hand. That
+composition has an order, and the obvious one is wrong. `NormalizeHost` stripped
+the dot *before* anything converted the host, so it could only see a dot
+somebody wrote as U+002E; IDNA maps U+3002, U+FF0E and U+FF61 onto `.` as well,
+so `example.com。` is a rooted spelling that the strip could not recognise. What
+it left behind was a trailing empty label, and `hasEmptyLabel` — running, per
+`Match`'s rule, on the canonical form — then refused the host outright. Measured:
+all three non-ASCII full stops stopped matching `example.com`, and an entry
+written with one was dropped from the set entirely.
+
+So the two collapse into one exported function, `CanonicalLookup`, that trims,
+canonicalizes, and *then* de-roots. Stripping again afterwards is not the fix —
+`example.com..` would lose both dots and match — so it is one strip, after.
+Three consequences follow, and all three are wanted: a rooted Unicode spelling
+is now the same host as its bare form; there is one name for the comparison
+instead of two that can drift apart; and a scoped address keeps its zone
+identifier at admission too, because `CanonicalLookup` delegates to
+`CanonicalHost`, which holds the zone out of the fold. That last one closes a
+gap this plan had listed as out of scope (below).
+
+`CanonicalHost` is a new function either way, so every call site opts in
+deliberately rather than inheriting a changed meaning; the rename makes the same
+true of the callers that only ever wanted the lookup form.
 
 ### Where it is called
 
@@ -236,8 +266,9 @@ egress away for a field nobody is touching.
 
 `internal/gate` today calls `admit(hostOnly(target))` and then
 `g.dial(ctx, "tcp", target)`. Once admission canonicalizes, those two strings can
-differ by a whole name — `exa<U+00AD>mple.com`, `K.example` and `example<U+3002>com`
-all canonicalize onto `example.com` with no error. The dial takes the canonical
+differ by a whole name — `exa<U+00AD>mple.com` and `example<U+3002>com` both
+canonicalize onto `example.com`, and U+212A before `.example` onto `k.example`,
+none of them with an error. The dial takes the canonical
 name. The CONNECT tunnel is opaque and the client inside it sends its own SNI, so
 nothing above the socket observes the change; and without it the widening is a
 false promise, since `net.Dialer` on a raw U-label answers "no such host".
@@ -281,13 +312,15 @@ Three, all INFERRED, in `docs/DIVERGENCES.md`:
 - **#601** — that a declared MCP endpoint resolves through the resolver's search
   list. The gate dialing the canonical name narrows the admitted-versus-dialled
   gap to the name; #601 closes the name-versus-address half by resolving once.
-- **`NormalizeHost` folding a zone identifier**, so that `fe80::1%eth0` and
-  `fe80::1%ETH0` are one host on the *admission* side but two in
-  `internal/mcp` and `internal/vaultresolve`. `CanonicalHost` splits at the first
-  `%` and returns the remainder untouched, so nothing this plan adds folds a
-  zone — the gate dials a scoped address with its interface name as the sandbox
-  wrote it. What stays is `NormalizeHost`'s own fold, which admission still runs;
-  it is recorded on #609.
+- **A zone identifier folded into the comparison** — listed here as out of
+  scope, and then closed anyway. `CanonicalHost` splits at the first `%` and
+  returns the remainder untouched, and `CanonicalLookup` inherits that, so
+  `fe80::1%eth0` and `fe80::1%ETH0` are now two hosts everywhere: at admission,
+  at the dial, and in `internal/mcp` and `internal/vaultresolve`, which already
+  kept them apart. It falls out of the same reordering that made a trailing
+  U+3002 a rooted spelling, and it errs toward refusal, so it lands here rather
+  than waiting for its own change. #609's note that this was unaddressed is
+  retired with it.
 - **Migrating stored rows** (decision 4), and any cap on the number of entries —
   the reference publishes one for credentials (16) and none for environments, and
   neither is this issue's subject.
@@ -302,11 +335,11 @@ length cap in both directions, the zone identifier, and the canonical dial; the
 three divergences registered; a `changelog.d/` fragment; and the verifier plus
 both reviewers run per the repository's ritual.
 
-Two mutants survive, and both are stated rather than hidden. Canonicalizing the
+Three mutants survive, and each is stated rather than hidden. Canonicalizing the
 whole entry *before* the wildcard cut changes no output, because the asterisk's
 error sends `CanonicalHost` back to the fold — the conversion after the cut is
 the half that matters, and it has its own row. And dropping `NewHostSet`'s
 empty-label check removes only keys that could never have matched, since `Match`
 refuses an empty label on the request side first; it is defence in depth, and no
-test can distinguish it. The control plane's `endpointKey` is the third, argued
+test can distinguish it. The third is the control plane's `endpointKey`, argued
 where it is called.

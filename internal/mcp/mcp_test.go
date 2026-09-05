@@ -1016,7 +1016,7 @@ func TestBearerOriginComparison(t *testing.T) {
 			wrong: "the A-label is what the socket goes to, so the two spellings cannot be two origins"},
 		{name: "an IDN still folds on its ASCII half", endpoint: "http://b\u00fccher.EXAMPLE:8080/rpc", target: "http://b\u00fccher.example:8080/rpc", attach: true,
 			wrong: "the ASCII letters of a mixed name must still fold, or the credential is withheld from its own server"},
-		// U+0130 is the pair that motivates internal/egress's NormalizeHost and
+		// U+0130 is the pair that motivates internal/egress's CanonicalLookup and
 		// is *not* one of these: strings.ToLower maps it onto "i", IDNA does not
 		// (xn--i-9bb.example), and it must stay a different origin.
 		{name: "a dotted capital I is not an i", endpoint: "http://\u0130.example:8080/rpc", target: "http://i.example:8080/rpc",

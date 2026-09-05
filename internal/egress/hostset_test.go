@@ -135,25 +135,63 @@ func TestAnIDNAliasIsNotItsASCIITwin(t *testing.T) {
 		"pypİ.org",
 		"apİ.example.com",
 	} {
-		if egress.NormalizeHost(alias) == egress.NormalizeHost("github.com") ||
+		if egress.CanonicalLookup(alias) == egress.CanonicalLookup("github.com") ||
 			set.Match(alias) {
-			t.Errorf("%q matched an ASCII entry: NormalizeHost gave %q", alias, egress.NormalizeHost(alias))
+			t.Errorf("%q matched an ASCII entry: CanonicalLookup gave %q", alias, egress.CanonicalLookup(alias))
 		}
 	}
 }
 
 // ...while the ASCII folding the grammar does need keeps working, trailing dot
-// and all.
+// and all — including the three dots that are only a dot after conversion.
 func TestASCIIFoldingStillNormalizes(t *testing.T) {
 	for _, tc := range []struct{ in, want string }{
 		{"API.Example.Com", "api.example.com"},
 		{"example.com.", "example.com"},
 		{"  Example.COM.  ", "example.com"},
 		{"GITHUB.COM", "github.com"},
+		// UTS46 maps these onto "." — so a host written with one is rooted, and
+		// the de-rooting has to run after the conversion to see it.
+		{"example.com\u3002", "example.com"},
+		{"example.com\uff0e", "example.com"},
+		{"example.com\uff61", "example.com"},
+		// ...and exactly one dot comes off, or a name with an empty last label
+		// would be laundered into a valid one.
+		{"example.com..", "example.com."},
+		{"example.com\u3002\u3002", "example.com."},
 	} {
-		if got := egress.NormalizeHost(tc.in); got != tc.want {
-			t.Errorf("NormalizeHost(%q) = %q, want %q", tc.in, got, tc.want)
+		if got := egress.CanonicalLookup(tc.in); got != tc.want {
+			t.Errorf("CanonicalLookup(%q) = %q, want %q", tc.in, got, tc.want)
 		}
+	}
+}
+
+// A rooted spelling is the same host however its final dot is written, on both
+// sides of the comparison. Measured before this landed: all three of these
+// stopped matching, and an entry written that way was dropped from the set.
+func TestARootedSpellingIsTheSameHost(t *testing.T) {
+	set := egress.NewHostSet([]string{"example.com", "*.internal.example.com"})
+	for _, h := range []string{
+		"example.com.", "example.com\u3002", "example.com\uff0e", "example.com\uff61",
+	} {
+		if !set.Match(h) {
+			t.Errorf("a rooted spelling %q did not match example.com", h)
+		}
+	}
+	// A doubled final dot is an empty label, not a rooted name.
+	for _, h := range []string{"example.com..", "example.com\u3002\u3002", "example.com.\u3002"} {
+		if set.Match(h) {
+			t.Errorf("%q matched example.com; it carries an empty label", h)
+		}
+	}
+	// The entry side too, in both branches.
+	for _, e := range []string{"example.com\u3002", "example.com."} {
+		if !egress.NewHostSet([]string{e}).Match("example.com") {
+			t.Errorf("an entry written %q stopped matching example.com", e)
+		}
+	}
+	if !egress.NewHostSet([]string{"*.internal.example.com\u3002"}).Match("a.internal.example.com") {
+		t.Error("a wildcard entry written with an ideographic full stop was dropped")
 	}
 }
 
@@ -279,7 +317,7 @@ func TestAnEmptyLabelIsJudgedAfterCanonicalization(t *testing.T) {
 	} {
 		if set.Match(h) {
 			t.Errorf("%q matched *.example.com; it canonicalizes to %q",
-				h, egress.CanonicalHost(egress.NormalizeHost(h)))
+				h, egress.CanonicalLookup(h))
 		}
 	}
 	// A fullwidth stop between two real labels is a real boundary, and matching

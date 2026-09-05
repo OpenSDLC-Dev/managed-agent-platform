@@ -369,7 +369,7 @@ func TestRootedNameLeavesEverythingThatIsNotADNSNameAlone(t *testing.T) {
 		// curated set holds.
 		{"pypi.org:443", "pypi.org.:443"},
 		{"files.pythonhosted.org:80", "files.pythonhosted.org.:80"},
-		// A spelling the host set admits (NormalizeHost lowercases) and the
+		// A spelling the host set admits (CanonicalLookup lowercases) and the
 		// resolver answers case-insensitively, so it must root like any other.
 		{"PYPI.ORG:443", "PYPI.ORG.:443"},
 		// Already absolute — so this is idempotent, and a request the sandbox
@@ -644,12 +644,11 @@ func TestARegistryRequestLeavesAHandlerRooted(t *testing.T) {
 func TestConnectDialsTheNameItAdmitted(t *testing.T) {
 	g := New(Config{Networking: domain.Networking{
 		Type: domain.NetLimited,
-		// The scoped entry is spelled in lower case because the *admission*
-		// side folds a zone identifier whole (egress.NormalizeHost, an
-		// asymmetry recorded on #609); the dial is what must not, and that is
-		// the row below.
+		// The scoped entries carry the zone exactly as the request spells it:
+		// a zone names a local interface and is case-sensitive, so neither the
+		// admission nor the dial folds it.
 		AllowedHosts: []string{"xn--bcher-kva.example", "example.com",
-			"fe80::1%eth0", "fe80::1%25eth0"},
+			"fe80::1%Eth0", "fe80::1%25Eth0"},
 	}})
 	var saw string
 	g.dial = rootedDial(func(_ context.Context, _, addr string) (net.Conn, error) {
@@ -667,10 +666,12 @@ func TestConnectDialsTheNameItAdmitted(t *testing.T) {
 		"an ASCII host is dialled exactly as it was typed": {
 			"example.com:443", "example.com:443"},
 		// A zone identifier names a local interface and is case-sensitive, so
-		// the canonical name of a scoped address keeps it byte for byte. Both
-		// spellings a CONNECT authority can carry are driven: hostOnly splits
-		// the brackets off but decodes nothing, so the "%25" of a URI-form zone
-		// reaches the dial as written too.
+		// the canonical name of a scoped address keeps it byte for byte — and,
+		// since the same function decides admission, an entry naming %Eth0 no
+		// longer admits a request for %eth0 either. Both spellings a CONNECT
+		// authority can carry are driven: hostOnly splits the brackets off but
+		// decodes nothing, so the "%25" of a URI-form zone reaches the dial as
+		// written too.
 		"a scoped address keeps its zone exactly": {
 			"[fe80::1%Eth0]:443", "[fe80::1%Eth0]:443"},
 		"a percent-encoded zone is not decoded either": {

@@ -196,7 +196,7 @@ func (a admission) rooted() bool { return a == admitRegistry }
 // and on the way out, so a declaration and the request that uses it need not be
 // spelled identically.
 //
-// The host goes through egress.CanonicalHost — the very function an operator's
+// The host goes through egress.CanonicalLookup — the very function an operator's
 // allowed_hosts are matched by, not a copy of it — so the two lists cannot drift
 // apart on what makes two names one. That is why it moved with them in plan 43:
 // a HostSet that compares canonical names beside a map that compares folded ones
@@ -211,7 +211,7 @@ func (a admission) rooted() bool { return a == admitRegistry }
 // spec. mcpEndpoint refuses a wildcard today, and a map cannot become one
 // however that changes.
 func endpointKey(host, port string) string {
-	return egress.CanonicalHost(egress.NormalizeHost(host)) + ":" + strings.TrimLeft(port, "0")
+	return egress.CanonicalLookup(host) + ":" + strings.TrimLeft(port, "0")
 }
 
 // hopByHop are the connection-scoped headers a forwarding proxy must not pass
