@@ -1101,8 +1101,9 @@ scope predicate has exactly that shape. So `internal/api/scopematrix_test.go`:
    not what this plan lists by hand, and **this plan states no total for it**. Reading found
    `getMemoryVersion` and `getMemory` (slice 4, below), then `getSkillVersion` and
    `downloadSkillVersion`, whose only `skills` read is `resolveSkillVersion`'s `latest` arm in
-   another function, then the vault-credential routes §7.5 enumerates, then the deployment-run
-   pair and two more vault-credential writes. Four readings, four larger answers — which is the
+   another function, then the vault-credential reads, then — a reading later, and now folded
+   into §7.5's list with them — the deployment-run pair and the two vault-credential writes.
+   Four readings, four larger answers — which is the
    argument for the mechanism rather than a list, and the reason the exemption list's length is
    pinned at slice 6, after the guard has enumerated what reading kept missing. Two members have **no** statement
    in the six packages at all: `session_gate_tokens` and `work_session_tokens` live in
@@ -1132,9 +1133,18 @@ scope predicate has exactly that shape. So `internal/api/scopematrix_test.go`:
      mask an unsafe statement of the same shape in another — the false negative this rule
      closes. A rule the guard cannot evaluate statically is a comment, not a rule — and that,
      not the function boundary, is where the line falls. **A call in this body to a pinned
-     parent-checking helper is static** and admits the statement: the guard holds the helper set
-     by name, so adding one is a reviewed edit and each member's contract (it refuses a foreign
-     parent with the absent-id answer) is asserted by its own test. What it cannot see, and
+     parent-checking helper is static** and admits the statement — but only if the call
+     **dominates** it: earlier in the same body, and outside any branch the statement itself is
+     outside of. **Presence alone would admit the leak this rule exists to catch.**
+     `getMemory` is the proof: its `checkMemoryStore` call is in its own body, and useless there
+     — it sits inside the `ErrNoRows` branch *after* the read (`memories.go:317`, call at
+     `:322`), so a hit answers before the store is checked and a presence test would wave it
+     through. Dominance is position in the AST, which the guard can compute; it is not
+     reachability, which it cannot. The helper set is pinned from **slice 2** as the
+     parent-*reading* helpers, each asserted to read its parent and answer absent when there is
+     none; the scope predicate inside them arrives in **slice 4** with every other read, and the
+     contract becomes the full one — a foreign parent gets the absent-id answer — then. Adding a
+     member is a reviewed edit either way. What the guard cannot see, and
      therefore refuses, is a parent resolved **with nothing in this body at all** — a sibling
      handler earlier in the request path, or a helper this function never calls. Those are
      rule-(d) exemptions naming their resolver, never (b) admissions. In the current tree they
@@ -1196,10 +1206,15 @@ scope predicate has exactly that shape. So `internal/api/scopematrix_test.go`:
      `c.vault_id = ANY($1)` on parent ids their caller resolved under scope, and
      `mcprefresh.go:222` and `:418` are keyed on a credential row's own id — an id those first
      two resolved. In `internal/api`, where the scope does reach the statement, it takes the
-     scoped parent read or the pinned-helper call rule (b) admits — which is what the memory
-     routes rely on: their probes are `lockMemoryStore` (`memories.go:132`),
-     `lockMemoryStoreForWrite` (`:148`) and `checkMemoryStore`, so those three are pinned
-     helpers from slice 2 and the routes are admitted rather than exempted. **How many in-api
+     scoped parent read or the pinned-helper **dominating** call rule (b) admits — which is what
+     most of the memory surface rides: `lockMemoryStore` (`memories.go:132`),
+     `lockMemoryStoreForWrite` (`:148`) and `checkMemoryStore` (`:162`) are the three pinned
+     helpers, and the routes that call one of them first are admitted rather than exempted.
+     Two things that is **not**: a route whose call does not dominate (`getMemory`, below,
+     until slice 4 moves its probe ahead of the read), and the surface's own helper `FuncDecl`s
+     — `occupiedBy` (`:178`, statement `:180`) and `insertMemoryVersion` (`:196`, statement
+     `:207`) hold no parent read and call no pinned helper, so the guard names them and a slice
+     takes them. Which is the point: the rule reaches what reading did not. **How many in-api
      routes fail (g) against the current tree is not a number this plan states**, and that is
      deliberate: reading found the ones below and §7.5's, four separate readings each found more
      than the last, and an enumeration by hand over 67 child mentions is exactly the work the
