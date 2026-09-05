@@ -1091,7 +1091,19 @@ scope predicate has exactly that shape. So `internal/api/scopematrix_test.go`:
    remembered — false for the second one, and would drop the member carrying the worst blast
    radius: `vault_credentials`, which is why §7.5 enumerates its `internal/api` statements by
    hand instead of leaving them to slice 4's bulk (its four in `internal/vaultresolve` are named
-   in step 1 above).
+   in step 1 above). **And sized, because eleven members reach much further than four did**: the
+   eleven are named **92** times across the six packages — 67 in `internal/api`, 14 in
+   `internal/executor`, 4 each in `internal/brain` and `internal/vaultresolve`, 3 in
+   `internal/queue`, none in `internal/events`. *Counting rule: §4.5's mention rule with these
+   eleven names substituted for the fourteen.* Outside `internal/api` they ride rule (g)'s
+   stand-in arm. Inside it, (g) asks each for its parent's scoped read in the same function, and
+   **which ones already have it is what the guard's first run against the current tree reports**,
+   not what this plan lists by hand — §6.5 names only the two that fail outright
+   (`getMemoryVersion`, `getMemory`) because those two were found by reading, and finding the
+   rest that way is the job the mechanism exists to take over. Two members have **no** statement
+   in the six packages at all: `session_gate_tokens` and `work_session_tokens` live in
+   `internal/gatetoken` and `internal/worktoken`, which the walk reaches only when slice 5 widens
+   it to every non-test file under `internal/`.
 3. For every SQL literal naming a scoped table after `FROM` / `JOIN` / `INSERT INTO` /
    `UPDATE` / `DELETE FROM`, requires one of:
    - **(a)** the three-column predicate;
@@ -1159,9 +1171,15 @@ scope predicate has exactly that shape. So `internal/api/scopematrix_test.go`:
    And for every SQL literal naming an **unscoped child table** — step 2's second set, which no
    predicate rule can reach — requires:
    - **(g)** a scoped read of that child's **parent, in the same function**: rule (b)'s shape,
-     applied where there is no column to predicate on. **In a package that holds no request
-     scope there is no scope to read the parent under**, so rule (b′)'s constraint stands in for
-     it there, for the same reason it does on a scoped table — and it has to cover **all four** of
+     applied where there is no column to predicate on. **Where a package holds no request scope
+     there is no scope to read the parent under**, so whichever arm admits that package's
+     *scoped-table* statements admits its unscoped-child ones too — (b′) in `internal/brain`,
+     `internal/executor` and `internal/vaultresolve`, (e) in `internal/queue`, (f) in
+     `internal/events`. Stated that way rather than by naming three packages, because the
+     second set has eleven members and they do not all live where (b′) reaches: `worker_polls`
+     is read and written in `internal/queue` (`stats.go:55`, `:84`, `:88`) under exactly rule
+     (e)'s `environment_id` constraint, and a (b′)-only stand-in would leave those three
+     admitted by nothing. The (b′) arm has to cover **all four** of
      `internal/vaultresolve`'s `vault_credentials` statements, not just the two that look like
      joins: `credentials.go:139` and `mcp.go:85` join `vaults` and constrain
      `c.vault_id = ANY($1)` on parent ids their caller resolved under scope, and
@@ -1191,10 +1209,12 @@ entries instead of auditing 211 statements. Its permanent members, **each its ow
 where this paragraph says otherwise, each with its reason:
 `queue.Claim` (`internal/queue/queue.go:300`) and the self_hosted gauge (the literal at
 `internal/queue/metrics.go:92`); the **deployment scheduler's background lane** — one entry for
-its three statements on `deployments`, none of which any rule can admit because the lane holds
-no credential and the scope comes *out* of these reads rather than into them: the due scan
-(`internal/api/deploymentscheduler.go:211-218`), the fire's `FOR SHARE` re-read (`:444-451`) and
-the failure `UPDATE` (`:534-536`); the retention sweep
+its **five** statements, none of which any rule can admit because the lane holds no credential
+and the scope comes *out* of these reads rather than into them: on `deployments`, the due scan
+(`internal/api/deploymentscheduler.go:211-218`), the fire's `FOR SHARE` re-read (`:444-451`)
+and the failure `UPDATE` (`:534-536`); on `deployment_runs`, whose enrolment as an unscoped
+child (§6.5 step 2) is what brings them in at all, the run claim (`:479`) and the two settles
+(`:524`, `:546`); the retention sweep
 (`internal/api/memoryretention.go:109-118`); the **five** credential resolvers of §6.3; the
 boot catalog import (`internal/api/skillsimport.go:103-104`, `:108`, `:135-138` — the three
 `skills` statements inside `importSkillDir`, which opens at `:82`); the reaper's by-id classification
@@ -1560,11 +1580,17 @@ the credential-less re-read itself. It therefore joins that re-read in the sched
 background-lane exemption (§6.5). The run claim
 `INSERT INTO deployment_runs …` (`deploymentscheduler.go:479`) **cannot** copy the deployment's
 scope — no column in `deployment_runs` holds one (`0031_deployments.sql:127`, the
-`CREATE TABLE`) — which puts it, and its manual-run twin at
-`internal/api/deploymentruns.go:103` under the `FOR SHARE` re-read at `:82-85`, outside the
-target set rather than on the exemption list (§6.5 step 2); it is the same fact that makes §7.4
-give the run list and the run get a join. Each carries the comment naming the scoped re-read it
-rides on, so none of the three is silently unaccounted for.
+`CREATE TABLE`). That does **not** put it outside the target set: `deployment_runs` is one of
+§6.5 step 2's eleven unscoped children, so rule (g) sees every statement naming it and asks
+for the parent's scoped read in the same function. The manual-run twin
+(`internal/api/deploymentruns.go:103`) passes, on the `FOR SHARE` re-read at `:82-85` that
+slice 4 gives the predicate; the scheduler's claim does not, for the same credential-less
+reason its `deployments` statements do not, so it **joins the background-lane exemption**
+rather than sitting outside the rules. So do the two settle statements the earlier draft
+missed entirely — `UPDATE deployment_runs …` at `:524` and `:546`, both keyed on the run id
+the claim returned. That is five statements in one entry, not three, and it is the same fact
+that makes §7.4 give the run list and the run get a join. Each carries the comment naming the
+scoped re-read it rides on, so none is silently unaccounted for.
 · `internal/store/store.go:34-42` corrected: the inheritance sentence gains its
 two exceptions (`deleted_sessions`, `session_checkpoints`), and "does not yet enforce" is left
 alone until slice 5 (§7.4).
@@ -1653,9 +1679,10 @@ predicate in place at their `WHERE true` base; `deploymentruns.go:274` gains a
 `JOIN deployments d ON d.id = r.deployment_id` and the predicate on `d`, because
 `deployment_runs` carries no scope columns and its `deployment_id` filter is optional (`:276`) —
 **and its by-id twin takes the same join**, `getDeploymentRun` (`:245`, statement `:252`,
-`SELECT runColumns FROM deployment_runs WHERE id = $1`), which the guard never sees — step 2
-puts `deployment_runs` outside the target set — and which no bulk edit
-reaches: a run id alone would otherwise read across workspaces;
+`SELECT runColumns FROM deployment_runs WHERE id = $1`), which rule (g) does see — step 2
+enrols `deployment_runs` among the unscoped children — and which no bulk edit
+reaches, because there is no column on it to predicate: a run id alone would otherwise read
+across workspaces, and the join is what satisfies (g);
 `memories.go:611`'s enforceable point is the parent memory-store read (`:135`, `:165`), its
 `WHERE true` sitting on a derived table; and the **eleventh** builder, `listThreads`
 (`threads.go:133`), which already joins `sessions s`, takes the scope predicate on that alias
