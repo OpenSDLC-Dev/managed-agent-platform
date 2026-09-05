@@ -963,7 +963,8 @@ scope predicate has exactly that shape. So `internal/api/scopematrix_test.go`:
    on `sessions` and `deployments` (§6.7).
 
 **The exemption list is the deliverable, not a loophole** — a reviewer reads nineteen commented
-entries instead of auditing 211 statements. Its permanent members, each with its reason:
+entries instead of auditing 211 statements. Its permanent members, **each its own entry** except
+where this paragraph says otherwise, each with its reason:
 `queue.Claim` (`internal/queue/queue.go:300`) and the self_hosted gauge (the literal at
 `internal/queue/metrics.go:92`); the **deployment scheduler's background lane** — one entry for
 its three statements on `deployments`, none of which any rule can admit because the lane holds
