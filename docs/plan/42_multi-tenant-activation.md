@@ -1830,6 +1830,9 @@ a scoped table:
   create-time check.
 - `getSkillVersion` (`:692`, statement `:711`) and `downloadSkillVersion` (`:840`, statement
   `:868`) have **no parent check at all** today; each gains one in the same shape as `:634`.
+  These two and the three vault-credential routes below — `getVaultCredential`,
+  `updateVaultCredential` (two reads) and `validateVaultCredential` — are five of the seven
+  routes rule (g) fails against the current tree (§6.5); slice 4 owns the other two.
 
 The in-repo remediation pattern is the adjacent file lane, which solved this and documents the
 contrast: admit to the lane, narrow inside the handler, fail closed to 404
