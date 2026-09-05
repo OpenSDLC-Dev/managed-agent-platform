@@ -1,7 +1,12 @@
 ---
-status: in-progress
+status: archived
 issue: "#353"
 ---
+
+> **Archived — completed.** Delivered in one PR, closing #353 and #576 together; the
+> reference's cross-session install cache (decision 2) is deferred to #595, and the
+> gate's package-registry allow-set stays #591. The progress summary is in
+> docs/HISTORY.md.
 
 # Environment `config.packages` installed into the sandbox (plan 40)
 
@@ -64,7 +69,8 @@ session-error union (betasessionevent.go) has eight variants — `billing_error`
 `credential_host_unreachable_error`, `mcp_authentication_failed_error`,
 `mcp_connection_failed_error`, `model_overloaded_error`, `model_rate_limited_error`,
 `model_request_failed_error`, `unknown_error` — none about packages; every variant's
-`retry_status` is `{type: "retrying"}` or `{type: "exhausted"}`, nothing more. Whatever a
+`retry_status` is one of `{type: "retrying"}`, `{type: "exhausted"}` and
+`{type: "terminal"}`, and nothing else. Whatever a
 failed install looks like on the reference wire is unrecorded; this platform's variant will
 be its own, as `github_repository_clone_error` (plan 25) is.
 
@@ -143,7 +149,7 @@ manager is exit 127 whatever the manager:
 
 | manager | install |
 | --- | --- |
-| `apt` | `export DEBIAN_FRONTEND=noninteractive; dpkg --configure -a; apt-get update -q && apt-get install -y -q <entries>` — the `dpkg --configure -a` repairs a transaction an earlier deadline killed, which otherwise wedges every later `apt-get`, the agent's own included |
+| `apt` | `export DEBIAN_FRONTEND=noninteractive; dpkg --configure -a; apt-get -o APT::Sandbox::User=root update -q && apt-get -o APT::Sandbox::User=root install -y -q <entries>` — the `dpkg --configure -a` repairs a transaction an earlier deadline killed, which otherwise wedges every later `apt-get`, the agent's own included; `APT::Sandbox::User=root` keeps apt's acquire methods as root, since dropping them to `_apt` takes the `CAP_SETUID`/`CAP_SETGID` the platform's own default capability drop removes and every fetch would die |
 | `cargo` | `cargo install --root /usr/local <entries>` |
 | `gem` | `gem install --no-document <entries>` |
 | `go` | `GOBIN=/usr/local/bin go install <e1> && … <eN>` — one invocation per entry, because `go install` refuses `@version` arguments from different modules in one call; an entry carrying no `@` gets `@latest` appended, because outside a module `go install` requires a version and the docs promise an unpinned entry installs the latest |
@@ -218,10 +224,15 @@ an entry the reference may accept is a divergence in the strict direction, regis
 such with that sentence as the evidence.
 
 **D7 — The sandbox must be root with a writable root.** Every manager writes under `/usr`
-or `/var`. Before the first manager runs, one cheap probe in the sandbox itself — `id -u`
+or `/var`. Before the first manager that actually runs — the probe is lazy, so a pass
+whose managers are all settled or refused costs no exec at all — one cheap probe in the
+sandbox itself — `id -u`
 and whether `/usr` and `/var` are writable — refuses the whole pass with reason
 `sandbox_not_root` or `rootfs_read_only`, recorded once (D4) and running no manager,
-rather than six timeouts' worth of `Permission denied`. Probing the sandbox rather than
+rather than six timeouts' worth of `Permission denied`. An answer the probe cannot have
+produced — a shell so broken it printed something else — installs anyway, with a log line
+rather than an invented wire reason: the install's own failure is then the honest
+diagnosis. Probing the sandbox rather than
 reading `cfg.Hardening` is deliberate: `RunAsUser` and `ReadOnlyRootfs` are bound at
 create and an adopted sandbox may disagree with the executor's current config, and an image
 whose *own* default user is non-root is invisible to the config entirely. The combination
@@ -284,8 +295,9 @@ the gate.
    metric, called under the advisory lock on the tool-run path. Unit tests on the fake
    sandbox (which gains an error-returning exec seam for the backend-fault arm): order,
    quoting, the `go` suffix, per-manager skip, reinstall on a changed list, the three-
-   attempt cap and the `exhausted` re-emission, every reason, dedupe, restore-path
-   reinstall, no-op on an empty config, the harvest path installing nothing. Two
+   attempt cap and the `exhausted` re-emission, every reason, dedupe, the sentinel path
+   lying under none of the checkpoint roots — which is what makes a restored sandbox
+   install again — no-op on an empty config, the harvest path installing nothing. Two
    real-sandbox tests beside `TestClosedLoopRealSandbox`: in the default gate, a stub
    `apt-get` planted at `/usr/local/sbin` of a pre-provisioned `debian:stable-slim`
    sandbox records the argv the pass hands it and the sentinel it leaves — the seam

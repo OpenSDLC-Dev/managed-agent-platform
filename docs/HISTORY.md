@@ -49,6 +49,72 @@ new directory and in-repo citations re-pointed in the moving PR (plan
 
 ---
 
+## Environment packages installed into the sandbox (plan 40, #353, #576) — archived 2026-09-05, delivered in one PR (#PR)
+
+`config.packages` had been accepted, validated, stored and echoed since the environment
+routes shipped, and read by nothing: a client following the reference docs got a 200
+environment and an agent whose first `import pandas` raised, which is how two of
+Anthropic's own cwc-workshops failed here. The install is now an executor
+materialization pass — one `Sandbox.Exec` per non-empty manager, in the reference's
+alphabetical order, before the skills and inside the session advisory lock
+`provisionSandbox` already holds, so a reclaiming executor waits on a lapsed holder's
+pass instead of racing its `apt-get` for the dpkg lock. Four decisions shaped what a
+client sees. A `/tmp/.map-packages` sentinel records what each manager settled, which
+makes a later provision a no-op and a changed list a fresh attempt, and caps an
+unchanged failing list at three attempts per sandbox; it sits outside the checkpoint
+roots on purpose, so a restored sandbox — a fresh container — installs again. Failure
+is surfaced, never fatal: a `session.error` of the platform's own
+`environment_package_install_error`, with six reasons and a `retry_status` that flips to
+`exhausted` at the cap, carrying the manager's own output tail sanitized,
+userinfo-redacted and bounded at 8 KiB — the one `session.error` here whose text is
+sandbox-controlled, which is what those three bounds are for. One cheap probe refuses a
+non-root or read-only sandbox up front rather than paying six timeouts of `Permission
+denied`. And #576's create-time 400 landed with it, refusing `packages` under `limited`
+networking without `allow_package_managers` on the merged config, so the shape cannot
+arrive in two halves.
+
+Verification: sixteen executor unit tests
+(`internal/executor/packages_test.go`) pin the order and every command byte for byte,
+the quoting of an entry containing a quote and a `; rm -rf /`, the per-manager skip and
+the reinstall on a changed list, the attempt cap and the `exhausted` re-emission, every
+reason, the dedupe, the sanitize and redaction, the backend-fault arm, the empty config,
+the grading harvest installing nothing, and the sentinel path lying under none of the
+checkpoint roots. Beside them a real-container test drives the whole seam end to end
+against a `debian:stable-slim` sandbox with a stubbed `apt-get`, recording the argv the
+pass hands it and the sentinel it leaves, with no public-internet dependency the default
+`make test` must not gain. The acceptance the issue asked for is the
+`RUN_LIVE_PACKAGE_TESTS` consent tier (README's table): a run installs a real `jq`
+from the Debian mirror and then answers `jq --version` through a `bash` tool call.
+
+Compose acceptance (run 2026-09-05, twice): the executor rebuilt from the branch and
+recreated alone on the user's running stack (`EXECUTOR_IMAGE=cwc-sandbox-pptx`, Docker
+backend, the platform's default hardening), an environment with `apt: [jq]` and `pip:
+[cowsay==6.1]`, a `claude-haiku-4-5` bash agent asked to run `jq --version` and `import
+cowsay`. **The first run failed apt and found a defect the Go rows had hidden**: pip
+installed `cowsay` (`/usr/local/lib/python3.12/site-packages/cowsay`, the sentinel
+recording `installed: true`), while apt recorded one deduped `session.error` — `setgroups
+65534 failed`, `seteuid 42 failed`, `Method http has died unexpectedly` — because apt drops
+its acquire methods to `_apt`, which takes the `CAP_SETUID`/`CAP_SETGID` that
+`sandbox.DefaultCapDrop` removes on every deployment that sets no `SANDBOX_CAP_DROP`, and
+the live row had run under a zero `Hardening`. Both `apt-get` invocations now carry
+`-o APT::Sandbox::User=root`, and both real-container rows provision under the default
+capability drop; mutating the option back to `_apt` fails the live row with the stack's
+exact error, restoring it passes (14.9 s). **The second run passed**: both tool results
+`is_error: false`, `jq-1.7` and `cowsay-import-ok`, no `session.error`, the session idle
+in 15 s with a sentinel of `apt` and `pip` each `installed: true, attempts: 1`. The
+sessions, environments and agents were deleted or archived afterwards and the reaper
+removed both sandboxes.
+
+Deferred: the reference's cross-session install cache — a per-environment image keyed on
+the packages hash, which Kubernetes has no build primitive for and which would join the
+sandbox adoption comparison — is #595, so packages install per sandbox here. Left open
+beside it: #591, the gate's package-registry allow-set, without which a `limited`
+session's install reaches a registry only through `allowed_hosts`; and five of the six
+registry entries this plan added are inferences naming #78 for the recording that would
+settle them.
+
+---
+
 ## Skills GA wire shape — the `ant` CLI, and the SDK clients #566 named (plan 39, #566, run 2026-09-04) — ✅ passed
 
 Verified against two docker-compose stacks built from `feat/skills-ga-shape` @ 98de5c4 — the

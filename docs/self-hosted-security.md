@@ -173,6 +173,13 @@ is the exact list. On **Docker** that same `stat` is only wanted, not required
 grep/coreutils — a busybox-only image gets a clear tool error, not degraded
 behaviour.
 
+A cloud environment's `config.packages` adds a contract of its own, and only for
+the managers it names: the executor runs `apt`, `cargo`, `gem`, `go`, `npm` and
+`pip` as **your** image supplies them and installs none of them, so a list naming
+a manager the image does not carry is a `session.error` with reason
+`manager_missing` rather than an install. The `debian:stable-slim` default
+carries `apt-get` and none of the other five.
+
 Two things do degrade silently rather than fail, both about file **modes** and
 neither about the correctness of a file's contents. A write preserves the target's
 permission bits by reading them with `stat -c %a` (so a script stays executable
@@ -232,6 +239,13 @@ The sandbox runs as **your image's default user** unless you name a uid:
 Kubernetes' `securityContext.runAsUser`). It is numeric because that is all both
 backends can express — a Kubernetes securityContext takes no user name.
 `debian:stable-slim` defaults to root; a hardened image does not have to.
+
+One platform feature is incompatible with a non-root uid, and says so rather than
+failing six times over: a cloud environment's `config.packages` cannot be
+installed, because every manager writes under `/usr` or `/var`. The executor
+probes the sandbox before the first manager runs and, finding it non-root,
+records one `session.error` with reason `sandbox_not_root` and runs no manager at
+all. The session itself runs on, without the packages.
 
 **The platform runs nothing in your container as anyone but that user** — no
 privileged exec, anywhere, and one place had to be designed around to keep it
@@ -325,8 +339,13 @@ a typo is a process that will not start, not a deployment that starts and cannot
 provision a session.
 
 What the default costs, so it is not a surprise: a tool that changes uid loses
-the ability. `apt-get` is the one worth knowing — it warns that it cannot drop
-privileges for downloading and continues as root; `su` and `sudo` fail outright.
+the ability. `apt-get` is the one worth knowing — it drops its download methods
+to `_apt`, and under the default set that drop fails outright (`setgroups 65534
+failed`, `Method http has died unexpectedly`) rather than warning and continuing
+as root. The platform's own `config.packages` install (plan 40) therefore runs
+both `apt-get` calls with `-o APT::Sandbox::User=root`; an agent that runs
+`apt-get` itself in a `bash` tool needs the same option. `su` and `sudo` fail
+outright.
 
 A **gated** sandbox (plan 12) drops those same three whatever `SANDBOX_CAP_DROP`
 says — they are what keeps a tool from crafting raw packets past the gate's
@@ -462,6 +481,10 @@ in the code (`sandbox.WritablePaths`) precisely so neither backend can forget on
 
 Kubernetes mounts an `emptyDir` over each; Docker an anonymous volume, which its
 existing container removal takes away with the container.
+
+A cloud environment's `config.packages` is refused under this knob for the reason
+§2 gives for the other one: the same probe finds `/usr` and `/var` unwritable,
+records one `session.error` with reason `rootfs_read_only`, and runs no manager.
 
 Docker uses a volume rather than a `tmpfs` deliberately, and the reason is
 measured rather than stylistic: the daemon refuses `PUT

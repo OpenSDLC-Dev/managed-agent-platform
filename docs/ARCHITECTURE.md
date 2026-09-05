@@ -92,8 +92,12 @@ platform's own executor, just deployed elsewhere.
    same pull semantics at two deployment points; an item whose session attaches a
    memory store is handed out with a per-item sessions token in its `secret`, the
    credential the reference worker uses for that item's calls ("Security
-   invariants"). Either materializes the agent's
-   skills into the freshly provisioned sandbox (`{workdir}/skills/<name>/`, versions
+   invariants"). On the platform side the executor first installs the environment's
+   `config.packages` into the freshly provisioned sandbox — one sandbox command per
+   non-empty manager, in the reference's alphabetical order, a manager that cannot
+   install becoming a `session.error` the session then runs past (plan 40). Either
+   half then materializes the agent's
+   skills into that sandbox (`{workdir}/skills/<name>/`, versions
    resolved at use time, per-skill failure tolerated) along with the session's mounted
    resources (below), runs the tool, and posts the result event (`agent.tool_result`
    platform-managed, `user.tool_result` self-hosted). Either side also reconciles the
