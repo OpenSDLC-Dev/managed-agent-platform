@@ -212,9 +212,8 @@ func guardedClient(requestTimeout time.Duration) *http.Client {
 			return http.ErrUseLastResponse
 		},
 		Transport: &http.Transport{
-			DialContext: (&net.Dialer{
+			DialContext: (&dialguard.Dialer{
 				Timeout: DialTimeout,
-				Control: dialguard.Control(dialguard.IPAllowed),
 			}).DialContext,
 			ForceAttemptHTTP2:      true,
 			MaxIdleConnsPerHost:    2,

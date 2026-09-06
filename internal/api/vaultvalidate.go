@@ -87,9 +87,9 @@ var probeClient = &http.Client{
 		return http.ErrUseLastResponse
 	},
 	Transport: &http.Transport{
-		DialContext: (&net.Dialer{
+		DialContext: (&dialguard.Dialer{
 			Timeout: validateCallTimeout,
-			Control: dialguard.Control(func(ip net.IP) error { return probeIPAllowed(ip) }),
+			Allow:   func(_ context.Context, ip net.IP) error { return probeIPAllowed(ip) },
 		}).DialContext,
 	},
 }

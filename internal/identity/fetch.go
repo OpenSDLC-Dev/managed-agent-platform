@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"net"
 	"net/http"
 	"net/url"
 	"strings"
@@ -48,9 +47,8 @@ var productionClient = &http.Client{
 		return http.ErrUseLastResponse
 	},
 	Transport: &http.Transport{
-		DialContext: (&net.Dialer{
+		DialContext: (&dialguard.Dialer{
 			Timeout: fetchTimeout,
-			Control: dialguard.Control(dialguard.IPAllowed),
 		}).DialContext,
 		ForceAttemptHTTP2:      true,
 		MaxIdleConnsPerHost:    2,

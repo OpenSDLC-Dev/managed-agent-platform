@@ -49,6 +49,53 @@ new directory and in-repo citations re-pointed in the moving PR (plan
 
 ---
 
+## One resolution per dial (plan 44, #601) — archived 2026-09-06, delivered in one PR
+
+Every outbound connection this platform makes to a customer-supplied or
+agent-declared name now goes through one dialler, `dialguard.Dialer`: it resolves
+the name **once**, holds every address that came back to the address floor before
+any connect, and dials those addresses. Five call sites moved onto it — the
+per-session gate, `internal/mcp`'s two clients behind the executor, the
+vault-credential probe, the OAuth token-endpoint refresh and the JWKS fetch — and
+`dialguard.Control`, which had been the shared mechanism, was deleted with its
+last caller: two mechanisms answering "what does this platform do before it
+connects" is the drift the change exists to remove.
+
+The cost the issue named was paid rather than avoided. Dialling a resolved
+literal loses three things `net.Dialer` was providing, and all three are
+reproduced: failover to the next address, a per-address share of the budget
+floored at two seconds, and the second address family started after a 300ms
+fallback delay (RFC 6555), first connection winning and the loser cancelled and
+closed. The share's floor is Go's own rule, and the suite drives it either side —
+with less than the floor left, an attempt gets what remains rather than a slice
+too short to complete a handshake in.
+
+**What the change does not do is the part worth recording.** #601's option 4, the
+one settled on, is written there as closing "the search-list gap … uniformly for
+every class". That clause does not hold, and this is the correction: a single
+resolution of `api.example.com` under `ndots:5` still consults the `search` list
+first, still answers from an internal zone, and `dialguard.IPAllowed` still admits
+the RFC 1918 address it returns — deliberately, because on-prem MCP servers live
+there. The legitimate case and the leak are identical in everything the gate can
+observe: an MCP-class host, a private resolved address, and a credential matched
+by name. `nexus.infra:8080` with a bearer and `api.example.com:80` with one
+differ only in *which name answered*, which is not an address question. So no
+rule about the resolved address separates them, and #601 stays open for the
+policy half — its options 1 to 3, rooting the MCP class outright, rooting it with
+an opt-out, or preferring the absolute answer. What plan 44 closes is the other
+half: the decision and the socket no longer consult different resolutions, and
+the address is now an input the request path holds, which is what #570 needs
+before it can give `unrestricted` a floor at all.
+
+Mutation-tested per the repo rule: 18 mutants, 18 killed, no survivors. Two
+survived the first pass and both were real. One showed that an all-refused answer
+still reported `ErrRefused` through a generic fallback, losing the refusal that
+names the offending address — the test now asserts the address. The other showed
+that `netip.Addr.WithZone("")` before `AsSlice()` was a no-op, because netip keeps
+a zone beside the address rather than in it; the call read like a guard and
+removing it changed nothing, so it went, and the mutant was re-pointed at a
+rewrite that does change behaviour.
+
 ## One host comparison, canonicalized (plan 43, #609) — archived 2026-09-06, delivered in one PR (#613)
 
 Three packages each carried a hand-rolled ASCII case fold to decide whether two

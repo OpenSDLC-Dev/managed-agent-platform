@@ -1,5 +1,6 @@
-// Package dialguard blocks the addresses a platform-initiated outbound
-// connection must never reach.
+// Package dialguard opens the platform's outbound connections to
+// customer-supplied destinations, and blocks the addresses they must never
+// reach.
 //
 // Anything that dials a URL supplied by a customer — a vault credential's MCP
 // server or token endpoint, an agent's `mcp_servers` entry — is an SSRF vector,
@@ -9,9 +10,18 @@
 // link-local (cloud metadata, 169.254.169.254 / fe80::/10), the unspecified
 // address, and multicast.
 //
-// Two properties matter more than the list. The check runs on the *resolved* IP
-// at connect time (net.Dialer.Control), on every dial, so DNS rebinding cannot
-// slip a blocked address past a name that resolved innocently a moment earlier.
+// Two properties matter more than the list. The check runs on the *resolved*
+// address, on every dial, and this package performs that resolution itself
+// (Dialer): a name is looked up once, every address that came back is judged
+// before any connect, and those addresses are what the socket uses. So a name
+// cannot be re-resolved below a caller's decision into somewhere the floor never
+// saw — which is what DNS rebinding is, and which was the one thing the gate,
+// the MCP client and the two credential dials could not previously say about
+// their own connections (#601, docs/plan/44). What a single resolution does not
+// change is which answer a resolver gives: a `search` list still completes a
+// relative name, and the address such a completion returns is admitted here if
+// it is private, deliberately — see the next paragraph, and #601 for the policy
+// question that leaves open.
 // And RFC 1918 private ranges are deliberately allowed: this platform's premise
 // is on-prem / in-VPC operation (CLAUDE.md), where MCP servers and token
 // endpoints legitimately live on the operator's own private network — the
@@ -29,7 +39,6 @@ import (
 	"errors"
 	"fmt"
 	"net"
-	"syscall"
 )
 
 // ErrRefused is wrapped by every refusal this guard produces, so a caller can
@@ -312,25 +321,4 @@ func isZero(b []byte) bool {
 		}
 	}
 	return true
-}
-
-// Control builds a net.Dialer Control hook that runs allow on the resolved
-// address of every dial — the address the connection is about to be made to
-// rather than the name it came from, which is what makes DNS rebinding
-// ineffective. allow is a parameter rather than a hard-wired call so a caller
-// can hand in a closure over its own overridable seam (a test pointing at an
-// httptest server on loopback needs one); the closure itself is captured once
-// and called per dial, so a seam it reads is consulted afresh on each one.
-func Control(allow func(net.IP) error) func(network, address string, c syscall.RawConn) error {
-	return func(_, address string, _ syscall.RawConn) error {
-		host, _, err := net.SplitHostPort(address)
-		if err != nil {
-			return err
-		}
-		ip := net.ParseIP(host)
-		if ip == nil {
-			return fmt.Errorf("dial address %q did not resolve to an IP", address)
-		}
-		return allow(ip)
-	}
 }

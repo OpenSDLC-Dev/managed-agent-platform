@@ -666,6 +666,12 @@ a promise about where the session connects, and a credential is chosen for that
 name and then delivered wherever the dial lands — by the gate, substituting on
 plain HTTP, and by the executor on its own dial to the same URL
 ([#601](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/601)).
+Every one of those dials now resolves its name **once** and holds each address
+that came back to the floor before connecting, so where a connection goes is no
+longer decided below the check that admitted it; what that does not do is change
+which answer your resolver gives, so the residual above is narrowed to exactly
+that — a name your `search` list completes into your own network, on a private
+address the floor admits by design.
 **For the default
 (non-`limited`) case, egress is unrestricted**: a default Docker sandbox
 gets `NetworkMode: bridge`, and the Kubernetes sandbox pod carries no
