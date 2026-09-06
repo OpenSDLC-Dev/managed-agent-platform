@@ -49,6 +49,43 @@ new directory and in-repo citations re-pointed in the moving PR (plan
 
 ---
 
+## Dreams — the hundred-transcript bound through the four-stage pipeline (plan 41 slice 3, run 2026-09-06) — ✅ passed
+
+Plan §1 slice 3 asks for "a second acceptance run at the 100-transcript bound", the number §7 and
+§9 size the batch and the live-thread cap for. Run at 40ee893 on `feat/dreams-slice-3` through the
+live eval tier (`TestDreamPipelineHundred`, `RUN_EVALS=1`) rather than the compose stack, because
+what this run has to show is a fan-out the `ant` CLI cannot see: the digest threads belong to the
+pipeline session, and the count is the whole question.
+
+- A hundred one-turn sessions drove first, ten at a time, each stating one module's build id — no
+  tool call, so none of them provisioned a container. The dream then took all hundred as its
+  input over an empty store, with the instruction to group by module and keep every build id
+  greppable.
+- `completed` in **11m15s** against the runner's 40-minute budget, spending **437,110 input and
+  38,968 output tokens**. No stage came near its cap.
+- **Thirteen digest threads**, which is `ceil(100/8)` exactly — the fan-out the batch size
+  predicts, measured rather than intended. This is what the divergence entry rests on: one thread
+  per transcript, which the reference's own recording shows, would have asked for a hundred live
+  threads against this platform's cap of 25.
+- The store synced twice: 100 memories pushed by the merge stage, then 1 by the index stage. The
+  output store's `/MEMORY.md` was present and named them.
+
+A second run at 13ea2d1, after the review round that followed, is the one the shipping code
+produced: `completed` in **10m10s**, again thirteen threads, but **209,898 input tokens** against
+the first run's 437,110 for the same hundred transcripts. The halving is almost certainly the
+review's own finding: the stage-2 message had told each thread to take "the files whose names
+begin with those sequence numbers", and sequence numbers are not padded, so batch 1 claimed
+transcripts 1 to 8 and also 10 to 89 and 100. Every batch read far more than its own. One run
+either side is not a controlled measurement, but nothing else about the run changed and the
+mechanism is exact.
+
+The seeded run beside it (`TestDreamPipeline`, four graders on consolidation quality) passed three
+times in a row on the same code. Its fourth-from-last run is the one that earned the merge rules a
+new line: it left a duplicated preference stated in two files while obeying every rule it had been
+given, because "nothing is removed on suspicion" reads a duplicate as no licence to remove.
+
+---
+
 ## A package credential out of argv (plan 46, #599) — archived 2026-09-06, delivered in one PR
 
 Plan 40 left two residuals when it closed the durable surface, and #599 tracked

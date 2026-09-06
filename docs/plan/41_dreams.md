@@ -432,9 +432,12 @@ the paths, counts and the caller's `instructions` substituted in.
    depth is one.
 3. **Merge.** The coordinator reads the digests and the plan and rewrites the store under
    these rules, in priority order: update before create (check for an existing memory
-   first); newer validated evidence wins a contradiction, and an unresolved one is kept
-   explicit rather than silently picked; nothing is deleted on suspicion — a file changes
-   only when a digest positively contradicts it; relative dates become absolute; the
+   first); two memories that state the same thing are folded into one, which is the
+   single removal no digest has to license (added in slice 3 — the rule list this plan
+   first wrote had none, and a live run left a duplicated preference in two files while
+   obeying every rule it was given); newer validated evidence wins a contradiction, and
+   an unresolved one is kept explicit rather than silently picked; nothing else is
+   deleted on suspicion — a file changes only when a digest positively contradicts it; relative dates become absolute; the
    user's wording and greppable strings survive compression; validated facts, explicit
    preferences, inferred preferences and the agent's own proposals are labelled and not
    interchangeable; a credential is never to be written (the prompt's rule — what the
@@ -505,7 +508,11 @@ store unchanged, or empty it if everything in it was garbage; the platform does 
 second-guess that. What it does guard is spend: each stage has a **turn
 cap** — the number of model turns, **every thread's counted**, the runner will tolerate
 before it posts a `user.interrupt` and fails the dream with `internal_error` ("stage N
-exceeded its budget") — 4 / 300 / 30 / 10, package `var`s, and the whole dream has
+exceeded its budget") — 30 / 300 / 60 / 30, package `var`s, the first, third and fourth
+measured rather than reasoned (this plan's first guess of 4 for orient was one turn short of
+what a real stage costs, and failed every dream on its first stage until the §7 eval measured
+5 / 10 / 6 / 7 over two transcripts and logged it on every run since); 300 stays the fan-out's
+arithmetic, which no seeded run reaches, and the whole dream has
 `DREAM_TIMEOUT` (§5.2). The count is one query: the session's `span.model_request_end`
 events (`internal/domain/event.go:75`; every settled turn on every thread ends in one, a thread's
 with its `thread_id` set) whose `seq` follows the stage's opening `user.message` — the

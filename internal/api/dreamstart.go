@@ -541,7 +541,7 @@ func (s *server) createDreamSession(ctx context.Context, tx pgx.Tx, d dreamRow, 
 		"type": "user.message",
 		"content": []any{map[string]any{
 			"type": "text",
-			"text": dreamStageMessage(mounted.MountPath, len(d.inputSessionIDs), instructions),
+			"text": dreamStageMessage(1, mounted.MountPath, len(d.inputSessionIDs), instructions),
 		}},
 	})
 	// The post-commit half goes back to startDream, which commits: a pipeline

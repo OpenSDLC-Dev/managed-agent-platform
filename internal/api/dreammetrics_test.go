@@ -143,6 +143,7 @@ func TestDreamClosingArmRecordsSessionIdle(t *testing.T) {
 	_, body := seededDreamBody(t, s)
 	dreamID, sessionID := startedDream(t, s, body)
 
+	atLastStage(t, s, dreamID)
 	tick(t, s) // arm 10 completes the dream, leaving it terminal
 	if d := getDream(t, s, dreamID); d["status"] != "completed" {
 		t.Fatalf("dream is %v, want completed (arm 10)", d["status"])

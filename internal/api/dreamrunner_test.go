@@ -16,6 +16,7 @@ import (
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/blob"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/blob/blobtest"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/queue"
 )
 
 // The dream runner's state machine and its tick (plan 41 slice 2, §4.1, §7).
@@ -138,8 +139,119 @@ func startedDream(t *testing.T, s *tserver, body map[string]any) (dreamID, sessi
 		t.Fatalf("dream %s is %v after its start tick (%v)", dreamID, d["status"], d["error"])
 	}
 	sessionID = d["session_id"].(string)
-	setSessionStatus(t, s, sessionID, "idle")
+	foldSessionIdle(t, s, sessionID)
 	return dreamID, sessionID
+}
+
+// foldSessionIdle is the whole settlement the brain commits when a turn ends:
+// the session and its primary thread idle, and the model_turn that carried the
+// turn is done. The item is part of it because arm 9 depends on it — Enqueue
+// dedups against a live item of the same (session, thread, kind), so a stage
+// posted while the previous turn's item still stood would enqueue nothing.
+func foldSessionIdle(t *testing.T, s *tserver, sessionID string) {
+	t.Helper()
+	setSessionStatus(t, s, sessionID, "idle")
+	if _, err := s.pool.Exec(context.Background(),
+		`UPDATE work_items SET state = 'stopped' WHERE session_id = $1 AND state <> 'stopped'`,
+		sessionID); err != nil {
+		t.Fatalf("stop the settled turn's work item: %v", err)
+	}
+}
+
+// setDreamStage moves the pipeline position the way a completed stage would,
+// for the cases that begin at a stage rather than walking to it.
+func setDreamStage(t *testing.T, s *tserver, dreamID string, stage int) {
+	t.Helper()
+	if _, err := s.pool.Exec(context.Background(),
+		`UPDATE dreams SET stage = $2 WHERE id = $1`, dreamID, stage); err != nil {
+		t.Fatalf("set dream stage: %v", err)
+	}
+}
+
+// atLastStage puts a dream on the stage arm 10 answers, which is what every
+// case about a *terminal* dream wants: the stages themselves are walked by the
+// arm-9 cases below, and repeating that walk in each of them would test the
+// same advance a dozen times over.
+func atLastStage(t *testing.T, s *tserver, dreamID string) {
+	t.Helper()
+	setDreamStage(t, s, dreamID, api.DreamStageCount)
+}
+
+// exhaustPrimaryTurn leaves the session the way a model request that ran out of
+// retries leaves it: idle, with the primary thread's stop reason recording the
+// failure and a terminal session.error on the log. internal/brain's failTurn is
+// what writes this shape; the runner has to tell it apart from a finished
+// stage, which idles the same way.
+func exhaustPrimaryTurn(t *testing.T, s *tserver, sessionID string) {
+	t.Helper()
+	appendEvent(t, s, sessionID, "session.error",
+		`{"error":{"message":"upstream 529","retry_status":{"type":"exhausted"}}}`)
+	setPrimaryStop(t, s, sessionID, "retries_exhausted")
+}
+
+// cutTheDelegationBudget leaves the session the way either delegation bound
+// leaves it, which is the shape the stop reason alone cannot see: the error
+// says the run was cut, but the thread idles on end_turn exactly as a finished
+// stage does (internal/brain/delegate.go: runExhausted and chainCapped).
+func cutTheDelegationBudget(t *testing.T, s *tserver, sessionID string) {
+	t.Helper()
+	appendEvent(t, s, sessionID, "session.error",
+		`{"error":{"type":"session_delegation_exhausted_error",`+
+			`"message":"this session spent its delegation budget",`+
+			`"retry_status":{"type":"exhausted"}}}`)
+	setPrimaryStop(t, s, sessionID, "end_turn")
+}
+
+// retryTheTurn is the third shape and the one that must NOT fail the dream: the
+// brain records the same event type for a failure it then chains a fresh
+// attempt onto, and marks it retrying rather than exhausted.
+func retryTheTurn(t *testing.T, s *tserver, sessionID string) {
+	t.Helper()
+	appendEvent(t, s, sessionID, "session.error",
+		`{"error":{"message":"upstream 529","retry_status":{"type":"retrying"}}}`)
+	setPrimaryStop(t, s, sessionID, "end_turn")
+}
+
+func setPrimaryStop(t *testing.T, s *tserver, sessionID, stop string) {
+	t.Helper()
+	if _, err := s.pool.Exec(context.Background(), `
+		UPDATE session_threads SET stop_reason = jsonb_build_object('type', $2::text)
+		 WHERE session_id = $1 AND parent_thread_id IS NULL`, sessionID, stop); err != nil {
+		t.Fatalf("set the primary thread's stop reason: %v", err)
+	}
+}
+
+// primaryStageMessages is the text of every user.message the runner has posted
+// on the primary thread, in log order — one per stage opened.
+func primaryStageMessages(t *testing.T, s *tserver, sessionID string) []string {
+	t.Helper()
+	rows, err := s.pool.Query(context.Background(), `
+		SELECT payload->'content'->0->>'text' FROM events
+		 WHERE session_id = $1 AND type = 'user.message' AND thread_id IS NULL
+		 ORDER BY seq`, sessionID)
+	if err != nil {
+		t.Fatalf("read stage messages: %v", err)
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var text string
+		if err := rows.Scan(&text); err != nil {
+			t.Fatalf("scan stage message: %v", err)
+		}
+		out = append(out, text)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("read stage messages: %v", err)
+	}
+	return out
+}
+
+// wantStageMessage renders the stage message the runner owes, from the mount
+// the session really carries and the dream's own instructions.
+func wantStageMessage(t *testing.T, s *tserver, sessionID string, stage, transcripts int, instructions string) string {
+	t.Helper()
+	return api.DreamStageMessageForTest(stage, memoryMount(t, s, sessionID), transcripts, instructions)
 }
 
 // seededDreamBody is the create body every arm's case uses: one store holding
@@ -230,7 +342,7 @@ func TestDreamTickArms(t *testing.T) {
 		{
 			name: "the stage's turn cap is arm 6",
 			arrange: func(t *testing.T, s *tserver, _, _, sessionID string) {
-				t.Cleanup(api.SetDreamStageTurnCapForTest(2))
+				t.Cleanup(api.SetDreamStageTurnCapForTest(1, 2))
 				for range 3 {
 					appendEvent(t, s, sessionID, "span.model_request_end", `{}`)
 				}
@@ -240,7 +352,7 @@ func TestDreamTickArms(t *testing.T) {
 		{
 			name: "the stage's turn cap counts a child thread's turns too",
 			arrange: func(t *testing.T, s *tserver, _, _, sessionID string) {
-				t.Cleanup(api.SetDreamStageTurnCapForTest(2))
+				t.Cleanup(api.SetDreamStageTurnCapForTest(1, 2))
 				// The primary thread alone stays inside the cap; what carries
 				// the stage over it is the delegated thread's turn, counted
 				// because every thread's turns are the stage's (§3.3).
@@ -261,9 +373,49 @@ func TestDreamTickArms(t *testing.T) {
 			status: "failed", errType: "internal_error",
 		},
 		{
-			name:    "an idle session with the stage done is arm 10",
-			arrange: func(t *testing.T, s *tserver, _, _, _ string) {},
-			status:  "completed",
+			name: "an idle session whose last turn failed is arm 5, not an advance",
+			arrange: func(t *testing.T, s *tserver, _, _, sessionID string) {
+				exhaustPrimaryTurn(t, s, sessionID)
+			},
+			status: "failed", errType: "internal_error",
+		},
+		{
+			name: "an idle session whose last turn failed is arm 5 at the last stage too",
+			arrange: func(t *testing.T, s *tserver, _, dreamID, sessionID string) {
+				atLastStage(t, s, dreamID)
+				exhaustPrimaryTurn(t, s, sessionID)
+			},
+			status: "failed", errType: "internal_error",
+		},
+		{
+			name: "a delegation bound is arm 5 though the thread idles on end_turn",
+			arrange: func(t *testing.T, s *tserver, _, _, sessionID string) {
+				cutTheDelegationBudget(t, s, sessionID)
+			},
+			status: "failed", errType: "internal_error",
+		},
+		{
+			name: "a delegation bound at the last stage does not complete the dream",
+			arrange: func(t *testing.T, s *tserver, _, dreamID, sessionID string) {
+				atLastStage(t, s, dreamID)
+				cutTheDelegationBudget(t, s, sessionID)
+			},
+			status: "failed", errType: "internal_error",
+		},
+		{
+			name: "a failure the brain retried is not a failed stage",
+			arrange: func(t *testing.T, s *tserver, _, dreamID, sessionID string) {
+				atLastStage(t, s, dreamID)
+				retryTheTurn(t, s, sessionID)
+			},
+			status: "completed",
+		},
+		{
+			name: "an idle session with the last stage done is arm 10",
+			arrange: func(t *testing.T, s *tserver, _, dreamID, _ string) {
+				atLastStage(t, s, dreamID)
+			},
+			status: "completed",
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -389,6 +541,7 @@ func TestDreamClosingArm(t *testing.T) {
 		t.Fatalf("the dream owns %d files, want 3 (two transcripts and INDEX.md)", len(fileIDs))
 	}
 
+	atLastStage(t, s, dreamID)
 	tick(t, s) // arm 10 completes it
 	tick(t, s) // arm 1 closes it
 
@@ -427,6 +580,7 @@ func TestDreamClosingArmWithTheSessionGone(t *testing.T) {
 	dreamID, sessionID := startedDream(t, s, body)
 	fileIDs := dreamFileIDs(t, s, dreamID)
 
+	atLastStage(t, s, dreamID)
 	tick(t, s) // completes
 	if _, err := s.pool.Exec(context.Background(), `DELETE FROM sessions WHERE id = $1`, sessionID); err != nil {
 		t.Fatalf("delete pipeline session: %v", err)
@@ -454,6 +608,7 @@ func TestDreamClosingArmWaitsForARunningSession(t *testing.T) {
 	_, body := seededDreamBody(t, s)
 	dreamID, sessionID := startedDream(t, s, body)
 
+	atLastStage(t, s, dreamID)
 	tick(t, s) // completes while idle
 	setSessionStatus(t, s, sessionID, "running")
 	tick(t, s)
@@ -535,6 +690,7 @@ func TestDreamCompletionSecretScan(t *testing.T) {
 		writeSessionVersion(t, s, dreamOutputStore(t, s, dreamID), sessionID,
 			"/leaked.md", "the key is sk-abcdefghijklmnop")
 
+		atLastStage(t, s, dreamID)
 		tick(t, s)
 		d := getDream(t, s, dreamID)
 		if got, msg := dreamError(t, d); d["status"] != "failed" || got != "internal_error" {
@@ -550,6 +706,7 @@ func TestDreamCompletionSecretScan(t *testing.T) {
 		body := map[string]any{"inputs": dreamInputs(storeID, ids), "model": "claude-opus-4-8"}
 
 		dreamID, _ := startedDream(t, s, body)
+		atLastStage(t, s, dreamID)
 		tick(t, s)
 		if d := getDream(t, s, dreamID); d["status"] != "completed" {
 			t.Fatalf("dream is %v (%v); the clone's own versions must stay out of the scan",
@@ -569,6 +726,7 @@ func TestDreamTwoReplicasOneArm(t *testing.T) {
 	s := newTestServer(t)
 	_, body := seededDreamBody(t, s)
 	dreamID, _ := startedDream(t, s, body)
+	atLastStage(t, s, dreamID)
 
 	now := dbNow(t, s)
 	done := make(chan error, 2)
@@ -787,7 +945,7 @@ func TestDreamArmOrder(t *testing.T) {
 		s := newTestServer(t)
 		_, body := seededDreamBody(t, s)
 		dreamID, sessionID := startedDream(t, s, body)
-		t.Cleanup(api.SetDreamStageTurnCapForTest(2))
+		t.Cleanup(api.SetDreamStageTurnCapForTest(1, 2))
 		for range 3 {
 			appendEvent(t, s, sessionID, "span.model_request_end", `{}`)
 		}
@@ -824,6 +982,249 @@ func TestDreamArmOrder(t *testing.T) {
 				"is read before the session's own end", got, msg)
 		}
 	})
+}
+
+// Arm 9 (plan 41 slice 3, §3.3): the four stages are four user.messages on one
+// session's primary thread, and the runner posts each one when the session has
+// gone idle on the last. Nothing about the dream's own status moves with them.
+
+// One advance: the stage the runner opens, the turn it enqueues, and the two
+// things it must not do — move the dream, or leave the stage where it was.
+func TestDreamStageAdvance(t *testing.T) {
+	s := newTestServer(t)
+	_, body := seededDreamBody(t, s)
+	body["instructions"] = "keep the shell commands verbatim"
+	dreamID, sessionID := startedDream(t, s, body)
+	// Installed after the start, so what it counts is this arm's work rather
+	// than the pipeline session's birth.
+	collect := collectMetrics(t)
+
+	tick(t, s)
+
+	d := getDream(t, s, dreamID)
+	if d["status"] != "running" {
+		t.Fatalf("dream is %v (%v); an advance moves the stage, not the status", d["status"], d["error"])
+	}
+	if stage, _, _ := dreamInternals(t, s, dreamID); stage != 2 {
+		t.Errorf("stage = %d after the advance, want 2", stage)
+	}
+	if got := s.sessionStatus(sessionID); got != "running" {
+		t.Errorf("the pipeline session is %s, want running: the posted stage starts a turn", got)
+	}
+	msgs := primaryStageMessages(t, s, sessionID)
+	if len(msgs) != 2 {
+		t.Fatalf("the primary thread carries %d stage messages, want the start's and stage 2's", len(msgs))
+	}
+	if want := wantStageMessage(t, s, sessionID, 2, 2, body["instructions"].(string)); msgs[1] != want {
+		t.Errorf("the posted stage message is\n%s\n\nwant\n%s", msgs[1], want)
+	}
+	if n := s.liveWork(sessionID, queue.ModelTurn); n != 1 {
+		t.Errorf("%d live model_turn items, want the one the posted stage enqueued", n)
+	}
+	rm := collect()
+	if got := apiStatusCount(t, rm, "running"); got != 1 {
+		t.Errorf("running transitions = %d, want 1 (the arm woke the session once)", got)
+	}
+	for _, to := range []string{"completed", "failed"} {
+		if got := dreamTransitionCount(t, rm, to); got != 0 {
+			t.Errorf("dream transitions to %s = %d, want 0: the dream is still running", to, got)
+		}
+	}
+}
+
+// The whole pipeline, one stage per tick: the runner posts, the brain (here
+// the test) settles the turn idle, and the tick after the last stage completes
+// the dream rather than opening a fifth.
+func TestDreamWalksTheFourStagesInOrder(t *testing.T) {
+	s := newTestServer(t)
+	_, body := seededDreamBody(t, s)
+	body["instructions"] = "keep the shell commands verbatim"
+	dreamID, sessionID := startedDream(t, s, body)
+	collect := collectMetrics(t)
+
+	for range api.DreamStageCount - 1 {
+		tick(t, s)                       // arm 9 opens the next stage
+		foldSessionIdle(t, s, sessionID) // the settlement that answers it
+	}
+	tick(t, s) // arm 10, the last stage answered
+
+	if d := getDream(t, s, dreamID); d["status"] != "completed" {
+		t.Fatalf("dream is %v (%v) after four stages, want completed", d["status"], d["error"])
+	}
+	if stage, _, _ := dreamInternals(t, s, dreamID); stage != api.DreamStageCount {
+		t.Errorf("stage = %d at completion, want %d", stage, api.DreamStageCount)
+	}
+	msgs := primaryStageMessages(t, s, sessionID)
+	if len(msgs) != api.DreamStageCount {
+		t.Fatalf("the primary thread carries %d stage messages, want %d", len(msgs), api.DreamStageCount)
+	}
+	for i, got := range msgs {
+		if want := wantStageMessage(t, s, sessionID, i+1, 2, body["instructions"].(string)); got != want {
+			t.Errorf("message %d is not stage %d's:\n%s\n\nwant\n%s", i+1, i+1, got, want)
+		}
+	}
+	if got := apiStatusCount(t, collect(), "running"); got != api.DreamStageCount-1 {
+		t.Errorf("running transitions = %d, want %d (one per stage the runner opened)",
+			got, api.DreamStageCount-1)
+	}
+}
+
+// The caps are per stage (30 / 300 / 60 / 30), so the same turns that
+// exhaust one stage's budget sit well inside another's. The cases below set
+// their own caps rather than leaning on those numbers, which are measured and
+// will move again.
+// A stage outside 1..4 is a row nothing in this code can write — the start
+// writes 1 and arm 9 only increments below the last — so it stands for
+// corruption, and what the arm must not do with it is index the cap array. The
+// panic that would follow runs in the sweep's own goroutine, which no recover
+// covers, so it would end the controlplane rather than the dream.
+func TestDreamStageOutsideThePipelineFailsRatherThanPanics(t *testing.T) {
+	s := newTestServer(t)
+	_, body := seededDreamBody(t, s)
+	dreamID, _ := startedDream(t, s, body)
+	setDreamStage(t, s, dreamID, api.DreamStageCount+1)
+
+	tick(t, s)
+
+	d := getDream(t, s, dreamID)
+	got, msg := dreamError(t, d)
+	if d["status"] != "failed" || got != "internal_error" ||
+		msg != "dream is at stage 5, outside the pipeline's 1 to 4" {
+		t.Fatalf("dream is %v/%v/%q, want failed on the corrupt stage", d["status"], got, msg)
+	}
+}
+
+func TestDreamStageTurnCapsArePerStage(t *testing.T) {
+	t.Run("stage 3 is measured against stage 3's cap", func(t *testing.T) {
+		s := newTestServer(t)
+		_, body := seededDreamBody(t, s)
+		dreamID, sessionID := startedDream(t, s, body)
+		setDreamStage(t, s, dreamID, 3)
+		t.Cleanup(api.SetDreamStageTurnCapForTest(3, 2))
+		for range 3 {
+			appendEvent(t, s, sessionID, "span.model_request_end", `{}`)
+		}
+
+		tick(t, s)
+
+		d := getDream(t, s, dreamID)
+		got, msg := dreamError(t, d)
+		if d["status"] != "failed" || got != "internal_error" ||
+			msg != "stage 3 exceeded its budget of 2 model turns" {
+			t.Fatalf("dream is %v/%v/%q, want failed on stage 3's own budget", d["status"], got, msg)
+		}
+	})
+	t.Run("the same turns at stage 1 are inside stage 1's", func(t *testing.T) {
+		s := newTestServer(t)
+		_, body := seededDreamBody(t, s)
+		dreamID, sessionID := startedDream(t, s, body)
+		for range 3 {
+			appendEvent(t, s, sessionID, "span.model_request_end", `{}`)
+		}
+
+		tick(t, s)
+
+		d := getDream(t, s, dreamID)
+		if d["status"] != "running" {
+			t.Fatalf("dream is %v (%v); three turns are inside stage 1's budget",
+				d["status"], d["error"])
+		}
+		if stage, _, _ := dreamInternals(t, s, dreamID); stage != 2 {
+			t.Errorf("stage = %d, want 2: an under-budget idle stage advances", stage)
+		}
+	})
+}
+
+// The count belongs to the stage, not to the session: the turns spent before a
+// stage's opening message are not that stage's, which is what makes the last
+// stage's cap survivable on a run whose digest stage spent hundreds.
+func TestDreamStageTurnsCountFromTheStageOpener(t *testing.T) {
+	s := newTestServer(t)
+	_, body := seededDreamBody(t, s)
+	dreamID, sessionID := startedDream(t, s, body)
+	for range 3 { // stage 1's turns, inside its budget
+		appendEvent(t, s, sessionID, "span.model_request_end", `{}`)
+	}
+
+	tick(t, s) // arm 9: stage 2's message lands after those three events
+	foldSessionIdle(t, s, sessionID)
+	t.Cleanup(api.SetDreamStageTurnCapForTest(2, 2))
+	tick(t, s)
+
+	d := getDream(t, s, dreamID)
+	if d["status"] != "running" {
+		t.Fatalf("dream is %v (%v); stage 1's turns are not stage 2's to spend",
+			d["status"], d["error"])
+	}
+	if stage, _, _ := dreamInternals(t, s, dreamID); stage != 3 {
+		t.Errorf("stage = %d, want 3", stage)
+	}
+}
+
+// The post helper answers only an idle session. The arm reads the status
+// before it decides (§3.3), so the way to a running one is the window between
+// that read and the post — where the helper's own locked re-read is the last
+// check, and its error rolls the whole arm back.
+func TestDreamStagePostRefusesANonIdleSession(t *testing.T) {
+	s := newTestServer(t)
+	_, body := seededDreamBody(t, s)
+	dreamID, sessionID := startedDream(t, s, body)
+
+	var once sync.Once
+	defer api.SetDreamHookAfterLockForTest(func() {
+		once.Do(func() { setSessionStatus(t, s, sessionID, "running") })
+	})()
+
+	if err := api.DreamTickForTest(context.Background(), s.pool, s.blobs,
+		dbNow(t, s), dreamCfg()); err == nil {
+		t.Fatal("the tick reported success although it posted a stage to a session that had started running")
+	}
+	d := getDream(t, s, dreamID)
+	if d["status"] != "running" {
+		t.Fatalf("dream is %v (%v), want running: the rolled-back arm changed nothing",
+			d["status"], d["error"])
+	}
+	if stage, _, _ := dreamInternals(t, s, dreamID); stage != 1 {
+		t.Errorf("stage = %d, want 1: the advance rolled back with its post", stage)
+	}
+	if msgs := primaryStageMessages(t, s, sessionID); len(msgs) != 1 {
+		t.Errorf("the primary thread carries %d stage messages, want only the start's", len(msgs))
+	}
+}
+
+// The post's other refusal: an idle thread that still holds an unanswered
+// tool_use cannot be woken, because the resumed turn would replay an assistant
+// tool_use no result answers. Under the internal agent's always_allow policy
+// such a call is not an ask, so arm 8 does not see it and this guard is what
+// catches it.
+func TestDreamStagePostRefusesAnUnansweredToolUse(t *testing.T) {
+	s := newTestServer(t)
+	_, body := seededDreamBody(t, s)
+	dreamID, sessionID := startedDream(t, s, body)
+	appendEvent(t, s, sessionID, "agent.tool_use",
+		`{"name":"bash","input":{},"evaluated_permission":"allow"}`)
+
+	// The tick succeeds, because failing the dream is the handling: no later
+	// tick can clear an unanswered tool_use, so retrying it would spend the
+	// whole runtime budget and then report `timeout` for a fault that had a
+	// name from the first tick.
+	if err := api.DreamTickForTest(context.Background(), s.pool, s.blobs,
+		dbNow(t, s), dreamCfg()); err != nil {
+		t.Fatalf("the tick errored instead of failing the dream: %v", err)
+	}
+	d := getDream(t, s, dreamID)
+	errType, msg := dreamError(t, d)
+	if d["status"] != "failed" || errType != "internal_error" ||
+		!strings.Contains(msg, "unanswered tool_use") {
+		t.Fatalf("dream is %v/%v/%q, want failed naming the unanswered tool_use",
+			d["status"], errType, msg)
+	}
+	if stage, _, _ := dreamInternals(t, s, dreamID); stage != 1 {
+		t.Errorf("stage = %d, want 1: the advance took no stage with it", stage)
+	}
+	if msgs := primaryStageMessages(t, s, sessionID); len(msgs) != 1 {
+		t.Errorf("the primary thread carries %d stage messages, want only the start's", len(msgs))
+	}
 }
 
 // --- shared readers -------------------------------------------------------
