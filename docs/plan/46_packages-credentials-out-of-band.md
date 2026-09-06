@@ -108,7 +108,10 @@ HTTPS. The placeholder would reach the origin literally.
    userinfo.
 4. **The credential is materialized into a scratch `HOME`, and the install for
    that manager runs with `HOME` pointed at it.** `$HOME/.netrc` always;
-   `$HOME/.npmrc` additionally for npm, whose fetcher reads no netrc. The
+   `$HOME/.npmrc` additionally for npm, whose fetcher reads no netrc. Both are
+   written `0600` rather than the `0644` a zero mode lands: it does not close
+   the same-user read below, since the install and the agent share a root, but
+   an image carrying any other user no longer has them readable by default. The
    alternative — writing into the image's own `/root` and restoring afterwards —
    needs a read-modify-write and a restore path that can leave a credential
    behind when it fails. A scratch directory has neither. The cost is stated
@@ -229,7 +232,7 @@ Each rung is a test that fails before the change and passes after.
    rewording would stop exercising.
 3. **The materialized files**, per transport: the netrc's bare, unquoted values
    and its one line per host, the npmrc's base64 `_password` and its per-host
-   keys, and that the npmrc is written for npm alone.
+   keys, that the npmrc is written for npm alone, and that both land `0600`.
 4. **One hostname the list disagrees about** leaves every entry on it alone and
    writes no file — two different credentials, and a second URL naming the host
    with none, on another port and over plain `http` alike; the same credential

@@ -769,9 +769,18 @@ func (e *Executor) installPackages(ctx context.Context, sb sandbox.Sandbox, sid 
 			})
 		}
 		if credsDir != "" {
-			files := []sandbox.FileWrite{{Path: credsDir + "/.netrc", Data: netrcFile(stripped.creds)}}
+			// 0600, because a zero Mode lands 0644 and these two files are the
+			// credential. It does not close the same-user read the design
+			// concedes — the install and the agent share a root — but an image
+			// with any other user in it no longer has these readable by
+			// default, and the install owns them either way.
+			files := []sandbox.FileWrite{
+				{Path: credsDir + "/.netrc", Data: netrcFile(stripped.creds), Mode: 0o600},
+			}
 			if m.npmrc {
-				files = append(files, sandbox.FileWrite{Path: credsDir + "/.npmrc", Data: npmrcFile(stripped.creds)})
+				files = append(files, sandbox.FileWrite{
+					Path: credsDir + "/.npmrc", Data: npmrcFile(stripped.creds), Mode: 0o600,
+				})
 			}
 			// A write that fails faults the item exactly as a failed Exec does.
 			// Falling back to the credential in argv instead would answer a

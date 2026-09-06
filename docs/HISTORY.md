@@ -172,6 +172,22 @@ bound, for the life of the sandbox. A change now means a record whose digest
 differs; with no record there is nothing to have changed from, and the dedupe
 query is the right answer.
 
+CodeRabbit found the same dedupe defect independently, and three more. Two were
+documentation telling a reader something the code contradicts: the security
+guide offered an npm 6 workaround — move the credential into the image's own npm
+configuration — that the paragraph's own measurement rules out, since npm 6
+derives auth from the configured registry and sends it to no other host, so no
+`.npmrc` key restores a lifted tarball credential. And the credential files were
+landing `0644`, because a zero `FileWrite.Mode` means `0644`; they are `0600`
+now, which does not close the same-user read the design concedes but does keep
+out any other user the image carries. The third was a test that could not fail —
+it compared SHA-256 over two different strings, which always differ — standing
+in for the sentinel's "until the list changes" contract. It is driven end to end
+now: a credentialed list fails its three attempts, the credential is rotated,
+and the fourth install runs against a fresh attempt count, both lists assembling
+the same credential-free command so that only the sentinel can tell them
+apart.
+
 ## The `unrestricted` address floor (plan 45, #570) — archived 2026-09-06, delivered in one PR
 
 `unrestricted` admitted every host *and* every address. A recording of the

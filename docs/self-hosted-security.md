@@ -208,7 +208,8 @@ directory then lives as long as the sandbox does.
 What this does not make private is the **sandbox itself**. An install needs root,
 and the agent's own tool calls run in that same sandbox as the same user, so the
 credential file is exactly as readable there as the argv it replaced, for the
-length of the install. The sandbox is one trust domain; prefer high-entropy
+length of the install — the files are written `0600`, which keeps out any *other*
+user the image carries but not the one the agent already is. The sandbox is one trust domain; prefer high-entropy
 deploy tokens over reusable passwords, and scope them to the repository or
 registry path the session needs.
 
@@ -240,12 +241,16 @@ included — so an image that bakes a private index into pip.conf loses it for
 that install; and every `HOME`-rooted cache is cold.
 
 One shape is made worse, and it is the only one: **npm 6 and older**. That npm
-sends no credential for a non-registry fetch from any `.npmrc` key (measured),
-so an npm entry that is a credentialed tarball URL now authenticates with
-nothing and fails where it used to succeed. npm 7 and later are unaffected. If
-your image ships npm 6, either move the credential into the image's own npm
-configuration or keep it in the entry by using a shape this pass does not lift —
-and be aware of the exec-audit exposure that then remains.
+sends no credential for a non-registry fetch from any `.npmrc` key (measured):
+its fetcher derives auth from the configured registry and sends it only where
+the host matches, so a credentialed tarball URL now authenticates with nothing
+and fails where it used to succeed. npm 7 and later are unaffected, and there is
+no `.npmrc` shape that restores it — an `_authToken` or `username`/`_password`
+for the tarball host is exactly what npm 6 will not send. So the fallbacks are
+elsewhere: publish the package to a registry npm is configured for, where npm 6
+authenticates normally; upgrade npm; or keep the credential in the entry by
+using a shape this pass does not lift — and accept the exec-audit exposure that
+then remains.
 
 Two things do degrade silently rather than fail, both about file **modes** and
 neither about the correctness of a file's contents. A write preserves the target's

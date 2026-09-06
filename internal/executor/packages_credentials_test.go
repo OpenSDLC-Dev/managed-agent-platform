@@ -2,6 +2,7 @@ package executor
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -92,6 +93,27 @@ func TestACredentialNeverReachesTheInstallCommand(t *testing.T) {
 	// timed-out install is SIGKILLed and its trap never runs.
 	if !slices.Contains(sb.cmds, "rm -rf '"+dir+"'") {
 		t.Errorf("no removal ran after the install; commands were %v", sb.cmds)
+	}
+}
+
+// TestTheCredentialFilesAreNotWorldReadable: a zero FileWrite.Mode lands 0644,
+// and these two files are the credential. The same-user read stays open — the
+// install and the agent share a root, which no file mode closes — but nothing
+// else in the image reads them by default.
+func TestTheCredentialFilesAreNotWorldReadable(t *testing.T) {
+	sb := &fakeSandbox{}
+	h := newHarness(t, sb)
+	h.setPackages(t, map[string][]string{
+		"npm": {"https://bot:s3cr3t@registry.example/pkg.tgz"},
+	})
+	h.suspend(t, writeUse("out.txt", "hello"))
+	h.stepOnce(t)
+
+	dir := credsDir(t, sb)
+	for _, name := range []string{"/.netrc", "/.npmrc"} {
+		if mode := sb.modes[dir+name]; mode != 0o600 {
+			t.Errorf("%s mode = %#o, want 0600", name, mode)
+		}
 	}
 }
 
@@ -425,15 +447,49 @@ func TestAnotherHostWithoutACredentialIsNotADisagreement(t *testing.T) {
 	}
 }
 
-// TestARotatedCredentialIsAChangedList: the sentinel's "until the list changes"
-// contract. Comparing the stripped form would make a corrected credential
-// indistinguishable from the broken one it replaces, so a list that had spent
-// its three attempts would never install again.
-func TestARotatedCredentialIsAChangedList(t *testing.T) {
-	bad := packagesDigest([]string{"git+https://bot:bad@host.example.com/repo"})
-	good := packagesDigest([]string{"git+https://bot:good@host.example.com/repo"})
-	if bad == good {
-		t.Error("a rotated credential digests the same, so the sandbox would skip the install")
+// TestARotatedCredentialIsInstalledAgain is the sentinel's "until the list
+// changes" contract, driven end to end rather than asserted on two hashes. A
+// list that has spent its three attempts is left alone until it changes, and a
+// corrected credential has to count as a change or the fix can never be tried —
+// which is the whole reason the sentinel digests the list as written while the
+// published digest does not. Both lists assemble the *same* install command,
+// the credential having been lifted out of each, so nothing but the sentinel
+// can tell them apart.
+func TestARotatedCredentialIsInstalledAgain(t *testing.T) {
+	sb := &fakeSandbox{execHook: failInstall(sandbox.ExecResult{ExitCode: 1, Stdout: "401 Unauthorized\n"})}
+	h := newHarness(t, sb)
+	h.setPackages(t, map[string][]string{"pip": {"https://bot:bad@host.example.com/lib.whl"}})
+	for i := 1; i <= 4; i++ {
+		h.suspend(t, writeUse(fmt.Sprintf("f%d.txt", i), "x"))
+		h.stepOnce(t)
+	}
+	if n := len(installCmds(sb)); n != 3 {
+		t.Fatalf("install attempts = %d, want the three the cap allows", n)
+	}
+
+	h.setPackages(t, map[string][]string{"pip": {"https://bot:good@host.example.com/lib.whl"}})
+	h.suspend(t, writeUse("f5.txt", "x"))
+	h.stepOnce(t)
+
+	cmds := installCmds(sb)
+	if len(cmds) != 4 {
+		t.Fatalf("install attempts = %d, want a fourth: a rotated credential is a changed list", len(cmds))
+	}
+	// Not a byte comparison of the two commands: the scratch directory's name
+	// is random per pass by design. What must match is everything the manager
+	// is handed — the same credential-free URL, and neither secret anywhere.
+	for i, c := range cmds {
+		if !strings.Contains(c, "'https://host.example.com/lib.whl'") {
+			t.Errorf("command %d = %s, want the credential-free URL", i, c)
+		}
+		for _, secret := range []string{"bad", "good"} {
+			if strings.Contains(c, ":"+secret+"@") {
+				t.Errorf("command %d carries the %q credential: %s", i, secret, c)
+			}
+		}
+	}
+	if rec := sentinel(t, sb)["pip"]; rec.Attempts != 1 || rec.Installed {
+		t.Errorf("sentinel = %+v, want one fresh attempt and no install", rec)
 	}
 }
 
