@@ -93,11 +93,12 @@ that all five call sites already import.
 type Dialer struct {
 	Timeout       time.Duration
 	FallbackDelay time.Duration // 0 selects net.Dialer's own 300ms
-	// Lookup resolves a name to addresses. network is "ip", "ip4" or "ip6" —
-	// the spelling net.Resolver.LookupIP takes — so nil selects
-	// net.DefaultResolver.LookupIP and a "tcp4" dial still resolves only A
-	// records.
-	Lookup func(ctx context.Context, network, host string) ([]net.IP, error)
+	// Lookup resolves a name to addresses. Nil selects
+	// net.DefaultResolver.LookupIPAddr — LookupIPAddr rather than LookupIP,
+	// because only the former keeps IPAddr.Zone. That is also why a "tcp4"
+	// dial drops the AAAA answers here rather than asking the resolver for
+	// one family: the network is not in this signature.
+	Lookup func(ctx context.Context, host string) ([]net.IPAddr, error)
 	// Allow judges every resolved address before any connect. Nil selects
 	// IPAllowed. The context is passed because a caller's answer can depend on
 	// it — the gate's floor is per admission class, and the class travels in
@@ -121,17 +122,27 @@ Behaviour, in order:
 2. The timeout starts here, before the lookup, which is where `net.Dialer`
    starts its own. A negative value is already expired, as `net.Dialer` reads
    one.
-3. `net.SplitHostPort`. What it refuses is dialled unchanged — the same
-   fail-as-before rule `rootedName` already argues in place.
+3. `net.SplitHostPort`. What it refuses goes to step 5 rather than to the
+   standard dialler: that was the one route on which a socket could open
+   without the floor having been asked anything, and it was safe only for as
+   long as the standard dialler's parser stayed exactly as strict as
+   `SplitHostPort`.
 4. An address literal skips the lookup and is judged directly. This is not an
    optimisation: it is what keeps a literal's refusal identical to today's.
-5. A host that is neither a name nor an address `net.ParseIP` reads — a
-   zone-scoped literal, or the empty host of `:443` — is judged as an
-   *unreadable* address and dialled unchanged if the caller admits it anyway.
-   That is exactly what the `Control` hook did: it refused these before
-   consulting its predicate, and it was not installed at all for a class the
-   gate exempts from the floor, which dialled them. Both halves have to survive
-   or the change moves what a session can reach.
+5. An authority step 3 could not split, or a host that is neither a name nor
+   an address `net.ParseIP` reads — a zone-scoped literal, the empty host of
+   `:443`, a bracketed `[foo:bar]` — is judged as an *unreadable* address and
+   dialled unchanged if the caller admits it anyway.
+   None of these could reach a socket for a floored class before either: a
+   zone-scoped literal and an empty host errored inside the `Control` hook
+   before its predicate ran, while an authority the parser or the resolver
+   rejects never reached the hook at all. For a class the gate exempts from the
+   floor no hook was installed, and all of them went to the standard dialler
+   unchanged — which is what still happens, so each still fails, or connects,
+   exactly as it did. Both halves have to survive or the change moves what a
+   session can reach. The one difference is the kind of error a floored class
+   gets for the shapes that used to fail below the hook: `ErrRefused` rather
+   than a parse or lookup failure.
 6. Otherwise one `Lookup`, whose answer is unmapped — `net.IP` carries an A
    record as sixteen bytes with the IPv4-mapped prefix, and dialling that
    literally would spell `198.51.100.1` as `[::ffff:198.51.100.1]`.
@@ -210,10 +221,19 @@ This plan changes *where* the resolution happens, not *who is floored* and not
 | `internal/api/vaultvalidate.go` | `net.Dialer{Control: …}` over `probeIPAllowed` | the primitive, seam kept |
 | `internal/vaultresolve/mcprefresh.go` | `net.Dialer{Control: …}` over `refreshIPAllowed` | the primitive, seam kept |
 
-Nothing above changes what any of them may reach. The three non-gate callers
-have no admitted-name-versus-dialled-name divergence to close — they dial a URL
-with no host allowlist above it — and they are converted so that one dialler is
-the whole answer, not because they are broken.
+Nothing above changes what any of them may reach, with one measured exception,
+found by the re-verification and recorded here rather than smoothed over. The
+deleted `Control` hook refused **every resolved address carrying a zone**:
+`net.ParseIP` answers nil for one, so the hook errored before its predicate ran.
+A zoned answer the floor admits is now dialled, zone kept. Observing it takes an
+operator's own resolver answering a non-link-local name with a zone — link-local
+is refused either way — and it is what `net.Dialer` does with the same answer,
+but it is a difference and not nothing.
+
+The three non-gate callers have no admitted-name-versus-dialled-name divergence
+to close — they dial a URL with no host allowlist above it — and they are
+converted so that one dialler is the whole answer, not because they are
+broken.
 
 TLS server names and `Host` headers are untouched by construction: the rewrite
 happens inside `DialContext`, which receives the address and returns a
@@ -242,14 +262,16 @@ rather than the network.
    completes within a small multiple of `FallbackDelay`, not of `Timeout` — and
    not *before* it either, which is what catches a race started too early. The
    per-address share of the budget is driven directly, either side of its floor.
-6. **Literals and malformed addresses are unchanged**, and this is the item
-   the review pass rewrote: the first draft asserted it and tested only part of
-   it. `[::1]` and a bare IPv4 literal are judged and dialled as before;
-   `[[::1]]:443` still fails as the standard dialler fails it; and the two
-   shapes the old hook refused *without consulting its predicate* — a
-   zone-scoped literal and the empty host of `:443` — are driven on both sides,
-   refused for a floored class and dialled unchanged for an exempt one
-   (`TestAnAddressTheFloorCannotReadKeepsItsOldAnswer`).
+6. **Literals and malformed addresses keep their old answers**, and this is
+   the item two review passes rewrote: the first draft asserted it and tested
+   only part of it. `[::1]` and a bare IPv4 literal are judged and dialled as
+   before. Every shape the old hook refused *without consulting its
+   predicate* — a zone-scoped literal, the empty host of `:443`, a bracketed
+   `[foo:bar]`, and an authority that cannot be split at all — is driven on
+   both sides: refused for a floored class, and handed to the standard dialler
+   unchanged for an exempt one, where `[[::1]]:443` still fails exactly as it
+   always did (`TestAnAddressTheFloorCannotReadKeepsItsOldAnswer`,
+   `TestAnAddressThisCannotSplitFailsAsBefore`).
 7. **The class still decides.** In `internal/gate`, an `admitOperator` dial
    reaches an address the floor refuses and an `admitMCP` one does not — the
    existing assertions, re-pointed at the new dialler.
@@ -259,8 +281,8 @@ rather than the network.
    failure, and none dies by hanging the package until its own timeout (one
    did, and the test was bounded rather than the mutant retired, because a test
    that hangs on a regression reports it as a timeout instead of as itself).
-   Twenty-eight mutants, twenty-eight killed. Three survived a pass and all
-   three were real: an all-refused answer
+   Twenty-nine mutants, twenty-nine killed. Four survived a pass and all four
+   were real: an all-refused answer
    was still reporting `ErrRefused` through a generic fallback rather than the
    refusal that names the offending address, and `netip.Addr.WithZone("")` before
    `AsSlice()` turned out to be a no-op — netip keeps a zone beside the address
@@ -270,7 +292,12 @@ rather than the network.
    the port-less networks anyway, so nothing was left holding `portCarrying`
    itself. Its own property is that the refusal does not depend on the caller's
    floor — a class the caller exempts still cannot dial a network with no
-   address to judge — and that is what the test drives now.
+   address to judge — and that is what the test drives now. The fourth was
+   written by the re-verification rather than by this suite: dropping the colon
+   from the test for a host that is not an address left the package green,
+   because every case reaching that branch also carried a percent sign or an
+   empty host. A bracketed `[foo:bar]` reaches it by its colon alone, and is
+   now one of the shapes item 6 above drives.
 
 ## Docs
 

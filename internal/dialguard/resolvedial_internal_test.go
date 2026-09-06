@@ -427,15 +427,27 @@ func TestALiteralIsNotResolved(t *testing.T) {
 	}
 }
 
-// TestAnAddressTheFloorCannotReadKeepsItsOldAnswer. Two shapes are neither a
-// name nor something net.ParseIP can read: a zone-scoped literal, and the empty
-// host of ":443". The Control hook this type replaced refused both without ever
-// consulting its predicate — and was not installed at all for a class the gate
-// exempts from the floor, which dialled them unchanged. Both halves have to
-// survive, or the change moves what a session can reach.
+// TestAnAddressTheFloorCannotReadKeepsItsOldAnswer. Three authorities carry no
+// address the floor can read: a zone-scoped literal, the empty host of ":443",
+// and a bracketed host that is not an address at all. None of them could reach
+// a socket for a floored class before — the first two errored inside the
+// Control hook before its predicate ran, and the third failed in the resolver
+// without the hook being reached — and all of them went to the standard dialler
+// unchanged for a class the gate exempts from the floor, which had no hook
+// installed. Both halves have to survive, or the change moves what a session
+// can reach. What does change for the floored half is the error's kind: the
+// third used to fail as a lookup and now fails as ErrRefused.
 func TestAnAddressTheFloorCannotReadKeepsItsOldAnswer(t *testing.T) {
 	t.Parallel()
-	for _, addr := range []string{"[2001:db8::1%eth0]:443", "[fe80::1%eth0]:443", ":443"} {
+	for _, addr := range []string{
+		"[2001:db8::1%eth0]:443",
+		"[fe80::1%eth0]:443",
+		":443",
+		// The last one is the only shape here that reaches the unreadable
+		// branch by its colon alone: the other three carry a percent sign or
+		// an empty host. Without it the colon is a guard no test can fail.
+		"[foo:bar]:443",
+	} {
 		t.Run(addr, func(t *testing.T) {
 			t.Parallel()
 			var judged []net.IP
@@ -664,9 +676,11 @@ func TestAnAddressThisCannotSplitFailsAsBefore(t *testing.T) {
 	}
 }
 
-// TestTheDialNetworkFiltersTheFamilies: a "tcp4" dial takes A records only,
-// exactly as net.Dialer's own resolution does — it resolves both families and
-// filters, which is why the filter lives here rather than in the lookup.
+// TestTheDialNetworkFiltersTheFamilies: a "tcp4" dial takes A records only.
+// net.Dialer both hints the resolver by family and filters what comes back;
+// this reproduces the filtering half alone, because the network is not in a
+// signature that has to keep the zone, and filtering is the half that decides
+// what gets dialled.
 func TestTheDialNetworkFiltersTheFamilies(t *testing.T) {
 	t.Parallel()
 	for network, want := range map[string][]string{
@@ -760,26 +774,60 @@ func TestTheProductionResolverIsWiredUp(t *testing.T) {
 // TestTheBudgetsOwnErrorSurvives: when the budget is gone, net.Dialer answers
 // with the context's error rather than with whatever the first address happened
 // to fail with, so errors.Is(err, context.DeadlineExceeded) means what it says.
+//
+// Both halves are driven by a budget that is already spent rather than by one
+// running out mid-dial. A budget under partialDeadline's two-second floor gives
+// each address everything that is left, so the per-address deadline lands on
+// the parent's and which timer fires first is not decided — and when the child
+// wins, one more address is tried and its predecessor's error is what comes
+// back, exactly as net.Dialer answers the same tie. The guard is what this
+// holds; the tie is not a property either dialler has.
 func TestTheBudgetsOwnErrorSurvives(t *testing.T) {
 	t.Parallel()
-	d := &Dialer{
-		Timeout:       120 * time.Millisecond,
-		FallbackDelay: -1,
-		Lookup: func(context.Context, string) ([]net.IPAddr, error) {
-			return ips(t, "198.51.100.1", "198.51.100.2", "198.51.100.3"), nil
-		},
-		dialOne: func(ctx context.Context, _, addr string) (net.Conn, error) {
-			if strings.HasPrefix(addr, "198.51.100.1:") {
+
+	t.Run("spent before the first address", func(t *testing.T) {
+		t.Parallel()
+		ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+		defer cancel()
+		d := &Dialer{
+			Lookup: func(context.Context, string) ([]net.IPAddr, error) {
+				return ips(t, "198.51.100.1", "198.51.100.2"), nil
+			},
+			dialOne: func(context.Context, string, string) (net.Conn, error) {
 				return nil, errors.New("connection refused")
-			}
-			<-ctx.Done()
-			return nil, ctx.Err()
-		},
-	}
-	_, err := d.DialContext(context.Background(), "tcp", "slow.example:443")
-	if !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("err = %v, want the budget's own error", err)
-	}
+			},
+		}
+		_, err := d.DialContext(ctx, "tcp", "slow.example:443")
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("err = %v, want the budget's own error", err)
+		}
+	})
+
+	t.Run("spent between two addresses", func(t *testing.T) {
+		t.Parallel()
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		var rec recorder
+		d := &Dialer{
+			Lookup: func(context.Context, string) ([]net.IPAddr, error) {
+				return ips(t, "198.51.100.1", "198.51.100.2"), nil
+			},
+			dialOne: func(_ context.Context, _, addr string) (net.Conn, error) {
+				rec.add(addr)
+				// The first attempt is what spends the budget, which is the
+				// shape a real timeout has without the timer that makes it one.
+				cancel()
+				return nil, errors.New("connection refused")
+			},
+		}
+		_, err := d.DialContext(ctx, "tcp", "slow.example:443")
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("err = %v, want the context's own error", err)
+		}
+		if got := rec.all(); len(got) != 1 {
+			t.Errorf("dialled %v, want the second address left alone once there was no budget for it", got)
+		}
+	})
 }
 
 // TestPartitionPrefersTheFamilyTheResolverPutFirst keeps the resolver's RFC 6724

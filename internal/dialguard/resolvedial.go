@@ -70,7 +70,13 @@ type Dialer struct {
 	// each answer and drops IPAddr.Zone with it, so a name whose answer is a
 	// zone-scoped address would be dialled without the zone that makes it
 	// routable. Filtering the families a "tcp4" dial wants is therefore done
-	// here rather than asked of the resolver — again as net.Dialer does it.
+	// here, after the answer, rather than asked of the resolver. net.Dialer
+	// does both — it hints the resolver by family and filters what comes back —
+	// so this reproduces the filtering half only, and always asks for both
+	// families. No caller here dials tcp4 or tcp6, so what that costs is a
+	// wasted AAAA lookup rather than a wrong answer, and closing it would mean
+	// putting the network back into the signature that the zone above is the
+	// reason for keeping out.
 	//
 	// The answer's order is honoured: a resolver has already applied RFC 6724
 	// to it.

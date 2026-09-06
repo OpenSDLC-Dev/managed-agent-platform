@@ -121,18 +121,33 @@ too; and `net.IP` carries an A record as sixteen IPv4-mapped bytes, which
 `netip` reads literally, so `198.51.100.1` was being dialled as
 `[::ffff:198.51.100.1]`.
 
-Mutation-tested per the repo rule: 28 mutants, 28 killed, no survivors, each
+Mutation-tested per the repo rule: 29 mutants, 29 killed, no survivors, each
 by a named test rather than by a build failure — which the review pass asked
 to be checked rather than asserted, and which turned up one mutant that was
 dying by hanging the package until its own timeout; the test was bounded
-rather than the mutant retired. Three mutants survived a pass and all three
-were real. One showed that an all-refused answer still reported `ErrRefused`
+rather than the mutant retired. The full gate run turned up the same lesson from
+the other side: the test for a spent budget raced the dialler it was driving.
+Under `partialDeadline`'s two-second floor every address is granted whatever is
+left of the budget, so the per-address deadline lands on the parent's, and when
+the child's timer wins the loop takes one more address and reports the first
+one's error — which is what `net.Dialer` answers to the same tie. The guard was
+real and the timing was the assertion, so the test now drives a budget that is
+already spent, before the first address and between two of them, and the mutant
+dies by name either way. Four mutants survived a pass and all four were real. The first showed that an all-refused answer still reported `ErrRefused`
 through a generic fallback, losing the refusal that names the offending
-address — the test now asserts the address. The other showed that
-`netip.Addr.WithZone("")` before `AsSlice()` was a no-op, because netip
-keeps a zone beside the address rather than in it; the call read like a
-guard and removing it changed nothing, so it went, and the mutant was
-re-pointed at a rewrite that does change behaviour.
+address — the test now asserts the address. The second showed that
+`netip.Addr.WithZone("")` before `AsSlice()` was a no-op, because netip keeps a
+zone beside the address rather than in it; the call read like a guard and
+removing it changed nothing, so it went, and the mutant was re-pointed at a
+rewrite that does change behaviour. The third came with the fix above: once an
+authority that cannot be split was folded into the floor, the default `Allow`
+refused the port-less networks anyway, so nothing held the network check itself,
+and the property that is its own — that the refusal does not depend on the
+caller's floor — is what the test drives now. The fourth was written by the
+re-verification rather than by this suite: dropping the colon from the test for
+a host that is not an address left the package green, because every case
+reaching that branch also carried a percent sign or an empty host. A bracketed
+`[foo:bar]` reaches it by its colon alone, and now does.
 
 ## One host comparison, canonicalized (plan 43, #609) — archived 2026-09-06, delivered in one PR (#613)
 
