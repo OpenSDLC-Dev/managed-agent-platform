@@ -4,8 +4,10 @@ import (
 	"context"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/api"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
 )
 
 // A management key resolves exactly one workspace (plan 42 §6.2), so a value
@@ -104,5 +106,74 @@ func TestEnsureAPIKeyWritesTheConfiguredWorkspaceOnAFreshKey(t *testing.T) {
 	// the workspace is a real selector.
 	if org != "default" || workspace != workspaceB || project != "default" {
 		t.Errorf("key scope = (%s,%s,%s), want (default,%s,default)", org, workspace, project, workspaceB)
+	}
+}
+
+// The move must be loud even when two boots race to adopt the same never-seen
+// value into different workspaces: each would SELECT before either committed,
+// find no row, warn about nothing, and the later upsert would pick the tenant
+// silently. Adopters of one value therefore serialize on a transaction-scoped
+// advisory lock keyed on the hash. This test plays the first adopter: it holds
+// that lock, proves the second waits behind it, commits its row in `default`,
+// and checks the second saw the row it would otherwise have raced past.
+func TestEnsureAPIKeyRacingAdoptersStillWarnAboutTheMove(t *testing.T) {
+	s := newTestServer(t)
+	ctx := context.Background()
+	registerWorkspace(t, s.pool, workspaceB)
+	const key = "ak-raced-into-two-workspaces"
+
+	first, err := s.pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin the first adopter: %v", err)
+	}
+	defer func() { _ = first.Rollback(ctx) }()
+	// The lock EnsureAPIKeyInWorkspace takes, keyed in SQL so this test derives
+	// nothing on the Go side.
+	if _, err := first.Exec(ctx,
+		`SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`, sha256Hex(key)); err != nil {
+		t.Fatalf("take the adoption lock: %v", err)
+	}
+
+	warnings := captureWarnings(t)
+	second := make(chan error, 1)
+	go func() { second <- api.EnsureAPIKeyInWorkspace(ctx, s.pool, workspaceB, "raced", key) }()
+	select {
+	case err := <-second:
+		t.Fatalf("the second adopter returned (%v) while the first still held the lock", err)
+	case <-time.After(300 * time.Millisecond):
+	}
+
+	if _, err := first.Exec(ctx,
+		`INSERT INTO api_keys (id, name, key_hash) VALUES ($1, 'raced', $2)`,
+		domain.NewID(domain.PrefixAPIKey).String(), sha256Hex(key)); err != nil {
+		t.Fatalf("the first adopter's insert: %v", err)
+	}
+	if err := first.Commit(ctx); err != nil {
+		t.Fatalf("the first adopter's commit: %v", err)
+	}
+	select {
+	case err := <-second:
+		if err != nil {
+			t.Fatalf("EnsureAPIKeyInWorkspace once the lock was released: %v", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("the second adopter never returned after the first committed")
+	}
+
+	var workspace string
+	var rows int
+	if err := s.pool.QueryRow(ctx,
+		`SELECT workspace_id, count(*) OVER () FROM api_keys WHERE key_hash = $1`,
+		sha256Hex(key)).Scan(&workspace, &rows); err != nil {
+		t.Fatalf("read the raced key: %v", err)
+	}
+	if rows != 1 || workspace != workspaceB {
+		t.Errorf("raced key = %d row(s) in %q, want 1 in %q", rows, workspace, workspaceB)
+	}
+	got := warnings()
+	for _, want := range []string{"another workspace", "default", workspaceB} {
+		if !strings.Contains(got, want) {
+			t.Errorf("the second adopter did not warn about the move (%q missing):\n%s", want, got)
+		}
 	}
 }

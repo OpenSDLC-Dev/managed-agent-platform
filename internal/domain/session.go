@@ -42,10 +42,11 @@ func (u *Usage) Add(m ModelUsage) {
 
 // Scope is the multi-tenant scoping carried by every core resource. The
 // WORKSPACE is the isolation unit: it is what the workspace registry names,
-// what a credential resolves to, and what every scoped query filters on. OrgID
-// and ProjectID are frozen at "default" — they exist so a resource's identity
-// is complete and a later org or project split needs no migration of meaning,
-// not because anything varies them today.
+// what a credential resolves to, and what every scoped query will filter on
+// once the read predicates land (plan 42 slice 4). OrgID and ProjectID are
+// frozen at "default" — they exist so a resource's identity is complete and a
+// later org or project split needs no migration of meaning, not because
+// anything varies them today.
 //
 // A scope is DERIVED FROM THE CREDENTIAL and never computed by a handler: each
 // credential resolver puts one on the request context, and code that needs a

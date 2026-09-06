@@ -7,7 +7,7 @@ What is being worked on right now, and how far along it is — nothing else. **S
 **Plan 42 (#56) — multi-tenant activation: the workspace becomes a real scoping key.**
 Six slices. Slice 1 lands with this PR: the workspace registry (seeded `default`),
 every credential resolving one `domain.Scope`, both tenancy response headers, and
-the one header-narrowing rule (its malformed- and not-found bodies verbatim from
+the one header-narrowing rule (its malformed- and not-found message templates verbatim from
 the reference). Slices 2-6 are not started.
 
 **#78 — confirming documented wire assumptions against a real managed-agents endpoint.**

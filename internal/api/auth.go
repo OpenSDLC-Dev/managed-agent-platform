@@ -125,6 +125,16 @@ func EnsureAPIKeyInWorkspace(ctx context.Context, pool *pgxpool.Pool, workspace,
 		return err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+	// Adopters of one value serialize here, so the SELECT below sees whatever a
+	// concurrent boot committed. Without it two replicas configuring the same
+	// never-seen value into different workspaces would each find no row, neither
+	// would warn, and the later upsert would pick the tenant silently — the one
+	// move this function promises to be loud about. Transaction-scoped, so the
+	// commit or the deferred rollback releases it; keyed in SQL so a test can
+	// hold the same lock without repeating a Go-side derivation.
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`, hash); err != nil {
+		return err
+	}
 	// Adopting a key somebody issued from the console is the right outcome (see the
 	// ON CONFLICT clause below) but it must not be a silent one. An operator who
 	// pasted an archived console key out of an old runbook has just brought a
