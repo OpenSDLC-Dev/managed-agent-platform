@@ -114,9 +114,9 @@ plain-HTTP path silently keeps answering 502.
 **The empty authority** is refused by `admit` itself, at the top, before any
 set is consulted: `admitAll` answering before a host is examined at all is the
 bypass, so the one line that fixes it belongs there, where it covers every
-caller rather than each handler separately. Under `limited` it was already closed — an empty host
-matches no set — so what this adds is the `unrestricted` arm, where the dial
-went to the local system. Flooring `unrestricted` would also have caught it,
+caller rather than each handler separately. Under `limited` it was already
+closed — an empty host matches no set — so what this adds is the `unrestricted`
+arm, where the dial went to the local system. Flooring `unrestricted` would also have caught it,
 and the explicit check is kept anyway: it answers 403 rather than depending on
 what an empty address happens to resolve to, and it holds for a class the floor
 exempts. `handlePlain` carries the same shape through `http://:80/x`, and there

@@ -74,8 +74,8 @@ mechanism refused keep that distinction and read the body for it. And the
 **empty authority** found in #596's review: `CONNECT :443` gives an empty host,
 `admit` short-circuits on `admitAll` before any host is examined, and `":443"`
 is Go's local-system form — so the gate dialled loopback in the namespace it
-shares with the sandbox. Both handlers refuse it before admit is asked, which
-holds even for the class the floor exempts.
+shares with the sandbox. It is refused now before any host set is consulted,
+which holds even for the class the floor exempts.
 
 The review passes found three things worth keeping. The verification caught two
 scopings the change had made stale — `docs/ARCHITECTURE.md`'s `dialguard/` row
@@ -106,15 +106,18 @@ the first place, so a caller added later inherits it.
 Mutation-tested per the repo rule: 8 mutants, 8 killed, each by a named test.
 One survived its first pass and was real — the marker that tells the floor's own
 refusal from the rest carries an `ip != nil` half, and nothing held it, so an
-address the dialler never read would have been called private/reserved. One of them is worth keeping: putting the exemption back on
+address the dialler never read would have been called private/reserved. One
+kill is worth reporting on its own: putting the exemption back on
 `allowed_hosts` instead of `unrestricted` is killed by twenty tests, which is
 what an exemption that most of the suite depends on should look like, and is the
 evidence that the one being removed was the narrower of the two.
 
-What it does not cover is a deployment shape rather than a policy: a vault-less
-`unrestricted` session is provisioned no gate at all (`wantsGate` is `limited`
-or vault-attached) and the Docker backend networks it directly, so nothing in
-`internal/gate` runs for it. That is #620, with the three options costed —
+What it does not cover is a deployment shape rather than a policy: a session
+the executor provisions no gate for is networked directly by the Docker backend,
+so nothing in `internal/gate` runs for it. That is any `unrestricted` session
+with no vault attached (`wantsGate` is `limited`-or-vault-attached) and, because
+the same condition also requires a configured gate image and control-plane URL,
+every session at all on a deployment that sets neither — the chart's default. That is #620, with the three options costed —
 provision a gate for every session, enforce at the sandbox network layer, or
 register the gap — and it was split out deliberately rather than decided inside
 a policy change.
