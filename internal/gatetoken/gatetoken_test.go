@@ -40,7 +40,7 @@ func TestEnsureAndAuthenticate(t *testing.T) {
 	if err := gatetoken.Ensure(ctx, pool, sess.String(), token); err != nil {
 		t.Fatalf("Ensure: %v", err)
 	}
-	got, err := gatetoken.Authenticate(ctx, pool, token)
+	got, _, err := gatetoken.Authenticate(ctx, pool, token)
 	if err != nil {
 		t.Fatalf("Authenticate: %v", err)
 	}
@@ -93,14 +93,14 @@ func TestEnsureRevokesPriorToken(t *testing.T) {
 	}
 
 	// One live token per session: re-minting revokes the predecessor.
-	got, err := gatetoken.Authenticate(ctx, pool, first)
+	got, _, err := gatetoken.Authenticate(ctx, pool, first)
 	if err != nil {
 		t.Fatalf("Authenticate(prior): %v", err)
 	}
 	if got != "" {
 		t.Errorf("the prior token still authenticates (%q); it should be revoked", got)
 	}
-	got, err = gatetoken.Authenticate(ctx, pool, second)
+	got, _, err = gatetoken.Authenticate(ctx, pool, second)
 	if err != nil {
 		t.Fatalf("Authenticate(current): %v", err)
 	}
@@ -121,7 +121,7 @@ func TestRevokeInvalidatesLiveToken(t *testing.T) {
 	if err := gatetoken.Revoke(ctx, pool, sess.String()); err != nil {
 		t.Fatalf("Revoke: %v", err)
 	}
-	got, err := gatetoken.Authenticate(ctx, pool, token)
+	got, _, err := gatetoken.Authenticate(ctx, pool, token)
 	if err != nil {
 		t.Fatalf("Authenticate(revoked): %v", err)
 	}
@@ -147,7 +147,7 @@ func TestEnsureNonexistentSessionErrors(t *testing.T) {
 
 func TestAuthenticateUnknownToken(t *testing.T) {
 	pool := pgtest.NewPool(t)
-	got, err := gatetoken.Authenticate(context.Background(), pool, gatetoken.Mint())
+	got, _, err := gatetoken.Authenticate(context.Background(), pool, gatetoken.Mint())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -169,7 +169,7 @@ func TestAuthenticateArchivedSession(t *testing.T) {
 		t.Fatal(err)
 	}
 	// An archived session's gate must fail closed — the token no longer authenticates.
-	got, err := gatetoken.Authenticate(ctx, pool, token)
+	got, _, err := gatetoken.Authenticate(ctx, pool, token)
 	if err != nil {
 		t.Fatalf("Authenticate(archived): %v", err)
 	}
@@ -191,7 +191,7 @@ func TestAuthenticateAfterSessionDeleteCascades(t *testing.T) {
 		t.Fatal(err)
 	}
 	// The token row is cascade-deleted; authentication is a clean empty, not an error.
-	got, err := gatetoken.Authenticate(ctx, pool, token)
+	got, _, err := gatetoken.Authenticate(ctx, pool, token)
 	if err != nil {
 		t.Fatalf("Authenticate after cascade: %v", err)
 	}
