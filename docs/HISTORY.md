@@ -117,6 +117,109 @@ before acting):
   new record broke the pattern". Twenty-two rules over sixty-five sections on `main`; the premise
   came from a truncated grep.
 
+## One resolution per dial (plan 44, #601) — archived 2026-09-06, delivered in one PR
+
+Every outbound connection this platform makes to a customer-supplied or
+agent-declared name — a smaller set than every outbound connection, because a
+repository clone's host is fixed to `github.com` by the create-time grammar and
+the web backends dial an operator-configured reader rather than the agent's
+URL — now goes through one dialler, `dialguard.Dialer`: it
+resolves the name **once**, holds every address that came back to the
+address floor before any connect, and dials those addresses. Five call sites
+moved onto it — the per-session gate, `internal/mcp`'s two clients behind
+the executor, the vault-credential probe, the OAuth token-endpoint refresh
+and the JWKS fetch — and `dialguard.Control`, which had been the shared
+mechanism, was deleted with its last caller: two mechanisms answering "what
+does this platform do before it connects" is the drift the change exists to
+remove.
+
+The cost the issue named was paid rather than avoided. Dialling a resolved
+literal loses three things `net.Dialer` was providing, and all three are
+reproduced: failover to the next address, a per-address share of the budget
+floored at two seconds, and the second address family started after a 300ms
+fallback delay (RFC 6555), first connection winning and the loser cancelled
+and closed. The share's floor is Go's own rule, and the suite drives it
+either side — with less than the floor left, an attempt gets what remains
+rather than a slice too short to complete a handshake in. A fourth thing had
+to be reproduced and was missed on the first pass: `net.Dialer` applies its
+`Timeout` at the top of `DialContext`, before it resolves, so the bound
+covers the lookup too. Applying it after the lookup left a hanging resolver
+— and a dial to an address literal, which skips the multi-address path
+entirely — bounded only by the caller's context, which for the gate is the
+sandbox's own request. Caught by re-reading the new code against Go's, not
+by a test, which is why one now exists.
+
+**What the change does not do is the part worth recording.** #601's option
+4, the one settled on, is written there as closing "the search-list gap …
+uniformly for every class". That clause does not hold, and this is the
+correction: a single resolution of `api.example.com` under `ndots:5` still
+consults the `search` list first, still answers from an internal zone, and
+`dialguard.IPAllowed` still admits the RFC 1918 address it returns —
+deliberately, because on-prem MCP servers live there. Both reviewers then
+made the same point about the correction itself, and it is the sharper
+version: the residual is not the search list, it is a *private answer for a
+declared name*, which split-horizon DNS and a controlled zone produce
+absolutely and without any completion at all. Rooting — #601's options 1 to
+3 — narrows that residual rather than ending it. The legitimate case and the
+leak are identical in everything the gate can observe: an MCP-class host, a
+private resolved address, and a credential matched by name.
+`nexus.infra:8080` with a bearer and `api.example.com:80` with one differ
+only in *which name answered*, which is not an address question. So no rule
+about the resolved address separates them, and #601 stays open for the
+policy half — its options 1 to 3, rooting the MCP class outright, rooting it
+with an opt-out, or preferring the absolute answer. What plan 44 closes is
+the other half: the decision and the socket no longer consult different
+resolutions, and the address is now an input the request path holds, which
+is what #570 needs before it can give `unrestricted` a floor at all.
+
+Three review passes ran against it — the verifier, a Codex reviewer and
+`/code-review` — and between them they found three defects that were real
+rather than stylistic, each now carrying a test and a mutant. The dial timeout
+did not bound the lookup, so a hanging resolver was held only by the caller's
+context. The families were partitioned *after* the floor filtered the answer,
+so refusing the preferred family's first address handed the lead to the other
+one — where `net.Dialer` partitions before its hook runs. And the
+`net.SplitHostPort`-error path handed its address straight to the standard
+dialler, which was the one route on which a socket could open without the floor
+having been asked anything; folding it into the unreadable-address branch means
+no path reaches a socket unjudged, rather than no path anybody thought of.
+
+Two more came out of reading the new code against Go's rather than from any
+finding: `net.Resolver.LookupIP` drops `IPAddr.Zone` (it builds its result from
+each answer's `IP`), so the resolution moved to `LookupIPAddr` and the family
+filtering a `tcp4` dial needs moved here, which is where `net.Dialer` does it
+too; and `net.IP` carries an A record as sixteen IPv4-mapped bytes, which
+`netip` reads literally, so `198.51.100.1` was being dialled as
+`[::ffff:198.51.100.1]`.
+
+Mutation-tested per the repo rule: 29 mutants, 29 killed, no survivors, each
+by a named test rather than by a build failure — which the review pass asked
+to be checked rather than asserted, and which turned up one mutant that was
+dying by hanging the package until its own timeout; the test was bounded
+rather than the mutant retired. The full gate run turned up the same lesson from
+the other side: the test for a spent budget raced the dialler it was driving.
+Under `partialDeadline`'s two-second floor every address is granted whatever is
+left of the budget, so the per-address deadline lands on the parent's, and when
+the child's timer wins the loop takes one more address and reports the first
+one's error — which is what `net.Dialer` answers to the same tie. The guard was
+real and the timing was the assertion, so the test now drives a budget that is
+already spent, before the first address and between two of them, and the mutant
+dies by name either way. Four mutants survived a pass and all four were real. The first showed that an all-refused answer still reported `ErrRefused`
+through a generic fallback, losing the refusal that names the offending
+address — the test now asserts the address. The second showed that
+`netip.Addr.WithZone("")` before `AsSlice()` was a no-op, because netip keeps a
+zone beside the address rather than in it; the call read like a guard and
+removing it changed nothing, so it went, and the mutant was re-pointed at a
+rewrite that does change behaviour. The third came with the fix above: once an
+authority that cannot be split was folded into the floor, the default `Allow`
+refused the port-less networks anyway, so nothing held the network check itself,
+and the property that is its own — that the refusal does not depend on the
+caller's floor — is what the test drives now. The fourth was written by the
+re-verification rather than by this suite: dropping the colon from the test for
+a host that is not an address left the package green, because every case
+reaching that branch also carried a percent sign or an empty host. A bracketed
+`[foo:bar]` reaches it by its colon alone, and now does.
+
 ## One host comparison, canonicalized (plan 43, #609) — archived 2026-09-06, delivered in one PR (#613)
 
 Three packages each carried a hand-rolled ASCII case fold to decide whether two

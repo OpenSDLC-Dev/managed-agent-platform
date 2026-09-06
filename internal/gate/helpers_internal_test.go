@@ -42,8 +42,8 @@ func TestTheGatesDialerBoundsTheConnectPhase(t *testing.T) {
 	if d.Timeout <= 0 {
 		t.Errorf("dialer Timeout = %v, want a finite bound on the connect phase", d.Timeout)
 	}
-	if d.ControlContext == nil {
-		t.Error("dialer has no ControlContext, so the address floor never runs")
+	if d.Allow == nil {
+		t.Error("dialer has no Allow, so the address floor never runs")
 	}
 }
 
@@ -356,6 +356,38 @@ func TestWhatEachAdmissionClassAsksOfTheDial(t *testing.T) {
 		if got := tc.how.rooted(); got != tc.rooted {
 			t.Errorf("%v.rooted() = %v, want %v", tc.how, got, tc.rooted)
 		}
+	}
+}
+
+// The floor is wired to the admission marker rather than to the dial itself:
+// the dialler judges every resolved address before any connect, and what it
+// asks of one depends on the class the handler recorded in the context. The two
+// end-to-end tests in gate_test.go exercise that through a real origin; this
+// drives the wiring directly, so a class that quietly stopped being floored is
+// caught by name rather than by whichever origin a test happened to reach.
+func TestTheGatesFloorFollowsTheAdmissionClass(t *testing.T) {
+	d := newDialer(dialguard.IPAllowed)
+	loopback := net.ParseIP("127.0.0.1")
+	for _, tc := range []struct {
+		how     admission
+		refused bool
+	}{
+		{admitNone, true},
+		{admitUnrestricted, false},
+		{admitOperator, false},
+		{admitMCP, true},
+		{admitRegistry, true},
+	} {
+		err := d.Allow(withAdmission(context.Background(), tc.how), loopback)
+		if refused := err != nil; refused != tc.refused {
+			t.Errorf("class %d: refused = %v (%v), want %v", tc.how, refused, err, tc.refused)
+		}
+	}
+	// A context no handler marked reads as the zero value, which floors: a dial
+	// that reached the dialler without passing admit is the last one to hand an
+	// unfloored socket.
+	if d.Allow(context.Background(), loopback) == nil {
+		t.Error("an unmarked context must be floored")
 	}
 }
 
