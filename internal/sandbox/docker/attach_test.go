@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os/exec"
 	"testing"
+	"time"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/sandbox"
@@ -36,9 +37,7 @@ func TestAttachRefusesAStoppedContainerAndLeavesItStopped(t *testing.T) {
 			t.Errorf("reap: %v", err)
 		}
 	})
-	if out, err := exec.Command("docker", "stop", "-t", "0", sb.ID()).CombinedOutput(); err != nil {
-		t.Fatalf("docker stop %s: %v: %s", sb.ID(), err, out)
-	}
+	stopContainer(t, sb.ID())
 
 	got, err := provider.Attach(ctx, sid)
 	if !errors.Is(err, sandbox.ErrNotFound) {
@@ -80,6 +79,24 @@ func TestAttachRefusesAContainerThatIsNotOurs(t *testing.T) {
 	}
 	if got != nil {
 		t.Errorf("attach returned a handle %v for a container this platform does not own", got.ID())
+	}
+}
+
+// stopContainer leaves a fixture container stopped but still present, which is
+// a state the sandbox API cannot reach: it has no stop, and Reap destroys. The
+// stop must not travel through the container either — an in-container `kill 1`
+// takes down the exec carrying it along with the container, so that exec's own
+// status races the teardown it asked for (#625). The deadline is what makes a
+// wedged daemon fail here by name rather than hang the package to its own.
+func stopContainer(t *testing.T, id string) {
+	t.Helper()
+	const budget = 30 * time.Second
+	ctx, cancel := context.WithTimeout(context.Background(), budget)
+	defer cancel()
+	// The budget is named in the message because a killed child reports
+	// "signal: killed", which otherwise reads as though the container was.
+	if out, err := exec.CommandContext(ctx, "docker", "stop", "-t", "0", id).CombinedOutput(); err != nil {
+		t.Fatalf("docker stop %s within %s: %v: %s", id, budget, err, out)
 	}
 }
 
