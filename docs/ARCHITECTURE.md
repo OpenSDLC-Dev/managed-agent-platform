@@ -267,7 +267,8 @@ first opens by checking the previous one's artefact — the runner cannot read t
 recovering a scratch directory a dead container took is the prompt's job, not the tick's.
 While the dream owns the session it is **read-only to the public API**: reads, the
 list and the stream answer as they do for any session, and every mutation answers a 400
-naming the dream, because that internal agent's toolset is `always_allow` with `bash`. When
+naming the dream, because that internal agent's toolset is `always_allow` — and a
+`create_new` dream's has `bash` besides. When
 the dream settles — completed, failed, timed out, or canceled through the same interrupt
 `user.interrupt` runs, which folds a running or idle session to idle and leaves a
 `rescheduling` or `terminated` one where it stands — the runner mirrors the final `usage`,

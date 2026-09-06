@@ -264,9 +264,11 @@ const MemoryMountRoot = "/mnt/memory"
 // "" when it may. display is the path the model used, for the message; the
 // read-only wording is the reference toolset's own (plan 36 decision 12).
 // The check is lexical, like resolve: a symlink the agent planted can lead a
-// path out of its root, as `bash` can write anywhere anyway — the store
-// behind a read-only mount is protected by the sync's pull-only mode, and
-// this is the clear answer the file tools owe a model that tries.
+// path out of its root, which costs nothing where `bash` can write anywhere
+// anyway and is unreachable where it cannot, none of the file tools being able
+// to plant one — the store behind a read-only mount is protected by the sync's
+// pull-only mode, and this is the clear answer the file tools owe a model that
+// tries.
 func (r Runner) unwritable(display, resolved string) string {
 	for _, root := range r.ReadOnlyRoots {
 		if under(resolved, root) {

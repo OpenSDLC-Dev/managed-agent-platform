@@ -189,8 +189,7 @@ func TestDreamStartLandsEverythingInOneCommit(t *testing.T) {
 func TestDreamStartInPlaceConsolidatesTheInputStore(t *testing.T) {
 	s := newTestServer(t)
 	storeID, body := seededDreamBody(t, s)
-	dreamID := createDream(t, s, body)["id"].(string)
-	makeDreamInPlace(t, s, dreamID, storeID)
+	dreamID := createDreamInPlace(t, s, body, storeID)["id"].(string)
 	stores, versions := memoryStoreCount(t, s), storeVersionCount(t, s, storeID)
 
 	tick(t, s)
@@ -238,8 +237,7 @@ func TestDreamStartInPlaceConsolidatesTheInputStore(t *testing.T) {
 func TestDreamStartInPlaceRunsWithoutBash(t *testing.T) {
 	s := newTestServer(t)
 	storeID, body := seededDreamBody(t, s)
-	dreamID := createDream(t, s, body)["id"].(string)
-	makeDreamInPlace(t, s, dreamID, storeID)
+	dreamID := createDreamInPlace(t, s, body, storeID)["id"].(string)
 	tick(t, s)
 	inPlace := getDream(t, s, dreamID)["session_id"].(string)
 
@@ -255,25 +253,27 @@ func TestDreamStartInPlaceRunsWithoutBash(t *testing.T) {
 	if !slices.Equal(member, want) {
 		t.Errorf("the in-place roster's self member is offered %v, want %v", member, want)
 	}
-	if got, _ := offeredTools(t, s, cloning); !slices.Contains(got, "bash") {
-		t.Errorf("a create_new session is offered %v, want bash among them", got)
+	// The create_new side is asserted whole rather than for bash alone, because
+	// that is what keeps the two constants honest in both directions: a tool
+	// disabled in dreamAgentBody and not mirrored into dreamNoBashTools would
+	// drop out here, where a search for bash would never look.
+	withBash := append([]string{"bash"}, want...)
+	if got, _ := offeredTools(t, s, cloning); !slices.Equal(got, withBash) {
+		t.Errorf("a create_new session is offered %v, want %v", got, withBash)
 	}
 }
 
-// makeDreamInPlace sets the one column the runner reads for it
-// (dreamRow.inPlace), which is what a create body's update_existing arm will
-// write once the create route accepts one. The behavior column and the stored
-// output_behavior are set together, exactly as the route sets them, so nothing
-// here depends on a shape the route has not landed yet.
-func makeDreamInPlace(t *testing.T, s *tserver, dreamID, storeID string) {
+// createDreamInPlace creates an in-place dream the way a caller does — an
+// update_existing output_behavior naming the body's own memory_store input —
+// so the tests above drive the whole chain, create body to start arm, rather
+// than writing the column the runner reads and proving only its second half.
+// The body is copied because its callers reuse it for a second, cloning dream,
+// which the hold would refuse if it inherited the target.
+func createDreamInPlace(t *testing.T, s *tserver, body map[string]any, storeID string) map[string]any {
 	t.Helper()
-	if _, err := s.pool.Exec(context.Background(), `
-		UPDATE dreams
-		   SET target_memory_store_id = $2,
-		       output_behavior = jsonb_build_object('type', 'update_existing', 'memory_store_id', $2::text)
-		 WHERE id = $1`, dreamID, storeID); err != nil {
-		t.Fatalf("make dream %s in-place: %v", dreamID, err)
-	}
+	in := maps.Clone(body)
+	in["output_behavior"] = map[string]any{"type": "update_existing", "memory_store_id": storeID}
+	return createDream(t, s, in)
 }
 
 func memoryStoreCount(t *testing.T, s *tserver) int {

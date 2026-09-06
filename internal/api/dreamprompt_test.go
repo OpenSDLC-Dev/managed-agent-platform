@@ -609,18 +609,18 @@ func TestDreamPlanningStagesAreOneTextForBothRuns(t *testing.T) {
 // tombstones in both files the caller reads afterwards.
 func TestDreamInPlaceStagesListTheTombstones(t *testing.T) {
 	for _, tc := range []struct {
-		stage             int
-		inPlaceWants      []string
-		createNewWants    []string
-		inPlaceForbidden  []string
-		createNewForbidde []string
+		stage              int
+		inPlaceWants       []string
+		createNewWants     []string
+		inPlaceForbidden   []string
+		createNewForbidden []string
 	}{
 		{
-			stage:             3,
-			inPlaceWants:      []string{"left as a tombstone"},
-			createNewWants:    []string{"one file surviving it"},
-			inPlaceForbidden:  []string{"one file surviving it"},
-			createNewForbidde: []string{"tombstone"},
+			stage:              3,
+			inPlaceWants:       []string{"left as a tombstone"},
+			createNewWants:     []string{"one file surviving it"},
+			inPlaceForbidden:   []string{"one file surviving it"},
+			createNewForbidden: []string{"tombstone"},
 		},
 		{
 			stage: 4,
@@ -629,9 +629,9 @@ func TestDreamInPlaceStagesListTheTombstones(t *testing.T) {
 				"trailing *to remove* section",
 				"*to remove* heading",
 			},
-			createNewWants:    []string{"created, updated and removed"},
-			inPlaceForbidden:  []string{"created, updated and removed"},
-			createNewForbidde: []string{"*to remove*", "tombstone"},
+			createNewWants:     []string{"created, updated and removed"},
+			inPlaceForbidden:   []string{"created, updated and removed"},
+			createNewForbidden: []string{"*to remove*", "tombstone"},
 		},
 	} {
 		inPlace := dreamStageMessage(tc.stage, goldenMount, goldenTranscripts, "", dreamUpdateExisting)
@@ -651,7 +651,7 @@ func TestDreamInPlaceStagesListTheTombstones(t *testing.T) {
 				t.Errorf("the in-place stage %d still says %q:\n%s", tc.stage, gone, inPlace)
 			}
 		}
-		for _, gone := range tc.createNewForbidde {
+		for _, gone := range tc.createNewForbidden {
 			if strings.Contains(clone, gone) {
 				t.Errorf("the create_new stage %d carries the in-place text %q:\n%s", tc.stage, gone, clone)
 			}
