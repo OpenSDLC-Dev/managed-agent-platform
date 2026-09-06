@@ -1326,11 +1326,28 @@ func (s *server) archiveSession(r *http.Request) (any, error) {
 	if err := requireNotRunning(ctx, tx, id, "archiving"); err != nil {
 		return nil, err
 	}
-	// The session's end ends its live child threads (plan 35 decision 12) —
-	// before the archive mark, which closes the log to appends — and the
-	// primary's archived_at mirrors the session's.
-	if err := terminateLiveChildren(ctx, tx, s.log, id); err != nil {
+	row, err := s.archiveSessionInTx(ctx, tx, id)
+	if err != nil {
 		return nil, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, err
+	}
+	return renderSession(row)
+}
+
+// archiveSessionInTx is the archive itself, without the guards the handler
+// runs ahead of it: the session's end ends its live child threads (plan 35
+// decision 12) — before the archive mark, which closes the log to appends —
+// and the primary's archived_at mirrors the session's. Idempotent, because
+// both stamps are COALESCEd.
+//
+// The dream runner's closing arm shares it (plan 41 §4.1 arm 1), where
+// requireNotDreamOwned would refuse the runner itself and the not-running
+// check is the arm's own decision rather than a rejected request.
+func (s *server) archiveSessionInTx(ctx context.Context, tx pgx.Tx, id string) (sessionRow, error) {
+	if err := terminateLiveChildren(ctx, tx, s.log, id); err != nil {
+		return sessionRow{}, err
 	}
 	row, err := scanSession(tx.QueryRow(ctx,
 		`UPDATE sessions SET
@@ -1338,18 +1355,15 @@ func (s *server) archiveSession(r *http.Request) (any, error) {
 		   archived_at = COALESCE(archived_at, now())
 		 WHERE id = $1 RETURNING `+sessionColumns, id))
 	if err != nil {
-		return nil, err
+		return sessionRow{}, err
 	}
 	if _, err := tx.Exec(ctx,
 		`UPDATE session_threads SET archived_at = $2, updated_at = $3
 		  WHERE session_id = $1 AND parent_thread_id IS NULL AND archived_at IS NULL`,
 		id, row.archivedAt, row.updatedAt); err != nil {
-		return nil, err
+		return sessionRow{}, err
 	}
-	if err := tx.Commit(ctx); err != nil {
-		return nil, err
-	}
-	return renderSession(row)
+	return row, nil
 }
 
 func (s *server) deleteSession(r *http.Request) (any, error) {

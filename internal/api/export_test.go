@@ -8,6 +8,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/blob"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/dialguard"
 )
 
@@ -216,4 +217,57 @@ func InterruptSessionForTest(ctx context.Context, pool *pgxpool.Pool, sessionID 
 		return err
 	}
 	return tx.Commit(ctx)
+}
+
+// DreamTickForTest runs exactly one dream-runner tick against the pool at the
+// given instant. The production loop is a ticker calling this with the
+// database's own clock (SELECT now()), so a test that drives now covers the
+// timeout and the start lease without a wall clock. Test binary only.
+func DreamTickForTest(ctx context.Context, pool *pgxpool.Pool, blobs blob.Store, now time.Time, cfg DreamRunnerConfig) error {
+	return newServer(pool, blobs, nil).dreamTick(ctx, now, cfg)
+}
+
+// DreamInternalIDsForTest exposes the fixed ids of the runner's hidden agent
+// and environment, so a test asserts against the constants rather than a copy
+// of their values. Test binary only.
+func DreamInternalIDsForTest() (agentID, envID string) { return dreamAgentID, dreamEnvID }
+
+// DreamInternalBodiesForTest exposes the request bodies the runner hands the
+// two insert helpers, so a test can write the same bodies through the public
+// create routes and compare what the handlers store. Test binary only.
+func DreamInternalBodiesForTest() (agentBody, envBody string) { return dreamAgentBody, dreamEnvBody }
+
+// SetDreamStartAttemptsForTest lowers the start-claim bound so the exhaustion
+// arm resolves in a couple of ticks. Test binary only.
+func SetDreamStartAttemptsForTest(n int) (restore func()) {
+	prev := dreamStartAttempts
+	dreamStartAttempts = n
+	return func() { dreamStartAttempts = prev }
+}
+
+// SetDreamStartLeaseForTest shortens the soft lease so a crashed claimant's
+// dream re-enters the candidate scan in test time. Test binary only.
+func SetDreamStartLeaseForTest(d time.Duration) (restore func()) {
+	prev := dreamStartLease
+	dreamStartLease = d
+	return func() { dreamStartLease = prev }
+}
+
+// SetDreamStageTurnCapForTest lowers the stage's turn cap so the over-budget
+// arm can be driven with a handful of planted span.model_request_end rows.
+// Test binary only.
+func SetDreamStageTurnCapForTest(n int) (restore func()) {
+	prev := dreamStageTurnCap
+	dreamStageTurnCap = n
+	return func() { dreamStageTurnCap = prev }
+}
+
+// SetDreamStartHookAfterRenderForTest installs a hook in the window between
+// the render's blob puts and the write transaction — the one §4.2 leaves
+// unlocked, where a cancel lands and wins; a returned error drives the
+// unclassified rollback instead. Test binary only.
+func SetDreamStartHookAfterRenderForTest(f func() error) (restore func()) {
+	prev := dreamStartHookAfterRender
+	dreamStartHookAfterRender = f
+	return func() { dreamStartHookAfterRender = prev }
 }

@@ -253,7 +253,7 @@ transcripts and an `INDEX.md`, which ride in as `file` resources whose rows the 
 and the `cloud` environment behind that session are internal rows the runner creates once
 and nothing else can reach: absent from both lists, a 404 from every route addressing them
 by id, refused by every resolver but the runner's. The dream's own model rides in as an
-`agent_with_overrides`, and the runner drives the session by posting a `user.message` and
+`agent_with_overrides`, and the runner drives the session by writing a `user.message` to its log and
 waiting for it to idle — one stage today, the four the plan designs once the next slice
 lands. While the dream owns the session it is **read-only to the public API**: reads, the
 list and the stream answer as they do for any session, and every mutation answers a 400

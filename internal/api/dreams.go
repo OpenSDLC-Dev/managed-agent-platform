@@ -19,9 +19,9 @@ import (
 // BetaDream forbids extra keys, so every one renders on every response —
 // nullable ones as null rather than by omission.
 //
-// Slice 1 serves these routes with no runner behind them (plan 41 §1): a
-// created dream stays `pending`, so `outputs` is always empty, `session_id`
-// always null, `usage` always zero and `error` always null until slice 2.
+// The runner behind them (dreamrunner.go) is what fills `outputs`,
+// `session_id`, `usage` and `error`; a create on a deployment that runs none
+// is refused rather than left pending forever (plan 41 §4.7).
 type dreamJSON struct {
 	ID             string            `json:"id"`
 	Type           string            `json:"type"`
@@ -49,8 +49,8 @@ type dreamUsageJSON struct {
 	CacheCreationInputTokens int64 `json:"cache_creation_input_tokens"`
 }
 
-// dreamErrorJSON is BetaDreamError: failure detail for a failed dream. Slice 2
-// is the first writer.
+// dreamErrorJSON is BetaDreamError: failure detail for a failed dream, written
+// by the tick's arms and by the start's classified failures (§5.2).
 type dreamErrorJSON struct {
 	Type    string `json:"type"`
 	Message string `json:"message"`
@@ -118,6 +118,12 @@ func dreamSessionID(id string) string {
 
 func (s *server) createDream(r *http.Request) (any, error) {
 	ctx := r.Context()
+	// Nothing would ever run this dream: the runner owns the timeout too, so a
+	// create on a runner-less deployment would leave a row pending forever
+	// (plan 41 §4.7). The other four routes keep answering.
+	if !s.dreamRunner {
+		return nil, errDreamRunnerDisabled
+	}
 	obj, err := decodeObject(r)
 	if err != nil {
 		return nil, err
@@ -487,7 +493,7 @@ func (s *server) archiveDream(r *http.Request) (any, error) {
 	if err := checkID(id, "dream"); err != nil {
 		return nil, err
 	}
-	return s.dreamAction(ctx, id, func(ctx context.Context, tx pgx.Tx, status string, archivedAt *time.Time) error {
+	return s.dreamAction(ctx, id, func(ctx context.Context, tx pgx.Tx, status string, archivedAt *time.Time, _ *string) error {
 		// Idempotent: archived_at is set once and never cleared, so a second
 		// archive answers 200 with the first call's timestamp. status is left
 		// alone — "There is no unarchive" and no status change either (§2.6).
@@ -509,21 +515,36 @@ func (s *server) cancelDream(r *http.Request) (any, error) {
 	if err := checkID(id, "dream"); err != nil {
 		return nil, err
 	}
-	return s.dreamAction(ctx, id, func(ctx context.Context, tx pgx.Tx, status string, _ *time.Time) error {
+	return s.dreamAction(ctx, id, func(ctx context.Context, tx pgx.Tx, status string, _ *time.Time, sessionID *string) error {
 		switch status {
 		case "canceled":
 			// "Canceling an already-canceled dream is an idempotent no-op":
 			// ended_at keeps the first call's timestamp.
 			return nil
-		case "pending", "running":
+		case "pending":
 			// A dream with no session has nothing to wind down, so it ends and
-			// closes in the same commit (§5.3). No row can be `running` before
-			// slice 2 lands the runner; slice 2 replaces this arm for it with
-			// §4.1's interrupt-and-close sequence, which closes only once the
-			// pipeline session is archived and its files are gone.
+			// closes in the same commit (§5.3).
 			_, err := tx.Exec(ctx,
 				`UPDATE dreams SET status = 'canceled', ended_at = now(), closed_at = now(),
 				        updated_at = now() WHERE id = $1`, id)
+			return err
+		case "running":
+			// The interrupt runs in this transaction, not as a bare event
+			// append, which would stop nothing: it settles the outstanding
+			// calls, cancels the queued work and idles the threads (§4.1). It
+			// records no post-commit session-status metric — that observation
+			// belongs to whoever commits — and a session already gone at the
+			// database level leaves nothing to interrupt. closed_at stays for
+			// the runner's closing arm, which archives the session and deletes
+			// the transcripts once it is no longer running.
+			if sessionID != nil {
+				if err := s.interruptSessionInTx(ctx, tx, *sessionID); err != nil {
+					return err
+				}
+			}
+			_, err := tx.Exec(ctx,
+				`UPDATE dreams SET status = 'canceled', ended_at = now(), updated_at = now()
+				  WHERE id = $1`, id)
 			return err
 		default:
 			return errInvalid("dream %s is %s; only a pending or running dream can be canceled", id, status)
@@ -535,24 +556,33 @@ func (s *server) cancelDream(r *http.Request) (any, error) {
 // let the caller decide what the transition is, and render the result through
 // the one column list every other handler reads.
 func (s *server) dreamAction(ctx context.Context, id string,
-	apply func(context.Context, pgx.Tx, string, *time.Time) error) (any, error) {
+	apply func(context.Context, pgx.Tx, string, *time.Time, *string) error) (any, error) {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return nil, err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+	// The one transaction a cancel can wait on is a start's write transaction,
+	// bounded by the clone's size; without this bound a wedged start would
+	// hang the request instead of failing it, and a failed request is what the
+	// SDK retries (§4.1).
+	if err := setDreamLockWait(ctx, tx); err != nil {
+		return nil, err
+	}
 
 	var status string
 	var archivedAt *time.Time
+	var sessionID *string
 	err = tx.QueryRow(ctx,
-		`SELECT status, archived_at FROM dreams WHERE id = $1 FOR UPDATE`, id).Scan(&status, &archivedAt)
+		`SELECT status, archived_at, session_id FROM dreams WHERE id = $1 FOR UPDATE`, id).
+		Scan(&status, &archivedAt, &sessionID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, errNotFound("dream %s not found", id)
 	}
 	if err != nil {
 		return nil, err
 	}
-	if err := apply(ctx, tx, status, archivedAt); err != nil {
+	if err := apply(ctx, tx, status, archivedAt, sessionID); err != nil {
 		return nil, err
 	}
 	d, err := scanDream(tx.QueryRow(ctx, `SELECT `+dreamColumns+` FROM dreams WHERE id = $1`, id))

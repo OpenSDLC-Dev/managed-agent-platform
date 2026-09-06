@@ -39,6 +39,18 @@ spec:
                 secretKeyRef:
                   name: {{ include "map.secretName" . }}
                   key: controlplane-api-key
+            {{- with .Values.controlplane.dreamTickInterval }}
+            - name: DREAM_TICK_INTERVAL
+              value: {{ . | quote }}
+            {{- end }}
+            {{- with .Values.controlplane.dreamTimeout }}
+            - name: DREAM_TIMEOUT
+              value: {{ . | quote }}
+            {{- end }}
+            {{- with .Values.controlplane.dreamMaxInputBytes }}
+            - name: DREAM_MAX_INPUT_BYTES
+              value: {{ . | quote }}
+            {{- end }}
             {{- include "map.commonEnv" . | nindent 12 }}
             {{- include "map.blobEnv" . | nindent 12 }}
             {{- include "map.secretsEnv" . | nindent 12 }}
