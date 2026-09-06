@@ -121,6 +121,81 @@ run; slice 4 owns `update_existing` and its hold, still refused at create here.
 
 ---
 
+## The `unrestricted` address floor (plan 45, #570) — archived 2026-09-06, delivered in one PR
+
+`unrestricted` admitted every host *and* every address. A recording of the
+reference on 2026-09-03 answered the question `internal/gate/policy.go` had been
+deferring in a comment: on one `unrestricted` environment it refused
+`http://169.254.169.254/` with **403 `Destination IP is in a private/reserved
+range`** and answered `https://example.com/` with 200. Unrestricted in its
+hosts, floored in its addresses — which is the distinction the `admission` type
+already existed to keep apart, so the change is one exemption removed from
+`floored()`.
+
+Plan 44 is what made it that small: the gate's dialler already resolves a name
+once and holds every resolved address to the admission class before any connect,
+so the floor was wired to the class and was only being asked the wrong question
+for one of them.
+
+Two things travelled with it. The refusal's **shape**: a dial the floor stopped
+surfaced as 502 `cannot reach host`, which reads as an origin that did not
+answer rather than as a policy answer, and it now carries the reference's 403
+and wording — for the MCP and package-registry classes as well, which had the
+same misreport. The tests that used the two status codes to prove *which*
+mechanism refused keep that distinction and read the body for it. And the
+**empty authority** found in #596's review: `CONNECT :443` gives an empty host,
+`admit` short-circuits on `admitAll` before any host is examined, and `":443"`
+is Go's local-system form — so the gate dialled loopback in the namespace it
+shares with the sandbox. It is refused now before any host set is consulted,
+which holds even for the class the floor exempts.
+
+The review passes found three things worth keeping. The verification caught two
+scopings the change had made stale — `docs/ARCHITECTURE.md`'s `dialguard/` row
+and `newDialer`'s own doc comment both still said the floor runs "only for a
+dial a widening flag admitted" — and named a reachability change nobody had:
+with `NO_PROXY` forced empty, a sandbox curling its *own* loopback through the
+proxy now gets the 403. The Codex pass found the one that mattered: the raw test
+helper returned the response *headers* as the body, so a body assertion would
+have passed on almost anything, and under it sat a claim the tests could not
+hold — `http.Error` appends a newline, so the body is the reference's *wording*
+and never its bytes. The helper splits at the blank line now and the claim says
+wording; a curl transcript could not have settled the bytes either way. It also
+caught the plan asserting a "private or reserved" refusal where the probe showed
+link-local alone, which the changelog and the registry had qualified correctly
+and the plan had not.
+
+The Claude reviewer's pass then found the one that mattered most, and it was in
+the change this PR had just made: the 403 was keyed on `dialguard.ErrRefused`,
+which is wider than the floor. That sentinel also wraps an authority the dialler
+could not split and a lookup that returned no address of a usable family — and
+the second is raised *before* the floor is asked anything, so an `admitOperator`
+dial, the one class the floor never judges, could be told its destination was in
+a private range. The gate marks its own refusal now and matches on that. The
+same pass moved the empty-host check out of the two handlers into
+`policy.admit`, where `admitAll` was answering before any host was examined in
+the first place, so a caller added later inherits it.
+
+Mutation-tested per the repo rule: 8 mutants, 8 killed, each by a named test.
+One survived its first pass and was real — the marker that tells the floor's own
+refusal from the rest carries an `ip != nil` half, and nothing held it, so an
+address the dialler never read would have been called private/reserved. One
+kill is worth reporting on its own: putting the exemption back on
+`allowed_hosts` instead of `unrestricted` is killed by twenty tests, which is
+what an exemption that most of the suite depends on should look like, and is the
+evidence that the one being removed was the narrower of the two.
+
+What it does not cover is a deployment shape rather than a policy: a session
+the executor provisions no gate for is networked directly by the Docker backend,
+so nothing in `internal/gate` runs for it. That is any `unrestricted` session
+with no vault attached (`wantsGate` is `limited`-or-vault-attached) and, because
+the same condition also requires a configured gate image and control-plane URL,
+every session at all on a deployment that sets neither — the chart's default. That is #620, with the three options costed —
+provision a gate for every session, enforce at the sandbox network layer, or
+register the gap — and it was split out deliberately rather than decided inside
+a policy change.
+
+---
+
 ## Dreams — real `ant` CLI against `/v1/dreams` (plan 41 slice 1, run 2026-09-06) — ✅ passed
 
 The plan's §7 acceptance bullet asks that the real `ant beta:dreams create|retrieve|list|cancel|
