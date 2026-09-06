@@ -92,8 +92,21 @@ caught the plan asserting a "private or reserved" refusal where the probe showed
 link-local alone, which the changelog and the registry had qualified correctly
 and the plan had not.
 
-Mutation-tested per the repo rule: 7 mutants, 7 killed, no survivors, each by a
-named test. One of them is worth keeping: putting the exemption back on
+The Claude reviewer's pass then found the one that mattered most, and it was in
+the change this PR had just made: the 403 was keyed on `dialguard.ErrRefused`,
+which is wider than the floor. That sentinel also wraps an authority the dialler
+could not split and a lookup that returned no address of a usable family — and
+the second is raised *before* the floor is asked anything, so an `admitOperator`
+dial, the one class the floor never judges, could be told its destination was in
+a private range. The gate marks its own refusal now and matches on that. The
+same pass moved the empty-host check out of the two handlers into
+`policy.admit`, where `admitAll` was answering before any host was examined in
+the first place, so a caller added later inherits it.
+
+Mutation-tested per the repo rule: 8 mutants, 8 killed, each by a named test.
+One survived its first pass and was real — the marker that tells the floor's own
+refusal from the rest carries an `ip != nil` half, and nothing held it, so an
+address the dialler never read would have been called private/reserved. One of them is worth keeping: putting the exemption back on
 `allowed_hosts` instead of `unrestricted` is killed by twenty tests, which is
 what an exemption that most of the suite depends on should look like, and is the
 evidence that the one being removed was the narrower of the two.
@@ -105,6 +118,9 @@ or vault-attached) and the Docker backend networks it directly, so nothing in
 provision a gate for every session, enforce at the sandbox network layer, or
 register the gap — and it was split out deliberately rather than decided inside
 a policy change.
+
+---
+
 ## Dreams — real `ant` CLI against `/v1/dreams` (plan 41 slice 1, run 2026-09-06) — ✅ passed
 
 The plan's §7 acceptance bullet asks that the real `ant beta:dreams create|retrieve|list|cancel|

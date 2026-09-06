@@ -21,6 +21,7 @@ package gate
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -206,9 +207,10 @@ func rootedDial(base func(ctx context.Context, network, addr string) (net.Conn, 
 // and this proxy is the operator's own egress, so a host listed there is dialled
 // unfloored — listing it is the vouching. `unrestricted` used to be exempt too
 // and is not (plan 45, #570): the reference admits every host under it and still
-// refuses a private or reserved address underneath, which is the same split this
-// type makes. Allow takes a context because the admission marker is what tells
-// the classes apart and only the context carries it.
+// refuses an address underneath — link-local is the case its probe showed, and
+// this floor admits RFC 1918 by design — which is the same split between host
+// and address this type makes. Allow takes a context because the admission
+// marker is what tells the classes apart and only the context carries it.
 func newDialer(ipAllowed func(net.IP) error) *dialguard.Dialer {
 	return &dialguard.Dialer{
 		Timeout: dialTimeout,
@@ -216,10 +218,24 @@ func newDialer(ipAllowed func(net.IP) error) *dialguard.Dialer {
 			if !admissionOf(ctx).floored() {
 				return nil
 			}
-			return ipAllowed(ip)
+			err := ipAllowed(ip)
+			if err != nil && ip != nil {
+				return fmt.Errorf("%w: %w", errFloorRefused, err)
+			}
+			return err
 		},
 	}
 }
+
+// errFloorRefused marks the address floor's own refusal of an address it read,
+// which is the only thing the reference's "private/reserved range" wording
+// describes. dialguard.ErrRefused is wider than that: it also wraps an
+// authority the dialler could not split, and a lookup that returned no address
+// of a usable family — the second of which is raised before Allow runs at all,
+// so matching the sentinel would put the floor's wording on a dial for
+// `admitOperator`, the one class this floor never judges. Those stay the 502
+// they have always been.
+var errFloorRefused = errors.New("address refused by the platform's floor")
 
 // New builds a Gate from cfg.
 func New(cfg Config) *Gate {
@@ -285,7 +301,7 @@ func (g *Gate) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 // so this is errors.Is rather than a comparison — and a test drives that path
 // through a real RoundTrip rather than assuming the wrapping is transparent.
 func refusedOrUnreachable(w http.ResponseWriter, err error) {
-	if errors.Is(err, dialguard.ErrRefused) {
+	if errors.Is(err, errFloorRefused) {
 		// The recording gives the wording, not the bytes: what a curl transcript
 		// shows cannot settle whether the reference terminates the line. So this
 		// is http.Error like every other refusal here, which appends a newline,
@@ -307,17 +323,6 @@ const refusedBody = "Destination IP is in a private/reserved range"
 func (g *Gate) handleConnect(w http.ResponseWriter, r *http.Request) {
 	target := addrWithPort(r.Host, "443")
 	host, port := hostOnly(target), portOnly(target)
-	// An authority naming no host is refused before admit is asked, because
-	// admit cannot refuse it: `unrestricted` short-circuits on admitAll before
-	// any host is examined, so `CONNECT :443` came back admitted, and ":443" is
-	// Go's documented "local system" form — the gate would dial loopback in the
-	// namespace it shares with the sandbox. Under `limited` this was already
-	// closed, an empty host matching no set. Found in #596's review, fixed here
-	// with the floor that would also have caught it (#570).
-	if host == "" {
-		http.Error(w, "host not permitted by the environment's networking policy", http.StatusForbidden)
-		return
-	}
 	how := g.policy.admit(host, port)
 	if how == admitNone {
 		http.Error(w, "host not permitted by the environment's networking policy", http.StatusForbidden)
@@ -486,14 +491,6 @@ func (g *Gate) handlePlain(w http.ResponseWriter, r *http.Request) {
 	// carries the same two halves and is normalized the same way.
 	target := addrWithPort(r.URL.Host, defaultPort(r.URL.Scheme))
 	host, port := hostOnly(target), portOnly(target)
-	// `http://:80/x` is the same empty authority handleConnect refuses above,
-	// and it carried more: a credential whose own arm is `unrestricted` ignores
-	// its Hosts list, so its secret would have been substituted into a request
-	// delivered to a loopback listener.
-	if host == "" {
-		http.Error(w, "host not permitted by the environment's networking policy", http.StatusForbidden)
-		return
-	}
 	how := g.policy.admit(host, port)
 	if how == admitNone {
 		http.Error(w, "host not permitted by the environment's networking policy", http.StatusForbidden)

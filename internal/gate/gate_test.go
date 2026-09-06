@@ -108,6 +108,10 @@ func rawStatusAndBody(t *testing.T, gateURL, raw string) (string, string) {
 	return line, body
 }
 
+// proxyClient is an http.Client that routes through the gate served at gateURL.
+// trustedTLS, when non-nil, is an httptest TLS origin whose self-signed
+// certificate the client trusts — so the CONNECT tunnel test verifies the origin
+// properly rather than skipping verification.
 func proxyClient(t *testing.T, gateURL string, trustedTLS *httptest.Server) *http.Client {
 	t.Helper()
 	u, err := url.Parse(gateURL)
@@ -535,9 +539,10 @@ func TestAnMCPOnlyDialIsHeldToTheAddressFloor(t *testing.T) {
 //
 // "The tunnel failed" alone would not prove it: a regression that stopped
 // admitting MCP endpoints over CONNECT refuses before dialing and fails the
-// tunnel too. So the two are told apart by the status Go reports for a refused
-// CONNECT — 502 is the dial the policy admitted and the floor then stopped, 403
-// is the policy — and the same gate with the floor lifted is required to carry
+// tunnel too. So the two are told apart by what the gate wrote on the wire —
+// both refusals answer 403 now, and the body is what names which one it was,
+// the floor's address or admit's policy — and the same gate with the floor
+// lifted is required to carry
 // the request through.
 func TestAnMCPOnlyTunnelIsHeldToTheAddressFloor(t *testing.T) {
 	origin := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -841,6 +846,30 @@ func TestGateStillReportsAnUnreachableHostAsUnreachable(t *testing.T) {
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusBadGateway {
 		t.Errorf("status = %d, want 502 for a host that refused the connection", resp.StatusCode)
+	}
+}
+
+// TestAnAddressTheDiallerCannotReadIsNotCalledPrivate. The floor marks its own
+// refusals so the handlers can answer them in the reference's words, and the
+// marking has to stop at an address it actually read. `CONNECT [::1]` — no port
+// — is double-bracketed into `[[::1]]:443`, which net.SplitHostPort refuses, so
+// the dialler judges it as an unreadable address rather than as a destination.
+// A floored class still refuses it, as it always did, and the refusal is the
+// 502 it always was: "Destination IP is in a private/reserved range" would be a
+// claim about an address nobody parsed.
+func TestAnAddressTheDiallerCannotReadIsNotCalledPrivate(t *testing.T) {
+	// No IPAllowed override: the production floor, and `unrestricted` is floored.
+	g := gate.New(gate.Config{Networking: domain.Networking{Type: domain.NetUnrestricted}})
+	gsrv := httptest.NewServer(g)
+	defer gsrv.Close()
+
+	status, body := rawStatusAndBody(t, gsrv.URL,
+		"CONNECT [::1] HTTP/1.1\r\nHost: [::1]\r\nConnection: close\r\n\r\n")
+	if !strings.HasPrefix(status, "HTTP/1.1 502") {
+		t.Errorf("status = %q, want the 502 of a dial that could not be made", status)
+	}
+	if strings.Contains(body, "private/reserved") {
+		t.Errorf("body = %q, want no claim about an address the dialler never read", body)
 	}
 }
 

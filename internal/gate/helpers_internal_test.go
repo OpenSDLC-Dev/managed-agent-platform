@@ -3,6 +3,7 @@ package gate
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -331,9 +332,88 @@ func (a admission) String() string {
 	return "admission(" + strconv.Itoa(int(a)) + ")"
 }
 
+// TestTheRefusalCarriesTheRecordedWording pins the constant itself. Every other
+// assertion in this package matches a substring of it, which would survive a
+// change to the clause around it — and the wording is the whole point: it is
+// what a recording of the reference produced (#570, 2026-09-03), quoted rather
+// than composed.
+func TestTheRefusalCarriesTheRecordedWording(t *testing.T) {
+	const recorded = "Destination IP is in a private/reserved range"
+	if refusedBody != recorded {
+		t.Errorf("refusedBody = %q, want the reference's own wording %q", refusedBody, recorded)
+	}
+}
+
+// TestOnlyTheFloorsOwnRefusalGetsTheFloorsAnswer. dialguard.ErrRefused is wider
+// than the floor: it also wraps an authority the dialler could not split and a
+// lookup that returned no address of a usable family. The second is raised
+// before Allow runs at all, so keying the 403 on the sentinel would tell an
+// `admitOperator` dial — the one class this floor never judges — that its
+// destination is in a private range. Only the floor's own refusal of an address
+// it read answers with the floor's wording; everything else stays the 502 it
+// has always been.
+func TestOnlyTheFloorsOwnRefusalGetsTheFloorsAnswer(t *testing.T) {
+	for name, tc := range map[string]struct {
+		err        error
+		wantStatus int
+		wantBody   string
+	}{
+		"the floor refused an address it read": {
+			fmt.Errorf("%w: %w", errFloorRefused, dialguard.ErrRefused),
+			http.StatusForbidden, refusedBody,
+		},
+		"an authority the dialler could not read": {
+			fmt.Errorf("dial target is not a usable address: %w", dialguard.ErrRefused),
+			http.StatusBadGateway, "cannot reach host",
+		},
+		"a lookup with no address of a usable family": {
+			fmt.Errorf("dial target has no suitable address: %w", dialguard.ErrRefused),
+			http.StatusBadGateway, "cannot reach host",
+		},
+		"an ordinary dial failure": {
+			errors.New("connection refused"),
+			http.StatusBadGateway, "cannot reach host",
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			w := httptest.NewRecorder()
+			refusedOrUnreachable(w, tc.err)
+			if w.Code != tc.wantStatus {
+				t.Errorf("status = %d, want %d", w.Code, tc.wantStatus)
+			}
+			if got := strings.TrimSpace(w.Body.String()); got != tc.wantBody {
+				t.Errorf("body = %q, want %q", got, tc.wantBody)
+			}
+		})
+	}
+}
+
+// TestAnAuthorityWithNoHostIsRefusedByThePolicy drives the empty authority where
+// it is now decided. admitAll answered before any host was examined, so
+// `CONNECT :443` came back admitted and ":443" is Go's local-system dial form.
+// Refusing it in admit rather than in the two handlers is what makes a caller
+// added later inherit it — and what lets it be driven here rather than only
+// through a raw listener.
+func TestAnAuthorityWithNoHostIsRefusedByThePolicy(t *testing.T) {
+	for name, p := range map[string]*policy{
+		"unrestricted": newPolicy(domain.Networking{Type: domain.NetUnrestricted}, nil),
+		"limited":      newPolicy(domain.Networking{Type: domain.NetLimited, AllowedHosts: []string{"ok.example"}}, nil),
+	} {
+		if got := p.admit("", "443"); got != admitNone {
+			t.Errorf("%s: admit(\"\", 443) = %v, want admitNone", name, got)
+		}
+	}
+	// And the host half is untouched: unrestricted still admits a name nobody
+	// listed, which is the reference's own answer.
+	if got := newPolicy(domain.Networking{Type: domain.NetUnrestricted}, nil).admit("anything.example", "443"); got != admitUnrestricted {
+		t.Errorf("admit of a named host under unrestricted = %v, want admitUnrestricted", got)
+	}
+}
+
 // floored and rooted are the two questions the dialer asks of one admission, and
-// they deliberately do not have the same answer: both widening flags admit a
-// name no operator vouched for, so both are floored — but only the registry
+// they deliberately do not have the same answer. Every class but the operator's
+// own list is floored — the widening flags admit a name no operator vouched for,
+// and `unrestricted` admits every name there is (#570) — but only the registry
 // class is a list this platform authors rather than reads, so only it is
 // resolved absolutely (#596).
 func TestWhatEachAdmissionClassAsksOfTheDial(t *testing.T) {

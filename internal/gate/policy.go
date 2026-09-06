@@ -110,6 +110,16 @@ func newPolicy(net domain.Networking, mcpEndpoints []string) *policy {
 // author switch #596's fix off on a grant that is the operator's, by declaring
 // an endpoint at a host the operator's own flag had opened.
 func (p *policy) admit(host, port string) admission {
+	// An authority naming no host is refused before any set is consulted,
+	// because admitAll would otherwise answer before a host is examined at all:
+	// `CONNECT :443` and `http://:80/x` came back admitted, and ":443" is Go's
+	// documented "local system" form, so the gate dialled loopback in the
+	// namespace it shares with the sandbox. Found in #596's review, closed
+	// here (#570). It lives in admit rather than in the two handlers so a
+	// caller added later inherits it, and so the policy tests can drive it.
+	if host == "" {
+		return admitNone
+	}
 	if p.admitAll {
 		return admitUnrestricted
 	}

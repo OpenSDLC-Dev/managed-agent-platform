@@ -39,11 +39,14 @@ being asked the wrong question for one of them.
 
 Three decisions, taken 2026-09-06 against the alternatives named beside them:
 
-1. **The floor lands in the gate, for the sessions that have one.** A
-   vault-less `unrestricted` session is provisioned no gate at all
-   (`gateSpec`: `wantsGate := Limited || len(vaultIDs) > 0`) and the Docker
-   backend networks it directly (`networkMode` returns `"bridge"`), so nothing
-   in `internal/gate` can reach it. That arm is an executor and sandbox-backend
+1. **The floor lands in the gate, for the sessions that have one.** `gateSpec`
+   provisions one only when a session *wants* it — `wantsGate := Limited ||
+   len(vaultIDs) > 0` — **and** the deployment configured one: the same
+   condition returns nil when `GateImage` or `ControlplaneURL` is empty, which
+   is the chart's default. Everything else gets `networkMode`'s `"bridge"` and
+   networks directly, so nothing in `internal/gate` can reach it. The uncovered
+   set is therefore wider than "vault-less": it is every session no gate is
+   provisioned for. That arm is an executor and sandbox-backend
    question — always provision a gate, or enforce at the network layer — and it
    becomes **its own issue** rather than being decided here. The alternatives
    were provisioning a gate for every session and enforcing in both backends.
@@ -158,16 +161,24 @@ divergence and #570 explicitly is not about it.
    driven through a real listener the way #596's review drove it.
 5. **Mutation testing**, per the repo rule: every guard above gets a mutant that
    removes it, and each must die by a *named* test — not by a build failure and
-   not by a hang. Seven mutants, seven killed, no survivors: the exemption put
-   back on `unrestricted` and taken off `allowed_hosts`, the empty-authority
-   check removed from each handler, the refusal flattened back into a 502, and
-   the 403 stripped of first its reason and then its status.
+   not by a hang. Eight mutants, eight killed: the exemption put back on
+   `unrestricted` and taken off `allowed_hosts`, the empty-host check removed
+   from `admit`, the refusal flattened back into a 502, the 403 stripped of
+   first its wording and then its status, the floor's marker widened to every
+   refusal `dialguard` produces, and the marker's own `ip != nil` half removed.
+   The last of those survived its first pass and was real: nothing held the half
+   that stops an address the dialler never read from being called
+   private/reserved.
 
 ## Docs
 
-- `changelog.d/` — one fragment, naming which sessions gain the floor.
+- `changelog.d/` — two fragments: the floor and its refusal shape, and the
+  empty-authority bypass, which is a security fix and is filed as one.
 - `docs/DIVERGENCES.md` — the egress row's `unrestricted` line becomes the
   narrower statement, and the dial-address-floor row gains the gate.
 - `internal/gate/policy.go` — the comment that deferred to #570 is replaced by
   what the recording answered.
-- `STATE.md`, and this file's status.
+- This file's status. **Not STATE.md**: it tracks active work, and by the time
+  this landed its Active work was plan 41's, with the archived-plans sentence
+  this would have joined already removed. An archived plan's record is its own
+  frontmatter and docs/HISTORY.md.
