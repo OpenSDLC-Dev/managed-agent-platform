@@ -62,6 +62,13 @@ zone, and `dialguard.IPAllowed` still admits the RFC 1918 address it returns —
 deliberately, because on-prem MCP servers live there (see the package comment).
 The credential is still chosen by name and still delivered to that address.
 
+The residual is in fact **wider** than the search list, which matters for
+whoever takes options 1 to 3: the same private answer arrives from split-horizon
+DNS, or from a controlled zone publishing an RFC 1918 record for the declared
+name absolutely. Rooting the lookup narrows the residual to those; it does not
+end it. Both reviewers reached this independently, and the documents were
+corrected to say the wider thing.
+
 No rule about the *address* can separate the two cases, and this is the reason
 the issue needed a policy decision rather than a patch:
 
@@ -106,17 +113,35 @@ keeps the shape it has.
 
 Behaviour, in order:
 
-1. `net.SplitHostPort`. What it refuses is dialled unchanged — the same
+1. A network with no host and port in its address — a raw `ip:proto`, a unix
+   path — is **refused**. This type resolves a name and judges addresses, so
+   there is nothing for it to do with one, and handing it to the standard
+   dialler would open a socket the floor never saw. Every caller here dials TCP,
+   so nothing loses reach; it is the one deliberate narrowing in the change.
+2. The timeout starts here, before the lookup, which is where `net.Dialer`
+   starts its own. A negative value is already expired, as `net.Dialer` reads
+   one.
+3. `net.SplitHostPort`. What it refuses is dialled unchanged — the same
    fail-as-before rule `rootedName` already argues in place.
-2. An address literal skips the lookup and is judged directly. This is not an
+4. An address literal skips the lookup and is judged directly. This is not an
    optimisation: it is what keeps a literal's refusal identical to today's.
-3. Otherwise one `Lookup`. An empty answer is the resolver's own error.
-4. `Allow` runs on **every** returned address before any connect. A refused
-   address is dropped, not attempted. If every address is refused, the first
-   refusal is returned — so the message a caller surfaces is still
-   `dialguard.ErrRefused`, which `internal/vaultresolve/mcprefresh.go` already
-   tests with `errors.Is`.
-5. The survivors are dialled (next section).
+5. A host that is neither a name nor an address `net.ParseIP` reads — a
+   zone-scoped literal, or the empty host of `:443` — is judged as an
+   *unreadable* address and dialled unchanged if the caller admits it anyway.
+   That is exactly what the `Control` hook did: it refused these before
+   consulting its predicate, and it was not installed at all for a class the
+   gate exempts from the floor, which dialled them. Both halves have to survive
+   or the change moves what a session can reach.
+6. Otherwise one `Lookup`, whose answer is unmapped — `net.IP` carries an A
+   record as sixteen bytes with the IPv4-mapped prefix, and dialling that
+   literally would spell `198.51.100.1` as `[::ffff:198.51.100.1]`.
+7. `Allow` runs on **every** returned address before any connect, in the
+   resolver's order. A refused address is dropped, not attempted. If every
+   address is refused, the first refusal is returned — so the message a caller
+   surfaces is still `dialguard.ErrRefused`, which
+   `internal/vaultresolve/mcprefresh.go` already tests with `errors.Is`, and it
+   still names the address.
+8. The survivors are dialled (next section).
 
 `Control` is deleted once the last caller stops using it. It is ours, it was
 introduced by this line of work, and leaving two mechanisms that answer the same
@@ -134,10 +159,19 @@ deployment:
   the caller's context, which for the gate is the sandbox's own request.
 - **Multi-address failover** — try the next address when one fails.
 - **Per-address deadline** — the remaining budget divided by the addresses
-  left, so one blackholed address cannot consume the whole `Timeout`.
+  left, floored at two seconds, so one blackholed address cannot consume the
+  whole `Timeout` and a long list does not reduce each attempt to a slice too
+  short to finish a handshake in.
 - **Happy Eyeballs (RFC 6555/8305)** — the other family started after
   `FallbackDelay`, first success winning, so a broken IPv6 path costs 300ms
-  rather than a connect timeout.
+  rather than a connect timeout. For network `"tcp"` alone, which is
+  `net.Dialer`'s own condition (`d.dualStack() && network == "tcp"`): `tcp4` and
+  `tcp6` have one family by construction, and it does not race udp.
+- **The resolver's ordering, twice over.** Which family leads is decided by the
+  *whole* answer, before the floor filters it — `net.Dialer` partitions before
+  its `Control` hook runs, so a refused first address must not hand the lead to
+  the other family. And with the race off, addresses are tried in the resolver's
+  own order rather than regrouped by family.
 
 The implementation mirrors Go's own: partition by the family of the first
 address, run each partition serially, race the two with the fallback delay, and
@@ -208,14 +242,25 @@ rather than the network.
    completes within a small multiple of `FallbackDelay`, not of `Timeout` — and
    not *before* it either, which is what catches a race started too early. The
    per-address share of the budget is driven directly, either side of its floor.
-6. **Literals and malformed addresses are unchanged.** `[::1]`, `:443`,
-   `[[::1]]:443` and a bare IPv4 literal behave as they do today.
+6. **Literals and malformed addresses are unchanged**, and this is the item
+   the review pass rewrote: the first draft asserted it and tested only part of
+   it. `[::1]` and a bare IPv4 literal are judged and dialled as before;
+   `[[::1]]:443` still fails as the standard dialler fails it; and the two
+   shapes the old hook refused *without consulting its predicate* — a
+   zone-scoped literal and the empty host of `:443` — are driven on both sides,
+   refused for a floored class and dialled unchanged for an exempt one
+   (`TestAnAddressTheFloorCannotReadKeepsItsOldAnswer`).
 7. **The class still decides.** In `internal/gate`, an `admitOperator` dial
    reaches an address the floor refuses and an `admitMCP` one does not — the
    existing assertions, re-pointed at the new dialler.
 8. **Mutation testing**, per the repo rule: every guard above gets a mutant
-   that removes it, and each must fail a named test. Nineteen mutants, nineteen
-   killed. Two survived the first pass and both were real: an all-refused answer
+   that removes it, and each must fail a **named test** — checked, rather than
+   assumed, by reading which test each kill came from: none dies on a build
+   failure, and none dies by hanging the package until its own timeout (one
+   did, and the test was bounded rather than the mutant retired, because a test
+   that hangs on a regression reports it as a timeout instead of as itself).
+   Twenty-four mutants, twenty-four killed. Two survived the first pass and both
+   were real: an all-refused answer
    was still reporting `ErrRefused` through a generic fallback rather than the
    refusal that names the offending address, and `netip.Addr.WithZone("")` before
    `AsSlice()` turned out to be a no-op — netip keeps a zone beside the address

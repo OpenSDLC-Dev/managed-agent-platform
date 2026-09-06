@@ -82,7 +82,11 @@ every class". That clause does not hold, and this is the correction: a single
 resolution of `api.example.com` under `ndots:5` still consults the `search` list
 first, still answers from an internal zone, and `dialguard.IPAllowed` still admits
 the RFC 1918 address it returns — deliberately, because on-prem MCP servers live
-there. The legitimate case and the leak are identical in everything the gate can
+there. Both reviewers then made the same point about the correction itself, and
+it is the sharper version: the residual is not the search list, it is a *private
+answer for a declared name*, which split-horizon DNS and a controlled zone
+produce absolutely and without any completion at all. Rooting — #601's options 1
+to 3 — narrows that residual rather than ending it. The legitimate case and the leak are identical in everything the gate can
 observe: an MCP-class host, a private resolved address, and a credential matched
 by name. `nexus.infra:8080` with a bearer and `api.example.com:80` with one
 differ only in *which name answered*, which is not an address question. So no
@@ -93,8 +97,11 @@ half: the decision and the socket no longer consult different resolutions, and
 the address is now an input the request path holds, which is what #570 needs
 before it can give `unrestricted` a floor at all.
 
-Mutation-tested per the repo rule: 19 mutants, 19 killed, no survivors. Two
-survived the first pass and both were real. One showed that an all-refused answer
+Mutation-tested per the repo rule: 24 mutants, 24 killed, no survivors, each by
+a named test rather than by a build failure — which the review pass asked to be
+checked rather than asserted, and which turned up one mutant that was dying by
+hanging the package until its own timeout; the test was bounded rather than the
+mutant retired. Two mutants survived the first pass and both were real. One showed that an all-refused answer
 still reported `ErrRefused` through a generic fallback, losing the refusal that
 names the offending address — the test now asserts the address. The other showed
 that `netip.Addr.WithZone("")` before `AsSlice()` was a no-op, because netip keeps

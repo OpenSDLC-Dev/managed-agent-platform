@@ -668,10 +668,14 @@ plain HTTP, and by the executor on its own dial to the same URL
 ([#601](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/601)).
 Every one of those dials now resolves its name **once** and holds each address
 that came back to the floor before connecting, so where a connection goes is no
-longer decided below the check that admitted it; what that does not do is change
-which answer your resolver gives, so the residual above is narrowed to exactly
-that — a name your `search` list completes into your own network, on a private
-address the floor admits by design.
+longer decided below the check that admitted it. What that does not do is change
+which answer your resolver gives, and that is the whole of the residual: a
+declared name that resolves to a **private address** still receives the
+credential chosen for it. A `search` domain completing the name into your own
+network is one way to produce that answer; split-horizon DNS serving the name
+from an internal view, or a zone somebody controls publishing an RFC 1918 record
+for it outright, are others, and the floor admits all of them by the same
+deliberate rule — your own MCP servers live on those addresses.
 **For the default
 (non-`limited`) case, egress is unrestricted**: a default Docker sandbox
 gets `NetworkMode: bridge`, and the Kubernetes sandbox pod carries no

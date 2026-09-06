@@ -18,10 +18,11 @@
 // saw — which is what DNS rebinding is, and which was the one thing the gate,
 // the MCP client and the two credential dials could not previously say about
 // their own connections (#601, docs/plan/44). What a single resolution does not
-// change is which answer a resolver gives: a `search` list still completes a
-// relative name, and the address such a completion returns is admitted here if
-// it is private, deliberately — see the next paragraph, and #601 for the policy
-// question that leaves open.
+// change is which answer a resolver gives: a name may resolve to a private
+// address by a `search`-list completion, by split-horizon DNS, or by a zone
+// somebody controls publishing an RFC 1918 record for it, and every one of those
+// is admitted here — deliberately, for the reason the next paragraph gives. #601
+// carries the policy question that leaves open.
 // And RFC 1918 private ranges are deliberately allowed: this platform's premise
 // is on-prem / in-VPC operation (CLAUDE.md), where MCP servers and token
 // endpoints legitimately live on the operator's own private network — the

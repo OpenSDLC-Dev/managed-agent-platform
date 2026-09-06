@@ -181,6 +181,80 @@ func TestAFailedAddressFallsOverToTheNext(t *testing.T) {
 	}
 }
 
+// TestWithTheRaceOffTheResolversOrderIsKept: partitioning by family exists to
+// race the two halves, so a caller that turned the race off must get the list
+// as the resolver left it rather than one regrouped behind its back.
+func TestWithTheRaceOffTheResolversOrderIsKept(t *testing.T) {
+	t.Parallel()
+	var rec recorder
+	d := &Dialer{
+		FallbackDelay: -1,
+		Lookup: func(context.Context, string, string) ([]net.IP, error) {
+			return ips(t, "2001:db8::1", "198.51.100.1", "2001:db8::2"), nil
+		},
+		dialOne: func(_ context.Context, _, addr string) (net.Conn, error) {
+			rec.add(addr)
+			return nil, errors.New("connection refused")
+		},
+	}
+	if _, err := d.DialContext(context.Background(), "tcp", "mixed.example:443"); err == nil {
+		t.Fatal("every address refused, so the dial must fail")
+	}
+	want := []string{"[2001:db8::1]:443", "198.51.100.1:443", "[2001:db8::2]:443"}
+	got := rec.all()
+	if len(got) != len(want) {
+		t.Fatalf("dialled %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("dialled %v, want the resolver's order %v", got, want)
+		}
+	}
+
+	// And the same for a network that is not "tcp": net.Dialer races the two
+	// families for that network alone, so anything else is tried in the
+	// resolver's order however long the fallback delay is.
+	rec = recorder{}
+	d.FallbackDelay = time.Second
+	if _, err := d.DialContext(context.Background(), "udp", "mixed.example:443"); err == nil {
+		t.Fatal("every address refused, so the dial must fail")
+	}
+	got = rec.all()
+	if len(got) != len(want) {
+		t.Fatalf("udp: dialled %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("udp: dialled %v, want the resolver's order %v — only tcp races", got, want)
+		}
+	}
+}
+
+// TestAFamilyWithNoSurvivorIsNotRacedAgainstTheOther: when the floor refuses
+// every address of the family the resolver preferred, the other family is all
+// there is, and racing an empty half against it would put "no address to dial"
+// where the real connect error belongs.
+func TestAFamilyWithNoSurvivorIsNotRacedAgainstTheOther(t *testing.T) {
+	t.Parallel()
+	connectErr := errors.New("connection refused by the origin")
+	d := &Dialer{
+		Lookup: func(context.Context, string, string) ([]net.IP, error) {
+			return ips(t, "::1", "::2", "198.51.100.1"), nil
+		},
+		Allow: func(_ context.Context, ip net.IP) error {
+			if ip.String() == "::2" {
+				return IPAllowed(net.IP{}) // refused, like ::1 before it
+			}
+			return IPAllowed(ip)
+		},
+		dialOne: func(context.Context, string, string) (net.Conn, error) { return nil, connectErr },
+	}
+	_, err := d.DialContext(context.Background(), "tcp", "dual.example:443")
+	if !errors.Is(err, connectErr) {
+		t.Fatalf("err = %v, want the surviving family's own connect error", err)
+	}
+}
+
 // TestTheOtherFamilyStartsAfterTheFallbackDelay is Happy Eyeballs: a blackholed
 // primary family must cost the delay, not the whole timeout. Driven through the
 // dial seam rather than the network, so it neither needs IPv6 nor depends on
@@ -225,13 +299,23 @@ func TestTheOtherFamilyStartsAfterTheFallbackDelay(t *testing.T) {
 func TestTheTimeoutBoundsTheWholeDial(t *testing.T) {
 	t.Parallel()
 	const budget = 60 * time.Millisecond
+	// How long the stand-in waits for a bound that should have arrived long
+	// before. Comfortably over the budget and comfortably under the assertion.
+	const giveUp = 2 * time.Second
 	t.Run("a resolver that never answers", func(t *testing.T) {
 		t.Parallel()
 		d := &Dialer{
 			Timeout: budget,
 			Lookup: func(ctx context.Context, _, _ string) ([]net.IP, error) {
-				<-ctx.Done()
-				return nil, ctx.Err()
+				// Bounded, not blocking: a test that hangs when the bound goes
+				// missing takes the whole package down with it and reports the
+				// regression as a timeout rather than as itself.
+				select {
+				case <-ctx.Done():
+					return nil, ctx.Err()
+				case <-time.After(giveUp):
+					return ips(t, "198.51.100.1"), nil
+				}
 			},
 			dialOne: func(context.Context, string, string) (net.Conn, error) {
 				t.Error("the lookup never answered, so nothing may be dialled")
@@ -242,7 +326,7 @@ func TestTheTimeoutBoundsTheWholeDial(t *testing.T) {
 		if _, err := d.DialContext(context.Background(), "tcp", "slow.example:443"); err == nil {
 			t.Fatal("want the dial to give up")
 		}
-		if elapsed := time.Since(start); elapsed > time.Second {
+		if elapsed := time.Since(start); elapsed > giveUp {
 			t.Errorf("returned in %v, want about the %v budget", elapsed, budget)
 		}
 	})
@@ -251,15 +335,19 @@ func TestTheTimeoutBoundsTheWholeDial(t *testing.T) {
 		d := &Dialer{
 			Timeout: budget,
 			dialOne: func(ctx context.Context, _, _ string) (net.Conn, error) {
-				<-ctx.Done()
-				return nil, ctx.Err()
+				select {
+				case <-ctx.Done():
+					return nil, ctx.Err()
+				case <-time.After(giveUp):
+					return stubConn(t), nil
+				}
 			},
 		}
 		start := time.Now()
 		if _, err := d.DialContext(context.Background(), "tcp", "198.51.100.9:443"); err == nil {
 			t.Fatal("want the dial to give up")
 		}
-		if elapsed := time.Since(start); elapsed > time.Second {
+		if elapsed := time.Since(start); elapsed > giveUp {
 			t.Errorf("returned in %v, want about the %v budget", elapsed, budget)
 		}
 	})
@@ -335,27 +423,181 @@ func TestALiteralIsNotResolved(t *testing.T) {
 	}
 }
 
-// TestAZoneScopedLiteralIsJudgedWithoutItsZone: a zone names an interface, not a
-// destination, so the floor must see the address alone — while the dial keeps
-// the zone, which is the whole reason the address was written that way.
-func TestAZoneScopedLiteralIsJudgedWithoutItsZone(t *testing.T) {
+// TestAnAddressTheFloorCannotReadKeepsItsOldAnswer. Two shapes are neither a
+// name nor something net.ParseIP can read: a zone-scoped literal, and the empty
+// host of ":443". The Control hook this type replaced refused both without ever
+// consulting its predicate — and was not installed at all for a class the gate
+// exempts from the floor, which dialled them unchanged. Both halves have to
+// survive, or the change moves what a session can reach.
+func TestAnAddressTheFloorCannotReadKeepsItsOldAnswer(t *testing.T) {
 	t.Parallel()
-	var judged string
+	for _, addr := range []string{"[2001:db8::1%eth0]:443", "[fe80::1%eth0]:443", ":443"} {
+		t.Run(addr, func(t *testing.T) {
+			t.Parallel()
+			var judged []net.IP
+			var rec recorder
+			floored := &Dialer{
+				Allow: func(_ context.Context, ip net.IP) error {
+					judged = append(judged, ip)
+					return IPAllowed(ip)
+				},
+				Lookup: func(context.Context, string, string) ([]net.IP, error) {
+					t.Error("this is not a name and must not be resolved")
+					return nil, errors.New("unreachable")
+				},
+				dialOne: func(context.Context, string, string) (net.Conn, error) {
+					t.Error("a floored class refused this before and must still")
+					return nil, errors.New("unreachable")
+				},
+			}
+			if _, err := floored.DialContext(context.Background(), "tcp", addr); !errors.Is(err, ErrRefused) {
+				t.Fatalf("floored: err = %v, want ErrRefused", err)
+			}
+			if len(judged) != 1 || judged[0] != nil {
+				t.Errorf("the floor was asked about %v, want one unreadable address", judged)
+			}
+
+			// The gate's own shape for a class it exempts: Allow answers before
+			// it looks at the address at all.
+			exempt := &Dialer{
+				Allow:   func(context.Context, net.IP) error { return nil },
+				dialOne: func(_ context.Context, _, a string) (net.Conn, error) { rec.add(a); return stubConn(t), nil },
+			}
+			c, err := exempt.DialContext(context.Background(), "tcp", addr)
+			if err != nil {
+				t.Fatalf("exempt: %v — an unfloored class dialled this unchanged before", err)
+			}
+			_ = c.Close()
+			if got := rec.all(); len(got) != 1 || got[0] != addr {
+				t.Errorf("dialled %v, want %q spelled exactly as it came", got, addr)
+			}
+		})
+	}
+}
+
+// TestANetworkWithNoPortIsRefused. This type takes a name and a port apart,
+// judges the addresses and dials them; a raw "ip:proto" address is a bare host
+// and a unix address is a path, so neither has anything for the floor to be
+// asked about. Handing one to the standard dialler would open a socket nothing
+// judged, which is the one outcome a guard may not have.
+func TestANetworkWithNoPortIsRefused(t *testing.T) {
+	t.Parallel()
+	for _, network := range []string{"ip:icmp", "ip4:1", "unix", "unixgram"} {
+		d := &Dialer{
+			dialOne: func(context.Context, string, string) (net.Conn, error) {
+				t.Errorf("%s: dialled without the floor", network)
+				return nil, errors.New("unreachable")
+			},
+		}
+		if _, err := d.DialContext(context.Background(), network, "whatever"); !errors.Is(err, ErrRefused) {
+			t.Errorf("%s: err = %v, want ErrRefused", network, err)
+		}
+	}
+	// And the networks that do carry a port are not caught by it.
+	for _, network := range []string{"tcp", "tcp4", "tcp6", "udp", "udp4", "udp6"} {
+		if !portCarrying(network) {
+			t.Errorf("portCarrying(%q) = false, want true", network)
+		}
+	}
+}
+
+// TestANegativeTimeoutIsAlreadyExpired: net.Dialer reads a negative Timeout as a
+// deadline in the past rather than as no deadline (dial.go's deadline method
+// tests Timeout != 0), and a drop-in that read it as "unbounded" would turn a
+// caller's mistake into an unbounded dial.
+func TestANegativeTimeoutIsAlreadyExpired(t *testing.T) {
+	t.Parallel()
+	d := &Dialer{
+		Timeout: -time.Second,
+		Lookup: func(ctx context.Context, _, _ string) ([]net.IP, error) {
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
+			return ips(t, "198.51.100.1"), nil
+		},
+		dialOne: func(ctx context.Context, _, _ string) (net.Conn, error) {
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
+			return stubConn(t), nil
+		},
+	}
+	if _, err := d.DialContext(context.Background(), "tcp", "host.example:443"); err == nil {
+		t.Fatal("a negative timeout is already expired, so the dial must fail")
+	}
+}
+
+// TestTheResolversPreferredFamilyLeadsThroughARefusal: which family races first
+// is decided by the whole answer, and the floor refusing that family's first
+// address must not hand the lead to the other one. net.Dialer partitions before
+// its Control hook runs, so this is fidelity rather than taste — and getting it
+// wrong picks a different backend and a different latency profile on every
+// dual-stack name with one blocked address.
+func TestTheResolversPreferredFamilyLeadsThroughARefusal(t *testing.T) {
+	t.Parallel()
 	var rec recorder
 	d := &Dialer{
-		Allow:   func(_ context.Context, ip net.IP) error { judged = ip.String(); return nil },
-		dialOne: func(_ context.Context, _, addr string) (net.Conn, error) { rec.add(addr); return stubConn(t), nil },
+		FallbackDelay: 5 * time.Second, // long enough that the fallback cannot win
+		Lookup: func(context.Context, string, string) ([]net.IP, error) {
+			// v6 leads, but the resolver's first address is one the floor
+			// refuses; a second v6 address survives.
+			return ips(t, "::1", "198.51.100.1", "2001:db8::2"), nil
+		},
+		dialOne: func(_ context.Context, _, addr string) (net.Conn, error) {
+			rec.add(addr)
+			return stubConn(t), nil
+		},
 	}
-	c, err := d.DialContext(context.Background(), "tcp", "[2001:db8::1%eth0]:443")
+	c, err := d.DialContext(context.Background(), "tcp", "dual.example:443")
 	if err != nil {
 		t.Fatalf("dial: %v", err)
 	}
 	_ = c.Close()
-	if judged != "2001:db8::1" {
-		t.Errorf("the floor judged %q, want the address without its zone", judged)
+	if got := rec.all(); len(got) != 1 || got[0] != "[2001:db8::2]:443" {
+		t.Errorf("dialled %v, want the surviving address of the resolver's own first family", got)
 	}
-	if got := rec.all(); len(got) != 1 || got[0] != "[2001:db8::1%eth0]:443" {
-		t.Errorf("dialled %v, want the zone kept", got)
+}
+
+// TestTheLosingFamilysConnectionIsClosed: the race's most important guarantee
+// is not that a winner is returned but that the loser does not leak a socket
+// when it comes up a moment later.
+func TestTheLosingFamilysConnectionIsClosed(t *testing.T) {
+	t.Parallel()
+	loser := make(chan net.Conn, 1)
+	closed := make(chan struct{})
+	d := &Dialer{
+		FallbackDelay: time.Millisecond,
+		Lookup: func(context.Context, string, string) ([]net.IP, error) {
+			return ips(t, "2001:db8::1", "198.51.100.2"), nil
+		},
+		dialOne: func(ctx context.Context, _, addr string) (net.Conn, error) {
+			if strings.HasPrefix(addr, "[2001:db8::1]") {
+				// The primary comes up late — after the fallback has won.
+				<-closed
+				c := stubConn(t)
+				loser <- c
+				return c, nil
+			}
+			return stubConn(t), nil
+		},
+	}
+	c, err := d.DialContext(context.Background(), "tcp", "dual.example:443")
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer c.Close()
+	close(closed) // let the loser finish now that a winner is in hand
+	late := <-loser
+	// A net.Pipe end reports use of a closed connection on a read after Close.
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		_ = late.SetReadDeadline(time.Now().Add(10 * time.Millisecond))
+		if _, err := late.Read(make([]byte, 1)); err != nil && strings.Contains(err.Error(), "closed") {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the losing family's connection was never closed")
+		}
 	}
 }
 
@@ -423,15 +665,21 @@ func TestPartitionPrefersTheFamilyTheResolverPutFirst(t *testing.T) {
 		netip.MustParseAddr("2001:db8::2"),
 		netip.MustParseAddr("198.51.100.2"),
 	}
-	primary, fallback := partition(addrs)
+	primary, fallback := partition(is4(addrs[0]), addrs)
 	if len(primary) != 2 || primary[0].String() != "2001:db8::1" || primary[1].String() != "2001:db8::2" {
 		t.Errorf("primary = %v, want both v6 addresses in resolver order", primary)
 	}
 	if len(fallback) != 2 || fallback[0].String() != "198.51.100.1" {
 		t.Errorf("fallback = %v, want both v4 addresses in resolver order", fallback)
 	}
-	if _, fb := partition(addrs[1:2]); len(fb) != 0 {
+	if _, fb := partition(is4(addrs[1]), addrs[1:2]); len(fb) != 0 {
 		t.Error("a single-family answer has no fallback half to race")
+	}
+	// An A record reaches this as an IPv4-mapped address, which is the form
+	// net.Resolver.LookupIP returns; reading that as IPv6 would split one family
+	// in two and race a name against itself.
+	if !is4(netip.MustParseAddr("::ffff:198.51.100.1")) {
+		t.Error("an IPv4-mapped address must count as IPv4, as net.Dialer counts it")
 	}
 }
 

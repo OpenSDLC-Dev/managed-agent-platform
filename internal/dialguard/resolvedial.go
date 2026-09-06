@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net"
 	"net/netip"
+	"strings"
 	"time"
 )
 
@@ -27,23 +28,31 @@ const minPartialTimeout = 2 * time.Second
 // It exists because the platform's decisions are made about names while the
 // socket goes to an address, and until this type the resolution that turned one
 // into the other happened inside net.Dialer — below every decision, visible only
-// to the Control hook one syscall before connect(2). A gate that has admitted a
+// to a Control hook one syscall before connect(2). A gate that has admitted a
 // host, or an executor that has chosen a credential for it, cannot see where the
 // connection is actually going, so nothing above the socket can be said about
 // it (#601, docs/plan/44).
 //
 // What that buys is one resolution per dial, with the addresses the floor judged
 // being exactly the addresses connect(2) is called on. What it does not buy is a
-// different answer from the resolver: a `search` list still completes a relative
-// name, and IPAllowed still admits the RFC 1918 address that completion may
-// return, deliberately (see this package's doc comment). Closing that is a
+// different answer from the resolver. A private answer for a name — from a
+// `search`-list completion, from split-horizon DNS, or from a poisoned
+// response — is admitted here, deliberately (see this package's doc comment),
+// and a credential chosen for that name still reaches it. Closing that is a
 // policy decision about *which name may answer*, and it belongs above this type.
+//
+// It is a drop-in for net.Dialer on the port-carrying networks — the tcp and udp
+// families — and refuses every other, because a raw "ip:proto" or unix address
+// has no host and port for it to judge and delegating one would open a socket
+// the floor never saw. Every caller here dials TCP.
 //
 // The zero value is usable and behaves like net.Dialer with the platform floor:
 // no overall timeout, the process resolver, IPAllowed.
 type Dialer struct {
-	// Timeout bounds the whole dial — every address attempt together, as
-	// net.Dialer.Timeout does. Zero means no bound.
+	// Timeout bounds the whole dial — the lookup and every address attempt
+	// together, which is where net.Dialer applies its own. Zero means no bound;
+	// a negative value is already expired when the dial starts, as net.Dialer's
+	// is.
 	Timeout time.Duration
 
 	// FallbackDelay is how long the second address family waits before racing
@@ -77,16 +86,20 @@ type Dialer struct {
 }
 
 // DialContext connects to addr, which is a "host:port" the caller has already
-// decided may be reached. It is a drop-in for (&net.Dialer{…}).DialContext.
+// decided may be reached.
 func (d *Dialer) DialContext(ctx context.Context, network, addr string) (net.Conn, error) {
+	if !portCarrying(network) {
+		return nil, fmt.Errorf("dial network %q has no host and port to judge: %w", network, ErrRefused)
+	}
 	// The bound covers the lookup as well as the connects, which is where
 	// net.Dialer applies its own Timeout and is the only placement that bounds
 	// the whole operation: a resolver that never answers would otherwise hold
 	// the caller for as long as its context allows, and for the gate that
-	// context is the sandbox's request. Cancelling on return cannot disturb a
-	// connection that came back — a dial stops watching its context once it has
-	// one to hand over.
-	if d.Timeout > 0 {
+	// context is the sandbox's request. A negative value is already expired,
+	// which is net.Dialer's reading of one too. Cancelling on return cannot
+	// disturb a connection that came back — a dial stops watching its context
+	// once it has one to hand over.
+	if d.Timeout != 0 {
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithTimeout(ctx, d.Timeout)
 		defer cancel()
@@ -101,12 +114,23 @@ func (d *Dialer) DialContext(ctx context.Context, network, addr string) (net.Con
 		// for the same shapes.
 		return d.dial(ctx, network, addr)
 	}
-	if ip, ok := parseAddr(host); ok {
+	if ip := net.ParseIP(host); ip != nil {
 		// A literal skips the lookup, and must: resolving one would be a
-		// different operation with different failures. The zone of a
-		// zone-scoped address is not part of what an address check is about,
-		// so the floor sees the address without it while the dial keeps it.
-		if err := d.allow(ctx, ipOf(ip)); err != nil {
+		// different operation with different failures.
+		if err := d.allow(ctx, ip); err != nil {
+			return nil, err
+		}
+		return d.dial(ctx, network, addr)
+	}
+	if host == "" || strings.ContainsAny(host, ":%") {
+		// Not a name, and not an address net.ParseIP can read: a zone-scoped
+		// literal such as fe80::1%eth0, or the empty host of ":443". The hook
+		// this type replaced judged exactly these as unreadable and refused
+		// them, while a class it was not installed for dialled them unchanged —
+		// and a nil address reproduces both, since IPAllowed refuses one and a
+		// caller that exempts the class never looks. Resolving them instead
+		// would be a narrowing nobody asked for.
+		if err := d.allow(ctx, nil); err != nil {
 			return nil, err
 		}
 		return d.dial(ctx, network, addr)
@@ -116,51 +140,67 @@ func (d *Dialer) DialContext(ctx context.Context, network, addr string) (net.Con
 	if err != nil {
 		return nil, err
 	}
-	addrs, err := d.admitted(ctx, ips)
+	all, err := addrsOf(ips)
 	if err != nil {
 		return nil, err
 	}
-	return d.dialAll(ctx, network, addrs, port)
+	admitted, refusal := d.admitted(ctx, all)
+	if len(admitted) == 0 {
+		return nil, refusal
+	}
+	// all[0] rather than admitted[0]: which family leads is the resolver's
+	// choice, made by RFC 6724 over the whole answer, and the floor refusing
+	// that family's first address must not hand the lead to the other one.
+	// net.Dialer partitions before its Control hook runs, for the same reason.
+	return d.dialAll(ctx, network, is4(all[0]), admitted, port)
 }
 
-// admitted runs the floor over every resolved address and returns the ones it
-// admits. It is an error rather than an empty slice when none survive, and the
-// error is the first refusal so that a caller matching on ErrRefused — which
+// addrsOf reads the resolver's answer. An address netip cannot read is dropped
+// rather than dialled: IPAllowed answers for a net.IP it can read, and a
+// caller's own Allow may be laxer than that.
+func addrsOf(ips []net.IP) ([]netip.Addr, error) {
+	out := make([]netip.Addr, 0, len(ips))
+	for _, ip := range ips {
+		a, ok := netip.AddrFromSlice(ip)
+		if !ok {
+			continue
+		}
+		// Unmap, because net.IP carries an A record as sixteen bytes with the
+		// IPv4-mapped prefix and netip reads that literally: without this the
+		// dial address for 198.51.100.1 is spelled [::ffff:198.51.100.1]:443,
+		// which is a different address family to the socket and not what
+		// net.Dialer would have dialled.
+		out = append(out, a.Unmap())
+	}
+	if len(out) == 0 {
+		// A resolver that answers with no usable address and no error. Nothing
+		// in the standard library does this, but Lookup is a seam.
+		return nil, fmt.Errorf("dial target resolved to no address: %w", ErrRefused)
+	}
+	return out, nil
+}
+
+// admitted runs the floor over every resolved address, in the resolver's order,
+// and returns the ones it admits together with the first refusal. The refusal is
+// returned rather than summarised so a caller matching on ErrRefused — which
 // vaultresolve does, to tell a destination that can never be dialled from a
-// network that may recover — still sees it.
-func (d *Dialer) admitted(ctx context.Context, ips []net.IP) ([]netip.Addr, error) {
+// network that may recover — still sees it, and so the message still names the
+// address that was refused.
+func (d *Dialer) admitted(ctx context.Context, addrs []netip.Addr) ([]netip.Addr, error) {
 	var (
 		out     []netip.Addr
 		refusal error
 	)
-	for _, ip := range ips {
-		if err := d.allow(ctx, ip); err != nil {
+	for _, a := range addrs {
+		if err := d.allow(ctx, net.IP(a.AsSlice())); err != nil {
 			if refusal == nil {
 				refusal = err
 			}
 			continue
 		}
-		a, ok := parseAddr(ip.String())
-		if !ok {
-			// An address the floor admitted but netip cannot read is refused
-			// rather than dialled: IPAllowed answers for a net.IP it can read,
-			// and a caller's own Allow may be laxer than that.
-			if refusal == nil {
-				refusal = fmt.Errorf("dial target is not a usable address: %w", ErrRefused)
-			}
-			continue
-		}
 		out = append(out, a)
 	}
-	if len(out) == 0 {
-		if refusal != nil {
-			return nil, refusal
-		}
-		// A resolver that answers with no addresses and no error. Nothing in
-		// the standard library does this, but Lookup is a seam.
-		return nil, fmt.Errorf("dial target resolved to no address: %w", ErrRefused)
-	}
-	return out, nil
+	return out, refusal
 }
 
 // dialAll connects to the first of addrs that answers, reproducing the three
@@ -169,10 +209,19 @@ func (d *Dialer) admitted(ctx context.Context, ips []net.IP) ([]netip.Addr, erro
 // blackholed address cannot spend all of it, and the other family started after
 // FallbackDelay so a broken IPv6 path costs that delay rather than a connect
 // timeout.
-func (d *Dialer) dialAll(ctx context.Context, network string, addrs []netip.Addr, port string) (net.Conn, error) {
-	primary, fallback := partition(addrs)
-	if len(fallback) == 0 || d.FallbackDelay < 0 {
-		return d.dialSerial(ctx, network, append(primary, fallback...), port)
+//
+// The race is for "tcp" alone, which is net.Dialer's own condition (dial.go's
+// `d.dualStack() && network == "tcp"`): tcp4 and tcp6 have one family by
+// construction, and it does not race udp at all. With the race off — by network
+// or by a negative delay — the addresses are tried in the resolver's order
+// rather than regrouped by family.
+func (d *Dialer) dialAll(ctx context.Context, network string, primaryIs4 bool, addrs []netip.Addr, port string) (net.Conn, error) {
+	if network != "tcp" || d.FallbackDelay < 0 {
+		return d.dialSerial(ctx, network, addrs, port)
+	}
+	primary, fallback := partition(primaryIs4, addrs)
+	if len(primary) == 0 || len(fallback) == 0 {
+		return d.dialSerial(ctx, network, addrs, port)
 	}
 	return d.dialRace(ctx, network, primary, fallback, port)
 }
@@ -196,7 +245,7 @@ func (d *Dialer) dialSerial(ctx context.Context, network string, addrs []netip.A
 		}
 	}
 	if first == nil {
-		// Only reachable with an empty list, which admitted() cannot produce.
+		// Only reachable with an empty list, which DialContext cannot produce.
 		first = errors.New("no address to dial")
 	}
 	return nil, first
@@ -306,33 +355,40 @@ func (d *Dialer) fallbackDelay() time.Duration {
 	return defaultFallbackDelay
 }
 
+// portCarrying reports whether a dial network's address is a "host:port" this
+// type can take apart. The tcp and udp families are; a raw "ip:proto" address is
+// a bare host and a unix address is a path, so for those there is nothing to
+// split, nothing to resolve, and — this being the point — nothing the floor
+// would ever be asked about.
+func portCarrying(network string) bool {
+	return strings.HasPrefix(network, "tcp") || strings.HasPrefix(network, "udp")
+}
+
 // lookupNetwork maps a dial network onto the spelling net.Resolver.LookupIP
 // takes, so a "tcp4" dial resolves only A records exactly as net.Dialer's own
-// resolution would. Anything else asks for both families, which is what "tcp",
-// "udp" and the unix networks all want (a unix network never reaches here — it
-// has no host:port to split).
+// resolution would.
 func lookupNetwork(network string) string {
 	switch network {
-	case "tcp4", "udp4", "ip4":
+	case "tcp4", "udp4":
 		return "ip4"
-	case "tcp6", "udp6", "ip6":
+	case "tcp6", "udp6":
 		return "ip6"
 	default:
 		return "ip"
 	}
 }
 
-// partition splits the resolved list by address family, keeping the resolver's
-// order within each half and making the family of the first address the primary
-// one — the same rule net.Dialer uses, so the family a resolver preferred is
-// still the family tried first.
-func partition(addrs []netip.Addr) (primary, fallback []netip.Addr) {
-	if len(addrs) == 0 {
-		return nil, nil
-	}
-	is4 := addrs[0].Is4() || addrs[0].Is4In6()
+// is4 is the family test, and it is net.Dialer's: an IPv4-mapped answer counts
+// as IPv4, which is the form net.Resolver.LookupIP returns A records in.
+func is4(a netip.Addr) bool { return a.Is4() || a.Is4In6() }
+
+// partition splits the admitted addresses into the family the resolver put
+// first and the other, keeping its order within each half. Which family leads
+// is decided by the whole answer rather than by what survived the floor, so a
+// refused first address cannot hand the lead to the other family.
+func partition(primaryIs4 bool, addrs []netip.Addr) (primary, fallback []netip.Addr) {
 	for _, a := range addrs {
-		if a4 := a.Is4() || a.Is4In6(); a4 == is4 {
+		if is4(a) == primaryIs4 {
 			primary = append(primary, a)
 		} else {
 			fallback = append(fallback, a)
@@ -365,28 +421,7 @@ func partialDeadline(ctx context.Context, remaining int) (context.Context, conte
 	return context.WithTimeout(ctx, share)
 }
 
-// parseAddr reads an address literal, zone and all. It is netip rather than
-// net.ParseIP because net.ParseIP answers nil for a zone-scoped address such as
-// fe80::1%eth0, which a caller may legitimately dial and which must not be
-// mistaken for a name to resolve.
-func parseAddr(host string) (netip.Addr, bool) {
-	a, err := netip.ParseAddr(host)
-	if err != nil {
-		return netip.Addr{}, false
-	}
-	return a, true
-}
-
-// ipOf returns the address the floor judges. A zone names an interface rather
-// than a destination, and IPAllowed asks only about the destination — which
-// comes for free here: netip keeps a zone beside the address rather than in it,
-// so AsSlice never carries one. Spelling that as a WithZone("") call would read
-// like a guard while removing it changed nothing.
-func ipOf(a netip.Addr) net.IP {
-	return net.IP(a.AsSlice())
-}
-
-// joinAddrPort spells one resolved address for the dial, keeping any zone.
+// joinAddrPort spells one resolved address for the dial.
 func joinAddrPort(a netip.Addr, port string) string {
 	return net.JoinHostPort(a.String(), port)
 }
