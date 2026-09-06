@@ -21,6 +21,17 @@ import (
 
 const testKey = "map-test-key-0123456789"
 
+// The second tenant. Every fixture server comes up with the workspace 0034
+// seeds — `default`, the id every existing row already carries — so a tenancy
+// test that needs two workspaces has to register the other one itself.
+// workspaceB is a minted-shape id because the header rule validates one
+// (domain.ValidWithPrefix), and testKeyB is to workspaceB what testKey is to
+// the default workspace.
+const (
+	workspaceB = "wrkspc_0123456789abcdefghjkmnpq"
+	testKeyB   = "map-test-key-workspace-b"
+)
+
 func TestMain(m *testing.M) {
 	os.Exit(pgtest.Main(m))
 }
@@ -43,6 +54,28 @@ func newPoolWithKey(t *testing.T) *pgxpool.Pool {
 		t.Fatalf("EnsureAPIKey: %v", err)
 	}
 	return pool
+}
+
+// registerWorkspace adds a live workspace beside the seeded default.
+func registerWorkspace(t *testing.T, pool *pgxpool.Pool, id string) {
+	t.Helper()
+	if _, err := pool.Exec(context.Background(),
+		`INSERT INTO workspaces (id, org_id, name) VALUES ($1, 'default', 'B')`, id); err != nil {
+		t.Fatalf("register workspace %s: %v", id, err)
+	}
+}
+
+// newWorkspaceBKey registers workspaceB and binds a management key to it,
+// through the same EnsureAPIKey path the control plane boots with rather than
+// by writing the row a fixture thinks it would write. It returns the key's
+// plaintext, which is all a test needs to make requests as the second tenant.
+func newWorkspaceBKey(t *testing.T, pool *pgxpool.Pool) string {
+	t.Helper()
+	registerWorkspace(t, pool, workspaceB)
+	if err := api.EnsureAPIKeyInWorkspace(context.Background(), pool, workspaceB, "test-b", testKeyB); err != nil {
+		t.Fatalf("EnsureAPIKeyInWorkspace: %v", err)
+	}
+	return testKeyB
 }
 
 // issueKey mints a live worker credential for an environment and returns the

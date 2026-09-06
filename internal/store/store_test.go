@@ -633,12 +633,51 @@ func TestKeyRotationMigrationRepairsExistingDuplicates(t *testing.T) {
 	}
 }
 
+// scopedTables is every table whose CREATE TABLE declares the reserved tenancy
+// triple, in migration order. Counting rule, so the list can be re-derived
+// rather than trusted: `grep -n "org_id" internal/store/migrations/*.sql` —
+// seven in 0001_init.sql, then one each in 0007, 0008, 0011, 0022, 0025, 0028
+// and 0031. Child tables (agent_versions, skill_versions, vault_credentials,
+// deployment_runs among them) declare none and inherit scope through their
+// foreign key, so they are deliberately absent.
+var scopedTables = []string{
+	"agents", "environments", "sessions", "events", "work_items", "api_keys",
+	"environment_keys", "skills", "files", "vaults", "principals",
+	"session_threads", "memory_stores", "deployments",
+}
+
+// seedEveryScopedTable puts one row in each of scopedTables, naming no tenancy
+// column anywhere, so what the assertions read back is what the schema wrote.
+func seedEveryScopedTable(t *testing.T, pool *pgxpool.Pool) {
+	t.Helper()
+	seedSessionChain(t, pool)
+	ctx := context.Background()
+	for _, q := range []string{
+		`INSERT INTO events (id, session_id, seq, type, payload) VALUES ('sevt_1', 'sesn_1', 1, 'user.message', '{}')`,
+		`INSERT INTO work_items (id, environment_id, session_id, kind) VALUES ('work_1', 'env_1', 'sesn_1', 'model_turn')`,
+		`INSERT INTO api_keys (id, name, key_hash) VALUES ('apikey_1', 'k', 'hash-key-1')`,
+		`INSERT INTO environment_keys (id, environment_id, key_hash) VALUES ('envkey_1', 'env_1', 'hash-env-1')`,
+		`INSERT INTO skills (id, source, display_title) VALUES ('skill_1', 'custom', 's')`,
+		`INSERT INTO files (id, filename, mime_type, size_bytes) VALUES ('file_1', 'f.txt', 'text/plain', 1)`,
+		`INSERT INTO vaults (id, display_name) VALUES ('vlt_1', 'v')`,
+		`INSERT INTO principals (id, issuer, subject) VALUES ('principal_1', 'iss', 'sub')`,
+		`INSERT INTO session_threads (id, session_id, agent_name, status) VALUES ('sthr_1', 'sesn_1', 'a', 'idle')`,
+		`INSERT INTO memory_stores (id, name) VALUES ('memstore_1', 'm')`,
+		`INSERT INTO deployments (id, name, agent_id, agent_version, environment_id)
+		 VALUES ('depl_1', 'd', 'agent_1', 1, 'env_1')`,
+	} {
+		if _, err := pool.Exec(ctx, q); err != nil {
+			t.Fatalf("seed %q: %v", q, err)
+		}
+	}
+}
+
 func TestTenancyColumnsHaveSingleTenantDefaults(t *testing.T) {
 	pool := open(t, pgtest.FreshDB(t))
 	ctx := context.Background()
-	seedSessionChain(t, pool)
+	seedEveryScopedTable(t, pool)
 
-	for _, table := range []string{"agents", "environments", "sessions"} {
+	for _, table := range scopedTables {
 		var org, wksp, proj string
 		q := `SELECT org_id, workspace_id, project_id FROM ` + table + ` LIMIT 1`
 		if err := pool.QueryRow(ctx, q).Scan(&org, &wksp, &proj); err != nil {
@@ -647,6 +686,62 @@ func TestTenancyColumnsHaveSingleTenantDefaults(t *testing.T) {
 		if org != "default" || wksp != "default" || proj != "default" {
 			t.Errorf("%s tenancy defaults = (%s,%s,%s), want (default,default,default)", table, org, wksp, proj)
 		}
+	}
+}
+
+// 0034 REGISTERS the default workspace rather than creating one: it lands on
+// deployments whose tables are already full of rows carrying workspace_id
+// 'default', and those rows are what its single seeded row describes. So the
+// upgrade is replayed here the way an operator's is — every scoped table
+// populated under the pre-0034 schema, plus the fixture's own agent,
+// environment, session and threads — and the migration must leave all of it
+// exactly as it found it. A backfill, a rewrite, or a second seeded workspace
+// would all show up as a failure below.
+func TestWorkspaceRegistryLandsOnAPopulatedDatabaseWithoutTouchingIt(t *testing.T) {
+	ctx := context.Background()
+	pool := rawPool(t, pgtest.FreshDB(t))
+	if err := store.MigrateThrough(ctx, pool, "0033_skills_display_name.sql"); err != nil {
+		t.Fatalf("migrate through 0033: %v", err)
+	}
+	seedEveryScopedTable(t, pool)
+	sessionID, _ := pgtest.NewSession(t, pool, "cloud")
+	pgtest.NewChildThread(t, pool, sessionID)
+
+	if err := store.Migrate(ctx, pool); err != nil {
+		t.Fatalf("migrate the rest: %v", err)
+	}
+
+	// Every row of every scoped table, not a sample: a backfill that rewrote
+	// only the rows one query happens to reach is the failure this guards.
+	for _, table := range scopedTables {
+		var strayed int
+		q := `SELECT count(*) FROM ` + table +
+			` WHERE org_id <> 'default' OR workspace_id <> 'default' OR project_id <> 'default'`
+		if err := pool.QueryRow(ctx, q).Scan(&strayed); err != nil {
+			t.Fatalf("%s tenancy columns: %v", table, err)
+		}
+		if strayed != 0 {
+			t.Errorf("%s: %d rows left the single-tenant defaults", table, strayed)
+		}
+	}
+
+	var count int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM workspaces`).Scan(&count); err != nil {
+		t.Fatalf("count workspaces: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("workspaces rows = %d, want 1", count)
+	}
+	var id, org, name string
+	var archivedAt *time.Time
+	if err := pool.QueryRow(ctx,
+		`SELECT id, org_id, name, archived_at FROM workspaces`).
+		Scan(&id, &org, &name, &archivedAt); err != nil {
+		t.Fatalf("read default workspace: %v", err)
+	}
+	if id != "default" || org != "default" || name != "Default Workspace" || archivedAt != nil {
+		t.Errorf("registered workspace = (%s,%s,%q,%v), want (default,default,\"Default Workspace\",<nil>)",
+			id, org, name, archivedAt)
 	}
 }
 

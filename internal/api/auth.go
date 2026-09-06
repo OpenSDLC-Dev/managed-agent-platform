@@ -94,7 +94,31 @@ func partialKeyHint(key string) string {
 // It only ever writes rows with created_by NULL, which is what puts them under
 // that index and marks them env-var-managed. A key issued over the console
 // records its issuer and is deliberately outside the one-live rule (plan 32).
+//
+// This is EnsureAPIKeyInWorkspace in `default`, the workspace 0034 seeds and
+// the only one a single-tenant deployment has — what a caller that never chose
+// a workspace is asking for.
 func EnsureAPIKey(ctx context.Context, pool *pgxpool.Pool, name, key string) error {
+	return EnsureAPIKeyInWorkspace(ctx, pool, "default", name, key)
+}
+
+// EnsureAPIKeyInWorkspace is EnsureAPIKey binding the credential to a named
+// workspace, which is what a management key resolves its scope from (plan 42
+// §6.1).
+//
+// A value configured here that already exists as another workspace's key MOVES
+// to this one: the upsert's conflict arm carries workspace_id across, so the
+// credential cannot go on authenticating into the workspace it was first
+// configured in. That is the deliberate reading of one secret, one workspace
+// (§6.8) — the conflict target stays (key_hash) and its global UNIQUE stays
+// with it. Re-targeting the conflict on (org_id, workspace_id, key_hash) is the
+// tempting alternative and the wrong one: with the global UNIQUE still in place
+// the second workspace's insert would raise a uniqueness violation rather than
+// conflict, failing the boot and turning a misconfiguration into an existence
+// oracle for the first workspace's key; and dropping that UNIQUE to avoid the
+// violation would let one secret authenticate into two workspaces, which is the
+// premise tenancy rests on.
+func EnsureAPIKeyInWorkspace(ctx context.Context, pool *pgxpool.Pool, workspace, name, key string) error {
 	hash := hashKey(key)
 	tx, err := pool.Begin(ctx)
 	if err != nil {
@@ -110,17 +134,27 @@ func EnsureAPIKey(ctx context.Context, pool *pgxpool.Pool, name, key string) err
 	// database edit could clear, and it protects nobody — setting the variable at
 	// all requires the deployment access that could equally configure a fresh
 	// value. So: adopt, and say so.
+	//
+	// A cross-workspace move is loud for the same reason and independently of
+	// the issuer: the row is about to stop answering for the workspace it was
+	// configured in, and boot is the only moment anything could say so.
 	var priorIssuer *string
-	var priorStatus string
+	var priorStatus, priorWorkspace string
 	switch err := tx.QueryRow(ctx,
-		`SELECT created_by, status FROM api_keys WHERE key_hash = $1`, hash).
-		Scan(&priorIssuer, &priorStatus); {
+		`SELECT created_by, status, workspace_id FROM api_keys WHERE key_hash = $1`, hash).
+		Scan(&priorIssuer, &priorStatus, &priorWorkspace); {
 	case err == pgx.ErrNoRows: // a value this deployment has never seen
 	case err != nil:
 		return err
-	case priorIssuer != nil:
-		slog.WarnContext(ctx, "configured management key already existed as a console-issued key; adopting it as env-var-managed",
-			"name", name, "issued_by", *priorIssuer, "previous_status", priorStatus)
+	default:
+		if priorIssuer != nil {
+			slog.WarnContext(ctx, "configured management key already existed as a console-issued key; adopting it as env-var-managed",
+				"name", name, "issued_by", *priorIssuer, "previous_status", priorStatus)
+		}
+		if priorWorkspace != workspace {
+			slog.WarnContext(ctx, "configured management key already existed in another workspace; moving it",
+				"name", name, "previous_workspace", priorWorkspace, "workspace", workspace)
+		}
 	}
 	// Archive before inserting: api_keys_one_live_unissued admits one active
 	// unissued row per name and Postgres enforces it per statement, so
@@ -143,12 +177,16 @@ func EnsureAPIKey(ctx context.Context, pool *pgxpool.Pool, name, key string) err
 	// refuses, i.e. a control plane that starts without a working bootstrap
 	// credential. Naming a value in CONTROLPLANE_API_KEY makes it env-var-managed,
 	// whatever it was before.
+	// workspace_id is set on both arms, which is what makes a value configured in
+	// a second workspace a move rather than a silent cross-tenant credential.
+	// org_id and project_id are not: they are frozen at 'default' (plan 42
+	// decision 3), so naming them would be a column this platform cannot vary.
 	if _, err := tx.Exec(ctx,
-		`INSERT INTO api_keys (id, name, key_hash, partial_key_hint) VALUES ($1, $2, $3, $4)
+		`INSERT INTO api_keys (id, name, key_hash, partial_key_hint, workspace_id) VALUES ($1, $2, $3, $4, $5)
 		 ON CONFLICT (key_hash) DO UPDATE
 		 SET status = 'active', name = EXCLUDED.name, partial_key_hint = EXCLUDED.partial_key_hint,
-		     created_by = NULL, expires_at = NULL`,
-		domain.NewID(domain.PrefixAPIKey).String(), name, hash, partialKeyHint(key)); err != nil {
+		     workspace_id = EXCLUDED.workspace_id, created_by = NULL, expires_at = NULL`,
+		domain.NewID(domain.PrefixAPIKey).String(), name, hash, partialKeyHint(key), workspace); err != nil {
 		return err
 	}
 	return tx.Commit(ctx)

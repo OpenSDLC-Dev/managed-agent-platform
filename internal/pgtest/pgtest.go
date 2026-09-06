@@ -219,15 +219,32 @@ func NewPool(t *testing.T) *pgxpool.Pool {
 	return pool
 }
 
+// defaultScope is the tenancy triple a fixture writes when its caller names no
+// other: the single-tenant defaults every scoped table has declared since 0001,
+// so the ordinary fixture keeps writing exactly what the schema wrote for it.
+var defaultScope = domain.Scope{OrgID: "default", WorkspaceID: "default", ProjectID: "default"}
+
 // NewSession inserts the minimum fixture rows (agent, agent version,
-// environment of the given kind, session) and returns the session and
-// environment ids.
+// environment of the given kind, session) in the default workspace and returns
+// the session and environment ids.
 func NewSession(t *testing.T, pool *pgxpool.Pool, envKind string) (sessionID, envID domain.ID) {
+	t.Helper()
+	return NewSessionInScope(t, pool, envKind, defaultScope)
+}
+
+// NewSessionInScope is NewSession in the named scope — a second workspace's
+// fixture, for the isolation tests. It is the one place a fixture CHOOSES a
+// tenant: every row below the environment reads its scope off the row it hangs
+// from, so no fixture can assemble a chain whose halves disagree about whose
+// data it is.
+func NewSessionInScope(t *testing.T, pool *pgxpool.Pool, envKind string, scope domain.Scope) (sessionID, envID domain.ID) {
 	t.Helper()
 	envID = domain.NewID("env")
 	if _, err := pool.Exec(context.Background(),
-		`INSERT INTO environments (id, name, kind, config) VALUES ($1, 'fixture', $2, $3)`,
-		envID, envKind, `{"type":"`+envKind+`"}`); err != nil {
+		`INSERT INTO environments (id, name, kind, config, org_id, workspace_id, project_id)
+		 VALUES ($1, 'fixture', $2, $3, $4, $5, $6)`,
+		envID, envKind, `{"type":"`+envKind+`"}`,
+		scope.OrgID, scope.WorkspaceID, scope.ProjectID); err != nil {
 		t.Fatalf("fixture insert: %v", err)
 	}
 	return NewSessionInEnv(t, pool, envID), envID
@@ -238,6 +255,11 @@ func NewSession(t *testing.T, pool *pgxpool.Pool, envKind string) (sessionID, en
 // it to place several sessions — and thus several work items — under one
 // environment, since Enqueue dedupes per (session, kind) while a live item
 // exists.
+//
+// The session inherits the environment's scope, and its agent and primary
+// thread inherit it in turn, each SELECTing the columns off its parent row
+// rather than being told them. agent_versions takes none: it has no scope
+// columns and inherits through its foreign key, as 0001_init.sql:9-10 says.
 func NewSessionInEnv(t *testing.T, pool *pgxpool.Pool, envID domain.ID) (sessionID domain.ID) {
 	t.Helper()
 	ctx := context.Background()
@@ -250,19 +272,31 @@ func NewSessionInEnv(t *testing.T, pool *pgxpool.Pool, envID domain.ID) (session
 		sql  string
 		args []any
 	}{
-		{`INSERT INTO agents (id, name, version, spec) VALUES ($1, 'fixture', 1, '{"model":{"id":"fixture-model"}}')`,
-			[]any{agentID}},
+		{`INSERT INTO agents (id, name, version, spec, org_id, workspace_id, project_id)
+		  SELECT $1, 'fixture', 1, '{"model":{"id":"fixture-model"}}', e.org_id, e.workspace_id, e.project_id
+		    FROM environments e WHERE e.id = $2`, []any{agentID, envID}},
 		{`INSERT INTO agent_versions (agent_id, version, name, spec) VALUES ($1, 1, 'fixture', '{"model":{"id":"fixture-model"}}')`,
 			[]any{agentID}},
-		{`INSERT INTO sessions (id, agent_id, agent_version, resolved_agent, environment_id, status)
-		  VALUES ($1, $2, 1, $3, $4, 'idle')`, []any{sessionID, agentID, resolved, envID}},
+		{`INSERT INTO sessions (id, agent_id, agent_version, resolved_agent, environment_id, status,
+		                        org_id, workspace_id, project_id)
+		  SELECT $1, $2, 1, $3, $4, 'idle', e.org_id, e.workspace_id, e.project_id
+		    FROM environments e WHERE e.id = $4`, []any{sessionID, agentID, resolved, envID}},
 		// The primary thread every session has (plan 35): status the session's,
 		// no agent of its own.
-		{`INSERT INTO session_threads (id, session_id, agent_name, status) VALUES ($1, $2, 'fixture', 'idle')`,
-			[]any{domain.PrimaryThreadID(sessionID), sessionID}},
+		{`INSERT INTO session_threads (id, session_id, agent_name, status, org_id, workspace_id, project_id)
+		  SELECT $1, $2, 'fixture', 'idle', s.org_id, s.workspace_id, s.project_id
+		    FROM sessions s WHERE s.id = $2`, []any{domain.PrimaryThreadID(sessionID), sessionID}},
 	} {
-		if _, err := pool.Exec(ctx, q.sql, q.args...); err != nil {
+		tag, err := pool.Exec(ctx, q.sql, q.args...)
+		if err != nil {
 			t.Fatalf("fixture insert: %v", err)
+		}
+		// A row whose scope is SELECTed from its parent inserts NOTHING when the
+		// parent is missing, where the old VALUES form raised a foreign-key
+		// error. Without this the fixture would hand back an id for a row it
+		// never wrote.
+		if tag.RowsAffected() != 1 {
+			t.Fatalf("fixture insert wrote %d rows (missing parent?): %s", tag.RowsAffected(), q.sql)
 		}
 	}
 	return sessionID
@@ -300,11 +334,20 @@ func NewChildThread(t *testing.T, pool *pgxpool.Pool, sessionID domain.ID) domai
 func NewChildThreadWithAgent(t *testing.T, pool *pgxpool.Pool, sessionID domain.ID, agentJSON string) domain.ID {
 	t.Helper()
 	id := domain.NewID("sthr")
-	if _, err := pool.Exec(context.Background(),
-		`INSERT INTO session_threads (id, session_id, parent_thread_id, agent, agent_name, status)
-		 VALUES ($1, $2, $3, $4::jsonb, COALESCE($4::jsonb->>'name', 'worker'), 'idle')`,
-		id, sessionID, domain.PrimaryThreadID(sessionID), agentJSON); err != nil {
+	// The child carries its session's scope, read off the session row: a
+	// delegated thread is the same tenant's work as the session that spawned it.
+	tag, err := pool.Exec(context.Background(),
+		`INSERT INTO session_threads (id, session_id, parent_thread_id, agent, agent_name, status,
+		                              org_id, workspace_id, project_id)
+		 SELECT $1, $2, $3, $4::jsonb, COALESCE($4::jsonb->>'name', 'worker'), 'idle',
+		        s.org_id, s.workspace_id, s.project_id
+		   FROM sessions s WHERE s.id = $2`,
+		id, sessionID, domain.PrimaryThreadID(sessionID), agentJSON)
+	if err != nil {
 		t.Fatalf("fixture child thread: %v", err)
+	}
+	if tag.RowsAffected() != 1 {
+		t.Fatalf("fixture child thread wrote %d rows (missing session?)", tag.RowsAffected())
 	}
 	return id
 }
