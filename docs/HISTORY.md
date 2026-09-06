@@ -98,7 +98,7 @@ the tabs and imperative-mood preferences, each with a small `bash` call.
   `/MEMORY.md` (328 B) holds one resolving line per memory. The **input** store is untouched: the
   same four paths with the same four `content_sha256`.
 - 30 s after `ended_at` the closing arm landed: the pipeline session `archived_at`
-  07:39:01.829965Z, `files list` carries no `dream/` row, and each of the three file ids the
+  07:39:01.82991Z, `files list` carries no `dream/` row, and each of the three file ids the
   session's `resources[]` still names answers `404 file … not found`. A send now → `400 … is
   archived and read-only` — the dream gate replaced by the ordinary one. `list --status completed`
   serves the dream.
