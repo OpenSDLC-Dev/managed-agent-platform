@@ -110,13 +110,15 @@ the tabs and imperative-mood preferences, each with a small `bash` call.
 - `archive` on both → `archived_at` stamped with `status` left at `completed` and `canceled`;
   `list` then omits them and `list --include-archived` serves both.
 
-Two things the run pinned that the code, not the plan, decides: the runner logs nothing on the
-happy path — every `slog` call it makes is a path that went wrong or was skipped: two warnings in
-the tick loop (a database clock it could not read, a tick that did not finish), three errors in the
-start arm, and one debug line for a tick a saturated sweep budget skips — so a dream's lifecycle is
-observable through the `dream.*` metrics and the wire, never `docker logs`; and an archived
-pipeline session still reads `status: idle`, the archive being `archived_at` rather than a status
-of its own. Slice 3 owns the four stages, the digest threads, the report and the 100-transcript
+Two things the run pinned that the code, not the plan, decides: the runner's own code logs nothing
+on the happy path — every `slog` call it makes is a path that went wrong or was skipped: two
+warnings in the tick loop (a database clock it could not read, a tick that did not finish), three
+errors in the start arm, and one debug line for a tick a saturated sweep budget skips. The one line
+a successful start does emit is not the runner's: creating the pipeline session records the shared
+committer's `session created with resources` at Info, as a wire create and a deployment fire do. So
+a dream's lifecycle is observable through the `dream.*` metrics and the wire, never `docker logs`;
+and an archived pipeline session still reads `status: idle`, the archive being `archived_at` rather
+than a status of its own. Slice 3 owns the four stages, the digest threads, the report and the 100-transcript
 run; slice 4 owns `update_existing` and its hold, still refused at create here.
 
 ---

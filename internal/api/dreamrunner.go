@@ -178,6 +178,11 @@ type dreamStepResult struct {
 	// the reason `to` is: a rolled-back tick must leave no sample behind.
 	turns *int
 	stage int
+	// sessionMoves are the pipeline session's status transitions the arm's
+	// interrupt made, in the order the threads made them
+	// (interruptSessionInTx hands them back rather than counting them). Same
+	// rule again: recorded after the commit, never before.
+	sessionMoves []domain.SessionStatus
 	// after runs once the transaction has committed, still on the arm's
 	// budget slot: the start arm's render-and-write, the closing arm's blob
 	// deletes.
@@ -290,6 +295,9 @@ func (s *server) runDreamArm(ctx context.Context, id string, now time.Time, cfg 
 	}
 	if res.turns != nil {
 		recordDreamStageTurns(ctx, res.stage, *res.turns)
+	}
+	for _, st := range res.sessionMoves {
+		events.RecordSessionStatus(ctx, st)
 	}
 	if res.after != nil {
 		res.after(ctx)
@@ -449,13 +457,15 @@ func (s *server) dreamTurnArms(ctx context.Context, tx pgx.Tx, d dreamRow, turns
 func (s *server) dreamClosingArm(ctx context.Context, tx pgx.Tx, d dreamRow) (dreamStepResult, error) {
 	if d.sessionFound {
 		if d.sessionStatus == string(domain.SessionRunning) {
-			// interruptSessionInTx records no post-commit session-status
-			// metric — that observation belongs to whoever commits, and this
-			// arm's own metric is the dream transition, which has not moved.
-			if err := s.interruptSessionInTx(ctx, tx, *d.sessionID); err != nil {
+			// interruptSessionInTx counts no session-status metric itself —
+			// runDreamArm records what it returns after the commit, because
+			// that observation belongs to whoever commits. This arm's own
+			// metric is the dream transition, which has not moved.
+			moves, err := s.interruptSessionInTx(ctx, tx, *d.sessionID)
+			if err != nil {
 				return dreamStepResult{}, err
 			}
-			return dreamStepResult{}, mirrorDreamUsage(ctx, tx, d)
+			return dreamStepResult{sessionMoves: moves}, mirrorDreamUsage(ctx, tx, d)
 		}
 		if d.sessionArchived == nil {
 			// Every other status the set requireNotRunning admits — idle,
@@ -533,12 +543,18 @@ func (s *server) dreamClaim(ctx context.Context, tx pgx.Tx, d dreamRow, cfg Drea
 // still live; arm 1 archives and closes on a later tick. A dream with no
 // session has nothing to wind down, so it closes in the same commit (§4.6).
 func (s *server) dreamFail(ctx context.Context, tx pgx.Tx, d dreamRow, errType, msg string) (dreamStepResult, error) {
+	var moves []domain.SessionStatus
 	if d.sessionFound && d.sessionArchived == nil && d.sessionStatus != string(domain.SessionTerminated) {
-		if err := s.interruptSessionInTx(ctx, tx, *d.sessionID); err != nil {
+		var err error
+		if moves, err = s.interruptSessionInTx(ctx, tx, *d.sessionID); err != nil {
 			return dreamStepResult{}, err
 		}
 	}
-	return s.dreamSettle(ctx, tx, d, "failed", &dreamErrorJSON{Type: errType, Message: msg})
+	res, err := s.dreamSettle(ctx, tx, d, "failed", &dreamErrorJSON{Type: errType, Message: msg})
+	// The interrupt's moves ride the settle's result up to runDreamArm, which
+	// records them after the commit like every other count here.
+	res.sessionMoves = moves
+	return res, err
 }
 
 // dreamSettle writes one terminal state, mirrors the session's usage a last

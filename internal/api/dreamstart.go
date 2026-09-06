@@ -126,10 +126,15 @@ func (s *server) startDream(ctx context.Context, d dreamRow, cfg DreamRunnerConf
 		}
 	}
 	started := false
+	var created createdSession
 	if err == nil {
-		started, err = s.writeDreamStart(ctx, d, sessionID, files, cfg)
+		created, started, err = s.writeDreamStart(ctx, d, sessionID, files, cfg)
 	}
 	if started {
+		// The write transaction has committed, so the pipeline session's own
+		// post-commit half runs here — the same recordCreated a wire create,
+		// a deployment fire and a scheduled fire each call after their commit.
+		created.recordCreated(ctx)
 		return
 	}
 	// Everything short of the committed start leaves the objects unreferenced:
@@ -260,21 +265,22 @@ func sessionCreationTimes(ctx context.Context, db querier, ids []string) (map[st
 // so a dream is `running` only with everything it needs. It reports whether
 // the start committed: everything else — a cancel that landed, a classified
 // failure settled here, a rollback — leaves the rendered objects unreferenced
-// for the caller to delete.
-func (s *server) writeDreamStart(ctx context.Context, d dreamRow, sessionID string, files []dreamFile, cfg DreamRunnerConfig) (bool, error) {
+// for the caller to delete. On a committed start it also hands back the
+// pipeline session's post-commit half, for the caller to record.
+func (s *server) writeDreamStart(ctx context.Context, d dreamRow, sessionID string, files []dreamFile, cfg DreamRunnerConfig) (createdSession, bool, error) {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
-		return false, err
+		return createdSession{}, false, err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 	if err := setDreamLockWait(ctx, tx); err != nil {
-		return false, err
+		return createdSession{}, false, err
 	}
 
 	var status string
 	if err := tx.QueryRow(ctx,
 		`SELECT status FROM dreams WHERE id = $1 FOR UPDATE`, d.id).Scan(&status); err != nil {
-		return false, err
+		return createdSession{}, false, err
 	}
 	if h := dreamStartHookInWrite; h != nil {
 		h()
@@ -282,46 +288,47 @@ func (s *server) writeDreamStart(ctx context.Context, d dreamRow, sessionID stri
 	if status != "pending" {
 		// A cancel landed while the render ran, and closed the dream. Nothing
 		// to write; the objects go.
-		return false, nil
+		return createdSession{}, false, nil
 	}
 
 	// Steps 1 and 2, the two classified failures, before anything is written:
 	// a settle here is one commit with no partial work behind it.
 	store, errType, msg, err := dreamStartChecks(ctx, tx, d, cfg)
 	if err != nil {
-		return false, err
+		return createdSession{}, false, err
 	}
 	if errType != "" {
 		if _, err := tx.Exec(ctx, `
 			UPDATE dreams SET status = 'failed', ended_at = now(), closed_at = now(),
 			       error = $2, updated_at = now()
 			 WHERE id = $1`, d.id, mustJSON(dreamErrorJSON{Type: errType, Message: msg})); err != nil {
-			return false, err
+			return createdSession{}, false, err
 		}
 		if err := tx.Commit(ctx); err != nil {
-			return false, err
+			return createdSession{}, false, err
 		}
 		recordDreamTransition(ctx, "failed")
-		return false, nil
+		return createdSession{}, false, nil
 	}
 
 	if err := s.ensureDreamInternalRows(ctx, tx); err != nil { // step 3
-		return false, err
+		return createdSession{}, false, err
 	}
 	cloneID, err := s.cloneDreamStore(ctx, tx, d, store, sessionID) // step 4
 	if err != nil {
-		return false, err
+		return createdSession{}, false, err
 	}
 	for _, f := range files { // step 5
 		if _, err := tx.Exec(ctx, `
 			INSERT INTO files (id, filename, mime_type, size_bytes, downloadable, dream_id)
 			VALUES ($1, $2, $3, $4, false, $5)`,
 			f.id, f.filename, dreamFileMIME, int64(len(f.data)), d.id); err != nil {
-			return false, err
+			return createdSession{}, false, err
 		}
 	}
-	if err := s.createDreamSession(ctx, tx, d, cloneID, sessionID, files); err != nil { // step 6
-		return false, err
+	created, err := s.createDreamSession(ctx, tx, d, cloneID, sessionID, files) // step 6
+	if err != nil {
+		return createdSession{}, false, err
 	}
 	// Step 7: outputs[] and session_id land in the same commit as `running`,
 	// so no client can observe a running dream with an empty outputs list.
@@ -329,13 +336,13 @@ func (s *server) writeDreamStart(ctx context.Context, d dreamRow, sessionID stri
 		UPDATE dreams SET status = 'running', stage = 1, session_id = $2, outputs = $3, updated_at = now()
 		 WHERE id = $1`, d.id, sessionID,
 		mustJSON([]any{map[string]string{"type": "memory_store", "memory_store_id": cloneID}})); err != nil {
-		return false, err
+		return createdSession{}, false, err
 	}
 	if err := tx.Commit(ctx); err != nil {
-		return false, err
+		return createdSession{}, false, err
 	}
 	recordDreamTransition(ctx, "running")
-	return true, nil
+	return created, true, nil
 }
 
 // dreamInputStore is what step 1 read and step 4 clones from.
@@ -502,20 +509,20 @@ func dreamCloneName(name, dreamID string) string {
 // admits the hidden pair. created_by is whatever the runner's context carries,
 // which is nothing, so the session lands unattributed exactly as a scheduled
 // fire's does; the dream row carries its own created_by for audit.
-func (s *server) createDreamSession(ctx context.Context, tx pgx.Tx, d dreamRow, cloneID, sessionID string, files []dreamFile) error {
+func (s *server) createDreamSession(ctx context.Context, tx pgx.Tx, d dreamRow, cloneID, sessionID string, files []dreamFile) (createdSession, error) {
 	store := resourceInput{kind: resourceKindMemory, memoryStoreID: cloneID, access: "read_write"}
 	// The mount path the prompt spells is the resource's own: the snapshot
 	// createSessionInTx takes a moment below, taken here first, so no slug is
 	// computed twice or by hand.
 	mounted, err := snapshotMemoryStore(ctx, tx, store)
 	if err != nil {
-		return err
+		return createdSession{}, err
 	}
 	inputs := []resourceInput{store}
 	for _, f := range files {
 		mount, err := resolveMountPath(f.mount)
 		if err != nil {
-			return err
+			return createdSession{}, err
 		}
 		inputs = append(inputs, resourceInput{kind: resourceKindFile, fileID: f.id, mountPath: mount})
 	}
@@ -537,9 +544,11 @@ func (s *server) createDreamSession(ctx context.Context, tx pgx.Tx, d dreamRow, 
 			"text": dreamStageMessage(mounted.MountPath, len(d.inputSessionIDs), instructions),
 		}},
 	})
-	_, err = s.createSessionInTx(ctx, tx, createSessionIn{
+	// The post-commit half goes back to startDream, which commits: a pipeline
+	// session is born running with its transcripts and clone attached, and
+	// those counts are the shared committer's, not the runner's own.
+	return s.createSessionInTx(ctx, tx, createSessionIn{
 		id: sessionID, internal: true, envID: dreamEnvID, agentRaw: agentRaw,
 		resourceInputs: inputs, rawInitial: []json.RawMessage{initial},
 	})
-	return err
 }

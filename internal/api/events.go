@@ -815,13 +815,14 @@ func keepLastSessionIdle(batch []events.NewEvent) []events.NewEvent {
 // The dream runner calls it on the session a dream owns — from the cancel
 // handler and from the tick (plan 41 §4.1) — where the handler is closed to it
 // by requireNotDreamOwned, and where a bare event append would stop nothing.
-// It never commits; the caller does. The one thing the handler does that this
-// cannot is record the status metrics, which are observations of a committed
-// transition and so belong to whoever commits.
+// It never commits; the caller does. So it does not record the status metrics
+// either — those observe a committed transition — and instead returns the
+// moves it made, in the order the threads made them, for the caller to record
+// after its own commit exactly as sendSessionEvents records its own.
 //
 // An archived session has nothing to interrupt: its threads have ended and its
 // log is closed to appends. A session that is gone is the caller's 404.
-func (s *server) interruptSessionInTx(ctx context.Context, tx pgx.Tx, sessionID string) error {
+func (s *server) interruptSessionInTx(ctx context.Context, tx pgx.Tx, sessionID string) ([]domain.SessionStatus, error) {
 	var envKind, status string
 	var archivedAt *time.Time
 	err := tx.QueryRow(ctx,
@@ -829,13 +830,13 @@ func (s *server) interruptSessionInTx(ctx context.Context, tx pgx.Tx, sessionID 
 		 FROM sessions s JOIN environments e ON e.id = s.environment_id
 		 WHERE s.id = $1 FOR UPDATE OF s`, sessionID).Scan(&envKind, &status, &archivedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return errNotFound("session %s not found", sessionID)
+		return nil, errNotFound("session %s not found", sessionID)
 	}
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if archivedAt != nil {
-		return nil
+		return nil, nil
 	}
 	// The interrupt goes on the log as a client's would, so a reader sees why
 	// the session stopped. It is threadless, which is the session-wide spelling
@@ -843,13 +844,14 @@ func (s *server) interruptSessionInTx(ctx context.Context, tx pgx.Tx, sessionID 
 	// a session-wide interrupt.
 	batch, err := events.NormalizeInbound(envKind, []json.RawMessage{json.RawMessage(`{"type":"user.interrupt"}`)})
 	if err != nil {
-		return err
+		return nil, err
 	}
 	threads, err := liveThreads(ctx, tx, sessionID, status)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	var opts events.AppendOptions
+	var moves []domain.SessionStatus
 	var cancelSession, outcomeFlip bool
 	for _, th := range threads {
 		out, err := s.interruptThreadInTx(ctx, tx, interruptThreadIn{
@@ -857,9 +859,10 @@ func (s *server) interruptSessionInTx(ctx context.Context, tx pgx.Tx, sessionID 
 			status: th.status, all: true, primaryInterrupted: true,
 		})
 		if err != nil {
-			return err
+			return nil, err
 		}
 		batch = append(batch, out.batch...)
+		moves = append(moves, out.moves...)
 		for i := range out.moves {
 			opts.SetStatus = &out.moves[i]
 		}
@@ -878,8 +881,10 @@ func (s *server) interruptSessionInTx(ctx context.Context, tx pgx.Tx, sessionID 
 			return flip(evals)
 		}
 	}
-	_, err = s.log.AppendInTx(ctx, tx, domain.ID(sessionID), batch, opts)
-	return err
+	if _, err := s.log.AppendInTx(ctx, tx, domain.ID(sessionID), batch, opts); err != nil {
+		return nil, err
+	}
+	return moves, nil
 }
 
 // snapshotRubrics copies each file rubric's bytes to an outcome-owned blob

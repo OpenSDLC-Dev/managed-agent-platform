@@ -213,7 +213,7 @@ func InterruptSessionForTest(ctx context.Context, pool *pgxpool.Pool, sessionID 
 		return err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
-	if err := newServer(pool, nil, nil).interruptSessionInTx(ctx, tx, sessionID); err != nil {
+	if _, err := newServer(pool, nil, nil).interruptSessionInTx(ctx, tx, sessionID); err != nil {
 		return err
 	}
 	return tx.Commit(ctx)

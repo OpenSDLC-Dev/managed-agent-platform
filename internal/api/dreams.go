@@ -11,6 +11,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/events"
 	"github.com/jackc/pgx/v5"
 )
 
@@ -517,8 +518,10 @@ func (s *server) cancelDream(r *http.Request) (any, error) {
 	}
 	// The two arms below both move the status, so both are counted — after
 	// dreamAction commits, because a metric observes committed state (the
-	// runner's own transitions are counted the same way).
+	// runner's own transitions are counted the same way). sessionMoves is the
+	// running arm's interrupt, counted at the same moment for the same reason.
 	moved := false
+	var sessionMoves []domain.SessionStatus
 	d, err := s.dreamAction(ctx, id, func(ctx context.Context, tx pgx.Tx, status string, _ *time.Time, sessionID *string) error {
 		switch status {
 		case "canceled":
@@ -537,15 +540,17 @@ func (s *server) cancelDream(r *http.Request) (any, error) {
 			// The interrupt runs in this transaction, not as a bare event
 			// append, which would stop nothing: it settles the outstanding
 			// calls, cancels the queued work and idles the threads (§4.1). It
-			// records no post-commit session-status metric — that observation
-			// belongs to whoever commits — and a session already gone at the
-			// database level leaves nothing to interrupt. closed_at stays for
-			// the runner's closing arm, which archives the session and deletes
-			// the transcripts once it is no longer running.
+			// hands back the status moves it made rather than counting them,
+			// because this handler is the one that commits — and a session
+			// already gone at the database level leaves nothing to interrupt.
+			// closed_at stays for the runner's closing arm, which archives the
+			// session and deletes the transcripts once it is no longer running.
 			if sessionID != nil {
-				if err := s.interruptSessionInTx(ctx, tx, *sessionID); err != nil {
+				moves, err := s.interruptSessionInTx(ctx, tx, *sessionID)
+				if err != nil {
 					return err
 				}
+				sessionMoves = moves
 			}
 			moved = true
 			_, err := tx.Exec(ctx,
@@ -558,6 +563,9 @@ func (s *server) cancelDream(r *http.Request) (any, error) {
 	})
 	if err == nil && moved {
 		recordDreamTransition(ctx, "canceled")
+		for _, st := range sessionMoves {
+			events.RecordSessionStatus(ctx, st)
+		}
 	}
 	return d, err
 }
