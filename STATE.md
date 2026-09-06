@@ -5,9 +5,9 @@ What is being worked on right now, and how far along it is — nothing else. **S
 ## Active work
 
 **Plan 41 — dreams** ([docs/plan/41_dreams.md](./docs/plan/41_dreams.md), [#475](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/475)), five slices: a
-dream consolidates one memory store over 1–100 session transcripts. Slice 1 (this PR) lands the five
-`/v1/dreams` routes, the `drm_` prefix and migration `0034` with no runner behind them — a created
-dream stays `pending` until slice 2, and `update_existing` is refused with a 400 until slice 4. Slice
+dream consolidates one memory store over 1–100 session transcripts. Slice 2 (this PR) lands the
+runner — the sweep, the transcript renderer, the hidden rows and a **one-stage** pipeline session;
+slice 3 brings the four stages and digest threads, and `update_existing` waits for slice 4. Slice
 0's recording waits on preview enrollment; no slice waits on it, each landing its entries INFERRED.
 
 **#78 — confirming documented wire assumptions against a real managed-agents endpoint.** Four
@@ -20,7 +20,7 @@ recording days, 1,346 request/response pairs for about US$1.12, in a private arc
       US$0, every item unanswered; waits on preview enrollment
 - [x] Slice 1, the surface and the storage — the five routes, `drm_`, migration `0034`,
       create-time validation, the list, and archive and cancel over the state machine
-- [ ] Slice 2 — the runner, with a one-stage pipeline
+- [x] Slice 2 — the runner, with a one-stage pipeline
 - [ ] Slice 3 — the full pipeline
 - [ ] Slice 4 — `update_existing`
 - [x] Reconcile 2026-09-02 and 2026-09-03's second wave into the registry — three entries

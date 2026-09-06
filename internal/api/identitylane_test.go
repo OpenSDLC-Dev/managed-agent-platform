@@ -87,7 +87,10 @@ func newLaneServerWith(t *testing.T, adjust func(*identity.Config)) *laneServer 
 	if err != nil {
 		t.Fatalf("local.New: %v", err)
 	}
-	srv := httptest.NewServer(api.NewHandler(pool, blobs, cipher, v))
+	// The dream runner is on for the same reason the cipher is real: with it
+	// off, POST /v1/dreams answers a 500 and the role-matrix rows would pass
+	// on a configuration detail rather than on the role check.
+	srv := httptest.NewServer(api.NewHandler(pool, blobs, cipher, v, api.WithDreamRunner()))
 	t.Cleanup(srv.Close)
 	return &laneServer{
 		tserver: &tserver{t: t, url: srv.URL, pool: pool, blobs: blobs},

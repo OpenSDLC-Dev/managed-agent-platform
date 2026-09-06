@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/transcript"
 )
 
 // parseVerdict's protocol tolerance: the three verdicts parse with their
@@ -33,9 +34,9 @@ func TestParseVerdict(t *testing.T) {
 	}
 }
 
-// renderTranscript labels each conversation-bearing event with its role,
+// transcript.Render labels each conversation-bearing event with its role,
 // flattens tool calls to name+input, skips non-conversation events, and cuts
-// any single item at graderItemBudget.
+// any single item at transcript.GraderItemBudget.
 func TestRenderTranscript(t *testing.T) {
 	body := func(v any) []byte {
 		raw, err := json.Marshal(v)
@@ -44,9 +45,9 @@ func TestRenderTranscript(t *testing.T) {
 		}
 		return raw
 	}
-	long := strings.Repeat("a", graderItemBudget+100)
+	long := strings.Repeat("a", transcript.GraderItemBudget+100)
 
-	out := renderTranscript([]domain.Event{
+	out := transcript.Render([]domain.Event{
 		{Type: domain.EventUserMessage, Body: body(map[string]any{"content": "hello"})},
 		{Type: domain.EventSystemMessage, Body: body(map[string]any{"content": []map[string]any{{"type": "text", "text": "system note"}}})},
 		{Type: domain.EventAgentMessage, Body: body(map[string]any{"content": []map[string]any{
@@ -73,22 +74,22 @@ func TestRenderTranscript(t *testing.T) {
 	}
 }
 
-// Once the head fills graderTranscriptBudget, later items stop appending and
-// the tail is cut with a truncation note.
+// Once the head fills transcript.GraderTranscriptBudget, later items stop
+// appending and the tail is cut with a truncation note.
 func TestRenderTranscriptTotalBudget(t *testing.T) {
-	body, err := json.Marshal(map[string]any{"content": strings.Repeat("b", graderItemBudget+10)})
+	body, err := json.Marshal(map[string]any{"content": strings.Repeat("b", transcript.GraderItemBudget+10)})
 	if err != nil {
 		t.Fatal(err)
 	}
 	var history []domain.Event
-	for range graderTranscriptBudget/graderItemBudget + 10 {
+	for range transcript.GraderTranscriptBudget/transcript.GraderItemBudget + 10 {
 		history = append(history, domain.Event{Type: domain.EventUserMessage, Body: body})
 	}
-	out := renderTranscript(history)
+	out := transcript.Render(history)
 	if !strings.HasSuffix(out, "[transcript truncated]") {
 		t.Fatalf("missing transcript truncation note; len=%d", len(out))
 	}
-	if len(out) > graderTranscriptBudget+len("\n[transcript truncated]") {
+	if len(out) > transcript.GraderTranscriptBudget+len("\n[transcript truncated]") {
 		t.Errorf("transcript length %d exceeds the budget", len(out))
 	}
 }
@@ -109,8 +110,8 @@ func TestContentText(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			if got := contentText([]byte(c.body)); got != c.want {
-				t.Errorf("contentText(%s) = %q, want %q", c.body, got, c.want)
+			if got := transcript.ContentText([]byte(c.body)); got != c.want {
+				t.Errorf("transcript.ContentText(%s) = %q, want %q", c.body, got, c.want)
 			}
 		})
 	}

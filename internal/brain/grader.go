@@ -32,6 +32,7 @@ import (
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/provider"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/queue"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/toolset"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/transcript"
 	"github.com/jackc/pgx/v5"
 )
 
@@ -39,12 +40,6 @@ const (
 	// graderHeartbeatInterval paces span.outcome_evaluation_ongoing while the
 	// grader call runs (cadence ours, INFERRED).
 	graderHeartbeatInterval = 30 * time.Second
-	// graderTranscriptBudget caps the rendered transcript handed to the
-	// grader; the head is kept and a truncation note marks the cut (ours).
-	graderTranscriptBudget = 200_000
-	// graderItemBudget caps any single transcript item (a tool result can be
-	// 100 KiB on its own; the grader needs the shape, not every byte).
-	graderItemBudget = 4_000
 	// graderExplanationBudget caps the verdict explanation: it persists into
 	// the end event and the sessions projection — re-decoded on every later
 	// claim — and is re-fed to the agent each revision cycle, so an unbounded
@@ -127,7 +122,7 @@ func (b *Brain) runGrading(ctx context.Context, item *queue.Item, agent domain.R
 			Role: "user",
 			Content: mustTextContent("# Outcome\n\n" + d.Description +
 				deliverables +
-				"\n\n# Agent transcript\n\n" + renderTranscript(history)),
+				"\n\n# Agent transcript\n\n" + transcript.Render(history)),
 		}},
 	}
 
@@ -639,117 +634,6 @@ func parseVerdict(text string) (result, explanation string) {
 		break
 	}
 	return verdictNeedsRevision, strings.TrimSpace(text)
-}
-
-// renderTranscript renders the session's conversation-bearing events as the
-// role-labeled plain text the grader reads (shape ours, INFERRED). Long items
-// truncate at graderItemBudget; the whole transcript at graderTranscriptBudget.
-//
-// The agent-to-agent message pair (plan 35) is deliberately not rendered. The
-// grader reads the whole session rather than one thread, so a child's report is
-// already here as that child's own submit_result call, and rendering the
-// coordinator's copy of it would put the same text in twice.
-func renderTranscript(history []domain.Event) string {
-	var sb strings.Builder
-	add := func(role, text string) {
-		if sb.Len() >= graderTranscriptBudget {
-			return
-		}
-		if len(text) > graderItemBudget {
-			text = text[:graderItemBudget] + "\n[truncated]"
-		}
-		sb.WriteString("## " + role + "\n" + text + "\n\n")
-	}
-	for _, ev := range history {
-		switch ev.Type {
-		case domain.EventUserMessage:
-			add("user", contentText(ev.Body))
-		case domain.EventSystemMessage:
-			add("system", contentText(ev.Body))
-		case domain.EventAgentMessage:
-			add("agent", contentText(ev.Body))
-		case domain.EventAgentToolUse, domain.EventAgentMCPToolUse, domain.EventAgentCustomToolUse:
-			var p struct {
-				Name  string          `json:"name"`
-				Input json.RawMessage `json:"input"`
-			}
-			if json.Unmarshal(ev.Body, &p) == nil {
-				add("agent tool call", p.Name+" "+string(p.Input))
-			}
-		case domain.EventUserToolResult, domain.EventUserCustomToolRes,
-			domain.EventAgentToolResult, domain.EventAgentMCPToolResult:
-			add("tool result", contentText(ev.Body))
-		}
-	}
-	out := sb.String()
-	if len(out) > graderTranscriptBudget {
-		out = out[:graderTranscriptBudget] + "\n[transcript truncated]"
-	}
-	return out
-}
-
-// contentText flattens an event body's content — a string or a block array —
-// into plain text for the transcript.
-func contentText(body []byte) string {
-	var p struct {
-		Content json.RawMessage `json:"content"`
-	}
-	if json.Unmarshal(body, &p) != nil || len(p.Content) == 0 {
-		return ""
-	}
-	var s string
-	if json.Unmarshal(p.Content, &s) == nil {
-		return s
-	}
-	if text, ok := flattenBlocks(p.Content); ok {
-		return text
-	}
-	return string(p.Content)
-}
-
-// flattenBlocks renders a content-block array as plain text. Most blocks
-// carry their text at the top level; a search_result block carries its
-// evidence as title + source + nested text blocks, so those flatten too —
-// web_search answers would otherwise vanish from the transcript.
-func flattenBlocks(raw json.RawMessage) (string, bool) {
-	var blocks []struct {
-		Type    string          `json:"type"`
-		Text    string          `json:"text"`
-		Title   string          `json:"title"`
-		Source  string          `json:"source"`
-		Content json.RawMessage `json:"content"`
-	}
-	if json.Unmarshal(raw, &blocks) != nil {
-		return "", false
-	}
-	var sb strings.Builder
-	add := func(text string) {
-		if text == "" {
-			return
-		}
-		if sb.Len() > 0 {
-			sb.WriteString("\n")
-		}
-		sb.WriteString(text)
-	}
-	for _, b := range blocks {
-		if b.Type == "search_result" {
-			var parts []string
-			if b.Title != "" {
-				parts = append(parts, b.Title)
-			}
-			if b.Source != "" {
-				parts = append(parts, b.Source)
-			}
-			if nested, ok := flattenBlocks(b.Content); ok && nested != "" {
-				parts = append(parts, nested)
-			}
-			add(strings.Join(parts, "\n"))
-			continue
-		}
-		add(b.Text)
-	}
-	return sb.String(), true
 }
 
 // mustTextContent marshals one text block array; a plain string cannot fail.

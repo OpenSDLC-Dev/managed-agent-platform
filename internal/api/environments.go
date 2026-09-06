@@ -412,45 +412,90 @@ func packagesTypeEcho(config []byte) []byte {
 
 func (s *server) createEnvironment(r *http.Request) (any, error) {
 	ctx := r.Context()
-	obj, err := decodeObject(r)
+	body, err := readBody(r)
 	if err != nil {
 		return nil, err
 	}
-	if err := rejectUnknownKeys(obj, "name", "description", "config", "scope", "metadata"); err != nil {
+	id := domain.NewID(domain.PrefixEnvironment).String()
+
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
 		return nil, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	// The conflict arm cannot fire here: the id was minted a line ago.
+	if _, err := s.insertEnvironmentInTx(ctx, tx, body, id, false); err != nil {
+		return nil, err
+	}
+	// Read back rather than returned, for insertAgentInTx's reason: the insert
+	// body is shared with the dream runner, which wants no response.
+	var row environmentRow
+	if err := tx.QueryRow(ctx,
+		`SELECT name, description, config, metadata, created_at, updated_at
+		 FROM environments WHERE id = $1`, id).
+		Scan(&row.name, &row.description, &row.config, &row.metaJSON,
+			&row.createdAt, &row.updatedAt); err != nil {
+		return nil, err
+	}
+	metadata := map[string]string{}
+	if err := json.Unmarshal(row.metaJSON, &metadata); err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, err
+	}
+	return renderEnvironment(id, row.name, row.description, row.config, metadata,
+		row.createdAt, row.updatedAt, nil), nil
+}
+
+// insertEnvironmentInTx is insertAgentInTx's twin for environments: the request
+// JSON POST /v1/environments accepts, normalized by the handler's own
+// normalizeEnvConfig, written under the caller's id inside the caller's
+// transaction and never committed. The dream runner passes the fixed id and
+// internal=true for the no-egress environment its sessions run in (plan 41 §4.3),
+// ON CONFLICT DO NOTHING so only the first dream creates it; inserted is false
+// when the id already existed.
+func (s *server) insertEnvironmentInTx(ctx context.Context, tx pgx.Tx, body json.RawMessage,
+	id string, internal bool) (inserted bool, err error) {
+	obj, err := decodeBodyObject(body)
+	if err != nil {
+		return false, err
+	}
+	if err := rejectUnknownKeys(obj, "name", "description", "config", "scope", "metadata"); err != nil {
+		return false, err
 	}
 	name, err := requiredString(obj, "name")
 	if err != nil {
-		return nil, err
+		return false, err
 	}
 	if err := parseScope(obj); err != nil {
-		return nil, err
+		return false, err
 	}
 	description, _, null, err := stringField(obj, "description")
 	if err != nil {
-		return nil, err
+		return false, err
 	}
 	if null {
 		description = ""
 	}
 	kind, config, err := normalizeEnvConfig(obj["config"], nil)
 	if err != nil {
-		return nil, err
+		return false, err
 	}
 	metadata, err := parseMetadata(obj)
 	if err != nil {
-		return nil, err
+		return false, err
 	}
 
-	id := domain.NewID(domain.PrefixEnvironment).String()
-	var createdAt, updatedAt time.Time
-	if err := s.pool.QueryRow(ctx,
-		`INSERT INTO environments (id, name, kind, config, description, metadata)
-		 VALUES ($1, $2, $3, $4, $5, $6) RETURNING created_at, updated_at`,
-		id, name, kind, config, description, metadata).Scan(&createdAt, &updatedAt); err != nil {
-		return nil, err
+	tag, err := tx.Exec(ctx,
+		`INSERT INTO environments (id, name, kind, config, description, metadata, internal)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7) ON CONFLICT DO NOTHING`,
+		id, name, kind, config, description, metadata, internal)
+	if err != nil {
+		return false, err
 	}
-	return renderEnvironment(id, name, description, config, metadata, createdAt, updatedAt, nil), nil
+	return tag.RowsAffected() == 1, nil
 }
 
 type environmentRow struct {
@@ -469,7 +514,7 @@ func (s *server) getEnvironment(r *http.Request) (any, error) {
 	var row environmentRow
 	err := s.pool.QueryRow(ctx,
 		`SELECT name, description, config, metadata, created_at, updated_at, archived_at
-		 FROM environments WHERE id = $1`, id).
+		 FROM environments WHERE id = $1`+notInternal, id).
 		Scan(&row.name, &row.description, &row.config, &row.metaJSON,
 			&row.createdAt, &row.updatedAt, &row.archivedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -513,7 +558,7 @@ func (s *server) updateEnvironment(r *http.Request) (any, error) {
 	var kind string
 	err = tx.QueryRow(ctx,
 		`SELECT name, kind, description, config, metadata, created_at, updated_at, archived_at
-		 FROM environments WHERE id = $1 FOR UPDATE`, id).
+		 FROM environments WHERE id = $1`+notInternal+` FOR UPDATE`, id).
 		Scan(&row.name, &kind, &row.description, &row.config, &row.metaJSON,
 			&row.createdAt, &row.updatedAt, &row.archivedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -597,7 +642,7 @@ func (s *server) listEnvironments(r *http.Request) (any, error) {
 	}
 
 	query := `SELECT id, name, description, config, metadata, created_at, updated_at, archived_at
-	          FROM environments WHERE true`
+	          FROM environments WHERE true` + notInternal
 	var args []any
 	if !includeArchived {
 		query += ` AND archived_at IS NULL`
@@ -667,7 +712,7 @@ func (s *server) archiveEnvironment(r *http.Request) (any, error) {
 		`UPDATE environments SET
 		   updated_at  = CASE WHEN archived_at IS NULL THEN now() ELSE updated_at END,
 		   archived_at = COALESCE(archived_at, now())
-		 WHERE id = $1
+		 WHERE id = $1`+notInternal+`
 		 RETURNING name, description, config, metadata, created_at, updated_at, archived_at`, id).
 		Scan(&row.name, &row.description, &row.config, &row.metaJSON,
 			&row.createdAt, &row.updatedAt, &row.archivedAt)
@@ -839,7 +884,7 @@ func (s *server) deleteEnvironment(r *http.Request) (any, error) {
 			return nil, err
 		}
 	}
-	tag, err := s.pool.Exec(ctx, `DELETE FROM environments WHERE id = $1`, id)
+	tag, err := s.pool.Exec(ctx, `DELETE FROM environments WHERE id = $1`+notInternal, id)
 	var pgErr *pgconn.PgError
 	if errors.As(err, &pgErr) && pgErr.Code == "23503" { // foreign_key_violation
 		if !force {

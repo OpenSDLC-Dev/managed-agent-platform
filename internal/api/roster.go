@@ -173,10 +173,16 @@ func resolveRoster(ctx context.Context, tx pgx.Tx, raw json.RawMessage, selfID s
 	type agentRow struct {
 		current  int64
 		archived bool
+		internal bool
 	}
 	members := map[string]agentRow{}
+	// The dream runner's hidden agent is read rather than excluded (the
+	// notInternal fragment every other resolver carries): in a batch lookup an
+	// excluded row is indistinguishable from an unknown id, and this resolver
+	// must answer the same 404 as the other three rather than this route's
+	// "not found" 400 (§4.4).
 	rows, err := tx.Query(ctx,
-		`SELECT id, version, archived_at FROM agents WHERE id = ANY($1) ORDER BY id FOR SHARE`, ids)
+		`SELECT id, version, archived_at, internal FROM agents WHERE id = ANY($1) ORDER BY id FOR SHARE`, ids)
 	if err != nil {
 		return nil, rosterLockErr(err)
 	}
@@ -185,12 +191,13 @@ func resolveRoster(ctx context.Context, tx pgx.Tx, raw json.RawMessage, selfID s
 			id         string
 			current    int64
 			archivedAt *time.Time
+			internal   bool
 		)
-		if err := rows.Scan(&id, &current, &archivedAt); err != nil {
+		if err := rows.Scan(&id, &current, &archivedAt, &internal); err != nil {
 			rows.Close()
 			return nil, err
 		}
-		members[id] = agentRow{current: current, archived: archivedAt != nil}
+		members[id] = agentRow{current: current, archived: archivedAt != nil, internal: internal}
 	}
 	rows.Close()
 	if err := rows.Err(); err != nil {
@@ -204,6 +211,9 @@ func resolveRoster(ctx context.Context, tx pgx.Tx, raw json.RawMessage, selfID s
 		m, ok := members[refs[i].ID]
 		if !ok {
 			return nil, errInvalid("multiagent.agents[%d]: agent %s not found", i, refs[i].ID)
+		}
+		if m.internal {
+			return nil, errNotFound("agent %s not found", refs[i].ID)
 		}
 		if m.archived {
 			return nil, errInvalid("multiagent.agents[%d]: agent %s is archived", i, refs[i].ID)

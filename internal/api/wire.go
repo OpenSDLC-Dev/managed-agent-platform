@@ -27,6 +27,19 @@ var nulEscape = []byte{'\\', 'u', '0', '0', '0', '0'}
 // field so handlers can distinguish omitted / null / value — the reference
 // updates are patches where that distinction is semantic.
 func decodeObject(r *http.Request) (map[string]json.RawMessage, error) {
+	raw, err := readBody(r)
+	if err != nil {
+		return nil, err
+	}
+	return decodeBodyObject(raw)
+}
+
+// readBody and decodeBodyObject are decodeObject's two halves. They are split
+// because the two creates whose parse-and-insert the dream runner shares
+// (insertAgentInTx, insertEnvironmentInTx) take the request JSON itself rather
+// than the decoded map: the handler reads the bytes, the shared body decodes
+// them, and both callers get the same rejections in the same order.
+func readBody(r *http.Request) (json.RawMessage, error) {
 	// Read one byte past the limit so oversize bodies are detected as such
 	// instead of being truncated into a misleading JSON parse error.
 	raw, err := io.ReadAll(io.LimitReader(r.Body, maxBodyBytes+1))
@@ -37,6 +50,10 @@ func decodeObject(r *http.Request) (map[string]json.RawMessage, error) {
 		return nil, &apiError{http.StatusRequestEntityTooLarge, errTypeRequestTooLarge,
 			fmt.Sprintf("request body larger than %d bytes", maxBodyBytes)}
 	}
+	return raw, nil
+}
+
+func decodeBodyObject(raw json.RawMessage) (map[string]json.RawMessage, error) {
 	if len(bytes.TrimSpace(raw)) == 0 {
 		return map[string]json.RawMessage{}, nil
 	}
