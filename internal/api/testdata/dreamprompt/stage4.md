@@ -1,6 +1,6 @@
 Stage 4 of 4: index and audit. Check /mnt/memory/team-notes
-against dream/plan.md and the digests first: a change they routed that never
-landed is made now.
+against the digests under dream/digests/ first, and against dream/plan.md if it
+is still there: a change they routed that never landed is made now.
 
 Rewrite /mnt/memory/team-notes/MEMORY.md as the store's index — one line
 per memory, at most 150 characters, its path and what it holds, never its

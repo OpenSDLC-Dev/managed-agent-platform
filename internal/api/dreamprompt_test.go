@@ -56,6 +56,17 @@ func TestDreamBatches(t *testing.T) {
 	if full[12] != (dreamBatch{13, 97, 100}) {
 		t.Errorf("the last batch of 100 is %v, want {13 97 100}", full[12])
 	}
+	// The batch size is a var, tunable per §3.4, and two things bound what it
+	// may be tuned to. Below 5 a hundred transcripts want more children than
+	// the platform's live-thread cap of 25 allows, and the last batches would
+	// simply never be digested. At or below 0 dreamBatches would not terminate
+	// at all. Neither is checked at runtime — this is where a tune that broke
+	// them would be caught.
+	if dreamDigestBatch < 5 {
+		t.Errorf("dreamDigestBatch is %d: below 5 the hundred-transcript bound needs %d "+
+			"digest threads, past the platform's live-thread cap", dreamDigestBatch, len(full))
+	}
+
 	// Consecutive and complete: every transcript in exactly one batch.
 	next := 1
 	for _, b := range full {
@@ -125,17 +136,23 @@ func TestDreamStageTwoNamesTheWave(t *testing.T) {
 	}
 }
 
-// Every stage after the first opens by checking the previous one's artefact
-// against plan.md — the pipeline's one recovery from a container that died
-// with the workdir in it (§3.3). Stage 1 has nothing to check.
+// Every stage after the first opens by checking what the stage before it left
+// — the pipeline's one recovery from a container that died with the workdir in
+// it (§3.3). Stage 1 has nothing to check. The artefact named is the previous
+// stage's own: the plan for stage 2, the digests for the two that consume
+// them, which is why this is a table rather than one string.
 func TestDreamStagesOpenWithTheArtefactCheck(t *testing.T) {
-	for _, stage := range []int{2, 3, 4} {
+	for stage, artefact := range map[int]string{
+		2: dreamScratchDir + "plan.md",
+		3: dreamScratchDir + "digests/",
+		4: dreamScratchDir + "digests/",
+	} {
 		opening := firstParagraph(dreamStageMessage(stage, goldenMount, goldenTranscripts, ""))
 		if !strings.Contains(opening, "Check") {
 			t.Errorf("stage %d does not open with an artefact check:\n%s", stage, opening)
 		}
-		if !strings.Contains(opening, dreamScratchDir+"plan.md") {
-			t.Errorf("stage %d's opening check does not name the plan:\n%s", stage, opening)
+		if !strings.Contains(opening, artefact) {
+			t.Errorf("stage %d's opening check does not name %s:\n%s", stage, artefact, opening)
 		}
 	}
 	opening := firstParagraph(dreamStageMessage(1, goldenMount, goldenTranscripts, ""))
@@ -239,10 +256,24 @@ func TestDreamSystemPromptCarriesTheSharedContract(t *testing.T) {
 
 // The budgets §9 sizes the pipeline against: a stage message is a rounding
 // error beside a batch of transcripts, and the system prompt is paid for on
-// every turn of every thread. Measured with the golden steering substituted:
-// system prompt 4,946 bytes; stages 1 to 4 at 18 transcripts 735 / 866 / 542 /
-// 681 bytes; and stage 2 at the 100-transcript input cap — the longest batch
-// list there is — 1,064 bytes.
+// every turn of every thread. The sizes themselves are logged rather than
+// written down here — every edit to a prompt moves them, and a comment naming
+// last month's bytes is worse than no comment. Run it with -v for today's.
+// Every stage in the pipeline has its own text, and says which stage it is.
+// The switch that renders them is keyed on literals, so this is what would
+// catch a stage added to dreamStageCount without a case of its own: the
+// default branch renders an internal error rather than the last stage's
+// instructions, and the header assertion below reads it as the wrong stage.
+func TestEveryStageRendersItsOwnMessage(t *testing.T) {
+	for stage := 1; stage <= dreamStageCount; stage++ {
+		msg := dreamStageMessage(stage, goldenMount, goldenTranscripts, "")
+		want := fmt.Sprintf("Stage %d of %d:", stage, dreamStageCount)
+		if !strings.HasPrefix(msg, want) {
+			t.Errorf("stage %d does not open %q:\n%s", stage, want, firstParagraph(msg))
+		}
+	}
+}
+
 func TestDreamPromptSizes(t *testing.T) {
 	const stageCap, systemCap = 4 << 10, 12 << 10
 

@@ -37,11 +37,17 @@ const (
 	// latency. Two seconds rather than the binary's thirty: a test that waits
 	// half a minute for the first tick is measuring the ticker.
 	dreamTick = 2 * time.Second
-	// dreamRunnerTimeout is DREAM_TIMEOUT for these runs — the budget from
-	// creation, after which the runner settles the dream as failed{timeout}.
-	// Well under the binary's two hours, and above the poll deadlines below so
-	// that a stuck dream fails as a dream rather than as a test timeout.
-	dreamRunnerTimeout = 40 * time.Minute
+	// The two DREAM_TIMEOUTs — the budget from creation, after which the runner
+	// settles the dream as failed{timeout}. Both are well under the binary's
+	// two hours, and each sits *below* its test's own poll deadline, which is
+	// the ordering that makes a stuck dream report itself: the runner reaches
+	// its budget first and writes failed{timeout} with a message, where the
+	// poll reaching its deadline first would only produce a test failure
+	// saying the dream was still running. The seeded run finishes in about two
+	// minutes and the hundred in about eleven, so both budgets are slack, not
+	// a schedule.
+	dreamRunnerTimeout        = 15 * time.Minute
+	dreamRunnerTimeoutHundred = 40 * time.Minute
 	// dreamMaxInputBytes is cmd/controlplane's DREAM_MAX_INPUT_BYTES default,
 	// spelled here because the runner takes it as configuration and no default
 	// lives in the package under test.
@@ -80,10 +86,10 @@ func startDreamRunner(t *testing.T, s *stack, cfg api.DreamRunnerConfig) {
 }
 
 // dreamRunnerConfig is what both tests start the runner with.
-func dreamRunnerConfig() api.DreamRunnerConfig {
+func dreamRunnerConfig(timeout time.Duration) api.DreamRunnerConfig {
 	return api.DreamRunnerConfig{
 		TickInterval:  dreamTick,
-		Timeout:       dreamRunnerTimeout,
+		Timeout:       timeout,
 		MaxInputBytes: dreamMaxInputBytes,
 	}
 }
@@ -332,7 +338,7 @@ func mentions(memories map[string]string, needle string) []string {
 func TestDreamPipeline(t *testing.T) {
 	cfg := modeltest.Endpoint(t, modeltest.EvalsEnv)
 	s := newStack(t, cfg)
-	startDreamRunner(t, s, dreamRunnerConfig())
+	startDreamRunner(t, s, dreamRunnerConfig(dreamRunnerTimeout))
 
 	// The harness's two per-run tokens, so the planted credential is unique to
 	// this run — a fixed string could be matched by a store some earlier run
@@ -524,7 +530,7 @@ func TestDreamPipeline(t *testing.T) {
 func TestDreamPipelineHundred(t *testing.T) {
 	cfg := modeltest.Endpoint(t, modeltest.EvalsEnv)
 	s := newStack(t, cfg)
-	startDreamRunner(t, s, dreamRunnerConfig())
+	startDreamRunner(t, s, dreamRunnerConfig(dreamRunnerTimeoutHundred))
 
 	// 8 is internal/api's dreamDigestBatch, and 13 is ceil(100/8) — the digest
 	// threads one wave of a hundred transcripts spawns. Both are spelled here

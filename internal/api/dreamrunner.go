@@ -81,17 +81,23 @@ const dreamStageCount = 4
 // indexed by the stage (§3.3; index 0 is never read, a running dream's stage
 // being 1..4). Vars with a test setter, per §3.4, as the three above are.
 //
-// The numbers are measured rather than reasoned. A cap is only there to catch
-// a stage that loops — the wall clock is DREAM_TIMEOUT's to bound — so each is
-// set well above what a real stage spends, and what a real stage spends is
-// what the live eval logs on every run (evals/dream_test.go's stageSpend).
-// The plan's first guess was 4 / 300 / 30 / 10, and the first live run refuted
-// the first of those outright: a two-transcript dream over a four-memory store
-// spends 5 / 10 / 6 / 7, so stage 1's orient failed on its cap every time, one
-// turn short, before any of the work the dream exists for could run. Stage 2's
-// number is the fan-out's and is left where the plan sized it: thirteen digest
-// threads reading eight transcripts each are about 170 turns with the
-// coordinator's spawn wave and its waits.
+// A cap is only there to catch a stage that loops — the wall clock is
+// DREAM_TIMEOUT's to bound — so each sits well above what a real stage spends,
+// and what a real stage spends is what the live eval logs on every run
+// (evals/dream_test.go's stageSpend).
+//
+// Three of the four are measured; stage 2's is not, and the difference is
+// worth keeping straight. The plan's first guess was 4 / 300 / 30 / 10, and
+// the first live run refuted the first of those outright: a two-transcript
+// dream over a four-memory store spends 5 / 10 / 6 / 7, so stage 1's orient
+// failed on its cap every time, one turn short, before any of the work the
+// dream exists for could run. Stages 1, 3 and 4 are set from those runs.
+// Stage 2's 300 is the fan-out's arithmetic, left where the plan sized it —
+// thirteen digest threads reading eight transcripts each are about 170 turns
+// with the coordinator's spawn wave and its waits — and the seeded run, which
+// spends ten there, cannot test it. What it has is one observation rather than
+// a measurement: the hundred-transcript run completed, so stage 2 stayed under
+// 300 at the bound the number was sized for.
 var dreamStageTurnCaps = [dreamStageCount + 1]int{0, 30, 300, 60, 30}
 
 // dreamLockWait is the lock_timeout every dream-row transaction sets: the
@@ -433,30 +439,36 @@ func (s *server) dreamStep(ctx context.Context, tx pgx.Tx, d dreamRow, now time.
 	if errType != "" {
 		return s.dreamFail(ctx, tx, d, errType, msg)
 	}
-	// 5. ended badly, in either of the two shapes that wears. A terminated
-	// session is the obvious one. The other is a model request that ran out of
-	// retries: internal/brain's failTurn records a session.error and leaves the
-	// primary thread idle carrying this stop reason, which is the state a
-	// finished stage leaves too — so without the second half the runner would
-	// read a failed turn as a stage completed and either open the next stage
-	// over the missing work or, at the last, call the dream completed. Both
-	// delegation bounds arrive this way as well: they cut the session with an
-	// error rather than terminating it. The stop reason is only the last
-	// settled turn's, so it is read on an idle session alone; on a running one
-	// it belongs to the turn before.
-	terminated := d.sessionStatus == string(domain.SessionTerminated)
-	exhausted := d.sessionStatus == string(domain.SessionIdle) &&
-		d.sessionStop == string(domain.StopRetriesExhausted)
-	if terminated || exhausted {
+	if d.sessionStatus == string(domain.SessionTerminated) { // 5. ended badly
 		last, err := lastSessionError(ctx, tx, *d.sessionID)
 		if err != nil {
 			return dreamStepResult{}, err
 		}
-		if terminated {
-			return s.dreamFail(ctx, tx, d, "internal_error", "pipeline session terminated: "+last)
+		return s.dreamFail(ctx, tx, d, "internal_error", "pipeline session terminated: "+last)
+	}
+	// The other half of arm 5, and the one worth explaining: an idle session
+	// is not the same thing as a finished stage. Every way a pipeline turn can
+	// give up short of terminating the session leaves it idle — the shape a
+	// finished stage leaves — so read alone, "idle" would advance the dream
+	// over work that never happened, and at the last stage would complete it.
+	// The two signals below are both needed and neither subsumes the other. A
+	// model request out of retries idles the primary with `retries_exhausted`;
+	// the two delegation bounds idle it with `end_turn` instead and say so
+	// only in the error they record. It is read on an idle session alone: on a
+	// running one the stop reason belongs to the turn before, and an error
+	// under a still-running sibling is one the coordinator may yet answer.
+	if d.sessionStatus == string(domain.SessionIdle) {
+		why, err := dreamStageFailure(ctx, tx, *d.sessionID)
+		if err != nil {
+			return dreamStepResult{}, err
 		}
-		return s.dreamFail(ctx, tx, d, "internal_error",
-			fmt.Sprintf("stage %d ended in a failed turn: %s", d.stage, last))
+		if why == "" && d.sessionStop == string(domain.StopRetriesExhausted) {
+			why = "the turn ran out of retries"
+		}
+		if why != "" {
+			return s.dreamFail(ctx, tx, d, "internal_error",
+				fmt.Sprintf("stage %d ended in a failed turn: %s", d.stage, why))
+		}
 	}
 	turns, err := dreamStageTurns(ctx, tx, *d.sessionID)
 	if err != nil {
@@ -526,14 +538,30 @@ func (s *server) dreamAdvanceArm(ctx context.Context, tx pgx.Tx, d dreamRow) (dr
 	}
 	moves, err := s.postDreamStageInTx(ctx, tx, *d.sessionID,
 		dreamStageMessage(d.stage+1, mount, len(d.inputSessionIDs), instructions))
+	if errors.Is(err, errDreamStageRefused) {
+		// A state no later tick can clear, so retrying it would only spend the
+		// dream's whole runtime budget and then report `timeout` for a fault
+		// that had a name all along.
+		return s.dreamFail(ctx, tx, d, "internal_error",
+			fmt.Sprintf("stage %d could not be opened: %s", d.stage+1, err))
+	}
 	if err != nil {
 		return dreamStepResult{}, err
 	}
-	if _, err := tx.Exec(ctx,
-		`UPDATE dreams SET stage = stage + 1, updated_at = now() WHERE id = $1`, d.id); err != nil {
+	// One statement, not the stage bump followed by mirrorDreamUsage: the
+	// settle and the closing arm both fold usage into their own update the
+	// same way, and two writes to one row in one transaction is two row
+	// versions for nothing.
+	usage, err := dreamUsageOf(d)
+	if err != nil {
 		return dreamStepResult{}, err
 	}
-	return dreamStepResult{sessionMoves: moves}, mirrorDreamUsage(ctx, tx, d)
+	if _, err := tx.Exec(ctx, `
+		UPDATE dreams SET stage = stage + 1, usage = COALESCE($2, usage), updated_at = now()
+		 WHERE id = $1`, d.id, usage); err != nil {
+		return dreamStepResult{}, err
+	}
+	return dreamStepResult{sessionMoves: moves}, nil
 }
 
 // dreamStoreMount is the output store's mount as the pipeline session actually
@@ -802,6 +830,40 @@ func dreamStageTurns(ctx context.Context, db querier, sessionID string) (int, er
 		 WHERE session_id = $1 AND type = $2 AND seq > $3`,
 		sessionID, string(domain.EventSpanModelRequestEnd), openedAt).Scan(&turns)
 	return turns, err
+}
+
+// dreamStageFailure is the message of the last unrecoverable error the primary
+// thread recorded since the stage opened, or "" if the stage has none.
+//
+// Three things narrow it, and each is load-bearing. `retry_status: exhausted`
+// is what separates a turn that gave up from one the brain chained a fresh
+// attempt onto, which records the same event type and then succeeds — without
+// it a recovered stage would fail the dream. The primary thread is the only
+// one read, because a digest thread that dies is the coordinator's to notice:
+// the stage-2 message has it check the digests on disk and rebuild what is
+// missing, and failing the dream here would take that recovery away. And the
+// stage's own opener bounds it, so an error survived under an earlier stage
+// cannot fail a later one.
+func dreamStageFailure(ctx context.Context, db querier, sessionID string) (string, error) {
+	var msg *string
+	err := db.QueryRow(ctx, `
+		SELECT payload->'error'->>'message' FROM events
+		 WHERE session_id = $1 AND type = $2 AND thread_id IS NULL
+		   AND payload->'error'->'retry_status'->>'type' = 'exhausted'
+		   AND seq > (SELECT COALESCE(MAX(seq), 0) FROM events
+		               WHERE session_id = $1 AND type = $3 AND thread_id IS NULL)
+		 ORDER BY seq DESC LIMIT 1`,
+		sessionID, string(domain.EventSessionError), string(domain.EventUserMessage)).Scan(&msg)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "", nil
+	}
+	if err != nil {
+		return "", err
+	}
+	if msg == nil {
+		return "an error with no message", nil
+	}
+	return *msg, nil
 }
 
 // lastSessionError renders the message a terminated session last recorded, for

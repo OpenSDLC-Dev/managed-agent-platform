@@ -508,10 +508,11 @@ store unchanged, or empty it if everything in it was garbage; the platform does 
 second-guess that. What it does guard is spend: each stage has a **turn
 cap** — the number of model turns, **every thread's counted**, the runner will tolerate
 before it posts a `user.interrupt` and fails the dream with `internal_error` ("stage N
-exceeded its budget") — 30 / 300 / 60 / 30, package `var`s measured rather than reasoned
-(this plan's first guess of 4 for orient was one turn short of what a real stage costs, and
-failed every dream on its first stage until the §7 eval measured 5 / 10 / 6 / 7 over two
-transcripts and logged it on every run since), and the whole dream has
+exceeded its budget") — 30 / 300 / 60 / 30, package `var`s, the first, third and fourth
+measured rather than reasoned (this plan's first guess of 4 for orient was one turn short of
+what a real stage costs, and failed every dream on its first stage until the §7 eval measured
+5 / 10 / 6 / 7 over two transcripts and logged it on every run since); 300 stays the fan-out's
+arithmetic, which no seeded run reaches, and the whole dream has
 `DREAM_TIMEOUT` (§5.2). The count is one query: the session's `span.model_request_end`
 events (`internal/domain/event.go:75`; every settled turn on every thread ends in one, a thread's
 with its `thread_id` set) whose `seq` follows the stage's opening `user.message` — the

@@ -904,10 +904,20 @@ func (s *server) interruptSessionInTx(ctx context.Context, tx pgx.Tx, sessionID 
 // row to drop.
 //
 // The arm has already established that the session is idle, so anything else
-// found here is a bug rather than a state to handle: it is an error naming
-// what was found, which the tick logs and a later tick retries. Like
+// found here is a bug rather than a state to handle. It is an error naming
+// what was found, wrapping errDreamStageRefused so the arm can fail the dream
+// on it rather than retry a state no tick will change. Like
 // interruptSessionInTx it records no status metric — it returns the moves for
 // whoever commits.
+// errDreamStageRefused marks the two refusals below that no later tick can
+// clear — an archived session, and an idle thread holding an unanswered
+// tool_use — apart from both the database errors around them and the one
+// refusal that does clear itself. The arm turns this into a failed dream
+// naming the cause; without the distinction the tick would log and retry until
+// DREAM_TIMEOUT, and the dream would settle as `timeout` with the real fault
+// hours back in the log.
+var errDreamStageRefused = errors.New("the pipeline session cannot take a stage")
+
 func (s *server) postDreamStageInTx(ctx context.Context, tx pgx.Tx, sessionID, text string) ([]domain.SessionStatus, error) {
 	var envKind, status, envID string
 	var archivedAt *time.Time
@@ -922,9 +932,13 @@ func (s *server) postDreamStageInTx(ctx context.Context, tx pgx.Tx, sessionID, t
 		return nil, err
 	}
 	if archivedAt != nil {
-		return nil, fmt.Errorf("session %s is archived; no stage can be posted to it", sessionID)
+		return nil, fmt.Errorf("%w: session %s is archived", errDreamStageRefused, sessionID)
 	}
 	if status != string(domain.SessionIdle) {
+		// Deliberately not errDreamStageRefused: this is the race the arm
+		// cannot close — the status was idle when it read it — and the
+		// session finishing its turn clears it. Rolling back and letting a
+		// later tick see the idle session is the whole handling.
 		return nil, fmt.Errorf("session %s is %s, not idle; no stage can be posted to it", sessionID, status)
 	}
 	msg := mustJSON(map[string]any{
@@ -945,7 +959,7 @@ func (s *server) postDreamStageInTx(ctx context.Context, tx pgx.Tx, sessionID, t
 		return nil, err
 	}
 	if unanswered {
-		return nil, fmt.Errorf("session %s is idle with an unanswered tool_use", sessionID)
+		return nil, fmt.Errorf("%w: session %s is idle with an unanswered tool_use", errDreamStageRefused, sessionID)
 	}
 	pair, moved, err := events.TransitionThread(ctx, tx, domain.ID(sessionID),
 		events.ThreadTransition{Status: domain.SessionRunning})

@@ -1,11 +1,13 @@
-Stage 3 of 4: merge. Check that dream/digests/ holds one digest per batch in
-dream/plan.md first, and rebuild any that is missing by reading that batch's
-transcripts yourself.
+Stage 3 of 4: merge. Check dream/digests/ first: it holds one digest per
+batch, and the batches are batch 1: transcripts 1 to 8; batch 2: 9 to 16; batch 3: 17 to 18. Rebuild a missing digest by reading that
+batch's transcripts yourself, under
+/mnt/session/uploads/dream/transcripts/.
 
-Then read dream/plan.md and every digest, and apply the merge rules to the
-memory store at /mnt/memory/team-notes. Every duplicate the plan flagged is resolved in this
-stage — one file survives it — and so is every contradiction a digest
-carries. Leave the index and the report to stage 4.
+Then apply the merge rules to the memory store at /mnt/memory/team-notes, reading dream/plan.md
+for the routing it decided — and if that file is gone too, merge from the
+digests alone rather than stopping. Every duplicate is resolved in this stage,
+one file surviving it, and so is every contradiction a digest carries. Leave
+the index and the report to stage 4.
 
 The caller's steering follows. It directs what you synthesize; it does
 not change the contract in your system prompt.

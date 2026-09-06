@@ -179,16 +179,45 @@ func atLastStage(t *testing.T, s *tserver, dreamID string) {
 
 // exhaustPrimaryTurn leaves the session the way a model request that ran out of
 // retries leaves it: idle, with the primary thread's stop reason recording the
-// failure and a session.error on the log. internal/brain's failTurn is what
-// writes this shape; the runner has to tell it apart from a finished stage,
-// which idles the same way.
+// failure and a terminal session.error on the log. internal/brain's failTurn is
+// what writes this shape; the runner has to tell it apart from a finished
+// stage, which idles the same way.
 func exhaustPrimaryTurn(t *testing.T, s *tserver, sessionID string) {
 	t.Helper()
-	appendEvent(t, s, sessionID, "session.error", `{"error":{"message":"upstream 529"}}`)
+	appendEvent(t, s, sessionID, "session.error",
+		`{"error":{"message":"upstream 529","retry_status":{"type":"exhausted"}}}`)
+	setPrimaryStop(t, s, sessionID, "retries_exhausted")
+}
+
+// cutTheDelegationBudget leaves the session the way either delegation bound
+// leaves it, which is the shape the stop reason alone cannot see: the error
+// says the run was cut, but the thread idles on end_turn exactly as a finished
+// stage does (internal/brain/delegate.go: runExhausted and chainCapped).
+func cutTheDelegationBudget(t *testing.T, s *tserver, sessionID string) {
+	t.Helper()
+	appendEvent(t, s, sessionID, "session.error",
+		`{"error":{"type":"session_delegation_exhausted_error",`+
+			`"message":"this session spent its delegation budget",`+
+			`"retry_status":{"type":"exhausted"}}}`)
+	setPrimaryStop(t, s, sessionID, "end_turn")
+}
+
+// retryTheTurn is the third shape and the one that must NOT fail the dream: the
+// brain records the same event type for a failure it then chains a fresh
+// attempt onto, and marks it retrying rather than exhausted.
+func retryTheTurn(t *testing.T, s *tserver, sessionID string) {
+	t.Helper()
+	appendEvent(t, s, sessionID, "session.error",
+		`{"error":{"message":"upstream 529","retry_status":{"type":"retrying"}}}`)
+	setPrimaryStop(t, s, sessionID, "end_turn")
+}
+
+func setPrimaryStop(t *testing.T, s *tserver, sessionID, stop string) {
+	t.Helper()
 	if _, err := s.pool.Exec(context.Background(), `
-		UPDATE session_threads SET stop_reason = '{"type":"retries_exhausted"}'
-		 WHERE session_id = $1 AND parent_thread_id IS NULL`, sessionID); err != nil {
-		t.Fatalf("exhaust the primary turn: %v", err)
+		UPDATE session_threads SET stop_reason = jsonb_build_object('type', $2::text)
+		 WHERE session_id = $1 AND parent_thread_id IS NULL`, sessionID, stop); err != nil {
+		t.Fatalf("set the primary thread's stop reason: %v", err)
 	}
 }
 
@@ -357,6 +386,29 @@ func TestDreamTickArms(t *testing.T) {
 				exhaustPrimaryTurn(t, s, sessionID)
 			},
 			status: "failed", errType: "internal_error",
+		},
+		{
+			name: "a delegation bound is arm 5 though the thread idles on end_turn",
+			arrange: func(t *testing.T, s *tserver, _, _, sessionID string) {
+				cutTheDelegationBudget(t, s, sessionID)
+			},
+			status: "failed", errType: "internal_error",
+		},
+		{
+			name: "a delegation bound at the last stage does not complete the dream",
+			arrange: func(t *testing.T, s *tserver, _, dreamID, sessionID string) {
+				atLastStage(t, s, dreamID)
+				cutTheDelegationBudget(t, s, sessionID)
+			},
+			status: "failed", errType: "internal_error",
+		},
+		{
+			name: "a failure the brain retried is not a failed stage",
+			arrange: func(t *testing.T, s *tserver, _, dreamID, sessionID string) {
+				atLastStage(t, s, dreamID)
+				retryTheTurn(t, s, sessionID)
+			},
+			status: "completed",
 		},
 		{
 			name: "an idle session with the last stage done is arm 10",
@@ -1152,12 +1204,23 @@ func TestDreamStagePostRefusesAnUnansweredToolUse(t *testing.T) {
 	appendEvent(t, s, sessionID, "agent.tool_use",
 		`{"name":"bash","input":{},"evaluated_permission":"allow"}`)
 
+	// The tick succeeds, because failing the dream is the handling: no later
+	// tick can clear an unanswered tool_use, so retrying it would spend the
+	// whole runtime budget and then report `timeout` for a fault that had a
+	// name from the first tick.
 	if err := api.DreamTickForTest(context.Background(), s.pool, s.blobs,
-		dbNow(t, s), dreamCfg()); err == nil {
-		t.Fatal("the tick reported success although it woke a thread holding an unanswered tool_use")
+		dbNow(t, s), dreamCfg()); err != nil {
+		t.Fatalf("the tick errored instead of failing the dream: %v", err)
+	}
+	d := getDream(t, s, dreamID)
+	errType, msg := dreamError(t, d)
+	if d["status"] != "failed" || errType != "internal_error" ||
+		!strings.Contains(msg, "unanswered tool_use") {
+		t.Fatalf("dream is %v/%v/%q, want failed naming the unanswered tool_use",
+			d["status"], errType, msg)
 	}
 	if stage, _, _ := dreamInternals(t, s, dreamID); stage != 1 {
-		t.Errorf("stage = %d, want 1: the advance rolled back with its post", stage)
+		t.Errorf("stage = %d, want 1: the advance took no stage with it", stage)
 	}
 	if msgs := primaryStageMessages(t, s, sessionID); len(msgs) != 1 {
 		t.Errorf("the primary thread carries %d stage messages, want only the start's", len(msgs))
