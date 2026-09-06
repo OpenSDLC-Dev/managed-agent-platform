@@ -6,8 +6,10 @@ import (
 	"log/slog"
 	"net/http"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/identity"
 )
 
@@ -85,10 +87,111 @@ func requireIdentity(pool *pgxpool.Pool, v *identity.Verifier, next http.Handler
 			writeError(w, r, err)
 			return
 		}
+		scope, err := identityScope(r, pool, v, id)
+		if err != nil {
+			writeError(w, r, err)
+			return
+		}
+		// Stamped before anything writes, so both headers ride a 200 and a
+		// role denial alike. ctxKeyBootstrapKey is deliberately not set: a
+		// human is never the env-var-managed key.
+		stampScope(w, scope)
 		ctx := context.WithValue(r.Context(), ctxKeyIdentity,
 			identityPrincipal{ID: principalID, Role: id.Role})
+		ctx = context.WithValue(ctx, ctxKeyScope, scope)
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})
+}
+
+// The identity lane's two tenancy refusals, both 403s (plan 42 §6.2).
+const (
+	// identityWorkspacesUnconfigured is decision 4's fail-closed arm. It names
+	// the two variables because a deployment that grew a second workspace has a
+	// configuration to write, and no other message would say which.
+	identityWorkspacesUnconfigured = "this deployment has more than one live workspace and neither " +
+		"IDENTITY_CLAIM_WORKSPACES nor IDENTITY_WORKSPACE_MAP is configured, so an identity's workspace cannot be resolved"
+	// identityNoWorkspace is the no-authority refusal: authenticated, and a
+	// member of nothing this deployment still runs. It is the membership twin of
+	// a human whose claims mapped to no role, and takes the same shape — 403,
+	// naming what is missing and never which workspaces exist.
+	identityNoWorkspace = "this identity is a member of no live workspace in this deployment"
+)
+
+// identityScope resolves the workspace a human's request runs in (plan 42 §6.2).
+//
+// Membership comes from the claims the verifier already resolved; the registry
+// decides which of them a deployment still runs, because archive is a tombstone
+// and an archived workspace resolves no credential. The header then NARROWS,
+// under the one rule selectWorkspace holds for every lane — so a workspace
+// outside the identity's live set answers the same 404 whether it is foreign,
+// archived, or never existed.
+//
+// The unconfigured deployment is the whole compatibility story: no claim, one
+// live workspace, and every SSO installation that predates this slice keeps
+// working untouched. Two live workspaces and no configuration is the arm that
+// must refuse rather than guess.
+func identityScope(r *http.Request, pool *pgxpool.Pool, v *identity.Verifier, id identity.Identity) (domain.Scope, error) {
+	if !v.WorkspacesConfigured() {
+		live, err := liveWorkspaceScopes(r.Context(), pool, nil)
+		if err != nil {
+			return domain.Scope{}, err
+		}
+		// Zero folds in with "more than one" rather than taking a third arm: the
+		// default workspace cannot be archived (§6.9), so a deployment with no
+		// live workspace is unreachable, and a branch nothing exercises is worse
+		// than a refusal that covers it.
+		if len(live) != 1 {
+			return domain.Scope{}, errForbidden(identityWorkspacesUnconfigured)
+		}
+		return selectWorkspace(r, live)
+	}
+	if len(id.Workspaces) == 0 {
+		return domain.Scope{}, errForbidden(identityNoWorkspace)
+	}
+	covered, err := liveWorkspaceScopes(r.Context(), pool, id.Workspaces)
+	if err != nil {
+		return domain.Scope{}, err
+	}
+	if len(covered) == 0 {
+		return domain.Scope{}, errForbidden(identityNoWorkspace)
+	}
+	return selectWorkspace(r, covered)
+}
+
+// liveWorkspaceScopes reads live workspace rows as the scopes a credential may
+// resolve to. only nil selects every live workspace — the unconfigured
+// deployment's case, where the COUNT is the decision; otherwise it selects the
+// members of the identity's set that are still live.
+//
+// Org rides along from the row and the project is the frozen literal, because
+// project has no registry of its own (migration 0034's header says so).
+func liveWorkspaceScopes(ctx context.Context, pool *pgxpool.Pool, only []string) ([]domain.Scope, error) {
+	const (
+		everyOne = `SELECT org_id, id FROM workspaces WHERE archived_at IS NULL ORDER BY id`
+		named    = `SELECT org_id, id FROM workspaces WHERE archived_at IS NULL AND id = ANY ($1) ORDER BY id`
+	)
+	var (
+		rows pgx.Rows
+		err  error
+	)
+	if only == nil {
+		rows, err = pool.Query(ctx, everyOne)
+	} else {
+		rows, err = pool.Query(ctx, named, only)
+	}
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []domain.Scope
+	for rows.Next() {
+		s := domain.Scope{ProjectID: "default"}
+		if err := rows.Scan(&s.OrgID, &s.WorkspaceID); err != nil {
+			return nil, err
+		}
+		out = append(out, s)
+	}
+	return out, rows.Err()
 }
 
 // requireRole enforces a route's minimum role. It is the whole enforcement

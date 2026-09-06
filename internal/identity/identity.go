@@ -79,6 +79,23 @@
 // Debug: it answers which key a provider rotated to, and it is not a credential.
 // TestLogsCarryNoCredentials reads the actual output.
 //
+// # Workspace membership
+//
+// Two optional variables carry it, and they are optional as a PAIR:
+// IDENTITY_CLAIM_WORKSPACES names a multi-valued claim, resolved by the same
+// machinery the roles claim uses, and IDENTITY_WORKSPACE_MAP is a
+// comma-separated claimValue=workspaceId map, so an operator binds the IdP group
+// names they already have rather than pushing platform-minted wrkspc_ ids into
+// the IdP. Both unset is a deployment with one workspace, which is every
+// deployment predating plan 42; either one alone is a boot error, because either
+// alone is a deployment that looks configured and is not.
+//
+// Nothing here is persisted, for the reason the role is not: the IdP stays
+// authoritative, and a stored tenant would be a second, stale authority beside
+// it (internal/store/migrations/0022_principals.sql). What the resolved set
+// means — including what an EMPTY set means — is internal/api's identity lane to
+// decide, not this package's.
+//
 // # kid is required
 //
 // A token with no kid, and a JWK with no kid, are both refused. Key selection is
@@ -138,8 +155,8 @@ func ParseRole(s string) (Role, bool) {
 // Identity is one verified human principal.
 //
 // The four strings are exactly the principals-table columns upsertPrincipal
-// writes (internal/api); Role is re-derived from the token per request and never
-// stored,
+// writes (internal/api); Role and Workspaces are re-derived from the token per
+// request and never stored,
 // because the IdP stays authoritative. A field that is not here cannot be
 // persisted or logged by accident: no raw claims, no token, no expiry.
 type Identity struct {
@@ -148,6 +165,13 @@ type Identity struct {
 	Email       string // "" when the claim is absent or not a string
 	DisplayName string // "" likewise
 	Role        Role   // RoleNone when no claim value mapped
+	// Workspaces is the membership the token proves: the workspace ids the
+	// configured map bound the claim's values to, in claim order, without
+	// repeats. Empty when nothing mapped AND when the deployment configures no
+	// membership at all — the two are told apart by
+	// Verifier.WorkspacesConfigured, never by this field, because "no membership
+	// asserted" and "no membership configured" have opposite fail-closed answers.
+	Workspaces []string
 }
 
 // Mode is the deployment's identity mode.

@@ -100,7 +100,7 @@ func jwksXVerifyRejected(t *testing.T, v *identity.Verifier, token, what string)
 	if !errors.Is(err, identity.ErrUnauthenticated) {
 		t.Fatalf("%s: Verify err = %v, want ErrUnauthenticated", what, err)
 	}
-	if id != (identity.Identity{}) {
+	if !verifierXSame(id, identity.Identity{}) {
 		t.Errorf("%s: Verify returned identity %+v on a rejection, want the zero value", what, id)
 	}
 }

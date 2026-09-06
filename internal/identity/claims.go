@@ -1,6 +1,9 @@
 package identity
 
-import "strings"
+import (
+	"slices"
+	"strings"
+)
 
 // claimAt resolves a configured claim name against a decoded claim set.
 //
@@ -73,7 +76,10 @@ func stringClaim(claims map[string]any, name string) string {
 	return s
 }
 
-// roleValues normalizes a resolved roles claim to its string values.
+// claimValues normalizes a resolved multi-valued claim to its string values. It
+// serves both of them — the roles claim and, since plan 42 §6.2, the workspaces
+// claim — because the normalization is the same question either way and a
+// second copy of it could drift on the cap.
 //
 // A scalar string is one value — NOT split on spaces, which would be inventing
 // OAuth scope semantics nobody asked for. An array contributes its string
@@ -82,14 +88,14 @@ func stringClaim(claims map[string]any, name string) string {
 // The cap bounds the elements EXAMINED, not the strings collected. Capping the
 // output instead would let a claim pad itself past the limit with non-strings
 // and still be read at any depth, which is the whole cap defeated; and where the
-// two differ, this direction drops a role rather than granting one.
-func roleValues(v any) []string {
+// two differ, this direction drops a value rather than granting one.
+func claimValues(v any) []string {
 	switch t := v.(type) {
 	case string:
 		return []string{t}
 	case []any:
-		if len(t) > maxRoleValues {
-			t = t[:maxRoleValues]
+		if len(t) > maxClaimValues {
+			t = t[:maxClaimValues]
 		}
 		out := make([]string, 0, len(t))
 		for _, e := range t {
@@ -117,4 +123,27 @@ func strongestRole(values []string, m map[string]Role) Role {
 		}
 	}
 	return best
+}
+
+// mappedWorkspaces reduces claim values to the workspace ids the operator's map
+// binds them to, in claim order and without repeats — two IdP groups may name
+// one workspace, and the identity covers it once.
+//
+// An unmapped value DROPS, exactly as it does in strongestRole, and dropping is
+// the safer of the two readings rather than the lazier one. Every real IdP sends
+// groups a deployment has no interest in, so refusing a token that carries one
+// would deny every human on it — a denial with no diagnostic, which is the worst
+// shape this package's configuration defects can take. Dropping cannot widen
+// anything: a value nobody mapped names no workspace, and an identity that maps
+// to none resolves to no workspace at all, which the identity lane refuses.
+func mappedWorkspaces(values []string, m map[string]string) []string {
+	var out []string
+	for _, v := range values {
+		id, ok := m[v]
+		if !ok || slices.Contains(out, id) {
+			continue
+		}
+		out = append(out, id)
+	}
+	return out
 }
