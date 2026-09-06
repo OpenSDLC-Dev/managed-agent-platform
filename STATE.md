@@ -5,13 +5,15 @@ What is being worked on right now, and how far along it is — nothing else. **S
 ## Active work
 
 **#78 — confirming documented wire assumptions against a real managed-agents endpoint.**
-Four recording days, 1,301 request/response pairs for about US$1.12: bytes observed
+Four recording days, 1,346 request/response pairs for about US$1.12: bytes observed
 once, at cost, in a private archive. 2026-09-02 covered the Work API, turn semantics,
 multiagent threads, memory stores, files, skills, vaults, deployments and permission
 gating; 2026-09-03 ran two waves, one free and one of 281 pairs; 2026-09-04 settled the
-skills GA wire shape; 2026-09-05 added #594's batch and #56's, the latter the first
-**multi-workspace** capture. #78 stays open — 117 registry entries name it as their live
-tracker, and the debt is now analysis rather than recording. Plan 38 (#263) archived
+skills GA wire shape; 2026-09-05 added #594's batch, #56's — the first
+**multi-workspace** capture — and plan 41's `/v1/dreams` probe, refused: the organization
+is not enrolled in that preview. #78 stays open — 117 registry entries name it as their
+live tracker, and the debt is analysis rather than recording, that blocked checklist
+aside. Plan 38 (#263) archived
 2026-09-04; plans 39 (#566, skills GA) and 40 (#353, environment packages,
 folding in #576) 2026-09-05; plan 43 (#609, one host comparison) 2026-09-06.
 
@@ -23,4 +25,6 @@ folding in #576) 2026-09-05; plan 43 (#609, one host comparison) 2026-09-06.
       mismatches now #570-#574, #577-#579, #581-#582, #589-#591, `list_cost` on #432)
 - [x] Record the multi-workspace capture plan 42 (#56) gated slice 1 on — items 1-5
       in full, item 6 on its key lane; the gate lifts, its environment-key half unobserved
+- [ ] Record plan 41's `/v1/dreams` checklist (its §8.2) — attempted 2026-09-05, 45 pairs,
+      US$0, every item unanswered; waits on preview enrollment, and no slice waits on it
 - [ ] Read the 72 un-analysed comparison rows from 2026-09-02
