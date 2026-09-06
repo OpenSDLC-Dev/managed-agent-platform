@@ -54,6 +54,8 @@ func (r matrixRoute) request() string {
 		id = "file_nonexistent"
 	case "memory_stores":
 		id = "memstore_nonexistent"
+	case "dreams":
+		id = "drm_nonexistent"
 	case "deployments":
 		id = "depl_nonexistent"
 	case "deployment_runs":
@@ -86,6 +88,7 @@ func roleMatrix() []matrixRoute {
 		store   = "/v1/memory_stores/{id}"
 		memory  = store + "/memories/{mid}"
 		version = store + "/memory_versions/{vid}"
+		dream   = "/v1/dreams/{id}"
 		depl    = "/v1/deployments/{id}"
 	)
 	v, d, a := identity.RoleViewer, identity.RoleDeveloper, identity.RoleAdmin
@@ -154,6 +157,12 @@ func roleMatrix() []matrixRoute {
 		{"POST", store + "/memories", d}, {"POST", memory, d}, {"DELETE", memory, d},
 		{"GET", store + "/memory_versions", v}, {"GET", version, v},
 		{"POST", version + "/redact", a},
+
+		// Dreams (plan 41 §5.1): reads viewer, create and both lifecycle
+		// actions developer — the memory-store family's own split.
+		{"GET", "/v1/dreams", v}, {"GET", dream, v},
+		{"POST", "/v1/dreams", d},
+		{"POST", dream + "/archive", d}, {"POST", dream + "/cancel", d},
 	}
 }
 
