@@ -408,7 +408,7 @@ func TestAnAssembledCommandTooLongForExecIsRefusedTerminally(t *testing.T) {
 			goMgr = m
 		}
 	}
-	if got := len(goMgr.command(entries)); got <= maxInstallCommandBytes {
+	if got := len(goMgr.command(entries, "")); got <= maxInstallCommandBytes {
 		t.Fatalf("test setup: assembled command %d not over the %d limit; add entries", got, maxInstallCommandBytes)
 	}
 

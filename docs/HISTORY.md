@@ -49,6 +49,41 @@ new directory and in-repo citations re-pointed in the moving PR (plan
 
 ---
 
+## A package credential out of argv (plan 46, #599) — archived 2026-09-06, delivered in one PR
+
+Plan 40 left two residuals when it closed the durable surface, and #599 tracked
+them: a credential embedded in a `config.packages` entry rode in the assembled
+install command, and `packages_digest` was an unsalted hash of the entries.
+
+The design rests on which file each fetcher actually reads, so that was measured
+rather than recalled — a local origin demanding Basic auth, recording what
+arrived, on 2026-09-06. `git` 2.47.3 authenticates from `$HOME/.netrc` with no
+credential helper configured, on the retry after the 401; pip 25.0.1's own
+fetcher sends the same header from the same file on its **first** request; npm
+reads no netrc at all and sends it from `$HOME/.npmrc`'s per-host `username`,
+base64 `_password` and `always-auth`. Two properties of the netrc format were
+measured with them, because both decide what the writer may emit: a `machine`
+line matches on the hostname alone, port excluded, and a value may be
+double-quoted with `\"` and `\\` honoured inside the quotes — so a credential
+containing spaces or quotes has a representation and one containing a newline
+does not.
+
+The obvious alternative — leave the credential out of the entry and let the
+gate's egress substitution put it in from a vault — was rejected on evidence
+rather than taste: the gate substitutes only on plain HTTP, where the platform
+holds the request plaintext, and an HTTPS request rides through as an opaque
+CONNECT tunnel (#166). A package registry is HTTPS, so the placeholder would
+reach the origin literally.
+
+What the change does **not** close is stated in the security guide rather than
+implied: an install needs root and the agent's tool calls run in that same
+sandbox as the same user, so the materialized file is exactly as readable there
+as the argv it replaced, for the same window. The sandbox is one trust domain.
+What it does close is everything outside it — the Kubernetes apiserver's audit
+log, whose readers are cluster operators and whose records outlive the session,
+and the digest oracle an environment key could read while the config it digests
+needs a management key.
+
 ## The `unrestricted` address floor (plan 45, #570) — archived 2026-09-06, delivered in one PR
 
 `unrestricted` admitted every host *and* every address. A recording of the

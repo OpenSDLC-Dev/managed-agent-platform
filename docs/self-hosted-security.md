@@ -180,17 +180,29 @@ a manager the image does not carry is a `session.error` with reason
 `manager_missing` rather than an install. The `debian:stable-slim` default
 carries `apt-get` and none of the other five.
 
-One caveat if a package entry embeds a credential — a private registry URL such
-as `pip: ["git+https://user:token@host/repo"]`. The install runs it in the
-sandbox, so the credential is in that process's argv: a same-sandbox agent can
-read it from `/proc` while the install runs, and on **Kubernetes** the argv is
-part of the exec request the apiserver audit log records for `pods/exec`. The
-platform keeps the credential out of the durable session state — the install's
-`session.error` message has its URLs redacted, and the `/tmp` sentinel stores a
-digest, not the entries — but it cannot keep it out of the argv while a package
-manager needs it there. Prefer high-entropy deploy tokens over reusable
-passwords, and be aware of the exec-audit exposure; injecting credentials out of
-band (netrc / `.npmrc`) so they never reach argv is tracked in #599.
+A package entry may embed a credential — a private registry URL such as
+`pip: ["git+https://user:token@host/repo"]` — and it is **not** put on the
+install's command line. The executor lifts the credential out of the entry,
+writes it into the file the fetcher reads (a netrc for git and pip, and npm's
+own per-host pair as well for npm), points that one install's `HOME` at a
+scratch directory holding them, and hands the manager a credential-free URL; the
+install's own trap removes the directory however it ends. So the credential is
+not in the process argv, and on **Kubernetes** it is therefore not in the exec
+request the apiserver audit log records for `pods/exec` — the exposure that
+reached cluster operators, outside the session entirely. The durable session
+state never carried it either: the install's `session.error` message has its URLs
+redacted, and the `/tmp` sentinel stores a digest — now taken over the
+credential-free form, so it is no longer an offline oracle for a weak credential
+to anyone holding an environment key.
+
+What this does not make private is the **sandbox itself**. An install needs root,
+and the agent's own tool calls run in that same sandbox as the same user, so the
+credential file is exactly as readable there as the argv it replaced, for the
+same window. The sandbox is one trust domain; prefer high-entropy deploy tokens
+over reusable passwords, and scope them to the repository or registry path the
+session needs. One shape keeps the old exposure, because no netrc can represent
+it: a credential whose decoded form contains a control character stays in its
+entry, and the executor logs at warn that it did, naming the manager and host.
 
 Two things do degrade silently rather than fail, both about file **modes** and
 neither about the correctness of a file's contents. A write preserves the target's
