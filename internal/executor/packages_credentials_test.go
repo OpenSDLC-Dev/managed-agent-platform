@@ -377,6 +377,54 @@ func TestOneHostnameCannotHoldTwoCredentials(t *testing.T) {
 	}
 }
 
+// TestAHostAlsoNamedWithoutACredentialKeepsItInline is the widening the
+// one-credential-per-host rule missed while it only compared credentials to
+// credentials. A netrc line matches the hostname alone — not the port, not the
+// scheme — and pip sends Basic from it on the *first* request rather than on a
+// 401, so a line written for the credentialed URL would be sent, unasked, to
+// every other URL in the list naming that host. That is a secret reaching a
+// service it never reached before, which is worse than the argv exposure the
+// pass exists to replace.
+func TestAHostAlsoNamedWithoutACredentialKeepsItInline(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		other string
+	}{
+		{"another port", "https://registry.example/public.whl"},
+		{"plain http, where the secret would go out in the clear", "http://registry.example:8443/public.whl"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			entries := []string{"https://bot:s3cr3t@registry.example:8443/private.whl", tc.other}
+			got := stripPackageCredentials(entries, managerNamed(t, "pip"))
+			if len(got.creds) != 0 {
+				t.Errorf("credentials = %+v, want none written", got.creds)
+			}
+			if !slices.Equal(got.entries, entries) {
+				t.Errorf("entries = %q, want them untouched", got.entries)
+			}
+			if !slices.Contains(got.inlined, "registry.example") {
+				t.Errorf("inlined = %v, want the host named in the warn line", got.inlined)
+			}
+		})
+	}
+}
+
+// TestAnotherHostWithoutACredentialIsNotADisagreement: the rule above is about
+// one host, not about the list. An uncredentialed URL elsewhere says nothing
+// about where this credential may be sent.
+func TestAnotherHostWithoutACredentialIsNotADisagreement(t *testing.T) {
+	got := stripPackageCredentials([]string{
+		"https://bot:s3cr3t@private.example/lib.whl",
+		"https://public.example/other.whl",
+	}, managerNamed(t, "pip"))
+	if len(got.creds) != 1 || got.creds[0].machine != "private.example" {
+		t.Fatalf("credentials = %+v, want the one on private.example", got.creds)
+	}
+	if got.entries[0] != "https://private.example/lib.whl" {
+		t.Errorf("entry = %q, want the credential lifted out", got.entries[0])
+	}
+}
+
 // TestARotatedCredentialIsAChangedList: the sentinel's "until the list changes"
 // contract. Comparing the stripped form would make a corrected credential
 // indistinguishable from the broken one it replaces, so a list that had spent

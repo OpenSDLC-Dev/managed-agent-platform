@@ -97,7 +97,15 @@ HTTPS. The placeholder would reach the origin literally.
    `registry.example.` cannot slip past as two hosts; and what is compared is the
    **login**, not the whole credential, so one host reached on two ports with the
    same user and secret is one netrc line and two npmrc keys, not a
-   disagreement.
+   disagreement. A URL naming the host with **no** credential at all is a
+   disagreement too, and the sharpest one: the line would be sent there
+   unasked — pip sends Basic from a netrc on the *first* request, not on a 401 —
+   so a secret meant for `registry.example:8443` would start arriving at
+   `registry.example:443`, or over plain `http`, at a service that never
+   received it. A URL carrying its own credential is unaffected, because its own
+   wins; that is why an absent one, and only an absent one, has to count. This
+   is why the scan reads every URL in the list rather than only the ones with a
+   userinfo.
 4. **The credential is materialized into a scratch `HOME`, and the install for
    that manager runs with `HOME` pointed at it.** `$HOME/.netrc` always;
    `$HOME/.npmrc` additionally for npm, whose fetcher reads no netrc. The
@@ -147,7 +155,13 @@ HTTPS. The placeholder would reach the origin literally.
    credential's failures would have been suppressed as repeats of the broken
    one's and a client would have seen silence. The caller knows the list changed
    — the sentinel is what tells it — and says so, and a changed list is emitted
-   without consulting the history.
+   without consulting the history. "Changed" means the sentinel holds a record
+   whose digest differs, and deliberately not "the sentinel holds no record":
+   the refusal paths below emit and return without writing one, so a stored
+   invalid list has no record on any pass, and reading that as a change would
+   skip the dedupe every time and append the same exhausted error on every tool
+   call for the life of the sandbox. With no record there is nothing to have
+   changed from, and the query is the right answer.
 8. **A credential a bare netrc line cannot carry is left inline.** Values are
    written unquoted (the measurement above says why), so a decoded userinfo
    carrying whitespace, a `"`, a `\`, a `#` or a control character has no
@@ -173,8 +187,9 @@ this change does not make it two.
 decisions argue: a credential in a query parameter, which nothing can tell from
 an ordinary parameter; a transport that reads neither file; a *manager* that
 reads neither file (`apt`, `cargo`, `gem`); a hostname two entries disagree
-about; a value a bare netrc cannot carry; and a userinfo Go's URL grammar
-refuses where a manager would not. For those the argv and audit-log exposure is
+about — including a host some other URL in the same list names with no
+credential at all; a value a bare netrc cannot carry; and a userinfo Go's URL
+grammar refuses where a manager would not. For those the argv and audit-log exposure is
 exactly what it was — unchanged, not newly created — **and so is the digest**,
 since the published one is taken over whatever survived the strip. All but the
 first are named in a warn line rather than left silent.
@@ -215,11 +230,15 @@ Each rung is a test that fails before the change and passes after.
 3. **The materialized files**, per transport: the netrc's bare, unquoted values
    and its one line per host, the npmrc's base64 `_password` and its per-host
    keys, and that the npmrc is written for npm alone.
-4. **One hostname with two credentials** leaves both entries alone and writes no
-   file; the same credential twice is written once.
+4. **One hostname the list disagrees about** leaves every entry on it alone and
+   writes no file — two different credentials, and a second URL naming the host
+   with none, on another port and over plain `http` alike; the same credential
+   twice is written once, and an uncredentialed URL for a *different* host is
+   not a disagreement.
 5. **The digests**: the published one equals the digest of the same list written
    without its credential, and the sentinel's does not — a rotated credential is
-   a changed list.
+   a changed list. And a list refused before any sentinel is written is one
+   event however many tool calls follow it.
 6. **The removal**, driven through a real shell rather than asserted as a
    substring: the trap removes the directory when the install fails and when the
    preflight refuses, the status the classification reads survives, and the

@@ -264,17 +264,20 @@ type strippedPackages struct {
 	inlined []string
 }
 
-// packageCredentialRe finds a URL credential wherever it sits in an entry,
-// because the entry is not always the URL: pip's PEP 508 direct reference
-// (`private-lib @ git+https://user:token@host/repo`) and npm's alias
+// packageURLRe finds a URL's scheme and authority wherever they sit in an
+// entry, because the entry is not always the URL: pip's PEP 508 direct
+// reference (`private-lib @ git+https://user:token@host/repo`) and npm's alias
 // (`private-lib@https://user:token@host/pkg.tgz`) each nest one, and both are
-// ordinary syntax their managers accept. It is anySchemeUserinfoRe's shape —
-// the redactor already does this job on the way out — so the userinfo class
-// excludes every character that ends an authority and the greedy `+` therefore
-// runs to the LAST `@` before it, which is how a URL parser splits userinfo
-// from host and what makes a password containing `@` come out whole.
-var packageCredentialRe = regexp.MustCompile(
-	`([a-zA-Z][a-zA-Z0-9+.\-]*)://([^\s/?#]+)@([^\s/?#]*)`)
+// ordinary syntax their managers accept.
+//
+// It matches every URL, not only the ones carrying a credential, because both
+// halves of the one-credential-per-host rule need them: a netrc line matches on
+// the hostname alone and is therefore sent to every URL in the list naming that
+// host, so an uncredentialed one is a host that would start receiving a secret
+// it never had. The authority class excludes every character that ends an
+// authority, so the match stops where a URL parser stops.
+var packageURLRe = regexp.MustCompile(
+	`([a-zA-Z][a-zA-Z0-9+.\-]*)://([^\s/?#]*)`)
 
 // credentialSchemes are the transports whose fetcher reads a file this pass
 // writes — measured, not assumed. Everything else keeps its credential where it
@@ -298,49 +301,79 @@ type candidate struct {
 // credentialed entry is common, not where it is possible.
 //
 // It scans before it cuts, because whether a credential can be moved at all
-// depends on the others: a netrc line matches on the hostname alone, so two
-// entries naming one host with different credentials have no representation
-// that keeps them apart, and writing either would send one service the other's
-// secret. Those stay where they are.
+// depends on the others: a netrc line matches on the hostname alone, so it
+// serves every URL in the list naming that host. Two entries naming one host
+// with different credentials have no representation that keeps them apart, and
+// one entry naming it with *no* credential would start receiving the other's —
+// preemptively, since pip sends Basic from a netrc on the first request rather
+// than on a 401. Either way the host keeps every credential it has inline.
 func stripPackageCredentials(entries []string, manager packageManager) strippedPackages {
 	out := strippedPackages{entries: make([]string, len(entries))}
 	copy(out.entries, entries)
 
+	// bare names a host some URL in this list reaches with no credential of its
+	// own. It is a disagreement exactly as two different credentials are: one
+	// netrc line serves every URL naming the host, so writing one would widen
+	// the secret to an origin that never received it.
+	bare := map[string]bool{}
 	var found []candidate
 	for i, e := range entries {
-		for _, m := range packageCredentialRe.FindAllStringSubmatchIndex(e, -1) {
+		for _, m := range packageURLRe.FindAllStringSubmatchIndex(e, -1) {
 			scheme := strings.ToLower(e[m[2]:m[3]])
-			userinfo, host := e[m[4]:m[5]], e[m[6]:m[7]]
+			authority := e[m[4]:m[5]]
+			// A URL parser splits the userinfo on the authority's LAST `@`,
+			// which is what makes a password containing one come out whole; the
+			// same split here is what the cut below removes.
+			at := strings.LastIndex(authority, "@")
+			host := authority
+			if at >= 0 {
+				host = authority[at+1:]
+			}
 			// The span the regexp found is re-read by the URL parser, which is
 			// what decodes the percent-encoding and splits an IPv6 literal from
 			// its port. The scan locates; the parser interprets.
-			u, err := url.Parse(scheme + "://" + userinfo + "@" + host + "/")
+			u, err := url.Parse(scheme + "://" + authority + "/")
 			if err != nil {
-				// Go's userinfo grammar refuses characters a manager would have
-				// accepted (`^`, a malformed `%` escape). The credential stays
-				// where it is, and is named rather than dropped in silence.
-				out.inlined = append(out.inlined, host)
-				continue
-			}
-			if u.User == nil {
-				continue
-			}
-			secret, has := u.User.Password()
-			if !has || secret == "" {
-				// A bare `user@host`, or a `user:@host`, names a user; there is
-				// no secret to move and nothing to gain by moving it.
+				if at >= 0 {
+					// Go's userinfo grammar refuses characters a manager would
+					// have accepted (`^`, a malformed `%` escape). The
+					// credential stays where it is, and is named rather than
+					// dropped in silence.
+					out.inlined = append(out.inlined, host)
+				}
 				continue
 			}
 			machine := netrcMachine(u.Hostname())
-			if machine == "" || !netrcSafe(u.User.Username()) || !netrcSafe(secret) ||
-				!credentialSchemes[scheme] || !manager.netrc {
+			// Whether this URL's own fetch would read what the pass writes. It
+			// decides both halves below: what may be lifted, and what may be
+			// widened by something else being lifted.
+			reads := credentialSchemes[scheme] && manager.netrc
+			var secret string
+			if u.User != nil {
+				secret, _ = u.User.Password()
+			}
+			if secret == "" {
+				// A bare `user@host`, a `user:@host`, or no userinfo at all:
+				// nothing to move. But a netrc matches on the hostname alone,
+				// so a credential written for another URL naming this host
+				// would start being sent *here* — to a service that never had
+				// it, over whatever scheme and port this URL names. A URL
+				// carrying its own credential is unaffected, because its own
+				// wins; one carrying none is not, so it counts as a
+				// disagreement about the host.
+				if reads && machine != "" {
+					bare[machine] = true
+				}
+				continue
+			}
+			if machine == "" || !netrcSafe(u.User.Username()) || !netrcSafe(secret) || !reads {
 				// An empty machine name would make the whole file unparseable
 				// for pip and drop every other host's credential with it.
 				out.inlined = append(out.inlined, host)
 				continue
 			}
 			found = append(found, candidate{
-				entry: i, from: m[4], to: m[5],
+				entry: i, from: m[4], to: m[4] + at,
 				cred: packageCredential{
 					authority: u.Host, machine: machine,
 					user: u.User.Username(), secret: secret,
@@ -349,12 +382,17 @@ func stripPackageCredentials(entries []string, manager packageManager) strippedP
 		}
 	}
 
-	// A hostname two credentials disagree about keeps both of them inline. What
-	// counts as disagreement is the credential, not the port it was named on: one
-	// netrc line serves every port of a host, so the same user and secret on two
-	// of them is one line, not a collision.
+	// A hostname the list disagrees about keeps every credential on it inline.
+	// What counts as disagreement is the credential, not the port it was named
+	// on: one netrc line serves every port of a host, so the same user and
+	// secret on two of them is one line, not a collision — while a *different*
+	// credential, or no credential at all, is a URL the line would reach with a
+	// secret meant for another.
 	type login struct{ user, secret string }
 	conflicted := map[string]bool{}
+	for m := range bare {
+		conflicted[m] = true
+	}
 	seen := map[string]login{}
 	for _, c := range found {
 		l := login{c.cred.user, c.cred.secret}
@@ -627,11 +665,18 @@ func (e *Executor) installPackages(ctx context.Context, sb sandbox.Sandbox, sid 
 		digest := packagesDigest(entries)
 		published := packagesDigest(stripped.entries)
 		rec, seen := recs[m.name]
-		// A list this sandbox has not tried in this exact form, credential
-		// included. Two lists differing only in a credential publish the same
-		// digest, so the emission's own dedupe would suppress the second — this
-		// is what tells it not to.
-		changed := !seen || rec.Digest != digest
+		// A list this sandbox tried before and has since been given in another
+		// form, credential included. Two lists differing only in a credential
+		// publish the same digest, so the emission's own dedupe would suppress
+		// the second — this is what tells it not to.
+		//
+		// A *missing* record is deliberately not "changed": the refusal
+		// branches below emit and `continue` without writing a sentinel, so a
+		// stored invalid list has no record on any pass. Reading that as a
+		// changed list would skip the dedupe every time and append the same
+		// exhausted error on every tool call, forever. With no record there is
+		// nothing to have changed from, and the query is the right answer.
+		changed := seen && rec.Digest != digest
 		if seen && rec.Digest == digest {
 			// Settled, or out of attempts: either way this sandbox is done
 			// with this list until it changes.

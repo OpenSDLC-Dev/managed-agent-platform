@@ -151,6 +151,27 @@ one digest, so the corrected credential's failures read as repeats of the broken
 one's and a client watching would have seen nothing. The executor says the list
 changed now, and a changed list is emitted without consulting the history.
 
+**A third round, on the PR itself, found the two the first two had left.** The
+one-credential-per-host rule compared credentials to credentials, and so never
+saw a list that names one host both with a credential and without one: only the
+credentialed URL entered the conflict scan, no disagreement was found, and the
+netrc line written for it would have been sent to the uncredentialed URL as well
+— preemptively, since pip sends Basic from a netrc on the first request rather
+than on a 401 — putting a secret meant for one port at a service on another, or
+over plain `http`. That is a widening of exactly the kind the rule exists to
+refuse. The scan reads every URL in the list now, not only the ones carrying a
+userinfo, and an absent credential counts as a disagreement; a URL carrying its
+own is unaffected, because its own wins.
+
+The second was in the dedupe flag the round before had added. It read a
+*missing* sentinel record as "the list changed" — but the two terminal refusals,
+an invalid entry and an over-long assembled command, emit and return without
+writing a record at all, so no pass after the first would find one. Each tool
+call would have appended another identical exhausted `session.error`, without
+bound, for the life of the sandbox. A change now means a record whose digest
+differs; with no record there is nothing to have changed from, and the dedupe
+query is the right answer.
+
 ## The `unrestricted` address floor (plan 45, #570) — archived 2026-09-06, delivered in one PR
 
 `unrestricted` admitted every host *and* every address. A recording of the

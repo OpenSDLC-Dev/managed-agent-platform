@@ -219,9 +219,12 @@ nothing can tell from an ordinary parameter; a **transport that reads neither
 file** — `ssh` takes no password from a URL at all, and `hg`, `svn` and `bzr`
 authenticate from their own stores; a **manager that reads neither file**, which
 is `apt`, `cargo` and `gem` (their credential stores are `auth.conf.d`,
-`credentials.toml` and `~/.gem/credentials`); **one hostname two entries disagree
+`credentials.toml` and `~/.gem/credentials`); **one hostname the list disagrees
 about**, since a netrc line matches the hostname alone, case-insensitively, and
-writing either credential would send one service the other's secret; a value a
+is therefore sent to every URL in the list naming that host — so two entries
+carrying different credentials would send one service the other's secret, and a
+second URL naming the host with *no* credential (another port, or plain `http`)
+would start receiving one it never had; a value a
 **bare netrc cannot carry** — whitespace, a quote, a backslash, a `#`, a control
 character (a netrc *may* be quoted, and this deliberately does not, because
 Python's `netrc` module did not strip quotes before 3.11 and pip reads the file

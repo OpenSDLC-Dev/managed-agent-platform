@@ -473,6 +473,27 @@ func TestAnInvalidEntryIsRefusedWithoutRunningAnything(t *testing.T) {
 	}
 }
 
+// TestARefusedListIsOneEventHoweverManyToolCallsFollow: a refused list emits
+// and returns without writing a sentinel record, so no pass after the first
+// finds one. The dedupe has to hold anyway — a session making a hundred tool
+// calls must not accumulate a hundred identical exhausted errors, which is what
+// treating "no record" as "the list changed" would do.
+func TestARefusedListIsOneEventHoweverManyToolCallsFollow(t *testing.T) {
+	sb := &fakeSandbox{}
+	h := newHarness(t, sb)
+	h.setPackages(t, map[string][]string{"pip": {"--index-url=http://evil.example/simple"}})
+
+	for i := 1; i <= 3; i++ {
+		h.suspend(t, writeUse(fmt.Sprintf("f%d.txt", i), "x"))
+		h.stepOnce(t)
+	}
+
+	errs := h.packageErrors(t)
+	if len(errs) != 1 {
+		t.Fatalf("package errors = %d, want 1 for three tool calls: %+v", len(errs), errs)
+	}
+}
+
 // TestTheProbeRefusesASandboxThatCannotInstall is decision 7: every manager
 // writes under /usr or /var, so a non-root or read-only sandbox is refused once
 // — with no manager on the event, because the fault is the sandbox's — rather
