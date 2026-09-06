@@ -558,9 +558,14 @@ func TestDreamCompletionSecretScan(t *testing.T) {
 	})
 }
 
-// Two replicas ticking the same dream: FOR UPDATE SKIP LOCKED gives the arm to
-// one of them, and the loser changes nothing.
+// Two replicas ticking the same dream: FOR UPDATE SKIP LOCKED gives the
+// completion to one of them. The loser either skips the locked row or, arriving
+// after the winner's commit, finds a completed dream and takes its next step,
+// the closing arm — both are one completion. The terminal row cannot tell one
+// completion from two, which write the same row, so the test counts the
+// committed transitions instead.
 func TestDreamTwoReplicasOneArm(t *testing.T) {
+	collect := collectMetrics(t)
 	s := newTestServer(t)
 	_, body := seededDreamBody(t, s)
 	dreamID, _ := startedDream(t, s, body)
@@ -577,10 +582,11 @@ func TestDreamTwoReplicasOneArm(t *testing.T) {
 			t.Fatalf("concurrent tick: %v", err)
 		}
 	}
-	// One completion, one skip: the dream is completed exactly once and its
-	// ended_at is a single stamp.
 	if d := getDream(t, s, dreamID); d["status"] != "completed" {
 		t.Fatalf("dream is %v after two concurrent ticks", d["status"])
+	}
+	if got := dreamTransitionCount(t, collect(), "completed"); got != 1 {
+		t.Errorf("completed transitions = %d, want 1 (one replica completed the dream, the other did not)", got)
 	}
 }
 

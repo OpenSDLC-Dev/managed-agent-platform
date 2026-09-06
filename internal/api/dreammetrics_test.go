@@ -6,6 +6,9 @@ import (
 	"net/http"
 	"testing"
 	"time"
+
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/api"
+	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 )
 
 // The session metrics the dream runner's own paths owe (plan 41 slice 2).
@@ -16,6 +19,31 @@ import (
 //
 // Each case swaps the process meter provider through collectMetrics, which is
 // why none of them runs in parallel.
+
+// dreamTransitionCount reads dream.transitions for one target status — the
+// count of arms that committed a move there, which is how a test tells one
+// completion from two that wrote the same terminal row.
+func dreamTransitionCount(t *testing.T, rm metricdata.ResourceMetrics, to string) int64 {
+	t.Helper()
+	var total int64
+	for _, sm := range rm.ScopeMetrics {
+		for _, m := range sm.Metrics {
+			if m.Name != api.MetricDreamTransitions {
+				continue
+			}
+			sum, ok := m.Data.(metricdata.Sum[int64])
+			if !ok {
+				t.Fatalf("%s is %T, want an int64 sum", api.MetricDreamTransitions, m.Data)
+			}
+			for _, p := range sum.DataPoints {
+				if v, ok := p.Attributes.Value("to"); ok && v.AsString() == to {
+					total += p.Value
+				}
+			}
+		}
+	}
+	return total
+}
 
 // sessionResourceCount reads back how many resources a session really carries,
 // so a case asserts the counter against the session rather than a hand-copied
