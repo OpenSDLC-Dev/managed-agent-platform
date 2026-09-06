@@ -183,6 +183,10 @@ type dreamRow struct {
 	sessionArchived  *time.Time
 	sessionUsage     []byte
 	sessionCreatedAt time.Time
+	// sessionStop is the primary thread's stop reason, which is how an idle
+	// session says whether its last turn succeeded. Empty before the first
+	// turn settles.
+	sessionStop string
 }
 
 // dreamStepResult is what an arm leaves behind for the commit and after it.
@@ -382,9 +386,14 @@ func lockDream(ctx context.Context, tx pgx.Tx, id string, now time.Time) (dreamR
 	if d.sessionID == nil {
 		return d, true, nil
 	}
-	err = tx.QueryRow(ctx,
-		`SELECT status, archived_at, usage, created_at FROM sessions WHERE id = $1`, *d.sessionID).
-		Scan(&d.sessionStatus, &d.sessionArchived, &d.sessionUsage, &d.sessionCreatedAt)
+	var stop *string
+	err = tx.QueryRow(ctx, `
+		SELECT s.status, s.archived_at, s.usage, s.created_at, t.stop_reason->>'type'
+		  FROM sessions s
+		  LEFT JOIN session_threads t
+		    ON t.session_id = s.id AND t.parent_thread_id IS NULL
+		 WHERE s.id = $1`, *d.sessionID).
+		Scan(&d.sessionStatus, &d.sessionArchived, &d.sessionUsage, &d.sessionCreatedAt, &stop)
 	if errors.Is(err, pgx.ErrNoRows) {
 		// Unreachable through the API — the gate refuses a delete while the
 		// dream owns the session, and the foreign key nulls session_id at the
@@ -397,6 +406,9 @@ func lockDream(ctx context.Context, tx pgx.Tx, id string, now time.Time) (dreamR
 		return d, false, err
 	}
 	d.sessionFound = true
+	if stop != nil {
+		d.sessionStop = *stop
+	}
 	return d, true, nil
 }
 
@@ -421,12 +433,30 @@ func (s *server) dreamStep(ctx context.Context, tx pgx.Tx, d dreamRow, now time.
 	if errType != "" {
 		return s.dreamFail(ctx, tx, d, errType, msg)
 	}
-	if d.sessionStatus == string(domain.SessionTerminated) { // 5. ended badly
+	// 5. ended badly, in either of the two shapes that wears. A terminated
+	// session is the obvious one. The other is a model request that ran out of
+	// retries: internal/brain's failTurn records a session.error and leaves the
+	// primary thread idle carrying this stop reason, which is the state a
+	// finished stage leaves too — so without the second half the runner would
+	// read a failed turn as a stage completed and either open the next stage
+	// over the missing work or, at the last, call the dream completed. Both
+	// delegation bounds arrive this way as well: they cut the session with an
+	// error rather than terminating it. The stop reason is only the last
+	// settled turn's, so it is read on an idle session alone; on a running one
+	// it belongs to the turn before.
+	terminated := d.sessionStatus == string(domain.SessionTerminated)
+	exhausted := d.sessionStatus == string(domain.SessionIdle) &&
+		d.sessionStop == string(domain.StopRetriesExhausted)
+	if terminated || exhausted {
 		last, err := lastSessionError(ctx, tx, *d.sessionID)
 		if err != nil {
 			return dreamStepResult{}, err
 		}
-		return s.dreamFail(ctx, tx, d, "internal_error", "pipeline session terminated: "+last)
+		if terminated {
+			return s.dreamFail(ctx, tx, d, "internal_error", "pipeline session terminated: "+last)
+		}
+		return s.dreamFail(ctx, tx, d, "internal_error",
+			fmt.Sprintf("stage %d ended in a failed turn: %s", d.stage, last))
 	}
 	turns, err := dreamStageTurns(ctx, tx, *d.sessionID)
 	if err != nil {

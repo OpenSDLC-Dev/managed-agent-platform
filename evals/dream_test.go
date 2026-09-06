@@ -402,8 +402,12 @@ func TestDreamPipeline(t *testing.T) {
 	// The stale fact is replaced. A memory that records the move (both regions
 	// in one file) is a correct history line, not a stale fact — what fails is
 	// a file still presenting eu-west-1 alone as where production deploys.
-	if len(mentions(after, "us-east-2")) == 0 {
-		t.Errorf("no memory mentions us-east-2, the newer deploy target: %v", after)
+	// The index is excluded here for the opposite reason it is excluded below:
+	// there, a line about the surviving memory must not count as a second
+	// statement; here, a line about a memory that no longer exists must not
+	// stand in for the fact itself.
+	if len(mentionsOutsideIndex(after, "us-east-2")) == 0 {
+		t.Errorf("no memory states us-east-2, the newer deploy target: %v", after)
 	}
 	for _, path := range mentions(after, "eu-west-1") {
 		if !strings.Contains(after[path], "us-east-2") {
@@ -417,8 +421,16 @@ func TestDreamPipeline(t *testing.T) {
 	// and counting that line as a second statement would fail a store that
 	// merged correctly. (The credential check below deliberately does not make
 	// this exception: a secret in the index is a leak like any other.)
-	if paths := mentionsOutsideIndex(after, "tabs"); len(paths) > 1 {
-		t.Errorf("the tabs preference is still stated in %d memories: %v", len(paths), paths)
+	// Exactly one, not "at most one": consolidating the pair by deleting both
+	// loses the preference, and a grader that only counts down would call that
+	// a pass.
+	// The needle is "tab" rather than the fixtures' "tabs" because a merge is
+	// free to reword — "tab indentation" states the same preference — and now
+	// that zero is a failure, a needle the merge can write around would fail a
+	// store that consolidated correctly. Nothing else in this seed invites the
+	// word.
+	if paths := mentionsOutsideIndex(after, "tab"); len(paths) != 1 {
+		t.Errorf("the tab preference is stated in %d memories, want exactly 1: %v", len(paths), paths)
 	}
 
 	// The planted credential reaches no memory. The renderer redacts it on the
@@ -454,9 +466,23 @@ func TestDreamPipeline(t *testing.T) {
 	index, ok := after["/MEMORY.md"]
 	if !ok {
 		t.Errorf("the output store has no /MEMORY.md index: %v", memoryPaths(after))
-	} else if lines := nonEmptyLines(index); lines < len(after)-1 {
-		t.Errorf("/MEMORY.md has %d non-empty lines for %d other memories:\n%s",
-			lines, len(after)-1, index)
+	} else {
+		if lines := nonEmptyLines(index); lines < len(after)-1 {
+			t.Errorf("/MEMORY.md has %d non-empty lines for %d other memories:\n%s",
+				lines, len(after)-1, index)
+		}
+		// Counting lines alone passes an index of the right length that names
+		// the wrong files, so every memory is looked for by name. The leading
+		// slash is trimmed because the prompt asks for the path and both
+		// spellings of it are one: "/prefs/indent.md" and "prefs/indent.md".
+		for path := range after {
+			if path == "/MEMORY.md" {
+				continue
+			}
+			if !strings.Contains(index, strings.TrimPrefix(path, "/")) {
+				t.Errorf("/MEMORY.md does not name the memory %s:\n%s", path, index)
+			}
+		}
 	}
 
 	// The fan-out ran: two transcripts are one batch, so the pipeline session

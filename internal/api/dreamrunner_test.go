@@ -177,6 +177,21 @@ func atLastStage(t *testing.T, s *tserver, dreamID string) {
 	setDreamStage(t, s, dreamID, api.DreamStageCount)
 }
 
+// exhaustPrimaryTurn leaves the session the way a model request that ran out of
+// retries leaves it: idle, with the primary thread's stop reason recording the
+// failure and a session.error on the log. internal/brain's failTurn is what
+// writes this shape; the runner has to tell it apart from a finished stage,
+// which idles the same way.
+func exhaustPrimaryTurn(t *testing.T, s *tserver, sessionID string) {
+	t.Helper()
+	appendEvent(t, s, sessionID, "session.error", `{"error":{"message":"upstream 529"}}`)
+	if _, err := s.pool.Exec(context.Background(), `
+		UPDATE session_threads SET stop_reason = '{"type":"retries_exhausted"}'
+		 WHERE session_id = $1 AND parent_thread_id IS NULL`, sessionID); err != nil {
+		t.Fatalf("exhaust the primary turn: %v", err)
+	}
+}
+
 // primaryStageMessages is the text of every user.message the runner has posted
 // on the primary thread, in log order — one per stage opened.
 func primaryStageMessages(t *testing.T, s *tserver, sessionID string) []string {
@@ -325,6 +340,21 @@ func TestDreamTickArms(t *testing.T) {
 			arrange: func(t *testing.T, s *tserver, _, _, sessionID string) {
 				appendEvent(t, s, sessionID, "agent.tool_use",
 					`{"name":"bash","input":{},"evaluated_permission":"ask"}`)
+			},
+			status: "failed", errType: "internal_error",
+		},
+		{
+			name: "an idle session whose last turn failed is arm 5, not an advance",
+			arrange: func(t *testing.T, s *tserver, _, _, sessionID string) {
+				exhaustPrimaryTurn(t, s, sessionID)
+			},
+			status: "failed", errType: "internal_error",
+		},
+		{
+			name: "an idle session whose last turn failed is arm 5 at the last stage too",
+			arrange: func(t *testing.T, s *tserver, _, dreamID, sessionID string) {
+				atLastStage(t, s, dreamID)
+				exhaustPrimaryTurn(t, s, sessionID)
 			},
 			status: "failed", errType: "internal_error",
 		},
@@ -987,8 +1017,10 @@ func TestDreamWalksTheFourStagesInOrder(t *testing.T) {
 	}
 }
 
-// The caps are per stage (§3.3: 4 / 300 / 30 / 10), so the same turns that
-// exhaust one stage's budget sit well inside another's.
+// The caps are per stage (30 / 300 / 60 / 30), so the same turns that
+// exhaust one stage's budget sit well inside another's. The cases below set
+// their own caps rather than leaning on those numbers, which are measured and
+// will move again.
 // A stage outside 1..4 is a row nothing in this code can write — the start
 // writes 1 and arm 9 only increments below the last — so it stands for
 // corruption, and what the arm must not do with it is index the cap array. The
@@ -1042,7 +1074,7 @@ func TestDreamStageTurnCapsArePerStage(t *testing.T) {
 
 		d := getDream(t, s, dreamID)
 		if d["status"] != "running" {
-			t.Fatalf("dream is %v (%v); three turns are inside stage 1's budget of four",
+			t.Fatalf("dream is %v (%v); three turns are inside stage 1's budget",
 				d["status"], d["error"])
 		}
 		if stage, _, _ := dreamInternals(t, s, dreamID); stage != 2 {
@@ -1052,13 +1084,13 @@ func TestDreamStageTurnCapsArePerStage(t *testing.T) {
 }
 
 // The count belongs to the stage, not to the session: the turns spent before a
-// stage's opening message are not that stage's, which is what makes a cap of
-// ten survivable on the fourth stage of a run that spent hundreds.
+// stage's opening message are not that stage's, which is what makes the last
+// stage's cap survivable on a run whose digest stage spent hundreds.
 func TestDreamStageTurnsCountFromTheStageOpener(t *testing.T) {
 	s := newTestServer(t)
 	_, body := seededDreamBody(t, s)
 	dreamID, sessionID := startedDream(t, s, body)
-	for range 3 { // stage 1's turns, inside its budget of four
+	for range 3 { // stage 1's turns, inside its budget
 		appendEvent(t, s, sessionID, "span.model_request_end", `{}`)
 	}
 

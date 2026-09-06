@@ -238,7 +238,7 @@ memory store at %[2]s. Every duplicate the plan flagged is resolved in this
 stage — one file survives it — and so is every contradiction a digest
 carries. Leave the index and the report to stage 4.`,
 			dreamScratchDir, storeMount)
-	default:
+	case dreamStageCount:
 		fmt.Fprintf(&b, `Stage 4 of 4: index and audit. Check %[1]s
 against %[2]splan.md and the digests first: a change they routed that never
 landed is made now.
@@ -252,6 +252,15 @@ contradictions you resolved, the ones still open, and the transcripts that
 produced nothing. "Nothing changed" is a valid and successful report — if the
 transcripts carried nothing durable, say so and leave the store as it is.`,
 			storeMount, dreamScratchDir)
+	default:
+		// Unreachable: the start passes a literal 1 and the advance passes
+		// d.stage+1 from behind the runner's range guard. It is spelled out
+		// because the alternative — a bare default rendering the last stage's
+		// text — would answer a stage that does not exist with the audit
+		// message, telling a dream that never digested anything to write its
+		// index. A stage number in a message is visible; the wrong stage's
+		// message is not.
+		fmt.Fprintf(&b, "internal error: no stage %d in a %d-stage pipeline", stage, dreamStageCount)
 	}
 	// Steering directs synthesis, so it rides the two stages that synthesize:
 	// stage 1 decides what goes where, stage 3 writes it. Stages 2 and 4 read
