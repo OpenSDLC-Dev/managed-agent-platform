@@ -570,14 +570,15 @@ item 5, which gates slice 6) at §7.6, and the archived-workspace refusal (item 
   **both** `work_items` inserts — `internal/queue/queue.go:224-229` (`EnqueueThread`) and
   `:258-263` (`EnqueueOutputsHarvest`, which plan 38's idle harvest added) — and
   `internal/executor/harvest.go:394-396` (`files`).
-- **The scoped-table set is 14**: `agents`, `environments`, `sessions`, `events`, `work_items`,
+- **The scoped-table set is 15**: `agents`, `environments`, `sessions`, `events`, `work_items`,
   `api_keys`, `environment_keys` (`0001_init.sql:15,41,66,101,116,141,154`), `skills`
   (`0007:9`), `files` (`0008:11`), `vaults` (`0011:10`), `principals` (`0022:43`),
-  `session_threads` (`0025:14`), `memory_stores` (`0028:10`), `deployments` (`0031:16`).
-  *Counting rule: `grep -n org_id internal/store/migrations/*.sql` returns **19** lines (20 once
-  slice 1's `0035_workspaces.sql` lands — §6.5 step 2) in 9
-  files; five are not column definitions — `0001:6` (prose), `0007:25` (the partial index),
-  `0013:43` (prose) and `0025:44`, `:46` (the backfill).* Eleven child tables inherit through a
+  `session_threads` (`0025:14`), `memory_stores` (`0028:10`), `deployments` (`0031:16`),
+  `dreams` (`0034:28`). *Counting rule: `grep -n org_id internal/store/migrations/*.sql` returns
+  **25** lines in 11 files, slice 1's `0035_workspaces.sql` included (§6.5 step 2); nine are not
+  column definitions — `0001:6` (prose), `0007:25` (the partial index), `0013:43` (prose),
+  `0025:44`, `:46` (the backfill), and `0035:7`, `:11` (prose), `:29` (the `UNIQUE`), `:32` (the
+  seed) — and one, `0035:23`, is the registry's own.* Eleven child tables inherit through a
   foreign key. **Two inherit nothing**: `deleted_sessions` (`0018:12-16`, no `REFERENCES` by
   design — the tombstone outlives its session) and `session_checkpoints` (`0019:11-16`,
   `session_id text PRIMARY KEY` at `:12` with no `REFERENCES`), so
@@ -646,20 +647,20 @@ plan carries the corrections so the verifier's docs rung does not flag them:
    `0021_environment_keys_named.sql:25`; nothing to rebuild there.
 2. **The worker-lane policy is at `internal/api/server.go:305` and `:559-569`**, not the cited
    `server.go:329-360`. The dispatcher arm is `:346-347`.
-3. **The statement count is 211 across 32 of the 46 non-test `internal/api` files**, not 60-80
+3. **The statement count is 225 across 34 of the 48 non-test `internal/api` files**, not 60-80
    across 13. *Counting rule: occurrences of the four statement-opening tokens `SELECT `,
-   `INSERT INTO `, `UPDATE <ident> SET`, `DELETE FROM ` across those 46 files, counting a
+   `INSERT INTO `, `UPDATE <ident> SET`, `DELETE FROM ` across those 48 files, counting a
    nested subquery's `SELECT` as its own occurrence and including statements on unscoped
-   tables.* A second, narrower rule gives the guard's real workload: mentions of one of the 14
-   scoped tables after `FROM`/`JOIN`/`INSERT INTO`/`UPDATE`/`DELETE FROM` number **143** in
+   tables.* A second, narrower rule gives the guard's real workload: mentions of one of the 15
+   scoped tables after `FROM`/`JOIN`/`INSERT INTO`/`UPDATE`/`DELETE FROM` number **153** in
    `internal/api`, **51** in `internal/events`, **31** in `internal/queue`, **22** in
-   `internal/executor` and **26** in `internal/brain` — **273** in all, plus **2** in
+   `internal/executor` and **26** in `internal/brain` — **283** in all, plus **2** in
    `internal/vaultresolve`, the guard's sixth target package (§6.5). These are **mention**
    counts — one statement can contribute several (`internal/api/threads.go:133-134` yields both
-   `FROM session_threads` and `JOIN sessions`) — where 211 is a **statement** count; by the
+   `FROM session_threads` and `JOIN sessions`) — where 225 is a **statement** count; by the
    statement rule `internal/queue` holds 18, `internal/events` 59, and brain, executor and
    vaultresolve 77 together (29, 44 and 4), and later sections spend each figure in its own unit. *That rule as an
-   expression: `grep -roE "(FROM|JOIN|INSERT INTO|UPDATE|DELETE FROM) (<the 14 names>)([^_a-z]|$)"
+   expression: `grep -roE "(FROM|JOIN|INSERT INTO|UPDATE|DELETE FROM) (<the 15 names>)([^_a-z]|$)"
    --include=*.go <pkg>` minus `_test.go` lines.* Create-time
    cross-references are ~16 sites, not 6, and **three have no existing site at all** (§7.4).
 
@@ -1045,7 +1046,7 @@ environment_keys IN SHARE MODE`, argued at `:11-18` — **not** `0025:57-61`, wh
 
 ### 6.5 The completeness guard
 
-No request-driven test can prove that 211 statements all filter. The repo already answers this
+No request-driven test can prove that 225 statements all filter. The repo already answers this
 question, in the same package, for the same class of problem:
 `internal/api/rolematrix_test.go:18-21` parses `server.go` with `go/parser` and states the
 reasoning verbatim — "a request-driven test can only check the routes someone remembered to
@@ -1072,8 +1073,9 @@ scope predicate has exactly that shape. So `internal/api/scopematrix_test.go`:
 2. **Derives the scoped-table set from `internal/store/migrations/*.sql`**, not from a
    hand-written list — the mechanism `internal/domain/docs_test.go` uses for the prefix set,
    and for the same reason (that kind of list has drifted twice). A bare `org_id` grep will not
-   do: it returns 19 lines of which 5 are prose, an index and a backfill (§4.4) — 20 once slice
-   1's `0035` lands, its `org_id` the one declaration the three-column rules read past. So the
+   do: it returns 25 lines of which 9 are prose, an index, a backfill, and slice 1's `UNIQUE` and
+   seed (§4.4), and one is the `0035` registry's own `org_id`, the one declaration the
+   three-column rules read past. So the
    derivation is two rules, both stated in the test, and **both keyed on all three columns, not
    on `org_id` alone**: **(i)** a `CREATE TABLE <name> ( … )` block whose body declares
    `org_id`, `workspace_id` *and* `project_id`, and **(ii)** an `ALTER TABLE <name> ADD COLUMN`
@@ -1083,7 +1085,7 @@ scope predicate has exactly that shape. So `internal/api/scopematrix_test.go`:
    All three, because slice 1's own `workspaces` table declares `org_id` and nothing else
    (§7.1): the registry is the referent of every predicate, not a referrer, and an `org_id`-only
    rule would enrol it into a check it can never satisfy. Rule
-   (ii) has **no instance in the merged tree** — all 15 declarations sit inside `CREATE TABLE`
+   (ii) has **no instance in the merged tree** — all 16 declarations sit inside `CREATE TABLE`
    bodies and no migration carries an `ADD COLUMN` of these columns — so it is proved by a
    synthetic fixture rather than by the tree (§7.2). The same walk derives a **second set**: a
    table declaring none of the three while carrying a `REFERENCES` to one that does is an
@@ -1106,7 +1108,7 @@ scope predicate has exactly that shape. So `internal/api/scopematrix_test.go`:
    eleven are named **92** times across the six packages — 67 in `internal/api`, 14 in
    `internal/executor`, 4 each in `internal/brain` and `internal/vaultresolve`, 3 in
    `internal/queue`, none in `internal/events`. *Counting rule: §4.5's mention rule with these
-   eleven names substituted for the fourteen.* Outside `internal/api` they ride rule (g)'s
+   eleven names substituted for the fifteen.* Outside `internal/api` they ride rule (g)'s
    stand-in arm. Inside it, (g) asks each for its parent's scoped read in the same function, and
    **which ones already have it is what the guard's first run against the current tree reports**,
    not what this plan lists by hand, and **this plan states no total for it**. Reading found
@@ -1274,7 +1276,7 @@ scope predicate has exactly that shape. So `internal/api/scopematrix_test.go`:
    on `sessions` and `deployments` (§6.7).
 
 **The exemption list is the deliverable, not a loophole** — a reviewer reads nineteen commented
-entries instead of auditing 211 statements. Its permanent members, **each its own entry** except
+entries instead of auditing 225 statements. Its permanent members, **each its own entry** except
 where this paragraph says otherwise, each with its reason:
 `queue.Claim` (`internal/queue/queue.go:300`) and the self_hosted gauge (the literal at
 `internal/queue/metrics.go:92`); the **deployment scheduler's background lane** — one entry for
@@ -2251,7 +2253,7 @@ released changelog sections (`docs/changelog/0.3.0.md`) are deliberately left as
 **D1 — Application-level predicates with an AST guard and a database write floor.** *Rejected:*
 row-level security, on §6.6's evidence, chiefly that `internal/pgtest/pgtest.go:95` makes the
 entire Postgres suite a superuser so policies would be inert under the whole merge gate.
-*Rejected:* a store-layer repository every statement must call — it would move 211 statements out
+*Rejected:* a store-layer repository every statement must call — it would move 225 statements out
 of the handlers into a new package, contradicting `internal/store/store.go:6-9`'s stated
 ownership ("Query SQL is not owned here — it belongs to the packages that issue it") and turning
 a surgical change into a re-architecture. *Rejected:* schema-per-tenant — `queue.Claim` is a
