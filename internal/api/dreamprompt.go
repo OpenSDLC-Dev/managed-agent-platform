@@ -98,10 +98,12 @@ const redactedSecretMarker = "[REDACTED_SECRET]"
 // the same rooting resolveMountPath applies, for the prompt's prose.
 func mountedAt(p string) string { return defaultMountRoot + p }
 
-// dreamStageMessage is slice 2's single stage: orient over the index, then
-// merge, index and report in the same turn. Slice 3 replaces it with the four
-// of §3.3, each opening by checking the previous stage's artefact.
-func dreamStageMessage(storeMount string, transcripts int, instructions string) string {
+// dreamStageMessage is the user.message that opens stage `stage` (1..4, §3.3).
+// Until the four stages land it is slice 2's single fused message for every
+// stage number: orient over the index, then merge, index and report in one
+// turn.
+func dreamStageMessage(stage int, storeMount string, transcripts int, instructions string) string {
+	_ = stage
 	var b strings.Builder
 	fmt.Fprintf(&b, `Read %s, then read all %d transcripts under %s.
 
