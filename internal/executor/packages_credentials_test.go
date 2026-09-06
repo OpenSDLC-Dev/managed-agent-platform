@@ -609,6 +609,36 @@ func TestARotatedCredentialIsNotDedupedAway(t *testing.T) {
 	}
 }
 
+// TestAFailedCredentialWriteStillAsksForTheDirectory: the write is the one path
+// on which a credential can be half-materialized — WriteFiles lands its members
+// in order and stops at the first failure, so a batch that failed may already
+// have put a file in the sandbox. The pass faults the item, as any backend
+// failure does, and asks for the directory on the way out rather than leaving a
+// secret in a sandbox whose session goes on running.
+func TestAFailedCredentialWriteStillAsksForTheDirectory(t *testing.T) {
+	sb := &fakeSandbox{failPath: "/.netrc"}
+	h := newHarness(t, sb)
+	h.setPackages(t, map[string][]string{
+		"pip": {"git+https://bot:s3cr3t@git.example.com/team/lib"},
+	})
+	h.suspend(t, writeUse("out.txt", "hello"))
+
+	h.stepExpectingFault(t)
+
+	if got := installCmds(sb); len(got) != 0 {
+		t.Errorf("install commands = %v, want none: the write failed before the install", got)
+	}
+	var removed []string
+	for _, c := range sb.cmds {
+		if strings.HasPrefix(c, "rm -rf '/tmp/.map-pkgcreds-") {
+			removed = append(removed, c)
+		}
+	}
+	if len(removed) != 1 {
+		t.Errorf("removals = %v, want exactly one: the failing write asks for the directory too", removed)
+	}
+}
+
 // TestTheRemovalCarriesItsOwnBudget: two Execs each carrying the install
 // timeout would put twice the stall floor's longest single step inside one
 // silent interval, which is the reclaim loop #383 is about.

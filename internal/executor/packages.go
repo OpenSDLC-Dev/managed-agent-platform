@@ -807,8 +807,8 @@ func packageFailureReason(res sandbox.ExecResult) string {
 // credential is nothing but those characters).
 //
 // #599 narrowed all three rather than closing them: a credential lifted out
-// before the command is assembled is one the manager cannot echo, but the four
-// entry shapes stripPackageCredentials leaves alone still reach it, and for
+// before the command is assembled is one the manager cannot echo, but every
+// entry shape stripPackageCredentials leaves alone still reaches it, and for
 // those this redaction is what stands between the credential and the log.
 func packageMessage(out string) string {
 	msg := urlInText.ReplaceAllStringFunc(out, redactURL)
