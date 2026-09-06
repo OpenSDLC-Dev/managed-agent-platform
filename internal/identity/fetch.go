@@ -23,8 +23,8 @@ import (
 // from the remote issuer. A hostile or compromised provider is already game over
 // for authentication — but the guard still denies it a blind, credential-free
 // SSRF primitive against the control plane's own loopback surfaces and the cloud
-// metadata endpoint, and checking the resolved IP at connect time makes DNS
-// rebinding ineffective. It is not a defence against a hostile issuer, and it is
+// metadata endpoint, and resolving the name once and judging every address it
+// returned before any connect makes DNS rebinding ineffective. It is not a defence against a hostile issuer, and it is
 // not a substitute for the scheme rule.
 //
 // The two rules are separate and must not be conflated. requireHTTPS is a SCHEME

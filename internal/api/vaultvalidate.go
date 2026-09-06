@@ -74,7 +74,7 @@ const (
 var probeIPAllowed = dialguard.IPAllowed
 
 // probeClient is the SSRF-guarded client for both outbound validate calls. The
-// Control hook reads probeIPAllowed on every dial (so a test override takes
+// Allow closure reads probeIPAllowed on every dial (so a test override takes
 // effect). Redirects are never followed: neither an OAuth token exchange nor an
 // MCP initialize legitimately redirects, and following a 307/308 would replay
 // the POST body — the refresh_token and a client_secret_post secret — to the

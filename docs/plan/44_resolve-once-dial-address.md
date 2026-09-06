@@ -259,13 +259,18 @@ rather than the network.
    failure, and none dies by hanging the package until its own timeout (one
    did, and the test was bounded rather than the mutant retired, because a test
    that hangs on a regression reports it as a timeout instead of as itself).
-   Twenty-four mutants, twenty-four killed. Two survived the first pass and both
-   were real: an all-refused answer
+   Twenty-eight mutants, twenty-eight killed. Three survived a pass and all
+   three were real: an all-refused answer
    was still reporting `ErrRefused` through a generic fallback rather than the
    refusal that names the offending address, and `netip.Addr.WithZone("")` before
    `AsSlice()` turned out to be a no-op — netip keeps a zone beside the address
    rather than in it — so a call that read like a guard was removed rather than
-   given a test it could never fail.
+   given a test it could never fail. The third came later: once an authority
+   that cannot be split was folded into the floor, the default `Allow` refused
+   the port-less networks anyway, so nothing was left holding `portCarrying`
+   itself. Its own property is that the refusal does not depend on the caller's
+   floor — a class the caller exempts still cannot dial a network with no
+   address to judge — and that is what the test drives now.
 
 ## Docs
 

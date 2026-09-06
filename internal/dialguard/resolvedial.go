@@ -61,12 +61,20 @@ type Dialer struct {
 	// net.Dialer.
 	FallbackDelay time.Duration
 
-	// Lookup resolves host to addresses. network is "ip", "ip4" or "ip6", the
-	// spelling net.Resolver.LookupIP takes, so nil selects
-	// net.DefaultResolver.LookupIP and a test can substitute the whole
-	// resolution without a DNS server. The answer's order is honoured: a
-	// resolver has already applied RFC 6724 to it.
-	Lookup func(ctx context.Context, network, host string) ([]net.IP, error)
+	// Lookup resolves host to addresses. Nil selects
+	// net.DefaultResolver.LookupIPAddr, and a test can substitute the whole
+	// resolution without a DNS server.
+	//
+	// LookupIPAddr rather than LookupIP, which is what net.Dialer resolves
+	// through and for the same reason: LookupIP builds its result as the IP of
+	// each answer and drops IPAddr.Zone with it, so a name whose answer is a
+	// zone-scoped address would be dialled without the zone that makes it
+	// routable. Filtering the families a "tcp4" dial wants is therefore done
+	// here rather than asked of the resolver — again as net.Dialer does it.
+	//
+	// The answer's order is honoured: a resolver has already applied RFC 6724
+	// to it.
+	Lookup func(ctx context.Context, host string) ([]net.IPAddr, error)
 
 	// Allow judges every resolved address before any connect. Nil selects
 	// IPAllowed.
@@ -106,41 +114,42 @@ func (d *Dialer) DialContext(ctx context.Context, network, addr string) (net.Con
 	}
 
 	host, port, err := net.SplitHostPort(addr)
-	if err != nil {
-		// Not an address this can take apart, which is a caller's malformed
-		// input rather than a destination. It goes to the standard dialler so
-		// it fails exactly as it did before this type existed, with that
-		// dialler's own error — the same rule gate.rootedName argues in place
-		// for the same shapes.
-		return d.dial(ctx, network, addr)
-	}
-	if ip := net.ParseIP(host); ip != nil {
-		// A literal skips the lookup, and must: resolving one would be a
-		// different operation with different failures.
-		if err := d.allow(ctx, ip); err != nil {
-			return nil, err
+	if err == nil {
+		if ip := net.ParseIP(host); ip != nil {
+			// A literal skips the lookup, and must: resolving one would be a
+			// different operation with different failures.
+			if err := d.allow(ctx, ip); err != nil {
+				return nil, err
+			}
+			return d.dial(ctx, network, addr)
 		}
-		return d.dial(ctx, network, addr)
 	}
-	if host == "" || strings.ContainsAny(host, ":%") {
-		// Not a name, and not an address net.ParseIP can read: a zone-scoped
-		// literal such as fe80::1%eth0, or the empty host of ":443". The hook
-		// this type replaced judged exactly these as unreadable and refused
-		// them, while a class it was not installed for dialled them unchanged —
-		// and a nil address reproduces both, since IPAllowed refuses one and a
-		// caller that exempts the class never looks. Resolving them instead
-		// would be a narrowing nobody asked for.
-		if err := d.allow(ctx, nil); err != nil {
-			return nil, err
+	if err != nil || host == "" || strings.ContainsAny(host, ":%") {
+		// An address this cannot read as a host and a port, or whose host is
+		// neither a name nor something net.ParseIP takes: a malformed
+		// authority, a zone-scoped literal, or the empty host of ":443". The
+		// hook this type replaced judged all of these as unreadable and refused
+		// them, while a class it was not installed for dialled them
+		// unchanged — and a nil address reproduces both, since IPAllowed
+		// refuses one and a caller that exempts the class never looks.
+		// Resolving them instead would be a narrowing nobody asked for.
+		//
+		// The unsplittable case is here rather than handed straight to the
+		// standard dialler because that would be the one path on which a socket
+		// could open without the floor having been asked anything — safe today
+		// only for as long as that dialler's parser stays exactly as strict as
+		// net.SplitHostPort, which is not a thing to rest a guard on.
+		if aerr := d.allow(ctx, nil); aerr != nil {
+			return nil, aerr
 		}
 		return d.dial(ctx, network, addr)
 	}
 
-	ips, err := d.lookup(ctx, network, host)
+	ips, err := d.lookup(ctx, host)
 	if err != nil {
 		return nil, err
 	}
-	all, err := addrsOf(ips)
+	all, err := addrsOf(ips, network)
 	if err != nil {
 		return nil, err
 	}
@@ -155,13 +164,16 @@ func (d *Dialer) DialContext(ctx context.Context, network, addr string) (net.Con
 	return d.dialAll(ctx, network, is4(all[0]), admitted, port)
 }
 
-// addrsOf reads the resolver's answer. An address netip cannot read is dropped
-// rather than dialled: IPAllowed answers for a net.IP it can read, and a
-// caller's own Allow may be laxer than that.
-func addrsOf(ips []net.IP) ([]netip.Addr, error) {
+// addrsOf reads the resolver's answer, keeping its order and each answer's
+// zone, and keeps only the families the dial network asked for — which is where
+// net.Dialer filters them too. An address netip cannot read is dropped rather
+// than dialled: IPAllowed answers for a net.IP it can read, and a caller's own
+// Allow may be laxer than that.
+func addrsOf(ips []net.IPAddr, network string) ([]netip.Addr, error) {
+	want4, want6 := wantedFamilies(network)
 	out := make([]netip.Addr, 0, len(ips))
 	for _, ip := range ips {
-		a, ok := netip.AddrFromSlice(ip)
+		a, ok := netip.AddrFromSlice(ip.IP)
 		if !ok {
 			continue
 		}
@@ -169,15 +181,37 @@ func addrsOf(ips []net.IP) ([]netip.Addr, error) {
 		// IPv4-mapped prefix and netip reads that literally: without this the
 		// dial address for 198.51.100.1 is spelled [::ffff:198.51.100.1]:443,
 		// which is a different address family to the socket and not what
-		// net.Dialer would have dialled.
-		out = append(out, a.Unmap())
+		// net.Dialer would have dialled. It is also what makes the family test
+		// below agree with net.Dialer's, whose isIPv4 is To4() != nil.
+		a = a.Unmap()
+		if v4 := a.Is4(); (v4 && !want4) || (!v4 && !want6) {
+			continue
+		}
+		// WithZone is a no-op on an IPv4 address, so this needs no arm.
+		out = append(out, a.WithZone(ip.Zone))
 	}
 	if len(out) == 0 {
-		// A resolver that answers with no usable address and no error. Nothing
-		// in the standard library does this, but Lookup is a seam.
-		return nil, fmt.Errorf("dial target resolved to no address: %w", ErrRefused)
+		// Either a resolver that answered with nothing usable — nothing in the
+		// standard library does that, but Lookup is a seam — or a network whose
+		// family the answer does not have, which is net.Dialer's "no suitable
+		// address found".
+		return nil, fmt.Errorf("dial target has no suitable address: %w", ErrRefused)
 	}
 	return out, nil
+}
+
+// wantedFamilies is which address families a dial network will accept, and it
+// is net.Dialer's rule: the numbered networks take one family each, everything
+// else takes both.
+func wantedFamilies(network string) (v4, v6 bool) {
+	switch network {
+	case "tcp4", "udp4":
+		return true, false
+	case "tcp6", "udp6":
+		return false, true
+	default:
+		return true, true
+	}
 }
 
 // admitted runs the floor over every resolved address, in the resolver's order,
@@ -231,6 +265,13 @@ func (d *Dialer) dialAll(ctx context.Context, network string, primaryIs4 bool, a
 func (d *Dialer) dialSerial(ctx context.Context, network string, addrs []netip.Addr, port string) (net.Conn, error) {
 	var first error
 	for i, a := range addrs {
+		// The budget before the attempt, and the budget's own error when it is
+		// gone: net.Dialer answers a spent deadline with the context's error
+		// rather than with whatever the first address happened to fail with, so
+		// errors.Is(err, context.DeadlineExceeded) means what it says.
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		actx, cancel := partialDeadline(ctx, len(addrs)-i)
 		c, err := d.dial(actx, network, joinAddrPort(a, port))
 		cancel()
@@ -239,9 +280,6 @@ func (d *Dialer) dialSerial(ctx context.Context, network string, addrs []netip.A
 		}
 		if first == nil {
 			first = err
-		}
-		if ctx.Err() != nil {
-			break
 		}
 	}
 	if first == nil {
@@ -265,6 +303,11 @@ func (d *Dialer) dialRace(ctx context.Context, network string, primary, fallback
 		primary bool
 	}
 	rctx, cancel := context.WithCancel(ctx)
+	// Every return below also cancels, one of them from inside a goroutine that
+	// has to outlive this one; the defer is here so that stays true of a return
+	// somebody adds later rather than being a four-path audit. CancelFunc is
+	// idempotent, so the two together cost nothing.
+	defer cancel()
 	results := make(chan outcome, 2)
 	pending := 0
 	start := func(addrs []netip.Addr, isPrimary bool) {
@@ -340,12 +383,12 @@ func (d *Dialer) allow(ctx context.Context, ip net.IP) error {
 	return IPAllowed(ip)
 }
 
-func (d *Dialer) lookup(ctx context.Context, network, host string) ([]net.IP, error) {
+func (d *Dialer) lookup(ctx context.Context, host string) ([]net.IPAddr, error) {
 	lookup := d.Lookup
 	if lookup == nil {
-		lookup = net.DefaultResolver.LookupIP
+		lookup = net.DefaultResolver.LookupIPAddr
 	}
-	return lookup(ctx, lookupNetwork(network), host)
+	return lookup(ctx, host)
 }
 
 func (d *Dialer) fallbackDelay() time.Duration {
@@ -356,25 +399,20 @@ func (d *Dialer) fallbackDelay() time.Duration {
 }
 
 // portCarrying reports whether a dial network's address is a "host:port" this
-// type can take apart. The tcp and udp families are; a raw "ip:proto" address is
-// a bare host and a unix address is a path, so for those there is nothing to
-// split, nothing to resolve, and — this being the point — nothing the floor
-// would ever be asked about.
+// type can take apart. The six tcp and udp spellings are; a raw "ip:proto"
+// address is a bare host and a unix address is a path, so for those there is
+// nothing to split, nothing to resolve, and — this being the point — nothing
+// the floor would ever be asked about.
+//
+// The six by name rather than by prefix: "tcpmux" is not a network, and letting
+// it through would spend a real lookup and a floor pass on it before the
+// standard dialler said so.
 func portCarrying(network string) bool {
-	return strings.HasPrefix(network, "tcp") || strings.HasPrefix(network, "udp")
-}
-
-// lookupNetwork maps a dial network onto the spelling net.Resolver.LookupIP
-// takes, so a "tcp4" dial resolves only A records exactly as net.Dialer's own
-// resolution would.
-func lookupNetwork(network string) string {
 	switch network {
-	case "tcp4", "udp4":
-		return "ip4"
-	case "tcp6", "udp6":
-		return "ip6"
+	case "tcp", "tcp4", "tcp6", "udp", "udp4", "udp6":
+		return true
 	default:
-		return "ip"
+		return false
 	}
 }
 
