@@ -67,10 +67,10 @@ and authenticates without it, and npm 6 sends no credential for a non-registry
 fetch with or without it — which also makes npm 6 the one shape this change
 makes worse, and the security guide says so. Two properties of the netrc format were
 measured with them, because both decide what the writer may emit: a `machine`
-line matches on the hostname alone, port excluded, and a value may be
-double-quoted with `\"` and `\\` honoured inside the quotes — so a credential
-containing spaces or quotes has a representation and one containing a newline
-does not.
+line matches on the hostname alone, port excluded, and a value *may* be
+double-quoted, with `\"` and `\\` honoured inside the quotes. The writer
+nevertheless must not quote, for a reason curl could not have shown and the
+Claude review did.
 
 The obvious alternative — leave the credential out of the entry and let the
 gate's egress substitution put it in from a vault — was rejected on evidence
@@ -83,10 +83,11 @@ What the change does **not** close is stated in the security guide rather than
 implied: an install needs root and the agent's tool calls run in that same
 sandbox as the same user, so the materialized file is exactly as readable there
 as the argv it replaced, for the length of the install. The sandbox is one trust
-domain. Four entry shapes also keep the exposure they had — a credential in a
-query parameter, a transport that reads neither file, a hostname two entries
-disagree about, and a value no netrc can carry — and the last three are named in
-a warn line rather than left silent. What the change does close is everything
+domain. Six entry shapes also keep the exposure they had — a credential in a
+query parameter, a transport that reads neither file, a manager that reads
+neither (`apt`, `cargo`, `gem`), a hostname two entries disagree about, a value a
+bare netrc cannot carry, and a userinfo Go's URL grammar refuses — and all but
+the first are named in a warn line rather than left silent. What the change does close is everything
 outside the sandbox for every other shape: the Kubernetes apiserver's audit log,
 whose readers are cluster operators and whose records outlive the session, and
 the digest oracle an environment key could read while the config it digests
@@ -121,6 +122,34 @@ command through a real shell instead of asserting that it contains a trap — ba
 3.2 replaces a subshell with its last command and takes the EXIT trap with it,
 where bash 5 does not. The group ends on `exit "$?"` now, and the executor asks
 for the directory again after the install returns.
+
+**The Claude pass then found a regression no measurement of ours could have
+seen, because it was in a parser this platform does not run.** The writer quoted
+every netrc value, which curl reads correctly — and pip's own fetcher does not
+go through curl. It goes through Python's `netrc` module, and that module did
+not strip quotes before 3.11: python 3.10.21 hands back `"bot"` and `"s3cr3t"`
+where 3.12.14 hands back `bot` and `s3cr3t`, so pip would have sent the quotes
+and every credentialed direct-URL install on an Ubuntu 22.04 or Debian bullseye
+image would have started failing. Values are written bare now, and a credential
+a bare value cannot carry keeps its entry.
+
+Five more from the same pass, each a defect in the change. The scheme allowlist
+asked the wrong half of the question: `apt`, `cargo` and `gem` read their own
+credential stores, so an https credential in one of their entries was being
+lifted into a netrc none of them reads — the same break the allowlist exists to
+prevent, one level up. A netrc matches its machine name case-insensitively and
+ignores a trailing dot, so `Registry.Example` and `registry.example.` slipped
+past the one-host-one-credential check as two hosts and curl would have sent one
+service the other's secret. An entry whose authority is empty (`https://u:p@/x`)
+wrote a nameless `machine` line, which makes the *whole file* unparseable for
+pip and drops every other host's credential with it. A userinfo Go's URL grammar
+refuses — an unescaped `^`, a malformed `%` — was dropped by a bare `continue`,
+so that credential stayed in argv with no warning at all, the silent exception
+the design exists to avoid. And publishing the stripped digest silenced the
+event dedupe across a rotation: two lists differing only in a credential publish
+one digest, so the corrected credential's failures read as repeats of the broken
+one's and a client watching would have seen nothing. The executor says the list
+changed now, and a changed list is emitted without consulting the history.
 
 ## The `unrestricted` address floor (plan 45, #570) — archived 2026-09-06, delivered in one PR
 

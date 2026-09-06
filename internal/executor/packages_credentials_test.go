@@ -8,6 +8,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/sandbox"
 )
@@ -72,7 +73,7 @@ func TestACredentialNeverReachesTheInstallCommand(t *testing.T) {
 	if got[0] != want {
 		t.Errorf("install command:\n got %s\nwant %s", got[0], want)
 	}
-	if netrc := sb.files[dir+"/.netrc"]; netrc != "machine git.example.com\nlogin \"bot\"\npassword \"s3cr3t\"\n" {
+	if netrc := sb.files[dir+"/.netrc"]; netrc != "machine git.example.com\nlogin bot\npassword s3cr3t\n" {
 		t.Errorf("netrc = %q", netrc)
 	}
 	if _, ok := sb.files[dir+"/.npmrc"]; ok {
@@ -178,9 +179,9 @@ func TestACredentialIsLiftedOutOfTheEntryItRidesIn(t *testing.T) {
 		},
 		{
 			name:  "percent-encoded userinfo reaches the file decoded, because that is what the origin is sent",
-			entry: "https://user%40corp.example:p%2Fss%20word@host.example.com/x.tgz",
+			entry: "https://user%40corp.example:p%2Fss@host.example.com/x.tgz",
 			want:  "https://host.example.com/x.tgz",
-			creds: []packageCredential{{authority: "host.example.com", machine: "host.example.com", user: "user@corp.example", secret: "p/ss word"}},
+			creds: []packageCredential{{authority: "host.example.com", machine: "host.example.com", user: "user@corp.example", secret: "p/ss"}},
 		},
 		{
 			name:  "a bare user names a user, and there is no secret to hide",
@@ -205,7 +206,7 @@ func TestACredentialIsLiftedOutOfTheEntryItRidesIn(t *testing.T) {
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			got := stripPackageCredentials([]string{tc.entry})
+			got := stripPackageCredentials([]string{tc.entry}, managerNamed(t, "pip"))
 			if len(got.entries) != 1 || got.entries[0] != tc.want {
 				t.Errorf("entry = %q, want %q", got.entries, tc.want)
 			}
@@ -224,19 +225,42 @@ func TestACredentialIsLiftedOutOfTheEntryItRidesIn(t *testing.T) {
 	}
 }
 
-// TestTheNetrcCarriesACredentialWhitespaceWouldSplit pins the quoting the
-// format needs and the escaping inside it. Both were measured against the
-// parser git rides on before being written here (plan 46): unquoted, a password
-// with a space is two tokens and the origin is sent the first half.
-func TestTheNetrcCarriesACredentialWhitespaceWouldSplit(t *testing.T) {
+// TestTheNetrcIsWrittenWithoutQuotes is a regression the Claude review found by
+// measuring the parser this platform does not control: pip's own fetcher reads
+// the file through Python's `netrc` module, and before 3.11 that module did not
+// strip quotes — python 3.10 hands back `"bot"` where 3.12 hands back `bot`, so
+// a quoted file makes pip send the quotes and the origin refuse. Ubuntu 22.04
+// and Debian bullseye ship that Python, so quoting would have broken a
+// credentialed pip install that worked before this change.
+func TestTheNetrcIsWrittenWithoutQuotes(t *testing.T) {
 	got := string(netrcFile([]packageCredential{
-		{machine: "a.example.com", user: "bot", secret: `pa"ss\wo rd`},
-		{machine: "b.example.com", user: "two words", secret: "plain"},
+		{machine: "a.example.com", user: "bot", secret: "s3cr3t"},
 	}))
-	want := "machine a.example.com\nlogin \"bot\"\npassword \"pa\\\"ss\\\\wo rd\"\n" +
-		"machine b.example.com\nlogin \"two words\"\npassword \"plain\"\n"
+	want := "machine a.example.com\nlogin bot\npassword s3cr3t\n"
 	if got != want {
 		t.Errorf("netrc:\n got %q\nwant %q", got, want)
+	}
+}
+
+// TestACredentialNoBareNetrcCanCarryStaysInline is the other half of that: a
+// value a bare netrc cannot represent is not quoted into one, it is left where
+// it is and named.
+func TestACredentialNoBareNetrcCanCarryStaysInline(t *testing.T) {
+	// Percent-encoded, because that is the only way these reach a URL's
+	// userinfo at all — unencoded, the authority ends at the space or the `#`
+	// and there is no credential for anything to see.
+	for _, secret := range []string{"pass%20word", "qu%22ote", "back%5Cslash", "hash%23mark", "with%0Anewline"} {
+		entry := "https://bot:" + secret + "@host.example.com/x.tgz"
+		got := stripPackageCredentials([]string{entry}, managerNamed(t, "pip"))
+		if got.entries[0] != entry {
+			t.Errorf("%q: entry = %q, want it untouched", secret, got.entries[0])
+		}
+		if len(got.creds) != 0 {
+			t.Errorf("%q: credentials = %+v, want none", secret, got.creds)
+		}
+		if len(got.inlined) != 1 {
+			t.Errorf("%q: inlined = %v, want the host named", secret, got.inlined)
+		}
 	}
 }
 
@@ -257,14 +281,14 @@ func TestTheNpmrcCarriesTheSecretAsBase64(t *testing.T) {
 // the credential out of the pre-image, a digest an environment key can read is
 // no longer an offline oracle for the credential a management key holds.
 func TestTheDigestAnEnvironmentKeyCanReadIsStripped(t *testing.T) {
-	with := stripPackageCredentials([]string{"git+https://bot:s3cr3t@git.example.com/team/lib"})
-	without := stripPackageCredentials([]string{"git+https://git.example.com/team/lib"})
+	with := stripPackageCredentials([]string{"git+https://bot:s3cr3t@git.example.com/team/lib"}, managerNamed(t, "pip"))
+	without := stripPackageCredentials([]string{"git+https://git.example.com/team/lib"}, managerNamed(t, "pip"))
 	if got, want := packagesDigest(with.entries), packagesDigest(without.entries); got != want {
 		t.Errorf("digest with a credential = %s, want the credential-free list's %s", got, want)
 	}
 	// And a list that differs in something other than its credential still
 	// digests differently, so the sentinel keeps telling one list from another.
-	other := stripPackageCredentials([]string{"git+https://bot:s3cr3t@git.example.com/team/other"})
+	other := stripPackageCredentials([]string{"git+https://bot:s3cr3t@git.example.com/team/other"}, managerNamed(t, "pip"))
 	if packagesDigest(with.entries) == packagesDigest(other.entries) {
 		t.Error("two different lists share a digest")
 	}
@@ -288,7 +312,7 @@ func TestACredentialNestedInAnEntryIsLiftedOutToo(t *testing.T) {
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			got := stripPackageCredentials([]string{tc.entry})
+			got := stripPackageCredentials([]string{tc.entry}, managerNamed(t, "pip"))
 			if got.entries[0] != tc.want {
 				t.Errorf("entry = %q, want %q", got.entries[0], tc.want)
 			}
@@ -309,7 +333,7 @@ func TestATransportThatReadsNothingWeWriteKeepsItsCredential(t *testing.T) {
 		"hg+https://bot:s3cr3t@hg.example.com/repo",
 		"svn+https://bot:s3cr3t@svn.example.com/repo",
 	} {
-		got := stripPackageCredentials([]string{entry})
+		got := stripPackageCredentials([]string{entry}, managerNamed(t, "pip"))
 		if got.entries[0] != entry {
 			t.Errorf("entry = %q, want it untouched", got.entries[0])
 		}
@@ -332,7 +356,7 @@ func TestOneHostnameCannotHoldTwoCredentials(t *testing.T) {
 		"https://alice:secretA@registry.example:8443/a.whl",
 		"https://bob:secretB@registry.example:9443/b.whl",
 	}
-	got := stripPackageCredentials(entries)
+	got := stripPackageCredentials(entries, managerNamed(t, "pip"))
 	if !slices.Equal(got.entries, entries) {
 		t.Errorf("entries = %q, want them untouched", got.entries)
 	}
@@ -347,7 +371,7 @@ func TestOneHostnameCannotHoldTwoCredentials(t *testing.T) {
 	same := stripPackageCredentials([]string{
 		"https://alice:secretA@registry.example/a.whl",
 		"https://alice:secretA@registry.example/b.whl",
-	})
+	}, managerNamed(t, "pip"))
 	if len(same.creds) != 1 {
 		t.Errorf("credentials = %+v, want the repeat collapsed into one", same.creds)
 	}
@@ -463,4 +487,146 @@ func TestThePublishedDigestCarriesNoCredential(t *testing.T) {
 	if rec := sentinel(t, sb)["pip"]; rec.Digest != written {
 		t.Errorf("sentinel digest = %s, want the list as written %s", rec.Digest, written)
 	}
+}
+
+// managerNamed is the table's own entry, so a test drives the manager the pass
+// would drive rather than a fixture that could disagree with it.
+func managerNamed(t *testing.T, name string) packageManager {
+	t.Helper()
+	for _, m := range packageManagers {
+		if m.name == name {
+			return m
+		}
+	}
+	t.Fatalf("no manager named %q", name)
+	return packageManager{}
+}
+
+// TestOneHostSpelledTwoWaysIsOneHost: a netrc consumer matches the machine name
+// case-insensitively and ignores a trailing dot, so two spellings of one host
+// are one host — and two credentials under them are a disagreement, not two
+// records. curl takes the first case-insensitive match, which would have sent
+// one service the other's secret.
+func TestOneHostSpelledTwoWaysIsOneHost(t *testing.T) {
+	got := stripPackageCredentials([]string{
+		"https://alice:secretA@Registry.Example/a.whl",
+		"https://bob:secretB@registry.example./b.whl",
+	}, managerNamed(t, "pip"))
+	if len(got.creds) != 0 {
+		t.Errorf("credentials = %+v, want none: the two spellings name one host", got.creds)
+	}
+	// And one host on two ports with the same login is not a disagreement at
+	// all: one netrc line serves every port.
+	same := stripPackageCredentials([]string{
+		"https://u:p@registry.example:8443/a.whl",
+		"https://u:p@registry.example/b.whl",
+	}, managerNamed(t, "npm"))
+	if len(same.creds) != 2 {
+		t.Fatalf("credentials = %+v, want one per authority for the npmrc", same.creds)
+	}
+	if got := string(netrcFile(same.creds)); got != "machine registry.example\nlogin u\npassword p\n" {
+		t.Errorf("netrc = %q, want one line: a machine line has no port to differ on", got)
+	}
+	if got := strings.Count(string(npmrcFile(same.creds)), ":username="); got != 2 {
+		t.Errorf("npmrc username keys = %d, want one per authority", got)
+	}
+}
+
+// TestAnEntryTheScanCannotReadKeepsItsCredentialAndIsNamed: an empty host would
+// make the whole netrc unparseable for pip — which drops every other host's
+// credential with it — and a userinfo Go's grammar refuses is a credential the
+// manager would still have accepted. Neither may pass, and neither may be
+// dropped in silence.
+func TestAnEntryTheScanCannotReadKeepsItsCredentialAndIsNamed(t *testing.T) {
+	for _, entry := range []string{
+		"https://u:p@/x.tgz",
+		"https://bot:p^ss@host.example.com/x",
+		"https://bot:pa%ss@host.example.com/x",
+	} {
+		got := stripPackageCredentials([]string{entry}, managerNamed(t, "pip"))
+		if got.entries[0] != entry {
+			t.Errorf("%q: entry = %q, want it untouched", entry, got.entries[0])
+		}
+		if len(got.creds) != 0 {
+			t.Errorf("%q: credentials = %+v, want none", entry, got.creds)
+		}
+		if len(got.inlined) != 1 {
+			t.Errorf("%q: inlined = %v, want it named once", entry, got.inlined)
+		}
+	}
+}
+
+// TestAUserWithNoSecretIsNotACredential: `user:@host` has a password the parser
+// reports as present and empty. Moving it would cost a scratch HOME that hides
+// the image's own configuration, to protect nothing.
+func TestAUserWithNoSecretIsNotACredential(t *testing.T) {
+	entry := "https://someone:@host.example.com/x.tgz"
+	got := stripPackageCredentials([]string{entry}, managerNamed(t, "pip"))
+	if got.entries[0] != entry || len(got.creds) != 0 || len(got.inlined) != 0 {
+		t.Errorf("got %+v, want the entry untouched and nothing recorded", got)
+	}
+}
+
+// TestAManagerThatReadsNoNetrcKeepsItsCredential: the scheme is not the whole
+// question. apt reads /etc/apt/auth.conf.d, cargo its own credentials.toml and
+// gem ~/.gem/credentials — a credential moved into a netrc for them is an
+// install broken rather than an exposure closed.
+func TestAManagerThatReadsNoNetrcKeepsItsCredential(t *testing.T) {
+	entry := "https://ci:tok3n@gems.example.com/private.gem"
+	for _, name := range []string{"apt", "cargo", "gem"} {
+		got := stripPackageCredentials([]string{entry}, managerNamed(t, name))
+		if got.entries[0] != entry || len(got.creds) != 0 {
+			t.Errorf("%s: got %+v, want the entry untouched", name, got)
+		}
+	}
+	for _, name := range []string{"pip", "npm", "go"} {
+		got := stripPackageCredentials([]string{entry}, managerNamed(t, name))
+		if len(got.creds) != 1 {
+			t.Errorf("%s: credentials = %+v, want one", name, got.creds)
+		}
+	}
+}
+
+// TestARotatedCredentialIsNotDedupedAway: two lists differing only in a
+// credential publish the same digest now, so the emission's own dedupe would
+// have suppressed the corrected credential's failure as a repeat of the broken
+// one's — and a client watching a rotation would see silence.
+func TestARotatedCredentialIsNotDedupedAway(t *testing.T) {
+	sb := &fakeSandbox{execHook: failInstall(sandbox.ExecResult{ExitCode: 100, Stdout: "401\n"})}
+	h := newHarness(t, sb)
+	h.setPackages(t, map[string][]string{"pip": {"git+https://bot:WRONG@host.example.com/repo"}})
+	h.suspend(t, writeUse("out.txt", "hello"))
+	h.stepOnce(t)
+	if n := len(h.packageErrors(t)); n != 1 {
+		t.Fatalf("package errors = %d, want 1 for the first failure", n)
+	}
+
+	h.setPackages(t, map[string][]string{"pip": {"git+https://bot:ALSO-WRONG@host.example.com/repo"}})
+	h.suspend(t, writeUse("out2.txt", "hello"))
+	h.stepOnce(t)
+	if n := len(h.packageErrors(t)); n != 2 {
+		t.Errorf("package errors = %d, want 2: the rotated credential's failure is its own event", n)
+	}
+}
+
+// TestTheRemovalCarriesItsOwnBudget: two Execs each carrying the install
+// timeout would put twice the stall floor's longest single step inside one
+// silent interval, which is the reclaim loop #383 is about.
+func TestTheRemovalCarriesItsOwnBudget(t *testing.T) {
+	sb := &fakeSandbox{}
+	h := newHarnessWith(t, &fakeProvider{sb: sb}, Config{PackageInstallTimeout: 9 * time.Minute})
+	h.setPackages(t, map[string][]string{"pip": {"git+https://bot:s3cr3t@git.example.com/team/lib"}})
+	h.suspend(t, writeUse("out.txt", "hello"))
+	h.stepOnce(t)
+
+	dir := credsDir(t, sb)
+	for i, c := range sb.cmds {
+		if c == "rm -rf '"+dir+"'" {
+			if sb.execTimeouts[i] != packagesCredsRemoveTimeout {
+				t.Errorf("removal timeout = %v, want %v", sb.execTimeouts[i], packagesCredsRemoveTimeout)
+			}
+			return
+		}
+	}
+	t.Errorf("no removal ran; commands were %v", sb.cmds)
 }

@@ -38,11 +38,16 @@ arrives; none of it is recalled from documentation.
 | `npm` 11's own fetcher (a tarball URL) | `$HOME/.npmrc`, per-host `username` + `_password` (base64) | `Authorization: Basic`, on the **first** request |
 | `npm` 6's own fetcher (the same URL) | the same file | **nothing** — with `always-auth` and without it |
 
-Two properties of the netrc format were measured with it, because both decide
-what the writer may emit: a `machine` line matches on the **hostname alone**,
-port excluded, and a value may be **double-quoted**, with `\"` and `\\` honoured
-inside the quotes. So a credential containing spaces or quotes has a
-representation; one containing a newline does not.
+Three properties of the netrc format were measured with them, because each
+decides what the writer may emit. A `machine` line matches on the **hostname
+alone**, port excluded, and case-insensitively. A value **may** be double-quoted
+— curl reads one, `\"` and `\\` escapes included. And the writer nevertheless
+**must not** quote, because curl is not the only reader: pip's own fetcher goes
+through Python's `netrc` module, which did not strip quotes before 3.11 —
+measured, python 3.10.21 returns `"bot"` where 3.12.14 returns `bot`, and
+Ubuntu 22.04 and Debian bullseye ship that Python. A quoted file would make pip
+send the quotes and the origin refuse. So values are written bare, and a
+credential a bare value cannot carry keeps its entry.
 
 ## Why not the vault placeholder instead
 
@@ -71,20 +76,28 @@ HTTPS. The placeholder would reach the origin literally.
    alone. What this still does not see is a credential in a **query parameter**
    (`?token=…`), which no rule can tell from an ordinary parameter — the
    redactor covers it on output, and nothing here claims to.
-2. **Only the transports whose fetcher reads what this writes.** `http`,
-   `https`, `git+http`, `git+https`. `git+ssh` never used the URL's password
-   (ssh takes none from a URL), and `hg+https`, `svn+https` and `bzr+http`
-   authenticate from their own stores — lifting their credential out would break
-   an install that works today rather than protect one. Everything else keeps
-   its credential where it is.
+2. **Only where the fetcher reads what this writes — which is a question about
+   the manager as well as the scheme.** The scheme must be `http`, `https`,
+   `git+http` or `git+https`: `git+ssh` never used the URL's password (ssh takes
+   none from a URL), and `hg+https`, `svn+https` and `bzr+http` authenticate from
+   their own stores. And the *manager* must be one whose fetch reads a netrc at
+   all — pip's own client and git do, which covers pip, npm and go; `apt`,
+   `cargo` and `gem` read `auth.conf.d`, `credentials.toml` and
+   `~/.gem/credentials`, so moving their credential into a netrc would break an
+   install that works today rather than protect one. Everything else keeps its
+   credential where it is.
 3. **One hostname cannot hold two credentials.** A netrc `machine` line matches
    on the hostname alone, port and path excluded, so two entries naming one host
    with different credentials have no representation that keeps them apart:
    whichever was written would be sent to both, and one service would receive
    the other's secret. That is worse than the argv exposure it replaces, so a
-   host two entries disagree about keeps both of them inline. The same host
-   named twice with the *same* credential is not a disagreement and is written
-   once.
+   host two entries disagree about keeps both of them inline. Two details decide
+   what counts: the host is folded first — matching is case-insensitive and a
+   trailing dot names the same host — so `Registry.Example` and
+   `registry.example.` cannot slip past as two hosts; and what is compared is the
+   **login**, not the whole credential, so one host reached on two ports with the
+   same user and secret is one netrc line and two npmrc keys, not a
+   disagreement.
 4. **The credential is materialized into a scratch `HOME`, and the install for
    that manager runs with `HOME` pointed at it.** `$HOME/.netrc` always;
    `$HOME/.npmrc` additionally for npm, whose fetcher reads no netrc. The
@@ -112,9 +125,13 @@ HTTPS. The placeholder would reach the origin literally.
    a **timed-out** install is killed with SIGKILL to its process group on both
    backends, which no trap survives at all. So `installPackages` asks for the
    directory again after the install returns — also when a write or the exec
-   itself failed first. What neither removal survives is this executor dying in
-   between; the directory then lives as long as the sandbox, and the next pass
-   writes to a fresh random name rather than that one.
+   itself failed first. That second removal carries **its own** short budget and
+   is preceded by a progress tick: two calls each carrying the install timeout
+   would put twice the stall floor's longest single step inside one silent
+   interval, which is the reclaim loop #383 is about. What neither removal
+   survives is this executor dying in between; the directory then lives as long
+   as the sandbox, and the next pass writes to a fresh random name rather than
+   that one.
 7. **Two digests, because they answer different questions.** The **sentinel**
    inside the sandbox keeps comparing the list as written, credential included:
    a rotated credential has to read as a changed list, or a corrected credential
@@ -124,10 +141,20 @@ HTTPS. The placeholder would reach the origin literally.
    can read while the config it digests needs a management key, is taken over
    the stripped form — that is what stops it being an offline oracle for a weak
    credential. Keying the hash instead needs a key source, a rotation story and
-   a migration for digests already written; stripping needs none.
-8. **A credential a netrc cannot carry is left inline.** The decoded userinfo of
-   a URL can contain a newline (percent-encoded in the URL, decoded before use),
-   and no netrc quoting represents it. Such an entry keeps the credential it has
+   a migration for digests already written; stripping needs none. One
+   consequence has to be paid for rather than admired: the event dedupe keys on
+   the published digest, which a rotation no longer changes, so a corrected
+   credential's failures would have been suppressed as repeats of the broken
+   one's and a client would have seen silence. The caller knows the list changed
+   — the sentinel is what tells it — and says so, and a changed list is emitted
+   without consulting the history.
+8. **A credential a bare netrc line cannot carry is left inline.** Values are
+   written unquoted (the measurement above says why), so a decoded userinfo
+   carrying whitespace, a `"`, a `\`, a `#` or a control character has no
+   representation here — a URL can carry every one of them percent-encoded, and
+   they decode before use. So can a hostname the parser reads as empty, and a
+   userinfo Go's URL grammar refuses where a manager would not (an unescaped
+   `^`, a malformed `%` escape). Each such entry keeps the credential it has
    today — the exposure is unchanged rather than newly created — and the
    executor logs at warn that it did, naming the manager and the host but never
    the secret. The same line covers decisions 2 and 3's leftovers. Refusing the
@@ -142,13 +169,22 @@ user — so a file the install reads is exactly as readable as the argv it
 replaces, for the length of the install. The sandbox is one trust domain and
 this change does not make it two.
 
-**Four entry shapes keep the credential they have today**, each for a reason the
+**Six entry shapes keep the credential they have today**, each for a reason the
 decisions argue: a credential in a query parameter, which nothing can tell from
-an ordinary parameter; a transport that reads neither file this writes; a
-hostname two entries disagree about; and a credential whose decoded form carries
-a control character. For those, the argv and audit-log exposure is exactly what
-it was — unchanged, not newly created — and the last three are named in a warn
-line rather than left silent.
+an ordinary parameter; a transport that reads neither file; a *manager* that
+reads neither file (`apt`, `cargo`, `gem`); a hostname two entries disagree
+about; a value a bare netrc cannot carry; and a userinfo Go's URL grammar
+refuses where a manager would not. For those the argv and audit-log exposure is
+exactly what it was — unchanged, not newly created — **and so is the digest**,
+since the published one is taken over whatever survived the strip. All but the
+first are named in a warn line rather than left silent.
+
+**The scratch `HOME` hides more than the two files it holds.** Everything rooted
+at `HOME` goes with it for that one install — `~/.config/pip/pip.conf` and
+`$CARGO_HOME` included — so an image that bakes a private index into pip.conf
+loses it for the install that carries a credential, and every `HOME`-rooted
+cache is cold. Only that install, and only a manager whose list carries a
+credential.
 
 **An image shipping npm 6 loses an install it had.** npm 6 sends no credential
 for a non-registry fetch from any `.npmrc` key (measured), so an npm tarball URL
@@ -176,9 +212,9 @@ Each rung is a test that fails before the change and passes after.
 2. **The assembled command carries no credential.** Asserted on the exact
    command string for a credentialed list — not a substring probe that a
    rewording would stop exercising.
-3. **The materialized files**, per transport: the netrc's quoting and escaping,
-   the npmrc's base64 `_password` and its per-host keys, and that the npmrc is
-   written for npm alone.
+3. **The materialized files**, per transport: the netrc's bare, unquoted values
+   and its one line per host, the npmrc's base64 `_password` and its per-host
+   keys, and that the npmrc is written for npm alone.
 4. **One hostname with two credentials** leaves both entries alone and writes no
    file; the same credential twice is written once.
 5. **The digests**: the published one equals the digest of the same list written

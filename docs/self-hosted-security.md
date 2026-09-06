@@ -181,19 +181,29 @@ a manager the image does not carry is a `session.error` with reason
 carries `apt-get` and none of the other five.
 
 A package entry may embed a credential — a private registry URL such as
-`pip: ["git+https://user:token@host/repo"]` — and it is **not** put on the
-install's command line. The executor lifts the credential out of the entry,
-writes it into the file the fetcher reads (a netrc for git and pip, and npm's
-own per-host pair as well for npm), points that one install's `HOME` at a
-scratch directory holding them, and hands the manager a credential-free URL; the
-install's own trap removes the directory however it ends. So the credential is
-not in the process argv, and on **Kubernetes** it is therefore not in the exec
-request the apiserver audit log records for `pods/exec` — the exposure that
-reached cluster operators, outside the session entirely. The durable session
-state never carried it either: the install's `session.error` message has its URLs
-redacted, and the `/tmp` sentinel stores a digest — now taken over the
-credential-free form, so it is no longer an offline oracle for a weak credential
-to anyone holding an environment key.
+`pip: ["git+https://user:token@host/repo"]`, or the same nested in pip's
+`name @ url` or npm's `name@url` syntax — and it is **not** put on the install's
+command line. The executor lifts the credential out of the entry, writes it into
+the file that manager's fetcher reads (a netrc for pip, npm and go, whose
+fetches go through pip's own client or git; npm's per-host pair as well for
+npm), points that one install's `HOME` at a scratch directory holding them, and
+hands the manager a credential-free URL. So the credential is not in the process
+argv, and on **Kubernetes** it is therefore not in the exec request the
+apiserver audit log records for `pods/exec` — the exposure that reached cluster
+operators, outside the session entirely. The `packages_digest` on the install's
+`session.error` is taken over the credential-free entries too, so that event —
+readable with an *environment* key, while the config it digests needs a
+*management* key — is no longer an offline oracle for a weak credential. (The
+`/tmp` sentinel inside the sandbox deliberately still digests the list as
+written: that is what makes a rotated credential a changed list rather than the
+same one with an exhausted retry count, and it never leaves the sandbox.)
+
+The scratch directory is removed twice over: by the install command's own
+`trap … EXIT` when the group ends of its own accord, and by the executor after
+the install returns — which is the one that matters when an install **times
+out**, since both backends kill it with SIGKILL to its process group and no trap
+survives that. Neither survives the executor itself dying in between; the
+directory then lives as long as the sandbox does.
 
 What this does not make private is the **sandbox itself**. An install needs root,
 and the agent's own tool calls run in that same sandbox as the same user, so the
@@ -202,15 +212,29 @@ length of the install. The sandbox is one trust domain; prefer high-entropy
 deploy tokens over reusable passwords, and scope them to the repository or
 registry path the session needs.
 
-Four entry shapes keep the exposure they have today, unchanged rather than newly
-created: a credential in a **query parameter** (`?token=…`), which nothing can
-tell from an ordinary parameter; a **transport that reads neither file** — `ssh`
-takes no password from a URL at all, and `hg`, `svn` and `bzr` authenticate from
-their own stores; **one hostname two entries disagree about**, since a netrc line
-matches the hostname alone and writing either credential would send one service
-the other's secret; and a credential whose decoded form carries a **control
-character**, which no netrc quoting represents. The last three are named in a
-warn line rather than left silent.
+Six entry shapes keep the exposure they had, unchanged rather than newly created
+— **and for these the digest is not stripped either**, so both halves of the old
+exposure remain: a credential in a **query parameter** (`?token=…`), which
+nothing can tell from an ordinary parameter; a **transport that reads neither
+file** — `ssh` takes no password from a URL at all, and `hg`, `svn` and `bzr`
+authenticate from their own stores; a **manager that reads neither file**, which
+is `apt`, `cargo` and `gem` (their credential stores are `auth.conf.d`,
+`credentials.toml` and `~/.gem/credentials`); **one hostname two entries disagree
+about**, since a netrc line matches the hostname alone, case-insensitively, and
+writing either credential would send one service the other's secret; a value a
+**bare netrc cannot carry** — whitespace, a quote, a backslash, a `#`, a control
+character (a netrc *may* be quoted, and this deliberately does not, because
+Python's `netrc` module did not strip quotes before 3.11 and pip reads the file
+through it: on an image shipping Python 3.10 a quoted file makes pip send the
+quotes); and a userinfo **Go's URL grammar refuses** where a package manager
+would not, such as an unescaped `^` or a malformed `%`. All but the first are
+named in a warn line rather than left silent.
+
+Two more costs of the `HOME` swap, for the one install that carries a
+credential: the image's own `~/.netrc` and `~/.npmrc` are not read, and neither
+is anything else rooted there — `~/.config/pip/pip.conf` and `$CARGO_HOME`
+included — so an image that bakes a private index into pip.conf loses it for
+that install; and every `HOME`-rooted cache is cold.
 
 One shape is made worse, and it is the only one: **npm 6 and older**. That npm
 sends no credential for a non-registry fetch from any `.npmrc` key (measured),

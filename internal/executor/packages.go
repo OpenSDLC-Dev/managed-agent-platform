@@ -56,6 +56,12 @@ const (
 // repeated install.
 const packagesSentinelPath = "/tmp/.map-packages"
 
+// packagesCredsRemoveTimeout bounds the removal of a manager's credential
+// directory. It is not an install: `rm -rf` on one directory either answers at
+// once or the sandbox is not answering at all, and giving it the install's
+// budget would put two full install timeouts inside one silent interval.
+const packagesCredsRemoveTimeout = 30 * time.Second
+
 // packageInstallAttempts is how many times one unchanged list may fail in a
 // sandbox before it is left alone until it changes. A typo'd entry, or a
 // registry the gate refuses, must stop costing a full install budget before
@@ -111,6 +117,12 @@ type packageManager struct {
 	// exit from another's ordinary failure.
 	preflight string
 	install   func(entries []string) string
+	// netrc says this manager's fetch reads $HOME/.netrc — pip's own fetcher
+	// does, and git does, which is what a `git+https` entry becomes for pip,
+	// npm and go alike. apt, cargo and gem read their own credential stores, so
+	// moving a credential into a netrc for them would break an install that
+	// works rather than protect one.
+	netrc bool
 	// npmrc says this manager's own fetcher reads no netrc, so a credential
 	// lifted out of one of its entries needs npm's per-host pair as well.
 	npmrc bool
@@ -170,6 +182,7 @@ var packageManagers = []packageManager{
 	{
 		name:      "go",
 		preflight: packagePreflight("go"),
+		netrc:     true,
 		install: func(entries []string) string {
 			// One invocation per entry, because `go install` refuses @version
 			// arguments from different modules in one call; an entry carrying
@@ -189,8 +202,10 @@ var packageManagers = []packageManager{
 	{
 		name:      "npm",
 		preflight: packagePreflight("npm"),
-		// npm's own fetcher reads no netrc, so a credentialed tarball URL needs
-		// the per-host pair its config carries as well (plan 46, measured).
+		// A `git+https` npm entry is git's fetch, which reads the netrc; npm's
+		// own fetcher reads none, so a credentialed tarball URL needs the
+		// per-host pair its config carries as well (plan 46, measured).
+		netrc: true,
 		npmrc: true,
 		install: func(entries []string) string {
 			return "npm install -g " + quoteEntries(entries)
@@ -201,6 +216,7 @@ var packageManagers = []packageManager{
 		// Not `command -v pip`: a slim image ships python3 without pip, and
 		// that failure exits 1 rather than 127.
 		preflight: "python3 -m pip --version >/dev/null 2>&1 || exit 127",
+		netrc:     true,
 		install: func(entries []string) string {
 			return "PIP_BREAK_SYSTEM_PACKAGES=1 PIP_DISABLE_PIP_VERSION_CHECK=1 PIP_NO_INPUT=1 " +
 				"python3 -m pip install " + quoteEntries(entries)
@@ -286,7 +302,7 @@ type candidate struct {
 // entries naming one host with different credentials have no representation
 // that keeps them apart, and writing either would send one service the other's
 // secret. Those stay where they are.
-func stripPackageCredentials(entries []string) strippedPackages {
+func stripPackageCredentials(entries []string, manager packageManager) strippedPackages {
 	out := strippedPackages{entries: make([]string, len(entries))}
 	copy(out.entries, entries)
 
@@ -299,37 +315,54 @@ func stripPackageCredentials(entries []string) strippedPackages {
 			// what decodes the percent-encoding and splits an IPv6 literal from
 			// its port. The scan locates; the parser interprets.
 			u, err := url.Parse(scheme + "://" + userinfo + "@" + host + "/")
-			if err != nil || u.User == nil {
+			if err != nil {
+				// Go's userinfo grammar refuses characters a manager would have
+				// accepted (`^`, a malformed `%` escape). The credential stays
+				// where it is, and is named rather than dropped in silence.
+				out.inlined = append(out.inlined, host)
+				continue
+			}
+			if u.User == nil {
 				continue
 			}
 			secret, has := u.User.Password()
-			if !has {
-				// A bare `user@host` names a user; there is no secret to hide.
+			if !has || secret == "" {
+				// A bare `user@host`, or a `user:@host`, names a user; there is
+				// no secret to move and nothing to gain by moving it.
 				continue
 			}
-			if !credentialSchemes[scheme] || !netrcSafe(u.User.Username()) || !netrcSafe(secret) {
-				out.inlined = append(out.inlined, u.Hostname())
+			machine := netrcMachine(u.Hostname())
+			if machine == "" || !netrcSafe(u.User.Username()) || !netrcSafe(secret) ||
+				!credentialSchemes[scheme] || !manager.netrc {
+				// An empty machine name would make the whole file unparseable
+				// for pip and drop every other host's credential with it.
+				out.inlined = append(out.inlined, host)
 				continue
 			}
 			found = append(found, candidate{
 				entry: i, from: m[4], to: m[5],
 				cred: packageCredential{
-					authority: u.Host, machine: u.Hostname(),
+					authority: u.Host, machine: machine,
 					user: u.User.Username(), secret: secret,
 				},
 			})
 		}
 	}
 
-	// A hostname two credentials disagree about keeps both of them inline.
+	// A hostname two credentials disagree about keeps both of them inline. What
+	// counts as disagreement is the credential, not the port it was named on: one
+	// netrc line serves every port of a host, so the same user and secret on two
+	// of them is one line, not a collision.
+	type login struct{ user, secret string }
 	conflicted := map[string]bool{}
-	seen := map[string]packageCredential{}
+	seen := map[string]login{}
 	for _, c := range found {
-		if prev, ok := seen[c.cred.machine]; ok && prev != c.cred {
+		l := login{c.cred.user, c.cred.secret}
+		if prev, ok := seen[c.cred.machine]; ok && prev != l {
 			conflicted[c.cred.machine] = true
 			continue
 		}
-		seen[c.cred.machine] = c.cred
+		seen[c.cred.machine] = l
 	}
 
 	// Cut back to front, so an earlier span's index still names the same byte.
@@ -353,29 +386,53 @@ func stripPackageCredentials(entries []string) strippedPackages {
 	return out
 }
 
-// netrcSafe reports whether a value has a netrc representation. A quoted value
-// carries spaces and, escaped, quotes and backslashes (both measured); nothing
-// represents a control character, and a URL can carry one percent-encoded.
+// netrcSafe reports whether a value can be written to a netrc as it is, which
+// is the only way it may be written. A netrc value *can* be double-quoted —
+// curl reads one, escapes included — but the writer must not, because pip's own
+// fetcher reads the file through Python's `netrc` module and that module did not
+// strip quotes before 3.11: measured, python 3.10 returns `"bot"` and
+// `"s3cr3t"` where 3.12 returns `bot` and `s3cr3t`, so a quoted file makes pip
+// send the quotes and the origin refuse. Ubuntu 22.04 and Debian bullseye ship
+// that Python.
+//
+// So a value carrying anything a bare token cannot — whitespace, a quote, a
+// backslash, a `#`, a control character — has no representation here and its
+// entry keeps its credential, which is an exposure unchanged rather than an
+// install broken.
 func netrcSafe(v string) bool {
-	return !strings.ContainsFunc(v, func(r rune) bool { return r < 0x20 || r == 0x7f })
+	return v != "" && !strings.ContainsFunc(v, func(r rune) bool {
+		return r < 0x20 || r == 0x7f || r == ' ' || r == '\t' || r == '"' || r == '\\' || r == '#'
+	})
+}
+
+// netrcMachine folds a hostname to the form a netrc consumer matches on: case
+// is ignored there, and a trailing dot names the same host as no trailing dot,
+// so `Registry.Example` and `registry.example.` must not read as two hosts with
+// two credentials — curl takes the first case-insensitive match and would send
+// one service the other's secret.
+func netrcMachine(host string) string {
+	return strings.TrimSuffix(strings.ToLower(host), ".")
 }
 
 // netrcFile is what git and pip's own fetcher read. A `machine` line matches on
-// the hostname alone, port excluded. Where two entries name one host, the first
-// wins, which is netrc's own rule rather than a choice made here.
+// the hostname alone, port excluded, and case-insensitively — which is why the
+// machine name is folded before it is compared or written. Values are bare;
+// netrcSafe is what guarantees they can be.
 func netrcFile(creds []packageCredential) []byte {
 	var b strings.Builder
+	written := map[string]bool{}
 	for _, c := range creds {
-		fmt.Fprintf(&b, "machine %s\nlogin %s\npassword %s\n",
-			c.machine, netrcValue(c.user), netrcValue(c.secret))
+		// One line per host. Two entries reaching one host on two ports are two
+		// npmrc keys — that file is keyed by authority — and one netrc line,
+		// because a machine line has no port to differ on. Writing the second
+		// would be a line no consumer ever reaches.
+		if written[c.machine] {
+			continue
+		}
+		written[c.machine] = true
+		fmt.Fprintf(&b, "machine %s\nlogin %s\npassword %s\n", c.machine, c.user, c.secret)
 	}
 	return []byte(b.String())
-}
-
-// netrcValue quotes a value, because a netrc is whitespace-delimited and a
-// credential may contain spaces.
-func netrcValue(v string) string {
-	return `"` + strings.NewReplacer(`\`, `\\`, `"`, `\"`).Replace(v) + `"`
 }
 
 // npmrcFile is npm's fetcher's half. The secret rides as base64, so it carries
@@ -451,7 +508,8 @@ func quoteEntries(entries []string) string {
 // neither survives is this executor dying in between; the directory then lives
 // as long as the sandbox, and the next pass writes to a fresh random name.
 func (m packageManager) command(entries []string, credsDir string) string {
-	body := m.preflight + "; " + m.install(entries)
+	install := m.install(entries)
+	body := m.preflight + "; " + install
 	if credsDir != "" {
 		q := shellQuote(credsDir)
 		// `exit "$?"` ends the group on a builtin, carrying the status the
@@ -460,7 +518,7 @@ func (m packageManager) command(entries []string, credsDir string) string {
 		// does, bash 5 does not, both measured — takes the EXIT trap with it and
 		// the credentials outlive the install.
 		body = "trap \"rm -rf " + q + "\" EXIT; " + m.preflight +
-			"; export HOME=" + q + "; " + m.install(entries) + "; exit \"$?\""
+			"; export HOME=" + q + "; " + install + "; exit \"$?\""
 	}
 	return "set -o pipefail; { " + body + "; } 2>&1 | tail -c " +
 		strconv.Itoa(packageOutputTailBytes)
@@ -556,7 +614,7 @@ func (e *Executor) installPackages(ctx context.Context, sb sandbox.Sandbox, sid 
 		// an offline oracle for a weak credential (#599's second surface —
 		// the event subtree it rides on is readable with an environment key,
 		// while the config it digests needs a management key).
-		stripped := stripPackageCredentials(entries)
+		stripped := stripPackageCredentials(entries, m)
 		// Two digests, because they answer different questions. The sentinel
 		// asks "is this the list I last tried", and a rotated credential is a
 		// changed list — comparing the stripped form would let a corrected
@@ -569,6 +627,11 @@ func (e *Executor) installPackages(ctx context.Context, sb sandbox.Sandbox, sid 
 		digest := packagesDigest(entries)
 		published := packagesDigest(stripped.entries)
 		rec, seen := recs[m.name]
+		// A list this sandbox has not tried in this exact form, credential
+		// included. Two lists differing only in a credential publish the same
+		// digest, so the emission's own dedupe would suppress the second — this
+		// is what tells it not to.
+		changed := !seen || rec.Digest != digest
 		if seen && rec.Digest == digest {
 			// Settled, or out of attempts: either way this sandbox is done
 			// with this list until it changes.
@@ -591,7 +654,8 @@ func (e *Executor) installPackages(ctx context.Context, sb sandbox.Sandbox, sid 
 			// makes a refused entry acceptable, so telling a client to wait
 			// for a retry would be a lie.
 			e.emitPackageInstallError(ctx, sid, m.name, packageReasonInvalid,
-				"an entry is empty or begins with '-', which a package manager reads as an option rather than a package", published, true)
+				"an entry is empty or begins with '-', which a package manager reads as an option rather than a package",
+				published, true, changed)
 			continue
 		}
 		// The assembled command is one execve argument, which Linux caps near
@@ -609,7 +673,7 @@ func (e *Executor) installPackages(ctx context.Context, sb sandbox.Sandbox, sid 
 			recordPackageInstalled(ctx, m.name, packageOutcomeInvalid)
 			e.emitPackageInstallError(ctx, sid, m.name, packageReasonInvalid,
 				fmt.Sprintf("the assembled install command is %d bytes, over the %d-byte exec-argument limit", len(cmd), maxInstallCommandBytes),
-				published, true)
+				published, true, changed)
 			continue
 		}
 		// The probe is lazy: it costs an Exec, and a pass whose every manager
@@ -627,7 +691,7 @@ func (e *Executor) installPackages(ctx context.Context, sb sandbox.Sandbox, sid 
 				// Recorded once, with no manager, and running none: six
 				// timeouts' worth of "Permission denied" tell a client
 				// nothing the probe has not already said.
-				e.emitPackageInstallError(ctx, sid, "", reason, packageProbeMessages[reason], "", true)
+				e.emitPackageInstallError(ctx, sid, "", reason, packageProbeMessages[reason], "", true, false)
 				return nil
 			}
 		}
@@ -649,25 +713,28 @@ func (e *Executor) installPackages(ctx context.Context, sb sandbox.Sandbox, sid 
 			if credsDir == "" {
 				return
 			}
+			// Its own budget, not the install's: two calls each carrying
+			// PackageInstallTimeout would put twice the stall floor's longest
+			// single step inside one silent interval, which is the reclaim loop
+			// #383 is about. progress() first, for the same reason.
+			progress()
 			_, _ = sb.Exec(ctx, sandbox.ExecRequest{
 				Command: "rm -rf " + shellQuote(credsDir),
-				Timeout: e.cfg.PackageInstallTimeout,
+				Timeout: packagesCredsRemoveTimeout,
 			})
 		}
 		if credsDir != "" {
+			files := []sandbox.FileWrite{{Path: credsDir + "/.netrc", Data: netrcFile(stripped.creds)}}
+			if m.npmrc {
+				files = append(files, sandbox.FileWrite{Path: credsDir + "/.npmrc", Data: npmrcFile(stripped.creds)})
+			}
 			// A write that fails faults the item exactly as a failed Exec does.
 			// Falling back to the credential in argv instead would answer a
 			// sandbox-side failure by widening the exposure this pass exists to
 			// close.
-			if err := sb.WriteFile(ctx, credsDir+"/.netrc", netrcFile(stripped.creds)); err != nil {
+			if err := sb.WriteFiles(ctx, files); err != nil {
 				removeCreds()
 				return err
-			}
-			if m.npmrc {
-				if err := sb.WriteFile(ctx, credsDir+"/.npmrc", npmrcFile(stripped.creds)); err != nil {
-					removeCreds()
-					return err
-				}
 			}
 		}
 		progress()
@@ -696,7 +763,7 @@ func (e *Executor) installPackages(ctx context.Context, sb sandbox.Sandbox, sid 
 			slog.WarnContext(ctx, "packages not installed",
 				"session_id", sid, "manager", m.name, "reason", reason, "attempts", rec.Attempts)
 			e.emitPackageInstallError(ctx, sid, m.name, reason, packageMessage(res.Stdout),
-				published, rec.Attempts >= packageInstallAttempts)
+				published, rec.Attempts >= packageInstallAttempts, changed)
 		}
 		recs[m.name] = rec
 		writePackageSentinel(ctx, sb, sid, recs)
@@ -820,10 +887,20 @@ func writePackageSentinel(ctx context.Context, sb sandbox.Sandbox, sid domain.ID
 // repeated identical failure of the same list is one event, a reason flip is a
 // new one, the attempt that exhausts the cap re-emits under the flipped
 // retry_status, and a *different* list that fails the same way is a new event
-// rather than one the first list's history suppresses. The list identity is the
-// digest, mirroring the clone error's (resource_id, reason) key. The work
-// item's lease already makes this executor the session's single writer, so the
-// check-then-append needs no further guarding, and emission is best effort:
+// rather than one the first list's history suppresses.
+//
+// `changed` is what keeps that last property true now that the published digest
+// is stripped of credentials (#599): two lists differing only in a credential
+// publish the same digest, so a rotated credential's failures would be
+// suppressed by the broken credential's history and a client watching would see
+// silence where it should see the new attempt. The caller knows the list
+// changed — the sentinel compares the list as written — and says so, and a
+// changed list is emitted without consulting the history at all.
+//
+// Otherwise the list identity is the digest, mirroring the clone error's
+// (resource_id, reason) key. The work item's lease already makes this executor
+// the session's single writer, so the check-then-append needs no further
+// guarding, and emission is best effort:
 // failing to record the error must not turn a tolerated install failure into a
 // failed run (the emitRepoCloneError precedent).
 //
@@ -832,7 +909,7 @@ func writePackageSentinel(ctx context.Context, sb sandbox.Sandbox, sid domain.ID
 // events subtree is also readable with an environment key, and the manager plus
 // the output tail name what failed (decision 4). digest is empty for the
 // sandbox-level reasons, which are the sandbox's rather than a list's.
-func (e *Executor) emitPackageInstallError(ctx context.Context, sid domain.ID, manager, reason, message, digest string, exhausted bool) {
+func (e *Executor) emitPackageInstallError(ctx context.Context, sid domain.ID, manager, reason, message, digest string, exhausted, changed bool) {
 	// Required on every variant of the reference's error union. `exhausted`
 	// where nothing the session can do will change the answer: the attempt cap
 	// is spent, the entry is refused, or the sandbox itself cannot install.
@@ -843,7 +920,8 @@ func (e *Executor) emitPackageInstallError(ctx context.Context, sid domain.ID, m
 	var already bool
 	// COALESCE, because the sandbox-level reasons carry neither a manager nor a
 	// digest and a NULL would never compare equal to the '' this passes for them.
-	err := e.pool.QueryRow(ctx, `SELECT EXISTS(
+	if !changed {
+		err := e.pool.QueryRow(ctx, `SELECT EXISTS(
 		SELECT 1 FROM events
 		 WHERE session_id = $1 AND type = 'session.error'
 		   AND payload->'error'->>'type' = $2
@@ -851,11 +929,12 @@ func (e *Executor) emitPackageInstallError(ctx context.Context, sid domain.ID, m
 		   AND payload->'error'->>'reason' = $4
 		   AND payload->'error'->'retry_status'->>'type' = $5
 		   AND COALESCE(payload->'error'->>'packages_digest', '') = $6)`,
-		sid.String(), packageInstallErrorType, manager, reason, retryStatus, digest).Scan(&already)
-	if err != nil {
-		slog.WarnContext(ctx, "checking for an existing package install error failed",
-			"session_id", sid, "manager", manager, "err", err)
-		return
+			sid.String(), packageInstallErrorType, manager, reason, retryStatus, digest).Scan(&already)
+		if err != nil {
+			slog.WarnContext(ctx, "checking for an existing package install error failed",
+				"session_id", sid, "manager", manager, "err", err)
+			return
+		}
 	}
 	if already {
 		return
