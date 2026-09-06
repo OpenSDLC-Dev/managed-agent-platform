@@ -99,7 +99,7 @@ func partialKeyHint(key string) string {
 // that index and marks them env-var-managed. A key issued over the console
 // records its issuer and is deliberately outside the one-live rule (plan 32).
 //
-// This is EnsureAPIKeyInWorkspace in `default`, the workspace 0034 seeds and
+// This is EnsureAPIKeyInWorkspace in `default`, the workspace 0035 seeds and
 // the only one a single-tenant deployment has — what a caller that never chose
 // a workspace is asking for.
 func EnsureAPIKey(ctx context.Context, pool *pgxpool.Pool, name, key string) error {
@@ -273,7 +273,7 @@ type apiKeyPrincipal struct {
 // That join is COMPOSITE — workspace and org both — because org has exactly one
 // authority, the registry. A key row whose org_id drifted from its workspace's
 // names a tenant no workspace agrees with, so it resolves to nothing rather
-// than to whichever half the query happened to read; 0034's UNIQUE (org_id, id)
+// than to whichever half the query happened to read; 0035's UNIQUE (org_id, id)
 // is the index it lands on.
 func authenticate(ctx context.Context, pool *pgxpool.Pool, key string) (apiKeyPrincipal, error) {
 	var p apiKeyPrincipal

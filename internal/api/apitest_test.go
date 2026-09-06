@@ -21,7 +21,7 @@ import (
 
 const testKey = "map-test-key-0123456789"
 
-// The second tenant. Every fixture server comes up with the workspace 0034
+// The second tenant. Every fixture server comes up with the workspace 0035
 // seeds — `default`, the id every existing row already carries — so a tenancy
 // test that needs two workspaces has to register the other one itself.
 // workspaceB is a minted-shape id because the header rule validates one

@@ -36,7 +36,7 @@
 // files, vaults, principals among them) carry org_id, workspace_id and
 // project_id as text NOT NULL DEFAULT 'default', while child tables inherit
 // scope through their foreign key to a scoped parent. Since plan 42 slice 1
-// (0034_workspaces.sql) the workspaces registry names the workspaces those rows
+// (0035_workspaces.sql) the workspaces registry names the workspaces those rows
 // may belong to, and every credential resolves exactly one of them — an
 // archived workspace resolves none. What is still absent is the read half: no
 // query filters on the triple yet, so scope decides which tenant a request runs

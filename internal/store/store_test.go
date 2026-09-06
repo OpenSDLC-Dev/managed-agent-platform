@@ -34,7 +34,7 @@ const (
 
 // wantMigrations tracks the number of embedded migration files; bump it when
 // a migration is added.
-const wantMigrations = 34
+const wantMigrations = 35
 
 func open(t *testing.T, dsn string) *pgxpool.Pool {
 	t.Helper()
@@ -646,7 +646,7 @@ func TestKeyRotationMigrationRepairsExistingDuplicates(t *testing.T) {
 var scopedTables = []string{
 	"agents", "environments", "sessions", "events", "work_items", "api_keys",
 	"environment_keys", "skills", "files", "vaults", "principals",
-	"session_threads", "memory_stores", "deployments",
+	"session_threads", "memory_stores", "deployments", "dreams",
 }
 
 // TestScopedTablesMatchTheSchema asks the database rather than a reader. The
@@ -723,6 +723,8 @@ func seedEveryScopedTable(t *testing.T, pool *pgxpool.Pool) {
 		`INSERT INTO principals (id, issuer, subject) VALUES ('principal_1', 'iss', 'sub')`,
 		`INSERT INTO session_threads (id, session_id, agent_name, status) VALUES ('sthr_1', 'sesn_1', 'a', 'idle')`,
 		`INSERT INTO memory_stores (id, name) VALUES ('memstore_1', 'm')`,
+		`INSERT INTO dreams (id, status, inputs, input_memory_store_id, input_session_ids, model, output_behavior)
+		   VALUES ('drm_1', 'pending', '[]', 'memstore_1', '{}', '{"id":"m"}', '{"type":"create_new"}')`,
 		`INSERT INTO deployments (id, name, agent_id, agent_version, environment_id)
 		 VALUES ('depl_1', 'd', 'agent_1', 1, 'env_1')`,
 	} {
@@ -749,19 +751,19 @@ func TestTenancyColumnsHaveSingleTenantDefaults(t *testing.T) {
 	}
 }
 
-// 0034 REGISTERS the default workspace rather than creating one: it lands on
+// 0035 REGISTERS the default workspace rather than creating one: it lands on
 // deployments whose tables are already full of rows carrying workspace_id
 // 'default', and those rows are what its single seeded row describes. So the
 // upgrade is replayed here the way an operator's is — every scoped table
-// populated under the pre-0034 schema, plus the fixture's own agent,
+// populated under the pre-0035 schema, plus the fixture's own agent,
 // environment, session and threads — and the migration must leave all of it
 // exactly as it found it. A backfill, a rewrite, or a second seeded workspace
 // would all show up as a failure below.
 func TestWorkspaceRegistryLandsOnAPopulatedDatabaseWithoutTouchingIt(t *testing.T) {
 	ctx := context.Background()
 	pool := rawPool(t, pgtest.FreshDB(t))
-	if err := store.MigrateThrough(ctx, pool, "0033_skills_display_name.sql"); err != nil {
-		t.Fatalf("migrate through 0033: %v", err)
+	if err := store.MigrateThrough(ctx, pool, "0034_dreams.sql"); err != nil {
+		t.Fatalf("migrate through 0034: %v", err)
 	}
 	seedEveryScopedTable(t, pool)
 	sessionID, _ := pgtest.NewSession(t, pool, "cloud")
@@ -776,7 +778,7 @@ func TestWorkspaceRegistryLandsOnAPopulatedDatabaseWithoutTouchingIt(t *testing.
 			t.Fatalf("%s row count: %v", table, err)
 		}
 		if seeded == 0 {
-			t.Fatalf("%s is empty before 0034; seedEveryScopedTable must populate every scoped table", table)
+			t.Fatalf("%s is empty before 0035; seedEveryScopedTable must populate every scoped table", table)
 		}
 	}
 

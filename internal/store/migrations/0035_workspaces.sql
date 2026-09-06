@@ -1,4 +1,4 @@
--- 0034_workspaces: the workspace registry (plan 42 slice 1, #56).
+-- 0035_workspaces: the workspace registry (plan 42 slice 1, #56).
 --
 -- Every scoped table has carried workspace_id 'default' since 0001, with no
 -- table saying what that value names. This adds the one that does — and it

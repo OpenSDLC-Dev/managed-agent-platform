@@ -5,7 +5,7 @@ issue: "#56"
 
 # Multi-tenant activation — the workspace becomes a real scoping key (plan 42)
 
-Resolves **#56**. Today the reserved tenancy columns are decoration. Fourteen tables carry
+Resolves **#56**. Today the reserved tenancy columns are decoration. Fifteen tables carry
 `org_id`/`workspace_id`/`project_id` as `text NOT NULL DEFAULT 'default'`; **exactly two
 statement lines in the whole non-test tree name any of those columns**, and they are the two
 halves of one `INSERT … SELECT` (`internal/brain/delegate.go:363` and `:365`); **no statement
@@ -197,10 +197,10 @@ issue; none is a blocker under decision 1.
   line; the reason this is deferred is that a per-tenant *policy* needs a place to live, not
   that the join is hard.
 - **Per-organization quotas and limits** (decision 7): #46, `docs/DIVERGENCES.md:110`'s 500 GB
-  file quota, `:155`'s 1,000-scheduled-deployments cap, and the docs' 100-workspaces cap.
+  file quota, `:158`'s 1,000-scheduled-deployments cap, and the docs' 100-workspaces cap.
   **Only `:110` argues from single-tenancy** — a fixed 500 GB ceiling would be arbitrary on a
   single-tenant deployment — so that half expires here and is **re-argued** (§7.6) on the
-  operator-owns-its-own-disk half the same entry already states. `:155` carries no tenancy
+  operator-owns-its-own-disk half the same entry already states. `:158` carries no tenancy
   word at all: its operator-owned-capacity reason survives this plan unchanged. Neither is
   implemented.
 - **Webhooks (#261).** All 44 spec webhook event data schemas require `organization_id` and
@@ -236,7 +236,7 @@ document re-derives it. Where an SDK twin exists it is cited beside the count
 (`betadeployment.go:1451`, `:1803`; `betadeploymentrun.go:534`, `:880`; `betawebhook.go`'s 44
 required `organization_id` and 44 required `workspace_id` fields), and the twin is what a
 reviewer checks. That
-follows the precedent of `docs/DIVERGENCES.md:161`, which cites
+follows the precedent of `docs/DIVERGENCES.md:164`, which cites
 `anthropic-openapi.yml:29161 and :25626 (the two run-error schemas)` by line into a local file
 this repo does not carry; the registry states no citation convention (its format note at `:10`
 sets none, and both styles appear in it), so this is a choice for new entries rather than an
@@ -279,7 +279,7 @@ literal `Not Found` body, re-checked 2026-09-04: `/docs/en/api/managed-agents/ov
 pages live outside the repository**, so a line citation into one is this plan's working index
 rather than a coordinate a reviewer can re-check: every quotation is verbatim so a re-fetch
 finds it by string, and the registry entries the slices add use the registry's own style for a
-fetched page — slug, fetch date, quoted sentence (`docs/DIVERGENCES.md:155`, `:158`).
+fetched page — slug, fetch date, quoted sentence (`docs/DIVERGENCES.md:158`, `:161`).
 
 ### 4.2 The reference, from those sources
 
@@ -413,7 +413,7 @@ fetched page — slug, fetch date, quoted sentence (`docs/DIVERGENCES.md:155`, `
   run errors' `message` carries only the description "Human-readable error description.", so
   **any wording we emit is ours** and is registered **CONFIRMED** — a deliberate divergence, not
   an inference, because the reference documents no wording a recording could settle it against.
-  `docs/DIVERGENCES.md:159` and `:160` are the precedent for the neighbouring class (a run-error
+  `docs/DIVERGENCES.md:162` and `:163` are the precedent for the neighbouring class (a run-error
   type nothing here records) and sit in the CONFIRMED section (`:35`), not the INFERRED one
   (`:166`).
 - **The organization has observable behavior**, which is why decision 2 rests on the absence of
@@ -499,7 +499,7 @@ architecture; the plan changes they *did* force are listed in §5.
    those paths has no description, and both header names are absent from the spec entirely. The
    2026-09-03 recording narrows this without closing it: that key is an **OAuth token carrying
    named scopes**, two of them workspace-level (`workspace:developer`, `workspace:skills`), and
-   admission is per route rather than per API (`docs/DIVERGENCES.md:171`). So a workspace
+   admission is per route rather than per API (`docs/DIVERGENCES.md:174`). So a workspace
    dimension exists on that credential; whether a *response* names it, and what a foreign header
    does there, were still unobserved.
    → **It does not, and the work lane ignores the header entirely.** The mint response grants
@@ -575,7 +575,7 @@ item 5, which gates slice 6) at §7.6, and the archived-workspace refusal (item 
   (`0007:9`), `files` (`0008:11`), `vaults` (`0011:10`), `principals` (`0022:43`),
   `session_threads` (`0025:14`), `memory_stores` (`0028:10`), `deployments` (`0031:16`).
   *Counting rule: `grep -n org_id internal/store/migrations/*.sql` returns **19** lines (20 once
-  slice 1's `0034_workspaces.sql` lands — §6.5 step 2) in 9
+  slice 1's `0035_workspaces.sql` lands — §6.5 step 2) in 9
   files; five are not column definitions — `0001:6` (prose), `0007:25` (the partial index),
   `0013:43` (prose) and `0025:44`, `:46` (the backfill).* Eleven child tables inherit through a
   foreign key. **Two inherit nothing**: `deleted_sessions` (`0018:12-16`, no `REFERENCES` by
@@ -995,7 +995,7 @@ Two carve-outs live inside the predicate itself:
 
 A new migration adds a **composite** `FOREIGN KEY (org_id, workspace_id) REFERENCES workspaces
 (org_id, id)` to the **nine root tables** — the `UNIQUE (org_id, id)` such a key requires is
-declared in the `workspaces` table itself, in slice 1's `0034_workspaces.sql` (§7.1), because a
+declared in the `workspaces` table itself, in slice 1's `0035_workspaces.sql` (§7.1), because a
 merged migration cannot be edited to add it afterwards: `agents`, `environments`, `sessions`, `api_keys`, `skills`, `files`,
 `vaults`, `memory_stores`, `deployments`. Composite, not `workspace_id` alone: a single-column
 key would leave `org_id` on rows looking authoritative while nothing validated it — the exact
@@ -1006,7 +1006,7 @@ same lock.
 **Validation is made safe rather than assumed.** Nothing in the schema, the code or the tests
 establishes that every existing row holds `'default'`: the columns are `text NOT NULL DEFAULT
 'default'` with no CHECK, and the pin that looks like proof reads one row from three of the
-fourteen tables (`internal/store/store_test.go:636-651`, the loop over `{"agents",
+fifteen tables (`internal/store/store_test.go:636-651`, the loop over `{"agents",
 "environments", "sessions"}` at `:641`). Because `Migrate` runs every pending file in one
 transaction at every binary's startup (`internal/store/migrate.go:27-33`), a single
 non-default value anywhere in the nine tables would make the deployment unbootable with no
@@ -1073,7 +1073,7 @@ scope predicate has exactly that shape. So `internal/api/scopematrix_test.go`:
    hand-written list — the mechanism `internal/domain/docs_test.go` uses for the prefix set,
    and for the same reason (that kind of list has drifted twice). A bare `org_id` grep will not
    do: it returns 19 lines of which 5 are prose, an index and a backfill (§4.4) — 20 once slice
-   1's `0034` lands, its `org_id` the one declaration the three-column rules read past. So the
+   1's `0035` lands, its `org_id` the one declaration the three-column rules read past. So the
    derivation is two rules, both stated in the test, and **both keyed on all three columns, not
    on `org_id` alone**: **(i)** a `CREATE TABLE <name> ( … )` block whose body declares
    `org_id`, `workspace_id` *and* `project_id`, and **(ii)** an `ALTER TABLE <name> ADD COLUMN`
@@ -1083,7 +1083,7 @@ scope predicate has exactly that shape. So `internal/api/scopematrix_test.go`:
    All three, because slice 1's own `workspaces` table declares `org_id` and nothing else
    (§7.1): the registry is the referent of every predicate, not a referrer, and an `org_id`-only
    rule would enrol it into a check it can never satisfy. Rule
-   (ii) has **no instance in the merged tree** — all 14 declarations sit inside `CREATE TABLE`
+   (ii) has **no instance in the merged tree** — all 15 declarations sit inside `CREATE TABLE`
    bodies and no migration carries an `ADD COLUMN` of these columns — so it is proved by a
    synthetic fixture rather than by the tree (§7.2). The same walk derives a **second set**: a
    table declaring none of the three while carrying a `REFERENCES` to one that does is an
@@ -1352,7 +1352,7 @@ Three more, each independently sufficient:
   (`deploy/compose/docker-compose.yml:23`) and `store.Open` runs `Migrate` on the handlers' own
   pool (`internal/store/store.go:67-81`, the `Migrate` call at `:76`), so the role that owns
   every table is the role that queries them — and an owner bypasses RLS without `FORCE` on all
-  14 tables.
+  15 tables.
 - **The background writers carry no request tenant.** Brain, executor, the scheduler and
   `Migrate` itself would force an "unset tenant means all rows" arm, demoting RLS from
   enforcement to decoration; a `BYPASSRLS` background role would contradict
@@ -1453,7 +1453,7 @@ it alone.
 another's key of the same name. **This one lands in slice 5, not slice 1**, because its test
 cannot be written before then: the fixture needs two live env-var-managed keys of the same name
 in different workspaces, and `0024:77-78`'s `api_keys_one_live_unissued` is keyed on `name`
-alone until slice 5's `0036` rescopes it, so the second key cannot be inserted at all. The other
+alone until slice 5's `0037` rescopes it, so the second key cannot be inserted at all. The other
 two corrections above are testable on slice 1's schema and land there.
 
 ### 6.9 What archiving a workspace does, and does not do
@@ -1473,7 +1473,7 @@ half-defined cascade ships:
 - **Deployments pause** with `workspace_archived_error`; a run attempted in an archived
   workspace fails with the run-error twin. `0031_deployments.sql:98`, `:105`, `:176`, `:185`'s
   CHECK lists already admit both values, so no migration is needed — exactly as
-  `docs/DIVERGENCES.md:161` predicted. The run error's `message` wording is **ours** and is
+  `docs/DIVERGENCES.md:164` predicted. The run error's `message` wording is **ours** and is
   registered **CONFIRMED** — a deliberate divergence rather than an inference, the reference
   giving only "Human-readable error description." for a recording to match (§4.2).
 - **In-flight sessions and leased work items are not touched.** Existing machinery — lease
@@ -1504,8 +1504,8 @@ entries.
 the registry holds the default workspace as a *recognised* row rather than a created one; both
 response headers are emitted. Behavior changes only in the header surface.
 
-**Changes.** Migration `0034_workspaces.sql` (next free number: the directory ends at
-`0033_skills_display_name.sql`) — `workspaces (id text PRIMARY KEY, org_id text NOT NULL
+**Changes.** Migration `0035_workspaces.sql` (the next free number once plan 41 slice 1's
+`0034_dreams.sql` landed on 2026-09-06) — `workspaces (id text PRIMARY KEY, org_id text NOT NULL
 DEFAULT 'default', name text NOT NULL, created_at timestamptz NOT NULL DEFAULT now(),
 archived_at timestamptz, UNIQUE (org_id, id))` plus `INSERT … VALUES ('default', 'default',
 'Default Workspace')`. Its header states the change and notes that `0001_init.sql:6-10`,
@@ -1558,7 +1558,7 @@ refused. ·
 lands it in the configured workspace; a same-workspace rotation is unchanged. · Migration replay over a populated
 database leaves every row at `default` and inserts exactly one workspace. ·
 **`TestTenancyColumnsHaveSingleTenantDefaults` (`internal/store/store_test.go:636-651`) is
-extended from 3 tables to all 14** — widening the table loop at `:641`, which is an edit to that
+extended from 3 tables to all 15** — widening the table loop at `:641`, which is an edit to that
 test and the only one it takes: its assertion is unchanged, because it is the
 upgrade-compatibility pin and the pin that `org_id`/`project_id` stay constant. Enforcement is a
 separate suite beside it.
@@ -1730,7 +1730,7 @@ a newly created resource would be invisible to its own creator.
 segment's are the same value until slice 6 lets them differ (§7.6). ·
 `envkeys.go:93` and `principals.go:37-44` deliberately leave their columns at the defaults, with
 a comment each so the omission reads as deliberate (§6.1, §6.2). · `skillsimport.go:102-104` is
-exempted, not changed. · Migration `0035_workspace_fk.sql`: the normalizing UPDATEs, then the
+exempted, not changed. · Migration `0036_workspace_fk.sql`: the normalizing UPDATEs, then the
 nine composite foreign keys of §6.4, with the lock name, the lock cost and the exclusion reasons
 in its header. · The guard's target set does not grow here — it was complete at slice 2 — but
 `internal/api`'s inserts come **off the exemption list**, admitted now by rule (c).
@@ -1741,7 +1741,7 @@ management key carries its issuer's workspace. · An environment key minted for 
 second-workspace environment authenticates into that workspace (the derive-don't-copy decision).
 · The composite key refuses an insert naming a nonexistent workspace, and one naming a real
 workspace under the wrong `org_id`, on three representative tables. · Catalog skills stay at
-`default` after a boot import in a multi-workspace database. · Migration `0035` replays over a
+`default` after a boot import in a multi-workspace database. · Migration `0036` replays over a
 populated database, and the per-table `count(*) … WHERE org_id <> 'default'` assertions hold
 after the normalizing UPDATEs.
 
@@ -1941,7 +1941,7 @@ patch**'s locked read (`internal/api/consoleapikeys.go:239`,
 *revoke* route: `server.go:192-194` registers POST and GET on the collection and POST on the
 item only, so revocation is a `status` patch through this same handler) —
 without them a workspace-bound key can rename or archive another workspace's management key by
-id. · Migration `0036_api_keys_one_live_scoped.sql`: `LOCK TABLE api_keys IN SHARE MODE; DROP
+id. · Migration `0037_api_keys_one_live_scoped.sql`: `LOCK TABLE api_keys IN SHARE MODE; DROP
 INDEX IF EXISTS api_keys_one_live_unissued; CREATE UNIQUE INDEX api_keys_one_live_unissued ON
 api_keys (org_id, workspace_id, project_id, name) WHERE status = 'active' AND created_by IS
 NULL;` — 0024's index under 0024's predicate (§4.5). Widening a unique key cannot fail on
@@ -2006,9 +2006,9 @@ A management key lists, patches and revokes only its own workspace's keys. ·
 Two workspaces may each hold a live env-var-managed key named `bootstrap`; rotating one leaves
 the other active. · A vault credential read, a credential update, a vault delete, a skill
 delete and a file download are each refused across workspaces with the absent-id answer, and the
-corresponding blob object survives. · Migration `0036` replays over a database holding keys in
+corresponding blob object survives. · Migration `0037` replays over a database holding keys in
 several workspaces. · **`TestKeyRotationMigrationRepairsExistingDuplicates`' rewind list
-(`internal/store/store_test.go:533-545`) must gain `0036`** — it drops
+(`internal/store/store_test.go:533-545`) must gain `0037`** — it drops
 `api_keys_one_live_unissued` *by name* (`:534`) and deletes 0013/0021/0024 from
 `schema_migrations` (`:541-544`) before replaying, so without the addition its replay silently
 ends on a schema no deployment reaches.
@@ -2034,7 +2034,7 @@ settled all four ahead of this plan — the field is `display_name`, its derivat
 SKILL.md frontmatter is the reference's own, the 255-character cap now matches
 (`internal/api/skillsupload.go:27`, `maxDisplayNameChars`), and `0033_skills_display_name.sql:28`
 dropped the uniqueness — and the entry already reads "Converged, no longer a divergence".
-**Amend** `:162`, which stays
+**Amend** `:165`, which stays
 accurate but whose contrast against "skills (workspace-global shared assets)" no longer holds. ·
 `docs/plan/08_files.md:188` and `docs/plan/36_memory-stores.md:629` restate the workspace-global
 policy and are archived plans — cited as historical, with the correction recorded in the
@@ -2183,8 +2183,8 @@ set below already requires. The same phrase appears in code at
 `internal/api/sessionresources.go:590` and in prose at `docs/self-hosted-security.md:528`.
 All five sites get the word; the residual itself is unchanged.
 
-**Registry, in one batch.** **Demote** `:161` to provenance — by slice 6 the *last* live tracker
-naming #56 (`grep -c "Tracked: #56" docs/DIVERGENCES.md` → 2 before slice 1, `:48` and `:161`; slice 1
+**Registry, in one batch.** **Demote** `:164` to provenance — by slice 6 the *last* live tracker
+naming #56 (`grep -c "Tracked: #56" docs/DIVERGENCES.md` → 2 before slice 1, `:48` and `:164`; slice 1
 closes `:48`'s), so `make registry-check` reports live-tracker-open until it moves; its workspace
 half retires and its `organization_disabled_error` half is re-argued (§6.9) and re-pointed at a
 new issue.
@@ -2194,18 +2194,18 @@ docs/DIVERGENCES.md` → `:19`, `:48` (slice 1's, already rewritten there), `:60
 `:110` (the 500 GB per-org quota, whose clause about a fixed ceiling being arbitrary on a
 single-tenant deployment gives way to the operator-owns-its-own-disk reason the same entry
 already carries — the words are paraphrased here, not quoted),
-`:136`, `:158`, `:161`, `:253`, `:259`, `:263`. **Separately**, each
+`:136`, `:161`, `:164`, `:256`, `:262`, `:266`. **Separately**, each
 with its own stated reason rather than a single-tenancy premise it does not contain, revisit
 `:93` (environment worker-key *issuance*, which contains no tenancy word at all), `:94`, `:130`,
-`:133`, `:155` (the 1,000-scheduled-deployments cap) and `:162` — for `:130` the divergence
+`:133`, `:158` (the 1,000-scheduled-deployments cap) and `:165` — for `:130` the divergence
 **grows** rather than shifts, and its recorded count of **seven** org/account-level roles stands
 unchanged: what the workspaces doc adds is a second axis, five *workspace-level* roles with
 documented inheritance (§4.2), so three org-wide roles with no per-workspace granularity is a
-wider gap under real tenancy, covered by §3's fine-grained exclusion. **Leave `:275`'s organization clause intact** —
+wider gap under real tenancy, covered by §3's fine-grained exclusion. **Leave `:278`'s organization clause intact** —
 "v1 answers only for `default` and 404s anything else *before* the environment lookup, naming
 the organization in the message" describes the `{organization_id}` segment, which decision 2
 freezes and `consoleOrganization` preserves, so striking it would delete an accurate record.
-`:275` gains **nothing** about workspaces: its path is the environment-token dialect
+`:278` gains **nothing** about workspaces: its path is the environment-token dialect
 (`/api/oauth/organizations/{organization_id}/environments/{environment_id}/tokens…`, `:94`),
 which carries no `{workspace}` segment at all. The workspace half's new behavior — resolved
 against the registry, constrained by the caller's scope only without the administration
@@ -2240,7 +2240,7 @@ does not mirror (§4.2). And per `docs/HISTORY.md:1095-1103` — #56's *last*
 scope change silently rotted five registry pointers **while the issue stayed open**, a rot no
 issue-state check can see — this PR re-reads every #56 reference by hand: **the registry's nine**
 (`grep -nE "#56([^0-9]|$)" docs/DIVERGENCES.md` → `:28`, `:48`, `:129`, `:130`, `:131`, `:136`,
-`:161`, `:189`, `:192`; the regex's trailing class is what keeps #565/#566/#567 out of the set,
+`:164`, `:192`, `:195`; the regex's trailing class is what keeps #565/#566/#567 out of the set,
 and `:48` joined it in this plan's own PR, before slice 1's `Landed for #56` entries widened the set),
 `docs/self-hosted-security.md:851` and
 `:1242`, `docs/ARCHITECTURE.md:466`, and **`README.md:76`**. Archived plans (31, 32, 37) and
@@ -2264,7 +2264,7 @@ per organization.
 authoritative when nothing validates it, and re-activating org later would re-sweep every
 statement. Carrying all three costs one term in one helper; §6.4's write floor carries the pair
 for the same reason, so "additive later" is a property the database holds, not a hope.
-*Rejected:* dropping `project_id` from 14 tables — a larger, irreversible migration that
+*Rejected:* dropping `project_id` from 15 tables — a larger, irreversible migration that
 destroys a seam CLAUDE.md blesses.
 
 **D3 — One key, one workspace** (decision 5). *Rejected:* a super-scope credential — every
@@ -2338,7 +2338,7 @@ reference behavior nothing records today.
 **D9 — Emit `workspace_archived_error`; leave `organization_disabled_error` unemitted.**
 *Rejected:* inventing an organization lifecycle so the second error type has a producer.
 `0031_deployments.sql`'s CHECK lists already admit both values, so the emitted half needs no
-migration — exactly as `:161` predicted. The emitted half's `message` is ours and registered.
+migration — exactly as `:164` predicted. The emitted half's `message` is ours and registered.
 
 **D10 — Cross-tenant refusal follows the split the tree already decided on evidence, rather than
 unifying it — and the 404 arm is CONFIRMED against what looked like real counter-evidence.** `/v1` resource routes
@@ -2384,7 +2384,7 @@ satisfiable today and still catches the refactor that would defeat the scanner.
 
 **D13 — The write floor normalizes before it constrains.** *Rejected:* asserting "every existing
 row holds `'default'`" from the column default, which nothing establishes: no CHECK, and the pin
-that looks like proof reads one row from three of fourteen tables
+that looks like proof reads one row from three of fifteen tables
 (`internal/store/store_test.go:641`). Because `Migrate` is one transaction at every binary's
 startup (`internal/store/migrate.go:27-33`), a single stray value would make the deployment
 unbootable with no repair path — the failure mode `0013` was written to avoid.
@@ -2491,7 +2491,7 @@ environment-key half stays unobserved, and §6.1 carries it as ours (§5.1). So 
 slice-1 gate (items 1-4 and 6) nor the slice-6 one (item 5) is outstanding. **Nothing the
 2026-09-03 and 2026-09-04 recordings settled closed any of those items** — they reached the
 environment key's OAuth scopes and the skills wire shape, never a second workspace — which is
-what 2026-09-05 was for, and the registry's second wave (#575) left `:48` and `:161` as the only
+what 2026-09-05 was for, and the registry's second wave (#575) left `:48` and `:164` as the only
 two entries still tracking #56.
 
 **What is still open is one half of one item and two small threads.** An *environment* key

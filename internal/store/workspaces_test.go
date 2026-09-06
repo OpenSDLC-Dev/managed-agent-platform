@@ -8,7 +8,7 @@ import (
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/pgtest"
 )
 
-// 0034 holds the default workspace as a RECOGNISED row rather than a created
+// 0035 holds the default workspace as a RECOGNISED row rather than a created
 // one (plan 42 slice 1): every scoped row already carries workspace_id
 // 'default', so the registry that gives those values a referent has to come up
 // already naming it, live and unarchived. Exactly one row, because a second

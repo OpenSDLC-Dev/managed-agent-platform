@@ -73,7 +73,7 @@ const (
 )
 
 // DefaultWorkspaceID is this deployment's frozen workspace id — the row
-// migration 0034 seeds, and the only workspace id that carries no wrkspc_
+// migration 0035 seeds, and the only workspace id that carries no wrkspc_
 // prefix. The reference's own Default Workspace has a prefixed id; ours does
 // not, because every scoped table already carries the literal 'default' and
 // rewriting them all would be an UPDATE for a cosmetic gain.

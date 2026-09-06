@@ -197,7 +197,7 @@ func liveWorkspaceScopesAmong(ctx context.Context, pool *pgxpool.Pool, ids []str
 
 // scanWorkspaceScopes projects workspace rows to scopes. Org rides along from
 // the row and the project is the frozen literal, because project has no
-// registry of its own (migration 0034's header says so).
+// registry of its own (migration 0035's header says so).
 func scanWorkspaceScopes(rows pgx.Rows) ([]domain.Scope, error) {
 	defer rows.Close()
 	var out []domain.Scope
