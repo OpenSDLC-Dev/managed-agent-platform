@@ -202,11 +202,13 @@ func rootedDial(base func(ctx context.Context, network, addr string) (net.Conn, 
 // admits the RFC 1918 address such a completion may return. Rooting is the only
 // thing here that touches that, and only for the one class it applies to.
 //
-// The floor runs only for a dial a widening flag admitted: `allowed_hosts` is an
-// operator's list and this proxy is the operator's own egress, so narrowing that
-// half would be a plan 12 decision rather than this one. Allow takes a context
-// because the admission marker is what tells the classes apart and only the
-// context carries it.
+// The floor runs for every class but one: `allowed_hosts` is an operator's list
+// and this proxy is the operator's own egress, so a host listed there is dialled
+// unfloored — listing it is the vouching. `unrestricted` used to be exempt too
+// and is not (plan 45, #570): the reference admits every host under it and still
+// refuses a private or reserved address underneath, which is the same split this
+// type makes. Allow takes a context because the admission marker is what tells
+// the classes apart and only the context carries it.
 func newDialer(ipAllowed func(net.IP) error) *dialguard.Dialer {
 	return &dialguard.Dialer{
 		Timeout: dialTimeout,
@@ -284,11 +286,20 @@ func (g *Gate) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 // through a real RoundTrip rather than assuming the wrapping is transparent.
 func refusedOrUnreachable(w http.ResponseWriter, err error) {
 	if errors.Is(err, dialguard.ErrRefused) {
-		http.Error(w, "Destination IP is in a private/reserved range", http.StatusForbidden)
+		// The recording gives the wording, not the bytes: what a curl transcript
+		// shows cannot settle whether the reference terminates the line. So this
+		// is http.Error like every other refusal here, which appends a newline,
+		// and the claim made anywhere about it is that the wording matches —
+		// never that the body is byte-for-byte the reference's.
+		http.Error(w, refusedBody, http.StatusForbidden)
 		return
 	}
 	http.Error(w, "cannot reach host", http.StatusBadGateway)
 }
+
+// refusedBody is the reference's own wording for an address its floor refused,
+// recorded 2026-09-03 on an `unrestricted` environment (#570).
+const refusedBody = "Destination IP is in a private/reserved range"
 
 // handleConnect admits or refuses an HTTPS tunnel on its target host, then
 // copies bytes opaquely — no substitution, so a placeholder in a TLS body

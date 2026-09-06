@@ -374,8 +374,9 @@ func TestTheGatesFloorFollowsTheAdmissionClass(t *testing.T) {
 	}{
 		{admitNone, true},
 		// `unrestricted` is unrestricted in its hosts, not in its addresses:
-		// the reference admits every name and refuses a private or reserved
-		// address underneath it (#570, recorded 2026-09-03).
+		// the reference admits every name and still refuses an address
+		// underneath it (#570, recorded 2026-09-03 — the case probed is
+		// link-local, and this floor admits RFC 1918 by design).
 		{admitUnrestricted, true},
 		// The one exemption left. A host in allowed_hosts is an operator
 		// naming a destination, and naming a private one there is the vouching.

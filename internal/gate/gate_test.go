@@ -65,14 +65,12 @@ func rawStatusLine(t *testing.T, gateURL, raw string) string {
 	return strings.TrimRight(line, "\r\n")
 }
 
-// proxyClient is an http.Client that routes through the gate served at gateURL.
-// trustedTLS, when non-nil, is an httptest TLS origin whose self-signed
-// certificate the client trusts — so the CONNECT tunnel test verifies the origin
-// properly rather than skipping verification.
-// rawStatusAndBody is rawStatusLine plus what the gate said. Two refusals now
-// share the 403: the policy's, on a host it never admitted, and the address
-// floor's, on an address it did. The status alone can no longer tell them
-// apart, and which one fired is the thing these tests exist to prove.
+// rawStatusAndBody is rawStatusLine plus the entity body — the body proper,
+// split at the blank line, rather than everything after the status line, which
+// would be the headers and would make a body assertion pass on almost anything.
+// Two refusals now share the 403: the policy's, on a host it never admitted,
+// and the address floor's, on an address it did. The status alone can no longer
+// tell them apart, and which one fired is the thing these tests exist to prove.
 func rawStatusAndBody(t *testing.T, gateURL, raw string) (string, string) {
 	t.Helper()
 	u, err := url.Parse(gateURL)
@@ -102,7 +100,11 @@ func rawStatusAndBody(t *testing.T, gateURL, raw string) (string, string) {
 	if len(all) == 0 {
 		t.Fatal("the gate answered nothing within the deadline")
 	}
-	line, body, _ := strings.Cut(string(all), "\r\n")
+	line, rest, _ := strings.Cut(string(all), "\r\n")
+	_, body, ok := strings.Cut(rest, "\r\n\r\n")
+	if !ok {
+		t.Fatalf("the gate's response has no header/body separator: %q", all)
+	}
 	return line, body
 }
 
@@ -303,8 +305,9 @@ func TestGateConnectRefusesDisallowedHTTPS(t *testing.T) {
 	// proxying http.Client only surfaces a generic tunnel error, which also fires
 	// on an unrelated TLS failure — so it cannot prove the host-filter ran (a
 	// deleted CONNECT admit check would still leave such a test green). Raw-dial
-	// so the 403 (vs. the 502 an unfiltered dial to the refused host would give)
-	// is observed directly.
+	// so the refusal is observed directly. The status alone no longer says which
+	// refusal it is — the address floor answers 403 too — but this host is
+	// refused before any dial, so a floor that never ran cannot produce it.
 	status := rawStatusLine(t, gsrv.URL, "CONNECT 127.0.0.1:1 HTTP/1.1\r\nHost: 127.0.0.1:1\r\n\r\n")
 	if !strings.HasPrefix(status, "HTTP/1.1 403") {
 		t.Errorf("CONNECT status line = %q, want HTTP/1.1 403 for a host outside the networking policy", status)

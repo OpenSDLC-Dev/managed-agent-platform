@@ -16,8 +16,17 @@ environment with `networking: {"type":"unrestricted"}`:
 | `https://example.com/` | 200 |
 
 So `unrestricted` is unrestricted in its **hosts** and not in its **addresses**:
-every name is admitted, and a private or reserved address is refused underneath
-it. This platform admits both — `newPolicy` returns `admitAll` for
+every name is admitted, and an address underneath it can still be refused. What
+the probe actually demonstrates is the **link-local** case, which is the one
+that matters most — `169.254.169.254` is the cloud metadata endpoint — and the
+reference's *message* names a wider class than its probe showed. This platform
+refuses loopback, link-local, the unspecified address and multicast, and
+**admits RFC 1918 by design** (the self-hosted premise `internal/dialguard`
+argues in place), so `http://10.0.0.1/` is still dialled here. Whether the
+reference refuses it is unrecorded; if it does, that is a divergence to keep
+rather than a gap to close, and the registry's row says so.
+
+This platform admits both halves today — `newPolicy` returns `admitAll` for
 `domain.NetUnrestricted`, and `admission.floored()` then exempts that class from
 the address floor as well.
 
@@ -114,6 +123,16 @@ and `docs/DIVERGENCES.md` say which sessions are covered, so nobody reads
 "`unrestricted` now has an address floor" as covering the deployment shape where
 it does not.
 
+One reachability change inside the gated shape is worth naming rather than
+leaving to be discovered: a sandbox that curls its **own** loopback through the
+proxy now gets the 403. `NO_PROXY` is forced empty by design, so a
+proxy-honouring client's request to `127.0.0.1:<port>` goes to the gate, which
+refuses the address like any other. Direct loopback is untouched — the firewall
+does not stop a sandbox talking to itself without the proxy — and the reference
+answers its own recorded probe of `127.0.0.1:1` with a connection failure rather
+than a tunnel, so this is closer to it rather than further away. It is still a
+shape that worked before and does not now.
+
 The gate is also an environment-variable forward proxy, where the reference
 intercepts transparently — a process that clears its own proxy variables leaves
 through neither ours nor theirs identically. That is a separate recorded
@@ -125,8 +144,13 @@ divergence and #570 explicitly is not about it.
    `admitUnrestricted` dial to a private address is refused where it was
    admitted; `admitOperator` still is not. The existing per-class assertions
    move with it.
-2. **Every host still leaves.** `unrestricted` admits a public name and dials
-   it — the half of the recording that is not a refusal.
+2. **Every host still leaves.** `unrestricted` admits a host no list names and
+   dials it — the half of the recording that is not a refusal. It reaches an
+   httptest origin, so what it drives is admission and the dial, not name
+   resolution: an origin's authority is an address literal. The resolver half of
+   the same dialler is held in `internal/dialguard`, where
+   `TestTheProductionResolverIsWiredUp` drives a real lookup through to the
+   floor's refusal.
 3. **The refusal's shape**, on both handlers: 403 and the reference's body for
    `ErrRefused`, 502 for an ordinary dial failure. The plain-HTTP case drives a
    real `RoundTrip` so the wrapping is tested rather than assumed.

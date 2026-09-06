@@ -77,6 +77,21 @@ is Go's local-system form — so the gate dialled loopback in the namespace it
 shares with the sandbox. Both handlers refuse it before admit is asked, which
 holds even for the class the floor exempts.
 
+The review passes found three things worth keeping. The verification caught two
+scopings the change had made stale — `docs/ARCHITECTURE.md`'s `dialguard/` row
+and `newDialer`'s own doc comment both still said the floor runs "only for a
+dial a widening flag admitted" — and named a reachability change nobody had:
+with `NO_PROXY` forced empty, a sandbox curling its *own* loopback through the
+proxy now gets the 403. The Codex pass found the one that mattered: the raw test
+helper returned the response *headers* as the body, so a body assertion would
+have passed on almost anything, and under it sat a claim the tests could not
+hold — `http.Error` appends a newline, so the body is the reference's *wording*
+and never its bytes. The helper splits at the blank line now and the claim says
+wording; a curl transcript could not have settled the bytes either way. It also
+caught the plan asserting a "private or reserved" refusal where the probe showed
+link-local alone, which the changelog and the registry had qualified correctly
+and the plan had not.
+
 Mutation-tested per the repo rule: 7 mutants, 7 killed, no survivors, each by a
 named test. One of them is worth keeping: putting the exemption back on
 `allowed_hosts` instead of `unrestricted` is killed by twenty tests, which is
