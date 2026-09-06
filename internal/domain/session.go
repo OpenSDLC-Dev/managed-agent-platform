@@ -40,9 +40,18 @@ func (u *Usage) Add(m ModelUsage) {
 	u.CacheCreation.Ephemeral5m += m.CacheCreationInputTokens
 }
 
-// Scope is the reserved multi-tenant scoping carried by every core resource.
-// v1 is single-tenant and fills these with default values; the columns exist
-// from day 1 so multi-tenancy can land without a migration of meaning.
+// Scope is the multi-tenant scoping carried by every core resource. The
+// WORKSPACE is the isolation unit: it is what the workspace registry names,
+// what a credential resolves to, and what every scoped query filters on. OrgID
+// and ProjectID are frozen at "default" — they exist so a resource's identity
+// is complete and a later org or project split needs no migration of meaning,
+// not because anything varies them today.
+//
+// A scope is DERIVED FROM THE CREDENTIAL and never computed by a handler: each
+// credential resolver puts one on the request context, and code that needs a
+// scope reads it from there. A request cannot name its own tenant; the
+// anthropic-workspace-id header may only narrow to a workspace the credential
+// already covers.
 //
 // NOTE: scoping is org/workspace/project — NEVER user. Sessions are not bound
 // to an end-user (a deliberate divergence from adk's AppName+UserID). End-user

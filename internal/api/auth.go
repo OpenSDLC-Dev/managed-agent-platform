@@ -233,3 +233,27 @@ func principalFrom(ctx context.Context) string {
 	}
 	return ""
 }
+
+// scopeFrom is the tenancy answer to "whose data may this request touch" — the
+// scope the credential resolved to, attached by whichever resolver
+// authenticated it. Every scoped query reads it from here; no handler ever
+// computes one (plan 42 §6.1).
+//
+// !ok IS AN INTERNAL ERROR at every call site, never "unscoped, proceed". A
+// handler reaching for a scope it was not given has been dispatched behind a
+// resolver that does not set one, which is a wiring defect: serving the request
+// anyway would serve it across every tenant. Fail the request instead.
+func scopeFrom(ctx context.Context) (domain.Scope, bool) {
+	s, ok := ctx.Value(ctxKeyScope).(domain.Scope)
+	return s, ok
+}
+
+// bootstrapKeyFrom reports whether this request authenticated with the
+// env-var-managed management key — the api_keys row with created_by IS NULL,
+// the same predicate api_keys_one_live_unissued keys on (plan 42 §6.8). Absent
+// means false, which is the safe answer: every other credential, and every
+// unauthenticated request, is not the bootstrap key.
+func bootstrapKeyFrom(ctx context.Context) bool {
+	b, _ := ctx.Value(ctxKeyBootstrapKey).(bool)
+	return b
+}

@@ -61,6 +61,17 @@ const (
 	// literal in internal/api until plan 32 gave the console a route that has to
 	// validate one on a path; the two spellings are the same constant now.
 	PrefixAPIKey = "apikey"
+	// PrefixWorkspace names a tenant in the workspace registry (plan 42, #56).
+	// It joins the private family for the same reason as the three above: a
+	// workspace id travels on the anthropic-workspace-id header and in console
+	// routes, never as an id on a /v1 path, so admitting it to knownPrefixes
+	// would widen the shape every wire path accepts in order to validate
+	// something no wire path receives. The header's own validation is
+	// ValidWithPrefix against this constant — plus the literal "default", which
+	// is this deployment's frozen workspace id: the reference's own Default
+	// Workspace carries a wrkspc_-prefixed id, and rewriting ours would be an
+	// UPDATE across every scoped table for a cosmetic gain.
+	PrefixWorkspace = "wrkspc"
 )
 
 // altSessionPrefix is accepted on input for wire compatibility: the managed-agents
