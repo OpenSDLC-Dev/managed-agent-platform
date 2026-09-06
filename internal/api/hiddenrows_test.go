@@ -86,21 +86,48 @@ func TestInternalRowsAreUnlistedAndUnretrievable(t *testing.T) {
 
 	// Every id-addressed route answers the 404 an unknown id gets — the
 	// versions list among them, which would otherwise render the internal spec
-	// to anyone holding the id.
-	for _, tc := range []struct{ method, path string }{
-		{http.MethodGet, "/v1/agents/" + agentID},
-		{http.MethodGet, "/v1/agents/" + agentID + "?version=1"},
-		{http.MethodPost, "/v1/agents/" + agentID},
-		{http.MethodGet, "/v1/agents/" + agentID + "/versions"},
-		{http.MethodPost, "/v1/agents/" + agentID + "/archive"},
-		{http.MethodGet, "/v1/environments/" + envID},
-		{http.MethodPost, "/v1/environments/" + envID},
-		{http.MethodDelete, "/v1/environments/" + envID},
-		{http.MethodPost, "/v1/environments/" + envID + "/archive"},
+	// to anyone holding the id — and the console API's three environment-key
+	// routes with them. Off the wire is not off the rule: a listing that
+	// answered 200 confirms the row, and issuance refusing with "is a cloud
+	// environment" says what kind it is.
+	//
+	// The revoke arm only carries the rule with a key to aim at — a missing key
+	// answers 404 by itself — so one is minted straight through the store,
+	// which is the only way to give a cloud environment a key at all.
+	internalKeyID := storeIssuedKeyID(t, s, envID)
+
+	for _, tc := range []struct {
+		method, path string
+		body         any
+	}{
+		{http.MethodGet, "/v1/agents/" + agentID, nil},
+		{http.MethodGet, "/v1/agents/" + agentID + "?version=1", nil},
+		{http.MethodPost, "/v1/agents/" + agentID, nil},
+		{http.MethodGet, "/v1/agents/" + agentID + "/versions", nil},
+		{http.MethodPost, "/v1/agents/" + agentID + "/archive", nil},
+		{http.MethodGet, "/v1/environments/" + envID, nil},
+		{http.MethodPost, "/v1/environments/" + envID, nil},
+		{http.MethodDelete, "/v1/environments/" + envID, nil},
+		{http.MethodPost, "/v1/environments/" + envID + "/archive", nil},
+		{http.MethodPost, consoleTokens(envID), map[string]any{"name": "issued to a hidden row"}},
+		{http.MethodGet, consoleTokens(envID), nil},
+		{http.MethodPost, consoleRevoke(envID, internalKeyID), nil},
 	} {
-		status, body := s.do(tc.method, tc.path, nil)
+		status, body := s.do(tc.method, tc.path, tc.body)
 		wantErr(t, status, body, http.StatusNotFound, "not_found_error")
 	}
+}
+
+// storeIssuedKeyID mints one worker credential for an environment through the
+// store and returns its id.
+func storeIssuedKeyID(t *testing.T, s *tserver, envID string) string {
+	t.Helper()
+	issueKey(t, s.pool, envID, "for the revoke arm")
+	keys, _, err := api.ListEnvironmentKeys(context.Background(), s.pool, envID, 10, 0)
+	if err != nil || len(keys) != 1 {
+		t.Fatalf("list environment keys for %s: %d keys, err %v", envID, len(keys), err)
+	}
+	return keys[0].ID
 }
 
 func TestInternalRowsRefusedByEveryResolver(t *testing.T) {

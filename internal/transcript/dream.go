@@ -75,8 +75,20 @@ func RenderDream(ctx context.Context, log Lister, sessionID string) (*Dream, err
 	d := &Dream{SessionID: sessionID}
 	w.write("# session " + sessionID + "\n\n")
 
+	// The high-water mark, read before the first page. A dream's input session
+	// stays publicly writable while the dream reads it, so a client appending
+	// as fast as the renderer pages would hand it a full page every time, and a
+	// loop that stops only on a short page would never stop — with the tick
+	// blocked behind it. The newest seq at the start is what this dream reads;
+	// what arrives during the render belongs to the next one.
+	mark, hasEvents, err := newestSeq(ctx, log, sessionID)
+	if err != nil {
+		return nil, err
+	}
+
 	q := events.ListQuery{Scope: events.ScopeSession, Limit: DreamPageSize}
-	for {
+paging:
+	for hasEvents {
 		page, err := log.List(ctx, domain.ID(sessionID), q)
 		if err != nil {
 			return nil, fmt.Errorf("render transcript %s: %w", sessionID, err)
@@ -85,6 +97,11 @@ func RenderDream(ctx context.Context, log Lister, sessionID string) (*Dream, err
 			break
 		}
 		for _, ev := range page {
+			// The query carries no upper bound, so a page can run past the
+			// mark; the renderer is what stops at it.
+			if ev.Seq > mark {
+				break paging
+			}
 			if ev.Type == domain.EventUserMessage {
 				d.Turns++
 				if d.Turns == 1 {
@@ -93,15 +110,30 @@ func RenderDream(ctx context.Context, log Lister, sessionID string) (*Dream, err
 			}
 			w.write(renderDreamEvent(ev))
 		}
-		if len(page) < DreamPageSize {
+		last := page[len(page)-1].Seq
+		if len(page) < DreamPageSize || last >= mark {
 			break
 		}
-		last := page[len(page)-1].Seq
 		q.AfterSeq = &last
 	}
 
 	d.Text, d.ElidedBytes = w.result()
 	return d, nil
+}
+
+// newestSeq reads the session view's newest seq in one descending row — the
+// mark RenderDream stops at. false when the session has no events at all, which
+// is the render's whole answer.
+func newestSeq(ctx context.Context, log Lister, sessionID string) (int64, bool, error) {
+	page, err := log.List(ctx, domain.ID(sessionID), events.ListQuery{
+		Scope: events.ScopeSession, Desc: true, Limit: 1})
+	if err != nil {
+		return 0, false, fmt.Errorf("render transcript %s: %w", sessionID, err)
+	}
+	if len(page) == 0 {
+		return 0, false, nil
+	}
+	return page[0].Seq, true, nil
 }
 
 // renderDreamEvent renders one event as its markdown section, or "" for the
@@ -252,6 +284,14 @@ func IndexLine(seq int, d *Dream, createdAt time.Time) string {
 		seq, d.SessionID, createdAt.UTC().Format(time.RFC3339), d.Turns, size, d.FirstUser)
 }
 
+// dreamQuote is the quoting an assignment may carry on either side of its
+// separator, and the characters its value class excludes — so a quoted value
+// ends at its closing quote instead of swallowing it. All three are accepted
+// because accepting only the double quote left `password='hunter2hunter2'`
+// whole, which also carried it past the runner's completion scan: that scan
+// asks only whether Redact changed the content.
+const dreamQuote = "\"'`"
+
 // dreamSecrets are the four shapes §3.2 names. Each replacement keeps what
 // identifies the match — the "Bearer " scheme, the assignment's left-hand side
 // — and replaces only the value, so a redacted transcript still shows the
@@ -263,7 +303,7 @@ var dreamSecrets = []struct {
 	{regexp.MustCompile(`sk-[A-Za-z0-9._-]{8,}`), redactedSecret},
 	{regexp.MustCompile(`AKIA[0-9A-Z]{12,}`), redactedSecret},
 	{regexp.MustCompile(`(?i)(bearer\s+)[A-Za-z0-9._~+/=-]{8,}`), "${1}" + redactedSecret},
-	{regexp.MustCompile(`(?i)((?:api[_-]?key|token|secret|password)"?\s*[:=]\s*"?)[^\s"',;}]+`), "${1}" + redactedSecret},
+	{regexp.MustCompile(`(?i)((?:api[_-]?key|token|secret|password)[` + dreamQuote + `]?\s*[:=]\s*[` + dreamQuote + `]?)[^\s` + dreamQuote + `,;}]+`), "${1}" + redactedSecret},
 }
 
 // Redact replaces the four secret shapes with "[REDACTED_SECRET]": an sk- key,
@@ -331,11 +371,17 @@ func (w *capWriter) write(s string) {
 // cap the two buffers are the whole text and never overlap — the tail only
 // ever saw the bytes the head refused.
 func (w *capWriter) result() ([]byte, int) {
-	if w.total <= w.headMax+w.tailMax {
+	max := w.headMax + w.tailMax
+	if w.total <= max {
 		return append(w.head, w.tail...), 0
 	}
-	head := trimPartialEnd(w.head)
-	tail := trimPartialStart(w.tail)
+	keep := elisionKeep(w.total, max)
+	head := trimPartialEnd(w.head[:min(keep/2, len(w.head))])
+	tail := w.tail
+	if n := keep - keep/2; len(tail) > n {
+		tail = tail[len(tail)-n:]
+	}
+	tail = trimPartialStart(tail)
 	elided := w.total - len(head) - len(tail)
 	out := append(head, elisionNote(elided)...)
 	return append(out, tail...), elided
@@ -347,9 +393,32 @@ func elide(s string, max int) string {
 	if len(s) <= max {
 		return s
 	}
-	head := trimPartialEnd([]byte(s[:max/2]))
-	tail := trimPartialStart([]byte(s[len(s)-(max-max/2):]))
+	keep := elisionKeep(len(s), max)
+	head := trimPartialEnd([]byte(s[:keep/2]))
+	tail := trimPartialStart([]byte(s[len(s)-(keep-keep/2):]))
 	return string(head) + elisionNote(len(s)-len(head)-len(tail)) + string(tail)
+}
+
+// elisionKeep is how many of max's bytes the two ends may keep: every cap here
+// is strict, so the marker announcing the cut is paid for out of the kept bytes
+// rather than added on top of them. That is a fixed point — the marker names
+// the elided count, which is what is kept subtracted from the total — and each
+// pass can only keep less than the one before, so the loop settles, in practice
+// on the second pass, once the count's digits stop changing. Returning at
+// next >= keep is what makes the result safe rather than merely converged:
+// keep + len(marker) is then keep + max - next, which is at most max.
+func elisionKeep(total, max int) int {
+	keep := max
+	for {
+		next := max - len(elisionNote(total-keep))
+		if next < 0 {
+			next = 0
+		}
+		if next >= keep {
+			return keep
+		}
+		keep = next
+	}
 }
 
 // elisionNote is the one marker form both cuts emit.

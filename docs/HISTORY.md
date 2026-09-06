@@ -111,7 +111,9 @@ the tabs and imperative-mood preferences, each with a small `bash` call.
   `list` then omits them and `list --include-archived` serves both.
 
 Two things the run pinned that the code, not the plan, decides: the runner logs nothing on the
-happy path — its only `slog` calls are the start arm's failure paths — so a dream's lifecycle is
+happy path — every `slog` call it makes is a path that went wrong or was skipped: two warnings in
+the tick loop (a database clock it could not read, a tick that did not finish), three errors in the
+start arm, and one debug line for a tick a saturated sweep budget skips — so a dream's lifecycle is
 observable through the `dream.*` metrics and the wire, never `docker logs`; and an archived
 pipeline session still reads `status: idle`, the archive being `archived_at` rather than a status
 of its own. Slice 3 owns the four stages, the digest threads, the report and the 100-transcript

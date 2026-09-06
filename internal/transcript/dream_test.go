@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"runtime"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -15,36 +16,54 @@ import (
 )
 
 // fakeLog is the only test double in this package: an in-memory Lister that
-// honors the AfterSeq keyset and the Limit the renderer pages with, and
-// records what each page was asked for. No pgtest — the renderer's contract
-// with the log is the query it sends and the events it gets back, and a real
-// Postgres would only slow that down.
+// honors the AfterSeq keyset, the Desc direction and the Limit the renderer
+// asks with, and records every query it was given. No pgtest — the renderer's
+// contract with the log is the query it sends and the events it gets back, and
+// a real Postgres would only slow that down.
 type fakeLog struct {
-	evs    []domain.Event
-	err    error
-	calls  int
-	scopes []events.Scope
-	limits []int
+	evs     []domain.Event
+	err     error
+	queries []events.ListQuery
 }
 
 func (f *fakeLog) List(_ context.Context, _ domain.ID, q events.ListQuery) ([]domain.Event, error) {
-	f.calls++
-	f.scopes = append(f.scopes, q.Scope)
-	f.limits = append(f.limits, q.Limit)
+	f.queries = append(f.queries, q)
 	if f.err != nil {
 		return nil, f.err
 	}
+	return pageOf(f.evs, q), nil
+}
+
+// pageOf answers one ListQuery out of an ordered slice, the way the real log's
+// keyset does: exclusive of AfterSeq in whichever direction the sort runs.
+func pageOf(evs []domain.Event, q events.ListQuery) []domain.Event {
 	var out []domain.Event
-	for _, ev := range f.evs {
-		if q.AfterSeq != nil && ev.Seq <= *q.AfterSeq {
-			continue
+	take := func(ev domain.Event) bool {
+		if q.AfterSeq != nil {
+			if q.Desc && ev.Seq >= *q.AfterSeq {
+				return true
+			}
+			if !q.Desc && ev.Seq <= *q.AfterSeq {
+				return true
+			}
 		}
 		out = append(out, ev)
-		if q.Limit > 0 && len(out) == q.Limit {
+		return q.Limit == 0 || len(out) < q.Limit
+	}
+	if q.Desc {
+		for i := len(evs) - 1; i >= 0; i-- {
+			if !take(evs[i]) {
+				break
+			}
+		}
+		return out
+	}
+	for _, ev := range evs {
+		if !take(ev) {
 			break
 		}
 	}
-	return out, nil
+	return out
 }
 
 // mustEvent builds one log row; seqs must ascend, because the keyset does.
@@ -69,8 +88,9 @@ func renderEvents(t *testing.T, evs ...domain.Event) *Dream {
 	return d
 }
 
-// The renderer pulls the session view in DreamPageSize keyset pages: three
-// calls for 500 events, each asking for ScopeSession and the page limit.
+// The renderer reads the high-water mark in one descending row, then pulls the
+// session view in DreamPageSize keyset pages: three of them for 500 events,
+// each asking for ScopeSession and the page limit.
 func TestRenderDreamPages(t *testing.T) {
 	var evs []domain.Event
 	for i := range 500 {
@@ -81,12 +101,15 @@ func TestRenderDreamPages(t *testing.T) {
 	if err != nil {
 		t.Fatalf("RenderDream: %v", err)
 	}
-	if log.calls != 3 {
-		t.Errorf("List called %d times, want 3 pages of %d", log.calls, DreamPageSize)
+	if len(log.queries) != 4 {
+		t.Fatalf("List called %d times, want the mark read and 3 pages of %d", len(log.queries), DreamPageSize)
 	}
-	for i, sc := range log.scopes {
-		if sc != events.ScopeSession || log.limits[i] != DreamPageSize {
-			t.Errorf("page %d asked for scope %v limit %d", i, sc, log.limits[i])
+	if m := log.queries[0]; m.Scope != events.ScopeSession || !m.Desc || m.Limit != 1 {
+		t.Errorf("the first query is %+v, want the descending one-row mark read", m)
+	}
+	for i, q := range log.queries[1:] {
+		if q.Scope != events.ScopeSession || q.Limit != DreamPageSize || q.Desc {
+			t.Errorf("page %d asked for %+v", i, q)
 		}
 	}
 	if d.Turns != 500 {
@@ -113,6 +136,65 @@ func TestRenderDreamEmptyAndError(t *testing.T) {
 	}
 }
 
+// A session that is still being written to while the dream reads it: this log
+// answers every page in full and appends another page's worth each time it is
+// asked, so a renderer that stopped only on a short page would never stop. The
+// mark taken before the first page is what ends the render, and it renders what
+// existed when it started and nothing that arrived after.
+func TestRenderDreamStopsAtTheHighWaterMark(t *testing.T) {
+	log := &appendingLog{}
+	log.append(2 * DreamPageSize)
+
+	done := make(chan *Dream, 1)
+	go func() {
+		d, err := RenderDream(context.Background(), log, "sesn_busy")
+		if err != nil {
+			t.Errorf("RenderDream: %v", err)
+			close(done)
+			return
+		}
+		done <- d
+	}()
+	select {
+	case d := <-done:
+		if d == nil {
+			t.Fatal("RenderDream failed")
+		}
+		if d.Turns != 2*DreamPageSize {
+			t.Errorf("rendered %d turns, want the %d that existed at the mark", d.Turns, 2*DreamPageSize)
+		}
+		if got := string(d.Text); strings.Contains(got, fmt.Sprintf("turn %d", 2*DreamPageSize+1)) {
+			t.Error("the render carried an event appended after the mark")
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("RenderDream never returned: the appender kept every page full, so nothing but a high-water mark can end it")
+	}
+}
+
+// appendingLog is a log a client keeps writing to: it answers the query it was
+// given and then appends a full page more, mimicking an appender that outruns
+// the reader.
+type appendingLog struct {
+	mu  sync.Mutex
+	evs []domain.Event
+}
+
+func (a *appendingLog) append(n int) {
+	for range n {
+		seq := int64(len(a.evs) + 1)
+		a.evs = append(a.evs, domain.Event{Seq: seq, Type: domain.EventUserMessage,
+			Body: []byte(fmt.Sprintf(`{"content":"turn %d"}`, seq))})
+	}
+}
+
+func (a *appendingLog) List(_ context.Context, _ domain.ID, q events.ListQuery) ([]domain.Event, error) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	out := pageOf(a.evs, q)
+	a.append(DreamPageSize)
+	return out, nil
+}
+
 // Tool call inputs cut at 512 bytes and tool results at 2 KiB, both from the
 // middle and both naming what went.
 func TestRenderDreamPerEventTruncation(t *testing.T) {
@@ -130,13 +212,15 @@ func TestRenderDreamPerEventTruncation(t *testing.T) {
 	if strings.Contains(got, strings.Repeat("r", dreamToolResultBudget)) {
 		t.Error("tool result was not truncated")
 	}
-	// Both ends of each item survive the middle elision.
+	// Both ends of each item survive the middle elision, and each marker names
+	// what its own budget could not keep — the marker's bytes come out of the
+	// budget, so the count runs past the overflow by the marker's own width.
 	inputJSON := fmt.Sprintf(`{"command":%q}`, input)
 	for _, want := range []string{
 		"## tool call: bash", `{"command":"iii`, `iii"}`,
 		"## tool result", "rrr",
-		fmt.Sprintf("[… %d bytes elided …]", len(inputJSON)-dreamToolInputBudget),
-		fmt.Sprintf("[… %d bytes elided …]", len(result)-dreamToolResultBudget),
+		elisionNote(len(inputJSON) - elisionKeep(len(inputJSON), dreamToolInputBudget)),
+		elisionNote(len(result) - elisionKeep(len(result), dreamToolResultBudget)),
 	} {
 		if !strings.Contains(got, want) {
 			t.Errorf("missing %q in:\n%s", want, got)
@@ -157,6 +241,20 @@ func TestElideRuneBoundaries(t *testing.T) {
 	}
 	if got := elide("short", 100); got != "short" {
 		t.Errorf("elide under the budget = %q", got)
+	}
+}
+
+// Every budget is strict: the marker announcing the cut is paid for out of the
+// kept bytes, so an elided string is never longer than the budget it was cut
+// to. ASCII content, so no byte goes to a rune boundary and the result lands on
+// the budget exactly.
+func TestElideBudgetIsStrict(t *testing.T) {
+	for _, max := range []int{64, 100, dreamToolInputBudget, dreamToolResultBudget} {
+		for _, n := range []int{max + 1, max * 3, 100_000} {
+			if got := len(elide(strings.Repeat("z", n), max)); got != max {
+				t.Errorf("elide(%d bytes, budget %d) = %d bytes, want exactly the budget", n, max, got)
+			}
+		}
 	}
 }
 
@@ -251,15 +349,47 @@ func TestRedactEverySourceAndShape(t *testing.T) {
 	}
 }
 
+// The assignment shape quotes its value three ways, and a quoted value ends at
+// its closing quote rather than swallowing it. A single-quoted value is the one
+// that escaped both defences before this test existed: the pattern left it
+// whole, so the runner's completion scan — which asks whether Redact changed
+// the content — passed it too.
+func TestRedactQuotedAssignments(t *testing.T) {
+	for _, c := range []struct{ name, in, want string }{
+		{"double", `password="hunter2hunter2"`, `password="` + redactedSecret + `"`},
+		{"single", `password='hunter2hunter2'`, `password='` + redactedSecret + `'`},
+		{"backtick", "password=`hunter2hunter2`", "password=`" + redactedSecret + "`"},
+		{"single around the key too", `'api-key': 'hunter2hunter2'`, `'api-key': '` + redactedSecret + `'`},
+		{"backtick around the key too", "`token`: `hunter2hunter2`", "`token`: `" + redactedSecret + "`"},
+		{"unquoted", `secret = hunter2hunter2`, `secret = ` + redactedSecret},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			if got := Redact(c.in); got != c.want {
+				t.Errorf("Redact(%s) = %s, want %s", c.in, got, c.want)
+			}
+		})
+	}
+}
+
 // Redaction runs before truncation, so an elision can never split a match and
 // leave a fragment: this secret straddles the tool result's head cut.
 func TestRedactBeforeTruncation(t *testing.T) {
 	const secret = "sk-live-STRADDLEcut0123abcd"
-	head := dreamToolResultBudget / 2
+	const pad = 1000
 	// The suffix starts with a space: a shape pattern is greedy, and an
 	// unbroken run of key-alphabet bytes after the secret would be swallowed
 	// into the same match and leave nothing long enough to elide.
-	body := strings.Repeat("a", head-12) + secret + " " + strings.Repeat("b", 3000)
+	body := strings.Repeat("a", pad) + secret + " " + strings.Repeat("b", 3000)
+	// The straddle has to be short enough that neither side is a match on its
+	// own, or a redaction running after the cut would clean both up and the
+	// test could not fail for the property it pins. Nine bytes of the secret
+	// stay on the head side — "sk-live-S", six characters after "sk-" where the
+	// pattern needs eight — and the rest goes into the elided middle. The cut
+	// moves with the marker's width, so the fixture checks where it landed
+	// rather than assuming.
+	if got := elisionKeep(len(body), dreamToolResultBudget)/2 - pad; got != 9 {
+		t.Fatalf("the fixture straddles the head cut by %d bytes, want 9", got)
+	}
 	d := renderEvents(t, mustEvent(t, 1, domain.EventAgentToolResult, content(body)))
 	got := string(d.Text)
 	for _, fragment := range []string{"sk-live", "STRADDLE"} {
@@ -289,8 +419,11 @@ func TestRenderDreamTranscriptCap(t *testing.T) {
 		t.Fatalf("RenderDream: %v", err)
 	}
 	note := elisionNote(d.ElidedBytes)
-	if len(d.Text) != DreamTranscriptCap+len(note) {
-		t.Errorf("rendered %d bytes, want the cap %d plus the note", len(d.Text), DreamTranscriptCap)
+	// The cap is strict — the note is paid for out of it — and this fixture is
+	// ASCII, so nothing is lost to a rune boundary and the transcript lands on
+	// the cap exactly.
+	if len(d.Text) != DreamTranscriptCap {
+		t.Errorf("rendered %d bytes, want the cap %d, note included", len(d.Text), DreamTranscriptCap)
 	}
 	if d.ElidedBytes <= 0 || !strings.Contains(string(d.Text), note) {
 		t.Errorf("ElidedBytes = %d, text:\n%s", d.ElidedBytes, d.Text)
@@ -322,8 +455,9 @@ func TestRenderDreamSingleOversizeEvent(t *testing.T) {
 		t.Fatalf("RenderDream: %v", err)
 	}
 	got := string(d.Text)
-	if len(d.Text) != DreamTranscriptCap+len(elisionNote(d.ElidedBytes)) {
-		t.Errorf("rendered %d bytes for a %d-byte message", len(d.Text), len(body))
+	if len(d.Text) != DreamTranscriptCap {
+		t.Errorf("rendered %d bytes for a %d-byte message, want the cap %d",
+			len(d.Text), len(body), DreamTranscriptCap)
 	}
 	if !strings.HasPrefix(got, "# session sesn_big") || !strings.HasSuffix(got, "END\n\n") {
 		t.Errorf("the cap kept the wrong ends:\n%s", got)
@@ -375,10 +509,19 @@ func TestFirstUserPreview(t *testing.T) {
 
 // The memory bound (§7): a 50,000-event log renders under the cap holding no
 // more memory than a 500-event one, because the paging and the two fixed
-// buffers are the only state. Retained heap is what is measured — the total
-// allocated necessarily grows with the log, the live set must not.
+// buffers are the only state.
+//
+// Two measures, because retained heap alone cannot fail for the property: a
+// renderer that materialised all 50,000 events and dropped the slice before
+// returning would leave nothing behind and pass. So the log itself measures the
+// live heap at every page boundary — a GC and a ReadMemStats in the List call —
+// and keeps the largest it sees. A materialising renderer holds its growing
+// slice live across exactly those calls, so its peak climbs with the log while
+// a paged renderer's does not. It is a heuristic on two counts: the sample is
+// taken between pages rather than continuously, and HeapAlloc counts everything
+// live, not only the renderer's share.
 func TestRenderDreamMemoryBound(t *testing.T) {
-	measure := func(n int) (int64, *Dream) {
+	measure := func(n int) (int64, uint64, *Dream) {
 		t.Helper()
 		log := &generatedLog{n: n}
 		runtime.GC()
@@ -392,13 +535,13 @@ func TestRenderDreamMemoryBound(t *testing.T) {
 		runtime.GC()
 		runtime.GC()
 		runtime.ReadMemStats(&after)
-		return int64(after.HeapAlloc) - int64(before.HeapAlloc), d
+		return int64(after.HeapAlloc) - int64(before.HeapAlloc), log.peak, d
 	}
-	smallHeap, small := measure(500)
-	bigHeap, big := measure(50_000)
+	smallHeap, smallPeak, small := measure(500)
+	bigHeap, bigPeak, big := measure(50_000)
 
 	for _, d := range []*Dream{small, big} {
-		if len(d.Text) > DreamTranscriptCap+64 {
+		if len(d.Text) > DreamTranscriptCap {
 			t.Errorf("session of %d turns rendered %d bytes, over the cap", d.Turns, len(d.Text))
 		}
 	}
@@ -410,9 +553,20 @@ func TestRenderDreamMemoryBound(t *testing.T) {
 	// linear (a materialized 50,000-event log is megabytes).
 	const slack = 64 << 10
 	t.Logf("retained heap: 500 events %d bytes, 50,000 events %d bytes", smallHeap, bigHeap)
+	t.Logf("peak live heap at a page boundary: 500 events %d bytes, 50,000 events %d bytes", smallPeak, bigPeak)
 	if bigHeap-smallHeap > slack {
 		t.Errorf("retained heap grew by %d bytes between 500 and 50,000 events; the paging is not holding",
 			bigHeap-smallHeap)
+	}
+	// 1 MiB, chosen from both footprints rather than guessed: the paged
+	// renderer's peak grows by 33-41 KiB between the two runs (page buffers and
+	// GC noise, measured over repeated runs), and a renderer that materialised
+	// the 50,000 events grew its peak by 14.5 MiB. The bound sits an order of
+	// magnitude clear of each.
+	const peakSlack = 1 << 20
+	if int64(bigPeak)-int64(smallPeak) > peakSlack {
+		t.Errorf("peak live heap grew by %d bytes between 500 and 50,000 events; the renderer is holding the log, not paging it",
+			int64(bigPeak)-int64(smallPeak))
 	}
 	runtime.KeepAlive(small)
 	runtime.KeepAlive(big)
@@ -420,18 +574,43 @@ func TestRenderDreamMemoryBound(t *testing.T) {
 
 // generatedLog serves a log of n synthetic events a page at a time without
 // ever holding one: a fake that materialized 50,000 events would be measuring
-// itself in the bound above.
-type generatedLog struct{ n int }
+// itself in the bound above. It also takes that bound's peak sample — a GC and
+// a ReadMemStats at each page boundary, keeping the largest live heap it sees.
+type generatedLog struct {
+	n    int
+	peak uint64
+}
 
 func (g *generatedLog) List(_ context.Context, _ domain.ID, q events.ListQuery) ([]domain.Event, error) {
+	if q.Desc {
+		// The high-water mark: the newest row, which for a generated log of n
+		// events is the nth.
+		return []domain.Event{g.event(int64(g.n))}, nil
+	}
 	start := int64(0)
 	if q.AfterSeq != nil {
 		start = *q.AfterSeq
 	}
 	out := make([]domain.Event, 0, q.Limit)
 	for seq := start + 1; seq <= int64(g.n) && len(out) < q.Limit; seq++ {
-		body := fmt.Sprintf(`{"content":"turn %d: %s"}`, seq, strings.Repeat("w", 120))
-		out = append(out, domain.Event{Seq: seq, Type: domain.EventUserMessage, Body: []byte(body)})
+		out = append(out, g.event(seq))
 	}
+	g.sample()
 	return out, nil
+}
+
+// sample records the live heap between two pages, which is where a renderer
+// that accumulates has its accumulation.
+func (g *generatedLog) sample() {
+	runtime.GC()
+	var m runtime.MemStats
+	runtime.ReadMemStats(&m)
+	if m.HeapAlloc > g.peak {
+		g.peak = m.HeapAlloc
+	}
+}
+
+func (g *generatedLog) event(seq int64) domain.Event {
+	body := fmt.Sprintf(`{"content":"turn %d: %s"}`, seq, strings.Repeat("w", 120))
+	return domain.Event{Seq: seq, Type: domain.EventUserMessage, Body: []byte(body)}
 }

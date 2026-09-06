@@ -47,7 +47,9 @@ controlplane:
     port: 8080
   # The dream runner's three knobs (docs/plan/41_dreams.md §4.7). Empty uses
   # the binary default; "0" for the interval disables the runner, and
-  # POST /v1/dreams then reports the absence.
+  # POST /v1/dreams then reports the absence. Quoted or bare, the 0 means the
+  # same: the template tests these for emptiness rather than truth, because a
+  # Go template reads a YAML-numeric 0 as false.
   dreamTickInterval: ""   # DREAM_TICK_INTERVAL, e.g. "30s"; empty uses the binary default (30s)
   dreamTimeout: ""        # DREAM_TIMEOUT, a dream's runtime budget from creation, e.g. "2h"; empty uses the binary default (2h)
   dreamMaxInputBytes: ""  # DREAM_MAX_INPUT_BYTES, the input store's content cap in bytes; empty uses the binary default (67108864, 64 MiB)

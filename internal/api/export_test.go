@@ -262,6 +262,15 @@ func SetDreamStageTurnCapForTest(n int) (restore func()) {
 	return func() { dreamStageTurnCap = prev }
 }
 
+// SetDreamCloneBatchForTest lowers the clone's multi-row insert width so a
+// store of a handful of memories still crosses the batch boundary the
+// production width (500) never reaches under test. Test binary only.
+func SetDreamCloneBatchForTest(n int) (restore func()) {
+	prev := dreamCloneBatch
+	dreamCloneBatch = n
+	return func() { dreamCloneBatch = prev }
+}
+
 // SetDreamStartHookAfterRenderForTest installs a hook in the window between
 // the render's blob puts and the write transaction — the one §4.2 leaves
 // unlocked, where a cancel lands and wins; a returned error drives the
@@ -270,4 +279,72 @@ func SetDreamStartHookAfterRenderForTest(f func() error) (restore func()) {
 	prev := dreamStartHookAfterRender
 	dreamStartHookAfterRender = f
 	return func() { dreamStartHookAfterRender = prev }
+}
+
+// SetDreamStartHookInWriteForTest installs a hook inside the start's write
+// transaction, with the dream row locked FOR UPDATE and nothing written yet —
+// the seam for holding the row while a cancel waits at it. Test binary only.
+func SetDreamStartHookInWriteForTest(f func()) (restore func()) {
+	prev := dreamStartHookInWrite
+	dreamStartHookInWrite = f
+	return func() { dreamStartHookInWrite = prev }
+}
+
+// SetDreamHookAfterLockForTest installs a hook in the arm's window between the
+// pipeline session's status read and its ask read, so a test can commit an
+// ask-and-idle exactly there (§3.3). Test binary only.
+func SetDreamHookAfterLockForTest(f func()) (restore func()) {
+	prev := dreamHookAfterLock
+	dreamHookAfterLock = f
+	return func() { dreamHookAfterLock = prev }
+}
+
+// SetDreamLockWaitForTest shortens the lock_timeout every dream-row
+// transaction sets, so the contention between a start's write and a cancel
+// resolves in test time. Test binary only.
+func SetDreamLockWaitForTest(d time.Duration) (restore func()) {
+	prev := dreamLockWait
+	dreamLockWait = d
+	return func() { dreamLockWait = prev }
+}
+
+// FillSweepBudgetForTest saturates the pool's shared sweep budget and returns
+// the release that hands every slot back, so a test can drive a tick that finds
+// no connection to spend. Test binary only.
+func FillSweepBudgetForTest(pool *pgxpool.Pool) (release func()) {
+	b := sweepBudget(pool)
+	held := 0
+	for {
+		select {
+		case b <- struct{}{}:
+			held++
+		default:
+			return func() {
+				for range held {
+					<-b
+				}
+				held = 0
+			}
+		}
+	}
+}
+
+// SweepBudgetHeldForTest is how many slots of the pool's shared sweep budget
+// are taken right now — zero once every arm of a finished tick has handed its
+// slot back, however the arm ended. Test binary only.
+func SweepBudgetHeldForTest(pool *pgxpool.Pool) int { return len(sweepBudget(pool)) }
+
+// DreamCandidatesForTest runs the tick's candidate scan alone, so a test can
+// hold a candidate list across another tick's claim and then run the arm on the
+// stale id. Test binary only.
+func DreamCandidatesForTest(ctx context.Context, pool *pgxpool.Pool, now time.Time) ([]string, error) {
+	return scanDreamCandidates(ctx, pool, sweepBudget(pool), now)
+}
+
+// DreamArmForTest runs one candidate's arm — the transaction that re-reads the
+// row under the scan's own predicate — without a scan in front of it. Test
+// binary only.
+func DreamArmForTest(ctx context.Context, pool *pgxpool.Pool, blobs blob.Store, id string,
+	now time.Time, cfg DreamRunnerConfig) error {
+	return newServer(pool, blobs, nil).runDreamArm(ctx, id, now, cfg)
 }

@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -108,6 +110,19 @@ func appendEvent(t *testing.T, s *tserver, sessionID, typ, payload string) strin
 		t.Fatalf("append %s: %v", typ, err)
 	}
 	return id
+}
+
+// appendThreadEvent is appendEvent on a child thread: the events.thread_id
+// column a delegated turn carries, which the stage's count must not filter out.
+func appendThreadEvent(t *testing.T, s *tserver, sessionID, threadID, typ, payload string) {
+	t.Helper()
+	id := domain.NewID(domain.PrefixEvent).String()
+	if _, err := s.pool.Exec(context.Background(), `
+		INSERT INTO events (id, session_id, thread_id, seq, type, payload)
+		VALUES ($1, $2, $3, (SELECT COALESCE(MAX(seq), 0) + 1 FROM events WHERE session_id = $2), $4, $5::jsonb)`,
+		id, sessionID, threadID, typ, payload); err != nil {
+		t.Fatalf("append %s on thread %s: %v", typ, threadID, err)
+	}
 }
 
 // startedDream creates a dream over a seeded store and n input sessions and
@@ -219,6 +234,21 @@ func TestDreamTickArms(t *testing.T) {
 				for range 3 {
 					appendEvent(t, s, sessionID, "span.model_request_end", `{}`)
 				}
+			},
+			status: "failed", errType: "internal_error",
+		},
+		{
+			name: "the stage's turn cap counts a child thread's turns too",
+			arrange: func(t *testing.T, s *tserver, _, _, sessionID string) {
+				t.Cleanup(api.SetDreamStageTurnCapForTest(2))
+				// The primary thread alone stays inside the cap; what carries
+				// the stage over it is the delegated thread's turn, counted
+				// because every thread's turns are the stage's (§3.3).
+				for range 2 {
+					appendEvent(t, s, sessionID, "span.model_request_end", `{}`)
+				}
+				appendThreadEvent(t, s, sessionID, domain.NewID(domain.PrefixSessionThread).String(),
+					"span.model_request_end", `{}`)
 			},
 			status: "failed", errType: "internal_error",
 		},
@@ -586,7 +616,222 @@ func TestDreamRunnerDisabled(t *testing.T) {
 	}
 }
 
+// §3.3's read order, driven at the one instant that can break it: the arm
+// takes the session's status, an ask-and-idle commits, and only then does the
+// arm read the asks. The busy status it already holds is what it must act on,
+// so the stage is not mistaken for finished — and the next tick, reading both
+// after the commit, fails the dream on the ask.
+func TestDreamAskAndIdleLandBetweenTheArmsTwoReads(t *testing.T) {
+	s := newTestServer(t)
+	_, body := seededDreamBody(t, s)
+	dreamID, sessionID := startedDream(t, s, body)
+	setSessionStatus(t, s, sessionID, "running")
+
+	var once sync.Once
+	defer api.SetDreamHookAfterLockForTest(func() {
+		once.Do(func() {
+			// The brain's own commit: the ask and the flip to idle land
+			// together, which is why reading the status first is safe.
+			appendEvent(t, s, sessionID, "agent.tool_use",
+				`{"name":"bash","input":{},"evaluated_permission":"ask"}`)
+			setSessionStatus(t, s, sessionID, "idle")
+		})
+	})()
+
+	tick(t, s)
+	if d := getDream(t, s, dreamID); d["status"] != "running" {
+		t.Fatalf("dream is %v (%v); the arm held a busy status read and must have taken arm 7",
+			d["status"], d["error"])
+	}
+
+	tick(t, s)
+	d := getDream(t, s, dreamID)
+	got, msg := dreamError(t, d)
+	if d["status"] != "failed" || got != "internal_error" || !strings.Contains(msg, "asked for confirmation") {
+		t.Fatalf("dream is %v/%v/%q, want failed/internal_error naming the ask", d["status"], got, msg)
+	}
+}
+
+// The shared sweep budget is taken without waiting: a tick that finds it
+// saturated does nothing and returns, rather than parking on a connection the
+// rest of the process is using (§4.1). The next tick, with the budget free,
+// claims the dream it left.
+func TestDreamTickSkipsASaturatedSweepBudget(t *testing.T) {
+	s := newTestServer(t)
+	_, body := seededDreamBody(t, s)
+	dreamID := createDream(t, s, body)["id"].(string)
+
+	release := api.FillSweepBudgetForTest(s.pool)
+	now := dbNow(t, s)
+	done := make(chan error, 1)
+	go func() {
+		done <- api.DreamTickForTest(context.Background(), s.pool, s.blobs, now, dreamCfg())
+	}()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("tick with a saturated sweep budget: %v", err)
+		}
+	case <-time.After(30 * time.Second):
+		release()
+		t.Fatal("the tick blocked on the saturated sweep budget instead of skipping")
+	}
+	if _, attempts, _ := dreamInternals(t, s, dreamID); attempts != 0 {
+		t.Errorf("attempts = %d; a tick with no budget slot claimed anyway", attempts)
+	}
+	if d := getDream(t, s, dreamID); d["status"] != "pending" {
+		t.Fatalf("dream is %v after a tick that had nothing to spend", d["status"])
+	}
+
+	release()
+	tick(t, s)
+	if d := getDream(t, s, dreamID); d["status"] != "running" {
+		t.Fatalf("dream is %v once the budget was free, want running (%v)", d["status"], d["error"])
+	}
+}
+
+// An arm hands its budget slot back however it ends. The erroring arm is the
+// one a leak would hide behind, so it is the one asserted: outputs[] that no
+// longer decodes fails arm 4 before it can decide anything.
+func TestDreamArmReleasesItsBudgetSlotWhenItErrors(t *testing.T) {
+	s := newTestServer(t)
+	_, body := seededDreamBody(t, s)
+	dreamID, _ := startedDream(t, s, body)
+	if _, err := s.pool.Exec(context.Background(),
+		`UPDATE dreams SET outputs = '{}'::jsonb WHERE id = $1`, dreamID); err != nil {
+		t.Fatalf("corrupt outputs: %v", err)
+	}
+
+	if err := api.DreamTickForTest(context.Background(), s.pool, s.blobs,
+		dbNow(t, s), dreamCfg()); err == nil {
+		t.Fatal("the tick reported success although its only arm failed")
+	}
+	if n := api.SweepBudgetHeldForTest(s.pool); n != 0 {
+		t.Errorf("%d sweep budget slots are still held after the arm errored", n)
+	}
+}
+
+// Two replicas ticking one *pending* dream: the claim is a single row's, so
+// exactly one attempt is burned, one pipeline session created and one store
+// cloned. The completed-dream twin above pins the same rule at the other end.
+//
+// The race is made deterministic rather than hoped for: the arm that wins the
+// row parks in the hook before its claim commits, so the other replica's scan
+// is guaranteed to run while the dream still looks unclaimed — the interleaving
+// the claim's exclusion exists for, and the one a timing-lucky pair of ticks
+// would never reach.
+func TestDreamTwoReplicasOneClaim(t *testing.T) {
+	s := newTestServer(t)
+	_, body := seededDreamBody(t, s)
+	dreamID := createDream(t, s, body)["id"].(string)
+
+	locked, release := make(chan struct{}, 2), make(chan struct{})
+	var once sync.Once
+	releaseArm := func() { once.Do(func() { close(release) }) }
+	defer releaseArm()
+	defer api.SetDreamHookAfterLockForTest(func() {
+		locked <- struct{}{}
+		<-release
+	})()
+
+	now := dbNow(t, s)
+	done := make(chan error, 2)
+	for range 2 {
+		go func() {
+			done <- api.DreamTickForTest(context.Background(), s.pool, s.blobs, now, dreamCfg())
+		}()
+	}
+	<-locked
+	// The replica that did not take the row is skipped by SKIP LOCKED rather
+	// than queued behind it, so its tick is already over.
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("the replica that lost the row: %v", err)
+		}
+	case <-time.After(30 * time.Second):
+		t.Fatal("the second replica is still waiting at the row the first one holds")
+	}
+	releaseArm()
+	if err := <-done; err != nil {
+		t.Fatalf("the replica that claimed: %v", err)
+	}
+
+	if _, attempts, _ := dreamInternals(t, s, dreamID); attempts != 1 {
+		t.Errorf("attempts = %d after two concurrent ticks, want the one claim", attempts)
+	}
+	if d := getDream(t, s, dreamID); d["status"] != "running" || d["session_id"] == nil {
+		t.Fatalf("dream is %v with session %v, want running with one", d["status"], d["session_id"])
+	}
+	_, dreamEnv := api.DreamInternalIDsForTest()
+	if n := countRows(t, s, `SELECT count(*) FROM sessions WHERE environment_id = $1`, dreamEnv); n != 1 {
+		t.Errorf("%d pipeline sessions exist, want 1", n)
+	}
+	// The input store and its one clone: a second claim would have cloned again.
+	if n := countRows(t, s, `SELECT count(*) FROM memory_stores`); n != 2 {
+		t.Errorf("%d memory stores exist, want the input and its one clone", n)
+	}
+}
+
+// The arms are ordered, and the order is the contract: an arm that matches
+// stops the table. Each case sets up two conditions and names which one must
+// answer.
+func TestDreamArmOrder(t *testing.T) {
+	t.Run("the turn cap beats a busy session", func(t *testing.T) {
+		s := newTestServer(t)
+		_, body := seededDreamBody(t, s)
+		dreamID, sessionID := startedDream(t, s, body)
+		t.Cleanup(api.SetDreamStageTurnCapForTest(2))
+		for range 3 {
+			appendEvent(t, s, sessionID, "span.model_request_end", `{}`)
+		}
+		setSessionStatus(t, s, sessionID, "running")
+
+		tick(t, s)
+
+		d := getDream(t, s, dreamID)
+		if d["status"] != "failed" {
+			t.Fatalf("dream is %v (%v); the busy session answered ahead of the turn cap",
+				d["status"], d["error"])
+		}
+		if got, msg := dreamError(t, d); got != "internal_error" || !strings.Contains(msg, "model turns") {
+			t.Fatalf("error = %v/%q, want internal_error naming the turn budget", got, msg)
+		}
+	})
+	t.Run("an unavailable input store beats a terminated session", func(t *testing.T) {
+		s := newTestServer(t)
+		storeID, body := seededDreamBody(t, s)
+		dreamID, sessionID := startedDream(t, s, body)
+		archiveMemoryStore(t, s, storeID)
+		appendEvent(t, s, sessionID, "session.error",
+			`{"error":{"type":"model_request_failed_error","message":"no provider route for model"}}`)
+		setSessionStatus(t, s, sessionID, "terminated")
+
+		tick(t, s)
+
+		d := getDream(t, s, dreamID)
+		if d["status"] != "failed" {
+			t.Fatalf("dream is %v (%v), want failed", d["status"], d["error"])
+		}
+		if got, msg := dreamError(t, d); got != "input_memory_store_unavailable" {
+			t.Fatalf("error = %v/%q, want input_memory_store_unavailable: the unavailable input "+
+				"is read before the session's own end", got, msg)
+		}
+	})
+}
+
 // --- shared readers -------------------------------------------------------
+
+// countRows runs a one-column count for the assertions that are about how many
+// rows a race left behind.
+func countRows(t *testing.T, s *tserver, query string, args ...any) int {
+	t.Helper()
+	var n int
+	if err := s.pool.QueryRow(context.Background(), query, args...).Scan(&n); err != nil {
+		t.Fatalf("count: %v", err)
+	}
+	return n
+}
 
 func archiveMemoryStore(t *testing.T, s *tserver, storeID string) {
 	t.Helper()

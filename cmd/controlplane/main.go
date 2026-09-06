@@ -211,6 +211,16 @@ func run(ctx context.Context) error {
 			*dst = d
 		}
 	}
+	// Exactly "0" disables the runner; every other non-positive value is a
+	// misconfiguration and says so, because neither would announce itself: a
+	// negative interval would disable the runner silently, and a zero or
+	// negative timeout would time every dream out on its first tick.
+	if dreams.TickInterval < 0 {
+		return errors.New("DREAM_TICK_INTERVAL must be a non-negative Go duration (0 disables the runner)")
+	}
+	if dreams.Timeout <= 0 {
+		return errors.New("DREAM_TIMEOUT must be a positive Go duration")
+	}
 	if v := os.Getenv("DREAM_MAX_INPUT_BYTES"); v != "" {
 		n, err := strconv.ParseInt(v, 10, 64)
 		if err != nil || n <= 0 {

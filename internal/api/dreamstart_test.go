@@ -6,8 +6,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"net/http"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 	"unicode/utf8"
@@ -365,6 +367,154 @@ func TestDreamStartAttemptsExhausted(t *testing.T) {
 	}
 }
 
+// The claim that dies before it can report back is the one settleExhaustedDream
+// never sees: every attempt is spent and nothing settled the dream, so the next
+// tick past the lease must end it here rather than hand out one claim more.
+func TestDreamClaimAtTheCapSettlesInsteadOfClaiming(t *testing.T) {
+	s := newTestServer(t)
+	t.Cleanup(api.SetDreamStartAttemptsForTest(2))
+	_, body := seededDreamBody(t, s)
+	dreamID := createDream(t, s, body)["id"].(string)
+	// The row a claimant that crashed after its last claim leaves behind.
+	if _, err := s.pool.Exec(context.Background(),
+		`UPDATE dreams SET attempts = 2, updated_at = now() - interval '1 hour' WHERE id = $1`,
+		dreamID); err != nil {
+		t.Fatalf("age the exhausted claim: %v", err)
+	}
+
+	tick(t, s)
+
+	d := getDream(t, s, dreamID)
+	_, attempts, closedAt := dreamInternals(t, s, dreamID)
+	if d["status"] != "failed" {
+		t.Fatalf("dream is %v with session %v after %d attempts; a dream at the cap must be "+
+			"settled, not claimed again", d["status"], d["session_id"], attempts)
+	}
+	got, msg := dreamError(t, d)
+	if got != "internal_error" {
+		t.Fatalf("error.type = %q (%q), want internal_error", got, msg)
+	}
+	if !strings.Contains(msg, "the last claim did not complete") {
+		t.Errorf("the settle does not name the claim that never reported back: %q", msg)
+	}
+	if d["session_id"] != nil {
+		t.Errorf("a dream past its claim cap was started anyway: session %v", d["session_id"])
+	}
+	if attempts != 2 {
+		t.Errorf("attempts = %d, want the cap unchanged: the settle claims nothing", attempts)
+	}
+	if closedAt == nil {
+		t.Error("the settle left the dream open; it has no session to wind down")
+	}
+}
+
+// The candidate list is advisory and the locked re-read decides: a list taken
+// before a claim, replayed after it, claims nothing — the claim's own soft
+// lease excludes the row on both sides of the tick (§4.1).
+func TestDreamStaleCandidateIsRefusedByTheLockedReRead(t *testing.T) {
+	s := newTestServer(t)
+	_, body := seededDreamBody(t, s)
+	dreamID := createDream(t, s, body)["id"].(string)
+
+	ids, err := api.DreamCandidatesForTest(context.Background(), s.pool, dbNow(t, s))
+	if err != nil {
+		t.Fatalf("scan candidates: %v", err)
+	}
+	if len(ids) != 1 || ids[0] != dreamID {
+		t.Fatalf("candidates = %v, want the one pending dream", ids)
+	}
+
+	// A claim that burns an attempt and rolls its start back leaves the row
+	// `pending` — the shape the stale list still names, and the one only the
+	// lease keeps out of a second claim.
+	restore := api.SetDreamStartHookAfterRenderForTest(func() error {
+		return errors.New("the write could not be reached")
+	})
+	tick(t, s)
+	restore()
+	if _, attempts, _ := dreamInternals(t, s, dreamID); attempts != 1 {
+		t.Fatalf("attempts = %d after the claim, want 1", attempts)
+	}
+
+	if err := api.DreamArmForTest(context.Background(), s.pool, s.blobs, ids[0],
+		dbNow(t, s), dreamCfg()); err != nil {
+		t.Fatalf("arm on the stale candidate: %v", err)
+	}
+
+	if _, attempts, _ := dreamInternals(t, s, dreamID); attempts != 1 {
+		t.Errorf("attempts = %d: the stale candidate was claimed a second time", attempts)
+	}
+	if d := getDream(t, s, dreamID); d["status"] != "pending" || d["session_id"] != nil {
+		t.Errorf("dream is %v with session %v, want the pending row the claim left",
+			d["status"], d["session_id"])
+	}
+}
+
+// A cancel arriving while the start's write transaction holds the row waits at
+// the row for lock_timeout and then fails the request (§4.1): a failed request
+// is what the SDK retries, and the retry lands against whatever the write left
+// — here a running dream, which it cancels.
+func TestDreamCancelWhileTheStartWriteHoldsTheRow(t *testing.T) {
+	s := newTestServer(t)
+	t.Cleanup(api.SetDreamLockWaitForTest(250 * time.Millisecond))
+	_, body := seededDreamBody(t, s)
+	dreamID := createDream(t, s, body)["id"].(string)
+
+	held, release := make(chan struct{}), make(chan struct{})
+	var once sync.Once
+	releaseWrite := func() { once.Do(func() { close(release) }) }
+	defer releaseWrite()
+	defer api.SetDreamStartHookInWriteForTest(func() {
+		close(held)
+		<-release
+	})()
+
+	now := dbNow(t, s)
+	ticked := make(chan error, 1)
+	go func() {
+		ticked <- api.DreamTickForTest(context.Background(), s.pool, s.blobs, now, dreamCfg())
+	}()
+	<-held
+
+	canceled := make(chan int, 1)
+	go func() {
+		status, _ := s.do(http.MethodPost, "/v1/dreams/"+dreamID+"/cancel", nil)
+		canceled <- status
+	}()
+	select {
+	case status := <-canceled:
+		// 55P03 is unmapped, so the request fails rather than hangs.
+		if status != http.StatusInternalServerError {
+			t.Errorf("cancel against the held row: status %d, want 500", status)
+		}
+	case <-time.After(30 * time.Second):
+		t.Fatal("the cancel never returned: it waited on the start's row lock with no bound")
+	}
+
+	releaseWrite()
+	if err := <-ticked; err != nil {
+		t.Fatalf("dream tick: %v", err)
+	}
+	d := getDream(t, s, dreamID)
+	if d["status"] != "running" || d["session_id"] == nil {
+		t.Fatalf("the released write left the dream %v with session %v, want running with one",
+			d["status"], d["session_id"])
+	}
+	sessionID := d["session_id"].(string)
+
+	status, res := s.do(http.MethodPost, "/v1/dreams/"+dreamID+"/cancel", nil)
+	if status != http.StatusOK || res["status"] != "canceled" {
+		t.Fatalf("the retried cancel: status %d (%v)", status, res)
+	}
+	if !sessionInterrupted(t, s, sessionID) {
+		t.Error("the retried cancel did not interrupt the now-running dream's session")
+	}
+	tick(t, s)
+	if _, _, closedAt := dreamInternals(t, s, dreamID); closedAt == nil {
+		t.Error("the closing arm did not finish the canceled dream")
+	}
+}
+
 // A cancel landing during the unlocked render wins: the write transaction
 // finds the dream no longer pending, writes nothing and drops the objects.
 func TestDreamCancelDuringTheRender(t *testing.T) {
@@ -559,6 +709,28 @@ func assertCloneVersions(t *testing.T, s *tserver, storeID, sessionID string, wa
 	}
 }
 
+// assertCloneVersionPerMemory pins the pairing the batched insert makes by
+// parameter number alone: every cloned memory has exactly one version, that
+// version is its head pointer, and the two carry the same path and content.
+// A numbering slip inside a batch crosses these without changing any count.
+func assertCloneVersionPerMemory(t *testing.T, s *tserver, storeID string, want int) {
+	t.Helper()
+	var paired int
+	if err := s.pool.QueryRow(context.Background(), `
+		SELECT count(*) FROM memories m
+		  JOIN memory_versions v
+		    ON v.memory_id = m.id AND v.memory_store_id = m.memory_store_id
+		 WHERE m.memory_store_id = $1 AND m.memory_version_id = v.id
+		   AND v.operation = 'created' AND v.path = m.path AND v.content = m.content
+		   AND v.content_sha256 = m.content_sha256
+		   AND v.content_size_bytes = m.content_size_bytes`, storeID).Scan(&paired); err != nil {
+		t.Fatalf("join the clone's memories to their versions: %v", err)
+	}
+	if paired != want {
+		t.Errorf("%d cloned memories are paired with their own created version, want %d", paired, want)
+	}
+}
+
 func assertInternalRow(t *testing.T, s *tserver, table, id string) {
 	t.Helper()
 	var internal bool
@@ -716,6 +888,51 @@ func TestDreamCloneNameKeepsItsSuffixAtTheBound(t *testing.T) {
 	}
 	if n := utf8.RuneCountInString(name); n > 255 {
 		t.Errorf("clone name is %d characters, over the store-name bound", n)
+	}
+}
+
+// The clone writes its memories and their versions in batches (§4.2 step 4),
+// and at the production width of 500 no test store ever reaches the second
+// pass: the loop bound, the per-batch parameter numbering and the pairing of a
+// memory with its own version are all decided by code one partial batch never
+// exercises. Lowered to 2, five memories are two full batches and a partial,
+// with a single full batch and an empty store either side of them.
+func TestDreamCloneBatchesEveryMemoryAndItsVersion(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		paths []string
+	}{
+		{"two full batches and a partial", []string{"/a.md", "/b.md", "/c.md", "/d.md", "/e.md"}},
+		{"exactly one full batch", []string{"/a.md", "/b.md"}},
+		{"an empty input store", nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			defer api.SetDreamCloneBatchForTest(2)()
+			s := newTestServer(t)
+			storeID := createMemoryStore(t, s, "preferences")
+			want := map[string]string{}
+			for i, path := range tc.paths {
+				content := fmt.Sprintf("content of %s (%d)", path, i)
+				createMemory(t, s, storeID, path, content)
+				want[path] = content
+			}
+			agentID, envID := fixture(t, s)
+			ids := []any{createSession(t, s, map[string]any{"agent": agentID, "environment_id": envID})["id"]}
+			dreamID, sessionID := startedDream(t, s,
+				map[string]any{"inputs": dreamInputs(storeID, ids), "model": "claude-opus-4-8"})
+
+			cloneID := dreamOutputStore(t, s, dreamID)
+			if got := clonePaths(t, s, cloneID); !maps.Equal(got, want) {
+				t.Errorf("clone holds %v, want the input's %v", got, want)
+			}
+			assertCloneVersions(t, s, cloneID, sessionID, len(tc.paths))
+			assertCloneVersionPerMemory(t, s, cloneID, len(tc.paths))
+			// The input is the one store the clone must not touch, whichever
+			// side of a batch boundary its memories fall.
+			if got := clonePaths(t, s, storeID); !maps.Equal(got, want) {
+				t.Errorf("the input store holds %v, want its own %v", got, want)
+			}
+		})
 	}
 }
 

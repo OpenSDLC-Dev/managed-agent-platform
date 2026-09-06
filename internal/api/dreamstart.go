@@ -69,8 +69,10 @@ const dreamEnvBody = `{
 
 // dreamCloneBatch is the multi-row insert width the clone writes: a
 // 2,000-memory store is four statements for the memories and four for their
-// versions, not four thousand.
-const dreamCloneBatch = 500
+// versions, not four thousand. A var for the test setter
+// (dreamrunner.go:55-61's idiom), because no test store is large enough to
+// make the loop run more than once at 500.
+var dreamCloneBatch = 500
 
 // dreamFileMIME is what a rendered transcript is: markdown, the form §3.2
 // renders and the model reads.
@@ -89,6 +91,13 @@ var errDreamInternalRowArchived = errors.New("the dream runner's internal agent 
 // an error and drive the unclassified rollback the claim survives. Always nil
 // in production.
 var dreamStartHookAfterRender func() error
+
+// dreamStartHookInWrite, when non-nil, runs inside the write transaction with
+// the dream row locked FOR UPDATE and nothing written yet, so a test can hold
+// the row there and drive the contention §4.1 bounds with lock_timeout — the
+// cancel that waits at the row and fails rather than hangs. Always nil in
+// production.
+var dreamStartHookInWrite func()
 
 // dreamFile is one rendered file on its way into the sandbox: the row's
 // filename keeps GET /v1/files legible while the dream runs, the mount is the
@@ -266,6 +275,9 @@ func (s *server) writeDreamStart(ctx context.Context, d dreamRow, sessionID stri
 	if err := tx.QueryRow(ctx,
 		`SELECT status FROM dreams WHERE id = $1 FOR UPDATE`, d.id).Scan(&status); err != nil {
 		return false, err
+	}
+	if h := dreamStartHookInWrite; h != nil {
+		h()
 	}
 	if status != "pending" {
 		// A cancel landed while the render ran, and closed the dream. Nothing

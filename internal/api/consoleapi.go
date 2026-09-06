@@ -135,6 +135,10 @@ func consoleEnvironmentID(r *http.Request) (string, error) {
 // must be able to see, and revoke, keys already issued to an environment whatever
 // has happened to it since. Issuance does consult both, and reads them under a
 // row lock instead — see createEnvironmentKey.
+//
+// notInternal because off the wire is not off the rule (plan 41 §4.4): the dream
+// runner's own environment is hidden from every public surface, and a console
+// listing that answered for it would confirm the row the /v1 routes refuse to.
 func (s *server) consoleEnvironment(r *http.Request) (string, error) {
 	id, err := consoleEnvironmentID(r)
 	if err != nil {
@@ -142,7 +146,7 @@ func (s *server) consoleEnvironment(r *http.Request) (string, error) {
 	}
 	var exists bool
 	err = s.pool.QueryRow(r.Context(),
-		`SELECT true FROM environments WHERE id = $1`, id).Scan(&exists)
+		`SELECT true FROM environments WHERE id = $1`+notInternal, id).Scan(&exists)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return "", errNotFound("environment %s not found", id)
 	}
@@ -159,6 +163,10 @@ func (s *server) consoleEnvironment(r *http.Request) (string, error) {
 // environment key, so issuing one there would hand an operator a credential
 // nothing can use. The reference offers no key UI for its cloud environments
 // either.
+//
+// The row read carries notInternal for the reason consoleEnvironment's does, and
+// with more to lose: without it the runner's hidden environment is refused as a
+// cloud environment, which says what kind of row is there.
 func (s *server) createEnvironmentKey(r *http.Request) (any, error) {
 	envID, err := consoleEnvironmentID(r)
 	if err != nil {
@@ -201,7 +209,7 @@ func (s *server) createEnvironmentKey(r *http.Request) (any, error) {
 	var kind string
 	var archivedAt *time.Time
 	err = tx.QueryRow(ctx,
-		`SELECT kind, archived_at FROM environments WHERE id = $1 FOR SHARE`, envID).Scan(&kind, &archivedAt)
+		`SELECT kind, archived_at FROM environments WHERE id = $1`+notInternal+` FOR SHARE`, envID).Scan(&kind, &archivedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, errNotFound("environment %s not found", envID)
 	}

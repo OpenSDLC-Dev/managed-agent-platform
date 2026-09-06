@@ -173,6 +173,11 @@ type dreamStepResult struct {
 	// to is the status the arm moved the dream to, empty when it moved none.
 	// Counted after the commit, because a metric observes committed state.
 	to string
+	// turns is the stage-turn sample the arm counted, nil where it counted
+	// none, and stage the stage it counted for. Recorded after the commit for
+	// the reason `to` is: a rolled-back tick must leave no sample behind.
+	turns *int
+	stage int
 	// after runs once the transaction has committed, still on the arm's
 	// budget slot: the start arm's render-and-write, the closing arm's blob
 	// deletes.
@@ -204,10 +209,20 @@ func (s *server) dreamTick(ctx context.Context, now time.Time, cfg DreamRunnerCo
 		mu   sync.Mutex
 		errs []error
 	)
+dispatch:
 	for _, id := range ids {
-		wg.Add(1)
 		sem <- struct{}{}
-		budget <- struct{}{}
+		// The shared budget is taken without waiting (§4.1: "a tick may find
+		// zero slots and skip"): a saturated pool leaves the rest of this
+		// tick's candidates to the next tick, rather than parking a sweep on
+		// a connection the rest of the process is using.
+		select {
+		case budget <- struct{}{}:
+		default:
+			<-sem
+			break dispatch
+		}
+		wg.Add(1)
 		go func(id string) {
 			defer wg.Done()
 			defer func() { <-sem }()
@@ -225,12 +240,15 @@ func (s *server) dreamTick(ctx context.Context, now time.Time, cfg DreamRunnerCo
 
 // scanDreamCandidates is the tick's plain, lockless scan (§4.1): every dream
 // with something left to do, minus the ones under a live start claim. It holds
-// a budget slot like an arm, because it is one query on one connection.
+// a budget slot like an arm, because it is one query on one connection — and
+// takes it without waiting, so a saturated budget skips the whole tick rather
+// than queueing one behind the sweep that filled it.
 func scanDreamCandidates(ctx context.Context, pool *pgxpool.Pool, budget chan struct{}, now time.Time) ([]string, error) {
 	select {
 	case budget <- struct{}{}:
-	case <-ctx.Done():
-		return nil, ctx.Err()
+	default:
+		slog.DebugContext(ctx, "dream tick skipped: the sweep budget is saturated")
+		return nil, nil
 	}
 	defer func() { <-budget }()
 
@@ -270,6 +288,9 @@ func (s *server) runDreamArm(ctx context.Context, id string, now time.Time, cfg 
 	if res.to != "" {
 		recordDreamTransition(ctx, res.to)
 	}
+	if res.turns != nil {
+		recordDreamStageTurns(ctx, res.stage, *res.turns)
+	}
 	if res.after != nil {
 		res.after(ctx)
 	}
@@ -292,6 +313,9 @@ func (s *server) dreamArmTx(ctx context.Context, id string, now time.Time, cfg D
 		// scan. Not this replica's arm.
 		return dreamStepResult{}, err
 	}
+	if h := dreamHookAfterLock; h != nil {
+		h()
+	}
 	res, err := s.dreamStep(ctx, tx, d, now, cfg)
 	if err != nil {
 		return dreamStepResult{}, err
@@ -301,6 +325,12 @@ func (s *server) dreamArmTx(ctx context.Context, id string, now time.Time, cfg D
 	}
 	return res, nil
 }
+
+// dreamHookAfterLock, when non-nil, runs in the window §3.3's read order
+// protects: the arm has taken the dream row and the pipeline session's status
+// and has read no ask yet, so a test can commit an ask-and-idle there and
+// require the arm to still see a busy session. Always nil in production.
+var dreamHookAfterLock func()
 
 // lockDream re-reads the candidate under the scan's predicate, then the
 // pipeline session's own state. The session read is deliberately the second
@@ -379,7 +409,18 @@ func (s *server) dreamStep(ctx context.Context, tx pgx.Tx, d dreamRow, now time.
 	if err != nil {
 		return dreamStepResult{}, err
 	}
-	recordDreamStageTurns(ctx, d.stage, turns)
+	res, err := s.dreamTurnArms(ctx, tx, d, turns)
+	if err != nil {
+		return dreamStepResult{}, err
+	}
+	// The sample is the commit's, not the transaction's: a tick that rolls
+	// back must leave no turn count behind, so runDreamArm records it.
+	res.stage, res.turns = d.stage, &turns
+	return res, nil
+}
+
+// dreamTurnArms is arms 6 to 10, the ones the stage's turn count precedes.
+func (s *server) dreamTurnArms(ctx context.Context, tx pgx.Tx, d dreamRow, turns int) (dreamStepResult, error) {
 	if turns > dreamStageTurnCap { // 6. over budget
 		return s.dreamFail(ctx, tx, d, "internal_error",
 			fmt.Sprintf("stage %d exceeded its budget of %d model turns", d.stage, dreamStageTurnCap))
@@ -467,7 +508,19 @@ func (s *server) dreamCompleteArm(ctx context.Context, tx pgx.Tx, d dreamRow) (d
 
 // dreamClaim is arm 3's first phase: count the attempt, release the row, and
 // let the start run its rendering with no lock held (§4.2).
+//
+// A row already at dreamStartAttempts is the shape settleExhaustedDream cannot
+// reach: every claim was spent and the last claimant died before it could
+// report back, so nothing settled the dream and the aged lease would otherwise
+// hand it a sixth claim. The cap is therefore enforced here as well, and this
+// side has no last error to carry — settleExhaustedDream keeps the case that
+// does.
 func (s *server) dreamClaim(ctx context.Context, tx pgx.Tx, d dreamRow, cfg DreamRunnerConfig) (dreamStepResult, error) {
+	if d.attempts >= dreamStartAttempts {
+		return s.dreamFail(ctx, tx, d, "internal_error", fmt.Sprintf(
+			"the dream could not be started in %d attempts; the last claim did not complete",
+			dreamStartAttempts))
+	}
 	if _, err := tx.Exec(ctx,
 		`UPDATE dreams SET attempts = attempts + 1, updated_at = now() WHERE id = $1`, d.id); err != nil {
 		return dreamStepResult{}, err
@@ -560,9 +613,15 @@ func (s *server) dreamUnavailable(ctx context.Context, tx pgx.Tx, d dreamRow) (e
 	return "", "", nil
 }
 
+// memoryStoreLive runs inside the arm's transaction and nowhere else, which is
+// what makes FOR SHARE right here: an archive or a delete racing the arm waits
+// for the commit that acts on this read instead of landing between the two.
+// The lock protects the arm's own decision and nothing past it — once the dream
+// is complete the caller may archive or delete the output store freely (§2.6,
+// §4.6).
 func memoryStoreLive(ctx context.Context, db querier, id string) (bool, error) {
 	var archivedAt *time.Time
-	err := db.QueryRow(ctx, `SELECT archived_at FROM memory_stores WHERE id = $1`, id).Scan(&archivedAt)
+	err := db.QueryRow(ctx, `SELECT archived_at FROM memory_stores WHERE id = $1 FOR SHARE`, id).Scan(&archivedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return false, nil
 	}
@@ -642,6 +701,12 @@ func lastSessionError(ctx context.Context, db querier, sessionID string) (string
 // session wrote whose content still matches a redaction pattern, or "". It is
 // the cheap half of the secret defence (§3.3): the pipeline reads redacted
 // text, and this reads back what it wrote.
+//
+// The strict `created_at > after` bound cannot exclude a version the session
+// wrote: the only versions that can tie the session row's own created_at are
+// the clone's, which share the session's transaction and its now(); anything
+// the session writes lands in a transaction that begins after that one
+// committed, so its now() is strictly later.
 func dreamSecretInVersions(ctx context.Context, db querier, storeID, sessionID string, after time.Time) (string, error) {
 	rows, err := db.Query(ctx, `
 		SELECT memory_id, content FROM memory_versions

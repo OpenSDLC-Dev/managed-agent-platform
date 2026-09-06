@@ -515,7 +515,11 @@ func (s *server) cancelDream(r *http.Request) (any, error) {
 	if err := checkID(id, "dream"); err != nil {
 		return nil, err
 	}
-	return s.dreamAction(ctx, id, func(ctx context.Context, tx pgx.Tx, status string, _ *time.Time, sessionID *string) error {
+	// The two arms below both move the status, so both are counted — after
+	// dreamAction commits, because a metric observes committed state (the
+	// runner's own transitions are counted the same way).
+	moved := false
+	d, err := s.dreamAction(ctx, id, func(ctx context.Context, tx pgx.Tx, status string, _ *time.Time, sessionID *string) error {
 		switch status {
 		case "canceled":
 			// "Canceling an already-canceled dream is an idempotent no-op":
@@ -524,6 +528,7 @@ func (s *server) cancelDream(r *http.Request) (any, error) {
 		case "pending":
 			// A dream with no session has nothing to wind down, so it ends and
 			// closes in the same commit (§5.3).
+			moved = true
 			_, err := tx.Exec(ctx,
 				`UPDATE dreams SET status = 'canceled', ended_at = now(), closed_at = now(),
 				        updated_at = now() WHERE id = $1`, id)
@@ -542,6 +547,7 @@ func (s *server) cancelDream(r *http.Request) (any, error) {
 					return err
 				}
 			}
+			moved = true
 			_, err := tx.Exec(ctx,
 				`UPDATE dreams SET status = 'canceled', ended_at = now(), updated_at = now()
 				  WHERE id = $1`, id)
@@ -550,6 +556,10 @@ func (s *server) cancelDream(r *http.Request) (any, error) {
 			return errInvalid("dream %s is %s; only a pending or running dream can be canceled", id, status)
 		}
 	})
+	if err == nil && moved {
+		recordDreamTransition(ctx, "canceled")
+	}
+	return d, err
 }
 
 // dreamAction is the shared body of the two lifecycle routes: lock the row,
