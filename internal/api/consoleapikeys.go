@@ -26,12 +26,15 @@ const (
 	consoleAPIKeyPath  = consoleAPIKeysPath + "/{key_id}"
 )
 
-// reservedWorkspace is the only workspace id this platform answers for, beside
-// reservedOrganization. The segment is carried because the reference carries it
-// and because `workspace_id` is already a reserved tenancy column (principle 5):
-// a seam, not an implementation. Until it becomes real scoping, any other value
-// names a workspace that does not exist.
-const reservedWorkspace = "default"
+// reservedWorkspace is the only workspace id THIS ROUTE answers for, beside
+// reservedOrganization. `workspace_id` stopped being a seam with plan 42 slice
+// 1 — it is real scoping now, resolved from a credential and narrowed by the
+// anthropic-workspace-id header — but these console routes have not caught up:
+// slice 4 gives the reads their scope predicates (#56) and slice 6 lands
+// workspace management, and until both, a second workspace has nothing here to
+// address. So any other value still answers as a workspace that does not exist,
+// and slice 6 is where this rule and selectWorkspace's become one.
+const reservedWorkspace = domain.DefaultWorkspaceID
 
 // actorJSON renders the reference's `{id, type}` actor. Its own vocabulary for
 // type is `user`; ours is `principal` or `api_key`, because we have no `user_`

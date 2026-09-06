@@ -4,13 +4,17 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"strings"
+	"time"
 	"unicode/utf8"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -99,8 +103,18 @@ func partialKeyHint(key string) string {
 // the only one a single-tenant deployment has — what a caller that never chose
 // a workspace is asking for.
 func EnsureAPIKey(ctx context.Context, pool *pgxpool.Pool, name, key string) error {
-	return EnsureAPIKeyInWorkspace(ctx, pool, "default", name, key)
+	return EnsureAPIKeyInWorkspace(ctx, pool, domain.DefaultWorkspaceID, name, key)
 }
+
+// keyAdoptionLockWait bounds the wait for the adoption lock below — and, since
+// SET LOCAL runs for the whole transaction, every row lock it takes afterwards.
+// A fleet of replicas booting together all hash the SAME configured value, so
+// they all queue on one lock, and the boot context has no deadline of its own:
+// an unbounded wait is a control plane that hangs before it serves, which the
+// Helm liveness probe turns into a CrashLoopBackOff carrying no diagnostic at
+// all. Bounded, a wedged adopter fails loudly and names the lock. A var only
+// for the test setter.
+var keyAdoptionLockWait = 10 * time.Second
 
 // EnsureAPIKeyInWorkspace is EnsureAPIKey binding the credential to a named
 // workspace, which is what a management key resolves its scope from (plan 42
@@ -132,7 +146,34 @@ func EnsureAPIKeyInWorkspace(ctx context.Context, pool *pgxpool.Pool, workspace,
 	// move this function promises to be loud about. Transaction-scoped, so the
 	// commit or the deferred rollback releases it; keyed in SQL so a test can
 	// hold the same lock without repeating a Go-side derivation.
+	//
+	// SET LOCAL takes no bind parameter, so the milliseconds are formatted into
+	// the statement text; the value is this package's, never a caller's.
+	if _, err := tx.Exec(ctx,
+		fmt.Sprintf("SET LOCAL lock_timeout = '%dms'", keyAdoptionLockWait.Milliseconds())); err != nil {
+		return err
+	}
 	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`, hash); err != nil {
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == "55P03" { // lock_not_available
+			return fmt.Errorf("another replica is adopting the management key %q and has held the adoption lock past %s: %w",
+				name, keyAdoptionLockWait, err)
+		}
+		return err
+	}
+	// The destination has to be a workspace this deployment still runs, checked
+	// after the lock and before anything is written. The upsert writes
+	// workspace_id exactly as given, and authenticate folds a missed registry
+	// join into the unknown-key 401 by design (§6.1) — so without this check a
+	// typo, or a destination archived since the deployment was configured,
+	// boots clean and then answers every request `invalid x-api-key`, with
+	// nothing anywhere naming the workspace at fault.
+	var live int
+	switch err := tx.QueryRow(ctx,
+		`SELECT 1 FROM workspaces WHERE id = $1 AND archived_at IS NULL`, workspace).Scan(&live); {
+	case errors.Is(err, pgx.ErrNoRows):
+		return fmt.Errorf("workspace %q is not a live workspace in this deployment", workspace)
+	case err != nil:
 		return err
 	}
 	// Adopting a key somebody issued from the console is the right outcome (see the
@@ -228,12 +269,18 @@ type apiKeyPrincipal struct {
 // §6.1, and the reference's own answer, §6.9). created_by rides along because
 // nothing else can reach it: the bootstrap marker is a column, and this is the
 // only query that reads the row (§6.8).
+//
+// That join is COMPOSITE — workspace and org both — because org has exactly one
+// authority, the registry. A key row whose org_id drifted from its workspace's
+// names a tenant no workspace agrees with, so it resolves to nothing rather
+// than to whichever half the query happened to read; 0034's UNIQUE (org_id, id)
+// is the index it lands on.
 func authenticate(ctx context.Context, pool *pgxpool.Pool, key string) (apiKeyPrincipal, error) {
 	var p apiKeyPrincipal
 	err := pool.QueryRow(ctx,
 		`SELECT k.id, k.org_id, k.workspace_id, k.project_id, k.created_by IS NULL
 		   FROM api_keys k
-		   JOIN workspaces w ON w.id = k.workspace_id AND w.archived_at IS NULL
+		   JOIN workspaces w ON w.id = k.workspace_id AND w.org_id = k.org_id AND w.archived_at IS NULL
 		 WHERE k.key_hash = $1 AND k.status = 'active'
 		   AND (k.expires_at IS NULL OR k.expires_at > now())`,
 		hashKey(key)).Scan(&p.ID, &p.Scope.OrgID, &p.Scope.WorkspaceID, &p.Scope.ProjectID, &p.Bootstrap)

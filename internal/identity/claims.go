@@ -1,6 +1,7 @@
 package identity
 
 import (
+	"log/slog"
 	"slices"
 	"strings"
 )
@@ -85,10 +86,16 @@ func stringClaim(claims map[string]any, name string) string {
 // OAuth scope semantics nobody asked for. An array contributes its string
 // elements and silently drops the rest. Anything else contributes none.
 //
-// The cap bounds the elements EXAMINED, not the strings collected. Capping the
-// output instead would let a claim pad itself past the limit with non-strings
-// and still be read at any depth, which is the whole cap defeated; and where the
-// two differ, this direction drops a value rather than granting one.
+// The cap — maxClaimValues, 1000 — bounds the elements EXAMINED, not the
+// strings collected. Capping the output instead would let a claim pad itself
+// past the limit with non-strings and still be read at any depth, which is the
+// whole cap defeated; and where the two differ, this direction drops a value
+// rather than granting one.
+//
+// Truncation is SILENT here and reported by the caller: both call sites go
+// through boundedClaimValues, which logs when a claim was cut short. This
+// function stays quiet so the two are not double-counted, and so a test of the
+// normalization rule is not also a test of logging.
 func claimValues(v any) []string {
 	switch t := v.(type) {
 	case string:
@@ -107,6 +114,24 @@ func claimValues(v any) []string {
 	default:
 		return nil
 	}
+}
+
+// boundedClaimValues is claimValues with the truncation made visible. It is
+// what Verify calls for both multi-valued claims.
+//
+// A cut claim is a silent, permanent denial otherwise: the values past the cap
+// are the ones not read, so a human whose only mapped group sorts late gets no
+// role — and, since plan 42 §6.2, no workspace — with nothing anywhere saying
+// why. The log line is the difference between "our IdP sends too many groups"
+// and an unfalsifiable "SSO is broken for one person". It is a warning rather
+// than a refusal because refusing would deny the human outright, which is the
+// same outcome and less recoverable.
+func boundedClaimValues(name string, v any) []string {
+	if t, ok := v.([]any); ok && len(t) > maxClaimValues {
+		slog.Warn("identity: claim truncated to the value cap; values past it were not read",
+			"claim", name, "values", len(t), "cap", maxClaimValues)
+	}
+	return claimValues(v)
 }
 
 // strongestRole reduces mapped values to the single strongest role by the fixed

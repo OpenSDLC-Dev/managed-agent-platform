@@ -327,7 +327,9 @@ func TestClaimValues(t *testing.T) {
 
 func TestClaimValuesCap(t *testing.T) {
 	t.Parallel()
-	const total = 200
+	// Derived from the cap rather than a literal, so raising the cap does not
+	// quietly turn this into a test of nothing.
+	total := maxClaimValues * 2
 	raw := make([]any, total)
 	for i := range raw {
 		raw[i] = fmt.Sprintf("r%d", i)

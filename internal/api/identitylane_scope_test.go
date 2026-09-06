@@ -138,6 +138,45 @@ func TestIdentityLaneScopeWithNoClaimConfigured(t *testing.T) {
 	})
 }
 
+// The identity lane's own half of the stamping schedule: a response that
+// resolved no scope carries neither tenancy header. The two membership 403s are
+// asserted where they are raised, in the tests above; these are the two that
+// answer before membership is even consulted, and neither was pinned.
+func TestIdentityLaneRefusalsBeforeAScopeAreUnstamped(t *testing.T) {
+	s := newLaneServer(t)
+
+	t.Run("a malformed header is refused before anything resolves", func(t *testing.T) {
+		got := laneScoped(t, s, s.token("platform-admins"), "marketing")
+		if got.status != http.StatusBadRequest || got.errType != "invalid_request_error" {
+			t.Fatalf("a malformed workspace header: status %d, error type %q, want 400 invalid_request_error",
+				got.status, got.errType)
+		}
+		if msg := laneMessage(t, got.body); msg != "anthropic-workspace-id header must be a valid workspace ID." {
+			t.Errorf("message = %q, want the one every lane answers", msg)
+		}
+		if got.org != "" || got.work != "" {
+			t.Errorf("tenancy headers = (%q, %q) on a refusal that resolved no scope, want neither",
+				got.org, got.work)
+		}
+	})
+
+	t.Run("a pre-auth 401 stamps neither", func(t *testing.T) {
+		// JWT-shaped, so it takes the identity lane rather than the key lane,
+		// and unverifiable, so it never reaches a scope.
+		res := s.doRaw(http.MethodGet, laneAgents, nil,
+			map[string]string{"Authorization": "Bearer eyJhbGciOiJSUzI1NiJ9.eyJzdWIiOiJ4In0.sig"})
+		org, work := res.Header.Get("anthropic-organization-id"), res.Header.Get("anthropic-workspace-id")
+		status, errType, _ := laneRead(t, res)
+		if status != http.StatusUnauthorized || errType != "authentication_error" {
+			t.Fatalf("an unverifiable token: status %d, error type %q, want 401 authentication_error",
+				status, errType)
+		}
+		if org != "" || work != "" {
+			t.Errorf("tenancy headers = (%q, %q) on a pre-auth 401, want neither", org, work)
+		}
+	})
+}
+
 // TestIdentityLaneScopeFromClaims is the configured deployment: membership comes
 // from the token, selection from the reference's own header, and the header may
 // only narrow to a workspace the identity already covers.

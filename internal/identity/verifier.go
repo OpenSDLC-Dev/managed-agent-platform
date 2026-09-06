@@ -12,6 +12,8 @@ import (
 
 	jose "github.com/go-jose/go-jose/v4"
 	"github.com/go-jose/go-jose/v4/jwt"
+
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
 )
 
 // Verifier verifies this deployment's identity credential. Safe for concurrent
@@ -111,7 +113,7 @@ func New(ctx context.Context, cfg Config) (*Verifier, error) {
 		if value == "" {
 			return nil, errors.New("identity: the workspace map has an empty claim value")
 		}
-		if !validWorkspaceID(id) {
+		if !domain.IsWorkspaceID(id) {
 			return nil, fmt.Errorf("identity: the workspace map gives %q the invalid workspace id %q", value, id)
 		}
 		workspaceMap[value] = id
@@ -415,13 +417,14 @@ func (v *Verifier) Verify(ctx context.Context, token string) (Identity, error) {
 		DisplayName: truncate(stringClaim(all, v.nameClaim), maxProfileBytes),
 		// RoleNone is not an error: the principal is authenticated with no
 		// authority, and a role-gated route refuses it.
-		Role: strongestRole(claimValues(claimAt(all, v.rolesClaim)), v.roleMap),
+		Role: strongestRole(boundedClaimValues(v.rolesClaim, claimAt(all, v.rolesClaim)), v.roleMap),
 		// Empty is not an error either, and for the same reason: the membership
 		// this token proves is the caller's, and what an empty one may reach is
 		// the identity lane's decision, not this package's. An unconfigured
 		// deployment resolves nothing here — claimAt on "" is nil — so a token
 		// that carries a workspaces claim anyway cannot assert membership where
 		// no operator asked for any.
-		Workspaces: mappedWorkspaces(claimValues(claimAt(all, v.workspacesClaim)), v.workspaceMap),
+		Workspaces: mappedWorkspaces(
+			boundedClaimValues(v.workspacesClaim, claimAt(all, v.workspacesClaim)), v.workspaceMap),
 	}, nil
 }

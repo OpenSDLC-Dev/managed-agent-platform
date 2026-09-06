@@ -106,7 +106,9 @@ func Secret(token string) string {
 // The session also carries the scope, which the projection takes at no extra
 // round trip, and the workspace join is a fifth end condition: a token whose
 // workspace has been archived resolves to nothing, so the lane refuses it with
-// the same 401 an unknown token gets (plan 42 §6.1, §6.9).
+// the same 401 an unknown token gets (plan 42 §6.1, §6.9). That join is
+// composite — org too — because org has one authority, the registry: a session
+// whose org_id drifted from its workspace's resolves to nothing.
 func Authenticate(ctx context.Context, pool *pgxpool.Pool, token string) (Principal, error) {
 	var p Principal
 	err := pool.QueryRow(ctx,
@@ -114,7 +116,7 @@ func Authenticate(ctx context.Context, pool *pgxpool.Pool, token string) (Princi
 		   FROM work_session_tokens t
 		   JOIN work_items w ON w.id = t.work_id AND w.session_id = t.session_id
 		   JOIN sessions s ON s.id = t.session_id
-		   JOIN workspaces ws ON ws.id = s.workspace_id AND ws.archived_at IS NULL
+		   JOIN workspaces ws ON ws.id = s.workspace_id AND ws.org_id = s.org_id AND ws.archived_at IS NULL
 		  WHERE t.token_hash = $1
 		    AND CASE WHEN w.state IN ('stopping', 'stopped')
 		             THEN w.stop_requested_at > now() - make_interval(secs => $2)

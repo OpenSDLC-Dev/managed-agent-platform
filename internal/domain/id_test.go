@@ -194,3 +194,35 @@ func TestValidWithPrefix(t *testing.T) {
 		t.Errorf("%q must not validate under the agent prefix", good)
 	}
 }
+
+// TestIsWorkspaceID pins the one rule the request header and the identity
+// membership map both run. Its whole reason to exist is that the two entry
+// points must answer identically, so what it rejects matters as much as what it
+// takes: a bare UUID is the shape the reference's own workspace ids have and
+// this platform mints none, and `Default` is the near miss an operator types.
+func TestIsWorkspaceID(t *testing.T) {
+	valid := map[string]string{
+		"the seeded id": DefaultWorkspaceID,
+		"a minted id":   NewID(PrefixWorkspace).String(),
+	}
+	for name, id := range valid {
+		if !IsWorkspaceID(id) {
+			t.Errorf("%s: %q must be a workspace id", name, id)
+		}
+	}
+	invalid := map[string]string{
+		"empty":              "",
+		"a bare uuid":        "6f1b0f7e-2d3a-4c5b-8e9f-0a1b2c3d4e5f",
+		"the wrong case":     "Default",
+		"another resource":   "sesn_0123456789abcdefghjkmnpq",
+		"prefix only":        "wrkspc",
+		"empty token":        "wrkspc_",
+		"out-of-alphabet":    "wrkspc_illo",
+		"default with slack": " default",
+	}
+	for name, id := range invalid {
+		if IsWorkspaceID(id) {
+			t.Errorf("%s: %q must not be a workspace id", name, id)
+		}
+	}
+}

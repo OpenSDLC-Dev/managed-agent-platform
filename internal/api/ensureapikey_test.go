@@ -109,6 +109,53 @@ func TestEnsureAPIKeyWritesTheConfiguredWorkspaceOnAFreshKey(t *testing.T) {
 	}
 }
 
+// The destination is validated against the registry before anything is
+// written. Without that check a typo — or a workspace archived since the
+// deployment was configured — boots clean and then answers every request
+// `invalid x-api-key`, because the upsert writes workspace_id as given and
+// authenticate folds a missed registry join into the unknown-key 401 by design.
+// A boot-time error names the workspace; a 401 names nothing.
+func TestEnsureAPIKeyRefusesAWorkspaceTheRegistryDoesNotRun(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		register func(t *testing.T, s *tserver)
+	}{
+		{"a workspace that was never registered", func(t *testing.T, s *tserver) {}},
+		{"a workspace that has been archived", func(t *testing.T, s *tserver) {
+			registerWorkspace(t, s.pool, workspaceB)
+			if _, err := s.pool.Exec(context.Background(),
+				`UPDATE workspaces SET archived_at = now() WHERE id = $1`, workspaceB); err != nil {
+				t.Fatalf("archive workspace B: %v", err)
+			}
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := newTestServer(t)
+			ctx := context.Background()
+			tc.register(t, s)
+
+			const key = "ak-into-a-workspace-that-is-not-there"
+			err := api.EnsureAPIKeyInWorkspace(ctx, s.pool, workspaceB, "boot", key)
+			if err == nil {
+				t.Fatal("EnsureAPIKeyInWorkspace succeeded; a key bound to a workspace nothing runs must fail the boot")
+			}
+			if !strings.Contains(err.Error(), workspaceB) {
+				t.Errorf("error %q does not name the workspace an operator has to fix", err)
+			}
+			// And nothing was written: the check runs before the upsert, so a
+			// refused boot leaves no credential behind to be adopted later.
+			var rows int
+			if err := s.pool.QueryRow(ctx,
+				`SELECT count(*) FROM api_keys WHERE key_hash = $1`, sha256Hex(key)).Scan(&rows); err != nil {
+				t.Fatalf("count key rows: %v", err)
+			}
+			if rows != 0 {
+				t.Errorf("api_keys rows for the refused key = %d, want 0", rows)
+			}
+		})
+	}
+}
+
 // The move must be loud even when two boots race to adopt the same never-seen
 // value into different workspaces: each would SELECT before either committed,
 // find no row, warn about nothing, and the later upsert would pick the tenant

@@ -29,7 +29,22 @@ const orgHeader = "anthropic-organization-id"
 // caller must choose. A well-formed id outside the set answers 404 whether or
 // not that workspace exists, from this one code path, so existence never leaks.
 func selectWorkspace(r *http.Request, covered []domain.Scope) (domain.Scope, error) {
-	v := r.Header.Get(workspaceHeader)
+	// A repeated selector is refused before the value is read at all, which is
+	// the rule requireAPIKey already applies to a duplicate x-api-key: two
+	// values are ambiguous, Header.Get would silently take the first, and the
+	// workspace a request ran in would then depend on header order. Identical
+	// values take the same refusal — an exception for them is exactly what a
+	// proxy that appends its own copy would land in, and there is no reading
+	// under which a client meant to send the selector twice. Unobserved on the
+	// reference; registered as an inference.
+	values := r.Header.Values(workspaceHeader)
+	if len(values) > 1 {
+		return domain.Scope{}, errInvalid("anthropic-workspace-id header must be a valid workspace ID.")
+	}
+	var v string
+	if len(values) == 1 {
+		v = values[0]
+	}
 	if v == "" {
 		if len(covered) == 1 {
 			return covered[0], nil
@@ -40,10 +55,12 @@ func selectWorkspace(r *http.Request, covered []domain.Scope) (domain.Scope, err
 		// nobody exercises.
 		return domain.Scope{}, errInvalid("anthropic-workspace-id header is required: this identity spans multiple workspaces and none was selected.")
 	}
-	// "default" is this deployment's own frozen workspace id, which the
-	// reference has no equivalent of — accepting it is a lenient parse of ours,
-	// registered as such.
-	if !domain.ValidWithPrefix(v, domain.PrefixWorkspace) && v != "default" {
+	// domain.IsWorkspaceID is the one copy of the rule, shared with the identity
+	// membership map so a configured target and a header value cannot disagree.
+	// It also takes domain.DefaultWorkspaceID, this deployment's own frozen
+	// workspace id, which the reference has no equivalent of — a lenient parse
+	// of ours, registered as such.
+	if !domain.IsWorkspaceID(v) {
 		return domain.Scope{}, errInvalid("anthropic-workspace-id header must be a valid workspace ID.")
 	}
 	for _, s := range covered {
@@ -58,8 +75,11 @@ func selectWorkspace(r *http.Request, covered []domain.Scope) (domain.Scope, err
 
 // stampScope emits the two tenancy response headers. Each resolver calls it as
 // soon as the scope resolves and before anything writes, so both headers are
-// present on a 200 and on an authenticated 4xx, and absent on a 401 that failed
-// before authentication.
+// present on a 200 and on an authenticated 4xx — and absent wherever NO scope
+// resolved, which is more than the pre-auth 401: the two header refusals above
+// (malformed, and a well-formed id outside the credential's set) and the
+// identity lane's two membership 403s, identityWorkspacesUnconfigured and
+// identityNoWorkspace, all answer before any scope exists to stamp.
 func stampScope(w http.ResponseWriter, s domain.Scope) {
 	w.Header().Set(orgHeader, s.OrgID)
 	w.Header().Set(workspaceHeader, s.WorkspaceID)

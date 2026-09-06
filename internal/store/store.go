@@ -31,15 +31,18 @@
 // databases that already ran it, so the file and the deployed schema silently
 // disagree. A schema change is always a new, higher-numbered file.
 //
-// The schema also carries multi-tenancy it does not yet enforce: top-level
-// resource tables (agents, environments, sessions, events, work_items,
-// api_keys, skills, files, vaults, principals among them) reserve org_id,
-// workspace_id and project_id as text NOT NULL DEFAULT 'default', while child
-// tables inherit scope through their foreign key to a scoped parent. Rows
-// written today mean the same thing once multi-tenancy lands, which is the
-// whole point of reserving the columns rather than adding them later. Scoping
-// is org/workspace/project and never an end-user: sessions carry no user_id
-// by design, and created_by is audit only.
+// The schema carries multi-tenancy it enforces in part. Top-level resource
+// tables (agents, environments, sessions, events, work_items, api_keys, skills,
+// files, vaults, principals among them) carry org_id, workspace_id and
+// project_id as text NOT NULL DEFAULT 'default', while child tables inherit
+// scope through their foreign key to a scoped parent. Since plan 42 slice 1
+// (0034_workspaces.sql) the workspaces registry names the workspaces those rows
+// may belong to, and every credential resolves exactly one of them — an
+// archived workspace resolves none. What is still absent is the read half: no
+// query filters on the triple yet, so scope decides which tenant a request runs
+// AS and not yet what it can see. Later slices close that. Scoping is
+// org/workspace/project and never an end-user: sessions carry no user_id by
+// design, and created_by is audit only.
 package store
 
 import (

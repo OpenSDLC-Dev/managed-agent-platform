@@ -177,12 +177,7 @@ func TestCredentialLanesResolveAScope(t *testing.T) {
 				if res.Code != http.StatusUnauthorized {
 					t.Fatalf("status = %d, want 401 (body %s)", res.Code, res.Body)
 				}
-				if got := res.Header().Get(orgHeader); got != "" {
-					t.Errorf("%s = %q on a pre-auth 401, want absent", orgHeader, got)
-				}
-				if got := res.Header().Get(workspaceHeader); got != "" {
-					t.Errorf("%s = %q on a pre-auth 401, want absent", workspaceHeader, got)
-				}
+				wantNoTenancyHeaders(t, res)
 			})
 
 			t.Run("a header naming its own workspace narrows to it", func(t *testing.T) {
@@ -198,6 +193,7 @@ func TestCredentialLanesResolveAScope(t *testing.T) {
 				res := serveLane(c.mw, scopeEcho(t), r)
 				wantLaneError(t, res, http.StatusBadRequest, errTypeInvalidRequest,
 					"anthropic-workspace-id header must be a valid workspace ID.")
+				wantNoTenancyHeaders(t, res)
 			})
 
 			t.Run("a live workspace it does not cover is not found", func(t *testing.T) {
@@ -206,6 +202,7 @@ func TestCredentialLanesResolveAScope(t *testing.T) {
 				res := serveLane(c.mw, scopeEcho(t), r)
 				wantLaneError(t, res, http.StatusNotFound, errTypeNotFound,
 					"Workspace `"+foreign+"` not found.")
+				wantNoTenancyHeaders(t, res)
 			})
 
 			t.Run("a workspace that does not exist answers the same bytes", func(t *testing.T) {
@@ -291,6 +288,35 @@ func TestTheLiteralDefaultIsAValidWorkspaceHeader(t *testing.T) {
 	r.Header.Set(workspaceHeader, "default")
 	res := serveLane(func(next http.Handler) http.Handler { return requireAPIKey(pool, next) }, scopeEcho(t), r)
 	wantScopeBody(t, res, domain.Scope{OrgID: "default", WorkspaceID: "default", ProjectID: "default"})
+}
+
+// Org has one authority — the registry — so a key row whose org_id has drifted
+// from its workspace's does not resolve at all. The join is composite for that
+// reason, and the refusal must be the byte-identical 401 an unknown key gets:
+// a drifted row is a row that names no tenant this deployment runs, and saying
+// so differently would tell a caller the key exists.
+func TestAnAPIKeyWhoseOrgDriftedDoesNotResolve(t *testing.T) {
+	pool := pgtest.NewPool(t)
+	ctx := context.Background()
+	const key = "map-org-drift-key"
+	if err := EnsureAPIKey(ctx, pool, "drift", key); err != nil {
+		t.Fatalf("EnsureAPIKey: %v", err)
+	}
+	if _, err := pool.Exec(ctx,
+		`UPDATE api_keys SET org_id = 'other' WHERE key_hash = $1`, hashKey(key)); err != nil {
+		t.Fatalf("drift the key's org: %v", err)
+	}
+	mw := func(next http.Handler) http.Handler { return requireAPIKey(pool, next) }
+	drifted := serveLane(mw, scopeEcho(t), laneRequest(http.MethodGet, "/v1/agents", "x-api-key", key)())
+	unknown := serveLane(mw, scopeEcho(t), laneRequest(http.MethodGet, "/v1/agents", "x-api-key", "map-no-such-key")())
+	if drifted.Code != http.StatusUnauthorized {
+		t.Fatalf("a drifted key answers %d (body %s), want 401", drifted.Code, drifted.Body)
+	}
+	if drifted.Body.String() != unknown.Body.String() {
+		t.Errorf("a drifted key answers %s; an unknown one answers %s — they must be identical",
+			drifted.Body, unknown.Body)
+	}
+	wantNoTenancyHeaders(t, drifted)
 }
 
 // The bootstrap marker reaches the request, and marks only the env-var-managed
@@ -448,6 +474,20 @@ func wantTenancyHeaders(t *testing.T, res *httptest.ResponseRecorder, org, works
 	}
 	if got := res.Header().Get(workspaceHeader); got != workspace {
 		t.Errorf("%s = %q, want %q", workspaceHeader, got, workspace)
+	}
+}
+
+// wantNoTenancyHeaders is the other half of the stamping schedule, and the half
+// wantLaneError does not read: a response that resolved NO scope carries
+// neither header. It covers the pre-auth 401 and both header refusals, which
+// answer before there is a scope to stamp.
+func wantNoTenancyHeaders(t *testing.T, res *httptest.ResponseRecorder) {
+	t.Helper()
+	if got := res.Header().Get(orgHeader); got != "" {
+		t.Errorf("%s = %q on a response that resolved no scope, want absent", orgHeader, got)
+	}
+	if got := res.Header().Get(workspaceHeader); got != "" {
+		t.Errorf("%s = %q on a response that resolved no scope, want absent", workspaceHeader, got)
 	}
 }
 

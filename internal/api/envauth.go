@@ -21,7 +21,9 @@ import (
 // The scope comes from the ENVIRONMENT's row, never from environment_keys' own
 // reserved columns, so a key can never disagree with the environment it serves
 // — no copy at mint time, no drift, no backfill (plan 42 §6.1). Those columns
-// stay unread, said out loud so the omission reads as deliberate.
+// stay unread, said out loud so the omission reads as deliberate. The registry
+// join is composite — org too — because org has one authority, the registry: an
+// environment whose org_id drifted from its workspace's resolves to nothing.
 func authenticateEnvironmentKey(ctx context.Context, pool *pgxpool.Pool, key string) (string, domain.Scope, error) {
 	var envID string
 	var scope domain.Scope
@@ -29,7 +31,7 @@ func authenticateEnvironmentKey(ctx context.Context, pool *pgxpool.Pool, key str
 		`SELECT k.environment_id, e.org_id, e.workspace_id, e.project_id
 		   FROM environment_keys k
 		   JOIN environments e ON e.id = k.environment_id
-		   JOIN workspaces w ON w.id = e.workspace_id AND w.archived_at IS NULL
+		   JOIN workspaces w ON w.id = e.workspace_id AND w.org_id = e.org_id AND w.archived_at IS NULL
 		  WHERE k.key_hash = $1 AND k.revoked_at IS NULL
 		    AND (k.expires_at IS NULL OR k.expires_at > now())`,
 		hashKey(key)).Scan(&envID, &scope.OrgID, &scope.WorkspaceID, &scope.ProjectID)

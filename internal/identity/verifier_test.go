@@ -2102,3 +2102,66 @@ func TestNewCopiesTheWorkspaceMap(t *testing.T) {
 	want.Workspaces = []string{"default"}
 	verifierXAccepted(t, "a verifier built from a map the caller then edited", got, err, want)
 }
+
+// A claim cut at the value cap is the quietest failure this package has: the
+// human authenticates, resolves to no workspace, and gets a permanent 403 that
+// names a membership problem they cannot see. The cap still exists — the work
+// has to be bounded — so the guarantee is that it says so. This test drives the
+// pair: the mapped group sitting one past the cap, which must be dropped AND
+// logged, and the same group inside it, which must resolve and say nothing.
+//
+// Not parallel: it replaces the default logger for its duration.
+func TestVerifyLogsAWorkspacesClaimCutAtTheCap(t *testing.T) {
+	sink := &syncBufferX{}
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(sink, &slog.HandlerOptions{Level: slog.LevelWarn})))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+
+	idp, clock := verifierXIdP(t)
+	v := verifierXNew(t, idp, clock, verifierXMembership)
+
+	// The mapped group last, behind cap+49 groups this deployment maps to
+	// nothing — an ordinary shape for a user in a large directory.
+	const past = identity.MaxClaimValuesForTest + 50
+	values := make([]any, past)
+	for i := range values {
+		values[i] = fmt.Sprintf("g%d", i)
+	}
+	values[past-1] = "tenant-b"
+
+	verify := func(t *testing.T, vs []any) identity.Identity {
+		t.Helper()
+		claims := verifierXClaims(idp, clock)
+		claims["workspaces"] = vs
+		got, err := v.Verify(context.Background(), idp.Mint(t, claims))
+		if err != nil {
+			t.Fatalf("Verify: %v", err)
+		}
+		return got
+	}
+
+	t.Run("past the cap it is dropped and logged", func(t *testing.T) {
+		if got := verify(t, values); len(got.Workspaces) != 0 {
+			t.Errorf("Workspaces = %v, want none: the mapped group sits past the cap", got.Workspaces)
+		}
+		logged := sink.String()
+		for _, want := range []string{"claim truncated", "workspaces", fmt.Sprint(past)} {
+			if !strings.Contains(logged, want) {
+				t.Errorf("the truncation warning does not mention %q:\n%s", want, logged)
+			}
+		}
+	})
+
+	t.Run("inside the cap it resolves, silently", func(t *testing.T) {
+		before := len(sink.String())
+		// The same values with the leading 50 dropped, so the mapped group is
+		// the cap's last element rather than the first past it.
+		if got := verify(t, values[50:]); len(got.Workspaces) != 1 ||
+			got.Workspaces[0] != verifierXWorkspaceB {
+			t.Errorf("Workspaces = %v, want %q", got.Workspaces, verifierXWorkspaceB)
+		}
+		if added := sink.String()[before:]; strings.Contains(added, "claim truncated") {
+			t.Errorf("a claim that fits the cap warned:\n%s", added)
+		}
+	})
+}

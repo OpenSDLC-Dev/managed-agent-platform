@@ -132,7 +132,7 @@ const (
 // must refuse rather than guess.
 func identityScope(r *http.Request, pool *pgxpool.Pool, v *identity.Verifier, id identity.Identity) (domain.Scope, error) {
 	if !v.WorkspacesConfigured() {
-		live, err := liveWorkspaceScopes(r.Context(), pool, nil)
+		live, err := allLiveWorkspaceScopes(r.Context(), pool)
 		if err != nil {
 			return domain.Scope{}, err
 		}
@@ -148,7 +148,7 @@ func identityScope(r *http.Request, pool *pgxpool.Pool, v *identity.Verifier, id
 	if len(id.Workspaces) == 0 {
 		return domain.Scope{}, errForbidden(identityNoWorkspace)
 	}
-	covered, err := liveWorkspaceScopes(r.Context(), pool, id.Workspaces)
+	covered, err := liveWorkspaceScopesAmong(r.Context(), pool, id.Workspaces)
 	if err != nil {
 		return domain.Scope{}, err
 	}
@@ -158,30 +158,47 @@ func identityScope(r *http.Request, pool *pgxpool.Pool, v *identity.Verifier, id
 	return selectWorkspace(r, covered)
 }
 
-// liveWorkspaceScopes reads live workspace rows as the scopes a credential may
-// resolve to. only nil selects every live workspace — the unconfigured
-// deployment's case, where the COUNT is the decision; otherwise it selects the
-// members of the identity's set that are still live.
+// allLiveWorkspaceScopes reads every live workspace as a scope — the
+// unconfigured deployment's case, where the COUNT is the decision.
 //
-// Org rides along from the row and the project is the frozen literal, because
-// project has no registry of its own (migration 0034's header says so).
-func liveWorkspaceScopes(ctx context.Context, pool *pgxpool.Pool, only []string) ([]domain.Scope, error) {
-	const (
-		everyOne = `SELECT org_id, id FROM workspaces WHERE archived_at IS NULL ORDER BY id`
-		named    = `SELECT org_id, id FROM workspaces WHERE archived_at IS NULL AND id = ANY ($1) ORDER BY id`
-	)
-	var (
-		rows pgx.Rows
-		err  error
-	)
-	if only == nil {
-		rows, err = pool.Query(ctx, everyOne)
-	} else {
-		rows, err = pool.Query(ctx, named, only)
-	}
+// LIMIT 2 because that is the whole question: identityScope needs to know
+// whether there is exactly one live workspace and which, and every answer past
+// the second is the same answer.
+//
+// It is a separate function from liveWorkspaceScopesAmong rather than a nil
+// argument to one. The fail-open reading ("no ids means every workspace") and
+// the fail-closed one ("no ids means nothing") are one guard apart, and
+// mappedWorkspaces returns exactly nil for an identity that is a member of
+// nothing — so a single function taking a possibly-empty slice puts the
+// dangerous input one missing check away from the dangerous branch.
+func allLiveWorkspaceScopes(ctx context.Context, pool *pgxpool.Pool) ([]domain.Scope, error) {
+	rows, err := pool.Query(ctx,
+		`SELECT org_id, id FROM workspaces WHERE archived_at IS NULL ORDER BY id LIMIT 2`)
 	if err != nil {
 		return nil, err
 	}
+	return scanWorkspaceScopes(rows)
+}
+
+// liveWorkspaceScopesAmong selects the members of an identity's set that are
+// still live. An empty set is answered without a query at all: it can only ever
+// mean "a member of nothing", never "everything".
+func liveWorkspaceScopesAmong(ctx context.Context, pool *pgxpool.Pool, ids []string) ([]domain.Scope, error) {
+	if len(ids) == 0 {
+		return nil, nil
+	}
+	rows, err := pool.Query(ctx,
+		`SELECT org_id, id FROM workspaces WHERE archived_at IS NULL AND id = ANY ($1) ORDER BY id`, ids)
+	if err != nil {
+		return nil, err
+	}
+	return scanWorkspaceScopes(rows)
+}
+
+// scanWorkspaceScopes projects workspace rows to scopes. Org rides along from
+// the row and the project is the frozen literal, because project has no
+// registry of its own (migration 0034's header says so).
+func scanWorkspaceScopes(rows pgx.Rows) ([]domain.Scope, error) {
 	defer rows.Close()
 	var out []domain.Scope
 	for rows.Next() {

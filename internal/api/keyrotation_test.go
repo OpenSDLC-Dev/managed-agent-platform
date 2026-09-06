@@ -137,10 +137,11 @@ func TestConcurrentAPIKeyMintsLeaveOneLiveKey(t *testing.T) {
 // TestConcurrentSameValueAPIKeyMintsAllSucceed guards the production startup
 // path: every controlplane replica calls EnsureAPIKey with the *same* bootstrap
 // value (cmd/controlplane/main.go), and a returned error is fatal — the process
-// refuses to start. Replicas booting together must therefore all succeed, which
-// they do because the shared key_hash makes each racer's upsert converge on one
-// row instead of adding a second live one. Nothing about the one-live index may
-// turn a simultaneous rollout into a crash loop.
+// refuses to start. Replicas booting together must therefore all succeed, and
+// they do in two steps: adopters of one value hash to one key and SERIALIZE on
+// the adoption lock, then each takes its turn and the shared key_hash makes its
+// upsert land on the one row instead of adding a second live one. Neither the
+// lock nor the one-live index may turn a simultaneous rollout into a crash loop.
 func TestConcurrentSameValueAPIKeyMintsAllSucceed(t *testing.T) {
 	ctx := context.Background()
 	pool := pgtest.NewPool(t)

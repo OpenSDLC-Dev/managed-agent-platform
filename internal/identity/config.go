@@ -89,9 +89,15 @@ const (
 	// one. Unlike the profile fields this one REFUSES rather than truncates — see
 	// the check in Verify.
 	maxSubjectBytes = 255
-	maxClaimValues  = 100
-	maxClaimDepth   = 8
-	maxLoggedKID    = 64 // attacker-controlled; truncate before logging
+	// maxClaimValues bounds the elements examined in a multi-valued claim. It is
+	// 1000 rather than a tighter number because since plan 42 §6.2 a claim past
+	// it costs a human their WORKSPACE, not just a role: a user in 150 IdP
+	// groups whose one mapped group sorts late would be a permanent 403. The
+	// bound still holds — maxTokenBytes caps the token long before this — and
+	// where it does bite, boundedClaimValues says so in the log.
+	maxClaimValues = 1000
+	maxClaimDepth  = 8
+	maxLoggedKID   = 64 // attacker-controlled; truncate before logging
 	// maxProfileBytes bounds the two descriptive Identity fields. Generous for a
 	// real name or address (RFC 5321 caps an email path at 254) and far under the
 	// ~12 KiB a claim could otherwise reach inside maxTokenBytes.
@@ -133,11 +139,6 @@ const (
 	envClaimWorkspaces = "IDENTITY_CLAIM_WORKSPACES"
 	envWorkspaceMap    = "IDENTITY_WORKSPACE_MAP"
 )
-
-// defaultWorkspaceID is the seeded workspace's literal id (migration 0034). It
-// is a valid configured value beside a minted wrkspc_ id, because it is the
-// workspace every row in a single-tenant deployment already names.
-const defaultWorkspaceID = "default"
 
 // ConfigFromEnv parses and validates the IDENTITY_* variables read through
 // getenv. cmd/controlplane passes os.Getenv; a test passes a map lookup, which is
@@ -403,9 +404,9 @@ func parseWorkspaceMap(s string) (map[string]string, error) {
 		if id == "" {
 			return nil, fmt.Errorf("%s pair %q has an empty workspace id", envWorkspaceMap, pair)
 		}
-		if !validWorkspaceID(id) {
+		if !domain.IsWorkspaceID(id) {
 			return nil, fmt.Errorf("%s pair %q names workspace %q; want %s or a %s_ id",
-				envWorkspaceMap, pair, id, defaultWorkspaceID, domain.PrefixWorkspace)
+				envWorkspaceMap, pair, id, domain.DefaultWorkspaceID, domain.PrefixWorkspace)
 		}
 		if _, dup := out[value]; dup {
 			return nil, fmt.Errorf("%s maps %q twice", envWorkspaceMap, value)
@@ -416,13 +417,6 @@ func parseWorkspaceMap(s string) (map[string]string, error) {
 		return nil, nil
 	}
 	return out, nil
-}
-
-// validWorkspaceID is the workspace-id rule, shared by the configured map and —
-// through internal/api/scope.go — by the request header: a minted wrkspc_ id,
-// or the literal id migration 0034 seeded.
-func validWorkspaceID(id string) bool {
-	return id == defaultWorkspaceID || domain.ValidWithPrefix(id, domain.PrefixWorkspace)
 }
 
 // requireWorkspacePair refuses a half-configured membership, in ConfigFromEnv

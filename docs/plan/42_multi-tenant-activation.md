@@ -952,7 +952,7 @@ passes to its `next` (e.g. `auth.go:207`); `withRequestID` keeps its request-id 
 recording shows the reference does not run one schedule at all — whether a route stamps comes
 first, and only within a stamping route does how far the request got decide which headers
 appear (§4.3 item 5). **Our single schedule is therefore a deliberate simplification**, and a
-strictly wider one: every authenticated response of every route carries both headers, so
+strictly wider one: every response on which a credential resolved a scope carries both headers, so
 wherever the reference stamps them we do too, and we stamp on responses where it does not — a
 body-parse failure, every `/v1/environments` call, the work-poll lane, and the console dialect's
 organization-level routes, where the reference stamps the organization alone. A client that
@@ -1869,8 +1869,12 @@ populated in the same database.
 slice** — all seven coordinates: `internal/store/store.go:34` and `:37-38`,
 `internal/domain/session.go:44-45`,
 `docs/ARCHITECTURE.md:368` (the `store/` row's "reserves the multi-tenant columns it does not
-yet enforce") and `:485`'s parenthetical, `CLAUDE.md:36`'s parenthetical and `:85`'s layout
-line. They are still true here: §7.5's enumerated by-id reads on `vaults`, `vault_credentials`,
+yet enforce") and `:485`'s parenthetical, `CLAUDE.md:36`'s parenthetical and `:88`'s layout
+line. (Slice 1 already retired the word *reserved* itself at `CLAUDE.md:36` and `:88`, at both
+`docs/ARCHITECTURE.md` sentences, and at `internal/store/store.go`'s package doc, after review —
+a resolved-and-honored workspace is no longer reserved; what survives to slice 5, unflipped, is
+the *not yet enforced* claim alone.) They are still true here: §7.5's enumerated by-id reads on
+`vaults`, `vault_credentials`,
 `skills` and `files` are unscoped until that slice closes them, and a doc asserting enforcement
 one slice early is the overclaim the verifier's docs rung exists to catch. Slice 5 flips all
 seven. The principle halves stay verbatim whenever they flip — scoping is org/workspace/project
@@ -2012,7 +2016,10 @@ ends on a schema no deployment reaches.
 **Docs.** `changelog.d/` · STATE.md · **the "does not yet enforce" claims flip here**, where they
 finally become false — seven coordinates across four files: `internal/store/store.go:34` and
 `:37-38`, `internal/domain/session.go:44-45`, `docs/ARCHITECTURE.md:368` and `:485`,
-`CLAUDE.md:36` and `:85` (§7.4 says why they wait for this slice). · Registry: **rewrite the two entries carrying the clause
+`CLAUDE.md:36` and `:88` (§7.4 says why they wait for this slice). (The word *reserved* is
+already gone from five of those coordinates by then, retired in slice 1's review; what flips
+here is the *not yet enforced* claim itself, substance rather than wording, on all seven.) ·
+Registry: **rewrite the two entries carrying the clause
 "scopes nothing per environment (skills are workspace-global)"** — `:163`, which #575's
 2026-09-03 recording promoted from INFERRED to CONFIRMED, and `:64`, plan 39's twin from the
 2026-09-04 recording — to the per-workspace rule plus the `anthropic`-source carve-out. **Both

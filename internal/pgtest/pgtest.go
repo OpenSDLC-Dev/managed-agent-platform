@@ -222,7 +222,11 @@ func NewPool(t *testing.T) *pgxpool.Pool {
 // defaultScope is the tenancy triple a fixture writes when its caller names no
 // other: the single-tenant defaults every scoped table has declared since 0001,
 // so the ordinary fixture keeps writing exactly what the schema wrote for it.
-var defaultScope = domain.Scope{OrgID: "default", WorkspaceID: "default", ProjectID: "default"}
+// The workspace is the registry's own id rather than a literal, because it is
+// the one member of the triple a row can be asked to disagree with.
+var defaultScope = domain.Scope{
+	OrgID: "default", WorkspaceID: domain.DefaultWorkspaceID, ProjectID: "default",
+}
 
 // NewSession inserts the minimum fixture rows (agent, agent version,
 // environment of the given kind, session) in the default workspace and returns

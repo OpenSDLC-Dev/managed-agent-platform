@@ -170,6 +170,55 @@ func TestSelectWorkspaceHidesExistenceBehindOneBody(t *testing.T) {
 	}
 }
 
+// A repeated selector is ambiguous, and ambiguous is a refusal — the rule
+// requireAPIKey already runs on a duplicate x-api-key. Two IDENTICAL values are
+// refused too: an exception for them is what a proxy appending its own copy
+// would land in, and it would make the answer depend on how many hops added a
+// header rather than on what the client asked for. Both arms must also leave
+// the response unstamped, because no scope ever resolved.
+func TestSelectWorkspaceRefusesARepeatedHeader(t *testing.T) {
+	covered := []domain.Scope{coveredWorkspace(wsAlpha), coveredWorkspace(wsBeta)}
+	for _, tc := range []struct {
+		name   string
+		values []string
+	}{
+		{"two different values", []string{wsAlpha, wsBeta}},
+		{"the same value twice", []string{wsAlpha, wsAlpha}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := httptest.NewRequest(http.MethodGet, "/v1/agents", nil)
+			for _, v := range tc.values {
+				r.Header.Add(workspaceHeader, v)
+			}
+			got, err := selectWorkspace(r, covered)
+			if got != (domain.Scope{}) {
+				t.Errorf("scope on refusal = %+v, want the zero scope", got)
+			}
+			var ae *apiError
+			if !errors.As(err, &ae) {
+				t.Fatalf("selectWorkspace err = %v, want an apiError", err)
+			}
+			if ae.status != http.StatusBadRequest || ae.errType != errTypeInvalidRequest {
+				t.Errorf("error = %d %s, want %d %s", ae.status, ae.errType,
+					http.StatusBadRequest, errTypeInvalidRequest)
+			}
+			// The malformed-value message, byte for byte: a repeated header must
+			// not become a third refusal a client has to learn.
+			if want := "anthropic-workspace-id header must be a valid workspace ID."; ae.message != want {
+				t.Errorf("message = %q, want %q", ae.message, want)
+			}
+			w := httptest.NewRecorder()
+			writeError(w, r, err)
+			if got := w.Header().Get(orgHeader); got != "" {
+				t.Errorf("%s = %q on a refusal that resolved no scope, want absent", orgHeader, got)
+			}
+			if got := w.Header().Get(workspaceHeader); got != "" {
+				t.Errorf("%s = %q on a refusal that resolved no scope, want absent", workspaceHeader, got)
+			}
+		})
+	}
+}
+
 func TestStampScopeSetsBothTenancyHeaders(t *testing.T) {
 	w := httptest.NewRecorder()
 	stampScope(w, coveredWorkspace(wsAlpha))

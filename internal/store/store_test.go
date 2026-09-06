@@ -633,17 +633,77 @@ func TestKeyRotationMigrationRepairsExistingDuplicates(t *testing.T) {
 	}
 }
 
-// scopedTables is every table whose CREATE TABLE declares the reserved tenancy
-// triple, in migration order. Counting rule, so the list can be re-derived
-// rather than trusted: `grep -n "org_id" internal/store/migrations/*.sql` —
-// seven in 0001_init.sql, then one each in 0007, 0008, 0011, 0022, 0025, 0028
-// and 0031. Child tables (agent_versions, skill_versions, vault_credentials,
-// deployment_runs among them) declare none and inherit scope through their
-// foreign key, so they are deliberately absent.
+// scopedTables is every table whose CREATE TABLE declares the tenancy triple,
+// in migration order. Child tables (agent_versions, skill_versions,
+// vault_credentials, deployment_runs among them) declare none and inherit scope
+// through their foreign key to a scoped parent, so they are deliberately
+// absent — as is workspaces itself, which is the registry the triple names
+// rather than a row that carries one.
+//
+// TestScopedTablesMatchTheSchema re-derives this from the migrated database, so
+// a new scoped table added without a line here fails rather than silently
+// escaping every assertion below.
 var scopedTables = []string{
 	"agents", "environments", "sessions", "events", "work_items", "api_keys",
 	"environment_keys", "skills", "files", "vaults", "principals",
 	"session_threads", "memory_stores", "deployments",
+}
+
+// TestScopedTablesMatchTheSchema asks the database rather than a reader. The
+// list above is the denominator of every tenancy assertion in this file, so a
+// table missing from it is not a smaller test — it is a table nothing checks,
+// and the failure would be a scoped table quietly outside the whole suite.
+//
+// It also pins the triple's shape: org_id alone is what identifies a scoped
+// table, and the other two must ride with it, because half a triple is a table
+// no scope predicate can be written against.
+func TestScopedTablesMatchTheSchema(t *testing.T) {
+	pool := open(t, pgtest.FreshDB(t))
+	ctx := context.Background()
+
+	rows, err := pool.Query(ctx,
+		`SELECT table_name FROM information_schema.columns
+		  WHERE table_schema = 'public' AND column_name = 'org_id'
+		  ORDER BY table_name`)
+	if err != nil {
+		t.Fatalf("query org_id columns: %v", err)
+	}
+	var found []string
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			t.Fatalf("scan table name: %v", err)
+		}
+		found = append(found, name)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("iterate org_id columns: %v", err)
+	}
+	// workspaces carries org_id as the registry's own pair, not as a scope it
+	// is subject to, so it is the one exclusion — named here rather than
+	// filtered in SQL, so it reads as a decision.
+	found = slices.DeleteFunc(found, func(name string) bool { return name == "workspaces" })
+
+	want := slices.Clone(scopedTables)
+	slices.Sort(want)
+	if !slices.Equal(found, want) {
+		t.Errorf("tables carrying org_id = %v, want scopedTables %v", found, want)
+	}
+
+	for _, table := range scopedTables {
+		for _, column := range []string{"workspace_id", "project_id"} {
+			var exists bool
+			if err := pool.QueryRow(ctx,
+				`SELECT EXISTS (SELECT 1 FROM information_schema.columns
+				   WHERE table_schema = 'public' AND table_name = $1 AND column_name = $2)`,
+				table, column).Scan(&exists); err != nil {
+				t.Fatalf("%s.%s: %v", table, column, err)
+			}
+			if !exists {
+				t.Errorf("%s carries org_id but not %s; the triple travels together", table, column)
+			}
+		}
+	}
 }
 
 // seedEveryScopedTable puts one row in each of scopedTables, naming no tenancy
@@ -706,6 +766,19 @@ func TestWorkspaceRegistryLandsOnAPopulatedDatabaseWithoutTouchingIt(t *testing.
 	seedEveryScopedTable(t, pool)
 	sessionID, _ := pgtest.NewSession(t, pool, "cloud")
 	pgtest.NewChildThread(t, pool, sessionID)
+
+	// The fixture is checked before the migration runs, because every assertion
+	// below counts rows that STRAYED: an empty table cannot stray, so a table
+	// seedEveryScopedTable forgot would pass this test by having nothing in it.
+	for _, table := range scopedTables {
+		var seeded int
+		if err := pool.QueryRow(ctx, `SELECT count(*) FROM `+table).Scan(&seeded); err != nil {
+			t.Fatalf("%s row count: %v", table, err)
+		}
+		if seeded == 0 {
+			t.Fatalf("%s is empty before 0034; seedEveryScopedTable must populate every scoped table", table)
+		}
+	}
 
 	if err := store.Migrate(ctx, pool); err != nil {
 		t.Fatalf("migrate the rest: %v", err)
