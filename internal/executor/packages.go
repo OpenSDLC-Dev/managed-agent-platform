@@ -11,6 +11,7 @@ import (
 	"log/slog"
 	"net/url"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -240,60 +241,116 @@ type strippedPackages struct {
 	// userinfo cut from every entry a credential was taken from.
 	entries []string
 	creds   []packageCredential
-	// inlined names the hosts whose credential stayed in its entry because no
-	// netrc can carry it, so the caller can say so rather than leaving a silent
-	// exception behind.
+	// inlined names the hosts whose credential stayed in its entry — its
+	// transport reads nothing this pass writes, no netrc can carry its value, or
+	// another entry claims the same host with a different one — so the caller
+	// can say so rather than leaving a silent exception behind.
 	inlined []string
 }
 
-// stripPackageCredentials lifts every entry's URL credential out of the list.
+// packageCredentialRe finds a URL credential wherever it sits in an entry,
+// because the entry is not always the URL: pip's PEP 508 direct reference
+// (`private-lib @ git+https://user:token@host/repo`) and npm's alias
+// (`private-lib@https://user:token@host/pkg.tgz`) each nest one, and both are
+// ordinary syntax their managers accept. It is anySchemeUserinfoRe's shape —
+// the redactor already does this job on the way out — so the userinfo class
+// excludes every character that ends an authority and the greedy `+` therefore
+// runs to the LAST `@` before it, which is how a URL parser splits userinfo
+// from host and what makes a password containing `@` come out whole.
+var packageCredentialRe = regexp.MustCompile(
+	`([a-zA-Z][a-zA-Z0-9+.\-]*)://([^\s/?#]+)@([^\s/?#]*)`)
+
+// credentialSchemes are the transports whose fetcher reads a file this pass
+// writes — measured, not assumed. Everything else keeps its credential where it
+// is: `git+ssh` never used the URL's password in the first place (ssh takes
+// none from a URL), and `hg+https`, `svn+https` and `bzr+http` authenticate
+// from their own stores, so lifting the credential out would break an install
+// that works today rather than protect one.
+var credentialSchemes = map[string]bool{
+	"http": true, "https": true, "git+http": true, "git+https": true,
+}
+
+// candidate is one credential the scan found, and where in which entry it sits.
+type candidate struct {
+	entry    int
+	from, to int // the userinfo span, `@` excluded
+	cred     packageCredential
+}
+
+// stripPackageCredentials lifts every URL credential out of a manager's list.
 // The test is the URL's shape, not the manager's name: pip and npm are where a
 // credentialed entry is common, not where it is possible.
+//
+// It scans before it cuts, because whether a credential can be moved at all
+// depends on the others: a netrc line matches on the hostname alone, so two
+// entries naming one host with different credentials have no representation
+// that keeps them apart, and writing either would send one service the other's
+// secret. Those stay where they are.
 func stripPackageCredentials(entries []string) strippedPackages {
 	out := strippedPackages{entries: make([]string, len(entries))}
 	copy(out.entries, entries)
-	for i, e := range entries {
-		u, err := url.Parse(e)
-		if err != nil || u.User == nil {
-			continue
-		}
-		secret, ok := u.User.Password()
-		if !ok {
-			// A bare `user@host` names a user; there is no secret to hide.
-			continue
-		}
-		user := u.User.Username()
-		if !netrcSafe(user) || !netrcSafe(secret) {
-			out.inlined = append(out.inlined, u.Hostname())
-			continue
-		}
-		out.entries[i] = cutUserinfo(e)
-		out.creds = append(out.creds, packageCredential{
-			authority: u.Host, machine: u.Hostname(), user: user, secret: secret,
-		})
-	}
-	return out
-}
 
-// cutUserinfo removes the `user:secret@` span and leaves every other byte of
-// the entry where it was. Rebuilding the entry from url.URL's parts instead
-// would re-encode a path this platform never examined — the manager reads the
-// entry, not our parse of it.
-func cutUserinfo(entry string) string {
-	i := strings.Index(entry, "://")
-	if i < 0 {
-		return entry
+	var found []candidate
+	for i, e := range entries {
+		for _, m := range packageCredentialRe.FindAllStringSubmatchIndex(e, -1) {
+			scheme := strings.ToLower(e[m[2]:m[3]])
+			userinfo, host := e[m[4]:m[5]], e[m[6]:m[7]]
+			// The span the regexp found is re-read by the URL parser, which is
+			// what decodes the percent-encoding and splits an IPv6 literal from
+			// its port. The scan locates; the parser interprets.
+			u, err := url.Parse(scheme + "://" + userinfo + "@" + host + "/")
+			if err != nil || u.User == nil {
+				continue
+			}
+			secret, has := u.User.Password()
+			if !has {
+				// A bare `user@host` names a user; there is no secret to hide.
+				continue
+			}
+			if !credentialSchemes[scheme] || !netrcSafe(u.User.Username()) || !netrcSafe(secret) {
+				out.inlined = append(out.inlined, u.Hostname())
+				continue
+			}
+			found = append(found, candidate{
+				entry: i, from: m[4], to: m[5],
+				cred: packageCredential{
+					authority: u.Host, machine: u.Hostname(),
+					user: u.User.Username(), secret: secret,
+				},
+			})
+		}
 	}
-	start := i + len("://")
-	end := len(entry)
-	if n := strings.IndexAny(entry[start:], "/?#"); n >= 0 {
-		end = start + n
+
+	// A hostname two credentials disagree about keeps both of them inline.
+	conflicted := map[string]bool{}
+	seen := map[string]packageCredential{}
+	for _, c := range found {
+		if prev, ok := seen[c.cred.machine]; ok && prev != c.cred {
+			conflicted[c.cred.machine] = true
+			continue
+		}
+		seen[c.cred.machine] = c.cred
 	}
-	at := strings.LastIndex(entry[start:end], "@")
-	if at < 0 {
-		return entry
+
+	// Cut back to front, so an earlier span's index still names the same byte.
+	credOf := map[packageCredential]bool{}
+	for i := len(found) - 1; i >= 0; i-- {
+		c := found[i]
+		if conflicted[c.cred.machine] {
+			out.inlined = append(out.inlined, c.cred.machine)
+			continue
+		}
+		e := out.entries[c.entry]
+		out.entries[c.entry] = e[:c.from] + e[c.to+1:] // the span and its `@`
+		if !credOf[c.cred] {
+			credOf[c.cred] = true
+			out.creds = append(out.creds, c.cred)
+		}
 	}
-	return entry[:start] + entry[start+at+1:]
+	// Found back to front; written in the order the entries name them, which is
+	// the order netrc resolves ties in.
+	slices.Reverse(out.creds)
+	return out
 }
 
 // netrcSafe reports whether a value has a netrc representation. A quoted value
@@ -325,13 +382,19 @@ func netrcValue(v string) string {
 // what a netrc could not have; the username is written as it is, and a `#` in
 // one would truncate the value — an install that fails to authenticate, which
 // is loud, rather than a credential that leaks, which is not.
+//
+// No `always-auth`, which npm's older documentation asked for beside these
+// keys: npm 11 authenticates from the pair alone and warns that the key is
+// unknown, and npm 6 sends no credential for a non-registry fetch with or
+// without it (both measured). So it buys a warning in one and nothing in the
+// other — and an npm 6 image is the one shape this pass makes worse, which
+// docs/self-hosted-security.md says rather than leaves to be discovered.
 func npmrcFile(creds []packageCredential) []byte {
 	var b strings.Builder
 	for _, c := range creds {
-		fmt.Fprintf(&b, "//%s/:username=%s\n//%s/:_password=%s\n//%s/:always-auth=true\n",
+		fmt.Fprintf(&b, "//%s/:username=%s\n//%s/:_password=%s\n",
 			c.authority, c.user,
-			c.authority, base64.StdEncoding.EncodeToString([]byte(c.secret)),
-			c.authority)
+			c.authority, base64.StdEncoding.EncodeToString([]byte(c.secret)))
 	}
 	return []byte(b.String())
 }
@@ -378,18 +441,26 @@ func quoteEntries(entries []string) string {
 //
 // credsDir, when a list carried a credential, is the scratch HOME the
 // materialized files live in: the install reads them from there, and the trap
-// removes them however the group ends — including the preflight's own 127,
-// which is why the trap is set before it. The trap runs in the pipeline's
-// subshell and carries a path rather than a secret, so it is as argv-safe as
-// the rest of the command. What it cannot survive is this executor dying
-// between the write and the exec; the directory then lives as long as the
-// sandbox, and the next pass writes to a fresh name rather than that one.
+// removes them when the group ends of its own accord — including the
+// preflight's 127, which is why the trap is set before it. It carries a path
+// rather than a secret, so it is as argv-safe as the rest of the command.
+//
+// It is not the only removal, because it cannot be: a timed-out install is
+// SIGKILLed by process group on both backends and no EXIT trap runs then, so
+// installPackages asks for the directory again after the install returns. What
+// neither survives is this executor dying in between; the directory then lives
+// as long as the sandbox, and the next pass writes to a fresh random name.
 func (m packageManager) command(entries []string, credsDir string) string {
 	body := m.preflight + "; " + m.install(entries)
 	if credsDir != "" {
 		q := shellQuote(credsDir)
+		// `exit "$?"` ends the group on a builtin, carrying the status the
+		// install left. Without it the group's last command is the install
+		// itself, and a shell that replaces the subshell with it — bash 3.2
+		// does, bash 5 does not, both measured — takes the EXIT trap with it and
+		// the credentials outlive the install.
 		body = "trap \"rm -rf " + q + "\" EXIT; " + m.preflight +
-			"; export HOME=" + q + "; " + m.install(entries)
+			"; export HOME=" + q + "; " + m.install(entries) + "; exit \"$?\""
 	}
 	return "set -o pipefail; { " + body + "; } 2>&1 | tail -c " +
 		strconv.Itoa(packageOutputTailBytes)
@@ -486,7 +557,17 @@ func (e *Executor) installPackages(ctx context.Context, sb sandbox.Sandbox, sid 
 		// the event subtree it rides on is readable with an environment key,
 		// while the config it digests needs a management key).
 		stripped := stripPackageCredentials(entries)
-		digest := packagesDigest(stripped.entries)
+		// Two digests, because they answer different questions. The sentinel
+		// asks "is this the list I last tried", and a rotated credential is a
+		// changed list — comparing the stripped form would let a corrected
+		// credential inherit the exhausted attempt count of the broken one, and
+		// never install. It stays inside the sandbox, where plan 40 already put
+		// it. The published one rides on an event an environment key can read
+		// while the config it digests needs a management key, so it is taken
+		// over the stripped form: that is what stops it being an offline oracle
+		// for a weak credential (#599's second surface).
+		digest := packagesDigest(entries)
+		published := packagesDigest(stripped.entries)
 		rec, seen := recs[m.name]
 		if seen && rec.Digest == digest {
 			// Settled, or out of attempts: either way this sandbox is done
@@ -510,7 +591,7 @@ func (e *Executor) installPackages(ctx context.Context, sb sandbox.Sandbox, sid 
 			// makes a refused entry acceptable, so telling a client to wait
 			// for a retry would be a lie.
 			e.emitPackageInstallError(ctx, sid, m.name, packageReasonInvalid,
-				"an entry is empty or begins with '-', which a package manager reads as an option rather than a package", digest, true)
+				"an entry is empty or begins with '-', which a package manager reads as an option rather than a package", published, true)
 			continue
 		}
 		// The assembled command is one execve argument, which Linux caps near
@@ -528,7 +609,7 @@ func (e *Executor) installPackages(ctx context.Context, sb sandbox.Sandbox, sid 
 			recordPackageInstalled(ctx, m.name, packageOutcomeInvalid)
 			e.emitPackageInstallError(ctx, sid, m.name, packageReasonInvalid,
 				fmt.Sprintf("the assembled install command is %d bytes, over the %d-byte exec-argument limit", len(cmd), maxInstallCommandBytes),
-				digest, true)
+				published, true)
 			continue
 		}
 		// The probe is lazy: it costs an Exec, and a pass whose every manager
@@ -554,8 +635,24 @@ func (e *Executor) installPackages(ctx context.Context, sb sandbox.Sandbox, sid 
 			// Said rather than silently excepted: these entries keep the
 			// exposure they have today, and nothing else about the pass tells
 			// anyone which ones.
-			slog.WarnContext(ctx, "a package credential no netrc can carry stayed in the install command",
+			slog.WarnContext(ctx, "a package credential this platform cannot move out of band stayed in the install command",
 				"session_id", sid, "manager", m.name, "hosts", stripped.inlined)
+		}
+		// The install's own trap removes the scratch directory when the group
+		// ends of its own accord, and this removes it when nothing ran the trap:
+		// a timed-out install is SIGKILLed by process group on both backends,
+		// which no EXIT trap survives, and a write or an exec can fail before
+		// the shell is ever reached. Best effort — a sandbox that cannot answer
+		// this can no longer be cleaned by anything, and the directory dies with
+		// it.
+		removeCreds := func() {
+			if credsDir == "" {
+				return
+			}
+			_, _ = sb.Exec(ctx, sandbox.ExecRequest{
+				Command: "rm -rf " + shellQuote(credsDir),
+				Timeout: e.cfg.PackageInstallTimeout,
+			})
 		}
 		if credsDir != "" {
 			// A write that fails faults the item exactly as a failed Exec does.
@@ -563,10 +660,12 @@ func (e *Executor) installPackages(ctx context.Context, sb sandbox.Sandbox, sid 
 			// sandbox-side failure by widening the exposure this pass exists to
 			// close.
 			if err := sb.WriteFile(ctx, credsDir+"/.netrc", netrcFile(stripped.creds)); err != nil {
+				removeCreds()
 				return err
 			}
 			if m.npmrc {
 				if err := sb.WriteFile(ctx, credsDir+"/.npmrc", npmrcFile(stripped.creds)); err != nil {
+					removeCreds()
 					return err
 				}
 			}
@@ -576,6 +675,7 @@ func (e *Executor) installPackages(ctx context.Context, sb sandbox.Sandbox, sid 
 			Command: cmd,
 			Timeout: e.cfg.PackageInstallTimeout,
 		})
+		removeCreds()
 		if err != nil {
 			return err
 		}
@@ -596,7 +696,7 @@ func (e *Executor) installPackages(ctx context.Context, sb sandbox.Sandbox, sid 
 			slog.WarnContext(ctx, "packages not installed",
 				"session_id", sid, "manager", m.name, "reason", reason, "attempts", rec.Attempts)
 			e.emitPackageInstallError(ctx, sid, m.name, reason, packageMessage(res.Stdout),
-				digest, rec.Attempts >= packageInstallAttempts)
+				published, rec.Attempts >= packageInstallAttempts)
 		}
 		recs[m.name] = rec
 		writePackageSentinel(ctx, sb, sid, recs)
@@ -633,12 +733,16 @@ func packageFailureReason(res sandbox.ExecResult) string {
 // credential would slip past entirely. anySchemeUserinfoRe then drops the
 // userinfo of a non-http URL too (`git+ssh://token@…`, a legitimate pip/npm VCS
 // entry), which redactURL — anchored on `http(s)://` — does not reach. Three
-// residuals remain, all closed at the source by #599's out-of-band credential
-// injection: a query credential in a non-http URL; one whose `http(s)://` scheme
+// residuals remain: a query credential in a non-http URL; one whose `http(s)://` scheme
 // the in-shell `tail -c` cut off; and a run of trailing punctuation
 // (`.,:;!?)]}"'`) redactURL reattaches to keep the sentence readable, which
 // leaks a credential's trailing-punctuation suffix (its whole value only if the
 // credential is nothing but those characters).
+//
+// #599 narrowed all three rather than closing them: a credential lifted out
+// before the command is assembled is one the manager cannot echo, but the four
+// entry shapes stripPackageCredentials leaves alone still reach it, and for
+// those this redaction is what stands between the credential and the log.
 func packageMessage(out string) string {
 	msg := urlInText.ReplaceAllStringFunc(out, redactURL)
 	msg = anySchemeUserinfoRe.ReplaceAllString(msg, "$1***@")

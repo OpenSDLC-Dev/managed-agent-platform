@@ -198,11 +198,27 @@ to anyone holding an environment key.
 What this does not make private is the **sandbox itself**. An install needs root,
 and the agent's own tool calls run in that same sandbox as the same user, so the
 credential file is exactly as readable there as the argv it replaced, for the
-same window. The sandbox is one trust domain; prefer high-entropy deploy tokens
-over reusable passwords, and scope them to the repository or registry path the
-session needs. One shape keeps the old exposure, because no netrc can represent
-it: a credential whose decoded form contains a control character stays in its
-entry, and the executor logs at warn that it did, naming the manager and host.
+length of the install. The sandbox is one trust domain; prefer high-entropy
+deploy tokens over reusable passwords, and scope them to the repository or
+registry path the session needs.
+
+Four entry shapes keep the exposure they have today, unchanged rather than newly
+created: a credential in a **query parameter** (`?token=…`), which nothing can
+tell from an ordinary parameter; a **transport that reads neither file** — `ssh`
+takes no password from a URL at all, and `hg`, `svn` and `bzr` authenticate from
+their own stores; **one hostname two entries disagree about**, since a netrc line
+matches the hostname alone and writing either credential would send one service
+the other's secret; and a credential whose decoded form carries a **control
+character**, which no netrc quoting represents. The last three are named in a
+warn line rather than left silent.
+
+One shape is made worse, and it is the only one: **npm 6 and older**. That npm
+sends no credential for a non-registry fetch from any `.npmrc` key (measured),
+so an npm entry that is a credentialed tarball URL now authenticates with
+nothing and fails where it used to succeed. npm 7 and later are unaffected. If
+your image ships npm 6, either move the credential into the image's own npm
+configuration or keep it in the entry by using a shape this pass does not lift —
+and be aware of the exec-audit exposure that then remains.
 
 Two things do degrade silently rather than fail, both about file **modes** and
 neither about the correctness of a file's contents. A write preserves the target's

@@ -60,8 +60,12 @@ rather than recalled — a local origin demanding Basic auth, recording what
 arrived, on 2026-09-06. `git` 2.47.3 authenticates from `$HOME/.netrc` with no
 credential helper configured, on the retry after the 401; pip 25.0.1's own
 fetcher sends the same header from the same file on its **first** request; npm
-reads no netrc at all and sends it from `$HOME/.npmrc`'s per-host `username`,
-base64 `_password` and `always-auth`. Two properties of the netrc format were
+11 reads no netrc at all and sends it from `$HOME/.npmrc`'s per-host `username`
+and base64 `_password`. `always-auth`, which npm's older documentation asks for
+beside them, is written by nothing here: npm 11 warns that the key is unknown
+and authenticates without it, and npm 6 sends no credential for a non-registry
+fetch with or without it — which also makes npm 6 the one shape this change
+makes worse, and the security guide says so. Two properties of the netrc format were
 measured with them, because both decide what the writer may emit: a `machine`
 line matches on the hostname alone, port excluded, and a value may be
 double-quoted with `\"` and `\\` honoured inside the quotes — so a credential
@@ -78,11 +82,45 @@ reach the origin literally.
 What the change does **not** close is stated in the security guide rather than
 implied: an install needs root and the agent's tool calls run in that same
 sandbox as the same user, so the materialized file is exactly as readable there
-as the argv it replaced, for the same window. The sandbox is one trust domain.
-What it does close is everything outside it — the Kubernetes apiserver's audit
-log, whose readers are cluster operators and whose records outlive the session,
-and the digest oracle an environment key could read while the config it digests
+as the argv it replaced, for the length of the install. The sandbox is one trust
+domain. Four entry shapes also keep the exposure they had — a credential in a
+query parameter, a transport that reads neither file, a hostname two entries
+disagree about, and a value no netrc can carry — and the last three are named in
+a warn line rather than left silent. What the change does close is everything
+outside the sandbox for every other shape: the Kubernetes apiserver's audit log,
+whose readers are cluster operators and whose records outlive the session, and
+the digest oracle an environment key could read while the config it digests
 needs a management key.
+
+**The reviews rewrote four of the decisions, and the sharpest finding was that
+the fix did not fix the common case.** The first draft parsed each entry as a
+URL — but pip's PEP 508 direct reference (`private-lib @ git+https://…`) and
+npm's alias (`private-lib@https://…`) nest the URL inside the entry, both are
+syntax their managers accept, and `url.Parse` of the whole entry sees neither.
+Those credentials went on reaching argv with no warning at all. The scan is a
+regexp now, of the shape the package's own message redactor already uses for the
+same job on the way out.
+
+Three more, each a defect in the change rather than in what it replaced. Taking
+the digest over the stripped list closed the oracle and broke the sentinel's
+"until the list changes" contract: a rotated credential digested the same as the
+broken one it replaced, so a list that had spent its three attempts would never
+install again — there are two digests now, and only the published one is
+stripped. A netrc `machine` line matches the hostname alone, so two entries
+naming one host with different credentials collapsed into whichever was written,
+and one service would have been sent the other's secret; a host two entries
+disagree about now keeps both inline. And a transport that reads neither file —
+`git+ssh`, `hg+https`, `svn+https` — had its credential lifted into a file
+nothing would read, breaking an install that worked.
+
+The cleanup was claimed on every exit path and was not on any of three. A
+timed-out install is SIGKILLed by process group on both backends, which no EXIT
+trap survives; a write or an exec can fail before the shell starts; and — found
+by writing the test the reviews showed was missing, which runs the assembled
+command through a real shell instead of asserting that it contains a trap — bash
+3.2 replaces a subshell with its last command and takes the EXIT trap with it,
+where bash 5 does not. The group ends on `exit "$?"` now, and the executor asks
+for the directory again after the install returns.
 
 ## The `unrestricted` address floor (plan 45, #570) — archived 2026-09-06, delivered in one PR
 

@@ -1,8 +1,15 @@
 package executor
 
 import (
+	"errors"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
+
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/sandbox"
 )
 
 // credsDir is the directory the pass materialized a manager's credentials into,
@@ -61,7 +68,7 @@ func TestACredentialNeverReachesTheInstallCommand(t *testing.T) {
 		"python3 -m pip --version >/dev/null 2>&1 || exit 127; " +
 		"export HOME='" + dir + "'; " +
 		"PIP_BREAK_SYSTEM_PACKAGES=1 PIP_DISABLE_PIP_VERSION_CHECK=1 PIP_NO_INPUT=1 " +
-		"python3 -m pip install 'git+https://git.example.com/team/lib' 'sqlalchemy==2.0.30'")
+		"python3 -m pip install 'git+https://git.example.com/team/lib' 'sqlalchemy==2.0.30'; exit \"$?\"")
 	if got[0] != want {
 		t.Errorf("install command:\n got %s\nwant %s", got[0], want)
 	}
@@ -71,13 +78,19 @@ func TestACredentialNeverReachesTheInstallCommand(t *testing.T) {
 	if _, ok := sb.files[dir+"/.npmrc"]; ok {
 		t.Errorf("an npmrc was written for pip, whose fetcher reads netrc")
 	}
-	// The sentinel the agent can read carries the digest of the stripped list,
-	// which is what the pass actually compares against on its next turn — the
-	// second surface is closed in the wiring, not only in the function.
+	// The sentinel compares the list as written, credential included, so a
+	// rotated credential is a changed list rather than the same one with an
+	// exhausted attempt count. It is the published digest that is stripped, and
+	// TestTheDigestAnEnvironmentKeyCanReadIsStripped drives that one.
 	recs := sentinel(t, sb)
-	wantDigest := packagesDigest([]string{"git+https://git.example.com/team/lib", "sqlalchemy==2.0.30"})
+	wantDigest := packagesDigest([]string{"git+https://bot:s3cr3t@git.example.com/team/lib", "sqlalchemy==2.0.30"})
 	if got := recs["pip"].Digest; got != wantDigest {
-		t.Errorf("sentinel digest = %s, want the stripped list's %s", got, wantDigest)
+		t.Errorf("sentinel digest = %s, want the list as written %s", got, wantDigest)
+	}
+	// And the directory is asked for again after the install returns, because a
+	// timed-out install is SIGKILLed and its trap never runs.
+	if !slices.Contains(sb.cmds, "rm -rf '"+dir+"'") {
+		t.Errorf("no removal ran after the install; commands were %v", sb.cmds)
 	}
 }
 
@@ -99,7 +112,6 @@ func TestNpmAlsoGetsAnNpmrc(t *testing.T) {
 	for _, want := range []string{
 		"//npm.example.com:8443/:username=ci\n",
 		"//npm.example.com:8443/:_password=dG9rM24=\n",
-		"//npm.example.com:8443/:always-auth=true\n",
 	} {
 		if !strings.Contains(npmrc, want) {
 			t.Errorf("npmrc is missing %q; got:\n%s", want, npmrc)
@@ -235,17 +247,16 @@ func TestTheNpmrcCarriesTheSecretAsBase64(t *testing.T) {
 		{authority: "npm.example.com:8443", user: "ci", secret: "tok3n"},
 	}))
 	want := "//npm.example.com:8443/:username=ci\n" +
-		"//npm.example.com:8443/:_password=dG9rM24=\n" +
-		"//npm.example.com:8443/:always-auth=true\n"
+		"//npm.example.com:8443/:_password=dG9rM24=\n"
 	if got != want {
 		t.Errorf("npmrc:\n got %q\nwant %q", got, want)
 	}
 }
 
-// TestTheDigestIsTakenOverTheStrippedList is #599's second surface: with the
-// credential out of the pre-image, a digest an environment key can read is no
-// longer an offline oracle for the credential a management key holds.
-func TestTheDigestIsTakenOverTheStrippedList(t *testing.T) {
+// TestTheDigestAnEnvironmentKeyCanReadIsStripped is #599's second surface: with
+// the credential out of the pre-image, a digest an environment key can read is
+// no longer an offline oracle for the credential a management key holds.
+func TestTheDigestAnEnvironmentKeyCanReadIsStripped(t *testing.T) {
 	with := stripPackageCredentials([]string{"git+https://bot:s3cr3t@git.example.com/team/lib"})
 	without := stripPackageCredentials([]string{"git+https://git.example.com/team/lib"})
 	if got, want := packagesDigest(with.entries), packagesDigest(without.entries); got != want {
@@ -256,5 +267,200 @@ func TestTheDigestIsTakenOverTheStrippedList(t *testing.T) {
 	other := stripPackageCredentials([]string{"git+https://bot:s3cr3t@git.example.com/team/other"})
 	if packagesDigest(with.entries) == packagesDigest(other.entries) {
 		t.Error("two different lists share a digest")
+	}
+}
+
+// TestACredentialNestedInAnEntryIsLiftedOutToo: the entry is not always the
+// URL. pip's PEP 508 direct reference and npm's alias each nest one, both are
+// syntax their managers accept, and parsing the whole entry as a URL sees
+// neither — which left the credential in argv with no warning at all.
+func TestACredentialNestedInAnEntryIsLiftedOutToo(t *testing.T) {
+	for _, tc := range []struct{ name, entry, want string }{
+		{
+			name:  "pip's PEP 508 direct reference",
+			entry: "private-lib @ git+https://bot:s3cr3t@git.example.com/team/lib.git",
+			want:  "private-lib @ git+https://git.example.com/team/lib.git",
+		},
+		{
+			name:  "npm's alias to a tarball URL",
+			entry: "private-lib@https://ci:tok3n@npm.example.com/pkg.tgz",
+			want:  "private-lib@https://npm.example.com/pkg.tgz",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := stripPackageCredentials([]string{tc.entry})
+			if got.entries[0] != tc.want {
+				t.Errorf("entry = %q, want %q", got.entries[0], tc.want)
+			}
+			if len(got.creds) != 1 {
+				t.Fatalf("credentials = %+v, want one", got.creds)
+			}
+		})
+	}
+}
+
+// TestATransportThatReadsNothingWeWriteKeepsItsCredential: moving a credential
+// into a netrc only helps a fetcher that reads one. ssh takes no password from
+// a URL at all, and hg, svn and bzr authenticate from their own stores — so
+// lifting theirs out would break an install that works today.
+func TestATransportThatReadsNothingWeWriteKeepsItsCredential(t *testing.T) {
+	for _, entry := range []string{
+		"git+ssh://bot:s3cr3t@git.example.com/team/lib",
+		"hg+https://bot:s3cr3t@hg.example.com/repo",
+		"svn+https://bot:s3cr3t@svn.example.com/repo",
+	} {
+		got := stripPackageCredentials([]string{entry})
+		if got.entries[0] != entry {
+			t.Errorf("entry = %q, want it untouched", got.entries[0])
+		}
+		if len(got.creds) != 0 {
+			t.Errorf("credentials = %+v, want none", got.creds)
+		}
+		if len(got.inlined) != 1 {
+			t.Errorf("inlined = %v, want the host named once", got.inlined)
+		}
+	}
+}
+
+// TestOneHostnameCannotHoldTwoCredentials: a netrc line matches on the hostname
+// alone, so two entries naming one host with different credentials have no
+// representation that keeps them apart. Writing either would send one service
+// the other's secret — a worse outcome than the argv exposure it replaces — so
+// both stay where they are.
+func TestOneHostnameCannotHoldTwoCredentials(t *testing.T) {
+	entries := []string{
+		"https://alice:secretA@registry.example:8443/a.whl",
+		"https://bob:secretB@registry.example:9443/b.whl",
+	}
+	got := stripPackageCredentials(entries)
+	if !slices.Equal(got.entries, entries) {
+		t.Errorf("entries = %q, want them untouched", got.entries)
+	}
+	if len(got.creds) != 0 {
+		t.Errorf("credentials = %+v, want none written", got.creds)
+	}
+	if len(got.inlined) != 2 {
+		t.Errorf("inlined = %v, want both named", got.inlined)
+	}
+	// One host named twice with the SAME credential is not a conflict, and is
+	// written once.
+	same := stripPackageCredentials([]string{
+		"https://alice:secretA@registry.example/a.whl",
+		"https://alice:secretA@registry.example/b.whl",
+	})
+	if len(same.creds) != 1 {
+		t.Errorf("credentials = %+v, want the repeat collapsed into one", same.creds)
+	}
+}
+
+// TestARotatedCredentialIsAChangedList: the sentinel's "until the list changes"
+// contract. Comparing the stripped form would make a corrected credential
+// indistinguishable from the broken one it replaces, so a list that had spent
+// its three attempts would never install again.
+func TestARotatedCredentialIsAChangedList(t *testing.T) {
+	bad := packagesDigest([]string{"git+https://bot:bad@host.example.com/repo"})
+	good := packagesDigest([]string{"git+https://bot:good@host.example.com/repo"})
+	if bad == good {
+		t.Error("a rotated credential digests the same, so the sandbox would skip the install")
+	}
+}
+
+// TestTheTrapRemovesTheCredentialsWhenTheInstallEnds runs the assembled command
+// through a real shell rather than asserting that it contains a trap. Both
+// arms: an install that fails, and a manager that is missing, whose preflight
+// exits 127 before anything else in the group runs.
+func TestTheTrapRemovesTheCredentialsWhenTheInstallEnds(t *testing.T) {
+	if _, err := exec.LookPath("bash"); err != nil {
+		t.Skipf("no bash: %v", err)
+	}
+	for _, tc := range []struct {
+		name              string
+		preflight, script string
+		wantStatus        int
+	}{
+		{name: "the install fails", preflight: "true", script: "false", wantStatus: 1},
+		{name: "the manager is missing", preflight: packagePreflight("definitely-not-a-real-binary"), script: "echo unreachable", wantStatus: 127},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := filepath.Join(t.TempDir(), "creds")
+			if err := os.MkdirAll(dir, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(dir, ".netrc"), []byte("machine h\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			m := packageManager{
+				name:      "probe",
+				preflight: tc.preflight,
+				install:   func([]string) string { return tc.script },
+			}
+			// The command is expected to fail. Two things are asserted: the
+			// cleanup ran, and the status the classification reads survived the
+			// `exit "$?"` the cleanup needed.
+			err := exec.Command("bash", "-c", m.command([]string{"x"}, dir)).Run()
+			var ee *exec.ExitError
+			if !errors.As(err, &ee) || ee.ExitCode() != tc.wantStatus {
+				t.Errorf("status = %v, want %d", err, tc.wantStatus)
+			}
+			if _, err := os.Stat(dir); !os.IsNotExist(err) {
+				t.Errorf("the credential directory survived the install: %v", err)
+			}
+		})
+	}
+}
+
+// TestTheInstallReadsItsCredentialsFromTheScratchHome pins the other half of
+// the same command: HOME is exported before the install runs, so the netrc and
+// npmrc the pass wrote are the ones the fetcher finds.
+func TestTheInstallReadsItsCredentialsFromTheScratchHome(t *testing.T) {
+	if _, err := exec.LookPath("bash"); err != nil {
+		t.Skipf("no bash: %v", err)
+	}
+	dir := t.TempDir()
+	m := packageManager{
+		name:      "probe",
+		preflight: "true",
+		install:   func([]string) string { return `test "$HOME" = ` + shellQuote(dir) },
+	}
+	if err := exec.Command("bash", "-c", m.command([]string{"x"}, dir)).Run(); err != nil {
+		t.Errorf("the install did not see the scratch HOME: %v", err)
+	}
+}
+
+// TestThePublishedDigestCarriesNoCredential is #599's second surface where it
+// actually ships: on the event. Its subtree is readable with an environment key
+// while the environment config it digests needs a management key, so a digest
+// taken over the entries as written is an offline oracle for a weak credential.
+// The pure function having the right answer is not the claim — this asserts the
+// value that leaves the process.
+func TestThePublishedDigestCarriesNoCredential(t *testing.T) {
+	sb := &fakeSandbox{execHook: failInstall(sandbox.ExecResult{
+		ExitCode: 100,
+		Stdout:   "could not authenticate\n",
+	})}
+	h := newHarness(t, sb)
+	h.setPackages(t, map[string][]string{
+		"pip": {"git+https://bot:s3cr3t@git.example.com/team/lib"},
+	})
+	h.suspend(t, writeUse("out.txt", "hello"))
+	h.stepOnce(t)
+
+	errs := h.packageErrors(t)
+	if len(errs) != 1 {
+		t.Fatalf("package errors = %d, want 1: %+v", len(errs), errs)
+	}
+	stripped := packagesDigest([]string{"git+https://git.example.com/team/lib"})
+	written := packagesDigest([]string{"git+https://bot:s3cr3t@git.example.com/team/lib"})
+	switch got := errs[0]["packages_digest"]; got {
+	case stripped:
+	case written:
+		t.Error("the published digest is taken over the entries as written, so it is a pre-image an environment-key holder can search")
+	default:
+		t.Errorf("packages_digest = %v, want the stripped list's %s", got, stripped)
+	}
+	// The sentinel inside the sandbox is the other half, and it keeps the list
+	// as written so that a rotated credential still reads as a changed list.
+	if rec := sentinel(t, sb)["pip"]; rec.Digest != written {
+		t.Errorf("sentinel digest = %s, want the list as written %s", rec.Digest, written)
 	}
 }

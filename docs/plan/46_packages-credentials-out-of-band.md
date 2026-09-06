@@ -35,7 +35,8 @@ arrives; none of it is recalled from documentation.
 |---|---|---|
 | `git` 2.47.3 (pip's and npm's `git+https://`) | `$HOME/.netrc` | `Authorization: Basic`, on the retry after the 401 |
 | `pip` 25.0.1's own fetcher (a direct archive URL) | `$HOME/.netrc` | `Authorization: Basic`, on the **first** request |
-| `npm` 11's own fetcher (a tarball URL) | `$HOME/.npmrc`, per-host `username` + `_password` (base64) + `always-auth` | `Authorization: Basic`, on the first request |
+| `npm` 11's own fetcher (a tarball URL) | `$HOME/.npmrc`, per-host `username` + `_password` (base64) | `Authorization: Basic`, on the **first** request |
+| `npm` 6's own fetcher (the same URL) | the same file | **nothing** — with `always-auth` and without it |
 
 Two properties of the netrc format were measured with it, because both decide
 what the writer may emit: a `machine` line matches on the **hostname alone**,
@@ -56,49 +57,81 @@ HTTPS. The placeholder would reach the origin literally.
 
 ## Decisions
 
-1. **Extraction is by URL shape, not by manager.** An entry is credential-bearing
-   when it parses as a URL whose authority carries userinfo *with a password* —
-   `scheme://user:secret@host/…`, the `git+https` composite included. A bare
-   `user@host` is not a credential and is left alone. Everything else about the
-   entry is untouched, and a non-URL entry is not rewritten at all. Doing this
-   per manager instead would mean six near-identical rules, and the two the
-   issue names (pip, npm) are only where the shape is *common*, not where it is
-   possible.
-2. **The credential is materialized into a scratch `HOME`, and the install for
+1. **The scan looks for a URL credential anywhere in the entry, not for an entry
+   that is a URL.** The entry is often not the URL: pip's PEP 508 direct
+   reference (`private-lib @ git+https://user:token@host/repo`) and npm's alias
+   (`private-lib@https://user:token@host/pkg.tgz`) each nest one, and both are
+   ordinary syntax their managers accept. So the test is a regexp of the shape
+   `internal/executor`'s own message redactor already uses for the same job on
+   the way out — a scheme, a userinfo that runs to the last `@` before the
+   authority ends, and a host — and the span it finds is re-read by `url.Parse`,
+   which decodes the percent-encoding and splits an IPv6 literal from its port.
+   The scan locates; the parser interprets; the cut is textual, so no other byte
+   of the entry moves. A `user@host` with no password is a name and is left
+   alone. What this still does not see is a credential in a **query parameter**
+   (`?token=…`), which no rule can tell from an ordinary parameter — the
+   redactor covers it on output, and nothing here claims to.
+2. **Only the transports whose fetcher reads what this writes.** `http`,
+   `https`, `git+http`, `git+https`. `git+ssh` never used the URL's password
+   (ssh takes none from a URL), and `hg+https`, `svn+https` and `bzr+http`
+   authenticate from their own stores — lifting their credential out would break
+   an install that works today rather than protect one. Everything else keeps
+   its credential where it is.
+3. **One hostname cannot hold two credentials.** A netrc `machine` line matches
+   on the hostname alone, port and path excluded, so two entries naming one host
+   with different credentials have no representation that keeps them apart:
+   whichever was written would be sent to both, and one service would receive
+   the other's secret. That is worse than the argv exposure it replaces, so a
+   host two entries disagree about keeps both of them inline. The same host
+   named twice with the *same* credential is not a disagreement and is written
+   once.
+4. **The credential is materialized into a scratch `HOME`, and the install for
    that manager runs with `HOME` pointed at it.** `$HOME/.netrc` always;
-   `$HOME/.npmrc` additionally for the npm manager, whose fetcher reads no
-   netrc. The alternative — writing into the image's own `/root` and restoring
-   afterwards — needs a read-modify-write and a restore path that can leave a
-   credential behind when it fails. A scratch directory has neither, and its
-   removal is unconditional. The cost is stated rather than hidden: for that one
-   install, an image that ships its own `~/.npmrc` or `~/.netrc` is not read,
-   and the manager's `HOME`-rooted cache is cold. Both apply only to a manager
-   whose list actually carries a credential.
-3. **The directory name is random** (`sandbox.TempName()`, the name the atomic
-   write already uses). The sandbox is agent-writable, so a fixed path could be
-   pre-created as a regular file by the agent to make the write fail; a random
+   `$HOME/.npmrc` additionally for npm, whose fetcher reads no netrc. The
+   alternative — writing into the image's own `/root` and restoring afterwards —
+   needs a read-modify-write and a restore path that can leave a credential
+   behind when it fails. A scratch directory has neither. The cost is stated
+   rather than hidden: for that one install, an image that ships its own
+   `~/.npmrc` or `~/.netrc` is not read, and the manager's `HOME`-rooted cache
+   is cold. Both apply only to a manager whose list actually carries a
+   credential. **No `always-auth`** goes in the npmrc: npm 11 authenticates from
+   the per-host pair alone and warns that the key is unknown, and npm 6 sends no
+   credential for a non-registry fetch with or without it (both measured) — so
+   an image shipping npm 6 is the one shape this pass makes worse, and the
+   security guide says so.
+5. **The directory name is random.** The sandbox is agent-writable, so a fixed
+   path could be pre-created as a regular file to make the write fail; a random
    one cannot be waited for.
-4. **The removal rides on the install command's own `trap … EXIT`**, so a
-   manager that fails, times out, or exits non-zero still cleans up. The trap
-   carries a path and no secret, so it is argv-safe. What it does not survive is
-   the executor dying between the write and the exec: the file then lives as
-   long as the sandbox does, which is until the session's sandbox is discarded.
-   The next pass's write is to a fresh random directory rather than that one, so
-   nothing accumulates under a name a later pass reuses.
-5. **`packages_digest` is computed over the stripped entries**, which is what
-   removes the oracle: there is no longer a credential inside the pre-image. The
-   alternative, keying the hash, needs a key source, a rotation story and a
-   migration for digests already written; stripping needs none, because a
-   credential-free entry strips to itself. One consequence, once: a list that
-   carries a credential digests differently than it did before this change, so
-   its first pass in an existing sandbox installs again.
-6. **A credential a netrc cannot carry is left inline.** The decoded userinfo of
+6. **The removal is asked for twice, because once is not enough.** The install
+   command carries a `trap … EXIT` set before its preflight, which removes the
+   directory the moment the group ends of its own accord — including the
+   preflight's 127. Two things were measured about that trap and both changed
+   the code: a subshell whose last command is the install is *replaced* by it on
+   bash 3.2, taking the EXIT trap with it (bash 5 keeps it), so the group ends
+   on `exit "$?"`, a builtin, carrying the status the classification reads; and
+   a **timed-out** install is killed with SIGKILL to its process group on both
+   backends, which no trap survives at all. So `installPackages` asks for the
+   directory again after the install returns — also when a write or the exec
+   itself failed first. What neither removal survives is this executor dying in
+   between; the directory then lives as long as the sandbox, and the next pass
+   writes to a fresh random name rather than that one.
+7. **Two digests, because they answer different questions.** The **sentinel**
+   inside the sandbox keeps comparing the list as written, credential included:
+   a rotated credential has to read as a changed list, or a corrected credential
+   inherits the exhausted attempt count of the broken one and never installs.
+   Plan 40 already put that digest there, so nothing is newly exposed. The
+   **published** `packages_digest`, which rides on an event an environment key
+   can read while the config it digests needs a management key, is taken over
+   the stripped form — that is what stops it being an offline oracle for a weak
+   credential. Keying the hash instead needs a key source, a rotation story and
+   a migration for digests already written; stripping needs none.
+8. **A credential a netrc cannot carry is left inline.** The decoded userinfo of
    a URL can contain a newline (percent-encoded in the URL, decoded before use),
    and no netrc quoting represents it. Such an entry keeps the credential it has
    today — the exposure is unchanged rather than newly created — and the
-   executor logs that it did, at warn, naming the manager and the host but never
-   the secret. Refusing the install instead would break a list that works today,
-   for a shape that is exotic.
+   executor logs at warn that it did, naming the manager and the host but never
+   the secret. The same line covers decisions 2 and 3's leftovers. Refusing the
+   install instead would break a list that works today.
 
 ## What this does not close, stated rather than implied
 
@@ -106,35 +139,56 @@ HTTPS. The placeholder would reach the origin literally.
 requires root (plan 40's decision 7 probes for it and refuses a non-root
 sandbox), and the agent's own tool calls run in that same sandbox as the same
 user — so a file the install reads is exactly as readable as the argv it
-replaces, for the same window, by the same reader. The sandbox is one trust
-domain and this change does not make it two.
+replaces, for the length of the install. The sandbox is one trust domain and
+this change does not make it two.
 
-What it does close is everything **outside** that domain: the credential no
-longer reaches the Kubernetes apiserver's audit log, where the exposure is to
-cluster operators and outlives the session; and `packages_digest` stops being an
-offline oracle for a weak credential, for anyone holding an environment key.
-`docs/self-hosted-security.md`'s paragraph on this says exactly that, in place of
-the interim one that names #599 as the fix that has not landed.
+**Four entry shapes keep the credential they have today**, each for a reason the
+decisions argue: a credential in a query parameter, which nothing can tell from
+an ordinary parameter; a transport that reads neither file this writes; a
+hostname two entries disagree about; and a credential whose decoded form carries
+a control character. For those, the argv and audit-log exposure is exactly what
+it was — unchanged, not newly created — and the last three are named in a warn
+line rather than left silent.
+
+**An image shipping npm 6 loses an install it had.** npm 6 sends no credential
+for a non-registry fetch from any `.npmrc` key (measured), so an npm tarball URL
+whose credential this pass lifts out authenticates with nothing and fails 401
+where it used to succeed. npm 7 and later are unaffected. That is the one place
+this trades a working install for the audit-log exposure, and the security guide
+says so rather than leaving it to be discovered.
+
+What it does close is everything **outside** the sandbox for every other shape:
+the credential no longer reaches the Kubernetes apiserver's audit log, where the
+exposure is to cluster operators and outlives the session; and the published
+`packages_digest` stops being an offline oracle for a weak credential, for
+anyone holding an environment key.
 
 ## Acceptance
 
 Each rung is a test that fails before the change and passes after.
 
-1. **Extraction**, over the URL shapes that occur: `git+https://u:p@h/r`,
-   `https://u:p@h/x.tgz`, a URL with no userinfo, a bare `user@` with no
-   password, a percent-encoded credential (which must reach the file decoded), a
-   non-URL entry, and an entry whose decoded credential carries a newline.
+1. **Extraction**, over the shapes that occur: a whole-entry `git+https://u:p@h/r`,
+   a tarball URL with a port, pip's PEP 508 nesting, npm's alias nesting, a URL
+   with no userinfo, a bare `user@` with no password, a percent-encoded
+   credential (which must reach the file decoded), a non-URL entry, an `@` in a
+   path, a scheme whose fetcher reads nothing this writes, and an entry whose
+   decoded credential carries a newline.
 2. **The assembled command carries no credential.** Asserted on the exact
    command string for a credentialed list — not a substring probe that a
    rewording would stop exercising.
 3. **The materialized files**, per transport: the netrc's quoting and escaping,
    the npmrc's base64 `_password` and its per-host keys, and that the npmrc is
    written for npm alone.
-4. **The digest is over the stripped form**, and equals the digest of the same
-   list written without its credential.
-5. **The scratch directory is removed** when the install succeeds and when it
-   fails.
-6. **Mutation testing**, per the repo rule: every guard above gets a mutant that
+4. **One hostname with two credentials** leaves both entries alone and writes no
+   file; the same credential twice is written once.
+5. **The digests**: the published one equals the digest of the same list written
+   without its credential, and the sentinel's does not — a rotated credential is
+   a changed list.
+6. **The removal**, driven through a real shell rather than asserted as a
+   substring: the trap removes the directory when the install fails and when the
+   preflight refuses, the status the classification reads survives, and the
+   executor asks for the directory again after the install returns.
+7. **Mutation testing**, per the repo rule: every guard above gets a mutant that
    removes it, and each must die by a *named* test — not by a build failure and
    not by a hang.
 
