@@ -49,6 +49,45 @@ new directory and in-repo citations re-pointed in the moving PR (plan
 
 ---
 
+## Dreams — real `ant` CLI against `/v1/dreams` (plan 41 slice 1, run 2026-09-06) — ✅ passed
+
+The plan's §7 acceptance bullet asks that the real `ant beta:dreams create|retrieve|list|cancel|
+archive` work against this platform. Recorded with `ant` v1.30.0 (which pins anthropic-sdk-go
+v1.70.1) against the branch's own `controlplane` on a throwaway Postgres, at a1302ea on
+`feat/dreams-slice-1`, before the reviewers' round. Two CLI facts the transcript needed: `--input`
+is one mapping per element (`--input '{type: memory_store, …}' --input '{type: sessions, …}'`), and
+a dream's `--model` takes the bare id string as readily as the `{id, speed}` mapping — unlike an
+agent's `--model`, which the CLI still refuses as "string was used where mapping is expected".
+
+- `create --model claude-sonnet-4-6` → the fourteen-key `dream`: `status` `pending`, `inputs`
+  echoed in request order with the ids as sent, `outputs: []`, `model: {id: claude-sonnet-4-6}` with
+  no `speed`, `instructions: null`, `output_behavior: {type: create_new}` (the documented default,
+  never sent), `session_id`/`ended_at`/`archived_at`/`error` all null, and `usage` four zero
+  counters with `cache_creation_input_tokens` flat rather than a session's nested split.
+  `retrieve` → the same body.
+- `create --model '{"id":"claude-sonnet-4-6","speed":"fast"}' --instructions … --output-behavior
+  '{"type":"create_new"}'` → all three echoed, `speed: fast` among them.
+- `list` and `list --status pending` → both dreams, newest first; `list --limit 1 --max-items -1` →
+  the CLI auto-paged one per page through this platform's `k1|` cursor (with `--debug`, two GETs,
+  the second carrying `page=`), neither dream repeated.
+- `--output-behavior '{"type":"update_existing","memory_store_id":<the input store>}'` → `400
+  output_behavior.type update_existing is not available yet on this platform` — slice 1's hold,
+  taken before any target rule, so no row can carry a target this platform cannot yet run.
+- The refusals, each `400 invalid_request_error`: the archived store (`memory store … is
+  archived`), a session that does not exist (`session sesn_zzz… not found`), 101 session ids
+  (`session_ids must carry 1 to 100 session ids, not 101`), and `--model ''`, which the CLI's YAML
+  parse sends as a null and the platform answers `model is required`.
+- `archive` on the pending dream → `400 dream … is pending; cancel it first`; `cancel` → `canceled`
+  with `ended_at` set and `archived_at` still null; `cancel` again → the same body and the same
+  `ended_at`; `archive` → `archived_at` set with `status` left at `canceled`; `archive` again → the
+  same `archived_at`. `list` then omits the dream, while `list --include-archived`, `retrieve` and
+  `list --status canceled --include-archived` all serve it.
+- `retrieve --dream-id drm_doesnotexist000000000000` → `404 not_found_error`.
+
+Slice 1 has no runner, so a dream never leaves `pending` except through `cancel`: `running`,
+`completed` and `failed`, the pipeline `session_id`, the harvested `outputs` and the output store's
+memories are slice 2's acceptance, and `update_existing` is slice 4's.
+
 ## One host comparison, canonicalized (plan 43, #609) — archived 2026-09-06, delivered in one PR (#613)
 
 Three packages each carried a hand-rolled ASCII case fold to decide whether two
