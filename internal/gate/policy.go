@@ -14,10 +14,11 @@ import (
 // second. "limited" admits the configured allowed_hosts, plus — each under its
 // own flag — the *endpoints* the agent declares MCP servers at
 // (allow_mcp_servers) and the curated package registries
-// (allow_package_managers); "unrestricted" admits every host — the reference's
-// safety blocklist for unrestricted is unpublished and its enforcement is
-// deferred to a later sub-PR (recorded INFERRED in DIVERGENCES), so this phase
-// does not narrow it. An unknown type fails closed (admits nothing).
+// (allow_package_managers); "unrestricted" admits every *host* and still holds
+// every resolved *address* to the platform's floor, which is what a recording
+// of the reference shows it doing (#570): 403 on `169.254.169.254`, 200 on
+// `example.com`, one environment. An unknown type fails closed (admits
+// nothing).
 //
 // The three admitting sets are kept apart because they are not equally trusted.
 // `allowed_hosts` is an operator's list, entered through a validated grammar in
@@ -138,16 +139,28 @@ const (
 )
 
 // floored reports whether the dial is held to the platform's address floor.
-// Both widening flags admit a name no operator vouched for, so both are.
+// Every class but one is: both widening flags admit a name no operator vouched
+// for, and `unrestricted` admits every name there is.
 //
-// It is written as the two exemptions rather than as the members so that the
-// floor is what a class gets unless someone writes down why it should not. Two
+// `unrestricted` used to be exempt, on the reading that a mode named that way
+// cannot also refuse. A recording of the reference (#570, 2026-09-03) shows it
+// refusing `169.254.169.254` with 403 on an `unrestricted` environment while
+// answering `example.com` with 200, so the two questions this type exists to
+// keep apart are the two the reference answers differently: every *host* is
+// admitted, and the *address* underneath is still judged.
+//
+// The exemption left is the one that was always the argument: a host in
+// allowed_hosts is an operator naming a destination, and naming a private one
+// there is the vouching.
+//
+// It is written as the exemption rather than as the members so that the floor
+// is what a class gets unless someone writes down why it should not. Two
 // classes of caller depend on that direction: an admitting set added later is
 // floored until its author says otherwise, and so is the zero value — a
 // context no handler marked, which is to say a dial that reached the dialler
 // without passing admit at all, and therefore the last one to trust with an
 // unfloored socket.
-func (a admission) floored() bool { return a != admitUnrestricted && a != admitOperator }
+func (a admission) floored() bool { return a != admitOperator }
 
 // rooted reports whether the gate resolves the name absolutely — appending the
 // trailing dot that makes a resolver skip its `search` list (#596).

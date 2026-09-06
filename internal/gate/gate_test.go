@@ -69,6 +69,43 @@ func rawStatusLine(t *testing.T, gateURL, raw string) string {
 // trustedTLS, when non-nil, is an httptest TLS origin whose self-signed
 // certificate the client trusts — so the CONNECT tunnel test verifies the origin
 // properly rather than skipping verification.
+// rawStatusAndBody is rawStatusLine plus what the gate said. Two refusals now
+// share the 403: the policy's, on a host it never admitted, and the address
+// floor's, on an address it did. The status alone can no longer tell them
+// apart, and which one fired is the thing these tests exist to prove.
+func rawStatusAndBody(t *testing.T, gateURL, raw string) (string, string) {
+	t.Helper()
+	u, err := url.Parse(gateURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	conn, err := net.Dial("tcp", u.Host)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	if _, err := io.WriteString(conn, raw); err != nil {
+		t.Fatal(err)
+	}
+	// A refusal is a complete response the server will happily reuse the
+	// connection after, so reading to EOF would wait for a close nobody is
+	// sending. The deadline is the backstop: without it a regression that
+	// leaves the response unfinished would hang the package to its own timeout
+	// instead of failing here by name.
+	if err := conn.SetReadDeadline(time.Now().Add(5 * time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	all, err := io.ReadAll(conn)
+	if err != nil && !errors.Is(err, os.ErrDeadlineExceeded) {
+		t.Fatal(err)
+	}
+	if len(all) == 0 {
+		t.Fatal("the gate answered nothing within the deadline")
+	}
+	line, body, _ := strings.Cut(string(all), "\r\n")
+	return line, body
+}
+
 func proxyClient(t *testing.T, gateURL string, trustedTLS *httptest.Server) *http.Client {
 	t.Helper()
 	u, err := url.Parse(gateURL)
@@ -445,13 +482,16 @@ func TestAnMCPOnlyDialIsHeldToTheAddressFloor(t *testing.T) {
 	host, declared := hostOf(t, origin.URL), endpointOf(t, origin.URL)
 
 	for name, tc := range map[string]struct {
-		net  domain.Networking
-		want int
+		net      domain.Networking
+		want     int
+		wantBody string
 	}{
-		// The origin is on loopback, which the real floor refuses.
+		// The origin is on loopback, which the real floor refuses. The status is
+		// the policy's 403 as well, so the body is what says the floor answered
+		// rather than admit having refused the host outright.
 		"the floor refuses a declared loopback endpoint": {
 			domain.Networking{Type: domain.NetLimited, AllowMCPServers: true},
-			http.StatusBadGateway,
+			http.StatusForbidden, "private/reserved range",
 		},
 		// The same address, admitted by the operator's own list, is dialled.
 		"and leaves an operator's own host alone": {
@@ -459,7 +499,7 @@ func TestAnMCPOnlyDialIsHeldToTheAddressFloor(t *testing.T) {
 				Type: domain.NetLimited, AllowMCPServers: true,
 				AllowedHosts: []string{host},
 			},
-			http.StatusOK,
+			http.StatusOK, "",
 		},
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -475,6 +515,12 @@ func TestAnMCPOnlyDialIsHeldToTheAddressFloor(t *testing.T) {
 			defer resp.Body.Close()
 			if resp.StatusCode != tc.want {
 				t.Errorf("status = %d, want %d", resp.StatusCode, tc.want)
+			}
+			if tc.wantBody != "" {
+				body, _ := io.ReadAll(resp.Body)
+				if !strings.Contains(string(body), tc.wantBody) {
+					t.Errorf("body = %q, want it to name the floor (%q)", body, tc.wantBody)
+				}
 			}
 		})
 	}
@@ -503,15 +549,18 @@ func TestAnMCPOnlyTunnelIsHeldToTheAddressFloor(t *testing.T) {
 	// No IPAllowed override: the production floor, against an origin on loopback.
 	floored := httptest.NewServer(gate.New(cfg))
 	defer floored.Close()
-	_, err := proxyClient(t, floored.URL, origin).Get(origin.URL)
-	if err == nil {
-		t.Fatal("the tunnel to a refused address was established")
+	// Raw, because a proxying client surfaces a refused CONNECT as a status text
+	// alone — and the status no longer says which refusal it was. The body does:
+	// the floor names the address, admit names the policy.
+	endpoint := endpointOf(t, origin.URL)
+	refusedStatus, refusedBody := rawStatusAndBody(t, floored.URL,
+		"CONNECT "+endpoint+" HTTP/1.1\r\nHost: "+endpoint+"\r\nConnection: close\r\n\r\n")
+	if !strings.HasPrefix(refusedStatus, "HTTP/1.1 403") {
+		t.Errorf("tunnel status = %q, want the floor's 403", refusedStatus)
 	}
-	// Go surfaces a refused CONNECT as its status text.
-	if got := err.Error(); !strings.Contains(got, http.StatusText(http.StatusBadGateway)) {
-		t.Errorf("tunnel error = %v, want the 502 of an admitted dial the floor stopped "+
-			"(a %q would mean the policy refused it and the floor was never asked)",
-			err, http.StatusText(http.StatusForbidden))
+	if !strings.Contains(refusedBody, "private/reserved range") {
+		t.Errorf("tunnel body = %q, want the floor's own refusal — the policy's "+
+			"wording here would mean admit refused the endpoint and the floor was never asked", refusedBody)
 	}
 
 	// The same declaration, the same origin, the floor lifted: CONNECT is
@@ -619,13 +668,15 @@ func TestAPackageRegistryOnlyDialIsHeldToTheAddressFloor(t *testing.T) {
 	host := hostOf(t, origin.URL)
 
 	for name, tc := range map[string]struct {
-		net  domain.Networking
-		want int
+		net      domain.Networking
+		want     int
+		wantBody string
 	}{
-		// The origin is on loopback, which the real floor refuses.
+		// The origin is on loopback, which the real floor refuses; the body is
+		// what separates its 403 from admit's.
 		"the floor refuses a registry-only dial": {
 			domain.Networking{Type: domain.NetLimited, AllowPackageManagers: true},
-			http.StatusBadGateway,
+			http.StatusForbidden, "private/reserved range",
 		},
 		// The same address, admitted by the operator's own list, is dialled.
 		"and leaves an operator's own host alone": {
@@ -633,7 +684,7 @@ func TestAPackageRegistryOnlyDialIsHeldToTheAddressFloor(t *testing.T) {
 				Type: domain.NetLimited, AllowPackageManagers: true,
 				AllowedHosts: []string{host},
 			},
-			http.StatusOK,
+			http.StatusOK, "",
 		},
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -650,6 +701,12 @@ func TestAPackageRegistryOnlyDialIsHeldToTheAddressFloor(t *testing.T) {
 			defer resp.Body.Close()
 			if resp.StatusCode != tc.want {
 				t.Errorf("status = %d, want %d", resp.StatusCode, tc.want)
+			}
+			if tc.wantBody != "" {
+				body, _ := io.ReadAll(resp.Body)
+				if !strings.Contains(string(body), tc.wantBody) {
+					t.Errorf("body = %q, want it to name the floor (%q)", body, tc.wantBody)
+				}
 			}
 		})
 	}
@@ -716,11 +773,121 @@ func TestGateDoesNotWriteTheMCPHostsIntoTheConfiguredList(t *testing.T) {
 	}
 }
 
-func TestGateUnrestrictedAdmitsAnyHost(t *testing.T) {
+// TestGateUnrestrictedFloorsTheResolvedAddress is the half of the 2026-09-03
+// recording that is a refusal: on an environment with `unrestricted`
+// networking, the reference answered `http://169.254.169.254/` with 403 and
+// `Destination IP is in a private/reserved range` while answering
+// `https://example.com/` with 200. Every name is admitted; the address is still
+// judged. An httptest origin stands in for the private address — it is
+// loopback, which is what this platform's floor refuses (RFC 1918 stays
+// reachable by design, the self-hosted premise the dial-address-floor entry
+// argues, so this platform's floor is narrower than the reference's and the
+// registry says so).
+func TestGateUnrestrictedFloorsTheResolvedAddress(t *testing.T) {
 	origin := echoOrigin(t)
 	defer origin.Close()
 
 	g := gate.New(gate.Config{Networking: domain.Networking{Type: domain.NetUnrestricted}})
+	gsrv := httptest.NewServer(g)
+	defer gsrv.Close()
+
+	t.Run("plain", func(t *testing.T) {
+		resp, err := proxyClient(t, gsrv.URL, nil).Get(origin.URL)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusForbidden {
+			t.Errorf("status = %d, want 403 — the address floor refused this dial", resp.StatusCode)
+		}
+		body, _ := io.ReadAll(resp.Body)
+		if !strings.Contains(string(body), "private/reserved range") {
+			t.Errorf("body = %q, want the reference's own wording", body)
+		}
+	})
+
+	// The tunnel path reads its error from the dialler directly rather than
+	// through a transport, so it is driven separately — and raw, because a
+	// proxying client turns every tunnel failure into one generic error.
+	t.Run("connect", func(t *testing.T) {
+		host := hostOf(t, origin.URL)
+		status := rawStatusLine(t, gsrv.URL, "CONNECT "+host+" HTTP/1.1\r\nHost: "+host+"\r\n\r\n")
+		if !strings.HasPrefix(status, "HTTP/1.1 403") {
+			t.Errorf("CONNECT status = %q, want 403 — a refused address is policy, not an unreachable host", status)
+		}
+	})
+}
+
+// TestGateStillReportsAnUnreachableHostAsUnreachable keeps the two apart. The
+// floor's 403 is a policy answer; a host that simply does not answer is still
+// the 502 it always was, or the refusal loses the only thing that distinguishes
+// "you may not" from "it did not".
+func TestGateStillReportsAnUnreachableHostAsUnreachable(t *testing.T) {
+	g := gate.New(gate.Config{
+		Networking: domain.Networking{Type: domain.NetUnrestricted},
+		// A floor that admits everything, so what is left is the dial itself.
+		IPAllowed: func(net.IP) error { return nil },
+	})
+	gsrv := httptest.NewServer(g)
+	defer gsrv.Close()
+
+	resp, err := proxyClient(t, gsrv.URL, nil).Get("http://127.0.0.1:1/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusBadGateway {
+		t.Errorf("status = %d, want 502 for a host that refused the connection", resp.StatusCode)
+	}
+}
+
+// TestGateRefusesAnEmptyAuthority closes the bypass the Claude reviewer found
+// in #596's pass and left for this issue. `CONNECT :443` gives hostOnly "" and
+// admit short-circuits on admitAll before any host is examined, so the class was
+// admitUnrestricted rather than admitNone — and ":443" is Go's documented
+// "local system" form, so the gate dialled loopback in the namespace it shares
+// with the sandbox. handlePlain has the same shape through `http://:80/x`,
+// where a credential whose arm is `unrestricted` would have been substituted
+// into a request delivered to that listener.
+func TestGateRefusesAnEmptyAuthority(t *testing.T) {
+	// The floor admits everything here, so what this drives is the handlers'
+	// own refusal rather than the address floor catching it downstream. Both
+	// hold it, and the test says which one it is asking about.
+	g := gate.New(gate.Config{
+		Networking: domain.Networking{Type: domain.NetUnrestricted},
+		IPAllowed:  func(net.IP) error { return nil },
+	})
+	gsrv := httptest.NewServer(g)
+	defer gsrv.Close()
+
+	status := rawStatusLine(t, gsrv.URL, "CONNECT :443 HTTP/1.1\r\nHost: :443\r\n\r\n")
+	if !strings.HasPrefix(status, "HTTP/1.1 403") {
+		t.Errorf("CONNECT status = %q, want 403 — an empty authority names no host to admit", status)
+	}
+
+	resp, err := proxyClient(t, gsrv.URL, nil).Get("http://:80/x")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusForbidden {
+		t.Errorf("plain status = %d, want 403 for an empty authority", resp.StatusCode)
+	}
+}
+
+func TestGateUnrestrictedAdmitsAnyHost(t *testing.T) {
+	origin := echoOrigin(t)
+	defer origin.Close()
+
+	// The host half of what the reference does: every name is admitted. The
+	// address half is TestGateUnrestrictedFloorsTheResolvedAddress, and it is
+	// why this one supplies its own floor — an httptest origin is loopback,
+	// which the real floor refuses, so without this the two halves could not be
+	// told apart and this test would fail for the other one's reason.
+	g := gate.New(gate.Config{
+		Networking: domain.Networking{Type: domain.NetUnrestricted},
+		IPAllowed:  func(net.IP) error { return nil },
+	})
 	gsrv := httptest.NewServer(g)
 	defer gsrv.Close()
 

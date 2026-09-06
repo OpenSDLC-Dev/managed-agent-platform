@@ -49,6 +49,48 @@ new directory and in-repo citations re-pointed in the moving PR (plan
 
 ---
 
+## The `unrestricted` address floor (plan 45, #570) — archived 2026-09-06, delivered in one PR
+
+`unrestricted` admitted every host *and* every address. A recording of the
+reference on 2026-09-03 answered the question `internal/gate/policy.go` had been
+deferring in a comment: on one `unrestricted` environment it refused
+`http://169.254.169.254/` with **403 `Destination IP is in a private/reserved
+range`** and answered `https://example.com/` with 200. Unrestricted in its
+hosts, floored in its addresses — which is the distinction the `admission` type
+already existed to keep apart, so the change is one exemption removed from
+`floored()`.
+
+Plan 44 is what made it that small: the gate's dialler already resolves a name
+once and holds every resolved address to the admission class before any connect,
+so the floor was wired to the class and was only being asked the wrong question
+for one of them.
+
+Two things travelled with it. The refusal's **shape**: a dial the floor stopped
+surfaced as 502 `cannot reach host`, which reads as an origin that did not
+answer rather than as a policy answer, and it now carries the reference's 403
+and wording — for the MCP and package-registry classes as well, which had the
+same misreport. The tests that used the two status codes to prove *which*
+mechanism refused keep that distinction and read the body for it. And the
+**empty authority** found in #596's review: `CONNECT :443` gives an empty host,
+`admit` short-circuits on `admitAll` before any host is examined, and `":443"`
+is Go's local-system form — so the gate dialled loopback in the namespace it
+shares with the sandbox. Both handlers refuse it before admit is asked, which
+holds even for the class the floor exempts.
+
+Mutation-tested per the repo rule: 7 mutants, 7 killed, no survivors, each by a
+named test. One of them is worth keeping: putting the exemption back on
+`allowed_hosts` instead of `unrestricted` is killed by twenty tests, which is
+what an exemption that most of the suite depends on should look like, and is the
+evidence that the one being removed was the narrower of the two.
+
+What it does not cover is a deployment shape rather than a policy: a vault-less
+`unrestricted` session is provisioned no gate at all (`wantsGate` is `limited`
+or vault-attached) and the Docker backend networks it directly, so nothing in
+`internal/gate` runs for it. That is #620, with the three options costed —
+provision a gate for every session, enforce at the sandbox network layer, or
+register the gap — and it was split out deliberately rather than decided inside
+a policy change.
+
 ## One resolution per dial (plan 44, #601) — archived 2026-09-06, delivered in one PR
 
 Every outbound connection this platform makes to a customer-supplied or

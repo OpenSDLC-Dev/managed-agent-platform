@@ -13,10 +13,10 @@ skills GA wire shape; 2026-09-05 added #594's batch, #56's — the first
 **multi-workspace** capture — and plan 41's `/v1/dreams` probe, refused: the organization
 is not enrolled in that preview. #78 stays open — 117 registry entries name it as their
 live tracker, and the debt is analysis rather than recording, that blocked checklist
-aside. Plan 38 (#263) archived
-2026-09-04; plans 39 (#566, skills GA) and 40 (#353, environment packages,
-folding in #576) 2026-09-05; plans 43 (#609, one host comparison) and 44
-(#601, one resolution per dial) 2026-09-06.
+aside. Plans archived: 38 (#263) 2026-09-04; 39 (#566, skills GA) and 40 (#353,
+environment packages, folding in #576) 2026-09-05; 43 (#609, one host comparison),
+44 (#601, one resolution per dial) and 45 (#570, the `unrestricted` address floor,
+ungated half #620) 2026-09-06.
 
 ## Tasks
 

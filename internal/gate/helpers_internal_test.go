@@ -345,7 +345,7 @@ func TestWhatEachAdmissionClassAsksOfTheDial(t *testing.T) {
 		// as. It floors: a dial that never passed admit is not one to hand an
 		// unfloored socket.
 		{admitNone, true, false},
-		{admitUnrestricted, false, false},
+		{admitUnrestricted, true, false},
 		{admitOperator, false, false},
 		{admitMCP, true, false},
 		{admitRegistry, true, true},
@@ -373,7 +373,12 @@ func TestTheGatesFloorFollowsTheAdmissionClass(t *testing.T) {
 		refused bool
 	}{
 		{admitNone, true},
-		{admitUnrestricted, false},
+		// `unrestricted` is unrestricted in its hosts, not in its addresses:
+		// the reference admits every name and refuses a private or reserved
+		// address underneath it (#570, recorded 2026-09-03).
+		{admitUnrestricted, true},
+		// The one exemption left. A host in allowed_hosts is an operator
+		// naming a destination, and naming a private one there is the vouching.
 		{admitOperator, false},
 		{admitMCP, true},
 		{admitRegistry, true},

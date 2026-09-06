@@ -77,11 +77,12 @@ type Config struct {
 	// declares MCP servers at. They widen a `limited` policy that sets
 	// allow_mcp_servers and nothing else — see newPolicy.
 	MCPServerEndpoints []string
-	// IPAllowed is the address floor a dial admitted only by a widening flag —
-	// MCPServerEndpoints, or the package registries Networking opens — is held
-	// to, run on the resolved address. Nil selects dialguard.IPAllowed, which is
-	// what the platform's own MCP client uses on the same declarations; a test
-	// overrides it to reach a loopback server.
+	// IPAllowed is the address floor every dial but an operator-vouched one is
+	// held to, run on the resolved address — the widening flags'
+	// (MCPServerEndpoints, the package registries Networking opens) and
+	// `unrestricted`'s. Nil selects dialguard.IPAllowed, which is what the
+	// platform's own MCP client uses on the same declarations; a test overrides
+	// it to reach a loopback server.
 	IPAllowed     func(net.IP) error
 	Credentials   []egress.Credential
 	OnUnreachable func(host string, placeholders []string)
@@ -271,12 +272,41 @@ func (g *Gate) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	g.handlePlain(w, r)
 }
 
+// refusedOrUnreachable answers a failed dial. The address floor's refusal is a
+// policy answer and says so — 403, in the reference's own words, which a
+// recording of an `unrestricted` environment answering `169.254.169.254`
+// produced (#570). Every other failure stays the 502 it was: an agent that
+// cannot tell "you may not" from "it did not answer" retries the one it should
+// not and gives up on the one it should.
+//
+// The plain-HTTP path reads its error through http.Transport, which wraps it,
+// so this is errors.Is rather than a comparison — and a test drives that path
+// through a real RoundTrip rather than assuming the wrapping is transparent.
+func refusedOrUnreachable(w http.ResponseWriter, err error) {
+	if errors.Is(err, dialguard.ErrRefused) {
+		http.Error(w, "Destination IP is in a private/reserved range", http.StatusForbidden)
+		return
+	}
+	http.Error(w, "cannot reach host", http.StatusBadGateway)
+}
+
 // handleConnect admits or refuses an HTTPS tunnel on its target host, then
 // copies bytes opaquely — no substitution, so a placeholder in a TLS body
 // reaches the origin literally (the documented #166 gap).
 func (g *Gate) handleConnect(w http.ResponseWriter, r *http.Request) {
 	target := addrWithPort(r.Host, "443")
 	host, port := hostOnly(target), portOnly(target)
+	// An authority naming no host is refused before admit is asked, because
+	// admit cannot refuse it: `unrestricted` short-circuits on admitAll before
+	// any host is examined, so `CONNECT :443` came back admitted, and ":443" is
+	// Go's documented "local system" form — the gate would dial loopback in the
+	// namespace it shares with the sandbox. Under `limited` this was already
+	// closed, an empty host matching no set. Found in #596's review, fixed here
+	// with the floor that would also have caught it (#570).
+	if host == "" {
+		http.Error(w, "host not permitted by the environment's networking policy", http.StatusForbidden)
+		return
+	}
 	how := g.policy.admit(host, port)
 	if how == admitNone {
 		http.Error(w, "host not permitted by the environment's networking policy", http.StatusForbidden)
@@ -307,10 +337,10 @@ func (g *Gate) handleConnect(w http.ResponseWriter, r *http.Request) {
 	// An empty canonical name is the other authority the substitution has to
 	// decline. UTS46 deletes the ignorable code points outright, so an authority
 	// written as one SOFT HYPHEN canonicalizes to "", and JoinHostPort("", port)
-	// is ":port" — an address Go's resolver reads as the unspecified one, which
-	// is a destination the policy never admitted and, on this host, a local
-	// service. The authority goes out as written instead, and fails to resolve
-	// as it did before there was a canonical dial at all.
+	// is ":port" — the local-system form the guard above refuses when the
+	// authority is empty to begin with. The authority goes out as written
+	// instead, and fails to resolve as it did before there was a canonical dial
+	// at all: a lone SOFT HYPHEN is not a name any resolver answers.
 	//
 	// Reaching this needs a request line whose authority differs from its Host
 	// header, since net/http answers 400 to a malformed Host header before any
@@ -322,7 +352,7 @@ func (g *Gate) handleConnect(w http.ResponseWriter, r *http.Request) {
 	}
 	upstream, err := g.dial(ctx, "tcp", dialAddr)
 	if err != nil {
-		http.Error(w, "cannot reach host", http.StatusBadGateway)
+		refusedOrUnreachable(w, err)
 		return
 	}
 	defer upstream.Close()
@@ -445,6 +475,14 @@ func (g *Gate) handlePlain(w http.ResponseWriter, r *http.Request) {
 	// carries the same two halves and is normalized the same way.
 	target := addrWithPort(r.URL.Host, defaultPort(r.URL.Scheme))
 	host, port := hostOnly(target), portOnly(target)
+	// `http://:80/x` is the same empty authority handleConnect refuses above,
+	// and it carried more: a credential whose own arm is `unrestricted` ignores
+	// its Hosts list, so its secret would have been substituted into a request
+	// delivered to a loopback listener.
+	if host == "" {
+		http.Error(w, "host not permitted by the environment's networking policy", http.StatusForbidden)
+		return
+	}
 	how := g.policy.admit(host, port)
 	if how == admitNone {
 		http.Error(w, "host not permitted by the environment's networking policy", http.StatusForbidden)
@@ -469,7 +507,7 @@ func (g *Gate) handlePlain(w http.ResponseWriter, r *http.Request) {
 
 	resp, err := g.transport.RoundTrip(out)
 	if err != nil {
-		http.Error(w, "cannot reach host", http.StatusBadGateway)
+		refusedOrUnreachable(w, err)
 		return
 	}
 	defer resp.Body.Close()
