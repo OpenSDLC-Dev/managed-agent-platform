@@ -159,6 +159,10 @@ func TestDreamTickArms(t *testing.T) {
 		arrange func(t *testing.T, s *tserver, storeID, dreamID, sessionID string)
 		status  string
 		errType string
+		// closesAtOnce: the arm finds no session to wind down, so the same
+		// commit stamps closed_at and takes the transcript rows and objects —
+		// the closing arm never runs on a dream already closed.
+		closesAtOnce bool
 	}{
 		{
 			name: "input store archived is arm 4",
@@ -197,7 +201,7 @@ func TestDreamTickArms(t *testing.T) {
 					t.Fatalf("delete pipeline session: %v", err)
 				}
 			},
-			status: "failed", errType: "internal_error",
+			status: "failed", errType: "internal_error", closesAtOnce: true,
 		},
 		{
 			name: "a terminated session is arm 5",
@@ -238,6 +242,7 @@ func TestDreamTickArms(t *testing.T) {
 			dreamID, sessionID := startedDream(t, s, body)
 
 			tc.arrange(t, s, storeID, dreamID, sessionID)
+			fileIDs := dreamFileIDs(t, s, dreamID)
 			tick(t, s)
 
 			d := getDream(t, s, dreamID)
@@ -253,6 +258,20 @@ func TestDreamTickArms(t *testing.T) {
 			}
 			if d["ended_at"] == nil {
 				t.Error("a terminal dream has no ended_at")
+			}
+			_, _, closedAt := dreamInternals(t, s, dreamID)
+			if tc.closesAtOnce != (closedAt != nil) {
+				t.Errorf("closed_at = %v, want closed at once: %v", closedAt, tc.closesAtOnce)
+			}
+			if tc.closesAtOnce {
+				if left := dreamFileIDs(t, s, dreamID); len(left) != 0 {
+					t.Errorf("%d transcript rows survived the close that had no session to wind down", len(left))
+				}
+				for _, id := range fileIDs {
+					if _, _, err := s.blobs.Get(context.Background(), blob.FilesKey(id)); !errors.Is(err, blob.ErrNotFound) {
+						t.Errorf("object for %s survived the close: %v", id, err)
+					}
+				}
 			}
 		})
 	}

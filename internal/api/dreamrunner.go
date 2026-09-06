@@ -489,8 +489,11 @@ func (s *server) dreamFail(ctx context.Context, tx pgx.Tx, d dreamRow, errType, 
 }
 
 // dreamSettle writes one terminal state, mirrors the session's usage a last
-// time, and closes the dream outright when it never had a session to wind
-// down.
+// time, and closes the dream outright when it has no session to wind down —
+// one it never had, or one deleted at the database level. The close takes
+// the transcript rows with it (§4.6): their ownership is the dream's, and the
+// closing arm, which would otherwise delete them, never runs on a dream this
+// commit closes.
 func (s *server) dreamSettle(ctx context.Context, tx pgx.Tx, d dreamRow, status string, failure *dreamErrorJSON) (dreamStepResult, error) {
 	var errJSON []byte
 	if failure != nil {
@@ -507,7 +510,17 @@ func (s *server) dreamSettle(ctx context.Context, tx pgx.Tx, d dreamRow, status 
 		 WHERE id = $1`, d.id, status, errJSON, usage, !d.sessionFound); err != nil {
 		return dreamStepResult{}, err
 	}
-	return dreamStepResult{to: status}, nil
+	res := dreamStepResult{to: status}
+	if !d.sessionFound {
+		keys, err := deleteDreamFileRows(ctx, tx, d.id)
+		if err != nil {
+			return dreamStepResult{}, err
+		}
+		if len(keys) > 0 {
+			res.after = func(ctx context.Context) { s.deleteDreamBlobs(ctx, keys) }
+		}
+	}
+	return res, nil
 }
 
 // dreamUnavailable is arm 4's four reads, in §4.1's order. The executor
