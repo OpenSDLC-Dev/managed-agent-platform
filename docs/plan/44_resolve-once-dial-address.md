@@ -128,6 +128,10 @@ question is exactly the drift this plan exists to remove.
 all three have to be reproduced or they are a regression on every dual-stack
 deployment:
 
+- **The timeout's scope** — `net.Dialer` applies its `Timeout` at the top of
+  `DialContext`, *before* it resolves, so the bound covers the lookup as well as
+  the connects. Applying it any later leaves a hanging resolver bounded only by
+  the caller's context, which for the gate is the sandbox's own request.
 - **Multi-address failover** — try the next address when one fails.
 - **Per-address deadline** — the remaining budget divided by the addresses
   left, so one blackholed address cannot consume the whole `Timeout`.
@@ -210,7 +214,7 @@ rather than the network.
    reaches an address the floor refuses and an `admitMCP` one does not — the
    existing assertions, re-pointed at the new dialler.
 8. **Mutation testing**, per the repo rule: every guard above gets a mutant
-   that removes it, and each must fail a named test. Eighteen mutants, eighteen
+   that removes it, and each must fail a named test. Nineteen mutants, nineteen
    killed. Two survived the first pass and both were real: an all-refused answer
    was still reporting `ErrRefused` through a generic fallback rather than the
    refusal that names the offending address, and `netip.Addr.WithZone("")` before

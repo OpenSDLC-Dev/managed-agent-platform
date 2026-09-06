@@ -68,7 +68,13 @@ floored at two seconds, and the second address family started after a 300ms
 fallback delay (RFC 6555), first connection winning and the loser cancelled and
 closed. The share's floor is Go's own rule, and the suite drives it either side —
 with less than the floor left, an attempt gets what remains rather than a slice
-too short to complete a handshake in.
+too short to complete a handshake in. A fourth thing had to be reproduced and
+was missed on the first pass: `net.Dialer` applies its `Timeout` at the top of
+`DialContext`, before it resolves, so the bound covers the lookup too. Applying
+it after the lookup left a hanging resolver — and a dial to an address literal,
+which skips the multi-address path entirely — bounded only by the caller's
+context, which for the gate is the sandbox's own request. Caught by re-reading
+the new code against Go's, not by a test, which is why one now exists.
 
 **What the change does not do is the part worth recording.** #601's option 4, the
 one settled on, is written there as closing "the search-list gap … uniformly for
@@ -87,7 +93,7 @@ half: the decision and the socket no longer consult different resolutions, and
 the address is now an input the request path holds, which is what #570 needs
 before it can give `unrestricted` a floor at all.
 
-Mutation-tested per the repo rule: 18 mutants, 18 killed, no survivors. Two
+Mutation-tested per the repo rule: 19 mutants, 19 killed, no survivors. Two
 survived the first pass and both were real. One showed that an all-refused answer
 still reported `ErrRefused` through a generic fallback, losing the refusal that
 names the offending address — the test now asserts the address. The other showed

@@ -79,6 +79,19 @@ type Dialer struct {
 // DialContext connects to addr, which is a "host:port" the caller has already
 // decided may be reached. It is a drop-in for (&net.Dialer{…}).DialContext.
 func (d *Dialer) DialContext(ctx context.Context, network, addr string) (net.Conn, error) {
+	// The bound covers the lookup as well as the connects, which is where
+	// net.Dialer applies its own Timeout and is the only placement that bounds
+	// the whole operation: a resolver that never answers would otherwise hold
+	// the caller for as long as its context allows, and for the gate that
+	// context is the sandbox's request. Cancelling on return cannot disturb a
+	// connection that came back — a dial stops watching its context once it has
+	// one to hand over.
+	if d.Timeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, d.Timeout)
+		defer cancel()
+	}
+
 	host, port, err := net.SplitHostPort(addr)
 	if err != nil {
 		// Not an address this can take apart, which is a caller's malformed
@@ -157,11 +170,6 @@ func (d *Dialer) admitted(ctx context.Context, ips []net.IP) ([]netip.Addr, erro
 // FallbackDelay so a broken IPv6 path costs that delay rather than a connect
 // timeout.
 func (d *Dialer) dialAll(ctx context.Context, network string, addrs []netip.Addr, port string) (net.Conn, error) {
-	if d.Timeout > 0 {
-		var cancel context.CancelFunc
-		ctx, cancel = context.WithTimeout(ctx, d.Timeout)
-		defer cancel()
-	}
 	primary, fallback := partition(addrs)
 	if len(fallback) == 0 || d.FallbackDelay < 0 {
 		return d.dialSerial(ctx, network, append(primary, fallback...), port)

@@ -217,6 +217,54 @@ func TestTheOtherFamilyStartsAfterTheFallbackDelay(t *testing.T) {
 	}
 }
 
+// TestTheTimeoutBoundsTheWholeDial: net.Dialer's Timeout covers resolution as
+// well as the connects, and so must this one — a resolver that never answers,
+// or a literal that never connects, must not hold the caller for as long as its
+// context allows. For the gate that context is the sandbox's own request, which
+// is why its dialer carries a bound at all.
+func TestTheTimeoutBoundsTheWholeDial(t *testing.T) {
+	t.Parallel()
+	const budget = 60 * time.Millisecond
+	t.Run("a resolver that never answers", func(t *testing.T) {
+		t.Parallel()
+		d := &Dialer{
+			Timeout: budget,
+			Lookup: func(ctx context.Context, _, _ string) ([]net.IP, error) {
+				<-ctx.Done()
+				return nil, ctx.Err()
+			},
+			dialOne: func(context.Context, string, string) (net.Conn, error) {
+				t.Error("the lookup never answered, so nothing may be dialled")
+				return nil, errors.New("unreachable")
+			},
+		}
+		start := time.Now()
+		if _, err := d.DialContext(context.Background(), "tcp", "slow.example:443"); err == nil {
+			t.Fatal("want the dial to give up")
+		}
+		if elapsed := time.Since(start); elapsed > time.Second {
+			t.Errorf("returned in %v, want about the %v budget", elapsed, budget)
+		}
+	})
+	t.Run("a literal that never connects", func(t *testing.T) {
+		t.Parallel()
+		d := &Dialer{
+			Timeout: budget,
+			dialOne: func(ctx context.Context, _, _ string) (net.Conn, error) {
+				<-ctx.Done()
+				return nil, ctx.Err()
+			},
+		}
+		start := time.Now()
+		if _, err := d.DialContext(context.Background(), "tcp", "198.51.100.9:443"); err == nil {
+			t.Fatal("want the dial to give up")
+		}
+		if elapsed := time.Since(start); elapsed > time.Second {
+			t.Errorf("returned in %v, want about the %v budget", elapsed, budget)
+		}
+	})
+}
+
 // TestBothFamiliesFailingReportsThePrimarysError keeps the message naming the
 // family the resolver preferred.
 func TestBothFamiliesFailingReportsThePrimarysError(t *testing.T) {
