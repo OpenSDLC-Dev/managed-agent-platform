@@ -1323,7 +1323,9 @@ The 2026-09-05 attempt settled only that the route is registered and gated
    duplicated id; two `memory_store` inputs; no `memory_store` input; no `sessions` input;
    `update_existing` naming another store; an unknown body key, and one inside the
    `model` object; `instructions` of 4,097 characters; `model: ""`; an unsupported model
-   id; `speed: fast` on a model that supports it and one that does not.
+   id; `speed: fast` on a model that supports it and one that does not;
+   `output_behavior: null` and `instructions: null` (expect 200 — the platform reads both
+   as unset).
 7. The cardinality rule: whether the reference accepts two `sessions` inputs (merged?) or
    refuses them.
 8. `include_archived` omitted vs `true`; `statuses[]` bracketed vs bare; `limit` omitted

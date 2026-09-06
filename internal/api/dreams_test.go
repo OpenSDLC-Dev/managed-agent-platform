@@ -212,9 +212,6 @@ func TestDreamCreateRejections(t *testing.T) {
 			map[string]any{"type": "other"})},
 		{"create_new carrying a target", dreamWith(storeID, sessionIDs, "output_behavior",
 			map[string]any{"type": "create_new", "memory_store_id": storeID})},
-		// Either the unknown key or the refusal answers this one; both are 400s.
-		{"update_existing carrying an unknown key", dreamWith(storeID, sessionIDs, "output_behavior",
-			map[string]any{"type": "update_existing", "extra": 1})},
 		{"unknown top-level key", func() map[string]any {
 			b := dreamBody(storeID, sessionIDs)
 			b["priority"] = "high"
@@ -227,9 +224,9 @@ func TestDreamCreateRejections(t *testing.T) {
 		})
 	}
 
-	// These six rules each have a later rule behind them that answers the same
-	// 400 for a different reason — an id that fails the shape check is also an
-	// id no row carries — so the message is what proves which rule fired.
+	// These rules each have a later rule behind them that answers the same 400
+	// for a different reason — an id that fails the shape check is also an id
+	// no row carries — so the message is what proves which rule fired.
 	for _, tc := range []struct {
 		name string
 		body map[string]any
@@ -253,6 +250,11 @@ func TestDreamCreateRejections(t *testing.T) {
 		{"duplicate across both spellings", with([]any{storeInput,
 			map[string]any{"type": "sessions", "session_ids": []any{sesn, alias}}}),
 			fmt.Sprintf("session_ids must not repeat %q", alias)},
+		// The arm's key set is checked before the slice-4 refusal (§5.2): with
+		// that check removed this body would still 400, on the refusal.
+		{"update_existing carrying an unknown key", dreamWith(storeID, sessionIDs, "output_behavior",
+			map[string]any{"type": "update_existing", "extra": 1}),
+			`unknown field "extra"`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			status, body := s.do(http.MethodPost, "/v1/dreams", tc.body)
@@ -300,6 +302,35 @@ func TestDreamCreateAcceptsArchivedAndAliasedSessions(t *testing.T) {
 	second, _ := inputs[1].(map[string]any)
 	if got, _ := second["session_ids"].([]any); len(got) != 1 || got[0] != alias {
 		t.Errorf("session_ids = %v, want the session_ spelling echoed as sent", second["session_ids"])
+	}
+}
+
+// The documented bounds hold at the boundary and count characters: exactly 100
+// session ids are accepted, and so are 4,096 two-byte characters of
+// instructions, which a byte count would refuse. An explicit null is read as
+// unset on output_behavior and instructions alike — the repo's create-route
+// rule, registered in docs/DIVERGENCES.md because the spec types
+// output_behavior non-nullable.
+func TestDreamCreateBoundsAndNulls(t *testing.T) {
+	s := newTestServer(t)
+	storeID, sessionIDs := createDreamInputs(t, s, 100)
+	createDream(t, s, dreamBody(storeID, sessionIDs))
+
+	few := sessionIDs[:1]
+	createDream(t, s, dreamWith(storeID, few, "instructions", strings.Repeat("é", 4096)))
+	status, body := s.do(http.MethodPost, "/v1/dreams",
+		dreamWith(storeID, few, "instructions", strings.Repeat("é", 4097)))
+	wantErr(t, status, body, http.StatusBadRequest, "invalid_request_error")
+
+	req := dreamBody(storeID, few)
+	req["output_behavior"] = nil
+	req["instructions"] = nil
+	got := createDream(t, s, req)
+	if ob, _ := got["output_behavior"].(map[string]any); len(ob) != 1 || ob["type"] != "create_new" {
+		t.Errorf("output_behavior = %v after an explicit null, want {type: create_new}", got["output_behavior"])
+	}
+	if got["instructions"] != nil {
+		t.Errorf("instructions = %v after an explicit null, want null", got["instructions"])
 	}
 }
 
@@ -388,17 +419,30 @@ func TestDreamListPaging(t *testing.T) {
 	if got := len(listData(t, all)); got != 21 {
 		t.Errorf("limit=100 returned %d rows, want 21", got)
 	}
-	for _, q := range []string{"limit=0", "limit=101", "page=" + url.QueryEscape(encodedVersionCursor)} {
+	for _, q := range []string{"limit=0", "limit=101", "page=not-a-cursor"} {
 		status, body := s.do(http.MethodGet, "/v1/dreams?"+q, nil)
 		wantErr(t, status, body, http.StatusBadRequest, "invalid_request_error")
 	}
-	status, body := s.do(http.MethodGet, "/v1/dreams?page=not-a-cursor", nil)
-	wantErr(t, status, body, http.StatusBadRequest, "invalid_request_error")
+	// One case per arm of the guard: the version, seq and path kinds decode
+	// with a zero time and an empty id, so a guard missing any one arm would
+	// bind those and answer an empty 200 page — end of history — where a 400
+	// belongs; a prev-direction time cursor is the fourth arm.
+	for name, cur := range foreignCursors {
+		status, body := s.do(http.MethodGet, "/v1/dreams?page="+url.QueryEscape(cur), nil)
+		if status != http.StatusBadRequest {
+			t.Errorf("%s cursor: status %d (%v), want 400", name, status, body)
+		}
+	}
 }
 
-// A version-keyed cursor: the agent-versions list's own encoding, which the
-// dreams list must refuse rather than answer as an empty final page.
-const encodedVersionCursor = "azF8bnx2fDE" // base64url of "k1|n|v|1"
+// The other lists' own cursor encodings — base64url of the k1| grammar page.go's
+// decodeCursor reads — which the dreams list must refuse.
+var foreignCursors = map[string]string{
+	"version":   "azF8bnx2fDE",                                        // k1|n|v|1
+	"seq":       "azF8bnxzfGR8NQ",                                     // k1|n|s|d|5
+	"path":      "azF8bnxtfFlTOWk",                                    // k1|n|m|base64url("a/b")
+	"prev time": "azF8cHx0fDF8ZHJtXzAxMjM0NTY3ODlhYmNkZWZnaGprbW5wcQ", // k1|p|t|1|drm_0123456789abcdefghjkmnpq
+}
 
 func TestDreamListFilters(t *testing.T) {
 	s := newTestServer(t)

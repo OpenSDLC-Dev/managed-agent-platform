@@ -289,8 +289,11 @@ func parseDreamSessionIDs(arm map[string]json.RawMessage) ([]string, error) {
 	return out, nil
 }
 
-// parseDreamOutputBehavior returns the stored output_behavior. Absent or
-// explicitly null is the documented default, {type: create_new}.
+// parseDreamOutputBehavior returns the stored output_behavior. Absent is the
+// documented default, {type: create_new}; an explicit null is read the same
+// way — the repo's create-route rule (stringField, parseMetadata), not the
+// spec's, which types the field non-nullable, so docs/DIVERGENCES.md
+// registers it.
 func parseDreamOutputBehavior(obj map[string]json.RawMessage) (json.RawMessage, error) {
 	raw, ok := obj["output_behavior"]
 	if !ok || isNull(raw) {
