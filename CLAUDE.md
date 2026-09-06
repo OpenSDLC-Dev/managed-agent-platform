@@ -33,7 +33,7 @@ The as-built depth — process topology, the full execution flow (permissions/HI
 2. **adk-go (`google.golang.org/adk/v2`) is a source of ideas, never a foundation.** (Distinct from Claude Managed Agents, which *is* our authoritative reference for the domain model.) adk-go is NOT a dependency of the domain layer. Where its abstractions conflict with the Anthropic model — its genai-centric `Event`/`session.Service`, its in-process `Runner`, `server/adkrest` — **do not use them**. Only borrow narrow, non-conflicting helpers, and only when they clearly save work. If a borrow ever conflicts, drop it and hand-roll.
 3. **Observability is built in, not bolted on.** Every cross-process call propagates OTel context (W3C `traceparent`, including through work items to BYOC workers). Anthropic `span.*` events and OTel spans are emitted from the **same** instrumentation point so they never drift.
 4. **Model providers are config-driven.** A provider is constructed from config: `protocol` (`anthropic`|`openai`) · `model` · `base_url` · `api_key` (+ optional headers). The Anthropic-protocol provider must work against **any** endpoint speaking Anthropic Messages (gateway, proxy, self-hosted model) — never hard-code `api.anthropic.com`. `model` string → provider is resolved via the `model_providers` config/table.
-5. **Sessions are NOT bound to an end-user.** Scoping keys are `org`/`workspace`/`project` (reserved now, single-tenant defaults in v1). There is no `user_id` on a session (this is a deliberate divergence from adk's `AppName`+`UserID`). End-user ↔ session ownership is an **application-layer** concern; the platform stays user-agnostic. Apps use session `metadata` and the audit-only `created_by` as hooks.
+5. **Sessions are NOT bound to an end-user.** Scoping keys are `org`/`workspace`/`project` (the workspace resolves from the credential since plan 42 slice 1 and is not yet filtered on; `org`/`project` stay frozen at `default`). There is no `user_id` on a session (this is a deliberate divergence from adk's `AppName`+`UserID`). End-user ↔ session ownership is an **application-layer** concern; the platform stays user-agnostic. Apps use session `metadata` and the audit-only `created_by` as hooks.
 
 Two standing product decisions travel with these principles: **v1's first-class scenario is a general task agent** (bash + file + web toolset; repository mounting shipped with plan 25 as a wire-compatible session resource, but the toolset is still not built around a repo-centric coding agent), and the project is **Apache-2.0, pure open source — no open-core edition gating**.
 
@@ -85,7 +85,7 @@ internal/
   identity/   # the human-auth boundary: OIDC / trusted-proxy JWT verifier, claim→role
               #   mapping, bounded JWKS cache (go-jose; no vendor SDK)
   telemetry/  # OTel/OTLP init; span ↔ span.* same-source instrumentation
-  store/      # Postgres schema/migrations, reserved multi-tenant columns
+  store/      # Postgres schema/migrations, the multi-tenant columns and the `workspaces` registry
 deploy/{helm,compose,gcp}
 ```
 

@@ -72,6 +72,7 @@ import (
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/api"
 	blobbackend "github.com/OpenSDLC-Dev/managed-agent-platform/internal/blob/backend"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/identity"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/queue"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/secrets/backend"
@@ -125,7 +126,10 @@ func run(ctx context.Context) error {
 		return err
 	}
 	defer pool.Close()
-	if err := api.EnsureAPIKey(ctx, pool, "bootstrap", bootKey); err != nil {
+	// The bootstrap key lives in the default workspace, named here rather than
+	// defaulted: it is the credential a deployment starts with, so which tenant
+	// it answers for belongs at the site that configures it (plan 42 §6.8).
+	if err := api.EnsureAPIKeyInWorkspace(ctx, pool, domain.DefaultWorkspaceID, "bootstrap", bootKey); err != nil {
 		return err
 	}
 	// The queue depth/pending/workers_polling gauges sample the /work/stats view

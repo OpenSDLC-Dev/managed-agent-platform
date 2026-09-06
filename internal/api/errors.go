@@ -120,6 +120,11 @@ const (
 	ctxKeySession     // the session a gate's Bearer token is scoped to
 	ctxKeyIdentity    // the verified human a request authenticated as (plan 31)
 	ctxKeyWorkSession // the session a worker's sessions token is scoped to (plan 36)
+	ctxKeyScope       // the domain.Scope this request's credential resolved to (plan 42)
+	// ctxKeyBootstrapKey marks the env-var-managed management key — the
+	// api_keys row whose created_by IS NULL. A bool, and reachable only from
+	// here: authenticate selects the column, and nothing else can carry it.
+	ctxKeyBootstrapKey
 )
 
 func requestIDFrom(ctx context.Context) string {

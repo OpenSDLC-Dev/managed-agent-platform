@@ -4,13 +4,17 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"strings"
+	"time"
 	"unicode/utf8"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -94,13 +98,84 @@ func partialKeyHint(key string) string {
 // It only ever writes rows with created_by NULL, which is what puts them under
 // that index and marks them env-var-managed. A key issued over the console
 // records its issuer and is deliberately outside the one-live rule (plan 32).
+//
+// This is EnsureAPIKeyInWorkspace in `default`, the workspace 0035 seeds and
+// the only one a single-tenant deployment has — what a caller that never chose
+// a workspace is asking for.
 func EnsureAPIKey(ctx context.Context, pool *pgxpool.Pool, name, key string) error {
+	return EnsureAPIKeyInWorkspace(ctx, pool, domain.DefaultWorkspaceID, name, key)
+}
+
+// keyAdoptionLockWait bounds the wait for the adoption lock below — and, since
+// SET LOCAL runs for the whole transaction, every row lock it takes afterwards.
+// A fleet of replicas booting together all hash the SAME configured value, so
+// they all queue on one lock, and the boot context has no deadline of its own:
+// an unbounded wait is a control plane that hangs before it serves, which the
+// Helm liveness probe turns into a CrashLoopBackOff carrying no diagnostic at
+// all. Bounded, a wedged adopter fails loudly and names the lock. A var only
+// for the test setter.
+var keyAdoptionLockWait = 10 * time.Second
+
+// EnsureAPIKeyInWorkspace is EnsureAPIKey binding the credential to a named
+// workspace, which is what a management key resolves its scope from (plan 42
+// §6.1).
+//
+// A value configured here that already exists as another workspace's key MOVES
+// to this one: the upsert's conflict arm carries workspace_id across, so the
+// credential cannot go on authenticating into the workspace it was first
+// configured in. That is the deliberate reading of one secret, one workspace
+// (§6.8) — the conflict target stays (key_hash) and its global UNIQUE stays
+// with it. Re-targeting the conflict on (org_id, workspace_id, key_hash) is the
+// tempting alternative and the wrong one: with the global UNIQUE still in place
+// the second workspace's insert would raise a uniqueness violation rather than
+// conflict, failing the boot and turning a misconfiguration into an existence
+// oracle for the first workspace's key; and dropping that UNIQUE to avoid the
+// violation would let one secret authenticate into two workspaces, which is the
+// premise tenancy rests on.
+func EnsureAPIKeyInWorkspace(ctx context.Context, pool *pgxpool.Pool, workspace, name, key string) error {
 	hash := hashKey(key)
 	tx, err := pool.Begin(ctx)
 	if err != nil {
 		return err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+	// Adopters of one value serialize here, so the SELECT below sees whatever a
+	// concurrent boot committed. Without it two replicas configuring the same
+	// never-seen value into different workspaces would each find no row, neither
+	// would warn, and the later upsert would pick the tenant silently — the one
+	// move this function promises to be loud about. Transaction-scoped, so the
+	// commit or the deferred rollback releases it; keyed in SQL so a test can
+	// hold the same lock without repeating a Go-side derivation.
+	//
+	// SET LOCAL takes no bind parameter, so the milliseconds are formatted into
+	// the statement text; the value is this package's, never a caller's.
+	if _, err := tx.Exec(ctx,
+		fmt.Sprintf("SET LOCAL lock_timeout = '%dms'", keyAdoptionLockWait.Milliseconds())); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`, hash); err != nil {
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == "55P03" { // lock_not_available
+			return fmt.Errorf("another replica is adopting the management key %q and has held the adoption lock past %s: %w",
+				name, keyAdoptionLockWait, err)
+		}
+		return err
+	}
+	// The destination has to be a workspace this deployment still runs, checked
+	// after the lock and before anything is written. The upsert writes
+	// workspace_id exactly as given, and authenticate folds a missed registry
+	// join into the unknown-key 401 by design (§6.1) — so without this check a
+	// typo, or a destination archived since the deployment was configured,
+	// boots clean and then answers every request `invalid x-api-key`, with
+	// nothing anywhere naming the workspace at fault.
+	var live int
+	switch err := tx.QueryRow(ctx,
+		`SELECT 1 FROM workspaces WHERE id = $1 AND archived_at IS NULL`, workspace).Scan(&live); {
+	case errors.Is(err, pgx.ErrNoRows):
+		return fmt.Errorf("workspace %q is not a live workspace in this deployment", workspace)
+	case err != nil:
+		return err
+	}
 	// Adopting a key somebody issued from the console is the right outcome (see the
 	// ON CONFLICT clause below) but it must not be a silent one. An operator who
 	// pasted an archived console key out of an old runbook has just brought a
@@ -110,17 +185,27 @@ func EnsureAPIKey(ctx context.Context, pool *pgxpool.Pool, name, key string) err
 	// database edit could clear, and it protects nobody — setting the variable at
 	// all requires the deployment access that could equally configure a fresh
 	// value. So: adopt, and say so.
+	//
+	// A cross-workspace move is loud for the same reason and independently of
+	// the issuer: the row is about to stop answering for the workspace it was
+	// configured in, and boot is the only moment anything could say so.
 	var priorIssuer *string
-	var priorStatus string
+	var priorStatus, priorWorkspace string
 	switch err := tx.QueryRow(ctx,
-		`SELECT created_by, status FROM api_keys WHERE key_hash = $1`, hash).
-		Scan(&priorIssuer, &priorStatus); {
+		`SELECT created_by, status, workspace_id FROM api_keys WHERE key_hash = $1`, hash).
+		Scan(&priorIssuer, &priorStatus, &priorWorkspace); {
 	case err == pgx.ErrNoRows: // a value this deployment has never seen
 	case err != nil:
 		return err
-	case priorIssuer != nil:
-		slog.WarnContext(ctx, "configured management key already existed as a console-issued key; adopting it as env-var-managed",
-			"name", name, "issued_by", *priorIssuer, "previous_status", priorStatus)
+	default:
+		if priorIssuer != nil {
+			slog.WarnContext(ctx, "configured management key already existed as a console-issued key; adopting it as env-var-managed",
+				"name", name, "issued_by", *priorIssuer, "previous_status", priorStatus)
+		}
+		if priorWorkspace != workspace {
+			slog.WarnContext(ctx, "configured management key already existed in another workspace; moving it",
+				"name", name, "previous_workspace", priorWorkspace, "workspace", workspace)
+		}
 	}
 	// Archive before inserting: api_keys_one_live_unissued admits one active
 	// unissued row per name and Postgres enforces it per statement, so
@@ -143,41 +228,78 @@ func EnsureAPIKey(ctx context.Context, pool *pgxpool.Pool, name, key string) err
 	// refuses, i.e. a control plane that starts without a working bootstrap
 	// credential. Naming a value in CONTROLPLANE_API_KEY makes it env-var-managed,
 	// whatever it was before.
+	// workspace_id is set on both arms, which is what makes a value configured in
+	// a second workspace a move rather than a silent cross-tenant credential.
+	// org_id and project_id are not: they are frozen at 'default' (plan 42
+	// decision 3), so naming them would be a column this platform cannot vary.
 	if _, err := tx.Exec(ctx,
-		`INSERT INTO api_keys (id, name, key_hash, partial_key_hint) VALUES ($1, $2, $3, $4)
+		`INSERT INTO api_keys (id, name, key_hash, partial_key_hint, workspace_id) VALUES ($1, $2, $3, $4, $5)
 		 ON CONFLICT (key_hash) DO UPDATE
 		 SET status = 'active', name = EXCLUDED.name, partial_key_hint = EXCLUDED.partial_key_hint,
-		     created_by = NULL, expires_at = NULL`,
-		domain.NewID(domain.PrefixAPIKey).String(), name, hash, partialKeyHint(key)); err != nil {
+		     workspace_id = EXCLUDED.workspace_id, created_by = NULL, expires_at = NULL`,
+		domain.NewID(domain.PrefixAPIKey).String(), name, hash, partialKeyHint(key), workspace); err != nil {
 		return err
 	}
 	return tx.Commit(ctx)
 }
 
-// authenticate resolves an x-api-key value to the key's row ID, or "" if the key
-// is unknown, not active, or past its expiry.
+// apiKeyPrincipal is what an x-api-key resolves to: the row's id (the audit
+// principal), the tenant the row binds, and whether it is the env-var-managed
+// bootstrap key. A zero ID means the key did not resolve at all.
+type apiKeyPrincipal struct {
+	ID        string
+	Scope     domain.Scope
+	Bootstrap bool
+}
+
+// authenticate resolves an x-api-key value to its principal, or the zero
+// principal if the key is unknown, not active, past its expiry, or bound to a
+// workspace that is no longer live.
 //
 // Expiry is evaluated here rather than swept: a key whose expires_at has passed
 // stops authenticating the moment it passes, with no background job to be down.
 // The comparison is against the database's clock, the same one that stamped
 // created_at, so a control-plane replica with a skewed clock cannot extend or
 // shorten a credential's life.
-func authenticate(ctx context.Context, pool *pgxpool.Pool, key string) (string, error) {
-	var id string
+//
+// The workspace join is the same kind of condition and deliberately shares the
+// branch: a key whose workspace has been archived — or that names no registry
+// row at all — is refused with the message an unknown key gets, so archiving a
+// tenant discloses nothing about which of its credentials existed (plan 42
+// §6.1, and the reference's own answer, §6.9). created_by rides along because
+// nothing else can reach it: the bootstrap marker is a column, and this is the
+// only query that reads the row (§6.8).
+//
+// That join is COMPOSITE — workspace and org both — because org has exactly one
+// authority, the registry. A key row whose org_id drifted from its workspace's
+// names a tenant no workspace agrees with, so it resolves to nothing rather
+// than to whichever half the query happened to read; 0035's UNIQUE (org_id, id)
+// is the index it lands on.
+func authenticate(ctx context.Context, pool *pgxpool.Pool, key string) (apiKeyPrincipal, error) {
+	var p apiKeyPrincipal
 	err := pool.QueryRow(ctx,
-		`SELECT id FROM api_keys
-		 WHERE key_hash = $1 AND status = 'active'
-		   AND (expires_at IS NULL OR expires_at > now())`,
-		hashKey(key)).Scan(&id)
+		`SELECT k.id, k.org_id, k.workspace_id, k.project_id, k.created_by IS NULL
+		   FROM api_keys k
+		   JOIN workspaces w ON w.id = k.workspace_id AND w.org_id = k.org_id AND w.archived_at IS NULL
+		 WHERE k.key_hash = $1 AND k.status = 'active'
+		   AND (k.expires_at IS NULL OR k.expires_at > now())`,
+		hashKey(key)).Scan(&p.ID, &p.Scope.OrgID, &p.Scope.WorkspaceID, &p.Scope.ProjectID, &p.Bootstrap)
 	if err == pgx.ErrNoRows {
-		return "", nil
+		return apiKeyPrincipal{}, nil
 	}
-	return id, err
+	return p, err
 }
 
 // requireAPIKey is the management-auth middleware: every /v1 route needs a
 // valid, unrevoked x-api-key. The authenticated key's ID is stored in the
-// request context as the audit principal (sessions.created_by).
+// request context as the audit principal (sessions.created_by), beside the
+// scope it resolved and the bootstrap marker.
+//
+// A management key covers exactly one workspace, so the header can only name
+// that one; selectWorkspace answers the other cases. Both tenancy headers are
+// stamped the moment the scope resolves and before anything writes, so they
+// are present on a 200 and on whatever 4xx the route answers, and absent on
+// the 401s above — which is the whole of the schedule (plan 42 §6.2).
 func requireAPIKey(pool *pgxpool.Pool, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// A repeated field is refused before the value is read. HTTP allows one,
@@ -200,11 +322,20 @@ func requireAPIKey(pool *pgxpool.Pool, next http.Handler) http.Handler {
 			writeError(w, r, err)
 			return
 		}
-		if principal == "" {
+		if principal.ID == "" {
 			writeError(w, r, errAuth("invalid x-api-key"))
 			return
 		}
-		next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), ctxKeyPrincipal, principal)))
+		scope, err := selectWorkspace(r, []domain.Scope{principal.Scope})
+		if err != nil {
+			writeError(w, r, err)
+			return
+		}
+		stampScope(w, scope)
+		ctx := context.WithValue(r.Context(), ctxKeyPrincipal, principal.ID)
+		ctx = context.WithValue(ctx, ctxKeyScope, scope)
+		ctx = context.WithValue(ctx, ctxKeyBootstrapKey, principal.Bootstrap)
+		next.ServeHTTP(w, r.WithContext(ctx))
 	})
 }
 
@@ -232,4 +363,28 @@ func principalFrom(ctx context.Context) string {
 		return p.ID
 	}
 	return ""
+}
+
+// scopeFrom is the tenancy answer to "whose data may this request touch" — the
+// scope the credential resolved to, attached by whichever resolver
+// authenticated it. Every scoped query reads it from here; no handler ever
+// computes one (plan 42 §6.1).
+//
+// !ok IS AN INTERNAL ERROR at every call site, never "unscoped, proceed". A
+// handler reaching for a scope it was not given has been dispatched behind a
+// resolver that does not set one, which is a wiring defect: serving the request
+// anyway would serve it across every tenant. Fail the request instead.
+func scopeFrom(ctx context.Context) (domain.Scope, bool) {
+	s, ok := ctx.Value(ctxKeyScope).(domain.Scope)
+	return s, ok
+}
+
+// bootstrapKeyFrom reports whether this request authenticated with the
+// env-var-managed management key — the api_keys row with created_by IS NULL,
+// the same predicate api_keys_one_live_unissued keys on (plan 42 §6.8). Absent
+// means false, which is the safe answer: every other credential, and every
+// unauthenticated request, is not the bootstrap key.
+func bootstrapKeyFrom(ctx context.Context) bool {
+	b, _ := ctx.Value(ctxKeyBootstrapKey).(bool)
+	return b
 }

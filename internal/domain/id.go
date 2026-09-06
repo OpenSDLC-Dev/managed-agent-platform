@@ -62,7 +62,22 @@ const (
 	// literal in internal/api until plan 32 gave the console a route that has to
 	// validate one on a path; the two spellings are the same constant now.
 	PrefixAPIKey = "apikey"
+	// PrefixWorkspace names a tenant in the workspace registry (plan 42, #56).
+	// It joins the private family for the same reason as the three above: a
+	// workspace id travels on the anthropic-workspace-id header and in console
+	// routes, never as an id on a /v1 path, so admitting it to knownPrefixes
+	// would widen the shape every wire path accepts in order to validate
+	// something no wire path receives. What does validate one is IsWorkspaceID,
+	// which takes this prefix plus DefaultWorkspaceID.
+	PrefixWorkspace = "wrkspc"
 )
+
+// DefaultWorkspaceID is this deployment's frozen workspace id — the row
+// migration 0035 seeds, and the only workspace id that carries no wrkspc_
+// prefix. The reference's own Default Workspace has a prefixed id; ours does
+// not, because every scoped table already carries the literal 'default' and
+// rewriting them all would be an UPDATE for a cosmetic gain.
+const DefaultWorkspaceID = "default"
 
 // altSessionPrefix is accepted on input for wire compatibility: the managed-agents
 // work-data schema spells a session id "session_...", so a worker can hand one
@@ -175,6 +190,18 @@ func (id ID) Valid() bool {
 func ValidWithPrefix(id, prefix string) bool {
 	p, token, ok := strings.Cut(id, "_")
 	return ok && p == prefix && validToken(token)
+}
+
+// IsWorkspaceID reports whether v names a workspace this platform could have:
+// a minted wrkspc_ id, or DefaultWorkspaceID.
+//
+// One copy, shared by the request-header validator (internal/api/scope.go) and
+// the identity membership map (internal/identity/config.go), so the two entry
+// points cannot drift. They have to agree: a configured map target the header
+// would refuse — or the reverse — turns a typo into a per-request denial with
+// nothing in any log to say why.
+func IsWorkspaceID(v string) bool {
+	return v == DefaultWorkspaceID || ValidWithPrefix(v, PrefixWorkspace)
 }
 
 // validToken holds the rule both spellings share: a non-empty token drawn only

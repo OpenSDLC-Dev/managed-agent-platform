@@ -4,7 +4,9 @@ import (
 	"context"
 	"testing"
 
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/identity"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/pgtest"
 )
 
 // TestPrincipalFromResolvesEitherLane pins what sessions.created_by records.
@@ -43,5 +45,41 @@ func TestPrincipalFromResolvesEitherLane(t *testing.T) {
 	both := context.WithValue(human, ctxKeyPrincipal, "bootstrap")
 	if got := principalFrom(both); got != "bootstrap" {
 		t.Errorf("both lanes: principalFrom = %q, want the machine principal", got)
+	}
+}
+
+// The membership lookup's empty input is the one that must never widen.
+// identityScope refuses a member of nothing before it gets here, so this arm is
+// unreachable through a request — which is exactly why it is pinned in
+// isolation: "no ids" and "every live workspace" are one guard apart, and the
+// evidence that the guard went missing would be a human resolving into a tenant
+// they are not a member of.
+func TestLiveWorkspaceScopesAmongNothingIsNothing(t *testing.T) {
+	pool := pgtest.NewPool(t)
+	ctx := context.Background()
+	// A second live workspace, so "every live workspace" and "the one seeded
+	// row" are distinguishable answers.
+	if _, err := pool.Exec(ctx,
+		`INSERT INTO workspaces (id, org_id, name) VALUES ($1, 'default', 'B')`,
+		domain.NewID(domain.PrefixWorkspace).String()); err != nil {
+		t.Fatalf("insert workspace B: %v", err)
+	}
+	for _, ids := range [][]string{nil, {}} {
+		got, err := liveWorkspaceScopesAmong(ctx, pool, ids)
+		if err != nil {
+			t.Fatalf("liveWorkspaceScopesAmong(%v): %v", ids, err)
+		}
+		if len(got) != 0 {
+			t.Errorf("liveWorkspaceScopesAmong(%v) = %+v, want nothing", ids, got)
+		}
+	}
+	// And the all-workspaces reader still answers the other question, capped at
+	// the two rows its caller's decision needs.
+	all, err := allLiveWorkspaceScopes(ctx, pool)
+	if err != nil {
+		t.Fatalf("allLiveWorkspaceScopes: %v", err)
+	}
+	if len(all) != 2 {
+		t.Errorf("allLiveWorkspaceScopes = %+v, want the two live workspaces", all)
 	}
 }

@@ -34,7 +34,7 @@ const (
 
 // wantMigrations tracks the number of embedded migration files; bump it when
 // a migration is added.
-const wantMigrations = 34
+const wantMigrations = 35
 
 func open(t *testing.T, dsn string) *pgxpool.Pool {
 	t.Helper()
@@ -633,12 +633,113 @@ func TestKeyRotationMigrationRepairsExistingDuplicates(t *testing.T) {
 	}
 }
 
+// scopedTables is every table whose CREATE TABLE declares the tenancy triple,
+// in migration order. Child tables (agent_versions, skill_versions,
+// vault_credentials, deployment_runs among them) declare none and inherit scope
+// through their foreign key to a scoped parent, so they are deliberately
+// absent — as is workspaces itself, which is the registry the triple names
+// rather than a row that carries one.
+//
+// TestScopedTablesMatchTheSchema re-derives this from the migrated database, so
+// a new scoped table added without a line here fails rather than silently
+// escaping every assertion below.
+var scopedTables = []string{
+	"agents", "environments", "sessions", "events", "work_items", "api_keys",
+	"environment_keys", "skills", "files", "vaults", "principals",
+	"session_threads", "memory_stores", "deployments", "dreams",
+}
+
+// TestScopedTablesMatchTheSchema asks the database rather than a reader. The
+// list above is the denominator of every tenancy assertion in this file, so a
+// table missing from it is not a smaller test — it is a table nothing checks,
+// and the failure would be a scoped table quietly outside the whole suite.
+//
+// It also pins the triple's shape: org_id alone is what identifies a scoped
+// table, and the other two must ride with it, because half a triple is a table
+// no scope predicate can be written against.
+func TestScopedTablesMatchTheSchema(t *testing.T) {
+	pool := open(t, pgtest.FreshDB(t))
+	ctx := context.Background()
+
+	rows, err := pool.Query(ctx,
+		`SELECT table_name FROM information_schema.columns
+		  WHERE table_schema = 'public' AND column_name = 'org_id'
+		  ORDER BY table_name`)
+	if err != nil {
+		t.Fatalf("query org_id columns: %v", err)
+	}
+	var found []string
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			t.Fatalf("scan table name: %v", err)
+		}
+		found = append(found, name)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("iterate org_id columns: %v", err)
+	}
+	// workspaces carries org_id as the registry's own pair, not as a scope it
+	// is subject to, so it is the one exclusion — named here rather than
+	// filtered in SQL, so it reads as a decision.
+	found = slices.DeleteFunc(found, func(name string) bool { return name == "workspaces" })
+
+	want := slices.Clone(scopedTables)
+	slices.Sort(want)
+	if !slices.Equal(found, want) {
+		t.Errorf("tables carrying org_id = %v, want scopedTables %v", found, want)
+	}
+
+	for _, table := range scopedTables {
+		for _, column := range []string{"workspace_id", "project_id"} {
+			var exists bool
+			if err := pool.QueryRow(ctx,
+				`SELECT EXISTS (SELECT 1 FROM information_schema.columns
+				   WHERE table_schema = 'public' AND table_name = $1 AND column_name = $2)`,
+				table, column).Scan(&exists); err != nil {
+				t.Fatalf("%s.%s: %v", table, column, err)
+			}
+			if !exists {
+				t.Errorf("%s carries org_id but not %s; the triple travels together", table, column)
+			}
+		}
+	}
+}
+
+// seedEveryScopedTable puts one row in each of scopedTables, naming no tenancy
+// column anywhere, so what the assertions read back is what the schema wrote.
+func seedEveryScopedTable(t *testing.T, pool *pgxpool.Pool) {
+	t.Helper()
+	seedSessionChain(t, pool)
+	ctx := context.Background()
+	for _, q := range []string{
+		`INSERT INTO events (id, session_id, seq, type, payload) VALUES ('sevt_1', 'sesn_1', 1, 'user.message', '{}')`,
+		`INSERT INTO work_items (id, environment_id, session_id, kind) VALUES ('work_1', 'env_1', 'sesn_1', 'model_turn')`,
+		`INSERT INTO api_keys (id, name, key_hash) VALUES ('apikey_1', 'k', 'hash-key-1')`,
+		`INSERT INTO environment_keys (id, environment_id, key_hash) VALUES ('envkey_1', 'env_1', 'hash-env-1')`,
+		`INSERT INTO skills (id, source, display_title) VALUES ('skill_1', 'custom', 's')`,
+		`INSERT INTO files (id, filename, mime_type, size_bytes) VALUES ('file_1', 'f.txt', 'text/plain', 1)`,
+		`INSERT INTO vaults (id, display_name) VALUES ('vlt_1', 'v')`,
+		`INSERT INTO principals (id, issuer, subject) VALUES ('principal_1', 'iss', 'sub')`,
+		`INSERT INTO session_threads (id, session_id, agent_name, status) VALUES ('sthr_1', 'sesn_1', 'a', 'idle')`,
+		`INSERT INTO memory_stores (id, name) VALUES ('memstore_1', 'm')`,
+		`INSERT INTO dreams (id, status, inputs, input_memory_store_id, input_session_ids, model, output_behavior)
+		   VALUES ('drm_1', 'pending', '[]', 'memstore_1', '{}', '{"id":"m"}', '{"type":"create_new"}')`,
+		`INSERT INTO deployments (id, name, agent_id, agent_version, environment_id)
+		 VALUES ('depl_1', 'd', 'agent_1', 1, 'env_1')`,
+	} {
+		if _, err := pool.Exec(ctx, q); err != nil {
+			t.Fatalf("seed %q: %v", q, err)
+		}
+	}
+}
+
 func TestTenancyColumnsHaveSingleTenantDefaults(t *testing.T) {
 	pool := open(t, pgtest.FreshDB(t))
 	ctx := context.Background()
-	seedSessionChain(t, pool)
+	seedEveryScopedTable(t, pool)
 
-	for _, table := range []string{"agents", "environments", "sessions"} {
+	for _, table := range scopedTables {
 		var org, wksp, proj string
 		q := `SELECT org_id, workspace_id, project_id FROM ` + table + ` LIMIT 1`
 		if err := pool.QueryRow(ctx, q).Scan(&org, &wksp, &proj); err != nil {
@@ -647,6 +748,75 @@ func TestTenancyColumnsHaveSingleTenantDefaults(t *testing.T) {
 		if org != "default" || wksp != "default" || proj != "default" {
 			t.Errorf("%s tenancy defaults = (%s,%s,%s), want (default,default,default)", table, org, wksp, proj)
 		}
+	}
+}
+
+// 0035 REGISTERS the default workspace rather than creating one: it lands on
+// deployments whose tables are already full of rows carrying workspace_id
+// 'default', and those rows are what its single seeded row describes. So the
+// upgrade is replayed here the way an operator's is — every scoped table
+// populated under the pre-0035 schema, plus the fixture's own agent,
+// environment, session and threads — and the migration must leave all of it
+// exactly as it found it. A backfill, a rewrite, or a second seeded workspace
+// would all show up as a failure below.
+func TestWorkspaceRegistryLandsOnAPopulatedDatabaseWithoutTouchingIt(t *testing.T) {
+	ctx := context.Background()
+	pool := rawPool(t, pgtest.FreshDB(t))
+	if err := store.MigrateThrough(ctx, pool, "0034_dreams.sql"); err != nil {
+		t.Fatalf("migrate through 0034: %v", err)
+	}
+	seedEveryScopedTable(t, pool)
+	sessionID, _ := pgtest.NewSession(t, pool, "cloud")
+	pgtest.NewChildThread(t, pool, sessionID)
+
+	// The fixture is checked before the migration runs, because every assertion
+	// below counts rows that STRAYED: an empty table cannot stray, so a table
+	// seedEveryScopedTable forgot would pass this test by having nothing in it.
+	for _, table := range scopedTables {
+		var seeded int
+		if err := pool.QueryRow(ctx, `SELECT count(*) FROM `+table).Scan(&seeded); err != nil {
+			t.Fatalf("%s row count: %v", table, err)
+		}
+		if seeded == 0 {
+			t.Fatalf("%s is empty before 0035; seedEveryScopedTable must populate every scoped table", table)
+		}
+	}
+
+	if err := store.Migrate(ctx, pool); err != nil {
+		t.Fatalf("migrate the rest: %v", err)
+	}
+
+	// Every row of every scoped table, not a sample: a backfill that rewrote
+	// only the rows one query happens to reach is the failure this guards.
+	for _, table := range scopedTables {
+		var strayed int
+		q := `SELECT count(*) FROM ` + table +
+			` WHERE org_id <> 'default' OR workspace_id <> 'default' OR project_id <> 'default'`
+		if err := pool.QueryRow(ctx, q).Scan(&strayed); err != nil {
+			t.Fatalf("%s tenancy columns: %v", table, err)
+		}
+		if strayed != 0 {
+			t.Errorf("%s: %d rows left the single-tenant defaults", table, strayed)
+		}
+	}
+
+	var count int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM workspaces`).Scan(&count); err != nil {
+		t.Fatalf("count workspaces: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("workspaces rows = %d, want 1", count)
+	}
+	var id, org, name string
+	var archivedAt *time.Time
+	if err := pool.QueryRow(ctx,
+		`SELECT id, org_id, name, archived_at FROM workspaces`).
+		Scan(&id, &org, &name, &archivedAt); err != nil {
+		t.Fatalf("read default workspace: %v", err)
+	}
+	if id != "default" || org != "default" || name != "Default Workspace" || archivedAt != nil {
+		t.Errorf("registered workspace = (%s,%s,%q,%v), want (default,default,\"Default Workspace\",<nil>)",
+			id, org, name, archivedAt)
 	}
 }
 

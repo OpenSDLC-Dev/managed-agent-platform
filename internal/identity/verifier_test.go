@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"reflect"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -135,13 +136,23 @@ func verifierXWant(idp *identitytest.IdP) identity.Identity {
 	}
 }
 
+// verifierXSame is equality for an Identity. It exists because Workspaces (plan
+// 42 §6.2) made the struct carry a slice, so == no longer compiles at all — and
+// it compares the whole value rather than a list of fields, so a field added
+// later is compared here without anyone remembering to add it.
+//
+// A nil Workspaces and an empty one are NOT equal under this, deliberately:
+// Verify returns nil when nothing mapped, so an implementation that started
+// returning an allocated empty slice would be a change worth seeing.
+func verifierXSame(a, b identity.Identity) bool { return reflect.DeepEqual(a, b) }
+
 // verifierXAccepted asserts a verification succeeded and produced want.
 func verifierXAccepted(t *testing.T, what string, got identity.Identity, err error, want identity.Identity) {
 	t.Helper()
 	if err != nil {
 		t.Fatalf("%s: Verify: %v", what, err)
 	}
-	if got != want {
+	if !verifierXSame(got, want) {
 		t.Errorf("%s: Identity = %+v, want %+v", what, got, want)
 	}
 }
@@ -160,7 +171,7 @@ func verifierXRejected(t *testing.T, what string, id identity.Identity, err erro
 	if got := err.Error(); got != verifierXFailed {
 		t.Errorf("%s: Error() = %q, want the constant %q", what, got, verifierXFailed)
 	}
-	if id != (identity.Identity{}) {
+	if !verifierXSame(id, identity.Identity{}) {
 		t.Errorf("%s: a rejection returned %+v, want the zero Identity", what, id)
 	}
 	var ie *identity.Error
@@ -1497,7 +1508,7 @@ func TestNoMappedRoleYieldsRoleNone(t *testing.T) {
 	}
 	want := verifierXWant(idp)
 	want.Role = identity.RoleNone
-	if got != want {
+	if !verifierXSame(got, want) {
 		t.Errorf("Identity = %+v, want %+v", got, want)
 	}
 	if got.Role.AtLeast(identity.RoleViewer) {
@@ -1940,4 +1951,217 @@ func TestLogsCarryNoCredentials(t *testing.T) {
 			t.Errorf("a log line quotes token segment %d:\n%s", i, logged)
 		}
 	}
+}
+
+// verifierXWorkspaceB is a well-formed workspace id for the membership tests.
+const verifierXWorkspaceB = "wrkspc_0123456789abcdefghjkmnpq"
+
+// verifierXMembership is the configuration a multi-workspace deployment runs:
+// the claim name, and the group→workspace map an operator writes. "everyone" is
+// deliberately mapped to nothing, so a token carrying it proves the drop.
+func verifierXMembership(c *identity.Config) {
+	c.WorkspacesClaim = "workspaces"
+	c.WorkspaceMap = map[string]string{
+		"tenant-a": "default",
+		"tenant-b": verifierXWorkspaceB,
+	}
+}
+
+// TestVerifyResolvesWorkspaceMembership is plan 42 §6.2's claim half: the
+// membership a token carries becomes workspace ids on the Identity, and nothing
+// about it is persisted or re-derived later.
+func TestVerifyResolvesWorkspaceMembership(t *testing.T) {
+	t.Parallel()
+	idp, clock := verifierXIdP(t)
+	v := verifierXNew(t, idp, clock, verifierXMembership)
+	if !v.WorkspacesConfigured() {
+		t.Fatal("WorkspacesConfigured() = false with both names set")
+	}
+
+	for _, tc := range []struct {
+		name   string
+		values any
+		want   []string
+	}{
+		{name: "one group", values: []any{"tenant-b"}, want: []string{verifierXWorkspaceB}},
+		{
+			name:   "an unmapped group drops and the mapped one survives",
+			values: []any{"everyone", "tenant-a"},
+			want:   []string{"default"},
+		},
+		{name: "two groups", values: []any{"tenant-a", "tenant-b"}, want: []string{"default", verifierXWorkspaceB}},
+		{name: "a scalar claim is one value", values: "tenant-a", want: []string{"default"}},
+		{name: "nothing mapped", values: []any{"everyone"}},
+		{name: "the claim is absent", values: nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			claims := verifierXClaims(idp, clock)
+			if tc.values != nil {
+				claims["workspaces"] = tc.values
+			}
+			got, err := v.Verify(context.Background(), idp.Mint(t, claims))
+			want := verifierXWant(idp)
+			want.Workspaces = tc.want
+			verifierXAccepted(t, tc.name, got, err, want)
+		})
+	}
+}
+
+// TestVerifyIgnoresAWorkspacesClaimWhenUnconfigured pins the fail-closed arm's
+// other half. A deployment that configures neither name resolves no membership
+// at all — so a token that carries a workspaces claim anyway changes nothing,
+// and the identity lane decides the scope from the registry instead.
+func TestVerifyIgnoresAWorkspacesClaimWhenUnconfigured(t *testing.T) {
+	t.Parallel()
+	idp, clock, v := verifierXFixture(t)
+	if v.WorkspacesConfigured() {
+		t.Fatal("WorkspacesConfigured() = true with neither name set")
+	}
+	claims := verifierXClaims(idp, clock)
+	claims["workspaces"] = []any{"tenant-a", "tenant-b"}
+	got, err := v.Verify(context.Background(), idp.Mint(t, claims))
+	verifierXAccepted(t, "an unconfigured deployment", got, err, verifierXWant(idp))
+}
+
+// TestNewValidatesWorkspaceMembership is the package boundary's own check on a
+// Config built literally, mirroring what ConfigFromEnv refuses: a half
+// configuration, a workspace id that can match no row, an empty claim value, and
+// a claim name claimAt would not walk.
+func TestNewValidatesWorkspaceMembership(t *testing.T) {
+	t.Parallel()
+	idp, clock := verifierXIdP(t)
+
+	deep := strings.Join(make([]string, identity.MaxClaimDepthForTest+2), ".")
+	for _, tc := range []struct {
+		name   string
+		adjust func(*identity.Config)
+	}{
+		{
+			name: "a claim with no map",
+			adjust: func(c *identity.Config) {
+				c.WorkspacesClaim = "workspaces"
+			},
+		},
+		{
+			name: "a map with no claim",
+			adjust: func(c *identity.Config) {
+				c.WorkspaceMap = map[string]string{"tenant-a": "default"}
+			},
+		},
+		{
+			name: "an empty claim value",
+			adjust: func(c *identity.Config) {
+				c.WorkspacesClaim = "workspaces"
+				c.WorkspaceMap = map[string]string{"": "default"}
+			},
+		},
+		{
+			name: "a workspace id of the wrong shape",
+			adjust: func(c *identity.Config) {
+				c.WorkspacesClaim = "workspaces"
+				c.WorkspaceMap = map[string]string{"tenant-a": "tenant-a"}
+			},
+		},
+		{
+			name: "an over-deep claim name",
+			adjust: func(c *identity.Config) {
+				verifierXMembership(c)
+				c.WorkspacesClaim = deep
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if v, err := identity.New(context.Background(), verifierXConfig(idp, clock, tc.adjust)); err == nil {
+				t.Errorf("New accepted %s: %+v", tc.name, v)
+			}
+		})
+	}
+}
+
+// TestNewCopiesTheWorkspaceMap pins that live membership is not mutable from
+// outside, for the reason the role map is copied: the caller's map would
+// otherwise be a data race against every concurrent Verify, and a silent change
+// of which tenant a human reaches.
+func TestNewCopiesTheWorkspaceMap(t *testing.T) {
+	t.Parallel()
+	idp, clock := verifierXIdP(t)
+	m := map[string]string{"tenant-a": "default"}
+	v := verifierXNew(t, idp, clock, func(c *identity.Config) {
+		c.WorkspacesClaim = "workspaces"
+		c.WorkspaceMap = m
+	})
+	m["tenant-a"] = verifierXWorkspaceB
+	m["everyone"] = verifierXWorkspaceB
+
+	claims := verifierXClaims(idp, clock)
+	claims["workspaces"] = []any{"tenant-a", "everyone"}
+	got, err := v.Verify(context.Background(), idp.Mint(t, claims))
+	want := verifierXWant(idp)
+	want.Workspaces = []string{"default"}
+	verifierXAccepted(t, "a verifier built from a map the caller then edited", got, err, want)
+}
+
+// A claim cut at the value cap is the quietest failure this package has: the
+// human authenticates, resolves to no workspace, and gets a permanent 403 that
+// names a membership problem they cannot see. The cap still exists — the work
+// has to be bounded — so the guarantee is that it says so. This test drives the
+// pair: the mapped group sitting one past the cap, which must be dropped AND
+// logged, and the same group inside it, which must resolve and say nothing.
+//
+// Not parallel: it replaces the default logger for its duration.
+func TestVerifyLogsAWorkspacesClaimCutAtTheCap(t *testing.T) {
+	sink := &syncBufferX{}
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(sink, &slog.HandlerOptions{Level: slog.LevelWarn})))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+
+	idp, clock := verifierXIdP(t)
+	v := verifierXNew(t, idp, clock, verifierXMembership)
+
+	// The mapped group last, behind cap+49 groups this deployment maps to
+	// nothing — an ordinary shape for a user in a large directory.
+	const past = identity.MaxClaimValuesForTest + 50
+	values := make([]any, past)
+	for i := range values {
+		values[i] = fmt.Sprintf("g%d", i)
+	}
+	values[past-1] = "tenant-b"
+
+	verify := func(t *testing.T, vs []any) identity.Identity {
+		t.Helper()
+		claims := verifierXClaims(idp, clock)
+		claims["workspaces"] = vs
+		got, err := v.Verify(context.Background(), idp.Mint(t, claims))
+		if err != nil {
+			t.Fatalf("Verify: %v", err)
+		}
+		return got
+	}
+
+	t.Run("past the cap it is dropped and logged", func(t *testing.T) {
+		if got := verify(t, values); len(got.Workspaces) != 0 {
+			t.Errorf("Workspaces = %v, want none: the mapped group sits past the cap", got.Workspaces)
+		}
+		logged := sink.String()
+		for _, want := range []string{"claim truncated", "workspaces", fmt.Sprint(past)} {
+			if !strings.Contains(logged, want) {
+				t.Errorf("the truncation warning does not mention %q:\n%s", want, logged)
+			}
+		}
+	})
+
+	t.Run("inside the cap it resolves, silently", func(t *testing.T) {
+		before := len(sink.String())
+		// The same values with the leading 50 dropped, so the mapped group is
+		// the cap's last element rather than the first past it.
+		if got := verify(t, values[50:]); len(got.Workspaces) != 1 ||
+			got.Workspaces[0] != verifierXWorkspaceB {
+			t.Errorf("Workspaces = %v, want %q", got.Workspaces, verifierXWorkspaceB)
+		}
+		if added := sink.String()[before:]; strings.Contains(added, "claim truncated") {
+			t.Errorf("a claim that fits the cap warned:\n%s", added)
+		}
+	})
 }

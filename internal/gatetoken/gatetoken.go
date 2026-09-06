@@ -98,15 +98,26 @@ func Revoke(ctx context.Context, pool *pgxpool.Pool, sessionID string) error {
 // an archived session's gate must stop being served). There is no wall-clock
 // expiry — validity is the session's lifetime. A deleted session's token is
 // cascade-removed and resolves to "" with no error.
-func Authenticate(ctx context.Context, pool *pgxpool.Pool, token string) (string, error) {
+//
+// It also returns the tenant the session sits in: a gate token declares none
+// of its own and inherits the session's, which the join already reaching that
+// row carries at no extra cost. The workspace join is a fourth end condition —
+// an archived workspace resolves to nothing, so the lane refuses the token with
+// the same 401 an unknown one gets (plan 42 §6.1, §6.9). It is composite — org
+// too — because org has one authority, the registry: a session whose org_id
+// drifted from its workspace's resolves to nothing.
+func Authenticate(ctx context.Context, pool *pgxpool.Pool, token string) (string, domain.Scope, error) {
 	var sessionID string
+	var scope domain.Scope
 	err := pool.QueryRow(ctx,
-		`SELECT t.session_id FROM session_gate_tokens t
+		`SELECT t.session_id, s.org_id, s.workspace_id, s.project_id
+		    FROM session_gate_tokens t
 		    JOIN sessions s ON s.id = t.session_id
+		    JOIN workspaces w ON w.id = s.workspace_id AND w.org_id = s.org_id AND w.archived_at IS NULL
 		  WHERE t.token_hash = $1 AND t.revoked_at IS NULL AND s.archived_at IS NULL`,
-		HashToken(token)).Scan(&sessionID)
+		HashToken(token)).Scan(&sessionID, &scope.OrgID, &scope.WorkspaceID, &scope.ProjectID)
 	if err == pgx.ErrNoRows {
-		return "", nil
+		return "", domain.Scope{}, nil
 	}
-	return sessionID, err
+	return sessionID, scope, err
 }

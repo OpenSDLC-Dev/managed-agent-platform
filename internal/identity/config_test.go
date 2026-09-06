@@ -28,6 +28,9 @@ const (
 	configXVarClaimEmail    = "IDENTITY_CLAIM_EMAIL"
 	configXVarClaimName     = "IDENTITY_CLAIM_NAME"
 	configXVarRoleMap       = "IDENTITY_ROLE_MAP"
+
+	configXVarClaimWorkspaces = "IDENTITY_CLAIM_WORKSPACES"
+	configXVarWorkspaceMap    = "IDENTITY_WORKSPACE_MAP"
 )
 
 // configXAllVars is every name this package reads, for the one test that has to
@@ -37,6 +40,7 @@ var configXAllVars = []string{
 	configXVarProxyPreset, configXVarProxyHeader, configXVarProxyIssuer,
 	configXVarProxyAudience, configXVarProxyKeysURL, configXVarProxyAlgs,
 	configXVarClaimRoles, configXVarClaimEmail, configXVarClaimName, configXVarRoleMap,
+	configXVarClaimWorkspaces, configXVarWorkspaceMap,
 }
 
 // configXAllAlgorithms is the settled allowlist, written out as literals so
@@ -929,5 +933,188 @@ func TestFromEnvReturnsNilWhenDisabled(t *testing.T) {
 		if v != nil {
 			t.Fatalf("FromEnv(%s=%q) returned a verifier, want a nil *Verifier", configXVarMode, mode)
 		}
+	}
+}
+
+// configXWorkspaceB is a well-formed workspace id, spelled out for the reason
+// the variable names above are: it is a value an operator pastes into a
+// deployment, and the shape it must satisfy is domain.ValidWithPrefix's.
+const configXWorkspaceB = "wrkspc_0123456789abcdefghjkmnpq"
+
+// TestParseWorkspaceMap is TestParseRoleMap's twin for IDENTITY_WORKSPACE_MAP:
+// the same grammar, a different target, and one deliberate difference — an
+// unset map is not an error, because a deployment with a single workspace
+// configures neither of the two names.
+func TestParseWorkspaceMap(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name string
+		spec string
+		want map[string]string
+	}{
+		{
+			name: "one pair",
+			spec: "tenant-b=" + configXWorkspaceB,
+			want: map[string]string{"tenant-b": configXWorkspaceB},
+		},
+		{
+			name: "the literal default is a workspace id",
+			spec: "everyone=default",
+			want: map[string]string{"everyone": "default"},
+		},
+		{
+			name: "whitespace around pairs and around each '='",
+			spec: " eng = default , ops=" + configXWorkspaceB + " ",
+			want: map[string]string{"eng": "default", "ops": configXWorkspaceB},
+		},
+		{
+			// Duplicate TARGETS are ordinary: two IdP groups may both grant one
+			// workspace. Only a duplicate source is an error.
+			name: "two claim values naming one workspace",
+			spec: "a=default,b=default",
+			want: map[string]string{"a": "default", "b": "default"},
+		},
+		{
+			name: "an empty pair is skipped rather than refused",
+			spec: "eng=default,",
+			want: map[string]string{"eng": "default"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			cfg, err := identity.ConfigFromEnv(configXEnv(configXOIDC(map[string]string{
+				configXVarClaimWorkspaces: "workspaces",
+				configXVarWorkspaceMap:    tc.spec,
+			})))
+			if err != nil {
+				t.Fatalf("ConfigFromEnv(%s=%q): %v", configXVarWorkspaceMap, tc.spec, err)
+			}
+			if !maps.Equal(cfg.WorkspaceMap, tc.want) {
+				t.Errorf("WorkspaceMap = %v, want %v", cfg.WorkspaceMap, tc.want)
+			}
+		})
+	}
+
+	// The rejection rules. Every defect is an error rather than a dropped entry:
+	// a dropped entry is a silent change of which tenant a human reaches.
+	msgs := map[string]string{}
+	for _, tc := range []struct {
+		name     string
+		spec     string
+		mentions []string
+	}{
+		{name: "no '='", spec: "eng", mentions: []string{configXVarWorkspaceMap, "eng"}},
+		{name: "empty claim value", spec: "=default", mentions: []string{configXVarWorkspaceMap, "=default"}},
+		{name: "empty workspace id", spec: "eng=", mentions: []string{configXVarWorkspaceMap, "eng="}},
+		{
+			name:     "a workspace id of the wrong shape",
+			spec:     "eng=tenant-b",
+			mentions: []string{configXVarWorkspaceMap, "tenant-b"},
+		},
+		{
+			name:     "a wrkspc_ id whose token is not the id alphabet",
+			spec:     "eng=wrkspc_NOT-BASE32",
+			mentions: []string{configXVarWorkspaceMap, "wrkspc_NOT-BASE32"},
+		},
+		{
+			name:     "duplicate claim value",
+			spec:     "eng=default,eng=" + configXWorkspaceB,
+			mentions: []string{configXVarWorkspaceMap, "eng"},
+		},
+	} {
+		cfg, err := identity.ConfigFromEnv(configXEnv(configXOIDC(map[string]string{
+			configXVarClaimWorkspaces: "workspaces",
+			configXVarWorkspaceMap:    tc.spec,
+		})))
+		if err == nil {
+			t.Errorf("%s: ConfigFromEnv accepted %s=%q as %v",
+				tc.name, configXVarWorkspaceMap, tc.spec, cfg.WorkspaceMap)
+			continue
+		}
+		for _, m := range tc.mentions {
+			if !strings.Contains(err.Error(), m) {
+				t.Errorf("%s: error %q does not mention %q", tc.name, err, m)
+			}
+		}
+		msgs[tc.name] = err.Error()
+	}
+	// The two shape rejections share one rule and one message; the rest are
+	// separate rules and must read differently.
+	delete(msgs, "a wrkspc_ id whose token is not the id alphabet")
+	configXWantDistinct(t, msgs)
+}
+
+// TestConfigFromEnvWorkspaceMembership pins the two names as a PAIR. Either one
+// alone is a boot error, because either one alone is a deployment that looks
+// configured and is not: a claim with no map resolves every human to no
+// workspace, and a map with no claim name is never read at all.
+func TestConfigFromEnvWorkspaceMembership(t *testing.T) {
+	t.Parallel()
+
+	t.Run("both unset is the single-workspace deployment", func(t *testing.T) {
+		t.Parallel()
+		cfg, err := identity.ConfigFromEnv(configXEnv(configXOIDC(nil)))
+		if err != nil {
+			t.Fatalf("ConfigFromEnv: %v", err)
+		}
+		if cfg.WorkspacesClaim != "" || cfg.WorkspaceMap != nil {
+			t.Errorf("WorkspacesClaim = %q, WorkspaceMap = %v; want both unset",
+				cfg.WorkspacesClaim, cfg.WorkspaceMap)
+		}
+	})
+
+	t.Run("both set", func(t *testing.T) {
+		t.Parallel()
+		cfg, err := identity.ConfigFromEnv(configXEnv(configXOIDC(map[string]string{
+			configXVarClaimWorkspaces: " resource_access.console.workspaces ",
+			configXVarWorkspaceMap:    "tenant-b=" + configXWorkspaceB,
+		})))
+		if err != nil {
+			t.Fatalf("ConfigFromEnv: %v", err)
+		}
+		// Trimmed, and NOT defaulted: there is no default claim name here,
+		// because unset is a meaningful state and "roles" has no workspace twin.
+		if cfg.WorkspacesClaim != "resource_access.console.workspaces" {
+			t.Errorf("WorkspacesClaim = %q, want the trimmed configured name", cfg.WorkspacesClaim)
+		}
+		if !maps.Equal(cfg.WorkspaceMap, map[string]string{"tenant-b": configXWorkspaceB}) {
+			t.Errorf("WorkspaceMap = %v", cfg.WorkspaceMap)
+		}
+	})
+
+	t.Run("shared with trusted_proxy mode", func(t *testing.T) {
+		t.Parallel()
+		cfg, err := identity.ConfigFromEnv(configXEnv(configXCustom(map[string]string{
+			configXVarClaimWorkspaces: "groups",
+			configXVarWorkspaceMap:    "eng=default",
+		})))
+		if err != nil {
+			t.Fatalf("ConfigFromEnv: %v", err)
+		}
+		if cfg.WorkspacesClaim != "groups" {
+			t.Errorf("WorkspacesClaim = %q, want it read after the mode branch", cfg.WorkspacesClaim)
+		}
+	})
+
+	for _, tc := range []struct {
+		name string
+		over map[string]string
+	}{
+		{name: "a claim with no map", over: map[string]string{configXVarClaimWorkspaces: "workspaces"}},
+		{name: "a map with no claim", over: map[string]string{configXVarWorkspaceMap: "eng=default"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			cfg, err := identity.ConfigFromEnv(configXEnv(configXOIDC(tc.over)))
+			if err == nil {
+				t.Fatalf("ConfigFromEnv accepted a half-configured membership: %+v", cfg)
+			}
+			for _, m := range []string{configXVarClaimWorkspaces, configXVarWorkspaceMap} {
+				if !strings.Contains(err.Error(), m) {
+					t.Errorf("error %q does not name %q", err, m)
+				}
+			}
+		})
 	}
 }

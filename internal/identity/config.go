@@ -7,6 +7,8 @@ import (
 	"slices"
 	"strings"
 	"time"
+
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
 )
 
 // Config is one verifier's whole contract.
@@ -27,6 +29,14 @@ type Config struct {
 	EmailClaim string          // default "email"
 	NameClaim  string          // default "name"
 	RoleMap    map[string]Role // claim value → role; empty is an error in New
+
+	// Workspace membership (plan 42 §6.2). Unlike the four above these two have
+	// no default and are optional as a PAIR: both unset is a deployment with one
+	// workspace, which is every deployment that predates this. One without the
+	// other is a boot error — a claim with no map resolves every human to no
+	// workspace, and a map with no claim name is never read at all.
+	WorkspacesClaim string            // multi-valued claim naming the human's workspaces
+	WorkspaceMap    map[string]string // claim value → workspace id
 
 	// HTTPClient replaces the guarded client wholesale. A supplied client gives up
 	// everything productionClient carries — the dial-time address guard, the
@@ -79,9 +89,15 @@ const (
 	// one. Unlike the profile fields this one REFUSES rather than truncates — see
 	// the check in Verify.
 	maxSubjectBytes = 255
-	maxRoleValues   = 100
-	maxClaimDepth   = 8
-	maxLoggedKID    = 64 // attacker-controlled; truncate before logging
+	// maxClaimValues bounds the elements examined in a multi-valued claim. It is
+	// 1000 rather than a tighter number because since plan 42 §6.2 a claim past
+	// it costs a human their WORKSPACE, not just a role: a user in 150 IdP
+	// groups whose one mapped group sorts late would be a permanent 403. The
+	// bound still holds — maxTokenBytes caps the token long before this — and
+	// where it does bite, boundedClaimValues says so in the log.
+	maxClaimValues = 1000
+	maxClaimDepth  = 8
+	maxLoggedKID   = 64 // attacker-controlled; truncate before logging
 	// maxProfileBytes bounds the two descriptive Identity fields. Generous for a
 	// real name or address (RFC 5321 caps an email path at 254) and far under the
 	// ~12 KiB a claim could otherwise reach inside maxTokenBytes.
@@ -118,6 +134,10 @@ const (
 	envClaimEmail    = "IDENTITY_CLAIM_EMAIL"
 	envClaimName     = "IDENTITY_CLAIM_NAME"
 	envRoleMap       = "IDENTITY_ROLE_MAP"
+	// The workspace-membership pair (plan 42 §6.2), read in both modes exactly as
+	// the claim names above are.
+	envClaimWorkspaces = "IDENTITY_CLAIM_WORKSPACES"
+	envWorkspaceMap    = "IDENTITY_WORKSPACE_MAP"
 )
 
 // ConfigFromEnv parses and validates the IDENTITY_* variables read through
@@ -158,6 +178,13 @@ func ConfigFromEnv(getenv func(string) string) (Config, error) {
 	cfg.EmailClaim = valueOr(getenv(envClaimEmail), "email")
 	cfg.NameClaim = valueOr(getenv(envClaimName), "name")
 	if cfg.RoleMap, err = parseRoleMap(getenv(envRoleMap)); err != nil {
+		return Config{}, err
+	}
+	cfg.WorkspacesClaim = strings.TrimSpace(getenv(envClaimWorkspaces))
+	if cfg.WorkspaceMap, err = parseWorkspaceMap(getenv(envWorkspaceMap)); err != nil {
+		return Config{}, err
+	}
+	if err = requireWorkspacePair(cfg.WorkspacesClaim, cfg.WorkspaceMap); err != nil {
 		return Config{}, err
 	}
 	return cfg, nil
@@ -340,6 +367,77 @@ func parseRoleMap(s string) (map[string]Role, error) {
 		return nil, fmt.Errorf("%s is required and must map at least one claim value", envRoleMap)
 	}
 	return out, nil
+}
+
+// parseWorkspaceMap parses IDENTITY_WORKSPACE_MAP on parseRoleMap's grammar —
+// comma-separated value=target pairs, trimmed on both sides of each '=' — with
+// a workspace id as the target. The map exists so an operator binds the IdP
+// group names they already have rather than pushing platform-minted wrkspc_ ids
+// into the IdP.
+//
+// One deliberate difference from the role map: nothing mapped is nil rather
+// than an error. The role map is required because a deployment without one
+// denies every human; workspace membership is optional, and the deployment that
+// configures neither name is the single-workspace one every installation is
+// until it creates a second workspace.
+//
+// The target is validated here, at boot, against the same rule the
+// anthropic-workspace-id header runs (internal/api/scope.go): an id of the
+// wrong shape can match no workspace row, so accepting one would turn a typo
+// into a per-request denial with nothing in any log to say why.
+func parseWorkspaceMap(s string) (map[string]string, error) {
+	pairs := strings.Split(s, ",")
+	out := make(map[string]string, len(pairs))
+	for _, pair := range pairs {
+		pair = strings.TrimSpace(pair)
+		if pair == "" {
+			continue
+		}
+		value, id, found := strings.Cut(pair, "=")
+		if !found {
+			return nil, fmt.Errorf("%s pair %q has no '='", envWorkspaceMap, pair)
+		}
+		value, id = strings.TrimSpace(value), strings.TrimSpace(id)
+		if value == "" {
+			return nil, fmt.Errorf("%s pair %q has an empty claim value", envWorkspaceMap, pair)
+		}
+		if id == "" {
+			return nil, fmt.Errorf("%s pair %q has an empty workspace id", envWorkspaceMap, pair)
+		}
+		if !domain.IsWorkspaceID(id) {
+			return nil, fmt.Errorf("%s pair %q names workspace %q; want %s or a %s_ id",
+				envWorkspaceMap, pair, id, domain.DefaultWorkspaceID, domain.PrefixWorkspace)
+		}
+		if _, dup := out[value]; dup {
+			return nil, fmt.Errorf("%s maps %q twice", envWorkspaceMap, value)
+		}
+		out[value] = id
+	}
+	if len(out) == 0 {
+		return nil, nil
+	}
+	return out, nil
+}
+
+// requireWorkspacePair refuses a half-configured membership, in ConfigFromEnv
+// and again in New — the package's own boundary, where a Config can be built
+// literally.
+//
+// Neither half alone has a useful reading, and both fail in the direction that
+// is hardest to diagnose: a claim name with no map resolves every human to no
+// workspace, which locks the deployment out with nothing in any log to say why,
+// and a map with no claim name is never consulted, so an operator who believes
+// they have configured tenancy has not.
+func requireWorkspacePair(claim string, m map[string]string) error {
+	switch {
+	case claim != "" && len(m) == 0:
+		return fmt.Errorf("%s is set but %s maps nothing; every identity would resolve to no workspace",
+			envClaimWorkspaces, envWorkspaceMap)
+	case claim == "" && len(m) > 0:
+		return fmt.Errorf("%s is set but %s is not; nothing would read the map",
+			envWorkspaceMap, envClaimWorkspaces)
+	}
+	return nil
 }
 
 // parseAlgorithms parses a comma-separated allowlist against defaultAlgorithms.

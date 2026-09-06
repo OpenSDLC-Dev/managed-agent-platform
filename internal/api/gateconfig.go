@@ -39,8 +39,12 @@ func (s *server) getGateConfig(r *http.Request) (any, error) {
 	// read. Without the shared lock the two autocommit reads leave a window in
 	// which a session archived mid-request could still be served one last config
 	// with live secrets; with it, an archived (or raced-deleted) session fails
-	// closed. Mirrors the executor's FOR UPDATE OF s session read. The guard is
-	// also re-applied here, not only in requireGateToken's gatetoken.Authenticate.
+	// closed. Mirrors the executor's FOR UPDATE OF s session read. BOTH of
+	// gatetoken.Authenticate's end conditions are re-applied here rather than
+	// only in requireGateToken — the session's archive, and the workspace
+	// registry join it runs, composite in org for the reason auth.go's is —
+	// because a workspace archived in the same window would otherwise be served
+	// exactly the one last config with live secrets the lock exists to prevent.
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return nil, err
@@ -56,12 +60,14 @@ func (s *server) getGateConfig(r *http.Request) (any, error) {
 		// here reads.
 		`SELECT e.config, s.resolved_agent->'mcp_servers', s.vault_ids
 		   FROM sessions s JOIN environments e ON e.id = s.environment_id
+		   JOIN workspaces w ON w.id = s.workspace_id AND w.org_id = s.org_id AND w.archived_at IS NULL
 		  WHERE s.id = $1 AND s.archived_at IS NULL
 		  FOR SHARE OF s`,
 		sessionID).Scan(&configJSON, &mcpServersJSON, &vaultIDs)
 	if errors.Is(err, pgx.ErrNoRows) {
-		// Authenticated, but the session was archived or deleted between auth and
-		// this read — re-auth (fail-closed), never a partial config.
+		// Authenticated, but the session was archived or deleted — or its
+		// workspace archived — between auth and this read: re-auth
+		// (fail-closed), never a partial config.
 		return nil, errAuth("gate token no longer valid")
 	}
 	if err != nil {

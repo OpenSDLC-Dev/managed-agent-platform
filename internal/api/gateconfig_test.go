@@ -412,6 +412,27 @@ func TestGateConfigArchivedSessionFailsClosed(t *testing.T) {
 	}
 }
 
+// The twin of the test above, on the other end condition the gate lane applies:
+// archiving the WORKSPACE a session sits in must stop its gate being served
+// too, and by both routes — gatetoken.Authenticate's registry join and the
+// re-read under the FOR SHARE lock, which mirrors it so a workspace archived in
+// that window cannot be handed one last config with live secrets. Nothing at
+// the schema level forbids archiving `default` yet; slice 6's workspace
+// management is where that rule lands.
+func TestGateConfigArchivedWorkspaceFailsClosed(t *testing.T) {
+	s := newTestServer(t)
+	sessionID, _, _ := gatedSession(t, s)
+	token := mintGateToken(t, s, sessionID)
+
+	if _, err := s.pool.Exec(context.Background(),
+		`UPDATE workspaces SET archived_at = now() WHERE id = 'default'`); err != nil {
+		t.Fatalf("archive the default workspace: %v", err)
+	}
+	if _, err := gateconfig.NewClient(s.url, token, nil).Fetch(context.Background()); !errors.Is(err, gateconfig.ErrUnauthorized) {
+		t.Fatalf("Fetch on a session in an archived workspace = %v, want ErrUnauthorized", err)
+	}
+}
+
 func TestGateConfigAuthLane(t *testing.T) {
 	s := newTestServer(t)
 

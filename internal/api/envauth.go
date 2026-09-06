@@ -6,26 +6,39 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 // authenticateEnvironmentKey resolves a Bearer token to the environment it is
-// scoped to, or "" if the key is unknown, revoked, or expired. Those three take
-// the same branch on purpose: the caller turns "" into one 401 with one message,
-// so a probing client learns nothing about which of them it hit. A key minted
-// before keys carried expiries has a NULL expires_at and never expires.
-func authenticateEnvironmentKey(ctx context.Context, pool *pgxpool.Pool, key string) (string, error) {
+// scoped to and that environment's scope, or "" if the key is unknown, revoked,
+// expired, or its environment sits in a workspace that is no longer live. Those
+// take the same branch on purpose: the caller turns "" into one 401 with one
+// message, so a probing client learns nothing about which of them it hit. A key
+// minted before keys carried expiries has a NULL expires_at and never expires.
+//
+// The scope comes from the ENVIRONMENT's row, never from environment_keys' own
+// reserved columns, so a key can never disagree with the environment it serves
+// — no copy at mint time, no drift, no backfill (plan 42 §6.1). Those columns
+// stay unread, said out loud so the omission reads as deliberate. The registry
+// join is composite — org too — because org has one authority, the registry: an
+// environment whose org_id drifted from its workspace's resolves to nothing.
+func authenticateEnvironmentKey(ctx context.Context, pool *pgxpool.Pool, key string) (string, domain.Scope, error) {
 	var envID string
+	var scope domain.Scope
 	err := pool.QueryRow(ctx,
-		`SELECT environment_id FROM environment_keys
-		  WHERE key_hash = $1 AND revoked_at IS NULL
-		    AND (expires_at IS NULL OR expires_at > now())`,
-		hashKey(key)).Scan(&envID)
+		`SELECT k.environment_id, e.org_id, e.workspace_id, e.project_id
+		   FROM environment_keys k
+		   JOIN environments e ON e.id = k.environment_id
+		   JOIN workspaces w ON w.id = e.workspace_id AND w.org_id = e.org_id AND w.archived_at IS NULL
+		  WHERE k.key_hash = $1 AND k.revoked_at IS NULL
+		    AND (k.expires_at IS NULL OR k.expires_at > now())`,
+		hashKey(key)).Scan(&envID, &scope.OrgID, &scope.WorkspaceID, &scope.ProjectID)
 	if err == pgx.ErrNoRows {
-		return "", nil
+		return "", domain.Scope{}, nil
 	}
-	return envID, err
+	return envID, scope, err
 }
 
 // bearerToken extracts a non-empty Authorization: Bearer token. ok reports
@@ -37,26 +50,38 @@ func bearerToken(r *http.Request) (token string, ok bool) {
 }
 
 // resolveEnvironmentKey authenticates a request's Authorization: Bearer
-// environment key, returning the environment it is scoped to. On a missing/empty
-// header or an unknown/revoked key it writes the wire auth error and returns
+// environment key, returning the environment it is scoped to and the scope that
+// environment resolves. On a missing/empty header, an unknown/revoked key or a
+// workspace header it may not narrow to, it writes the wire error and returns
 // ok=false. Both worker-auth middlewares share it so the Bearer-resolution rules
 // live in one place.
-func resolveEnvironmentKey(w http.ResponseWriter, r *http.Request, pool *pgxpool.Pool) (envID string, ok bool) {
+//
+// The tenancy headers are stamped HERE rather than in the middlewares, because
+// the second caller is requireEnvironmentKeyForSession — the worker half of the
+// dual-auth session routes, whose own ownership 404 would otherwise go out bare
+// on exactly the routes a BYOC deployment uses most (plan 42 §6.2).
+func resolveEnvironmentKey(w http.ResponseWriter, r *http.Request, pool *pgxpool.Pool) (envID string, scope domain.Scope, ok bool) {
 	token, hasBearer := bearerToken(r)
 	if !hasBearer || token == "" {
 		writeError(w, r, errAuth("missing Authorization: Bearer environment key"))
-		return "", false
+		return "", domain.Scope{}, false
 	}
-	envID, err := authenticateEnvironmentKey(r.Context(), pool, token)
+	envID, bound, err := authenticateEnvironmentKey(r.Context(), pool, token)
 	if err != nil {
 		writeError(w, r, err)
-		return "", false
+		return "", domain.Scope{}, false
 	}
 	if envID == "" {
 		writeError(w, r, errAuth("invalid environment key"))
-		return "", false
+		return "", domain.Scope{}, false
 	}
-	return envID, true
+	scope, err = selectWorkspace(r, []domain.Scope{bound})
+	if err != nil {
+		writeError(w, r, err)
+		return "", domain.Scope{}, false
+	}
+	stampScope(w, scope)
+	return envID, scope, true
 }
 
 // requireEnvironmentKey is the worker-auth middleware guarding the work API:
@@ -66,11 +91,12 @@ func resolveEnvironmentKey(w http.ResponseWriter, r *http.Request, pool *pgxpool
 // another's queue.
 func requireEnvironmentKey(pool *pgxpool.Pool, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		envID, ok := resolveEnvironmentKey(w, r, pool)
+		envID, scope, ok := resolveEnvironmentKey(w, r, pool)
 		if !ok {
 			return
 		}
-		next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), ctxKeyEnvironment, envID)))
+		ctx := context.WithValue(r.Context(), ctxKeyEnvironment, envID)
+		next.ServeHTTP(w, r.WithContext(context.WithValue(ctx, ctxKeyScope, scope)))
 	})
 }
 
@@ -87,7 +113,7 @@ func requireEnvironmentKey(pool *pgxpool.Pool, next http.Handler) http.Handler {
 // dual-auth.
 func requireEnvironmentKeyForSession(pool *pgxpool.Pool, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		envID, ok := resolveEnvironmentKey(w, r, pool)
+		envID, scope, ok := resolveEnvironmentKey(w, r, pool)
 		if !ok {
 			return
 		}
@@ -116,7 +142,8 @@ func requireEnvironmentKeyForSession(pool *pgxpool.Pool, next http.Handler) http
 			writeError(w, r, err)
 			return
 		}
-		next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), ctxKeyEnvironment, envID)))
+		ctx := context.WithValue(r.Context(), ctxKeyEnvironment, envID)
+		next.ServeHTTP(w, r.WithContext(context.WithValue(ctx, ctxKeyScope, scope)))
 	})
 }
 
