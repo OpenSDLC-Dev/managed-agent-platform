@@ -712,25 +712,38 @@ func TestDreamPipelineInPlace(t *testing.T) {
 			retiredPath, memoryPaths(after))
 	}
 	// And it is a tombstone rather than the fact it was: the portal no longer
-	// reads as where expenses are filed, and the successor is named.
-	if tomb := after[retiredPath]; tomb != "" {
-		if tomb == before[retiredPath] {
-			t.Errorf("%s is unchanged, so the transcript that ended it changed nothing:\n%s",
-				retiredPath, tomb)
-		}
-		if !strings.Contains(strings.ToLower(tomb), "finance") {
-			t.Errorf("%s does not name its successor:\n%s", retiredPath, tomb)
-		}
+	// reads as where expenses are filed, and the successor is named. Emptying
+	// the file is not tombstoning it — that is a deletion this session could
+	// not make, spelled a different way — so the empty case is a failure here
+	// rather than a case to skip.
+	tomb := after[retiredPath]
+	switch {
+	case strings.TrimSpace(tomb) == "":
+		t.Errorf("%s was emptied rather than tombstoned", retiredPath)
+	case tomb == before[retiredPath]:
+		t.Errorf("%s is unchanged, so the transcript that ended it changed nothing:\n%s",
+			retiredPath, tomb)
+	case !strings.Contains(strings.ToLower(tomb), "finance"):
+		t.Errorf("%s does not name its successor:\n%s", retiredPath, tomb)
 	}
 	// The successor fact reached the store, in the tombstone or beside it.
 	if len(mentionsOutsideIndex(after, "finance.internal")) == 0 {
 		t.Errorf("no memory states the new place expenses are filed: %v", memoryPaths(after))
 	}
-	// The index carries the retirement where the caller will look for it.
+	// The index carries the retirement where the caller will look for it, and
+	// says which memory it means. Searching for the word alone would pass an
+	// index whose removal section reads "nothing to remove", which is the one
+	// thing this run must not produce.
 	if index, ok := after["/MEMORY.md"]; !ok {
 		t.Errorf("the store has no /MEMORY.md index: %v", memoryPaths(after))
-	} else if !strings.Contains(strings.ToLower(index), "remove") {
-		t.Errorf("/MEMORY.md has no section listing what the caller should remove:\n%s", index)
+	} else {
+		lower := strings.ToLower(index)
+		if !strings.Contains(lower, "remove") {
+			t.Errorf("/MEMORY.md has no section listing what the caller should remove:\n%s", index)
+		}
+		if !strings.Contains(lower, strings.TrimPrefix(retiredPath, "/")) {
+			t.Errorf("/MEMORY.md does not name %s, the memory it retired:\n%s", retiredPath, index)
+		}
 	}
 	// The memory nothing spoke to is byte-identical, in place as much as in a
 	// clone.
