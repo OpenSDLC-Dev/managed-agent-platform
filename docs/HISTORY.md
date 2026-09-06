@@ -83,7 +83,7 @@ agent's `--model`, which the CLI still refuses as "string was used where mapping
   `ended_at`; `archive` → `archived_at` set with `status` left at `canceled`; `archive` again → the
   same `archived_at`. `list` then omits the dream, while `list --include-archived`, `retrieve` and
   `list --status canceled --include-archived` all serve it.
-- `retrieve --dream-id drm_doesnotexist000000000000` → `404 not_found_error`.
+- `retrieve` with a `drm_` id nothing owns → `404 not_found_error`.
 
 Slice 1 has no runner, so a dream never leaves `pending` except through `cancel`: `running`,
 `completed` and `failed`, the pipeline `session_id`, the harvested `outputs` and the output store's
