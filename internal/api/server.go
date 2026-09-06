@@ -154,6 +154,16 @@ func NewHandler(pool *pgxpool.Pool, blobs blob.Store, cipher secrets.Cipher, ver
 	// one that holds this (plan 36 decision 14).
 	mux.HandleFunc("POST /v1/memory_stores/{id}/memory_versions/{vid}/redact", s.handle(identity.RoleAdmin, s.redactMemoryVersion))
 
+	// Dreams (plan 41 §5.1): the memory family's consolidation job. Reads
+	// viewer, create and both lifecycle actions developer — each one starts or
+	// ends work against a memory store, which is where the store surface itself
+	// puts the line.
+	mux.HandleFunc("POST /v1/dreams", s.handle(identity.RoleDeveloper, s.createDream))
+	mux.HandleFunc("GET /v1/dreams", s.handle(identity.RoleViewer, s.listDreams))
+	mux.HandleFunc("GET /v1/dreams/{id}", s.handle(identity.RoleViewer, s.getDream))
+	mux.HandleFunc("POST /v1/dreams/{id}/archive", s.handle(identity.RoleDeveloper, s.archiveDream))
+	mux.HandleFunc("POST /v1/dreams/{id}/cancel", s.handle(identity.RoleDeveloper, s.cancelDream))
+
 	// The console API — off the /v1 wire, mirroring the reference console's own
 	// private path so a console-facing endpoint has a convention rather than an
 	// invented namespace (internal/api/consoleapi.go). Management x-api-key, via
@@ -233,6 +243,8 @@ func NewHandler(pool *pgxpool.Pool, blobs blob.Store, cipher secrets.Cipher, ver
 		"/v1/memory_stores/{id}/memories", "/v1/memory_stores/{id}/memories/{mid}",
 		"/v1/memory_stores/{id}/memory_versions", "/v1/memory_stores/{id}/memory_versions/{vid}",
 		"/v1/memory_stores/{id}/memory_versions/{vid}/redact",
+		"/v1/dreams", "/v1/dreams/{id}",
+		"/v1/dreams/{id}/archive", "/v1/dreams/{id}/cancel",
 		"/v1/deployments", "/v1/deployments/{id}", "/v1/deployments/{id}/archive",
 		"/v1/deployments/{id}/pause", "/v1/deployments/{id}/unpause",
 		"/v1/deployments/{id}/run",
