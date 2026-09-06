@@ -1,5 +1,5 @@
 ---
-status: approved
+status: in-progress
 issue: "#475"
 ---
 
@@ -1290,8 +1290,9 @@ running pipeline session answers (item 2).
 The INFERRED entries' tracker is **#78**, the recording tracker, which stays open and
 already carries the registry's other unsettled inferences; each entry therefore carries
 the parenthetical `tools/registrycheck` requires of an entry sharing a tracker, naming
-its recording item. Slice 1 lands them INFERRED; the recording, when enrollment allows
-it (§1 slice 0), converts the ones it settles in a reconciliation PR. The rewritten `:135` entry keeps `*Tracked: #475*` only while
+its recording item. Each slice lands its entries INFERRED as the behavior
+arrives; the recording, when enrollment allows it (§1 slice 0), converts the ones it
+settles in a reconciliation PR. The rewritten `:135` entry keeps `*Tracked: #475*` only while
 `#475` is open: the close-out PR rewrites the pointer as a trailing `landed for #475`
 clause — the provenance form the guard accepts while the issue is still open
 (`tools/registrycheck/registrycheck.go:395-398` rejects a live tracker on a closed issue,
