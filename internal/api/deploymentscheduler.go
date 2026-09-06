@@ -75,9 +75,10 @@ const (
 
 // deploymentFireConcurrency bounds how many fires one tick runs at once. A
 // fire is a full session creation, and thirty of them serialized behind one
-// tick would overrun the 30-second interval (§4.4); the connection budget is
-// one per in-flight fire plus one per replica briefly blocked on a competing
-// claim, so this constant is also (most of) the scheduler's draw on the pool.
+// tick would overrun the 30-second interval (§4.4). It is a cap, not the
+// scheduler's draw on the pool: that is the shared sweepBudget a fire takes a
+// slot of, one connection per in-flight fire plus one per replica briefly
+// blocked on a competing claim.
 const deploymentFireConcurrency = 4
 
 // deploymentTickInterval paces the sweep, and is therefore the fire latency:
@@ -295,20 +296,19 @@ func (s *server) deploymentTick(ctx context.Context, now time.Time) error {
 		return errors.Join(scanErrs...)
 	}
 
-	// The fire concurrency is clamped to the pool: pgxpool's default MaxConns
-	// is max(4, NumCPU), so on a small host the constant alone could pin
-	// every connection for up to a contended fire's lock_timeout, queueing
-	// each HTTP handler behind the sweep (§4.4's budget). Two are always left
-	// for the rest of the process — the SSE broker holds one for its LISTEN
-	// loop whenever a subscriber exists.
-	concurrency := deploymentFireConcurrency
-	if m := int(s.pool.Config().MaxConns) - 2; m < concurrency {
-		concurrency = max(1, m)
-	}
+	// The fire's draw on the pool is a slot of the process-wide sweep budget
+	// (sweepBudget, plan 41 §4.1), which is this clamp made shareable: it was
+	// a local MaxConns-2 cap here, and the dream runner sweeping beside this
+	// one would have doubled the reservation away. Two connections are still
+	// always left for the rest of the process — the SSE broker holds one for
+	// its LISTEN loop whenever a subscriber exists — and now for both sweeps
+	// together. deploymentFireConcurrency stays this sweep's own cap on top:
+	// thirty fires serialized behind one tick would overrun the interval.
+	budget := sweepBudget(s.pool)
 
 	ctx, span := otel.GetTracerProvider().Tracer(apiTracerName).Start(ctx, "deployment.tick")
 	defer span.End()
-	sem := make(chan struct{}, concurrency)
+	sem := make(chan struct{}, deploymentFireConcurrency)
 	var (
 		wg   sync.WaitGroup
 		mu   sync.Mutex
@@ -317,9 +317,11 @@ func (s *server) deploymentTick(ctx context.Context, now time.Time) error {
 	for _, f := range fires {
 		wg.Add(1)
 		sem <- struct{}{}
+		budget <- struct{}{}
 		go func(f deploymentFire) {
 			defer wg.Done()
 			defer func() { <-sem }()
+			defer func() { <-budget }()
 			if err := s.fireScheduled(ctx, f); err != nil {
 				mu.Lock()
 				errs = append(errs, err)

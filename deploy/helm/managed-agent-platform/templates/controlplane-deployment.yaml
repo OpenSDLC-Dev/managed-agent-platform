@@ -39,6 +39,26 @@ spec:
                 secretKeyRef:
                   name: {{ include "map.secretName" . }}
                   key: controlplane-api-key
+            {{- /* Set, not true: a Go template reads a YAML-numeric 0 as false, so
+                   `with` would drop the one value that disables the runner and
+                   leave it at its 30s default with no warning. `kindIs "invalid"`
+                   is the nil half — toString renders a nil as "<nil>", which is
+                   not empty — so an explicit null stays the unset value it was. */}}
+            {{- $tick := .Values.controlplane.dreamTickInterval }}
+            {{- if and (not (kindIs "invalid" $tick)) (ne (toString $tick) "") }}
+            - name: DREAM_TICK_INTERVAL
+              value: {{ $tick | quote }}
+            {{- end }}
+            {{- $timeout := .Values.controlplane.dreamTimeout }}
+            {{- if and (not (kindIs "invalid" $timeout)) (ne (toString $timeout) "") }}
+            - name: DREAM_TIMEOUT
+              value: {{ $timeout | quote }}
+            {{- end }}
+            {{- $maxInput := .Values.controlplane.dreamMaxInputBytes }}
+            {{- if and (not (kindIs "invalid" $maxInput)) (ne (toString $maxInput) "") }}
+            - name: DREAM_MAX_INPUT_BYTES
+              value: {{ $maxInput | quote }}
+            {{- end }}
             {{- include "map.commonEnv" . | nindent 12 }}
             {{- include "map.blobEnv" . | nindent 12 }}
             {{- include "map.secretsEnv" . | nindent 12 }}

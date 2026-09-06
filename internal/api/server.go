@@ -26,6 +26,12 @@ type server struct {
 	queue  *queue.Queue
 	blobs  blob.Store
 	cipher secrets.Cipher
+	// dreamRunner records that this process ticks a dream runner (plan 41
+	// §4.7). False is DREAM_TICK_INTERVAL="0", the one configuration in which
+	// a created dream would never reach a terminal state — the timeout is the
+	// runner's too — so POST /v1/dreams then refuses. The other four routes
+	// never read it.
+	dreamRunner bool
 	// emitting marks sessions with an unreachable-credential advisory emission
 	// in flight, so a gate fetching faster than the emission drains cannot
 	// stack detached goroutines (startEmission).
@@ -40,6 +46,14 @@ func newServer(pool *pgxpool.Pool, blobs blob.Store, cipher secrets.Cipher) *ser
 	return &server{pool: pool, log: events.NewLog(pool), broker: events.NewBroker(pool), queue: queue.New(pool), blobs: blobs, cipher: cipher}
 }
 
+// Option is a handler setting with no collaborator behind it — variadic so a
+// deployment that wants none writes none.
+type Option func(*server)
+
+// WithDreamRunner tells the handler that this process ticks a dream runner,
+// which is what lets POST /v1/dreams accept a create (plan 41 §4.7).
+func WithDreamRunner() Option { return func(s *server) { s.dreamRunner = true } }
+
 // NewHandler assembles the control-plane HTTP surface over the given pool.
 // blobs is the object store backing skill archives; nil deploys without
 // object storage — everything serves except the storage-backed skill routes,
@@ -51,8 +65,11 @@ func newServer(pool *pgxpool.Pool, blobs blob.Store, cipher secrets.Cipher) *ser
 // is then what it was before plan 31 — no lane, no role check — on every
 // request shape but one: requireAPIKey refuses a repeated x-api-key field in
 // every mode, deliberately (see dispatchManagementAuth).
-func NewHandler(pool *pgxpool.Pool, blobs blob.Store, cipher secrets.Cipher, verifier *identity.Verifier) http.Handler {
+func NewHandler(pool *pgxpool.Pool, blobs blob.Store, cipher secrets.Cipher, verifier *identity.Verifier, opts ...Option) http.Handler {
 	s := newServer(pool, blobs, cipher)
+	for _, opt := range opts {
+		opt(s)
+	}
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("POST /v1/agents", s.handle(identity.RoleDeveloper, s.createAgent))

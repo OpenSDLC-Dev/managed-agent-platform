@@ -215,8 +215,10 @@ const overrideSystemMaxRunes = 100_000
 
 // resolveAgent resolves the create-time agent union (plain id string,
 // {type:"agent"}, or {type:"agent_with_overrides"}) into the immutable
-// snapshot the session will carry.
-func (s *server) resolveAgent(ctx context.Context, db querier, raw json.RawMessage) (sessionAgentJSON, error) {
+// snapshot the session will carry. internal admits the dream runner's own
+// hidden agent, which every other caller resolves as not found (§4.4); it is
+// createSessionIn.internal, and no request can set it.
+func (s *server) resolveAgent(ctx context.Context, db querier, raw json.RawMessage, internal bool) (sessionAgentJSON, error) {
 	var snap sessionAgentJSON
 
 	var agentID string
@@ -284,9 +286,13 @@ func (s *server) resolveAgent(ctx context.Context, db querier, raw json.RawMessa
 		specJSON   []byte
 		archivedAt *time.Time
 	)
+	hidden := notInternal
+	if internal {
+		hidden = ""
+	}
 	if version == 0 {
 		err := db.QueryRow(ctx,
-			`SELECT name, version, spec, archived_at FROM agents WHERE id = $1`, agentID).
+			`SELECT name, version, spec, archived_at FROM agents WHERE id = $1`+hidden, agentID).
 			Scan(&name, &version, &specJSON, &archivedAt)
 		if errors.Is(err, pgx.ErrNoRows) {
 			return snap, errNotFound("agent %s not found", agentID)
@@ -298,7 +304,7 @@ func (s *server) resolveAgent(ctx context.Context, db querier, raw json.RawMessa
 		err := db.QueryRow(ctx,
 			`SELECT v.name, v.spec, a.archived_at
 			 FROM agent_versions v JOIN agents a ON a.id = v.agent_id
-			 WHERE v.agent_id = $1 AND v.version = $2`, agentID, version).
+			 WHERE v.agent_id = $1 AND v.version = $2`+hidden, agentID, version).
 			Scan(&name, &specJSON, &archivedAt)
 		if errors.Is(err, pgx.ErrNoRows) {
 			return snap, errNotFound("agent %s version %d not found", agentID, version)
@@ -619,6 +625,17 @@ func (s *server) createSession(r *http.Request) (any, error) {
 // unattributed. deploymentID is set only by a deployment fire — the create
 // surface has no deployment field on the wire and rejects the key.
 type createSessionIn struct {
+	// id is the session's, for a caller that must know it before the row
+	// exists: the dream runner mints it so the memory clone's `created`
+	// versions can be attributed to the session_actor of a session it has not
+	// created yet (plan 41 §4.2 steps 4 and 6). Empty mints one below, as
+	// every wire create does; a collision fails the INSERT like any other
+	// unique violation, and the runner retries the start with a fresh id.
+	id string
+	// internal admits the runner's own hidden agent and environment, which
+	// every other resolver answers 404 for (§4.4). Unreachable from the wire:
+	// no request field reaches either of these two.
+	internal       bool
 	envID          string
 	agentRaw       json.RawMessage
 	title          string
@@ -641,9 +658,9 @@ type createdSession struct {
 // recordCreated is the post-commit half every committer shares — the status
 // metric for a session born running, and the resource-mutation metric with
 // its log line. Called only after a successful Commit, because both observe
-// committed state; createSession, runDeployment and the scheduler's fire are
-// the three callers, and one copy is what keeps a metric added here firing
-// for all of them.
+// committed state; createSession, runDeployment, the scheduler's fire and the
+// dream start are the four callers, and one copy is what keeps a metric added
+// here firing for all of them.
 func (c createdSession) recordCreated(ctx context.Context) {
 	if c.initialEvents > 0 {
 		events.RecordSessionStatus(ctx, domain.SessionRunning)
@@ -665,8 +682,13 @@ func (c createdSession) recordCreated(ctx context.Context) {
 func (s *server) createSessionInTx(ctx context.Context, tx pgx.Tx, in createSessionIn) (createdSession, error) {
 	var envArchivedAt *time.Time
 	var envKind string
+	hidden := notInternal
+	if in.internal {
+		hidden = ""
+	}
 	err := tx.QueryRow(ctx,
-		`SELECT archived_at, kind FROM environments WHERE id = $1 FOR SHARE`, in.envID).Scan(&envArchivedAt, &envKind)
+		`SELECT archived_at, kind FROM environments WHERE id = $1`+hidden+` FOR SHARE`, in.envID).
+		Scan(&envArchivedAt, &envKind)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return createdSession{}, errNotFound("environment %s not found", in.envID)
 	}
@@ -677,11 +699,19 @@ func (s *server) createSessionInTx(ctx context.Context, tx pgx.Tx, in createSess
 		return createdSession{}, classified("environment_archived_error",
 			errInvalid("environment %s is archived", in.envID))
 	}
+	// vault_ids and metadata are both NOT NULL, and every wire path parses a
+	// value for each; a caller that has neither (the dream runner) passes nil.
+	if in.vaultIDs == nil {
+		in.vaultIDs = []string{}
+	}
+	if in.metadata == nil {
+		in.metadata = map[string]string{}
+	}
 	if err := validateAttachedVaults(ctx, tx, in.vaultIDs); err != nil {
 		return createdSession{}, err
 	}
 
-	agent, err := s.resolveAgent(ctx, tx, in.agentRaw)
+	agent, err := s.resolveAgent(ctx, tx, in.agentRaw, in.internal)
 	if err != nil {
 		return createdSession{}, err
 	}
@@ -709,7 +739,10 @@ func (s *server) createSessionInTx(ctx context.Context, tx pgx.Tx, in createSess
 		}
 	}
 
-	id := domain.NewID(domain.PrefixSession).String()
+	id := in.id
+	if id == "" {
+		id = domain.NewID(domain.PrefixSession).String()
+	}
 	var createdBy *string
 	if p := principalFrom(ctx); p != "" {
 		createdBy = &p
@@ -947,6 +980,9 @@ func (s *server) updateSession(r *http.Request) (any, error) {
 	}
 	if row.archivedAt != nil {
 		return nil, errInvalid("session %s is archived", id)
+	}
+	if err := requireNotDreamOwned(ctx, tx, id); err != nil {
+		return nil, err
 	}
 	metadata := map[string]string{}
 	if err := json.Unmarshal(row.metaJSON, &metadata); err != nil {
@@ -1284,14 +1320,34 @@ func (s *server) archiveSession(r *http.Request) (any, error) {
 		return nil, err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+	if err := requireNotDreamOwned(ctx, tx, id); err != nil {
+		return nil, err
+	}
 	if err := requireNotRunning(ctx, tx, id, "archiving"); err != nil {
 		return nil, err
 	}
-	// The session's end ends its live child threads (plan 35 decision 12) —
-	// before the archive mark, which closes the log to appends — and the
-	// primary's archived_at mirrors the session's.
-	if err := terminateLiveChildren(ctx, tx, s.log, id); err != nil {
+	row, err := s.archiveSessionInTx(ctx, tx, id)
+	if err != nil {
 		return nil, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, err
+	}
+	return renderSession(row)
+}
+
+// archiveSessionInTx is the archive itself, without the guards the handler
+// runs ahead of it: the session's end ends its live child threads (plan 35
+// decision 12) — before the archive mark, which closes the log to appends —
+// and the primary's archived_at mirrors the session's. Idempotent, because
+// both stamps are COALESCEd.
+//
+// The dream runner's closing arm shares it (plan 41 §4.1 arm 1), where
+// requireNotDreamOwned would refuse the runner itself and the not-running
+// check is the arm's own decision rather than a rejected request.
+func (s *server) archiveSessionInTx(ctx context.Context, tx pgx.Tx, id string) (sessionRow, error) {
+	if err := terminateLiveChildren(ctx, tx, s.log, id); err != nil {
+		return sessionRow{}, err
 	}
 	row, err := scanSession(tx.QueryRow(ctx,
 		`UPDATE sessions SET
@@ -1299,18 +1355,15 @@ func (s *server) archiveSession(r *http.Request) (any, error) {
 		   archived_at = COALESCE(archived_at, now())
 		 WHERE id = $1 RETURNING `+sessionColumns, id))
 	if err != nil {
-		return nil, err
+		return sessionRow{}, err
 	}
 	if _, err := tx.Exec(ctx,
 		`UPDATE session_threads SET archived_at = $2, updated_at = $3
 		  WHERE session_id = $1 AND parent_thread_id IS NULL AND archived_at IS NULL`,
 		id, row.archivedAt, row.updatedAt); err != nil {
-		return nil, err
+		return sessionRow{}, err
 	}
-	if err := tx.Commit(ctx); err != nil {
-		return nil, err
-	}
-	return renderSession(row)
+	return row, nil
 }
 
 func (s *server) deleteSession(r *http.Request) (any, error) {
@@ -1324,6 +1377,9 @@ func (s *server) deleteSession(r *http.Request) (any, error) {
 		return nil, err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+	if err := requireNotDreamOwned(ctx, tx, id); err != nil {
+		return nil, err
+	}
 	if err := requireNotRunning(ctx, tx, id, "deleting"); err != nil {
 		return nil, err
 	}

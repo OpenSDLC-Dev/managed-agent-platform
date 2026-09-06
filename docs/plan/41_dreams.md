@@ -1227,7 +1227,7 @@ the renderer in `internal/transcript`; no test-support package is added, so the 
   under the per-transcript cap with peak allocation measured by `testing.AllocsPerRun`
   or a `runtime.MemStats` delta against the same log at 500 events — the two must be
   within a constant of each other, or the paging is not doing its job.
-- **Live tiers**: the `RUN_EVALS` suite (`make eval`) — a seeded store (three memories, one
+- **Live tiers** (slice 3): the `RUN_EVALS` suite (`make eval`) — a seeded store (three memories, one
   stale, one duplicated) and two recorded transcripts; graders check the output store
   merged the duplicate, replaced the stale fact with the transcript's newer one, wrote no
   secret (a planted `sk-` string must not appear), and kept the untouched memory; a

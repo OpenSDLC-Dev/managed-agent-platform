@@ -771,7 +771,7 @@ func (s *server) sealDeploymentRepoTokens(ctx context.Context, inputs []resource
 // createSessionInTx applies to the same row.
 func requireLiveEnvironment(ctx context.Context, tx pgx.Tx, envID string) error {
 	var archivedAt *time.Time
-	err := tx.QueryRow(ctx, `SELECT archived_at FROM environments WHERE id = $1 FOR SHARE`, envID).Scan(&archivedAt)
+	err := tx.QueryRow(ctx, `SELECT archived_at FROM environments WHERE id = $1`+notInternal+` FOR SHARE`, envID).Scan(&archivedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return errNotFound("environment %s not found", envID)
 	}

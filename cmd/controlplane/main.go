@@ -43,6 +43,14 @@
 //	                      SECRETS_BACKEND=gcpkms. No credential accompanies
 //	                      it: authentication is Application Default
 //	                      Credentials (Workload Identity on GKE)
+//	DREAM_TICK_INTERVAL   dream runner sweep interval, a Go duration (default
+//	                      "30s"). "0" disables the runner, and POST /v1/dreams
+//	                      then answers a 500 api_error rather than accept a
+//	                      dream nothing would ever run
+//	DREAM_TIMEOUT         a dream's runtime budget from creation, a Go duration
+//	                      (default "2h") → error.type "timeout"
+//	DREAM_MAX_INPUT_BYTES input memory-store content cap in bytes (default
+//	                      67108864, 64 MiB) → "input_memory_store_too_large"
 //	OTEL_EXPORTER_OTLP_ENDPOINT  optional OTLP/gRPC collector endpoint
 //	OTEL_EXPORTER_OTLP_INSECURE  "true" to export without TLS (default TLS)
 //
@@ -66,6 +74,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -181,23 +190,69 @@ func run(ctx context.Context) error {
 		slog.Info("identity configured", "mode", string(verifier.Mode()))
 	}
 
+	// The dream runner's three knobs (plan 41 §4.7), the controlplane's first
+	// sweep configuration: the two durations with cmd/brain's idiom, the byte
+	// count with ParseInt. A zero interval disables the runner, and the
+	// handler is told, because a dream created where nothing sweeps would stay
+	// pending forever — the timeout is the runner's too.
+	dreams := api.DreamRunnerConfig{
+		TickInterval:  30 * time.Second,
+		Timeout:       2 * time.Hour,
+		MaxInputBytes: 64 << 20,
+	}
+	for env, dst := range map[string]*time.Duration{
+		"DREAM_TICK_INTERVAL": &dreams.TickInterval, "DREAM_TIMEOUT": &dreams.Timeout,
+	} {
+		if v := os.Getenv(env); v != "" {
+			d, err := time.ParseDuration(v)
+			if err != nil {
+				return errors.New(env + " must be a Go duration")
+			}
+			*dst = d
+		}
+	}
+	// Exactly "0" disables the runner; every other non-positive value is a
+	// misconfiguration and says so, because neither would announce itself: a
+	// negative interval would disable the runner silently, and a zero or
+	// negative timeout would time every dream out on its first tick.
+	if dreams.TickInterval < 0 {
+		return errors.New("DREAM_TICK_INTERVAL must be a non-negative Go duration (0 disables the runner)")
+	}
+	if dreams.Timeout <= 0 {
+		return errors.New("DREAM_TIMEOUT must be a positive Go duration")
+	}
+	if v := os.Getenv("DREAM_MAX_INPUT_BYTES"); v != "" {
+		n, err := strconv.ParseInt(v, 10, 64)
+		if err != nil || n <= 0 {
+			return errors.New("DREAM_MAX_INPUT_BYTES must be a positive byte count")
+		}
+		dreams.MaxInputBytes = n
+	}
+	var handlerOpts []api.Option
+	if dreams.TickInterval > 0 {
+		handlerOpts = append(handlerOpts, api.WithDreamRunner())
+	} else {
+		slog.Info("dream runner disabled; POST /v1/dreams will report the absence")
+	}
+
 	srv := &http.Server{
 		Addr:    addr,
-		Handler: api.NewHandler(pool, blobs, cipher, verifier),
+		Handler: api.NewHandler(pool, blobs, cipher, verifier, handlerOpts...),
 		// Slow-client bounds: auth runs inside the handler, so unauthenticated
 		// connections must not be able to sit open indefinitely.
 		ReadHeaderTimeout: 10 * time.Second,
 		ReadTimeout:       time.Minute,
 		IdleTimeout:       2 * time.Minute,
 	}
-	// Memory-version retention (#476) and the deployment scheduler (plan 37):
-	// the two background sweeps this binary runs. Both are hosted here because
-	// this process already holds the pool and serves the routes they belong
-	// to, and because a deployment whose environments are all self_hosted runs
-	// no executor to put them in. Both are replica-safe: the retention
-	// statement is idempotent, and the scheduler's occurrence claim is a
-	// unique-index insert, so a second replica costs a duplicate query or a
-	// briefly-blocked loser and never a wrong answer.
+	// Memory-version retention (#476), the deployment scheduler (plan 37) and
+	// the dream runner (plan 41): the three background sweeps this binary
+	// runs. All are hosted here because this process already holds the pool
+	// and serves the routes they belong to, and because a deployment whose
+	// environments are all self_hosted runs no executor to put them in. All
+	// are replica-safe: the retention statement is idempotent, the scheduler's
+	// occurrence claim is a unique-index insert, and the runner re-reads each
+	// dream FOR UPDATE SKIP LOCKED — so a second replica costs a duplicate
+	// query, a briefly-blocked loser or a skipped row, never a wrong answer.
 	//
 	// Joined, for the reason the meter deregistration above is ordered: this
 	// defer is registered after `defer pool.Close()`, so LIFO drains the sweep
@@ -210,7 +265,13 @@ func run(ctx context.Context) error {
 	go func() { defer close(retentionDone); api.StartMemoryRetention(sweepCtx, pool) }()
 	schedulerDone := make(chan struct{})
 	go func() { defer close(schedulerDone); api.StartDeploymentScheduler(sweepCtx, pool, blobs, cipher) }()
-	defer func() { stopSweeps(); <-retentionDone; <-schedulerDone }()
+	dreamsDone := make(chan struct{})
+	if dreams.TickInterval > 0 {
+		go func() { defer close(dreamsDone); api.StartDreamRunner(sweepCtx, pool, blobs, cipher, dreams) }()
+	} else {
+		close(dreamsDone)
+	}
+	defer func() { stopSweeps(); <-retentionDone; <-schedulerDone; <-dreamsDone }()
 
 	errCh := make(chan error, 1)
 	go func() { errCh <- srv.ListenAndServe() }()

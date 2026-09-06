@@ -49,6 +49,80 @@ new directory and in-repo citations re-pointed in the moving PR (plan
 
 ---
 
+## Dreams — real `ant` CLI and `claude-haiku-4-5` against the runner (plan 41 slice 2, run 2026-09-06) — ✅ passed
+
+Plan §1 slice 2 asks that the runner be "accepted end to end with the real `ant` CLI and a real
+model over a seeded store and two transcripts", and §7's acceptance bullet for `retrieve` through
+`pending` → `running` → `completed` with the output store's memories read back. Run at 69784d6 on
+`feat/dreams-slice-2` against the owner's local compose stack, rebuilding **only** `controlplane`
+and `brain` from this checkout: the brain applied migration `0034_dreams.sql` (additive, already
+on `main`) on start, its container env is byte-identical to before the recreate, and the
+controlplane's differs by exactly the three empty `DREAM_*` keys the branch's compose adds — so
+the binary's defaults apply, a 30 s tick and a 2 h timeout. The executor kept its old image. Seed:
+one `cloud` environment, one agent on `claude-haiku-4-5` with the default toolset at
+`always_allow`, a store of four memories (a stale `/facts/deploy-target.md` naming staging-1, two
+overlapping tabs preferences, and an untouched `/facts/vendor-portal.md` carrying an `sk-test-…`
+example key), and two one-turn sessions — one correcting the deploy target to prod-2, one stating
+the tabs and imperative-mood preferences, each with a small `bash` call.
+
+- `create --input '{type: memory_store, …}' --input '{type: sessions, session_ids: […]}' --model
+  claude-haiku-4-5 --instructions 'Organize the store by topic and keep the user's own wording.'`
+  → `pending`, `session_id` null and `outputs` empty. `retrieve` every 10 s: `pending` at
+  07:37:13Z and 07:37:23Z, `running` at 07:37:34Z — one tick later — already carrying both
+  `session_id` and a one-element `outputs`, then `completed` at 07:38:34Z with `ended_at`
+  07:38:31.840346Z, 78 s after create. `usage` on the terminal dream: 7046 input, 2953 output,
+  37937 cache-read, 0 cache-creation.
+- While `running`, `sessions retrieve` on the pipeline session: `agent.id` `agent_dreamrunner`
+  version 1 named `dream`, its model the dream's, `environment_id` `env_dreamrunner`, the
+  consolidation system prompt inline, an `agent_toolset_20260401` at `always_allow` with
+  `web_fetch` and `web_search` disabled, a `coordinator` roster holding only itself, and four
+  `resources[]` — the cloned store `read_write` at `/mnt/memory/slice2-input-store-dream-<token>`,
+  and three file rows at `/mnt/session/uploads/dream/transcripts/{1,2}-<sesn>.md` and
+  `…/dream/INDEX.md`.
+- `agents retrieve --agent-id agent_dreamrunner` → `404 not_found_error`, "agent agent_dreamrunner
+  not found"; `environments retrieve --environment-id env_dreamrunner` the same. `files list`
+  showed the three rows named `dream/<drm>/1-<sesn>.md` (878 B), `dream/<drm>/2-<sesn>.md` (514 B)
+  and `dream/<drm>/INDEX.md` (682 B). `sessions:events send` on the pipeline session → `400
+  invalid_request_error`, "session is owned by dream drm_…".
+- The pipeline log, 66 events over 9 model turns and 18 tool calls (8 `read`, 5 `bash`, 5
+  `write`), far under the 300-turn stage cap. `INDEX.md` renders one line per transcript — seq,
+  session id, time, turn count, rendered bytes, and an elided first user message; a transcript
+  renders `# session <sesn>` and then `## user` / `## agent` / `## tool call: bash` / `## tool
+  result`. The session read both transcripts and all four memories, wrote `/workspace/dream/plan.md`
+  and `report.md`, and rewrote the store.
+- The output store, named `Slice2 input store (dream <token>)`: `/facts/deploy-target.md` (296 B)
+  now reads "the deploy target is now prod-2 … migrated off staging-1"; the two preference files
+  are merged into one `/prefs/code-style.md` (210 B) quoting the user's own wording;
+  `/facts/vendor-portal.md` is byte-identical to the seed with its example key intact — the
+  end-of-stage secret scan covers the versions the session wrote, not what the clone carried; and
+  `/MEMORY.md` (328 B) holds one resolving line per memory. The **input** store is untouched: the
+  same four paths with the same four `content_sha256`.
+- 30 s after `ended_at` the closing arm landed: the pipeline session `archived_at`
+  07:39:01.82991Z, `files list` carries no `dream/` row, and each of the three file ids the
+  session's `resources[]` still names answers `404 file … not found`. A send now → `400 … is
+  archived and read-only` — the dream gate replaced by the ordinary one. `list --status completed`
+  serves the dream.
+- A second dream, canceled the moment it turned `running` (created 07:40:19Z, `running` 07:40:34Z
+  with its own pipeline session): `cancel` → `canceled`, `ended_at` 07:40:34.945607Z, `archived_at`
+  still null. The next tick archived its session at 07:41:01.829965Z; the `dreams` row read through
+  `psql` carries `closed_at` at that same instant and `attempts` 1 — `closed_at` is not on the
+  wire. Its clone survives, holding the four seed memories unchanged.
+- `archive` on both → `archived_at` stamped with `status` left at `completed` and `canceled`;
+  `list` then omits them and `list --include-archived` serves both.
+
+Two things the run pinned that the code, not the plan, decides: the runner's own code logs nothing
+on the happy path — every `slog` call it makes is a path that went wrong or was skipped: two
+warnings in the tick loop (a database clock it could not read, a tick that did not finish), three
+errors in the start arm, and one debug line for a tick a saturated sweep budget skips. The one line
+a successful start does emit is not the runner's: creating the pipeline session records the shared
+committer's `session created with resources` at Info, as a wire create and a deployment fire do. So
+a dream's lifecycle is observable through the `dream.*` metrics and the wire, never `docker logs`;
+and an archived pipeline session still reads `status: idle`, the archive being `archived_at` rather
+than a status of its own. Slice 3 owns the four stages, the digest threads, the report and the 100-transcript
+run; slice 4 owns `update_existing` and its hold, still refused at create here.
+
+---
+
 ## The `unrestricted` address floor (plan 45, #570) — archived 2026-09-06, delivered in one PR
 
 `unrestricted` admitted every host *and* every address. A recording of the

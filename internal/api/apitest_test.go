@@ -75,7 +75,10 @@ func newTestServerWithCipher(t *testing.T, cipher secrets.Cipher) *tserver {
 	t.Helper()
 	pool := newPoolWithKey(t)
 	blobs := blobtest.Mem()
-	srv := httptest.NewServer(api.NewHandler(pool, blobs, cipher, nil))
+	// The dream runner is on for the shared test server: POST /v1/dreams
+	// refuses a create where no runner sweeps (plan 41 §4.7), and the disabled
+	// deployment has its own case.
+	srv := httptest.NewServer(api.NewHandler(pool, blobs, cipher, nil, api.WithDreamRunner()))
 	t.Cleanup(srv.Close)
 	return &tserver{t: t, url: srv.URL, pool: pool, blobs: blobs}
 }

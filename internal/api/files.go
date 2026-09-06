@@ -287,6 +287,26 @@ func (s *server) deleteFile(r *http.Request) (any, error) {
 	if s.blobs == nil {
 		return nil, errFilesUnavailable
 	}
+	// A dream's transcript rows are the runner's while the dream is open (plan
+	// 41 §4.5): the executor tolerates a deleted mount rather than failing the
+	// run, so a caller could otherwise blank a transcript mid-dream. The
+	// closing arm deletes them itself. A dream that closes between this read
+	// and the delete below simply lets the delete through, which is the right
+	// answer either way.
+	var dreamID *string
+	err := s.pool.QueryRow(ctx,
+		`SELECT d.id FROM files f
+		   LEFT JOIN dreams d ON d.id = f.dream_id AND d.closed_at IS NULL
+		  WHERE f.id = $1`, id).Scan(&dreamID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, errNotFound("file %s not found", id)
+	}
+	if err != nil {
+		return nil, err
+	}
+	if dreamID != nil {
+		return nil, errInvalid("file %s is owned by dream %s", id, *dreamID)
+	}
 	tag, err := s.pool.Exec(ctx, `DELETE FROM files WHERE id = $1`, id)
 	if err != nil {
 		return nil, err
