@@ -36,11 +36,17 @@ Scope decisions, settled with the owner on 2026-09-05:
    header joined every dream call (§2.1) — and the public API reference now documents the
    request and response *shapes* in full; the behavior around them is §2.7's list, which
    is why slice 0 exists. Building to the shapes is no longer building to a moving target.
-2. **A recording comes first (slice 0).** The owner holds research-preview access, so the
-   behaviors neither the docs nor the types state — the pipeline session's agent and
-   visibility, the output store's naming, the clone's version attribution, the error codes
-   at create — are recorded before slice 1 lands rather than inferred and corrected later.
-   §8.2 is the checklist; every entry it settles lands CONFIRMED, the rest INFERRED.
+2. **A recording comes first (slice 0) — attempted 2026-09-05, blocked.** The behaviors
+   neither the docs nor the types state — the pipeline session's agent and visibility,
+   the output store's naming, the clone's version attribution, the error codes at create —
+   were to be recorded before slice 1 landed. The attempt found the console account's
+   organizations not enrolled in the dreaming research preview: `/v1/dreams` answers the
+   gate 404 (route registered, `dreaming-2026-04-21` recognized by the beta validator,
+   organization not enrolled; archive `2026-09-05-dreams/batch1`). Enrollment is
+   requested. Until it lands, slices 1–4 proceed with every recording-settleable choice
+   registered INFERRED against tracker #78, and the recording, taken when the route
+   opens, converts them in one reconciliation PR (§8.1, §8.2; decision 9, amended
+   2026-09-06).
 3. **The pipeline runs on a platform-owned internal agent and environment, hidden from
    the lists.** No wire field names where a dream runs, and the reference's pipeline
    session is created by the reference, not by the caller. This platform creates one
@@ -79,10 +85,12 @@ that settles them (§8).
 
 **Five slices**, each its own PR, fragment, STATE.md movement and registry entries:
 
-0. **Recording.** No code. A real `ant beta:dreams` run against the reference over the
-   checklist in §8.2, filed in the private recordings archive under its own dated
-   directory with the archive's README conventions, and reconciled into §8.1's entries
-   before slice 1 opens. The SDK pin stays at v1.70.1 (§2.1).
+0. **Recording — blocked on enrollment.** No code. Attempted 2026-09-05 through the
+   archive's console lane: 45 probes filed as `2026-09-05-dreams/batch1`, every §8.2 item
+   unanswered because the organization is not enrolled. The checklist is taken when
+   `GET /v1/dreams` answers the organization, appended to the same directory, and
+   reconciled into §8.1 by a follow-up PR that converts what it settles to CONFIRMED and
+   fixes what differs. No slice waits on it. The SDK pin stays at v1.70.1 (§2.1).
 1. **The surface and the storage.** Migration `0034`, `PrefixDream`, the five routes,
    create-time validation, the list, and the two lifecycle actions over a state machine
    with no runner behind it: a created dream stays `pending` until slice 2 lands, and
@@ -146,8 +154,10 @@ of their own, so a claim that rests on them alone is dated, and a claim the spec
 types can also carry cites those; `anthropic-sdk-go` at tag v1.70.1 (`betadream.go`,
 `beta.go`, `internal/requestconfig/requestconfig.go`) and its `scripts/mock-spec.json.gz`
 at v1.71.0; `anthropic-cli` at tag v1.30.0 (`pkg/cmd/betadream.go`, `pkg/cmd/cmd.go`).
-Slice 0's recording is filed in the private archive and is the source for everything
-§2.7 lists as unobserved.
+Slice 0's recording, once taken, is the source for the recording-settleable items §2.7
+lists as unobserved; until then those items stay INFERRED (§8.1), the pipeline's design
+stays *ours* whatever the recording shows (§2.7's last sentence, §3), and the one public
+observation §2.7 names is cited where it bears.
 
 ### 2.2 Resources and paths
 
@@ -295,6 +305,18 @@ files. §8.2 turns each into a recording item. One more is a harness fact the re
 will not reveal by any probe: the pipeline's stages, prompts, and rendering — §3 is this
 platform's own design, marked *ours*.
 
+One official artifact shows a real run, and it is the only observed evidence a public
+sweep found (2026-09-06; 33 sources checked, one with bytes): the
+`anthropics/claude-quickstarts` knowledge-wiki notebook keeps two dreams' saved output
+(commit 40a7a14, 2026-08-03). It shows four things: the pipeline session's events are
+listable by the caller's own key at `GET /v1/sessions/{session_id}/events` while the
+dream runs; the session spawns **one thread per input session** (`session.thread_created`
+— six for six inputs, four for four); `agent.tool_use` events carry `input.file_path`;
+and `usage.output_tokens` climbs while the dream runs (178k over 18 minutes for six
+sessions; the run's model is not recorded — the notebook's default is `claude-sonnet-5`), with
+`outputs[]` read after `completed`. Everything else above
+stays unobserved — the notebook redacts its output ids.
+
 ---
 
 ## 3. The pipeline — what the session is told to do
@@ -397,7 +419,10 @@ the paths, counts and the caller's `instructions` substituted in.
    duplicates or contradicted.
 2. **Digest.** The coordinator spawns one `self` thread per batch of **8** transcripts
    (≤ 13 for 100; the platform caps live threads at 25, `internal/brain/delegate.go:40`)
-   and waits on them. Each thread reads its batch and writes **one digest per batch**,
+   and waits on them — the reference's own fan-out, visible in the quickstart notebook's
+   thread counts (§2.7), is one thread per input session; batching is this platform's
+   choice, so a hundred transcripts fit one wave under the cap. Each thread reads its
+   batch and writes **one digest per batch**,
    `/workspace/dream/digests/<batch>.md`, ≤ 4 KiB, in a fixed schema — per transcript a
    description line and `outcome: success|partial|fail|uncertain`, then the batch's
    *Preference signals* / *Reusable knowledge* / *Failures and what to do differently* /
@@ -1265,16 +1290,17 @@ running pipeline session answers (item 2).
 The INFERRED entries' tracker is **#78**, the recording tracker, which stays open and
 already carries the registry's other unsettled inferences; each entry therefore carries
 the parenthetical `tools/registrycheck` requires of an entry sharing a tracker, naming
-its recording item. Slice 0 converts the ones it settles before slice 1 opens, so most
-land CONFIRMED on arrival. The rewritten `:135` entry keeps `*Tracked: #475*` only while
+its recording item. Slice 1 lands them INFERRED; the recording, when enrollment allows
+it (§1 slice 0), converts the ones it settles in a reconciliation PR. The rewritten `:135` entry keeps `*Tracked: #475*` only while
 `#475` is open: the close-out PR rewrites the pointer as a trailing `landed for #475`
 clause — the provenance form the guard accepts while the issue is still open
 (`tools/registrycheck/registrycheck.go:395-398` rejects a live tracker on a closed issue,
 `:412-416` a `(delivered)` on an open one) — and #475 is closed after that PR merges (§9).
 
-### 8.2 Recording checklist (slice 0; `ant --format raw` on every call, the archive's recorder conventions)
+### 8.2 Recording checklist (slice 0, blocked on enrollment as of 2026-09-06; the archive's console-lane recorder, or `ant --format raw` on a key lane)
 
-In priority order — each settles entries above:
+The 2026-09-05 attempt settled only that the route is registered and gated
+(`2026-09-05-dreams/FINDINGS.md`). In priority order — each settles entries above:
 
 1. A completed dream's `session_id`: `GET /v1/sessions/{id}` — its `agent` (id, version,
    model, system, tools, multiagent), its `environment_id`, its `resources[]`; then `GET
@@ -1366,7 +1392,14 @@ states the alternative it beat.
    `MODEL_PROVIDERS_PATH` and a `Registry` for `Describe` alone — a new cross-process
    coupling for a check `POST /v1/agents` does not make either; if it is ever wanted it is
    an issue for both surfaces at once.
-9. **Recording first** (slice 0). **Settled 2026-09-05**; the checklist is §8.2.
+9. **Recording first** (slice 0). **Settled 2026-09-05, amended 2026-09-06**: the
+   organization is not enrolled in the preview, so the recording is taken when it is,
+   and slices 1–4 proceed meanwhile with the recording-settleable choices INFERRED
+   (§8.1); the checklist is §8.2. Rejected: waiting — the shapes are the SDK's and the
+   spec's, and every inference is a status code, a name, a create-time validation rule
+   or a visibility rule: a refuted one costs a registry rewrite and a bounded fix in the
+   handler that holds it, or stays as a divergence registered as ours where this
+   platform's design decides it (§9).
 10. **The pin stays at v1.70.1** (§2.1): v1.71.0 changes nothing this plan reads.
 11. **`speed` is accepted, echoed and ignored**, as it is for agents. Rejected: a 400 on
     `fast` — the reference rejects "invalid combinations", and which combinations are
@@ -1415,6 +1448,17 @@ states the alternative it beat.
 
 ### Risks, and what bounds each
 
+- **Building ahead of the recording.** Fifteen wire-visible choices are INFERRED
+  (§8.1) while enrollment is pending: status codes and error types at create, the input
+  cardinality rule, what `parseModel` and the `speed` check refuse, the output store's
+  name and clone attribution, the hidden rows' and the transcripts' visibility, and
+  what a canceled or running pipeline session answers. A refuted one costs its registry
+  rewrite and a fix inside the handler or arm that holds it — a status, a message, a
+  validation branch, a name — and where the choice is this platform's design rather
+  than the reference's (the hidden agent, the transcripts as files, the read-only
+  session), the entry moves to the CONFIRMED section as ours instead. What the
+  recording cannot move: the shapes, which are the SDK's and the spec's, and the
+  pipeline's design (§3).
 - **The model window.** A batch of eight 24 KiB transcripts is about 50k tokens of tool
   results in one thread; the merge stage reads up to 13 digests of 4 KiB — 52 KiB, one
   per batch — plus the store files `plan.md` routes it to, read through the mount one
