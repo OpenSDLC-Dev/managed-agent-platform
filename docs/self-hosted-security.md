@@ -180,17 +180,77 @@ a manager the image does not carry is a `session.error` with reason
 `manager_missing` rather than an install. The `debian:stable-slim` default
 carries `apt-get` and none of the other five.
 
-One caveat if a package entry embeds a credential — a private registry URL such
-as `pip: ["git+https://user:token@host/repo"]`. The install runs it in the
-sandbox, so the credential is in that process's argv: a same-sandbox agent can
-read it from `/proc` while the install runs, and on **Kubernetes** the argv is
-part of the exec request the apiserver audit log records for `pods/exec`. The
-platform keeps the credential out of the durable session state — the install's
-`session.error` message has its URLs redacted, and the `/tmp` sentinel stores a
-digest, not the entries — but it cannot keep it out of the argv while a package
-manager needs it there. Prefer high-entropy deploy tokens over reusable
-passwords, and be aware of the exec-audit exposure; injecting credentials out of
-band (netrc / `.npmrc`) so they never reach argv is tracked in #599.
+A package entry may embed a credential — a private registry URL such as
+`pip: ["git+https://user:token@host/repo"]`, or the same nested in pip's
+`name @ url` or npm's `name@url` syntax — and it is **not** put on the install's
+command line. The executor lifts the credential out of the entry, writes it into
+the file that manager's fetcher reads (a netrc for pip, npm and go, whose
+fetches go through pip's own client or git; npm's per-host pair as well for
+npm), points that one install's `HOME` at a scratch directory holding them, and
+hands the manager a credential-free URL. So the credential is not in the process
+argv, and on **Kubernetes** it is therefore not in the exec request the
+apiserver audit log records for `pods/exec` — the exposure that reached cluster
+operators, outside the session entirely. The `packages_digest` on the install's
+`session.error` is taken over the credential-free entries too, so that event —
+readable with an *environment* key, while the config it digests needs a
+*management* key — is no longer an offline oracle for a weak credential. (The
+`/tmp` sentinel inside the sandbox deliberately still digests the list as
+written: that is what makes a rotated credential a changed list rather than the
+same one with an exhausted retry count, and it never leaves the sandbox.)
+
+The scratch directory is removed twice over: by the install command's own
+`trap … EXIT` when the group ends of its own accord, and by the executor after
+the install returns — which is the one that matters when an install **times
+out**, since both backends kill it with SIGKILL to its process group and no trap
+survives that. Neither survives the executor itself dying in between; the
+directory then lives as long as the sandbox does.
+
+What this does not make private is the **sandbox itself**. An install needs root,
+and the agent's own tool calls run in that same sandbox as the same user, so the
+credential file is exactly as readable there as the argv it replaced, for the
+length of the install — the files are written `0600`, which keeps out any *other*
+user the image carries but not the one the agent already is. The sandbox is one trust domain; prefer high-entropy
+deploy tokens over reusable passwords, and scope them to the repository or
+registry path the session needs.
+
+Six entry shapes keep the exposure they had, unchanged rather than newly created
+— **and for these the digest is not stripped either**, so both halves of the old
+exposure remain: a credential in a **query parameter** (`?token=…`), which
+nothing can tell from an ordinary parameter; a **transport that reads neither
+file** — `ssh` takes no password from a URL at all, and `hg`, `svn` and `bzr`
+authenticate from their own stores; a **manager that reads neither file**, which
+is `apt`, `cargo` and `gem` (their credential stores are `auth.conf.d`,
+`credentials.toml` and `~/.gem/credentials`); **one hostname the list disagrees
+about**, since a netrc line matches the hostname alone, case-insensitively, and
+is therefore sent to every URL in the list naming that host — so two entries
+carrying different credentials would send one service the other's secret, and a
+second URL naming the host with *no* credential (another port, or plain `http`)
+would start receiving one it never had; a value a
+**bare netrc cannot carry** — whitespace, a quote, a backslash, a `#`, a control
+character (a netrc *may* be quoted, and this deliberately does not, because
+Python's `netrc` module did not strip quotes before 3.11 and pip reads the file
+through it: on an image shipping Python 3.10 a quoted file makes pip send the
+quotes); and a userinfo **Go's URL grammar refuses** where a package manager
+would not, such as an unescaped `^` or a malformed `%`. All but the first are
+named in a warn line rather than left silent.
+
+Two more costs of the `HOME` swap, for the one install that carries a
+credential: the image's own `~/.netrc` and `~/.npmrc` are not read, and neither
+is anything else rooted there — `~/.config/pip/pip.conf` and `$CARGO_HOME`
+included — so an image that bakes a private index into pip.conf loses it for
+that install; and every `HOME`-rooted cache is cold.
+
+One shape is made worse, and it is the only one: **npm 6 and older**. That npm
+sends no credential for a non-registry fetch from any `.npmrc` key (measured):
+its fetcher derives auth from the configured registry and sends it only where
+the host matches, so a credentialed tarball URL now authenticates with nothing
+and fails where it used to succeed. npm 7 and later are unaffected, and there is
+no `.npmrc` shape that restores it — an `_authToken` or `username`/`_password`
+for the tarball host is exactly what npm 6 will not send. So the fallbacks are
+elsewhere: publish the package to a registry npm is configured for, where npm 6
+authenticates normally; upgrade npm; or keep the credential in the entry by
+using a shape this pass does not lift — and accept the exec-audit exposure that
+then remains.
 
 Two things do degrade silently rather than fail, both about file **modes** and
 neither about the correctness of a file's contents. A write preserves the target's

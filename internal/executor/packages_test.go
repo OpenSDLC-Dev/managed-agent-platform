@@ -408,7 +408,7 @@ func TestAnAssembledCommandTooLongForExecIsRefusedTerminally(t *testing.T) {
 			goMgr = m
 		}
 	}
-	if got := len(goMgr.command(entries)); got <= maxInstallCommandBytes {
+	if got := len(goMgr.command(entries, "")); got <= maxInstallCommandBytes {
 		t.Fatalf("test setup: assembled command %d not over the %d limit; add entries", got, maxInstallCommandBytes)
 	}
 
@@ -470,6 +470,27 @@ func TestAnInvalidEntryIsRefusedWithoutRunningAnything(t *testing.T) {
 	}
 	if rs, _ := errs[0]["retry_status"].(map[string]any); rs["type"] != "exhausted" {
 		t.Errorf("retry_status = %+v, want exhausted from the first", rs)
+	}
+}
+
+// TestARefusedListIsOneEventHoweverManyToolCallsFollow: a refused list emits
+// and returns without writing a sentinel record, so no pass after the first
+// finds one. The dedupe has to hold anyway — a session making a hundred tool
+// calls must not accumulate a hundred identical exhausted errors, which is what
+// treating "no record" as "the list changed" would do.
+func TestARefusedListIsOneEventHoweverManyToolCallsFollow(t *testing.T) {
+	sb := &fakeSandbox{}
+	h := newHarness(t, sb)
+	h.setPackages(t, map[string][]string{"pip": {"--index-url=http://evil.example/simple"}})
+
+	for i := 1; i <= 3; i++ {
+		h.suspend(t, writeUse(fmt.Sprintf("f%d.txt", i), "x"))
+		h.stepOnce(t)
+	}
+
+	errs := h.packageErrors(t)
+	if len(errs) != 1 {
+		t.Fatalf("package errors = %d, want 1 for three tool calls: %+v", len(errs), errs)
 	}
 }
 

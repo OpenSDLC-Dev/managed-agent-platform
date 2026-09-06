@@ -49,6 +49,147 @@ new directory and in-repo citations re-pointed in the moving PR (plan
 
 ---
 
+## A package credential out of argv (plan 46, #599) — archived 2026-09-06, delivered in one PR
+
+Plan 40 left two residuals when it closed the durable surface, and #599 tracked
+them: a credential embedded in a `config.packages` entry rode in the assembled
+install command, and `packages_digest` was an unsalted hash of the entries.
+
+The design rests on which file each fetcher actually reads, so that was measured
+rather than recalled — a local origin demanding Basic auth, recording what
+arrived, on 2026-09-06. `git` 2.47.3 authenticates from `$HOME/.netrc` with no
+credential helper configured, on the retry after the 401; pip 25.0.1's own
+fetcher sends the same header from the same file on its **first** request; npm
+11 reads no netrc at all and sends it from `$HOME/.npmrc`'s per-host `username`
+and base64 `_password`. `always-auth`, which npm's older documentation asks for
+beside them, is written by nothing here: npm 11 warns that the key is unknown
+and authenticates without it, and npm 6 sends no credential for a non-registry
+fetch with or without it — which also makes npm 6 the one shape this change
+makes worse, and the security guide says so. Two properties of the netrc format were
+measured with them, because both decide what the writer may emit: a `machine`
+line matches on the hostname alone, port excluded, and a value *may* be
+double-quoted, with `\"` and `\\` honoured inside the quotes. The writer
+nevertheless must not quote, for a reason curl could not have shown and the
+Claude review did.
+
+The obvious alternative — leave the credential out of the entry and let the
+gate's egress substitution put it in from a vault — was rejected on evidence
+rather than taste: the gate substitutes only on plain HTTP, where the platform
+holds the request plaintext, and an HTTPS request rides through as an opaque
+CONNECT tunnel (#166). A package registry is HTTPS, so the placeholder would
+reach the origin literally.
+
+What the change does **not** close is stated in the security guide rather than
+implied: an install needs root and the agent's tool calls run in that same
+sandbox as the same user, so the materialized file is exactly as readable there
+as the argv it replaced, for the length of the install. The sandbox is one trust
+domain. Six entry shapes also keep the exposure they had — a credential in a
+query parameter, a transport that reads neither file, a manager that reads
+neither (`apt`, `cargo`, `gem`), a hostname two entries disagree about, a value a
+bare netrc cannot carry, and a userinfo Go's URL grammar refuses — and all but
+the first are named in a warn line rather than left silent. What the change does close is everything
+outside the sandbox for every other shape: the Kubernetes apiserver's audit log,
+whose readers are cluster operators and whose records outlive the session, and
+the digest oracle an environment key could read while the config it digests
+needs a management key.
+
+**The reviews rewrote four of the decisions, and the sharpest finding was that
+the fix did not fix the common case.** The first draft parsed each entry as a
+URL — but pip's PEP 508 direct reference (`private-lib @ git+https://…`) and
+npm's alias (`private-lib@https://…`) nest the URL inside the entry, both are
+syntax their managers accept, and `url.Parse` of the whole entry sees neither.
+Those credentials went on reaching argv with no warning at all. The scan is a
+regexp now, of the shape the package's own message redactor already uses for the
+same job on the way out.
+
+Three more, each a defect in the change rather than in what it replaced. Taking
+the digest over the stripped list closed the oracle and broke the sentinel's
+"until the list changes" contract: a rotated credential digested the same as the
+broken one it replaced, so a list that had spent its three attempts would never
+install again — there are two digests now, and only the published one is
+stripped. A netrc `machine` line matches the hostname alone, so two entries
+naming one host with different credentials collapsed into whichever was written,
+and one service would have been sent the other's secret; a host two entries
+disagree about now keeps both inline. And a transport that reads neither file —
+`git+ssh`, `hg+https`, `svn+https` — had its credential lifted into a file
+nothing would read, breaking an install that worked.
+
+The cleanup was claimed on every exit path and was not on any of three. A
+timed-out install is SIGKILLed by process group on both backends, which no EXIT
+trap survives; a write or an exec can fail before the shell starts; and — found
+by writing the test the reviews showed was missing, which runs the assembled
+command through a real shell instead of asserting that it contains a trap — bash
+3.2 replaces a subshell with its last command and takes the EXIT trap with it,
+where bash 5 does not. The group ends on `exit "$?"` now, and the executor asks
+for the directory again after the install returns.
+
+**The Claude pass then found a regression no measurement of ours could have
+seen, because it was in a parser this platform does not run.** The writer quoted
+every netrc value, which curl reads correctly — and pip's own fetcher does not
+go through curl. It goes through Python's `netrc` module, and that module did
+not strip quotes before 3.11: python 3.10.21 hands back `"bot"` and `"s3cr3t"`
+where 3.12.14 hands back `bot` and `s3cr3t`, so pip would have sent the quotes
+and every credentialed direct-URL install on an Ubuntu 22.04 or Debian bullseye
+image would have started failing. Values are written bare now, and a credential
+a bare value cannot carry keeps its entry.
+
+Five more from the same pass, each a defect in the change. The scheme allowlist
+asked the wrong half of the question: `apt`, `cargo` and `gem` read their own
+credential stores, so an https credential in one of their entries was being
+lifted into a netrc none of them reads — the same break the allowlist exists to
+prevent, one level up. A netrc matches its machine name case-insensitively and
+ignores a trailing dot, so `Registry.Example` and `registry.example.` slipped
+past the one-host-one-credential check as two hosts and curl would have sent one
+service the other's secret. An entry whose authority is empty (`https://u:p@/x`)
+wrote a nameless `machine` line, which makes the *whole file* unparseable for
+pip and drops every other host's credential with it. A userinfo Go's URL grammar
+refuses — an unescaped `^`, a malformed `%` — was dropped by a bare `continue`,
+so that credential stayed in argv with no warning at all, the silent exception
+the design exists to avoid. And publishing the stripped digest silenced the
+event dedupe across a rotation: two lists differing only in a credential publish
+one digest, so the corrected credential's failures read as repeats of the broken
+one's and a client watching would have seen nothing. The executor says the list
+changed now, and a changed list is emitted without consulting the history.
+
+**A third round, on the PR itself, found the two the first two had left.** The
+one-credential-per-host rule compared credentials to credentials, and so never
+saw a list that names one host both with a credential and without one: only the
+credentialed URL entered the conflict scan, no disagreement was found, and the
+netrc line written for it would have been sent to the uncredentialed URL as well
+— preemptively, since pip sends Basic from a netrc on the first request rather
+than on a 401 — putting a secret meant for one port at a service on another, or
+over plain `http`. That is a widening of exactly the kind the rule exists to
+refuse. The scan reads every URL in the list now, not only the ones carrying a
+userinfo, and an absent credential counts as a disagreement; a URL carrying its
+own is unaffected, because its own wins.
+
+The second was in the dedupe flag the round before had added. It read a
+*missing* sentinel record as "the list changed" — but the two terminal refusals,
+an invalid entry and an over-long assembled command, emit and return without
+writing a record at all, so no pass after the first would find one. Each tool
+call would have appended another identical exhausted `session.error`, without
+bound, for the life of the sandbox. A change now means a record whose digest
+differs; with no record there is nothing to have changed from, and the dedupe
+query is the right answer.
+
+CodeRabbit found the same dedupe defect independently, and three more. Two were
+documentation telling a reader something the code contradicts: the security
+guide offered an npm 6 workaround — move the credential into the image's own npm
+configuration — that the paragraph's own measurement rules out, since npm 6
+derives auth from the configured registry and sends it to no other host, so no
+`.npmrc` key restores a lifted tarball credential. And the credential files were
+landing `0644`, because a zero `FileWrite.Mode` means `0644`; they are `0600`
+now, which does not close the same-user read the design concedes but does keep
+out any other user the image carries. The third was a test that could not fail —
+it compared SHA-256 over two different strings, which always differ — standing
+in for the sentinel's "until the list changes" contract. It is driven end to end
+now: a credentialed list fails its three attempts, the credential is rotated,
+and the fourth install runs against a fresh attempt count, both lists assembling
+the same credential-free command so that only the sentinel can tell them
+apart.
+
+---
+
 ## Dreams — real `ant` CLI and `claude-haiku-4-5` against the runner (plan 41 slice 2, run 2026-09-06) — ✅ passed
 
 Plan §1 slice 2 asks that the runner be "accepted end to end with the real `ant` CLI and a real
