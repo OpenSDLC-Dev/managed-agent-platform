@@ -52,7 +52,10 @@ new directory and in-repo citations re-pointed in the moving PR (plan
 ## One resolution per dial (plan 44, #601) — archived 2026-09-06, delivered in one PR
 
 Every outbound connection this platform makes to a customer-supplied or
-agent-declared name now goes through one dialler, `dialguard.Dialer`: it
+agent-declared name — a smaller set than every outbound connection, because a
+repository clone's host is fixed to `github.com` by the create-time grammar and
+the web backends dial an operator-configured reader rather than the agent's
+URL — now goes through one dialler, `dialguard.Dialer`: it
 resolves the name **once**, holds every address that came back to the
 address floor before any connect, and dials those addresses. Five call sites
 moved onto it — the per-session gate, `internal/mcp`'s two clients behind

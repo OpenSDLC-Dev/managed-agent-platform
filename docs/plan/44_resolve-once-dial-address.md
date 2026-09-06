@@ -28,6 +28,17 @@ customer-supplied or agent-declared name resolves that name exactly once, judges
 the addresses that came back, and connects to those addresses — never to a name
 a lower layer resolves again on its own.
 
+The qualifier is the whole of it, and it is a smaller set than "every outbound
+connection": the platform's other dials do not carry a name a customer or an
+agent chose, and this plan does not widen them. A repository clone's host is
+pinned to the literal `github.com` by the create-time grammar, the customer
+supplying the path below it; the web backends hand the agent's URL to an
+operator-configured reader that fetches it on its own infrastructure rather than
+dialling it here; and model providers, object storage and the database are the
+operator's own coordinates. This is the floor under the names a session can
+choose, not a universal egress check — the registry's dial-address-floor entry
+makes the same distinction about the same two neighbours.
+
 Today the resolution happens inside `net.Dialer`, below every decision the
 platform makes. `admit` sees a name; `Substitute` sees a name; the address
 appears for the first time in the `Control` hook, one syscall before `connect`,
