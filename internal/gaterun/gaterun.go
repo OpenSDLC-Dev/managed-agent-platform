@@ -34,7 +34,7 @@ const tracerName = "github.com/OpenSDLC-Dev/managed-agent-platform/internal/gate
 // left unset — the seam is diagnostic-only, and credential_host_unreachable_error
 // is a config-conflict event the controlplane emits when rendering this config,
 // not something the gate reports. Everything else takes gate.New's defaults,
-// the address floor under an MCP-only dial included — the gate offers no seam
+// the address floor under every dial but an operator-vouched one included — the gate offers no seam
 // for its dialer, so this conversion cannot lose it.
 func Convert(cfg *gateconfig.Config) gate.Config {
 	creds := make([]egress.Credential, 0, len(cfg.Credentials))
