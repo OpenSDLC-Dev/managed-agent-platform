@@ -15,7 +15,7 @@ const (
 	MaxTokenBytesForTest   = maxTokenBytes
 	MaxSubjectBytesForTest = maxSubjectBytes
 	ClockSkewLeewayForTest = clockSkewLeeway
-	MaxRoleValuesForTest   = maxRoleValues
+	MaxClaimValuesForTest  = maxClaimValues
 	MaxClaimDepthForTest   = maxClaimDepth
 	MaxProfileBytesForTest = maxProfileBytes
 )

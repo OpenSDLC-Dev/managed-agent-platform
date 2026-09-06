@@ -103,7 +103,7 @@ func TestClaimAtDottedPathOnly(t *testing.T) {
 			"resource_access": {"console": {"roles": ["platform-viewer"]}}
 		}`)
 		roles := map[string]Role{"platform-viewer": RoleViewer, "platform-admin": RoleAdmin}
-		got := strongestRole(roleValues(claimAt(claims, "resource_access.console.roles")), roles)
+		got := strongestRole(claimValues(claimAt(claims, "resource_access.console.roles")), roles)
 		if got != RoleViewer {
 			t.Errorf("role from the shadowed Keycloak claim = %q, want %q — the flat "+
 				"claim escalated the user to their own role", got, RoleViewer)
@@ -136,7 +136,7 @@ func TestClaimAtURINamespacedName(t *testing.T) {
 	t.Run("https namespaced claim resolves whole", func(t *testing.T) {
 		t.Parallel()
 		claims := claimsXDecode(t, `{"https://corp.example/roles": ["platform-admins"]}`)
-		got := roleValues(claimAt(claims, "https://corp.example/roles"))
+		got := claimValues(claimAt(claims, "https://corp.example/roles"))
 		if len(got) != 1 || got[0] != "platform-admins" {
 			t.Errorf("claimAt = %#v, want the namespaced claim read as one key", got)
 		}
@@ -146,7 +146,7 @@ func TestClaimAtURINamespacedName(t *testing.T) {
 		t.Parallel()
 		claims := claimsXDecode(t, `{"https://corp.example/roles": ["platform-admins"]}`)
 		roles := map[string]Role{"platform-admins": RoleAdmin}
-		if got := strongestRole(roleValues(claimAt(claims, "https://corp.example/roles")), roles); got != RoleAdmin {
+		if got := strongestRole(claimValues(claimAt(claims, "https://corp.example/roles")), roles); got != RoleAdmin {
 			t.Errorf("role = %q, want %q — an Auth0-shaped deployment must not silently deny everyone", got, RoleAdmin)
 		}
 	})
@@ -159,7 +159,7 @@ func TestClaimAtURINamespacedName(t *testing.T) {
 			"https://corp.example/roles": ["viewer-value"],
 			"https://corp": {"example/roles": ["admin-value"]}
 		}`)
-		got := roleValues(claimAt(claims, "https://corp.example/roles"))
+		got := claimValues(claimAt(claims, "https://corp.example/roles"))
 		if len(got) != 1 || got[0] != "viewer-value" {
 			t.Errorf("claimAt = %#v, want the flat value: a URI-shaped name never walks", got)
 		}
@@ -288,7 +288,7 @@ func TestStringClaim(t *testing.T) {
 	}
 }
 
-func TestRoleValues(t *testing.T) {
+func TestClaimValues(t *testing.T) {
 	t.Parallel()
 	claims := claimsXDecode(t, `{
 		"scalar": "eng",
@@ -317,56 +317,56 @@ func TestRoleValues(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			got := roleValues(claimAt(claims, tc.claim))
+			got := claimValues(claimAt(claims, tc.claim))
 			if !slices.Equal(got, tc.want) {
-				t.Errorf("roleValues(%q) = %#v, want %#v", tc.claim, got, tc.want)
+				t.Errorf("claimValues(%q) = %#v, want %#v", tc.claim, got, tc.want)
 			}
 		})
 	}
 }
 
-func TestRoleValuesCap(t *testing.T) {
+func TestClaimValuesCap(t *testing.T) {
 	t.Parallel()
 	const total = 200
 	raw := make([]any, total)
 	for i := range raw {
 		raw[i] = fmt.Sprintf("r%d", i)
 	}
-	got := roleValues(raw)
-	if len(got) != maxRoleValues {
-		t.Fatalf("roleValues over %d elements returned %d values, want the cap %d",
-			total, len(got), maxRoleValues)
+	got := claimValues(raw)
+	if len(got) != maxClaimValues {
+		t.Fatalf("claimValues over %d elements returned %d values, want the cap %d",
+			total, len(got), maxClaimValues)
 	}
 	// The cap reads a prefix, in document order, rather than an arbitrary subset.
 	for i, v := range got {
 		if want := fmt.Sprintf("r%d", i); v != want {
-			t.Fatalf("roleValues[%d] = %q, want %q", i, v, want)
+			t.Fatalf("claimValues[%d] = %q, want %q", i, v, want)
 		}
 	}
 }
 
-// TestRoleValuesCapCountsElementsNotStrings is the cap's real question, and the
+// TestClaimValuesCapCountsElementsNotStrings is the cap's real question, and the
 // two readings differ in the direction that matters. Counting only the strings
 // COLLECTED would let a claim pad itself past the limit with values that cost a
 // loop iteration each and are not strings — nulls here — and still be read at
 // any depth: the cap defeated by construction, with the padded-past value being
 // the one that grants admin. Counting elements EXAMINED bounds the work as
 // stated, and where the two disagree it drops a role rather than granting one.
-func TestRoleValuesCapCountsElementsNotStrings(t *testing.T) {
+func TestClaimValuesCapCountsElementsNotStrings(t *testing.T) {
 	t.Parallel()
 
-	raw := make([]any, 0, maxRoleValues+1)
-	for range maxRoleValues {
+	raw := make([]any, 0, maxClaimValues+1)
+	for range maxClaimValues {
 		raw = append(raw, nil)
 	}
 	raw = append(raw, "platform-admins")
 
-	if got := roleValues(raw); len(got) != 0 {
-		t.Fatalf("roleValues = %q, want nothing: the string sits past the cap", got)
+	if got := claimValues(raw); len(got) != 0 {
+		t.Fatalf("claimValues = %q, want nothing: the string sits past the cap", got)
 	}
 	// The control: one fewer pad and the same value is inside the cap and read.
-	if got := roleValues(raw[1:]); len(got) != 1 || got[0] != "platform-admins" {
-		t.Fatalf("roleValues = %q, want the value that sits inside the cap", got)
+	if got := claimValues(raw[1:]); len(got) != 1 || got[0] != "platform-admins" {
+		t.Fatalf("claimValues = %q, want the value that sits inside the cap", got)
 	}
 }
 
@@ -376,9 +376,9 @@ func TestRoleValuesCapCountsElementsNotStrings(t *testing.T) {
 // role map entry for "admin".
 func TestSpaceDelimitedScalarIsOneValue(t *testing.T) {
 	t.Parallel()
-	got := roleValues("eng admin")
+	got := claimValues("eng admin")
 	if want := []string{"eng admin"}; !slices.Equal(got, want) {
-		t.Errorf("roleValues(%q) = %#v, want %#v — the scalar was split on spaces", "eng admin", got, want)
+		t.Errorf("claimValues(%q) = %#v, want %#v — the scalar was split on spaces", "eng admin", got, want)
 	}
 	if r := strongestRole(got, map[string]Role{"admin": RoleAdmin, "eng": RoleViewer}); r != RoleNone {
 		t.Errorf("strongestRole over the unsplit scalar = %q, want %q — a space-delimited "+
@@ -441,6 +441,56 @@ func TestStrongestRoleUnmappedDrop(t *testing.T) {
 			t.Parallel()
 			if got := strongestRole(tc.values, tc.roles); got != tc.want {
 				t.Errorf("strongestRole(%v) = %q, want %q", tc.values, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestMappedWorkspaces is strongestRole's twin for membership (plan 42 §6.2):
+// the same drop-the-unmapped rule, and a set rather than a maximum.
+func TestMappedWorkspaces(t *testing.T) {
+	t.Parallel()
+	const wsB = "wrkspc_0123456789abcdefghjkmnpq"
+	m := map[string]string{"tenant-a": "default", "tenant-b": wsB, "also-b": wsB}
+
+	for _, tc := range []struct {
+		name   string
+		values []string
+		m      map[string]string
+		want   []string
+	}{
+		{name: "one mapped value", values: []string{"tenant-a"}, m: m, want: []string{"default"}},
+		{
+			// The safe reading, and the reason for it: every real IdP sends groups
+			// a deployment does not map, so refusing one would deny every human.
+			// Dropping cannot widen anything — a value nobody mapped names no
+			// workspace.
+			name:   "an unmapped value drops rather than refusing the token",
+			values: []string{"all-employees", "tenant-a"},
+			m:      m,
+			want:   []string{"default"},
+		},
+		{
+			name:   "two groups naming one workspace yield it once",
+			values: []string{"tenant-b", "also-b"},
+			m:      m,
+			want:   []string{wsB},
+		},
+		{
+			name:   "claim order is kept",
+			values: []string{"tenant-b", "tenant-a"},
+			m:      m,
+			want:   []string{wsB, "default"},
+		},
+		{name: "nothing mapped", values: []string{"unknown", "other"}, m: m},
+		{name: "no values", m: m},
+		{name: "empty map", values: []string{"tenant-a"}, m: map[string]string{}},
+		{name: "nil map", values: []string{"tenant-a"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := mappedWorkspaces(tc.values, tc.m); !slices.Equal(got, tc.want) {
+				t.Errorf("mappedWorkspaces(%v) = %#v, want %#v", tc.values, got, tc.want)
 			}
 		})
 	}

@@ -29,8 +29,14 @@ type Verifier struct {
 	emailClaim string
 	nameClaim  string
 	roleMap    map[string]Role
-	now        func() time.Time
-	keys       *keySet
+	// workspacesClaim is "" when this deployment derives no membership from
+	// claims, which is a state the identity lane reads (WorkspacesConfigured)
+	// rather than a defaulted name — unlike the three claim names above, whose
+	// absence takes a default.
+	workspacesClaim string
+	workspaceMap    map[string]string
+	now             func() time.Time
+	keys            *keySet
 }
 
 // New builds the verifier, performing every network call a misconfiguration
@@ -96,6 +102,23 @@ func New(ctx context.Context, cfg Config) (*Verifier, error) {
 		}
 		roleMap[value] = role
 	}
+	// The membership map is validated and copied for the same two reasons, and a
+	// third of its own: an id of the wrong shape can match no workspace row, so
+	// accepting one would turn a typo into a per-request denial nothing explains.
+	workspacesClaim := strings.TrimSpace(cfg.WorkspacesClaim)
+	workspaceMap := make(map[string]string, len(cfg.WorkspaceMap))
+	for value, id := range cfg.WorkspaceMap {
+		if value == "" {
+			return nil, errors.New("identity: the workspace map has an empty claim value")
+		}
+		if !validWorkspaceID(id) {
+			return nil, fmt.Errorf("identity: the workspace map gives %q the invalid workspace id %q", value, id)
+		}
+		workspaceMap[value] = id
+	}
+	if err := requireWorkspacePair(workspacesClaim, workspaceMap); err != nil {
+		return nil, fmt.Errorf("identity: %w", err)
+	}
 	if err := requireIssuerURL(cfg.Issuer); err != nil {
 		return nil, fmt.Errorf("identity: issuer %w", err)
 	}
@@ -154,14 +177,19 @@ func New(ctx context.Context, cfg Config) (*Verifier, error) {
 		emailClaim: valueOr(cfg.EmailClaim, "email"),
 		nameClaim:  valueOr(cfg.NameClaim, "name"),
 		roleMap:    roleMap,
-		now:        now,
-		keys:       newKeySet(jwksURL, client, algNames, now),
+		// No default: "" is the deployment that derives no membership from claims.
+		workspacesClaim: workspacesClaim,
+		workspaceMap:    workspaceMap,
+		now:             now,
+		keys:            newKeySet(jwksURL, client, algNames, now),
 	}
 	// Checked on the DEFAULTED names, and here rather than in ConfigFromEnv, for
 	// the reason the role map is: New is the package's boundary and a Config can be
 	// built literally. claimNameTooDeep says what this prevents.
 	for _, c := range []struct{ what, name string }{
 		{envClaimRoles, v.rolesClaim}, {envClaimEmail, v.emailClaim}, {envClaimName, v.nameClaim},
+		// "" is not a path, so an unconfigured membership never trips this.
+		{envClaimWorkspaces, v.workspacesClaim},
 	} {
 		if claimNameTooDeep(c.name) {
 			return nil, fmt.Errorf("identity: %s %q is %d segments deep; at most %d are walked",
@@ -179,7 +207,8 @@ func New(ctx context.Context, cfg Config) (*Verifier, error) {
 	slog.Info("identity configured",
 		"mode", string(cfg.Mode), "issuer", cfg.Issuer, "audience", cfg.Audience,
 		"jwks_url", redactURL(jwksURL), "algorithms", algNames, "roles_claim", v.rolesClaim,
-		"mapped_values", len(roleMap))
+		"mapped_values", len(roleMap), "workspaces_claim", v.workspacesClaim,
+		"mapped_workspace_values", len(workspaceMap))
 	return v, nil
 }
 
@@ -236,6 +265,14 @@ func (v *Verifier) Mode() Mode { return v.mode }
 // AssertionHeader is the request header carrying the proxy's assertion in
 // trusted_proxy mode, and "" in oidc mode.
 func (v *Verifier) AssertionHeader() string { return v.header }
+
+// WorkspacesConfigured reports whether this deployment derives workspace
+// membership from claims (plan 42 §6.2). It is the question the identity lane's
+// fail-closed arm turns on: unconfigured means the scope comes from the
+// registry — the single live workspace, or a refusal when there is more than one
+// — while configured means Identity.Workspaces is the whole membership, empty
+// included.
+func (v *Verifier) WorkspacesConfigured() bool { return v.workspacesClaim != "" }
 
 // Verify authenticates one compact JWT and maps it to an Identity.
 //
@@ -378,6 +415,13 @@ func (v *Verifier) Verify(ctx context.Context, token string) (Identity, error) {
 		DisplayName: truncate(stringClaim(all, v.nameClaim), maxProfileBytes),
 		// RoleNone is not an error: the principal is authenticated with no
 		// authority, and a role-gated route refuses it.
-		Role: strongestRole(roleValues(claimAt(all, v.rolesClaim)), v.roleMap),
+		Role: strongestRole(claimValues(claimAt(all, v.rolesClaim)), v.roleMap),
+		// Empty is not an error either, and for the same reason: the membership
+		// this token proves is the caller's, and what an empty one may reach is
+		// the identity lane's decision, not this package's. An unconfigured
+		// deployment resolves nothing here — claimAt on "" is nil — so a token
+		// that carries a workspaces claim anyway cannot assert membership where
+		// no operator asked for any.
+		Workspaces: mappedWorkspaces(claimValues(claimAt(all, v.workspacesClaim)), v.workspaceMap),
 	}, nil
 }
