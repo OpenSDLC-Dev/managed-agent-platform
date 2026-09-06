@@ -1,5 +1,5 @@
 ---
-status: draft
+status: in-progress
 issue: "#56"
 ---
 
@@ -38,7 +38,7 @@ is a sequencing property, not merely an ordering preference, and it is the plan'
 **Slice 1 did not start until the live recording of §5 existed; it was taken 2026-09-05 and
 the gate is lifted** (§5.1). This mirrors plan 31's own provision for #378: the console-key
 surface there was shaped by a real capture before it was built, and four entries in
-`docs/DIVERGENCES.md` still cite it — `:125`-`:128`. *Counting rule: `grep -c "#378"
+`docs/DIVERGENCES.md` still cite it — `:133`-`:136`. *Counting rule: `grep -c "#378"
 docs/DIVERGENCES.md` → 4.*
 
 ---
@@ -196,11 +196,11 @@ issue; none is a blocker under decision 1.
   `memory_versions.memory_store_id` is right there (`0029_memories.sql:37`), so the join is one
   line; the reason this is deferred is that a per-tenant *policy* needs a place to live, not
   that the join is hard.
-- **Per-organization quotas and limits** (decision 7): #46, `docs/DIVERGENCES.md:102`'s 500 GB
-  file quota, `:147`'s 1,000-scheduled-deployments cap, and the docs' 100-workspaces cap.
-  **Only `:102` argues from single-tenancy** — a fixed 500 GB ceiling would be arbitrary on a
+- **Per-organization quotas and limits** (decision 7): #46, `docs/DIVERGENCES.md:110`'s 500 GB
+  file quota, `:155`'s 1,000-scheduled-deployments cap, and the docs' 100-workspaces cap.
+  **Only `:110` argues from single-tenancy** — a fixed 500 GB ceiling would be arbitrary on a
   single-tenant deployment — so that half expires here and is **re-argued** (§7.6) on the
-  operator-owns-its-own-disk half the same entry already states. `:147` carries no tenancy
+  operator-owns-its-own-disk half the same entry already states. `:155` carries no tenancy
   word at all: its operator-owned-capacity reason survives this plan unchanged. Neither is
   implemented.
 - **Webhooks (#261).** All 44 spec webhook event data schemas require `organization_id` and
@@ -236,7 +236,7 @@ document re-derives it. Where an SDK twin exists it is cited beside the count
 (`betadeployment.go:1451`, `:1803`; `betadeploymentrun.go:534`, `:880`; `betawebhook.go`'s 44
 required `organization_id` and 44 required `workspace_id` fields), and the twin is what a
 reviewer checks. That
-follows the precedent of `docs/DIVERGENCES.md:153`, which cites
+follows the precedent of `docs/DIVERGENCES.md:161`, which cites
 `anthropic-openapi.yml:29161 and :25626 (the two run-error schemas)` by line into a local file
 this repo does not carry; the registry states no citation convention (its format note at `:10`
 sets none, and both styles appear in it), so this is a choice for new entries rather than an
@@ -279,7 +279,7 @@ literal `Not Found` body, re-checked 2026-09-04: `/docs/en/api/managed-agents/ov
 pages live outside the repository**, so a line citation into one is this plan's working index
 rather than a coordinate a reviewer can re-check: every quotation is verbatim so a re-fetch
 finds it by string, and the registry entries the slices add use the registry's own style for a
-fetched page — slug, fetch date, quoted sentence (`docs/DIVERGENCES.md:147`, `:150`).
+fetched page — slug, fetch date, quoted sentence (`docs/DIVERGENCES.md:155`, `:158`).
 
 ### 4.2 The reference, from those sources
 
@@ -338,7 +338,7 @@ fetched page — slug, fetch date, quoted sentence (`docs/DIVERGENCES.md:147`, `
   (for example, on Admin API requests) or the request fails before authentication completes."
   The SDK reads the workspace header only on error paths and appends `(Workspace-ID: …)` to
   the error string (`anthropic-sdk-go/internal/apierror/apierror.go:29` the field, `:69-70` the
-  suffix, as `docs/DIVERGENCES.md:47` itself cites); it never reads the organization header, and says why — `OrganizationID` "is
+  suffix, as `docs/DIVERGENCES.md:48` itself cites); it never reads the organization header, and says why — `OrganizationID` "is
   intentionally absent: the server exposes the caller's organization only as the
   anthropic-organization-id *response* header" (`internal/auth/types.go:32-35`, the range
   `docs/plan/31_console-sso-rbac.md:167-168` already cites).
@@ -389,7 +389,7 @@ fetched page — slug, fetch date, quoted sentence (`docs/DIVERGENCES.md:147`, `
   `display_title` at `betaskill.go:128`, `:177`, `:226` being the pre-GA spelling), matched the
   255-character cap (`internal/api/skillsupload.go:27`), and showed two skills accepted under
   one name — so `0033_skills_display_name.sql:28` dropped the uniqueness this platform used to
-  enforce, and `docs/DIVERGENCES.md:60` records the whole entry as converged. What survives for
+  enforce, and `docs/DIVERGENCES.md:68` records the whole entry as converged. What survives for
   this plan is only the **source split**: the catalog is every workspace's, a custom skill is
   one workspace's, which is §6.3's carve-out.
 - **Archiving a workspace archives its keys, but no status is recorded for the refusal.**
@@ -413,7 +413,7 @@ fetched page — slug, fetch date, quoted sentence (`docs/DIVERGENCES.md:147`, `
   run errors' `message` carries only the description "Human-readable error description.", so
   **any wording we emit is ours** and is registered **CONFIRMED** — a deliberate divergence, not
   an inference, because the reference documents no wording a recording could settle it against.
-  `docs/DIVERGENCES.md:151` and `:152` are the precedent for the neighbouring class (a run-error
+  `docs/DIVERGENCES.md:159` and `:160` are the precedent for the neighbouring class (a run-error
   type nothing here records) and sit in the CONFIRMED section (`:35`), not the INFERRED one
   (`:166`).
 - **The organization has observable behavior**, which is why decision 2 rests on the absence of
@@ -433,9 +433,9 @@ fetched page — slug, fetch date, quoted sentence (`docs/DIVERGENCES.md:147`, `
 - **The reference has role granularity at both levels.** Five workspace-level roles — Workspace
   User, Limited Developer, Developer, Admin, Billing (workspaces doc:39-45) — with documented
   inheritance from the organization's own roles (`:47-52`, `:1114-1122`), whose count this page
-  never states; `docs/DIVERGENCES.md:122` records **seven** of those from plan 31's console
+  never states; `docs/DIVERGENCES.md:130` records **seven** of those from plan 31's console
   ground truth. This platform has three **org-wide** roles and no per-workspace granularity at
-  all, which is §3's fine-grained exclusion. So `:122`'s divergence *grows* along a second axis
+  all, which is §3's fine-grained exclusion. So `:130`'s divergence *grows* along a second axis
   — per-workspace granularity — rather than changing its count of seven.
 - **The api-key `scope` field is fully documented, and it is not an enum.** The Retrieve API Key
   page (fetched 2026-09-04, §4.1) gives it as "`scope: object or object` — Where the API key
@@ -448,7 +448,7 @@ fetched page — slug, fetch date, quoted sentence (`docs/DIVERGENCES.md:147`, `
   also do for all-workspaces keys" — which is the evidence behind §7.6's key-kinds entry.
   **None of this is a registry item**: the Admin API's `api_keys` resource is not a surface this
   platform mirrors, the console key routes being plan 32's own dialect in place of the Admin API
-  §3 declines (`docs/DIVERGENCES.md:125`). Under decision 5
+  §3 declines (`docs/DIVERGENCES.md:133`). Under decision 5
   every key minted here corresponds to the `workspace` variant, and the `organization` variant
   has no counterpart: a consequence of that decision, not a divergence.
 - **A cross-organization/workspace mismatch *is* given a status by the SDK, three times, and
@@ -499,7 +499,7 @@ architecture; the plan changes they *did* force are listed in §5.
    those paths has no description, and both header names are absent from the spec entirely. The
    2026-09-03 recording narrows this without closing it: that key is an **OAuth token carrying
    named scopes**, two of them workspace-level (`workspace:developer`, `workspace:skills`), and
-   admission is per route rather than per API (`docs/DIVERGENCES.md:163`). So a workspace
+   admission is per route rather than per API (`docs/DIVERGENCES.md:171`). So a workspace
    dimension exists on that credential; whether a *response* names it, and what a foreign header
    does there, were still unobserved.
    → **It does not, and the work lane ignores the header entirely.** The mint response grants
@@ -672,7 +672,7 @@ plan carries the corrections so the verifier's docs rung does not flag them:
 Decision 6. This is an account action creating real credentials in a real organization, in the
 shape of #378's 2026-08-13 console capture, so only the user can perform it. **Slice 1 does not
 start until items 1-4 and 6 exist** — the same provision plan 31 made for #378, whose capture
-still anchors four registry entries (`:125`-`:128`). Item 5 gates slice 6 instead, and item 6
+still anchors four registry entries (`:133`-`:136`). Item 5 gates slice 6 instead, and item 6
 rides on the archive item 5 performs. Capture request and response headers and full error bodies
 throughout; a second workspace and one key bound to it are the whole setup.
 
@@ -710,7 +710,7 @@ What to capture, and what each observation converts:
 5. **The console's own workspace administration** — the one item that gates **slice 6**, not
    slice 1, and is captured in the same sitting because creating workspace B in the console is
    already step one of this setup. Record that create's request and response, the workspace
-   listing, and an archive. `docs/DIVERGENCES.md:86` justifies the whole `/api/` dialect by its
+   listing, and an archive. `docs/DIVERGENCES.md:94` justifies the whole `/api/` dialect by its
    having been "mirrored segment-for-segment from the reference console's own private backend
    (observed live 2026-08-10)", and slice 6 adds two routes to that dialect (§7.6) with no such
    capture behind them.
@@ -1473,7 +1473,7 @@ half-defined cascade ships:
 - **Deployments pause** with `workspace_archived_error`; a run attempted in an archived
   workspace fails with the run-error twin. `0031_deployments.sql:98`, `:105`, `:176`, `:185`'s
   CHECK lists already admit both values, so no migration is needed — exactly as
-  `docs/DIVERGENCES.md:153` predicted. The run error's `message` wording is **ours** and is
+  `docs/DIVERGENCES.md:161` predicted. The run error's `message` wording is **ours** and is
   registered **CONFIRMED** — a deliberate divergence rather than an inference, the reference
   giving only "Human-readable error description." for a recording to match (§4.2).
 - **In-flight sessions and leased work items are not touched.** Existing machinery — lease
@@ -1569,7 +1569,7 @@ doc beside `config.go:26-29` for the two new `IDENTITY_*` names — **not**
 `docs/ARCHITECTURE.md:466`, which mentions only `IDENTITY_MODE` and enumerates neither existing
 name, so there is no list for them to join; if ARCHITECTURE is to carry them, `:465-470` — the
 bullet's opening and its sentence naming `IDENTITY_MODE` — is
-*extended*. · Registry: **rewrite** `:47` — this plan's own PR already recast that entry to
+*extended*. · Registry: **rewrite** `:48` — this plan's own PR already recast that entry to
 cover **both** halves (no response header; the request header accepted and ignored, with
 `server.go:699` cited and `Tracked: #56` naming this slice), so slice 1 rewrites it into the
 *delivered* behavior: both response headers emitted wherever a scope resolves, the request
@@ -1577,9 +1577,9 @@ header honored under the narrow-only rule, and its #56 tracker pointer closes.
 **What matches the reference is not a divergence and stays out of the divergence sections**: the
 two unconditional request-header bodies — 400 on a malformed value, 404 on a workspace that does
 not exist — are reproduced verbatim, as is the workspace response header's documented emission
-schedule, so both belong in `:47`'s rewritten non-mismatch half, or in the registry's
+schedule, so both belong in `:48`'s rewritten non-mismatch half, or in the registry's
 architecture-and-compatibility notes, which exist for exactly this class
-(`docs/DIVERGENCES.md:14-17`, against the CONFIRMED section's own charter at `:37`: "Mismatches
+(`docs/DIVERGENCES.md:14-17`, against the CONFIRMED section's own charter at `:38`: "Mismatches
 with the managed-agents wire taken by choice"). What is **added** as a divergence is only the
 mismatch: `anthropic-organization-id` emitted on the workspace header's schedule, no absence
 rule for it being recorded anywhere; the reference's "required with a multi-workspace API key"
@@ -2176,33 +2176,33 @@ set below already requires. The same phrase appears in code at
 `internal/api/sessionresources.go:590` and in prose at `docs/self-hosted-security.md:528`.
 All five sites get the word; the residual itself is unchanged.
 
-**Registry, in one batch.** **Demote** `:153` to provenance — by slice 6 the *last* live tracker
-naming #56 (`grep -c "Tracked: #56" docs/DIVERGENCES.md` → 2 today, `:47` and `:153`; slice 1
-closes `:47`'s), so `make registry-check` reports live-tracker-open until it moves; its workspace
+**Registry, in one batch.** **Demote** `:161` to provenance — by slice 6 the *last* live tracker
+naming #56 (`grep -c "Tracked: #56" docs/DIVERGENCES.md` → 2 before slice 1, `:48` and `:161`; slice 1
+closes `:48`'s), so `make registry-check` reports live-tracker-open until it moves; its workspace
 half retires and its `organization_disabled_error` half is re-argued (§6.9) and re-pointed at a
 new issue.
 **Re-argue the twelve entries that actually cite single-tenancy as their reason**, which is a
 derived set, not a remembered one: `grep -nE "single-tenan|single organization|single-organization"
-docs/DIVERGENCES.md` → `:19`, `:47` (slice 1's, already rewritten there), `:52`, `:58`, `:100`,
-`:102` (the 500 GB per-org quota, whose clause about a fixed ceiling being arbitrary on a
+docs/DIVERGENCES.md` → `:19`, `:48` (slice 1's, already rewritten there), `:60`, `:66`, `:108`,
+`:110` (the 500 GB per-org quota, whose clause about a fixed ceiling being arbitrary on a
 single-tenant deployment gives way to the operator-owns-its-own-disk reason the same entry
 already carries — the words are paraphrased here, not quoted),
-`:128`, `:150`, `:153`, `:245`, `:251`, `:255`. **Separately**, each
+`:136`, `:158`, `:161`, `:253`, `:259`, `:263`. **Separately**, each
 with its own stated reason rather than a single-tenancy premise it does not contain, revisit
-`:85` (environment worker-key *issuance*, which contains no tenancy word at all), `:86`, `:122`,
-`:125`, `:147` (the 1,000-scheduled-deployments cap) and `:154` — for `:122` the divergence
+`:93` (environment worker-key *issuance*, which contains no tenancy word at all), `:94`, `:130`,
+`:133`, `:155` (the 1,000-scheduled-deployments cap) and `:162` — for `:130` the divergence
 **grows** rather than shifts, and its recorded count of **seven** org/account-level roles stands
 unchanged: what the workspaces doc adds is a second axis, five *workspace-level* roles with
 documented inheritance (§4.2), so three org-wide roles with no per-workspace granularity is a
-wider gap under real tenancy, covered by §3's fine-grained exclusion. **Leave `:267`'s organization clause intact** —
+wider gap under real tenancy, covered by §3's fine-grained exclusion. **Leave `:275`'s organization clause intact** —
 "v1 answers only for `default` and 404s anything else *before* the environment lookup, naming
 the organization in the message" describes the `{organization_id}` segment, which decision 2
 freezes and `consoleOrganization` preserves, so striking it would delete an accurate record.
-`:267` gains **nothing** about workspaces: its path is the environment-token dialect
-(`/api/oauth/organizations/{organization_id}/environments/{environment_id}/tokens…`, `:86`),
+`:275` gains **nothing** about workspaces: its path is the environment-token dialect
+(`/api/oauth/organizations/{organization_id}/environments/{environment_id}/tokens…`, `:94`),
 which carries no `{workspace}` segment at all. The workspace half's new behavior — resolved
 against the registry, constrained by the caller's scope only without the administration
-capability, identical 404 — goes to `:125`, the entry whose path
+capability, identical 404 — goes to `:133`, the entry whose path
 (`/api/console/organizations/{org}/workspaces/{workspace}/api_keys`) actually has the segment;
 `internal/api/server.go:171-173` and `:192-194` register the two dialects separately, which is
 why the two entries stay separate. **Add** CONFIRMED: the reference's key kinds,
@@ -2232,9 +2232,9 @@ outright: the api-key `scope` field is fully documented and belongs to a resourc
 does not mirror (§4.2). And per `docs/HISTORY.md:1095-1103` — #56's *last*
 scope change silently rotted five registry pointers **while the issue stayed open**, a rot no
 issue-state check can see — this PR re-reads every #56 reference by hand: **the registry's nine**
-(`grep -nE "#56([^0-9]|$)" docs/DIVERGENCES.md` → `:28`, `:47`, `:121`, `:122`, `:123`, `:128`,
-`:153`, `:181`, `:184`; the regex's trailing class is what keeps #565/#566/#567 out of the set,
-and `:47` joined it in this plan's own PR),
+(`grep -nE "#56([^0-9]|$)" docs/DIVERGENCES.md` → `:28`, `:48`, `:129`, `:130`, `:131`, `:136`,
+`:161`, `:189`, `:192`; the regex's trailing class is what keeps #565/#566/#567 out of the set,
+and `:48` joined it in this plan's own PR, before slice 1's `Landed for #56` entries widened the set),
 `docs/self-hosted-security.md:851` and
 `:1242`, `docs/ARCHITECTURE.md:466`, and **`README.md:76`**. Archived plans (31, 32, 37) and
 released changelog sections (`docs/changelog/0.3.0.md`) are deliberately left as historical text.
@@ -2322,7 +2322,7 @@ parse, with no appeal to `anthropic-sdk-go/config/federation.go`, which speaks o
 **D8 — Environment `scope: "account"` stays refused, on a new reason.** The SDK and spec are the
 only sources and they define `account` as visibility to the owning **account** — a principal —
 self-hosted only. That is orthogonal to org/workspace, and this platform has no account identity
-for a machine credential to own an environment with. Only `docs/DIVERGENCES.md:52`'s stated
+for a machine credential to own an environment with. Only `docs/DIVERGENCES.md:60`'s stated
 reason ("single-tenant v1") expires. One thread stays live and is registered rather than
 resolved: the field "defaults based on organization type"
 (`anthropic-sdk-go/betaenvironment.go:735-736`), so if org ever activates, that default is
@@ -2331,7 +2331,7 @@ reference behavior nothing records today.
 **D9 — Emit `workspace_archived_error`; leave `organization_disabled_error` unemitted.**
 *Rejected:* inventing an organization lifecycle so the second error type has a producer.
 `0031_deployments.sql`'s CHECK lists already admit both values, so the emitted half needs no
-migration — exactly as `:153` predicted. The emitted half's `message` is ours and registered.
+migration — exactly as `:161` predicted. The emitted half's `message` is ours and registered.
 
 **D10 — Cross-tenant refusal follows the split the tree already decided on evidence, rather than
 unifying it — and the 404 arm is CONFIRMED against what looked like real counter-evidence.** `/v1` resource routes
@@ -2484,7 +2484,7 @@ environment-key half stays unobserved, and §6.1 carries it as ours (§5.1). So 
 slice-1 gate (items 1-4 and 6) nor the slice-6 one (item 5) is outstanding. **Nothing the
 2026-09-03 and 2026-09-04 recordings settled closed any of those items** — they reached the
 environment key's OAuth scopes and the skills wire shape, never a second workspace — which is
-what 2026-09-05 was for, and the registry's second wave (#575) left `:47` and `:153` as the only
+what 2026-09-05 was for, and the registry's second wave (#575) left `:48` and `:161` as the only
 two entries still tracking #56.
 
 **What is still open is one half of one item and two small threads.** An *environment* key
