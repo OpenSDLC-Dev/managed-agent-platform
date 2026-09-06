@@ -5,7 +5,6 @@ import (
 	"context"
 	"io"
 	"testing"
-	"time"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/sandbox"
@@ -59,20 +58,11 @@ func TestExportWorksOnAStoppedContainer(t *testing.T) {
 	if err := sb.WriteFile(ctx, "/workspace/survives.txt", []byte("read me stopped")); err != nil {
 		t.Fatalf("write: %v", err)
 	}
-	if res, err := sb.Exec(ctx, sandbox.ExecRequest{Command: "kill 1"}); err != nil || res.ExitCode != 0 {
-		t.Fatalf("stop container: %v (exit %d)", err, res.ExitCode)
-	}
 	// The export must run against a STOPPED container, or this test proves
-	// nothing the contract rows don't: wait until exec refuses first.
-	deadline := time.Now().Add(30 * time.Second)
-	for {
-		if _, err := sb.Exec(ctx, sandbox.ExecRequest{Command: "echo hi"}); err != nil {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatal("container never stopped after kill 1")
-		}
-		time.Sleep(200 * time.Millisecond)
+	// nothing the contract rows don't.
+	stopContainer(t, sb.ID())
+	if state := containerState(t, sb.ID()); state != "exited" {
+		t.Fatalf("container is %q before the export, want it exited", state)
 	}
 
 	rc, err := provider.Export(ctx, sid, "/workspace")
