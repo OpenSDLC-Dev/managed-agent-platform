@@ -254,8 +254,12 @@ and the `cloud` environment behind that session are internal rows the runner cre
 and nothing else can reach: absent from both lists, a 404 from every route addressing them
 by id, refused by every resolver but the runner's. The dream's own model rides in as an
 `agent_with_overrides`, and the runner drives the session by writing a `user.message` to its log and
-waiting for it to idle — one stage today, the four the plan designs once the next slice
-lands. While the dream owns the session it is **read-only to the public API**: reads, the
+waiting for it to idle, once per stage: orient, digest, merge, index and audit. The digest
+stage fans out to one delegated thread per batch of transcripts and the coordinator waits on
+them; every stage carries its own turn cap, every thread's counted, and every stage after the
+first opens by checking the previous one's artefact — the runner cannot read the sandbox, so
+recovering a scratch directory a dead container took is the prompt's job, not the tick's.
+While the dream owns the session it is **read-only to the public API**: reads, the
 list and the stream answer as they do for any session, and every mutation answers a 400
 naming the dream, because that internal agent's toolset is `always_allow` with `bash`. When
 the dream settles — completed, failed, timed out, or canceled through the same interrupt

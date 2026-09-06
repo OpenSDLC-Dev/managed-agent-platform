@@ -887,6 +887,88 @@ func (s *server) interruptSessionInTx(ctx context.Context, tx pgx.Tx, sessionID 
 	return moves, nil
 }
 
+// postDreamStageInTx appends one stage's user.message on the primary thread of
+// an idle session and enqueues the model turn it starts, inside the caller's
+// transaction. It is the narrow recipe createSessionInTx runs for a create's
+// initial events (sessions.go: NormalizeInbound → TransitionThread →
+// AppendInTx with an Enqueue in Then), lifted for the dream runner's arm 9
+// (plan 41 §4.1) — deliberately not a factoring of sendSessionEvents, which
+// the runner cannot call at all: requireNotDreamOwned refuses every send to
+// the session a dream owns, the runner's own included.
+//
+// Two things the create and the handler's idle-primary wake do are left out.
+// Reemit is one: the rows here are idle rather than freshly inserted, so the
+// move itself is what emits the pair. The other is startWorkCycle's
+// mcp_catalogs delete, which re-dials the servers a previous cycle could not
+// reach — the internal dream agent declares no MCP server, so there is never a
+// row to drop.
+//
+// The arm has already established that the session is idle, so anything else
+// found here is a bug rather than a state to handle: it is an error naming
+// what was found, which the tick logs and a later tick retries. Like
+// interruptSessionInTx it records no status metric — it returns the moves for
+// whoever commits.
+func (s *server) postDreamStageInTx(ctx context.Context, tx pgx.Tx, sessionID, text string) ([]domain.SessionStatus, error) {
+	var envKind, status, envID string
+	var archivedAt *time.Time
+	err := tx.QueryRow(ctx,
+		`SELECT e.kind, s.status, s.archived_at, s.environment_id
+		 FROM sessions s JOIN environments e ON e.id = s.environment_id
+		 WHERE s.id = $1 FOR UPDATE OF s`, sessionID).Scan(&envKind, &status, &archivedAt, &envID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, errNotFound("session %s not found", sessionID)
+	}
+	if err != nil {
+		return nil, err
+	}
+	if archivedAt != nil {
+		return nil, fmt.Errorf("session %s is archived; no stage can be posted to it", sessionID)
+	}
+	if status != string(domain.SessionIdle) {
+		return nil, fmt.Errorf("session %s is %s, not idle; no stage can be posted to it", sessionID, status)
+	}
+	msg := mustJSON(map[string]any{
+		"type":    "user.message",
+		"content": []any{map[string]any{"type": "text", "text": text}},
+	})
+	batch, err := events.NormalizeInbound(envKind, []json.RawMessage{json.RawMessage(msg)})
+	if err != nil {
+		return nil, err
+	}
+	// The guard the handler applies before waking an idle primary: a resumed
+	// turn would replay an assistant tool_use that no tool_result answers, a
+	// request the model protocol rejects. The handler logs it and leaves the
+	// thread idle; here it is the arm's error, there being no client to post
+	// the missing result.
+	unanswered, err := events.HasUnansweredThreadToolUse(ctx, tx, domain.ID(sessionID), "", nil)
+	if err != nil {
+		return nil, err
+	}
+	if unanswered {
+		return nil, fmt.Errorf("session %s is idle with an unanswered tool_use", sessionID)
+	}
+	pair, moved, err := events.TransitionThread(ctx, tx, domain.ID(sessionID),
+		events.ThreadTransition{Status: domain.SessionRunning})
+	if err != nil {
+		return nil, err
+	}
+	// TransitionThread writes sessions.status itself, so the append needs no
+	// SetStatus; what the move is wanted for is the committer's own metric.
+	var moves []domain.SessionStatus
+	if moved != nil {
+		moves = append(moves, *moved)
+	}
+	if _, err := s.log.AppendInTx(ctx, tx, domain.ID(sessionID), append(batch, pair...), events.AppendOptions{
+		Then: func(ctx context.Context, tx pgx.Tx) error {
+			_, err := s.queue.Enqueue(ctx, tx, domain.ID(envID), domain.ID(sessionID), queue.ModelTurn)
+			return err
+		},
+	}); err != nil {
+		return nil, err
+	}
+	return moves, nil
+}
+
 // snapshotRubrics copies each file rubric's bytes to an outcome-owned blob
 // key at acceptance, so deleting the source file mid-outcome cannot break
 // replay or grading. A snapshot orphaned by a failed commit is harmless —

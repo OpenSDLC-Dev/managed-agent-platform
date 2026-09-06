@@ -253,13 +253,25 @@ func SetDreamStartLeaseForTest(d time.Duration) (restore func()) {
 	return func() { dreamStartLease = prev }
 }
 
-// SetDreamStageTurnCapForTest lowers the stage's turn cap so the over-budget
+// DreamStageCount is §3.3's four, for the tests that walk the pipeline end to
+// end rather than repeating the number. Test binary only.
+const DreamStageCount = dreamStageCount
+
+// DreamStageMessageForTest renders the message the runner posts to open a
+// stage, so an api_test case compares the log against what the code says
+// rather than against prose of its own. Test binary only.
+func DreamStageMessageForTest(stage int, storeMount string, transcripts int, instructions string) string {
+	return dreamStageMessage(stage, storeMount, transcripts, instructions)
+}
+
+// SetDreamStageTurnCapForTest lowers one stage's turn cap so the over-budget
 // arm can be driven with a handful of planted span.model_request_end rows.
-// Test binary only.
-func SetDreamStageTurnCapForTest(n int) (restore func()) {
-	prev := dreamStageTurnCap
-	dreamStageTurnCap = n
-	return func() { dreamStageTurnCap = prev }
+// Per stage, because the caps are: a case must be able to lower the stage it
+// drives and leave the others where §3.3 put them. Test binary only.
+func SetDreamStageTurnCapForTest(stage, n int) (restore func()) {
+	prev := dreamStageTurnCaps[stage]
+	dreamStageTurnCaps[stage] = n
+	return func() { dreamStageTurnCaps[stage] = prev }
 }
 
 // SetDreamCloneBatchForTest lowers the clone's multi-row insert width so a

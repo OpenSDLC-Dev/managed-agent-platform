@@ -39,6 +39,13 @@ type stack struct {
 	url  string
 	pool *pgxpool.Pool
 	sbx  *docker.Provider
+	// blobs and cipher are the handler's own, kept here for the one caller that
+	// needs the same two the control plane hands its sweeps: the dream runner,
+	// which puts rendered transcripts and creates a session of its own
+	// (dream_test.go's startDreamRunner). Concrete types, so this file gains no
+	// import for two values it only passes on.
+	blobs  *blobtest.MemStore
+	cipher *local.Cipher
 	// model is MODEL_ID, the string every agent is created with. See agentBody.
 	model string
 
@@ -79,7 +86,10 @@ func newStack(t *testing.T, cfg modeltest.Config) *stack {
 	if err != nil {
 		t.Fatalf("local.New: %v", err)
 	}
-	srv := httptest.NewServer(api.NewHandler(pool, blobs, cipher, nil))
+	// WithDreamRunner because this process runs one when a dream test starts it
+	// (the control plane pairs the two the same way): POST /v1/dreams refuses a
+	// create on a deployment where nothing would ever sweep the row.
+	srv := httptest.NewServer(api.NewHandler(pool, blobs, cipher, nil, api.WithDreamRunner()))
 	t.Cleanup(srv.Close)
 
 	// One default route. Config.Model is the id the *endpoint* receives, so it
@@ -110,7 +120,7 @@ func newStack(t *testing.T, cfg modeltest.Config) *stack {
 		t.Fatalf("evals require Docker: %v", err)
 	}
 
-	s := &stack{url: srv.URL, pool: pool, sbx: sbx, model: cfg.Model}
+	s := &stack{url: srv.URL, pool: pool, sbx: sbx, blobs: blobs, cipher: cipher, model: cfg.Model}
 
 	// Reap every session's container. Registered BEFORE the loop-stop cleanup so
 	// that LIFO runs it AFTER the loops have stopped — the moment when no

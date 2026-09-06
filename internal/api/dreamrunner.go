@@ -71,11 +71,28 @@ var dreamStartAttempts = 5
 // milliseconds.
 var dreamConcurrency = 2
 
-// dreamStageTurnCap is the model turns a stage may spend — every thread's
-// counted — before the runner interrupts the session and fails the dream. One
-// var while the pipeline is one stage (slice 2); slice 3 turns it into the
-// four caps of §3.3.
-var dreamStageTurnCap = 300
+// dreamStageCount is the pipeline's length (§3.3). The start arm posts stage
+// 1's message with the session; arm 9 posts the three that follow, and arm 10
+// runs only once the last of them has been answered.
+const dreamStageCount = 4
+
+// dreamStageTurnCaps is the model turns each stage may spend — every thread's
+// counted — before the runner interrupts the session and fails the dream,
+// indexed by the stage (§3.3; index 0 is never read, a running dream's stage
+// being 1..4). Vars with a test setter, per §3.4, as the three above are.
+//
+// The numbers are measured rather than reasoned. A cap is only there to catch
+// a stage that loops — the wall clock is DREAM_TIMEOUT's to bound — so each is
+// set well above what a real stage spends, and what a real stage spends is
+// what the live eval logs on every run (evals/dream_test.go's stageSpend).
+// The plan's first guess was 4 / 300 / 30 / 10, and the first live run refuted
+// the first of those outright: a two-transcript dream over a four-memory store
+// spends 5 / 10 / 6 / 7, so stage 1's orient failed on its cap every time, one
+// turn short, before any of the work the dream exists for could run. Stage 2's
+// number is the fan-out's and is left where the plan sized it: thirteen digest
+// threads reading eight transcripts each are about 170 turns with the
+// coordinator's spawn wave and its waits.
+var dreamStageTurnCaps = [dreamStageCount + 1]int{0, 30, 300, 60, 30}
 
 // dreamLockWait is the lock_timeout every dream-row transaction sets: the
 // tick's arm, the start's write transaction, and the two lifecycle handlers on
@@ -384,9 +401,7 @@ func lockDream(ctx context.Context, tx pgx.Tx, id string, now time.Time) (dreamR
 }
 
 // dreamStep is §4.1's decision table: the arms in order, the first that
-// matches and only that one. Arm 9 ("stage k < 4 complete") is slice 3's — the
-// pipeline is one stage here, so a session that idles has finished it, and arm
-// 10 runs the end-of-stage checks.
+// matches and only that one.
 func (s *server) dreamStep(ctx context.Context, tx pgx.Tx, d dreamRow, now time.Time, cfg DreamRunnerConfig) (dreamStepResult, error) {
 	switch {
 	case d.status != "pending" && d.status != "running": // 1. closing
@@ -422,16 +437,29 @@ func (s *server) dreamStep(ctx context.Context, tx pgx.Tx, d dreamRow, now time.
 		return dreamStepResult{}, err
 	}
 	// The sample is the commit's, not the transaction's: a tick that rolls
-	// back must leave no turn count behind, so runDreamArm records it.
+	// back must leave no turn count behind, so runDreamArm records it. The
+	// stage it is attributed to is the one whose turns were counted — the one
+	// that just finished, not the one arm 9 may have opened below it.
 	res.stage, res.turns = d.stage, &turns
 	return res, nil
 }
 
 // dreamTurnArms is arms 6 to 10, the ones the stage's turn count precedes.
 func (s *server) dreamTurnArms(ctx context.Context, tx pgx.Tx, d dreamRow, turns int) (dreamStepResult, error) {
-	if turns > dreamStageTurnCap { // 6. over budget
+	// The stage is a database column with no CHECK behind it, and the cap
+	// below indexes an array with it. Nothing this code writes can leave the
+	// range — the start writes 1, arm 9 only increments below the last — so a
+	// row outside it is corruption, and the reason it is answered rather than
+	// left to panic is where the panic would land: an arm runs in the sweep's
+	// own goroutine, which no request-scoped recover covers, so it would take
+	// the controlplane with it.
+	if d.stage < 1 || d.stage > dreamStageCount {
 		return s.dreamFail(ctx, tx, d, "internal_error",
-			fmt.Sprintf("stage %d exceeded its budget of %d model turns", d.stage, dreamStageTurnCap))
+			fmt.Sprintf("dream is at stage %d, outside the pipeline's 1 to %d", d.stage, dreamStageCount))
+	}
+	if turns > dreamStageTurnCaps[d.stage] { // 6. over budget
+		return s.dreamFail(ctx, tx, d, "internal_error",
+			fmt.Sprintf("stage %d exceeded its budget of %d model turns", d.stage, dreamStageTurnCaps[d.stage]))
 	}
 	if d.sessionStatus == string(domain.SessionRunning) || // 7. busy
 		d.sessionStatus == string(domain.SessionRescheduling) {
@@ -447,7 +475,58 @@ func (s *server) dreamTurnArms(ctx context.Context, tx pgx.Tx, d dreamRow, turns
 		// every send that could answer it.
 		return s.dreamFail(ctx, tx, d, "internal_error", "pipeline session asked for confirmation")
 	}
-	return s.dreamCompleteArm(ctx, tx, d) // 10. idle, the stage complete
+	if d.stage < dreamStageCount { // 9. idle, stage k < 4 complete
+		return s.dreamAdvanceArm(ctx, tx, d)
+	}
+	return s.dreamCompleteArm(ctx, tx, d) // 10. idle, stage 4 complete
+}
+
+// dreamAdvanceArm is arm 9: the session has finished a stage that is not the
+// last, so the next stage's message opens on the primary thread and its turn
+// is enqueued. The dream's own status does not move — the stage does — so the
+// arm reports no transition, only the session's.
+func (s *server) dreamAdvanceArm(ctx context.Context, tx pgx.Tx, d dreamRow) (dreamStepResult, error) {
+	mount, err := dreamStoreMount(ctx, tx, *d.sessionID)
+	if err != nil {
+		return dreamStepResult{}, err
+	}
+	var instructions string
+	if d.instructions != nil {
+		instructions = *d.instructions
+	}
+	moves, err := s.postDreamStageInTx(ctx, tx, *d.sessionID,
+		dreamStageMessage(d.stage+1, mount, len(d.inputSessionIDs), instructions))
+	if err != nil {
+		return dreamStepResult{}, err
+	}
+	if _, err := tx.Exec(ctx,
+		`UPDATE dreams SET stage = stage + 1, updated_at = now() WHERE id = $1`, d.id); err != nil {
+		return dreamStepResult{}, err
+	}
+	return dreamStepResult{sessionMoves: moves}, mirrorDreamUsage(ctx, tx, d)
+}
+
+// dreamStoreMount is the output store's mount as the pipeline session actually
+// mounted it, read from the session's own resources[] in the arm's
+// transaction. Recomputing it from the store's name would be wrong rather than
+// merely redundant: a rename mid-run changes the slug, and the prompt would
+// then name a path the session never mounted.
+func dreamStoreMount(ctx context.Context, db querier, sessionID string) (string, error) {
+	var raw []byte
+	if err := db.QueryRow(ctx,
+		`SELECT resources FROM sessions WHERE id = $1`, sessionID).Scan(&raw); err != nil {
+		return "", err
+	}
+	var refs []memoryResourceJSON
+	if err := json.Unmarshal(raw, &refs); err != nil {
+		return "", err
+	}
+	for _, r := range refs {
+		if r.Type == "memory_store" {
+			return r.MountPath, nil
+		}
+	}
+	return "", fmt.Errorf("pipeline session %s mounts no memory store", sessionID)
 }
 
 // dreamClosingArm is arm 1: the terminal dream's session is wound down, its
