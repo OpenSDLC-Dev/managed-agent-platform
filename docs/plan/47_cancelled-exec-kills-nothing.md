@@ -202,7 +202,21 @@ slice 2 is the dead holder.
    its request is bounded by `StreamWithContext` (`client.go:150`), so the
    budget is the whole of the worst case.
 
-6. **The kill re-checks before it signals, and says who cleans up.** A pid can
+6. **The kill resolves the start, and does not read "no pid yet" as "nothing to
+   kill".** This is the failure mode the rest of the design would otherwise hide.
+   The pid is written *inside* the sandbox, after the remote exec request is
+   accepted — and on k8s after the command is already running, since the wrapper
+   backgrounds it before recording it (`deadline.go:69-71`). A cancellation
+   landing in either window would find no pid file, kill nothing, return
+   successfully, and leave exactly the orphan this contract exists to prevent.
+   Worse, it would do so invisibly: an acceptance rung that cancels a command it
+   has already observed running never reaches the window at all. So the kill
+   path must **resolve the start outcome within its budget** rather than take
+   the file's absence as an answer — waiting for the pid to appear, or
+   establishing that the command never started — and slice 1 owes a test that
+   cancels with startup paused before the pid write.
+
+7. **The kill re-checks before it signals, and says who cleans up.** A pid can
    be reassigned between the command exiting and the detached kill arriving, and
    a blind `kill -9 -<pid>` would then signal "whatever group has since been
    assigned that pid" — not a hypothetical, but the reason docker's own watchdog
@@ -214,12 +228,12 @@ slice 2 is the dead holder.
    cancelled exec leaves and prove it in a test — or every cancelled call
    accumulates residue in `/tmp` for the sandbox's life.
 
-7. **A cancelled call is still not a timeout.** `TimedOut` stays false and the
+8. **A cancelled call is still not a timeout.** `TimedOut` stays false and the
    error return stays `ctx.Err()`. `TimedOut` means "the command outlived its
    deadline" (`sandbox.go:367-388`) and a caller who gave up learned nothing
    about the command's own deadline. Nothing in the classification changes.
 
-8. **No new per-call `Timeout`s on the paths a cancellation reaches** — the
+9. **No new per-call `Timeout`s on the paths a cancellation reaches** — the
    simplification the contract change buys, and why the remedy is one change
    rather than a scattering. Most of the unbudgeted calls are bounded by an
    outer context already: `RepoCloneTimeout` for the clone (`repos.go:180`),
@@ -241,7 +255,7 @@ slice 2 is the dead holder.
    whether they get a budget of their own is slice 2's question, not something
    slice 1 may be read as having handled.
 
-9. **Slice 2 is scoped, not designed here**, and it has at least four candidates
+10. **Slice 2 is scoped, not designed here**, and it has at least four candidates
    rather than the two #598 offers. An **in-sandbox lock** carries the hard
    part: a liveness rule deciding when an owner is gone, running in an arbitrary
    customer image, that cannot itself wedge. A **widened advisory lock** covering
@@ -257,7 +271,7 @@ The reclaiming provision can **reap and re-provision instead of
    are adopting rather than creating (`docker.go:408`, `k8s.go:162`), so an
    adopter could stop whatever a previous holder left running before it hands
    the sandbox back — bounded, and paid only on the reclaim path. It inherits
-   decision 6's pid problem in its hardest form, since the state it reads was
+   decision 7's pid problem in its hardest form, since the state it reads was
    written by a process that is gone.
 
    **Two of the four cannot cover BYOC, and that is a deciding constraint.**
@@ -297,15 +311,15 @@ the command survives and `Exec` returns the cancellation anyway. That is the
 pre-existing behaviour, not a regression, and decision 3 is why it is preferred
 to blocking.
 
-**A command nothing ever cancels.** Decision 8 names the two: the post-run memory
+**A command nothing ever cancels.** Decision 9 names the two: the post-run memory
 apply and the reaper's standalone sync. A contract about cancellation cannot
 reach a path that is never cancelled, and slice 1 does not pretend to.
 
 ## Slices
 
 **Slice 1 — the cancellation contract.** `sandbox.go`'s `Exec` doc comment; the
-kill on both backends with the detached budgeted context; docker's `execWrapper`
-pid file; a new rung in the shared contract suite; and the two documents that
+kill on both backends with the detached budgeted context, resolving the start
+rather than trusting the pid file's absence; docker's `execWrapper` pid file; a new rung in the shared contract suite; and the two documents that
 currently state the opposite (`contract.go:446-447`'s orphan sentence, plan 13's
 known consequence) corrected in the same PR. `repos.go`'s sweep comment loses
 the race it describes.
@@ -334,27 +348,32 @@ Each rung is a test that fails before the change and passes after.
 2. **`DeadlineExceeded` as well as `Canceled`.** The concrete case this plan is
    written about is a `context.WithTimeout` expiring (`repos.go:180`), not a
    `cancel()`, and the two reach the same arm by different routes.
-3. **With a zero `Timeout`.** The rung must pass on the shape the executor
+3. **Cancellation *before* the pid exists.** The window rung 1 cannot reach:
+   startup paused between the exec request being accepted and the pid write,
+   then cancelled. No orphan may survive it. Without this rung the whole design
+   passes while leaving the window open, which is why decision 6 exists.
+4. **With a zero `Timeout`.** The rung must pass on the shape the executor
    actually uses, which is the shape with no watchdog armed — so neither backend
    can satisfy it by leaning on the wrapper's deadline subshell.
-4. **The marker is inside the group.** A plain `&` child counts; a `setsid`
+5. **The marker is inside the group.** A plain `&` child counts; a `setsid`
    grandchild is deliberately out of scope and must not be asserted.
-5. **The bulk write, on Kubernetes.** A cancelled `WriteFiles` leaves no in-pod
+6. **The bulk write, on Kubernetes.** A cancelled `WriteFiles` leaves no in-pod
    `tar` running — the rung that would fail an `Exec`-only implementation, and
    the reason decision 1 names the seam rather than the method.
-6. **Cancellation is still not a timeout**: the cancelled call reports
+7. **Cancellation is still not a timeout**: the cancelled call reports
    `TimedOut` false and returns `ctx.Err()`.
-7. **A kill that cannot land does not hang the cancellation.** With the kill path
+8. **A kill that cannot land does not hang the cancellation.** With the kill path
    forced to fail or to exceed its budget, the call still returns the caller's
-   cancellation promptly.
-8. **No residue, and no wrong process.** A cancelled call leaves no `.pid`/`.exit`
+   cancellation promptly — including when the budget is spent waiting for a pid
+   that never appears.
+9. **No residue, and no wrong process.** A cancelled call leaves no `.pid`/`.exit`
    state behind, and a kill arriving after the command already exited signals
    nothing.
-9. **The clone's sweep no longer races** on the path where the kill lands: a
+10. **The clone's sweep no longer races** on the path where the kill lands: a
    clone cancelled mid-extraction leaves no `tar` running and no staging
    residue. Scoped to that path deliberately — decision 1 promises best effort,
    so an unconditional assertion would claim more than the design does.
-10. **Mutation testing**, per the repo rule: every guard above gets a mutant that
+11. **Mutation testing**, per the repo rule: every guard above gets a mutant that
    removes it, each dying by a *named* test.
 
 ## Docs
