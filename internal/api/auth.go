@@ -192,30 +192,57 @@ func EnsureAPIKeyInWorkspace(ctx context.Context, pool *pgxpool.Pool, workspace,
 	return tx.Commit(ctx)
 }
 
-// authenticate resolves an x-api-key value to the key's row ID, or "" if the key
-// is unknown, not active, or past its expiry.
+// apiKeyPrincipal is what an x-api-key resolves to: the row's id (the audit
+// principal), the tenant the row binds, and whether it is the env-var-managed
+// bootstrap key. A zero ID means the key did not resolve at all.
+type apiKeyPrincipal struct {
+	ID        string
+	Scope     domain.Scope
+	Bootstrap bool
+}
+
+// authenticate resolves an x-api-key value to its principal, or the zero
+// principal if the key is unknown, not active, past its expiry, or bound to a
+// workspace that is no longer live.
 //
 // Expiry is evaluated here rather than swept: a key whose expires_at has passed
 // stops authenticating the moment it passes, with no background job to be down.
 // The comparison is against the database's clock, the same one that stamped
 // created_at, so a control-plane replica with a skewed clock cannot extend or
 // shorten a credential's life.
-func authenticate(ctx context.Context, pool *pgxpool.Pool, key string) (string, error) {
-	var id string
+//
+// The workspace join is the same kind of condition and deliberately shares the
+// branch: a key whose workspace has been archived — or that names no registry
+// row at all — is refused with the message an unknown key gets, so archiving a
+// tenant discloses nothing about which of its credentials existed (plan 42
+// §6.1, and the reference's own answer, §6.9). created_by rides along because
+// nothing else can reach it: the bootstrap marker is a column, and this is the
+// only query that reads the row (§6.8).
+func authenticate(ctx context.Context, pool *pgxpool.Pool, key string) (apiKeyPrincipal, error) {
+	var p apiKeyPrincipal
 	err := pool.QueryRow(ctx,
-		`SELECT id FROM api_keys
-		 WHERE key_hash = $1 AND status = 'active'
-		   AND (expires_at IS NULL OR expires_at > now())`,
-		hashKey(key)).Scan(&id)
+		`SELECT k.id, k.org_id, k.workspace_id, k.project_id, k.created_by IS NULL
+		   FROM api_keys k
+		   JOIN workspaces w ON w.id = k.workspace_id AND w.archived_at IS NULL
+		 WHERE k.key_hash = $1 AND k.status = 'active'
+		   AND (k.expires_at IS NULL OR k.expires_at > now())`,
+		hashKey(key)).Scan(&p.ID, &p.Scope.OrgID, &p.Scope.WorkspaceID, &p.Scope.ProjectID, &p.Bootstrap)
 	if err == pgx.ErrNoRows {
-		return "", nil
+		return apiKeyPrincipal{}, nil
 	}
-	return id, err
+	return p, err
 }
 
 // requireAPIKey is the management-auth middleware: every /v1 route needs a
 // valid, unrevoked x-api-key. The authenticated key's ID is stored in the
-// request context as the audit principal (sessions.created_by).
+// request context as the audit principal (sessions.created_by), beside the
+// scope it resolved and the bootstrap marker.
+//
+// A management key covers exactly one workspace, so the header can only name
+// that one; selectWorkspace answers the other cases. Both tenancy headers are
+// stamped the moment the scope resolves and before anything writes, so they
+// are present on a 200 and on whatever 4xx the route answers, and absent on
+// the 401s above — which is the whole of the schedule (plan 42 §6.2).
 func requireAPIKey(pool *pgxpool.Pool, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// A repeated field is refused before the value is read. HTTP allows one,
@@ -238,11 +265,20 @@ func requireAPIKey(pool *pgxpool.Pool, next http.Handler) http.Handler {
 			writeError(w, r, err)
 			return
 		}
-		if principal == "" {
+		if principal.ID == "" {
 			writeError(w, r, errAuth("invalid x-api-key"))
 			return
 		}
-		next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), ctxKeyPrincipal, principal)))
+		scope, err := selectWorkspace(r, []domain.Scope{principal.Scope})
+		if err != nil {
+			writeError(w, r, err)
+			return
+		}
+		stampScope(w, scope)
+		ctx := context.WithValue(r.Context(), ctxKeyPrincipal, principal.ID)
+		ctx = context.WithValue(ctx, ctxKeyScope, scope)
+		ctx = context.WithValue(ctx, ctxKeyBootstrapKey, principal.Bootstrap)
+		next.ServeHTTP(w, r.WithContext(ctx))
 	})
 }
 

@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/pgtest"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/queue"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/worktoken"
@@ -66,7 +67,8 @@ func TestMintAndAuthenticate(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if p != (worktoken.Principal{WorkID: item.ID.String(), SessionID: sess.String(), EnvironmentID: env.String()}) {
+	if p != (worktoken.Principal{WorkID: item.ID.String(), SessionID: sess.String(), EnvironmentID: env.String(),
+		Scope: domain.Scope{OrgID: "default", WorkspaceID: "default", ProjectID: "default"}}) {
 		t.Errorf("principal = %+v", p)
 	}
 	if p, _ := worktoken.Authenticate(ctx, pool, "wtk_unknown"); p != (worktoken.Principal{}) {

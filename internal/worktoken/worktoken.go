@@ -50,12 +50,17 @@ type DB interface {
 	Exec(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error)
 }
 
-// Principal is what a token authenticates — the item, its session, and the
-// environment both belong to.
+// Principal is what a token authenticates — the item, its session, the
+// environment both belong to, and the tenant the session sits in.
+//
+// A sessions token declares no tenant of its own: it is minted for one item
+// and inherits that item's session's scope, so the two can never disagree
+// (docs/plan/42_multi-tenant-activation.md §6.1).
 type Principal struct {
 	WorkID        string
 	SessionID     string
 	EnvironmentID string
+	Scope         domain.Scope
 }
 
 // Mint issues the token for workID's claim of sessionID's item and stores its
@@ -97,19 +102,26 @@ func Secret(token string) string {
 // is set by every stop but Queue.Complete, and Complete settles only Claim's
 // items — the brain's turns and the cloud executor's tool runs — never a
 // polled one.
+//
+// The session also carries the scope, which the projection takes at no extra
+// round trip, and the workspace join is a fifth end condition: a token whose
+// workspace has been archived resolves to nothing, so the lane refuses it with
+// the same 401 an unknown token gets (plan 42 §6.1, §6.9).
 func Authenticate(ctx context.Context, pool *pgxpool.Pool, token string) (Principal, error) {
 	var p Principal
 	err := pool.QueryRow(ctx,
-		`SELECT t.work_id, t.session_id, w.environment_id
+		`SELECT t.work_id, t.session_id, w.environment_id, s.org_id, s.workspace_id, s.project_id
 		   FROM work_session_tokens t
 		   JOIN work_items w ON w.id = t.work_id AND w.session_id = t.session_id
 		   JOIN sessions s ON s.id = t.session_id
+		   JOIN workspaces ws ON ws.id = s.workspace_id AND ws.archived_at IS NULL
 		  WHERE t.token_hash = $1
 		    AND CASE WHEN w.state IN ('stopping', 'stopped')
 		             THEN w.stop_requested_at > now() - make_interval(secs => $2)
 		             ELSE w.lease_expires_at > now() END
 		    AND s.archived_at IS NULL`,
-		gatetoken.HashToken(token), queue.WindDown.Seconds()).Scan(&p.WorkID, &p.SessionID, &p.EnvironmentID)
+		gatetoken.HashToken(token), queue.WindDown.Seconds()).
+		Scan(&p.WorkID, &p.SessionID, &p.EnvironmentID, &p.Scope.OrgID, &p.Scope.WorkspaceID, &p.Scope.ProjectID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Principal{}, nil
 	}

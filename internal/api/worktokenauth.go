@@ -7,6 +7,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/worktoken"
 )
 
@@ -96,6 +97,12 @@ func memoryRouteForWorker(method, rest string) bool {
 // can neither reach them nor learn they exist. The request continues with the
 // environment in context (workScope's check) and the session for the memory
 // handlers' attribution.
+//
+// The token declares no tenant: the scope is its session's, resolved by
+// Authenticate (plan 42 §6.1). The header rule is the same one every other
+// lane runs — the reference ignores it on the work lane and stamps nothing
+// there, and applying it uniformly is a registered divergence, because a rule
+// with an exception is the kind that leaks (§6.2).
 func requireWorkToken(pool *pgxpool.Pool, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		token, _ := bearerToken(r)
@@ -108,6 +115,14 @@ func requireWorkToken(pool *pgxpool.Pool, next http.Handler) http.Handler {
 			writeError(w, r, errAuth("invalid sessions token"))
 			return
 		}
+		// Before the route check, so every refusal below an authenticated token
+		// carries the tenancy headers too.
+		scope, err := selectWorkspace(r, []domain.Scope{principal.Scope})
+		if err != nil {
+			writeError(w, r, err)
+			return
+		}
+		stampScope(w, scope)
 		refused := errAuth("the sessions token does not authorize this route")
 		p := r.URL.EscapedPath()
 		switch {
@@ -162,6 +177,7 @@ func requireWorkToken(pool *pgxpool.Pool, next http.Handler) http.Handler {
 		}
 		ctx := context.WithValue(r.Context(), ctxKeyEnvironment, principal.EnvironmentID)
 		ctx = context.WithValue(ctx, ctxKeyWorkSession, principal.SessionID)
+		ctx = context.WithValue(ctx, ctxKeyScope, scope)
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})
 }

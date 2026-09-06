@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/gateconfig"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/gatetoken"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -18,6 +19,10 @@ import (
 // selected by path (isGateConfigPath), never by inspecting the token value, so a
 // gtk_ token never reaches a management handler and an x-api-key never reaches
 // this one.
+//
+// Like the sessions token, a gate token declares no tenant: the scope is its
+// session's, and the header rule and the tenancy stamp are the same ones every
+// other lane runs (plan 42 §6.1, §6.2).
 func requireGateToken(pool *pgxpool.Pool, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		token, hasBearer := bearerToken(r)
@@ -25,7 +30,7 @@ func requireGateToken(pool *pgxpool.Pool, next http.Handler) http.Handler {
 			writeError(w, r, errAuth("missing Authorization: Bearer gate token"))
 			return
 		}
-		sessionID, err := gatetoken.Authenticate(r.Context(), pool, token)
+		sessionID, bound, err := gatetoken.Authenticate(r.Context(), pool, token)
 		if err != nil {
 			writeError(w, r, err)
 			return
@@ -34,7 +39,14 @@ func requireGateToken(pool *pgxpool.Pool, next http.Handler) http.Handler {
 			writeError(w, r, errAuth("invalid gate token"))
 			return
 		}
-		next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), ctxKeySession, sessionID)))
+		scope, err := selectWorkspace(r, []domain.Scope{bound})
+		if err != nil {
+			writeError(w, r, err)
+			return
+		}
+		stampScope(w, scope)
+		ctx := context.WithValue(r.Context(), ctxKeySession, sessionID)
+		next.ServeHTTP(w, r.WithContext(context.WithValue(ctx, ctxKeyScope, scope)))
 	})
 }
 
