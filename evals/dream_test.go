@@ -523,10 +523,11 @@ func TestDreamPipeline(t *testing.T) {
 // as thirteen digest threads.
 //
 // It costs real money and real minutes. Measured on the first successful run
-// (2026-09-06, claude-haiku-4-5): the whole test took 883s, of which the dream
-// itself was 11m15s against the 40-minute budget, and the dream spent 437,110
-// input and 38,968 output tokens across exactly the thirteen digest threads
-// the batch size predicts.
+// (2026-09-06, claude-haiku-4-5): driving the hundred transcripts took 3m4s and
+// the dream itself 10m10s against its 40-minute budget, spending 209,898 input
+// and 43,124 output tokens across exactly the thirteen digest threads the batch
+// size predicts. docs/HISTORY.md carries the run before it, whose input was
+// twice this one's, and what the review found between them.
 func TestDreamPipelineHundred(t *testing.T) {
 	cfg := modeltest.Endpoint(t, modeltest.EvalsEnv)
 	s := newStack(t, cfg)

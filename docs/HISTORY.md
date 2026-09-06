@@ -70,6 +70,15 @@ pipeline session, and the count is the whole question.
 - The store synced twice: 100 memories pushed by the merge stage, then 1 by the index stage. The
   output store's `/MEMORY.md` was present and named them.
 
+A second run at 13ea2d1, after the review round that followed, is the one the shipping code
+produced: `completed` in **10m10s**, again thirteen threads, but **209,898 input tokens** against
+the first run's 437,110 for the same hundred transcripts. The halving is almost certainly the
+review's own finding: the stage-2 message had told each thread to take "the files whose names
+begin with those sequence numbers", and sequence numbers are not padded, so batch 1 claimed
+transcripts 1 to 8 and also 10 to 89 and 100. Every batch read far more than its own. One run
+either side is not a controlled measurement, but nothing else about the run changed and the
+mechanism is exact.
+
 The seeded run beside it (`TestDreamPipeline`, four graders on consolidation quality) passed three
 times in a row on the same code. Its fourth-from-last run is the one that earned the merge rules a
 new line: it left a duplicated preference stated in two files while obeying every rule it had been
