@@ -3,7 +3,6 @@ package docker_test
 import (
 	"context"
 	"errors"
-	"os/exec"
 	"strings"
 	"testing"
 
@@ -17,7 +16,7 @@ import (
 // exact value, so the test must read it from the daemon's own inspect.
 func effectiveNetworkMode(t *testing.T, id string) string {
 	t.Helper()
-	out, err := exec.Command("docker", "inspect", "-f", "{{.HostConfig.NetworkMode}}", id).Output()
+	out, err := dockerCLI(context.Background(), "inspect", "-f", "{{.HostConfig.NetworkMode}}", id).Output()
 	if err != nil {
 		t.Fatalf("docker inspect %s: %v", id, err)
 	}

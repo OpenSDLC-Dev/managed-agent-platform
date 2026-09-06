@@ -80,13 +80,15 @@ Deferred past v1 — **seams reserved, not implemented**, each tracked as an iss
 
 ## Development
 
-Requires **Go 1.26+** and Docker (the storage and API contract tests start
+Requires **Go 1.26+** and Docker: the storage and API contract tests start
 their own disposable Postgres containers, and the sandbox, shell, toolset, and
-executor tests start a disposable `debian:stable-slim` container). The Kubernetes
+executor tests start a disposable `debian:stable-slim` container. The fixtures
+that drive the daemon through the `docker` CLI rather than its HTTP API — the
+storage, API and sandbox ones — need that binary on PATH as well. The Kubernetes
 sandbox provider's contract test additionally needs a cluster — a local
 [kind](https://kind.sigs.k8s.io) cluster works, and CI provisions one. A missing
-daemon or cluster is a hard test failure, not a skip, so the coverage gate cannot
-be hollowed out.
+daemon, binary or cluster is a hard test failure, not a skip, so the coverage
+gate cannot be hollowed out.
 
 ```bash
 make build                 # build (go build ./...)

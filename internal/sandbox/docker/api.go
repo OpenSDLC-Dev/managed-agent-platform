@@ -25,15 +25,22 @@ type apiClient struct {
 	base string
 }
 
-// newAPIClient resolves the daemon address: the explicit host, else
-// DOCKER_HOST, else the well-known socket.
-func newAPIClient(host string) (*apiClient, error) {
+// daemonHost resolves the daemon address: the explicit host, else DOCKER_HOST,
+// else the well-known socket. It knows nothing of `docker context`, which only
+// the CLI reads — so a test that shells out to `docker` must hand it this
+// address, or the two can reach different daemons on the same machine (#627).
+func daemonHost(host string) string {
 	if host == "" {
 		host = os.Getenv("DOCKER_HOST")
 	}
 	if host == "" {
 		host = "unix:///var/run/docker.sock"
 	}
+	return host
+}
+
+func newAPIClient(host string) (*apiClient, error) {
+	host = daemonHost(host)
 	switch {
 	case strings.HasPrefix(host, "unix://"):
 		path := strings.TrimPrefix(host, "unix://")

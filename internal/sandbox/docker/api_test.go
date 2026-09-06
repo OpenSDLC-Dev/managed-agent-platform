@@ -239,6 +239,25 @@ func TestNewResolvesDaemonAddress(t *testing.T) {
 	}
 }
 
+// The address a test must hand the `docker` CLI so it cannot follow a `docker
+// context` to a different daemon (#627). TestNewResolvesDaemonAddress cannot
+// pin the last step: an unset DOCKER_HOST and an explicit unix host both leave
+// the client's base at "http://docker", so only the resolved address separates
+// them.
+func TestDaemonHostFallsBackToTheWellKnownSocket(t *testing.T) {
+	t.Setenv("DOCKER_HOST", "tcp://10.0.0.1:2375")
+	if got := daemonHost("unix:///explicit.sock"); got != "unix:///explicit.sock" {
+		t.Errorf("explicit host: %q", got)
+	}
+	if got := daemonHost(""); got != "tcp://10.0.0.1:2375" {
+		t.Errorf("DOCKER_HOST: %q", got)
+	}
+	t.Setenv("DOCKER_HOST", "")
+	if got := daemonHost(""); got != "unix:///var/run/docker.sock" {
+		t.Errorf("fallback: %q", got)
+	}
+}
+
 func TestProvisionValidatesSpec(t *testing.T) {
 	p := fakeDaemon(t, func(w http.ResponseWriter, r *http.Request) {
 		t.Errorf("unexpected call to %s", r.URL.Path)

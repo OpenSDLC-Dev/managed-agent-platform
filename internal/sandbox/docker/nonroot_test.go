@@ -3,7 +3,6 @@ package docker_test
 import (
 	"context"
 	"errors"
-	"os/exec"
 	"strings"
 	"testing"
 
@@ -36,7 +35,7 @@ USER app
 // everything is already the sandbox user's.
 func TestBulkWriteOnANonRootImage(t *testing.T) {
 	image := "map-nonroot-test:latest"
-	build := exec.Command("docker", "build", "-q", "-t", image, "-")
+	build := dockerCLI(context.Background(), "build", "-q", "-t", image, "-")
 	build.Stdin = strings.NewReader(nonRootDockerfile)
 	if out, err := build.CombinedOutput(); err != nil {
 		t.Fatalf("build the non-root image: %v\n%s", err, out)
@@ -131,7 +130,7 @@ USER app
 // be among them.
 func TestTheRootShedRunsNoAgentCodeOnANonRootImage(t *testing.T) {
 	image := "map-hooked-test:latest"
-	build := exec.Command("docker", "build", "-q", "-t", image, "-")
+	build := dockerCLI(context.Background(), "build", "-q", "-t", image, "-")
 	build.Stdin = strings.NewReader(hookedDockerfile)
 	if out, err := build.CombinedOutput(); err != nil {
 		t.Fatalf("build the hooked image: %v\n%s", err, out)
@@ -192,7 +191,7 @@ func TestTheRootShedRunsNoAgentCodeOnANonRootImage(t *testing.T) {
 // docker-backend row for TestBulkWriteOnANonRootImage's reason.
 func TestWriteIntoARootOwnedParentOnANonRootImage(t *testing.T) {
 	image := "map-nonroot-test:latest"
-	build := exec.Command("docker", "build", "-q", "-t", image, "-")
+	build := dockerCLI(context.Background(), "build", "-q", "-t", image, "-")
 	build.Stdin = strings.NewReader(nonRootDockerfile)
 	if out, err := build.CombinedOutput(); err != nil {
 		t.Fatalf("build the non-root image: %v\n%s", err, out)
@@ -256,7 +255,7 @@ func TestWriteIntoARootOwnedParentOnANonRootImage(t *testing.T) {
 // on.
 func TestBulkWriteIntoARootOwnedParentOnANonRootImage(t *testing.T) {
 	image := "map-nonroot-test:latest"
-	build := exec.Command("docker", "build", "-q", "-t", image, "-")
+	build := dockerCLI(context.Background(), "build", "-q", "-t", image, "-")
 	build.Stdin = strings.NewReader(nonRootDockerfile)
 	if out, err := build.CombinedOutput(); err != nil {
 		t.Fatalf("build the non-root image: %v\n%s", err, out)
