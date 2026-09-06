@@ -78,9 +78,9 @@ var refreshClient = &http.Client{
 		return http.ErrUseLastResponse
 	},
 	Transport: &http.Transport{
-		DialContext: (&net.Dialer{
+		DialContext: (&dialguard.Dialer{
 			Timeout: refreshTimeout,
-			Control: dialguard.Control(func(ip net.IP) error { return refreshIPAllowed(ip) }),
+			Allow:   func(_ context.Context, ip net.IP) error { return refreshIPAllowed(ip) },
 		}).DialContext,
 		ForceAttemptHTTP2:      true,
 		MaxIdleConnsPerHost:    2,

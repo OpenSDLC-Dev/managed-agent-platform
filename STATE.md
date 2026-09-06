@@ -11,10 +11,11 @@ the one header-narrowing rule (its malformed- and not-found message templates ve
 the reference). Slices 2-6 are not started.
 
 **#78 — confirming documented wire assumptions against a real managed-agents endpoint.**
-Four recording days, 1,301 request/response pairs for about US$1.12, observed once at
-cost in a private archive; 2026-09-05's batch was the first multi-workspace capture,
-the recording plan 42 slice 1 was gated on. #78 stays open — 121 registry entries name
-it as their live tracker, and the debt is now analysis rather than recording.
+Four recording days, 1,346 request/response pairs for about US$1.12, observed once at
+cost in a private archive. 2026-09-05 added the first multi-workspace capture (the one
+plan 42 slice 1 was gated on) and plan 41's `/v1/dreams` probe, refused: the organization
+is not enrolled in that preview. #78 stays open — 121 registry entries name it as their
+live tracker, and the debt is analysis rather than recording, that blocked checklist aside.
 
 ## Tasks
 
@@ -25,4 +26,6 @@ it as their live tracker, and the debt is now analysis rather than recording.
 - [ ] Slice 4 — read predicates and cross-references (the behavior change)
 - [ ] Slice 5 — the leaks inheritance does not cover
 - [ ] Slice 6 — the operator surface, the acceptance run, close-out (#56 closes)
+- [ ] Record plan 41's `/v1/dreams` checklist (its §8.2) — attempted 2026-09-05, 45 pairs,
+      US$0, every item unanswered; waits on preview enrollment, and no slice waits on it
 - [ ] Read the 72 un-analysed comparison rows from 2026-09-02 (#78)

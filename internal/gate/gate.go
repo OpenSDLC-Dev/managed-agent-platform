@@ -27,7 +27,6 @@ import (
 	"strconv"
 	"strings"
 	"sync/atomic"
-	"syscall"
 	"time"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/dialguard"
@@ -195,21 +194,26 @@ func rootedDial(base func(ctx context.Context, network, addr string) (net.Conn, 
 // newDialer is the one dialer the gate opens every socket through — both
 // handlers, and the transport under handlePlain.
 //
+// It resolves each name once and judges every address that came back before any
+// connect, so the address the floor admitted is the address the socket uses
+// (#601, docs/plan/44). What that does not change is which answer the resolver
+// gives: a `search` list still completes a relative name, and the floor still
+// admits the RFC 1918 address such a completion may return. Rooting is the only
+// thing here that touches that, and only for the one class it applies to.
+//
 // The floor runs only for a dial a widening flag admitted: `allowed_hosts` is an
 // operator's list and this proxy is the operator's own egress, so narrowing that
-// half would be a plan 12 decision rather than this one. ControlContext rather
-// than Control, because the marker is what tells the two apart and only the
-// context carries it; Go calls it once per candidate address, so a dual-stack or
-// multi-A name is judged on every address it is actually about to connect to.
-func newDialer(ipAllowed func(net.IP) error) *net.Dialer {
-	floor := dialguard.Control(ipAllowed)
-	return &net.Dialer{
+// half would be a plan 12 decision rather than this one. Allow takes a context
+// because the admission marker is what tells the classes apart and only the
+// context carries it.
+func newDialer(ipAllowed func(net.IP) error) *dialguard.Dialer {
+	return &dialguard.Dialer{
 		Timeout: dialTimeout,
-		ControlContext: func(ctx context.Context, network, address string, c syscall.RawConn) error {
+		Allow: func(ctx context.Context, ip net.IP) error {
 			if !admissionOf(ctx).floored() {
 				return nil
 			}
-			return floor(network, address, c)
+			return ipAllowed(ip)
 		},
 	}
 }

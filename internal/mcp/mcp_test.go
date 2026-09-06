@@ -1127,7 +1127,7 @@ func TestDefaultClientRefusesRedirects(t *testing.T) {
 
 func TestDefaultClientGuardsEveryDial(t *testing.T) {
 	t.Parallel()
-	// The guard runs in the dialer's Control hook, so it sees the resolved
+	// The guard runs before the connect, on the resolved
 	// address of each dial rather than the name in the URL — a rebind that
 	// answers with 127.0.0.1 on the second lookup is refused like the first.
 	transport, ok := mcp.DefaultClient.Transport.(*http.Transport)
@@ -1135,7 +1135,7 @@ func TestDefaultClientGuardsEveryDial(t *testing.T) {
 		t.Fatalf("DefaultClient.Transport = %T, want *http.Transport", mcp.DefaultClient.Transport)
 	}
 	if transport.DialContext == nil {
-		t.Fatal("DefaultClient dials without a Control hook")
+		t.Fatal("DefaultClient dials without the guarded dialler")
 	}
 	for _, addr := range []string{
 		"127.0.0.1:443", "169.254.169.254:80", "[::1]:443",
@@ -1144,7 +1144,7 @@ func TestDefaultClientGuardsEveryDial(t *testing.T) {
 		_, err := transport.DialContext(context.Background(), "tcp", addr)
 		// Asserting only that the dial failed proves nothing about the guard:
 		// none of these addresses answers, so each fails with or without one,
-		// and deleting the Control hook left this test green. The failure has
+		// and deleting the address guard left this test green. The failure has
 		// to be the guard's own refusal.
 		if err == nil || !strings.Contains(err.Error(), "disallowed address") {
 			t.Errorf("dial to %s = %v, want the guard's refusal", addr, err)
@@ -2107,7 +2107,7 @@ func TestCallClientCarriesEveryGuardDefaultClientDoes(t *testing.T) {
 		t.Fatalf("CallClient.Transport = %T, want *http.Transport", mcp.CallClient.Transport)
 	}
 	if transport.DialContext == nil {
-		t.Fatal("CallClient dials without a Control hook — the address guard is the SSRF floor")
+		t.Fatal("CallClient dials without the guarded dialler — the address guard is the SSRF floor")
 	}
 	// The guard itself, on the same address classes the twin refuses.
 	for _, addr := range []string{"127.0.0.1:443", "169.254.169.254:80", "[64:ff9b::7f00:1]:443"} {
