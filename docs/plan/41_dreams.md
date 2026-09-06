@@ -154,9 +154,10 @@ of their own, so a claim that rests on them alone is dated, and a claim the spec
 types can also carry cites those; `anthropic-sdk-go` at tag v1.70.1 (`betadream.go`,
 `beta.go`, `internal/requestconfig/requestconfig.go`) and its `scripts/mock-spec.json.gz`
 at v1.71.0; `anthropic-cli` at tag v1.30.0 (`pkg/cmd/betadream.go`, `pkg/cmd/cmd.go`).
-Slice 0's recording, once taken, is the source for everything §2.7 lists as unobserved;
-until then those items stay INFERRED (§8.1), and the one public observation §2.7 names
-is cited where it bears.
+Slice 0's recording, once taken, is the source for the recording-settleable items §2.7
+lists as unobserved; until then those items stay INFERRED (§8.1), the pipeline's design
+stays *ours* whatever the recording shows (§2.7's last sentence, §3), and the one public
+observation §2.7 names is cited where it bears.
 
 ### 2.2 Resources and paths
 
@@ -1395,8 +1396,10 @@ states the alternative it beat.
    organization is not enrolled in the preview, so the recording is taken when it is,
    and slices 1–4 proceed meanwhile with the recording-settleable choices INFERRED
    (§8.1); the checklist is §8.2. Rejected: waiting — the shapes are the SDK's and the
-   spec's, and every inference is a status, a name or a visibility rule a small fix
-   corrects.
+   spec's, and every inference is a status code, a name, a create-time validation rule
+   or a visibility rule: a refuted one costs a registry rewrite and a bounded fix in the
+   handler that holds it, or stays as a divergence registered as ours where this
+   platform's design decides it (§9).
 10. **The pin stays at v1.70.1** (§2.1): v1.71.0 changes nothing this plan reads.
 11. **`speed` is accepted, echoed and ignored**, as it is for agents. Rejected: a 400 on
     `fast` — the reference rejects "invalid combinations", and which combinations are
@@ -1446,10 +1449,16 @@ states the alternative it beat.
 ### Risks, and what bounds each
 
 - **Building ahead of the recording.** Fifteen wire-visible choices are INFERRED
-  (§8.1) while enrollment is pending. Each is a status code, a name or a visibility
-  rule — a registry entry and a small fix if the recording refutes it, never a
-  structural change; the shapes are the SDK's and the spec's, and the pipeline's design
-  (§3) is this platform's whatever the reference does.
+  (§8.1) while enrollment is pending: status codes and error types at create, the input
+  cardinality rule, what `parseModel` and the `speed` check refuse, the output store's
+  name and clone attribution, the hidden rows' and the transcripts' visibility, and
+  what a canceled or running pipeline session answers. A refuted one costs its registry
+  rewrite and a fix inside the handler or arm that holds it — a status, a message, a
+  validation branch, a name — and where the choice is this platform's design rather
+  than the reference's (the hidden agent, the transcripts as files, the read-only
+  session), the entry moves to the CONFIRMED section as ours instead. What the
+  recording cannot move: the shapes, which are the SDK's and the spec's, and the
+  pipeline's design (§3).
 - **The model window.** A batch of eight 24 KiB transcripts is about 50k tokens of tool
   results in one thread; the merge stage reads up to 13 digests of 4 KiB — 52 KiB, one
   per batch — plus the store files `plan.md` routes it to, read through the mount one
