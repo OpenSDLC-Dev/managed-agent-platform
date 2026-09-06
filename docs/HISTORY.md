@@ -49,6 +49,52 @@ new directory and in-repo citations re-pointed in the moving PR (plan
 
 ---
 
+## Dreams — the in-place run, and plan 41 closed (plan 41 slice 4, run 2026-09-07) — ✅ passed
+
+Slice 4 is the plan's last code, so this record carries both the acceptance run and the archived
+plan's progress summary.
+
+**The run.** `TestDreamPipelineInPlace` at the tip of `feat/dreams-slice-4`, through the live eval
+tier rather than the compose stack, because what it has to show is what an in-place session cannot
+do. A store of two memories — one the transcript retires outright (the vendor portal was shut
+down), one nothing speaks to — consolidated under `output_behavior: update_existing`.
+
+- `completed` in **1m5s**, spending 16,867 input and 4,272 output tokens over stage spends of
+  4 / 8 / 4 / 4, every stage far inside its cap.
+- `outputs[]` named the input store: no clone was written, which is the whole of what in-place
+  means on the wire.
+- The retired memory **is still there**, and is no longer the fact it was: rewritten as a tombstone
+  naming the internal finance app that replaced it. Nothing in that session could have deleted it —
+  `bash` is disabled and the file tools do not remove — so the tombstone is the design working
+  rather than the model being tidy.
+- Beside it, a new `/facts/expenses-filing.md` carrying where expenses are filed now, and
+  `/MEMORY.md` rewritten with the retirement listed where the caller will look for it.
+- `/facts/build.md`, which no transcript mentioned, came back byte-identical.
+
+**Plan 41's delivery, in five slices.** Slice 1 landed the surface and the storage — migration
+`0034`, `drm_`, the five routes, create-time validation, the list, and archive and cancel over a
+state machine with no runner behind it. Slice 2 landed the runner: the sweep, the store clone, the
+hidden internal agent and environment, transcript rendering with its redaction and caps, and a
+one-stage pipeline, accepted end to end with the real `ant` CLI. Slice 3 replaced that one stage
+with the plan's four, added the batched digest threads, measured the turn caps against live runs
+that refuted the plan's first guess, and was accepted at the hundred-transcript bound. Slice 4 is
+this one. Slice 0, the recording that would settle the registry's dream inferences, was attempted
+2026-09-05 and answered nothing — the organization is not enrolled in the preview — and is the
+only outstanding item; it settles entries rather than code, which is why the plan archives without
+it. [#475](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/475) stays open until it
+lands.
+
+**What the slices taught, which the plan could not have known.** The merge rules were missing a
+rule: two memories stating the same thing are folded into one, because "nothing is removed on
+suspicion" correctly reads a duplicate as no licence to remove, and a live run left both files in
+place while obeying every rule it had. An idle session is not a finished stage — a failed turn
+leaves exactly the state a finished one does, and the two delegation bounds leave it wearing a
+different stop reason again. And a batch named by a filename prefix is not a batch: sequence
+numbers are not padded, so at the hundred bound one batch claimed most of the others, which cost
+twice the input tokens until it was found.
+
+---
+
 ## Dreams — the hundred-transcript bound through the four-stage pipeline (plan 41 slice 3, run 2026-09-06) — ✅ passed
 
 Plan §1 slice 3 asks for "a second acceptance run at the 100-transcript bound", the number §7 and

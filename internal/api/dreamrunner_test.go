@@ -248,10 +248,13 @@ func primaryStageMessages(t *testing.T, s *tserver, sessionID string) []string {
 }
 
 // wantStageMessage renders the stage message the runner owes, from the mount
-// the session really carries and the dream's own instructions.
+// the session really carries and the dream's own instructions. Every caller
+// here drives a create_new dream, so the rendering is create_new's; an
+// in-place case would have to say so, which is why the flag is spelled rather
+// than defaulted.
 func wantStageMessage(t *testing.T, s *tserver, sessionID string, stage, transcripts int, instructions string) string {
 	t.Helper()
-	return api.DreamStageMessageForTest(stage, memoryMount(t, s, sessionID), transcripts, instructions)
+	return api.DreamStageMessageForTest(stage, memoryMount(t, s, sessionID), transcripts, instructions, false)
 }
 
 // seededDreamBody is the create body every arm's case uses: one store holding

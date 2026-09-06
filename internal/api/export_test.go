@@ -259,9 +259,13 @@ const DreamStageCount = dreamStageCount
 
 // DreamStageMessageForTest renders the message the runner posts to open a
 // stage, so an api_test case compares the log against what the code says
-// rather than against prose of its own. Test binary only.
-func DreamStageMessageForTest(stage int, storeMount string, transcripts int, instructions string) string {
-	return dreamStageMessage(stage, storeMount, transcripts, instructions)
+// rather than against prose of its own. The in-place flag is a parameter
+// rather than a fixed false because the two variants say different things
+// about deletion, and a test that walked a create_new dream's log against an
+// in-place rendering would pass on prose neither stage ever posted. Test
+// binary only.
+func DreamStageMessageForTest(stage int, storeMount string, transcripts int, instructions string, inPlace bool) string {
+	return dreamStageMessage(stage, storeMount, transcripts, instructions, inPlace)
 }
 
 // SetDreamStageTurnCapForTest lowers one stage's turn cap so the over-budget

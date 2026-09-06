@@ -10,9 +10,11 @@ import (
 	"net/http"
 )
 
-// Wire error types (shared.ErrorType in the reference SDK). The reference has
-// no dedicated conflict type; optimistic-version mismatches surface as
-// invalid_request_error with HTTP 409.
+// Wire error types (shared.ErrorType in the reference SDK). The shared union
+// carries no generic conflict type, so an optimistic-version mismatch surfaces
+// as invalid_request_error with HTTP 409 (errConflict). Where a reference
+// schema names a conflict type of its own — the memory surface's two and the
+// dream surface's one, all three below — this platform uses the schema's.
 const (
 	errTypeInvalidRequest  = "invalid_request_error"
 	errTypeAuthentication  = "authentication_error"
@@ -33,6 +35,11 @@ const (
 	// error in this platform that carries fields beyond type and message.
 	errTypeMemoryPathConflict       = "memory_path_conflict_error"
 	errTypeMemoryPreconditionFailed = "memory_precondition_failed_error"
+	// The dream surface's own 409 (plan 41 §5.3), named by the reference
+	// schema like the memory pair above: BetaTargetStoreHeldError is the
+	// conflict_error arm of BetaDreamingError, and the only arm of that union
+	// with no shared.ErrorType counterpart.
+	errTypeConflict = "conflict_error"
 )
 
 // apiError is an error that maps onto the Anthropic wire error envelope.
@@ -52,6 +59,15 @@ type apiError struct {
 type apiErrorWithFields struct {
 	apiError
 	fields map[string]string
+}
+
+// apiErrorWithHeaders is an apiError the reference pins response headers to.
+// Exactly one is — the dream target-store hold, whose `x-should-retry: false`
+// is contract rather than decoration — so, for the reason above, the map sits
+// in its own type instead of a nil field on every other error.
+type apiErrorWithHeaders struct {
+	apiError
+	headers map[string]string
 }
 
 func (e *apiError) Error() string { return e.message }
@@ -87,6 +103,20 @@ func errMemoryPathConflict(conflictingID, conflictingPath, format string, args .
 // `expected_content_sha256` is. The schema carries no extra members.
 func errMemoryPrecondition(format string, args ...any) *apiError {
 	return &apiError{http.StatusConflict, errTypeMemoryPreconditionFailed, fmt.Sprintf(format, args...)}
+}
+
+// errTargetStoreHeld is the dream create's 409 (BetaTargetStoreHeldError, plan
+// 41 §5.3): the update_existing target is still held by a live in-place dream.
+// The header is load-bearing — without it the SDK spends two retries on a
+// conflict that nothing but the holding dream's close can clear
+// (anthropic-sdk-go internal/requestconfig, MaxRetries: 2 and the
+// x-should-retry check ahead of it) — and this is the only response on the
+// platform that carries one.
+func errTargetStoreHeld(format string, args ...any) error {
+	return &apiErrorWithHeaders{
+		apiError: apiError{http.StatusConflict, errTypeConflict, fmt.Sprintf(format, args...)},
+		headers:  map[string]string{"x-should-retry": "false"},
+	}
 }
 
 func errAuth(message string) *apiError {
@@ -140,6 +170,16 @@ func writeError(w http.ResponseWriter, r *http.Request, err error) {
 		// code path whatever the schema added.
 		maps.Copy(inner, withFields.fields)
 		err = &withFields.apiError
+	}
+	var withHeaders *apiErrorWithHeaders
+	if errors.As(err, &withHeaders) {
+		// Same shape as the fields above, and set before writeJSON writes the
+		// status line: the headers come off, the plain apiError underneath
+		// renders through the one code path.
+		for k, v := range withHeaders.headers {
+			w.Header().Set(k, v)
+		}
+		err = &withHeaders.apiError
 	}
 	var ae *apiError
 	if !errors.As(err, &ae) {

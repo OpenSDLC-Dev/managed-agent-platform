@@ -1,6 +1,8 @@
 package api_test
 
 import (
+	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -8,11 +10,11 @@ import (
 	"testing"
 )
 
-// The dream wire surface (plan 41 slice 1, #475): shapes per the pinned SDK's
-// BetaDream, bounds per the OpenAPI spec the SDK is generated from. Slice 1
-// serves the five routes with no runner behind them — a created dream stays
-// `pending`, and every `output_behavior.type: update_existing` body is refused
-// until slice 4.
+// The dream wire surface (plan 41, #475): shapes per the pinned SDK's
+// BetaDream, bounds per the OpenAPI spec the SDK is generated from. The
+// create's last rule is `update_existing`'s (slice 4): the target must be the
+// dream's own memory_store input, and at most one live in-place dream may hold
+// a store — a second is the 409 BetaTargetStoreHeldError names.
 
 // dreamFields is BetaDream's field set (anthropic-sdk-go v1.70.1
 // betadream.go:150-178): all fourteen are api:"required" and the spec forbids
@@ -250,11 +252,35 @@ func TestDreamCreateRejections(t *testing.T) {
 		{"duplicate across both spellings", with([]any{storeInput,
 			map[string]any{"type": "sessions", "session_ids": []any{sesn, alias}}}),
 			fmt.Sprintf("session_ids must not repeat %q", alias)},
-		// The arm's key set is checked before the slice-4 refusal (§5.2): with
-		// that check removed this body would still 400, on the refusal.
+		// The arm's key set is checked before its target rules (§5.2): with that
+		// check removed this body would 400 on the missing memory_store_id instead.
 		{"update_existing carrying an unknown key", dreamWith(storeID, sessionIDs, "output_behavior",
 			map[string]any{"type": "update_existing", "extra": 1}),
 			`unknown field "extra"`},
+		// The target's own rules (§5.3). memory_store_id is required with a
+		// minLength of 1 (BetaOutputBehaviorUpdateExisting), and the one value
+		// it may take is the dream's own memory_store input — the EAP rule the
+		// guide states and this platform infers the wording of.
+		{"update_existing with no target", dreamWith(storeID, sessionIDs, "output_behavior",
+			map[string]any{"type": "update_existing"}),
+			"output_behavior.memory_store_id is required"},
+		{"update_existing with a null target", dreamWith(storeID, sessionIDs, "output_behavior",
+			map[string]any{"type": "update_existing", "memory_store_id": nil}),
+			"output_behavior.memory_store_id is required"},
+		{"update_existing with an empty target", dreamWith(storeID, sessionIDs, "output_behavior",
+			map[string]any{"type": "update_existing", "memory_store_id": ""}),
+			"output_behavior.memory_store_id is required"},
+		{"update_existing with a non-string target", dreamWith(storeID, sessionIDs, "output_behavior",
+			map[string]any{"type": "update_existing", "memory_store_id": 7}),
+			"memory_store_id must be a string"},
+		{"update_existing targeting another store", dreamWith(storeID, sessionIDs, "output_behavior",
+			map[string]any{"type": "update_existing", "memory_store_id": otherStore}),
+			"output_behavior.memory_store_id must be the job's own memory_store input"},
+		// A target that exists nowhere takes the same rule, not a not-found:
+		// the equality check runs before the store lookup (§5.2's order).
+		{"update_existing targeting a store that does not exist", dreamWith(storeID, sessionIDs,
+			"output_behavior", map[string]any{"type": "update_existing", "memory_store_id": ghostStore}),
+			"output_behavior.memory_store_id must be the job's own memory_store input"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			status, body := s.do(http.MethodPost, "/v1/dreams", tc.body)
@@ -264,15 +290,138 @@ func TestDreamCreateRejections(t *testing.T) {
 
 	// 4,096 characters is the bound, not the break.
 	createDream(t, s, dreamWith(storeID, sessionIDs, "instructions", strings.Repeat("x", 4096)))
+}
 
-	// update_existing is refused until slice 4 lands its runtime path, whether
-	// or not the target is the input store — the refusal comes first (§5.3).
-	const refusal = "output_behavior.type update_existing is not available yet on this platform"
-	for _, target := range []string{storeID, otherStore} {
-		status, body := s.do(http.MethodPost, "/v1/dreams", dreamWith(storeID, sessionIDs, "output_behavior",
-			map[string]any{"type": "update_existing", "memory_store_id": target}))
-		wantErrMsg(t, status, body, http.StatusBadRequest, "invalid_request_error", refusal)
+// inPlaceDream is the create body of an update_existing dream over its own
+// input store — the only target the EAP rule admits (§5.3).
+func inPlaceDream(storeID string, sessionIDs []any) map[string]any {
+	return dreamWith(storeID, sessionIDs, "output_behavior",
+		map[string]any{"type": "update_existing", "memory_store_id": storeID})
+}
+
+// settleDreamTerminal puts a dream in a terminal status with closed_at still
+// null: the window between a dream ending and the runner's closing arm
+// reaching it, and the whole of what the hold has to cover beyond `pending`
+// and `running`. The closing arm itself is tested in dreamrunner_test.go; what
+// is under test here is the route's answer to each state, so each is written
+// directly rather than walked to.
+func settleDreamTerminal(t *testing.T, s *tserver, dreamID, status string) {
+	t.Helper()
+	if _, err := s.pool.Exec(context.Background(),
+		`UPDATE dreams SET status = $2, ended_at = now() WHERE id = $1`, dreamID, status); err != nil {
+		t.Fatalf("settle dream %s at %s: %v", dreamID, status, err)
 	}
+}
+
+// stampDreamClosed is what the closing arm's commit does to the hold.
+func stampDreamClosed(t *testing.T, s *tserver, dreamID string) {
+	t.Helper()
+	if _, err := s.pool.Exec(context.Background(),
+		`UPDATE dreams SET closed_at = now() WHERE id = $1`, dreamID); err != nil {
+		t.Fatalf("close dream %s: %v", dreamID, err)
+	}
+}
+
+// wantTargetHeld asserts the hold's refusal: 409 conflict_error
+// (BetaTargetStoreHeldError), the holding dream named in the message, and the
+// x-should-retry header the SDK reads instead of retrying a 409 twice.
+func wantTargetHeld(t *testing.T, s *tserver, body map[string]any, holder string) {
+	t.Helper()
+	res := s.doRaw(http.MethodPost, "/v1/dreams", body, map[string]string{"x-api-key": testKey})
+	defer res.Body.Close()
+	var envelope map[string]any
+	if err := json.NewDecoder(res.Body).Decode(&envelope); err != nil {
+		t.Fatalf("decode the hold's response: %v", err)
+	}
+	wantErr(t, res.StatusCode, envelope, http.StatusConflict, "conflict_error")
+	inner, _ := envelope["error"].(map[string]any)
+	if msg, _ := inner["message"].(string); !strings.Contains(msg, holder) {
+		t.Errorf("error.message = %q, want it to name the holding dream %s", msg, holder)
+	}
+	if got := res.Header.Get("x-should-retry"); got != "false" {
+		t.Errorf("x-should-retry = %q, want %q", got, "false")
+	}
+}
+
+// The hold (§5.3): at most one live update_existing dream per target store,
+// and nothing else on that store constrained by it.
+func TestDreamUpdateExistingHold(t *testing.T) {
+	s := newTestServer(t)
+	storeID, sessionIDs := createDreamInputs(t, s, 1)
+
+	held := createDream(t, s, inPlaceDream(storeID, sessionIDs))
+	if ob, _ := held["output_behavior"].(map[string]any); len(ob) != 2 ||
+		ob["type"] != "update_existing" || ob["memory_store_id"] != storeID {
+		t.Errorf("output_behavior = %v, want the update_existing arm echoed", held["output_behavior"])
+	}
+	// The second in-place create on the same store is the 409, not a 500 out
+	// of the raw unique violation.
+	wantTargetHeld(t, s, inPlaceDream(storeID, sessionIDs), held["id"].(string))
+
+	// A create_new dream holds nothing: its input is read once and its output
+	// is its own, so the store takes as many as a caller likes, held or not.
+	createDream(t, s, dreamBody(storeID, sessionIDs))
+	createDream(t, s, dreamBody(storeID, sessionIDs))
+
+	// And the hold is per target store, not global to the surface.
+	other := createMemoryStore(t, s, "dream-second-target")
+	createDream(t, s, inPlaceDream(other, sessionIDs))
+}
+
+// A create_new dream over a store holds nothing, so an in-place dream may take
+// the same store while it runs — the converse of the case above.
+func TestDreamCreateNewHoldsNothing(t *testing.T) {
+	s := newTestServer(t)
+	storeID, sessionIDs := createDreamInputs(t, s, 1)
+
+	created := createDream(t, s, dreamBody(storeID, sessionIDs))
+	var target *string
+	if err := s.pool.QueryRow(context.Background(),
+		`SELECT target_memory_store_id FROM dreams WHERE id = $1`, created["id"]).Scan(&target); err != nil {
+		t.Fatalf("read target_memory_store_id: %v", err)
+	}
+	if target != nil {
+		t.Errorf("a create_new dream stored target_memory_store_id = %q, want null", *target)
+	}
+	createDream(t, s, inPlaceDream(storeID, sessionIDs))
+}
+
+// The hold outlives the dream's status: every terminal state keeps it until
+// the closing arm stamps closed_at, which is the one predicate behind both
+// windows the spec names — a cancel whose final writes are still landing, and
+// a just-finished dream still closing (§5.3).
+func TestDreamHoldSurvivesTerminalUntilClosed(t *testing.T) {
+	s := newTestServer(t)
+	_, sessionIDs := createDreamInputs(t, s, 1)
+
+	for _, status := range []string{"completed", "failed", "canceled"} {
+		t.Run(status, func(t *testing.T) {
+			storeID := createMemoryStore(t, s, "dream-hold-"+status)
+			holder := createDream(t, s, inPlaceDream(storeID, sessionIDs))["id"].(string)
+
+			settleDreamTerminal(t, s, holder, status)
+			wantTargetHeld(t, s, inPlaceDream(storeID, sessionIDs), holder)
+
+			stampDreamClosed(t, s, holder)
+			createDream(t, s, inPlaceDream(storeID, sessionIDs))
+		})
+	}
+}
+
+// A dream canceled while `pending` never had a session, so it ends and closes
+// in one commit (§5.3) and the target is free the moment the cancel returns.
+func TestDreamCancelWhilePendingReleasesTheHold(t *testing.T) {
+	s := newTestServer(t)
+	storeID, sessionIDs := createDreamInputs(t, s, 1)
+
+	holder := createDream(t, s, inPlaceDream(storeID, sessionIDs))["id"].(string)
+	wantTargetHeld(t, s, inPlaceDream(storeID, sessionIDs), holder)
+
+	status, body := s.do(http.MethodPost, "/v1/dreams/"+holder+"/cancel", nil)
+	if status != http.StatusOK || body["status"] != "canceled" {
+		t.Fatalf("cancel: status %d, dream %v", status, body)
+	}
+	createDream(t, s, inPlaceDream(storeID, sessionIDs))
 }
 
 func dreamWithModel(storeID string, sessionIDs []any, model any) map[string]any {

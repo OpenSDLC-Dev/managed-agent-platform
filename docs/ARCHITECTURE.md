@@ -249,7 +249,13 @@ session transcripts, and it does that work in an ordinary session the control pl
 for itself. The dream runner clones the input store, renders each input session's event log
 to markdown — secrets shape-redacted and each transcript capped, the log streamed in pages
 rather than loaded — and creates a session mounting the clone read-write beside those
-transcripts and an `INDEX.md`, which ride in as `file` resources whose rows the dream owns. The agent
+transcripts and an `INDEX.md`, which ride in as `file` resources whose rows the dream owns.
+An `update_existing` dream skips the clone and mounts the caller's own store instead, which
+changes two things: a partial unique index holds that store against a second live in-place
+dream, so a colliding create is a 409 naming the holder, and the session runs with `bash`
+disabled — with only the file tools left, the jail around memory is code rather than prompt
+(`write` and `edit` refuse a `/mnt/memory` path outside a mounted store), and the price is
+that nothing can delete, so a retired memory becomes a tombstone the caller removes. The agent
 and the `cloud` environment behind that session are internal rows the runner creates once
 and nothing else can reach: absent from both lists, a 404 from every route addressing them
 by id, refused by every resolver but the runner's. The dream's own model rides in as an
