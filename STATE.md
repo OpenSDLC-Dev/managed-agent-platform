@@ -15,7 +15,8 @@ is not enrolled in that preview. #78 stays open — 117 registry entries name it
 live tracker, and the debt is analysis rather than recording, that blocked checklist
 aside. Plan 38 (#263) archived
 2026-09-04; plans 39 (#566, skills GA) and 40 (#353, environment packages,
-folding in #576) 2026-09-05; plan 43 (#609, one host comparison) 2026-09-06.
+folding in #576) 2026-09-05; plans 43 (#609, one host comparison) and 44
+(#601, one resolution per dial) 2026-09-06.
 
 ## Tasks
 

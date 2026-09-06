@@ -66,8 +66,11 @@ internal/
   toolset/    # the built-in tools (agent_toolset_20260401)
   webtool/    # web_fetch/web_search backends: Searcher/Fetcher ifaces + tavily/ + jina/
   mcp/        # the MCP client: a thin wrapper over the official go-sdk (plan 29)
-  dialguard/  # the address guard under the vault probe's dials, the MCP client's
-              #   DefaultClient and the token-endpoint refresh (SSRF floor; all three live)
+  dialguard/  # the dialler under the five paths that reach a customer-supplied
+              #   or agent-declared destination — gate, MCP client, vault probe,
+              #   token refresh, JWKS fetch: resolves a name once, holds each
+              #   address to the SSRF floor, dials what survives. Not a universal
+              #   egress check; docs/ARCHITECTURE.md says what it is not
   oauthrefresh/ # the RFC 6749 refresh-token grant, shared by the mcp_oauth_validate
               #   probe and the executor's dial-time credential refresh (plan 29)
   sandbox/    # Sandbox/Provider iface + docker/ + k8s/ + backend selection + shell/
