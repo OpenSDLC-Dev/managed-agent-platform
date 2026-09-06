@@ -311,8 +311,9 @@ sweep found (2026-09-06; 33 sources checked, one with bytes): the
 listable by the caller's own key at `GET /v1/sessions/{session_id}/events` while the
 dream runs; the session spawns **one thread per input session** (`session.thread_created`
 — six for six inputs, four for four); `agent.tool_use` events carry `input.file_path`;
-and `usage.output_tokens` climbs while `running` (178k over 18 minutes for six sessions
-on an Opus-tier model), with `outputs[]` read after `completed`. Everything else above
+and `usage.output_tokens` climbs while the dream runs (178k over 18 minutes for six
+sessions; the run's model is not recorded — the notebook's default is `claude-sonnet-5`), with
+`outputs[]` read after `completed`. Everything else above
 stays unobserved — the notebook redacts its output ids.
 
 ---
