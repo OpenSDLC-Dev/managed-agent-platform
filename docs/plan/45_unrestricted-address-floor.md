@@ -85,11 +85,17 @@ floored by default; it now has one exemption instead of two, and the sentence
 about both widening flags becomes a sentence about the one class that is not a
 widening at all.
 
-**The refusal's shape.** `dialguard.ErrRefused` already travels out of the
-dialler; both handlers currently flatten every dial error into
-502 `cannot reach host`. They separate the two:
+**The refusal's shape.** Both handlers currently flatten every dial error into
+502 `cannot reach host`. They separate the floor's refusal from the rest, keyed
+on a marker the gate sets rather than on `dialguard.ErrRefused`: that sentinel is
+wider than the floor, also wrapping an authority the dialler could not split and
+a lookup that returned no address of a usable family — and the second is raised
+*before* `Allow` runs at all, so matching it would tell an `admitOperator` dial,
+the one class this floor never judges, that its destination was private or
+reserved. The gate's `Allow` wraps `errFloorRefused` around a refusal of an
+address it actually read, and around nothing else:
 
-- `errors.Is(err, dialguard.ErrRefused)` → **403**, body
+- `errors.Is(err, errFloorRefused)` → **403**, body
   `Destination IP is in a private/reserved range`
 - anything else → 502, unchanged
 
@@ -105,9 +111,10 @@ from `transport.RoundTrip`, which wraps it — the test asserts `errors.Is`
 survives that wrapping rather than assuming it, because if it does not the
 plain-HTTP path silently keeps answering 502.
 
-**The empty authority** is refused before `admit` is asked, in both handlers,
-because `admit` is the thing that cannot refuse it: `admitAll` answers before
-any host is examined. Under `limited` it was already closed — an empty host
+**The empty authority** is refused by `admit` itself, at the top, before any
+set is consulted: `admitAll` answering before a host is examined at all is the
+bypass, so the one line that fixes it belongs there, where it covers every
+caller rather than each handler separately. Under `limited` it was already closed — an empty host
 matches no set — so what this adds is the `unrestricted` arm, where the dial
 went to the local system. Flooring `unrestricted` would also have caught it,
 and the explicit check is kept anyway: it answers 403 rather than depending on
@@ -119,9 +126,11 @@ delivered to that loopback listener.
 
 ## What this does not do, stated rather than implied
 
-A vault-less `unrestricted` session has **no gate in its egress path**, and this
-plan does not give it one. For those sessions the metadata endpoint stays
-reachable, and the new issue carries the decision. Both the changelog fragment
+A session the executor provisions no gate for has **no gate in its egress
+path**, and this plan does not give it one — any `unrestricted` session with no
+vault attached, and every session at all where the deployment configured no gate
+image. For those sessions the metadata endpoint stays reachable, and the new
+issue carries the decision. Both the changelog fragment
 and `docs/DIVERGENCES.md` say which sessions are covered, so nobody reads
 "`unrestricted` now has an address floor" as covering the deployment shape where
 it does not.
@@ -155,8 +164,9 @@ divergence and #570 explicitly is not about it.
    `TestTheProductionResolverIsWiredUp` drives a real lookup through to the
    floor's refusal.
 3. **The refusal's shape**, on both handlers: 403 and the reference's body for
-   `ErrRefused`, 502 for an ordinary dial failure. The plain-HTTP case drives a
-   real `RoundTrip` so the wrapping is tested rather than assumed.
+   the floor's own refusal, 502 for every other dial failure — the rest of
+   `dialguard.ErrRefused` included. The plain-HTTP case drives a real
+   `RoundTrip` so the wrapping is tested rather than assumed.
 4. **The empty authority** under `unrestricted` is refused rather than dialled,
    driven through a real listener the way #596's review drove it.
 5. **Mutation testing**, per the repo rule: every guard above gets a mutant that
