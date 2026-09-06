@@ -6,6 +6,7 @@ import (
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/provider"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/transcript"
 )
 
 // buildRequest replays the event log into one provider request: the log IS
@@ -199,7 +200,7 @@ func buildRequest(system string, tools []json.RawMessage, history []domain.Event
 			}
 			blk, err := json.Marshal(map[string]any{
 				"type": "text",
-				"text": "[message from " + from + "]\n\n" + contentText(ev.Body),
+				"text": "[message from " + from + "]\n\n" + transcript.ContentText(ev.Body),
 			})
 			if err != nil {
 				return req, 0, err

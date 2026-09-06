@@ -925,6 +925,9 @@ func (s *server) addSessionResourceTx(ctx context.Context, id string, r *http.Re
 	if archivedAt != nil {
 		return fileResourceJSON{}, errInvalid("session %s is archived", id)
 	}
+	if err := requireNotDreamOwned(ctx, tx, id); err != nil {
+		return fileResourceJSON{}, err
+	}
 	if mountPathTaken(resources, in.mountPath) {
 		return fileResourceJSON{}, errInvalid("mount_path %q is already in use by this session", in.mountPath)
 	}
@@ -990,6 +993,9 @@ func (s *server) deleteSessionResourceTx(ctx context.Context, id, rid string) er
 	}
 	if archivedAt != nil {
 		return errInvalid("session %s is archived", id)
+	}
+	if err := requireNotDreamOwned(ctx, tx, id); err != nil {
+		return err
 	}
 	idx := indexOfResource(resources, rid)
 	if idx < 0 {
@@ -1084,6 +1090,9 @@ func (s *server) rotateResourceTokenTx(ctx context.Context, id, rid string, r *h
 	}
 	if archivedAt != nil {
 		return nil, errInvalid("session %s is archived", id)
+	}
+	if err := requireNotDreamOwned(ctx, tx, id); err != nil {
+		return nil, err
 	}
 	idx := indexOfResource(resources, rid)
 	if idx < 0 {

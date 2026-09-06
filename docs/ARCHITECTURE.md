@@ -57,7 +57,7 @@ Postgres, all coordination through it:
 
 | Binary | Role |
 |---|---|
-| `controlplane` | The wire-compatible REST surface: resource CRUD, the event log endpoints (POST/list/SSE), the work API for BYOC workers, auth (management `x-api-key`, worker environment keys), and the session state machine. It also runs the two background sweeps no request drives — memory-version retention (#476), hourly, and the deployment scheduler (plan 37), every 30 seconds — both cancelled and drained before the pool closes. The scheduler's at-most-one-run-per-occurrence guarantee across replicas is the partial unique index on `(deployment_id, scheduled_at)` — the reference's own published idempotency key — not leader election, which this platform has nowhere; and its clock is Postgres's, one `SELECT now()` per tick, so a replica with a skewed clock cannot shift what fires. |
+| `controlplane` | The wire-compatible REST surface: resource CRUD, the event log endpoints (POST/list/SSE), the work API for BYOC workers, auth (management `x-api-key`, worker environment keys), and the session state machine. It also runs the three background sweeps no request drives — memory-version retention (#476), hourly; the deployment scheduler (plan 37), every 30 seconds; and the dream runner (plan 41), every `DREAM_TICK_INTERVAL` — all cancelled and drained before the pool closes. The scheduler's at-most-one-run-per-occurrence guarantee across replicas is the partial unique index on `(deployment_id, scheduled_at)` — the reference's own published idempotency key — not leader election, which this platform has nowhere; and its clock is Postgres's, one `SELECT now()` per tick, so a replica with a skewed clock cannot shift what fires. The runner needs no such index because it holds no claim across ticks: a tick takes one dream's row `FOR UPDATE SKIP LOCKED`, advances it by one step and commits, so one replica works a dream at a time and a replica that dies mid-tick costs the step it was in and nothing else. |
 | `brain` | The harness pool. Claims `model_turn` work, replays the session's event log to rebuild context, calls the model provider, writes the resulting events, enqueues tool work, suspends. |
 | `executor` | The built-in sandbox worker for platform-managed (`cloud`) environments. Claims `tool_exec` work, runs the tool inside the session's sandbox container, posts `agent.tool_result`. Also claims `web_exec` work — web_fetch/web_search, run in its own process with no sandbox, for **both** environment kinds — `outputs_harvest` work, the deliverables snapshot of `/mnt/session/outputs/` a cloud session takes when an outcome-grading cycle begins and when a brain settlement folds the session idle, and `mcp_exec` work — both halves of the MCP path, likewise in its own process with no sandbox and for **both** environment kinds: the discovery that fills `mcp_catalogs`, enqueued when a turn suspends for a declared server with no row, and the tool call itself, enqueued when the brain routes an `mcp__{server}__{tool}` the model asked for. |
 | `worker` | The distributable BYOC worker for `self_hosted` environments. Same pull protocol as the executor, run on customer compute, posting `user.tool_result` — the real `ant beta:worker` works against the same API. |
@@ -244,6 +244,25 @@ later run to reconcile it, so the flush is the only pass that saves what the age
 It fails the item (`ErrSessionMemoryNoToken`) rather than run a store session with no
 token to mount from.
 
+**A dream's pipeline session** (plan 41). A dream consolidates one memory store over 1–100
+session transcripts, and it does that work in an ordinary session the control plane creates
+for itself. The dream runner clones the input store, renders each input session's event log
+to markdown — secrets shape-redacted and each transcript capped, the log streamed in pages
+rather than loaded — and creates a session mounting the clone read-write beside those
+transcripts and an `INDEX.md`, which ride in as `file` resources whose rows the dream owns. The agent
+and the `cloud` environment behind that session are internal rows the runner creates once
+and nothing else can reach: absent from both lists, a 404 from every route addressing them
+by id, refused by every resolver but the runner's. The dream's own model rides in as an
+`agent_with_overrides`, and the runner drives the session by posting a `user.message` and
+waiting for it to idle — one stage today, the four the plan designs once the next slice
+lands. While the dream owns the session it is **read-only to the public API**: reads, the
+list and the stream answer as they do for any session, and every mutation answers a 400
+naming the dream, because that internal agent's toolset is `always_allow` with `bash`. When
+the dream settles — completed, failed, timed out, or canceled through the same interrupt
+`user.interrupt` runs, so the session ends idle rather than terminated — the runner mirrors
+the final `usage`, archives the session, deletes the transcript rows and their blobs, and
+stamps the dream closed.
+
 **Sandboxes have a lifecycle** (plan 24). Provision is idempotent per session — it
 returns, heals, or re-creates — and the **reaper in the executor is the single owner of
 destruction**, on four tiers: a session `deleted`, `archived` or `terminated`, plus an
@@ -370,6 +389,7 @@ Layout order is by layer, as the repo is.
 | `skills/` | Skill-upload validation and canonical-zip normalization, funnelled through one place so the rules cannot drift between entry points. |
 | `cron/` | The occurrence engine behind a deployment's schedule: the reference's 5-field POSIX dialect, matched literally against a wall clock in an IANA zone. `Due`, `Next` and `Upcoming` share one walk, so the list a client reads in `upcoming_runs_at` and the instant the scheduler fires cannot disagree. It imports `time/tzdata` itself rather than leaving that to a `main`, because the server image ships no zoneinfo and the failure would appear only there. |
 | `memsync/` | What every writer of a memory store agrees on, so the halves of plan 36 cannot drift — `internal/api` since slice 2, the executor since slice 4, the BYOC worker from slice 6: the path and content rules every memory write obeys and the mount-path slug; the marker, baseline and tree-hash conventions, the two shell commands the sync runs, and the pure `Plan(local, baseline, remote)` decision table. |
+| `transcript/` | Two renderers of a session's event log as text a model reads, in one package because the brain and the control plane each need one: the outcome grader's role-labelled plain text, and the dream's markdown — paged rather than loaded, secret-redacted before any truncation, capped per item and per transcript. It reaches for the domain and the log and nothing else. |
 | `telemetry/` | OTel tracing and metrics init, and W3C trace-context propagation. The `span.*` domain events come from the spans started here, so the two views never drift. |
 | `mimetab/` | The pinned extension → MIME table both writers of the files registry consult, so the serving host never decides a wire-visible value. |
 | `sandbox/backend/` · `blob/backend/` · `secrets/backend/` | Where a deployment's backend is *chosen*, one selector per seam, so every binary constructs it from the same config point. Each is a sibling rather than part of its seam because the seam package holds the interface **and** the sentinel errors backends wrap, so it must not import them. |

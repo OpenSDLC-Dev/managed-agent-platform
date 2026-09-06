@@ -244,6 +244,9 @@ func (s *server) archiveThread(r *http.Request) (any, error) {
 	if err := s.lockSession(ctx, tx, sessionID); err != nil {
 		return nil, err
 	}
+	if err := requireNotDreamOwned(ctx, tx, sessionID); err != nil {
+		return nil, err
+	}
 	row, err := loadThread(ctx, tx, sessionID, threadID, true)
 	if err != nil {
 		return nil, err

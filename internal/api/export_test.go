@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"encoding/json"
 	"net"
 	"time"
 
@@ -145,4 +146,74 @@ func DeploymentPausingErrorTypesForTest() []string {
 		types = append(types, t)
 	}
 	return types
+}
+
+// InsertAgentForTest writes an agent through the parse-and-insert body the
+// dream runner shares with POST /v1/agents (insertAgentInTx): the request JSON,
+// a caller-chosen id, and the internal flag no request can carry. It commits
+// its own transaction and reports whether the id was new. Test binary only.
+func InsertAgentForTest(ctx context.Context, pool *pgxpool.Pool, body, id string, internal bool) (bool, error) {
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		return false, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	inserted, err := newServer(pool, nil, nil).insertAgentInTx(ctx, tx, json.RawMessage(body), id, internal)
+	if err != nil {
+		return false, err
+	}
+	return inserted, tx.Commit(ctx)
+}
+
+// InsertEnvironmentForTest is InsertAgentForTest for environments
+// (insertEnvironmentInTx). Test binary only.
+func InsertEnvironmentForTest(ctx context.Context, pool *pgxpool.Pool, body, id string, internal bool) (bool, error) {
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		return false, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	inserted, err := newServer(pool, nil, nil).insertEnvironmentInTx(ctx, tx, json.RawMessage(body), id, internal)
+	if err != nil {
+		return false, err
+	}
+	return inserted, tx.Commit(ctx)
+}
+
+// CreateSessionForTest creates a session the way the dream runner will (plan 41
+// §4.2 step 6): with the pre-minted id it must know before the row exists, and
+// with the internal bypass that admits the runner's own hidden agent and
+// environment. An empty id mints one, as a wire create does. Returns the
+// created session's id. Test binary only.
+func CreateSessionForTest(ctx context.Context, pool *pgxpool.Pool, id, envID, agentRaw string, internal bool) (string, error) {
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		return "", err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	created, err := newServer(pool, nil, nil).createSessionInTx(ctx, tx, createSessionIn{
+		id: id, internal: internal, envID: envID, agentRaw: json.RawMessage(agentRaw),
+	})
+	if err != nil {
+		return "", err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return "", err
+	}
+	return created.row.id, nil
+}
+
+// InterruptSessionForTest runs the whole-session interrupt the dream runner's
+// cancel and tick call (interruptSessionInTx), committing its transaction.
+// Test binary only.
+func InterruptSessionForTest(ctx context.Context, pool *pgxpool.Pool, sessionID string) error {
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if err := newServer(pool, nil, nil).interruptSessionInTx(ctx, tx, sessionID); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
 }

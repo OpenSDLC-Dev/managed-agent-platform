@@ -90,6 +90,9 @@ func (s *server) sendSessionEvents(r *http.Request) (any, error) {
 	if sessionArchivedAt != nil {
 		return nil, errInvalid("session %s is archived and read-only", id)
 	}
+	if err := requireNotDreamOwned(ctx, tx, id); err != nil {
+		return nil, err
+	}
 
 	newEvents, err := events.NormalizeInbound(envKind, rawEvents)
 	if err != nil {
@@ -343,133 +346,45 @@ func (s *server) sendSessionEvents(r *http.Request) (any, error) {
 		}
 		switch {
 		case a.interrupt:
-			// Every tool call still outstanding on this thread is answered with
-			// an error result. The model protocol requires every tool_use
-			// answered before the conversation continues and the log is
-			// append-only, so a call left abandoned would poison every future
-			// replay — which is the dead end the interrupt exists to escape, not
-			// one it may create. The batch's own results count as answered,
-			// exactly as they do for the message trigger.
-			abandoned, err := events.UnansweredThreadToolUses(ctx, tx, domain.ID(id), tid, events.ToolResultRefs(newEvents))
+			out, err := s.interruptThreadInTx(ctx, tx, interruptThreadIn{
+				sessionID: domain.ID(id), threadID: tid, agentName: th.agentName,
+				status: status, answered: events.ToolResultRefs(newEvents),
+				all: interruptAll, primaryInterrupted: primaryInterrupted,
+				resume: hasUserMessage || hasDefineOutcome,
+			})
 			if err != nil {
 				return nil, err
 			}
-			// Only the two statuses v1 ever writes can be interrupted. Nothing sets
-			// terminated or rescheduling today, and neither should be settled from
-			// here if something one day does: terminated has ended and reviving it on
-			// the redirect below would make this the one trigger that un-ends a
-			// session — the user.message case guards against exactly that by
-			// requiring idle — while rescheduling would need semantics no code has
-			// defined yet, and guessing them could leave the column disagreeing with
-			// the log.
-			interruptible := status == string(domain.SessionIdle) || status == string(domain.SessionRunning)
-			// Nothing to stop: an idle thread with no outstanding call has no turn
-			// to end, so the event is logged and settles no turn (a non-terminal
-			// outcome still settles below — the flip does not depend on settling).
-			// Emitting a status_idle for a thread that never left idle would
-			// announce a transition that did not happen.
-			settling := interruptible && (status == string(domain.SessionRunning) || len(abandoned) > 0)
-			if settling {
-				results, err := events.InterruptResults(abandoned)
-				if err != nil {
-					return nil, err
-				}
-				batch = append(batch, results...)
-				// A child stopped mid-turn and the report it owed will never
-				// come, so its coordinator is told (plan 35 decision 7) — and
-				// woken when this was the last child it could have been
-				// waiting on, the rule events.WakeOnThreadEnded argues. The
-				// wake goes in before this thread's own idle below, so the
-				// session never folds idle between the two. A session-wide
-				// interrupt says nothing at all: it idles the coordinator in
-				// this same loop, one notice per child would be noise on a
-				// session the human just stopped, and a wake would restart
-				// what the interrupt stopped.
-				//
-				// interruptAll is not that test on its own: it means every live
-				// thread was named, so it is false the moment one idle sibling
-				// goes unnamed — and a client that interrupts each *running*
-				// thread has done exactly that. The wake below would then flip
-				// the coordinator this same batch has already idled back to
-				// running and queue it a fresh turn, restarting what the human
-				// stopped. What the rule was always about is whether the
-				// coordinator is still there to be told, so ask that.
-				if !isPrimary && !interruptAll && !primaryInterrupted {
-					notice, err := events.ThreadEnded(domain.ID(id), tid, th.agentName,
-						fmt.Sprintf("[agent %s was interrupted]\n\nIt stopped mid-turn and will not report. "+
-							"Send it new instructions, or archive it to free the slot.", th.agentName))
-					if err != nil {
-						return nil, err
-					}
-					batch = append(batch, notice)
-					pair, moved, woke, err := events.WakeOnThreadEnded(ctx, tx, domain.ID(id), tid)
-					if err != nil {
-						return nil, err
-					}
-					batch = append(batch, pair...)
-					moveTo(moved)
-					if woke {
-						thens = append(thens, enqueueTurn(""))
-					}
-				}
-				// end_turn, not a stop reason of its own: the reference documents an
-				// interrupted turn as ending on the same stop reason as one that
-				// finishes by itself, and the idle stop_reason union has no
-				// interruption variant to carry (docs/DIVERGENCES.md). The thread
-				// event is emitted whenever a turn ends — a stranded or gate-blocked
-				// thread is already idle and its clients still need the new stop
-				// reason — and so is the session's when it stays idle (Reemit);
-				// the column only moves when the fold really changes.
-				if err := transition(events.ThreadTransition{ThreadID: tid, Status: domain.SessionIdle,
-					Stop: &domain.StopReason{Type: domain.StopEndTurn}, Reemit: true}); err != nil {
-					return nil, err
-				}
-				// Cancel first, then enqueue. A session-wide interrupt keeps today's
-				// CancelSession exactly — every live item of every kind, so the
-				// driver's own context is cancelled and the in-flight sandbox
-				// command with it; a thread-scoped one stops that thread's turn
-				// alone and never the shared exec item a sibling's calls ride on,
-				// so nothing cancels the driver and the answers written here are
-				// what tells it: both drivers watch the call they are running and
-				// drop it once answered (decision 9, #441).
-				if interruptAll {
-					if len(cancels) == 0 {
-						cancels = append(cancels, func(ctx context.Context, tx pgx.Tx) error {
-							return s.queue.CancelSession(ctx, tx, domain.ID(id))
-						})
-					}
-				} else {
-					cancels = append(cancels, func(ctx context.Context, tx pgx.Tx) error {
-						return s.queue.CancelThread(ctx, tx, domain.ID(id), tid)
-					})
-				}
+			batch = append(batch, out.batch...)
+			for i := range out.moves {
+				moveTo(&out.moves[i])
 			}
-			if !isPrimary {
-				break
+			// Cancel first, then enqueue. A session-wide interrupt keeps
+			// today's CancelSession exactly — every live item of every kind, so
+			// the driver's own context is cancelled and the in-flight sandbox
+			// command with it, and one cancel covers every thread the loop
+			// interrupts; a thread-scoped one stops that thread's turn alone
+			// and never the shared exec item a sibling's calls ride on, so
+			// nothing cancels the driver and the answers written above are what
+			// tells it: both drivers watch the call they are running and drop
+			// it once answered (decision 9, #441).
+			if out.cancelSession && len(cancels) == 0 {
+				cancels = append(cancels, func(ctx context.Context, tx pgx.Tx) error {
+					return s.queue.CancelSession(ctx, tx, domain.ID(id))
+				})
 			}
-			// An active outcome settles with the turn — the docs mark it
-			// interrupted "even if evaluation hadn't started yet", with an empty
-			// outcome_evaluation_start_id when no start fired — freeing the
-			// session for a new define_outcome, possibly one in this same batch
-			// (the documented chaining pattern).
-			if interruptible {
-				ends, flip, err := events.InterruptOutcomes(ctx, tx, domain.ID(id))
-				if err != nil {
-					return nil, err
-				}
-				batch = append(batch, ends...)
-				outcomeFlip = flip
+			if out.cancelThread {
+				cancels = append(cancels, func(ctx context.Context, tx pgx.Tx) error {
+					return s.queue.CancelThread(ctx, tx, domain.ID(id), tid)
+				})
 			}
-			// The interrupt leaves nothing outstanding, so a user.message — or a
-			// new user.define_outcome — in the same batch resumes exactly as it
-			// would on any idle session: the documented way to steer a running
-			// agent, or to chain outcomes, in one send.
-			if (hasUserMessage || hasDefineOutcome) && interruptible {
-				if err := transition(events.ThreadTransition{Status: domain.SessionRunning}); err != nil {
-					return nil, err
-				}
+			if out.wakeParent {
+				thens = append(thens, enqueueTurn(""))
+			}
+			if out.resumed {
 				thens = append(thens, startWorkCycle)
 			}
+			outcomeFlip = outcomeFlip || out.outcomeFlip
 		case a.confirmation && status == string(domain.SessionIdle):
 			// A requires_action suspension resolves. If confirmations remain
 			// outstanding, the thread re-idles with the shrunken blocking set;
@@ -626,25 +541,7 @@ func (s *server) sendSessionEvents(r *http.Request) (any, error) {
 		}
 	}
 	if interruptAll {
-		// A session-wide interrupt ends its threads one by one, and each end
-		// re-idles the session with the fold of that moment; the session is
-		// told once, with the fold after the last of them — the earlier
-		// re-idles are dropped. A single-agent session emits one either way.
-		lastIdle := -1
-		for i, ev := range batch {
-			if ev.Type == domain.EventSessionStatusIdle {
-				lastIdle = i
-			}
-		}
-		if lastIdle >= 0 {
-			kept := batch[:0:0]
-			for i, ev := range batch {
-				if ev.Type != domain.EventSessionStatusIdle || i == lastIdle {
-					kept = append(kept, ev)
-				}
-			}
-			batch = kept
-		}
+		batch = keepLastSessionIdle(batch)
 	}
 	if len(cancels)+len(thens) > 0 {
 		opts.Then = func(ctx context.Context, tx pgx.Tx) error {
@@ -713,6 +610,276 @@ func (s *server) sendSessionEvents(r *http.Request) (any, error) {
 		data = append(data, wire)
 	}
 	return map[string]any{"data": data}, nil
+}
+
+// interruptThreadIn is one thread's slice of an interrupt: the thread itself
+// and the four facts the arm reads from the send (or the runner) around it.
+type interruptThreadIn struct {
+	sessionID domain.ID
+	threadID  domain.ID
+	agentName string
+	status    string
+	// answered are the calls the same batch answers. A client may confirm and
+	// post an outstanding result in one send, and that result is validated and
+	// about to be appended — as good as answered.
+	answered []string
+	// all: every live thread of the session is interrupted, which is what
+	// decides between cancelling the session's queued work and this thread's.
+	all bool
+	// primaryInterrupted: the coordinator is being interrupted in the same
+	// batch, so a child ending here has nobody to tell.
+	primaryInterrupted bool
+	// resume: a user.message or user.define_outcome in the same batch redirects
+	// the primary as soon as this interrupt has settled it.
+	resume bool
+}
+
+// interruptThreadOut is what the arm leaves its caller to place: the events to
+// append, the status moves to record after the commit, and the work to
+// schedule — cancels before enqueues, the order the caller keeps.
+type interruptThreadOut struct {
+	batch         []events.NewEvent
+	moves         []domain.SessionStatus
+	cancelSession bool
+	cancelThread  bool
+	wakeParent    bool
+	resumed       bool
+	outcomeFlip   bool
+}
+
+// interruptThreadInTx is a send's interrupt arm for one thread: it settles the
+// outstanding calls, tells and wakes a coordinator whose child stopped,
+// transitions the thread, and reports the queue work to cancel and the outcomes
+// to flip. It is a helper rather than a case body because the dream runner
+// interrupts the session it owns from outside any request
+// (interruptSessionInTx), where an appended event alone would stop nothing.
+func (s *server) interruptThreadInTx(ctx context.Context, tx pgx.Tx, in interruptThreadIn) (interruptThreadOut, error) {
+	var out interruptThreadOut
+	isPrimary := in.threadID == ""
+	// transition moves one thread under the caller's lock and keeps the pair it
+	// emits with the rest of the arm's events.
+	transition := func(t events.ThreadTransition) error {
+		pair, moved, err := events.TransitionThread(ctx, tx, in.sessionID, t)
+		if err != nil {
+			return err
+		}
+		out.batch = append(out.batch, pair...)
+		if moved != nil {
+			out.moves = append(out.moves, *moved)
+		}
+		return nil
+	}
+	// Every tool call still outstanding on this thread is answered with
+	// an error result. The model protocol requires every tool_use
+	// answered before the conversation continues and the log is
+	// append-only, so a call left abandoned would poison every future
+	// replay — which is the dead end the interrupt exists to escape, not
+	// one it may create. The batch's own results count as answered,
+	// exactly as they do for the message trigger.
+	abandoned, err := events.UnansweredThreadToolUses(ctx, tx, in.sessionID, in.threadID, in.answered)
+	if err != nil {
+		return out, err
+	}
+	// Only the two statuses v1 ever writes can be interrupted. Nothing sets
+	// terminated or rescheduling today, and neither should be settled from
+	// here if something one day does: terminated has ended and reviving it on
+	// the redirect below would make this the one trigger that un-ends a
+	// session — the user.message case guards against exactly that by
+	// requiring idle — while rescheduling would need semantics no code has
+	// defined yet, and guessing them could leave the column disagreeing with
+	// the log.
+	interruptible := in.status == string(domain.SessionIdle) || in.status == string(domain.SessionRunning)
+	// Nothing to stop: an idle thread with no outstanding call has no turn
+	// to end, so the event is logged and settles no turn (a non-terminal
+	// outcome still settles below — the flip does not depend on settling).
+	// Emitting a status_idle for a thread that never left idle would
+	// announce a transition that did not happen.
+	settling := interruptible && (in.status == string(domain.SessionRunning) || len(abandoned) > 0)
+	if settling {
+		results, err := events.InterruptResults(abandoned)
+		if err != nil {
+			return out, err
+		}
+		out.batch = append(out.batch, results...)
+		// A child stopped mid-turn and the report it owed will never
+		// come, so its coordinator is told (plan 35 decision 7) — and
+		// woken when this was the last child it could have been
+		// waiting on, the rule events.WakeOnThreadEnded argues. The
+		// wake goes in before this thread's own idle below, so the
+		// session never folds idle between the two. A session-wide
+		// interrupt says nothing at all: it idles the coordinator in
+		// this same loop, one notice per child would be noise on a
+		// session the human just stopped, and a wake would restart
+		// what the interrupt stopped.
+		//
+		// `all` is not that test on its own: it means every live
+		// thread was named, so it is false the moment one idle sibling
+		// goes unnamed — and a client that interrupts each *running*
+		// thread has done exactly that. The wake below would then flip
+		// the coordinator this same batch has already idled back to
+		// running and queue it a fresh turn, restarting what the human
+		// stopped. What the rule was always about is whether the
+		// coordinator is still there to be told, so ask that.
+		if !isPrimary && !in.all && !in.primaryInterrupted {
+			notice, err := events.ThreadEnded(in.sessionID, in.threadID, in.agentName,
+				fmt.Sprintf("[agent %s was interrupted]\n\nIt stopped mid-turn and will not report. "+
+					"Send it new instructions, or archive it to free the slot.", in.agentName))
+			if err != nil {
+				return out, err
+			}
+			out.batch = append(out.batch, notice)
+			pair, moved, woke, err := events.WakeOnThreadEnded(ctx, tx, in.sessionID, in.threadID)
+			if err != nil {
+				return out, err
+			}
+			out.batch = append(out.batch, pair...)
+			if moved != nil {
+				out.moves = append(out.moves, *moved)
+			}
+			out.wakeParent = woke
+		}
+		// end_turn, not a stop reason of its own: the reference documents an
+		// interrupted turn as ending on the same stop reason as one that
+		// finishes by itself, and the idle stop_reason union has no
+		// interruption variant to carry (docs/DIVERGENCES.md). The thread
+		// event is emitted whenever a turn ends — a stranded or gate-blocked
+		// thread is already idle and its clients still need the new stop
+		// reason — and so is the session's when it stays idle (Reemit);
+		// the column only moves when the fold really changes.
+		if err := transition(events.ThreadTransition{ThreadID: in.threadID, Status: domain.SessionIdle,
+			Stop: &domain.StopReason{Type: domain.StopEndTurn}, Reemit: true}); err != nil {
+			return out, err
+		}
+		// The queue work the caller cancels for this settlement: the
+		// session's every live item, or this thread's turn alone.
+		out.cancelSession, out.cancelThread = in.all, !in.all
+	}
+	if !isPrimary {
+		return out, nil
+	}
+	// An active outcome settles with the turn — the docs mark it
+	// interrupted "even if evaluation hadn't started yet", with an empty
+	// outcome_evaluation_start_id when no start fired — freeing the
+	// session for a new define_outcome, possibly one in this same batch
+	// (the documented chaining pattern).
+	if interruptible {
+		ends, flip, err := events.InterruptOutcomes(ctx, tx, in.sessionID)
+		if err != nil {
+			return out, err
+		}
+		out.batch = append(out.batch, ends...)
+		out.outcomeFlip = flip
+	}
+	// The interrupt leaves nothing outstanding, so a user.message — or a
+	// new user.define_outcome — in the same batch resumes exactly as it
+	// would on any idle session: the documented way to steer a running
+	// agent, or to chain outcomes, in one send.
+	if in.resume && interruptible {
+		if err := transition(events.ThreadTransition{Status: domain.SessionRunning}); err != nil {
+			return out, err
+		}
+		out.resumed = true
+	}
+	return out, nil
+}
+
+// keepLastSessionIdle drops all but the final session.status_idle of a batch. A
+// session-wide interrupt ends its threads one by one, and each end re-idles the
+// session with the fold of that moment; the session is told once, with the fold
+// after the last of them. A single-agent session emits one either way.
+func keepLastSessionIdle(batch []events.NewEvent) []events.NewEvent {
+	lastIdle := -1
+	for i, ev := range batch {
+		if ev.Type == domain.EventSessionStatusIdle {
+			lastIdle = i
+		}
+	}
+	if lastIdle < 0 {
+		return batch
+	}
+	kept := batch[:0:0]
+	for i, ev := range batch {
+		if ev.Type != domain.EventSessionStatusIdle || i == lastIdle {
+			kept = append(kept, ev)
+		}
+	}
+	return kept
+}
+
+// interruptSessionInTx interrupts every live thread of a session inside the
+// caller's transaction, exactly as a session-wide user.interrupt posted to
+// POST /v1/sessions/{id}/events does: the inbound event is appended, every
+// outstanding call is answered, the threads idle, an active outcome flips to
+// interrupted and the session's queued work is cancelled with the append.
+//
+// The dream runner calls it on the session a dream owns — from the cancel
+// handler and from the tick (plan 41 §4.1) — where the handler is closed to it
+// by requireNotDreamOwned, and where a bare event append would stop nothing.
+// It never commits; the caller does. The one thing the handler does that this
+// cannot is record the status metrics, which are observations of a committed
+// transition and so belong to whoever commits.
+//
+// An archived session has nothing to interrupt: its threads have ended and its
+// log is closed to appends. A session that is gone is the caller's 404.
+func (s *server) interruptSessionInTx(ctx context.Context, tx pgx.Tx, sessionID string) error {
+	var envKind, status string
+	var archivedAt *time.Time
+	err := tx.QueryRow(ctx,
+		`SELECT e.kind, s.status, s.archived_at
+		 FROM sessions s JOIN environments e ON e.id = s.environment_id
+		 WHERE s.id = $1 FOR UPDATE OF s`, sessionID).Scan(&envKind, &status, &archivedAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return errNotFound("session %s not found", sessionID)
+	}
+	if err != nil {
+		return err
+	}
+	if archivedAt != nil {
+		return nil
+	}
+	// The interrupt goes on the log as a client's would, so a reader sees why
+	// the session stopped. It is threadless, which is the session-wide spelling
+	// RouteInbound would leave untouched, and unstamped, as the handler leaves
+	// a session-wide interrupt.
+	batch, err := events.NormalizeInbound(envKind, []json.RawMessage{json.RawMessage(`{"type":"user.interrupt"}`)})
+	if err != nil {
+		return err
+	}
+	threads, err := liveThreads(ctx, tx, sessionID, status)
+	if err != nil {
+		return err
+	}
+	var opts events.AppendOptions
+	var cancelSession, outcomeFlip bool
+	for _, th := range threads {
+		out, err := s.interruptThreadInTx(ctx, tx, interruptThreadIn{
+			sessionID: domain.ID(sessionID), threadID: th.id, agentName: th.agentName,
+			status: th.status, all: true, primaryInterrupted: true,
+		})
+		if err != nil {
+			return err
+		}
+		batch = append(batch, out.batch...)
+		for i := range out.moves {
+			opts.SetStatus = &out.moves[i]
+		}
+		cancelSession = cancelSession || out.cancelSession
+		outcomeFlip = outcomeFlip || out.outcomeFlip
+	}
+	batch = keepLastSessionIdle(batch)
+	if cancelSession {
+		opts.Then = func(ctx context.Context, tx pgx.Tx) error {
+			return s.queue.CancelSession(ctx, tx, domain.ID(sessionID))
+		}
+	}
+	if outcomeFlip {
+		flip := events.FlipNonTerminalOutcomes(time.Now().UTC())
+		opts.MutateOutcomes = func(evals []domain.OutcomeEvaluation) ([]domain.OutcomeEvaluation, error) {
+			return flip(evals)
+		}
+	}
+	_, err = s.log.AppendInTx(ctx, tx, domain.ID(sessionID), batch, opts)
+	return err
 }
 
 // snapshotRubrics copies each file rubric's bytes to an outcome-owned blob

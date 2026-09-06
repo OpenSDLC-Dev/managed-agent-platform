@@ -103,37 +103,10 @@ func parseAgentSpecFields(obj map[string]json.RawMessage, spec *agentSpec) error
 
 func (s *server) createAgent(r *http.Request) (any, error) {
 	ctx := r.Context()
-	obj, err := decodeObject(r)
+	body, err := readBody(r)
 	if err != nil {
 		return nil, err
 	}
-	if err := rejectUnknownKeys(obj, "name", "model", "system", "description",
-		"tools", "mcp_servers", "skills", "metadata", "multiagent"); err != nil {
-		return nil, err
-	}
-	name, err := requiredString(obj, "name")
-	if err != nil {
-		return nil, err
-	}
-	if raw, ok := obj["model"]; !ok || isNull(raw) {
-		return nil, errInvalid("model is required")
-	}
-	var spec agentSpec
-	if err := parseAgentSpecFields(obj, &spec); err != nil {
-		return nil, err
-	}
-	spec.Normalize()
-	if err := validateAgentSpec(spec); err != nil {
-		return nil, err
-	}
-	metadata, err := parseMetadata(obj)
-	if err != nil {
-		return nil, err
-	}
-	if err := validateMetadataCaps(metadata); err != nil {
-		return nil, err
-	}
-
 	id := domain.NewID(domain.PrefixAgent).String()
 
 	tx, err := s.pool.Begin(ctx)
@@ -142,34 +115,105 @@ func (s *server) createAgent(r *http.Request) (any, error) {
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
-	// The roster resolves inside the transaction (FOR SHARE on its members),
-	// with `self` pinned to the version this create produces.
-	if raw, ok := obj["multiagent"]; ok && !isNull(raw) {
-		if spec.Multiagent, err = resolveRoster(ctx, tx, raw, id, 1); err != nil {
-			return nil, err
-		}
-	}
-	specJSON, err := json.Marshal(spec)
-	if err != nil {
+	// The conflict arm cannot fire here: the id was minted a line ago.
+	if _, err := s.insertAgentInTx(ctx, tx, body, id, false); err != nil {
 		return nil, err
 	}
-
-	var createdAt, updatedAt time.Time
+	// Read back rather than returned: the insert body is shared with the dream
+	// runner, which wants no response, so the render takes its values from the
+	// rows just written — inside the same transaction, so it sees exactly them.
+	var (
+		name                 string
+		specJSON, metaJSON   []byte
+		createdAt, updatedAt time.Time
+	)
 	if err := tx.QueryRow(ctx,
-		`INSERT INTO agents (id, name, version, spec, metadata)
-		 VALUES ($1, $2, 1, $3, $4) RETURNING created_at, updated_at`,
-		id, name, specJSON, metadata).Scan(&createdAt, &updatedAt); err != nil {
+		`SELECT name, spec, metadata, created_at, updated_at FROM agents WHERE id = $1`, id).
+		Scan(&name, &specJSON, &metaJSON, &createdAt, &updatedAt); err != nil {
 		return nil, err
 	}
-	if _, err := tx.Exec(ctx,
-		`INSERT INTO agent_versions (agent_id, version, name, spec) VALUES ($1, 1, $2, $3)`,
-		id, name, specJSON); err != nil {
+	spec, metadata, err := decodeSpecAndMetadata(specJSON, metaJSON)
+	if err != nil {
 		return nil, err
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return nil, err
 	}
 	return renderAgent(id, name, 1, spec, metadata, createdAt, updatedAt, nil), nil
+}
+
+// insertAgentInTx is create's parse-and-insert: the request JSON POST /v1/agents
+// accepts, normalized the way the handler normalizes it (resolveRoster and the
+// rest), written under the caller's id into `agents` and `agent_versions`
+// version 1 — a session's foreign key points at the version row — inside the
+// caller's transaction, which it never commits.
+//
+// The handler passes the id it just minted and internal=false. The dream runner
+// passes its fixed id, internal=true and the request body of plan 41 §4.3, so
+// its hidden agent is normalized by the handler's own code and no plan text has
+// to spell out a stored row (§4.2 step 3). Both inserts are ON CONFLICT DO
+// NOTHING for that caller: the first dream on a fresh platform writes the rows
+// and every later one finds them. inserted is false when the id already
+// existed, and the rows are then whatever the first writer left.
+func (s *server) insertAgentInTx(ctx context.Context, tx pgx.Tx, body json.RawMessage,
+	id string, internal bool) (inserted bool, err error) {
+	obj, err := decodeBodyObject(body)
+	if err != nil {
+		return false, err
+	}
+	if err := rejectUnknownKeys(obj, "name", "model", "system", "description",
+		"tools", "mcp_servers", "skills", "metadata", "multiagent"); err != nil {
+		return false, err
+	}
+	name, err := requiredString(obj, "name")
+	if err != nil {
+		return false, err
+	}
+	if raw, ok := obj["model"]; !ok || isNull(raw) {
+		return false, errInvalid("model is required")
+	}
+	var spec agentSpec
+	if err := parseAgentSpecFields(obj, &spec); err != nil {
+		return false, err
+	}
+	spec.Normalize()
+	if err := validateAgentSpec(spec); err != nil {
+		return false, err
+	}
+	metadata, err := parseMetadata(obj)
+	if err != nil {
+		return false, err
+	}
+	if err := validateMetadataCaps(metadata); err != nil {
+		return false, err
+	}
+
+	// The roster resolves inside the transaction (FOR SHARE on its members),
+	// with `self` pinned to the version this create produces.
+	if raw, ok := obj["multiagent"]; ok && !isNull(raw) {
+		if spec.Multiagent, err = resolveRoster(ctx, tx, raw, id, 1); err != nil {
+			return false, err
+		}
+	}
+	specJSON, err := json.Marshal(spec)
+	if err != nil {
+		return false, err
+	}
+
+	tag, err := tx.Exec(ctx,
+		`INSERT INTO agents (id, name, version, spec, metadata, internal)
+		 VALUES ($1, $2, 1, $3, $4, $5) ON CONFLICT DO NOTHING`,
+		id, name, specJSON, metadata, internal)
+	if err != nil {
+		return false, err
+	}
+	if _, err := tx.Exec(ctx,
+		`INSERT INTO agent_versions (agent_id, version, name, spec) VALUES ($1, 1, $2, $3)
+		 ON CONFLICT DO NOTHING`,
+		id, name, specJSON); err != nil {
+		return false, err
+	}
+	return tag.RowsAffected() == 1, nil
 }
 
 func (s *server) getAgent(r *http.Request) (any, error) {
@@ -195,7 +239,7 @@ func (s *server) getAgent(r *http.Request) (any, error) {
 	)
 	err := s.pool.QueryRow(ctx,
 		`SELECT name, version, spec, metadata, created_at, updated_at, archived_at
-		 FROM agents WHERE id = $1`, id).
+		 FROM agents WHERE id = $1`+notInternal, id).
 		Scan(&name, &version, &specJSON, &metaJSON, &createdAt, &updatedAt, &archivedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, errNotFound("agent %s not found", id)
@@ -223,7 +267,7 @@ func (s *server) getAgentVersion(ctx context.Context, id string, version int64) 
 	err := s.pool.QueryRow(ctx,
 		`SELECT v.name, v.spec, a.metadata, a.created_at, v.created_at, a.archived_at
 		 FROM agents a JOIN agent_versions v ON v.agent_id = a.id
-		 WHERE a.id = $1 AND v.version = $2`, id, version).
+		 WHERE a.id = $1 AND v.version = $2`+notInternal, id, version).
 		Scan(&name, &specJSON, &metaJSON, &createdAt, &vAt, &archivedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, errNotFound("agent %s version %d not found", id, version)
@@ -297,7 +341,7 @@ func (s *server) updateAgent(r *http.Request) (any, error) {
 	)
 	err = tx.QueryRow(ctx,
 		`SELECT name, version, spec, metadata, created_at, updated_at, archived_at
-		 FROM agents WHERE id = $1 FOR UPDATE`, id).
+		 FROM agents WHERE id = $1`+notInternal+` FOR UPDATE`, id).
 		Scan(&name, &current, &specJSON, &metaJSON, &createdAt, &updatedAt, &archivedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, errNotFound("agent %s not found", id)
@@ -427,7 +471,7 @@ func (s *server) listAgents(r *http.Request) (any, error) {
 		return nil, err
 	}
 
-	query := `SELECT id, name, version, spec, metadata, created_at, updated_at, archived_at FROM agents WHERE true`
+	query := `SELECT id, name, version, spec, metadata, created_at, updated_at, archived_at FROM agents WHERE true` + notInternal
 	var args []any
 	if !includeArchived {
 		query += ` AND archived_at IS NULL`
@@ -514,7 +558,7 @@ func (s *server) listAgentVersions(r *http.Request) (any, error) {
 		archivedAt *time.Time
 	)
 	err = s.pool.QueryRow(ctx,
-		`SELECT metadata, created_at, archived_at FROM agents WHERE id = $1`, id).
+		`SELECT metadata, created_at, archived_at FROM agents WHERE id = $1`+notInternal, id).
 		Scan(&metaJSON, &createdAt, &archivedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, errNotFound("agent %s not found", id)
@@ -664,7 +708,7 @@ func (s *server) archiveAgent(r *http.Request) (any, error) {
 	// be repinned, so a repin racing this would leave a live deployment pinning
 	// an archived agent.
 	var archivedAt *time.Time
-	err = tx.QueryRow(ctx, `SELECT archived_at FROM agents WHERE id = $1 FOR UPDATE`, id).Scan(&archivedAt)
+	err = tx.QueryRow(ctx, `SELECT archived_at FROM agents WHERE id = $1`+notInternal+` FOR UPDATE`, id).Scan(&archivedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, errNotFound("agent %s not found", id)
 	}

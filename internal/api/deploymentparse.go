@@ -181,7 +181,7 @@ func resolveDeploymentAgent(ctx context.Context, db querier, raw json.RawMessage
 
 	var latest int
 	var archivedAt *time.Time
-	err := db.QueryRow(ctx, `SELECT version, archived_at FROM agents WHERE id = $1 FOR SHARE`, id).
+	err := db.QueryRow(ctx, `SELECT version, archived_at FROM agents WHERE id = $1`+notInternal+` FOR SHARE`, id).
 		Scan(&latest, &archivedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		// 404, not 400: resolveAgent answers a session's missing agent the same
