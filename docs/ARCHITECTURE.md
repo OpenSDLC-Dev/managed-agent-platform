@@ -411,7 +411,11 @@ per-seam pairs — `sandbox/sandboxtest/`, `blob/blobtest/`, `blob/gcs/gcstest/`
 through them, each over its own half of the list. The ones that start a
 container — `pgtest`, `dockertest`, `sandboxtest`, `blobtest`, `gcstest`,
 `secretstest` — treat a missing Docker daemon as a hard failure rather than a
-skip, because a skipped contract test hollows out the coverage gate silently;
+skip, because a skipped contract test hollows out the coverage gate silently.
+They drive it through the `docker` CLI rather than its HTTP API, so the binary is
+a requirement of theirs too, and of the suites that use them — but not of a suite
+that reaches the daemon through the Go client, which is why `toolset` and
+`sandbox/shell` pass with no `docker` on PATH;
 the rest serve an in-process fake (an httptest server, a fake gRPC endpoint, a
 fake OpenID provider) and need no daemon. And the ones gating a paid tier take
 consent from an environment variable, never from the presence of a configured

@@ -1,9 +1,13 @@
 package docker_test
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"os"
 	"os/exec"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -63,12 +67,12 @@ func TestAttachRefusesAContainerThatIsNotOurs(t *testing.T) {
 	}
 	sid := domain.NewID("sesn")
 	name := "map-" + string(sid)
-	if out, err := exec.Command("docker", "create", "--name", name, testImage, "sleep", "1").
+	if out, err := dockerCLI(context.Background(), "create", "--name", name, testImage, "sleep", "1").
 		CombinedOutput(); err != nil {
 		t.Fatalf("docker create %s: %v: %s", name, err, out)
 	}
 	t.Cleanup(func() {
-		if out, err := exec.Command("docker", "rm", "-f", name).CombinedOutput(); err != nil {
+		if out, err := dockerCLI(context.Background(), "rm", "-f", name).CombinedOutput(); err != nil {
 			t.Errorf("docker rm %s: %v: %s", name, err, out)
 		}
 	})
@@ -82,6 +86,12 @@ func TestAttachRefusesAContainerThatIsNotOurs(t *testing.T) {
 	}
 }
 
+// cliBudget bounds the CLI calls that answer in well under a second, so a
+// daemon that accepts the connection and then says nothing fails a named test
+// rather than the whole package's `go test` alarm. The image builds are
+// deliberately outside it — a build's duration is not this test's to bound.
+const cliBudget = 30 * time.Second
+
 // stopContainer leaves a fixture container stopped but still present, which is
 // a state the sandbox API cannot reach: it has no stop, and Reap destroys. The
 // stop must not travel through the container either — an in-container `kill 1`
@@ -90,21 +100,78 @@ func TestAttachRefusesAContainerThatIsNotOurs(t *testing.T) {
 // wedged daemon fail here by name rather than hang the package to its own.
 func stopContainer(t *testing.T, id string) {
 	t.Helper()
-	const budget = 30 * time.Second
-	ctx, cancel := context.WithTimeout(context.Background(), budget)
+	ctx, cancel := context.WithTimeout(context.Background(), cliBudget)
 	defer cancel()
 	// The budget is named in the message because a killed child reports
 	// "signal: killed", which otherwise reads as though the container was.
-	if out, err := exec.CommandContext(ctx, "docker", "stop", "-t", "0", id).CombinedOutput(); err != nil {
-		t.Fatalf("docker stop %s within %s: %v: %s", id, budget, err, out)
+	if out, err := dockerCLI(ctx, "stop", "-t", "0", id).CombinedOutput(); err != nil {
+		t.Fatalf("docker stop %s within %s: %v: %s", id, cliBudget, err, out)
 	}
 }
 
 func containerState(t *testing.T, id string) string {
 	t.Helper()
-	out, err := exec.Command("docker", "inspect", "-f", "{{.State.Status}}", id).Output()
-	if err != nil {
-		t.Fatalf("docker inspect %s: %v", id, err)
+	// The two streams are kept apart in both directions: the status is parsed
+	// out of stdout, so a warning must not land inside it, and the daemon's own
+	// message ("No such object: ...") is what makes a failure here readable
+	// rather than a bare "exit status 1".
+	ctx, cancel := context.WithTimeout(context.Background(), cliBudget)
+	defer cancel()
+	var stdout, stderr bytes.Buffer
+	cmd := dockerCLI(ctx, "inspect", "-f", "{{.State.Status}}", id)
+	cmd.Stdout, cmd.Stderr = &stdout, &stderr
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("docker inspect %s: %v: %s", id, err, bytes.TrimSpace(stderr.Bytes()))
 	}
-	return string(out[:len(out)-1])
+	return strings.TrimSpace(stdout.String())
+}
+
+// The whole mechanism rests on `--host` outranking the context, which is a
+// property of the CLI rather than of this code — and one that could change under
+// a CLI version this repo does not pin. So it is asserted against the real one.
+// The first half is the control: a context that does not exist must break a bare
+// `docker`, or the second half would prove only that it had been ignored (#627).
+func TestTheHostFlagOutranksTheContext(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), cliBudget)
+	defer cancel()
+	t.Setenv("DOCKER_CONTEXT", "map-no-such-context")
+	if out, err := exec.CommandContext(ctx, "docker", "version").CombinedOutput(); err == nil {
+		t.Fatalf("a context that does not exist was ignored, so this test proves nothing: %s", out)
+	}
+	if out, err := dockerCLI(ctx, "version").CombinedOutput(); err != nil {
+		t.Fatalf("--host did not outrank DOCKER_CONTEXT: %v: %s", err, out)
+	}
+}
+
+// containerState parses the daemon's reply, so what it trims off matters: the
+// status arrives without a trailing newline often enough that slicing a fixed
+// last byte off it returned "exite". A fake `docker` is the only way to pin the
+// reply's exact shape, and it needs no daemon (#627).
+func TestTheStateHelperTrimsRatherThanSlices(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "docker"),
+		[]byte("#!/bin/sh\nprintf 'exited'\n"), 0o755); err != nil {
+		t.Fatalf("write the fake docker: %v", err)
+	}
+	t.Setenv("PATH", dir)
+	if got := containerState(t, "any-id"); got != "exited" {
+		t.Errorf("state %q, want %q", got, "exited")
+	}
+}
+
+// dockerCLI is `docker`, aimed at the daemon this package's provider resolved.
+// Left alone the CLI follows the active `docker context`, while the provider
+// reads only DOCKER_HOST and then the well-known socket — so on a host where
+// those name different daemons a fixture is created against one and read back
+// from the other, and the test reports a missing container as though the product
+// had lost it (#627). Every `docker` this package's own test files run goes
+// through here — but not the gate image `sandboxtest` builds for the contract
+// suite, which is in a package that cannot reach this seam.
+//
+// The address is a flag rather than DOCKER_HOST because DOCKER_CONTEXT overrides
+// that variable; `--host` outranks both, which is measurable: `DOCKER_CONTEXT`
+// naming no context fails on its own and succeeds beside `--host`.
+func dockerCLI(ctx context.Context, arg ...string) *exec.Cmd {
+	return exec.CommandContext(ctx, "docker",
+		append([]string{"--host", docker.DaemonHostForTest()}, arg...)...)
 }

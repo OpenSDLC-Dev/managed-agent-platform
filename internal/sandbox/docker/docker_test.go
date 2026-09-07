@@ -54,7 +54,11 @@ func TestExportWorksOnAStoppedContainer(t *testing.T) {
 	if err != nil {
 		t.Fatalf("provision: %v", err)
 	}
-	t.Cleanup(func() { _ = provider.Reap(context.Background(), sid) })
+	t.Cleanup(func() {
+		if err := provider.Reap(context.Background(), sid); err != nil {
+			t.Errorf("reap: %v", err)
+		}
+	})
 	if err := sb.WriteFile(ctx, "/workspace/survives.txt", []byte("read me stopped")); err != nil {
 		t.Fatalf("write: %v", err)
 	}
