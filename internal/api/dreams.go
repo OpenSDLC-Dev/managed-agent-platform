@@ -172,9 +172,16 @@ func (s *server) createDream(r *http.Request) (any, error) {
 		instructions = &v
 	}
 
-	behavior, err := parseDreamOutputBehavior(obj)
+	behavior, target, err := parseDreamOutputBehavior(obj)
 	if err != nil {
 		return nil, err
+	}
+	// The EAP rule (§5.3), and the last of the create's body checks: an
+	// in-place dream consolidates its own input store, so a target naming any
+	// other store is a 400 — INFERRED, the reference publishing the rule and
+	// not its code.
+	if target != nil && *target != storeID {
+		return nil, errInvalid("output_behavior.memory_store_id must be the job's own memory_store input")
 	}
 
 	tx, err := s.pool.Begin(ctx)
@@ -193,18 +200,46 @@ func (s *server) createDream(r *http.Request) (any, error) {
 	// whitespace), so "as sent" is by value, not by bytes.
 	d, err := scanDream(tx.QueryRow(ctx,
 		`INSERT INTO dreams (id, status, inputs, input_memory_store_id, input_session_ids,
-			model, instructions, output_behavior, created_by)
-		 VALUES ($1, 'pending', $2, $3, $4, $5, $6, $7, $8)
+			model, instructions, output_behavior, target_memory_store_id, created_by)
+		 VALUES ($1, 'pending', $2, $3, $4, $5, $6, $7, $8, $9)
 		 RETURNING `+dreamColumns,
 		domain.NewID(domain.PrefixDream).String(), rawInputs, storeID, sessionIDs,
-		mustJSON(model), instructions, behavior, principalPtr(ctx)))
+		mustJSON(model), instructions, behavior, target, principalPtr(ctx)))
 	if err != nil {
+		// The hold (§5.3). dreams_target_hold_idx is the enforcement — one
+		// live in-place dream per target store, "live" being any status not
+		// yet closed — and this turns the unique violation it raises into the
+		// spec's 409 rather than the 500 an unhandled one would be.
+		if isUniqueViolation(err, "dreams_target_hold_idx") {
+			_ = tx.Rollback(ctx)
+			return nil, s.dreamTargetHeld(ctx, storeID)
+		}
 		return nil, err
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return nil, err
 	}
 	return d, nil
+}
+
+// dreamTargetHeld names the dream holding the target store, for the 409 above.
+// The read comes AFTER the failed insert has rolled back, because the insert
+// is what serializes two concurrent creates and a read before it could only
+// race; the price is the one case the spec allows the name to be missing from,
+// a holder that closed in between — which is also the case where the retry the
+// message asks for is about to succeed. Any other read failure is answered the
+// same way: the insert already proved the hold, so a 409 without the name
+// beats a 500.
+func (s *server) dreamTargetHeld(ctx context.Context, storeID string) error {
+	var holder string
+	if err := s.pool.QueryRow(ctx,
+		`SELECT id FROM dreams WHERE target_memory_store_id = $1 AND closed_at IS NULL`,
+		storeID).Scan(&holder); err != nil {
+		return errTargetStoreHeld("memory store %s is still held by a prior update_existing "+
+			"dream; retry", storeID)
+	}
+	return errTargetStoreHeld("memory store %s is still held by dream %s; wait for it to finish "+
+		"or cancel it, then retry", storeID, holder)
 }
 
 // parseDreamInputs validates the inputs[] union and returns the denormalized
@@ -296,43 +331,60 @@ func parseDreamSessionIDs(arm map[string]json.RawMessage) ([]string, error) {
 	return out, nil
 }
 
-// parseDreamOutputBehavior returns the stored output_behavior. Absent is the
-// documented default, {type: create_new}; an explicit null is read the same
-// way — the repo's create-route rule (stringField, parseMetadata), not the
-// spec's, which types the field non-nullable, so docs/DIVERGENCES.md
-// registers it.
-func parseDreamOutputBehavior(obj map[string]json.RawMessage) (json.RawMessage, error) {
+// parseDreamOutputBehavior returns the stored output_behavior and, under
+// update_existing, the target store — nil under create_new, which holds
+// nothing. Absent is the documented default, {type: create_new}; an explicit
+// null is read the same way — the repo's create-route rule (stringField,
+// parseMetadata), not the spec's, which types the field non-nullable, so
+// docs/DIVERGENCES.md registers it.
+//
+// The target is returned rather than checked here: the rule it must satisfy
+// (§5.3) compares it against the memory_store input, which only the create
+// knows.
+func parseDreamOutputBehavior(obj map[string]json.RawMessage) (json.RawMessage, *string, error) {
 	raw, ok := obj["output_behavior"]
 	if !ok || isNull(raw) {
-		return json.RawMessage(`{"type":"create_new"}`), nil
+		return json.RawMessage(`{"type":"create_new"}`), nil, nil
 	}
 	var ob map[string]json.RawMessage
 	if err := json.Unmarshal(raw, &ob); err != nil || ob == nil {
-		return nil, errInvalid("output_behavior must be an object")
+		return nil, nil, errInvalid("output_behavior must be an object")
 	}
 	var typ string
 	if t, ok := ob["type"]; ok {
 		_ = json.Unmarshal(t, &typ)
 	}
+	var target *string
 	switch typ {
 	case "create_new":
 		if err := rejectUnknownKeys(ob, "type"); err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 	case "update_existing":
 		if err := rejectUnknownKeys(ob, "type", "memory_store_id"); err != nil {
-			return nil, err
+			return nil, nil, err
 		}
-		// Slice 4 gives update_existing its runtime path — the target check,
-		// the hold, and the in-place mount. Until then every such body takes
-		// this one 400, before any target rule, so no row can set
-		// target_memory_store_id and no dream can be created that the runner
-		// would have no way to run (plan 41 §5.3).
-		return nil, errInvalid("output_behavior.type update_existing is not available yet on this platform")
+		// BetaOutputBehaviorUpdateExisting lists memory_store_id as required
+		// with a minLength of 1, so absent, null, empty and non-string are all
+		// 400s here rather than targets the rule downstream would then refuse
+		// for the wrong reason. The message names the field's full path: an
+		// unqualified one reads as the memory_store input's own id, which this
+		// body also carries.
+		v, set, null, err := stringField(ob, "memory_store_id")
+		if err != nil {
+			// stringField formats with the bare key, which is the one wording
+			// this field must not take, so the non-string arm is re-spelled
+			// here rather than passed through.
+			return nil, nil, errInvalid("output_behavior.memory_store_id must be a string")
+		}
+		if !set || null || v == "" {
+			return nil, nil, errInvalid("output_behavior.memory_store_id is required")
+		}
+		target = &v
 	default:
-		return nil, errInvalid(`output_behavior.type must be "create_new" or "update_existing"`)
+		return nil, nil, errInvalid(`output_behavior.type must be "create_new" or "update_existing"`)
 	}
-	return raw, nil
+	return raw, target, nil
 }
 
 // checkDreamInputsExist refuses a create naming inputs that are not there. Each

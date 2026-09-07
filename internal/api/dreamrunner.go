@@ -189,11 +189,20 @@ type dreamRow struct {
 	sessionArchived  *time.Time
 	sessionUsage     []byte
 	sessionCreatedAt time.Time
+	// targetStoreID is the update_existing target, and the whole of what makes
+	// a dream in-place: set, the runner consolidates that store itself rather
+	// than a clone of it (§5.3). Nil on every create_new dream.
+	targetStoreID *string
 	// sessionStop is the primary thread's stop reason, which is how an idle
 	// session says whether its last turn succeeded. Empty before the first
 	// turn settles.
 	sessionStop string
 }
+
+// inPlace is the update_existing dream: one whose output store is its input.
+// It is asked of the row rather than of output_behavior because the column is
+// what the hold index is keyed on, so the two can never disagree.
+func (d dreamRow) inPlace() bool { return d.targetStoreID != nil }
 
 // dreamStepResult is what an arm leaves behind for the commit and after it.
 type dreamStepResult struct {
@@ -376,13 +385,14 @@ func lockDream(ctx context.Context, tx pgx.Tx, id string, now time.Time) (dreamR
 	var d dreamRow
 	err := tx.QueryRow(ctx, `
 		SELECT id, status, stage, attempts, created_at, session_id, input_memory_store_id,
-		       input_session_ids, instructions, model, outputs
+		       input_session_ids, instructions, model, outputs, target_memory_store_id
 		  FROM dreams
 		 WHERE id = $1 AND closed_at IS NULL
 		   AND NOT (status = 'pending' AND attempts > 0 AND updated_at > $2)
 		 FOR UPDATE SKIP LOCKED`, id, now.Add(-dreamStartLease)).
 		Scan(&d.id, &d.status, &d.stage, &d.attempts, &d.createdAt, &d.sessionID,
-			&d.inputStoreID, &d.inputSessionIDs, &d.instructions, &d.model, &d.outputs)
+			&d.inputStoreID, &d.inputSessionIDs, &d.instructions, &d.model, &d.outputs,
+			&d.targetStoreID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return d, false, nil
 	}
@@ -537,7 +547,7 @@ func (s *server) dreamAdvanceArm(ctx context.Context, tx pgx.Tx, d dreamRow) (dr
 		instructions = *d.instructions
 	}
 	moves, err := s.postDreamStageInTx(ctx, tx, *d.sessionID,
-		dreamStageMessage(d.stage+1, mount, len(d.inputSessionIDs), instructions))
+		dreamStageMessage(d.stage+1, mount, len(d.inputSessionIDs), instructions, d.inPlace()))
 	if errors.Is(err, errDreamStageRefused) {
 		// A state no later tick can clear, so retrying it would only spend the
 		// dream's whole runtime budget and then report `timeout` for a fault
@@ -638,10 +648,21 @@ func (s *server) dreamCompleteArm(ctx context.Context, tx pgx.Tx, d dreamRow) (d
 	if err != nil {
 		return dreamStepResult{}, err
 	}
-	// The time bound keeps the clone out of the scan: the start arm attributed
-	// every cloned version to this same actor and stamped them and the session
-	// row with one now(), so the caller's pre-existing content cannot fail a
-	// dream that wrote nothing wrong.
+	// The two bounds keep everything the dream did not write out of the scan,
+	// which each output behavior needs for its own reason. Under create_new the
+	// clone is the problem: the start arm attributed every cloned version to
+	// this same actor, so only the time bound separates them, and it can
+	// because the clone and the session row were stamped with one now(). Under
+	// update_existing there is no clone and the store is the caller's own, so
+	// the actor bound is what carries it — versions somebody else wrote, before
+	// this dream or beside it, are not this dream's to fail on. Either way a
+	// dream fails only on a credential it put there itself.
+	//
+	// The failure is the whole of the response, and what it leaves behind
+	// differs by behavior: a create_new clone is a store the caller can drop
+	// whole, while an in-place version is in the caller's own store and
+	// nothing here can remove it — which is why the message names the memory,
+	// for the caller to delete through the memories API.
 	memoryID, err := dreamSecretInVersions(ctx, tx, storeID, *d.sessionID, d.sessionCreatedAt)
 	if err != nil {
 		return dreamStepResult{}, err
@@ -753,7 +774,10 @@ func (s *server) dreamUnavailable(ctx context.Context, tx pgx.Tx, d dreamRow) (e
 	if err != nil {
 		return "", "", err
 	}
-	if storeID != "" {
+	// Under update_existing the output store IS the input store, read and
+	// locked at the top of this arm, so a second read would be a round trip
+	// whose failure branch the first one has already taken.
+	if storeID != "" && storeID != d.inputStoreID {
 		if live, err := memoryStoreLive(ctx, tx, storeID); err != nil {
 			return "", "", err
 		} else if !live {

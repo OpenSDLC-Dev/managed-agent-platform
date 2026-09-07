@@ -1,5 +1,5 @@
 ---
-status: in-progress
+status: archived
 issue: "#475"
 ---
 
@@ -413,7 +413,8 @@ reads the model's reply text — every durable output is a file, which is what k
 transcripts inside one coordinator context. The stage messages are fixed text in code with
 the paths, counts and the caller's `instructions` substituted in.
 
-1. **Orient and plan.** Input: the store's file manifest (path, size, first line), the
+1. **Orient and plan.** Input: the store's file manifest (path, first line — the size this
+   asked for was dropped in slice 4, no tool a `bash`-less in-place session has reporting one), the
    `INDEX.md`, the `instructions` in a delimited block. Output: `/workspace/dream/plan.md` — a
    routing table from transcripts to target memory files, and the files it suspects are
    duplicates or contradicted.

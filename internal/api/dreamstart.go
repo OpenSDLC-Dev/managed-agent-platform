@@ -48,7 +48,8 @@ const (
 // is how one row serves whatever model a dream names. The toolset is
 // always_allow with the two web tools off (no egress is the environment's job
 // too), and bash stays on because the merge stage removes and moves memory
-// files and no file tool can.
+// files and no file tool can — for `create_new`, where the clone is what makes
+// that acceptable. An in-place dream overrides it away (dreamNoBashTools).
 const dreamAgentBody = `{
 	"name": "dream",
 	"model": {"id": "dream-placeholder"},
@@ -66,6 +67,25 @@ const dreamEnvBody = `{
 	"name": "dream",
 	"config": {"type": "cloud", "networking": {"type": "limited", "allowed_hosts": []}, "packages": {}}
 }`
+
+// dreamNoBashTools is the `tools` override an in-place dream's session rides
+// on (§4.3, §5.3): the internal agent's own toolset entry with bash disabled
+// beside the two web tools. It is the whole array rather than the one added
+// config because resolveAgent replaces tools[] outright, and it is spelled
+// beside dreamAgentBody rather than derived from it because a derivation of
+// four keys is more machinery than the drift it would prevent —
+// TestDreamStartInPlaceRunsWithoutBash keeps the two honest by resolving what
+// each kind of dream's session was really offered.
+//
+// It is a code jail, not a prompt one: with only the file tools left, `write`
+// and `edit` refuse every /mnt/memory path outside a mounted store
+// (toolset.Runner.unwritable), so the session that mounts the caller's own
+// store read_write can reach no other memory whatever its transcripts say.
+const dreamNoBashTools = `[{"type": "agent_toolset_20260401",
+	           "default_config": {"enabled": true, "permission_policy": {"type": "always_allow"}},
+	           "configs": [{"type": "web_fetch", "name": "web_fetch", "enabled": false},
+	                       {"type": "web_search", "name": "web_search", "enabled": false},
+	                       {"type": "bash", "name": "bash", "enabled": false}]}]`
 
 // dreamCloneBatch is the multi-row insert width the clone writes: a
 // 2,000-memory store is four statements for the memories and four for their
@@ -314,9 +334,18 @@ func (s *server) writeDreamStart(ctx context.Context, d dreamRow, sessionID stri
 	if err := s.ensureDreamInternalRows(ctx, tx); err != nil { // step 3
 		return createdSession{}, false, err
 	}
-	cloneID, err := s.cloneDreamStore(ctx, tx, d, store, sessionID) // step 4
-	if err != nil {
-		return createdSession{}, false, err
+	// Step 4, and the whole of what update_existing changes here: an in-place
+	// dream writes no clone and consolidates the caller's own store, so the
+	// session mounts the input store itself and step 7 names it (§5.3). The
+	// input is what is named rather than target_memory_store_id because the
+	// two are equal by the create-time target rule (§5.2) and the input is the
+	// one dreamStartChecks just found live.
+	outputStoreID := d.inputStoreID
+	if !d.inPlace() {
+		outputStoreID, err = s.cloneDreamStore(ctx, tx, d, store, sessionID)
+		if err != nil {
+			return createdSession{}, false, err
+		}
 	}
 	for _, f := range files { // step 5
 		if _, err := tx.Exec(ctx, `
@@ -326,7 +355,7 @@ func (s *server) writeDreamStart(ctx context.Context, d dreamRow, sessionID stri
 			return createdSession{}, false, err
 		}
 	}
-	created, err := s.createDreamSession(ctx, tx, d, cloneID, sessionID, files) // step 6
+	created, err := s.createDreamSession(ctx, tx, d, outputStoreID, sessionID, files) // step 6
 	if err != nil {
 		return createdSession{}, false, err
 	}
@@ -335,7 +364,7 @@ func (s *server) writeDreamStart(ctx context.Context, d dreamRow, sessionID stri
 	if _, err := tx.Exec(ctx, `
 		UPDATE dreams SET status = 'running', stage = 1, session_id = $2, outputs = $3, updated_at = now()
 		 WHERE id = $1`, d.id, sessionID,
-		mustJSON([]any{map[string]string{"type": "memory_store", "memory_store_id": cloneID}})); err != nil {
+		mustJSON([]any{map[string]string{"type": "memory_store", "memory_store_id": outputStoreID}})); err != nil {
 		return createdSession{}, false, err
 	}
 	if err := tx.Commit(ctx); err != nil {
@@ -509,8 +538,10 @@ func dreamCloneName(name, dreamID string) string {
 // admits the hidden pair. created_by is whatever the runner's context carries,
 // which is nothing, so the session lands unattributed exactly as a scheduled
 // fire's does; the dream row carries its own created_by for audit.
-func (s *server) createDreamSession(ctx context.Context, tx pgx.Tx, d dreamRow, cloneID, sessionID string, files []dreamFile) (createdSession, error) {
-	store := resourceInput{kind: resourceKindMemory, memoryStoreID: cloneID, access: "read_write"}
+//
+// outputStoreID is the clone, or under update_existing the input store itself.
+func (s *server) createDreamSession(ctx context.Context, tx pgx.Tx, d dreamRow, outputStoreID, sessionID string, files []dreamFile) (createdSession, error) {
+	store := resourceInput{kind: resourceKindMemory, memoryStoreID: outputStoreID, access: "read_write"}
 	// The mount path the prompt spells is the resource's own: the snapshot
 	// createSessionInTx takes a moment below, taken here first, so no slug is
 	// computed twice or by hand.
@@ -531,17 +562,25 @@ func (s *server) createDreamSession(ctx context.Context, tx pgx.Tx, d dreamRow, 
 	if d.instructions != nil {
 		instructions = *d.instructions
 	}
-	agentRaw := mustJSON(map[string]any{
+	agent := map[string]any{
 		"type":   "agent_with_overrides",
 		"id":     dreamAgentID,
 		"model":  json.RawMessage(d.model),
-		"system": dreamSystemPrompt(mounted.MountPath),
-	})
+		"system": dreamSystemPrompt(mounted.MountPath, d.inPlace()),
+	}
+	if d.inPlace() {
+		// The write boundary §5.3 puts around the caller's own store: no bash,
+		// so the file tools are the only writers left and the memory they can
+		// reach is the mounted store alone. The roster's self member inherits
+		// it, snapshotRoster taking the resolved spec this override produced.
+		agent["tools"] = json.RawMessage(dreamNoBashTools)
+	}
+	agentRaw := mustJSON(agent)
 	initial := mustJSON(map[string]any{
 		"type": "user.message",
 		"content": []any{map[string]any{
 			"type": "text",
-			"text": dreamStageMessage(1, mounted.MountPath, len(d.inputSessionIDs), instructions),
+			"text": dreamStageMessage(1, mounted.MountPath, len(d.inputSessionIDs), instructions, d.inPlace()),
 		}},
 	})
 	// The post-commit half goes back to startDream, which commits: a pipeline

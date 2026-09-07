@@ -8,6 +8,7 @@ import (
 	"io"
 	"maps"
 	"net/http"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -18,6 +19,7 @@ import (
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/blob"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/blob/blobtest"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/toolset"
 )
 
 // The start arm (plan 41 §4.2): the claim, the unlocked render, and the write
@@ -180,6 +182,169 @@ func TestDreamStartLandsEverythingInOneCommit(t *testing.T) {
 	if status != http.StatusBadRequest {
 		t.Errorf("archive the pipeline session while the dream runs: status %d (%v), want 400", status, res)
 	}
+}
+
+// The in-place start (§5.3): step 4 skipped outright — no clone written, the
+// caller's own store mounted read_write, and outputs[] naming it.
+func TestDreamStartInPlaceConsolidatesTheInputStore(t *testing.T) {
+	s := newTestServer(t)
+	storeID, body := seededDreamBody(t, s)
+	dreamID := createDreamInPlace(t, s, body, storeID)["id"].(string)
+	stores, versions := memoryStoreCount(t, s), storeVersionCount(t, s, storeID)
+
+	tick(t, s)
+
+	d := getDream(t, s, dreamID)
+	if d["status"] != "running" {
+		t.Fatalf("dream is %v, want running (%v)", d["status"], d["error"])
+	}
+	if got := dreamOutputStore(t, s, dreamID); got != storeID {
+		t.Errorf("outputs[0] names %s, want the input store %s", got, storeID)
+	}
+	if got := memoryStoreCount(t, s); got != stores {
+		t.Errorf("the platform holds %d memory stores, want the %d it started with — an in-place dream clones nothing", got, stores)
+	}
+	if got := storeVersionCount(t, s, storeID); got != versions {
+		t.Errorf("the input store carries %d versions, want the %d it started with", got, versions)
+	}
+
+	// The session mounts that same store, writable: the consolidation lands in
+	// the caller's own memory, which is what update_existing means.
+	sessionID := d["session_id"].(string)
+	mount := ""
+	for _, r := range sessionResources(t, s, sessionID) {
+		if r["type"] != "memory_store" {
+			continue
+		}
+		if r["memory_store_id"] != storeID || r["access"] != "read_write" {
+			t.Errorf("the session mounts %v %v, want %s read_write", r["memory_store_id"], r["access"], storeID)
+		}
+		mount = r["mount_path"].(string)
+	}
+	if mount == "" {
+		t.Fatal("the in-place session mounts no memory store")
+	}
+	if system, _ := resolvedAgent(t, s, sessionID)["system"].(string); !strings.Contains(system, mount) {
+		t.Errorf("the system prompt does not name the mounted store %s:\n%s", mount, system)
+	}
+}
+
+// The toolset half of the same boundary (§4.3): an in-place session is offered
+// no bash, so the file tools are the only writers left and the memory they may
+// write is the mounted store alone (internal/toolset's unwritable, pinned by
+// TestMemoryRootsGuardTheFileTools). The refusal of a call to a name the model
+// was not offered is internal/brain's, over this very set.
+func TestDreamStartInPlaceRunsWithoutBash(t *testing.T) {
+	s := newTestServer(t)
+	storeID, body := seededDreamBody(t, s)
+	dreamID := createDreamInPlace(t, s, body, storeID)["id"].(string)
+	tick(t, s)
+	inPlace := getDream(t, s, dreamID)["session_id"].(string)
+
+	_, cloning := startedDream(t, s, body)
+
+	want := []string{"read", "write", "edit", "glob", "grep"}
+	own, member := offeredTools(t, s, inPlace)
+	if !slices.Equal(own, want) {
+		t.Errorf("the in-place session is offered %v, want %v — bash is what update_existing takes away", own, want)
+	}
+	// The roster's self member is the same resolution, so the digest threads
+	// the coordinator spawns inherit the jail rather than escaping it.
+	if !slices.Equal(member, want) {
+		t.Errorf("the in-place roster's self member is offered %v, want %v", member, want)
+	}
+	// The create_new side is asserted whole rather than for bash alone, because
+	// that is what keeps the two constants honest in both directions: a tool
+	// disabled in dreamAgentBody and not mirrored into dreamNoBashTools would
+	// drop out here, where a search for bash would never look.
+	withBash := append([]string{"bash"}, want...)
+	if got, _ := offeredTools(t, s, cloning); !slices.Equal(got, withBash) {
+		t.Errorf("a create_new session is offered %v, want %v", got, withBash)
+	}
+}
+
+// createDreamInPlace creates an in-place dream the way a caller does — an
+// update_existing output_behavior naming the body's own memory_store input —
+// so the tests above drive the whole chain, create body to start arm, rather
+// than writing the column the runner reads and proving only its second half.
+// The body is copied because its callers reuse it for a second, cloning dream,
+// which the hold would refuse if it inherited the target.
+func createDreamInPlace(t *testing.T, s *tserver, body map[string]any, storeID string) map[string]any {
+	t.Helper()
+	in := maps.Clone(body)
+	in["output_behavior"] = map[string]any{"type": "update_existing", "memory_store_id": storeID}
+	return createDream(t, s, in)
+}
+
+func memoryStoreCount(t *testing.T, s *tserver) int {
+	t.Helper()
+	var n int
+	if err := s.pool.QueryRow(context.Background(),
+		`SELECT count(*) FROM memory_stores`).Scan(&n); err != nil {
+		t.Fatalf("count memory stores: %v", err)
+	}
+	return n
+}
+
+func storeVersionCount(t *testing.T, s *tserver, storeID string) int {
+	t.Helper()
+	var n int
+	if err := s.pool.QueryRow(context.Background(),
+		`SELECT count(*) FROM memory_versions WHERE memory_store_id = $1`, storeID).Scan(&n); err != nil {
+		t.Fatalf("count versions of %s: %v", storeID, err)
+	}
+	return n
+}
+
+// offeredTools resolves the built-in tools a session's stored snapshot offers,
+// through the same toolset.Tools the brain builds a turn's tool list from: the
+// session's own agent, and the roster's self member the coordinator's spawned
+// threads run on.
+func offeredTools(t *testing.T, s *tserver, sessionID string) (own, member []string) {
+	t.Helper()
+	var raw []byte
+	if err := s.pool.QueryRow(context.Background(),
+		`SELECT resolved_agent FROM sessions WHERE id = $1`, sessionID).Scan(&raw); err != nil {
+		t.Fatalf("read resolved_agent: %v", err)
+	}
+	var snap struct {
+		Tools      []json.RawMessage `json:"tools"`
+		Multiagent struct {
+			Agents []struct {
+				Tools []json.RawMessage `json:"tools"`
+			} `json:"agents"`
+		} `json:"multiagent"`
+	}
+	if err := json.Unmarshal(raw, &snap); err != nil {
+		t.Fatalf("decode resolved_agent: %v", err)
+	}
+	if len(snap.Multiagent.Agents) != 1 {
+		t.Fatalf("the snapshot carries %d roster members, want the one self member",
+			len(snap.Multiagent.Agents))
+	}
+	return toolNames(t, snap.Tools), toolNames(t, snap.Multiagent.Agents[0].Tools)
+}
+
+func toolNames(t *testing.T, tools []json.RawMessage) []string {
+	t.Helper()
+	if len(tools) != 1 {
+		t.Fatalf("the snapshot carries %d tools entries, want the one toolset", len(tools))
+	}
+	defs, err := toolset.Tools(tools[0])
+	if err != nil {
+		t.Fatalf("resolve the snapshot's toolset: %v", err)
+	}
+	var names []string
+	for _, def := range defs {
+		var d struct {
+			Name string `json:"name"`
+		}
+		if err := json.Unmarshal(def, &d); err != nil {
+			t.Fatalf("decode a tool definition: %v", err)
+		}
+		names = append(names, d.Name)
+	}
+	return names
 }
 
 // A second dream on a fresh platform finds the hidden pair rather than writing

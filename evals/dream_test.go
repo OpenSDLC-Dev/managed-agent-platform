@@ -138,18 +138,31 @@ func (s *stack) oneTurn(t *testing.T, agentID, envID, message string) string {
 // the create response.
 func (s *stack) createDream(t *testing.T, storeID string, sessionIDs []string, instructions string) map[string]any {
 	t.Helper()
+	return s.createDreamWith(t, storeID, sessionIDs, instructions, nil)
+}
+
+// createDreamWith is createDream plus an explicit output_behavior, which is the
+// only thing an in-place dream's body says differently. A nil behavior sends no
+// key at all rather than an explicit create_new, so the default path stays the
+// one the other tests exercise.
+func (s *stack) createDreamWith(t *testing.T, storeID string, sessionIDs []string, instructions string, behavior map[string]any) map[string]any {
+	t.Helper()
 	ids := make([]any, len(sessionIDs))
 	for i, id := range sessionIDs {
 		ids[i] = id
 	}
-	return s.do(t, http.MethodPost, "/v1/dreams", map[string]any{
+	body := map[string]any{
 		"inputs": []any{
 			map[string]any{"type": "memory_store", "memory_store_id": storeID},
 			map[string]any{"type": "sessions", "session_ids": ids},
 		},
 		"model":        s.model,
 		"instructions": instructions,
-	})
+	}
+	if behavior != nil {
+		body["output_behavior"] = behavior
+	}
+	return s.do(t, http.MethodPost, "/v1/dreams", body)
 }
 
 // awaitDream polls the retrieve route until the dream is terminal, and returns
@@ -618,6 +631,125 @@ func TestDreamPipelineHundred(t *testing.T) {
 	after := s.storeMemories(t, outputStoreID(t, dream))
 	if _, ok := after["/MEMORY.md"]; !ok {
 		t.Errorf("the output store has no /MEMORY.md index: %v", memoryPaths(after))
+	}
+}
+
+// TestDreamPipelineInPlace is the update_existing case (plan 41 §5.3, §7): the
+// dream consolidates the caller's own store rather than a clone of it, and the
+// session that does it has no `bash`. What that costs is deletion — `write` and
+// `edit` create and change, and nothing removes — so a memory the transcripts
+// retire has to survive as a tombstone naming its successor, listed for the
+// caller to remove through the memories API.
+//
+// The graders here are the seeded case's inverted where in-place inverts them:
+// there the input store must come back byte-identical, here it is the output
+// and must have changed.
+func TestDreamPipelineInPlace(t *testing.T) {
+	cfg := modeltest.Endpoint(t, modeltest.EvalsEnv)
+	s := newStack(t, cfg)
+	startDreamRunner(t, s, dreamRunnerConfig(dreamRunnerTimeout))
+
+	tr := &Trial{Nonce: newNonce(t), Recall: newNonce(t)}
+
+	// The seed. One memory a transcript retires outright — the vendor portal is
+	// gone — and one nothing touches.
+	const (
+		retiredPath   = "/facts/vendor-portal.md"
+		untouchedPath = "/facts/build.md"
+	)
+	seed := &MemoryFixture{
+		Name: "dream-eval-in-place",
+		Memories: map[string]string{
+			retiredPath: "# Vendor portal\n\n" +
+				"Validated fact: expenses are filed through the vendor portal at vendor.example.com.\n",
+			untouchedPath: "# Build\n\n" +
+				"Validated fact: the build runs `make verify`, which takes about nine minutes.\n",
+		},
+	}
+	storeID := s.createMemoryStore(t, seed, tr)
+	before := s.storeMemories(t, storeID)
+
+	agentID := s.createAgent(t, dreamAgentBody(s.model, "dream-eval-in-place"))
+	envID := s.createEnvironment(t, "dream-eval-in-place")
+
+	// The transcript that retires it: not a contradiction to weigh, an
+	// outright end. The successor is named, because a tombstone that names no
+	// successor is just a deletion the caller has to reconstruct.
+	sessionA := s.oneTurn(t, agentID, envID,
+		"Note for the future: the vendor portal at vendor.example.com was shut down on "+
+			"2026-09-01. Expenses are now filed in the internal finance app at finance.internal.")
+
+	start := time.Now()
+	created := s.createDreamWith(t, storeID, []string{sessionA},
+		"Retire what the transcript ends; keep the user's own wording.",
+		map[string]any{"type": "update_existing", "memory_store_id": storeID})
+	dreamID := id(t, created, "create dream")
+	dream := s.awaitDream(t, dreamID, 25*time.Minute)
+
+	in, out := dreamUsage(t, dream)
+	t.Logf("in-place dream %s: status %v in %s — usage %.0f in / %.0f out",
+		dreamID, dream["status"], time.Since(start).Round(time.Second), in, out)
+	if sid, _ := dream["session_id"].(string); sid != "" {
+		t.Logf("stage spend (model turns, every thread's): %v", stageSpend(t, s, sid))
+	}
+	if dream["status"] != "completed" {
+		t.Fatalf("dream %s ended %v: %v (pipeline session %v)",
+			dreamID, dream["status"], dream["error"], dream["session_id"])
+	}
+
+	// The output IS the input: no clone was written, and outputs[] says so.
+	if got := outputStoreID(t, dream); got != storeID {
+		t.Fatalf("outputs[] names %s, want the input store %s — an in-place dream cloned", got, storeID)
+	}
+
+	after := s.storeMemories(t, storeID)
+	t.Logf("the store now holds %d memories: %v", len(after), memoryPaths(after))
+
+	// Nothing was removed, because nothing could be: the retired memory is
+	// still a path in the store.
+	if _, ok := after[retiredPath]; !ok {
+		t.Errorf("%s is gone from an in-place store, where no tool can delete: %v",
+			retiredPath, memoryPaths(after))
+	}
+	// And it is a tombstone rather than the fact it was: the portal no longer
+	// reads as where expenses are filed, and the successor is named. Emptying
+	// the file is not tombstoning it — that is a deletion this session could
+	// not make, spelled a different way — so the empty case is a failure here
+	// rather than a case to skip.
+	tomb := after[retiredPath]
+	switch {
+	case strings.TrimSpace(tomb) == "":
+		t.Errorf("%s was emptied rather than tombstoned", retiredPath)
+	case tomb == before[retiredPath]:
+		t.Errorf("%s is unchanged, so the transcript that ended it changed nothing:\n%s",
+			retiredPath, tomb)
+	case !strings.Contains(strings.ToLower(tomb), "finance"):
+		t.Errorf("%s does not name its successor:\n%s", retiredPath, tomb)
+	}
+	// The successor fact reached the store, in the tombstone or beside it.
+	if len(mentionsOutsideIndex(after, "finance.internal")) == 0 {
+		t.Errorf("no memory states the new place expenses are filed: %v", memoryPaths(after))
+	}
+	// The index carries the retirement where the caller will look for it, and
+	// says which memory it means. Searching for the word alone would pass an
+	// index whose removal section reads "nothing to remove", which is the one
+	// thing this run must not produce.
+	if index, ok := after["/MEMORY.md"]; !ok {
+		t.Errorf("the store has no /MEMORY.md index: %v", memoryPaths(after))
+	} else {
+		lower := strings.ToLower(index)
+		if !strings.Contains(lower, "remove") {
+			t.Errorf("/MEMORY.md has no section listing what the caller should remove:\n%s", index)
+		}
+		if !strings.Contains(lower, strings.TrimPrefix(retiredPath, "/")) {
+			t.Errorf("/MEMORY.md does not name %s, the memory it retired:\n%s", retiredPath, index)
+		}
+	}
+	// The memory nothing spoke to is byte-identical, in place as much as in a
+	// clone.
+	if after[untouchedPath] != before[untouchedPath] {
+		t.Errorf("the untouched memory changed:\n before: %q\n  after: %q",
+			before[untouchedPath], after[untouchedPath])
 	}
 }
 
