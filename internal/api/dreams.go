@@ -372,7 +372,10 @@ func parseDreamOutputBehavior(obj map[string]json.RawMessage) (json.RawMessage, 
 		// body also carries.
 		v, set, null, err := stringField(ob, "memory_store_id")
 		if err != nil {
-			return nil, nil, err
+			// stringField formats with the bare key, which is the one wording
+			// this field must not take, so the non-string arm is re-spelled
+			// here rather than passed through.
+			return nil, nil, errInvalid("output_behavior.memory_store_id must be a string")
 		}
 		if !set || null || v == "" {
 			return nil, nil, errInvalid("output_behavior.memory_store_id is required")

@@ -657,6 +657,12 @@ func (s *server) dreamCompleteArm(ctx context.Context, tx pgx.Tx, d dreamRow) (d
 	// the actor bound is what carries it — versions somebody else wrote, before
 	// this dream or beside it, are not this dream's to fail on. Either way a
 	// dream fails only on a credential it put there itself.
+	//
+	// The failure is the whole of the response, and what it leaves behind
+	// differs by behavior: a create_new clone is a store the caller can drop
+	// whole, while an in-place version is in the caller's own store and
+	// nothing here can remove it — which is why the message names the memory,
+	// for the caller to delete through the memories API.
 	memoryID, err := dreamSecretInVersions(ctx, tx, storeID, *d.sessionID, d.sessionCreatedAt)
 	if err != nil {
 		return dreamStepResult{}, err
@@ -768,7 +774,10 @@ func (s *server) dreamUnavailable(ctx context.Context, tx pgx.Tx, d dreamRow) (e
 	if err != nil {
 		return "", "", err
 	}
-	if storeID != "" {
+	// Under update_existing the output store IS the input store, read and
+	// locked at the top of this arm, so a second read would be a round trip
+	// whose failure branch the first one has already taken.
+	if storeID != "" && storeID != d.inputStoreID {
 		if live, err := memoryStoreLive(ctx, tx, storeID); err != nil {
 			return "", "", err
 		} else if !live {

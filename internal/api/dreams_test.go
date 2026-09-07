@@ -272,7 +272,7 @@ func TestDreamCreateRejections(t *testing.T) {
 			"output_behavior.memory_store_id is required"},
 		{"update_existing with a non-string target", dreamWith(storeID, sessionIDs, "output_behavior",
 			map[string]any{"type": "update_existing", "memory_store_id": 7}),
-			"memory_store_id must be a string"},
+			"output_behavior.memory_store_id must be a string"},
 		{"update_existing targeting another store", dreamWith(storeID, sessionIDs, "output_behavior",
 			map[string]any{"type": "update_existing", "memory_store_id": otherStore}),
 			"output_behavior.memory_store_id must be the job's own memory_store input"},

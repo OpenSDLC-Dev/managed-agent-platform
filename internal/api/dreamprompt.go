@@ -263,14 +263,19 @@ func mountedAt(p string) string { return defaultMountRoot + p }
 //
 // inPlace is dreamSystemPrompt's, and only the two stages that touch the store
 // read it: stage 1 writes nothing under it and stage 2's threads never reach
-// it, so those two are one text for both runs.
+// it, so those two are one text for both runs. Which is also why stage 1's
+// manifest asks for less than the plan designed: it wanted each file's size
+// beside its path, and no tool an in-place session still has reports one —
+// `glob` returns paths and `read` returns content, `bash` is gone, and asking
+// anyway would buy a size by reading every memory in full, which is the cost
+// the stage exists to avoid.
 func dreamStageMessage(stage int, storeMount string, transcripts int, instructions string, inPlace bool) string {
 	var b strings.Builder
 	switch stage {
 	case 1:
 		fmt.Fprintf(&b, `Stage 1 of 4: orient and plan. Write nothing under %[1]s in this stage.
 
-Build a manifest of %[1]s — every file's path, its size and its first line —
+Build a manifest of %[1]s — every file's path and its first line —
 and read %[2]s, which lists the %[3]d transcripts
 under %[4]s.
 

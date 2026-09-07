@@ -59,16 +59,17 @@ tier rather than the compose stack, because what it has to show is what an in-pl
 do. A store of two memories — one the transcript retires outright (the vendor portal was shut
 down), one nothing speaks to — consolidated under `output_behavior: update_existing`.
 
-- `completed` in **1m5s**, spending 16,867 input and 4,272 output tokens over stage spends of
-  4 / 8 / 4 / 4, every stage far inside its cap.
+- `completed` in **1m30s**, spending 17,107 input and 3,538 output tokens over stage spends of
+  5 / 9 / 4 / 4, every stage far inside its cap.
 - `outputs[]` named the input store: no clone was written, which is the whole of what in-place
   means on the wire.
 - The retired memory **is still there**, and is no longer the fact it was: rewritten as a tombstone
   naming the internal finance app that replaced it. Nothing in that session could have deleted it —
   `bash` is disabled and the file tools do not remove — so the tombstone is the design working
   rather than the model being tidy.
-- Beside it, a new `/facts/expenses-filing.md` carrying where expenses are filed now, and
-  `/MEMORY.md` rewritten with the retirement listed where the caller will look for it.
+- `/MEMORY.md` came back rewritten with the retirement listed where the caller will look for it.
+  Where the successor is written is the model's call and the graders do not fix it: an earlier run
+  on the same store put it in a new `/facts/expenses-filing.md`, this one inside the tombstone.
 - `/facts/build.md`, which no transcript mentioned, came back byte-identical.
 
 **Plan 41's delivery, in five slices.** Slice 1 landed the surface and the storage — migration

@@ -1,6 +1,6 @@
 Stage 1 of 4: orient and plan. Write nothing under /mnt/memory/team-notes in this stage.
 
-Build a manifest of /mnt/memory/team-notes — every file's path, its size and its first line —
+Build a manifest of /mnt/memory/team-notes — every file's path and its first line —
 and read /mnt/session/uploads/dream/INDEX.md, which lists the 18 transcripts
 under /mnt/session/uploads/dream/transcripts/.
 

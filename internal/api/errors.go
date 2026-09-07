@@ -38,7 +38,9 @@ const (
 	// The dream surface's own 409 (plan 41 §5.3), named by the reference
 	// schema like the memory pair above: BetaTargetStoreHeldError is the
 	// conflict_error arm of BetaDreamingError, and the only arm of that union
-	// with no shared.ErrorType counterpart.
+	// with no shared.ErrorType counterpart. It is not errConflict's type:
+	// that constructor is the 409 every other conflicting route takes, and it
+	// answers invalid_request_error.
 	errTypeConflict = "conflict_error"
 )
 
@@ -163,16 +165,21 @@ func requestIDFrom(ctx context.Context) string {
 // without leaking internals.
 func writeError(w http.ResponseWriter, r *http.Request, err error) {
 	inner := map[string]string{}
+	// Both decorations are matched against the error as it arrived, because
+	// either match narrows err to the plain apiError underneath: taking one
+	// first would hide the other from an error that ever carried both.
 	var withFields *apiErrorWithFields
-	if errors.As(err, &withFields) {
+	hasFields := errors.As(err, &withFields)
+	var withHeaders *apiErrorWithHeaders
+	hasHeaders := errors.As(err, &withHeaders)
+	if hasFields {
 		// Take the extra members off, then carry on with the plain apiError
 		// underneath, so the status and the two shared fields have exactly one
 		// code path whatever the schema added.
 		maps.Copy(inner, withFields.fields)
 		err = &withFields.apiError
 	}
-	var withHeaders *apiErrorWithHeaders
-	if errors.As(err, &withHeaders) {
+	if hasHeaders {
 		// Same shape as the fields above, and set before writeJSON writes the
 		// status line: the headers come off, the plain apiError underneath
 		// renders through the one code path.
