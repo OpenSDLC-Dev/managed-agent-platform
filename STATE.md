@@ -6,9 +6,9 @@ What is being worked on right now, and how far along it is — nothing else. **S
 
 **#78 — confirming documented wire assumptions against a real managed-agents endpoint.** Four
 recording days, 1,346 request/response pairs for about US$1.12, in a private archive. It stays open:
-129 registry entries name it as their live tracker, and the debt is now analysis, not recording.
-The twelve dream entries are the exception it cannot clear: `/v1/dreams` is a research preview this
-organization is not enrolled in, so no recording settles them and none is waited on.
+138 registry entries name it as their live tracker, and the debt is now analysis, not recording.
+Its twelve INFERRED dream entries are the exception it cannot clear: `/v1/dreams` is a research
+preview this organization is not enrolled in, so no recording settles them and none is waited on.
 
 ## Tasks
 
