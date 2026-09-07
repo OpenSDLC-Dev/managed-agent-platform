@@ -1243,6 +1243,34 @@ func countRows(t *testing.T, s *tserver, query string, args ...any) int {
 	return n
 }
 
+// Arm 4's in-place half. The output store IS the input store there, so the
+// arm skips the output read it would otherwise take — and this is what the
+// skip rests on: the store is still read, under the input's own error rather
+// than the output's, and an archived one still fails the dream rather than
+// passing unnoticed.
+func TestDreamTickInPlaceStoreArchivedIsArm4(t *testing.T) {
+	s := newTestServer(t)
+	storeID, body := seededDreamBody(t, s)
+	dreamID := createDreamInPlace(t, s, body, storeID)["id"].(string)
+	tick(t, s)
+	d := getDream(t, s, dreamID)
+	if d["status"] != "running" {
+		t.Fatalf("dream is %v after its start tick (%v)", d["status"], d["error"])
+	}
+	foldSessionIdle(t, s, d["session_id"].(string))
+
+	archiveMemoryStore(t, s, storeID)
+	tick(t, s)
+
+	d = getDream(t, s, dreamID)
+	if d["status"] != "failed" {
+		t.Fatalf("dream is %v, want failed (error %v)", d["status"], d["error"])
+	}
+	if got, msg := dreamError(t, d); got != "input_memory_store_unavailable" {
+		t.Errorf("error.type = %q (%q), want input_memory_store_unavailable", got, msg)
+	}
+}
+
 func archiveMemoryStore(t *testing.T, s *tserver, storeID string) {
 	t.Helper()
 	if status, body := s.do(http.MethodPost, "/v1/memory_stores/"+storeID+"/archive", nil); status != http.StatusOK {
