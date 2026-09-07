@@ -80,10 +80,13 @@ one-stage pipeline, accepted end to end with the real `ant` CLI. Slice 3 replace
 with the plan's four, added the batched digest threads, measured the turn caps against live runs
 that refuted the plan's first guess, and was accepted at the hundred-transcript bound. Slice 4 is
 this one. Slice 0, the recording that would settle the registry's dream inferences, was attempted
-2026-09-05 and answered nothing — the organization is not enrolled in the preview — and is the
-only outstanding item; it settles entries rather than code, which is why the plan archives without
-it. [#475](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/475) stays open until it
-lands.
+2026-09-05 and answered nothing — the organization is not enrolled in the preview — and it settles
+entries rather than code, which is why the plan archived without it.
+[#475](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/475) is closed with it: the
+owner's decision on 2026-09-07 was that `/v1/dreams` is a research preview this account cannot
+reach, so the recording is not work waiting on a date. The twelve entries it would have settled
+stay INFERRED under #78 like every other unrecorded reading, and a future enrollment converts them
+there rather than reopening a delivered plan.
 
 **What the slices taught, which the plan could not have known.** The merge rules were missing a
 rule: two memories stating the same thing are folded into one, because "nothing is removed on
