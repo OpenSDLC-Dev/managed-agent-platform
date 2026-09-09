@@ -4,16 +4,21 @@ What is being worked on right now, and how far along it is — nothing else. **S
 
 ## Active work
 
-**#78 — confirming documented wire assumptions against a real managed-agents endpoint.** Four
-recording days, 1,346 request/response pairs for about US$1.12, in a private archive. It stays open:
-138 registry entries name it as their live tracker, and the debt is now analysis, not recording.
-Its twelve INFERRED dream entries are the exception it cannot clear: `/v1/dreams` is a research
-preview this organization is not enrolled in, so no recording settles them and none is waited on.
+None.
 
 ## Tasks
 
-- [x] Reconcile 2026-09-02 and 2026-09-03's second wave into the registry — three entries
-      to CONFIRMED, four registered readings refuted, 23 mismatches now their own issues
-- [x] Record the multi-workspace capture plan 42 (#56) gated slice 1 on — items 1-5 in
-      full, item 6 on its key lane; the gate lifts, its environment-key half unobserved
-- [ ] Read the 72 un-analysed comparison rows from 2026-09-02
+None in flight. Plan 41 (dreams) delivered its four code slices and archived, and
+[#475](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/475) closed with it on
+2026-09-07 without slice 0's recording: `/v1/dreams` is a research preview this account cannot
+reach, which is an access problem rather than a scheduled one. That, and the fourteen registry
+entries it leaves unsettleable, are recorded on
+[#78](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/78), which stays open as the
+registry's standing tracker — the debt there is analysis now, chiefly the 72 recorded-but-unchecked
+comparison rows from 2026-09-02. The three questions plan 41's reviews spun off are their own
+issues: the executor's memory-sync semantics
+([#626](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/626),
+[#631](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/631)) and the file tools
+advising `bash` to sessions never offered it
+([#634](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/634)). Pick the next piece of
+work from the GitHub issue backlog.
