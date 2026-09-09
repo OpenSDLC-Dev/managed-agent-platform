@@ -4,11 +4,10 @@ What is being worked on right now, and how far along it is — nothing else. **S
 
 ## Active work
 
-None.
+**None.** [Plan 41](./docs/plan/41_dreams.md) (dreams, #475) archived 2026-09-07, the last stream
+in flight; its delivery record is [docs/HISTORY.md](./docs/HISTORY.md). Pick the next piece of work
+from the GitHub issue backlog.
 
 ## Tasks
 
-None in flight. Plan 41 (dreams) was the last stream and archived on 2026-09-07; what it
-delivered is [docs/HISTORY.md](./docs/HISTORY.md)'s record and its close-out fragment's, and what
-it left open is on the issues it left open. Pick the next piece of work from the GitHub issue
-backlog.
+_None — no active work._
