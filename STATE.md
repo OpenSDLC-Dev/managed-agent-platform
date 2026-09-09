@@ -4,16 +4,10 @@ What is being worked on right now, and how far along it is — nothing else. **S
 
 ## Active work
 
-**#78 — confirming documented wire assumptions against a real managed-agents endpoint.** Four
-recording days, 1,346 request/response pairs for about US$1.12, in a private archive. It stays open:
-138 registry entries name it as their live tracker, and the debt is now analysis, not recording.
-Its twelve INFERRED dream entries are the exception it cannot clear: `/v1/dreams` is a research
-preview this organization is not enrolled in, so no recording settles them and none is waited on.
+**None.** [Plan 41](./docs/plan/41_dreams.md) (dreams, #475) archived 2026-09-07, the last stream
+in flight; its delivery record is [docs/HISTORY.md](./docs/HISTORY.md). Pick the next piece of work
+from the GitHub issue backlog.
 
 ## Tasks
 
-- [x] Reconcile 2026-09-02 and 2026-09-03's second wave into the registry — three entries
-      to CONFIRMED, four registered readings refuted, 23 mismatches now their own issues
-- [x] Record the multi-workspace capture plan 42 (#56) gated slice 1 on — items 1-5 in
-      full, item 6 on its key lane; the gate lifts, its environment-key half unobserved
-- [ ] Read the 72 un-analysed comparison rows from 2026-09-02
+_None — no active work._
