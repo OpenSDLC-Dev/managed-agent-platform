@@ -1294,6 +1294,11 @@ func (s *server) listSessions(r *http.Request) (any, error) {
 // message are ours (docs/DIVERGENCES.md, INFERRED). The row lock holds the
 // status still until the caller's tx commits, so an approval flipping the
 // session to running cannot slip between the check and the mutation.
+//
+// It is also the first half of a lock order the mutation depends on: the session
+// row before anything that cascades from it. internal/gatetoken.Ensure takes the
+// same order on purpose, and taking the two the other way round here would
+// reopen the deadlock #313 closed.
 func requireNotRunning(ctx context.Context, tx pgx.Tx, id, verb string) error {
 	var status string
 	err := tx.QueryRow(ctx, `SELECT status FROM sessions WHERE id = $1 FOR UPDATE`, id).Scan(&status)
