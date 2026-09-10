@@ -521,22 +521,29 @@ func TestEnvironmentKeysEnvironmentIndexExists(t *testing.T) {
 //   - `am = btree` — ordering is half the job here, and a hash index cannot
 //     serve any of it. (The environment_keys pin accepts one on purpose; it
 //     exists for equality seeks alone.)
-//   - each `indoption` in (0, 3) — direction, where "a btree reads backwards as
-//     happily" stops holding. `(agent_id, created_at DESC, id)` passes every
-//     other clause and the planner emits an Incremental Sort: `created_at`
-//     presorted on the backward scan, `id` re-sorted within its ties. Uniformity
-//     is not the rule either, because indoption packs two bits — DESC (1) and
-//     NULLS FIRST (2) — and a uniform 1 or a uniform 2 sorts just as surely.
-//     Only 0 (ASC NULLS LAST) and 3 (DESC NULLS FIRST) match this ORDER BY's own
-//     null placement, forwards and backwards respectively.
+//   - `indoption` in (0, 3) on the two **ordering** columns — direction, where
+//     "a btree reads backwards as happily" stops holding. `(agent_id,
+//     created_at DESC, id)` passes every other clause and the planner emits an
+//     Incremental Sort: `created_at` presorted on the backward scan, `id`
+//     re-sorted within its ties. Uniformity is not the rule either, because
+//     indoption packs two bits — DESC (1) and NULLS FIRST (2) — and a uniform 1
+//     or a uniform 2 sorts just as surely. Only 0 (ASC NULLS LAST) and 3 (DESC
+//     NULLS FIRST) match this ORDER BY's own null placement, forwards and
+//     backwards. That all three columns are NOT NULL does not make the null bit
+//     moot, which is worth stating because it reads as though it should: the
+//     planner compares pathkeys rather than reasoning from the constraint, and
+//     an ASC NULLS FIRST spelling was measured leaving the sort in place.
 //   - `indclass` and `indcollation` per column — the same hole spelled two more
 //     ways. `text_pattern_ops` on the two text columns, or a `COLLATE "C"` on
 //     `id`, orders rows differently from the query's default, so the index is
 //     usable and the sort survives anyway.
 //
-// Not asserted: which of the two directions, only that null placement agrees
-// with it. All three of the shapes named above were built and measured; each
-// passed the clause list as it stood before them.
+// `agent_id` is exempted from the direction clause, and an INCLUDE payload from
+// the column count, because neither can cost this query its ordering: the
+// leading column is pinned to one value by the WHERE, and payload is not sorted
+// on either way. Both were built and measured sort-free rather than reasoned
+// about. Every other shape named above was built too, and each passed the clause
+// list as it stood before it.
 func TestDeploymentsAgentLiveIndexExists(t *testing.T) {
 	pool := open(t, pgtest.FreshDB(t))
 	var exists bool
@@ -548,11 +555,11 @@ func TestDeploymentsAgentLiveIndexExists(t *testing.T) {
 		      AND c.relname = 'deployments_agent_live_idx'
 		      AND c.relam = (SELECT oid FROM pg_am WHERE amname = 'btree')
 		      AND i.indisvalid AND i.indisready
-		      AND i.indnatts = 3 AND i.indnkeyatts = 3
+		      AND i.indnkeyatts = 3
 		      AND pg_get_expr(i.indpred, i.indrelid) = '(archived_at IS NULL)'
 		      AND (SELECT bool_and(ok) FROM (
 		             SELECT i.indkey[k] = a.attnum
-		                AND i.indoption[k] IN (0, 3)
+		                AND (k = 0 OR i.indoption[k] IN (0, 3))
 		                AND i.indclass[k] = t.opcdefault
 		                AND i.indcollation[k] = a.attcollation AS ok
 		               FROM unnest(ARRAY['agent_id', 'created_at', 'id']) WITH ORDINALITY AS want(name, ord)
@@ -581,18 +588,34 @@ func TestDeploymentsAgentLiveIndexExists(t *testing.T) {
 			"(agent_id, created_at, id) WHERE archived_at IS NULL as this query orders it; found: %s", got)
 	}
 	// 0031's plain index stays, for the one caller the partial index cannot
-	// serve: GET /v1/deployments?agent_id=&include_archived=true drops the
+	// serve: GET /v1/deployments?agent_id=<id>&include_archived=true drops the
 	// archived_at predicate, and a partial index cannot answer a query over the
 	// rows it excludes. The default listing keeps the predicate and is served by
 	// the index above.
+	//
+	// Asserted with the same rigour rather than by name, which would be a check
+	// only good for absence: a later migration could drop this one and give the
+	// name to an index on another column, or leave a failed build's catalog row
+	// behind, and the listing would fall to a sequential scan under a green test.
+	// Not asserted: partial-ness beyond "there is no predicate", since any
+	// predicate at all excludes rows this caller reads.
 	var plain bool
 	if err := pool.QueryRow(context.Background(),
-		`SELECT EXISTS (SELECT 1 FROM pg_indexes
-		    WHERE tablename = 'deployments' AND indexname = 'deployments_agent_idx')`).Scan(&plain); err != nil {
-		t.Fatalf("query pg_indexes: %v", err)
+		`SELECT EXISTS (
+		   SELECT 1 FROM pg_index i
+		     JOIN pg_class c ON c.oid = i.indexrelid
+		    WHERE i.indrelid = to_regclass('deployments')
+		      AND c.relname = 'deployments_agent_idx'
+		      AND c.relam = (SELECT oid FROM pg_am WHERE amname = 'btree')
+		      AND i.indisvalid AND i.indisready
+		      AND i.indpred IS NULL
+		      AND i.indkey[0] = (SELECT a.attnum FROM pg_attribute a
+		                          WHERE a.attrelid = i.indrelid AND a.attname = 'agent_id'))`).Scan(&plain); err != nil {
+		t.Fatalf("query pg_index: %v", err)
 	}
 	if !plain {
-		t.Errorf("deployments_agent_idx is gone; the unfiltered agent_id listing has no index")
+		t.Errorf("no valid non-partial btree leading on deployments(agent_id); " +
+			"the agent-filtered include_archived listing has nothing to seek on")
 	}
 }
 

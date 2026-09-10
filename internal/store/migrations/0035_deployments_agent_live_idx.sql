@@ -15,18 +15,23 @@
 -- columns and the predicate here makes it Limit -> WindowAgg -> Index Only Scan,
 -- and it is preferred over both.
 --
--- What this does not change is the order of growth. count(*) OVER () reads every
--- matching row whatever index serves it, so the LIMIT still bounds the output
--- and not the work, and archiveAgent holds FOR UPDATE on the agent row while it
--- runs, so deployment creates and repins of that agent queue behind it. The
--- work is O(live deployments pinning one agent) before and after; this is the
--- constant.
+-- The LIMIT still bounds the output and not the work: count(*) OVER () reads
+-- every live deployment of the agent whatever index serves it, so this stays
+-- linear in those. What it stops being linear in is the archived ones. Reading
+-- agent_id alone and filtering afterwards touched every deployment the agent has
+-- ever had, live or archived, and this platform deletes neither (archiving is a
+-- timestamp, and deployment_runs references the row) — so the old cost grew with
+-- a history that only ever grows, while the new one is bounded by what is live.
+-- That matters because of who waits for it:
+-- archiveAgent holds FOR UPDATE on the agent row while this runs, and deployment
+-- creates and repins of that agent resolve it FOR SHARE, so they queue behind.
 --
 -- deployments_agent_idx is deliberately kept, for the one caller this index
--- cannot serve: GET /v1/deployments?agent_id=&include_archived=true drops the
--- archived_at predicate, and a partial index cannot answer a query over rows it
--- excludes. The default listing keeps the predicate and is served by this index
--- instead.
+-- cannot serve: GET /v1/deployments?agent_id=<id>&include_archived=true drops
+-- the archived_at predicate, and a partial index cannot answer a query over rows
+-- it excludes. (An *empty* agent_id is not that caller — the handler drops the
+-- agent predicate with it and the listing is served in created order.) The
+-- default listing keeps the predicate and is served by this index instead.
 --
 -- "Index only" is the plan node, not a promise about the heap: an index-only
 -- scan still fetches from it for rows the visibility map does not mark, so the
@@ -35,14 +40,16 @@
 --
 -- Not CONCURRENTLY: migrate.go applies every pending file inside one
 -- transaction, and CREATE INDEX CONCURRENTLY cannot run in a transaction block.
--- This form takes ACCESS EXCLUSIVE on deployments for the build. store.Open
--- migrates at process start, so the process running it is not yet serving —
--- but on a rolling upgrade the replicas still on the old version are, and their
--- reads of this table wait. No ceiling on the table's size is claimed here to
--- argue that away: the reference's published 1,000
--- cap is on *scheduled* deployments per organization (docs/DIVERGENCES.md, where
--- it is also recorded as unenforced by this platform), and a manual deployment
--- carries no schedule, so nothing bounds the live rows this index spans.
+-- This form takes SHARE on deployments for the build: reads go on, writes —
+-- deployment creates, repins, pauses, archives — wait for the whole migration
+-- transaction, since migrate.go commits once. What bounds that here is that
+-- 0031 created this table and is itself unreleased (v0.3.0 ends at 0024), so a
+-- database following releases applies 0031 and 0035 together and builds this
+-- index over an empty table. One tracking main has whatever it has, and no
+-- ceiling on the table's size is claimed to argue that away: the reference's
+-- published 1,000 cap would not supply one either — it is on *scheduled*
+-- deployments per organization (docs/DIVERGENCES.md, which also records it as
+-- unenforced here), and a manual deployment carries no schedule.
 --
 -- 0031's comment on deployments_agent_idx gives the archive check as its
 -- reason. That reason moves here; 0031 is merged and cannot say so itself.
