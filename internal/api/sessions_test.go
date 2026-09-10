@@ -788,12 +788,20 @@ func TestDeleteSessionRemovesCheckpointBlob(t *testing.T) {
 // Session-produced is exactly scope_type='session' here: internal/executor's
 // harvest is the only writer of those rows, a plain upload writes neither scope
 // column, and a dream's files carry dream_id instead — three inserts that do not
-// overlap, and no UPDATE anywhere moves a row between them.
+// overlap, and no production UPDATE moves a row between them.
 //
-// All three rows share a filename on purpose. Scoped rows are unique per
+// The rows that can share a filename do, on purpose. Scoped rows are unique per
 // (scope_id, filename) and a plain upload is free to repeat a name, so a cleanup
 // that keyed on the name rather than the scope would take the wrong rows and
 // this would catch it.
+//
+// The fourth row is the one nothing writes yet: a non-session scope under this
+// session's id. It is here because `scope_type` is otherwise an unpinned clause
+// — dropping it from the delete changes no behavior today, since no writer pairs
+// a scope_id with another type — and docs/plan/42's #266 bullet is that a
+// workspace-scoped upload path would put exactly this row in the table. Then the
+// clause is the only thing standing between a session delete and someone else's
+// file, so it is asserted now rather than after.
 func TestDeleteSessionRemovesTheFilesItProduced(t *testing.T) {
 	s := newTestServer(t)
 	agentID, envID := fixture(t, s)
@@ -801,31 +809,36 @@ func TestDeleteSessionRemovesTheFilesItProduced(t *testing.T) {
 	bystander := createSession(t, s, map[string]any{"agent": agentID, "environment_id": envID})["id"].(string)
 	ctx := context.Background()
 
-	// scope is the session a harvest published under, or "" for a plain upload.
 	// The column lists are the producers': internal/executor/harvest.go writes
-	// the scoped shape, internal/api/files.go the unscoped one.
-	seed := func(scope string) string {
+	// the scoped shape, internal/api/files.go the unscoped one. scopeType "" is
+	// a plain upload, which writes neither scope column.
+	seed := func(name, scopeType, scopeID string) string {
 		t.Helper()
 		id := domain.NewID("file").String()
 		var err error
-		if scope == "" {
+		if scopeType == "" {
 			_, err = s.pool.Exec(ctx,
 				`INSERT INTO files (id, filename, mime_type, size_bytes, downloadable)
-				 VALUES ($1, 'report.md', 'text/markdown', 5, false)`, id)
+				 VALUES ($1, $2, 'text/markdown', 5, false)`, id, name)
 		} else {
 			_, err = s.pool.Exec(ctx,
 				`INSERT INTO files (id, filename, mime_type, size_bytes, downloadable, scope_type, scope_id)
-				 VALUES ($1, 'report.md', 'text/markdown', 5, true, 'session', $2)`, id, scope)
+				 VALUES ($1, $2, 'text/markdown', 5, true, $3, $4)`, id, name, scopeType, scopeID)
 		}
 		if err != nil {
-			t.Fatalf("seed a file row for scope %q: %v", scope, err)
+			t.Fatalf("seed a %q file row: %v", scopeType, err)
 		}
 		if err := s.blobs.Put(ctx, blob.FilesKey(id), strings.NewReader("bytes"), 5, "text/markdown"); err != nil {
 			t.Fatalf("seed the object for %s: %v", id, err)
 		}
 		return id
 	}
-	harvested, bystandersHarvest, uploaded := seed(doomed), seed(bystander), seed("")
+	harvested := seed("report.md", "session", doomed)
+	bystandersHarvest := seed("report.md", "session", bystander)
+	uploaded := seed("report.md", "", "")
+	// A distinct name only because (scope_id, filename) is unique among scoped
+	// rows and this one shares the doomed session's scope_id by design.
+	otherScope := seed("notes.md", "workspace", doomed)
 
 	if status, body := s.do(http.MethodDelete, "/v1/sessions/"+doomed, nil); status != http.StatusOK {
 		t.Fatalf("delete: %d %v", status, body)
@@ -856,7 +869,7 @@ func TestDeleteSessionRemovesTheFilesItProduced(t *testing.T) {
 		t.Error("the deleted session's harvested file row outlived it")
 	}
 	if hasObject(harvested) {
-		t.Error("the deleted session's harvested file is gone from the registry but its bytes are not")
+		t.Error("the deleted session's harvested file kept its bytes")
 	}
 	for _, kept := range []struct {
 		what string
@@ -864,6 +877,7 @@ func TestDeleteSessionRemovesTheFilesItProduced(t *testing.T) {
 	}{
 		{"another session's harvested file", bystandersHarvest},
 		{"a plain upload, which the reference leaves alone", uploaded},
+		{"a file scoped to something other than a session", otherScope},
 	} {
 		if rows(kept.id) != 1 {
 			t.Errorf("%s was deleted with the session", kept.what)
