@@ -79,8 +79,8 @@ type cursor struct {
 // to be recognised from outside as the same bug.
 //
 // It lives beside the kinds it names so a list added later reads the rule
-// instead of reassembling it from three booleans, which is how ten of them came
-// to disagree (#534).
+// instead of reassembling it from three booleans, which is how eleven of the
+// fourteen came to disagree (#534).
 func (c *cursor) foreignToTime() bool {
 	return c.versioned || c.seqKeyed || c.pathKeyed
 }
