@@ -72,6 +72,24 @@ func Ensure(ctx context.Context, pool *pgxpool.Pool, sessionID, token string) er
 		return err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+	// The session row first, then its token rows — the order a session delete
+	// takes: it holds the session (internal/api, requireNotRunning's FOR UPDATE)
+	// and then needs the token rows, because migration 0012 cascades the delete
+	// into them. Revoking first and inserting second took those in the opposite
+	// order, so a delete racing a re-mint closed a cycle and Postgres aborted one
+	// side of it (#313). Not every path agrees yet — claimWork still takes a work
+	// item before the session its token's foreign key needs (#643).
+	//
+	// KEY SHARE is the lock the insert's foreign key takes below, so this adds
+	// nothing to what the transaction already acquires and concurrent Ensures
+	// still share it; what it does is acquire it *before* the token rows rather
+	// than after. It is deliberately not read for existence — the foreign key
+	// remains the one authority on whether the session is there, and a second
+	// answer here could only disagree with it.
+	if _, err := tx.Exec(ctx,
+		`SELECT 1 FROM sessions WHERE id = $1 FOR KEY SHARE`, sessionID); err != nil {
+		return err
+	}
 	if _, err := tx.Exec(ctx, revokeSQL, sessionID); err != nil {
 		return err
 	}
