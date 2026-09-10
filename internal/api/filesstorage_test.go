@@ -120,4 +120,7 @@ func TestFileScopeRendered(t *testing.T) {
 	if listScope == nil || listScope["id"] != sess || listScope["type"] != "session" {
 		t.Errorf("listed scope = %v, want {id:%s, type:session}", data[0]["scope"], sess)
 	}
+	if data[0]["expires_at"] != nil {
+		t.Errorf("listed scoped expires_at = %v, want null", data[0]["expires_at"])
+	}
 }
