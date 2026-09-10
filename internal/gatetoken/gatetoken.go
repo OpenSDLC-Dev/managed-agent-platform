@@ -81,11 +81,12 @@ func Ensure(ctx context.Context, pool *pgxpool.Pool, sessionID, token string) er
 	// order, so a delete racing a re-mint closed a cycle and Postgres aborted one
 	// side of it (#313).
 	//
-	// KEY SHARE is the lock the insert's foreign key takes below, so this adds
-	// nothing to what the transaction already acquires, and two Ensures still do
-	// not block each other on it — a statement about what this costs, not a claim
-	// that they are otherwise ordered. What it does is acquire the lock *before*
-	// the token rows rather than after.
+	// KEY SHARE is the mode the insert's foreign key check takes below, so on the
+	// path that reaches the insert this acquires the same tuple and relation
+	// locks the transaction would have acquired anyway — earlier, and before the
+	// token rows rather than after. Two Ensures still do not block each other on
+	// it: a statement about what this costs, not a claim that they are otherwise
+	// ordered.
 	//
 	// It is deliberately not read for existence — the foreign key
 	// remains the one authority on whether the session is there, and a second

@@ -242,7 +242,10 @@ const (
 // test pins the interleaving where the delete reaches the session row first:
 // Ensure waits for it and then fails on the foreign key of a session that is
 // gone — a clean loss, and the same outcome the cycle produced on the runs where
-// the delete happened to be the survivor. The other interleaving has no loser at
+// the delete happened to be the survivor. That the loss is a foreign key
+// violation and not a serialization failure is Read Committed, the fixture's
+// default and the server's; under a stricter default this assertion is the thing
+// that would say so. The other interleaving has no loser at
 // all, and is not what this test is about: the re-mint takes the session row
 // first, commits, and the delete then cascades the new token away with it.
 func TestEnsureDoesNotDeadlockAgainstASessionDelete(t *testing.T) {
@@ -288,7 +291,12 @@ func TestEnsureDoesNotDeadlockAgainstASessionDelete(t *testing.T) {
 	// parked behind the session row and this would hang to the package timeout
 	// instead of reporting. Rolling back an already-committed tx is a no-op.
 	_ = del.Rollback(ctx)
-	ensureErr := <-ensured
+	var ensureErr error
+	select {
+	case ensureErr = <-ensured:
+	case <-time.After(30 * time.Second):
+		t.Fatal("Ensure never returned after the delete's transaction ended")
+	}
 
 	// A deadlock on either side is the regression itself, and the outcome
 	// assertions below would only restate it under a wrong name.
@@ -336,10 +344,15 @@ func waitForABlockedBackend(t *testing.T, pool *pgxpool.Pool, ensured <-chan err
 			t.Fatalf("Ensure returned before it ever blocked: %v", err)
 		default:
 		}
+		// Each poll is bounded, so a stalled pool acquire or query fails here
+		// rather than running past the loop's own deadline to the package timeout.
+		pollCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		var blocked int
-		if err := pool.QueryRow(context.Background(),
+		err := pool.QueryRow(pollCtx,
 			`SELECT count(*) FROM pg_stat_activity
-			  WHERE datname = current_database() AND wait_event_type = 'Lock'`).Scan(&blocked); err != nil {
+			  WHERE datname = current_database() AND wait_event_type = 'Lock'`).Scan(&blocked)
+		cancel()
+		if err != nil {
 			t.Fatalf("count blocked backends: %v", err)
 		}
 		if blocked == 1 {
