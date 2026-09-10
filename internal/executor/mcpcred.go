@@ -44,8 +44,9 @@ func credentialUnusable(err error) bool {
 // (network error, timeout, or non-authentication HTTP failure)", while
 // `mcp_authentication_failed_error` covers the server rejecting the vault's
 // credential, requiring one where none matched, or a credential this platform
-// could not produce. The first two arrive alike as a 401 or 403 — a server
-// answers the same whether a token was sent or not — so one test answers both.
+// could not produce. The first two arrive alike as a 401 — a server answers the
+// same whether a token was sent or not — so one test answers both. A 403 is a
+// connection failure here, as it is on the reference (#572).
 func mcpAuthFailure(err error) bool {
 	return errors.Is(err, mcp.ErrUnauthorized) || credentialUnusable(err)
 }

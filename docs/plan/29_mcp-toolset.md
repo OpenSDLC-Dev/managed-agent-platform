@@ -218,8 +218,11 @@ normalization exactly; first vault wins; unmatched connects anonymously.
 `static_bearer.token` / `mcp_oauth.access_token` → `Authorization: Bearer`. An expired
 `mcp_oauth` (clock-skewed `expires_at`) with a refresh block refreshes first — the
 RFC 6749 exchange is extracted from `vaultvalidate.go` into a shared internal helper,
-and rotated tokens persist (the validate endpoint's existing precedent). A 401/403 from
-the server → `session.error{mcp_authentication_failed_error}`.
+and rotated tokens persist (the validate endpoint's existing precedent). A 401 from
+the server → `session.error{mcp_authentication_failed_error}` (this said `401/403`; a
+2026-09-03 recording dialled five statuses in one turn and found only 401 is an
+authentication failure — 403 answers `mcp_connection_failed_error` beside 407, 500 and
+502 — #572, docs/DIVERGENCES.md).
 
 ### Networking policy — two enforcement points
 

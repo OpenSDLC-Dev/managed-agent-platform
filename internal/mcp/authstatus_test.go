@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -40,11 +41,16 @@ func TestConnectMarksARefusedCredential(t *testing.T) {
 		unexpected string
 	}{
 		{name: "401 unauthorized", status: http.StatusUnauthorized, refused: true},
-		{name: "403 forbidden", status: http.StatusForbidden, refused: true},
 		// Every other failure is a connection that did not work, which is what
-		// the other error type is for. 407 in particular is an authentication
-		// status the reference does not name — a proxy's, not the server's.
+		// the other error type is for — 403 included. A 2026-09-03 recording
+		// dialled five statuses in one turn and only 401 came back an
+		// authentication failure; 403 answered `mcp_connection_failed_error`
+		// ("access forbidden"), and so did 407, 500 and 502 (#572). 407 is an
+		// authentication status, but a proxy's rather than the server's, which
+		// is the reason it was already on this side of the split.
+		{name: "403 forbidden", status: http.StatusForbidden},
 		{name: "500 server error", status: http.StatusInternalServerError},
+		{name: "502 bad gateway", status: http.StatusBadGateway},
 		{name: "404 not found", status: http.StatusNotFound},
 		{name: "429 too many requests", status: http.StatusTooManyRequests},
 		{name: "407 proxy authentication required", status: http.StatusProxyAuthRequired},
@@ -176,6 +182,19 @@ func TestAResolvedTokenReplacesTheURLsOwnCredential(t *testing.T) {
 // which is the half a connect-time test cannot reach.
 func serveThenFailing(t *testing.T, rules map[string]int) string {
 	t.Helper()
+	return serveThenFailingWith(t, rules, nil)
+}
+
+// serveThenFailingWith is serveThenFailing with the body the failing status
+// carries left to the caller. A nil writeBody sends the status alone; a JSON-RPC
+// error body is the other shape a real server sends, and go-sdk v1.7.0 reads one
+// out of a non-2xx that is neither 404 nor transient (streamable.go,
+// checkResponse). For those statuses the body is what decides whether the
+// failure reads as the server's answer, so a test of that classification has to
+// be able to choose.
+func serveThenFailingWith(t *testing.T, rules map[string]int,
+	writeBody func(w http.ResponseWriter, id json.RawMessage)) string {
+	t.Helper()
 	inner := sdk.NewStreamableHTTPHandler(func(*http.Request) *sdk.Server {
 		s := sdk.NewServer(&sdk.Implementation{Name: "refusing-server", Version: "1"}, nil)
 		sdk.AddTool(s, &sdk.Tool{Name: "echo", Description: "echoes"},
@@ -192,11 +211,18 @@ func serveThenFailing(t *testing.T, rules map[string]int) string {
 			return
 		}
 		var msg struct {
-			Method string `json:"method"`
+			Method string          `json:"method"`
+			ID     json.RawMessage `json:"id"`
 		}
 		_ = json.Unmarshal(body, &msg)
 		if status, ok := rules[msg.Method]; ok {
+			if writeBody == nil {
+				w.WriteHeader(status)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(status)
+			writeBody(w, msg.ID)
 			return
 		}
 		r.Body = io.NopCloser(bytes.NewReader(body))
@@ -204,6 +230,80 @@ func serveThenFailing(t *testing.T, rules map[string]int) string {
 	}))
 	t.Cleanup(ts.Close)
 	return ts.URL
+}
+
+// jsonRPCError writes the response a server sends when it refuses a call in the
+// protocol's own words rather than with a bare status.
+func jsonRPCError(w http.ResponseWriter, id json.RawMessage) {
+	if len(id) == 0 {
+		id = json.RawMessage("null")
+	}
+	_, _ = fmt.Fprintf(w,
+		`{"jsonrpc":"2.0","id":%s,"error":{"code":-32000,"message":"policy says no"}}`, id)
+}
+
+// A call-time 403 is classified by whatever the server sent, exactly as 407 and
+// 500 are. That is the whole of what #572 asks for, on the half a dial-time test
+// cannot reach: before it, the watch marked 403 alongside 401, so [mcp.Conn]
+// asked the refusal question first and a 403 here read ErrUnauthorized whatever
+// the body held. It now falls through to the same question every other status
+// has always been asked.
+//
+// What is asserted is that 403 stops being an authentication failure and starts
+// answering exactly as its peer does, not what that shared answer is — the latter
+// is #641's question, and the recording, which dialled, cannot reach it.
+//
+// **407 is the peer, and 500 and 502 are not quite.** go-sdk v1.7.0 sorts a
+// non-2xx three ways (streamable.go, checkResponse): 404 is a missing session;
+// 500, 502, 503, 504 and 429 are transient and become jsonrpc2.ErrRejected with
+// the body never read; anything else has its body decoded and a JSON-RPC error
+// found there wrapped. ErrRejected is itself a *jsonrpc.Error, so [answered]
+// matches it too — which means a bare 500 reads as the server's answer where a
+// bare 403 does not, a difference about transience and not about credentials.
+// So the exact claim is 403 ≡ 407, in both shapes a server can send; 500 and 502
+// join them only when a body arrives, and are held here to the part #572 is
+// actually about, that none of them is a refused credential.
+func TestACallTimeForbiddenIsClassifiedLikeItsPeerStatuses(t *testing.T) {
+	type verdict struct{ unauthorized, serverAnswered bool }
+	classify := func(t *testing.T, status int,
+		body func(http.ResponseWriter, json.RawMessage)) verdict {
+		t.Helper()
+		conn, err := mcp.Connect(context.Background(), mcp.Config{
+			URL:        serveThenFailingWith(t, map[string]int{"tools/call": status}, body),
+			HTTPClient: &http.Client{}, BearerToken: "tok"})
+		if err != nil {
+			t.Fatalf("%d: the handshake was expected to succeed: %v", status, err)
+		}
+		defer conn.Close()
+		if _, err = conn.CallTool(context.Background(), "echo", nil); err == nil {
+			t.Fatalf("%d: expected the refused call to fail", status)
+		}
+		if errors.Is(err, mcp.ErrUnauthorized) {
+			t.Errorf("a %d on the call was marked a refused credential: %v", status, err)
+		}
+		return verdict{
+			unauthorized:   errors.Is(err, mcp.ErrUnauthorized),
+			serverAnswered: errors.Is(err, mcp.ErrServerAnswered),
+		}
+	}
+
+	for _, shape := range []struct {
+		name string
+		body func(http.ResponseWriter, json.RawMessage)
+	}{
+		{"a bare status", nil},
+		{"a JSON-RPC error body", jsonRPCError},
+	} {
+		t.Run(shape.name, func(t *testing.T) {
+			forbidden := classify(t, http.StatusForbidden, shape.body)
+			if peer := classify(t, http.StatusProxyAuthRequired, shape.body); peer != forbidden {
+				t.Errorf("403 classified %+v but 407 classified %+v; #572 is that they are one class",
+					forbidden, peer)
+			}
+			classify(t, http.StatusInternalServerError, shape.body)
+			classify(t, http.StatusBadGateway, shape.body)
+		})
+	}
 }
 
 // A refusal that lands after the handshake is the same authentication failure,

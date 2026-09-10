@@ -848,10 +848,11 @@ func mcpResultEvent(useID domain.ID, res mcpAnswer) (events.NewEvent, error) {
 // mcp_authentication_failed_error covers "the server rejected the credential
 // from the attached vault, required authentication when no matching credential
 // was configured, or an OAuth token refresh failed". The first two of those
-// three arrive as the same 401 or 403 whether a token was sent or not, so one
-// test answers both; the third is the credential this platform could not
-// resolve at all, which never reaches the server and is an authentication
-// failure all the same.
+// three arrive as the same 401 whether a token was sent or not, so one test
+// answers both; the third is the credential this platform could not resolve at
+// all, which never reaches the server and is an authentication failure all the
+// same. 403 is not on this side: the reference answers it
+// mcp_connection_failed_error (#572).
 type mcpFailure struct {
 	message        string
 	authentication bool
