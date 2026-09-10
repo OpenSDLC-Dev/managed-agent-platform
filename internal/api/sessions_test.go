@@ -984,6 +984,112 @@ func TestDeleteSessionSurvivesCheckpointDeleteFailure(t *testing.T) {
 	}
 }
 
+// TestDeleteSessionBroadcastsAfterTheClientDisconnects: the delete commits and
+// then broadcasts the terminal frames its subscribers are waiting for, the same
+// pair TestSessionDeleteEndsLiveChildren pins on a delete nobody interrupts. A
+// client that gives up in between must not decide what everyone else sees:
+// there is no republishing these, the rows they would have been appended to
+// having cascaded away with the session.
+//
+// Two assertions carry it, because the two kinds of frame are owed
+// differently. The child's termination has no second source anywhere, so on
+// the request's context it is simply absent and its arrival proves the
+// publish. session.deleted does have one — the stream loop's own gone-check,
+// which TestStreamDeletionBackstopViaPing covers — so its type proves nothing,
+// and the shared broadcast id is what tells the publish from the stand-in.
+func TestDeleteSessionBroadcastsAfterTheClientDisconnects(t *testing.T) {
+	pool := newPoolWithKey(t)
+	okSrv := httptest.NewServer(api.NewHandler(pool, blobtest.Mem(), nil, nil))
+	t.Cleanup(okSrv.Close)
+	s := &tserver{t: t, url: okSrv.URL, pool: pool}
+	sid := eventsFixture(t, s)
+	child := insertChild(t, s, sid, "idle")
+
+	// The subscribers the hang-up must not reach. They watch through the
+	// undisconnected server, because the middleware below cancels every
+	// request it serves and would otherwise cut these two off itself.
+	childStream := s.stream(t, "/v1/sessions/"+sid+"/threads/"+child+"/stream")
+	sessionStream := s.stream(t, "/v1/sessions/"+sid+"/events/stream")
+
+	// The seam stops the handler in the one window that matters — after the
+	// commit, before the broadcasts — so the disconnect lands there and not,
+	// as any timing-based cancel would, on either side of it.
+	held, resume := make(chan struct{}), make(chan struct{})
+	t.Cleanup(api.SetDeleteSessionAfterCommitHookForTest(func() {
+		close(held)
+		<-resume
+	}))
+
+	// The disconnect stands in for the client or proxy going away, as the skill
+	// delete's own hang-up test does: it cancels the very context the handler
+	// runs on, and reports back so the broadcasts resume only once it truly is
+	// cancelled.
+	disconnect, cancelled := make(chan struct{}), make(chan struct{})
+	inner := api.NewHandler(pool, blobtest.Mem(), nil, nil)
+	gateSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ctx, cancel := context.WithCancel(r.Context())
+		defer cancel()
+		go func() {
+			<-disconnect
+			cancel()
+			close(cancelled)
+		}()
+		inner.ServeHTTP(w, r.WithContext(ctx))
+	}))
+	t.Cleanup(gateSrv.Close)
+
+	// The status rides a defer so that do's own t.Fatalf, which unwinds this
+	// goroutine rather than the test's, still reports rather than stranding the
+	// receives below on a value nobody will send.
+	done := make(chan int, 1)
+	go func() {
+		status := 0
+		defer func() { done <- status }()
+		gated := &tserver{t: t, url: gateSrv.URL, pool: pool}
+		status, _ = gated.do(http.MethodDelete, "/v1/sessions/"+sid, nil)
+	}()
+	// A delete that answered without reaching the seam never committed, so the
+	// window this test is about did not happen — say so rather than blocking on
+	// a hook that will not fire now. The disconnect still closes, so the
+	// middleware's goroutine ends with the test instead of outliving it.
+	select {
+	case <-held:
+	case status := <-done:
+		close(disconnect)
+		t.Fatalf("delete = %d without reaching the post-commit seam", status)
+	}
+	close(disconnect)
+	<-cancelled
+	close(resume)
+	if status := <-done; status != http.StatusOK {
+		t.Fatalf("delete = %d, want 200", status)
+	}
+
+	deleted := map[string]string{}
+	for name, st := range map[string]*sseStream{"child": childStream, "session": sessionStream} {
+		f := st.next(t)
+		if f.name != "session.thread_status_terminated" || f.data["session_thread_id"] != child {
+			t.Errorf("%s stream first frame = %s %v, want the live child's termination: "+
+				"the broadcast followed the disconnecting client out", name, f.name, f.data)
+		}
+		f = st.next(t)
+		if f.name != "session.deleted" {
+			t.Errorf("%s stream second frame = %s, want session.deleted", name, f.name)
+			continue
+		}
+		deleted[name], _ = f.data["id"].(string)
+	}
+	// One broadcast carries one id to both streams. The gone-check backstop
+	// mints a fresh id per stream, so it cannot forge this: two ids that differ
+	// say each stream synthesized its own terminator and the third publish
+	// never landed — which the frame's type alone cannot tell you, and which a
+	// setup slow enough to reach a ping tick would otherwise let pass.
+	if a, b := deleted["child"], deleted["session"]; a == "" || a != b {
+		t.Errorf("session.deleted ids = %q (child) and %q (session), want one shared "+
+			"broadcast id rather than a terminator each stream made for itself", a, b)
+	}
+}
+
 func TestRunningSessionArchiveAndDeleteRejected(t *testing.T) {
 	s := newTestServer(t)
 	agentID, envID := fixture(t, s)

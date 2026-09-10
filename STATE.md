@@ -4,10 +4,15 @@ What is being worked on right now, and how far along it is — nothing else. **S
 
 ## Active work
 
-**None.** [Plan 41](./docs/plan/41_dreams.md) (dreams, #475) archived 2026-09-07, the last stream
-in flight; its delivery record is [docs/HISTORY.md](./docs/HISTORY.md). Pick the next piece of work
-from the GitHub issue backlog.
+**The session-delete family** — three issues on what `deleteSession` does after its commit,
+taken in this order because each leaves ground the next stands on. No plan file: `issue-triage`
+judged #646 direct, and the other two are judged as they start.
 
 ## Tasks
 
-_None — no active work._
+- [x] #646 — the terminal broadcasts run detached from the request, so a client that hangs up
+  after the commit no longer cancels the child-termination frame every other subscriber is owed.
+- [ ] #354 — the delete does not kick the executor's reaper, so a deleted session's sandbox
+  can outlive it by a full reap interval.
+- [ ] #645 — deliverable objects the post-commit cleanup does not remove are orphaned for good;
+  no tier knows their keys, so nothing retries them.

@@ -40,6 +40,15 @@ func SetUpdateCredentialResealHookForTest(f func()) (restore func()) {
 	return func() { updateCredentialResealHook = nil }
 }
 
+// SetDeleteSessionAfterCommitHookForTest installs a hook fired between a
+// session delete's commit and its terminal broadcasts, so a test can hang up
+// on the request in that exact window and assert the frames still reach the
+// subscribers holding a stream open. Test binary only.
+func SetDeleteSessionAfterCommitHookForTest(f func()) (restore func()) {
+	deleteSessionAfterCommitHook = f
+	return func() { deleteSessionAfterCommitHook = nil }
+}
+
 // ScrubberCleanForTest builds a scrubber from the given literal needles (in
 // order) and runs its redaction over text, so a test can assert the
 // longest-first ordering without reaching into unexported internals. Test
