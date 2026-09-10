@@ -142,8 +142,12 @@ func TestWebSearchAnswersWithSearchResultBlocks(t *testing.T) {
 	if len(first.Content) != 1 || first.Content[0].Type != "text" || first.Content[0].Text != "How to write Go." {
 		t.Errorf("hit content = %+v, want one text block with the snippet", first.Content)
 	}
-	if first.Citations == nil || !first.Citations.Enabled {
-		t.Errorf("citations = %+v, want present with enabled true", first.Citations)
+	// Every block, not just the first: the flag is set per block, so a partial
+	// enablement has to fail here rather than hide behind hit one.
+	for i, b := range r.Content {
+		if b.Citations == nil || !b.Citations.Enabled {
+			t.Errorf("block %d citations = %+v, want present with enabled true", i, b.Citations)
+		}
 	}
 
 	// No sandbox was provisioned; the turn resumes on a fresh model_turn.
