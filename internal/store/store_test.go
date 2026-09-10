@@ -513,9 +513,7 @@ func TestEnvironmentKeysEnvironmentIndexExists(t *testing.T) {
 //     is the exact complement and covers none of the rows read here.
 //   - `indnkeyatts = 3` with the three resolved **in order** — agent_id must
 //     lead or there is no seek, and created_at then id must follow it or the
-//     sort survives, which is the whole finding. INCLUDE payload is excluded by
-//     `indnatts = indnkeyatts`: a trailing column stored but not sorted on
-//     cannot serve an ORDER BY.
+//     sort survives, which is the whole finding.
 //   - `indisvalid AND indisready` — a half-built index wears the right name and
 //     the planner will not use it.
 //   - `am = btree` — ordering is half the job here, and a hash index cannot
@@ -650,14 +648,32 @@ func TestDeploymentsAgentLiveIndexLeavesNoSort(t *testing.T) {
 		 SELECT 'agent_bulk_' || g, 'a', '{}' FROM generate_series(1, 200) g`,
 		`INSERT INTO agent_versions (agent_id, version, name, spec)
 		 SELECT 'agent_bulk_' || g, 1, 'a', '{}' FROM generate_series(1, 200) g`,
+		// The archived modulus must be coprime with the agent modulus, or it is
+		// constant within an agent and every agent comes out wholly live or
+		// wholly archived — which is not this index's case, and was the fixture's
+		// bug before 3 replaced 4 here.
 		`INSERT INTO deployments (id, name, agent_id, agent_version, environment_id, archived_at)
 		 SELECT 'depl_' || g, 'd', 'agent_bulk_' || (g % 200 + 1), 1, 'env_1',
-		        CASE WHEN g % 4 = 0 THEN now() ELSE NULL END
+		        CASE WHEN g % 3 = 0 THEN now() ELSE NULL END
 		   FROM generate_series(1, 6000) g`,
 	} {
 		if _, err := pool.Exec(ctx, q); err != nil {
 			t.Fatalf("seed %q: %v", q, err)
 		}
+	}
+	// Asserted rather than assumed: a fixture whose target agent has no live
+	// deployments measures the planner against an empty result, and every claim
+	// below would still pass.
+	var live, archived int
+	if err := pool.QueryRow(ctx,
+		`SELECT count(*) FILTER (WHERE archived_at IS NULL),
+		        count(*) FILTER (WHERE archived_at IS NOT NULL)
+		   FROM deployments WHERE agent_id = 'agent_bulk_1'`).Scan(&live, &archived); err != nil {
+		t.Fatalf("count the target agent's rows: %v", err)
+	}
+	if live == 0 || archived == 0 {
+		t.Fatalf("agent_bulk_1 has %d live and %d archived deployments; the fixture has to "+
+			"carry both for the partial index to be the question", live, archived)
 	}
 	if _, err := pool.Exec(ctx, `ANALYZE deployments`); err != nil {
 		t.Fatalf("analyze: %v", err)
