@@ -65,6 +65,26 @@ type cursor struct {
 	path      string
 }
 
+// foreignToTime reports whether c positions a walk this list does not run: a
+// version, sequence or path key, issued by one of the three lists ordered by
+// something other than (created_at, id).
+//
+// A time-keyed list has to refuse those rather than bind them. They decode with
+// a zero time and an empty id, which is a perfectly legal position for the
+// keyset comparison, so the request answers 200 with something plausible where
+// the reference publishes 400. Which plausible answer depends on which way the
+// comparison points: a DESC walk finds nothing before the zero time and reports
+// end-of-history, while an ASC one finds everything after it and serves the
+// first page again as though no cursor had been sent. Neither is stable enough
+// to be recognised from outside as the same bug.
+//
+// It lives beside the kinds it names so a list added later reads the rule
+// instead of reassembling it from three booleans, which is how ten of them came
+// to disagree (#534).
+func (c *cursor) foreignToTime() bool {
+	return c.versioned || c.seqKeyed || c.pathKeyed
+}
+
 type pageParams struct {
 	limit int
 	cur   *cursor

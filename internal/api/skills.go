@@ -364,7 +364,7 @@ func (s *server) listSkills(r *http.Request) (any, error) {
 		query += fmt.Sprintf(` AND s.source = $%d`, len(args))
 	}
 	if page.cur != nil {
-		if page.cur.versioned || page.cur.seqKeyed || page.cur.dir != dirNext {
+		if page.cur.foreignToTime() || page.cur.dir != dirNext {
 			return nil, errInvalid("invalid page cursor")
 		}
 		args = append(args, page.cur.t, page.cur.id)
@@ -641,7 +641,7 @@ func (s *server) listSkillVersions(r *http.Request) (any, error) {
 	query := `SELECT id, name, description, created_at FROM skill_versions WHERE skill_id = $1`
 	args := []any{id}
 	if page.cur != nil {
-		if page.cur.versioned || page.cur.seqKeyed || page.cur.dir != dirNext {
+		if page.cur.foreignToTime() || page.cur.dir != dirNext {
 			return nil, errInvalid("invalid page cursor")
 		}
 		args = append(args, page.cur.t, page.cur.id)

@@ -393,7 +393,7 @@ func (s *server) listDeployments(r *http.Request) (any, error) {
 		query += fmt.Sprintf(` AND created_at <= $%d`, len(args))
 	}
 	if page.cur != nil {
-		if page.cur.versioned || page.cur.dir != dirNext {
+		if page.cur.foreignToTime() || page.cur.dir != dirNext {
 			return nil, errInvalid("invalid page cursor")
 		}
 		args = append(args, page.cur.t, page.cur.id)

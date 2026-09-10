@@ -332,7 +332,7 @@ func (s *server) listDeploymentRuns(r *http.Request) (any, error) {
 		// where the reference publishes 400 for an invalid cursor. The
 		// sibling time-keyed lists share the narrower check and the same
 		// hole (#534).
-		if page.cur.versioned || page.cur.seqKeyed || page.cur.pathKeyed || page.cur.dir != dirNext {
+		if page.cur.foreignToTime() || page.cur.dir != dirNext {
 			return nil, errInvalid("invalid page cursor")
 		}
 		args = append(args, page.cur.t, page.cur.id)

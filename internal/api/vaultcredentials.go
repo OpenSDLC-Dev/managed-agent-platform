@@ -443,7 +443,7 @@ func (s *server) listVaultCredentials(r *http.Request) (any, error) {
 		query += ` AND archived_at IS NULL`
 	}
 	if page.cur != nil {
-		if page.cur.versioned || page.cur.dir != dirNext {
+		if page.cur.foreignToTime() || page.cur.dir != dirNext {
 			return nil, errInvalid("invalid page cursor")
 		}
 		args = append(args, page.cur.t, page.cur.id)
