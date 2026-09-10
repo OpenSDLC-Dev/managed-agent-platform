@@ -1,21 +1,31 @@
 package api_test
 
 import (
+	"maps"
 	"net/http"
 	"net/url"
+	"strings"
 	"testing"
 )
 
-// foreignKindCursors are the three kinds no time-keyed list issues, taken from
-// the encodings dreams_test.go already spells out. That map carries a fourth
-// arm, a prev-direction time cursor, which is a foreign thing to a
-// unidirectional list but a perfectly good cursor on the sessions list — the
-// one list that paginates backwards — so the kind arms are named apart from it.
-var foreignKindCursors = map[string]string{
-	"version": foreignCursors["version"],
-	"seq":     foreignCursors["seq"],
-	"path":    foreignCursors["path"],
+// listLabel turns a request path into a subtest name. "/" is testing's own
+// subtest separator, so a path used verbatim reports as a nest several levels
+// deep with a generated parent id inside it — which -run cannot address and a
+// CI failure line cannot be read from.
+func listLabel(path string) string {
+	return strings.ReplaceAll(strings.TrimPrefix(path, "/v1/"), "/", "_")
 }
+
+// foreignKindCursors is dreams_test.go's foreignCursors without its one
+// direction arm: a prev-direction time cursor is a foreign thing to a
+// unidirectional list but a perfectly good cursor on the sessions list, the one
+// list that paginates backwards. Derived rather than listed, so a kind added to
+// the grammar later is covered here by having been added there.
+var foreignKindCursors = func() map[string]string {
+	m := maps.Clone(foreignCursors)
+	delete(m, "prev time")
+	return m
+}()
 
 // TestTimeKeyedListsRejectForeignCursors: a cursor belonging to one of the
 // three lists ordered by something other than (created_at, id) is the
@@ -59,7 +69,7 @@ func TestTimeKeyedListsRejectForeignCursors(t *testing.T) {
 		"/v1/vaults/" + vaultID + "/credentials",
 	} {
 		for name, cur := range foreignCursors {
-			t.Run(path+" "+name, func(t *testing.T) {
+			t.Run(listLabel(path)+"_"+name, func(t *testing.T) {
 				status, res := s.do(http.MethodGet, path+"?page="+url.QueryEscape(cur), nil)
 				wantErr(t, status, res, http.StatusBadRequest, "invalid_request_error")
 			})
@@ -73,7 +83,7 @@ func TestTimeKeyedListsRejectForeignCursors(t *testing.T) {
 	// everywhere above and fail here.
 	for _, order := range []string{"asc", "desc"} {
 		for name, cur := range foreignKindCursors {
-			t.Run("/v1/sessions order="+order+" "+name, func(t *testing.T) {
+			t.Run("sessions_order="+order+"_"+name, func(t *testing.T) {
 				status, res := s.do(http.MethodGet,
 					"/v1/sessions?order="+order+"&page="+url.QueryEscape(cur), nil)
 				wantErr(t, status, res, http.StatusBadRequest, "invalid_request_error")

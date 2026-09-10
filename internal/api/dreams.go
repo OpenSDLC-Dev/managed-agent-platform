@@ -495,10 +495,6 @@ func (s *server) listDreams(r *http.Request) (any, error) {
 		}
 	}
 	if page.cur != nil {
-		// Every non-time cursor kind is rejected, not just the version one: a
-		// seq or path cursor decodes with a zero time and an empty id, and
-		// binding those would render an empty 200 page — end of history — where
-		// the reference publishes a 400 (the deployment-runs list, #534).
 		if page.cur.foreignToTime() || page.cur.dir != dirNext {
 			return nil, errInvalid("invalid page cursor")
 		}
