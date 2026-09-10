@@ -166,6 +166,18 @@ func wantFields(t *testing.T, obj map[string]any, keys ...string) {
 	}
 }
 
+// wantNoFields asserts keys the reference omits entirely are absent — a
+// distinction wantFields cannot make, since a key present with a null value
+// satisfies it just as an omitted one fails it.
+func wantNoFields(t *testing.T, obj map[string]any, keys ...string) {
+	t.Helper()
+	for _, k := range keys {
+		if v, ok := obj[k]; ok {
+			t.Errorf("wire field %q should be omitted, got %v", k, v)
+		}
+	}
+}
+
 // listData pulls the "data" array out of a list response.
 func listData(t *testing.T, body map[string]any) []map[string]any {
 	t.Helper()

@@ -97,6 +97,12 @@ func TestFileScopeRendered(t *testing.T) {
 	if scope == nil || scope["id"] != sess || scope["type"] != "session" {
 		t.Errorf("scope = %v, want {id:%s, type:session}", obj["scope"], sess)
 	}
+	// Omitting a null scope must not omit a real one, and expires_at rides
+	// along on a scoped file exactly as it does on an upload (#651).
+	wantFields(t, obj, "scope", "expires_at")
+	if obj["expires_at"] != nil {
+		t.Errorf("scoped expires_at = %v, want null", obj["expires_at"])
+	}
 
 	status, body := s.do("GET", "/v1/files?scope_id="+sess, nil)
 	if status != http.StatusOK {

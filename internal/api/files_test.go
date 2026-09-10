@@ -62,7 +62,10 @@ func TestFileUploadRoundTrip(t *testing.T) {
 	pdf := "application/pdf"
 	created := s.uploadFile(t, "report.pdf", &pdf, "%PDF-1.7 fake body")
 
-	wantFields(t, created, "id", "created_at", "filename", "mime_type", "size_bytes", "type", "downloadable", "scope")
+	wantFields(t, created, "id", "created_at", "filename", "mime_type", "size_bytes", "type", "downloadable", "expires_at")
+	// The reference puts expires_at on every file object and omits scope unless
+	// the file has one; an upload has neither an expiry nor a scope (#651).
+	wantNoFields(t, created, "scope")
 	id, _ := created["id"].(string)
 	if !strings.HasPrefix(id, "file_") {
 		t.Errorf("id = %q, want a file_ id", id)
@@ -79,8 +82,8 @@ func TestFileUploadRoundTrip(t *testing.T) {
 	if created["downloadable"] != false {
 		t.Errorf("downloadable = %v, want false", created["downloadable"])
 	}
-	if created["scope"] != nil {
-		t.Errorf("scope = %v, want null for an upload", created["scope"])
+	if created["expires_at"] != nil {
+		t.Errorf("expires_at = %v, want null: nothing this platform stores expires", created["expires_at"])
 	}
 	// size_bytes is a JSON number; the harness decodes it as float64.
 	if n, _ := created["size_bytes"].(float64); int(n) != len("%PDF-1.7 fake body") {
@@ -100,6 +103,11 @@ func TestFileUploadRoundTrip(t *testing.T) {
 		if got[k] != created[k] {
 			t.Errorf("get %s = %v, create returned %v", k, got[k], created[k])
 		}
+	}
+	wantFields(t, got, "expires_at")
+	wantNoFields(t, got, "scope")
+	if got["expires_at"] != nil {
+		t.Errorf("get expires_at = %v, want null", got["expires_at"])
 	}
 }
 
@@ -330,6 +338,12 @@ func TestFileList(t *testing.T) {
 	}
 	if data[0]["id"] != ids[4] || data[4]["id"] != ids[0] {
 		t.Errorf("list order = %v, want newest-first", []any{data[0]["id"], data[4]["id"]})
+	}
+	// A listed file object is the same shape as a fetched one (#651).
+	wantFields(t, data[0], "expires_at")
+	wantNoFields(t, data[0], "scope")
+	if data[0]["expires_at"] != nil {
+		t.Errorf("listed expires_at = %v, want null", data[0]["expires_at"])
 	}
 	if body["has_more"] != false {
 		t.Errorf("has_more = %v, want false", body["has_more"])

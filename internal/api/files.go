@@ -23,10 +23,23 @@ const maxFileListLimit = 1000
 
 // fileJSON is the BetaFileMetadata wire shape (anthropic-sdk-go betafile.go:166-201):
 // id/created_at/filename/mime_type/size_bytes all api:"required"; type is the
-// constant "file"; downloadable a plain bool; scope api:"nullable" — a
-// {id, type:"session"} object for files created in a scoping resource's context,
-// null for a plain upload. Like the skills registry, the shape is api-local
-// (no domain.File) — the registry is metadata-only.
+// constant "file"; downloadable a plain bool.
+//
+// The last two fields are both api:"nullable" in the SDK, which is an
+// annotation about what a client tolerates, not about what the server sends —
+// a Go struct cannot distinguish an absent key from a null one, so that
+// vocabulary has no way to say "omitted". The recorded reference bytes do
+// distinguish, and they disagree with each other: every file object carries
+// expires_at, and only a file that has a scope carries scope. The eight
+// recorded objects settle it with their own control — the six that omit scope
+// entirely still spell out expires_at: null, so the absence is the reference's
+// and not the recorder's.
+//
+// expires_at is null on every file this platform stores. It is the upload time
+// plus expires_in_seconds, and parseFileUpload refuses that parameter (#655),
+// so nothing here can expire — unlike an always-null next_page, which would
+// have been a lie the moment has_more went true. Like the skills registry, the
+// shape is api-local (no domain.File) — the registry is metadata-only.
 type fileJSON struct {
 	ID           string         `json:"id"`
 	CreatedAt    time.Time      `json:"created_at"`
@@ -35,7 +48,8 @@ type fileJSON struct {
 	SizeBytes    int64          `json:"size_bytes"`
 	Type         string         `json:"type"`
 	Downloadable bool           `json:"downloadable"`
-	Scope        *fileScopeJSON `json:"scope"`
+	ExpiresAt    *time.Time     `json:"expires_at"`
+	Scope        *fileScopeJSON `json:"scope,omitempty"`
 }
 
 // fileScopeJSON is BetaFileScope (betafile.go:209-227): the scoping resource id
