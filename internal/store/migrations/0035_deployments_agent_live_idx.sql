@@ -1,0 +1,57 @@
+-- The agent-archive refusal's own index (#523). Archiving an agent is refused
+-- while a live deployment pins it (plan 37 decision 7), and naming the blockers
+-- runs, inside archiveAgent's transaction:
+--
+--   SELECT id, count(*) OVER () FROM deployments
+--    WHERE agent_id = $1 AND archived_at IS NULL
+--    ORDER BY created_at, id LIMIT 5
+--
+-- 0031's deployments_agent_idx is on agent_id alone, so that read sorted its
+-- matches and returned to the heap to test archived_at. Where an agent's
+-- deployments are a small share of the table — the case worth planning for —
+-- that measures as Limit -> Sort -> WindowAgg -> Bitmap Heap Scan; where one
+-- agent owns much of it, the planner walks deployments_created_idx instead and
+-- filters, which loses the sort but reads the table. Carrying the ordering
+-- columns and the predicate here makes it Limit -> WindowAgg -> Index Only Scan,
+-- and it is preferred over both.
+--
+-- The LIMIT still bounds the output and not the work: count(*) OVER () reads
+-- every live deployment of the agent whatever index serves it, so this stays
+-- linear in those. What it stops being linear in is the archived ones. Reading
+-- agent_id alone and filtering afterwards touched every deployment the agent has
+-- ever had, live or archived, and this platform deletes neither (archiving is a
+-- timestamp, and deployment_runs references the row) — so the old cost grew with
+-- a history that only ever grows, while the new one is bounded by what is live.
+-- That matters because of who waits for it:
+-- archiveAgent holds FOR UPDATE on the agent row while this runs, and deployment
+-- creates and repins of that agent resolve it FOR SHARE, so they queue behind.
+--
+-- deployments_agent_idx is deliberately kept, for the one caller this index
+-- cannot serve: GET /v1/deployments?agent_id=<id>&include_archived=true drops
+-- the archived_at predicate, and a partial index cannot answer a query over rows
+-- it excludes. (An *empty* agent_id is not that caller — the handler drops the
+-- agent predicate with it and the listing is served in created order.) The
+-- default listing keeps the predicate and is served by this index instead.
+--
+-- "Index only" is the plan node, not a promise about the heap: an index-only
+-- scan still fetches from it for rows the visibility map does not mark, so the
+-- archive that follows a bulk repin reads some. The sort and the predicate are
+-- what this index removes unconditionally.
+--
+-- Not CONCURRENTLY: migrate.go applies every pending file inside one
+-- transaction, and CREATE INDEX CONCURRENTLY cannot run in a transaction block.
+-- This form takes SHARE on deployments for the build: reads go on, writes —
+-- deployment creates, repins, pauses, archives — wait for the whole migration
+-- transaction, since migrate.go commits once. What bounds that here is that
+-- 0031 created this table and is itself unreleased (v0.3.0 ends at 0024), so a
+-- database following releases applies 0031 and 0035 together and builds this
+-- index over an empty table. One tracking main has whatever it has, and no
+-- ceiling on the table's size is claimed to argue that away: the reference's
+-- published 1,000 cap would not supply one either — it is on *scheduled*
+-- deployments per organization (docs/DIVERGENCES.md, which also records it as
+-- unenforced here), and a manual deployment carries no schedule.
+--
+-- 0031's comment on deployments_agent_idx gives the archive check as its
+-- reason. That reason moves here; 0031 is merged and cannot say so itself.
+CREATE INDEX deployments_agent_live_idx
+    ON deployments (agent_id, created_at, id) WHERE archived_at IS NULL;
