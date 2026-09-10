@@ -294,12 +294,28 @@ func (s *server) listFiles(r *http.Request) (any, error) {
 		// newest-first order — "an opaque page cursor returned in a prior list
 		// response's next_page", passed back as ?page= (SDK v1.70.1 betafile.go
 		// BetaFileListParams.Page). One meaning on every arm, so the two lanes
-		// read as one walk: after a before_id page it hands back the position
-		// the cursor row itself sits at, which is why has_more — answering the
-		// other lane's question, whether rows remain the way that page was
-		// fetched — does not decide it there. Null only at the end of the list,
-		// which a before_id page never is: every row it returned is newer than
-		// a cursor row that exists.
+		// read as one walk: on a forward page null is exactly has_more, while a
+		// non-empty before_id page always carries a cursor, continuing into the
+		// row its own cursor named — which is why has_more, answering whether
+		// rows remain the way that page was fetched, does not decide it there.
+		// Under scope_id that continuation can be one further request that comes
+		// back empty, the boundary row being resolved unfiltered.
+		//
+		// An empty page carries none — this branch is inside len(files) > 0, no
+		// row is left to anchor on, and the reference's own empty page is
+		// next_page:null. That reads as end-of-list on the one arm where it is
+		// not: an empty before_id page sits at the TOP of the list. No cursor
+		// client can act on the difference either way, because
+		// pagination.PageCursor.GetNextPage stops on an empty data array before
+		// it looks at the cursor at all.
+		//
+		// A cursor handed out on an id-seeded page cannot be replayed the way
+		// that pager replays one: GetNextPage clones the seed request and only
+		// adds ?page=, so a client that seeded with after_id sends
+		// after_id=…&page=… and meets the refusal above. That is the reference's
+		// shape too — it sends next_page on every page while refusing the same
+		// combination — so the cursor is emitted here rather than withheld on
+		// the arms a legacy client seeds.
 		if hasMore || beforeID != "" {
 			c := encodeTimeCursor(dirNext, files[len(files)-1].CreatedAt, last)
 			out.NextPage = &c

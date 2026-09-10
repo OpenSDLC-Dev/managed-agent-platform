@@ -393,10 +393,23 @@ func TestFileList(t *testing.T) {
 		t.Errorf("unknown cursor: status %d, data %v", status, body["data"])
 	}
 	wantFields(t, body, "data", "next_page", "has_more", "first_id", "last_id")
+
+	// A cursor that actually decodes, so the exclusivity arms below reach the
+	// guard they aim at. One that does not is refused before the handler ever
+	// compares it against after_id/before_id, so it would pass this table with
+	// the guard deleted.
+	status, body = s.do("GET", "/v1/files?limit=2", nil)
+	if status != http.StatusOK {
+		t.Fatalf("cursor fetch: %d %v", status, body)
+	}
+	cur := nextPage(t, body)
+	if cur == "" {
+		t.Fatal("expected a cursor to test exclusivity with")
+	}
 	for _, q := range []string{"limit=0", "limit=1001", "limit=abc", "after_id=x&before_id=y",
 		"page=not-a-cursor",
-		"page=x&after_id=file_0000000000000000000000ok",
-		"page=x&before_id=file_0000000000000000000000ok"} {
+		"page=" + cur + "&after_id=" + ids[3],
+		"page=" + cur + "&before_id=" + ids[3]} {
 		status, obj := s.do("GET", "/v1/files?"+q, nil)
 		wantErr(t, status, obj, http.StatusBadRequest, "invalid_request_error")
 	}
@@ -430,7 +443,13 @@ func TestFileListNextPageCursor(t *testing.T) {
 			t.Fatalf("cursor walk %s: %d %v", path, status, body)
 		}
 		wantFields(t, body, "data", "next_page", "has_more", "first_id", "last_id")
-		for _, d := range listData(t, body) {
+		// Per page, not just in aggregate: a continuation that ignored ?limit=
+		// and returned everything left would still produce the right sequence.
+		data := listData(t, body)
+		if len(data) > 2 {
+			t.Fatalf("page %d returned %d rows, want at most the limit of 2", i, len(data))
+		}
+		for _, d := range data {
 			walked = append(walked, d["id"])
 		}
 		cur := nextPage(t, body)
@@ -462,6 +481,88 @@ func TestFileListNextPageCursor(t *testing.T) {
 	}
 	if data := listData(t, body); len(data) != 1 || data[0]["id"] != ids[0] {
 		t.Errorf("replay page = %v, want [%s]", pageIDs(data), ids[0])
+	}
+}
+
+// TestFileListBeforeIDCursor pins the one claim in #544 that has_more cannot
+// speak for: on a before_id page next_page is the position of the cursor row
+// itself, so the backwards lane and the forward walk join up. has_more there
+// answers the id lane's own question — whether rows remain the way that page
+// was fetched — so it can be false on a page that still carries a cursor, and
+// that disagreement is the behavior rather than a bug in it.
+func TestFileListBeforeIDCursor(t *testing.T) {
+	s := newTestServer(t)
+	oct := "application/octet-stream"
+	ids := make([]string, 0, 5)
+	for i := 0; i < 5; i++ {
+		created := s.uploadFile(t, fmt.Sprintf("b%d.bin", i), &oct, fmt.Sprintf("body-%d", i))
+		ids = append(ids, created["id"].(string))
+	}
+	stampCreatedAt(t, s, "files", ids...)
+
+	// Only ids[3] and ids[4] are newer than ids[2], so this page exhausts the
+	// backwards walk: has_more is false while rows older than it plainly remain.
+	status, body := s.do("GET", "/v1/files?limit=2&before_id="+ids[2], nil)
+	if status != http.StatusOK {
+		t.Fatalf("before page: %d %v", status, body)
+	}
+	if data := listData(t, body); len(data) != 2 || data[0]["id"] != ids[4] || data[1]["id"] != ids[3] {
+		t.Fatalf("before page = %v, want [%s %s]", pageIDs(listData(t, body)), ids[4], ids[3])
+	}
+	if body["has_more"] != false {
+		t.Errorf("before page has_more = %v, want false", body["has_more"])
+	}
+	cur := nextPage(t, body)
+	if cur == "" {
+		t.Fatal("before page next_page is null; want the cursor row's own position")
+	}
+
+	// Following it lands on the before_id cursor row — no gap, no repeat.
+	status, body = s.do("GET", "/v1/files?page="+cur, nil)
+	if status != http.StatusOK {
+		t.Fatalf("continuation: %d %v", status, body)
+	}
+	data := listData(t, body)
+	if len(data) != 3 || data[0]["id"] != ids[2] || data[2]["id"] != ids[0] {
+		t.Fatalf("continuation = %v, want [%s %s %s]", pageIDs(data), ids[2], ids[1], ids[0])
+	}
+	if np := nextPage(t, body); np != "" {
+		t.Errorf("continuation next_page = %q, want null at the end of the list", np)
+	}
+
+	// A before_id page that does have newer rows beyond it reports has_more and
+	// still continues into the cursor row.
+	status, body = s.do("GET", "/v1/files?limit=2&before_id="+ids[1], nil)
+	if status != http.StatusOK {
+		t.Fatalf("before page 2: %d %v", status, body)
+	}
+	if data := listData(t, body); len(data) != 2 || data[0]["id"] != ids[3] || data[1]["id"] != ids[2] {
+		t.Fatalf("before page 2 = %v, want [%s %s]", pageIDs(listData(t, body)), ids[3], ids[2])
+	}
+	if body["has_more"] != true {
+		t.Errorf("before page 2 has_more = %v, want true", body["has_more"])
+	}
+	status, body = s.do("GET", "/v1/files?limit=1&page="+nextPage(t, body), nil)
+	if status != http.StatusOK {
+		t.Fatalf("continuation 2: %d %v", status, body)
+	}
+	if data := listData(t, body); len(data) != 1 || data[0]["id"] != ids[1] {
+		t.Fatalf("continuation 2 = %v, want [%s]", pageIDs(listData(t, body)), ids[1])
+	}
+
+	// Nothing is newer than the newest row, so this page is empty — and an
+	// empty page carries no cursor, matching the recorded reference shape even
+	// though this one arm sits at the top of the list rather than its end.
+	status, body = s.do("GET", "/v1/files?before_id="+ids[4], nil)
+	if status != http.StatusOK {
+		t.Fatalf("empty before page: %d %v", status, body)
+	}
+	wantFields(t, body, "data", "next_page", "has_more", "first_id", "last_id")
+	if data := listData(t, body); len(data) != 0 {
+		t.Errorf("empty before page = %v, want none", pageIDs(data))
+	}
+	if np := nextPage(t, body); np != "" {
+		t.Errorf("empty before page next_page = %q, want null", np)
 	}
 }
 
