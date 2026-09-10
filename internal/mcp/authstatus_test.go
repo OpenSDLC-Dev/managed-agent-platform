@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -181,6 +182,18 @@ func TestAResolvedTokenReplacesTheURLsOwnCredential(t *testing.T) {
 // which is the half a connect-time test cannot reach.
 func serveThenFailing(t *testing.T, rules map[string]int) string {
 	t.Helper()
+	return serveThenFailingWith(t, rules, nil)
+}
+
+// serveThenFailingWith is serveThenFailing with the body the failing status
+// carries left to the caller. A nil writeBody sends the status alone; a
+// JSON-RPC error body is the other shape a real server sends, and go-sdk v1.7.0
+// decodes one out of any non-2xx (streamable.go, checkResponse). Which of the
+// two arrives is what decides whether the failure reads as the server's answer,
+// so a test of that classification has to be able to choose.
+func serveThenFailingWith(t *testing.T, rules map[string]int,
+	writeBody func(w http.ResponseWriter, id json.RawMessage)) string {
+	t.Helper()
 	inner := sdk.NewStreamableHTTPHandler(func(*http.Request) *sdk.Server {
 		s := sdk.NewServer(&sdk.Implementation{Name: "refusing-server", Version: "1"}, nil)
 		sdk.AddTool(s, &sdk.Tool{Name: "echo", Description: "echoes"},
@@ -197,11 +210,18 @@ func serveThenFailing(t *testing.T, rules map[string]int) string {
 			return
 		}
 		var msg struct {
-			Method string `json:"method"`
+			Method string          `json:"method"`
+			ID     json.RawMessage `json:"id"`
 		}
 		_ = json.Unmarshal(body, &msg)
 		if status, ok := rules[msg.Method]; ok {
+			if writeBody == nil {
+				w.WriteHeader(status)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(status)
+			writeBody(w, msg.ID)
 			return
 		}
 		r.Body = io.NopCloser(bytes.NewReader(body))
@@ -209,6 +229,53 @@ func serveThenFailing(t *testing.T, rules map[string]int) string {
 	}))
 	t.Cleanup(ts.Close)
 	return ts.URL
+}
+
+// jsonRPCError writes the response a server sends when it refuses a call in the
+// protocol's own words rather than with a bare status.
+func jsonRPCError(w http.ResponseWriter, id json.RawMessage) {
+	if len(id) == 0 {
+		id = json.RawMessage("null")
+	}
+	_, _ = fmt.Fprintf(w,
+		`{"jsonrpc":"2.0","id":%s,"error":{"code":-32000,"message":"policy says no"}}`, id)
+}
+
+// A call-time 403 is classified by what the server sent, exactly as 407 and 500
+// are. That is the whole of what #572 asks for, on the half a dial-time test
+// cannot reach: before it, the watch marked 403 alongside 401, so [mcp.Conn]
+// asked the refusal question first and this row read ErrUnauthorized. It now
+// falls through to the same question every other status has always been asked.
+//
+// The three run as one table because the claim is that they are one class. The
+// 2026-09-03 recording put 403 with 407, 500 and 502 rather than with 401, so a
+// row disagreeing with its neighbours would be 403 singled out again, in the
+// other direction.
+func TestACallTimeForbiddenIsClassifiedLikeEveryOtherNonAuthStatus(t *testing.T) {
+	for _, status := range []int{
+		http.StatusForbidden, http.StatusProxyAuthRequired, http.StatusInternalServerError,
+	} {
+		t.Run(http.StatusText(status), func(t *testing.T) {
+			conn, err := mcp.Connect(context.Background(), mcp.Config{
+				URL: serveThenFailingWith(t,
+					map[string]int{"tools/call": status}, jsonRPCError),
+				HTTPClient: &http.Client{}, BearerToken: "tok"})
+			if err != nil {
+				t.Fatalf("the handshake was expected to succeed: %v", err)
+			}
+			defer conn.Close()
+			_, err = conn.CallTool(context.Background(), "echo", nil)
+			if err == nil {
+				t.Fatal("expected the refused call to fail")
+			}
+			if errors.Is(err, mcp.ErrUnauthorized) {
+				t.Errorf("a %d on the call was marked a refused credential: %v", status, err)
+			}
+			if !errors.Is(err, mcp.ErrServerAnswered) {
+				t.Errorf("a %d carrying a JSON-RPC error = %v, want ErrServerAnswered", status, err)
+			}
+		})
+	}
 }
 
 // A refusal that lands after the handshake is the same authentication failure,
