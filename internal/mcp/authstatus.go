@@ -8,8 +8,12 @@ import (
 )
 
 // ErrUnauthorized marks an error raised on an exchange the server answered 401
-// or 403 to — the credential was refused, or the server required one and this
-// dial carried none.
+// to — the credential was refused, or the server required one and this dial
+// carried none. 401 alone: a 2026-09-03 recording dialled five statuses in one
+// turn and only that one came back an authentication failure, 403 answering
+// `mcp_connection_failed_error` ("access forbidden") beside 407, 500 and 502
+// (#572). A forbidden request is a decision about the request, not about
+// whether the credential was accepted.
 //
 // It exists because the two failures the wire distinguishes cannot otherwise be
 // told apart here. The reference splits them by cause:
@@ -24,7 +28,7 @@ import (
 // The status is observed here rather than read off the SDK's error, which does
 // not carry it: go-sdk v1.7.0 renders a non-2xx as `http.StatusText(code)` inside
 // a formatted message and wraps no sentinel (mcp/streamable.go, checkResponse),
-// and 401/403 are not among the statuses it treats as transient. Matching that
+// and 401 is not among the statuses it treats as transient. Matching that
 // message would be matching prose that a version bump may reword; watching the
 // response is exact, and this package already owns the whole transport chain.
 //
@@ -35,8 +39,8 @@ import (
 var ErrUnauthorized = errors.New("the server refused the credential")
 
 // authWatch is the innermost RoundTripper of a connection's chain: it records
-// whether any exchange came back 401 or 403, so an error raised anywhere
-// downstream of one can be marked as an authentication failure.
+// whether any exchange came back 401, so an error raised anywhere downstream of
+// one can be marked as an authentication failure.
 //
 // The flag answers for the connection's most recent exchange, within an
 // operation. A failure surfaces at whichever exchange the SDK gave up on, which
@@ -84,8 +88,7 @@ func (w *authWatch) RoundTrip(req *http.Request) (*http.Response, error) {
 	// it answer for the operation would erase the refusal that caused the
 	// teardown — which is exactly what it did.
 	if req.Method != http.MethodDelete {
-		w.seen.Store(resp != nil && (resp.StatusCode == http.StatusUnauthorized ||
-			resp.StatusCode == http.StatusForbidden))
+		w.seen.Store(resp != nil && resp.StatusCode == http.StatusUnauthorized)
 	}
 	return resp, err
 }
@@ -100,8 +103,8 @@ func (w *authWatch) mark(err error) error {
 	return fmt.Errorf("%w: %w", ErrUnauthorized, err)
 }
 
-// refused reports whether this operation was answered 401 or 403. A nil watch
-// has seen nothing.
+// refused reports whether this operation was answered 401. A nil watch has seen
+// nothing.
 func (w *authWatch) refused() bool { return w != nil && w.seen.Load() }
 
 // reset starts a fresh operation. Clearing on the way in rather than on any

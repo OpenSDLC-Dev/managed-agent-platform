@@ -40,11 +40,16 @@ func TestConnectMarksARefusedCredential(t *testing.T) {
 		unexpected string
 	}{
 		{name: "401 unauthorized", status: http.StatusUnauthorized, refused: true},
-		{name: "403 forbidden", status: http.StatusForbidden, refused: true},
 		// Every other failure is a connection that did not work, which is what
-		// the other error type is for. 407 in particular is an authentication
-		// status the reference does not name — a proxy's, not the server's.
+		// the other error type is for — 403 included. A 2026-09-03 recording
+		// dialled five statuses in one turn and only 401 came back an
+		// authentication failure; 403 answered `mcp_connection_failed_error`
+		// ("access forbidden"), and so did 407, 500 and 502 (#572). 407 is an
+		// authentication status, but a proxy's rather than the server's, which
+		// is the reason it was already on this side of the split.
+		{name: "403 forbidden", status: http.StatusForbidden},
 		{name: "500 server error", status: http.StatusInternalServerError},
+		{name: "502 bad gateway", status: http.StatusBadGateway},
 		{name: "404 not found", status: http.StatusNotFound},
 		{name: "429 too many requests", status: http.StatusTooManyRequests},
 		{name: "407 proxy authentication required", status: http.StatusProxyAuthRequired},

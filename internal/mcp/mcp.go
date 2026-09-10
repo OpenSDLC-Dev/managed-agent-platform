@@ -138,8 +138,8 @@ type Tool struct {
 // use and is not meant to be: one work item, one connection, one goroutine.
 type Conn struct {
 	session *sdk.ClientSession
-	// auth records whether this connection was ever answered 401 or 403, so a
-	// failure raised on it can be told from one that never got that far. Nil on
+	// auth records whether this connection was ever answered 401, so a failure
+	// raised on it can be told from one that never got that far. Nil on
 	// a Conn built without the transport chain, which marks nothing.
 	auth *authWatch
 }

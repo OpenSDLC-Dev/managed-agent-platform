@@ -214,6 +214,57 @@ func TestMCPCallToAnUnreachableServerStaysAConnectionFailure(t *testing.T) {
 	}
 }
 
+// So is a 403, which used to read as a refused credential here. The reference
+// dialled five statuses in one turn and answered only 401 with an
+// authentication failure; 403 came back mcp_connection_failed_error ("access
+// forbidden") beside 407, 500 and 502 (#572). A forbidden request is a decision
+// about the request, not about whether the credential was accepted.
+//
+// The event's whole shape is pinned here because the same recording fixed it:
+// exactly four keys — no http_status, so a client cannot recover the origin's
+// status — and retry_status "retrying", which the reference sends even on the
+// authentication arm.
+func TestMCPCallRefusedWith403StaysAConnectionFailure(t *testing.T) {
+	h := mcpHarness(t)
+	forbidden := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusForbidden)
+	}))
+	defer forbidden.Close()
+	h.declareListedMCPServers(t, [2]string{"docs", forbidden.URL})
+	h.appendMCPToolUse(t, "docs", "ask", `{}`)
+	h.enqueueMCP(t)
+
+	h.stepOnce(t)
+
+	errs := h.sessionErrors(t)
+	if len(errs) != 1 {
+		t.Fatalf("got %d session errors, want 1", len(errs))
+	}
+	var body struct {
+		Error map[string]any `json:"error"`
+	}
+	if err := json.Unmarshal(errs[0].Body, &body); err != nil {
+		t.Fatal(err)
+	}
+	if body.Error["type"] != "mcp_connection_failed_error" {
+		t.Errorf("type = %v, want mcp_connection_failed_error", body.Error["type"])
+	}
+	if body.Error["mcp_server_name"] != "docs" {
+		t.Errorf("mcp_server_name = %v, want docs", body.Error["mcp_server_name"])
+	}
+	if retry, _ := body.Error["retry_status"].(map[string]any); retry["type"] != "retrying" {
+		t.Errorf("retry_status = %v, want {type: retrying}", body.Error["retry_status"])
+	}
+	for _, k := range []string{"mcp_server_name", "message", "retry_status", "type"} {
+		if _, ok := body.Error[k]; !ok {
+			t.Errorf("error is missing key %q", k)
+		}
+	}
+	if len(body.Error) != 4 {
+		t.Errorf("error carries %d keys (%v), want exactly the four above", len(body.Error), body.Error)
+	}
+}
+
 // Discovery dials with the same credential: a listing is as authenticated as a
 // call, and a server that only publishes its tools to a known client would
 // otherwise never yield a catalog row.
