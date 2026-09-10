@@ -267,7 +267,7 @@ func (e *Executor) runWebTool(ctx context.Context, u toolUse) toolset.Result {
 			}
 			blocks = append(blocks, domain.SearchResultBlock{
 				Type:      "search_result",
-				Citations: domain.SearchResultCitations{Enabled: false},
+				Citations: domain.SearchResultCitations{Enabled: true},
 				Content:   content,
 				Source:    source,
 				Title:     title,

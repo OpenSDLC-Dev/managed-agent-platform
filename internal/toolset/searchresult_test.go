@@ -13,7 +13,10 @@ import (
 // Result.SearchResults) must be, field for field, what the SDK's typed schema
 // decodes — the round-trip discipline every
 // wire shape gets. Presence is asserted through respjson, not just decoded
-// values: a dropped required field would decode to the same zero value.
+// values: a dropped required field would decode to the same zero value — which
+// is why citations.enabled stays false here where the driver emits true
+// (#548). The zero value is what leaves that presence assertion load-bearing;
+// with true, a plain comparison would already catch the field going missing.
 func TestSearchResultBlockRoundTripsThroughSDK(t *testing.T) {
 	raw, err := json.Marshal(domain.SearchResultBlock{
 		Type:      "search_result",
