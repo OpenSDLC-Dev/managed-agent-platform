@@ -1381,6 +1381,24 @@ func (s *server) archiveSessionInTx(ctx context.Context, tx pgx.Tx, id string) (
 // behind and nothing else.
 const sessionDeleteCleanupBudget = 30 * time.Second
 
+// sessionDeleteBroadcastBudget bounds the terminal broadcasts, which run
+// detached from the request for the reason the cleanup below already gives.
+// Its own budget rather than a share of sessionDeleteCleanupBudget: a publish
+// is a pool acquire and one NOTIFY round trip, not an object-store call, and a
+// pool that has stopped answering must not spend the cleanup's budget here.
+// Neither loss can be taken back; what differs is reach. A dropped frame is
+// owed to whoever holds a stream open at this moment and to nobody after, so
+// the set of people it can still disappoint empties on its own; bytes the
+// cleanup skips sit in the store until something outside this code removes
+// them, and nothing does.
+const sessionDeleteBroadcastBudget = 5 * time.Second
+
+// deleteSessionAfterCommitHook is a test-only seam fired between the delete's
+// commit and its terminal broadcasts; nil in production. That window is the
+// whole of the case the detached context exists for — a caller that hangs up
+// on a delete which has already succeeded.
+var deleteSessionAfterCommitHook func()
+
 func (s *server) deleteSession(r *http.Request) (any, error) {
 	ctx := r.Context()
 	id := normalizeSessionID(r.PathValue("id"))
@@ -1458,12 +1476,37 @@ func (s *server) deleteSession(r *http.Request) (any, error) {
 	if err := tx.Commit(ctx); err != nil {
 		return nil, err
 	}
+	// Test seam: hang up on the request in exactly this window. nil in production.
+	if deleteSessionAfterCommitHook != nil {
+		deleteSessionAfterCommitHook()
+	}
 	// The session.deleted event terminates any active event stream. It
 	// cannot be persisted — the log rows just cascaded away with the
 	// session — so it goes out as an ephemeral broadcast, best-effort:
 	// the delete itself has already succeeded. Each live child's
 	// session.thread_status_terminated goes out first, the same way, on the
 	// child's own stream and cross-posted to the session's.
+	//
+	// Detached from the request context — the decision the cleanup below
+	// already made, for the reason it already gives: past the commit, nothing
+	// the caller does should decide what its fellow subscribers see. The two
+	// kinds are owed differently, and the child's is why this matters. A lost
+	// session.deleted still reaches its watchers a ping later, synthesized by
+	// the stream's own check for a session that is gone; nothing anywhere
+	// regenerates a child's termination.
+	bctx, cancelBroadcast := context.WithTimeout(context.WithoutCancel(ctx), sessionDeleteBroadcastBudget)
+	defer cancelBroadcast()
+	var undelivered int
+	var firstErr error
+	note := func(err error) {
+		if err == nil {
+			return
+		}
+		undelivered++
+		if firstErr == nil {
+			firstErr = err
+		}
+	}
 	for _, child := range liveChildren {
 		frame := map[string]any{
 			"id":                domain.NewID("sevt").String(),
@@ -1472,14 +1515,24 @@ func (s *server) deleteSession(r *http.Request) (any, error) {
 			"session_thread_id": child.id,
 			"agent_name":        child.agentName,
 		}
-		_ = s.log.PublishThreadEventFrame(ctx, domain.ID(id), domain.ID(child.id), frame)
-		_ = s.log.PublishEventFrame(ctx, domain.ID(id), frame)
+		note(s.log.PublishThreadEventFrame(bctx, domain.ID(id), domain.ID(child.id), frame))
+		note(s.log.PublishEventFrame(bctx, domain.ID(id), frame))
 	}
-	_ = s.log.PublishEventFrame(ctx, domain.ID(id), map[string]any{
+	note(s.log.PublishEventFrame(bctx, domain.ID(id), map[string]any{
 		"id":           domain.NewID("sevt").String(),
 		"type":         "session.deleted",
 		"processed_at": time.Now().UTC(),
-	})
+	}))
+	// Counted and said once for the set, the shape the cleanup below uses.
+	// Best-effort still means the delete stands whatever this reports; it does
+	// not mean nobody should be told. Past this point the only thing that can
+	// drop a frame is the database the transaction just committed through, and
+	// that is a condition an operator can act on and a discarded error hides.
+	if undelivered > 0 {
+		slog.WarnContext(ctx, "session delete broadcasts not delivered",
+			"session", id, "frames", undelivered, "children", len(liveChildren),
+			"error", firstErr)
+	}
 	// The checkpoint blob goes with the record, best-effort for the same
 	// reason as the broadcast. Best-effort is enough because this is not the
 	// only remover: a session that still owns a sandbox is the reaper's
