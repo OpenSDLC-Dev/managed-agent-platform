@@ -795,13 +795,14 @@ func TestDeleteSessionRemovesCheckpointBlob(t *testing.T) {
 // that keyed on the name rather than the scope would take the wrong rows and
 // this would catch it.
 //
-// The fourth row is the one nothing writes yet: a non-session scope under this
+// The fourth row is one nothing writes: a non-session scope carrying this
 // session's id. It is here because `scope_type` is otherwise an unpinned clause
 // — dropping it from the delete changes no behavior today, since no writer pairs
-// a scope_id with another type — and docs/plan/42's #266 bullet is that a
-// workspace-scoped upload path would put exactly this row in the table. Then the
-// clause is the only thing standing between a session delete and someone else's
-// file, so it is asserted now rather than after.
+// a scope_id with another type, so nothing would fail. It is deliberately not a
+// prediction of docs/plan/42's workspace-scoped upload path, which would put
+// workspace ids in that column rather than session ids; it is the minimal row
+// that makes the clause load-bearing, and the reason to keep the clause is that
+// the schema holds this invariant with neither a CHECK nor a foreign key.
 func TestDeleteSessionRemovesTheFilesItProduced(t *testing.T) {
 	s := newTestServer(t)
 	agentID, envID := fixture(t, s)
@@ -833,13 +834,23 @@ func TestDeleteSessionRemovesTheFilesItProduced(t *testing.T) {
 		}
 		return id
 	}
+	// Two for the doomed session, so a cleanup that stops after the first row
+	// fails rather than passing on a set of one.
 	harvested := seed("report.md", "session", doomed)
+	alsoHarvested := seed("summary.md", "session", doomed)
 	bystandersHarvest := seed("report.md", "session", bystander)
 	uploaded := seed("report.md", "", "")
 	// A distinct name only because (scope_id, filename) is unique among scoped
 	// rows and this one shares the doomed session's scope_id by design.
 	otherScope := seed("notes.md", "workspace", doomed)
 
+	// Archiving first, on the session that survives: the reference archives "while
+	// preserving its history", so this is the half of the split that must not
+	// delete anything. It runs before the delete so a cleanup wired to the wrong
+	// verb has already done its damage by the time the survivor is checked.
+	if status, body := s.do(http.MethodPost, "/v1/sessions/"+bystander+"/archive", nil); status != http.StatusOK {
+		t.Fatalf("archive: %d %v", status, body)
+	}
 	if status, body := s.do(http.MethodDelete, "/v1/sessions/"+doomed, nil); status != http.StatusOK {
 		t.Fatalf("delete: %d %v", status, body)
 	}
@@ -865,17 +876,19 @@ func TestDeleteSessionRemovesTheFilesItProduced(t *testing.T) {
 		return true
 	}
 
-	if rows(harvested) != 0 {
-		t.Error("the deleted session's harvested file row outlived it")
-	}
-	if hasObject(harvested) {
-		t.Error("the deleted session's harvested file kept its bytes")
+	for _, gone := range []string{harvested, alsoHarvested} {
+		if rows(gone) != 0 {
+			t.Errorf("harvested file %s outlived the session that produced it", gone)
+		}
+		if hasObject(gone) {
+			t.Errorf("harvested file %s lost its row but kept its bytes", gone)
+		}
 	}
 	for _, kept := range []struct {
 		what string
 		id   string
 	}{
-		{"another session's harvested file", bystandersHarvest},
+		{"an archived session's harvested file", bystandersHarvest},
 		{"a plain upload, which the reference leaves alone", uploaded},
 		{"a file scoped to something other than a session", otherScope},
 	} {

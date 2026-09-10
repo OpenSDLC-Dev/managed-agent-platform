@@ -1432,14 +1432,20 @@ func (s *server) deleteSession(r *http.Request) (any, error) {
 	// an upload writes neither scope column and a dream's files carry dream_id
 	// instead. files.scope_id is polymorphic and so carries no foreign key,
 	// which is why this is by hand rather than a cascade — the checkpoint row
-	// above is deleted for the same reason (#266). The ids come back because
-	// the objects they name outlive the rows and are removed after the commit.
+	// above is deleted for the same reason (#266). That "exactly" is an
+	// invariant of the writers and not of the schema, which has neither a CHECK
+	// nor a foreign key to hold it. The ids come back because the objects they
+	// name outlive the rows; how completely those are removed after the commit
+	// is the cleanup's own paragraph below.
 	//
 	// Taking these rows while holding the session is the right way round, and
-	// worth saying because the wrong way round is a deadlock (#313): the only
-	// other transaction that touches them, internal/executor's settleHarvest,
-	// also takes the session row FOR UPDATE before it replaces the snapshot, so
-	// the two serialize on the session rather than closing a cycle over it.
+	// worth saying because the wrong way round is a deadlock (#313). Every
+	// production path that holds both takes the session first — internal/
+	// executor's settleHarvest locks it FOR UPDATE before replacing the
+	// snapshot, and an outcome submission locks its own session before taking a
+	// referenced rubric file FOR SHARE. The paths that touch a file row without
+	// one, DELETE /v1/files/{id} among them, ask for no session lock afterwards,
+	// so no reverse edge exists for this to close a cycle against.
 	deliverables, err := tx.Query(ctx,
 		`DELETE FROM files WHERE scope_type = 'session' AND scope_id = $1 RETURNING id`, id)
 	if err != nil {
@@ -1490,10 +1496,12 @@ func (s *server) deleteSession(r *http.Request) (any, error) {
 	// remove is orphaned for good, which is the trade internal/api/files.go
 	// already takes for a single object and #645 would end for the set.
 	//
-	// Sequential, because one round trip per object is the only shape
-	// blob.Store offers, and bounded by the harvest's own per-session file cap.
+	// Sequential, because one call per object is the only shape blob.Store
+	// offers, and bounded in number by the harvest's own per-session file cap.
 	// A store slow enough to exhaust the budget leaves the tail behind rather
-	// than holding the response open for a set that will not finish.
+	// than holding the response open for a set that will not finish — as far as
+	// the store honors the context it is handed, which the interface asks for
+	// and cannot enforce.
 	if s.blobs != nil {
 		dctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), sessionDeleteCleanupBudget)
 		defer cancel()
