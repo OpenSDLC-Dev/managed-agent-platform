@@ -28,10 +28,23 @@
 -- excludes. The default listing keeps the predicate and is served by this index
 -- instead.
 --
+-- "Index only" is the plan node, not a promise about the heap: an index-only
+-- scan still fetches from it for rows the visibility map does not mark, so the
+-- archive that follows a bulk repin reads some. The sort and the predicate are
+-- what this index removes unconditionally.
+--
 -- Not CONCURRENTLY: migrate.go applies every pending file inside one
 -- transaction, and CREATE INDEX CONCURRENTLY cannot run in a transaction block.
--- The table is small enough at this platform's scale that the ordinary form's
--- write lock is the cheaper trade; the reference caps live deployments at 1,000
--- per organization, a cap this platform deliberately does not enforce.
+-- This form takes ACCESS EXCLUSIVE on deployments for the build. store.Open
+-- migrates at process start, so the process running it is not yet serving —
+-- but on a rolling upgrade the replicas still on the old version are, and their
+-- reads of this table wait. No ceiling on the table's size is claimed here to
+-- argue that away: the reference's published 1,000
+-- cap is on *scheduled* deployments per organization (docs/DIVERGENCES.md, where
+-- it is also recorded as unenforced by this platform), and a manual deployment
+-- carries no schedule, so nothing bounds the live rows this index spans.
+--
+-- 0031's comment on deployments_agent_idx gives the archive check as its
+-- reason. That reason moves here; 0031 is merged and cannot say so itself.
 CREATE INDEX deployments_agent_live_idx
     ON deployments (agent_id, created_at, id) WHERE archived_at IS NULL;
