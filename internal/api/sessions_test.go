@@ -9,7 +9,9 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"reflect"
+	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -901,11 +903,27 @@ func TestDeleteSessionRemovesTheFilesItProduced(t *testing.T) {
 	}
 }
 
-// failingDeleteBlobStore fails every Delete; the rest delegates.
-type failingDeleteBlobStore struct{ blob.Store }
+// failingDeleteBlobStore fails every Delete and records what it was asked for;
+// the rest delegates. The record is what separates "the delete survived a
+// failing store" from "the delete never asked the store anything", which look
+// the same from the response.
+type failingDeleteBlobStore struct {
+	blob.Store
+	mu       sync.Mutex
+	attempts []string
+}
 
-func (f failingDeleteBlobStore) Delete(context.Context, string) error {
+func (f *failingDeleteBlobStore) Delete(_ context.Context, key string) error {
+	f.mu.Lock()
+	f.attempts = append(f.attempts, key)
+	f.mu.Unlock()
 	return errors.New("storage down")
+}
+
+func (f *failingDeleteBlobStore) asked(key string) bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return slices.Contains(f.attempts, key)
 }
 
 // TestDeleteSessionSurvivesCheckpointDeleteFailure: the post-commit object
@@ -924,23 +942,33 @@ func TestDeleteSessionSurvivesCheckpointDeleteFailure(t *testing.T) {
 		t.Fatalf("local.New: %v", err)
 	}
 	pool := newPoolWithKey(t)
-	srv := httptest.NewServer(api.NewHandler(pool, failingDeleteBlobStore{Store: blobtest.Mem()}, cipher, nil))
+	store := &failingDeleteBlobStore{Store: blobtest.Mem()}
+	srv := httptest.NewServer(api.NewHandler(pool, store, cipher, nil))
 	t.Cleanup(srv.Close)
 	s := &tserver{t: t, url: srv.URL, pool: pool}
 
 	agentID, envID := fixture(t, s)
 	sess := createSession(t, s, map[string]any{"agent": agentID, "environment_id": envID})
 	id := sess["id"].(string)
+	fileID := domain.NewID("file").String()
 	if _, err := pool.Exec(context.Background(),
 		`INSERT INTO files (id, filename, mime_type, size_bytes, downloadable, scope_type, scope_id)
 		 VALUES ($1, 'report.md', 'text/markdown', 5, true, 'session', $2)`,
-		domain.NewID("file").String(), id); err != nil {
+		fileID, id); err != nil {
 		t.Fatalf("seed a harvested file: %v", err)
 	}
 
 	status, body := s.do(http.MethodDelete, "/v1/sessions/"+id, nil)
 	if status != http.StatusOK {
 		t.Fatalf("delete with a failing blob store: %d %v", status, body)
+	}
+	// The deliverable's object was actually asked for. Without this the test
+	// cannot tell a cleanup that survived a failing store from one that gave up
+	// after the checkpoint delete failed and never reached the deliverables —
+	// the store fails both keys alike, so the response and the row look
+	// identical either way.
+	if !store.asked(blob.FilesKey(fileID)) {
+		t.Error("the delete never asked the store to remove the harvested file's object")
 	}
 	// The row still went with the session: only the objects are best-effort.
 	var left int
