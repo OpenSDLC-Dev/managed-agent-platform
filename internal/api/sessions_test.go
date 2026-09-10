@@ -895,10 +895,16 @@ func (f failingDeleteBlobStore) Delete(context.Context, string) error {
 	return errors.New("storage down")
 }
 
-// TestDeleteSessionSurvivesCheckpointDeleteFailure: the checkpoint delete is
-// post-commit and best-effort — a failing object store must not change the
-// delete's response, and the row (with its tombstone) is already gone, so the
-// reaper's deleted tier remains the retrying remover.
+// TestDeleteSessionSurvivesCheckpointDeleteFailure: the post-commit object
+// deletes are best-effort — a failing object store must not change the delete's
+// response. The checkpoint's row (with its tombstone) is already gone, so the
+// reaper's deleted tier remains the retrying remover; the harvested
+// deliverables have no such remover and are simply orphaned (#645), which is
+// the outcome this pins rather than a 500.
+//
+// The session harvests a file first, deliberately. Without one the deliverable
+// cleanup is skipped for want of anything to delete and the failing store never
+// reaches it — the test would pass whatever that code did.
 func TestDeleteSessionSurvivesCheckpointDeleteFailure(t *testing.T) {
 	cipher, err := local.New(local.Config{KeyID: "test-1", Key: bytes.Repeat([]byte{7}, 32)})
 	if err != nil {
@@ -912,10 +918,25 @@ func TestDeleteSessionSurvivesCheckpointDeleteFailure(t *testing.T) {
 	agentID, envID := fixture(t, s)
 	sess := createSession(t, s, map[string]any{"agent": agentID, "environment_id": envID})
 	id := sess["id"].(string)
+	if _, err := pool.Exec(context.Background(),
+		`INSERT INTO files (id, filename, mime_type, size_bytes, downloadable, scope_type, scope_id)
+		 VALUES ($1, 'report.md', 'text/markdown', 5, true, 'session', $2)`,
+		domain.NewID("file").String(), id); err != nil {
+		t.Fatalf("seed a harvested file: %v", err)
+	}
 
 	status, body := s.do(http.MethodDelete, "/v1/sessions/"+id, nil)
 	if status != http.StatusOK {
 		t.Fatalf("delete with a failing blob store: %d %v", status, body)
+	}
+	// The row still went with the session: only the objects are best-effort.
+	var left int
+	if err := pool.QueryRow(context.Background(),
+		`SELECT count(*) FROM files WHERE scope_id = $1`, id).Scan(&left); err != nil {
+		t.Fatal(err)
+	}
+	if left != 0 {
+		t.Errorf("a failing object store left %d registry row(s) behind", left)
 	}
 	if body["id"] != id || body["type"] != "session_deleted" {
 		t.Errorf("delete response = %v, want {id: %s, type: session_deleted}", body, id)

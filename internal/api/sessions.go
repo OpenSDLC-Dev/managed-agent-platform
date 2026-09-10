@@ -1371,13 +1371,15 @@ func (s *server) archiveSessionInTx(ctx context.Context, tx pgx.Tx, id string) (
 	return row, nil
 }
 
-// deliverableCleanupBudget bounds the object deletes a session delete does for
-// the files it harvested. Sized for a large snapshot against a healthy store —
-// a delete is one round trip, so hundreds fit — and short enough that a store
-// that has stopped answering costs the caller a slow response rather than a
-// hung one. The rows are already committed when it starts, so running out of it
-// leaves bytes behind and nothing else.
-const deliverableCleanupBudget = 30 * time.Second
+// sessionDeleteCleanupBudget is the whole cost a session delete's post-commit
+// object cleanup may add to the response — the checkpoint archive and the
+// harvested deliverables together, because a caller waits for the sum and not
+// for either half. Sized for a full snapshot against a healthy store, where a
+// delete is one round trip, and short enough that a store which has stopped
+// answering costs the caller a slow response rather than a hung one. The rows
+// are already committed when it starts, so running out of it leaves bytes
+// behind and nothing else.
+const sessionDeleteCleanupBudget = 30 * time.Second
 
 func (s *server) deleteSession(r *http.Request) (any, error) {
 	ctx := r.Context()
@@ -1480,30 +1482,48 @@ func (s *server) deleteSession(r *http.Request) (any, error) {
 	// pass will ever visit again. Detached from the request context: the
 	// commit already happened, and a client hanging up must not skip the one
 	// delete this path exists for.
+	//
+	// The deliverables' bytes follow, in the same window: the two cleanups share
+	// one response, so one ceiling states what that response can cost. Their
+	// best-effort is weaker than the checkpoint's and the difference is worth
+	// naming — no reaper tier knows these keys, so an object this loop does not
+	// remove is orphaned for good, which is the trade internal/api/files.go
+	// already takes for a single object and #645 would end for the set.
+	//
+	// Sequential, because one round trip per object is the only shape
+	// blob.Store offers, and bounded by the harvest's own per-session file cap.
+	// A store slow enough to exhaust the budget leaves the tail behind rather
+	// than holding the response open for a set that will not finish.
 	if s.blobs != nil {
-		dctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+		dctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), sessionDeleteCleanupBudget)
 		defer cancel()
 		if err := s.blobs.Delete(dctx, blob.SessionCheckpointKey(id)); err != nil {
 			slog.WarnContext(ctx, "session checkpoint blob not deleted", "session", id, "error", err)
 		}
-	}
-	// The deliverables' bytes follow their rows, best-effort and post-commit for
-	// the checkpoint's reasons, under a budget of their own because this is a
-	// set: a snapshot can run to hundreds of objects, and one store round trip
-	// each is the only shape blob.Store offers. Overrunning the budget orphans
-	// the tail rather than failing the delete, which is the trade files.go
-	// already takes for a single object; what it must not do is hold the
-	// response open for a set that will not finish.
-	if s.blobs != nil && len(fileIDs) > 0 {
-		dctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), deliverableCleanupBudget)
-		defer cancel()
+		var failed, unattempted int
+		var firstErr error
 		for i, fid := range fileIDs {
 			if dctx.Err() != nil {
-				slog.WarnContext(ctx, "session deliverables orphaned in object storage",
-					"session", id, "orphaned", len(fileIDs)-i, "of", len(fileIDs))
+				unattempted = len(fileIDs) - i
 				break
 			}
-			s.deleteOrphanedFile(dctx, blob.FilesKey(fid))
+			if err := s.blobs.Delete(dctx, blob.FilesKey(fid)); err != nil {
+				failed++
+				if firstErr == nil {
+					firstErr = err
+				}
+			}
+		}
+		// One line for the set, not one per object: a store answering 403 to
+		// every key would otherwise say so two hundred times and never say how
+		// many bytes were left behind.
+		if failed > 0 || unattempted > 0 {
+			slog.WarnContext(ctx, "session deliverables left in object storage",
+				"session", id, "failed", failed, "unattempted", unattempted,
+				"total", len(fileIDs), "error", firstErr)
+		} else if len(fileIDs) > 0 {
+			slog.InfoContext(ctx, "session deliverables deleted",
+				"session", id, "files", len(fileIDs))
 		}
 	}
 	return map[string]string{"id": id, "type": "session_deleted"}, nil
