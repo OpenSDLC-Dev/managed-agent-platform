@@ -16,6 +16,7 @@ import (
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/api"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/blob"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/blob/blobtest"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/secrets/local"
 )
 
@@ -775,6 +776,101 @@ func TestDeleteSessionRemovesCheckpointBlob(t *testing.T) {
 	}
 	if deadKind != "cloud" {
 		t.Errorf("tombstone environment_kind = %q, want cloud", deadKind)
+	}
+}
+
+// TestDeleteSessionRemovesTheFilesItProduced pins the reference's rule for
+// which files a session delete takes with it: "Files you uploaded through the
+// Files API are also unaffected, but files the session itself produced are
+// scoped to it and are permanently deleted along with its filesystem"
+// (platform.claude.com, Session operations → Deleting a session).
+//
+// Session-produced is exactly scope_type='session' here: internal/executor's
+// harvest is the only writer of those rows, a plain upload writes neither scope
+// column, and a dream's files carry dream_id instead — three inserts that do not
+// overlap, and no UPDATE anywhere moves a row between them.
+//
+// All three rows share a filename on purpose. Scoped rows are unique per
+// (scope_id, filename) and a plain upload is free to repeat a name, so a cleanup
+// that keyed on the name rather than the scope would take the wrong rows and
+// this would catch it.
+func TestDeleteSessionRemovesTheFilesItProduced(t *testing.T) {
+	s := newTestServer(t)
+	agentID, envID := fixture(t, s)
+	doomed := createSession(t, s, map[string]any{"agent": agentID, "environment_id": envID})["id"].(string)
+	bystander := createSession(t, s, map[string]any{"agent": agentID, "environment_id": envID})["id"].(string)
+	ctx := context.Background()
+
+	// scope is the session a harvest published under, or "" for a plain upload.
+	// The column lists are the producers': internal/executor/harvest.go writes
+	// the scoped shape, internal/api/files.go the unscoped one.
+	seed := func(scope string) string {
+		t.Helper()
+		id := domain.NewID("file").String()
+		var err error
+		if scope == "" {
+			_, err = s.pool.Exec(ctx,
+				`INSERT INTO files (id, filename, mime_type, size_bytes, downloadable)
+				 VALUES ($1, 'report.md', 'text/markdown', 5, false)`, id)
+		} else {
+			_, err = s.pool.Exec(ctx,
+				`INSERT INTO files (id, filename, mime_type, size_bytes, downloadable, scope_type, scope_id)
+				 VALUES ($1, 'report.md', 'text/markdown', 5, true, 'session', $2)`, id, scope)
+		}
+		if err != nil {
+			t.Fatalf("seed a file row for scope %q: %v", scope, err)
+		}
+		if err := s.blobs.Put(ctx, blob.FilesKey(id), strings.NewReader("bytes"), 5, "text/markdown"); err != nil {
+			t.Fatalf("seed the object for %s: %v", id, err)
+		}
+		return id
+	}
+	harvested, bystandersHarvest, uploaded := seed(doomed), seed(bystander), seed("")
+
+	if status, body := s.do(http.MethodDelete, "/v1/sessions/"+doomed, nil); status != http.StatusOK {
+		t.Fatalf("delete: %d %v", status, body)
+	}
+
+	rows := func(id string) int {
+		t.Helper()
+		var n int
+		if err := s.pool.QueryRow(ctx, `SELECT count(*) FROM files WHERE id = $1`, id).Scan(&n); err != nil {
+			t.Fatalf("count file %s: %v", id, err)
+		}
+		return n
+	}
+	hasObject := func(id string) bool {
+		t.Helper()
+		rc, _, err := s.blobs.Get(ctx, blob.FilesKey(id))
+		if errors.Is(err, blob.ErrNotFound) {
+			return false
+		}
+		if err != nil {
+			t.Fatalf("get object for %s: %v", id, err)
+		}
+		rc.Close()
+		return true
+	}
+
+	if rows(harvested) != 0 {
+		t.Error("the deleted session's harvested file row outlived it")
+	}
+	if hasObject(harvested) {
+		t.Error("the deleted session's harvested file is gone from the registry but its bytes are not")
+	}
+	for _, kept := range []struct {
+		what string
+		id   string
+	}{
+		{"another session's harvested file", bystandersHarvest},
+		{"a plain upload, which the reference leaves alone", uploaded},
+	} {
+		if rows(kept.id) != 1 {
+			t.Errorf("%s was deleted with the session", kept.what)
+		}
+		if !hasObject(kept.id) {
+			t.Errorf("%s kept its row but lost its bytes", kept.what)
+		}
 	}
 }
 
