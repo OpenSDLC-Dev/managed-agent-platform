@@ -301,9 +301,10 @@ func (s *server) listFiles(r *http.Request) (any, error) {
 		// Under scope_id that continuation can be one further request that comes
 		// back empty, the boundary row being resolved unfiltered.
 		//
-		// An empty page carries none — this branch is inside len(files) > 0, no
-		// row is left to anchor on, and the reference's own empty page is
-		// next_page:null. That reads as end-of-list on the one arm where it is
+		// An empty page still sends the key, null: this branch is inside
+		// len(files) > 0, so no value is minted, not that none is sent — the
+		// reference's own empty page is next_page:null too. That reads as
+		// end-of-list on the one arm where it is
 		// not: an empty before_id page sits at the TOP of the list. No cursor
 		// client can act on the difference either way, because
 		// pagination.PageCursor.GetNextPage stops on an empty data array before
