@@ -21,7 +21,7 @@ import (
 // managed-agents resource lists' 100.
 const maxFileListLimit = 1000
 
-// fileJSON is the BetaFileMetadata wire shape (anthropic-sdk-go betafile.go:178-217):
+// fileJSON is the BetaFileMetadata wire shape (anthropic-sdk-go betafile.go:178-218):
 // id/created_at/filename/mime_type/size_bytes all api:"required"; type is the
 // constant "file"; downloadable a plain bool.
 //
@@ -30,10 +30,24 @@ const maxFileListLimit = 1000
 // answer that, but at runtime rather than in the tags — respjson.Field.Raw()
 // reads "null" for a null and "" for an omitted key — so the schema alone
 // cannot decide which of these two we owe. The recorded bytes can, and they
-// split: of the eight file objects in the archive all eight carry expires_at,
-// and only the two with a scope carry scope. Those readings check each other,
-// because the six that omit scope entirely still spell out expires_at: null —
-// so the absence is the reference's and not the recorder's.
+// split: all eight file objects in the archive carry expires_at, and the six
+// without a scope carry no scope key. Those readings check each other, because
+// the six that omit scope still spell out expires_at: null — so the absence is
+// the reference's and not the recorder's.
+//
+// The two halves are not evidenced equally, and the asymmetry is worth keeping
+// in view. The omission is broad: six objects across upload, get and list, on
+// the bare path and ?beta=true alike. The presence is one file read twice on
+// GET /v1/files/{id}, bare path — no recorded list entry and no ?beta=true
+// response ever held a scoped file. We render scope on every surface anyway,
+// because renderFile is the only renderer and the reference gives no reason to
+// think a lane strips it.
+//
+// omitempty is not what enforces "only when it has one" — it omits a nil
+// pointer and nothing else, so a non-nil pointer to a zero-value scope would
+// still marshal (as would omitzero: for a pointer the two behave alike).
+// renderFile's both-non-nil guard is the actual contract; the tag only carries
+// out what it decides.
 //
 // expires_at is null on every file this platform stores. It is the upload time
 // plus expires_in_seconds, and parseFileUpload refuses that parameter (#655),

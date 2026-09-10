@@ -173,7 +173,10 @@ func wantNoFields(t *testing.T, obj map[string]any, keys ...string) {
 	t.Helper()
 	for _, k := range keys {
 		if v, ok := obj[k]; ok {
-			t.Errorf("wire field %q should be omitted, got %v", k, v)
+			// Say "present", not the value: the case this exists to catch is a
+			// present-and-null key, and reporting it as "got <nil>" reads like
+			// the absence the assertion wanted.
+			t.Errorf("wire field %q is present (value %v), want the key omitted entirely", k, v)
 		}
 	}
 }
