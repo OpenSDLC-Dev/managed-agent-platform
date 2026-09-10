@@ -241,40 +241,55 @@ func jsonRPCError(w http.ResponseWriter, id json.RawMessage) {
 		`{"jsonrpc":"2.0","id":%s,"error":{"code":-32000,"message":"policy says no"}}`, id)
 }
 
-// A call-time 403 is classified by what the server sent, exactly as 407 and 500
-// are. That is the whole of what #572 asks for, on the half a dial-time test
+// A call-time 403 is classified by whatever the server sent, exactly as 407 and
+// 500 are. That is the whole of what #572 asks for, on the half a dial-time test
 // cannot reach: before it, the watch marked 403 alongside 401, so [mcp.Conn]
-// asked the refusal question first and this row read ErrUnauthorized. It now
-// falls through to the same question every other status has always been asked.
+// asked the refusal question first and a 403 here read ErrUnauthorized whatever
+// the body held. It now falls through to the same question every other status
+// has always been asked.
 //
-// The three run as one table because the claim is that they are one class. The
+// What is asserted is that the three agree, not which answer they agree on. The
 // 2026-09-03 recording put 403 with 407, 500 and 502 rather than with 401, so a
-// row disagreeing with its neighbours would be 403 singled out again, in the
-// other direction.
+// status disagreeing with its neighbours would be 403 singled out again, in the
+// other direction — and that is a claim this package can make. Whether the
+// answer they share is the right one is #641's question, not this test's: a
+// non-2xx carrying a JSON-RPC error body reads as [ErrServerAnswered] for every
+// one of them, which reached 500 and 502 long before #572 reached 403.
+//
+// The body matters and is therefore supplied: go-sdk v1.7.0 decodes a JSON-RPC
+// error out of any non-2xx (streamable.go, checkResponse), so the shape the
+// server sends is what decides the answer. A bare status takes the other route.
 func TestACallTimeForbiddenIsClassifiedLikeEveryOtherNonAuthStatus(t *testing.T) {
+	type verdict struct{ unauthorized, serverAnswered bool }
+	got := map[int]verdict{}
 	for _, status := range []int{
 		http.StatusForbidden, http.StatusProxyAuthRequired, http.StatusInternalServerError,
 	} {
-		t.Run(http.StatusText(status), func(t *testing.T) {
-			conn, err := mcp.Connect(context.Background(), mcp.Config{
-				URL: serveThenFailingWith(t,
-					map[string]int{"tools/call": status}, jsonRPCError),
-				HTTPClient: &http.Client{}, BearerToken: "tok"})
-			if err != nil {
-				t.Fatalf("the handshake was expected to succeed: %v", err)
-			}
-			defer conn.Close()
-			_, err = conn.CallTool(context.Background(), "echo", nil)
-			if err == nil {
-				t.Fatal("expected the refused call to fail")
-			}
-			if errors.Is(err, mcp.ErrUnauthorized) {
-				t.Errorf("a %d on the call was marked a refused credential: %v", status, err)
-			}
-			if !errors.Is(err, mcp.ErrServerAnswered) {
-				t.Errorf("a %d carrying a JSON-RPC error = %v, want ErrServerAnswered", status, err)
-			}
-		})
+		conn, err := mcp.Connect(context.Background(), mcp.Config{
+			URL: serveThenFailingWith(t,
+				map[string]int{"tools/call": status}, jsonRPCError),
+			HTTPClient: &http.Client{}, BearerToken: "tok"})
+		if err != nil {
+			t.Fatalf("%d: the handshake was expected to succeed: %v", status, err)
+		}
+		_, err = conn.CallTool(context.Background(), "echo", nil)
+		conn.Close()
+		if err == nil {
+			t.Fatalf("%d: expected the refused call to fail", status)
+		}
+		if errors.Is(err, mcp.ErrUnauthorized) {
+			t.Errorf("a %d on the call was marked a refused credential: %v", status, err)
+		}
+		got[status] = verdict{
+			unauthorized:   errors.Is(err, mcp.ErrUnauthorized),
+			serverAnswered: errors.Is(err, mcp.ErrServerAnswered),
+		}
+	}
+	for _, status := range []int{http.StatusProxyAuthRequired, http.StatusInternalServerError} {
+		if got[status] != got[http.StatusForbidden] {
+			t.Errorf("403 classified %+v but %d classified %+v; #572 is that they are one class",
+				got[http.StatusForbidden], status, got[status])
+		}
 	}
 }
 

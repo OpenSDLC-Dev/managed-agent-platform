@@ -224,6 +224,12 @@ func TestMCPCallToAnUnreachableServerStaysAConnectionFailure(t *testing.T) {
 // exactly four keys — no http_status, so a client cannot recover the origin's
 // status — and retry_status "retrying", which the reference sends even on the
 // authentication arm.
+//
+// The gateway refuses everything, so this is the dial arm (mcp.Connect's error),
+// which is the arm the recording covers: its probe varied the status on servers
+// that answered it to every request. A 403 on the call itself lands in the
+// call-time arm instead, where internal/mcp pins that it classifies as 407 and
+// 500 do; whether the answer all three share is the right one is #641.
 func TestMCPCallRefusedWith403StaysAConnectionFailure(t *testing.T) {
 	h := mcpHarness(t)
 	forbidden := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -236,21 +242,30 @@ func TestMCPCallRefusedWith403StaysAConnectionFailure(t *testing.T) {
 
 	h.stepOnce(t)
 
-	errs := h.sessionErrors(t)
-	if len(errs) != 1 {
-		t.Fatalf("got %d session errors, want 1", len(errs))
+	if got := mcpErrorType(t, h); got != "mcp_connection_failed_error" {
+		t.Errorf("session error type = %q, want mcp_connection_failed_error", got)
+	}
+	// The turn still continues, which is what the changelog entry promises: the
+	// model is answered whichever of the two errors the operator is told about.
+	if results := h.mcpResults(t); len(results) != 1 {
+		t.Fatalf("got %d results, want the call answered so the turn can carry on", len(results))
 	}
 	var body struct {
 		Error map[string]any `json:"error"`
 	}
-	if err := json.Unmarshal(errs[0].Body, &body); err != nil {
+	if err := json.Unmarshal(h.sessionErrors(t)[0].Body, &body); err != nil {
 		t.Fatal(err)
-	}
-	if body.Error["type"] != "mcp_connection_failed_error" {
-		t.Errorf("type = %v, want mcp_connection_failed_error", body.Error["type"])
 	}
 	if body.Error["mcp_server_name"] != "docs" {
 		t.Errorf("mcp_server_name = %v, want docs", body.Error["mcp_server_name"])
+	}
+	// Only the type is matched to the reference, never the wording: ours names
+	// the exchange that failed ("calling \"initialize\"") where the reference
+	// says "access forbidden". Registered as a divergence rather than left to be
+	// read off the recording, since the type and the message arrive together.
+	msg, _ := body.Error["message"].(string)
+	if !strings.Contains(msg, `initialize`) || strings.Contains(msg, "access forbidden") {
+		t.Errorf("message = %q, want this platform's own prose naming the exchange", msg)
 	}
 	if retry, _ := body.Error["retry_status"].(map[string]any); retry["type"] != "retrying" {
 		t.Errorf("retry_status = %v, want {type: retrying}", body.Error["retry_status"])

@@ -591,6 +591,15 @@ func failedDial(ctx context.Context, row catalogRow, err error) catalogRow {
 	// whatever it fails with next (internal/mcp, authstatus.go), so an error can
 	// carry a refusal and a cancellation at once — and a refusal is a verdict
 	// the server earned however the pass then ended.
+	//
+	// 401 is the whole of that carve-out, and the cost of it is worth stating
+	// because nothing else records it: a 403 answered just before the deadline
+	// takes the clock branch, which sets notReached, which announceable()
+	// excludes — so the session is told nothing at all about a server that
+	// actively refused it. That is not 403's own treatment but every connection
+	// failure's; a 500 or a 502 in the same position has always landed here.
+	// Widening the carve-out to keep 403 would privilege it over those two with
+	// no wire basis, the recording having put all three in one class (#572).
 	if !mcpAuthFailure(err) && ctx.Err() != nil &&
 		(errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled)) {
 		row.reason, row.notReached = passRanOutOfTime, true
