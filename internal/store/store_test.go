@@ -34,7 +34,7 @@ const (
 
 // wantMigrations tracks the number of embedded migration files; bump it when
 // a migration is added.
-const wantMigrations = 34
+const wantMigrations = 35
 
 func open(t *testing.T, dsn string) *pgxpool.Pool {
 	t.Helper()
@@ -496,6 +496,80 @@ func TestEnvironmentKeysEnvironmentIndexExists(t *testing.T) {
 	}
 	if oneLive {
 		t.Errorf("environment_keys_one_live survived 0021; per-host keys cannot exist under it")
+	}
+}
+
+// TestDeploymentsAgentLiveIndexExists: the agent-archive refusal reads
+// `agent_id = $1 AND archived_at IS NULL ORDER BY created_at, id`, and 0035
+// exists so that one index carries the seek, the predicate and the ordering
+// together (#523). Read out of the catalog rather than pattern-matched, for the
+// reason the environment_keys pin above argues at length; the clauses here name
+// the ways an index could carry this name and still leave the sort in place:
+//
+//   - `indpred IS NOT NULL` and the predicate itself — a non-partial index over
+//     the same three columns serves the query, but every archived deployment of
+//     the agent is then in it, which is the history this one exists to skip. A
+//     different predicate is the subtler miss: `WHERE archived_at IS NOT NULL`
+//     is the exact complement and covers none of the rows read here.
+//   - `indnkeyatts = 3` with the three resolved **in order** — agent_id must
+//     lead or there is no seek, and created_at then id must follow it or the
+//     sort survives, which is the whole finding. INCLUDE payload is excluded by
+//     `indnatts = indnkeyatts`: a trailing column stored but not sorted on
+//     cannot serve an ORDER BY.
+//   - `indisvalid AND indisready` — a half-built index wears the right name and
+//     the planner will not use it.
+//   - `am = btree` — ordering is half the job here, and a hash index cannot
+//     serve any of it. (The environment_keys pin accepts one on purpose; it
+//     exists for equality seeks alone.)
+//   - the three `indoption` entries equal — direction, which is where the
+//     "reads a btree backwards" reasoning stops holding. It holds for an index
+//     reversed *uniformly*: the planner walks it backwards and the order comes
+//     out right. A mixed one does not. `(agent_id, created_at DESC, id)` passes
+//     every other clause on this list, and the planner then emits an Incremental
+//     Sort — `created_at` presorted on the backward scan, `id` re-sorted within
+//     its ties. That is the sort surviving, which is the whole finding, under an
+//     index carrying the right name and columns.
+//
+// Not asserted: which direction, only that they agree.
+func TestDeploymentsAgentLiveIndexExists(t *testing.T) {
+	pool := open(t, pgtest.FreshDB(t))
+	var exists bool
+	if err := pool.QueryRow(context.Background(),
+		`SELECT EXISTS (
+		   SELECT 1 FROM pg_index i
+		     JOIN pg_class c ON c.oid = i.indexrelid
+		    WHERE i.indrelid = to_regclass('deployments')
+		      AND c.relname = 'deployments_agent_live_idx'
+		      AND c.relam = (SELECT oid FROM pg_am WHERE amname = 'btree')
+		      AND i.indisvalid AND i.indisready
+		      AND i.indnatts = 3 AND i.indnkeyatts = 3
+		      AND i.indoption[0] = i.indoption[1]
+		      AND i.indoption[1] = i.indoption[2]
+		      AND pg_get_expr(i.indpred, i.indrelid) = '(archived_at IS NULL)'
+		      AND i.indkey[0] = (SELECT a.attnum FROM pg_attribute a
+		                          WHERE a.attrelid = i.indrelid AND a.attname = 'agent_id')
+		      AND i.indkey[1] = (SELECT a.attnum FROM pg_attribute a
+		                          WHERE a.attrelid = i.indrelid AND a.attname = 'created_at')
+		      AND i.indkey[2] = (SELECT a.attnum FROM pg_attribute a
+		                          WHERE a.attrelid = i.indrelid AND a.attname = 'id'))`).Scan(&exists); err != nil {
+		t.Fatalf("query pg_index: %v", err)
+	}
+	if !exists {
+		t.Errorf("no valid deployments_agent_live_idx on deployments (agent_id, created_at, id) WHERE archived_at IS NULL")
+	}
+	// 0031's plain index stays, for the one caller the partial index cannot
+	// serve: GET /v1/deployments?agent_id=&include_archived=true drops the
+	// archived_at predicate, and a partial index cannot answer a query over the
+	// rows it excludes. The default listing keeps the predicate and is served by
+	// the index above.
+	var plain bool
+	if err := pool.QueryRow(context.Background(),
+		`SELECT EXISTS (SELECT 1 FROM pg_indexes
+		    WHERE tablename = 'deployments' AND indexname = 'deployments_agent_idx')`).Scan(&plain); err != nil {
+		t.Fatalf("query pg_indexes: %v", err)
+	}
+	if !plain {
+		t.Errorf("deployments_agent_idx is gone; the unfiltered agent_id listing has no index")
 	}
 }
 

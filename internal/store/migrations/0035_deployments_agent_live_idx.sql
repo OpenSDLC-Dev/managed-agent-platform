@@ -1,0 +1,37 @@
+-- The agent-archive refusal's own index (#523). Archiving an agent is refused
+-- while a live deployment pins it (plan 37 decision 7), and naming the blockers
+-- runs, inside archiveAgent's transaction:
+--
+--   SELECT id, count(*) OVER () FROM deployments
+--    WHERE agent_id = $1 AND archived_at IS NULL
+--    ORDER BY created_at, id LIMIT 5
+--
+-- 0031's deployments_agent_idx is on agent_id alone, so that read sorted its
+-- matches and returned to the heap to test archived_at. Where an agent's
+-- deployments are a small share of the table — the case worth planning for —
+-- that measures as Limit -> Sort -> WindowAgg -> Bitmap Heap Scan; where one
+-- agent owns much of it, the planner walks deployments_created_idx instead and
+-- filters, which loses the sort but reads the table. Carrying the ordering
+-- columns and the predicate here makes it Limit -> WindowAgg -> Index Only Scan,
+-- and it is preferred over both.
+--
+-- What this does not change is the order of growth. count(*) OVER () reads every
+-- matching row whatever index serves it, so the LIMIT still bounds the output
+-- and not the work, and archiveAgent holds FOR UPDATE on the agent row while it
+-- runs, so deployment creates and repins of that agent queue behind it. The
+-- work is O(live deployments pinning one agent) before and after; this is the
+-- constant.
+--
+-- deployments_agent_idx is deliberately kept, for the one caller this index
+-- cannot serve: GET /v1/deployments?agent_id=&include_archived=true drops the
+-- archived_at predicate, and a partial index cannot answer a query over rows it
+-- excludes. The default listing keeps the predicate and is served by this index
+-- instead.
+--
+-- Not CONCURRENTLY: migrate.go applies every pending file inside one
+-- transaction, and CREATE INDEX CONCURRENTLY cannot run in a transaction block.
+-- The table is small enough at this platform's scale that the ordinary form's
+-- write lock is the cheaper trade; the reference caps live deployments at 1,000
+-- per organization, a cap this platform deliberately does not enforce.
+CREATE INDEX deployments_agent_live_idx
+    ON deployments (agent_id, created_at, id) WHERE archived_at IS NULL;

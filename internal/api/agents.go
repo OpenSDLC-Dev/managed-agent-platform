@@ -640,10 +640,12 @@ func (s *server) listAgentVersions(r *http.Request) (any, error) {
 // blocking on one would build a dead end of its own — an agent no operator
 // could ever archive, because nothing clears the deployment.
 //
-// The LIMIT bounds the output and not the work: the count reads every live
-// deployment of the agent, and the plain agent_id index serves neither the
-// ordering nor the archived_at predicate (#523, deliberately left for a
-// migration that is being written anyway).
+// The LIMIT bounds the output and not the work: count(*) OVER () reads every
+// live deployment of the agent whatever index serves it. What an index can take
+// off is the rest, and deployments_agent_live_idx (0035) does — the seek, the
+// archived_at predicate and this ORDER BY in one partial index, which makes the
+// read index-only and drops the sort 0031's agent_id-alone index left in it
+// (#523).
 //
 // Runs inside archiveAgent's transaction, which already holds FOR UPDATE on the
 // agent row. The querier parameter would take the pool just as happily, and
