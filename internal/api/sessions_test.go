@@ -9,13 +9,16 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"reflect"
+	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/api"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/blob"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/blob/blobtest"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/secrets/local"
 )
 
@@ -778,34 +781,203 @@ func TestDeleteSessionRemovesCheckpointBlob(t *testing.T) {
 	}
 }
 
-// failingDeleteBlobStore fails every Delete; the rest delegates.
-type failingDeleteBlobStore struct{ blob.Store }
+// TestDeleteSessionRemovesTheFilesItProduced pins the reference's rule for
+// which files a session delete takes with it: "Files you uploaded through the
+// Files API are also unaffected, but files the session itself produced are
+// scoped to it and are permanently deleted along with its filesystem"
+// (platform.claude.com, Session operations → Deleting a session).
+//
+// Session-produced is exactly scope_type='session' here: internal/executor's
+// harvest is the only writer of those rows, a plain upload writes neither scope
+// column, and a dream's files carry dream_id instead — three inserts that do not
+// overlap, and no production UPDATE moves a row between them.
+//
+// The rows that can share a filename do, on purpose. Scoped rows are unique per
+// (scope_id, filename) and a plain upload is free to repeat a name, so a cleanup
+// that keyed on the name rather than the scope would take the wrong rows and
+// this would catch it.
+//
+// The fourth row is one nothing writes: a non-session scope carrying this
+// session's id. It is here because `scope_type` is otherwise an unpinned clause
+// — dropping it from the delete changes no behavior today, since no writer pairs
+// a scope_id with another type, so nothing would fail. It is deliberately not a
+// prediction of docs/plan/42's workspace-scoped upload path, which would put
+// workspace ids in that column rather than session ids; it is the minimal row
+// that makes the clause load-bearing, and the reason to keep the clause is that
+// the schema holds this invariant with neither a CHECK nor a foreign key.
+func TestDeleteSessionRemovesTheFilesItProduced(t *testing.T) {
+	s := newTestServer(t)
+	agentID, envID := fixture(t, s)
+	doomed := createSession(t, s, map[string]any{"agent": agentID, "environment_id": envID})["id"].(string)
+	bystander := createSession(t, s, map[string]any{"agent": agentID, "environment_id": envID})["id"].(string)
+	ctx := context.Background()
 
-func (f failingDeleteBlobStore) Delete(context.Context, string) error {
+	// The column lists are the producers': internal/executor/harvest.go writes
+	// the scoped shape, internal/api/files.go the unscoped one. scopeType "" is
+	// a plain upload, which writes neither scope column.
+	seed := func(name, scopeType, scopeID string) string {
+		t.Helper()
+		id := domain.NewID("file").String()
+		var err error
+		if scopeType == "" {
+			_, err = s.pool.Exec(ctx,
+				`INSERT INTO files (id, filename, mime_type, size_bytes, downloadable)
+				 VALUES ($1, $2, 'text/markdown', 5, false)`, id, name)
+		} else {
+			_, err = s.pool.Exec(ctx,
+				`INSERT INTO files (id, filename, mime_type, size_bytes, downloadable, scope_type, scope_id)
+				 VALUES ($1, $2, 'text/markdown', 5, true, $3, $4)`, id, name, scopeType, scopeID)
+		}
+		if err != nil {
+			t.Fatalf("seed a %q file row: %v", scopeType, err)
+		}
+		if err := s.blobs.Put(ctx, blob.FilesKey(id), strings.NewReader("bytes"), 5, "text/markdown"); err != nil {
+			t.Fatalf("seed the object for %s: %v", id, err)
+		}
+		return id
+	}
+	// Two for the doomed session, so a cleanup that stops after the first row
+	// fails rather than passing on a set of one.
+	harvested := seed("report.md", "session", doomed)
+	alsoHarvested := seed("summary.md", "session", doomed)
+	bystandersHarvest := seed("report.md", "session", bystander)
+	uploaded := seed("report.md", "", "")
+	// A distinct name only because (scope_id, filename) is unique among scoped
+	// rows and this one shares the doomed session's scope_id by design.
+	otherScope := seed("notes.md", "workspace", doomed)
+
+	// Archiving first, on the session that survives: the reference archives "while
+	// preserving its history", so this is the half of the split that must not
+	// delete anything. It runs before the delete so a cleanup wired to the wrong
+	// verb has already done its damage by the time the survivor is checked.
+	if status, body := s.do(http.MethodPost, "/v1/sessions/"+bystander+"/archive", nil); status != http.StatusOK {
+		t.Fatalf("archive: %d %v", status, body)
+	}
+	if status, body := s.do(http.MethodDelete, "/v1/sessions/"+doomed, nil); status != http.StatusOK {
+		t.Fatalf("delete: %d %v", status, body)
+	}
+
+	rows := func(id string) int {
+		t.Helper()
+		var n int
+		if err := s.pool.QueryRow(ctx, `SELECT count(*) FROM files WHERE id = $1`, id).Scan(&n); err != nil {
+			t.Fatalf("count file %s: %v", id, err)
+		}
+		return n
+	}
+	hasObject := func(id string) bool {
+		t.Helper()
+		rc, _, err := s.blobs.Get(ctx, blob.FilesKey(id))
+		if errors.Is(err, blob.ErrNotFound) {
+			return false
+		}
+		if err != nil {
+			t.Fatalf("get object for %s: %v", id, err)
+		}
+		rc.Close()
+		return true
+	}
+
+	for _, gone := range []string{harvested, alsoHarvested} {
+		if rows(gone) != 0 {
+			t.Errorf("harvested file %s outlived the session that produced it", gone)
+		}
+		if hasObject(gone) {
+			t.Errorf("harvested file %s lost its row but kept its bytes", gone)
+		}
+	}
+	for _, kept := range []struct {
+		what string
+		id   string
+	}{
+		{"an archived session's harvested file", bystandersHarvest},
+		{"a plain upload, which the reference leaves alone", uploaded},
+		{"a file scoped to something other than a session", otherScope},
+	} {
+		if rows(kept.id) != 1 {
+			t.Errorf("%s was deleted with the session", kept.what)
+		}
+		if !hasObject(kept.id) {
+			t.Errorf("%s kept its row but lost its bytes", kept.what)
+		}
+	}
+}
+
+// failingDeleteBlobStore fails every Delete and records what it was asked for;
+// the rest delegates. The record is what separates "the delete survived a
+// failing store" from "the delete never asked the store anything", which look
+// the same from the response.
+type failingDeleteBlobStore struct {
+	blob.Store
+	mu       sync.Mutex
+	attempts []string
+}
+
+func (f *failingDeleteBlobStore) Delete(_ context.Context, key string) error {
+	f.mu.Lock()
+	f.attempts = append(f.attempts, key)
+	f.mu.Unlock()
 	return errors.New("storage down")
 }
 
-// TestDeleteSessionSurvivesCheckpointDeleteFailure: the checkpoint delete is
-// post-commit and best-effort — a failing object store must not change the
-// delete's response, and the row (with its tombstone) is already gone, so the
-// reaper's deleted tier remains the retrying remover.
+func (f *failingDeleteBlobStore) asked(key string) bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return slices.Contains(f.attempts, key)
+}
+
+// TestDeleteSessionSurvivesCheckpointDeleteFailure: the post-commit object
+// deletes are best-effort — a failing object store must not change the delete's
+// response. The checkpoint's row (with its tombstone) is already gone, so the
+// reaper's deleted tier remains the retrying remover; the harvested
+// deliverables have no such remover and are simply orphaned (#645), which is
+// the outcome this pins rather than a 500.
+//
+// The session harvests a file first, deliberately. Without one the deliverable
+// cleanup is skipped for want of anything to delete and the failing store never
+// reaches it — the test would pass whatever that code did.
 func TestDeleteSessionSurvivesCheckpointDeleteFailure(t *testing.T) {
 	cipher, err := local.New(local.Config{KeyID: "test-1", Key: bytes.Repeat([]byte{7}, 32)})
 	if err != nil {
 		t.Fatalf("local.New: %v", err)
 	}
 	pool := newPoolWithKey(t)
-	srv := httptest.NewServer(api.NewHandler(pool, failingDeleteBlobStore{Store: blobtest.Mem()}, cipher, nil))
+	store := &failingDeleteBlobStore{Store: blobtest.Mem()}
+	srv := httptest.NewServer(api.NewHandler(pool, store, cipher, nil))
 	t.Cleanup(srv.Close)
 	s := &tserver{t: t, url: srv.URL, pool: pool}
 
 	agentID, envID := fixture(t, s)
 	sess := createSession(t, s, map[string]any{"agent": agentID, "environment_id": envID})
 	id := sess["id"].(string)
+	fileID := domain.NewID("file").String()
+	if _, err := pool.Exec(context.Background(),
+		`INSERT INTO files (id, filename, mime_type, size_bytes, downloadable, scope_type, scope_id)
+		 VALUES ($1, 'report.md', 'text/markdown', 5, true, 'session', $2)`,
+		fileID, id); err != nil {
+		t.Fatalf("seed a harvested file: %v", err)
+	}
 
 	status, body := s.do(http.MethodDelete, "/v1/sessions/"+id, nil)
 	if status != http.StatusOK {
 		t.Fatalf("delete with a failing blob store: %d %v", status, body)
+	}
+	// The deliverable's object was actually asked for. Without this the test
+	// cannot tell a cleanup that survived a failing store from one that gave up
+	// after the checkpoint delete failed and never reached the deliverables —
+	// the store fails both keys alike, so the response and the row look
+	// identical either way.
+	if !store.asked(blob.FilesKey(fileID)) {
+		t.Error("the delete never asked the store to remove the harvested file's object")
+	}
+	// The row still went with the session: only the objects are best-effort.
+	var left int
+	if err := pool.QueryRow(context.Background(),
+		`SELECT count(*) FROM files WHERE scope_id = $1`, id).Scan(&left); err != nil {
+		t.Fatal(err)
+	}
+	if left != 0 {
+		t.Errorf("a failing object store left %d registry row(s) behind", left)
 	}
 	if body["id"] != id || body["type"] != "session_deleted" {
 		t.Errorf("delete response = %v, want {id: %s, type: session_deleted}", body, id)

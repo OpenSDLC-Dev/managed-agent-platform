@@ -1371,6 +1371,16 @@ func (s *server) archiveSessionInTx(ctx context.Context, tx pgx.Tx, id string) (
 	return row, nil
 }
 
+// sessionDeleteCleanupBudget is the whole cost a session delete's post-commit
+// object cleanup may add to the response — the checkpoint archive and the
+// harvested deliverables together, because a caller waits for the sum and not
+// for either half. Sized for a full snapshot against a healthy store, where a
+// delete is one round trip, and short enough that a store which has stopped
+// answering costs the caller a slow response rather than a hung one. The rows
+// are already committed when it starts, so running out of it leaves bytes
+// behind and nothing else.
+const sessionDeleteCleanupBudget = 30 * time.Second
+
 func (s *server) deleteSession(r *http.Request) (any, error) {
 	ctx := r.Context()
 	id := normalizeSessionID(r.PathValue("id"))
@@ -1413,6 +1423,38 @@ func (s *server) deleteSession(r *http.Request) (any, error) {
 	if _, err := tx.Exec(ctx, `DELETE FROM session_checkpoints WHERE session_id = $1`, id); err != nil {
 		return nil, err
 	}
+	// The deliverables the session produced go with it, and files uploaded
+	// through the files API do not — the reference's own split: "Files you
+	// uploaded through the Files API are also unaffected, but files the session
+	// itself produced are scoped to it and are permanently deleted along with
+	// its filesystem." Session-produced is exactly scope_type='session' here,
+	// because internal/executor's harvest is the only writer of those rows,
+	// an upload writes neither scope column and a dream's files carry dream_id
+	// instead. files.scope_id is polymorphic and so carries no foreign key,
+	// which is why this is by hand rather than a cascade — the checkpoint row
+	// above is deleted for the same reason (#266). That "exactly" is an
+	// invariant of the writers and not of the schema, which has neither a CHECK
+	// nor a foreign key to hold it. The ids come back because the objects they
+	// name outlive the rows; how completely those are removed after the commit
+	// is the cleanup's own paragraph below.
+	//
+	// Taking these rows while holding the session is the right way round, and
+	// worth saying because the wrong way round is a deadlock (#313). Every
+	// production path that holds both takes the session first — internal/
+	// executor's settleHarvest locks it FOR UPDATE before replacing the
+	// snapshot, and an outcome submission locks its own session before taking a
+	// referenced rubric file FOR SHARE. The paths that touch a file row without
+	// one, DELETE /v1/files/{id} among them, ask for no session lock afterwards,
+	// so no reverse edge exists for this to close a cycle against.
+	deliverables, err := tx.Query(ctx,
+		`DELETE FROM files WHERE scope_type = 'session' AND scope_id = $1 RETURNING id`, id)
+	if err != nil {
+		return nil, err
+	}
+	fileIDs, err := pgx.CollectRows(deliverables, pgx.RowTo[string])
+	if err != nil {
+		return nil, err
+	}
 	if err := tx.Commit(ctx); err != nil {
 		return nil, err
 	}
@@ -1446,11 +1488,50 @@ func (s *server) deleteSession(r *http.Request) (any, error) {
 	// pass will ever visit again. Detached from the request context: the
 	// commit already happened, and a client hanging up must not skip the one
 	// delete this path exists for.
+	//
+	// The deliverables' bytes follow, in the same window: the two cleanups share
+	// one response, so one ceiling states what that response can cost. Their
+	// best-effort is weaker than the checkpoint's and the difference is worth
+	// naming — no reaper tier knows these keys, so an object this loop does not
+	// remove is orphaned for good, which is the trade internal/api/files.go
+	// already takes for a single object and #645 would end for the set.
+	//
+	// Sequential, because one call per object is the only shape blob.Store
+	// offers, and bounded in number by the harvest's own per-session file cap.
+	// A store slow enough to exhaust the budget leaves the tail behind rather
+	// than holding the response open for a set that will not finish — as far as
+	// the store honors the context it is handed, which the interface asks for
+	// and cannot enforce.
 	if s.blobs != nil {
-		dctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+		dctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), sessionDeleteCleanupBudget)
 		defer cancel()
 		if err := s.blobs.Delete(dctx, blob.SessionCheckpointKey(id)); err != nil {
 			slog.WarnContext(ctx, "session checkpoint blob not deleted", "session", id, "error", err)
+		}
+		var failed, unattempted int
+		var firstErr error
+		for i, fid := range fileIDs {
+			if dctx.Err() != nil {
+				unattempted = len(fileIDs) - i
+				break
+			}
+			if err := s.blobs.Delete(dctx, blob.FilesKey(fid)); err != nil {
+				failed++
+				if firstErr == nil {
+					firstErr = err
+				}
+			}
+		}
+		// One line for the set, not one per object: a store answering 403 to
+		// every key would otherwise say so two hundred times and never say how
+		// many bytes were left behind.
+		if failed > 0 || unattempted > 0 {
+			slog.WarnContext(ctx, "session deliverables left in object storage",
+				"session", id, "failed", failed, "unattempted", unattempted,
+				"total", len(fileIDs), "error", firstErr)
+		} else if len(fileIDs) > 0 {
+			slog.InfoContext(ctx, "session deliverables deleted",
+				"session", id, "files", len(fileIDs))
 		}
 	}
 	return map[string]string{"id": id, "type": "session_deleted"}, nil
