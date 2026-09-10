@@ -321,15 +321,31 @@ type biPageJSON struct {
 	PrevPage *string `json:"prev_page"`
 }
 
-// filePageJSON is the classic Files API list envelope — {data, has_more,
-// first_id, last_id} (anthropic-sdk-go packages/pagination Page[T]). The Files
-// API predates the managed-agents next_page cursor convention and paginates by
-// bare object id (after_id / before_id) instead of an opaque keyset cursor, so
-// it gets its own envelope alongside pageJSON. first_id/last_id are the first
-// and last ids of the returned page (nullable — null on an empty page).
+// filePageJSON is the Files API list envelope — {data, next_page, has_more,
+// first_id, last_id}, in that order. It is the one list that carries both
+// pagination dialects at once, which is why it exists alongside pageJSON: the
+// classic Files API's bare-object-id paging (after_id/before_id, answered by
+// has_more/first_id/last_id) and the managed-agents keyset cursor the GA shape
+// moved this route to (?page=, answered by next_page). Carrying both is the
+// reference's own documented arrangement, not a leftover: under
+// managed-agents-2026-04-01 it keeps after_id/before_id "still accepted (not
+// combinable with page or ids[])" and puts has_more/first_id/last_id
+// "alongside next_page". Its plain shape is {data, next_page} — which is all
+// its typed schema has read since anthropic-sdk-go v1.68.0 moved
+// Beta.Files.List from pagination.Page[T] to pagination.PageCursor[T] — and
+// the docs say later Managed Agents beta versions receive that plain shape, so
+// the three classic keys have an end date rather than a permanent home here.
+// first_id/last_id are the first and last ids of the returned page and
+// next_page the position after it, all three null when there is none.
+//
+// Recorded verbatim, four times, on an endpoint already past that GA migration:
+// {"data":[],"next_page":null,"has_more":false,"first_id":null,"last_id":null}
+// (managed-agents-wire-recordings 2026-09-02/batch2.json idx 386 and 391,
+// 2026-09-03/batch2.json idx 266 and 276; #544).
 type filePageJSON struct {
-	Data    []any   `json:"data"`
-	HasMore bool    `json:"has_more"`
-	FirstID *string `json:"first_id"`
-	LastID  *string `json:"last_id"`
+	Data     []any   `json:"data"`
+	NextPage *string `json:"next_page"`
+	HasMore  bool    `json:"has_more"`
+	FirstID  *string `json:"first_id"`
+	LastID   *string `json:"last_id"`
 }

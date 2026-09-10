@@ -8,7 +8,6 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
-	"net/url"
 	"strconv"
 	"time"
 
@@ -175,9 +174,23 @@ func (s *server) listFiles(r *http.Request) (any, error) {
 	if afterID != "" && beforeID != "" {
 		return nil, errInvalid("after_id and before_id are mutually exclusive")
 	}
-	limit, err := parseFileLimit(q)
+	// The shared parser reads ?page= and ?limit= together, so this list inherits
+	// the keyset cursor's guards — the grammar check and #135's unstorable-id
+	// reject — rather than growing a second spelling of them. Its limit bounds
+	// are this route's own (1–1000, default 20), not the resource lists' 100.
+	page, err := parsePageWith(q, defaultLimit, maxFileListLimit)
 	if err != nil {
 		return nil, err
+	}
+	limit := page.limit
+	if page.cur != nil {
+		if afterID != "" || beforeID != "" {
+			return nil, errInvalid("page and after_id/before_id are mutually exclusive")
+		}
+		// Unidirectional list: only forward time cursors are valid here (#534).
+		if page.cur.foreignToTime() || page.cur.dir != dirNext {
+			return nil, errInvalid("invalid page cursor")
+		}
 	}
 	scopeID := q.Get("scope_id")
 	// A query-parameter value binds straight into Postgres; an unstorable byte
@@ -188,8 +201,9 @@ func (s *server) listFiles(r *http.Request) (any, error) {
 	}
 
 	// Resolve the after_id/before_id cursor to its (created_at, id) keyset
-	// position. An unknown cursor id yields an empty page — the reference's
-	// behavior here is unrecorded (docs/DIVERGENCES.md).
+	// position — the position a ?page= cursor already carries, which is why that
+	// lane needs no lookup and cannot 404. An unknown cursor id yields an empty
+	// page — the reference's behavior here is unrecorded (docs/DIVERGENCES.md).
 	cursorID := afterID
 	if beforeID != "" {
 		cursorID = beforeID
@@ -197,7 +211,9 @@ func (s *server) listFiles(r *http.Request) (any, error) {
 	var curCreatedAt time.Time
 	var curID string
 	haveCursor := false
-	if cursorID != "" {
+	if page.cur != nil {
+		curCreatedAt, curID, haveCursor = page.cur.t, page.cur.id, true
+	} else if cursorID != "" {
 		if !storableText(cursorID) {
 			return nil, errInvalid("invalid page cursor")
 		}
@@ -274,6 +290,37 @@ func (s *server) listFiles(r *http.Request) (any, error) {
 	if len(files) > 0 {
 		first, last := files[0].ID, files[len(files)-1].ID
 		out.FirstID, out.LastID = &first, &last
+		// next_page is the position after this page in the list's own
+		// newest-first order — "an opaque page cursor returned in a prior list
+		// response's next_page", passed back as ?page= (SDK v1.70.1 betafile.go
+		// BetaFileListParams.Page). One meaning on every arm, so the two lanes
+		// read as one walk: on a forward page null is exactly has_more, while a
+		// non-empty before_id page always carries a cursor, continuing into the
+		// row its own cursor named — which is why has_more, answering whether
+		// rows remain the way that page was fetched, does not decide it there.
+		// Under scope_id that continuation can be one further request that comes
+		// back empty, the boundary row being resolved unfiltered.
+		//
+		// An empty page still sends the key, null: this branch is inside
+		// len(files) > 0, so no value is minted, not that none is sent — the
+		// reference's own empty page is next_page:null too. That reads as
+		// end-of-list on the one arm where it is
+		// not: an empty before_id page sits at the TOP of the list. No cursor
+		// client can act on the difference either way, because
+		// pagination.PageCursor.GetNextPage stops on an empty data array before
+		// it looks at the cursor at all.
+		//
+		// A cursor handed out on an id-seeded page cannot be replayed the way
+		// that pager replays one: GetNextPage clones the seed request and only
+		// adds ?page=, so a client that seeded with after_id sends
+		// after_id=…&page=… and meets the refusal above. That is the reference's
+		// shape too — it sends next_page on every page while refusing the same
+		// combination — so the cursor is emitted here rather than withheld on
+		// the arms a legacy client seeds.
+		if hasMore || beforeID != "" {
+			c := encodeTimeCursor(dirNext, files[len(files)-1].CreatedAt, last)
+			out.NextPage = &c
+		}
 	}
 	return out, nil
 }
@@ -414,19 +461,4 @@ func (s *server) fileMountedInEnvironment(ctx context.Context, envID, fileID str
 		return false
 	}
 	return exists
-}
-
-// parseFileLimit parses the GET /v1/files limit (1–1000, default 20). The
-// Files list paginates by object id, not the managed-agents keyset cursor, so
-// it does not share parsePage.
-func parseFileLimit(q url.Values) (int, error) {
-	limit := defaultLimit
-	if s := q.Get("limit"); s != "" {
-		n, err := strconv.Atoi(s)
-		if err != nil || n < 1 || n > maxFileListLimit {
-			return 0, errInvalid("limit must be an integer between 1 and %d", maxFileListLimit)
-		}
-		limit = n
-	}
-	return limit, nil
 }

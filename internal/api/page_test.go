@@ -57,6 +57,7 @@ func TestTimeKeyedListsRejectForeignCursors(t *testing.T) {
 	for _, path := range []string{
 		"/v1/agents",
 		"/v1/environments",
+		"/v1/files",
 		"/v1/sessions/" + sessionID + "/threads",
 		"/v1/deployments",
 		"/v1/deployment_runs",

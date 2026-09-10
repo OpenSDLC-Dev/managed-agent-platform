@@ -192,7 +192,16 @@ func nextPage(t *testing.T, body map[string]any) string {
 	if !ok {
 		t.Fatalf(`list response missing "next_page": %v`, body)
 	}
-	s, _ := v.(string)
+	if v == nil {
+		return ""
+	}
+	// Without this, every non-string decoded to "" and satisfied a "want null"
+	// assertion — false and 0 among them, on a key whose whole contract is
+	// string-or-null.
+	s, ok := v.(string)
+	if !ok {
+		t.Fatalf(`list response "next_page" is %T (%v), want a string or null`, v, v)
+	}
 	return s
 }
 
