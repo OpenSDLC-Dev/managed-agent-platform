@@ -142,8 +142,8 @@ func TestWebSearchAnswersWithSearchResultBlocks(t *testing.T) {
 	if len(first.Content) != 1 || first.Content[0].Type != "text" || first.Content[0].Text != "How to write Go." {
 		t.Errorf("hit content = %+v, want one text block with the snippet", first.Content)
 	}
-	if first.Citations == nil || first.Citations.Enabled {
-		t.Errorf("citations = %+v, want present with enabled false", first.Citations)
+	if first.Citations == nil || !first.Citations.Enabled {
+		t.Errorf("citations = %+v, want present with enabled true", first.Citations)
 	}
 
 	// No sandbox was provisioned; the turn resumes on a fresh model_turn.
