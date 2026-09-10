@@ -323,7 +323,7 @@ func TestFileList(t *testing.T) {
 	if status != http.StatusOK {
 		t.Fatalf("list: %d %v", status, body)
 	}
-	wantFields(t, body, "data", "has_more", "first_id", "last_id")
+	wantFields(t, body, "data", "next_page", "has_more", "first_id", "last_id")
 	data := listData(t, body)
 	if len(data) != 5 {
 		t.Fatalf("list returned %d files, want 5", len(data))
@@ -337,6 +337,11 @@ func TestFileList(t *testing.T) {
 	if body["first_id"] != ids[4] || body["last_id"] != ids[0] {
 		t.Errorf("first_id/last_id = %v/%v, want %s/%s", body["first_id"], body["last_id"], ids[4], ids[0])
 	}
+	// Five rows fit one page, so the cursor is present and null — the shape
+	// every recorded reference response carries (#544).
+	if np := nextPage(t, body); np != "" {
+		t.Errorf("next_page on a terminal page = %q, want null", np)
+	}
 
 	// Paginate forward with limit=2 + after_id.
 	status, body = s.do("GET", "/v1/files?limit=2", nil)
@@ -349,6 +354,9 @@ func TestFileList(t *testing.T) {
 	}
 	if body["has_more"] != true {
 		t.Errorf("page 1 has_more = %v, want true", body["has_more"])
+	}
+	if nextPage(t, body) == "" {
+		t.Error("page 1 next_page is null while has_more is true, want a cursor")
 	}
 	status, body = s.do("GET", "/v1/files?limit=2&after_id="+ids[3], nil)
 	if status != http.StatusOK {
@@ -377,15 +385,83 @@ func TestFileList(t *testing.T) {
 	if data := listData(t, body); len(data) != 0 {
 		t.Errorf("scope_id filter returned %d files, want 0", len(data))
 	}
+	wantFields(t, body, "data", "next_page", "has_more", "first_id", "last_id")
 
 	// Unknown cursor → empty page. Bad limit / both cursors → 400.
 	status, body = s.do("GET", "/v1/files?after_id=file_0000000000000000000000ok", nil)
 	if status != http.StatusOK || len(listData(t, body)) != 0 {
 		t.Errorf("unknown cursor: status %d, data %v", status, body["data"])
 	}
-	for _, q := range []string{"limit=0", "limit=1001", "limit=abc", "after_id=x&before_id=y"} {
+	wantFields(t, body, "data", "next_page", "has_more", "first_id", "last_id")
+	for _, q := range []string{"limit=0", "limit=1001", "limit=abc", "after_id=x&before_id=y",
+		"page=not-a-cursor",
+		"page=x&after_id=file_0000000000000000000000ok",
+		"page=x&before_id=file_0000000000000000000000ok"} {
 		status, obj := s.do("GET", "/v1/files?"+q, nil)
 		wantErr(t, status, obj, http.StatusBadRequest, "invalid_request_error")
+	}
+}
+
+// TestFileListNextPageCursor walks the whole list on the cursor the envelope
+// hands out, and checks it lands on the rows the after_id walk lands on. A
+// next_page that is merely present proves nothing — it has to be the position
+// the reference says it is: "an opaque page cursor returned in a prior list
+// response's next_page", passed back as ?page= (anthropic-sdk-go v1.70.1
+// betafile.go BetaFileListParams.Page).
+func TestFileListNextPageCursor(t *testing.T) {
+	s := newTestServer(t)
+	oct := "application/octet-stream"
+	ids := make([]string, 0, 5)
+	for i := 0; i < 5; i++ {
+		created := s.uploadFile(t, fmt.Sprintf("c%d.bin", i), &oct, fmt.Sprintf("body-%d", i))
+		ids = append(ids, created["id"].(string))
+	}
+	stampCreatedAt(t, s, "files", ids...)
+
+	// Newest-first, so the cursor walk should report ids[4]…ids[0] in order.
+	var walked []any
+	path := "/v1/files?limit=2"
+	for i := 0; ; i++ {
+		if i > 5 {
+			t.Fatalf("cursor walk did not terminate: %v", walked)
+		}
+		status, body := s.do("GET", path, nil)
+		if status != http.StatusOK {
+			t.Fatalf("cursor walk %s: %d %v", path, status, body)
+		}
+		wantFields(t, body, "data", "next_page", "has_more", "first_id", "last_id")
+		for _, d := range listData(t, body) {
+			walked = append(walked, d["id"])
+		}
+		cur := nextPage(t, body)
+		// has_more and next_page answer the same question and must agree: the
+		// bug this test pins is a page that says "more rows" and hands back a
+		// null cursor (#544).
+		if (cur != "") != (body["has_more"] == true) {
+			t.Fatalf("has_more = %v but next_page = %q", body["has_more"], cur)
+		}
+		if cur == "" {
+			break
+		}
+		path = "/v1/files?limit=2&page=" + cur
+	}
+	want := []any{ids[4], ids[3], ids[2], ids[1], ids[0]}
+	if fmt.Sprint(walked) != fmt.Sprint(want) {
+		t.Errorf("cursor walk = %v, want %v", walked, want)
+	}
+
+	// A cursor from this list, replayed on a smaller page, still positions by
+	// (created_at, id) rather than by page number.
+	status, body := s.do("GET", "/v1/files?limit=4", nil)
+	if status != http.StatusOK {
+		t.Fatalf("limit=4: %d %v", status, body)
+	}
+	status, body = s.do("GET", "/v1/files?limit=1&page="+nextPage(t, body), nil)
+	if status != http.StatusOK {
+		t.Fatalf("replay: %d %v", status, body)
+	}
+	if data := listData(t, body); len(data) != 1 || data[0]["id"] != ids[0] {
+		t.Errorf("replay page = %v, want [%s]", pageIDs(data), ids[0])
 	}
 }
 
