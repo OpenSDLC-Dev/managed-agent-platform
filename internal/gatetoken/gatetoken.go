@@ -65,13 +65,36 @@ const revokeSQL = `UPDATE session_gate_tokens SET revoked_at = now()
 // it revokes every prior unrevoked token for the session and inserts the new
 // hash. Re-minting on a replacement gate therefore invalidates the predecessor
 // (revoke-on-re-mint), and the partial unique index keeps at most one live token
-// per session. Only the hash is stored.
+// per session. Only the hash is stored. It takes the session row before either
+// of those, the order a session delete takes and load-bearing against it (#313)
+// — the body says why.
 func Ensure(ctx context.Context, pool *pgxpool.Pool, sessionID, token string) error {
 	tx, err := pool.Begin(ctx)
 	if err != nil {
 		return err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+	// The session row first, then its token rows — the order a session delete
+	// takes: it holds the session (internal/api, requireNotRunning's FOR UPDATE)
+	// and then needs the token rows, because migration 0012 cascades the delete
+	// into them. Revoking first and inserting second took those in the opposite
+	// order, so a delete racing a re-mint closed a cycle and Postgres aborted one
+	// side of it (#313).
+	//
+	// KEY SHARE is the mode the insert's foreign key check takes below, so on the
+	// path that reaches the insert this acquires the same tuple and relation
+	// locks the transaction would have acquired anyway — earlier, and before the
+	// token rows rather than after. Two Ensures still do not block each other on
+	// it: a statement about what this costs, not a claim that they are otherwise
+	// ordered.
+	//
+	// It is deliberately not read for existence — the foreign key
+	// remains the one authority on whether the session is there, and a second
+	// answer here could only disagree with it.
+	if _, err := tx.Exec(ctx,
+		`SELECT 1 FROM sessions WHERE id = $1 FOR KEY SHARE`, sessionID); err != nil {
+		return err
+	}
 	if _, err := tx.Exec(ctx, revokeSQL, sessionID); err != nil {
 		return err
 	}

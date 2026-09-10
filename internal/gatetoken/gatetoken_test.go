@@ -4,9 +4,14 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"os"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/gatetoken"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/pgtest"
@@ -210,5 +215,152 @@ func TestMintWithPrefixAndHashToken(t *testing.T) {
 	sum := sha256.Sum256([]byte(tok))
 	if got := gatetoken.HashToken(tok); got != hex.EncodeToString(sum[:]) {
 		t.Errorf("HashToken = %s; want the token's sha256 hex", got)
+	}
+}
+
+// pgDeadlockDetected is 40P01, which Postgres raises on whichever side of a
+// cycle it chooses to abort; pgForeignKeyViolation is 23503, which is how the
+// race resolves once there is no cycle to abort.
+const (
+	pgDeadlockDetected    = "40P01"
+	pgForeignKeyViolation = "23503"
+)
+
+// A session delete racing a gate re-mint used to close a lock cycle: the delete
+// holds the session row and then needs the token rows it cascades into, while
+// Ensure held the token rows and then needed the session row for its insert's
+// foreign key. Postgres broke the tie by aborting one side, so an ordinary race
+// surfaced as a 500 or a failed gate provisioning (#313).
+//
+// The delete side is spelled out here rather than driven through the API,
+// because those two statements *are* the ordering under test: internal/api's
+// requireNotRunning takes the session FOR UPDATE, and deleteSession's DELETE
+// cascades into session_gate_tokens through migration 0012. A change to either
+// belongs in this test too.
+//
+// What the fix changes is not who wins but that there is a winner at all. This
+// test pins the interleaving where the delete reaches the session row first:
+// Ensure waits for it and then fails on the foreign key of a session that is
+// gone — a clean loss, and the same outcome the cycle produced on the runs where
+// the delete happened to be the survivor. That the loss is a foreign key
+// violation and not a serialization failure is Read Committed, the fixture's
+// default and the server's; under a stricter default this assertion is the thing
+// that would say so. The other interleaving has no loser at
+// all, and is not what this test is about: the re-mint takes the session row
+// first, commits, and the delete then cascades the new token away with it.
+func TestEnsureDoesNotDeadlockAgainstASessionDelete(t *testing.T) {
+	pool := pgtest.NewPool(t)
+	sess, _ := pgtest.NewSession(t, pool, "cloud")
+	ctx := context.Background()
+
+	// A live predecessor, so Ensure's revoke has a row to take a lock on. Without
+	// one it updates nothing, holds nothing, and there is no cycle to reproduce.
+	if err := gatetoken.Ensure(ctx, pool, sess.String(), gatetoken.Mint()); err != nil {
+		t.Fatalf("seed the predecessor token: %v", err)
+	}
+
+	del, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin the delete: %v", err)
+	}
+	defer func() { _ = del.Rollback(ctx) }()
+	var status string
+	if err := del.QueryRow(ctx,
+		`SELECT status FROM sessions WHERE id = $1 FOR UPDATE`, sess).Scan(&status); err != nil {
+		t.Fatalf("lock the session row: %v", err)
+	}
+
+	ensured := make(chan error, 1)
+	go func() { ensured <- gatetoken.Ensure(ctx, pool, sess.String(), gatetoken.Mint()) }()
+
+	// Wait for Ensure to be blocked before the delete asks for anything else.
+	// Which lock it waits on is the whole difference between the two orderings,
+	// and asserting that here would be asserting the fix rather than its effect
+	// — so the wait only requires that it is waiting.
+	waitForABlockedBackend(t, pool, ensured)
+
+	// The cascade into session_gate_tokens happens here.
+	_, delErr := del.Exec(ctx, `DELETE FROM sessions WHERE id = $1`, sess)
+	if delErr == nil {
+		delErr = del.Commit(ctx)
+	}
+	// End the delete's transaction before waiting on Ensure. A failed statement
+	// leaves the transaction aborted but still holding its locks until it ends,
+	// so on any delete failure — the pre-fix deadlock among them, on the runs
+	// where Postgres picks the delete as its victim — Ensure would still be
+	// parked behind the session row and this would hang to the package timeout
+	// instead of reporting. Rolling back an already-committed tx is a no-op.
+	_ = del.Rollback(ctx)
+	var ensureErr error
+	select {
+	case ensureErr = <-ensured:
+	case <-time.After(30 * time.Second):
+		t.Fatal("Ensure never returned after the delete's transaction ended")
+	}
+
+	// A deadlock on either side is the regression itself, and the outcome
+	// assertions below would only restate it under a wrong name.
+	for _, e := range []struct {
+		who string
+		err error
+	}{{"the delete", delErr}, {"Ensure", ensureErr}} {
+		if pgCodeIs(e.err, pgDeadlockDetected) {
+			t.Fatalf("%s was aborted as a deadlock: %v", e.who, e.err)
+		}
+	}
+	if delErr != nil {
+		t.Errorf("the delete did not win the race cleanly: %v", delErr)
+	}
+	// And Ensure loses it the way the comment above says it does. Without this,
+	// any non-deadlock outcome passes — a nil error included, which would mean a
+	// token minted for a session that no longer exists.
+	if !pgCodeIs(ensureErr, pgForeignKeyViolation) {
+		t.Errorf("Ensure = %v, want the foreign key to refuse a deleted session (%s)",
+			ensureErr, pgForeignKeyViolation)
+	}
+}
+
+// pgCodeIs reports whether err carries the Postgres SQLSTATE code.
+func pgCodeIs(err error, code string) bool {
+	var pgErr *pgconn.PgError
+	return errors.As(err, &pgErr) && pgErr.Code == code
+}
+
+// waitForABlockedBackend returns once exactly one backend on this test's
+// database is waiting for a lock — the form internal/queue and internal/api use
+// for the same wait, kept identical so a Postgres upgrade has one dialect to
+// revisit rather than one more. The count is exact rather than "some backend"
+// so it answers about this test's blocked backend and not the database's mood;
+// pgtest gives a fresh database per test, so nothing else can be waiting, and
+// the poller's own query is running rather than waiting so it never self-counts.
+// It watches ensured as well, because an Ensure that fails without ever blocking
+// would otherwise be reported as a timeout with its own error thrown away.
+func waitForABlockedBackend(t *testing.T, pool *pgxpool.Pool, ensured <-chan error) {
+	t.Helper()
+	deadline := time.Now().Add(15 * time.Second)
+	for {
+		select {
+		case err := <-ensured:
+			t.Fatalf("Ensure returned before it ever blocked: %v", err)
+		default:
+		}
+		// Each poll is bounded, so a stalled pool acquire or query fails here
+		// rather than running past the loop's own deadline to the package timeout.
+		pollCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		var blocked int
+		err := pool.QueryRow(pollCtx,
+			`SELECT count(*) FROM pg_stat_activity
+			  WHERE datname = current_database() AND wait_event_type = 'Lock'`).Scan(&blocked)
+		cancel()
+		if err != nil {
+			t.Fatalf("count blocked backends: %v", err)
+		}
+		if blocked == 1 {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("waited for Ensure to block, saw %d blocked backend(s); the race this test exists for did not happen", blocked)
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 }
