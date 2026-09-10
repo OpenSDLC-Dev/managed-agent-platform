@@ -303,7 +303,7 @@ func (s *server) listMemoryStores(r *http.Request) (any, error) {
 	}
 	if page.cur != nil {
 		// Unidirectional list: only forward time cursors are valid here.
-		if page.cur.versioned || page.cur.dir != dirNext {
+		if page.cur.foreignToTime() || page.cur.dir != dirNext {
 			return nil, errInvalid("invalid page cursor")
 		}
 		args = append(args, page.cur.t, page.cur.id)

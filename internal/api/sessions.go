@@ -1230,7 +1230,7 @@ func (s *server) listSessions(r *http.Request) (any, error) {
 	}
 	orderDir, reversed := sortDir, false
 	if page.cur != nil {
-		if page.cur.versioned {
+		if page.cur.foreignToTime() {
 			return nil, errInvalid("invalid page cursor")
 		}
 		var clause string

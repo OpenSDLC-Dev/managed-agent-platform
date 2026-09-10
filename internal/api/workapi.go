@@ -277,7 +277,7 @@ func (s *server) listWork(r *http.Request) (any, error) {
 	var afterID string
 	if page.cur != nil {
 		// Unidirectional list: only a forward time cursor is valid here.
-		if page.cur.versioned || page.cur.seqKeyed || page.cur.dir != dirNext {
+		if page.cur.foreignToTime() || page.cur.dir != dirNext {
 			return nil, errInvalid("invalid page cursor")
 		}
 		after, afterT, afterID = true, page.cur.t, page.cur.id
