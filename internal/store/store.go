@@ -52,11 +52,16 @@ import (
 
 // FileLiveSQL is the predicate that says a files row still has content: it has
 // no expiry, or its expiry has not arrived (#655, plan 48). Here for
-// SessionTombstoneInsertSQL's reason, and more urgently — four packages read
-// this table to hand a file's bytes to something, and each was written when a
-// row's existence was the whole question. Three of them had to be taught the
-// rule after the fact; the fourth is this comment, so the next one is a
-// decision rather than an omission.
+// SessionTombstoneInsertSQL's reason, and more urgently.
+//
+// Four packages read this table to hand a file's bytes to something — api,
+// brain, executor, events — and each was written when a row's existence was the
+// whole question. When the expiry rule arrived, only api's own route was taught
+// it; the other three were found serving expired bytes in review, one of them
+// mounting into a sandbox what the HTTP route was already refusing. So the rule
+// is written once, here, rather than in each reader's SQL: a reader that
+// composes it has agreed to it, and a reader that does not has decided
+// something instead of forgetting it.
 //
 // It reads now() from the database, never a replica's clock: expires_at was
 // computed from the database's now() at upload. Unqualified, so it composes
