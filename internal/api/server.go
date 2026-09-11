@@ -36,6 +36,13 @@ type server struct {
 	// in flight, so a gate fetching faster than the emission drains cannot
 	// stack detached goroutines (startEmission).
 	emitting sync.Map
+	// objectDeletes is this process's sweeper wake (plan 49): a delete enqueues
+	// the object keys it orphans and then asks the sweeper to look now. Nil
+	// where no sweeper runs beside the handler, which is every test that does
+	// not care how soon the bytes go, and there it means the sweep happens on
+	// its interval instead. Nothing is ever lost by its absence — the queue is
+	// the durable statement, and the wake only brings a drain forward.
+	objectDeletes *ObjectDeleteQueue
 }
 
 // newServer is the assembly NewHandler and StartDeploymentScheduler share: a
@@ -53,6 +60,15 @@ type Option func(*server)
 // WithDreamRunner tells the handler that this process ticks a dream runner,
 // which is what lets POST /v1/dreams accept a create (plan 41 §4.7).
 func WithDreamRunner() Option { return func(s *server) { s.dreamRunner = true } }
+
+// WithObjectDeletes hands the handler the wake of the sweeper running beside it
+// (plan 49), so a delete's enqueued keys are drained now rather than at the
+// sweeper's next interval. Without it the deployment is correct and a little
+// slower to free bytes, which is the deliberate shape of a wake that nothing
+// depends on.
+func WithObjectDeletes(q *ObjectDeleteQueue) Option {
+	return func(s *server) { s.objectDeletes = q }
+}
 
 // NewHandler assembles the control-plane HTTP surface over the given pool.
 // blobs is the object store backing skill archives; nil deploys without

@@ -1394,27 +1394,28 @@ func (s *server) archiveSessionInTx(ctx context.Context, tx pgx.Tx, id string) (
 	return row, nil
 }
 
-// sessionDeleteCleanupBudget is the whole cost a session delete's post-commit
-// object cleanup may add to the response — the checkpoint archive and the
-// harvested deliverables together, because a caller waits for the sum and not
-// for either half. Sized for a full snapshot against a healthy store, where a
-// delete is one round trip, and short enough that a store which has stopped
-// answering costs the caller a slow response rather than a hung one. The rows
-// are already committed when it starts, so running out of it leaves bytes
-// behind and nothing else.
-const sessionDeleteCleanupBudget = 30 * time.Second
-
 // sessionDeleteBroadcastBudget bounds the terminal broadcasts, which run
-// detached from the request for the reason the cleanup below already gives.
-// Its own budget rather than a share of sessionDeleteCleanupBudget: a publish
-// is a pool acquire and one NOTIFY round trip, not an object-store call, and a
-// pool that has stopped answering must not spend the cleanup's budget here.
-// Neither loss can be taken back; what differs is reach. A dropped frame is
-// owed to whoever holds a stream open at this moment and to nobody after, so
-// the set of people it can still disappoint empties on its own; bytes the
-// cleanup skips sit in the store until something outside this code removes
-// them, and nothing does.
+// detached from the request: past the commit, nothing the caller does should
+// decide what its fellow subscribers see. Bounded because a delete that has
+// already succeeded must not hold its response open behind a pool that has
+// stopped answering, and a publish is one pool acquire and one NOTIFY round
+// trip — a moment is worth waiting; a minute is not.
+//
+// It is now the only post-commit budget here. The object cleanup that used to
+// own the other one is gone: its keys are enqueued in the transaction and a
+// sweeper removes them (plan 49), so bytes are no longer something this
+// response can run out of time for. A dropped frame is the one loss on this
+// path that nothing retries — it is owed to whoever holds a stream open at this
+// moment and to nobody after, which is why it is worth a budget of its own and
+// why the count of what went undelivered is logged rather than discarded.
 const sessionDeleteBroadcastBudget = 5 * time.Second
+
+// deleteSessionBeforeCommitHook is a test-only seam fired after the delete has
+// enqueued its object keys and before it commits; nil in production. That
+// window is where the plan-49 claim lives and the only place it is visible: a
+// row written on the transaction is invisible to every other connection until
+// the commit, and one written beside it is not.
+var deleteSessionBeforeCommitHook func()
 
 // deleteSessionAfterCommitHook is a test-only seam fired between the delete's
 // commit and its terminal broadcasts; nil in production. That window is the
@@ -1508,6 +1509,37 @@ func (s *server) deleteSession(r *http.Request) (any, error) {
 	if err != nil {
 		return nil, err
 	}
+	// The bytes are owed here rather than deleted here (plan 49, #645 + #320).
+	// Enqueued in this transaction, from the ids it has just taken, so the
+	// record of what is owed commits with the rows that stopped referring to
+	// it: an enqueue after the commit would leave the crash window it exists to
+	// close still open, and a delete on the request path — which is what this
+	// replaces — left anything a slow or refusing store did not finish orphaned
+	// for good, since nothing revisited it.
+	//
+	// The checkpoint key goes with them. Its old comment argued best-effort was
+	// enough because the reaper's deleted tier deletes the same key first, but
+	// a reap pass visits only what provider.Owned() still returns, so a session
+	// whose sandbox the idle tier already destroyed has no second remover at
+	// all (#320).
+	//
+	// Only with a store: without one no object was ever written, so a row here
+	// would owe bytes that do not exist and nothing would ever drain it.
+	if s.blobs != nil {
+		keys := make([]string, 0, len(fileIDs)+1)
+		keys = append(keys, blob.SessionCheckpointKey(id))
+		for _, fid := range fileIDs {
+			keys = append(keys, blob.FilesKey(fid))
+		}
+		if _, err := tx.Exec(ctx, store.PendingObjectDeleteInsertSQL, keys); err != nil {
+			return nil, err
+		}
+	}
+	// Test seam: read the queue from another connection in exactly this window.
+	// nil in production.
+	if deleteSessionBeforeCommitHook != nil {
+		deleteSessionBeforeCommitHook()
+	}
 	if err := tx.Commit(ctx); err != nil {
 		return nil, err
 	}
@@ -1568,64 +1600,12 @@ func (s *server) deleteSession(r *http.Request) (any, error) {
 			"session", id, "frames", undelivered, "children", len(liveChildren),
 			"error", firstErr)
 	}
-	// The checkpoint blob goes with the record, best-effort for the same
-	// reason as the broadcast. Best-effort is enough because this is not the
-	// only remover: a session that still owns a sandbox is the reaper's
-	// deleted tier, which deletes this same key before it reaps (plan 24) —
-	// this covers the session whose sandbox is already gone, which no reap
-	// pass will ever visit again. Both removers running at once is fine, and
-	// since the commit woke the reaper (#354) it is now the ordinary case:
-	// deleting a key that is already gone is nil for every backend
-	// (blob.Store's contract, and blobtest's DeleteMissingIsNil rung), which
-	// is what the reaper has always relied on arriving second.
-	// Detached from the request context: the
-	// commit already happened, and a client hanging up must not skip the one
-	// delete this path exists for.
-	//
-	// The deliverables' bytes follow, in the same window: the two cleanups share
-	// one response, so one ceiling states what that response can cost. Their
-	// best-effort is weaker than the checkpoint's and the difference is worth
-	// naming — no reaper tier knows these keys, so an object this loop does not
-	// remove is orphaned for good, which is the trade internal/api/files.go
-	// already takes for a single object and #645 would end for the set.
-	//
-	// Sequential, because one call per object is the only shape blob.Store
-	// offers, and bounded in number by the harvest's own per-session file cap.
-	// A store slow enough to exhaust the budget leaves the tail behind rather
-	// than holding the response open for a set that will not finish — as far as
-	// the store honors the context it is handed, which the interface asks for
-	// and cannot enforce.
-	if s.blobs != nil {
-		dctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), sessionDeleteCleanupBudget)
-		defer cancel()
-		if err := s.blobs.Delete(dctx, blob.SessionCheckpointKey(id)); err != nil {
-			slog.WarnContext(ctx, "session checkpoint blob not deleted", "session", id, "error", err)
-		}
-		var failed, unattempted int
-		var firstErr error
-		for i, fid := range fileIDs {
-			if dctx.Err() != nil {
-				unattempted = len(fileIDs) - i
-				break
-			}
-			if err := s.blobs.Delete(dctx, blob.FilesKey(fid)); err != nil {
-				failed++
-				if firstErr == nil {
-					firstErr = err
-				}
-			}
-		}
-		// One line for the set, not one per object: a store answering 403 to
-		// every key would otherwise say so two hundred times and never say how
-		// many bytes were left behind.
-		if failed > 0 || unattempted > 0 {
-			slog.WarnContext(ctx, "session deliverables left in object storage",
-				"session", id, "failed", failed, "unattempted", unattempted,
-				"total", len(fileIDs), "error", firstErr)
-		} else if len(fileIDs) > 0 {
-			slog.InfoContext(ctx, "session deliverables deleted",
-				"session", id, "files", len(fileIDs))
-		}
-	}
+	// And the sweeper is asked to look now, so the ordinary delete still frees
+	// the bytes in milliseconds rather than at the next interval (plan 49). A
+	// non-blocking send after the commit: it cannot fail the request, cannot
+	// delay it, and is never load-bearing — it only brings forward what the
+	// sweeper's own interval would do anyway, and only for this replica, which
+	// is the one that just enqueued.
+	s.objectDeletes.Wake()
 	return map[string]string{"id": id, "type": "session_deleted"}, nil
 }

@@ -49,6 +49,71 @@ new directory and in-repo citations re-pointed in the moving PR (plan
 
 ---
 
+## An object delete that fails is retried, not forgotten (plan 49, #645 + #320) — archived 2026-09-11, delivered in one PR
+
+`DELETE /v1/sessions/{id}` removed a session's `files` rows in a transaction and
+then deleted their objects on the request path, best-effort, under a
+thirty-second budget it shared with the workspace checkpoint. What that pass did
+not finish was lost permanently rather than temporarily, and the reason is the
+ordering: the rows that named the objects were already gone, so nothing
+afterwards — another delete, a sweep, a reap, an operator — could name them
+either. Three ordinary things reached that state: a store returning an error, a
+budget spent on a sequential loop of up to two hundred single-object deletes,
+and a process dying between the commit and the cleanup.
+
+The change is one substitution: the request path stops paying the debt and
+starts recording it. The same `DELETE FROM files … RETURNING id` that yields the
+keys enqueues them, in that transaction, so what is owed commits exactly when
+the rows that referred to it stop existing — a delete that rolls back owes
+nothing, and a delete that commits cannot fail to owe. A control-plane sweeper
+drains the queue and defers a refused key rather than dropping it. The request
+path then touches the object store not at all, which is what removed
+`sessionDeleteCleanupBudget` — the largest contributor to a delete's worst-case
+response — along with the partial-progress accounting the loop kept in order to
+report what it had skipped.
+
+Three choices were load-bearing and each had a plausible alternative. A new
+table rather than columns on `deleted_sessions`: the tombstone's own migration
+says it is "three small columns … kept indefinitely", because the reaper needs
+it as permanent evidence, so keys carried there would outlive their objects and
+need a done-marker to tell them apart — a queue built inside a table designed
+never to drain. A control-plane sweeper rather than an executor one: the control
+plane owns the `files` domain, already runs three sibling sweepers, and always
+runs, whereas a deployment can have no cloud executor at all and a cleanup that
+silently does not happen in some topologies is the failure being fixed. And no
+delete at all on the request path rather than a delete with the queue as a
+fallback: two removers would have had to agree about what happens when they
+race, for a saving the wake already provides.
+
+#320 was folded in and closed with it. The checkpoint blob's best-effort delete
+was excused on the grounds that the reaper's `deleted` tier removes the same key
+— but `reapPass` lists `provider.Owned()` once and visits only what that
+answers, so a session whose sandbox the idle tier had already destroyed never
+appears in a listing again and had no second remover at all. That is also why
+the retryable cleanup could not be a new reaper tier, however natural that
+sounds: it needed a sweep not scoped by what a sandbox endpoint currently holds.
+The reaper's own checkpoint delete stays where it is, and the two removers cost
+nothing, a missing key being nil for every backend by the seam's contract.
+
+Eight guards were run against the broken code. Six killed their mutants
+outright. The seventh is the one worth recording: moving the enqueue off the
+transaction and onto the pool changes nothing any test could see, because both
+versions leave the same rows behind once the delete has answered — the
+difference lives entirely in the window before the commit. It took a test-only
+seam in that window, and an assertion made from a second connection, where
+uncommitted rows are invisible and rows written beside the transaction are not.
+Without it the decision that closes the crash window would have been asserted by
+the plan and by nothing else.
+
+The eighth mutant was semantically null — it replaced `s.blobs != nil` with
+`true` on a path where a store always exists — and reported two kills anyway,
+which is how two rungs still asserting the old behaviour were found: they had
+been red on the branch since the request-path delete was removed, and the full
+package suite had not been run since. One now drains the sweeper before
+asserting the checkpoint is gone; the other, which existed to prove a failing
+store did not stop the delete from *reaching* the store, was rewritten around
+what it now means for a delete to survive an outage — the rows go, the debt is
+recorded, and the store is not consulted.
 ## File expiration (plan 49, #655) — archived 2026-09-11, delivered in two PRs
 
 `POST /v1/files` rejected `expires_in_seconds` with a 400, so a client that set the
