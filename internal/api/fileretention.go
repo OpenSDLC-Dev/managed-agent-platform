@@ -175,6 +175,12 @@ func purgeExpiredFiles(ctx context.Context, pool *pgxpool.Pool, blobs blob.Store
 	if err != nil {
 		return 0, err
 	}
+	// The detachment below starts here, not earlier, and that boundary leaves a
+	// window of its own: a cancellation landing while this drains loses the ids
+	// of a DELETE the server may already have committed, and then no tier knows
+	// those keys. It is milliseconds wide against an hourly tick, and closing it
+	// would mean running the statement itself past the caller's cancellation —
+	// which cannot distinguish a commit from an abort either. #696 holds it.
 	ids, err := pgx.CollectRows(rows, pgx.RowTo[string])
 	if err != nil {
 		return 0, err
