@@ -309,6 +309,10 @@ func TestRetentionLoopSweepsBeforeItsFirstTick(t *testing.T) {
 // statement: a tick has to reach the sweep, and a cancelled context has to end
 // it. Without the first half, the loop could stop calling the sweep entirely
 // and every other test here would stay green.
+//
+// It takes two subjects to show that now. The sweep runs a pass before its
+// first wait, so the first removal proves only that the loop started; a second
+// memory, seeded once the first is gone, is the one a tick has to carry.
 func TestRetentionLoopSweepsThenStops(t *testing.T) {
 	restore := SetMemoryPruneIntervalForTest(10 * time.Millisecond)
 	t.Cleanup(restore)
@@ -330,6 +334,25 @@ func TestRetentionLoopSweepsThenStops(t *testing.T) {
 		}
 		if time.Now().After(deadline) {
 			t.Fatalf("the loop never swept: survivors = %d, want 5", len(surviving(t, pool, memoryID)))
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	// A second memory, seeded only once the first has gone. That ordering is
+	// the barrier: one pass has demonstrably finished, so whatever removes
+	// this one came after a tick. Seeding it earlier would race the startup
+	// pass rather than exclude it.
+	second := domain.NewID(domain.PrefixMemory).String()
+	moreIDs := seedVersions(t, pool, second, 9, time.Now().Add(-90*24*time.Hour), time.Hour)
+	liveMemory(t, pool, second, moreIDs[8], "/second.md")
+	deadline = time.Now().Add(30 * time.Second)
+	for {
+		if len(surviving(t, pool, second)) == 5 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("no tick reached the sweep after the startup pass: survivors = %d, want 5",
+				len(surviving(t, pool, second)))
 		}
 		time.Sleep(20 * time.Millisecond)
 	}

@@ -64,9 +64,11 @@ func StartMemoryRetention(ctx context.Context, pool *pgxpool.Pool) {
 		// does not fire on creation, so a control plane that restarts more
 		// often than this interval would otherwise never prune at all. At an
 		// hour that is not an exotic deployment — it is one that rolls on every
-		// merge. The statement's idempotence is what makes the boot pass free:
-		// every replica taking it at once costs duplicate queries and nothing
-		// else. fileretention.go's sweep takes the same order for the reason.
+		// merge. What makes a boot pass safe on every replica at once is the
+		// statement's idempotence, which is a claim about the answer and not
+		// about the cost: they serialize on row locks and rescan what the
+		// winner already removed. fileretention.go's sweep takes this order
+		// for the same reason.
 		n, err := pruneMemoryVersions(ctx, pool, memoryVersionRetention, memoryVersionsKept)
 		switch {
 		case err != nil && ctx.Err() == nil:
