@@ -119,6 +119,130 @@ func TestPurgeTakesTheOldestFirst(t *testing.T) {
 	}
 }
 
+// TestPurgeFinishesItsObjectsAfterCancellation pins the one thing this sweep
+// cannot be allowed to get wrong. The rows are committed before the first
+// object delete, so an object skipped because the sweep was cancelled is
+// orphaned for good — its id is gone and nothing can enumerate what is left
+// (#645's class). The deletes therefore run on a context the sweep's own
+// cancellation cannot reach, and a store that cancels the sweep from inside its
+// own first Delete is that shutdown made deterministic.
+func TestPurgeFinishesItsObjectsAfterCancellation(t *testing.T) {
+	pool := pgtest.NewPool(t)
+	mem := blobtest.Mem()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	blobs := &cancellingBlobStore{Store: mem, cancel: cancel}
+
+	window := 30 * 24 * time.Hour
+	var ids []string
+	for i := 0; i < 3; i++ {
+		ids = append(ids, seedExpiredFile(t, pool, mem, window+time.Duration(i+1)*time.Hour))
+	}
+
+	// The cancellation lands after the rows are committed, which is the only
+	// window where it can do damage, and purge must still report all three.
+	n, err := purgeExpiredFiles(ctx, pool, blobs, window)
+	if err != nil {
+		t.Fatalf("purge: %v", err)
+	}
+	if n != len(ids) {
+		t.Errorf("purged %d, want %d", n, len(ids))
+	}
+	if got := blobs.attempts(); got != len(ids) {
+		t.Errorf("object deletes attempted = %d, want %d: cancelling the sweep must not strand the rest of a batch whose rows are already gone", got, len(ids))
+	}
+	for _, id := range ids {
+		if rc, _, err := mem.Get(context.Background(), blob.FilesKey(id)); err == nil {
+			rc.Close()
+			t.Errorf("the object for %s outlived its row: nothing can find it again", id)
+		}
+	}
+}
+
+// cancellingBlobStore cancels the sweep from inside its own first Delete, then
+// deletes as usual — so what the test sees afterwards is exactly what survived
+// the cancellation.
+type cancellingBlobStore struct {
+	blob.Store
+	cancel context.CancelFunc
+	asked  int
+}
+
+func (c *cancellingBlobStore) Delete(ctx context.Context, key string) error {
+	c.asked++
+	c.cancel()
+	// A real store refuses a call handed a cancelled context; MemStore ignores
+	// the context entirely, which would hide the sweep handing over one that
+	// its own cancellation reaches.
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	return c.Store.Delete(ctx, key)
+}
+
+func (c *cancellingBlobStore) attempts() int { return c.asked }
+
+// TestPurgeStopsWhenTheBudgetRunsOut pins the other half of the detached
+// context: detaching from the sweep's cancellation would otherwise mean a store
+// that has stopped answering holds the shutdown open forever. The budget bounds
+// it instead, and what it could not reach is counted rather than lost silently.
+func TestPurgeStopsWhenTheBudgetRunsOut(t *testing.T) {
+	restore := SetFilePurgeCleanupBudgetForTest(500 * time.Millisecond)
+	defer restore()
+
+	pool := pgtest.NewPool(t)
+	mem := blobtest.Mem()
+	blobs := &blockingBlobStore{Store: mem}
+	ctx := context.Background()
+	window := 30 * 24 * time.Hour
+	var ids []string
+	for i := 0; i < 3; i++ {
+		ids = append(ids, seedExpiredFile(t, pool, mem, window+time.Duration(i+1)*time.Hour))
+	}
+
+	n, err := purgeExpiredFiles(ctx, pool, blobs, window)
+	if err != nil {
+		t.Fatalf("purge: %v", err)
+	}
+	if n != len(ids) {
+		t.Errorf("purged %d, want %d: the rows go whatever the store does", n, len(ids))
+	}
+	// One call spends the whole budget, so the loop must abandon the rest
+	// rather than pay it again per object.
+	if got := blobs.attempts(); got != 1 {
+		t.Errorf("object deletes attempted = %d, want 1: the budget bounds the set, not each call", got)
+	}
+	for _, id := range ids[1:] {
+		rc, _, err := mem.Get(context.Background(), blob.FilesKey(id))
+		if err != nil {
+			t.Errorf("object for %s is gone; the sweep was supposed to have run out of budget first", id)
+			continue
+		}
+		rc.Close()
+	}
+}
+
+// blockingBlobStore never answers until the caller's context ends — the store
+// that has stopped responding, which is the case the budget exists for. The
+// fallback timer is a backstop, so a sweep whose deletes have no budget at all
+// fails this test instead of hanging it.
+type blockingBlobStore struct {
+	blob.Store
+	asked int
+}
+
+func (b *blockingBlobStore) Delete(ctx context.Context, _ string) error {
+	b.asked++
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-time.After(3 * time.Second):
+		return nil
+	}
+}
+
+func (b *blockingBlobStore) attempts() int { return b.asked }
+
 // TestPurgeSurvivesAFailingObjectStore: the row deletion is committed before a
 // single object delete is attempted, so a store that refuses every key must not
 // turn into rows that survive. It leaves orphans, which is the accepted outcome,

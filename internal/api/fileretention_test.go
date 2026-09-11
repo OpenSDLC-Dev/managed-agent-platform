@@ -130,6 +130,45 @@ func TestExpiredFilePurgeWithoutBlobStore(t *testing.T) {
 	}
 }
 
+// TestFileRetentionSweepsBeforeItsFirstTick pins the order of the loop's two
+// halves. time.NewTicker does not fire on creation, so a loop that waited first
+// would never sweep in a control plane that restarts more often than the
+// interval — a rolling deployment, which is the ordinary one. The interval here
+// is longer than this test could ever wait, so only a sweep taken before the
+// first tick can pass it.
+func TestFileRetentionSweepsBeforeItsFirstTick(t *testing.T) {
+	s := newTestServer(t)
+	oct := "application/octet-stream"
+	restore := api.SetFilePurgeIntervalForTest(time.Hour)
+	defer restore()
+
+	swept := s.uploadFile(t, "swept.bin", &oct, "bytes")["id"].(string)
+	expireBy(t, s, swept, 31*24*time.Hour)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { defer close(done); api.StartFileRetention(ctx, s.pool, s.blobs) }()
+	t.Cleanup(func() { cancel(); <-done })
+
+	deadline := time.Now().Add(10 * time.Second)
+	for fileRowExists(t, s, swept) {
+		if time.Now().After(deadline) {
+			t.Fatal("the row survived: the sweep is waiting for a first tick an hour away, so a control plane restarted more often would never purge anything")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	// And then it waits. A row expiring after that first sweep must sit until
+	// the tick an hour away, because a loop that swept without waiting would
+	// run continuously against Postgres and look identical from the row above.
+	later := s.uploadFile(t, "later.bin", &oct, "bytes")["id"].(string)
+	expireBy(t, s, later, 31*24*time.Hour)
+	time.Sleep(500 * time.Millisecond)
+	if !fileRowExists(t, s, later) {
+		t.Error("a row expiring after the startup sweep was taken within the interval: the loop is not waiting between sweeps")
+	}
+}
+
 // TestFileRetentionSweepRuns drives the loop itself rather than its statement:
 // the ticker fires, the sweep runs, and cancelling the context ends it. It also
 // pins the production window's value — 30 days is the number the reference
@@ -151,6 +190,10 @@ func TestFileRetentionSweepRuns(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go func() { defer close(done); api.StartFileRetention(ctx, s.pool, s.blobs) }()
+	// Every exit path stops the loop, not only the two below: a t.Fatalf in any
+	// helper between here and them would otherwise leave the sweep querying a
+	// pool that newTestServer's own cleanup is about to close.
+	t.Cleanup(func() { cancel(); <-done })
 
 	// Wait for the object too, not just the row: the DELETE commits before the
 	// object delete runs, so a check taken the moment the row disappears can

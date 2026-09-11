@@ -81,7 +81,17 @@ const (
 	// half runs detached, so a controlplane shutdown waits up to this long for
 	// the tick in flight. A store too slow to finish the batch inside it leaves
 	// a tail — counted and logged as one line, rather than cancelled silently.
-	filePurgeCleanupBudget = 30 * time.Second
+	//
+	// That wait is why the chart sets terminationGracePeriodSeconds: an orderly
+	// exit is up to 10s of HTTP drain plus up to this, and Kubernetes' own
+	// default of 30s would SIGKILL the drain partway — losing both the tail and
+	// the one line that would have counted it, which is the whole point of
+	// running detached.
+	//
+	// A var rather than a const for filePurgeBatch's reason: nothing a test can
+	// drive exhausts 30 seconds, so export_test.go shrinks it to watch a store
+	// that has stopped answering cost the sweep the budget and not the process.
+	filePurgeCleanupBudgetDefault = 30 * time.Second
 
 	// MetricExpiredFilesPurged counts rows the sweep removed. Exported so the
 	// test can assert the exact name; no attributes, since the only candidates
@@ -91,6 +101,9 @@ const (
 
 // filePurgeBatch is filePurgeBatchDefault, shrinkable by the test binary.
 var filePurgeBatch = filePurgeBatchDefault
+
+// filePurgeCleanupBudget is filePurgeCleanupBudgetDefault, likewise shrinkable.
+var filePurgeCleanupBudget = filePurgeCleanupBudgetDefault
 
 // filePurgeInterval paces the sweep. Expiry latency is not what this decides —
 // the content route stops serving at expires_at, whatever the sweep has done —
@@ -111,11 +124,12 @@ func StartFileRetention(ctx context.Context, pool *pgxpool.Pool, blobs blob.Stor
 	t := time.NewTicker(filePurgeInterval)
 	defer t.Stop()
 	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-t.C:
-		}
+		// The sweep runs before the first wait rather than after it: a ticker
+		// does not fire on creation, so a control plane that restarts more
+		// often than this interval would otherwise never sweep at all — and a
+		// rolling deployment is exactly that control plane. Replicas all
+		// sweeping at boot is not a collision either, since the DELETE is the
+		// claim and their batches are disjoint.
 		n, err := purgeExpiredFiles(ctx, pool, blobs, fileMetadataRetention)
 		switch {
 		case err != nil && ctx.Err() == nil:
@@ -123,6 +137,11 @@ func StartFileRetention(ctx context.Context, pool *pgxpool.Pool, blobs blob.Stor
 		case err == nil && n > 0:
 			slog.InfoContext(ctx, "expired files purged", "count", n,
 				"expired_before", fileMetadataRetention)
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
 		}
 	}
 }

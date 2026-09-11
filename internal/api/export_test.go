@@ -107,6 +107,15 @@ func PurgeExpiredFilesForTest(ctx context.Context, pool *pgxpool.Pool, blobs blo
 	return purgeExpiredFiles(ctx, pool, blobs, retention)
 }
 
+// SetFilePurgeCleanupBudgetForTest shrinks the budget the post-commit object
+// deletes run under, so a test can drive a store that has stopped answering to
+// the end of it. At the real 30 seconds that bound is unobservable.
+func SetFilePurgeCleanupBudgetForTest(d time.Duration) (restore func()) {
+	prev := filePurgeCleanupBudget
+	filePurgeCleanupBudget = d
+	return func() { filePurgeCleanupBudget = prev }
+}
+
 // SetFilePurgeBatchForTest shrinks one sweep's batch, so a test can see which
 // rows a batch takes — at the production size every expired row fits in one and
 // the order is unobservable.

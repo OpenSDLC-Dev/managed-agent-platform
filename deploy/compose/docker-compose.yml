@@ -123,6 +123,12 @@ services:
   controlplane:
     <<: *app
     command: /controlplane
+    # The chart's terminationGracePeriodSeconds, for the same reason: an orderly
+    # exit drains HTTP and then the background sweeps, and the expired-file
+    # sweep's object deletes run detached with a 30s budget so a shutdown cannot
+    # strand objects whose rows it already removed. Compose's own default of 10s
+    # would kill that partway.
+    stop_grace_period: 60s
     environment:
       <<: *app-env
       CONTROLPLANE_API_KEY: ${CONTROLPLANE_API_KEY:?set CONTROLPLANE_API_KEY in .env}

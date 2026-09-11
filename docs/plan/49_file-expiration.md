@@ -89,8 +89,11 @@ with `expires_at` in the past, which is the published behavior; the docs tell cl
 
 ## Slice 2 — the purge
 
-`internal/api/fileretention.go`, beside `memoryretention.go` and built from it: an hourly
-ticker in the controlplane, one statement per tick.
+`internal/api/fileretention.go`, beside `memoryretention.go` and built from it: one
+statement per sweep in the controlplane, taken at startup and then hourly. (As built the
+startup sweep is the departure from `memoryretention.go`: a ticker does not fire on
+creation, so waiting first would mean a control plane restarted more often than the
+interval never swept at all.)
 
 ```
 DELETE FROM files WHERE id IN (SELECT id FROM files
