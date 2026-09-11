@@ -1338,6 +1338,12 @@ func (s *server) archiveSession(r *http.Request) (any, error) {
 	if err := tx.Commit(ctx); err != nil {
 		return nil, err
 	}
+	// An archived session's sandbox is the reaper's too, and an operator who
+	// archives rather than deletes was watching the same container linger.
+	// The dream runner's closing arm shares archiveSessionInTx, not this
+	// handler, and is left on the interval: it archives on its own schedule
+	// with nobody waiting on a response.
+	s.kickReaper(ctx, id)
 	return renderSession(row)
 }
 
@@ -1392,6 +1398,30 @@ const sessionDeleteCleanupBudget = 30 * time.Second
 // cleanup skips sit in the store until something outside this code removes
 // them, and nothing does.
 const sessionDeleteBroadcastBudget = 5 * time.Second
+
+// reapKickBudget bounds the reap kick, for the reason the broadcast budget
+// beside it gives: one NOTIFY on the pool, worth waiting a moment for and
+// never worth holding a response open on.
+const reapKickBudget = 5 * time.Second
+
+// kickReaper asks whichever executors are listening to sweep their sandboxes
+// now rather than at their next interval, because this session has just ended
+// (#354, plan 48). Every caller is past its commit, so the policy is the one
+// this file already applies there and it lives here rather than at each call
+// site: detached from the request, bounded, and best-effort.
+//
+// Best-effort is weaker here than it looks and that is the design. The sweep
+// reads the deleted_sessions tombstone, which the ending transaction already
+// committed; this only says look now. Losing it costs one reap interval — the
+// latency every session had before the kick existed — and never a sandbox.
+func (s *server) kickReaper(ctx context.Context, id string) {
+	kctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), reapKickBudget)
+	defer cancel()
+	if err := events.NotifyReapKick(kctx, s.pool); err != nil {
+		slog.WarnContext(ctx, "sandbox reap kick not published; teardown waits for the reap interval",
+			"session", id, "error", err)
+	}
+}
 
 // deleteSessionAfterCommitHook is a test-only seam fired between the delete's
 // commit and its terminal broadcasts; nil in production. That window is the
@@ -1533,6 +1563,14 @@ func (s *server) deleteSession(r *http.Request) (any, error) {
 			"session", id, "frames", undelivered, "children", len(liveChildren),
 			"error", firstErr)
 	}
+	// Ahead of the object cleanup below, not after it: the cleanup can spend
+	// its whole budget against a store that has stopped answering, and the
+	// sandbox this frees should not wait behind bytes. Racing that cleanup for
+	// the checkpoint object is fine — deleting a key that is already gone is
+	// nil for every backend (blob.Store's contract, and blobtest's
+	// DeleteMissingIsNil rung), which is what the reaper has always relied on
+	// arriving second.
+	s.kickReaper(ctx, id)
 	// The checkpoint blob goes with the record, best-effort for the same
 	// reason as the broadcast. Best-effort is enough because this is not the
 	// only remover: a session that still owns a sandbox is the reaper's

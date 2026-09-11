@@ -115,10 +115,18 @@ type Config struct {
 	StallTimeout time.Duration
 	// ReapInterval paces the sandbox reaper (reaper.go): one sweep of this
 	// endpoint's owned sessions per interval (EXECUTOR_REAP_INTERVAL; 0 takes
-	// the 60s default). Teardown latency is bounded by it, and nothing else
-	// destroys sandboxes, so there is no off switch — a deployment that wants
-	// slower reaping sets it longer.
+	// the 60s default). It is the floor on teardown latency, not the whole
+	// bound — a session's end also kicks the sweep (ReapKickDSN below) — and
+	// nothing else destroys sandboxes, so there is no off switch: a deployment
+	// that wants slower reaping sets it longer.
 	ReapInterval time.Duration
+	// ReapKickDSN opens the one connection the reap kick listens on, held
+	// outside the pool for as long as Run lasts so it stays clear of the
+	// nested-acquisition budget cmd/executor's pool floor guards (plan 48).
+	// Empty leaves the listener unstarted and teardown paced by ReapInterval
+	// alone, which is what every deployment had before the kick: a deployment
+	// that cannot spare the connection loses latency and nothing else.
+	ReapKickDSN string
 	// CheckpointMaxBytes budgets a workspace checkpoint (checkpoint.go): ONE
 	// measure on both sides — the framed, uncompressed tar stream, metered as
 	// capture writes it and again as restore decompresses it — so a capture
@@ -313,10 +321,15 @@ type Executor struct {
 	// kindOffset rotates step's claim order across the kinds — see step.
 	// Touched only by Run's single goroutine.
 	kindOffset int
+	// kick carries the reap wake from the listener to reapLoop. Capacity one
+	// and sent to without blocking, so a burst of ended sessions collapses
+	// into the one sweep that will see all of them rather than one apiece.
+	kick chan struct{}
 }
 
 func New(pool *pgxpool.Pool, log *events.Log, q *queue.Queue, provider sandbox.Provider, blobs blob.Store, cipher secrets.Cipher, cfg Config) *Executor {
-	e := &Executor{pool: pool, log: log, queue: q, provider: provider, blobs: blobs, cipher: cipher, cfg: cfg.withDefaults()}
+	e := &Executor{pool: pool, log: log, queue: q, provider: provider, blobs: blobs, cipher: cipher, cfg: cfg.withDefaults(),
+		kick: make(chan struct{}, 1)}
 	if cfg.TavilyAPIKey != "" {
 		e.searcher = tavily.New(cfg.WebSearchBaseURL, cfg.TavilyAPIKey)
 	}
@@ -347,7 +360,12 @@ func (e *Executor) Run(ctx context.Context) error {
 	reapCtx, cancel := context.WithCancel(ctx)
 	reapDone := make(chan struct{})
 	go func() { defer close(reapDone); e.reapLoop(reapCtx) }()
-	defer func() { cancel(); <-reapDone }()
+	// The kick listener rides the same lifetime for the same reason: it holds
+	// a connection of its own, and one outliving Run would race the caller's
+	// shutdown just as a reap pass would.
+	listenDone := make(chan struct{})
+	go func() { defer close(listenDone); e.listenReapKicks(reapCtx) }()
+	defer func() { cancel(); <-reapDone; <-listenDone }()
 	for {
 		if err := ctx.Err(); err != nil {
 			return nil

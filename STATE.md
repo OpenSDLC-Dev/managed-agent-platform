@@ -4,15 +4,16 @@ What is being worked on right now, and how far along it is — nothing else. **S
 
 ## Active work
 
-**The session-delete family** — three issues on what `deleteSession` does after its commit,
-taken in this order because each leaves ground the next stands on. No plan file: `issue-triage`
-judged #646 direct, and the other two are judged as they start.
+**The session-delete family** — three issues on what a session's end does after its commit,
+taken in this order because each leaves ground the next stands on. #646 needed no plan file
+(`issue-triage`); [plan 48](./docs/plan/48_reap-kick.md) covers #354, which retires plan 24's
+eventual-teardown decision.
 
 ## Tasks
 
 - [x] #646 — the terminal broadcasts run detached from the request, so a client that hangs up
   after the commit no longer cancels the child-termination frame every other subscriber is owed.
-- [ ] #354 — the delete does not kick the executor's reaper, so a deleted session's sandbox
-  can outlive it by a full reap interval.
+- [x] #354 — ending a session publishes a wake the executor listens for, so teardown no longer
+  waits for the reap interval. Archive too; terminate is deferred to its own issue.
 - [ ] #645 — deliverable objects the post-commit cleanup does not remove are orphaned for good;
   no tier knows their keys, so nothing retries them.

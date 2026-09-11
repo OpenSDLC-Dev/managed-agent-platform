@@ -63,9 +63,13 @@ Postgres, all coordination through it:
 | `worker` | The distributable BYOC worker for `self_hosted` environments. Same pull protocol as the executor, run on customer compute, posting `user.tool_result` — the real `ant beta:worker` works against the same API. |
 
 Processes never talk to each other directly. The brain and the executors communicate
-only through the control plane's event log and work queue — which is what makes
+through the control plane's event log and work queue, and where a poll would be too slow
+to wait for, through a Postgres `NOTIFY` that says only *look now* — the work API's long
+poll (#74) and the sandbox reaper's teardown wake (plan 48). Both are wakes over a
+connection the listener dialled out on, never an inbound surface, which is what keeps
 "customer-run worker with zero inbound network access" the same code path as the
-platform's own executor, just deployed elsewhere.
+platform's own executor, just deployed elsewhere — and both are droppable, because what
+they point at is a committed row the listener re-reads for itself.
 
 ## Execution flow
 
@@ -109,7 +113,8 @@ platform's own executor, just deployed elsewhere.
    writes on the way out instead (below).
 5. The commit that appends the result also enqueues the next `model_turn` — only once
    every tool use in the turn is answered. A brain claims it (brains wake by polling the
-   queue; Postgres LISTEN/NOTIFY serves the SSE fan-out, not the brain), replays, and
+   queue; the LISTEN/NOTIFY wakes serve the SSE fan-out, the work API's long poll and the
+   sandbox reaper — never the brain), replays, and
    continues until the model stops calling tools, then writes `session.status_idle`
    with `stop_reason.end_turn`.
 
@@ -280,9 +285,16 @@ accepted as it is for any file.
 returns, heals, or re-creates — and the **reaper in the executor is the single owner of
 destruction**, on four tiers: a session `deleted`, `archived` or `terminated`, plus an
 `idle` tier that reclaims a session idle past `EXECUTOR_SANDBOX_IDLE_TTL` with no work
-owed. It needs no cross-replica coordination, because each executor sees only its own
-daemon or namespace and reaping is idempotent; teardown is one interval behind its
-trigger, which no wire surface can observe. Before the idle tier destroys a sandbox the
+owed. It needs no cross-replica coordination, because reaping is idempotent and each
+executor lists only its own endpoint — one daemon's containers on Docker, one namespace's
+pods on Kubernetes, where the chart's replicas share a namespace and so race for the same
+pods at the cost of a redundant listing. `EXECUTOR_REAP_INTERVAL` is the floor under
+teardown latency rather than the latency itself: ending a session — deleting or archiving
+it — publishes a wake the executor holds a `LISTEN` for, on a connection outside its pool,
+and the sweep that wake triggers is the ordinary one (plan 48). The wake is allowed to be
+lost, because what the sweep reads is the tombstone the ending transaction committed;
+losing it costs one interval. None of it is observable on the wire, which exposes no
+sandbox. Before the idle tier destroys a sandbox the
 checkpoint engine captures the session's durable state — workdir, the persistent shell's
 cwd/env, the published deliverables — as one gzipped tar in object storage, and the next
 provision restores it into a fresh sandbox, so an idle-reaped session resumes where it

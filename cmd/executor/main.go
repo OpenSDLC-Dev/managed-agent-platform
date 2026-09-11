@@ -13,7 +13,10 @@
 //	                         is refused: a provision pins a session-lock
 //	                         connection and the reaper two (its lock and, mid
 //	                         memory sync, its own transaction) while their
-//	                         nested queries still need the pool
+//	                         nested queries still need the pool. One further
+//	                         connection is held outside the pool, for the reap
+//	                         kick's LISTEN, so size the server's limit for
+//	                         pool_max_conns + 1 per executor
 //	EXECUTOR_IMAGE           sandbox base image (default "debian:stable-slim")
 //	EXECUTOR_WORKDIR         working directory inside the sandbox (default
 //	                         "/workspace")
@@ -202,6 +205,9 @@ func run(ctx context.Context) error {
 		Workdir:         os.Getenv("EXECUTOR_WORKDIR"),
 		ControlplaneURL: os.Getenv("CONTROLPLANE_URL"),
 		GateImage:       os.Getenv("EXECUTOR_GATE_IMAGE"),
+		// The reap kick listens on its own connection to the same database,
+		// deliberately not one of the pool's — see the pool floor below.
+		ReapKickDSN: dsn,
 		// The same OTLP config telemetry.Run reads for this executor, handed on to
 		// each session's gate container so its egress spans reach the collector too.
 		OTelEndpoint: os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT"),
@@ -315,6 +321,13 @@ func run(ctx context.Context) error {
 	// queries (the gate-token mint and revoke, the under-lock re-reads), so
 	// a fourth connection must exist for those to ever proceed. Refuse less
 	// at startup instead of wedging silently under load.
+	//
+	// The reap kick's LISTEN is deliberately outside this number: it holds a
+	// connection of its own for the process's lifetime, opened from the same
+	// DSN, and never acquires from the pool — so it cannot participate in the
+	// nesting this floor is about, and counting it here would raise the floor
+	// to five and refuse every deployment whose DSN leaves pool_max_conns at
+	// the four-connection default (plan 48).
 	if pool.Config().MaxConns < 4 {
 		return fmt.Errorf("DATABASE_URL pool_max_conns = %d: the executor needs at least 4 connections", pool.Config().MaxConns)
 	}

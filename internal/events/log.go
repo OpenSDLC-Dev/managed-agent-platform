@@ -28,6 +28,10 @@ const (
 	channelEvents = "map_session_events"
 	channelFrames = "map_session_frames"
 	channelWork   = "map_work_items"
+	// ChannelReapKick is the executor's, not the broker's: the reaper holds
+	// its own LISTEN outside the pool, so the name is exported for it rather
+	// than dispatched here (plan 48).
+	ChannelReapKick = "map_sandbox_reap"
 )
 
 // Execer is the single pgx method NotifyWorkEnqueued needs, satisfied by a
@@ -51,6 +55,24 @@ func NotifyWorkEnqueued(ctx context.Context, db Execer, envID domain.ID) error {
 		return err
 	}
 	_, err = db.Exec(ctx, `SELECT pg_notify($1, $2)`, channelWork, string(payload))
+	return err
+}
+
+// NotifyReapKick wakes whichever executors are listening to sweep their owned
+// sandboxes now rather than at their next interval — the producer half of the
+// session-delete kick (#354, plan 48). It carries no payload on purpose. The
+// durable statement of what is owed is the deleted_sessions tombstone the
+// delete wrote in its own transaction, which every reaper re-reads and
+// re-classifies under its session lock; a session id here would be a fact the
+// consumer must not trust anyway, since the wake reaches executors that own
+// nothing of that session. So this only ever says look again, never what to do,
+// and losing it costs one interval rather than a sandbox.
+//
+// Unlike NotifyWorkEnqueued this is not meant to ride a transaction: a delete
+// that has committed must not be failed by its own wake, so callers fire it
+// afterwards on a context the client cannot cancel.
+func NotifyReapKick(ctx context.Context, db Execer) error {
+	_, err := db.Exec(ctx, `SELECT pg_notify($1, '')`, ChannelReapKick)
 	return err
 }
 
