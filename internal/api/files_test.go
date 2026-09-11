@@ -435,6 +435,7 @@ func TestFileList(t *testing.T) {
 // the reference says it is: "an opaque page cursor returned in a prior list
 // response's next_page", passed back as ?page= (anthropic-sdk-go v1.70.1
 // betafile.go BetaFileListParams.Page).
+
 // TestFileListIDs covers ?ids=, the documented batch filter: "Restrict the
 // result set to Files whose `id` is in this list. At most 100 entries (after
 // de-duplication). Mutually exclusive with `page` and `limit`. When supplied,
@@ -451,9 +452,9 @@ func TestFileListIDs(t *testing.T) {
 	}
 	stampCreatedAt(t, s, "files", ids...)
 
-	// Both spellings reach the same filter — the statuses[] precedent this repo
-	// already sets twice. The public docs write this one `ids[]`; the SDK field
-	// is `ids`.
+	// Both spellings reach the same filter, through the listParam helper the
+	// repeatable parameters on the other lists already share. The public docs
+	// write this one `ids[]`, which is also what the SDK's encoder emits.
 	for _, key := range []string{"ids", "ids[]"} {
 		status, body := s.do("GET", "/v1/files?"+key+"="+ids[0]+"&"+key+"="+ids[2], nil)
 		if status != http.StatusOK {
@@ -478,11 +479,15 @@ func TestFileListIDs(t *testing.T) {
 	if status, body := s.do("DELETE", "/v1/files/"+deleted, nil); status != http.StatusOK {
 		t.Fatalf("delete: %d %v", status, body)
 	}
-	absent := "file_0000000000000000000000ok"
+	// Alphabet-legal (idAlphabet is Crockford base32 minus i/l/o/u), so this one
+	// really is a well-formed id nothing owns: it survives the shape filter and
+	// reaches the query, which is the only way to exercise a non-empty ids set
+	// that matches nothing.
+	absent := "file_0000000000000000000000hk"
 	// The NUL arm is the one the id-grammar filter exists for (#135): an
 	// unstorable byte must never reach the bind parameter, where Postgres would
 	// answer with a 500 instead of a filtered page.
-	status, body := s.do("GET", "/v1/files?ids="+ids[1]+"&ids="+absent+"&ids=not-a-file-id&ids=file_%00"+strings.Repeat("a", 23)+"&ids="+deleted, nil)
+	status, body := s.do("GET", "/v1/files?ids="+ids[1]+"&ids="+absent+"&ids=not-a-file-id&ids=sesn_0000000000000000000000hm&ids=file_%00"+strings.Repeat("a", 23)+"&ids="+deleted, nil)
 	if status != http.StatusOK {
 		t.Fatalf("ids with misses: %d %v", status, body)
 	}
@@ -515,6 +520,24 @@ func TestFileListIDs(t *testing.T) {
 	if got := listData(t, body); len(got) != 0 {
 		t.Errorf("all-malformed ids = %v, want []: a dropped entry is not an absent filter", pageIDs(got))
 	}
+	// Not just an empty array: a regression that matched rows and then truncated
+	// them away would leave has_more true behind the same empty data.
+	if body["has_more"] != false {
+		t.Errorf("all-malformed has_more = %v, want false", body["has_more"])
+	}
+	if np := nextPage(t, body); np != "" {
+		t.Errorf("all-malformed next_page = %q, want null", np)
+	}
+
+	// An empty value is not an id: ?ids= is no filter, not a filter matching
+	// nothing, so the whole list comes back.
+	status, body = s.do("GET", "/v1/files?ids=", nil)
+	if status != http.StatusOK {
+		t.Fatalf("empty ids value: %d %v", status, body)
+	}
+	if got := listData(t, body); len(got) == 0 {
+		t.Errorf("?ids= returned an empty page, want the unfiltered list")
+	}
 
 	// De-duplication.
 	status, body = s.do("GET", "/v1/files?ids="+ids[3]+"&ids="+ids[3]+"&ids="+ids[3], nil)
@@ -545,6 +568,9 @@ func TestFileListIDs(t *testing.T) {
 		// 200 entries collapsing to 100 must pass: counting the query string
 		// rather than the set would reject this.
 		{"200 entries, 100 distinct", append(append([]string{}, hundred...), hundred...), http.StatusOK},
+		// A malformed entry is still an entry, so it consumes cap: the bound is on
+		// what the caller sent, de-duplicated, not on what resolved.
+		{"100 valid plus one malformed", append(append([]string{}, hundred...), "ids=not-a-file-id"), http.StatusBadRequest},
 	} {
 		status, body := s.do("GET", "/v1/files?"+strings.Join(tc.query, "&"), nil)
 		if status != tc.want {
@@ -591,6 +617,10 @@ func TestFileListIDs(t *testing.T) {
 		{"ids+page", "ids=" + ids[0] + "&page=" + cursor},
 		{"ids+after_id", "ids=" + ids[0] + "&after_id=" + ids[1]},
 		{"ids+before_id", "ids=" + ids[0] + "&before_id=" + ids[1]},
+		// A repeated parameter whose first value is empty must not slip past:
+		// reading only the first value would call this absent.
+		{"ids+empty-then-real limit", "ids=" + ids[0] + "&limit=&limit=2"},
+		{"ids+empty-then-real after_id", "ids=" + ids[0] + "&after_id=&after_id=" + ids[1]},
 	} {
 		if status, body := s.do("GET", "/v1/files?"+tc.query, nil); status != http.StatusBadRequest {
 			t.Errorf("%s: %d, want 400 (%v)", tc.name, status, body)

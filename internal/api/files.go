@@ -207,43 +207,70 @@ func (s *server) listFiles(r *http.Request) (any, error) {
 		return nil, errInvalid("after_id and before_id are mutually exclusive")
 	}
 
-	// ?ids[] restricts the result set to the files named. url.Values keys the
-	// bracketed spelling literally, and that is the one the SDK sends —
-	// BetaFileListParams.URLQuery pins ArrayQueryFormatBrackets, whose encoder
-	// appends "[]" to the key once per element. The bare spelling is accepted
-	// too, the statuses[] leniency this repo already applies twice.
-	idsParam := append(q["ids[]"], q["ids"]...)
-	idsSupplied := len(idsParam) > 0
+	// ?ids[] restricts the result set to the files named. listParam reads both
+	// wire spellings; the bracketed one is what the SDK sends, since
+	// BetaFileListParams.URLQuery pins ArrayQueryFormatBrackets and that encoder
+	// appends "[]" to the key once per element.
+	//
+	// An empty value is not an id, so ?ids= reads as no filter at all rather than
+	// as a filter matching nothing — the same way every other empty parameter on
+	// this route reads.
+	idsParam := listParam(q, "ids")
+	idsSupplied := false
+	for _, id := range idsParam {
+		if id != "" {
+			idsSupplied = true
+			break
+		}
+	}
 	var ids []string
 	if idsSupplied {
 		// "Mutually exclusive with page and limit", and the docs name the id
 		// cursors in the same breath: before_id/after_id are "not combinable with
-		// page or ids[]". Read the raw values rather than the parsed ones, since
-		// parsePageWith cannot tell a defaulted limit from a sent one.
-		if q.Get("page") != "" || q.Get("limit") != "" || afterID != "" || beforeID != "" {
+		// page or ids[]". Ask whether a value was sent rather than reading the
+		// first one: parsePageWith cannot tell a defaulted limit from a sent one,
+		// and q.Get would let ?limit=&limit=5 past a guard that ?limit=5 trips.
+		sent := func(key string) bool {
+			for _, v := range q[key] {
+				if v != "" {
+					return true
+				}
+			}
+			return false
+		}
+		if sent("page") || sent("limit") || sent("after_id") || sent("before_id") {
 			return nil, errInvalid("ids is not combinable with page, limit, after_id or before_id")
 		}
-		seen := make(map[string]bool, len(idsParam))
+		// The cap is checked as the set grows, so a caller sending far more
+		// entries than it allows pays for the rejection rather than for all of
+		// them. It counts entries the caller sent, de-duplicated — which is what
+		// the docs bound — so a malformed entry still consumes cap, and 100 good
+		// ids plus one typo is a 400 rather than a silently-shortened page.
+		seen := make(map[string]bool, min(len(idsParam), maxFileListIDs+1))
 		for _, id := range idsParam {
-			if seen[id] {
+			if id == "" || seen[id] {
 				continue
 			}
 			seen[id] = true
+			if len(seen) > maxFileListIDs {
+				return nil, errInvalid("ids accepts at most %d entries", maxFileListIDs)
+			}
 			// A malformed id is dropped rather than rejected. The scalar filters
 			// beside this one 400 on a bad shape (#135's "shape first"), but this
 			// parameter is documented to tolerate misses — "IDs that do not resolve
 			// to a visible File — including deleted Files — are silently omitted" —
-			// and a malformed id resolves to no visible file by definition. The
-			// price is that an all-malformed request reads as an empty page rather
-			// than an error; the id grammar is also what keeps an unstorable byte
-			// out of the bind parameter, which #135 requires either way.
+			// and a malformed id resolves to no visible file by definition.
+			//
+			// Valid is the half that carries weight: it is what keeps an unstorable
+			// byte out of the bind parameter, which #135 requires whatever the
+			// status code would be. The prefix half changes no response — a
+			// well-formed id of another resource simply matches no file row — and
+			// is here to say what this parameter takes, matching checkFileID's
+			// identical pair.
 			if !domain.ID(id).HasPrefix(domain.PrefixFile) || !domain.ID(id).Valid() {
 				continue
 			}
 			ids = append(ids, id)
-		}
-		if len(seen) > maxFileListIDs {
-			return nil, errInvalid("ids accepts at most %d entries", maxFileListIDs)
 		}
 	}
 	// The shared parser reads ?page= and ?limit= together, so this list inherits
@@ -300,6 +327,16 @@ func (s *server) listFiles(r *http.Request) (any, error) {
 		haveCursor = true
 	}
 
+	// Every entry dropped is a filter that can match nothing, so answer it here
+	// rather than asking Postgres to agree. Leaving it to the query would work —
+	// pgx binds a nil slice as a NULL array and `id = ANY(NULL)` is NULL for every
+	// row — but that makes the empty page depend on the driver's nil mapping and
+	// on three-valued logic, where the terminal-page argument below ("at most
+	// len(ids) rows can match") says nothing at all for a set of size zero.
+	if idsSupplied && len(ids) == 0 {
+		return filePageJSON{Data: []any{}}, nil
+	}
+
 	query := `SELECT id, filename, mime_type, size_bytes, downloadable, scope_type, scope_id, created_at FROM files WHERE true`
 	var args []any
 	if scopeID != "" {
@@ -309,12 +346,12 @@ func (s *server) listFiles(r *http.Request) (any, error) {
 	if idsSupplied {
 		// scope_id is not on the exclusivity list, so the two filters intersect.
 		// The page size becomes the set's own size, which is what makes this page
-		// terminal without a second rule: at most len(ids) rows can match, so the
-		// limit+1 probe below never sees an extra, has_more is false, and the
-		// next_page branch mints nothing — "the response is always a single page".
-		// An empty set after the shape filter still lands here rather than falling
-		// through to an unfiltered list, which is the whole point of tracking
-		// idsSupplied separately from len(ids).
+		// terminal without a second rule: id is the primary key and the set is
+		// de-duplicated, so at most len(ids) rows can match, the limit+1 probe
+		// below never sees an extra, has_more is false, and the next_page branch
+		// mints nothing — "the response is always a single page". The empty set is
+		// not an exception to that argument but a case it cannot speak to, which
+		// is why it returned above instead.
 		args = append(args, ids)
 		query += fmt.Sprintf(` AND id = ANY($%d)`, len(args))
 		limit = len(ids)
