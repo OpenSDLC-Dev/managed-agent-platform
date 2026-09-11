@@ -100,6 +100,31 @@ func TestMaterializeOrphanBlobNotMounted(t *testing.T) {
 	}
 }
 
+// TestMaterializeExpiredFileNotMounted: past expires_at the content route
+// answers 404, so the platform-managed half must not stream the bytes into the
+// sandbox either. Otherwise the two deployment points of one pull protocol
+// disagree — a cloud session mounts what a BYOC worker is refused (#655).
+func TestMaterializeExpiredFileNotMounted(t *testing.T) {
+	sb := &fakeSandbox{}
+	h := newHarness(t, sb)
+	h.seedFile(t, "file_expired", "expired bytes")
+	if _, err := h.pool.Exec(context.Background(),
+		`UPDATE files SET expires_at = now() - interval '1 second' WHERE id = $1`,
+		"file_expired"); err != nil {
+		t.Fatalf("expire the seeded file: %v", err)
+	}
+	mount := "/mnt/session/uploads/file_expired"
+	h.refFiles(t, [2]string{"file_expired", mount})
+
+	h.suspend(t, writeUse("out.txt", "x"))
+	if _, err := h.exec.step(context.Background()); err != nil {
+		t.Fatalf("step: %v", err)
+	}
+	if got, ok := sb.files[mount]; ok {
+		t.Errorf("an expired file must not mount, got %q", got)
+	}
+}
+
 // TestFilesMaterializeIdempotent: re-provisioning a live sandbox whose sentinel
 // matches the mounted set and whose mounts are present skips restreaming — the
 // object can change underneath and the sandbox keeps the materialized bytes.

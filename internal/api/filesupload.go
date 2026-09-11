@@ -37,7 +37,9 @@ const (
 	maxExpiresInSeconds = 7776000
 	// maxExpiresInBytes bounds the part before it is parsed at all: the field
 	// is a number, and the longest one that could ever be in range is seven
-	// digits. The slack is for a sign and for a client that pads.
+	// digits. The slack is not tolerance — a value this long is refused either
+	// way — it is so that the refusal is the range error a client can act on
+	// rather than a length error about a field whose length it never chose.
 	maxExpiresInBytes = 32
 )
 
@@ -100,7 +102,9 @@ func parseFileUpload(r *http.Request) (*fileUpload, error) {
 			continue
 		}
 		if part.FormName() != "file" {
-			return nil, errInvalid("unknown form field %q; send one file part named \"file\"", part.FormName())
+			return nil, errInvalid(
+				"unknown form field %q; this form takes a file part named \"file\" and an optional \"expires_in_seconds\"",
+				part.FormName())
 		}
 		if up != nil {
 			return nil, errInvalid("duplicate file part; send exactly one")
@@ -135,24 +139,39 @@ func parseFileUpload(r *http.Request) (*fileUpload, error) {
 // is ours (docs/DIVERGENCES.md).
 //
 // The value is bounded before it is parsed, so an enormous part is refused
-// rather than read. Nothing is trimmed: a multipart field's value is the bytes
-// between the headers and the boundary, so " 3600" is what a client sent and
-// not something to guess past, and this parser is strict everywhere else too.
+// rather than read.
+//
+// The grammar is strconv.ParseInt's, which is not quite "digits": it accepts a
+// leading sign and leading zeros, so "+3600" and "0003600" are the 3600 they
+// spell and are taken. Nothing is trimmed, though — a multipart field's value
+// is the bytes between the headers and the boundary, so " 3600" is what the
+// client sent and not something to guess past. The line is that a different
+// spelling of the same integer is the same request, while a value that is not
+// an integer is not one; both halves are pinned by tests, because neither is
+// visible in the wire error and a later drift either way would be silent.
+//
+// A number too large for an int64 is reported as out of range rather than as
+// malformed: it parsed fine, it is just not a lifetime.
 func parseExpiresIn(part *multipart.Part) (int64, error) {
 	raw, err := io.ReadAll(io.LimitReader(part, maxExpiresInBytes+1))
 	if err != nil {
 		return 0, mapFileBodyErr(err)
 	}
+	notAnInteger := errInvalid("expires_in_seconds must be an integer number of seconds")
+	outOfRange := errInvalid("expires_in_seconds must be between %d and %d",
+		minExpiresInSeconds, maxExpiresInSeconds)
 	if len(raw) > maxExpiresInBytes {
-		return 0, errInvalid("expires_in_seconds must be an integer number of seconds")
+		return 0, notAnInteger
 	}
 	secs, err := strconv.ParseInt(string(raw), 10, 64)
-	if err != nil {
-		return 0, errInvalid("expires_in_seconds must be an integer number of seconds")
+	switch {
+	case errors.Is(err, strconv.ErrRange):
+		return 0, outOfRange
+	case err != nil:
+		return 0, notAnInteger
 	}
 	if secs < minExpiresInSeconds || secs > maxExpiresInSeconds {
-		return 0, errInvalid("expires_in_seconds must be between %d and %d",
-			minExpiresInSeconds, maxExpiresInSeconds)
+		return 0, outOfRange
 	}
 	return secs, nil
 }

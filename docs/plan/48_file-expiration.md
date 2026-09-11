@@ -50,17 +50,30 @@ later make. `renderFile` reports the stored value in place of its hardcoded null
 `downloadFile` answers 404 once the instant has passed. The check goes **before** both gates
 already on the route — the management lane's `downloadable` 400 and the environment-key lane's
 mount-scope check — so one rule answers whoever asks, rather than two lanes disagreeing about
-a file that no longer has content. `fileMustExist` grows the same predicate, which is this
-platform's analogue of the docs' "A Messages request that references the file fails before
-inference": a session cannot mount a file whose content is contractually gone.
+a file that no longer has content.
+
+**That rule belongs to every reader, not to the HTTP route.** Four packages read the `files`
+table in order to hand a file's bytes to something, and each was written when a row's
+existence was the whole question — so gating the route alone would have left the
+platform-managed executor materializing bytes into a sandbox that the BYOC worker, going
+through the same route, refuses. The predicate therefore lives once, as `store.FileLiveSQL`
+beside `SessionTombstoneInsertSQL` on the schema's owner, and is composed by the session
+mount check, the executor's materialization, the brain's mounted-files block and the outcome
+rubric's validation. One reader omits it deliberately and says so: the grader's deliverables
+listing selects `scope_type = 'session'` rows, which only the outputs harvest writes, and the
+harvest sets no expiry.
+
+The mount refusal is this platform's analogue of the docs' "A Messages request that references
+the file fails before inference" — a mount is where a file reaches a model here. A session
+that outlives a file it already mounted needs no new behavior: an expired file is the same
+dangling miss a deleted one already was, counted and skipped on both halves of the pull
+protocol. What expiry does **not** do is reach into a sandbox that already holds the bytes —
+the executor's sentinel skips re-streaming a mount set that has not changed, so the residual a
+delete already leaves is the one an expiry leaves, and the registry says so in the same place.
 
 The list and the metadata route are deliberately untouched. An expired file keeps appearing
 with `expires_at` in the past, which is the published behavior; the docs tell clients to
 "compare `expires_at` to the current time to filter expired files" themselves.
-
-A session that outlives a file it already mounted meets the same 404 a deleted file gives, on
-a path the worker already has: `internal/worker/files.go` reads a 404 from the content lane as
-`not_found`, skips that mount, and materializes the rest.
 
 ## Slice 2 — the purge
 
@@ -103,7 +116,9 @@ row and the object leaves an orphan, the outcome this package already accepts ev
 - An upload without the part still answers `expires_at: null`.
 - Past `expires_at`: the content route 404s on both lanes, the metadata route and the list
   still answer, and `DELETE` still removes the row.
-- A session cannot be created mounting an expired file.
+- A session cannot be created mounting an expired file; neither half of the pull protocol
+  materializes one, the brain counts it as a miss rather than describing it, and it cannot be
+  named as an outcome rubric.
 - The sweep removes a row and its object once 30 days have passed and leaves a file one second
   short of that alone.
 - `make verify` green, coverage gate held.

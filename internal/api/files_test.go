@@ -64,7 +64,8 @@ func TestFileUploadRoundTrip(t *testing.T) {
 
 	wantFields(t, created, "id", "created_at", "filename", "mime_type", "size_bytes", "type", "downloadable", "expires_at")
 	// The reference puts expires_at on every file object and omits scope unless
-	// the file has one; an upload has neither an expiry nor a scope (#651).
+	// the file has one; this upload sends no expires_in_seconds and gets no
+	// scope (#651, and the parameter itself in #655).
 	wantNoFields(t, created, "scope")
 	id, _ := created["id"].(string)
 	if !strings.HasPrefix(id, "file_") {
@@ -83,7 +84,7 @@ func TestFileUploadRoundTrip(t *testing.T) {
 		t.Errorf("downloadable = %v, want false", created["downloadable"])
 	}
 	if created["expires_at"] != nil {
-		t.Errorf("expires_at = %v, want null: nothing this platform stores expires", created["expires_at"])
+		t.Errorf("expires_at = %v, want null: this upload requested no lifetime", created["expires_at"])
 	}
 	// size_bytes is a JSON number; the harness decodes it as float64.
 	if n, _ := created["size_bytes"].(float64); int(n) != len("%PDF-1.7 fake body") {

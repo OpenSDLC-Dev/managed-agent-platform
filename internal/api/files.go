@@ -13,6 +13,7 @@ import (
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/blob"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/store"
 	"github.com/jackc/pgx/v5"
 )
 
@@ -535,7 +536,7 @@ func (s *server) downloadFile(w http.ResponseWriter, r *http.Request) {
 	// comparing a scanned timestamp: expires_at was computed from the database's
 	// now() at upload, and no replica's clock may decide when it arrives.
 	err := s.pool.QueryRow(ctx,
-		`SELECT filename, mime_type, downloadable, expires_at IS NOT NULL AND expires_at <= now()
+		`SELECT filename, mime_type, downloadable, NOT `+store.FileLiveSQL+`
 		   FROM files WHERE id = $1`, id).
 		Scan(&filename, &mimeType, &downloadable, &expired)
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -558,6 +559,11 @@ func (s *server) downloadFile(w http.ResponseWriter, r *http.Request) {
 	// The metadata route and the list deliberately do not gain this check: an
 	// expired file keeps answering there for the documented 30 days, with
 	// expires_at in the past, until the retention sweep removes it.
+	//
+	// "Before both gates" means the two that decide whether this caller may have
+	// this file. The storage-availability 500 above is prior to all three and
+	// stays there: it answers that the deployment serves no content at all,
+	// which is true of a live file and an expired one alike.
 	if expired {
 		writeError(w, r, errNotFound("file %s not found", id))
 		return

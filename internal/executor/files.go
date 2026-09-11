@@ -15,6 +15,7 @@ import (
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/blob"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/sandbox"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/store"
 	"github.com/jackc/pgx/v5"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
@@ -152,8 +153,13 @@ func (e *Executor) materializeFile(ctx context.Context, sb sandbox.Sandbox, m fi
 	// Mounting the orphan would make the two halves disagree and contradict the
 	// documented absent-mount behavior (plan decision 2); check the row so a
 	// deleted file is the same dangling miss on both halves.
+	// An expired file is the same dangling miss as a deleted one, for the reason
+	// above: past expires_at the content route answers 404, so mounting the bytes
+	// here would make the platform-managed half serve what the BYOC half refuses
+	// (#655, plan 48).
 	var exists bool
-	err := e.pool.QueryRow(ctx, `SELECT true FROM files WHERE id = $1`, m.FileID).Scan(&exists)
+	err := e.pool.QueryRow(ctx,
+		`SELECT true FROM files WHERE id = $1 AND `+store.FileLiveSQL, m.FileID).Scan(&exists)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return fmt.Errorf("%w: %s", errFileMissing, m.FileID)
 	}

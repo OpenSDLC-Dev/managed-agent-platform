@@ -18,4 +18,4 @@
 -- `expires_at IS NOT NULL` would cost every upload a write to keep a sweep
 -- nothing waits on shorter. Add one when a deployment's sweep is measurably
 -- slow, with the measurement in hand.
-ALTER TABLE files ADD COLUMN IF NOT EXISTS expires_at timestamptz;
+ALTER TABLE files ADD COLUMN expires_at timestamptz;

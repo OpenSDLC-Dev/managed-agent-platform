@@ -17,6 +17,7 @@ import (
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/memsync"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/secrets"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/store"
 	"github.com/jackc/pgx/v5"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
@@ -779,8 +780,7 @@ func insertSessionResourceCredentials(ctx context.Context, tx pgx.Tx, sessionID 
 func fileMustExist(ctx context.Context, db querier, fileID string) error {
 	var exists bool
 	err := db.QueryRow(ctx,
-		`SELECT true FROM files
-		  WHERE id = $1 AND (expires_at IS NULL OR expires_at > now())`, fileID).Scan(&exists)
+		`SELECT true FROM files WHERE id = $1 AND `+store.FileLiveSQL, fileID).Scan(&exists)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return classified("file_not_found_error", errNotFound("file %s not found", fileID))
 	}

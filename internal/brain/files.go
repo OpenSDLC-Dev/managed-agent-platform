@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"strings"
 
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/store"
 	"github.com/jackc/pgx/v5"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/metric"
@@ -59,8 +60,11 @@ func (b *Brain) resolveFilesBlock(ctx context.Context, resourcesJSON []byte) (st
 		}
 		var filename, mimeType string
 		var size int64
+		// Expired counts as gone here too: the executor no longer materializes
+		// such a mount, so telling the model the file is there would describe a
+		// path with nothing at it (#655, plan 48).
 		err := b.pool.QueryRow(ctx,
-			`SELECT filename, mime_type, size_bytes FROM files WHERE id = $1`, m.FileID).
+			`SELECT filename, mime_type, size_bytes FROM files WHERE id = $1 AND `+store.FileLiveSQL, m.FileID).
 			Scan(&filename, &mimeType, &size)
 		if errors.Is(err, pgx.ErrNoRows) {
 			slog.WarnContext(ctx, "mounted file not injected (file gone)",
