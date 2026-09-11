@@ -193,9 +193,45 @@ func TestPlanWipeGuard(t *testing.T) {
 // Actions come out in path order whatever order the maps iterate, so a run's
 // settle and its telemetry are reproducible; a path the store would refuse is
 // never pushed and is remembered as refused; and nil maps are inputs too.
+// A memory the store already holds at a path the rules refuse — one stored
+// before ValidatePath learned to refuse it — can still have its content
+// edited. That push carries the memory's id and no path (the appliers send
+// content alone, and the route validates only a path a caller supplies), so
+// the store never sees the illegal name. Refusing it here would strand the
+// edit: nothing retries a refusal, and the next remote change overwrites it.
+//
+// Creating one is still refused, because that push has no id to carry and the
+// route would answer 400 for the path it would have to send.
+func TestPlanEditsAMemoryAtAPathTheRulesNowRefuse(t *testing.T) {
+	const p = "/legacy\u2028name.md"
+
+	res := memsync.Plan(memsync.Input{
+		Local:    map[string]string{p: "edited"},
+		Remote:   map[string]memsync.Head{p: {ID: "mem_1", SHA: "original"}},
+		Baseline: memsync.Baseline{Synced: map[string]string{p: "original"}},
+	})
+	if len(res.Actions) != 1 || res.Actions[0].Kind != memsync.Push || res.Actions[0].ID != "mem_1" {
+		t.Fatalf("actions = %+v, want one push carrying the memory's id", res.Actions)
+	}
+	if len(res.Skipped) != 0 || len(res.Next.Refused) != 0 {
+		t.Errorf("skipped = %v, refused = %v, want the edit neither skipped nor refused",
+			res.Skipped, res.Next.Refused)
+	}
+
+	if res := memsync.Plan(memsync.Input{Local: map[string]string{p: "new"}}); len(res.Actions) != 0 ||
+		len(res.Skipped) != 1 || res.Next.Refused[p] != "new" {
+		t.Errorf("a new file at that path: actions = %+v, skipped = %v, refused = %v",
+			res.Actions, res.Skipped, res.Next.Refused)
+	}
+}
+
 func TestPlanOrderAndRefusedPaths(t *testing.T) {
 	res := memsync.Plan(memsync.Input{
-		Local: map[string]string{"/z": "z", "/a": "a", "/m/n": "n", "/bad\x01": "x", "/x/../y": "y"},
+		Local: map[string]string{"/z": "z", "/a": "a", "/m/n": "n", "/bad\x01": "x", "/x/../y": "y",
+			// A path here is a filename read off a sandbox directory rather
+			// than a string a client chose, so an illegal one is a file that
+			// already exists: the refusal has to happen locally.
+			"/line\u2028sep": "s"},
 	})
 	var paths []string
 	for _, act := range res.Actions {
@@ -207,10 +243,11 @@ func TestPlanOrderAndRefusedPaths(t *testing.T) {
 	if got := strings.Join(paths, " "); got != "/a /m/n /z" {
 		t.Errorf("order = %q", got)
 	}
-	if got := len(res.Skipped); got != 2 {
+	if got := len(res.Skipped); got != 3 {
 		t.Errorf("skipped = %v", res.Skipped)
 	}
-	if res.Next.Refused["/bad\x01"] != "x" || res.Next.Refused["/x/../y"] != "y" {
+	if res.Next.Refused["/bad\x01"] != "x" || res.Next.Refused["/x/../y"] != "y" ||
+		res.Next.Refused["/line\u2028sep"] != "s" {
 		t.Errorf("refused = %v", res.Next.Refused)
 	}
 	if res.Next.Synced == nil {

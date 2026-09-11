@@ -78,8 +78,9 @@ type Result struct {
 // a remote deletion re-creates. Pull-only mode drops every write to the store
 // and otherwise decides identically, so a read-only directory still follows
 // the store's changes and deletions. A push whose bytes the store refused
-// before, or whose path the store would refuse, is skipped and stays refused
-// until the bytes change.
+// before is skipped and stays refused until the bytes change, as is a push
+// that would have to CREATE a memory at a path the rules refuse — a push
+// against a memory the store already holds is judged on its bytes alone.
 //
 // The wipe guard is the reference's own: an empty directory against a
 // baseline that remembered more than one file is a wiped mount, so everything
@@ -107,7 +108,15 @@ func Plan(in Input) Result {
 				res.Withheld++
 			case res.Next.Refused[path] == local:
 				res.Skipped = append(res.Skipped, path)
-			case ValidatePath(path) != nil:
+			// Only a push that has to CREATE the memory carries the path, so
+			// only that one needs a legal path. A push with an id sends content
+			// against the memory the store already holds — refusing it for its
+			// name would strand an edit to a memory stored before a rule
+			// tightened, and nothing retries a refusal. (An applier that finds
+			// the memory gone re-creates it, path and all; the store refuses
+			// that one, and the refusal it records lands the path here on the
+			// next run.)
+			case act.ID == "" && ValidatePath(path) != nil:
 				res.Next.Refused[path] = local
 				res.Skipped = append(res.Skipped, path)
 			default:
@@ -143,7 +152,10 @@ func Plan(in Input) Result {
 			// The store holds the baseline and the file differs from both: a
 			// local edit. (local == base is impossible here — it would equal
 			// the head, the case above.)
-			if in.PullOnly || res.Next.Refused[path] == local || ValidatePath(path) != nil {
+			// This push carries head.ID, so the path is not its business — the
+			// arm above withholds it only for PullOnly or a standing refusal,
+			// and the baseline has to survive either.
+			if in.PullOnly || res.Next.Refused[path] == local {
 				res.Next.Synced[path] = base
 			}
 			push(Action{Kind: Push, Path: path, ID: head.ID, BaselineSHA: base, LocalSHA: local})

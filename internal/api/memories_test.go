@@ -181,20 +181,22 @@ func TestMemoryPathRules(t *testing.T) {
 	store := createMemoryStore(t, s, "paths")
 
 	for name, path := range map[string]any{
-		"absent":              nil,
-		"empty":               "",
-		"no leading slash":    "notes.md",
-		"the root alone":      "/",
-		"an empty segment":    "/notes//today.md",
-		"a trailing slash":    "/notes/",
-		"a dot segment":       "/notes/./today.md",
-		"a dot-dot segment":   "/notes/../today.md",
-		"a control character": "/notes/\u0007bell.md",
-		"a format character":  "/notes/rtl\u200e.md",
-		"an NFD path":         "/cafe\u0301.md",
-		"1025 bytes":          "/" + strings.Repeat("a", 1024),
-		"the marker path":     "/.anthropic-memory-store",
-		"not a string":        42,
+		"absent":                nil,
+		"empty":                 "",
+		"no leading slash":      "notes.md",
+		"the root alone":        "/",
+		"an empty segment":      "/notes//today.md",
+		"a trailing slash":      "/notes/",
+		"a dot segment":         "/notes/./today.md",
+		"a dot-dot segment":     "/notes/../today.md",
+		"a control character":   "/notes/\u0007bell.md",
+		"a format character":    "/notes/rtl\u200e.md",
+		"a line separator":      "/notes/line\u2028break.md",
+		"a paragraph separator": "/notes/para\u2029break.md",
+		"an NFD path":           "/cafe\u0301.md",
+		"1025 bytes":            "/" + strings.Repeat("a", 1024),
+		"the marker path":       "/.anthropic-memory-store",
+		"not a string":          42,
 	} {
 		status, body := s.do(http.MethodPost, "/v1/memory_stores/"+store+"/memories",
 			map[string]any{"path": path, "content": ""})
@@ -210,7 +212,7 @@ func TestMemoryPathRules(t *testing.T) {
 
 	// The same rules hold on a rename.
 	id := createMemory(t, s, store, "/renamable.md", "x")["id"].(string)
-	for _, path := range []string{"relative.md", "/a//b", "/..", "/.anthropic-memory-store"} {
+	for _, path := range []string{"relative.md", "/a//b", "/..", "/.anthropic-memory-store", "/re\u2028named.md"} {
 		status, body := s.do(http.MethodPost, "/v1/memory_stores/"+store+"/memories/"+id,
 			map[string]any{"path": path})
 		if status != http.StatusBadRequest {

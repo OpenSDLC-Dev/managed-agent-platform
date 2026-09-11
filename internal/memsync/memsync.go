@@ -51,11 +51,16 @@ const (
 	markerPath = "/.anthropic-memory-store"
 )
 
-// ValidatePath holds decision 4's path table, which is the reference's own
-// documented rule verbatim: "Must start with `/`, contain at least one
-// non-empty segment, and be at most 1,024 bytes. Must not contain empty
-// segments, `.` or `..` segments, control or format characters, and must be
-// NFC-normalized."
+// ValidatePath holds the reference's own documented path rule verbatim
+// (anthropic-sdk-go v1.70.1 betamemorystorememory.go:434-438): "Must start
+// with `/`, contain at least one non-empty segment, and be at most 1,024
+// bytes. Must not contain empty segments, `.` or `..` segments, control or
+// format characters, or the Unicode line and paragraph separators (U+2028,
+// U+2029), and must be NFC-normalized. Paths are case-sensitive."
+//
+// docs/plan/36_memory-stores.md decision 4 is the same table as it read at the
+// SDK version pinned then, before the separators clause: an archived plan is
+// the record of a decision, so it keeps the rule it was decided against.
 //
 // NFC is a rejection, not a normalization: the rule reads as a constraint on
 // what a client may send, and normalizing silently would hand back a path the
@@ -94,6 +99,13 @@ func ValidatePath(path string) error {
 	for _, r := range path {
 		if unicode.Is(unicode.Cc, r) || unicode.Is(unicode.Cf, r) {
 			return errors.New("path cannot contain control or format characters")
+		}
+		// The separators are their own categories — Zl and Zp — so the Cc/Cf
+		// test above does not reach them, and the rule names them separately
+		// for that reason. Matched as the two code points the rule gives
+		// rather than as their categories, which are singletons only today.
+		if r == '\u2028' || r == '\u2029' {
+			return errors.New("path cannot contain line or paragraph separators")
 		}
 	}
 	if !norm.NFC.IsNormalString(path) {
