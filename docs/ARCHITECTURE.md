@@ -288,12 +288,15 @@ destruction**, on four tiers: a session `deleted`, `archived` or `terminated`, p
 owed. It needs no cross-replica coordination, because reaping is idempotent and each
 executor lists only its own endpoint — one daemon's containers on Docker, one namespace's
 pods on Kubernetes, where the chart's replicas share a namespace and so race for the same
-pods at the cost of a redundant listing. `EXECUTOR_REAP_INTERVAL` is the floor under
-teardown latency rather than the latency itself: ending a session — deleting or archiving
-it — publishes a wake the executor holds a `LISTEN` for, on a connection outside its pool,
-and the sweep that wake triggers is the ordinary one (plan 48). The wake is allowed to be
-lost, because what the sweep reads is the tombstone the ending transaction committed;
-losing it costs one interval. None of it is observable on the wire, which exposes no
+pods at the cost of a redundant listing. `EXECUTOR_REAP_INTERVAL` is the worst case for
+teardown rather than the usual one: ending a session — deleting or archiving it —
+publishes a wake the executor holds a `LISTEN` for, on a connection outside its pool, and
+the sweep that wake triggers is the ordinary one (plan 48). The wake rides the ending
+transaction, so it reaches nobody before the row it is owed to and nobody at all if the
+ending rolls back, and it is allowed to be lost: what the sweep re-reads is that row — the
+tombstone a delete wrote, `archived_at` for an archive — so losing a wake costs one
+interval and never a sandbox. It is also not free: each wake sweeps everything every
+listening executor owns, so its cost follows the rate at which sessions end. None of it is observable on the wire, which exposes no
 sandbox. Before the idle tier destroys a sandbox the
 checkpoint engine captures the session's durable state — workdir, the persistent shell's
 cwd/env, the published deliverables — as one gzipped tar in object storage, and the next

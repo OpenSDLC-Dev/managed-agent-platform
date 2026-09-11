@@ -13,9 +13,11 @@ package executor
 //
 // Teardown is paced by the reap interval rather than delayed to it: a session's
 // end publishes a wake this package listens for (reapkick.go, plan 48), so the
-// interval is the floor under teardown latency and not the latency itself. A
-// lost wake costs one interval, which is where teardown was before the kick
-// existed. What the wire sees is unchanged either way, which is nothing — no
+// interval is the worst case for teardown and no longer the usual one. A lost
+// wake costs one interval, which is where teardown was before the kick existed.
+// A wake is also work: every listening executor sweeps everything it owns, so
+// the cost of the kick scales with the rate sessions end and, on Kubernetes,
+// with the replica count sharing the namespace. What the wire sees is unchanged either way, which is nothing — no
 // API surface exposes a sandbox's existence.
 
 import (

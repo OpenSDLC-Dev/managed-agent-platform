@@ -34,8 +34,9 @@ const (
 	ChannelReapKick = "map_sandbox_reap"
 )
 
-// Execer is the single pgx method NotifyWorkEnqueued needs, satisfied by a
-// pool and a transaction alike, so the NOTIFY can join the caller's commit.
+// Execer is the single pgx method the NOTIFY producers below need, satisfied
+// by a pool and a transaction alike, so the NOTIFY can join the caller's
+// commit.
 type Execer interface {
 	Exec(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error)
 }
@@ -68,9 +69,13 @@ func NotifyWorkEnqueued(ctx context.Context, db Execer, envID domain.ID) error {
 // nothing of that session. So this only ever says look again, never what to do,
 // and losing it costs one interval rather than a sandbox.
 //
-// Unlike NotifyWorkEnqueued this is not meant to ride a transaction: a delete
-// that has committed must not be failed by its own wake, so callers fire it
-// afterwards on a context the client cannot cancel.
+// Like NotifyWorkEnqueued it runs on the caller's db handle and is meant to
+// ride the ending transaction: Postgres delivers a NOTIFY only on commit, so
+// the wake cannot reach a reaper before the tombstone it is owed to, and an
+// ending that rolls back wakes nobody. Riding the commit is also what keeps
+// the kick off the response path — a session's end publishes it without a
+// second round trip, a budget, or a window where the commit lands and the
+// process dies before the wake goes out.
 func NotifyReapKick(ctx context.Context, db Execer) error {
 	_, err := db.Exec(ctx, `SELECT pg_notify($1, '')`, ChannelReapKick)
 	return err

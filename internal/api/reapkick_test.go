@@ -34,13 +34,20 @@ func listenReapKick(t *testing.T, pool *pgxpool.Pool) *pgx.Conn {
 	return conn
 }
 
-// awaitKick waits for one notification on the kick channel.
+// awaitKick waits for one notification on the kick channel, and holds the
+// producer to the empty payload the consumer's design depends on: a session id
+// here would be a fact the reaper must not act on, so publishing one would be
+// an invitation to read it.
 func awaitKick(t *testing.T, conn *pgx.Conn, what string) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	if _, err := conn.WaitForNotification(ctx); err != nil {
+	n, err := conn.WaitForNotification(ctx)
+	if err != nil {
 		t.Fatalf("%s published no reap kick: %v", what, err)
+	}
+	if n.Payload != "" {
+		t.Fatalf("%s published the kick with payload %q; it carries none", what, n.Payload)
 	}
 }
 
@@ -50,11 +57,12 @@ func awaitKick(t *testing.T, conn *pgx.Conn, what string) {
 // archives rather than deletes was watching the same container linger.
 func TestSessionEndKicksTheReaper(t *testing.T) {
 	for _, tc := range []struct {
-		name string
-		path func(sid string) string
+		name   string
+		method string
+		path   func(sid string) string
 	}{
-		{"delete", func(sid string) string { return "/v1/sessions/" + sid }},
-		{"archive", func(sid string) string { return "/v1/sessions/" + sid + "/archive" }},
+		{"delete", http.MethodDelete, func(sid string) string { return "/v1/sessions/" + sid }},
+		{"archive", http.MethodPost, func(sid string) string { return "/v1/sessions/" + sid + "/archive" }},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			s := newTestServer(t)
@@ -66,15 +74,39 @@ func TestSessionEndKicksTheReaper(t *testing.T) {
 			// queued for a connection that was not listening when it fired.
 			conn := listenReapKick(t, s.pool)
 
-			method := http.MethodDelete
-			if tc.name == "archive" {
-				method = http.MethodPost
-			}
-			if status, res := s.do(method, tc.path(sid), nil); status != http.StatusOK {
+			if status, res := s.do(tc.method, tc.path(sid), nil); status != http.StatusOK {
 				t.Fatalf("%s: %d %v", tc.name, status, res)
 			}
 			awaitKick(t, conn, tc.name)
 		})
+	}
+}
+
+// TestRearchivingKicksNothing: archiving is idempotent, and the second call
+// ends nothing — the stamp it would set is already there. A kick for it would
+// have every listening executor sweep everything it owns for a request that
+// changed no row, which a client polling the endpoint turns into a standing
+// load. The refusal rung below cannot cover this one: this request succeeds.
+func TestRearchivingKicksNothing(t *testing.T) {
+	s := newTestServer(t)
+	agentID, envID := fixture(t, s)
+	sid := createSession(t, s, map[string]any{
+		"agent": agentID, "environment_id": envID})["id"].(string)
+	if status, res := s.do(http.MethodPost, "/v1/sessions/"+sid+"/archive", nil); status != http.StatusOK {
+		t.Fatalf("first archive: %d %v", status, res)
+	}
+
+	// Listening only now, so the first archive's kick — which is owed and was
+	// published — is not the notification this rung could mistake for a second.
+	conn := listenReapKick(t, s.pool)
+	if status, res := s.do(http.MethodPost, "/v1/sessions/"+sid+"/archive", nil); status != http.StatusOK {
+		t.Fatalf("second archive: %d %v", status, res)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if n, err := conn.WaitForNotification(ctx); err == nil {
+		t.Fatalf("re-archiving published a reap kick: %+v", n)
 	}
 }
 

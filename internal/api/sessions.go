@@ -1338,12 +1338,6 @@ func (s *server) archiveSession(r *http.Request) (any, error) {
 	if err := tx.Commit(ctx); err != nil {
 		return nil, err
 	}
-	// An archived session's sandbox is the reaper's too, and an operator who
-	// archives rather than deletes was watching the same container linger.
-	// The dream runner's closing arm shares archiveSessionInTx, not this
-	// handler, and is left on the interval: it archives on its own schedule
-	// with nobody waiting on a response.
-	s.kickReaper(ctx, id)
 	return renderSession(row)
 }
 
@@ -1360,6 +1354,16 @@ func (s *server) archiveSessionInTx(ctx context.Context, tx pgx.Tx, id string) (
 	if err := terminateLiveChildren(ctx, tx, s.log, id); err != nil {
 		return sessionRow{}, err
 	}
+	// Read ahead of the COALESCE rather than after it, because afterwards the
+	// two cases are indistinguishable: the stamp is set either way, and an
+	// archive that changed nothing must not claim a session just ended. The
+	// row is already locked by the caller's guards, so this is one round trip
+	// and no new contention.
+	var alreadyArchived bool
+	if err := tx.QueryRow(ctx,
+		`SELECT archived_at IS NOT NULL FROM sessions WHERE id = $1`, id).Scan(&alreadyArchived); err != nil {
+		return sessionRow{}, err
+	}
 	row, err := scanSession(tx.QueryRow(ctx,
 		`UPDATE sessions SET
 		   updated_at  = CASE WHEN archived_at IS NULL THEN now() ELSE updated_at END,
@@ -1373,6 +1377,18 @@ func (s *server) archiveSessionInTx(ctx context.Context, tx pgx.Tx, id string) (
 		  WHERE session_id = $1 AND parent_thread_id IS NULL AND archived_at IS NULL`,
 		id, row.archivedAt, row.updatedAt); err != nil {
 		return sessionRow{}, err
+	}
+	// An archived session's sandbox is the reaper's too, so the ending wakes
+	// it here rather than at the handler (#354, plan 48): every caller of this
+	// function archives a session, the dream runner's closing arm included,
+	// and riding the transaction costs none of them a response. Only when this
+	// call is what archived it — re-archiving ends nothing, and a wake that
+	// reports an ending would have every executor sweep for a request that
+	// changed no row.
+	if !alreadyArchived {
+		if err := events.NotifyReapKick(ctx, tx); err != nil {
+			return sessionRow{}, err
+		}
 	}
 	return row, nil
 }
@@ -1398,30 +1414,6 @@ const sessionDeleteCleanupBudget = 30 * time.Second
 // cleanup skips sit in the store until something outside this code removes
 // them, and nothing does.
 const sessionDeleteBroadcastBudget = 5 * time.Second
-
-// reapKickBudget bounds the reap kick, for the reason the broadcast budget
-// beside it gives: one NOTIFY on the pool, worth waiting a moment for and
-// never worth holding a response open on.
-const reapKickBudget = 5 * time.Second
-
-// kickReaper asks whichever executors are listening to sweep their sandboxes
-// now rather than at their next interval, because this session has just ended
-// (#354, plan 48). Every caller is past its commit, so the policy is the one
-// this file already applies there and it lives here rather than at each call
-// site: detached from the request, bounded, and best-effort.
-//
-// Best-effort is weaker here than it looks and that is the design. The sweep
-// reads the deleted_sessions tombstone, which the ending transaction already
-// committed; this only says look now. Losing it costs one reap interval — the
-// latency every session had before the kick existed — and never a sandbox.
-func (s *server) kickReaper(ctx context.Context, id string) {
-	kctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), reapKickBudget)
-	defer cancel()
-	if err := events.NotifyReapKick(kctx, s.pool); err != nil {
-		slog.WarnContext(ctx, "sandbox reap kick not published; teardown waits for the reap interval",
-			"session", id, "error", err)
-	}
-}
 
 // deleteSessionAfterCommitHook is a test-only seam fired between the delete's
 // commit and its terminal broadcasts; nil in production. That window is the
@@ -1452,6 +1444,16 @@ func (s *server) deleteSession(r *http.Request) (any, error) {
 	// never this deployment's — and it records the environment kind because
 	// only a cloud session's sandbox is the platform's to destroy (plan 24).
 	if _, err := tx.Exec(ctx, store.SessionTombstoneInsertSQL, id); err != nil {
+		return nil, err
+	}
+	// And the wake for it, in the same transaction and next to the row it is
+	// owed to (#354, plan 48): the sandbox goes when an executor sweeps, and
+	// without this it sweeps at its next interval. Postgres holds a NOTIFY
+	// until commit, so no reaper can be woken to look for a tombstone this
+	// transaction has not yet made visible, and a delete that rolls back
+	// wakes nobody. Losing the wake costs one reap interval, never a sandbox —
+	// the tombstone is the durable statement and every sweep re-reads it.
+	if err := events.NotifyReapKick(ctx, tx); err != nil {
 		return nil, err
 	}
 	// The live children end with the session (decision 12), but their rows
@@ -1563,20 +1565,17 @@ func (s *server) deleteSession(r *http.Request) (any, error) {
 			"session", id, "frames", undelivered, "children", len(liveChildren),
 			"error", firstErr)
 	}
-	// Ahead of the object cleanup below, not after it: the cleanup can spend
-	// its whole budget against a store that has stopped answering, and the
-	// sandbox this frees should not wait behind bytes. Racing that cleanup for
-	// the checkpoint object is fine — deleting a key that is already gone is
-	// nil for every backend (blob.Store's contract, and blobtest's
-	// DeleteMissingIsNil rung), which is what the reaper has always relied on
-	// arriving second.
-	s.kickReaper(ctx, id)
 	// The checkpoint blob goes with the record, best-effort for the same
 	// reason as the broadcast. Best-effort is enough because this is not the
 	// only remover: a session that still owns a sandbox is the reaper's
 	// deleted tier, which deletes this same key before it reaps (plan 24) —
 	// this covers the session whose sandbox is already gone, which no reap
-	// pass will ever visit again. Detached from the request context: the
+	// pass will ever visit again. Both removers running at once is fine, and
+	// since the commit woke the reaper (#354) it is now the ordinary case:
+	// deleting a key that is already gone is nil for every backend
+	// (blob.Store's contract, and blobtest's DeleteMissingIsNil rung), which
+	// is what the reaper has always relied on arriving second.
+	// Detached from the request context: the
 	// commit already happened, and a client hanging up must not skip the one
 	// delete this path exists for.
 	//

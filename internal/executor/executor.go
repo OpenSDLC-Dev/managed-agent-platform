@@ -115,18 +115,23 @@ type Config struct {
 	StallTimeout time.Duration
 	// ReapInterval paces the sandbox reaper (reaper.go): one sweep of this
 	// endpoint's owned sessions per interval (EXECUTOR_REAP_INTERVAL; 0 takes
-	// the 60s default). It is the floor on teardown latency, not the whole
-	// bound — a session's end also kicks the sweep (ReapKickDSN below) — and
+	// the 60s default). It is the worst case for teardown, no longer the usual
+	// one — a session's end also kicks the sweep (ReapKickConn below) — and
 	// nothing else destroys sandboxes, so there is no off switch: a deployment
 	// that wants slower reaping sets it longer.
 	ReapInterval time.Duration
-	// ReapKickDSN opens the one connection the reap kick listens on, held
+	// ReapKickConn describes the one connection the reap kick listens on, held
 	// outside the pool for as long as Run lasts so it stays clear of the
 	// nested-acquisition budget cmd/executor's pool floor guards (plan 48).
-	// Empty leaves the listener unstarted and teardown paced by ReapInterval
+	// A parsed config rather than a DSN because the pool's is the only one
+	// that is correct: pgxpool.ParseConfig consumes the pool_* options a
+	// DATABASE_URL may carry, while pgx.ParseConfig leaves them in the startup
+	// packet, where the server rejects them as unknown settings and the
+	// listener never connects at all. Pass the pool's own — see cmd/executor.
+	// Nil leaves the listener unstarted and teardown paced by ReapInterval
 	// alone, which is what every deployment had before the kick: a deployment
 	// that cannot spare the connection loses latency and nothing else.
-	ReapKickDSN string
+	ReapKickConn *pgx.ConnConfig
 	// CheckpointMaxBytes budgets a workspace checkpoint (checkpoint.go): ONE
 	// measure on both sides — the framed, uncompressed tar stream, metered as
 	// capture writes it and again as restore decompresses it — so a capture

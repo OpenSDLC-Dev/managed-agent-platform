@@ -1,5 +1,5 @@
 ---
-status: in-progress
+status: archived
 issue: "#354"
 ---
 
@@ -83,18 +83,30 @@ way; this plan pays it.
    starvation and windowing problems, for a wake the database can deliver for
    free.
 
-2. **The producer fires after the commit, best-effort, on the detached context
-   that block already has.** The rule, stated once so it survives later edits:
-   **the kick may never fail the DELETE.** Firing inside the deleting
-   transaction cannot honour it — pgx dooms a transaction on a failed statement,
-   so a `pg_notify` error would abort a delete that had otherwise succeeded.
-   `deleteSession`'s post-commit block already exists, is already detached and
-   budgeted for exactly this class of work, and its own comment states the
-   rationale. The kick joins it.
+2. **The producer fires inside the ending transaction, beside the row the wake
+   is owed to.** The rule it has to honour: **the kick may never fail the
+   DELETE.** A `NOTIFY` inside the transaction honours it, because Postgres
+   queues the notification and delivers it only on commit — it cannot reach a
+   reaper before the tombstone is visible, it reaches nobody if the ending rolls
+   back, and it cannot fail a delete that has committed, since there is no
+   moment at which the delete is committed and the notify has not run. That is
+   the argument `NotifyWorkEnqueued` already makes in the same file, and this
+   producer now shares its contract and its `Execer`.
 
-   What that costs is a crash window between commit and notify. It degrades to
-   the ticker, which is today's behaviour, and it is the same degradation every
-   other loss mode already has.
+   Riding the commit is also what keeps the kick off the response path: no
+   second round trip, no budget, and no window in which the commit lands and the
+   process dies before the wake goes out.
+
+   *Evaluated and rejected:* firing after the commit on the detached context
+   `deleteSession` already has. The reasoning was that pgx dooms a transaction
+   on a failed statement, so an in-transaction `pg_notify` could abort a delete
+   that had otherwise succeeded. It confuses two different things — a statement
+   that fails *before* commit fails a delete that has not succeeded yet, which
+   is ordinary, and is a risk every work enqueue in this codebase already
+   takes. What the post-commit version actually cost was a synchronous 5-second
+   budget on `DELETE` and on archive, a crash window, and a second constant
+   restating the budget beside it. Both external reviewers raised it; the code
+   shipped it first and this plan records the correction rather than hiding it.
 
 3. **The wake carries no payload and is allowed to be lost.** The durable
    evidence is the `deleted_sessions` tombstone, written inside the deleting
@@ -132,21 +144,43 @@ way; this plan pays it.
    budget. The cost is one sentence in the `DATABASE_URL` doc block saying the
    executor holds one connection outside the pool.
 
+   The listener dials that connection from **the pool's parsed configuration**,
+   never from `DATABASE_URL` itself. Only `pgxpool.ParseConfig` consumes the
+   `pool_*` options a DSN may carry; `pgx.ParseConfig` leaves them in the
+   startup packet, where the server refuses the connection over a setting it
+   has never heard of (`FATAL: unrecognized configuration parameter
+   "pool_max_conns"`). Dialling the raw string would therefore break the kick
+   outright in exactly the deployments the doc block tells to tune their pool —
+   silently, since the listener's only symptom is a warning every backoff and a
+   teardown that falls back to the interval. `internal/executor`'s
+   `TestReapKickDialsThePoolsConfigNotTheDSN` pins both halves.
+
 6. **Delete and archive; not terminate.** The issue's acceptance names delete;
-   its own option 1 names "deleteSession / archive / terminate". Archive is one
-   producer call in a handler that already commits and returns, and it reaches
+   its own option 1 names "deleteSession / archive / terminate". Archive reaches
    the same `reapPass` — shipping delete-only would leave an operator who
-   archives filing this issue again. Terminate is written by the brain's
-   settlement: a second producer in a second binary, on a path with no
-   post-commit block to join. It earns its own issue rather than a rushed third
-   call site here.
+   archives filing this issue again. It publishes from `archiveSessionInTx`
+   rather than from the handler, so every caller that archives a session kicks,
+   the dream runner's closing arm included: once the wake rides the transaction
+   it costs a caller nothing, and the latency argument that would have excluded
+   the runner goes with it. Gated on the archive having actually happened —
+   the statement `COALESCE`s, so re-archiving ends nothing, and a wake for it
+   would have every listening executor sweep everything it owns for a request
+   that changed no row. Terminate is written by the brain's
+   settlement: a second producer in a second binary, on a path unlike either
+   handler. It earns its own issue rather than a rushed third call site here,
+   and that issue is #688.
 
 7. **One `Info` line the first time `LISTEN` establishes, and a `Warn` each time
-   it cannot.** Not decoration: behind a transaction-pooling proxy `LISTEN`
-   never establishes at all — `internal/events/broker.go` already says so — and
-   an inert kick is indistinguishable from a slow one from the outside. The
-   listener never faults `Run`; it reconnects with the broker's backoff and the
-   ticker remains the floor.
+   it cannot.** Not decoration: an inert kick is indistinguishable from a slow
+   one from the outside, and the deployments where it is inert are ones this
+   process cannot detect for itself — a transaction-pooling proxy that refuses
+   `LISTEN` (`internal/events/broker.go` already says so) and, worse, one that
+   accepts the statement while multiplexing away the backend that would deliver
+   the notification, where the listener believes it is covering and never hears
+   anything. The `Info` line is what an operator checks against that; a counter
+   split by wake source would make it observable rather than inspectable, and is
+   left for whoever first needs it. The listener never faults `Run`; it
+   reconnects with the broker's backoff and the ticker still covers.
 
 8. **The `Owned()` "natural shard" sentence is corrected here rather than left
    beside a kick.** `reaper.go` and `docs/ARCHITECTURE.md` both say each
@@ -164,13 +198,19 @@ way; this plan pays it.
 
 ## What this does not close
 
-- **Terminate** (decision 6) — a follow-up issue.
+- **Terminate** (decision 6) — #688.
 - **BYOC sandbox lifecycle**, which the platform reaper has never covered.
-- **The crash window** between commit and notify (decision 2). Bounded by the
-  ticker, which is today's behaviour for every session.
-- **Anything about `Owned()`'s cost**: a kicked pass is one runtime list plus the
-  classification queries per owned session, the same pass the ticker already
-  runs, now also triggered by events.
+- **The cost of a wake.** A kicked pass is one runtime list plus the
+  classification queries per owned session — the same pass the ticker already
+  runs, now also triggered by events. So the reaper's database and runtime load
+  now follows the rate at which sessions end, multiplied on Kubernetes by the
+  replicas sharing a namespace, where before it was one pass per interval
+  whatever happened. Coalescing bounds a burst, not a sustained rate; the gate
+  on re-archiving (decision 6) is what keeps a wake tied to a real ending. No
+  minimum gap between kicked sweeps is imposed, because a sweep per ended
+  session is work proportional to work, and a debounce would be a tuning knob
+  invented ahead of any evidence that the rate hurts. If it does, that is an
+  issue with a measurement attached.
 
 ## Slices
 
@@ -213,8 +253,10 @@ guard gets a mutant that dies by a named test.
   observe" — still true, and still the reason no `docs/DIVERGENCES.md` entry is
   owed (plan 24's ground truth: no Managed Agents endpoint exposes container
   existence).
-- `internal/executor/executor.go`'s `ReapInterval` comment: it is now the floor,
-  not the whole bound.
+- `internal/executor/executor.go`'s `ReapInterval` comment: it is now the worst
+  case for teardown, not the usual one.
+- `internal/sandbox/sandbox.go`'s `Owned()` comment, per decision 8 — the same
+  correction as the reaper's, at the interface the reaper reads.
 - `docs/ARCHITECTURE.md`: the sandbox-lifecycle paragraph's "one interval behind
   its trigger"; the topology sentence's enumeration, including the work-queue
   wake it already omitted; and the `Owned()` sentence per decision 8.
@@ -224,3 +266,9 @@ guard gets a mutant that dies by a named test.
   is superseded here and the supersession is recorded in this plan and the
   changelog fragment, not by retro-editing a closed plan.
 - `STATE.md` — this plan is the active work.
+
+## Closed
+
+Archived by the PR that delivered it — one commit, twelve files, every decision
+above and every acceptance rung below. What it left open is #688 (terminate) and
+the cost note above; the delivery record is `CHANGELOG.md` and `docs/HISTORY.md`.
