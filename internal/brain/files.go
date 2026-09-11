@@ -62,7 +62,7 @@ func (b *Brain) resolveFilesBlock(ctx context.Context, resourcesJSON []byte) (st
 		var size int64
 		// Expired counts as gone here too: the executor no longer materializes
 		// such a mount, so telling the model the file is there would describe a
-		// path with nothing at it (#655, plan 48).
+		// path with nothing at it (#655, plan 49).
 		err := b.pool.QueryRow(ctx,
 			`SELECT filename, mime_type, size_bytes FROM files WHERE id = $1 AND `+store.FileLiveSQL, m.FileID).
 			Scan(&filename, &mimeType, &size)

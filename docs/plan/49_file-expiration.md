@@ -1,9 +1,21 @@
 ---
-status: in-progress
+status: archived
 issue: "#655"
 ---
 
-# File expiration: the upload parameter, the grace window, and the purge (plan 48)
+# File expiration: the upload parameter, the grace window, and the purge (plan 49)
+
+> **Archived 2026-09-11, completed (#655).** Both slices landed: the parameter, the column
+> and the enforcement in PR #691, the retention sweep in the PR that archives this file. The
+> as-built shape is `store.FileLiveSQL` and its five composing readers, plus
+> `internal/api/fileretention.go`; the delivery narrative is the `changelog.d/` fragments.
+> Retained for the decisions below, chiefly why the bytes go at the purge rather than at the
+> expiry and why "GC is a non-goal" survives a sweep that deletes files.
+>
+> Numbered **48** while slice 1 was in review, which is what PR #691 and the commits under it
+> call it. An earlier-opened PR (#677, the reap kick) had claimed 48 for a plan invisible in
+> any checkout and merged first, so this one renumbered — the convention being that the
+> earlier claimant keeps the number.
 
 `POST /v1/files` refuses `expires_in_seconds` with a 400 — `parseFileUpload` admits one part
 named `file` and rejects every other name — so a client that sets the documented expiry fails
@@ -77,17 +89,31 @@ with `expires_at` in the past, which is the published behavior; the docs tell cl
 
 ## Slice 2 — the purge
 
-`internal/api/fileretention.go`, beside `memoryretention.go` and built from it: an hourly
-ticker in the controlplane, one statement per tick.
+`internal/api/fileretention.go`, beside `memoryretention.go` and built from it: one
+statement per sweep in the controlplane, taken at startup and then hourly. (As built the
+startup sweep is the departure from `memoryretention.go`: a ticker does not fire on
+creation, so waiting first would mean a control plane restarted more often than the
+interval never swept at all.)
 
 ```
-DELETE FROM files WHERE expires_at < now() - <30 days> RETURNING id
+DELETE FROM files WHERE id IN (SELECT id FROM files
+  WHERE expires_at < now() - <30 days> LIMIT <batch>) RETURNING id
 ```
 
 then a best-effort `blobs.Delete` per returned id — `deleteFile`'s order (row first, object
 after), for `deleteFile`'s reason. The DELETE is itself the claim, so two replicas never
 delete the same object twice: a row is returned to exactly one of them. A crash between the
 row and the object leaves an orphan, the outcome this package already accepts everywhere else.
+
+The batch bound is the one thing this sweep has that `memoryretention`'s does not, and the
+reason is the object delete: that sweep does nothing per row, while this one owes a network
+call for each row it removed, so an unbounded first pass over a backlog would owe as many as
+the backlog held. (It does not hold a transaction open across them — the DELETE commits when
+the statement returns, and the objects go after it, on a context the sweep's own cancellation
+cannot reach, so a shutdown mid-sweep cannot silently orphan a committed batch.) The batch is
+taken oldest-first under `FOR UPDATE SKIP LOCKED`, so a backlog drains as a queue rather than
+as an unpredictable subset, which is what makes "eventually" true, and two replicas take
+disjoint batches instead of blocking on each other.
 
 ## Decisions
 
@@ -119,6 +145,6 @@ row and the object leaves an orphan, the outcome this package already accepts ev
 - A session cannot be created mounting an expired file; neither half of the pull protocol
   materializes one, the brain counts it as a miss rather than describing it, and it cannot be
   named as an outcome rubric.
-- The sweep removes a row and its object once 30 days have passed and leaves a file one second
-  short of that alone.
+- The sweep removes a row and its object once 30 days have passed, and leaves alone both a file
+  short of that and a file with no expiry at all.
 - `make verify` green, coverage gate held.

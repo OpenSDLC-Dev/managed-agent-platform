@@ -20,6 +20,7 @@ spec:
         {{- include "map.labels" . | nindent 8 }}
         app.kubernetes.io/component: controlplane
     spec:
+      terminationGracePeriodSeconds: {{ .Values.controlplane.terminationGracePeriodSeconds }}
       serviceAccountName: {{ include "map.fullname" . }}-controlplane
       {{- include "map.imagePullSecrets" . | nindent 6 }}
       {{- include "map.cloudSQLProxy" . | nindent 6 }}

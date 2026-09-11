@@ -55,7 +55,7 @@ const maxFileListIDs = 100
 // out what it decides.
 //
 // expires_at is the upload time plus expires_in_seconds, null when the upload
-// asked for no lifetime (#655, plan 48). It is sent either way: the key is
+// asked for no lifetime (#655, plan 49). It is sent either way: the key is
 // always present, and null is the value that says "does not expire". Like the
 // skills registry, the shape is api-local (no domain.File) — the registry is
 // metadata-only.
@@ -114,8 +114,15 @@ func checkFileID(id string) error {
 
 // deleteOrphanedFile best-effort-removes an object whose database row never
 // landed (or just left). A failure here leaves a rare orphaned object, accepted
-// and documented in the plan — GC is a non-goal. It deliberately runs on the
-// request context (like the skills registry's deleteOrphanedObject): when
+// and documented in the plan — GC is a non-goal.
+//
+// That is still true, and the expired-file sweep beside it (fileretention.go)
+// is not the exception it looks like: this note is about objects whose row is
+// gone, which nothing can enumerate, while the sweep removes objects their own
+// row names, on a lifecycle the client asked for at upload.
+//
+// deleteOrphanedFile deliberately runs on the request context (like the skills
+// registry's deleteOrphanedObject): when
 // insertFile's commit fails ambiguously — a cancelled or dropped context, where
 // Postgres may in fact have committed — that same cancelled context makes this
 // delete a no-op, so a possibly-live object is preserved rather than deleted out
@@ -548,7 +555,7 @@ func (s *server) downloadFile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// "Downloading its content (GET /v1/files/{file_id}/content) returns a 404
-	// error" once expires_at has passed (public docs, plan 48). It is answered
+	// error" once expires_at has passed (public docs, plan 49). It is answered
 	// ahead of both gates below, so the two lanes agree about a file that no
 	// longer has content: without this, the management lane would keep saying
 	// "not downloadable" and the worker lane would keep serving bytes the wire

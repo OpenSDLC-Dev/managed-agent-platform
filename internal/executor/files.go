@@ -156,7 +156,7 @@ func (e *Executor) materializeFile(ctx context.Context, sb sandbox.Sandbox, m fi
 	// An expired file is the same dangling miss as a deleted one, for the reason
 	// above: past expires_at the content route answers 404, so mounting the bytes
 	// here would make the platform-managed half serve what the BYOC half refuses
-	// (#655, plan 48).
+	// (#655, plan 49).
 	var exists bool
 	err := e.pool.QueryRow(ctx,
 		`SELECT true FROM files WHERE id = $1 AND `+store.FileLiveSQL, m.FileID).Scan(&exists)

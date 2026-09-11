@@ -99,6 +99,41 @@ func SchedulerTick(ctx context.Context, pool *pgxpool.Pool, now time.Time) error
 	return newServer(pool, nil, nil).deploymentTick(ctx, now)
 }
 
+// PurgeExpiredFilesForTest drives one sweep with a window the caller chooses,
+// so the 30-day rule can be exercised in a test without 30 days or a fake
+// clock. The production window is the package's own; only the statement is
+// parameterized.
+func PurgeExpiredFilesForTest(ctx context.Context, pool *pgxpool.Pool, blobs blob.Store, retention time.Duration) (int, error) {
+	return purgeExpiredFiles(ctx, pool, blobs, retention)
+}
+
+// SetFilePurgeCleanupBudgetForTest shrinks the budget the post-commit object
+// deletes run under, so a test can drive a store that has stopped answering to
+// the end of it. At the real 30 seconds that bound is unobservable.
+func SetFilePurgeCleanupBudgetForTest(d time.Duration) (restore func()) {
+	prev := filePurgeCleanupBudget
+	filePurgeCleanupBudget = d
+	return func() { filePurgeCleanupBudget = prev }
+}
+
+// SetFilePurgeBatchForTest shrinks one sweep's batch, so a test can see which
+// rows a batch takes — at the production size every expired row fits in one and
+// the order is unobservable.
+func SetFilePurgeBatchForTest(n int) (restore func()) {
+	prev := filePurgeBatch
+	filePurgeBatch = n
+	return func() { filePurgeBatch = prev }
+}
+
+// SetFilePurgeIntervalForTest shortens the expired-file sweep's cadence so a
+// test can drive a tick without waiting an hour (SetMemoryPruneIntervalForTest's
+// reason, for the sibling sweep).
+func SetFilePurgeIntervalForTest(d time.Duration) (restore func()) {
+	prev := filePurgeInterval
+	filePurgeInterval = d
+	return func() { filePurgeInterval = prev }
+}
+
 // SetDeploymentTickIntervalForTest shortens the scheduler's cadence so the
 // one wall-clock test can watch the ticker actually fire. Test binary only.
 func SetDeploymentTickIntervalForTest(d time.Duration) (restore func()) {
