@@ -36,7 +36,7 @@ type server struct {
 	// in flight, so a gate fetching faster than the emission drains cannot
 	// stack detached goroutines (startEmission).
 	emitting sync.Map
-	// objectDeletes is this process's sweeper wake (plan 49): a delete enqueues
+	// objectDeletes is this process's sweeper wake (plan 50): a delete enqueues
 	// the object keys it orphans and then asks the sweeper to look now. Nil
 	// where no sweeper runs beside the handler, which is every test that does
 	// not care how soon the bytes go, and there it means the sweep happens on
@@ -62,7 +62,7 @@ type Option func(*server)
 func WithDreamRunner() Option { return func(s *server) { s.dreamRunner = true } }
 
 // WithObjectDeletes hands the handler the wake of the sweeper running beside it
-// (plan 49), so a delete's enqueued keys are drained now rather than at the
+// (plan 50), so a delete's enqueued keys are drained now rather than at the
 // sweeper's next interval. Without it the deployment is correct and a little
 // slower to free bytes, which is the deliberate shape of a wake that nothing
 // depends on.

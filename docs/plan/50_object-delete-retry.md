@@ -3,7 +3,7 @@ status: archived
 issue: "#645"
 ---
 
-# An object delete that fails is retried, not forgotten (plan 49)
+# An object delete that fails is retried, not forgotten (plan 50)
 
 Deleting a session removes its `files` rows transactionally and then deletes
 their objects best-effort, on the request path, under one wall-clock budget

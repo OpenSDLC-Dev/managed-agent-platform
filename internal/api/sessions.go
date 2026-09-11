@@ -1403,7 +1403,7 @@ func (s *server) archiveSessionInTx(ctx context.Context, tx pgx.Tx, id string) (
 //
 // It is now the only post-commit budget here. The object cleanup that used to
 // own the other one is gone: its keys are enqueued in the transaction and a
-// sweeper removes them (plan 49), so bytes are no longer something this
+// sweeper removes them (plan 50), so bytes are no longer something this
 // response can run out of time for. A dropped frame is the one loss on this
 // path that nothing retries — it is owed to whoever holds a stream open at this
 // moment and to nobody after, which is why it is worth a budget of its own and
@@ -1412,7 +1412,7 @@ const sessionDeleteBroadcastBudget = 5 * time.Second
 
 // deleteSessionBeforeCommitHook is a test-only seam fired after the delete has
 // enqueued its object keys and before it commits; nil in production. That
-// window is where plan 49's decision 2 lives and the only place either half of
+// window is where plan 50's decision 2 lives and the only place either half of
 // it can be seen. A row written on the transaction is invisible to every other
 // connection until the commit and one written beside it is not — and an error
 // returned here fails the delete in that same window, so the rollback half
@@ -1511,7 +1511,7 @@ func (s *server) deleteSession(r *http.Request) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	// The bytes are owed here rather than deleted here (plan 49, #645 + #320).
+	// The bytes are owed here rather than deleted here (plan 50, #645 + #320).
 	// Enqueued in this transaction, from the ids it has just taken, so the
 	// record of what is owed commits with the rows that stopped referring to
 	// it: an enqueue after the commit would leave the crash window it exists to
@@ -1565,7 +1565,7 @@ func (s *server) deleteSession(r *http.Request) (any, error) {
 	// stopped answering spends. The send is non-blocking and infallible: it
 	// cannot fail a request that has already succeeded, and it is never
 	// load-bearing, bringing forward only what this replica's own interval
-	// would do anyway (plan 49).
+	// would do anyway (plan 50).
 	s.objectDeletes.Wake()
 	// Test seam: hang up on the request in exactly this window. nil in production.
 	if deleteSessionAfterCommitHook != nil {
@@ -1579,7 +1579,7 @@ func (s *server) deleteSession(r *http.Request) (any, error) {
 	// child's own stream and cross-posted to the session's.
 	//
 	// Detached from the request context — the decision the object cleanup this
-	// function used to run made first, for the reason plan 49 kept: past the commit, nothing
+	// function used to run made first, for the reason plan 50 kept: past the commit, nothing
 	// the caller does should decide what its fellow subscribers see. The two
 	// kinds are owed differently, and the child's is why this matters. A lost
 	// session.deleted still reaches its watchers a ping later, synthesized by

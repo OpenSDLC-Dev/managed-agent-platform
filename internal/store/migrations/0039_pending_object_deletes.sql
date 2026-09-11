@@ -1,4 +1,4 @@
--- Object keys a delete still owes the object store (plan 49, #645 + #320).
+-- Object keys a delete still owes the object store (plan 50, #645 + #320).
 --
 -- The request path no longer deletes objects: deleteSession enqueues here in
 -- the transaction that removes the rows, and a control-plane sweeper drains it.

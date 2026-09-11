@@ -185,7 +185,7 @@ func awaitAttempt(t *testing.T, store *refusingStore, key, what string) {
 }
 
 // TestSessionDeleteEnqueuesItsObjectsRatherThanDeletingThem: the request path
-// removes no bytes (plan 49 decision 3). What it leaves is a row per key,
+// removes no bytes (plan 50 decision 3). What it leaves is a row per key,
 // committed with the rows that stopped referring to the objects — which is what
 // makes a failed delete retryable instead of forgotten, and what a delete that
 // went on removing bytes itself would not leave.
@@ -203,7 +203,7 @@ func TestSessionDeleteEnqueuesItsObjectsRatherThanDeletingThem(t *testing.T) {
 	}
 
 	if got := store.attempts(); len(got) != 0 {
-		t.Fatalf("the request path deleted %v; plan 49 leaves every object to the sweeper", got)
+		t.Fatalf("the request path deleted %v; plan 50 leaves every object to the sweeper", got)
 	}
 	// The checkpoint key rides with the deliverables (#320): its old remover was
 	// the reaper's deleted tier, which never revisits a session whose sandbox
@@ -217,7 +217,7 @@ func TestSessionDeleteEnqueuesItsObjectsRatherThanDeletingThem(t *testing.T) {
 }
 
 // TestTheEnqueueRidesTheDeletingTransaction: the keys are written on the
-// transaction, not beside it (plan 49 decision 2). Which one it is cannot be
+// transaction, not beside it (plan 50 decision 2). Which one it is cannot be
 // seen once the delete has answered — both leave the same rows — and it decides
 // everything before that. On the transaction, the queue learns what is owed
 // exactly when the rows that referred to the objects stop existing: a delete
@@ -380,7 +380,7 @@ func TestASweepRemovesWhatADeleteCouldNot(t *testing.T) {
 // an object is still owed, so a refusal must leave it — with the attempt
 // counted, the cause on it, and the next try in the future rather than
 // immediately, which is what keeps a permanently refused key from spinning
-// (plan 49 decision 6).
+// (plan 50 decision 6).
 func TestAFailedObjectDeleteIsDeferredNotDropped(t *testing.T) {
 	store := newRefusingStore()
 	store.setRefusing(true)
@@ -665,7 +665,7 @@ func TestAHangingStoreDoesNotStopTheSweeper(t *testing.T) {
 	}
 }
 
-// TestTwoSweepersDoNotDuplicateTheStoreRoundTrips is plan 49's acceptance item
+// TestTwoSweepersDoNotDuplicateTheStoreRoundTrips is plan 50's acceptance item
 // 6, and it pins the half of that sentence a test can reach. Two replicas drain
 // one table; every key must reach the store exactly once, which is what the
 // claim buys — it pushes next_attempt_at past the pass that took it, and the

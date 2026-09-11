@@ -732,7 +732,7 @@ func TestSessionArchiveAndDelete(t *testing.T) {
 // message are ours — INFERRED in docs/DIVERGENCES.md.
 // A deleted session's workspace checkpoint goes with the record, by the same
 // route as its deliverables: enqueued in the deleting transaction and removed
-// by the sweeper (plan 49). It used to be a best-effort delete on the request
+// by the sweeper (plan 50). It used to be a best-effort delete on the request
 // path, excused by the reaper's deleted tier being a second remover — but a
 // reap pass visits only what provider.Owned() still returns, so a session whose
 // sandbox the idle tier already destroyed had no second remover at all (#320).
@@ -863,7 +863,7 @@ func TestDeleteSessionRemovesTheFilesItProduced(t *testing.T) {
 		t.Fatalf("delete: %d %v", status, body)
 	}
 	// The rows went with the transaction; the bytes are owed rather than gone,
-	// because the request path stopped deleting objects (plan 49). Draining
+	// because the request path stopped deleting objects (plan 50). Draining
 	// here keeps this rung about which files a delete takes and which it leaves
 	// — the question it was written for — rather than about when.
 	startSweeper(t, s, s.blobs).Wake()

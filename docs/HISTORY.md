@@ -49,7 +49,7 @@ new directory and in-repo citations re-pointed in the moving PR (plan
 
 ---
 
-## An object delete that fails is retried, not forgotten (plan 49, #645 + #320) — archived 2026-09-11, delivered in one PR
+## An object delete that fails is retried, not forgotten (plan 50, #645 + #320) — archived 2026-09-12, delivered in one PR
 
 `DELETE /v1/sessions/{id}` removed a session's `files` rows in a transaction and
 then deleted their objects on the request path, best-effort, under a

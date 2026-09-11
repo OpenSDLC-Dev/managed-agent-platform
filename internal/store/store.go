@@ -96,7 +96,7 @@ const SessionTombstoneInsertSQL = `INSERT INTO deleted_sessions (id, environment
 	 ON CONFLICT (id) DO NOTHING`
 
 // PendingObjectDeleteInsertSQL enqueues object keys the caller's transaction
-// has just orphaned, for the sweeper that deletes them (plan 49). One
+// has just orphaned, for the sweeper that deletes them (plan 50). One
 // definition on the schema's owner for the same reason as the tombstone above:
 // the producer and the consumer are in different packages and must agree on
 // the shape exactly.

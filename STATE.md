@@ -5,7 +5,7 @@ What is being worked on right now, and how far along it is — nothing else. **S
 ## Active work
 
 **None.** The session-delete family (#646, #354, #645) closed 2026-09-12, the last stream in
-flight; [plan 48](./docs/plan/48_reap-kick.md) and [plan 49](./docs/plan/49_object-delete-retry.md)
+flight; [plan 48](./docs/plan/48_reap-kick.md) and [plan 50](./docs/plan/50_object-delete-retry.md)
 archived with it and their delivery records are in [docs/HISTORY.md](./docs/HISTORY.md). Pick the
 next piece of work from the GitHub issue backlog.
 

@@ -119,7 +119,7 @@ func checkFileID(id string) error {
 // Two things beside it now remove objects on a schedule, and neither is the
 // exception it looks like. The expired-file sweep (fileretention.go) removes
 // objects their own row still names, on a lifecycle the client asked for at
-// upload; plan 49's queue removes objects a session delete recorded before it
+// upload; plan 50's queue removes objects a session delete recorded before it
 // took their rows away. This note is about the objects left when neither
 // happened — a row that never landed — which nothing can enumerate and nothing
 // wrote down.
@@ -518,7 +518,7 @@ func (s *server) deleteFile(r *http.Request) (any, error) {
 	}
 	// The row is gone; the object follows best-effort (rare orphans accepted,
 	// GC a non-goal) — one object, one race, on a path with no snapshot behind
-	// it, which is why it is not the set a session delete owes to plan 49's
+	// it, which is why it is not the set a session delete owes to plan 50's
 	// queue. A deleted file cannot be recovered — the reference has no file
 	// archival (unlike sessions).
 	s.deleteOrphanedFile(ctx, blob.FilesKey(id))

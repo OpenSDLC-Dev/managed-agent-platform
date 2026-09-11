@@ -236,7 +236,7 @@ func run(ctx context.Context) error {
 	}
 	// Shared by the handler that enqueues orphaned object keys and the sweeper
 	// below that deletes them, so a delete's bytes go now rather than at the
-	// sweeper's next interval (plan 49).
+	// sweeper's next interval (plan 50).
 	objectDeletes := api.NewObjectDeleteQueue()
 	handlerOpts = append(handlerOpts, api.WithObjectDeletes(objectDeletes))
 
@@ -250,7 +250,7 @@ func run(ctx context.Context) error {
 		IdleTimeout:       2 * time.Minute,
 	}
 	// Memory-version retention (#476), expired-file retention (#655), the
-	// deployment scheduler (plan 37), the object-delete drain (plan 49) and the
+	// deployment scheduler (plan 37), the object-delete drain (plan 50) and the
 	// dream runner (plan 41): the five background sweeps this binary runs. All
 	// are hosted here because this process already holds the pool and serves the
 	// routes they belong to, and because a deployment whose environments are all

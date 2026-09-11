@@ -13,7 +13,7 @@ import (
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/blob"
 )
 
-// The retrying half of object cleanup (plan 49, #645 and #320). A delete
+// The retrying half of object cleanup (plan 50, #645 and #320). A delete
 // enqueues the keys it orphans in its own transaction and removes no bytes
 // itself; this drains that queue, deleting each object and then the row that
 // owed it.
