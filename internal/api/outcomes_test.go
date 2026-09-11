@@ -326,6 +326,18 @@ func TestDefineOutcomeFileRubricRejections(t *testing.T) {
 	sendEvents(t, s, sid, defineOutcome("d", map[string]any{
 		"rubric": map[string]any{"type": "file", "file_id": atCap["id"].(string)},
 	}))
+
+	// An expired file is not a rubric source: the snapshot taken at acceptance
+	// would copy bytes the content route already refuses to serve (#655). The
+	// rubric lane would otherwise be the one way left to read them, since the
+	// file can be neither downloaded nor mounted.
+	expired := s.uploadFile(t, "stale.md", nil, "rubric text")
+	expire(t, s, expired["id"].(string))
+	status, res = s.do(http.MethodPost, "/v1/sessions/"+sid+"/events",
+		map[string]any{"events": []any{defineOutcome("d", map[string]any{
+			"rubric": map[string]any{"type": "file", "file_id": expired["id"].(string)},
+		})}})
+	wantErr(t, status, res, http.StatusBadRequest, "invalid_request_error")
 }
 
 // --- initial_events on POST /v1/sessions (absorbing #161) ---

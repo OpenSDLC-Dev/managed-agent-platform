@@ -4,9 +4,10 @@
 // connects and migrates, and controlplane, brain and executor each converge the
 // database at startup.
 // Query SQL is not owned here — it belongs to the packages that issue it
-// (internal/api, internal/events, internal/queue and friends). The exception
-// is SessionTombstoneInsertSQL below, which lives on the schema's owner
-// precisely because two packages must agree on it exactly.
+// (internal/api, internal/events, internal/queue and friends). The exceptions
+// are SessionTombstoneInsertSQL and FileLiveSQL below, which live on the
+// schema's owner precisely because separate packages must agree on them
+// exactly.
 //
 // Three properties of Migrate (migrate.go) are contract, not implementation
 // detail, and are what a contributor breaks by accident.
@@ -48,6 +49,39 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 )
+
+// FileLiveSQL is the predicate that says a files row still has content: it has
+// no expiry, or its expiry has not arrived (#655, plan 48). Here for
+// SessionTombstoneInsertSQL's reason, and more urgently.
+//
+// Four packages read this table to hand a file's bytes to something — api,
+// brain, executor, events — and each was written when a row's existence was the
+// whole question. When the expiry rule arrived, only api's own route was taught
+// it; the other three were found serving expired bytes in review, one of them
+// mounting into a sandbox what the HTTP route was already refusing. So the rule
+// is written once, here, rather than in each reader's SQL: a reader that
+// composes it has agreed to it, and a reader that does not has decided
+// something instead of forgetting it.
+//
+// It reads now() from the database, never a replica's clock: expires_at was
+// computed from the database's now() at upload. Unqualified, so it composes
+// into a query that aliases the table as well as one that does not.
+//
+// now() is transaction start, not statement time, so a transaction that began
+// just before an expiry and then waited on a row lock still sees the file as
+// live. That is the wanted reading rather than a gap clock_timestamp() would
+// close: a create mounting ten files judges all ten against one instant instead
+// of letting the tenth expire between statements, expires_at is itself a now()
+// value, and every other age predicate in this platform compares against now().
+// The residue is a sub-transaction race that no clock function wins — a client
+// one microsecond earlier would have been admitted anyway.
+//
+// One reader deliberately omits it, and only one: the grader's deliverables
+// listing (internal/brain/grader.go) selects `scope_type = 'session'` rows,
+// which only the outputs harvest writes, and the harvest sets no expiry — the
+// upload route is the one writer that can. Composing it there would guard a
+// state no writer can reach.
+const FileLiveSQL = `(expires_at IS NULL OR expires_at > now())`
 
 // SessionTombstoneInsertSQL writes a session's deleted_sessions tombstone —
 // id and environment kind, read while the sessions row can still be joined,

@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/store"
 	"github.com/jackc/pgx/v5"
 )
 
@@ -114,8 +115,12 @@ func ValidateDefineOutcomes(ctx context.Context, tx pgx.Tx, sessionID domain.ID,
 	d := defs[0]
 	if d.RubricType == "file" {
 		var sizeBytes int64
+		// An expired file is not a rubric source: the snapshot that follows this
+		// check copies bytes the content route already refuses to serve
+		// (#655, plan 48).
 		err := tx.QueryRow(ctx,
-			`SELECT size_bytes FROM files WHERE id = $1 FOR SHARE`, d.RubricFileID).Scan(&sizeBytes)
+			`SELECT size_bytes FROM files WHERE id = $1 AND `+store.FileLiveSQL+` FOR SHARE`,
+			d.RubricFileID).Scan(&sizeBytes)
 		if errors.Is(err, pgx.ErrNoRows) {
 			return fmt.Errorf("rubric file %s not found", d.RubricFileID)
 		}

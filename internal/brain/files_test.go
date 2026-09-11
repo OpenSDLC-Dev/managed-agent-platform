@@ -69,6 +69,36 @@ func TestResolveFilesBlock(t *testing.T) {
 	}
 }
 
+// TestResolveFilesBlockSkipsExpired: an expired mount is the same counted miss a
+// deleted one already was. The executor no longer materializes it, so telling
+// the model the file is mounted would describe a path with nothing at it (#655).
+func TestResolveFilesBlockSkipsExpired(t *testing.T) {
+	pool := pgtest.NewPool(t)
+	b := &Brain{pool: pool}
+	ctx := context.Background()
+
+	seedFileRow(t, b, "file_expired", "gone.pdf", "application/pdf", 2048)
+	if _, err := pool.Exec(ctx,
+		`UPDATE files SET expires_at = now() - interval '1 second' WHERE id = $1`,
+		"file_expired"); err != nil {
+		t.Fatalf("expire the seeded file: %v", err)
+	}
+	resources := mustResourcesJSON(t, map[string]string{
+		"type": "file", "file_id": "file_expired",
+		"mount_path": "/mnt/session/uploads/file_expired"})
+
+	block, n, misses := b.resolveFilesBlock(ctx, resources)
+	if n != 0 {
+		t.Errorf("injected = %d, want 0: an expired file has no content to describe", n)
+	}
+	if misses != 1 {
+		t.Errorf("misses = %d, want 1: an expired mount is counted like a dangling one", misses)
+	}
+	if block != "" {
+		t.Errorf("block = %q, want empty", block)
+	}
+}
+
 func seedFileRow(t *testing.T, b *Brain, id, filename, mime string, size int64) {
 	t.Helper()
 	if _, err := b.pool.Exec(context.Background(),

@@ -7,6 +7,7 @@ import (
 	"mime"
 	"mime/multipart"
 	"net/http"
+	"strconv"
 	"strings"
 	"unicode/utf8"
 
@@ -26,20 +27,49 @@ var maxFileBytes int64 = 500 << 20
 // (below), independent of this whole-body defense.
 const fileUploadHeadroom = 1 << 20
 
+// The documented bounds on expires_in_seconds: "an integer number of seconds
+// between 3,600 (1 hour) and 7,776,000 (90 days)", inclusive at both ends (the
+// API reference states them as minimum and maximum). They are enforced here,
+// where a bad value is a wire 400, rather than as a CHECK on the column, where
+// it would be a 500 at the bind (migration 0037 argues that in place).
+const (
+	minExpiresInSeconds = 3600
+	maxExpiresInSeconds = 7776000
+	// maxExpiresInBytes bounds the part before it is parsed at all: the field
+	// is a number, and the longest one that could ever be in range is seven
+	// digits. The slack is not tolerance — a value this long is refused either
+	// way — it is so that the refusal is the range error a client can act on
+	// rather than a length error about a field whose length it never chose.
+	maxExpiresInBytes = 32
+)
+
 // fileUpload is a decoded single-file multipart upload.
 type fileUpload struct {
 	filename string
 	mimeType string
 	data     []byte
+	// expiresIn is the requested lifetime in seconds, nil when the upload sent
+	// no expires_in_seconds part. It stays a lifetime rather than an instant
+	// all the way to the INSERT: the docs define expires_at as "the upload time
+	// plus that value", the upload time is the created_at Postgres stamps, and
+	// computing it here would substitute this process's clock for that one.
+	expiresIn *int64
 }
 
 // parseFileUpload reads a multipart/form-data body carrying exactly one part
-// named "file" (BetaFileUploadParams: the SDK emits one `file` part). The
-// filename comes from the part's Content-Disposition and is validated against
-// the documented rules; the MIME type is taken from the part header, falling
-// back to the filename extension. Extra, unknown, or duplicate parts are
-// rejected — the reference's strictness here is unrecorded, so this is an
-// inference (docs/DIVERGENCES.md).
+// named "file" (BetaFileUploadParams: the SDK emits one `file` part) and at
+// most one named "expires_in_seconds". The filename comes from the part's
+// Content-Disposition and is validated against the documented rules; the MIME
+// type is taken from the part header, falling back to the filename extension.
+// Extra, unknown, or duplicate parts are rejected — the reference's strictness
+// here is unrecorded, so this is an inference (docs/DIVERGENCES.md).
+//
+// The two parts may arrive in either order, because nothing decides one for a
+// client: the SDK's encoder happens to write the file first, curl writes the
+// -F flags in the order given, and a hand-rolled form writes whatever it
+// writes. RFC 7578 §5.2 asks a sender to preserve its form's order and an
+// intermediary not to reorder — neither of which tells this parser what order
+// to expect — so it depends on none.
 func parseFileUpload(r *http.Request) (*fileUpload, error) {
 	mt, params, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
 	if err != nil || mt != "multipart/form-data" || params["boundary"] == "" {
@@ -51,6 +81,7 @@ func parseFileUpload(r *http.Request) (*fileUpload, error) {
 	body := http.MaxBytesReader(nil, r.Body, maxFileBytes+fileUploadHeadroom)
 	mr := multipart.NewReader(body, params["boundary"])
 	var up *fileUpload
+	var expiresIn *int64
 	for {
 		part, err := mr.NextPart()
 		if errors.Is(err, io.EOF) {
@@ -59,8 +90,21 @@ func parseFileUpload(r *http.Request) (*fileUpload, error) {
 		if err != nil {
 			return nil, mapFileBodyErr(err)
 		}
+		if part.FormName() == "expires_in_seconds" {
+			if expiresIn != nil {
+				return nil, errInvalid("duplicate expires_in_seconds part; send at most one")
+			}
+			secs, err := parseExpiresIn(part)
+			if err != nil {
+				return nil, err
+			}
+			expiresIn = &secs
+			continue
+		}
 		if part.FormName() != "file" {
-			return nil, errInvalid("unknown form field %q; send one file part named \"file\"", part.FormName())
+			return nil, errInvalid(
+				"unknown form field %q; this form takes a file part named \"file\" and an optional \"expires_in_seconds\"",
+				part.FormName())
 		}
 		if up != nil {
 			return nil, errInvalid("duplicate file part; send exactly one")
@@ -85,7 +129,51 @@ func parseFileUpload(r *http.Request) (*fileUpload, error) {
 	if up == nil {
 		return nil, errInvalid(`no file uploaded: send one part named "file"`)
 	}
+	up.expiresIn = expiresIn
 	return up, nil
+}
+
+// parseExpiresIn reads the expires_in_seconds part: an integer in the
+// documented range. The exact wire error the reference gives for a bad value is
+// unrecorded — the docs publish the bounds and not the message — so the wording
+// is ours (docs/DIVERGENCES.md).
+//
+// The value is bounded before it is parsed, so an enormous part is refused
+// rather than read.
+//
+// The grammar is strconv.ParseInt's, which is not quite "digits": it accepts a
+// leading sign and leading zeros, so "+3600" and "0003600" are the 3600 they
+// spell and are taken. Nothing is trimmed, though — a multipart field's value
+// is the bytes between the headers and the boundary, so " 3600" is what the
+// client sent and not something to guess past. The line is that a different
+// spelling of the same integer is the same request, while a value that is not
+// an integer is not one; both halves are pinned by tests, because neither is
+// visible in the wire error and a later drift either way would be silent.
+//
+// A number too large for an int64 is reported as out of range rather than as
+// malformed: it parsed fine, it is just not a lifetime.
+func parseExpiresIn(part *multipart.Part) (int64, error) {
+	raw, err := io.ReadAll(io.LimitReader(part, maxExpiresInBytes+1))
+	if err != nil {
+		return 0, mapFileBodyErr(err)
+	}
+	notAnInteger := errInvalid("expires_in_seconds must be an integer number of seconds")
+	outOfRange := errInvalid("expires_in_seconds must be between %d and %d",
+		minExpiresInSeconds, maxExpiresInSeconds)
+	if len(raw) > maxExpiresInBytes {
+		return 0, notAnInteger
+	}
+	secs, err := strconv.ParseInt(string(raw), 10, 64)
+	switch {
+	case errors.Is(err, strconv.ErrRange):
+		return 0, outOfRange
+	case err != nil:
+		return 0, notAnInteger
+	}
+	if secs < minExpiresInSeconds || secs > maxExpiresInSeconds {
+		return 0, outOfRange
+	}
+	return secs, nil
 }
 
 // forbiddenFilenameChars are the characters the public Files docs reject in a

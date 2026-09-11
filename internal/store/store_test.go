@@ -34,7 +34,7 @@ const (
 
 // wantMigrations tracks the number of embedded migration files; bump it when
 // a migration is added.
-const wantMigrations = 36
+const wantMigrations = 37
 
 func open(t *testing.T, dsn string) *pgxpool.Pool {
 	t.Helper()
@@ -420,6 +420,53 @@ func TestFileScopePairValidatesExistingRows(t *testing.T) {
 	}
 	if err := store.Migrate(ctx, pool); err != nil {
 		t.Errorf("0036 over clean data: %v", err)
+	}
+}
+
+// TestFilesExpiresAtNoBackfill pins 0037's one claim that a fresh database
+// cannot show: a row that predates it reads as "never expires" rather than
+// being given an instant. The API suite only ever reads rows it just created,
+// so a later migration adding a DEFAULT or a backfill to this column would
+// expire every legacy upload with nothing to catch it (#655).
+func TestFilesExpiresAtNoBackfill(t *testing.T) {
+	ctx := context.Background()
+	pool, err := pgxpool.New(ctx, pgtest.FreshDB(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pool.Close()
+	if err := store.MigrateThrough(ctx, pool, "0036_files_scope_pair.sql"); err != nil {
+		t.Fatalf("migrate through 0036: %v", err)
+	}
+	if _, err := pool.Exec(ctx,
+		`INSERT INTO files (id, filename, mime_type, size_bytes)
+		 VALUES ('file_legacy', 'a.txt', 'text/plain', 1)`); err != nil {
+		t.Fatalf("seed a row under 0036: %v", err)
+	}
+	if err := store.Migrate(ctx, pool); err != nil {
+		t.Fatalf("apply 0037: %v", err)
+	}
+	var expiresAt *time.Time
+	if err := pool.QueryRow(ctx,
+		`SELECT expires_at FROM files WHERE id = 'file_legacy'`).Scan(&expiresAt); err != nil {
+		t.Fatalf("read expires_at: %v", err)
+	}
+	if expiresAt != nil {
+		t.Errorf("a pre-0037 row got expires_at = %v, want null (no backfill, no default)", *expiresAt)
+	}
+	// And a fresh insert that names no expiry gets none either — the column
+	// carries no DEFAULT.
+	if _, err := pool.Exec(ctx,
+		`INSERT INTO files (id, filename, mime_type, size_bytes)
+		 VALUES ('file_fresh', 'b.txt', 'text/plain', 1)`); err != nil {
+		t.Fatalf("insert under 0037: %v", err)
+	}
+	if err := pool.QueryRow(ctx,
+		`SELECT expires_at FROM files WHERE id = 'file_fresh'`).Scan(&expiresAt); err != nil {
+		t.Fatalf("read expires_at: %v", err)
+	}
+	if expiresAt != nil {
+		t.Errorf("a fresh row with no expiry got %v, want null", *expiresAt)
 	}
 }
 

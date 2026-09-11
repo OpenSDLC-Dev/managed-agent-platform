@@ -17,6 +17,7 @@ import (
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/memsync"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/secrets"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/store"
 	"github.com/jackc/pgx/v5"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
@@ -760,12 +761,26 @@ func insertSessionResourceCredentials(ctx context.Context, tx pgx.Tx, sessionID 
 	return nil
 }
 
-// fileMustExist reports whether a file row exists, mapping absence to the wire
-// 404. The referencing session's transaction holds no lock on the file row, so a
-// concurrent delete may still leave a dangling reference — accepted (decision 2).
+// fileMustExist reports whether a file row exists and still has content,
+// mapping absence to the wire 404. The referencing session's transaction holds
+// no lock on the file row, so a concurrent delete may still leave a dangling
+// reference — accepted (decision 2).
+//
+// An expired file is absent for this purpose: its content is contractually gone
+// (the download route 404s it), so mounting it would place a file in the
+// sandbox that the API says cannot be read. This is the local analogue of the
+// docs' "A Messages request that references the file fails before inference" —
+// that sentence is about the Messages API, which this platform does not serve,
+// and a mount is where a file reaches a model here. That the reference refuses
+// the mount too is an inference (docs/DIVERGENCES.md).
+//
+// A session that outlives a file it already mounted is a different case and
+// needs no clause: the worker reads the content lane's 404 as not_found, skips
+// that mount and materializes the rest (internal/worker/files.go).
 func fileMustExist(ctx context.Context, db querier, fileID string) error {
 	var exists bool
-	err := db.QueryRow(ctx, `SELECT true FROM files WHERE id = $1`, fileID).Scan(&exists)
+	err := db.QueryRow(ctx,
+		`SELECT true FROM files WHERE id = $1 AND `+store.FileLiveSQL, fileID).Scan(&exists)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return classified("file_not_found_error", errNotFound("file %s not found", fileID))
 	}

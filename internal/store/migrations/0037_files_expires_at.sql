@@ -1,0 +1,21 @@
+-- When a file's content stops being retrievable (#655, plan 48). NULL means
+-- never, which is every row 0008 through 0036 could produce: POST /v1/files
+-- rejected expires_in_seconds outright, so nothing in this registry had a
+-- lifetime at all.
+--
+-- Nullable with no default, and no backfill: a file uploaded before this
+-- migration was uploaded without an expiry, and null is what that means.
+--
+-- No CHECK bounding it against created_at, deliberately. The documented range
+-- (3600 to 7776000 seconds) is a bound on the *parameter*, enforced in
+-- parseFileUpload where the wire error belongs; a constraint restating it here
+-- would turn a client's bad number into a 500 at the bind and would also
+-- forbid a row the outputs harvest or a future importer might legitimately
+-- write with an instant this table has no opinion about.
+--
+-- No index either. The retention sweep (plan 48 slice 2) reads this column
+-- hourly and the rows it looks for are rare, but a partial index over
+-- `expires_at IS NOT NULL` would cost every upload a write to keep a sweep
+-- nothing waits on shorter. Add one when a deployment's sweep is measurably
+-- slow, with the measurement in hand.
+ALTER TABLE files ADD COLUMN expires_at timestamptz;
