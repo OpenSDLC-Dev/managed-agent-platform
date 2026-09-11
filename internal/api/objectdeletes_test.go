@@ -522,6 +522,94 @@ func TestABackoffOutlastsALongOutage(t *testing.T) {
 	}
 }
 
+// poisonStore refuses every delete with an error a text column cannot hold, in
+// all three shapes at once: a NUL byte, an invalid UTF-8 sequence, and enough
+// length that the bound has to cut — with a multi-byte rune straddling the cut
+// so the cut itself can make the value invalid.
+type poisonStore struct {
+	*blobtest.MemStore
+	mu        sync.Mutex
+	attempted []string
+}
+
+func (s *poisonStore) Delete(_ context.Context, key string) error {
+	s.mu.Lock()
+	s.attempted = append(s.attempted, key)
+	s.mu.Unlock()
+	// The padding is computed rather than guessed, because the two removals
+	// shorten the head and the rune has to straddle the cut *after* them: a "€"
+	// that ends up on either side of byte 500 would let a byte-wise cut pass,
+	// and the rung would agree with the code instead of checking it.
+	head := "storage said: \x00\xff "
+	survives := strings.ReplaceAll(strings.ToValidUTF8(head, ""), "\x00", "")
+	return errors.New(head + strings.Repeat("x", 498-len(survives)) + "€" +
+		strings.Repeat("y", 600))
+}
+
+func (s *poisonStore) asked() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return len(s.attempted)
+}
+
+// TestARefusalIsRecordedWhateverTheStoreSaid: the cause lands on the row even
+// when the store's message is bytes Postgres will not store. Each of the three
+// shapes fails the same way and the failure is the expensive one — the whole
+// deferral UPDATE rolls back, so the attempt goes uncounted and the key keeps
+// only its claim, which is the state a permanently refused key must never reach
+// and the one an operator reading last_error cannot diagnose, the column having
+// stopped being written.
+//
+// NUL is the one that survives a validity check: U+0000 is valid UTF-8, so
+// making the string valid is not enough on its own.
+func TestARefusalIsRecordedWhateverTheStoreSaid(t *testing.T) {
+	t.Cleanup(api.SetObjectDeleteIntervalForTest(20 * time.Millisecond))
+	store := &poisonStore{MemStore: blobtest.Mem()}
+	cipher, err := local.New(local.Config{KeyID: "test-1", Key: bytes.Repeat([]byte{7}, 32)})
+	if err != nil {
+		t.Fatalf("local.New: %v", err)
+	}
+	pool := newPoolWithKey(t)
+	srv := httptest.NewServer(api.NewHandler(pool, store, cipher, nil, api.WithDreamRunner()))
+	t.Cleanup(srv.Close)
+	s := &tserver{t: t, url: srv.URL, pool: pool, blobs: store.MemStore}
+	ctx := context.Background()
+
+	const key = "files/file_poisonedcause"
+	if _, err := pool.Exec(ctx,
+		`INSERT INTO pending_object_deletes (object_key) VALUES ($1)`, key); err != nil {
+		t.Fatalf("seed the key: %v", err)
+	}
+	startSweeper(t, s, store).Wake()
+
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		var attempts int
+		var cause *string
+		if err := pool.QueryRow(ctx,
+			`SELECT attempts, last_error FROM pending_object_deletes WHERE object_key = $1`,
+			key).Scan(&attempts, &cause); err != nil {
+			t.Fatalf("read the refused key: %v", err)
+		}
+		if attempts > 0 {
+			if cause == nil || *cause == "" {
+				t.Fatal("the refusal was counted but its cause was dropped")
+			}
+			if strings.ContainsRune(*cause, 0) {
+				t.Fatal("a NUL reached the column, which Postgres cannot hold")
+			}
+			return
+		}
+		if time.Now().After(deadline) && store.asked() > 0 {
+			t.Fatal("the store was asked and refused, but no attempt was recorded: the UPDATE carrying the cause is failing on the cause itself, so the key keeps neither its count nor its backoff")
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the store was never asked")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
 // TestAHangingStoreDoesNotStopTheSweeper: every store call is bounded, so a
 // delete that never returns is a failed attempt rather than the end of this
 // replica's cleanup. Nothing below the call supplies that bound — a blackholed

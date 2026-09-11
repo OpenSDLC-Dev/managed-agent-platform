@@ -299,21 +299,25 @@ func deferPendingObjectDelete(ctx context.Context, pool *pgxpool.Pool, key strin
 	return err
 }
 
-// truncateError bounds what a store's error can write into a row. A backend is
-// free to return a whole response body, and this column is read by an operator
-// asking what went wrong, not by anything that needs the tail.
+// truncateError makes a store's error safe to put in a text column, and bounds
+// it: a backend is free to return a whole response body, and this column is
+// read by an operator asking what went wrong, not by anything that needs the
+// tail.
 //
-// Two ways the bound can produce bytes a UTF8 database refuses, and both end
-// the same way: the defer UPDATE fails, so the key loses its count and its
-// backoff exactly as an arithmetic error would — and what caused it is the
-// store message the row exists to carry. The string is made valid first,
-// because unlike the ones internal/identity's own truncate handles, this one
-// has not been through encoding/json and a backend may hand back a raw response
-// body. Then the cut is walked back off a partial rune, which is the failure
-// that truncate documents at length.
+// Three ways the value can be bytes a UTF8 database refuses, and all three end
+// the same way — the defer UPDATE fails, so the key loses its count and its
+// backoff exactly as an arithmetic error would, and what caused that is the
+// store message the row exists to carry. Invalid sequences go first, because
+// unlike the strings internal/identity's own truncate handles, this one has not
+// been through encoding/json and a backend may hand back a raw response body.
+// NUL goes with them, and is the one that survives a validity check: U+0000 is
+// perfectly good UTF-8 and perfectly unstorable, Postgres being a C program
+// whose text values end at the first zero byte. Then the cut is walked back off
+// a partial rune, which is the failure truncate documents at length.
 func truncateError(err error) string {
 	const max = 500
 	s := strings.ToValidUTF8(err.Error(), "")
+	s = strings.ReplaceAll(s, "\x00", "")
 	if len(s) <= max {
 		return s
 	}
