@@ -11,6 +11,13 @@ issue: "#55"
 > this plan's progress summary in docs/history/2026-07.md. #55 stays open for its other half —
 > git/repo mounting (`github_repository` resources). Retained for the rationale below,
 > consulted before large changes.
+>
+> **Two points below are superseded and are not authority** — an archived plan is a record,
+> not a live spec, the convention docs/DIVERGENCES.md already applies to decision 6. The
+> endpoint table says `GET /v1/files` carries no `next_page`; it does, and so does the
+> reference's (#544). The objects section says an upload renders `scope: null`; the key is
+> omitted when a file has no scope, on both sides (#651). docs/DIVERGENCES.md holds the
+> current reading of each, with the recording behind it.
 
 This plan lifts the **Files half of #55** out of its reserved seam: the wire-compatible
 `/v1/files` registry over the existing object-storage layer, session `resources[]`

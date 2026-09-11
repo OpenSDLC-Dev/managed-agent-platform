@@ -310,8 +310,19 @@ func TestFileDelete(t *testing.T) {
 
 func TestFileNotFound(t *testing.T) {
 	s := newTestServer(t)
-	// Well-formed but unknown → 404; malformed id → 404 (shape-rejected).
-	for _, id := range []string{"file_0000000000000000000000ok", "not-a-file-id", "agent_0000000000000000000000ok"} {
+	// Both ways to reach this 404, which the wire deliberately cannot tell
+	// apart. The first id is well-formed and names no row. The other three
+	// never reach a lookup at all: `o` is outside the id alphabet (Crockford
+	// base32 drops i, l, o and u), which disqualifies the two that carry it,
+	// and `not-a-file-id` has no prefix. Rejecting on shape is what keeps a
+	// byte Postgres cannot store out of a bind parameter, where it would answer
+	// 500 instead of this (#135).
+	for _, id := range []string{
+		"file_0123456789abcdefghjkmnpq",
+		"file_0000000000000000000000ok",
+		"not-a-file-id",
+		"agent_0000000000000000000000ok",
+	} {
 		status, obj := s.do("GET", "/v1/files/"+id, nil)
 		wantErr(t, status, obj, http.StatusNotFound, "not_found_error")
 	}
