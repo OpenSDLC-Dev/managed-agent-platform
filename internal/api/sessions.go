@@ -1450,9 +1450,11 @@ func (s *server) deleteSession(r *http.Request) (any, error) {
 	// an upload writes neither scope column and a dream's files carry dream_id
 	// instead. files.scope_id is polymorphic and so carries no foreign key,
 	// which is why this is by hand rather than a cascade — the checkpoint row
-	// above is deleted for the same reason (#266). That "exactly" is an
-	// invariant of the writers and not of the schema, which has neither a CHECK
-	// nor a foreign key to hold it. The ids come back because the objects they
+	// above is deleted for the same reason (#266). Since 0036 the schema does
+	// hold half of that "exactly" — the two scope columns are present together
+	// or not at all — but not the half this clause turns on: nothing pins the
+	// type's value, so a scope_id paired with some other type would still slip
+	// a DELETE that dropped `scope_type = 'session'`, which is why it stays. The ids come back because the objects they
 	// name outlive the rows; how completely those are removed after the commit
 	// is the cleanup's own paragraph below.
 	//

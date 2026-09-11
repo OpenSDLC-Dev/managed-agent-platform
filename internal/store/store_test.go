@@ -332,11 +332,10 @@ func TestEnumCheckConstraints(t *testing.T) {
 }
 
 // TestFileScopePairAgrees pins 0036's constraint: a files row carries both
-// scope columns or neither. Before it, either column could stand alone —
-// and scope_id alone was the damaging shape, because both indexes and the
-// list's ?scope_id= filter key on that column while renderFile needs the pair,
-// so the row matched a filter for a scope its own object then declined to
-// report (#659). No writer could produce it; the schema simply allowed it.
+// scope columns or neither. Before it either could stand alone, and scope_id
+// alone was the damaging shape — the argument for why is the migration's, and
+// is not repeated here (#659). No writer could produce such a row; the schema
+// simply allowed it.
 func TestFileScopePairAgrees(t *testing.T) {
 	pool := open(t, pgtest.FreshDB(t))
 	ctx := context.Background()
@@ -354,8 +353,11 @@ func TestFileScopePairAgrees(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			_, err := pool.Exec(ctx, tc.q)
 			var pgErr *pgconn.PgError
-			if !errors.As(err, &pgErr) || pgErr.Code != pgCheckViolation {
-				t.Errorf("half-set pair (%s) => %v, want check violation %s", tc.name, err, pgCheckViolation)
+			// The constraint by name, not just the SQLSTATE class: any future
+			// CHECK on this table would satisfy the code alone, and then this
+			// test would keep passing with the pairing invariant gone.
+			if !errors.As(err, &pgErr) || pgErr.Code != pgCheckViolation || pgErr.ConstraintName != "files_scope_pair_agrees" {
+				t.Errorf("half-set pair (%s) => %v, want %s from files_scope_pair_agrees", tc.name, err, pgCheckViolation)
 			}
 		})
 	}
@@ -371,6 +373,53 @@ func TestFileScopePairAgrees(t *testing.T) {
 		if _, err := pool.Exec(ctx, q); err != nil {
 			t.Errorf("valid insert rejected: %q: %v", q, err)
 		}
+	}
+}
+
+// TestFileScopePairValidatesExistingRows pins what a fresh database cannot show:
+// 0036 refuses to apply over a row that already violates it. A CHECK landed
+// NOT VALID still rejects new inserts, so TestFileScopePairAgrees would pass
+// just the same if the migration stopped validating history — and validating it
+// is the whole of that migration's argument for the lock it takes (#659).
+func TestFileScopePairValidatesExistingRows(t *testing.T) {
+	ctx := context.Background()
+	pool, err := pgxpool.New(ctx, pgtest.FreshDB(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pool.Close()
+	if err := store.MigrateThrough(ctx, pool, "0035_deployments_agent_live_idx.sql"); err != nil {
+		t.Fatalf("migrate through 0035: %v", err)
+	}
+	// Writable only under the schema before 0036, which is the point.
+	if _, err := pool.Exec(ctx,
+		`INSERT INTO files (id, filename, mime_type, size_bytes, scope_id)
+		 VALUES ('file_legacy', 'a.txt', 'text/plain', 1, 'sesn_1')`); err != nil {
+		t.Fatalf("seed a half-set row under 0035: %v", err)
+	}
+	err = store.Migrate(ctx, pool)
+	if err == nil {
+		t.Fatal("0036 applied over a violating row, want it to refuse")
+	}
+	var pgErr *pgconn.PgError
+	if !errors.As(err, &pgErr) || pgErr.Code != pgCheckViolation {
+		t.Errorf("migrate over a violating row => %v, want check violation %s", err, pgCheckViolation)
+	}
+	// All or nothing: the failed transaction must leave 0036 unrecorded.
+	var applied int
+	if err := pool.QueryRow(ctx,
+		`SELECT count(*) FROM schema_migrations WHERE version = '0036_files_scope_pair.sql'`).Scan(&applied); err != nil {
+		t.Fatalf("read schema_migrations: %v", err)
+	}
+	if applied != 0 {
+		t.Errorf("0036 recorded as applied after it failed")
+	}
+	// ...and once the row it refuses is gone, it applies.
+	if _, err := pool.Exec(ctx, `DELETE FROM files WHERE id = 'file_legacy'`); err != nil {
+		t.Fatalf("remove the violating row: %v", err)
+	}
+	if err := store.Migrate(ctx, pool); err != nil {
+		t.Errorf("0036 over clean data: %v", err)
 	}
 }
 

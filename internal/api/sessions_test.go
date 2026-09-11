@@ -803,8 +803,10 @@ func TestDeleteSessionRemovesCheckpointBlob(t *testing.T) {
 // a scope_id with another type, so nothing would fail. It is deliberately not a
 // prediction of docs/plan/42's workspace-scoped upload path, which would put
 // workspace ids in that column rather than session ids; it is the minimal row
-// that makes the clause load-bearing, and the reason to keep the clause is that
-// the schema holds this invariant with neither a CHECK nor a foreign key.
+// that makes the clause load-bearing. 0036 now pairs the two columns, so this
+// row must carry both to be writable at all — but the type's value is still
+// unpinned, deliberately, since plan 42 means to widen it, which is exactly why
+// the clause is worth keeping.
 func TestDeleteSessionRemovesTheFilesItProduced(t *testing.T) {
 	s := newTestServer(t)
 	agentID, envID := fixture(t, s)

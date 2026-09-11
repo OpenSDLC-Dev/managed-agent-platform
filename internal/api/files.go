@@ -79,10 +79,9 @@ type fileScopeJSON struct {
 
 func renderFile(id, filename, mimeType string, sizeBytes int64, downloadable bool, scopeType, scopeID *string, createdAt time.Time) fileJSON {
 	var scope *fileScopeJSON
-	// Both-or-neither is enforced in the schema since 0036, so this reads as a
-	// restatement rather than as the only thing standing between a half-set row
-	// and a file object that contradicts the ?scope_id= filter which returned it
-	// (#659). It still has to ask, because it is building a pointer.
+	// Both-or-neither is enforced in the schema since 0036, so this is a
+	// restatement rather than the only thing holding it (#659). It still has to
+	// ask, because it is building a pointer.
 	if scopeID != nil && scopeType != nil {
 		scope = &fileScopeJSON{ID: *scopeID, Type: *scopeType}
 	}
