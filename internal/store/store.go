@@ -95,6 +95,21 @@ const SessionTombstoneInsertSQL = `INSERT INTO deleted_sessions (id, environment
 	 WHERE s.id = $1
 	 ON CONFLICT (id) DO NOTHING`
 
+// PendingObjectDeleteInsertSQL enqueues object keys the caller's transaction
+// has just orphaned, for the sweeper that deletes them (plan 50). One
+// definition on the schema's owner for the same reason as the tombstone above:
+// the producer and the consumer are in different packages and must agree on
+// the shape exactly.
+//
+// One statement for the whole set, because a session's deliverables are up to
+// two hundred keys and a delete should not become two hundred round trips
+// inside a transaction that holds the session row. Conflicts are ignored: an
+// object already owed is owed once, and a key enqueued twice would otherwise
+// fail a delete that has nothing wrong with it.
+const PendingObjectDeleteInsertSQL = `INSERT INTO pending_object_deletes (object_key)
+	 SELECT unnest($1::text[])
+	 ON CONFLICT (object_key) DO NOTHING`
+
 // Open connects to the database at dsn, verifies the connection, and applies
 // any pending migrations. The returned pool is ready for use; the caller
 // closes it at process exit.

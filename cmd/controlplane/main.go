@@ -234,6 +234,11 @@ func run(ctx context.Context) error {
 	} else {
 		slog.Info("dream runner disabled; POST /v1/dreams will report the absence")
 	}
+	// Shared by the handler that enqueues orphaned object keys and the sweeper
+	// below that deletes them, so a delete's bytes go now rather than at the
+	// sweeper's next interval (plan 50).
+	objectDeletes := api.NewObjectDeleteQueue()
+	handlerOpts = append(handlerOpts, api.WithObjectDeletes(objectDeletes))
 
 	srv := &http.Server{
 		Addr:    addr,
@@ -245,15 +250,18 @@ func run(ctx context.Context) error {
 		IdleTimeout:       2 * time.Minute,
 	}
 	// Memory-version retention (#476), expired-file retention (#655), the
-	// deployment scheduler (plan 37) and the dream runner (plan 41): the four
-	// background sweeps this binary runs. All are hosted here because this
-	// process already holds the pool and serves the routes they belong to, and
-	// because a deployment whose environments are all self_hosted runs no
-	// executor to put them in. All are replica-safe: the memory statement is
-	// idempotent, the file sweep's DELETE is itself the claim, the scheduler's
-	// occurrence claim is a unique-index insert, and the runner re-reads each
-	// dream FOR UPDATE SKIP LOCKED — so a second replica costs a duplicate
-	// query, a briefly-blocked loser or a skipped row, never a wrong answer.
+	// deployment scheduler (plan 37), the object-delete drain (plan 50) and the
+	// dream runner (plan 41): the five background sweeps this binary runs. All
+	// are hosted here because this process already holds the pool and serves the
+	// routes they belong to, and because a deployment whose environments are all
+	// self_hosted runs no executor to put them in. All are replica-safe: the
+	// memory statement is idempotent, the file sweep's DELETE is itself the
+	// claim, the scheduler's occurrence claim is a unique-index insert, and the
+	// runner and the drain each claim FOR UPDATE SKIP LOCKED — so a second
+	// replica costs a duplicate query, a briefly-blocked loser or a skipped row,
+	// never a wrong answer. The drain is the one a request can hurry: a session
+	// delete wakes it in-process after its commit, and its interval is the
+	// backstop for another replica's work.
 	//
 	// Joined, for the reason the meter deregistration above is ordered: this
 	// defer is registered after `defer pool.Close()`, so LIFO drains the sweep
@@ -268,13 +276,25 @@ func run(ctx context.Context) error {
 	go func() { defer close(filesDone); api.StartFileRetention(sweepCtx, pool, blobs) }()
 	schedulerDone := make(chan struct{})
 	go func() { defer close(schedulerDone); api.StartDeploymentScheduler(sweepCtx, pool, blobs, cipher) }()
+	objectDeletesDone := make(chan struct{})
+	go func() {
+		defer close(objectDeletesDone)
+		api.StartPendingObjectDeletes(sweepCtx, pool, blobs, objectDeletes)
+	}()
 	dreamsDone := make(chan struct{})
 	if dreams.TickInterval > 0 {
 		go func() { defer close(dreamsDone); api.StartDreamRunner(sweepCtx, pool, blobs, cipher, dreams) }()
 	} else {
 		close(dreamsDone)
 	}
-	defer func() { stopSweeps(); <-retentionDone; <-filesDone; <-schedulerDone; <-dreamsDone }()
+	defer func() {
+		stopSweeps()
+		<-retentionDone
+		<-filesDone
+		<-schedulerDone
+		<-dreamsDone
+		<-objectDeletesDone
+	}()
 
 	errCh := make(chan error, 1)
 	go func() { errCh <- srv.ListenAndServe() }()

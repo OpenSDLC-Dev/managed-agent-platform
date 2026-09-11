@@ -114,22 +114,27 @@ func checkFileID(id string) error {
 
 // deleteOrphanedFile best-effort-removes an object whose database row never
 // landed (or just left). A failure here leaves a rare orphaned object, accepted
-// and documented in the plan — GC is a non-goal.
+// and documented in the plan — GC is a non-goal on this path.
 //
-// That is still true, and the expired-file sweep beside it (fileretention.go)
-// is not the exception it looks like: this note is about objects whose row is
-// gone, which nothing can enumerate, while the sweep removes objects their own
-// row names, on a lifecycle the client asked for at upload.
+// Two things beside it now remove objects on a schedule, and neither is the
+// exception it looks like. The expired-file sweep (fileretention.go) removes
+// objects their own row still names, on a lifecycle the client asked for at
+// upload; plan 50's queue removes objects a session delete recorded before it
+// took their rows away. This note is about the objects left when neither
+// happened — a row that never landed — which nothing can enumerate and nothing
+// wrote down.
 //
-// deleteOrphanedFile deliberately runs on the request context (like the skills
-// registry's deleteOrphanedObject): when
+// Not enqueuing this one is deliberate rather than an omission, because this
+// delete has to be allowed to fail. deleteOrphanedFile runs on the request
+// context (like the skills registry's deleteOrphanedObject): when
 // insertFile's commit fails ambiguously — a cancelled or dropped context, where
 // Postgres may in fact have committed — that same cancelled context makes this
 // delete a no-op, so a possibly-live object is preserved rather than deleted out
-// from under a committed row. A detached context would "fix" the benign orphan
-// leak at the cost of that data-loss risk; preserving the object is the correct
-// trade (a definite commit rejection leaves the context live, so the orphan is
-// still cleaned).
+// from under a committed row. Queueing the key instead would retry past that
+// cancellation and do precisely the damage the no-op avoids; a detached context
+// would "fix" the benign orphan leak at the same cost. Preserving the object is
+// the correct trade (a definite commit rejection leaves the context live, so
+// the orphan is still cleaned).
 func (s *server) deleteOrphanedFile(ctx context.Context, key string) {
 	if err := s.blobs.Delete(ctx, key); err != nil {
 		slog.WarnContext(ctx, "file orphaned in object storage", "key", key, "err", err)
@@ -512,8 +517,10 @@ func (s *server) deleteFile(r *http.Request) (any, error) {
 		return nil, errNotFound("file %s not found", id)
 	}
 	// The row is gone; the object follows best-effort (rare orphans accepted,
-	// GC a non-goal). A deleted file cannot be recovered — the reference has no
-	// file archival (unlike sessions).
+	// GC a non-goal) — one object, one race, on a path with no snapshot behind
+	// it, which is why it is not the set a session delete owes to plan 50's
+	// queue. A deleted file cannot be recovered — the reference has no file
+	// archival (unlike sessions).
 	s.deleteOrphanedFile(ctx, blob.FilesKey(id))
 	slog.InfoContext(ctx, "file deleted", "file_id", id)
 	return map[string]string{"id": id, "type": "file_deleted"}, nil

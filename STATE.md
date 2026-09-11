@@ -4,16 +4,11 @@ What is being worked on right now, and how far along it is — nothing else. **S
 
 ## Active work
 
-**The session-delete family** — three issues on what a session's end does after its commit,
-taken in this order because each leaves ground the next stands on. #646 needed no plan file
-(`issue-triage`); [plan 48](./docs/plan/48_reap-kick.md) covered #354 and archived with it,
-retiring plan 24's eventual-teardown decision.
+**None.** The session-delete family (#646, #354, #645) closed 2026-09-12, the last stream in
+flight; [plan 48](./docs/plan/48_reap-kick.md) and [plan 50](./docs/plan/50_object-delete-retry.md)
+archived with it and their delivery records are in [docs/HISTORY.md](./docs/HISTORY.md). Pick the
+next piece of work from the GitHub issue backlog.
 
 ## Tasks
 
-- [x] #646 — the terminal broadcasts run detached from the request, so a client that hangs up
-  after the commit no longer cancels the child-termination frame every other subscriber is owed.
-- [x] #354 — ending a session publishes a wake the executor listens for, so teardown no longer
-  waits for the reap interval. Archive too; terminate is #688.
-- [ ] #645 — deliverable objects the post-commit cleanup does not remove are orphaned for good;
-  no tier knows their keys, so nothing retries them.
+_None — no active work._

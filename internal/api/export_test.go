@@ -49,6 +49,16 @@ func SetDeleteSessionAfterCommitHookForTest(f func()) (restore func()) {
 	return func() { deleteSessionAfterCommitHook = nil }
 }
 
+// SetDeleteSessionBeforeCommitHookForTest installs a hook fired after a session
+// delete has enqueued its orphaned object keys and before it commits, so a test
+// can read the queue from another connection in that exact window and assert
+// the rows are not there yet — which is what distinguishes an enqueue that
+// rides the transaction from one that merely runs beside it. Test binary only.
+func SetDeleteSessionBeforeCommitHookForTest(f func() error) (restore func()) {
+	deleteSessionBeforeCommitHook = f
+	return func() { deleteSessionBeforeCommitHook = nil }
+}
+
 // ScrubberCleanForTest builds a scrubber from the given literal needles (in
 // order) and runs its redaction over text, so a test can assert the
 // longest-first ordering without reaching into unexported internals. Test
@@ -84,6 +94,34 @@ func SetMemoryPruneIntervalForTest(d time.Duration) (restore func()) {
 	prev := memoryPruneInterval
 	memoryPruneInterval = d
 	return func() { memoryPruneInterval = prev }
+}
+
+// SetObjectDeleteIntervalForTest shortens the object-delete sweep's cadence so
+// the one rung that must watch the interval itself fire — a key another replica
+// enqueued, which raises no wake here — need not spend a minute doing it. Test
+// binary only.
+func SetObjectDeleteIntervalForTest(d time.Duration) (restore func()) {
+	prev := objectDeleteInterval
+	objectDeleteInterval = d
+	return func() { objectDeleteInterval = prev }
+}
+
+// SetObjectDeleteBackoffForTest shortens the wait a refused key gets before it
+// is tried again, so the recovery rung can watch the store come back without
+// spending the production backoff. Test binary only.
+// SetObjectDeleteCallBudgetForTest shortens the bound on one store call, so a
+// rung can reach a store that hangs without waiting out the production budget.
+// Test binary only.
+func SetObjectDeleteCallBudgetForTest(d time.Duration) (restore func()) {
+	prev := objectDeleteCallBudget
+	objectDeleteCallBudget = d
+	return func() { objectDeleteCallBudget = prev }
+}
+
+func SetObjectDeleteBackoffForTest(base, max time.Duration) (restore func()) {
+	prevBase, prevMax := objectDeleteBackoffBase, objectDeleteBackoffMax
+	objectDeleteBackoffBase, objectDeleteBackoffMax = base, max
+	return func() { objectDeleteBackoffBase, objectDeleteBackoffMax = prevBase, prevMax }
 }
 
 // SchedulerTick runs exactly one deployment-scheduler tick against the pool

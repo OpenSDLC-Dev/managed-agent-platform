@@ -1,7 +1,6 @@
 package api_test
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -11,7 +10,6 @@ import (
 	"reflect"
 	"slices"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 
@@ -19,7 +17,6 @@ import (
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/blob"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/blob/blobtest"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
-	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/secrets/local"
 )
 
 // sessionRequiredFields is the BetaManagedAgentsSession wire surface; all
@@ -733,9 +730,12 @@ func TestSessionArchiveAndDelete(t *testing.T) {
 // Plan 24 slice 1: the reference documents that a running session cannot be
 // archived or deleted (an interrupt must land first). The reject status and
 // message are ours — INFERRED in docs/DIVERGENCES.md.
-// A deleted session's workspace checkpoint goes with the record (best-effort;
-// the reaper's deleted tier is the other remover — this path covers a session
-// whose sandbox is already gone, which no reap pass will visit again).
+// A deleted session's workspace checkpoint goes with the record, by the same
+// route as its deliverables: enqueued in the deleting transaction and removed
+// by the sweeper (plan 50). It used to be a best-effort delete on the request
+// path, excused by the reaper's deleted tier being a second remover — but a
+// reap pass visits only what provider.Owned() still returns, so a session whose
+// sandbox the idle tier already destroyed had no second remover at all (#320).
 func TestDeleteSessionRemovesCheckpointBlob(t *testing.T) {
 	s := newTestServer(t)
 	agentID, envID := fixture(t, s)
@@ -754,6 +754,10 @@ func TestDeleteSessionRemovesCheckpointBlob(t *testing.T) {
 	if status, body := s.do(http.MethodDelete, "/v1/sessions/"+id, nil); status != http.StatusOK {
 		t.Fatalf("delete: %d %v", status, body)
 	}
+	// The bytes are owed by the delete and paid by the sweeper, so the rung
+	// runs one rather than waiting for whichever replica gets there first.
+	startSweeper(t, s, s.blobs).Wake()
+	awaitDrained(t, s.pool, "the delete's enqueued checkpoint")
 	if _, _, err := s.blobs.Get(ctx, key); !errors.Is(err, blob.ErrNotFound) {
 		t.Errorf("checkpoint after delete: %v, want ErrNotFound", err)
 	}
@@ -858,6 +862,12 @@ func TestDeleteSessionRemovesTheFilesItProduced(t *testing.T) {
 	if status, body := s.do(http.MethodDelete, "/v1/sessions/"+doomed, nil); status != http.StatusOK {
 		t.Fatalf("delete: %d %v", status, body)
 	}
+	// The rows went with the transaction; the bytes are owed rather than gone,
+	// because the request path stopped deleting objects (plan 50). Draining
+	// here keeps this rung about which files a delete takes and which it leaves
+	// — the question it was written for — rather than about when.
+	startSweeper(t, s, s.blobs).Wake()
+	awaitDrained(t, s.pool, "the delete's enqueued objects")
 
 	rows := func(id string) int {
 		t.Helper()
@@ -905,84 +915,50 @@ func TestDeleteSessionRemovesTheFilesItProduced(t *testing.T) {
 	}
 }
 
-// failingDeleteBlobStore fails every Delete and records what it was asked for;
-// the rest delegates. The record is what separates "the delete survived a
-// failing store" from "the delete never asked the store anything", which look
-// the same from the response.
-type failingDeleteBlobStore struct {
-	blob.Store
-	mu       sync.Mutex
-	attempts []string
-}
-
-func (f *failingDeleteBlobStore) Delete(_ context.Context, key string) error {
-	f.mu.Lock()
-	f.attempts = append(f.attempts, key)
-	f.mu.Unlock()
-	return errors.New("storage down")
-}
-
-func (f *failingDeleteBlobStore) asked(key string) bool {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	return slices.Contains(f.attempts, key)
-}
-
-// TestDeleteSessionSurvivesCheckpointDeleteFailure: the post-commit object
-// deletes are best-effort — a failing object store must not change the delete's
-// response. The checkpoint's row (with its tombstone) is already gone, so the
-// reaper's deleted tier remains the retrying remover; the harvested
-// deliverables have no such remover and are simply orphaned (#645), which is
-// the outcome this pins rather than a 500.
+// TestDeleteSessionSurvivesABrokenObjectStore: a store that is down changes
+// nothing about what a delete does. It used to change two things — the response
+// was still a 200, but the bytes were gone for good, and the only evidence the
+// delete had ever owed them was gone with it. Now the request path never asks
+// the store at all: the rows go, the debt is recorded, and the outage is the
+// sweeper's problem (TestASweepRemovesWhatADeleteCouldNot pays it).
 //
-// The session harvests a file first, deliberately. Without one the deliverable
-// cleanup is skipped for want of anything to delete and the failing store never
-// reaches it — the test would pass whatever that code did.
-func TestDeleteSessionSurvivesCheckpointDeleteFailure(t *testing.T) {
-	cipher, err := local.New(local.Config{KeyID: "test-1", Key: bytes.Repeat([]byte{7}, 32)})
-	if err != nil {
-		t.Fatalf("local.New: %v", err)
-	}
-	pool := newPoolWithKey(t)
-	store := &failingDeleteBlobStore{Store: blobtest.Mem()}
-	srv := httptest.NewServer(api.NewHandler(pool, store, cipher, nil))
-	t.Cleanup(srv.Close)
-	s := &tserver{t: t, url: srv.URL, pool: pool}
-
+// The session harvests a file first, deliberately. Without one the delete owes
+// only a checkpoint and the rung could not tell the registry rows going from
+// there being none to go.
+func TestDeleteSessionSurvivesABrokenObjectStore(t *testing.T) {
+	store := newRefusingStore()
+	store.setRefusing(true)
+	s := newTestServerWithStore(t, store)
 	agentID, envID := fixture(t, s)
 	sess := createSession(t, s, map[string]any{"agent": agentID, "environment_id": envID})
 	id := sess["id"].(string)
-	fileID := domain.NewID("file").String()
-	if _, err := pool.Exec(context.Background(),
-		`INSERT INTO files (id, filename, mime_type, size_bytes, downloadable, scope_type, scope_id)
-		 VALUES ($1, 'report.md', 'text/markdown', 5, true, 'session', $2)`,
-		fileID, id); err != nil {
-		t.Fatalf("seed a harvested file: %v", err)
-	}
+	fileID := seedDeliverable(t, s, id, "report.md")
 
 	status, body := s.do(http.MethodDelete, "/v1/sessions/"+id, nil)
 	if status != http.StatusOK {
-		t.Fatalf("delete with a failing blob store: %d %v", status, body)
+		t.Fatalf("delete with a broken object store: %d %v", status, body)
 	}
-	// The deliverable's object was actually asked for. Without this the test
-	// cannot tell a cleanup that survived a failing store from one that gave up
-	// after the checkpoint delete failed and never reached the deliverables —
-	// the store fails both keys alike, so the response and the row look
-	// identical either way.
-	if !store.asked(blob.FilesKey(fileID)) {
-		t.Error("the delete never asked the store to remove the harvested file's object")
+	if body["id"] != id || body["type"] != "session_deleted" {
+		t.Errorf("delete response = %v, want {id: %s, type: session_deleted}", body, id)
 	}
-	// The row still went with the session: only the objects are best-effort.
+	// The rows went, and they went without the store being consulted: a delete
+	// that still reached for the bytes here would be back to failing, or
+	// silently not failing, on someone else's outage.
 	var left int
-	if err := pool.QueryRow(context.Background(),
+	if err := s.pool.QueryRow(context.Background(),
 		`SELECT count(*) FROM files WHERE scope_id = $1`, id).Scan(&left); err != nil {
 		t.Fatal(err)
 	}
 	if left != 0 {
-		t.Errorf("a failing object store left %d registry row(s) behind", left)
+		t.Errorf("a broken object store left %d registry row(s) behind", left)
 	}
-	if body["id"] != id || body["type"] != "session_deleted" {
-		t.Errorf("delete response = %v, want {id: %s, type: session_deleted}", body, id)
+	if got := store.attempts(); len(got) != 0 {
+		t.Errorf("the delete asked the broken store for %v; it should ask it for nothing", got)
+	}
+	// And the debt outlived the outage, which is the whole of #645: without the
+	// row there is nothing left to say the object was ever owed.
+	if !slices.Contains(pendingKeys(t, s.pool), blob.FilesKey(fileID)) {
+		t.Error("the delete left no record of the deliverable's object: it is orphaned")
 	}
 }
 
