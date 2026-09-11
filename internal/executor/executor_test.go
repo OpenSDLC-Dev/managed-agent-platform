@@ -331,6 +331,9 @@ type fakeProvider struct {
 	// capture-BEFORE-destroy ordering under test.
 	mu    sync.Mutex
 	owned []domain.ID
+	// ownedCalls counts reap passes: one Owned listing per pass, by
+	// construction.
+	ownedCalls int
 	// attached records every session Attach was asked about, and attachErr and
 	// running drive its answer: running is the set this endpoint holds a live
 	// sandbox for, so a test can be a session that has one without provisioning.
@@ -389,7 +392,18 @@ func (p *fakeProvider) Provision(ctx context.Context, spec sandbox.Spec) (sandbo
 func (p *fakeProvider) Owned(context.Context) ([]domain.ID, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	// Counted because a reap pass lists exactly once (reapPass), which makes
+	// this the pass counter the coalescing rung asserts on.
+	p.ownedCalls++
 	return slices.Clone(p.owned), nil
+}
+
+// ownedCallsSnapshot reads the pass count under the mutex — Run's reaper
+// goroutine increments it concurrently with a polling test.
+func (p *fakeProvider) ownedCallsSnapshot() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.ownedCalls
 }
 
 // Attach is Provision's read-only half: it creates nothing, so a session this

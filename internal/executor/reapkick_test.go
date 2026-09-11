@@ -302,26 +302,69 @@ func TestReapKickDialsThePoolsConfigNotTheDSN(t *testing.T) {
 	awaitReap(t, h, h.sid, "the sweep the listener runs when it establishes from a pool-tuned DSN")
 }
 
-// TestReapKicksCoalesce: the wake channel holds one request, so a burst of
-// endings costs the sweep that sees all of them rather than one sweep each.
-// Built through New rather than by hand, so that the capacity this depends on
-// is the one the constructor gives every executor; asserted on the channel
-// itself because the alternative — counting passes under a live Run — races
-// the sweep it is counting.
+// TestReapKicksCoalesce: a burst of endings costs the sweep that sees all of
+// them rather than one sweep each. Asserted against a live reapLoop on the
+// count of sweeps it actually ran — one Owned listing per pass, by
+// construction — rather than on the wake channel's length, which would only
+// restate the constructor.
+//
+// The burst arrives while a pass is already running, which is the case the
+// capacity exists for and the one a channel-length check cannot reach. Both
+// mistakes fail it: an unbuffered wake would drop all five, since the loop is
+// inside the pass and not at its select, leaving one sweep; an unbounded one
+// would queue five more, leaving six.
+//
+// wake is called directly rather than published through Postgres so that the
+// burst is complete before the pass is released — a NOTIFY arrives when it
+// arrives, and a rung that raced that would be counting arrivals rather than
+// coalescing. The NOTIFY path has its own rungs above.
 func TestReapKicksCoalesce(t *testing.T) {
-	h := newHarnessWith(t, &fakeProvider{sb: &fakeSandbox{}}, Config{})
-	e := h.exec
+	h := newHarnessWith(t, &fakeProvider{sb: &fakeSandbox{}}, Config{ReapInterval: time.Hour})
+	h.prov = h.exec.provider.(*fakeProvider)
+	h.exec.cfg.ReapKickConn = kickConn(t, h)
+	deleteSessionRow(t, h)
+	h.prov.owned = []domain.ID{h.sid}
+
+	// Hold the first pass open at the seam between classification and the
+	// session lock. Closed rather than signalled once, so every later pass runs
+	// straight through it.
+	reached := make(chan struct{}, 1)
+	release := make(chan struct{})
+	reapHookAfterClassify = func(domain.ID) {
+		select {
+		case reached <- struct{}{}:
+		default:
+		}
+		<-release
+	}
+	t.Cleanup(func() { reapHookAfterClassify = nil })
+
+	_, stop := runExecutor(t, h)
+	defer stop()
+
+	select {
+	case <-reached:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the sweep the listener runs when it establishes never reached the classify seam")
+	}
 	for range 5 {
-		e.wake()
+		h.exec.wake()
 	}
-	if n := len(e.kick); n != 1 {
-		t.Fatalf("five wakes queued %d sweeps, want 1", n)
+	close(release)
+
+	awaitReap(t, h, h.sid, "the pass that was already running")
+	// One sweep for the five, so two in all. Settled rather than sampled: the
+	// second sweep is still starting when the first one's reap lands, and with
+	// the interval at an hour nothing else can add to this.
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if n := h.prov.ownedCallsSnapshot(); n > 2 {
+			t.Fatalf("five wakes during one pass cost %d sweeps, want 2", n)
+		}
+		time.Sleep(20 * time.Millisecond)
 	}
-	<-e.kick
-	// And a wake after the sweep took the request arms the next one: coalescing
-	// must not swallow an ending that arrived while the previous sweep ran.
-	e.wake()
-	if n := len(e.kick); n != 1 {
-		t.Fatalf("a wake after the sweep queued %d, want 1", n)
+	if n := h.prov.ownedCallsSnapshot(); n != 2 {
+		t.Fatalf("five wakes during one pass cost %d sweeps, want 2 "+
+			"(the one that was running, and one for the whole burst)", n)
 	}
 }

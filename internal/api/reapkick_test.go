@@ -2,6 +2,7 @@ package api_test
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"testing"
 	"time"
@@ -82,6 +83,25 @@ func TestSessionEndKicksTheReaper(t *testing.T) {
 	}
 }
 
+// requireNoKick asserts that nothing was published, and insists the wait ended
+// the one way that actually means nothing: its deadline. Accepting any error
+// would let a listening connection that simply died stand in for a producer
+// that stayed quiet, and the rung would then pass without testing the producer
+// at all.
+func requireNoKick(t *testing.T, conn *pgx.Conn, what string) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	n, err := conn.WaitForNotification(ctx)
+	if err == nil {
+		t.Fatalf("%s published a reap kick: %+v", what, n)
+	}
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("%s: the wait for a kick ended with %v, not its deadline; "+
+			"this rung proves nothing unless the connection was listening throughout", what, err)
+	}
+}
+
 // TestRearchivingKicksNothing: archiving is idempotent, and the second call
 // ends nothing — the stamp it would set is already there. A kick for it would
 // have every listening executor sweep everything it owns for a request that
@@ -103,11 +123,7 @@ func TestRearchivingKicksNothing(t *testing.T) {
 		t.Fatalf("second archive: %d %v", status, res)
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-	defer cancel()
-	if n, err := conn.WaitForNotification(ctx); err == nil {
-		t.Fatalf("re-archiving published a reap kick: %+v", n)
-	}
+	requireNoKick(t, conn, "re-archiving")
 }
 
 // TestRefusedSessionEndKicksNothing: the kick reports that a session ended, so
@@ -138,9 +154,5 @@ func TestRefusedSessionEndKicksNothing(t *testing.T) {
 
 	// A kick that a successful end publishes would already be waiting here, so
 	// the wait only has to outlast the round trips above, not a timeout.
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-	defer cancel()
-	if n, err := conn.WaitForNotification(ctx); err == nil {
-		t.Fatalf("a refused request published a reap kick: %+v", n)
-	}
+	requireNoKick(t, conn, "a refused request")
 }
