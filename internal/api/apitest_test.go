@@ -166,6 +166,21 @@ func wantFields(t *testing.T, obj map[string]any, keys ...string) {
 	}
 }
 
+// wantNoFields asserts keys the reference omits entirely are absent — a
+// distinction wantFields cannot make, since a key present with a null value
+// satisfies it just as an omitted one fails it.
+func wantNoFields(t *testing.T, obj map[string]any, keys ...string) {
+	t.Helper()
+	for _, k := range keys {
+		if v, ok := obj[k]; ok {
+			// Say "present", not the value: the case this exists to catch is a
+			// present-and-null key, and reporting it as "got <nil>" reads like
+			// the absence the assertion wanted.
+			t.Errorf("wire field %q is present (value %v), want the key omitted entirely", k, v)
+		}
+	}
+}
+
 // listData pulls the "data" array out of a list response.
 func listData(t *testing.T, body map[string]any) []map[string]any {
 	t.Helper()

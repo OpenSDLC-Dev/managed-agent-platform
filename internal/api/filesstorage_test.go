@@ -97,6 +97,12 @@ func TestFileScopeRendered(t *testing.T) {
 	if scope == nil || scope["id"] != sess || scope["type"] != "session" {
 		t.Errorf("scope = %v, want {id:%s, type:session}", obj["scope"], sess)
 	}
+	// The scope assertion above already fails on an omitted key (a missing key
+	// type-asserts to a nil map), so only expires_at needs pinning here (#651).
+	wantFields(t, obj, "expires_at")
+	if obj["expires_at"] != nil {
+		t.Errorf("scoped expires_at = %v, want null", obj["expires_at"])
+	}
 
 	status, body := s.do("GET", "/v1/files?scope_id="+sess, nil)
 	if status != http.StatusOK {
@@ -105,5 +111,16 @@ func TestFileScopeRendered(t *testing.T) {
 	data := listData(t, body)
 	if len(data) != 1 || data[0]["id"] != id {
 		t.Errorf("scope_id filter = %v, want [%s]", pageIDs(data), id)
+	}
+	// The list is the surface no recording covers for a scoped file, and the one
+	// where a future change could quietly drop the scope: listFiles scans its own
+	// variables before calling renderFile. Pin the positive case here (#651).
+	wantFields(t, data[0], "scope", "expires_at")
+	listScope, _ := data[0]["scope"].(map[string]any)
+	if listScope == nil || listScope["id"] != sess || listScope["type"] != "session" {
+		t.Errorf("listed scope = %v, want {id:%s, type:session}", data[0]["scope"], sess)
+	}
+	if data[0]["expires_at"] != nil {
+		t.Errorf("listed scoped expires_at = %v, want null", data[0]["expires_at"])
 	}
 }
