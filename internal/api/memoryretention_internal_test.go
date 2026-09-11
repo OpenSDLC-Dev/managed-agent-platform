@@ -264,6 +264,47 @@ func prunedCount(t *testing.T, reader *sdkmetric.ManualReader) int64 {
 	return 0
 }
 
+// TestRetentionLoopSweepsBeforeItsFirstTick pins the order of the loop's two
+// halves, which TestRetentionLoopSweepsThenStops cannot see: at its 10ms
+// interval a loop that waits first still sweeps almost immediately. The
+// interval here is longer than this test could ever wait, so only a sweep taken
+// before the first tick passes it — and a control plane restarting more often
+// than the interval is the deployment that depends on that (#695).
+func TestRetentionLoopSweepsBeforeItsFirstTick(t *testing.T) {
+	restore := SetMemoryPruneIntervalForTest(time.Hour)
+	t.Cleanup(restore)
+
+	pool := retentionPool(t)
+	memoryID := domain.NewID(domain.PrefixMemory).String()
+	ids := seedVersions(t, pool, memoryID, 9, time.Now().Add(-90*24*time.Hour), time.Hour)
+	liveMemory(t, pool, memoryID, ids[8], "/notes.md")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { defer close(done); StartMemoryRetention(ctx, pool) }()
+	t.Cleanup(func() { cancel(); <-done })
+
+	deadline := time.Now().Add(30 * time.Second)
+	for len(surviving(t, pool, memoryID)) != 5 {
+		if time.Now().After(deadline) {
+			t.Fatalf("the loop is waiting for a first tick an hour away, so a control plane restarted more often would never prune: survivors = %d, want 5",
+				len(surviving(t, pool, memoryID)))
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	// And then it waits. Versions expiring after that first pass must sit until
+	// the tick an hour away, because a loop that swept without waiting would
+	// run continuously against Postgres and look identical from the rows above.
+	second := domain.NewID(domain.PrefixMemory).String()
+	moreIDs := seedVersions(t, pool, second, 9, time.Now().Add(-90*24*time.Hour), time.Hour)
+	liveMemory(t, pool, second, moreIDs[8], "/other.md")
+	time.Sleep(500 * time.Millisecond)
+	if got := len(surviving(t, pool, second)); got != 9 {
+		t.Errorf("a second memory's versions went within the interval: survivors = %d, want all 9 — the loop is not waiting between sweeps", got)
+	}
+}
+
 // TestRetentionLoopSweepsThenStops drives the loop itself, not just the
 // statement: a tick has to reach the sweep, and a cancelled context has to end
 // it. Without the first half, the loop could stop calling the sweep entirely

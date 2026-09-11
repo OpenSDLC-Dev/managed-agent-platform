@@ -60,11 +60,13 @@ func StartMemoryRetention(ctx context.Context, pool *pgxpool.Pool) {
 	t := time.NewTicker(memoryPruneInterval)
 	defer t.Stop()
 	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-t.C:
-		}
+		// The sweep runs before the first wait rather than after it: a ticker
+		// does not fire on creation, so a control plane that restarts more
+		// often than this interval would otherwise never prune at all. At an
+		// hour that is not an exotic deployment — it is one that rolls on every
+		// merge. The statement's idempotence is what makes the boot pass free:
+		// every replica taking it at once costs duplicate queries and nothing
+		// else. fileretention.go's sweep takes the same order for the reason.
 		n, err := pruneMemoryVersions(ctx, pool, memoryVersionRetention, memoryVersionsKept)
 		switch {
 		case err != nil && ctx.Err() == nil:
@@ -72,6 +74,11 @@ func StartMemoryRetention(ctx context.Context, pool *pgxpool.Pool) {
 		case err == nil && n > 0:
 			slog.InfoContext(ctx, "memory versions pruned", "count", n,
 				"older_than", memoryVersionRetention, "kept_per_memory", memoryVersionsKept)
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
 		}
 	}
 }
