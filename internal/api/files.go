@@ -53,11 +53,11 @@ const maxFileListIDs = 100
 // renderFile's both-non-nil guard is the actual contract; the tag only carries
 // out what it decides.
 //
-// expires_at is null on every file this platform stores. It is the upload time
-// plus expires_in_seconds, and parseFileUpload refuses that parameter (#655),
-// so nothing here can expire — unlike an always-null next_page, which would
-// have been a lie the moment has_more went true. Like the skills registry, the
-// shape is api-local (no domain.File) — the registry is metadata-only.
+// expires_at is the upload time plus expires_in_seconds, null when the upload
+// asked for no lifetime (#655, plan 48). It is sent either way: the key is
+// always present, and null is the value that says "does not expire". Like the
+// skills registry, the shape is api-local (no domain.File) — the registry is
+// metadata-only.
 type fileJSON struct {
 	ID           string         `json:"id"`
 	CreatedAt    time.Time      `json:"created_at"`
@@ -77,7 +77,7 @@ type fileScopeJSON struct {
 	Type string `json:"type"`
 }
 
-func renderFile(id, filename, mimeType string, sizeBytes int64, downloadable bool, scopeType, scopeID *string, createdAt time.Time) fileJSON {
+func renderFile(id, filename, mimeType string, sizeBytes int64, downloadable bool, scopeType, scopeID *string, createdAt time.Time, expiresAt *time.Time) fileJSON {
 	var scope *fileScopeJSON
 	// Both-or-neither is enforced in the schema since 0036, so this is a
 	// restatement rather than the only thing holding it (#659). It still has to
@@ -85,9 +85,14 @@ func renderFile(id, filename, mimeType string, sizeBytes int64, downloadable boo
 	if scopeID != nil && scopeType != nil {
 		scope = &fileScopeJSON{ID: *scopeID, Type: *scopeType}
 	}
+	if expiresAt != nil {
+		utc := expiresAt.UTC()
+		expiresAt = &utc
+	}
 	return fileJSON{
 		ID: id, CreatedAt: createdAt.UTC(), Filename: filename, MimeType: mimeType,
-		SizeBytes: sizeBytes, Type: "file", Downloadable: downloadable, Scope: scope,
+		SizeBytes: sizeBytes, Type: "file", Downloadable: downloadable,
+		ExpiresAt: expiresAt, Scope: scope,
 	}
 }
 
@@ -135,7 +140,7 @@ func (s *server) createFile(r *http.Request) (any, error) {
 		return nil, err
 	}
 	id := domain.NewID(domain.PrefixFile).String()
-	createdAt, err := s.insertFile(ctx, id, up)
+	createdAt, expiresAt, err := s.insertFile(ctx, id, up)
 	if err != nil {
 		recordFileUpload(ctx, fileOutcomeError, 0)
 		return nil, err
@@ -144,7 +149,7 @@ func (s *server) createFile(r *http.Request) (any, error) {
 	slog.InfoContext(ctx, "file uploaded", "file_id", id, "filename", up.filename,
 		"mime_type", up.mimeType, "bytes", len(up.data))
 	// A fresh upload is never downloadable and carries no scope (public docs).
-	return renderFile(id, up.filename, up.mimeType, int64(len(up.data)), false, nil, nil, createdAt), nil
+	return renderFile(id, up.filename, up.mimeType, int64(len(up.data)), false, nil, nil, createdAt, expiresAt), nil
 }
 
 // insertFile lands the metadata row and the object in one transaction with the
@@ -152,28 +157,38 @@ func (s *server) createFile(r *http.Request) (any, error) {
 // before commit (the object exists before the row becomes visible — a metadata
 // row can never point at a missing object), commit last. The only orphan window
 // is a failed commit after a successful put, cleaned best-effort.
-func (s *server) insertFile(ctx context.Context, id string, up *fileUpload) (time.Time, error) {
+//
+// expires_at is computed by Postgres from the same now() that defaults
+// created_at, so the two are the one instant the docs describe — "the upload
+// time plus that value" — rather than two clocks agreeing to the millisecond.
+// An upload that requested no lifetime needs no branch: make_interval is STRICT
+// (pg_proc.proisstrict), so a NULL argument makes a NULL interval and now()
+// plus NULL is NULL, which is exactly "does not expire".
+func (s *server) insertFile(ctx context.Context, id string, up *fileUpload) (time.Time, *time.Time, error) {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
-		return time.Time{}, err
+		return time.Time{}, nil, err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 	var createdAt time.Time
+	var expiresAt *time.Time
 	if err := tx.QueryRow(ctx,
-		`INSERT INTO files (id, filename, mime_type, size_bytes, downloadable)
-		 VALUES ($1, $2, $3, $4, false) RETURNING created_at`,
-		id, up.filename, up.mimeType, int64(len(up.data))).Scan(&createdAt); err != nil {
-		return time.Time{}, err
+		`INSERT INTO files (id, filename, mime_type, size_bytes, downloadable, expires_at)
+		 VALUES ($1, $2, $3, $4, false, now() + make_interval(secs => $5::bigint))
+		 RETURNING created_at, expires_at`,
+		id, up.filename, up.mimeType, int64(len(up.data)), up.expiresIn).
+		Scan(&createdAt, &expiresAt); err != nil {
+		return time.Time{}, nil, err
 	}
 	key := blob.FilesKey(id)
 	if err := s.blobs.Put(ctx, key, bytes.NewReader(up.data), int64(len(up.data)), up.mimeType); err != nil {
-		return time.Time{}, fmt.Errorf("store file: %w", err)
+		return time.Time{}, nil, fmt.Errorf("store file: %w", err)
 	}
 	if err := tx.Commit(ctx); err != nil {
 		s.deleteOrphanedFile(ctx, key)
-		return time.Time{}, err
+		return time.Time{}, nil, err
 	}
-	return createdAt, nil
+	return createdAt, expiresAt, nil
 }
 
 func (s *server) getFile(r *http.Request) (any, error) {
@@ -188,18 +203,19 @@ func (s *server) getFile(r *http.Request) (any, error) {
 		downloadable       bool
 		scopeType, scopeID *string
 		createdAt          time.Time
+		expiresAt          *time.Time
 	)
 	err := s.pool.QueryRow(ctx,
-		`SELECT filename, mime_type, size_bytes, downloadable, scope_type, scope_id, created_at
+		`SELECT filename, mime_type, size_bytes, downloadable, scope_type, scope_id, created_at, expires_at
 		 FROM files WHERE id = $1`, id).
-		Scan(&filename, &mimeType, &sizeBytes, &downloadable, &scopeType, &scopeID, &createdAt)
+		Scan(&filename, &mimeType, &sizeBytes, &downloadable, &scopeType, &scopeID, &createdAt, &expiresAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, errNotFound("file %s not found", id)
 	}
 	if err != nil {
 		return nil, err
 	}
-	return renderFile(id, filename, mimeType, sizeBytes, downloadable, scopeType, scopeID, createdAt), nil
+	return renderFile(id, filename, mimeType, sizeBytes, downloadable, scopeType, scopeID, createdAt, expiresAt), nil
 }
 
 func (s *server) listFiles(r *http.Request) (any, error) {
@@ -340,7 +356,7 @@ func (s *server) listFiles(r *http.Request) (any, error) {
 		return filePageJSON{Data: []any{}}, nil
 	}
 
-	query := `SELECT id, filename, mime_type, size_bytes, downloadable, scope_type, scope_id, created_at FROM files WHERE true`
+	query := `SELECT id, filename, mime_type, size_bytes, downloadable, scope_type, scope_id, created_at, expires_at FROM files WHERE true`
 	var args []any
 	if scopeID != "" {
 		args = append(args, scopeID)
@@ -388,11 +404,12 @@ func (s *server) listFiles(r *http.Request) (any, error) {
 			downloadable           bool
 			scopeType, sID         *string
 			createdAt              time.Time
+			expiresAt              *time.Time
 		)
-		if err := rows.Scan(&id, &filename, &mimeType, &sizeBytes, &downloadable, &scopeType, &sID, &createdAt); err != nil {
+		if err := rows.Scan(&id, &filename, &mimeType, &sizeBytes, &downloadable, &scopeType, &sID, &createdAt, &expiresAt); err != nil {
 			return nil, err
 		}
-		files = append(files, renderFile(id, filename, mimeType, sizeBytes, downloadable, scopeType, sID, createdAt))
+		files = append(files, renderFile(id, filename, mimeType, sizeBytes, downloadable, scopeType, sID, createdAt, expiresAt))
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
@@ -512,16 +529,37 @@ func (s *server) downloadFile(w http.ResponseWriter, r *http.Request) {
 	var (
 		filename, mimeType string
 		downloadable       bool
+		expired            bool
 	)
+	// Postgres answers whether the file has expired, rather than this process
+	// comparing a scanned timestamp: expires_at was computed from the database's
+	// now() at upload, and no replica's clock may decide when it arrives.
 	err := s.pool.QueryRow(ctx,
-		`SELECT filename, mime_type, downloadable FROM files WHERE id = $1`, id).
-		Scan(&filename, &mimeType, &downloadable)
+		`SELECT filename, mime_type, downloadable, expires_at IS NOT NULL AND expires_at <= now()
+		   FROM files WHERE id = $1`, id).
+		Scan(&filename, &mimeType, &downloadable, &expired)
 	if errors.Is(err, pgx.ErrNoRows) {
 		writeError(w, r, errNotFound("file %s not found", id))
 		return
 	}
 	if err != nil {
 		writeError(w, r, err)
+		return
+	}
+	// "Downloading its content (GET /v1/files/{file_id}/content) returns a 404
+	// error" once expires_at has passed (public docs, plan 48). It is answered
+	// ahead of both gates below, so the two lanes agree about a file that no
+	// longer has content: without this, the management lane would keep saying
+	// "not downloadable" and the worker lane would keep serving bytes the wire
+	// contract says are gone. That the reference orders its own checks this way
+	// is unrecorded — the docs give the status and not the precedence
+	// (docs/DIVERGENCES.md).
+	//
+	// The metadata route and the list deliberately do not gain this check: an
+	// expired file keeps answering there for the documented 30 days, with
+	// expires_at in the past, until the retention sweep removes it.
+	if expired {
+		writeError(w, r, errNotFound("file %s not found", id))
 		return
 	}
 	// Lane-aware authorization. On the worker environment-key lane, a mount's

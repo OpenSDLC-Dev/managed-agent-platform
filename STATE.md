@@ -8,6 +8,10 @@ What is being worked on right now, and how far along it is — nothing else. **S
 taken in this order because each leaves ground the next stands on. No plan file: `issue-triage`
 judged #646 direct, and the other two are judged as they start.
 
+**File expiration (plan 48, #655)** — the upload route refused the documented
+`expires_in_seconds`, so nothing in the registry could expire. Two slices, running in parallel
+with the family above and touching none of its files.
+
 ## Tasks
 
 - [x] #646 — the terminal broadcasts run detached from the request, so a client that hangs up
@@ -16,3 +20,6 @@ judged #646 direct, and the other two are judged as they start.
   can outlive it by a full reap interval.
 - [ ] #645 — deliverable objects the post-commit cleanup does not remove are orphaned for good;
   no tier knows their keys, so nothing retries them.
+- [x] Plan 48 slice 1 — the parameter, the column, and the 404 the content route owes past
+  `expires_at`.
+- [ ] Plan 48 slice 2 — the sweep that ends the documented 30-day grace window.
