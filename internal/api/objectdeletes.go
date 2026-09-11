@@ -3,7 +3,9 @@ package api
 import (
 	"context"
 	"log/slog"
+	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -22,18 +24,20 @@ import (
 // already destroyed is never revisited and the reaper is not a second remover
 // for it at all. That is the hole #320 records, and no new tier could close it.
 
-const (
-	// objectDeleteBatch bounds one pass. A backlog drains over several passes
-	// rather than in one long transaction, which keeps a claim short and the
-	// tail from starving behind a store that has slowed down.
-	objectDeleteBatch = 100
+// objectDeleteBatch bounds one pass. A backlog drains over several passes
+// rather than in one long transaction, which keeps a claim short and the tail
+// from starving behind a store that has slowed down.
+const objectDeleteBatch = 100
 
-	// objectDeleteBackoffMax caps the retry of a key the store refuses. Capped
-	// rather than unbounded because a row is never dropped: a permanently
-	// failing key retries forever, and forever at an hour is a line in a log a
-	// day, while forever at doubling would quietly become never.
-	objectDeleteBackoffMax = time.Hour
-)
+// objectDeleteBackoffMax caps the retry of a key the store refuses. Capped
+// rather than unbounded because a row is never dropped: a permanently failing
+// key retries forever, and forever at an hour is a line in a log a day, while
+// forever at doubling would quietly become never.
+//
+// A var for the reason the base below is one, and for one of its own: a rung
+// watching a refused key come back has to bound the doubling too, or the wait
+// it saves on the first retry it spends on the ninth.
+var objectDeleteBackoffMax = time.Hour
 
 // objectDeleteBackoffBase is the first wait after a refusal, doubling from
 // there to the cap above. A var so a rung can watch a refused key come back
@@ -47,13 +51,21 @@ var objectDeleteBackoffBase = 30 * time.Second
 // the interval itself fire need not spend it; never written in production.
 var objectDeleteInterval = time.Minute
 
-// objectDeleteClaimLease is how long a claimed key is held before another
-// replica may take it. Long enough that an ordinary store call finishes inside
-// it, short enough that a sweeper which dies mid-pass leaves its claim stuck
-// for about one sweep rather than for a backoff. Distinct from the backoff
-// above, which is what a key gets after a refusal rather than while it is being
-// tried. A var for the same reason as the interval.
-var objectDeleteClaimLease = time.Minute
+// objectDeleteClaimLease is how long a claimed batch is held before another
+// replica may take it. It has to cover a batch and not a call: the claim is
+// taken once for up to objectDeleteBatch keys, and the store calls then run
+// sequentially, outside any transaction, never renewed. A lease sized for one
+// round trip expires mid-batch against any store having a slow day and hands
+// the tail to a second replica — the duplicated round trips the claim exists to
+// avoid. What the larger value costs is a sweeper that dies mid-pass: its
+// remaining keys wait this long instead of one interval. Neither way loses
+// anything, a key deleted twice being nil and a row never dropped.
+//
+// Distinct from the backoff above, which is what a key gets after a refusal
+// rather than while it is being tried. A const, unlike the two above: no rung
+// needs it shortened, and a package var nothing writes is state pretending to
+// be a knob.
+const objectDeleteClaimLease = 5 * time.Minute
 
 // ObjectDeleteQueue is the wake shared between the handlers that enqueue and
 // the sweeper that drains, within one process. A capacity-one channel: the
@@ -148,34 +160,61 @@ func StartPendingObjectDeletes(ctx context.Context, pool *pgxpool.Pool, blobs bl
 // store cares to take. The cost of that choice is the crash window it opens —
 // an object deleted, then the process dies before its row is — which costs a
 // redundant delete on the next pass and nothing more.
+//
+// Each row goes as soon as its own object does, rather than all of them at the
+// end of the pass. Batching that write would be one round trip instead of a
+// hundred, and would keep every key of a slow batch claimable by a second
+// replica for as long as the batch ran: the keys already deleted would be the
+// ones sitting there longest, which is precisely the redundant work the claim
+// is for. A row removed immediately cannot be claimed by anyone.
 func drainPendingObjectDeletes(ctx context.Context, pool *pgxpool.Pool, blobs blob.Store) (done, failed int, err error) {
 	claimed, err := claimPendingObjectDeletes(ctx, pool, objectDeleteBatch)
 	if err != nil || len(claimed) == 0 {
 		return 0, 0, err
 	}
-	var removed []string
+	var firstCause error
 	for _, key := range claimed {
 		if ctx.Err() != nil {
 			break
 		}
 		if derr := blobs.Delete(ctx, key); derr != nil {
+			// A delete that failed because this process is going down is not a
+			// refusal and must not be recorded as one: the key keeps its claim
+			// and comes back, rather than carrying an attempt and a "context
+			// canceled" into the column an operator reads to find out what a
+			// store actually refused.
+			if ctx.Err() != nil {
+				break
+			}
 			failed++
+			if firstCause == nil {
+				firstCause = derr
+			}
 			if ferr := deferPendingObjectDelete(ctx, pool, key, derr); ferr != nil && ctx.Err() == nil {
 				slog.WarnContext(ctx, "object delete failure not recorded", "key", key, "error", ferr)
 			}
 			continue
 		}
-		removed = append(removed, key)
-	}
-	if len(removed) > 0 {
 		if _, derr := pool.Exec(ctx,
-			`DELETE FROM pending_object_deletes WHERE object_key = ANY($1::text[])`, removed); derr != nil {
-			// The objects are gone; the rows are not. The next pass deletes
-			// keys that are already missing, which every backend answers nil.
-			return 0, failed, derr
+			`DELETE FROM pending_object_deletes WHERE object_key = $1`, key); derr != nil {
+			// The object is gone and its row is not. The next pass deletes a
+			// key that is already missing, which every backend answers nil, so
+			// what this costs is one redundant round trip. The count still says
+			// the object went, because it did.
+			if ctx.Err() == nil {
+				slog.WarnContext(ctx, "deleted object still owed a row", "key", key, "error", derr)
+			}
 		}
+		done++
 	}
-	return len(removed), failed, nil
+	// Said once for the pass rather than once per key, and said at all: a store
+	// refusing everything is otherwise silent here, the only other line on this
+	// path being a failure to record a failure. The cap on the backoff is what
+	// keeps this to a line an hour for a key nothing can remove.
+	if failed > 0 {
+		slog.WarnContext(ctx, "objects still owed after a sweep", "count", failed, "error", firstCause)
+	}
+	return done, failed, nil
 }
 
 // claimPendingObjectDeletes takes the due keys, oldest first, and pushes their
@@ -183,8 +222,13 @@ func drainPendingObjectDeletes(ctx context.Context, pool *pgxpool.Pool, blobs bl
 // already working on. The push is the claim: the rows are not locked for the
 // duration of the store calls, which happen after this transaction commits.
 func claimPendingObjectDeletes(ctx context.Context, pool *pgxpool.Pool, limit int) ([]string, error) {
+	// Seconds through make_interval rather than a duration string. Postgres
+	// does parse Go's "5m0s" spelling, but a duration that reaches SQL as text
+	// is one parser change away from meaning something else, and "m" is the
+	// character that means minutes here and months two lines of documentation
+	// away. internal/api/apikeylifecycle_test.go made the same choice.
 	rows, err := pool.Query(ctx,
-		`UPDATE pending_object_deletes SET next_attempt_at = now() + $2::interval
+		`UPDATE pending_object_deletes SET next_attempt_at = now() + make_interval(secs => $2)
 		  WHERE object_key IN (
 		        SELECT object_key FROM pending_object_deletes
 		         WHERE next_attempt_at <= now()
@@ -192,7 +236,7 @@ func claimPendingObjectDeletes(ctx context.Context, pool *pgxpool.Pool, limit in
 		         LIMIT $1
 		         FOR UPDATE SKIP LOCKED)
 		  RETURNING object_key`,
-		limit, objectDeleteClaimLease.String())
+		limit, objectDeleteClaimLease.Seconds())
 	if err != nil {
 		return nil, err
 	}
@@ -204,25 +248,57 @@ func claimPendingObjectDeletes(ctx context.Context, pool *pgxpool.Pool, limit in
 // never dropped: a key the store permanently refuses retries forever, and the
 // cap is what keeps forever to a line an hour rather than a line a day and then
 // a line a year.
+//
+// The exponent is clamped as well as the product, and the second of those is
+// the one anybody writes by reflex. `interval * power(2, attempts)` leaves
+// interval range once attempts passes 38, and LEAST cannot cap a product that
+// errored on its way to being computed: the whole statement fails, so the
+// attempt goes uncounted, the cause unrecorded, and the row keeps only its
+// claim. That inverts the cap exactly where it is needed — the key comes back
+// far sooner than the cap says, for as long as the outage lasts, with the
+// column an operator reads frozen at the last value it could write. Seven
+// doublings reach the cap and every attempt after is an hour apart, so one key
+// a store refuses for a day and a half arrives there. The clamp sits far above
+// the exponent any cap inside interval range can need; its only job is to keep
+// the arithmetic inside what an interval can hold.
 func deferPendingObjectDelete(ctx context.Context, pool *pgxpool.Pool, key string, cause error) error {
 	_, err := pool.Exec(ctx,
 		`UPDATE pending_object_deletes
 		    SET attempts        = attempts + 1,
 		        last_error      = $2,
-		        next_attempt_at = now() + LEAST($3::interval * power(2, attempts), $4::interval)
+		        next_attempt_at = now() + LEAST(
+		            make_interval(secs => $3) * power(2, LEAST(attempts, 20)),
+		            make_interval(secs => $4))
 		  WHERE object_key = $1`,
-		key, truncateError(cause), objectDeleteBackoffBase.String(), objectDeleteBackoffMax.String())
+		key, truncateError(cause), objectDeleteBackoffBase.Seconds(), objectDeleteBackoffMax.Seconds())
 	return err
 }
 
 // truncateError bounds what a store's error can write into a row. A backend is
 // free to return a whole response body, and this column is read by an operator
 // asking what went wrong, not by anything that needs the tail.
+//
+// Two ways the bound can produce bytes a UTF8 database refuses, and both end
+// the same way: the defer UPDATE fails, so the key loses its count and its
+// backoff exactly as an arithmetic error would — and what caused it is the
+// store message the row exists to carry. The string is made valid first,
+// because unlike the ones internal/identity's own truncate handles, this one
+// has not been through encoding/json and a backend may hand back a raw response
+// body. Then the cut is walked back off a partial rune, which is the failure
+// that truncate documents at length.
 func truncateError(err error) string {
 	const max = 500
-	s := err.Error()
-	if len(s) > max {
-		return s[:max] + "…"
+	s := strings.ToValidUTF8(err.Error(), "")
+	if len(s) <= max {
+		return s
 	}
-	return s
+	out := s[:max]
+	for len(out) > 0 {
+		r, size := utf8.DecodeLastRuneInString(out)
+		if r != utf8.RuneError || size > 1 {
+			break
+		}
+		out = out[:len(out)-1]
+	}
+	return out + "…"
 }

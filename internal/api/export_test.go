@@ -54,7 +54,7 @@ func SetDeleteSessionAfterCommitHookForTest(f func()) (restore func()) {
 // can read the queue from another connection in that exact window and assert
 // the rows are not there yet — which is what distinguishes an enqueue that
 // rides the transaction from one that merely runs beside it. Test binary only.
-func SetDeleteSessionBeforeCommitHookForTest(f func()) (restore func()) {
+func SetDeleteSessionBeforeCommitHookForTest(f func() error) (restore func()) {
 	deleteSessionBeforeCommitHook = f
 	return func() { deleteSessionBeforeCommitHook = nil }
 }
@@ -109,10 +109,10 @@ func SetObjectDeleteIntervalForTest(d time.Duration) (restore func()) {
 // SetObjectDeleteBackoffForTest shortens the wait a refused key gets before it
 // is tried again, so the recovery rung can watch the store come back without
 // spending the production backoff. Test binary only.
-func SetObjectDeleteBackoffForTest(d time.Duration) (restore func()) {
-	prev := objectDeleteBackoffBase
-	objectDeleteBackoffBase = d
-	return func() { objectDeleteBackoffBase = prev }
+func SetObjectDeleteBackoffForTest(base, max time.Duration) (restore func()) {
+	prevBase, prevMax := objectDeleteBackoffBase, objectDeleteBackoffMax
+	objectDeleteBackoffBase, objectDeleteBackoffMax = base, max
+	return func() { objectDeleteBackoffBase, objectDeleteBackoffMax = prevBase, prevMax }
 }
 
 // SchedulerTick runs exactly one deployment-scheduler tick against the pool

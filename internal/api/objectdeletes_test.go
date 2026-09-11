@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"slices"
@@ -212,10 +213,12 @@ func TestSessionDeleteEnqueuesItsObjectsRatherThanDeletingThem(t *testing.T) {
 // commit and the insert leaves objects that are unreferenced and unrecorded,
 // which is the crash window #645 is about and the one nothing can reopen later.
 //
-// So the assertion has to be made while the transaction is still open, from a
-// connection that is not in it: uncommitted rows are invisible there and rows
-// written beside the transaction are not. That window is the seam's whole
-// reason to exist.
+// So the rung brackets the commit from both sides, from a connection that is
+// not in the transaction. Before it: nothing, because uncommitted rows are
+// invisible there while rows written beside the transaction are not. The
+// instant after it: everything, because the commit is what publishes them —
+// which is what an enqueue moved to where the old object cleanup ran, after the
+// commit, would fail. One assertion alone would let the other shape through.
 func TestTheEnqueueRidesTheDeletingTransaction(t *testing.T) {
 	store := newRefusingStore()
 	s := newTestServerWithStore(t, store)
@@ -224,41 +227,87 @@ func TestTheEnqueueRidesTheDeletingTransaction(t *testing.T) {
 		"agent": agentID, "environment_id": envID})["id"].(string)
 	seedDeliverable(t, s, sid, "one.md")
 
-	// Buffered and read after the response, so the count crosses goroutines on
-	// the channel rather than on a shared variable, and a hook that never fires
-	// leaves it empty rather than leaving a stale zero that would pass.
-	seen := make(chan int, 1)
-	t.Cleanup(api.SetDeleteSessionBeforeCommitHookForTest(func() {
+	// Buffered and read after the response, so each count crosses goroutines on
+	// its channel rather than on a shared variable, and a hook that never fired
+	// leaves one empty rather than leaving a stale zero that would pass.
+	before, after := make(chan int, 1), make(chan int, 1)
+	count := func() int {
 		var n int
 		// Another connection from the same pool: a read on the handler's own
 		// would be inside the transaction and would see the rows either way.
 		if err := s.pool.QueryRow(context.Background(),
 			`SELECT count(*) FROM pending_object_deletes`).Scan(&n); err != nil {
-			n = -1
+			return -1
 		}
-		seen <- n
+		return n
+	}
+	t.Cleanup(api.SetDeleteSessionBeforeCommitHookForTest(func() error {
+		before <- count()
+		return nil
 	}))
+	t.Cleanup(api.SetDeleteSessionAfterCommitHookForTest(func() { after <- count() }))
 
 	if status, res := s.do(http.MethodDelete, "/v1/sessions/"+sid, nil); status != http.StatusOK {
 		t.Fatalf("delete: %d %v", status, res)
 	}
 
-	var during int
-	select {
-	case during = <-seen:
-	default:
-		t.Fatal("the delete answered without reaching the seam: it never committed, so the window under test did not happen")
+	read := func(c chan int, which string) int {
+		t.Helper()
+		select {
+		case n := <-c:
+			if n < 0 {
+				t.Fatalf("could not read the queue %s the commit", which)
+			}
+			return n
+		default:
+			t.Fatalf("the delete answered without reaching the %s-commit seam", which)
+			return 0
+		}
 	}
-	switch {
-	case during < 0:
-		t.Fatal("could not read the queue from outside the transaction")
-	case during > 0:
-		t.Fatalf("%d key(s) were already visible outside the delete's transaction before it committed; the enqueue is running beside the transaction rather than on it, which reopens the crash window between the commit and the insert", during)
+	if n := read(before, "before"); n > 0 {
+		t.Fatalf("%d key(s) were visible outside the delete's transaction before it committed: the enqueue is running beside the transaction, which leaves rows behind a delete that rolls back", n)
 	}
-	// And the commit is what publishes them, so the rung cannot pass by the
-	// enqueue simply never happening.
-	if got := pendingKeys(t, s.pool); len(got) == 0 {
-		t.Fatal("the committed delete owes nothing: the seam fired but no key was ever enqueued")
+	// The deliverable and the checkpoint, both there the instant the commit
+	// returned. An enqueue that had moved after the commit would show nothing
+	// here and the right rows later, and the rung above alone would pass it.
+	if n := read(after, "after"); n != 2 {
+		t.Fatalf("%d key(s) were owed the instant the commit returned, want 2: the enqueue did not commit with the rows it is owed to", n)
+	}
+}
+
+// TestADeleteThatRollsBackOwesNothing is decision 2's other half, and the one
+// an enqueue beside the transaction gets wrong in the opposite direction: rows
+// claiming bytes that nobody orphaned, for a session that is still there. It
+// needs the delete to fail after the enqueue and before the commit, which is
+// the window the seam already exists for.
+func TestADeleteThatRollsBackOwesNothing(t *testing.T) {
+	store := newRefusingStore()
+	s := newTestServerWithStore(t, store)
+	agentID, envID := fixture(t, s)
+	sid := createSession(t, s, map[string]any{
+		"agent": agentID, "environment_id": envID})["id"].(string)
+	fileID := seedDeliverable(t, s, sid, "one.md")
+
+	t.Cleanup(api.SetDeleteSessionBeforeCommitHookForTest(func() error {
+		return errors.New("the delete fails after enqueuing and before committing")
+	}))
+	if status, _ := s.do(http.MethodDelete, "/v1/sessions/"+sid, nil); status == http.StatusOK {
+		t.Fatal("the delete answered OK though it never committed")
+	}
+
+	if got := pendingKeys(t, s.pool); len(got) != 0 {
+		t.Fatalf("a delete that rolled back left %v owed: those objects are still referenced, and a sweeper will delete them", got)
+	}
+	// And the rollback really did take the rows back with it, so the emptiness
+	// above is the transaction undoing the enqueue rather than the enqueue
+	// never having run.
+	var rows int
+	if err := s.pool.QueryRow(context.Background(),
+		`SELECT count(*) FROM files WHERE id = $1`, fileID).Scan(&rows); err != nil {
+		t.Fatal(err)
+	}
+	if rows != 1 {
+		t.Fatal("the rolled-back delete removed the deliverable's row anyway")
 	}
 }
 
@@ -271,8 +320,12 @@ func TestASweepRemovesWhatADeleteCouldNot(t *testing.T) {
 	// is the sweeper's interval — a wake reports an ending, and nothing ends
 	// when a store recovers. Both are shortened so the rung runs in test time;
 	// the production pacing of each is not what this one is about, and the
-	// deferral has its own rung below.
-	t.Cleanup(api.SetObjectDeleteBackoffForTest(20 * time.Millisecond))
+	// deferral has its own rung below. The cap is shortened with the base
+	// because the sweeper keeps retrying through the outage and every refusal
+	// doubles the next wait: uncapped, a loaded machine that spends a few
+	// seconds between the refusal and the recovery finds the key deferred past
+	// the recovery, and the rung fails on its own pacing.
+	t.Cleanup(api.SetObjectDeleteBackoffForTest(20*time.Millisecond, 50*time.Millisecond))
 	t.Cleanup(api.SetObjectDeleteIntervalForTest(20 * time.Millisecond))
 	store := newRefusingStore()
 	store.setRefusing(true)
@@ -352,6 +405,158 @@ func TestAFailedObjectDeleteIsDeferredNotDropped(t *testing.T) {
 			t.Fatal("the refusal was never recorded on the row")
 		}
 		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// TestADeleteOnABloblessReplicaStillRecordsWhatItOrphaned: the enqueue does not
+// ask whether this process has an object store, because that is a fact about
+// the replica and not about the objects. A control plane that had a store and
+// comes back without one — an env var dropped in a deploy, a configuration
+// drifted from the executor's — would otherwise delete the rows that name those
+// objects and write nothing down, and restoring the configuration afterwards
+// could not recover keys nobody recorded: the permanent orphaning this plan
+// exists to end, reintroduced by a guard against it.
+//
+// The other direction is what the guard was for, and it costs nothing. A
+// deployment that never had a store has no deliverables to enqueue, so what
+// accumulates is one row per deleted session for a checkpoint that was never
+// written — and the first sweeper to run deletes a missing key, which every
+// backend answers nil, and drains them.
+func TestADeleteOnABloblessReplicaStillRecordsWhatItOrphaned(t *testing.T) {
+	cipher, err := local.New(local.Config{KeyID: "test-1", Key: bytes.Repeat([]byte{7}, 32)})
+	if err != nil {
+		t.Fatalf("local.New: %v", err)
+	}
+	pool := newPoolWithKey(t)
+	// No object store at all, which cmd/controlplane supports and logs: the
+	// storage-backed routes report the absence and everything else serves.
+	srv := httptest.NewServer(api.NewHandler(pool, nil, cipher, nil, api.WithDreamRunner()))
+	t.Cleanup(srv.Close)
+	s := &tserver{t: t, url: srv.URL, pool: pool}
+
+	agentID, envID := fixture(t, s)
+	sid := createSession(t, s, map[string]any{
+		"agent": agentID, "environment_id": envID})["id"].(string)
+	// The row without its object, which is exactly the state a replica that has
+	// lost its store sees: the bytes were written by a deployment that had one.
+	fileID := domain.NewID("file").String()
+	if _, err := pool.Exec(context.Background(),
+		`INSERT INTO files (id, filename, mime_type, size_bytes, downloadable, scope_type, scope_id)
+		 VALUES ($1, 'report.md', 'text/markdown', 5, true, 'session', $2)`, fileID, sid); err != nil {
+		t.Fatalf("seed a harvested file: %v", err)
+	}
+
+	if status, res := s.do(http.MethodDelete, "/v1/sessions/"+sid, nil); status != http.StatusOK {
+		t.Fatalf("delete on a blob-less replica: %d %v", status, res)
+	}
+
+	want := []string{blob.FilesKey(fileID), blob.SessionCheckpointKey(sid)}
+	slices.Sort(want)
+	if got := pendingKeys(t, pool); !slices.Equal(got, want) {
+		t.Fatalf("a blob-less replica recorded %v, want %v: the objects it just stopped referring to are orphaned with nothing naming them", got, want)
+	}
+}
+
+// TestABackoffOutlastsALongOutage: a key refused for long enough must still be
+// deferred. The backoff multiplies an interval by `power(2, attempts)`, which
+// leaves interval range once attempts passes 38 — and the cap cannot save a
+// product that errored on its way to being computed, so the whole UPDATE fails.
+// What that costs is the reverse of what the cap is for: the attempt goes
+// uncounted and the cause unrecorded, so the column an operator reads to answer
+// "what has this deployment failed to delete" freezes, and the row keeps only
+// its claim, coming back far sooner than the cap says rather than later. Seven
+// doublings reach the cap and every attempt after is an hour apart, so a day
+// and a half of one refused key is all it takes to get there.
+func TestABackoffOutlastsALongOutage(t *testing.T) {
+	t.Cleanup(api.SetObjectDeleteIntervalForTest(20 * time.Millisecond))
+	store := newRefusingStore()
+	store.setRefusing(true)
+	s := newTestServerWithStore(t, store)
+	ctx := context.Background()
+
+	// Seeded at the attempt count rather than driven to it: the real path takes
+	// a day and a half of wall clock to arrive, and the row is the whole of
+	// what this queue is either way.
+	const key = "files/file_refusedforadayandahalf"
+	if _, err := s.pool.Exec(ctx,
+		`INSERT INTO pending_object_deletes (object_key, attempts) VALUES ($1, 39)`, key); err != nil {
+		t.Fatalf("seed a long-refused key: %v", err)
+	}
+
+	startSweeper(t, s, store).Wake()
+	awaitAttempt(t, store, key, "the sweep of a long-refused key")
+
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		var attempts int
+		var capped bool
+		if err := s.pool.QueryRow(ctx,
+			`SELECT attempts, next_attempt_at > now() + interval '50 minutes'
+			   FROM pending_object_deletes WHERE object_key = $1`, key).Scan(&attempts, &capped); err != nil {
+			t.Fatalf("read the long-refused key: %v", err)
+		}
+		if attempts > 39 {
+			if !capped {
+				t.Fatal("the refusal was counted but the next attempt was not pushed out to the cap")
+			}
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("attempts is still %d after a refused sweep: the UPDATE that records a failure is itself failing, so the key keeps neither its count nor its backoff", attempts)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// TestTwoSweepersDoNotDuplicateTheStoreRoundTrips is plan 49's acceptance item
+// 6, and it pins the half of that sentence a test can reach. Two replicas drain
+// one table; every key must reach the store exactly once, which is what the
+// claim buys — it pushes next_attempt_at past the pass that took it, and the
+// row goes as soon as its object does, so the other replica's claim cannot
+// return the same key.
+//
+// It does not pin "neither blocks the other". Without SKIP LOCKED the second
+// claim would wait for the first to commit and then find the rows no longer
+// due, so it would still not duplicate: what changes is latency under
+// contention, and nothing here would notice. Decision 5 says correctness does
+// not rest on the claim at all, a double delete being nil for every backend —
+// what rests on it is the waste, and the waste is what this counts.
+func TestTwoSweepersDoNotDuplicateTheStoreRoundTrips(t *testing.T) {
+	t.Cleanup(api.SetObjectDeleteIntervalForTest(20 * time.Millisecond))
+	store := newRefusingStore()
+	s := newTestServerWithStore(t, store)
+	ctx := context.Background()
+
+	const keys = 60
+	want := make([]string, 0, keys)
+	for i := range keys {
+		key := fmt.Sprintf("files/file_shared%02d", i)
+		want = append(want, key)
+		if _, err := s.pool.Exec(ctx,
+			`INSERT INTO pending_object_deletes (object_key) VALUES ($1)`, key); err != nil {
+			t.Fatalf("seed %s: %v", key, err)
+		}
+		if err := s.blobs.Put(ctx, key, strings.NewReader("bytes"), 5, "text/plain"); err != nil {
+			t.Fatalf("seed the object for %s: %v", key, err)
+		}
+	}
+
+	// Two loops over one pool, the deployment shape this is about.
+	startSweeper(t, s, store).Wake()
+	startSweeper(t, s, store).Wake()
+	awaitDrained(t, s.pool, "two sweepers draining one table")
+
+	got := store.attempts()
+	slices.Sort(got)
+	slices.Sort(want)
+	if !slices.Equal(got, want) {
+		t.Fatalf("the store was asked %d times for %d keys; a key asked twice is the duplicated round trip the claim exists to avoid\n got: %v\nwant: %v",
+			len(got), len(want), got, want)
+	}
+	for _, key := range want {
+		if _, _, err := s.blobs.Get(ctx, key); !errors.Is(err, blob.ErrNotFound) {
+			t.Fatalf("%s survived the sweep: %v", key, err)
+		}
 	}
 }
 

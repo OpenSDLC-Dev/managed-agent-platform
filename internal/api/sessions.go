@@ -1412,10 +1412,12 @@ const sessionDeleteBroadcastBudget = 5 * time.Second
 
 // deleteSessionBeforeCommitHook is a test-only seam fired after the delete has
 // enqueued its object keys and before it commits; nil in production. That
-// window is where the plan-49 claim lives and the only place it is visible: a
-// row written on the transaction is invisible to every other connection until
-// the commit, and one written beside it is not.
-var deleteSessionBeforeCommitHook func()
+// window is where plan 49's decision 2 lives and the only place either half of
+// it can be seen. A row written on the transaction is invisible to every other
+// connection until the commit and one written beside it is not — and an error
+// returned here fails the delete in that same window, so the rollback half
+// ("a delete that does not commit owes nothing") has somewhere to happen too.
+var deleteSessionBeforeCommitHook func() error
 
 // deleteSessionAfterCommitHook is a test-only seam fired between the delete's
 // commit and its terminal broadcasts; nil in production. That window is the
@@ -1490,7 +1492,7 @@ func (s *server) deleteSession(r *http.Request) (any, error) {
 	// type's value, so a scope_id paired with some other type would still slip
 	// a DELETE that dropped `scope_type = 'session'`, which is why it stays. The ids come back because the objects they
 	// name outlive the rows; how completely those are removed after the commit
-	// is the cleanup's own paragraph below.
+	// is the enqueue's own paragraph below.
 	//
 	// Taking these rows while holding the session is the right way round, and
 	// worth saying because the wrong way round is a deadlock (#313). Every
@@ -1523,26 +1525,48 @@ func (s *server) deleteSession(r *http.Request) (any, error) {
 	// whose sandbox the idle tier already destroyed has no second remover at
 	// all (#320).
 	//
-	// Only with a store: without one no object was ever written, so a row here
-	// would owe bytes that do not exist and nothing would ever drain it.
-	if s.blobs != nil {
-		keys := make([]string, 0, len(fileIDs)+1)
-		keys = append(keys, blob.SessionCheckpointKey(id))
-		for _, fid := range fileIDs {
-			keys = append(keys, blob.FilesKey(fid))
-		}
-		if _, err := tx.Exec(ctx, store.PendingObjectDeleteInsertSQL, keys); err != nil {
+	// Enqueued whether or not this process has a store, which is the part that
+	// looks wrong and is not. Whether an object was written is a fact about the
+	// deployment that wrote it, not about the configuration this replica booted
+	// with: a control plane that had a store and restarts without one — an
+	// env var dropped in a deploy, a config that has drifted from the
+	// executor's — would otherwise take the rows away and record nothing, and
+	// restoring the configuration could not recover keys nobody wrote down.
+	// That is the permanent orphaning this plan exists to end, reintroduced by
+	// the guard against it.
+	//
+	// The other direction costs nothing. For a deployment that never had a
+	// store there are no deliverables to enqueue — the harvest needs one — so
+	// what accumulates is a row per deleted session naming a checkpoint that
+	// was never written, and the first sweeper to run deletes a missing key,
+	// which every backend answers nil, and drains them.
+	keys := make([]string, 0, len(fileIDs)+1)
+	keys = append(keys, blob.SessionCheckpointKey(id))
+	for _, fid := range fileIDs {
+		keys = append(keys, blob.FilesKey(fid))
+	}
+	if _, err := tx.Exec(ctx, store.PendingObjectDeleteInsertSQL, keys); err != nil {
+		return nil, err
+	}
+	// Test seam: read the queue from another connection in exactly this window,
+	// or fail the delete here to watch the rollback. nil in production.
+	if deleteSessionBeforeCommitHook != nil {
+		if err := deleteSessionBeforeCommitHook(); err != nil {
 			return nil, err
 		}
-	}
-	// Test seam: read the queue from another connection in exactly this window.
-	// nil in production.
-	if deleteSessionBeforeCommitHook != nil {
-		deleteSessionBeforeCommitHook()
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return nil, err
 	}
+	// The rows are visible the instant the commit returns, so the sweeper is
+	// asked to look now — here rather than after the broadcasts below, which is
+	// the difference between freeing the bytes in milliseconds and freeing them
+	// after however much of sessionDeleteBroadcastBudget a database that has
+	// stopped answering spends. The send is non-blocking and infallible: it
+	// cannot fail a request that has already succeeded, and it is never
+	// load-bearing, bringing forward only what this replica's own interval
+	// would do anyway (plan 49).
+	s.objectDeletes.Wake()
 	// Test seam: hang up on the request in exactly this window. nil in production.
 	if deleteSessionAfterCommitHook != nil {
 		deleteSessionAfterCommitHook()
@@ -1554,8 +1578,8 @@ func (s *server) deleteSession(r *http.Request) (any, error) {
 	// session.thread_status_terminated goes out first, the same way, on the
 	// child's own stream and cross-posted to the session's.
 	//
-	// Detached from the request context — the decision the cleanup below
-	// already made, for the reason it already gives: past the commit, nothing
+	// Detached from the request context — the decision the object cleanup this
+	// function used to run made first, for the reason plan 49 kept: past the commit, nothing
 	// the caller does should decide what its fellow subscribers see. The two
 	// kinds are owed differently, and the child's is why this matters. A lost
 	// session.deleted still reaches its watchers a ping later, synthesized by
@@ -1590,7 +1614,7 @@ func (s *server) deleteSession(r *http.Request) (any, error) {
 		"type":         "session.deleted",
 		"processed_at": time.Now().UTC(),
 	}))
-	// Counted and said once for the set, the shape the cleanup below uses.
+	// Counted and said once for the set, the shape the sweeper's pass uses.
 	// Best-effort still means the delete stands whatever this reports; it does
 	// not mean nobody should be told. Past this point the only thing that can
 	// drop a frame is the database the transaction just committed through, and
@@ -1600,12 +1624,5 @@ func (s *server) deleteSession(r *http.Request) (any, error) {
 			"session", id, "frames", undelivered, "children", len(liveChildren),
 			"error", firstErr)
 	}
-	// And the sweeper is asked to look now, so the ordinary delete still frees
-	// the bytes in milliseconds rather than at the next interval (plan 49). A
-	// non-blocking send after the commit: it cannot fail the request, cannot
-	// delay it, and is never load-bearing — it only brings forward what the
-	// sweeper's own interval would do anyway, and only for this replica, which
-	// is the one that just enqueued.
-	s.objectDeletes.Wake()
 	return map[string]string{"id": id, "type": "session_deleted"}, nil
 }

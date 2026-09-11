@@ -72,6 +72,19 @@ in the same function would be a strange place to stop. This plan closes both.
    with the row removal, or the crash window it exists to close is still open.
    An enqueue after the commit would leave exactly the third failure mode above.
 
+   **Unconditionally, including on a replica with no object store.** The first
+   draft asked `s.blobs != nil` first, reasoning that without a store no object
+   was ever written. That confuses a fact about the deployment that wrote the
+   objects with the configuration this replica happens to have booted with. A
+   control plane that had a store and comes back without one — a dropped env
+   var, a configuration drifted from the executor's — would take the rows away
+   and write nothing down, and restoring the configuration afterwards could not
+   recover keys nobody recorded: the permanent orphaning this plan exists to
+   end, reintroduced by the guard against it. The other direction costs a row
+   per deleted session naming a checkpoint that was never written, for a
+   deployment that never had a store — and the first sweeper to run deletes a
+   missing key, which every backend answers nil, and drains them.
+
 3. **The request path deletes nothing.** `deleteSession` enqueues and returns.
    This is what #645 itself proposes ("the handler could stop deleting objects
    entirely"), and it removes `sessionDeleteCleanupBudget` — thirty seconds, the
@@ -96,6 +109,25 @@ in the same function would be a strange place to stop. This plan closes both.
    is nil for every backend, which is the contract `blobtest`'s
    `DeleteMissingIsNil` rung pins — but doing the same store round trip N times
    is waste a `SKIP LOCKED` claim avoids for free.
+
+   The claim is a lease on `next_attempt_at`, and it has to cover a **batch**
+   rather than a call: it is taken once for up to a hundred keys whose store
+   calls then run sequentially, outside any transaction, never renewed. Each
+   row is deleted as soon as its own object is, rather than all of them at the
+   end — one round trip per key instead of one per pass, bought because a
+   batched write leaves the keys already deleted sitting claimable for as long
+   as the rest of the batch runs, which is exactly the redundant work the claim
+   is for.
+
+   What remains, and was not built: the settlement is unconditional. If a
+   replica's store call fails just after its lease expired and a second replica
+   reclaimed the key, the first replica's deferral still writes — overwriting
+   the second's lease, possibly moving it earlier, and counting an attempt the
+   second will count again. Fencing that needs a claim token on the row and a
+   compare-and-set on every write. It is not built because what it protects is
+   waste rather than correctness — a key deleted twice is nil, and a row is
+   never dropped — and this plan does not have a measurement saying the waste is
+   worth a generation column.
 
 6. **A failed key stays, with a backoff; it is never dropped.** The row is the
    only record that an object is still owed, so discarding it after N attempts
@@ -132,11 +164,28 @@ in the same function would be a strange place to stop. This plan closes both.
    holds a cleanup budget.
 5. **A permanently failing key is retried on a bounded backoff and never
    dropped**, and its row carries the attempt count and the last error.
-6. **Two replicas draining at once do not duplicate the store round trips**, and
-   neither blocks the other.
+6. **Two replicas draining at once do not duplicate the store round trips.**
+   Only the first half of that has a rung: without `SKIP LOCKED` the second
+   claim would wait for the first to commit and then find the rows no longer
+   due, so it would still not duplicate — what changes is latency under
+   contention, which no test here would notice.
 7. **A wake drains without waiting for the interval**, and the interval drains
    without a wake.
 8. **Nothing else changes**: no wire surface, no reaper tier, no `deleteFile`.
+9. **A backoff outlasts a long outage.** `interval * power(2, attempts)` leaves
+   interval range once `attempts` passes 38, and `LEAST` cannot cap a product
+   that errored on the way to being computed — so the exponent is clamped as
+   well as the product, or a key refused for a day and a half stops recording
+   its attempts and comes back on its claim rather than its cap.
+
+### Not pinned by a rung
+
+- **A delete cancelled by shutdown is not recorded as a store refusal.** The
+  check is there, but the damage it prevents is only reachable when pgx
+  completes the deferral statement before the cancellation propagates to it —
+  the same cancelled context otherwise fails that write and nothing is recorded
+  either way. No test can force that window; the check costs nothing and is
+  kept as hardening rather than as a claim.
 
 ## Docs
 
@@ -149,3 +198,11 @@ in the same function would be a strange place to stop. This plan closes both.
 - `STATE.md` — this plan is the active work.
 - **Not** `docs/DIVERGENCES.md`: no wire surface changes, and no Managed Agents
   endpoint reports whether an object was removed.
+
+## Left open
+
+The same orphan-on-refusal shape survives on two neighbouring paths this plan
+deliberately does not touch — the harvest's snapshot replacement and the dream
+close, both of which compute their keys in a transaction and then delete the
+objects after the commit, best-effort. #693 records them now that the mechanism
+to fix them exists.

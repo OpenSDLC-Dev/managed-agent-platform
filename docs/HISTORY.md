@@ -150,6 +150,54 @@ which is merged and therefore immutable; its two stale claims are corrected in
 
 ---
 
+Three reviewers then found the same arithmetic defect independently, each with
+the same experiment: `interval * power(2, attempts)` leaves interval range once
+attempts passes 38, and `LEAST` cannot cap a product that errored on its way to
+being computed. A key a store refuses permanently reaches that in about a day
+and a half — seven doublings to the hourly cap, then one attempt an hour — and
+from there every deferral fails, so the attempt goes uncounted, the cause
+unrecorded, and the row keeps only its claim: the key comes back far sooner than
+the cap promises rather than later, with the operator-facing column frozen at
+the last value it could write. The cap inverted exactly where it was needed.
+
+The sharpest finding was not a defect in the code but in the guard over it. The
+rung asserting that the enqueue rides the transaction read the queue from a
+second connection in the pre-commit window and found it empty — which an enqueue
+moved *after* the commit, the shape the old cleanup had and the one #645 is
+actually about, also satisfies. The rung now brackets the commit from both
+sides: nothing visible before it, both keys visible the instant it returns, so
+an enqueue that is not on the transaction has nowhere to be. A second rung
+covers the half no assertion after the fact can reach, failing the delete
+between the enqueue and the commit and requiring that the queue be empty and the
+deliverable's row still present.
+
+One design decision was reversed in review. The enqueue had asked
+`s.blobs != nil` first, on the reasoning that without a store no object was ever
+written — which confuses a fact about the deployment that wrote the objects with
+the configuration the replica happens to have booted with. A control plane that
+had a store and returns without one would have taken the rows away and recorded
+nothing, and no later configuration could recover keys nobody wrote down: the
+permanent orphaning this plan exists to end, reintroduced by the guard against
+it. Enqueueing unconditionally costs a deployment that never had a store one row
+per deleted session, which the first sweeper to exist drains, a missing key
+being nil for every backend.
+
+Also corrected: a refused sweep logged nothing at all, so an outage was silent
+while the backlog grew, against a comment in the same file justifying the hour
+cap as "a line in a log a day"; `truncateError` cut at byte 500 and could split
+a rune, which a UTF8 database refuses on insert — the failure
+`internal/identity`'s own `truncate` documents at length, reintroduced, and
+worse here because a store error has not been through `encoding/json` and need
+not be valid UTF-8 at all; the claim lease was sized for one store call while
+covering a batch of a hundred; the rows were deleted at the end of a pass rather
+than each as its object went, leaving the keys already deleted claimable for
+longest; and the wake sat behind the broadcast budget instead of beside the
+commit. One review claim was refuted rather than fixed: that Postgres rejects
+Go's duration spelling as an interval. It does not — `'1m0s'::interval` is
+`00:01:00`, measured — though the durations now reach SQL as seconds through
+`make_interval` anyway, which is what the rest of the repo does and what makes
+the question moot.
+
 ## A session's end kicks the reaper (plan 48, #354) — archived 2026-09-11, delivered in one PR
 
 `DELETE /v1/sessions/{id}` returned `session_deleted` while the container stayed
