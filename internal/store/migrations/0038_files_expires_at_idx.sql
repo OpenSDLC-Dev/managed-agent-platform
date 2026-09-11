@@ -1,0 +1,23 @@
+-- The index 0037 argued against, on a cost that does not exist (#655, plan 49).
+--
+-- 0037 said a partial index "would cost every upload a write to keep a sweep
+-- nothing waits on shorter". That is backwards: a partial index does not index
+-- the rows its own predicate excludes, so an upload with no lifetime — which
+-- 0037's next sentence calls every row the registry could produce before it —
+-- pays a predicate evaluation and no index entry at all. Only an expiring
+-- upload pays, and only for as long as it exists. A merged migration is
+-- immutable, so the correction is recorded in internal/api/fileretention.go
+-- rather than in 0037.
+--
+-- What changed with it is that the scan is no longer hypothetical. Slice 2's
+-- retention sweep runs `expires_at < now() - <30 days>` once an hour on every
+-- controlplane, forever, and `files` grows without bound: a row per upload and
+-- a row per harvested deliverable, pruned by nothing except this sweep. Without
+-- the index that is an hourly sequential scan of the whole table, finding
+-- nothing on almost every tick.
+--
+-- Partial rather than plain, and on expires_at alone: the sweep's predicate and
+-- its ORDER BY are both that column, NULL means "never expires" and is the
+-- overwhelming majority of rows, and no query asks this table for its NULLs
+-- here — the routes that care about expiry all name a specific id.
+CREATE INDEX files_expires_at_idx ON files (expires_at) WHERE expires_at IS NOT NULL;

@@ -49,6 +49,42 @@ new directory and in-repo citations re-pointed in the moving PR (plan
 
 ---
 
+## File expiration (plan 49, #655) — archived 2026-09-11, delivered in two PRs
+
+`POST /v1/files` rejected `expires_in_seconds` with a 400, so a client that set the
+documented expiry failed its upload and nothing in the registry could expire at all.
+Slice 1 (PR #691) took the parameter, added the column, and stopped serving an expired
+file's content; slice 2 added the sweep that ends the published 30-day grace window.
+
+The part worth keeping is what slice 1's review found, which was not in its diff but in
+what the diff left alone. Gating the HTTP content route gated one reader of five: the
+platform-managed executor read the object straight from blob storage after checking only
+that a row existed, so a cloud sandbox mounted bytes a BYOC worker was refused; the brain
+described the mount to the model; an outcome rubric could still be defined from a file
+that could be neither downloaded nor mounted. All three passes reached that independently.
+The predicate now lives once as `store.FileLiveSQL`, beside `SessionTombstoneInsertSQL`,
+and the one reader that omits it names itself and says why.
+
+Two findings were declined with the reasoning recorded in the code rather than dropped:
+`now()` stays transaction-start, because a create mounting ten files should judge all ten
+against one instant and the residue is a race no clock function wins; and expiry does not
+reach into a sandbox already holding the bytes, which is the residual a delete already
+leaves and the registry already documents.
+
+Slice 2's review turned up the defect that mattered most in either slice: its object
+deletes ran on the sweep's own cancellable context *after* the row deletions had
+committed, so a controlplane restart mid-sweep would have orphaned up to a batch of
+objects permanently and silently — #645's class, created fresh. They run detached with a
+budget now, and report once for the set rather than once per object.
+
+Numbering: this plan was 48 while slice 1 was in review. An earlier-opened PR (#677) held
+that number for a plan invisible in any checkout and merged first, so the later claimant
+renumbered to 49 and every reference moved with it — except migration 0037's comment,
+which is merged and therefore immutable; its two stale claims are corrected in
+`internal/api/fileretention.go`, the move `memoryretention.go` already makes for 0029's.
+
+---
+
 ## A session's end kicks the reaper (plan 48, #354) — archived 2026-09-11, delivered in one PR
 
 `DELETE /v1/sessions/{id}` returned `session_deleted` while the container stayed

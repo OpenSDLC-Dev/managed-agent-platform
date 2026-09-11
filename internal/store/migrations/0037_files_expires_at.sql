@@ -1,4 +1,4 @@
--- When a file's content stops being retrievable (#655, plan 49). NULL means
+-- When a file's content stops being retrievable (#655, plan 48). NULL means
 -- never, which is every row 0008 through 0036 could produce: POST /v1/files
 -- rejected expires_in_seconds outright, so nothing in this registry had a
 -- lifetime at all.
@@ -13,7 +13,7 @@
 -- forbid a row the outputs harvest or a future importer might legitimately
 -- write with an instant this table has no opinion about.
 --
--- No index either. The retention sweep (plan 49 slice 2) reads this column
+-- No index either. The retention sweep (plan 48 slice 2) reads this column
 -- hourly and the rows it looks for are rare, but a partial index over
 -- `expires_at IS NOT NULL` would cost every upload a write to keep a sweep
 -- nothing waits on shorter. Add one when a deployment's sweep is measurably

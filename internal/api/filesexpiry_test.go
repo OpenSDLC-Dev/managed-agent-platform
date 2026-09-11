@@ -216,15 +216,12 @@ func TestFileUploadExpiresInSeconds(t *testing.T) {
 	})
 }
 
-// expire moves a file's expiry into the past. The documented minimum lifetime is
-// an hour, so no upload can produce an expired file inside a test; the column is
-// what the routes read, and this writes it directly.
+// expire moves a file's expiry just into the past. The documented minimum
+// lifetime is an hour, so no upload can produce an expired file inside a test;
+// the column is what the routes read, and expireBy writes it directly.
 func expire(t *testing.T, s *tserver, id string) {
 	t.Helper()
-	if _, err := s.pool.Exec(context.Background(),
-		`UPDATE files SET expires_at = now() - interval '1 second' WHERE id = $1`, id); err != nil {
-		t.Fatalf("expire %s: %v", id, err)
-	}
+	expireBy(t, s, id, time.Second)
 }
 
 // TestExpiredFileLifecycle pins what the public docs say happens at expires_at:

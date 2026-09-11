@@ -103,10 +103,14 @@ delete the same object twice: a row is returned to exactly one of them. A crash 
 row and the object leaves an orphan, the outcome this package already accepts everywhere else.
 
 The batch bound is the one thing this sweep has that `memoryretention`'s does not, and the
-reason is the object delete: that sweep does nothing per row, while this one makes a network
-call for each, so an unbounded first pass over a backlog would hold a transaction open for as
-long as the object store took. A backlog drains over successive ticks instead, which costs
-nothing anyone is waiting for — every row it walks is at least 30 days past an expiry.
+reason is the object delete: that sweep does nothing per row, while this one owes a network
+call for each row it removed, so an unbounded first pass over a backlog would owe as many as
+the backlog held. (It does not hold a transaction open across them — the DELETE commits when
+the statement returns, and the objects go after it, on a context the sweep's own cancellation
+cannot reach, so a shutdown mid-sweep cannot silently orphan a committed batch.) The batch is
+taken oldest-first under `FOR UPDATE SKIP LOCKED`, so a backlog drains as a queue rather than
+as an unpredictable subset, which is what makes "eventually" true, and two replicas take
+disjoint batches instead of blocking on each other.
 
 ## Decisions
 

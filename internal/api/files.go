@@ -119,8 +119,10 @@ func checkFileID(id string) error {
 // That is still true, and the expired-file sweep beside it (fileretention.go)
 // is not the exception it looks like: this note is about objects whose row is
 // gone, which nothing can enumerate, while the sweep removes objects their own
-// row names, on a lifecycle the client asked for at upload. It deliberately runs on the
-// request context (like the skills registry's deleteOrphanedObject): when
+// row names, on a lifecycle the client asked for at upload.
+//
+// deleteOrphanedFile deliberately runs on the request context (like the skills
+// registry's deleteOrphanedObject): when
 // insertFile's commit fails ambiguously — a cancelled or dropped context, where
 // Postgres may in fact have committed — that same cancelled context makes this
 // delete a no-op, so a possibly-live object is preserved rather than deleted out

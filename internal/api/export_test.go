@@ -107,6 +107,15 @@ func PurgeExpiredFilesForTest(ctx context.Context, pool *pgxpool.Pool, blobs blo
 	return purgeExpiredFiles(ctx, pool, blobs, retention)
 }
 
+// SetFilePurgeBatchForTest shrinks one sweep's batch, so a test can see which
+// rows a batch takes — at the production size every expired row fits in one and
+// the order is unobservable.
+func SetFilePurgeBatchForTest(n int) (restore func()) {
+	prev := filePurgeBatch
+	filePurgeBatch = n
+	return func() { filePurgeBatch = prev }
+}
+
 // SetFilePurgeIntervalForTest shortens the expired-file sweep's cadence so a
 // test can drive a tick without waiting an hour (SetMemoryPruneIntervalForTest's
 // reason, for the sibling sweep).

@@ -152,17 +152,18 @@ func TestFileRetentionSweepRuns(t *testing.T) {
 	done := make(chan struct{})
 	go func() { defer close(done); api.StartFileRetention(ctx, s.pool, s.blobs) }()
 
+	// Wait for the object too, not just the row: the DELETE commits before the
+	// object delete runs, so a check taken the moment the row disappears can
+	// land in between and fail for no reason.
 	deadline := time.Now().Add(10 * time.Second)
-	for fileRowExists(t, s, swept) {
+	for fileRowExists(t, s, swept) || blobExists(t, s, swept) {
 		if time.Now().After(deadline) {
 			cancel()
 			<-done
-			t.Fatal("the sweep did not remove a file 31 days past its expiry")
+			t.Fatalf("31 days past its expiry, the sweep left row=%v object=%v",
+				fileRowExists(t, s, swept), blobExists(t, s, swept))
 		}
 		time.Sleep(20 * time.Millisecond)
-	}
-	if blobExists(t, s, swept) {
-		t.Error("the sweep removed the row but left the object")
 	}
 	// The 29-day file was a candidate of the same statement that removed the
 	// 31-day one, so its survival is decided rather than merely pending.
