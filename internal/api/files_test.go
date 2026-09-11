@@ -435,6 +435,184 @@ func TestFileList(t *testing.T) {
 // the reference says it is: "an opaque page cursor returned in a prior list
 // response's next_page", passed back as ?page= (anthropic-sdk-go v1.70.1
 // betafile.go BetaFileListParams.Page).
+// TestFileListIDs covers ?ids=, the documented batch filter: "Restrict the
+// result set to Files whose `id` is in this list. At most 100 entries (after
+// de-duplication). Mutually exclusive with `page` and `limit`. When supplied,
+// the response is always a single page (`next_page` is null). IDs that do not
+// resolve to a visible File — including deleted Files — are silently omitted."
+// (#652)
+func TestFileListIDs(t *testing.T) {
+	s := newTestServer(t)
+	oct := "application/octet-stream"
+	ids := make([]string, 0, 5)
+	for i := 0; i < 5; i++ {
+		created := s.uploadFile(t, fmt.Sprintf("f%d.bin", i), &oct, fmt.Sprintf("body-%d", i))
+		ids = append(ids, created["id"].(string))
+	}
+	stampCreatedAt(t, s, "files", ids...)
+
+	// Both spellings reach the same filter — the statuses[] precedent this repo
+	// already sets twice. The public docs write this one `ids[]`; the SDK field
+	// is `ids`.
+	for _, key := range []string{"ids", "ids[]"} {
+		status, body := s.do("GET", "/v1/files?"+key+"="+ids[0]+"&"+key+"="+ids[2], nil)
+		if status != http.StatusOK {
+			t.Fatalf("%s list: %d %v", key, status, body)
+		}
+		// Still the list's own newest-first order, not the order asked in.
+		if got := pageIDs(listData(t, body)); len(got) != 2 || got[0] != ids[2] || got[1] != ids[0] {
+			t.Errorf("%s = %v, want [%s %s] newest-first", key, got, ids[2], ids[0])
+		}
+		wantFields(t, body, "data", "next_page", "has_more", "first_id", "last_id")
+		if np := nextPage(t, body); np != "" {
+			t.Errorf("%s next_page = %q, want null: an ids page is always terminal", key, np)
+		}
+		if body["has_more"] != false {
+			t.Errorf("%s has_more = %v, want false", key, body["has_more"])
+		}
+	}
+
+	// Unresolvable entries drop out instead of failing the request: a well-formed
+	// id nothing owns, a malformed one, and a deleted one.
+	deleted := s.uploadFile(t, "gone.bin", &oct, "gone")["id"].(string)
+	if status, body := s.do("DELETE", "/v1/files/"+deleted, nil); status != http.StatusOK {
+		t.Fatalf("delete: %d %v", status, body)
+	}
+	absent := "file_0000000000000000000000ok"
+	// The NUL arm is the one the id-grammar filter exists for (#135): an
+	// unstorable byte must never reach the bind parameter, where Postgres would
+	// answer with a 500 instead of a filtered page.
+	status, body := s.do("GET", "/v1/files?ids="+ids[1]+"&ids="+absent+"&ids=not-a-file-id&ids=file_%00"+strings.Repeat("a", 23)+"&ids="+deleted, nil)
+	if status != http.StatusOK {
+		t.Fatalf("ids with misses: %d %v", status, body)
+	}
+	if got := pageIDs(listData(t, body)); len(got) != 1 || got[0] != ids[1] {
+		t.Errorf("ids with misses = %v, want [%s]", got, ids[1])
+	}
+
+	// Every entry a miss is an empty page, not an error — the cost of the
+	// silent-omission rule, and a shape a cursor client already stops on.
+	status, body = s.do("GET", "/v1/files?ids="+absent, nil)
+	if status != http.StatusOK {
+		t.Fatalf("all-miss ids: %d %v", status, body)
+	}
+	if got := listData(t, body); len(got) != 0 {
+		t.Errorf("all-miss ids = %v, want []", pageIDs(got))
+	}
+	wantFields(t, body, "data", "next_page", "has_more", "first_id", "last_id")
+	if body["first_id"] != nil || body["last_id"] != nil {
+		t.Errorf("empty ids page first/last = %v/%v, want null", body["first_id"], body["last_id"])
+	}
+
+	// An all-malformed request is an empty page, not an unfiltered list. This is
+	// the one arm that separates "ids was supplied" from "ids resolved to
+	// something": drop the distinction and every entry being dropped reads as no
+	// filter at all.
+	status, body = s.do("GET", "/v1/files?ids=not-a-file-id&ids=also-bad", nil)
+	if status != http.StatusOK {
+		t.Fatalf("all-malformed ids: %d %v", status, body)
+	}
+	if got := listData(t, body); len(got) != 0 {
+		t.Errorf("all-malformed ids = %v, want []: a dropped entry is not an absent filter", pageIDs(got))
+	}
+
+	// De-duplication.
+	status, body = s.do("GET", "/v1/files?ids="+ids[3]+"&ids="+ids[3]+"&ids="+ids[3], nil)
+	if status != http.StatusOK {
+		t.Fatalf("duplicate ids: %d %v", status, body)
+	}
+	if got := pageIDs(listData(t, body)); len(got) != 1 || got[0] != ids[3] {
+		t.Errorf("duplicate ids = %v, want [%s] once", got, ids[3])
+	}
+
+	// ...and the 100 cap, which the docs count on the de-duplicated set. Building
+	// the arms from well-formed ids keeps the cap the only thing under test.
+	var hundred, hundredOne []string
+	for i := 0; i < 101; i++ {
+		one := fmt.Sprintf("ids=file_00000000000000000000%04d", i)
+		if i < 100 {
+			hundred = append(hundred, one)
+		}
+		hundredOne = append(hundredOne, one)
+	}
+	for _, tc := range []struct {
+		name  string
+		query []string
+		want  int
+	}{
+		{"100 distinct ids", hundred, http.StatusOK},
+		{"101 distinct ids", hundredOne, http.StatusBadRequest},
+		// 200 entries collapsing to 100 must pass: counting the query string
+		// rather than the set would reject this.
+		{"200 entries, 100 distinct", append(append([]string{}, hundred...), hundred...), http.StatusOK},
+	} {
+		status, body := s.do("GET", "/v1/files?"+strings.Join(tc.query, "&"), nil)
+		if status != tc.want {
+			t.Errorf("%s: %d, want %d (%v)", tc.name, status, tc.want, body)
+		}
+	}
+
+	// More matches than the default page size still come back as one page: an ids
+	// request carries no limit of its own, so nothing may silently truncate it.
+	// 22 > the list default of 20 (page.go defaultLimit), which is unexported.
+	bulk := make([]string, 0, 22)
+	for i := 0; i < cap(bulk); i++ {
+		created := s.uploadFile(t, fmt.Sprintf("bulk%d.bin", i), &oct, "b")
+		bulk = append(bulk, created["id"].(string))
+	}
+	query := make([]string, 0, len(bulk))
+	for _, id := range bulk {
+		query = append(query, "ids[]="+id)
+	}
+	status, body = s.do("GET", "/v1/files?"+strings.Join(query, "&"), nil)
+	if status != http.StatusOK {
+		t.Fatalf("bulk ids: %d %v", status, body)
+	}
+	if got := listData(t, body); len(got) != len(bulk) {
+		t.Errorf("bulk ids returned %d rows, want all %d in one page", len(got), len(bulk))
+	}
+	if body["has_more"] != false {
+		t.Errorf("bulk ids has_more = %v, want false", body["has_more"])
+	}
+	if np := nextPage(t, body); np != "" {
+		t.Errorf("bulk ids next_page = %q, want null", np)
+	}
+
+	// Mutually exclusive with page and limit, and with the id cursors the docs
+	// name in the same breath ("not combinable with `page` or `ids[]`"). The
+	// page arm needs a real cursor, or it would fail on the decode instead.
+	_, first := s.do("GET", "/v1/files?limit=2", nil)
+	cursor := nextPage(t, first)
+	if cursor == "" {
+		t.Fatalf("expected a cursor from a limit=2 page over 6 files: %v", first)
+	}
+	for _, tc := range []struct{ name, query string }{
+		{"ids+limit", "ids=" + ids[0] + "&limit=2"},
+		{"ids+page", "ids=" + ids[0] + "&page=" + cursor},
+		{"ids+after_id", "ids=" + ids[0] + "&after_id=" + ids[1]},
+		{"ids+before_id", "ids=" + ids[0] + "&before_id=" + ids[1]},
+	} {
+		if status, body := s.do("GET", "/v1/files?"+tc.query, nil); status != http.StatusBadRequest {
+			t.Errorf("%s: %d, want 400 (%v)", tc.name, status, body)
+		}
+	}
+
+	// scope_id is not on the exclusivity list, so the two filters intersect.
+	scoped, sess := "file_0000000000000000000000h1", "sesn_0000000000000000000000h1"
+	if _, err := s.pool.Exec(context.Background(),
+		`INSERT INTO files (id, filename, mime_type, size_bytes, downloadable, scope_type, scope_id)
+		 VALUES ($1,'out.txt','text/plain',3,true,'session',$2)`, scoped, sess); err != nil {
+		t.Fatalf("seed scoped row: %v", err)
+	}
+	status, body = s.do("GET", "/v1/files?ids="+scoped+"&ids="+ids[0]+"&scope_id="+sess, nil)
+	if status != http.StatusOK {
+		t.Fatalf("ids+scope_id: %d %v", status, body)
+	}
+	if got := pageIDs(listData(t, body)); len(got) != 1 || got[0] != scoped {
+		t.Errorf("ids+scope_id = %v, want [%s]: the two filters AND", got, scoped)
+	}
+}
+
 func TestFileListNextPageCursor(t *testing.T) {
 	s := newTestServer(t)
 	oct := "application/octet-stream"

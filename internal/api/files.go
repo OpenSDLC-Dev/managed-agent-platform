@@ -21,6 +21,10 @@ import (
 // managed-agents resource lists' 100.
 const maxFileListLimit = 1000
 
+// maxFileListIDs bounds ?ids[], counted on the de-duplicated set the way the
+// docs count it — "at most 100 entries (after de-duplication)".
+const maxFileListIDs = 100
+
 // fileJSON is the BetaFileMetadata wire shape (anthropic-sdk-go betafile.go:178-218):
 // id/created_at/filename/mime_type/size_bytes all api:"required"; type is the
 // constant "file"; downloadable a plain bool.
@@ -202,6 +206,46 @@ func (s *server) listFiles(r *http.Request) (any, error) {
 	if afterID != "" && beforeID != "" {
 		return nil, errInvalid("after_id and before_id are mutually exclusive")
 	}
+
+	// ?ids[] restricts the result set to the files named. url.Values keys the
+	// bracketed spelling literally, and that is the one the SDK sends —
+	// BetaFileListParams.URLQuery pins ArrayQueryFormatBrackets, whose encoder
+	// appends "[]" to the key once per element. The bare spelling is accepted
+	// too, the statuses[] leniency this repo already applies twice.
+	idsParam := append(q["ids[]"], q["ids"]...)
+	idsSupplied := len(idsParam) > 0
+	var ids []string
+	if idsSupplied {
+		// "Mutually exclusive with page and limit", and the docs name the id
+		// cursors in the same breath: before_id/after_id are "not combinable with
+		// page or ids[]". Read the raw values rather than the parsed ones, since
+		// parsePageWith cannot tell a defaulted limit from a sent one.
+		if q.Get("page") != "" || q.Get("limit") != "" || afterID != "" || beforeID != "" {
+			return nil, errInvalid("ids is not combinable with page, limit, after_id or before_id")
+		}
+		seen := make(map[string]bool, len(idsParam))
+		for _, id := range idsParam {
+			if seen[id] {
+				continue
+			}
+			seen[id] = true
+			// A malformed id is dropped rather than rejected. The scalar filters
+			// beside this one 400 on a bad shape (#135's "shape first"), but this
+			// parameter is documented to tolerate misses — "IDs that do not resolve
+			// to a visible File — including deleted Files — are silently omitted" —
+			// and a malformed id resolves to no visible file by definition. The
+			// price is that an all-malformed request reads as an empty page rather
+			// than an error; the id grammar is also what keeps an unstorable byte
+			// out of the bind parameter, which #135 requires either way.
+			if !domain.ID(id).HasPrefix(domain.PrefixFile) || !domain.ID(id).Valid() {
+				continue
+			}
+			ids = append(ids, id)
+		}
+		if len(seen) > maxFileListIDs {
+			return nil, errInvalid("ids accepts at most %d entries", maxFileListIDs)
+		}
+	}
 	// The shared parser reads ?page= and ?limit= together, so this list inherits
 	// the keyset cursor's guards — the grammar check and #135's unstorable-id
 	// reject — rather than growing a second spelling of them. Its limit bounds
@@ -261,6 +305,19 @@ func (s *server) listFiles(r *http.Request) (any, error) {
 	if scopeID != "" {
 		args = append(args, scopeID)
 		query += fmt.Sprintf(` AND scope_id = $%d`, len(args))
+	}
+	if idsSupplied {
+		// scope_id is not on the exclusivity list, so the two filters intersect.
+		// The page size becomes the set's own size, which is what makes this page
+		// terminal without a second rule: at most len(ids) rows can match, so the
+		// limit+1 probe below never sees an extra, has_more is false, and the
+		// next_page branch mints nothing — "the response is always a single page".
+		// An empty set after the shape filter still lands here rather than falling
+		// through to an unfiltered list, which is the whole point of tracking
+		// idsSupplied separately from len(ids).
+		args = append(args, ids)
+		query += fmt.Sprintf(` AND id = ANY($%d)`, len(args))
+		limit = len(ids)
 	}
 	// Default and after_id fetch newest-first; before_id fetches the nearest
 	// newer rows ascending, reversed to newest-first before rendering.
