@@ -1,0 +1,42 @@
+-- A files row carries both scope columns or neither (#659). 0008 declared them
+-- as two independent nullable columns, so either could stand alone.
+--
+-- scope_id alone is the shape that bites: the list's ?scope_id= filter matches
+-- on that column while renderFile builds a scope object only when it holds
+-- both. Such a row is returned by a filter naming its scope and then renders
+-- with no scope key at all -- the registry says the file belongs to a session
+-- and the file's own object declines to say so. Since #651 that disagreement is
+-- an omitted key rather than a visibly wrong `"scope": null`, which makes it
+-- quieter, not better.
+--
+-- A CHECK passes on NULL, so the expression has to be one that can never be
+-- NULL: IS NULL always answers, so `=` between two of its results is a real
+-- boolean for every row. (This says the columns are present together, not that
+-- they agree -- they never agree, one is a type and one is an id.)
+--
+-- This validates existing rows rather than landing NOT VALID, and the cost of
+-- that is worth stating plainly, because it is paid at startup by every binary:
+-- Migrate applies all pending migrations in ONE transaction (internal/store/
+-- migrate.go) and store.Open calls it from controlplane, brain, executor and
+-- worker. So a violating row does not degrade the deployment, it stops it --
+-- the transaction rolls back, no later migration applies either, and each
+-- restart retries the same failure. The ACCESS EXCLUSIVE this takes is likewise
+-- held for the remainder of that transaction, not just for the statement.
+--
+-- Two things make that the right trade here and not a gamble. No row this
+-- platform wrote can violate it: `git log -S` over the three production inserts
+-- shows each wrote both columns or neither from its first commit -- the outputs
+-- harvest writes the literal 'session' and the session id in one VALUES clause,
+-- uploads and dream files write neither -- and there has never been a
+-- production UPDATE of this table at all, so no row could have been halved
+-- after the fact. And NOT VALID is not the cheaper half of this choice, it is a
+-- different one: the follow-up VALIDATE CONSTRAINT has to run in its own
+-- transaction, which this migrator cannot express, so NOT VALID here would not
+-- defer validation but abandon it. A deployment holding a row only out-of-band
+-- SQL could have written should stop and be looked at.
+--
+-- IF EXISTS so re-running the file is a no-op rather than a duplicate_object
+-- error that would take every other pending migration down with it.
+ALTER TABLE files DROP CONSTRAINT IF EXISTS files_scope_pair_agrees;
+ALTER TABLE files ADD CONSTRAINT files_scope_pair_agrees
+    CHECK ((scope_type IS NULL) = (scope_id IS NULL));
