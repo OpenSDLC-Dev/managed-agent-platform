@@ -1254,6 +1254,116 @@ func TestSkillVersionAddressing(t *testing.T) {
 	wantErr(t, status, obj, http.StatusNotFound, "not_found_error")
 }
 
+// TestSkillLatestAliasRoundTripsToDownload pins the two-call flow the pinned
+// SDK's agent toolset performs when it materializes a skill into a sandbox
+// (anthropic-sdk-go v1.70.1 tools/agenttoolset/skills.go:102-119): retrieve the
+// version addressed by the alias, then download by the concrete id THAT CALL
+// RETURNED. The client no longer resolves the alias itself — resolveSkillVersion,
+// which listed a skill's versions and picked the newest, is gone at the pin — so
+// the retrieve response's `id` is load-bearing in a way it was not before: a
+// retrieve that echoed the alias back would send the download to a route that
+// refuses it (TestSkillVersionLatestAliasRefusals), and a `latest`-pinned skill
+// would never materialize on the BYOC half.
+//
+// TestSkillVersionAddressing pins what the retrieve echoes and
+// TestSkillContentDisposition pins a download by a concrete id; what neither
+// holds is the composition — that the id one answers with is one the other
+// takes. Four further properties of that flow are pinned nowhere else: the
+// alias resolves to the NEWEST of several versions (against a one-version skill
+// every resolution rule answers alike, including one that picked the oldest);
+// the `name` the same response carries is what the landing directory is derived
+// from (:106-114, falling back to the skill id); both calls ride the environment
+// key with X-Api-Key deleted (:41-45) rather than the management key
+// TestSkillReadsEnvironmentKeyLane drives by concrete id; and the id the
+// retrieve hands over may be the legacy spelling, which is the case an upgraded
+// installation actually runs.
+func TestSkillLatestAliasRoundTripsToDownload(t *testing.T) {
+	s := newTestServer(t)
+	_, envID := fixture(t, s)
+	wkey := issueKey(t, s.pool, envID, "skills-latest-lane")
+
+	created := s.createSkill(t)
+	id, _ := created["id"].(string)
+	v1, _ := created["latest_version_id"].(string)
+
+	ct, body := skillForm(t, nil, []upFile{
+		{name: "financial-skill/SKILL.md", content: testSkillMD},
+		{name: "financial-skill/v2.txt", content: "second"},
+	})
+	status, obj := s.doForm("POST", "/v1/skills/"+id+"/versions", ct, body)
+	if status != http.StatusOK {
+		t.Fatalf("create the second version: %d %v", status, obj)
+	}
+	want, _ := obj["id"].(string)
+	if !strings.HasPrefix(want, "skver_") || want == v1 {
+		t.Fatalf("second version id = %q, want a fresh skver_ id (first %q)", want, v1)
+	}
+
+	// `?beta=true` is accepted and ignored on these routes, so it rides along
+	// with the environment key rather than costing a pass of its own.
+	for _, lane := range []struct {
+		name, query string
+		hdr         map[string]string
+	}{
+		{"management key", "", map[string]string{"x-api-key": testKey}},
+		{"environment key and ?beta=true", "?beta=true", map[string]string{"Authorization": "Bearer " + wkey}},
+	} {
+		t.Run(lane.name, func(t *testing.T) {
+			res := s.doRaw("GET", "/v1/skills/"+id+"/versions/latest"+lane.query, nil, lane.hdr)
+			raw, err := io.ReadAll(res.Body)
+			res.Body.Close()
+			if err != nil {
+				t.Fatalf("read the retrieve: %v", err)
+			}
+			if res.StatusCode != http.StatusOK {
+				t.Fatalf("retrieve by the alias: status %d (%s)", res.StatusCode, raw)
+			}
+			var v map[string]any
+			if err := json.Unmarshal(raw, &v); err != nil {
+				t.Fatalf("decode the retrieve: %v", err)
+			}
+			if v["id"] != want {
+				t.Fatalf("retrieve by the alias echoed id %v, want the newest version %q", v["id"], want)
+			}
+			if v["name"] != "financial-skill" {
+				t.Errorf("retrieve by the alias carried name %v, want financial-skill", v["name"])
+			}
+
+			// The id the retrieve handed back is one the download accepts. The
+			// alias is not, which is the whole reason the client makes two calls.
+			vid, _ := v["id"].(string)
+			res = s.doRaw("GET", "/v1/skills/"+id+"/versions/"+vid+"/content"+lane.query, nil, lane.hdr)
+			io.Copy(io.Discard, res.Body)
+			res.Body.Close()
+			if res.StatusCode != http.StatusOK {
+				t.Errorf("download by the id the retrieve returned: status %d", res.StatusCode)
+			}
+		})
+	}
+
+	// An upgraded installation is where the round trip earns its keep: a row
+	// the upgrade retained still renders `skillver_` (decision 9), and the
+	// client downloads by whatever the retrieve handed it rather than by a
+	// spelling it assumes. TestSkillVersionAddressing retrieves by that slot
+	// but downloads only by the GA id, so plant one and walk both calls.
+	const legacy = "skillver_3141592653abcdefghjkmnpq"
+	if _, err := s.pool.Exec(t.Context(),
+		`UPDATE skill_versions SET id = $3 WHERE skill_id = $1 AND id = $2`, id, want, legacy); err != nil {
+		t.Fatalf("plant a retained legacy version id: %v", err)
+	}
+	status, obj = s.do("GET", "/v1/skills/"+id+"/versions/latest", nil)
+	if status != http.StatusOK || obj["id"] != legacy {
+		t.Fatalf("retrieve by the alias on a retained row = %d %v, want %s", status, obj, legacy)
+	}
+	res := s.doRaw("GET", "/v1/skills/"+id+"/versions/"+legacy+"/content", nil,
+		map[string]string{"x-api-key": testKey})
+	io.Copy(io.Discard, res.Body)
+	res.Body.Close()
+	if res.StatusCode != http.StatusOK {
+		t.Errorf("download by the retained legacy id = %d, want 200", res.StatusCode)
+	}
+}
+
 // TestSkillContentDisposition pins the download's Content-Disposition, which
 // the recording shows on every observed content download: an attachment named
 // for the version's own slug, carried only as an RFC 5987 filename*.
