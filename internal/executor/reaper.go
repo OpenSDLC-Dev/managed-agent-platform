@@ -3,10 +3,22 @@ package executor
 // The sandbox reaper (plan 24): the one owner of sandbox destruction. It lives
 // in the executor because this is the only process holding both the sandbox
 // provider and the pool, and it needs no coordination across replicas — Owned
-// is endpoint-local (each executor sees only its own daemon or namespace, a
-// natural shard) and Reap is idempotent, so N executors reap concurrently.
-// Teardown is eventual, one reap interval behind the trigger, which the wire
-// cannot observe: no API surface exposes a sandbox's existence.
+// is endpoint-local and Reap is idempotent, so N executors reap concurrently.
+// Endpoint-local shards cleanly on Docker, where it is one daemon's
+// containers, and not on Kubernetes, where it is one namespace's pods and the
+// chart puts every replica in the same namespace: those replicas see each
+// other's sandboxes and race for them, which costs a redundant listing and
+// nothing more, the per-session advisory lock serializing the one pair that
+// must not interleave.
+//
+// Teardown is paced by the reap interval rather than delayed to it: a session's
+// end publishes a wake this package listens for (reapkick.go, plan 48), so the
+// interval is the worst case for teardown and no longer the usual one. A lost
+// wake costs one interval, which is where teardown was before the kick existed.
+// A wake is also work: every listening executor sweeps everything it owns, so
+// the cost of the kick scales with the rate sessions end and, on Kubernetes,
+// with the replica count sharing the namespace. What the wire sees is unchanged either way, which is nothing — no
+// API surface exposes a sandbox's existence.
 
 import (
 	"context"
@@ -68,7 +80,11 @@ func sessionLockKey(id domain.ID) int64 {
 // window must not be reaped on the stale answer). Always nil in production.
 var reapHookAfterClassify func(domain.ID)
 
-// reapLoop drives one reap pass per interval until the context ends.
+// reapLoop drives one reap pass per interval, or sooner when a session's end
+// kicks it (plan 48). Both wakes run the same pass: the kick says only that
+// something ended somewhere, so what it triggers is the ordinary sweep, which
+// re-reads this endpoint's own holding and classifies it under the session
+// lock exactly as the ticker's pass does.
 func (e *Executor) reapLoop(ctx context.Context) {
 	t := time.NewTicker(e.cfg.ReapInterval)
 	defer t.Stop()
@@ -77,10 +93,23 @@ func (e *Executor) reapLoop(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-t.C:
+		case <-e.kick:
 		}
 		if err := e.reapPass(ctx); err != nil && ctx.Err() == nil {
 			slog.WarnContext(ctx, "reap pass incomplete; the next interval retries", "error", err)
 		}
+	}
+}
+
+// wake asks for one sweep, dropping the request when a sweep is already owed.
+// Coalescing is what makes the kick affordable: a pass costs one endpoint
+// listing plus a classification per owned sandbox, so a bulk delete of a
+// hundred sessions must cost the sweep that sees all hundred, not a hundred
+// sweeps.
+func (e *Executor) wake() {
+	select {
+	case e.kick <- struct{}{}:
+	default:
 	}
 }
 

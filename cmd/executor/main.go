@@ -13,7 +13,10 @@
 //	                         is refused: a provision pins a session-lock
 //	                         connection and the reaper two (its lock and, mid
 //	                         memory sync, its own transaction) while their
-//	                         nested queries still need the pool
+//	                         nested queries still need the pool. One further
+//	                         connection is held outside the pool, for the reap
+//	                         kick's LISTEN, so size the server's limit for
+//	                         pool_max_conns + 1 per executor
 //	EXECUTOR_IMAGE           sandbox base image (default "debian:stable-slim")
 //	EXECUTOR_WORKDIR         working directory inside the sandbox (default
 //	                         "/workspace")
@@ -315,9 +318,23 @@ func run(ctx context.Context) error {
 	// queries (the gate-token mint and revoke, the under-lock re-reads), so
 	// a fourth connection must exist for those to ever proceed. Refuse less
 	// at startup instead of wedging silently under load.
+	//
+	// The reap kick's LISTEN is deliberately outside this number: it holds a
+	// connection of its own for the process's lifetime, dialled from this
+	// pool's config, and never acquires from the pool — so it cannot
+	// participate in the
+	// nesting this floor is about, and counting it here would raise the floor
+	// to five and refuse every deployment whose DSN leaves pool_max_conns at
+	// the four-connection default (plan 48).
 	if pool.Config().MaxConns < 4 {
 		return fmt.Errorf("DATABASE_URL pool_max_conns = %d: the executor needs at least 4 connections", pool.Config().MaxConns)
 	}
+	// The listener dials the pool's own parsed config, not DATABASE_URL: only
+	// pgxpool's parse consumes the pool_* options the DSN may carry, and pgx
+	// would forward them to the server as settings it does not have and
+	// refuse the connection over. So this is set here rather than in the
+	// literal above, where the pool does not exist yet.
+	cfg.ReapKickConn = pool.Config().ConnConfig.Copy()
 
 	provider, err := backend.New(backend.Config{
 		Backend:             os.Getenv("SANDBOX_BACKEND"),

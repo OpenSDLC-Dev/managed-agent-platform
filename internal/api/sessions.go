@@ -1354,6 +1354,17 @@ func (s *server) archiveSessionInTx(ctx context.Context, tx pgx.Tx, id string) (
 	if err := terminateLiveChildren(ctx, tx, s.log, id); err != nil {
 		return sessionRow{}, err
 	}
+	// Read ahead of the COALESCE rather than after it, because afterwards the
+	// two cases are indistinguishable: the stamp is set either way, and an
+	// archive that changed nothing must not claim a session just ended. One
+	// round trip, and the handler's guards have already taken this row FOR
+	// UPDATE by the time it runs; the dream runner's arm holds its dream row
+	// instead, which is what keeps it alone with this session.
+	var alreadyArchived bool
+	if err := tx.QueryRow(ctx,
+		`SELECT archived_at IS NOT NULL FROM sessions WHERE id = $1`, id).Scan(&alreadyArchived); err != nil {
+		return sessionRow{}, err
+	}
 	row, err := scanSession(tx.QueryRow(ctx,
 		`UPDATE sessions SET
 		   updated_at  = CASE WHEN archived_at IS NULL THEN now() ELSE updated_at END,
@@ -1367,6 +1378,18 @@ func (s *server) archiveSessionInTx(ctx context.Context, tx pgx.Tx, id string) (
 		  WHERE session_id = $1 AND parent_thread_id IS NULL AND archived_at IS NULL`,
 		id, row.archivedAt, row.updatedAt); err != nil {
 		return sessionRow{}, err
+	}
+	// An archived session's sandbox is the reaper's too, so the ending wakes
+	// it here rather than at the handler (#354, plan 48): every caller of this
+	// function archives a session, the dream runner's closing arm included,
+	// and riding the transaction costs none of them a response. Only when this
+	// call is what archived it — re-archiving ends nothing, and a wake that
+	// reports an ending would have every executor sweep for a request that
+	// changed no row.
+	if !alreadyArchived {
+		if err := events.NotifyReapKick(ctx, tx); err != nil {
+			return sessionRow{}, err
+		}
 	}
 	return row, nil
 }
@@ -1422,6 +1445,16 @@ func (s *server) deleteSession(r *http.Request) (any, error) {
 	// never this deployment's — and it records the environment kind because
 	// only a cloud session's sandbox is the platform's to destroy (plan 24).
 	if _, err := tx.Exec(ctx, store.SessionTombstoneInsertSQL, id); err != nil {
+		return nil, err
+	}
+	// And the wake for it, in the same transaction and next to the row it is
+	// owed to (#354, plan 48): the sandbox goes when an executor sweeps, and
+	// without this it sweeps at its next interval. Postgres holds a NOTIFY
+	// until commit, so no reaper can be woken to look for a tombstone this
+	// transaction has not yet made visible, and a delete that rolls back
+	// wakes nobody. Losing the wake costs one reap interval, never a sandbox —
+	// the tombstone is the durable statement and every sweep re-reads it.
+	if err := events.NotifyReapKick(ctx, tx); err != nil {
 		return nil, err
 	}
 	// The live children end with the session (decision 12), but their rows
@@ -1540,7 +1573,12 @@ func (s *server) deleteSession(r *http.Request) (any, error) {
 	// only remover: a session that still owns a sandbox is the reaper's
 	// deleted tier, which deletes this same key before it reaps (plan 24) —
 	// this covers the session whose sandbox is already gone, which no reap
-	// pass will ever visit again. Detached from the request context: the
+	// pass will ever visit again. Both removers running at once is fine, and
+	// since the commit woke the reaper (#354) it is now the ordinary case:
+	// deleting a key that is already gone is nil for every backend
+	// (blob.Store's contract, and blobtest's DeleteMissingIsNil rung), which
+	// is what the reaper has always relied on arriving second.
+	// Detached from the request context: the
 	// commit already happened, and a client hanging up must not skip the one
 	// delete this path exists for.
 	//

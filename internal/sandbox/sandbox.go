@@ -540,8 +540,11 @@ type Provider interface {
 	// Owned lists the distinct session ids of every sandbox asset — sandbox
 	// containers/pods and gate containers, running or stopped — this endpoint
 	// currently holds, read from the ownership label. Endpoint-local by
-	// design: each executor sees only its own daemon or namespace, which is
-	// what shards the reaper across executors with no coordination (plan 24).
+	// design: an executor lists one daemon's containers or one namespace's
+	// pods, which is what lets the reaper run on every executor with no
+	// coordination (plan 24). Not a partition — the chart's replicas share a
+	// namespace and so list each other's pods; what makes that safe is that
+	// Reap is idempotent and the reaper serializes on a per-session lock.
 	Owned(ctx context.Context) ([]domain.ID, error)
 	// Reap destroys everything the endpoint owns for the session — sandbox,
 	// gate, anonymous volumes — revoking the session's gate token first when

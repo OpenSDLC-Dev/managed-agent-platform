@@ -49,6 +49,63 @@ new directory and in-repo citations re-pointed in the moving PR (plan
 
 ---
 
+## A session's end kicks the reaper (plan 48, #354) — archived 2026-09-11, delivered in one PR
+
+`DELETE /v1/sessions/{id}` returned `session_deleted` while the container stayed
+`Up` for as long as a full `EXECUTOR_REAP_INTERVAL`. Plan 24 had chosen that
+latency deliberately and stated it as a property; this retired the first half of
+that sentence and kept the second, which is that the wire cannot observe any of
+it.
+
+The decision that kept the change small was to wake the **existing** `reapLoop`
+rather than reap a named session: a targeted reap would have had to re-establish
+by hand the `Owned()` gate, the gate-token revoke, the cloud-only predicate, the
+deleted tier's blob-delete retry and the memory-sync ordering that `reapPass`
+gets by construction. `reapSession`'s signature and every existing call site
+went untouched, which is itself the evidence that idle-TTL and orphan behaviour
+were unchanged.
+
+Two design errors shipped in the first commit and were caught in review, both by
+the Codex reviewer and `/code-review` independently. The first: the producer
+fired **after** the commit on a detached, budgeted context, on the stated
+grounds that an in-transaction `pg_notify` could doom a delete that had
+otherwise succeeded. That confused a statement failing before commit — ordinary,
+and a risk every work enqueue in the codebase already takes — with failing a
+delete that has already committed, which a pre-commit `NOTIFY` cannot do, since
+Postgres queues it and delivers only on commit. What the post-commit version
+actually cost was a synchronous five-second budget on both endings and a crash
+window. The kick now rides the ending transaction, as `NotifyWorkEnqueued`
+beside it always has.
+
+The second was sharper, and was verified experimentally by both reviewers before
+it was believed: the listener dialled the raw `DATABASE_URL` with `pgx.Connect`.
+`pgxpool.ParseConfig` consumes the `pool_*` options a DSN may carry, but
+`pgx.ParseConfig` leaves them in the startup packet, where the server answers
+`FATAL: unrecognized configuration parameter "pool_max_conns"` and refuses the
+connection. Any deployment that tuned its pool in the DSN — the shape
+`cmd/executor`'s own documentation tells operators to use — would have had a
+listener that never established, a warning every backoff, and teardown silently
+back on the interval the change existed to stop waiting for. No test caught it
+because the fixture DSN carries no query string at all. The listener now dials
+the pool's parsed configuration, and a rung pins both halves: that the raw parse
+fails to connect, and that the pool's config works.
+
+Acceptance ran on real binaries with `EXECUTOR_REAP_INTERVAL=1h`, where the
+container was destroyed 0.428s after the `DELETE` and 0.448s after an archive —
+arithmetically impossible from the ticker. Six guards were each run against the
+broken code. One did not kill its mutant on the first attempt: the shutdown
+rung's deadline was longer than the reconnect backoff, so a retry pause that
+ignored its context still finished inside it. Tightening the deadline below the
+backoff is what made it a guard rather than a test that passes whatever the code
+does.
+
+Left open: terminate, the third ending, which is written by the brain's
+settlement in another binary (#688); and the cost of a wake, since every
+listening executor sweeps everything it owns, so the reaper's load now follows
+the rate at which sessions end. No debounce was imposed — a sweep per ended
+session is work proportional to work, and a tuning knob invented ahead of a
+measurement is the kind of configurability this repo refuses.
+
 ## Dreams — the in-place run, and plan 41 closed (plan 41 slice 4, run 2026-09-07) — ✅ passed
 
 Slice 4 is the plan's last code, so this record carries both the acceptance run and the archived
