@@ -305,6 +305,18 @@ func TestRetentionLoopSweepsBeforeItsFirstTick(t *testing.T) {
 	}
 }
 
+// TestMemoryPruneIntervalIsTheDocumentedCadence pins the production value,
+// which no other test can: every loop test overrides it, so without this one a
+// change to a second — an unbounded full-table DELETE once a second — passes
+// the gate. Hourly is an operator contract in docs/ARCHITECTURE.md and
+// docs/DIVERGENCES.md, and the literal is deliberate: comparing against the var
+// would move both sides together and pin nothing.
+func TestMemoryPruneIntervalIsTheDocumentedCadence(t *testing.T) {
+	if memoryPruneInterval != time.Hour {
+		t.Errorf("memoryPruneInterval = %s, want 1h — the cadence both docs publish", memoryPruneInterval)
+	}
+}
+
 // TestRetentionLoopSweepsThenStops drives the loop itself, not just the
 // statement: a tick has to reach the sweep, and a cancelled context has to end
 // it. Without the first half, the loop could stop calling the sweep entirely
@@ -323,9 +335,12 @@ func TestRetentionLoopSweepsThenStops(t *testing.T) {
 	liveMemory(t, pool, memoryID, ids[8], "/notes.md")
 
 	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
 	done := make(chan struct{})
 	go func() { defer close(done); StartMemoryRetention(ctx, pool) }()
+	// Every exit path stops the loop, not only the one below: the phases that
+	// follow can t.Fatalf, and the sweeper would otherwise go on issuing
+	// deletes against a pool retentionPool's own cleanup is about to close.
+	t.Cleanup(func() { cancel(); <-done })
 
 	deadline := time.Now().Add(30 * time.Second)
 	for {

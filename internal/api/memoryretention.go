@@ -52,8 +52,12 @@ const (
 var memoryPruneInterval = time.Hour
 
 // StartMemoryRetention sweeps until ctx ends. The statement is idempotent, so
-// two controlplane replicas running it cost a duplicate query and never a
-// wrong answer. It takes row locks only on the rows it deletes, which no plain
+// two controlplane replicas running it never reach a wrong answer — they cost a
+// duplicate query and, since the reorder below made a boot pass the moment they
+// all take one, whatever lock waiting that duplication implies. The statement
+// removes what it finds in one unbounded DELETE, which is what the first pass
+// over a long-unpruned table costs and what makes that timing worth naming.
+// It takes row locks only on the rows it deletes, which no plain
 // reader waits on — a redaction's `SELECT … FOR UPDATE` on one of those rows
 // would, for as long as the delete runs.
 func StartMemoryRetention(ctx context.Context, pool *pgxpool.Pool) {

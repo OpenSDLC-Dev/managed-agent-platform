@@ -20,6 +20,7 @@ import (
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/blob/blobtest"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/secrets/local"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/store"
 )
 
 // refusingStore is an object store that can be told to refuse every delete and
@@ -181,6 +182,32 @@ func awaitAttempt(t *testing.T, store *refusingStore, key, what string) {
 			t.Fatalf("%s: %q was never attempted", what, key)
 		}
 		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// TestDrainSweepsBeforeItsFirstTick: the queue holds precisely what a process
+// died before deleting, so a backlog at boot is the normal case — and the wake
+// that would have announced it died with that process. Nothing here wakes the
+// sweeper and the interval is production's minute, longer than the wait below,
+// so only a pass taken before the first wait can empty the queue. Without it a
+// replica restarting more often than the interval never drains at all.
+func TestDrainSweepsBeforeItsFirstTick(t *testing.T) {
+	s := newTestServer(t)
+	ctx := context.Background()
+	key := blob.FilesKey(domain.NewID("file").String())
+	if err := s.blobs.Put(ctx, key, strings.NewReader("bytes"), 5, "text/markdown"); err != nil {
+		t.Fatalf("seed the object: %v", err)
+	}
+	// The row a dead process's transaction left behind.
+	if _, err := s.pool.Exec(ctx, store.PendingObjectDeleteInsertSQL, []string{key}); err != nil {
+		t.Fatalf("seed the owed key: %v", err)
+	}
+
+	startSweeper(t, s, s.blobs)
+	awaitDrained(t, s.pool, "the backlog a restart inherits")
+
+	if _, _, err := s.blobs.Get(ctx, key); err == nil {
+		t.Errorf("%s: the row went but the object did not", key)
 	}
 }
 
