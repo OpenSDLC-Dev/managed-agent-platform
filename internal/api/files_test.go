@@ -312,11 +312,12 @@ func TestFileNotFound(t *testing.T) {
 	s := newTestServer(t)
 	// Both ways to reach this 404, which the wire deliberately cannot tell
 	// apart. The first id is well-formed and names no row. The other three
-	// never reach a lookup at all: `o` is outside the id alphabet (Crockford
-	// base32 drops i, l, o and u), which disqualifies the two that carry it,
-	// and `not-a-file-id` has no prefix. Rejecting on shape is what keeps a
-	// byte Postgres cannot store out of a bind parameter, where it would answer
-	// 500 instead of this (#135).
+	// never reach a lookup at all: checkFileID wants both a file_ prefix and a
+	// token drawn from the id alphabet, and between them these three fail each
+	// half — `o` is outside that alphabet (Crockford base32 drops i, l, o and
+	// u). Rejecting on shape is what keeps a byte Postgres cannot store
+	// out of a bind parameter, where it would answer 500 instead of this
+	// (#135).
 	for _, id := range []string{
 		"file_0123456789abcdefghjkmnpq",
 		"file_0000000000000000000000ok",
