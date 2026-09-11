@@ -51,7 +51,7 @@ import (
 )
 
 // FileLiveSQL is the predicate that says a files row still has content: it has
-// no expiry, or its expiry has not arrived (#655, plan 48). Here for
+// no expiry, or its expiry has not arrived (#655, plan 49). Here for
 // SessionTombstoneInsertSQL's reason, and more urgently.
 //
 // Four packages read this table to hand a file's bytes to something — api,

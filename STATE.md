@@ -9,10 +9,6 @@ taken in this order because each leaves ground the next stands on. #646 needed n
 (`issue-triage`); [plan 48](./docs/plan/48_reap-kick.md) covered #354 and archived with it,
 retiring plan 24's eventual-teardown decision.
 
-**File expiration (plan 48, #655)** — the upload route refused the documented
-`expires_in_seconds`, so nothing in the registry could expire. Two slices, running in parallel
-with the family above and touching none of its files.
-
 ## Tasks
 
 - [x] #646 — the terminal broadcasts run detached from the request, so a client that hangs up
@@ -21,6 +17,3 @@ with the family above and touching none of its files.
   waits for the reap interval. Archive too; terminate is #688.
 - [ ] #645 — deliverable objects the post-commit cleanup does not remove are orphaned for good;
   no tier knows their keys, so nothing retries them.
-- [x] Plan 48 slice 1 — the parameter, the column, and the 404 the content route owes past
-  `expires_at`.
-- [ ] Plan 48 slice 2 — the sweep that ends the documented 30-day grace window.

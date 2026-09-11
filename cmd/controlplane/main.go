@@ -244,12 +244,13 @@ func run(ctx context.Context) error {
 		ReadTimeout:       time.Minute,
 		IdleTimeout:       2 * time.Minute,
 	}
-	// Memory-version retention (#476), the deployment scheduler (plan 37) and
-	// the dream runner (plan 41): the three background sweeps this binary
-	// runs. All are hosted here because this process already holds the pool
-	// and serves the routes they belong to, and because a deployment whose
-	// environments are all self_hosted runs no executor to put them in. All
-	// are replica-safe: the retention statement is idempotent, the scheduler's
+	// Memory-version retention (#476), expired-file retention (#655), the
+	// deployment scheduler (plan 37) and the dream runner (plan 41): the four
+	// background sweeps this binary runs. All are hosted here because this
+	// process already holds the pool and serves the routes they belong to, and
+	// because a deployment whose environments are all self_hosted runs no
+	// executor to put them in. All are replica-safe: the memory statement is
+	// idempotent, the file sweep's DELETE is itself the claim, the scheduler's
 	// occurrence claim is a unique-index insert, and the runner re-reads each
 	// dream FOR UPDATE SKIP LOCKED — so a second replica costs a duplicate
 	// query, a briefly-blocked loser or a skipped row, never a wrong answer.
@@ -263,6 +264,8 @@ func run(ctx context.Context) error {
 	sweepCtx, stopSweeps := context.WithCancel(ctx)
 	retentionDone := make(chan struct{})
 	go func() { defer close(retentionDone); api.StartMemoryRetention(sweepCtx, pool) }()
+	filesDone := make(chan struct{})
+	go func() { defer close(filesDone); api.StartFileRetention(sweepCtx, pool, blobs) }()
 	schedulerDone := make(chan struct{})
 	go func() { defer close(schedulerDone); api.StartDeploymentScheduler(sweepCtx, pool, blobs, cipher) }()
 	dreamsDone := make(chan struct{})
@@ -271,7 +274,7 @@ func run(ctx context.Context) error {
 	} else {
 		close(dreamsDone)
 	}
-	defer func() { stopSweeps(); <-retentionDone; <-schedulerDone; <-dreamsDone }()
+	defer func() { stopSweeps(); <-retentionDone; <-filesDone; <-schedulerDone; <-dreamsDone }()
 
 	errCh := make(chan error, 1)
 	go func() { errCh <- srv.ListenAndServe() }()

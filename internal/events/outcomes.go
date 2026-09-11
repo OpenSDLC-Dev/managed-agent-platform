@@ -117,7 +117,7 @@ func ValidateDefineOutcomes(ctx context.Context, tx pgx.Tx, sessionID domain.ID,
 		var sizeBytes int64
 		// An expired file is not a rubric source: the snapshot that follows this
 		// check copies bytes the content route already refuses to serve
-		// (#655, plan 48).
+		// (#655, plan 49).
 		err := tx.QueryRow(ctx,
 			`SELECT size_bytes FROM files WHERE id = $1 AND `+store.FileLiveSQL+` FOR SHARE`,
 			d.RubricFileID).Scan(&sizeBytes)
