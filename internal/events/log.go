@@ -61,21 +61,23 @@ func NotifyWorkEnqueued(ctx context.Context, db Execer, envID domain.ID) error {
 
 // NotifyReapKick wakes whichever executors are listening to sweep their owned
 // sandboxes now rather than at their next interval — the producer half of the
-// session-delete kick (#354, plan 48). It carries no payload on purpose. The
-// durable statement of what is owed is the deleted_sessions tombstone the
-// delete wrote in its own transaction, which every reaper re-reads and
-// re-classifies under its session lock; a session id here would be a fact the
+// session-end kick (#354, plan 48). It carries no payload on purpose. The
+// durable statement of what is owed is the row the ending transaction wrote —
+// the deleted_sessions tombstone for a delete, archived_at for an archive —
+// which every reaper re-reads and re-classifies under its session lock; a
+// session id here would be a fact the
 // consumer must not trust anyway, since the wake reaches executors that own
 // nothing of that session. So this only ever says look again, never what to do,
 // and losing it costs one interval rather than a sandbox.
 //
 // Like NotifyWorkEnqueued it runs on the caller's db handle and is meant to
 // ride the ending transaction: Postgres delivers a NOTIFY only on commit, so
-// the wake cannot reach a reaper before the tombstone it is owed to, and an
+// the wake cannot reach a reaper before the row it is owed to, and an
 // ending that rolls back wakes nobody. Riding the commit is also what keeps
-// the kick off the response path — a session's end publishes it without a
-// second round trip, a budget, or a window where the commit lands and the
-// process dies before the wake goes out.
+// the kick off the response path — a session's end publishes it as one more
+// statement in a transaction it was already running, rather than as post-commit
+// work with a budget, a failure to report, and a window where the commit lands
+// and the process dies before the wake goes out.
 func NotifyReapKick(ctx context.Context, db Execer) error {
 	_, err := db.Exec(ctx, `SELECT pg_notify($1, '')`, ChannelReapKick)
 	return err

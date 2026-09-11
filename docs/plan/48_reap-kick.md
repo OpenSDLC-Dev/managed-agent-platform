@@ -93,9 +93,10 @@ way; this plan pays it.
    the argument `NotifyWorkEnqueued` already makes in the same file, and this
    producer now shares its contract and its `Execer`.
 
-   Riding the commit is also what keeps the kick off the response path: no
-   second round trip, no budget, and no window in which the commit lands and the
-   process dies before the wake goes out.
+   Riding the commit is also what keeps the kick off the response path. One
+   statement inside a transaction the request was already running, rather than
+   post-commit work with a budget of its own — and no window in which the commit
+   lands and the process dies before the wake goes out.
 
    *Evaluated and rejected:* firing after the commit on the detached context
    `deleteSession` already has. The reasoning was that pgx dooms a transaction
@@ -269,6 +270,6 @@ guard gets a mutant that dies by a named test.
 
 ## Closed
 
-Archived by the PR that delivered it — one commit, twelve files, every decision
-above and every acceptance rung below. What it left open is #688 (terminate) and
+Archived by the PR that delivered it, carrying every decision above and every
+acceptance rung below. What it left open is #688 (terminate) and
 the cost note above; the delivery record is `CHANGELOG.md` and `docs/HISTORY.md`.
