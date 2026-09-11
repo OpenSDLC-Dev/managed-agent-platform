@@ -119,6 +119,15 @@ in the same function would be a strange place to stop. This plan closes both.
    as the rest of the batch runs, which is exactly the redundant work the claim
    is for.
 
+   Every store call carries its own deadline, and a pass carries the claim's.
+   Nothing below the call supplies either: a blackholed endpoint accepts the
+   connection and answers nothing, which no HTTP client on this path times out
+   on, and the keys are worked one at a time — so one call that never returns
+   would hold this replica's cleanup for the life of the process, and on a
+   deployment with one control plane that is the whole of it. Bounded, the same
+   call is an ordinary failed attempt: counted, carrying its cause, backed off,
+   and followed by the next key.
+
    What remains, and was not built: the settlement is unconditional. If a
    replica's store call fails just after its lease expired and a second replica
    reclaimed the key, the first replica's deferral still writes — overwriting

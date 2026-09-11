@@ -32,6 +32,7 @@ type refusingStore struct {
 	*blobtest.MemStore
 	mu        sync.Mutex
 	refuse    bool
+	hang      bool
 	attempted []string
 }
 
@@ -42,8 +43,15 @@ func newRefusingStore() *refusingStore {
 func (s *refusingStore) Delete(ctx context.Context, key string) error {
 	s.mu.Lock()
 	s.attempted = append(s.attempted, key)
-	refuse := s.refuse
+	refuse, hang := s.refuse, s.hang
 	s.mu.Unlock()
+	// A store that answers nothing at all, which is not the same failure as one
+	// that refuses: an error comes back and can be recorded, while a hang comes
+	// back only when something upstream decides it has waited long enough.
+	if hang {
+		<-ctx.Done()
+		return ctx.Err()
+	}
 	if refuse {
 		return errors.New("object store is refusing deletes")
 	}
@@ -54,6 +62,12 @@ func (s *refusingStore) setRefusing(refuse bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.refuse = refuse
+}
+
+func (s *refusingStore) setHanging(hang bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.hang = hang
 }
 
 func (s *refusingStore) attempts() []string {
@@ -503,6 +517,61 @@ func TestABackoffOutlastsALongOutage(t *testing.T) {
 		}
 		if time.Now().After(deadline) {
 			t.Fatalf("attempts is still %d after a refused sweep: the UPDATE that records a failure is itself failing, so the key keeps neither its count nor its backoff", attempts)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// TestAHangingStoreDoesNotStopTheSweeper: every store call is bounded, so a
+// delete that never returns is a failed attempt rather than the end of this
+// replica's cleanup. Nothing below the call supplies that bound — a blackholed
+// endpoint accepts the connection and then answers nothing, which no HTTP
+// client here times out on — and the keys are worked one at a time, so an
+// unbounded call would hold the sweeper for the life of the process while the
+// queue behind it grew. On a deployment with one control plane that is the
+// whole of the cleanup, stopped.
+func TestAHangingStoreDoesNotStopTheSweeper(t *testing.T) {
+	t.Cleanup(api.SetObjectDeleteCallBudgetForTest(200 * time.Millisecond))
+	t.Cleanup(api.SetObjectDeleteBackoffForTest(20*time.Millisecond, 50*time.Millisecond))
+	t.Cleanup(api.SetObjectDeleteIntervalForTest(20 * time.Millisecond))
+	store := newRefusingStore()
+	store.setHanging(true)
+	s := newTestServerWithStore(t, store)
+	ctx := context.Background()
+
+	first, second := "files/file_hangs01", "files/file_hangs02"
+	for _, key := range []string{first, second} {
+		if _, err := s.pool.Exec(ctx,
+			`INSERT INTO pending_object_deletes (object_key) VALUES ($1)`, key); err != nil {
+			t.Fatalf("seed %s: %v", key, err)
+		}
+	}
+
+	startSweeper(t, s, store).Wake()
+
+	// The second key is the assertion. A sweeper stuck on the first would never
+	// reach it, and the queue would sit there for as long as the store hung.
+	awaitAttempt(t, store, second, "the key behind the one that hung")
+
+	// And the hang was recorded as what it is, so an operator asking what this
+	// deployment cannot delete gets an answer rather than silence.
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		var attempts int
+		var cause *string
+		if err := s.pool.QueryRow(ctx,
+			`SELECT attempts, last_error FROM pending_object_deletes WHERE object_key = $1`,
+			first).Scan(&attempts, &cause); err != nil {
+			t.Fatalf("read the hung key: %v", err)
+		}
+		if attempts > 0 {
+			if cause == nil || *cause == "" {
+				t.Fatal("the hung delete was counted but left no cause on the row")
+			}
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the hung delete was never recorded as an attempt: it is not being treated as a failure, so the key carries no backoff and no cause")
 		}
 		time.Sleep(10 * time.Millisecond)
 	}

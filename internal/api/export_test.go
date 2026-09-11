@@ -109,6 +109,15 @@ func SetObjectDeleteIntervalForTest(d time.Duration) (restore func()) {
 // SetObjectDeleteBackoffForTest shortens the wait a refused key gets before it
 // is tried again, so the recovery rung can watch the store come back without
 // spending the production backoff. Test binary only.
+// SetObjectDeleteCallBudgetForTest shortens the bound on one store call, so a
+// rung can reach a store that hangs without waiting out the production budget.
+// Test binary only.
+func SetObjectDeleteCallBudgetForTest(d time.Duration) (restore func()) {
+	prev := objectDeleteCallBudget
+	objectDeleteCallBudget = d
+	return func() { objectDeleteCallBudget = prev }
+}
+
 func SetObjectDeleteBackoffForTest(base, max time.Duration) (restore func()) {
 	prevBase, prevMax := objectDeleteBackoffBase, objectDeleteBackoffMax
 	objectDeleteBackoffBase, objectDeleteBackoffMax = base, max

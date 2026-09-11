@@ -44,6 +44,17 @@ var objectDeleteBackoffMax = time.Hour
 // without spending the wait; never written in production.
 var objectDeleteBackoffBase = 30 * time.Second
 
+// objectDeleteCallBudget bounds one store call. It is a liveness bound and not
+// a performance one: the point is that a delete cannot run forever, not that it
+// must be quick. Without it a single call that never returns — a blackholed
+// endpoint answers nothing and times out at no layer below, the HTTP client
+// having no response deadline of its own — stops this sweeper for the life of
+// the process, because the keys are worked through one at a time. With it that
+// call is a failed attempt like any other: counted, carrying its cause, backed
+// off, and followed by the next key. A var so a rung can reach the hang without
+// waiting one out.
+var objectDeleteCallBudget = 30 * time.Second
+
 // objectDeleteInterval paces the sweep that runs without a wake. It is the
 // backstop, not the usual path — an ending wakes its own replica — so it is
 // sized for the two cases a wake cannot cover: another replica's enqueue, and a
@@ -172,18 +183,32 @@ func drainPendingObjectDeletes(ctx context.Context, pool *pgxpool.Pool, blobs bl
 	if err != nil || len(claimed) == 0 {
 		return 0, 0, err
 	}
+	// A pass does not outlive the claim it holds. Past the lease these keys are
+	// another replica's to take, and a sweeper still grinding through them
+	// would be doing exactly the duplicated work the claim exists to prevent —
+	// which a store slow enough to need every one of its per-call budgets would
+	// otherwise reach. The bookkeeping below stays on the outer context: a pass
+	// that ran out of time must still be able to write down what it learned.
+	passCtx, endPass := context.WithTimeout(ctx, objectDeleteClaimLease)
+	defer endPass()
+
 	var firstCause error
 	for _, key := range claimed {
-		if ctx.Err() != nil {
+		if passCtx.Err() != nil {
 			break
 		}
-		if derr := blobs.Delete(ctx, key); derr != nil {
-			// A delete that failed because this process is going down is not a
-			// refusal and must not be recorded as one: the key keeps its claim
-			// and comes back, rather than carrying an attempt and a "context
-			// canceled" into the column an operator reads to find out what a
-			// store actually refused.
-			if ctx.Err() != nil {
+		callCtx, endCall := context.WithTimeout(passCtx, objectDeleteCallBudget)
+		derr := blobs.Delete(callCtx, key)
+		endCall()
+		if derr != nil {
+			// A delete cut short because this process is going down, or because
+			// the pass outlived its claim, is not a refusal and must not be
+			// recorded as one: the key keeps its claim and comes back, rather
+			// than carrying an attempt and a "context canceled" into the column
+			// an operator reads to find out what a store actually refused. A
+			// call that spent its own budget is a refusal — that is the whole
+			// point of giving it one.
+			if passCtx.Err() != nil {
 				break
 			}
 			failed++
