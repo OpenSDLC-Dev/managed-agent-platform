@@ -1,0 +1,30 @@
+-- A files row carries both scope columns or neither (#659). 0008 declared them
+-- as two independent nullable columns, so either could stand alone.
+--
+-- scope_id alone is the shape that bites. Both indexes on this table key on
+-- that column and nothing else -- files_scope_id_idx (0008) and
+-- files_scope_filename_idx (0017) -- and so does the list's ?scope_id= filter,
+-- while renderFile builds a scope object only when it holds both. Such a row is
+-- therefore indexed, is returned by a filter naming its scope, and renders with
+-- no scope key at all: the registry says the file belongs to a session and the
+-- file's own object declines to say so. Since #651 that disagreement is an
+-- omitted key rather than a visibly wrong `"scope": null`, which makes it
+-- quieter, not better.
+--
+-- IS NOT DISTINCT FROM would not serve here, because the question is not
+-- whether the two values match -- they never match, one is a type and one is an
+-- id -- but whether they are present together. Comparing their null-ness
+-- directly says exactly that, and says it without a third state: `=` between
+-- two booleans neither of which can be NULL, since IS NULL always answers.
+--
+-- Nothing in this platform can have written a violating row. The only
+-- production writer of these columns is the outputs harvest
+-- (internal/executor/harvest.go), which writes the literal 'session' and the
+-- session id in one VALUES clause; uploads and dream files write neither
+-- column. So this is expected to validate against existing data everywhere. It
+-- is deliberately written to find out rather than to assume: a plain ADD
+-- CONSTRAINT takes ACCESS EXCLUSIVE and scans the table, and a deployment
+-- holding a row this forbids should stop and be looked at, not inherit a
+-- constraint marked NOT VALID that quietly exempts its own history.
+ALTER TABLE files ADD CONSTRAINT files_scope_pair_agrees
+    CHECK ((scope_type IS NULL) = (scope_id IS NULL));

@@ -34,7 +34,7 @@ const (
 
 // wantMigrations tracks the number of embedded migration files; bump it when
 // a migration is added.
-const wantMigrations = 35
+const wantMigrations = 36
 
 func open(t *testing.T, dsn string) *pgxpool.Pool {
 	t.Helper()
@@ -325,6 +325,49 @@ func TestEnumCheckConstraints(t *testing.T) {
 		`INSERT INTO environments (id, name, kind, config) VALUES ('env_sh', 'e2', 'self_hosted', '{"type":"self_hosted"}')`,
 	)
 	for _, q := range valid {
+		if _, err := pool.Exec(ctx, q); err != nil {
+			t.Errorf("valid insert rejected: %q: %v", q, err)
+		}
+	}
+}
+
+// TestFileScopePairAgrees pins 0036's constraint: a files row carries both
+// scope columns or neither. Before it, either column could stand alone —
+// and scope_id alone was the damaging shape, because both indexes and the
+// list's ?scope_id= filter key on that column while renderFile needs the pair,
+// so the row matched a filter for a scope its own object then declined to
+// report (#659). No writer could produce it; the schema simply allowed it.
+func TestFileScopePairAgrees(t *testing.T) {
+	pool := open(t, pgtest.FreshDB(t))
+	ctx := context.Background()
+
+	half := []struct {
+		name string
+		q    string
+	}{
+		{"scope_id without scope_type", `INSERT INTO files (id, filename, mime_type, size_bytes, scope_id)
+		                                 VALUES ('file_h1', 'a.txt', 'text/plain', 1, 'sesn_1')`},
+		{"scope_type without scope_id", `INSERT INTO files (id, filename, mime_type, size_bytes, scope_type)
+		                                 VALUES ('file_h2', 'b.txt', 'text/plain', 1, 'session')`},
+	}
+	for _, tc := range half {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := pool.Exec(ctx, tc.q)
+			var pgErr *pgconn.PgError
+			if !errors.As(err, &pgErr) || pgErr.Code != pgCheckViolation {
+				t.Errorf("half-set pair (%s) => %v, want check violation %s", tc.name, err, pgCheckViolation)
+			}
+		})
+	}
+
+	// Both shapes a writer actually produces must still go in. A constraint
+	// that rejected the harvest's rows would fail loudly at runtime rather
+	// than here, and one that rejected plain uploads would break every upload.
+	for _, q := range []string{
+		`INSERT INTO files (id, filename, mime_type, size_bytes) VALUES ('file_u1', 'up.txt', 'text/plain', 1)`,
+		`INSERT INTO files (id, filename, mime_type, size_bytes, scope_type, scope_id)
+		 VALUES ('file_s1', 'out.txt', 'text/plain', 1, 'session', 'sesn_1')`,
+	} {
 		if _, err := pool.Exec(ctx, q); err != nil {
 			t.Errorf("valid insert rejected: %q: %v", q, err)
 		}
