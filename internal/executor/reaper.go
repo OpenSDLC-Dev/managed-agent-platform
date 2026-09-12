@@ -80,11 +80,11 @@ func sessionLockKey(id domain.ID) int64 {
 // window must not be reaped on the stale answer). Always nil in production.
 var reapHookAfterClassify func(domain.ID)
 
-// reapLoop drives one reap pass per interval, or sooner when a session's end
-// kicks it (plan 48). Both wakes run the same pass: the kick says only that
-// something ended somewhere, so what it triggers is the ordinary sweep, which
-// re-reads this endpoint's own holding and classifies it under the session
-// lock exactly as the ticker's pass does.
+// reapLoop drives one reap pass at startup, then one per interval, or sooner
+// when a session's end kicks it (plan 48). All three wakes run the same pass:
+// the kick says only that something ended somewhere, so what it triggers is the
+// ordinary sweep, which re-reads this endpoint's own holding and classifies it
+// under the session lock exactly as the ticker's pass does.
 func (e *Executor) reapLoop(ctx context.Context) {
 	t := time.NewTicker(e.cfg.ReapInterval)
 	defer t.Stop()
@@ -95,8 +95,13 @@ func (e *Executor) reapLoop(ctx context.Context) {
 		// ReapInterval would never reap on its own. This loop looked exempt
 		// because it usually has a boot pass anyway — listenReapKicks wakes it
 		// on every LISTEN establish, the first included — but that wake is not
-		// this loop's to rely on: ReapKickConn is optional by design, and the
-		// listener also gives up when the dial keeps failing. In either case a
+		// this loop's to rely on: a listener whose target never admits a LISTEN
+		// never establishes one, so it never wakes anything — it retries every
+		// reapKickBackoff rather than giving up, which is not the same as
+		// arriving. The pooler that multiplexes the backend away and the server
+		// with no connection left to give are the reachable ones; a nil
+		// ReapKickConn is the same state by configuration, which executor.go
+		// admits and cmd/executor does not produce. In any of them a
 		// restarting executor left its predecessor's containers standing for a
 		// full interval, and a crash-looping one left them forever (#709).
 		//

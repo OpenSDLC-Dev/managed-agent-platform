@@ -100,7 +100,14 @@ func TestRunReapsOnAKickRatherThanTheInterval(t *testing.T) {
 	ctx, stop := runExecutor(t, h)
 	defer stop()
 
-	awaitReap(t, h, barrier, "the sweep the listener runs when it establishes")
+	awaitReap(t, h, barrier, "the startup sweeps")
+	// Both startup sweeps have to be spent before the subject exists, or one of
+	// them reaps it and the notification proves nothing: the loop's own boot
+	// pass is one, the listener's establish is the other. And the LISTEN has to
+	// be up before the NOTIFY, which is delivered only to connections already
+	// listening.
+	awaitListening(t, h)
+	awaitPasses(t, h, 2, "the boot pass and the listener's establish")
 
 	deleteSessionRowByID(t, h, kicked)
 	ownSession(t, h, kicked)
@@ -189,6 +196,46 @@ func shortenReapKickBackoff(t *testing.T) {
 // ran, which for that connection is the LISTEN itself and nothing since; the
 // match is scoped to this test's own database, which pgtest creates fresh, so
 // it cannot reach a parallel suite's listener.
+// awaitListening waits for the listener's backend to be holding the LISTEN,
+// which is what killListener looks for and what a rung has to know before it
+// publishes anything: a NOTIFY sent before the LISTEN is delivered to nobody
+// and queued nowhere.
+func awaitListening(t *testing.T, h *harness) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		var pid int
+		err := h.pool.QueryRow(context.Background(),
+			`SELECT pid FROM pg_stat_activity
+			  WHERE datname = current_database() AND pid <> pg_backend_pid()
+			    AND query = $1`, "LISTEN "+events.ChannelReapKick).Scan(&pid)
+		if err == nil {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("no backend is holding %s: %v", events.ChannelReapKick, err)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// awaitPasses waits until n reap passes have listed this endpoint's holding.
+// A session owned after that cannot have been seen by any of them, which is
+// what lets a rung say which wake reaped it: the loop passes once before its
+// first wait (#709) and the listener sweeps again when it establishes, so two
+// sweeps happen at startup for reasons that have nothing to do with the wake
+// under test.
+func awaitPasses(t *testing.T, h *harness, n int, what string) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for h.prov.ownedCallsSnapshot() < n {
+		if time.Now().After(deadline) {
+			t.Fatalf("%s: %d reap pass(es) ran, want %d", what, h.prov.ownedCallsSnapshot(), n)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
 func killListener(t *testing.T, h *harness) {
 	t.Helper()
 	ctx := context.Background()
@@ -236,7 +283,8 @@ func TestReapKickListenerRecoversFromALostConnection(t *testing.T) {
 	ctx, stop := runExecutor(t, h)
 	defer stop()
 
-	awaitReap(t, h, barrier, "the sweep the listener runs when it establishes")
+	awaitReap(t, h, barrier, "the startup sweeps")
+	awaitPasses(t, h, 2, "the boot pass and the listener's establish")
 
 	// The outage. Ending a session while it lasts publishes into nothing, so
 	// only the sweep the reconnect runs can account for this reap.
@@ -274,15 +322,24 @@ func TestReapKickListenerSurvivesAnUnusableTarget(t *testing.T) {
 		t.Fatalf("parse the unusable config: %v", err)
 	}
 	h.exec.cfg.ReapKickConn = unusable
-	deleteSessionRow(t, h)
-	h.prov.owned = []domain.ID{h.sid}
+	barrier := h.sid
+	ticked := pgtest.NewSessionInEnv(t, h.pool, h.envID)
+	deleteSessionRowByID(t, h, barrier)
+	h.prov.owned = []domain.ID{barrier}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	runDone := make(chan struct{})
 	go func() { _ = h.exec.Run(ctx); close(runDone) }()
 
-	awaitReap(t, h, h.sid, "the interval, with a listener that cannot connect")
+	// The first is the boot pass's (#709), and the second is the interval's:
+	// this listener never establishes, so it never wakes anything, and a
+	// session owned after the boot pass listed has nothing else left to reap
+	// it.
+	awaitReap(t, h, barrier, "the pass the loop takes before its first wait")
+	deleteSessionRowByID(t, h, ticked)
+	ownSession(t, h, ticked)
+	awaitReap(t, h, ticked, "the interval, with a listener that cannot connect")
 
 	// The deadline has to be shorter than the backoff, or a pause that waits
 	// the backoff out instead of yielding to the cancellation still lands
@@ -341,11 +398,12 @@ func TestReapKickDialsThePoolsConfigNotTheDSN(t *testing.T) {
 	defer tunedPool.Close()
 	h.exec.cfg.ReapKickConn = tunedPool.Config().ConnConfig.Copy()
 
-	deleteSessionRow(t, h)
-	h.prov.owned = []domain.ID{h.sid}
 	_, stop := runExecutor(t, h)
 	defer stop()
-	awaitReap(t, h, h.sid, "the sweep the listener runs when it establishes from a pool-tuned DSN")
+	// The LISTEN itself, not a reap: since #709 the loop sweeps at startup
+	// whatever the listener does, so a reap would be satisfied by a config that
+	// never connects at all.
+	awaitListening(t, h)
 }
 
 // TestReapKicksCoalesce: a burst of endings costs the sweep that sees all of
@@ -367,7 +425,9 @@ func TestReapKickDialsThePoolsConfigNotTheDSN(t *testing.T) {
 func TestReapKicksCoalesce(t *testing.T) {
 	h := newHarnessWith(t, &fakeProvider{sb: &fakeSandbox{}}, Config{ReapInterval: time.Hour})
 	h.prov = h.exec.provider.(*fakeProvider)
-	h.exec.cfg.ReapKickConn = kickConn(t, h)
+	if h.exec.cfg.ReapKickConn != nil {
+		t.Fatal("the harness configured a kick connection; this rung counts sweeps and must have no wake it did not raise")
+	}
 	deleteSessionRow(t, h)
 	h.prov.owned = []domain.ID{h.sid}
 
@@ -391,7 +451,7 @@ func TestReapKicksCoalesce(t *testing.T) {
 	select {
 	case <-reached:
 	case <-time.After(10 * time.Second):
-		t.Fatal("the sweep the listener runs when it establishes never reached the classify seam")
+		t.Fatal("the pass the loop takes before its first wait never reached the classify seam")
 	}
 	for range 5 {
 		h.exec.wake()
@@ -399,7 +459,7 @@ func TestReapKicksCoalesce(t *testing.T) {
 	close(release)
 
 	awaitReap(t, h, h.sid, "the pass that was already running")
-	// One sweep for the five, so two in all. Settled rather than sampled: the
+	// One sweep for the five, so two in all — the boot pass and the burst's. Settled rather than sampled: the
 	// second sweep is still starting when the first one's reap lands, and with
 	// the interval at an hour nothing else can add to this.
 	deadline := time.Now().Add(2 * time.Second)
