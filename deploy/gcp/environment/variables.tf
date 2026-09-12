@@ -339,8 +339,10 @@ variable "docker_hub_mirror" {
   type        = bool
   description = <<-EOT
     Create an Artifact Registry remote repository that mirrors Docker Hub, so the
-    chart's third-party images (postgres, minio, openbao) are pulled through the
-    project's own registry rather than from a rate-limited anonymous upstream.
+    chart's third-party images are pulled through the project's own registry
+    rather than from a rate-limited anonymous upstream. MinIO stopped being one
+    of them when Docker Hub stopped serving that namespace: the chart pins it at
+    quay.io now, which this remote cannot reach (#701).
 
     It is a mirror, not a vendoring step: a cache miss still reaches Docker Hub,
     through Cloud NAT. What it buys is a stable pull path, one place to scan, and

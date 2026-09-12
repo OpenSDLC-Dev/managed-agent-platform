@@ -24,7 +24,15 @@ import (
 
 // Image is the pinned MinIO the harness runs — the same release deploy/compose
 // and the helm chart default to, so the contract tests exercise what ships.
-const Image = "minio/minio:RELEASE.2025-09-07T16-13-09Z"
+//
+// From quay.io rather than Docker Hub, and every one of those three carries the
+// registry for the same reason: Docker Hub stopped serving the `minio`
+// namespace between 2026-09-11 and 2026-09-12, answering an anonymous pull with
+// "repository does not exist" rather than a rate limit, which turned this
+// harness into a hard failure on any machine without the image already cached
+// (#701). MinIO's own mirror still publishes this release under the identical
+// tag and digest.
+const Image = "quay.io/minio/minio:RELEASE.2025-09-07T16-13-09Z"
 
 // Root credentials for the throwaway container (MinIO requires a password of
 // at least 8 characters).
