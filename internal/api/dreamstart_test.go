@@ -1017,7 +1017,7 @@ func TestDreamRunnerPassesBeforeItsFirstTick(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go func() { defer close(done); api.StartDreamRunner(ctx, s.pool, s.blobs, nil, cfg) }()
-	defer func() { cancel(); <-done }()
+	defer func() { cancel(); waitForStop(t, done) }()
 
 	deadline := time.Now().Add(30 * time.Second)
 	for getDream(t, s, dreamID)["status"] != "running" {
@@ -1028,13 +1028,27 @@ func TestDreamRunnerPassesBeforeItsFirstTick(t *testing.T) {
 	}
 
 	// And then it waits. A second dream, created once the first is running, must
-	// stay pending until the tick an hour away — a loop that passed without ever
-	// waiting would start it too and look identical from the status above.
+	// be untouched until the tick an hour away — a loop that passed without ever
+	// waiting would take it too and look identical from the status above.
+	//
+	// What is asserted is the claim rather than the status: dreamClaim commits
+	// attempts=1 before the start arm renders anything, so a spinning loop shows
+	// it in milliseconds, where `running` waits out two transcript renders, a
+	// blob put and a session creation and could still be pending at 500ms on a
+	// loaded machine — a barrier the mutant could walk through.
 	_, otherBody := seededDreamBody(t, s)
 	other := createDream(t, s, otherBody)["id"].(string)
 	time.Sleep(500 * time.Millisecond)
+	var attempts int
+	if err := s.pool.QueryRow(context.Background(),
+		`SELECT attempts FROM dreams WHERE id = $1`, other).Scan(&attempts); err != nil {
+		t.Fatal(err)
+	}
+	if attempts != 0 {
+		t.Errorf("a dream created after the startup pass was claimed %d time(s) within the interval: the loop is not waiting between passes", attempts)
+	}
 	if got := getDream(t, s, other)["status"]; got != "pending" {
-		t.Errorf("a dream created after the startup pass is %v within the interval, want pending: the loop is not waiting between passes", got)
+		t.Errorf("a dream created after the startup pass is %v within the interval, want pending", got)
 	}
 }
 

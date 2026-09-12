@@ -112,8 +112,11 @@ var dreamLockWait = 2 * time.Second
 // controlplane's environment.
 type DreamRunnerConfig struct {
 	// TickInterval paces the sweep, and is therefore a dream's start latency
-	// in the steady state — a dream pending when the process starts is taken by
-	// the pass the loop makes before its first wait (#699).
+	// in the steady state. A dream pending when the process starts is normally
+	// taken by the pass the loop makes before its first wait (#699) — normally,
+	// because that pass skips when the shared sweep budget is saturated or the
+	// clock read fails, and then the dream waits out an interval as it did
+	// before.
 	TickInterval time.Duration
 	// Timeout is a dream's runtime budget from creation, in pending as in
 	// running → error.type "timeout".
@@ -140,8 +143,8 @@ func StartDreamRunner(ctx context.Context, pool *pgxpool.Pool, blobs blob.Store,
 		// what puts it there (#699). A pass at boot is safe on every replica at
 		// once because each arm re-reads its dream FOR UPDATE SKIP LOCKED.
 		//
-		// The clock read cannot `continue` here: that would skip the wait and
-		// spin against a database that has just refused a statement.
+		// The clock read cannot `continue`, for the reason deploymentscheduler.go
+		// gives at the same place.
 		//
 		// The database's clock, as the scheduler reads it: the timeout and
 		// the lease are compared against columns Postgres stamped, so a

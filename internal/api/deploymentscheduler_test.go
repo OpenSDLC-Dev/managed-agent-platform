@@ -36,6 +36,30 @@ func setResumedAt(t *testing.T, s *tserver, deplID string, at time.Time) {
 	}
 }
 
+// waitForStop bounds the wait for a loop goroutine to return, so a loop that
+// misses its ctx.Done arm fails its own test rather than hanging the package
+// until the binary's timeout takes every test's attribution with it.
+func waitForStop(t *testing.T, done <-chan struct{}) {
+	t.Helper()
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Error("the loop did not stop with its context")
+	}
+}
+
+// makeDue rewinds the schedule floor against the database's own clock, which
+// is what a wall-clock loop test needs and setResumedAt above cannot give: that
+// one takes an instant from the test host, and the loop compares against
+// Postgres's now().
+func makeDue(t *testing.T, s *tserver, deplID string) {
+	t.Helper()
+	if _, err := s.pool.Exec(t.Context(),
+		`UPDATE deployments SET schedule_resumed_at = now() - interval '2 minutes' WHERE id = $1`, deplID); err != nil {
+		t.Fatal(err)
+	}
+}
+
 type schedRun struct {
 	id          string
 	scheduledAt time.Time
@@ -561,13 +585,6 @@ func TestSchedulerTickerRuns(t *testing.T) {
 	defer restore()
 	s := newTestServer(t)
 	agentID, envID := fixture(t, s)
-	makeDue := func(id string) {
-		t.Helper()
-		if _, err := s.pool.Exec(t.Context(),
-			`UPDATE deployments SET schedule_resumed_at = now() - interval '2 minutes' WHERE id = $1`, id); err != nil {
-			t.Fatal(err)
-		}
-	}
 	waitForRun := func(id, what string) {
 		t.Helper()
 		deadline := time.Now().Add(10 * time.Second)
@@ -580,17 +597,17 @@ func TestSchedulerTickerRuns(t *testing.T) {
 	}
 
 	deplID := createDeployment(t, s, scheduledBody(agentID, envID, "* * * * *", "UTC"))["id"].(string)
-	makeDue(deplID)
+	makeDue(t, s, deplID)
 
 	ctx, cancel := context.WithCancel(t.Context())
 	done := make(chan struct{})
 	go func() { defer close(done); api.StartDeploymentScheduler(ctx, s.pool, nil, nil) }()
-	defer func() { cancel(); <-done }()
+	defer func() { cancel(); waitForStop(t, done) }()
 
 	waitForRun(deplID, "the loop never fired the occurrence that was due when it started")
 
 	second := createDeployment(t, s, scheduledBody(agentID, envID, "* * * * *", "UTC"))["id"].(string)
-	makeDue(second)
+	makeDue(t, s, second)
 	waitForRun(second, "the ticker never fired an occurrence that fell due after the startup pass, so the loop passes once and then sleeps")
 }
 
@@ -609,15 +626,12 @@ func TestSchedulerPassesBeforeItsFirstTick(t *testing.T) {
 	s := newTestServer(t)
 	agentID, envID := fixture(t, s)
 	deplID := createDeployment(t, s, scheduledBody(agentID, envID, "* * * * *", "UTC"))["id"].(string)
-	if _, err := s.pool.Exec(t.Context(),
-		`UPDATE deployments SET schedule_resumed_at = now() - interval '2 minutes' WHERE id = $1`, deplID); err != nil {
-		t.Fatal(err)
-	}
+	makeDue(t, s, deplID)
 
 	ctx, cancel := context.WithCancel(t.Context())
 	done := make(chan struct{})
 	go func() { defer close(done); api.StartDeploymentScheduler(ctx, s.pool, nil, nil) }()
-	defer func() { cancel(); <-done }()
+	defer func() { cancel(); waitForStop(t, done) }()
 
 	deadline := time.Now().Add(15 * time.Second)
 	for len(scheduledRuns(t, s, deplID)) == 0 {
@@ -631,10 +645,7 @@ func TestSchedulerPassesBeforeItsFirstTick(t *testing.T) {
 	// the tick an hour away — a loop that passed without ever waiting would fire
 	// it too and look identical from the runs above.
 	other := createDeployment(t, s, scheduledBody(agentID, envID, "* * * * *", "UTC"))["id"].(string)
-	if _, err := s.pool.Exec(t.Context(),
-		`UPDATE deployments SET schedule_resumed_at = now() - interval '2 minutes' WHERE id = $1`, other); err != nil {
-		t.Fatal(err)
-	}
+	makeDue(t, s, other)
 	time.Sleep(500 * time.Millisecond)
 	if runs := scheduledRuns(t, s, other); len(runs) != 0 {
 		t.Errorf("a deployment made due after the startup pass fired %d run(s) within the interval: the loop is not waiting between passes", len(runs))
