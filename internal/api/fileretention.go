@@ -53,15 +53,17 @@ import (
 // them without an expires_at (internal/executor/harvest.go names id, filename,
 // mime_type, size_bytes, downloadable, scope_type and scope_id), so this sweep
 // never sees one — what removes them is a session delete, which takes every
-// row scoped to the session. The index still earns its place on the uploads,
-// which do expire.
+// row scoped to the session, and the next replacing harvest, which drops the
+// whole snapshot before writing the new one. The index still earns its place
+// on the uploads, which do expire.
 //
 // And it omits the note 0031 and 0035 both carry: migrate.go applies every
-// pending file inside one transaction, so CREATE INDEX cannot be CONCURRENTLY
-// and holds ACCESS EXCLUSIVE on files until the migration commits. On the very
-// table 0038 argues grows without bound, that is an upgrade stall an operator
-// gets no warning of — worth knowing before a deployment with a large registry
-// takes it.
+// pending file inside one transaction, so CREATE INDEX cannot be CONCURRENTLY.
+// This form takes SHARE on files for the build — 0035's own wording for the
+// same situation — so reads go on and writes wait, and they wait not for the
+// build but for the whole migration transaction, since migrate.go commits
+// once. On the very table 0038 argues grows without bound, that is an upgrade
+// stall on uploads, harvests and deletes that an operator gets no warning of.
 const (
 	// fileMetadataRetention is the reference's published window, measured from
 	// expires_at rather than from created_at: a file uploaded with a 90-day
@@ -129,12 +131,14 @@ func StartFileRetention(ctx context.Context, pool *pgxpool.Pool, q *ObjectDelete
 		// rolling deployment is exactly that control plane. Replicas all
 		// sweeping at boot is not a collision either, since the DELETE is the
 		// claim and their batches are disjoint.
-		// Until a pass comes back short, which is the object-delete drain's
-		// shape and is what keeps the batch a bound on one transaction rather
-		// than on one hour: a backlog larger than a batch used to wait a tick
-		// per thousand rows, so 50k expired rows outlived the published window
-		// by two days (#698). Each pass is its own transaction, so a tick that
-		// is interrupted keeps every pass that committed.
+		//
+		// It then keeps going until a pass comes back short, which is the
+		// object-delete drain's shape and is what keeps the batch a bound on
+		// one transaction rather than on one hour: a backlog larger than a
+		// batch used to wait a tick per thousand rows, so 50k expired rows
+		// outlived the published window by two days (#698). Each pass is its
+		// own transaction, so a tick that is interrupted keeps every pass that
+		// committed.
 		total := 0
 		for {
 			n, err := purgeExpiredFiles(ctx, pool, fileMetadataRetention)

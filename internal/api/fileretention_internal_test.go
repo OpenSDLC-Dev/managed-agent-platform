@@ -380,8 +380,11 @@ func TestTheSweepWakesTheDrain(t *testing.T) {
 // went without the clause; that is a fact about the current writers rather than
 // an invariant, and the cost of it being wrong is a file removed out from under
 // a runner still appending to it. A closed dream's transcript is not exempt,
-// because nobody is writing it — so the rung drives both halves through the
-// same row.
+// because nobody is writing it — so the rung drives every phase through the
+// same row, the terminal-but-unclosed one included: 0034 lets the status and
+// closed_at come apart, and a guard that read the status instead would pass
+// the other two phases while sweeping a transcript out from under a runner
+// that has not been closed out yet.
 func TestPurgeLeavesAnOpenDreamsTranscript(t *testing.T) {
 	pool := pgtest.NewPool(t)
 	ctx := context.Background()
@@ -411,12 +414,21 @@ func TestPurgeLeavesAnOpenDreamsTranscript(t *testing.T) {
 		t.Fatalf("purged %d rows, want none: the transcript of an open dream is the runner's", n)
 	}
 
-	// Closed, the same row is ordinary again.
-	// The terminal status and ended_at travel with closed_at or the CHECKs
-	// refuse it, which is closeDream's note.
+	// Terminal, and still not closed — dreams_closed_terminal (0034) requires
+	// the status of a closed dream to be terminal, not the reverse, so this row
+	// is legal and reachable. The claim hangs on closed_at, so it survives too.
 	if _, err := pool.Exec(ctx,
-		`UPDATE dreams SET status = 'completed', ended_at = now(), closed_at = now() WHERE id = $1`,
+		`UPDATE dreams SET status = 'completed', ended_at = now() WHERE id = $1`,
 		dreamID); err != nil {
+		t.Fatalf("finish the dream: %v", err)
+	}
+	if n, err := purgeExpiredFiles(ctx, pool, window); err != nil || n != 0 {
+		t.Fatalf("purge with the dream terminal but unclosed = %d, %v; want 0, nil — closed_at is what ends the runner's claim", n, err)
+	}
+
+	// Closed, the same row is ordinary again.
+	if _, err := pool.Exec(ctx,
+		`UPDATE dreams SET closed_at = now() WHERE id = $1`, dreamID); err != nil {
 		t.Fatalf("close the dream: %v", err)
 	}
 	if n, err := purgeExpiredFiles(ctx, pool, window); err != nil || n != 1 {
