@@ -124,9 +124,13 @@ func TestAPIKeyExpiryIsEvaluatedOnEveryRequest(t *testing.T) {
 		res.Body.Close()
 		return res.StatusCode
 	}
-	// Seconds through make_interval rather than a duration string: Postgres does
-	// not parse Go's "1h0m0s" spelling, and a silently-wrong interval here would
-	// make the test pass for the wrong reason.
+	// Seconds through make_interval rather than a duration string, because the
+	// two grammars disagree silently on signed values: Postgres signs each
+	// field, so `'-1h30m0s'::interval` is `-00:30:00`, while Go's
+	// `(-90 * time.Minute).String()` is that same text and means minus ninety
+	// minutes. A wrong value rather than an error is what makes a test pass for
+	// the wrong reason, and the negative duration this one passes below escapes
+	// only by having a single field. A number has no grammar to disagree about.
 	expire := func(at time.Duration) {
 		if _, err := s.pool.Exec(ctx,
 			`UPDATE api_keys SET expires_at = now() + make_interval(secs => $1) WHERE name = 'expiring'`,
