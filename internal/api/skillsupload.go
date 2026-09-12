@@ -44,8 +44,9 @@ func (u *skillUpload) totalBytes() int64 {
 }
 
 // bundle validates the upload and normalizes it to the canonical archive.
-// One files[] part that is a zip archive (by magic bytes — an inference
-// recorded in docs/DIVERGENCES.md) is the zip form; anything else is the
+// One files[] part that is a zip archive (by magic bytes — where the reference
+// goes by the filename's extension, a recorded mismatch in
+// docs/DIVERGENCES.md) is the zip form; anything else is the
 // loose path-qualified form.
 func (u *skillUpload) bundle() (*skills.Bundle, error) {
 	if len(u.files) == 1 && skills.IsZip(u.files[0].Data) {
@@ -67,12 +68,14 @@ func (u *skillUpload) bundle() (*skills.Bundle, error) {
 //
 // Unknown parts are IGNORED rather than rejected (plan 39, decision 8). The
 // recording shows a create carrying a stray display_title part succeeding with
-// its name derived from the frontmatter, exactly as if the part were absent —
-// which is only true if unknown parts in general are tolerated. The observed
-// evidence covers that one field name; the registry entry says so.
+// its name derived from the frontmatter, exactly as if the part were absent.
+// Two further names, description and xyzzy, were later put through both routes
+// and ignored the same way. Three names are still a sample, so tolerating any
+// unknown part remains an extrapolation — a weaker one than decision 8 made
+// from display_title alone, and the registry says so.
 //
-// files[] stays required. A files[] part without a filename is still rejected
-// (the reference's tolerance there is unrecorded — docs/DIVERGENCES.md).
+// files[] stays required. A files[] part without a filename is still rejected,
+// as it is on the reference — a 400 there too, recorded in docs/DIVERGENCES.md.
 func parseSkillUpload(r *http.Request, allowDisplayName bool) (*skillUpload, error) {
 	mt, params, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
 	if err != nil || mt != "multipart/form-data" || params["boundary"] == "" {

@@ -66,8 +66,9 @@ func TestSkillCreateDisplayName(t *testing.T) {
 }
 
 // TestSkillCreateIgnoresUnknownFormParts pins decision 8: a stray display_title
-// part is ignored and the name still derives from the frontmatter [5], which is
-// only true if unknown parts in general are tolerated.
+// part is ignored and the name still derives from the frontmatter [5]. The
+// reference ignores description and xyzzy the same way, so the rule this pins
+// extrapolates from three observed names rather than from one.
 func TestSkillCreateIgnoresUnknownFormParts(t *testing.T) {
 	s := newTestServer(t)
 

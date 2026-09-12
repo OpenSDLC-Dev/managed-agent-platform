@@ -55,7 +55,7 @@ type sessionJSON struct {
 	Resources          []json.RawMessage `json:"resources"`
 	VaultIDs           []string          `json:"vault_ids"`
 	DeploymentID       *string           `json:"deployment_id"` // set only by a deployment fire; null otherwise
-	Budget             *json.RawMessage  `json:"budget"`        // budgets are not built: always null (INFERRED, docs/DIVERGENCES.md)
+	Budget             *json.RawMessage  `json:"budget"`        // budgets are not built: always null, which is what the reference renders for a session created without one (recorded; docs/DIVERGENCES.md)
 	CreatedAt          time.Time         `json:"created_at"`
 	UpdatedAt          time.Time         `json:"updated_at"`
 	ArchivedAt         *time.Time        `json:"archived_at"`

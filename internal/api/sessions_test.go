@@ -22,7 +22,9 @@ import (
 // sessionRequiredFields is the BetaManagedAgentsSession wire surface; all
 // fields are api:"required" except deployment_id (nullable but present).
 // budget is api:"required" too, and rendered null here the way archived_at
-// is: the platform has no budgets (INFERRED, docs/DIVERGENCES.md).
+// is: the platform has no budgets. A recording shows the reference renders
+// null for a session created without one, so the empty case matches and only
+// the populated one is missing (docs/DIVERGENCES.md).
 var sessionRequiredFields = []string{
 	"id", "type", "agent", "environment_id", "status", "title", "metadata",
 	"usage", "stats", "outcome_evaluations", "resources", "vault_ids",
