@@ -289,7 +289,8 @@ owed. It needs no cross-replica coordination, because reaping is idempotent and 
 executor lists only its own endpoint — one daemon's containers on Docker, one namespace's
 pods on Kubernetes, where the chart's replicas share a namespace and so race for the same
 pods at the cost of a redundant listing. `EXECUTOR_REAP_INTERVAL` is the worst case for
-teardown rather than the usual one: ending a session — deleting or archiving it —
+teardown rather than the usual one, and the loop passes once at startup before waiting it
+out at all (#709): ending a session — deleting or archiving it —
 publishes a wake the executor holds a `LISTEN` for, on a connection outside its pool, and
 the sweep that wake triggers is the ordinary one (plan 48). The wake rides the ending
 transaction, so it reaches nobody before the row it is owed to and nobody at all if the

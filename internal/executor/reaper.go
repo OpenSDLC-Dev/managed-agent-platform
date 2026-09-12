@@ -80,11 +80,11 @@ func sessionLockKey(id domain.ID) int64 {
 // window must not be reaped on the stale answer). Always nil in production.
 var reapHookAfterClassify func(domain.ID)
 
-// reapLoop drives one reap pass at startup, then one per interval, or sooner
-// when a session's end kicks it (plan 48). All three wakes run the same pass:
-// the kick says only that something ended somewhere, so what it triggers is the
-// ordinary sweep, which re-reads this endpoint's own holding and classifies it
-// under the session lock exactly as the ticker's pass does.
+// reapLoop drives one reap pass at startup, then one per interval or sooner
+// when a session's end kicks it (plan 48). Both wakes run the same pass as
+// that first one: the kick says only that something ended somewhere, so what it
+// triggers is the ordinary sweep, which re-reads this endpoint's own holding
+// and classifies it under the session lock exactly as the ticker's pass does.
 func (e *Executor) reapLoop(ctx context.Context) {
 	t := time.NewTicker(e.cfg.ReapInterval)
 	defer t.Stop()
@@ -92,18 +92,11 @@ func (e *Executor) reapLoop(ctx context.Context) {
 		// The pass runs before the first wait, which is the order the five
 		// control-plane sweeps take and for the same reason: a ticker does not
 		// fire when it is created, so an executor restarting more often than
-		// ReapInterval would never reap on its own. This loop looked exempt
-		// because it usually has a boot pass anyway — listenReapKicks wakes it
-		// on every LISTEN establish, the first included — but that wake is not
-		// this loop's to rely on: a listener whose target never admits a LISTEN
-		// never establishes one, so it never wakes anything — it retries every
-		// reapKickBackoff rather than giving up, which is not the same as
-		// arriving. The pooler that multiplexes the backend away and the server
-		// with no connection left to give are the reachable ones; a nil
-		// ReapKickConn is the same state by configuration, which executor.go
-		// admits and cmd/executor does not produce. In any of them a
-		// restarting executor left its predecessor's containers standing for a
-		// full interval, and a crash-looping one left them forever (#709).
+		// ReapInterval would never reap on its own. The kick listener's sweep
+		// on every LISTEN establish looks like a boot pass and is not one this
+		// loop may rely on — a listener whose target never admits a LISTEN
+		// retries every reapKickBackoff forever without ever establishing, and
+		// retrying is not arriving (#709).
 		//
 		// A pass at boot is safe on every endpoint at once for this loop's own
 		// reason: it lists only its own holding and classifies each session

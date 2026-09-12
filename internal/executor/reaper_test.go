@@ -383,7 +383,11 @@ func TestProvisionWaitsForTheSessionLock(t *testing.T) {
 }
 
 // TestRunDrivesTheReaper: Run owns the reap loop — an archived session's
-// sandbox is reaped without any test calling reapPass, within a few intervals.
+// sandbox is reaped without any test calling reapPass. Which wake did it is
+// not this rung's claim and since #709 cannot be: the loop passes before its
+// first wait, so a session owned before Run starts is taken by that pass. The
+// interval's own claim lives in TestReapKickWithoutAConnStillReapsOnTheInterval,
+// on a subject owned after a pass has listed.
 func TestRunDrivesTheReaper(t *testing.T) {
 	h := newHarnessWith(t, &fakeProvider{sb: &fakeSandbox{}}, Config{ReapInterval: 20 * time.Millisecond})
 	h.prov = h.exec.provider.(*fakeProvider)

@@ -40,7 +40,8 @@
 //	                         set. A budget under that step makes every reclaim
 //	                         stall at the same place
 //	EXECUTOR_REAP_INTERVAL   sandbox reap pass interval, Go duration (default
-//	                         "1m"); each pass destroys the sandboxes of
+//	                         "1m"); one pass runs at startup and then one per
+//	                         interval, and each destroys the sandboxes of
 //	                         deleted (tombstone-evidenced), archived, and
 //	                         terminated cloud sessions — self_hosted sandboxes
 //	                         belong to the BYOC worker and are never touched
