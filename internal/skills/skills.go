@@ -61,8 +61,10 @@ var nameRe = regexp.MustCompile(`^[a-z0-9-]+$`)
 var xmlTagRe = regexp.MustCompile(`</?[a-zA-Z][^>]*>`)
 
 // IsZip reports whether data begins with the zip local-file-header magic. The
-// API uses it to pick the upload form when exactly one file part arrives;
-// magic-byte detection is an inference recorded in docs/DIVERGENCES.md.
+// API uses it to pick the upload form when exactly one file part arrives. That
+// was an inference until a recording refuted it: the reference picks the form
+// from the filename's extension instead, so this is a known mismatch rather
+// than an unchecked guess — docs/DIVERGENCES.md, converge or register in #630.
 func IsZip(data []byte) bool {
 	return bytes.HasPrefix(data, []byte("PK\x03\x04"))
 }
