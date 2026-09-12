@@ -130,11 +130,17 @@ func StartDreamRunner(ctx context.Context, pool *pgxpool.Pool, blobs blob.Store,
 	t := time.NewTicker(cfg.TickInterval)
 	defer t.Stop()
 	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-t.C:
-		}
+		// Before the first wait, for the scheduler's reason and with a cutoff
+		// of its own: dreamStep measures the timeout from created_at and its
+		// timeout arm precedes its start arm, so a dream that is pending with
+		// less than a tick of budget left is failed as `timeout` by the pass
+		// that would otherwise have started it. The tick a restart costs is
+		// what puts it there (#699). A pass at boot is safe on every replica at
+		// once because each arm re-reads its dream FOR UPDATE SKIP LOCKED.
+		//
+		// The clock read cannot `continue` here: that would skip the wait and
+		// spin against a database that has just refused a statement.
+		//
 		// The database's clock, as the scheduler reads it: the timeout and
 		// the lease are compared against columns Postgres stamped, so a
 		// replica's own clock must never enter the comparison.
@@ -143,10 +149,13 @@ func StartDreamRunner(ctx context.Context, pool *pgxpool.Pool, blobs blob.Store,
 			if ctx.Err() == nil {
 				slog.WarnContext(ctx, "dream tick skipped: reading the database clock failed", "error", err)
 			}
-			continue
-		}
-		if err := s.dreamTick(ctx, now, cfg); err != nil && ctx.Err() == nil {
+		} else if err := s.dreamTick(ctx, now, cfg); err != nil && ctx.Err() == nil {
 			slog.WarnContext(ctx, "dream tick incomplete; the next interval retries", "error", err)
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
 		}
 	}
 }

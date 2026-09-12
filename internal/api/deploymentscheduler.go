@@ -164,11 +164,20 @@ func StartDeploymentScheduler(ctx context.Context, pool *pgxpool.Pool, blobs blo
 	t := time.NewTicker(deploymentTickInterval)
 	defer t.Stop()
 	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-t.C:
-		}
+		// The pass runs before the first wait rather than after it, which is
+		// memoryretention.go's order and #695's reason: a ticker does not fire
+		// on creation, so every restart costs the deployments a tick. Thirty
+		// seconds is the documented fire latency and mostly harmless, but the
+		// lookup is clamped to now-deploymentCatchupWindow and cron.Due's lower
+		// bound is exclusive, so an occurrence that was inside the window when
+		// the process booted can be outside it one tick later — not late, not
+		// fired, and recorded nowhere (#699). A pass at boot is safe on every
+		// replica at once for this loop's own reason: the occurrence claim is a
+		// unique-index insert, so the losers block briefly and fire nothing.
+		//
+		// The clock read cannot `continue` here: that would skip the wait and
+		// spin against a database that has just refused a statement.
+		//
 		// The one SELECT now() per tick (§4.2): the database's clock, shared
 		// by every replica, is the only one the occurrence math may see.
 		var now time.Time
@@ -176,10 +185,13 @@ func StartDeploymentScheduler(ctx context.Context, pool *pgxpool.Pool, blobs blo
 			if ctx.Err() == nil {
 				slog.WarnContext(ctx, "deployment tick skipped: reading the database clock failed", "error", err)
 			}
-			continue
-		}
-		if err := s.deploymentTick(ctx, now); err != nil && ctx.Err() == nil {
+		} else if err := s.deploymentTick(ctx, now); err != nil && ctx.Err() == nil {
 			slog.WarnContext(ctx, "deployment tick incomplete; the next interval retries", "error", err)
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
 		}
 	}
 }

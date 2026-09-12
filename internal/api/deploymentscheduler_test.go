@@ -578,6 +578,53 @@ func TestSchedulerTickerRuns(t *testing.T) {
 	}
 }
 
+// TestSchedulerPassesBeforeItsFirstTick: the pass runs before the wait, not
+// after it. The interval here is an hour, so an occurrence that fires inside
+// this test can only have come from a pass taken at startup — and a ticker does
+// not fire when it is created, so without that pass every restart costs the
+// deployments a tick. Thirty seconds of latency is the documented design, but
+// the fire lookup is clamped to now-deploymentCatchupWindow and cron.Due's
+// lower bound is exclusive, so an occurrence that was inside the window when
+// the process booted can be outside it one tick later: not late, not fired, and
+// recorded nowhere (#699).
+func TestSchedulerPassesBeforeItsFirstTick(t *testing.T) {
+	restore := api.SetDeploymentTickIntervalForTest(time.Hour)
+	defer restore()
+	s := newTestServer(t)
+	agentID, envID := fixture(t, s)
+	deplID := createDeployment(t, s, scheduledBody(agentID, envID, "* * * * *", "UTC"))["id"].(string)
+	if _, err := s.pool.Exec(t.Context(),
+		`UPDATE deployments SET schedule_resumed_at = now() - interval '2 minutes' WHERE id = $1`, deplID); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithCancel(t.Context())
+	done := make(chan struct{})
+	go func() { defer close(done); api.StartDeploymentScheduler(ctx, s.pool, nil, nil) }()
+	defer func() { cancel(); <-done }()
+
+	deadline := time.Now().Add(15 * time.Second)
+	for len(scheduledRuns(t, s, deplID)) == 0 {
+		if time.Now().After(deadline) {
+			t.Fatal("the loop is waiting out a first tick an hour away: a control plane that restarts more often than the catch-up window loses the occurrence it was restarting through")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	// And then it waits. A second deployment, made due only now, must sit until
+	// the tick an hour away — a loop that passed without ever waiting would fire
+	// it too and look identical from the runs above.
+	other := createDeployment(t, s, scheduledBody(agentID, envID, "* * * * *", "UTC"))["id"].(string)
+	if _, err := s.pool.Exec(t.Context(),
+		`UPDATE deployments SET schedule_resumed_at = now() - interval '2 minutes' WHERE id = $1`, other); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(500 * time.Millisecond)
+	if runs := scheduledRuns(t, s, other); len(runs) != 0 {
+		t.Errorf("a deployment made due after the startup pass fired %d run(s) within the interval: the loop is not waiting between passes", len(runs))
+	}
+}
+
 // The pausing mapping is asserted on a property that can fail — every type
 // the Go map would write is admitted by the migration's CHECK — rather than
 // against a literal copy of itself. The reachable-path property is the arm

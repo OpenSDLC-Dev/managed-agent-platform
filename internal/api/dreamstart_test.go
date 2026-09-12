@@ -1000,6 +1000,44 @@ func firstUserMessage(t *testing.T, s *tserver, sessionID string) string {
 	return p.Content[0].Text
 }
 
+// TestDreamRunnerPassesBeforeItsFirstTick: the pass runs before the wait. The
+// interval here is an hour, so a dream that starts inside this test was started
+// by a pass taken at startup. What a missed first tick costs here is not
+// latency: dreamStep measures the timeout from created_at and its timeout arm
+// precedes its start arm, so a dream left pending with less than a tick of
+// budget is failed as `timeout` by the pass that would otherwise have started
+// it (#699).
+func TestDreamRunnerPassesBeforeItsFirstTick(t *testing.T) {
+	s := newTestServer(t)
+	_, body := seededDreamBody(t, s)
+	dreamID := createDream(t, s, body)["id"].(string)
+
+	cfg := dreamCfg()
+	cfg.TickInterval = time.Hour
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { defer close(done); api.StartDreamRunner(ctx, s.pool, s.blobs, nil, cfg) }()
+	defer func() { cancel(); <-done }()
+
+	deadline := time.Now().Add(30 * time.Second)
+	for getDream(t, s, dreamID)["status"] != "running" {
+		if time.Now().After(deadline) {
+			t.Fatal("the loop is waiting out a first tick an hour away, so a dream created just under its timeout is failed unstarted by the pass that follows")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	// And then it waits. A second dream, created once the first is running, must
+	// stay pending until the tick an hour away — a loop that passed without ever
+	// waiting would start it too and look identical from the status above.
+	_, otherBody := seededDreamBody(t, s)
+	other := createDream(t, s, otherBody)["id"].(string)
+	time.Sleep(500 * time.Millisecond)
+	if got := getDream(t, s, other)["status"]; got != "pending" {
+		t.Errorf("a dream created after the startup pass is %v within the interval, want pending: the loop is not waiting between passes", got)
+	}
+}
+
 // The loop around the tick: it sweeps on its own interval until its context
 // ends, and stops when it does.
 func TestStartDreamRunnerTicksAndStops(t *testing.T) {
