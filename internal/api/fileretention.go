@@ -223,6 +223,15 @@ var filePurgeAfterCommitHook func()
 // so the clause asks what deleteFile asks rather than excluding dream_id
 // outright, which would quietly make a closed dream's transcripts immortal if
 // one ever did get an expiry (#698).
+//
+// The redundant `dream_id IS NULL` in front of that clause is what keeps the
+// index: PostgreSQL pulls a bare NOT EXISTS up into a hash anti-join, which
+// carries no ordering, so every expired row in the table is scanned and sorted
+// before the LIMIT can stop — measured over two million expired rows at 423ms
+// and a 78MB external merge per pass, against 2ms for the form below, which
+// walks 0038's index in order and stops at the batch. A sublink under an OR is
+// not pulled up, which is why the disjunct holds the plan, and it selects the
+// same rows either way: a row with no dream satisfies the NOT EXISTS already.
 func purgeExpiredFiles(ctx context.Context, pool *pgxpool.Pool, retention time.Duration) (int, error) {
 	tx, err := pool.Begin(ctx)
 	if err != nil {
@@ -234,8 +243,9 @@ func purgeExpiredFiles(ctx context.Context, pool *pgxpool.Pool, retention time.D
 		DELETE FROM files
 		 WHERE id IN (SELECT f.id FROM files f
 		               WHERE f.expires_at < now() - make_interval(secs => $1)
-		                 AND NOT EXISTS (SELECT 1 FROM dreams d
-		                                  WHERE d.id = f.dream_id AND d.closed_at IS NULL)
+		                 AND (f.dream_id IS NULL
+		                      OR NOT EXISTS (SELECT 1 FROM dreams d
+		                                      WHERE d.id = f.dream_id AND d.closed_at IS NULL))
 		               ORDER BY f.expires_at, f.id
 		               LIMIT $2
 		               FOR UPDATE SKIP LOCKED)

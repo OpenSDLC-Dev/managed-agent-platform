@@ -375,6 +375,22 @@ func TestTheSweepWakesTheDrain(t *testing.T) {
 	}
 }
 
+// seedDream writes a running dream the way the create route would, which is
+// what the table's CHECKs require of any row a rung invents.
+func seedDream(t *testing.T, pool *pgxpool.Pool) string {
+	t.Helper()
+	id := domain.NewID(domain.PrefixDream).String()
+	if _, err := pool.Exec(context.Background(),
+		`INSERT INTO dreams (id, status, stage, inputs, input_memory_store_id, input_session_ids,
+		   model, output_behavior)
+		 VALUES ($1, 'running', 1, '[]'::jsonb, $2, '{}'::text[],
+		   '{"id":"claude-opus-4-8"}'::jsonb, '{"type":"create_new"}'::jsonb)`,
+		id, domain.NewID(domain.PrefixMemoryStore).String()); err != nil {
+		t.Fatalf("seed the dream: %v", err)
+	}
+	return id
+}
+
 // TestPurgeLeavesAnOpenDreamsTranscript pins deleteFile's refusal on this side
 // too. Nothing stamps an expiry on a transcript today, which is why the sweep
 // went without the clause; that is a fact about the current writers rather than
@@ -390,28 +406,45 @@ func TestPurgeLeavesAnOpenDreamsTranscript(t *testing.T) {
 	ctx := context.Background()
 	window := 30 * 24 * time.Hour
 	id := seedExpiredFile(t, pool, nil, window+time.Hour)
+	// Two rows the sweep must still take while that dream is open: a file no
+	// dream owns, and the transcript of a dream that is already closed. They are
+	// what makes the clause's correlation observable — uncorrelated it asks "is
+	// any dream open", which in a deployment with one live dream holds every
+	// closed dream's transcript forever, and a rung seeded with the open dream's
+	// own file alone cannot see that.
+	seedExpiredFile(t, pool, nil, window+2*time.Hour)
+	closed := seedExpiredFile(t, pool, nil, window+3*time.Hour)
 
 	// ownedsession_test.go's openDream, without its server: the shapes the
 	// create route produces, which the table's CHECKs require.
-	dreamID := domain.NewID(domain.PrefixDream).String()
-	if _, err := pool.Exec(ctx,
-		`INSERT INTO dreams (id, status, stage, inputs, input_memory_store_id, input_session_ids,
-		   model, output_behavior)
-		 VALUES ($1, 'running', 1, '[]'::jsonb, $2, '{}'::text[],
-		   '{"id":"claude-opus-4-8"}'::jsonb, '{"type":"create_new"}'::jsonb)`,
-		dreamID, domain.NewID(domain.PrefixMemoryStore).String()); err != nil {
-		t.Fatalf("seed the open dream: %v", err)
-	}
+	dreamID := seedDream(t, pool)
 	if _, err := pool.Exec(ctx, `UPDATE files SET dream_id = $1 WHERE id = $2`, dreamID, id); err != nil {
 		t.Fatalf("attach the transcript: %v", err)
+	}
+	closedDreamID := seedDream(t, pool)
+	if _, err := pool.Exec(ctx,
+		`UPDATE dreams SET status = 'completed', ended_at = now(), closed_at = now() WHERE id = $1`,
+		closedDreamID); err != nil {
+		t.Fatalf("close the second dream: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `UPDATE files SET dream_id = $1 WHERE id = $2`, closedDreamID, closed); err != nil {
+		t.Fatalf("attach the closed dream's transcript: %v", err)
 	}
 
 	n, err := purgeExpiredFiles(ctx, pool, window)
 	if err != nil {
 		t.Fatalf("purge: %v", err)
 	}
-	if n != 0 {
-		t.Fatalf("purged %d rows, want none: the transcript of an open dream is the runner's", n)
+	if n != 2 {
+		t.Fatalf("purged %d rows, want the two no open dream owns: the exemption is this row's own dream, not whether any dream is open", n)
+	}
+	var held bool
+	if err := pool.QueryRow(ctx,
+		`SELECT EXISTS (SELECT 1 FROM files WHERE id = $1)`, id).Scan(&held); err != nil {
+		t.Fatal(err)
+	}
+	if !held {
+		t.Fatal("the sweep took the transcript of an open dream")
 	}
 
 	// Terminal, and still not closed — dreams_closed_terminal (0034) requires
@@ -452,27 +485,34 @@ func TestTheSweepDrainsABacklogInOneTick(t *testing.T) {
 		seedExpiredFile(t, pool, nil, fileMetadataRetention+time.Duration(i+1)*time.Hour)
 	}
 
+	q := NewObjectDeleteQueue()
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
-	go func() { defer close(done); StartFileRetention(ctx, pool, nil) }()
-	t.Cleanup(func() { cancel(); <-done })
+	go func() { defer close(done); StartFileRetention(ctx, pool, q) }()
+	// Registered after the two setters, so it runs before them: the sweeper
+	// reads filePurgeBatch on every pass, and t.Cleanup would restore it while
+	// the goroutine is still looping.
+	defer func() { cancel(); <-done }()
 
 	// One tick, and the interval is an hour: three batches of two have to run
-	// inside the startup pass or this never finishes.
-	deadline := time.Now().Add(15 * time.Second)
-	for {
-		var left int
-		if err := pool.QueryRow(context.Background(),
-			`SELECT count(*) FROM files WHERE expires_at IS NOT NULL`).Scan(&left); err != nil {
-			t.Fatal(err)
-		}
-		if left == 0 {
-			return
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("%d expired row(s) left: a tick stopped at its first batch, so the backlog drains an hour at a time", left)
-		}
-		time.Sleep(20 * time.Millisecond)
+	// inside the startup pass or this never finishes. The wake is what says the
+	// pass is over — it is raised once, after the drain rather than after each
+	// batch, so everything the tick owed is owed by the time it arrives.
+	select {
+	case <-q.waits():
+	case <-time.After(15 * time.Second):
+		t.Fatal("no wake in 15 seconds: the startup pass never committed a batch")
+	}
+	if got := owedKeys(t, pool); len(got) != 5 {
+		t.Errorf("the drain was woken owing %d keys, want all 5: a tick that stops at its first batch leaves the rest for an hour", len(got))
+	}
+	var left int
+	if err := pool.QueryRow(context.Background(),
+		`SELECT count(*) FROM files WHERE expires_at IS NOT NULL`).Scan(&left); err != nil {
+		t.Fatal(err)
+	}
+	if left != 0 {
+		t.Errorf("%d expired row(s) left when the tick woke the drain: the backlog drains an hour at a time", left)
 	}
 }
 
