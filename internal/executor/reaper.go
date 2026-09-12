@@ -80,23 +80,36 @@ func sessionLockKey(id domain.ID) int64 {
 // window must not be reaped on the stale answer). Always nil in production.
 var reapHookAfterClassify func(domain.ID)
 
-// reapLoop drives one reap pass per interval, or sooner when a session's end
-// kicks it (plan 48). Both wakes run the same pass: the kick says only that
-// something ended somewhere, so what it triggers is the ordinary sweep, which
-// re-reads this endpoint's own holding and classifies it under the session
-// lock exactly as the ticker's pass does.
+// reapLoop drives one reap pass at startup, then one per interval or sooner
+// when a session's end kicks it (plan 48). Both wakes run the same pass as
+// that first one: the kick says only that something ended somewhere, so what it
+// triggers is the ordinary sweep, which re-reads this endpoint's own holding
+// and classifies it under the session lock exactly as the ticker's pass does.
 func (e *Executor) reapLoop(ctx context.Context) {
 	t := time.NewTicker(e.cfg.ReapInterval)
 	defer t.Stop()
 	for {
+		// The pass runs before the first wait, which is the order the five
+		// control-plane sweeps take and for the same reason: a ticker does not
+		// fire when it is created, so an executor restarting more often than
+		// ReapInterval would never reap on its own. The kick listener's sweep
+		// on every LISTEN establish looks like a boot pass and is not one this
+		// loop may rely on — a listener whose target never admits a LISTEN
+		// retries every reapKickBackoff forever without ever establishing, and
+		// retrying is not arriving (#709).
+		//
+		// A pass at boot is safe on every endpoint at once for this loop's own
+		// reason: it lists only its own holding and classifies each session
+		// under the session lock, which is exactly what the kick-driven pass
+		// already does at that moment today.
+		if err := e.reapPass(ctx); err != nil && ctx.Err() == nil {
+			slog.WarnContext(ctx, "reap pass incomplete; the next interval retries", "error", err)
+		}
 		select {
 		case <-ctx.Done():
 			return
 		case <-t.C:
 		case <-e.kick:
-		}
-		if err := e.reapPass(ctx); err != nil && ctx.Err() == nil {
-			slog.WarnContext(ctx, "reap pass incomplete; the next interval retries", "error", err)
 		}
 	}
 }
