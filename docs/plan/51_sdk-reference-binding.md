@@ -82,7 +82,8 @@ adds or drops an `absent at` clause and never touches `since` or
   and lags forever, or re-checked against every new pin to re-discover the same
   intentional absence.
 
-Two locator forms:
+Two locator forms for Go sources — the SDK's bundled spec adds a third, its
+schema path, under "Not every citation is a Go symbol" below:
 
 - **A symbol anchor** is the default: `betaagent.go BetaManagedAgentsWebFetchToolConfig`,
   a method qualified by its receiver (`betaagent.go BetaAgentNewParams.MarshalJSON`),
@@ -103,7 +104,13 @@ Two locator forms:
   `crosses-declarations` for a range covering more than one, `no-unique-name`
   where the enclosing declaration's name repeats in the file — the generated-
   `init` case, not "the file is generated", since every file in the SDK is — and
-  `non-go` for a source with no Go declarations to name.
+  `non-go` for a source with no machine-readable structure to name at all. That
+  last one is deliberately narrow: the SDK's bundled spec *is* machine-readable,
+  so a spec citation takes a schema path and `non-go` is refused there. Left
+  wide, it would be irrefutably true of every YAML line and would let the 23
+  spec citations keep their spans forever — the ceremony this set exists to
+  prevent, reappearing on the one surface where a parser could still have caught
+  it.
 
   There is deliberately no reason meaning "this one is different", and no
   bare-filename locator either. A parser cannot tell a genuine whole-file claim
@@ -219,9 +226,9 @@ resolution rungs, and rung 3 below is what actually watches the corpus.
    one tag always present; it does not apply to `anthropic-cli` anchors or to
    in-repo coordinates. Nor does it resolve a line span against the pin, whose
    numbers mean nothing at a tag the span was not written for — but where the
-   cache does hold a span's own stamped tag, this rung falsifies its reason
-   there, which is the other half of rung 1 and the only place decision 3's
-   "reported when available" can land. Everything it could not check is listed
+   cache holds an *older* span's own stamped tag, this rung falsifies its reason
+   there, which is the other half of rung 1 (whose own falsification stops at the
+   pin) and the only place decision 3's "reported when available" can land. Everything it could not check is listed
    as uncheckable rather than silently skipped: a rung that emits nothing for
    input it never read is a clean bill of health it did not earn.
 
@@ -284,19 +291,27 @@ its answer.
 
 ## What a bump looks like afterwards
 
-`make sdk-bump-report` prints two lists:
+`make sdk-bump-report` prints three lists:
 
 - **Transitions: positive anchors that no longer resolve at the new pin, and
   `absent at` anchors that resolve again.** Every one is a deletion, a rename, or
   a reinstatement in the SDK, and each needs a one-line disposition from a human.
   On the v1.66.0 → v1.70.1 bump already taken, this list would have held exactly
   one line, and named the entry that a per-entry human sweep eventually found.
-  Beneath it, the anchors the rung could not check — `anthropic-cli`, in-repo,
-  and line spans — named rather than omitted.
+- **Span reasons the sources contradict**, where the cache held the tag to check
+  them against: a `crosses-declarations` span covering one declaration, or a
+  `no-unique-name` span whose name turns out to be unique. Neither a transition
+  nor lag — a citation whose locator was mis-justified — so it gets its own list
+  rather than being folded into one that would misdescribe it.
 - **Claims lagging the pin.** Judgment, not obligation: an entry last checked
   four versions ago may be perfectly true, and re-stamping it without re-reading
   it would be the green-diff failure in a new costume. A stamp moves only when
   someone actually looked.
+
+Under all three, the anchors nothing could check — `anthropic-cli`, in-repo
+coordinates, and spans whose stamped tag no cache holds — named rather than
+omitted, because a report that silently drops what it never read is a clean bill
+of health it did not earn.
 
 The history files, the archived plans and the changelogs carry several hundred
 more SDK version mentions. A bump does not touch any of them, because each
@@ -311,7 +326,10 @@ they name a source nobody can open at the tag they give, while v1.70.1 bundles
 one as `scripts/mock-spec.json.gz`. Slice 2 therefore gives spec citations their
 own locator — a schema path such as `components.schemas.BetaSession` — resolved
 against the bundled spec at the stamped tag, and rung 2 covers them exactly when
-that tag is the pin. Anything the spec cannot answer stays a stamped line span.
+that tag is the pin. There is no span fallback here and none is needed: the spec
+is a tree, so every cited line has an enclosing node to name, which is also why
+`non-go` is refused for spec citations rather than left as a reason no parser
+could ever contradict.
 
 ## Slices
 
