@@ -32,8 +32,8 @@ everything, which turns true `since` sentences false and produces a green diff
 proving nothing was re-checked; or edit nothing, which is what happened.
 `internal/events/inbound.go:164` still says "at the pinned v1.66.0" while
 `go.mod` pins v1.70.1, and `.claude/agents/verifier.md:25` — a file that steers
-the verifier — still says "Judge against the SDK version pinned in
-`go.mod` (v1.66.0)". No rung in the gate notices either.
+the verifier — said the same until #724 took the literal out and put both
+steering documents under a gate test. Nothing in the gate notices the comment.
 
 That is the disease #452 diagnosed for `Tracked: #N` — *written once and
 falsified later, elsewhere, by an event the file cannot see* — with the SDK bump
@@ -184,8 +184,10 @@ currently hidden.
 ## What the guard does, and what it deliberately does not
 
 A new `tools/sdkref` owns the syntax of SDK references wherever they appear —
-`docs/DIVERGENCES.md`, Go comments, and the steering documents that also carry
-version claims. `tools/registrycheck` keeps its own job, the `Tracked:` pointers;
+`docs/DIVERGENCES.md` and the Go comments. The steering documents hold no
+citation to migrate, only a rule about naming a version at all, and that rule
+sits in the gate already (#724); it folds in here only if two homes for it prove
+worse than one. `tools/registrycheck` keeps its own job, the `Tracked:` pointers;
 the two invariant families stay in separate tools because they fail for
 unrelated reasons.
 
@@ -370,22 +372,26 @@ could ever contradict.
    rot the same way. The bare continuations are #660's blocker and they disappear
    here, because a symbol needs no filename inherited from the surrounding prose.
    Closes #660.
-3. **Migrate the Go comments, then the steering documents under a separate
-   rule.** 50 lines carry a coordinate — 49 citations (40 into the SDK, 3 into
-   go-jose, 6 into this repository) and one fixture path that is not one — and 12
-   carry a `since` whose source is usually unnamed. The comments are a pure
-   migration. The steering documents are not: `.claude/agents/verifier.md:25` is
-   an *operational instruction* to judge against the current pin, not evidence
+3. **Migrate the Go comments; the steering documents take a separate rule.**
+   50 lines carry a coordinate — 49 citations (40 into the SDK, 3 into go-jose,
+   6 into this repository) and one fixture path that is not one — and 12 carry a
+   `since` whose source is usually unnamed. The comments are a pure migration.
+   The steering documents are not: `.claude/agents/verifier.md:25` is an
+   *operational instruction* to judge against the current pin, not evidence
    dated to a tag, so rewriting it as `checked against v1.66.0` would be a
-   category error. Its rule is narrow — no literal SDK version beside "pinned in
-   `go.mod`" — and applying it does change what the verifier is told to do, which
-   is the point (#724 corrects that instance now; this slice keeps it from
-   recurring).
+   category error. Their rule is narrower and needs no citation syntax, so it
+   sits in the gate already, in `internal/domain/docs_test.go` (#724):
+   verifier.md may name no tag at all, dated or not, and
+   `docs/REFERENCE_PROJECTS.md` only one a temporal marker dates. This slice is
+   the comments, and folding that rule in beside them if two homes prove worse
+   than one.
 4. **Turn on failing.** Rungs 1 and 2 become errors, the corpus tolerance goes
    away, the `go.mod`-triggered workflow lands, and the bump ritual is written
    into `docs/REFERENCE_PROJECTS.md`.
 
-Slices 2 and 3 are independent and can land in either order once 1 is in.
+Slices 2 and 3 are independent and can land in either order once 1 is in. The
+steering documents are the exception that proves the ordering: their rule needs
+none of `tools/sdkref`, so it did not wait for it (#724).
 
 ## Non-goals
 
@@ -432,12 +438,13 @@ Slices 2 and 3 are independent and can land in either order once 1 is in.
    tags would need those modules, and the registry cites three tags no cache
    here holds. Older tags are reported when available and never required.
 4. **Both the registry and the Go comments migrate**, and the steering documents
-   after them, under their own rule. Two citation conventions in one repository
-   is a worse cost than one migration. Steering documents earn their place
-   because measuring the corpus turned up a live falsehood there
+   too, under their own rule. Two citation conventions in one repository is a
+   worse cost than one migration. Steering documents earn their place because
+   measuring the corpus turned up a live falsehood there
    (`.claude/agents/verifier.md:25`) as well as the one already known in a Go
    comment (`internal/events/inbound.go:164`) — the rot is not confined to the
-   two obvious surfaces.
+   two obvious surfaces. Theirs is also the only rule here that needs no
+   citation syntax, which is what lets it stand apart from the migration (#724).
 5. **This plan is sliced rather than landing as one PR.** The corpus is 276
    coordinates — 139 named and 88 bare continuations in the registry, 49 in Go
    comments — across three surfaces plus a new tool, and the evidence for

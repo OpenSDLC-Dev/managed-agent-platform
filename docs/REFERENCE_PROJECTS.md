@@ -48,7 +48,7 @@ either conflicts with the Anthropic model, the Anthropic model wins.
 ## Caveats
 
 The SDK and CLI checkouts track the API's tip and can run ahead of the pin (whatever
-lands next). Wire-compat is judged against the SDK version pinned in `go.mod` (v1.70.1) —
+lands next). Wire-compat is judged against the SDK version pinned in `go.mod` —
 and because the pin moves, **a registry entry's `anthropic-sdk-go vX.Y.Z` names the tag its
 coordinates were last checked against, not necessarily the pin**: read the coordinates at
 the tag the entry names, with `git show <tag>:<path>` or the module cache, never in a
