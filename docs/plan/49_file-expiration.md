@@ -19,6 +19,13 @@ issue: "#655"
 > the bytes go at the purge rather than at the expiry is untouched by that; which component
 > removes them is not.
 >
+> **Superseded on two more (#698).** Decision 3 says dream files are out of range "by
+> construction, not by a clause" — true of the writers that exist rather than an invariant, so
+> the sweep now asks `deleteFile`'s own question and a transcript an open dream owns is exempt
+> by clause. And the batch-bound paragraph above the decisions argues the bound from the
+> per-row object delete that #696 removed: the batch bounds a transaction now, not a tick, and
+> a tick drains until a batch comes back short.
+>
 > Numbered **48** while slice 1 was in review, which is what PR #691 and the commits under it
 > call it. An earlier-opened PR (#677, the reap kick) had claimed 48 for a plan invisible in
 > any checkout and merged first, so this one renumbered — the convention being that the

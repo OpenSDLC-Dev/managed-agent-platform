@@ -33,7 +33,8 @@ import (
 //
 // Two things migration 0037's comment says are no longer true, and a merged
 // migration is immutable — comments included — so the corrections live here,
-// the same move memoryretention.go makes for 0029's.
+// the same move memoryretention.go makes for 0029's. 0038's own two follow
+// them.
 //
 // It calls this plan 48, the number the plan had while slice 1 was in review;
 // an earlier-opened PR held that number and merged first, so the plan is 49.
@@ -44,6 +45,25 @@ import (
 // with no lifetime pays nothing at all and only an expiring one pays. Migration
 // 0038 adds that index, because the scan 0037 was willing to accept now runs
 // once an hour on every deployment, forever.
+//
+// 0038 is immutable in its turn, and two things it says need the same
+// treatment (#698). It describes the table as growing "a row per upload and a
+// row per harvested deliverable, pruned by nothing except this sweep", and
+// both halves are wrong about deliverables: the executor's harvest inserts
+// them without an expires_at (internal/executor/harvest.go names id, filename,
+// mime_type, size_bytes, downloadable, scope_type and scope_id), so this sweep
+// never sees one — what removes them is a session delete, which takes every
+// row scoped to the session, and the next replacing harvest, which drops the
+// whole snapshot before writing the new one. The index still earns its place
+// on the uploads, which do expire.
+//
+// And it omits the note 0031 and 0035 both carry: migrate.go applies every
+// pending file inside one transaction, so CREATE INDEX cannot be CONCURRENTLY.
+// This form takes SHARE on files for the build — 0035's own wording for the
+// same situation — so reads go on and writes wait, and they wait not for the
+// build but for the whole migration transaction, since migrate.go commits
+// once. On the very table 0038 argues grows without bound, that is an upgrade
+// stall on uploads, harvests and deletes that an operator gets no warning of.
 const (
 	// fileMetadataRetention is the reference's published window, measured from
 	// expires_at rather than from created_at: a file uploaded with a 90-day
@@ -62,16 +82,17 @@ const (
 	// size the order a batch is taken in is unobservable, so export_test.go
 	// shrinks it to watch the oldest go first.
 	//
-	// A backlog therefore drains over successive ticks rather than in one, and
-	// that is not a cost worth engineering away: every row it walks is already
-	// at least 30 days past an expiry nothing is waiting on. The batch is taken
-	// oldest-first, so draining over ticks is a queue and not a lottery.
+	// The batch is taken oldest-first, so a backlog drains as a queue and not as
+	// a lottery.
 	//
-	// It is a rate as well as a delay, though, and the rate is the part that
-	// could bite: a thousand an hour is the ceiling, so a deployment expiring
-	// more than that sustainedly would never drain and its metadata would
-	// outlive the published window. Raise it, or add a drain loop, when a
-	// deployment measures either problem.
+	// A backlog therefore drains over the passes of one tick rather than over
+	// successive hours, which is the loop below: the batch bounds a
+	// transaction, not a tick. It bounded a tick until the sweep stopped
+	// deleting objects (#696) — a thousand rows meant a thousand store round
+	// trips, and an hourly ceiling of a thousand rows meant a 50k backlog took
+	// 50 hours to clear while its metadata outlived the published window
+	// (#698). A pass now costs one DELETE and one array insert, so there is
+	// nothing left for the ceiling to protect.
 	filePurgeBatchDefault = 1000
 
 	// MetricExpiredFilesPurged counts rows the sweep removed. Exported so the
@@ -110,18 +131,36 @@ func StartFileRetention(ctx context.Context, pool *pgxpool.Pool, q *ObjectDelete
 		// rolling deployment is exactly that control plane. Replicas all
 		// sweeping at boot is not a collision either, since the DELETE is the
 		// claim and their batches are disjoint.
-		n, err := purgeExpiredFiles(ctx, pool, fileMetadataRetention)
-		switch {
-		case err != nil && ctx.Err() == nil:
-			slog.WarnContext(ctx, "expired file purge incomplete; the next interval retries", "error", err)
-		case err == nil && n > 0:
-			slog.InfoContext(ctx, "expired files purged", "count", n,
-				"expired_before", fileMetadataRetention)
-			// The keys are visible the instant that commit returned, so the
+		//
+		// It then keeps going until a pass comes back short, which is the
+		// object-delete drain's shape and is what keeps the batch a bound on
+		// one transaction rather than on one hour: a backlog larger than a
+		// batch used to wait a tick per thousand rows, so 50k expired rows
+		// outlived the published window by two days (#698). Each pass is its
+		// own transaction, so a tick that is interrupted keeps every pass that
+		// committed.
+		total := 0
+		for {
+			n, err := purgeExpiredFiles(ctx, pool, fileMetadataRetention)
+			total += n
+			if err != nil {
+				if ctx.Err() == nil {
+					slog.WarnContext(ctx, "expired file purge incomplete; the next interval retries", "error", err)
+				}
+				break
+			}
+			if n < filePurgeBatch {
+				break
+			}
+		}
+		if total > 0 {
+			slog.InfoContext(ctx, "expired files purged", "count", total,
+				"older_than", fileMetadataRetention)
+			// The keys are visible the instant those commits returned, so the
 			// drain is asked to look now rather than at its own next minute —
-			// deleteSession's move, for a batch up to a thousand times larger.
-			// Non-blocking, and never load-bearing: it only brings forward what
-			// the drain's own interval would do anyway.
+			// deleteSession's move, for a tick that can owe far more than a
+			// session does. Non-blocking, and never load-bearing: it only
+			// brings forward what the drain's own interval would do anyway.
 			q.Wake()
 		}
 		select {
@@ -175,9 +214,27 @@ var filePurgeAfterCommitHook func()
 // upload. retention is a parameter so a test can drive the rule in seconds
 // rather than in days.
 //
-// A dream's transcript files are out of range by construction rather than by a
-// clause — nothing sets expires_at on them — so deleteFile's refusal to remove
-// a file an open dream owns has no twin to grow here.
+// A file an open dream owns is exempt, which is deleteFile's refusal made
+// structural here rather than left resting on the fact that nothing sets
+// expires_at on a transcript. That fact is true and is not an invariant: any
+// future path that stamped an expiry on a transcript would walk through a door
+// the manual route holds shut, and would take the file out from under a runner
+// still writing to it. Closed dreams are not exempt — nobody is writing those —
+// so the clause asks what deleteFile asks rather than excluding dream_id
+// outright, which would quietly make a closed dream's transcripts immortal if
+// one ever did get an expiry (#698).
+//
+// The redundant `dream_id IS NULL` in front of that clause is what pins the
+// plan. A bare NOT EXISTS is pulled up into an anti-join, and which anti-join
+// is a cost decision: a nested loop keeps 0038's index order and stops at the
+// batch, a hash anti-join carries no ordering at all, so every expired row in
+// the table is scanned and sorted before the LIMIT can stop. Both were seen
+// over two million expired rows — the nested loop at a few milliseconds, the
+// hash form at 423ms with a 78MB external merge, and per pass now that a tick
+// drains. So the bare spelling is not wrong; it is left to the statistics on a
+// table 0038 argues grows without bound. A sublink under an OR is not pulled
+// up at all, which takes the choice away, and it selects the same rows either
+// way: a row with no dream satisfies the NOT EXISTS already.
 func purgeExpiredFiles(ctx context.Context, pool *pgxpool.Pool, retention time.Duration) (int, error) {
 	tx, err := pool.Begin(ctx)
 	if err != nil {
@@ -187,9 +244,12 @@ func purgeExpiredFiles(ctx context.Context, pool *pgxpool.Pool, retention time.D
 
 	rows, err := tx.Query(ctx, `
 		DELETE FROM files
-		 WHERE id IN (SELECT id FROM files
-		               WHERE expires_at < now() - make_interval(secs => $1)
-		               ORDER BY expires_at, id
+		 WHERE id IN (SELECT f.id FROM files f
+		               WHERE f.expires_at < now() - make_interval(secs => $1)
+		                 AND (f.dream_id IS NULL
+		                      OR NOT EXISTS (SELECT 1 FROM dreams d
+		                                      WHERE d.id = f.dream_id AND d.closed_at IS NULL))
+		               ORDER BY f.expires_at, f.id
 		               LIMIT $2
 		               FOR UPDATE SKIP LOCKED)
 		 RETURNING id`, retention.Seconds(), filePurgeBatch)
