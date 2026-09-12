@@ -1188,6 +1188,29 @@ func (s *server) listSessions(r *http.Request) (any, error) {
 	var args []any
 	if !includeArchived {
 		query += ` AND archived_at IS NULL`
+		if len(statuses) == 0 {
+			// The reference's default listing hides a `terminated` session as
+			// well as an archived one — a 2026-09-03 sweep listed 28 sessions
+			// and deleted all 28, and a re-list with include_archived=true
+			// returned a 29th that was `terminated` and never archived (#574).
+			// Reconciling by listing is what that blind spot cost us.
+			//
+			// An explicit statuses[] replaces this restriction rather than
+			// being narrowed by it, so naming `terminated` returns them. That
+			// is ours: the sweep probed a default list and an include_archived
+			// one, never a status-filtered list. The alternative — a scope no
+			// filter reaches past, the way include_archived=false is scoped —
+			// would leave a value both the SDK types and the bundled spec
+			// admit for statuses[] matching nothing without a flag neither
+			// description mentions, and would collapse "terminated by failure"
+			// and "archived" into one answer only include_archived=true can
+			// ask (INFERRED, #78).
+			//
+			// Written against the projection rather than the column so the one
+			// rule lives in one place; the clause above already makes the two
+			// identical here.
+			query += ` AND ` + sessionStatusExpr + ` <> 'terminated'`
+		}
 	}
 	if deplID := q.Get("deployment_id"); deplID != "" {
 		// "Filter sessions created by this deployment ID": an equality on the

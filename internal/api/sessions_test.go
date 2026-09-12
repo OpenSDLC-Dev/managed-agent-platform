@@ -1163,11 +1163,89 @@ func TestAnArchivedSessionReadsTerminated(t *testing.T) {
 	if got := listIDs("include_archived=true&statuses[]=rescheduling"); len(got) != 0 {
 		t.Errorf("statuses[]=rescheduling returned a session the wire reads terminated: %v", got)
 	}
-	// A stored `terminated` needs no archive to be found, and the default
-	// listing reaches it: what that listing hides is archived rows, which is
-	// the question #574 owns.
+	// The archived sessions read `terminated` and still stay out of the
+	// default listing, which drops them by archive rather than by status: only
+	// the stored one is named there.
 	if got, w := listIDs("statuses[]=terminated"), want(term); !slices.Equal(got, w) {
-		t.Errorf("the default listing's statuses[]=terminated = %v, want the unarchived %v", got, w)
+		t.Errorf("the default listing's statuses[]=terminated = %v, want only the stored one %v", got, w)
+	}
+}
+
+// #574: the reference's default `GET /v1/sessions` hides a `terminated` session
+// as well as an archived one. The sweep that recorded it, and what is inferred
+// rather than recorded, are in listSessions' own comment; what this pins is the
+// shape — hidden by default, returned when `statuses[]` names it, and always
+// reachable by id.
+func TestTerminatedIsHiddenFromTheDefaultListing(t *testing.T) {
+	s := newTestServer(t)
+	agentID, envID := fixture(t, s)
+	newSession := func() string {
+		t.Helper()
+		sess := createSession(t, s, map[string]any{"agent": agentID, "environment_id": envID})
+		return sess["id"].(string)
+	}
+	listIDs := func(query string) []string {
+		t.Helper()
+		_, body := s.do(http.MethodGet, "/v1/sessions?"+query, nil)
+		out := []string{}
+		for _, e := range listData(t, body) {
+			out = append(out, e["id"].(string))
+		}
+		slices.Sort(out)
+		return out
+	}
+
+	want := func(ids ...string) []string {
+		slices.Sort(ids)
+		return ids
+	}
+	terminate := func(id string) {
+		t.Helper()
+		if _, err := s.pool.Exec(context.Background(),
+			`UPDATE sessions SET status = 'terminated' WHERE id = $1`, id); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	live, term := newSession(), newSession()
+	terminate(term)
+
+	// Both are unarchived, so what hides one of them is its status.
+	if got, w := listIDs(""), want(live); !slices.Equal(got, w) {
+		t.Errorf("the default listing = %v, want only the live session %v", got, w)
+	}
+	// An explicit statuses[] replaces that restriction rather than being
+	// narrowed by it — which is the half of #574 the sweep never probed.
+	if got, w := listIDs("statuses[]=terminated"), want(term); !slices.Equal(got, w) {
+		t.Errorf("statuses[]=terminated = %v, want the terminated session %v", got, w)
+	}
+	// Naming another status still does not surface it.
+	if got, w := listIDs("statuses[]=idle"), want(live); !slices.Equal(got, w) {
+		t.Errorf("statuses[]=idle = %v, want only the live session %v", got, w)
+	}
+	// include_archived widens the scope on its own, with no filter at all.
+	if got, w := listIDs("include_archived=true"), want(live, term); !slices.Equal(got, w) {
+		t.Errorf("include_archived=true = %v, want both %v", got, w)
+	}
+	// And the session itself is untouched.
+	code, got := s.do(http.MethodGet, "/v1/sessions/"+term, nil)
+	if code != http.StatusOK || got["status"] != "terminated" {
+		t.Errorf("GET on the hidden session = %d %v, want 200 terminated", code, got["status"])
+	}
+
+	// The filters compose, which is what the reading above is worth: a
+	// deployment whose run ended drops out of the listing that reconciles it —
+	// the blind spot this issue is about — and naming the status gets it back,
+	// rather than `include_archived=true` returning every archived session with
+	// it.
+	depl := createDeployment(t, s, deploymentBody(agentID, envID))["id"].(string)
+	fired := runDeployment(t, s, depl)["session_id"].(string)
+	terminate(fired)
+	if got := listIDs("deployment_id=" + depl); len(got) != 0 {
+		t.Errorf("the deployment's default listing = %v, want nothing once its run ended", got)
+	}
+	if got, w := listIDs("deployment_id="+depl+"&statuses[]=terminated"), want(fired); !slices.Equal(got, w) {
+		t.Errorf("deployment_id with statuses[]=terminated = %v, want the fired session %v", got, w)
 	}
 }
 
