@@ -400,7 +400,10 @@ cloudSQLProxy:
 # compatible store works.
 minio:
   enabled: true
-  image: minio/minio:RELEASE.2025-09-07T16-13-09Z
+  # From quay.io, not Docker Hub, which stopped serving the `minio` namespace
+  # (#701); internal/blob/blobtest carries the evidence. An air-gapped operator
+  # mirroring this image pulls it from there.
+  image: quay.io/minio/minio:RELEASE.2025-09-07T16-13-09Z
   # -- REQUIRED when minio.enabled: the chart does NOT auto-generate credentials,
   # for the same GitOps-render-stability reason as postgresql.password. MinIO
   # requires a rootPassword of at least 8 characters.
