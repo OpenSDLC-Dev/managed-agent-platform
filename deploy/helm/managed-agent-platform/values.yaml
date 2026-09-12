@@ -54,10 +54,11 @@ controlplane:
   dreamTimeout: ""        # DREAM_TIMEOUT, a dream's runtime budget from creation, e.g. "2h"; empty uses the binary default (2h)
   dreamMaxInputBytes: ""  # DREAM_MAX_INPUT_BYTES, the input store's content cap in bytes; empty uses the binary default (67108864, 64 MiB)
   # -- How long Kubernetes waits between SIGTERM and SIGKILL. The control plane
-  # drains HTTP (up to 10s) and then the background sweeps, of which the expired
-  # -file sweep's object deletes run detached with a 30s budget so a shutdown
-  # cannot strand objects whose rows it already removed. Kubernetes' own default
-  # of 30s is shorter than that sum, and would kill the drain partway.
+  # drains HTTP (up to 10s, the bound cmd/controlplane gives its own Shutdown)
+  # and then cancels the background sweeps, which stop promptly — none of them
+  # runs detached work any more. This is margin over that, not arithmetic: it
+  # was sized for the expired-file sweep's 30s detached object deletes, which
+  # went when that sweep stopped deleting objects at all (#696).
   terminationGracePeriodSeconds: 60
   resources: {}
   nodeSelector: {}

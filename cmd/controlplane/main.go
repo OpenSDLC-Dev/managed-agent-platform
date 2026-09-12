@@ -259,9 +259,10 @@ func run(ctx context.Context) error {
 	// claim, the scheduler's occurrence claim is a unique-index insert, and the
 	// runner and the drain each claim FOR UPDATE SKIP LOCKED — so a second
 	// replica costs a duplicate query, a briefly-blocked loser or a skipped row,
-	// never a wrong answer. The drain is the one a request can hurry: a session
-	// delete wakes it in-process after its commit, and its interval is the
-	// backstop for another replica's work.
+	// never a wrong answer. The drain is the one that can be hurried, and both
+	// of the things that owe it objects do so: a session delete and the file
+	// sweep each wake it in-process after their own commit, leaving its interval
+	// as the backstop for another replica's work.
 	//
 	// Joined, for the reason the meter deregistration above is ordered: this
 	// defer is registered after `defer pool.Close()`, so LIFO drains the sweep
@@ -273,7 +274,7 @@ func run(ctx context.Context) error {
 	retentionDone := make(chan struct{})
 	go func() { defer close(retentionDone); api.StartMemoryRetention(sweepCtx, pool) }()
 	filesDone := make(chan struct{})
-	go func() { defer close(filesDone); api.StartFileRetention(sweepCtx, pool, blobs) }()
+	go func() { defer close(filesDone); api.StartFileRetention(sweepCtx, pool, objectDeletes) }()
 	schedulerDone := make(chan struct{})
 	go func() { defer close(schedulerDone); api.StartDeploymentScheduler(sweepCtx, pool, blobs, cipher) }()
 	objectDeletesDone := make(chan struct{})

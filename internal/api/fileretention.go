@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/blob"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/store"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"go.opentelemetry.io/otel"
@@ -50,14 +51,12 @@ const (
 	// readable for up to 30 days" past the expiry says.
 	fileMetadataRetention = 30 * 24 * time.Hour
 
-	// filePurgeBatch bounds two things: the DELETE itself — the rows one
-	// statement locks and rewrites, and with them the length of that statement's
-	// own transaction — and the number of object deletes the tick then owes.
-	// memoryretention's sweep needs no such bound because it does nothing per
-	// row; this one makes a network call for every row it removed, and an
-	// unbounded first sweep over a long backlog would owe as many as there were.
-	// (The object deletes are not inside that transaction: the DELETE commits
-	// when the statement returns, and the loop below runs after it.)
+	// filePurgeBatch bounds one transaction: the rows the DELETE locks and
+	// rewrites, and the keys the enqueue writes beside them before either
+	// commits. memoryretention's sweep needs no such bound because it does
+	// nothing per row; this one writes a debt for every row it removes, and an
+	// unbounded first sweep over a long backlog would hold all of them open at
+	// once.
 	//
 	// A var rather than a const for filePurgeInterval's reason: at the real
 	// size the order a batch is taken in is unobservable, so export_test.go
@@ -75,24 +74,6 @@ const (
 	// deployment measures either problem.
 	filePurgeBatchDefault = 1000
 
-	// filePurgeCleanupBudget bounds the object deletes a tick will wait for
-	// once its rows are gone. It is deleteSession's number for the same
-	// operation, and the trade is different here in one way worth stating: this
-	// half runs detached, so a controlplane shutdown waits up to this long for
-	// the tick in flight. A store too slow to finish the batch inside it leaves
-	// a tail — counted and logged as one line, rather than cancelled silently.
-	//
-	// That wait is why the chart sets terminationGracePeriodSeconds: an orderly
-	// exit is up to 10s of HTTP drain plus up to this, and Kubernetes' own
-	// default of 30s would SIGKILL the drain partway — losing both the tail and
-	// the one line that would have counted it, which is the whole point of
-	// running detached.
-	//
-	// A var rather than a const for filePurgeBatch's reason: nothing a test can
-	// drive exhausts 30 seconds, so export_test.go shrinks it to watch a store
-	// that has stopped answering cost the sweep the budget and not the process.
-	filePurgeCleanupBudgetDefault = 30 * time.Second
-
 	// MetricExpiredFilesPurged counts rows the sweep removed. Exported so the
 	// test can assert the exact name; no attributes, since the only candidates
 	// would be file ids.
@@ -101,9 +82,6 @@ const (
 
 // filePurgeBatch is filePurgeBatchDefault, shrinkable by the test binary.
 var filePurgeBatch = filePurgeBatchDefault
-
-// filePurgeCleanupBudget is filePurgeCleanupBudgetDefault, likewise shrinkable.
-var filePurgeCleanupBudget = filePurgeCleanupBudgetDefault
 
 // filePurgeInterval paces the sweep. Expiry latency is not what this decides —
 // the content route stops serving at expires_at, whatever the sweep has done —
@@ -114,13 +92,15 @@ var filePurgeInterval = time.Hour
 
 // StartFileRetention sweeps until ctx ends. Safe on every replica at once: the
 // DELETE is itself the claim, so a row is returned to exactly one sweeper and
-// only that sweeper deletes its object.
+// only that sweeper owes its objects.
 //
-// blobs may be nil — a deployment configured without object storage cannot
-// accept an upload at all, so it can only hold rows from a configuration that
-// had one. The rows are still removed; the objects are then beyond this
-// process's reach and are left to the operator who took the store away.
-func StartFileRetention(ctx context.Context, pool *pgxpool.Pool, blobs blob.Store) {
+// It removes no bytes. It removes rows and writes, in the same transaction, one
+// pending_object_deletes row per object they orphan — so a deployment has one
+// remover of orphaned bytes, the drain, whether the keys came from a session
+// delete or from here (plan 50). A deployment configured without object storage
+// stops being a special case: the debt is recorded the same way, and the half
+// that needs a store is the drain, which such a deployment does not run.
+func StartFileRetention(ctx context.Context, pool *pgxpool.Pool, q *ObjectDeleteQueue) {
 	t := time.NewTicker(filePurgeInterval)
 	defer t.Stop()
 	for {
@@ -130,13 +110,19 @@ func StartFileRetention(ctx context.Context, pool *pgxpool.Pool, blobs blob.Stor
 		// rolling deployment is exactly that control plane. Replicas all
 		// sweeping at boot is not a collision either, since the DELETE is the
 		// claim and their batches are disjoint.
-		n, err := purgeExpiredFiles(ctx, pool, blobs, fileMetadataRetention)
+		n, err := purgeExpiredFiles(ctx, pool, fileMetadataRetention)
 		switch {
 		case err != nil && ctx.Err() == nil:
 			slog.WarnContext(ctx, "expired file purge incomplete; the next interval retries", "error", err)
 		case err == nil && n > 0:
 			slog.InfoContext(ctx, "expired files purged", "count", n,
 				"expired_before", fileMetadataRetention)
+			// The keys are visible the instant that commit returned, so the
+			// drain is asked to look now rather than at its own next minute —
+			// deleteSession's move, for a batch up to a thousand times larger.
+			// Non-blocking, and never load-bearing: it only brings forward what
+			// the drain's own interval would do anyway.
+			q.Wake()
 		}
 		select {
 		case <-ctx.Done():
@@ -146,14 +132,30 @@ func StartFileRetention(ctx context.Context, pool *pgxpool.Pool, blobs blob.Stor
 	}
 }
 
-// purgeExpiredFiles removes one batch of files whose grace window has elapsed,
-// then their objects.
+// filePurgeBeforeCommitHook is a test-only seam fired after the sweep has
+// enqueued the batch's object keys and before it commits; nil in production.
+// It is deleteSessionBeforeCommitHook's twin and exists for the same window:
+// the only place from which either half of "the row and the debt commit
+// together" can be watched, and the only place an error can fail the sweep
+// while both are still uncommitted.
+var filePurgeBeforeCommitHook func() error
+
+// purgeExpiredFiles removes one batch of files whose grace window has elapsed
+// and, in the same transaction, records what those removals leave owed.
 //
-// The row goes first and the object follows best-effort, which is deleteFile's
-// order and deleteFile's reason: a failure here leaves an orphaned object,
-// which this package accepts everywhere it touches the two stores, while the
-// reverse order would leave a metadata row pointing at bytes that are gone —
-// the one state insertFile is built to make impossible.
+// One transaction rather than two statements, because an id is the only name an
+// object has. A DELETE that committed without the enqueue would take the names
+// with it and no tier could enumerate what was left in the store — #645's class,
+// reached here three ways that have nothing to do with each other: a
+// cancellation landing in the RETURNING drain (#696), a store refusing every key
+// of a healthy sweep (#698), and a process that dies between the two statements.
+// None of them can lose a batch now. What commits here the object-delete drain
+// retries with backoff and never drops.
+//
+// So this sweep touches no object store, and nothing it does is best-effort.
+// The old order it inherited — row first, object after, orphan accepted — is
+// still deleteFile's and the dream runner's, where one request or one dream
+// orphans a handful rather than a batch of a thousand (#703).
 //
 // The window is a duration subtracted from the database's own clock, never a
 // timestamp computed here: expires_at was itself computed from that clock at
@@ -163,8 +165,14 @@ func StartFileRetention(ctx context.Context, pool *pgxpool.Pool, blobs blob.Stor
 // A dream's transcript files are out of range by construction rather than by a
 // clause — nothing sets expires_at on them — so deleteFile's refusal to remove
 // a file an open dream owns has no twin to grow here.
-func purgeExpiredFiles(ctx context.Context, pool *pgxpool.Pool, blobs blob.Store, retention time.Duration) (int, error) {
-	rows, err := pool.Query(ctx, `
+func purgeExpiredFiles(ctx context.Context, pool *pgxpool.Pool, retention time.Duration) (int, error) {
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback(ctx)
+
+	rows, err := tx.Query(ctx, `
 		DELETE FROM files
 		 WHERE id IN (SELECT id FROM files
 		               WHERE expires_at < now() - make_interval(secs => $1)
@@ -175,50 +183,30 @@ func purgeExpiredFiles(ctx context.Context, pool *pgxpool.Pool, blobs blob.Store
 	if err != nil {
 		return 0, err
 	}
-	// The detachment below starts here, not earlier, and that boundary leaves a
-	// window of its own: a cancellation landing while this drains loses the ids
-	// of a DELETE the server may already have committed, and then no tier knows
-	// those keys. It is milliseconds wide against an hourly tick, and closing it
-	// would mean running the statement itself past the caller's cancellation —
-	// which cannot distinguish a commit from an abort either. #696 holds it.
 	ids, err := pgx.CollectRows(rows, pgx.RowTo[string])
 	if err != nil {
 		return 0, err
 	}
+	if len(ids) > 0 {
+		keys := make([]string, len(ids))
+		for i, id := range ids {
+			keys[i] = blob.FilesKey(id)
+		}
+		if _, err := tx.Exec(ctx, store.PendingObjectDeleteInsertSQL, keys); err != nil {
+			return 0, err
+		}
+	}
+	// Test seam: read the queue from another connection in exactly this window,
+	// or fail the sweep here to watch the rollback. nil in production.
+	if filePurgeBeforeCommitHook != nil {
+		if err := filePurgeBeforeCommitHook(); err != nil {
+			return 0, err
+		}
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return 0, err
+	}
 	recordExpiredFilesPurged(ctx, len(ids))
-	if blobs == nil || len(ids) == 0 {
-		return len(ids), nil
-	}
-	// The rows are committed by the time this runs, so their ids are gone and
-	// nothing else knows these keys: an object skipped here is orphaned for
-	// good (#645's class). It therefore runs on a context the sweep's own
-	// cancellation cannot reach — deleteSession's shape for the same operation
-	// — with a budget instead, so a shutdown mid-sweep costs at most that much
-	// delay rather than a silent leak of the whole batch.
-	dctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), filePurgeCleanupBudget)
-	defer cancel()
-	var failed, unattempted int
-	var firstErr error
-	for i, id := range ids {
-		if dctx.Err() != nil {
-			unattempted = len(ids) - i
-			break
-		}
-		if err := blobs.Delete(dctx, blob.FilesKey(id)); err != nil {
-			failed++
-			if firstErr == nil {
-				firstErr = err
-			}
-		}
-	}
-	// One line for the set, not one per object: deleteSession's rule, and a
-	// batch is a thousand times more able to break it — a store answering 403
-	// to every key would otherwise say so a thousand times a tick and never say
-	// how many objects were left behind.
-	if failed > 0 || unattempted > 0 {
-		slog.WarnContext(ctx, "expired files left in object storage",
-			"failed", failed, "unattempted", unattempted, "total", len(ids), "error", firstErr)
-	}
 	return len(ids), nil
 }
 

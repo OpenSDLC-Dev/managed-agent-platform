@@ -141,17 +141,18 @@ func SchedulerTick(ctx context.Context, pool *pgxpool.Pool, now time.Time) error
 // so the 30-day rule can be exercised in a test without 30 days or a fake
 // clock. The production window is the package's own; only the statement is
 // parameterized.
-func PurgeExpiredFilesForTest(ctx context.Context, pool *pgxpool.Pool, blobs blob.Store, retention time.Duration) (int, error) {
-	return purgeExpiredFiles(ctx, pool, blobs, retention)
+func PurgeExpiredFilesForTest(ctx context.Context, pool *pgxpool.Pool, retention time.Duration) (int, error) {
+	return purgeExpiredFiles(ctx, pool, retention)
 }
 
-// SetFilePurgeCleanupBudgetForTest shrinks the budget the post-commit object
-// deletes run under, so a test can drive a store that has stopped answering to
-// the end of it. At the real 30 seconds that bound is unobservable.
-func SetFilePurgeCleanupBudgetForTest(d time.Duration) (restore func()) {
-	prev := filePurgeCleanupBudget
-	filePurgeCleanupBudget = d
-	return func() { filePurgeCleanupBudget = prev }
+// SetFilePurgeBeforeCommitHookForTest installs a hook fired after the sweep has
+// enqueued the batch's object keys and before it commits; the file sweep's twin
+// of SetDeleteSessionBeforeCommitHookForTest, and the only window from which
+// "the row and the debt commit together" can be watched from outside the
+// transaction — or failed, to watch the rollback.
+func SetFilePurgeBeforeCommitHookForTest(f func() error) (restore func()) {
+	filePurgeBeforeCommitHook = f
+	return func() { filePurgeBeforeCommitHook = nil }
 }
 
 // SetFilePurgeBatchForTest shrinks one sweep's batch, so a test can see which
