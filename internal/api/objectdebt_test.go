@@ -95,6 +95,13 @@ func TestDeletingASkillOwesEveryVersionsArchive(t *testing.T) {
 	if got := pendingKeys(t, s.pool); !slices.Equal(got, want) {
 		t.Fatalf("the cascade owes %v, want both versions' archives %v", got, want)
 	}
+	// And it attempted no delete of its own, which is what retires the rung
+	// that used to disconnect a client mid-sweep: there is no sweep on the
+	// request path to disconnect from, so the half-state it guarded against —
+	// rows gone, archives orphaned — has no window left to happen in.
+	if got := store.attempts(); len(got) != 0 {
+		t.Fatalf("the request path deleted %v; plan 50 leaves every object to the sweeper", got)
+	}
 }
 
 // addSkillVersion uploads a second bundle to an existing skill, so a delete has
