@@ -1,10 +1,14 @@
 package api_test
 
 import (
+	"context"
+	"errors"
 	"net/http"
 	"slices"
 	"testing"
+	"time"
 
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/api"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/blob"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/skills"
 )
@@ -108,6 +112,62 @@ func TestDeletingASkillOwesEveryVersionsArchive(t *testing.T) {
 	// rows gone, archives orphaned — has no window left to happen in.
 	if got := store.attempts(); len(got) != 0 {
 		t.Fatalf("the request path deleted %v; plan 50 leaves every object to the sweeper", got)
+	}
+}
+
+// TestTheDreamCloseWakesTheDrainThroughItsRunner is the one rung here that
+// composes both halves — the close writing the debt down and the drain paying
+// it — and the only one that has to, because the seam it covers is the wiring
+// rather than the arm. The wake this change added to the closing arm was dead
+// on arrival: StartDreamRunner built its server with no queue in it, so Wake()
+// returned on its nil guard in the only process that runs the arm. Every other
+// dream rung reaches that arm through DreamTickForTest, which builds its own
+// server and would pass either way; a rung that picks its own seam agrees with
+// the code instead of checking it. So this one starts the real loop.
+//
+// The sweep's own cadence is pushed out of reach for the same reason. Left at a
+// minute it would eventually remove the bytes whether or not anything woke it,
+// and the rung would pass against the defect it exists for.
+func TestTheDreamCloseWakesTheDrainThroughItsRunner(t *testing.T) {
+	t.Cleanup(api.SetObjectDeleteIntervalForTest(10 * time.Minute))
+	s := newTestServer(t)
+	_, body := seededDreamBody(t, s)
+	dreamID, _ := startedDream(t, s, body)
+	fileIDs := dreamFileIDs(t, s, dreamID)
+	if len(fileIDs) == 0 {
+		t.Fatal("the dream owns no files, so the close would owe nothing and the drain would have nothing to pay")
+	}
+	atLastStage(t, s, dreamID)
+
+	// The sweeper first, so it is already parked on the queue when the close
+	// wakes it; then the runner, handed that same queue the way main.go hands
+	// it one.
+	q := startSweeper(t, s, s.blobs)
+	cfg := dreamCfg()
+	cfg.TickInterval = 20 * time.Millisecond
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { defer close(done); api.StartDreamRunner(ctx, s.pool, s.blobs, nil, q, cfg) }()
+	defer func() { cancel(); waitForStop(t, done) }()
+
+	deadline := time.Now().Add(30 * time.Second)
+	for {
+		if _, _, closedAt := dreamInternals(t, s, dreamID); closedAt != nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the runner never closed the dream, so nothing here can be said about its wake")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	// From here the interval is ten minutes away, so bytes that go within this
+	// window went because the close woke the queue the runner was given.
+	awaitDrained(t, s.pool, "the closing arm's wake")
+	for _, id := range fileIDs {
+		if _, _, err := s.blobs.Get(context.Background(), blob.FilesKey(id)); !errors.Is(err, blob.ErrNotFound) {
+			t.Errorf("the transcript object for %s outlived the drain the close woke: %v", id, err)
+		}
 	}
 }
 
