@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"slices"
 	"testing"
 	"time"
 
@@ -49,7 +50,7 @@ func blobExists(t *testing.T, s *tserver, id string) bool {
 // plan 49 slice 2): metadata "remains readable for up to 30 days, with
 // expires_at in the past", and then does not. The window is measured from
 // expires_at, so a file one second short of it survives a sweep that removes
-// the one just past it — row and object together.
+// the one just past it, and its object waits for the drain.
 func TestExpiredFilePurge(t *testing.T) {
 	s := newTestServer(t)
 	oct := "application/octet-stream"
@@ -63,7 +64,7 @@ func TestExpiredFilePurge(t *testing.T) {
 	expireBy(t, s, past, window+time.Minute)
 	expireBy(t, s, inside, window-time.Minute)
 
-	n, err := api.PurgeExpiredFilesForTest(ctx, s.pool, s.blobs, window)
+	n, err := api.PurgeExpiredFilesForTest(ctx, s.pool, window)
 	if err != nil {
 		t.Fatalf("purge: %v", err)
 	}
@@ -74,8 +75,15 @@ func TestExpiredFilePurge(t *testing.T) {
 	if fileRowExists(t, s, past) {
 		t.Error("a file past the grace window kept its row")
 	}
-	if blobExists(t, s, past) {
-		t.Error("a file past the grace window kept its object")
+	// The object outlives the row on purpose. The sweep records what the row's
+	// removal orphaned and the object-delete drain is the one remover of
+	// orphaned bytes (plan 50); a sweep that deleted them itself is what used
+	// to lose a whole batch's ids to a refusing store.
+	if !blobExists(t, s, past) {
+		t.Error("the sweep removed the object itself rather than enqueueing it")
+	}
+	if got := pendingKeys(t, s.pool); !slices.Contains(got, blob.FilesKey(past)) {
+		t.Errorf("the queue owes %v, which does not include the purged file's object", got)
 	}
 	// Inside the window the metadata route still answers — the documented
 	// behavior the sweep must not shorten.
@@ -98,35 +106,8 @@ func TestExpiredFilePurge(t *testing.T) {
 	}
 
 	// A second sweep finds nothing left to do.
-	if n, err := api.PurgeExpiredFilesForTest(ctx, s.pool, s.blobs, window); err != nil || n != 0 {
+	if n, err := api.PurgeExpiredFilesForTest(ctx, s.pool, window); err != nil || n != 0 {
 		t.Errorf("second sweep = %d, %v; want 0, nil", n, err)
-	}
-}
-
-// TestExpiredFilePurgeWithoutBlobStore: a deployment that has lost its object
-// store still removes the rows. The objects are beyond this process's reach,
-// which is the operator's doing, and leaving the metadata to outlive the
-// published window instead would be the worse answer.
-func TestExpiredFilePurgeWithoutBlobStore(t *testing.T) {
-	s := newTestServer(t)
-	oct := "application/octet-stream"
-	window := 30 * 24 * time.Hour
-
-	id := s.uploadFile(t, "orphan.bin", &oct, "bytes")["id"].(string)
-	expireBy(t, s, id, window+time.Minute)
-
-	n, err := api.PurgeExpiredFilesForTest(context.Background(), s.pool, nil, window)
-	if err != nil {
-		t.Fatalf("purge with no blob store: %v", err)
-	}
-	if n != 1 {
-		t.Fatalf("purged %d, want 1", n)
-	}
-	if fileRowExists(t, s, id) {
-		t.Error("the row survived a purge that had no object store")
-	}
-	if !blobExists(t, s, id) {
-		t.Error("the object was removed by a sweep with no object store, which cannot happen")
 	}
 }
 
@@ -147,7 +128,7 @@ func TestFileRetentionSweepsBeforeItsFirstTick(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
-	go func() { defer close(done); api.StartFileRetention(ctx, s.pool, s.blobs) }()
+	go func() { defer close(done); api.StartFileRetention(ctx, s.pool, nil) }()
 	t.Cleanup(func() { cancel(); <-done })
 
 	deadline := time.Now().Add(10 * time.Second)
@@ -193,24 +174,26 @@ func TestFileRetentionSweepRuns(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
-	go func() { defer close(done); api.StartFileRetention(ctx, s.pool, s.blobs) }()
+	go func() { defer close(done); api.StartFileRetention(ctx, s.pool, nil) }()
 	// Every exit path stops the loop, not only the two below: a t.Fatalf in any
 	// helper between here and them would otherwise leave the sweep querying a
 	// pool that newTestServer's own cleanup is about to close.
 	t.Cleanup(func() { cancel(); <-done })
 
-	// Wait for the object too, not just the row: the DELETE commits before the
-	// object delete runs, so a check taken the moment the row disappears can
-	// land in between and fail for no reason.
+	// The row is the whole of what this loop removes; the object is the drain's
+	// to take, and no drain runs here. Waiting on the object too — which this
+	// rung used to do, because the sweep deleted it — would now never finish.
 	deadline := time.Now().Add(10 * time.Second)
-	for fileRowExists(t, s, swept) || blobExists(t, s, swept) {
+	for fileRowExists(t, s, swept) {
 		if time.Now().After(deadline) {
 			cancel()
 			<-done
-			t.Fatalf("31 days past its expiry, the sweep left row=%v object=%v",
-				fileRowExists(t, s, swept), blobExists(t, s, swept))
+			t.Fatalf("31 days past its expiry, the sweep left the row behind")
 		}
 		time.Sleep(20 * time.Millisecond)
+	}
+	if !blobExists(t, s, swept) {
+		t.Error("the loop removed the object itself: the debt is the drain's to pay")
 	}
 
 	// A second expired file, uploaded only once the first has gone. That

@@ -12,6 +12,13 @@ issue: "#655"
 > Retained for the decisions below, chiefly why the bytes go at the purge rather than at the
 > expiry and why "GC is a non-goal" survives a sweep that deletes files.
 >
+> **Superseded on one point (#696, plan 50).** The as-built sweep no longer deletes objects at
+> all. Slice 2's design — a `RETURNING` drain and then a best-effort `blobs.Delete` per id,
+> orphan accepted — is what this file argues, and the sweep now enqueues those keys in the
+> transaction that removes the rows instead, leaving the bytes to the object-delete drain. Why
+> the bytes go at the purge rather than at the expiry is untouched by that; which component
+> removes them is not.
+>
 > Numbered **48** while slice 1 was in review, which is what PR #691 and the commits under it
 > call it. An earlier-opened PR (#677, the reap kick) had claimed 48 for a plan invisible in
 > any checkout and merged first, so this one renumbered — the convention being that the

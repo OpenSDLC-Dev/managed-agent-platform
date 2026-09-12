@@ -3,7 +3,9 @@ package api
 import (
 	"context"
 	"errors"
+	"slices"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -62,7 +64,7 @@ func TestPurgeRecordsWhatItRemoved(t *testing.T) {
 
 	// A sweep over an empty registry must leave no series at all — not a series
 	// reading zero.
-	if _, err := purgeExpiredFiles(ctx, pool, blobs, window); err != nil {
+	if _, err := purgeExpiredFiles(ctx, pool, window); err != nil {
 		t.Fatalf("purge over an empty registry: %v", err)
 	}
 	if _, found := purgedCount(t, reader); found {
@@ -74,7 +76,7 @@ func TestPurgeRecordsWhatItRemoved(t *testing.T) {
 	}
 	seedExpiredFile(t, pool, blobs, window-time.Hour) // inside the window
 
-	if _, err := purgeExpiredFiles(ctx, pool, blobs, window); err != nil {
+	if _, err := purgeExpiredFiles(ctx, pool, window); err != nil {
 		t.Fatalf("purge: %v", err)
 	}
 	got, found := purgedCount(t, reader)
@@ -83,7 +85,7 @@ func TestPurgeRecordsWhatItRemoved(t *testing.T) {
 	}
 	// The second sweep finds only the row inside the window; the counter must
 	// not move.
-	if _, err := purgeExpiredFiles(ctx, pool, blobs, window); err != nil {
+	if _, err := purgeExpiredFiles(ctx, pool, window); err != nil {
 		t.Fatalf("second purge: %v", err)
 	}
 	if got, _ := purgedCount(t, reader); got != 3 {
@@ -110,7 +112,7 @@ func TestPurgeTakesTheOldestFirst(t *testing.T) {
 	oldest := seedExpiredFile(t, pool, blobs, window+72*time.Hour)
 
 	for _, want := range []string{oldest, middle, newest} {
-		n, err := purgeExpiredFiles(ctx, pool, blobs, window)
+		n, err := purgeExpiredFiles(ctx, pool, window)
 		if err != nil {
 			t.Fatalf("purge: %v", err)
 		}
@@ -128,174 +130,271 @@ func TestPurgeTakesTheOldestFirst(t *testing.T) {
 	}
 }
 
-// TestPurgeFinishesItsObjectsAfterCancellation pins the one thing this sweep
-// cannot be allowed to get wrong. The rows are committed before the first
-// object delete, so an object skipped because the sweep was cancelled is
-// orphaned for good — its id is gone and nothing can enumerate what is left
-// (#645's class). The deletes therefore run on a context the sweep's own
-// cancellation cannot reach, and a store that cancels the sweep from inside its
-// own first Delete is that shutdown made deterministic.
-func TestPurgeFinishesItsObjectsAfterCancellation(t *testing.T) {
+// TestPurgeOwesTheObjectsItOrphans: the sweep removes rows and no bytes, and
+// what it writes in their place is the debt — one pending_object_deletes row
+// per object, which is the only thing still naming those objects once the ids
+// are gone. Until plan 50 this sweep deleted the bytes itself, best-effort, and
+// a store refusing the batch took every id with it (#698's first item).
+func TestPurgeOwesTheObjectsItOrphans(t *testing.T) {
 	pool := pgtest.NewPool(t)
 	mem := blobtest.Mem()
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	blobs := &cancellingBlobStore{Store: mem, cancel: cancel}
-
-	window := 30 * 24 * time.Hour
-	var ids []string
-	for i := 0; i < 3; i++ {
-		ids = append(ids, seedExpiredFile(t, pool, mem, window+time.Duration(i+1)*time.Hour))
-	}
-
-	// The cancellation lands after the rows are committed, which is the only
-	// window where it can do damage, and purge must still report all three.
-	n, err := purgeExpiredFiles(ctx, pool, blobs, window)
-	if err != nil {
-		t.Fatalf("purge: %v", err)
-	}
-	if n != len(ids) {
-		t.Errorf("purged %d, want %d", n, len(ids))
-	}
-	if got := blobs.attempts(); got != len(ids) {
-		t.Errorf("object deletes attempted = %d, want %d: cancelling the sweep must not strand the rest of a batch whose rows are already gone", got, len(ids))
-	}
-	for _, id := range ids {
-		if rc, _, err := mem.Get(context.Background(), blob.FilesKey(id)); err == nil {
-			rc.Close()
-			t.Errorf("the object for %s outlived its row: nothing can find it again", id)
-		}
-	}
-}
-
-// cancellingBlobStore cancels the sweep from inside its own first Delete, then
-// deletes as usual — so what the test sees afterwards is exactly what survived
-// the cancellation.
-type cancellingBlobStore struct {
-	blob.Store
-	cancel context.CancelFunc
-	asked  int
-}
-
-func (c *cancellingBlobStore) Delete(ctx context.Context, key string) error {
-	c.asked++
-	c.cancel()
-	// A real store refuses a call handed a cancelled context; MemStore ignores
-	// the context entirely, which would hide the sweep handing over one that
-	// its own cancellation reaches.
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-	return c.Store.Delete(ctx, key)
-}
-
-func (c *cancellingBlobStore) attempts() int { return c.asked }
-
-// TestPurgeStopsWhenTheBudgetRunsOut pins the other half of the detached
-// context: detaching from the sweep's cancellation would otherwise mean a store
-// that has stopped answering holds the shutdown open forever. The budget bounds
-// it instead, and what it could not reach is counted rather than lost silently.
-func TestPurgeStopsWhenTheBudgetRunsOut(t *testing.T) {
-	restore := SetFilePurgeCleanupBudgetForTest(500 * time.Millisecond)
-	defer restore()
-
-	pool := pgtest.NewPool(t)
-	mem := blobtest.Mem()
-	blobs := &blockingBlobStore{Store: mem}
 	ctx := context.Background()
 	window := 30 * 24 * time.Hour
-	var ids []string
-	for i := 0; i < 3; i++ {
-		ids = append(ids, seedExpiredFile(t, pool, mem, window+time.Duration(i+1)*time.Hour))
-	}
 
-	n, err := purgeExpiredFiles(ctx, pool, blobs, window)
+	var expired []string
+	for i := 0; i < 3; i++ {
+		expired = append(expired, seedExpiredFile(t, pool, mem, window+time.Duration(i+1)*time.Hour))
+	}
+	seedExpiredFile(t, pool, mem, window-time.Hour) // inside the window
+
+	n, err := purgeExpiredFiles(ctx, pool, window)
 	if err != nil {
 		t.Fatalf("purge: %v", err)
 	}
-	if n != len(ids) {
-		t.Errorf("purged %d, want %d: the rows go whatever the store does", n, len(ids))
+	if n != len(expired) {
+		t.Fatalf("purged %d, want %d", n, len(expired))
 	}
-	// One call spends the whole budget, so the loop must abandon the rest
-	// rather than pay it again per object.
-	if got := blobs.attempts(); got != 1 {
-		t.Errorf("object deletes attempted = %d, want 1: the budget bounds the set, not each call", got)
+
+	want := make([]string, 0, len(expired))
+	for _, id := range expired {
+		want = append(want, blob.FilesKey(id))
 	}
-	for _, id := range ids[1:] {
-		rc, _, err := mem.Get(context.Background(), blob.FilesKey(id))
+	slices.Sort(want)
+	// Exactly these: a key too few is an object nothing can find again, and the
+	// file still inside its window would be a key too many.
+	if got := owedKeys(t, pool); !slices.Equal(got, want) {
+		t.Errorf("the queue owes %v, want %v", got, want)
+	}
+	// The bytes are still there. Writing down what is owed is the whole of this
+	// sweep's job; the drain is what pays it.
+	for _, id := range expired {
+		rc, _, err := mem.Get(ctx, blob.FilesKey(id))
 		if err != nil {
-			t.Errorf("object for %s is gone; the sweep was supposed to have run out of budget first", id)
+			t.Errorf("the sweep deleted the object for %s itself: %v", id, err)
 			continue
 		}
 		rc.Close()
 	}
 }
 
-// blockingBlobStore never answers until the caller's context ends — the store
-// that has stopped responding, which is the case the budget exists for. The
-// fallback timer is a backstop, so a sweep whose deletes have no budget at all
-// fails this test instead of hanging it.
-type blockingBlobStore struct {
-	blob.Store
-	asked int
-}
-
-func (b *blockingBlobStore) Delete(ctx context.Context, _ string) error {
-	b.asked++
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	case <-time.After(3 * time.Second):
-		return nil
-	}
-}
-
-func (b *blockingBlobStore) attempts() int { return b.asked }
-
-// TestPurgeSurvivesAFailingObjectStore: the row deletion is committed before a
-// single object delete is attempted, so a store that refuses every key must not
-// turn into rows that survive. It leaves orphans, which is the accepted outcome,
-// and the sweep still reports what it removed from the registry.
-func TestPurgeSurvivesAFailingObjectStore(t *testing.T) {
+// TestThePurgeDebtRidesTheDeletingTransaction: the keys are written on the
+// transaction, not beside it — deleteSession's rule (plan 50 decision 2),
+// reached here by a sweep rather than a request. Which one it is cannot be seen
+// once the sweep has answered, and it decides everything before that. On the
+// transaction, a sweep that does not commit owes nothing and one that commits
+// cannot fail to owe. Beside it, both halves come apart: a rolled-back sweep
+// leaves the queue claiming bytes nobody orphaned, and a sweep that died
+// between its two statements leaves objects unreferenced and unrecorded.
+//
+// So the rung brackets the commit from a connection outside the transaction.
+// Before it: nothing, because uncommitted rows are invisible there while rows
+// written beside the transaction are not. After it: the whole batch.
+func TestThePurgeDebtRidesTheDeletingTransaction(t *testing.T) {
 	pool := pgtest.NewPool(t)
-	failing := &refusingBlobStore{Store: blobtest.Mem()}
 	ctx := context.Background()
 	window := 30 * 24 * time.Hour
-	id := seedExpiredFile(t, pool, failing.Store, window+time.Hour)
+	id := seedExpiredFile(t, pool, nil, window+time.Hour)
 
-	n, err := purgeExpiredFiles(ctx, pool, failing, window)
-	if err != nil {
-		t.Fatalf("purge against a failing store: %v", err)
+	// Both sides, and the second is the one that costs something to give up:
+	// reading only before the commit and again after the call returned would
+	// pass an enqueue that runs after the commit, which is exactly the window a
+	// process death reopens.
+	before, after := -1, -1
+	t.Cleanup(SetFilePurgeBeforeCommitHookForTest(func() error {
+		before = len(owedKeys(t, pool))
+		return nil
+	}))
+	t.Cleanup(SetFilePurgeAfterCommitHookForTest(func() { after = len(owedKeys(t, pool)) }))
+
+	if _, err := purgeExpiredFiles(ctx, pool, window); err != nil {
+		t.Fatalf("purge: %v", err)
 	}
-	if n != 1 {
-		t.Errorf("purged %d, want 1: a failing object delete must not change what left the registry", n)
+	if before < 0 || after < 0 {
+		t.Fatal("the sweep answered without reaching both sides of its commit")
 	}
+	if before > 0 {
+		t.Errorf("%d key(s) were visible outside the sweep's transaction before it committed: the enqueue is running beside the transaction", before)
+	}
+	if after != 1 {
+		t.Errorf("the queue owes %d key(s) the instant the commit returned, want 1: an enqueue after the commit leaves this window empty", after)
+	}
+	if got := owedKeys(t, pool); !slices.Equal(got, []string{blob.FilesKey(id)}) {
+		t.Errorf("the queue owes %v, want exactly the purged key", got)
+	}
+}
+
+// TestACancelledPurgeKeepsItsRows is #696 in its own shape rather than in an
+// injected error's: a shutdown landing inside the sweep, after the DELETE and
+// before the commit. The rollback then runs on a context that is already dead,
+// which is the case the issue describes and the one an ordinary failure does
+// not reach.
+func TestACancelledPurgeKeepsItsRows(t *testing.T) {
+	pool := pgtest.NewPool(t)
+	window := 30 * 24 * time.Hour
+	id := seedExpiredFile(t, pool, nil, window+time.Hour)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	t.Cleanup(SetFilePurgeBeforeCommitHookForTest(func() error {
+		cancel()
+		return nil
+	}))
+	if _, err := purgeExpiredFiles(ctx, pool, window); err == nil {
+		t.Fatal("a sweep cancelled before its commit reported success")
+	}
+
 	var exists bool
-	if err := pool.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM files WHERE id = $1)`, id).Scan(&exists); err != nil {
+	if err := pool.QueryRow(context.Background(),
+		`SELECT EXISTS (SELECT 1 FROM files WHERE id = $1)`, id).Scan(&exists); err != nil {
 		t.Fatal(err)
 	}
-	if exists {
-		t.Error("the row survived because its object delete failed")
+	if !exists {
+		t.Errorf("%s went with a cancelled sweep: its object is now unreferenced and unrecorded", id)
 	}
-	if got := failing.attempts(); got != 1 {
-		t.Errorf("object deletes attempted = %d, want 1: the sweep must ask even when the store refuses", got)
+	if got := owedKeys(t, pool); len(got) != 0 {
+		t.Errorf("the queue owes %v after a cancelled sweep", got)
 	}
 }
 
-// refusingBlobStore refuses every Delete and counts what it was asked for. The
-// count is what separates "the sweep tried and the store refused" from "the
-// sweep never asked", which look the same from the rows.
-type refusingBlobStore struct {
-	blob.Store
-	asked int
+// TestAHeldPurgeDoesNotBlockAnotherReplica pins what holding the transaction
+// open across the enqueue costs, which is the one thing this change could have
+// broken about concurrency. FOR UPDATE SKIP LOCKED holds the batch's rows until
+// the transaction ends rather than until the statement does, so a second
+// replica has to skip them and take its own batch — not wait. If it waited, the
+// sweeps would serialize across replicas at the production batch of a thousand.
+func TestAHeldPurgeDoesNotBlockAnotherReplica(t *testing.T) {
+	restore := SetFilePurgeBatchForTest(1)
+	defer restore()
+
+	pool := pgtest.NewPool(t)
+	window := 30 * 24 * time.Hour
+	oldest := seedExpiredFile(t, pool, nil, window+72*time.Hour)
+	newer := seedExpiredFile(t, pool, nil, window+24*time.Hour)
+
+	held, release := make(chan struct{}), make(chan struct{})
+	var arrived atomic.Bool
+	t.Cleanup(SetFilePurgeBeforeCommitHookForTest(func() error {
+		// Only the first sweep waits; the second must run straight through.
+		if arrived.CompareAndSwap(false, true) {
+			close(held)
+			<-release
+		}
+		return nil
+	}))
+
+	first := make(chan error, 1)
+	go func() {
+		_, err := purgeExpiredFiles(context.Background(), pool, window)
+		first <- err
+	}()
+	<-held
+
+	// A deadline rather than a bare context: if SKIP LOCKED stopped applying,
+	// the failure should be this rung reporting a wait, not a suite that hangs.
+	secondCtx, cancelSecond := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancelSecond()
+	n, err := purgeExpiredFiles(secondCtx, pool, window)
+	if err != nil {
+		close(release)
+		<-first
+		t.Fatalf("the second sweep waited on the first's open transaction: %v", err)
+	}
+	if n != 1 {
+		close(release)
+		<-first
+		t.Fatalf("the second sweep took %d rows, want the one the first is not holding", n)
+	}
+
+	close(release)
+	if err := <-first; err != nil {
+		t.Fatalf("the held sweep: %v", err)
+	}
+	want := []string{blob.FilesKey(newer), blob.FilesKey(oldest)}
+	slices.Sort(want)
+	if got := owedKeys(t, pool); !slices.Equal(got, want) {
+		t.Errorf("the queue owes %v, want both batches' keys %v", got, want)
+	}
 }
 
-func (r *refusingBlobStore) Delete(context.Context, string) error {
-	r.asked++
-	return errors.New("object store refuses every key")
+// TestAPurgeThatDoesNotCommitLosesNothing is the half #696 is about. A sweep
+// interrupted between the DELETE and the commit has to leave the rows where
+// they were: an id is the only name its object has, so a statement that
+// committed without the debt recorded would strand the bytes with nothing able
+// to enumerate them — which is what a cancellation landing in the RETURNING
+// drain used to do. Rolling back costs an hour's delay and loses nothing.
+func TestAPurgeThatDoesNotCommitLosesNothing(t *testing.T) {
+	pool := pgtest.NewPool(t)
+	ctx := context.Background()
+	window := 30 * 24 * time.Hour
+	id := seedExpiredFile(t, pool, nil, window+time.Hour)
+
+	interrupted := errors.New("the sweep is interrupted before it commits")
+	t.Cleanup(SetFilePurgeBeforeCommitHookForTest(func() error { return interrupted }))
+	if _, err := purgeExpiredFiles(ctx, pool, window); !errors.Is(err, interrupted) {
+		t.Fatalf("purge = %v, want the interruption to fail it", err)
+	}
+
+	var exists bool
+	if err := pool.QueryRow(ctx,
+		`SELECT EXISTS (SELECT 1 FROM files WHERE id = $1)`, id).Scan(&exists); err != nil {
+		t.Fatal(err)
+	}
+	if !exists {
+		t.Errorf("%s went with a sweep that never committed: its object is now unreferenced and unrecorded", id)
+	}
+	if got := owedKeys(t, pool); len(got) != 0 {
+		t.Errorf("the queue owes %v after a sweep that did not commit", got)
+	}
 }
 
-func (r *refusingBlobStore) attempts() int { return r.asked }
+// TestTheSweepWakesTheDrain: a committed batch is bytes the drain can free
+// immediately, and the drain's own backstop is a minute away, so the sweep asks
+// it to look — deleteSession's move for the same debt. Nothing depends on the
+// wake for correctness, which is precisely why nothing else here would notice
+// it going missing.
+func TestTheSweepWakesTheDrain(t *testing.T) {
+	pool := pgtest.NewPool(t)
+	seedExpiredFile(t, pool, nil, fileMetadataRetention+time.Hour)
+
+	q := NewObjectDeleteQueue()
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { defer close(done); StartFileRetention(ctx, pool, q) }()
+	t.Cleanup(func() { cancel(); <-done })
+
+	select {
+	case <-q.waits():
+		// And the debt is already there: a wake raised before the commit, or
+		// after a sweep that removed nothing, would tell the drain to look at
+		// an empty queue.
+		if got := owedKeys(t, pool); len(got) != 1 {
+			t.Errorf("the drain was woken with %v owed, want the batch that had just committed", got)
+		}
+	case <-time.After(10 * time.Second):
+		t.Error("the sweep committed a batch and never woke the drain, which then waits out its own interval for work this replica already knows about")
+	}
+}
+
+// owedKeys reads what the queue owes, ordered — the durable statement this
+// sweep makes instead of deleting bytes.
+func owedKeys(t *testing.T, pool *pgxpool.Pool) []string {
+	t.Helper()
+	rows, err := pool.Query(context.Background(),
+		`SELECT object_key FROM pending_object_deletes ORDER BY object_key`)
+	if err != nil {
+		t.Fatalf("read the queue: %v", err)
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var k string
+		if err := rows.Scan(&k); err != nil {
+			t.Fatal(err)
+		}
+		out = append(out, k)
+	}
+	return out
+}
 
 // purgedCount reports the counter's total and whether the instrument exists at
 // all. The second half is the one that can see "a sweep that removed nothing
