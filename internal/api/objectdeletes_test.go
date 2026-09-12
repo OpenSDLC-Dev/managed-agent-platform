@@ -766,18 +766,28 @@ func TestTwoSweepersDoNotDuplicateTheStoreRoundTrips(t *testing.T) {
 // depend on it — a key another replica enqueued raises no wake in this process
 // at all. Asserted with no queue, which is also every deployment that wires
 // none.
+//
+// It takes two keys to assert that now. A backlog seeded before the sweeper
+// starts is drained by the pass that runs before the first wait, whether or not
+// a tick ever fires, so the first key proves only that the loop started. The
+// second is enqueued once the first is gone — past that point the boot pass has
+// claimed all it will ever claim, and with no wake wired, nothing but the
+// interval is left to remove it.
 func TestTheSweeperDrainsWithoutAWake(t *testing.T) {
 	store := newRefusingStore()
 	s := newTestServerWithStore(t, store)
 	ctx := context.Background()
-	key := "files/file_from-another-replica"
-	if err := s.blobs.Put(ctx, key, strings.NewReader("x"), 1, "text/plain"); err != nil {
-		t.Fatal(err)
+	seed := func(key string) {
+		t.Helper()
+		if err := s.blobs.Put(ctx, key, strings.NewReader("x"), 1, "text/plain"); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := s.pool.Exec(ctx,
+			`INSERT INTO pending_object_deletes (object_key) VALUES ($1)`, key); err != nil {
+			t.Fatal(err)
+		}
 	}
-	if _, err := s.pool.Exec(ctx,
-		`INSERT INTO pending_object_deletes (object_key) VALUES ($1)`, key); err != nil {
-		t.Fatal(err)
-	}
+	seed("files/file_from-another-replica")
 
 	// The interval is the thing under test, so it is shortened rather than
 	// waited out — with the production minute this rung would be a minute long
@@ -788,6 +798,10 @@ func TestTheSweeperDrainsWithoutAWake(t *testing.T) {
 	go func() { defer close(done); api.StartPendingObjectDeletes(sweepCtx, s.pool, store, nil) }()
 	defer func() { cancel(); <-done }()
 
+	awaitDrained(t, s.pool, "the pass that runs before the first wait")
+
+	key := "files/file_enqueued-after-the-boot-pass"
+	seed(key)
 	awaitDrained(t, s.pool, "the sweeper's own interval, with no wake")
 	if _, _, err := s.blobs.Get(ctx, key); !errors.Is(err, blob.ErrNotFound) {
 		t.Fatalf("the object survived: %v", err)
