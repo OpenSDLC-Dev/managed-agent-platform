@@ -268,7 +268,7 @@ Reporting without an enforced moment to read the report is how
 `.claude/agents/verifier.md:25` stayed wrong, and "we will run the report" is a
 ritual, not a mechanism. So the pin gets a trigger: a workflow on any pull
 request whose diff touches the `anthropic-sdk-go` line in `go.mod`, running
-`make sdk-bump-report` and rendering both lists into the step summary.
+`make sdk-bump-report` and rendering its lists into the step summary.
 
 It fails on **undispositioned transitions, and only those.** A transition is
 dispositioned when the citation says the bump was seen: an entry whose symbol
@@ -317,6 +317,30 @@ The history files, the archived plans and the changelogs carry several hundred
 more SDK version mentions. A bump does not touch any of them, because each
 records what was true when it was written — that is what those files are for.
 
+### The `api.md` citations name symbols already, and have drifted five times
+
+Two coordinates point into the SDK's generated API index
+(`docs/DIVERGENCES.md:91`). They need no new locator form: an `api.md` line
+documents a Go symbol, so the citation takes that symbol —
+`api.md BetaEnvironmentWorkService.Stop` — which resolves in the module like any
+other anchor.
+
+That entry is the clearest evidence in the registry for this whole plan, because
+it narrates its own decay. Its prose records that the range it cited at v1.58.0
+"drifted with v1.59.0's `api.md` additions, again with v1.61.0's (683 → 693),
+again with v1.63.1's (693 → 698), and again with v1.66" — four re-readings of one
+citation, none of which changed the claim being made.
+
+There has since been a fifth, and nobody has recorded it. The entry is stamped
+v1.66.0 and cites `api.md:884`, which at v1.66.0 is indeed the Stop line, so the
+citation is true as written and the stamp is doing its job. At the pin, line 884
+is `Ack` and Stop has moved to 888. Through all five drifts the symbol
+`BetaEnvironmentWorkService.Stop` did not move at all.
+
+That is the difference between the two locators in one entry: five human
+re-readings, four of them recorded in prose as they happened, to keep a number
+current under a claim that never changed.
+
 ## Not every citation is a Go symbol
 
 The registry cites `anthropic-openapi.yml` in 11 named coordinates and 12 bare
@@ -333,8 +357,8 @@ could ever contradict.
 
 ## Slices
 
-1. **`tools/sdkref` with all three rungs, and `make sdk-bump-report` as rung 3's
-   two-list front end.** Its own test runs the real files inside `make verify`,
+1. **`tools/sdkref` with all three rungs, and `make sdk-bump-report` as their
+   front end.** Its own test runs the real files inside `make verify`,
    the way `tools/registrycheck`'s does. The tool lands first and clean: it must
    tolerate the existing corpus, so rungs 1 and 2 start by reporting rather than
    failing, and the exemption is the corpus itself rather than a hand-written
@@ -399,8 +423,8 @@ Slices 2 and 3 are independent and can land in either order once 1 is in.
    light falsely reads as "re-verified".
 2. **A line span stays legal as a stamped fallback, but only where a symbol
    does not resolve.** Banning spans outright would force a false symbol onto
-   multi-declaration spans, generated `init`, and spec citations; allowing them
-   freely would let the migration stamp everything and convert nothing. What was
+   multi-declaration spans and generated `init`; allowing them freely would let
+   the migration stamp everything and convert nothing. What was
    wrong with a coordinate was never the coordinate — it was the missing stamp
    that let it be read as current — so the stamp is mandatory and the span is
    conditional.
