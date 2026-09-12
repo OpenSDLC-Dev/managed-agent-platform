@@ -324,7 +324,7 @@ func TestChildThreadViewAndCrossPosts(t *testing.T) {
 	st.expectNone(t)
 }
 
-// Archive rules: the primary is refused, a non-idle child is refused, an idle
+// Archive rules: the primary is refused, a running child is refused, an idle
 // child terminates with its event cross-posted; idempotent; the session's own
 // archive ends every live child and leaves the primary alone.
 func TestThreadArchive(t *testing.T) {
@@ -341,7 +341,7 @@ func TestThreadArchive(t *testing.T) {
 	running := insertChild(t, s, sid, "running")
 	status, body = s.do(http.MethodPost, path+running+"/archive", nil)
 	wantErr(t, status, body, http.StatusBadRequest, "invalid_request_error")
-	if msg := errMessage(body); !strings.Contains(msg, "only an idle thread can be archived") {
+	if msg := errMessage(body); !strings.Contains(msg, "is running; send a user.interrupt event before archiving") {
 		t.Errorf("message = %q", msg)
 	}
 	status, body = s.do(http.MethodPost, path+"sthr_0000000000000000000000000/archive", nil)
@@ -492,6 +492,50 @@ func TestThreadArchive(t *testing.T) {
 	}
 	if n := threadRows(t, s, sid); n != 0 {
 		t.Errorf("thread rows after delete = %d, want 0", n)
+	}
+}
+
+// #730: a rescheduling child is archivable, and the ending is a real one — the
+// coordinator hears about it, the child's terminated event lands, and the
+// session folds off the status the child was holding it at. Why the thread
+// rule and the session's have to agree is argued at archiveThread; the
+// refusals are TestThreadArchive's, which owns them.
+func TestAReschedulingThreadIsArchivable(t *testing.T) {
+	collect := collectMetrics(t)
+	s := newTestServer(t)
+	sid := eventsFixture(t, s)
+
+	// A live rescheduling child carries the session with it. insertChild
+	// writes the row directly, so the fold that would have moved the session
+	// is applied here by hand.
+	resch := insertChild(t, s, sid, "rescheduling")
+	if _, err := s.pool.Exec(context.Background(),
+		`UPDATE sessions SET status = 'rescheduling' WHERE id = $1`, sid); err != nil {
+		t.Fatal(err)
+	}
+
+	status, res := s.do(http.MethodPost, "/v1/sessions/"+sid+"/threads/"+resch+"/archive", nil)
+	if status != http.StatusOK {
+		t.Fatalf("archive a rescheduling child: %d %v", status, res)
+	}
+	if res["status"] != "terminated" || res["archived_at"] == nil {
+		t.Errorf("archived rescheduling child = %v, want terminated with archived_at set", res)
+	}
+	if types := s.eventTypes(sid); !sameStrings(types, []string{
+		"agent.thread_message_received", "session.thread_status_terminated", "session.status_idle"}) {
+		t.Errorf("session view after the archive = %v, want the coordinator's notice, the child's "+
+			"ending and the session off rescheduling", types)
+	}
+	_, sess := s.do(http.MethodGet, "/v1/sessions/"+sid, nil)
+	if sess["status"] != "idle" {
+		t.Errorf("session status after the archive = %v, want idle — only the primary is left to fold",
+			sess["status"])
+	}
+	// ...and the move is counted. Terminating an idle child never moved the
+	// fold, so this is the first ending that does, and the count is what says
+	// the status the termination folded to reaches the metric at all.
+	if n := apiStatusCount(t, collect(), "idle"); n != 1 {
+		t.Errorf("idle transitions recorded = %d, want the one the child's ending folded", n)
 	}
 }
 
