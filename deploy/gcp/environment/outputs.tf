@@ -197,11 +197,14 @@ output "docker_hub_mirror" {
     image published as `postgres:16-alpine` is really `library/postgres`, and the
     mirror is addressed with that full path. So the chart's postgres image
     becomes PREFIX/library/postgres:16-alpine, while openbao/openbao — which
-    already names an organisation — becomes PREFIX/openbao/openbao.
+    already names an organisation — becomes PREFIX/openbao/openbao. Those two
+    illustrate the rule rather than exhaust the list: every image the chart
+    pulls from Docker Hub is rewritten the same way.
 
-    The chart's MinIO is not one of them any more: Docker Hub stopped serving
-    the `minio` namespace, so that image is pinned at quay.io (#701) and a
-    remote repository pointed at Docker Hub cannot serve it. Mirroring it needs
-    a second remote repository, with quay.io as its upstream.
+    MinIO is the one that is no longer among them, and not for a naming reason:
+    Docker Hub stopped serving the `minio` namespace, so the chart pins that
+    image at quay.io (#701) and a remote pointed at Docker Hub cannot serve it
+    at all. Mirroring it needs a second remote repository, with quay.io as its
+    upstream.
   EOT
 }
