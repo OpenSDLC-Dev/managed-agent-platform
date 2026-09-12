@@ -375,6 +375,95 @@ func TestTheSweepWakesTheDrain(t *testing.T) {
 	}
 }
 
+// TestPurgeLeavesAnOpenDreamsTranscript pins deleteFile's refusal on this side
+// too. Nothing stamps an expiry on a transcript today, which is why the sweep
+// went without the clause; that is a fact about the current writers rather than
+// an invariant, and the cost of it being wrong is a file removed out from under
+// a runner still appending to it. A closed dream's transcript is not exempt,
+// because nobody is writing it — so the rung drives both halves through the
+// same row.
+func TestPurgeLeavesAnOpenDreamsTranscript(t *testing.T) {
+	pool := pgtest.NewPool(t)
+	ctx := context.Background()
+	window := 30 * 24 * time.Hour
+	id := seedExpiredFile(t, pool, nil, window+time.Hour)
+
+	// ownedsession_test.go's openDream, without its server: the shapes the
+	// create route produces, which the table's CHECKs require.
+	dreamID := domain.NewID(domain.PrefixDream).String()
+	if _, err := pool.Exec(ctx,
+		`INSERT INTO dreams (id, status, stage, inputs, input_memory_store_id, input_session_ids,
+		   model, output_behavior)
+		 VALUES ($1, 'running', 1, '[]'::jsonb, $2, '{}'::text[],
+		   '{"id":"claude-opus-4-8"}'::jsonb, '{"type":"create_new"}'::jsonb)`,
+		dreamID, domain.NewID(domain.PrefixMemoryStore).String()); err != nil {
+		t.Fatalf("seed the open dream: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `UPDATE files SET dream_id = $1 WHERE id = $2`, dreamID, id); err != nil {
+		t.Fatalf("attach the transcript: %v", err)
+	}
+
+	n, err := purgeExpiredFiles(ctx, pool, window)
+	if err != nil {
+		t.Fatalf("purge: %v", err)
+	}
+	if n != 0 {
+		t.Fatalf("purged %d rows, want none: the transcript of an open dream is the runner's", n)
+	}
+
+	// Closed, the same row is ordinary again.
+	// The terminal status and ended_at travel with closed_at or the CHECKs
+	// refuse it, which is closeDream's note.
+	if _, err := pool.Exec(ctx,
+		`UPDATE dreams SET status = 'completed', ended_at = now(), closed_at = now() WHERE id = $1`,
+		dreamID); err != nil {
+		t.Fatalf("close the dream: %v", err)
+	}
+	if n, err := purgeExpiredFiles(ctx, pool, window); err != nil || n != 1 {
+		t.Fatalf("purge after the dream closed = %d, %v; want 1, nil — a closed dream's transcript is nobody's", n, err)
+	}
+}
+
+// TestTheSweepDrainsABacklogInOneTick pins what the batch bounds: a
+// transaction, not a tick. Until #698 a backlog larger than one batch waited an
+// hour per batch, so a deployment expiring faster than the ceiling never
+// drained and its metadata outlived the published window. The batch is shrunk
+// because the production one is larger than any backlog a rung will seed.
+func TestTheSweepDrainsABacklogInOneTick(t *testing.T) {
+	restore := SetFilePurgeBatchForTest(2)
+	defer restore()
+	interval := SetFilePurgeIntervalForTest(time.Hour)
+	defer interval()
+
+	pool := pgtest.NewPool(t)
+	for i := 0; i < 5; i++ {
+		seedExpiredFile(t, pool, nil, fileMetadataRetention+time.Duration(i+1)*time.Hour)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { defer close(done); StartFileRetention(ctx, pool, nil) }()
+	t.Cleanup(func() { cancel(); <-done })
+
+	// One tick, and the interval is an hour: three batches of two have to run
+	// inside the startup pass or this never finishes.
+	deadline := time.Now().Add(15 * time.Second)
+	for {
+		var left int
+		if err := pool.QueryRow(context.Background(),
+			`SELECT count(*) FROM files WHERE expires_at IS NOT NULL`).Scan(&left); err != nil {
+			t.Fatal(err)
+		}
+		if left == 0 {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("%d expired row(s) left: a tick stopped at its first batch, so the backlog drains an hour at a time", left)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
 // owedKeys reads what the queue owes, ordered — the durable statement this
 // sweep makes instead of deleting bytes.
 func owedKeys(t *testing.T, pool *pgxpool.Pool) []string {
