@@ -596,8 +596,25 @@ func TestTheResolversPreferredFamilyLeadsThroughARefusal(t *testing.T) {
 // when it comes up a moment later.
 func TestTheLosingFamilysConnectionIsClosed(t *testing.T) {
 	t.Parallel()
+	// How long any handoff below waits for a step that should take
+	// microseconds. Bounded, not blocking, for the reason
+	// TestTheTimeoutBoundsTheWholeDial gives — an unbounded receive here held a
+	// CI runner for the package's whole timeout once (#689). Ten seconds
+	// because a bound has only to turn a wedge into a report: nothing here
+	// measures elapsed time, and a budget inside the scheduling noise that
+	// caused #689 would trade one flake for another. Each bound fails what it
+	// guards rather than falling through — expiring and then returning a
+	// winning connection anyway would hand the race straight back, ten seconds
+	// wide instead of a millisecond.
+	const handoff = 10 * time.Second
 	loser := make(chan net.Conn, 1)
 	closed := make(chan struct{})
+	entered := make(chan struct{})
+	// The loser's own connection, made on this goroutine: stubConn registers a
+	// t.Cleanup, and one registered from a dial still running after a failed
+	// run has returned is registered too late to run at all — a leaked pipe
+	// pair rather than the closed one this test is about.
+	late := stubConn(t)
 	d := &Dialer{
 		FallbackDelay: time.Millisecond,
 		Lookup: func(context.Context, string) ([]net.IPAddr, error) {
@@ -605,11 +622,29 @@ func TestTheLosingFamilysConnectionIsClosed(t *testing.T) {
 		},
 		dialOne: func(ctx context.Context, _, addr string) (net.Conn, error) {
 			if strings.HasPrefix(addr, "[2001:db8::1]") {
+				// Announced before the block, because it is what the fallback
+				// waits on below. The primary family is this one address, so
+				// dialSerial takes this branch once.
+				close(entered)
 				// The primary comes up late — after the fallback has won.
-				<-closed
-				c := stubConn(t)
-				loser <- c
-				return c, nil
+				select {
+				case <-closed:
+				case <-time.After(handoff):
+					return nil, errors.New("no winner came back to release the loser")
+				}
+				loser <- late
+				return late, nil
+			}
+			// The fallback wins, but never before the primary is in the race.
+			// Winning earlier cancels the primary out at dialSerial's
+			// per-address context check, so its dialOne is never entered at
+			// all — and a loser that never dialled has no connection for this
+			// test to find closed. FallbackDelay is a millisecond, which is a
+			// long time to be descheduled on a loaded runner.
+			select {
+			case <-entered:
+			case <-time.After(handoff):
+				return nil, errors.New("the primary family never entered the dial")
 			}
 			return stubConn(t), nil
 		},
@@ -620,7 +655,11 @@ func TestTheLosingFamilysConnectionIsClosed(t *testing.T) {
 	}
 	defer c.Close()
 	close(closed) // let the loser finish now that a winner is in hand
-	late := <-loser
+	select {
+	case <-loser:
+	case <-time.After(handoff):
+		t.Fatal("the losing family never handed its connection over")
+	}
 	// A net.Pipe end reports use of a closed connection on a read after Close.
 	deadline := time.Now().Add(2 * time.Second)
 	for {
