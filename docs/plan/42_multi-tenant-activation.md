@@ -79,10 +79,7 @@ docs/DIVERGENCES.md` → 4.*
    decrementing across workspaces inside a window (§5.1), so per-workspace metering is not a
    thing this platform is failing to mirror.
 8. **#56 lands first**, assuming independence from #46 and #550; whichever lands second
-   inherits the other's tests. #56's own title carries the `(post-v1)` marker that CLAUDE.md
-   makes the whole deferral list, so decision 1 is the explicit go-ahead that lifts it for this
-   issue alone; slice 6 closing #56 takes it out of that open-issue query with no title edit,
-   and every non-goal §3 opens gets the marker so the query stays the whole list.
+   inherits the other's tests.
 
 ## 2. Design rules this plan sets on its own
 
