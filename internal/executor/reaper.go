@@ -89,14 +89,29 @@ func (e *Executor) reapLoop(ctx context.Context) {
 	t := time.NewTicker(e.cfg.ReapInterval)
 	defer t.Stop()
 	for {
+		// The pass runs before the first wait, which is the order the five
+		// control-plane sweeps take and for the same reason: a ticker does not
+		// fire when it is created, so an executor restarting more often than
+		// ReapInterval would never reap on its own. This loop looked exempt
+		// because it usually has a boot pass anyway — listenReapKicks wakes it
+		// on every LISTEN establish, the first included — but that wake is not
+		// this loop's to rely on: ReapKickConn is optional by design, and the
+		// listener also gives up when the dial keeps failing. In either case a
+		// restarting executor left its predecessor's containers standing for a
+		// full interval, and a crash-looping one left them forever (#709).
+		//
+		// A pass at boot is safe on every endpoint at once for this loop's own
+		// reason: it lists only its own holding and classifies each session
+		// under the session lock, which is exactly what the kick-driven pass
+		// already does at that moment today.
+		if err := e.reapPass(ctx); err != nil && ctx.Err() == nil {
+			slog.WarnContext(ctx, "reap pass incomplete; the next interval retries", "error", err)
+		}
 		select {
 		case <-ctx.Done():
 			return
 		case <-t.C:
 		case <-e.kick:
-		}
-		if err := e.reapPass(ctx); err != nil && ctx.Err() == nil {
-			slog.WarnContext(ctx, "reap pass incomplete; the next interval retries", "error", err)
 		}
 	}
 }

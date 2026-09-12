@@ -77,10 +77,12 @@ func kickConn(t *testing.T, h *harness) *pgx.ConnConfig {
 // The interval is an hour, so every reap this test observes is one the ticker
 // cannot account for.
 //
-// Two sessions, because the listener sweeps once whenever it establishes — it
-// has to, since LISTEN delivers only to connections already listening and a
-// kick fired while it was down was queued nowhere. That startup sweep would
-// reap a deleted session all by itself, so it cannot be the thing under test.
+// Two sessions, because a sweep runs at startup whatever the kick does: the
+// loop passes before its first wait (#709), and the listener sweeps again
+// whenever it establishes — it has to, since LISTEN delivers only to
+// connections already listening and a kick fired while it was down was queued
+// nowhere. Either sweep would reap a deleted session all by itself, so neither
+// can be the thing under test.
 // The first session is its target and its barrier: seeing it reaped is how the
 // test knows the LISTEN is covering. The second is owned only afterwards, so
 // the startup sweep — which listed its holding before that — can never be what
@@ -113,19 +115,63 @@ func TestRunReapsOnAKickRatherThanTheInterval(t *testing.T) {
 // teardown latency it had before the kick, not a broken reaper. The same rung
 // covers the listener that never establishes, since both leave the ticker as
 // the only wake.
+//
+// Two sessions, for the reason the kick rung above needs two: the loop takes a
+// pass before its first wait (#709), so a session owned before it starts is
+// reaped by that pass and says nothing about the ticker. The second is owned
+// only once the first is gone — after the boot pass listed the holding — so a
+// tick is the only thing left that can reap it.
 func TestReapKickWithoutAConnStillReapsOnTheInterval(t *testing.T) {
 	h := newHarnessWith(t, &fakeProvider{sb: &fakeSandbox{}}, Config{ReapInterval: 20 * time.Millisecond})
 	h.prov = h.exec.provider.(*fakeProvider)
 	if h.exec.cfg.ReapKickConn != nil {
 		t.Fatal("the harness configured a kick connection; this rung needs none")
 	}
+	barrier := h.sid
+	ticked := pgtest.NewSessionInEnv(t, h.pool, h.envID)
+	deleteSessionRowByID(t, h, barrier)
+	h.prov.owned = []domain.ID{barrier}
+
+	_, stop := runExecutor(t, h)
+	defer stop()
+
+	awaitReap(t, h, barrier, "the pass the loop takes before its first wait, with no listener")
+
+	deleteSessionRowByID(t, h, ticked)
+	ownSession(t, h, ticked)
+	awaitReap(t, h, ticked, "the interval, with no listener")
+}
+
+// TestRunReapsBeforeItsFirstTick: the loop passes before it waits, so an
+// executor that restarts more often than ReapInterval still tears down its
+// predecessor's leftovers. The interval here is an hour and no listener is
+// configured, so nothing but that pass can reap anything — and until #709 the
+// wake that made this look covered belonged to the listener, which two
+// supported configurations never start.
+func TestRunReapsBeforeItsFirstTick(t *testing.T) {
+	h := newHarnessWith(t, &fakeProvider{sb: &fakeSandbox{}}, Config{ReapInterval: time.Hour})
+	h.prov = h.exec.provider.(*fakeProvider)
+	if h.exec.cfg.ReapKickConn != nil {
+		t.Fatal("the harness configured a kick connection; this rung needs none")
+	}
+	held := pgtest.NewSessionInEnv(t, h.pool, h.envID)
 	deleteSessionRow(t, h)
 	h.prov.owned = []domain.ID{h.sid}
 
 	_, stop := runExecutor(t, h)
 	defer stop()
 
-	awaitReap(t, h, h.sid, "the interval, with no listener")
+	awaitReap(t, h, h.sid, "the pass the loop takes before its first wait")
+
+	// And then it waits. A session owned after that pass must stand until the
+	// tick an hour away — a loop that passed without ever waiting would reap it
+	// too and look identical from the reap above.
+	deleteSessionRowByID(t, h, held)
+	ownSession(t, h, held)
+	time.Sleep(500 * time.Millisecond)
+	if slices.Contains(h.prov.reapedSnapshot(), held) {
+		t.Error("a session owned after the boot pass was reaped within the interval: the loop is not waiting between passes")
+	}
 }
 
 // shortenReapKickBackoff spends the reconnect pause in test time. The value is
