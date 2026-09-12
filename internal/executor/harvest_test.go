@@ -254,15 +254,47 @@ func TestReHarvestReplacesSnapshotPerPath(t *testing.T) {
 		t.Errorf("report.json blob = %q, want v2", got)
 	}
 	// The snapshot replaces per path: fresh ids, and the replaced snapshot's
-	// blobs are gone from storage.
+	// objects are owed to the control plane's sweeper rather than deleted here
+	// (#703). The executor writes the debt on the publishing transaction — the
+	// ids that name those objects go away with the rows, so after the commit
+	// nothing else could name them — and hosts no drain of its own, which it
+	// does not need: the queue is a table, and the control plane drains
+	// whatever any binary wrote to it.
+	owed := h.pendingKeys(t)
 	for _, old := range first {
-		if _, _, err := h.blobs.Get(context.Background(), blob.FilesKey(old.id)); !errors.Is(err, blob.ErrNotFound) {
-			t.Errorf("old blob %s (%s) still stored, err = %v; want ErrNotFound", old.id, old.filename, err)
+		if !slices.Contains(owed, blob.FilesKey(old.id)) {
+			t.Errorf("the re-harvest owes %v, want the replaced object for %s (%s) among them", owed, old.id, old.filename)
 		}
 	}
-	if h.blobs.Len() != 2 {
-		t.Errorf("stored blobs = %d, want 2", h.blobs.Len())
+	// Still stored, because nothing has drained the queue in this test: four
+	// objects, the two replaced and the two that replaced them.
+	if h.blobs.Len() != 4 {
+		t.Errorf("stored blobs = %d, want all 4: the re-harvest enqueues rather than deleting", h.blobs.Len())
 	}
+}
+
+// pendingKeys reads what the executor's publish left the control plane's
+// sweeper to remove.
+func (h *harness) pendingKeys(t *testing.T) []string {
+	t.Helper()
+	rows, err := h.pool.Query(context.Background(),
+		`SELECT object_key FROM pending_object_deletes ORDER BY object_key`)
+	if err != nil {
+		t.Fatalf("read the pending queue: %v", err)
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var k string
+		if err := rows.Scan(&k); err != nil {
+			t.Fatal(err)
+		}
+		out = append(out, k)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	return out
 }
 
 func TestHarvestCapsAreGreedyAndDeterministic(t *testing.T) {

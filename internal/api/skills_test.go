@@ -12,8 +12,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/textproto"
+	"slices"
 	"strings"
-	"sync"
 	"testing"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/api"
@@ -709,6 +709,9 @@ func TestSkillVersionDeleteRecomputesLatest(t *testing.T) {
 		return vid
 	}
 	v2, v3 := newVersion(), newVersion()
+	// Read before the delete: the row that holds the number is what the delete
+	// removes, and the number is what names the archive.
+	v3number := s.versionNumber(t, id, v3)
 
 	// Deleting the newest version rolls latest_version_id back to the next one,
 	// and the response echoes the deleted version's own id.
@@ -720,9 +723,13 @@ func TestSkillVersionDeleteRecomputesLatest(t *testing.T) {
 	if status != http.StatusOK || skill["latest_version_id"] != v2 {
 		t.Errorf("after deleting v3, skill = %v, want latest_version_id %q", skill, v2)
 	}
-	// Its archive left object storage with it.
-	if n := s.blobs.Len(); n != 2 {
-		t.Errorf("stored objects = %d, want 2 after deleting one of three versions", n)
+	// Its archive is owed to the sweeper rather than deleted here (#703), so
+	// all three objects are still stored and exactly one of them is owed.
+	if n := s.blobs.Len(); n != 3 {
+		t.Errorf("stored objects = %d, want all 3 still stored: the delete enqueues rather than removing", n)
+	}
+	if got, want := pendingKeys(t, s.pool), []string{skills.BlobKey(id, v3number)}; !slices.Equal(got, want) {
+		t.Errorf("the version delete owes %v, want exactly the deleted version's archive %v", got, want)
 	}
 
 	status, del = s.do("DELETE", "/v1/skills/"+id+"/versions/"+v3, nil)
@@ -896,109 +903,17 @@ func TestFailedPutCommitsNoRows(t *testing.T) {
 	}
 }
 
-// cancelGate is a Store whose Delete honors its context, as every real backend
-// does, and holds the first call open so a test can disconnect the request the
-// sweep is running under while the rest of it is still to come.
-type cancelGate struct {
-	blob.Store
-	held   chan struct{}
-	resume chan struct{}
-	once   sync.Once
-}
-
-func (g *cancelGate) Delete(ctx context.Context, key string) error {
-	g.once.Do(func() {
-		close(g.held)
-		<-g.resume
-	})
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-	return g.Store.Delete(ctx, key)
-}
-
-// TestSkillDeleteSweepsArchivesAfterTheClientDisconnects: both deletes commit
-// their rows and then sweep the archives those rows named. A client or a proxy
-// that gives up in between must not turn the plan's accepted "rare orphan" into
-// every archive of a many-versioned skill, which is what a sweep running on the
-// request's own context does — so it runs on one the disconnect cannot reach.
-func TestSkillDeleteSweepsArchivesAfterTheClientDisconnects(t *testing.T) {
-	cases := []struct {
-		name          string
-		path          func(id, versionID string) string
-		wantRemaining int
-	}{
-		{"the whole skill", func(id, _ string) string { return "/v1/skills/" + id }, 0},
-		{"one version", func(id, vid string) string {
-			return "/v1/skills/" + id + "/versions/" + vid
-		}, 2},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			pool := newPoolWithKey(t)
-			working := blobtest.Mem()
-			okSrv := httptest.NewServer(api.NewHandler(pool, working, nil, nil))
-			t.Cleanup(okSrv.Close)
-			ok := &tserver{t: t, url: okSrv.URL, pool: pool, blobs: working}
-
-			// Three versions, so the skill delete sweeps a set rather than one
-			// object — the case a proxy timeout can realistically outlive.
-			created := ok.createSkill(t)
-			id, _ := created["id"].(string)
-			v1, _ := created["latest_version_id"].(string)
-			for _, extra := range []string{"second", "third"} {
-				ct, body := skillForm(t, nil, []upFile{
-					{name: "financial-skill/SKILL.md", content: testSkillMD},
-					{name: "financial-skill/" + extra + ".txt", content: extra},
-				})
-				if status, obj := ok.doForm("POST", "/v1/skills/"+id+"/versions", ct, body); status != http.StatusOK {
-					t.Fatalf("seed version %s: %d %v", extra, status, obj)
-				}
-			}
-			if n := working.Len(); n != 3 {
-				t.Fatalf("seeded %d archives, want 3", n)
-			}
-
-			// The disconnect stands in for the client or proxy going away: it
-			// cancels the very context the handler is running on, and reports
-			// back so the sweep resumes only once it truly is cancelled.
-			gate := &cancelGate{Store: working, held: make(chan struct{}), resume: make(chan struct{})}
-			disconnect, cancelled := make(chan struct{}), make(chan struct{})
-			inner := api.NewHandler(pool, gate, nil, nil)
-			gateSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				ctx, cancel := context.WithCancel(r.Context())
-				defer cancel()
-				go func() {
-					<-disconnect
-					cancel()
-					close(cancelled)
-				}()
-				inner.ServeHTTP(w, r.WithContext(ctx))
-			}))
-			t.Cleanup(gateSrv.Close)
-
-			done := make(chan int, 1)
-			go func() {
-				gated := &tserver{t: t, url: gateSrv.URL, pool: pool, blobs: working}
-				status, _ := gated.do("DELETE", tc.path(id, v1), nil)
-				done <- status
-			}()
-			<-gate.held
-			close(disconnect)
-			<-cancelled
-			close(gate.resume)
-			if status := <-done; status != http.StatusOK {
-				t.Fatalf("delete = %d, want 200", status)
-			}
-
-			if n := working.Len(); n != tc.wantRemaining {
-				t.Errorf("%d archives left in storage, want %d: the sweep followed the "+
-					"client out instead of finishing the rows it had already deleted",
-					n, tc.wantRemaining)
-			}
-		})
-	}
-}
+// TestSkillDeleteSweepsArchivesAfterTheClientDisconnects lived here, with a
+// cancelGate Store that held the first Delete open so the rung could disconnect
+// the request the sweep was running under. Both are retired by #703, because
+// the window they guarded is gone rather than merely narrower: the delete makes
+// no store call at all now, and the archives it owes are enqueued by the
+// transaction that removes the rows. A disconnect can land on either side of
+// that commit and neither side orphans anything — before it, the commit fails
+// and the rows stay with their archives; after it, the rows and the debt are
+// committed together. What the old rung asserted through a race,
+// TestDeletingASkillOwesEveryVersionsArchive now asserts structurally, by
+// requiring that the request path attempt no delete.
 
 // TestSkillDeleteAnswersShapeAndExistenceWithoutStorage: DELETE is the one
 // skills route that needed no object storage before the cascade gave it a
@@ -1460,8 +1375,11 @@ func TestSkillDeleteCascadesOverVersions(t *testing.T) {
 	if rows != 0 {
 		t.Errorf("%d version rows survived the cascade", rows)
 	}
-	if n := s.blobs.Len(); n != 0 {
-		t.Errorf("stored objects after the cascade = %d, want every archive swept", n)
+	// Every archive is owed rather than swept here (#703): the cascade's debt
+	// rides the transaction that removes the rows naming it, and the drain is
+	// what frees the bytes.
+	if owed := pendingKeys(t, s.pool); len(owed) != 2 {
+		t.Errorf("the cascade owes %v, want both versions' archives", owed)
 	}
 }
 

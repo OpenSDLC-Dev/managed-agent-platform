@@ -8,6 +8,7 @@ import (
 	"mime/multipart"
 	"net/http"
 	"net/textproto"
+	"slices"
 	"strings"
 	"testing"
 
@@ -297,9 +298,13 @@ func TestFileDelete(t *testing.T) {
 	if obj["id"] != id || obj["type"] != "file_deleted" {
 		t.Errorf("delete response = %v, want {id:%s, type:file_deleted}", obj, id)
 	}
-	// The object is gone too.
-	if _, _, err := s.blobs.Get(context.Background(), "files/"+id); err == nil {
-		t.Errorf("blob files/%s still present after delete", id)
+	// The object is the sweeper's now (#703): what the delete itself does is
+	// write the debt down on the transaction that took the row away, which is
+	// the only record of the object once its id is gone. That the sweeper then
+	// removes the bytes is plan 50's own rungs, and the end-to-end pair for
+	// this route is TestDeletingAFileOwesItsObject.
+	if got := pendingKeys(t, s.pool); !slices.Contains(got, "files/"+id) {
+		t.Errorf("the delete owes %v, want files/%s among them", got, id)
 	}
 	// Second delete → 404; get → 404.
 	status, obj = s.do("DELETE", "/v1/files/"+id, nil)

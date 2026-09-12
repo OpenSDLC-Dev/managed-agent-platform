@@ -159,9 +159,14 @@ func (s *server) startDream(ctx context.Context, d dreamRow, cfg DreamRunnerConf
 	}
 	// Everything short of the committed start leaves the objects unreferenced:
 	// a cancel that landed during the render, a classified failure settled in
-	// the write transaction, or a rollback. They go best-effort, and the next
-	// attempt mints fresh ids rather than reuse anything.
-	s.deleteDreamBlobs(ctx, dreamFileKeys(files))
+	// the write transaction, or a rollback. No row ever committed against these
+	// bytes, so they are discardUncommittedObject's class rather than the
+	// queue's — the argument is that helper's, and it is why the dream's *close*
+	// enqueues while its failed *start* does not (#703). The next attempt mints
+	// fresh ids rather than reuse anything.
+	for _, key := range dreamFileKeys(files) {
+		s.discardUncommittedObject(ctx, key)
+	}
 	switch {
 	case err == nil:
 		return

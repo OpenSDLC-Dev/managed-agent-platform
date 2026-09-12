@@ -112,36 +112,36 @@ func checkFileID(id string) error {
 	return nil
 }
 
-// deleteOrphanedFile best-effort-removes an object whose database row never
-// landed (or just left). A failure here leaves a rare orphaned object, accepted
-// and documented in the plan — GC is a non-goal on this path.
+// discardUncommittedObject best-effort-removes an object whose database row
+// never committed. The name is the contract: this is not a delete path, and the
+// two callers that mistook it for one — deleteFile and the dream runner's close
+// — are why it says so now rather than arguing it in prose alone (#703). An
+// object a committed row once named is owed to plan 50's queue instead, written
+// down by the transaction that takes the row away.
 //
-// What removes objects on a schedule is one thing, and it is not an exception
-// to this note: plan 50's drain removes what a committed transaction wrote down
-// as owed — a session delete's keys, and now the expired-file sweep's, that
-// sweep having stopped deleting objects itself (#696). This note is about the
-// objects nothing wrote down, because there was no committed row to write them
-// against: a row that never landed, which nothing can enumerate.
+// Not enqueuing here is deliberate rather than an omission, and it is the whole
+// reason the two classes cannot share a path. This runs on the caller's own
+// context — the request's for insertFile, the runner tick's for startDream —
+// and that is what makes it right: when a commit fails on a cancelled or
+// dropped context, where Postgres may in fact have committed, the same
+// cancellation makes this delete a no-op, so a possibly-live object is
+// preserved rather than deleted out from under a row that did land. Queueing
+// the key would retry past that cancellation and do precisely the damage the
+// no-op avoids; a detached context would "fix" the benign orphan leak at the
+// same cost.
 //
-// Not enqueuing is deliberate rather than an omission for the caller this note
-// was written for — insertFile's rollback — because that delete has to be
-// allowed to fail. deleteOrphanedFile runs on the request
-// context (like the skills registry's deleteOrphanedObject): when
-// insertFile's commit fails ambiguously — a cancelled or dropped context, where
-// Postgres may in fact have committed — that same cancelled context makes this
-// delete a no-op, so a possibly-live object is preserved rather than deleted out
-// from under a committed row. Queueing the key instead would retry past that
-// cancellation and do precisely the damage the no-op avoids; a detached context
-// would "fix" the benign orphan leak at the same cost. Preserving the object is
-// the correct trade (a definite commit rejection leaves the context live, so
-// the orphan is still cleaned).
+// The protection is the cancellation's, though, so it reaches exactly as far as
+// the cancellation does. A commit that fails with the context still live — a
+// connection lost after Postgres committed but before the client heard it — has
+// this delete remove the bytes of a row that did land, and the Store contract
+// obliges no backend to refuse a cancelled context either (blobtest's own Mem
+// ignores it). That residue is older than the queue and is not something the
+// queue could fix: an object the caller cannot prove uncommitted is exactly the
+// one it must not enqueue.
 //
-// That argument covers one of this helper's three callers. deleteFile and the
-// dream runner reach it with their rows already committed, so the object is
-// definitely orphaned and a retry could damage nothing — they are among the
-// sites #703 records as still owing the queue a debt they do not record, along
-// with the skills registry's own twin of this helper.
-func (s *server) deleteOrphanedFile(ctx context.Context, key string) {
+// The skills registry's discardUncommittedArchive is this helper's twin, on the
+// same argument and for the same shape of caller.
+func (s *server) discardUncommittedObject(ctx context.Context, key string) {
 	if err := s.blobs.Delete(ctx, key); err != nil {
 		slog.WarnContext(ctx, "file orphaned in object storage", "key", key, "err", err)
 	}
@@ -204,7 +204,7 @@ func (s *server) insertFile(ctx context.Context, id string, up *fileUpload) (tim
 		return time.Time{}, nil, fmt.Errorf("store file: %w", err)
 	}
 	if err := tx.Commit(ctx); err != nil {
-		s.deleteOrphanedFile(ctx, key)
+		s.discardUncommittedObject(ctx, key)
 		return time.Time{}, nil, err
 	}
 	return createdAt, expiresAt, nil
@@ -515,19 +515,37 @@ func (s *server) deleteFile(r *http.Request) (any, error) {
 	if dreamID != nil {
 		return nil, errInvalid("file %s is owned by dream %s", id, *dreamID)
 	}
-	tag, err := s.pool.Exec(ctx, `DELETE FROM files WHERE id = $1`, id)
+	// One object, and a transaction opened for it rather than the bare Exec
+	// this delete used to be. The row is the object's only name, so the debt
+	// has to be recorded by the same commit that takes the name away
+	// (plan 50 decision 2, #703): beside the transaction, a delete that rolls
+	// back would leave a row claiming bytes nobody orphaned, and a process that
+	// died between the commit and the insert would leave the object
+	// unreferenced and unrecorded — which is the state no later pass can
+	// discover. A deleted file cannot be recovered: the reference has no file
+	// archival, unlike sessions.
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	tag, err := tx.Exec(ctx, `DELETE FROM files WHERE id = $1`, id)
 	if err != nil {
 		return nil, err
 	}
 	if tag.RowsAffected() == 0 {
 		return nil, errNotFound("file %s not found", id)
 	}
-	// The row is gone; the object follows best-effort (rare orphans accepted,
-	// GC a non-goal) — one object, one race, on a path with no snapshot behind
-	// it, which is why it is not the set a session delete owes to plan 50's
-	// queue. A deleted file cannot be recovered — the reference has no file
-	// archival (unlike sessions).
-	s.deleteOrphanedFile(ctx, blob.FilesKey(id))
+	if err := store.EnqueueObjectDeletes(ctx, tx, []string{blob.FilesKey(id)}); err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, err
+	}
+	// Asked for now rather than at the drain's next interval, as deleteSession
+	// does: non-blocking and infallible, so it cannot fail a request that has
+	// already succeeded, and never load-bearing.
+	s.objectDeletes.Wake()
 	slog.InfoContext(ctx, "file deleted", "file_id", id)
 	return map[string]string{"id": id, "type": "file_deleted"}, nil
 }

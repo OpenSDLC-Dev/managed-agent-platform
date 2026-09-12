@@ -259,10 +259,12 @@ func run(ctx context.Context) error {
 	// claim, the scheduler's occurrence claim is a unique-index insert, and the
 	// runner and the drain each claim FOR UPDATE SKIP LOCKED — so a second
 	// replica costs a duplicate query, a briefly-blocked loser or a skipped row,
-	// never a wrong answer. The drain is the one that can be hurried, and both
-	// of the things that owe it objects do so: a session delete and the file
-	// sweep each wake it in-process after their own commit, leaving its interval
-	// as the backstop for another replica's work.
+	// never a wrong answer. The drain is the one that can be hurried, and
+	// every remover in this binary does: a session delete, the file sweep, and
+	// the file, skill, skill-version and dream deletes each wake it in-process
+	// after their own commit. The executor's harvest owes it too and cannot wake
+	// it — the queue is a table, not a process — so for that path the interval
+	// is the whole latency, as it is the backstop for another replica's work.
 	//
 	// Joined, for the reason the meter deregistration above is ordered: this
 	// defer is registered after `defer pool.Close()`, so LIFO drains the sweep
@@ -284,7 +286,10 @@ func run(ctx context.Context) error {
 	}()
 	dreamsDone := make(chan struct{})
 	if dreams.TickInterval > 0 {
-		go func() { defer close(dreamsDone); api.StartDreamRunner(sweepCtx, pool, blobs, cipher, dreams) }()
+		go func() {
+			defer close(dreamsDone)
+			api.StartDreamRunner(sweepCtx, pool, blobs, cipher, objectDeletes, dreams)
+		}()
 	} else {
 		close(dreamsDone)
 	}

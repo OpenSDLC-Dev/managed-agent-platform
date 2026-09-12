@@ -20,11 +20,12 @@ import (
 // half out of a predicate every reader composes; this is the second, and it is
 // the only thing in this platform that removes a file nobody asked to remove.
 //
-// That reverses nothing. deleteOrphanedFile's "GC is a non-goal" note is about
-// objects whose row never landed — accidents nobody can enumerate, where a
-// sweep would have to guess what is live. An expired file is the opposite: the
-// row names the object, and the deletion is the lifecycle the client bought at
-// upload. The note stays true where it stands.
+// That reverses nothing. discardUncommittedObject is about objects whose row
+// never committed — accidents nobody can enumerate, where a sweep would have to
+// guess what is live. An expired file is the opposite: the row names the
+// object, and the deletion is the lifecycle the client bought at upload. That
+// helper's argument stays true where it stands, and is now the only thing left
+// on this side of the line (#703).
 //
 // It lives beside the file routes for memoryretention.go's reason — it is
 // written from the same facts they are — and the controlplane hosts it because
@@ -204,10 +205,11 @@ var filePurgeAfterCommitHook func()
 // retries with backoff and never drops.
 //
 // So this sweep touches no object store, and nothing it does is best-effort.
-// The old order it inherited — row first, object after, orphan accepted — is
-// still the file, skill and dream delete paths' (#703), where one request
-// orphans a handful at most: one object, or a skill's versions, or a dream's
-// hundred transcripts and an index, rather than a batch of a thousand an hour.
+// Nor does any other remover of a committed row: the file, skill and dream
+// delete paths and the executor's harvest each write their debt down on the
+// transaction that removes the rows too (#703). What is left of the old order —
+// row first, object after, orphan accepted — is the object whose row never
+// committed, which is owed to nothing.
 //
 // The window is a duration subtracted from the database's own clock, never a
 // timestamp computed here: expires_at was itself computed from that clock at
@@ -265,7 +267,7 @@ func purgeExpiredFiles(ctx context.Context, pool *pgxpool.Pool, retention time.D
 		for i, id := range ids {
 			keys[i] = blob.FilesKey(id)
 		}
-		if _, err := tx.Exec(ctx, store.PendingObjectDeleteInsertSQL, keys); err != nil {
+		if err := store.EnqueueObjectDeletes(ctx, tx, keys); err != nil {
 			return 0, err
 		}
 	}

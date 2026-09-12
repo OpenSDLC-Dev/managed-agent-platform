@@ -16,6 +16,7 @@ import (
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/skills"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/store"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 )
@@ -228,10 +229,12 @@ func isUniqueViolation(err error, constraint string) bool {
 	return errors.As(err, &pgErr) && pgErr.Code == "23505" && pgErr.ConstraintName == constraint
 }
 
-// deleteOrphanedObject best-effort-removes an archive whose database row
-// never landed (or just left). A failure here leaves a rare orphaned object,
-// accepted and documented in the plan — GC is a non-goal.
-func (s *server) deleteOrphanedObject(ctx context.Context, key string) {
+// discardUncommittedArchive best-effort-removes an archive whose database row
+// never committed — internal/api/files.go's discardUncommittedObject for this
+// registry, resting on that helper's argument in full. The archives a committed
+// row once named go to plan 50's queue instead, enqueued by the transaction
+// that removes the row (#703).
+func (s *server) discardUncommittedArchive(ctx context.Context, key string) {
 	if err := s.blobs.Delete(ctx, key); err != nil {
 		slog.WarnContext(ctx, "skill archive orphaned in object storage", "key", key, "err", err)
 	}
@@ -312,7 +315,7 @@ func (s *server) insertSkill(ctx context.Context, id, vid, displayName, version 
 		return time.Time{}, fmt.Errorf("store skill archive: %w", err)
 	}
 	if err := tx.Commit(ctx); err != nil {
-		s.deleteOrphanedObject(ctx, key)
+		s.discardUncommittedArchive(ctx, key)
 		return time.Time{}, err
 	}
 	return createdAt, nil
@@ -413,7 +416,8 @@ func (s *server) listSkills(r *http.Request) (any, error) {
 }
 
 // deleteSkill cascades: versions then skill, in one transaction, with each
-// version's archive swept from object storage afterwards (plan 39 decision 6).
+// version's archive enqueued for the object-delete drain by that same
+// transaction (plan 39 decision 6; the enqueue is #703's).
 // The cascade is enforced here rather than by the schema on purpose — an
 // ON DELETE CASCADE would drop the version rows behind this handler's back and
 // orphan every archive they name.
@@ -445,10 +449,12 @@ func (s *server) deleteSkill(r *http.Request) (any, error) {
 	if source != "custom" {
 		return nil, errInvalid("anthropic skills are managed by the platform, not this API")
 	}
-	// The sweep needs somewhere to sweep — asked after shape and existence, so
-	// that a deployment without object storage still answers an unknown or
-	// unmanaged id the way it did before the cascade gave this route archives
-	// to remove at all.
+	// Asked after shape and existence, so a deployment without object storage
+	// still answers an unknown or unmanaged id the way it did before this route
+	// had archives to account for at all. The refusal outlives the sweep it was
+	// written for: the archives are enqueued rather than deleted here now, and a
+	// replica with no store configured must not take the rows away on behalf of
+	// objects it cannot know were written.
 	if s.blobs == nil {
 		return nil, errSkillsUnavailable
 	}
@@ -464,19 +470,25 @@ func (s *server) deleteSkill(r *http.Request) (any, error) {
 	if _, err := tx.Exec(ctx, `DELETE FROM skills WHERE id = $1`, id); err != nil {
 		return nil, err
 	}
+	// Every version's archive, owed by the commit that removes the rows naming
+	// them (plan 50 decision 2, #703). This is the site the old best-effort
+	// shape could lose the most at: N sequential deletes with nothing left to
+	// answer the client with, so a store having a bad day orphaned not the odd
+	// archive that note accepted but every one the skill still had. The sweep
+	// used to outlive the request on context.WithoutCancel to keep a proxy
+	// timeout from doing the same; a queued key needs no live context at all,
+	// which subsumes that argument rather than dropping it.
+	keys := make([]string, 0, len(versions))
+	for _, v := range versions {
+		keys = append(keys, skillBlobKey(id, v))
+	}
+	if err := store.EnqueueObjectDeletes(ctx, tx, keys); err != nil {
+		return nil, err
+	}
 	if err := tx.Commit(ctx); err != nil {
 		return nil, err
 	}
-	// The rows are gone; the archives follow best-effort, the same ordering a
-	// single version delete uses (rare orphans are accepted; GC is a non-goal).
-	// The sweep outlives the request on purpose: it is N sequential deletes
-	// with nothing left to answer the client with, so on the request's own
-	// context a proxy timeout would orphan not the odd archive the plan
-	// accepts but every one the skill still had.
-	sweep := context.WithoutCancel(ctx)
-	for _, v := range versions {
-		s.deleteOrphanedObject(sweep, skillBlobKey(id, v))
-	}
+	s.objectDeletes.Wake()
 	slog.InfoContext(ctx, "skill deleted", "skill_id", id, "versions", len(versions))
 	return map[string]string{"id": id, "type": "skill_deleted"}, nil
 }
@@ -611,7 +623,7 @@ func (s *server) insertSkillVersion(ctx context.Context, id, vid, version string
 		return time.Time{}, fmt.Errorf("store skill archive: %w", err)
 	}
 	if err := tx.Commit(ctx); err != nil {
-		s.deleteOrphanedObject(ctx, key)
+		s.discardUncommittedArchive(ctx, key)
 		return time.Time{}, err
 	}
 	return createdAt, nil
@@ -790,15 +802,18 @@ func (s *server) deleteSkillVersion(r *http.Request) (any, error) {
 		 ), updated_at = now() WHERE id = $1`, id); err != nil {
 		return nil, err
 	}
+	// The archive, owed by the commit that removes the row naming it. The
+	// delete used to run outside the request's cancellation because the row
+	// cannot come back, so a client that gave up after the commit must not
+	// decide whether the object goes with it; a queued key answers that and the
+	// store outage besides.
+	if err := store.EnqueueObjectDeletes(ctx, tx, []string{skillBlobKey(id, version)}); err != nil {
+		return nil, err
+	}
 	if err := tx.Commit(ctx); err != nil {
 		return nil, err
 	}
-	// The row is gone; the archive follows best-effort (plan: rare orphans
-	// are accepted, GC is a non-goal), and outside the request's cancellation
-	// for the same reason the cascade's sweep is: the row cannot come back, so
-	// a client that gave up after the commit must not decide whether the
-	// object it named goes with it.
-	s.deleteOrphanedObject(context.WithoutCancel(ctx), skillBlobKey(id, version))
+	s.objectDeletes.Wake()
 	slog.InfoContext(ctx, "skill version deleted", "skill_id", id, "version", version)
 	// The deleted object's id, like every other id on this surface since the GA
 	// convergence, is the version row's — the numeric no longer appears on the

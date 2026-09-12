@@ -47,6 +47,7 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -109,6 +110,24 @@ const SessionTombstoneInsertSQL = `INSERT INTO deleted_sessions (id, environment
 const PendingObjectDeleteInsertSQL = `INSERT INTO pending_object_deletes (object_key)
 	 SELECT unnest($1::text[])
 	 ON CONFLICT (object_key) DO NOTHING`
+
+// EnqueueObjectDeletes runs that statement on the caller's transaction, and is
+// how every producer should reach it: eight removers write this queue across
+// two packages (#703), and open-coding the Exec at each one is how they came to
+// disagree about the empty set — some guarding, some sending Postgres a
+// zero-length array. The rule lives here once instead. An empty set is not an
+// error and not a statement: a remover that found nothing to remove owes
+// nothing.
+//
+// The transaction is the point, so the parameter is one: a caller with only a
+// pool has nothing to ride and is writing a debt no commit stands behind.
+func EnqueueObjectDeletes(ctx context.Context, tx pgx.Tx, keys []string) error {
+	if len(keys) == 0 {
+		return nil
+	}
+	_, err := tx.Exec(ctx, PendingObjectDeleteInsertSQL, keys)
+	return err
+}
 
 // Open connects to the database at dsn, verifies the connection, and applies
 // any pending migrations. The returned pool is ready for use; the caller

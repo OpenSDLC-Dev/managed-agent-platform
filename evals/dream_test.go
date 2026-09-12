@@ -74,7 +74,7 @@ func startDreamRunner(t *testing.T, s *stack, cfg api.DreamRunnerConfig) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		api.StartDreamRunner(ctx, s.pool, s.blobs, s.cipher, cfg)
+		api.StartDreamRunner(ctx, s.pool, s.blobs, s.cipher, nil, cfg)
 	}()
 	t.Cleanup(func() {
 		cancel()
