@@ -243,6 +243,15 @@ func foldSession(ctx context.Context, q Querier, sessionID domain.ID, t ThreadTr
 		tid = domain.PrimaryThreadID(sessionID)
 	}
 	rows, err := q.Query(ctx,
+		// An archived session's primary is live by this predicate, because the
+		// archive leaves that row alone (#713). No fold over it ever stands: a
+		// fold runs only from a transition, every transition commits through an
+		// append, and an append to an archived session is refused
+		// (ErrSessionArchived). The guarantee is the transaction, not an
+		// ordering — several callers fold first and append after, and the
+		// refusal rolls the fold back with everything else. Anything that ever
+		// commits a transition without passing that refusal inherits this
+		// primary as a live thread.
 		`SELECT id, status, stop_reason FROM session_threads
 		  WHERE session_id = $1 AND archived_at IS NULL AND status <> 'terminated'
 		  ORDER BY created_at, id`, sessionID.String())

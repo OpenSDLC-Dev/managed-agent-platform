@@ -326,7 +326,7 @@ func TestChildThreadViewAndCrossPosts(t *testing.T) {
 
 // Archive rules: the primary is refused, a non-idle child is refused, an idle
 // child terminates with its event cross-posted; idempotent; the session's own
-// archive ends every live child and mirrors onto the primary.
+// archive ends every live child and leaves the primary alone.
 func TestThreadArchive(t *testing.T) {
 	s := newTestServer(t)
 	sid := eventsFixture(t, s)
@@ -434,21 +434,49 @@ func TestThreadArchive(t *testing.T) {
 	status, body = s.do(http.MethodGet, "/v1/sessions/"+sid+"/threads?page="+nextPage(t, evres), nil)
 	wantErr(t, status, body, http.StatusBadRequest, "invalid_request_error")
 
-	// The session's archive: the running child is terminated too, the
-	// primary carries the session's archived_at.
+	// The session's archive: the running child is terminated and archived with
+	// it, the primary is left exactly where it was. The reference leaves its
+	// archived session's primary `idle`, `archived_at` null and `updated_at`
+	// untouched (#713, recorded 2026-09-12), and only the session row moves.
+	var primaryBefore map[string]any
+	for _, th := range listThreads(t, s, sid) {
+		if th["id"] == primary {
+			primaryBefore = th
+		}
+	}
+	if primaryBefore == nil {
+		t.Fatalf("no primary thread before the session's archive")
+	}
 	if status, res := s.do(http.MethodPost, "/v1/sessions/"+sid+"/archive", nil); status != http.StatusOK {
 		t.Fatalf("archive session: %d %v", status, res)
 	}
+	primarySeen := false
 	for _, th := range listThreads(t, s, sid) {
-		if th["archived_at"] == nil {
-			t.Errorf("thread %v not archived with its session", th["id"])
+		if th["id"] == primary {
+			primarySeen = true
+			if th["archived_at"] != nil {
+				t.Errorf("the primary carries archived_at %v after the session's archive; the reference leaves it null", th["archived_at"])
+			}
+			if th["status"] != "idle" {
+				t.Errorf("the primary's status = %v after the session's archive, want idle", th["status"])
+			}
+			if th["updated_at"] != primaryBefore["updated_at"] {
+				t.Errorf("the primary's updated_at moved to %v on the session's archive, want the %v it already had",
+					th["updated_at"], primaryBefore["updated_at"])
+			}
+			continue
 		}
-		if th["id"] != primary && th["status"] != "terminated" {
+		if th["archived_at"] == nil {
+			t.Errorf("child %v not archived with its session", th["id"])
+		}
+		if th["status"] != "terminated" {
 			t.Errorf("child %v status = %v after the session's archive, want terminated", th["id"], th["status"])
 		}
-		if th["id"] == primary && th["status"] == "terminated" {
-			t.Errorf("the primary terminated on session archive; it never does")
-		}
+	}
+	if !primarySeen {
+		// Every assertion above is inside the primary's arm, so a primary
+		// missing from the listing would pass them all by never running them.
+		t.Error("the primary is not in the threads listing after the session's archive")
 	}
 	_, cres = s.do(http.MethodGet, path+running+"/events", nil)
 	if own := listData(t, cres); len(own) != 1 || own[0]["type"] != "session.thread_status_terminated" {
@@ -470,6 +498,52 @@ func TestThreadArchive(t *testing.T) {
 // Deleting a session ends its live children too (decision 12) — the rows go
 // with the session, so the termination is broadcast to the open streams, the
 // child's own and the session's, ahead of session.deleted.
+// Dropping the archive's mirror (#713) put an archived session's primary back
+// inside foldSession's live set — `archived_at IS NULL AND status <> 'terminated'`.
+// Nothing folds it, and that is an invariant rather than an accident: a fold
+// commits only through an event append, and an archived session refuses every
+// append. This pins the half that is not the rendering, so a future path that
+// admits an append to an archived session fails here rather than silently
+// moving a status the wire says is settled.
+func TestAnArchivedSessionsPrimaryIsLiveButNothingFoldsIt(t *testing.T) {
+	s := newTestServer(t)
+	sid := eventsFixture(t, s)
+	if status, res := s.do(http.MethodPost, "/v1/sessions/"+sid+"/archive", nil); status != http.StatusOK {
+		t.Fatalf("archive: %d %v", status, res)
+	}
+	_, before := s.do(http.MethodGet, "/v1/sessions/"+sid, nil)
+
+	// Live by the fold's own predicate: the archive left the row alone.
+	var primary map[string]any
+	for _, th := range listThreads(t, s, sid) {
+		if th["parent_thread_id"] == nil {
+			primary = th
+		}
+	}
+	if primary == nil {
+		t.Fatal("no primary thread after the archive")
+	}
+	if primary["archived_at"] != nil || primary["status"] == "terminated" {
+		t.Fatalf("the primary is outside the fold's live set: %v", primary)
+	}
+
+	// The append that would carry a fold is refused, so the fold never stands.
+	status, res := s.do(http.MethodPost, "/v1/sessions/"+sid+"/events", map[string]any{
+		"events": []any{map[string]any{"type": "user.message",
+			"content": []any{map[string]any{"type": "text", "text": "after the archive"}}}}})
+	wantErr(t, status, res, http.StatusBadRequest, "invalid_request_error")
+	inner, _ := res["error"].(map[string]any)
+	if msg, _ := inner["message"].(string); !strings.Contains(msg, "archived") {
+		t.Errorf("message %q must say the session is archived", msg)
+	}
+
+	_, after := s.do(http.MethodGet, "/v1/sessions/"+sid, nil)
+	if after["status"] != before["status"] || after["updated_at"] != before["updated_at"] {
+		t.Errorf("the refused append moved the session: %v/%v then %v/%v",
+			before["status"], before["updated_at"], after["status"], after["updated_at"])
+	}
+}
+
 func TestSessionDeleteEndsLiveChildren(t *testing.T) {
 	s := newTestServer(t)
 	sid := eventsFixture(t, s)

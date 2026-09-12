@@ -4,15 +4,16 @@ What is being worked on right now, and how far along it is — nothing else. **S
 
 ## Active work
 
-**[#703](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/703) — the last object
-deletes that orphaned on a store refusal.** No plan file: the mechanism is
-[plan 50](./docs/plan/50_object-delete-retry.md)'s, archived, and this replicates it across the
-call sites it did not reach. #693 is folded in here.
+**Aligning the archive's endings with the reference**, the three issues a 2026-09-12 recording
+left decided: the reference reports an archived session `terminated` over a primary it leaves
+unarchived, and this platform reports neither — it archived the primary instead.
+#713 lands the thread row, #710 the session status as a read-time projection from
+`archived_at`, #574 the listing that follows from it. The recording and what it settled are in
+[docs/DIVERGENCES.md](./docs/DIVERGENCES.md)'s INFERRED section under #78.
 
 ## Tasks
 
-- [x] The six call sites enqueue on their deleting transaction: `deleteFile`, the dream close
-      and settle, the skill and skill-version deletes, and the harvest's snapshot replacement
-- [x] The never-committed rollbacks keep the best-effort delete, under helpers renamed to say
-      so — `discardUncommittedObject` and `discardUncommittedArchive`
-- [ ] Verifier, both reviewers, PR, CI, merge
+- [x] #713 — the session archive stops mirroring `archived_at`/`updated_at` onto the primary
+- [ ] #710 — render `terminated` when `archived_at` is set, and retire the reaper tier, its
+      fixture-only test and the four docs that describe an ending the column never holds
+- [ ] #574 — whether the default session listing hides `terminated`, once #710 produces one

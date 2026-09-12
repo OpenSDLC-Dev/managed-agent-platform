@@ -1,0 +1,36 @@
+-- A session archive no longer stamps its archived_at onto the primary thread
+-- row (#713): the reference leaves that row alone, and a recording settled it.
+-- Dropping the write only fixes sessions archived from here on. Two earlier
+-- writers already filled the column on rows that exist now — the archive path
+-- itself, for every session archived before this migration, and 0025's
+-- backfill, which mirrored each session's archived_at onto the primary it
+-- created. Without this, one deployment renders two behaviors: a session
+-- archived last week keeps an archived primary, one archived tomorrow does
+-- not.
+--
+-- Safe as an unconditional clear, because nothing else writes the column on a
+-- primary: POST /v1/sessions/{id}/threads/{tid}/archive refuses the primary
+-- ("archive the session"), so a child's archive can never land here, and the
+-- WHERE keeps every child row untouched.
+--
+-- updated_at is not restored. The old mirror moved it to the archive time and
+-- what it held before is not recorded anywhere, so it stays where it is: a
+-- timestamp that once moved for a reason the code no longer has. Only rows
+-- archived before this migration carry it, and nothing reads it to decide
+-- anything.
+--
+-- A rolling upgrade can put this back on a row. The control plane is an
+-- ordinary Deployment, so an old replica still running the mirror may archive a
+-- session after this has run, and a recorded migration does not run twice; that
+-- session keeps the stamp. The guard that would prevent it — a CHECK that the
+-- column is null on a primary — cannot go here, because it would fail those old
+-- replicas' archives outright and turn a stale timestamp into failed requests
+-- for the length of every rollout. It belongs in a release where no writer of
+-- the mirror is left (#720).
+--
+-- archived_at IS NOT NULL keeps this off the rows that do not need it: without
+-- it every primary in the table is rewritten, new tuples and WAL for each, and
+-- this repository applies pending migrations in one transaction at startup.
+UPDATE session_threads
+   SET archived_at = NULL
+ WHERE parent_thread_id IS NULL AND archived_at IS NOT NULL;
