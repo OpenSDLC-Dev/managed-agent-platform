@@ -124,11 +124,11 @@ services:
   controlplane:
     <<: *app
     command: /controlplane
-    # The chart's terminationGracePeriodSeconds, for the same reason: an orderly
-    # exit drains HTTP — up to 10s, the bound cmd/controlplane gives its own
-    # Shutdown — and then cancels the background sweeps. Compose's own default
-    # is that same 10s, so it would land exactly on the boundary and kill a
-    # drain that used all of it.
+    # The chart's terminationGracePeriodSeconds, for the same reason: SIGTERM
+    # cancels the background sweeps at once while HTTP drains under its own 10s
+    # bound, and the pool close can then wait on a slow handler's connection.
+    # Compose's own default is that same 10s, so it would land exactly on the
+    # drain's boundary.
     stop_grace_period: 60s
     environment:
       <<: *app-env

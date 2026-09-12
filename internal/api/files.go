@@ -116,16 +116,16 @@ func checkFileID(id string) error {
 // landed (or just left). A failure here leaves a rare orphaned object, accepted
 // and documented in the plan — GC is a non-goal on this path.
 //
-// Two things beside it now remove objects on a schedule, and neither is the
-// exception it looks like. The expired-file sweep (fileretention.go) removes
-// objects their own row still names, on a lifecycle the client asked for at
-// upload; plan 50's queue removes objects a session delete recorded before it
-// took their rows away. This note is about the objects left when neither
-// happened — a row that never landed — which nothing can enumerate and nothing
-// wrote down.
+// What removes objects on a schedule is one thing, and it is not an exception
+// to this note: plan 50's drain removes what a committed transaction wrote down
+// as owed — a session delete's keys, and now the expired-file sweep's, that
+// sweep having stopped deleting objects itself (#696). This note is about the
+// objects nothing wrote down, because there was no committed row to write them
+// against: a row that never landed, which nothing can enumerate.
 //
-// Not enqueuing this one is deliberate rather than an omission, because this
-// delete has to be allowed to fail. deleteOrphanedFile runs on the request
+// Not enqueuing is deliberate rather than an omission for the caller this note
+// was written for — insertFile's rollback — because that delete has to be
+// allowed to fail. deleteOrphanedFile runs on the request
 // context (like the skills registry's deleteOrphanedObject): when
 // insertFile's commit fails ambiguously — a cancelled or dropped context, where
 // Postgres may in fact have committed — that same cancelled context makes this
@@ -135,6 +135,11 @@ func checkFileID(id string) error {
 // would "fix" the benign orphan leak at the same cost. Preserving the object is
 // the correct trade (a definite commit rejection leaves the context live, so
 // the orphan is still cleaned).
+//
+// That argument covers one of this helper's three callers. deleteFile and the
+// dream runner reach it with their rows already committed, so the object is
+// definitely orphaned and a retry could damage nothing — they are the sites
+// #703 records as still owing the queue a debt they do not record.
 func (s *server) deleteOrphanedFile(ctx context.Context, key string) {
 	if err := s.blobs.Delete(ctx, key); err != nil {
 		slog.WarnContext(ctx, "file orphaned in object storage", "key", key, "err", err)

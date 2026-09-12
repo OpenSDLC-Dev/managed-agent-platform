@@ -155,6 +155,14 @@ func SetFilePurgeBeforeCommitHookForTest(f func() error) (restore func()) {
 	return func() { filePurgeBeforeCommitHook = nil }
 }
 
+// SetFilePurgeAfterCommitHookForTest installs a hook fired between the sweep's
+// commit and its return — the window where an enqueue that had moved after the
+// commit is visible as an empty queue, and the only window in which it is.
+func SetFilePurgeAfterCommitHookForTest(f func()) (restore func()) {
+	filePurgeAfterCommitHook = f
+	return func() { filePurgeAfterCommitHook = nil }
+}
+
 // SetFilePurgeBatchForTest shrinks one sweep's batch, so a test can see which
 // rows a batch takes — at the production size every expired row fits in one and
 // the order is unobservable.

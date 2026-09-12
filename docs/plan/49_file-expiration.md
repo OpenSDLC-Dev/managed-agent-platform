@@ -13,7 +13,7 @@ issue: "#655"
 > expiry and why "GC is a non-goal" survives a sweep that deletes files.
 >
 > **Superseded on one point (#696, plan 50).** The as-built sweep no longer deletes objects at
-> all. Decision 2's design — a `RETURNING` drain and then a best-effort `blobs.Delete` per id,
+> all. Slice 2's design — a `RETURNING` drain and then a best-effort `blobs.Delete` per id,
 > orphan accepted — is what this file argues, and the sweep now enqueues those keys in the
 > transaction that removes the rows instead, leaving the bytes to the object-delete drain. Why
 > the bytes go at the purge rather than at the expiry is untouched by that; which component

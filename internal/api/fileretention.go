@@ -140,6 +140,18 @@ func StartFileRetention(ctx context.Context, pool *pgxpool.Pool, q *ObjectDelete
 // while both are still uncommitted.
 var filePurgeBeforeCommitHook func() error
 
+// filePurgeAfterCommitHook is the other half of that seam, fired between the
+// commit and the sweep's return; nil in production. It is where "a sweep that
+// commits cannot fail to owe" is actually checked: an enqueue moved to after
+// the commit — which reopens the crash window this whole change closes, a
+// process dying between the two writes — leaves the queue empty at this instant
+// and full by the time the caller could look.
+//
+// Which is why nothing may be written between the commit and this call: a write
+// placed there is the one version of that mistake the seam cannot see, and a
+// probe confirmed it survives every rung.
+var filePurgeAfterCommitHook func()
+
 // purgeExpiredFiles removes one batch of files whose grace window has elapsed
 // and, in the same transaction, records what those removals leave owed.
 //
@@ -154,8 +166,9 @@ var filePurgeBeforeCommitHook func() error
 //
 // So this sweep touches no object store, and nothing it does is best-effort.
 // The old order it inherited — row first, object after, orphan accepted — is
-// still deleteFile's and the dream runner's, where one request or one dream
-// orphans a handful rather than a batch of a thousand (#703).
+// still deleteFile's and the dream runner's (#703), where a request orphans one
+// object and a dream up to its hundred transcripts plus an index, rather than a
+// batch of a thousand.
 //
 // The window is a duration subtracted from the database's own clock, never a
 // timestamp computed here: expires_at was itself computed from that clock at
@@ -205,6 +218,10 @@ func purgeExpiredFiles(ctx context.Context, pool *pgxpool.Pool, retention time.D
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return 0, err
+	}
+	// Test seam: read the queue in exactly this window. nil in production.
+	if filePurgeAfterCommitHook != nil {
+		filePurgeAfterCommitHook()
 	}
 	recordExpiredFilesPurged(ctx, len(ids))
 	return len(ids), nil

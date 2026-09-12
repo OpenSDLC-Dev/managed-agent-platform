@@ -1,9 +1,10 @@
 - **The expired-file sweep can no longer lose the objects it orphans** — it removed a
-  file's row and then deleted the object best-effort, which left two ways for a batch to
+  file's row and then deleted the object best-effort, which left three ways for a batch to
   vanish without trace: a shutdown landing while the statement's ids were still being read
-  could commit the removal and lose the ids with it, and a store refusing every key of a
-  healthy sweep did the same for up to a thousand objects an hour, logging counts and no
-  ids. Either way nothing in any tier still named those objects. The sweep now records the
+  could commit the removal and lose the ids with it, a store refusing every key of a healthy
+  sweep did the same for up to a thousand objects an hour while logging counts and no ids,
+  and a process dying between the two steps did it without either going wrong. However it
+  happened, nothing in any tier still named those objects. The sweep now records the
   debt instead of paying it — one `pending_object_deletes` row per object, written in the
   transaction that removes the file rows — so the removal and the record commit together or
   not at all, and the object-delete drain that already serves session deletes retries each

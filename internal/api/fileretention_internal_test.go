@@ -5,6 +5,7 @@ import (
 	"errors"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -194,22 +195,124 @@ func TestThePurgeDebtRidesTheDeletingTransaction(t *testing.T) {
 	window := 30 * 24 * time.Hour
 	id := seedExpiredFile(t, pool, nil, window+time.Hour)
 
-	owedBefore := -1
+	// Both sides, and the second is the one that costs something to give up:
+	// reading only before the commit and again after the call returned would
+	// pass an enqueue that runs after the commit, which is exactly the window a
+	// process death reopens.
+	before, after := -1, -1
 	t.Cleanup(SetFilePurgeBeforeCommitHookForTest(func() error {
-		owedBefore = len(owedKeys(t, pool))
+		before = len(owedKeys(t, pool))
 		return nil
 	}))
+	t.Cleanup(SetFilePurgeAfterCommitHookForTest(func() { after = len(owedKeys(t, pool)) }))
+
 	if _, err := purgeExpiredFiles(ctx, pool, window); err != nil {
 		t.Fatalf("purge: %v", err)
 	}
-	switch {
-	case owedBefore < 0:
-		t.Fatal("the sweep committed without reaching the before-commit seam")
-	case owedBefore > 0:
-		t.Errorf("%d key(s) were visible outside the sweep's transaction before it committed: the enqueue is running beside the transaction", owedBefore)
+	if before < 0 || after < 0 {
+		t.Fatal("the sweep answered without reaching both sides of its commit")
+	}
+	if before > 0 {
+		t.Errorf("%d key(s) were visible outside the sweep's transaction before it committed: the enqueue is running beside the transaction", before)
+	}
+	if after != 1 {
+		t.Errorf("the queue owes %d key(s) the instant the commit returned, want 1: an enqueue after the commit leaves this window empty", after)
 	}
 	if got := owedKeys(t, pool); !slices.Equal(got, []string{blob.FilesKey(id)}) {
-		t.Errorf("the queue owes %v the instant the commit returned, want exactly the purged key", got)
+		t.Errorf("the queue owes %v, want exactly the purged key", got)
+	}
+}
+
+// TestACancelledPurgeKeepsItsRows is #696 in its own shape rather than in an
+// injected error's: a shutdown landing inside the sweep, after the DELETE and
+// before the commit. The rollback then runs on a context that is already dead,
+// which is the case the issue describes and the one an ordinary failure does
+// not reach.
+func TestACancelledPurgeKeepsItsRows(t *testing.T) {
+	pool := pgtest.NewPool(t)
+	window := 30 * 24 * time.Hour
+	id := seedExpiredFile(t, pool, nil, window+time.Hour)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	t.Cleanup(SetFilePurgeBeforeCommitHookForTest(func() error {
+		cancel()
+		return nil
+	}))
+	if _, err := purgeExpiredFiles(ctx, pool, window); err == nil {
+		t.Fatal("a sweep cancelled before its commit reported success")
+	}
+
+	var exists bool
+	if err := pool.QueryRow(context.Background(),
+		`SELECT EXISTS (SELECT 1 FROM files WHERE id = $1)`, id).Scan(&exists); err != nil {
+		t.Fatal(err)
+	}
+	if !exists {
+		t.Errorf("%s went with a cancelled sweep: its object is now unreferenced and unrecorded", id)
+	}
+	if got := owedKeys(t, pool); len(got) != 0 {
+		t.Errorf("the queue owes %v after a cancelled sweep", got)
+	}
+}
+
+// TestAHeldPurgeDoesNotBlockAnotherReplica pins what holding the transaction
+// open across the enqueue costs, which is the one thing this change could have
+// broken about concurrency. FOR UPDATE SKIP LOCKED holds the batch's rows until
+// the transaction ends rather than until the statement does, so a second
+// replica has to skip them and take its own batch — not wait. If it waited, the
+// sweeps would serialize across replicas at the production batch of a thousand.
+func TestAHeldPurgeDoesNotBlockAnotherReplica(t *testing.T) {
+	restore := SetFilePurgeBatchForTest(1)
+	defer restore()
+
+	pool := pgtest.NewPool(t)
+	window := 30 * 24 * time.Hour
+	oldest := seedExpiredFile(t, pool, nil, window+72*time.Hour)
+	newer := seedExpiredFile(t, pool, nil, window+24*time.Hour)
+
+	held, release := make(chan struct{}), make(chan struct{})
+	var arrived atomic.Bool
+	t.Cleanup(SetFilePurgeBeforeCommitHookForTest(func() error {
+		// Only the first sweep waits; the second must run straight through.
+		if arrived.CompareAndSwap(false, true) {
+			close(held)
+			<-release
+		}
+		return nil
+	}))
+
+	first := make(chan error, 1)
+	go func() {
+		_, err := purgeExpiredFiles(context.Background(), pool, window)
+		first <- err
+	}()
+	<-held
+
+	// A deadline rather than a bare context: if SKIP LOCKED stopped applying,
+	// the failure should be this rung reporting a wait, not a suite that hangs.
+	secondCtx, cancelSecond := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancelSecond()
+	n, err := purgeExpiredFiles(secondCtx, pool, window)
+	if err != nil {
+		close(release)
+		<-first
+		t.Fatalf("the second sweep waited on the first's open transaction: %v", err)
+	}
+	if n != 1 {
+		close(release)
+		<-first
+		t.Fatalf("the second sweep took %d rows, want the one the first is not holding", n)
+	}
+
+	close(release)
+	if err := <-first; err != nil {
+		t.Fatalf("the held sweep: %v", err)
+	}
+	want := []string{blob.FilesKey(newer), blob.FilesKey(oldest)}
+	slices.Sort(want)
+	if got := owedKeys(t, pool); !slices.Equal(got, want) {
+		t.Errorf("the queue owes %v, want both batches' keys %v", got, want)
 	}
 }
 
@@ -261,6 +364,12 @@ func TestTheSweepWakesTheDrain(t *testing.T) {
 
 	select {
 	case <-q.waits():
+		// And the debt is already there: a wake raised before the commit, or
+		// after a sweep that removed nothing, would tell the drain to look at
+		// an empty queue.
+		if got := owedKeys(t, pool); len(got) != 1 {
+			t.Errorf("the drain was woken with %v owed, want the batch that had just committed", got)
+		}
 	case <-time.After(10 * time.Second):
 		t.Error("the sweep committed a batch and never woke the drain, which then waits out its own interval for work this replica already knows about")
 	}
