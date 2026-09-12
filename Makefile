@@ -20,7 +20,7 @@ SHELL := /usr/bin/env bash
 .PHONY: build crossbuild vet fmt-check test cover-gate verify eval \
 	changelog changelog-notes changelog-archive \
 	release-tag-check release-images release-chart-check release-chart release-binaries \
-	openbao-init-test cd-outcome-test parked-test retry-test identifiers-test pins-test registry-check \
+	openbao-init-test cd-outcome-test parked-test retry-test identifiers-test pins-test registry-check sdk-bump-report \
 	gcp-fmt gcp-validate gcp-split-check gcp-lint gcp-bootstrap-test gcp-dbinit-test gcp-split-check-test gcp-power-test gcp-tfvars-test gcp-env-targets-test gcp-foundation-apply gcp-bootstrap gcp-env-apply gcp-db-init gcp-env-destroy gcp-env-rebuild \
 	gcp-require-project gcp-env-tfvars gcp-env-migrate-state gcp-env-init gcp-env-vars-match \
 	gcp-env-stop gcp-env-start gcp-env-status
@@ -160,6 +160,23 @@ changelog-archive:
 # (the repository is public) and only raises the API rate limit.
 registry-check:
 	go run ./tools/registrycheck -issues
+
+# The SDK-citation report (plan 51, #722): every symbol anchor the registry and
+# the Go comments carry into a module go.mod pins, resolved against that pin,
+# plus the line spans the sources contradict, the lag behind the pin and
+# everything the run could not check. Offline, which is why it depends on `build`: the pinned module
+# has to be materialised before `go list -m` can find it with the proxy refused,
+# and on a cold runner just after a bump nothing else would have fetched it.
+#
+# Outside the gate on purpose: at gate time a symbol that has vanished is not yet
+# a defect, since the entry may describe a version where it existed, and
+# reddening until every such claim is re-verified is the thing plan 51 removes.
+# The shape and pin-resolution rungs do run inside `make verify`, through the
+# package's own test, but they do not fail it until slice 4, because the corpus
+# they will govern is not migrated yet — and a green gate prints nothing of what
+# they found. This target prints it, above the report.
+sdk-bump-report: build
+	go run ./tools/sdkref -report
 
 # ---------------------------------------------------------------------------
 # Release publishing (docs/RELEASING.md; plan 27). Like the gcp-* group,

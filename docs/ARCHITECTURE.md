@@ -701,3 +701,22 @@ GitHub still knows the issues its provenance cites — events no file in this re
 see. That half is
 `make registry-check` and [`registry.yml`](../.github/workflows/registry.yml), daily and on
 every pull request that touches the registry.
+
+`tools/sdkref` sits on the same seam over the other half of the same file, and over the
+citations written in Go comments beside the code (plan 51). Where registrycheck reads a
+pointer at this repository, sdkref reads a citation into a source this repository does not
+control, at a tag — and keeps that citation's two jobs apart, because they answer a pin
+bump differently: a temporal claim (`since`, `checked against`, `absent at`) and a locator
+inside the source, so a bump moves one and not the other. Shape is syntax — plus which
+files git tracks and which modules `go.mod` requires — and runs in the gate as the
+package's own test. Resolution runs in the gate too, but only at the version `go.mod`
+pins: `make verify` begins with `build`, so that module is guaranteed present while no
+other tag is, and requiring one would put the network in an offline gate. Neither fails
+the gate until the corpus they govern is migrated — the exemption is that corpus, not a
+list of blessed lines, and plan 51's slice 4 is where it ends; until then `make
+sdk-bump-report` prints what they find, above its report. The report is the judgment rung,
+outside the gate — it resolves every anchor into a pinned module against that pin,
+whatever the citation's stamp, falsifies a line span's stated reason against the tag the
+span was written for wherever the module cache already holds it, and only reports, because
+at gate time a symbol that has vanished is not yet a defect, and reddening until every
+such claim is re-verified is the wholesale re-editing the plan removes.
