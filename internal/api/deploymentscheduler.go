@@ -82,8 +82,10 @@ const (
 const deploymentFireConcurrency = 4
 
 // deploymentTickInterval paces the sweep, and is therefore the fire latency:
-// with no jitter (§3.4, registered), an occurrence fires at the first tick
-// that sees it due — 0-30 seconds after its instant. A var so the test binary
+// with no jitter (§3.4, registered), an occurrence fires at the first pass that
+// sees it due — 0-30 seconds after its instant in the steady state, and at once
+// if the pass the loop takes before its first wait is the one that sees it
+// (#699). A var so the test binary
 // can drive the ticker without a wall clock; export_test.go holds the setter.
 var deploymentTickInterval = 30 * time.Second
 
@@ -164,11 +166,20 @@ func StartDeploymentScheduler(ctx context.Context, pool *pgxpool.Pool, blobs blo
 	t := time.NewTicker(deploymentTickInterval)
 	defer t.Stop()
 	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-t.C:
-		}
+		// The pass runs before the first wait rather than after it, which is
+		// memoryretention.go's order and #695's reason: a ticker does not fire
+		// on creation, so every restart costs the deployments a tick. Thirty
+		// seconds is the documented fire latency and mostly harmless, but the
+		// lookup is clamped to now-deploymentCatchupWindow and cron.Due's lower
+		// bound is exclusive, so an occurrence that was inside the window when
+		// the process booted can be outside it one tick later — not late, not
+		// fired, and recorded nowhere (#699). A pass at boot is safe on every
+		// replica at once for this loop's own reason: the occurrence claim is a
+		// unique-index insert, so the losers block briefly and fire nothing.
+		//
+		// The clock read cannot `continue` here: that would skip the wait and
+		// spin against a database that has just refused a statement.
+		//
 		// The one SELECT now() per tick (§4.2): the database's clock, shared
 		// by every replica, is the only one the occurrence math may see.
 		var now time.Time
@@ -176,10 +187,13 @@ func StartDeploymentScheduler(ctx context.Context, pool *pgxpool.Pool, blobs blo
 			if ctx.Err() == nil {
 				slog.WarnContext(ctx, "deployment tick skipped: reading the database clock failed", "error", err)
 			}
-			continue
-		}
-		if err := s.deploymentTick(ctx, now); err != nil && ctx.Err() == nil {
+		} else if err := s.deploymentTick(ctx, now); err != nil && ctx.Err() == nil {
 			slog.WarnContext(ctx, "deployment tick incomplete; the next interval retries", "error", err)
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
 		}
 	}
 }
@@ -299,10 +313,13 @@ func (s *server) deploymentTick(ctx context.Context, now time.Time) error {
 	// The fire's draw on the pool is a slot of the process-wide sweep budget
 	// (sweepBudget, plan 41 §4.1), which is this clamp made shareable: it was
 	// a local MaxConns-2 cap here, and the dream runner sweeping beside this
-	// one would have doubled the reservation away. Two connections are still
-	// always left for the rest of the process — the SSE broker holds one for
-	// its LISTEN loop whenever a subscriber exists — and now for both sweeps
-	// together. deploymentFireConcurrency stays this sweep's own cap on top:
+	// one would have doubled the reservation away. Two connections are left
+	// outside it for the rest of the process — the SSE broker holds one for its
+	// LISTEN loop whenever a subscriber exists — and the two sweeps that share
+	// the budget cannot take those. The three that do not share it can: memory
+	// retention, the expired-file sweep and the object-delete drain take one
+	// connection each, and since #699 all five pass at boot rather than three,
+	// so the boot instant is where that reservation is thinnest. deploymentFireConcurrency stays this sweep's own cap on top:
 	// thirty fires serialized behind one tick would overrun the interval.
 	budget := sweepBudget(s.pool)
 

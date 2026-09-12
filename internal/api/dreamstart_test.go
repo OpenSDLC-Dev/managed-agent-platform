@@ -1000,8 +1000,67 @@ func firstUserMessage(t *testing.T, s *tserver, sessionID string) string {
 	return p.Content[0].Text
 }
 
+// TestDreamRunnerPassesBeforeItsFirstTick: the pass runs before the wait. The
+// interval here is an hour, so a dream that starts inside this test was started
+// by a pass taken at startup. What a missed first tick costs here is not
+// latency: dreamStep measures the timeout from created_at and its timeout arm
+// precedes its start arm, so a dream left pending with less than a tick of
+// budget is failed as `timeout` by the pass that would otherwise have started
+// it (#699).
+func TestDreamRunnerPassesBeforeItsFirstTick(t *testing.T) {
+	s := newTestServer(t)
+	_, body := seededDreamBody(t, s)
+	dreamID := createDream(t, s, body)["id"].(string)
+
+	cfg := dreamCfg()
+	cfg.TickInterval = time.Hour
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { defer close(done); api.StartDreamRunner(ctx, s.pool, s.blobs, nil, cfg) }()
+	defer func() { cancel(); waitForStop(t, done) }()
+
+	deadline := time.Now().Add(30 * time.Second)
+	for getDream(t, s, dreamID)["status"] != "running" {
+		if time.Now().After(deadline) {
+			t.Fatal("the loop is waiting out a first tick an hour away, so a dream created just under its timeout is failed unstarted by the pass that follows")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	// And then it waits. A second dream, created once the first is running, must
+	// be untouched until the tick an hour away — a loop that passed without ever
+	// waiting would take it too and look identical from the status above.
+	//
+	// What is asserted is the claim rather than the status: dreamClaim commits
+	// attempts=1 before the start arm renders anything, so a spinning loop shows
+	// it in milliseconds, where `running` waits out two transcript renders, a
+	// blob put and a session creation and could still be pending at 500ms on a
+	// loaded machine — a barrier the mutant could walk through.
+	_, otherBody := seededDreamBody(t, s)
+	other := createDream(t, s, otherBody)["id"].(string)
+	time.Sleep(500 * time.Millisecond)
+	var attempts int
+	if err := s.pool.QueryRow(context.Background(),
+		`SELECT attempts FROM dreams WHERE id = $1`, other).Scan(&attempts); err != nil {
+		t.Fatal(err)
+	}
+	if attempts != 0 {
+		t.Errorf("a dream created after the startup pass was claimed %d time(s) within the interval: the loop is not waiting between passes", attempts)
+	}
+	if got := getDream(t, s, other)["status"]; got != "pending" {
+		t.Errorf("a dream created after the startup pass is %v within the interval, want pending", got)
+	}
+}
+
 // The loop around the tick: it sweeps on its own interval until its context
 // ends, and stops when it does.
+//
+// It takes two dreams to show the interval half. The loop passes once before
+// its first wait (#699), so the dream that is pending at startup proves only
+// that the loop ran; a loop that passed at boot and then never consumed its
+// ticker again would pass with one subject. The second is created once the
+// first is running, after the startup pass has scanned, so only a tick reaches
+// it.
 func TestStartDreamRunnerTicksAndStops(t *testing.T) {
 	s := newTestServer(t)
 	_, body := seededDreamBody(t, s)
@@ -1013,14 +1072,23 @@ func TestStartDreamRunnerTicksAndStops(t *testing.T) {
 	done := make(chan struct{})
 	go func() { defer close(done); api.StartDreamRunner(ctx, s.pool, s.blobs, nil, cfg) }()
 
-	deadline := time.Now().Add(30 * time.Second)
-	for getDream(t, s, dreamID)["status"] != "running" {
-		if time.Now().After(deadline) {
-			cancel()
-			t.Fatal("the runner loop never started the pending dream")
+	waitForRunning := func(id, what string) {
+		t.Helper()
+		deadline := time.Now().Add(30 * time.Second)
+		for getDream(t, s, id)["status"] != "running" {
+			if time.Now().After(deadline) {
+				cancel()
+				t.Fatal(what)
+			}
+			time.Sleep(20 * time.Millisecond)
 		}
-		time.Sleep(20 * time.Millisecond)
 	}
+	waitForRunning(dreamID, "the runner loop never started the dream that was pending when it started")
+
+	_, secondBody := seededDreamBody(t, s)
+	second := createDream(t, s, secondBody)["id"].(string)
+	waitForRunning(second, "the ticker never started a dream created after the startup pass, so the loop passes once and then sleeps")
+
 	cancel()
 	select {
 	case <-done:
