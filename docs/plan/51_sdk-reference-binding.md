@@ -66,7 +66,10 @@ a convention.
 
 **Name the axes separately, so a bump touches one of them.**
 
-Three temporal forms, and a bump changes none of them:
+Three temporal forms. No bump rewrites any of them on its own; the only edit a
+bump can require is the one-line disposition described under the guard, which
+adds or drops an `absent at` clause and never touches `since` or
+`checked against`:
 
 - `since <source> vX.Y.Z` — the reference has behaved this way from that tag on.
   Twelve Go comments already carry a `since` and a version, though only two name
@@ -96,11 +99,16 @@ Two locator forms:
   **The fallback is earned, not chosen**, and it has to be *checkable* without
   the tag it was written against, because most stamped tags are not fetchable
   offline. So a span carries a reason from a closed set, written by the person
-  migrating it: `crosses-declarations` for a range covering more than one;
-  `no-unique-name` where the enclosing declaration's name repeats in the file,
-  which is the generated-`init` case and not "the file is generated", since every
-  file in the SDK is; `whole-file` for a claim about the file's shape; and
-  `non-go` for a source with no Go declarations to name.
+  migrating it, and every member of the set is a property a parser can check:
+  `crosses-declarations` for a range covering more than one, `no-unique-name`
+  where the enclosing declaration's name repeats in the file — the generated-
+  `init` case, not "the file is generated", since every file in the SDK is — and
+  `non-go` for a source with no Go declarations to name. A claim about a whole
+  file needs no reason and no span: it cites the file and stops
+  (`betasessionevent.go`), which rung 1 accepts as a locator in its own right.
+  There is deliberately no reason meaning "this one is different", because a
+  reason a parser cannot falsify is an escape hatch, and one escape hatch is all
+  a stamp-everything migration needs.
 
   ```
   checked against anthropic-sdk-go v1.66.0 — betasessionevent.go:2931-2980
@@ -108,11 +116,16 @@ Two locator forms:
   ```
 
   Rung 1 checks the reason is present and from the set, which is pure syntax and
-  always decidable. Where the stamped source *is* available — the pin, and
-  whatever else the cache happens to hold — the guard goes further and falsifies
-  the reason: a `crosses-declarations` span that resolves to one declaration is a
-  finding. Without both halves, "symbols are the default" would be prose only —
-  a migration could stamp all 126 coordinates, convert none, and pass every rung,
+  always decidable. Falsifying it — a `crosses-declarations` span that resolves
+  to a single declaration — needs the source, so **it fails the gate only at the
+  pin**, whose module the gate has already materialised. At any other tag it is
+  rung 3's business and reports. That split matters more than it looks: a rung
+  that failed on whatever the local module cache happened to hold would make
+  `make verify` pass or fail by accident of a developer's disk, and would break
+  decision 3's promise that older tags are never required.
+
+  Without the reason, "symbols are the default" would be prose only — a
+  migration could stamp all 126 coordinates, convert none, and pass every rung,
   which would make slice 4 a ceremony. The measurement below is what makes the
   rule affordable: 104 of 104 resolve, so a span is the rare case and its reason
   is worth typing.
@@ -171,10 +184,13 @@ unrelated reasons.
 
 1. **Shape.** A citation into an external source carries one of the three
    temporal forms and a locator, and a bare `file.go:NNN` with no stamp is not a
-   locator. A span additionally carries a reason from the closed set above —
-   always checked for shape, and falsified against the source wherever the guard
-   can reach it.
-2. **Resolution at the pin, with the polarity the form asks for.** For a citation
+   locator. A span additionally carries a reason from the closed set above,
+   checked for shape always and falsified against the source at the pin.
+2. **Resolution at the pin, with the polarity the form asks for.** The pinned
+   module needs no acquisition step: it is in the build graph, so `make verify`
+   has already materialised it by the time any rung runs — `verify` begins with
+   `build` — and `go list -m -f '{{.Dir}}'` then resolves it with `GOPROXY=off`.
+   That is the whole reason the failing rungs stop at the pin. For a citation
    stamped at the version `go.mod` pins, a `since` or `checked against` anchor
    must resolve and an `absent at` anchor must **not** — a negative claim that
    silently starts resolving again is as wrong as a positive one that stops.
