@@ -1343,9 +1343,11 @@ func (s *server) archiveSession(r *http.Request) (any, error) {
 
 // archiveSessionInTx is the archive itself, without the guards the handler
 // runs ahead of it: the session's end ends its live child threads (plan 35
-// decision 12) — before the archive mark, which closes the log to appends —
-// and the primary's archived_at mirrors the session's. Idempotent, because
-// both stamps are COALESCEd.
+// decision 12) — before the archive mark, which closes the log to appends.
+// The primary is left exactly as it was, which is what the reference does: its
+// archived session's primary stays idle, archived_at null, updated_at at
+// whatever the thread's own last change set it to (#713, recorded 2026-09-12).
+// Idempotent, because both of the session's stamps are COALESCEd.
 //
 // The dream runner's closing arm shares it (plan 41 §4.1 arm 1), where
 // requireNotDreamOwned would refuse the runner itself and the not-running
@@ -1371,12 +1373,6 @@ func (s *server) archiveSessionInTx(ctx context.Context, tx pgx.Tx, id string) (
 		   archived_at = COALESCE(archived_at, now())
 		 WHERE id = $1 RETURNING `+sessionColumns, id))
 	if err != nil {
-		return sessionRow{}, err
-	}
-	if _, err := tx.Exec(ctx,
-		`UPDATE session_threads SET archived_at = $2, updated_at = $3
-		  WHERE session_id = $1 AND parent_thread_id IS NULL AND archived_at IS NULL`,
-		id, row.archivedAt, row.updatedAt); err != nil {
 		return sessionRow{}, err
 	}
 	// An archived session's sandbox is the reaper's too, so the ending wakes

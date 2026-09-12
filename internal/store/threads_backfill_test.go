@@ -67,10 +67,12 @@ func TestSessionThreadsBackfillsLegacySessions(t *testing.T) {
 		Scan(&id, &name, &status, &parent, &agent, &usage, &createdAt, &updatedAt, &archivedAt); err != nil {
 		t.Fatalf("backfilled primary thread: %v", err)
 	}
+	// 0040 clears archived_at on every primary: 0025 backfilled the session's
+	// onto this row, and a primary is not a thing that archives (#713).
 	if id != "sthr_0123456789abcdefghjkmnpqrs" || name != "legacy" || status != "idle" ||
 		parent != nil || agent != nil || string(usage) != `{"input_tokens": 7}` ||
 		!strings.HasPrefix(createdAt, "2026-01-02 03:04:05") || !strings.HasPrefix(updatedAt, "2026-01-02 03:04:06") ||
-		archivedAt == nil || !strings.HasPrefix(*archivedAt, "2026-01-02 03:04:07") {
+		archivedAt != nil {
 		t.Errorf("backfilled row = %s %s %s parent=%v agent=%v usage=%s created=%s updated=%s archived=%v",
 			id, name, status, parent, agent, usage, createdAt, updatedAt, archivedAt)
 	}
