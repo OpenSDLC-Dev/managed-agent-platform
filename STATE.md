@@ -4,11 +4,16 @@ What is being worked on right now, and how far along it is — nothing else. **S
 
 ## Active work
 
-**None.** The session-delete family (#646, #354, #645) closed 2026-09-12, the last stream in
-flight; [plan 48](./docs/plan/48_reap-kick.md) and [plan 50](./docs/plan/50_object-delete-retry.md)
-archived with it and their delivery records are in [docs/HISTORY.md](./docs/HISTORY.md). Pick the
-next piece of work from the GitHub issue backlog.
+**Aligning the archive's endings with the reference**, the three issues a 2026-09-12 recording
+left decided: the reference reports an archived session `terminated` over a primary it leaves
+unarchived, and this platform reports neither — it archived the primary instead.
+#713 lands the thread row, #710 the session status as a read-time projection from
+`archived_at`, #574 the listing that follows from it. The recording and what it settled are in
+[docs/DIVERGENCES.md](./docs/DIVERGENCES.md)'s INFERRED section under #78.
 
 ## Tasks
 
-_None — no active work._
+- [x] #713 — the session archive stops mirroring `archived_at`/`updated_at` onto the primary
+- [ ] #710 — render `terminated` when `archived_at` is set, and retire the reaper tier, its
+      fixture-only test and the four docs that describe an ending the column never holds
+- [ ] #574 — whether the default session listing hides `terminated`, once #710 produces one
