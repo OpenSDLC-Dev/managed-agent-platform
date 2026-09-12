@@ -1411,8 +1411,9 @@ func (s *server) archiveSessionInTx(ctx context.Context, tx pgx.Tx, id string) (
 	// two cases are indistinguishable: the stamp is set either way, and an
 	// archive that changed nothing must not claim a session just ended. One
 	// round trip, and the handler's guards have already taken this row FOR
-	// UPDATE by the time it runs; the dream runner's arm holds its dream row
-	// instead, which is what keeps it alone with this session.
+	// UPDATE by the time it runs; the dream runner's closing arm takes the
+	// same lock and re-reads the status under it before calling in (#716).
+	// Both callers hold this row, and a third would have to as well.
 	var alreadyArchived bool
 	if err := tx.QueryRow(ctx,
 		`SELECT archived_at IS NOT NULL FROM sessions WHERE id = $1`, id).Scan(&alreadyArchived); err != nil {

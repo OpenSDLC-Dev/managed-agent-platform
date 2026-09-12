@@ -390,6 +390,8 @@ func (s *server) dreamArmTx(ctx context.Context, id string, now time.Time, cfg D
 		// scan. Not this replica's arm.
 		return dreamStepResult{}, err
 	}
+	// (dreamLockWait above bounds every lock this transaction waits on, the
+	// closing arm's session row included.)
 	if h := dreamHookAfterLock; h != nil {
 		h()
 	}
@@ -635,6 +637,41 @@ func dreamStoreMount(ctx context.Context, db querier, sessionID string) (string,
 // running is interrupted again (idempotent) and the close waits for the next
 // tick — a turn ends, so the wait is bounded by the turn.
 func (s *server) dreamClosingArm(ctx context.Context, tx pgx.Tx, d dreamRow) (dreamStepResult, error) {
+	if d.sessionFound {
+		// lockDream read this session without a lock on its row, which §3.3's
+		// read order makes safe for *choosing* an arm: an ask commits with the
+		// flip to idle, so a stale busy read costs a tick and nothing else. An
+		// archive cannot ride on it. Archiving closes the log to appends, so a
+		// session that went running since that read would be left with a brain
+		// working against a log that refuses it — a state the public path
+		// cannot reach, because it takes this row lock and re-checks under it
+		// (requireNotRunning). Usage comes along: the close below folds it in
+		// and nothing re-reads it afterwards, so a turn that settled since the
+		// snapshot would otherwise be missing from the dream's own total for
+		// good (#716).
+		//
+		// In the arm rather than in lockDream because of the seam, not the
+		// read order: dreamHookAfterLock commits a session transition in the
+		// window between the dream's lock and this one, and a lock held across
+		// that window would wedge the tests that pin §3.3.
+		//
+		// The order is the dream row then the session row, which every path
+		// taking both already follows. The reverse edge exists — deleting a
+		// session cascades to dreams.session_id — but cannot close a cycle:
+		// requireNotDreamOwned refuses that delete while the dream is open,
+		// and it runs before the session lock is taken.
+		switch err := tx.QueryRow(ctx,
+			`SELECT status, archived_at, usage FROM sessions WHERE id = $1 FOR UPDATE`,
+			*d.sessionID).Scan(&d.sessionStatus, &d.sessionArchived, &d.sessionUsage); {
+		case errors.Is(err, pgx.ErrNoRows):
+			// Gone since lockDream read it — unreachable for the reason stated
+			// there, and answered the same way rather than failing every tick
+			// from here on, which would strand the blobs below.
+			d.sessionFound = false
+		case err != nil:
+			return dreamStepResult{}, err
+		}
+	}
 	if d.sessionFound {
 		if d.sessionStatus == string(domain.SessionRunning) {
 			// interruptSessionInTx counts no session-status metric itself —
