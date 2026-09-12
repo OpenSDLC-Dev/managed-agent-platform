@@ -92,9 +92,9 @@ Two locator forms:
   update parameter).
 - **A stamped line span is the named fallback**, not a defeat. At an immutable
   tag a line span is perfectly stable, and some citations have no single symbol
-  to name: `betasessionevent.go:2931-2980` crosses nine declarations, generated
-  union registration puts fifteen `init` functions in `betaagent.go` alone, and
-  a claim can be about a file's shape rather than any declaration in it.
+  to name: `betasessionevent.go:2931-2980` crosses nine declarations, and
+  generated union registration puts fifteen `init` functions in `betaagent.go`
+  alone.
 
   **The fallback is earned, not chosen**, and it has to be *checkable* without
   the tag it was written against, because most stamped tags are not fetchable
@@ -103,12 +103,14 @@ Two locator forms:
   `crosses-declarations` for a range covering more than one, `no-unique-name`
   where the enclosing declaration's name repeats in the file — the generated-
   `init` case, not "the file is generated", since every file in the SDK is — and
-  `non-go` for a source with no Go declarations to name. A claim about a whole
-  file needs no reason and no span: it cites the file and stops
-  (`betasessionevent.go`), which rung 1 accepts as a locator in its own right.
-  There is deliberately no reason meaning "this one is different", because a
-  reason a parser cannot falsify is an escape hatch, and one escape hatch is all
-  a stamp-everything migration needs.
+  `non-go` for a source with no Go declarations to name.
+
+  There is deliberately no reason meaning "this one is different", and no
+  bare-filename locator either. A parser cannot tell a genuine whole-file claim
+  from a declaration-level citation with its line numbers stripped off, so
+  admitting one would hand back a wider version of the hatch this set exists to
+  close. A claim genuinely about a file as a whole makes no citation this
+  grammar governs, and joins the out-of-scope list below.
 
   ```
   checked against anthropic-sdk-go v1.66.0 — betasessionevent.go:2931-2980
@@ -118,11 +120,11 @@ Two locator forms:
   Rung 1 checks the reason is present and from the set, which is pure syntax and
   always decidable. Falsifying it — a `crosses-declarations` span that resolves
   to a single declaration — needs the source, so **it fails the gate only at the
-  pin**, whose module the gate has already materialised. At any other tag it is
-  rung 3's business and reports. That split matters more than it looks: a rung
-  that failed on whatever the local module cache happened to hold would make
-  `make verify` pass or fail by accident of a developer's disk, and would break
-  decision 3's promise that older tags are never required.
+  pin**, whose module the gate has already materialised; at any older tag the
+  cache happens to hold, rung 3 reports it instead. That split matters more than
+  it looks: a rung that failed on whatever a module cache happened to hold would
+  make `make verify` pass or fail by accident of a developer's disk, and would
+  break decision 3's promise that older tags are never required.
 
   Without the reason, "symbols are the default" would be prose only — a
   migration could stamp all 126 coordinates, convert none, and pass every rung,
@@ -214,11 +216,14 @@ resolution rungs, and rung 3 below is what actually watches the corpus.
    anchor that has started resolving again, are the two transitions this plan
    exists to surface. It is possible offline for the anchors that live in a
    module `go.mod` pins and for bundled-spec schema paths, because the pin is the
-   one tag always present; it does not apply to `anthropic-cli` anchors, to
-   in-repo coordinates, or to line spans, whose numbers mean nothing at a tag
-   they were not written for. Those are listed as uncheckable rather than
-   silently skipped — a rung that emits nothing for input it never read is a
-   clean bill of health it did not earn.
+   one tag always present; it does not apply to `anthropic-cli` anchors or to
+   in-repo coordinates. Nor does it resolve a line span against the pin, whose
+   numbers mean nothing at a tag the span was not written for — but where the
+   cache does hold a span's own stamped tag, this rung falsifies its reason
+   there, which is the other half of rung 1 and the only place decision 3's
+   "reported when available" can land. Everything it could not check is listed
+   as uncheckable rather than silently skipped: a rung that emits nothing for
+   input it never read is a clean bill of health it did not earn.
 
    It reports rather than fails, because at gate time a transition is not yet
    known to be a defect: a symbol may be gone precisely because the entry
@@ -244,7 +249,8 @@ a Go module `go.mod` pins — `anthropic-sdk-go`, and the three go-jose coordina
 in `internal/identity` that work the same way — plus the SDK's bundled spec and
 `anthropic-cli`** — the registry also
 cites unversioned public documentation by page and fetch date, dated recordings
-by archive path, and makes comparative claims across three tags at once. Those
+by archive path, claims about a source file as a whole that name no location
+inside it, and comparative claims across three tags at once. Those
 are real citations and they are not this plan's; forcing them into a
 tag-and-symbol grammar would be the category error described below for steering
 documents.
