@@ -4,18 +4,12 @@ What is being worked on right now, and how far along it is — nothing else. **S
 
 ## Active work
 
-**Aligning the archive's endings with the reference**, the three issues a 2026-09-12 recording
-left decided: the reference reports an archived session `terminated` over a primary it leaves
-unarchived, and this platform reports neither — it archived the primary instead.
-#713 lands the thread row, #710 the session status as a read-time projection from
-`archived_at`, #574 the listing that follows from it. The recording and what it settled are in
-[docs/DIVERGENCES.md](./docs/DIVERGENCES.md)'s INFERRED section under #78.
+**none.** Nothing is in flight. Aligning the archive's endings with the reference is finished:
+#713 and #710 as a 2026-09-12 recording left them, #574 as the 2026-09-03 sweep that first
+recorded it did. What each one settled is in [docs/DIVERGENCES.md](./docs/DIVERGENCES.md)'s INFERRED section and in the
+[changelog.d/](./changelog.d/) fragments that ship with them.
+The backlog is [GitHub issues](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues).
 
 ## Tasks
 
-- [x] #713 — the session archive stops mirroring `archived_at`/`updated_at` onto the primary
-- [x] #710 — an archived session renders `terminated`, projected from `archived_at` on the
-      session object and the `statuses[]` filter; the reaper's `terminated` tier stays, since
-      #577 would produce the status it reads
-- [ ] #574 — whether the default listing hides `terminated`; #710 leaves only archived ones,
-      which that listing already excludes, so the open case is a stored one (#577's)
+_None — no active work._
