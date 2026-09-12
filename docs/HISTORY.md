@@ -248,12 +248,17 @@ ignored its context still finished inside it. Tightening the deadline below the
 backoff is what made it a guard rather than a test that passes whatever the code
 does.
 
-Left open: terminate, the third ending, which is written by the brain's
-settlement in another binary (#688); and the cost of a wake, since every
-listening executor sweeps everything it owns, so the reaper's load now follows
-the rate at which sessions end. No debounce was imposed — a sweep per ended
-session is work proportional to work, and a tuning knob invented ahead of a
-measurement is the kind of configurability this repo refuses.
+Left open: the cost of a wake, since every listening executor sweeps
+everything it owns, so the reaper's load now follows the rate at which sessions
+end. No debounce was imposed — a sweep per ended session is work proportional to
+work, and a tuning knob invented ahead of a measurement is the kind of
+configurability this repo refuses. Terminate, deferred to #688 as a third
+ending the brain's settlement writes, was not left open at all: no settlement
+moves a session to `terminated`, which this file had already recorded under
+plan 24's review hardening. #688 closed unbuilt on 2026-09-12, and what the
+closure exposed — `classifyForReap`'s terminated tier reading a status no
+producer writes, and the question of whether the status should exist — is
+#710's.
 
 ## Dreams — the in-place run, and plan 41 closed (plan 41 slice 4, run 2026-09-07) — ✅ passed
 
