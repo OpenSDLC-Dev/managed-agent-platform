@@ -4,12 +4,14 @@ What is being worked on right now, and how far along it is — nothing else. **S
 
 ## Active work
 
-**none.** Nothing is in flight. Aligning the archive's endings with the reference is finished:
-#713 and #710 as a 2026-09-12 recording left them, #574 as the 2026-09-03 sweep that first
-recorded it did. What each one settled is in [docs/DIVERGENCES.md](./docs/DIVERGENCES.md)'s INFERRED section and in the
-[changelog.d/](./changelog.d/) fragments that ship with them.
-The backlog is [GitHub issues](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues).
+**Closing out what the archive-endings cluster left open.** #713, #710 and #574 landed; the
+two issues their reviews filed did not. #716 is a defect and lands now. #720 is the second
+half of a two-phase migration — the CHECK it wants would refuse the archive writes of any
+replica still running the release before #713, so it needs a release between the two, which
+is the release this work also cuts.
 
 ## Tasks
 
-_None — no active work._
+- [x] #716 — the dream closing arm re-reads its session under the row lock before archiving
+- [ ] cut the release that carries #713, #710, #574 and #716 ([docs/RELEASING.md](./docs/RELEASING.md))
+- [ ] #720 — once that release is out: a second one-shot clear, then the primary-unarchived CHECK

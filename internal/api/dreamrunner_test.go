@@ -631,6 +631,159 @@ func TestDreamClosingArmWaitsForARunningSession(t *testing.T) {
 	}
 }
 
+// #716: the closing arm re-reads the session under its own row lock, because
+// lockDream's snapshot is taken without one and can be stale by the time the
+// arm acts. A session that goes running in that window must be interrupted and
+// left for the next tick, never archived — an archive closes the log to
+// appends, and the public archive path refuses a running session under exactly
+// this lock. The tick after it, with the session idle again, closes the dream:
+// what the arm does is defer, not give up.
+func TestDreamClosingArmRereadsTheSessionUnderItsLock(t *testing.T) {
+	s := newTestServer(t)
+	_, body := seededDreamBody(t, s)
+	dreamID, sessionID := startedDream(t, s, body)
+
+	atLastStage(t, s, dreamID)
+	tick(t, s) // completes while idle, so the next tick is the closing arm
+
+	// The window the snapshot leaves open: lockDream has read an idle session
+	// and the arm has not yet decided what to do with it.
+	var once sync.Once
+	restore := api.SetDreamHookAfterLockForTest(func() {
+		once.Do(func() { setSessionStatus(t, s, sessionID, "running") })
+	})
+	defer restore() // the explicit one below is skipped if a tick fails the test
+
+	tick(t, s)
+	restore()
+	if _, _, closedAt := dreamInternals(t, s, dreamID); closedAt != nil {
+		t.Fatal("the closing arm closed over a session that went running after the snapshot")
+	}
+	if !sessionInterrupted(t, s, sessionID) {
+		t.Error("the arm read the session as running but did not interrupt it")
+	}
+	_, sess := s.do(http.MethodGet, "/v1/sessions/"+sessionID, nil)
+	if sess["archived_at"] != nil {
+		t.Errorf("a running session was archived: archived_at = %v", sess["archived_at"])
+	}
+
+	// The deferral is bounded by the turn: once the session settles, the very
+	// next tick closes the dream.
+	setSessionStatus(t, s, sessionID, "idle")
+	tick(t, s)
+	if _, _, closedAt := dreamInternals(t, s, dreamID); closedAt == nil {
+		t.Fatal("the arm deferred the close and never came back for it")
+	}
+}
+
+// ...and the re-read is a locked one. A plain re-read would pass the test
+// above, because the hook commits before the arm resumes and READ COMMITTED
+// shows it the new value either way; what it would not do is exclude a flip
+// landing between the read and the archive. So hold the row, watch the arm
+// block on it, and only then commit the flip — a lock-free statement never
+// waits, which is exactly how this fails if the FOR UPDATE goes. The technique
+// is requireNotRunning's own (sessions_test.go).
+func TestDreamClosingArmWaitsForTheSessionRowLock(t *testing.T) {
+	s := newTestServer(t)
+	_, body := seededDreamBody(t, s)
+	dreamID, sessionID := startedDream(t, s, body)
+
+	atLastStage(t, s, dreamID)
+	tick(t, s) // completes while idle, so the next tick is the closing arm
+
+	ctx := context.Background()
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if _, err := tx.Exec(ctx,
+		`UPDATE sessions SET status = 'running' WHERE id = $1`, sessionID); err != nil {
+		t.Fatalf("hold the session row: %v", err)
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		done <- api.DreamTickForTest(ctx, s.pool, s.blobs, dbNow(t, s), dreamCfg())
+	}()
+
+	// The arm's lock_timeout is dreamLockWait, so the flip has to commit well
+	// inside it; the poll costs milliseconds.
+	waitSQL := `SELECT EXISTS (
+		SELECT 1 FROM pg_stat_activity
+		WHERE datname = current_database()
+		  AND wait_event_type = 'Lock'
+		  AND query LIKE '%FROM sessions%FOR UPDATE%')`
+	for deadline := time.Now().Add(time.Second); ; {
+		select {
+		case err := <-done:
+			t.Fatalf("the arm finished (err %v) without waiting on the held row", err)
+		default:
+		}
+		var waiting bool
+		if err := s.pool.QueryRow(ctx, waitSQL).Scan(&waiting); err != nil {
+			t.Fatalf("poll pg_stat_activity: %v", err)
+		}
+		if waiting {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the closing arm never blocked on the held session row lock")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatalf("commit the flip: %v", err)
+	}
+	if err := <-done; err != nil {
+		t.Fatalf("dream tick: %v", err)
+	}
+
+	if _, _, closedAt := dreamInternals(t, s, dreamID); closedAt != nil {
+		t.Error("the arm archived over a flip that committed while it waited for the lock")
+	}
+}
+
+// ...and usage rides on the same locked read. The close folds the session's
+// usage into the dream and nothing re-reads it afterwards, so a turn settling
+// inside the snapshot window would be missing from the dream's own total for
+// good.
+func TestDreamClosingArmFoldsTheUsageItLocked(t *testing.T) {
+	s := newTestServer(t)
+	_, body := seededDreamBody(t, s)
+	dreamID, sessionID := startedDream(t, s, body)
+
+	atLastStage(t, s, dreamID)
+	tick(t, s) // completes while idle, so the next tick is the closing arm
+
+	// A turn settles in the window: the session stays idle, and its usage
+	// moves past what lockDream sampled.
+	var once sync.Once
+	restore := api.SetDreamHookAfterLockForTest(func() {
+		once.Do(func() {
+			if _, err := s.pool.Exec(context.Background(),
+				`UPDATE sessions SET usage = $2 WHERE id = $1`, sessionID,
+				`{"input_tokens":7,"output_tokens":9,"cache_read_input_tokens":0,`+
+					`"cache_creation":{"ephemeral_1h_input_tokens":0,"ephemeral_5m_input_tokens":0}}`); err != nil {
+				t.Errorf("set session usage: %v", err)
+			}
+		})
+	})
+	defer restore() // the explicit one below is skipped if a tick fails the test
+
+	tick(t, s)
+	restore()
+	if _, _, closedAt := dreamInternals(t, s, dreamID); closedAt == nil {
+		t.Fatal("the closing arm did not close an idle session's dream")
+	}
+	usage := getDream(t, s, dreamID)["usage"].(map[string]any)
+	for key, want := range map[string]float64{"input_tokens": 7, "output_tokens": 9} {
+		if usage[key] != want {
+			t.Errorf("the closed dream's usage.%s = %v, want the locked read's %v", key, usage[key], want)
+		}
+	}
+}
+
 // Cancel is a request-side transition. A pending dream ends and closes in one
 // commit; a running one is interrupted in the cancel's own transaction and
 // left for the closing arm.
