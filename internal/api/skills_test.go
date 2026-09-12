@@ -720,9 +720,13 @@ func TestSkillVersionDeleteRecomputesLatest(t *testing.T) {
 	if status != http.StatusOK || skill["latest_version_id"] != v2 {
 		t.Errorf("after deleting v3, skill = %v, want latest_version_id %q", skill, v2)
 	}
-	// Its archive left object storage with it.
-	if n := s.blobs.Len(); n != 2 {
-		t.Errorf("stored objects = %d, want 2 after deleting one of three versions", n)
+	// Its archive is owed to the sweeper rather than deleted here (#703), so
+	// all three objects are still stored and exactly one of them is owed.
+	if n := s.blobs.Len(); n != 3 {
+		t.Errorf("stored objects = %d, want all 3 still stored: the delete enqueues rather than removing", n)
+	}
+	if got := pendingKeys(t, s.pool); len(got) != 1 {
+		t.Errorf("the version delete owes %v, want exactly the deleted version's archive", got)
 	}
 
 	status, del = s.do("DELETE", "/v1/skills/"+id+"/versions/"+v3, nil)

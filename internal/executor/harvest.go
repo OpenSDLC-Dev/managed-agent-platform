@@ -30,6 +30,7 @@ import (
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/mimetab"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/queue"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/sandbox"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/store"
 	"go.opentelemetry.io/otel/codes"
 )
 
@@ -418,20 +419,31 @@ func (e *Executor) settleHarvest(ctx context.Context, item *queue.Item, files []
 	if err := e.queue.Complete(ctx, tx, item); err != nil {
 		return err
 	}
+	// The replaced snapshot's bytes go unreferenced the moment these deletes
+	// commit, and the ids are the objects' only names — so the debt is written
+	// down by the same transaction, not after it (plan 50 decision 2, #703).
+	// The old shape removed the objects best-effort once the commit had already
+	// taken the names away, which a store having a bad day turned into bytes
+	// nothing could enumerate.
+	//
+	// The executor hosts no drain and no wake channel, and needs neither: the
+	// queue is a table, and the control plane drains whatever any binary wrote
+	// to it. The table is the contract, not the process (#693) — so what this
+	// costs, against the control-plane sites, is the wait for the drain's next
+	// interval rather than a wake, on a path with no client waiting on it.
+	if len(oldIDs) > 0 {
+		keys := make([]string, 0, len(oldIDs))
+		for _, id := range oldIDs {
+			keys = append(keys, blob.FilesKey(id))
+		}
+		if _, err := tx.Exec(ctx, store.PendingObjectDeleteInsertSQL, keys); err != nil {
+			return err
+		}
+	}
 	if err := tx.Commit(ctx); err != nil {
 		return err
 	}
 	published = true
-
-	// The replaced snapshot's bytes went unreferenced the moment the deletes
-	// committed; removing the objects is best-effort residue cleanup, exactly
-	// like a discard.
-	for _, id := range oldIDs {
-		if derr := e.blobs.Delete(ctx, blob.FilesKey(id)); derr != nil {
-			slog.WarnContext(ctx, "executor: could not delete a replaced deliverable blob",
-				"session", item.SessionID, "file", id, "error", derr)
-		}
-	}
 	return nil
 }
 

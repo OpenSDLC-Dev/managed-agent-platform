@@ -4,11 +4,15 @@ What is being worked on right now, and how far along it is — nothing else. **S
 
 ## Active work
 
-**None.** The session-delete family (#646, #354, #645) closed 2026-09-12, the last stream in
-flight; [plan 48](./docs/plan/48_reap-kick.md) and [plan 50](./docs/plan/50_object-delete-retry.md)
-archived with it and their delivery records are in [docs/HISTORY.md](./docs/HISTORY.md). Pick the
-next piece of work from the GitHub issue backlog.
+**[#703](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/703) — the last object
+deletes that orphaned on a store refusal.** No plan file: the mechanism is
+[plan 50](./docs/plan/50_object-delete-retry.md)'s, archived, and this replicates it across the
+call sites it did not reach. #693 is folded in here.
 
 ## Tasks
 
-_None — no active work._
+- [x] The six call sites enqueue on their deleting transaction: `deleteFile`, the dream close
+      and settle, the skill and skill-version deletes, and the harvest's snapshot replacement
+- [x] The never-committed rollbacks keep the best-effort delete, under helpers renamed to say
+      so — `discardUncommittedObject` and `discardUncommittedArchive`
+- [ ] Verifier, both reviewers, PR, CI, merge

@@ -21,6 +21,7 @@ import (
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/events"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/secrets"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/store"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/transcript"
 )
 
@@ -234,9 +235,14 @@ type dreamStepResult struct {
 	// rule again: recorded after the commit, never before.
 	sessionMoves []domain.SessionStatus
 	// after runs once the transaction has committed, still on the arm's
-	// budget slot: the start arm's render-and-write, the closing arm's blob
-	// deletes.
+	// budget slot: the start arm's render-and-write.
 	after func(context.Context)
+	// wakeObjectDeletes asks the sweeper to drain now rather than at its next
+	// interval, for an arm whose commit enqueued object keys. Same rule as the
+	// two above — after the commit, never before — and for the same reason
+	// deleteSession wakes there: non-blocking and infallible, bringing forward
+	// only what this replica's own interval would do anyway.
+	wakeObjectDeletes bool
 }
 
 // dreamTick runs one sweep at the given instant: scan the candidates, then run
@@ -348,6 +354,12 @@ func (s *server) runDreamArm(ctx context.Context, id string, now time.Time, cfg 
 	}
 	for _, st := range res.sessionMoves {
 		events.RecordSessionStatus(ctx, st)
+	}
+	// Before res.after, which on the start arm renders and writes: the keys are
+	// visible the instant dreamArmTx's commit returned, and nothing after this
+	// point needs to finish first for the sweeper to find them.
+	if res.wakeObjectDeletes {
+		s.objectDeletes.Wake()
 	}
 	if res.after != nil {
 		res.after(ctx)
@@ -636,8 +648,7 @@ func (s *server) dreamClosingArm(ctx context.Context, tx pgx.Tx, d dreamRow) (dr
 			}
 		}
 	}
-	keys, err := deleteDreamFileRows(ctx, tx, d.id)
-	if err != nil {
+	if err := enqueueDreamBlobs(ctx, tx, d.id); err != nil {
 		return dreamStepResult{}, err
 	}
 	usage, err := dreamUsageOf(d)
@@ -649,9 +660,11 @@ func (s *server) dreamClosingArm(ctx context.Context, tx pgx.Tx, d dreamRow) (dr
 		  WHERE id = $1`, d.id, usage); err != nil {
 		return dreamStepResult{}, err
 	}
-	// The objects follow the rows after the commit, best-effort, the order
-	// deleteFile gives the two (rare orphans accepted, GC a non-goal).
-	return dreamStepResult{after: func(ctx context.Context) { s.deleteDreamBlobs(ctx, keys) }}, nil
+	// The objects were written down as owed by the statement above's own
+	// transaction rather than deleted after it, which is what deleteFile does
+	// too: the transcript ids are the objects' only names, and this commit is
+	// what takes them away (#703).
+	return dreamStepResult{wakeObjectDeletes: true}, nil
 }
 
 // dreamCompleteArm is arm 10: the end-of-stage checks of §3.3, then completed.
@@ -753,13 +766,10 @@ func (s *server) dreamSettle(ctx context.Context, tx pgx.Tx, d dreamRow, status 
 	}
 	res := dreamStepResult{to: status}
 	if !d.sessionFound {
-		keys, err := deleteDreamFileRows(ctx, tx, d.id)
-		if err != nil {
+		if err := enqueueDreamBlobs(ctx, tx, d.id); err != nil {
 			return dreamStepResult{}, err
 		}
-		if len(keys) > 0 {
-			res.after = func(ctx context.Context) { s.deleteDreamBlobs(ctx, keys) }
-		}
+		res.wakeObjectDeletes = true
 	}
 	return res, nil
 }
@@ -1002,27 +1012,38 @@ func mirrorDreamUsage(ctx context.Context, tx pgx.Tx, d dreamRow) error {
 // deleteDreamFileRows removes the dream's transcript rows and returns the
 // object keys the caller deletes after the commit (§4.5). Their ownership is
 // the dream's, not the session's, so they go whether or not a session remains.
-func deleteDreamFileRows(ctx context.Context, tx pgx.Tx, dreamID string) ([]string, error) {
+// enqueueDreamBlobs removes a dream's file rows and, on the same transaction,
+// records the objects they named as owed (plan 50 decision 2, #703). The two
+// halves were separate once — the rows inside the commit, the objects after it,
+// best-effort — which is the shape that lost a transcript's key whenever the
+// store refused: up to dreamSessionsMax transcripts plus the index, and the ids
+// that named them gone with the rows.
+//
+// An empty set enqueues nothing rather than an empty array, so a dream that
+// wrote no files leaves the statement unrun rather than sending Postgres a
+// zero-length unnest.
+func enqueueDreamBlobs(ctx context.Context, tx pgx.Tx, dreamID string) error {
 	rows, err := tx.Query(ctx, `DELETE FROM files WHERE dream_id = $1 RETURNING id`, dreamID)
 	if err != nil {
-		return nil, err
+		return err
 	}
 	defer rows.Close()
 	var keys []string
 	for rows.Next() {
 		var id string
 		if err := rows.Scan(&id); err != nil {
-			return nil, err
+			return err
 		}
 		keys = append(keys, blob.FilesKey(id))
 	}
-	return keys, rows.Err()
-}
-
-func (s *server) deleteDreamBlobs(ctx context.Context, keys []string) {
-	for _, k := range keys {
-		s.deleteOrphanedFile(ctx, k)
+	if err := rows.Err(); err != nil {
+		return err
 	}
+	if len(keys) == 0 {
+		return nil
+	}
+	_, err = tx.Exec(ctx, store.PendingObjectDeleteInsertSQL, keys)
+	return err
 }
 
 // setDreamLockWait bounds every dream-row lock wait in tx. SET cannot be

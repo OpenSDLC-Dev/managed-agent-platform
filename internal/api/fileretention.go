@@ -20,11 +20,12 @@ import (
 // half out of a predicate every reader composes; this is the second, and it is
 // the only thing in this platform that removes a file nobody asked to remove.
 //
-// That reverses nothing. deleteOrphanedFile's "GC is a non-goal" note is about
-// objects whose row never landed — accidents nobody can enumerate, where a
-// sweep would have to guess what is live. An expired file is the opposite: the
-// row names the object, and the deletion is the lifecycle the client bought at
-// upload. The note stays true where it stands.
+// That reverses nothing. discardUncommittedObject is about objects whose row
+// never committed — accidents nobody can enumerate, where a sweep would have to
+// guess what is live. An expired file is the opposite: the row names the
+// object, and the deletion is the lifecycle the client bought at upload. That
+// helper's argument stays true where it stands, and is now the only thing left
+// on this side of the line (#703).
 //
 // It lives beside the file routes for memoryretention.go's reason — it is
 // written from the same facts they are — and the controlplane hosts it because

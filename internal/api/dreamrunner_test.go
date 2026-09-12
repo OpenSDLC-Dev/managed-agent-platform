@@ -3,10 +3,10 @@ package api_test
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -452,9 +452,10 @@ func TestDreamTickArms(t *testing.T) {
 				if left := dreamFileIDs(t, s, dreamID); len(left) != 0 {
 					t.Errorf("%d transcript rows survived the close that had no session to wind down", len(left))
 				}
+				owed := pendingKeys(t, s.pool)
 				for _, id := range fileIDs {
-					if _, _, err := s.blobs.Get(context.Background(), blob.FilesKey(id)); !errors.Is(err, blob.ErrNotFound) {
-						t.Errorf("object for %s survived the close: %v", id, err)
+					if !slices.Contains(owed, blob.FilesKey(id)) {
+						t.Errorf("the close owes %v, want the object for %s among them", owed, id)
 					}
 				}
 			}
@@ -559,12 +560,16 @@ func TestDreamClosingArm(t *testing.T) {
 	if archivedAt == nil {
 		t.Error("the pipeline session was not archived")
 	}
+	owed := pendingKeys(t, s.pool)
 	for _, id := range fileIDs {
 		if status, _ := s.do(http.MethodGet, "/v1/files/"+id, nil); status != http.StatusNotFound {
 			t.Errorf("GET /v1/files/%s = %d after the close, want 404", id, status)
 		}
-		if _, _, err := s.blobs.Get(context.Background(), blob.FilesKey(id)); !errors.Is(err, blob.ErrNotFound) {
-			t.Errorf("object for %s survives the close: %v", id, err)
+		// The row is gone and the object is owed: the close writes the debt on
+		// the transaction that removes the rows, because the ids that name the
+		// objects go with them (#703). The bytes are the sweeper's.
+		if !slices.Contains(owed, blob.FilesKey(id)) {
+			t.Errorf("the close owes %v, want the object for %s among them", owed, id)
 		}
 	}
 	// The gate lifts with the close: the archived session answers as any
@@ -597,9 +602,10 @@ func TestDreamClosingArmWithTheSessionGone(t *testing.T) {
 	if _, _, closedAt := dreamInternals(t, s, dreamID); closedAt == nil {
 		t.Fatal("the closing arm needs the session row to close")
 	}
+	owed := pendingKeys(t, s.pool)
 	for _, id := range fileIDs {
-		if _, _, err := s.blobs.Get(context.Background(), blob.FilesKey(id)); !errors.Is(err, blob.ErrNotFound) {
-			t.Errorf("object for %s survives the close: %v", id, err)
+		if !slices.Contains(owed, blob.FilesKey(id)) {
+			t.Errorf("the close owes %v, want the object for %s among them", owed, id)
 		}
 	}
 }
