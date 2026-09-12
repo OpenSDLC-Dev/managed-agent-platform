@@ -120,16 +120,24 @@ func checkFileID(id string) error {
 // down by the transaction that takes the row away.
 //
 // Not enqueuing here is deliberate rather than an omission, and it is the whole
-// reason the two classes cannot share a path. This runs on the request context:
-// when a commit fails ambiguously — a cancelled or dropped context, where
-// Postgres may in fact have committed — that same cancelled context makes this
-// delete a no-op, so a possibly-live object is preserved rather than deleted
-// out from under a row that did land. Queueing the key would retry past that
-// cancellation and do precisely the damage the no-op avoids; a detached context
-// would "fix" the benign orphan leak at the same cost. Preserving the object is
-// the correct trade — a definite commit rejection leaves the context live, so
-// the orphan is still cleaned — and the leak it accepts is bounded by the
-// commits that fail, not by the objects that are deleted.
+// reason the two classes cannot share a path. This runs on the caller's own
+// context — the request's for insertFile, the runner tick's for startDream —
+// and that is what makes it right: when a commit fails on a cancelled or
+// dropped context, where Postgres may in fact have committed, the same
+// cancellation makes this delete a no-op, so a possibly-live object is
+// preserved rather than deleted out from under a row that did land. Queueing
+// the key would retry past that cancellation and do precisely the damage the
+// no-op avoids; a detached context would "fix" the benign orphan leak at the
+// same cost.
+//
+// The protection is the cancellation's, though, so it reaches exactly as far as
+// the cancellation does. A commit that fails with the context still live — a
+// connection lost after Postgres committed but before the client heard it — has
+// this delete remove the bytes of a row that did land, and the Store contract
+// obliges no backend to refuse a cancelled context either (blobtest's own Mem
+// ignores it). That residue is older than the queue and is not something the
+// queue could fix: an object the caller cannot prove uncommitted is exactly the
+// one it must not enqueue.
 //
 // The skills registry's discardUncommittedArchive is this helper's twin, on the
 // same argument and for the same shape of caller.
@@ -528,7 +536,7 @@ func (s *server) deleteFile(r *http.Request) (any, error) {
 	if tag.RowsAffected() == 0 {
 		return nil, errNotFound("file %s not found", id)
 	}
-	if _, err := tx.Exec(ctx, store.PendingObjectDeleteInsertSQL, []string{blob.FilesKey(id)}); err != nil {
+	if err := store.EnqueueObjectDeletes(ctx, tx, []string{blob.FilesKey(id)}); err != nil {
 		return nil, err
 	}
 	if err := tx.Commit(ctx); err != nil {

@@ -431,14 +431,12 @@ func (e *Executor) settleHarvest(ctx context.Context, item *queue.Item, files []
 	// to it. The table is the contract, not the process (#693) — so what this
 	// costs, against the control-plane sites, is the wait for the drain's next
 	// interval rather than a wake, on a path with no client waiting on it.
-	if len(oldIDs) > 0 {
-		keys := make([]string, 0, len(oldIDs))
-		for _, id := range oldIDs {
-			keys = append(keys, blob.FilesKey(id))
-		}
-		if _, err := tx.Exec(ctx, store.PendingObjectDeleteInsertSQL, keys); err != nil {
-			return err
-		}
+	keys := make([]string, 0, len(oldIDs))
+	for _, id := range oldIDs {
+		keys = append(keys, blob.FilesKey(id))
+	}
+	if err := store.EnqueueObjectDeletes(ctx, tx, keys); err != nil {
+		return err
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return err

@@ -161,11 +161,14 @@ issue; none is a blocker under decision 1.
   `blob.FilesKey(id)` is `"files/" + id` (`internal/blob/blob.go:26`) and
   `skills.BlobKey(skillID, version)` is `"skills/" + skillID + "/" + version + ".zip"`
   (`internal/skills/extract.go:173`). After this plan the SQL predicate is the *only* thing
-  between tenant B and tenant A's bytes, and the orphan-cleanup paths delete by key with no
-  tenant check at all (`internal/api/files.go:86` `deleteOrphanedFile`, called at `:139` and
-  `:300`; `internal/api/skills.go:234` `deleteOrphanedObject`, called at `:315`, `:478`, `:614`
-  and `:801`), so a predicate bug on the destructive statements of
-  §7.5 destroys another tenant's objects rather than merely reading them.
+  between tenant B and tenant A's bytes, and every path that removes an object does so by key
+  with no tenant check at all: the control plane's object-delete drain
+  (`internal/api/objectdeletes.go`), which since #703 is what removes the bytes for every
+  committed row, and the two remaining best-effort discards for rows that never committed
+  (`discardUncommittedObject` in `internal/api/files.go`, `discardUncommittedArchive` in
+  `internal/api/skills.go`). So a predicate bug on the destructive statements of §7.5 destroys
+  another tenant's objects rather than merely reading them, and the drain is now the first
+  place to look rather than the last.
 - **Per-tenant credential encryption.** `secrets.Cipher.Encrypt(ctx, plaintext)` takes no
   tenant, namespace or key selector (`internal/secrets/secrets.go:34` the interface, `:38` the
   signature), so every tenant's `vault_credentials.secret_ciphertext` is sealed under one

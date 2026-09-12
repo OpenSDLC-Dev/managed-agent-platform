@@ -1016,7 +1016,7 @@ func TestDreamRunnerPassesBeforeItsFirstTick(t *testing.T) {
 	cfg.TickInterval = time.Hour
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
-	go func() { defer close(done); api.StartDreamRunner(ctx, s.pool, s.blobs, nil, cfg) }()
+	go func() { defer close(done); api.StartDreamRunner(ctx, s.pool, s.blobs, nil, nil, cfg) }()
 	defer func() { cancel(); waitForStop(t, done) }()
 
 	deadline := time.Now().Add(30 * time.Second)
@@ -1070,7 +1070,7 @@ func TestStartDreamRunnerTicksAndStops(t *testing.T) {
 	cfg.TickInterval = 20 * time.Millisecond
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
-	go func() { defer close(done); api.StartDreamRunner(ctx, s.pool, s.blobs, nil, cfg) }()
+	go func() { defer close(done); api.StartDreamRunner(ctx, s.pool, s.blobs, nil, nil, cfg) }()
 
 	waitForRunning := func(id, what string) {
 		t.Helper()

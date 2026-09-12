@@ -416,7 +416,8 @@ func (s *server) listSkills(r *http.Request) (any, error) {
 }
 
 // deleteSkill cascades: versions then skill, in one transaction, with each
-// version's archive swept from object storage afterwards (plan 39 decision 6).
+// version's archive enqueued for the object-delete drain by that same
+// transaction (plan 39 decision 6; the enqueue is #703's).
 // The cascade is enforced here rather than by the schema on purpose — an
 // ON DELETE CASCADE would drop the version rows behind this handler's back and
 // orphan every archive they name.
@@ -448,10 +449,12 @@ func (s *server) deleteSkill(r *http.Request) (any, error) {
 	if source != "custom" {
 		return nil, errInvalid("anthropic skills are managed by the platform, not this API")
 	}
-	// The sweep needs somewhere to sweep — asked after shape and existence, so
-	// that a deployment without object storage still answers an unknown or
-	// unmanaged id the way it did before the cascade gave this route archives
-	// to remove at all.
+	// Asked after shape and existence, so a deployment without object storage
+	// still answers an unknown or unmanaged id the way it did before this route
+	// had archives to account for at all. The refusal outlives the sweep it was
+	// written for: the archives are enqueued rather than deleted here now, and a
+	// replica with no store configured must not take the rows away on behalf of
+	// objects it cannot know were written.
 	if s.blobs == nil {
 		return nil, errSkillsUnavailable
 	}
@@ -479,7 +482,7 @@ func (s *server) deleteSkill(r *http.Request) (any, error) {
 	for _, v := range versions {
 		keys = append(keys, skillBlobKey(id, v))
 	}
-	if _, err := tx.Exec(ctx, store.PendingObjectDeleteInsertSQL, keys); err != nil {
+	if err := store.EnqueueObjectDeletes(ctx, tx, keys); err != nil {
 		return nil, err
 	}
 	if err := tx.Commit(ctx); err != nil {
@@ -804,7 +807,7 @@ func (s *server) deleteSkillVersion(r *http.Request) (any, error) {
 	// cannot come back, so a client that gave up after the commit must not
 	// decide whether the object goes with it; a queued key answers that and the
 	// store outage besides.
-	if _, err := tx.Exec(ctx, store.PendingObjectDeleteInsertSQL, []string{skillBlobKey(id, version)}); err != nil {
+	if err := store.EnqueueObjectDeletes(ctx, tx, []string{skillBlobKey(id, version)}); err != nil {
 		return nil, err
 	}
 	if err := tx.Commit(ctx); err != nil {

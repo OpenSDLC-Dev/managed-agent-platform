@@ -68,6 +68,13 @@ func TestDeletingASkillVersionOwesItsArchive(t *testing.T) {
 	if got := pendingKeys(t, s.pool); !slices.Equal(got, want) {
 		t.Fatalf("the version delete owes %v, want that version's archive %v", got, want)
 	}
+	// The retired disconnect rung was table-driven over the cascade and this
+	// single-version delete alike, so the structural replacement has to cover
+	// both: a regression that put the context.WithoutCancel discard back after
+	// this commit would still enqueue, and only this assertion would see it.
+	if got := store.attempts(); len(got) != 0 {
+		t.Fatalf("the request path deleted %v; plan 50 leaves every object to the sweeper", got)
+	}
 }
 
 // TestDeletingASkillOwesEveryVersionsArchive is the cascade, and the site whose

@@ -131,8 +131,15 @@ type DreamRunnerConfig struct {
 // skips the row rather than duplicating the arm. blobs and cipher are the
 // handler's own — the start arm puts the rendered transcripts and creates a
 // session, which needs whatever POST /v1/sessions needs.
-func StartDreamRunner(ctx context.Context, pool *pgxpool.Pool, blobs blob.Store, cipher secrets.Cipher, cfg DreamRunnerConfig) {
+func StartDreamRunner(ctx context.Context, pool *pgxpool.Pool, blobs blob.Store, cipher secrets.Cipher, q *ObjectDeleteQueue, cfg DreamRunnerConfig) {
 	s := newServer(pool, blobs, cipher)
+	// Taken as an argument the way StartFileRetention takes it, not through an
+	// Option: this server is built here rather than by NewHandler, so an
+	// Option would have to be threaded through a constructor no request uses.
+	// Without it the close's wake is a no-op against a nil queue and every
+	// dream's transcripts wait out the drain's interval — correct, and a minute
+	// slower than the deployment paid for.
+	s.objectDeletes = q
 	t := time.NewTicker(cfg.TickInterval)
 	defer t.Stop()
 	for {
@@ -1009,9 +1016,6 @@ func mirrorDreamUsage(ctx context.Context, tx pgx.Tx, d dreamRow) error {
 	return err
 }
 
-// deleteDreamFileRows removes the dream's transcript rows and returns the
-// object keys the caller deletes after the commit (§4.5). Their ownership is
-// the dream's, not the session's, so they go whether or not a session remains.
 // enqueueDreamBlobs removes a dream's file rows and, on the same transaction,
 // records the objects they named as owed (plan 50 decision 2, #703). The two
 // halves were separate once — the rows inside the commit, the objects after it,
@@ -1039,11 +1043,7 @@ func enqueueDreamBlobs(ctx context.Context, tx pgx.Tx, dreamID string) error {
 	if err := rows.Err(); err != nil {
 		return err
 	}
-	if len(keys) == 0 {
-		return nil
-	}
-	_, err = tx.Exec(ctx, store.PendingObjectDeleteInsertSQL, keys)
-	return err
+	return store.EnqueueObjectDeletes(ctx, tx, keys)
 }
 
 // setDreamLockWait bounds every dream-row lock wait in tx. SET cannot be

@@ -6,9 +6,9 @@
   a store that refused or a process that died in that window left bytes no tier could
   enumerate. Each now enqueues its keys on the same transaction that removes the rows, for the
   sweeper plan 50 built — the shape `deleteSession` and the expired-file sweep already used, so
-  "rare orphans accepted" is no longer a property of this platform. A skill cascade is the
+  no object a committed row named is orphaned by a store having a bad day any more. A skill cascade is the
   biggest beneficiary: it was N sequential deletes with nothing left to answer the client with,
-  and a bad day orphaned every archive the skill had rather than the odd one. Two things
-  deliberately keep the best-effort delete, under helpers renamed to say why: an object whose
-  row **never committed** must not be queued, because an ambiguous commit failure is exactly
-  when a possibly-live object has to be preserved rather than retried into deletion.
+  and a bad day orphaned every archive the skill had rather than the odd one. One class of
+  object deliberately keeps the best-effort delete, under helpers renamed to say why: the one
+  whose row **never committed** is owed to nothing, and queueing it would retry a delete past
+  the cancellation that is all that protects a commit which may in fact have landed.

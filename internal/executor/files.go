@@ -147,9 +147,10 @@ func (e *Executor) materializeFiles(ctx context.Context, sb sandbox.Sandbox, sid
 // whose own byte accounting rejects a truncated transfer.
 func (e *Executor) materializeFile(ctx context.Context, sb sandbox.Sandbox, m fileRef) error {
 	// The files row is authoritative for existence, so check it before streaming.
-	// A deleted file leaves its object best-effort (api deleteFile: row gone, blob
-	// orphan accepted), so a still-present blob is not proof the file exists — and
-	// the brain's resolveFilesBlock already treats a row-less mount as dangling.
+	// A deleted file's object outlives its row until the control plane's drain
+	// removes it (api deleteFile enqueues it, #703), so a still-present blob is
+	// not proof the file exists — and the brain's resolveFilesBlock already
+	// treats a row-less mount as dangling.
 	// Mounting the orphan would make the two halves disagree and contradict the
 	// documented absent-mount behavior (plan decision 2); check the row so a
 	// deleted file is the same dangling miss on both halves.

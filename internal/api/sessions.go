@@ -1545,7 +1545,7 @@ func (s *server) deleteSession(r *http.Request) (any, error) {
 	for _, fid := range fileIDs {
 		keys = append(keys, blob.FilesKey(fid))
 	}
-	if _, err := tx.Exec(ctx, store.PendingObjectDeleteInsertSQL, keys); err != nil {
+	if err := store.EnqueueObjectDeletes(ctx, tx, keys); err != nil {
 		return nil, err
 	}
 	// Test seam: read the queue from another connection in exactly this window,

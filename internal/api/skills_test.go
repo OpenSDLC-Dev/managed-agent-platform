@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/textproto"
+	"slices"
 	"strings"
 	"testing"
 
@@ -708,6 +709,9 @@ func TestSkillVersionDeleteRecomputesLatest(t *testing.T) {
 		return vid
 	}
 	v2, v3 := newVersion(), newVersion()
+	// Read before the delete: the row that holds the number is what the delete
+	// removes, and the number is what names the archive.
+	v3number := s.versionNumber(t, id, v3)
 
 	// Deleting the newest version rolls latest_version_id back to the next one,
 	// and the response echoes the deleted version's own id.
@@ -724,8 +728,8 @@ func TestSkillVersionDeleteRecomputesLatest(t *testing.T) {
 	if n := s.blobs.Len(); n != 3 {
 		t.Errorf("stored objects = %d, want all 3 still stored: the delete enqueues rather than removing", n)
 	}
-	if got := pendingKeys(t, s.pool); len(got) != 1 {
-		t.Errorf("the version delete owes %v, want exactly the deleted version's archive", got)
+	if got, want := pendingKeys(t, s.pool), []string{skills.BlobKey(id, v3number)}; !slices.Equal(got, want) {
+		t.Errorf("the version delete owes %v, want exactly the deleted version's archive %v", got, want)
 	}
 
 	status, del = s.do("DELETE", "/v1/skills/"+id+"/versions/"+v3, nil)
