@@ -138,8 +138,9 @@ func checkFileID(id string) error {
 //
 // That argument covers one of this helper's three callers. deleteFile and the
 // dream runner reach it with their rows already committed, so the object is
-// definitely orphaned and a retry could damage nothing — they are the sites
-// #703 records as still owing the queue a debt they do not record.
+// definitely orphaned and a retry could damage nothing — they are among the
+// sites #703 records as still owing the queue a debt they do not record, along
+// with the skills registry's own twin of this helper.
 func (s *server) deleteOrphanedFile(ctx context.Context, key string) {
 	if err := s.blobs.Delete(ctx, key); err != nil {
 		slog.WarnContext(ctx, "file orphaned in object storage", "key", key, "err", err)

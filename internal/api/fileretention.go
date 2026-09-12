@@ -166,9 +166,9 @@ var filePurgeAfterCommitHook func()
 //
 // So this sweep touches no object store, and nothing it does is best-effort.
 // The old order it inherited — row first, object after, orphan accepted — is
-// still deleteFile's and the dream runner's (#703), where a request orphans one
-// object and a dream up to its hundred transcripts plus an index, rather than a
-// batch of a thousand.
+// still the file, skill and dream delete paths' (#703), where one request
+// orphans a handful at most: one object, or a skill's versions, or a dream's
+// hundred transcripts and an index, rather than a batch of a thousand an hour.
 //
 // The window is a duration subtracted from the database's own clock, never a
 // timestamp computed here: expires_at was itself computed from that clock at
