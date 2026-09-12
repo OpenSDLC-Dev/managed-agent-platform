@@ -224,14 +224,17 @@ var filePurgeAfterCommitHook func()
 // outright, which would quietly make a closed dream's transcripts immortal if
 // one ever did get an expiry (#698).
 //
-// The redundant `dream_id IS NULL` in front of that clause is what keeps the
-// index: PostgreSQL pulls a bare NOT EXISTS up into a hash anti-join, which
-// carries no ordering, so every expired row in the table is scanned and sorted
-// before the LIMIT can stop — measured over two million expired rows at 423ms
-// and a 78MB external merge per pass, against 2ms for the form below, which
-// walks 0038's index in order and stops at the batch. A sublink under an OR is
-// not pulled up, which is why the disjunct holds the plan, and it selects the
-// same rows either way: a row with no dream satisfies the NOT EXISTS already.
+// The redundant `dream_id IS NULL` in front of that clause is what pins the
+// plan. A bare NOT EXISTS is pulled up into an anti-join, and which anti-join
+// is a cost decision: a nested loop keeps 0038's index order and stops at the
+// batch, a hash anti-join carries no ordering at all, so every expired row in
+// the table is scanned and sorted before the LIMIT can stop. Both were seen
+// over two million expired rows — the nested loop at a few milliseconds, the
+// hash form at 423ms with a 78MB external merge, and per pass now that a tick
+// drains. So the bare spelling is not wrong; it is left to the statistics on a
+// table 0038 argues grows without bound. A sublink under an OR is not pulled
+// up at all, which takes the choice away, and it selects the same rows either
+// way: a row with no dream satisfies the NOT EXISTS already.
 func purgeExpiredFiles(ctx context.Context, pool *pgxpool.Pool, retention time.Duration) (int, error) {
 	tx, err := pool.Begin(ctx)
 	if err != nil {
