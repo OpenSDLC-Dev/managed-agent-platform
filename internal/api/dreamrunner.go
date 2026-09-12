@@ -111,7 +111,9 @@ var dreamLockWait = 2 * time.Second
 // DreamRunnerConfig is the operator's three knobs (§4.7), read from the
 // controlplane's environment.
 type DreamRunnerConfig struct {
-	// TickInterval paces the sweep, and is therefore a dream's start latency.
+	// TickInterval paces the sweep, and is therefore a dream's start latency
+	// in the steady state — a dream pending when the process starts is taken by
+	// the pass the loop makes before its first wait (#699).
 	TickInterval time.Duration
 	// Timeout is a dream's runtime budget from creation, in pending as in
 	// running → error.type "timeout".

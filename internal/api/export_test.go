@@ -181,8 +181,9 @@ func SetFilePurgeIntervalForTest(d time.Duration) (restore func()) {
 	return func() { filePurgeInterval = prev }
 }
 
-// SetDeploymentTickIntervalForTest shortens the scheduler's cadence so the
-// one wall-clock test can watch the ticker actually fire. Test binary only.
+// SetDeploymentTickIntervalForTest sets the scheduler's cadence: short, so a
+// wall-clock test can watch the ticker fire, or long, so one can watch the pass
+// the loop takes before its first wait. Test binary only.
 func SetDeploymentTickIntervalForTest(d time.Duration) (restore func()) {
 	prev := deploymentTickInterval
 	deploymentTickInterval = d

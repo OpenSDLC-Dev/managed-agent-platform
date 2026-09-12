@@ -1040,6 +1040,13 @@ func TestDreamRunnerPassesBeforeItsFirstTick(t *testing.T) {
 
 // The loop around the tick: it sweeps on its own interval until its context
 // ends, and stops when it does.
+//
+// It takes two dreams to show the interval half. The loop passes once before
+// its first wait (#699), so the dream that is pending at startup proves only
+// that the loop ran; a loop that passed at boot and then never consumed its
+// ticker again would pass with one subject. The second is created once the
+// first is running, after the startup pass has scanned, so only a tick reaches
+// it.
 func TestStartDreamRunnerTicksAndStops(t *testing.T) {
 	s := newTestServer(t)
 	_, body := seededDreamBody(t, s)
@@ -1051,14 +1058,23 @@ func TestStartDreamRunnerTicksAndStops(t *testing.T) {
 	done := make(chan struct{})
 	go func() { defer close(done); api.StartDreamRunner(ctx, s.pool, s.blobs, nil, cfg) }()
 
-	deadline := time.Now().Add(30 * time.Second)
-	for getDream(t, s, dreamID)["status"] != "running" {
-		if time.Now().After(deadline) {
-			cancel()
-			t.Fatal("the runner loop never started the pending dream")
+	waitForRunning := func(id, what string) {
+		t.Helper()
+		deadline := time.Now().Add(30 * time.Second)
+		for getDream(t, s, id)["status"] != "running" {
+			if time.Now().After(deadline) {
+				cancel()
+				t.Fatal(what)
+			}
+			time.Sleep(20 * time.Millisecond)
 		}
-		time.Sleep(20 * time.Millisecond)
 	}
+	waitForRunning(dreamID, "the runner loop never started the dream that was pending when it started")
+
+	_, secondBody := seededDreamBody(t, s)
+	second := createDream(t, s, secondBody)["id"].(string)
+	waitForRunning(second, "the ticker never started a dream created after the startup pass, so the loop passes once and then sleeps")
+
 	cancel()
 	select {
 	case <-done:

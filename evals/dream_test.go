@@ -34,8 +34,9 @@ import (
 
 const (
 	// dreamTick paces the runner's sweep, and is therefore a dream's start
-	// latency. Two seconds rather than the binary's thirty: a test that waits
-	// half a minute for the first tick is measuring the ticker.
+	// latency after the first pass, which the loop takes before it waits at all
+	// (#699). Two seconds rather than the binary's thirty, so a dream created
+	// while the suite runs is not left measuring the ticker.
 	dreamTick = 2 * time.Second
 	// The two DREAM_TIMEOUTs — the budget from creation, after which the runner
 	// settles the dream as failed{timeout}. Both are well under the binary's

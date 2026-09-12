@@ -548,34 +548,50 @@ func TestSchedulerDST(t *testing.T) {
 	}
 }
 
-// The one wall-clock test: the production loop — ticker, database clock,
-// candidate scan — actually fires. Everything else drives a fixed now.
+// The wall-clock test for the ticker: the production loop — ticker, database
+// clock, candidate scan — fires on a tick. Everything else drives a fixed now.
+//
+// It takes two deployments to show that. The loop passes once before its first
+// wait (#699), so a deployment due at startup proves only that the loop ran;
+// with one subject a loop that passed at boot and then never consumed its
+// ticker again would pass this test. The second is made due once the first has
+// fired, after the startup pass has scanned, so only a tick can reach it.
 func TestSchedulerTickerRuns(t *testing.T) {
 	restore := api.SetDeploymentTickIntervalForTest(20 * time.Millisecond)
 	defer restore()
 	s := newTestServer(t)
 	agentID, envID := fixture(t, s)
-	deplID := createDeployment(t, s, scheduledBody(agentID, envID, "* * * * *", "UTC"))["id"].(string)
-	if _, err := s.pool.Exec(t.Context(),
-		`UPDATE deployments SET schedule_resumed_at = now() - interval '2 minutes' WHERE id = $1`, deplID); err != nil {
-		t.Fatal(err)
+	makeDue := func(id string) {
+		t.Helper()
+		if _, err := s.pool.Exec(t.Context(),
+			`UPDATE deployments SET schedule_resumed_at = now() - interval '2 minutes' WHERE id = $1`, id); err != nil {
+			t.Fatal(err)
+		}
 	}
+	waitForRun := func(id, what string) {
+		t.Helper()
+		deadline := time.Now().Add(10 * time.Second)
+		for len(scheduledRuns(t, s, id)) == 0 {
+			if time.Now().After(deadline) {
+				t.Fatalf("%s: no run row", what)
+			}
+			time.Sleep(20 * time.Millisecond)
+		}
+	}
+
+	deplID := createDeployment(t, s, scheduledBody(agentID, envID, "* * * * *", "UTC"))["id"].(string)
+	makeDue(deplID)
 
 	ctx, cancel := context.WithCancel(t.Context())
 	done := make(chan struct{})
 	go func() { defer close(done); api.StartDeploymentScheduler(ctx, s.pool, nil, nil) }()
 	defer func() { cancel(); <-done }()
 
-	deadline := time.Now().Add(10 * time.Second)
-	for {
-		if runs := scheduledRuns(t, s, deplID); len(runs) >= 1 {
-			return
-		}
-		if time.Now().After(deadline) {
-			t.Fatal("the ticker never fired the due occurrence")
-		}
-		time.Sleep(20 * time.Millisecond)
-	}
+	waitForRun(deplID, "the loop never fired the occurrence that was due when it started")
+
+	second := createDeployment(t, s, scheduledBody(agentID, envID, "* * * * *", "UTC"))["id"].(string)
+	makeDue(second)
+	waitForRun(second, "the ticker never fired an occurrence that fell due after the startup pass, so the loop passes once and then sleeps")
 }
 
 // TestSchedulerPassesBeforeItsFirstTick: the pass runs before the wait, not
