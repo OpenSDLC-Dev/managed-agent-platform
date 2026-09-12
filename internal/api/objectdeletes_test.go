@@ -191,6 +191,12 @@ func awaitAttempt(t *testing.T, store *refusingStore, key, what string) {
 // sweeper and the interval is production's minute, longer than the wait below,
 // so only a pass taken before the first wait can empty the queue. Without it a
 // replica restarting more often than the interval never drains at all.
+//
+// Then the other half, which the first cannot see: a loop that dropped its wait
+// entirely would empty that backlog just as fast and still stop on a cancelled
+// context, so it passes everything above while polling Postgres continuously. A
+// key owed after the boot pass, with nothing to wake anyone, is the one a
+// waiting loop has to leave alone.
 func TestDrainSweepsBeforeItsFirstTick(t *testing.T) {
 	s := newTestServer(t)
 	ctx := context.Background()
@@ -208,6 +214,18 @@ func TestDrainSweepsBeforeItsFirstTick(t *testing.T) {
 
 	if _, _, err := s.blobs.Get(ctx, key); err == nil {
 		t.Errorf("%s: the row went but the object did not", key)
+	}
+
+	second := blob.FilesKey(domain.NewID("file").String())
+	if err := s.blobs.Put(ctx, second, strings.NewReader("bytes"), 5, "text/markdown"); err != nil {
+		t.Fatalf("seed the second object: %v", err)
+	}
+	if _, err := s.pool.Exec(ctx, store.PendingObjectDeleteInsertSQL, []string{second}); err != nil {
+		t.Fatalf("seed the second owed key: %v", err)
+	}
+	time.Sleep(500 * time.Millisecond)
+	if got := pendingKeys(t, s.pool); !slices.Contains(got, second) {
+		t.Errorf("a key enqueued after the boot pass went within the interval: queue = %v — the loop is not waiting between passes", got)
 	}
 }
 

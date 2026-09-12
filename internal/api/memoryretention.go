@@ -56,8 +56,12 @@ var memoryPruneInterval = time.Hour
 // duplicate query and, since the reorder below made a boot pass the moment they
 // all take one, whatever lock waiting that duplication implies. The statement
 // removes what it finds in one unbounded DELETE, which is what the first pass
-// over a long-unpruned table costs and what makes that timing worth naming.
-// It takes row locks only on the rows it deletes, which no plain
+// over a long-unpruned table costs and what makes that timing worth naming: a
+// control plane restarting faster than that pass commits repeats it from the
+// start at every boot and still prunes nothing, so the order below buys forward
+// progress only where a restart outlasts one DELETE. A bounded batch —
+// fileretention.go's shape — is what would close that, the day a first pass is
+// measured in minutes. It takes row locks only on the rows it deletes, which no plain
 // reader waits on — a redaction's `SELECT … FOR UPDATE` on one of those rows
 // would, for as long as the delete runs.
 func StartMemoryRetention(ctx context.Context, pool *pgxpool.Pool) {
