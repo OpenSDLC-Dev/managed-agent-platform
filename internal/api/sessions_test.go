@@ -1070,6 +1070,107 @@ func TestDeleteSessionBroadcastsAfterTheClientDisconnects(t *testing.T) {
 	}
 }
 
+// #710: the reference reports an archived session `terminated`, and no
+// settlement here produces that value, so the status is projected at read time
+// and the column keeps whatever the fold last left. Three controls stand around
+// the archived session, because the projection is only right if it is a
+// rendering: a live session keeps its own status, an archive out of
+// `rescheduling` reads `terminated` just the same, and a stored `terminated`
+// — the status #577 would produce — is surfaced rather than masked.
+func TestAnArchivedSessionReadsTerminated(t *testing.T) {
+	s := newTestServer(t)
+	agentID, envID := fixture(t, s)
+	newSession := func() string {
+		t.Helper()
+		sess := createSession(t, s, map[string]any{"agent": agentID, "environment_id": envID})
+		if sess["status"] != "idle" {
+			t.Fatalf("a fresh session reads %v, want idle", sess["status"])
+		}
+		return sess["id"].(string)
+	}
+	setStatus := func(id, status string) {
+		t.Helper()
+		if _, err := s.pool.Exec(context.Background(),
+			`UPDATE sessions SET status = $2 WHERE id = $1`, id, status); err != nil {
+			t.Fatal(err)
+		}
+	}
+	storedStatus := func(id string) string {
+		t.Helper()
+		var got string
+		if err := s.pool.QueryRow(context.Background(),
+			`SELECT status FROM sessions WHERE id = $1`, id).Scan(&got); err != nil {
+			t.Fatal(err)
+		}
+		return got
+	}
+	archive := func(id string) map[string]any {
+		t.Helper()
+		code, body := s.do(http.MethodPost, "/v1/sessions/"+id+"/archive", nil)
+		if code != http.StatusOK {
+			t.Fatalf("archiving %s = %d, want 200: %v", id, code, body)
+		}
+		return body
+	}
+	listIDs := func(query string) []string {
+		t.Helper()
+		_, body := s.do(http.MethodGet, "/v1/sessions?"+query, nil)
+		out := []string{}
+		for _, e := range listData(t, body) {
+			out = append(out, e["id"].(string))
+		}
+		slices.Sort(out)
+		return out
+	}
+	want := func(ids ...string) []string {
+		slices.Sort(ids)
+		return ids
+	}
+
+	// requireNotRunning refuses only `running`, so archiving out of
+	// `rescheduling` is reachable; a stored `terminated` has no producer yet.
+	id, live, resch, term := newSession(), newSession(), newSession(), newSession()
+	setStatus(resch, "rescheduling")
+	setStatus(term, "terminated")
+
+	if got := archive(id)["status"]; got != "terminated" {
+		t.Errorf("the archive response reads %v, want terminated", got)
+	}
+	_, got := s.do(http.MethodGet, "/v1/sessions/"+id, nil)
+	if got["status"] != "terminated" {
+		t.Errorf("GET after the archive reads %v, want terminated", got["status"])
+	}
+	if s := storedStatus(id); s != "idle" {
+		t.Errorf("stored status = %q, want the idle the fold left", s)
+	}
+
+	// The projection does not depend on what the column held.
+	if got := archive(resch)["status"]; got != "terminated" {
+		t.Errorf("an archived rescheduling session reads %v, want terminated", got)
+	}
+	if s := storedStatus(resch); s != "rescheduling" {
+		t.Errorf("stored status = %q, want the rescheduling the fold left", s)
+	}
+
+	// The filter selects rows before any of them is rendered, so it has to
+	// agree with the projection on every one of them.
+	if got, w := listIDs("include_archived=true&statuses[]=terminated"), want(id, resch, term); !slices.Equal(got, w) {
+		t.Errorf("statuses[]=terminated with include_archived = %v, want %v", got, w)
+	}
+	if got, w := listIDs("include_archived=true&statuses[]=idle"), want(live); !slices.Equal(got, w) {
+		t.Errorf("statuses[]=idle with include_archived = %v, want only the live session %v", got, w)
+	}
+	if got := listIDs("include_archived=true&statuses[]=rescheduling"); len(got) != 0 {
+		t.Errorf("statuses[]=rescheduling returned a session the wire reads terminated: %v", got)
+	}
+	// A stored `terminated` needs no archive to be found, and the default
+	// listing reaches it: what that listing hides is archived rows, which is
+	// the question #574 owns.
+	if got, w := listIDs("statuses[]=terminated"), want(term); !slices.Equal(got, w) {
+		t.Errorf("the default listing's statuses[]=terminated = %v, want the unarchived %v", got, w)
+	}
+}
+
 func TestRunningSessionArchiveAndDeleteRejected(t *testing.T) {
 	s := newTestServer(t)
 	agentID, envID := fixture(t, s)

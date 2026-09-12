@@ -14,6 +14,8 @@ unarchived, and this platform reports neither — it archived the primary instea
 ## Tasks
 
 - [x] #713 — the session archive stops mirroring `archived_at`/`updated_at` onto the primary
-- [ ] #710 — render `terminated` when `archived_at` is set, and retire the reaper tier, its
-      fixture-only test and the four docs that describe an ending the column never holds
-- [ ] #574 — whether the default session listing hides `terminated`, once #710 produces one
+- [x] #710 — an archived session renders `terminated`, projected from `archived_at` on the
+      session object and the `statuses[]` filter; the reaper's `terminated` tier stays, since
+      #577 would produce the status it reads
+- [ ] #574 — whether the default listing hides `terminated`; #710 leaves only archived ones,
+      which that listing already excludes, so the open case is a stored one (#577's)
