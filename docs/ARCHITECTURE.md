@@ -184,7 +184,9 @@ session once), the exec drivers run only the runnable calls — every thread's s
 calls off the session's one `tool_exec`, the web and MCP lanes on their own items — and
 wake each thread as its own calls are answered, outcome grading runs at
 the session's quiescence, and the session's status is a fold over its threads' (running ≻
-rescheduling ≻ idle; `requires_action ≻ retries_exhausted ≻ end_turn`, `event_ids` unioned).
+rescheduling ≻ idle; `requires_action ≻ retries_exhausted ≻ end_turn`, `event_ids` unioned) —
+which an archived session's wire status overrides, reading `terminated` projected from
+`archived_at` at render time rather than stored.
 Delegation is the settlement's own work rather than any driver's: a coordinator's primary
 thread is offered `create_agent` / `send_to_agent` / `list_agents` / `wait_for_agents` and
 every child `submit_result` / `send_to_parent`, and the transaction that commits the turn

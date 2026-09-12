@@ -85,6 +85,14 @@ type sessionRow struct {
 	archivedAt           *time.Time
 }
 
+// sessionStatusExpr is renderSession's archive projection expressed in SQL, for
+// the one place that cannot go through it: the list's statuses[] filter, which
+// selects rows before any of them is rendered. The two have to agree —
+// filtering the stored column while rendering the projection would hand back a
+// session the wire calls terminated that statuses[]=terminated cannot find, and
+// that statuses[]=idle returns instead.
+const sessionStatusExpr = `CASE WHEN archived_at IS NOT NULL THEN 'terminated' ELSE status END`
+
 const sessionColumns = `id, resolved_agent, environment_id, status, title,
 	metadata, usage, resources, outcome_evaluations, vault_ids, deployment_id, created_at, updated_at, archived_at`
 
@@ -188,9 +196,29 @@ func renderSession(r sessionRow) (sessionJSON, error) {
 	if r.vaultIDs == nil {
 		r.vaultIDs = []string{}
 	}
+	// The wire status is not always the stored one: the reference reports an
+	// archived session `terminated` (recorded 2026-09-12), and no caller here
+	// transitions a session to that value, so the fold never writes it. The
+	// archive projects it at render time instead, which reproduces everything
+	// the recording could show — the status turns at the archive, no thread
+	// row moves, and the session's event list gains nothing. Whether the
+	// reference also announces the turn on a live stream without persisting it
+	// is unknown: the probes read stored lists (#710).
+	//
+	// Projected here rather than in sessionColumns because this function builds
+	// every session object on the wire, the create response included, and that
+	// one is assembled in Go without reading its row back. The stored column is
+	// untouched, so every reader that decides something — requireNotRunning,
+	// the reaper, the dream arms — still sees what a settlement wrote, and a
+	// producer of a real terminated (#577's failed model request) would reach
+	// them rather than being masked by this.
+	status := r.status
+	if r.archivedAt != nil {
+		status = string(domain.SessionTerminated)
+	}
 	return sessionJSON{
 		ID: r.id, Type: "session", Agent: agent, EnvironmentID: r.environmentID,
-		Status: r.status, Title: r.title, Metadata: metadata, Usage: usage,
+		Status: status, Title: r.title, Metadata: metadata, Usage: usage,
 		Stats: statsJSON{}, OutcomeEvaluations: outcomes,
 		Resources: resources, VaultIDs: r.vaultIDs, DeploymentID: r.deploymentID,
 		CreatedAt: r.createdAt.UTC(), UpdatedAt: r.updatedAt.UTC(), ArchivedAt: utcPtr(r.archivedAt),
@@ -1209,7 +1237,7 @@ func (s *server) listSessions(r *http.Request) (any, error) {
 	}
 	if len(statuses) > 0 {
 		args = append(args, statuses)
-		query += fmt.Sprintf(` AND status = ANY($%d)`, len(args))
+		query += fmt.Sprintf(` AND %s = ANY($%d)`, sessionStatusExpr, len(args))
 	}
 	for key, op := range map[string]string{
 		"created_at[gt]": ">", "created_at[gte]": ">=",
