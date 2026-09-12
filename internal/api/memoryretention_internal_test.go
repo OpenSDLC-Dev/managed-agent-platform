@@ -264,10 +264,67 @@ func prunedCount(t *testing.T, reader *sdkmetric.ManualReader) int64 {
 	return 0
 }
 
+// TestRetentionLoopSweepsBeforeItsFirstTick pins the order of the loop's two
+// halves, which TestRetentionLoopSweepsThenStops cannot see: at its 10ms
+// interval a loop that waits first still sweeps almost immediately. The
+// interval here is longer than this test could ever wait, so only a sweep taken
+// before the first tick passes it — and a control plane restarting more often
+// than the interval is the deployment that depends on that (#695).
+func TestRetentionLoopSweepsBeforeItsFirstTick(t *testing.T) {
+	restore := SetMemoryPruneIntervalForTest(time.Hour)
+	t.Cleanup(restore)
+
+	pool := retentionPool(t)
+	memoryID := domain.NewID(domain.PrefixMemory).String()
+	ids := seedVersions(t, pool, memoryID, 9, time.Now().Add(-90*24*time.Hour), time.Hour)
+	liveMemory(t, pool, memoryID, ids[8], "/notes.md")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { defer close(done); StartMemoryRetention(ctx, pool) }()
+	t.Cleanup(func() { cancel(); <-done })
+
+	deadline := time.Now().Add(30 * time.Second)
+	for len(surviving(t, pool, memoryID)) != 5 {
+		if time.Now().After(deadline) {
+			t.Fatalf("the loop is waiting for a first tick an hour away, so a control plane restarted more often would never prune: survivors = %d, want 5",
+				len(surviving(t, pool, memoryID)))
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	// And then it waits. Versions expiring after that first pass must sit until
+	// the tick an hour away, because a loop that swept without waiting would
+	// run continuously against Postgres and look identical from the rows above.
+	second := domain.NewID(domain.PrefixMemory).String()
+	moreIDs := seedVersions(t, pool, second, 9, time.Now().Add(-90*24*time.Hour), time.Hour)
+	liveMemory(t, pool, second, moreIDs[8], "/other.md")
+	time.Sleep(500 * time.Millisecond)
+	if got := len(surviving(t, pool, second)); got != 9 {
+		t.Errorf("a second memory's versions went within the interval: survivors = %d, want all 9 — the loop is not waiting between sweeps", got)
+	}
+}
+
+// TestMemoryPruneIntervalIsTheDocumentedCadence pins the production value,
+// which no other test can: every loop test overrides it, so without this one a
+// change to a second — an unbounded full-table DELETE once a second — passes
+// the gate. Hourly is an operator contract in docs/ARCHITECTURE.md and
+// docs/DIVERGENCES.md, and the literal is deliberate: comparing against the var
+// would move both sides together and pin nothing.
+func TestMemoryPruneIntervalIsTheDocumentedCadence(t *testing.T) {
+	if memoryPruneInterval != time.Hour {
+		t.Errorf("memoryPruneInterval = %s, want 1h — the cadence both docs publish", memoryPruneInterval)
+	}
+}
+
 // TestRetentionLoopSweepsThenStops drives the loop itself, not just the
 // statement: a tick has to reach the sweep, and a cancelled context has to end
 // it. Without the first half, the loop could stop calling the sweep entirely
 // and every other test here would stay green.
+//
+// It takes two subjects to show that now. The sweep runs a pass before its
+// first wait, so the first removal proves only that the loop started; a second
+// memory, seeded once the first is gone, is the one a tick has to carry.
 func TestRetentionLoopSweepsThenStops(t *testing.T) {
 	restore := SetMemoryPruneIntervalForTest(10 * time.Millisecond)
 	t.Cleanup(restore)
@@ -278,9 +335,12 @@ func TestRetentionLoopSweepsThenStops(t *testing.T) {
 	liveMemory(t, pool, memoryID, ids[8], "/notes.md")
 
 	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
 	done := make(chan struct{})
 	go func() { defer close(done); StartMemoryRetention(ctx, pool) }()
+	// Every exit path stops the loop, not only the one below: the phases that
+	// follow can t.Fatalf, and the sweeper would otherwise go on issuing
+	// deletes against a pool retentionPool's own cleanup is about to close.
+	t.Cleanup(func() { cancel(); <-done })
 
 	deadline := time.Now().Add(30 * time.Second)
 	for {
@@ -289,6 +349,25 @@ func TestRetentionLoopSweepsThenStops(t *testing.T) {
 		}
 		if time.Now().After(deadline) {
 			t.Fatalf("the loop never swept: survivors = %d, want 5", len(surviving(t, pool, memoryID)))
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	// A second memory, seeded only once the first has gone. That ordering is
+	// the barrier: one pass has demonstrably finished, so whatever removes
+	// this one came after a tick. Seeding it earlier would race the startup
+	// pass rather than exclude it.
+	second := domain.NewID(domain.PrefixMemory).String()
+	moreIDs := seedVersions(t, pool, second, 9, time.Now().Add(-90*24*time.Hour), time.Hour)
+	liveMemory(t, pool, second, moreIDs[8], "/second.md")
+	deadline = time.Now().Add(30 * time.Second)
+	for {
+		if len(surviving(t, pool, second)) == 5 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("no tick reached the sweep after the startup pass: survivors = %d, want 5",
+				len(surviving(t, pool, second)))
 		}
 		time.Sleep(20 * time.Millisecond)
 	}

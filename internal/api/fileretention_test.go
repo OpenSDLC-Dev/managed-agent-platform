@@ -174,6 +174,10 @@ func TestFileRetentionSweepsBeforeItsFirstTick(t *testing.T) {
 // pins the production window's value — 30 days is the number the reference
 // publishes, and the statement test passes its own window in, so without these
 // two files the constant could be any duration at all and nothing would fail.
+//
+// It takes two subjects to show that now. The sweep runs a pass before its
+// first wait, so the first removal proves only that the loop started; a second
+// file, uploaded once the first is gone, is the one a tick has to carry.
 func TestFileRetentionSweepRuns(t *testing.T) {
 	s := newTestServer(t)
 	oct := "application/octet-stream"
@@ -205,6 +209,20 @@ func TestFileRetentionSweepRuns(t *testing.T) {
 			<-done
 			t.Fatalf("31 days past its expiry, the sweep left row=%v object=%v",
 				fileRowExists(t, s, swept), blobExists(t, s, swept))
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	// A second expired file, uploaded only once the first has gone. That
+	// ordering is the barrier: one pass has demonstrably finished, so whatever
+	// removes this one came after a tick. Uploading it earlier would race the
+	// startup pass rather than exclude it.
+	ticked := s.uploadFile(t, "ticked.bin", &oct, "bytes")["id"].(string)
+	expireBy(t, s, ticked, 31*24*time.Hour)
+	deadline = time.Now().Add(10 * time.Second)
+	for fileRowExists(t, s, ticked) {
+		if time.Now().After(deadline) {
+			t.Fatalf("no tick reached the sweep after the startup pass: %s survived", ticked)
 		}
 		time.Sleep(20 * time.Millisecond)
 	}

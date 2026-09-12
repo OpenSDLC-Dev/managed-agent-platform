@@ -20,6 +20,7 @@ import (
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/blob/blobtest"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/secrets/local"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/store"
 )
 
 // refusingStore is an object store that can be told to refuse every delete and
@@ -181,6 +182,50 @@ func awaitAttempt(t *testing.T, store *refusingStore, key, what string) {
 			t.Fatalf("%s: %q was never attempted", what, key)
 		}
 		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// TestDrainSweepsBeforeItsFirstTick: the queue holds precisely what a process
+// died before deleting, so a backlog at boot is the normal case — and the wake
+// that would have announced it died with that process. Nothing here wakes the
+// sweeper and the interval is production's minute, longer than the wait below,
+// so only a pass taken before the first wait can empty the queue. Without it a
+// replica restarting more often than the interval never drains at all.
+//
+// Then the other half, which the first cannot see: a loop that dropped its wait
+// entirely would empty that backlog just as fast and still stop on a cancelled
+// context, so it passes everything above while polling Postgres continuously. A
+// key owed after the boot pass, with nothing to wake anyone, is the one a
+// waiting loop has to leave alone.
+func TestDrainSweepsBeforeItsFirstTick(t *testing.T) {
+	s := newTestServer(t)
+	ctx := context.Background()
+	key := blob.FilesKey(domain.NewID("file").String())
+	if err := s.blobs.Put(ctx, key, strings.NewReader("bytes"), 5, "text/markdown"); err != nil {
+		t.Fatalf("seed the object: %v", err)
+	}
+	// The row a dead process's transaction left behind.
+	if _, err := s.pool.Exec(ctx, store.PendingObjectDeleteInsertSQL, []string{key}); err != nil {
+		t.Fatalf("seed the owed key: %v", err)
+	}
+
+	startSweeper(t, s, s.blobs)
+	awaitDrained(t, s.pool, "the backlog a restart inherits")
+
+	if _, _, err := s.blobs.Get(ctx, key); err == nil {
+		t.Errorf("%s: the row went but the object did not", key)
+	}
+
+	second := blob.FilesKey(domain.NewID("file").String())
+	if err := s.blobs.Put(ctx, second, strings.NewReader("bytes"), 5, "text/markdown"); err != nil {
+		t.Fatalf("seed the second object: %v", err)
+	}
+	if _, err := s.pool.Exec(ctx, store.PendingObjectDeleteInsertSQL, []string{second}); err != nil {
+		t.Fatalf("seed the second owed key: %v", err)
+	}
+	time.Sleep(500 * time.Millisecond)
+	if got := pendingKeys(t, s.pool); !slices.Contains(got, second) {
+		t.Errorf("a key enqueued after the boot pass went within the interval: queue = %v — the loop is not waiting between passes", got)
 	}
 }
 
@@ -721,18 +766,28 @@ func TestTwoSweepersDoNotDuplicateTheStoreRoundTrips(t *testing.T) {
 // depend on it — a key another replica enqueued raises no wake in this process
 // at all. Asserted with no queue, which is also every deployment that wires
 // none.
+//
+// It takes two keys to assert that now. A backlog seeded before the sweeper
+// starts is drained by the pass that runs before the first wait, whether or not
+// a tick ever fires, so the first key proves only that the loop started. The
+// second is enqueued once the first is gone — past that point the boot pass has
+// claimed all it will ever claim, and with no wake wired, nothing but the
+// interval is left to remove it.
 func TestTheSweeperDrainsWithoutAWake(t *testing.T) {
 	store := newRefusingStore()
 	s := newTestServerWithStore(t, store)
 	ctx := context.Background()
-	key := "files/file_from-another-replica"
-	if err := s.blobs.Put(ctx, key, strings.NewReader("x"), 1, "text/plain"); err != nil {
-		t.Fatal(err)
+	seed := func(key string) {
+		t.Helper()
+		if err := s.blobs.Put(ctx, key, strings.NewReader("x"), 1, "text/plain"); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := s.pool.Exec(ctx,
+			`INSERT INTO pending_object_deletes (object_key) VALUES ($1)`, key); err != nil {
+			t.Fatal(err)
+		}
 	}
-	if _, err := s.pool.Exec(ctx,
-		`INSERT INTO pending_object_deletes (object_key) VALUES ($1)`, key); err != nil {
-		t.Fatal(err)
-	}
+	seed("files/file_from-another-replica")
 
 	// The interval is the thing under test, so it is shortened rather than
 	// waited out — with the production minute this rung would be a minute long
@@ -743,6 +798,10 @@ func TestTheSweeperDrainsWithoutAWake(t *testing.T) {
 	go func() { defer close(done); api.StartPendingObjectDeletes(sweepCtx, s.pool, store, nil) }()
 	defer func() { cancel(); <-done }()
 
+	awaitDrained(t, s.pool, "the pass that runs before the first wait")
+
+	key := "files/file_enqueued-after-the-boot-pass"
+	seed(key)
 	awaitDrained(t, s.pool, "the sweeper's own interval, with no wake")
 	if _, _, err := s.blobs.Get(ctx, key); !errors.Is(err, blob.ErrNotFound) {
 		t.Fatalf("the object survived: %v", err)

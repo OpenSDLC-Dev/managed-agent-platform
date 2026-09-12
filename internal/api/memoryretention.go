@@ -52,19 +52,31 @@ const (
 var memoryPruneInterval = time.Hour
 
 // StartMemoryRetention sweeps until ctx ends. The statement is idempotent, so
-// two controlplane replicas running it cost a duplicate query and never a
-// wrong answer. It takes row locks only on the rows it deletes, which no plain
+// two controlplane replicas running it never reach a wrong answer — they cost a
+// duplicate query and, since the reorder below made a boot pass the moment they
+// all take one, whatever lock waiting that duplication implies. The statement
+// removes what it finds in one unbounded DELETE, which is what the first pass
+// over a long-unpruned table costs and what makes that timing worth naming: a
+// control plane restarting faster than that pass commits repeats it from the
+// start at every boot and still prunes nothing, so the order below buys forward
+// progress only where a restart outlasts one DELETE. A bounded batch —
+// fileretention.go's shape — is what would close that, the day a first pass is
+// measured in minutes. It takes row locks only on the rows it deletes, which no plain
 // reader waits on — a redaction's `SELECT … FOR UPDATE` on one of those rows
 // would, for as long as the delete runs.
 func StartMemoryRetention(ctx context.Context, pool *pgxpool.Pool) {
 	t := time.NewTicker(memoryPruneInterval)
 	defer t.Stop()
 	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-t.C:
-		}
+		// The sweep runs before the first wait rather than after it: a ticker
+		// does not fire on creation, so a control plane that restarts more
+		// often than this interval would otherwise never prune at all. At an
+		// hour that is not an exotic deployment — it is one that rolls on every
+		// merge. What makes a boot pass safe on every replica at once is the
+		// statement's idempotence, which is a claim about the answer and not
+		// about the cost: they serialize on row locks and rescan what the
+		// winner already removed. fileretention.go's sweep takes this order
+		// for the same reason.
 		n, err := pruneMemoryVersions(ctx, pool, memoryVersionRetention, memoryVersionsKept)
 		switch {
 		case err != nil && ctx.Err() == nil:
@@ -72,6 +84,11 @@ func StartMemoryRetention(ctx context.Context, pool *pgxpool.Pool) {
 		case err == nil && n > 0:
 			slog.InfoContext(ctx, "memory versions pruned", "count", n,
 				"older_than", memoryVersionRetention, "kept_per_memory", memoryVersionsKept)
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
 		}
 	}
 }

@@ -37,6 +37,15 @@ func seedExpiredFile(t *testing.T, pool *pgxpool.Pool, blobs blob.Store, expired
 	return id
 }
 
+// TestFilePurgeIntervalIsTheDocumentedCadence is memoryretention's twin, for
+// the same reason: both loop tests override the interval, so the production
+// value is pinned by nothing else, and docs/ARCHITECTURE.md publishes it.
+func TestFilePurgeIntervalIsTheDocumentedCadence(t *testing.T) {
+	if filePurgeInterval != time.Hour {
+		t.Errorf("filePurgeInterval = %s, want 1h — the cadence ARCHITECTURE.md publishes", filePurgeInterval)
+	}
+}
+
 // TestPurgeRecordsWhatItRemoved pins the instrument by its exact exported name:
 // a sweep that removed rows counts them, and a sweep that removed none records
 // nothing, so a quiet database leaves no series (memoryretention's twin).

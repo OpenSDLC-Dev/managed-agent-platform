@@ -129,12 +129,13 @@ func StartPendingObjectDeletes(ctx context.Context, pool *pgxpool.Pool, blobs bl
 	t := time.NewTicker(objectDeleteInterval)
 	defer t.Stop()
 	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-t.C:
-		case <-q.waits():
-		}
+		// The first pass runs before the first wait, and this is the sweep with
+		// the strongest claim to it: the queue holds precisely what some process
+		// died before deleting, so a backlog at boot is the normal case rather
+		// than the exception — and no wake can announce it, because the enqueue
+		// happened in the process that is gone. A replica restarting more often
+		// than the interval would otherwise never drain at all.
+		//
 		// Until the pass claims nothing: a wake says a delete just enqueued a
 		// set, and one batch may not be all of it.
 		for {
@@ -151,6 +152,12 @@ func StartPendingObjectDeletes(ctx context.Context, pool *pgxpool.Pool, blobs bl
 			if done+failed < objectDeleteBatch {
 				break
 			}
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+		case <-q.waits():
 		}
 	}
 }
