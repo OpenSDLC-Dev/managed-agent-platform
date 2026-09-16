@@ -1,5 +1,5 @@
 ---
-status: approved
+status: in-progress
 issue: "#722"
 ---
 
@@ -106,7 +106,9 @@ schema path, under "Not every citation is a Go symbol" below:
   `init` case, not "the file is generated", since every file in the SDK is — and
   `non-go` for a source with no machine-readable structure to name at all. That
   last one is deliberately narrow: the SDK's bundled spec *is* machine-readable,
-  so a spec citation takes a schema path and `non-go` is refused there. Left
+  so a spec citation takes a schema path and `non-go` is refused there — as it
+  is over any structured file, which leaves prose (`.md`, `.txt`) the only kind
+  it can be true of. Left
   wide, it would be irrefutably true of every YAML line and would let the 23
   spec citations keep their spans forever — the ceremony this set exists to
   prevent, reappearing on the one surface where a parser could still have caught
@@ -124,8 +126,8 @@ schema path, under "Not every citation is a Go symbol" below:
   (span: crosses-declarations)
   ```
 
-  Rung 1 checks the reason is present and from the set, which is pure syntax and
-  always decidable. Falsifying it — a `crosses-declarations` span that resolves
+  Rung 1 checks the reason is present, from the set, and one the file's own kind
+  can bear, which needs no source and is always decidable. Falsifying it — a `crosses-declarations` span that resolves
   to a single declaration — needs the source, so **it fails the gate only at the
   pin**, whose module the gate has already materialised; at any older tag the
   cache happens to hold, rung 3 reports it instead. That split matters more than
@@ -246,7 +248,7 @@ a stamp "names the tag its coordinates were last checked against, not
 necessarily the pin". The guard enforces that reading instead of contradicting
 it.
 
-**Three limits stated rather than papered over.** The guard detects deletion and
+**Four limits stated rather than papered over.** The guard detects deletion and
 renaming, not semantic drift: a struct whose field changes meaning, or a constant
 whose value moves, passes every rung while the enclosing symbol survives. So the
 report is proportional to what Anthropic *removed*, and the lag list remains the
@@ -262,7 +264,14 @@ by archive path, claims about a source file as a whole that name no location
 inside it, and comparative claims across three tags at once. Those
 are real citations and they are not this plan's; forcing them into a
 tag-and-symbol grammar would be the category error described below for steering
-documents.
+documents. Last, rung 1 finds an unmigrated citation by what it reaches for — a
+governed source's name, a version, a coordinate, the spec — so a mention
+carrying none of them is not a candidate: a file and a symbol named in passing,
+`betatoolrunner.go executeTools`, with no source, tag or line. When slice 1
+landed the comments held 50 such mentions, at least five of them into the SDK
+and the rest partial paths into this repository, the MCP go-sdk's files, or
+prose. Telling those apart needs a guess about whose file a basename names,
+which a fail-closed rung cannot make, so slice 3 reads them by hand.
 
 ### The observation point a report-only rung needs
 
@@ -371,11 +380,17 @@ could ever contradict.
    spec citations and two `api.md` coordinates at `docs/DIVERGENCES.md:91` that
    rot the same way. The bare continuations are #660's blocker and they disappear
    here, because a symbol needs no filename inherited from the surrounding prose.
-   Closes #660.
+   One constraint slice 1 established: a locator is symbols, not prose about
+   them, so `BetaDeploymentService (New, Update, List)` migrates to the three
+   symbols themselves joined by `and` rather than keeping the parenthetical —
+   which rung 1 reads as part of the locator and then refuses, since it is not a
+   symbol. Closes #660.
 3. **Migrate the Go comments; the steering documents take a separate rule.**
    50 lines carry a coordinate — 49 citations (40 into the SDK, 3 into go-jose,
    6 into this repository) and one fixture path that is not one — and 12 carry a
-   `since` whose source is usually unnamed. The comments are a pure migration.
+   `since` whose source is usually unnamed; beside them sit the sourceless
+   `file.go Symbol` mentions rung 1 cannot see (the last of the four limits
+   above), which this slice reads by hand. The comments are a pure migration.
    The steering documents are not: `.claude/agents/verifier.md:25` is an
    *operational instruction* to judge against the current pin, not evidence
    dated to a tag, so rewriting it as `checked against v1.66.0` would be a
