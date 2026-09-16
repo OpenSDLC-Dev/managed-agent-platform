@@ -38,8 +38,9 @@ docs/plan/51_sdk-reference-binding.md's grammar.
               shape alone and never make a run unavailable
 
 make verify runs -fail over the whole corpus, through this package's own test.
-Without -fail every run exits 0, which is what -report wants: the report is
-read, not obeyed. ` + "`make sdk-bump-report`" + ` is the front end for -report.`
+Without -fail no finding changes the exit code, which is what -report wants: the
+report is read, not obeyed. A run that could not read the corpus, or open the pin
+for -report, exits 2 either way. ` + "`make sdk-bump-report`" + ` is the front end for -report.`
 
 func main() { os.Exit(run(os.Args[1:], os.Stdout, os.Stderr)) }
 

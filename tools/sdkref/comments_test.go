@@ -224,6 +224,22 @@ func Probe() {}
 	}
 }
 
+// TestATrackedFileTheTreeDeletedHoldsNoComment. git still lists a file removed
+// without `git rm`, and there is no comment in it to read: the deletion is the
+// change, and failing the gate as though the file would not parse misnames it.
+func TestATrackedFileTheTreeDeletedHoldsNoComment(t *testing.T) {
+	root := commentTree(t)
+	findings, _, _ := GoComments(root, []string{"deleted.go", "probe.go"}, ourFiles(), nil)
+	for _, f := range findings {
+		if f.File != "probe.go" {
+			t.Errorf("unexpected finding %s", f)
+		}
+	}
+	if len(findings) == 0 {
+		t.Errorf("probe.go was not read beside the deleted file")
+	}
+}
+
 // TestAGoFileThatWillNotParseIsNamed. Every comment in such a file went unread,
 // and a scan that skipped it in silence would report a clean corpus it had not
 // looked at. The files beside it are still read.

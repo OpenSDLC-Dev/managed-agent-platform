@@ -830,7 +830,7 @@ func TestShapeFindings(t *testing.T) {
 		},
 		{
 			name:  "but not by a citation of another source",
-			in:    "// anthropic-cli's SessionToolRunner (checked against anthropic-sdk-go v1.70.1 — betatoolrunner.go BetaToolRunner) loops",
+			in:    "// anthropic-cli's BetaToolRunner (checked against anthropic-sdk-go v1.70.1 — betatoolrunner.go BetaToolRunner) loops",
 			rules: []string{"untagged"},
 		},
 		{
@@ -840,6 +840,89 @@ func TestShapeFindings(t *testing.T) {
 			in: "*Evidence: checked against anthropic-sdk-go v1.70.1 — betaagent.go BetaAgent " +
 				"and anthropic-cli's SessionToolRunner.*",
 			rules: []string{"untagged"},
+		},
+		{
+			// The claim has a tag, so "no tag" would be the wrong edit. The sweep
+			// classifies the version and says which one it needs.
+			name:  "a mention whose clause carries a version is the version's to classify",
+			in:    "// anthropic-sdk-go's Foo since v1.70.1",
+			rules: []string{"source-unnamed"},
+		},
+		{
+			name:  "and so is one beside a misspelt head",
+			in:    "// anthropic-sdk-go's Foo (checked against Anthropic-sdk-go v1.70.1 — betaagent.go Foo)",
+			rules: []string{"source-unnamed"},
+		},
+		{
+			name:  "but not a version the text gives another project",
+			in:    "// anthropic-sdk-go's Foo reads what go-sdk v1.7.0 writes",
+			rules: []string{"untagged"},
+		},
+		{
+			// Rung 2 resolves only what the citation names, so a citation of
+			// another symbol would leave this one free to vanish.
+			name:  "a citation of another symbol dates nothing it does not name",
+			in:    "// anthropic-sdk-go's Foo (since anthropic-sdk-go v1.70.1 — betaagent.go Bar)",
+			rules: []string{"untagged"},
+		},
+		{
+			name:  "a package mention is dated by a citation into a file of that name",
+			in:    "// anthropic-sdk-go's tools/agenttoolset (checked against anthropic-sdk-go v1.70.1 — agenttoolset.go BetaAgentToolset20260401) runs them",
+			rules: nil,
+		},
+		{
+			name:  "a source named by its module path with a major version",
+			in:    "// github.com/go-jose/go-jose/v4 jwt.Expected treats a zero Time as now",
+			rules: []string{"untagged"},
+		},
+		{
+			// The full stop ends the sentence, not the path, and what follows it
+			// is the next sentence's first word.
+			name:  "a module path ending a sentence names nothing after it",
+			in:    "// the verifier uses github.com/go-jose/go-jose/v4. Two other routes were declined",
+			rules: nil,
+		},
+		{
+			name:  "and by that path's possessive",
+			in:    "// go-jose/v4's jwt.Expected treats a zero Time as now",
+			rules: []string{"untagged"},
+		},
+		{
+			name:  "a source and a package path in parentheses",
+			in:    "// the reference runs them on the host (anthropic-sdk-go (tools/agenttoolset))",
+			rules: []string{"untagged"},
+		},
+		{
+			name:  "a package of a source, named by its import path",
+			in:    "// github.com/anthropics/anthropic-sdk-go/option sets it",
+			rules: []string{"untagged"},
+		},
+		{
+			// A word that is itself a source's name is not a symbol, and must not
+			// hide the mention that starts with it.
+			name:  "a mention straight after another source's name",
+			in:    "// anthropic-cli anthropic-sdk-go's SessionToolRunner loops",
+			rules: []string{"untagged"},
+		},
+		{
+			name:  "a method on a one-letter type",
+			in:    "// anthropic-sdk-go's T.Foo reads it",
+			rules: []string{"untagged"},
+		},
+		{
+			name:  "a constant in capitals with a number",
+			in:    "// go-jose HS256 signs it",
+			rules: []string{"untagged"},
+		},
+		{
+			name:  "a major version in capitals is not a symbol",
+			in:    "// go-jose V4 parses the key set",
+			rules: nil,
+		},
+		{
+			name:  "nor is an abbreviation",
+			in:    "// the anthropic-sdk-go e.g. mentions it",
+			rules: nil,
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -854,6 +937,20 @@ func TestShapeFindings(t *testing.T) {
 	}
 }
 
+// TestAMentionIsQuotedWithoutWhatIntroducesTheNextCitation. A clause cut at the
+// next citation ends on whatever led into it — a parenthesis, a connective —
+// and quoting that sends a reader looking for text the claim does not contain.
+func TestAMentionIsQuotedWithoutWhatIntroducesTheNextCitation(t *testing.T) {
+	for in, want := range map[string]string{
+		"// go-jose's JSONWebKey.UnmarshalJSON (checked against anthropic-sdk-go v1.70.1 — betaagent.go BetaAgent)": `"go-jose's JSONWebKey.UnmarshalJSON"`,
+		"// anthropic-sdk-go's Foo and go-jose's Bar (checked against go-jose v4.1.4 — jwk.go Bar)":                 `"anthropic-sdk-go's Foo"`,
+	} {
+		if got := Shape(in); len(got) != 1 || !strings.Contains(got[0].Msg, want) {
+			t.Errorf("Shape(%q) = %v, want one finding quoting %s", in, got, want)
+		}
+	}
+}
+
 // TestAnUntaggedSpecIsToldToTakeASchemaPath. A source written in front of the
 // spec's own file is untagged like any file, but the edit it needs is a schema
 // path: advice asking for a symbol would send the migrator to the one form the
@@ -862,6 +959,7 @@ func TestAnUntaggedSpecIsToldToTakeASchemaPath(t *testing.T) {
 	for in, want := range map[string]string{
 		"// (anthropic-sdk-go scripts/mock-spec.json.gz BetaSessionNewParams)": "spec <schema path>",
 		"// (anthropic-sdk-go betafile.go BetaFileListParams)":                 "<file> <symbol>",
+		"// the anthropic-sdk-go OpenAPI spec says it":                         "spec <schema path>",
 	} {
 		if got := Shape(in); len(got) != 1 || !strings.Contains(got[0].Msg, want) {
 			t.Errorf("Shape(%q) = %v, want one finding advising %q", in, got, want)
@@ -990,9 +1088,11 @@ func TestTheRegistryAndCommentsAreReadable(t *testing.T) {
 		{"head-malformed", "- **p9** — checked against `anthropic-sdk-go v1.63.0` (sentinel)."},
 		{"head-malformed", "- **p10** — *Evidence: since anthropic-sdk-go V1.70.1 — betasentinel.go BetaSentinel.*"},
 		{"undated", "- **p11** — pkg.go.dev/github.com/anthropics/anthropic-sdk-go@v1.70.1#BetaSentinel."},
+		{"untagged", "- **p12** — go-jose's JSONWebKey.Sentinel decodes it."},
 	}
 	const clean = "\n- **probe** — *Evidence: checked against anthropic-sdk-go v1.70.1 — betasession.go BetaSession.*" +
-		"\n- **probe** — go-sdk v1.7.0 panics on it, and k8s.io/api v0.36.2 has no such field."
+		"\n- **probe** — go-sdk v1.7.0 panics on it, and k8s.io/api v0.36.2 has no such field." +
+		"\n- **probe** — go-jose's jwt.Sentinel (checked against go-jose v4.1.4 — jwt/validation.go Sentinel) treats it."
 	appended := string(src)
 	for _, p := range probes {
 		appended += "\n" + p.line
@@ -1050,8 +1150,12 @@ func TestTheRegistryAndCommentsAreReadable(t *testing.T) {
 //
 // p5 the SDK's bundled spec constrains it.
 //
+// p6 go-jose's JSONWebKey.Sentinel decodes it.
+//
 // clean: checked against anthropic-sdk-go v1.70.1 — betasession.go BetaSession,
-// go-sdk v1.7.0 panics on it, and listening on x.com:443 and nexus.infra:8080.
+// go-sdk v1.7.0 panics on it, and listening on x.com:443 and nexus.infra:8080,
+// and go-jose's jwt.Sentinel (checked against go-jose v4.1.4 — jwt/validation.go
+// Sentinel) treats it.
 func P() {}
 `
 	path := filepath.Join(t.TempDir(), "probe.go")
@@ -1067,7 +1171,7 @@ func P() {}
 	want := []struct {
 		rule string
 		line int
-	}{{"bare-line", 3}, {"source-unnamed", 5}, {"untagged", 7}, {"bare-tag", 9}, {"untagged", 11}}
+	}{{"bare-line", 3}, {"source-unnamed", 5}, {"untagged", 7}, {"bare-tag", 9}, {"untagged", 11}, {"untagged", 13}}
 	if len(withProbe) != len(comments)+len(want) {
 		t.Fatalf("a probe file moved the comment findings from %d to %d, want exactly %d "+
 			"more:\n%v", len(comments), len(withProbe), len(want), withProbe[min(len(comments), len(withProbe)):])

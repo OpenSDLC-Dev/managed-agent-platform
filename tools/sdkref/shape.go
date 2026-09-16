@@ -4,8 +4,10 @@ import (
 	"fmt"
 	"path"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
+	"unicode"
 )
 
 // Rung 1 — shape. Syntax, plus two facts about this repository that no source's
@@ -92,20 +94,19 @@ var (
 	// tag and, often, no line number, it matches no other rule here at all.
 	untaggedHead = regexp.MustCompile(`(` + strings.Join(sources, "|") +
 		`)\s+([\w./-]+\.(?:go|md|ya?ml|json(?:\.gz)?))\b`)
-	// untaggedMention is a governed source, or its possessive — quoted or not —
-	// followed by a word that may name something inside it. It is the same claim as
-	// untaggedHead without the file — a method named after the source's
-	// possessive, a package path in parentheses after the source — and matched
-	// nothing else here, so a bump could falsify it with no rung saying so.
-	// Which words are names is symbolLike's to judge, since this pattern cannot
-	// tell a symbol from prose.
+	// untaggedMention is a governed source — by name, possessive, quoted, or
+	// with the rest of an import path after it — and the word written after it.
+	// It is the same claim as untaggedHead without the file — a method named
+	// after the source's possessive, a package path in parentheses after the
+	// source — and matched nothing else here, so a bump could falsify it with no
+	// rung saying so. Whether the word, or the path, names anything is mentions'
+	// to judge, since this pattern cannot tell a symbol from prose.
 	untaggedMention = regexp.MustCompile("(" + strings.Join(sources, "|") +
-		")`?(?:['’][sS])?[\\s`]+([A-Za-z_][\\w./-]*\\w)")
-	// dottedName and packagePath are the two shapes symbolLike admits besides a
-	// mixed-case identifier: `Type.Method` or `pkg.Name`, and a path of packages.
-	dottedName  = regexp.MustCompile(`^[A-Za-z_]\w+(?:\.[A-Za-z_]\w+)+$`)
-	packagePath = regexp.MustCompile(`^[a-z][\w.-]*(?:/[\w.-]+)+$`)
-	identifier  = regexp.MustCompile(`^[A-Za-z_]\w*$`)
+		")((?:/[\\w.-]*\\w)*)(?:`?(?:['’][sS])?[\\s`(]+([A-Za-z_][\\w./-]*\\w))?")
+	// packagePath is a path of packages, which symbolLike admits beside a
+	// symbol; majorVersion is a module's major version, which names no package.
+	packagePath  = regexp.MustCompile(`^[a-z][\w.-]*(?:/[\w.-]+)+$`)
+	majorVersion = regexp.MustCompile(`^[vV]\d+$`)
 	// specEpithet is the other way the corpus names a source: not by module but
 	// by what it is. The registry writes a tag and then the kind of document,
 	// which names the SDK's bundled copy at that tag and rots exactly like a
@@ -174,7 +175,8 @@ const (
 		"it moved: write `checked against <source> <tag> — <file> <symbol>`"
 	adviseMentionUntagged = "%q names something in a source but no tag, so no bump can be " +
 		"told whether it moved: cite it beside the mention as `(checked against <source> <tag> " +
-		"— <file> <symbol>)`, or name it without the source"
+		"— <file> <symbol>)` naming that symbol, or — where a citation beside it already " +
+		"does — drop the source's name"
 	adviseSpecUntagged = "%q names an OpenAPI document but no tag, so no bump can be told " +
 		"whether it moved: write `checked against " + SpecSource + " <tag> — spec <schema path>`"
 	adviseSpecUndated = "%q names the SDK's bundled spec at a tag with no temporal form: write " +
@@ -342,11 +344,17 @@ func (s Scanner) scan(line string) ([]Finding, []Finding) {
 	// emit reports the clause that runs from `from` past `after`, and consumes
 	// it. report does the same for a match nothing has consumed yet.
 	emit := func(from, after int, rule, msg string) {
-		_, end, _ := clause(text, after, nextHead(bounds, after))
+		_, end, atHead := clause(text, after, nextHead(bounds, after))
+		quote := strings.TrimSpace(text[from:end])
+		if atHead {
+			// Cut at the next citation, the quote ends on whatever led into it
+			// — a parenthesis, a connective — which is no part of this claim.
+			quote = trimConnective(strings.TrimSuffix(quote, "("), true)
+		}
 		findings = append(findings, Finding{
 			at:   from,
 			Rule: rule,
-			Msg:  fmt.Sprintf(msg, strings.TrimSpace(text[from:end])),
+			Msg:  fmt.Sprintf(msg, quote),
 		})
 		mark(consumed, from, end)
 	}
@@ -419,21 +427,23 @@ func (s Scanner) scan(line string) ([]Finding, []Finding) {
 		}
 		report(at, "untagged", advice)
 	}
-	for _, at := range mentions(text) {
-		// A mention whose clause runs into a citation of the source it names is
-		// the claim that citation dates.
-		if _, end, atHead := clause(text, at[1], nextHead(bounds, at[1])); atHead {
-			if h := datedHead.FindStringSubmatchIndex(text[end:]); h != nil && h[0] == 0 &&
-				text[end+h[4]:end+h[5]] == text[at[2]:at[3]] {
-				mark(consumed, at[0], at[1])
-				continue
-			}
-		}
-		report(at, "untagged", adviseMentionUntagged)
-	}
 	for _, re := range []*regexp.Regexp{untaggedSpec, specFile} {
 		for _, at := range re.FindAllStringIndex(text, -1) {
 			report(at, "untagged", adviseSpecUntagged)
+		}
+	}
+	// After the spec: `OpenAPI` reads as a symbol, and the edit an OpenAPI
+	// document needs is a schema path.
+	for _, m := range mentions(text) {
+		_, end, _ := clause(text, m.to, nextHead(bounds, m.to))
+		switch {
+		case s.ownsTag(text[m.to:end]):
+			// The claim has a tag, so "no tag" is the wrong edit: the sweep
+			// below classifies the version and says which one it needs.
+		case citedBy(text, end, bounds, m):
+			mark(consumed, m.from, m.to)
+		default:
+			report([]int{m.from, m.to}, "untagged", adviseMentionUntagged)
 		}
 	}
 
@@ -556,38 +566,115 @@ func headStarts(text string) []int {
 			out = append(out, at[0])
 		}
 	}
-	for _, at := range mentions(text) {
-		out = append(out, at[0])
+	for _, m := range mentions(text) {
+		out = append(out, m.from)
 	}
 	sort.Ints(out)
 	return out
 }
 
-// mentions returns each untaggedMention whose word names something, as
-// submatch indices. A source named by its module path is still that source, so
-// unlike a head a mention need not stand alone.
-func mentions(text string) [][]int {
-	var out [][]int
-	for _, at := range untaggedMention.FindAllStringSubmatchIndex(text, -1) {
-		if symbolLike(text[at[4]:at[5]]) {
-			out = append(out, at)
+// mention is a governed source named beside something inside it: from the
+// source's name to the end of what it names.
+type mention struct {
+	from, to int
+	source   string
+	name     string // the symbol or package path named
+}
+
+// mentions returns every untaggedMention that names something. A source named
+// by its module path is still that source, so unlike a head a mention need not
+// stand alone, and neither a major version nor the source's own name repeated in
+// that path — `go-jose/go-jose/v4` — is a package. The scan resumes after a
+// source's own name rather than after its match, because the word a match took
+// may be a source's name itself.
+func mentions(text string) []mention {
+	var out []mention
+	for pos := 0; pos < len(text); {
+		at := untaggedMention.FindStringSubmatchIndex(text[pos:])
+		if at == nil {
+			break
+		}
+		for i := range at {
+			if at[i] >= 0 {
+				at[i] += pos
+			}
+		}
+		pos = at[3]
+		source, pkg := text[at[2]:at[3]], ""
+		for _, seg := range strings.Split(text[at[4]:at[5]], "/") {
+			if seg != "" && !majorVersion.MatchString(seg) && !slices.Contains(sources, seg) {
+				pkg = path.Join(pkg, seg)
+			}
+		}
+		switch {
+		case at[6] >= 0 && symbolLike(text[at[6]:at[7]]):
+			out = append(out, mention{at[0], at[7], source, text[at[6]:at[7]]})
+			pos = at[7]
+		case pkg != "":
+			// A package of the source, named by its import path.
+			out = append(out, mention{at[0], at[5], source, pkg})
+			pos = at[5]
 		}
 	}
 	return out
 }
 
 // symbolLike reports whether a word written after a source's name names
-// something inside it: a path of packages, a dotted name, or an identifier in
-// mixed case. A version is none of those, and is left to the sweep, which says
-// which edit it needs; a word in lower case is prose, and one in capitals is
+// something inside it: a path of packages, or a symbol the grammar's own
+// locator would admit that is spelt in mixed case, or in capitals with a digit.
+// A version is none of those, and is left to the sweep, which says which edit
+// it needs; a word in lower case is prose, and one in capitals alone is
 // emphasis. The judgment is spelling, so it has limits both ways — a
-// capitalised word opening a clause reads as a symbol — and they are the price
-// of seeing a claim with no file at all.
+// capitalised word opening a clause reads as a symbol, and a one-word package
+// in lower case reads as prose — and they are the price of seeing a claim with
+// no file at all without opening the module, which this rung never does.
 func symbolLike(word string) bool {
-	if packagePath.MatchString(word) || dottedName.MatchString(word) {
+	if packagePath.MatchString(word) {
 		return true
 	}
-	return identifier.MatchString(word) && strings.ToUpper(word) != word && strings.ToLower(word) != word
+	if !symbolRe.MatchString(word) || majorVersion.MatchString(word) {
+		return false
+	}
+	upper := strings.ContainsFunc(word, unicode.IsUpper)
+	return upper && strings.ContainsFunc(word, func(r rune) bool { return unicode.IsLower(r) || unicode.IsDigit(r) })
+}
+
+// citedBy reports whether the citation opening at `at` dates mention m: it
+// cites m's source, and its locator names what m names — the last part of m's
+// name as a part of a symbol, of the file's path, or of a schema path. A
+// citation of another symbol would leave this one free to vanish, since rung 2
+// resolves only what a citation names.
+func citedBy(text string, at int, bounds []int, m mention) bool {
+	// ParseCitation reads a citation only from its first byte, so a head
+	// further on parses nothing here.
+	h := datedHead.FindStringIndex(text[at:])
+	if h == nil {
+		return false
+	}
+	_, end, atHead := clause(text, at+h[1], nextHead(bounds, at+h[1]))
+	c := ParseCitation(trimConnective(text[at:end], atHead))
+	if c == nil || c.Source != m.source {
+		return false
+	}
+	name := m.name[strings.LastIndexAny(m.name, "./")+1:]
+	parts := strings.FieldsFunc(strings.TrimSuffix(c.Loc.File, path.Ext(c.Loc.File))+"."+c.Loc.Path,
+		func(r rune) bool { return r == '.' || r == '/' })
+	for _, s := range c.Loc.Symbols {
+		parts = append(parts, strings.Split(s, ".")...)
+	}
+	return slices.Contains(parts, name)
+}
+
+// ownsTag reports whether text carries a version this grammar governs: one the
+// text does not give another project, which the sweep would report.
+func (s Scanner) ownsTag(text string) bool {
+	for _, at := range anyTag.FindAllStringIndex(text, -1) {
+		m := nameBefore.FindStringSubmatchIndex(text[:at[0]])
+		if m == nil || !attributedElsewhere(text[m[2]:m[3]], s.Requires) {
+			return true
+		}
+	}
+	return false
 }
 
 func nextHead(starts []int, after int) int {
