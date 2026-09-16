@@ -495,6 +495,39 @@ func TestThreadArchive(t *testing.T) {
 	}
 }
 
+// A rescheduling child is refused its own archive, which is idle only, yet
+// ended by its session's, which refuses only running (docs/DIVERGENCES.md,
+// session threads; #730).
+func TestAReschedulingThreadEndsOnlyWithItsSession(t *testing.T) {
+	s := newTestServer(t)
+	sid := eventsFixture(t, s)
+	resch := insertChild(t, s, sid, "rescheduling")
+	thread := "/v1/sessions/" + sid + "/threads/" + resch
+
+	status, body := s.do(http.MethodPost, thread+"/archive", nil)
+	wantErr(t, status, body, http.StatusBadRequest, "invalid_request_error")
+	if msg := errMessage(body); !strings.Contains(msg, "is rescheduling; only an idle thread can be archived") {
+		t.Errorf("message = %q", msg)
+	}
+	if status, th := s.do(http.MethodGet, thread, nil); status != http.StatusOK ||
+		th["status"] != "rescheduling" || th["archived_at"] != nil {
+		t.Errorf("refused child = %d %v, want still rescheduling and unarchived", status, th)
+	}
+
+	// The session folds rescheduling over it, which requireNotRunning admits.
+	if _, err := s.pool.Exec(context.Background(),
+		`UPDATE sessions SET status = 'rescheduling' WHERE id = $1`, sid); err != nil {
+		t.Fatal(err)
+	}
+	if status, res := s.do(http.MethodPost, "/v1/sessions/"+sid+"/archive", nil); status != http.StatusOK {
+		t.Fatalf("archive session: %d %v", status, res)
+	}
+	if status, th := s.do(http.MethodGet, thread, nil); status != http.StatusOK ||
+		th["status"] != "terminated" || th["archived_at"] == nil {
+		t.Errorf("child after the session's archive = %d %v, want terminated and archived", status, th)
+	}
+}
+
 // Deleting a session ends its live children too (decision 12) — the rows go
 // with the session, so the termination is broadcast to the open streams, the
 // child's own and the session's, ahead of session.deleted.
@@ -552,18 +585,41 @@ func TestSessionDeleteEndsLiveChildren(t *testing.T) {
 	if status, res := s.do(http.MethodPost, "/v1/sessions/"+sid+"/threads/"+done+"/archive", nil); status != http.StatusOK {
 		t.Fatalf("archive: %d %v", status, res)
 	}
+	// A rescheduling child ends too: the session folds rescheduling over it,
+	// which requireNotRunning admits (docs/DIVERGENCES.md, session threads; #730).
+	resch := insertChild(t, s, sid, "rescheduling")
+	if _, err := s.pool.Exec(context.Background(),
+		`UPDATE sessions SET status = 'rescheduling' WHERE id = $1`, sid); err != nil {
+		t.Fatal(err)
+	}
 	childStream := s.stream(t, "/v1/sessions/"+sid+"/threads/"+child+"/stream")
+	reschStream := s.stream(t, "/v1/sessions/"+sid+"/threads/"+resch+"/stream")
 	sessionStream := s.stream(t, "/v1/sessions/"+sid+"/events/stream")
 	if status, res := s.do(http.MethodDelete, "/v1/sessions/"+sid, nil); status != http.StatusOK {
 		t.Fatalf("delete: %d %v", status, res)
 	}
-	for name, st := range map[string]*sseStream{"child": childStream, "session": sessionStream} {
-		f := st.next(t)
-		if f.name != "session.thread_status_terminated" || f.data["session_thread_id"] != child || f.data["agent_name"] != "worker" {
-			t.Errorf("%s stream first frame = %s %v, want the live child's termination", name, f.name, f.data)
+	// Each stream announces the live children it carries, in whichever order
+	// their creation stamps put them, and then the deletion.
+	for name, c := range map[string]struct {
+		st   *sseStream
+		want []string
+	}{"child": {childStream, []string{child}}, "rescheduling": {reschStream, []string{resch}},
+		"session": {sessionStream, []string{child, resch}}} {
+		got := map[any]bool{}
+		for range c.want {
+			f := c.st.next(t)
+			if f.name != "session.thread_status_terminated" || f.data["agent_name"] != "worker" {
+				t.Errorf("%s stream frame = %s %v, want a live child's termination", name, f.name, f.data)
+			}
+			got[f.data["session_thread_id"]] = true
 		}
-		if f := st.next(t); f.name != "session.deleted" {
-			t.Errorf("%s stream second frame = %s, want session.deleted", name, f.name)
+		for _, id := range c.want {
+			if !got[id] {
+				t.Errorf("%s stream did not announce %s's termination", name, id)
+			}
+		}
+		if f := c.st.next(t); f.name != "session.deleted" {
+			t.Errorf("%s stream frame after the terminations = %s, want session.deleted", name, f.name)
 		}
 	}
 	if n := threadRows(t, s, sid); n != 0 {

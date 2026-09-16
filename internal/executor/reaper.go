@@ -273,7 +273,8 @@ func (e *Executor) idleTTL() time.Duration {
 // — the approved command must run in the context the human saw; the ask read
 // is ordered before the main query, see below). `user.interrupt` does not
 // reap — an interrupted-then-abandoned session falls to the TTL like any
-// other. Running and rescheduling stay untouchable.
+// other. Running and rescheduling stay untouchable: each has a turn in flight
+// or being retried, and that turn needs the sandbox.
 func (e *Executor) classifyForReap(ctx context.Context, q events.Querier, sid domain.ID) (reapTier, error) {
 	// The idle tier's ask exclusion is read BEFORE the main criteria query,
 	// deliberately: the two reads are separate snapshots, and a confirmation
