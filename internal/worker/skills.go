@@ -35,7 +35,9 @@ var skillDigitsRe = regexp.MustCompile(`^[0-9]+$`)
 // SetupSkills materializes the session's skills into the sandbox — its agent's
 // own, and on a coordinator session every roster member's beside them — the
 // BYOC twin of the executor's materialization and a re-expression of the
-// reference worker's SetupSkills (anthropic-sdk-go tools/agenttoolset):
+// reference worker's SetupSkills (checked against anthropic-sdk-go v1.70.1 —
+// skills.go AgentToolContext.SetupSkills and
+// AgentToolContext.SetupSkillsFromSession and AgentToolContext.downloadSkill):
 // session GET with the environment key, per skill a version GET that resolves
 // the pin and carries the name, the /content download, and extraction under
 // the reference guards — all wire, no database, writing through the sandbox

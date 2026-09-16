@@ -18,7 +18,7 @@ import (
 )
 
 // maxFileListLimit is the GET /v1/files per-page cap: the SDK documents limit
-// "1 to 1000" (checked against anthropic-sdk-go v1.70.1 — betafile.go
+// as 1 to 1000 (checked against anthropic-sdk-go v1.70.1 — betafile.go
 // BetaFileListParams.Limit), unlike the managed-agents resource lists' 100.
 const maxFileListLimit = 1000
 

@@ -26,9 +26,9 @@ const (
 	// events with limit=1000 (checked against anthropic-sdk-go v1.70.1 —
 	// betasessiontoolrunner.go SessionToolRunner.reconcile), which a 100 cap
 	// 400s before it can run a tool. 1000 is the value the worker requests and
-	// the reference's general list convention (documented "1 to 1000" on most
-	// SDK list params); the event-list param itself documents no explicit maximum,
-	// so this is our compatible upper bound (some cap is needed — an unbounded
+	// the reference's general list convention (1 to 1000 on several SDK list
+	// params); the event-list param itself documents no explicit maximum, so
+	// this is our compatible upper bound (some cap is needed — an unbounded
 	// limit is a query-cost risk), not a proven reference cap.
 	maxEventLimit = 1000
 	// The deployment-runs list publishes its own cap — "Default 20, maximum

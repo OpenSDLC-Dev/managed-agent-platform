@@ -32,8 +32,14 @@ const (
 // definitions are the eight built-in tools in the order the reference lists
 // them, each already in the Messages-API tool shape the provider request
 // carries (name / description / input_schema). The six sandbox tools' schemas
-// are the wire's, field for field — anthropic-sdk-go's
-// BetaManagedAgentsAgentToolset20260401*Input types are what the model's tool
+// are the wire's, field for field — the SDK's six Input types (checked against
+// anthropic-sdk-go v1.70.1 — betaagent.go
+// BetaManagedAgentsAgentToolset20260401BashInput and
+// BetaManagedAgentsAgentToolset20260401ReadInput and
+// BetaManagedAgentsAgentToolset20260401WriteInput and
+// BetaManagedAgentsAgentToolset20260401EditInput and
+// BetaManagedAgentsAgentToolset20260401GlobInput and
+// BetaManagedAgentsAgentToolset20260401GrepInput) are what the model's tool
 // calls are validated against on the other side, so a property this platform
 // invents is a property no reference client would send. The two web tools have
 // no such Input types (see their own comment below).

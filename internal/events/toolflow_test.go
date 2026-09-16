@@ -1080,9 +1080,8 @@ func TestToolflowChecksSeeCallerTransaction(t *testing.T) {
 // never as a client diagnosis: without the err check after Scan,
 // ValidateToolResults would read an empty useType and report a kind mismatch
 // for what is really a dead pool. This covers each function's query error only
-// — UnconfirmedAskEvents returns a mid-iteration rows.Scan failure unwrapped
-// (toolflow.go:278), which a closed pool cannot reach because it fails at
-// Query first.
+// — UnconfirmedAskEvents returns a mid-iteration rows.Scan failure unwrapped,
+// which a closed pool cannot reach because it fails at Query first.
 func TestToolflowQueryErrorsAreWrapped(t *testing.T) {
 	pool := pgtest.NewPool(t)
 	log := events.NewLog(pool)

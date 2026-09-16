@@ -26,4 +26,5 @@ migrated; it fails nothing until slice 4 turns failing on.
 - [x] Plan 51 slice 2 — `docs/DIVERGENCES.md`'s citations migrated to the grammar; closes #660
 - [x] Plan 51 slice 3 — the Go comments' citations migrated to the grammar
 - [ ] Plan 51 slice 4 — rungs 1 and 2 fail, the `go.mod`-triggered workflow lands, and the bump
-      ritual is written into `docs/REFERENCE_PROJECTS.md`
+      ritual is written into `docs/REFERENCE_PROJECTS.md`; first, rung 1 must also flag a source
+      named beside a bare symbol or a package path, which it passes today

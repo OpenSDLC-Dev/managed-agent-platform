@@ -12,9 +12,10 @@ import (
 
 // DefaultStallTimeout is how long a model endpoint may say nothing at all
 // before its turn is abandoned, when a route configures no stall_timeout of its
-// own. It is the anthropic-sdk-go's own judgment for the same hazard — that
-// SDK's defaultResponseHeaderTimeout — because the worst legitimate silence is
-// the same wait it bounds: an endpoint that queues a request sends no response
+// own. It is the SDK's own judgment for the same hazard (checked against
+// anthropic-sdk-go v1.70.1 — default_http_client.go
+// defaultResponseHeaderTimeout), because the worst legitimate silence is the
+// same wait it bounds: an endpoint that queues a request sends no response
 // header until it starts generating. Sized to never end a healthy turn;
 // operators who know their endpoint answers faster tighten it per route.
 const DefaultStallTimeout = 10 * time.Minute

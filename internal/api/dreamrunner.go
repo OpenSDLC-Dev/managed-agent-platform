@@ -57,7 +57,7 @@ const (
 // out of every replica's candidate scan (§4.2): the soft lease — one constant
 // against updated_at, no owner column and no renewal, because the phase it
 // covers is seconds and a crashed claimant costs one attempt and one lease,
-// never a stuck dream. A var for the test setter (memoryretention.go:48-52's
+// never a stuck dream. A var for the test setter (memoryPruneInterval's
 // idiom), as the three below are.
 var dreamStartLease = 5 * time.Minute
 

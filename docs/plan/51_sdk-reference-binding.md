@@ -31,8 +31,8 @@ clause — "At the pinned v1.70.1
 Because nothing separates the axes, a bump offers two bad options: edit
 everything, which turns true `since` sentences false and produces a green diff
 proving nothing was re-checked; or edit nothing, which is what happened.
-`internal/events/inbound.go:164` said "at the pinned v1.66.0" while `go.mod`
-pinned v1.70.1 until slice 3 migrated it, and `.claude/agents/verifier.md:25` —
+`internal/events/inbound.go:164` said "at the pinned v1.66.0", with `go.mod`
+already at v1.70.1, until slice 3 migrated it, and `.claude/agents/verifier.md:25` —
 a file that steers the verifier — said the same until #724 took the literal out
 and put both steering documents under a gate test. Nothing in the gate noticed
 the comment.
@@ -400,9 +400,10 @@ does not have.
    which rung 1 reads as part of the locator and then refuses, since it is not a
    symbol. Closes #660.
 3. **Migrate the Go comments; the steering documents take a separate rule.**
-   50 lines carry a coordinate — 49 citations (40 into the SDK, 3 into go-jose,
-   6 into this repository) and one fixture path that is not one — and 12 carry a
-   `since` whose source is usually unnamed; beside them sit the sourceless
+   When slice 1 landed, 50 lines carried a coordinate — 49 citations (40 into the
+   SDK, 3 into go-jose, 6 into this repository) and one fixture path that is not
+   one — and 12 carried a `since` whose source was usually unnamed; beside them
+   sat the sourceless
    `file.go Symbol` mentions rung 1 cannot see (the last of the four limits
    above), which this slice reads by hand. The comments are a pure migration.
    The steering documents are not: `.claude/agents/verifier.md:25` is an
@@ -439,8 +440,9 @@ none of `tools/sdkref`, so it did not wait for it (#724).
   offline constraint forbids it.
 - **Not a change to what is cited.** Which claims the registry makes, and which
   divergences it records, are untouched.
-- **Not a rule for in-repo coordinates.** Eleven registry coordinates and six Go
-  comments cite this repository's own source by line; git holds our history, so
+- **Not a rule for in-repo coordinates.** When this plan was written, eleven
+  registry coordinates and six Go comments cited this repository's own source by
+  line; git holds our history, so
   they take a symbol with no stamp. No rung enforces that — rung 1 reads
   citations into an external source, and rungs 2 and 3 are explicitly excluded —
   so it stays a convention a reviewer applies, not a check. Guarding our own

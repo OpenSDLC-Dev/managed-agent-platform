@@ -42,9 +42,10 @@ import (
 // nothing else, so the stores cannot be mounted, and running the tools without
 // them would hand the agent the amnesia the reference worker refuses (checked
 // against anthropic-sdk-go v1.66.0 — worker.go EnvironmentWorker.handleItem).
-// Its text is the reference's own, so the two workers fail the same item the
-// same way. The lease loop drains such an item — a re-hand-out would carry no
-// token either, and reclaiming it would loop.
+// Its text is the reference's own (checked against anthropic-sdk-go v1.70.1 —
+// memories.go ErrSessionMemoryNoToken), so the two workers fail the same item
+// the same way. The lease loop drains such an item — a re-hand-out would carry
+// no token either, and reclaiming it would loop.
 var ErrSessionMemoryNoToken = errors.New("the work item carried no sessions token, so the session's memory stores cannot be mounted")
 
 // memoryRef is the memory_store arm of a session's resources[] as the worker

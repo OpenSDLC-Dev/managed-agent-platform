@@ -1485,9 +1485,10 @@ func TestNonToolUseStopKeepsCustomAndAskRouting(t *testing.T) {
 func TestRefusalDropsItsToolBlocks(t *testing.T) {
 	// The one stop reason whose tool blocks are NOT run: a refusal is
 	// terminal, and the SDK's own agentic loop returns before executing a
-	// refused turn's calls. The blocks must not reach the log either — an
-	// intent nothing may answer and nothing may run wedges every later replay
-	// — so the turn settles on its text alone.
+	// refused turn's calls (checked against anthropic-sdk-go v1.70.1 —
+	// betatoolrunner.go determineNextStepFromStopReason). The blocks must not
+	// reach the log either — an intent nothing may answer and nothing may run
+	// wedges every later replay — so the turn settles on its text alone.
 	h := newHarness(t, [][]provider.Chunk{{
 		textChunk(0, "I can't help with that."),
 		provider.Chunk{Kind: provider.KindToolUse, ToolUse: &provider.ToolUse{

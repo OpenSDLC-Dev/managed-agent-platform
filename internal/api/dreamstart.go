@@ -90,7 +90,7 @@ const dreamNoBashTools = `[{"type": "agent_toolset_20260401",
 // dreamCloneBatch is the multi-row insert width the clone writes: a
 // 2,000-memory store is four statements for the memories and four for their
 // versions, not four thousand. A var for the test setter
-// (dreamrunner.go:55-61's idiom), because no test store is large enough to
+// (dreamStartLease's idiom), because no test store is large enough to
 // make the loop run more than once at 500.
 var dreamCloneBatch = 500
 
