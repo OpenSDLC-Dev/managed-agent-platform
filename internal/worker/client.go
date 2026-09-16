@@ -31,7 +31,7 @@ func NewClient(baseURL, envKey string) sdk.Client {
 // sessionsTokenFromSecret decodes a work item's secret — base64url, padding
 // optional, of JSON {"sessions_token": …}: the envelope the control plane
 // renders (internal/worktoken.Secret) and the reference worker decodes
-// (anthropic-sdk-go v1.66.0 lib/environments/worker.go
+// (checked against anthropic-sdk-go v1.66.0 — worker.go
 // sessionsTokenFromSecret) — to the token, or "" for no secret or one it
 // cannot read. Never logged: the caller logs that it was unreadable, not
 // what it held.

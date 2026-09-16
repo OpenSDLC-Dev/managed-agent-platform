@@ -160,7 +160,7 @@ issue; none is a blocker under decision 1.
 - **Per-tenant object-storage isolation.** Blob keys carry no tenant:
   `blob.FilesKey(id)` is `"files/" + id` (`internal/blob/blob.go:26`) and
   `skills.BlobKey(skillID, version)` is `"skills/" + skillID + "/" + version + ".zip"`
-  (`internal/skills/extract.go:173`). After this plan the SQL predicate is the *only* thing
+  (`internal/skills/extract.go:174`). After this plan the SQL predicate is the *only* thing
   between tenant B and tenant A's bytes, and every path that removes an object does so by key
   with no tenant check at all: the control plane's object-delete drain
   (`internal/api/objectdeletes.go`), which since #703 is what removes the bytes for every
@@ -209,7 +209,7 @@ issue; none is a blocker under decision 1.
   "whether to invent an org/workspace-scoped registration API" question cheaper; it does not
   answer it.
 - **`files.scope_type`'s polymorphism (#266).** `0008_files.sql:24` is a nullable `text` with
-  no CHECK, and `listFiles` filters on `scope_id` alone (`internal/api/files.go:215-219`). The
+  no CHECK, and `listFiles` filters on `scope_id` alone (`internal/api/files.go:216-220`). The
   tenant predicate on `files` contains it today; any future workspace-scoped upload path makes
   `scope_id` collide across tenants. This plan must not deepen it.
 
@@ -555,14 +555,14 @@ item 5, which gates slice 6) at §7.6, and the archived-workspace refusal (item 
   statement `:21-24`). The api package has exactly six context keys and none carries a tenant
   (`internal/api/errors.go:114` the type, `:117-122` the constants).
 - **The identity lane has no tenant source at all.** `identity.Identity` has five fields —
-  Issuer, Subject, Email, DisplayName, Role (`internal/identity/identity.go:145-151`); only
+  Issuer, Subject, Email, DisplayName, Role (`internal/identity/identity.go:149-155`); only
   `RolesClaim`/`EmailClaim`/`NameClaim` and `RoleMap` are configurable
   (`internal/identity/config.go:26-29`); `upsertPrincipal` never writes `principals`' reserved
   columns (`internal/api/principals.go:35` the func, `:37-44` the statement).
 - **Exactly one statement writes scope**, and it is the house pattern:
   `internal/brain/delegate.go:362-367` copies the parent session's triple into a child
   `session_threads` row via `INSERT … SELECT`, with the reason at `:356-361`. Its sibling — the
-  *primary* thread insert at `internal/api/sessions.go:753` — does not, so one session's thread
+  *primary* thread insert at `internal/api/sessions.go:759` — does not, so one session's thread
   rows would disagree with each other the moment a session lives outside `default`. Migration
   `0025_session_threads.sql:44-48`'s own backfill got it right; the live insert is the outlier.
 - **Four more writes into scoped tables rely on the column default:**
@@ -597,16 +597,16 @@ item 5, which gates slice 6) at §7.6, and the archived-workspace refusal (item 
   No trigger, function, RLS policy or CHECK anywhere references the three columns.
 - **Ten list handlers build SQL on a literal `WHERE true` base**, but that literal is the
   insertion point for only **eight** of them: `agents.go:430`, `deployments.go:365`,
-  `environments.go:572`, `files.go:215`, `memorystores.go:291`, `sessions.go:1123`,
+  `environments.go:572`, `files.go:216`, `memorystores.go:298`, `sessions.go:1129`,
   `skills.go:360`, `vaults.go:209`. The other two sit on tables that carry **no scope columns**.
   `deploymentruns.go:274` lists `deployment_runs` (`0031_deployments.sql:127`, no `org_id`) and
   its `deployment_id` filter is **optional** (`:276`), so an unfiltered
   `GET /v1/deployment_runs` would stay cross-tenant — it needs a
-  `JOIN deployments d ON d.id = r.deployment_id` to carry the predicate. `memories.go:611`'s
-  `WHERE true` is on the *derived* table `matched` (`:600-611`), whose projection is
-  `memoryColumns`; the parent term `memory_store_id = $1` is at `:609` on `memories`
+  `JOIN deployments d ON d.id = r.deployment_id` to carry the predicate. `memories.go:618`'s
+  `WHERE true` is on the *derived* table `matched` (`:607-618`), whose projection is
+  `memoryColumns`; the parent term `memory_store_id = $1` is at `:616` on `memories`
   (`0029_memories.sql:8`, no `org_id`), so its enforceable point is the parent memory-store read
-  (`:135`, `:165`). An **eleventh** list builder is invisible to this count because it has no
+  (`:138`, `:168`). An **eleventh** list builder is invisible to this count because it has no
   `WHERE true` base: `listThreads` (`threads.go:117`, query `:133`, keyset term `:138`), which
   scopes through the parent session its `sessionExists` gate at `:130` resolves. *Counting rule:
   `grep -n "WHERE true" internal/api/*.go` minus `_test.go` — ten lines, none in `threads.go`.*
@@ -827,7 +827,7 @@ and its fire transaction already re-reads the deployment row `FOR SHARE` (`:444-
 three columns join that projection and pass into `createSessionInTx`. The manual-run twin does
 the same on its own `FOR SHARE` re-read (`internal/api/deploymentruns.go:82-85`). The brain and
 executor consumers already re-read the session under a row lock at the top of every item
-(`internal/brain/brain.go:500-505`, `internal/executor/executor.go:945-950`), so scope joins
+(`internal/brain/brain.go:502-507`, `internal/executor/executor.go:947-952`), so scope joins
 those column lists at zero extra round trip — which is why **none** of `queue.Item`
 (`internal/queue/queue.go:94`),
 `Claim`'s own `RETURNING` list (`internal/queue/queue.go:320-324`) or `workColumns` (`:170`,
@@ -933,7 +933,7 @@ header or omits it.
 
 Both response headers are stamped **inside each credential resolver** — `requireAPIKey`
 (`internal/api/auth.go:181`), `resolveEnvironmentKey` (`envauth.go:44`), `requireWorkToken`
-(`worktokenauth.go:99`), `requireGateToken` (`gateauth.go:21`) and `requireIdentity`
+(`worktokenauth.go:103`), `requireGateToken` (`gateauth.go:21`) and `requireIdentity`
 (`identitylane.go:61`) — immediately after the scope resolves and before the handler or an
 authenticated rejection writes, so both are present on a 200 and on an authenticated 4xx and
 absent on a pre-auth 401. The environment lane is stamped at the **shared resolver**, not at
@@ -1152,8 +1152,8 @@ scope predicate has exactly that shape. So `internal/api/scopematrix_test.go`:
      **dominates** it: earlier in the same body, and outside any branch the statement itself is
      outside of. **Presence alone would admit the leak this rule exists to catch.**
      `getMemory` is the proof: its `checkMemoryStore` call is in its own body, and useless there
-     — it sits inside the `ErrNoRows` branch *after* the read (`memories.go:317`, call at
-     `:322`), so a hit answers before the store is checked and a presence test would wave it
+     — it sits inside the `ErrNoRows` branch *after* the read (`memories.go:320`, call at
+     `:325`), so a hit answers before the store is checked and a presence test would wave it
      through. Dominance is position in the AST, which the guard can compute; it is not
      reachability, which it cannot. Two consequences of anchoring on position, both stated so
      the guard's author does not have to choose. A call in an `if` statement's init clause —
@@ -1180,11 +1180,11 @@ scope predicate has exactly that shape. So `internal/api/scopematrix_test.go`:
      `internal/executor` and `internal/vaultresolve` — constrained either **by the scoped
      table's own primary key** or **by the id of a scoped row its caller already resolved under
      scope**: a session id, a thread id, or a vault id. Both shapes, not just the first: the
-     by-own-PK half covers `internal/brain/brain.go:500-505`,
-     `internal/executor/executor.go:945-950`, `internal/executor/memory.go:87`, `:180`, `:430`,
+     by-own-PK half covers `internal/brain/brain.go:502-507`,
+     `internal/executor/executor.go:947-952`, `internal/executor/memory.go:87`, `:180`, `:430`,
      `:754`, `:785`, but at least eight statements in those two packages are keyed on
-     `session_id` rather than on a primary key — `brain/brain.go:546`, `brain/delegate.go:326`,
-     `:446`, `:985`, `brain/repos.go:92`, `executor/mcpwork.go:229`, `executor/packages.go:553`,
+     `session_id` rather than on a primary key — `brain/brain.go:548`, `brain/delegate.go:326`,
+     `:446`, `:985`, `brain/repos.go:92`, `executor/mcpwork.go:231`, `executor/packages.go:553`,
      `executor/repos.go:378`. A by-own-PK-only rule admits none of those eight, and no other rule
      reaches them: rule (f) has exactly the right shape and the same justification but names
      `internal/events` alone. So the rule is stated on the **property that makes it safe** — the
@@ -1237,8 +1237,8 @@ scope predicate has exactly that shape. So `internal/api/scopematrix_test.go`:
      `mcprefresh.go:222` and `:418` are keyed on a credential row's own id — an id those first
      two resolved. In `internal/api`, where the scope does reach the statement, it takes the
      scoped parent read or the pinned-helper **dominating** call rule (b) admits — which is what
-     most of the memory surface rides: `lockMemoryStore` (`memories.go:132`),
-     `lockMemoryStoreForWrite` (`:148`) and `checkMemoryStore` (`:162`) are the three pinned
+     most of the memory surface rides: `lockMemoryStore` (`memories.go:135`),
+     `lockMemoryStoreForWrite` (`:151`) and `checkMemoryStore` (`:165`) are the three pinned
      helpers, and the routes that call one of them first are admitted rather than exempted.
      Two things that is **not**: a route whose call does not dominate (`getMemory`, below,
      until slice 4 moves its probe ahead of the read; `listMemoryVersions`, whose probe at
@@ -1257,8 +1257,8 @@ scope predicate has exactly that shape. So `internal/api/scopematrix_test.go`:
      `getMemoryVersion` (`internal/api/memoryversions.go:98`) reads
      `memory_versions` with no store probe anywhere in its body, defaulting to full content
      (`viewFull`), so a store id and version id from another workspace would return that
-     workspace's memory verbatim. `getMemory` (`memories.go:317`) probes only on the **miss**
-     path (`:322`, inside the `ErrNoRows` branch), so a hit answers before the store is ever
+     workspace's memory verbatim. `getMemory` (`memories.go:320`) probes only on the **miss**
+     path (`:325`, inside the `ErrNoRows` branch), so a hit answers before the store is ever
      checked. Both were written under a parent obligation the plan stated in prose; this rule is
      the reason a third one cannot be written the same way.
 4. **Fails closed on a dynamically composed table name**, and only on that. The stronger rule
@@ -1375,12 +1375,12 @@ say nothing about the ids inside the payload. The same grep over non-test Go ret
 enumerable set of **five** writers across **two** tables — the sessions columns and
 `deployments`' own `resources`, `vault_ids` and `initial_events`, which the scheduler later snapshots into a session:
 
-- `internal/api/sessions.go:732-733` — the create, which writes all three at once;
-- `internal/api/sessions.go:1052` — `UPDATE sessions SET resolved_agent = $2, …` (session
-  update; `vault_ids` updates are explicitly refused at `:928`);
-- `internal/api/sessionresources.go:803` — `UPDATE sessions SET resources = $2, updated_at =
-  now() WHERE id = $1`, reached from `addSessionResource` (`:878`) via `addSessionResourceTx`
-  (`:892`). A table-based guard passes it while it smuggles a foreign reference;
+- `internal/api/sessions.go:738-739` — the create, which writes all three at once;
+- `internal/api/sessions.go:1058` — `UPDATE sessions SET resolved_agent = $2, …` (session
+  update; `vault_ids` updates are explicitly refused at `:934`);
+- `internal/api/sessionresources.go:823` — `UPDATE sessions SET resources = $2, updated_at =
+  now() WHERE id = $1`, reached from `addSessionResource` (`:898`) via `addSessionResourceTx`
+  (`:912`). A table-based guard passes it while it smuggles a foreign reference;
 - `internal/api/deployments.go:301` (the create's column list) and `:622` (the update's SET
   list), which carry `vault_ids`, `resources` **and `initial_events`** on `deployments`. That payload is exactly what
   the deployment scheduler snapshots into a session with **no request credential** (§6.1), and
@@ -1400,7 +1400,7 @@ So the plan states the invariant and gives it a mechanism:
 
 All reference-id validation funnels through one `requireSameTenantIDs` helper, called at the
 two session materialization points — `materializeResourceInputs`
-(`internal/api/sessionresources.go:653`, called from `internal/api/sessions.go:694`) and
+(`internal/api/sessionresources.go:673`, called from `internal/api/sessions.go:700`) and
 `addSessionResource` — at the two deployment parse points, and beside
 `validateDeploymentInitialEvents` for the file-rubric id, which is §7.4's new
 "deployment resources→file and memory store, and initial-events rubric→file" check. The guard
@@ -1647,7 +1647,7 @@ rewrite keeps an explicit "the session must exist" arm — the `SELECT` is
 `FROM sessions WHERE id = $3` and the caller distinguishes the two zero-row causes — with the
 reason in a comment beside it and a test for each cause. · `internal/executor/harvest.go:394-396`
 stamps it; the transaction already reads the session at `:310-312`. ·
-`internal/api/sessions.go:753`, the primary thread. · `internal/api/deploymentscheduler.go:444-451`
+`internal/api/sessions.go:759`, the primary thread. · `internal/api/deploymentscheduler.go:444-451`
 adds the three columns to the fire's existing `FOR SHARE` re-read and passes them into
 `createSessionInTx` (`:506`); the manual-run twin at `internal/api/deploymentruns.go:82-85` does
 the same. · The scheduler's **other two** background statements are keyed on the
@@ -1727,8 +1727,8 @@ naming a workspace that does not exist in its organization. Must precede the rea
 a newly created resource would be invisible to its own creator.
 
 **Changes.** The remaining `internal/api` inserts into scoped tables: `agents.go:159`,
-`environments.go:420`, `sessions.go:732`, `deployments.go:300`, `memorystores.go:124`,
-`vaults.go:82`, `files.go:129`, `skills.go:298`, `apikeys.go:135` — `IssueManagementKey`
+`environments.go:420`, `sessions.go:738`, `deployments.go:300`, `memorystores.go:129`,
+`vaults.go:82`, `files.go:130`, `skills.go:298`, `apikeys.go:135` — `IssueManagementKey`
 (`:101`), reached only from the console route, so the *issuer's* scope and the `{workspace}`
 segment's are the same value until slice 6 lets them differ (§7.6). ·
 `envkeys.go:93` and `principals.go:37-44` deliberately leave their columns at the defaults, with
@@ -1768,7 +1768,7 @@ predicate in place at their `WHERE true` base; `deploymentruns.go:274` gains a
 enrols `deployment_runs` among the unscoped children — and which no bulk edit
 reaches, because there is no column on it to predicate: a run id alone would otherwise read
 across workspaces, and the join is what satisfies (g);
-`memories.go:611`'s enforceable point is the parent memory-store read (`:135`, `:165`), its
+`memories.go:618`'s enforceable point is the parent memory-store read (`:138`, `:168`), its
 `WHERE true` sitting on a derived table; and the **eleventh** builder, `listThreads`
 (`threads.go:133`), which already joins `sessions s`, takes the scope predicate on that alias
 in-statement — the same-function form rule (b) now requires (§6.5) — with its `sessionExists`
@@ -1786,14 +1786,14 @@ fragments (`internal/events/preview.go`), so that one helper is the whole bounda
 here rather than counted.
 
 · **The ~16 create-time cross-references**, each asserting the referenced row's scope equals the
-caller's rather than only its existence: session→environment (`sessions.go:669`), session→agent
-and pinned version (`:289`, `:299-301`), session→vaults (`:414`, via `validateAttachedVaults` at
-`:410`, shared with `deployments.go:287` and `:560`), session→roster members (`roster.go:426`),
-agent→roster (`roster.go:179`, `:221`), session resource→memory store
-(`sessionresources.go:704`), session resource→file (`:768`), deployment→environment
+caller's rather than only its existence: session→environment (`sessions.go:675`), session→agent
+and pinned version (`:293`, `:303-305`), session→vaults (`:420`, via `validateAttachedVaults` at
+`:416`, shared with `deployments.go:287` and `:560`), session→roster members (`roster.go:427`),
+agent→roster (`roster.go:180`, `:222`), session resource→memory store
+(`sessionresources.go:724`), session resource→file (`:788`), deployment→environment
 (`deployments.go:774`), deployment→agent and version (`deploymentparse.go:184`, `:204`), skill
 version→skill (`skills.go:559`, `:750`), vault credential→vault (`vaultcredentials.go:152`,
-`:433`), memory→store (`memories.go:135`, `:165`), thread→session (`threads.go:189`, `:324` —
+`:433`), memory→store (`memories.go:138`, `:168`), thread→session (`threads.go:189`, `:324` —
 **not** `:181`, which is `loadThread`'s join-based by-id read, the rule-(b) case §6.5 names),
 environment key→environment (`consoleapi.go:204`).
 
@@ -1839,7 +1839,7 @@ gets its slice (§6.5). The deployment-run pair is here by its join: `getDeploym
 `listDeploymentRuns` have no `deployments` read of any kind today, and the join this slice adds
 is what satisfies (g) for both. Then `getMemoryVersion`
 (`internal/api/memoryversions.go:98`) gains the scoped `memory_stores` probe it has never had,
-and `getMemory`'s probe (`memories.go:322`) moves ahead of its read so a hit is checked as the
+and `getMemory`'s probe (`memories.go:325`) moves ahead of its read so a hit is checked as the
 miss already is; `listMemoryVersions`' probe (`memoryversions.go:206`) moves ahead of the literal
 it already precedes in execution (`:141`, run at `:209`) — no behaviour changes, and rule (b)'s
 anchor is satisfied. The probe is the existing `checkMemoryStore`, which slice 4 has just given
@@ -1898,7 +1898,7 @@ INFERRED entries only).
 every non-test file under `internal/`.
 
 **Changes — the worker-lane policy reversal.** Four routes are readable today from any
-environment key or `wtk_` token, and `internal/api/worktokenauth.go:134-135` is a bare
+environment key or `wtk_` token, and `internal/api/worktokenauth.go:138-139` is a bare
 `case isSkillReadPath(p): // Workspace-global, as for the environment key.` with no check at
 all. **The fix is not one predicate repeated four times**, because only one of the four queries
 a scoped table:
@@ -1922,12 +1922,12 @@ a scoped table:
 
 The in-repo remediation pattern is the adjacent file lane, which solved this and documents the
 contrast: admit to the lane, narrow inside the handler, fail closed to 404
-(`internal/api/files.go:335-343` the argument, `:344-352` the branch, `:385`
+(`internal/api/files.go:336-344` the argument, `:345-353` the branch, `:386`
 `fileMountedInEnvironment`). **Four doc sites flip in this same PR** or a comment asserts the
 pre-change policy beside post-change code: `internal/api/server.go:559-568` (the
 `isSkillReadPath` doc, whose `:563-565` states the policy verbatim),
-`internal/api/worktokenauth.go:17` and `:134-135`, `internal/api/doc.go:55-56`, and — because
-they *contrast* against skills' globality — `internal/api/files.go:339` and
+`internal/api/worktokenauth.go:17` and `:138-139`, `internal/api/doc.go:55-56`, and — because
+they *contrast* against skills' globality — `internal/api/files.go:340` and
 `internal/api/server.go:598`.
 
 **Changes — the key surface.** `ListManagementKeys` has no `WHERE` at all
@@ -1968,8 +1968,8 @@ are enumerated here rather than left to slice 4's bulk:
   and it is the strongest single argument for **rule (g)**: an unscoped child written with no
   parent term at all, which no predicate rule could ever have caught.
 - **The destructive and cascade statements**, each of which either deletes an object or a
-  credential: `internal/api/files.go:290` (`DELETE FROM files WHERE id = $1`, whose orphan
-  object delete follows at `:300`); `internal/api/skills.go:464` (`DELETE FROM skills`) and the
+  credential: `internal/api/files.go:291` (`DELETE FROM files WHERE id = $1`, whose orphan
+  object delete follows at `:301`); `internal/api/skills.go:464` (`DELETE FROM skills`) and the
   version cascade `:456` beside it that plan 39 added (object deletes at `:478`), `:778`
   (`DELETE FROM skill_versions`, object delete at `:801`), `:602` and `:787` (`UPDATE skills SET
   latest_version …`), `:439` and `:495` (source reads by bare id feeding a delete and a create);
@@ -1977,11 +1977,11 @@ are enumerated here rather than left to slice 4's bulk:
   (`UPDATE vault_credentials`, the archive cascade); `internal/api/vaultcredentials.go:360`,
   `:511` (`UPDATE vault_credentials`) and `:540` (`DELETE … WHERE id = $1 AND vault_id = $2`,
   the one that already carries its parent).
-- `internal/api/files.go:324-326`, the `SELECT filename, mime_type, downloadable FROM files
+- `internal/api/files.go:325-327`, the `SELECT filename, mime_type, downloadable FROM files
   WHERE id = $1` that the download handler runs before either lane branch, gains the `files`
-  predicate. The **branch structure at `:344-352` is unchanged** — it is a Go-side lane test
+  predicate. The **branch structure at `:345-353` is unchanged** — it is a Go-side lane test
   with no SQL in it — and the environment-key arm's `fileMountedInEnvironment` isolation
-  (`:344-348`, `:385`) is left exactly as it is.
+  (`:345-349`, `:386`) is left exactly as it is.
 - `internal/api/auth.go:129-132`, `EnsureAPIKey`'s archive-by-name (§6.8).
 - Guard target: every non-test file under `internal/`. `vault_credentials` needs no rule of its
   own — it is one of §6.5's eleven unscoped children and rule (g) has covered it since slice 2;
@@ -1994,7 +1994,7 @@ are enumerated here rather than left to slice 4's bulk:
 `internal/api/skillsauth_test.go:14` (`TestSkillReadsEnvironmentKeyLane`) issues its environment
 key inside the same fixture environment that created the skill (`_, envID := fixture(t, s)` at
 `:16`; `wkey := issueKey(t, s.pool, envID, "skills-lane")` at `:17`), so it would pass unchanged
-under scoping, and `internal/api/worktoken_test.go:194-197` does the same for the token. Write
+under scoping, and `internal/api/worktoken_test.go:195-198` does the same for the token. Write
 "workspace B's environment key reading workspace A's custom skill answers 404" and its `wtk_`
 twin, across all four routes including `/content`, before touching the lane. · An
 `anthropic`-source skill stays readable from every workspace's key and token — the carve-out
@@ -2176,7 +2176,7 @@ phrase, plus a third entry that carries the same bound in different words.**
 and bounds them with "none reaches past the agent's own single-tenant session" — so it takes the
 per-session/same-tenant word too, which is also what its place in the twelve-entry re-argument
 set below already requires. The same phrase appears in code at
-`internal/api/sessionresources.go:590` and in prose at `docs/self-hosted-security.md:528`.
+`internal/api/sessionresources.go:610` and in prose at `docs/self-hosted-security.md:528`.
 All five sites get the word; the residual itself is unchanged.
 
 **Registry, in one batch.** **Demote** `:153` to provenance — by slice 6 the *last* live tracker
@@ -2292,7 +2292,7 @@ columns on `deleted_sessions` and `session_checkpoints` — neither is listed, e
 rendered to a tenant, and the reaper that reads the tombstone is endpoint-local and
 tenant-agnostic by design (`internal/executor/reaper.go:3-9`). *Considered and priced, not
 dismissed:* `store.SessionTombstoneInsertSQL` (`internal/store/store.go:59-62`) is already an
-`INSERT … SELECT` from a `sessions`-joined read, executed at `internal/api/sessions.go:1335`
+`INSERT … SELECT` from a `sessions`-joined read, executed at `internal/api/sessions.go:1345`
 inside `deleteSession`'s transaction, so a scope predicate on `s` would cost one term and would
 close the one path by which a cross-workspace delete could write a tombstone. It stays exempt
 because D5's *reader*-side argument does not cover the writer and the honest answer is that the

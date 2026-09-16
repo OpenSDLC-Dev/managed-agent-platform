@@ -142,10 +142,10 @@ func TestParseTolerationsRejectsMalformed(t *testing.T) {
 		// And its converse: Exists is a wildcard over values, so a value
 		// alongside it is a contradiction the operator should see.
 		{"Exists with a value", `[{"key":"sandbox","operator":"Exists","value":"true"}]`},
-		// The rules below were found by probing a live v1.36 API server rather
-		// than by reading the type — each of these passed this parser and was
-		// then rejected at every pod create, which is precisely the failure the
-		// parser exists to move to startup.
+		// The rules below were found by probing a live Kubernetes 1.36 API
+		// server rather than by reading the type — each of these passed this
+		// parser and was then rejected at every pod create, which is precisely
+		// the failure the parser exists to move to startup.
 		{"key is not a label key", `[{"key":"my pool","operator":"Exists"}]`},
 		{"value is not a label value", `[{"key":"sandbox","value":"pool 1"}]`},
 		// The vendored type's comment calls tolerationSeconds "ignored" outside
@@ -156,10 +156,10 @@ func TestParseTolerationsRejectsMalformed(t *testing.T) {
 			`[{"key":"a","operator":"Exists","tolerationSeconds":30}]`},
 		// Lt and Gt compare numerically, so a non-numeric value is refused even
 		// on a cluster that enables their feature gate. The four canonical-form
-		// rows below are the ones ParseInt alone let through: measured against a
-		// v1.36.1 server with TaintTolerationComparisonOperators ON — the only
-		// cluster shape that can answer, since a gate-off server refuses every
-		// Lt/Gt toleration before it ever looks at the value.
+		// rows below are the ones ParseInt alone let through: measured against
+		// a Kubernetes 1.36.1 server with TaintTolerationComparisonOperators ON
+		// — the only cluster shape that can answer, since a gate-off server
+		// refuses every Lt/Gt toleration before it ever looks at the value.
 		{"Lt with a non-numeric value", `[{"key":"a","operator":"Lt","value":"abc"}]`},
 		{"Lt with a leading zero", `[{"key":"a","operator":"Lt","value":"0100"}]`},
 		{"Gt with a plus sign", `[{"key":"a","operator":"Gt","value":"+5"}]`},

@@ -354,14 +354,14 @@ func renderEnvironment(id, name, description string, config []byte, metadata map
 }
 
 // packagesTypeEcho stamps "type":"packages" onto a cloud config's packages
-// object at render time — every create/get/list/update/archive response
-// goes through here, via renderEnvironment. The reference SDK types this key
-// as a discriminator sibling to the six manager lists, admitting only the
-// literal "packages" (anthropic-sdk-go v1.66.0 betaenvironment.go
-// BetaPackages.Type / BetaPackagesParams.Type, #382); packagesJSON has no
-// field for it, and parsePackages validates but never persists it (see its
-// own comment). That the reference's own response always renders the field
-// is unobserved (docs/DIVERGENCES.md, INFERRED); this platform does so
+// object at render time — every create/get/list/update/archive response goes
+// through here, via renderEnvironment. The reference SDK types this key as a
+// discriminator sibling to the six manager lists, admitting only the literal
+// "packages" (checked against anthropic-sdk-go v1.66.0 — betaenvironment.go
+// BetaPackages.Type and BetaPackagesParams.Type, #382); packagesJSON has no
+// field for it, and parsePackages validates but never persists it (see its own
+// comment). That the reference's own response always renders the field is
+// unobserved (docs/DIVERGENCES.md, INFERRED); this platform does so
 // unconditionally.
 //
 // It works on maps of json.RawMessage rather than decoding through

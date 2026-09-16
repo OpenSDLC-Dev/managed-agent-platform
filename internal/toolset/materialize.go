@@ -287,9 +287,10 @@ func materializeConfigs(kind string, raw, defEnabled, defPolicy json.RawMessage)
 		entry := map[string]json.RawMessage{
 			"name": m.name, "enabled": defEnabled, "permission_policy": defPolicy,
 		}
-		// anthropic-sdk-go v1.66.0 split the built-in per-tool config into a
-		// union whose eight variants mark `type` required, tagged with the same
-		// constant as `name` — so it is rendered from the name rather than
+		// The SDK split the built-in per-tool config into a union whose eight
+		// variants mark `type` required (since anthropic-sdk-go v1.66.0 —
+		// betaagent.go BetaManagedAgentsAgentToolConfigUnion), tagged with the
+		// same constant as `name` — so it is rendered from the name rather than
 		// echoed, and rendered whether or not the request carried one. The MCP
 		// arm's BetaManagedAgentsMCPToolConfig gained no such field.
 		if kind == agentToolsetType {

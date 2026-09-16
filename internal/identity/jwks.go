@@ -222,10 +222,11 @@ type rawKeySet struct {
 // rawKeyMeta carries the three fields jose.JSONWebKey cannot report usefully:
 // key_ops (absent from its raw struct entirely), use, and the RSA exponent as
 // PUBLISHED. E has to come from here because by the time go-jose hands over an
-// rsa.PublicKey the exponent is already int(big.Int.Int64()) (encoding.go), and
-// Int64 on an oversized value yields its low 64 bits — so a published exponent
-// of 2^64+65537 arrives as a perfectly ordinary 65537 and no check applied
-// afterwards can tell the difference.
+// rsa.PublicKey the exponent is already int(big.Int.Int64()) (checked against
+// go-jose v4.1.4 — encoding.go byteBuffer.toInt), and Int64 on an oversized
+// value yields its low 64 bits — so a published exponent of 2^64+65537 arrives
+// as a perfectly ordinary 65537 and no check applied afterwards can tell the
+// difference.
 type rawKeyMeta struct {
 	Use    string   `json:"use"`
 	KeyOps []string `json:"key_ops"`

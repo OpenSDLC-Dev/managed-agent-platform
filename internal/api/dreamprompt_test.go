@@ -21,7 +21,7 @@ import (
 
 // updatePrompts rewrites the golden prompts after a deliberate wording change:
 // `go test ./internal/api/ -run DreamPromptGolden -update`, then read the diff.
-// The idiom is internal/transcript's (transcript_test.go:19-41).
+// The idiom is internal/transcript's (update and checkGolden).
 var updatePrompts = flag.Bool("update", false, "rewrite the golden files")
 
 // The fixed rendering the golden files hold. Eighteen transcripts because that

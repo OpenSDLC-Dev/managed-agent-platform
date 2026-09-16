@@ -53,8 +53,10 @@ import (
 // the policy did not reach them. See mcpEgressAllowed.
 
 // mcpServerRef is one entry of the resolved agent's mcp_servers array, whose
-// wire shape is exactly {type: "url", name, url} (betaagent.go). Only the two
-// fields a connection needs are decoded.
+// wire shape is exactly {type: "url", name, url} (checked against
+// anthropic-sdk-go v1.70.1 — betaagent.go
+// BetaManagedAgentsMCPServerURLDefinition). Only the two fields a connection
+// needs are decoded.
 type mcpServerRef struct {
 	Name string `json:"name"`
 	URL  string `json:"url"`

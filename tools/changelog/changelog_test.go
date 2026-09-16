@@ -303,7 +303,7 @@ func TestAssembleNothingToRelease(t *testing.T) {
 	}
 }
 
-// A legacy body with no fragments is still releasable (the v0.2.0 shape if no
+// A legacy body with no fragments is still releasable (the 0.2.0 shape if no
 // fragment lands between the mechanism and the cut).
 func TestAssembleLegacyOnly(t *testing.T) {
 	clPath, dir := writeFixture(t, legacyChangelog, nil)

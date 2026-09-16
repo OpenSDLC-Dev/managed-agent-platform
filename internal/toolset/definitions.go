@@ -286,12 +286,16 @@ func resolveToolset(raw json.RawMessage) ([]resolved, error) {
 // path so a client can find the typo. It runs after resolveToolset's typed
 // unmarshal, so every object it revisits has already parsed as the right JSON shape.
 //
-// The accepted keys are anthropic-sdk-go v1.66.0's request (*Params) types in
-// betaagent.go: BetaManagedAgentsAgentToolset20260401Params (type/configs/
-// default_config), AgentToolsetDefaultConfigParams (enabled/permission_policy),
-// the eight BetaManagedAgents<Tool>ToolConfigParams variants of
-// AgentToolConfigParamsUnion (name/type/enabled/permission_policy), and the
-// always_allow/always_ask policy params (type only). The two web variants carry
+// The accepted keys are those of the SDK's request (*Params) types:
+// type/configs/default_config on the toolset, enabled/permission_policy on its
+// default_config, name/type/enabled/permission_policy on the eight per-tool
+// variants of the union, and type only on the always_allow/always_ask policy
+// params, checked against anthropic-sdk-go v1.66.0 — betaagent.go
+// BetaManagedAgentsAgentToolset20260401Params and
+// BetaManagedAgentsAgentToolsetDefaultConfigParams and
+// BetaManagedAgentsAgentToolConfigParamsUnion and
+// BetaManagedAgentsAlwaysAllowPolicyParam and
+// BetaManagedAgentsAlwaysAskPolicyParam. The two web variants carry
 // allowed_domains / blocked_domains and max_content_tokens / user_location as
 // well; those four stay refused, because this platform's egress allow-list is
 // operator-side configuration (WEBTOOL_ALLOWED_DOMAINS) and accepting the field
@@ -325,11 +329,13 @@ func rejectUnknownToolsetKeys(kind string, raw json.RawMessage) error {
 
 // rejectConfigKeys checks a default_config or configs[] object and its nested
 // permission_policy. perTool adds "name", accepted only on a configs[] entry,
-// and — on the built-in kind alone — "type": v1.66.0 split AgentToolConfigParams
-// into a union whose eight variants each tag themselves with the tool's own name
-// in both keys. It is optional on the request and required on the response, so a
-// v1.66.0 client may or may not send it. Neither kind's default_config gained
-// one, and BetaManagedAgentsMCPToolConfigParams did not either.
+// and — on the built-in kind alone — "type": the SDK split
+// AgentToolConfigParams into a union whose eight variants each tag themselves
+// with the tool's own name in both keys (since anthropic-sdk-go v1.66.0 —
+// betaagent.go BetaManagedAgentsAgentToolConfigParamsUnion). It is optional on
+// the request and required on the response, so a client of that version may or
+// may not send it. Neither kind's default_config gained one, and
+// BetaManagedAgentsMCPToolConfigParams did not either.
 func rejectConfigKeys(kind string, obj map[string]json.RawMessage, path string, perTool bool) error {
 	allowed := []string{"enabled", "permission_policy"}
 	builtinTool := perTool && kind == agentToolsetType

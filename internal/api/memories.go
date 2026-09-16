@@ -17,11 +17,11 @@ import (
 	"github.com/jackc/pgx/v5"
 )
 
-// memoryJSON is the BetaManagedAgentsMemory wire shape (anthropic-sdk-go
-// v1.66.0 betamemorystorememory.go:180-240). Everything but content is
-// api:"required"; content is api:"nullable" and populated only under
-// view=full, so it is the one pointer here. content_sha256 and
-// content_size_bytes are "Always populated, regardless of `view`" — that is
+// memoryJSON is the BetaManagedAgentsMemory wire shape (checked against
+// anthropic-sdk-go v1.66.0 — betamemorystorememory.go BetaManagedAgentsMemory).
+// Everything but content is api:"required"; content is api:"nullable" and
+// populated only under view=full, so it is the one pointer here. content_sha256
+// and content_size_bytes are "Always populated, regardless of `view`" — that is
 // what lets a sync client diff a whole store without fetching a byte of it.
 type memoryJSON struct {
 	ID               string    `json:"id"`
@@ -36,7 +36,9 @@ type memoryJSON struct {
 	UpdatedAt        time.Time `json:"updated_at"`
 }
 
-// memoryPrefixJSON is the other arm of the list union (:248-367): "a
+// memoryPrefixJSON is the other arm of the list union (checked against
+// anthropic-sdk-go v1.66.0 — betamemorystorememory.go
+// BetaManagedAgentsMemoryListItemUnion and BetaManagedAgentsMemoryPrefix): "a
 // rolled-up directory marker … a list-time rollup, not a stored resource; it
 // has no ID and no lifecycle", produced only when depth is set.
 type memoryPrefixJSON struct {
@@ -44,9 +46,10 @@ type memoryPrefixJSON struct {
 	Path string `json:"path"`
 }
 
-// The two projections a memory or a version renders under
-// (betamemorystorememory.go:369-379). The default is per endpoint: retrieve
-// defaults to full, list/create/update to basic.
+// The two projections a memory or a version renders under (checked against
+// anthropic-sdk-go v1.66.0 — betamemorystorememory.go
+// BetaManagedAgentsMemoryView). The default is per endpoint: retrieve defaults
+// to full, list/create/update to basic.
 const (
 	viewBasic = "basic"
 	viewFull  = "full"
@@ -455,11 +458,12 @@ func (s *server) updateMemory(r *http.Request) (any, error) {
 	return renderMemory(storeID, next, view == viewFull), nil
 }
 
-// parsePrecondition reads the optimistic-concurrency precondition
-// (betamemorystorememory.go:381-412). type is the union's discriminator and
+// parsePrecondition reads the optimistic-concurrency precondition (checked
+// against anthropic-sdk-go v1.66.0 — betamemorystorememory.go
+// BetaManagedAgentsPreconditionParam). type is the union's discriminator and
 // carries one value; content_sha256 is param.Opt in the SDK but required here,
-// since a precondition with nothing to compare against would silently become
-// an unconditional write.
+// since a precondition with nothing to compare against would silently become an
+// unconditional write.
 func parsePrecondition(raw json.RawMessage) (*string, error) {
 	if !present(raw) {
 		return nil, nil
@@ -497,10 +501,13 @@ func (s *server) deleteMemory(r *http.Request) (any, error) {
 	if err := checkID(memoryID, "memory"); err != nil {
 		return nil, err
 	}
-	// The delete precondition rides the query string, not a body
-	// (betamemorystorememory.go:145). storableText, not a digest shape check:
-	// any value that is not the stored one is a mismatch, and the only byte
-	// that must not reach the comparison is one Postgres cannot store (#135).
+	// The delete precondition rides the query string, not a body (checked
+	// against anthropic-sdk-go v1.66.0 — betamemorystorememory.go
+	// BetaMemoryStoreMemoryService.Delete and
+	// BetaMemoryStoreMemoryDeleteParams.ExpectedContentSha256). storableText,
+	// not a digest shape check: any value that is not the stored one is a
+	// mismatch, and the only byte that must not reach the comparison is one
+	// Postgres cannot store (#135).
 	expected := r.URL.Query().Get("expected_content_sha256")
 	if !storableText(expected) {
 		return nil, errInvalid("expected_content_sha256 must be valid text")

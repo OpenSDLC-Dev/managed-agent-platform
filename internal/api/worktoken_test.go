@@ -89,9 +89,10 @@ func pollItem(t *testing.T, s *tserver, envID, key string) (workID string, secre
 	return workID, secret, token
 }
 
-// sessionsTokenFromSecret decodes the secret the way the v1.66.0 reference
-// worker does (lib/environments/worker.go sessionsTokenFromSecret): URL-safe
-// base64 with any padding stripped, of a JSON object with a sessions_token key.
+// sessionsTokenFromSecret decodes the secret the way the reference worker does
+// (checked against anthropic-sdk-go v1.66.0 — worker.go
+// sessionsTokenFromSecret): URL-safe base64 with any padding stripped, of a
+// JSON object with a sessions_token key.
 func sessionsTokenFromSecret(t *testing.T, secret string) string {
 	t.Helper()
 	raw, err := base64.RawURLEncoding.DecodeString(strings.TrimRight(secret, "="))

@@ -1171,14 +1171,16 @@ func TestSkillVersionAddressing(t *testing.T) {
 
 // TestSkillLatestAliasRoundTripsToDownload pins the two-call flow the pinned
 // SDK's agent toolset performs when it materializes a skill into a sandbox
-// (anthropic-sdk-go v1.70.1 tools/agenttoolset/skills.go:102-119): retrieve the
-// version addressed by the alias, then download by the concrete id THAT CALL
-// RETURNED. The client no longer resolves the alias itself — resolveSkillVersion,
-// which listed a skill's versions and picked the newest, is gone at the pin — so
-// the retrieve response's `id` is load-bearing in a way it was not before: a
-// retrieve that echoed the alias back would send the download to a route that
-// refuses it (TestSkillVersionLatestAliasRefusals), and a `latest`-pinned skill
-// would never materialize on the BYOC half.
+// (checked against anthropic-sdk-go v1.70.1 — skills.go
+// AgentToolContext.downloadSkill): retrieve the version addressed by the alias,
+// then download by the concrete id THAT CALL RETURNED. The client no longer
+// resolves the alias itself — resolveSkillVersion, which listed a skill's
+// versions and picked the newest, is gone (absent at anthropic-sdk-go v1.70.1 —
+// skills.go resolveSkillVersion) — so the retrieve response's `id` is
+// load-bearing in a way it was not before: a retrieve that echoed the alias
+// back would send the download to a route that refuses it
+// (TestSkillVersionLatestAliasRefusals), and a `latest`-pinned skill would
+// never materialize on the BYOC half.
 //
 // TestSkillVersionAddressing pins what the retrieve echoes and
 // TestSkillContentDisposition pins a download by a concrete id; what neither
@@ -1187,9 +1189,11 @@ func TestSkillVersionAddressing(t *testing.T) {
 // alias resolves to the NEWEST of several versions (against a one-version skill
 // every resolution rule answers alike, including one that picked the oldest);
 // the `name` the same response carries is what the landing directory is derived
-// from (:106-114, falling back to the skill id); both calls ride the environment
-// key with X-Api-Key deleted (:41-45) rather than the management key
-// TestSkillReadsEnvironmentKeyLane drives by concrete id; and the id the
+// from (falling back to the skill id; checked against anthropic-sdk-go v1.70.1
+// — skills.go AgentToolContext.downloadSkill); both calls ride the environment
+// key with X-Api-Key deleted (checked against anthropic-sdk-go v1.70.1 —
+// skills.go AgentToolContext.SetupSkillsFromSession) rather than the management
+// key TestSkillReadsEnvironmentKeyLane drives by concrete id; and the id the
 // retrieve hands over may be the legacy spelling, which is the case an upgraded
 // installation actually runs.
 func TestSkillLatestAliasRoundTripsToDownload(t *testing.T) {

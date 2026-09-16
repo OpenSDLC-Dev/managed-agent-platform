@@ -221,7 +221,8 @@ func resolveSkillVersion(pinned string, retrieved *sdk.BetaSkillVersion) string 
 		// version at all never reaches here, the retrieve having refused it.
 		// Only the retrieve resolves the alias, so the download rides the
 		// concrete id it answered with — the reference worker's own rule
-		// (anthropic-sdk-go tools/agenttoolset/skills.go).
+		// (checked against anthropic-sdk-go v1.70.1 — skills.go
+		// AgentToolContext.downloadSkill).
 		return retrieved.ID
 	}
 }

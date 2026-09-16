@@ -11,14 +11,17 @@ import (
 )
 
 // The dream wire surface (plan 41, #475): shapes per the pinned SDK's
-// BetaDream, bounds per the OpenAPI spec the SDK is generated from. The
-// create's last rule is `update_existing`'s (slice 4): the target must be the
-// dream's own memory_store input, and at most one live in-place dream may hold
-// a store — a second is the 409 BetaTargetStoreHeldError names.
+// BetaDream, bounds per the spec the SDK is generated from (checked against
+// anthropic-sdk-go v1.70.1 — spec components.schemas.BetaCreateDreamRequest).
+// The create's last rule is `update_existing`'s (slice 4): the target must be
+// the dream's own memory_store input, and at most one live in-place dream may
+// hold a store — a second is the 409 BetaTargetStoreHeldError names.
 
-// dreamFields is BetaDream's field set (anthropic-sdk-go v1.70.1
-// betadream.go:150-178): all fourteen are api:"required" and the spec forbids
-// extra keys, so the resource renders exactly these, always.
+// dreamFields is BetaDream's field set (checked against anthropic-sdk-go
+// v1.70.1 — betadream.go BetaDream): all fourteen are api:"required" and the
+// spec forbids extra keys (checked against anthropic-sdk-go v1.70.1 — spec
+// components.schemas.BetaDream.additionalProperties), so the resource renders
+// exactly these, always.
 var dreamFields = []string{
 	"type", "id", "status", "inputs", "outputs", "model", "instructions",
 	"output_behavior", "session_id", "created_at", "ended_at", "archived_at",
@@ -640,7 +643,8 @@ func TestDreamListFilters(t *testing.T) {
 	wantErr(t, status, body, http.StatusBadRequest, "invalid_request_error")
 
 	// Both created_at bounds are exclusive, unlike the memory-store list's
-	// [gte]/[lte] pair (betadream.go:923-946).
+	// [gte]/[lte] pair (checked against anthropic-sdk-go v1.70.1 — betadream.go
+	// BetaDreamListParams).
 	_, one := s.do(http.MethodGet, "/v1/dreams/"+kept, nil)
 	at := url.QueryEscape(one["created_at"].(string))
 	if ids := listIDs("?created_at[gt]=" + at); has(ids, kept) {

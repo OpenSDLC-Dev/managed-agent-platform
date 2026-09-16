@@ -337,18 +337,19 @@ type unreachableProbe struct {
 // credential_host_unreachable_error (a session.error variant): an
 // environment_variable credential whose allowed_hosts includes a host the
 // environment's networking policy does not permit — a configuration conflict
-// the user should hear about, since the credential can never be substituted
-// on those hosts through this environment (SDK betasessionevent.go's
-// documented trigger). Detection runs on every config render (resolution is
-// read-time, so an edit heals or introduces a conflict without a restart) but
-// each (session, credential) conflict is emitted best-effort once —
-// check-then-append, so concurrent duplicate fetches could double-emit an
-// advisory event; that rarity is not worth a uniqueness constraint.
-// Best-effort and asynchronous: the caller runs it in its own goroutine,
-// detached from the request's cancellation but bounded by emitTimeout, so the
-// config a live gate is waiting for is neither delayed nor failed over an
-// advisory event, and a stalled events table cannot accumulate goroutines —
-// detection or append errors are logged and swallowed.
+// the user should hear about, since the credential can never be substituted on
+// those hosts through this environment (the SDK's documented trigger, checked
+// against anthropic-sdk-go v1.70.1 — betasessionevent.go
+// BetaManagedAgentsCredentialHostUnreachableError). Detection runs on every
+// config render (resolution is read-time, so an edit heals or introduces a
+// conflict without a restart) but each (session, credential) conflict is
+// emitted best-effort once — check-then-append, so concurrent duplicate fetches
+// could double-emit an advisory event; that rarity is not worth a uniqueness
+// constraint. Best-effort and asynchronous: the caller runs it in its own
+// goroutine, detached from the request's cancellation but bounded by
+// emitTimeout, so the config a live gate is waiting for is neither delayed nor
+// failed over an advisory event, and a stalled events table cannot accumulate
+// goroutines — detection or append errors are logged and swallowed.
 func (s *server) emitUnreachableCredentials(ctx context.Context, sessionID string, net domain.Networking,
 	mcpHosts []string, creds []unreachableProbe) {
 	// Only a limited policy refuses hosts. The zero value is the wire default,

@@ -218,9 +218,9 @@ func TestReadWriteEdit(t *testing.T) {
 	})
 
 	t.Run("an inverted view_range selects nothing and reads empty", func(t *testing.T) {
-		// The reference toolset stopped answering [3,1] with an error at
-		// v1.63.0 (anthropic-sdk-go tools/agenttoolset/fs.go: "An inverted
-		// range selects nothing"): the model gets empty content, not is_error.
+		// The reference toolset stopped answering [3,1] with an error ("An
+		// inverted range selects nothing", since anthropic-sdk-go v1.63.0 —
+		// fs.go execRead): the model gets empty content, not is_error.
 		if got := ok(t, r, "read", `{"file_path":"rw/deep/a.txt","view_range":[3,1]}`); got != "" {
 			t.Fatalf("content = %q, want empty", got)
 		}

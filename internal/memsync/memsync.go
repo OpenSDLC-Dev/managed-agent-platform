@@ -31,9 +31,11 @@ const (
 	// MaxPathBytes and MaxContentBytes are the documented memory bounds — a
 	// path of at most 1,024 bytes and content of at most 100 kB — counted in
 	// BYTES, not runes, which is what the reference states for both
-	// (anthropic-sdk-go v1.66.0 betamemorystorememory.go:207-218, 414-422).
-	// They differ from the store surface's rune-counted "characters" for that
-	// reason and no other.
+	// (checked against anthropic-sdk-go v1.66.0 — betamemorystorememory.go
+	// BetaManagedAgentsMemory.Path and BetaManagedAgentsMemory.Content and
+	// BetaMemoryStoreMemoryNewParams.Content and
+	// BetaMemoryStoreMemoryNewParams.Path). They differ from the store
+	// surface's rune-counted "characters" for that reason and no other.
 	MaxPathBytes    = 1024
 	MaxContentBytes = 102400
 
@@ -52,11 +54,12 @@ const (
 )
 
 // ValidatePath holds the reference's own documented path rule verbatim
-// (anthropic-sdk-go v1.70.1 betamemorystorememory.go:434-438): "Must start
-// with `/`, contain at least one non-empty segment, and be at most 1,024
-// bytes. Must not contain empty segments, `.` or `..` segments, control or
-// format characters, or the Unicode line and paragraph separators (U+2028,
-// U+2029), and must be NFC-normalized. Paths are case-sensitive."
+// (checked against anthropic-sdk-go v1.70.1 — betamemorystorememory.go
+// BetaMemoryStoreMemoryNewParams.Path): "Must start with `/`, contain at least
+// one non-empty segment, and be at most 1,024 bytes. Must not contain empty
+// segments, `.` or `..` segments, control or format characters, or the Unicode
+// line and paragraph separators (U+2028, U+2029), and must be NFC-normalized.
+// Paths are case-sensitive."
 //
 // docs/plan/36_memory-stores.md decision 4 is the same table as it read at the
 // SDK version pinned then, before the separators clause: an archived plan is

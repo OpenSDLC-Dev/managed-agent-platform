@@ -603,11 +603,12 @@ func requestMeta(ctx context.Context) sdk.Meta {
 // It is deliberately the SDK's rule and not a guessed-at Anthropic one, and it
 // is a floor rather than the whole constraint. The reference states a charset
 // only for a *custom* tool — "1-128 characters; letters, digits, underscores,
-// and hyphens" (anthropic-sdk-go betaagent.go, BetaManagedAgentsCustomToolParams)
-// — and states none at all for the field that names an MCP tool, which
-// documents length alone. So this admits '.', which that custom-tool charset
-// excludes. Where a reference-checked rule belongs is where the request is
-// assembled and the constraint can be diffed against the reference, not here.
+// and hyphens" (checked against anthropic-sdk-go v1.70.1 — betaagent.go
+// BetaManagedAgentsCustomToolParams.Name) — and states none at all for the
+// field that names an MCP tool, which documents length alone. So this admits
+// '.', which that custom-tool charset excludes. Where a reference-checked rule
+// belongs is where the request is assembled and the constraint can be diffed
+// against the reference, not here.
 func usableName(name string) bool {
 	if name == "" || len(name) > 128 {
 		return false

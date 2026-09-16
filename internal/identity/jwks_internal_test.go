@@ -312,12 +312,13 @@ func TestParseKeySetRejectsWeakRSAKeys(t *testing.T) {
 // exponent structurally cannot see, and the reason the ceiling reads the raw
 // member instead.
 //
-// go-jose decodes "e" as int(big.Int.Int64()) (encoding.go:193), and Int64 on an
-// oversized value yields the low 64 bits. So a published exponent of 2^64+65537
-// arrives as a perfectly ordinary 65537: odd, ≥ 3, and far under the ceiling. Any
-// rule applied to pub.E therefore admits it, and the key installed is one the
-// provider never published — it verifies signatures the provider cannot make and
-// refuses the ones it can.
+// go-jose decodes "e" as int(big.Int.Int64()) (checked against go-jose v4.1.4 —
+// encoding.go byteBuffer.toInt), and Int64 on an oversized value yields the low
+// 64 bits. So a published exponent of 2^64+65537 arrives as a perfectly
+// ordinary 65537: odd, ≥ 3, and far under the ceiling. Any rule applied to
+// pub.E therefore admits it, and the key installed is one the provider never
+// published — it verifies signatures the provider cannot make and refuses the
+// ones it can.
 //
 // The control matters as much as the case: the same modulus with a real 65537
 // must still be usable, or the test would pass on a rule that rejects everything.

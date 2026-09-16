@@ -17,7 +17,7 @@ comparison; this plan closes them. Four distilled principles drive the slices:
 1. **A guard is only worth what it refuses.** The workshop pins a fixture designed to
    fail and asserts the framework fails it. This repo already writes that doctrine down —
    `deploy/gcp/check_split_test.py`'s docstring, and mutant-style tests at
-   `internal/api/sessions_test.go:916`, `internal/executor/files_test.go:207`,
+   `internal/api/sessions_test.go:918`, `internal/executor/files_test.go:207`,
    `internal/blob/gcs/gcs_test.go:258` — but no Go contract suite or eval grader pack has
    a suite-level known-bad subject.
 2. **"Couldn't observe" and "observed and wrong" are different facts.** Conflating them

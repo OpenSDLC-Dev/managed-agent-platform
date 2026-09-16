@@ -55,7 +55,8 @@ func createRepoSession(t *testing.T, s *tserver, resources ...any) map[string]an
 
 // wantRepoResourceFields asserts the rendered github_repository wire shape —
 // {id, created_at, mount_path, type, updated_at, url, checkout}, checkout
-// nullable, and NEVER an authorization_token (betasessionresource.go:211-221).
+// nullable, and NEVER an authorization_token (checked against anthropic-sdk-go
+// v1.70.1 — betasessionresource.go BetaManagedAgentsGitHubRepositoryResource).
 func wantRepoResourceFields(t *testing.T, res map[string]any) {
 	t.Helper()
 	wantFields(t, res, "id", "created_at", "mount_path", "type", "updated_at", "url", "checkout")

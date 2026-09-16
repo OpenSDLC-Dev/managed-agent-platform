@@ -60,8 +60,10 @@ func TestSelfHostedSessionViewCarriesChildToolCalls(t *testing.T) {
 		if ev := view[workerRes]; ev == nil || ev["session_thread_id"] != child {
 			t.Errorf("%s: the worker's result = %v, want it carrying session_thread_id %s", path, ev, child)
 		}
-		// agent.tool_result has no session_thread_id on the wire (SDK
-		// betasessionevent.go:878-902), so it is rendered without one.
+		// agent.tool_result has no session_thread_id on the wire (absent at
+		// anthropic-sdk-go v1.70.1 — betasessionevent.go
+		// BetaManagedAgentsAgentToolResultEvent.SessionThreadID), so it is
+		// rendered without one.
 		ev := view[agentRes]
 		if ev == nil {
 			t.Errorf("%s: the platform's result is missing from the view", path)

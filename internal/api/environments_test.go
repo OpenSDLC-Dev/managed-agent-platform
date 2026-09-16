@@ -134,10 +134,11 @@ func TestEnvironmentCreateSelfHostedAndLimitedCloud(t *testing.T) {
 
 // TestEnvironmentPackagesTypeKeyAccepted covers #382: the reference SDK types
 // packages.type as a discriminator sibling to the six manager lists ("packages"
-// is the only value — BetaPackagesParams.Type / BetaPackages.Type in
-// anthropic-sdk-go betaenvironment.go), not a package manager, so a cookbook
-// body carrying it must not 400, and every response packages object echoes it
-// back regardless of whether the request supplied it.
+// is the only value, checked against anthropic-sdk-go v1.70.1 —
+// betaenvironment.go BetaPackagesParams.Type and BetaPackages.Type), not a
+// package manager, so a cookbook body carrying it must not 400, and every
+// response packages object echoes it back regardless of whether the request
+// supplied it.
 func TestEnvironmentPackagesTypeKeyAccepted(t *testing.T) {
 	s := newTestServer(t)
 

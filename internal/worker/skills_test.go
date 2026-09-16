@@ -276,9 +276,10 @@ func (g *gaRegistry) materialize(t *testing.T, pin string) *fakeSandbox {
 // TestSkillPinResolvesByForm pins the worker's three-way resolution of a stored
 // skills[] pin (plan 39 decision 5). The alias goes to the retrieve, which is
 // the only thing that resolves it, and the download rides the concrete id it
-// answers with — the reference worker's own rule (anthropic-sdk-go
-// tools/agenttoolset/skills.go). An id and the pre-GA numeric are already the
-// addressing token and are carried through verbatim.
+// answers with — the reference worker's own rule (checked against
+// anthropic-sdk-go v1.70.1 — skills.go AgentToolContext.downloadSkill). An id
+// and the pre-GA numeric are already the addressing token and are carried
+// through verbatim.
 //
 // The two id rows are the regression the plan is built on: the two-way "digits
 // or else" test this replaces read a pinned version id as the alias "latest"

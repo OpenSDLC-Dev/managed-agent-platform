@@ -122,11 +122,13 @@ func (p *anthropicProvider) Generate(ctx context.Context, req provider.Request) 
 		params.System = []sdk.TextBlockParam{{Text: req.System}}
 	}
 	// param.SetJSON carries the raw wire bytes through field- and
-	// value-preserving (since SDK v1.60.0 the marshaler compacts and
-	// HTML-escapes raw JSON, so the bytes are equal as JSON, not verbatim).
-	// Round-tripping through the SDK's typed variants instead would silently
-	// drop fields and tool types the pinned SDK version doesn't model yet;
-	// validity is the endpoint's judgment, not this adapter's.
+	// value-preserving (the marshaler compacts and HTML-escapes the
+	// override's raw JSON, so the bytes are equal as JSON, not verbatim;
+	// checked against anthropic-sdk-go v1.70.1 — packages/param/encoder.go
+	// MarshalWithExtras and MarshalUnion). Round-tripping through the SDK's
+	// typed variants instead would silently drop fields and tool types the
+	// pinned SDK version doesn't model yet; validity is the endpoint's
+	// judgment, not this adapter's.
 	for i, m := range req.Messages {
 		role, err := json.Marshal(m.Role)
 		if err != nil {

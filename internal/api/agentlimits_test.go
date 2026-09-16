@@ -7,13 +7,13 @@ import (
 	"testing"
 )
 
-// The reference documents these caps on the agent create/update params
-// (anthropic-sdk-go betaagent.go): at most 128 tools and 20 mcp_servers,
-// server names unique and every server referenced by an mcp_toolset in the
-// resulting tools, metadata at most 16 pairs with 64-char keys and 512-char
-// values. Unenforced, each produced an agent the platform stores but the
-// provider rejects on every turn — a 400 at create, not a run-time surprise
-// (#66).
+// The reference documents these caps on the agent create/update params (checked
+// against anthropic-sdk-go v1.70.1 — betaagent.go BetaAgentNewParams and
+// BetaAgentUpdateParams): at most 128 tools and 20 mcp_servers, server names
+// unique and every server referenced by an mcp_toolset in the resulting tools,
+// metadata at most 16 pairs with 64-char keys and 512-char values. Unenforced,
+// each produced an agent the platform stores but the provider rejects on every
+// turn — a 400 at create, not a run-time surprise (#66).
 
 func customTool(name string) map[string]any {
 	return map[string]any{"type": "custom", "name": name, "description": "d",

@@ -23,9 +23,10 @@ const (
 	maxLimit     = 100
 	// The session-events list accepts limit up to 1000, not maxLimit: the
 	// reference worker's SessionToolRunner reconciles a session by listing its
-	// events with limit=1000 (anthropic-sdk-go betasessiontoolrunner.go), which a
-	// 100 cap 400s before it can run a tool. 1000 is the value the worker requests
-	// and the reference's general list convention (documented "1 to 1000" on most
+	// events with limit=1000 (checked against anthropic-sdk-go v1.70.1 —
+	// betasessiontoolrunner.go SessionToolRunner.reconcile), which a 100 cap
+	// 400s before it can run a tool. 1000 is the value the worker requests and
+	// the reference's general list convention (documented "1 to 1000" on most
 	// SDK list params); the event-list param itself documents no explicit maximum,
 	// so this is our compatible upper bound (some cap is needed — an unbounded
 	// limit is a query-cost risk), not a proven reference cap.
@@ -331,12 +332,13 @@ type biPageJSON struct {
 // managed-agents-2026-04-01 it keeps after_id/before_id "still accepted (not
 // combinable with page or ids[])" and puts has_more/first_id/last_id
 // "alongside next_page". Its plain shape is {data, next_page} — which is all
-// its typed schema has read since anthropic-sdk-go v1.68.0 moved
-// Beta.Files.List from pagination.Page[T] to pagination.PageCursor[T] — and
-// the docs say later Managed Agents beta versions receive that plain shape, so
-// the three classic keys have an end date rather than a permanent home here.
-// first_id/last_id are the first and last ids of the returned page and
-// next_page the position after it, all three null when there is none.
+// its typed schema has read since Beta.Files.List moved from pagination.Page[T]
+// to pagination.PageCursor[T] (since anthropic-sdk-go v1.68.0 — betafile.go
+// BetaFileService.List) — and the docs say later Managed Agents beta versions
+// receive that plain shape, so the three classic keys have an end date rather
+// than a permanent home here. first_id/last_id are the first and last ids of
+// the returned page and next_page the position after it, all three null when
+// there is none.
 //
 // Recorded verbatim, four times, on an endpoint already past that GA migration:
 // {"data":[],"next_page":null,"has_more":false,"first_id":null,"last_id":null}

@@ -2,11 +2,11 @@
 // BYOC worker presents for a work item whose session attaches a memory store
 // (docs/plan/36_memory-stores.md decision 15). The reference's poll response
 // carries the token inside the item's `secret` — URL-safe base64 of a JSON
-// object whose sessions_token key the v1.66.0 reference worker reads
-// (anthropic-sdk-go lib/environments/worker.go, sessionsTokenFromSecret) —
-// and the worker then calls the item's heartbeat and stop, its session's read
-// and events, the skill reads and the memory routes with the token as its
-// Bearer, the environment key deleted from those requests.
+// object whose sessions_token key the reference worker reads (checked against
+// anthropic-sdk-go v1.66.0 — worker.go sessionsTokenFromSecret) — and the
+// worker then calls the item's heartbeat and stop, its session's read and
+// events, the skill reads and the memory routes with the token as its Bearer,
+// the environment key deleted from those requests.
 //
 // A token is minted once per claim, in the claim's own transaction, and
 // stored hash-only. It carries neither an expiry nor a revocation column: it
@@ -15,10 +15,10 @@
 // archive each end it without an event, and a stop ends it queue.WindDown (a
 // minute) after it was requested: the reference worker flushes its unsynced
 // memory writes once the control plane has reported the stop, on a context of
-// its own bounded by 30 seconds (lib/environments/memories.go Cleanup), and a
-// token dead at that instant would lose them — a BYOC workdir is removed at
-// the item's end, with no held sandbox to sync from later as a cloud session
-// has. The value itself is
+// its own bounded by 30 seconds (checked against anthropic-sdk-go v1.66.0 —
+// memories.go SessionMemoryStores.Cleanup), and a token dead at that instant
+// would lose them — a BYOC workdir is removed at the item's end, with no held
+// sandbox to sync from later as a cloud session has. The value itself is
 // gatetoken's mint under another prefix, so every internal bearer the
 // platform issues shares one entropy and one alphabet.
 package worktoken

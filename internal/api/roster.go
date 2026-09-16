@@ -107,14 +107,15 @@ func selfMember(self sessionAgentJSON) threadAgentJSON {
 // version this write produces (1 on create, current+1 on update). It runs
 // inside the caller's transaction and takes FOR SHARE on every referenced
 // agent row, so a concurrent archive cannot slip between the check and the
-// commit. The documented constraints (SDK betasession.go, the roster doc
-// comment): 1–20 entries; a bare id string, {type:"agent",id,version?} or
-// {type:"self"}; distinct agents after resolving `self` and string forms; at
-// most one `self`; referenced agents exist, are not archived, and do not
-// themselves carry `multiagent` (depth limit 1). `self` is exempt from the
-// depth check — read literally the rule would forbid the documented feature —
-// and the depth check reads the spec that gets pinned, since that is the
-// definition a thread would run. Every rejection is a 400 naming the entry.
+// commit. The documented constraints (checked against anthropic-sdk-go v1.70.1
+// — betasession.go BetaManagedAgentsMultiagentParams.Agents): 1–20 entries; a
+// bare id string, {type:"agent",id,version?} or {type:"self"}; distinct agents
+// after resolving `self` and string forms; at most one `self`; referenced
+// agents exist, are not archived, and do not themselves carry `multiagent`
+// (depth limit 1). `self` is exempt from the depth check — read literally the
+// rule would forbid the documented feature — and the depth check reads the spec
+// that gets pinned, since that is the definition a thread would run. Every
+// rejection is a 400 naming the entry.
 func resolveRoster(ctx context.Context, tx pgx.Tx, raw json.RawMessage, selfID string, selfVersion int64) (json.RawMessage, error) {
 	obj, err := asObjectRaw(raw)
 	if err != nil {

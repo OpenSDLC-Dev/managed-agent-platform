@@ -31,10 +31,11 @@ clause — "At the pinned v1.70.1
 Because nothing separates the axes, a bump offers two bad options: edit
 everything, which turns true `since` sentences false and produces a green diff
 proving nothing was re-checked; or edit nothing, which is what happened.
-`internal/events/inbound.go:164` still says "at the pinned v1.66.0" while
-`go.mod` pins v1.70.1, and `.claude/agents/verifier.md:25` — a file that steers
-the verifier — said the same until #724 took the literal out and put both
-steering documents under a gate test. Nothing in the gate notices the comment.
+`internal/events/inbound.go:164` said "at the pinned v1.66.0" while `go.mod`
+pinned v1.70.1 until slice 3 migrated it, and `.claude/agents/verifier.md:25` —
+a file that steers the verifier — said the same until #724 took the literal out
+and put both steering documents under a gate test. Nothing in the gate noticed
+the comment.
 
 That is the disease #452 diagnosed for `Tracked: #N` — *written once and
 falsified later, elsewhere, by an event the file cannot see* — with the SDK bump
@@ -73,8 +74,9 @@ adds or drops an `absent at` clause and never touches `since` or
 `checked against`:
 
 - `since <source> vX.Y.Z` — the reference has behaved this way from that tag on.
-  Twelve Go comments already carry a `since` and a version, though only two name
-  the source; the rest need the source added, not the version changed.
+  Before slice 3, twelve Go comments carried a `since` and a version, though
+  only two named the source; the rest needed the source added, not the version
+  changed.
 - `checked against <source> vX.Y.Z` — a human verified this against that tag.
   Not "the pin is v1.66.0", which today can falsify, but "this was verified
   against v1.66.0", which is permanently true.
@@ -272,7 +274,7 @@ carrying none of them is not a candidate: a file and a symbol named in passing,
 landed the comments held 50 such mentions, at least five of them into the SDK
 and the rest partial paths into this repository, the MCP go-sdk's files, or
 prose. Telling those apart needs a guess about whose file a basename names,
-which a fail-closed rung cannot make, so slice 3 reads them by hand.
+which a fail-closed rung cannot make, so slice 3 read them by hand.
 
 ### The observation point a report-only rung needs
 

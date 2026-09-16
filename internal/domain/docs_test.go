@@ -169,7 +169,7 @@ func repoRoot() string {
 // sdkVersionLiteral matches a module version as a document would write one.
 // Both cases of the `v`, because a sentence can start with one, and two or three
 // components, because dropping the patch is the cheapest way past a guard like
-// this and `v1.70` still reads as the pin. A version with no `v` at all is not
+// this and `vX.Y` still reads as the pin. A version with no `v` at all is not
 // matched: Go module versions carry one by universal convention, while bare
 // decimal triples in these documents are far more often a Go release, an image
 // tag or a section number, and turning those red would cost more than the
@@ -255,8 +255,8 @@ func undatedVersions(line string, markersDate bool) []string {
 // actually knows: go.mod.
 //
 // It exists because correcting these by hand only resets the clock, the same
-// lesson docs/plan/34_doc-trim.md drew for the prefix lists above. #593 moved the
-// pin v1.66.0 → v1.70.1 and swept neither document; #667 corrected
+// lesson docs/plan/34_doc-trim.md drew for the prefix lists above. #593 moved
+// the SDK pin and swept neither document; #667 corrected
 // docs/REFERENCE_PROJECTS.md's copy by hand and nothing reached .claude/, so the
 // file steering the verifier's wire-compatibility rung went on naming a version
 // this repository had stopped building against until #724. Nothing linked the
@@ -277,7 +277,7 @@ func undatedVersions(line string, markersDate bool) []string {
 //
 // The two documents get different rules, because they are different kinds of
 // document. verifier.md is pure instruction — it has no occasion to name a tag at
-// all, dated or not, since an instruction to judge against v1.66.0 is wrong the
+// all, dated or not, since an instruction to judge against vX.Y.Z is wrong the
 // moment the pin moves however carefully it is dated. REFERENCE_PROJECTS.md also
 // records history, where naming a tag is right; there the rule is that the tag
 // must be dated, so the sentence is about that tag rather than about the pin.

@@ -37,8 +37,9 @@ import (
 // One rule the parsers apply is *cluster-dependent* rather than universal, and
 // is called out where it appears: the Lt and Gt toleration operators need the
 // alpha TaintTolerationComparisonOperators feature gate, which is off by default
-// (measured on v1.36). They are accepted because they are real fields of the
-// pinned type, so refusing them would break a cluster that enables the gate.
+// (measured on Kubernetes 1.36). They are accepted because they are real fields
+// of the pinned type, so refusing them would break a cluster that enables the
+// gate.
 const (
 	envNodeSelector = "SANDBOX_K8S_NODE_SELECTOR"
 	envTolerations  = "SANDBOX_K8S_TOLERATIONS"
@@ -130,8 +131,8 @@ func parseTolerations(s string) ([]corev1.Toleration, error) {
 // checkToleration applies the pod-create validator's rules to one toleration, so
 // a value the API server would refuse — once per session, forever — is refused
 // once at startup instead. The rules are Kubernetes', not a convenient subset:
-// they were derived by probing a live v1.36 API server, which rejects several
-// shapes the vendored type's own comments describe as merely "ignored".
+// they were derived by probing a live Kubernetes 1.36 API server, which rejects
+// several shapes the vendored type's own comments describe as merely "ignored".
 func checkToleration(t corev1.Toleration) error {
 	switch t.Operator {
 	case "", corev1.TolerationOpEqual, corev1.TolerationOpExists,
@@ -171,8 +172,8 @@ func checkToleration(t corev1.Toleration) error {
 		// A numeric comparison against a non-number is refused even on a cluster
 		// that enables the gate — and the server applies TWO rules here, not
 		// one. ParseInt alone was the first implementation and accepted four
-		// shapes a gate-enabled v1.36 server rejects ("0100", "+5", "-0",
-		// "-01"): canonical form comes first, so a leading zero cannot be
+		// shapes a gate-enabled Kubernetes 1.36 server rejects ("0100", "+5",
+		// "-0", "-01"): canonical form comes first, so a leading zero cannot be
 		// mistaken for octal, and only then the int64 range check that refuses
 		// an overflowing run of digits. Both are applied, in that order,
 		// through the same validator the server calls — so the accept/reject

@@ -473,9 +473,10 @@ func TestWorkPollBlockMsExpiresToNull(t *testing.T) {
 
 // TestWorkPollBlockMsRejectsNonPositive pins the validation edge the SDK
 // records: non-blocking is expressed by omitting block_ms, and the reference
-// server rejects an explicit 0 (anthropic-sdk-go lib/environments/poller.go).
-// Zero, negative, present-but-empty, unparseable, and repeated values are all
-// 400 here — unlike the non-validating reclaim knob.
+// server rejects an explicit 0 (checked against anthropic-sdk-go v1.70.1 —
+// poller.go WorkPollerOptions.BlockMs). Zero, negative, present-but-empty,
+// unparseable, and repeated values are all 400 here — unlike the non-validating
+// reclaim knob.
 func TestWorkPollBlockMsRejectsNonPositive(t *testing.T) {
 	s := newTestServer(t)
 	envID, _, key := selfHostedWorker(t, s, "ek-block-bad")
@@ -631,10 +632,10 @@ func TestWorkHeartbeatClaimsLeaseAndExtends(t *testing.T) {
 // TestWorkStopGracefulThenForce pins POST .../work/{work_id}/stop: success is a
 // bodiless 204 with no JSON Content-Type — the reference service sends no body
 // even though the generated SDK method is typed *BetaSelfHostedWork, which is
-// exactly why its work poller bypasses the strict decoder (anthropic-sdk-go
-// lib/environments/poller.go, stopWork). The resulting state is read back with
-// GET: a graceful stop moves an item a worker holds to stopping, re-stopping a
-// stopping item is 409, and force escalates it to stopped.
+// exactly why its work poller bypasses the strict decoder (checked against
+// anthropic-sdk-go v1.70.1 — poller.go stopWork). The resulting state is read
+// back with GET: a graceful stop moves an item a worker holds to stopping,
+// re-stopping a stopping item is 409, and force escalates it to stopped.
 func TestWorkStopGracefulThenForce(t *testing.T) {
 	s := newTestServer(t)
 	envID, sessionID, key := selfHostedWorker(t, s, "ek-stop")
