@@ -1926,7 +1926,7 @@ contrast: admit to the lane, narrow inside the handler, fail closed to 404
 `fileMountedInEnvironment`). **Four doc sites flip in this same PR** or a comment asserts the
 pre-change policy beside post-change code: `internal/api/server.go:559-568` (the
 `isSkillReadPath` doc, whose `:563-565` states the policy verbatim),
-`internal/api/worktokenauth.go:17` and `:138-139`, `internal/api/doc.go:55-56`, and — because
+`internal/api/worktokenauth.go:18-19` and `:138-139`, `internal/api/doc.go:55-56`, and — because
 they *contrast* against skills' globality — `internal/api/files.go:340` and
 `internal/api/server.go:598`.
 
