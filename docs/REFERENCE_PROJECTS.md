@@ -49,10 +49,10 @@ either conflicts with the Anthropic model, the Anthropic model wins.
 
 The SDK and CLI checkouts track the API's tip and can run ahead of the pin (whatever
 lands next). Wire-compat is judged against the SDK version pinned in `go.mod` —
-and because the pin moves, **a registry entry's `anthropic-sdk-go vX.Y.Z` names the tag its
-coordinates were last checked against, not necessarily the pin**: read the coordinates at
-the tag the entry names, with `git show <tag>:<path>` or the module cache, never in a
-working tree that has moved on;
+and because the pin moves, **a registry citation's tag is the one its form names — the tag
+its anchor was checked against, arrived at (`since`) or was missing at (`absent at`) — not
+necessarily the pin**: read the anchor at that tag, with `git show <tag>:<path>` or the
+module cache, never in a working tree that has moved on;
 new surface in a checkout is not an invitation to build ahead of the backlog, and pinned
 surface the platform deliberately leaves unbuilt — memory stores, the advisor, budgets —
 is registered in docs/DIVERGENCES.md rather than built. (Session threads were on that
