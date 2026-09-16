@@ -157,8 +157,8 @@ still there after the bump.
 
 The standing objection is that the SDK's managed-agents files are generated
 union boilerplate where no unique symbol exists to cite. Before slice 2 the
-registry held 126 named `file.go:NNN` coordinates, 122 of them distinct. Nineteen are set aside:
-11 point into this repository, 5 name an `anthropic-cli` path, 2 sit in an entry
+registry held 126 named `file.go:NNN` coordinates, 122 of them distinct.
+Nineteen are set aside: 11 point into this repository, 5 name an `anthropic-cli` path, 2 sit in an entry
 naming no SDK tag this machine's cache holds, and 1 is an SDK `examples/` file
 the published module does not ship. That leaves **103 distinct coordinates**,
 one of which two entries cite at different tags — so 104 (coordinate, tag) pairs
