@@ -279,7 +279,8 @@ naming the dream, because that internal agent's toolset is `always_allow` — an
 the dream settles — completed, failed, timed out, or canceled through the same interrupt
 `user.interrupt` runs, which folds a running or idle session to idle and leaves a
 `rescheduling` or `terminated` one where it stands — the runner mirrors the final `usage`,
-archives the session at whatever status it holds, deletes the transcript rows, and stamps
+archives the session at whatever status it holds once its live children have ended, which
+can itself move the status, deletes the transcript rows, and stamps
 the dream closed. The objects are written down as owed by that same commit — the transcript
 ids are their only names, and the commit is what takes the ids away — and the drain removes
 the bytes.

@@ -237,9 +237,9 @@ type dreamStepResult struct {
 	turns *int
 	stage int
 	// sessionMoves are the pipeline session's status transitions the arm's
-	// interrupt made, in the order the threads made them
-	// (interruptSessionInTx hands them back rather than counting them). Same
-	// rule again: recorded after the commit, never before.
+	// interrupt or archive made, in the order the threads made them
+	// (interruptSessionInTx and archiveSessionInTx hand them back rather than
+	// counting them). Same rule again: recorded after the commit, never before.
 	sessionMoves []domain.SessionStatus
 	// after runs once the transaction has committed, still on the arm's
 	// budget slot: the start arm's render-and-write.
@@ -672,6 +672,7 @@ func (s *server) dreamClosingArm(ctx context.Context, tx pgx.Tx, d dreamRow) (dr
 			return dreamStepResult{}, err
 		}
 	}
+	var sessionMoves []domain.SessionStatus
 	if d.sessionFound {
 		if d.sessionStatus == string(domain.SessionRunning) {
 			// interruptSessionInTx counts no session-status metric itself —
@@ -687,9 +688,11 @@ func (s *server) dreamClosingArm(ctx context.Context, tx pgx.Tx, d dreamRow) (dr
 		if d.sessionArchived == nil {
 			// Every other status the set requireNotRunning admits — idle,
 			// terminated and rescheduling alike — is archivable.
-			if _, err := s.archiveSessionInTx(ctx, tx, *d.sessionID); err != nil {
+			_, moves, err := s.archiveSessionInTx(ctx, tx, *d.sessionID)
+			if err != nil {
 				return dreamStepResult{}, err
 			}
+			sessionMoves = moves
 		}
 	}
 	if err := enqueueDreamBlobs(ctx, tx, d.id); err != nil {
@@ -708,7 +711,7 @@ func (s *server) dreamClosingArm(ctx context.Context, tx pgx.Tx, d dreamRow) (dr
 	// transaction rather than deleted after it, which is what deleteFile does
 	// too: the transcript ids are the objects' only names, and this commit is
 	// what takes them away (#703).
-	return dreamStepResult{wakeObjectDeletes: true}, nil
+	return dreamStepResult{wakeObjectDeletes: true, sessionMoves: sessionMoves}, nil
 }
 
 // dreamCompleteArm is arm 10: the end-of-stage checks of §3.3, then completed.

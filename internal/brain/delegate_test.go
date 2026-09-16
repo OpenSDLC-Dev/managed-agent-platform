@@ -375,6 +375,39 @@ func TestWaitWithNothingToWaitForDoesNotPark(t *testing.T) {
 	}
 }
 
+// A child at rescheduling is not something to wait for: nothing resumes a
+// thread resting there, so a park on it would never be released (#731). The
+// wait times out in-commit instead, as it does with nobody running. Nothing
+// leaves a thread at rescheduling across a commit, so the row is forged.
+func TestWaitDoesNotParkOnARetryingChild(t *testing.T) {
+	h := newHarness(t, [][]provider.Chunk{{
+		toolCall("t1", "wait_for_agents", `{}`),
+		done("tool_use", 1),
+	}}, nil)
+	h.roster(t, "researcher")
+	child := pgtest.NewChildThread(t, h.pool, h.sessionID)
+	if _, err := h.pool.Exec(context.Background(),
+		`UPDATE session_threads SET status = 'rescheduling' WHERE id = $1`, child.String()); err != nil {
+		t.Fatal(err)
+	}
+	h.wake(t, "wait for the retrying child")
+	h.runOnce(t)
+
+	got := h.answers(t)
+	if len(got) != 1 || got[0].isErr {
+		t.Fatalf("answers = %v", got)
+	}
+	if got[0].text != nothingToWaitForAnswer {
+		t.Errorf("wait answered %q, want nothing to wait for", got[0].text)
+	}
+	if s := h.threadStatus(t, domain.PrimaryThreadID(h.sessionID)); s != "running" {
+		t.Errorf("coordinator = %q, want running — a park on a retrying child is never released", s)
+	}
+	if n := h.liveTurns(t, ""); n != 1 {
+		t.Errorf("coordinator turns queued = %d, want its next turn", n)
+	}
+}
+
 // Two children reporting at once cost one queued parent turn: they serialize
 // on the session row lock, the first finds the parent idle and wakes it, the
 // second finds it running and leaves the chain to the parent's own settlement.

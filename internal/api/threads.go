@@ -257,7 +257,7 @@ func (s *server) archiveThread(r *http.Request) (any, error) {
 	if row.parent == nil {
 		return nil, errInvalid("the primary thread cannot be archived; archive the session")
 	}
-	var woke *domain.SessionStatus
+	var woke, ended *domain.SessionStatus
 	if row.archivedAt == nil {
 		if row.status != string(domain.SessionIdle) {
 			return nil, errInvalid("thread %s is %s; only an idle thread can be archived", threadID, row.status)
@@ -269,15 +269,17 @@ func (s *server) archiveThread(r *http.Request) (any, error) {
 		if woke, err = s.notifyThreadArchived(ctx, tx, row); err != nil {
 			return nil, err
 		}
-		if row, err = terminateThread(ctx, tx, s.log, row); err != nil {
+		if row, ended, err = terminateThread(ctx, tx, s.log, row); err != nil {
 			return nil, err
 		}
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return nil, err
 	}
-	if woke != nil {
-		events.RecordSessionStatus(ctx, *woke)
+	for _, moved := range []*domain.SessionStatus{woke, ended} {
+		if moved != nil {
+			events.RecordSessionStatus(ctx, *moved)
+		}
 	}
 	return renderThread(row)
 }
@@ -334,21 +336,25 @@ func (s *server) lockSession(ctx context.Context, tx pgx.Tx, id string) error {
 	return err
 }
 
-// terminateThread ends a live child thread: its unanswered tool calls — an
-// idle thread parked on requires_action has them — are closed with error
-// results the way an interrupt closes them, each on the surfaces its call was
-// on; then status moves to terminated — the fold leaves the session where it
-// was, a terminated thread counting for nothing (decision 4) — archived_at is
-// set, and the event goes on the child's stream cross-posted to the primary's.
-// The caller holds the session row lock and the thread row.
-func terminateThread(ctx context.Context, tx pgx.Tx, log *events.Log, row threadRow) (threadRow, error) {
+// terminateThread ends a live child thread: its unanswered tool calls — an idle
+// thread parked on requires_action has them — are closed with error results the
+// way an interrupt closes them, each on the surfaces its call was on; then
+// status moves to terminated — a terminated thread counts for nothing in the
+// fold (decision 4), and the session's status moves whenever the fold over the
+// threads left differs from the status stored: never for an idle child under a
+// live primary, but the last thread holding the session at rescheduling leaves
+// it idle — archived_at is set, and the event goes on the child's stream
+// cross-posted to the primary's. Any such move is returned for the caller to
+// count after its commit (#731). The caller holds the session row lock and the
+// thread row.
+func terminateThread(ctx context.Context, tx pgx.Tx, log *events.Log, row threadRow) (threadRow, *domain.SessionStatus, error) {
 	uses, err := events.UnansweredThreadToolUses(ctx, tx, domain.ID(row.sessionID), domain.ID(row.id), nil)
 	if err != nil {
-		return row, err
+		return row, nil, err
 	}
 	batch, err := events.InterruptResults(uses)
 	if err != nil {
-		return row, err
+		return row, nil, err
 	}
 	// The session's idle stop reason is a pick over its idle threads'
 	// (decision 4), this child's among them — its asks in the union, or its
@@ -361,21 +367,21 @@ func terminateThread(ctx context.Context, tx pgx.Tx, log *events.Log, row thread
 	var stopJSON []byte
 	if err := tx.QueryRow(ctx, `SELECT stop_reason FROM session_threads WHERE id = $1`, row.id).
 		Scan(&stopJSON); err != nil {
-		return row, err
+		return row, nil, err
 	}
 	if row.status == string(domain.SessionIdle) {
 		var own *domain.StopReason
 		if len(stopJSON) > 0 {
 			own = new(domain.StopReason)
 			if err := json.Unmarshal(stopJSON, own); err != nil {
-				return row, fmt.Errorf("thread %s stop_reason: %w", row.id, err)
+				return row, nil, fmt.Errorf("thread %s stop_reason: %w", row.id, err)
 			}
 		}
 		var folded domain.SessionStatus
 		folded, before, err = events.PreviewTransition(ctx, tx, domain.ID(row.sessionID), events.ThreadTransition{
 			ThreadID: domain.ID(row.id), Status: domain.SessionIdle, Stop: own})
 		if err != nil {
-			return row, err
+			return row, nil, err
 		}
 		if folded != domain.SessionIdle {
 			before = nil
@@ -384,14 +390,14 @@ func terminateThread(ctx context.Context, tx pgx.Tx, log *events.Log, row thread
 	pair, moved, err := events.TransitionThread(ctx, tx, domain.ID(row.sessionID), events.ThreadTransition{
 		ThreadID: domain.ID(row.id), Status: domain.SessionTerminated})
 	if err != nil {
-		return row, err
+		return row, nil, err
 	}
 	batch = append(batch, pair...)
 	if before != nil && moved == nil {
 		folded, stop, err := events.PreviewTransition(ctx, tx, domain.ID(row.sessionID), events.ThreadTransition{
 			ThreadID: domain.ID(row.id), Status: domain.SessionTerminated})
 		if err != nil {
-			return row, err
+			return row, nil, err
 		}
 		after = stop
 		if folded == domain.SessionIdle && !sameStop(before, after) {
@@ -407,17 +413,20 @@ func terminateThread(ctx context.Context, tx pgx.Tx, log *events.Log, row thread
 		`UPDATE session_threads SET archived_at = now(), updated_at = now()
 		  WHERE id = $1 RETURNING status, archived_at, updated_at`, row.id).
 		Scan(&row.status, &row.archivedAt, &row.updatedAt); err != nil {
-		return row, err
+		return row, nil, err
 	}
 	switch _, err = log.AppendInTx(ctx, tx, domain.ID(row.sessionID), batch, events.AppendOptions{SetStatus: moved}); {
 	case errors.Is(err, events.ErrSessionArchived):
 		// A live child under an archived session: unreachable while the
 		// session's archive ends its children first, and a 400 if it ever is.
-		return row, errInvalid("session %s is archived", row.sessionID)
+		return row, nil, errInvalid("session %s is archived", row.sessionID)
 	case errors.Is(err, events.ErrSessionNotFound):
-		return row, errNotFound("session %s not found", row.sessionID)
+		return row, nil, errNotFound("session %s not found", row.sessionID)
 	}
-	return row, err
+	if err != nil {
+		return row, nil, err
+	}
+	return row, moved, nil
 }
 
 // sameStop compares two idle stop reasons by their wire shape.
@@ -437,18 +446,24 @@ func sameStop(a, b *domain.StopReason) bool {
 // (decision 12: a child terminates on the session's own end). Runs in the
 // caller's transaction before the session is marked archived (the log refuses
 // appends afterwards). Deletion has no rows to keep — deleteSession broadcasts
-// the same event ephemerally instead.
-func terminateLiveChildren(ctx context.Context, tx pgx.Tx, log *events.Log, sessionID string) error {
+// the same event ephemerally instead. It returns the session status moves the
+// endings made, in order, for the caller to count after its commit.
+func terminateLiveChildren(ctx context.Context, tx pgx.Tx, log *events.Log, sessionID string) ([]domain.SessionStatus, error) {
 	children, err := liveChildThreads(ctx, tx, sessionID)
 	if err != nil {
-		return err
+		return nil, err
 	}
+	var moves []domain.SessionStatus
 	for _, child := range children {
-		if _, err := terminateThread(ctx, tx, log, child); err != nil {
-			return err
+		_, moved, err := terminateThread(ctx, tx, log, child)
+		if err != nil {
+			return nil, err
+		}
+		if moved != nil {
+			moves = append(moves, *moved)
 		}
 	}
-	return nil
+	return moves, nil
 }
 
 // liveChildThreads locks and returns a session's unarchived child threads in

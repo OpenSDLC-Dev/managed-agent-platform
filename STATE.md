@@ -4,8 +4,8 @@ What is being worked on right now, and how far along it is — nothing else. **S
 
 ## Active work
 
-**Closing out what the archive-endings cluster left open.** #713, #710, #574 and #716
-landed, and #730 lands as a registry record of the two archive rules. #720 is the second
+**Closing out what the archive-endings cluster left open.** #713, #710, #574, #716 and
+#730 landed; #731 settles the `rescheduling` child gaps #730's review found. #720 is the second
 half of a two-phase migration — the CHECK it wants would refuse the archive writes of any
 replica still running the release before #713, so it needs a release between the two, which
 is the release this work also cuts.
@@ -14,5 +14,6 @@ is the release this work also cuts.
 
 - [x] #716 — the dream closing arm re-reads its session under the row lock before archiving
 - [x] #730 — the thread and session archive rules recorded together; both halves pinned by tests
-- [ ] cut the release that carries #713, #710, #574, #716 and #730 ([docs/RELEASING.md](./docs/RELEASING.md))
+- [x] #731 — an archive ending a retrying child counts its fold move; a wait stays off such a child
+- [ ] cut the release that carries #713, #710, #574, #716, #730 and #731 ([docs/RELEASING.md](./docs/RELEASING.md))
 - [ ] #720 — once that release is out: a second one-shot clear, then the primary-unarchived CHECK

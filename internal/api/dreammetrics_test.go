@@ -135,8 +135,8 @@ func TestDreamTimeoutRecordsSessionIdle(t *testing.T) {
 }
 
 // (d) Arm 1: a terminal dream whose session is still running is interrupted
-// again, and the tick commits that. The archive on the next tick is not a
-// status transition, so it adds nothing.
+// again, and the tick commits that. The archive on the next tick ends no child,
+// so it moves no status and adds nothing.
 func TestDreamClosingArmRecordsSessionIdle(t *testing.T) {
 	collect := collectMetrics(t)
 	s := newTestServer(t)
@@ -160,6 +160,6 @@ func TestDreamClosingArmRecordsSessionIdle(t *testing.T) {
 		t.Fatal("the closing arm did not stamp closed_at")
 	}
 	if got := apiStatusCount(t, collect(), "idle"); got != 1 {
-		t.Errorf("idle transitions = %d after the archive, want 1 (an archive is not a status)", got)
+		t.Errorf("idle transitions = %d after the archive, want 1 (an archive ending no child moves no status)", got)
 	}
 }
