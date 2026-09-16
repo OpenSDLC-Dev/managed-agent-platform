@@ -121,7 +121,13 @@ func TestToolsRejectsMalformedEntry(t *testing.T) {
 }
 
 // The schema the model is handed is the one the wire documents, field for
-// field (anthropic-sdk-go betaagent.go, BetaManagedAgents…{Bash,Read,…}Input).
+// field (checked against anthropic-sdk-go v1.70.1 — betaagent.go
+// BetaManagedAgentsAgentToolset20260401BashInput and
+// BetaManagedAgentsAgentToolset20260401ReadInput and
+// BetaManagedAgentsAgentToolset20260401WriteInput and
+// BetaManagedAgentsAgentToolset20260401EditInput and
+// BetaManagedAgentsAgentToolset20260401GlobInput and
+// BetaManagedAgentsAgentToolset20260401GrepInput).
 func TestToolSchemasMatchTheWire(t *testing.T) {
 	want := map[string]struct {
 		props    []string

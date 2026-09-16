@@ -47,7 +47,7 @@ const dreamRosterAgent = "dream"
 // var, not a const, because §3.4 makes the batch size tunable for a model with
 // a smaller window; nothing in production writes it. Eight keeps a hundred
 // transcripts inside thirteen threads, under the platform's live-thread cap of
-// 25 (internal/brain/delegate.go:40).
+// 25 (internal/brain/delegate.go maxLiveThreads).
 var dreamDigestBatch = 8
 
 // dreamBatch is one batch of consecutive transcript sequence numbers: batch n

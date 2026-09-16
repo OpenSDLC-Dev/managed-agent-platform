@@ -108,9 +108,10 @@ func scanSession(row pgx.Row) (sessionRow, error) {
 // resolved-agent snapshot, for the one place that ships that snapshot without
 // going through renderSession: the `agent` field of a `session.updated` event,
 // which the reference types as the same resolved session-agent object the
-// session response carries (SDK betasession.go, BetaManagedAgentsSessionUpdated
-// Event.Agent). Without it the same update answers twice in two shapes — a
-// resolved agent in the HTTP response and a sparse one in the event stream.
+// session response carries (checked against anthropic-sdk-go v1.70.1 —
+// betasession.go BetaManagedAgentsSessionUpdatedEvent.Agent). Without it the
+// same update answers twice in two shapes — a resolved agent in the HTTP
+// response and a sparse one in the event stream.
 //
 // It rewrites only the `tools` key (and the members' tools inside a
 // coordinator's `multiagent` roster) and leaves every other byte of the
@@ -233,12 +234,13 @@ type querier interface {
 }
 
 // overrideSystemMaxRunes is the documented ceiling on an agent_with_overrides
-// replacement system prompt — "Up to 100,000 characters" (betasession.go). The
-// bound is specific to the session override params; agents' own create/update
-// system documents none. Counted in runes (the filesupload.go precedent for
-// character-documented limits, shared with #66/#289's metadata caps); the
-// reference's counting unit and reject shape are unobserved —
-// docs/DIVERGENCES.md (#291).
+// replacement system prompt — "Up to 100,000 characters" (checked against
+// anthropic-sdk-go v1.70.1 — betasession.go
+// BetaManagedAgentsAgentWithOverridesParams.System). The bound is specific to
+// the session override params; agents' own create/update system documents none.
+// Counted in runes (the filesupload.go precedent for character-documented
+// limits, shared with #66/#289's metadata caps); the reference's counting unit
+// and reject shape are unobserved — docs/DIVERGENCES.md (#291).
 const overrideSystemMaxRunes = 100_000
 
 // resolveAgent resolves the create-time agent union (plain id string,
@@ -274,12 +276,14 @@ func (s *server) resolveAgent(ctx context.Context, db querier, raw json.RawMessa
 		switch obj.Type {
 		case "agent":
 		case "agent_with_overrides":
-			// The override params carry no roster (SDK betasession.go
-			// AgentWithOverridesParams); the coordinator's stored roster is
-			// the only one a session gets — an explicit 400, not a silent
-			// drop (plan 35 decision 10, INFERRED in docs/DIVERGENCES.md).
-			// An explicit null is the value every session response renders
-			// for a single agent, so a read-modify-write echo passes.
+			// The override params carry no roster (absent at anthropic-sdk-go
+			// v1.70.1 — betasession.go
+			// BetaManagedAgentsAgentWithOverridesParams.Multiagent); the
+			// coordinator's stored roster is the only one a session gets — an
+			// explicit 400, not a silent drop (plan 35 decision 10, INFERRED in
+			// docs/DIVERGENCES.md). An explicit null is the value every session
+			// response renders for a single agent, so a read-modify-write echo
+			// passes.
 			if present(obj.Multiagent) {
 				return snap, errInvalid("agent override multiagent is not supported; the roster is the coordinator agent's")
 			}
@@ -364,9 +368,11 @@ func (s *server) resolveAgent(ctx context.Context, db querier, raw json.RawMessa
 			return snap, errInvalid("agent override system must be a string")
 		} else if utf8.RuneCountInString(spec.System) > overrideSystemMaxRunes {
 			// The SDK bounds the replacement prompt — "Up to 100,000
-			// characters" (betasession.go) — on this override only; the
-			// stored agent's own system documents no ceiling, so the check
-			// binds what the override supplies, never the preserved value.
+			// characters" (checked against anthropic-sdk-go v1.70.1 —
+			// betasession.go BetaManagedAgentsAgentWithOverridesParams.System)
+			// — on this override only; the stored agent's own system documents
+			// no ceiling, so the check binds what the override supplies, never
+			// the preserved value.
 			return snap, errInvalid("agent override system cannot exceed %d characters", overrideSystemMaxRunes)
 		}
 	}
@@ -1200,11 +1206,14 @@ func (s *server) listSessions(r *http.Request) (any, error) {
 			// is ours: the sweep probed a default list and an include_archived
 			// one, never a status-filtered list. The alternative — a scope no
 			// filter reaches past, the way include_archived=false is scoped —
-			// would leave a value both the SDK types and the bundled spec
-			// admit for statuses[] matching nothing without a flag neither
-			// description mentions, and would collapse "terminated by failure"
-			// and "archived" into one answer only include_archived=true can
-			// ask (INFERRED, #78).
+			// would leave a value both the SDK types and the spec it bundles
+			// admit for statuses[] (checked against anthropic-sdk-go v1.70.1 —
+			// betasession.go BetaSessionListParams.Statuses; checked against
+			// anthropic-sdk-go v1.70.1 — spec
+			// components.schemas.BetaManagedAgentsSessionStatus.enum) matching
+			// nothing without a flag neither description mentions, and would
+			// collapse "terminated by failure" and "archived" into one answer
+			// only include_archived=true can ask (INFERRED, #78).
 			//
 			// Written against the projection rather than the column so the one
 			// rule lives in one place; the clause above already makes the two
@@ -1226,10 +1235,11 @@ func (s *server) listSessions(r *http.Request) (any, error) {
 	}
 	if storeID := q.Get("memory_store_id"); storeID != "" {
 		// "Filter sessions whose resources contain a memory_store with this
-		// memory store ID" (betasession.go:2830): a containment match on the
-		// resources array, the fileMountedInEnvironment precedent (files.go);
-		// no index until a list needs one (plan 36 decision 7). Shape first,
-		// as for agent_id (#135).
+		// memory store ID" (checked against anthropic-sdk-go v1.66.0 —
+		// betasession.go BetaSessionListParams.MemoryStoreID): a containment
+		// match on the resources array, the fileMountedInEnvironment precedent
+		// (files.go); no index until a list needs one (plan 36 decision 7).
+		// Shape first, as for agent_id (#135).
 		if !domain.ID(storeID).HasPrefix(domain.PrefixMemoryStore) || !domain.ID(storeID).Valid() {
 			return nil, errInvalid("memory_store_id must be a valid memory store id")
 		}

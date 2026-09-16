@@ -15,10 +15,12 @@ import (
 	"github.com/jackc/pgx/v5"
 )
 
-// dreamJSON is the BetaDream wire shape (anthropic-sdk-go v1.70.1
-// betadream.go:150-178). All fourteen fields are api:"required" and the spec's
-// BetaDream forbids extra keys, so every one renders on every response —
-// nullable ones as null rather than by omission.
+// dreamJSON is the BetaDream wire shape (checked against anthropic-sdk-go
+// v1.70.1 — betadream.go BetaDream). All fourteen fields are api:"required" and
+// the spec's BetaDream forbids extra keys (checked against anthropic-sdk-go
+// v1.70.1 — spec components.schemas.BetaDream.additionalProperties), so every
+// one renders on every response — nullable ones as null rather than by
+// omission.
 //
 // The runner behind them (dreamrunner.go) is what fills `outputs`,
 // `session_id`, `usage` and `error`; a create on a deployment that runs none
@@ -40,9 +42,10 @@ type dreamJSON struct {
 	Error          *dreamErrorJSON   `json:"error"`
 }
 
-// dreamUsageJSON is BetaDreamUsage (betadream.go:594-612): the four counters
-// flat, unlike a session's nested cache_creation split — the dream's
-// cache_creation_input_tokens is the "sum of all TTL tiers".
+// dreamUsageJSON is BetaDreamUsage (checked against anthropic-sdk-go v1.70.1 —
+// betadream.go BetaDreamUsage): the four counters flat, unlike a session's
+// nested cache_creation split — the dream's cache_creation_input_tokens is the
+// "sum of all TTL tiers".
 type dreamUsageJSON struct {
 	InputTokens              int64 `json:"input_tokens"`
 	OutputTokens             int64 `json:"output_tokens"`
@@ -483,7 +486,8 @@ func (s *server) listDreams(r *http.Request) (any, error) {
 	}
 	// Both bounds are EXCLUSIVE, unlike the agent, memory-store and deployment
 	// lists' [gte]/[lte] pair — the dream list publishes only these two
-	// (betadream.go:923-946).
+	// (checked against anthropic-sdk-go v1.70.1 — betadream.go
+	// BetaDreamListParams).
 	for _, f := range []struct{ key, op string }{{"created_at[gt]", ">"}, {"created_at[lt]", "<"}} {
 		t, err := parseTimeParam(q, f.key)
 		if err != nil {

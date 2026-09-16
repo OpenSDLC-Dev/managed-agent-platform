@@ -30,7 +30,7 @@ const maxReclaimMs = 600_000 // 10 minutes
 
 // maxBlockMs caps block_ms at the reference server's ceiling: the SDK's own
 // work poller documents that "the server caps this at 999" and sends exactly
-// 999 (anthropic-sdk-go lib/environments/poller.go).
+// 999 (checked against anthropic-sdk-go v1.70.1 — poller.go pollBlockMillis).
 const maxBlockMs = 999
 
 // workData is a work item's payload. For every self-hosted work item it is a
@@ -236,11 +236,11 @@ func (s *server) pollWork(w http.ResponseWriter, r *http.Request) {
 // blockWindow reads block_ms — how long an empty poll is held open before
 // answering null. Absent means non-blocking (the wire default). Unlike the
 // reclaim knob this one is validated: the SDK records that the reference
-// rejects an explicit 0 (non-blocking is expressed by omission —
-// anthropic-sdk-go lib/environments/poller.go), so zero, negative, empty
-// (present-but-valueless, which is not omission), unparseable, and repeated
-// values are 400; an over-cap value is clamped to the server ceiling the same
-// source documents.
+// rejects an explicit 0 (non-blocking is expressed by omission, checked against
+// anthropic-sdk-go v1.70.1 — poller.go WorkPollerOptions.BlockMs), so zero,
+// negative, empty (present-but-valueless, which is not omission), unparseable,
+// and repeated values are 400; an over-cap value is clamped to the server
+// ceiling the same source documents.
 func blockWindow(r *http.Request) (time.Duration, error) {
 	vs, ok := r.URL.Query()["block_ms"]
 	if !ok {
@@ -484,8 +484,8 @@ func (s *server) heartbeatWork(r *http.Request) (any, error) {
 // bodiless 204: the reference service sends no body here even though the
 // generated SDK method is typed `*BetaSelfHostedWork`, which is why the SDK's
 // own work poller rebinds the response destination to bypass its strict decoder
-// (anthropic-sdk-go lib/environments/poller.go, stopWork). A caller that needs
-// the resulting state reads it back with GET .../work/{work_id}. An
+// (checked against anthropic-sdk-go v1.70.1 — poller.go stopWork). A caller
+// that needs the resulting state reads it back with GET .../work/{work_id}. An
 // already-stopped item is 409, which the reference worker ignores.
 func (s *server) stopWork(r *http.Request) error {
 	envID, workID, err := s.workScope(r)

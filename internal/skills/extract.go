@@ -17,10 +17,11 @@ import (
 )
 
 // ExtractMaxBytes caps a skill archive's total decompressed content at
-// extraction time, matching the reference worker's guard (anthropic-sdk-go
-// tools/agenttoolset/skillarchive.go: 1 GiB). Far above the 30 MB upload cap
-// on purpose — extraction guards protect the sandbox even if a stored object
-// did not come through this platform's upload validation.
+// extraction time, matching the reference worker's guard (1 GiB; checked
+// against anthropic-sdk-go v1.70.1 — skillarchive.go skillArchiveMaxBytes). Far
+// above the 30 MB upload cap on purpose — extraction guards protect the sandbox
+// even if a stored object did not come through this platform's upload
+// validation.
 const ExtractMaxBytes = 1 << 30
 
 // SentinelName is the marker file written under {workdir}/skills/ after a
@@ -260,10 +261,11 @@ func extractWithLimits(data []byte, maxMembers int, maxBytes int64) ([]File, err
 }
 
 // plain reports whether f is a regular file or a directory — the only members
-// extracted, the reference's zipEntryIsPlain rule (v1.63.0). Unix type bits
-// are honoured only for entries a Unix host wrote, which is exactly what
-// zip.FileHeader.Mode observes; every other host's entry is data, and a
-// Unix-host directory entry is one with or without the trailing slash.
+// extracted, the reference's zipEntryIsPlain rule (since anthropic-sdk-go
+// v1.63.0 — skillarchive.go zipEntryIsPlain). Unix type bits are honoured only
+// for entries a Unix host wrote, which is exactly what zip.FileHeader.Mode
+// observes; every other host's entry is data, and a Unix-host directory entry
+// is one with or without the trailing slash.
 func plain(f *zip.File) bool {
 	m := f.Mode()
 	return m.IsRegular() || m.IsDir()

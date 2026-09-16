@@ -3,8 +3,9 @@ package domain
 import "time"
 
 // Outcome-evaluation results, mirroring BetaManagedAgentsOutcomeEvaluationResource
-// (anthropic-sdk-go v1.66.0 betasession.go): pending before the agent begins
-// work, running while producing or revising, evaluating while the grader
+// (checked against anthropic-sdk-go v1.66.0 — betasession.go
+// BetaManagedAgentsOutcomeEvaluationResource.Result): pending before the agent
+// begins work, running while producing or revising, evaluating while the grader
 // scores; the other four are terminal.
 const (
 	OutcomeResultPending              = "pending"

@@ -18,8 +18,10 @@ import (
 // agent.thread_message_received. Each half is stored on its own thread's log
 // and neither is cross-posted — the primary's rows are the session view
 // already, and neither type carries a session_thread_id for a child's row to
-// render there with (SDK betasessionevent.go:544, :714), so a cross-posted one
-// would show on the session view as a message the primary itself exchanged.
+// render there with (checked against anthropic-sdk-go v1.70.1 —
+// betasessionevent.go BetaManagedAgentsAgentThreadMessageReceivedEvent and
+// BetaManagedAgentsAgentThreadMessageSentEvent), so a cross-posted one would
+// show on the session view as a message the primary itself exchanged.
 
 // ThreadPeer names one end of a message: the thread, and the agent it runs.
 // Both are empty for the primary thread, whose agent name is absent — null on

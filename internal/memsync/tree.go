@@ -18,8 +18,8 @@ const MarkerName = ".anthropic-memory-store"
 
 // MarkerBytes is the marker's content: a version line and the store id, which
 // is what the reference worker writes and later re-hashes to decide whether a
-// directory it finds is one it stamped (anthropic-sdk-go v1.66.0
-// lib/environments/memories.go, scanMarker/markerSHA).
+// directory it finds is one it stamped (checked against anthropic-sdk-go
+// v1.66.0 — memories.go SessionMemoryStores.scanMarker and markerSHA).
 func MarkerBytes(storeID string) []byte {
 	return []byte("version 1\n" + storeID)
 }

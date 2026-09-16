@@ -39,12 +39,13 @@ import (
 
 // ErrSessionMemoryNoToken fails a work item whose session attaches a memory
 // store when the item carried no sessions token: the memory routes admit
-// nothing else, so the stores cannot be mounted, and running the tools
-// without them would hand the agent the amnesia the reference worker refuses
-// (anthropic-sdk-go v1.66.0 lib/environments/worker.go:516-528). Its text is
-// the reference's own, so the two workers fail the same item the same way.
-// The lease loop drains such an item — a re-hand-out would carry no token
-// either, and reclaiming it would loop.
+// nothing else, so the stores cannot be mounted, and running the tools without
+// them would hand the agent the amnesia the reference worker refuses (checked
+// against anthropic-sdk-go v1.66.0 — worker.go EnvironmentWorker.handleItem).
+// Its text is the reference's own (checked against anthropic-sdk-go v1.70.1 —
+// memories.go ErrSessionMemoryNoToken), so the two workers fail the same item
+// the same way. The lease loop drains such an item — a re-hand-out would carry
+// no token either, and reclaiming it would loop.
 var ErrSessionMemoryNoToken = errors.New("the work item carried no sessions token, so the session's memory stores cannot be mounted")
 
 // memoryRef is the memory_store arm of a session's resources[] as the worker
@@ -67,9 +68,9 @@ const (
 	// batch's members land root-owned, and a root-owned 0644 file refuses a
 	// non-root agent's in-place `>>`.
 	memoryFileMode = 0o666
-	// The reference worker's page sizes (lib/environments/memories.go
-	// listPageSize, fullListPageSize): the largest the wire allows for each
-	// view — the full view is capped at 20.
+	// The reference worker's page sizes (checked against anthropic-sdk-go
+	// v1.70.1 — memories.go listPageSize and fullListPageSize): the largest the
+	// wire allows for each view — the full view is capped at 20.
 	memoryListPageSize     = 100
 	memoryFullListPageSize = 20
 )
@@ -355,8 +356,8 @@ func (m *memoryStores) sync(ctx context.Context, progress func()) {
 }
 
 // memoryFlushTimeout bounds the shutdown flush's own context — the reference
-// worker's MemoryFlushTimeout (anthropic-sdk-go v1.66.0 lib/environments/
-// memories.go): a slow store cannot stall teardown past it, and it stays
+// worker's value (checked against anthropic-sdk-go v1.66.0 — memories.go
+// MemoryFlushTimeout): a slow store cannot stall teardown past it, and it stays
 // inside the window the sessions token is still valid after a stop.
 const memoryFlushTimeout = 30 * time.Second
 

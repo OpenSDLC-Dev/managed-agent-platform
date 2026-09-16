@@ -449,7 +449,8 @@ type Sandbox interface {
 	//     root cannot chmod it and the write lands 0644 where k8s preserves the
 	//     mode (#209). (The Claude Code harness's atomic write does the same three
 	//     steps — a harness-design observation, not a wire behavior of the
-	//     managed-agents reference; the SDK's host-side agenttoolset writes a fixed
+	//     managed-agents reference; the SDK's host-side toolset (checked against
+	//     anthropic-sdk-go v1.70.1 — fs.go execWrite and execEdit) writes a fixed
 	//     0644 instead.)
 	//   - A file bind-mounted into the sandbox cannot be renamed onto at all, and
 	//     a device node could only be *supplanted*, never written through — so

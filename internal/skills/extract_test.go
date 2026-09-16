@@ -75,11 +75,12 @@ func TestExtract(t *testing.T) {
 }
 
 // TestExtractSkipsNonPlainEntries pins the reference's zipEntryIsPlain rule
-// (agenttoolset/skillarchive.go, v1.63.0): a Unix-host entry whose type bits
-// say symlink or FIFO is skipped, never written out as a regular file holding
-// its link target; a Unix-host directory entry without the trailing slash is
-// a directory, not an empty file; and an entry from a non-Unix host carries
-// no type bits, so its bytes are data whatever its permission bits look like.
+// (since anthropic-sdk-go v1.63.0 — skillarchive.go zipEntryIsPlain): a
+// Unix-host entry whose type bits say symlink or FIFO is skipped, never written
+// out as a regular file holding its link target; a Unix-host directory entry
+// without the trailing slash is a directory, not an empty file; and an entry
+// from a non-Unix host carries no type bits, so its bytes are data whatever its
+// permission bits look like.
 func TestExtractSkipsNonPlainEntries(t *testing.T) {
 	var buf bytes.Buffer
 	w := zip.NewWriter(&buf)

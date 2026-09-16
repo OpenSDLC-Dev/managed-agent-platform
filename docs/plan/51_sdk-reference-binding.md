@@ -31,10 +31,11 @@ clause — "At the pinned v1.70.1
 Because nothing separates the axes, a bump offers two bad options: edit
 everything, which turns true `since` sentences false and produces a green diff
 proving nothing was re-checked; or edit nothing, which is what happened.
-`internal/events/inbound.go:164` still says "at the pinned v1.66.0" while
-`go.mod` pins v1.70.1, and `.claude/agents/verifier.md:25` — a file that steers
-the verifier — said the same until #724 took the literal out and put both
-steering documents under a gate test. Nothing in the gate notices the comment.
+`internal/events/inbound.go:164` said "at the pinned v1.66.0", with `go.mod`
+already at v1.70.1, until slice 3 migrated it, and `.claude/agents/verifier.md:25` —
+a file that steers the verifier — said the same until #724 took the literal out
+and put both steering documents under a gate test. Nothing in the gate noticed
+the comment.
 
 That is the disease #452 diagnosed for `Tracked: #N` — *written once and
 falsified later, elsewhere, by an event the file cannot see* — with the SDK bump
@@ -73,8 +74,9 @@ adds or drops an `absent at` clause and never touches `since` or
 `checked against`:
 
 - `since <source> vX.Y.Z` — the reference has behaved this way from that tag on.
-  Twelve Go comments already carry a `since` and a version, though only two name
-  the source; the rest need the source added, not the version changed.
+  Before slice 3, twelve Go comments carried a `since` and a version, though
+  only two named the source; the rest needed the source added, not the version
+  changed.
 - `checked against <source> vX.Y.Z` — a human verified this against that tag.
   Not "the pin is v1.66.0", which today can falsify, but "this was verified
   against v1.66.0", which is permanently true.
@@ -272,7 +274,7 @@ carrying none of them is not a candidate: a file and a symbol named in passing,
 landed the comments held 50 such mentions, at least five of them into the SDK
 and the rest partial paths into this repository, the MCP go-sdk's files, or
 prose. Telling those apart needs a guess about whose file a basename names,
-which a fail-closed rung cannot make, so slice 3 reads them by hand.
+which a fail-closed rung cannot make, so slice 3 read them by hand.
 
 ### The observation point a report-only rung needs
 
@@ -398,9 +400,10 @@ does not have.
    which rung 1 reads as part of the locator and then refuses, since it is not a
    symbol. Closes #660.
 3. **Migrate the Go comments; the steering documents take a separate rule.**
-   50 lines carry a coordinate — 49 citations (40 into the SDK, 3 into go-jose,
-   6 into this repository) and one fixture path that is not one — and 12 carry a
-   `since` whose source is usually unnamed; beside them sit the sourceless
+   When slice 1 landed, 50 lines carried a coordinate — 49 citations (40 into the
+   SDK, 3 into go-jose, 6 into this repository) and one fixture path that is not
+   one — and 12 carried a `since` whose source was usually unnamed; beside them
+   sat the sourceless
    `file.go Symbol` mentions rung 1 cannot see (the last of the four limits
    above), which this slice reads by hand. The comments are a pure migration.
    The steering documents are not: `.claude/agents/verifier.md:25` is an
@@ -437,8 +440,9 @@ none of `tools/sdkref`, so it did not wait for it (#724).
   offline constraint forbids it.
 - **Not a change to what is cited.** Which claims the registry makes, and which
   divergences it records, are untouched.
-- **Not a rule for in-repo coordinates.** Eleven registry coordinates and six Go
-  comments cite this repository's own source by line; git holds our history, so
+- **Not a rule for in-repo coordinates.** When this plan was written, eleven
+  registry coordinates and six Go comments cited this repository's own source by
+  line; git holds our history, so
   they take a symbol with no stamp. No rung enforces that — rung 1 reads
   citations into an external source, and rungs 2 and 3 are explicitly excluded —
   so it stays a convention a reviewer applies, not a check. Guarding our own

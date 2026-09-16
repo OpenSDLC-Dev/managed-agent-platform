@@ -97,7 +97,8 @@ __map_path_fault() {
 // atomic write does the same three steps — stat the target, chmod the temporary
 // file, rename — which is a harness-design observation from the local snapshot,
 // not a wire behavior of the managed-agents reference. (The SDK's own host-side
-// agenttoolset writes a fixed 0644 instead; that divergence is in the registry.)
+// toolset writes a fixed 0644 instead, checked against anthropic-sdk-go v1.70.1
+// — fs.go execWrite and execEdit; that divergence is in the registry.)
 //
 // Only an existing regular file has a mode worth carrying over. The symlink is the
 // case worth spelling out, and `-h` is tested first because `-f` follows a link

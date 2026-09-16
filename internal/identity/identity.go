@@ -29,18 +29,22 @@
 //
 // What go-jose does not do, and this package therefore does:
 //
-//   - require exp — ValidateWithLeeway skips it when absent (jwt/validation.go);
+//   - require exp — ValidateWithLeeway skips it when absent (checked against
+//     go-jose v4.1.4 — jwt/validation.go Claims.ValidateWithLeeway);
 //   - require a non-empty sub;
 //   - anything about azp;
-//   - refuse b64, by either route. go-jose lists b64 in its own supportedCritical
-//     set (shared.go), so a crit naming it passes; and computeAuthData (jws.go)
-//     honours a bare b64 with no reference to crit, verifying over the raw
-//     payload. RFC 7797 §7 says a JWT MUST NOT use b64 at all. Verify refuses any
-//     crit and any b64, before the key lookup;
+//   - refuse b64, by either route. go-jose lists b64 in its own
+//     supportedCritical set (checked against go-jose v4.1.4 — shared.go
+//     supportedCritical), so a crit naming it passes; and computeAuthData
+//     (checked against go-jose v4.1.4 — jws.go
+//     JSONWebSignature.computeAuthData) honours a bare b64 with no reference to
+//     crit, verifying over the raw payload. RFC 7797 §7 says a JWT MUST NOT use
+//     b64 at all. Verify refuses any crit and any b64, before the key lookup;
 //   - fetch, cache, or bound the lifetime of a key set, and OIDC discovery;
 //   - bound an RSA modulus, require an odd exponent, reject an even modulus, or
-//     bound the exponent above (jwk.go rsaPublicKey builds a bare rsa.PublicKey,
-//     and decodes e as int(big.Int.Int64()), which silently truncates);
+//     bound the exponent above (rsaPublicKey builds a bare rsa.PublicKey, and
+//     decodes e as int(big.Int.Int64()), which silently truncates; checked
+//     against go-jose v4.1.4 — jwk.go rawJSONWebKey.rsaPublicKey);
 //   - parse key_ops at all (rawJSONWebKey has no such field);
 //   - enforce a JWK's declared alg against the JWS header;
 //   - decode a JWK Set per entry: jose.JSONWebKeySet has no set-level

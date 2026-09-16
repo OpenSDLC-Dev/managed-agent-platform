@@ -142,9 +142,10 @@ func redactURL(raw string) string {
 
 // requireHTTPS is the scheme rule: https, or http to a loopback host.
 //
-// It mirrors the reference SDK's own rule for its credential endpoints
-// (anthropic-sdk-go internal/auth/https.go). Userinfo in the URL is refused: a
-// credential smuggled into a key URL is never a legitimate configuration.
+// It mirrors the reference SDK's own rule for its credential endpoints (checked
+// against anthropic-sdk-go v1.70.1 — internal/auth/https.go
+// requireSecureTokenEndpoint). Userinfo in the URL is refused: a credential
+// smuggled into a key URL is never a legitimate configuration.
 func requireHTTPS(raw string) error {
 	_, err := parseHTTPSURL(raw)
 	return err

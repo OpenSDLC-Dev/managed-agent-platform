@@ -14,12 +14,14 @@ import (
 	"github.com/jackc/pgx/v5"
 )
 
-// memoryStoreJSON is the BetaManagedAgentsMemoryStore wire shape
-// (anthropic-sdk-go v1.66.0 betamemorystore.go:179-216). type/id/name/
-// created_at/updated_at are api:"required" and archived_at api:"nullable";
-// description and metadata are neither, but always render — "" and {} when
-// unset, per "Empty string when unset" (:196-198) — so no client sees null
-// where the schema types a string or an object.
+// memoryStoreJSON is the BetaManagedAgentsMemoryStore wire shape (checked
+// against anthropic-sdk-go v1.66.0 — betamemorystore.go
+// BetaManagedAgentsMemoryStore). type/id/name/created_at/updated_at are
+// api:"required" and archived_at api:"nullable"; description and metadata are
+// neither, but always render — "" and {} when unset, per "Empty string when
+// unset" (checked against anthropic-sdk-go v1.66.0 — betamemorystore.go
+// BetaManagedAgentsMemoryStore.Description) — so no client sees null where the
+// schema types a string or an object.
 type memoryStoreJSON struct {
 	ID          string            `json:"id"`
 	Type        string            `json:"type"`
@@ -31,9 +33,12 @@ type memoryStoreJSON struct {
 	ArchivedAt  *time.Time        `json:"archived_at"`
 }
 
-// The documented store-surface limits (betamemorystore.go:232-243, and the
-// OpenAPI spec's minLength/maxLength on BetaManagedAgentsCreateMemoryStore-
-// Request). The metadata caps are the shared documented ones in wire.go.
+// The documented store-surface limits (checked against anthropic-sdk-go
+// v1.66.0 — betamemorystore.go BetaMemoryStoreNewParams, and the spec's
+// minLength/maxLength on BetaManagedAgentsCreateMemoryStoreRequest, checked
+// against anthropic-sdk-go v1.70.1 — spec
+// components.schemas.BetaManagedAgentsCreateMemoryStoreRequest). The metadata
+// caps are the shared documented ones in wire.go.
 const (
 	memoryStoreNameMax        = 255
 	memoryStoreDescriptionMax = 1024
@@ -277,7 +282,9 @@ func (s *server) listMemoryStores(r *http.Request) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	// Both bounds are inclusive (betamemorystore.go:290-296).
+	// Both bounds are inclusive (checked against anthropic-sdk-go v1.66.0 —
+	// betamemorystore.go BetaMemoryStoreListParams.CreatedAtGte and
+	// BetaMemoryStoreListParams.CreatedAtLte).
 	gte, err := parseTimeParam(q, "created_at[gte]")
 	if err != nil {
 		return nil, err
@@ -365,8 +372,9 @@ func (s *server) archiveMemoryStore(r *http.Request) (any, error) {
 	// a second archive returns the store with the first call's timestamp.
 	// Unlike archiveVault this leaves updated_at alone on the first call too:
 	// the spec defines the field as when name, description or metadata last
-	// changed (the OpenAPI spec's BetaManagedAgentsMemoryStore.updated_at), and
-	// an archive changes none of them.
+	// changed (checked against anthropic-sdk-go v1.70.1 — spec
+	// components.schemas.BetaManagedAgentsMemoryStore.properties.updated_at),
+	// and an archive changes none of them.
 	var row memoryStoreRow
 	err := s.pool.QueryRow(ctx,
 		`UPDATE memory_stores SET archived_at = COALESCE(archived_at, now())
@@ -394,8 +402,9 @@ func (s *server) deleteMemoryStore(r *http.Request) (any, error) {
 		return nil, err
 	}
 	// Hard delete: "The store and all its memories and versions are no longer
-	// retrievable" (betamemorystore.go:149-153). Slice 2's tables carry the
-	// ON DELETE CASCADE that makes the second half true.
+	// retrievable" (checked against anthropic-sdk-go v1.66.0 —
+	// betamemorystore.go BetaManagedAgentsDeletedMemoryStore). Slice 2's tables
+	// carry the ON DELETE CASCADE that makes the second half true.
 	tag, err := s.pool.Exec(ctx, `DELETE FROM memory_stores WHERE id = $1`, id)
 	if err != nil {
 		return nil, err

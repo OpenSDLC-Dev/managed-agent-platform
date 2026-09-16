@@ -12,9 +12,17 @@ import (
 )
 
 // The memory wire surface (plan 36 slice 2, #52): shapes per the pinned SDK's
-// BetaManagedAgentsMemory and BetaManagedAgentsMemoryPrefix, rules per the
-// OpenAPI spec the SDK is generated from (the occupancy 409, the no-op update,
-// the precondition short-circuit, the tombstone) and the memory guide's caps.
+// BetaManagedAgentsMemory and BetaManagedAgentsMemoryPrefix, rules per the spec
+// the SDK is generated from (the occupancy 409, checked against
+// anthropic-sdk-go v1.70.1 — spec
+// components.schemas.BetaManagedAgentsCreateMemoryParams; the no-op update,
+// checked against anthropic-sdk-go v1.70.1 — spec
+// components.schemas.BetaManagedAgentsUpdateMemoryParams; the precondition
+// short-circuit, checked against anthropic-sdk-go v1.70.1 — spec
+// components.schemas.BetaManagedAgentsContentSha256Precondition; the tombstone,
+// checked against anthropic-sdk-go v1.70.1 — spec
+// components.schemas.BetaManagedAgentsDeletedMemory) and the memory guide's
+// caps.
 
 func digest(content string) string {
 	sum := sha256.Sum256([]byte(content))

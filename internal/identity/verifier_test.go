@@ -588,16 +588,18 @@ func TestVerifyRejectsCritHeader(t *testing.T) {
 		verifierXRejected(t, fmt.Sprintf("crit %#v", odd), got, err)
 	}
 
-	// The one exception, asserted rather than left to be discovered: "crit":null
-	// is ACCEPTED, because go-jose never surfaces it. rawHeader decodes a JSON
-	// null to a nil *RawMessage and sanitized() skips those (shared.go:416), so it
+	// The one exception, asserted rather than left to be discovered:
+	// "crit":null is ACCEPTED, because go-jose never surfaces it. rawHeader
+	// decodes a JSON null to a nil *RawMessage and sanitized() skips those
+	// (checked against go-jose v4.1.4 — shared.go rawHeader.sanitized), so it
 	// never reaches ExtraHeaders.
 	//
-	// That is safe, and the reason is not "go-jose hides it" — it is that a null
-	// confers nothing to hide. go-jose's own getCritical returns no names for it
-	// (shared.go:340), and getB64 returns the default true for a null b64, so
-	// neither member can declare an extension or change how the payload is read.
-	// A null crit is semantically the member being absent.
+	// That is safe, and the reason is not "go-jose hides it" — it is that a
+	// null confers nothing to hide. go-jose's own getCritical returns no names
+	// for it (checked against go-jose v4.1.4 — shared.go
+	// rawHeader.getCritical), and getB64 returns the default true for a null
+	// b64, so neither member can declare an extension or change how the payload
+	// is read. A null crit is semantically the member being absent.
 	//
 	// This row exists so that if go-jose ever starts surfacing nulls, or starts
 	// reading meaning into one, the change fails here and someone re-reads this
@@ -779,9 +781,10 @@ func TestVerifyIssuerExact(t *testing.T) {
 //
 // One row diverges from this file's design note, deliberately and in the
 // fail-closed direction: an array mixing a matching string with a non-string
-// element is REFUSED, because go-jose's Audience.UnmarshalJSON (jwt/claims.go)
-// returns ErrUnmarshalAudience for any non-string element rather than skipping
-// it, so the claim set never decodes. Refusing a token whose aud we cannot fully
+// element is REFUSED, because go-jose's Audience.UnmarshalJSON (checked against
+// go-jose v4.1.4 — jwt/claims.go Audience.UnmarshalJSON) returns
+// ErrUnmarshalAudience for any non-string element rather than skipping it, so
+// the claim set never decodes. Refusing a token whose aud we cannot fully
 // decode is the safe reading, and it is what the code does.
 func TestVerifyAudienceShapes(t *testing.T) {
 	t.Parallel()

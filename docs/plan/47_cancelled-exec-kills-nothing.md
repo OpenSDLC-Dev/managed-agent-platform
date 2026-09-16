@@ -60,8 +60,8 @@ bound.
 
 **And the BYOC worker is the same code twice.** `internal/worker` is the
 customer-hosted twin of `internal/executor` and makes the same zero-`Timeout`
-calls through the same interface (`worker/files.go:247`, `worker/memory.go:230`,
-`:482`, `:845`). Slice 1 lands in `internal/sandbox`, so the worker inherits the
+calls through the same interface (`worker/files.go:247`, `worker/memory.go:231`,
+`:483`, `:846`). Slice 1 lands in `internal/sandbox`, so the worker inherits the
 fix without a line of its own — but it is inside the blast radius, and plan 35
 decision 9's "our BYOC worker does the same on its heartbeat" means it meets the
 cancellation half exactly as the executor does.
@@ -278,7 +278,7 @@ The reclaiming provision can **reap and re-provision instead of
    `internal/worker` runs the same sandbox seam (`worker/toolexec.go:140`,
    `:204`), cancels on the same stall or lease loss (`worker/lease.go:549`), and
    its detached shutdown memory flush reads the sandbox afterwards
-   (`worker/memory.go:378`, `:482`) — racing an abandoned tool exactly as the
+   (`worker/memory.go:379`, `:483`) — racing an abandoned tool exactly as the
    clone sweep races an abandoned `tar`. A Postgres advisory lock reaches none
    of that: plan 24 puts BYOC worker lifecycle out of scope because "the
    platform reaper is executor-only" (`24_sandbox-teardown.md:217-221`). So the

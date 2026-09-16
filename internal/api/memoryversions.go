@@ -11,11 +11,11 @@ import (
 	"github.com/jackc/pgx/v5"
 )
 
-// memoryVersionJSON is the BetaManagedAgentsMemoryVersion wire shape
-// (anthropic-sdk-go v1.66.0 betamemorystorememoryversion.go:234-310): "one
-// immutable, attributed row in a memory's append-only history … Versions
-// belong to the store (not the individual memory) and persist after the memory
-// is deleted."
+// memoryVersionJSON is the BetaManagedAgentsMemoryVersion wire shape (checked
+// against anthropic-sdk-go v1.66.0 — betamemorystorememoryversion.go
+// BetaManagedAgentsMemoryVersion): "one immutable, attributed row in a memory's
+// append-only history … Versions belong to the store (not the individual
+// memory) and persist after the memory is deleted."
 //
 // Four fields are nullable for two separate reasons the row itself already
 // carries, so the renderer only ever applies `view` on top: a `deleted`

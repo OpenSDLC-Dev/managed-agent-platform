@@ -80,11 +80,13 @@ func TestAgentToolsetRejectsUnknownField(t *testing.T) {
 	}
 }
 
-// A v1.66.0 client may put the per-tool `type` discriminator beside `name` —
-// the SDK's own generated example does, and `ant beta:agents create` passes
-// `--tool` JSON through raw — so a create carrying it must not 400. The echo
-// renders `type` on every built-in entry whether the request sent one or not,
-// because the response union marks it required on all eight variants.
+// A client may put the per-tool `type` discriminator beside `name` (checked
+// against anthropic-sdk-go v1.66.0 — betaagent.go
+// BetaManagedAgentsAgentToolConfigParamsUnion) — the SDK's own generated
+// example does, and `ant beta:agents create` passes `--tool` JSON through raw —
+// so a create carrying it must not 400. The echo renders `type` on every
+// built-in entry whether the request sent one or not, because the response
+// union marks it required on all eight variants.
 func TestAgentToolConfigTypeDiscriminator(t *testing.T) {
 	s := newTestServer(t)
 	agent := createAgent(t, s, agentBody(map[string]any{
@@ -202,8 +204,10 @@ func TestAgentCreateModelObjectAndFullConfig(t *testing.T) {
 	// the omitted ones are filled in, because both toolset kinds echo their
 	// configuration resolved (plan 29 slice 1 — the rule itself is pinned by
 	// TestToolsetConfigsEchoResolved). The first entry set every knob but the
-	// per-tool `type` discriminator the v1.66.0 response union requires, so its
-	// echo grows one; the bare mcp_toolset gains the MCP default.
+	// per-tool `type` discriminator the response union requires (checked
+	// against anthropic-sdk-go v1.66.0 — betaagent.go
+	// BetaManagedAgentsAgentToolConfigUnion), so its echo grows one; the bare
+	// mcp_toolset gains the MCP default.
 	wantTools := []any{
 		map[string]any{
 			"type":           "agent_toolset_20260401",

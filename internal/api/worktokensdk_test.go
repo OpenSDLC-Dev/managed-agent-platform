@@ -14,13 +14,13 @@ import (
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/events"
 )
 
-// TestSDKWorkerServesAnItemWithTheSessionsToken drives the v1.66.0 reference
-// worker's per-item flow (EnvironmentWorker.HandleItem — the secret decoded,
-// the session read, the events stream, the lease heartbeat, the force-stop)
-// against the in-process server with the environment key revoked first, so
-// every call it makes rides the sessions token or fails. Memory sync is
-// switched off (a negative interval, the SDK's documented exception) — the
-// worker's download is slice 6's.
+// TestSDKWorkerServesAnItemWithTheSessionsToken drives the reference worker's
+// per-item flow (the secret decoded, the session read, the events stream, the
+// lease heartbeat, the force-stop; checked against anthropic-sdk-go v1.66.0 —
+// worker.go EnvironmentWorker.HandleItem) against the in-process server with
+// the environment key revoked first, so every call it makes rides the sessions
+// token or fails. Memory sync is switched off (a negative interval, the SDK's
+// documented exception) — the worker's download is slice 6's.
 func TestSDKWorkerServesAnItemWithTheSessionsToken(t *testing.T) {
 	s := newTestServer(t)
 	ctx := context.Background()

@@ -26,7 +26,8 @@ const (
 	// skills-guide's published 30 MB bundle limit).
 	MaxTotalBytes = 30 << 20
 	// MaxMembers caps the file count, matching the reference worker's own
-	// extraction guard (anthropic-sdk-go tools/agenttoolset).
+	// extraction guard (checked against anthropic-sdk-go v1.70.1 —
+	// skillarchive.go skillArchiveMaxMembers).
 	MaxMembers = 10000
 
 	maxNameLen        = 64

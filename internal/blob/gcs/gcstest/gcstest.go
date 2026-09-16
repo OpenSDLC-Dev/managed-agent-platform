@@ -115,8 +115,8 @@ func waitReady(endpoint string, timeout time.Duration) error {
 			// Serving is what "ready" means, and a 409 says the fake answered
 			// about state it already holds — which is what a create whose reply
 			// was lost leaves behind. Without this the retry would then poll a
-			// working fake until the timeout. (v1.56.0 has no ErrBucketExist, so
-			// the status code is the only signal.)
+			// working fake until the timeout. cloud.google.com/go/storage v1.56.0
+			// lacks ErrBucketExist, so the status code is the only signal.
 			return nil
 		}
 		if time.Now().Add(poll).After(deadline) {

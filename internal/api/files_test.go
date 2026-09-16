@@ -451,8 +451,8 @@ func TestFileList(t *testing.T) {
 // hands out, and checks it lands on the rows the after_id walk lands on. A
 // next_page that is merely present proves nothing — it has to be the position
 // the reference says it is: "an opaque page cursor returned in a prior list
-// response's next_page", passed back as ?page= (anthropic-sdk-go v1.70.1
-// betafile.go BetaFileListParams.Page).
+// response's next_page", passed back as ?page= (checked against
+// anthropic-sdk-go v1.70.1 — betafile.go BetaFileListParams.Page).
 
 // TestFileListIDs covers ?ids=, the documented batch filter: "Restrict the
 // result set to Files whose `id` is in this list. At most 100 entries (after

@@ -186,7 +186,8 @@ func TestSessionUpdateValidatesResultingAgent(t *testing.T) {
 }
 
 // The SDK documents session metadata with the same sentence as agents and
-// vaults — 16 pairs, 64-char keys, 512-char values (betasession.go) — so
+// vaults — 16 pairs, 64-char keys, 512-char values (checked against
+// anthropic-sdk-go v1.70.1 — betasession.go BetaSessionNewParams.Metadata) — so
 // sessions run the same shared check, counted in runes like the others (#289).
 func TestSessionMetadataCaps(t *testing.T) {
 	s := newTestServer(t)
@@ -236,9 +237,10 @@ func TestSessionMetadataCaps(t *testing.T) {
 }
 
 // The SDK bounds an agent_with_overrides replacement system prompt at 100,000
-// characters (betasession.go) — a bound specific to the session override; the
-// stored agent's own system documents none. Counted in runes, the
-// filesupload.go precedent for character-documented limits (#291).
+// characters (checked against anthropic-sdk-go v1.70.1 — betasession.go
+// BetaManagedAgentsAgentWithOverridesParams.System) — a bound specific to the
+// session override; the stored agent's own system documents none. Counted in
+// runes, the filesupload.go precedent for character-documented limits (#291).
 func TestSessionOverrideSystemCap(t *testing.T) {
 	s := newTestServer(t)
 	agentID, envID := fixture(t, s)

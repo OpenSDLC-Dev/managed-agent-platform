@@ -114,12 +114,12 @@ func New(ctx context.Context, cfg Config) (*Verifier, error) {
 		now = time.Now
 	}
 	// A clock reading the zero time is refused rather than tolerated. go-jose's
-	// jwt.Expected treats a zero Time as "use time.Now()" (jwt/validation.go), so
-	// a Config.Now starting at time.Time{} — the natural zero value, and an easy
-	// thing for a test's fake clock to be — would validate exp, nbf and
-	// iat against the real wall clock while the key-set TTL and the cooldown ran
-	// against the fake one. Silent, and in the direction where an expired token
-	// can verify.
+	// jwt.Expected treats a zero Time as "use time.Now()" (checked against
+	// go-jose v4.1.4 — jwt/validation.go Expected.Time), so a Config.Now
+	// starting at time.Time{} — the natural zero value, and an easy thing for a
+	// test's fake clock to be — would validate exp, nbf and iat against the
+	// real wall clock while the key-set TTL and the cooldown ran against the
+	// fake one. Silent, and in the direction where an expired token can verify.
 	if now().IsZero() {
 		return nil, errors.New("identity: Config.Now returns the zero time")
 	}
@@ -257,17 +257,19 @@ func (v *Verifier) Verify(ctx context.Context, token string) (Identity, error) {
 	// under ExtraHeaders because its sanitized() switch names neither.
 	//
 	// crit: go-jose's own check is weaker than it looks, allowing a crit that
-	// names "b64" (shared.go's supportedCritical). Nothing this package needs is
-	// negotiated through crit, so "present" is the whole test.
+	// names "b64" (checked against go-jose v4.1.4 — shared.go
+	// supportedCritical). Nothing this package needs is negotiated through
+	// crit, so "present" is the whole test.
 	//
 	// b64 is checked separately rather than only through crit because go-jose
-	// honours it either way: computeAuthData (jws.go) reads b64 from the
-	// protected header with no reference to crit, and verifies over the raw
-	// payload when it is false. RFC 7797 §7 says a JWT MUST NOT use b64 at all.
-	// No attacker can reach this — the protected header is signed, so adding b64
-	// breaks the signature — but a provider minting one would hand us a token
-	// other verifiers read differently, and that is a difference to refuse
-	// rather than absorb.
+	// honours it either way: computeAuthData (checked against go-jose v4.1.4 —
+	// jws.go JSONWebSignature.computeAuthData) reads b64 from the protected
+	// header with no reference to crit, and verifies over the raw payload when
+	// it is false. RFC 7797 §7 says a JWT MUST NOT use b64 at all. No attacker
+	// can reach this — the protected header is signed, so adding b64 breaks the
+	// signature — but a provider minting one would hand us a token other
+	// verifiers read differently, and that is a difference to refuse rather
+	// than absorb.
 	for _, name := range [...]jose.HeaderKey{"crit", "b64"} {
 		if _, ok := hdr.ExtraHeaders[name]; ok {
 			return Identity{}, reject("crit or b64 header present")

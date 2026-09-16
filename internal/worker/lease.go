@@ -659,8 +659,8 @@ func (w *Worker) sessionLive(ctx context.Context, sessionID string) (live, coord
 // *BetaSelfHostedWork, so the SDK's strict decoder fails a successful call with
 // "expected destination type of 'string' or '[]byte' …". Rebinding the response
 // destination to **http.Response trips the decoder bypass — the same workaround
-// the reference's own poller applies, for the same reason (anthropic-sdk-go
-// lib/environments/poller.go, stopWork).
+// the reference's own poller applies, for the same reason (checked against
+// anthropic-sdk-go v1.70.1 — poller.go stopWork).
 func (w *Worker) forceStop(workID, sessionID string) {
 	ctx, cancel := context.WithTimeout(context.Background(), stopTimeout)
 	defer cancel()

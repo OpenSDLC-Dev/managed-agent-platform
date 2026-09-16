@@ -19,8 +19,9 @@ func TestMain(m *testing.M) {
 }
 
 // TestSecretIsTheReferenceWorkerEnvelope: unpadded URL-safe base64 of a JSON
-// object with one key, sessions_token — what v1.66.0's sessionsTokenFromSecret
-// reads (it strips padding first, so unpadded is the stricter choice).
+// object with one key, sessions_token — what sessionsTokenFromSecret reads (it
+// strips padding first, so unpadded is the stricter choice; checked against
+// anthropic-sdk-go v1.66.0 — worker.go sessionsTokenFromSecret).
 func TestSecretIsTheReferenceWorkerEnvelope(t *testing.T) {
 	secret := worktoken.Secret("wtk_abc")
 	if strings.ContainsAny(secret, "=+/") {

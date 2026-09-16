@@ -473,7 +473,8 @@ func TestToolLevelErrorIsAnsweredNotAbandoned(t *testing.T) {
 }
 
 // TestEmptyToolResultPostsPlaceholder: empty tool output posts the reference
-// runner's "(no output)" text block (since v1.63.1), never an empty text block — a
+// runner's "(no output)" text block (since anthropic-sdk-go v1.63.1 —
+// betasessiontoolrunner.go toToolResultContent), never an empty text block — a
 // Messages endpoint rejects an empty text block, and that request is what the
 // brain replays.
 func TestEmptyToolResultPostsPlaceholder(t *testing.T) {

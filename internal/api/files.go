@@ -18,15 +18,16 @@ import (
 )
 
 // maxFileListLimit is the GET /v1/files per-page cap: the SDK documents limit
-// "1 to 1000" (anthropic-sdk-go betafile.go BetaFileListParams), unlike the
-// managed-agents resource lists' 100.
+// as 1 to 1000 (checked against anthropic-sdk-go v1.70.1 — betafile.go
+// BetaFileListParams.Limit), unlike the managed-agents resource lists' 100.
 const maxFileListLimit = 1000
 
 // maxFileListIDs bounds ?ids[], counted on the de-duplicated set the way the
 // docs count it — "at most 100 entries (after de-duplication)".
 const maxFileListIDs = 100
 
-// fileJSON is the BetaFileMetadata wire shape (anthropic-sdk-go betafile.go:178-218):
+// fileJSON is the BetaFileMetadata wire shape (checked against anthropic-sdk-go
+// v1.70.1 — betafile.go BetaFileMetadata):
 // id/created_at/filename/mime_type/size_bytes all api:"required"; type is the
 // constant "file"; downloadable a plain bool.
 //
@@ -71,8 +72,8 @@ type fileJSON struct {
 	Scope        *fileScopeJSON `json:"scope,omitempty"`
 }
 
-// fileScopeJSON is BetaFileScope (betafile.go:226-237): the scoping resource id
-// and its type ("session").
+// fileScopeJSON is BetaFileScope (checked against anthropic-sdk-go v1.70.1 —
+// betafile.go BetaFileScope): the scoping resource id and its type ("session").
 type fileScopeJSON struct {
 	ID   string `json:"id"`
 	Type string `json:"type"`
@@ -453,14 +454,15 @@ func (s *server) listFiles(r *http.Request) (any, error) {
 		out.FirstID, out.LastID = &first, &last
 		// next_page is the position after this page in the list's own
 		// newest-first order — "an opaque page cursor returned in a prior list
-		// response's next_page", passed back as ?page= (SDK v1.70.1 betafile.go
-		// BetaFileListParams.Page). One meaning on every arm, so the two lanes
-		// read as one walk: on a forward page null is exactly has_more, while a
-		// non-empty before_id page always carries a cursor, continuing into the
-		// row its own cursor named — which is why has_more, answering whether
-		// rows remain the way that page was fetched, does not decide it there.
-		// Under scope_id that continuation can be one further request that comes
-		// back empty, the boundary row being resolved unfiltered.
+		// response's next_page", passed back as ?page= (checked against
+		// anthropic-sdk-go v1.70.1 — betafile.go BetaFileListParams.Page). One
+		// meaning on every arm, so the two lanes read as one walk: on a forward
+		// page null is exactly has_more, while a non-empty before_id page
+		// always carries a cursor, continuing into the row its own cursor named
+		// — which is why has_more, answering whether rows remain the way that
+		// page was fetched, does not decide it there. Under scope_id that
+		// continuation can be one further request that comes back empty, the
+		// boundary row being resolved unfiltered.
 		//
 		// An empty page still sends the key, null: this branch is inside
 		// len(files) > 0, so no value is minted, not that none is sent — the
@@ -634,8 +636,9 @@ func (s *server) downloadFile(w http.ResponseWriter, r *http.Request) {
 	}
 	defer rc.Close()
 	// Content-Disposition carries the original filename so the CLI names the
-	// local file (anthropic-cli cmdutil.go); the exact header shape is an
-	// inference (docs/DIVERGENCES.md).
+	// local file (checked against anthropic-cli v1.30.0 — cmdutil.go
+	// createDownloadFile); the exact header shape is an inference
+	// (docs/DIVERGENCES.md).
 	w.Header().Set("Content-Type", mimeType)
 	w.Header().Set("Content-Length", strconv.FormatInt(size, 10))
 	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", filename))

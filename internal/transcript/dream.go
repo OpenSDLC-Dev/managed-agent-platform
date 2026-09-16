@@ -43,7 +43,7 @@ const (
 // at most 2.4 MiB — the per-dream bound (§3.2). The head kept and the rolling
 // tail are each half of it, which is what makes it a memory bound and not just
 // an output length: a test that lowers the cap sees both buffers shrink with
-// it. A var, not a const, for that test (memoryretention.go:48-52's idiom);
+// it. A var, not a const, for that test (memoryPruneInterval's idiom);
 // nothing in production writes it.
 var DreamTranscriptCap = 24 << 10
 

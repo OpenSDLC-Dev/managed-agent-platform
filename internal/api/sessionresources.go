@@ -25,15 +25,18 @@ import (
 )
 
 // maxResourceListLimit caps GET /v1/sessions/{id}/resources: the SDK documents
-// limit "1 to 1000" and, uniquely, "if omitted, returns all"
-// (anthropic-sdk-go betasessionresource.go). parseResourceLimit maps an omitted
+// limit "max 1000" and, uniquely, "If omitted, returns all" (checked against
+// anthropic-sdk-go v1.70.1 — betasessionresource.go
+// BetaSessionResourceListParams.Limit). parseResourceLimit maps an omitted
 // limit to -1 (all), not the managed-agents default of 20.
 const maxResourceListLimit = 1000
 
 // defaultMountRoot is the session's uploads directory — the container location
-// every file resource is mounted under, whether the caller supplies a mount_path
-// or not (an omitted one is /mnt/session/uploads/<file_id>; betasession.go:787
-// documents that default, and resolveMountPath the rooting of a supplied one).
+// every file resource is mounted under, whether the caller supplies a
+// mount_path or not (an omitted one is /mnt/session/uploads/<file_id>; the SDK
+// documents that default, checked against anthropic-sdk-go v1.70.1 —
+// betasession.go BetaManagedAgentsFileResourceParams.MountPath, and
+// resolveMountPath the rooting of a supplied one).
 const defaultMountRoot = "/mnt/session/uploads/"
 
 // maxMountPathBytes bounds a resolved mount_path so a pathological value never
@@ -41,9 +44,11 @@ const defaultMountRoot = "/mnt/session/uploads/"
 const maxMountPathBytes = 1024
 
 // defaultRepoMountRoot prefixes the default mount for a github_repository
-// resource: /workspace/<repo-name> (betasession.go:816 documents the default;
-// the <repo-name> derivation — last URL segment, ".git" stripped — is INFERRED,
-// plan 25 decision 3). Unlike file mounts, repo mounts are used literally.
+// resource: /workspace/<repo-name> (the SDK documents the default, checked
+// against anthropic-sdk-go v1.70.1 — betasession.go
+// BetaManagedAgentsGitHubRepositoryResourceParams.MountPath; the <repo-name>
+// derivation — last URL segment, ".git" stripped — is INFERRED, plan 25
+// decision 3). Unlike file mounts, repo mounts are used literally.
 const defaultRepoMountRoot = "/workspace/"
 
 // maxAuthorizationTokenBytes caps a github_repository authorization_token (400
@@ -79,15 +84,20 @@ const memoryMountParent = "/mnt/memory"
 const maxMemoryStoresPerSession = 8
 
 // maxMemoryInstructionsChars caps a memory attachment's instructions
-// (betasession.go:912 "Max 4096 chars"; the spec's maxLength, so characters,
-// not bytes).
+// ("Max 4096 chars", checked against anthropic-sdk-go v1.70.1 — betasession.go
+// BetaManagedAgentsMemoryStoreResourceParam.Instructions; the spec's maxLength,
+// checked against anthropic-sdk-go v1.70.1 — spec
+// components.schemas.BetaManagedAgentsMemoryStoreResourceParam.properties.instructions,
+// so characters, not bytes).
 const maxMemoryInstructionsChars = 4096
 
 // fileResourceJSON is the materialized session file resource
-// (BetaManagedAgentsSessionResource file variant, betasessionresource.go:176-209):
-// every field is api:"required", so the server resolves the default mount_path
-// and both timestamps at create/add and renders them. Stored verbatim as one
-// element of the sessions.resources jsonb array; session GET echoes the array.
+// (BetaManagedAgentsSessionResource file variant, checked against
+// anthropic-sdk-go v1.70.1 — betasessionresource.go
+// BetaManagedAgentsFileResource): every field is api:"required", so the server
+// resolves the default mount_path and both timestamps at create/add and renders
+// them. Stored verbatim as one element of the sessions.resources jsonb array;
+// session GET echoes the array.
 type fileResourceJSON struct {
 	ID        string    `json:"id"`
 	CreatedAt time.Time `json:"created_at"`
@@ -98,12 +108,13 @@ type fileResourceJSON struct {
 }
 
 // repoResourceJSON is the materialized github_repository session resource
-// (BetaManagedAgentsGitHubRepositoryResource, betasessionresource.go:211-221):
-// {id, created_at, mount_path, type, updated_at, url, checkout} — every field
-// api:"required" except checkout (api:"nullable"). The authorization_token is
-// write-only on the wire and deliberately absent from this type: what lands in
-// the verbatim-echoed sessions.resources jsonb is token-free by construction
-// (plan 25 decision 2); the secret seals into session_resource_credentials.
+// (checked against anthropic-sdk-go v1.70.1 — betasessionresource.go
+// BetaManagedAgentsGitHubRepositoryResource): {id, created_at, mount_path,
+// type, updated_at, url, checkout} — every field api:"required" except checkout
+// (api:"nullable"). The authorization_token is write-only on the wire and
+// deliberately absent from this type: what lands in the verbatim-echoed
+// sessions.resources jsonb is token-free by construction (plan 25 decision 2);
+// the secret seals into session_resource_credentials.
 type repoResourceJSON struct {
 	ID        string        `json:"id"`
 	CreatedAt time.Time     `json:"created_at"`
@@ -114,8 +125,10 @@ type repoResourceJSON struct {
 	Checkout  *checkoutJSON `json:"checkout"` // nullable: renders null when omitted (as-given, plan 25 decision 3)
 }
 
-// checkoutJSON is the branch|commit checkout union (betasession.go:889-892
-// registers exactly these two variants), stored and rendered as given.
+// checkoutJSON is the branch|commit checkout union (the SDK registers exactly
+// these two variants, checked against anthropic-sdk-go v1.70.1 — betasession.go
+// BetaManagedAgentsGitHubRepositoryResourceParamsCheckoutUnion), stored and
+// rendered as given.
 type checkoutJSON struct {
 	Type string `json:"type"`
 	Name string `json:"name,omitempty"` // branch variant
@@ -123,17 +136,17 @@ type checkoutJSON struct {
 }
 
 // memoryResourceJSON is the stored memory_store session resource
-// (BetaManagedAgentsMemoryStoreResource, betasessionresource.go:317-352):
-// exactly {memory_store_id, type, access, description, instructions,
-// mount_path, name} — no id and no timestamps, unlike the file and repository
-// variants (plan 36 decision 7). name, description and mount_path are
-// snapshotted from the store row inside the create transaction ("Later edits
-// to the store's name do not propagate"); access renders the documented
-// default "read_write" when the request omitted it (whether the reference
-// echoes the string or null is INFERRED); instructions renders null when
-// omitted. Stored verbatim as one element of sessions.resources, so the
-// brain, executor and worker decoders — which pick elements by type — pass
-// it over until slice 4 teaches them the mount.
+// (checked against anthropic-sdk-go v1.70.1 — betasessionresource.go
+// BetaManagedAgentsMemoryStoreResource): exactly {memory_store_id, type,
+// access, description, instructions, mount_path, name} — no id and no
+// timestamps, unlike the file and repository variants (plan 36 decision 7).
+// name, description and mount_path are snapshotted from the store row inside
+// the create transaction ("Later edits to the store's name do not propagate");
+// access renders the documented default "read_write" when the request omitted
+// it (whether the reference echoes the string or null is INFERRED);
+// instructions renders null when omitted. Stored verbatim as one element of
+// sessions.resources, so the brain, executor and worker decoders — which pick
+// elements by type — pass it over until slice 4 teaches them the mount.
 type memoryResourceJSON struct {
 	Access        string  `json:"access"`
 	Description   string  `json:"description"`
@@ -318,13 +331,15 @@ func parseFileResource(obj map[string]json.RawMessage) (resourceInput, error) {
 }
 
 // parseMemoryResource validates the memory_store create variant
-// (BetaManagedAgentsMemoryStoreResourceParam, betasession.go:896-935:
-// memory_store_id and type required; access and instructions optional, both
-// nullable). The id is checked on shape here and against the store row in the
-// create transaction; an explicit null for access is the omitted case — the
-// documented default, "read_write" — and for instructions the stored null.
-// The SDK never transmits an empty access (omitzero), so "" is refused with
-// every other value outside the enum rather than read as the default.
+// (memory_store_id and type required; access and instructions optional, both
+// nullable, checked against anthropic-sdk-go v1.70.1 — betasession.go
+// BetaManagedAgentsMemoryStoreResourceParam; checked against anthropic-sdk-go
+// v1.70.1 — spec components.schemas.BetaManagedAgentsMemoryStoreResourceParam).
+// The id is checked on shape here and against the store row in the create
+// transaction; an explicit null for access is the omitted case — the documented
+// default, "read_write" — and for instructions the stored null. The SDK never
+// transmits an empty access (omitzero), so "" is refused with every other value
+// outside the enum rather than read as the default.
 func parseMemoryResource(obj map[string]json.RawMessage) (resourceInput, error) {
 	if err := rejectUnknownKeys(obj, "type", "memory_store_id", "access", "instructions"); err != nil {
 		return resourceInput{}, err
@@ -361,10 +376,11 @@ func parseMemoryResource(obj map[string]json.RawMessage) (resourceInput, error) 
 }
 
 // parseRepoResource validates the github_repository create variant
-// (betasession.go:806-821: authorization_token, type, url required;
-// mount_path and checkout optional). Validation is create-time-local — no
-// network call proves the repo or the token; the first materialization is the
-// probe (plan 25 decision 3).
+// (authorization_token, type, url required; mount_path and checkout optional,
+// checked against anthropic-sdk-go v1.70.1 — betasession.go
+// BetaManagedAgentsGitHubRepositoryResourceParams). Validation is
+// create-time-local — no network call proves the repo or the token; the first
+// materialization is the probe (plan 25 decision 3).
 func parseRepoResource(obj map[string]json.RawMessage) (resourceInput, error) {
 	if err := rejectUnknownKeys(obj, "type", "url", "authorization_token", "mount_path", "checkout"); err != nil {
 		return resourceInput{}, err
@@ -463,9 +479,11 @@ func validRepoURLSegment(s string) bool {
 }
 
 // parseCheckout parses the optional checkout union: {type:"branch", name} |
-// {type:"commit", sha} (betasession.go:889-892 registers exactly these two).
-// Omitted or null means the repository's default branch, resolved at clone
-// time — stored and rendered as null (as-given, INFERRED, plan 25 decision 3).
+// {type:"commit", sha} (the SDK registers exactly these two, checked against
+// anthropic-sdk-go v1.70.1 — betasession.go
+// BetaManagedAgentsGitHubRepositoryResourceParamsCheckoutUnion). Omitted or
+// null means the repository's default branch, resolved at clone time — stored
+// and rendered as null (as-given, INFERRED, plan 25 decision 3).
 func parseCheckout(obj map[string]json.RawMessage) (*checkoutJSON, error) {
 	raw, ok := obj["checkout"]
 	if !ok || isNull(raw) {
@@ -507,7 +525,9 @@ func parseCheckout(obj map[string]json.RawMessage) (*checkoutJSON, error) {
 }
 
 // isFullCommitSHA reports whether s is exactly 40 hex characters ("Full commit
-// SHA to check out", betasession.go:624 and :661; the 40-hex strictness is INFERRED).
+// SHA to check out", checked against anthropic-sdk-go v1.70.1 — betasession.go
+// BetaManagedAgentsCommitCheckout.Sha and
+// BetaManagedAgentsCommitCheckoutParam.Sha; the 40-hex strictness is INFERRED).
 func isFullCommitSHA(s string) bool {
 	if len(s) != 40 {
 		return false
@@ -915,9 +935,10 @@ func (s *server) addSessionResourceTx(ctx context.Context, id string, r *http.Re
 	}
 	if in.kind != resourceKindFile {
 		// The add endpoint is typed file-only in the SDK (Add returns the file
-		// resource, betasessionresource.go:135) and the docs pin repos to the
-		// session's lifetime — wire-faithful, message INFERRED (plan 25
-		// decision 3).
+		// resource, checked against anthropic-sdk-go v1.70.1 —
+		// betasessionresource.go BetaSessionResourceService.Add) and the docs
+		// pin repos to the session's lifetime — wire-faithful, message INFERRED
+		// (plan 25 decision 3).
 		return fileResourceJSON{}, errInvalid("only file resources can be added to an existing session")
 	}
 	if err := checkID(id, "session"); err != nil {
@@ -1031,11 +1052,12 @@ func (s *server) deleteSessionResourceTx(ctx context.Context, id, rid string) er
 
 // updateSessionResource handles POST …/resources/{rid} — token rotation, the
 // one mutation a github_repository resource supports ("Currently only
-// `github_repository` resources support token rotation",
-// betasessionresource.go:690-698). The new token seals over the old ciphertext
-// and the resource's updated_at bumps inside the echoed jsonb; an already
-// materialized clone is unaffected (no retroactive effect — INFERRED, plan 25
-// decision 5). File resources keep the established rejection.
+// `github_repository` resources support token rotation", checked against
+// anthropic-sdk-go v1.70.1 — betasessionresource.go
+// BetaSessionResourceUpdateParams.AuthorizationToken). The new token seals over
+// the old ciphertext and the resource's updated_at bumps inside the echoed
+// jsonb; an already materialized clone is unaffected (no retroactive effect —
+// INFERRED, plan 25 decision 5). File resources keep the established rejection.
 func (s *server) updateSessionResource(r *http.Request) (any, error) {
 	ctx := r.Context()
 	id := normalizeSessionID(r.PathValue("id"))

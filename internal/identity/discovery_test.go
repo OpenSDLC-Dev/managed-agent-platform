@@ -538,11 +538,12 @@ func TestNewValidatesTheAssertionHeaderAgainstTheMode(t *testing.T) {
 }
 
 // TestNewRefusesAZeroClock closes a silent trap rather than an attack.
-// go-jose's jwt.Expected treats a zero Time as "use time.Now()"
-// (jwt/validation.go), and Config.Now is exported precisely so later slices can
-// drive expiry — so a fake clock starting at time.Time{}, the natural zero value,
-// would validate exp/nbf/iat against the real wall clock while the key-set TTL
-// ran against the fake one. Nothing would say so.
+// go-jose's jwt.Expected treats a zero Time as "use time.Now()" (checked
+// against go-jose v4.1.4 — jwt/validation.go Expected.Time), and Config.Now is
+// exported precisely so later slices can drive expiry — so a fake clock
+// starting at time.Time{}, the natural zero value, would validate exp/nbf/iat
+// against the real wall clock while the key-set TTL ran against the fake one.
+// Nothing would say so.
 func TestNewRefusesAZeroClock(t *testing.T) {
 	t.Parallel()
 	p := identitytest.NewIdP(t)

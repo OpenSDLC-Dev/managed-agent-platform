@@ -161,8 +161,9 @@ func normalizeUserMessage(obj map[string]json.RawMessage) (NewEvent, error) {
 	// A plain string is accepted alongside the block array and stored verbatim
 	// so the echo round-trips; replay renders it as one text block, which is
 	// why the empty string is refused for the same reason an empty text block
-	// is (validateBlock). This is ours, not the SDK's: at the pinned v1.66.0
-	// BetaManagedAgentsUserMessageEventParamsContentUnion has text, image,
+	// is (validateBlock). This is ours, not the SDK's: the content union
+	// (checked against anthropic-sdk-go v1.70.1 — betasessionevent.go
+	// BetaManagedAgentsUserMessageEventParamsContentUnion) has text, image,
 	// document and redacted arms and no string arm, and every reference schema
 	// types this content as an array. Registered in docs/DIVERGENCES.md rather
 	// than tightened, because clients already send it.
@@ -523,8 +524,9 @@ func validateBlock(raw json.RawMessage, allowed map[string]bool) error {
 			return fmt.Errorf("text block requires a string text field")
 		}
 		// The reference API rejects an empty text block in a tool result —
-		// its runner substitutes "(no output)" for one since v1.63.1 — and
-		// the user-side carriers that reach here are replayed to a Messages
+		// its runner substitutes "(no output)" for one (since anthropic-sdk-go
+		// v1.63.1 — betasessiontoolrunner.go toToolResultContent) — and the
+		// user-side carriers that reach here are replayed to a Messages
 		// endpoint, which rejects it too, so accepting it would wedge the
 		// session; system.message shares the rule for uniformity (its text
 		// folds into the system string, where empty is harmless) (INFERRED,

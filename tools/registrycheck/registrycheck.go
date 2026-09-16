@@ -104,7 +104,7 @@ var pointerOpenRe = regexp.MustCompile(`(?i) \*(tracked|landed for):?`)
 // it with the entry's name. A name survives an insertion; a line number cannot.
 // Singular and plural both, because "(lines 69-71)" rots the same way.
 //
-// A `file.go:285` citation into another file is deliberately NOT this: it names
+// A `file.go:NNN` citation into another file is deliberately NOT this: it names
 // code the reader is being sent to read, and this file's insertions cannot move
 // it. Those churn on their own schedule and are the cited file's problem.
 var lineRefRe = regexp.MustCompile(`\(lines? \d+`)

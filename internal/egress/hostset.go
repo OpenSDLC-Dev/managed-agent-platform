@@ -30,11 +30,12 @@ import (
 // environment's networking allow-list (may this request leave at all?).
 //
 // A wildcard "*.example.com" matches any subdomain but never the apex
-// (example.com) — the reference's recorded behavior (anthropic-sdk-go
-// betavaultcredential.go: "a `*.`-prefixed entry matches any subdomain of the
-// named domain but not the domain itself"). "Any subdomain" is read as any
-// label depth (a.example.com, a.b.example.com), the one residual the SDK wording
-// does not pin (recorded in DIVERGENCES).
+// (example.com) — the reference's recorded behavior ("a `*.`-prefixed entry
+// matches any subdomain of the named domain but not the domain itself"; checked
+// against anthropic-sdk-go v1.70.1 — betavaultcredential.go
+// BetaManagedAgentsLimitedCredentialNetworkingResponse.AllowedHosts). "Any
+// subdomain" is read as any label depth (a.example.com, a.b.example.com), the
+// one residual the SDK wording does not pin (recorded in DIVERGENCES).
 type HostSet struct {
 	exact    map[string]struct{} // hostnames and IPv4 literals, canonical (see CanonicalHost)
 	suffixes []string            // wildcard suffixes, canonical, no leading "*."

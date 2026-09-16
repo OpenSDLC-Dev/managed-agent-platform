@@ -7,15 +7,17 @@ import (
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/memsync"
 )
 
-// The documented path rules, one case per rejection (anthropic-sdk-go v1.70.1
-// betamemorystorememory.go:434-438, and the OpenAPI spec's
-// BetaManagedAgentsCreateMemoryParams.path: "Must start with `/`, contain at
-// least one non-empty segment, and be at most 1,024 bytes. Must not contain
-// empty segments, `.` or `..` segments, control or format characters, or the
-// Unicode line and paragraph separators (U+2028, U+2029), and must be
-// NFC-normalized. Paths are case-sensitive."). Every non-ASCII case is written
-// as an escape: the difference between the two spellings of cafe-acute is the
-// whole point of the NFD row, and a literal would hide it.
+// The documented path rules, one case per rejection ("Must start with `/`,
+// contain at least one non-empty segment, and be at most 1,024 bytes. Must not
+// contain empty segments, `.` or `..` segments, control or format characters,
+// or the Unicode line and paragraph separators (U+2028, U+2029), and must be
+// NFC-normalized. Paths are case-sensitive."; checked against anthropic-sdk-go
+// v1.70.1 — betamemorystorememory.go BetaMemoryStoreMemoryNewParams.Path;
+// checked against anthropic-sdk-go v1.70.1 — spec
+// components.schemas.BetaManagedAgentsCreateMemoryParams.properties.path).
+// Every non-ASCII case is written as an escape: the difference between the two
+// spellings of cafe-acute is the whole point of the NFD row, and a literal
+// would hide it.
 func TestValidatePath(t *testing.T) {
 	for name, path := range map[string]string{
 		"empty":                      "",

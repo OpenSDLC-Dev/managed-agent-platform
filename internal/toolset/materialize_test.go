@@ -46,9 +46,10 @@ func TestMaterializeResolvesBothToolsetKinds(t *testing.T) {
 			`"default_config":{"enabled":true,"permission_policy":{"type":"always_ask"}},` +
 			`"type":"agent_toolset_20260401"}`,
 	}, {
-		// anthropic-sdk-go v1.66.0 split the built-in per-tool config into a
-		// union whose eight variants mark `type` required on the response, so
-		// the echo renders it whether or not the request carried one — here the
+		// The SDK split the built-in per-tool config into a union whose eight
+		// variants mark `type` required on the response (since anthropic-sdk-go
+		// v1.66.0 — betaagent.go BetaManagedAgentsAgentToolConfigUnion), so the
+		// echo renders it whether or not the request carried one — here the
 		// entry sent nothing but its name and inherits the rest.
 		name: "a built-in entry gains the type discriminator it was not sent with",
 		in: `{"type":"agent_toolset_20260401","default_config":{"enabled":false},` +
@@ -226,10 +227,13 @@ func TestValidateMCPToolset(t *testing.T) {
 		in:      `{"type":"mcp_toolset","mcp_server_name":"g","allowed_tools":["t"]}`,
 		wantErr: `unknown field "allowed_tools"`,
 	}, {
-		// v1.66.0's per-tool `type` discriminator landed on the eight built-in
-		// variants only: BetaManagedAgentsMCPToolConfig(Params) still carries
-		// name / enabled / permission_policy, so this arm keeps refusing it —
-		// and its echo keeps rendering entries without one.
+		// The per-tool `type` discriminator landed on the eight built-in
+		// variants only (since anthropic-sdk-go v1.66.0 — betaagent.go
+		// BetaManagedAgentsAgentToolConfigParamsUnion and
+		// BetaManagedAgentsAgentToolConfigUnion):
+		// BetaManagedAgentsMCPToolConfig(Params) still carries name / enabled /
+		// permission_policy, so this arm keeps refusing it — and its echo keeps
+		// rendering entries without one.
 		name:    "a per-tool type is rejected on the mcp arm",
 		in:      `{"type":"mcp_toolset","mcp_server_name":"g","configs":[{"name":"t","type":"t"}]}`,
 		wantErr: `unknown field "type" in configs[0]`,

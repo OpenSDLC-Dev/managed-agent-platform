@@ -481,9 +481,10 @@ func TestListEventsPagingAndFilters(t *testing.T) {
 	status, res = s.do(http.MethodGet, path+"?limit=0", nil)
 	wantErr(t, status, res, http.StatusBadRequest, "invalid_request_error")
 	// The session-events list accepts limit up to 1000 — the reference worker's
-	// SessionToolRunner reconciles by listing with limit=1000 (SDK
-	// betasessiontoolrunner.go) — unlike the other lists, which cap at 100. 1001
-	// is rejected (our compatible upper bound; see maxEventLimit).
+	// SessionToolRunner reconciles by listing with limit=1000 (checked against
+	// anthropic-sdk-go v1.70.1 — betasessiontoolrunner.go
+	// SessionToolRunner.reconcile) — unlike the other lists, which cap at 100.
+	// 1001 is rejected (our compatible upper bound; see maxEventLimit).
 	status, res = s.do(http.MethodGet, path+"?limit=1000", nil)
 	if status != http.StatusOK {
 		t.Errorf("limit=1000 on events: status %d, want 200: %s", status, res)

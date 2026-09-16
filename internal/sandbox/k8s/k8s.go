@@ -1866,9 +1866,10 @@ printf %s "$3"
 // the default ACL carries named entries the file inherits an extended ACL whose
 // mask the `chmod` clamps to `r--`, so those entries come out effective r-- too.
 // Setting a created file's mode rather than inheriting it is also what the
-// reference's own host-side runner does (`agenttoolset`'s `atomicWriteFile` chmods
-// its temporary file to 0o644 before renaming). The umask stays alongside it, and
-// is not a fallback for *this* case: an image with no `chmod` on its PATH still
+// reference's own host-side runner does (its atomic write chmods the temporary
+// file to 0o644 before renaming; checked against anthropic-sdk-go v1.70.1 —
+// fs.go atomicWriteFile and execWrite). The umask stays alongside it, and is
+// not a fallback for *this* case: an image with no `chmod` on its PATH still
 // gets #212's answer from the umask, and still loses to a default ACL. That is the
 // degradation, stated rather than papered over — the same shape as the one
 // __map_preserve_mode already documents, where an image whose `stat` cannot do `-c`

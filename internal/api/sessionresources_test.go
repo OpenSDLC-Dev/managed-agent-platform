@@ -42,7 +42,8 @@ func resourcesOf(t *testing.T, sess map[string]any) []map[string]any {
 }
 
 // wantResourceFields asserts the materialized file-resource wire shape — every
-// field is api:"required" (betasessionresource.go:176-209).
+// field is api:"required" (checked against anthropic-sdk-go v1.70.1 —
+// betasessionresource.go BetaManagedAgentsFileResource).
 func wantResourceFields(t *testing.T, res map[string]any) {
 	t.Helper()
 	wantFields(t, res, "id", "created_at", "file_id", "mount_path", "type", "updated_at")

@@ -440,17 +440,19 @@ func (b *Brain) runTurn(ctx context.Context, item *queue.Item, claimedAt time.Ti
 		// SDK's own agentic loop returns before executing them because they
 		// "belong to a dead conversation — executing them fires side effects
 		// the caller never confirmed and produces tool_results that cannot be
-		// coherently replayed" (betatoolrunner.go executeTools). Dropping them
-		// goes one step further than the SDK, deliberately: it keeps the
-		// refused message, blocks and all, in a history it has marked complete
-		// and will never send again, while this log is durable and every later
-		// turn replays it — so a committed intent would be one nothing may
-		// answer and nothing may run, which is #181 re-opened for this one
-		// stop reason. The log loses what the model asked for; the drop is
-		// logged so it stays auditable, and the alternative (committing the
-		// intents against synthesized error results, as a denied confirmation
-		// does) is recorded and rejected in docs/DIVERGENCES.md. The turn
-		// settles on its text like any other tool-less turn.
+		// coherently replayed" (checked against anthropic-sdk-go v1.70.1 —
+		// betatoolrunner.go determineNextStepFromStopReason and
+		// betaToolRunnerBase.executeTools). Dropping them goes one step further
+		// than the SDK, deliberately: it keeps the refused message, blocks and
+		// all, in a history it has marked complete and will never send again,
+		// while this log is durable and every later turn replays it — so a
+		// committed intent would be one nothing may answer and nothing may run,
+		// which is #181 re-opened for this one stop reason. The log loses what
+		// the model asked for; the drop is logged so it stays auditable, and
+		// the alternative (committing the intents against synthesized error
+		// results, as a denied confirmation does) is recorded and rejected in
+		// docs/DIVERGENCES.md. The turn settles on its text like any other
+		// tool-less turn.
 		slog.WarnContext(sctx, "brain: refusal stop reason, tool blocks dropped unexecuted",
 			"session_id", sid.String(), "tool_blocks", len(turn.toolUses))
 		turn.toolUses = nil
@@ -795,18 +797,22 @@ func (b *Brain) commitTurn(ctx context.Context, sid domain.ID, item *queue.Item,
 	// A turn that called tools suspends on them, whatever stop reason came
 	// with them — the classification is the blocks, not the label. Nothing in
 	// the Messages schema ties the two: max_tokens, stop_sequence, refusal and
-	// a non-compliant end_turn can all arrive over a complete tool block, and
-	// the SDK's own agentic loop reads the blocks for exactly that reason —
-	// though since v1.62.0 it also declines to run *any* call of a cut-off
-	// turn (max_tokens, model_context_window_exceeded), complete ones
-	// included; here a truncated block never reaches this point (below), so
-	// the complete ones run (docs/DIVERGENCES.md, #181). The
-	// intents commit either way (turnEvents emits one tool-intent event per
+	// a non-compliant end_turn can all arrive over a complete tool block. The
+	// SDK's own agentic loop read the blocks too (checked against
+	// anthropic-sdk-go v1.66.0 — betatoolrunner.go
+	// betaToolRunnerBase.executeTools), though it declined to run *any* call of
+	// a cut-off turn (max_tokens, model_context_window_exceeded), complete ones
+	// included (since anthropic-sdk-go v1.62.0 — betatoolrunner.go
+	// betaToolRunnerBase.executeTools), and it runs tools on a tool_use stop
+	// alone (since anthropic-sdk-go v1.67.0 — betatoolrunner.go
+	// determineNextStepFromStopReason). Here a truncated block never reaches
+	// this point (below), so the complete ones run (docs/DIVERGENCES.md, #181).
+	// The intents commit either way (turnEvents emits one tool-intent event per
 	// block), so classifying on the label would idle the session with calls
-	// nothing ever enqueues and leave every later replay carrying a tool_use
-	// no result answers. runTurn has already resolved the two shapes that are
-	// not tool turns: a tool_use stop with no blocks fails, and a refusal
-	// arrives here with its blocks dropped.
+	// nothing ever enqueues and leave every later replay carrying a tool_use no
+	// result answers. runTurn has already resolved the two shapes that are not
+	// tool turns: a tool_use stop with no blocks fails, and a refusal arrives
+	// here with its blocks dropped.
 	//
 	// A block truncated mid-input never reaches here — streamTurn rejects a
 	// tool input that is not a complete JSON object, and a proper prefix of an
