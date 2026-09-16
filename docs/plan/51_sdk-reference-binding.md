@@ -209,13 +209,13 @@ unrelated reasons.
    must resolve and an `absent at` anchor must **not** — a negative claim that
    silently starts resolving again is as wrong as a positive one that stops.
    Only the pin is guaranteed present: the module graph contains v1.70.1 and
-   nothing else, while the registry cites v1.63.0, v1.64.0 and v1.65.0, which a
+   nothing else, while the registry cites older tags too, which a
    developer's module cache holds only if someone fetched them and a cold CI
    runner never does. Restricting the failing rung to pin-stamped citations is what
    keeps the gate offline.
 
-That restriction is narrower than it sounds. When slice 2 landed, 240 of the
-registry's 347 SDK citations were stamped at the pin and 107 at an older tag, so
+That restriction is narrower than it sounds. When slice 2 landed, 245 of the
+registry's 352 SDK citations were stamped at the pin and 107 at an older tag, so
 rung 2 can fail on about two thirds of the corpus — and on the day of the next
 bump, on none of it, until stamps start moving again. Rung 2 is therefore the weaker of the two
 resolution rungs, and rung 3 below is what actually watches the corpus.
@@ -462,7 +462,7 @@ none of `tools/sdkref`, so it did not wait for it (#724).
    that let it be read as current — so the stamp is mandatory and the span is
    conditional.
 3. **The failing rung resolves only at the pin.** Resolving at arbitrary stamped
-   tags would need those modules, and the registry cites three tags no cold CI
+   tags would need those modules, and the registry cites older tags no cold CI
    runner holds. Older tags are reported when available and never required.
 4. **Both the registry and the Go comments migrate**, and the steering documents
    too, under their own rule. Two citation conventions in one repository is a
