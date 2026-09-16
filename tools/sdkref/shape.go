@@ -92,15 +92,15 @@ var (
 	// tag and, often, no line number, it matches no other rule here at all.
 	untaggedHead = regexp.MustCompile(`(` + strings.Join(sources, "|") +
 		`)\s+([\w./-]+\.(?:go|md|ya?ml|json(?:\.gz)?))\b`)
-	// untaggedMention is a governed source, or its possessive, followed by a
-	// word that may name something inside it. It is the same claim as
+	// untaggedMention is a governed source, or its possessive — quoted or not —
+	// followed by a word that may name something inside it. It is the same claim as
 	// untaggedHead without the file — a method named after the source's
 	// possessive, a package path in parentheses after the source — and matched
 	// nothing else here, so a bump could falsify it with no rung saying so.
 	// Which words are names is symbolLike's to judge, since this pattern cannot
 	// tell a symbol from prose.
 	untaggedMention = regexp.MustCompile("(" + strings.Join(sources, "|") +
-		")(?:['’][sS])?[\\s`]+([A-Za-z_][\\w./-]*\\w)")
+		")`?(?:['’][sS])?[\\s`]+([A-Za-z_][\\w./-]*\\w)")
 	// dottedName and packagePath are the two shapes symbolLike admits besides a
 	// mixed-case identifier: `Type.Method` or `pkg.Name`, and a path of packages.
 	dottedName  = regexp.MustCompile(`^[A-Za-z_]\w+(?:\.[A-Za-z_]\w+)+$`)

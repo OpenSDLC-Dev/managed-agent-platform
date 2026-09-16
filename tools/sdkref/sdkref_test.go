@@ -784,6 +784,13 @@ func TestShapeFindings(t *testing.T) {
 			rules: []string{"untagged"},
 		},
 		{
+			// The registry writes the source quoted and the possessive outside
+			// the quote.
+			name:  "a quoted source's possessive and a quoted symbol with no tag",
+			in:    "*the SDK's string matched `anthropic-sdk-go`'s `bashTool.Description()` verbatim.*",
+			rules: []string{"untagged"},
+		},
+		{
 			name:  "a source named by its module path and a symbol with no tag",
 			in:    "// github.com/anthropics/anthropic-sdk-go option.WithBaseURL sets it",
 			rules: []string{"untagged"},
