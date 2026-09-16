@@ -225,9 +225,12 @@ func (s *server) getThread(r *http.Request) (any, error) {
 // idle child thread is archived and terminated, with its
 // session.thread_status_terminated on its own stream and the primary's
 // (decision 12); archiving the primary — the session's own life — or a thread
-// that is still running or rescheduling is refused (the reference's status
-// code for the latter is unrecorded; 400 like the session's own
-// archive-while-running). Archiving an archived thread is idempotent.
+// that is still running or rescheduling is refused (400 like the session's own
+// archive-while-running; the reference documents "Archive only succeeds if the
+// thread is `idle`" but no status code). Archiving an archived thread is
+// idempotent. Idle only, not requireNotRunning's running only:
+// docs/DIVERGENCES.md's session threads entry says why, and that the
+// reference's answer at rescheduling is inferred (#730).
 func (s *server) archiveThread(r *http.Request) (any, error) {
 	ctx := r.Context()
 	sessionID, threadID, err := threadIDs(r)

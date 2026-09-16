@@ -1288,10 +1288,11 @@ func TestRunningSessionArchiveAndDeleteRejected(t *testing.T) {
 		t.Fatalf("delete after idle: %d %v", status, body)
 	}
 
-	// The refusal is running-only — the registry's positive claim that
-	// rescheduling (an auto-retrying session) does not refuse is load-bearing:
-	// a guard tightened to "must be idle" would strand such a session's
-	// archive behind its transient-error loop.
+	// The refusal is running-only, so a rescheduling (auto-retrying) session is
+	// archivable: a guard tightened to "must be idle" would strand its archive
+	// behind its transient-error loop. The registry records that as an
+	// inference about the reference, beside the thread archive's opposite
+	// choice.
 	resched := createSession(t, s, map[string]any{"agent": agentID, "environment_id": envID})
 	rid := resched["id"].(string)
 	if _, err := s.pool.Exec(context.Background(),

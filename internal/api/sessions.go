@@ -1340,11 +1340,13 @@ func (s *server) listSessions(r *http.Request) (any, error) {
 }
 
 // requireNotRunning locks the session row and refuses the mutation while the
-// session is running — the reference documents that a running session cannot
-// be archived or deleted (an interrupt must land first); the reject status and
-// message are ours (docs/DIVERGENCES.md, INFERRED). The row lock holds the
-// status still until the caller's tx commits, so an approval flipping the
-// session to running cannot slip between the check and the mutation.
+// session is running — the reference documents that a running session cannot be
+// archived or deleted (an interrupt must settle it idle first); the reject
+// status is the one recorded from the reference and the message is ours
+// (docs/DIVERGENCES.md, whose session threads entry covers rescheduling). The
+// row lock holds the status still until the caller's tx commits, so an approval
+// flipping the session to running cannot slip between the check and the
+// mutation.
 //
 // It is also the first half of a lock order the mutation depends on: the session
 // row before anything that cascades from it. internal/gatetoken.Ensure takes the

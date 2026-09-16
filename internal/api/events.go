@@ -680,14 +680,14 @@ func (s *server) interruptThreadInTx(ctx context.Context, tx pgx.Tx, in interrup
 	if err != nil {
 		return out, err
 	}
-	// Only the two statuses v1 ever writes can be interrupted. Nothing sets
-	// terminated or rescheduling today, and neither should be settled from
-	// here if something one day does: terminated has ended and reviving it on
-	// the redirect below would make this the one trigger that un-ends a
-	// session — the user.message case guards against exactly that by
-	// requiring idle — while rescheduling would need semantics no code has
-	// defined yet, and guessing them could leave the column disagreeing with
-	// the log.
+	// Only the two statuses a live thread rests at can be interrupted: nothing
+	// leaves one at rescheduling across a commit, and terminated today is only
+	// an archived child's. Neither should be settled from here if that changes:
+	// terminated has ended and reviving it on the redirect below would make
+	// this the one trigger that un-ends a session — the user.message case
+	// guards against exactly that by requiring idle — while rescheduling would
+	// need semantics no code has defined yet, and guessing them could leave the
+	// column disagreeing with the log.
 	interruptible := in.status == string(domain.SessionIdle) || in.status == string(domain.SessionRunning)
 	// Nothing to stop: an idle thread with no outstanding call has no turn
 	// to end, so the event is logged and settles no turn (a non-terminal

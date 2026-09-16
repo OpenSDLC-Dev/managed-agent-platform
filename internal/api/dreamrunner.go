@@ -548,7 +548,7 @@ func (s *server) dreamTurnArms(ctx context.Context, tx pgx.Tx, d dreamRow, turns
 		return s.dreamFail(ctx, tx, d, "internal_error",
 			fmt.Sprintf("stage %d exceeded its budget of %d model turns", d.stage, dreamStageTurnCaps[d.stage]))
 	}
-	if d.sessionStatus == string(domain.SessionRunning) || // 7. busy
+	if d.sessionStatus == string(domain.SessionRunning) || // 7. busy: a turn in flight or being retried
 		d.sessionStatus == string(domain.SessionRescheduling) {
 		return dreamStepResult{}, mirrorDreamUsage(ctx, tx, d)
 	}
