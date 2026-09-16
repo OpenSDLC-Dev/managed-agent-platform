@@ -190,7 +190,8 @@ func TestParseKeySetSkipsUnusableEntries(t *testing.T) {
 	t.Parallel()
 
 	// kty nobody can build: go-jose's JSONWebKey.UnmarshalJSON returns
-	// ErrUnsupportedKeyType, which is the error that fails a set-level decode.
+	// ErrUnsupportedKeyType (checked against go-jose v4.1.4 — jwk.go
+	// JSONWebKey.UnmarshalJSON), which is the error that fails a set-level decode.
 	unknownKty := map[string]any{"kty": "NTRU", "kid": "unknown-kty", "use": "sig"}
 
 	// OKP with a curve go-jose only handles for Ed25519. An X25519 encryption key

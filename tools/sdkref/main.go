@@ -37,9 +37,9 @@ docs/plan/51_sdk-reference-binding.md's grammar.
               a checkout rather than a module, so its citations are held to
               shape alone and never make a run unavailable
 
-Slice 1 lands this tool against an unmigrated corpus, so -fail is off by default:
-the exemption is the corpus itself rather than a hand-written list that would
-become its own debt. ` + "`make sdk-bump-report`" + ` is the front end for -report.`
+make verify runs -fail over the whole corpus, through this package's own test.
+Without -fail every run exits 0, which is what -report wants: the report is
+read, not obeyed. ` + "`make sdk-bump-report`" + ` is the front end for -report.`
 
 func main() { os.Exit(run(os.Args[1:], os.Stdout, os.Stderr)) }
 
@@ -72,9 +72,9 @@ func run(args []string, out, errOut io.Writer) int {
 		return exitUnavailable
 	}
 
-	// Rung 2 belongs to -fail as much as to -report: it is the rung slice 4
-	// turns into the gate, and a -fail that only checked shape would pass a
-	// corpus whose anchors had all stopped resolving.
+	// Rung 2 belongs to -fail as much as to -report: it is half of what the
+	// gate fails on, and a -fail that only checked shape would pass a corpus
+	// whose anchors had all stopped resolving.
 	var bump string
 	var unavailable []string
 	if *report || *fail {
@@ -134,7 +134,7 @@ func run(args []string, out, errOut io.Writer) int {
 // comments under root — and returns what rung 1 found in them together with the
 // citations the resolving rungs are to judge. It is one function because the
 // two halves must reach those rungs together: comment citations that rung 1
-// read but rung 2 never saw would be exempt from the gate slice 4 builds, and
+// read but rung 2 never saw would be exempt from the gate, and
 // nothing about the output would say so.
 //
 // The third result is the coordinates into this repository both halves hold,

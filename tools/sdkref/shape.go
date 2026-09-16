@@ -92,6 +92,20 @@ var (
 	// tag and, often, no line number, it matches no other rule here at all.
 	untaggedHead = regexp.MustCompile(`(` + strings.Join(sources, "|") +
 		`)\s+([\w./-]+\.(?:go|md|ya?ml|json(?:\.gz)?))\b`)
+	// untaggedMention is a governed source, or its possessive, followed by a
+	// word that may name something inside it. It is the same claim as
+	// untaggedHead without the file — a method named after the source's
+	// possessive, a package path in parentheses after the source — and matched
+	// nothing else here, so a bump could falsify it with no rung saying so.
+	// Which words are names is symbolLike's to judge, since this pattern cannot
+	// tell a symbol from prose.
+	untaggedMention = regexp.MustCompile("(" + strings.Join(sources, "|") +
+		")(?:['’][sS])?[\\s`]+([A-Za-z_][\\w./-]*\\w)")
+	// dottedName and packagePath are the two shapes symbolLike admits besides a
+	// mixed-case identifier: `Type.Method` or `pkg.Name`, and a path of packages.
+	dottedName  = regexp.MustCompile(`^[A-Za-z_]\w+(?:\.[A-Za-z_]\w+)+$`)
+	packagePath = regexp.MustCompile(`^[a-z][\w.-]*(?:/[\w.-]+)+$`)
+	identifier  = regexp.MustCompile(`^[A-Za-z_]\w*$`)
 	// specEpithet is the other way the corpus names a source: not by module but
 	// by what it is. The registry writes a tag and then the kind of document,
 	// which names the SDK's bundled copy at that tag and rots exactly like a
@@ -158,6 +172,9 @@ const (
 		"gone (`absent at`), or drop the version from a sentence that checked nothing"
 	adviseUntagged = "%q names a source and a file but no tag, so no bump can be told whether " +
 		"it moved: write `checked against <source> <tag> — <file> <symbol>`"
+	adviseMentionUntagged = "%q names something in a source but no tag, so no bump can be " +
+		"told whether it moved: cite it beside the mention as `(checked against <source> <tag> " +
+		"— <file> <symbol>)`, or name it without the source"
 	adviseSpecUntagged = "%q names an OpenAPI document but no tag, so no bump can be told " +
 		"whether it moved: write `checked against " + SpecSource + " <tag> — spec <schema path>`"
 	adviseSpecUndated = "%q names the SDK's bundled spec at a tag with no temporal form: write " +
@@ -402,6 +419,18 @@ func (s Scanner) scan(line string) ([]Finding, []Finding) {
 		}
 		report(at, "untagged", advice)
 	}
+	for _, at := range mentions(text) {
+		// A mention whose clause runs into a citation of the source it names is
+		// the claim that citation dates.
+		if _, end, atHead := clause(text, at[1], nextHead(bounds, at[1])); atHead {
+			if h := datedHead.FindStringSubmatchIndex(text[end:]); h != nil && h[0] == 0 &&
+				text[end+h[4]:end+h[5]] == text[at[2]:at[3]] {
+				mark(consumed, at[0], at[1])
+				continue
+			}
+		}
+		report(at, "untagged", adviseMentionUntagged)
+	}
 	for _, re := range []*regexp.Regexp{untaggedSpec, specFile} {
 		for _, at := range re.FindAllStringIndex(text, -1) {
 			report(at, "untagged", adviseSpecUntagged)
@@ -527,8 +556,38 @@ func headStarts(text string) []int {
 			out = append(out, at[0])
 		}
 	}
+	for _, at := range mentions(text) {
+		out = append(out, at[0])
+	}
 	sort.Ints(out)
 	return out
+}
+
+// mentions returns each untaggedMention whose word names something, as
+// submatch indices. A source named by its module path is still that source, so
+// unlike a head a mention need not stand alone.
+func mentions(text string) [][]int {
+	var out [][]int
+	for _, at := range untaggedMention.FindAllStringSubmatchIndex(text, -1) {
+		if symbolLike(text[at[4]:at[5]]) {
+			out = append(out, at)
+		}
+	}
+	return out
+}
+
+// symbolLike reports whether a word written after a source's name names
+// something inside it: a path of packages, a dotted name, or an identifier in
+// mixed case. A version is none of those, and is left to the sweep, which says
+// which edit it needs; a word in lower case is prose, and one in capitals is
+// emphasis. The judgment is spelling, so it has limits both ways — a
+// capitalised word opening a clause reads as a symbol — and they are the price
+// of seeing a claim with no file at all.
+func symbolLike(word string) bool {
+	if packagePath.MatchString(word) || dottedName.MatchString(word) {
+		return true
+	}
+	return identifier.MatchString(word) && strings.ToUpper(word) != word && strings.ToLower(word) != word
 }
 
 func nextHead(starts []int, after int) int {

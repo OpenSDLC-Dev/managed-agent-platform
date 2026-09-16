@@ -761,6 +761,79 @@ func TestShapeFindings(t *testing.T) {
 			in:    "// github.com/modelcontextprotocol/go-sdk/v2 v2.0.0 panics on it",
 			rules: []string{"bare-tag"},
 		},
+		{
+			// With no file there was nothing for a head to match, so a claim about
+			// a named symbol passed every rung however far the source had moved.
+			name:  "a source's possessive and a symbol with no tag",
+			in:    "// the header timeout is anthropic-sdk-go's defaultResponseHeaderTimeout",
+			rules: []string{"untagged"},
+		},
+		{
+			name:  "a source and a package path with no tag",
+			in:    "// the reference runs them on the host (anthropic-sdk-go tools/agenttoolset)",
+			rules: []string{"untagged"},
+		},
+		{
+			name:  "a source and a method with no tag",
+			in:    "// go-jose's JSONWebKey.UnmarshalJSON returns ErrUnsupportedKeyType",
+			rules: []string{"untagged"},
+		},
+		{
+			name:  "a source and a quoted symbol with no tag",
+			in:    "*Evidence: anthropic-cli `SessionToolRunner` behavior.*",
+			rules: []string{"untagged"},
+		},
+		{
+			name:  "a source named by its module path and a symbol with no tag",
+			in:    "// github.com/anthropics/anthropic-sdk-go option.WithBaseURL sets it",
+			rules: []string{"untagged"},
+		},
+		{
+			name:  "a source and a word written in capitals is emphasis, not a symbol",
+			in:    "// the OKP curve go-jose DOES build",
+			rules: nil,
+		},
+		{
+			name:  "a source and a lower-case word is prose",
+			in:    "// the retry is left to anthropic-sdk-go's own judgment",
+			rules: nil,
+		},
+		{
+			// A tag is the sweep's to classify, and it says which edit is missing.
+			name:  "a source's possessive and a tag is undated, not untagged",
+			in:    "// anthropic-sdk-go's v1.63.0 client reads it",
+			rules: []string{"undated"},
+		},
+		{
+			// Telling the author to add the citation they wrote beside it would
+			// only send them back.
+			name:  "a symbol cited straight after it is dated",
+			in:    "// go-jose's Audience.UnmarshalJSON (checked against go-jose v4.1.4 — jwt/claims.go Audience.UnmarshalJSON) refuses it",
+			rules: nil,
+		},
+		{
+			name:  "and one cited further on in its clause",
+			in:    "// go-jose's jwt.Expected treats a zero Time as \"use time.Now()\" (checked against go-jose v4.1.4 — jwt/validation.go Expected.Time), and more",
+			rules: nil,
+		},
+		{
+			name:  "but not by a citation past the end of its clause",
+			in:    "// go-jose's JSONWebKey.UnmarshalJSON refuses it, as the decoder does (checked against go-jose v4.1.4 — jwk.go JSONWebKey.UnmarshalJSON)",
+			rules: []string{"untagged"},
+		},
+		{
+			name:  "but not by a citation of another source",
+			in:    "// anthropic-cli's SessionToolRunner (checked against anthropic-sdk-go v1.70.1 — betatoolrunner.go BetaToolRunner) loops",
+			rules: []string{"untagged"},
+		},
+		{
+			// A mention is a head, so the clause before it ends there rather than
+			// swallowing it into a locator that no longer parses.
+			name: "a mention after a conforming citation is its own finding",
+			in: "*Evidence: checked against anthropic-sdk-go v1.70.1 — betaagent.go BetaAgent " +
+				"and anthropic-cli's SessionToolRunner.*",
+			rules: []string{"untagged"},
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var got []string
@@ -866,15 +939,14 @@ func TestAnInRepoCoordinateIsOutOfScope(t *testing.T) {
 	}
 }
 
-// TestTheRegistryAndCommentsAreReadable is the rung that runs the real files
-// inside make verify, the way tools/registrycheck's own test does.
+// TestTheRegistryAndCommentsAreReadable runs rung 1's detector over the real
+// files inside make verify, the way tools/registrycheck's own test does.
 //
-// Counting findings would be a floor, not an assertion: a detector that had
-// regressed to one rule would still clear it. So the real check is differential
-// — two probe lines are appended to the corpus, one that must be reported and
-// one that must not, and the delta has to be exactly the first. That survives
-// the migration slices 2 and 3 perform, because it does not depend on how much
-// of the corpus is still unmigrated.
+// TestTheCorpusPassesFail fails on what the corpus holds, and a clean corpus is
+// no assertion about the detector: one that had regressed to a single rule
+// would find nothing too. So this check is differential — probe lines are
+// appended to the corpus, ones that must be reported and ones that must not,
+// and the delta has to be exactly the first.
 func TestTheRegistryAndCommentsAreReadable(t *testing.T) {
 	root := repoRoot(t)
 	src, err := os.ReadFile(filepath.Join(root, File))
@@ -892,7 +964,7 @@ func TestTheRegistryAndCommentsAreReadable(t *testing.T) {
 	inRepo, requires := InSet(files), Required(paths)
 	scanner := Scanner{InRepo: inRepo, Requires: requires}
 	findings := scanner.All(string(src))
-	t.Logf("%s: %d shape finding(s) over the unmigrated corpus", File, len(findings))
+	t.Logf("%s: %d shape finding(s)", File, len(findings))
 
 	// One probe per kind of candidate, each on its own line, so a detector that
 	// had regressed to recognising any one shape — or only the probe itself —
@@ -1007,9 +1079,9 @@ func P() {}
 	}
 }
 
-// TestRungTwoRunsOverTheRealCorpus is what slice 4 turns into the gate. It runs
-// here already, reporting rather than failing, because a rung that only ever saw
-// fixtures would be flipped to failing on the day it first met the corpus.
+// TestRungTwoRunsOverTheRealCorpus shows rung 2 judging the real corpus.
+// TestTheCorpusPassesFail fails on its findings; this shows that there were
+// citations to judge, and that a vanished one among them would be found.
 func TestRungTwoRunsOverTheRealCorpus(t *testing.T) {
 	root := repoRoot(t)
 	src, err := os.ReadFile(filepath.Join(root, File))
@@ -1030,12 +1102,12 @@ func TestRungTwoRunsOverTheRealCorpus(t *testing.T) {
 	got := env.Resolution(all)
 	t.Logf("rung 2 over %d real citation(s) at pin %s: %d finding(s)", len(all), env.Pin, len(got))
 
-	// The corpus is not migrated yet, so on its own it may hand rung 2 nothing to
-	// judge. Two probes at whatever go.mod pins today, naming what that tag's own
-	// text declares — never a version or a symbol written here, which the next
-	// bump would turn into a probe rung 2 skips or one that fails for its own
-	// premise — make the run assert something: one resolves and must add
-	// nothing, one does not and must add exactly one finding.
+	// A clean corpus says nothing about the rung, which would report nothing had
+	// it skipped everything. Two probes at whatever go.mod pins today, naming
+	// what that tag's own text declares — never a version or a symbol written
+	// here, which the next bump would turn into a probe rung 2 skips or one that
+	// fails for its own premise — make the run assert something: one resolves
+	// and must add nothing, one does not and must add exactly one finding.
 	sdk := realSDK(t)
 	probes := Citations(
 		"checked against anthropic-sdk-go " + env.Pin + " — " + sdk.file + " " + sdk.method + "\n" +

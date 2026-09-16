@@ -110,10 +110,10 @@ func errMemoryPrecondition(format string, args ...any) *apiError {
 // errTargetStoreHeld is the dream create's 409 (BetaTargetStoreHeldError, plan
 // 41 §5.3): the update_existing target is still held by a live in-place dream.
 // The header is load-bearing — without it the SDK spends two retries on a
-// conflict that nothing but the holding dream's close can clear
-// (anthropic-sdk-go internal/requestconfig, MaxRetries: 2 and the
-// x-should-retry check ahead of it) — and this is the only response on the
-// platform that carries one.
+// conflict that nothing but the holding dream's close can clear (checked
+// against anthropic-sdk-go v1.70.1 — requestconfig.go NewRequestConfig and
+// shouldRetry, which reads x-should-retry ahead of the status code) — and
+// this is the only response on the platform that carries one.
 func errTargetStoreHeld(format string, args ...any) error {
 	return &apiErrorWithHeaders{
 		apiError: apiError{http.StatusConflict, errTypeConflict, fmt.Sprintf(format, args...)},

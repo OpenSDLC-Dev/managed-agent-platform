@@ -8,11 +8,23 @@ import (
 	"testing"
 )
 
+// TestTheCorpusPassesFail is plan 51's gate: rungs 1 and 2 over the registry and
+// the Go comments, through the -fail a developer runs, so the gate and the
+// command line cannot disagree about what passes. Exit 2 fails it as surely as
+// exit 1 — a run that could not open a cited module judged nothing it cites.
+func TestTheCorpusPassesFail(t *testing.T) {
+	var out, errOut strings.Builder
+	if code := run([]string{"-root", repoRoot(t), "-fail"}, &out, &errOut); code != 0 {
+		t.Errorf("sdkref -fail exited %d over the corpus; each finding names the edit it "+
+			"needs:\n%s%s", code, out.String(), errOut.String())
+	}
+}
+
 // TestFailChecksBothRungs holds the command line to what its own help text says.
 // The probe document is shape-clean on purpose: its only defect is that the
 // symbol does not resolve at the pin, so a -fail that ran shape alone would exit
-// 0 over a corpus whose every anchor had stopped resolving — and slice 4 turns
-// exactly this flag into the merge gate.
+// 0 over a corpus whose every anchor had stopped resolving — and this flag is
+// what TestTheCorpusPassesFail holds the real corpus to.
 func TestFailChecksBothRungs(t *testing.T) {
 	root := repoRoot(t)
 	// The probe is stamped at whatever go.mod pins today. Written as a literal
