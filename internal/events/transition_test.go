@@ -202,7 +202,8 @@ func TestTransitionThreadWithoutThreadRows(t *testing.T) {
 // The rollup over child threads: a child's own move emits its cross-posted
 // thread event and a session event only when the fold changes; idle stop
 // reasons pick requires_action over end_turn with the ask ids unioned in log
-// order; a child's termination leaves the session where it was.
+// order; this child's termination leaves the session where it was, the fold
+// reading the same without it.
 func TestTransitionThreadFoldsOverChildren(t *testing.T) {
 	ctx := context.Background()
 	pool := pgtest.NewPool(t)

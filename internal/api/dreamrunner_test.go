@@ -580,6 +580,36 @@ func TestDreamClosingArm(t *testing.T) {
 	}
 }
 
+// The closing arm's archive counts the session moves it commits, as the
+// handler's does: a pipeline session left at rescheduling by a retrying child
+// folds idle when the archive ends that child (#731). The rows are forged —
+// nothing leaves a thread at rescheduling across a commit.
+func TestDreamClosingArmRecordsTheMoveItsArchiveMakes(t *testing.T) {
+	collect := collectMetrics(t)
+	s := newTestServer(t)
+	_, body := seededDreamBody(t, s)
+	dreamID, sessionID := startedDream(t, s, body)
+	atLastStage(t, s, dreamID)
+	tick(t, s) // arm 10 completes it
+
+	insertChild(t, s, sessionID, "rescheduling")
+	if _, err := s.pool.Exec(context.Background(),
+		`UPDATE sessions SET status = 'rescheduling' WHERE id = $1`, sessionID); err != nil {
+		t.Fatal(err)
+	}
+	before, eventsBefore := statusCounts(t, collect()), statusEvents(t, s, sessionID)
+	tick(t, s) // arm 1 closes it
+
+	if _, _, closedAt := dreamInternals(t, s, dreamID); closedAt == nil {
+		t.Fatal("the closing arm left closed_at null")
+	}
+	wantStatusDeltas(t, before, statusCounts(t, collect()), map[string]int64{"idle": 1})
+	wantStatusEvents(t, eventsBefore, statusEvents(t, s, sessionID), map[string]int{"session.status_idle": 1})
+	if column := sessionColumn(t, s, sessionID); column != "idle" {
+		t.Errorf("sessions.status = %q, want idle", column)
+	}
+}
+
 // A session deleted at the database level skips the archive and closes the
 // same way — the transcripts are the dream's, not the session's.
 func TestDreamClosingArmWithTheSessionGone(t *testing.T) {

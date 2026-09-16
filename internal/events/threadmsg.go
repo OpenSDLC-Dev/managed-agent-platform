@@ -175,11 +175,21 @@ func ThreadEnded(sessionID, child domain.ID, agentName, text string) (NewEvent, 
 
 // busyChild is "a child that is still going to report": running, or idle only
 // until its human answers (domain.StopRequiresAction — a gated child resumes
-// and reports when its verdict lands). Written once because two decisions read
-// it and a drift between them is a coordinator parked on nothing: whether a
-// wait_for_agents has anything to wait for (plan 35 decision 7's W1), and
-// whether an ending has just taken the last thing that could wake a
-// coordinator already parked. Bound: $1 the session.
+// and reports when its verdict lands). Not rescheduling, though that status
+// means a turn is being retried: nothing resumes a thread resting there — the
+// brain claims only running threads and completes any other thread's item unrun
+// — so a wait parked on one would park on nothing, and a sibling's ending would
+// skip the wake on its account. The reaper and the dream runner's busy check do
+// count rescheduling, and each is right for itself: wrongly waiting costs them
+// a sandbox kept until the session is archived or deleted, or a dream failed by
+// its timeout, where a coordinator wrongly parked stalls its session's work
+// with nothing to say so. Nothing rests there today (the reclaim writes
+// rescheduling and running in one commit); whatever lets a thread rest there
+// must give it that exit first, then count it here (#731). Written once because
+// two decisions read it and a drift between them is a coordinator parked on
+// nothing: whether a wait_for_agents has anything to wait for (plan 35 decision
+// 7's W1), and whether an ending has just taken the last thing that could wake
+// a coordinator already parked. Bound: $1 the session.
 const busyChild = `session_id = $1 AND parent_thread_id IS NOT NULL AND archived_at IS NULL
 	  AND (status = 'running' OR (status = 'idle' AND stop_reason->>'type' = 'requires_action'))`
 

@@ -1384,12 +1384,15 @@ func (s *server) archiveSession(r *http.Request) (any, error) {
 	if err := requireNotRunning(ctx, tx, id, "archiving"); err != nil {
 		return nil, err
 	}
-	row, err := s.archiveSessionInTx(ctx, tx, id)
+	row, moves, err := s.archiveSessionInTx(ctx, tx, id)
 	if err != nil {
 		return nil, err
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return nil, err
+	}
+	for _, st := range moves {
+		events.RecordSessionStatus(ctx, st)
 	}
 	return renderSession(row)
 }
@@ -1404,10 +1407,13 @@ func (s *server) archiveSession(r *http.Request) (any, error) {
 //
 // The dream runner's closing arm shares it (plan 41 §4.1 arm 1), where
 // requireNotDreamOwned would refuse the runner itself and the not-running
-// check is the arm's own decision rather than a rejected request.
-func (s *server) archiveSessionInTx(ctx context.Context, tx pgx.Tx, id string) (sessionRow, error) {
-	if err := terminateLiveChildren(ctx, tx, s.log, id); err != nil {
-		return sessionRow{}, err
+// check is the arm's own decision rather than a rejected request. Both count
+// the session status moves it returns — ending a child can move the status —
+// after their commit (#731).
+func (s *server) archiveSessionInTx(ctx context.Context, tx pgx.Tx, id string) (sessionRow, []domain.SessionStatus, error) {
+	moves, err := terminateLiveChildren(ctx, tx, s.log, id)
+	if err != nil {
+		return sessionRow{}, nil, err
 	}
 	// Read ahead of the COALESCE rather than after it, because afterwards the
 	// two cases are indistinguishable: the stamp is set either way, and an
@@ -1419,7 +1425,7 @@ func (s *server) archiveSessionInTx(ctx context.Context, tx pgx.Tx, id string) (
 	var alreadyArchived bool
 	if err := tx.QueryRow(ctx,
 		`SELECT archived_at IS NOT NULL FROM sessions WHERE id = $1`, id).Scan(&alreadyArchived); err != nil {
-		return sessionRow{}, err
+		return sessionRow{}, nil, err
 	}
 	row, err := scanSession(tx.QueryRow(ctx,
 		`UPDATE sessions SET
@@ -1427,7 +1433,7 @@ func (s *server) archiveSessionInTx(ctx context.Context, tx pgx.Tx, id string) (
 		   archived_at = COALESCE(archived_at, now())
 		 WHERE id = $1 RETURNING `+sessionColumns, id))
 	if err != nil {
-		return sessionRow{}, err
+		return sessionRow{}, nil, err
 	}
 	// An archived session's sandbox is the reaper's too, so the ending wakes
 	// it here rather than at the handler (#354, plan 48): every caller of this
@@ -1438,10 +1444,10 @@ func (s *server) archiveSessionInTx(ctx context.Context, tx pgx.Tx, id string) (
 	// changed no row.
 	if !alreadyArchived {
 		if err := events.NotifyReapKick(ctx, tx); err != nil {
-			return sessionRow{}, err
+			return sessionRow{}, nil, err
 		}
 	}
-	return row, nil
+	return row, moves, nil
 }
 
 // sessionDeleteBroadcastBudget bounds the terminal broadcasts, which run
