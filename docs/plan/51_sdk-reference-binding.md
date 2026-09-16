@@ -9,7 +9,8 @@ This repository is bound to `anthropic-sdk-go`, and that binding is the point:
 wire compatibility is judged against the pinned SDK, and a claim about the
 reference that cites nothing is not checkable. What is not the point is that a
 pin bump reads as though it invalidates every citation at once —
-`docs/DIVERGENCES.md` names an SDK version 184 times and the Go comments 54 more
+`docs/DIVERGENCES.md` named an SDK version 184 times when this plan was written,
+and the Go comments 54 more
 — when the work a bump actually creates is proportional to what Anthropic
 changed, not to how many times we cited them — and a machine's share of that is
 narrower still, since a guard can see a symbol removed or renamed but not one
@@ -24,7 +25,7 @@ things** and one syntax carries both:
 | **the locator** | where to look — `betamemorystorememory.go:207-218` | the numbers move whether or not the claim did |
 
 These are orthogonal axes, not a list of kinds: a citation is a locator plus,
-usually, a temporal claim, and `docs/DIVERGENCES.md:47` fuses the two into one
+usually, a temporal claim, and `docs/DIVERGENCES.md:47` fused the two into one
 clause — "At the pinned v1.70.1
 **both** file shapes carry `expires_at` (`file.go:185`, `betafile.go:200`)".
 Because nothing separates the axes, a bump offers two bad options: edit
@@ -42,8 +43,8 @@ in place of the issue closure. #452's cure was to make the assertion executable.
 ## The convention half-exists already
 
 This is not a scheme invented from nothing. Under #612 and #667 the registry
-began reaching for it by hand. `docs/DIVERGENCES.md:60` already writes a dated
-claim and a bare symbol side by side:
+began reaching for it by hand. Before slice 2 migrated it, `docs/DIVERGENCES.md:60`
+wrote a dated claim and a bare symbol side by side:
 
 ```
 anthropic-sdk-go v1.70.1 tools/agenttoolset/skills.go:102 (the retrieve) and
@@ -55,12 +56,12 @@ getSkillVersion and resolveSkillVersion, …
 
 Three things are worth taking from that entry. A human found that
 `resolveSkillVersion` had been deleted from the reference between v1.66.0 and
-v1.70.1, and recorded it — so the rot this plan attacks is real and is currently
-caught by per-entry human reading, at the cost #660 is still paying. The last
-clause is already a symbol anchor with no line number. And "absent at the pin" is
-a third temporal form, which the table above does not name. The plan's job
-is to generalise and enforce what the registry already reaches for, not to invent
-a convention.
+v1.70.1, and recorded it — so the rot this plan attacks is real, and was caught
+only by per-entry human reading, at the cost #660 recorded. The last clause was
+already a symbol anchor with no line number. And "absent at the pin" is a third
+temporal form, which the table above does not name. The plan's job is to
+generalise and enforce what the registry already reached for, not to invent a
+convention.
 
 ## The shape of the fix
 
@@ -155,9 +156,9 @@ still there after the bump.
 ### Symbols are a workable anchor, measured rather than assumed
 
 The standing objection is that the SDK's managed-agents files are generated
-union boilerplate where no unique symbol exists to cite. The registry holds 126
-named `file.go:NNN` coordinates, 122 of them distinct. Nineteen are set aside:
-11 point into this repository, 5 name an `anthropic-cli` path, 2 sit in an entry
+union boilerplate where no unique symbol exists to cite. Before slice 2 the
+registry held 126 named `file.go:NNN` coordinates, 122 of them distinct.
+Nineteen are set aside: 11 point into this repository, 5 name an `anthropic-cli` path, 2 sit in an entry
 naming no SDK tag this machine's cache holds, and 1 is an SDK `examples/` file
 the published module does not ship. That leaves **103 distinct coordinates**,
 one of which two entries cite at different tags — so 104 (coordinate, tag) pairs
@@ -208,15 +209,15 @@ unrelated reasons.
    must resolve and an `absent at` anchor must **not** — a negative claim that
    silently starts resolving again is as wrong as a positive one that stops.
    Only the pin is guaranteed present: the module graph contains v1.70.1 and
-   nothing else, while the registry cites v1.63.0, v1.64.0 and v1.65.0, none of
-   which are in this machine's module cache and none of which a cold CI runner
-   would have. Restricting the failing rung to pin-stamped citations is what
+   nothing else, while the registry cites older tags too, which a
+   developer's module cache holds only if someone fetched them and a cold CI
+   runner never does. Restricting the failing rung to pin-stamped citations is what
    keeps the gate offline.
 
-That restriction is narrower than it sounds. 95 of the registry's 184 version
-mentions are stamped at the pin today and 89 name an older tag, so rung 2 can
-fail on about half the corpus — and on the day of the next bump, on none of it,
-until stamps start moving again. Rung 2 is therefore the weaker of the two
+That restriction is narrower than it sounds. When slice 2 landed, 245 of the
+registry's 352 SDK citations were stamped at the pin and 107 at an older tag, so
+rung 2 can fail on about two thirds of the corpus — and on the day of the next
+bump, on none of it, until stamps start moving again. Rung 2 is therefore the weaker of the two
 resolution rungs, and rung 3 below is what actually watches the corpus.
 
 **Reports, and does not fail:**
@@ -330,21 +331,21 @@ records what was true when it was written — that is what those files are for.
 
 ### The `api.md` citations name symbols already, and have drifted five times
 
-Two coordinates point into the SDK's generated API index
+Two coordinates pointed into the SDK's generated API index
 (`docs/DIVERGENCES.md:91`). They need no new locator form: an `api.md` line
 documents a Go symbol, so the citation takes that symbol —
 `api.md BetaEnvironmentWorkService.Stop` — which resolves in the module like any
 other anchor.
 
-That entry is the clearest evidence in the registry for this whole plan, because
-it narrates its own decay. Its prose records that the range it cited at v1.58.0
+That entry was the clearest evidence in the registry for this whole plan, because
+it narrated its own decay. Its prose recorded that the range it cited at v1.58.0
 "drifted with v1.59.0's `api.md` additions, again with v1.61.0's (683 → 693),
 again with v1.63.1's (693 → 698), and again with v1.66" — four re-readings of one
 citation, none of which changed the claim being made.
 
-There has since been a fifth, and nobody has recorded it. The entry is stamped
-v1.66.0 and cites `api.md:884`, which at v1.66.0 is indeed the Stop line, so the
-citation is true as written and the stamp is doing its job. At the pin, line 884
+There had since been a fifth, and nobody had recorded it. The entry was stamped
+v1.66.0 and cited `api.md:884`, which at v1.66.0 is indeed the Stop line, so the
+citation was true as written and the stamp was doing its job. At the pin, line 884
 is `Ack` and Stop has moved to 888. Through all five drifts the symbol
 `BetaEnvironmentWorkService.Stop` did not move at all.
 
@@ -354,8 +355,8 @@ current under a claim that never changed.
 
 ## Not every citation is a Go symbol
 
-The registry cites `anthropic-openapi.yml` in 11 named coordinates and 12 bare
-continuations. No Go symbol can anchor a YAML schema, and #660 already carries
+The registry cited `anthropic-openapi.yml` in 11 named coordinates and 12 bare
+continuations. No Go symbol can anchor a YAML schema, and #660 carried
 those citations as a separate open problem — v1.66.0 shipped no spec at all, so
 they name a source nobody can open at the tag they give, while v1.70.1 bundles
 one as `scripts/mock-spec.json.gz`. Slice 2 therefore gives spec citations their
@@ -365,6 +366,16 @@ that tag is the pin. There is no span fallback here and none is needed: the spec
 is a tree, so every cited line has an enclosing node to name, which is also why
 `non-go` is refused for spec citations rather than left as a reason no parser
 could ever contradict.
+
+Every node but one kind. An operation — its methods, a query parameter's
+description, its summary — sits under `paths`, whose keys
+(`/v1/deployments?beta=true`) are not identifiers, so no schema path reaches it.
+Slice 2 anchors such a claim on the generated Go symbol that carries the same
+text — the service method, the list-params field — and on the schema the
+operation references where there is one, such as the shared `BetaErrorResponse`
+every deployment operation answers its errors with. What neither carries stays
+prose, because a locator for it would need a quoted path segment the grammar
+does not have.
 
 ## Slices
 
@@ -378,7 +389,8 @@ could ever contradict.
 2. **Migrate `docs/DIVERGENCES.md`** — 126 named Go coordinates and 76 bare
    `:NNN` continuations into Go source, across 74 of its 259 entries, plus the 23
    spec citations and two `api.md` coordinates at `docs/DIVERGENCES.md:91` that
-   rot the same way. The bare continuations are #660's blocker and they disappear
+   rot the same way — and every other finding rung 1 reports in the file, such as
+   an untagged file mention or a bare tag. The bare continuations are #660's blocker and they disappear
    here, because a symbol needs no filename inherited from the surrounding prose.
    One constraint slice 1 established: a locator is symbols, not prose about
    them, so `BetaDeploymentService (New, Update, List)` migrates to the three
@@ -450,8 +462,8 @@ none of `tools/sdkref`, so it did not wait for it (#724).
    that let it be read as current — so the stamp is mandatory and the span is
    conditional.
 3. **The failing rung resolves only at the pin.** Resolving at arbitrary stamped
-   tags would need those modules, and the registry cites three tags no cache
-   here holds. Older tags are reported when available and never required.
+   tags would need those modules, and the registry cites older tags no cold CI
+   runner holds. Older tags are reported when available and never required.
 4. **Both the registry and the Go comments migrate**, and the steering documents
    too, under their own rule. Two citation conventions in one repository is a
    worse cost than one migration. Steering documents earn their place because
@@ -460,7 +472,7 @@ none of `tools/sdkref`, so it did not wait for it (#724).
    comment (`internal/events/inbound.go:164`) — the rot is not confined to the
    two obvious surfaces. Theirs is also the only rule here that needs no
    citation syntax, which is what lets it stand apart from the migration (#724).
-5. **This plan is sliced rather than landing as one PR.** The corpus is 276
+5. **This plan is sliced rather than landing as one PR.** The corpus was 276
    coordinates — 139 named and 88 bare continuations in the registry, 49 in Go
    comments — across three surfaces plus a new tool, and the evidence for
    slicing is recent: a three-entry registry change landed with a tail of Go
