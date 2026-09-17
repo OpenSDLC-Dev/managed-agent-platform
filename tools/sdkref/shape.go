@@ -88,7 +88,7 @@ var (
 	nameBefore = regexp.MustCompile("([\\w./-]+)(?:['’][sS])?(?:@|[\\s`_\\[(]+)$")
 	// nameChar is a character a name is spelt with; wordChar is one a word is.
 	nameChar = regexp.MustCompile(`^[\w./-]$`)
-	wordChar = regexp.MustCompile(`^[\w-]$`)
+	wordChar = regexp.MustCompile(`^[\w.-]$`)
 	// untaggedHead is a governed source followed straight by a file, with no
 	// tag between them. It names everything a citation needs
 	// except the one thing a bump asks about,
@@ -229,17 +229,33 @@ func datedRule(text string, tag []int, end int) (string, string) {
 // sweep, which reads a name whole, is what classifies it.
 func standalone(text string, i int) bool { return i == 0 || !nameChar.MatchString(text[i-1:i]) }
 
-// inWord reports whether a source name found at i is the tail of a longer word
-// — `mongo-sdk` ends in `go-sdk` — rather than a name of its own. Unlike
-// standalone it admits a slash in front, since the patterns that ask it read a
-// source ending an import path as that source.
-func inWord(text string, i int) bool { return i > 0 && wordChar.MatchString(text[i-1:i]) }
+// names reports whether a source name found at text[i:j] names that source. It
+// does not when it is the tail of a longer word — `mongo-sdk` ends in
+// `go-sdk` — or the last element of a module go.mod requires for another
+// project. Unlike standalone it admits a slash in front, since the patterns
+// that ask it read a source ending an import path as that source; j may run on
+// past the name, over the package path a mention carries.
+func names(text string, i, j int, requires func(string) bool) bool {
+	if i > 0 && wordChar.MatchString(text[i-1:i]) {
+		return false
+	}
+	return !attributedElsewhere(text[nameStart(text, i):j], requires)
+}
 
-// reaches reports whether a line reaches for this grammar: reach, matched as a
-// name of its own.
-func reaches(text string) bool {
+// nameStart is where the name ending at or running through i begins: a module
+// path in front of a source's name is part of it.
+func nameStart(text string, i int) int {
+	for i > 0 && nameChar.MatchString(text[i-1:i]) {
+		i--
+	}
+	return i
+}
+
+// reaches reports whether a line reaches for this grammar: reach, matched where
+// it names a source.
+func reaches(text string, requires func(string) bool) bool {
 	for _, at := range reach.FindAllStringIndex(text, -1) {
-		if !inWord(text, at[0]) {
+		if names(text, at[0], at[1], requires) {
 			return true
 		}
 	}
@@ -416,7 +432,13 @@ func (s Scanner) scan(line string) ([]Finding, []Finding) {
 		emit(from, at[1], rule, advice)
 	}
 	for _, at := range majorTag.FindAllStringSubmatchIndex(text, -1) {
-		m := formBefore.FindStringSubmatchIndex(text[:at[0]])
+		// The pattern reads only the source's own name, so a module path in front
+		// of it puts the form before the whole path.
+		start := nameStart(text, at[0])
+		if name := text[start:at[3]]; !governed(name) || attributedElsewhere(name, s.Requires) {
+			continue
+		}
+		m := formBefore.FindStringSubmatchIndex(text[:start])
 		if m == nil || anyConsumed(consumed, at[0], at[1]) {
 			continue
 		}
@@ -442,7 +464,7 @@ func (s Scanner) scan(line string) ([]Finding, []Finding) {
 		emit(from, at[1], rule, advice)
 	}
 	for _, at := range untaggedHead.FindAllStringSubmatchIndex(text, -1) {
-		if inWord(text, at[0]) {
+		if !names(text, at[0], at[3], s.Requires) {
 			continue
 		}
 		// The SDK's spec is a file the source ships, and the edit it needs is a
@@ -460,7 +482,7 @@ func (s Scanner) scan(line string) ([]Finding, []Finding) {
 	}
 	// After the spec: `OpenAPI` reads as a symbol, and the edit an OpenAPI
 	// document needs is a schema path.
-	for _, m := range mentions(text) {
+	for _, m := range mentions(text, s.Requires) {
 		_, end, _ := clause(text, m.to, nextHead(bounds, m.to))
 		switch {
 		case s.ownsTag(text[m.to:end]):
@@ -522,7 +544,7 @@ func (s Scanner) scan(line string) ([]Finding, []Finding) {
 	// off it across several commas, so clause-scoping would lose the very
 	// continuations this rule exists to catch.
 	var ours []Finding
-	if s.AnyExternalCoordinate || reaches(text) {
+	if s.AnyExternalCoordinate || reaches(text, s.Requires) {
 		var bare []Finding
 		bare, ours = s.bare(text, consumed)
 		findings = append(findings, bare...)
@@ -570,7 +592,7 @@ func (s Scanner) bare(text string, consumed []bool) ([]Finding, []Finding) {
 	// comment, where the paragraph usually names no source at all — a
 	// coordinate into a file this repository does not ship, sitting on the same
 	// line. With neither, a lone `:12` is far more likely to be a port.
-	if !reaches(text) && !(s.AnyExternalCoordinate && external) {
+	if !reaches(text, s.Requires) && !(s.AnyExternalCoordinate && external) {
 		return findings, ours
 	}
 	for _, at := range continuation.FindAllStringSubmatchIndex(text, -1) {
@@ -592,7 +614,7 @@ func headStarts(text string) []int {
 			out = append(out, at[0])
 		}
 	}
-	for _, m := range mentions(text) {
+	for _, m := range mentions(text, nil) {
 		out = append(out, m.from)
 	}
 	sort.Ints(out)
@@ -613,7 +635,7 @@ type mention struct {
 // that path — `go-jose/go-jose/v4` — is a package. The scan resumes after a
 // source's own name rather than after its match, because the word a match took
 // may be a source's name itself.
-func mentions(text string) []mention {
+func mentions(text string, requires func(string) bool) []mention {
 	var out []mention
 	for pos := 0; pos < len(text); {
 		at := untaggedMention.FindStringSubmatchIndex(text[pos:])
@@ -626,7 +648,7 @@ func mentions(text string) []mention {
 			}
 		}
 		pos = at[3]
-		if inWord(text, at[2]) {
+		if !names(text, at[2], at[5], requires) {
 			continue
 		}
 		source, pkg := text[at[2]:at[3]], ""

@@ -280,6 +280,15 @@ func TestAWordEndingInASourceNameMakesNoContinuation(t *testing.T) {
 	if got := s.Line("// mongo-sdk listens on the host :8080"); len(got) != 0 {
 		t.Errorf("a line naming mongo-sdk reported %v, want nothing", got)
 	}
+	// The first match being the tail of a word decides nothing about the rest.
+	if got := s.Line("// mongo-sdk wraps go-sdk, on the host :8080"); len(got) != 1 {
+		t.Errorf("a line naming mongo-sdk and then the go-sdk reported %v, want its continuation", got)
+	}
+	// Nor does a module go.mod requires for another project, which only ends in one.
+	s.Requires = testRequires
+	if got := s.Line("// example.com/acme/go-sdk listens on the host :8080"); len(got) != 0 {
+		t.Errorf("a line naming example.com/acme/go-sdk reported %v, want nothing", got)
+	}
 }
 
 // TestACommentCitesTheFileBesideItByItsBasename. A comment that names a file

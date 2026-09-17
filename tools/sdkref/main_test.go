@@ -64,12 +64,15 @@ func TestFailChecksBothRungs(t *testing.T) {
 // relies on, so a claim stamped at its pin reaches rung 2 like the SDK's do: a
 // symbol it does not declare fails the gate. A go-sdk left out of the grammar
 // reads the probe as no citation at all, and one left out of the modules rung 2
-// opens, or mapped to the wrong one, judges nothing it names. That the symbols
-// it does declare resolve is the corpus's to show, in TestTheCorpusPassesFail;
-// naming one here would tie this test to the file a bump may move it out of.
+// opens, or mapped to the wrong one, judges nothing it names. The version is
+// read from go.mod by the go-sdk's own path rather than through `modules`, so a
+// wrong mapping stamps the probe at a tag rung 2 does not hold and skips it. That
+// the symbols the go-sdk declares resolve is the corpus's to show, in
+// TestTheCorpusPassesFail; naming one here would tie this test to the file a
+// bump may move it out of.
 func TestFailResolvesTheMCPGoSDK(t *testing.T) {
 	root := repoRoot(t)
-	mcp, err := Module(root, modules["go-sdk"])
+	mcp, err := Module(root, "github.com/modelcontextprotocol/go-sdk")
 	if err != nil {
 		t.Fatalf("resolving the pin offline: %v", err)
 	}

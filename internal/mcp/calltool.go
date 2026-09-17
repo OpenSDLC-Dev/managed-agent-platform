@@ -112,12 +112,14 @@ func answered(err error) bool {
 // Empty arguments become the empty object the SDK sends in place of a nil.
 //
 // One thing a fresh connection does not do, which matters when a server uses it:
-// the SDK lifts a tool parameter annotated `x-mcp-header` (SEP-2243) out of the
-// arguments and onto an HTTP header only for a tool it already has cached from a
-// `tools/list` on this same session (checked against go-sdk v1.7.0 —
-// mcp/client.go ClientSession.CallTool and ClientSession.lookupTool).
-// Connections here are per-work-item and a caller that only calls never lists,
-// so such a parameter travels in the JSON body instead.
+// the SDK copies a tool parameter annotated `x-mcp-header` (SEP-2243) from the
+// arguments into an `Mcp-Param-*` HTTP header only for a tool it already has
+// cached from a `tools/list` on this same session (checked against go-sdk
+// v1.7.0 — mcp/client.go ClientSession.CallTool and ClientSession.lookupTool;
+// checked against go-sdk v1.7.0 — mcp/streamable_headers.go setStandardHeaders
+// and generateParamHeaders). Connections here are per-work-item and a caller
+// that only calls never lists, so such a parameter travels in the JSON body
+// alone.
 //
 // One request is also not always one round trip. A server may answer with
 // `resultType: "input_required"` instead of the tool's output — the multi

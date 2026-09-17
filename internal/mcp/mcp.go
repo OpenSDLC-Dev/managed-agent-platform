@@ -735,22 +735,22 @@ func (c *Conn) Close() error { return c.session.Close() }
 // ClientSession.ListTools and ClientSession.usesNewProtocol), and an entry
 // stays there until the server sends notifications/tools/list_changed, which
 // clears the cache outright (checked against go-sdk v1.7.0 — mcp/cache.go
-// methodCache.invalidate). Asking for its cursor again does not free it: an
-// unexpired entry is served, and an expired one is dropped, with the fresh
-// answer taking its place when that request succeeds. So a hundred unique
-// cursors hold a hundred pages live. This package retains its own copy
-// alongside: names and descriptions are shared string backings rather than
-// second copies, but every accepted schema exists twice, once as the SDK's
-// decoded map and once as the bytes re-marshaled here. Cumulative makes the
-// bound mean what it says.
+// methodCache.invalidate), or until its cursor is asked for again without a
+// positive, unexpired `ttlMs` to its name, which drops it and lets the fresh
+// answer take its place if that request succeeds. So a hundred unique cursors,
+// none of them asked for twice, hold a hundred pages live. This package retains
+// its own copy alongside: names and descriptions are shared string backings
+// rather than second copies, but every accepted schema exists twice, once as
+// the SDK's decoded map and once as the bytes re-marshaled here. Cumulative
+// makes the bound mean what it says.
 //
 // (Whether a *read* of that cache avoids the wire is a separate question with a
 // different answer, and worth not conflating: the cache's get treats an entry
 // as a miss and deletes it unless the server sent a positive, unexpired `ttlMs`
 // hint, which nothing defaults (checked against go-sdk v1.7.0 — mcp/cache.go
 // methodCache.get) — so a modern server that omits the field caches nothing
-// usefully and every repeat goes back on the wire. Retention does not depend on
-// that; serving does.)
+// usefully and every repeat goes back on the wire. Retention of a page nobody
+// asks for again does not depend on that; serving does.)
 //
 // What it covers is bodies in full and header blocks only as far as they can be
 // counted after parsing — see headerBytes. Header fields that never reach the

@@ -450,8 +450,65 @@ func TestShapeFindings(t *testing.T) {
 			rules: nil,
 		},
 		{
+			name:  "nor does a name joined to one by a dot",
+			in:    "// mongo.go-sdk ClientSession reads it",
+			rules: nil,
+		},
+		{
+			name:  "a required module ending in a source's name, mentioned beside a symbol, is another project",
+			in:    "// example.com/acme/go-sdk ClientSession reads it",
+			rules: nil,
+		},
+		{
+			name:  "and beside a file",
+			in:    "// example.com/acme/go-sdk client.go reads it",
+			rules: nil,
+		},
+		{
+			name:  "and it makes no coordinate on its line a citation",
+			in:    "- **p** — example.com/acme/go-sdk reads client.go:12",
+			rules: nil,
+		},
+		{
+			name:  "and it makes no port on its line a continuation",
+			in:    "- **p** — example.com/acme/go-sdk listens on the host :8080",
+			rules: nil,
+		},
+		{
+			// majorTag reads only the source's own name, so the form stands before
+			// the whole path and has to be looked for there.
+			name:  "a form, a governed module path and a major tag",
+			in:    "*Evidence: checked against github.com/modelcontextprotocol/go-sdk v1 — mcp/client.go Client.Connect.*",
+			rules: []string{"head-malformed"},
+		},
+		{
+			name:  "but not when the name only ends in a source's",
+			in:    "*Evidence: checked against mongo-sdk v1 — client.go Client.*",
+			rules: nil,
+		},
+		{
+			name:  "nor when the path is a module go.mod requires for another project",
+			in:    "*Evidence: checked against example.com/acme/go-sdk v1 — client.go Client.*",
+			rules: nil,
+		},
+		{
 			name:  "a link to a source's pull request names no package in it",
 			in:    "// see https://github.com/modelcontextprotocol/go-sdk/pull/1160 for the fix",
+			rules: nil,
+		},
+		{
+			name:  "nor does one to an issue",
+			in:    "// see https://github.com/modelcontextprotocol/go-sdk/issues/1154",
+			rules: nil,
+		},
+		{
+			name:  "or a discussion",
+			in:    "// see https://github.com/modelcontextprotocol/go-sdk/discussions/12",
+			rules: nil,
+		},
+		{
+			name:  "or a release",
+			in:    "// see https://github.com/modelcontextprotocol/go-sdk/releases/latest",
 			rules: nil,
 		},
 		{
