@@ -727,10 +727,12 @@ func (c *Conn) Close() error { return c.session.Close() }
 // into a per-cursor cache unconditionally, gated only on the negotiated
 // revision (checked against go-sdk v1.7.0 — mcp/client.go
 // ClientSession.ListTools and ClientSession.usesNewProtocol), and an entry
-// stays there until that cursor is asked for again or the server sends
-// notifications/tools/list_changed, which clears the cache outright (checked
-// against go-sdk v1.7.0 — mcp/cache.go methodCache.invalidate). So a hundred
-// unique cursors hold a hundred pages live. This package retains its own copy
+// stays there until the server sends notifications/tools/list_changed, which
+// clears the cache outright (checked against go-sdk v1.7.0 — mcp/cache.go
+// methodCache.invalidate). Asking for its cursor again does not free it: an
+// unexpired entry is served, and an expired one is dropped, with the fresh
+// answer taking its place when that request succeeds. So a hundred unique
+// cursors hold a hundred pages live. This package retains its own copy
 // alongside: names and descriptions are shared string backings rather than
 // second copies, but every accepted schema exists twice, once as the SDK's
 // decoded map and once as the bytes re-marshaled here. Cumulative makes the
@@ -818,10 +820,11 @@ const MaxResponseBytes = 8 << 20
 // from the caller's cancellation, so the only thing that ends it is the
 // connection's own Close, and only after the DELETE has returned — then sends
 // the session-ending DELETE on it (checked against go-sdk v1.7.0 —
-// mcp/streamable.go streamableClientConn.Close). A server that accepts that
-// DELETE and never answers would otherwise hang Close — and the work item's
-// queue lease with it — with nothing left to interrupt it. A request that
-// already carries a deadline keeps it, so this never shortens ListTimeout.
+// mcp/streamable.go StreamableClientTransport.Connect and
+// streamableClientConn.Close). A server that accepts that DELETE and never
+// answers would otherwise hang Close — and the work item's queue lease with it
+// — with nothing left to interrupt it. A request that already carries a
+// deadline keeps it, so this never shortens ListTimeout.
 func withResponseLimit(client *http.Client) *http.Client {
 	copied := *client
 	copied.Transport = newLimitedTransport(client.Transport, MaxResponseBytes)

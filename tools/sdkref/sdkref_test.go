@@ -223,10 +223,11 @@ func TestParseCitation(t *testing.T) {
 	}
 }
 
-// testRequires is a go.mod's requirements as the shape tests see them: two
-// projects this grammar does not govern, and two governed sources.
+// testRequires is a go.mod's requirements as the shape tests see them: three
+// projects this grammar does not govern, one of them spelt like a governed
+// source, and two governed sources.
 var testRequires = Required([]string{"k8s.io/api", "cloud.google.com/go/storage",
-	"github.com/go-jose/go-jose/v4", "github.com/modelcontextprotocol/go-sdk"})
+	"example.com/acme/go-sdk", "github.com/go-jose/go-jose/v4", "github.com/modelcontextprotocol/go-sdk"})
 
 // TestShapeFindings pins rung 1, which is always decidable. A candidate is
 // anything that reaches for this grammar — a source name, a tag, a coordinate —
@@ -426,6 +427,13 @@ func TestShapeFindings(t *testing.T) {
 			name:  "and so does its name joined to the tag by @",
 			in:    "// fixed in go-sdk@v1.7.0",
 			rules: []string{"undated"},
+		},
+		{
+			// A module is its path, not its last element: go-sdk is a name many
+			// projects' repositories share.
+			name:  "a required module that only ends in a governed source's name is another project",
+			in:    "// example.com/acme/go-sdk v9.9.9 documents it",
+			rules: nil,
 		},
 		{
 			name:  "the spec named with no tag at all",

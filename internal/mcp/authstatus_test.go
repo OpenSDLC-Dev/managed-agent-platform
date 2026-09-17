@@ -31,8 +31,9 @@ func serveStatus(t *testing.T, status int) string {
 }
 
 // The wire splits a refused credential from a server that could not be reached,
-// and only the status can tell them apart: the go-sdk renders a non-2xx into
-// prose and wraps no sentinel, so this package watches the response itself.
+// and only the status can tell them apart: the go-sdk renders a refused status
+// into prose and wraps no sentinel carrying it, so this package watches the
+// response itself.
 func TestConnectMarksARefusedCredential(t *testing.T) {
 	for _, row := range []struct {
 		name       string

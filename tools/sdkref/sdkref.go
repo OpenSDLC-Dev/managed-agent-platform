@@ -222,12 +222,15 @@ var majorSuffix = regexp.MustCompile(`/v\d+$`)
 // governed reports whether a name written in front of a tag is a source this
 // grammar governs — by its grammar name, alone or ending a path, which is how
 // anthropic-cli's module path names a checkout no go.mod requires, or by the
-// module path go.mod knows it by, with or without the major-version suffix and
-// down to any package in it.
+// module path go.mod knows it by.
 func governed(name string) bool {
-	if slices.Contains(sources, path.Base(name)) {
-		return true
-	}
+	return slices.Contains(sources, path.Base(name)) || governedModule(name)
+}
+
+// governedModule reports whether a name is the module path go.mod knows a
+// governed source by, with or without the major-version suffix and down to any
+// package in it.
+func governedModule(name string) bool {
 	for _, mod := range modules {
 		base := majorSuffix.ReplaceAllString(mod, "")
 		if name == base || strings.HasPrefix(name, base+"/") {
@@ -239,14 +242,16 @@ func governed(name string) bool {
 
 // attributedElsewhere reports whether a name written in front of a tag says the
 // tag belongs to a project this grammar does not govern: a module go.mod
-// requires that is not a governed source.
+// requires that is not a governed source's module.
 //
 // A name that only looks like a module path attributes nothing. A documentation
 // host, or a pkg.go.dev link into the SDK itself, is shaped like one, and read
 // as one it carried a governed tag away without a finding. Only go.mod can tell
-// a module from a string with a dot in it.
+// a module from a string with a dot in it. And a required module is its whole
+// path: one whose last element merely spells a source's name, as many a
+// project's `go-sdk` does, is somebody else's.
 func attributedElsewhere(name string, requires func(string) bool) bool {
-	return requires != nil && requires(name) && !governed(name)
+	return requires != nil && requires(name) && !governedModule(name)
 }
 
 // Required is the predicate over the module paths go.mod requires: whether a
