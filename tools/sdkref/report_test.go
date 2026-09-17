@@ -1,6 +1,7 @@
 package main
 
 import (
+	"compress/gzip"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -339,9 +340,11 @@ func TestBumpReport(t *testing.T) {
 		t.Errorf("the rendered entry does not name its anchor: %s", rep.Uncheckable[0])
 	}
 	out := rep.String()
-	// Plan 51 specifies three lists and, under them, what went unchecked.
+	// Plan 51 specifies three lists and, under them, what went unchecked; the
+	// transitions are split by whether a citation has dispositioned them.
 	for _, section := range []string{
-		"transitions at the pin",
+		"transitions awaiting a disposition",
+		"transitions already dispositioned",
 		"line spans the sources contradict",
 		"stamps behind the pin",
 		"not checked, and why",
@@ -351,13 +354,13 @@ func TestBumpReport(t *testing.T) {
 		}
 	}
 	// Both polarities of a transition are one list, and both reach it.
-	if at := strings.Index(out, "transitions at the pin"); at < 0 ||
+	if at := strings.Index(out, "transitions awaiting a disposition"); at < 0 ||
 		!strings.Contains(out[at:], "resolveSkillVersion") ||
 		!strings.Contains(out[at:], "betaenvironment.go BetaEnvironment") {
 		t.Errorf("the transitions list does not carry both polarities:\n%s", out)
 	}
-	if n := strings.Count(out, "\n\n"); n != 4 {
-		t.Errorf("report has %d sections, want the plan's four:\n%s", n, out)
+	if n := strings.Count(out, "\n\n"); n != 5 {
+		t.Errorf("report has %d sections, want five:\n%s", n, out)
 	}
 	if !strings.Contains(out, "none") {
 		t.Errorf("an empty section printed no placeholder, so it cannot be told from a "+
@@ -484,14 +487,17 @@ func TestAPinStampedSpanReachesTheReport(t *testing.T) {
 	}
 }
 
+// citations parses one citation per line, each in its own unit, so no two of
+// them are read as written beside each other.
 func citations(t *testing.T, lines ...string) []Citation {
 	t.Helper()
 	var out []Citation
-	for _, l := range lines {
+	for i, l := range lines {
 		c := ParseCitation(l)
 		if c == nil {
 			t.Fatalf("ParseCitation(%q) = nil", l)
 		}
+		c.Unit = i + 1
 		out = append(out, *c)
 	}
 	return out
@@ -513,6 +519,21 @@ func TestCitationsAgreeWithShape(t *testing.T) {
 	}
 	if cites[0].Loc.Symbols[0] != "BetaAgentNewParams" {
 		t.Errorf("the conforming citation resolved to %q", cites[0].Loc.Desc())
+	}
+}
+
+// TestARegistryCitationsUnitIsItsLine. The registry writes one entry per line,
+// so two citations on a line share a unit and a citation on the next does not.
+func TestARegistryCitationsUnitIsItsLine(t *testing.T) {
+	cs := Citations("prose\n" +
+		"checked against anthropic-sdk-go v1.66.0 — betaagent.go A and absent at anthropic-sdk-go v1.70.1 — betaagent.go A\n" +
+		"absent at anthropic-sdk-go v1.70.1 — betaagent.go B")
+	var got []int
+	for _, c := range cs {
+		got = append(got, c.Unit)
+	}
+	if fmt.Sprint(got) != "[2 2 3]" {
+		t.Errorf("units = %v, want [2 2 3]", got)
 	}
 }
 
@@ -608,6 +629,27 @@ func TestACitedSourceThisRunCannotOpenIsNamed(t *testing.T) {
 	if !named {
 		t.Errorf("Uncheckable = %v, want the go-jose citation listed with its anchor",
 			rep.Uncheckable)
+	}
+}
+
+// TestAnUnreadableSpecIsNamed. The SDK can resolve while the spec it bundles
+// cannot be read — an SDK that stopped shipping it — and then every schema
+// anchor goes unchecked and reaches no transition, which an exit code that
+// counted transitions alone would call clean.
+func TestAnUnreadableSpecIsNamed(t *testing.T) {
+	schema := citations(t, "checked against anthropic-sdk-go v1.66.0 — spec components.schemas.BetaSession")
+	symbol := citations(t, "checked against anthropic-sdk-go v1.66.0 — betaagent.go BetaAgentNewParams")
+	e := env(t, "v1.70.1")
+	e.spec = NewSpec(t.TempDir())
+	if got := e.Unresolvable(schema); len(got) != 1 || !strings.Contains(got[0], "bundled spec") {
+		t.Errorf("Unresolvable = %v, want the unreadable spec named", got)
+	}
+	if got := e.Unresolvable(symbol); len(got) != 0 {
+		t.Errorf("Unresolvable = %v, want none: nothing cited reads the spec", got)
+	}
+	e.spec = nil
+	if got := e.Unresolvable(schema); len(got) != 1 || !strings.Contains(got[0], "bundled spec") {
+		t.Errorf("Unresolvable = %v, want the unopened spec named", got)
 	}
 }
 
@@ -723,5 +765,366 @@ func TestASpanOverGoThatWillNotParseIsUncheckable(t *testing.T) {
 		"checked against anthropic-sdk-go v1.70.1 — broken.go:1-2 (span: crosses-declarations)"))
 	if len(got) != 1 || got[0].Rule != "span-uncheckable" {
 		t.Errorf("Resolution = %v, want the span named as unreadable", got)
+	}
+}
+
+// document reads lines the way the registry is read, one unit per line, so a
+// test can put two anchors beside each other or apart.
+func document(t *testing.T, lines ...string) []Citation {
+	t.Helper()
+	cs := Citations(strings.Join(lines, "\n"))
+	for i := range cs {
+		cs[i].File = "registry.md"
+	}
+	return cs
+}
+
+// TestATransitionIsDispositionedBesideIt is plan 51's disposition. A bump
+// fails on a transition nobody has read, and reading one is written down beside
+// it: an anchor gone at the pin takes an `absent at` on what it lost, at a tag
+// after its own stamp and no later than the pin. Each case below is one way
+// something that is not that edit could pass for it.
+func TestATransitionIsDispositionedBesideIt(t *testing.T) {
+	const pin = "v1.70.1"
+	const gone = "checked against anthropic-sdk-go v1.66.0 — betaagent.go resolveSkillVersion"
+	for _, tc := range []struct {
+		name  string
+		lines []string
+		want  bool // dispositioned
+	}{
+		{
+			name:  "absent at the pin, beside it",
+			lines: []string{gone + " and absent at anthropic-sdk-go v1.70.1 — betaagent.go resolveSkillVersion"},
+			want:  true,
+		},
+		{
+			// When it went is a finer claim than when the bump was taken, and
+			// just as true at every later pin.
+			name:  "absent at a tag between the stamp and the pin",
+			lines: []string{gone + " and absent at anthropic-sdk-go v1.68.0 — betaagent.go resolveSkillVersion"},
+			want:  true,
+		},
+		{
+			name:  "nothing beside it",
+			lines: []string{gone},
+		},
+		{
+			name:  "absent at the stamp's own tag contradicts the anchor rather than dispositioning it",
+			lines: []string{gone + " and absent at anthropic-sdk-go v1.66.0 — betaagent.go resolveSkillVersion"},
+		},
+		{
+			name:  "absent at a tag before the stamp",
+			lines: []string{gone + " and absent at anthropic-sdk-go v1.60.0 — betaagent.go resolveSkillVersion"},
+		},
+		{
+			// It describes a bump that has not happened.
+			name:  "absent at a tag ahead of the pin",
+			lines: []string{gone + " and absent at anthropic-sdk-go v1.71.0 — betaagent.go resolveSkillVersion"},
+		},
+		{
+			name: "absent at the pin, in another unit",
+			lines: []string{gone,
+				"absent at anthropic-sdk-go v1.70.1 — betaagent.go resolveSkillVersion"},
+		},
+		{
+			name:  "absent at the pin, in another file",
+			lines: []string{gone + " and absent at anthropic-sdk-go v1.70.1 — betafile.go resolveSkillVersion"},
+		},
+		{
+			name:  "absent at the pin, naming another symbol",
+			lines: []string{gone + " and absent at anthropic-sdk-go v1.70.1 — betaagent.go noSuchHelper"},
+		},
+		{
+			name:  "absent from another source",
+			lines: []string{gone + " and absent at go-jose v1.68.0 — betaagent.go resolveSkillVersion"},
+		},
+		{
+			// A positive anchor claims every symbol it names, so only the one
+			// that went has anything to acknowledge.
+			name: "only what went needs acknowledging",
+			lines: []string{"checked against anthropic-sdk-go v1.66.0 — betaagent.go BetaAgentNewParams " +
+				"and resolveSkillVersion and absent at anthropic-sdk-go v1.70.1 — betaagent.go resolveSkillVersion"},
+			want: true,
+		},
+		{
+			name: "everything that went needs acknowledging, not only the last",
+			lines: []string{"checked against anthropic-sdk-go v1.66.0 — betaagent.go noSuchHelper " +
+				"and resolveSkillVersion and absent at anthropic-sdk-go v1.70.1 — betaagent.go resolveSkillVersion"},
+		},
+		{
+			name: "everything that went needs acknowledging, not only the first",
+			lines: []string{"checked against anthropic-sdk-go v1.66.0 — betaagent.go noSuchHelper " +
+				"and resolveSkillVersion and absent at anthropic-sdk-go v1.70.1 — betaagent.go noSuchHelper"},
+		},
+		{
+			name: "one absent-at over both",
+			lines: []string{"checked against anthropic-sdk-go v1.66.0 — betaagent.go noSuchHelper " +
+				"and resolveSkillVersion and absent at anthropic-sdk-go v1.70.1 — betaagent.go resolveSkillVersion " +
+				"and noSuchHelper"},
+			want: true,
+		},
+		{
+			name: "a file the pin does not ship",
+			lines: []string{"checked against anthropic-sdk-go v1.66.0 — nosuch.go BetaAgentNewParams " +
+				"and absent at anthropic-sdk-go v1.70.1 — nosuch.go BetaAgentNewParams"},
+			want: true,
+		},
+		{
+			// Stamped at the pin, it is simply wrong, and rung 2 says so.
+			name: "an anchor stamped at the pin has no later tag to be acknowledged at",
+			lines: []string{"checked against anthropic-sdk-go v1.70.1 — betaagent.go resolveSkillVersion " +
+				"and absent at anthropic-sdk-go v1.70.1 — betaagent.go resolveSkillVersion"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rep := env(t, pin).Bump(document(t, tc.lines...))
+			if len(rep.Returned) != 0 {
+				t.Fatalf("Returned = %v, want none: this case is about a vanished anchor", rep.Returned)
+			}
+			switch {
+			case tc.want && (len(rep.Dispositioned) != 1 || len(rep.Vanished) != 0):
+				t.Errorf("Vanished = %v, Dispositioned = %v, want the transition dispositioned",
+					rep.Vanished, rep.Dispositioned)
+			case !tc.want && (len(rep.Dispositioned) != 0 || len(rep.Vanished) != 1):
+				t.Errorf("Vanished = %v, Dispositioned = %v, want the transition awaiting a disposition",
+					rep.Vanished, rep.Dispositioned)
+			}
+		})
+	}
+}
+
+// TestAPreReleasePinIsDispositionedAtTheReleaseItPrecedes. The grammar names
+// release tags only, so under a pseudo-version pin no tag after the stamp was
+// no later than the pin, and a transition there could never be dispositioned.
+func TestAPreReleasePinIsDispositionedAtTheReleaseItPrecedes(t *testing.T) {
+	const pin = "v1.70.2-0.20260901000000-abcdef012345"
+	const gone = "checked against anthropic-sdk-go v1.70.1 — betaagent.go resolveSkillVersion"
+	for _, tc := range []struct {
+		tag  string
+		want bool
+	}{
+		{"v1.70.2", true},
+		{"v1.70.3", false},
+	} {
+		rep := env(t, pin).Bump(document(t,
+			gone+" and absent at anthropic-sdk-go "+tc.tag+" — betaagent.go resolveSkillVersion"))
+		if got := len(rep.Dispositioned) == 1 && len(rep.Vanished) == 0; got != tc.want {
+			t.Errorf("absent at %s: Vanished = %v, Dispositioned = %v, want dispositioned = %v",
+				tc.tag, rep.Vanished, rep.Dispositioned, tc.want)
+		}
+	}
+	rep := env(t, pin).Bump(document(t, gone))
+	if len(rep.Vanished) != 1 || !strings.Contains(rep.Vanished[0].Msg, "`absent at anthropic-sdk-go v1.70.2 — ") {
+		t.Errorf("Vanished = %v, want the line naming the release the pin precedes", rep.Vanished)
+	}
+}
+
+// TestTheLineAwaitingADispositionNamesOnlyWhatIsOpen. A line naming what an
+// `absent at` beside it already names would stamp that symbol's absence twice.
+// And an anchor stamped at the pin has no bump to acknowledge — the line the
+// tool would refuse is not the line to suggest.
+func TestTheLineAwaitingADispositionNamesOnlyWhatIsOpen(t *testing.T) {
+	rep := env(t, "v1.70.1").Bump(document(t,
+		"checked against anthropic-sdk-go v1.66.0 — betaagent.go resolveSkillVersion and noSuchHelper "+
+			"and absent at anthropic-sdk-go v1.68.0 — betaagent.go resolveSkillVersion",
+		"checked against anthropic-sdk-go v1.70.1 — betaagent.go noSuchHelper"))
+	if len(rep.Vanished) != 2 {
+		t.Fatalf("Vanished = %v, want both anchors", rep.Vanished)
+	}
+	if msg := rep.Vanished[0].Msg; !strings.Contains(msg, "— betaagent.go noSuchHelper`") {
+		t.Errorf("Vanished[0] = %s, want the line naming noSuchHelper alone", rep.Vanished[0])
+	}
+	if msg := rep.Vanished[1].Msg; strings.Contains(msg, "`absent at") ||
+		!strings.Contains(msg, "the claim is what is wrong") {
+		t.Errorf("Vanished[1] = %s, want no disposition offered for an anchor stamped at the pin",
+			rep.Vanished[1])
+	}
+}
+
+// TestADeletedFilesDispositionIsNotListedUnchecked. Rung 2 judges an `absent
+// at` stamped at the pin on a file the pin does not ship, so the report has
+// nothing to add — listing it as uncheckable would grow that list by one line
+// for every file a bump deletes, burying what really went unread.
+func TestADeletedFilesDispositionIsNotListedUnchecked(t *testing.T) {
+	rep := env(t, "v1.70.1").Bump(document(t,
+		"checked against anthropic-sdk-go v1.66.0 — nosuch.go BetaAgentNewParams "+
+			"and absent at anthropic-sdk-go v1.70.1 — nosuch.go BetaAgentNewParams"))
+	if len(rep.Dispositioned) != 1 || len(rep.Uncheckable) != 0 {
+		t.Errorf("Dispositioned = %v, Uncheckable = %v, want the transition dispositioned and "+
+			"nothing unchecked", rep.Dispositioned, rep.Uncheckable)
+	}
+}
+
+// TestADispositionIsInTheAnchorsOwnDocument. Units are numbered by line, so the
+// registry's first line and a comment paragraph opening on a Go file's first
+// line share a number and nothing else.
+func TestADispositionIsInTheAnchorsOwnDocument(t *testing.T) {
+	cs := document(t, "checked against anthropic-sdk-go v1.66.0 — betaagent.go resolveSkillVersion")
+	elsewhere := document(t, "absent at anthropic-sdk-go v1.70.1 — betaagent.go resolveSkillVersion")
+	elsewhere[0].File = "internal/probe/probe.go"
+	rep := env(t, "v1.70.1").Bump(append(cs, elsewhere...))
+	if len(rep.Vanished) != 1 || len(rep.Dispositioned) != 0 {
+		t.Errorf("Vanished = %v, Dispositioned = %v, want the transition awaiting a disposition: "+
+			"the `absent at` is in another file", rep.Vanished, rep.Dispositioned)
+	}
+}
+
+// TestASchemaTransitionIsDispositionedBesideIt. A schema path vanishes like a
+// symbol does, and is acknowledged by naming the same path.
+func TestASchemaTransitionIsDispositionedBesideIt(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, "scripts"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	f, err := os.Create(filepath.Join(dir, SpecPath))
+	if err != nil {
+		t.Fatal(err)
+	}
+	zw := gzip.NewWriter(f)
+	if _, err := zw.Write([]byte(`{"components":{"schemas":{"BetaSession":{}}}}`)); err != nil {
+		t.Fatal(err)
+	}
+	if err := zw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+	const gone = "checked against anthropic-sdk-go v1.66.0 — spec components.schemas.BetaGone"
+	for name, tc := range map[string]struct {
+		line string
+		want bool
+	}{
+		"the same path": {gone + " and absent at anthropic-sdk-go v1.70.1 — spec components.schemas.BetaGone", true},
+		"another path":  {gone + " and absent at anthropic-sdk-go v1.70.1 — spec components.schemas.BetaOther", false},
+	} {
+		t.Run(name, func(t *testing.T) {
+			e := env(t, "v1.70.1")
+			e.spec = NewSpec(dir)
+			rep := e.Bump(document(t, tc.line))
+			if got := len(rep.Dispositioned) == 1 && len(rep.Vanished) == 0; got != tc.want {
+				t.Errorf("Vanished = %v, Dispositioned = %v, want dispositioned = %v",
+					rep.Vanished, rep.Dispositioned, tc.want)
+			}
+		})
+	}
+}
+
+// TestAReturnedAnchorIsNeverDispositioned. Plan 51's disposition for an
+// `absent at` anchor that resolves again is to drop the clause, so nothing
+// written beside it can stand in for that — not even an anchor saying it is
+// back.
+func TestAReturnedAnchorIsNeverDispositioned(t *testing.T) {
+	rep := env(t, "v1.70.1").Bump(document(t,
+		"absent at anthropic-sdk-go v1.66.0 — betaagent.go BetaAgentNewParams and checked against "+
+			"anthropic-sdk-go v1.70.1 — betaagent.go BetaAgentNewParams"))
+	if len(rep.Returned) != 1 || len(rep.Dispositioned) != 0 {
+		t.Fatalf("Returned = %v, Dispositioned = %v, want the returned anchor awaiting its "+
+			"disposition", rep.Returned, rep.Dispositioned)
+	}
+	if !strings.Contains(rep.Returned[0].Msg, "drop the `absent at` clause") {
+		t.Errorf("the transition does not say what disposes of it: %s", rep.Returned[0])
+	}
+	if n := rep.Undispositioned(); n != 1 {
+		t.Errorf("Undispositioned() = %d, want 1", n)
+	}
+}
+
+// TestAnUndispositionedTransitionNamesItsDisposition. The report is read on
+// the pull request that moves the pin, by someone who has to write the line; a
+// transition that only said "gone" would send them to the plan to learn its
+// grammar. The clause names what went, and only that.
+func TestAnUndispositionedTransitionNamesItsDisposition(t *testing.T) {
+	rep := env(t, "v1.70.1").Bump(document(t,
+		"checked against anthropic-sdk-go v1.66.0 — betaagent.go BetaAgentNewParams and noSuchHelper "+
+			"and resolveSkillVersion",
+		"checked against anthropic-sdk-go v1.66.0 — nosuch.go BetaAgentNewParams"))
+	if len(rep.Vanished) != 2 {
+		t.Fatalf("Vanished = %v, want both anchors", rep.Vanished)
+	}
+	for i, want := range []string{
+		"`absent at anthropic-sdk-go v1.70.1 — betaagent.go noSuchHelper and resolveSkillVersion`",
+		"`absent at anthropic-sdk-go v1.70.1 — nosuch.go BetaAgentNewParams`",
+	} {
+		if !strings.Contains(rep.Vanished[i].Msg, want) {
+			t.Errorf("Vanished[%d] = %s, want it to name %s", i, rep.Vanished[i], want)
+		}
+	}
+	if n := rep.Undispositioned(); n != 2 {
+		t.Errorf("Undispositioned() = %d, want 2", n)
+	}
+}
+
+// TestADeletedFilesDispositionPassesRungTwo. Rung 2 refuses an `absent at` on a
+// file the pin does not ship, because nothing in a missing file resolves and so
+// nothing could contradict it. That made a deleted file the one transition no
+// line could disposition: the clause the bump asks for is the clause the gate
+// refused. The positive anchor beside it, stamped earlier on the same file and
+// symbol, is what says the file was there, so the pair passes — and the
+// `absent at` passes with nothing else.
+func TestADeletedFilesDispositionPassesRungTwo(t *testing.T) {
+	const absent = "absent at anthropic-sdk-go v1.70.1 — nosuch.go BetaAgentNewParams"
+	for _, tc := range []struct {
+		name  string
+		lines []string
+		want  bool // passes
+	}{
+		{
+			name:  "beside the anchor it acknowledges",
+			lines: []string{"checked against anthropic-sdk-go v1.66.0 — nosuch.go BetaAgentNewParams and " + absent},
+			want:  true,
+		},
+		{
+			name:  "alone",
+			lines: []string{absent},
+		},
+		{
+			name:  "in another unit",
+			lines: []string{"checked against anthropic-sdk-go v1.66.0 — nosuch.go BetaAgentNewParams", absent},
+		},
+		{
+			name:  "beside an anchor on another symbol",
+			lines: []string{"checked against anthropic-sdk-go v1.66.0 — nosuch.go BetaAgentList and " + absent},
+		},
+		{
+			name:  "beside an anchor in another file",
+			lines: []string{"checked against anthropic-sdk-go v1.66.0 — other.go BetaAgentNewParams and " + absent},
+		},
+		{
+			// The positive anchor at the same tag is itself a claim rung 2
+			// refuses, so it cannot vouch for the other.
+			name:  "beside an anchor stamped at the same tag",
+			lines: []string{"checked against anthropic-sdk-go v1.70.1 — nosuch.go BetaAgentNewParams and " + absent},
+		},
+		{
+			name:  "beside another absent-at",
+			lines: []string{"absent at anthropic-sdk-go v1.66.0 — nosuch.go BetaAgentNewParams and " + absent},
+		},
+		{
+			name: "every symbol it names beside an anchor",
+			lines: []string{"checked against anthropic-sdk-go v1.66.0 — nosuch.go A and B and " +
+				"absent at anthropic-sdk-go v1.70.1 — nosuch.go A and B"},
+			want: true,
+		},
+		{
+			name: "one symbol it names beside no anchor",
+			lines: []string{"checked against anthropic-sdk-go v1.66.0 — nosuch.go A and " +
+				"absent at anthropic-sdk-go v1.70.1 — nosuch.go A and B"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var refused []Finding
+			for _, f := range env(t, "v1.70.1").Resolution(document(t, tc.lines...)) {
+				if f.Rule == "unresolvable" {
+					refused = append(refused, f)
+				}
+			}
+			if tc.want && len(refused) != 0 {
+				t.Errorf("Resolution = %v, want the disposition of a deleted file accepted", refused)
+			}
+			if !tc.want && len(refused) != 1 {
+				t.Errorf("Resolution = %v, want the `absent at` on a missing file refused", refused)
+			}
+		})
 	}
 }

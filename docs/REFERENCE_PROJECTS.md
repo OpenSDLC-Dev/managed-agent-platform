@@ -57,3 +57,32 @@ new surface in a checkout is not an invitation to build ahead of the backlog, an
 surface the platform deliberately leaves unbuilt — memory stores, the advisor, budgets —
 is registered in docs/DIVERGENCES.md rather than built. (Session threads were on that
 list until plan 35 built them.)
+
+## Bumping a pin
+
+A pull request that moves a pin in `go.mod` — the SDK's or go-jose's — or edits a citation
+runs `make sdk-bump-report` through [`sdk-bump.yml`](../.github/workflows/sdk-bump.yml), and
+fails while a **transition** awaits a disposition: an anchor the pin no longer holds, or an
+`absent at` anchor it holds again. Each is a deletion, a rename or a reinstatement in the
+reference, and the report names the line that dispositions it — except for an anchor
+stamped at the pin, which no bump has passed, and whose claim is simply wrong
+([plan 51](./plan/51_sdk-reference-binding.md)).
+
+1. **An anchor gone at the pin** takes `absent at <source> <pin> — <file> <what went>` in
+   the same registry line or comment paragraph, if the claim held at its stamp; each entry
+   citing the symbol takes its own. Check the name is spelt right first: the tool never
+   opens the stamp's tag, so a misspelt name reads as gone as surely as a deleted one. An
+   earlier tag after the stamp is accepted too, for someone who read when the symbol went —
+   name one only if you read it, since nothing checks a tag before the pin. Under a
+   pre-release or pseudo-version pin, which the grammar cannot name, write the release it
+   precedes. If the entry's argument rested on what went, the disposition is not enough:
+   rewrite the entry, and cite what replaced it at the tag you read.
+2. **An `absent at` anchor resolving again** drops that clause, and the claim it was part
+   of is re-read.
+3. **Neither moves a `since` or `checked against` stamp.** A stamp moves only when someone
+   has re-read the claim at the new tag. The guard sees what the reference deleted or
+   renamed, not what it changed underneath a surviving name, so the report's list of stamps
+   behind the pin is the prompt to look for the rest — judgment, never a failure.
+
+A citation stamped at the pin is held by the gate as any other: a positive anchor must
+resolve there, and an `absent at` anchor must not.

@@ -1,0 +1,87 @@
+name: sdk-bump
+
+# The observation point for the SDK bump report (plan 51).
+#
+# `make sdk-bump-report` resolves every citation into a module go.mod pins
+# against that pin, whatever the citation's stamp. A transition — an anchor gone
+# at the pin, or an `absent at` anchor resolving again — is what a bump leaves
+# for a human to read, and reading one is written down beside the anchor: the
+# ritual is in docs/REFERENCE_PROJECTS.md. `make verify` never reads one, since
+# at gate time a symbol that has vanished is not yet a defect. This job fails
+# while one awaits a disposition, or when the report could not read a source the
+# corpus cites. The stamps behind the pin stay judgment, and the shape and
+# pin-resolution findings it prints above the report already fail `make verify`.
+on:
+  pull_request:
+    paths:
+      # A transition arrives two ways: a pin moves, or a citation is written
+      # behind the pin without its disposition, or loses one. Watching both
+      # keeps main free of one, so this job fails only on the pull request that
+      # brought it. A path filter cannot see which line of go.mod moved, so
+      # every go.mod change runs it; the Go files carry the comment citations,
+      # and tools/sdkref with them.
+      - 'go.mod'
+      - 'docs/DIVERGENCES.md'
+      - '**.go'
+      - '.github/workflows/sdk-bump.yml'
+      # The recipe is this workflow's only executable step.
+      - 'Makefile'
+
+permissions:
+  contents: read
+
+jobs:
+  sdk-bump:
+    name: sdk-bump
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      # Nothing in this job pushes, so the token has no reason to outlive the
+      # checkout.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      # The command lives in the Makefile — the single executable source. Its
+      # recipe downloads the modules rather than building them, so a bump that
+      # breaks compilation — the pull request that most needs the report —
+      # still gets it.
+      #
+      # tee, so the report reaches both the log and the summary; pipefail, so the
+      # step's status is the report's and not tee's. The exit code is kept for the
+      # summary, which can branch on zero and nothing finer: make reports a
+      # failed recipe as its own exit 2, so the tool's 1 (a transition awaits a
+      # disposition) and 2 (it could not read what the corpus cites) arrive
+      # here as the same number. The output says which.
+      - name: sdk bump report
+        id: report
+        run: |
+          set -o pipefail
+          rc=0
+          make sdk-bump-report 2>&1 | tee report.txt || rc=$?
+          echo "rc=$rc" >> "$GITHUB_OUTPUT"
+          exit "$rc"
+      - name: render the report
+        if: always()
+        env:
+          RC: ${{ steps.report.outputs.rc }}
+          STATUS: ${{ job.status }}
+        run: |
+          {
+            echo '### SDK bump report'
+            if [ "$STATUS" = 'cancelled' ]; then
+              echo 'Cancelled before the report could answer. This is **not** a clean result — re-run it.'
+            elif [ -z "$RC" ]; then
+              echo 'The report never ran: an earlier step failed. This is **not** a clean result — read the step log.'
+            elif [ "$RC" = '0' ]; then
+              echo 'No transition awaits a disposition. The stamps behind the pin, below, are judgment rather than obligation: a stamp moves only when someone has re-read the claim.'
+            else
+              echo 'Either a transition awaits a disposition, or the report could not read a source the corpus cites — the end of the output says which. Each transition awaiting one names the line that would disposition it, unless it was stamped at the pin, where the claim itself is wrong. The ritual is in `docs/REFERENCE_PROJECTS.md`.'
+            fi
+            echo
+            echo '```'
+            cat report.txt 2>/dev/null || echo '(the report produced no output; read the step log)'
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

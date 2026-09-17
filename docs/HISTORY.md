@@ -49,6 +49,30 @@ new directory and in-repo citations re-pointed in the moving PR (plan
 
 ---
 
+## Binding to the SDK by symbol (plan 51, #722) — archived 2026-09-17, all four slices delivered (#736, #739, #740, #741 and this close-out)
+
+A citation into `anthropic-sdk-go`, go-jose or the `ant` CLI makes a temporal claim —
+`since`, `checked against`, `absent at` a tag — and gives a locator: a symbol, a schema path
+into the SDK's bundled spec, or a line span with a reason from a closed set. A pin bump
+answers the two differently, and fusing them made every bump look like it invalidated
+every citation. The plan (#725) and the steering documents' own rule (#727, #724) landed
+first. Then `tools/sdkref` with its three rungs, the failing two still tolerating the corpus
+(#736, slice 1); the registry's citations migrated, closing #660 (#739, slice 2); the Go
+comments' (#740, slice 3); rung 1 learning to see a governed source named beside a symbol
+with no tag, which dated twelve claims and found two no longer held, and rungs 1 and 2
+failing the gate (#741, slice 4). This close-out gives the report its dispositions — an
+`absent at` in an anchor's own registry line or comment paragraph, at a tag after its stamp
+and no later than the pin — and [`sdk-bump.yml`](../.github/workflows/sdk-bump.yml), which
+fails a pull request that moves a pin or edits a citation while a transition awaits one; the ritual is in
+[REFERENCE_PROJECTS.md](./REFERENCE_PROJECTS.md). At close the corpus held 541 citations, no
+shape or resolution finding, and four transitions, each already dispositioned. What the
+plan left out stays named in it: semantic drift under a surviving name, coordinates into
+this repository, and `anthropic-cli` beyond shape. Two follow-ups are filed: the registry's
+"the pinned SDK" epithets rung 1 cannot see (#737), and the claims slice 2 found contradicted
+without changing (#738).
+
+---
+
 ## An object delete that fails is retried, not forgotten (plan 50, #645 + #320) — archived 2026-09-12, delivered in one PR
 
 `DELETE /v1/sessions/{id}` removed a session's `files` rows in a transaction and

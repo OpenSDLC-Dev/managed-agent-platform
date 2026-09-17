@@ -3,6 +3,7 @@ package main
 import (
 	"errors"
 	"fmt"
+	"slices"
 	"sort"
 	"strings"
 )
@@ -14,10 +15,12 @@ import (
 // always answer: the pinned module is in the build graph and therefore already
 // on disk, while the registry cites tags no cold runner holds. Rung 3 asks the
 // question that actually matters — has anything the corpus cites moved at the
-// pin? — and only reports, because at gate time a vanished symbol is not yet a
-// defect. The entry may be describing a version where it existed. A gate that
+// pin? — and never fails the gate, because at gate time a vanished symbol is not
+// yet a defect. The entry may be describing a version where it existed. A gate that
 // reddened until every such claim was re-verified would convert "re-check what
-// changed" back into "edit everything now", which is the disease.
+// changed" back into "edit everything now", which is the disease. The pull
+// request that brings a transition — moving a pin, or editing a citation — is
+// where it is read instead, and there one nobody has dispositioned fails -report.
 //
 // Rung 3 is also the only rung that may read a tag other than the pin, and only
 // ever one the module cache already holds. That is where a span's reason gets
@@ -104,20 +107,24 @@ func NewEnv(repoRoot string) (*Env, error) {
 // Resolution is rung 2. It judges only citations stamped at the version the
 // module graph actually holds, with the polarity the citation's form asks for.
 func (e *Env) Resolution(cs []Citation) []Finding {
+	positive := index(cs, true)
 	var out []Finding
 	for _, c := range cs {
 		v, known := e.versions[c.Source]
 		if !known || c.Tag != v {
 			continue // a tag this gate cannot open; rung 3 speaks about it instead
 		}
-		out = append(out, e.judge(c)...)
+		out = append(out, e.judge(c, positive)...)
 	}
 	return out
 }
 
 // judge asks the one question rung 2 exists for, and phrases the answer as the
 // citation's own claim being wrong rather than as "not found".
-func (e *Env) judge(c Citation) []Finding {
+//
+// positive indexes the corpus's positive anchors, for the one `absent at` the
+// pin cannot contradict and must still accept: a deleted file's disposition.
+func (e *Env) judge(c Citation, positive units) []Finding {
 	if c.Loc.Kind == "span" {
 		found, err := e.falsifySpan(c, e.resolvers[c.Source], c.Tag)
 		if err != nil {
@@ -126,13 +133,23 @@ func (e *Env) judge(c Citation) []Finding {
 		}
 		return found
 	}
-	exists, unique, err := e.exists(c)
+	exists, unique, _, err := e.exists(c)
 	var gone NotShipped
 	switch {
 	case errors.As(err, &gone) && c.Positive():
 		return []Finding{e.finding(c, "vanished-at-stamp", fmt.Sprintf(
 			"%q claims this exists at %s, the version go.mod pins, and the module ships no %s "+
 				"there", c.Raw, c.Tag, gone.File))}
+	case errors.As(err, &gone) && positive.cover(c, c.Loc.names(), func(tag string) bool {
+		return newer(c.Tag, tag)
+	}):
+		// The anchor beside it, checked on the same file and symbol at an
+		// earlier tag, says the file was there, which leaves the one reading of
+		// this the pin can confirm: the file has gone. Refused, a deleted file
+		// was the one transition no line could disposition. That earlier tag is
+		// not opened, so a file name misspelt alike in both passes — as a symbol
+		// misspelt alike in both always has, in a file the pin still ships.
+		return nil
 	case errors.As(err, &gone):
 		return []Finding{e.finding(c, "unresolvable", fmt.Sprintf(
 			"%q claims a symbol is absent from %s, which the module does not ship at %s: "+
@@ -185,19 +202,23 @@ func (e *Env) finding(c Citation, rule, msg string) Finding {
 // resolve and one that has gone is the citation being wrong. An `absent at`
 // anchor claims none of them is there, so found means any one resolves — read as
 // "all", a negative claim over two symbols passed while one of them was back.
-// unique is whether every symbol that resolved did so exactly once.
-func (e *Env) exists(c Citation) (found, unique bool, err error) {
+// unique is whether every symbol that resolved did so exactly once, and missing
+// names what did not resolve.
+func (e *Env) exists(c Citation) (found, unique bool, missing []string, err error) {
 	if c.Loc.Kind == "schema" {
 		// The grammar gives a schema path to SpecSource alone, so this is the
 		// spec that source bundles.
 		if e.spec == nil {
-			return false, false, fmt.Errorf("no spec was opened for this run")
+			return false, false, nil, fmt.Errorf("no spec was opened for this run")
 		}
 		if !e.spec.Available() {
-			return false, false, fmt.Errorf("the module ships no readable spec: %v", e.spec.Err())
+			return false, false, nil, fmt.Errorf("the module ships no readable spec: %v", e.spec.Err())
 		}
 		ok, err := e.spec.Resolve(c.Loc.Path)
-		return ok, ok, err
+		if !ok {
+			missing = []string{c.Loc.Path}
+		}
+		return ok, ok, missing, err
 	}
 	r, ok := e.resolvers[c.Source]
 	if !ok {
@@ -205,26 +226,29 @@ func (e *Env) exists(c Citation) (found, unique bool, err error) {
 		// send a reader to different places, and only the first is a machine
 		// this run happened to be on.
 		if why, bad := e.unreachable[c.Source]; bad {
-			return false, false, fmt.Errorf("%s could not be resolved offline: %s", c.Source, why)
+			return false, false, nil, fmt.Errorf("%s could not be resolved offline: %s", c.Source, why)
 		}
-		return false, false, fmt.Errorf("%s is not a module this gate can resolve", c.Source)
+		return false, false, nil, fmt.Errorf("%s is not a module this gate can resolve", c.Source)
 	}
 	all, some := true, false
 	unique = true
 	for _, sym := range c.Loc.Symbols {
 		f, u, err := r.Resolve(c.Loc.File, sym)
 		if err != nil {
-			return false, false, err
+			return false, false, nil, err
 		}
 		all, some = all && f, some || f
+		if !f {
+			missing = append(missing, sym)
+		}
 		if f && !u {
 			unique = false
 		}
 	}
 	if c.Positive() {
-		return all, unique, nil
+		return all, unique, missing, nil
 	}
-	return some, unique, nil
+	return some, unique, missing, nil
 }
 
 // falsifySpan checks the reason a span gave for not being a symbol, against the
@@ -352,14 +376,99 @@ func (e *Env) at(source, version string) (*Resolver, error) {
 // reasons the sources contradict, the lag behind the pin, and — as loudly as
 // any of them — everything it could not check.
 type Report struct {
-	Pins         []string // each resolved source and the version go.mod pins it at
-	Read         int      // citations in the grammar that this rung considered
-	Vanished     []Finding
-	Returned     []Finding
-	Contradicted []Finding
-	Lag          []string
-	Uncheckable  []Unchecked
-	Caveats      []string
+	Pins     []string // each resolved source and the version go.mod pins it at
+	Read     int      // citations in the grammar that this rung considered
+	Vanished []Finding
+	Returned []Finding
+	// Dispositioned are the anchors gone at the pin whose unit already says so.
+	// Vanished and Returned are the transitions still awaiting that line.
+	Dispositioned []Finding
+	Contradicted  []Finding
+	Lag           []string
+	Uncheckable   []Unchecked
+	Caveats       []string
+}
+
+// Undispositioned counts the transitions no citation has acknowledged — what
+// the pull request moving a pin may not merge with.
+func (r Report) Undispositioned() int { return len(r.Vanished) + len(r.Returned) }
+
+// unitName is one name an anchor gives, keyed by where it is written.
+type unitName struct {
+	file   string // the document or Go file the citation is in
+	unit   int
+	source string
+	loc    string // the file the locator names inside the source
+	name   string
+}
+
+// units indexes the anchors of one polarity by each name they give, to the tags
+// they were stamped at.
+type units map[unitName][]string
+
+func index(cs []Citation, positive bool) units {
+	u := units{}
+	for _, c := range cs {
+		if c.Positive() != positive {
+			continue
+		}
+		for _, n := range c.Loc.names() {
+			k := unitName{c.File, c.Unit, c.Source, c.Loc.File, n}
+			u[k] = append(u[k], c.Tag)
+		}
+	}
+	return u
+}
+
+// cover reports whether each of names is given, in c's own unit and on the same
+// file of the same source, by an anchor whose tag ok accepts.
+func (u units) cover(c Citation, names []string, ok func(tag string) bool) bool {
+	for _, n := range names {
+		if !slices.ContainsFunc(u[unitName{c.File, c.Unit, c.Source, c.Loc.File, n}], ok) {
+			return false
+		}
+	}
+	return true
+}
+
+// vanish files an anchor the pin no longer holds. It is dispositioned when an
+// `absent at` beside it names everything it lost, at a tag after its stamp and
+// no later than the pin: one no later than the stamp contradicts the anchor
+// rather than recording a bump since, and one ahead of the pin records a bump
+// that has not happened. Otherwise the finding carries the line that would
+// disposition it, naming only what no `absent at` beside it names yet — or, for
+// an anchor stamped at the pin, which no bump has passed, says the claim is
+// what is wrong.
+//
+// A disposition is trusted as written. The anchor's own tag is not opened, so
+// an anchor that never resolved there is dispositioned as easily as one that
+// went: what this proves is that someone read the transition, not that the
+// claim beside it was ever true.
+//
+// A pin that is a pre-release or a pseudo-version has no tag of its own the
+// grammar can name, so the release it precedes stands in for it: an anchor gone
+// at a release candidate is dispositioned at the release, and if the release
+// brings it back, rung 2 says so the day it is pinned.
+func (r *Report) vanish(c Citation, lost []string, absent units, pin string, f Finding) {
+	at := releaseOf(pin)
+	acknowledges := func(tag string) bool { return newer(tag, c.Tag) && !newer(tag, at) }
+	var open []string
+	for _, n := range lost {
+		if !absent.cover(c, []string{n}, acknowledges) {
+			open = append(open, n)
+		}
+	}
+	switch {
+	case len(open) == 0:
+		r.Dispositioned = append(r.Dispositioned, f)
+		return
+	case !newer(at, c.Tag):
+		f.Msg += " — it is stamped at the pin, so no bump has passed it: the claim is what is wrong"
+	default:
+		f.Msg += fmt.Sprintf(" — if the claim held at %s and the name is spelt right, record the bump "+
+			"beside it: `absent at %s %s — %s %s`", c.Tag, c.Source, at, c.Loc.File, strings.Join(open, " and "))
+	}
+	r.Vanished = append(r.Vanished, f)
 }
 
 // Unchecked is one reason this run could not answer for some citations, and the
@@ -419,6 +528,7 @@ func (e *Env) Bump(cs []Citation) Report {
 		rep.Pins = append(rep.Pins, source+" "+v)
 	}
 	sort.Strings(rep.Pins)
+	absent := index(cs, false)
 	lag := map[string]int{}
 	uncheckable := map[string][]string{}
 	unchecked := func(c Citation, why string) {
@@ -470,14 +580,18 @@ func (e *Env) Bump(cs []Citation) Report {
 			continue
 		}
 		pin := e.versions[c.Source]
-		exists, unique, err := e.exists(c)
+		exists, unique, missing, err := e.exists(c)
 		var gone NotShipped
 		switch {
 		case errors.As(err, &gone) && c.Positive():
 			// A file that went away is a transition like a symbol that did —
 			// a deletion or a rename for a human to disposition.
-			rep.Vanished = append(rep.Vanished, e.finding(c, "vanished-at-pin", fmt.Sprintf(
+			rep.vanish(c, c.Loc.names(), absent, pin, e.finding(c, "vanished-at-pin", fmt.Sprintf(
 				"%q was checked at %s, and the pin %s ships no %s", c.Raw, c.Tag, pin, gone.File)))
+			continue
+		case errors.As(err, &gone) && c.Tag == pin:
+			// Rung 2 has judged this one: refused, or accepted beside the anchor
+			// it dispositions, whose file the pin confirms has gone.
 			continue
 		case errors.As(err, &gone):
 			unchecked(c, "an `absent at` anchor on a file the pin does not ship, which nothing "+
@@ -489,13 +603,15 @@ func (e *Env) Bump(cs []Citation) Report {
 		}
 		switch {
 		case c.Positive() && !exists:
-			rep.Vanished = append(rep.Vanished, e.finding(c, "vanished-at-pin", fmt.Sprintf(
-				"%q was checked at %s and no longer resolves at the pin %s",
-				c.Raw, c.Tag, pin)))
+			rep.vanish(c, missing, absent, pin, e.finding(c, "vanished-at-pin", fmt.Sprintf(
+				"%q was checked at %s and no longer resolves at the pin %s", c.Raw, c.Tag, pin)))
 		case !c.Positive() && exists:
+			// Nothing written beside it disposes of this: plan 51's disposition
+			// is dropping the clause, since the claim it made has stopped being
+			// the reference's state.
 			rep.Returned = append(rep.Returned, e.finding(c, "returned-at-pin", fmt.Sprintf(
-				"%q was absent at %s and resolves again at the pin %s",
-				c.Raw, c.Tag, pin)))
+				"%q was absent at %s and resolves again at the pin %s — drop the `absent at` "+
+					"clause, and re-read the claim it was part of", c.Raw, c.Tag, pin)))
 		case c.Positive() && c.Loc.Kind == "symbol" && !unique:
 			// Resolving says only that some declaration of the name survived,
 			// not that the one the citation meant did. Passing it would be the
@@ -528,6 +644,17 @@ func (e *Env) Unresolvable(cs []Citation) []string {
 	seen := map[string]bool{}
 	var out []string
 	for _, c := range cs {
+		if c.Loc.Kind == "schema" && !seen["spec"] {
+			// The spec is read apart from the module that bundles it, and can
+			// be missing from a module that resolves: an SDK that stopped
+			// shipping it leaves every schema anchor unchecked, and no transition.
+			seen["spec"] = true
+			if e.spec == nil {
+				out = append(out, SpecSource+"'s bundled spec: no spec was opened for this run")
+			} else if !e.spec.Available() {
+				out = append(out, fmt.Sprintf("%s's bundled spec: %v", SpecSource, e.spec.Err()))
+			}
+		}
 		if seen[c.Source] {
 			continue
 		}
@@ -565,6 +692,13 @@ func newer(tag, pin string) bool {
 		}
 	}
 	return pre
+}
+
+// releaseOf is the release a version is or precedes: itself, without a
+// pre-release or pseudo-version suffix.
+func releaseOf(v string) string {
+	r, _ := release(v)
+	return "v" + strings.Join(r[:], ".")
 }
 
 // release splits a version into its three numbers, and whether it carries a
@@ -623,12 +757,16 @@ func (r Report) String() string {
 	}
 	// Plan 51 specifies three lists and, under them, what went unchecked. The
 	// two polarities are one list because each entry asks the same thing of a
-	// human — a disposition for a deletion, a rename or a reinstatement — and a
+	// human — a disposition for a deletion, a rename or a reinstatement — and
+	// the transitions already dispositioned follow it, so what a bump's pull
+	// request must answer is not buried under what earlier bumps answered. A
 	// span whose range has drifted off its declarations sits with the spans
 	// whose reason is contradicted, since in both the source at the span's own
 	// tag disagrees with how the span was written.
-	section("transitions at the pin — anchors gone, and `absent at` anchors resolving again",
-		append(strs(r.Vanished), strs(r.Returned)...))
+	section("transitions awaiting a disposition — anchors gone at the pin, and `absent at` "+
+		"anchors resolving again there", append(strs(r.Vanished), strs(r.Returned)...))
+	section("transitions already dispositioned — anchors gone at the pin, beside an `absent at` "+
+		"stamped after them", strs(r.Dispositioned))
 	section("line spans the sources contradict", strs(r.Contradicted))
 	section("stamps behind the pin", r.Lag)
 	var unchecked []string

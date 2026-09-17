@@ -716,6 +716,9 @@ gate on any finding, and `make sdk-bump-report` prints what they find too, above
 report. The report is the judgment rung, outside the gate — it resolves every anchor into
 a pinned module against that pin, whatever the citation's stamp, falsifies a line span's
 stated reason against the tag the span was written for wherever the module cache already
-holds it, and only reports, because at gate time a symbol that has vanished is not yet a
-defect, and reddening until every such claim is re-verified is the wholesale re-editing
-the plan removes.
+holds it, and never fails `make verify`, because at gate time a symbol that has vanished is not
+yet a defect, and reddening until every such claim is re-verified is the wholesale
+re-editing the plan removes. A transition is read on the pull request that brings it
+instead: [`sdk-bump.yml`](../.github/workflows/sdk-bump.yml) runs the report on any change
+to `go.mod` or a citation, and fails while one awaits the one-line disposition
+[REFERENCE_PROJECTS.md](./REFERENCE_PROJECTS.md) describes.

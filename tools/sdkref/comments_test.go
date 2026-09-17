@@ -125,6 +125,81 @@ func TestACommentFindingNamesTheLineItsTextIsOn(t *testing.T) {
 	}
 }
 
+// TestACommentCitationsUnitIsItsParagraph. A disposition is written beside the
+// anchor it acknowledges, and in a comment "beside" is the paragraph: two
+// citations wrapped across its lines share one unit, the next paragraph of the
+// same comment is another, and so is a second comment on the same line — which
+// a unit named by its line number could not tell apart.
+func TestACommentCitationsUnitIsItsParagraph(t *testing.T) {
+	dir := t.TempDir()
+	const body = `package probe
+
+// A paragraph wrapping two citations: checked against anthropic-sdk-go v1.66.0
+// — betaagent.go resolveSkillVersion, and absent at anthropic-sdk-go v1.70.1 —
+// betaagent.go resolveSkillVersion.
+//
+// The next paragraph: absent at anthropic-sdk-go v1.70.1 — betaagent.go noSuchHelper.
+var X = f(/* checked against anthropic-sdk-go v1.66.0 — betaagent.go A */ 1, /* absent at anthropic-sdk-go v1.70.1 — betaagent.go A */ 2)
+
+/*
+A block comment's first paragraph: absent at anthropic-sdk-go v1.70.1 — betaagent.go B.
+
+And its second: absent at anthropic-sdk-go v1.70.1 — betaagent.go C.
+*/
+func f(...int) int { return 0 }
+`
+	if err := os.WriteFile(filepath.Join(dir, "probe.go"), []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_, cs, _ := GoComments(dir, []string{"probe.go"}, ourFiles(), nil)
+	if len(cs) != 7 {
+		t.Fatalf("citations = %+v, want seven", cs)
+	}
+	same := [][2]int{{0, 1}}
+	different := [][2]int{{0, 2}, {1, 2}, {3, 4}, {2, 3}, {5, 6}, {4, 5}}
+	for _, p := range same {
+		if cs[p[0]].Unit != cs[p[1]].Unit {
+			t.Errorf("%q and %q are in one paragraph, and in units %d and %d",
+				cs[p[0]].Raw, cs[p[1]].Raw, cs[p[0]].Unit, cs[p[1]].Unit)
+		}
+	}
+	for _, p := range different {
+		if cs[p[0]].Unit == cs[p[1]].Unit {
+			t.Errorf("%q and %q are in different paragraphs, and share unit %d",
+				cs[p[0]].Raw, cs[p[1]].Raw, cs[p[0]].Unit)
+		}
+	}
+}
+
+// TestABlockCommentParagraphsUnitIsItsSourceOffset. The scanner drops the CR
+// of every CRLF from a comment's text while positions count the source's bytes,
+// so an offset summed from the text drifts a byte behind per line.
+func TestABlockCommentParagraphsUnitIsItsSourceOffset(t *testing.T) {
+	dir := t.TempDir()
+	src := strings.ReplaceAll(`package probe
+
+/*
+First: absent at anthropic-sdk-go v1.70.1 — betaagent.go B.
+
+Second: absent at anthropic-sdk-go v1.70.1 — betaagent.go C.
+*/
+func f() {}
+`, "\n", "\r\n")
+	if err := os.WriteFile(filepath.Join(dir, "probe.go"), []byte(src), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_, cs, _ := GoComments(dir, []string{"probe.go"}, ourFiles(), nil)
+	if len(cs) != 2 {
+		t.Fatalf("citations = %+v, want two", cs)
+	}
+	for i, text := range []string{"First:", "Second:"} {
+		if want := strings.Index(src, text); cs[i].Unit != want {
+			t.Errorf("the %q paragraph's unit = %d, want %d, where its line starts in the file",
+				text, cs[i].Unit, want)
+		}
+	}
+}
+
 // TestTheCorpusCarriesCommentCitationsToTheResolvingRungs. Rung 1 reading the
 // comments is only half of it: if the citations it finds there never reach
 // rungs 2 and 3, then after slice 3 migrates the comments every one of them is

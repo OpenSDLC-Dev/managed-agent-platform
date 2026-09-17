@@ -28,19 +28,23 @@ docs/plan/51_sdk-reference-binding.md's grammar.
   -report     also run rungs 2 and 3: resolution at the pin, then the bump
               report — every anchor resolved against the pin whatever its
               stamp, plus the contradicted spans, the lag list, and everything
-              not checked
+              not checked — and exit 1 on a transition no citation has
+              dispositioned, or 2 in the -fail cases below
   -fail       also run rung 2, and exit non-zero on any rung 1 or rung 2
               finding — or exit 2, unavailable, when the corpus cites a
-              module this run could not open, or one a replace or a go.work
-              points at another tree: rung 2 would skip the first in silence
-              and certify the second against the wrong code. anthropic-cli is
-              a checkout rather than a module, so its citations are held to
-              shape alone and never make a run unavailable
+              module this run could not open, a bundled spec it could not
+              read, or a module a replace or a go.work points at another
+              tree: a run that could not read what it cites is no verdict on
+              it, and one that read a replacement would certify the wrong
+              code. anthropic-cli is a checkout rather than a module, so its
+              citations are held to shape alone and never make a run
+              unavailable
 
 make verify runs -fail over the whole corpus, through this package's own test.
-Without -fail no finding changes the exit code, which is what -report wants: the
-report is read, not obeyed. A run that could not read the corpus, or open the pin
-for -report, exits 2 either way. ` + "`make sdk-bump-report`" + ` is the front end for -report.`
+Without -fail no finding changes the exit code: -report's is about transitions,
+which the pull request bringing one is failed on and the gate never is. A
+run that could not read the corpus, or open the pin for -report, exits 2 either
+way. ` + "`make sdk-bump-report`" + ` is the front end for -report.`
 
 func main() { os.Exit(run(os.Args[1:], os.Stdout, os.Stderr)) }
 
@@ -77,6 +81,7 @@ func run(args []string, out, errOut io.Writer) int {
 	// gate fails on, and a -fail that only checked shape would pass a corpus
 	// whose anchors had all stopped resolving.
 	var bump string
+	var undispositioned int
 	var unavailable []string
 	if *report || *fail {
 		env, err := NewEnv(*root)
@@ -87,14 +92,14 @@ func run(args []string, out, errOut io.Writer) int {
 		findings = append(findings, env.Resolution(citations)...)
 		// Rung 2 can only judge a tag it can open, so it skips the citations of
 		// a source this machine could not resolve, and it judges a replaced one
-		// against whatever tree the replacement names. Under -fail either is
-		// indistinguishable from a pass, which is the one thing this tool must
-		// never let a run look like.
+		// against whatever tree the replacement names — and rung 3 does the same.
+		// Under either flag's exit code either is indistinguishable from a pass,
+		// which is the one thing this tool must never let a run look like.
 		unavailable = env.Unresolvable(citations)
 		if *report {
 			rep := env.Bump(citations)
 			rep.NameOurs(ours)
-			bump = rep.String()
+			bump, undispositioned = rep.String(), rep.Undispositioned()
 		} else {
 			// The report prints the caveats; -fail alone has no report, and a
 			// verdict whose conditions went unsaid reads as unconditional.
@@ -115,20 +120,27 @@ func run(args []string, out, errOut io.Writer) int {
 		fmt.Fprintln(out)
 		fmt.Fprint(out, bump)
 	}
-	if *fail && len(unavailable) > 0 {
-		// This outranks the findings, which are printed above either way: a run
-		// that did not read part of the corpus is not a verdict on it, and exit
-		// 1 would report the part it did read as the whole answer.
+	if len(unavailable) > 0 {
+		// This outranks the findings and the transitions, which are printed
+		// above either way: a run that did not read part of the corpus is not a
+		// verdict on it, and exit 1 would report the part it did read as the
+		// whole answer — or exit 0 say no transition awaits a disposition in a
+		// source it never opened.
 		for _, why := range unavailable {
-			fmt.Fprintf(errOut, "cited, and rung 2 cannot judge it at its tag — %s\n", why)
+			fmt.Fprintf(errOut, "cited, and no rung below shape can judge it at its tag — %s\n", why)
 		}
 		return exitUnavailable
 	}
+	code := 0
 	if *fail && len(findings) > 0 {
 		fmt.Fprintf(errOut, "%d finding(s)\n", len(findings))
-		return 1
+		code = 1
 	}
-	return 0
+	if undispositioned > 0 {
+		fmt.Fprintf(errOut, "%d transition(s) awaiting a disposition\n", undispositioned)
+		code = 1
+	}
+	return code
 }
 
 // corpus reads both halves — the document named on the command line and the Go

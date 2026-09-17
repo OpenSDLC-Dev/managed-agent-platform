@@ -11,7 +11,7 @@
 // re-checked) or not at all. docs/plan/51_sdk-reference-binding.md separates the
 // axes; this tool holds the separation.
 //
-// Three rungs, and only two of them can fail:
+// Three rungs, and only two of them can fail the gate:
 //
 //   - Shape is syntax, plus which files git tracks and which modules go.mod
 //     requires, and always decidable, so it runs on every citation.
@@ -21,9 +21,9 @@
 //     `go list -m` finds it with GOPROXY=off. The registry cites tags no cold
 //     runner holds, and reaching for them would make the gate need the network.
 //   - The report resolves every anchor it can against the pin whatever the
-//     citation's stamp, and never fails. At gate time a symbol that has vanished
-//     is not yet a defect — the entry may describe a version where it existed —
-//     so this rung is judgment, not obligation. A gate that reddened until fifty
+//     citation's stamp, and never fails the gate. At gate time a symbol that has
+//     vanished is not yet a defect — the entry may describe a version where it
+//     existed — so this rung is judgment, not obligation. A gate that reddened until fifty
 //     claims were re-verified would recreate the thing the plan removes. It is
 //     also the only rung that may read a tag other than the pin, and only ever
 //     one a module cache already holds: available, never required.
@@ -32,7 +32,10 @@
 // File, and the citations written in Go comments, which GoComments reads.
 //
 // The two failing rungs fail `make verify` through this package's own test,
-// which runs -fail over both halves.
+// which runs -fail over both halves. The report's one obligation is on the pull
+// request that brings a transition — moving a pin, or editing a citation — where
+// .github/workflows/sdk-bump.yml runs -report and fails while one awaits the
+// disposition docs/REFERENCE_PROJECTS.md describes.
 package main
 
 import (
@@ -82,8 +85,13 @@ func (f Finding) String() string {
 // Citation is one reference into an external source: a temporal claim about a
 // tag, and a locator inside that source at that tag.
 type Citation struct {
-	File   string
-	Line   int
+	File string
+	Line int
+	// Unit names the text the citation was read from, within File: its registry
+	// line's number, or the byte offset its comment paragraph begins at — a line
+	// can hold two comments. A disposition is written beside the anchor it
+	// acknowledges, and this is what "beside" means.
+	Unit   int
 	at     int    // byte offset within the text scanned; see Finding.at
 	Form   string // since | checked against | absent at
 	Source string
@@ -108,6 +116,18 @@ type Locator struct {
 	From    int      // span
 	To      int      // span
 	Reason  string   // span
+}
+
+// names are what the locator says is, or is not, in the source: its symbols, or
+// its schema path. A span names lines, which no tag but its own can judge.
+func (l Locator) names() []string {
+	switch l.Kind {
+	case "symbol":
+		return l.Symbols
+	case "schema":
+		return []string{l.Path}
+	}
+	return nil
 }
 
 // Desc renders the locator the way the citation wrote it, for messages.

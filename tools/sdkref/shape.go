@@ -880,7 +880,7 @@ func Citations(src string) []Citation {
 	var out []Citation
 	for i, line := range strings.Split(src, "\n") {
 		for _, c := range CitationsIn(line) {
-			c.Line = i + 1
+			c.Line, c.Unit = i+1, i+1
 			out = append(out, c)
 		}
 	}

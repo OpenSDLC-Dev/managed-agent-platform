@@ -164,17 +164,23 @@ registry-check:
 # The SDK-citation report (plan 51, #722): every symbol anchor the registry and
 # the Go comments carry into a module go.mod pins, resolved against that pin,
 # plus the line spans the sources contradict, the lag behind the pin and
-# everything the run could not check. Offline, which is why it depends on `build`: the pinned module
-# has to be materialised before `go list -m` can find it with the proxy refused,
-# and on a cold runner just after a bump nothing else would have fetched it.
+# everything the run could not check. Offline once the modules are on disk, which
+# is why it downloads them first: `go list -m` has to find the pinned module with
+# the proxy refused, and on a cold runner just after a bump nothing else would
+# have fetched it. Downloading rather than building means a bump that breaks
+# compilation still gets its report.
 #
 # Outside the gate on purpose: at gate time a symbol that has vanished is not yet
 # a defect, since the entry may describe a version where it existed, and
 # reddening until every such claim is re-verified is the thing plan 51 removes.
 # The shape and pin-resolution rungs run inside `make verify` instead, through
 # the package's own test, and fail it on any finding. This target prints what
-# they find too, above the report.
-sdk-bump-report: build
+# they find too, above the report. It fails while a transition awaits a
+# disposition, or when it could not read a source the corpus cites; the stamps
+# behind the pin never fail it. .github/workflows/sdk-bump.yml runs it on every
+# PR that touches go.mod or a citation.
+sdk-bump-report:
+	go mod download
 	go run ./tools/sdkref -report
 
 # ---------------------------------------------------------------------------

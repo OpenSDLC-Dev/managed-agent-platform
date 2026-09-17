@@ -1,5 +1,5 @@
 ---
-status: in-progress
+status: archived
 issue: "#722"
 ---
 
@@ -282,7 +282,12 @@ Reporting without an enforced moment to read the report is how
 `.claude/agents/verifier.md:25` stayed wrong, and "we will run the report" is a
 ritual, not a mechanism. So the pin gets a trigger: a workflow on any pull
 request whose diff touches the `anthropic-sdk-go` line in `go.mod`, running
-`make sdk-bump-report` and rendering its lists into the step summary.
+`make sdk-bump-report` and rendering its lists into the step summary. As landed,
+it runs on any change to `go.mod` or to a citation — `docs/DIVERGENCES.md` or a Go
+file. A path filter cannot narrow to one line, and a citation written behind the
+pin without its disposition, or a disposition removed, brings a transition as
+surely as a bump; watching both keeps `main` free of one, so the job fails only
+on the pull request that brought it.
 
 It fails on **undispositioned transitions, and only those.** A transition is
 dispositioned when the citation says the bump was seen: an entry whose symbol
@@ -293,6 +298,23 @@ which is why this is not the "edit everything now" failure in a smaller hat. A
 bump that deletes twenty symbols costs twenty one-line acknowledgements, each of
 them true when written, and nothing at all for the rest of the corpus. Lag stays
 advisory in the summary; it never fails.
+
+As landed, the rule is wider and the exit stricter than that. "Beside" is the
+anchor's own registry line or comment paragraph, and the `absent at` names the
+same file and everything the anchor lost — one clause for all of it, in each
+entry citing it, so the cost is a line per citing entry rather than per symbol.
+Its tag may be any after the stamp and no later than the pin, since when a symbol
+went stays true at every later pin, and a pre-release or pseudo-version pin, which
+the grammar cannot name, is dispositioned at the release it precedes. An anchor
+stamped at the pin has no bump behind it to acknowledge, so the report says its
+claim is wrong rather than offering a line. A deleted file needed rung 2 to make
+room: an `absent at` on a file the pin does not ship was refused as
+uncontradictable, so it now passes beside a positive anchor on that file and
+symbol stamped earlier. A disposition is trusted as written — the anchor's own tag
+is not opened, so a misspelt name reads as gone as surely as a deleted one. And
+the job fails not only on transitions but, with exit 2, when the report could not
+read a source the corpus cites, the bundled spec included, which is no verdict
+either way.
 
 That is also what makes rung 3's report-only stance and this job's exit code
 consistent rather than contradictory: at gate time a transition is unread, and
@@ -325,7 +347,10 @@ its answer.
 Under all three, the anchors nothing could check — `anthropic-cli`, in-repo
 coordinates, and spans whose stamped tag no cache holds — named rather than
 omitted, because a report that silently drops what it never read is a clean bill
-of health it did not earn.
+of health it did not earn. As landed, the first list prints in two parts: the
+transitions awaiting a disposition, each naming the line that would disposition
+it or, stamped at the pin, saying its claim is wrong; and those already
+dispositioned.
 
 The history files, the archived plans and the changelogs carry several hundred
 more SDK version mentions. A bump does not touch any of them, because each

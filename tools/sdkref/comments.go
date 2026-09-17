@@ -81,7 +81,7 @@ func GoComments(root string, files []string, inRepo, requires func(string) bool)
 					ours = append(ours, fmt.Sprintf("%s:%d %s", rel, par.lineAt(o.at), o.Msg))
 				}
 				for _, c := range CitationsIn(par.text) {
-					c.File, c.Line = rel, par.lineAt(c.at)
+					c.File, c.Line, c.Unit = rel, par.lineAt(c.at), par.unit
 					citations = append(citations, c)
 				}
 			}
@@ -95,6 +95,7 @@ func GoComments(root string, files []string, inRepo, requires func(string) bool)
 // offset in that text came from.
 type para struct {
 	text   string
+	unit   int   // the byte offset in the file its first line starts at, or past `/*` on a line code can share
 	starts []int // byte offset in text where each physical line's text begins
 	lines  []int // that line's number in the file
 }
@@ -122,7 +123,7 @@ func paragraphs(fset *token.FileSet, cg *ast.CommentGroup) []para {
 		}
 		cur, b = para{}, strings.Builder{}
 	}
-	add := func(at int, text string) {
+	add := func(at, off int, text string) {
 		text = strings.TrimSpace(text)
 		if text == "" {
 			flush()
@@ -130,20 +131,30 @@ func paragraphs(fset *token.FileSet, cg *ast.CommentGroup) []para {
 		}
 		if b.Len() > 0 {
 			b.WriteByte(' ')
+		} else {
+			cur.unit = off
 		}
 		cur.starts = append(cur.starts, b.Len())
 		cur.lines = append(cur.lines, at)
 		b.WriteString(text)
 	}
 	for _, c := range cg.List {
-		at := fset.Position(c.Pos()).Line
+		pos := fset.Position(c.Pos())
 		if strings.HasPrefix(c.Text, "//") {
-			add(at, strings.TrimPrefix(c.Text, "//"))
+			add(pos.Line, pos.Offset, strings.TrimPrefix(c.Text, "//"))
 			continue
 		}
 		body := strings.TrimSuffix(strings.TrimPrefix(c.Text, "/*"), "*/")
+		file := fset.File(c.Pos())
 		for i, l := range strings.Split(body, "\n") {
-			add(at+i, strings.TrimPrefix(strings.TrimSpace(l), "*"))
+			// A later line's offset is its start in the source, not a sum of the
+			// lengths before it: the scanner drops each CRLF's CR from Text, so a
+			// sum falls one byte behind per line.
+			off := pos.Offset + len("/*")
+			if i > 0 {
+				off = file.Offset(file.LineStart(pos.Line + i))
+			}
+			add(pos.Line+i, off, strings.TrimPrefix(strings.TrimSpace(l), "*"))
 		}
 	}
 	flush()
