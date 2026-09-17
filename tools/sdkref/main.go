@@ -167,7 +167,7 @@ func corpus(root, path, name string, comments bool) ([]Finding, []Citation, []st
 	}
 	inRepo, requires := InSet(files), Required(paths)
 	findings, ours := Scanner{InRepo: inRepo, Requires: requires}.Document(string(src), name)
-	citations := Citations(string(src))
+	citations := Citations(string(src), requires)
 	for i := range citations {
 		citations[i].File = name
 	}

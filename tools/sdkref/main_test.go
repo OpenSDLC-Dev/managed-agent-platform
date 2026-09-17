@@ -60,6 +60,37 @@ func TestFailChecksBothRungs(t *testing.T) {
 	}
 }
 
+// TestFailResolvesTheMCPGoSDK. The go-sdk is cited for behaviour the client
+// relies on, so a claim stamped at its pin reaches rung 2 like the SDK's do: a
+// symbol it does not declare fails the gate. A go-sdk left out of the grammar
+// reads the probe as no citation at all, and one left out of the modules rung 2
+// opens, or mapped to the wrong one, judges nothing it names. The version is
+// read from go.mod by the go-sdk's own path rather than through `modules`, so a
+// wrong mapping stamps the probe at a tag rung 2 does not hold and skips it. That
+// the symbols the go-sdk declares resolve is the corpus's to show, in
+// TestTheCorpusPassesFail; naming one here would tie this test to the file a
+// bump may move it out of.
+func TestFailResolvesTheMCPGoSDK(t *testing.T) {
+	root := repoRoot(t)
+	mcp, err := Module(root, "github.com/modelcontextprotocol/go-sdk")
+	if err != nil {
+		t.Fatalf("resolving the pin offline: %v", err)
+	}
+	probe := filepath.Join(t.TempDir(), "probe.md")
+	body := "- **probe** — *Evidence: checked against go-sdk " + mcp.Version +
+		" — mcp/client.go NoSuchSymbolAnywhereInTheSDK.*\n"
+	if err := os.WriteFile(probe, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var out, errOut strings.Builder
+	if code := run([]string{"-root", root, "-file", probe, "-comments=false", "-fail"}, &out, &errOut); code != 1 {
+		t.Errorf("-fail exited %d, want 1\nstdout:\n%s\nstderr:\n%s", code, out.String(), errOut.String())
+	}
+	if !strings.Contains(out.String(), "vanished-at-stamp") {
+		t.Errorf("-fail printed no rung 2 finding for a symbol the go-sdk does not declare:\n%s", out.String())
+	}
+}
+
 // TestReportFailsOnlyOnAnUndispositionedTransition is the exit code the bump
 // workflow reads. The probe's anchor is stamped before the pin and names nothing
 // the SDK declares, so the pin reports it gone; with its disposition beside it,

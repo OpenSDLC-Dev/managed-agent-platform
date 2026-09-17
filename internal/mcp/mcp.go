@@ -302,9 +302,10 @@ const http2HeaderListOverhead = 320
 // the GET endpoint it used, and a per-work-item connection has no use for
 // server-initiated messages in either era — it asks one question and closes.
 //
-// The setting therefore does nothing against a modern server: go-sdk v1.7.0
+// The setting therefore does nothing against a modern server: the go-sdk
 // returns before opening the GET whenever the negotiated version is 2026-07-28
-// or later (streamable.go, sessionUpdated), so it only takes effect on an older
+// or later (checked against go-sdk v1.7.0 — mcp/streamable.go
+// streamableClientConn.sessionUpdated), so it only takes effect on an older
 // negotiation, where the spec makes the GET optional and a tools/list answer
 // comes back on the POST regardless.
 //
@@ -364,9 +365,12 @@ func Connect(ctx context.Context, cfg Config) (*Conn, error) {
 	// The wrapper hands back the SDK's own Connection unchanged. Substituting
 	// one is not forbidden — the SDK ships LoggingTransport, which does exactly
 	// that, and a substituted connection still negotiates — but the SDK reaches
-	// sessionUpdated through a type assertion to an unexported interface, so a
-	// substitute silently loses it, and with it the Mcp-Protocol-Version header
-	// on every post-handshake request of a legacy negotiation. Since a legacy
+	// sessionUpdated through a type assertion to an unexported interface
+	// (checked against go-sdk v1.7.0 — mcp/transport.go LoggingTransport and
+	// clientConnection.sessionUpdated), so a substitute silently loses it, and
+	// with it the Mcp-Protocol-Version header on every post-handshake request
+	// of a legacy negotiation (checked against go-sdk v1.7.0 —
+	// mcp/streamable.go streamableClientConn.setMCPHeaders). Since a legacy
 	// negotiation is what this client mostly gets, the wrapper stays transparent.
 	transport := &capturingTransport{inner: &sdk.StreamableClientTransport{
 		Endpoint:             cfg.URL,
@@ -395,7 +399,8 @@ func Connect(ctx context.Context, cfg Config) (*Conn, error) {
 
 // capturingTransport keeps the Connection its inner transport produced so a
 // failed Client.Connect can still close it. Connect is called exactly once by
-// the SDK, so a single field needs no synchronisation.
+// the SDK (checked against go-sdk v1.7.0 — mcp/transport.go connect), so a
+// single field needs no synchronisation.
 type capturingTransport struct {
 	inner sdk.Transport
 	conn  sdk.Connection
@@ -474,13 +479,14 @@ func (c *Conn) listTools(ctx context.Context, budget time.Duration) ([]Tool, err
 			return nil, c.auth.mark(fmt.Errorf("mcp: list tools: %w", err))
 		}
 		for _, tool := range res.Tools {
-			// A nil element is what `"tools": [null]` decodes to. With go-sdk
-			// v1.7.0 the page never gets this far — the SDK dereferences the
-			// element first and panics, which listPage turns into an error —
-			// so this is the guard for the release that fixes that panic and
-			// starts handing nils through. It is deliberately kept: the cost
-			// is one condition, and the alternative is a nil dereference on
-			// data a customer-named server chose.
+			// A nil element is what `"tools": [null]` decodes to. The page
+			// never gets this far — the SDK dereferences the element first and
+			// panics (checked against go-sdk v1.7.0 — mcp/streamable_headers.go
+			// validateParamHeaderAnnotations), which listPage turns into an
+			// error — so this is the guard for the release that fixes that
+			// panic and starts handing nils through. It is deliberately kept:
+			// the cost is one condition, and the alternative is a nil
+			// dereference on data a customer-named server chose.
 			if tool == nil || !usableName(tool.Name) {
 				continue
 			}
@@ -516,11 +522,13 @@ func (c *Conn) listTools(ctx context.Context, budget time.Duration) ([]Tool, err
 		// pages, appending each page's tools again on every lap. A server can
 		// also make those laps free: under a 2026-07-28 negotiation the SDK
 		// serves an already-requested cursor out of its own per-cursor cache
-		// (mcp/client.go ListTools -> cachedListResult) whenever it sent a
-		// positive `ttlMs` with the page, and a page that never reaches the wire
-		// never draws on the cumulative byte budget either. Catching the repeat
-		// on its second sighting rather than the hundredth also keeps a wedged
-		// server from holding the queue lease for the round trips in between.
+		// (checked against go-sdk v1.7.0 — mcp/client.go
+		// ClientSession.ListTools; checked against go-sdk v1.7.0 — mcp/cache.go
+		// cachedListResult) whenever it sent a positive `ttlMs` with the page,
+		// and a page that never reaches the wire never draws on the cumulative
+		// byte budget either. Catching the repeat on its second sighting rather
+		// than the hundredth also keeps a wedged server from holding the queue
+		// lease for the round trips in between.
 		if seenCursor[res.NextCursor] {
 			return nil, fmt.Errorf("mcp: list tools: server repeated a pagination cursor")
 		}
@@ -534,15 +542,16 @@ func (c *Conn) listTools(ctx context.Context, budget time.Duration) ([]Tool, err
 // into an error.
 //
 // Recovering around a library call is not something to do lightly, and this is
-// the case that earns it: go-sdk v1.7.0 dereferences every element of the
-// decoded `tools` array without a nil check (filterValidTools →
-// validateParamHeaderAnnotations, mcp/streamable_headers.go), so a server
-// answering tools/list with `"tools": [null]` panics the client. The endpoint
-// is customer-supplied and the caller is an executor shared by every session
-// on the host, where a Go panic is not confined to the goroutine that raised
-// it — so the choice is between one failed work item and a process that takes
-// every concurrent tool call down with it. The recover is scoped to the single
-// SDK call so it cannot mask a panic in this package's own code.
+// the case that earns it: the go-sdk dereferences every element of the decoded
+// `tools` array without a nil check (checked against go-sdk v1.7.0 —
+// mcp/streamable_headers.go filterValidTools and
+// validateParamHeaderAnnotations), so a server answering tools/list with
+// `"tools": [null]` panics the client. The endpoint is customer-supplied and
+// the caller is an executor shared by every session on the host, where a Go
+// panic is not confined to the goroutine that raised it — so the choice is
+// between one failed work item and a process that takes every concurrent tool
+// call down with it. The recover is scoped to the single SDK call so it cannot
+// mask a panic in this package's own code.
 func (c *Conn) listPage(ctx context.Context, cursor string) (res *sdk.ListToolsResult, err error) {
 	defer func() {
 		if r := recover(); r != nil {
@@ -572,10 +581,11 @@ func (c *Conn) listPage(ctx context.Context, cursor string) (res *sdk.ListToolsR
 // anything, which is the point of the convention.
 //
 // The SDK fills the protocol's own `_meta` keys itself and only where they are
-// absent (injectRequestMeta), so a map supplied here is added to rather than
-// replaced. Nil when no span is active, which says "nothing to add" rather than
-// changing what goes out: `_meta` is `omitempty`, so an empty map would be
-// omitted from the request just the same.
+// absent (checked against go-sdk v1.7.0 — mcp/client.go injectRequestMeta), so
+// a map supplied here is added to rather than replaced. Nil when no span is
+// active, which says "nothing to add" rather than changing what goes out:
+// `_meta` is `omitempty`, so an empty map would be omitted from the request
+// just the same.
 func requestMeta(ctx context.Context) sdk.Meta {
 	carrier := map[string]string{}
 	telemetry.Inject(ctx, carrier)
@@ -592,13 +602,15 @@ func requestMeta(ctx context.Context) sdk.Meta {
 // usableName reports whether a server's tool name can be offered to a model.
 //
 // The rule is the MCP SDK's own — non-empty, at most 128 bytes, and the runes
-// [a-zA-Z0-9_.-] (validateToolName in mcp/tool.go; the 128 is a len(), so bytes,
-// whatever its error message calls them). Note what the SDK does *not* do with
-// it: AddTool logs a violation and registers the tool anyway, and nothing checks
-// it on the client side at all, so a name that breaks the rule reaches a client
-// as a perfectly ordinary listing entry. That makes this the first place it can
-// be caught, not a redundant second one. Refusing one tool is better than a
-// request that fails carrying every other tool with it.
+// [a-zA-Z0-9_.-] (checked against go-sdk v1.7.0 — mcp/tool.go validateToolName;
+// the 128 is a len(), so bytes, whatever its error message calls them). Note
+// what the SDK does *not* do with it: AddTool logs a violation and registers
+// the tool anyway (checked against go-sdk v1.7.0 — mcp/server.go
+// Server.AddTool), and nothing checks it on the client side at all, so a name
+// that breaks the rule reaches a client as a perfectly ordinary listing entry.
+// That makes this the first place it can be caught, not a redundant second one.
+// Refusing one tool is better than a request that fails carrying every other
+// tool with it.
 //
 // It is deliberately the SDK's rule and not a guessed-at Anthropic one, and it
 // is a floor rather than the whole constraint. The reference states a charset
@@ -641,8 +653,9 @@ func usableName(name string) bool {
 // below, arrived at from the other direction. Both MCP's schema and the pinned
 // SDK's own server require the root type: AddTool panics unless the decoded
 // schema's type is "object", and reads an absent type as not-"object" rather
-// than as a default (mcp/server.go). Anthropic's input_schema requires it too,
-// so a schema without it could not be offered to a model anyway.
+// than as a default (checked against go-sdk v1.7.0 — mcp/server.go
+// Server.AddTool). Anthropic's input_schema requires it too, so a schema
+// without it could not be offered to a model anyway.
 //
 // Substituting {"type":"object"} for an absent schema was the first shape of
 // this and was wrong: it reads as "this tool takes no arguments", which is a
@@ -705,34 +718,39 @@ func (c *Conn) Close() error { return c.session.Close() }
 // as they survive parsing to be counted, which is a distinction this comment
 // draws out below rather than one to take on trust from this line.
 //
-// The bound is not optional politeness: go-sdk v1.7.0 reads a response with
-// io.ReadAll before it decodes anything (mcp/streamable.go, handleJSON), so a
-// server that answers a tools/list with a chunked, multi-gigabyte description
-// grows the executor's heap until the process dies — and it takes every other
-// session on that host with it. Neither the request timeout nor the page bound
-// stops it, because both count requests rather than bytes, and no recover
-// catches an out-of-memory. The only place to refuse is before the SDK sees the
-// body.
+// The bound is not optional politeness: the go-sdk reads a response with
+// io.ReadAll before it decodes anything (checked against go-sdk v1.7.0 —
+// mcp/streamable.go streamableClientConn.handleJSON), so a server that answers
+// a tools/list with a chunked, multi-gigabyte description grows the executor's
+// heap until the process dies — and it takes every other session on that host
+// with it. Neither the request timeout nor the page bound stops it, because
+// both count requests rather than bytes, and no recover catches an
+// out-of-memory. The only place to refuse is before the SDK sees the body.
 //
 // It is cumulative because a per-response cap does not actually bound a listing.
 // maxToolPages responses of MaxResponseBytes each is 800 MiB, and both ends
 // retain it. Under a 2026-07-28 negotiation the SDK puts every tools/list result
-// into a per-cursor cache unconditionally (mcp/client.go ListTools →
-// toolsCache.put, gated only on usesNewProtocol), and an entry stays there until
-// that cursor is asked for again or the server sends
-// notifications/tools/list_changed, which clears the cache outright
-// (mcp/cache.go invalidate). So a hundred unique cursors hold a hundred pages
-// live. This package retains its own copy alongside: names and descriptions are
-// shared string backings rather than second copies, but every accepted schema
-// exists twice, once as the SDK's decoded map and once as the bytes re-marshaled
-// here. Cumulative makes the bound mean what it says.
+// into a per-cursor cache unconditionally, gated only on the negotiated
+// revision (checked against go-sdk v1.7.0 — mcp/client.go
+// ClientSession.ListTools and ClientSession.usesNewProtocol), and an entry
+// stays there until the server sends notifications/tools/list_changed, which
+// clears the cache outright (checked against go-sdk v1.7.0 — mcp/cache.go
+// methodCache.invalidate), or until its cursor is asked for again without a
+// positive, unexpired `ttlMs` to its name, which drops it and lets the fresh
+// answer take its place if that request succeeds. So a hundred unique cursors,
+// none of them asked for twice, hold a hundred pages live. This package retains
+// its own copy alongside: names and descriptions are shared string backings
+// rather than second copies, but every accepted schema exists twice, once as
+// the SDK's decoded map and once as the bytes re-marshaled here. Cumulative
+// makes the bound mean what it says.
 //
 // (Whether a *read* of that cache avoids the wire is a separate question with a
-// different answer, and worth not conflating: mcp/cache.go get treats an entry
+// different answer, and worth not conflating: the cache's get treats an entry
 // as a miss and deletes it unless the server sent a positive, unexpired `ttlMs`
-// hint, which nothing defaults — so a modern server that omits the field caches
-// nothing usefully and every repeat goes back on the wire. Retention does not
-// depend on that; serving does.)
+// hint, which nothing defaults (checked against go-sdk v1.7.0 — mcp/cache.go
+// methodCache.get) — so a modern server that omits the field caches nothing
+// usefully and every repeat goes back on the wire. Retention of a page nobody
+// asks for again does not depend on that; serving does.)
 //
 // What it covers is bodies in full and header blocks only as far as they can be
 // counted after parsing — see headerBytes. Header fields that never reach the
@@ -745,16 +763,20 @@ func (c *Conn) Close() error { return c.session.Close() }
 // total that no header arithmetic can produce, and by multiplying a per-block cap
 // by a response count. That last is the one that matters, because it is what all
 // of them needed — a bound on how many responses one connection answers, which
-// go-sdk v1.7.0 does not have. Counting the handshake, a hundred pages and the
+// the go-sdk does not have (checked against go-sdk v1.7.0 — mcp/streamable.go
+// StreamableClientTransport). Counting the handshake, a hundred pages and the
 // session-ending DELETE reaches 104, and two paths walk past it. A server that
 // answers the first server/discover with CodeUnsupportedProtocolVersion and a
-// supported-version list is probed a second time (mcp/client.go, `for range 2`).
-// And any response delivered as text/event-stream may end carrying a fresh `id:`
-// and no call response, which sends handleSSE round its reconnect loop again —
-// the no-progress retry cap it grew for exactly this resets on every id that
-// advances, the server picks the delay through the SSE `retry:` field, and the
-// SDK's own TODO beside it records that a limit on total attempts for one logical
-// request is still missing (mcp/streamable.go, handleSSE/connectSSE).
+// supported-version list is probed a second time, since discovery runs in a
+// `for range 2` loop (checked against go-sdk v1.7.0 — mcp/client.go
+// Client.Connect). And any response delivered as text/event-stream may end
+// carrying a fresh `id:` and no call response, which sends handleSSE round its
+// reconnect loop again — the no-progress retry cap it grew for exactly this
+// resets on every id that advances, the server picks the delay through the SSE
+// `retry:` field, and the SDK's own TODO beside it records that a limit on
+// total attempts for one logical request is still missing (checked against
+// go-sdk v1.7.0 — mcp/streamable.go streamableClientConn.handleSSE and
+// streamableClientConn.connectSSE).
 // TestAConnectionAnswersMoreResponsesThanItHasPages drives it: around two
 // thousand responses to a single listing in three seconds, in three of the 120
 // seconds ListTimeout allows, against the 104 that arithmetic multiplied by. It
@@ -803,11 +825,12 @@ const MaxResponseBytes = 8 << 20
 // context as context.WithCancel(xcontext.Detach(ctx)) — no deadline, and cut off
 // from the caller's cancellation, so the only thing that ends it is the
 // connection's own Close, and only after the DELETE has returned — then sends
-// the session-ending DELETE on it (mcp/streamable.go,
+// the session-ending DELETE on it (checked against go-sdk v1.7.0 —
+// mcp/streamable.go StreamableClientTransport.Connect and
 // streamableClientConn.Close). A server that accepts that DELETE and never
-// answers would otherwise hang Close — and the work item's queue lease with it —
-// with nothing left to interrupt it. A request that already carries a deadline
-// keeps it, so this never shortens ListTimeout.
+// answers would otherwise hang Close — and the work item's queue lease with it
+// — with nothing left to interrupt it. A request that already carries a
+// deadline keeps it, so this never shortens ListTimeout.
 func withResponseLimit(client *http.Client) *http.Client {
 	copied := *client
 	copied.Transport = newLimitedTransport(client.Transport, MaxResponseBytes)

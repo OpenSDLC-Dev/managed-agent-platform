@@ -98,6 +98,12 @@ func TestParseCitation(t *testing.T) {
 				Loc: Locator{Kind: "symbol", File: "jwks.go", Symbols: sym("JSONWebKeySet.Key")}},
 		},
 		{
+			name: "the MCP go-sdk, whose file names repeat across its packages",
+			in:   "checked against go-sdk v1.7.0 — mcp/client.go Client.Connect",
+			want: &Citation{Form: "checked against", Source: "go-sdk", Tag: "v1.7.0",
+				Loc: Locator{Kind: "symbol", File: "mcp/client.go", Symbols: sym("Client.Connect")}},
+		},
+		{
 			name: "anthropic-cli, in the grammar but not resolvable",
 			in:   "checked against anthropic-cli v0.5.0 — main.go run",
 			want: &Citation{Form: "checked against", Source: "anthropic-cli", Tag: "v0.5.0",
@@ -217,10 +223,13 @@ func TestParseCitation(t *testing.T) {
 	}
 }
 
-// testRequires is a go.mod's requirements as the shape tests see them: two
-// projects this grammar does not govern, a governed source, and the MCP go-sdk.
+// testRequires is a go.mod's requirements as the shape tests see them: four
+// projects this grammar does not govern, two of them spelt like a governed
+// source and one of those required only at its second major version, and two
+// governed sources.
 var testRequires = Required([]string{"k8s.io/api", "cloud.google.com/go/storage",
-	"github.com/go-jose/go-jose/v4", "github.com/modelcontextprotocol/go-sdk"})
+	"example.com/acme/go-sdk", "example.com/beta/go-sdk/v2", "github.com/go-jose/go-jose/v4",
+	"github.com/modelcontextprotocol/go-sdk"})
 
 // TestShapeFindings pins rung 1, which is always decidable. A candidate is
 // anything that reaches for this grammar — a source name, a tag, a coordinate —
@@ -402,9 +411,354 @@ func TestShapeFindings(t *testing.T) {
 			rules: nil,
 		},
 		{
-			// #729 holds the decision to leave the MCP go-sdk alone.
-			name:  "a project this grammar leaves alone, by name",
+			name:  "the MCP go-sdk is governed, so its name dates the tag after it",
 			in:    "// `\"tools\": [null]` is legal JSON that go-sdk v1.7.0 panics on",
+			rules: []string{"undated"},
+		},
+		{
+			name:  "and so does its module path",
+			in:    "// github.com/modelcontextprotocol/go-sdk v1.7.0 panics on it",
+			rules: []string{"undated"},
+		},
+		{
+			name:  "and so does its name as a capitalised possessive",
+			in:    "// go-sdk'S v1.7.0 panics on it",
+			rules: []string{"undated"},
+		},
+		{
+			name:  "and so does its name joined to the tag by @",
+			in:    "// fixed in go-sdk@v1.7.0",
+			rules: []string{"undated"},
+		},
+		{
+			// A short source name is the tail of many longer ones.
+			name:  "a word that only ends in a source's name names no source",
+			in:    "// mongo-sdk ClientSession reads it",
+			rules: nil,
+		},
+		{
+			name:  "nor does a hyphenated name ending in one, before a coordinate",
+			in:    "- **p** — casdoor-go-sdk mcp/streamable.go:12 reads it",
+			rules: nil,
+		},
+		{
+			name:  "nor does such a word make its line reach for the grammar",
+			in:    "- **p** — mongo-sdk's client.go:12 reads it",
+			rules: nil,
+		},
+		{
+			name:  "nor makes a port on its line a continuation",
+			in:    "- **p** — mongo-sdk listens on the host :8080",
+			rules: nil,
+		},
+		{
+			name:  "nor does a name joined to one by a dot",
+			in:    "// mongo.go-sdk ClientSession reads it",
+			rules: nil,
+		},
+		{
+			name:  "a required module ending in a source's name, mentioned beside a symbol, is another project",
+			in:    "// example.com/acme/go-sdk ClientSession reads it",
+			rules: nil,
+		},
+		{
+			name:  "and beside a file",
+			in:    "// example.com/acme/go-sdk client.go reads it",
+			rules: nil,
+		},
+		{
+			name:  "and it makes no coordinate on its line a citation",
+			in:    "- **p** — example.com/acme/go-sdk reads client.go:12",
+			rules: nil,
+		},
+		{
+			name:  "and it makes no port on its line a continuation",
+			in:    "- **p** — example.com/acme/go-sdk listens on the host :8080",
+			rules: nil,
+		},
+		{
+			// majorTag reads only the source's own name, so the form stands before
+			// the whole path and has to be looked for there.
+			name:  "a form, a governed module path and a major tag",
+			in:    "*Evidence: checked against github.com/modelcontextprotocol/go-sdk v1 — mcp/client.go Client.Connect.*",
+			rules: []string{"head-malformed"},
+		},
+		{
+			name:  "but not when the name only ends in a source's",
+			in:    "*Evidence: checked against mongo-sdk v1 — client.go Client.*",
+			rules: nil,
+		},
+		{
+			name:  "nor when the path is a module go.mod requires for another project",
+			in:    "*Evidence: checked against example.com/acme/go-sdk v1 — client.go Client.*",
+			rules: nil,
+		},
+		{
+			// A module path goes on with its major version, so the tag is not
+			// straight after the source's name.
+			name:  "a form, a module path with its major version and a major tag",
+			in:    "*Evidence: checked against github.com/go-jose/go-jose/v4 v4 — jwk.go JSONWebKey.*",
+			rules: []string{"head-malformed"},
+		},
+		{
+			name:  "and one naming the source with its major version alone",
+			in:    "*Evidence: checked against go-jose/v4 v4 — jwk.go JSONWebKey.*",
+			rules: []string{"head-malformed"},
+		},
+		{
+			name:  "which with no form dates nothing",
+			in:    "// github.com/go-jose/go-jose/v4 v4 parses the key set",
+			rules: nil,
+		},
+		{
+			// go.mod names a module with its major version on, so that is the
+			// name it is asked about.
+			name:  "but a module go.mod requires only at a later major version is that project",
+			in:    "*Evidence: checked against example.com/beta/go-sdk/v2 v2.3.4 — client.go Client.*",
+			rules: nil,
+		},
+		{
+			name:  "and so is a major tag after it",
+			in:    "*Evidence: checked against example.com/beta/go-sdk/v2 v2 — client.go Client.*",
+			rules: nil,
+		},
+		{
+			// The scheme's colon is not a name character, so the form stands in
+			// front of the whole URL.
+			name:  "a form, a link to a governed source and a major tag",
+			in:    "*Evidence: checked against https://github.com/modelcontextprotocol/go-sdk v1 — mcp/client.go Client.Connect.*",
+			rules: []string{"head-malformed"},
+		},
+		{
+			name:  "a link to a required module ending in a source's name is that module",
+			in:    "// https://example.com/acme/go-sdk ClientSession reads it",
+			rules: nil,
+		},
+		{
+			// Read as part of the name, the word before the colon would hide
+			// the module's own path from go.mod.
+			name:  "a colon that opens no link ends the name",
+			in:    "// module:example.com/acme/go-sdk ClientSession reads it",
+			rules: nil,
+		},
+		{
+			name:  "and so is a documentation host's link to it",
+			in:    "// https://pkg.go.dev/example.com/acme/go-sdk ClientSession reads it",
+			rules: nil,
+		},
+		{
+			name:  "but a documentation host's link to a governed source is that source",
+			in:    "// https://pkg.go.dev/github.com/modelcontextprotocol/go-sdk ClientSession reads it",
+			rules: []string{"untagged"},
+		},
+		{
+			name:  "and dates the tag after it",
+			in:    "// https://pkg.go.dev/github.com/modelcontextprotocol/go-sdk v1.7.0 panics on it",
+			rules: []string{"undated"},
+		},
+		{
+			name:  "while a link to another required module gives the tag after it to that module",
+			in:    "// fixed upstream in https://pkg.go.dev/k8s.io/api v0.36.2",
+			rules: nil,
+		},
+		{
+			name:  "a link to a source's pull request names no package in it",
+			in:    "// see https://github.com/modelcontextprotocol/go-sdk/pull/1160 for the fix",
+			rules: nil,
+		},
+		{
+			name:  "nor does one to an issue",
+			in:    "// see https://github.com/modelcontextprotocol/go-sdk/issues/1154",
+			rules: nil,
+		},
+		{
+			name:  "or a discussion",
+			in:    "// see https://github.com/modelcontextprotocol/go-sdk/discussions/12",
+			rules: nil,
+		},
+		{
+			name:  "or a release",
+			in:    "// see https://github.com/modelcontextprotocol/go-sdk/releases/latest",
+			rules: nil,
+		},
+		{
+			name:  "by its tag too",
+			in:    "// see https://github.com/modelcontextprotocol/go-sdk/releases/tag/nightly",
+			rules: nil,
+		},
+		{
+			name:  "or a page under a pull request",
+			in:    "// see https://github.com/modelcontextprotocol/go-sdk/pull/1160/files",
+			rules: nil,
+		},
+		{
+			name:  "or its diff",
+			in:    "// see https://github.com/modelcontextprotocol/go-sdk/pull/1160.diff",
+			rules: nil,
+		},
+		{
+			name:  "or its patch",
+			in:    "// see https://github.com/modelcontextprotocol/go-sdk/pull/1160.patch",
+			rules: nil,
+		},
+		{
+			name:  "or a comment on an issue",
+			in:    "// see https://github.com/modelcontextprotocol/go-sdk/issues/12#issuecomment-3",
+			rules: nil,
+		},
+		{
+			// A number or `latest` is a path segment of its own; one that only
+			// starts a segment is part of a package's name.
+			name:  "but a package whose name only starts like a page is a package",
+			in:    "// go-sdk/issues/12abc Client reads it",
+			rules: []string{"untagged"},
+		},
+		{
+			name:  "and one named by a word after the route",
+			in:    "// go-sdk/pull/helper Client reads it",
+			rules: []string{"untagged"},
+		},
+		{
+			name:  "and one under a pull request's diff",
+			in:    "// go-sdk/pull/1160.diff/helper Client reads it",
+			rules: []string{"untagged"},
+		},
+		{
+			name:  "or under its patch",
+			in:    "// go-sdk/pull/1160.patch/helper Client reads it",
+			rules: []string{"untagged"},
+		},
+		{
+			// Only a pull request is served as a diff.
+			name:  "and one under an issue spelt like a diff",
+			in:    "// go-sdk/issues/12.diff Client reads it",
+			rules: []string{"untagged"},
+		},
+		{
+			name:  "and one that only starts like the latest release",
+			in:    "// go-sdk/releases/latestclient Client reads it",
+			rules: []string{"untagged"},
+		},
+		{
+			// A forge route names a page by its number or its tag. Spelt without
+			// one it is a package's name, which a source may well have.
+			name:  "but a package spelt like a forge route is a package",
+			in:    "// go-sdk/issues Client reads it",
+			rules: []string{"untagged"},
+		},
+		{
+			// The route follows the repository, so one further down a path is
+			// inside a package.
+			name:  "and so is a route deeper in a package path",
+			in:    "// go-sdk/mcp/pull/1 Client reads it",
+			rules: []string{"untagged"},
+		},
+		{
+			name:  "one spelt like the releases page too",
+			in:    "// go-sdk/releases Client reads it",
+			rules: []string{"untagged"},
+		},
+		{
+			name:  "and makes its line reach for the grammar",
+			in:    "- **p** — go-sdk/issues; the server reads client.go:12",
+			rules: []string{"untagged", "bare-line"},
+		},
+		{
+			name:  "and a documentation host's link to one is still a mention",
+			in:    "// https://pkg.go.dev/github.com/modelcontextprotocol/go-sdk/issues Client reads it",
+			rules: []string{"untagged"},
+		},
+		{
+			name:  "nor does the title written after one",
+			in:    "// see https://github.com/modelcontextprotocol/go-sdk/pull/1160 FixClientCrash",
+			rules: nil,
+		},
+		{
+			// go-jose's module path repeats its name, so the pattern first
+			// matches the organisation, with the repository still in its path.
+			name:  "nor a link to the issues of a source whose path repeats its name",
+			in:    "// see https://github.com/go-jose/go-jose/issues/123 for the fix",
+			rules: nil,
+		},
+		{
+			name:  "and a link to one makes no port on its line a continuation",
+			in:    "- **p** — see https://github.com/modelcontextprotocol/go-sdk/issues/1154; the server listens on :8080",
+			rules: nil,
+		},
+		{
+			// The version's finding took the coordinate, but the file it names
+			// is still the one the continuation goes on in. A port there reads
+			// the same way, as it does beside a source's plain name.
+			name:  "and a coordinate another finding took names it all the same",
+			in:    "- **p** — see https://github.com/modelcontextprotocol/go-sdk/issues/1154; v9.9.9 external.go:99; :100 changed",
+			rules: []string{"bare-tag", "bare-line"},
+		},
+		{
+			name:  "unless a coordinate beside it names the file the continuation inherits",
+			in:    "- **p** — see https://github.com/modelcontextprotocol/go-sdk/issues/1154; streamable.go:99 and :100 changed",
+			rules: []string{"bare-line", "bare-line"},
+		},
+		{
+			// The link names the source, and a coordinate carries its own file.
+			name:  "but a full coordinate on its line is still a finding",
+			in:    "- **p** — see https://github.com/modelcontextprotocol/go-sdk/issues/1154; streamable.go:99 changed",
+			rules: []string{"bare-line"},
+		},
+		{
+			name:  "nor one to the issues of a source whose path repeats its name",
+			in:    "- **p** — see https://github.com/go-jose/go-jose/issues/123; the server listens on :8080",
+			rules: nil,
+		},
+		{
+			name:  "while a link into its tree still does",
+			in:    "// see https://github.com/modelcontextprotocol/go-sdk/blob/main/mcp/client.go",
+			rules: []string{"untagged"},
+		},
+		{
+			name:  "and so does one into the tree of a source whose path repeats its name",
+			in:    "// see https://github.com/go-jose/go-jose/blob/main/jwk.go",
+			rules: []string{"untagged"},
+		},
+		{
+			// A word that goes on past a source's name is somebody else's, as
+			// surely as one that starts before it.
+			name:  "a word only starting with a source's name makes its line reach for nothing",
+			in:    "- **p** — go-sdkx reads client.go:12",
+			rules: nil,
+		},
+		{
+			name:  "nor does it make a port on its line a continuation",
+			in:    "- **p** — go-sdk-tools listens on the host :8080",
+			rules: nil,
+		},
+		{
+			name:  "nor one a word goes on past after a dot",
+			in:    "- **p** — go-sdk.js reads client.go:12",
+			rules: nil,
+		},
+		{
+			name:  "but a full stop after a source's name ends a sentence, not the name",
+			in:    "- **p** — it wraps the go-sdk. It listens on the host :8080",
+			rules: []string{"bare-line"},
+		},
+		{
+			// With the foreign module read as a mention, the clause dating the
+			// first one ended in front of it, before the citation that dates it.
+			name: "a mention of a required module ending in a source's name bounds no clause",
+			in: "*Evidence: go-jose JSONWebKey is used by example.com/acme/go-sdk Client " +
+				"(checked against go-jose v4.1.4 — jwk.go JSONWebKey).*",
+			rules: nil,
+		},
+		{
+			name:  "another major version of a governed source is still that source",
+			in:    "// github.com/modelcontextprotocol/go-sdk/v2 v2.0.0 panics on it",
+			rules: []string{"undated"},
+		},
+		{
+			// A module is its path, not its last element: go-sdk is a name many
+			// projects' repositories share.
+			name:  "a required module that only ends in a governed source's name is another project",
+			in:    "// example.com/acme/go-sdk v9.9.9 documents it",
 			rules: nil,
 		},
 		{
@@ -752,13 +1106,13 @@ func TestShapeFindings(t *testing.T) {
 			rules: []string{"source-unnamed"},
 		},
 		{
-			name:  "a project left alone, named as a capitalised possessive",
-			in:    "// go-sdk'S v1.7.0 panics on it",
+			name:  "another project, named as a capitalised possessive",
+			in:    "// k8s.io/api'S v0.36.2 panics on it",
 			rules: nil,
 		},
 		{
 			name:  "another major version of a module go.mod requires is not that module",
-			in:    "// github.com/modelcontextprotocol/go-sdk/v2 v2.0.0 panics on it",
+			in:    "// cloud.google.com/go/storage/v2 v2.0.0 panics on it",
 			rules: []string{"bare-tag"},
 		},
 		{
@@ -855,7 +1209,7 @@ func TestShapeFindings(t *testing.T) {
 		},
 		{
 			name:  "but not a version the text gives another project",
-			in:    "// anthropic-sdk-go's Foo reads what go-sdk v1.7.0 writes",
+			in:    "// anthropic-sdk-go's Foo reads what k8s.io/api v0.36.2 writes",
 			rules: []string{"untagged"},
 		},
 		{
@@ -998,7 +1352,7 @@ func TestAClauseStopsAtTheNextCitation(t *testing.T) {
 	const src = "checked against anthropic-sdk-go v1.70.1 — betaagent.go Foo " +
 		"and checked against anthropic-sdk-go v1.63.0 — betafile.go Bar"
 	shape := ShapeAll(src)
-	cites := Citations(src)
+	cites := Citations(src, nil)
 	if len(cites) != 2 {
 		t.Errorf("Citations = %d, want both: %+v", len(cites), cites)
 	}
@@ -1096,7 +1450,7 @@ func TestTheRegistryAndCommentsAreReadable(t *testing.T) {
 		{"untagged", "- **p12** — go-jose's JSONWebKey.Sentinel decodes it."},
 	}
 	const clean = "\n- **probe** — *Evidence: checked against anthropic-sdk-go v1.70.1 — betasession.go BetaSession.*" +
-		"\n- **probe** — go-sdk v1.7.0 panics on it, and k8s.io/api v0.36.2 has no such field." +
+		"\n- **probe** — the go-sdk panics on it (checked against go-sdk v1.7.0 — mcp/tool.go validateToolName), and k8s.io/api v0.36.2 has no such field." +
 		"\n- **probe** — go-jose's jwt.Sentinel (checked against go-jose v4.1.4 — jwt/validation.go Sentinel) treats it."
 	appended := string(src)
 	for _, p := range probes {
@@ -1158,7 +1512,8 @@ func TestTheRegistryAndCommentsAreReadable(t *testing.T) {
 // p6 go-jose's JSONWebKey.Sentinel decodes it.
 //
 // clean: checked against anthropic-sdk-go v1.70.1 — betasession.go BetaSession,
-// go-sdk v1.7.0 panics on it, and listening on x.com:443 and nexus.infra:8080,
+// the go-sdk panics on it (checked against go-sdk v1.7.0 — mcp/tool.go
+// validateToolName), and listening on x.com:443 and nexus.infra:8080,
 // and go-jose's jwt.Sentinel (checked against go-jose v4.1.4 — jwt/validation.go
 // Sentinel) treats it.
 func P() {}
@@ -1208,8 +1563,13 @@ func TestRungTwoRunsOverTheRealCorpus(t *testing.T) {
 	if err != nil {
 		t.Fatalf("indexing %s: %v", root, err)
 	}
-	cites := Citations(string(src))
-	_, comments, _ := GoComments(root, files, InSet(files), nil)
+	paths, err := Requires(root)
+	if err != nil {
+		t.Fatalf("reading go.mod: %v", err)
+	}
+	requires := Required(paths)
+	cites := Citations(string(src), requires)
+	_, comments, _ := GoComments(root, files, InSet(files), requires)
 	env, err := NewEnv(root)
 	if err != nil {
 		t.Fatalf("NewEnv: %v", err)
@@ -1226,8 +1586,8 @@ func TestRungTwoRunsOverTheRealCorpus(t *testing.T) {
 	// and must add nothing, one does not and must add exactly one finding.
 	sdk := realSDK(t)
 	probes := Citations(
-		"checked against anthropic-sdk-go " + env.Pin + " — " + sdk.file + " " + sdk.method + "\n" +
-			"checked against anthropic-sdk-go " + env.Pin + " — " + sdk.file + " " + sdk.absent)
+		"checked against anthropic-sdk-go "+env.Pin+" — "+sdk.file+" "+sdk.method+"\n"+
+			"checked against anthropic-sdk-go "+env.Pin+" — "+sdk.file+" "+sdk.absent, nil)
 	if len(probes) != 2 {
 		t.Fatalf("the probes did not parse: %+v", probes)
 	}

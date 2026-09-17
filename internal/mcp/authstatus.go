@@ -26,11 +26,14 @@ import (
 // be refused.
 //
 // The status is observed here rather than read off the SDK's error, which does
-// not carry it: go-sdk v1.7.0 renders a non-2xx as `http.StatusText(code)` inside
-// a formatted message and wraps no sentinel (mcp/streamable.go, checkResponse),
-// and 401 is not among the statuses it treats as transient. Matching that
-// message would be matching prose that a version bump may reword; watching the
-// response is exact, and this package already owns the whole transport chain.
+// not carry it: for a 401 the go-sdk wraps no sentinel of its own — only a
+// JSON-RPC error it finds in the body, when the server sent one — and renders
+// the status as `http.StatusText(code)` inside a formatted message, since 401
+// is not among the statuses it treats as transient (checked against go-sdk
+// v1.7.0 — mcp/streamable.go streamableClientConn.checkResponse and
+// isTransientHTTPStatus). Matching that message would be matching prose that a
+// version bump may reword; watching the response is exact, and this package
+// already owns the whole transport chain.
 //
 // Distinct from [ErrServerAnswered], which marks a call the server answered *and
 // refused*: that is a working server reporting a working failure, and the model

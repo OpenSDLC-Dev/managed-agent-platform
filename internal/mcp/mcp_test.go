@@ -153,8 +153,9 @@ func serveToolsList(t *testing.T, result func(cursor string) map[string]any) (ur
 
 func TestListToolsContainsAPanicInsideTheClientLibrary(t *testing.T) {
 	t.Parallel()
-	// `"tools": [null]` is legal JSON that go-sdk v1.7.0 decodes into a nil
-	// element and then dereferences without checking (filterValidTools →
+	// `"tools": [null]` is legal JSON that the go-sdk decodes into a nil
+	// element and then dereferences without checking (checked against go-sdk
+	// v1.7.0 — mcp/streamable_headers.go filterValidTools and
 	// validateParamHeaderAnnotations), so the client panics on a response a
 	// customer-named server chose to send. The caller is an executor shared by
 	// every session on the host and a Go panic is not confined to its
@@ -263,9 +264,11 @@ func TestListToolsCannotTellAnAbsentToolsFieldFromAnEmptyOne(t *testing.T) {
 	// It is not treated that way, and the reason is not a judgment call: the
 	// SDK erases the difference before this package sees it. ListTools passes
 	// the decoded slice through `filterValidTools` before returning, and
-	// filterValidTools builds its result with `make([]*Tool, 0, len(tools))` —
-	// so a nil `tools` and an empty one both arrive here as a non-nil empty
-	// slice, and no check at this layer can separate them.
+	// filterValidTools builds its result with `make([]*Tool, 0, len(tools))`
+	// (checked against go-sdk v1.7.0 — mcp/client.go ClientSession.ListTools;
+	// checked against go-sdk v1.7.0 — mcp/streamable_headers.go
+	// filterValidTools) — so a nil `tools` and an empty one both arrive here as
+	// a non-nil empty slice, and no check at this layer can separate them.
 	//
 	// This test exists to pin that, because "distinguish absent from empty" is
 	// a natural thing for a reviewer to ask for and it cannot be built without
@@ -293,10 +296,12 @@ func TestListToolsCannotTellAnAbsentToolsFieldFromAnEmptyOne(t *testing.T) {
 
 func TestListToolsRefusesAResponseTooLargeToRead(t *testing.T) {
 	t.Parallel()
-	// go-sdk v1.7.0 reads a response with io.ReadAll before decoding anything,
-	// so an unbounded body is an unbounded allocation in an executor shared by
-	// every session on the host. Neither the request timeout nor the page bound
-	// helps — both count requests, not bytes — and no recover catches an OOM.
+	// The go-sdk reads a response with io.ReadAll before decoding anything
+	// (checked against go-sdk v1.7.0 — mcp/streamable.go
+	// streamableClientConn.handleJSON), so an unbounded body is an unbounded
+	// allocation in an executor shared by every session on the host. Neither
+	// the request timeout nor the page bound helps — both count requests, not
+	// bytes — and no recover catches an OOM.
 	//
 	// The fixture streams past the limit without ever finishing, and without a
 	// Content-Length, which is the shape that defeats any check made before the
@@ -338,9 +343,10 @@ func TestConnectClosesTheConnectionItCannotHandBack(t *testing.T) {
 	t.Parallel()
 	// The SDK returns unsupportedProtocolVersionError without closing the
 	// session it just built, and hands back no session for the caller to close
-	// — so this package keeps the transport's Connection in order to close it
-	// itself. A server that answers this way on every attempt would otherwise
-	// leak a reader goroutine and its connection per attempt.
+	// (checked against go-sdk v1.7.0 — mcp/client.go Client.Connect) — so this
+	// package keeps the transport's Connection in order to close it itself. A
+	// server that answers this way on every attempt would otherwise leak a
+	// reader goroutine and its connection per attempt.
 	//
 	// Asserted through the protocol rather than by counting goroutines: closing
 	// a streamable connection that has a session id sends an HTTP DELETE to the
@@ -870,15 +876,16 @@ func TestConnectFailsOnAnUnsupportedProtocolVersion(t *testing.T) {
 	// initialize with a version no revision defines. The client must reject it
 	// rather than proceed against a protocol it does not implement.
 	//
-	// This is the path that reaches the upstream leak: go-sdk v1.7.0 returns
+	// This is the path that reaches the upstream leak: the go-sdk returns
 	// `unsupportedProtocolVersionError` without closing the session it just
-	// built (mcp/client.go, the `!slices.Contains(supportedProtocolVersions,
-	// ...)` branch — the adjacent initialize and initialized failure paths both
-	// call `cs.Close()`), and Connect hands back no session for a caller to
-	// close. Connect works around it by capturing the transport's Connection,
-	// so a server answering this way on every attempt does not leak per
-	// attempt; TestConnectClosesTheConnectionItCannotHandBack is what asserts
-	// that, by watching for the DELETE. The upstream bug is still upstream's.
+	// built, in the `!slices.Contains(supportedProtocolVersions, ...)` branch
+	// where the adjacent initialize and initialized failure paths both call
+	// `cs.Close()` (checked against go-sdk v1.7.0 — mcp/client.go
+	// Client.Connect), and Connect hands back no session for a caller to close.
+	// Connect works around it by capturing the transport's Connection, so a
+	// server answering this way on every attempt does not leak per attempt;
+	// TestConnectClosesTheConnectionItCannotHandBack is what asserts that, by
+	// watching for the DELETE. The upstream bug is still upstream's.
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, err := io.ReadAll(r.Body)
 		if err != nil {
@@ -1570,12 +1577,16 @@ func TestAConnectionAnswersMoreResponsesThanItHasPages(t *testing.T) {
 	// may end carrying a priming event — an `id:` and no data, which SEP-1699
 	// makes legal and go-sdk explicitly supports (processStream: "events with an
 	// empty data buffer are allowed") — so the call it belongs to is still
-	// unanswered and handleSSE reconnects with Last-Event-ID to resume. The
-	// no-progress retry cap the SDK grew for this (#679) does not catch it: it
-	// resets on every id that advances, and each answer here advances one. The
-	// server also sets the pace, since the SSE `retry:` field overrides the
-	// backoff. The SDK's own TODO beside connectSSE records the gap — "we should
-	// consider also setting a limit on total attempts for one logical request".
+	// unanswered and handleSSE reconnects with Last-Event-ID to resume (checked
+	// against go-sdk v1.7.0 — mcp/streamable.go
+	// streamableClientConn.processStream and streamableClientConn.handleSSE).
+	// The no-progress retry cap the SDK grew for this (#679) does not catch it:
+	// it resets on every id that advances, and each answer here advances one.
+	// The server also sets the pace, since the SSE `retry:` field overrides the
+	// backoff. The SDK's own TODO beside connectSSE records the gap — "we
+	// should consider also setting a limit on total attempts for one logical
+	// request" (checked against go-sdk v1.7.0 — mcp/streamable.go
+	// streamableClientConn.connectSSE).
 	//
 	// So this test goes red the day that limit lands, which is the point: it is
 	// how the doc comment learns it may tighten again. What it must never do is
@@ -1778,9 +1789,10 @@ func TestListToolsReportsATransportFailure(t *testing.T) {
 		// SDK server, so Connect must succeed. It never issues tools/list — the
 		// SDK sends that method from exactly one place, ClientSession.ListTools,
 		// and Connect issues only server/discover, initialize and
-		// notifications/initialized — so a Connect error here means the listing
-		// was never reached and the assertion below would pass without testing
-		// anything.
+		// notifications/initialized (checked against go-sdk v1.7.0 —
+		// mcp/client.go ClientSession.ListTools and Client.Connect) — so a
+		// Connect error here means the listing was never reached and the
+		// assertion below would pass without testing anything.
 		t.Fatalf("Connect: %v (the fixture only fails tools/list)", err)
 	}
 	defer conn.Close()
@@ -1993,11 +2005,15 @@ func TestTheFallbackDeadlineOutlivesTheRoundTrip(t *testing.T) {
 
 func TestDetachedRequestsGetADeadlineOfTheirOwn(t *testing.T) {
 	t.Parallel()
-	// go-sdk detaches a connection's lifecycle context deliberately
-	// (xcontext.Detach: no deadline, nil Done) and sends the session-ending
-	// DELETE on it, so neither the caller's context nor ListTimeout can bound
-	// that request. http.Client.Timeout would, but it belongs to the caller and
-	// a supplied client may leave it zero — so the transport supplies a floor.
+	// go-sdk detaches a connection's lifecycle context deliberately, through
+	// xcontext.Detach — no deadline, nil Done — and sends the session-ending
+	// DELETE on it (checked against go-sdk v1.7.0 —
+	// internal/xcontext/xcontext.go Detach; checked against go-sdk v1.7.0 —
+	// mcp/streamable.go StreamableClientTransport.Connect and
+	// streamableClientConn.Close), so neither the caller's context nor
+	// ListTimeout can bound that request. http.Client.Timeout would, but it
+	// belongs to the caller and a supplied client may leave it zero — so the
+	// transport supplies a floor.
 	if left, had := mcp.RequestDeadlineForTest(context.Background()); !had {
 		t.Error("a request with no deadline reached the round-tripper still without one")
 	} else if left <= 0 || left > mcp.DialTimeout {

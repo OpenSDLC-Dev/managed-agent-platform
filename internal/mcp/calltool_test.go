@@ -268,12 +268,13 @@ func TestCallToolSendsTheModelsArgumentBytesUnaltered(t *testing.T) {
 // multi round-trip answer costs and how it ends (MCP 2026-07-28, SEP-2322).
 //
 // A server may answer `resultType: "input_required"` rather than run the tool,
-// asking for input to be supplied and the call retried. go-sdk v1.7.0 answers
-// those requests in its own client middleware and re-sends the call, so a server
-// that never stops asking is a loop the caller cannot see — and the two things
-// worth pinning are that it terminates, and that it terminates as a failure. An
-// empty answer instead would reach the model as a tool that returned nothing,
-// with nothing to say why.
+// asking for input to be supplied and the call retried. The go-sdk answers
+// those requests in its own client middleware and re-sends the call (checked
+// against go-sdk v1.7.0 — mcp/mrtr.go clientMultiRoundTripMiddleware), so a
+// server that never stops asking is a loop the caller cannot see — and the two
+// things worth pinning are that it terminates, and that it terminates as a
+// failure. An empty answer instead would reach the model as a tool that
+// returned nothing, with nothing to say why.
 //
 // The request is a `roots/list`, one of the three methods the SDK decodes (with
 // `elicitation/create` and `sampling/createMessage`); it refuses any other while
@@ -363,8 +364,9 @@ func TestCallToolKeepsTheServersOwnTextOverTheStructuredAnswer(t *testing.T) {
 // TestCallToolDropsBlocksAToolResultCannotCarry covers the two content types the
 // SDK's decoder accepts here but the protocol admits only in sampling messages.
 // They reach the client because CallToolResult decodes its content with no
-// allow-list at all (protocol.go, contentsFromWire(_, nil)); this platform has
-// nowhere to put them, and a block guessed into a text answer would be a
+// allow-list at all — it hands contentsFromWire a nil one (checked against
+// go-sdk v1.7.0 — mcp/protocol.go CallToolResult.UnmarshalJSON); this platform
+// has nowhere to put them, and a block guessed into a text answer would be a
 // fabrication. The blocks around them must survive.
 func TestCallToolDropsBlocksAToolResultCannotCarry(t *testing.T) {
 	t.Parallel()
@@ -441,7 +443,8 @@ func TestCallToolStillSucceedsWhenATrulyEmptyAnswerComesBack(t *testing.T) {
 //
 // `"inputRequests": {"x": null}` is legal JSON. InputRequestMap.UnmarshalJSON
 // decodes it into a map[string]*raw, checks only that the map itself is
-// non-nil, and then reads a field off every value — so the nil value is
+// non-nil, and then reads a field off every value (checked against go-sdk
+// v1.7.0 — mcp/protocol.go InputRequestMap.UnmarshalJSON) — so the nil value is
 // dereferenced *during* the result decode, on the calling goroutine. The
 // endpoint is customer-supplied and the eventual caller is an executor shared
 // by every session on the host, where a Go panic is not confined to the
@@ -473,10 +476,11 @@ func TestCallToolContainsAPanicInsideTheClientLibrary(t *testing.T) {
 
 // TestCallToolRefusesAnInputRequiredAnswerItCannotFulfil pins the one multi
 // round-trip shape that reaches this package. The SDK's client middleware
-// drives its retry loop off a non-nil `inputRequests` map, so an answer that
-// omits the key entirely is handed back untouched — carrying no output, from a
-// tool that never ran. Left alone it is a successful empty result, which is the
-// one reading of it the model can neither detect nor recover from.
+// drives its retry loop off a non-nil `inputRequests` map (checked against
+// go-sdk v1.7.0 — mcp/mrtr.go clientMultiRoundTripMiddleware), so an answer
+// that omits the key entirely is handed back untouched — carrying no output,
+// from a tool that never ran. Left alone it is a successful empty result, which
+// is the one reading of it the model can neither detect nor recover from.
 func TestCallToolRefusesAnInputRequiredAnswerItCannotFulfil(t *testing.T) {
 	t.Parallel()
 	url, _ := serveToolCall(t, func(json.RawMessage) map[string]any {
