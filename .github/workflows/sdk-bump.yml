@@ -78,7 +78,7 @@ jobs:
             elif [ "$RC" = '0' ]; then
               echo 'No transition awaits a disposition. The stamps behind the pin, below, are judgment rather than obligation: a stamp moves only when someone has re-read the claim.'
             else
-              echo 'Either a transition awaits a disposition, or the report could not read a source the corpus cites — the end of the output says which. Each transition awaiting one names the line that would disposition it, and the ritual is in `docs/REFERENCE_PROJECTS.md`.'
+              echo 'Either a transition awaits a disposition, or the report could not read a source the corpus cites — the end of the output says which. Each transition awaiting one names the line that would disposition it, unless it was stamped at the pin, where the claim itself is wrong. The ritual is in `docs/REFERENCE_PROJECTS.md`.'
             fi
             echo
             echo '```'

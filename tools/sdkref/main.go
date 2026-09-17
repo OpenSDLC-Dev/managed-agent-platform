@@ -29,15 +29,16 @@ docs/plan/51_sdk-reference-binding.md's grammar.
               report — every anchor resolved against the pin whatever its
               stamp, plus the contradicted spans, the lag list, and everything
               not checked — and exit 1 on a transition no citation has
-              dispositioned, or 2 when the corpus cites a module this run could
-              not open or one replaced by another tree, the -fail cases below
+              dispositioned, or 2 in the -fail cases below
   -fail       also run rung 2, and exit non-zero on any rung 1 or rung 2
               finding — or exit 2, unavailable, when the corpus cites a
-              module this run could not open, or one a replace or a go.work
-              points at another tree: rung 2 would skip the first in silence
-              and certify the second against the wrong code. anthropic-cli is
-              a checkout rather than a module, so its citations are held to
-              shape alone and never make a run unavailable
+              module this run could not open, a bundled spec it could not
+              read, or a module a replace or a go.work points at another
+              tree: a run that could not read what it cites is no verdict on
+              it, and one that read a replacement would certify the wrong
+              code. anthropic-cli is a checkout rather than a module, so its
+              citations are held to shape alone and never make a run
+              unavailable
 
 make verify runs -fail over the whole corpus, through this package's own test.
 Without -fail no finding changes the exit code: -report's is about transitions,

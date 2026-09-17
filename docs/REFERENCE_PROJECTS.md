@@ -64,7 +64,8 @@ A pull request that moves a pin in `go.mod` — the SDK's or go-jose's — or ed
 runs `make sdk-bump-report` through [`sdk-bump.yml`](../.github/workflows/sdk-bump.yml), and
 fails while a **transition** awaits a disposition: an anchor the pin no longer holds, or an
 `absent at` anchor it holds again. Each is a deletion, a rename or a reinstatement in the
-reference, and the report names the line that dispositions it
+reference, and the report names the line that dispositions it — except for an anchor
+stamped at the pin, which no bump has passed, and whose claim is simply wrong
 ([plan 51](./plan/51_sdk-reference-binding.md)).
 
 1. **An anchor gone at the pin** takes `absent at <source> <pin> — <file> <what went>` in
