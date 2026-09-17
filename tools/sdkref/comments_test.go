@@ -125,6 +125,19 @@ func TestACommentFindingNamesTheLineItsTextIsOn(t *testing.T) {
 	}
 }
 
+// TestACommentCitationsUnitIsItsParagraph. A disposition is written beside the
+// anchor it acknowledges, and in a comment "beside" is the paragraph: the
+// wrapped citation's head is on the paragraph's third line, and its unit is the
+// paragraph that began two lines earlier.
+func TestACommentCitationsUnitIsItsParagraph(t *testing.T) {
+	root := commentTree(t)
+	_, citations, _ := GoComments(root, []string{"probe.go"}, ourFiles(), nil)
+	if len(citations) != 1 || citations[0].Unit != 3 {
+		t.Errorf("citations = %+v, want the wrapped citation in the unit its paragraph "+
+			"begins at, line 3", citations)
+	}
+}
+
 // TestTheCorpusCarriesCommentCitationsToTheResolvingRungs. Rung 1 reading the
 // comments is only half of it: if the citations it finds there never reach
 // rungs 2 and 3, then after slice 3 migrates the comments every one of them is

@@ -60,6 +60,64 @@ func TestFailChecksBothRungs(t *testing.T) {
 	}
 }
 
+// TestReportFailsOnlyOnAnUndispositionedTransition is the exit code the bump
+// workflow reads. The probe's anchor is stamped before the pin and names nothing
+// the SDK declares, so the pin reports it gone; with its disposition beside it,
+// the same anchor has been read. Rung 2 judges neither, since neither anchor it
+// could fail on is stamped at the pin and wrong — which is also why the gate's
+// -fail passes both: a transition is not the gate's to read.
+func TestReportFailsOnlyOnAnUndispositionedTransition(t *testing.T) {
+	root := repoRoot(t)
+	sdk, err := Module(root, SDKModule)
+	if err != nil {
+		t.Fatalf("resolving the pin offline: %v", err)
+	}
+	const anchor = "checked against anthropic-sdk-go v1.0.0 — betaagent.go NoSuchSymbolAnywhereInTheSDK"
+	for _, tc := range []struct {
+		name, evidence string
+		want           int
+	}{
+		{"awaiting a disposition", anchor, 1},
+		{"dispositioned", anchor + " and absent at anthropic-sdk-go " + sdk.Version +
+			" — betaagent.go NoSuchSymbolAnywhereInTheSDK", 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			probe := filepath.Join(t.TempDir(), "probe.md")
+			body := "- **probe** — *Evidence: " + tc.evidence + ".*\n"
+			if err := os.WriteFile(probe, []byte(body), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			base := []string{"-root", root, "-file", probe, "-comments=false"}
+			var out, errOut strings.Builder
+			if code := run(append(base, "-report"), &out, &errOut); code != tc.want {
+				t.Errorf("-report exited %d, want %d\nstdout:\n%s\nstderr:\n%s",
+					code, tc.want, out.String(), errOut.String())
+			}
+			out.Reset()
+			if code := run(append(base, "-fail"), &out, io.Discard); code != 0 {
+				t.Errorf("-fail exited %d, want 0: the gate does not read transitions\n%s",
+					code, out.String())
+			}
+		})
+	}
+}
+
+// TestReportDoesNotPassOverASourceItCouldNotOpen. -report's exit 0 says no
+// transition awaits a disposition, which it cannot say of a source it never
+// opened: the go-jose citation below reaches no rung that could find one.
+func TestReportDoesNotPassOverASourceItCouldNotOpen(t *testing.T) {
+	root, _ := probeModule(t, "- **probe** — *Evidence: checked against go-jose v4.0.5 — jwk.go JSONWebKey.*\n")
+	var out, errOut strings.Builder
+	code := run([]string{"-root", root, "-file", "probe.md", "-comments=false", "-report"}, &out, &errOut)
+	if code != exitUnavailable {
+		t.Errorf("-report exited %d over a citation of a source it could not open, want %d\nstdout:\n%s\nstderr:\n%s",
+			code, exitUnavailable, out.String(), errOut.String())
+	}
+	if !strings.Contains(errOut.String(), "go-jose") {
+		t.Errorf("stderr does not name the source that went unchecked:\n%s", errOut.String())
+	}
+}
+
 // TestHelpIsNotAFailure. Exit 2 means "I could not look", and a caller that
 // asked for the usage and got it has nothing a script should branch on.
 func TestHelpIsNotAFailure(t *testing.T) {
