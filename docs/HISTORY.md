@@ -63,7 +63,7 @@ with no tag, which dated twelve claims and found two no longer held, and rungs 1
 failing the gate (#741, slice 4). This close-out gives the report its dispositions — an
 `absent at` in an anchor's own registry line or comment paragraph, at a tag after its stamp
 and no later than the pin — and [`sdk-bump.yml`](../.github/workflows/sdk-bump.yml), which
-fails the pull request moving a pin while a transition awaits one; the ritual is in
+fails a pull request that moves a pin or edits a citation while a transition awaits one; the ritual is in
 [REFERENCE_PROJECTS.md](./REFERENCE_PROJECTS.md). At close the corpus held 541 citations, no
 shape or resolution finding, and four transitions, each already dispositioned. What the
 plan left out stays named in it: semantic drift under a surviving name, coordinates into

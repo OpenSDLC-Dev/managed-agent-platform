@@ -40,8 +40,8 @@ docs/plan/51_sdk-reference-binding.md's grammar.
               shape alone and never make a run unavailable
 
 make verify runs -fail over the whole corpus, through this package's own test.
-Without -fail no finding changes the exit code: -report's is about transitions
-alone, which the pull request moving a pin is failed on and the gate never is. A
+Without -fail no finding changes the exit code: -report's is about transitions,
+which the pull request bringing one is failed on and the gate never is. A
 run that could not read the corpus, or open the pin for -report, exits 2 either
 way. ` + "`make sdk-bump-report`" + ` is the front end for -report.`
 

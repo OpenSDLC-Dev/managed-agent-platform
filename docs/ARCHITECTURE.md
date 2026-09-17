@@ -718,8 +718,7 @@ a pinned module against that pin, whatever the citation's stamp, falsifies a lin
 stated reason against the tag the span was written for wherever the module cache already
 holds it, and never fails the gate, because at gate time a symbol that has vanished is not
 yet a defect, and reddening until every such claim is re-verified is the wholesale
-re-editing the plan removes. The pull request that moves a pin is where it is read:
-[`sdk-bump.yml`](../.github/workflows/sdk-bump.yml) runs it on any `go.mod` change and fails
-while a transition awaits a disposition. An anchor gone at the pin is dispositioned by an
-`absent at` in its own registry line or comment paragraph; an `absent at` anchor resolving
-again, by dropping that clause. Neither moves a stamp.
+re-editing the plan removes. A transition is read on the pull request that brings it
+instead: [`sdk-bump.yml`](../.github/workflows/sdk-bump.yml) runs the report on any change
+to `go.mod` or a citation, and fails while one awaits the one-line disposition
+[REFERENCE_PROJECTS.md](./REFERENCE_PROJECTS.md) describes.

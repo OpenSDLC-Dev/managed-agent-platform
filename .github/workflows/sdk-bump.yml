@@ -3,26 +3,26 @@ name: sdk-bump
 # The observation point for the SDK bump report (plan 51).
 #
 # `make sdk-bump-report` resolves every citation into a module go.mod pins
-# against that pin, whatever the citation's stamp, and a transition — an anchor
-# gone at the pin, or an `absent at` anchor resolving again — is what a bump
-# leaves for a human to read. The gate never fails on one, because at gate time a
-# symbol that has vanished is not yet a defect: the entry may describe a version
-# where it existed. On the pull request that moves a pin it has been read or it
-# has not, and reading it is written down beside the anchor — the ritual is in
-# docs/REFERENCE_PROJECTS.md. So this job fails on a transition no citation has
-# dispositioned, and on nothing else the report says: the stamps behind the pin
-# stay judgment, and the shape and pin-resolution findings it prints above the
-# report already fail `make verify`.
+# against that pin, whatever the citation's stamp. A transition — an anchor gone
+# at the pin, or an `absent at` anchor resolving again — is what a bump leaves
+# for a human to read, and reading one is written down beside the anchor: the
+# ritual is in docs/REFERENCE_PROJECTS.md. `make verify` never reads one, since
+# at gate time a symbol that has vanished is not yet a defect. This job fails
+# while one awaits a disposition, or when the report could not read a source the
+# corpus cites. The stamps behind the pin stay judgment, and the shape and
+# pin-resolution findings it prints above the report already fail `make verify`.
 on:
   pull_request:
     paths:
-      # A path filter cannot see which line of go.mod moved, so this runs on
-      # every go.mod change. One that moved no governed pin reports the
-      # transitions the corpus already has — each dispositioned, unless a
-      # citation stamped behind the pin was written since without one, which is
-      # then this job's to name.
+      # A transition arrives two ways: a pin moves, or a citation is written
+      # behind the pin without its disposition, or loses one. Watching both
+      # keeps main free of one, so this job fails only on the pull request that
+      # brought it. A path filter cannot see which line of go.mod moved, so
+      # every go.mod change runs it; the Go files carry the comment citations,
+      # and tools/sdkref with them.
       - 'go.mod'
-      - 'tools/sdkref/**'
+      - 'docs/DIVERGENCES.md'
+      - '**.go'
       - '.github/workflows/sdk-bump.yml'
       # The recipe is this workflow's only executable step.
       - 'Makefile'
@@ -45,8 +45,9 @@ jobs:
         with:
           go-version-file: go.mod
       # The command lives in the Makefile — the single executable source. Its
-      # `build` prerequisite is what puts the pinned modules on disk, so the
-      # report resolves them with the proxy refused.
+      # recipe downloads the modules rather than building them, so a bump that
+      # breaks compilation — the pull request that most needs the report —
+      # still gets it.
       #
       # tee, so the report reaches both the log and the summary; pipefail, so the
       # step's status is the report's and not tee's. The exit code is kept for the
@@ -72,10 +73,12 @@ jobs:
             echo '### SDK bump report'
             if [ "$STATUS" = 'cancelled' ]; then
               echo 'Cancelled before the report could answer. This is **not** a clean result — re-run it.'
+            elif [ -z "$RC" ]; then
+              echo 'The report never ran: an earlier step failed. This is **not** a clean result — read the step log.'
             elif [ "$RC" = '0' ]; then
               echo 'No transition awaits a disposition. The stamps behind the pin, below, are judgment rather than obligation: a stamp moves only when someone has re-read the claim.'
             else
-              echo 'Either a transition awaits a disposition, or the report could not read what the corpus cites — the end of the output says which. Each transition awaiting one names the line that would disposition it: an anchor gone at the pin takes `absent at <source> <pin>` beside it, and an `absent at` anchor resolving again drops that clause. Neither moves a `checked against` stamp. The ritual is in `docs/REFERENCE_PROJECTS.md`.'
+              echo 'Either a transition awaits a disposition, or the report could not read a source the corpus cites — the end of the output says which. Each transition awaiting one names the line that would disposition it, and the ritual is in `docs/REFERENCE_PROJECTS.md`.'
             fi
             echo
             echo '```'

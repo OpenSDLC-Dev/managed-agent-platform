@@ -33,9 +33,9 @@
 //
 // The two failing rungs fail `make verify` through this package's own test,
 // which runs -fail over both halves. The report's one obligation is on the pull
-// request that moves a pin, where .github/workflows/sdk-bump.yml runs -report:
-// it fails while a transition awaits a disposition — the `absent at` written
-// beside an anchor gone at the pin, or dropped from one back there.
+// request that brings a transition — moving a pin, or editing a citation — where
+// .github/workflows/sdk-bump.yml runs -report and fails while one awaits the
+// disposition docs/REFERENCE_PROJECTS.md describes.
 package main
 
 import (
@@ -87,9 +87,10 @@ func (f Finding) String() string {
 type Citation struct {
 	File string
 	Line int
-	// Unit is the line the text the citation was read from begins on — its
-	// registry line, or its comment paragraph. A disposition is written beside
-	// the anchor it acknowledges, and this is what "beside" means.
+	// Unit names the text the citation was read from, within File: its registry
+	// line's number, or the byte offset its comment paragraph begins at — a line
+	// can hold two comments. A disposition is written beside the anchor it
+	// acknowledges, and this is what "beside" means.
 	Unit   int
 	at     int    // byte offset within the text scanned; see Finding.at
 	Form   string // since | checked against | absent at
