@@ -641,9 +641,11 @@ func symbolLike(word string) bool {
 
 // citedBy reports whether the citation opening at `at` dates mention m: it
 // cites m's source, and its locator names what m names. A qualified name is
-// named by itself, or — when its qualifier is a package — by the declaration it
-// qualifies: `jwt.Expected` by `Expected.Time`, never `JSONWebKey.UnmarshalJSON`
-// by `OtherType.UnmarshalJSON`. A bare name or a package path is named by a
+// named by itself, or by a symbol whose first part is its last part — the way a
+// package-qualified name is cited, `jwt.Expected` by `Expected.Time`, though
+// spelling cannot tell a package from a type — and never by another type's
+// member of the same name: not `JSONWebKey.UnmarshalJSON` by
+// `OtherType.UnmarshalJSON`. A bare name or a package path is named by a
 // part of a symbol, of the file's path, or of a schema path. A citation of
 // another symbol would leave this one free to vanish, since rung 2 resolves
 // only what a citation names.
