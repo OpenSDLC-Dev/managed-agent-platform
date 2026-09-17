@@ -4,16 +4,12 @@ What is being worked on right now, and how far along it is — nothing else. **S
 
 ## Active work
 
-**Closing out what the archive-endings cluster left open.** #713, #710, #574, #716, #730 and
-#731 landed and shipped in v0.4.0. #720 is the second half of a two-phase migration — the
-CHECK it wants would refuse the archive writes of any replica still running a release from
-before #713, so it had to wait for a release carrying #713, and v0.4.0 is that release.
+**none.** Nothing is in flight. The archive-endings cluster is closed: #713, #710, #574,
+#716, #730 and #731 shipped in v0.4.0 ([docs/changelog/0.4.0.md](./docs/changelog/0.4.0.md)),
+and #720's primary-unarchived CHECK landed after it; its entry is a
+[changelog.d/](./changelog.d/) fragment.
+The backlog is [GitHub issues](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues).
 
 ## Tasks
 
-- [x] #716 — the dream closing arm re-reads its session under the row lock before archiving
-- [x] #730 — the thread and session archive rules recorded together; both halves pinned by tests
-- [x] #731 — an archive ending a retrying child counts its fold move; a wait stays off such a child
-- [x] v0.4.0 ([docs/RELEASING.md](./docs/RELEASING.md)) — the release PR, the tag on its squash
-      merge, a green `release.yml` run, and `§ [0.4.0]` moved to docs/changelog/0.4.0.md
-- [ ] #720 — a second one-shot clear, then the primary-unarchived CHECK
+_None — no active work._

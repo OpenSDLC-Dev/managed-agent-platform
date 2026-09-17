@@ -244,9 +244,10 @@ func foldSession(ctx context.Context, q Querier, sessionID domain.ID, t ThreadTr
 	}
 	rows, err := q.Query(ctx,
 		// An archived session's primary is live by this predicate, because the
-		// archive leaves that row alone (#713). No fold over it ever stands: a
-		// fold runs only from a transition, every transition commits through an
-		// append, and an append to an archived session is refused
+		// archive leaves that row alone (#713) and a CHECK keeps its archived_at
+		// null (migration 0041). No fold over it ever stands: a fold runs only
+		// from a transition, every transition commits through an append, and an
+		// append to an archived session is refused
 		// (ErrSessionArchived). The guarantee is the transaction, not an
 		// ordering — several callers fold first and append after, and the
 		// refusal rolls the fold back with everything else. Anything that ever
