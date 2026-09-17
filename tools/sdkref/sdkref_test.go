@@ -592,6 +592,16 @@ func TestShapeFindings(t *testing.T) {
 			rules: nil,
 		},
 		{
+			name:  "or its diff",
+			in:    "// see https://github.com/modelcontextprotocol/go-sdk/pull/1160.diff",
+			rules: nil,
+		},
+		{
+			name:  "or its patch",
+			in:    "// see https://github.com/modelcontextprotocol/go-sdk/pull/1160.patch",
+			rules: nil,
+		},
+		{
 			name:  "or a comment on an issue",
 			in:    "// see https://github.com/modelcontextprotocol/go-sdk/issues/12#issuecomment-3",
 			rules: nil,
@@ -658,6 +668,13 @@ func TestShapeFindings(t *testing.T) {
 			name:  "and a link to one makes no port on its line a continuation",
 			in:    "- **p** — see https://github.com/modelcontextprotocol/go-sdk/issues/1154; the server listens on :8080",
 			rules: nil,
+		},
+		{
+			// The version's finding already took the coordinate, so it names
+			// that claim's file and nothing a port could inherit.
+			name:  "nor does a coordinate another finding took",
+			in:    "- **p** — see https://github.com/modelcontextprotocol/go-sdk/issues/1154; v9.9.9 external.go:99; the server listens on :8080",
+			rules: []string{"bare-tag"},
 		},
 		{
 			name:  "unless a coordinate beside it names the file the continuation inherits",
