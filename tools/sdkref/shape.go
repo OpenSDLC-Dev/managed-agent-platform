@@ -116,8 +116,9 @@ var (
 	// forgeRoute is a page a repository link reaches that is not its tree: a pull
 	// request, an issue or a discussion by its number, or a release by its tag or
 	// as the latest. What follows one is a title, never a symbol. Without its
-	// number or tag the route's name is a package's name, which a source may have.
-	forgeRoute = regexp.MustCompile(`^(?:(?:pull|issues|discussions)/\d|releases/(?:latest|tag/))`)
+	// number or tag, each a path segment of its own, the route's name is a
+	// package's name, which a source may have.
+	forgeRoute = regexp.MustCompile(`^(?:(?:pull|issues|discussions)/\d+(?:/|$)|releases/(?:latest(?:/|$)|tag/))`)
 	// packagePath is a path of packages, which symbolLike admits beside a
 	// symbol; majorVersion is a module's major version, which names no package.
 	packagePath  = regexp.MustCompile(`^[a-z][\w.-]*(?:/[\w.-]+)+$`)
@@ -264,8 +265,8 @@ func nameStart(text string, i int) int {
 // reaches reports whether a line reaches for this grammar: reach, matched where
 // it names a source — not where a longer word goes on past it. A link to a
 // forgeRoute of the source names the source but none of its files, so it counts
-// only when pages is set: it reaches for a coordinate, which carries its own
-// file, but not for a continuation, which has to inherit one.
+// only when pages is set, where a file is named already: for a coordinate, which
+// carries its own, or a continuation beside one.
 func reaches(text string, requires func(string) bool, pages bool) bool {
 	for _, at := range reach.FindAllStringIndex(text, -1) {
 		rest := text[at[1]:]
@@ -621,8 +622,10 @@ func (s Scanner) bare(text string, consumed []bool) ([]Finding, []Finding) {
 	// filename it inherits: a line naming a governed source, or — in a Go
 	// comment, where the paragraph usually names no source at all — a
 	// coordinate into a file this repository does not ship, sitting on the same
-	// line. With neither, a lone `:12` is far more likely to be a port.
-	if !reaches(text, s.Requires, false) && !(s.AnyExternalCoordinate && external) {
+	// line. With neither, a lone `:12` is far more likely to be a port. A link to
+	// a source's forge page names no file, so it counts only beside a coordinate
+	// that does.
+	if !reaches(text, s.Requires, external) && !(s.AnyExternalCoordinate && external) {
 		return findings, ours
 	}
 	for _, at := range continuation.FindAllStringSubmatchIndex(text, -1) {

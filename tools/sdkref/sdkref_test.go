@@ -587,6 +587,33 @@ func TestShapeFindings(t *testing.T) {
 			rules: nil,
 		},
 		{
+			name:  "or a page under a pull request",
+			in:    "// see https://github.com/modelcontextprotocol/go-sdk/pull/1160/files",
+			rules: nil,
+		},
+		{
+			name:  "or a comment on an issue",
+			in:    "// see https://github.com/modelcontextprotocol/go-sdk/issues/12#issuecomment-3",
+			rules: nil,
+		},
+		{
+			// A number or `latest` is a path segment of its own; one that only
+			// starts a segment is part of a package's name.
+			name:  "but a package whose name only starts like a page is a package",
+			in:    "// go-sdk/issues/12abc Client reads it",
+			rules: []string{"untagged"},
+		},
+		{
+			name:  "and one named by a word after the route",
+			in:    "// go-sdk/pull/helper Client reads it",
+			rules: []string{"untagged"},
+		},
+		{
+			name:  "and one that only starts like the latest release",
+			in:    "// go-sdk/releases/latestclient Client reads it",
+			rules: []string{"untagged"},
+		},
+		{
 			// A forge route names a page by its number or its tag. Spelt without
 			// one it is a package's name, which a source may well have.
 			name:  "but a package spelt like a forge route is a package",
@@ -631,6 +658,11 @@ func TestShapeFindings(t *testing.T) {
 			name:  "and a link to one makes no port on its line a continuation",
 			in:    "- **p** — see https://github.com/modelcontextprotocol/go-sdk/issues/1154; the server listens on :8080",
 			rules: nil,
+		},
+		{
+			name:  "unless a coordinate beside it names the file the continuation inherits",
+			in:    "- **p** — see https://github.com/modelcontextprotocol/go-sdk/issues/1154; streamable.go:99 and :100 changed",
+			rules: []string{"bare-line", "bare-line"},
 		},
 		{
 			// The link names the source, and a coordinate carries its own file.
