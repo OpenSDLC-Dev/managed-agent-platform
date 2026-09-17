@@ -72,7 +72,13 @@ mid-slice in something the release would half-ship.
    the trade a name-based exclusion buys; what it cannot do is miss an archive,
    since the tool writes those from a strict `X.Y.Z` version and nowhere else.
    The v0.3.0 cut found three citations, all in one archived plan, and a
-   filename-only grep saw only two.
+   filename-only grep saw only two. A citation can also name the directory
+   rather than a fragment — "the delivery narrative is the `changelog.d/`
+   fragments" — which no slug matches, so grep the directory too,
+   `git grep -nF 'changelog.d/' -- . ':!CHANGELOG.md' ':!changelog.d' ':(glob,exclude)docs/changelog/[0-9]*.[0-9]*.[0-9]*.md'`,
+   and retarget each hit that says where a change folded in this cut is
+   written; the hits that describe the convention stay. The v0.4.0 cut's
+   slug sweep missed one such citation, in an archived plan.
 7. Normal PR flow — verifier plus **full dual review** (the PR touches
    `Chart.yaml`, and a release PR changes the deploy surface; it is not
    LIGHT-tier docs), CI green, threads settled, squash merge.
@@ -120,7 +126,10 @@ also runs locally, where without `PUSH=1` nothing leaves the machine:
    release notes, rendered up front for the same reason: whole leading
    Keep-a-Changelog groups under GitHub's 125,000-character body cap, then
    a link to the full CHANGELOG.md section (the first cut's absorbed
-   backlog exceeds the cap). The section's relative links are rewritten
+   backlog exceeded the cap, and so did v0.4.0's section, whose notes carry
+   its `Added` and `Changed` groups alone). Keeping stops at the first group
+   that does not fit, so a later group that would fit — `Security` after an
+   oversized `Fixed` — is left to the link as well. The section's relative links are rewritten
    absolute at the tag on the way out: github.com's release renderer does
    resolve a repo-root-relative target against the repository at the tag,
    so the page itself reads correctly, but the raw body the REST API and

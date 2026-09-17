@@ -3,12 +3,13 @@ name: managed-agent-platform
 description: >-
   Self-hostable platform for long-horizon agents — the control plane, the brain
   pool, and the platform executor (with the in-cluster Kubernetes sandbox
-  backend), plus an optional in-cluster Postgres and MinIO. Wire-compatible with
-  Anthropic Claude Managed Agents.
+  backend), plus optional in-cluster Postgres, MinIO and OpenBao and an optional
+  bundled Casdoor identity provider. Wire-compatible with Anthropic Claude
+  Managed Agents.
 type: application
 # version is the chart version; appVersion is the default image tag (see values.yaml).
-version: 0.3.0
-appVersion: "0.3.0"
+version: 0.4.0
+appVersion: "0.4.0"
 kubeVersion: ">=1.26.0-0"
 sources:
   - https://github.com/OpenSDLC-Dev/managed-agent-platform

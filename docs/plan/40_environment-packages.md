@@ -321,9 +321,10 @@ the gate.
    create-time sentence to the past tense, #576 moved from the `Tracked:` head to the
    `landed for` tail — so `make registry-check` stays green; docs/ARCHITECTURE.md's
    execution-flow step 4; docs/self-hosted-security.md §2 and §4 (D7);
-   `changelog.d/environment-packages.added.md` and `.fixed.md` (the #576 half), and the
-   closing sentence of `changelog.d/packages-type-key.fixed.md`, which says the runtime
-   half stays open and will no longer be true in the same release; this plan archived,
+   the `environment-packages` added and fixed fragments (`CHANGELOG.md § [0.4.0]`; the
+   fixed one is the #576 half), and the closing sentence of the `packages-type-key` fixed
+   fragment (`CHANGELOG.md § [0.4.0]`), which said the runtime
+   half stays open and would no longer be true in the same release; this plan archived,
    its progress summary in docs/HISTORY.md, STATE.md's line; the follow-up issue for the
    cache.
 
