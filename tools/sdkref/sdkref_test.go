@@ -619,6 +619,22 @@ func TestShapeFindings(t *testing.T) {
 			rules: []string{"untagged"},
 		},
 		{
+			name:  "and one under a pull request's diff",
+			in:    "// go-sdk/pull/1160.diff/helper Client reads it",
+			rules: []string{"untagged"},
+		},
+		{
+			name:  "or under its patch",
+			in:    "// go-sdk/pull/1160.patch/helper Client reads it",
+			rules: []string{"untagged"},
+		},
+		{
+			// Only a pull request is served as a diff.
+			name:  "and one under an issue spelt like a diff",
+			in:    "// go-sdk/issues/12.diff Client reads it",
+			rules: []string{"untagged"},
+		},
+		{
 			name:  "and one that only starts like the latest release",
 			in:    "// go-sdk/releases/latestclient Client reads it",
 			rules: []string{"untagged"},
@@ -670,11 +686,12 @@ func TestShapeFindings(t *testing.T) {
 			rules: nil,
 		},
 		{
-			// The version's finding already took the coordinate, so it names
-			// that claim's file and nothing a port could inherit.
-			name:  "nor does a coordinate another finding took",
-			in:    "- **p** — see https://github.com/modelcontextprotocol/go-sdk/issues/1154; v9.9.9 external.go:99; the server listens on :8080",
-			rules: []string{"bare-tag"},
+			// The version's finding took the coordinate, but the file it names
+			// is still the one the continuation goes on in. A port there reads
+			// the same way, as it does beside a source's plain name.
+			name:  "and a coordinate another finding took names it all the same",
+			in:    "- **p** — see https://github.com/modelcontextprotocol/go-sdk/issues/1154; v9.9.9 external.go:99; :100 changed",
+			rules: []string{"bare-tag", "bare-line"},
 		},
 		{
 			name:  "unless a coordinate beside it names the file the continuation inherits",
@@ -1546,8 +1563,13 @@ func TestRungTwoRunsOverTheRealCorpus(t *testing.T) {
 	if err != nil {
 		t.Fatalf("indexing %s: %v", root, err)
 	}
-	cites := Citations(string(src), nil)
-	_, comments, _ := GoComments(root, files, InSet(files), nil)
+	paths, err := Requires(root)
+	if err != nil {
+		t.Fatalf("reading go.mod: %v", err)
+	}
+	requires := Required(paths)
+	cites := Citations(string(src), requires)
+	_, comments, _ := GoComments(root, files, InSet(files), requires)
 	env, err := NewEnv(root)
 	if err != nil {
 		t.Fatalf("NewEnv: %v", err)

@@ -115,11 +115,12 @@ var (
 		")((?:/[\\w.-]*\\w)*)(?:`?(?:['’][sS])?[\\s`(]+([A-Za-z_][\\w./-]*\\w))?")
 	// forgeRoute is a page a repository link reaches that is not its tree: a pull
 	// request, an issue or a discussion by its number — a pull request's also as
-	// its `.diff` or `.patch` — or a release by its tag or as the latest. What
+	// its `.diff` or `.patch`, which ends the path — or a release by its tag or as
+	// the latest. What
 	// follows one is a title, never a symbol. Without its number or tag, each a
 	// path segment of its own, the route's name is a package's name, which a
 	// source may have.
-	forgeRoute = regexp.MustCompile(`^(?:pull/\d+(?:\.diff|\.patch)?(?:/|$)|(?:issues|discussions)/\d+(?:/|$)|` +
+	forgeRoute = regexp.MustCompile(`^(?:pull/\d+(?:(?:\.diff|\.patch)?$|/)|(?:issues|discussions)/\d+(?:/|$)|` +
 		`releases/(?:latest(?:/|$)|tag/))`)
 	// packagePath is a path of packages, which symbolLike admits beside a
 	// symbol; majorVersion is a module's major version, which names no package.
@@ -600,7 +601,7 @@ func (s Scanner) bare(text string, consumed []bool) ([]Finding, []Finding) {
 			"%q %s, so nothing can check it and a bump cannot be told whether it moved: %s",
 			text[from:to], what, advice)})
 	}
-	var external, named bool
+	var external bool
 	for _, at := range coordinate.FindAllStringIndex(text, -1) {
 		// An absolute path names a place on some filesystem — a sandbox's
 		// workspace, a developer's disk — and no governed source ships one: a
@@ -617,7 +618,6 @@ func (s Scanner) bare(text string, consumed []bool) ([]Finding, []Finding) {
 			continue
 		}
 		external = true
-		named = named || !anyConsumed(consumed, at[0], at[1])
 		report(at[0], at[1], "inherits its tag from the prose around it",
 			"give it its own stamp and a symbol")
 	}
@@ -626,10 +626,10 @@ func (s Scanner) bare(text string, consumed []bool) ([]Finding, []Finding) {
 	// comment, where the paragraph usually names no source at all — a
 	// coordinate into a file this repository does not ship, sitting on the same
 	// line. With neither, a lone `:12` is far more likely to be a port. A link to
-	// a source's forge page names no file, so it counts only beside a coordinate
-	// this sweep reports, which does; one a claim before it already took names
-	// that claim's file, not the continuation's.
-	if !reaches(text, s.Requires, named) && !(s.AnyExternalCoordinate && external) {
+	// a source's forge page names no file, so it counts only beside an external
+	// coordinate, which does — one a finding before it took included, since a
+	// continuation goes on in a coordinate's file whoever took the coordinate.
+	if !reaches(text, s.Requires, external) && !(s.AnyExternalCoordinate && external) {
 		return findings, ours
 	}
 	for _, at := range continuation.FindAllStringSubmatchIndex(text, -1) {
