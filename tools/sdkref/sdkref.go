@@ -250,8 +250,26 @@ func governedModule(name string) bool {
 // a module from a string with a dot in it. And a required module is its whole
 // path: one whose last element merely spells a source's name, as many a
 // project's `go-sdk` does, is somebody else's.
+//
+// A link names a module by the path after its host, so each path the name ends
+// in is asked, longest first: the first that is a governed source's module
+// keeps the tag, and the first go.mod requires gives it away.
 func attributedElsewhere(name string, requires func(string) bool) bool {
-	return requires != nil && requires(name) && !governedModule(name)
+	if requires == nil {
+		return false
+	}
+	for {
+		if governedModule(name) {
+			return false
+		}
+		if requires(name) {
+			return true
+		}
+		var more bool
+		if _, name, more = strings.Cut(name, "/"); !more {
+			return false
+		}
+	}
 }
 
 // Required is the predicate over the module paths go.mod requires: whether a

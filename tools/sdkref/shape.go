@@ -49,13 +49,14 @@ var (
 	// because the two defects need different edits. A match that is only the tail
 	// of a longer name is not a head; see standalone.
 	undatedHead = regexp.MustCompile(`(` + strings.Join(sources, "|") + `)\s+(v\d+\.\d+\.\d+)`)
-	// majorTag is a source and the major number of a version. Named after a form
+	// majorTag is a source and the major number of a version, past the major
+	// version a module path carries. Named after a form
 	// with nothing following it, it is a dated claim no other pattern here can
 	// see, since every version they read has two numbers at least; a fuller
 	// version it cuts short is a head the patterns around it read the same way.
 	// With no form it is how prose names a module's major version, as
 	// `go-jose/v4` does, and dates nothing.
-	majorTag = regexp.MustCompile(`(` + strings.Join(sources, "|") + `)\s+([vV]\d+)\b`)
+	majorTag = regexp.MustCompile(`(` + strings.Join(sources, "|") + `)(?:/v\d+)?\s+([vV]\d+)\b`)
 	// negated is a negation standing straight before a temporal form. It turns the
 	// claim into its opposite, and every one of the grammar's three is a positive
 	// statement about a tag, so a negated head is not a citation however well the
@@ -243,9 +244,10 @@ func names(text string, i, j int, requires func(string) bool) bool {
 }
 
 // nameStart is where the name ending at or running through i begins: a module
-// path in front of a source's name is part of it.
+// path in front of a source's name is part of it, and so is the scheme of a
+// link it is written as.
 func nameStart(text string, i int) int {
-	for i > 0 && nameChar.MatchString(text[i-1:i]) {
+	for i > 0 && (nameChar.MatchString(text[i-1:i]) || strings.HasPrefix(text[i-1:], "://")) {
 		i--
 	}
 	return i
@@ -432,8 +434,8 @@ func (s Scanner) scan(line string) ([]Finding, []Finding) {
 		emit(from, at[1], rule, advice)
 	}
 	for _, at := range majorTag.FindAllStringSubmatchIndex(text, -1) {
-		// The pattern reads only the source's own name, so a module path in front
-		// of it puts the form before the whole path.
+		// The pattern reads only the source's own name, so a module path or a
+		// link in front of it puts the form before the whole of it.
 		start := nameStart(text, at[0])
 		if name := text[start:at[3]]; !governed(name) || attributedElsewhere(name, s.Requires) {
 			continue

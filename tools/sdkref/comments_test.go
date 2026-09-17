@@ -289,6 +289,9 @@ func TestAWordEndingInASourceNameMakesNoContinuation(t *testing.T) {
 	if got := s.Line("// example.com/acme/go-sdk listens on the host :8080"); len(got) != 0 {
 		t.Errorf("a line naming example.com/acme/go-sdk reported %v, want nothing", got)
 	}
+	if got := s.Line("// https://example.com/acme/go-sdk listens on the host :8080"); len(got) != 0 {
+		t.Errorf("a line linking example.com/acme/go-sdk reported %v, want nothing", got)
+	}
 }
 
 // TestACommentCitesTheFileBesideItByItsBasename. A comment that names a file

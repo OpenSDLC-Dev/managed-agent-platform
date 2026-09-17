@@ -492,6 +492,57 @@ func TestShapeFindings(t *testing.T) {
 			rules: nil,
 		},
 		{
+			// A module path goes on with its major version, so the tag is not
+			// straight after the source's name.
+			name:  "a form, a module path with its major version and a major tag",
+			in:    "*Evidence: checked against github.com/go-jose/go-jose/v4 v4 — jwk.go JSONWebKey.*",
+			rules: []string{"head-malformed"},
+		},
+		{
+			name:  "which with no form dates nothing",
+			in:    "// github.com/go-jose/go-jose/v4 v4 parses the key set",
+			rules: nil,
+		},
+		{
+			// The scheme's colon is not a name character, so the form stands in
+			// front of the whole URL.
+			name:  "a form, a link to a governed source and a major tag",
+			in:    "*Evidence: checked against https://github.com/modelcontextprotocol/go-sdk v1 — mcp/client.go Client.Connect.*",
+			rules: []string{"head-malformed"},
+		},
+		{
+			name:  "a link to a required module ending in a source's name is that module",
+			in:    "// https://example.com/acme/go-sdk ClientSession reads it",
+			rules: nil,
+		},
+		{
+			// Read as part of the name, the word before the colon would hide
+			// the module's own path from go.mod.
+			name:  "a colon that opens no link ends the name",
+			in:    "// module:example.com/acme/go-sdk ClientSession reads it",
+			rules: nil,
+		},
+		{
+			name:  "and so is a documentation host's link to it",
+			in:    "// https://pkg.go.dev/example.com/acme/go-sdk ClientSession reads it",
+			rules: nil,
+		},
+		{
+			name:  "but a documentation host's link to a governed source is that source",
+			in:    "// https://pkg.go.dev/github.com/modelcontextprotocol/go-sdk ClientSession reads it",
+			rules: []string{"untagged"},
+		},
+		{
+			name:  "and dates the tag after it",
+			in:    "// https://pkg.go.dev/github.com/modelcontextprotocol/go-sdk v1.7.0 panics on it",
+			rules: []string{"undated"},
+		},
+		{
+			name:  "while a link to another required module gives the tag after it to that module",
+			in:    "// fixed upstream in https://pkg.go.dev/k8s.io/api v0.36.2",
+			rules: nil,
+		},
+		{
 			name:  "a link to a source's pull request names no package in it",
 			in:    "// see https://github.com/modelcontextprotocol/go-sdk/pull/1160 for the fix",
 			rules: nil,
