@@ -268,12 +268,13 @@ func TestCallToolSendsTheModelsArgumentBytesUnaltered(t *testing.T) {
 // multi round-trip answer costs and how it ends (MCP 2026-07-28, SEP-2322).
 //
 // A server may answer `resultType: "input_required"` rather than run the tool,
-// asking for input to be supplied and the call retried. go-sdk v1.7.0 answers
-// those requests in its own client middleware and re-sends the call, so a server
-// that never stops asking is a loop the caller cannot see — and the two things
-// worth pinning are that it terminates, and that it terminates as a failure. An
-// empty answer instead would reach the model as a tool that returned nothing,
-// with nothing to say why.
+// asking for input to be supplied and the call retried. The go-sdk answers
+// those requests in its own client middleware and re-sends the call (checked
+// against go-sdk v1.7.0 — mcp/mrtr.go clientMultiRoundTripMiddleware), so a
+// server that never stops asking is a loop the caller cannot see — and the two
+// things worth pinning are that it terminates, and that it terminates as a
+// failure. An empty answer instead would reach the model as a tool that
+// returned nothing, with nothing to say why.
 //
 // The request is a `roots/list`, one of the three methods the SDK decodes (with
 // `elicitation/create` and `sampling/createMessage`); it refuses any other while
@@ -363,8 +364,9 @@ func TestCallToolKeepsTheServersOwnTextOverTheStructuredAnswer(t *testing.T) {
 // TestCallToolDropsBlocksAToolResultCannotCarry covers the two content types the
 // SDK's decoder accepts here but the protocol admits only in sampling messages.
 // They reach the client because CallToolResult decodes its content with no
-// allow-list at all (protocol.go, contentsFromWire(_, nil)); this platform has
-// nowhere to put them, and a block guessed into a text answer would be a
+// allow-list at all — it hands contentsFromWire a nil one (checked against
+// go-sdk v1.7.0 — mcp/protocol.go CallToolResult.UnmarshalJSON); this platform
+// has nowhere to put them, and a block guessed into a text answer would be a
 // fabrication. The blocks around them must survive.
 func TestCallToolDropsBlocksAToolResultCannotCarry(t *testing.T) {
 	t.Parallel()

@@ -83,7 +83,8 @@ var (
 	anyTag = regexp.MustCompile(`\b[vV]\d+\.\d+(?:\.\d+)?\b`)
 	// nameBefore is the word a version is written straight after, past quoting,
 	// a possessive, or the `@` of `module@version`. It is how the text attributes
-	// a version to a project: `k8s.io/api v0.36.2`, `go-sdk v1.7.0`.
+	// a version to a project: `k8s.io/api v0.36.2`,
+	// `cloud.google.com/go/storage@v1.56.0`.
 	nameBefore = regexp.MustCompile("([\\w./-]+)(?:['’][sS])?(?:@|[\\s`_\\[(]+)$")
 	// nameChar is a character a name is spelt with.
 	nameChar = regexp.MustCompile(`^[\w./-]$`)

@@ -98,6 +98,12 @@ func TestParseCitation(t *testing.T) {
 				Loc: Locator{Kind: "symbol", File: "jwks.go", Symbols: sym("JSONWebKeySet.Key")}},
 		},
 		{
+			name: "the MCP go-sdk, whose file names repeat across its packages",
+			in:   "checked against go-sdk v1.7.0 — mcp/client.go Client.Connect",
+			want: &Citation{Form: "checked against", Source: "go-sdk", Tag: "v1.7.0",
+				Loc: Locator{Kind: "symbol", File: "mcp/client.go", Symbols: sym("Client.Connect")}},
+		},
+		{
 			name: "anthropic-cli, in the grammar but not resolvable",
 			in:   "checked against anthropic-cli v0.5.0 — main.go run",
 			want: &Citation{Form: "checked against", Source: "anthropic-cli", Tag: "v0.5.0",
@@ -218,7 +224,7 @@ func TestParseCitation(t *testing.T) {
 }
 
 // testRequires is a go.mod's requirements as the shape tests see them: two
-// projects this grammar does not govern, a governed source, and the MCP go-sdk.
+// projects this grammar does not govern, and two governed sources.
 var testRequires = Required([]string{"k8s.io/api", "cloud.google.com/go/storage",
 	"github.com/go-jose/go-jose/v4", "github.com/modelcontextprotocol/go-sdk"})
 
@@ -402,10 +408,24 @@ func TestShapeFindings(t *testing.T) {
 			rules: nil,
 		},
 		{
-			// #729 holds the decision to leave the MCP go-sdk alone.
-			name:  "a project this grammar leaves alone, by name",
+			name:  "the MCP go-sdk is governed, so its name dates the tag after it",
 			in:    "// `\"tools\": [null]` is legal JSON that go-sdk v1.7.0 panics on",
-			rules: nil,
+			rules: []string{"undated"},
+		},
+		{
+			name:  "and so does its module path",
+			in:    "// github.com/modelcontextprotocol/go-sdk v1.7.0 panics on it",
+			rules: []string{"undated"},
+		},
+		{
+			name:  "and so does its name as a capitalised possessive",
+			in:    "// go-sdk'S v1.7.0 panics on it",
+			rules: []string{"undated"},
+		},
+		{
+			name:  "and so does its name joined to the tag by @",
+			in:    "// fixed in go-sdk@v1.7.0",
+			rules: []string{"undated"},
 		},
 		{
 			name:  "the spec named with no tag at all",
@@ -752,13 +772,13 @@ func TestShapeFindings(t *testing.T) {
 			rules: []string{"source-unnamed"},
 		},
 		{
-			name:  "a project left alone, named as a capitalised possessive",
-			in:    "// go-sdk'S v1.7.0 panics on it",
+			name:  "another project, named as a capitalised possessive",
+			in:    "// k8s.io/api'S v0.36.2 panics on it",
 			rules: nil,
 		},
 		{
 			name:  "another major version of a module go.mod requires is not that module",
-			in:    "// github.com/modelcontextprotocol/go-sdk/v2 v2.0.0 panics on it",
+			in:    "// cloud.google.com/go/storage/v2 v2.0.0 panics on it",
 			rules: []string{"bare-tag"},
 		},
 		{
@@ -855,7 +875,7 @@ func TestShapeFindings(t *testing.T) {
 		},
 		{
 			name:  "but not a version the text gives another project",
-			in:    "// anthropic-sdk-go's Foo reads what go-sdk v1.7.0 writes",
+			in:    "// anthropic-sdk-go's Foo reads what k8s.io/api v0.36.2 writes",
 			rules: []string{"untagged"},
 		},
 		{
@@ -1096,7 +1116,7 @@ func TestTheRegistryAndCommentsAreReadable(t *testing.T) {
 		{"untagged", "- **p12** — go-jose's JSONWebKey.Sentinel decodes it."},
 	}
 	const clean = "\n- **probe** — *Evidence: checked against anthropic-sdk-go v1.70.1 — betasession.go BetaSession.*" +
-		"\n- **probe** — go-sdk v1.7.0 panics on it, and k8s.io/api v0.36.2 has no such field." +
+		"\n- **probe** — the go-sdk panics on it (checked against go-sdk v1.7.0 — mcp/tool.go validateToolName), and k8s.io/api v0.36.2 has no such field." +
 		"\n- **probe** — go-jose's jwt.Sentinel (checked against go-jose v4.1.4 — jwt/validation.go Sentinel) treats it."
 	appended := string(src)
 	for _, p := range probes {
@@ -1158,7 +1178,8 @@ func TestTheRegistryAndCommentsAreReadable(t *testing.T) {
 // p6 go-jose's JSONWebKey.Sentinel decodes it.
 //
 // clean: checked against anthropic-sdk-go v1.70.1 — betasession.go BetaSession,
-// go-sdk v1.7.0 panics on it, and listening on x.com:443 and nexus.infra:8080,
+// the go-sdk panics on it (checked against go-sdk v1.7.0 — mcp/tool.go
+// validateToolName), and listening on x.com:443 and nexus.infra:8080,
 // and go-jose's jwt.Sentinel (checked against go-jose v4.1.4 — jwt/validation.go
 // Sentinel) treats it.
 func P() {}

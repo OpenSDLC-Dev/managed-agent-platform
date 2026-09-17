@@ -207,16 +207,17 @@ func (c *Conn) CallTool(ctx context.Context, name string, arguments json.RawMess
 // package's two SDK call sites, for a second and unrelated nil dereference.
 //
 // A result's `inputRequests` decodes through InputRequestMap.UnmarshalJSON
-// (mcp/protocol.go), which unmarshals the wire into a map[string]*raw, checks
-// only that the map itself is non-nil, and then reads a field off every value
-// in it. A server answering `"inputRequests": {"x": null}` therefore panics the
-// client, and it panics *during* the decode, on this goroutine, inside this
-// frame — so a recover here contains it and nothing further out is needed.
-// (The listing's panic is a different bug in a different place: a nil element
-// of a `[]*Tool` dereferenced after the decode by post-decode validation. The
-// content blocks are safe; the SDK nil-checks those, and this platform's own
-// guard against a nil embedded resource sits after the decode in
-// convertContent.)
+// (checked against go-sdk v1.7.0 — mcp/protocol.go
+// InputRequestMap.UnmarshalJSON), which unmarshals the wire into a
+// map[string]*raw, checks only that the map itself is non-nil, and then reads a
+// field off every value in it. A server answering
+// `"inputRequests": {"x": null}` therefore panics the client, and it panics
+// *during* the decode, on this goroutine, inside this frame — so a recover here
+// contains it and nothing further out is needed. (The listing's panic is a
+// different bug in a different place: a nil element of a `[]*Tool` dereferenced
+// after the decode by post-decode validation. The content blocks are safe; the
+// SDK nil-checks those, and this platform's own guard against a nil embedded
+// resource sits after the decode in convertContent.)
 func (c *Conn) callTool(ctx context.Context, params *sdk.CallToolParams) (res *sdk.CallToolResult, err error) {
 	defer func() {
 		if r := recover(); r != nil {

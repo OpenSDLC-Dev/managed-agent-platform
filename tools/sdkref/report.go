@@ -33,6 +33,7 @@ import (
 var modules = map[string]string{
 	"anthropic-sdk-go": SDKModule,
 	"go-jose":          "github.com/go-jose/go-jose/v4",
+	"go-sdk":           "github.com/modelcontextprotocol/go-sdk",
 }
 
 // Env holds what the resolving rungs need, resolved once.

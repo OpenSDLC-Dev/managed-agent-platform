@@ -60,6 +60,45 @@ func TestFailChecksBothRungs(t *testing.T) {
 	}
 }
 
+// TestFailResolvesTheMCPGoSDK. The go-sdk is cited for behaviour the client
+// relies on, so a claim stamped at its pin has to reach rung 2 like the SDK's
+// do: a symbol it no longer declares fails the gate, and one it declares
+// passes. A go-sdk left out of the grammar, or out of the modules rung 2 opens,
+// fails the first case with some other finding and the second with a finding.
+func TestFailResolvesTheMCPGoSDK(t *testing.T) {
+	root := repoRoot(t)
+	mcp, err := Module(root, "github.com/modelcontextprotocol/go-sdk")
+	if err != nil {
+		t.Fatalf("resolving the pin offline: %v", err)
+	}
+	for _, tc := range []struct {
+		symbol   string
+		want     int
+		vanished bool
+	}{
+		{"Client.NoSuchSymbolAnywhereInTheSDK", 1, true},
+		{"Client.Connect", 0, false},
+	} {
+		t.Run(tc.symbol, func(t *testing.T) {
+			probe := filepath.Join(t.TempDir(), "probe.md")
+			body := "- **probe** — *Evidence: checked against go-sdk " + mcp.Version +
+				" — mcp/client.go " + tc.symbol + ".*\n"
+			if err := os.WriteFile(probe, []byte(body), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			var out, errOut strings.Builder
+			code := run([]string{"-root", root, "-file", probe, "-comments=false", "-fail"}, &out, &errOut)
+			if code != tc.want {
+				t.Errorf("-fail exited %d, want %d\nstdout:\n%s\nstderr:\n%s",
+					code, tc.want, out.String(), errOut.String())
+			}
+			if got := strings.Contains(out.String(), "vanished-at-stamp"); got != tc.vanished {
+				t.Errorf("-fail reported vanished-at-stamp: %v, want %v\n%s", got, tc.vanished, out.String())
+			}
+		})
+	}
+}
+
 // TestReportFailsOnlyOnAnUndispositionedTransition is the exit code the bump
 // workflow reads. The probe's anchor is stamped before the pin and names nothing
 // the SDK declares, so the pin reports it gone; with its disposition beside it,

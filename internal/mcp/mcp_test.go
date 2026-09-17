@@ -153,8 +153,9 @@ func serveToolsList(t *testing.T, result func(cursor string) map[string]any) (ur
 
 func TestListToolsContainsAPanicInsideTheClientLibrary(t *testing.T) {
 	t.Parallel()
-	// `"tools": [null]` is legal JSON that go-sdk v1.7.0 decodes into a nil
-	// element and then dereferences without checking (filterValidTools →
+	// `"tools": [null]` is legal JSON that the go-sdk decodes into a nil
+	// element and then dereferences without checking (checked against go-sdk
+	// v1.7.0 — mcp/streamable_headers.go filterValidTools and
 	// validateParamHeaderAnnotations), so the client panics on a response a
 	// customer-named server chose to send. The caller is an executor shared by
 	// every session on the host and a Go panic is not confined to its
@@ -293,10 +294,12 @@ func TestListToolsCannotTellAnAbsentToolsFieldFromAnEmptyOne(t *testing.T) {
 
 func TestListToolsRefusesAResponseTooLargeToRead(t *testing.T) {
 	t.Parallel()
-	// go-sdk v1.7.0 reads a response with io.ReadAll before decoding anything,
-	// so an unbounded body is an unbounded allocation in an executor shared by
-	// every session on the host. Neither the request timeout nor the page bound
-	// helps — both count requests, not bytes — and no recover catches an OOM.
+	// The go-sdk reads a response with io.ReadAll before decoding anything
+	// (checked against go-sdk v1.7.0 — mcp/streamable.go
+	// streamableClientConn.handleJSON), so an unbounded body is an unbounded
+	// allocation in an executor shared by every session on the host. Neither
+	// the request timeout nor the page bound helps — both count requests, not
+	// bytes — and no recover catches an OOM.
 	//
 	// The fixture streams past the limit without ever finishing, and without a
 	// Content-Length, which is the shape that defeats any check made before the
@@ -870,15 +873,16 @@ func TestConnectFailsOnAnUnsupportedProtocolVersion(t *testing.T) {
 	// initialize with a version no revision defines. The client must reject it
 	// rather than proceed against a protocol it does not implement.
 	//
-	// This is the path that reaches the upstream leak: go-sdk v1.7.0 returns
+	// This is the path that reaches the upstream leak: the go-sdk returns
 	// `unsupportedProtocolVersionError` without closing the session it just
-	// built (mcp/client.go, the `!slices.Contains(supportedProtocolVersions,
-	// ...)` branch — the adjacent initialize and initialized failure paths both
-	// call `cs.Close()`), and Connect hands back no session for a caller to
-	// close. Connect works around it by capturing the transport's Connection,
-	// so a server answering this way on every attempt does not leak per
-	// attempt; TestConnectClosesTheConnectionItCannotHandBack is what asserts
-	// that, by watching for the DELETE. The upstream bug is still upstream's.
+	// built, in the `!slices.Contains(supportedProtocolVersions, ...)` branch
+	// where the adjacent initialize and initialized failure paths both call
+	// `cs.Close()` (checked against go-sdk v1.7.0 — mcp/client.go
+	// Client.Connect), and Connect hands back no session for a caller to close.
+	// Connect works around it by capturing the transport's Connection, so a
+	// server answering this way on every attempt does not leak per attempt;
+	// TestConnectClosesTheConnectionItCannotHandBack is what asserts that, by
+	// watching for the DELETE. The upstream bug is still upstream's.
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, err := io.ReadAll(r.Body)
 		if err != nil {

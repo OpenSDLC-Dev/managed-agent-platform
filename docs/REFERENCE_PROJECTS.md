@@ -60,7 +60,7 @@ list until plan 35 built them.)
 
 ## Bumping a pin
 
-A pull request that moves a pin in `go.mod` — the SDK's or go-jose's — or edits a citation
+A pull request that moves a pin in `go.mod` — the SDK's, go-jose's or the MCP go-sdk's — or edits a citation
 runs `make sdk-bump-report` through [`sdk-bump.yml`](../.github/workflows/sdk-bump.yml), and
 fails while a **transition** awaits a disposition: an anchor the pin no longer holds, or an
 `absent at` anchor it holds again. Each is a deletion, a rename or a reinstatement in the

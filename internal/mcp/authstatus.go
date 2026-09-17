@@ -26,9 +26,10 @@ import (
 // be refused.
 //
 // The status is observed here rather than read off the SDK's error, which does
-// not carry it: go-sdk v1.7.0 renders a non-2xx as `http.StatusText(code)` inside
-// a formatted message and wraps no sentinel (mcp/streamable.go, checkResponse),
-// and 401 is not among the statuses it treats as transient. Matching that
+// not carry it: the go-sdk renders a non-2xx as `http.StatusText(code)` inside
+// a formatted message and wraps no sentinel, and 401 is not among the statuses
+// it treats as transient (checked against go-sdk v1.7.0 — mcp/streamable.go
+// streamableClientConn.checkResponse and isTransientHTTPStatus). Matching that
 // message would be matching prose that a version bump may reword; watching the
 // response is exact, and this package already owns the whole transport chain.
 //

@@ -632,7 +632,8 @@ func TestMCPDiscoveryWithAFailedCredentialLookupFaultsRatherThanFailsTheRow(t *t
 // That is the one route a secret takes into a stored reason that no rule over
 // URLs can close, and it is not hypothetical: go-sdk decodes a non-2xx body,
 // finds the JSON-RPC error and carries its message into the error it returns
-// (mcp/streamable.go, checkResponse).
+// (checked against go-sdk v1.7.0 — mcp/streamable.go
+// streamableClientConn.checkResponse).
 func serveQuotingTheToken(t *testing.T, refuse string, tool mcptest.Tool) string {
 	t.Helper()
 	inner := mcptest.Server(t, tool)

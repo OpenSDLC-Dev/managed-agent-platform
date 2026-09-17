@@ -187,11 +187,11 @@ func serveThenFailing(t *testing.T, rules map[string]int) string {
 
 // serveThenFailingWith is serveThenFailing with the body the failing status
 // carries left to the caller. A nil writeBody sends the status alone; a JSON-RPC
-// error body is the other shape a real server sends, and go-sdk v1.7.0 reads one
-// out of a non-2xx that is neither 404 nor transient (streamable.go,
-// checkResponse). For those statuses the body is what decides whether the
-// failure reads as the server's answer, so a test of that classification has to
-// be able to choose.
+// error body is the other shape a real server sends, and the go-sdk reads one
+// out of a non-2xx that is neither 404 nor transient (checked against go-sdk
+// v1.7.0 — mcp/streamable.go streamableClientConn.checkResponse). For those
+// statuses the body is what decides whether the failure reads as the server's
+// answer, so a test of that classification has to be able to choose.
 func serveThenFailingWith(t *testing.T, rules map[string]int,
 	writeBody func(w http.ResponseWriter, id json.RawMessage)) string {
 	t.Helper()
@@ -253,16 +253,18 @@ func jsonRPCError(w http.ResponseWriter, id json.RawMessage) {
 // answering exactly as its peer does, not what that shared answer is — the latter
 // is #641's question, and the recording, which dialled, cannot reach it.
 //
-// **407 is the peer, and 500 and 502 are not quite.** go-sdk v1.7.0 sorts a
-// non-2xx three ways (streamable.go, checkResponse): 404 is a missing session;
-// 500, 502, 503, 504 and 429 are transient and become jsonrpc2.ErrRejected with
-// the body never read; anything else has its body decoded and a JSON-RPC error
-// found there wrapped. ErrRejected is itself a *jsonrpc.Error, so [answered]
-// matches it too — which means a bare 500 reads as the server's answer where a
-// bare 403 does not, a difference about transience and not about credentials.
-// So the exact claim is 403 ≡ 407, in both shapes a server can send; 500 and 502
-// join them only when a body arrives, and are held here to the part #572 is
-// actually about, that none of them is a refused credential.
+// **407 is the peer, and 500 and 502 are not quite.** The go-sdk sorts a
+// non-2xx three ways (checked against go-sdk v1.7.0 — mcp/streamable.go
+// streamableClientConn.checkResponse and isTransientHTTPStatus): 404 is a
+// missing session; 500, 502, 503, 504 and 429 are transient and become
+// jsonrpc2.ErrRejected with the body never read; anything else has its body
+// decoded and a JSON-RPC error found there wrapped. ErrRejected is itself a
+// *jsonrpc.Error, so [answered] matches it too — which means a bare 500 reads
+// as the server's answer where a bare 403 does not, a difference about
+// transience and not about credentials. So the exact claim is 403 ≡ 407, in
+// both shapes a server can send; 500 and 502 join them only when a body
+// arrives, and are held here to the part #572 is actually about, that none of
+// them is a refused credential.
 func TestACallTimeForbiddenIsClassifiedLikeItsPeerStatuses(t *testing.T) {
 	type verdict struct{ unauthorized, serverAnswered bool }
 	classify := func(t *testing.T, status int,

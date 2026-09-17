@@ -157,22 +157,7 @@ var forms = []string{"checked against", "absent at", "since"}
 // that results names `anthropic-sdk-go`, and `anthropic-openapi.yml` is only
 // the spelling rung 1 has to recognise on the way out. That recognition lives
 // in the scanner's `reach`, not in this list.
-//
-// The MCP go-sdk is a module `go.mod` pins, so its citations — in the registry
-// and in the comments under internal/mcp alike — would be directly resolvable
-// here, and it is deliberately out: plan 51 measured its corpus before
-// committing to a migration and never counted these. #729 holds that decision,
-// queued behind plan 51's remaining slices.
-var sources = []string{"anthropic-sdk-go", "anthropic-cli", "go-jose"}
-
-// ungoverned names the projects the corpus cites at a tag by a name that is not
-// a Go module path, and that this grammar deliberately leaves alone. Rung 1
-// reads every version as a candidate unless the text attributes it elsewhere,
-// and a version written straight after one of these names is attributed. A
-// module go.mod requires needs no entry: writing its path in front of the tag,
-// the way go.mod does, already says whose it is. The MCP go-sdk is the one
-// entry, for the reason `sources` gives.
-var ungoverned = []string{"go-sdk"}
+var sources = []string{"anthropic-sdk-go", "anthropic-cli", "go-jose", "go-sdk"}
 
 // spanReasons is the closed set. Every member is a property a parser can check,
 // which is the whole point: a reason no parser could contradict would let a
@@ -253,23 +238,22 @@ func governed(name string) bool {
 }
 
 // attributedElsewhere reports whether a name written in front of a tag says the
-// tag belongs to a project this grammar does not govern: one of the ungoverned
-// names, or a module go.mod requires that is not a governed source.
+// tag belongs to a project this grammar does not govern: a module go.mod
+// requires that is not a governed source.
 //
 // A name that only looks like a module path attributes nothing. A documentation
 // host, or a pkg.go.dev link into the SDK itself, is shaped like one, and read
 // as one it carried a governed tag away without a finding. Only go.mod can tell
 // a module from a string with a dot in it.
 func attributedElsewhere(name string, requires func(string) bool) bool {
-	return slices.Contains(ungoverned, name) ||
-		(requires != nil && requires(name) && !governed(name))
+	return requires != nil && requires(name) && !governed(name)
 }
 
 // Required is the predicate over the module paths go.mod requires: whether a
 // name is one of them, or a package inside one.
 //
-// A path that goes on with a major version is neither. `go-sdk/v2` is a module
-// of its own, which go.mod requiring `go-sdk` says nothing about.
+// A path that goes on with a major version is neither. `storage/v2` is a module
+// of its own, which go.mod requiring `storage` says nothing about.
 func Required(paths []string) func(string) bool {
 	return func(name string) bool {
 		for _, p := range paths {
