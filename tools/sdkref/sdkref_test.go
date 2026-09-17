@@ -866,6 +866,11 @@ func TestShapeFindings(t *testing.T) {
 			rules: []string{"untagged"},
 		},
 		{
+			name:  "nor does a citation of another type's method of that name",
+			in:    "// go-jose's JSONWebKey.UnmarshalJSON (checked against go-jose v4.1.4 — jwk.go OtherType.UnmarshalJSON) refuses it",
+			rules: []string{"untagged"},
+		},
+		{
 			name:  "a package mention is dated by a citation into a file of that name",
 			in:    "// anthropic-sdk-go's tools/agenttoolset (checked against anthropic-sdk-go v1.70.1 — agenttoolset.go BetaAgentToolset20260401) runs them",
 			rules: nil,

@@ -640,10 +640,13 @@ func symbolLike(word string) bool {
 }
 
 // citedBy reports whether the citation opening at `at` dates mention m: it
-// cites m's source, and its locator names what m names — the last part of m's
-// name as a part of a symbol, of the file's path, or of a schema path. A
-// citation of another symbol would leave this one free to vanish, since rung 2
-// resolves only what a citation names.
+// cites m's source, and its locator names what m names. A qualified name is
+// named by itself, or — when its qualifier is a package — by the declaration it
+// qualifies: `jwt.Expected` by `Expected.Time`, never `JSONWebKey.UnmarshalJSON`
+// by `OtherType.UnmarshalJSON`. A bare name or a package path is named by a
+// part of a symbol, of the file's path, or of a schema path. A citation of
+// another symbol would leave this one free to vanish, since rung 2 resolves
+// only what a citation names.
 func citedBy(text string, at int, bounds []int, m mention) bool {
 	// ParseCitation reads a citation only from its first byte, so a head
 	// further on parses nothing here.
@@ -657,6 +660,14 @@ func citedBy(text string, at int, bounds []int, m mention) bool {
 		return false
 	}
 	name := m.name[strings.LastIndexAny(m.name, "./")+1:]
+	if strings.Contains(m.name, ".") && !strings.Contains(m.name, "/") {
+		for _, s := range c.Loc.Symbols {
+			if s == m.name || strings.Split(s, ".")[0] == name {
+				return true
+			}
+		}
+		return false
+	}
 	parts := strings.FieldsFunc(strings.TrimSuffix(c.Loc.File, path.Ext(c.Loc.File))+"."+c.Loc.Path,
 		func(r rune) bool { return r == '.' || r == '/' })
 	for _, s := range c.Loc.Symbols {
