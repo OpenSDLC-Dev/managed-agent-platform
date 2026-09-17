@@ -1,5 +1,5 @@
 ---
-status: in-progress
+status: archived
 issue: "#722"
 ---
 
@@ -281,13 +281,21 @@ which a fail-closed rung cannot make, so slice 3 read them by hand.
 Reporting without an enforced moment to read the report is how
 `.claude/agents/verifier.md:25` stayed wrong, and "we will run the report" is a
 ritual, not a mechanism. So the pin gets a trigger: a workflow on any pull
-request whose diff touches the `anthropic-sdk-go` line in `go.mod`, running
-`make sdk-bump-report` and rendering its lists into the step summary.
+request whose diff touches `go.mod`, running `make sdk-bump-report` and rendering
+its lists into the step summary. As landed, it cannot narrow to the
+`anthropic-sdk-go` line: a path filter sees files, and a `go.mod` change that
+moved no pin reports only the transitions the corpus already dispositions.
 
 It fails on **undispositioned transitions, and only those.** A transition is
 dispositioned when the citation says the bump was seen: an entry whose symbol
 went away takes `absent at <source> <new pin>` beside the stamp it already has,
-and one whose symbol came back drops that clause. Neither edit advances the
+and one whose symbol came back drops that clause. As landed, "beside" is the
+anchor's own registry line or comment paragraph, the `absent at` names the same
+file and everything the anchor lost, and its tag may be any after the stamp and
+no later than the pin, since when a symbol went stays true at every later pin. A
+deleted file needed rung 2 to make room: an `absent at` on a file the pin does not
+ship was refused as uncontradictable, so it now passes beside a positive anchor on
+that file and symbol stamped earlier. Neither edit advances the
 `checked against` stamp, so neither is a claim to have re-verified anything —
 which is why this is not the "edit everything now" failure in a smaller hat. A
 bump that deletes twenty symbols costs twenty one-line acknowledgements, each of

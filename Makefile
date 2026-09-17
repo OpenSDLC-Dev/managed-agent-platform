@@ -173,7 +173,9 @@ registry-check:
 # reddening until every such claim is re-verified is the thing plan 51 removes.
 # The shape and pin-resolution rungs run inside `make verify` instead, through
 # the package's own test, and fail it on any finding. This target prints what
-# they find too, above the report.
+# they find too, above the report. It fails on a transition no citation has
+# dispositioned, and on nothing else it prints: .github/workflows/sdk-bump.yml
+# runs it on every PR that touches go.mod, which is where a bump is read.
 sdk-bump-report: build
 	go run ./tools/sdkref -report
 

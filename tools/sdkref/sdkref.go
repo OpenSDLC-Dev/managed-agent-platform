@@ -11,7 +11,7 @@
 // re-checked) or not at all. docs/plan/51_sdk-reference-binding.md separates the
 // axes; this tool holds the separation.
 //
-// Three rungs, and only two of them can fail:
+// Three rungs, and only two of them can fail the gate:
 //
 //   - Shape is syntax, plus which files git tracks and which modules go.mod
 //     requires, and always decidable, so it runs on every citation.
@@ -21,9 +21,9 @@
 //     `go list -m` finds it with GOPROXY=off. The registry cites tags no cold
 //     runner holds, and reaching for them would make the gate need the network.
 //   - The report resolves every anchor it can against the pin whatever the
-//     citation's stamp, and never fails. At gate time a symbol that has vanished
-//     is not yet a defect — the entry may describe a version where it existed —
-//     so this rung is judgment, not obligation. A gate that reddened until fifty
+//     citation's stamp, and never fails the gate. At gate time a symbol that has
+//     vanished is not yet a defect — the entry may describe a version where it
+//     existed — so this rung is judgment, not obligation. A gate that reddened until fifty
 //     claims were re-verified would recreate the thing the plan removes. It is
 //     also the only rung that may read a tag other than the pin, and only ever
 //     one a module cache already holds: available, never required.
@@ -32,7 +32,10 @@
 // File, and the citations written in Go comments, which GoComments reads.
 //
 // The two failing rungs fail `make verify` through this package's own test,
-// which runs -fail over both halves.
+// which runs -fail over both halves. The report's one obligation is on the pull
+// request that moves a pin, where .github/workflows/sdk-bump.yml runs -report:
+// it fails while a transition awaits a disposition — the `absent at` written
+// beside an anchor gone at the pin, or dropped from one back there.
 package main
 
 import (

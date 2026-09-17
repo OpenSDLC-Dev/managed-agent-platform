@@ -15,10 +15,12 @@ import (
 // always answer: the pinned module is in the build graph and therefore already
 // on disk, while the registry cites tags no cold runner holds. Rung 3 asks the
 // question that actually matters — has anything the corpus cites moved at the
-// pin? — and only reports, because at gate time a vanished symbol is not yet a
-// defect. The entry may be describing a version where it existed. A gate that
+// pin? — and never fails the gate, because at gate time a vanished symbol is not
+// yet a defect. The entry may be describing a version where it existed. A gate that
 // reddened until every such claim was re-verified would convert "re-check what
-// changed" back into "edit everything now", which is the disease.
+// changed" back into "edit everything now", which is the disease. The pull
+// request moving a pin is where a transition is read instead, and there one
+// nobody has dispositioned fails -report.
 //
 // Rung 3 is also the only rung that may read a tag other than the pin, and only
 // ever one the module cache already holds. That is where a span's reason gets

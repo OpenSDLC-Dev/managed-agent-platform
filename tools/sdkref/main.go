@@ -91,9 +91,9 @@ func run(args []string, out, errOut io.Writer) int {
 		findings = append(findings, env.Resolution(citations)...)
 		// Rung 2 can only judge a tag it can open, so it skips the citations of
 		// a source this machine could not resolve, and it judges a replaced one
-		// against whatever tree the replacement names. Under -fail either is
-		// indistinguishable from a pass, which is the one thing this tool must
-		// never let a run look like.
+		// against whatever tree the replacement names — and rung 3 does the same.
+		// Under either flag's exit code either is indistinguishable from a pass,
+		// which is the one thing this tool must never let a run look like.
 		unavailable = env.Unresolvable(citations)
 		if *report {
 			rep := env.Bump(citations)
