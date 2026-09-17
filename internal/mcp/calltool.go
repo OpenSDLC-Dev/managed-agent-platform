@@ -114,9 +114,10 @@ func answered(err error) bool {
 // One thing a fresh connection does not do, which matters when a server uses it:
 // the SDK lifts a tool parameter annotated `x-mcp-header` (SEP-2243) out of the
 // arguments and onto an HTTP header only for a tool it already has cached from a
-// `tools/list` on this same session (ClientSession.lookupTool). Connections here
-// are per-work-item and a caller that only calls never lists, so such a
-// parameter travels in the JSON body instead.
+// `tools/list` on this same session (checked against go-sdk v1.7.0 —
+// mcp/client.go ClientSession.CallTool and ClientSession.lookupTool).
+// Connections here are per-work-item and a caller that only calls never lists,
+// so such a parameter travels in the JSON body instead.
 //
 // One request is also not always one round trip. A server may answer with
 // `resultType: "input_required"` instead of the tool's output — the multi
@@ -124,7 +125,8 @@ func answered(err error) bool {
 // 2026-07-28 (SEP-2322). This platform offers no interactive surface to fulfil
 // such a request with, so every shape of it ends the call, and the three shapes
 // end it differently because the SDK's client middleware handles them
-// differently:
+// differently (checked against go-sdk v1.7.0 — mcp/mrtr.go
+// clientMultiRoundTripMiddleware):
 //
 //   - `inputRequests` with entries: the middleware answers them itself and
 //     re-sends the call, up to ten attempts, then fails. The result never

@@ -429,6 +429,42 @@ func TestShapeFindings(t *testing.T) {
 			rules: []string{"undated"},
 		},
 		{
+			// A short source name is the tail of many longer ones.
+			name:  "a word that only ends in a source's name names no source",
+			in:    "// mongo-sdk ClientSession reads it",
+			rules: nil,
+		},
+		{
+			name:  "nor does a hyphenated name ending in one, before a coordinate",
+			in:    "- **p** — casdoor-go-sdk mcp/streamable.go:12 reads it",
+			rules: nil,
+		},
+		{
+			name:  "nor does such a word make its line reach for the grammar",
+			in:    "- **p** — mongo-sdk's client.go:12 reads it",
+			rules: nil,
+		},
+		{
+			name:  "nor makes a port on its line a continuation",
+			in:    "- **p** — mongo-sdk listens on the host :8080",
+			rules: nil,
+		},
+		{
+			name:  "a link to a source's pull request names no package in it",
+			in:    "// see https://github.com/modelcontextprotocol/go-sdk/pull/1160 for the fix",
+			rules: nil,
+		},
+		{
+			name:  "while a link into its tree still does",
+			in:    "// see https://github.com/modelcontextprotocol/go-sdk/blob/main/mcp/client.go",
+			rules: []string{"untagged"},
+		},
+		{
+			name:  "another major version of a governed source is still that source",
+			in:    "// github.com/modelcontextprotocol/go-sdk/v2 v2.0.0 panics on it",
+			rules: []string{"undated"},
+		},
+		{
 			// A module is its path, not its last element: go-sdk is a name many
 			// projects' repositories share.
 			name:  "a required module that only ends in a governed source's name is another project",

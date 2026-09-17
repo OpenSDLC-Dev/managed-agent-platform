@@ -268,6 +268,20 @@ func TestAContinuationInAParagraphThatNamesNoSource(t *testing.T) {
 	}
 }
 
+// TestAWordEndingInASourceNameMakesNoContinuation. In a comment a continuation
+// counts on a line that names a source even with no coordinate beside it, so a
+// word that only ends in a source's name — `mongo-sdk` ends in `go-sdk` — would
+// turn every port on its line into a citation.
+func TestAWordEndingInASourceNameMakesNoContinuation(t *testing.T) {
+	s := Scanner{AnyExternalCoordinate: true}
+	if got := s.Line("// go-sdk listens on the host :8080"); len(got) != 1 {
+		t.Fatalf("a line naming the go-sdk reported %v, want its continuation", got)
+	}
+	if got := s.Line("// mongo-sdk listens on the host :8080"); len(got) != 0 {
+		t.Errorf("a line naming mongo-sdk reported %v, want nothing", got)
+	}
+}
+
 // TestACommentCitesTheFileBesideItByItsBasename. A comment that names a file
 // of its own directory by basename means the file next to it, the way anyone
 // reading one package does; resolving only from the repository root called every

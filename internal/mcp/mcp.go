@@ -365,9 +365,12 @@ func Connect(ctx context.Context, cfg Config) (*Conn, error) {
 	// The wrapper hands back the SDK's own Connection unchanged. Substituting
 	// one is not forbidden — the SDK ships LoggingTransport, which does exactly
 	// that, and a substituted connection still negotiates — but the SDK reaches
-	// sessionUpdated through a type assertion to an unexported interface, so a
-	// substitute silently loses it, and with it the Mcp-Protocol-Version header
-	// on every post-handshake request of a legacy negotiation. Since a legacy
+	// sessionUpdated through a type assertion to an unexported interface
+	// (checked against go-sdk v1.7.0 — mcp/transport.go LoggingTransport and
+	// clientConnection.sessionUpdated), so a substitute silently loses it, and
+	// with it the Mcp-Protocol-Version header on every post-handshake request
+	// of a legacy negotiation (checked against go-sdk v1.7.0 —
+	// mcp/streamable.go streamableClientConn.setMCPHeaders). Since a legacy
 	// negotiation is what this client mostly gets, the wrapper stays transparent.
 	transport := &capturingTransport{inner: &sdk.StreamableClientTransport{
 		Endpoint:             cfg.URL,
@@ -396,7 +399,8 @@ func Connect(ctx context.Context, cfg Config) (*Conn, error) {
 
 // capturingTransport keeps the Connection its inner transport produced so a
 // failed Client.Connect can still close it. Connect is called exactly once by
-// the SDK, so a single field needs no synchronisation.
+// the SDK (checked against go-sdk v1.7.0 — mcp/transport.go connect), so a
+// single field needs no synchronisation.
 type capturingTransport struct {
 	inner sdk.Transport
 	conn  sdk.Connection
@@ -577,10 +581,11 @@ func (c *Conn) listPage(ctx context.Context, cursor string) (res *sdk.ListToolsR
 // anything, which is the point of the convention.
 //
 // The SDK fills the protocol's own `_meta` keys itself and only where they are
-// absent (injectRequestMeta), so a map supplied here is added to rather than
-// replaced. Nil when no span is active, which says "nothing to add" rather than
-// changing what goes out: `_meta` is `omitempty`, so an empty map would be
-// omitted from the request just the same.
+// absent (checked against go-sdk v1.7.0 — mcp/client.go injectRequestMeta), so
+// a map supplied here is added to rather than replaced. Nil when no span is
+// active, which says "nothing to add" rather than changing what goes out:
+// `_meta` is `omitempty`, so an empty map would be omitted from the request
+// just the same.
 func requestMeta(ctx context.Context) sdk.Meta {
 	carrier := map[string]string{}
 	telemetry.Inject(ctx, carrier)
@@ -600,7 +605,8 @@ func requestMeta(ctx context.Context) sdk.Meta {
 // [a-zA-Z0-9_.-] (checked against go-sdk v1.7.0 — mcp/tool.go validateToolName;
 // the 128 is a len(), so bytes, whatever its error message calls them). Note
 // what the SDK does *not* do with it: AddTool logs a violation and registers
-// the tool anyway, and nothing checks it on the client side at all, so a name
+// the tool anyway (checked against go-sdk v1.7.0 — mcp/server.go
+// Server.AddTool), and nothing checks it on the client side at all, so a name
 // that breaks the rule reaches a client as a perfectly ordinary listing entry.
 // That makes this the first place it can be caught, not a redundant second one.
 // Refusing one tool is better than a request that fails carrying every other

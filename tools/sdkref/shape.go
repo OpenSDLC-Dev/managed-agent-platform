@@ -86,8 +86,9 @@ var (
 	// a version to a project: `k8s.io/api v0.36.2`,
 	// `cloud.google.com/go/storage@v1.56.0`.
 	nameBefore = regexp.MustCompile("([\\w./-]+)(?:['’][sS])?(?:@|[\\s`_\\[(]+)$")
-	// nameChar is a character a name is spelt with.
+	// nameChar is a character a name is spelt with; wordChar is one a word is.
 	nameChar = regexp.MustCompile(`^[\w./-]$`)
+	wordChar = regexp.MustCompile(`^[\w-]$`)
 	// untaggedHead is a governed source followed straight by a file, with no
 	// tag between them. It names everything a citation needs
 	// except the one thing a bump asks about,
@@ -104,6 +105,10 @@ var (
 	// to judge, since this pattern cannot tell a symbol from prose.
 	untaggedMention = regexp.MustCompile("(" + strings.Join(sources, "|") +
 		")((?:/[\\w.-]*\\w)*)(?:`?(?:['’][sS])?[\\s`(]+([A-Za-z_][\\w./-]*\\w))?")
+	// forgeRoutes are the pages a repository link reaches that are not its
+	// tree: what follows one of them after a source's path is a number or a
+	// title, never a package.
+	forgeRoutes = []string{"pull", "issues", "discussions", "releases"}
 	// packagePath is a path of packages, which symbolLike admits beside a
 	// symbol; majorVersion is a module's major version, which names no package.
 	packagePath  = regexp.MustCompile(`^[a-z][\w.-]*(?:/[\w.-]+)+$`)
@@ -223,6 +228,23 @@ func datedRule(text string, tag []int, end int) (string, string) {
 // a name, with the form in front of the whole of it where there is one — so the
 // sweep, which reads a name whole, is what classifies it.
 func standalone(text string, i int) bool { return i == 0 || !nameChar.MatchString(text[i-1:i]) }
+
+// inWord reports whether a source name found at i is the tail of a longer word
+// — `mongo-sdk` ends in `go-sdk` — rather than a name of its own. Unlike
+// standalone it admits a slash in front, since the patterns that ask it read a
+// source ending an import path as that source.
+func inWord(text string, i int) bool { return i > 0 && wordChar.MatchString(text[i-1:i]) }
+
+// reaches reports whether a line reaches for this grammar: reach, matched as a
+// name of its own.
+func reaches(text string) bool {
+	for _, at := range reach.FindAllStringIndex(text, -1) {
+		if !inWord(text, at[0]) {
+			return true
+		}
+	}
+	return false
+}
 
 // Scanner runs rung 1.
 //
@@ -420,6 +442,9 @@ func (s Scanner) scan(line string) ([]Finding, []Finding) {
 		emit(from, at[1], rule, advice)
 	}
 	for _, at := range untaggedHead.FindAllStringSubmatchIndex(text, -1) {
+		if inWord(text, at[0]) {
+			continue
+		}
 		// The SDK's spec is a file the source ships, and the edit it needs is a
 		// schema path rather than a symbol.
 		advice := adviseUntagged
@@ -497,7 +522,7 @@ func (s Scanner) scan(line string) ([]Finding, []Finding) {
 	// off it across several commas, so clause-scoping would lose the very
 	// continuations this rule exists to catch.
 	var ours []Finding
-	if s.AnyExternalCoordinate || reach.MatchString(text) {
+	if s.AnyExternalCoordinate || reaches(text) {
 		var bare []Finding
 		bare, ours = s.bare(text, consumed)
 		findings = append(findings, bare...)
@@ -545,7 +570,7 @@ func (s Scanner) bare(text string, consumed []bool) ([]Finding, []Finding) {
 	// comment, where the paragraph usually names no source at all — a
 	// coordinate into a file this repository does not ship, sitting on the same
 	// line. With neither, a lone `:12` is far more likely to be a port.
-	if !reach.MatchString(text) && !(s.AnyExternalCoordinate && external) {
+	if !reaches(text) && !(s.AnyExternalCoordinate && external) {
 		return findings, ours
 	}
 	for _, at := range continuation.FindAllStringSubmatchIndex(text, -1) {
@@ -601,8 +626,17 @@ func mentions(text string) []mention {
 			}
 		}
 		pos = at[3]
+		if inWord(text, at[2]) {
+			continue
+		}
 		source, pkg := text[at[2]:at[3]], ""
-		for _, seg := range strings.Split(text[at[4]:at[5]], "/") {
+		segs := strings.Split(strings.TrimPrefix(text[at[4]:at[5]], "/"), "/")
+		if slices.Contains(forgeRoutes, segs[0]) {
+			// A link to the source's pull requests or issues, which name no
+			// package of it.
+			segs = nil
+		}
+		for _, seg := range segs {
 			if seg != "" && !majorVersion.MatchString(seg) && !slices.Contains(sources, seg) {
 				pkg = path.Join(pkg, seg)
 			}

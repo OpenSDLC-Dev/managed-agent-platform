@@ -443,7 +443,8 @@ func TestCallToolStillSucceedsWhenATrulyEmptyAnswerComesBack(t *testing.T) {
 //
 // `"inputRequests": {"x": null}` is legal JSON. InputRequestMap.UnmarshalJSON
 // decodes it into a map[string]*raw, checks only that the map itself is
-// non-nil, and then reads a field off every value — so the nil value is
+// non-nil, and then reads a field off every value (checked against go-sdk
+// v1.7.0 — mcp/protocol.go InputRequestMap.UnmarshalJSON) — so the nil value is
 // dereferenced *during* the result decode, on the calling goroutine. The
 // endpoint is customer-supplied and the eventual caller is an executor shared
 // by every session on the host, where a Go panic is not confined to the
@@ -475,10 +476,11 @@ func TestCallToolContainsAPanicInsideTheClientLibrary(t *testing.T) {
 
 // TestCallToolRefusesAnInputRequiredAnswerItCannotFulfil pins the one multi
 // round-trip shape that reaches this package. The SDK's client middleware
-// drives its retry loop off a non-nil `inputRequests` map, so an answer that
-// omits the key entirely is handed back untouched — carrying no output, from a
-// tool that never ran. Left alone it is a successful empty result, which is the
-// one reading of it the model can neither detect nor recover from.
+// drives its retry loop off a non-nil `inputRequests` map (checked against
+// go-sdk v1.7.0 — mcp/mrtr.go clientMultiRoundTripMiddleware), so an answer
+// that omits the key entirely is handed back untouched — carrying no output,
+// from a tool that never ran. Left alone it is a successful empty result, which
+// is the one reading of it the model can neither detect nor recover from.
 func TestCallToolRefusesAnInputRequiredAnswerItCannotFulfil(t *testing.T) {
 	t.Parallel()
 	url, _ := serveToolCall(t, func(json.RawMessage) map[string]any {
