@@ -56,7 +56,7 @@ var (
 	// version it cuts short is a head the patterns around it read the same way.
 	// With no form it is how prose names a module's major version, as
 	// `go-jose/v4` does, and dates nothing.
-	majorTag = regexp.MustCompile(`(` + strings.Join(sources, "|") + `)(?:/v\d+)?\s+([vV]\d+)\b`)
+	majorTag = regexp.MustCompile(`(` + strings.Join(sources, "|") + `)((?:/v\d+)?)\s+([vV]\d+)\b`)
 	// negated is a negation standing straight before a temporal form. It turns the
 	// claim into its opposite, and every one of the grammar's three is a positive
 	// statement about a tag, so a negated head is not a citation however well the
@@ -435,9 +435,12 @@ func (s Scanner) scan(line string) ([]Finding, []Finding) {
 	}
 	for _, at := range majorTag.FindAllStringSubmatchIndex(text, -1) {
 		// The pattern reads only the source's own name, so a module path or a
-		// link in front of it puts the form before the whole of it.
+		// link in front of it puts the form before the whole of it. Whether the
+		// name is a governed source is asked without its major version, since a
+		// source's name ends before one; whose module it is, with it, since
+		// go.mod requires a module by the path that carries it.
 		start := nameStart(text, at[0])
-		if name := text[start:at[3]]; !governed(name) || attributedElsewhere(name, s.Requires) {
+		if !governed(text[start:at[3]]) || attributedElsewhere(text[start:at[5]], s.Requires) {
 			continue
 		}
 		m := formBefore.FindStringSubmatchIndex(text[:start])

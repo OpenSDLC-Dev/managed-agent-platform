@@ -223,11 +223,13 @@ func TestParseCitation(t *testing.T) {
 	}
 }
 
-// testRequires is a go.mod's requirements as the shape tests see them: three
-// projects this grammar does not govern, one of them spelt like a governed
-// source, and two governed sources.
+// testRequires is a go.mod's requirements as the shape tests see them: four
+// projects this grammar does not govern, two of them spelt like a governed
+// source and one of those required only at its second major version, and two
+// governed sources.
 var testRequires = Required([]string{"k8s.io/api", "cloud.google.com/go/storage",
-	"example.com/acme/go-sdk", "github.com/go-jose/go-jose/v4", "github.com/modelcontextprotocol/go-sdk"})
+	"example.com/acme/go-sdk", "example.com/beta/go-sdk/v2", "github.com/go-jose/go-jose/v4",
+	"github.com/modelcontextprotocol/go-sdk"})
 
 // TestShapeFindings pins rung 1, which is always decidable. A candidate is
 // anything that reaches for this grammar — a source name, a tag, a coordinate —
@@ -499,8 +501,25 @@ func TestShapeFindings(t *testing.T) {
 			rules: []string{"head-malformed"},
 		},
 		{
+			name:  "and one naming the source with its major version alone",
+			in:    "*Evidence: checked against go-jose/v4 v4 — jwk.go JSONWebKey.*",
+			rules: []string{"head-malformed"},
+		},
+		{
 			name:  "which with no form dates nothing",
 			in:    "// github.com/go-jose/go-jose/v4 v4 parses the key set",
+			rules: nil,
+		},
+		{
+			// go.mod names a module with its major version on, so that is the
+			// name it is asked about.
+			name:  "but a module go.mod requires only at a later major version is that project",
+			in:    "*Evidence: checked against example.com/beta/go-sdk/v2 v2.3.4 — client.go Client.*",
+			rules: nil,
+		},
+		{
+			name:  "and so is a major tag after it",
+			in:    "*Evidence: checked against example.com/beta/go-sdk/v2 v2 — client.go Client.*",
 			rules: nil,
 		},
 		{
