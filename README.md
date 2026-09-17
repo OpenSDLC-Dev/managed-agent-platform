@@ -4,7 +4,7 @@ An open-source, self-hostable platform for **long-horizon AI agents**, written i
 
 Run the whole thing on-prem or in your own VPC — **your data and your compute never leave your boundary**.
 
-> **Status: v0.3.0, with scheduled deployments and dreams merged to `main` and unreleased — the v1 loop is complete; agents reach MCP servers, the control plane authenticates people, a coordinator agent's roster runs as concurrent session threads, a session mounts versioned memory stores it reads and writes back, a deployment fires an agent on a cron schedule with its run history readable over the wire, and a dream consolidates one of those memory stores over past session transcripts.** A `v*` tag publishes container images and the Helm chart to GHCR, and worker binaries with clamped release notes to the GitHub Release ([docs/RELEASING.md](./docs/RELEASING.md)).
+> **Status: v0.4.0 — the v1 loop is complete; agents reach MCP servers, the control plane authenticates people, a coordinator agent's roster runs as concurrent session threads, a session mounts versioned memory stores it reads and writes back, a deployment fires an agent on a cron schedule with its run history readable over the wire, and a dream consolidates one of those memory stores over past session transcripts.** A `v*` tag publishes container images and the Helm chart to GHCR, and worker binaries with clamped release notes to the GitHub Release ([docs/RELEASING.md](./docs/RELEASING.md)).
 
 What runs today, end to end:
 

@@ -8,7 +8,7 @@ issue: "#655"
 > **Archived 2026-09-11, completed (#655).** Both slices landed: the parameter, the column
 > and the enforcement in PR #691, the retention sweep in the PR that archives this file. The
 > as-built shape is `store.FileLiveSQL` and its five composing readers, plus
-> `internal/api/fileretention.go`; the delivery narrative is the `changelog.d/` fragments.
+> `internal/api/fileretention.go`; the delivery narrative is `CHANGELOG.md § [0.4.0]`.
 > Retained for the decisions below, chiefly why the bytes go at the purge rather than at the
 > expiry and why "GC is a non-goal" survives a sweep that deletes files.
 >
