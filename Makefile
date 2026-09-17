@@ -171,10 +171,9 @@ registry-check:
 # Outside the gate on purpose: at gate time a symbol that has vanished is not yet
 # a defect, since the entry may describe a version where it existed, and
 # reddening until every such claim is re-verified is the thing plan 51 removes.
-# The shape and pin-resolution rungs do run inside `make verify`, through the
-# package's own test, but they do not fail it until slice 4, because the corpus
-# they will govern is not migrated yet — and a green gate prints nothing of what
-# they found. This target prints it, above the report.
+# The shape and pin-resolution rungs run inside `make verify` instead, through
+# the package's own test, and fail it on any finding. This target prints what
+# they find too, above the report.
 sdk-bump-report: build
 	go run ./tools/sdkref -report
 

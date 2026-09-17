@@ -31,9 +31,8 @@
 // Both halves of the corpus go through the same scanner: the registry named by
 // File, and the citations written in Go comments, which GoComments reads.
 //
-// Slice 1 lands the tool against an unmigrated corpus, so the two failing rungs
-// report for now. The exemption is the corpus itself rather than a hand-written
-// list, which would become its own debt.
+// The two failing rungs fail `make verify` through this package's own test,
+// which runs -fail over both halves.
 package main
 
 import (

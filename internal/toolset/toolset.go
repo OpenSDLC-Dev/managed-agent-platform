@@ -15,8 +15,11 @@
 // and this package only knows how to run one.
 //
 // The reference implementation of these six is anthropic-sdk-go's
-// tools/agenttoolset, which runs them on the host and therefore has to confine
-// the file tools to a workdir and warn that bash cannot be confined at all.
+// tools/agenttoolset (checked against anthropic-sdk-go v1.70.1 — agenttoolset.go
+// BetaAgentToolset20260401), which runs them on the host and therefore has to
+// confine the file tools to a workdir (checked against anthropic-sdk-go v1.70.1
+// — agenttoolset.go resolvePath) and warn that bash cannot be confined at all
+// (checked against anthropic-sdk-go v1.70.1 — bash.go BetaBashTool).
 // Here the container IS the confinement, and bash runs in it like everything
 // else, so the file tools resolve relative paths against the workdir and
 // otherwise let a path be a path: a model that wants /etc can read it with

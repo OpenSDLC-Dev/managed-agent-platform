@@ -899,7 +899,9 @@ func TestSingleAudienceIgnoresAZP(t *testing.T) {
 // TestVerifyRequiresSubAndExp covers the two checks go-jose does not make. A
 // principal with no subject cannot be a principal, and a token with no expiry
 // never stops being valid — go-jose's ValidateWithLeeway skips exp when it is
-// absent, so without this check a token minted once would authenticate forever.
+// absent (checked against go-jose v4.1.4 — jwt/validation.go
+// Claims.ValidateWithLeeway), so without this check a token minted once would
+// authenticate forever.
 func TestVerifyRequiresSubAndExp(t *testing.T) {
 	t.Parallel()
 	idp, clock, v := verifierXFixture(t)
@@ -1555,8 +1557,9 @@ func TestVerifyRoleClaimTypes(t *testing.T) {
 }
 
 // TestVerifyDistinguishesADecodeFailureFromABadSignature pins the two apart in
-// the reason vocabulary. go-jose's Claims does both jobs in one call — verify,
-// then unmarshal into every destination — so a genuinely IdP-signed token whose
+// the reason vocabulary. go-jose's Claims (checked against go-jose v4.1.4 —
+// jwt/jwt.go JSONWebToken.Claims) does both jobs in one call — verify, then
+// unmarshal into every destination — so a genuinely IdP-signed token whose
 // payload will not decode arrives as an error from the same line as a forgery.
 // Collapsing them sends an operator hunting a key rotation for what is a provider
 // emitting the wrong claim type, and the reason is their whole diagnostic

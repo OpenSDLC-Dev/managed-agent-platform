@@ -711,12 +711,11 @@ inside the source, so a bump moves one and not the other. Shape is syntax — pl
 files git tracks and which modules `go.mod` requires — and runs in the gate as the
 package's own test. Resolution runs in the gate too, but only at the version `go.mod`
 pins: `make verify` begins with `build`, so that module is guaranteed present while no
-other tag is, and requiring one would put the network in an offline gate. Neither fails
-the gate until the corpus they govern is migrated — the exemption is that corpus, not a
-list of blessed lines, and plan 51's slice 4 is where it ends; until then `make
-sdk-bump-report` prints what they find, above its report. The report is the judgment rung,
-outside the gate — it resolves every anchor into a pinned module against that pin,
-whatever the citation's stamp, falsifies a line span's stated reason against the tag the
-span was written for wherever the module cache already holds it, and only reports, because
-at gate time a symbol that has vanished is not yet a defect, and reddening until every
-such claim is re-verified is the wholesale re-editing the plan removes.
+other tag is, and requiring one would put the network in an offline gate. Both fail the
+gate on any finding, and `make sdk-bump-report` prints what they find too, above its
+report. The report is the judgment rung, outside the gate — it resolves every anchor into
+a pinned module against that pin, whatever the citation's stamp, falsifies a line span's
+stated reason against the tag the span was written for wherever the module cache already
+holds it, and only reports, because at gate time a symbol that has vanished is not yet a
+defect, and reddening until every such claim is re-verified is the wholesale re-editing
+the plan removes.

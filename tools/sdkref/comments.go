@@ -1,10 +1,12 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"go/ast"
 	"go/parser"
 	"go/token"
+	"io/fs"
 	"path"
 	"path/filepath"
 	"strings"
@@ -50,6 +52,11 @@ func GoComments(root string, files []string, inRepo, requires func(string) bool)
 		fset := token.NewFileSet()
 		f, err := parser.ParseFile(fset, filepath.Join(root, filepath.FromSlash(rel)), nil,
 			parser.ParseComments|parser.SkipObjectResolution)
+		if errors.Is(err, fs.ErrNotExist) {
+			// git still lists a file removed without `git rm`. It holds no
+			// comment, and the deletion is the change, not a file left unread.
+			continue
+		}
 		if err != nil {
 			findings = append(findings, Finding{File: rel, Rule: "comments-unread", Msg: fmt.Sprintf(
 				"this file could not be parsed, so no citation in its comments was read: %v", err)})

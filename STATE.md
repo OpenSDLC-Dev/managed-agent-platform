@@ -13,7 +13,7 @@ is the release this work also cuts.
 **Binding to the SDK by symbol** ([plan 51](./docs/plan/51_sdk-reference-binding.md), #722), so a
 pin bump touches only what the reference changed: `tools/sdkref` keeps a citation's temporal
 claim apart from its locator. The corpus it governs — the registry and the Go comments — is
-migrated; it fails nothing until slice 4 turns failing on.
+migrated, and its shape and resolution rungs fail the gate.
 
 ## Tasks
 
@@ -25,6 +25,7 @@ migrated; it fails nothing until slice 4 turns failing on.
 - [x] Plan 51 slice 1 — `tools/sdkref`'s three rungs, and `make sdk-bump-report` as their front end
 - [x] Plan 51 slice 2 — `docs/DIVERGENCES.md`'s citations migrated to the grammar; closes #660
 - [x] Plan 51 slice 3 — the Go comments' citations migrated to the grammar
-- [ ] Plan 51 slice 4 — rungs 1 and 2 fail, the `go.mod`-triggered workflow lands, and the bump
-      ritual is written into `docs/REFERENCE_PROJECTS.md`; first, rung 1 must also flag a source
-      named beside a bare symbol or a package path, which it passes today
+- [x] Plan 51 slice 4a — rung 1 flags a source named beside a symbol or a package path; rungs 1
+      and 2 fail the gate
+- [ ] Plan 51 slice 4b — the `go.mod`-triggered workflow fails on undispositioned transitions,
+      and the bump ritual is written into `docs/REFERENCE_PROJECTS.md`; plan 51 archives
