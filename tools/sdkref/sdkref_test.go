@@ -582,6 +582,40 @@ func TestShapeFindings(t *testing.T) {
 			rules: nil,
 		},
 		{
+			name:  "by its tag too",
+			in:    "// see https://github.com/modelcontextprotocol/go-sdk/releases/tag/nightly",
+			rules: nil,
+		},
+		{
+			// A forge route names a page by its number or its tag. Spelt without
+			// one it is a package's name, which a source may well have.
+			name:  "but a package spelt like a forge route is a package",
+			in:    "// go-sdk/issues Client reads it",
+			rules: []string{"untagged"},
+		},
+		{
+			// The route follows the repository, so one further down a path is
+			// inside a package.
+			name:  "and so is a route deeper in a package path",
+			in:    "// go-sdk/mcp/pull/1 Client reads it",
+			rules: []string{"untagged"},
+		},
+		{
+			name:  "one spelt like the releases page too",
+			in:    "// go-sdk/releases Client reads it",
+			rules: []string{"untagged"},
+		},
+		{
+			name:  "and makes its line reach for the grammar",
+			in:    "- **p** — go-sdk/issues; the server reads client.go:12",
+			rules: []string{"untagged", "bare-line"},
+		},
+		{
+			name:  "and a documentation host's link to one is still a mention",
+			in:    "// https://pkg.go.dev/github.com/modelcontextprotocol/go-sdk/issues Client reads it",
+			rules: []string{"untagged"},
+		},
+		{
 			name:  "nor does the title written after one",
 			in:    "// see https://github.com/modelcontextprotocol/go-sdk/pull/1160 FixClientCrash",
 			rules: nil,
@@ -597,6 +631,12 @@ func TestShapeFindings(t *testing.T) {
 			name:  "and a link to one makes no port on its line a continuation",
 			in:    "- **p** — see https://github.com/modelcontextprotocol/go-sdk/issues/1154; the server listens on :8080",
 			rules: nil,
+		},
+		{
+			// The link names the source, and a coordinate carries its own file.
+			name:  "but a full coordinate on its line is still a finding",
+			in:    "- **p** — see https://github.com/modelcontextprotocol/go-sdk/issues/1154; streamable.go:99 changed",
+			rules: []string{"bare-line"},
 		},
 		{
 			name:  "nor one to the issues of a source whose path repeats its name",
@@ -623,6 +663,11 @@ func TestShapeFindings(t *testing.T) {
 		{
 			name:  "nor does it make a port on its line a continuation",
 			in:    "- **p** — go-sdk-tools listens on the host :8080",
+			rules: nil,
+		},
+		{
+			name:  "nor one a word goes on past after a dot",
+			in:    "- **p** — go-sdk.js reads client.go:12",
 			rules: nil,
 		},
 		{

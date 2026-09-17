@@ -113,10 +113,11 @@ var (
 	// to judge, since this pattern cannot tell a symbol from prose.
 	untaggedMention = regexp.MustCompile("(" + strings.Join(sources, "|") +
 		")((?:/[\\w.-]*\\w)*)(?:`?(?:['’][sS])?[\\s`(]+([A-Za-z_][\\w./-]*\\w))?")
-	// forgeRoutes are the pages a repository link reaches that are not its
-	// tree: what follows one of them after a source's path is a number or a
-	// title, never a package.
-	forgeRoutes = []string{"pull", "issues", "discussions", "releases"}
+	// forgeRoute is a page a repository link reaches that is not its tree: a pull
+	// request, an issue or a discussion by its number, or a release by its tag or
+	// as the latest. What follows one is a title, never a symbol. Without its
+	// number or tag the route's name is a package's name, which a source may have.
+	forgeRoute = regexp.MustCompile(`^(?:(?:pull|issues|discussions)/\d|releases/(?:latest|tag/))`)
 	// packagePath is a path of packages, which symbolLike admits beside a
 	// symbol; majorVersion is a module's major version, which names no package.
 	packagePath  = regexp.MustCompile(`^[a-z][\w.-]*(?:/[\w.-]+)+$`)
@@ -261,31 +262,31 @@ func nameStart(text string, i int) int {
 }
 
 // reaches reports whether a line reaches for this grammar: reach, matched where
-// it names a source — not where a longer word goes on past it, and not in a link
-// to one of the source's forgeRoutes.
-func reaches(text string, requires func(string) bool) bool {
+// it names a source — not where a longer word goes on past it. A link to a
+// forgeRoute of the source names the source but none of its files, so it counts
+// only when pages is set: it reaches for a coordinate, which carries its own
+// file, but not for a continuation, which has to inherit one.
+func reaches(text string, requires func(string) bool, pages bool) bool {
 	for _, at := range reach.FindAllStringIndex(text, -1) {
 		rest := text[at[1]:]
 		if names(text, at[0], at[1], requires) && !wordGoesOn.MatchString(rest) &&
-			!forgeLink(sourcePath.FindString(rest)) {
+			(pages || !forgeLink(sourcePath.FindString(rest))) {
 			return true
 		}
 	}
 	return false
 }
 
-// forgeLink reports whether the path a source's name goes on with links to one
-// of forgeRoutes. The route is its first segment that is not a source's name,
-// which go-jose's repository path repeats: a match there starts at the
-// organisation, with the repository still to come.
+// forgeLink reports whether the path a source's name goes on with is a
+// forgeRoute, past any segment that is a source's name, which go-jose's
+// repository path repeats: a match there starts at the organisation, with the
+// repository still to come.
 func forgeLink(p string) bool {
-	for _, seg := range strings.Split(strings.TrimPrefix(p, "/"), "/") {
-		if slices.Contains(sources, seg) {
-			continue
-		}
-		return slices.Contains(forgeRoutes, seg)
+	segs := strings.Split(strings.TrimPrefix(p, "/"), "/")
+	for len(segs) > 0 && slices.Contains(sources, segs[0]) {
+		segs = segs[1:]
 	}
-	return false
+	return forgeRoute.MatchString(strings.Join(segs, "/"))
 }
 
 // Scanner runs rung 1.
@@ -573,7 +574,7 @@ func (s Scanner) scan(line string) ([]Finding, []Finding) {
 	// off it across several commas, so clause-scoping would lose the very
 	// continuations this rule exists to catch.
 	var ours []Finding
-	if s.AnyExternalCoordinate || reaches(text, s.Requires) {
+	if s.AnyExternalCoordinate || reaches(text, s.Requires, true) {
 		var bare []Finding
 		bare, ours = s.bare(text, consumed)
 		findings = append(findings, bare...)
@@ -621,7 +622,7 @@ func (s Scanner) bare(text string, consumed []bool) ([]Finding, []Finding) {
 	// comment, where the paragraph usually names no source at all — a
 	// coordinate into a file this repository does not ship, sitting on the same
 	// line. With neither, a lone `:12` is far more likely to be a port.
-	if !reaches(text, s.Requires) && !(s.AnyExternalCoordinate && external) {
+	if !reaches(text, s.Requires, false) && !(s.AnyExternalCoordinate && external) {
 		return findings, ours
 	}
 	for _, at := range continuation.FindAllStringSubmatchIndex(text, -1) {

@@ -522,6 +522,20 @@ func TestCitationsAgreeWithShape(t *testing.T) {
 	}
 }
 
+// TestCitationsBoundAClauseWhereShapeDoes. A required module ending in a
+// source's name bounds no clause in rung 1, so it must bound none in Citations:
+// written as a citation's file, it would otherwise pass rung 1 as conforming and
+// never reach rung 2.
+func TestCitationsBoundAClauseWhereShapeDoes(t *testing.T) {
+	const src = "checked against go-jose v4.1.4 — example.com/acme/go-sdk/x.go Foo"
+	if shape := (Scanner{Requires: testRequires}).Line(src); len(shape) != 0 {
+		t.Fatalf("rung 1 = %v, want the citation to conform", shape)
+	}
+	if cites := CitationsIn(src, testRequires); len(cites) != 1 {
+		t.Errorf("CitationsIn = %+v, want the one citation rung 1 passed", cites)
+	}
+}
+
 // TestARegistryCitationsUnitIsItsLine. The registry writes one entry per line,
 // so two citations on a line share a unit and a citation on the next does not.
 func TestARegistryCitationsUnitIsItsLine(t *testing.T) {
