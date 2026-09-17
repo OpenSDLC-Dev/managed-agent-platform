@@ -171,6 +171,35 @@ func f(...int) int { return 0 }
 	}
 }
 
+// TestABlockCommentParagraphsUnitIsItsSourceOffset. The scanner drops the CR
+// of every CRLF from a comment's text while positions count the source's bytes,
+// so an offset summed from the text drifts a byte behind per line.
+func TestABlockCommentParagraphsUnitIsItsSourceOffset(t *testing.T) {
+	dir := t.TempDir()
+	src := strings.ReplaceAll(`package probe
+
+/*
+First: absent at anthropic-sdk-go v1.70.1 — betaagent.go B.
+
+Second: absent at anthropic-sdk-go v1.70.1 — betaagent.go C.
+*/
+func f() {}
+`, "\n", "\r\n")
+	if err := os.WriteFile(filepath.Join(dir, "probe.go"), []byte(src), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_, cs, _ := GoComments(dir, []string{"probe.go"}, ourFiles(), nil)
+	if len(cs) != 2 {
+		t.Fatalf("citations = %+v, want two", cs)
+	}
+	for i, text := range []string{"First:", "Second:"} {
+		if want := strings.Index(src, text); cs[i].Unit != want {
+			t.Errorf("the %q paragraph's unit = %d, want %d, where its line starts in the file",
+				text, cs[i].Unit, want)
+		}
+	}
+}
+
 // TestTheCorpusCarriesCommentCitationsToTheResolvingRungs. Rung 1 reading the
 // comments is only half of it: if the citations it finds there never reach
 // rungs 2 and 3, then after slice 3 migrates the comments every one of them is

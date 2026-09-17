@@ -95,7 +95,7 @@ func GoComments(root string, files []string, inRepo, requires func(string) bool)
 // offset in that text came from.
 type para struct {
 	text   string
-	unit   int   // the byte offset in the file its first line of text is at
+	unit   int   // the byte offset in the file its first line starts at, or past `/*` on a line code can share
 	starts []int // byte offset in text where each physical line's text begins
 	lines  []int // that line's number in the file
 }
@@ -145,10 +145,16 @@ func paragraphs(fset *token.FileSet, cg *ast.CommentGroup) []para {
 			continue
 		}
 		body := strings.TrimSuffix(strings.TrimPrefix(c.Text, "/*"), "*/")
-		off := pos.Offset + len("/*")
+		file := fset.File(c.Pos())
 		for i, l := range strings.Split(body, "\n") {
+			// A later line's offset is its start in the source, not a sum of the
+			// lengths before it: the scanner drops each CRLF's CR from Text, so a
+			// sum falls one byte behind per line.
+			off := pos.Offset + len("/*")
+			if i > 0 {
+				off = file.Offset(file.LineStart(pos.Line + i))
+			}
 			add(pos.Line+i, off, strings.TrimPrefix(strings.TrimSpace(l), "*"))
-			off += len(l) + 1
 		}
 	}
 	flush()
