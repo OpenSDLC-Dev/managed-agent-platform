@@ -292,6 +292,13 @@ func TestAWordEndingInASourceNameMakesNoContinuation(t *testing.T) {
 	if got := s.Line("// https://example.com/acme/go-sdk listens on the host :8080"); len(got) != 0 {
 		t.Errorf("a line linking example.com/acme/go-sdk reported %v, want nothing", got)
 	}
+	// Nor a word that goes on past a source's name, nor a link to a source's issues.
+	if got := s.Line("// go-sdk-tools listens on the host :8080"); len(got) != 0 {
+		t.Errorf("a line naming go-sdk-tools reported %v, want nothing", got)
+	}
+	if got := s.Line("// see https://github.com/go-jose/go-jose/issues/123, on the host :8080"); len(got) != 0 {
+		t.Errorf("a line linking go-jose's issues reported %v, want nothing", got)
+	}
 }
 
 // TestACommentCitesTheFileBesideItByItsBasename. A comment that names a file

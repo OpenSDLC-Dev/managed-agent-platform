@@ -90,6 +90,13 @@ var (
 	// nameChar is a character a name is spelt with; wordChar is one a word is.
 	nameChar = regexp.MustCompile(`^[\w./-]$`)
 	wordChar = regexp.MustCompile(`^[\w.-]$`)
+	// wordGoesOn is what follows a source's name that is only the start of a
+	// longer word, `go-sdkx` or `go-sdk-tools`. A full stop ends a sentence, not
+	// a word, unless the word goes on straight after it.
+	wordGoesOn = regexp.MustCompile(`^(?:[\w-]|\.\w)`)
+	// sourcePath is the path a source's name goes on with, read the way
+	// untaggedMention reads it.
+	sourcePath = regexp.MustCompile(`^(?:/[\w.-]*\w)*`)
 	// untaggedHead is a governed source followed straight by a file, with no
 	// tag between them. It names everything a citation needs
 	// except the one thing a bump asks about,
@@ -254,12 +261,29 @@ func nameStart(text string, i int) int {
 }
 
 // reaches reports whether a line reaches for this grammar: reach, matched where
-// it names a source.
+// it names a source — not where a longer word goes on past it, and not in a link
+// to one of the source's forgeRoutes.
 func reaches(text string, requires func(string) bool) bool {
 	for _, at := range reach.FindAllStringIndex(text, -1) {
-		if names(text, at[0], at[1], requires) {
+		rest := text[at[1]:]
+		if names(text, at[0], at[1], requires) && !wordGoesOn.MatchString(rest) &&
+			!forgeLink(sourcePath.FindString(rest)) {
 			return true
 		}
+	}
+	return false
+}
+
+// forgeLink reports whether the path a source's name goes on with links to one
+// of forgeRoutes. The route is its first segment that is not a source's name,
+// which go-jose's repository path repeats: a match there starts at the
+// organisation, with the repository still to come.
+func forgeLink(p string) bool {
+	for _, seg := range strings.Split(strings.TrimPrefix(p, "/"), "/") {
+		if slices.Contains(sources, seg) {
+			continue
+		}
+		return slices.Contains(forgeRoutes, seg)
 	}
 	return false
 }
@@ -349,7 +373,7 @@ func (s Scanner) scan(line string) ([]Finding, []Finding) {
 	// text — which is what lets a wrapped comment paragraph put a finding back
 	// on the physical line it came from.
 	text := blankEmphasis(line)
-	bounds := headStarts(text)
+	bounds := headStarts(text, s.Requires)
 	consumed := make([]bool, len(text))
 	var findings []Finding
 
@@ -611,15 +635,16 @@ func (s Scanner) bare(text string, consumed []bool) ([]Finding, []Finding) {
 // to the next one at the latest: two citations written side by side on one line
 // would otherwise be read as a single malformed one by rung 1 and as the second
 // one alone by Citations, and the two halves of one scan would disagree about
-// where a citation ends.
-func headStarts(text string) []int {
+// where a citation ends. A mention is a head only where it names a source, which
+// go.mod has a say in.
+func headStarts(text string, requires func(string) bool) []int {
 	var out []int
 	for _, re := range []*regexp.Regexp{datedHead, undatedHead, specEpithet, untaggedHead, untaggedSpec} {
 		for _, at := range re.FindAllStringIndex(text, -1) {
 			out = append(out, at[0])
 		}
 	}
-	for _, m := range mentions(text, nil) {
+	for _, m := range mentions(text, requires) {
 		out = append(out, m.from)
 	}
 	sort.Ints(out)
@@ -656,14 +681,13 @@ func mentions(text string, requires func(string) bool) []mention {
 		if !names(text, at[2], at[5], requires) {
 			continue
 		}
-		source, pkg := text[at[2]:at[3]], ""
-		segs := strings.Split(strings.TrimPrefix(text[at[4]:at[5]], "/"), "/")
-		if slices.Contains(forgeRoutes, segs[0]) {
+		if forgeLink(text[at[4]:at[5]]) {
 			// A link to the source's pull requests or issues, which name no
-			// package of it.
-			segs = nil
+			// package of it, and the title written after one no symbol.
+			continue
 		}
-		for _, seg := range segs {
+		source, pkg := text[at[2]:at[3]], ""
+		for _, seg := range strings.Split(strings.TrimPrefix(text[at[4]:at[5]], "/"), "/") {
 			if seg != "" && !majorVersion.MatchString(seg) && !slices.Contains(sources, seg) {
 				pkg = path.Join(pkg, seg)
 			}
@@ -937,11 +961,13 @@ func anyConsumed(consumed []bool, from, to int) bool {
 //
 // It shares datedHead and clause with Shape on purpose: the two halves of one
 // scan must agree about where a citation begins and ends, or a clause could be
-// reported as malformed by rung 1 and resolved as well-formed by rung 2.
-func Citations(src string) []Citation {
+// reported as malformed by rung 1 and resolved as well-formed by rung 2. So it
+// takes the go.mod requirements rung 1's Scanner does, which decide where a
+// mention bounds a clause.
+func Citations(src string, requires func(string) bool) []Citation {
 	var out []Citation
 	for i, line := range strings.Split(src, "\n") {
-		for _, c := range CitationsIn(line) {
+		for _, c := range CitationsIn(line, requires) {
 			c.Line, c.Unit = i+1, i+1
 			out = append(out, c)
 		}
@@ -951,9 +977,9 @@ func Citations(src string) []Citation {
 
 // CitationsIn returns every conforming citation in one piece of text, each
 // carrying the offset it starts at.
-func CitationsIn(line string) []Citation {
+func CitationsIn(line string, requires func(string) bool) []Citation {
 	text := blankEmphasis(line)
-	bounds := headStarts(text)
+	bounds := headStarts(text, requires)
 	var out []Citation
 	for _, at := range datedHead.FindAllStringIndex(text, -1) {
 		if negated.MatchString(text[:at[0]]) {

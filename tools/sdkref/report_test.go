@@ -510,7 +510,7 @@ func citations(t *testing.T, lines ...string) []Citation {
 func TestCitationsAgreeWithShape(t *testing.T) {
 	const src = `- **entry** — *Evidence: checked against anthropic-sdk-go v1.70.1 — betaagent.go BetaAgentNewParams; anthropic-sdk-go v1.66.0 poller.go:492-518.*`
 	shape := ShapeAll(src)
-	cites := Citations(src)
+	cites := Citations(src, nil)
 	if len(cites) != 1 {
 		t.Fatalf("Citations = %d, want the one conforming clause: %+v", len(cites), cites)
 	}
@@ -525,9 +525,9 @@ func TestCitationsAgreeWithShape(t *testing.T) {
 // TestARegistryCitationsUnitIsItsLine. The registry writes one entry per line,
 // so two citations on a line share a unit and a citation on the next does not.
 func TestARegistryCitationsUnitIsItsLine(t *testing.T) {
-	cs := Citations("prose\n" +
-		"checked against anthropic-sdk-go v1.66.0 — betaagent.go A and absent at anthropic-sdk-go v1.70.1 — betaagent.go A\n" +
-		"absent at anthropic-sdk-go v1.70.1 — betaagent.go B")
+	cs := Citations("prose\n"+
+		"checked against anthropic-sdk-go v1.66.0 — betaagent.go A and absent at anthropic-sdk-go v1.70.1 — betaagent.go A\n"+
+		"absent at anthropic-sdk-go v1.70.1 — betaagent.go B", nil)
 	var got []int
 	for _, c := range cs {
 		got = append(got, c.Unit)
@@ -542,7 +542,7 @@ func TestARegistryCitationsUnitIsItsLine(t *testing.T) {
 // not: resolved, it would pass exactly when the negation says it should fail.
 func TestANegatedCitationReachesNoRung(t *testing.T) {
 	const src = "*Evidence: not checked against anthropic-sdk-go v1.70.1 — betaagent.go BetaAgentNewParams.*"
-	if cites := Citations(src); len(cites) != 0 {
+	if cites := Citations(src, nil); len(cites) != 0 {
 		t.Errorf("Citations = %+v, want none: a negated form claims nothing", cites)
 	}
 	if shape := ShapeAll(src); len(shape) != 1 || shape[0].Rule != "negated-form" {
@@ -772,7 +772,7 @@ func TestASpanOverGoThatWillNotParseIsUncheckable(t *testing.T) {
 // test can put two anchors beside each other or apart.
 func document(t *testing.T, lines ...string) []Citation {
 	t.Helper()
-	cs := Citations(strings.Join(lines, "\n"))
+	cs := Citations(strings.Join(lines, "\n"), nil)
 	for i := range cs {
 		cs[i].File = "registry.md"
 	}

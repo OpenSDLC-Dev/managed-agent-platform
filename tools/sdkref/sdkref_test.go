@@ -582,9 +582,61 @@ func TestShapeFindings(t *testing.T) {
 			rules: nil,
 		},
 		{
+			name:  "nor does the title written after one",
+			in:    "// see https://github.com/modelcontextprotocol/go-sdk/pull/1160 FixClientCrash",
+			rules: nil,
+		},
+		{
+			// go-jose's module path repeats its name, so the pattern first
+			// matches the organisation, with the repository still in its path.
+			name:  "nor a link to the issues of a source whose path repeats its name",
+			in:    "// see https://github.com/go-jose/go-jose/issues/123 for the fix",
+			rules: nil,
+		},
+		{
+			name:  "and a link to one makes no port on its line a continuation",
+			in:    "- **p** — see https://github.com/modelcontextprotocol/go-sdk/issues/1154; the server listens on :8080",
+			rules: nil,
+		},
+		{
+			name:  "nor one to the issues of a source whose path repeats its name",
+			in:    "- **p** — see https://github.com/go-jose/go-jose/issues/123; the server listens on :8080",
+			rules: nil,
+		},
+		{
 			name:  "while a link into its tree still does",
 			in:    "// see https://github.com/modelcontextprotocol/go-sdk/blob/main/mcp/client.go",
 			rules: []string{"untagged"},
+		},
+		{
+			name:  "and so does one into the tree of a source whose path repeats its name",
+			in:    "// see https://github.com/go-jose/go-jose/blob/main/jwk.go",
+			rules: []string{"untagged"},
+		},
+		{
+			// A word that goes on past a source's name is somebody else's, as
+			// surely as one that starts before it.
+			name:  "a word only starting with a source's name makes its line reach for nothing",
+			in:    "- **p** — go-sdkx reads client.go:12",
+			rules: nil,
+		},
+		{
+			name:  "nor does it make a port on its line a continuation",
+			in:    "- **p** — go-sdk-tools listens on the host :8080",
+			rules: nil,
+		},
+		{
+			name:  "but a full stop after a source's name ends a sentence, not the name",
+			in:    "- **p** — it wraps the go-sdk. It listens on the host :8080",
+			rules: []string{"bare-line"},
+		},
+		{
+			// With the foreign module read as a mention, the clause dating the
+			// first one ended in front of it, before the citation that dates it.
+			name: "a mention of a required module ending in a source's name bounds no clause",
+			in: "*Evidence: go-jose JSONWebKey is used by example.com/acme/go-sdk Client " +
+				"(checked against go-jose v4.1.4 — jwk.go JSONWebKey).*",
+			rules: nil,
 		},
 		{
 			name:  "another major version of a governed source is still that source",
@@ -1189,7 +1241,7 @@ func TestAClauseStopsAtTheNextCitation(t *testing.T) {
 	const src = "checked against anthropic-sdk-go v1.70.1 — betaagent.go Foo " +
 		"and checked against anthropic-sdk-go v1.63.0 — betafile.go Bar"
 	shape := ShapeAll(src)
-	cites := Citations(src)
+	cites := Citations(src, nil)
 	if len(cites) != 2 {
 		t.Errorf("Citations = %d, want both: %+v", len(cites), cites)
 	}
@@ -1400,7 +1452,7 @@ func TestRungTwoRunsOverTheRealCorpus(t *testing.T) {
 	if err != nil {
 		t.Fatalf("indexing %s: %v", root, err)
 	}
-	cites := Citations(string(src))
+	cites := Citations(string(src), nil)
 	_, comments, _ := GoComments(root, files, InSet(files), nil)
 	env, err := NewEnv(root)
 	if err != nil {
@@ -1418,8 +1470,8 @@ func TestRungTwoRunsOverTheRealCorpus(t *testing.T) {
 	// and must add nothing, one does not and must add exactly one finding.
 	sdk := realSDK(t)
 	probes := Citations(
-		"checked against anthropic-sdk-go " + env.Pin + " — " + sdk.file + " " + sdk.method + "\n" +
-			"checked against anthropic-sdk-go " + env.Pin + " — " + sdk.file + " " + sdk.absent)
+		"checked against anthropic-sdk-go "+env.Pin+" — "+sdk.file+" "+sdk.method+"\n"+
+			"checked against anthropic-sdk-go "+env.Pin+" — "+sdk.file+" "+sdk.absent, nil)
 	if len(probes) != 2 {
 		t.Fatalf("the probes did not parse: %+v", probes)
 	}

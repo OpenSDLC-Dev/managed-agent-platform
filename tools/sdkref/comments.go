@@ -80,7 +80,7 @@ func GoComments(root string, files []string, inRepo, requires func(string) bool)
 				for _, o := range own {
 					ours = append(ours, fmt.Sprintf("%s:%d %s", rel, par.lineAt(o.at), o.Msg))
 				}
-				for _, c := range CitationsIn(par.text) {
+				for _, c := range CitationsIn(par.text, requires) {
 					c.File, c.Line, c.Unit = rel, par.lineAt(c.at), par.unit
 					citations = append(citations, c)
 				}
