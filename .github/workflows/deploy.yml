@@ -537,12 +537,13 @@ jobs:
           # own. Nothing in this repository creates or fills it — deploy/gcp/README.md
           # ("Continuous delivery") owns which secrets are stood up out of band and
           # by whom — so it may be missing, or present with no version, and those
-          # need different commands. gcloud does not separate them: `versions access
-          # latest` answers both with `NOT_FOUND: Secret [...] not found or has no
-          # versions`, which names the two states and settles neither (measured
-          # against the API, gcloud 578). That is why one branch handles both and
-          # names both commands, create first — the operator cannot be told which
-          # one they are in. What the secret holds when it is right is a live model
+          # need different commands. The step cannot tell which: for a secret that
+          # is absent, `versions access latest` answers `NOT_FOUND: Secret [...] not
+          # found or has no versions` — measured against the API at gcloud 578, and
+          # a sentence that names both states while committing to neither. Whatever
+          # a versionless one answers, that reply already leaves the state open, so
+          # one branch handles both and names both commands, create first. What the
+          # secret holds when it is right is a live model
           # API key, the one credential no automation may mint, so this step can
           # repair neither state: it stops here rather than deploying a brain that
           # crash-loops on an empty config.

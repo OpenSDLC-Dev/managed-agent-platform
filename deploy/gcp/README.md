@@ -1341,9 +1341,10 @@ The five **mode-1** secrets — `postgres-password`, `minio-root-user`, `minio-r
 deliberately left in place rather than deleted: mode 1 is still the documented manual path
 above, and a secret with a version is a secret that can still decrypt something.
 
-**`model-providers` has a version, and that version is a placeholder.** It is a real endpoint
-(`https://api.anthropic.com`) with a fake key, stored so the pipeline could be proven end to
-end without inventing a credential. An unreachable host would have been a *different* failure
+**`model-providers` was given a version, and that version is a placeholder.** It is a real
+endpoint (`https://api.anthropic.com`) with a fake key, stored so the pipeline could be
+proven end to end without inventing a credential. Nothing here can tell you whether it is
+still what the secret holds — that is the point of replacing it. An unreachable host would have been a *different* failure
 — the brain retrying a dead name — from the one this is honest about, which is an invalid
 key: the platform comes up, `/v1/agents` answers, the deploy gate passes, and the first
 session that calls a model fails with an auth error. Replace it in one line:
@@ -1363,8 +1364,8 @@ external IP, then requires `GET /v1/agents?limit=1` to answer 200 with the manag
 which exercises the key end to end and takes a round trip through Cloud SQL, so it is a real
 check rather than a readiness probe restated — and to answer something *other* than 200
 without it, which is the check that an address on the public internet is not simply open. It
-does **not** run a session, so it says nothing about the model route (which is a placeholder
-today), the sandbox pool or the egress gate. Those are the acceptance battery's job, not the
+does **not** run a session, so it says nothing about the model route (a placeholder unless
+someone has replaced it), the sandbox pool or the egress gate. Those are the acceptance battery's job, not the
 pipeline's.
 
 **That address is plain HTTP on a bare IP**, and
