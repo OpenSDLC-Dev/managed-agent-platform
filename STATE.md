@@ -8,8 +8,8 @@ What is being worked on right now, and how far along it is — nothing else. **S
 #716, #730 and #731 shipped in v0.4.0 ([docs/changelog/0.4.0.md](./docs/changelog/0.4.0.md)),
 and #720's primary-unarchived CHECK landed after it; its entry is a
 [changelog.d/](./changelog.d/) fragment, as are #748's executor Cloud KMS grant, #749's
-release-install path for GCP, #752's legible `gcp-env-destroy` failure and #755's
-corrected `model-providers` secret guidance.
+release-install path for GCP, #752's legible `gcp-env-destroy` failure, #755's corrected
+`model-providers` secret guidance and #750's guard over each identity's Cloud KMS role.
 The backlog is [GitHub issues](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues).
 
 ## Tasks

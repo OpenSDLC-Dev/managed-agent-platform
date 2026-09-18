@@ -78,6 +78,18 @@ resource "google_service_account_iam_member" "executor_workload_identity" {
 
 # ---------------------------------------------------------------------------
 # KMS. Split by what each component actually calls, not by what is convenient.
+#
+# `make gcp-kms-role-check` holds the FLOOR of that split — no identity granted
+# less than its binary's packages call — by reading these roles and the cipher's
+# call sites in the Go source, rather than by trusting the prose below (#750,
+# raised because #748 was a role string kept correct only by seven comments that
+# had all gone stale together). A floor is not the split: it can say the executor
+# needs Decrypt, never that an identity should hold less, and any binary linking
+# internal/secrets/backend inherits both permissions from the backend's own calls
+# whatever its own code does. CI runs it beside the other gcp-* checks, and
+# `go run ./tools/kmsrole` from the repository root prints the table it derived.
+# Narrowing a role here is still a judgment call — this only stops the judgment
+# being wrong in the direction #748 was.
 # ---------------------------------------------------------------------------
 
 # The control plane encrypts on write and decrypts for mcp_oauth_validate and
