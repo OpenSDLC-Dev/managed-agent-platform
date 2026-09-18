@@ -447,7 +447,7 @@ func TestANarrowedRoleFails(t *testing.T) {
 	// The message has to carry the site, or a red run says an identity is
 	// under-granted without saying what demanded the permission.
 	if f := findingFor(r, "executor"); !strings.Contains(f.Msg, "internal/executor/repos.go:") {
-		t.Errorf("the executor finding names no call site: %q", f.Msg)
+		t.Errorf("the executor finding names no site: %q", f.Msg)
 	}
 }
 

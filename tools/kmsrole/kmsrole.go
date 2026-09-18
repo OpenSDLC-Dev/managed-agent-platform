@@ -83,11 +83,14 @@
 // revoke cloudkms above the key), a `package main` directly under cmd/ or below
 // cmd/<name> (walked from nowhere, and mapping to no identity), a `.tf.json`
 // file (this reader parses HCL only, and a grant in JSON would read as absent),
-// a `.tf` file outside the two roots an apply loads, and any .tf construct its
-// reader cannot read (see hcl.go). It also refuses when grants appear in more
-// than one Terraform root, when it found no grant at all, and when no binary
-// reaches the cipher — the last two would let it print ok over nothing, which is
-// how a checker's bug becomes the input it never reads.
+// a `.tf` file outside the two roots an apply loads, a cipher-key block that
+// assigns no `crypto_key_id`, `member` or `role` at all, one that assigns the
+// same attribute twice (the two would disagree and this guard would report on
+// whichever it kept), and any .tf construct its reader cannot read (see hcl.go).
+// It also refuses when grants appear in more than one Terraform root, when it
+// found no grant at all, and when no binary reaches the cipher — the last two
+// would let it print ok over nothing, which is how a checker's bug becomes the
+// input it never reads.
 //
 // A grant on a crypto key OTHER than the cipher is not refused: it is simply not
 // this key's grant, and ignoring it is the correct reading.
@@ -538,8 +541,9 @@ func wideIAMOK(b tfBlock, binaries map[string]bool) error {
 		//
 		// The `member` branch above is blind to the same principals but not in
 		// the same place: a computed `member` fails the literal read and falls
-		// through to the role check, so it is refused, while a computed
-		// `members` list lands here and is ignored.
+		// through to the role check, which refuses it when the role IS a readable
+		// `roles/cloudkms.` literal and ignores it otherwise. A computed `members`
+		// list lands here instead and is ignored whatever the role says.
 		return nil
 	}
 	line, has, err := b.attr("role")
