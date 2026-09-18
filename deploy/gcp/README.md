@@ -1564,12 +1564,12 @@ the project and is one more `terraform import` away.
 ## Checking it without touching GCP
 
 ```sh
-make gcp-fmt gcp-validate gcp-split-check gcp-lint \
+make gcp-fmt gcp-validate gcp-split-check gcp-kms-role-check gcp-lint \
      gcp-bootstrap-test gcp-split-check-test gcp-dbinit-test gcp-power-test \
      gcp-tfvars-test gcp-env-targets-test
 ```
 
-None of them needs credentials, state, or a project, and CI runs all ten on every PR — so
+None of them needs credentials, state, or a project, and CI runs all eleven on every PR — so
 neither the configuration nor the tooling can rot silently between the rare runs that
 actually provision anything. `gcp-dbinit-test` is the one with a host requirement: it needs
 Docker, because it starts a real PostgreSQL. `gcp-validate` stays **credential-free** now that
@@ -1583,7 +1583,14 @@ from the registry like any other dependency.
 `foundation/` declares must carry both guards it can — `prevent_destroy` and, where the kind
 has it, `deletion_policy = "PREVENT"`.
 
-The last six **run** the tooling rather than reading it, because the first four are static
+`gcp-kms-role-check` is the same kind of enforcement for the other rule these files kept
+only by prose: it reads each identity's key-level Cloud KMS role out of `environment/iam.tf`
+and every `Encrypt`/`Decrypt` call site out of the Go packages each `cmd/` binary imports,
+and fails when an identity is granted less than its binary calls. It is a floor — it never
+asks for a role to be narrowed — and it refuses rather than guesses whatever it cannot read
+honestly. `tools/kmsrole`'s package comment argues both, and says what #748 cost.
+
+The last six **run** the tooling rather than reading it, because the first five are static
 and this is a place where static checking has already been insufficient. `gcp-lint` is
 shellcheck, and shellcheck cannot know that `gcloud secrets versions describe` rejects
 `--filter` — it exited 0 on a `bootstrap.sh` that aborted on its first call in every project,

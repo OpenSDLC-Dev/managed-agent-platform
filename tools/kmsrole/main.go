@@ -7,10 +7,16 @@ import (
 	"strings"
 )
 
-// The guard itself runs inside `make verify`, through this package's own test.
-// This binary exists for the other reader of the same derivation: someone
-// editing deploy/gcp/environment/iam.tf, who wants to see which identity calls
-// what before changing a role string. Run it from the repository root.
+// This binary IS the guard against the real tree: `make gcp-kms-role-check`
+// runs it, and CI runs that. It prints the table it derived — which identity
+// calls what, and what each is granted — before saying ok or naming what is
+// under-granted, because someone about to change a role string wants to see the
+// derivation and not just the verdict. Run it from the repository root.
+//
+// The package's own test is the other half, and stays inside `make verify`: it
+// reads fixtures and the Go tree, never deploy/gcp, so the Go gate does not
+// depend on the GCP tree (plan 20, Decision 9). kmsrole.go's package comment
+// argues the division.
 func main() {
 	log.SetFlags(0)
 	r, err := Check(".", filepath.Join("deploy", "gcp"))

@@ -81,11 +81,11 @@ func TestAHeredocBodyIsNeitherStructureNorValue(t *testing.T) {
 	if !ok || label != "executor" || g.Role != "roles/cloudkms.cryptoKeyEncrypter" {
 		t.Fatalf("readGrant = %q %+v %v, want the executor's Encrypter role", label, g, ok)
 	}
-	// And the body must not carry the prose at all. Today nothing downstream
-	// could read it — a heredoc line's scrubbed copy is empty, and that is what
-	// attr matches on — so this asserts the invariant rather than the symptom:
-	// the next reader to reach for Raw without Scrubbed would otherwise find a
-	// second role assignment waiting in a description.
+	// And the body must not carry the prose at all: tfBlocks drops a heredoc
+	// line rather than storing it, and this is the assertion that fails when
+	// that filter goes. Scrubbing is only the second line of defence — a
+	// heredoc line's scrubbed copy is empty, so attr would not match it even if
+	// it were stored — and a reader reaching for Raw has no such protection.
 	for _, l := range blocks[0].Body {
 		if strings.Contains(l.Raw, "EncrypterDecrypter") {
 			t.Errorf("line %d of the heredoc body is in the block body: %q", l.N, l.Raw)
@@ -209,10 +209,11 @@ func TestADuplicateAttributeIsRefused(t *testing.T) {
 	}
 }
 
-// TestNestedNamesTheBlock: detection is structural, so a block written on one
-// line — which nets to zero braces — is still seen, and an interpolated value
-// is still not a block.
-func TestNestedNamesTheBlock(t *testing.T) {
+// TestNestedNamesEveryBlock: detection is structural, so a block written on one
+// line — which nets to zero braces — is still seen; an interpolated value is
+// still not a block; and EVERY nested block is named, because returning only the
+// first let an allowed `lifecycle` shadow a `condition` written after it.
+func TestNestedNamesEveryBlock(t *testing.T) {
 	blocks, err := tfBlocks(writeTF(t, `resource "a" "multi" {
   condition {
     title = "t"
@@ -229,6 +230,15 @@ resource "a" "meta" {
   }
 }
 
+resource "a" "shadowed" {
+  lifecycle {
+    prevent_destroy = true
+  }
+  condition {
+    expression = "false"
+  }
+}
+
 resource "a" "plain" {
   member = "serviceAccount:${data.google_service_account.x.email}"
   labels = {
@@ -239,10 +249,25 @@ resource "a" "plain" {
 	if err != nil {
 		t.Fatalf("tfBlocks: %v", err)
 	}
-	want := map[string]string{"multi": "condition", "oneline": "condition", "meta": "lifecycle", "plain": ""}
+	want := map[string][]string{
+		"multi":    {"condition"},
+		"oneline":  {"condition"},
+		"meta":     {"lifecycle"},
+		"shadowed": {"lifecycle", "condition"},
+		"plain":    nil,
+	}
 	for _, b := range blocks {
-		if got := b.nested(); got != want[b.Label] {
-			t.Errorf("%s.nested() = %q, want %q", b.Label, got, want[b.Label])
+		got := b.nested()
+		w := want[b.Label]
+		if len(got) != len(w) {
+			t.Errorf("%s.nested() = %v, want %v", b.Label, got, w)
+			continue
+		}
+		for i := range w {
+			if got[i] != w[i] {
+				t.Errorf("%s.nested() = %v, want %v", b.Label, got, w)
+				break
+			}
 		}
 	}
 }

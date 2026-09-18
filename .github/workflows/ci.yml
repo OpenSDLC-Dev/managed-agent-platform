@@ -1074,9 +1074,8 @@ jobs:
       - name: the two configurations stay independent
         run: make gcp-split-check
       # The role strings in environment/iam.tf against the cipher's call sites
-      # in the Go source: #748 shipped an executor that decrypted under an
-      # Encrypter-only grant for three releases, and nothing went red because
-      # the cipher's startup probe only encrypts.
+      # in the Go source. tools/kmsrole's package comment says what it does and
+      # what #748 cost.
       - name: each identity's KMS role matches what its code calls
         run: make gcp-kms-role-check
       - name: shell scripts lint

@@ -90,7 +90,9 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"sort"
+	"strconv"
 	"strings"
 )
 
@@ -156,6 +158,11 @@ const (
 	// intended way to be told to teach it.
 	cipherKeyLabel = "cipher"
 )
+
+// tfRoots are the two directories `terraform apply` is ever run in here, and so
+// the only ones whose grants are real. deploy/gcp/check_split.py pins the same
+// two names, and the Makefile's apply targets are the third place they appear.
+var tfRoots = []string{"foundation", "environment"}
 
 var (
 	// A literal string assignment, with an optional trailing comment. Anything
@@ -312,7 +319,18 @@ func readGrants(dir string, binaries map[string]bool) (map[string]Grant, error) 
 			// block it replaced.
 			return fmt.Errorf("%s: Terraform override files replace attributes rather than add to them, which this guard does not model — express the grant in one place", p)
 		case strings.HasSuffix(p, ".tf"):
+			// Only the two roots an apply actually reads. Terraform loads the
+			// .tf files of ONE directory, never recursively, so configuration
+			// anywhere else is either a module — whose labels live in their own
+			// scope — or configuration nobody applies, and crediting a grant
+			// that is never applied is the same class of wrong answer as
+			// crediting a grant on the wrong key. check_split.py pins the same
+			// two names, and the Makefile's apply targets are the third place
+			// they appear. A rename fails this loudly.
 			root := filepath.Dir(p)
+			if !slices.Contains(tfRoots, filepath.Base(root)) || filepath.Dir(root) != dir {
+				return fmt.Errorf("%s is outside the Terraform roots this guard reads (%s directly inside %s) — those are the directories an apply loads, and a grant anywhere else is either a module's or one nobody applies", p, strings.Join(tfRoots, " and "), dir)
+			}
 			byRoot[root] = append(byRoot[root], p)
 		}
 		return nil
@@ -363,11 +381,14 @@ func readFileGrants(path string, binaries map[string]bool, into map[string]Grant
 	for _, b := range blocks {
 		if b.Type == "module" {
 			// The module's own configuration is somewhere this guard does not
-			// look, and check_split.py refuses a module it cannot follow for
-			// the same reason. A grant a module MAKES would only read as absent
-			// here — the safe direction — but a google_kms_crypto_key_iam_policy
-			// inside one is authoritative for its (key, role) pair and would
-			// REVOKE the members read here, which is not.
+			// look: it reads the root directory alone, so even a local module's
+			// files go unread. (check_split.py globs its half recursively and so
+			// refuses only a source it cannot follow; this is the stricter rule,
+			// for the weaker reader.) A grant a module MAKES would only read as
+			// absent here — the safe direction — but a
+			// google_kms_crypto_key_iam_policy inside one is authoritative for
+			// its (key, role) pair and would REVOKE the members read here,
+			// which is not.
 			return fmt.Errorf("%s calls a module, whose configuration this guard does not read — an IAM policy inside it can revoke the members read here", b.Addr())
 		}
 		if err := wideIAMOK(b, binaries); err != nil {
@@ -463,39 +484,45 @@ func wideIAMOK(b tfBlock, binaries map[string]bool) error {
 		return err
 	}
 	if !has {
-		return fmt.Errorf("%s assigns no role", b.Addr())
+		return nil
 	}
 	sm := tfStringRe.FindStringSubmatch(line.Raw)
 	if sm == nil {
-		return fmt.Errorf("%s:%d: cannot read the role as a literal string, so this guard cannot tell whether it grants cloudkms above the key", b.File, line.N)
+		// A role this guard cannot read — `each.value` under a for_each, a
+		// local, a conditional — is IGNORED rather than refused, and the
+		// asymmetry with a cipher grant is deliberate. Ignoring a wide grant can
+		// only ADD permissions to the picture this guard never had, so the worst
+		// it can produce is a finding that a wider grant would have excused: a
+		// false alarm, never a silent pass. Refusing instead would fail the
+		// build on `for_each = toset([...]) / role = each.value`, which is how
+		// ordinary project roles get written.
+		return nil
 	}
-	switch {
-	case strings.HasPrefix(sm[1], "roles/cloudkms."):
+	if strings.HasPrefix(sm[1], "roles/cloudkms.") {
 		return fmt.Errorf("%s grants %s above a single key, which this guard does not read — a key-level grant narrower than the code calls would then be harmless and this guard would report a failure that is not one", b.Addr(), sm[1])
-	case !tfPredefinedRoleRe.MatchString(sm[1]):
-		// A custom role's permissions live in the project, not here, so a
-		// cloudkms permission inside one is invisible to a prefix test.
-		return fmt.Errorf("%s grants the custom role %s above a single key, and this guard cannot read what a custom role permits — it may carry a cloudkms permission", b.Addr(), sm[1])
 	}
 	return nil
+}
+
+// requireAttr is attr for the attributes a cipher grant must carry.
+func requireAttr(b tfBlock, key string) (tfLine, error) {
+	line, has, err := b.attr(key)
+	if err != nil {
+		return tfLine{}, err
+	}
+	if !has {
+		return tfLine{}, fmt.Errorf("%s assigns no %s", b.Addr(), key)
+	}
+	return line, nil
 }
 
 // readGrant reads one KMS member block. ok is false when the block grants a key
 // other than the cipher, which is not this guard's business.
 func readGrant(b tfBlock, binaries map[string]bool) (label string, g Grant, ok bool, err error) {
-	if n := b.nested(); n != "" && n != "lifecycle" && n != "timeouts" {
-		return "", Grant{}, false, fmt.Errorf("%s opens a %s block — a `condition` makes the grant conditional, and reading role and member flat would credit it unconditionally", b.Addr(), n)
-	}
-	// count = 0 or an empty for_each makes the grant apply zero times while
-	// every attribute below still reads as a grant.
-	for _, meta := range []string{"count", "for_each"} {
-		if _, has, err := b.attr(meta); err != nil {
-			return "", Grant{}, false, err
-		} else if has {
-			return "", Grant{}, false, fmt.Errorf("%s carries %s, which decides how many times the grant is made — this guard reads the attributes, not the count", b.Addr(), meta)
-		}
-	}
-
+	// WHICH KEY first, before any refusal: a conditional or counted grant on
+	// some other crypto key is legitimate Terraform that this guard has no
+	// business failing the build over. Everything below this point is about the
+	// cipher.
 	keyLine, has, err := b.attr("crypto_key_id")
 	if err != nil {
 		return "", Grant{}, false, err
@@ -515,12 +542,27 @@ func readGrant(b tfBlock, binaries map[string]bool) (label string, g Grant, ok b
 		return "", Grant{}, false, nil
 	}
 
-	memberLine, has, err := b.attr("member")
+	// EVERY nested block, not the first: an allowed `lifecycle` written above a
+	// `condition` would otherwise shadow it, and a conditional grant credited
+	// unconditionally is exactly what this refusal exists to stop.
+	for _, n := range b.nested() {
+		if n != "lifecycle" && n != "timeouts" {
+			return "", Grant{}, false, fmt.Errorf("%s opens a %s block — a `condition` makes the grant conditional, and reading role and member flat would credit it unconditionally", b.Addr(), n)
+		}
+	}
+	// count = 0 or an empty for_each makes the grant apply zero times while
+	// every attribute below still reads as a grant.
+	for _, meta := range []string{"count", "for_each"} {
+		if _, has, err := b.attr(meta); err != nil {
+			return "", Grant{}, false, err
+		} else if has {
+			return "", Grant{}, false, fmt.Errorf("%s carries %s, which decides how many times the grant is made — this guard reads the attributes, not the count", b.Addr(), meta)
+		}
+	}
+
+	memberLine, err := requireAttr(b, "member")
 	if err != nil {
 		return "", Grant{}, false, err
-	}
-	if !has {
-		return "", Grant{}, false, fmt.Errorf("%s assigns no member", b.Addr())
 	}
 	mm := tfStringRe.FindStringSubmatch(memberLine.Raw)
 	if mm == nil {
@@ -539,12 +581,9 @@ func readGrant(b tfBlock, binaries map[string]bool) (label string, g Grant, ok b
 		return "", Grant{}, false, fmt.Errorf("%s:%d: the cipher is granted to %q, which is not a cmd/ binary — this guard maps cmd/<name> to the service account labelled <name> and has nothing to hold this grant to", b.File, memberLine.N, sm[1])
 	}
 
-	roleLine, has, err := b.attr("role")
+	roleLine, err := requireAttr(b, "role")
 	if err != nil {
 		return "", Grant{}, false, err
-	}
-	if !has {
-		return "", Grant{}, false, fmt.Errorf("%s assigns no role", b.Addr())
 	}
 	rm := tfStringRe.FindStringSubmatch(roleLine.Raw)
 	if rm == nil {
@@ -622,24 +661,36 @@ func noNestedMain(dir string) error {
 // line 1106 before line 651 in the one artifact an operator reads while deciding
 // which role string to widen.
 func sortSites(sites []string) {
-	key := func(s string) (string, int, string) {
+	type site struct {
+		file, call string
+		line       int
+		raw        string
+	}
+	keyed := make([]site, len(sites))
+	for i, s := range sites {
 		file, rest, _ := strings.Cut(s, ":")
 		num, call, _ := strings.Cut(rest, " ")
-		n := 0
-		fmt.Sscanf(num, "%d", &n)
-		return file, n, call
+		// A line number this cannot parse sorts first rather than silently as
+		// zero among real ones; the format is written a few lines above, so it
+		// can only differ if that changed.
+		n, err := strconv.Atoi(num)
+		if err != nil {
+			n = -1
+		}
+		keyed[i] = site{file: file, call: call, line: n, raw: s}
 	}
-	sort.Slice(sites, func(i, j int) bool {
-		fi, ni, ci := key(sites[i])
-		fj, nj, cj := key(sites[j])
-		if fi != fj {
-			return fi < fj
+	sort.Slice(keyed, func(i, j int) bool {
+		if keyed[i].file != keyed[j].file {
+			return keyed[i].file < keyed[j].file
 		}
-		if ni != nj {
-			return ni < nj
+		if keyed[i].line != keyed[j].line {
+			return keyed[i].line < keyed[j].line
 		}
-		return ci < cj
+		return keyed[i].call < keyed[j].call
 	})
+	for i := range keyed {
+		sites[i] = keyed[i].raw
+	}
 }
 
 func modulePath(root string) (string, error) {
@@ -723,24 +774,27 @@ func (s *scanner) pkg(pkg string) (*pkgInfo, error) {
 			}
 		}
 		ast.Inspect(f, func(n ast.Node) bool {
-			// Every SELECTION of a member with those names, not only the ones
-			// in call position: `f := cipher.Decrypt` hands the method to
-			// something else to call, and a call-only scan would report that
-			// binary as reaching no cipher at all.
-			sel, ok := n.(*ast.SelectorExpr)
-			if !ok {
+			// Every mention of either name, qualified or not, in call position
+			// or not. `x.Decrypt` covers a method call and a method value;
+			// a bare `Decrypt(b)` covers a same-package helper and a dot
+			// import, which a selector-only scan reads as no cipher at all.
+			// This over-counts freely — a local function, a struct field or a
+			// variable with one of these names counts — and that is the
+			// direction it is allowed to be wrong in.
+			// Idents alone: the Sel of `x.Decrypt` IS an Ident and the walk
+			// reaches it, so matching selectors as well would count every
+			// qualified mention twice.
+			id, ok := n.(*ast.Ident)
+			if !ok || (id.Name != "Encrypt" && id.Name != "Decrypt") {
 				return true
 			}
-			switch sel.Sel.Name {
-			case "Encrypt":
+			if id.Name == "Encrypt" {
 				info.Perms.Encrypt = true
-			case "Decrypt":
+			} else {
 				info.Perms.Decrypt = true
-			default:
-				return true
 			}
 			info.Sites = append(info.Sites, fmt.Sprintf("%s:%d %s",
-				filepath.ToSlash(filepath.Join(pkg, name)), s.fset.Position(sel.Sel.Pos()).Line, sel.Sel.Name))
+				filepath.ToSlash(filepath.Join(pkg, name)), s.fset.Position(id.Pos()).Line, id.Name))
 			return true
 		})
 	}

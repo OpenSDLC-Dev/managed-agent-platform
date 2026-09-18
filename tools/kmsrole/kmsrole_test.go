@@ -45,7 +45,9 @@ func grantFor(label, role string) string {
 }
 
 // tfTree writes a scratch Terraform directory. A nil map means the fixture
-// above, alone, in one root.
+// above, alone, in one root. A name without a directory lands in `environment/`,
+// because that is where the real grants live and the guard reads only the roots
+// an apply loads.
 func tfTree(t *testing.T, files map[string]string) string {
 	t.Helper()
 	if files == nil {
@@ -53,6 +55,9 @@ func tfTree(t *testing.T, files map[string]string) string {
 	}
 	dir := t.TempDir()
 	for name, body := range files {
+		if !strings.Contains(name, "/") {
+			name = "environment/" + name
+		}
 		p := filepath.Join(dir, filepath.FromSlash(name))
 		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
 			t.Fatal(err)
@@ -237,6 +242,34 @@ func Open(c cipher, b []byte) []byte { return c.Decrypt(b) }
 	}
 }
 
+// TestAnUnqualifiedCallCounts: a package-level `func Decrypt`, called without a
+// receiver or through a dot import, carries no selector. A selector-only scan
+// read both as reaching no cipher at all — an under-count, the one direction
+// this guard may not be wrong in.
+func TestAnUnqualifiedCallCounts(t *testing.T) {
+	vault := map[string]string{
+		"internal/vault/seal.go": "package vault\n\nfunc Decrypt(b []byte) []byte { return b }\n",
+	}
+	for name, main := range map[string]string{
+		"same package": "package main\n\nfunc Decrypt(b []byte) []byte { return b }\n\nfunc main() { _ = Decrypt(nil) }\n",
+		"dot import":   "package main\n\nimport . \"m/internal/vault\"\n\nfunc main() { _ = Decrypt(nil) }\n",
+		"qualified":    "package main\n\nimport \"m/internal/vault\"\n\nfunc main() { _ = vault.Decrypt(nil) }\n",
+	} {
+		files := map[string]string{"cmd/executor/main.go": main}
+		for k, v := range vault {
+			files[k] = v
+		}
+		rows, err := readNeeds(fakeRoot(t, files))
+		if err != nil {
+			t.Errorf("%s: readNeeds: %v", name, err)
+			continue
+		}
+		if len(rows) != 1 || !rows[0].Needs.Decrypt {
+			t.Errorf("%s: readNeeds = %+v, want Decrypt", name, rows)
+		}
+	}
+}
+
 // TestABinaryTreeThatReachesNothingIsRefused: a tree this guard can read all the
 // way through and still find no call in. Vacuously satisfying the rule is the
 // shape a checker's bug takes.
@@ -296,7 +329,9 @@ func main() {
 	if err != nil {
 		t.Fatalf("readNeeds: %v", err)
 	}
-	want := []string{"cmd/x/main.go:9 Decrypt", "cmd/x/main.go:12 Decrypt"}
+	// Line 5 is the method DECLARATION, which counts too — the scan matches
+	// identifiers, and over-counting is the direction it may be wrong in.
+	want := []string{"cmd/x/main.go:5 Decrypt", "cmd/x/main.go:9 Decrypt", "cmd/x/main.go:12 Decrypt"}
 	if len(rows) != 1 || len(rows[0].Sites) != len(want) {
 		t.Fatalf("sites = %v, want %v", rows[0].Sites, want)
 	}
@@ -490,6 +525,81 @@ func TestALifecycleBlockIsFine(t *testing.T) {
 	}
 }
 
+// TestAnAllowedBlockCannotShadowACondition: the test above legitimizes exactly
+// the ordering that opens the hole. Reading only the FIRST nested block let a
+// `lifecycle` written above a `condition` hide it, and a conditional grant
+// credited unconditionally is what the refusal exists to stop.
+func TestAnAllowedBlockCannotShadowACondition(t *testing.T) {
+	for _, allowed := range []string{"lifecycle {\n    prevent_destroy = true\n  }", "timeouts {\n    create = \"5m\"\n  }"} {
+		wantRefusal(t, tfTree(t, map[string]string{"iam.tf": rewrite(t, executorHeader,
+			executorHeader+"\n  "+allowed+"\n  condition {\n    expression = \"false\"\n  }")}),
+			"opens a condition block")
+	}
+}
+
+// TestARefusalDoesNotFireOnAnotherKey: which key a block grants is read before
+// any refusal, so a conditional or counted grant on some unrelated crypto key —
+// legitimate Terraform — does not fail the build.
+func TestARefusalDoesNotFireOnAnotherKey(t *testing.T) {
+	for name, body := range map[string]string{
+		"conditional": `resource "google_kms_crypto_key_iam_member" "signing" {
+  crypto_key_id = data.google_kms_crypto_key.signing.id
+  condition {
+    expression = "false"
+  }
+  role   = "roles/cloudkms.cryptoKeyDecrypter"
+  member = "serviceAccount:${data.google_service_account.executor.email}"
+}
+`,
+		"for_each": `resource "google_kms_crypto_key_iam_member" "signing" {
+  for_each      = toset(["a", "b"])
+  crypto_key_id = data.google_kms_crypto_key.signing.id
+  role          = "roles/cloudkms.cryptoKeyDecrypter"
+  member        = "serviceAccount:${data.google_service_account.executor.email}"
+}
+`,
+	} {
+		r, err := Check(repoRoot(), tfTree(t, map[string]string{"iam.tf": fixtureIAM + "\n" + body}))
+		if err != nil {
+			t.Errorf("%s on another key was refused: %v", name, err)
+			continue
+		}
+		if len(r.Findings) != 0 {
+			t.Errorf("%s on another key produced findings: %v", name, r.Findings)
+		}
+	}
+}
+
+// TestAGrantOutsideTheAppliedRootsIsRefused: Terraform loads the .tf files of
+// ONE directory, never recursively, and only two directories here are ever
+// applied. A grant living anywhere else — a subdirectory below a root, or a
+// sibling directory no apply target reads — would otherwise be credited as the
+// whole configuration while the deployed reality grants nothing.
+func TestAGrantOutsideTheAppliedRootsIsRefused(t *testing.T) {
+	for name, path := range map[string]string{
+		"below a root":          "environment/unused/iam.tf",
+		"a root nobody applies": "attic/iam.tf",
+		"loose at the top":      "iam.tf",
+		// A directory that carries a root's NAME but not its place. Matching on
+		// the base name alone would read this one as the real environment/.
+		"a root's name one level down": "attic/environment/iam.tf",
+	} {
+		dir := t.TempDir()
+		p := filepath.Join(dir, filepath.FromSlash(path))
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte(fixtureIAM), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := Check(repoRoot(), dir); err == nil {
+			t.Errorf("%s (%s): a grant no apply reads was accepted", name, path)
+		} else if !strings.Contains(err.Error(), "outside the Terraform roots") {
+			t.Errorf("%s: %v", name, err)
+		}
+	}
+}
+
 // TestCountIsRefused: count = 0 makes Terraform create nothing while every
 // attribute below still reads as a grant.
 func TestCountIsRefused(t *testing.T) {
@@ -560,30 +670,65 @@ func TestAWideCloudKMSGrantIsRefused(t *testing.T) {
 	wantRefusal(t, tfTree(t, map[string]string{"iam.tf": fixtureIAM + "\n" + wide}), "above a single key")
 }
 
-// TestAWideCustomRoleIsRefused: a prefix test cannot see a cloudkms permission
-// inside a custom role, and the role's definition is not in this tree.
-func TestAWideCustomRoleIsRefused(t *testing.T) {
-	wide := `resource "google_project_iam_member" "custom" {
+// TestAWideRoleThisGuardCannotReadIsIgnoredNotRefused: a project-level role it
+// cannot resolve — a custom role, or `each.value` under a for_each — is ignored.
+// Ignoring a wide grant can only ADD permissions this guard never had, so the
+// worst it produces is a finding a wider grant would have excused: a false
+// alarm, never a silent pass. Refusing instead would fail CI on the ordinary way
+// project roles are written.
+func TestAWideRoleThisGuardCannotReadIsIgnoredNotRefused(t *testing.T) {
+	for name, wide := range map[string]string{
+		"custom role": `resource "google_project_iam_member" "custom" {
   project = "p"
   role    = "projects/p/roles/cipherUser"
   member  = "serviceAccount:${data.google_service_account.executor.email}"
 }
-`
-	wantRefusal(t, tfTree(t, map[string]string{"iam.tf": fixtureIAM + "\n" + wide}), "custom role")
+`,
+		"for_each over roles": `resource "google_project_iam_member" "executor_roles" {
+  for_each = toset(["roles/logging.logWriter", "roles/monitoring.metricWriter"])
+  project  = "p"
+  role     = each.value
+  member   = "serviceAccount:${data.google_service_account.executor.email}"
+}
+`,
+	} {
+		dir := tfTree(t, map[string]string{"iam.tf": fixtureIAM + "\n" + wide})
+		r, err := Check(repoRoot(), dir)
+		if err != nil {
+			t.Errorf("%s: refused a legitimate project grant: %v", name, err)
+			continue
+		}
+		if len(r.Findings) != 0 {
+			t.Errorf("%s: %v", name, r.Findings)
+		}
+	}
 }
 
 // TestAWideGrantToSomeoneElseIsIgnored: nothing granted to a principal that is
 // not one of these identities can change what they may do.
 func TestAWideGrantToSomeoneElseIsIgnored(t *testing.T) {
-	other := `resource "google_project_iam_member" "backup" {
+	// roles/cloudkms.admin is the case that exercises the member filter and
+	// nothing else: a role outside cloudkms is excused by the prefix check
+	// further down whether or not the member was read, so a fixture using one
+	// would agree with the guard instead of testing it.
+	for name, role := range map[string]string{
+		"a custom project role": "projects/p/roles/backupOperator",
+		"a wide cloudkms role":  "roles/cloudkms.admin",
+	} {
+		other := `resource "google_project_iam_member" "backup" {
   project = "p"
-  role    = "projects/p/roles/backupOperator"
+  role    = "` + role + `"
   member  = "serviceAccount:${data.google_service_account.backup.email}"
 }
 `
-	dir := tfTree(t, map[string]string{"iam.tf": fixtureIAM + "\n" + other})
-	if r := mustCheck(t, dir); len(r.Findings) != 0 {
-		t.Fatalf("a wide grant to an unrelated identity produced findings: %v", r.Findings)
+		dir := tfTree(t, map[string]string{"iam.tf": fixtureIAM + "\n" + other})
+		r, err := Check(repoRoot(), dir)
+		if err != nil {
+			t.Fatalf("%s granted to an identity that is not a cmd/ binary was refused: %v", name, err)
+		}
+		if len(r.Findings) != 0 {
+			t.Fatalf("%s granted to an unrelated identity produced findings: %v", name, r.Findings)
+		}
 	}
 }
 

@@ -39,7 +39,7 @@ var (
 )
 
 func init() {
-	for _, k := range []string{"crypto_key_id", "member", "role", "count", "for_each", "policy_data"} {
+	for _, k := range []string{"crypto_key_id", "member", "role", "count", "for_each"} {
 		tfAttrRe[k] = regexp.MustCompile(`^\s*` + k + `\s*=`)
 	}
 }
@@ -102,14 +102,18 @@ func (b tfBlock) attr(key string) (tfLine, bool, error) {
 	}
 }
 
-// nested returns the name of the first nested block in the body, or "".
-func (b tfBlock) nested() string {
+// nested returns the name of every nested block in the body, in order. ALL of
+// them: returning only the first let an allowed `lifecycle` shadow a `condition`
+// written after it, and a conditional grant credited unconditionally is the one
+// thing this whole function exists to prevent.
+func (b tfBlock) nested() []string {
+	var out []string
 	for _, l := range b.Body {
 		if m := tfNestedRe.FindStringSubmatch(l.Scrubbed); m != nil {
-			return m[1]
+			out = append(out, m[1])
 		}
 	}
-	return ""
+	return out
 }
 
 func braces(s string) int {
