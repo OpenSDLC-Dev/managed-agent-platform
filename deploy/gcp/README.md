@@ -1354,9 +1354,9 @@ printf '%s' '[{"model":"*","protocol":"anthropic","base_url":"https://api.anthro
 ```
 
 The workflow still fails **by name** if that secret is ever missing or has no readable
-version — no automation may mint a live model API key, so the run stops and prints the
-`create` above it and the command above rather than installing a brain that crash-loops on
-an empty config.
+version — no automation may mint a live model API key, so the run stops and prints a
+`gcloud secrets create` and a `versions add` of its own, the latter reading the routes from
+a file rather than stdin, instead of installing a brain that crash-loops on an empty config.
 
 **What the smoke step proves, and what it does not.** It waits for the LoadBalancer's
 external IP, then requires `GET /v1/agents?limit=1` to answer 200 with the management key —

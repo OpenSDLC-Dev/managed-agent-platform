@@ -536,22 +536,24 @@ jobs:
           # model-providers is fetched on its own because its failure mode is its
           # own. Nothing in this repository creates or fills it — deploy/gcp/README.md
           # ("Continuous delivery") owns which secrets are stood up out of band and
-          # by whom — so it may be missing, or present with no version. Those need
-          # different commands and gcloud's stderr above distinguishes them (`Secret
-          # [...] not found` against `Secret Version [...] not found`); what it does
-          # not distinguish is the exit status, so one branch handles both and names
-          # both commands. What the secret holds when it is right is a live model API
-          # key, the one credential no automation may mint, so this step can repair
-          # neither state: it stops here rather than deploying a brain that
+          # by whom — so it may be missing, or present with no version, and those
+          # need different commands. gcloud does not separate them: `versions access
+          # latest` answers both with `NOT_FOUND: Secret [...] not found or has no
+          # versions`, which names the two states and settles neither (measured
+          # against the API, gcloud 578). That is why one branch handles both and
+          # names both commands, create first — the operator cannot be told which
+          # one they are in. What the secret holds when it is right is a live model
+          # API key, the one credential no automation may mint, so this step can
+          # repair neither state: it stops here rather than deploying a brain that
           # crash-loops on an empty config.
           #
-          # In the staging project this pipeline was proven on it DOES have a
-          # version, and that version is a PLACEHOLDER: a real
-          # endpoint (https://api.anthropic.com) with a fake key, stored so this
-          # pipeline could be proven end to end without inventing a credential. The
-          # platform comes up, /v1/agents answers 200, this job goes green — and
-          # the first session that calls a model fails with an auth error, which is
-          # the truth about it. Replace it, in one line:
+          # In the staging project it HAD a version when this pipeline was first
+          # proven, and that version was a PLACEHOLDER: a real endpoint
+          # (https://api.anthropic.com) with a fake key, stored so the whole thing
+          # could be exercised without inventing a credential. The platform comes
+          # up, /v1/agents answers 200, this job goes green — and the first session
+          # that calls a model fails with an auth error, which is the truth about
+          # it. If that is still what is there, replace it, in one line:
           #
           #   printf '%s' '[{"model":"*","protocol":"anthropic","base_url":"https://api.anthropic.com","api_key":"sk-ant-REAL"}]' \
           #     | gcloud secrets versions add model-providers --project="$GCP_PROJECT_ID" --data-file=-
