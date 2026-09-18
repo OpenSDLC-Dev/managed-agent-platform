@@ -18,7 +18,7 @@ identically?"**
 | | `foundation/` | `environment/` |
 | --- | --- | --- |
 | Lifecycle | created once, **never destroyed** | created and destroyed freely |
-| Holds | KMS key ring + crypto key, the three service accounts, the Secret Manager secret *containers* | GKE cluster and node pools, Artifact Registry, Cloud SQL, the GCS bucket, all IAM bindings |
+| Holds | KMS key ring + crypto key, the three service accounts, the two database Secret Manager secret *containers* | GKE cluster and node pools, Artifact Registry, Cloud SQL, the GCS bucket, all IAM bindings |
 | Idle cost | cents a month | a running cluster and database |
 | `terraform destroy` | not supported — `prevent_destroy` **and** `deletion_policy = "PREVENT"` | `make gcp-env-destroy` |
 

@@ -535,8 +535,8 @@ jobs:
 
           # model-providers is fetched on its own because its failure mode is its
           # own. Nothing in this repository creates it — the foundation apply makes
-          # only the two `<prefix>-db-*` secrets Terraform reads back, so this one
-          # is stood up out of band with controlplane-api-key and database-url, and
+          # only the two `<prefix>-db-*` containers, so this one is stood up out of
+          # band with controlplane-api-key and database-url, and
           # may be missing OR present without a version. Either way it carries a
           # live model API key, the one credential no automation may mint, so the
           # step below cannot repair it: if that is the state, this job stops
