@@ -887,7 +887,9 @@ restore-ordering constraint you own:
   the data volume, and a restored bao cannot unseal without the exact key it was
   sealed with); for `local`, escrow the master key.
 - **Restore bao before anything that must decrypt.** Metadata CRUD works without
-  the cipher; egress substitution and credential validation do not.
+  the cipher; egress substitution, credential validation, updating a
+  credential's `auth` (which unseals and re-seals), `github_repository` clones
+  and vault-credentialed MCP dials do not.
 - **Losing the key loses every secret encrypted under it.** There is no recovery
   path; credential metadata survives and secrets must be re-entered.
 - **The bundled dev instances store their own bootstrap material.** The compose

@@ -5946,3 +5946,71 @@ Recording what the reference does is not checking what we do. `tools/registryche
 enforces the mechanical half and caught two entries settled in place and left in the
 wrong section, but it cannot catch a prose claim about our own behavior; only a reader
 with the source open can.
+
+## Published 0.4.0 into a fresh GCP project, mode 2 — acceptance record (run 2026-09-18) — ✅ passed
+
+The first deployment of this platform driven the way an external operator would drive it:
+a GCP project of its own, the **published** artifacts, and no build step. The chart came
+from `oci://ghcr.io/opensdlc-dev/charts/managed-agent-platform` at 0.4.0 and the four
+images from `ghcr.io/opensdlc-dev/managed-agent-platform/{controlplane,brain,executor,gate}:0.4.0`,
+pulled anonymously by private nodes over Cloud NAT. Mode 2 throughout — Cloud SQL
+POSTGRES_16 on a private IP behind the Auth Proxy sidecar, GCS for blobs, Cloud KMS for
+the credential cipher, and the seven-key Secret named by `existingSecret`. GKE
+1.35.7-gke.1222000, us-central1-a.
+
+It answered the question #75 asks — the release installs and runs from its published
+artifacts — and it found one real defect, which is the point of running it at all: the
+staging Terraform granted the executor `roles/cloudkms.cryptoKeyEncrypter`, so every
+`github_repository` clone and every vault-credentialed MCP dial failed while the install
+stayed green (#748). The evidence is a pair of executor logs on one unchanged session:
+`PermissionDenied … 'cloudkms.cryptoKeyVersions.useToDecrypt'` before the grant was
+widened, and `authentication required: Invalid username or token.` — the deliberately
+invalid test token, reached through a successful decrypt — after. The second decrypt site
+was measured the same way afterwards: a vault credential registered for an unresolvable
+MCP URL produced `mcp_connection_failed_error` (`no such host`), not
+`mcp_authentication_failed_error`, and only an opened credential reaches that branch.
+
+What else the install proved, each against the deployment rather than a rehearsal:
+`GET /v1/agents` 200 with the management key and 401 without it; an agent session whose
+`bash` call ran in a sandbox Pod on the tainted sandbox pool and returned through
+`agent.tool_result`; `POST /v1/files` 200 with the object present in the GCS bucket, so
+the blob path authenticated as the workload through Workload Identity; a `limited`
+session whose gate sidecar (uid 65532, version 0.4.0) answered `CONNECT example.com:443`
+with `200 Connection Established` and `CONNECT api.github.com:443` with `403 Forbidden`
+— which re-confirms plan 20's COS + containerd measurement one patch version later
+(1.35.7 against its 1.35.6), and this time through a real gated session rather than a
+hand-applied payload; the real `ant` CLI 1.30.0 at `--base-url` listing and
+creating agents and environments; and console 0.7.0 from
+`ghcr.io/opensdlc-dev/managed-agent-console:0.7.0` reaching it over cluster DNS, with
+`/api/health?deep=1` reporting `platform: {reachable: true, status: 200}`.
+
+**The paid acceptance leg ran against this deployment and passed.**
+`TestLiveDefineOutcomesAcceptance`, both rubric variants, 2070s total: `file-rubric`
+satisfied after one evaluation cycle with a 31,630-byte `costco_dcf_model.xlsx`, and
+`text-rubric` satisfied after one with a 67,995-byte `Costco_DCF_Model.xlsx` of seven
+labelled sheets. Worth recording is *how*: the chart's default sandbox image is
+`debian:stable-slim` — the same default compose carries — and this deployment had no
+`TAVILY_API_KEY` or `JINA_API_KEY`, so the agent had neither Python nor web access and
+wrote an OOXML writer in pure Perl to produce the workbook. The leg's own configuration
+contract asks for three variables and got all three; the toolset gap is this
+deployment's, not the suite's, and the outcome loop closed regardless.
+
+Two documentation gaps came out of it rather than out of review. Every GCP instruction in
+the repository builds images into Artifact Registry and installs the chart from the local
+checkout, so an operator deploying a release has to assemble the mode-2 values themselves
+(#749) — and two of those values are traps: `sandboxPlacement` is only emitted inside
+`terraform output -raw helm_values_mode1`, and omitting the whole block omits both
+halves of a pair whose halves fail differently — so rather than the visible failure,
+every sandbox lands on the platform pool, the pool the taint exists to protect
+(`deploy/gcp/environment/outputs.tf` argues the pair at the output itself; `Pending`
+forever is what the missing toleration *alone* produces); and the seven-key Secret has
+no worked command outside `.github/workflows/deploy.yml`. One console finding was filed on
+its own repository (console #176): `test/contracts/outcomes.spec.ts` asserts an outcome
+evaluation is still `pending` immediately after `user.define_outcome`, which races the
+brain's own pending→running flip — two runs of the suite failed in two different places,
+which is the race itself.
+
+Not verified, and named because the run otherwise reads as complete: the console's
+client-side rendering was never seen, only its server-rendered shells (200 with the login
+cookie, 307 to `/login` without) and the BFF calls its pages make. No browser was
+available in the session that drove this.

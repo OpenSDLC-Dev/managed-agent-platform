@@ -110,11 +110,13 @@
 //	                         the gcs backend takes BLOB_BUCKET alone
 //	SECRETS_BACKEND          secrets cipher (docs/plan/12): "openbao", "local",
 //	                         "gcpkms", or empty to run without one. The executor
-//	                         decrypts one secret: a github_repository resource's
-//	                         sealed token, per clone (docs/plan/25). Egress
-//	                         substitution still decrypts controlplane-side, for
-//	                         the per-session gate. Without a cipher, repository
-//	                         mounts do not clone
+//	                         decrypts in two places: a github_repository
+//	                         resource's sealed token, per clone (docs/plan/25),
+//	                         and a vault's bearer credential for an MCP dial
+//	                         (docs/plan/29). Egress substitution still decrypts
+//	                         controlplane-side, for the per-session gate.
+//	                         Without a cipher, repository mounts do not clone
+//	                         and a vault-credentialed MCP dial fails
 //	BAO_ADDR / BAO_TOKEN / BAO_TRANSIT_KEY / SECRETS_MASTER_KEY / SECRETS_KEY_ID /
 //	GCPKMS_KEY_NAME          the rest of the cipher config (as controlplane)
 //	TAVILY_API_KEY           web_search backend key; unset leaves the tool
@@ -363,18 +365,21 @@ func run(ctx context.Context) error {
 		slog.Info("object storage not configured; skills will not materialize")
 	}
 
-	// The executor decrypts one secret and one only: a github_repository
-	// resource's sealed authorization token, opened per clone so the platform
-	// can fetch the repository on the session's behalf (plan 25 decision 2).
+	// The executor decrypts in two places: a github_repository resource's
+	// sealed authorization token, opened per clone so the platform can fetch
+	// the repository on the session's behalf (plan 25 decision 2), and a
+	// vault's bearer credential for an MCP dial the URL matches (plan 29).
 	// Egress substitution still decrypts controlplane-side — the gate-config
 	// endpoint — never here. Constructing the cipher also fails fast on a
 	// misconfigured or unreachable backend, matching the controlplane's wiring.
+	// A deployment that grants this identity encrypt only therefore starts
+	// clean and fails those two per session; deploy/gcp/environment/iam.tf.
 	cipher, err := secretsbackend.FromEnv(ctx)
 	if err != nil {
 		return err
 	}
 	if cipher == nil {
-		slog.Info("secrets cipher not configured; github_repository resources will not clone")
+		slog.Info("secrets cipher not configured; github_repository resources will not clone and vault-credentialed MCP dials will fail")
 	}
 
 	slog.Info("executor running", "version", version.Version)

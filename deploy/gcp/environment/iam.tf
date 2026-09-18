@@ -88,16 +88,34 @@ resource "google_kms_crypto_key_iam_member" "controlplane" {
   member        = "serviceAccount:${data.google_service_account.controlplane.email}"
 }
 
-# The executor's only KMS call for the whole life of the process is the cipher's
-# startup probe Encrypt — it builds the cipher to fail fast on a misconfigured
-# backend and then discards it, and the resolution it does perform
-# (vaultresolve.Bindings) takes no cipher at all. So encrypt is enough, and
-# granting decrypt would expand post-compromise access for no runtime benefit:
-# an executor holding the shared database connection could otherwise read vault
-# ciphertext, strip the format marker, and call KMS directly.
+# The executor decrypts at runtime, in two places, so Encrypter alone is not
+# enough: a github_repository clone opens the resource's sealed authorization
+# token (internal/executor/repos.go, repoToken — plan 25 decision 2), and an
+# MCP dial resolves a vault's bearer credential
+# (internal/executor/mcpcred.go → internal/vaultresolve — plan 29). Both reach
+# secrets.Cipher.Decrypt, which internal/secrets/gcpkms serves with a KMS
+# Decrypt request. Decrypter alone is no better a fit: the MCP path encrypts at
+# runtime too, sealing a refreshed mcp_oauth token back onto its row
+# (internal/vaultresolve/mcprefresh.go, persistRotation), and that one only
+# warns when it fails. The predefined pair is the grant, not a rounding up.
+#
+# Encrypter alone fails neither at apply nor at startup, which is the part
+# worth stating: the cipher's startup probe only encrypts, so the controlplane
+# and the executor go Ready and a deploy is green. The loss appears per session —
+# a clone ends in session.error github_repository_clone_error with reason
+# "internal", once per repository and reason and best-effort at that, and the
+# session carries on without the checkout; a vault-credentialed MCP server
+# reads as an authentication failure.
+#
+# The post-compromise cost this grant carries is real and is the consequence of
+# where the code decrypts: an executor holding the shared database connection
+# can read the ciphertext it reaches — a vault's credentials and a session's
+# repository tokens alike — and call KMS directly. Plan 25 weighed that against
+# a plaintext-token HTTP hop from the control plane and chose the process-local
+# decrypt; the grant follows the code rather than the other way round.
 resource "google_kms_crypto_key_iam_member" "executor" {
   crypto_key_id = data.google_kms_crypto_key.cipher.id
-  role          = "roles/cloudkms.cryptoKeyEncrypter"
+  role          = "roles/cloudkms.cryptoKeyEncrypterDecrypter"
   member        = "serviceAccount:${data.google_service_account.executor.email}"
 }
 

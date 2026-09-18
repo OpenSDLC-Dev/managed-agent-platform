@@ -130,9 +130,10 @@ resource "google_kms_crypto_key" "cipher" {
 # now reached as the workloads themselves, through Workload Identity.
 # ---------------------------------------------------------------------------
 
-# The control plane encrypts on write and decrypts on read (mcp_oauth_validate
-# and the gate-config endpoint both call Decrypt), so it is the only identity
-# that needs the decrypt half.
+# The control plane encrypts on write and decrypts on read: mcp_oauth_validate
+# and the gate-config endpoint both call Decrypt. The executor decrypts too,
+# for its own reasons (its comment below), so those two share one key-level
+# role and the brain is the one identity that needs nothing from KMS.
 # The three identities. Each waits on the API enablement above: without that
 # dependency Terraform is free to create a service account concurrently with
 # enabling iam.googleapis.com, and on a project where IAM was never enabled the
@@ -174,10 +175,10 @@ resource "google_service_account" "brain" {
   }
 }
 
-# The executor builds the cipher only to fail fast on a misconfigured backend
-# and then discards it — vault credentials are decrypted control-plane side, at
-# the gate-config endpoint. So the one KMS call this identity ever makes is the
-# startup probe's Encrypt.
+# This identity encrypts and decrypts: egress substitution is decrypted
+# control-plane side at the gate-config endpoint, but a repository clone and an
+# MCP dial each open a sealed credential inside the executor process. The key
+# grant, and what Encrypter alone silently costs, are in environment/iam.tf.
 resource "google_service_account" "executor" {
   depends_on = [google_project_service.required]
 
