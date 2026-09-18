@@ -536,14 +536,17 @@ jobs:
           # model-providers is fetched on its own because its failure mode is its
           # own. Nothing in this repository creates or fills it — deploy/gcp/README.md
           # ("Continuous delivery") owns which secrets are stood up out of band and
-          # by whom — so it may be missing OR present without a version, and the two
-          # are one failure here: `versions access latest` reports both the same way.
-          # Either way it carries a live model API key, the one credential no
-          # automation may mint, so this step cannot repair it: if that is the state,
-          # this job stops here — loudly, naming the commands — rather than deploying
-          # a brain that crash-loops on an empty config.
+          # by whom — so it may be missing, or present with no version. Those need
+          # different commands and gcloud's stderr above distinguishes them (`Secret
+          # [...] not found` against `Secret Version [...] not found`); what it does
+          # not distinguish is the exit status, so one branch handles both and names
+          # both commands. What the secret holds when it is right is a live model API
+          # key, the one credential no automation may mint, so this step can repair
+          # neither state: it stops here rather than deploying a brain that
+          # crash-loops on an empty config.
           #
-          # It DOES have a version today, and that version is a PLACEHOLDER: a real
+          # In the staging project this pipeline was proven on it DOES have a
+          # version, and that version is a PLACEHOLDER: a real
           # endpoint (https://api.anthropic.com) with a fake key, stored so this
           # pipeline could be proven end to end without inventing a credential. The
           # platform comes up, /v1/agents answers 200, this job goes green — and
@@ -555,7 +558,7 @@ jobs:
           if ! gcloud secrets versions access latest \
                  --secret=model-providers --project="$GCP_PROJECT_ID" \
                  --out-file="$d/model-providers.json"; then
-            echo "::error::no readable version of the 'model-providers' secret — a human must add one"
+            echo "::error::cannot read the 'model-providers' secret — it must exist AND have an enabled version, and only a human can supply one"
             cat >&2 <<EOF
           This is deliberate and this workflow cannot fix it: model-providers holds a
           live model API key.

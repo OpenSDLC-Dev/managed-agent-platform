@@ -746,13 +746,27 @@ says so under a label of its own (`cd-notifier-miswired`) rather than filing it 
 a blind notifier and a broken deploy are different problems for different people.
 
 **Three of those secrets are not `bootstrap.sh`'s.** It owns exactly `<prefix>-db-password`
-and `<prefix>-db-admin-password`, because those are the two Terraform reads back. The three
+and `<prefix>-db-admin-password`, because those are the two the provisioning flow reads
+back — `environment/` reads the admin one, `make gcp-db-init` reads both. The three
 the pipeline reads — `controlplane-api-key`, `database-url`, `model-providers` — are created
 out of band by whoever stands the environment up, and this repository ships no tool that
 creates them for the same reason it ships none that assembles the mode-2 Secret: a tool that
 generated all of them would be a credential-handling tool of its own. `controlplane-api-key` is any high-entropy value
 (`openssl rand -hex 32`), `database-url` is composed below, and `model-providers` is the one
 a human must supply.
+
+The containers themselves are one command each. Unlike `bootstrap.sh`'s two these carry no
+`<prefix>`, because the workflow reads them by bare name — which is also why a second
+environment in the same project would collide on them:
+
+```sh
+for s in controlplane-api-key database-url model-providers; do
+  gcloud secrets create "$s" --project="$PROJECT" --replication-policy=automatic
+done
+```
+
+Until a container exists, adding its version fails with `NOT_FOUND` rather than working, and
+so does the deploy that reads it.
 
 **`gcp-db-init` is a prerequisite here, not a formality.** Mode 1 never ran it at all — the
 bundled Postgres creates its own role from `postgresql.password`. Mode 2's `database-url`
@@ -1337,9 +1351,10 @@ printf '%s' '[{"model":"*","protocol":"anthropic","base_url":"https://api.anthro
   | gcloud secrets versions add model-providers --project="$GCP_PROJECT_ID" --data-file=-
 ```
 
-The workflow still fails **by name** if that secret ever has no readable version — no
-automation may mint a live model API key, so the run stops printing the command above rather
-than installing a brain that crash-loops on an empty config.
+The workflow still fails **by name** if that secret is ever missing or has no readable
+version — no automation may mint a live model API key, so the run stops and prints the
+`create` above it and the command above rather than installing a brain that crash-loops on
+an empty config.
 
 **What the smoke step proves, and what it does not.** It waits for the LoadBalancer's
 external IP, then requires `GET /v1/agents?limit=1` to answer 200 with the management key —
