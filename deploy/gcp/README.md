@@ -760,8 +760,10 @@ The containers themselves are one command each. Unlike `bootstrap.sh`'s two thes
 environment in the same project would collide on them:
 
 ```sh
+project=your-project-id
+
 for s in controlplane-api-key database-url model-providers; do
-  gcloud secrets create "$s" --project="$PROJECT" --replication-policy=automatic
+  gcloud secrets create "$s" --project="$project" --replication-policy=automatic
 done
 ```
 
