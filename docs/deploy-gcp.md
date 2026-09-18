@@ -45,7 +45,7 @@ workload through Workload Identity. `existingSecret` is
 incompatible with `postgresql.enabled`, `minio.enabled` and `openbao.enabled` — the chart
 fails the render rather than deploying two of anything.
 
-Both modes have now been stood up and exercised end to end on GKE; the two acceptance
+Both modes have now been stood up and exercised end to end on GKE; the acceptance
 records are in [docs/HISTORY.md](./HISTORY.md). Where an acceptance measurement appears in
 this guide it comes from one of those runs. Not every number here is one — configured
 values, published prices and documented platform limits appear too, and none of those is
@@ -65,7 +65,7 @@ PROJECT=… make gcp-bootstrap           # fills the secrets
 PROJECT=… make gcp-env-tfvars          # environment/'s inputs, generated (#478)
 PROJECT=… make gcp-env-apply           # network, cluster, Cloud SQL, bucket, registry
 PROJECT=… make gcp-db-init             # the platform's database role — see below
-gcloud builds submit ...     # the component images
+gcloud builds submit ...     # the component images — skipped when installing a release
 helm install ...             # the platform
 ```
 
@@ -89,7 +89,8 @@ build → push → deploy → smoke. The reasoning, the two out-of-band IAM gran
 what an operator still owes a rebuilt environment are in
 [`deploy/gcp/README.md`](../deploy/gcp/README.md#continuous-delivery). Nothing about that
 workflow is required to deploy this platform; it is how *this* repository runs *its* staging
-environment, and the manual path above remains the supported one.
+environment, and the manual path above remains the supported one — whichever of its two
+endings you take, building the images or installing a release.
 
 `gcloud builds submit` has one requirement worth knowing before the first run on a fresh
 project: the images build under **BuildKit** (`env: ["DOCKER_BUILDKIT=1"]` in
@@ -108,6 +109,58 @@ rather than creating it. That split is what makes a rebuild safe, and the reason
 ring cannot be deleted in GCP at all, and destroying the key schedules every version for
 destruction while the name stays taken — so a configuration that owned it could not be
 re-applied, and the vault ciphertext encrypted under it would be gone.
+
+## Installing a release instead of building one
+
+Deploying a *released* version builds nothing. The five `make` targets above run unchanged;
+the last two lines of the shape collapse into one install from the published chart:
+
+```sh
+helm upgrade --install map oci://ghcr.io/opensdlc-dev/charts/managed-agent-platform \
+  --version <X.Y.Z> -n map --create-namespace -f my-values.yaml \
+  --wait --atomic --timeout 10m
+```
+
+`--timeout` because Helm's default is five minutes, and a first install on a fresh cluster
+spends them pulling four images over Cloud NAT before anything is Ready; `--atomic` then
+reads slow as failed and tears the release down. Ten is what CD uses for the same install.
+
+**Mode 2 needs its Secret to exist before this runs.** The chart creates none when
+`existingSecret` is set, and two of that Secret's keys are not optional, so the pods never
+start without it. Assembling it is unchanged by installing a release —
+[`deploy/gcp/README.md`](../deploy/gcp/README.md#handover-to-helm) has the command.
+
+**That values file wants no `image:` block.** The chart's defaults already resolve to the
+images that release published, at the tag its `appVersion` names —
+[`values.yaml`](../deploy/helm/managed-agent-platform/values.yaml) argues it where they are
+defined — so a block that says anything different can only move the install off the release
+it just pinned. `executor.gateImage` is the exception and the only image value this path has
+to set, because it is the only one with no default at all:
+`ghcr.io/opensdlc-dev/managed-agent-platform/gate:<X.Y.Z>`, from the same release, and the
+comment above the value says what leaving it empty costs.
+
+Everything else is the mode-2 configuration
+[`staging-values.yaml`](../deploy/gcp/staging-values.yaml) already carries with its reasons
+— `existingSecret`, the three `enabled: false` guards, `cloudSQLProxy`, the three Workload
+Identity annotations, `sandboxPlacement` — with your own coordinates in place of this
+repository's. **That file opens with an `image:` block of its own, and it is the one part
+not to bring**: `registry.invalid` is unresolvable by design, so copying the file wholesale
+and editing only the coordinates leaves every platform pod in `ImagePullBackOff`. The same
+holds for `terraform output -raw helm_values_mode1`, which is why `sandboxPlacement` is
+worth taking from `staging-values.yaml` instead: the pair is identical in both, but that
+output ships Artifact Registry coordinates the release never pushed to, and copying the
+fragment whole is the duplicate-key loss
+[`deploy/gcp/README.md`](../deploy/gcp/README.md#handover-to-helm) documents, running
+backwards — the correct defaults replaced rather than supplied.
+
+**No build runs, but Cloud Build does not leave the picture.** `make gcp-env-tfvars` still
+resolves `cloud_build_service_account`, whose own description in
+[`variables.tf`](../deploy/gcp/environment/variables.tf) explains why it is required with no
+default, and `environment/` still creates the Artifact Registry repository and its pusher
+binding. The API has to be on and that account has to exist; nothing pushes to it.
+
+The run behind this section is [docs/HISTORY.md](./HISTORY.md)'s "Published 0.4.0 into a
+fresh GCP project, mode 2".
 
 ## The database role is not a Cloud SQL superuser
 

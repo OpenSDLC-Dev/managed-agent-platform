@@ -193,7 +193,8 @@ that the prefix they read is still the one `env-power.sh` writes.
 - A GCP project with billing enabled, and `gcloud auth application-default login`.
 - Terraform ≥ 1.11 — `brew install hashicorp/tap/terraform`. It is not in Homebrew core.
   (1.11 for `password_wo`; `foundation/` alone needs only 1.5.)
-- `kubectl` and `helm` for the deploy that follows.
+- `kubectl` and `helm` for the deploy that follows, and `jq` if that deploy is mode 2 —
+  the Secret assembly checks the model routes with it before applying them.
 
 ## Running it
 
@@ -365,6 +366,12 @@ shell builtin: passing it as an argument would put it in `ps` output and shell h
 
 ## Handover to Helm
 
+An operator installing a **released** version skips this section's *build* — the values that
+differ, and the one output not to copy wholesale, are in
+[docs/deploy-gcp.md](../../docs/deploy-gcp.md#installing-a-release-instead-of-building-one).
+Everything else here still applies, the mode-2 Secret below most of all: it is assembled the
+same way whatever produced the images, and nothing in the chart creates it.
+
 The acceptance ran in the two phases the chart's own render-time exclusivity dictates
 (plan 20, Decision 4); both are done, and their records are in
 [docs/HISTORY.md](../../docs/HISTORY.md). **Mode-1** is bundled Postgres/MinIO/OpenBao with inline values —
@@ -412,7 +419,10 @@ Helm accepts the duplicate key silently and the later mapping wins whole, so `re
 `repository` revert to the chart's `ghcr.io` defaults. That is the same
 `ImagePullBackOff` this section exists to prevent, arrived at by trying to prevent it —
 verified by rendering the duplicate, which produced
-`ghcr.io/opensdlc-dev/managed-agent-platform/brain:TAG`.
+`ghcr.io/opensdlc-dev/managed-agent-platform/brain:TAG`. The loss is the mechanism rather
+than the direction: on a release install those same defaults are the *correct* coordinates,
+and it is the mode-1 fragment's Artifact Registry `image:` block that must not be copied in
+beside them.
 
 Set `tag` **once** and let it drive both the build and the install. Deriving it twice — a
 `_TAG` for the build and a fresh `git rev-parse` for the install — is how they come to
@@ -461,9 +471,12 @@ dedicated pool buys nothing.
 
 Mode-2's inputs are emitted individually, to be assembled into the pre-created Secret that
 the chart's `existingSecret` value names — its full key list is in
-[docs/deploy-gcp.md](../../docs/deploy-gcp.md#the-two-modes), and there is no script for it
-because a script that touched every one of these would be a credential-handling tool of its
-own. The mode-2 acceptance run built it with a single `kubectl create secret generic`:
+[docs/deploy-gcp.md](../../docs/deploy-gcp.md#the-two-modes), and this repository ships no
+tool that does it, because a tool that touched every one of these would be a
+credential-handling tool of its own. What follows is the command an operator types, not
+something `make` runs. The mode-2 acceptance run built the Secret with a single
+`kubectl create secret generic`, over some of the coordinates these emit — the rest belong
+to the values file rather than to the Secret:
 
 ```sh
 terraform output -raw  kms_key_name                              # gcpKMS.keyName / GCPKMS_KEY_NAME
@@ -482,6 +495,101 @@ project the way the service-account emails beside it do, and carries only the re
 instance name that `environment/`'s own public defaults already spell out. Why the proxy is
 the shape this deployment uses, and the one migration step that is not automatic, are under
 "Continuous delivery" below.
+
+The three credentials come from Secret Manager, two of the four remaining values are fixed
+strings and two are Terraform outputs, and the Secret is then one script — the shape
+`deploy.yml` runs, with the reasoning for `--from-file`, for the destination *names*, for
+the namespace step and for each of the three checks left where `deploy.yml` argues each,
+beside the same command:
+
+```sh
+#!/bin/bash
+set -euo pipefail
+
+project=your-project            # the project the five `make gcp-*` targets ran with
+prefix=map                      # the NAME_PREFIX this environment was built with
+repo=~/managed-agent-platform   # the checkout those targets ran in, so this file can
+env="$repo/deploy/gcp/environment"   # live anywhere and still find both of them
+
+d="$(mktemp -d)"; trap 'rm -rf "$d"' EXIT   # so no credential outlives a failure here
+
+gcloud secrets versions access latest --project="$project" \
+  --secret=controlplane-api-key --out-file="$d/controlplane-api-key"
+gcloud secrets versions access latest --project="$project" \
+  --secret=database-url --out-file="$d/database-url"
+gcloud secrets versions access latest --project="$project" \
+  --secret=model-providers --out-file="$d/model-providers.json"
+
+# Three checks, because all three of these failures apply cleanly and surface
+# much later: a blank version authenticates as nobody or points at no database,
+# a newline is part of a value both of whose consumers read it verbatim — an
+# x-api-key comparison and a DSN — and a model-providers that is not an array of
+# routes reaches the brain rather than this script.
+#
+# Blank rather than zero-byte: a lone space is neither empty nor a newline, so
+# it passes a `test -s` and a `wc -l` both, and is no more usable than nothing.
+for f in controlplane-api-key database-url model-providers.json; do
+  test -n "$(tr -d '[:space:]' < "$d/$f")" ||
+    { echo "secret '$f' has an empty or whitespace-only version" >&2; exit 1; }
+done
+for f in controlplane-api-key database-url; do
+  test "$(wc -l < "$d/$f")" -eq 0 || { echo "secret '$f' contains a newline" >&2; exit 1; }
+done
+jq -e -s 'length == 1 and (.[0] | type == "array" and length > 0 and all(.[]; has("model")))' \
+  "$d/model-providers.json" > /dev/null \
+  || { echo "model-providers is not a non-empty JSON array of routes" >&2; exit 1; }
+
+# Re-select the backend before reading it. What `.terraform` points at is
+# whatever the last `init` chose, which the coordinate guard cannot see — so
+# this is a prerequisite here for the same reason the Makefile makes it one of
+# `gcp-db-init`, and it prevents the same failure: coordinates out of one
+# project's state, secrets out of another's. Both names are needed, because
+# together they are the bucket's name. It also re-runs the tfvars check, so a
+# checkout that has never run `make gcp-env-tfvars` is refused here rather than
+# silently read.
+PROJECT="$project" NAME_PREFIX="$prefix" make -C "$repo" gcp-env-init
+
+# Assigned, not interpolated into the printf: `set -e` acts on a failed command
+# substitution in an assignment and not on one in an argument, so a Terraform
+# read that failed would otherwise be applied as an empty value.
+bucket="$(terraform -chdir="$env" output -raw blob_bucket)"
+key="$(terraform -chdir="$env" output -raw kms_key_name)"
+
+# The Secret goes wherever kubectl currently points, and nothing above has said
+# where that is. deploy.yml runs this as its own step for the same reason.
+gcloud container clusters get-credentials \
+  "$(terraform -chdir="$env" output -raw cluster_name)" \
+  --zone "$(terraform -chdir="$env" output -raw zone)" --project "$project"
+
+printf '%s' gcs       > "$d/blob-backend"
+printf '%s' "$bucket" > "$d/blob-bucket"
+printf '%s' gcpkms    > "$d/secrets-backend"
+printf '%s' "$key"    > "$d/gcpkms-key-name"
+
+kubectl create namespace map --dry-run=client -o yaml | kubectl apply -f -
+
+kubectl create secret generic map-platform --namespace map \
+  --from-file="$d/controlplane-api-key" --from-file="$d/database-url" \
+  --from-file="$d/model-providers.json" --from-file="$d/blob-backend" \
+  --from-file="$d/blob-bucket" --from-file="$d/secrets-backend" \
+  --from-file="$d/gcpkms-key-name" \
+  --dry-run=client -o yaml | kubectl apply -f -
+```
+
+Run it as a file rather than pasting it: pasted, the `trap` fires when the *terminal* closes
+rather than when the work ends, so a failure leaves three credentials on disk for as long as
+that shell lives. The three secrets it reads are created by nothing in this repository —
+["Continuous delivery"](#continuous-delivery) says who owns them and what goes in each.
+
+Two things it does **not** do, both of which matter on a re-run rather than a first install.
+`apply` adds and updates keys but removes none, so a `map-platform` that predates #240 keeps
+its `blob-endpoint` / `blob-access-key` / `blob-secret-key` and goes on injecting them into
+every pod — `templates/secret.yaml` says to delete those by hand, and that is still true
+here. And rotating a value changes nothing a running pod can see: env from a `secretKeyRef`
+is read once at start, and with `existingSecret` the chart renders no Secret, so
+`helm upgrade` produces a byte-identical pod template and correctly does nothing. CD rolls
+the pods itself when the apply reports a change; by hand that is `kubectl rollout restart`
+over the three Deployments.
 
 **Apply all three.** The brain's annotation used to be the one that was only sometimes
 needed — it existed for the Cloud SQL Auth Proxy (chart: `cloudSQLProxy.enabled`), and under
@@ -640,9 +748,9 @@ a blind notifier and a broken deploy are different problems for different people
 **Three of those secrets are not `bootstrap.sh`'s.** It owns exactly `<prefix>-db-password`
 and `<prefix>-db-admin-password`, because those are the two Terraform reads back. The three
 the pipeline reads — `controlplane-api-key`, `database-url`, `model-providers` — are created
-out of band by whoever stands the environment up, and there is no script for them here for
-the same reason there is none for the mode-2 Secret: a tool that generated all of them would
-be a credential-handling tool of its own. `controlplane-api-key` is any high-entropy value
+out of band by whoever stands the environment up, and this repository ships no tool that
+creates them for the same reason it ships none that assembles the mode-2 Secret: a tool that
+generated all of them would be a credential-handling tool of its own. `controlplane-api-key` is any high-entropy value
 (`openssl rand -hex 32`), `database-url` is composed below, and `model-providers` is the one
 a human must supply.
 

@@ -489,13 +489,20 @@ jobs:
               echo "  gcloud secrets versions list $1 --project=$GCP_PROJECT_ID" >&2
               return 1
             fi
-            # A zero-byte value is the failure worth catching here rather than at
+            # A blank value is the failure worth catching here rather than at
             # pod start: it is what a failed generator piped into
             # `gcloud secrets versions add` produces — stored successfully, and
             # now `latest`. The Secret would apply cleanly and the platform would
             # then authenticate as nobody.
-            if [ ! -s "$d/$2" ]; then
-              echo "::error::Secret Manager secret '$1' has an EMPTY latest version"
+            #
+            # Blank rather than zero-byte, because a lone space is neither empty
+            # nor a newline and so passes both this check's older `-s` form and
+            # the newline check below, while being no more usable than nothing:
+            # the api key is compared verbatim against a header the parser has
+            # already trimmed, and the DSN parses as no connection settings at
+            # all, which sends the pool to a localhost that is not there.
+            if [ -z "$(tr -d '[:space:]' < "$d/$2")" ]; then
+              echo "::error::Secret Manager secret '$1' has an EMPTY or whitespace-only latest version"
               echo "Add a real version and disable that one." >&2
               return 1
             fi
@@ -569,7 +576,15 @@ jobs:
           # of route objects and rejects anything else with "must be a JSON array".
           # Checking it here costs a second; getting it wrong costs the full
           # `--wait --atomic --timeout 10m` before the release rolls back.
-          if ! jq -e 'type == "array" and length > 0 and all(.[]; has("model"))' \
+          #
+          # `-s` is what makes it one document. Without it jq evaluates each
+          # top-level document in turn and `-e` takes its status from the LAST
+          # one, so a bare object followed by a valid array passes while the
+          # bytes Kubernetes stores are not a JSON array at all. A second
+          # `versions add` cannot produce that — it writes a whole new version —
+          # but one `--data-file` holding two documents can, which is what
+          # concatenating two route files, or editing one in place, produces.
+          if ! jq -e -s 'length == 1 and (.[0] | type == "array" and length > 0 and all(.[]; has("model")))' \
                "$d/model-providers.json" > /dev/null; then
             echo "::error::the 'model-providers' secret is not a non-empty JSON array of route objects"
             echo "Each entry needs at least \"model\" (\"*\" is the default route)." >&2
