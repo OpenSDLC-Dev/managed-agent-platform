@@ -534,14 +534,14 @@ jobs:
           done
 
           # model-providers is fetched on its own because its failure mode is its
-          # own. Nothing in this repository creates it — the foundation apply makes
-          # only the two `<prefix>-db-*` containers, so this one is stood up out of
-          # band with controlplane-api-key and database-url, and
-          # may be missing OR present without a version. Either way it carries a
-          # live model API key, the one credential no automation may mint, so the
-          # step below cannot repair it: if that is the state, this job stops
-          # here — loudly, naming the command — rather than deploying a brain that
-          # crash-loops on an empty config.
+          # own. Nothing in this repository creates or fills it — deploy/gcp/README.md
+          # ("Continuous delivery") owns which secrets are stood up out of band and
+          # by whom — so it may be missing OR present without a version, and the two
+          # are one failure here: `versions access latest` reports both the same way.
+          # Either way it carries a live model API key, the one credential no
+          # automation may mint, so this step cannot repair it: if that is the state,
+          # this job stops here — loudly, naming the commands — rather than deploying
+          # a brain that crash-loops on an empty config.
           #
           # It DOES have a version today, and that version is a PLACEHOLDER: a real
           # endpoint (https://api.anthropic.com) with a fake key, stored so this
@@ -558,7 +558,15 @@ jobs:
             echo "::error::no readable version of the 'model-providers' secret — a human must add one"
             cat >&2 <<EOF
           This is deliberate and this workflow cannot fix it: model-providers holds a
-          live model API key. Write the routes to a file and add them as a version:
+          live model API key.
+
+          Nothing in this repository creates the secret, so on a fresh environment it
+          does not exist at all and this comes first. Skip it if it does exist:
+
+            gcloud secrets create model-providers \\
+              --project=$GCP_PROJECT_ID --replication-policy=automatic
+
+          Then write the routes to a file and add them as its version:
 
             [ { "model": "*", "protocol": "anthropic",
                 "base_url": "https://your-gateway.example",
@@ -566,13 +574,6 @@ jobs:
 
             gcloud secrets versions add model-providers \\
               --project=$GCP_PROJECT_ID --data-file=/path/to/model-providers.json
-
-          Nothing in this repository creates the secret itself, so on a fresh
-          environment the command above fails with NOT_FOUND and this one comes
-          first:
-
-            gcloud secrets create model-providers \\
-              --project=$GCP_PROJECT_ID --replication-policy=automatic
 
           The accepted keys are documented under brain.modelProviders in
           deploy/helm/managed-agent-platform/values.yaml. base_url is the API ROOT:
