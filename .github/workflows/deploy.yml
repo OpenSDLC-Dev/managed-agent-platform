@@ -560,7 +560,19 @@ jobs:
           #     | gcloud secrets versions add model-providers --project="$GCP_PROJECT_ID" --data-file=-
           if ! gcloud secrets versions access latest \
                  --secret=model-providers --project="$GCP_PROJECT_ID" \
-                 --out-file="$d/model-providers.json"; then
+                 --out-file="$d/model-providers.json" 2>"$d/model-providers.err"; then
+            cat "$d/model-providers.err" >&2
+            # This branch catches every way the read can fail, and the advice below
+            # answers exactly one of them. A denied permission, a disabled API or an
+            # unreachable endpoint is not a secret anybody needs to create, so say
+            # only what is known and let the error above speak.
+            if ! grep -q NOT_FOUND "$d/model-providers.err"; then
+              echo "::error::cannot read the 'model-providers' secret, and not because it is absent"
+              echo "The error above is the whole of what this job knows. It is not a missing" >&2
+              echo "secret — check the deploy identity's Secret Manager access and that the" >&2
+              echo "API is enabled on $GCP_PROJECT_ID." >&2
+              exit 1
+            fi
             echo "::error::cannot read the 'model-providers' secret — it must exist AND have an enabled version, and only a human can supply one"
             cat >&2 <<EOF
           This is deliberate and this workflow cannot fix it: model-providers holds a
