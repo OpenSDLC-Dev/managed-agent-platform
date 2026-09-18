@@ -1,5 +1,5 @@
 // Package main implements kmsrole, the guard that holds each GCP identity's
-// key-level KMS role to what its binary's code actually calls (#750).
+// key-level KMS role to the Encrypt/Decrypt its binary's packages name (#750).
 //
 // #748 was a Terraform role string kept correct only by the prose around it.
 // Seven comments asserted the executor never decrypts; the code had decrypted
@@ -9,9 +9,9 @@
 // clone of a private repository and every vault-credentialed MCP dial lost its
 // credential. The fix corrected the role and the seven comments, which is the
 // same mechanism that failed, applied again. This guard re-derives the fact
-// instead: it reads the role from the Terraform and the cipher's call sites from
-// the Go source, and fails when an identity is granted less than its binary
-// calls.
+// instead: it reads the role from the Terraform and every Encrypt/Decrypt
+// identifier from the Go source, and fails when an identity is granted less than
+// its binary names.
 //
 // # Where it runs
 //
@@ -27,21 +27,22 @@
 //
 // # The rule, and the direction it is allowed to be wrong in
 //
-// One-directional: an identity must be granted at least what its code calls. An
-// identity granted MORE is not reported, because the failure being prevented is a
-// narrowed grant and the grants here are the predefined pair either way. It is a
-// floor, not a split — it can say the executor needs Decrypt, never that the
-// brain should stop being able to encrypt.
+// One-directional: an identity must be granted at least what its code names. An
+// identity granted MORE is not reported, because the failure being prevented is
+// a narrowed grant. It is a floor, not a split — it can say the executor needs
+// Decrypt, never that the brain should stop being able to encrypt.
 //
-// The Go-source half counts every selection of a member named Encrypt or
-// Decrypt — `x.Decrypt`, called or merely taken as a method value — in every
+// The Go-source half counts every IDENTIFIER named Encrypt or Decrypt — a call,
+// a method value, a bare same-package call and a declaration alike — in every
 // in-module package a binary transitively imports, read with go/parser so that
-// neither a comment nor a string can contribute one. That over-counts on
-// purpose, in three known ways: a member with those names on something other
-// than secrets.Cipher counts, a struct field named Encrypt counts, and so does a
-// cipher backend's own call to its cloud client (internal/secrets/gcpkms), which
-// means any binary linking the backend inherits both permissions whatever its
-// own code does. Over-counting demands a broader role and names the exact file
+// neither a comment nor a string can contribute one. "Call site" would be the
+// wrong word for what it finds, and the wrong thing to narrow it to. That
+// over-counts on purpose, in four known ways: a member with those names on
+// something other than secrets.Cipher counts, a struct field named Encrypt
+// counts, the Cipher interface's own method declarations count — so any binary
+// importing internal/secrets inherits both permissions whatever it calls — and
+// so does a cipher backend's own call to its cloud client
+// (internal/secrets/gcpkms). Over-counting demands a broader role and names the exact file
 // and line that demanded it; under-counting prints ok over #748 happening again.
 // When a binary appears that genuinely encrypts and never decrypts, the honest
 // refinement is to ignore a call that sits inside a method which itself
@@ -67,16 +68,22 @@
 // saying so is the whole point of the tool. It refuses a role outside the closed
 // set below, a member it cannot attribute to a service account, a cipher grant
 // whose identity is not a cmd/ binary, a grant carrying `count` or `for_each`
-// (which can make it apply zero times), a grant with a nested block other than
-// `lifecycle` or `timeouts`, an override file (whose semantics REPLACE rather
-// than add, so unioning it is wrong), a `module` block (whose configuration lives
-// where this guard does not look, and whose _iam_policy could revoke the members
-// read here), a KMS grant of a kind it does not understand on this key, a
-// cloudkms role granted above the key to one of these identities, and any .tf
+// (which can make it apply zero times), a grant carrying `ignore_changes` (which
+// decides whether the attributes read here are ever applied on an update), a
+// grant with a nested block other than `lifecycle` or `timeouts`, an override
+// file (whose semantics REPLACE rather than add, so unioning it is wrong), a
+// `module` block (whose configuration lives where this guard does not look, and
+// whose _iam_policy could revoke the members read here), a KMS grant of a kind
+// it does not understand on this key, an IAM deny or principal-access-boundary
+// policy (which SUBTRACTS, and is evaluated before the allows read here), a
+// cloudkms role it can read LITERALLY granted above the key to one of these
+// identities (one it cannot — `each.value`, a local — is ignored instead, for
+// the reason wideIAMOK argues), a `package main` directly under cmd/ or below
+// cmd/<name> (walked from nowhere, and mapping to no identity), and any .tf
 // construct its reader cannot read (see hcl.go). It also refuses when grants
-// appear in more than one Terraform root, when it found no grant at all, and when
-// no binary reaches the cipher — the last two would let it print ok over nothing,
-// which is how a checker's bug becomes the input it never reads.
+// appear in more than one Terraform root, when it found no grant at all, and
+// when no binary reaches the cipher — the last two would let it print ok over
+// nothing, which is how a checker's bug becomes the input it never reads.
 //
 // A grant on a crypto key OTHER than the cipher is not refused: it is simply not
 // this key's grant, and ignoring it is the correct reading.
@@ -170,6 +177,9 @@ var (
 	// does not evaluate HCL, and a value it cannot read is a value it must not
 	// report on.
 	tfStringRe = regexp.MustCompile(`^\s*[a-z_]+\s*=\s*"([^"]*)"\s*(?:#.*|//.*)?$`)
+	// Every quoted string on a line, for the list-valued attributes tfStringRe's
+	// single-assignment shape cannot reach.
+	tfAllStringsRe = regexp.MustCompile(`"([^"]*)"`)
 	// An unquoted reference, which is how crypto_key_id is written.
 	tfRefRe = regexp.MustCompile(`^\s*[a-z_]+\s*=\s*([A-Za-z0-9_.]+)\s*(?:#.*|//.*)?$`)
 	// The member form the tree uses, and the only one attributable to a binary.
@@ -180,11 +190,12 @@ var (
 	tfWideIAMRe = regexp.MustCompile(`^google_(?:project|folder|organization)_iam_(member|binding|policy)$`)
 	// Every KMS IAM kind, so one this guard does not read cannot pass unseen.
 	tfKMSIAMRe = regexp.MustCompile(`^google_kms_(?:crypto_key|key_ring)_iam_`)
+	// The two kinds that take permissions AWAY. Every other resource here only
+	// grants, which is what makes an unread one safe to ignore.
+	tfSubtractiveRe = regexp.MustCompile(`^google_iam_(?:deny_policy|principal_access_boundary_policy)$`)
 	// Terraform's override files, which MERGE into the resource of the same
 	// address and REPLACE its attributes.
 	tfOverrideRe = regexp.MustCompile(`(^|_)override\.tf$`)
-	// A predefined role. A custom role's permissions cannot be read from here.
-	tfPredefinedRoleRe = regexp.MustCompile(`^roles/[A-Za-z0-9.]+$`)
 )
 
 // Grant is one identity's key-level role on the cipher key.
@@ -264,7 +275,7 @@ func Check(root, tfDir string) (Report, error) {
 			findings = append(findings, Finding{
 				Binary: r.Binary,
 				Rule:   "ungranted",
-				Msg: fmt.Sprintf("calls %s on the cipher, and no %s on %q names it. Call sites: %s",
+				Msg: fmt.Sprintf("calls %s on the cipher, and no %s on %q names it. Sites: %s",
 					r.Needs, kmsMemberKind, cipherKeyLabel, strings.Join(r.Sites, ", ")),
 			})
 			continue
@@ -273,7 +284,7 @@ func Check(root, tfDir string) (Report, error) {
 			findings = append(findings, Finding{
 				Binary: r.Binary,
 				Rule:   "under-granted",
-				Msg: fmt.Sprintf("calls %s but %s at %s carries only %s — missing %s. Call sites: %s",
+				Msg: fmt.Sprintf("calls %s but %s at %s carries only %s — missing %s. Sites: %s",
 					r.Needs, r.Grant.Role, r.Grant.Where, r.Grant.Perms, m, strings.Join(r.Sites, ", ")),
 			})
 		}
@@ -368,7 +379,7 @@ func readGrants(dir string, binaries map[string]bool) (map[string]Grant, error) 
 		}
 	}
 	if len(granting) > 1 {
-		return nil, fmt.Errorf("grants on the %q key appear in more than one Terraform root (%s) — each root is a separate state and a separate apply, so this guard cannot tell which are applied together, and unioning them across roots is how a narrowed grant in one is masked by a wider grant in another", cipherKeyLabel, strings.Join(granting, ", "))
+		return nil, fmt.Errorf("grants on the %q key appear in more than one Terraform root (%s) — each root is a separate state and a separate apply, so this guard cannot tell which are applied together, and unioning them across roots is how a narrowed grant in one is masked by a wider grant in another — express every cipher grant in one root", cipherKeyLabel, strings.Join(granting, ", "))
 	}
 	return out, nil
 }
@@ -390,6 +401,18 @@ func readFileGrants(path string, binaries map[string]bool, into map[string]Grant
 			// its (key, role) pair and would REVOKE the members read here,
 			// which is not.
 			return fmt.Errorf("%s calls a module, whose configuration this guard does not read — an IAM policy inside it can revoke the members read here", b.Addr())
+		}
+		if tfSubtractiveRe.MatchString(b.Kind) {
+			// Everything else this guard reads ADDS permissions, which is why
+			// the worst an unread allow can do is a false alarm. These two
+			// subtract, and IAM evaluates a deny BEFORE the allows — so a deny
+			// covering a key-level grant credited above leaves the identity
+			// unable to do what its code calls while this guard reads the allow
+			// and prints ok. Refused rather than read: `denied_permissions` is a
+			// multi-line list, and `principalSet://goog/public:all` with
+			// `exception_principals` makes "does this cover one of these
+			// identities" unanswerable to a line-based reader.
+			return fmt.Errorf("%s subtracts permissions, and IAM evaluates it before the allow policies this guard reads — a credited grant it denies would still read as sufficient here", b.Addr())
 		}
 		if err := wideIAMOK(b, binaries); err != nil {
 			return err
@@ -448,6 +471,20 @@ func grantsAnotherKey(b tfBlock) (bool, error) {
 	return kr != nil && kr[1] != cipherKeyLabel, nil
 }
 
+// namesABinary reports whether any quoted string anywhere in the block is a
+// service-account reference to one of the cmd/ binaries. tfSAMemberRe is
+// anchored, so it is applied to each extracted string rather than to the line.
+func namesABinary(b tfBlock, binaries map[string]bool) bool {
+	for _, l := range b.Body {
+		for _, q := range tfAllStringsRe.FindAllStringSubmatch(l.Raw, -1) {
+			if sa := tfSAMemberRe.FindStringSubmatch(q[1]); sa != nil && binaries[sa[1]] {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // wideIAMOK refuses a role granted above a single key that this guard cannot
 // rule out as a cloudkms grant to one of these identities. Such a grant would
 // make a narrow key-level grant harmless, so this guard's failure would be a
@@ -478,6 +515,21 @@ func wideIAMOK(b tfBlock, binaries map[string]bool) error {
 				}
 			}
 		}
+	}
+	if m[1] == "binding" && !namesABinary(b, binaries) {
+		// A binding's `members` is a list, and a multi-line one at that, so it
+		// cannot go through attr — every body line is scanned instead. Without
+		// this, a project-level Cloud KMS role granted to somebody entirely
+		// unrelated fails the whole gate.
+		//
+		// What the scan does NOT rule out: a group or domain that contains one
+		// of these service accounts, a list built from a local or a `for`
+		// expression, a literal service-account email. Those keep the refusal,
+		// which is the harmless direction — wideIAMOK only ever refuses, it adds
+		// nothing to the grant table, so at worst it leaves a finding that a
+		// wider grant would have excused. The `member` branch above already
+		// carries exactly these blind spots.
+		return nil
 	}
 	line, has, err := b.attr("role")
 	if err != nil {
@@ -559,6 +611,22 @@ func readGrant(b tfBlock, binaries map[string]bool) (label string, g Grant, ok b
 			return "", Grant{}, false, fmt.Errorf("%s carries %s, which decides how many times the grant is made — this guard reads the attributes, not the count", b.Addr(), meta)
 		}
 	}
+	// `lifecycle { ignore_changes = [role] }` is the same class of construct, and
+	// the nested-block list above admits the block that carries it. Terraform
+	// honors the configured value when it CREATES a resource and ignores it when
+	// it UPDATES one, so a grant applied narrow stays narrow while the source is
+	// broadened — and `terraform plan`, the one other check an operator trusts,
+	// reports no drift either. #748 was exactly that transition (044e89c2
+	// broadened the executor from Encrypter to EncrypterDecrypter), so this one
+	// construct could have made the guard print ok over the bug it exists to
+	// catch. Refused whatever it targets: freezing `member` or `crypto_key_id`
+	// diverges the same way, and reading the target list to decide would be the
+	// guessing this guard refuses everywhere else.
+	if _, has, err := b.attr("ignore_changes"); err != nil {
+		return "", Grant{}, false, err
+	} else if has {
+		return "", Grant{}, false, fmt.Errorf("%s carries ignore_changes, which decides whether the attributes below are ever applied — this guard reads the source, and an update it suppresses would leave a narrower grant live", b.Addr())
+	}
 
 	memberLine, err := requireAttr(b, "member")
 	if err != nil {
@@ -615,6 +683,12 @@ func readNeeds(root string) ([]Row, error) {
 	var rows []Row
 	for _, e := range entries {
 		if !e.IsDir() {
+			// `package main` written directly in cmd/ is a buildable binary
+			// (`go build ./cmd`) that this loop skips, and its identity is not
+			// cmd/<name> — the same hole noNestedMain refuses one level down.
+			if err := rootMainRefused(cmdDir, e.Name()); err != nil {
+				return nil, err
+			}
 			continue
 		}
 		// A binary nested deeper than cmd/<name> would never be walked from
@@ -635,6 +709,22 @@ func readNeeds(root string) ([]Row, error) {
 		return nil, fmt.Errorf("no binaries under %s", cmdDir)
 	}
 	return rows, nil
+}
+
+// rootMainRefused refuses a `package main` file sitting directly in cmd/.
+func rootMainRefused(cmdDir, name string) error {
+	if !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
+		return nil
+	}
+	p := filepath.Join(cmdDir, name)
+	f, err := parser.ParseFile(token.NewFileSet(), p, nil, parser.PackageClauseOnly)
+	if err != nil {
+		return fmt.Errorf("parse %s: %w", p, err)
+	}
+	if f.Name.Name == "main" {
+		return fmt.Errorf("%s is a binary directly under cmd/, which this guard neither walks nor maps to an identity", p)
+	}
+	return nil
 }
 
 // noNestedMain refuses a `package main` below cmd/<name>.

@@ -1073,10 +1073,10 @@ jobs:
         run: make gcp-validate
       - name: the two configurations stay independent
         run: make gcp-split-check
-      # The role strings in environment/iam.tf against the cipher's call sites
-      # in the Go source. tools/kmsrole's package comment says what it does and
-      # what #748 cost.
-      - name: each identity's KMS role matches what its code calls
+      # The role strings in environment/iam.tf against the Encrypt/Decrypt
+      # identifiers in the Go source. tools/kmsrole's package comment says what it
+      # does and what #748 cost.
+      - name: each identity's KMS role covers the Encrypt/Decrypt its packages name
         run: make gcp-kms-role-check
       - name: shell scripts lint
         run: make gcp-lint

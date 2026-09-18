@@ -39,7 +39,7 @@ var (
 )
 
 func init() {
-	for _, k := range []string{"crypto_key_id", "member", "role", "count", "for_each"} {
+	for _, k := range []string{"crypto_key_id", "member", "role", "count", "for_each", "ignore_changes"} {
 		tfAttrRe[k] = regexp.MustCompile(`^\s*` + k + `\s*=`)
 	}
 }

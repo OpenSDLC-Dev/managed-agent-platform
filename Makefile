@@ -429,7 +429,7 @@ gcp-split-check:
 	python3 deploy/gcp/check_split.py
 
 # The other rule the Terraform keeps only by prose: each identity's key-level
-# Cloud KMS role against what its binary's code actually calls (#750; the
+# Cloud KMS role against every Encrypt/Decrypt its binary's packages name (#750; the
 # package comment says what #748 cost). Here rather than in `verify` for the
 # reason the whole gcp-* group is: it reads
 # deploy/gcp, and the gate does not depend on that tree. The package's own unit

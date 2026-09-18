@@ -196,15 +196,20 @@ func fakeRoot(t *testing.T, files map[string]string) string {
 // TestAMethodValueCounts: `f := cipher.Decrypt` hands the method somewhere else
 // to call. A scan that looked only at calls would report the binary as reaching
 // no cipher — an under-count, the one direction this guard may not be wrong in.
+// The declaration lives in another package on purpose, and the assertion is on
+// the SITE rather than on Needs: a declaration counts as an identifier too, so
+// a fixture declaring the method beside the method value would still report
+// Decrypt with the method value deleted — agreeing with the scanner instead of
+// checking it.
 func TestAMethodValueCounts(t *testing.T) {
-	root := fakeRoot(t, map[string]string{"cmd/executor/main.go": `package main
+	root := fakeRoot(t, map[string]string{
+		"internal/vault/seal.go": "package vault\n\ntype Cipher struct{}\n\nfunc (Cipher) Decrypt(b []byte) []byte { return b }\n",
+		"cmd/executor/main.go": `package main
 
-type cipher struct{}
-
-func (cipher) Decrypt(b []byte) []byte { return b }
+import "m/internal/vault"
 
 func main() {
-	c := cipher{}
+	c := vault.Cipher{}
 	f := c.Decrypt
 	_ = f
 }
@@ -215,6 +220,9 @@ func main() {
 	}
 	if len(rows) != 1 || !rows[0].Needs.Decrypt {
 		t.Fatalf("readNeeds = %+v, want cmd/executor needing Decrypt", rows)
+	}
+	if !hasSite(rows[0], "cmd/executor/main.go", "Decrypt") {
+		t.Fatalf("the method value itself produced no site: %v", rows[0].Sites)
 	}
 }
 
@@ -250,15 +258,23 @@ func TestAnUnqualifiedCallCounts(t *testing.T) {
 	vault := map[string]string{
 		"internal/vault/seal.go": "package vault\n\nfunc Decrypt(b []byte) []byte { return b }\n",
 	}
-	for name, main := range map[string]string{
-		"same package": "package main\n\nfunc Decrypt(b []byte) []byte { return b }\n\nfunc main() { _ = Decrypt(nil) }\n",
-		"dot import":   "package main\n\nimport . \"m/internal/vault\"\n\nfunc main() { _ = Decrypt(nil) }\n",
-		"qualified":    "package main\n\nimport \"m/internal/vault\"\n\nfunc main() { _ = vault.Decrypt(nil) }\n",
+	// Each case keeps the declaration out of main.go, and asserts the SITE in
+	// main.go rather than the unioned Needs: a declaration is an identifier too,
+	// so asserting Needs alone would still hold with every call deleted.
+	for name, files := range map[string]map[string]string{
+		"same package": {
+			"cmd/executor/seal.go": "package main\n\nfunc Decrypt(b []byte) []byte { return b }\n",
+			"cmd/executor/main.go": "package main\n\nfunc main() { _ = Decrypt(nil) }\n",
+		},
+		"dot import": {
+			"internal/vault/seal.go": vault["internal/vault/seal.go"],
+			"cmd/executor/main.go":   "package main\n\nimport . \"m/internal/vault\"\n\nfunc main() { _ = Decrypt(nil) }\n",
+		},
+		"qualified": {
+			"internal/vault/seal.go": vault["internal/vault/seal.go"],
+			"cmd/executor/main.go":   "package main\n\nimport \"m/internal/vault\"\n\nfunc main() { _ = vault.Decrypt(nil) }\n",
+		},
 	} {
-		files := map[string]string{"cmd/executor/main.go": main}
-		for k, v := range vault {
-			files[k] = v
-		}
 		rows, err := readNeeds(fakeRoot(t, files))
 		if err != nil {
 			t.Errorf("%s: readNeeds: %v", name, err)
@@ -266,7 +282,25 @@ func TestAnUnqualifiedCallCounts(t *testing.T) {
 		}
 		if len(rows) != 1 || !rows[0].Needs.Decrypt {
 			t.Errorf("%s: readNeeds = %+v, want Decrypt", name, rows)
+			continue
 		}
+		if !hasSite(rows[0], "cmd/executor/main.go", "Decrypt") {
+			t.Errorf("%s: the call itself produced no site: %v", name, rows[0].Sites)
+		}
+	}
+}
+
+// TestCryptoOperatorSatisfiesBoth pins the one role table entry no other test
+// reaches. It was added from a live `gcloud iam roles describe`, which found it
+// carries useToEncrypt and useToDecrypt — so it satisfies the floor for an
+// identity that does both. Deleting the entry makes the role unknown and
+// refused; narrowing it to Encrypt alone produces two under-granted findings.
+func TestCryptoOperatorSatisfiesBoth(t *testing.T) {
+	dir := tfTree(t, map[string]string{"iam.tf": rewrite(t,
+		`"roles/cloudkms.cryptoKeyEncrypterDecrypter"`,
+		`"roles/cloudkms.cryptoOperator"`)})
+	if r := mustCheck(t, dir); len(r.Findings) != 0 {
+		t.Fatalf("cryptoOperator carries both permissions, so it satisfies the floor: %v", r.Findings)
 	}
 }
 
@@ -303,6 +337,31 @@ func TestANestedBinaryIsRefused(t *testing.T) {
 	_, err := readNeeds(root)
 	if err == nil || !strings.Contains(err.Error(), "below cmd/<name>") {
 		t.Fatalf("error = %v, want the nested-binary refusal", err)
+	}
+}
+
+// TestABinaryDirectlyUnderCmdIsRefused is the same hole one level up. A
+// `package main` file written straight into cmd/ builds as `go build ./cmd`, is
+// skipped by a walk that only descends into directories, and maps to no
+// cmd/<name> identity — so its cipher calls would go uncounted and the guard
+// would print ok over a binary granted nothing.
+func TestABinaryDirectlyUnderCmdIsRefused(t *testing.T) {
+	root := fakeRoot(t, map[string]string{
+		"cmd/rotate.go":     "package main\n\nfunc main() {}\n",
+		"cmd/executor/m.go": "package main\n\nfunc main() {}\n",
+	})
+	_, err := readNeeds(root)
+	if err == nil || !strings.Contains(err.Error(), "directly under cmd/") {
+		t.Fatalf("error = %v, want the root-binary refusal", err)
+	}
+	// A non-main file there is not a binary and must not be refused: the
+	// refusal has to read the package clause, not the extension.
+	ok := fakeRoot(t, map[string]string{
+		"cmd/doc.go":        "package cmd\n",
+		"cmd/executor/m.go": "package main\n\nfunc main() {}\n",
+	})
+	if _, err := readNeeds(ok); err != nil {
+		t.Fatalf("a non-main file directly under cmd/ was refused: %v", err)
 	}
 }
 
@@ -515,13 +574,67 @@ func TestASingleLineConditionIsRefused(t *testing.T) {
 		"opens a condition block")
 }
 
-// TestALifecycleBlockIsFine: `lifecycle` and `timeouts` are meta-blocks that
-// cannot change who is granted what, so refusing them would be a false alarm.
+// TestALifecycleBlockIsFine: `prevent_destroy` and `timeouts` cannot change who
+// is granted what, so refusing them would be a false alarm. `ignore_changes`
+// can, and the test below refuses it — the distinction is the whole reason this
+// comment does not say "lifecycle blocks are harmless".
 func TestALifecycleBlockIsFine(t *testing.T) {
 	dir := tfTree(t, map[string]string{"iam.tf": rewrite(t, executorHeader,
 		executorHeader+"\n  lifecycle {\n    prevent_destroy = true\n  }")})
 	if r := mustCheck(t, dir); len(r.Findings) != 0 {
 		t.Fatalf("a lifecycle block produced findings: %v", r.Findings)
+	}
+}
+
+// TestIgnoreChangesIsRefused is the one lifecycle argument that decouples the
+// role this guard READS from the role Terraform APPLIES. Terraform honors a
+// configured value when it creates a resource and ignores it when it updates
+// one, so a grant applied narrow stays narrow while the source is broadened and
+// `terraform plan` reports no drift. #748 was exactly that transition, which
+// makes this the one construct able to make the guard print ok over the bug it
+// was written to catch.
+func TestIgnoreChangesIsRefused(t *testing.T) {
+	for name, body := range map[string]string{
+		"a list":       "lifecycle {\n    ignore_changes = [role]\n  }",
+		"all":          "lifecycle {\n    ignore_changes = all\n  }",
+		"the member":   "lifecycle {\n    ignore_changes = [member]\n  }",
+		"the key":      "lifecycle {\n    ignore_changes = [crypto_key_id]\n  }",
+		"a split list": "lifecycle {\n    ignore_changes = [\n      role,\n    ]\n  }",
+	} {
+		dir := tfTree(t, map[string]string{"iam.tf": rewrite(t, executorHeader,
+			executorHeader+"\n  "+body)})
+		if _, err := Check(repoRoot(), dir); err == nil {
+			t.Errorf("%s: ignore_changes was accepted, so a suppressed update could leave a narrower grant live", name)
+		} else if !strings.Contains(err.Error(), "carries ignore_changes") {
+			t.Errorf("%s: %v", name, err)
+		}
+	}
+}
+
+// TestASubtractivePolicyIsRefused: everything else this guard reads ADDS
+// permissions, which is what makes an unread allow a false alarm at worst. A
+// deny is evaluated BEFORE the allows, so one covering a credited grant leaves
+// the identity unable to do what its code calls while the guard reads the allow
+// and prints ok.
+func TestASubtractivePolicyIsRefused(t *testing.T) {
+	for _, kind := range []string{"google_iam_deny_policy", "google_iam_principal_access_boundary_policy"} {
+		blk := `resource "` + kind + `" "deny" {
+  parent = "cloudresourcemanager.googleapis.com/projects/p"
+  name   = "deny-executor-decrypt"
+  rules {
+    deny_rule {
+      denied_principals  = ["principal://iam.googleapis.com/projects/-/serviceAccounts/executor@p.iam.gserviceaccount.com"]
+      denied_permissions = ["cloudkms.googleapis.com/cryptoKeyVersions.useToDecrypt"]
+    }
+  }
+}
+`
+		dir := tfTree(t, map[string]string{"iam.tf": fixtureIAM + "\n" + blk})
+		if _, err := Check(repoRoot(), dir); err == nil {
+			t.Errorf("%s was read as harmless, so a deny could revoke a credited grant unseen", kind)
+		} else if !strings.Contains(err.Error(), "subtracts permissions") {
+			t.Errorf("%s: %v", kind, err)
+		}
 	}
 }
 
@@ -657,6 +770,56 @@ func TestABindingOnAnotherKeyIsFine(t *testing.T) {
 	}
 }
 
+// TestABindingWhoseKeyCannotBeReadIsRefused is the other half of the one above,
+// and the sharper half. `grantsAnotherKey` excuses a binding aimed somewhere
+// else; a binding whose key it cannot resolve must NOT be excused, because a
+// binding is authoritative for its (key, role) pair and this one may well be on
+// the cipher — in which case it revokes at apply time the very members read
+// here, and the guard would have printed ok over a configuration that grants
+// nothing.
+func TestABindingWhoseKeyCannotBeReadIsRefused(t *testing.T) {
+	for name, ref := range map[string]string{
+		"a local":         "local.cipher_key_id",
+		"a variable":      "var.cipher_key_id",
+		"a quoted id":     `"projects/p/locations/l/keyRings/r/cryptoKeys/cipher"`,
+		"another module":  "module.kms.key_id",
+		"an indexed list": "google_kms_crypto_key.all[0].id",
+	} {
+		blk := `resource "google_kms_crypto_key_iam_binding" "opaque" {
+  crypto_key_id = ` + ref + `
+  role          = "roles/cloudkms.cryptoKeyDecrypter"
+  members       = ["serviceAccount:x@example.iam.gserviceaccount.com"]
+}
+`
+		dir := tfTree(t, map[string]string{"iam.tf": fixtureIAM + "\n" + blk})
+		if _, err := Check(repoRoot(), dir); err == nil {
+			t.Errorf("%s (%s): a binding whose key this guard cannot read was excused as another key's", name, ref)
+		} else if !strings.Contains(err.Error(), "can carry the key's permissions past it unseen") {
+			t.Errorf("%s: %v", name, err)
+		}
+	}
+}
+
+// TestAKeyRingGrantIsRefused: a ring-level grant covers every key on the ring,
+// the cipher included, so it is never "another key" — and this guard reads only
+// crypto_key_iam_member, so it cannot read what the ring hands out.
+func TestAKeyRingGrantIsRefused(t *testing.T) {
+	for _, kind := range []string{"member", "binding", "policy"} {
+		blk := `resource "google_kms_key_ring_iam_` + kind + `" "ring" {
+  key_ring_id = data.google_kms_key_ring.cipher.id
+  role        = "roles/cloudkms.cryptoKeyDecrypter"
+  member      = "serviceAccount:${data.google_service_account.executor.email}"
+}
+`
+		dir := tfTree(t, map[string]string{"iam.tf": fixtureIAM + "\n" + blk})
+		if _, err := Check(repoRoot(), dir); err == nil {
+			t.Errorf("google_kms_key_ring_iam_%s was read as harmless", kind)
+		} else if !strings.Contains(err.Error(), "can carry the key's permissions past it unseen") {
+			t.Errorf("key_ring_iam_%s: %v", kind, err)
+		}
+	}
+}
+
 // TestAWideCloudKMSGrantIsRefused: a cloudkms role granted at project level
 // would make a narrow key-level grant harmless, so this guard's failure would
 // be a false alarm. Refusing says which of the two it is.
@@ -668,6 +831,62 @@ func TestAWideCloudKMSGrantIsRefused(t *testing.T) {
 }
 `
 	wantRefusal(t, tfTree(t, map[string]string{"iam.tf": fixtureIAM + "\n" + wide}), "above a single key")
+}
+
+// TestAWideBindingToSomeoneElseIsIgnored: a binding's members are a list, so
+// the single-assignment member read cannot reach them. Without a scan of the
+// whole block, a project-level Cloud KMS role granted to somebody entirely
+// unrelated fails the whole merge gate. A binding that DOES name one of these
+// identities must still be refused — in both list spellings, because a test
+// using only the inline form would pass against a scan that never matches.
+func TestAWideBindingToSomeoneElseIsIgnored(t *testing.T) {
+	unrelated := `resource "google_project_iam_binding" "backup" {
+  project = "p"
+  role    = "roles/cloudkms.cryptoKeyDecrypter"
+  members = ["serviceAccount:${data.google_service_account.backup.email}", "group:ops@example.com"]
+}
+`
+	dir := tfTree(t, map[string]string{"iam.tf": fixtureIAM + "\n" + unrelated})
+	r, err := Check(repoRoot(), dir)
+	if err != nil {
+		t.Fatalf("a binding naming nobody this guard tracks was refused: %v", err)
+	}
+	if len(r.Findings) != 0 {
+		t.Fatalf("a binding to an unrelated identity produced findings: %v", r.Findings)
+	}
+
+	for name, members := range map[string]string{
+		"inline":     `members = ["serviceAccount:${data.google_service_account.executor.email}"]`,
+		"multi-line": "members = [\n    \"group:ops@example.com\",\n    \"serviceAccount:${data.google_service_account.executor.email}\",\n  ]",
+	} {
+		ours := `resource "google_project_iam_binding" "wide" {
+  project = "p"
+  role    = "roles/cloudkms.cryptoKeyDecrypter"
+  ` + members + `
+}
+`
+		wantRefusal(t, tfTree(t, map[string]string{"iam.tf": fixtureIAM + "\n" + ours}), "above a single key")
+		_ = name
+	}
+}
+
+// TestAWideCloudKMSGrantIsRefusedAtEveryLevel: a role inherited from a folder or
+// an organization reaches the key exactly as a project-level one does, and
+// nothing in this tree would have caught a pattern that only knew about
+// projects.
+func TestAWideCloudKMSGrantIsRefusedAtEveryLevel(t *testing.T) {
+	for kind, scope := range map[string]string{
+		"google_folder_iam_member":       `folder = "folders/1"`,
+		"google_organization_iam_member": `org_id = "2"`,
+	} {
+		wide := `resource "` + kind + `" "wide" {
+  ` + scope + `
+  role   = "roles/cloudkms.cryptoKeyDecrypter"
+  member = "serviceAccount:${data.google_service_account.executor.email}"
+}
+`
+		wantRefusal(t, tfTree(t, map[string]string{"iam.tf": fixtureIAM + "\n" + wide}), "above a single key")
+	}
 }
 
 // TestAWideRoleThisGuardCannotReadIsIgnoredNotRefused: a project-level role it

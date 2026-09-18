@@ -1585,10 +1585,13 @@ has it, `deletion_policy = "PREVENT"`.
 
 `gcp-kms-role-check` is the same kind of enforcement for the other rule these files kept
 only by prose: it reads each identity's key-level Cloud KMS role out of `environment/iam.tf`
-and every `Encrypt`/`Decrypt` call site out of the Go packages each `cmd/` binary imports,
-and fails when an identity is granted less than its binary calls. It is a floor — it never
-asks for a role to be narrowed — and it refuses rather than guesses whatever it cannot read
-honestly. `tools/kmsrole`'s package comment argues both, and says what #748 cost.
+and every `Encrypt`/`Decrypt` identifier out of the in-module packages each `cmd/` binary
+transitively imports, and fails when an identity is granted less than its binary names. It
+is a floor — it never asks for a role to be narrowed — and on the cipher key it refuses
+rather than guesses whatever it cannot read honestly. A *wider* grant whose role it cannot
+read is ignored instead, because ignoring one can only add permissions it never saw, which
+costs a false alarm at worst. `tools/kmsrole`'s package comment argues all of it, and says
+what #748 cost.
 
 The last six **run** the tooling rather than reading it, because the first five are static
 and this is a place where static checking has already been insufficient. `gcp-lint` is

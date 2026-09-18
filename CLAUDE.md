@@ -120,7 +120,7 @@ make identifiers-test    # ...and the documentation, for the four shapes an oper
 make pins-test           # ...and every `uses:` in .github/workflows/, for the commit-SHA pin dependabot.yml requires, and every `actions/checkout` for the `persist-credentials: false` beside it
 make sdk-bump-report     # (outside the gate) what an SDK pin bump moved under: anchors gone at the pin, `absent at` anchors back at it, line spans the sources contradict, stamps behind it, and what went unchecked; fails while a transition awaits a disposition (plan 51)
 make gcp-fmt gcp-validate gcp-split-check gcp-lint   # GCP staging Terraform, credential-free
-make gcp-kms-role-check  # ...and each identity's key-level Cloud KMS role against the cipher calls its binary's packages actually make (#750)
+make gcp-kms-role-check  # ...and each identity's key-level Cloud KMS role against the Encrypt/Decrypt identifiers in the packages its binary imports (#750)
 make gcp-bootstrap-test gcp-split-check-test gcp-dbinit-test gcp-power-test gcp-tfvars-test gcp-env-targets-test  # ...and its tooling, run rather than read
 ```
 
