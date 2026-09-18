@@ -61,6 +61,11 @@ for a in "$@"; do
       # `~> 7.0` constraint is reason enough to keep.
       [ "$FAKE_DESTROY_FAILS" = hold ] && exit 1
       ;;
+    producer-elsewhere) # `Producer` in an error that is not this refusal
+      b='\033[31m\342\224\202\033[0m \033[0m'
+      printf "${b}Error: Producer quota exceeded for topic map-events\n" >&2
+      exit 1
+      ;;
     hold-plus) # the refusal AND an unrelated failure in one run
       b='\033[31m\342\224\202\033[0m \033[0m'
       printf "${b}Error: Producer services (e.g. CloudSQL, Cloud Memstore,\n" >&2
@@ -355,6 +360,15 @@ def main():
         check("a run that printed the refusal and then succeeded says NOTHING",
               rc == 0 and called(calls, "destroy")
               and "Producer services" in err
+              and "four-day hold" not in err, f"rc={rc} err={err[-300:]}")
+
+        # ...and both anchors are required, so `Producer` in some other error
+        # does not pull the four-day story in behind it.
+        rc, out, err, calls = run_make_streams(
+            tree, bin_dir, "gcp-env-destroy", state=held,
+            destroy_fails="producer-elsewhere")
+        check("`Producer` in an unrelated error says NOTHING",
+              rc != 0 and "Producer quota" in err
               and "four-day hold" not in err, f"rc={rc} err={err[-300:]}")
 
         # 7-vi. The refusal can arrive beside an unrelated failure, and the

@@ -664,15 +664,18 @@ gcp-db-init: gcp-require-project gcp-env-vars-match gcp-env-init
 # leaves stderr empty — so what moves is warnings and the error block, from
 # during the run to immediately before this message.
 #
-# `Producer` is one word on purpose. Terraform draws an error inside a box,
-# ANSI-coloured even when redirected to a file, and hard-wraps the message
-# mid-sentence, so Google's `Producer services ... are still using this
-# connection` arrives split across lines with escape sequences between them —
-# measured, a colour reset fuses with the next word (`0mcalls`), which defeats
-# stripping punctuation and joining the lines too. Wrapping never splits a word,
-# and a substring match survives the fusion, so a single word is the only anchor
-# that cannot silently stop matching. A rare false positive costs a pointer at a
-# document; a silent miss costs the whole feature.
+# The two anchors are single words on purpose, and matched independently rather
+# than as one phrase. Terraform draws an error inside a box, ANSI-coloured even
+# when redirected to a file, and hard-wraps the message to the terminal's width,
+# so Google's `Producer services ... are still using this connection` arrives
+# split across lines with escape sequences at the break — measured, a colour
+# reset fuses with the next word (`0mcalls`), which defeats stripping
+# punctuation and joining the lines too. Since the wrap position follows the
+# width, no fixed phrase is safe at every width, while wrapping never splits a
+# word and a substring match survives the fusion. Two words drawn from the same
+# recorded sentence are as specific as this can get without a phrase; a rare
+# false positive costs one paragraph pointing at a document, with terraform's
+# own error directly above it, and a silent miss costs the whole feature.
 gcp-env-destroy: gcp-require-project gcp-env-vars-match
 	$(GCP_TF) -chdir=deploy/gcp/environment init -input=false $(TF_BACKEND)
 	@resources="$$($(GCP_TF) -chdir=deploy/gcp/environment state list)" || { \
@@ -694,7 +697,8 @@ gcp-env-destroy: gcp-require-project gcp-env-vars-match
 	@err="$$(mktemp)"; trap 'rm -f "$$err"' EXIT; \
 	$(GCP_TF) -chdir=deploy/gcp/environment destroy 2>"$$err"; rc=$$?; \
 	cat "$$err" >&2; \
-	if [ $$rc -ne 0 ] && grep -q 'Producer' "$$err"; then \
+	if [ $$rc -ne 0 ] \
+	&& grep -q 'Producer' "$$err" && grep -q 'connection' "$$err"; then \
 		echo "" >&2; \
 		echo "Google's refusal above is the four-day hold: the producer side is not" >&2; \
 		echo "released until FOUR DAYS after the Cloud SQL instance is deleted, so" >&2; \
