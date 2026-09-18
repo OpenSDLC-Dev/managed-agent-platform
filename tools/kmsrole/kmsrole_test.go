@@ -124,8 +124,8 @@ func findingFor(r Report, binary string) *Finding {
 // ---------------------------------------------------------------------------
 
 // TestTheGuardHasTeeth pins the facts that make a passing run mean something. A
-// scan that found no call sites, or credited them to the wrong binary, would
-// pass just as quietly.
+// scan that found no Encrypt/Decrypt at all, or credited it to the wrong binary,
+// would pass just as quietly.
 func TestTheGuardHasTeeth(t *testing.T) {
 	got, err := readNeeds(repoRoot())
 	if err != nil {
@@ -595,8 +595,14 @@ func TestALifecycleBlockIsFine(t *testing.T) {
 // was written to catch.
 func TestIgnoreChangesIsRefused(t *testing.T) {
 	for name, body := range map[string]string{
-		"a list":       "lifecycle {\n    ignore_changes = [role]\n  }",
-		"all":          "lifecycle {\n    ignore_changes = all\n  }",
+		"a list": "lifecycle {\n    ignore_changes = [role]\n  }",
+		"all":    "lifecycle {\n    ignore_changes = all\n  }",
+		// A one-line block nets to zero braces and puts the argument after the
+		// opening brace rather than at the start of a line. `terraform fmt`
+		// accepts it, so `make gcp-fmt` never normalises it away — the same
+		// evasion TestASingleLineConditionIsRefused closed for `condition`.
+		"one line":     "lifecycle { ignore_changes = [role] }",
+		"one line all": "lifecycle { ignore_changes = all }",
 		"the member":   "lifecycle {\n    ignore_changes = [member]\n  }",
 		"the key":      "lifecycle {\n    ignore_changes = [crypto_key_id]\n  }",
 		"a split list": "lifecycle {\n    ignore_changes = [\n      role,\n    ]\n  }",
@@ -617,7 +623,15 @@ func TestIgnoreChangesIsRefused(t *testing.T) {
 // the identity unable to do what its code calls while the guard reads the allow
 // and prints ok.
 func TestASubtractivePolicyIsRefused(t *testing.T) {
-	for _, kind := range []string{"google_iam_deny_policy", "google_iam_principal_access_boundary_policy"} {
+	for _, kind := range []string{
+		"google_iam_deny_policy",
+		"google_iam_principal_access_boundary_policy",
+		// A boundary policy authored elsewhere still subtracts once something
+		// here attaches it, so the binding is as much a hazard as the policy.
+		"google_iam_projects_policy_binding",
+		"google_iam_folders_policy_binding",
+		"google_iam_organizations_policy_binding",
+	} {
 		blk := `resource "` + kind + `" "deny" {
   parent = "cloudresourcemanager.googleapis.com/projects/p"
   name   = "deny-executor-decrypt"

@@ -75,15 +75,19 @@
 // `module` block (whose configuration lives where this guard does not look, and
 // whose _iam_policy could revoke the members read here), a KMS grant of a kind
 // it does not understand on this key, an IAM deny or principal-access-boundary
-// policy (which SUBTRACTS, and is evaluated before the allows read here), a
-// cloudkms role it can read LITERALLY granted above the key to one of these
-// identities (one it cannot — `each.value`, a local — is ignored instead, for
-// the reason wideIAMOK argues), a `package main` directly under cmd/ or below
-// cmd/<name> (walked from nowhere, and mapping to no identity), and any .tf
-// construct its reader cannot read (see hcl.go). It also refuses when grants
-// appear in more than one Terraform root, when it found no grant at all, and
-// when no binary reaches the cipher — the last two would let it print ok over
-// nothing, which is how a checker's bug becomes the input it never reads.
+// policy and the bindings that attach one (which SUBTRACT, and are evaluated
+// before the allows read here), a cloudkms role it can read LITERALLY granted
+// above the key to one of these identities (one it cannot — `each.value`, a
+// local — is ignored instead, for the reason wideIAMOK argues), a whole
+// project/folder/organization IAM policy (whose opaque policy_data may grant or
+// revoke cloudkms above the key), a `package main` directly under cmd/ or below
+// cmd/<name> (walked from nowhere, and mapping to no identity), a `.tf.json`
+// file (this reader parses HCL only, and a grant in JSON would read as absent),
+// a `.tf` file outside the two roots an apply loads, and any .tf construct its
+// reader cannot read (see hcl.go). It also refuses when grants appear in more
+// than one Terraform root, when it found no grant at all, and when no binary
+// reaches the cipher — the last two would let it print ok over nothing, which is
+// how a checker's bug becomes the input it never reads.
 //
 // A grant on a crypto key OTHER than the cipher is not refused: it is simply not
 // this key's grant, and ignoring it is the correct reading.
@@ -190,9 +194,11 @@ var (
 	tfWideIAMRe = regexp.MustCompile(`^google_(?:project|folder|organization)_iam_(member|binding|policy)$`)
 	// Every KMS IAM kind, so one this guard does not read cannot pass unseen.
 	tfKMSIAMRe = regexp.MustCompile(`^google_kms_(?:crypto_key|key_ring)_iam_`)
-	// The two kinds that take permissions AWAY. Every other resource here only
-	// grants, which is what makes an unread one safe to ignore.
-	tfSubtractiveRe = regexp.MustCompile(`^google_iam_(?:deny_policy|principal_access_boundary_policy)$`)
+	// The kinds that take permissions AWAY. Every other resource here only
+	// grants, which is what makes an unread one safe to ignore. The
+	// `_policy_binding` forms are here because a boundary policy authored
+	// somewhere else still subtracts once something in this tree attaches it.
+	tfSubtractiveRe = regexp.MustCompile(`^google_iam_(?:deny_policy|principal_access_boundary_policy|(?:projects|folders|organizations)_policy_binding)$`)
 	// Terraform's override files, which MERGE into the resource of the same
 	// address and REPLACE its attributes.
 	tfOverrideRe = regexp.MustCompile(`(^|_)override\.tf$`)
@@ -522,13 +528,18 @@ func wideIAMOK(b tfBlock, binaries map[string]bool) error {
 		// this, a project-level Cloud KMS role granted to somebody entirely
 		// unrelated fails the whole gate.
 		//
-		// What the scan does NOT rule out: a group or domain that contains one
-		// of these service accounts, a list built from a local or a `for`
-		// expression, a literal service-account email. Those keep the refusal,
-		// which is the harmless direction — wideIAMOK only ever refuses, it adds
-		// nothing to the grant table, so at worst it leaves a finding that a
-		// wider grant would have excused. The `member` branch above already
-		// carries exactly these blind spots.
+		// What the scan does NOT see, it lets through: a group or domain that
+		// contains one of these service accounts, a list built from a local or a
+		// `for` expression, a literal service-account email. Each of those is
+		// IGNORED rather than refused, and that is the harmless direction —
+		// wideIAMOK only ever refuses and adds nothing to the grant table, so
+		// the most an unseen wide grant can cost is a finding it would have
+		// excused. It can never credit one.
+		//
+		// The `member` branch above is blind to the same principals but not in
+		// the same place: a computed `member` fails the literal read and falls
+		// through to the role check, so it is refused, while a computed
+		// `members` list lands here and is ignored.
 		return nil
 	}
 	line, has, err := b.attr("role")

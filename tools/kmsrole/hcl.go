@@ -39,8 +39,15 @@ var (
 )
 
 func init() {
+	// Either at the start of the line, or straight after a `{`. The second form
+	// is what a one-line nested block looks like — `lifecycle { ignore_changes =
+	// [role] }` — and a line-anchored pattern reads it as no assignment at all,
+	// which is how an argument inside such a block goes unseen. This matches on
+	// the SCRUBBED copy, where a brace inside a string has already been
+	// neutralised, so the `{` here is always structure. It is the same hazard
+	// nested() is matched structurally for: a one-line block nets to zero braces.
 	for _, k := range []string{"crypto_key_id", "member", "role", "count", "for_each", "ignore_changes"} {
-		tfAttrRe[k] = regexp.MustCompile(`^\s*` + k + `\s*=`)
+		tfAttrRe[k] = regexp.MustCompile(`(?:^|\{)\s*` + k + `\s*=`)
 	}
 }
 
