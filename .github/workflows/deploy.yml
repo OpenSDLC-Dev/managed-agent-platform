@@ -561,16 +561,26 @@ jobs:
           if ! gcloud secrets versions access latest \
                  --secret=model-providers --project="$GCP_PROJECT_ID" \
                  --out-file="$d/model-providers.json" 2>"$d/model-providers.err"; then
-            cat "$d/model-providers.err" >&2
+            rc=1
+          else
+            rc=0
+          fi
+          # Replayed either way, so a warning on the success path is not swallowed
+          # by the capture that exists for the failure path.
+          cat "$d/model-providers.err" >&2
+          if [ "$rc" -ne 0 ]; then
             # This branch catches every way the read can fail, and the advice below
-            # answers exactly one of them. A denied permission, a disabled API or an
-            # unreachable endpoint is not a secret anybody needs to create, so say
-            # only what is known and let the error above speak.
+            # answers exactly one of them. A denied permission, a disabled API, a
+            # version someone disabled or an unreachable endpoint is not a secret
+            # anybody needs to create, so route on the status Google returned and
+            # let the error above speak for the rest.
             if ! grep -q NOT_FOUND "$d/model-providers.err"; then
-              echo "::error::cannot read the 'model-providers' secret, and not because it is absent"
-              echo "The error above is the whole of what this job knows. It is not a missing" >&2
-              echo "secret — check the deploy identity's Secret Manager access and that the" >&2
-              echo "API is enabled on $GCP_PROJECT_ID." >&2
+              echo "::error::cannot read the 'model-providers' secret — the error above says why, and it is not a NOT_FOUND"
+              echo "The error above is the whole of what this job knows, and it does not say" >&2
+              echo "the secret is absent — though a caller without access is told that too," >&2
+              echo "so absent is not ruled out either. Start with what it does name: the" >&2
+              echo "deploy identity's Secret Manager access, whether the API is enabled on" >&2
+              echo "$GCP_PROJECT_ID, and whether the newest version was disabled." >&2
               exit 1
             fi
             echo "::error::cannot read the 'model-providers' secret — it must exist AND have an enabled version, and only a human can supply one"
