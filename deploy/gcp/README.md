@@ -18,7 +18,7 @@ identically?"**
 | | `foundation/` | `environment/` |
 | --- | --- | --- |
 | Lifecycle | created once, **never destroyed** | created and destroyed freely |
-| Holds | KMS key ring + crypto key, the three service accounts, the Secret Manager secret *containers* | GKE cluster and node pools, Artifact Registry, Cloud SQL, the GCS bucket, all IAM bindings |
+| Holds | KMS key ring + crypto key, the three service accounts, the two database Secret Manager secret *containers* | GKE cluster and node pools, Artifact Registry, Cloud SQL, the GCS bucket, all IAM bindings |
 | Idle cost | cents a month | a running cluster and database |
 | `terraform destroy` | not supported — `prevent_destroy` **and** `deletion_policy = "PREVENT"` | `make gcp-env-destroy` |
 
@@ -746,13 +746,29 @@ says so under a label of its own (`cd-notifier-miswired`) rather than filing it 
 a blind notifier and a broken deploy are different problems for different people.
 
 **Three of those secrets are not `bootstrap.sh`'s.** It owns exactly `<prefix>-db-password`
-and `<prefix>-db-admin-password`, because those are the two Terraform reads back. The three
+and `<prefix>-db-admin-password`, because those are the two the provisioning flow reads
+back — `environment/` reads the admin one, `make gcp-db-init` reads both. The three
 the pipeline reads — `controlplane-api-key`, `database-url`, `model-providers` — are created
 out of band by whoever stands the environment up, and this repository ships no tool that
 creates them for the same reason it ships none that assembles the mode-2 Secret: a tool that
 generated all of them would be a credential-handling tool of its own. `controlplane-api-key` is any high-entropy value
 (`openssl rand -hex 32`), `database-url` is composed below, and `model-providers` is the one
 a human must supply.
+
+The containers themselves are one command each. Unlike `bootstrap.sh`'s two these carry no
+`<prefix>`, because the workflow reads them by bare name — which is also why a second
+environment in the same project would collide on them:
+
+```sh
+project=your-project-id
+
+for s in controlplane-api-key database-url model-providers; do
+  gcloud secrets create "$s" --project="$project" --replication-policy=automatic
+done
+```
+
+Until a container exists, adding its version fails with `NOT_FOUND` rather than working, and
+so does the deploy that reads it.
 
 **`gcp-db-init` is a prerequisite here, not a formality.** Mode 1 never ran it at all — the
 bundled Postgres creates its own role from `postgresql.password`. Mode 2's `database-url`
@@ -1325,9 +1341,10 @@ The five **mode-1** secrets — `postgres-password`, `minio-root-user`, `minio-r
 deliberately left in place rather than deleted: mode 1 is still the documented manual path
 above, and a secret with a version is a secret that can still decrypt something.
 
-**`model-providers` has a version, and that version is a placeholder.** It is a real endpoint
-(`https://api.anthropic.com`) with a fake key, stored so the pipeline could be proven end to
-end without inventing a credential. An unreachable host would have been a *different* failure
+**`model-providers` was given a version, and that version is a placeholder.** It is a real
+endpoint (`https://api.anthropic.com`) with a fake key, stored so the pipeline could be
+proven end to end without inventing a credential. Nothing here can tell you whether it is
+still what the secret holds — that is the point of replacing it. An unreachable host would have been a *different* failure
 — the brain retrying a dead name — from the one this is honest about, which is an invalid
 key: the platform comes up, `/v1/agents` answers, the deploy gate passes, and the first
 session that calls a model fails with an auth error. Replace it in one line:
@@ -1337,17 +1354,21 @@ printf '%s' '[{"model":"*","protocol":"anthropic","base_url":"https://api.anthro
   | gcloud secrets versions add model-providers --project="$GCP_PROJECT_ID" --data-file=-
 ```
 
-The workflow still fails **by name** if that secret ever has no readable version — no
-automation may mint a live model API key, so the run stops printing the command above rather
-than installing a brain that crash-loops on an empty config.
+The workflow still fails **by name** if that secret is ever missing or has no readable
+version — no automation may mint a live model API key, so the run stops rather than
+installing a brain that crash-loops on an empty config. When Google answers `NOT_FOUND` it
+prints a `gcloud secrets create` and a `versions add` of its own, the latter reading the
+routes from a file rather than stdin; any other refusal — a denied permission, a disabled
+version — it leaves to gcloud's own error, because the create it would otherwise advise is
+not the fix for those.
 
 **What the smoke step proves, and what it does not.** It waits for the LoadBalancer's
 external IP, then requires `GET /v1/agents?limit=1` to answer 200 with the management key —
 which exercises the key end to end and takes a round trip through Cloud SQL, so it is a real
 check rather than a readiness probe restated — and to answer something *other* than 200
 without it, which is the check that an address on the public internet is not simply open. It
-does **not** run a session, so it says nothing about the model route (which is a placeholder
-today), the sandbox pool or the egress gate. Those are the acceptance battery's job, not the
+does **not** run a session, so it says nothing about the model route (a placeholder unless
+someone has replaced it), the sandbox pool or the egress gate. Those are the acceptance battery's job, not the
 pipeline's.
 
 **That address is plain HTTP on a bare IP**, and

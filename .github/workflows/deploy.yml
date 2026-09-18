@@ -534,28 +534,67 @@ jobs:
           done
 
           # model-providers is fetched on its own because its failure mode is its
-          # own. The secret CONTAINER is created by the foundation apply and can
-          # sit without a version: it carries a live model API key, the one
-          # credential no automation may mint. If that is the state, this job stops
-          # here — loudly, naming the command — rather than deploying a brain that
+          # own. Nothing in this repository creates or fills it — deploy/gcp/README.md
+          # ("Continuous delivery") owns which secrets are stood up out of band and
+          # by whom — so it may be missing, or present with no version, and those
+          # need different commands. The step cannot tell which: for a secret that
+          # is absent, `versions access latest` answers `NOT_FOUND: Secret [...] not
+          # found or has no versions` — measured against the API at gcloud 578, and
+          # a sentence that names both states while committing to neither. Whatever
+          # a versionless one answers, that reply already leaves the state open, so
+          # one branch handles both and names both commands, create first. What the
+          # secret holds when it is right is a live model
+          # API key, the one credential no automation may mint, so this step can
+          # repair neither state: it stops here rather than deploying a brain that
           # crash-loops on an empty config.
           #
-          # It DOES have a version today, and that version is a PLACEHOLDER: a real
-          # endpoint (https://api.anthropic.com) with a fake key, stored so this
-          # pipeline could be proven end to end without inventing a credential. The
-          # platform comes up, /v1/agents answers 200, this job goes green — and
-          # the first session that calls a model fails with an auth error, which is
-          # the truth about it. Replace it, in one line:
+          # In the staging project it HAD a version when this pipeline was first
+          # proven, and that version was a PLACEHOLDER: a real endpoint
+          # (https://api.anthropic.com) with a fake key, stored so the whole thing
+          # could be exercised without inventing a credential. The platform comes
+          # up, /v1/agents answers 200, this job goes green — and the first session
+          # that calls a model fails with an auth error, which is the truth about
+          # it. If that is still what is there, replace it, in one line:
           #
           #   printf '%s' '[{"model":"*","protocol":"anthropic","base_url":"https://api.anthropic.com","api_key":"sk-ant-REAL"}]' \
           #     | gcloud secrets versions add model-providers --project="$GCP_PROJECT_ID" --data-file=-
           if ! gcloud secrets versions access latest \
                  --secret=model-providers --project="$GCP_PROJECT_ID" \
-                 --out-file="$d/model-providers.json"; then
-            echo "::error::the 'model-providers' secret has no readable version — a human must add one"
+                 --out-file="$d/model-providers.json" 2>"$d/model-providers.err"; then
+            rc=1
+          else
+            rc=0
+          fi
+          # Replayed either way, so a warning on the success path is not swallowed
+          # by the capture that exists for the failure path.
+          cat "$d/model-providers.err" >&2
+          if [ "$rc" -ne 0 ]; then
+            # This branch catches every way the read can fail, and the advice below
+            # answers exactly one of them. A denied permission, a disabled API, a
+            # version someone disabled or an unreachable endpoint is not a secret
+            # anybody needs to create, so route on the status Google returned and
+            # let the error above speak for the rest.
+            if ! grep -q NOT_FOUND "$d/model-providers.err"; then
+              echo "::error::cannot read the 'model-providers' secret — the error above says why, and it is not a NOT_FOUND"
+              echo "The error above is the whole of what this job knows, and it does not say" >&2
+              echo "the secret is absent — though a caller without access is told that too," >&2
+              echo "so absent is not ruled out either. Start with what it does name: the" >&2
+              echo "deploy identity's Secret Manager access, whether the API is enabled on" >&2
+              echo "$GCP_PROJECT_ID, and whether the newest version was disabled." >&2
+              exit 1
+            fi
+            echo "::error::cannot read the 'model-providers' secret — it must exist AND have an enabled version, and only a human can supply one"
             cat >&2 <<EOF
           This is deliberate and this workflow cannot fix it: model-providers holds a
-          live model API key. Write the routes to a file and add them as a version:
+          live model API key.
+
+          Nothing in this repository creates the secret, so on a fresh environment it
+          does not exist at all and this comes first. Skip it if it does exist:
+
+            gcloud secrets create model-providers \\
+              --project=$GCP_PROJECT_ID --replication-policy=automatic
+
+          Then write the routes to a file and add them as its version:
 
             [ { "model": "*", "protocol": "anthropic",
                 "base_url": "https://your-gateway.example",
