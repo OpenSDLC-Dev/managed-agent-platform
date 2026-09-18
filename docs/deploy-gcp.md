@@ -684,10 +684,11 @@ destroys the cluster, Cloud SQL, the environment's **blob** bucket and the regis
 leaves `foundation/` alone — including the bucket holding `environment/`'s own Terraform
 state. What puts that bucket out of this command's reach is that it belongs to
 `foundation/`'s state, which this command never touches; `prevent_destroy` is the separate
-guard, against a `foundation/` destroy, and `foundation/` has no destroy target at all. It is deliberately **not idempotent**: run it twice and the second refuses, because
-the state is empty by then and Terraform cannot tell an already-destroyed environment from a
-checkout pointed at the wrong bucket — and only one of those quietly leaves a cluster
-billing. Three settings make that possible and are deliberately non-default: the cluster's
+guard, against a `foundation/` destroy, and `foundation/` has no destroy target at all. It is deliberately **not idempotent**: once a run empties the state, the next refuses,
+because Terraform cannot tell an already-destroyed environment from a checkout pointed at
+the wrong bucket — and only one of those quietly leaves a cluster billing. (A run held up
+by the service-networking peering does not empty it, which is why "Tearing it down" tells
+you to re-run.) Three settings make that possible and are deliberately non-default: the cluster's
 `deletion_protection`, Cloud SQL's two separate deletion-protection flags, and the bucket's
 `force_destroy`. All three are correct for staging and wrong for anything holding data
 someone would miss.
@@ -728,7 +729,9 @@ VPC, the reserved peering range, the connection itself and the API enablements �
 them billable**. The run that hits this has already deleted the cluster, the instance, the
 bucket and the registry, so the cost is settled and the remainder is bookkeeping. Stopping
 here is a legitimate end state: re-run `make gcp-env-destroy` once the four days are up,
-or leave it, since a later `make gcp-env-apply` adopts the same resources anyway.
+or leave it, since a later `make gcp-env-apply` adopts the same resources anyway. The
+target recognises Google's refusal and points here, so a bare `Error 1` is not all you
+get ([#752](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/752)).
 
 **Do not reach for the consumer-side peering delete** (`gcloud compute networks peerings
 delete servicenetworking-googleapis-com`). It is the obvious-looking way out and Google

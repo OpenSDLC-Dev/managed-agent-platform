@@ -637,6 +637,42 @@ gcp-db-init: gcp-require-project gcp-env-vars-match gcp-env-init
 # trade — Terraform cannot tell "already gone" from "pointed at the wrong empty
 # bucket", and between a needless refusal and a silent teardown of nothing, only
 # one of them can bill you for a month.
+#
+# A destroy usually fails on the service-networking connection. The header above
+# that resource in deploy/gcp/environment/main.tf says why, and docs/deploy-gcp.md
+# ("Tearing it down") has had the operator's copy since v0.2.0. What neither can
+# reach is the moment it happens. Terraform does print Google's refusal there —
+# what it does not say is that the wait is four days, that stopping is a
+# legitimate end state, or that this page exists. So the recipe recognises that
+# one outcome and says which page to read; the exit status is untouched.
+#
+# It recognises it from Google's own refusal, not from what the state looks like
+# afterwards. A residual-state shape can only say WHERE the destroy stopped, and
+# it says even that unreliably: what Terraform actually orders around the
+# connection is Cloud SQL before it and, after it, the network and reserved range
+# it references — while the cluster, the subnetwork, the router and the NAT have
+# no edge to it at all and may or may not be gone by the time it fails. Worse, it cannot say where on the documented
+# normal path — the operator re-running daily across the four-day wait — because
+# a prompt declined on the second run leaves exactly the shape a real hold does.
+# The refusal text is the direct signal and answers WHY, so a declined prompt, an
+# expired credential and a failure somewhere else are all silent without an
+# allowlist that would have to track every resource added to main.tf.
+#
+# stderr goes to a file and is replayed rather than teed, because reading a tee'd
+# copy races the tee. Measured against terraform 1.15: the plan, the progress and
+# the approval prompt are on stdout, which is untouched, and a declined prompt
+# leaves stderr empty — so what moves is warnings and the error block, from
+# during the run to immediately before this message.
+#
+# `Producer` is one word on purpose. Terraform draws an error inside a box,
+# ANSI-coloured even when redirected to a file, and hard-wraps the message
+# mid-sentence, so Google's `Producer services ... are still using this
+# connection` arrives split across lines with escape sequences between them —
+# measured, a colour reset fuses with the next word (`0mcalls`), which defeats
+# stripping punctuation and joining the lines too. Wrapping never splits a word,
+# and a substring match survives the fusion, so a single word is the only anchor
+# that cannot silently stop matching. A rare false positive costs a pointer at a
+# document; a silent miss costs the whole feature.
 gcp-env-destroy: gcp-require-project gcp-env-vars-match
 	$(GCP_TF) -chdir=deploy/gcp/environment init -input=false $(TF_BACKEND)
 	@resources="$$($(GCP_TF) -chdir=deploy/gcp/environment state list)" || { \
@@ -655,7 +691,22 @@ gcp-env-destroy: gcp-require-project gcp-env-vars-match
 		echo "  - PROJECT/NAME_PREFIX name the wrong bucket." >&2; \
 		exit 1; \
 	fi
-	$(GCP_TF) -chdir=deploy/gcp/environment destroy
+	@err="$$(mktemp)"; trap 'rm -f "$$err"' EXIT; \
+	$(GCP_TF) -chdir=deploy/gcp/environment destroy 2>"$$err"; rc=$$?; \
+	cat "$$err" >&2; \
+	if [ $$rc -ne 0 ] && grep -q 'Producer' "$$err"; then \
+		echo "" >&2; \
+		echo "Google's refusal above is the four-day hold: the producer side is not" >&2; \
+		echo "released until FOUR DAYS after the Cloud SQL instance is deleted, so" >&2; \
+		echo "re-running before then cannot finish it." >&2; \
+		echo "" >&2; \
+		echo "If that is the only failure above, stopping here is a legitimate end" >&2; \
+		echo "state and what it strands does not bill." >&2; \
+		echo "" >&2; \
+		echo "docs/deploy-gcp.md (\"Tearing it down\") has the account, and names the" >&2; \
+		echo "orphaned-disk sweep that \`terraform destroy\` does not do for you." >&2; \
+	fi; \
+	exit $$rc
 
 # The teardown proof of Decision 9, as one target: create -> destroy -> create.
 # What it proves is that the second apply succeeds with no KMS name collision

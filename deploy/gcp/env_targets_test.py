@@ -42,6 +42,44 @@ for a in "$@"; do
     printf '%s' "${FAKE_STATE:-}"
     exit 0
     ;;
+  destroy) # A failing destroy, with FAKE_DESTROY_FAILS naming the refusal —
+           # what the recipe reads to tell the four-day hold from anything else.
+    case "${FAKE_DESTROY_FAILS:-}" in
+    "") ;;
+    hold | hold-then-ok)
+      # Terraform's real error block, reproduced faithfully because its shape is
+      # what the recipe has to match: drawn in a box, ANSI-coloured even when
+      # redirected to a file, and hard-wrapped mid-sentence. The wrap below
+      # falls inside Google's phrase, exactly as it does in life.
+      b='\033[31m\342\224\202\033[0m \033[0m'
+      printf "${b}Error: Error waiting for Delete Service Networking Connection:\n" >&2
+      printf "${b}Producer services (e.g. CloudSQL, Cloud Memstore, etc.) are still\n" >&2
+      printf "${b}using this connection\n" >&2
+      # ...and `hold-then-ok` goes on to succeed. Synthetic: the pinned provider
+      # issues one delete and returns the wait's error, so this is not a path it
+      # takes today. It is here to hold the failure test in place, which the
+      # `~> 7.0` constraint is reason enough to keep.
+      [ "$FAKE_DESTROY_FAILS" = hold ] && exit 1
+      ;;
+    hold-plus) # the refusal AND an unrelated failure in one run
+      b='\033[31m\342\224\202\033[0m \033[0m'
+      printf "${b}Error: Producer services (e.g. CloudSQL, Cloud Memstore,\n" >&2
+      printf "${b}etc.) are still using this connection\n" >&2
+      printf "${b}Error: googleapi: Error 403: Permission denied on resource\n" >&2
+      exit 1
+      ;;
+    cancel) # The approval prompt, answered no. Measured against terraform
+            # 1.15: the prompt and `Destroy cancelled.` are on STDOUT and
+            # stderr is left empty, so there is nothing for the recipe to read.
+      echo "Destroy cancelled."
+      exit 1
+      ;;
+    *)
+      echo "fake terraform: ${FAKE_DESTROY_FAILS}" >&2
+      exit 1
+      ;;
+    esac
+    ;;
   esac
 done
 exit 0
@@ -72,11 +110,18 @@ def build_tree(tmp):
     return tree, bin_dir
 
 
-def run_make(tree, bin_dir, target, project="my-proj", prefix=None,
-             state="", *, state_fails=False, extra=(),
-             tfvars='project_id = "my-proj"\nname_prefix = "map"\n',
-             stray_out=None):
+def run_make(tree, bin_dir, target, *args, **kwargs):
     """Run one target; return (returncode, stdout+stderr, [terraform calls])."""
+    rc, out, err, calls = run_make_streams(tree, bin_dir, target, *args, **kwargs)
+    return rc, out + err, calls
+
+
+def run_make_streams(tree, bin_dir, target, project="my-proj", prefix=None,
+                     state="", *, state_fails=False, destroy_fails="", extra=(),
+                     tfvars='project_id = "my-proj"\nname_prefix = "map"\n',
+                     stray_out=None):
+    """As run_make, but keeping the two streams apart — which a diagnostic
+    printed to be read UNDER terraform's own error has to be checked on."""
     env_dir = tree / "deploy" / "gcp" / "environment"
     tfvars_path = env_dir / "terraform.tfvars"
     if tfvars is None:
@@ -95,6 +140,10 @@ def run_make(tree, bin_dir, target, project="my-proj", prefix=None,
         env["FAKE_STATE_FAILS"] = "1"
     else:
         env.pop("FAKE_STATE_FAILS", None)
+    if destroy_fails:
+        env["FAKE_DESTROY_FAILS"] = destroy_fails
+    else:
+        env.pop("FAKE_DESTROY_FAILS", None)
     # Never inherited from the developer's shell into an assertion about them.
     for k in ("PROJECT", "NAME_PREFIX", "OUT", "KMS_LOCATION"):
         env.pop(k, None)
@@ -112,7 +161,7 @@ def run_make(tree, bin_dir, target, project="my-proj", prefix=None,
 
     r = subprocess.run(argv, capture_output=True, text=True, env=env, check=False)
     calls = [c for c in log.read_text(encoding="utf-8").splitlines() if c]
-    return r.returncode, r.stdout + r.stderr, calls
+    return r.returncode, r.stdout, r.stderr, calls
 
 
 def main():
@@ -231,6 +280,96 @@ def main():
                                   state="google_container_cluster.map\n")
         check("destroy DOES run when the state holds resources",
               rc == 0 and called(calls, "destroy"), f"rc={rc} calls={calls}")
+
+        # 7-i. Google's refusal, which is the whole signal: the destroy failed
+        #      and said `still using this connection`. The bare `Error 1` that
+        #      make prints over it is all the operator had before.
+        held = ('google_compute_network.map\n'
+                'google_service_networking_connection.private_vpc\n')
+        rc, out, err, calls = run_make_streams(tree, bin_dir, "gcp-env-destroy",
+                                               state=held, destroy_fails="hold")
+        check("a destroy refused by the four-day hold explains itself",
+              rc != 0 and called(calls, "destroy")
+              and "four-day hold" in err and "FOUR DAYS" in err
+              and "Tearing it down" in err, f"rc={rc} err={err[-300:]}")
+
+        # Terraform's stderr is captured to a file to be read, so the replay that
+        # puts it back in front of the operator is load-bearing: without it the
+        # recipe would swallow the error it is explaining.
+        check("terraform's own refusal still reaches the operator",
+              "Producer services" in err, f"err={err[-300:]}")
+
+        # And the anchor has to survive the box: the fake wraps Google's phrase
+        # mid-sentence with a colour escape at the break, which is what the real
+        # error does. This row is why the recipe matches ONE word — widen it to
+        # any phrase that crosses a line and the message stops printing, which
+        # nothing else here would notice.
+        check("the anchor survives terraform's wrapped, coloured error",
+              "still using this connection" not in err
+              and "four-day hold" in err, f"err={err[-300:]}")
+
+        # ...on stderr, under terraform's own error rather than interleaved with
+        # its progress on stdout. Asserting against the two streams merged would
+        # let every `>&2` be deleted with the suite still green.
+        check("the explanation lands on stderr, where the error it follows is",
+              "four-day hold" not in out, f"out={out[-300:]}")
+
+        # 7-ii. Any OTHER refusal is left to speak for itself. The state shape is
+        #       deliberately not consulted: a residual-state test cannot tell a
+        #       credential error from the hold, because both leave the same
+        #       resources behind.
+        rc, out, err, calls = run_make_streams(tree, bin_dir, "gcp-env-destroy",
+                                               state=held,
+                                               destroy_fails="403 Forbidden")
+        check("a destroy that failed for another reason says NOTHING",
+              rc != 0 and called(calls, "destroy")
+              and "403 Forbidden" in err
+              and "four-day hold" not in err, f"rc={rc} err={err[-300:]}")
+
+        # 7-iii. The documented normal path is to re-run daily across the four
+        #        days, so a prompt answered `no` is routine — and it destroys
+        #        nothing while leaving exactly the state a real hold leaves.
+        #        Reading the refusal rather than the state is what keeps this
+        #        silent.
+        rc, out, err, calls = run_make_streams(tree, bin_dir, "gcp-env-destroy",
+                                               state=held,
+                                               destroy_fails="cancel")
+        check("a prompt the operator declined says NOTHING",
+              rc != 0 and called(calls, "destroy")
+              and "four-day hold" not in err, f"rc={rc} err={err[-300:]}")
+
+        # 7-iv. And a destroy that SUCCEEDS stays silent.
+        rc, out, err, calls = run_make_streams(tree, bin_dir, "gcp-env-destroy",
+                                               state=held)
+        check("a destroy that succeeds says nothing about the hold",
+              rc == 0 and called(calls, "destroy")
+              and "four-day hold" not in err, f"rc={rc} err={err[-300:]}")
+
+        # 7-v. Including a run that printed the refusal and then succeeded. The
+        #      pinned provider does not do that, so this is synthetic — it holds
+        #      the failure test in place, which `~> 7.0` is reason enough to keep
+        #      rather than let the anchor alone decide.
+        rc, out, err, calls = run_make_streams(tree, bin_dir, "gcp-env-destroy",
+                                               state=held,
+                                               destroy_fails="hold-then-ok")
+        check("a run that printed the refusal and then succeeded says NOTHING",
+              rc == 0 and called(calls, "destroy")
+              and "Producer services" in err
+              and "four-day hold" not in err, f"rc={rc} err={err[-300:]}")
+
+        # 7-vi. The refusal can arrive beside an unrelated failure, and the
+        #       anchor cannot tell that apart. So the message explains the
+        #       refusal without claiming to account for the whole run: it is
+        #       conditional on that being the only failure, because otherwise it
+        #       would be telling an operator to stop while something else is
+        #       genuinely wrong.
+        rc, out, err, calls = run_make_streams(tree, bin_dir, "gcp-env-destroy",
+                                               state=held,
+                                               destroy_fails="hold-plus")
+        check("the hold explanation never claims to be the only failure",
+              rc != 0 and "four-day hold" in err
+              and "403" in err
+              and "only failure" in err, f"rc={rc} err={err[-400:]}")
 
         # 8. apply and migrate-state reach terraform on the happy path, with the
         #    guard satisfied — and every one of them carries the BUCKET. Checking

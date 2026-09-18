@@ -7,8 +7,8 @@ What is being worked on right now, and how far along it is — nothing else. **S
 **none.** Nothing is in flight. The archive-endings cluster is closed: #713, #710, #574,
 #716, #730 and #731 shipped in v0.4.0 ([docs/changelog/0.4.0.md](./docs/changelog/0.4.0.md)),
 and #720's primary-unarchived CHECK landed after it; its entry is a
-[changelog.d/](./changelog.d/) fragment, as are #748's executor Cloud KMS grant and #749's
-release-install path for GCP.
+[changelog.d/](./changelog.d/) fragment, as are #748's executor Cloud KMS grant, #749's
+release-install path for GCP and #752's legible `gcp-env-destroy` failure.
 The backlog is [GitHub issues](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues).
 
 ## Tasks

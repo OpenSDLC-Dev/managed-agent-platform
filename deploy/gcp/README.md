@@ -1431,6 +1431,12 @@ refuses rather than succeeding over nothing. That trade is deliberate — Terraf
 "already gone" from "pointed at the wrong empty bucket", and only one of those bills you for
 a month.
 
+On the way out it also reads Terraform's refusal, and when that names the service-networking
+hold it says so and points at
+[docs/deploy-gcp.md](../../docs/deploy-gcp.md#tearing-it-down), where that failure is
+routine rather than wrong. It explains the refusal only, not the run, and the exit status
+is still Terraform's.
+
 **A checkout has to be pointed at the bucket once before it can read anything**, and that is
 `PROJECT=… make gcp-env-init`. It is the cheap half of what the move buys: a fresh clone with
 credentials can now read the environment — `terraform output -raw cluster_name`, the
