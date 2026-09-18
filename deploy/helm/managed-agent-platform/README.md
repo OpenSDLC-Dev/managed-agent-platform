@@ -297,14 +297,12 @@ for ksa in $(kubectl get sa -n NAMESPACE -l app.kubernetes.io/instance=RELEASE \
 done
 ```
 
-**The two need different key-level roles**, and granting both the same one
-over-privileges the executor. The control plane encrypts on write and decrypts
-for `mcp_oauth_validate`, so it needs
-`roles/cloudkms.cryptoKeyEncrypterDecrypter`. The executor constructs the cipher
-**only to fail fast on misconfiguration** — egress substitution decrypts
-control-plane side, at the gate-config endpoint, never in the executor — so the
-one KMS call it ever makes is the startup probe's encrypt, and
-`roles/cloudkms.cryptoKeyEncrypter` is enough:
+**Both need `roles/cloudkms.cryptoKeyEncrypterDecrypter`.** The control plane
+encrypts on write and decrypts for `mcp_oauth_validate`. The executor decrypts
+too, in two places: a `github_repository` clone opens the resource's sealed
+authorization token, and an MCP dial resolves a vault's bearer credential.
+Egress substitution is the one that stays control-plane side, at the
+gate-config endpoint.
 
 ```
 gcloud kms keys add-iam-policy-binding credentials \
@@ -313,9 +311,11 @@ gcloud kms keys add-iam-policy-binding credentials \
   --role roles/cloudkms.cryptoKeyEncrypterDecrypter
 ```
 
-(with a second Google service account bound only to
-`roles/cloudkms.cryptoKeyEncrypter` if you want the executor separated; a single
-account for both is simpler and is what the example above configures.)
+`roles/cloudkms.cryptoKeyEncrypter` on the executor is the shape to avoid, and
+it is quiet about it: the cipher's startup probe only encrypts, so the pods go
+Ready and the install is green. The failures arrive per session — a clone ends
+in `session.error` `github_repository_clone_error` with reason `internal`, and
+a vault-credentialed MCP server reads as an authentication failure.
 
 The brain never gets the key name: it holds no cipher, so on KMS grounds it has
 no reason to hold the identity either. It does have a **ServiceAccount** of its

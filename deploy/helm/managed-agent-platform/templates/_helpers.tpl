@@ -106,11 +106,13 @@ with skills (and file-rubric grading) unavailable instead of crash-looping.
 
 {{/*
 The SECRETS_ and BAO_ env entries for processes that use the credential cipher
-(docs/plan/12_vaults-credentials.md: the controlplane encrypts on write and
-decrypts for mcp_oauth_validate; the executor decrypts at egress substitution;
-the brain joins with #45; the BYOC worker never talks to bao). Every key is
-optional, exactly like map.blobEnv: a chart Secret rendered without secrets-*
-keys — or an existingSecret that never carried them — deploys without a cipher,
+(docs/plan/12_vaults-credentials.md for the controlplane, which encrypts on
+write and decrypts for mcp_oauth_validate and for egress substitution at the
+gate-config endpoint; plans 25 and 29 for the executor, which decrypts a
+repository's sealed token and an MCP dial's vault credential; the brain holds
+no cipher, and the BYOC worker never talks to bao). Every key is optional,
+exactly like map.blobEnv: a chart Secret rendered without secrets-* keys — or
+an existingSecret that never carried them — deploys without a cipher,
 and the processes serve with vault credential storage unavailable instead of
 crash-looping.
 */}}

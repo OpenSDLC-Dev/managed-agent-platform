@@ -12,12 +12,11 @@ metadata:
     {{- include "map.labels" . | nindent 4 }}
     app.kubernetes.io/component: executor
   {{- /* GKE Workload Identity is an annotation and nothing else — this is how
-        the gcpKMS cipher authenticates from the executor. The executor builds
-        the cipher only to fail fast on a misconfigured backend and then
-        discards it: vault credentials are decrypted control-plane side, at the
-        gate-config endpoint, never here. So the one KMS call this identity ever
-        makes is the startup probe's encrypt, and roles/cloudkms.cryptoKeyEncrypter
-        is enough for it — see values.yaml. */}}
+        the gcpKMS cipher authenticates from the executor. That identity both
+        encrypts and decrypts: egress substitution is decrypted control-plane
+        side at the gate-config endpoint, but a repository clone opens its
+        sealed token here and so does a vault-credentialed MCP dial. So it
+        needs roles/cloudkms.cryptoKeyEncrypterDecrypter — see values.yaml. */}}
   {{- with .Values.executor.serviceAccount.annotations }}
   annotations:
     {{- toYaml . | nindent 4 }}

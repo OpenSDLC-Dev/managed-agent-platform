@@ -39,7 +39,7 @@ controlplane:
   #
   # The control plane encrypts on write and decrypts for mcp_oauth_validate, so
   # its identity needs roles/cloudkms.cryptoKeyEncrypterDecrypter on the key.
-  # (The executor needs less — see its own serviceAccount block.)
+  # (The executor needs the same role, for reasons of its own — see its block.)
   serviceAccount:
     annotations: {}
   service:
@@ -126,13 +126,14 @@ executor:
   # binds this pod's identity to a Google service account, and that is how the
   # gcpKMS cipher authenticates without any key material in the Secret.
   #
-  # The executor constructs the cipher ONLY to fail fast on a misconfigured
-  # backend — egress substitution decrypts control-plane side, at the
-  # gate-config endpoint, never here — so the one KMS call it ever makes is the
-  # startup probe's encrypt, and roles/cloudkms.cryptoKeyEncrypter is enough.
-  # Pointing both components at one Google service account holding
-  # EncrypterDecrypter is simpler and is what the chart README's example does;
-  # two accounts is the least-privilege shape.
+  # The executor needs decrypt as well as encrypt: egress substitution does
+  # decrypt control-plane side, at the gate-config endpoint, but a
+  # github_repository clone opens its sealed authorization token here, and so
+  # does an MCP dial that a vault credential matches. So this account — one of
+  # its own, or the control plane's — holds
+  # roles/cloudkms.cryptoKeyEncrypterDecrypter. Encrypter alone installs green
+  # and fails per session instead; README.md's KMS section has the shape of
+  # those failures, so that they are written down once.
   serviceAccount:
     annotations: {}
   leaseTTL: ""       # EXECUTOR_LEASE_TTL, e.g. "15m"; empty uses the binary default
