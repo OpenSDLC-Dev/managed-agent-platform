@@ -17,9 +17,11 @@ import (
 // `<<EOT` as much as `<<-EOT`, because the marker decides how the body is
 // dedented, not where the string ends. check_split.py records the terraform
 // 1.15.8 runs behind that. Trimming is where the two languages could drift and
-// do not: strings.TrimSpace is Terraform's own whitespace set, and the four
-// characters Python's wider str.strip() adds are excluded there rather than
-// trimmed (#761). Requiring an exact match instead, as this reader
+// do not: over every file Terraform will parse, strings.TrimSpace is its
+// whitespace set, and the four characters Python's wider str.strip() adds are
+// excluded on that side rather than trimmed. Past that both still trim a lone
+// U+000D that Terraform refuses the file over, which is #761.
+// Requiring an exact match instead, as this reader
 // did until #758, reads on past a terminator Terraform honoured: what follows
 // is configuration to Terraform and string content to the reader, so a deny
 // policy that should have refused the file is never seen, and the swallowed

@@ -101,9 +101,12 @@ RESOURCE = re.compile(r'^\s*resource\s+"([^"]+)"\s+"([^"]+)"')
 MODULE = re.compile(r'^\s*module\s+"([^"]+)"')
 SOURCE = re.compile(r'^\s*source\s*=\s*"([^"]+)"\s*$', re.M)
 HEREDOC = re.compile(r"<<[-~]?([A-Za-z_][A-Za-z0-9_]*)")
-# The characters str.strip() calls whitespace and Terraform does not — exactly
-# the four ASCII separators. Everything else in Python's set is in Terraform's
-# too, so this is the whole of the difference. See blocks().
+# The characters str.strip() calls whitespace and Terraform reads as heredoc
+# body text — exactly the four ASCII separators, measured codepoint by codepoint
+# against terraform 1.15.8 over both languages' whole whitespace sets. One
+# disagreement is deliberately left outside this set: a lone U+000D before the
+# terminator, which both readers trim and which makes Terraform refuse the file
+# outright, so `make gcp-fmt` answers that one first (#761). See blocks().
 SEPARATORS = re.compile(r"[\x1c-\x1f]")
 
 
