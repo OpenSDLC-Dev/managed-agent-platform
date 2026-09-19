@@ -21,7 +21,7 @@ SHELL := /usr/bin/env bash
 	changelog changelog-notes changelog-archive \
 	release-tag-check release-images release-chart-check release-chart release-binaries \
 	openbao-init-test cd-outcome-test parked-test retry-test identifiers-test pins-test registry-check sdk-bump-report \
-	gcp-fmt gcp-validate gcp-split-check gcp-lint gcp-bootstrap-test gcp-dbinit-test gcp-split-check-test gcp-power-test gcp-tfvars-test gcp-env-targets-test gcp-foundation-apply gcp-bootstrap gcp-env-apply gcp-db-init gcp-env-destroy gcp-env-rebuild \
+	gcp-fmt gcp-validate gcp-split-check gcp-kms-role-check gcp-lint gcp-bootstrap-test gcp-dbinit-test gcp-split-check-test gcp-power-test gcp-tfvars-test gcp-env-targets-test gcp-foundation-apply gcp-bootstrap gcp-env-apply gcp-db-init gcp-env-destroy gcp-env-rebuild \
 	gcp-require-project gcp-env-tfvars gcp-env-migrate-state gcp-env-init gcp-env-vars-match \
 	gcp-env-stop gcp-env-start gcp-env-status
 
@@ -427,6 +427,17 @@ gcp-validate:
 # past it and moving one between files cannot false-fail it.
 gcp-split-check:
 	python3 deploy/gcp/check_split.py
+
+# The other rule the Terraform keeps only by prose: each identity's key-level
+# Cloud KMS role against every Encrypt/Decrypt its binary's packages name (#750; the
+# package comment says what #748 cost). Here rather than in `verify` for the
+# reason the whole gcp-* group is: it reads
+# deploy/gcp, and the gate does not depend on that tree. The package's own unit
+# tests run in the gate like any Go test — they read fixtures and the Go tree,
+# never deploy/gcp — the same division `gcp-split-check` and
+# `gcp-split-check-test` already draw.
+gcp-kms-role-check:
+	go run ./tools/kmsrole
 
 # The second half is a portability guard shellcheck does not offer: it checks
 # syntax and quoting, not which bash a construct needs. These scripts are run BY
