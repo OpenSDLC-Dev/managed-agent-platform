@@ -134,11 +134,12 @@ EOT2
 	if _, err := tfBlocks(writeTF(t, "locals {\n  a = <<EOT\nEOTX\n}\n")); err == nil {
 		t.Fatal("a heredoc closed by EOTX was read as terminated")
 	}
-	// Every padding terraform honours, not only the indented one: a left-trim
-	// would pass a suite that pins `    EOT` alone while reading on past
-	// `EOT   `, which terraform both accepts and leaves alone under
-	// `terraform fmt -check`.
-	for _, term := range []string{"    EOT", "EOT   ", "\tEOT"} {
+	// Four paddings, not only the indented one, because every narrower trim
+	// passes a suite that pins fewer: TrimLeft(" \t") reads on past `EOT   `,
+	// and Trim(" \t") reads on past the non-breaking space. Terraform honours
+	// all four — measured, and `terraform fmt -check` leaves every byte of them
+	// alone — so a tree can carry any one.
+	for _, term := range []string{"    EOT", "EOT   ", "\tEOT", " EOT"} {
 		got, err := tfBlocks(writeTF(t, "locals {\n  a = <<EOT\n"+term+"\n}\nresource \"a\" \"b\" {\n}\n"))
 		if err != nil {
 			t.Fatalf("terminator %q: %v", term, err)

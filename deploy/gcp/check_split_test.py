@@ -144,11 +144,12 @@ def main():
         #
         # Two cases because the wrong rule fails two different ways, and only
         # one of them is loud.
-        # All three paddings terraform honours, not just the indented one:
-        # `line.lstrip()` reads on past `EOT   `, which terraform accepts as a
-        # terminator and `terraform fmt -check` leaves alone, so a tree can
-        # carry one. The heredoc has to close for the key after it to sit at
-        # depth 0 and be seen.
+        # Four paddings, not just the indented one, because every narrower trim
+        # passes a suite that pins fewer: `lstrip()` reads on past `EOT   `, and
+        # `strip(" \t")` reads on past the non-breaking space. Terraform honours
+        # all four — measured, and `terraform fmt -check` leaves every byte of
+        # them alone — so a tree can carry any one, and the heredoc has to close
+        # for the key after it to sit at depth 0 and be seen.
         #
         # One file per form, deliberately. Put them together and a form that
         # fails to close is rescued by the NEXT form's terminator line, the key
@@ -156,7 +157,8 @@ def main():
         # which is how this started out written.
         for label, term in (("an indented", "    EOT"),
                             ("a trailing-space", "EOT   "),
-                            ("a tab-indented", "\tEOT")):
+                            ("a tab-indented", "\tEOT"),
+                            ("a non-breaking-space", " EOT")):
             case(tmp, "%s terminator ends a plain heredoc, so what follows is real" % label,
                  append("environment/main.tf",
                         '\nlocals {\n  a = <<EOT\n' + term + '\n}\n' + ROGUE_KEY),
