@@ -50,7 +50,7 @@ var (
 
 // Raised from the two places a lone carriage return can reach this reader, so
 // both say the same thing about the same character.
-var errLoneCR = errors.New("a carriage return that is not part of a CRLF, which terraform refuses as an Invalid character — refusing rather than guessing where the lines end")
+var errLoneCR = errors.New("a carriage return that is not part of a CRLF — terraform refuses the file over one (Invalid character, or Invalid multi-line string when it sits inside a quoted string), so this reader refuses rather than guessing where the lines end")
 
 func init() {
 	// Either at the start of the line, or straight after a `{`. The second form
@@ -283,8 +283,8 @@ func tfBlocks(path string) ([]tfBlock, error) {
 		// on where the return sits: measured on 1.15.8, `# note\r` at end of
 		// file, `# a\rb` and `# note\r\r\n` are all accepted — a comment runs to
 		// the newline and a lone return is ordinary text inside it — while the
-		// same return among structure, or inside a quoted string, is an
-		// `Invalid character`. Scrubbing has removed the comments and kept
+		// same return among structure is an `Invalid character` and inside a
+		// quoted string an `Invalid multi-line string`. Scrubbing removes the comments and keeps
 		// everything else, so what reaches here is the half terraform refuses.
 		// It has to be a refusal rather than a translation because this reader
 		// and check_split.py disagreed about such a file: Python's read_text()

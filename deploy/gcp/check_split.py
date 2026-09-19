@@ -113,8 +113,9 @@ SEPARATORS = re.compile(r"[\x1c-\x1f]")
 # Raised from the two places a lone carriage return can reach blocks(), so both
 # say the same thing about the same character.
 LONE_CR = (
-    "a carriage return that is not part of a CRLF, which terraform refuses as an "
-    "Invalid character. Refusing rather than guessing where the lines end."
+    "a carriage return that is not part of a CRLF. Terraform refuses the file over "
+    "one (Invalid character, or Invalid multi-line string when it sits inside a "
+    "quoted string), so this guard refuses rather than guessing where the lines end."
 )
 
 
@@ -222,17 +223,19 @@ def blocks(path: pathlib.Path):
     # same bytes are four lines here and one line there — where only the first
     # header can match (#761). (read_text(newline="") would say it more directly
     # and is Python 3.13; this file runs on 3.9.) Decoding explicitly also fixes
-    # the encoding at UTF-8, which terraform requires, where read_text() took the
-    # locale's. What to DO about a lone return is decided per line below, because
-    # terraform's own answer depends on where it sits.
+    # the encoding rather than taking the locale's, as read_text() did. What to DO
+    # about a lone return is decided per line below, because terraform's own
+    # answer depends on where it sits.
     #
     # surrogateescape rather than strict, so a byte that is not UTF-8 is carried
     # through as an opaque character instead of raising: tools/kmsrole/hcl.go
     # converts the same bytes with string(b) and validates nothing, and a reader
-    # that dies where its mirror reads on is the divergence #762 is about. It is
-    # not a licence either way — terraform accepts `# \xff` and refuses `"\xff"`
-    # as an `Invalid character encoding` — but neither reader loses its place
-    # over one, which is the contract that matters here.
+    # that dies where its mirror reads on is the divergence #762 is about. Nor is
+    # strict the safer choice: terraform accepts a comment holding raw bytes
+    # (`# caf\xe9` is `fmt`- and `validate`-clean on 1.15.8) and refuses `"\xff"`
+    # as an `Invalid character encoding`, so strict refused files terraform reads.
+    # Neither reader loses its place over such a byte, which is the contract that
+    # matters here.
     raw = path.read_bytes().decode("utf-8", "surrogateescape").replace("\r\n", "\n").split("\n")
     lines, skip_until = [], None
     for n, line in enumerate(raw):

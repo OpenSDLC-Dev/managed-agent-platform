@@ -242,6 +242,16 @@ def main():
                                ("mid-comment", b"# a\rb\n")):
             case(tmp, "a lone return inside a comment %s is read, not refused" % label,
                  append_bytes("environment/main.tf", b"\n" + comment), expect_ok=True)
+        # The accept side of the last-line rule, which the Go suite pins and this
+        # one did not: what the refusal must NOT reach. A missing final newline
+        # is only ever about the terminator, and terraform accepts both of these.
+        # Mirrors whose suites pin different things are the #762 channel.
+        case(tmp, "an ordinary last line with no trailing newline is read",
+             append_bytes("environment/main.tf", b"\nlocals {\n  a = 1\n}"),
+             expect_ok=True)
+        case(tmp, "a heredoc that closes before such a line is read",
+             append_bytes("environment/main.tf", b"\nlocals {\n  a = <<EOT\ntext\nEOT\n}"),
+             expect_ok=True)
         # A byte that is not UTF-8 is carried through rather than raised on, the
         # way tools/kmsrole/hcl.go's string(b) carries it: a reader that dies
         # where its mirror reads on is a divergence, and terraform accepts this
