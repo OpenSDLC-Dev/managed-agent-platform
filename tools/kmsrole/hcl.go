@@ -48,6 +48,10 @@ var (
 	tfAttrRe = map[string]*regexp.Regexp{}
 )
 
+// Raised from the two places a lone carriage return can reach this reader, so
+// both say the same thing about the same character.
+var errLoneCR = errors.New("a carriage return that is not part of a CRLF, which terraform refuses as an Invalid character — refusing rather than guessing where the lines end")
+
 func init() {
 	// Either at the start of the line, or straight after a `{`. The second form
 	// is what a one-line nested block looks like — `lifecycle { ignore_changes =
@@ -239,25 +243,19 @@ func tfBlocks(path string) ([]tfBlock, error) {
 	}
 	// Split on "\n" alone: strings.Split does not also break on U+2028, U+2029,
 	// \v, \f or \x85, which HCL treats as ordinary characters inside a string.
-	body := strings.ReplaceAll(string(b), "\r\n", "\n")
-	// What is left is a carriage return that ends no CRLF, and terraform 1.15.8
-	// refuses the file over one wherever it sits — between statements, inside a
-	// quoted string, inside a heredoc body, as the last byte — while a file
-	// written entirely in CRLF it accepts. So the refusal is of the LONE return,
-	// not of the character. It has to be a refusal rather than a translation
-	// because this reader and check_split.py disagreed about such a file: Python's
-	// read_text() breaks on a bare \r and Go does not, which made it four lines to
-	// one reader and one line to the other — and one line means only the first
-	// header can match, so the rest went unread with nothing said (#761).
-	if strings.Contains(body, "\r") {
-		return nil, fmt.Errorf("%s: contains a carriage return that is not part of a CRLF, which terraform refuses as an Invalid character — refusing rather than guessing where the lines end", path)
-	}
-	raw := strings.Split(body, "\n")
+	raw := strings.Split(strings.ReplaceAll(string(b), "\r\n", "\n"), "\n")
 
 	src := make([]tfLine, 0, len(raw))
 	term := ""
 	for i, line := range raw {
 		if term != "" {
+			// A body line, where a lone return is refused outright: terraform
+			// refuses the file over one, and a trailing `\r` before the
+			// terminator word is padding to strings.TrimSpace and not to
+			// terraform, so it would close the string HERE and not THERE.
+			if strings.Contains(line, "\r") {
+				return nil, fmt.Errorf("%s:%d: %w", path, i+1, errLoneCR)
+			}
 			src = append(src, tfLine{Raw: line, N: i + 1, Heredoc: true})
 			// Trimmed, whatever the opener's marker — see the header.
 			if strings.TrimSpace(line) == term {
@@ -280,6 +278,21 @@ func tfBlocks(path string) ([]tfBlock, error) {
 		s, codeLen, err := scrubTF(line)
 		if err != nil {
 			return nil, fmt.Errorf("%s:%d: %w", path, i+1, err)
+		}
+		// Checked on the SCRUBBED line, because terraform's own answer depends
+		// on where the return sits: measured on 1.15.8, `# note\r` at end of
+		// file, `# a\rb` and `# note\r\r\n` are all accepted — a comment runs to
+		// the newline and a lone return is ordinary text inside it — while the
+		// same return among structure, or inside a quoted string, is an
+		// `Invalid character`. Scrubbing has removed the comments and kept
+		// everything else, so what reaches here is the half terraform refuses.
+		// It has to be a refusal rather than a translation because this reader
+		// and check_split.py disagreed about such a file: Python's read_text()
+		// broke lines on a bare \r and this one never has, so the same bytes
+		// were four lines there and one line here — and one line means only the
+		// first header can match, with the rest unread and nothing said (#761).
+		if strings.Contains(s, "\r") {
+			return nil, fmt.Errorf("%s:%d: %w", path, i+1, errLoneCR)
 		}
 		code := line[:codeLen]
 		if m := tfHeredocRe.FindStringSubmatchIndex(s); m != nil {

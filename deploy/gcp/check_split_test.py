@@ -230,6 +230,27 @@ def main():
              append_bytes("environment/main.tf",
                           ("\n" + ROGUE_KEY).replace("\n", "\r\n").encode()),
              expect_text="must not OWN")
+        # And the position where terraform reads a lone return as ordinary text
+        # rather than refusing it: inside a comment, which runs to the newline.
+        # Measured on 1.15.8 — `# note\r` at end of file, `# a\rb` and
+        # `# note\r\r\n` are all accepted, so refusing them would be this guard
+        # rejecting configuration terraform takes. Three forms, because the
+        # cheap rule (refuse any return the CRLF pass leaves) accepts none of
+        # them: in `\r\r\n` the pass eats the second return and leaves the first.
+        for label, comment in (("at end of file", b"# note\r"),
+                               ("before a CRLF", b"# note\r\r\n"),
+                               ("mid-comment", b"# a\rb\n")):
+            case(tmp, "a lone return inside a comment %s is read, not refused" % label,
+                 append_bytes("environment/main.tf", b"\n" + comment), expect_ok=True)
+        # A byte that is not UTF-8 is carried through rather than raised on, the
+        # way tools/kmsrole/hcl.go's string(b) carries it: a reader that dies
+        # where its mirror reads on is a divergence, and terraform accepts this
+        # file. What is planted after it must still be caught, so this is not an
+        # `expect_ok` — it is the guard doing its job across the odd byte.
+        case(tmp, "a byte that is not UTF-8 does not stop the scan",
+             append_bytes("environment/main.tf",
+                          b"\n# \xff\n" + ROGUE_KEY.encode()),
+             expect_text="must not OWN")
         case(tmp, "a multi-line interpolation is refused",
              append("environment/main.tf",
                     '\nlocals {\n  x = "${coalesce(\n    var.a,\n    "b",\n  )}"\n}\n'),

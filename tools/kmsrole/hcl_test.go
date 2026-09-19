@@ -236,6 +236,15 @@ func TestCRLFAndAnUnterminatedLastLineAreStillRead(t *testing.T) {
 		{"CRLF throughout", "resource \"a\" \"b\" {\r\n  x = 1\r\n}\r\n"},
 		{"ordinary last line, no trailing newline", "resource \"a\" \"b\" {\n  x = 1\n}"},
 		{"heredoc closed, then a last line with no newline", "resource \"a\" \"b\" {\n  x = <<EOT\ntext\nEOT\n}"},
+		// A comment runs to the newline, so a lone return inside one is
+		// ordinary text: terraform 1.15.8 accepts all three of these, and
+		// refusing them would be this reader rejecting configuration the
+		// binary takes. The `\r\r\n` form matters on its own — the CRLF pass
+		// eats the second return and leaves the first, which is exactly what a
+		// whole-file "any return left over" rule trips on.
+		{"lone return in a comment at end of file", "resource \"a\" \"b\" {\n  x = 1\n}\n# note\r"},
+		{"lone return in a comment before a CRLF", "resource \"a\" \"b\" {\n  x = 1\n}\n# note\r\r\n"},
+		{"lone return mid-comment", "# a\rb\nresource \"a\" \"b\" {\n  x = 1\n}\n"},
 	} {
 		got, err := tfBlocks(writeTF(t, tc.body))
 		if err != nil {

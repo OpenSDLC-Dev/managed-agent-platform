@@ -110,6 +110,12 @@ HEREDOC = re.compile(r"<<[-~]?([A-Za-z_][A-Za-z0-9_]*)")
 # both languages' whitespace sets against terraform 1.15.8. What it is for is in
 # blocks(), its only caller.
 SEPARATORS = re.compile(r"[\x1c-\x1f]")
+# Raised from the two places a lone carriage return can reach blocks(), so both
+# say the same thing about the same character.
+LONE_CR = (
+    "a carriage return that is not part of a CRLF, which terraform refuses as an "
+    "Invalid character. Refusing rather than guessing where the lines end."
+)
 
 
 def scrub(line: str) -> str:
@@ -212,28 +218,31 @@ def blocks(path: pathlib.Path):
     # the quote tracking for the rest of the file.
     # Bytes decoded here rather than read_text(), which performs universal-newline
     # translation: without that a lone \r arrives already turned into a line
-    # break, and this reader parses a file terraform refuses. (read_text(newline="")
-    # would say it more directly and is Python 3.13; this file runs on 3.9.)
-    # Decoding explicitly also fixes the encoding at UTF-8, which is what
-    # terraform requires, where read_text() took the locale's. A bare return is an
-    # `Invalid character` to
-    # terraform 1.15.8 wherever it sits — between statements, inside a quoted
-    # string, inside a heredoc body, as the last byte — while a file written
-    # entirely in CRLF it accepts, so what is refused is the LONE return. It has
-    # to be refused rather than translated because tools/kmsrole/hcl.go breaks on
-    # "\n" alone: the same bytes were four lines here and one line there, and one
-    # line means only the first header can match (#761).
-    text = path.read_bytes().decode("utf-8").replace("\r\n", "\n")
-    if "\r" in text:
-        raise ValueError(
-            f"{path}: contains a carriage return that is not part of a CRLF, which "
-            f"terraform refuses as an Invalid character. Refusing rather than guessing "
-            f"where the lines end."
-        )
-    raw = text.split("\n")
+    # break, this reader breaks lines where tools/kmsrole/hcl.go does not, and the
+    # same bytes are four lines here and one line there — where only the first
+    # header can match (#761). (read_text(newline="") would say it more directly
+    # and is Python 3.13; this file runs on 3.9.) Decoding explicitly also fixes
+    # the encoding at UTF-8, which terraform requires, where read_text() took the
+    # locale's. What to DO about a lone return is decided per line below, because
+    # terraform's own answer depends on where it sits.
+    #
+    # surrogateescape rather than strict, so a byte that is not UTF-8 is carried
+    # through as an opaque character instead of raising: tools/kmsrole/hcl.go
+    # converts the same bytes with string(b) and validates nothing, and a reader
+    # that dies where its mirror reads on is the divergence #762 is about. It is
+    # not a licence either way — terraform accepts `# \xff` and refuses `"\xff"`
+    # as an `Invalid character encoding` — but neither reader loses its place
+    # over one, which is the contract that matters here.
+    raw = path.read_bytes().decode("utf-8", "surrogateescape").replace("\r\n", "\n").split("\n")
     lines, skip_until = [], None
     for n, line in enumerate(raw):
         if skip_until is not None:
+            # A body line, where a lone return is refused outright: terraform
+            # refuses the file over one, and a trailing `\r` before the
+            # terminator word is padding to str.strip() and not to terraform, so
+            # it would close the string HERE and not THERE.
+            if "\r" in line:
+                raise ValueError(f"{path}:{n + 1}: {LONE_CR}")
             # Trimmed, and for `<<EOT` as much as `<<-EOT`: the marker decides
             # how the BODY is dedented, not where the string ends. Measured
             # against terraform 1.15.8 — a plain heredoc closes at `    EOT`,
@@ -276,6 +285,15 @@ def blocks(path: pathlib.Path):
             scrubbed = scrub(line)
         except ValueError as exc:
             raise ValueError(f"{path}: {exc}") from None
+        # Checked on the SCRUBBED line, because terraform's own answer depends on
+        # where the return sits: measured on 1.15.8, `# note\r` at end of file,
+        # `# a\rb` and `# note\r\r\n` are all accepted — a comment runs to the
+        # newline and a lone return is ordinary text inside it — while the same
+        # return among structure, or inside a quoted string, is an `Invalid
+        # character`. scrub() removes the comments and keeps everything else, so
+        # what reaches here is the half terraform refuses.
+        if "\r" in scrubbed:
+            raise ValueError(f"{path}:{n + 1}: {LONE_CR}")
         m = HEREDOC.search(scrubbed)
         if m:
             skip_until = m.group(1)
