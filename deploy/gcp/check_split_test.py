@@ -134,6 +134,58 @@ def main():
         case(tmp, "an unterminated heredoc is refused",
              append("environment/main.tf", '\nlocals {\n  x = <<NEVERCLOSED\nbody\n}\n'),
              expect_text="never terminated")
+        # Terraform ends a heredoc at the first line that, TRIMMED, is the
+        # terminator — `<<EOT` exactly as much as `<<-EOT`; the marker dedents
+        # the body, it does not move the end. Measured against terraform
+        # 1.15.8, whose parser accepts `    EOT`, `EOT   ` and a tab-indented
+        # one, and rejects `EOTX`, `x EOT` and `EOT }`. Requiring an exact match
+        # instead reads on past a terminator Terraform honoured, and everything
+        # after it is configuration to Terraform and string content here (#758).
+        #
+        # Two cases because the wrong rule fails two different ways, and only
+        # one of them is loud.
+        # Four paddings, not just the indented one, because every narrower trim
+        # passes a suite that pins fewer: `lstrip()` reads on past `EOT   `, and
+        # `strip(" \t")` reads on past the non-breaking space. Terraform honours
+        # all four — measured, and `terraform fmt -check` leaves every byte of
+        # them alone — so a tree can carry any one, and the heredoc has to close
+        # for the key after it to sit at depth 0 and be seen.
+        #
+        # One file per form, deliberately. Put them together and a form that
+        # fails to close is rescued by the NEXT form's terminator line, the key
+        # is found anyway, and the case passes over a reader that is wrong —
+        # which is how this started out written.
+        for label, term in (("an indented", "    EOT"),
+                            ("a trailing-space", "EOT   "),
+                            ("a tab-indented", "\tEOT"),
+                            ("a non-breaking-space", " EOT")):
+            case(tmp, "%s terminator ends a plain heredoc, so what follows is real" % label,
+                 append("environment/main.tf",
+                        '\nlocals {\n  a = <<EOT\n' + term + '\n}\n' + ROGUE_KEY),
+                 expect_text="must not OWN")
+        # The quiet one: a second heredoc's bare terminator closes the FIRST for
+        # a checker still inside it, so the braces it swallowed balance again at
+        # end of file and neither the unterminated-heredoc nor the unbalanced-
+        # brace refusal fires. `terraform fmt -check` exits 0 on this exact text,
+        # so a tree can carry it.
+        case(tmp, "a swallowed key that re-balances at end of file",
+             append("environment/main.tf",
+                    '\nlocals {\n  a = <<EOT\n    EOT\n}\n' + ROGUE_KEY
+                    + '\nlocals {\n  b = <<EOT2\nEOT\nEOT2\n}\n'),
+             expect_text="must not OWN")
+        # The desync also runs the other way, and there it is Python's own
+        # whitespace that opens it: str.strip() removes U+001C-U+001F and
+        # Terraform does not, so those four end the string HERE and not THERE
+        # and this reader takes body lines for structure. The `{` among them
+        # buries the key below depth 0, where neither rule looks; the second
+        # heredoc returns the depth, so nothing is unbalanced at EOF. This is
+        # the one boundary no other gate covers — `terraform fmt -check
+        # -recursive` exits 0 on the whole tree with this appended (#761).
+        case(tmp, "a separator character forging a heredoc terminator",
+             append("environment/main.tf",
+                    '\nlocals {\n  a = <<EOT\n\x1cEOT\n{\nEOT\n}\n' + ROGUE_KEY
+                    + '\nlocals {\n  b = <<EOT2\n\x1cEOT2\n}\nEOT2\n}\n'),
+             expect_text="must not OWN")
         case(tmp, "a multi-line interpolation is refused",
              append("environment/main.tf",
                     '\nlocals {\n  x = "${coalesce(\n    var.a,\n    "b",\n  )}"\n}\n'),

@@ -13,13 +13,20 @@ import (
 // argues each refusal against a wrong answer review actually produced, and the
 // two cannot share code across languages.
 //
-// It is stricter than the Python in one place, deliberately. The Python matches a
-// heredoc terminator on the trimmed line, so an INDENTED terminator closes a
-// plain `<<EOT` for it while Terraform reads on — and everything between is
-// configuration to the reader and string content to Terraform, which is how a
-// grant that does not exist gets read as one. This reader requires the exact
-// terminator for `<<EOT` and allows indentation only for `<<-EOT`, as Terraform
-// does. The same hole in check_split.py is #758.
+// Both end a heredoc at the first line that, TRIMMED, is the terminator — for
+// `<<EOT` as much as `<<-EOT`, because the marker decides how the body is
+// dedented, not where the string ends. check_split.py records the terraform
+// 1.15.8 runs behind that. Trimming is where the two languages could drift and
+// do not: over every file Terraform will parse, strings.TrimSpace is its
+// whitespace set, and the four characters Python's wider str.strip() adds are
+// excluded on that side rather than trimmed. Past that both still trim a lone
+// U+000D that Terraform refuses the whole file over rather than reading as
+// padding — a boundary left open under #761, where `make gcp-fmt` reddens
+// first. Requiring an exact match instead, as this reader
+// did until #758, reads on past a terminator Terraform honoured: what follows
+// is configuration to Terraform and string content to the reader, so a deny
+// policy that should have refused the file is never seen, and the swallowed
+// braces can balance again at EOF with nothing to report.
 //
 // Structure is read from the scrubbed copy of a line — where a `{` inside a
 // display_name cannot shift the brace depth and a `<<EOF` inside a string cannot
@@ -29,7 +36,11 @@ import (
 var (
 	tfResourceRe = regexp.MustCompile(`^\s*resource\s+"([^"]+)"\s+"([^"]+)"`)
 	tfModuleRe   = regexp.MustCompile(`^\s*module\s+"([^"]+)"`)
-	tfHeredocRe  = regexp.MustCompile(`<<([-~]?)([A-Za-z_][A-Za-z0-9_]*)`)
+	// `~` is not a Terraform heredoc marker at all — a file containing one is
+	// rejected outright, and `make gcp-fmt` reddens on it first. It is matched
+	// here, as in check_split.py, only so the opener is still recognised as one
+	// rather than read as configuration.
+	tfHeredocRe = regexp.MustCompile(`<<[-~]?([A-Za-z_][A-Za-z0-9_]*)`)
 	// A nested block opener, with or without labels. Matched structurally rather
 	// than by brace arithmetic, because a block written on one line nets to zero
 	// braces and would go unseen.
@@ -232,20 +243,12 @@ func tfBlocks(path string) ([]tfBlock, error) {
 	raw := strings.Split(strings.ReplaceAll(string(b), "\r\n", "\n"), "\n")
 
 	src := make([]tfLine, 0, len(raw))
-	term, indented := "", false
+	term := ""
 	for i, line := range raw {
 		if term != "" {
 			src = append(src, tfLine{Raw: line, N: i + 1, Heredoc: true})
-			// `<<-EOT` and `<<~EOT` strip leading whitespace, so their
-			// terminator may be indented. A plain `<<EOT` ends only at a line
-			// that IS the terminator — matching an indented one there would end
-			// the string early for this reader while Terraform read on, leaving
-			// everything between as configuration to one and text to the other.
-			// The comparison is exact rather than right-trimmed for the same
-			// reason: a terminator this reader does not recognise makes the
-			// heredoc unterminated, which is a refusal, and `make gcp-fmt`
-			// already keeps trailing whitespace out of the tree.
-			if (indented && strings.TrimSpace(line) == term) || line == term {
+			// Trimmed, whatever the opener's marker — see the header.
+			if strings.TrimSpace(line) == term {
 				term = ""
 			}
 			continue
@@ -256,8 +259,7 @@ func tfBlocks(path string) ([]tfBlock, error) {
 		}
 		code := line[:codeLen]
 		if m := tfHeredocRe.FindStringSubmatchIndex(s); m != nil {
-			indented = m[3] > m[2] // a `-` or `~` between `<<` and the word
-			term = s[m[4]:m[5]]
+			term = s[m[2]:m[3]]
 			s = s[:m[0]]
 		}
 		src = append(src, tfLine{Raw: line, Code: code, Scrubbed: s, N: i + 1})

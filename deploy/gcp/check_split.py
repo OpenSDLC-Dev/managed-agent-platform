@@ -100,7 +100,16 @@ ROOT = pathlib.Path(__file__).parent
 RESOURCE = re.compile(r'^\s*resource\s+"([^"]+)"\s+"([^"]+)"')
 MODULE = re.compile(r'^\s*module\s+"([^"]+)"')
 SOURCE = re.compile(r'^\s*source\s*=\s*"([^"]+)"\s*$', re.M)
+# `~` is not a Terraform heredoc marker at all: `<<~EOT` is an `Invalid
+# expression`, not an indented heredoc — that spelling is Ruby's. It is matched
+# anyway, so that an opener is still recognised as one rather than read as
+# configuration.
 HEREDOC = re.compile(r"<<[-~]?([A-Za-z_][A-Za-z0-9_]*)")
+# The characters str.strip() calls whitespace and Terraform reads as ordinary
+# heredoc body text — exactly these four, swept codepoint by codepoint across
+# both languages' whitespace sets against terraform 1.15.8. What it is for is in
+# blocks(), its only caller.
+SEPARATORS = re.compile(r"[\x1c-\x1f]")
 
 
 def scrub(line: str) -> str:
@@ -205,7 +214,28 @@ def blocks(path: pathlib.Path):
     lines, skip_until = [], None
     for line in raw:
         if skip_until is not None:
-            if line.strip() == skip_until:
+            # Trimmed, and for `<<EOT` as much as `<<-EOT`: the marker decides
+            # how the BODY is dedented, not where the string ends. Measured
+            # against terraform 1.15.8 — a plain heredoc closes at `    EOT`,
+            # at `EOT   `, and at a tab-indented one, and closes at none of
+            # `EOTX`, `x EOT`, `EOT }`. Requiring an exact match instead reads
+            # on past a terminator Terraform honoured, and the configuration
+            # after it is then invisible to this guard alone (#758).
+            #
+            # But str.strip() is not Terraform's whitespace: it also removes
+            # U+001C-U+001F, which Terraform reads as ordinary body text. Those
+            # four close the string HERE and not THERE, so this reader takes
+            # body lines for structure — and a `{` among them buries the
+            # resources after it below depth 0, where neither rule looks. That
+            # is a `terraform fmt`-clean file this guard prints `ok` over, so
+            # the four are excluded rather than trimmed (#761). Checking the
+            # whole line is exact: it is reached only when what remains after
+            # stripping IS the terminator, so anything else on it is whitespace.
+            # One member of that whitespace stays in deliberately — a lone
+            # U+000D, which Terraform refuses the whole file over rather than
+            # reading as padding, so `make gcp-fmt` reddens before this guard is
+            # ever consulted. #761 holds it with the rest of the CR family.
+            if line.strip() == skip_until and not SEPARATORS.search(line):
                 skip_until = None
             lines.append("")  # keep numbering, contribute no structure
             continue
