@@ -1539,12 +1539,15 @@ the project and is one more `terraform import` away.
 ```sh
 make gcp-fmt gcp-validate gcp-split-check gcp-kms-role-check gcp-lint \
      gcp-bootstrap-test gcp-split-check-test gcp-dbinit-test gcp-power-test \
-     gcp-tfvars-test gcp-env-targets-test
+     gcp-tfvars-test gcp-env-targets-test tf-corpus-check
 ```
 
-None of them needs credentials, state, or a project, and CI runs all eleven on every PR — so
-neither the configuration nor the tooling can rot silently between the rare runs that
-actually provision anything. `gcp-dbinit-test` is the one with a host requirement: it needs
+None of them needs credentials, state, or a project, and CI runs every one of them on every
+PR — so neither the configuration nor the tooling can rot silently between the rare runs
+that actually provision anything. `tf-corpus-check` is the one that is not `gcp-` anything:
+it asks terraform for its verdict on [tools/tfcorpus](../../tools/tfcorpus), the fixture
+corpus that keeps `check_split.py`'s `.tf` reader and `tools/kmsrole`'s in agreement (#762),
+and it is in this block because it runs in the same credential-free CI job. `gcp-dbinit-test` is the one with a host requirement: it needs
 Docker, because it starts a real PostgreSQL. `gcp-validate` stays **credential-free** now that
 `environment/` declares a `backend "gcs"` block because it inits with `-backend=false`, which
 skips the backend entirely — no GCS call, no credential, no state. That is not the same as

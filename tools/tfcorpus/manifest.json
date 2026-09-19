@@ -1,0 +1,299 @@
+{
+  "cases": [
+    {
+      "file": "heredoc_pad_leading.tf",
+      "why": "an indented terminator closes a plain <<EOT, so the resource behind it is read",
+      "fmt": 0,
+      "blocks": [
+        "google_kms_crypto_key.after"
+      ]
+    },
+    {
+      "file": "heredoc_pad_trailing.tf",
+      "why": "a terminator with trailing spaces closes too \u2014 TrimLeft-only reads past it",
+      "fmt": 0,
+      "blocks": [
+        "google_kms_crypto_key.after"
+      ]
+    },
+    {
+      "file": "heredoc_pad_tab.tf",
+      "why": "a tab-indented terminator closes",
+      "fmt": 0,
+      "blocks": [
+        "google_kms_crypto_key.after"
+      ]
+    },
+    {
+      "file": "heredoc_pad_nbsp.tf",
+      "why": "a terminator padded with U+00A0 closes \u2014 Trim(\" \\t\") reads past it",
+      "fmt": 0,
+      "blocks": [
+        "google_kms_crypto_key.after"
+      ]
+    },
+    {
+      "file": "heredoc_lookalike_eotx.tf",
+      "why": "EOTX is not the terminator; a reader that closes there takes the unbalanced header below for structure and loses its place",
+      "fmt": 0,
+      "blocks": [
+        "google_kms_crypto_key.after"
+      ]
+    },
+    {
+      "file": "heredoc_lookalike_x_eot.tf",
+      "why": "a terminator word with something before it is not a terminator \u2014 a suffix match closes here and desyncs",
+      "fmt": 0,
+      "blocks": [
+        "google_kms_crypto_key.after"
+      ]
+    },
+    {
+      "file": "heredoc_lookalike_eot_brace.tf",
+      "why": "a terminator word with something after it is not a terminator \u2014 a prefix match closes here and desyncs",
+      "fmt": 0,
+      "blocks": [
+        "google_kms_crypto_key.after"
+      ]
+    },
+    {
+      "file": "heredoc_forged_separator.tf",
+      "why": "U+001C is body text to terraform and whitespace to str.strip(); the bypass of #761 closes here and desyncs",
+      "fmt": 0,
+      "blocks": [
+        "google_kms_crypto_key.after"
+      ]
+    },
+    {
+      "file": "heredoc_indent_marker.tf",
+      "why": "<<-EOT still closes where it says it does \u2014 the body holds an unbalanced header, so a reader that stopped recognising the `-` marker reads it as structure",
+      "fmt": 0,
+      "blocks": [
+        "google_kms_crypto_key.after"
+      ]
+    },
+    {
+      "file": "heredoc_swallow_rebalances.tf",
+      "why": "the #758 shape: a second heredoc's bare EOT re-balances what an exact-match reader swallowed, so nothing fires",
+      "fmt": 0,
+      "blocks": [
+        "google_kms_crypto_key.after"
+      ]
+    },
+    {
+      "file": "heredoc_never_closed.tf",
+      "why": "an unterminated heredoc is a refusal, never a short read",
+      "fmt": 2,
+      "refuse": "is never terminated"
+    },
+    {
+      "file": "heredoc_terminator_is_last_line.tf",
+      "why": "HCL wants the newline after a terminator that a file's last line never gets; the braces balance, so nothing else fires",
+      "fmt": 2,
+      "refuse": "no trailing newline"
+    },
+    {
+      "file": "heredoc_terminator_is_last_line_in_block.tf",
+      "why": "the same boundary one level in, where a brace-shaped refusal would name the wrong thing",
+      "fmt": 2,
+      "refuse": "no trailing newline"
+    },
+    {
+      "file": "heredoc_closed_then_last_line.tf",
+      "why": "an ordinary last line with no trailing newline is read \u2014 terraform takes it",
+      "fmt": 0,
+      "blocks": [
+        "google_kms_crypto_key.after"
+      ]
+    },
+    {
+      "file": "heredoc_opener_in_string.tf",
+      "why": "<<WORD inside a string opens no heredoc",
+      "fmt": 0,
+      "blocks": [
+        "google_kms_crypto_key.after"
+      ]
+    },
+    {
+      "file": "struct_indented_header.tf",
+      "why": "an indented header is still top-level \u2014 a check that needs `terraform fmt` first can be bypassed by running them in the wrong order",
+      "fmt": 3,
+      "blocks": [
+        "google_kms_crypto_key.after"
+      ]
+    },
+    {
+      "file": "struct_header_in_string.tf",
+      "why": "a header inside a quoted string is text, and its brace is not structure",
+      "fmt": 0,
+      "blocks": [
+        "google_kms_crypto_key.after"
+      ]
+    },
+    {
+      "file": "struct_ends_inside_block.tf",
+      "why": "a file that ends inside a block is a refusal",
+      "fmt": 2,
+      "refuse": "the file ended inside"
+    },
+    {
+      "file": "struct_unbalanced_at_eof.tf",
+      "why": "a stray closing brace is a refusal \u2014 the reader lost its place",
+      "fmt": 2,
+      "refuse": "unbalanced braces at end of file"
+    },
+    {
+      "file": "struct_module_is_a_block.tf",
+      "why": "a module is a block, because it is how configuration escapes the files a guard looked at",
+      "fmt": 0,
+      "blocks": [
+        "module.child"
+      ]
+    },
+    {
+      "file": "interp_nested_quote_dollar.tf",
+      "why": "a quoted string inside ${...} shifts the quote parity; refusing is the honest answer",
+      "fmt": 3,
+      "refuse": "cannot be read by this guard",
+      "terraform_accepts": true
+    },
+    {
+      "file": "interp_nested_quote_directive.tf",
+      "why": "the same hazard in a %{...} directive \u2014 handling only ${ leaves this free to hide a resource",
+      "fmt": 0,
+      "refuse": "cannot be read by this guard",
+      "terraform_accepts": true
+    },
+    {
+      "file": "interp_open_at_eol.tf",
+      "why": "a string still open at end of line would put the closing `}\"` at structure depth",
+      "fmt": 3,
+      "refuse": "still open at end of line",
+      "terraform_accepts": true
+    },
+    {
+      "file": "interp_value_is_read.tf",
+      "why": "an ordinary interpolation is read, not refused",
+      "fmt": 0,
+      "blocks": [
+        "google_kms_crypto_key.after"
+      ]
+    },
+    {
+      "file": "interp_brace_in_string.tf",
+      "why": "a brace inside a string is not structure \u2014 UNBALANCED, so a reader that stopped neutralising it loses its place here rather than nowhere",
+      "fmt": 0,
+      "blocks": [
+        "google_kms_crypto_key.after"
+      ]
+    },
+    {
+      "file": "cr_among_structure.tf",
+      "why": "the #761 divergence itself: read_text() breaks lines on a bare CR and split(\"\\n\") does not, so these bytes were four lines to one reader and one line to the other \u2014 where only the first header can match",
+      "fmt": 2,
+      "refuse": "a carriage return that is not part of a CRLF"
+    },
+    {
+      "file": "cr_in_heredoc_body.tf",
+      "why": "a body line is never scrubbed, so only the raw check reaches here",
+      "fmt": 2,
+      "refuse": "a carriage return that is not part of a CRLF"
+    },
+    {
+      "file": "cr_before_terminator.tf",
+      "why": "a return before the terminator word is padding to both languages' trims and not to terraform, so it would close the string HERE and not THERE",
+      "fmt": 2,
+      "refuse": "a carriage return that is not part of a CRLF"
+    },
+    {
+      "file": "cr_escaped_in_string.tf",
+      "why": "collapsing an escape pair to one character hid the return from every later look",
+      "fmt": 2,
+      "refuse": "a carriage return that is not part of a CRLF"
+    },
+    {
+      "file": "cr_crlf_throughout.tf",
+      "why": "terraform accepts a file written entirely in CRLF, so the rule is about the LONE return and not the character",
+      "fmt": 0,
+      "blocks": [
+        "google_kms_crypto_key.after"
+      ]
+    },
+    {
+      "file": "cr_in_comment.tf",
+      "why": "a comment runs to the newline, so a return inside one is ordinary text \u2014 refusing these would reject configuration terraform takes",
+      "fmt": 0,
+      "blocks": [
+        "google_kms_crypto_key.after"
+      ]
+    },
+    {
+      "file": "utf8_bad_at_header.tf",
+      "why": "the byte glues to `resource`, so the header matches nothing and a reader that answered here would report over a file holding a key",
+      "fmt": 2,
+      "refuse": "a byte that is not UTF-8, outside a comment"
+    },
+    {
+      "file": "utf8_bad_in_heredoc_body.tf",
+      "why": "a body line is never scrubbed; terraform answers Invalid character encoding plus Unterminated template string",
+      "fmt": 2,
+      "refuse": "a byte that is not UTF-8, outside a comment"
+    },
+    {
+      "file": "utf8_bad_escaped_in_string.tf",
+      "why": "the byte an escape swallows: the Go scrubber writes `_` over the pair, so its SCRUBBED copy is valid UTF-8 and only the raw code still holds the byte",
+      "fmt": 2,
+      "refuse": "a byte that is not UTF-8, outside a comment"
+    },
+    {
+      "file": "utf8_splice_pair.tf",
+      "why": "the pair a deleted backslash could splice into a well-formed \u00e9 the file never held, which is why the Go side checks the raw code and not its scrubbed copy",
+      "fmt": 2,
+      "refuse": "a byte that is not UTF-8, outside a comment"
+    },
+    {
+      "file": "utf8_bad_in_comment.tf",
+      "why": "terraform reads a raw byte inside a comment (fmt- and validate-clean on 1.15.8), so refusing it would reject configuration the binary takes",
+      "fmt": 0,
+      "blocks": [
+        "google_kms_crypto_key.after"
+      ]
+    },
+    {
+      "file": "utf8_backslash_before_runes.tf",
+      "why": "two-, three- and four-byte runes behind a backslash: terraform refuses this file and the readers must READ it rather than call it invalid UTF-8, which is the direction that matters for a guard. A scrubber consuming one byte of the rune cannot change this answer on its own \u2014 the raw-code check defends it, and utf8_bad_escaped_in_string is what pins that check",
+      "fmt": 2,
+      "blocks": [
+        "google_kms_crypto_key.after"
+      ]
+    },
+    {
+      "file": "bom_leading.tf",
+      "why": "terraform parses a BOM'd file, so the leading mark is dropped rather than refused \u2014 that is what lets the header be read (#765)",
+      "fmt": 3,
+      "blocks": [
+        "google_kms_crypto_key.after"
+      ]
+    },
+    {
+      "file": "bom_interior.tf",
+      "why": "only the FIRST U+FEFF is a byte-order mark; a later one glues to the header behind it exactly as a raw byte does",
+      "fmt": 2,
+      "refuse": "not the file's leading byte-order mark"
+    },
+    {
+      "file": "bom_double.tf",
+      "why": "the second mark is a character terraform refuses among structure",
+      "fmt": 2,
+      "refuse": "not the file's leading byte-order mark"
+    },
+    {
+      "file": "bom_in_text_positions.tf",
+      "why": "terraform accepts U+FEFF inside a string, a comment and a heredoc body, which is what makes the refusal above mean exactly the position terraform refuses",
+      "fmt": 0,
+      "blocks": [
+        "google_kms_crypto_key.after"
+      ]
+    }
+  ]
+}
