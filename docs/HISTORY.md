@@ -6051,7 +6051,10 @@ unbalanced-braces refusal never fires. The reasoning that this shape could only 
 in a refusal — that the readers' depth differs from Terraform's by exactly the braces
 they leak, so a displaced header implies an unbalanced end of file — is false: the leaked
 region and the swallowed region are two independent choices the file makes, and it can
-balance one against the other.
+balance one against the other. Two shapes of it are pinned, found independently of each
+other: one leaves the resource's braces in the leaked text and pays them back, and
+`heredoc_open_template_hides_a_braced_resource.tf` takes them into the phantom body along
+with the header, so no arithmetic downstream has anything left to notice.
 
 Two ways to close it. Emulate the rule — track template depth across body lines and close
 only at depth 0, which is what #767 asked for — or refuse a body line that ends with a

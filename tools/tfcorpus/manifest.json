@@ -343,6 +343,13 @@
       "terraform_accepts": true
     },
     {
+      "file": "heredoc_open_template_hides_a_braced_resource.tf",
+      "why": "the second shape of the same hiding file, found by an independent review: here the heredoc opened in the leaked text takes the resource's braces into its body with it rather than leaving them to be paid back, so the count never needs the stray `{` at all \u2014 the two together are why the rule is about the open template and not about any arithmetic downstream of it",
+      "fmt": 3,
+      "refuse": "left open at the end of a heredoc body line",
+      "terraform_accepts": true
+    },
+    {
       "file": "heredoc_multiline_template_is_refused.tf",
       "why": "the cost of the rule, stated: an ordinary multi-line template in a heredoc body holds no terminator-looking line and is harmless, terraform parses it, and it is refused all the same \u2014 following it would mean reading the template's own contents, braces inside its strings included, which is the emulation #762 weighed and rejected (docs/HISTORY.md)",
       "fmt": 3,
