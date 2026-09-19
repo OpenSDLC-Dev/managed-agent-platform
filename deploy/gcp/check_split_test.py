@@ -158,6 +158,19 @@ def main():
                     '\nlocals {\n  a = <<EOT\n    EOT\n}\n' + ROGUE_KEY
                     + '\nlocals {\n  b = <<EOT2\nEOT\nEOT2\n}\n'),
              expect_text="must not OWN")
+        # The desync also runs the other way, and there it is Python's own
+        # whitespace that opens it: str.strip() removes U+001C-U+001F and
+        # Terraform does not, so those four end the string HERE and not THERE
+        # and this reader takes body lines for structure. The `{` among them
+        # buries the key below depth 0, where neither rule looks; the second
+        # heredoc returns the depth, so nothing is unbalanced at EOF. This is
+        # the one boundary no other gate covers — `terraform fmt -check
+        # -recursive` exits 0 on the whole tree with this appended (#761).
+        case(tmp, "a separator character forging a heredoc terminator",
+             append("environment/main.tf",
+                    '\nlocals {\n  a = <<EOT\n\x1cEOT\n{\nEOT\n}\n' + ROGUE_KEY
+                    + '\nlocals {\n  b = <<EOT2\n\x1cEOT2\n}\nEOT2\n}\n'),
+             expect_text="must not OWN")
         case(tmp, "a multi-line interpolation is refused",
              append("environment/main.tf",
                     '\nlocals {\n  x = "${coalesce(\n    var.a,\n    "b",\n  )}"\n}\n'),

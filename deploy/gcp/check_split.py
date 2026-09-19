@@ -101,6 +101,10 @@ RESOURCE = re.compile(r'^\s*resource\s+"([^"]+)"\s+"([^"]+)"')
 MODULE = re.compile(r'^\s*module\s+"([^"]+)"')
 SOURCE = re.compile(r'^\s*source\s*=\s*"([^"]+)"\s*$', re.M)
 HEREDOC = re.compile(r"<<[-~]?([A-Za-z_][A-Za-z0-9_]*)")
+# The characters str.strip() calls whitespace and Terraform does not — exactly
+# the four ASCII separators. Everything else in Python's set is in Terraform's
+# too, so this is the whole of the difference. See blocks().
+SEPARATORS = re.compile(r"[\x1c-\x1f]")
 
 
 def scrub(line: str) -> str:
@@ -212,7 +216,17 @@ def blocks(path: pathlib.Path):
             # `EOTX`, `x EOT`, `EOT }`. Requiring an exact match instead reads
             # on past a terminator Terraform honoured, and the configuration
             # after it is then invisible to this guard alone (#758).
-            if line.strip() == skip_until:
+            #
+            # But str.strip() is not Terraform's whitespace: it also removes
+            # U+001C-U+001F, which Terraform reads as ordinary body text. Those
+            # four close the string HERE and not THERE, so this reader takes
+            # body lines for structure — and a `{` among them buries the
+            # resources after it below depth 0, where neither rule looks. That
+            # is a `terraform fmt`-clean file this guard prints `ok` over, so
+            # the four are excluded rather than trimmed (#761). Checking the
+            # whole line is exact: it is reached only when what remains after
+            # stripping IS the terminator, so anything else on it is whitespace.
+            if line.strip() == skip_until and not SEPARATORS.search(line):
                 skip_until = None
             lines.append("")  # keep numbering, contribute no structure
             continue
