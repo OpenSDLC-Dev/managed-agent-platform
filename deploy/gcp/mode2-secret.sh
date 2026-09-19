@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 # Assemble mode 2's Kubernetes Secret: the object the chart's `existingSecret`
 # names, which nothing else can build. The chart renders no Secret when
 # `existingSecret` is set, and Terraform holds no secret VALUES by design, so
@@ -85,6 +85,17 @@ require PROJECT
 require BLOB_BUCKET
 require KMS_KEY_NAME
 
+# Named before anything is fetched, as bootstrap.sh and dbinit.sh do. An absent
+# `jq` matters most: it exits 127 into the shape check's `if !`, which then
+# blames a healthy `model-providers` for a missing binary — and by then three
+# credentials are already on disk. `jq` arrives with neither gcloud nor kubectl.
+for tool in gcloud kubectl jq; do
+  if ! command -v "$tool" > /dev/null; then
+    fail "$tool is required and not on PATH"
+    exit 1
+  fi
+done
+
 namespace="${K8S_NAMESPACE:-map}"
 secret="${K8S_SECRET:-map-platform}"
 
@@ -126,7 +137,12 @@ fetch() {
   # being no more usable than nothing: the api key is compared verbatim against a
   # header the parser has already trimmed, and the DSN parses as no connection
   # settings at all, which sends the pool to a localhost that is not there.
-  if [ -z "$(tr -d '[:space:]' < "$d/$2")" ]; then
+  #
+  # `grep` reads the file rather than a substitution expanding it: this check sits
+  # in the one window where the value is on disk and `mask_file` has not run yet,
+  # so a form that made it a shell word would put the whole credential in an
+  # `xtrace` line before anything could redact it.
+  if ! LC_ALL=C grep -q '[^[:space:]]' "$d/$2"; then
     fail "Secret Manager secret '$1' has an EMPTY or whitespace-only latest version"
     echo "Add a real version and disable that one." >&2
     return 1
@@ -220,6 +236,14 @@ deploy/helm/managed-agent-platform/values.yaml. base_url is the API ROOT: the
 adapter appends /v1/messages or /v1/chat/completions itself, so omit a trailing
 /v1.
 EOF
+  # The one line of this guidance that is GitHub's alone: a CD run does not
+  # resume once the secret exists, and an operator who created it on the
+  # strength of the text above would otherwise wait for a deploy that never
+  # comes. Its absence is what a local run wants — there is no workflow to
+  # re-run, only this script.
+  if in_actions; then
+    echo "Then re-run this workflow (Actions -> deploy -> Run workflow)." >&2
+  fi
   exit 1
 fi
 

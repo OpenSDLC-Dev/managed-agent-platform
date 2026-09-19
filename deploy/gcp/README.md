@@ -504,6 +504,9 @@ strings and two are Terraform outputs, and the Secret is then
 beside the code that makes them. What is left here is only what produces its inputs:
 
 ```sh
+#!/bin/bash
+set -euo pipefail
+
 project=your-project            # the project the five `make gcp-*` targets ran with
 prefix=map                      # the NAME_PREFIX this environment was built with
 repo=~/managed-agent-platform   # the checkout those targets ran in, so this file can
@@ -521,18 +524,21 @@ PROJECT="$project" NAME_PREFIX="$prefix" make -C "$repo" gcp-env-init
 
 # The Secret goes wherever kubectl currently points, and nothing above has said
 # where that is. deploy.yml runs this as its own step for the same reason.
-gcloud container clusters get-credentials \
-  "$(terraform -chdir="$env" output -raw cluster_name)" \
-  --zone "$(terraform -chdir="$env" output -raw zone)" --project "$project"
+cluster="$(terraform -chdir="$env" output -raw cluster_name)"
+zone="$(terraform -chdir="$env" output -raw zone)"
+gcloud container clusters get-credentials "$cluster" --zone "$zone" --project "$project"
 
-# Assigned, not interpolated: `set -e` acts on a failed command substitution in
-# an assignment and not on one in an argument, so a Terraform read that failed
-# would otherwise be passed on as an empty value — and the script refuses an
-# empty one rather than assembling a Secret around it.
-PROJECT="$project" \
-BLOB_BUCKET="$(terraform -chdir="$env" output -raw blob_bucket)" \
-KMS_KEY_NAME="$(terraform -chdir="$env" output -raw kms_key_name)" \
-  "$repo/deploy/gcp/mode2-secret.sh"
+# Each Terraform read is an assignment ON ITS OWN LINE, and the export is a
+# separate statement. `set -e` fires on a failed command substitution only in a
+# standalone assignment: not in an argument, not in a command-prefix assignment
+# (`BLOB_BUCKET="$(...)" script`), and not in `export BLOB_BUCKET="$(...)"` —
+# all three run on with an empty value, measured on bash 3.2. The script
+# refuses an empty input rather than assembling a Secret around it, but "not
+# set" is a worse diagnosis than the Terraform error this form stops on.
+blob_bucket="$(terraform -chdir="$env" output -raw blob_bucket)"
+kms_key_name="$(terraform -chdir="$env" output -raw kms_key_name)"
+export PROJECT="$project" BLOB_BUCKET="$blob_bucket" KMS_KEY_NAME="$kms_key_name"
+"$repo/deploy/gcp/mode2-secret.sh"
 ```
 
 The script fetches the three credentials into a mode-700 directory of its own and removes it

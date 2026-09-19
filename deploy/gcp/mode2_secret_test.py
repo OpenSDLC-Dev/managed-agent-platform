@@ -43,10 +43,13 @@ import tempfile
 
 HERE = pathlib.Path(__file__).parent.resolve()
 SCRIPT = HERE / "mode2-secret.sh"
+BASH = shutil.which("bash")
 
-# The seven keys, in the order the Secret must carry them. The chart reads all
-# seven off one object; a missing `blob-backend` does not fail, it reads as the
-# default "s3" and then looks for an endpoint that is not there.
+# The seven keys the Secret must carry — a set, not a sequence: a Secret is a
+# map, so what is asserted below is that these seven and no others are applied.
+# The chart reads all seven off one object; a missing `blob-backend` does not
+# fail, it reads as the default "s3" and then looks for an endpoint that is not
+# there.
 KEYS = [
     "controlplane-api-key",
     "database-url",
@@ -95,7 +98,10 @@ if a[:3] == ["secrets", "versions", "access"]:
         sys.stderr.write("ERROR: (gcloud.secrets.versions.access) PERMISSION_DENIED: "
                          "Permission 'secretmanager.versions.access' denied.\n")
         sys.exit(1)
-    if (S / "fault.warn").exists():
+    # Per secret, not global. Only the `model-providers` read has its stderr
+    # captured; the other two pass theirs straight through, so a warning on all
+    # three would satisfy a check about the capture without exercising it.
+    if (S / ("fault.warn." + name)).exists():
         sys.stderr.write("WARNING: This command is using service account impersonation.\n")
     data = body.read_bytes()
     if out:
@@ -192,6 +198,13 @@ def run(tmp, name, versions=None, faults=(), env_extra=None, github=False, verb=
         (state / "apply.verb").write_text(verb)
     env = dict(os.environ)
     env["PATH"] = str(pathlib.Path(tmp) / "bin") + os.pathsep + env["PATH"]
+    # The script's own `mktemp -d` reads TMPDIR, so pointing it here keeps every
+    # directory it makes inside this run's scratch. Without that, the cleanup
+    # check below would scan the SHARED system temp dir: one interrupted run — or
+    # a mutation probe, or a second worktree running this suite at the same
+    # moment — leaves a `mode2-secret.*` behind there and every later run fails
+    # on someone else's litter until a human deletes it.
+    env["TMPDIR"] = str(tmp)
     env["FAKE_STATE"] = str(state)
     env["PROJECT"] = "p"
     env["BLOB_BUCKET"] = "map-blobs"
@@ -209,8 +222,23 @@ def run(tmp, name, versions=None, faults=(), env_extra=None, github=False, verb=
             env.pop(k, None)
         else:
             env[k] = v
-    return Run(state, subprocess.run(["bash", str(SCRIPT)], env=env, text=True,
+    # Absolute, resolved from the real environment: `subprocess` looks the
+    # program up on the CHILD's PATH, and one scenario hands the child a PATH
+    # holding nothing but the fakes.
+    return Run(state, subprocess.run([BASH, str(SCRIPT)], env=env, text=True,
                                      capture_output=True, timeout=120))
+
+
+def before(text, first, second):
+    """True when `first` occurs before `second` in `text`.
+
+    `str.index` would be shorter, but it raises when a marker is missing, and a
+    traceback is not a FAIL line: the run would die mid-suite with nothing in the
+    summary. Absence is exactly the regression these orderings exist to catch, so
+    it has to be answered False rather than thrown.
+    """
+    i, j = text.find(first), text.find(second)
+    return i >= 0 and j >= 0 and i < j
 
 
 def check(label, cond, detail=""):
@@ -239,10 +267,17 @@ def main():
         print("a healthy project assembles the Secret")
         r = run(tmp, "clean")
         check("exits 0", r.code == 0, r.out)
-        check("writes all seven keys", [k for k in KEYS if r.key(k) is not None] == KEYS,
+        check("writes those seven keys and no others",
+              sorted(p.name[len("key."):] for p in r.state.glob("key.*")) == sorted(KEYS),
               repr(sorted(p.name for p in r.state.glob("key.*"))))
         check("the namespace is applied before the Secret",
-              r.calls().index("create namespace") < r.calls().index("create secret"), r.calls())
+              before(r.calls(), "create namespace", "create secret"), r.calls())
+        # Applied, not merely built. `create namespace` alone renders a manifest
+        # to stdout and touches nothing; without this, dropping the
+        # `| kubectl apply -f -` from the namespace line still passes, and the
+        # Secret then lands in a namespace a fresh cluster does not have.
+        check("both manifests reach apply, not just the Secret's",
+              r.calls().count("kubectl apply -f -") == 2, r.calls())
         check("reports what apply did on stdout", "created" in r.proc.stdout, r.proc.stdout)
 
         print("credentials never reach an argv")
@@ -266,18 +301,37 @@ def main():
               r.key("gcpkms-key-name") == b"projects/p/locations/us-central1/keyRings/map/cryptoKeys/vault",
               repr(r.key("gcpkms-key-name")))
 
+        # The defaults are what every other scenario takes, so nothing else would
+        # notice them being hardcoded — and deploy.yml passes both explicitly, to
+        # name the Secret `existingSecret` binds to.
+        print("the namespace and the Secret's name are inputs, not literals")
+        n = run(tmp, "names", env_extra={"K8S_NAMESPACE": "other-ns",
+                                         "K8S_SECRET": "other-secret"})
+        check("exits 0", n.code == 0, n.out)
+        check("the namespace asked for is the one created",
+              "create namespace other-ns" in n.calls(), n.calls())
+        check("the Secret asked for is the one created",
+              "create secret generic other-secret" in n.calls(), n.calls())
+        check("...in that namespace", "--namespace other-ns" in n.calls(), n.calls())
+
         print("nothing is created for real — every write goes through apply")
         check("the Secret is created --dry-run=client", "--dry-run=client" in r.calls())
         check("apply read a manifest off the pipe",
               (r.state / "applied.manifest").exists())
 
+        # Both secrets, not just the first: the guard lives in one `fetch`, but a
+        # regression that special-cased the other one would pass a suite that
+        # only ever corrupts `controlplane-api-key`.
         print("a version that would apply cleanly and fail much later is refused")
-        for label, body in (("empty", b""), ("whitespace-only", b"   \n"), ("a lone space", b" ")):
-            bad = dict(GOOD)
-            bad["controlplane-api-key"] = body
-            b = run(tmp, "blank", versions=bad)
-            check("a %s controlplane-api-key is refused" % label, b.code != 0, b.out)
-            check("...and no Secret is applied", not (b.state / "applied.manifest").exists())
+        for secret in ("controlplane-api-key", "database-url"):
+            for label, body in (("empty", b""), ("whitespace-only", b"   \n"),
+                                ("a lone space", b" ")):
+                bad = dict(GOOD)
+                bad[secret] = body
+                b = run(tmp, "blank", versions=bad)
+                check("a %s %s is refused" % (label, secret), b.code != 0, b.out)
+                check("...and no Secret is applied",
+                      not (b.state / "applied.manifest").exists())
 
         print("a trailing newline is refused on the two values read verbatim")
         for secret in ("controlplane-api-key", "database-url"):
@@ -285,6 +339,7 @@ def main():
             bad[secret] = GOOD[secret] + b"\n"
             b = run(tmp, "newline", versions=bad)
             check("a newline in %s is refused" % secret, b.code != 0, b.out)
+            check("...and no Secret is applied", not (b.state / "applied.manifest").exists())
 
         print("...and NOT on model-providers, which every editor ends with one")
         ok = dict(GOOD)
@@ -324,9 +379,16 @@ def main():
         check("does NOT tell them to create the secret",
               "secrets create model-providers" not in b.out, b.out)
 
+        # `model-providers` is the one read whose stderr is captured, because the
+        # NOT_FOUND routing has to grep it. That capture is what could swallow a
+        # warning on the way past, so the replay is checked by its text: a
+        # swallowed warning leaves the exit status untouched, which is why an
+        # earlier version of this case passed while replaying nothing.
         print("a warning on the success path is not swallowed")
-        w = run(tmp, "warn", faults=("fault.warn",))
-        check("exits 0 with a warning present", w.code == 0, w.out)
+        w = run(tmp, "warn", faults=("warn.model-providers",))
+        check("exits 0", w.code == 0, w.out)
+        check("the warning gcloud printed reaches the operator",
+              "service account impersonation" in w.out, w.out)
 
         print("GitHub annotations appear only under GITHUB_ACTIONS")
         gh = run(tmp, "gh", github=True)
@@ -337,6 +399,14 @@ def main():
               "::add-mask::sk-ant-0123456789" in gh.out, gh.out)
         check("plain run emits no annotations",
               "::add-mask::" not in r.out and "::error::" not in r.out, r.out)
+        # ...and on a run that FAILS, which is the only path `fail()` takes. A
+        # success never reaches it, so the clean run alone would stay green with
+        # the GITHUB_ACTIONS guard deleted from `fail`.
+        plainbad = run(tmp, "plainerr",
+                       versions={k: v for k, v in GOOD.items() if k != "model-providers"})
+        check("a plain failure is annotated by neither",
+              plainbad.code != 0 and "::error::" not in plainbad.out
+              and "::add-mask::" not in plainbad.out, plainbad.out)
         ghbad = run(tmp, "gherr", versions={k: v for k, v in GOOD.items() if k != "model-providers"},
                     github=True)
         check("a failure is annotated under GITHUB_ACTIONS", "::error::" in ghbad.out, ghbad.out)
@@ -347,11 +417,17 @@ def main():
         late = dict(GOOD)
         late["database-url"] = GOOD["database-url"] + b"\n"
         gl = run(tmp, "ghorder", versions=late, github=True)
+        # Within ONE stream. `Run.out` is stdout followed by stderr, so comparing
+        # offsets across it would make any stdout marker precede any stderr one
+        # by construction — the check would go on passing, provingly nothing, the
+        # day someone moved the annotation to stderr. Both markers are asserted
+        # to be on stdout, which is where a workflow command has to be for GitHub
+        # to act on it at all.
         check("a credential is masked before the run that fails can print anything",
               gl.code != 0
-              and "::add-mask::" + GOOD["controlplane-api-key"].decode() in gl.out
-              and gl.out.index("::add-mask::") < gl.out.index("contains a newline"),
-              gl.out)
+              and "::add-mask::" + GOOD["controlplane-api-key"].decode() in gl.proc.stdout
+              and before(gl.proc.stdout, "::add-mask::", "contains a newline"),
+              gl.proc.stdout)
 
         print("the caller can tell a rotation from a no-op")
         for verb, want in (("created", "true"), ("configured", "true"),
@@ -369,6 +445,18 @@ def main():
         # the channel rather than a convenience.
         nov = run(tmp, "noghenv", verb="created", env_extra={"GITHUB_ENV": None})
         check("no GITHUB_ENV means no SECRET_CHANGED and no failure", nov.code == 0, nov.out)
+
+        # PATH here is the fake bin ALONE, so gcloud and kubectl resolve and jq
+        # does not. Everything the refusal needs is a bash builtin, which is why
+        # it can still speak with no real tool in reach.
+        print("a missing tool is named rather than misdiagnosed")
+        nojq = run(tmp, "nojq", env_extra={"PATH": str(binp)})
+        check("exits non-zero", nojq.code != 0, nojq.out)
+        check("names the tool", "jq is required and not on PATH" in nojq.out, nojq.out)
+        check("does not blame a healthy model-providers",
+              "not a non-empty JSON array" not in nojq.out, nojq.out)
+        check("...and no credential was fetched first",
+              not (nojq.state / "key.controlplane-api-key").exists())
 
         print("required inputs are refused rather than applied empty")
         for var in ("PROJECT", "BLOB_BUCKET", "KMS_KEY_NAME"):
@@ -395,10 +483,24 @@ def main():
         check("...and is left mode 700", (keep.stat().st_mode & 0o777) == 0o700,
               oct(keep.stat().st_mode & 0o777))
         check("a directory the script made does not survive",
-              not any(p.is_dir() and p.name.startswith("mode2-secret.")
-                      for p in pathlib.Path(tempfile.gettempdir()).glob("mode2-secret.*")
-                      if p != keep),
-              "scratch dirs left behind")
+              not any(p.is_dir() for p in pathlib.Path(tmp).glob("mode2-secret.*")),
+              "scratch dirs left behind: %r"
+              % sorted(p.name for p in pathlib.Path(tmp).glob("mode2-secret.*")))
+
+        print("a SECRET_DIR that does not exist yet is created, not refused")
+        # The scenario above hands over a directory that already exists, so the
+        # `mkdir -p` branch runs in neither it nor any other case. The header
+        # documents SECRET_DIR as a path the caller chooses, which reads as one
+        # they may not have made.
+        fresh = pathlib.Path(tmp) / "fresh.secretdir" / "nested"
+        f = run(tmp, "freshdir", env_extra={"SECRET_DIR": str(fresh)})
+        check("exits 0", f.code == 0, f.out)
+        check("the directory is created with the values in it",
+              (fresh / "controlplane-api-key").exists(),
+              sorted(p.name for p in fresh.glob("*")) if fresh.exists() else "absent")
+        check("...and at mode 700", fresh.exists()
+              and (fresh.stat().st_mode & 0o777) == 0o700,
+              oct(fresh.stat().st_mode & 0o777) if fresh.exists() else "absent")
 
         print()
         if failures:

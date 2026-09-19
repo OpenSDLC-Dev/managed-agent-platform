@@ -893,13 +893,28 @@ jobs:
         #
         # The key list is read out of the script rather than restated here, so a
         # key added there that nothing reads fails this step too. It moved out of
-        # deploy.yml with the assembly (#754); a grep that still pointed at the
-        # workflow would find nothing and pass, which is why the count is
-        # asserted rather than merely iterated.
+        # deploy.yml with the assembly (#754), which cost this step the one thing
+        # grepping the workflow gave it for free — proof that CD runs the
+        # assembly at all — so that is asserted first and separately. The count
+        # is asserted rather than merely iterated so that a grep matching FEWER
+        # than seven is a failure and not a shorter loop; a grep matching NOTHING
+        # already aborts the step, `pipefail` handing grep's exit 1 to the
+        # assignment and `set -e` taking it from there.
         run: |
           set -euo pipefail
-          wrote="$(grep -oE -- '--from-file="\$d/[^"]+"' deploy/gcp/mode2-secret.sh \
-            | sed 's|.*/||; s|"$||' | sort -u)"
+          grep -qF 'deploy/gcp/mode2-secret.sh' .github/workflows/deploy.yml \
+            || { echo "deploy.yml no longer runs deploy/gcp/mode2-secret.sh, so the keys checked below belong to a script nothing calls" >&2
+                 exit 1; }
+          flags="$(grep -oE -- '--from-file="\$d/[^"]+"' deploy/gcp/mode2-secret.sh \
+            | sed 's|.*/||; s|"$||')"
+          wrote="$(echo "$flags" | sort -u)"
+          # Both counts, because `sort -u` answers only the second question. A
+          # duplicated `--from-file` leaves seven unique names and eight flags,
+          # and real kubectl refuses it ("cannot add key …, another key by that
+          # name already exists") where the test's fake just overwrites.
+          [ "$(echo "$flags" | wc -l)" -eq "$(echo "$wrote" | wc -l)" ] \
+            || { echo "a Secret key is written twice in deploy/gcp/mode2-secret.sh:" >&2
+                 echo "$flags" | sort | uniq -d >&2; exit 1; }
           [ "$(echo "$wrote" | wc -l)" -eq 7 ] \
             || { echo "expected 7 --from-file keys in deploy/gcp/mode2-secret.sh, found:" >&2
                  echo "$wrote" >&2; exit 1; }
