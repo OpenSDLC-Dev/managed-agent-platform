@@ -66,10 +66,12 @@ def append(rel, text):
 def append_bytes(rel, data):
     """Append bytes rather than text.
 
-    These fixtures turn on a byte the reader has to see exactly: a lone carriage
-    return, which `read_text()` would translate into a line break before the
-    guard ever saw it, and the absence of a final newline, which `write_text()`
-    on a round-tripped file would not preserve reliably.
+    These fixtures turn on a byte the reader has to see exactly, which append()
+    above cannot promise: it round-trips the file through `read_text()`, whose
+    universal-newline translation rewrites a lone carriage return into "\n"
+    before the fixture is ever written. Appending in binary also leaves the file
+    ending exactly where the caller put it, which is what the no-trailing-newline
+    cases need.
     """
     def go(root):
         with (root / rel).open("ab") as f:
@@ -202,8 +204,15 @@ def main():
              expect_text="must not OWN")
         # The two boundaries #761 names, where this reader and the binary
         # disagreed. Both are files terraform refuses outright, so `make gcp-fmt`
-        # reddens on them — but this guard's contract is that it refuses rather
-        # than answering, and on both of these it answered.
+        # reddens on them — but what this guard owes is narrower than refusing
+        # every such file, and is what it broke here: never lose its place, and
+        # never report over configuration it did not read. On both of these it
+        # read part of the file and printed `ok` over the rest. Files terraform
+        # refuses are not automatically this guard's business: a NUL among
+        # structure is an `Invalid character` to terraform and this guard reads
+        # straight through it and still catches what it was hiding, measured on
+        # 1.15.8. Adding a refusal for every byte terraform dislikes would be
+        # this guard rejecting what it can perfectly well read.
         #
         # HCL wants the newline after a terminator that a file's last line never
         # gets: terraform 1.15.8 says `Unterminated template string`, and
@@ -223,12 +232,13 @@ def main():
         case(tmp, "a bare carriage return is refused rather than translated",
              append_bytes("environment/main.tf", b'\nlocals {\r  a = 1\r}\r'),
              expect_text="carriage return")
-        # Three more positions, each reached by a different half of the check.
-        # A body line is never scrubbed, so it is tested raw; a return before
-        # the terminator word would close the string in the wrong place, being
-        # padding to str.strip() and not to terraform; and an ESCAPED one used
-        # to vanish, the scrubber collapsing `\` plus its character to a single
-        # `_`. terraform 1.15.8 refuses all three.
+        # Three more positions across the two halves of the check. The first two
+        # reach the raw body check, because a body line is never scrubbed: a
+        # return anywhere in the body, and one before the terminator word, which
+        # would close the string in the wrong place, being padding to str.strip()
+        # and not to terraform. The third reaches the scrubbed-line check, where
+        # an ESCAPED return used to vanish — the scrubber collapsing `\` plus its
+        # character to a single `_`. terraform 1.15.8 refuses all three.
         for label, body in (
                 ("in a heredoc body", b'\nlocals {\n  a = <<EOT\nbody\rjunk\nEOT\n}\n'),
                 ("before a heredoc terminator", b'\nlocals {\n  a = <<EOT\ntext\n\rEOT\n}\n'),
@@ -239,9 +249,12 @@ def main():
         # The other half of that rule, and the reason it names the LONE return
         # rather than the character: terraform accepts a file written entirely
         # in CRLF, so this guard has to read one — and still catch what is in it.
-        case(tmp, "a CRLF file is still read, and still checked",
-             append_bytes("environment/main.tf",
-                          ("\n" + ROGUE_KEY).replace("\n", "\r\n").encode()),
+        # A file of its own, not an append: appending CRLF to main.tf leaves the
+        # bytes already in it LF-terminated, and a mixed file does not answer the
+        # question this case asks.
+        case(tmp, "a file written entirely in CRLF is still read, and still checked",
+             append_bytes("environment/zz_crlf.tf",
+                          ROGUE_KEY.replace("\n", "\r\n").encode()),
              expect_text="must not OWN")
         # And the position where terraform reads a lone return as ordinary text
         # rather than refusing it: inside a comment, which runs to the newline.
@@ -270,9 +283,29 @@ def main():
         # where its mirror reads on is a divergence, and terraform accepts this
         # file. What is planted after it must still be caught, so this is not an
         # `expect_ok` — it is the guard doing its job across the odd byte.
-        case(tmp, "a byte that is not UTF-8 does not stop the scan",
+        case(tmp, "a byte that is not UTF-8, inside a comment, does not stop the scan",
              append_bytes("environment/main.tf",
                           b"\n# \xff\n" + ROGUE_KEY.encode()),
+             expect_text="must not OWN")
+        # ...but outside one it is refused, because carrying a byte through is
+        # not the same as reading past it. Glued to the header the way it is
+        # here, `\xffresource` is one word to RESOURCE and the key behind it is
+        # invisible: before this case the guard printed `ok` over this file,
+        # which is the shape #761 is about. terraform refuses it outright
+        # (`Invalid character encoding`), so refusing is also what it does.
+        case(tmp, "a byte that is not UTF-8, outside a comment, is refused",
+             append_bytes("environment/main.tf",
+                          b"\n\xff" + ROGUE_KEY.strip().encode() + b"\n"),
+             expect_text="not UTF-8")
+        # A BOM is the other direction: terraform parses the file (`fmt -check`
+        # reports formatting drift and nothing else), so refusing it would
+        # reject configuration the binary takes — but left in the text it sits
+        # in front of the first header, which `^\s*` does not match, and every
+        # block in the file goes unread. Dropped on decode, so the key is seen
+        # and this case is the guard catching it (#765).
+        case(tmp, "a leading BOM does not hide the file's blocks",
+             append_bytes("environment/zz_bom.tf",
+                          b"\xef\xbb\xbf" + ROGUE_KEY.strip().encode() + b"\n"),
              expect_text="must not OWN")
         case(tmp, "a multi-line interpolation is refused",
              append("environment/main.tf",

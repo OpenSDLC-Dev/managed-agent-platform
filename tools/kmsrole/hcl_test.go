@@ -242,6 +242,17 @@ func TestTheReaderRefusesRatherThanShortRead(t *testing.T) {
 			"resource \"a\" \"b\" {\n  x = \"a\\\rb\"\n}\n",
 			"carriage return",
 		},
+		{
+			// The byte terraform refuses as an `Invalid character encoding`,
+			// where it hides a block rather than stopping the scan: it glues to
+			// `resource`, so the header regexp matches nothing and a reader
+			// that answered here would report over a file with a
+			// google_kms_crypto_key in it. The same byte inside a comment is
+			// read — that case is in the accept table below.
+			"a byte that is not UTF-8, outside a comment",
+			"\xffresource \"a\" \"b\" {\n  x = 1\n}\n",
+			"not UTF-8",
+		},
 	} {
 		if _, err := tfBlocks(writeTF(t, tc.body)); err == nil || !strings.Contains(err.Error(), tc.want) {
 			t.Errorf("%s: error = %v, want one mentioning %q", tc.name, err, tc.want)
@@ -268,6 +279,20 @@ func TestCRLFAndAnUnterminatedLastLineAreStillRead(t *testing.T) {
 		{"lone return in a comment at end of file", "resource \"a\" \"b\" {\n  x = 1\n}\n# note\r"},
 		{"lone return in a comment before a CRLF", "resource \"a\" \"b\" {\n  x = 1\n}\n# note\r\r\n"},
 		{"lone return mid-comment", "# a\rb\nresource \"a\" \"b\" {\n  x = 1\n}\n"},
+		// The Go half of a claim deploy/gcp/check_split.py makes about this
+		// reader: it decodes with surrogateescape rather than strict BECAUSE
+		// this side carries a byte that is not UTF-8 through instead of dying,
+		// and terraform accepts one in a comment (`# caf\xe9` is fmt- and
+		// validate-clean on 1.15.8). Nothing here pinned that, so a later
+		// utf8.Valid guard on this side would reopen the divergence with the Go
+		// suite still green and the Python comment still asserting it closed.
+		{"a byte that is not UTF-8, inside a comment", "# caf\xe9\nresource \"a\" \"b\" {\n  x = 1\n}\n"},
+		// A BOM parses for terraform — `fmt -check` reports formatting drift
+		// and nothing else — so refusing it would reject configuration the
+		// binary takes. Left in place it is worse than harmless: `^\s*` does
+		// not match U+FEFF, so the header behind it was invisible and every
+		// block in the file went unread with nothing said (#765).
+		{"a leading BOM", "\xef\xbb\xbfresource \"a\" \"b\" {\n  x = 1\n}\n"},
 	} {
 		got, err := tfBlocks(writeTF(t, tc.body))
 		if err != nil {

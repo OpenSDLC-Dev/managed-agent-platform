@@ -117,6 +117,15 @@ LONE_CR = (
     "one (Invalid character, or Invalid multi-line string when it sits inside a "
     "quoted string), so this guard refuses rather than guessing where the lines end."
 )
+# The bytes surrogateescape parks in the low surrogate range — see the decode in
+# blocks(). Raised where one survives scrub(), which is to say outside a comment.
+BAD_BYTE = re.compile(r"[\udc80-\udcff]")
+BAD_UTF8 = (
+    "a byte that is not UTF-8, outside a comment. Terraform refuses the file over one "
+    "(Invalid character encoding) and accepts it inside a comment, which runs to the "
+    "newline — and here it glues to whatever follows, so a resource header behind one "
+    "matches nothing and this guard would report over a file it had not read."
+)
 
 
 def scrub(line: str) -> str:
@@ -234,15 +243,21 @@ def blocks(path: pathlib.Path):
     # answer depends on where it sits.
     #
     # surrogateescape rather than strict, so a byte that is not UTF-8 is carried
-    # through as an opaque character instead of raising: tools/kmsrole/hcl.go
-    # converts the same bytes with string(b) and validates nothing, and a reader
-    # that dies where its mirror reads on is the divergence #762 is about. Nor is
-    # strict the safer choice: terraform accepts a comment holding raw bytes
-    # (`# caf\xe9` is `fmt`- and `validate`-clean on 1.15.8) and refuses `"\xff"`
-    # as an `Invalid character encoding`, so strict refused files terraform reads.
-    # Neither reader loses its place over such a byte, which is the contract that
-    # matters here.
-    raw = path.read_bytes().decode("utf-8", "surrogateescape").replace("\r\n", "\n").split("\n")
+    # through as an opaque character instead of raising: terraform accepts a
+    # comment holding raw bytes (`# caf\xe9` is `fmt`- and `validate`-clean on
+    # 1.15.8), and strict refused that file outright — with a traceback, not a
+    # message. Where terraform does refuse the byte (`Invalid character
+    # encoding`) this reader refuses too, on the scrubbed line below, because
+    # carrying it through is not the same as reading past it: `\xffresource "…"`
+    # is one word to the header regex, and a guard that finds no blocks there
+    # prints `ok` over a resource it never saw.
+    #
+    # utf-8-sig, so a leading BOM is dropped rather than left in front of the
+    # first header, where `^\s*` does not match it — U+FEFF is not whitespace to
+    # either language. terraform parses a BOM'd file (`fmt -check` reports only
+    # formatting drift, exit 3), so refusing it would reject configuration the
+    # binary takes; dropping it is what lets the header be read (#765).
+    raw = path.read_bytes().decode("utf-8-sig", "surrogateescape").replace("\r\n", "\n").split("\n")
     lines, skip_until = [], None
     for n, line in enumerate(raw):
         if skip_until is not None:
@@ -283,7 +298,7 @@ def blocks(path: pathlib.Path):
                 # here on it means exactly that.
                 if n == len(raw) - 1:
                     raise ValueError(
-                        f"{path}: heredoc <<{skip_until}'s terminator is the last line of a "
+                        f"{path}:{n + 1}: heredoc <<{skip_until}'s terminator is the last line of a "
                         f"file with no trailing newline, so HCL does not close the string "
                         f"there. Refusing rather than reading on."
                     )
@@ -301,9 +316,18 @@ def blocks(path: pathlib.Path):
         # return among structure is an `Invalid character` and inside a quoted
         # string an `Invalid multi-line string`. scrub() removes the comments,
         # and keeps a return everywhere else including behind a backslash, so
-        # what reaches here is the half terraform refuses.
+        # what reaches here is the half terraform refuses — with one exception,
+        # which the raw body check above shares: a comment inside a template
+        # interpolation is a comment to terraform and to neither of them, so a
+        # return there is refused although the binary reads it (#767). A known
+        # false refusal, taken over leaving the two short reads it replaces.
         if "\r" in scrubbed:
             raise ValueError(f"{path}:{n + 1}: {LONE_CR}")
+        # Same position rule, same reason, for the byte the decode above carried
+        # through: scrub() has removed the comments terraform reads it inside, so
+        # one that survives is one terraform refuses.
+        if BAD_BYTE.search(scrubbed):
+            raise ValueError(f"{path}:{n + 1}: {BAD_UTF8}")
         m = HEREDOC.search(scrubbed)
         if m:
             skip_until = m.group(1)
