@@ -880,24 +880,49 @@ jobs:
             || { echo "staging-values.yaml no longer turns on cloudSQLProxy.connectionTest" >&2
                  echo "$out" >&2; exit 1; }
           echo "ok: CD values file renders with the sandbox pair and the proxy connection test"
-      - name: the CD job and the chart agree on the mode-2 Secret's keys
-        # Mode 2 splits one contract across two files nothing joins. The deploy
-        # job writes seven FILES into a temp dir and `kubectl create secret
-        # --from-file` turns each file NAME into a Secret key; the chart reads
+      - name: the mode-2 assembly and the chart agree on the Secret's keys
+        # Mode 2 splits one contract across two files nothing joins.
+        # deploy/gcp/mode2-secret.sh writes seven FILES into a temp dir and
+        # `kubectl create secret --from-file` turns each file NAME into a Secret
+        # key; the chart reads
         # keys by name. Rename either side and nothing fails loudly: the keys
         # `map.blobEnv` and `map.secretsEnv` emit are `optional: true`, so the
         # pod starts and reads the chart's default instead — BLOB_BACKEND falls
         # back to "s3" and the platform looks for an S3 endpoint that is not
         # there, against a GCS bucket.
         #
-        # The key list is read out of `deploy.yml` rather than restated here, so
-        # a key added to the job that nothing reads fails this step too.
+        # The key list is read out of the script rather than restated here, so a
+        # key added there that nothing reads fails this step too. It moved out of
+        # deploy.yml with the assembly (#754), which cost this step the one thing
+        # grepping the workflow gave it for free — proof that CD runs the
+        # assembly at all — so that is asserted first and separately. The count
+        # is asserted rather than merely iterated so that a grep matching FEWER
+        # than seven is a failure and not a shorter loop; a grep matching NOTHING
+        # already aborts the step, `pipefail` handing grep's exit 1 to the
+        # assignment and `set -e` taking it from there.
         run: |
           set -euo pipefail
-          wrote="$(grep -oE -- '--from-file="\$d/[^"]+"' .github/workflows/deploy.yml \
-            | sed 's|.*/||; s|"$||' | sort -u)"
+          # The INVOCATION, not any mention of it: deploy.yml also names the
+          # script in the comment above the step, so a plain `grep -F` for the
+          # path would go on passing after the command itself was deleted. A
+          # line that runs it is not a comment and ends with the path, with an
+          # optional `VAR=... ` prefix — which is how the step passes SECRET_DIR.
+          grep -qE '^[[:space:]]*([^#[:space:]][^#]*[[:space:]])?deploy/gcp/mode2-secret\.sh[[:space:]]*$' \
+            .github/workflows/deploy.yml \
+            || { echo "deploy.yml no longer runs deploy/gcp/mode2-secret.sh, so the keys checked below belong to a script nothing calls" >&2
+                 exit 1; }
+          flags="$(grep -oE -- '--from-file="\$d/[^"]+"' deploy/gcp/mode2-secret.sh \
+            | sed 's|.*/||; s|"$||')"
+          wrote="$(echo "$flags" | sort -u)"
+          # Both counts, because `sort -u` answers only the second question. A
+          # duplicated `--from-file` leaves seven unique names and eight flags,
+          # and real kubectl refuses it ("cannot add key …, another key by that
+          # name already exists") where the test's fake just overwrites.
+          [ "$(echo "$flags" | wc -l)" -eq "$(echo "$wrote" | wc -l)" ] \
+            || { echo "a Secret key is written twice in deploy/gcp/mode2-secret.sh:" >&2
+                 echo "$flags" | sort | uniq -d >&2; exit 1; }
           [ "$(echo "$wrote" | wc -l)" -eq 7 ] \
-            || { echo "expected 7 --from-file keys in deploy.yml, found:" >&2
+            || { echo "expected 7 --from-file keys in deploy/gcp/mode2-secret.sh, found:" >&2
                  echo "$wrote" >&2; exit 1; }
           rendered="$(helm template t "$CHART" -f deploy/gcp/staging-values.yaml)"
           # Forward: every key the job writes is a key the render reads. The
@@ -905,7 +930,7 @@ jobs:
           # list entry rather than a secretKeyRef.
           for k in $wrote; do
             echo "$rendered" | grep -qE "^[[:space:]]*(- )?key: ${k//./\\.}\$" \
-              || { echo "deploy.yml writes Secret key '$k' and nothing in the render reads it" >&2
+              || { echo "mode2-secret.sh writes Secret key '$k' and nothing in the render reads it" >&2
                    exit 1; }
           done
           # Back: every key the chart REQUIRES — a secretKeyRef without
@@ -918,17 +943,17 @@ jobs:
             END { if (pend != "") print pend }' | sort -u)"
           for k in $needs; do
             echo "$wrote" | grep -qxF "$k" \
-              || { echo "the chart requires Secret key '$k' and deploy.yml never writes it" >&2
+              || { echo "the chart requires Secret key '$k' and mode2-secret.sh never writes it" >&2
                    exit 1; }
           done
           # And all of it against the PRE-CREATED Secret, whose name is also the
-          # `K8S_SECRET` the deploy job applies. Dropping `existingSecret`
+          # `K8S_SECRET` the script defaults to. Dropping `existingSecret`
           # entirely fails the render (secret.yaml's required-apiKey guard), but
           # CHANGING it renders green while binding every reference above to a
           # Secret nothing creates.
           echo "$rendered" | grep -qE '^[[:space:]]*name: map-platform$' \
             || { echo "the render does not bind to the pre-created Secret map-platform" >&2; exit 1; }
-          echo "ok: deploy.yml writes exactly the seven keys the render reads"
+          echo "ok: mode2-secret.sh writes exactly the seven keys the render reads"
           echo "required, so unset would wedge the pods: $(echo "$needs" | tr '\n' ' ')"
       - name: the bundled IdP is off by default and ships no default credential
         run: |
@@ -1093,6 +1118,14 @@ jobs:
       # exercises it is not a billable cluster. ubuntu-latest ships Docker.
       - name: the database role SQL establishes what it claims
         run: make gcp-dbinit-test
+      # The mode-2 Secret assembly — the deploy job's own step, now run here
+      # instead of only in production. Its three checks all guard failures that
+      # APPLY cleanly and surface much later (a blank version authenticates as
+      # nobody, a trailing newline is part of a value read verbatim, a
+      # model-providers that is not an array reaches the brain), and nothing
+      # automated read it at all while it lived twice (#754).
+      - name: the mode-2 Secret assembly refuses what would fail later
+        run: make gcp-mode2-secret-test
       # Parking and reviving the environment is a SEQUENCE of gcloud calls, and
       # the two things worth getting right — restoring the saved node counts
       # rather than a plausible constant, and the orderings in both directions —
