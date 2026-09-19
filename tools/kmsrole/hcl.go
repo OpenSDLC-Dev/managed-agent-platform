@@ -81,12 +81,16 @@ var errLoneCR = errors.New("a carriage return that is not part of a CRLF — ter
 var errOpenTemplateInBody = errors.New("a `${...}` or `%{...}` left open at the end of a heredoc body line — terraform reads the lines after it as template text and does not end the heredoc at a terminator inside one, while this reader closes at the first line that trims to the terminator, so the body behind it would arrive as configuration; write the template on one line so this guard can read the file")
 
 // openTemplate reports whether a `${...}` or `%{...}` is still open when this
-// heredoc body line ends. It counts only what a body line can be trusted for:
-// the two openers, the escaped spellings that are literal text, and a `}` while
-// something is open. A brace inside a string inside the template closes the
-// count early, which is why a TRUE answer refuses and a false one only means
-// this reader saw nothing it could not follow — never that it followed
-// everything. Mirrors check_split.py's open_template().
+// heredoc body line ends. Every brace between the opener and the end of the
+// line has to be accounted for, or the count reaches zero early and the caller
+// reads on over a file Terraform is still holding open. Two of them do not
+// belong to the template and both were found closing it: one inside a quoted
+// string (`${ join("", ["}",`) and one belonging to an object expression
+// (`${ merge({},`). So a string is skipped whole, and `{` counts as well as `}`.
+//
+// Ambiguity answers TRUE. A string that never closes on the line leaves this
+// unable to say where the template ends, and the caller refuses rather than
+// reads. Mirrors check_split.py's open_template().
 func openTemplate(line string) bool {
 	depth := 0
 	for i := 0; i < len(line); i++ {
@@ -96,7 +100,20 @@ func openTemplate(line string) bool {
 		case strings.HasPrefix(line[i:], "${"), strings.HasPrefix(line[i:], "%{"):
 			depth++
 			i++
-		case line[i] == '}' && depth > 0:
+		case depth > 0 && line[i] == '"':
+			i++
+			for i < len(line) && line[i] != '"' {
+				if line[i] == '\\' {
+					i++
+				}
+				i++
+			}
+			if i >= len(line) {
+				return true
+			}
+		case depth > 0 && line[i] == '{':
+			depth++
+		case depth > 0 && line[i] == '}':
 			depth--
 		}
 	}
@@ -491,15 +508,15 @@ func tfBlocks(path string) ([]tfBlock, error) {
 			// brace closing the enclosing block and a whole resource with it,
 			// while a stray `{` left in the leaked text balances the count
 			// again at EOF. Both halves are the file's to choose, so the reader
-			// ends at depth 0, says nothing, and reports no resource at all
-			// over a file `terraform fmt` accepts
+			// ends at depth 0, says nothing, and reports every resource but the
+			// hidden one over a file `terraform fmt` accepts
 			// (#762, heredoc_open_template_hides_a_resource.tf).
 			//
-			// Refused rather than emulated: following the terminator correctly
-			// needs the template's own contents read, and a brace inside a
-			// string inside the template would have to be read with it. The
-			// sibling rule for a quoted string has said the same since #760 —
-			// a template that does not close on its line is not read here.
+			// Refused rather than emulated: deciding the terminator against a
+			// depth carried ACROSS body lines needs the template's contents
+			// read as HCL, which is the sibling rule both readers have refused
+			// since #760. openTemplate asks only where a template ends on its
+			// own line, and answers open where it cannot say.
 			if openTemplate(line) {
 				return nil, fmt.Errorf("%s:%d: %w", path, i+1, errOpenTemplateInBody)
 			}

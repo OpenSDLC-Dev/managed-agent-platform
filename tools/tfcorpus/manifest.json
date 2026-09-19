@@ -337,7 +337,7 @@
     },
     {
       "file": "heredoc_open_template_hides_a_resource.tf",
-      "why": "the reason the rule above exists, and the worst outcome these guards have: terraform parses this file and BOTH readers reported no resource at all, silently. The first body line leaves a `${` open, so terraform runs the heredoc past the `EOT` inside it while the readers close there; the leaked body then opens a heredoc only they can see, which swallows the brace closing `locals` and the whole `hidden` resource, and the stray `z = {` pays back the brace so the depth still reaches 0 at EOF and the unbalanced-braces refusal never fires",
+      "why": "the reason the rule above exists, and the worst outcome these guards have: terraform parses this file and BOTH readers dropped the `hidden` KMS key from what they reported, silently. The first body line leaves a `${` open, so terraform runs the heredoc past the `EOT` inside it while the readers close there; the leaked body then opens a heredoc only they can see, which swallows the brace closing `locals` and the whole `hidden` resource, and the stray `z = {` pays back the brace so the depth still reaches 0 at EOF and the unbalanced-braces refusal never fires",
       "fmt": 3,
       "refuse": "left open at the end of a heredoc body line",
       "terraform_accepts": true
@@ -348,6 +348,58 @@
       "fmt": 3,
       "refuse": "left open at the end of a heredoc body line",
       "terraform_accepts": true
+    },
+    {
+      "file": "heredoc_open_template_brace_in_string_hides_a_resource.tf",
+      "why": "the same hiding file with the template's `}` moved inside a string, which is what a counter that walks braces alone reads as the close: it reached zero on the first line, the terminator below was taken, and `hidden` went unreported over a file terraform parses. Found in review of the counter that had no string awareness",
+      "fmt": 3,
+      "refuse": "left open at the end of a heredoc body line",
+      "terraform_accepts": true
+    },
+    {
+      "file": "heredoc_open_template_object_brace_hides_a_resource.tf",
+      "why": "and the same with an object expression's braces, which needs no string at all \u2014 `{` has to count as well as `}`, or the pair nets out and the count reaches zero with the template still open",
+      "fmt": 3,
+      "refuse": "left open at the end of a heredoc body line",
+      "terraform_accepts": true
+    },
+    {
+      "file": "heredoc_open_template_unterminated_string_is_refused.tf",
+      "why": "the ambiguity exit: a string opened inside the template and never closed on the line leaves the counter unable to say where the template ends, so it answers open and the file is refused rather than read. Returning the other answer there is what a counter guessing in the comfortable direction does",
+      "fmt": 2,
+      "refuse": "left open at the end of a heredoc body line"
+    },
+    {
+      "file": "heredoc_template_with_a_string_is_read.tf",
+      "why": "the cost the string awareness buys back: an ordinary template holding a string closes on its line and is read, where refusing every template that contains a quote would have rejected most heredocs anyone writes",
+      "fmt": 3,
+      "blocks": [
+        "google_kms_crypto_key.after"
+      ]
+    },
+    {
+      "file": "heredoc_template_with_a_braced_string_is_read.tf",
+      "why": "a `}` inside a string in a template that DOES close on its line: the string is skipped and the real `}` still counts, so the file is read rather than refused",
+      "fmt": 3,
+      "blocks": [
+        "google_kms_crypto_key.after"
+      ]
+    },
+    {
+      "file": "heredoc_template_with_an_object_is_read.tf",
+      "why": "the object-brace half of the same boundary: `{` and `}` pair off inside the template and it closes, so counting `{` costs this file nothing",
+      "fmt": 3,
+      "blocks": [
+        "google_kms_crypto_key.after"
+      ]
+    },
+    {
+      "file": "heredoc_nested_template_is_read.tf",
+      "why": "a template inside a string inside a template, all closing on one line \u2014 the string skip walks past the inner one whole, which is right here and is the case most likely to break a future rewrite of the counter",
+      "fmt": 3,
+      "blocks": [
+        "google_kms_crypto_key.after"
+      ]
     },
     {
       "file": "heredoc_multiline_template_is_refused.tf",

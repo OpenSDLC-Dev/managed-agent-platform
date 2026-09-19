@@ -6043,16 +6043,16 @@ runs on, and the file parses. Both readers closed at the first such line, so the
 the body arrived as structure.
 
 That is not merely a refusal. `heredoc_open_template_hides_a_resource.tf` is a file
-`terraform fmt` accepts over which both readers reported **no resource at all, and no
-error**: the leaked body opens a heredoc only they can see, which swallows the brace
-closing `locals` and an entire `google_kms_crypto_key`, while a stray `z = {` left in the
-leaked text pays the brace back so the depth still reaches 0 at end of file and the
-unbalanced-braces refusal never fires. The reasoning that this shape could only ever end
-in a refusal — that the readers' depth differs from Terraform's by exactly the braces
-they leak, so a displaced header implies an unbalanced end of file — is false: the leaked
-region and the swallowed region are two independent choices the file makes, and it can
-balance one against the other. Two shapes of it are pinned, found independently of each
-other: one leaves the resource's braces in the leaked text and pays them back, and
+`terraform fmt` accepts over which both readers reported **everything except the
+`google_kms_crypto_key` it hides, and no error**: the leaked body opens a heredoc only
+they can see, which swallows the brace closing `locals` and that whole resource, while a
+stray `z = {` left in the leaked text pays the brace back so the depth still reaches 0 at
+end of file and the unbalanced-braces refusal never fires. The reasoning that this could
+only ever end in a refusal — that the readers' depth differs from Terraform's by exactly
+the braces they leak, so a displaced header implies an unbalanced end of file — is false:
+the leaked region and the swallowed region are two independent choices the file makes, and
+it can balance one against the other. Two shapes of it are pinned, found independently of
+each other: one leaves the resource's braces in the leaked text and pays them back, and
 `heredoc_open_template_hides_a_braced_resource.tf` takes them into the phantom body along
 with the header, so no arithmetic downstream has anything left to notice.
 
@@ -6060,14 +6060,21 @@ Two ways to close it. Emulate the rule — track template depth across body line
 only at depth 0, which is what #767 asked for — or refuse a body line that ends with a
 template still open.
 
-Refusing won. Emulating means reading the template's own contents, because a brace inside
-a string inside it decides where it closes, and reading a quoted string inside a template
-is exactly what both readers have refused since #760. A depth counter that got that wrong
-would put them back to disagreeing with Terraform silently about where the heredoc ends,
-which is the failure being fixed rather than a smaller version of it. The refusal needs no
-such fidelity: a counter that closes early only ever fails to refuse a file it could have
-refused, and one that a string's brace confuses cannot invent an open template that is not
-there.
+Refusing won, but the counter behind it still has to be right about one thing: where the
+template ends on its own line. Closing early is not the harmless direction it looks like —
+the body line passes, the terminator below is taken, and the hiding resumes exactly as
+before. Two braces were found closing it early, one inside a quoted string
+(`${ join("}", [`) and one belonging to an object expression (`${ merge({},`), so a string
+is skipped whole and `{` counts as well as `}`. Where the counter cannot say — a string
+that never closes on the line — it answers open and the file is refused.
+
+What it does not do is read a template's contents as HCL. It never resolves what a string
+means, only where it ends, and reading a quoted string inside a template is what both
+readers have refused since #760. That is the line between this and the emulation #767
+asked for: emulating means carrying template depth across body lines and deciding a
+terminator against it, which needs those contents, and a counter that got them wrong would
+put the readers back to disagreeing with Terraform silently about where the heredoc ends —
+the failure being fixed rather than a smaller version of it.
 
 The cost is stated and pinned: an ordinary multi-line template in a heredoc body holds no
 terminator-looking line, is harmless, and is refused all the same
