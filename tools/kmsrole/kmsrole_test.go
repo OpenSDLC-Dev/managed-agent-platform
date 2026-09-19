@@ -879,8 +879,45 @@ func TestAWideBindingToSomeoneElseIsIgnored(t *testing.T) {
   ` + members + `
 }
 `
-		wantRefusal(t, tfTree(t, map[string]string{"iam.tf": fixtureIAM + "\n" + ours}), "above a single key")
-		_ = name
+		// A subtest each: wantRefusal is fatal, so without one the first
+		// spelling to fail would hide whether the other was ever exercised.
+		t.Run(name, func(t *testing.T) {
+			wantRefusal(t, tfTree(t, map[string]string{"iam.tf": fixtureIAM + "\n" + ours}), "above a single key")
+		})
+	}
+}
+
+// TestACommentCannotNameABinary: the principal scan reads a whole line rather
+// than one assignment, so it must read the line's CODE. A comment documenting
+// why a role is granted may quote one of these identities as an example, and
+// reading that as a member would refuse a block that grants it nothing —
+// documentation blocking the merge gate.
+func TestACommentCannotNameABinary(t *testing.T) {
+	for name, block := range map[string]string{
+		"a hash comment": `resource "google_project_iam_binding" "backup" {
+  project = "p"
+  role    = "roles/cloudkms.cryptoKeyDecrypter"
+  # Not granted to "serviceAccount:${data.google_service_account.executor.email}" —
+  # the executor holds its Decrypt at the key level instead.
+  members = ["serviceAccount:${data.google_service_account.backup.email}"]
+}
+`,
+		"a slash comment": `resource "google_project_iam_binding" "backup" {
+  project = "p"
+  role    = "roles/cloudkms.cryptoKeyDecrypter"
+  members = ["serviceAccount:${data.google_service_account.backup.email}"] // not "serviceAccount:${data.google_service_account.executor.email}"
+}
+`,
+	} {
+		dir := tfTree(t, map[string]string{"iam.tf": fixtureIAM + "\n" + block})
+		r, err := Check(repoRoot(), dir)
+		if err != nil {
+			t.Errorf("%s: a quoted example in a comment was read as a member: %v", name, err)
+			continue
+		}
+		if len(r.Findings) != 0 {
+			t.Errorf("%s: produced findings: %v", name, r.Findings)
+		}
 	}
 }
 

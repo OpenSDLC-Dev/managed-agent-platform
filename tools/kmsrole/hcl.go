@@ -57,7 +57,13 @@ func init() {
 // assignment. The flag rides on the line rather than in a parallel slice, so no
 // index alignment has to stay true for the reader to be right.
 type tfLine struct {
-	Raw      string
+	Raw string
+	// Code is Raw with any trailing comment removed and strings left intact.
+	// Neither of the other two answers for it: Raw carries the comment, and
+	// Scrubbed has rewritten the `${` and `}` an interpolated value is made of.
+	// A reader matching a value across a whole line needs this one, or a quoted
+	// example inside a comment reads as configuration.
+	Code     string
 	Scrubbed string
 	N        int // 1-based, in the file
 	Heredoc  bool
@@ -138,7 +144,12 @@ func neutral(ch byte) byte {
 
 // scrubTF drops comments and neutralizes the structural characters inside
 // strings. String TEXT survives — the resource header is read from it.
-func scrubTF(line string) (string, error) {
+//
+// codeLen is how many bytes of line are code: the index the comment starts at,
+// or the whole line when there is none. The comment boundary is only knowable
+// from this quote-aware pass — `#` inside a string does not start one — so it is
+// returned rather than recomputed by a caller that would get it wrong.
+func scrubTF(line string) (string, int, error) {
 	var out strings.Builder
 	quoted, interp := false, 0
 	for i := 0; i < len(line); i++ {
@@ -171,7 +182,7 @@ func scrubTF(line string) (string, error) {
 					// quote parity is shifted, so a later `{` and a later `}`
 					// both fall out of the string and the depth desyncs around
 					// an unread resource while still balancing at EOF.
-					return "", errors.New(`a quoted string inside a ${...} interpolation or %{...} directive cannot be read by this guard — assign it to a "locals" value and interpolate that instead`)
+					return "", 0, errors.New(`a quoted string inside a ${...} interpolation or %{...} directive cannot be read by this guard — assign it to a "locals" value and interpolate that instead`)
 				}
 				out.WriteByte(neutral(ch))
 			case ch == '"':
@@ -187,11 +198,11 @@ func scrubTF(line string) (string, error) {
 			quoted = true
 			out.WriteByte('"')
 		case ch == '#', strings.HasPrefix(line[i:], "//"):
-			return out.String(), nil
+			return out.String(), i, nil
 		case strings.HasPrefix(line[i:], "/*"):
 			// Not tracked across lines; opening one is enough of an oddity in
 			// this tree to refuse rather than guess.
-			return "", errors.New("/* */ block comments are not supported here — use # so this guard can read the file")
+			return "", 0, errors.New("/* */ block comments are not supported here — use # so this guard can read the file")
 		default:
 			out.WriteByte(ch)
 		}
@@ -200,9 +211,9 @@ func scrubTF(line string) (string, error) {
 		// Quote state is tracked per line, so the closing `}"` on a later line
 		// would count as structure and desync the brace depth for the rest of
 		// the file.
-		return "", errors.New(`a string is still open at end of line — write multi-line interpolations as a single-line "locals" value so this guard can read the file`)
+		return "", 0, errors.New(`a string is still open at end of line — write multi-line interpolations as a single-line "locals" value so this guard can read the file`)
 	}
-	return out.String(), nil
+	return out.String(), len(line), nil
 }
 
 // tfBlocks yields every top-level `resource` and `module` block in path.
@@ -239,16 +250,17 @@ func tfBlocks(path string) ([]tfBlock, error) {
 			}
 			continue
 		}
-		s, err := scrubTF(line)
+		s, codeLen, err := scrubTF(line)
 		if err != nil {
 			return nil, fmt.Errorf("%s:%d: %w", path, i+1, err)
 		}
+		code := line[:codeLen]
 		if m := tfHeredocRe.FindStringSubmatchIndex(s); m != nil {
 			indented = m[3] > m[2] // a `-` or `~` between `<<` and the word
 			term = s[m[4]:m[5]]
 			s = s[:m[0]]
 		}
-		src = append(src, tfLine{Raw: line, Scrubbed: s, N: i + 1})
+		src = append(src, tfLine{Raw: line, Code: code, Scrubbed: s, N: i + 1})
 	}
 	if term != "" {
 		return nil, fmt.Errorf("%s: heredoc <<%s is never terminated, so the rest of the file went unread — refusing to report on a partial scan", path, term)

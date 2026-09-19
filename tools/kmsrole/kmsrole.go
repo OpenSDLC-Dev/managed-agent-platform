@@ -485,7 +485,10 @@ func grantsAnotherKey(b tfBlock) (bool, error) {
 // anchored, so it is applied to each extracted string rather than to the line.
 func namesABinary(b tfBlock, binaries map[string]bool) bool {
 	for _, l := range b.Body {
-		for _, q := range tfAllStringsRe.FindAllStringSubmatch(l.Raw, -1) {
+		// Code, not Raw: a comment documenting why a role is granted may quote
+		// one of these identities as an example, and reading that as a member
+		// would refuse a block that grants nothing to it.
+		for _, q := range tfAllStringsRe.FindAllStringSubmatch(l.Code, -1) {
 			if sa := tfSAMemberRe.FindStringSubmatch(q[1]); sa != nil && binaries[sa[1]] {
 				return true
 			}

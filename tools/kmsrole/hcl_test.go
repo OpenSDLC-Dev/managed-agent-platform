@@ -27,7 +27,7 @@ func TestScrubKeepsTextAndDropsStructure(t *testing.T) {
 		{"directive", `m = "${%{ if true }y%{ endif }}"`, `m = "$_%_ if true _y%_ endif __"`},
 		{"escape", `name = "a\"{b"`, `name = "a__b"`},
 	} {
-		got, err := scrubTF(tc.in)
+		got, _, err := scrubTF(tc.in)
 		if err != nil {
 			t.Errorf("%s: %v", tc.name, err)
 			continue
@@ -47,7 +47,7 @@ func TestScrubRefusesWhatItCannotRead(t *testing.T) {
 		{"open string", `m = "${`, "still open at end of line"},
 		{"block comment", `/* role = "x" */`, "block comments are not supported"},
 	} {
-		if _, err := scrubTF(tc.in); err == nil || !strings.Contains(err.Error(), tc.want) {
+		if _, _, err := scrubTF(tc.in); err == nil || !strings.Contains(err.Error(), tc.want) {
 			t.Errorf("%s: scrubTF(%q) error = %v, want one mentioning %q", tc.name, tc.in, err, tc.want)
 		}
 	}
@@ -255,6 +255,11 @@ resource "a" "plain" {
 		"meta":     {"lifecycle"},
 		"shadowed": {"lifecycle", "condition"},
 		"plain":    nil,
+	}
+	// Without this the loop asserts nothing when the reader returns no blocks,
+	// and the shadowing case this test exists for would go unchecked.
+	if len(blocks) != len(want) {
+		t.Fatalf("read %d blocks, want %d", len(blocks), len(want))
 	}
 	for _, b := range blocks {
 		got := b.nested()
