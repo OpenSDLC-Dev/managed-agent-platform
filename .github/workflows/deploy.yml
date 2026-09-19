@@ -432,265 +432,39 @@ jobs:
           gcloud container clusters get-credentials "$GKE_CLUSTER" \
             --zone "$GCP_ZONE" --project "$GCP_PROJECT_ID"
 
-      # Mode 2's Secret, assembled here because nothing else can assemble it: the
-      # chart renders no Secret when `existingSecret` is set, and Terraform holds
-      # no secret VALUES by design. Three keys come from Secret Manager and four
-      # are literals that belong in the same object only because that is the shape
-      # `existingSecret` defines.
+      # Mode 2's Secret, assembled by deploy/gcp/mode2-secret.sh — the one copy
+      # of that logic, which an operator runs by hand out of the same file
+      # (deploy/gcp/README.md shows where its inputs come from). The script
+      # argues its own three checks, the `--from-file` rule and why the
+      # destination names are the Secret's keys. What is GitHub's alone stays
+      # here.
       #
-      # `kubectl create secret --dry-run=client -o yaml | kubectl apply -f -`
-      # rather than `create`: this runs on every push, and `create` fails the
-      # second time. Apply also makes a rotation a re-run of this job.
+      # It reads PROJECT, BLOB_BUCKET, KMS_KEY_NAME, K8S_NAMESPACE and
+      # K8S_SECRET from the environment; all but the first are this workflow's
+      # env already.
       - name: Assemble the mode-2 Secret
         if: env.POWERED_OFF != 'true'
+        env:
+          PROJECT: ${{ env.GCP_PROJECT_ID }}
         run: |
           set -euo pipefail
 
           # Outside the checkout, so no later step can sweep a credential into an
-          # image, an artifact or a `git add -A`. Mode 700 because the values are
-          # written by `gcloud --out-file`, which does not chmod what it creates.
-          d="$(mktemp -d)"
-          chmod 700 "$d"
-          echo "SECRET_DIR=$d" >> "$GITHUB_ENV"
+          # image, an artifact or a `git add -A`. Exported because the smoke check
+          # further down reads controlplane-api-key back out of it, and removed by
+          # the cleanup step at the end of this job — the script deliberately
+          # leaves a directory it was handed alone for that reason, and chmods it
+          # to 700 because `gcloud --out-file` does not chmod what it creates.
+          SECRET_DIR="$(mktemp -d)"
+          echo "SECRET_DIR=$SECRET_DIR" >> "$GITHUB_ENV"
 
-          # Register a value as a redaction BEFORE anything else can print it.
-          # This workflow's log is public, and the two ways a value gets into it
-          # are both one edit away rather than hypothetical: dropping `--out-file`
-          # from the `gcloud secrets versions access` below, which then prints the
-          # value to stdout, and a `set -x` added while debugging, which prints
-          # every expansion.
-          #
-          # What masking does NOT cover is the base64 form — `add-mask` is a
-          # literal string replacement — and `kubectl create secret -o yaml` emits
-          # every value base64-encoded. That output stays on the pipe into
-          # `kubectl apply` for exactly that reason: do not capture it into a
-          # variable, and do not `tee` it while debugging.
-          #
-          # Short lines are left alone deliberately. A mask replaces EVERY
-          # occurrence of the string in the log, so masking something like "map"
-          # would redact half the output and hide the failure it was added to
-          # catch. Eight characters is the shortest value worth protecting here;
-          # anything shorter is not a credential we can usefully hide anyway.
-          mask() {
-            while IFS= read -r line || [ -n "$line" ]; do
-              if [ "${#line}" -ge 8 ]; then printf '::add-mask::%s\n' "$line"; fi
-            done < "$1"
-          }
-
-          # fetch SECRET_ID DEST — reads the latest version straight to a file.
-          # `--out-file` rather than a command substitution: the value never
-          # becomes a shell variable, never reaches an argv, and keeps its exact
-          # bytes, which is what `--from-file` then hands to Kubernetes.
-          fetch() {
-            if ! gcloud secrets versions access latest \
-                   --secret="$1" --project="$GCP_PROJECT_ID" --out-file="$d/$2"; then
-              echo "::error::cannot read Secret Manager secret '$1' in $GCP_PROJECT_ID"
-              echo "The mode-2 deploy needs it. Check it exists and has an ENABLED version:" >&2
-              echo "  gcloud secrets versions list $1 --project=$GCP_PROJECT_ID" >&2
-              return 1
-            fi
-            # A blank value is the failure worth catching here rather than at
-            # pod start: it is what a failed generator piped into
-            # `gcloud secrets versions add` produces — stored successfully, and
-            # now `latest`. The Secret would apply cleanly and the platform would
-            # then authenticate as nobody.
-            #
-            # Blank rather than zero-byte, because a lone space is neither empty
-            # nor a newline and so passes both this check's older `-s` form and
-            # the newline check below, while being no more usable than nothing:
-            # the api key is compared verbatim against a header the parser has
-            # already trimmed, and the DSN parses as no connection settings at
-            # all, which sends the pool to a localhost that is not there.
-            if [ -z "$(tr -d '[:space:]' < "$d/$2")" ]; then
-              echo "::error::Secret Manager secret '$1' has an EMPTY or whitespace-only latest version"
-              echo "Add a real version and disable that one." >&2
-              return 1
-            fi
-            mask "$d/$2"
-          }
-
-          fetch controlplane-api-key controlplane-api-key
-          fetch database-url         database-url
-
-          # A trailing newline is the classic way one of these gets stored (an
-          # `echo` where bootstrap.sh uses `printf '%s'`), and both are embedded
-          # VERBATIM: one in an x-api-key comparison, one as a DSN. So the deploy
-          # would succeed and the platform would then reject the very key this job
-          # smoke-tests with, or fail to parse its own database URL. Refuse it
-          # here, where the fix is one command.
-          #
-          # model-providers.json is deliberately NOT checked this way: it is a
-          # JSON document read by a parser, a human adds it with
-          # `--data-file=/path/to/file`, and every editor on earth ends a file
-          # with a newline. Its shape is checked below instead.
-          for f in controlplane-api-key database-url; do
-            if [ "$(wc -l < "$d/$f")" -ne 0 ]; then
-              echo "::error::Secret Manager secret '$f' contains a newline"
-              echo "It is used verbatim, so a trailing newline is part of the value." >&2
-              echo "Re-add it without one: printf '%s' \"\$value\" | gcloud secrets" >&2
-              echo "versions add $f --project=$GCP_PROJECT_ID --data-file=-" >&2
-              exit 1
-            fi
-          done
-
-          # model-providers is fetched on its own because its failure mode is its
-          # own. Nothing in this repository creates or fills it — deploy/gcp/README.md
-          # ("Continuous delivery") owns which secrets are stood up out of band and
-          # by whom — so it may be missing, or present with no version, and those
-          # need different commands. The step cannot tell which: for a secret that
-          # is absent, `versions access latest` answers `NOT_FOUND: Secret [...] not
-          # found or has no versions` — measured against the API at gcloud 578, and
-          # a sentence that names both states while committing to neither. Whatever
-          # a versionless one answers, that reply already leaves the state open, so
-          # one branch handles both and names both commands, create first. What the
-          # secret holds when it is right is a live model
-          # API key, the one credential no automation may mint, so this step can
-          # repair neither state: it stops here rather than deploying a brain that
-          # crash-loops on an empty config.
-          #
-          # In the staging project it HAD a version when this pipeline was first
-          # proven, and that version was a PLACEHOLDER: a real endpoint
-          # (https://api.anthropic.com) with a fake key, stored so the whole thing
-          # could be exercised without inventing a credential. The platform comes
-          # up, /v1/agents answers 200, this job goes green — and the first session
-          # that calls a model fails with an auth error, which is the truth about
-          # it. If that is still what is there, replace it, in one line:
-          #
-          #   printf '%s' '[{"model":"*","protocol":"anthropic","base_url":"https://api.anthropic.com","api_key":"sk-ant-REAL"}]' \
-          #     | gcloud secrets versions add model-providers --project="$GCP_PROJECT_ID" --data-file=-
-          if ! gcloud secrets versions access latest \
-                 --secret=model-providers --project="$GCP_PROJECT_ID" \
-                 --out-file="$d/model-providers.json" 2>"$d/model-providers.err"; then
-            rc=1
-          else
-            rc=0
-          fi
-          # Replayed either way, so a warning on the success path is not swallowed
-          # by the capture that exists for the failure path.
-          cat "$d/model-providers.err" >&2
-          if [ "$rc" -ne 0 ]; then
-            # This branch catches every way the read can fail, and the advice below
-            # answers exactly one of them. A denied permission, a disabled API, a
-            # version someone disabled or an unreachable endpoint is not a secret
-            # anybody needs to create, so route on the status Google returned and
-            # let the error above speak for the rest.
-            if ! grep -q NOT_FOUND "$d/model-providers.err"; then
-              echo "::error::cannot read the 'model-providers' secret — the error above says why, and it is not a NOT_FOUND"
-              echo "The error above is the whole of what this job knows, and it does not say" >&2
-              echo "the secret is absent — though a caller without access is told that too," >&2
-              echo "so absent is not ruled out either. Start with what it does name: the" >&2
-              echo "deploy identity's Secret Manager access, whether the API is enabled on" >&2
-              echo "$GCP_PROJECT_ID, and whether the newest version was disabled." >&2
-              exit 1
-            fi
-            echo "::error::cannot read the 'model-providers' secret — it must exist AND have an enabled version, and only a human can supply one"
-            cat >&2 <<EOF
-          This is deliberate and this workflow cannot fix it: model-providers holds a
-          live model API key.
-
-          Nothing in this repository creates the secret, so on a fresh environment it
-          does not exist at all and this comes first. Skip it if it does exist:
-
-            gcloud secrets create model-providers \\
-              --project=$GCP_PROJECT_ID --replication-policy=automatic
-
-          Then write the routes to a file and add them as its version:
-
-            [ { "model": "*", "protocol": "anthropic",
-                "base_url": "https://your-gateway.example",
-                "api_key": "sk-..." } ]
-
-            gcloud secrets versions add model-providers \\
-              --project=$GCP_PROJECT_ID --data-file=/path/to/model-providers.json
-
-          The accepted keys are documented under brain.modelProviders in
-          deploy/helm/managed-agent-platform/values.yaml. base_url is the API ROOT:
-          the adapter appends /v1/messages or /v1/chat/completions itself, so omit a
-          trailing /v1. Then re-run this workflow (Actions -> deploy -> Run workflow).
-          EOF
-            exit 1
-          fi
-
-          # The brain's loader (internal/provider.LoadRoutes) requires a JSON ARRAY
-          # of route objects and rejects anything else with "must be a JSON array".
-          # Checking it here costs a second; getting it wrong costs the full
-          # `--wait --atomic --timeout 10m` before the release rolls back.
-          #
-          # `-s` is what makes it one document. Without it jq evaluates each
-          # top-level document in turn and `-e` takes its status from the LAST
-          # one, so a bare object followed by a valid array passes while the
-          # bytes Kubernetes stores are not a JSON array at all. A second
-          # `versions add` cannot produce that — it writes a whole new version —
-          # but one `--data-file` holding two documents can, which is what
-          # concatenating two route files, or editing one in place, produces.
-          if ! jq -e -s 'length == 1 and (.[0] | type == "array" and length > 0 and all(.[]; has("model")))' \
-               "$d/model-providers.json" > /dev/null; then
-            echo "::error::the 'model-providers' secret is not a non-empty JSON array of route objects"
-            echo "Each entry needs at least \"model\" (\"*\" is the default route)." >&2
-            exit 1
-          fi
-
-          # The api_key inside is the actual secret; the surrounding JSON is not.
-          # Masking per line would be useless here (a pretty-printed payload would
-          # register "[" as a redaction), so mask exactly the keys.
-          jq -r '.[].api_key // empty' "$d/model-providers.json" |
-            while IFS= read -r k; do
-              if [ "${#k}" -ge 8 ]; then printf '::add-mask::%s\n' "$k"; fi
-            done
-
-          # The four literals. Non-secret coordinates, but the chart reads all
-          # seven keys from this one object — `blob-backend` missing does not fail,
-          # it reads as the default "s3" and then looks for an endpoint that is not
-          # there.
-          printf '%s' gcs             > "$d/blob-backend"
-          printf '%s' "$BLOB_BUCKET"  > "$d/blob-bucket"
-          printf '%s' gcpkms          > "$d/secrets-backend"
-          printf '%s' "$KMS_KEY_NAME" > "$d/gcpkms-key-name"
-
-          # The namespace must exist before the Secret does, and `helm --create-namespace`
-          # runs after this step. Applied the same way for the same reason: it is
-          # already there on every run but the first.
-          kubectl create namespace "$K8S_NAMESPACE" --dry-run=client -o yaml \
-            | kubectl apply -f - > /dev/null
-
-          # --from-file, never --from-literal. A literal would put every one of
-          # these on this process's argv, visible in `ps` to anything else on the
-          # runner and in any log that captured the command line. The file name is
-          # the Secret key, which is why the fetch destinations above are named
-          # after the keys rather than after the Secret Manager secrets.
-          #
-          # Its one line of output — "created", "configured" or "unchanged" — is
-          # kept, because it is the only thing in this job that knows whether a
-          # rotation actually landed. It names the object and never a value, so
-          # it is safe to hold in a variable, unlike the manifest on the pipe.
-          applied="$(kubectl create secret generic "$K8S_SECRET" \
-            --namespace "$K8S_NAMESPACE" \
-            --from-file="$d/controlplane-api-key" \
-            --from-file="$d/database-url" \
-            --from-file="$d/model-providers.json" \
-            --from-file="$d/blob-backend" \
-            --from-file="$d/blob-bucket" \
-            --from-file="$d/secrets-backend" \
-            --from-file="$d/gcpkms-key-name" \
-            --dry-run=client -o yaml \
-            | kubectl apply -f -)"
-          echo "$applied"
-
-          # Nothing else can notice. Env from a `secretKeyRef` is read once, at
-          # process start; `helm upgrade` cannot see this Secret at all, because
-          # `existingSecret` means the chart renders none and its
-          # `checksum/secret` annotation therefore hashes an empty template on
-          # every run; and the case this matters in — a workflow_dispatch after a
-          # human rotated a Secret Manager value — deploys the same commit, so
-          # the pod template is byte-identical and Kubernetes correctly does
-          # nothing. The pods would go on serving the archived key and the old
-          # DSN, and the smoke check below would fail with the *new* key against
-          # them. So record whether the Secret changed; the step after the
-          # upgrade rolls the pods when it did.
-          case "$applied" in
-            *unchanged) echo "SECRET_CHANGED=false" >> "$GITHUB_ENV" ;;
-            *) echo "SECRET_CHANGED=true" >> "$GITHUB_ENV" ;;
-          esac
+          # NOT captured, deliberately. GitHub reads `::add-mask::` off this
+          # script's stdout, so a `$(...)` here would swallow every redaction and
+          # leave three credentials unmasked in a public log. The one thing this
+          # job needs back — whether the Secret actually changed — the script
+          # writes to $GITHUB_ENV as SECRET_CHANGED for the step that rolls the
+          # pods after the upgrade.
+          SECRET_DIR="$SECRET_DIR" deploy/gcp/mode2-secret.sh
 
       # --atomic is the whole reason this is one command and not a sequence: a
       # failed upgrade rolls the release back instead of leaving half the pods on

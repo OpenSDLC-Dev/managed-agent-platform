@@ -471,12 +471,13 @@ dedicated pool buys nothing.
 
 Mode-2's inputs are emitted individually, to be assembled into the pre-created Secret that
 the chart's `existingSecret` value names — its full key list is in
-[docs/deploy-gcp.md](../../docs/deploy-gcp.md#the-two-modes), and this repository ships no
-tool that does it, because a tool that touched every one of these would be a
-credential-handling tool of its own. What follows is the command an operator types, not
-something `make` runs. The mode-2 acceptance run built the Secret with a single
-`kubectl create secret generic`, over some of the coordinates these emit — the rest belong
-to the values file rather than to the Secret:
+[docs/deploy-gcp.md](../../docs/deploy-gcp.md#the-two-modes), and
+[`mode2-secret.sh`](./mode2-secret.sh) is what assembles it. That script is the same one CD
+runs, which is the whole reason it exists: the assembly was two hand-maintained copies until
+#754, and they had already drifted. It is not a `make` target, because it needs a cluster
+and three live credentials; what follows are the coordinates it reads, over some of which
+the mode-2 acceptance run built the Secret by hand — the rest belong to the values file
+rather than to the Secret:
 
 ```sh
 terraform output -raw  kms_key_name                              # gcpKMS.keyName / GCPKMS_KEY_NAME
@@ -497,47 +498,16 @@ the shape this deployment uses, and the one migration step that is not automatic
 "Continuous delivery" below.
 
 The three credentials come from Secret Manager, two of the four remaining values are fixed
-strings and two are Terraform outputs, and the Secret is then one script — the shape
-`deploy.yml` runs, with the reasoning for `--from-file`, for the destination *names*, for
-the namespace step and for each of the three checks left where `deploy.yml` argues each,
-beside the same command:
+strings and two are Terraform outputs, and the Secret is then
+[`mode2-secret.sh`](./mode2-secret.sh) — literally the file `deploy.yml` runs, which argues
+`--from-file`, the destination *names*, the namespace step and each of its three checks
+beside the code that makes them. What is left here is only what produces its inputs:
 
 ```sh
-#!/bin/bash
-set -euo pipefail
-
 project=your-project            # the project the five `make gcp-*` targets ran with
 prefix=map                      # the NAME_PREFIX this environment was built with
 repo=~/managed-agent-platform   # the checkout those targets ran in, so this file can
 env="$repo/deploy/gcp/environment"   # live anywhere and still find both of them
-
-d="$(mktemp -d)"; trap 'rm -rf "$d"' EXIT   # so no credential outlives a failure here
-
-gcloud secrets versions access latest --project="$project" \
-  --secret=controlplane-api-key --out-file="$d/controlplane-api-key"
-gcloud secrets versions access latest --project="$project" \
-  --secret=database-url --out-file="$d/database-url"
-gcloud secrets versions access latest --project="$project" \
-  --secret=model-providers --out-file="$d/model-providers.json"
-
-# Three checks, because all three of these failures apply cleanly and surface
-# much later: a blank version authenticates as nobody or points at no database,
-# a newline is part of a value both of whose consumers read it verbatim — an
-# x-api-key comparison and a DSN — and a model-providers that is not an array of
-# routes reaches the brain rather than this script.
-#
-# Blank rather than zero-byte: a lone space is neither empty nor a newline, so
-# it passes a `test -s` and a `wc -l` both, and is no more usable than nothing.
-for f in controlplane-api-key database-url model-providers.json; do
-  test -n "$(tr -d '[:space:]' < "$d/$f")" ||
-    { echo "secret '$f' has an empty or whitespace-only version" >&2; exit 1; }
-done
-for f in controlplane-api-key database-url; do
-  test "$(wc -l < "$d/$f")" -eq 0 || { echo "secret '$f' contains a newline" >&2; exit 1; }
-done
-jq -e -s 'length == 1 and (.[0] | type == "array" and length > 0 and all(.[]; has("model")))' \
-  "$d/model-providers.json" > /dev/null \
-  || { echo "model-providers is not a non-empty JSON array of routes" >&2; exit 1; }
 
 # Re-select the backend before reading it. What `.terraform` points at is
 # whatever the last `init` chose, which the coordinate guard cannot see — so
@@ -549,37 +519,30 @@ jq -e -s 'length == 1 and (.[0] | type == "array" and length > 0 and all(.[]; ha
 # silently read.
 PROJECT="$project" NAME_PREFIX="$prefix" make -C "$repo" gcp-env-init
 
-# Assigned, not interpolated into the printf: `set -e` acts on a failed command
-# substitution in an assignment and not on one in an argument, so a Terraform
-# read that failed would otherwise be applied as an empty value.
-bucket="$(terraform -chdir="$env" output -raw blob_bucket)"
-key="$(terraform -chdir="$env" output -raw kms_key_name)"
-
 # The Secret goes wherever kubectl currently points, and nothing above has said
 # where that is. deploy.yml runs this as its own step for the same reason.
 gcloud container clusters get-credentials \
   "$(terraform -chdir="$env" output -raw cluster_name)" \
   --zone "$(terraform -chdir="$env" output -raw zone)" --project "$project"
 
-printf '%s' gcs       > "$d/blob-backend"
-printf '%s' "$bucket" > "$d/blob-bucket"
-printf '%s' gcpkms    > "$d/secrets-backend"
-printf '%s' "$key"    > "$d/gcpkms-key-name"
-
-kubectl create namespace map --dry-run=client -o yaml | kubectl apply -f -
-
-kubectl create secret generic map-platform --namespace map \
-  --from-file="$d/controlplane-api-key" --from-file="$d/database-url" \
-  --from-file="$d/model-providers.json" --from-file="$d/blob-backend" \
-  --from-file="$d/blob-bucket" --from-file="$d/secrets-backend" \
-  --from-file="$d/gcpkms-key-name" \
-  --dry-run=client -o yaml | kubectl apply -f -
+# Assigned, not interpolated: `set -e` acts on a failed command substitution in
+# an assignment and not on one in an argument, so a Terraform read that failed
+# would otherwise be passed on as an empty value — and the script refuses an
+# empty one rather than assembling a Secret around it.
+PROJECT="$project" \
+BLOB_BUCKET="$(terraform -chdir="$env" output -raw blob_bucket)" \
+KMS_KEY_NAME="$(terraform -chdir="$env" output -raw kms_key_name)" \
+  "$repo/deploy/gcp/mode2-secret.sh"
 ```
 
-Run it as a file rather than pasting it: pasted, the `trap` fires when the *terminal* closes
-rather than when the work ends, so a failure leaves three credentials on disk for as long as
-that shell lives. The three secrets it reads are created by nothing in this repository —
-["Continuous delivery"](#continuous-delivery) says who owns them and what goes in each.
+The script fetches the three credentials into a mode-700 directory of its own and removes it
+however it exits — which is the reason it is a file rather than something to paste: pasted,
+the `trap` would fire when the *terminal* closes rather than when the work ends, leaving
+three credentials on disk for as long as that shell lives. Hand it `SECRET_DIR` and it keeps
+them there instead, and leaves the directory to you; that is how CD re-reads the api key to
+smoke-test the deployment. The three secrets it reads are created by nothing in this
+repository — ["Continuous delivery"](#continuous-delivery) says who owns them and what goes
+in each.
 
 Two things it does **not** do, both of which matter on a re-run rather than a first install.
 `apply` adds and updates keys but removes none, so a `map-platform` that predates #240 keeps
@@ -750,8 +713,11 @@ and `<prefix>-db-admin-password`, because those are the two the provisioning flo
 back — `environment/` reads the admin one, `make gcp-db-init` reads both. The three
 the pipeline reads — `controlplane-api-key`, `database-url`, `model-providers` — are created
 out of band by whoever stands the environment up, and this repository ships no tool that
-creates them for the same reason it ships none that assembles the mode-2 Secret: a tool that
-generated all of them would be a credential-handling tool of its own. `controlplane-api-key` is any high-entropy value
+creates them. [`mode2-secret.sh`](./mode2-secret.sh) does assemble the Secret out of them,
+which is a different act: it reads values that already exist and hands them to Kubernetes by
+path, never by value. Creating them means MINTING them — and one of the three is a live
+model API key, which no automation here may mint on anyone's
+behalf. `controlplane-api-key` is any high-entropy value
 (`openssl rand -hex 32`), `database-url` is composed below, and `model-providers` is the one
 a human must supply.
 
@@ -1300,8 +1266,9 @@ printf '%s' "postgres://map:$pw@$ip:5432/map?sslmode=require" \
 
 **The `map-platform` Secret is assembled by the pipeline**, because nothing else can: the
 chart writes no Secret in this mode and Terraform holds no secret *values* by design. The
-workflow reads `controlplane-api-key`, `database-url` and `model-providers` out of Secret
-Manager into a mode-700 temp directory, writes the four non-secret literals
+workflow runs [`mode2-secret.sh`](./mode2-secret.sh) — the same file an operator runs by hand
+above — which reads `controlplane-api-key`, `database-url` and `model-providers` out of
+Secret Manager into a mode-700 temp directory, writes the four non-secret literals
 (`blob-backend=gcs`, `blob-bucket`, `secrets-backend=gcpkms`, `gcpkms-key-name`) beside them,
 and applies all seven with `kubectl create secret generic … --from-file=… --dry-run=client
 -o yaml | kubectl apply -f -`. `--from-file` and never `--from-literal`: a literal puts every

@@ -21,7 +21,7 @@ SHELL := /usr/bin/env bash
 	changelog changelog-notes changelog-archive \
 	release-tag-check release-images release-chart-check release-chart release-binaries \
 	openbao-init-test cd-outcome-test parked-test retry-test identifiers-test pins-test registry-check sdk-bump-report \
-	gcp-fmt gcp-validate gcp-split-check gcp-kms-role-check gcp-lint gcp-bootstrap-test gcp-dbinit-test gcp-split-check-test gcp-power-test gcp-tfvars-test gcp-env-targets-test gcp-foundation-apply gcp-bootstrap gcp-env-apply gcp-db-init gcp-env-destroy gcp-env-rebuild \
+	gcp-fmt gcp-validate gcp-split-check gcp-kms-role-check gcp-lint gcp-bootstrap-test gcp-dbinit-test gcp-mode2-secret-test gcp-split-check-test gcp-power-test gcp-tfvars-test gcp-env-targets-test gcp-foundation-apply gcp-bootstrap gcp-env-apply gcp-db-init gcp-env-destroy gcp-env-rebuild \
 	gcp-require-project gcp-env-tfvars gcp-env-migrate-state gcp-env-init gcp-env-vars-match \
 	gcp-env-stop gcp-env-start gcp-env-status
 
@@ -448,10 +448,10 @@ gcp-kms-role-check:
 # in exactly that way. A list of constructs, not an analysis, and honest about
 # it: it catches a recurrence of this class, not every possible one.
 gcp-lint:
-	shellcheck deploy/gcp/bootstrap.sh deploy/gcp/dbinit.sh deploy/gcp/env-power.sh deploy/gcp/tfvars.sh
+	shellcheck deploy/gcp/bootstrap.sh deploy/gcp/dbinit.sh deploy/gcp/mode2-secret.sh deploy/gcp/env-power.sh deploy/gcp/tfvars.sh
 	@set -euo pipefail; \
 	found=0; \
-	for f in deploy/gcp/bootstrap.sh deploy/gcp/dbinit.sh deploy/gcp/env-power.sh deploy/gcp/tfvars.sh; do \
+	for f in deploy/gcp/bootstrap.sh deploy/gcp/dbinit.sh deploy/gcp/mode2-secret.sh deploy/gcp/env-power.sh deploy/gcp/tfvars.sh; do \
 		if grep -nE '(^|[^[:alnum:]_-])(mapfile|readarray)[[:space:]]|declare[[:space:]]+-[A-Za-z]*A|\$${[A-Za-z_][A-Za-z0-9_]*(\^\^|,,)' "$$f"; then \
 			echo "  ^ in $$f: needs bash 4; macOS ships 3.2" >&2; \
 			found=1; \
@@ -474,6 +474,16 @@ gcp-bootstrap-test:
 # is a comment. Needs Docker.
 gcp-dbinit-test:
 	python3 deploy/gcp/dbinit_test.py
+
+# The mode-2 Secret is the one object nothing else can build, and until this
+# existed nothing automated read its assembly at all — it lived twice, in
+# deploy.yml and in deploy/gcp/README.md, and the two had already drifted (#754).
+# Shellcheck cannot know that `--from-literal` would put three credentials on
+# argv, that a blank secret version applies cleanly and authenticates as nobody,
+# or that `jq -e` without `-s` takes its status from the LAST of several
+# documents. This runs the script against a fake gcloud and kubectl.
+gcp-mode2-secret-test:
+	python3 deploy/gcp/mode2_secret_test.py
 
 # The split guard run against the real tree proves only that the real tree is
 # compliant — a checker that had silently stopped reading would pass that too,
