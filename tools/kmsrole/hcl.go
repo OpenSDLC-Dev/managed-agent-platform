@@ -302,8 +302,8 @@ func scrubTF(line string) (string, int, error) {
 			case interp > 0 && strings.HasPrefix(line[i:], "/*") &&
 				strings.Contains(line[i+2:], "*/"):
 				// An inline block comment INSIDE a template expression, where
-				// HCL allows one — `"p${ 1 /* c */ }q"` is fmt-clean on
-				// terraform 1.15.8. The whole span is blanked, so nothing in it
+				// HCL allows one — terraform 1.15.8 parses
+				// `"p${ 1 /* c */ }q"`. The whole span is blanked, so nothing in it
 				// is read as structure: not a brace, not a quote, and not one
 				// of the characters refused in tfBlocks, which terraform reads
 				// here as the comment text they are.

@@ -239,7 +239,7 @@
     },
     {
       "file": "interp_block_comment_hides_a_quote.tf",
-      "why": "a quote inside that comment is comment text too, so the refusal aimed at a quoted string inside a template must not fire on it \u2014 the readers would otherwise reject a file terraform formats clean",
+      "why": "a quote inside that comment is comment text too, so the refusal aimed at a quoted string inside a template must not fire on it \u2014 the readers would otherwise reject a file terraform parses",
       "fmt": 3,
       "blocks": [
         "google_kms_crypto_key.after"
