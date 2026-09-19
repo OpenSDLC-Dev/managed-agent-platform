@@ -93,33 +93,46 @@ func TestAHeredocBodyIsNeitherStructureNorValue(t *testing.T) {
 	}
 }
 
-// TestAPlainHeredocNeedsAnUnindentedTerminator: Terraform ends `<<EOT` only at
-// a line that IS the terminator; matching an indented one would end the string
-// early for the reader while Terraform read on, and everything between is
-// configuration to one and text to the other — which is how a grant that does
-// not exist gets read as one. check_split.py's own case for the same rule is in
-// deploy/gcp/check_split_test.py (#758).
-func TestAPlainHeredocNeedsAnUnindentedTerminator(t *testing.T) {
-	ghost := `locals {
-  note = <<EOT
+// TestAnIndentedTerminatorEndsAPlainHeredoc pins the rule to what the binary
+// does rather than to what the marker looks like it should mean. terraform
+// 1.15.8 ends `<<EOT` at `    EOT` exactly as it ends `<<-EOT` there — the
+// marker dedents the body, it does not move the end — and this reader required
+// an exact match until #758.
+//
+// The fixture is the shape that makes the exact rule silent rather than loud:
+// the second heredoc's bare `EOT` closes the FIRST one for a reader still
+// inside it, so every brace it swallowed balances again at end of file and the
+// refusals that would otherwise fire — unterminated heredoc, unbalanced braces
+// — both stay quiet. `terraform fmt -check` exits 0 on it, so the tree can
+// carry it. Under the exact rule this reads zero blocks and reports nothing.
+func TestAnIndentedTerminatorEndsAPlainHeredoc(t *testing.T) {
+	swallowed := `locals {
+  a = <<EOT
     EOT
 }
-resource "google_kms_crypto_key_iam_member" "ghost" {
+resource "google_kms_crypto_key_iam_member" "real" {
   crypto_key_id = data.google_kms_crypto_key.cipher.id
   role          = "roles/cloudkms.cryptoKeyDecrypter"
   member        = "serviceAccount:${data.google_service_account.executor.email}"
 }
+locals {
+  b = <<EOT2
 EOT
+EOT2
 }
 `
-	blocks, err := tfBlocks(writeTF(t, ghost))
+	blocks, err := tfBlocks(writeTF(t, swallowed))
 	if err != nil {
 		t.Fatalf("tfBlocks: %v", err)
 	}
-	for _, b := range blocks {
-		if b.Label == "ghost" {
-			t.Fatalf("a resource inside a plain heredoc's body was read as configuration (%s)", b.Addr())
-		}
+	if len(blocks) != 1 || blocks[0].Label != "real" {
+		t.Fatalf("read %d blocks, want the one resource Terraform sees after the heredoc", len(blocks))
+	}
+	// And the other direction: a terminator that only looks like one leaves the
+	// heredoc open, so the reader refuses rather than reading the body as
+	// configuration. `EOTX` is not the word, trimmed or not.
+	if _, err := tfBlocks(writeTF(t, "locals {\n  a = <<EOT\nEOTX\n}\n")); err == nil {
+		t.Fatal("a heredoc closed by EOTX was read as terminated")
 	}
 	// The indented form still terminates where it says it does.
 	ok, err := tfBlocks(writeTF(t, "locals {\n  note = <<-EOT\n    text\n    EOT\n}\n\nresource \"a\" \"b\" {\n}\n"))
