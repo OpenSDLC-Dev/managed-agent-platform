@@ -19,10 +19,9 @@ import (
 // 1.15.8 runs behind that. Trimming is where the two languages could drift and
 // do not: over every file Terraform will parse, strings.TrimSpace is its
 // whitespace set, and the four characters Python's wider str.strip() adds are
-// excluded on that side rather than trimmed. Past that both still trim a lone
-// U+000D that Terraform refuses the whole file over rather than reading as
-// padding — a boundary left open under #761, where `make gcp-fmt` reddens
-// first. Requiring an exact match instead, as this reader
+// excluded on that side rather than trimmed. A lone U+000D never reaches that
+// comparison on either side: a file holding one is refused where its bytes are
+// read, as Terraform refuses it. Requiring an exact match instead, as this reader
 // did until #758, reads on past a terminator Terraform honoured: what follows
 // is configuration to Terraform and string content to the reader, so a deny
 // policy that should have refused the file is never seen, and the swallowed
@@ -240,7 +239,20 @@ func tfBlocks(path string) ([]tfBlock, error) {
 	}
 	// Split on "\n" alone: strings.Split does not also break on U+2028, U+2029,
 	// \v, \f or \x85, which HCL treats as ordinary characters inside a string.
-	raw := strings.Split(strings.ReplaceAll(string(b), "\r\n", "\n"), "\n")
+	body := strings.ReplaceAll(string(b), "\r\n", "\n")
+	// What is left is a carriage return that ends no CRLF, and terraform 1.15.8
+	// refuses the file over one wherever it sits — between statements, inside a
+	// quoted string, inside a heredoc body, as the last byte — while a file
+	// written entirely in CRLF it accepts. So the refusal is of the LONE return,
+	// not of the character. It has to be a refusal rather than a translation
+	// because this reader and check_split.py disagreed about such a file: Python's
+	// read_text() breaks on a bare \r and Go does not, which made it four lines to
+	// one reader and one line to the other — and one line means only the first
+	// header can match, so the rest went unread with nothing said (#761).
+	if strings.Contains(body, "\r") {
+		return nil, fmt.Errorf("%s: contains a carriage return that is not part of a CRLF, which terraform refuses as an Invalid character — refusing rather than guessing where the lines end", path)
+	}
+	raw := strings.Split(body, "\n")
 
 	src := make([]tfLine, 0, len(raw))
 	term := ""
@@ -249,6 +261,18 @@ func tfBlocks(path string) ([]tfBlock, error) {
 			src = append(src, tfLine{Raw: line, N: i + 1, Heredoc: true})
 			// Trimmed, whatever the opener's marker — see the header.
 			if strings.TrimSpace(line) == term {
+				// ...but HCL wants the newline after the terminator that the
+				// file's last line never gets: terraform 1.15.8 answers
+				// `Unterminated template string`, and accepts the same file the
+				// moment a trailing newline is added. An ordinary last line
+				// without one it accepts either way, so this is the
+				// terminator's rule and not the file's. Split on "\n" leaves a
+				// trailing "" when the content ends in one, so the last element
+				// is a line the file never ended — and it can only be reached
+				// here when it is non-empty, a terminator never being blank.
+				if i == len(raw)-1 {
+					return nil, fmt.Errorf("%s:%d: heredoc <<%s's terminator is the last line of a file with no trailing newline, so HCL does not close the string there — refusing rather than reading on", path, i+1, term)
+				}
 				term = ""
 			}
 			continue

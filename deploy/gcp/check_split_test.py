@@ -63,6 +63,20 @@ def append(rel, text):
     return lambda root: (root / rel).write_text((root / rel).read_text() + text)
 
 
+def append_bytes(rel, data):
+    """Append bytes rather than text.
+
+    These fixtures turn on a byte the reader has to see exactly: a lone carriage
+    return, which `read_text()` would translate into a line break before the
+    guard ever saw it, and the absence of a final newline, which `write_text()`
+    on a round-tripped file would not preserve reliably.
+    """
+    def go(root):
+        with (root / rel).open("ab") as f:
+            f.write(data)
+    return go
+
+
 def write(rel, text):
     def go(root):
         p = root / rel
@@ -185,6 +199,36 @@ def main():
              append("environment/main.tf",
                     '\nlocals {\n  a = <<EOT\n\x1cEOT\n{\nEOT\n}\n' + ROGUE_KEY
                     + '\nlocals {\n  b = <<EOT2\n\x1cEOT2\n}\nEOT2\n}\n'),
+             expect_text="must not OWN")
+        # The last two boundaries where this reader and the binary disagreed
+        # (#761). Both are files terraform refuses outright, so `make gcp-fmt`
+        # reddens on them — but this guard's contract is that it refuses rather
+        # than answering, and on both of these it answered.
+        #
+        # HCL wants the newline after a terminator that a file's last line never
+        # gets: terraform 1.15.8 says `Unterminated template string`, and
+        # accepts the very same bytes once a trailing newline is added. An
+        # ordinary last line without one it accepts either way, so the rule
+        # belongs to the terminator and not to the file. Written at depth 0 on
+        # purpose: inside a block the unbalanced-brace refusal fires and blames
+        # a brace, while here the depth never moves and nothing fires at all.
+        case(tmp, "a heredoc terminator as a last line with no trailing newline",
+             append_bytes("environment/main.tf", b'\ny = <<EOT\ntext\nEOT'),
+             expect_text="no trailing newline")
+        # And a carriage return that ends no CRLF. `read_text()` translated it
+        # into a line break, so this reader parsed a file terraform refuses as an
+        # `Invalid character` — and tools/kmsrole/hcl.go, which breaks on "\n"
+        # alone, read the same bytes as a single line where only the first header
+        # can match. Neither said anything.
+        case(tmp, "a bare carriage return is refused rather than translated",
+             append_bytes("environment/main.tf", b'\nlocals {\r  a = 1\r}\r'),
+             expect_text="carriage return")
+        # The other half of that rule, and the reason it names the LONE return
+        # rather than the character: terraform accepts a file written entirely
+        # in CRLF, so this guard has to read one — and still catch what is in it.
+        case(tmp, "a CRLF file is still read, and still checked",
+             append_bytes("environment/main.tf",
+                          ("\n" + ROGUE_KEY).replace("\n", "\r\n").encode()),
              expect_text="must not OWN")
         case(tmp, "a multi-line interpolation is refused",
              append("environment/main.tf",

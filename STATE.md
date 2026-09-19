@@ -10,8 +10,7 @@ and #720's primary-unarchived CHECK landed after it; its entry is a
 [changelog.d/](./changelog.d/) fragment, as are #748's executor Cloud KMS grant, #749's
 release-install path for GCP, #752's legible `gcp-env-destroy` failure, #755's corrected
 `model-providers` secret guidance, #750's guard over each identity's Cloud KMS role,
-#761's separator-character bypass of the split guard and #754's single mode-2 Secret
-assembly.
+#761's three `.tf`-reader boundaries and #754's single mode-2 Secret assembly.
 The backlog is [GitHub issues](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues).
 
 ## Tasks

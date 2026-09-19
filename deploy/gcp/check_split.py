@@ -210,9 +210,29 @@ def blocks(path: pathlib.Path):
     # \v, \f and \x85, which HCL treats as ordinary characters inside a string.
     # A description containing one would otherwise be cut mid-string and desync
     # the quote tracking for the rest of the file.
-    raw = path.read_text().replace("\r\n", "\n").split("\n")
+    # Bytes decoded here rather than read_text(), which performs universal-newline
+    # translation: without that a lone \r arrives already turned into a line
+    # break, and this reader parses a file terraform refuses. (read_text(newline="")
+    # would say it more directly and is Python 3.13; this file runs on 3.9.)
+    # Decoding explicitly also fixes the encoding at UTF-8, which is what
+    # terraform requires, where read_text() took the locale's. A bare return is an
+    # `Invalid character` to
+    # terraform 1.15.8 wherever it sits — between statements, inside a quoted
+    # string, inside a heredoc body, as the last byte — while a file written
+    # entirely in CRLF it accepts, so what is refused is the LONE return. It has
+    # to be refused rather than translated because tools/kmsrole/hcl.go breaks on
+    # "\n" alone: the same bytes were four lines here and one line there, and one
+    # line means only the first header can match (#761).
+    text = path.read_bytes().decode("utf-8").replace("\r\n", "\n")
+    if "\r" in text:
+        raise ValueError(
+            f"{path}: contains a carriage return that is not part of a CRLF, which "
+            f"terraform refuses as an Invalid character. Refusing rather than guessing "
+            f"where the lines end."
+        )
+    raw = text.split("\n")
     lines, skip_until = [], None
-    for line in raw:
+    for n, line in enumerate(raw):
         if skip_until is not None:
             # Trimmed, and for `<<EOT` as much as `<<-EOT`: the marker decides
             # how the BODY is dedented, not where the string ends. Measured
@@ -231,11 +251,24 @@ def blocks(path: pathlib.Path):
             # the four are excluded rather than trimmed (#761). Checking the
             # whole line is exact: it is reached only when what remains after
             # stripping IS the terminator, so anything else on it is whitespace.
-            # One member of that whitespace stays in deliberately — a lone
-            # U+000D, which Terraform refuses the whole file over rather than
-            # reading as padding, so `make gcp-fmt` reddens before this guard is
-            # ever consulted. #761 holds it with the rest of the CR family.
+            # A lone U+000D never reaches this comparison: a file holding one is
+            # refused where its bytes are read, as Terraform refuses it.
             if line.strip() == skip_until and not SEPARATORS.search(line):
+                # ...but HCL wants the newline after the terminator that a
+                # file's last line never gets. terraform 1.15.8 answers
+                # `Unterminated template string` and accepts the same bytes the
+                # moment a trailing newline is added, while an ordinary last
+                # line without one it accepts either way — so the rule is the
+                # terminator's, not the file's. split("\n") leaves a trailing ""
+                # when the text ends in one, so the last element is a line the
+                # file never ended; a terminator is never blank, so reaching
+                # here on it means exactly that.
+                if n == len(raw) - 1:
+                    raise ValueError(
+                        f"{path}: heredoc <<{skip_until}'s terminator is the last line of a "
+                        f"file with no trailing newline, so HCL does not close the string "
+                        f"there. Refusing rather than reading on."
+                    )
                 skip_until = None
             lines.append("")  # keep numbering, contribute no structure
             continue

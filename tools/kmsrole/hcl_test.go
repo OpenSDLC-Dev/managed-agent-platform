@@ -187,9 +187,63 @@ func TestTheReaderRefusesRatherThanShortRead(t *testing.T) {
 			"resource \"a\" \"b\" {\n  x = 1\n}\n}\n",
 			"unbalanced braces at end of file",
 		},
+		{
+			// HCL wants a newline after the terminator and the file's last line
+			// never gets one, so terraform 1.15.8 answers `Unterminated
+			// template string` — while the SAME file with a trailing newline it
+			// accepts, and an ordinary last line without one it accepts too.
+			// The reader closed the string here and answered anyway. Inside a
+			// block the braces then caught it, but blamed a brace: this fixture
+			// is the shape where they balance and nothing fires at all.
+			"terminator is the last line of a file with no trailing newline",
+			"resource \"a\" \"b\" {\n  x = 1\n}\n\ny = <<EOT\ntext\nEOT",
+			"no trailing newline",
+		},
+		{
+			// The same boundary one level in, where the reader used to refuse
+			// for the wrong reason — a reader sent after a brace that is not
+			// the problem is a reader that names what it could not read.
+			"the same terminator, inside a block",
+			"resource \"a\" \"b\" {\n  x = <<EOT\ntext\nEOT",
+			"no trailing newline",
+		},
+		{
+			// Terraform refuses a bare CR wherever it appears — between
+			// statements, inside a quoted string, inside a heredoc body, as the
+			// last byte — all `Invalid character` on 1.15.8, while CRLF
+			// throughout is accepted. Go breaks lines on \n alone and Python's
+			// read_text() breaks on a lone \r, so this file was one line to one
+			// reader and four to the other: a quiet short read on the Go side,
+			// where only the first header can still match.
+			"bare CR line endings",
+			"resource \"a\" \"b\" {\r  x = 1\r}\r",
+			"carriage return",
+		},
 	} {
 		if _, err := tfBlocks(writeTF(t, tc.body)); err == nil || !strings.Contains(err.Error(), tc.want) {
 			t.Errorf("%s: error = %v, want one mentioning %q", tc.name, err, tc.want)
+		}
+	}
+}
+
+// CRLF is the other half of the CR rule, and the reason it is a refusal of the
+// LONE carriage return rather than of the character: terraform accepts a file
+// written entirely in CRLF, so this reader has to as well. A last line with no
+// trailing newline is accepted for the same reason — terraform takes it, as
+// long as it is not a heredoc terminator.
+func TestCRLFAndAnUnterminatedLastLineAreStillRead(t *testing.T) {
+	for _, tc := range []struct{ name, body string }{
+		{"CRLF throughout", "resource \"a\" \"b\" {\r\n  x = 1\r\n}\r\n"},
+		{"ordinary last line, no trailing newline", "resource \"a\" \"b\" {\n  x = 1\n}"},
+		{"heredoc closed, then a last line with no newline", "resource \"a\" \"b\" {\n  x = <<EOT\ntext\nEOT\n}"},
+	} {
+		got, err := tfBlocks(writeTF(t, tc.body))
+		if err != nil {
+			t.Errorf("%s: %v", tc.name, err)
+			continue
+		}
+		if len(got) != 1 || got[0].Label != "b" {
+			t.Errorf("%s: read %d blocks, want the one resource", tc.name, len(got))
 		}
 	}
 }
