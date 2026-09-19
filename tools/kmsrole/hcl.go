@@ -13,13 +13,13 @@ import (
 // argues each refusal against a wrong answer review actually produced, and the
 // two cannot share code across languages.
 //
-// It is stricter than the Python in one place, deliberately. The Python matches a
-// heredoc terminator on the trimmed line, so an INDENTED terminator closes a
-// plain `<<EOT` for it while Terraform reads on — and everything between is
-// configuration to the reader and string content to Terraform, which is how a
-// grant that does not exist gets read as one. This reader requires the exact
-// terminator for `<<EOT` and allows indentation only for `<<-EOT`, as Terraform
-// does. The same hole in check_split.py is #758.
+// Both require the exact terminator for a plain `<<EOT` and allow indentation
+// only for `<<-EOT` and `<<~EOT`, as Terraform does. Matching a terminator on
+// the trimmed line instead would end the string early for the reader while
+// Terraform read on, and everything between is configuration to one and text
+// to the other — which is how a grant that does not exist gets read as one.
+// This reader was written that way from the start; check_split.py was not, and
+// #758 fixed it there.
 //
 // Structure is read from the scrubbed copy of a line — where a `{` inside a
 // display_name cannot shift the brace depth and a `<<EOF` inside a string cannot

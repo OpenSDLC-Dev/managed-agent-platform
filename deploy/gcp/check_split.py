@@ -100,7 +100,10 @@ ROOT = pathlib.Path(__file__).parent
 RESOURCE = re.compile(r'^\s*resource\s+"([^"]+)"\s+"([^"]+)"')
 MODULE = re.compile(r'^\s*module\s+"([^"]+)"')
 SOURCE = re.compile(r'^\s*source\s*=\s*"([^"]+)"\s*$', re.M)
-HEREDOC = re.compile(r"<<[-~]?([A-Za-z_][A-Za-z0-9_]*)")
+# Group 1 is the flavour, group 2 the terminator word. The flavour decides
+# whether an INDENTED terminator ends the string, so it cannot be discarded:
+# see the comparison in blocks().
+HEREDOC = re.compile(r"<<([-~]?)([A-Za-z_][A-Za-z0-9_]*)")
 
 
 def scrub(line: str) -> str:
@@ -202,10 +205,16 @@ def blocks(path: pathlib.Path):
     # A description containing one would otherwise be cut mid-string and desync
     # the quote tracking for the rest of the file.
     raw = path.read_text().replace("\r\n", "\n").split("\n")
-    lines, skip_until = [], None
+    lines, skip_until, indented = [], None, False
     for line in raw:
         if skip_until is not None:
-            if line.strip() == skip_until:
+            # `<<-EOT` and `<<~EOT` strip leading whitespace, so their
+            # terminator may be indented. A plain `<<EOT` ends only at a line
+            # that IS the terminator — matching an indented one there would
+            # end the string early for this checker while Terraform read on,
+            # leaving everything between as configuration to one and text to
+            # the other (#758). tools/kmsrole/hcl.go reads it the same way.
+            if (indented and line.strip() == skip_until) or line == skip_until:
                 skip_until = None
             lines.append("")  # keep numbering, contribute no structure
             continue
@@ -215,7 +224,8 @@ def blocks(path: pathlib.Path):
             raise ValueError(f"{path}: {exc}") from None
         m = HEREDOC.search(scrubbed)
         if m:
-            skip_until = m.group(1)
+            indented = bool(m.group(1))
+            skip_until = m.group(2)
             scrubbed = scrubbed[: m.start()]
         lines.append(scrubbed)
 

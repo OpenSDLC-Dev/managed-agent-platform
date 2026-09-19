@@ -93,12 +93,12 @@ func TestAHeredocBodyIsNeitherStructureNorValue(t *testing.T) {
 	}
 }
 
-// TestAPlainHeredocNeedsAnUnindentedTerminator is the reader's one deliberate
-// departure from check_split.py (#758). Terraform ends `<<EOT` only at a line
-// that IS the terminator; matching an indented one would end the string early
-// for the reader while Terraform read on, and everything between is
+// TestAPlainHeredocNeedsAnUnindentedTerminator: Terraform ends `<<EOT` only at
+// a line that IS the terminator; matching an indented one would end the string
+// early for the reader while Terraform read on, and everything between is
 // configuration to one and text to the other — which is how a grant that does
-// not exist gets read as one.
+// not exist gets read as one. check_split.py's own case for the same rule is in
+// deploy/gcp/check_split_test.py (#758).
 func TestAPlainHeredocNeedsAnUnindentedTerminator(t *testing.T) {
 	ghost := `locals {
   note = <<EOT

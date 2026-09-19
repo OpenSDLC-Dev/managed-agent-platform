@@ -134,6 +134,30 @@ def main():
         case(tmp, "an unterminated heredoc is refused",
              append("environment/main.tf", '\nlocals {\n  x = <<NEVERCLOSED\nbody\n}\n'),
              expect_text="never terminated")
+        # A plain `<<EOT` ends only at a line that IS the terminator; indentation
+        # is allowed for `<<-EOT` and `<<~EOT` alone. Ending at an indented one
+        # closes the string for this checker while Terraform reads on, and
+        # everything between is configuration to one and text to the other — a
+        # resource reported that no apply will ever create (#758).
+        #
+        # Each opener gets the body that is VALID Terraform under it, which is
+        # why these are not the same text twice: under `<<-EOT` the string really
+        # does end at the indented terminator, so the same bytes would leave a
+        # stray `EOT` line and an unbalanced brace. The second case is the control
+        # that stops the first from being satisfied by a checker that has simply
+        # stopped reading heredocs at all.
+        case(tmp, "a resource inside a plain heredoc is string content, not configuration",
+             append("environment/main.tf",
+                    '\nlocals {\n  note = <<EOT\n    EOT\n}\n'
+                    'resource "google_kms_crypto_key" "ghost" {\n'
+                    '  name     = "ghost"\n'
+                    '  key_ring = "projects/p/locations/us-central1/keyRings/r"\n'
+                    '}\nEOT\n}\n'),
+             expect_ok=True)
+        case(tmp, "an indented terminator does end a <<-EOT, so what follows is real",
+             append("environment/main.tf",
+                    '\nlocals {\n  note = <<-EOT\n    text\n    EOT\n}\n' + ROGUE_KEY),
+             expect_text="must not OWN")
         case(tmp, "a multi-line interpolation is refused",
              append("environment/main.tf",
                     '\nlocals {\n  x = "${coalesce(\n    var.a,\n    "b",\n  )}"\n}\n'),
