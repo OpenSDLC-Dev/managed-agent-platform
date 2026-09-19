@@ -223,6 +223,19 @@ def main():
         case(tmp, "a bare carriage return is refused rather than translated",
              append_bytes("environment/main.tf", b'\nlocals {\r  a = 1\r}\r'),
              expect_text="carriage return")
+        # Three more positions, each reached by a different half of the check.
+        # A body line is never scrubbed, so it is tested raw; a return before
+        # the terminator word would close the string in the wrong place, being
+        # padding to str.strip() and not to terraform; and an ESCAPED one used
+        # to vanish, the scrubber collapsing `\` plus its character to a single
+        # `_`. terraform 1.15.8 refuses all three.
+        for label, body in (
+                ("in a heredoc body", b'\nlocals {\n  a = <<EOT\nbody\rjunk\nEOT\n}\n'),
+                ("before a heredoc terminator", b'\nlocals {\n  a = <<EOT\ntext\n\rEOT\n}\n'),
+                ("escaped inside a quoted string", b'\nlocals {\n  a = "x\\\ry"\n}\n')):
+            case(tmp, "a carriage return %s is refused" % label,
+                 append_bytes("environment/main.tf", body),
+                 expect_text="carriage return")
         # The other half of that rule, and the reason it names the LONE return
         # rather than the character: terraform accepts a file written entirely
         # in CRLF, so this guard has to read one — and still catch what is in it.

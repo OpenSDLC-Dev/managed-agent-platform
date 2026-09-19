@@ -208,15 +208,38 @@ func TestTheReaderRefusesRatherThanShortRead(t *testing.T) {
 			"no trailing newline",
 		},
 		{
-			// Terraform refuses a bare CR wherever it appears — between
-			// statements, inside a quoted string, inside a heredoc body, as the
-			// last byte — all `Invalid character` on 1.15.8, while CRLF
+			// Terraform refuses a bare CR among structure, inside a quoted
+			// string and inside a heredoc body — `Invalid character` on 1.15.8,
+			// or `Invalid multi-line string` in the quoted case — while CRLF
 			// throughout is accepted. Go breaks lines on \n alone and Python's
-			// read_text() breaks on a lone \r, so this file was one line to one
+			// read_text() broke on a lone \r, so this file was one line to one
 			// reader and four to the other: a quiet short read on the Go side,
 			// where only the first header can still match.
 			"bare CR line endings",
 			"resource \"a\" \"b\" {\r  x = 1\r}\r",
+			"carriage return",
+		},
+		{
+			// The body half of that check, which nothing else reaches: body
+			// lines are never scrubbed, so they are tested raw.
+			"a lone CR inside a heredoc body",
+			"resource \"a\" \"b\" {\n  x = <<EOT\nbody\rjunk\nEOT\n}\n",
+			"carriage return",
+		},
+		{
+			// And the one that would close the string in the wrong place: a
+			// return before the terminator word is padding to TrimSpace and
+			// not to terraform.
+			"a lone CR before a heredoc terminator",
+			"resource \"a\" \"b\" {\n  x = <<EOT\ntext\n\rEOT\n}\n",
+			"carriage return",
+		},
+		{
+			// Escaped, where the scrubber used to collapse the pair to one `_`
+			// and hide the return from every later look. terraform 1.15.8 gives
+			// three errors on these bytes.
+			"a lone CR escaped inside a quoted string",
+			"resource \"a\" \"b\" {\n  x = \"a\\\rb\"\n}\n",
 			"carriage return",
 		},
 	} {

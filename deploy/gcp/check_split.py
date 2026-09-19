@@ -133,7 +133,13 @@ def scrub(line: str) -> str:
         ch = line[i]
         if quoted:
             if ch == "\\":
-                out.append("_")
+                # The escape and what it escapes both lose their structural
+                # meaning, and one character stands for the pair — nothing
+                # downstream reads the columns. A carriage return is the
+                # exception, kept so the lone-return check in blocks() can still
+                # see it: `"a\<CR>b"` is three errors to terraform 1.15.8, and
+                # collapsing the pair to `_` hid it from every later look.
+                out.append("\r" if line[i + 1 : i + 2] == "\r" else "_")
                 i += 2
                 continue
             if line[i : i + 2] in ("${", "%{"):
@@ -292,8 +298,9 @@ def blocks(path: pathlib.Path):
         # where the return sits: measured on 1.15.8, `# note\r` at end of file,
         # `# a\rb` and `# note\r\r\n` are all accepted — a comment runs to the
         # newline and a lone return is ordinary text inside it — while the same
-        # return among structure, or inside a quoted string, is an `Invalid
-        # character`. scrub() removes the comments and keeps everything else, so
+        # return among structure is an `Invalid character` and inside a quoted
+        # string an `Invalid multi-line string`. scrub() removes the comments,
+        # and keeps a return everywhere else including behind a backslash, so
         # what reaches here is the half terraform refuses.
         if "\r" in scrubbed:
             raise ValueError(f"{path}:{n + 1}: {LONE_CR}")

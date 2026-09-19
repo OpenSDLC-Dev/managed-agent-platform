@@ -172,8 +172,16 @@ func scrubTF(line string) (string, int, error) {
 			switch {
 			case ch == '\\':
 				// The escape and the character it escapes both lose their
-				// structural meaning; nothing downstream reads the columns.
-				out.WriteByte('_')
+				// structural meaning; nothing downstream reads the columns. A
+				// carriage return is the exception, kept so the lone-return
+				// check in tfBlocks can still see it: `"a\<CR>b"` is three
+				// errors to terraform 1.15.8, and collapsing the pair to `_`
+				// hid it from every later look.
+				if i+1 < len(line) && line[i+1] == '\r' {
+					out.WriteByte('\r')
+				} else {
+					out.WriteByte('_')
+				}
 				i++
 			case strings.HasPrefix(line[i:], "${"), strings.HasPrefix(line[i:], "%{"):
 				// An interpolation or a template directive. BOTH, because they
@@ -284,8 +292,9 @@ func tfBlocks(path string) ([]tfBlock, error) {
 		// file, `# a\rb` and `# note\r\r\n` are all accepted — a comment runs to
 		// the newline and a lone return is ordinary text inside it — while the
 		// same return among structure is an `Invalid character` and inside a
-		// quoted string an `Invalid multi-line string`. Scrubbing removes the comments and keeps
-		// everything else, so what reaches here is the half terraform refuses.
+		// quoted string an `Invalid multi-line string`. Scrubbing removes the
+		// comments, and keeps a return everywhere else including behind a
+		// backslash, so what reaches here is the half terraform refuses.
 		// It has to be a refusal rather than a translation because this reader
 		// and check_split.py disagreed about such a file: Python's read_text()
 		// broke lines on a bare \r and this one never has, so the same bytes
