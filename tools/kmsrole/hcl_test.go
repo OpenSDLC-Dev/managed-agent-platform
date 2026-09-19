@@ -502,3 +502,45 @@ func TestAddrNamesTheFileAndLine(t *testing.T) {
 		t.Errorf("Addr() = %q, want kind.label at line 2", got)
 	}
 }
+
+// fakeEOL and fakeEOLAt spell the same five characters two ways — a constant the
+// refusal scans for, and a byte switch scrubTF can afford per byte. A character
+// dropped from one and not the other turns a string-internal character into a
+// refusal, or the reverse, so the two are held together here rather than by the
+// corpus alone, which can only reach the cells its fixtures hold.
+func TestFakeEOLAtMatchesTheConstant(t *testing.T) {
+	for _, r := range fakeEOL {
+		s := string(r)
+		if got := fakeEOLAt(s); got != len(s) {
+			t.Errorf("fakeEOLAt(%q) = %d, want %d — in fakeEOL, missed by the switch", s, got, len(s))
+		}
+	}
+	// And nothing else is, swept rather than listed: a hand-picked negative set
+	// only reaches the cells someone thought of, and the point of this test is
+	// the case nobody thought of. Every rune, then every lead byte a scrubTF
+	// slice can start with — including a bare continuation byte, which is not a
+	// rune at all.
+	want := func(s string) int {
+		for _, r := range fakeEOL {
+			if strings.HasPrefix(s, string(r)) {
+				return len(string(r))
+			}
+		}
+		return 0
+	}
+	for r := rune(0); r <= 0x10FFFF; r++ {
+		if r >= 0xD800 && r <= 0xDFFF {
+			continue // not encodable; scrubTF never sees one
+		}
+		s := string(r)
+		if got := fakeEOLAt(s); got != want(s) {
+			t.Fatalf("fakeEOLAt(%q) = %d, want %d — the switch and fakeEOL disagree at U+%04X", s, got, want(s), r)
+		}
+	}
+	for b := 0; b < 256; b++ {
+		s := string([]byte{byte(b)})
+		if got := fakeEOLAt(s); got != want(s) {
+			t.Errorf("fakeEOLAt(% x) = %d, want %d", s, got, want(s))
+		}
+	}
+}
