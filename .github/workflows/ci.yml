@@ -902,7 +902,13 @@ jobs:
         # assignment and `set -e` taking it from there.
         run: |
           set -euo pipefail
-          grep -qF 'deploy/gcp/mode2-secret.sh' .github/workflows/deploy.yml \
+          # The INVOCATION, not any mention of it: deploy.yml also names the
+          # script in the comment above the step, so a plain `grep -F` for the
+          # path would go on passing after the command itself was deleted. A
+          # line that runs it is not a comment and ends with the path, with an
+          # optional `VAR=... ` prefix — which is how the step passes SECRET_DIR.
+          grep -qE '^[[:space:]]*([^#[:space:]][^#]*[[:space:]])?deploy/gcp/mode2-secret\.sh[[:space:]]*$' \
+            .github/workflows/deploy.yml \
             || { echo "deploy.yml no longer runs deploy/gcp/mode2-secret.sh, so the keys checked below belong to a script nothing calls" >&2
                  exit 1; }
           flags="$(grep -oE -- '--from-file="\$d/[^"]+"' deploy/gcp/mode2-secret.sh \
