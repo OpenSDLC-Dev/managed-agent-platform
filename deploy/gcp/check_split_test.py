@@ -334,6 +334,15 @@ def main():
         case(tmp, "a byte that is not UTF-8 escaped in a quoted string is refused",
              append_bytes("environment/main.tf", b'\nlocals {\n  a = "x\\\xffy"\n}\n'),
              expect_text="not UTF-8")
+        # The pair that can splice, which this reader gets right for free and
+        # its Go mirror had to be changed for: decoding the whole file up front
+        # makes 0xC3 and 0xA9 two independent characters that can never
+        # recombine, while a byte-at-a-time scrubber deleting the escape's
+        # backslash would have left them adjacent and legal. Pinned on both
+        # sides, so the claim that they agree here has an anchor in each.
+        case(tmp, "two bytes a deleted backslash could splice are still refused",
+             append_bytes("environment/main.tf", b'\nlocals {\n  a = "x\xc3\\\xa9y"\n}\n'),
+             expect_text="not UTF-8")
         # And the three positions terraform READS a U+FEFF in — inside a string,
         # a comment and a heredoc body, all measured clean on 1.15.8. The
         # refusal above must reach none of them, or this guard rejects

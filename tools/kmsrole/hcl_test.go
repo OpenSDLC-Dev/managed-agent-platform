@@ -270,6 +270,18 @@ func TestTheReaderRefusesRatherThanShortRead(t *testing.T) {
 			"not UTF-8",
 		},
 		{
+			// The pair that can splice. This scrubber deletes an escape's
+			// backslash, so keeping the escaped byte would have put 0xA9 right
+			// after the 0xC3 the byte before it wrote — a well-formed `é` the
+			// file never contained, which utf8.ValidString accepts. terraform
+			// gives this file three errors and check_split.py refuses it, so a
+			// reader that read it would be the only one of the three that did.
+			// This is why the check reads the raw code, not the scrubbed copy.
+			"two bytes a deleted backslash could splice into a valid rune",
+			"locals {\n  x = \"a\xc3\\\xa9b\"\n}\nresource \"a\" \"b\" {\n}\n",
+			"not UTF-8",
+		},
+		{
 			// Only the FIRST U+FEFF is a byte-order mark. A second, or one
 			// further in, is `Invalid character` to terraform and glues to the
 			// header behind it exactly as `\xff` does — which is how the

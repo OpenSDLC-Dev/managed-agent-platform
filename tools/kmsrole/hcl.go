@@ -188,22 +188,20 @@ func scrubTF(line string) (string, int, error) {
 				// check in tfBlocks can still see it: `"a\<CR>b"` is three
 				// errors to terraform 1.15.8, and collapsing the pair to `_`
 				// hid it from every later look.
-				// A byte that is not UTF-8 is kept for the same reason and the
-				// same measurement: `"a\<FF>b"` is three errors too, one of
-				// them the `Invalid character encoding` this reader answers.
-				// The whole rune is consumed rather than one byte — collapsing
+				// The whole rune is consumed rather than one byte: collapsing
 				// `\` plus a lead byte left the continuation bytes behind and
 				// manufactured invalid UTF-8 out of a file that had none, which
-				// this reader would then have refused for the wrong reason, and
-				// its Python mirror would not have refused at all.
+				// this reader would then have refused for the wrong reason
+				// while its Python mirror refused nothing. A byte that is not
+				// UTF-8 is NOT kept here — keeping it put it next to whatever
+				// preceded the backslash and could splice the two into a legal
+				// rune; tfBlocks checks the raw code for that instead, and says
+				// why there.
 				if i+1 < len(line) {
-					r, w := utf8.DecodeRuneInString(line[i+1:])
-					switch {
-					case line[i+1] == '\r':
+					_, w := utf8.DecodeRuneInString(line[i+1:])
+					if line[i+1] == '\r' {
 						out.WriteByte('\r')
-					case r == utf8.RuneError && w == 1:
-						out.WriteByte(line[i+1])
-					default:
+					} else {
 						out.WriteByte('_')
 					}
 					i += w
@@ -361,12 +359,21 @@ func tfBlocks(path string) ([]tfBlock, error) {
 		// Same position rule for a byte that is not UTF-8, and the same reason.
 		// terraform accepts one inside a comment (`# caf\xe9` is fmt- and
 		// validate-clean on 1.15.8) and refuses it anywhere else as an `Invalid
-		// character encoding`; scrubbing has removed the comments, so one that
-		// survives is one terraform refuses. Reading on is what this reader did
-		// until now, and it is not harmless: `\xffresource "…"` is a single word
-		// to the header regexp, so the block behind it is invisible and a scan
-		// that finds nothing reports as if there were nothing.
-		if !utf8.ValidString(s) {
+		// character encoding`. Reading on is what this reader did until now, and
+		// it is not harmless: `\xffresource "…"` is a single word to the header
+		// regexp, so the block behind it is invisible and a scan that finds
+		// nothing reports as if there were nothing.
+		//
+		// Checked on the RAW code — the line up to where its comment starts —
+		// and not on the scrubbed copy, which cannot answer the question. This
+		// scrubber works a byte at a time and DELETES the backslash of an
+		// escape, so in `"a<C3>\<A9>b"` it would write 0xC3, then 0xA9, leaving
+		// them adjacent: a well-formed `é` that the file never contained, over
+		// which utf8.ValidString says yes. terraform gives that file three
+		// errors and check_split.py refuses it — it decodes the whole file
+		// first, so its two surrogates can never recombine. The raw code cannot
+		// splice, which is what makes the two readers agree here.
+		if !utf8.ValidString(line[:codeLen]) {
 			return nil, fmt.Errorf("%s:%d: %w", path, i+1, errBadUTF8)
 		}
 		// And U+FEFF, which is valid UTF-8 and so invisible to the check above.
