@@ -134,7 +134,10 @@ SEPARATORS = re.compile(r"[\x1c-\x1f]")
 # That covers a `${...}` interpolation and a `%{...}` directive too, whose
 # contents are HCL again rather than string text — NEUTRAL_IN_TEMPLATE below is
 # what keeps them refusable there, and `$${`/`%%{`, which are literal text, are
-# consumed before they can be read as either.
+# consumed before they can be read as either. An inline `/* ... */` inside a
+# template expression is the exception that proves the rule: HCL allows a
+# comment there, terraform reads all five in one, and scrub() blanks the whole
+# span so this reader does too.
 #
 # Two places the parity still ends, both named because counting them wrong is
 # how this sentence was written twice. A heredoc BODY line is never scrubbed, so
@@ -240,6 +243,29 @@ def scrub(line: str) -> tuple[str, int]:
                 out.append(esc if esc == "\r" or BAD_BYTE.match(esc) else "_")
                 i += 2
                 continue
+            if interp and line[i : i + 2] == "/*":
+                # An inline block comment INSIDE a template expression, where
+                # HCL allows one — `"p${ 1 /* c */ }q"` is fmt-clean on
+                # terraform 1.15.8. The whole span is blanked, so nothing in it
+                # is read as structure: not a brace, not a quote, and not one of
+                # the characters refused below, which terraform reads here as
+                # the comment text they are.
+                #
+                # Only when the `*/` is on this line. An unterminated one leaves
+                # the template open past the end of the line, which terraform
+                # answers with `Invalid expression` — refusing to guess there is
+                # this reader's rule everywhere else and stays its rule here.
+                #
+                # `#` and `//` need no such branch: inside a single-line
+                # template they swallow the closing brace and the quote, and
+                # terraform answers `Invalid multi-line string`. Inside a
+                # heredoc body, where a template may legally span lines, the
+                # body is skipped whole and never reaches this scrubber.
+                end = line.find("*/", i + 2)
+                if end >= 0:
+                    out.append("_" * (end + 2 - i))
+                    i = end + 2
+                    continue
             if line[i : i + 3] in ("$${", "%%{"):
                 # An ESCAPED template: `$${` and `%%{` are literal text to
                 # Terraform, which accepts a file holding one. All three
@@ -439,12 +465,11 @@ def blocks(path: pathlib.Path):
         # return among structure is an `Invalid character` and inside a quoted
         # string an `Invalid multi-line string`. scrub() removes the comments,
         # and keeps a return everywhere else including behind a backslash, so
-        # what reaches here is the half terraform refuses — with one exception,
-        # which the raw body check above shares: a comment inside a template
-        # interpolation is a comment to terraform and to neither of them, so a
-        # return there is refused although the binary reads it (#767, folded
-        # into #762). A known false refusal, taken over leaving the two short
-        # reads it replaces.
+        # what reaches here is the half terraform refuses — inside a template
+        # expression as well as outside one, because scrub() blanks an inline
+        # `/* ... */` there too. The other two comment markers need no such
+        # care: inside a single-line template `#` and `//` swallow the closing
+        # brace and the quote, and terraform refuses the file.
         if "\r" in scrubbed:
             raise ValueError(f"{path}:{n + 1}: {LONE_CR}")
         # The same position rule for the five characters that look like a line

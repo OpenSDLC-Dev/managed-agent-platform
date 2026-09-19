@@ -214,6 +214,60 @@
       ]
     },
     {
+      "file": "interp_block_comment_hides_fake_eols.tf",
+      "why": "HCL allows an inline block comment inside a template expression and terraform reads all five separators and a U+FEFF as the comment text they are \u2014 so the refusal that reaches into a template must stop at one, which is what scrubbing the whole `/* ... */` span does; all six characters sit in one comment so a fix that covered some of them cannot pass",
+      "fmt": 3,
+      "blocks": [
+        "google_kms_crypto_key.after"
+      ]
+    },
+    {
+      "file": "interp_directive_block_comment_hides_fake_eols.tf",
+      "why": "the `%{...}` directive half of it, for the reason its sibling rows exist: the two share one depth counter, so a row for `${` alone would let a change close half of it and still pass",
+      "fmt": 3,
+      "blocks": [
+        "google_kms_crypto_key.after"
+      ]
+    },
+    {
+      "file": "interp_block_comment_hides_a_return.tf",
+      "why": "a carriage return in the same position, which terraform also reads as comment text \u2014 the one character whose false refusal here was known and accepted when the lone-return rule landed (#761), and the row that keeps it closed",
+      "fmt": 3,
+      "blocks": [
+        "google_kms_crypto_key.after"
+      ]
+    },
+    {
+      "file": "interp_block_comment_hides_a_quote.tf",
+      "why": "a quote inside that comment is comment text too, so the refusal aimed at a quoted string inside a template must not fire on it \u2014 the readers would otherwise reject a file terraform formats clean",
+      "fmt": 3,
+      "blocks": [
+        "google_kms_crypto_key.after"
+      ]
+    },
+    {
+      "file": "interp_hash_comment_is_refused.tf",
+      "why": "the boundary the block-comment branch must not be widened to: `#` and `//` inside a single-line template swallow the closing brace and the quote, so terraform answers Invalid multi-line string and the readers are right to refuse \u2014 a change that taught them to read a `#` comment there would answer over a file that cannot parse",
+      "fmt": 2,
+      "refuse": "a line separator Terraform does not read as one"
+    },
+    {
+      "file": "interp_block_comment_unterminated_is_read.tf",
+      "why": "and the other boundary: with no `*/` on the line the template stays open past its end, which terraform answers Invalid expression \u2014 the branch deliberately does not guess there, so the line scrubs as it did before and the file reads, benign because it cannot deploy",
+      "fmt": 2,
+      "blocks": [
+        "google_kms_crypto_key.after"
+      ]
+    },
+    {
+      "file": "string_block_comment_marker_is_text.tf",
+      "why": "the guard on that branch, from the other side: OUTSIDE a template `/*` is string text, and terraform formats this file clean. The `*/` sits in the line's real comment, so a branch that dropped the depth test would blank from the marker through it, swallow the quote that closes the string, and refuse a file that is fine \u2014 which is why the row is written this way and not as a bare `/* */` inside a string, where both spellings answer the same",
+      "fmt": 0,
+      "blocks": [
+        "google_kms_crypto_key.after"
+      ]
+    },
+    {
       "file": "interp_escaped_is_text.tf",
       "why": "`$${` is an ESCAPED template \u2014 literal text to terraform, which takes the file \u2014 so the characters behind it are string text and must stay neutralised; matching its trailing `${` as a template opener made the row above's refusal fire on a file the binary accepts",
       "fmt": 0,

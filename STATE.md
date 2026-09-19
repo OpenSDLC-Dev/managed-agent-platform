@@ -24,4 +24,5 @@ The backlog is [GitHub issues](https://github.com/OpenSDLC-Dev/managed-agent-pla
 - [x] #766 — a heredoc opener carrying anything after the marker: refuse, rather than read the configuration behind it as string content
 - [x] a heredoc tag Terraform takes and neither reader's class does (`<<Ö`) — found in review of the above, closed with it
 - [x] #762's own second finding — the `SEPARATORS` subtraction stays, and docs/HISTORY.md records the spelled-out set as the rejected alternative
-- [ ] the interpolation context folded in from #767 (closed; #762 tracks it): a terminator closes only at depth 0, and `#`/`//`/`/* */` inside `${…}` and `%{…}` are comments
+- [x] `/* */` inside `${…}` and `%{…}` is a comment to Terraform and now to both readers; `#`/`//` there need no rule, Terraform refusing a single-line template that holds one
+- [ ] the rest of the interpolation context folded in from #767 (closed; #762 tracks it): a heredoc terminator closes only at depth 0
