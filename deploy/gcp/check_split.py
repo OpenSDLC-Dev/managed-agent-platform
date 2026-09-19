@@ -256,11 +256,13 @@ def scrub(line: str) -> tuple[str, int]:
                 # answers with `Invalid expression` — refusing to guess there is
                 # this reader's rule everywhere else and stays its rule here.
                 #
-                # `#` and `//` need no such branch: inside a single-line
-                # template they swallow the closing brace and the quote, and
-                # terraform answers `Invalid multi-line string`. Inside a
-                # heredoc body, where a template may legally span lines, the
-                # body is skipped whole and never reaches this scrubber.
+                # No state is carried across lines, and none is needed: a
+                # template that spans lines leaves the string open at end of
+                # line, which the check below refuses before a second line of
+                # it is ever scrubbed. Terraform PARSES such a file —
+                # `"p${ 1 +` then `1 }q"` is exit 3 on 1.15.8 — so that is a
+                # false refusal, older than this branch and untouched by it
+                # (interp_open_at_eol.tf).
                 end = line.find("*/", i + 2)
                 if end >= 0:
                     out.append("_" * (end + 2 - i))
@@ -304,6 +306,24 @@ def scrub(line: str) -> tuple[str, int]:
                 i += 2
                 continue
             if interp:
+                if ch == "#" or line[i : i + 2] == "//":
+                    # A LINE comment inside an OPEN template. Terraform reads it
+                    # to the end of the line, which swallows the `}` closing the
+                    # template and the quote closing the string, and answers
+                    # `Invalid multi-line string`. This scrubber has no such
+                    # rule: it would close the string at that quote and read on
+                    # over a file terraform refuses. Two models disagreeing
+                    # silently about where a string ends is exactly what #761
+                    # was, so the disagreement is refused rather than kept.
+                    #
+                    # Only while the template is open. Once its `}` has closed,
+                    # a `#` is ordinary string text and terraform takes the file
+                    # (interp_hash_after_close_is_text.tf).
+                    raise ValueError(
+                        "a # or // comment inside a ${...} interpolation or %{...} directive "
+                        "runs past the brace that closes it and the quote that closes the "
+                        "string — Terraform refuses the file, so this guard does too"
+                    )
                 if ch == "{":
                     interp += 1
                 elif ch == "}":

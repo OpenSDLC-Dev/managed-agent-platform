@@ -247,9 +247,29 @@
     },
     {
       "file": "interp_hash_comment_is_refused.tf",
-      "why": "the boundary the block-comment branch must not be widened to: `#` and `//` inside a single-line template swallow the closing brace and the quote, so terraform answers Invalid multi-line string and the readers are right to refuse \u2014 a change that taught them to read a `#` comment there would answer over a file that cannot parse",
+      "why": "a `#` inside an OPEN template runs to the end of the line, taking the brace that closes the template and the quote that closes the string with it: terraform answers Invalid multi-line string, while a reader without this rule closes the string at that quote and reads on. The row carried a U+000B until the rule existed, which made both readers refuse it for the separator and proved nothing about the comment",
       "fmt": 2,
-      "refuse": "a line separator Terraform does not read as one"
+      "refuse": "a # or // comment inside a"
+    },
+    {
+      "file": "interp_hash_after_close_is_text.tf",
+      "why": "the boundary that refusal must not cross: once the template's brace has closed, a `#` is ordinary string text and terraform takes the file \u2014 a rule that fired anywhere inside a string would reject it",
+      "fmt": 3,
+      "blocks": [
+        "google_kms_crypto_key.after"
+      ]
+    },
+    {
+      "file": "interp_directive_hash_comment_is_refused.tf",
+      "why": "and the `%{...}` directive, which shares the depth counter with `${...}` \u2014 a rule gated on the interpolation spelling alone would leave this half reading on",
+      "fmt": 2,
+      "refuse": "a # or // comment inside a"
+    },
+    {
+      "file": "interp_slash_comment_is_refused.tf",
+      "why": "the `//` spelling of the same comment, so a rule written for one marker cannot pass",
+      "fmt": 2,
+      "refuse": "a # or // comment inside a"
     },
     {
       "file": "interp_block_comment_unterminated_is_read.tf",
