@@ -337,7 +337,16 @@ func TestCRLFAndAnUnterminatedLastLineAreStillRead(t *testing.T) {
 		// invalid UTF-8, which is what a scrubber consuming one byte instead of
 		// one rune made of it: the continuation bytes were left behind and the
 		// line became invalid UTF-8 that the file never contained.
-		{"a backslash before a multi-byte character", "resource \"a\" \"b\" {\n  x = \"a\\éb\"\n}\n"},
+		// Three widths, not one: the byte-at-a-time version this replaces left
+		// one continuation byte behind for a 2-byte rune, two for a 3-byte and
+		// three for a 4-byte, so a fixture of a single width pins only a third
+		// of the arithmetic. terraform refuses all three for `Invalid escape
+		// sequence` and this reader reads all three, which is the permitted
+		// direction — what must not happen is refusing them as invalid UTF-8
+		// the reader itself manufactured.
+		{"a backslash before a 2-byte character", "resource \"a\" \"b\" {\n  x = \"a\\éb\"\n}\n"},
+		{"a backslash before a 3-byte character", "resource \"a\" \"b\" {\n  x = \"a\\€b\"\n}\n"},
+		{"a backslash before a 4-byte character", "resource \"a\" \"b\" {\n  x = \"a\\\U0001f600b\"\n}\n"},
 	} {
 		got, err := tfBlocks(writeTF(t, tc.body))
 		if err != nil {

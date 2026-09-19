@@ -264,8 +264,10 @@ def blocks(path: pathlib.Path):
     # surrogateescape rather than strict, so a byte that is not UTF-8 is carried
     # through as an opaque character instead of raising: terraform accepts a
     # comment holding raw bytes (`# caf\xe9` is `fmt`- and `validate`-clean on
-    # 1.15.8), and strict refused that file outright — with a traceback, not a
-    # message. Where terraform does refuse the byte (`Invalid character
+    # 1.15.8), and strict refused that file outright, naming the byte's offset
+    # rather than the file's problem — UnicodeDecodeError is a ValueError, so
+    # __main__'s handler printed it like any other refusal.
+    # Where terraform does refuse the byte (`Invalid character
     # encoding`) this reader refuses too, on the scrubbed line below, because
     # carrying it through is not the same as reading past it: `\xffresource "…"`
     # is one word to the header regex, and a guard that finds no blocks there
