@@ -407,9 +407,15 @@ def main():
         check("a plain failure is annotated by neither",
               plainbad.code != 0 and "::error::" not in plainbad.out
               and "::add-mask::" not in plainbad.out, plainbad.out)
+        # The other half of the same split. There is no workflow to re-run from a
+        # terminal, and the guidance says so only inside Actions.
+        check("...and a local run is not told to re-run a workflow",
+              "Run workflow" not in plainbad.out, plainbad.out)
         ghbad = run(tmp, "gherr", versions={k: v for k, v in GOOD.items() if k != "model-providers"},
                     github=True)
         check("a failure is annotated under GITHUB_ACTIONS", "::error::" in ghbad.out, ghbad.out)
+        check("...and a CD run IS told the deploy does not resume by itself",
+              "Run workflow" in ghbad.out, ghbad.out)
         # Ordering, not just presence. Masking a value after something has
         # already printed it is no protection at all, so take the path that
         # fails AFTER the first value is fetched and require the redaction to be
@@ -446,17 +452,27 @@ def main():
         nov = run(tmp, "noghenv", verb="created", env_extra={"GITHUB_ENV": None})
         check("no GITHUB_ENV means no SECRET_CHANGED and no failure", nov.code == 0, nov.out)
 
-        # PATH here is the fake bin ALONE, so gcloud and kubectl resolve and jq
-        # does not. Everything the refusal needs is a bash builtin, which is why
-        # it can still speak with no real tool in reach.
+        # One PATH per tool, holding the other two and nothing else, because a
+        # scenario that only ever hides `jq` leaves the other two entries of the
+        # preflight loop unverifiable: cutting them to `for tool in jq` would
+        # keep the suite green. Everything a refusal needs is a bash builtin,
+        # which is why the script can still speak with no tool in reach.
         print("a missing tool is named rather than misdiagnosed")
-        nojq = run(tmp, "nojq", env_extra={"PATH": str(binp)})
-        check("exits non-zero", nojq.code != 0, nojq.out)
-        check("names the tool", "jq is required and not on PATH" in nojq.out, nojq.out)
-        check("does not blame a healthy model-providers",
-              "not a non-empty JSON array" not in nojq.out, nojq.out)
-        check("...and no credential was fetched first",
-              not (nojq.state / "key.controlplane-api-key").exists())
+        for missing in ("gcloud", "kubectl", "jq"):
+            only = pathlib.Path(tmp) / ("bin.no-" + missing)
+            only.mkdir(exist_ok=True)
+            for name, src in (("gcloud", binp / "gcloud"), ("kubectl", binp / "kubectl"),
+                              ("jq", pathlib.Path(shutil.which("jq")))):
+                if name != missing and not (only / name).exists():
+                    (only / name).symlink_to(src)
+            t = run(tmp, "no" + missing, env_extra={"PATH": str(only)})
+            check("a missing %s is named" % missing,
+                  t.code != 0 and "%s is required and not on PATH" % missing in t.out, t.out)
+            check("...and no credential was fetched first",
+                  not (t.state / "key.controlplane-api-key").exists())
+            check("...and nothing healthy is blamed for it",
+                  "not a non-empty JSON array" not in t.out
+                  and "EMPTY or whitespace-only" not in t.out, t.out)
 
         print("required inputs are refused rather than applied empty")
         for var in ("PROJECT", "BLOB_BUCKET", "KMS_KEY_NAME"):
