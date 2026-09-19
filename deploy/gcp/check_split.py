@@ -126,6 +126,16 @@ BAD_UTF8 = (
     "newline — and here it glues to whatever follows, so a resource header behind one "
     "matches nothing and this guard would report over a file it had not read."
 )
+# Same shape again for U+FEFF, which is valid UTF-8 and so invisible to BAD_BYTE.
+# Only the file's first one is a byte-order mark; a second, or one further in, is
+# a character Terraform refuses among structure — and it glues to a header the
+# same way, being whitespace to nobody's `\s`.
+BAD_BOM = (
+    "a U+FEFF that is not the file's leading byte-order mark, outside a comment. "
+    "Terraform refuses the file over one (Invalid character) and accepts it inside a "
+    "string, a comment and a heredoc body — and here it glues to whatever follows, so "
+    "a resource header behind one matches nothing."
+)
 
 
 def scrub(line: str) -> str:
@@ -147,8 +157,12 @@ def scrub(line: str) -> str:
                 # downstream reads the columns. A carriage return is the
                 # exception, kept so the lone-return check in blocks() can still
                 # see it: `"a\<CR>b"` is three errors to terraform 1.15.8, and
-                # collapsing the pair to `_` hid it from every later look.
-                out.append("\r" if line[i + 1 : i + 2] == "\r" else "_")
+                # collapsing the pair to `_` hid it from every later look. A
+                # byte that is not UTF-8 is kept for the same reason and the
+                # same measurement — `"a\<FF>b"` is three errors too, one of
+                # them the `Invalid character encoding` this reader answers.
+                esc = line[i + 1 : i + 2]
+                out.append(esc if esc == "\r" or BAD_BYTE.match(esc) else "_")
                 i += 2
                 continue
             if line[i : i + 2] in ("${", "%{"):
@@ -185,14 +199,19 @@ def scrub(line: str) -> str:
                         "cannot be read by this guard — assign it to a `locals` value and "
                         "interpolate that instead"
                     )
-                out.append("_" if ch in "{}#<" else ch)
+                out.append("_" if ch in "{}#<\ufeff" else ch)
                 i += 1
                 continue
             if ch == '"':
                 quoted = False
                 out.append('"')
             else:
-                out.append("_" if ch in "{}#<" else ch)
+                # U+FEFF joins the neutralized set rather than being refused
+                # outright: terraform accepts a BOM inside a string, inside a
+                # comment and inside a heredoc body, and refuses it among
+                # structure — so blanking it here is what lets the refusal
+                # below mean exactly the position terraform refuses.
+                out.append("_" if ch in "{}#<\ufeff" else ch)
             i += 1
             continue
         if ch == '"':
@@ -267,6 +286,12 @@ def blocks(path: pathlib.Path):
             # it would close the string HERE and not THERE.
             if "\r" in line:
                 raise ValueError(f"{path}:{n + 1}: {LONE_CR}")
+            # And the byte terraform refuses here too (`Invalid character
+            # encoding`, with an `Unterminated template string` behind it).
+            # A body line is never scrubbed, so the check below never sees it.
+            # U+FEFF is NOT checked: terraform reads one in a body as text.
+            if BAD_BYTE.search(line):
+                raise ValueError(f"{path}:{n + 1}: {BAD_UTF8}")
             # Trimmed, and for `<<EOT` as much as `<<-EOT`: the marker decides
             # how the BODY is dedented, not where the string ends. Measured
             # against terraform 1.15.8 — a plain heredoc closes at `    EOT`,
@@ -328,6 +353,8 @@ def blocks(path: pathlib.Path):
         # one that survives is one terraform refuses.
         if BAD_BYTE.search(scrubbed):
             raise ValueError(f"{path}:{n + 1}: {BAD_UTF8}")
+        if "\ufeff" in scrubbed:
+            raise ValueError(f"{path}:{n + 1}: {BAD_BOM}")
         m = HEREDOC.search(scrubbed)
         if m:
             skip_until = m.group(1)

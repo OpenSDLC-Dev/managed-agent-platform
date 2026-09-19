@@ -253,6 +253,36 @@ func TestTheReaderRefusesRatherThanShortRead(t *testing.T) {
 			"\xffresource \"a\" \"b\" {\n  x = 1\n}\n",
 			"not UTF-8",
 		},
+		{
+			// A body line is never scrubbed, so the check above it is the only
+			// one that reaches here. terraform 1.15.8: `Invalid character
+			// encoding` plus `Unterminated template string`.
+			"a byte that is not UTF-8 in a heredoc body",
+			"locals {\n  x = <<EOT\na\xffb\nEOT\n}\nresource \"a\" \"b\" {\n}\n",
+			"not UTF-8",
+		},
+		{
+			// Escaped, where the scrubber used to collapse the pair to one `_`
+			// and hide the byte from the check — the same hole the carriage
+			// return had. terraform gives three errors on these bytes.
+			"a byte that is not UTF-8 escaped inside a quoted string",
+			"locals {\n  x = \"a\\\xffb\"\n}\nresource \"a\" \"b\" {\n}\n",
+			"not UTF-8",
+		},
+		{
+			// Only the FIRST U+FEFF is a byte-order mark. A second, or one
+			// further in, is `Invalid character` to terraform and glues to the
+			// header behind it exactly as `\xff` does — which is how the
+			// `hidden` resource here went unlisted while `first` was reported.
+			"a U+FEFF among structure, past the leading one",
+			"resource \"a\" \"first\" {\n}\n\ufeffresource \"a\" \"hidden\" {\n}\n",
+			"not the file's leading byte-order mark",
+		},
+		{
+			"two byte-order marks at the start of the file",
+			"\ufeff\ufeffresource \"a\" \"b\" {\n}\n",
+			"not the file's leading byte-order mark",
+		},
 	} {
 		if _, err := tfBlocks(writeTF(t, tc.body)); err == nil || !strings.Contains(err.Error(), tc.want) {
 			t.Errorf("%s: error = %v, want one mentioning %q", tc.name, err, tc.want)
@@ -290,9 +320,24 @@ func TestCRLFAndAnUnterminatedLastLineAreStillRead(t *testing.T) {
 		// A BOM parses for terraform — `fmt -check` reports formatting drift
 		// and nothing else — so refusing it would reject configuration the
 		// binary takes. Left in place it is worse than harmless: `^\s*` does
-		// not match U+FEFF, so the header behind it was invisible and every
-		// block in the file went unread with nothing said (#765).
+		// not match U+FEFF, so the header on the file's first line went unseen
+		// behind it, with nothing said (#765). Only that header — a block
+		// further down still matched — which is why the refusal below handles
+		// the marks the strip does not take.
 		{"a leading BOM", "\xef\xbb\xbfresource \"a\" \"b\" {\n  x = 1\n}\n"},
+		// The three positions terraform reads a U+FEFF in, all measured clean
+		// on 1.15.8. The refusal above must reach none of them, or this guard
+		// rejects configuration the binary takes.
+		{"a BOM inside a quoted string", "resource \"a\" \"b\" {\n  x = \"p\ufeffq\"\n}\n"},
+		{"a BOM inside a comment", "# \ufeff\nresource \"a\" \"b\" {\n  x = 1\n}\n"},
+		{"a BOM inside a heredoc body", "resource \"a\" \"b\" {\n  x = <<EOT\n\ufeff\nEOT\n}\n"},
+		// A backslash before a multi-byte character. terraform refuses this
+		// file (`Invalid escape sequence`) and this reader reads it, which is
+		// the permitted direction — what must NOT happen is refusing it as
+		// invalid UTF-8, which is what a scrubber consuming one byte instead of
+		// one rune made of it: the continuation bytes were left behind and the
+		// line became invalid UTF-8 that the file never contained.
+		{"a backslash before a multi-byte character", "resource \"a\" \"b\" {\n  x = \"a\\éb\"\n}\n"},
 	} {
 		got, err := tfBlocks(writeTF(t, tc.body))
 		if err != nil {

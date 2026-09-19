@@ -50,12 +50,17 @@ var (
 	tfAttrRe = map[string]*regexp.Regexp{}
 )
 
-// Raised from the two places a lone carriage return can reach this reader, so
-// both say the same thing about the same character.
-// Raised where a byte that is not UTF-8 survives scrubbing, which is to say
-// where it sits outside a comment. Mirrors check_split.py's BAD_UTF8.
+// Raised where a U+FEFF past the file's leading byte-order mark survives
+// scrubbing. Mirrors check_split.py's BAD_BOM.
+var errBadBOM = errors.New("a U+FEFF that is not the file's leading byte-order mark, outside a comment — terraform refuses the file over one (Invalid character) and accepts it inside a string, a comment and a heredoc body, and here it glues to whatever follows, so a block header behind one matches nothing")
+
+// Raised where a byte that is not UTF-8 survives scrubbing, or reaches a
+// heredoc body line — which is to say where it sits outside a comment. Mirrors
+// check_split.py's BAD_UTF8.
 var errBadUTF8 = errors.New("a byte that is not UTF-8, outside a comment — terraform refuses the file over one (Invalid character encoding) and accepts it inside a comment, which runs to the newline, and here it glues to whatever follows, so a block header behind one matches nothing and this reader would report over a file it had not read")
 
+// Raised from the two places a lone carriage return can reach this reader, so
+// both say the same thing about the same character.
 var errLoneCR = errors.New("a carriage return that is not part of a CRLF — terraform refuses the file over one (Invalid character, or Invalid multi-line string when it sits inside a quoted string), so this reader refuses rather than guessing where the lines end")
 
 func init() {
@@ -183,12 +188,37 @@ func scrubTF(line string) (string, int, error) {
 				// check in tfBlocks can still see it: `"a\<CR>b"` is three
 				// errors to terraform 1.15.8, and collapsing the pair to `_`
 				// hid it from every later look.
-				if i+1 < len(line) && line[i+1] == '\r' {
-					out.WriteByte('\r')
+				// A byte that is not UTF-8 is kept for the same reason and the
+				// same measurement: `"a\<FF>b"` is three errors too, one of
+				// them the `Invalid character encoding` this reader answers.
+				// The whole rune is consumed rather than one byte — collapsing
+				// `\` plus a lead byte left the continuation bytes behind and
+				// manufactured invalid UTF-8 out of a file that had none, which
+				// this reader would then have refused for the wrong reason, and
+				// its Python mirror would not have refused at all.
+				if i+1 < len(line) {
+					r, w := utf8.DecodeRuneInString(line[i+1:])
+					switch {
+					case line[i+1] == '\r':
+						out.WriteByte('\r')
+					case r == utf8.RuneError && w == 1:
+						out.WriteByte(line[i+1])
+					default:
+						out.WriteByte('_')
+					}
+					i += w
 				} else {
 					out.WriteByte('_')
 				}
-				i++
+			case strings.HasPrefix(line[i:], "\ufeff"):
+				// Neutralized rather than refused: terraform accepts a BOM
+				// inside a string, a comment and a heredoc body, and refuses it
+				// among structure — so blanking it here is what lets the
+				// refusal in tfBlocks mean exactly the position terraform
+				// refuses. neutral() cannot do it: it works a byte at a time
+				// and this character is three.
+				out.WriteByte('_')
+				i += len("\ufeff") - 1
 			case strings.HasPrefix(line[i:], "${"), strings.HasPrefix(line[i:], "%{"):
 				// An interpolation or a template directive. BOTH, because they
 				// are the same hazard: their own braces are not structure, but
@@ -276,6 +306,14 @@ func tfBlocks(path string) ([]tfBlock, error) {
 			if strings.Contains(line, "\r") {
 				return nil, fmt.Errorf("%s:%d: %w", path, i+1, errLoneCR)
 			}
+			// And the byte terraform refuses here too (`Invalid character
+			// encoding`, with an `Unterminated template string` behind it). A
+			// body line is never scrubbed, so the check further down never sees
+			// it. U+FEFF is deliberately NOT checked: terraform reads one in a
+			// body as ordinary text.
+			if !utf8.ValidString(line) {
+				return nil, fmt.Errorf("%s:%d: %w", path, i+1, errBadUTF8)
+			}
 			src = append(src, tfLine{Raw: line, N: i + 1, Heredoc: true})
 			// Trimmed, whatever the opener's marker — see the header.
 			if strings.TrimSpace(line) == term {
@@ -330,6 +368,13 @@ func tfBlocks(path string) ([]tfBlock, error) {
 		// that finds nothing reports as if there were nothing.
 		if !utf8.ValidString(s) {
 			return nil, fmt.Errorf("%s:%d: %w", path, i+1, errBadUTF8)
+		}
+		// And U+FEFF, which is valid UTF-8 and so invisible to the check above.
+		// Only the file's first one was a byte-order mark; the strip above took
+		// that, so anything left is a character terraform refuses among
+		// structure, and one that glues to a header just as `\xff` does.
+		if strings.Contains(s, "\ufeff") {
+			return nil, fmt.Errorf("%s:%d: %w", path, i+1, errBadBOM)
 		}
 		code := line[:codeLen]
 		if m := tfHeredocRe.FindStringSubmatchIndex(s); m != nil {

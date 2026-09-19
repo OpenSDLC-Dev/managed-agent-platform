@@ -300,13 +300,59 @@ def main():
         # A BOM is the other direction: terraform parses the file (`fmt -check`
         # reports formatting drift and nothing else), so refusing it would
         # reject configuration the binary takes — but left in the text it sits
-        # in front of the first header, which `^\s*` does not match, and every
-        # block in the file goes unread. Dropped on decode, so the key is seen
-        # and this case is the guard catching it (#765).
-        case(tmp, "a leading BOM does not hide the file's blocks",
+        # in front of the first header, which `^\s*` does not match, so that
+        # header alone goes unseen (a block further down still matches).
+        # Dropped on decode, so the key here is seen and this case is the guard
+        # catching it (#765).
+        case(tmp, "a leading BOM does not hide the file's first block",
              append_bytes("environment/zz_bom.tf",
                           b"\xef\xbb\xbf" + ROGUE_KEY.strip().encode() + b"\n"),
              expect_text="must not OWN")
+        # Only the FIRST U+FEFF is a byte-order mark. A second, or one further
+        # in, is `Invalid character` to terraform and glues to the header behind
+        # it exactly as `\xff` does — so the key here went unlisted while the
+        # block before it was reported, which is a partial scan reported as a
+        # whole one. Measured on 1.15.8; the decode strips one mark, and what is
+        # left has to be refused rather than read past.
+        case(tmp, "a U+FEFF past the leading one is refused",
+             append_bytes("environment/zz_bom2.tf",
+                          b'resource "google_project" "seen" {\n}\n'
+                          b"\xef\xbb\xbf" + ROGUE_KEY.strip().encode() + b"\n"),
+             expect_text="leading byte-order mark")
+        case(tmp, "two byte-order marks at the start of a file are refused",
+             append_bytes("environment/zz_bom3.tf",
+                          b"\xef\xbb\xbf\xef\xbb\xbf" + ROGUE_KEY.strip().encode() + b"\n"),
+             expect_text="leading byte-order mark")
+        # The two positions the scrubbed-line check cannot reach. A body line is
+        # never scrubbed; and an escaped byte used to vanish, the scrubber
+        # collapsing `\` plus its character to a single `_` — the same hole the
+        # carriage return had. terraform 1.15.8 refuses both files.
+        case(tmp, "a byte that is not UTF-8 in a heredoc body is refused",
+             append_bytes("environment/main.tf",
+                          b"\nlocals {\n  a = <<EOT\nbody\xffjunk\nEOT\n}\n"),
+             expect_text="not UTF-8")
+        case(tmp, "a byte that is not UTF-8 escaped in a quoted string is refused",
+             append_bytes("environment/main.tf", b'\nlocals {\n  a = "x\\\xffy"\n}\n'),
+             expect_text="not UTF-8")
+        # And the three positions terraform READS a U+FEFF in — inside a string,
+        # a comment and a heredoc body, all measured clean on 1.15.8. The
+        # refusal above must reach none of them, or this guard rejects
+        # configuration the binary takes.
+        for label, body in (
+                ("a quoted string", b'\nlocals {\n  a = "p\xef\xbb\xbfq"\n}\n'),
+                ("a comment", b"\n# \xef\xbb\xbf\n"),
+                ("a heredoc body", b"\nlocals {\n  a = <<EOT\n\xef\xbb\xbf\nEOT\n}\n")):
+            case(tmp, "a U+FEFF inside %s is read, not refused" % label,
+                 append_bytes("environment/main.tf", body), expect_ok=True)
+        # A backslash before a multi-byte character. terraform refuses this file
+        # (`Invalid escape sequence`) and this guard reads it, which is the
+        # permitted direction — what must not happen is refusing it as invalid
+        # UTF-8. Python collapses the pair by CHARACTER and cannot manufacture a
+        # broken sequence; its Go mirror consumes a whole rune for the same
+        # reason, and this case is what pins the two together.
+        case(tmp, "a backslash before a multi-byte character is read",
+             append_bytes("environment/main.tf", b'\nlocals {\n  a = "x\\\xc3\xa9y"\n}\n'),
+             expect_ok=True)
         case(tmp, "a multi-line interpolation is refused",
              append("environment/main.tf",
                     '\nlocals {\n  x = "${coalesce(\n    var.a,\n    "b",\n  )}"\n}\n'),
