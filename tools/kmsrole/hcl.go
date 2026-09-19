@@ -20,8 +20,9 @@ import (
 // do not: over every file Terraform will parse, strings.TrimSpace is its
 // whitespace set, and the four characters Python's wider str.strip() adds are
 // excluded on that side rather than trimmed. Past that both still trim a lone
-// U+000D that Terraform refuses the file over, which is #761.
-// Requiring an exact match instead, as this reader
+// U+000D that Terraform refuses the whole file over rather than reading as
+// padding — a boundary left open under #761, where `make gcp-fmt` reddens
+// first. Requiring an exact match instead, as this reader
 // did until #758, reads on past a terminator Terraform honoured: what follows
 // is configuration to Terraform and string content to the reader, so a deny
 // policy that should have refused the file is never seen, and the swallowed
@@ -36,9 +37,9 @@ var (
 	tfResourceRe = regexp.MustCompile(`^\s*resource\s+"([^"]+)"\s+"([^"]+)"`)
 	tfModuleRe   = regexp.MustCompile(`^\s*module\s+"([^"]+)"`)
 	// `~` is not a Terraform heredoc marker at all — a file containing one is
-	// rejected outright, which `make gcp-validate` is there to catch. It is
-	// matched here, as in check_split.py, only so the opener is still
-	// recognised as one rather than read as configuration.
+	// rejected outright, and `make gcp-fmt` reddens on it first. It is matched
+	// here, as in check_split.py, only so the opener is still recognised as one
+	// rather than read as configuration.
 	tfHeredocRe = regexp.MustCompile(`<<[-~]?([A-Za-z_][A-Za-z0-9_]*)`)
 	// A nested block opener, with or without labels. Matched structurally rather
 	// than by brace arithmetic, because a block written on one line nets to zero

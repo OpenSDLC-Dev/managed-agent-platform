@@ -134,6 +134,31 @@ EOT2
 	if _, err := tfBlocks(writeTF(t, "locals {\n  a = <<EOT\nEOTX\n}\n")); err == nil {
 		t.Fatal("a heredoc closed by EOTX was read as terminated")
 	}
+	// Every padding terraform honours, not only the indented one: a left-trim
+	// would pass a suite that pins `    EOT` alone while reading on past
+	// `EOT   `, which terraform both accepts and leaves alone under
+	// `terraform fmt -check`.
+	for _, term := range []string{"    EOT", "EOT   ", "\tEOT"} {
+		got, err := tfBlocks(writeTF(t, "locals {\n  a = <<EOT\n"+term+"\n}\nresource \"a\" \"b\" {\n}\n"))
+		if err != nil {
+			t.Fatalf("terminator %q: %v", term, err)
+		}
+		if len(got) != 1 || got[0].Label != "b" {
+			t.Fatalf("terminator %q: read %d blocks, want the one resource", term, len(got))
+		}
+	}
+	// And the padding terraform does NOT honour, which is why this reader never
+	// had the bug #761 is named for: strings.TrimSpace leaves U+001C-U+001F
+	// alone, so the terminator they forge closes nothing. Pinned here because
+	// the claim is load-bearing in this file's header — a later harmonisation
+	// toward Python's wider trim would otherwise re-open it with the suite green.
+	sep, err := tfBlocks(writeTF(t, "locals {\n  a = <<EOT\n\x1cEOT\n{\nEOT\n}\nresource \"a\" \"b\" {\n}\n"))
+	if err != nil {
+		t.Fatalf("separator-forged terminator: %v", err)
+	}
+	if len(sep) != 1 || sep[0].Label != "b" {
+		t.Fatalf("read %d blocks after a separator-forged terminator, want the one resource", len(sep))
+	}
 	// The indented form still terminates where it says it does.
 	ok, err := tfBlocks(writeTF(t, "locals {\n  note = <<-EOT\n    text\n    EOT\n}\n\nresource \"a\" \"b\" {\n}\n"))
 	if err != nil {

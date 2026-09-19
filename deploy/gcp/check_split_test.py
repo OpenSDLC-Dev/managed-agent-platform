@@ -144,10 +144,23 @@ def main():
         #
         # Two cases because the wrong rule fails two different ways, and only
         # one of them is loud.
-        case(tmp, "an indented terminator ends a plain heredoc, so what follows is real",
-             append("environment/main.tf",
-                    '\nlocals {\n  note = <<EOT\n    EOT\n}\n' + ROGUE_KEY),
-             expect_text="must not OWN")
+        # All three paddings terraform honours, not just the indented one:
+        # `line.lstrip()` reads on past `EOT   `, which terraform accepts as a
+        # terminator and `terraform fmt -check` leaves alone, so a tree can
+        # carry one. The heredoc has to close for the key after it to sit at
+        # depth 0 and be seen.
+        #
+        # One file per form, deliberately. Put them together and a form that
+        # fails to close is rescued by the NEXT form's terminator line, the key
+        # is found anyway, and the case passes over a reader that is wrong —
+        # which is how this started out written.
+        for label, term in (("an indented", "    EOT"),
+                            ("a trailing-space", "EOT   "),
+                            ("a tab-indented", "\tEOT")):
+            case(tmp, "%s terminator ends a plain heredoc, so what follows is real" % label,
+                 append("environment/main.tf",
+                        '\nlocals {\n  a = <<EOT\n' + term + '\n}\n' + ROGUE_KEY),
+                 expect_text="must not OWN")
         # The quiet one: a second heredoc's bare terminator closes the FIRST for
         # a checker still inside it, so the braces it swallowed balance again at
         # end of file and neither the unterminated-heredoc nor the unbalanced-

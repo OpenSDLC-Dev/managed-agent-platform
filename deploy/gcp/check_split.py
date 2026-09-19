@@ -100,13 +100,15 @@ ROOT = pathlib.Path(__file__).parent
 RESOURCE = re.compile(r'^\s*resource\s+"([^"]+)"\s+"([^"]+)"')
 MODULE = re.compile(r'^\s*module\s+"([^"]+)"')
 SOURCE = re.compile(r'^\s*source\s*=\s*"([^"]+)"\s*$', re.M)
+# `~` is not a Terraform heredoc marker at all: `<<~EOT` is an `Invalid
+# expression`, not an indented heredoc — that spelling is Ruby's. It is matched
+# anyway, so that an opener is still recognised as one rather than read as
+# configuration.
 HEREDOC = re.compile(r"<<[-~]?([A-Za-z_][A-Za-z0-9_]*)")
-# The characters str.strip() calls whitespace and Terraform reads as heredoc
-# body text — exactly the four ASCII separators, measured codepoint by codepoint
-# against terraform 1.15.8 over both languages' whole whitespace sets. One
-# disagreement is deliberately left outside this set: a lone U+000D before the
-# terminator, which both readers trim and which makes Terraform refuse the file
-# outright, so `make gcp-fmt` answers that one first (#761). See blocks().
+# The characters str.strip() calls whitespace and Terraform reads as ordinary
+# heredoc body text — exactly these four, swept codepoint by codepoint across
+# both languages' whitespace sets against terraform 1.15.8. What it is for is in
+# blocks(), its only caller.
 SEPARATORS = re.compile(r"[\x1c-\x1f]")
 
 
@@ -229,6 +231,10 @@ def blocks(path: pathlib.Path):
             # the four are excluded rather than trimmed (#761). Checking the
             # whole line is exact: it is reached only when what remains after
             # stripping IS the terminator, so anything else on it is whitespace.
+            # One member of that whitespace stays in deliberately — a lone
+            # U+000D, which Terraform refuses the whole file over rather than
+            # reading as padding, so `make gcp-fmt` reddens before this guard is
+            # ever consulted. #761 holds it with the rest of the CR family.
             if line.strip() == skip_until and not SEPARATORS.search(line):
                 skip_until = None
             lines.append("")  # keep numbering, contribute no structure
