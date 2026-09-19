@@ -1,0 +1,5 @@
+locals {
+  m = "${coalesce(
+    "a",
+  )}"
+}

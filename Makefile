@@ -20,7 +20,7 @@ SHELL := /usr/bin/env bash
 .PHONY: build crossbuild vet fmt-check test cover-gate verify eval \
 	changelog changelog-notes changelog-archive \
 	release-tag-check release-images release-chart-check release-chart release-binaries \
-	openbao-init-test cd-outcome-test parked-test retry-test identifiers-test pins-test pipes-test registry-check sdk-bump-report \
+	openbao-init-test cd-outcome-test parked-test retry-test identifiers-test pins-test pipes-test tf-corpus-check registry-check sdk-bump-report \
 	gcp-fmt gcp-validate gcp-split-check gcp-kms-role-check gcp-lint gcp-bootstrap-test gcp-dbinit-test gcp-mode2-secret-test gcp-split-check-test gcp-power-test gcp-tfvars-test gcp-env-targets-test gcp-foundation-apply gcp-bootstrap gcp-env-apply gcp-db-init gcp-env-destroy gcp-env-rebuild \
 	gcp-require-project gcp-env-tfvars gcp-env-migrate-state gcp-env-init gcp-env-vars-match \
 	gcp-env-stop gcp-env-start gcp-env-status
@@ -346,6 +346,26 @@ pins-test:
 # later edit revokes. It self-tests before it scans.
 pipes-test:
 	python3 .github/scripts/pipes_test.py
+
+# The oracle half of the shared .tf corpus (#762). deploy/gcp/check_split.py and
+# tools/kmsrole/hcl.go are hand-written mirrors of one reader in two languages,
+# and tools/tfcorpus is what ties them: both suites read its manifest, so a rule
+# that moves in one reader and not the other fails on the side that did not
+# move. Those two rungs run in the gate (as tools/kmsrole's own test) and under
+# `gcp-split-check-test`; this one re-asks the terraform binary for each file's
+# `fmt` exit, because a corpus is worth exactly what its oracle is — #758 and
+# #761 were both rules the two readers agreed on and terraform disagreed with.
+# Only that exit: `fmt` says whether a file parses and never where the binary
+# closed a heredoc, so a row's expected blocks stay human-derived and the two
+# readers' agreement is what holds them. Outside `verify` for the reason
+# `gcp-fmt` is: terraform is not installed by this repo. Not named `gcp-`
+# because it is not GCP tooling; it runs in CI's `terraform` job only because
+# that is where the binary already is — which also means it tracks whatever
+# terraform that job installs, not a pinned one. So a terraform release that
+# moves an exit reddens PRs until the manifest is re-measured, the same
+# exposure `gcp-fmt` and `gcp-validate` already carry in that job.
+tf-corpus-check:
+	python3 tools/tfcorpus/oracle.py
 
 # ---------------------------------------------------------------------------
 # GCP staging environment (docs/plan/20, Decision 9). Developer tooling for GCP

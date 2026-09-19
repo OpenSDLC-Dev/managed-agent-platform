@@ -4,16 +4,22 @@ What is being worked on right now, and how far along it is — nothing else. **S
 
 ## Active work
 
-**none.** Nothing is in flight. The archive-endings cluster is closed: #713, #710, #574,
-#716, #730 and #731 shipped in v0.4.0 ([docs/changelog/0.4.0.md](./docs/changelog/0.4.0.md)),
-and #720's primary-unarchived CHECK landed after it; its entry is a
-[changelog.d/](./changelog.d/) fragment, as are #748's executor Cloud KMS grant, #749's
-release-install path for GCP, #752's legible `gcp-env-destroy` failure, #755's corrected
-`model-providers` secret guidance, #750's guard over each identity's Cloud KMS role,
-#761's `.tf`-reader boundaries, #765's BOM, #754's single mode-2 Secret assembly
-and #763's workflow pipelines that stopped reading early.
+**#762 — nothing executable keeps the two `.tf` readers in agreement.**
+`deploy/gcp/check_split.py` and `tools/kmsrole/hcl.go` are hand-written mirrors of one
+reader, kept in agreement by prose: three commits on #760 read the same heredoc rule
+three different ways, and every divergence was caught by a reviewer running terraform
+rather than by a test. Two PRs — the shared corpus first, then the three reader
+boundaries folded in from #766, #767 and #768.
+Everything else is closed: the archive-endings cluster shipped in v0.4.0
+([docs/changelog/0.4.0.md](./docs/changelog/0.4.0.md)), and #720, #748, #749, #752,
+#755, #750, #761, #765, #754 and #763 are unreleased
+[changelog.d/](./changelog.d/) fragments.
 The backlog is [GitHub issues](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues).
 
 ## Tasks
 
-_None — no active work._
+- [x] `tools/tfcorpus` — one corpus, both suites reading it, terraform asked for each `fmt` exit
+- [ ] #766 — a heredoc opener carrying a trailing comment: refuse, rather than read the configuration behind it as string content
+- [ ] #767 — interpolation context: a terminator closes only at interpolation depth 0, and `#`/`//`/`/* */` inside `${…}` are comments
+- [ ] #768 — `\v`, `\f`, U+2028 and U+0085 refused where they reach structure, read where terraform reads them
+- [ ] #762's own second finding — the CPython-`\s` vs Terraform-whitespace spelling behind `SEPARATORS`; the `#767` citations in both readers are repointed with it

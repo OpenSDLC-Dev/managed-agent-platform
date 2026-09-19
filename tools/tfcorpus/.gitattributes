@@ -1,0 +1,6 @@
+# These fixtures are bytes, not text. Rows here turn on a lone carriage return,
+# on a byte that is not UTF-8, and on whether the last line ends in a newline at
+# all — and git's own end-of-line translation would rewrite exactly those under a
+# clone that has core.autocrlf set. Marking them -text keeps what is committed
+# here the bytes every reader is handed.
+cases/*.tf -text

@@ -1112,6 +1112,12 @@ jobs:
         run: make gcp-bootstrap-test
       - name: the split guard actually bites
         run: make gcp-split-check-test
+      # And the oracle behind the shared .tf corpus both readers are pinned to
+      # (#762). tools/kmsrole reads it in the Go job and check_split_test.py in
+      # the step above; this one re-asks terraform for each file's `fmt` exit,
+      # which is the half neither of those can hold.
+      - name: terraform still gives the corpus the fmt exits it records
+        run: make tf-corpus-check
       # And neither terraform validate nor shellcheck can execute SQL. This runs
       # dbinit.sql against a real PostgreSQL 16 with TLS on — including the cases
       # that drive its assertions red on purpose — so the only thing that

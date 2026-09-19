@@ -13,6 +13,10 @@ Every case asserts a NON-ZERO exit and, where it matters, which message came bac
 The last group is the inverse: things that look suspicious and must stay green, so
 this file cannot be satisfied by a checker that simply refuses everything.
 
+A final group leaves the guard behind and reads the shared `.tf` corpus
+(tools/tfcorpus), which tools/kmsrole/corpus_test.go reads too — see corpus()
+below for what that is for.
+
 Run: make gcp-split-check-test
 """
 
@@ -25,6 +29,7 @@ import tempfile
 
 HERE = pathlib.Path(__file__).parent.resolve()
 CHECKER = HERE / "check_split.py"
+CORPUS = HERE.parent.parent / "tools" / "tfcorpus"
 
 ROGUE_KEY = '''
 resource "google_kms_crypto_key" "rogue" {
@@ -85,6 +90,62 @@ def write(rel, text):
         p.parent.mkdir(parents=True, exist_ok=True)
         p.write_text(text)
     return go
+
+
+def corpus():
+    """The shared .tf corpus, which tools/kmsrole/corpus_test.go also reads.
+
+    check_split.py's reader and tools/kmsrole/hcl.go's are hand-written mirrors
+    that cannot share code, and until #762 nothing executable tied one to the
+    other: three consecutive commits on #760 read the same heredoc rule three
+    different ways, each divergence caught by a reviewer running terraform
+    rather than by a test. tools/tfcorpus/README.md says what the manifest's
+    rows mean; a rule that moves in one reader and not the other now fails on
+    the side that did not move.
+
+    Alone in this file, these cases call blocks() here rather than running the
+    checker as a subprocess: the corpus is about the READER, and an exit code
+    cannot say "these blocks, in this order". The guard's own rules stay above.
+    """
+    # Imported here rather than at module scope so that main()'s "check_split.py
+    # not found next to this test" still comes out ahead of an ImportError.
+    # loader is the manifest's own reader, beside the manifest: the corpus's
+    # other Python consumer is tools/tfcorpus/oracle.py, and the row rule drifted
+    # between the two before the first follow-up PR landed.
+    import check_split
+    sys.path.insert(0, str(CORPUS))
+    import loader
+
+    # Reading nothing must never read as clean: an empty manifest, a row naming
+    # a file that is not there, a .tf that no row names, and a row naming
+    # neither blocks nor a refusal are each a failure and not a silent pass.
+    cases, problems = loader.load(CORPUS)
+    for p in problems:
+        print("  FAIL " + p)
+        failures.append("corpus manifest: " + p)
+    on_disk = {p.name for p in (CORPUS / "cases").glob("*.tf")}
+
+    for c in cases:
+        if c.get("file") not in on_disk or loader.row_problem(c):
+            continue  # loader.load() already named it
+        try:
+            got = ["module.%s" % kind if btype == "module" else "%s.%s" % (kind, name)
+                   for btype, kind, name, _ in check_split.blocks(CORPUS / "cases" / c["file"])]
+            err = None
+        except ValueError as exc:
+            got, err = None, str(exc)
+        if c.get("refuse"):
+            ok = err is not None and c["refuse"] in err
+            detail = "read %s, want a refusal mentioning %r" % (got, c["refuse"]) if err is None \
+                else "refused with %s, want one mentioning %r" % (err, c["refuse"])
+        else:
+            ok = err is None and got == c["blocks"]
+            detail = err if err is not None else "read %s, want %s" % (got, c["blocks"])
+        print(("  ok   " if ok else "  FAIL ") + c["file"])
+        if not ok:
+            print("       " + detail)
+            print("       " + c["why"])
+            failures.append("corpus: " + c["file"])
 
 
 def main():
@@ -419,13 +480,17 @@ def main():
                    'resource "google_storage_bucket_object" "x" {\n  name = "n"\n  bucket = "b"\n}\n'),
              expect_ok=True)
 
+        print("the shared .tf corpus reads the same here as in tools/kmsrole")
+        corpus()
+
         print()
         if failures:
             print("FAILED: %d case(s)" % len(failures))
             for f in failures:
                 print("  - %s" % f)
             return 1
-        print("ok: the split guard catches every planted violation and passes every decoy")
+        print("ok: the split guard catches every planted violation, passes every decoy, "
+              "and reads the shared corpus as tools/kmsrole does")
         return 0
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
