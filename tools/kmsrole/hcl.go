@@ -1,11 +1,13 @@
 package main
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"os"
 	"regexp"
 	"strings"
+	"unicode/utf8"
 )
 
 // The .tf reader. It is a deliberate near-mirror of deploy/gcp/check_split.py's
@@ -19,10 +21,9 @@ import (
 // 1.15.8 runs behind that. Trimming is where the two languages could drift and
 // do not: over every file Terraform will parse, strings.TrimSpace is its
 // whitespace set, and the four characters Python's wider str.strip() adds are
-// excluded on that side rather than trimmed. Past that both still trim a lone
-// U+000D that Terraform refuses the whole file over rather than reading as
-// padding — a boundary left open under #761, where `make gcp-fmt` reddens
-// first. Requiring an exact match instead, as this reader
+// excluded on that side rather than trimmed. A lone U+000D never reaches that
+// comparison on either side: a file holding one is refused where its bytes are
+// read, as Terraform refuses it. Requiring an exact match instead, as this reader
 // did until #758, reads on past a terminator Terraform honoured: what follows
 // is configuration to Terraform and string content to the reader, so a deny
 // policy that should have refused the file is never seen, and the swallowed
@@ -48,6 +49,19 @@ var (
 	// The attribute keys this guard reads, compiled once rather than per lookup.
 	tfAttrRe = map[string]*regexp.Regexp{}
 )
+
+// Raised where a U+FEFF past the file's leading byte-order mark survives
+// scrubbing. Mirrors check_split.py's BAD_BOM.
+var errBadBOM = errors.New("a U+FEFF that is not the file's leading byte-order mark, outside a comment — terraform refuses the file over one (Invalid character) and accepts it inside a string, a comment and a heredoc body, and here it glues to whatever follows, so a block header behind one matches nothing")
+
+// Raised where a byte that is not UTF-8 survives scrubbing, or reaches a
+// heredoc body line — which is to say where it sits outside a comment. Mirrors
+// check_split.py's BAD_UTF8.
+var errBadUTF8 = errors.New("a byte that is not UTF-8, outside a comment — terraform refuses the file over one (Invalid character encoding) and accepts it inside a comment, which runs to the newline, and here it glues to whatever follows, so a block header behind one matches nothing and this reader would report over a file it had not read")
+
+// Raised from the two places a lone carriage return can reach this reader, so
+// both say the same thing about the same character.
+var errLoneCR = errors.New("a carriage return that is not part of a CRLF — terraform refuses the file over one (Invalid character, or Invalid multi-line string when it sits inside a quoted string), so this reader refuses rather than guessing where the lines end")
 
 func init() {
 	// Either at the start of the line, or straight after a `{`. The second form
@@ -169,9 +183,40 @@ func scrubTF(line string) (string, int, error) {
 			switch {
 			case ch == '\\':
 				// The escape and the character it escapes both lose their
-				// structural meaning; nothing downstream reads the columns.
+				// structural meaning; nothing downstream reads the columns. A
+				// carriage return is the exception, kept so the lone-return
+				// check in tfBlocks can still see it: `"a\<CR>b"` is three
+				// errors to terraform 1.15.8, and collapsing the pair to `_`
+				// hid it from every later look.
+				// The whole rune is consumed rather than one byte: collapsing
+				// `\` plus a lead byte left the continuation bytes behind and
+				// manufactured invalid UTF-8 out of a file that had none, which
+				// this reader would then have refused for the wrong reason
+				// while its Python mirror refused nothing. A byte that is not
+				// UTF-8 is NOT kept here — keeping it put it next to whatever
+				// preceded the backslash and could splice the two into a legal
+				// rune; tfBlocks checks the raw code for that instead, and says
+				// why there.
+				if i+1 < len(line) {
+					_, w := utf8.DecodeRuneInString(line[i+1:])
+					if line[i+1] == '\r' {
+						out.WriteByte('\r')
+					} else {
+						out.WriteByte('_')
+					}
+					i += w
+				} else {
+					out.WriteByte('_')
+				}
+			case strings.HasPrefix(line[i:], "\ufeff"):
+				// Neutralized rather than refused: terraform accepts a BOM
+				// inside a string, a comment and a heredoc body, and refuses it
+				// among structure — so blanking it here is what lets the
+				// refusal in tfBlocks mean exactly the position terraform
+				// refuses. neutral() cannot do it: it works a byte at a time
+				// and this character is three.
 				out.WriteByte('_')
-				i++
+				i += len("\ufeff") - 1
 			case strings.HasPrefix(line[i:], "${"), strings.HasPrefix(line[i:], "%{"):
 				// An interpolation or a template directive. BOTH, because they
 				// are the same hazard: their own braces are not structure, but
@@ -238,6 +283,12 @@ func tfBlocks(path string) ([]tfBlock, error) {
 	if err != nil {
 		return nil, err
 	}
+	// A leading BOM is dropped rather than left in front of the first header,
+	// which `^\s*` does not match — U+FEFF is whitespace to neither this regexp
+	// nor Python's. terraform parses a BOM'd file (`fmt -check` reports only
+	// formatting drift), so refusing it would reject configuration the binary
+	// takes; dropping it is what lets the header be read (#765).
+	b = bytes.TrimPrefix(b, []byte("\xef\xbb\xbf"))
 	// Split on "\n" alone: strings.Split does not also break on U+2028, U+2029,
 	// \v, \f or \x85, which HCL treats as ordinary characters inside a string.
 	raw := strings.Split(strings.ReplaceAll(string(b), "\r\n", "\n"), "\n")
@@ -246,9 +297,36 @@ func tfBlocks(path string) ([]tfBlock, error) {
 	term := ""
 	for i, line := range raw {
 		if term != "" {
+			// A body line, where a lone return is refused outright: terraform
+			// refuses the file over one, and a trailing `\r` before the
+			// terminator word is padding to strings.TrimSpace and not to
+			// terraform, so it would close the string HERE and not THERE.
+			if strings.Contains(line, "\r") {
+				return nil, fmt.Errorf("%s:%d: %w", path, i+1, errLoneCR)
+			}
+			// And the byte terraform refuses here too (`Invalid character
+			// encoding`, with an `Unterminated template string` behind it). A
+			// body line is never scrubbed, so the check further down never sees
+			// it. U+FEFF is deliberately NOT checked: terraform reads one in a
+			// body as ordinary text.
+			if !utf8.ValidString(line) {
+				return nil, fmt.Errorf("%s:%d: %w", path, i+1, errBadUTF8)
+			}
 			src = append(src, tfLine{Raw: line, N: i + 1, Heredoc: true})
 			// Trimmed, whatever the opener's marker — see the header.
 			if strings.TrimSpace(line) == term {
+				// ...but HCL wants the newline after the terminator that the
+				// file's last line never gets: terraform 1.15.8 answers
+				// `Unterminated template string`, and accepts the same file the
+				// moment a trailing newline is added. An ordinary last line
+				// without one it accepts either way, so this is the
+				// terminator's rule and not the file's. Split on "\n" leaves a
+				// trailing "" when the content ends in one, so the last element
+				// is a line the file never ended — and it can only be reached
+				// here when it is non-empty, a terminator never being blank.
+				if i == len(raw)-1 {
+					return nil, fmt.Errorf("%s:%d: heredoc <<%s's terminator is the last line of a file with no trailing newline, so HCL does not close the string there — refusing rather than reading on", path, i+1, term)
+				}
 				term = ""
 			}
 			continue
@@ -256,6 +334,54 @@ func tfBlocks(path string) ([]tfBlock, error) {
 		s, codeLen, err := scrubTF(line)
 		if err != nil {
 			return nil, fmt.Errorf("%s:%d: %w", path, i+1, err)
+		}
+		// Checked on the SCRUBBED line, because terraform's own answer depends
+		// on where the return sits: measured on 1.15.8, `# note\r` at end of
+		// file, `# a\rb` and `# note\r\r\n` are all accepted — a comment runs to
+		// the newline and a lone return is ordinary text inside it — while the
+		// same return among structure is an `Invalid character` and inside a
+		// quoted string an `Invalid multi-line string`. Scrubbing removes the
+		// comments, and keeps a return everywhere else including behind a
+		// backslash, so what reaches here is the half terraform refuses — with
+		// one exception, which the raw body check above shares: a comment
+		// inside a template interpolation is a comment to terraform and to
+		// neither of them, so a return there is refused although the binary
+		// reads it (#767). A known false refusal, taken over leaving the two
+		// short reads it replaces.
+		// It has to be a refusal rather than a translation because this reader
+		// and check_split.py disagreed about such a file: Python's read_text()
+		// broke lines on a bare \r and this one never has, so the same bytes
+		// were four lines there and one line here — and one line means only the
+		// first header can match, with the rest unread and nothing said (#761).
+		if strings.Contains(s, "\r") {
+			return nil, fmt.Errorf("%s:%d: %w", path, i+1, errLoneCR)
+		}
+		// Same position rule for a byte that is not UTF-8, and the same reason.
+		// terraform accepts one inside a comment (`# caf\xe9` is fmt- and
+		// validate-clean on 1.15.8) and refuses it anywhere else as an `Invalid
+		// character encoding`. Reading on is what this reader did until now, and
+		// it is not harmless: `\xffresource "…"` is a single word to the header
+		// regexp, so the block behind it is invisible and a scan that finds
+		// nothing reports as if there were nothing.
+		//
+		// Checked on the RAW code — the line up to where its comment starts —
+		// and not on the scrubbed copy, which cannot answer the question. This
+		// scrubber works a byte at a time and DELETES the backslash of an
+		// escape, so in `"a<C3>\<A9>b"` it would write 0xC3, then 0xA9, leaving
+		// them adjacent: a well-formed `é` that the file never contained, over
+		// which utf8.ValidString says yes. terraform gives that file three
+		// errors and check_split.py refuses it — it decodes the whole file
+		// first, so its two surrogates can never recombine. The raw code cannot
+		// splice, which is what makes the two readers agree here.
+		if !utf8.ValidString(line[:codeLen]) {
+			return nil, fmt.Errorf("%s:%d: %w", path, i+1, errBadUTF8)
+		}
+		// And U+FEFF, which is valid UTF-8 and so invisible to the check above.
+		// Only the file's first one was a byte-order mark; the strip above took
+		// that, so anything left is a character terraform refuses among
+		// structure, and one that glues to a header just as `\xff` does.
+		if strings.Contains(s, "\ufeff") {
+			return nil, fmt.Errorf("%s:%d: %w", path, i+1, errBadBOM)
 		}
 		code := line[:codeLen]
 		if m := tfHeredocRe.FindStringSubmatchIndex(s); m != nil {

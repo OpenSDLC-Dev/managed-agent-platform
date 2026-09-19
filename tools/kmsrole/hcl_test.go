@@ -187,9 +187,186 @@ func TestTheReaderRefusesRatherThanShortRead(t *testing.T) {
 			"resource \"a\" \"b\" {\n  x = 1\n}\n}\n",
 			"unbalanced braces at end of file",
 		},
+		{
+			// HCL wants a newline after the terminator and the file's last line
+			// never gets one, so terraform 1.15.8 answers `Unterminated
+			// template string` — while the SAME file with a trailing newline it
+			// accepts, and an ordinary last line without one it accepts too.
+			// The reader closed the string here and answered anyway. Inside a
+			// block the braces then caught it, but blamed a brace: this fixture
+			// is the shape where they balance and nothing fires at all.
+			"terminator is the last line of a file with no trailing newline",
+			"resource \"a\" \"b\" {\n  x = 1\n}\n\ny = <<EOT\ntext\nEOT",
+			"no trailing newline",
+		},
+		{
+			// The same boundary one level in, where the reader used to refuse
+			// for the wrong reason — a reader sent after a brace that is not
+			// the problem is a reader that names what it could not read.
+			"the same terminator, inside a block",
+			"resource \"a\" \"b\" {\n  x = <<EOT\ntext\nEOT",
+			"no trailing newline",
+		},
+		{
+			// Terraform refuses a bare CR among structure, inside a quoted
+			// string and inside a heredoc body — `Invalid character` on 1.15.8,
+			// or `Invalid multi-line string` in the quoted case — while CRLF
+			// throughout is accepted. Go breaks lines on \n alone and Python's
+			// read_text() broke on a lone \r, so this file was one line to one
+			// reader and four to the other: a quiet short read on the Go side,
+			// where only the first header can still match.
+			"bare CR line endings",
+			"resource \"a\" \"b\" {\r  x = 1\r}\r",
+			"carriage return",
+		},
+		{
+			// The body half of that check, which nothing else reaches: body
+			// lines are never scrubbed, so they are tested raw.
+			"a lone CR inside a heredoc body",
+			"resource \"a\" \"b\" {\n  x = <<EOT\nbody\rjunk\nEOT\n}\n",
+			"carriage return",
+		},
+		{
+			// And the one that would close the string in the wrong place: a
+			// return before the terminator word is padding to TrimSpace and
+			// not to terraform.
+			"a lone CR before a heredoc terminator",
+			"resource \"a\" \"b\" {\n  x = <<EOT\ntext\n\rEOT\n}\n",
+			"carriage return",
+		},
+		{
+			// Escaped, where the scrubber used to collapse the pair to one `_`
+			// and hide the return from every later look. terraform 1.15.8 gives
+			// three errors on these bytes.
+			"a lone CR escaped inside a quoted string",
+			"resource \"a\" \"b\" {\n  x = \"a\\\rb\"\n}\n",
+			"carriage return",
+		},
+		{
+			// The byte terraform refuses as an `Invalid character encoding`,
+			// where it hides a block rather than stopping the scan: it glues to
+			// `resource`, so the header regexp matches nothing and a reader
+			// that answered here would report over a file with a
+			// google_kms_crypto_key in it. The same byte inside a comment is
+			// read — that case is in the accept table below.
+			"a byte that is not UTF-8, outside a comment",
+			"\xffresource \"a\" \"b\" {\n  x = 1\n}\n",
+			"not UTF-8",
+		},
+		{
+			// A body line is never scrubbed, so the check above it is the only
+			// one that reaches here. terraform 1.15.8: `Invalid character
+			// encoding` plus `Unterminated template string`.
+			"a byte that is not UTF-8 in a heredoc body",
+			"locals {\n  x = <<EOT\na\xffb\nEOT\n}\nresource \"a\" \"b\" {\n}\n",
+			"not UTF-8",
+		},
+		{
+			// Escaped, where the scrubber used to collapse the pair to one `_`
+			// and hide the byte from the check — the same hole the carriage
+			// return had. terraform gives three errors on these bytes.
+			"a byte that is not UTF-8 escaped inside a quoted string",
+			"locals {\n  x = \"a\\\xffb\"\n}\nresource \"a\" \"b\" {\n}\n",
+			"not UTF-8",
+		},
+		{
+			// The pair that can splice. This scrubber deletes an escape's
+			// backslash, so keeping the escaped byte would have put 0xA9 right
+			// after the 0xC3 the byte before it wrote — a well-formed `é` the
+			// file never contained, which utf8.ValidString accepts. terraform
+			// gives this file three errors and check_split.py refuses it, so a
+			// reader that read it would be the only one of the three that did.
+			// This is why the check reads the raw code, not the scrubbed copy.
+			"two bytes a deleted backslash could splice into a valid rune",
+			"locals {\n  x = \"a\xc3\\\xa9b\"\n}\nresource \"a\" \"b\" {\n}\n",
+			"not UTF-8",
+		},
+		{
+			// Only the FIRST U+FEFF is a byte-order mark. A second, or one
+			// further in, is `Invalid character` to terraform and glues to the
+			// header behind it exactly as `\xff` does — which is how the
+			// `hidden` resource here went unlisted while `first` was reported.
+			"a U+FEFF among structure, past the leading one",
+			"resource \"a\" \"first\" {\n}\n\ufeffresource \"a\" \"hidden\" {\n}\n",
+			"not the file's leading byte-order mark",
+		},
+		{
+			"two byte-order marks at the start of the file",
+			"\ufeff\ufeffresource \"a\" \"b\" {\n}\n",
+			"not the file's leading byte-order mark",
+		},
 	} {
 		if _, err := tfBlocks(writeTF(t, tc.body)); err == nil || !strings.Contains(err.Error(), tc.want) {
 			t.Errorf("%s: error = %v, want one mentioning %q", tc.name, err, tc.want)
+		}
+	}
+}
+
+// CRLF is the other half of the CR rule, and the reason it is a refusal of the
+// LONE carriage return rather than of the character: terraform accepts a file
+// written entirely in CRLF, so this reader has to as well. A last line with no
+// trailing newline is accepted for the same reason — terraform takes it, as
+// long as it is not a heredoc terminator.
+func TestCRLFAndAnUnterminatedLastLineAreStillRead(t *testing.T) {
+	for _, tc := range []struct{ name, body string }{
+		{"CRLF throughout", "resource \"a\" \"b\" {\r\n  x = 1\r\n}\r\n"},
+		{"ordinary last line, no trailing newline", "resource \"a\" \"b\" {\n  x = 1\n}"},
+		{"heredoc closed, then a last line with no newline", "resource \"a\" \"b\" {\n  x = <<EOT\ntext\nEOT\n}"},
+		// A comment runs to the newline, so a lone return inside one is
+		// ordinary text: terraform 1.15.8 accepts all three of these, and
+		// refusing them would be this reader rejecting configuration the
+		// binary takes. The `\r\r\n` form matters on its own — the CRLF pass
+		// eats the second return and leaves the first, which is exactly what a
+		// whole-file "any return left over" rule trips on.
+		{"lone return in a comment at end of file", "resource \"a\" \"b\" {\n  x = 1\n}\n# note\r"},
+		{"lone return in a comment before a CRLF", "resource \"a\" \"b\" {\n  x = 1\n}\n# note\r\r\n"},
+		{"lone return mid-comment", "# a\rb\nresource \"a\" \"b\" {\n  x = 1\n}\n"},
+		// The Go half of a claim deploy/gcp/check_split.py makes about this
+		// reader: it decodes with surrogateescape rather than strict BECAUSE
+		// this side carries a byte that is not UTF-8 through instead of dying,
+		// and terraform accepts one in a comment (`# caf\xe9` is fmt- and
+		// validate-clean on 1.15.8). Nothing here pinned that, so a later
+		// utf8.Valid guard on this side would reopen the divergence with the Go
+		// suite still green and the Python comment still asserting it closed.
+		{"a byte that is not UTF-8, inside a comment", "# caf\xe9\nresource \"a\" \"b\" {\n  x = 1\n}\n"},
+		// A BOM parses for terraform — `fmt -check` reports formatting drift
+		// and nothing else — so refusing it would reject configuration the
+		// binary takes. Left in place it is worse than harmless: `^\s*` does
+		// not match U+FEFF, so the header on the file's first line went unseen
+		// behind it, with nothing said (#765). Only that header — a block
+		// further down still matched — which is why the refusal below handles
+		// the marks the strip does not take.
+		{"a leading BOM", "\xef\xbb\xbfresource \"a\" \"b\" {\n  x = 1\n}\n"},
+		// The three positions terraform reads a U+FEFF in, all measured clean
+		// on 1.15.8. The refusal above must reach none of them, or this guard
+		// rejects configuration the binary takes.
+		{"a BOM inside a quoted string", "resource \"a\" \"b\" {\n  x = \"p\ufeffq\"\n}\n"},
+		{"a BOM inside a comment", "# \ufeff\nresource \"a\" \"b\" {\n  x = 1\n}\n"},
+		{"a BOM inside a heredoc body", "resource \"a\" \"b\" {\n  x = <<EOT\n\ufeff\nEOT\n}\n"},
+		// A backslash before a multi-byte character. terraform refuses this
+		// file (`Invalid escape sequence`) and this reader reads it, which is
+		// the permitted direction — what must NOT happen is refusing it as
+		// invalid UTF-8, which is what a scrubber consuming one byte instead of
+		// one rune made of it: the continuation bytes were left behind and the
+		// line became invalid UTF-8 that the file never contained.
+		// Three widths, not one: the byte-at-a-time version this replaces left
+		// one continuation byte behind for a 2-byte rune, two for a 3-byte and
+		// three for a 4-byte, so a fixture of a single width pins only a third
+		// of the arithmetic. terraform refuses all three for `Invalid escape
+		// sequence` and this reader reads all three, which is the permitted
+		// direction — what must not happen is refusing them as invalid UTF-8
+		// the reader itself manufactured.
+		{"a backslash before a 2-byte character", "resource \"a\" \"b\" {\n  x = \"a\\éb\"\n}\n"},
+		{"a backslash before a 3-byte character", "resource \"a\" \"b\" {\n  x = \"a\\€b\"\n}\n"},
+		{"a backslash before a 4-byte character", "resource \"a\" \"b\" {\n  x = \"a\\\U0001f600b\"\n}\n"},
+	} {
+		got, err := tfBlocks(writeTF(t, tc.body))
+		if err != nil {
+			t.Errorf("%s: %v", tc.name, err)
+			continue
+		}
+		if len(got) != 1 || got[0].Label != "b" {
+			t.Errorf("%s: read %d blocks, want the one resource", tc.name, len(got))
 		}
 	}
 }

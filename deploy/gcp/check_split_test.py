@@ -63,6 +63,22 @@ def append(rel, text):
     return lambda root: (root / rel).write_text((root / rel).read_text() + text)
 
 
+def append_bytes(rel, data):
+    """Append bytes rather than text.
+
+    These fixtures turn on a byte the reader has to see exactly, which append()
+    above cannot promise: it round-trips the file through `read_text()`, whose
+    universal-newline translation rewrites a lone carriage return into "\n"
+    before the fixture is ever written. Appending in binary also leaves the file
+    ending exactly where the caller put it, which is what the no-trailing-newline
+    cases need.
+    """
+    def go(root):
+        with (root / rel).open("ab") as f:
+            f.write(data)
+    return go
+
+
 def write(rel, text):
     def go(root):
         p = root / rel
@@ -186,6 +202,166 @@ def main():
                     '\nlocals {\n  a = <<EOT\n\x1cEOT\n{\nEOT\n}\n' + ROGUE_KEY
                     + '\nlocals {\n  b = <<EOT2\n\x1cEOT2\n}\nEOT2\n}\n'),
              expect_text="must not OWN")
+        # The two boundaries #761 names, where this reader and the binary
+        # disagreed. Both are files terraform refuses outright, so `make gcp-fmt`
+        # reddens on them — but what this guard owes is narrower than refusing
+        # every such file, and is what it broke here: never lose its place, and
+        # never report over configuration it did not read. On both of these it
+        # read part of the file and printed `ok` over the rest. Files terraform
+        # refuses are not automatically this guard's business: a NUL among
+        # structure is an `Invalid character` to terraform and this guard reads
+        # straight through it and still catches what it was hiding, measured on
+        # 1.15.8. Adding a refusal for every byte terraform dislikes would be
+        # this guard rejecting what it can perfectly well read.
+        #
+        # HCL wants the newline after a terminator that a file's last line never
+        # gets: terraform 1.15.8 says `Unterminated template string`, and
+        # accepts the very same bytes once a trailing newline is added. An
+        # ordinary last line without one it accepts either way, so the rule
+        # belongs to the terminator and not to the file. Written at depth 0 on
+        # purpose: inside a block the unbalanced-brace refusal fires and blames
+        # a brace, while here the depth never moves and nothing fires at all.
+        case(tmp, "a heredoc terminator as a last line with no trailing newline",
+             append_bytes("environment/main.tf", b'\ny = <<EOT\ntext\nEOT'),
+             expect_text="no trailing newline")
+        # And a carriage return that ends no CRLF. `read_text()` translated it
+        # into a line break, so this reader parsed a file terraform refuses as an
+        # `Invalid character` — and tools/kmsrole/hcl.go, which breaks on "\n"
+        # alone, read the same bytes as a single line where only the first header
+        # can match. Neither said anything.
+        case(tmp, "a bare carriage return is refused rather than translated",
+             append_bytes("environment/main.tf", b'\nlocals {\r  a = 1\r}\r'),
+             expect_text="carriage return")
+        # Three more positions across the two halves of the check. The first two
+        # reach the raw body check, because a body line is never scrubbed: a
+        # return anywhere in the body, and one before the terminator word, which
+        # would close the string in the wrong place, being padding to str.strip()
+        # and not to terraform. The third reaches the scrubbed-line check, where
+        # an ESCAPED return used to vanish — the scrubber collapsing `\` plus its
+        # character to a single `_`. terraform 1.15.8 refuses all three.
+        for label, body in (
+                ("in a heredoc body", b'\nlocals {\n  a = <<EOT\nbody\rjunk\nEOT\n}\n'),
+                ("before a heredoc terminator", b'\nlocals {\n  a = <<EOT\ntext\n\rEOT\n}\n'),
+                ("escaped inside a quoted string", b'\nlocals {\n  a = "x\\\ry"\n}\n')):
+            case(tmp, "a carriage return %s is refused" % label,
+                 append_bytes("environment/main.tf", body),
+                 expect_text="carriage return")
+        # The other half of that rule, and the reason it names the LONE return
+        # rather than the character: terraform accepts a file written entirely
+        # in CRLF, so this guard has to read one — and still catch what is in it.
+        # A file of its own, not an append: appending CRLF to main.tf leaves the
+        # bytes already in it LF-terminated, and a mixed file does not answer the
+        # question this case asks.
+        case(tmp, "a file written entirely in CRLF is still read, and still checked",
+             append_bytes("environment/zz_crlf.tf",
+                          ROGUE_KEY.replace("\n", "\r\n").encode()),
+             expect_text="must not OWN")
+        # And the position where terraform reads a lone return as ordinary text
+        # rather than refusing it: inside a comment, which runs to the newline.
+        # Measured on 1.15.8 — `# note\r` at end of file, `# a\rb` and
+        # `# note\r\r\n` are all accepted, so refusing them would be this guard
+        # rejecting configuration terraform takes. Three forms, because the
+        # cheap rule (refuse any return the CRLF pass leaves) accepts none of
+        # them: in `\r\r\n` the pass eats the second return and leaves the first.
+        for label, comment in (("at end of file", b"# note\r"),
+                               ("before a CRLF", b"# note\r\r\n"),
+                               ("mid-comment", b"# a\rb\n")):
+            case(tmp, "a lone return inside a comment %s is read, not refused" % label,
+                 append_bytes("environment/main.tf", b"\n" + comment), expect_ok=True)
+        # The accept side of the last-line rule, which the Go suite pins and this
+        # one did not: what the refusal must NOT reach. A missing final newline
+        # is only ever about the terminator, and terraform accepts both of these.
+        # Mirrors whose suites pin different things are the #762 channel.
+        case(tmp, "an ordinary last line with no trailing newline is read",
+             append_bytes("environment/main.tf", b"\nlocals {\n  a = 1\n}"),
+             expect_ok=True)
+        case(tmp, "a heredoc that closes before such a line is read",
+             append_bytes("environment/main.tf", b"\nlocals {\n  a = <<EOT\ntext\nEOT\n}"),
+             expect_ok=True)
+        # A byte that is not UTF-8 is carried through rather than raised on, the
+        # way tools/kmsrole/hcl.go's string(b) carries it: a reader that dies
+        # where its mirror reads on is a divergence, and terraform accepts this
+        # file. What is planted after it must still be caught, so this is not an
+        # `expect_ok` — it is the guard doing its job across the odd byte.
+        case(tmp, "a byte that is not UTF-8, inside a comment, does not stop the scan",
+             append_bytes("environment/main.tf",
+                          b"\n# \xff\n" + ROGUE_KEY.encode()),
+             expect_text="must not OWN")
+        # ...but outside one it is refused, because carrying a byte through is
+        # not the same as reading past it. Glued to the header the way it is
+        # here, `\xffresource` is one word to RESOURCE and the key behind it is
+        # invisible: before this case the guard printed `ok` over this file,
+        # which is the shape #761 is about. terraform refuses it outright
+        # (`Invalid character encoding`), so refusing is also what it does.
+        case(tmp, "a byte that is not UTF-8, outside a comment, is refused",
+             append_bytes("environment/main.tf",
+                          b"\n\xff" + ROGUE_KEY.strip().encode() + b"\n"),
+             expect_text="not UTF-8")
+        # A BOM is the other direction: terraform parses the file (`fmt -check`
+        # reports formatting drift and nothing else), so refusing it would
+        # reject configuration the binary takes — but left in the text it sits
+        # in front of the first header, which `^\s*` does not match, so that
+        # header alone goes unseen (a block further down still matches).
+        # Dropped on decode, so the key here is seen and this case is the guard
+        # catching it (#765).
+        case(tmp, "a leading BOM does not hide the file's first block",
+             append_bytes("environment/zz_bom.tf",
+                          b"\xef\xbb\xbf" + ROGUE_KEY.strip().encode() + b"\n"),
+             expect_text="must not OWN")
+        # Only the FIRST U+FEFF is a byte-order mark. A second, or one further
+        # in, is `Invalid character` to terraform and glues to the header behind
+        # it exactly as `\xff` does — so the key here went unlisted while the
+        # block before it was reported, which is a partial scan reported as a
+        # whole one. Measured on 1.15.8; the decode strips one mark, and what is
+        # left has to be refused rather than read past.
+        case(tmp, "a U+FEFF past the leading one is refused",
+             append_bytes("environment/zz_bom2.tf",
+                          b'resource "google_project" "seen" {\n}\n'
+                          b"\xef\xbb\xbf" + ROGUE_KEY.strip().encode() + b"\n"),
+             expect_text="leading byte-order mark")
+        case(tmp, "two byte-order marks at the start of a file are refused",
+             append_bytes("environment/zz_bom3.tf",
+                          b"\xef\xbb\xbf\xef\xbb\xbf" + ROGUE_KEY.strip().encode() + b"\n"),
+             expect_text="leading byte-order mark")
+        # The two positions the scrubbed-line check cannot reach. A body line is
+        # never scrubbed; and an escaped byte used to vanish, the scrubber
+        # collapsing `\` plus its character to a single `_` — the same hole the
+        # carriage return had. terraform 1.15.8 refuses both files.
+        case(tmp, "a byte that is not UTF-8 in a heredoc body is refused",
+             append_bytes("environment/main.tf",
+                          b"\nlocals {\n  a = <<EOT\nbody\xffjunk\nEOT\n}\n"),
+             expect_text="not UTF-8")
+        case(tmp, "a byte that is not UTF-8 escaped in a quoted string is refused",
+             append_bytes("environment/main.tf", b'\nlocals {\n  a = "x\\\xffy"\n}\n'),
+             expect_text="not UTF-8")
+        # The pair that can splice, which this reader gets right for free and
+        # its Go mirror had to be changed for: decoding the whole file up front
+        # makes 0xC3 and 0xA9 two independent characters that can never
+        # recombine, while a byte-at-a-time scrubber deleting the escape's
+        # backslash would have left them adjacent and legal. Pinned on both
+        # sides, so the claim that they agree here has an anchor in each.
+        case(tmp, "two bytes a deleted backslash could splice are still refused",
+             append_bytes("environment/main.tf", b'\nlocals {\n  a = "x\xc3\\\xa9y"\n}\n'),
+             expect_text="not UTF-8")
+        # And the three positions terraform READS a U+FEFF in — inside a string,
+        # a comment and a heredoc body, all measured clean on 1.15.8. The
+        # refusal above must reach none of them, or this guard rejects
+        # configuration the binary takes.
+        for label, body in (
+                ("a quoted string", b'\nlocals {\n  a = "p\xef\xbb\xbfq"\n}\n'),
+                ("a comment", b"\n# \xef\xbb\xbf\n"),
+                ("a heredoc body", b"\nlocals {\n  a = <<EOT\n\xef\xbb\xbf\nEOT\n}\n")):
+            case(tmp, "a U+FEFF inside %s is read, not refused" % label,
+                 append_bytes("environment/main.tf", body), expect_ok=True)
+        # A backslash before a multi-byte character. terraform refuses this file
+        # (`Invalid escape sequence`) and this guard reads it, which is the
+        # permitted direction — what must not happen is refusing it as invalid
+        # UTF-8. Python collapses the pair by CHARACTER and cannot manufacture a
+        # broken sequence; its Go mirror consumes a whole rune for the same
+        # reason, and this case is what pins the two together.
+        case(tmp, "a backslash before a multi-byte character is read",
+             append_bytes("environment/main.tf", b'\nlocals {\n  a = "x\\\xc3\xa9y"\n}\n'),
+             expect_ok=True)
         case(tmp, "a multi-line interpolation is refused",
              append("environment/main.tf",
                     '\nlocals {\n  x = "${coalesce(\n    var.a,\n    "b",\n  )}"\n}\n'),
