@@ -200,8 +200,8 @@ def main():
                     '\nlocals {\n  a = <<EOT\n\x1cEOT\n{\nEOT\n}\n' + ROGUE_KEY
                     + '\nlocals {\n  b = <<EOT2\n\x1cEOT2\n}\nEOT2\n}\n'),
              expect_text="must not OWN")
-        # The last two boundaries where this reader and the binary disagreed
-        # (#761). Both are files terraform refuses outright, so `make gcp-fmt`
+        # The two boundaries #761 names, where this reader and the binary
+        # disagreed. Both are files terraform refuses outright, so `make gcp-fmt`
         # reddens on them — but this guard's contract is that it refuses rather
         # than answering, and on both of these it answered.
         #
