@@ -96,7 +96,7 @@ jobs:
               --set externalObjectStorage.region=us-east-1 \
               --set externalObjectStorage.bucketPrecreated=true \
               --show-only "templates/$tpl-deployment.yaml")"
-            echo "$out" | grep -A5 'name: BLOB_BUCKET_PRECREATED' | grep -q 'key: blob-bucket-precreated' \
+            echo "$out" | grep -A5 'name: BLOB_BUCKET_PRECREATED' | grep 'key: blob-bucket-precreated' > /dev/null \
               || { echo "$tpl does not read BLOB_BUCKET_PRECREATED from the blob-bucket-precreated key" >&2
                    echo "$out" | grep -A5 'name: BLOB_BUCKET_PRECREATED' >&2; exit 1; }
           done
@@ -106,7 +106,7 @@ jobs:
           err="$(helm template t "$CHART" -f "$VALUES" "${ext[@]}" \
             --set externalObjectStorage.bucketPrecreated=true 2>&1 >/dev/null)" \
             && { echo "bucketPrecreated without a region must fail the render" >&2; exit 1; }
-          echo "$err" | grep -q 'bucketPrecreated requires region' \
+          echo "$err" | grep 'bucketPrecreated requires region' > /dev/null \
             || { echo "the region-less render failed for the wrong reason: $err" >&2; exit 1; }
           echo "ok: pre-created-bucket mode"
       - name: the keyless GCS mode carries no credential and reaches all three processes
@@ -131,11 +131,11 @@ jobs:
           # instead of the optional secretKeyRef the helper emits.
           all="$(helm template t "$CHART" -f "$VALUES" "${gcs[@]}")"
           for k in blob-access-key blob-secret-key blob-endpoint; do
-            echo "$all" | grep -q "^  $k:" \
+            echo "$all" | grep "^  $k:" > /dev/null \
               && { echo "the keyless GCS mode emitted $k" >&2; exit 1; }
           done
           for v in BLOB_ACCESS_KEY BLOB_SECRET_KEY BLOB_ENDPOINT; do
-            echo "$all" | grep -A2 "name: $v\$" | grep -qE '^ *value:' \
+            echo "$all" | grep -A2 "name: $v\$" | grep -E '^ *value:' > /dev/null \
               && { echo "the keyless GCS mode gave $v a literal value" >&2
                    echo "$all" | grep -A2 "name: $v\$" >&2; exit 1; }
           done
@@ -155,7 +155,7 @@ jobs:
             out="$(helm template t "$CHART" -f "$VALUES" "${gcs[@]}" --show-only "templates/$tpl-deployment.yaml")"
             for pair in BLOB_BACKEND:blob-backend BLOB_BUCKET:blob-bucket; do
               var="${pair%%:*}"; k="${pair##*:}"
-              echo "$out" | grep -A5 "name: $var\$" | grep -q "key: $k\$" \
+              echo "$out" | grep -A5 "name: $var\$" | grep "key: $k\$" > /dev/null \
                 || { echo "$tpl does not read $var from the $k key" >&2
                      echo "$out" | grep -A5 "name: $var\$" >&2; exit 1; }
             done
@@ -163,40 +163,40 @@ jobs:
           # Default values must not select it, or every existing install moves
           # backend on upgrade.
           out="$(helm template t "$CHART" -f "$VALUES" --show-only templates/secret.yaml)"
-          echo "$out" | grep -q "^  blob-backend:" \
+          echo "$out" | grep "^  blob-backend:" > /dev/null \
             && { echo "default values selected the GCS backend" >&2; exit 1; }
           # Ambiguity fails the render rather than picking one.
           for combo in "--set minio.enabled=false --set externalObjectStorage.endpoint=s3:9000 --set externalObjectStorage.accessKey=a --set externalObjectStorage.secretKey=b --set externalObjectStorage.bucket=c" ""; do
             err="$(helm template t "$CHART" -f "$VALUES" --set gcsObjectStorage.enabled=true \
               --set gcsObjectStorage.bucket=map-blob $combo 2>&1 >/dev/null)" \
               && { echo "GCS alongside another backend must fail the render" >&2; exit 1; }
-            echo "$err" | grep -q 'mutually exclusive' \
+            echo "$err" | grep 'mutually exclusive' > /dev/null \
               || { echo "the ambiguous render failed for the wrong reason: $err" >&2; exit 1; }
           done
           # A bucket is the whole configuration, so its absence is a refusal.
           err="$(helm template t "$CHART" -f "$VALUES" --set minio.enabled=false \
             --set gcsObjectStorage.enabled=true 2>&1 >/dev/null)" \
             && { echo "gcsObjectStorage without a bucket must fail the render" >&2; exit 1; }
-          echo "$err" | grep -q 'requires bucket' \
+          echo "$err" | grep 'requires bucket' > /dev/null \
             || { echo "the bucketless render failed for the wrong reason: $err" >&2; exit 1; }
           echo "ok: keyless GCS mode"
       - name: gate opt-in is off by default and complete when set
         run: |
           out="$(helm template t "$CHART" -f "$VALUES" --show-only templates/executor-deployment.yaml)"
-          echo "$out" | grep -qE 'EXECUTOR_GATE_IMAGE|CONTROLPLANE_URL' && { echo "default values must not opt the executor into the gate" >&2; exit 1; }
+          echo "$out" | grep -E 'EXECUTOR_GATE_IMAGE|CONTROLPLANE_URL' > /dev/null && { echo "default values must not opt the executor into the gate" >&2; exit 1; }
           out="$(helm template t "$CHART" -f "$VALUES" --set executor.gateImage=reg/gate:v1 --show-only templates/executor-deployment.yaml)"
-          echo "$out" | grep -q 'name: EXECUTOR_GATE_IMAGE' || { echo "gateImage did not set EXECUTOR_GATE_IMAGE" >&2; exit 1; }
-          echo "$out" | grep -q 'name: CONTROLPLANE_URL' || { echo "gateImage did not set CONTROLPLANE_URL" >&2; exit 1; }
-          echo "$out" | grep -q 'value: "http://t-managed-agent-platform-controlplane:8080"' || { echo "gateImage did not derive CONTROLPLANE_URL from the controlplane Service" >&2; exit 1; }
+          echo "$out" | grep 'name: EXECUTOR_GATE_IMAGE' > /dev/null || { echo "gateImage did not set EXECUTOR_GATE_IMAGE" >&2; exit 1; }
+          echo "$out" | grep 'name: CONTROLPLANE_URL' > /dev/null || { echo "gateImage did not set CONTROLPLANE_URL" >&2; exit 1; }
+          echo "$out" | grep 'value: "http://t-managed-agent-platform-controlplane:8080"' > /dev/null || { echo "gateImage did not derive CONTROLPLANE_URL from the controlplane Service" >&2; exit 1; }
           err="$(helm template t "$CHART" -f "$VALUES" --set executor.gateImage=reg/gate:v1 --kube-version 1.26 2>&1 >/dev/null)" \
             && { echo "gateImage must fail the render on Kubernetes < 1.29 (native sidecars)" >&2; exit 1; }
-          echo "$err" | grep -q 'executor.gateImage needs Kubernetes >= 1.29' \
+          echo "$err" | grep 'executor.gateImage needs Kubernetes >= 1.29' > /dev/null \
             || { echo "the 1.26 render failed for the wrong reason: $err" >&2; exit 1; }
           echo "ok: gate opt-in paths"
       - name: sandbox hardening and RuntimeClass are off by default and complete when set
         run: |
           out="$(helm template t "$CHART" -f "$VALUES" --show-only templates/executor-deployment.yaml)"
-          echo "$out" | grep -qE 'SANDBOX_PIDS_LIMIT|SANDBOX_CPU_MILLIS|SANDBOX_MEMORY_BYTES|SANDBOX_EPHEMERAL_STORAGE_BYTES|SANDBOX_CAP_DROP|SANDBOX_READONLY_ROOTFS|SANDBOX_RUN_AS_USER|SANDBOX_K8S_RUNTIME_CLASS|SANDBOX_K8S_NODE_SELECTOR|SANDBOX_K8S_TOLERATIONS|SANDBOX_K8S_IMAGE_PULL_SECRETS' \
+          echo "$out" | grep -E 'SANDBOX_PIDS_LIMIT|SANDBOX_CPU_MILLIS|SANDBOX_MEMORY_BYTES|SANDBOX_EPHEMERAL_STORAGE_BYTES|SANDBOX_CAP_DROP|SANDBOX_READONLY_ROOTFS|SANDBOX_RUN_AS_USER|SANDBOX_K8S_RUNTIME_CLASS|SANDBOX_K8S_NODE_SELECTOR|SANDBOX_K8S_TOLERATIONS|SANDBOX_K8S_IMAGE_PULL_SECRETS' > /dev/null \
             && { echo "default values must leave the executor's own hardening defaults alone" >&2; exit 1; }
           out="$(helm template t "$CHART" -f "$VALUES" \
             --set sandboxRuntimeClass.name=gvisor \
@@ -208,16 +208,16 @@ jobs:
             --set executor.sandboxHardening.runAsUser=10001 \
             --show-only templates/executor-deployment.yaml)"
           for v in SANDBOX_K8S_RUNTIME_CLASS SANDBOX_CPU_MILLIS SANDBOX_MEMORY_BYTES SANDBOX_EPHEMERAL_STORAGE_BYTES SANDBOX_CAP_DROP SANDBOX_READONLY_ROOTFS SANDBOX_RUN_AS_USER; do
-            echo "$out" | grep -q "name: $v" || { echo "$v was not rendered" >&2; exit 1; }
+            echo "$out" | grep "name: $v" > /dev/null || { echo "$v was not rendered" >&2; exit 1; }
           done
           # The value, not only the name: a knob rendered with the wrong value is
           # a cap the operator did not ask for.
-          echo "$out" | grep -A1 'name: SANDBOX_MEMORY_BYTES' | grep -q 'value: "1073741824"' \
+          echo "$out" | grep -A1 'name: SANDBOX_MEMORY_BYTES' | grep 'value: "1073741824"' > /dev/null \
             || { echo "memoryBytes did not reach the executor as configured" >&2; exit 1; }
           # Bytes, never a Kubernetes quantity string: the executor parses a
           # plain integer and fails startup on "20Gi", so a chart that helpfully
           # rendered a quantity would break every deployment that set the knob.
-          echo "$out" | grep -A1 'name: SANDBOX_EPHEMERAL_STORAGE_BYTES' | grep -q 'value: "21474836480"' \
+          echo "$out" | grep -A1 'name: SANDBOX_EPHEMERAL_STORAGE_BYTES' | grep 'value: "21474836480"' > /dev/null \
             || { echo "ephemeralStorageBytes did not reach the executor as raw bytes" >&2; exit 1; }
           # The same knobs again, this time through a values FILE — the path an
           # operator actually uses, and NOT the one `--set` exercises. Helm parses
@@ -239,7 +239,7 @@ jobs:
           for pair in 'SANDBOX_CPU_MILLIS 1000' 'SANDBOX_MEMORY_BYTES 21474836480' \
                       'SANDBOX_EPHEMERAL_STORAGE_BYTES 1073741824' 'SANDBOX_RUN_AS_USER 10001'; do
             set -- $pair
-            echo "$fileOut" | grep -A1 "name: $1" | grep -q "value: \"$2\"" \
+            echo "$fileOut" | grep -A1 "name: $1" | grep "value: \"$2\"" > /dev/null \
               || { echo "$1 from a values file did not render as a plain integer (scientific notation?)" >&2
                    echo "$fileOut" | grep -A1 "name: $1" >&2; exit 1; }
           done
@@ -258,7 +258,7 @@ jobs:
             --show-only templates/executor-deployment.yaml)"
           for pair in 'SANDBOX_CPU_MILLIS 2.5' 'SANDBOX_RUN_AS_USER -0.4'; do
             set -- $pair
-            echo "$fracOut" | grep -A1 "name: $1" | grep -q "value: \"$2\"" \
+            echo "$fracOut" | grep -A1 "name: $1" | grep "value: \"$2\"" > /dev/null \
               || { echo "$1 was rounded instead of reaching the executor as written" >&2
                    echo "$fracOut" | grep -A1 "name: $1" >&2; exit 1; }
           done
@@ -286,7 +286,7 @@ jobs:
             --show-only templates/executor-deployment.yaml)"
           # A map renders in sorted key order, so this string is stable.
           echo "$placeOut" | grep -A1 'name: SANDBOX_K8S_NODE_SELECTOR' \
-            | grep -qF 'value: "cloud.google.com/gke-nodepool=sandbox,role=isolated"' \
+            | grep -F 'value: "cloud.google.com/gke-nodepool=sandbox,role=isolated"' > /dev/null \
             || { echo "the node selector did not render as sorted key=value pairs" >&2
                  echo "$placeOut" | grep -A1 'name: SANDBOX_K8S_NODE_SELECTOR' >&2; exit 1; }
           # The whole encoding, not one field: a substring check would pass a
@@ -296,7 +296,7 @@ jobs:
           # decoder refuses it and the executor will not start — but that is a
           # deployment that stops working, which this catches at render instead.
           wantTol='value: "[{\"effect\":\"NoSchedule\",\"key\":\"sandbox\",\"operator\":\"Equal\",\"value\":\"true\"},{\"effect\":\"NoExecute\",\"key\":\"other\",\"operator\":\"Exists\",\"tolerationSeconds\":30}]"'
-          echo "$placeOut" | grep -A1 'name: SANDBOX_K8S_TOLERATIONS' | grep -qF "$wantTol" \
+          echo "$placeOut" | grep -A1 'name: SANDBOX_K8S_TOLERATIONS' | grep -F "$wantTol" > /dev/null \
             || { echo "tolerations did not render as the expected JSON encoding" >&2
                  echo "  want: $wantTol" >&2
                  echo "$placeOut" | grep -A1 'name: SANDBOX_K8S_TOLERATIONS' >&2; exit 1; }
@@ -318,17 +318,17 @@ jobs:
             --set executor.sandboxHardening.cpuMillis=0 \
             --set executor.sandboxHardening.readOnlyRootfs=false \
             --show-only templates/executor-deployment.yaml)"
-          echo "$out" | grep -A1 'name: SANDBOX_CPU_MILLIS' | grep -q 'value: "0"' \
+          echo "$out" | grep -A1 'name: SANDBOX_CPU_MILLIS' | grep 'value: "0"' > /dev/null \
             || { echo "an explicit cpuMillis=0 was dropped instead of turning the cap off" >&2; exit 1; }
-          echo "$out" | grep -A1 'name: SANDBOX_READONLY_ROOTFS' | grep -q 'value: "false"' \
+          echo "$out" | grep -A1 'name: SANDBOX_READONLY_ROOTFS' | grep 'value: "false"' > /dev/null \
             || { echo "an explicit readOnlyRootfs=false was dropped" >&2; exit 1; }
           # The RuntimeClass object is opt-in on top of the name, and creating it
           # without one would leave the executor pointing at nothing.
-          helm template t "$CHART" -f "$VALUES" | grep -q '^kind: RuntimeClass' \
+          helm template t "$CHART" -f "$VALUES" | grep '^kind: RuntimeClass' > /dev/null \
             && { echo "the chart must not create a cluster-scoped RuntimeClass by default" >&2; exit 1; }
           helm template t "$CHART" -f "$VALUES" --set sandboxRuntimeClass.create=true \
             --set sandboxRuntimeClass.name=gvisor --show-only templates/sandbox-runtimeclass.yaml \
-            | grep -q 'handler: "runsc"' || { echo "create=true did not render the RuntimeClass" >&2; exit 1; }
+            | grep 'handler: "runsc"' > /dev/null || { echo "create=true did not render the RuntimeClass" >&2; exit 1; }
           helm template t "$CHART" -f "$VALUES" --set sandboxRuntimeClass.create=true >/dev/null 2>&1 \
             && { echo "create=true without a name must fail the render" >&2; exit 1; }
           echo "ok: sandbox hardening + RuntimeClass paths"
@@ -345,7 +345,7 @@ jobs:
           YAML
           out="$(helm template t "$CHART" -f "$VALUES" -f /tmp/pullsecrets-values.yaml \
             --show-only templates/executor-deployment.yaml)"
-          echo "$out" | grep -A1 'name: SANDBOX_K8S_IMAGE_PULL_SECRETS' | grep -qF 'value: "regcred,ghcr-pull"' \
+          echo "$out" | grep -A1 'name: SANDBOX_K8S_IMAGE_PULL_SECRETS' | grep -F 'value: "regcred,ghcr-pull"' > /dev/null \
             || { echo "sandboxImagePullSecrets did not render as comma-joined names" >&2
                  echo "$out" | grep -A1 'name: SANDBOX_K8S_IMAGE_PULL_SECRETS' >&2; exit 1; }
           # Null inherits the top-level imagePullSecrets: an operator who told
@@ -354,7 +354,7 @@ jobs:
           # Secrets answer.
           out="$(helm template t "$CHART" -f "$VALUES" --set 'imagePullSecrets[0].name=regcred' \
             --show-only templates/executor-deployment.yaml)"
-          echo "$out" | grep -A1 'name: SANDBOX_K8S_IMAGE_PULL_SECRETS' | grep -qF 'value: "regcred"' \
+          echo "$out" | grep -A1 'name: SANDBOX_K8S_IMAGE_PULL_SECRETS' | grep -F 'value: "regcred"' > /dev/null \
             || { echo "an unset sandboxImagePullSecrets did not inherit imagePullSecrets" >&2; exit 1; }
           # ...and an explicit [] opts sandbox pods out without touching the
           # platform pods' own pull secrets. A values file, not --set: `--set
@@ -367,7 +367,7 @@ jobs:
           YAML
           out="$(helm template t "$CHART" -f "$VALUES" -f /tmp/optout-values.yaml \
             --show-only templates/executor-deployment.yaml)"
-          echo "$out" | grep -q 'SANDBOX_K8S_IMAGE_PULL_SECRETS' \
+          echo "$out" | grep 'SANDBOX_K8S_IMAGE_PULL_SECRETS' > /dev/null \
             && { echo "an explicit [] must render no SANDBOX_K8S_IMAGE_PULL_SECRETS" >&2; exit 1; }
           # `,` separates entries, so a name carrying one would render as two
           # plausible names the executor accepts silently; a nameless entry has
@@ -395,8 +395,8 @@ jobs:
             --set postgresql.enabled=false --set minio.enabled=false \
             --set openbao.enabled=false \
             --set existingSecret=my-preexisting)"
-          echo "$out" | grep -q 'name: my-preexisting' || { echo "expected Deployments to reference existingSecret" >&2; exit 1; }
-          echo "$out" | grep -q '^kind: Secret' && { echo "chart must not create a Secret when existingSecret is set" >&2; exit 1; }
+          echo "$out" | grep 'name: my-preexisting' > /dev/null || { echo "expected Deployments to reference existingSecret" >&2; exit 1; }
+          echo "$out" | grep '^kind: Secret' > /dev/null && { echo "chart must not create a Secret when existingSecret is set" >&2; exit 1; }
           echo "ok: existingSecret path"
       - name: external-openbao and local-cipher paths render
         run: |
@@ -404,12 +404,12 @@ jobs:
             --set openbao.enabled=false \
             --set externalOpenBao.address='https://bao.example.internal:8200' \
             --set externalOpenBao.token=ci-placeholder \
-            --show-only templates/secret.yaml | grep -q 'bao-addr:' \
+            --show-only templates/secret.yaml | grep 'bao-addr:' > /dev/null \
             || { echo "expected the external-openbao Secret keys" >&2; exit 1; }
           helm template t "$CHART" -f "$VALUES" \
             --set openbao.enabled=false \
             --set localCipher.masterKey='Y2ktcGxhY2Vob2xkZXItc3RhdGljLXNlYWwta2V5ISE=' \
-            --show-only templates/secret.yaml | grep -q 'secrets-master-key:' \
+            --show-only templates/secret.yaml | grep 'secrets-master-key:' > /dev/null \
             || { echo "expected the local-cipher Secret keys" >&2; exit 1; }
           if helm template t "$CHART" -f "$VALUES" \
                --set externalOpenBao.address='https://bao.example.internal:8200' \
@@ -433,7 +433,7 @@ jobs:
           got="$(echo "$out" | awk '/^  gcpkms-key-name:/ { gsub(/"/, "", $2); print $2 }' | base64 -d)"
           [ "$got" = "$KEY" ] \
             || { echo "gcpkms-key-name decoded to '${got:-<none>}', want '$KEY'" >&2; exit 1; }
-          echo "$out" | grep -q 'secrets-backend: "Z2Nwa21z"' \
+          echo "$out" | grep 'secrets-backend: "Z2Nwa21z"' > /dev/null \
             || { echo "expected secrets-backend to be gcpkms (base64 Z2Nwa21z)" >&2; exit 1; }
           # Both processes that hold the cipher must receive the name, and must
           # read it from the Secret key the Secret actually writes. Asserting
@@ -444,7 +444,7 @@ jobs:
           for t in controlplane executor; do
             rendered="$(helm template t "$CHART" -f "$VALUES" --set openbao.enabled=false \
               --set "gcpKMS.keyName=$KEY" --show-only "templates/$t-deployment.yaml")"
-            echo "$rendered" | grep -A4 'name: GCPKMS_KEY_NAME' | grep -q 'key: gcpkms-key-name' \
+            echo "$rendered" | grep -A4 'name: GCPKMS_KEY_NAME' | grep 'key: gcpkms-key-name' > /dev/null \
               || { echo "$t does not read GCPKMS_KEY_NAME from the gcpkms-key-name Secret key" >&2
                    echo "$rendered" | grep -A4 'name: GCPKMS_KEY_NAME' >&2; exit 1; }
           done
@@ -456,7 +456,7 @@ jobs:
           # control plane's KMS identity.
           brain="$(helm template t "$CHART" -f "$VALUES" --set openbao.enabled=false \
             --set "gcpKMS.keyName=$KEY" --show-only templates/brain-deployment.yaml)"
-          echo "$brain" | grep -q 'GCPKMS_KEY_NAME' \
+          echo "$brain" | grep 'GCPKMS_KEY_NAME' > /dev/null \
             && { echo "the brain holds no cipher and must not receive the KMS key name" >&2; exit 1; }
           # Workload Identity is an annotation and nothing else, so a chart that
           # silently dropped it would leave ADC with no identity and every
@@ -467,7 +467,7 @@ jobs:
             helm template t "$CHART" -f "$VALUES" \
               --set "$t.serviceAccount.annotations.iam\.gke\.io/gcp-service-account=map@p.iam.gserviceaccount.com" \
               --show-only "$tpl" \
-              | grep -q 'iam.gke.io/gcp-service-account: map@p.iam.gserviceaccount.com' \
+              | grep 'iam.gke.io/gcp-service-account: map@p.iam.gserviceaccount.com' > /dev/null \
               || { echo "the $t ServiceAccount dropped its annotations" >&2; exit 1; }
           done
           # An annotated ServiceAccount the Deployment does not USE grants
@@ -475,7 +475,7 @@ jobs:
           # between the two, not just that each exists.
           for t in controlplane brain executor; do
             sa="$(helm template t "$CHART" -f "$VALUES" --show-only "templates/$t-deployment.yaml" \
-              | awk '$1 == "serviceAccountName:" { print $2; exit }')"
+              | awk '$1 == "serviceAccountName:" && !seen { print $2; seen = 1 }')"
             [ "$sa" = "t-managed-agent-platform-$t" ] \
               || { echo "$t Deployment serviceAccountName is '${sa:-<none>}', want t-managed-agent-platform-$t" >&2; exit 1; }
           done
@@ -512,7 +512,7 @@ jobs:
           # which the bundled-Postgres guard then refuses — would read as
           # "absent, ok". Assigned, `set -e` fails the step on it instead.
           out="$(helm template t "$CHART" -f "$VALUES")"
-          echo "$out" | grep -q 'cloud-sql-proxy' \
+          echo "$out" | grep 'cloud-sql-proxy' > /dev/null \
             && { echo "default values must not add the Cloud SQL Auth Proxy sidecar" >&2; exit 1; }
           on=(--set postgresql.enabled=false
               --set externalDatabase.url='postgres://u:p@127.0.0.1:5432/x?sslmode=disable'
@@ -545,7 +545,7 @@ jobs:
             [ -n "$sidecar" ] \
               || { echo "$t: the proxy is not a native sidecar under initContainers" >&2
                    echo "$rendered" >&2; exit 1; }
-            echo "$sidecar" | grep -q 'restartPolicy: Always' \
+            echo "$sidecar" | grep 'restartPolicy: Always' > /dev/null \
               || { echo "$t: the sidecar is missing restartPolicy: Always" >&2; exit 1; }
             # Without a startupProbe a native sidecar promises only that the
             # process was started, not that it is listening — and the probe in
@@ -556,7 +556,7 @@ jobs:
             # probe pointed at nothing has the kubelet restart a healthy proxy
             # on a loop.
             for path in /startup /liveness; do
-              echo "$sidecar" | grep -q "path: $path" \
+              echo "$sidecar" | grep "path: $path" > /dev/null \
                 || { echo "$t: the sidecar has no probe on $path" >&2; exit 1; }
             done
             # ...and the probes must agree with the health server on a PORT.
@@ -574,7 +574,7 @@ jobs:
             # on loopback, which holds because the proxy defaults to 127.0.0.1
             # and the chart passes no --address. An --address flag would move it
             # onto the pod network without changing anything else visible here.
-            echo "$sidecar" | grep -q '"--address' \
+            echo "$sidecar" | grep '"--address' > /dev/null \
               && { echo "$t: an --address flag would take the socket off loopback" >&2; exit 1; }
             # connectionTest is a PAIR — absent unless asked for, present in the
             # proxy's own args when asked — and the two are asserted together so
@@ -584,11 +584,11 @@ jobs:
             # manifest-wide grep while dialing nothing. The default half matters
             # on its own, because switching it on by accident moves every chart
             # user's failures earlier without anyone choosing that.
-            echo "$sidecar" | grep -qF '"--run-connection-test"' \
+            echo "$sidecar" | grep -F '"--run-connection-test"' > /dev/null \
               && { echo "$t: --run-connection-test is present without connectionTest=true" >&2; exit 1; }
             withTest="$(helm template t "$CHART" -f "$VALUES" "${on[@]}" \
               --set cloudSQLProxy.connectionTest=true --show-only "templates/$t-deployment.yaml")"
-            echo "$withTest" | sidecarOf | grep -qF '"--run-connection-test"' \
+            echo "$withTest" | sidecarOf | grep -F '"--run-connection-test"' > /dev/null \
               || { echo "$t: connectionTest=true did not add --run-connection-test to the sidecar args" >&2
                    echo "$withTest" >&2; exit 1; }
             # --http-port is deliberately absent from this list: the
@@ -598,7 +598,7 @@ jobs:
             for want in '"--health-check"' '"--http-address=0.0.0.0"' \
                         '"--private-ip"' '"--port=5432"' '"--structured-logs"' \
                         '"proj:us-central1:inst"'; do
-              echo "$sidecar" | grep -qF "$want" \
+              echo "$sidecar" | grep -F "$want" > /dev/null \
                 || { echo "$t: the sidecar args are missing $want" >&2; exit 1; }
             done
           done
@@ -609,7 +609,7 @@ jobs:
           # match nothing and read as "removed, ok".
           noPrivate="$(helm template t "$CHART" -f "$VALUES" "${on[@]}" \
             --set cloudSQLProxy.privateIP=false --show-only templates/brain-deployment.yaml)"
-          echo "$noPrivate" | grep -qF '"--private-ip"' \
+          echo "$noPrivate" | grep -F '"--private-ip"' > /dev/null \
             && { echo "privateIP=false left --private-ip in the args" >&2; exit 1; }
           # The four render-time refusals. Each is asserted by its own MESSAGE,
           # not merely by a non-zero exit: several of these values would be
@@ -623,7 +623,7 @@ jobs:
             local err
             err="$(helm template t "$CHART" -f "$VALUES" "$@" 2>&1 >/dev/null)" \
               && { echo "rendered instead of failing: $*" >&2; exit 1; }
-            echo "$err" | grep -qF "$want" \
+            echo "$err" | grep -F "$want" > /dev/null \
               || { echo "refused for the wrong reason (wanted: $want)" >&2
                    echo "$err" >&2; exit 1; }
           }
@@ -651,7 +651,7 @@ jobs:
           domainScoped="$(helm template t "$CHART" -f "$VALUES" "${on[@]}" \
             --set 'cloudSQLProxy.instanceConnectionName=google.com:proj:us-central1:inst' \
             --show-only templates/brain-deployment.yaml)"
-          echo "$domainScoped" | grep -qF '"google.com:proj:us-central1:inst"' \
+          echo "$domainScoped" | grep -F '"google.com:proj:us-central1:inst"' > /dev/null \
             || { echo "a domain-scoped project's connection name was refused or mangled" >&2; exit 1; }
           refuses 'cloudSQLProxy.enabled is incompatible with postgresql.enabled' \
             --set cloudSQLProxy.enabled=true --set cloudSQLProxy.instanceConnectionName=proj:us-central1:inst
@@ -665,7 +665,7 @@ jobs:
         # would fail the job.
         run: |
           rendered="$(helm template t "$CHART" -f "$VALUES" --show-only templates/minio.yaml)"
-          p="$(echo "$rendered" | awk '/readinessProbe:/ { probe = 1 } probe && $1 == "path:" { print $2; exit }')"
+          p="$(echo "$rendered" | awk '/readinessProbe:/ { probe = 1 } probe && $1 == "path:" && !seen { print $2; seen = 1 }')"
           [ "$p" = "/minio/health/cluster" ] \
             || { echo "MinIO's readinessProbe must gate on /minio/health/cluster (#216); rendered: ${p:-<none>}" >&2; exit 1; }
           echo "$rendered" | awk '$1 == "path:" && $2 == "/minio/health/ready" { exit 1 }' \
@@ -678,14 +678,14 @@ jobs:
         # existing release's controlplane pod spec — and roll its pods on upgrade
         # — to say something the platform already assumed.
         run: |
-          helm template t "$CHART" -f "$VALUES" | grep -q 'IDENTITY_' \
+          helm template t "$CHART" -f "$VALUES" | grep 'IDENTITY_' > /dev/null \
             && { echo "default values must render no IDENTITY_* env at all" >&2; exit 1; }
           # Only the control plane has a human lane. The brain and the executor
           # never see a user token, so handing them the issuer, the audience and
           # the role map would be configuration with no reader.
           for tpl in brain executor; do
             helm template t "$CHART" -f "$VALUES" -f "$IAM_VALUES" --show-only "templates/$tpl-deployment.yaml" \
-              | grep -q 'IDENTITY_' \
+              | grep 'IDENTITY_' > /dev/null \
               && { echo "$tpl has no identity lane and must not receive its configuration" >&2; exit 1; }
           done
           # A mode with no role map renders a control plane that cannot boot:
@@ -696,7 +696,7 @@ jobs:
             --set identity.oidc.issuer=https://idp.ci.example \
             --set identity.oidc.audience=map-console 2>&1 >/dev/null)" \
             && { echo "identity.mode with an empty roleMap must fail the render" >&2; exit 1; }
-          echo "$err" | grep -q 'identity.roleMap must map at least one claim value' \
+          echo "$err" | grep 'identity.roleMap must map at least one claim value' > /dev/null \
             || { echo "the empty-roleMap render failed for the wrong reason: $err" >&2; exit 1; }
           out="$(helm template t "$CHART" -f "$VALUES" -f "$IAM_VALUES" --show-only templates/controlplane-deployment.yaml)"
           # The variable NAME and its VALUE together: these names are read verbatim
@@ -706,7 +706,7 @@ jobs:
           for pair in 'IDENTITY_MODE oidc' 'IDENTITY_OIDC_ISSUER https://idp.ci.example' \
                       'IDENTITY_OIDC_AUDIENCE map-console' 'IDENTITY_CLAIM_ROLES groups'; do
             set -- $pair
-            echo "$out" | grep -A1 "name: $1\$" | grep -q "value: \"$2\"" \
+            echo "$out" | grep -A1 "name: $1\$" | grep "value: \"$2\"" > /dev/null \
               || { echo "$1 did not reach the control plane as $2" >&2
                    echo "$out" | grep -A1 "name: $1\$" >&2; exit 1; }
           done
@@ -721,7 +721,7 @@ jobs:
           # parses, sorted by claim value the way `range` over a map renders.
           # Nothing else would notice the two sides drifting.
           want='value: "map/platform-admins=admin,map/platform-devs=developer,map/platform-read=viewer"'
-          echo "$out" | grep -A1 'name: IDENTITY_ROLE_MAP' | grep -qF "$want" \
+          echo "$out" | grep -A1 'name: IDENTITY_ROLE_MAP' | grep -F "$want" > /dev/null \
             || { echo "the role map did not render as the encoding the verifier parses" >&2
                  echo "  want: $want" >&2
                  echo "$out" | grep -A1 'name: IDENTITY_ROLE_MAP' >&2; exit 1; }
@@ -754,7 +754,7 @@ jobs:
             local err
             err="$(helm template t "$CHART" -f "$VALUES" -f "$IAM_VALUES" "$@" 2>&1 >/dev/null)" \
               && { echo "rendered instead of failing: $*" >&2; exit 1; }
-            echo "$err" | grep -qF "$want" \
+            echo "$err" | grep -F "$want" > /dev/null \
               || { echo "refused for the wrong reason (wanted: $want)" >&2; echo "$err" >&2; exit 1; }
           }
           # The refusals are READ OUT of the compose proxy's config rather than
@@ -782,7 +782,7 @@ jobs:
             | awk '/-casdoor-deny$/ { svc = 1 } svc && $1 == "selector:" { exit 1 }' \
             || { echo "the deny Service must have no selector" >&2; exit 1; }
           np="$(helm template t "$CHART" -f "$VALUES" -f "$IAM_VALUES" --show-only templates/casdoor-networkpolicy.yaml)"
-          echo "$np" | grep -q '^kind: NetworkPolicy$' \
+          echo "$np" | grep '^kind: NetworkPolicy$' > /dev/null \
             || { echo "the bundled IdP must ship its NetworkPolicy" >&2; exit 1; }
           # Anchored INSIDE spec.podSelector, not anywhere in the document: the
           # same component label sits in metadata.labels, so a bare grep stayed
@@ -790,7 +790,7 @@ jobs:
           # is empty applies to every pod in the namespace, which is a different
           # policy than the one this asserts.
           echo "$np" | awk '/^  podSelector:/ { f = 1; next } /^  [a-z]/ { f = 0 } f' \
-            | grep -q 'app.kubernetes.io/component: casdoor' \
+            | grep 'app.kubernetes.io/component: casdoor' > /dev/null \
             || { echo "the NetworkPolicy's podSelector does not select the IdP pod" >&2
                  echo "$np" >&2; exit 1; }
           # An EMPTY `from` means "all sources" to Kubernetes, so the one shape
@@ -798,14 +798,14 @@ jobs:
           # and admits everything.
           refuses 'must name at least one peer' --set-json 'casdoor.networkPolicy.from=[]'
           dep="$(helm template t "$CHART" -f "$VALUES" -f "$IAM_VALUES" --show-only templates/casdoor.yaml)"
-          echo "$dep" | grep -q 'type: ClusterIP' \
+          echo "$dep" | grep 'type: ClusterIP' > /dev/null \
             || { echo "the IdP Service must be ClusterIP" >&2; exit 1; }
-          echo "$dep" | grep -qE 'type: (NodePort|LoadBalancer)' \
+          echo "$dep" | grep -E 'type: (NodePort|LoadBalancer)' > /dev/null \
             && { echo "the IdP Service must never be NodePort or LoadBalancer — that is a second entrance with none of the deny rules on it" >&2; exit 1; }
           # `origin` is the `iss` claim of every token Casdoor mints and the
           # verifier compares `iss` exactly, so it must be the ingress host — and
           # https, the only scheme the platform accepts for an issuer or a key set.
-          echo "$dep" | grep -A1 'name: origin$' | grep -q 'value: "https://idp.ci.example"' \
+          echo "$dep" | grep -A1 'name: origin$' | grep 'value: "https://idp.ci.example"' > /dev/null \
             || { echo "origin is not https://<casdoor.ingress.host>" >&2
                  echo "$dep" | grep -A1 'name: origin$' >&2; exit 1; }
           refuses "must equal the bundled IdP's origin" --set 'identity.oidc.issuer=https://wrong.example'
@@ -814,13 +814,13 @@ jobs:
           # tokenFormat JWT: the alternative, JWT-Standard, drops `roles`,
           # `permissions` and `groups` from the token entirely, which would leave
           # IDENTITY_ROLE_MAP nothing to map and every human no role.
-          echo "$cm" | grep -q '"tokenFormat": "JWT"' \
+          echo "$cm" | grep '"tokenFormat": "JWT"' > /dev/null \
             || { echo "the seeded application must mint JWT (not JWT-Standard) tokens" >&2; exit 1; }
           # The grant CVE-2026-9097 (9.8, a revoked JWT accepted) lives on, and
           # self-service signup into the provider that guards the platform.
-          echo "$cm" | grep -q 'token-exchange' \
+          echo "$cm" | grep 'token-exchange' > /dev/null \
             && { echo "the token-exchange grant must not be enabled" >&2; exit 1; }
-          echo "$cm" | grep -q '"enableSignUp": false' \
+          echo "$cm" | grep '"enableSignUp": false' > /dev/null \
             || { echo "public signup must be off" >&2; exit 1; }
           # Casdoor needs a database of its own; with the bundled Postgres off the
           # chart has nothing to derive a DSN from, and says so rather than
@@ -863,12 +863,12 @@ jobs:
           # `sandboxPlacement`, so a typo in the key leaves them absent — and an
           # unanchored name check would also pass on a selector pointing at some
           # other pool.
-          echo "$out" | grep -A1 'name: SANDBOX_K8S_NODE_SELECTOR' | grep -qF 'map.opensdlc.dev/sandbox=true' \
+          echo "$out" | grep -A1 'name: SANDBOX_K8S_NODE_SELECTOR' | grep -F 'map.opensdlc.dev/sandbox=true' > /dev/null \
             || { echo "staging-values.yaml did not reach the executor as a sandbox nodeSelector" >&2
                  echo "$out" | grep -A1 'name: SANDBOX_K8S_NODE_SELECTOR' >&2; exit 1; }
           # The toleration is the other half of the pair and fails differently:
           # without it the selector finds the pool and the taint refuses the pod.
-          echo "$out" | grep -A1 'name: SANDBOX_K8S_TOLERATIONS' | grep -qF 'map.opensdlc.dev/sandbox' \
+          echo "$out" | grep -A1 'name: SANDBOX_K8S_TOLERATIONS' | grep -F 'map.opensdlc.dev/sandbox' > /dev/null \
             || { echo "staging-values.yaml did not reach the executor as a sandbox toleration" >&2
                  echo "$out" | grep -A1 'name: SANDBOX_K8S_TOLERATIONS' >&2; exit 1; }
           # The proxy's connection test is pinned here for the same reason as the
@@ -876,7 +876,7 @@ jobs:
           # and nothing else proves this file still sets it. Drop or misspell
           # `connectionTest` and staging silently goes back to a proxy that
           # reports itself up without dialing, with every check in this job green.
-          echo "$out" | grep -qF -- '--run-connection-test' \
+          echo "$out" | grep -F -- '--run-connection-test' > /dev/null \
             || { echo "staging-values.yaml no longer turns on cloudSQLProxy.connectionTest" >&2
                  echo "$out" >&2; exit 1; }
           echo "ok: CD values file renders with the sandbox pair and the proxy connection test"
@@ -929,7 +929,7 @@ jobs:
           # `- ` alternative is the brain's projected volume item, which is a
           # list entry rather than a secretKeyRef.
           for k in $wrote; do
-            echo "$rendered" | grep -qE "^[[:space:]]*(- )?key: ${k//./\\.}\$" \
+            echo "$rendered" | grep -E "^[[:space:]]*(- )?key: ${k//./\\.}\$" > /dev/null \
               || { echo "mode2-secret.sh writes Secret key '$k' and nothing in the render reads it" >&2
                    exit 1; }
           done
@@ -942,7 +942,7 @@ jobs:
             $1 == "secretKeyRef:" { inref = 1 }
             END { if (pend != "") print pend }' | sort -u)"
           for k in $needs; do
-            echo "$wrote" | grep -qxF "$k" \
+            echo "$wrote" | grep -xF "$k" > /dev/null \
               || { echo "the chart requires Secret key '$k' and mode2-secret.sh never writes it" >&2
                    exit 1; }
           done
@@ -951,7 +951,7 @@ jobs:
           # entirely fails the render (secret.yaml's required-apiKey guard), but
           # CHANGING it renders green while binding every reference above to a
           # Secret nothing creates.
-          echo "$rendered" | grep -qE '^[[:space:]]*name: map-platform$' \
+          echo "$rendered" | grep -E '^[[:space:]]*name: map-platform$' > /dev/null \
             || { echo "the render does not bind to the pre-created Secret map-platform" >&2; exit 1; }
           echo "ok: mode2-secret.sh writes exactly the seven keys the render reads"
           echo "required, so unset would wedge the pods: $(echo "$needs" | tr '\n' ' ')"
@@ -964,7 +964,7 @@ jobs:
           cmp deploy/compose/casdoor-init-data.json "$CHART/files/casdoor-init-data.json" \
             || { echo "the compose and chart seeds have drifted" >&2; exit 1; }
           # Off by default: no Casdoor object may appear in a default render.
-          helm template t "$CHART" -f "$VALUES" | grep -qi 'casdoor' \
+          helm template t "$CHART" -f "$VALUES" | grep -i 'casdoor' > /dev/null \
             && { echo "default values must not deploy the bundled IdP" >&2; exit 1; }
           idp=(--set casdoor.enabled=true --set casdoor.ingress.host=idp.example.test
                --set 'casdoor.console.redirectURIs[0]=https://console.example/callback')
@@ -980,7 +980,7 @@ jobs:
             args=("${idp[@]}" --set casdoor.adminPassword=pw --set casdoor.console.clientSecret=cs)
             err="$(helm template t "$CHART" -f "$VALUES" "${args[@]}" --set "casdoor.$miss=null" 2>&1 >/dev/null)" \
               && { echo "casdoor.$miss missing must fail the render" >&2; exit 1; }
-            echo "$err" | grep -q "casdoor.$miss is required" \
+            echo "$err" | grep "casdoor.$miss is required" > /dev/null \
               || { echo "the render without casdoor.$miss failed for the wrong reason: $err" >&2; exit 1; }
           done
           # The seed carries two credentials — the console's OAuth client secret
@@ -989,7 +989,7 @@ jobs:
           # is not, and ConfigMaps sit outside encryption-at-rest defaults.
           helm template t "$CHART" -f "$VALUES" "${idp[@]}" --set casdoor.adminPassword=pw \
             --set casdoor.console.clientSecret=cs --show-only templates/casdoor-init-data-secret.yaml \
-            | grep -q '^kind: Secret$' \
+            | grep '^kind: Secret$' > /dev/null \
             || { echo "the seed must render as a Secret, not a ConfigMap" >&2; exit 1; }
           # A single-replica IdP that re-applies its seed on boot must not be
           # rolled: the default RollingUpdate rounds maxSurge up to 1, so an
@@ -997,7 +997,7 @@ jobs:
           # database.
           helm template t "$CHART" -f "$VALUES" "${idp[@]}" --set casdoor.adminPassword=pw \
             --set casdoor.console.clientSecret=cs --show-only templates/casdoor.yaml \
-            | grep -q 'type: Recreate' \
+            | grep 'type: Recreate' > /dev/null \
             || { echo "the bundled IdP must use the Recreate strategy" >&2; exit 1; }
           full=("${idp[@]}" --set casdoor.adminPassword=pw --set casdoor.console.clientSecret=cs)
           seed="$(helm template t "$CHART" -f "$VALUES" "${full[@]}" \
@@ -1005,15 +1005,15 @@ jobs:
           # The three demo accounts are real, working credentials on a laptop.
           # None may reach a published cluster IdP.
           for u in map-admin map-dev map-viewer; do
-            echo "$seed" | grep -q "\"name\": \"$u\"" \
+            echo "$seed" | grep "\"name\": \"$u\"" > /dev/null \
               && { echo "the chart seeded the demo account $u" >&2; exit 1; }
           done
           # ...while Casdoor's own administrator IS seeded, carrying the operator's
           # password for Casdoor itself to hash on apply. Leaving the account out
           # would not remove it, only leave `123` on it.
-          echo "$seed" | grep -q '"name": "admin"' \
+          echo "$seed" | grep '"name": "admin"' > /dev/null \
             || { echo "the chart did not re-own built-in/admin" >&2; exit 1; }
-          echo "$seed" | grep -q '"passwordType": "plain"' \
+          echo "$seed" | grep '"passwordType": "plain"' > /dev/null \
             || { echo "built-in/admin must be seeded plain so Casdoor hashes it" >&2; exit 1; }
           # Deterministic renders are the reason it is seeded plain rather than
           # hashed here: bcrypt salts randomly, so a hash-at-render chart changes
@@ -1027,7 +1027,7 @@ jobs:
           # ...and it only takes effect because init data is allowed to re-apply.
           # With initDataNewOnly true, Casdoor skips the entry and keeps `123`.
           helm template t "$CHART" -f "$VALUES" "${full[@]}" --show-only templates/casdoor.yaml \
-            | grep -A1 'name: initDataNewOnly' | grep -q 'value: "false"' \
+            | grep -A1 'name: initDataNewOnly' | grep 'value: "false"' > /dev/null \
             || { echo "initDataNewOnly must be false or the seeded admin password is ignored" >&2; exit 1; }
           # A value YAML did not read as a string must be refused, not rendered.
           # These land in JSON Casdoor unmarshals into string fields, so a number
@@ -1046,14 +1046,14 @@ jobs:
                      "-f /tmp/casdoor-unquoted.yaml"; do
             err="$(helm template t "$CHART" -f "$VALUES" "${idp[@]}" $bad 2>&1 >/dev/null)" \
               && { echo "an unquoted credential must fail the render: $bad" >&2; exit 1; }
-            echo "$err" | grep -q 'must be a quoted string' \
+            echo "$err" | grep 'must be a quoted string' > /dev/null \
               || { echo "the unquoted render failed for the wrong reason: $err" >&2; exit 1; }
           done
           # ...and a quoted one still reaches the seed as a JSON string.
           helm template t "$CHART" -f "$VALUES" "${idp[@]}" \
             --set-string casdoor.adminPassword=12345678 --set casdoor.console.clientSecret=cs \
             --show-only templates/casdoor-init-data-secret.yaml \
-            | grep -q '"password": "12345678"' \
+            | grep '"password": "12345678"' > /dev/null \
             || { echo "a quoted credential did not render as a JSON string" >&2; exit 1; }
           # The audience Casdoor mints is the client id, so a render where the two
           # disagree is refused rather than left to fail every token behind a 401.
@@ -1064,7 +1064,7 @@ jobs:
             --set 'identity.roleMap.map/platform-admins=admin' \
             --set identity.oidc.audience=wrong 2>&1 >/dev/null)" \
             && { echo "an audience that is not the client id must fail the render" >&2; exit 1; }
-          echo "$err" | grep -q 'must equal casdoor.console.clientId' \
+          echo "$err" | grep 'must equal casdoor.console.clientId' > /dev/null \
             || { echo "the mismatched-audience render failed for the wrong reason: $err" >&2; exit 1; }
           echo "ok: bundled IdP is off by default, seeds no demo account, and owns its admin password"
 
@@ -1176,6 +1176,17 @@ jobs:
       # had not either (#558). That is what a rule kept by memory looks like.
       - name: every workflow pins its actions and drops its checkout credential
         run: make pins-test
+      # And the shape that makes a guard lie rather than lapse: under `pipefail`
+      # a pipeline reports the rightmost non-zero status, and a reading end that
+      # stops early (`grep -q`, `grep -m`, `head`) closes the pipe under a writer
+      # still writing, which then takes SIGPIPE and carries the whole pipeline to
+      # 141. Consumed with `||` that reddens the step for the thing it matched;
+      # consumed with `&&` it skips the failure branch, so the step passes
+      # although the forbidden thing was found. It was found on macOS, whose
+      # pipe buffer starts at 16 KB, on a render of about 22 KB; Linux holds
+      # 65,536 bytes, so the same step had passed on every runner (#763).
+      - name: no workflow pipeline stops reading before its input ends
+        run: make pipes-test
       # deploy-alert.yml couples to deploy.yml three ways, and all three fail
       # SILENTLY: the trigger stops matching, or every deploy classifies as
       # `parked` so no successful run ever closes a CD issue again. Nor can any
@@ -1368,7 +1379,7 @@ jobs:
           # a slow brain would otherwise fail this spuriously right after the 200.
           brain_ok=""
           for i in $(seq 1 15); do
-            docker compose logs brain 2>/dev/null | grep -q "brain running" && { brain_ok=1; break; }
+            docker compose logs brain 2>/dev/null | grep "brain running" > /dev/null && { brain_ok=1; break; }
             sleep 2
           done
           [ -n "$brain_ok" ] || { echo "brain did not start cleanly" >&2; docker compose logs brain >&2; exit 1; }
@@ -1390,7 +1401,7 @@ jobs:
           # latest_version_id, and a version object no longer holds a number at all.
           ver="$(echo "$created" | python3 -c 'import json,sys; print(json.load(sys.stdin)["latest_version_id"])')"
           echo "created $id version $ver"
-          curl -sf -H "x-api-key: $key" "$base?source=custom" | grep -q "$id"
+          curl -sf -H "x-api-key: $key" "$base?source=custom" | grep "$id" > /dev/null
           curl -sf -H "x-api-key: $key" "$base/$id" > /dev/null
           # Second version via the loose path-qualified form. Its frontmatter name
           # matches the skill's, which the name-consistency rule requires.

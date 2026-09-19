@@ -20,7 +20,7 @@ SHELL := /usr/bin/env bash
 .PHONY: build crossbuild vet fmt-check test cover-gate verify eval \
 	changelog changelog-notes changelog-archive \
 	release-tag-check release-images release-chart-check release-chart release-binaries \
-	openbao-init-test cd-outcome-test parked-test retry-test identifiers-test pins-test registry-check sdk-bump-report \
+	openbao-init-test cd-outcome-test parked-test retry-test identifiers-test pins-test pipes-test registry-check sdk-bump-report \
 	gcp-fmt gcp-validate gcp-split-check gcp-kms-role-check gcp-lint gcp-bootstrap-test gcp-dbinit-test gcp-mode2-secret-test gcp-split-check-test gcp-power-test gcp-tfvars-test gcp-env-targets-test gcp-foundation-apply gcp-bootstrap gcp-env-apply gcp-db-init gcp-env-destroy gcp-env-rebuild \
 	gcp-require-project gcp-env-tfvars gcp-env-migrate-state gcp-env-init gcp-env-vars-match \
 	gcp-env-stop gcp-env-start gcp-env-status
@@ -333,6 +333,19 @@ identifiers-test:
 # lives in the script's docstring, since Dependabot has no half in it.
 pins-test:
 	python3 .github/scripts/pins_test.py
+
+# And the third shape a reviewer was holding: a workflow pipeline whose reading
+# end stops early. Under `pipefail` the pipeline reports the RIGHTMOST non-zero
+# status, and `grep -q` exits on its first match — closing the pipe under a
+# writer that is still writing, which then takes SIGPIPE and carries the whole
+# pipeline to 141. Consumed with `||` that reddens the step for the very thing
+# it matched; consumed with `&&` it SKIPS the failure branch, so the step passes
+# although the forbidden thing was found — a false green, and origin/main
+# carried three (#763). A shape check, not a size one and not a pipefail one:
+# "small enough today" and "no `set -o pipefail` today" are both assumptions a
+# later edit revokes. It self-tests before it scans.
+pipes-test:
+	python3 .github/scripts/pipes_test.py
 
 # ---------------------------------------------------------------------------
 # GCP staging environment (docs/plan/20, Decision 9). Developer tooling for GCP
