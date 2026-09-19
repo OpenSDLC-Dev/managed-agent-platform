@@ -30,9 +30,11 @@ where the reader must refuse instead, and holds a substring **both** readers'
 messages contain — the two wordings differ in punctuation and in what each
 reader calls itself, so a row that quotes either one in full pins only that one.
 
-Exactly one of the two per row, and `fmt` on every row. `loader.py` is that rule
-in Python and `corpus_test.go` states it again in Go, because the Go decoder
-cannot be taught Python's. It is a rule over **values**, not over which keys are
+Exactly one of the two per row, and `fmt` and `why` on every row — a row nobody
+can review is a row nobody can tell from a row that pins nothing, and `why` is
+what a rung reads aloud when a reader disagrees with the row. `loader.py` is
+that rule in Python and `corpus_test.go` states it again in Go, because the Go
+decoder cannot be taught Python's. It is a rule over **values**, not over which keys are
 present: Go cannot tell an absent key from a JSON `null` or an empty string, so
 a row is a blocks row when `blocks` holds a list — `[]` included, meaning a file
 read cleanly with no top-level blocks in it — and a refusal row when `refuse`

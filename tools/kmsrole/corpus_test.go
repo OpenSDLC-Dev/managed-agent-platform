@@ -101,6 +101,13 @@ func TestTheSharedCorpus(t *testing.T) {
 			t.Errorf("%s: no `fmt` exit recorded — `make tf-corpus-check` is what puts it to the binary", c.File)
 			continue
 		}
+		// Required here as in loader.py: a row nobody can review is a row
+		// nobody can tell from a row that pins nothing, and this is what the
+		// failures below read aloud.
+		if c.Why == "" {
+			t.Errorf("%s: no `why` — a row has to say what it pins", c.File)
+			continue
+		}
 		// A row states one thing or the other. Neither would check nothing;
 		// both would let a reader satisfy the row by refusing.
 		if (c.Refuse != "") == (c.Blocks != nil) {
