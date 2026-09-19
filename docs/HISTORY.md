@@ -6034,3 +6034,38 @@ cells `tools/tfcorpus` pins; the other three separators, and the rest of Unicode
 White_Space, are inferred from the sweep rather than measured. Owning a copy of a set we
 cannot cheaply re-measure is the cost the subtraction avoids, and there is no third
 reader to transfer to.
+
+## Heredoc terminator inside an open template (#762, from #767) — rejected alternative, 2026-09-20
+
+Both readers end a heredoc at the first line that, trimmed, is the terminator. Terraform
+does not: measured on 1.15.8, a line reading `EOT` inside an open `${…}` or `%{…}` in the
+body is expression text, the heredoc runs on to the next one, and the file parses —
+`fmt` exit 3 for `${ join("", [` / `EOT` / `]) }` and for the `%{ if 1 ==` spelling. The
+readers close at the first, so the rest of the body arrives as structure, the brace depth
+desynchronises, and both refuse with `unbalanced braces at end of file`. A file Terraform
+accepts is rejected, and the message blames braces rather than the terminator.
+
+The fix considered was to track template depth across heredoc body lines and close only
+at depth 0 — the last thing #767 asked for. It was rejected, on two grounds.
+
+The first is that the failure is bounded to a refusal and cannot become a silent read.
+Terraform's own file balances, and the readers' count differs from it by exactly the
+braces in the leaked region, which Terraform reads as string text. So their depth at end
+of file equals the net braces leaked: zero, and the depth is correct again before any
+later header, which is then matched; non-zero, and the unbalanced-braces refusal fires.
+Hiding a block would need both at once. The worst reachable outcome is a loud refusal,
+possibly with a phantom block reported from the leaked text — never `ok` over a resource
+that went unread, which is the one outcome these guards exist to prevent.
+
+The second is what the fix would cost. Body lines are not scrubbed at all today, by
+design. Counting template depth in them needs a second scrubbing mode rather than the
+existing one, because a `"` in a heredoc body is literal text and not a delimiter — so
+the quote-parity machinery that makes `scrub`/`scrubTF` work is exactly wrong there. That
+is a second scrubber, hand-written twice, for a shape that cannot occur in `deploy/gcp/`
+and whose current answer is already safe.
+
+Three rows pin the decision instead: the `${…}` and `%{…}` spellings, each carrying
+`terraform_accepts` so the oracle fails if Terraform's verdict ever moves, and a
+multi-line template in a body with no terminator-looking line inside it, which both
+readers read — so the refusal stays about the terminator and does not spread to
+multi-line templates at large.

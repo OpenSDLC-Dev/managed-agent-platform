@@ -336,6 +336,28 @@
       ]
     },
     {
+      "file": "heredoc_terminator_inside_template_is_refused.tf",
+      "why": "a line that strips to the terminator, sitting inside an OPEN `${...}`: terraform keeps the heredoc open across it and parses the file, both readers close there, and the body text behind it arrives as structure. They end unbalanced and refuse \u2014 a false refusal, and the row exists to hold it to a refusal: the leaked braces cannot both push a later header off depth 0 and balance at EOF, so this can never become a silent read. Closing it needs template depth tracked across body lines, which neither reader has by design (#762, docs/HISTORY.md)",
+      "fmt": 3,
+      "refuse": "unbalanced braces at end of file",
+      "terraform_accepts": true
+    },
+    {
+      "file": "heredoc_terminator_inside_directive_is_refused.tf",
+      "why": "the `%{...}` directive half of the same shape, so a change that taught one spelling the trick and not the other cannot pass unnoticed",
+      "fmt": 3,
+      "refuse": "unbalanced braces at end of file",
+      "terraform_accepts": true
+    },
+    {
+      "file": "heredoc_multiline_template_is_read.tf",
+      "why": "the boundary: a template that spans body lines and holds no terminator-looking line is ordinary, terraform parses it, and both readers read the file \u2014 the refusal above is about the terminator, not about multi-line templates in a heredoc",
+      "fmt": 3,
+      "blocks": [
+        "google_kms_crypto_key.after"
+      ]
+    },
+    {
       "file": "opener_trailing_hash_comment.tf",
       "why": "terraform refuses a heredoc opener that carries anything after the marker; the readers scrub the comment first and then see a bare opener, so the configuration behind it became string content (#766)",
       "fmt": 2,
