@@ -6035,37 +6035,39 @@ White_Space, are inferred from the sweep rather than measured. Owning a copy of 
 cannot cheaply re-measure is the cost the subtraction avoids, and there is no third
 reader to transfer to.
 
-## Heredoc terminator inside an open template (#762, from #767) — rejected alternative, 2026-09-20
+## Emulating a heredoc terminator inside a template (#762, from #767) — rejected alternative, 2026-09-20
 
-Both readers end a heredoc at the first line that, trimmed, is the terminator. Terraform
-does not: measured on 1.15.8, a line reading `EOT` inside an open `${…}` or `%{…}` in the
-body is expression text, the heredoc runs on to the next one, and the file parses —
-`fmt` exit 3 for `${ join("", [` / `EOT` / `]) }` and for the `%{ if 1 ==` spelling. The
-readers close at the first, so the rest of the body arrives as structure, the brace depth
-desynchronises, and both refuse with `unbalanced braces at end of file`. A file Terraform
-accepts is rejected, and the message blames braces rather than the terminator.
+Terraform does not end a heredoc at a line reading the terminator when that line sits
+inside an open `${…}` or `%{…}`: measured on 1.15.8, it is expression text, the heredoc
+runs on, and the file parses. Both readers closed at the first such line, so the rest of
+the body arrived as structure.
 
-The fix considered was to track template depth across heredoc body lines and close only
-at depth 0 — the last thing #767 asked for. It was rejected, on two grounds.
+That is not merely a refusal. `heredoc_open_template_hides_a_resource.tf` is a file
+`terraform fmt` accepts over which both readers reported **no resource at all, and no
+error**: the leaked body opens a heredoc only they can see, which swallows the brace
+closing `locals` and an entire `google_kms_crypto_key`, while a stray `z = {` left in the
+leaked text pays the brace back so the depth still reaches 0 at end of file and the
+unbalanced-braces refusal never fires. The reasoning that this shape could only ever end
+in a refusal — that the readers' depth differs from Terraform's by exactly the braces
+they leak, so a displaced header implies an unbalanced end of file — is false: the leaked
+region and the swallowed region are two independent choices the file makes, and it can
+balance one against the other.
 
-The first is that the failure is bounded to a refusal and cannot become a silent read.
-Terraform's own file balances, and the readers' count differs from it by exactly the
-braces in the leaked region, which Terraform reads as string text. So their depth at end
-of file equals the net braces leaked: zero, and the depth is correct again before any
-later header, which is then matched; non-zero, and the unbalanced-braces refusal fires.
-Hiding a block would need both at once. The worst reachable outcome is a loud refusal,
-possibly with a phantom block reported from the leaked text — never `ok` over a resource
-that went unread, which is the one outcome these guards exist to prevent.
+Two ways to close it. Emulate the rule — track template depth across body lines and close
+only at depth 0, which is what #767 asked for — or refuse a body line that ends with a
+template still open.
 
-The second is what the fix would cost. Body lines are not scrubbed at all today, by
-design. Counting template depth in them needs a second scrubbing mode rather than the
-existing one, because a `"` in a heredoc body is literal text and not a delimiter — so
-the quote-parity machinery that makes `scrub`/`scrubTF` work is exactly wrong there. That
-is a second scrubber, hand-written twice, for a shape that cannot occur in `deploy/gcp/`
-and whose current answer is already safe.
+Refusing won. Emulating means reading the template's own contents, because a brace inside
+a string inside it decides where it closes, and reading a quoted string inside a template
+is exactly what both readers have refused since #760. A depth counter that got that wrong
+would put them back to disagreeing with Terraform silently about where the heredoc ends,
+which is the failure being fixed rather than a smaller version of it. The refusal needs no
+such fidelity: a counter that closes early only ever fails to refuse a file it could have
+refused, and one that a string's brace confuses cannot invent an open template that is not
+there.
 
-Three rows pin the decision instead: the `${…}` and `%{…}` spellings, each carrying
-`terraform_accepts` so the oracle fails if Terraform's verdict ever moves, and a
-multi-line template in a body with no terminator-looking line inside it, which both
-readers read — so the refusal stays about the terminator and does not spread to
-multi-line templates at large.
+The cost is stated and pinned: an ordinary multi-line template in a heredoc body holds no
+terminator-looking line, is harmless, and is refused all the same
+(`heredoc_multiline_template_is_refused.tf`, carrying `terraform_accepts`). `deploy/gcp/`
+contains none — `make gcp-split-check` reads the tree and still reports its seven
+protected resources.

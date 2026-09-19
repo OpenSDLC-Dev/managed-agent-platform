@@ -76,6 +76,33 @@ var errBadUTF8 = errors.New("a byte that is not UTF-8, outside a comment — ter
 // both say the same thing about the same character.
 var errLoneCR = errors.New("a carriage return that is not part of a CRLF — terraform refuses the file over one (Invalid character, or Invalid multi-line string when it sits inside a quoted string), so this reader refuses rather than guessing where the lines end")
 
+// Raised where a heredoc body line ends with a template still open. Mirrors
+// check_split.py's OPEN_TEMPLATE_IN_BODY.
+var errOpenTemplateInBody = errors.New("a `${...}` or `%{...}` left open at the end of a heredoc body line — terraform reads the lines after it as template text and does not end the heredoc at a terminator inside one, while this reader closes at the first line that trims to the terminator, so the body behind it would arrive as configuration; write the template on one line so this guard can read the file")
+
+// openTemplate reports whether a `${...}` or `%{...}` is still open when this
+// heredoc body line ends. It counts only what a body line can be trusted for:
+// the two openers, the escaped spellings that are literal text, and a `}` while
+// something is open. A brace inside a string inside the template closes the
+// count early, which is why a TRUE answer refuses and a false one only means
+// this reader saw nothing it could not follow — never that it followed
+// everything. Mirrors check_split.py's open_template().
+func openTemplate(line string) bool {
+	depth := 0
+	for i := 0; i < len(line); i++ {
+		switch {
+		case strings.HasPrefix(line[i:], "$${"), strings.HasPrefix(line[i:], "%%{"):
+			i += 2
+		case strings.HasPrefix(line[i:], "${"), strings.HasPrefix(line[i:], "%{"):
+			depth++
+			i++
+		case line[i] == '}' && depth > 0:
+			depth--
+		}
+	}
+	return depth > 0
+}
+
 // The five characters that look like a line ending to something splitting text
 // and are not one to Terraform. Splitting on "\n" does not break on them, and
 // check_split.py's split does not either — deliberately, because a description
@@ -454,6 +481,27 @@ func tfBlocks(path string) ([]tfBlock, error) {
 			// body as ordinary text.
 			if !utf8.ValidString(line) {
 				return nil, fmt.Errorf("%s:%d: %w", path, i+1, errBadUTF8)
+			}
+			// A template left OPEN at the end of a body line. Terraform reads
+			// what follows as template text and does not end the heredoc at a
+			// terminator sitting inside one; this reader compares every trimmed
+			// line to the terminator and closes at the first match. The gap is
+			// not a refusal by itself — the body behind it arrives as
+			// structure, and a heredoc opened in THAT text can swallow the
+			// brace closing the enclosing block and a whole resource with it,
+			// while a stray `{` left in the leaked text balances the count
+			// again at EOF. Both halves are the file's to choose, so the reader
+			// ends at depth 0, says nothing, and reports no resource at all
+			// over a file `terraform fmt` accepts
+			// (#762, heredoc_open_template_hides_a_resource.tf).
+			//
+			// Refused rather than emulated: following the terminator correctly
+			// needs the template's own contents read, and a brace inside a
+			// string inside the template would have to be read with it. The
+			// sibling rule for a quoted string has said the same since #760 —
+			// a template that does not close on its line is not read here.
+			if openTemplate(line) {
+				return nil, fmt.Errorf("%s:%d: %w", path, i+1, errOpenTemplateInBody)
 			}
 			src = append(src, tfLine{Raw: line, N: i + 1, Heredoc: true})
 			// Trimmed, whatever the opener's marker — see the header.

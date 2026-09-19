@@ -7,9 +7,10 @@ What is being worked on right now, and how far along it is — nothing else. **S
 **none.** Nothing is in flight. #762 — nothing executable kept the two hand-written `.tf`
 readers in agreement — closed across three PRs: the shared corpus both suites are pinned
 to, the line rules folded in from #766 and #768, and the template context from #767,
-whose last cell is a rejected alternative recorded in
-[docs/HISTORY.md](./docs/HISTORY.md) and pinned by corpus rows. The delivery record is
-there and in the [changelog.d/](./changelog.d/) fragments.
+whose last cell turned out to be a silent short read, a heredoc terminator sitting inside
+an open template. The delivery record is the [changelog.d/](./changelog.d/) fragments and
+[docs/HISTORY.md](./docs/HISTORY.md), which carries the emulation weighed against the
+refusal that shipped.
 The backlog is [GitHub issues](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues).
 
 ## Tasks
