@@ -8,8 +8,9 @@ What is being worked on right now, and how far along it is — nothing else. **S
 `deploy/gcp/check_split.py` and `tools/kmsrole/hcl.go` are hand-written mirrors of one
 reader, kept in agreement by prose: three commits on #760 read the same heredoc rule
 three different ways, and every divergence was caught by a reviewer running terraform
-rather than by a test. Two PRs — the shared corpus first, then the three reader
-boundaries folded in from #766, #767 and #768.
+rather than by a test. Three PRs — the shared corpus first, then the line rules folded
+in from #766 and #768, and the interpolation context folded in from #767 last, which
+needs machinery neither of the others did.
 Everything else is closed: the archive-endings cluster shipped in v0.4.0
 ([docs/changelog/0.4.0.md](./docs/changelog/0.4.0.md)), and #720, #748, #749, #752,
 #755, #750, #761, #765, #754 and #763 are unreleased
@@ -19,7 +20,9 @@ The backlog is [GitHub issues](https://github.com/OpenSDLC-Dev/managed-agent-pla
 ## Tasks
 
 - [x] `tools/tfcorpus` — one corpus, both suites reading it, terraform asked for each `fmt` exit
-- [ ] #766 — a heredoc opener carrying a trailing comment: refuse, rather than read the configuration behind it as string content
-- [ ] #767 — interpolation context: a terminator closes only at interpolation depth 0, and `#`/`//`/`/* */` inside `${…}` are comments
-- [ ] #768 — `\v`, `\f`, U+2028 and U+0085 refused where they reach structure, read where terraform reads them
-- [ ] #762's own second finding — the CPython-`\s` vs Terraform-whitespace spelling behind `SEPARATORS`; the `#767` citations in both readers are repointed with it
+- [x] #768 — `\v`, `\f`, U+0085, U+2028 and U+2029 refused where they reach structure, including inside a `${…}` or `%{…}`, and read where terraform reads them
+- [x] #766 — a heredoc opener carrying anything after the marker: refuse, rather than read the configuration behind it as string content
+- [x] a heredoc tag Terraform takes and neither reader's class does (`<<Ö`) — found in review of the above, closed with it
+- [x] #762's own second finding — the `SEPARATORS` subtraction stays, and docs/HISTORY.md records the spelled-out set as the rejected alternative
+- [x] `/* */` inside `${…}` and `%{…}` is a comment to Terraform and now to both readers; `#`/`//` there need no rule, Terraform refusing a single-line template that holds one
+- [ ] the rest of the interpolation context folded in from #767 (closed; #762 tracks it): a heredoc terminator closes only at depth 0

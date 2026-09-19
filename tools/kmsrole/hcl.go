@@ -37,11 +37,17 @@ import (
 var (
 	tfResourceRe = regexp.MustCompile(`^\s*resource\s+"([^"]+)"\s+"([^"]+)"`)
 	tfModuleRe   = regexp.MustCompile(`^\s*module\s+"([^"]+)"`)
-	// `~` is not a Terraform heredoc marker at all — a file containing one is
-	// rejected outright, and `make gcp-fmt` reddens on it first. It is matched
-	// here, as in check_split.py, only so the opener is still recognised as one
-	// rather than read as configuration.
-	tfHeredocRe = regexp.MustCompile(`<<[-~]?([A-Za-z_][A-Za-z0-9_]*)`)
+	// `~` is not a Terraform heredoc marker at all — `<<~EOT` is an `Invalid
+	// expression`, so terraform reads the lines behind it as structure. It is
+	// therefore NOT matched, here as in check_split.py: a reader that took them
+	// for a heredoc body skipped a resource and balanced its braces again
+	// (opener_tilde_marker.tf). Unmatched, it falls into the refusal below.
+	// The tag is an HCL identifier, which allows a `-` INSIDE it — `<<EOT-X` is
+	// terraform-clean, and a leading one cannot reach the class, so `<<-EOT`
+	// stays the indent marker plus `EOT`. An identifier also allows Unicode
+	// letters, which this class deliberately does not: tfBlocks refuses a `<<`
+	// it cannot match in full rather than read the body as configuration.
+	tfHeredocRe = regexp.MustCompile(`<<-?([A-Za-z_][A-Za-z0-9_-]*)`)
 	// A nested block opener, with or without labels. Matched structurally rather
 	// than by brace arithmetic, because a block written on one line nets to zero
 	// braces and would go unseen.
@@ -49,6 +55,13 @@ var (
 	// The attribute keys this guard reads, compiled once rather than per lookup.
 	tfAttrRe = map[string]*regexp.Regexp{}
 )
+
+// The two ways a heredoc opener can be one this reader must not read past.
+// Named, as every refusal here is, so an edit to one of them cannot drift from
+// check_split.py's wording unnoticed; the corpus matches a substring of each.
+var errOpenerTrailer = errors.New("nothing may follow a heredoc opener on its line — terraform refuses the file over a trailing comment, and over a single trailing space; read on, the configuration behind the opener becomes string content and the braces still balance")
+
+var errOpenerTag = errors.New("a `<<` this reader cannot read as a heredoc opener — Terraform's tag is any HCL identifier, Unicode letters included, and this reads only [A-Za-z_][A-Za-z0-9_-]*; unrecognised, the body is read as configuration and a `<<WORD` inside it becomes the opener")
 
 // Raised where a U+FEFF past the file's leading byte-order mark survives
 // scrubbing. Mirrors check_split.py's BAD_BOM.
@@ -62,6 +75,59 @@ var errBadUTF8 = errors.New("a byte that is not UTF-8, outside a comment — ter
 // Raised from the two places a lone carriage return can reach this reader, so
 // both say the same thing about the same character.
 var errLoneCR = errors.New("a carriage return that is not part of a CRLF — terraform refuses the file over one (Invalid character, or Invalid multi-line string when it sits inside a quoted string), so this reader refuses rather than guessing where the lines end")
+
+// The five characters that look like a line ending to something splitting text
+// and are not one to Terraform. Splitting on "\n" does not break on them, and
+// check_split.py's split does not either — deliberately, because a description
+// holding one would otherwise be cut mid-string — so a file using one AS its
+// separator arrives as a single line, where only the first header can match and
+// every block behind it is invisible (#768). Measured on terraform 1.15.8:
+// among structure each is an `Invalid character`; inside a string, a comment or
+// a heredoc body each is ordinary text. So they are neutralised where terraform
+// reads them and refused where it does not, which is the U+FEFF mechanism at
+// different codepoints.
+//
+// That covers a `${...}` interpolation and a `%{...}` directive too, whose
+// contents are HCL again rather than string text: scrubbing neutralises these
+// only at interpolation depth 0, and `$${`/`%%{`, which are literal text, are
+// consumed before they can be read as either. An inline `/* ... */` inside a
+// template expression is the exception that proves the rule: HCL allows a
+// comment there, terraform reads all five in one, and scrubTF blanks the whole
+// span so this reader does too.
+//
+// Two places the parity still ends, both named because counting them wrong is
+// how this sentence was written twice. A heredoc BODY line is never scrubbed,
+// so a template inside one is not seen and a file terraform refuses is read
+// (interp_in_heredoc_body_is_read.tf) — benign, since such a file cannot deploy
+// and `make gcp-fmt` reddens on it first. And behind a backslash terraform
+// answers `Invalid escape sequence` while scrubbing collapses the pair — but
+// that is the general escape class and not these five (`"a\zb"` draws it
+// too), and neither reader validates escapes. Mirrors check_split.py's
+// FAKE_EOL.
+const fakeEOL = "\v\f\u0085\u2028\u2029"
+
+var errFakeEOL = errors.New("a line separator Terraform does not read as one (U+000B, U+000C, U+0085, U+2028 or U+2029), outside a string, a comment and a heredoc body — terraform refuses the file over one (Invalid character) and this reader does not break lines on it, so everything behind it would arrive on the line in front of it, where only the first header can match and the rest goes unread")
+
+// fakeEOLAt returns the byte length of the not-a-line-ending character at the
+// start of s, or 0. s must be non-empty: the only caller slices a line inside a
+// loop bounded by its length. Byte-switched rather than read off fakeEOL
+// because scrubTF walks a line one byte at a time and every other byte must
+// cost one compare; TestFakeEOLAtMatchesTheConstant holds the two together.
+func fakeEOLAt(s string) int {
+	switch s[0] {
+	case '\v', '\f':
+		return 1
+	case 0xc2:
+		if strings.HasPrefix(s, "\u0085") {
+			return 2
+		}
+	case 0xe2:
+		if strings.HasPrefix(s, "\u2028") || strings.HasPrefix(s, "\u2029") {
+			return 3
+		}
+	}
+	return 0
+}
 
 func init() {
 	// Either at the start of the line, or straight after a `{`. The second form
@@ -180,6 +246,22 @@ func scrubTF(line string) (string, int, error) {
 	for i := 0; i < len(line); i++ {
 		ch := line[i]
 		if quoted {
+			if w := fakeEOLAt(line[i:]); interp == 0 && w > 0 {
+				// Neutralised rather than refused, for the reason the BOM is:
+				// terraform reads these inside string TEXT, and blanking them
+				// here is what lets the refusal in tfBlocks mean exactly the
+				// position terraform refuses. Handled ahead of the switch so
+				// the width is computed once.
+				//
+				// Only at interp == 0. A `${...}` or `%{...}` is not string
+				// text — its contents are HCL again, and terraform answers
+				// `Invalid character` for these in there — so they are written
+				// through for tfBlocks to refuse, as a carriage return and a
+				// non-UTF-8 byte in that position already were.
+				out.WriteByte('_')
+				i += w - 1
+				continue
+			}
 			switch {
 			case ch == '\\':
 				// The escape and the character it escapes both lose their
@@ -208,7 +290,7 @@ func scrubTF(line string) (string, int, error) {
 				} else {
 					out.WriteByte('_')
 				}
-			case strings.HasPrefix(line[i:], "\ufeff"):
+			case interp == 0 && strings.HasPrefix(line[i:], "\ufeff"):
 				// Neutralized rather than refused: terraform accepts a BOM
 				// inside a string, a comment and a heredoc body, and refuses it
 				// among structure — so blanking it here is what lets the
@@ -217,6 +299,49 @@ func scrubTF(line string) (string, int, error) {
 				// and this character is three.
 				out.WriteByte('_')
 				i += len("\ufeff") - 1
+			case interp > 0 && strings.HasPrefix(line[i:], "/*") &&
+				strings.Contains(line[i+2:], "*/"):
+				// An inline block comment INSIDE a template expression, where
+				// HCL allows one — `"p${ 1 /* c */ }q"` is fmt-clean on
+				// terraform 1.15.8. The whole span is blanked, so nothing in it
+				// is read as structure: not a brace, not a quote, and not one
+				// of the characters refused in tfBlocks, which terraform reads
+				// here as the comment text they are.
+				//
+				// Only when the `*/` is on this line. An unterminated one
+				// leaves the template open past the end of the line, which
+				// terraform answers with `Invalid expression` — refusing to
+				// guess there is this reader's rule everywhere else and stays
+				// its rule here.
+				//
+				// `#` and `//` need no such case: inside a single-line template
+				// they swallow the closing brace and the quote, and terraform
+				// answers `Invalid multi-line string`. Inside a heredoc body,
+				// where a template may legally span lines, the body is skipped
+				// whole and never reaches this scrubber.
+				w := strings.Index(line[i+2:], "*/") + len("/**/")
+				out.WriteString(strings.Repeat("_", w))
+				i += w - 1
+			case strings.HasPrefix(line[i:], "$${"), strings.HasPrefix(line[i:], "%%{"):
+				// An ESCAPED template: `$${` and `%%{` are literal text to
+				// Terraform, which accepts a file holding one. All three bytes
+				// are consumed, the brace blanked as the string text it is, so
+				// the `${` this would otherwise see does not open a template
+				// that is not there. Harmless while a template's contents were
+				// neutralised like string text; a false refusal the moment they
+				// stopped being (interp_escaped_is_text.tf).
+				//
+				// THREE bytes and not the `$$` pair: measured on terraform
+				// 1.15.8, a run of N `$` before `{` opens a template only at
+				// N == 1 — the escape binds to the two characters adjacent to
+				// the brace, not to pairs from the left. Eating pairs matched
+				// that at even N and opened a template on the leftover `$` at
+				// odd N, refusing `$$${...}`, which terraform takes
+				// (interp_escaped_odd_run_is_text.tf).
+				out.WriteByte(ch)
+				out.WriteByte(ch)
+				out.WriteByte('_')
+				i += 2
 			case strings.HasPrefix(line[i:], "${"), strings.HasPrefix(line[i:], "%{"):
 				// An interpolation or a template directive. BOTH, because they
 				// are the same hazard: their own braces are not structure, but
@@ -342,12 +467,11 @@ func tfBlocks(path string) ([]tfBlock, error) {
 		// same return among structure is an `Invalid character` and inside a
 		// quoted string an `Invalid multi-line string`. Scrubbing removes the
 		// comments, and keeps a return everywhere else including behind a
-		// backslash, so what reaches here is the half terraform refuses — with
-		// one exception, which the raw body check above shares: a comment
-		// inside a template interpolation is a comment to terraform and to
-		// neither of them, so a return there is refused although the binary
-		// reads it (#767). A known false refusal, taken over leaving the two
-		// short reads it replaces.
+		// backslash, so what reaches here is the half terraform refuses —
+		// inside a template expression as well as outside one, because scrubTF
+		// blanks an inline `/* ... */` there too. The other two comment markers
+		// need no such care: inside a single-line template `#` and `//` swallow
+		// the closing brace and the quote, and terraform refuses the file.
 		// It has to be a refusal rather than a translation because this reader
 		// and check_split.py disagreed about such a file: Python's read_text()
 		// broke lines on a bare \r and this one never has, so the same bytes
@@ -355,6 +479,14 @@ func tfBlocks(path string) ([]tfBlock, error) {
 		// first header can match, with the rest unread and nothing said (#761).
 		if strings.Contains(s, "\r") {
 			return nil, fmt.Errorf("%s:%d: %w", path, i+1, errLoneCR)
+		}
+		// The same position rule for the five characters that look like a line
+		// ending and are not one. scrubTF has neutralised them inside strings
+		// and dropped the comments, so one that survives is one terraform
+		// refuses — and one this reader would read straight past, taking a
+		// whole file for a single line (#768).
+		if strings.ContainsAny(s, fakeEOL) {
+			return nil, fmt.Errorf("%s:%d: %w", path, i+1, errFakeEOL)
 		}
 		// Same position rule for a byte that is not UTF-8, and the same reason.
 		// terraform accepts one inside a comment (`# caf\xe9` is fmt- and
@@ -384,7 +516,61 @@ func tfBlocks(path string) ([]tfBlock, error) {
 			return nil, fmt.Errorf("%s:%d: %w", path, i+1, errBadBOM)
 		}
 		code := line[:codeLen]
-		if m := tfHeredocRe.FindStringSubmatchIndex(s); m != nil {
+		m := tfHeredocRe.FindStringSubmatchIndex(s)
+		// A `<<` this expression cannot match IN FULL is refused rather than
+		// read past. Terraform's tag is an HCL identifier, so `<<Ö` opens a
+		// heredoc for the binary and nothing here, and `<<EÖT` opens one whose
+		// tag this truncates to `E`. Either way the body is then read as
+		// configuration, a `<<WORD` inside it becomes this reader's opener, and
+		// a terminator far below closes it with the braces balanced and a
+		// resource swallowed — measured on terraform 1.15.8, and pinned by
+		// opener_unicode_tag.tf.
+		//
+		// "In full" asks only whether the next byte is ASCII, not whether it is
+		// an identifier character: what can still continue an HCL identifier
+		// past this class is exactly a non-ASCII character, and "non-ASCII"
+		// means the same thing in both languages where unicode.IsLetter and
+		// str.isalpha() do not. It is read over bytes here and over codepoints
+		// in check_split.py, which agree because the class matches only ASCII,
+		// so whatever follows it starts at a byte boundary. A `<` inside a
+		// string is neutralised by scrubbing, so a `<<` still here is structure.
+		//
+		// The refusal covers every `<<` this cannot read — a bare one, a
+		// digit-initial tag, `<<<EOT` — and not only the Unicode tag that
+		// motivated it, which is why errOpenerTag names the condition rather
+		// than one cause.
+		if at := strings.Index(s, "<<"); at >= 0 {
+			if m == nil || m[0] != at || (m[1] < len(s) && s[m[1]] >= 0x80) {
+				return nil, fmt.Errorf("%s:%d: %w", path, i+1, errOpenerTag)
+			}
+		}
+		if m != nil {
+			// Nothing may follow the opener on its line. Measured against
+			// terraform 1.15.8. Every trailer named here has a corpus row, so
+			// `make tf-corpus-check` re-asks the binary rather than trusting
+			// this sentence: a `#` or `//` comment, a single space, a tab, a
+			// `}`, a `,` inside a call and a second opener are each an
+			// `Invalid expression`, while `<<-EOT` and an opener that ends the
+			// line inside a call are fine. A trailing `/* */` is refused
+			// further up, by the rule that this reader does not read block
+			// comments at all.
+			//
+			// Two clauses, each read against its own string, because the
+			// scrubbed line is NOT the raw line's length: an escape pair and a
+			// not-a-line-ending character inside a string each collapse to one
+			// byte. `m` indexes the scrubbed line, so the opener has to end THAT
+			// one; and a comment — the only thing scrubbing takes off the tail,
+			// a `/* */` being refused outright — shows as a code length short of
+			// the raw line's. Neither `<<EOT# note`, where the scrubbed line
+			// ends at the opener, nor `<<EOT<<EOT`, where the raw line does, is
+			// caught by the other.
+			//
+			// Reading on instead turned the configuration behind the opener into
+			// string content, with the braces still balancing and nothing to
+			// report (#766).
+			if m[1] != len(s) || codeLen != len(line) {
+				return nil, fmt.Errorf("%s:%d: %w", path, i+1, errOpenerTrailer)
+			}
 			term = s[m[2]:m[3]]
 			s = s[:m[0]]
 		}

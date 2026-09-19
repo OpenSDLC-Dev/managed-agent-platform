@@ -101,15 +101,87 @@ RESOURCE = re.compile(r'^\s*resource\s+"([^"]+)"\s+"([^"]+)"')
 MODULE = re.compile(r'^\s*module\s+"([^"]+)"')
 SOURCE = re.compile(r'^\s*source\s*=\s*"([^"]+)"\s*$', re.M)
 # `~` is not a Terraform heredoc marker at all: `<<~EOT` is an `Invalid
-# expression`, not an indented heredoc — that spelling is Ruby's. It is matched
-# anyway, so that an opener is still recognised as one rather than read as
-# configuration.
-HEREDOC = re.compile(r"<<[-~]?([A-Za-z_][A-Za-z0-9_]*)")
+# expression`, not an indented heredoc — that spelling is Ruby's. So it is NOT
+# matched: terraform reads the lines behind it as structure, and a reader that
+# took them for a heredoc body skipped a resource and balanced its braces again
+# (opener_tilde_marker.tf). Unmatched, it falls into the refusal below, which is
+# the answer for every `<<` this cannot read.
+#
+# The tag is an HCL identifier, which allows a `-` INSIDE it — `<<EOT-X` is
+# terraform-clean, and a leading one cannot reach the class, so `<<-EOT` is
+# still the indent marker plus `EOT`. An identifier also allows Unicode
+# letters, which this class deliberately does not: blocks() refuses a `<<`
+# this cannot match in full rather than read the body as configuration.
+HEREDOC = re.compile(r"<<-?([A-Za-z_][A-Za-z0-9_-]*)")
 # The characters str.strip() calls whitespace and Terraform reads as ordinary
 # heredoc body text — exactly these four, swept codepoint by codepoint across
-# both languages' whitespace sets against terraform 1.15.8. What it is for is in
-# blocks(), its only caller.
+# both languages' whitespace sets against terraform 1.15.8. Subtracting them is
+# what makes line.strip() below mean exactly the mirror's strings.TrimSpace,
+# which is Terraform's own set over every file it will parse; spelling that set
+# out here instead was weighed once and rejected (#762, docs/HISTORY.md). What
+# it is for is in blocks(), its only caller.
 SEPARATORS = re.compile(r"[\x1c-\x1f]")
+# The opposite hazard: characters that LOOK like a line ending to a reader
+# splitting text, and are not one to Terraform. str.splitlines() breaks on all
+# five and this reader deliberately does not — a description holding one would
+# otherwise be cut mid-string — so a file using one AS its separator arrives as
+# one long line, where only the first header can match and every block behind it
+# is invisible (#768). Measured on 1.15.8: among structure each is an `Invalid
+# character`, and inside a string, a comment or a heredoc body each is ordinary
+# text. So they are neutralized where terraform reads them and refused where it
+# does not, which is the U+FEFF mechanism at different codepoints.
+#
+# That covers a `${...}` interpolation and a `%{...}` directive too, whose
+# contents are HCL again rather than string text — NEUTRAL_IN_TEMPLATE below is
+# what keeps them refusable there, and `$${`/`%%{`, which are literal text, are
+# consumed before they can be read as either. An inline `/* ... */` inside a
+# template expression is the exception that proves the rule: HCL allows a
+# comment there, terraform reads all five in one, and scrub() blanks the whole
+# span so this reader does too.
+#
+# Two places the parity still ends, both named because counting them wrong is
+# how this sentence was written twice. A heredoc BODY line is never scrubbed, so
+# a template inside one is not seen and a file terraform refuses is read
+# (interp_in_heredoc_body_is_read.tf) — benign, since such a file cannot deploy
+# and `make gcp-fmt` reddens on it first. And behind a backslash terraform
+# answers `Invalid escape sequence` while scrub() collapses the pair — but that
+# is the general escape class and not these five (`"a\zb"` draws it too), and
+# neither reader validates escapes.
+FAKE_EOL_CHARS = "\x0b\x0c\u0085\u2028\u2029"
+FAKE_EOL = re.compile("[" + FAKE_EOL_CHARS + "]")
+# What a string may not keep: its own ability to shift the brace depth, start a
+# comment, open a heredoc, or carry one of the characters above out to where the
+# refusal below would read it as structure.
+#
+# Two sets, because a `${...}` or `%{...}` is not string text: its contents are
+# HCL again, and terraform answers `Invalid character` for U+FEFF and for all
+# five in there. Blanking them would hide them from the refusals — a carriage
+# return and a non-UTF-8 byte were already refused in that position, so keeping
+# them is what makes the family answer the same way.
+NEUTRAL_IN_TEMPLATE = "{}#<"
+NEUTRAL = NEUTRAL_IN_TEMPLATE + "\ufeff" + FAKE_EOL_CHARS
+FAKE_EOL_MSG = (
+    "a line separator Terraform does not read as one (U+000B, U+000C, U+0085, U+2028 "
+    "or U+2029), outside a string, a comment and a heredoc body. Terraform refuses the "
+    "file over one (Invalid character) and this reader does not break lines on it, so "
+    "everything behind it would arrive on the line in front of it — where only the "
+    "first header can match and the rest goes unread."
+)
+# The two ways a heredoc opener can be one this reader must not read past.
+# Named, as every refusal here is, so an edit to one of them cannot drift from
+# hcl.go's wording unnoticed; the corpus matches a substring of each.
+OPENER_TRAILER = (
+    "nothing may follow a heredoc opener on its line — terraform refuses the file "
+    "over a trailing comment, and over a single trailing space; read on, the "
+    "configuration behind the opener becomes string content and the braces still "
+    "balance"
+)
+OPENER_TAG = (
+    "a `<<` this guard cannot read as a heredoc opener — Terraform's tag is any HCL "
+    "identifier, Unicode letters included, and this reads only "
+    "[A-Za-z_][A-Za-z0-9_-]*; unrecognised, the body is read as configuration and a "
+    "`<<WORD` inside it becomes the opener"
+)
 # Raised from the two places a lone carriage return can reach blocks(), so both
 # say the same thing about the same character.
 LONE_CR = (
@@ -138,13 +210,19 @@ BAD_BOM = (
 )
 
 
-def scrub(line: str) -> str:
+def scrub(line: str) -> tuple[str, int]:
     """Drop comments, and neutralize the structural characters inside strings.
 
     String TEXT is kept — the resource header is read from it. What is removed
     is a string's ability to affect brace depth, start a comment, or open a
     heredoc, so that neither a `{` in a display_name nor a `<<EOF` in a shell
     snippet can swallow the rest of the file.
+
+    Returns the scrubbed line and how many characters of the RAW line are code:
+    the index a comment starts at, or the whole line when there is none. That
+    boundary is only knowable from this quote-aware pass — a `#` inside a string
+    does not start a comment — so it is returned rather than recomputed by a
+    caller that would get it wrong. Mirrors hcl.go's scrubTF.
     """
     out, quoted, interp = [], False, 0
     i = 0
@@ -164,6 +242,50 @@ def scrub(line: str) -> str:
                 esc = line[i + 1 : i + 2]
                 out.append(esc if esc == "\r" or BAD_BYTE.match(esc) else "_")
                 i += 2
+                continue
+            if interp and line[i : i + 2] == "/*":
+                # An inline block comment INSIDE a template expression, where
+                # HCL allows one — `"p${ 1 /* c */ }q"` is fmt-clean on
+                # terraform 1.15.8. The whole span is blanked, so nothing in it
+                # is read as structure: not a brace, not a quote, and not one of
+                # the characters refused below, which terraform reads here as
+                # the comment text they are.
+                #
+                # Only when the `*/` is on this line. An unterminated one leaves
+                # the template open past the end of the line, which terraform
+                # answers with `Invalid expression` — refusing to guess there is
+                # this reader's rule everywhere else and stays its rule here.
+                #
+                # `#` and `//` need no such branch: inside a single-line
+                # template they swallow the closing brace and the quote, and
+                # terraform answers `Invalid multi-line string`. Inside a
+                # heredoc body, where a template may legally span lines, the
+                # body is skipped whole and never reaches this scrubber.
+                end = line.find("*/", i + 2)
+                if end >= 0:
+                    out.append("_" * (end + 2 - i))
+                    i = end + 2
+                    continue
+            if line[i : i + 3] in ("$${", "%%{"):
+                # An ESCAPED template: `$${` and `%%{` are literal text to
+                # Terraform, which accepts a file holding one. All three
+                # characters are consumed, the brace blanked as the string text
+                # it is, so the `${` this reader would otherwise see does not
+                # open a template that is not there. Harmless while a template's
+                # contents were neutralized like string text; a false refusal
+                # the moment they stopped being (interp_escaped_is_text.tf).
+                #
+                # THREE characters and not the `$$` pair: measured on terraform
+                # 1.15.8, a run of N `$` before `{` opens a template only at
+                # N == 1 — the escape binds to the two characters adjacent to
+                # the brace, not to pairs from the left. Eating pairs matched
+                # that at even N and opened a template on the leftover `$` at
+                # odd N, refusing `$$${...}`, which terraform takes
+                # (interp_escaped_odd_run_is_text.tf).
+                out.append(ch)
+                out.append(ch)
+                out.append("_")
+                i += 3
                 continue
             if line[i : i + 2] in ("${", "%{"):
                 # An interpolation `${...}` or a template directive `%{...}`.
@@ -199,7 +321,7 @@ def scrub(line: str) -> str:
                         "cannot be read by this guard — assign it to a `locals` value and "
                         "interpolate that instead"
                     )
-                out.append("_" if ch in "{}#<\ufeff" else ch)
+                out.append("_" if ch in NEUTRAL_IN_TEMPLATE else ch)
                 i += 1
                 continue
             if ch == '"':
@@ -211,7 +333,7 @@ def scrub(line: str) -> str:
                 # comment and inside a heredoc body, and refuses it among
                 # structure — so blanking it here is what lets the refusal
                 # below mean exactly the position terraform refuses.
-                out.append("_" if ch in "{}#<\ufeff" else ch)
+                out.append("_" if ch in NEUTRAL else ch)
             i += 1
             continue
         if ch == '"':
@@ -237,7 +359,7 @@ def scrub(line: str) -> str:
             "a string is still open at end of line — write multi-line interpolations as a "
             "single-line `locals` value so this guard can read the file"
         )
-    return "".join(out)
+    return "".join(out), i
 
 
 def blocks(path: pathlib.Path):
@@ -333,7 +455,7 @@ def blocks(path: pathlib.Path):
             lines.append("")  # keep numbering, contribute no structure
             continue
         try:
-            scrubbed = scrub(line)
+            scrubbed, code_len = scrub(line)
         except ValueError as exc:
             raise ValueError(f"{path}: {exc}") from None
         # Checked on the SCRUBBED line, because terraform's own answer depends on
@@ -343,13 +465,20 @@ def blocks(path: pathlib.Path):
         # return among structure is an `Invalid character` and inside a quoted
         # string an `Invalid multi-line string`. scrub() removes the comments,
         # and keeps a return everywhere else including behind a backslash, so
-        # what reaches here is the half terraform refuses — with one exception,
-        # which the raw body check above shares: a comment inside a template
-        # interpolation is a comment to terraform and to neither of them, so a
-        # return there is refused although the binary reads it (#767). A known
-        # false refusal, taken over leaving the two short reads it replaces.
+        # what reaches here is the half terraform refuses — inside a template
+        # expression as well as outside one, because scrub() blanks an inline
+        # `/* ... */` there too. The other two comment markers need no such
+        # care: inside a single-line template `#` and `//` swallow the closing
+        # brace and the quote, and terraform refuses the file.
         if "\r" in scrubbed:
             raise ValueError(f"{path}:{n + 1}: {LONE_CR}")
+        # The same position rule for the five characters that look like a line
+        # ending and are not one. scrub() has neutralized them inside strings
+        # and removed the comments, so one that survives is one terraform
+        # refuses — and one this reader would otherwise read straight past,
+        # taking a whole file for a single line (#768).
+        if FAKE_EOL.search(scrubbed):
+            raise ValueError(f"{path}:{n + 1}: {FAKE_EOL_MSG}")
         # Same position rule, same reason, for the byte the decode above carried
         # through: scrub() has removed the comments terraform reads it inside, so
         # one that survives is one terraform refuses.
@@ -358,7 +487,58 @@ def blocks(path: pathlib.Path):
         if "\ufeff" in scrubbed:
             raise ValueError(f"{path}:{n + 1}: {BAD_BOM}")
         m = HEREDOC.search(scrubbed)
+        # A `<<` this class cannot match IN FULL is refused rather than read
+        # past. Terraform's tag is an HCL identifier, so `<<Ö` opens a heredoc
+        # for the binary and nothing for the class above, and `<<EÖT` opens one
+        # whose tag the class truncates to `E`. Either way the body is then read
+        # as configuration, a `<<WORD` inside it becomes this reader's opener,
+        # and a terminator far below closes it with the braces balanced and a
+        # resource swallowed — measured on terraform 1.15.8, and pinned by
+        # opener_unicode_tag.tf.
+        #
+        # "In full" asks only whether the next character is ASCII, not whether
+        # it is an identifier character: what can still continue an HCL
+        # identifier past this class is exactly a non-ASCII character, and
+        # "non-ASCII" means the same thing in both languages where
+        # `unicode.IsLetter` and str.isalpha() do not. It is read over
+        # codepoints here and over bytes in hcl.go, which agree because the
+        # class matches only ASCII, so whatever follows it starts at a byte
+        # boundary. A `<` inside a string is neutralized by scrub(), so a `<<`
+        # still here is structure.
+        #
+        # The refusal covers every `<<` this cannot read — a bare one, a
+        # digit-initial tag, `<<<EOT` — and not only the Unicode tag that
+        # motivated it, which is why OPENER_TAG names the condition rather than
+        # one cause.
+        at = scrubbed.find("<<")
+        if at >= 0:
+            tail = scrubbed[m.end():] if m else ""
+            if m is None or m.start() != at or (tail and ord(tail[0]) > 127):
+                raise ValueError(f"{path}:{n + 1}: {OPENER_TAG}")
         if m:
+            # Nothing may follow the opener on its line. Every trailer named
+            # here has a corpus row, so `make tf-corpus-check` re-asks terraform
+            # 1.15.8 rather than trusting this sentence: a `#` or `//` comment,
+            # a single space, a tab, a `}`, a `,` inside a call and a second
+            # opener are each an `Invalid expression`, while `<<-EOT` and an
+            # opener that ends the line inside a call are fine. A trailing
+            # `/* */` is refused further up, by the rule that this reader does
+            # not read block comments at all.
+            #
+            # Two clauses, each read against its own string, because the
+            # scrubbed line is NOT the raw line's length: an escape pair inside
+            # a string collapses to one character. `m` indexes the scrubbed
+            # line, so the opener has to end THAT one; and a comment — the only
+            # thing scrubbing takes off the tail, a `/* */` being refused
+            # outright above — shows as a code length short of the raw line's.
+            # Neither `<<EOT# note`, where the scrubbed line ends at the opener,
+            # nor `<<EOT<<EOT`, where the raw line does, is caught by the other.
+            #
+            # Reading on instead turned the configuration behind the opener into
+            # string content, with the braces still balancing and nothing to
+            # report (#766).
+            if m.end() != len(scrubbed) or code_len != len(line):
+                raise ValueError(f"{path}:{n + 1}: {OPENER_TRAILER}")
             skip_until = m.group(1)
             scrubbed = scrubbed[: m.start()]
         lines.append(scrubbed)

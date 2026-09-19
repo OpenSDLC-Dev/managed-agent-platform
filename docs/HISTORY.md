@@ -6014,3 +6014,23 @@ Not verified, and named because the run otherwise reads as complete: the console
 client-side rendering was never seen, only its server-rendered shells (200 with the login
 cookie, 307 to `/login` without) and the BFF calls its pages make. No browser was
 available in the session that drove this.
+
+## Terminator whitespace spelling (#762) — rejected alternative, 2026-09-19
+
+`check_split.py` decides a heredoc terminator with `line.strip() == marker and not
+SEPARATORS.search(line)` — CPython's whitespace, minus U+001C–U+001F. The reviewer on
+#760 read that as correctness-by-coincidence: the invariant is Terraform's whitespace,
+which the subtraction never names, and a `line.strip(TERMINATOR_WS)` spelling would name
+it, survive a host-language change, and transfer to a third reader.
+
+The subtraction stays. What this guard needs is that its two readers close a heredoc on
+the same line, and the subtraction states exactly that: `str.strip()`'s set minus
+`strings.TrimSpace`'s is precisely those four codepoints with nothing in the other
+direction, which #760 records sweeping over all of Unicode in three independent passes. A
+spelled-out set would instead assert Terraform's own whitespace, and that claim is only
+sampled — the binary was asked about a tab, NBSP and all five of U+000B, U+000C, U+0085,
+U+2028 and U+2029 padding a terminator, and about U+001C forging one, and those are the
+cells `tools/tfcorpus` pins; the other three separators, and the rest of Unicode's
+White_Space, are inferred from the sweep rather than measured. Owning a copy of a set we
+cannot cheaply re-measure is the cost the subtraction avoids, and there is no third
+reader to transfer to.

@@ -61,12 +61,18 @@ Write the `.tf` file under `cases/`, run `make tf-corpus-check` to learn its
 row naming no file, so a fixture cannot be added and left unchecked.
 
 Before you trust a new row, break the rule it claims to pin and check the
-**answer changes**. Six rows in this corpus did not discriminate on their first
-draft — four put a hidden resource inside a `locals` block, where a wrong
-heredoc close never lets the brace depth return to zero; one balanced the brace
-whose neutralisation it was meant to pin; one gave `<<-EOT` a body with nothing
-structural in it. Each read correctly under the very mutation it existed to
-catch. An unbalanced `{` in the shielded region is usually what fixes it.
+**answer changes**. Rows here have failed that four ways, each found by someone
+running a mutation rather than by reading: a hidden resource inside a `locals`
+block, where a wrong heredoc close never lets the brace depth return to zero; a
+shielded region with nothing structural in it at all; a balanced brace where the
+point was the neutralisation; and a file refused for an unrelated reason, which
+pins that reason instead. An unbalanced `{` in the shielded region is usually
+what fixes the first three, and the fourth needs a different file.
+
+A row naming several characters has to CONTAIN several characters, in each
+position it names. A row that said "these five" and held three read as coverage
+and was a sample: a mutant dropping either of the missing two left the whole
+corpus green.
 
 Where a rule is defended twice over, one row cannot show the second defence
 failing, and its `why` has to say which half it holds and which row holds the

@@ -188,6 +188,272 @@
       ]
     },
     {
+      "file": "interp_fake_eol_is_refused.tf",
+      "why": "a `${...}` interpolation's contents are HCL again, not string text, so terraform answers Invalid character for one of the five in there and both readers have to as well \u2014 neutralising it hid it from the refusal, which is how a carriage return in the same position was already handled",
+      "fmt": 2,
+      "refuse": "a line separator Terraform does not read as one"
+    },
+    {
+      "file": "interp_directive_fake_eol_is_refused.tf",
+      "why": "the `%{...}` directive is the same hazard as `${...}` and both readers count one depth for the two, so a row for `${` alone would let a change close half of it and still pass",
+      "fmt": 2,
+      "refuse": "a line separator Terraform does not read as one"
+    },
+    {
+      "file": "interp_bom_is_refused.tf",
+      "why": "and U+FEFF in that position, which was neutralised there for the same wrong reason \u2014 the row exists so the two sets cannot drift apart by one character",
+      "fmt": 2,
+      "refuse": "a U+FEFF that is not the file"
+    },
+    {
+      "file": "interp_directive_body_text_is_read.tf",
+      "why": "the boundary the refusal must not cross: a `%{ if }` BODY is string text again, the directive's own brace having closed, and terraform takes the file \u2014 a fix that refused at any depth inside a template would reject it",
+      "fmt": 3,
+      "blocks": [
+        "google_kms_crypto_key.after"
+      ]
+    },
+    {
+      "file": "interp_block_comment_hides_fake_eols.tf",
+      "why": "HCL allows an inline block comment inside a template expression and terraform reads all five separators and a U+FEFF as the comment text they are \u2014 so the refusal that reaches into a template must stop at one, which is what scrubbing the whole `/* ... */` span does; all six characters sit in one comment so a fix that covered some of them cannot pass",
+      "fmt": 3,
+      "blocks": [
+        "google_kms_crypto_key.after"
+      ]
+    },
+    {
+      "file": "interp_directive_block_comment_hides_fake_eols.tf",
+      "why": "the `%{...}` directive half of it, for the reason its sibling rows exist: the two share one depth counter, so a row for `${` alone would let a change close half of it and still pass",
+      "fmt": 3,
+      "blocks": [
+        "google_kms_crypto_key.after"
+      ]
+    },
+    {
+      "file": "interp_block_comment_hides_a_return.tf",
+      "why": "a carriage return in the same position, which terraform also reads as comment text \u2014 the one character whose false refusal here was known and accepted when the lone-return rule landed (#761), and the row that keeps it closed",
+      "fmt": 3,
+      "blocks": [
+        "google_kms_crypto_key.after"
+      ]
+    },
+    {
+      "file": "interp_block_comment_hides_a_quote.tf",
+      "why": "a quote inside that comment is comment text too, so the refusal aimed at a quoted string inside a template must not fire on it \u2014 the readers would otherwise reject a file terraform formats clean",
+      "fmt": 3,
+      "blocks": [
+        "google_kms_crypto_key.after"
+      ]
+    },
+    {
+      "file": "interp_hash_comment_is_refused.tf",
+      "why": "the boundary the block-comment branch must not be widened to: `#` and `//` inside a single-line template swallow the closing brace and the quote, so terraform answers Invalid multi-line string and the readers are right to refuse \u2014 a change that taught them to read a `#` comment there would answer over a file that cannot parse",
+      "fmt": 2,
+      "refuse": "a line separator Terraform does not read as one"
+    },
+    {
+      "file": "interp_block_comment_unterminated_is_read.tf",
+      "why": "and the other boundary: with no `*/` on the line the template stays open past its end, which terraform answers Invalid expression \u2014 the branch deliberately does not guess there, so the line scrubs as it did before and the file reads, benign because it cannot deploy",
+      "fmt": 2,
+      "blocks": [
+        "google_kms_crypto_key.after"
+      ]
+    },
+    {
+      "file": "string_block_comment_marker_is_text.tf",
+      "why": "the guard on that branch, from the other side: OUTSIDE a template `/*` is string text, and terraform formats this file clean. The `*/` sits in the line's real comment, so a branch that dropped the depth test would blank from the marker through it, swallow the quote that closes the string, and refuse a file that is fine \u2014 which is why the row is written this way and not as a bare `/* */` inside a string, where both spellings answer the same",
+      "fmt": 0,
+      "blocks": [
+        "google_kms_crypto_key.after"
+      ]
+    },
+    {
+      "file": "interp_escaped_is_text.tf",
+      "why": "`$${` is an ESCAPED template \u2014 literal text to terraform, which takes the file \u2014 so the characters behind it are string text and must stay neutralised; matching its trailing `${` as a template opener made the row above's refusal fire on a file the binary accepts",
+      "fmt": 0,
+      "blocks": [
+        "google_kms_crypto_key.after"
+      ]
+    },
+    {
+      "file": "interp_directive_escaped_is_text.tf",
+      "why": "and the `%%{` spelling, because the two escapes are tracked by the same branch as the two templates are",
+      "fmt": 0,
+      "blocks": [
+        "google_kms_crypto_key.after"
+      ]
+    },
+    {
+      "file": "interp_escaped_odd_run_is_text.tf",
+      "why": "a run of three: terraform opens a template only where ONE `$` precedes the brace, so this is literal text and the file is taken \u2014 a reader eating `$$` pairs from the left matched that at even run lengths and opened a template on the leftover at odd ones, which is why the escape is matched as the three characters adjacent to the brace",
+      "fmt": 0,
+      "blocks": [
+        "google_kms_crypto_key.after"
+      ]
+    },
+    {
+      "file": "interp_directive_escaped_odd_run_is_text.tf",
+      "why": "and the `%` run, because one branch matches both spellings",
+      "fmt": 0,
+      "blocks": [
+        "google_kms_crypto_key.after"
+      ]
+    },
+    {
+      "file": "interp_escape_inside_open_template_is_read.tf",
+      "why": "an escape inside an ALREADY-OPEN template: terraform refuses the file and both readers read it, because the escape branch does not ask the interpolation depth \u2014 unchanged from before this row and benign, since such a file cannot deploy, and pinned because it is the interpolation context #762 still owes",
+      "fmt": 2,
+      "blocks": [
+        "google_kms_crypto_key.after"
+      ]
+    },
+    {
+      "file": "interp_in_heredoc_body_is_read.tf",
+      "why": "the first of the two places the parity still ends, and the only one a row can pin: a heredoc BODY line is never scrubbed, so a template inside one is not seen and terraform refuses a file both readers read \u2014 benign, since such a file cannot deploy and `make gcp-fmt` reddens on it first, and pinned so the claim stays honest",
+      "fmt": 2,
+      "blocks": [
+        "google_kms_crypto_key.after"
+      ]
+    },
+    {
+      "file": "opener_trailing_hash_comment.tf",
+      "why": "terraform refuses a heredoc opener that carries anything after the marker; the readers scrub the comment first and then see a bare opener, so the configuration behind it became string content (#766)",
+      "fmt": 2,
+      "refuse": "nothing may follow a heredoc opener on its line"
+    },
+    {
+      "file": "opener_trailing_hash_tight.tf",
+      "why": "the same with no space, which the scrubbed line cannot tell from a bare opener at all",
+      "fmt": 2,
+      "refuse": "nothing may follow a heredoc opener on its line"
+    },
+    {
+      "file": "opener_trailing_slash_comment.tf",
+      "why": "and the // spelling",
+      "fmt": 2,
+      "refuse": "nothing may follow a heredoc opener on its line"
+    },
+    {
+      "file": "opener_trailing_space.tf",
+      "why": "not even one space: terraform answers Invalid expression, so the rule is the line ending and not the comment",
+      "fmt": 2,
+      "refuse": "nothing may follow a heredoc opener on its line"
+    },
+    {
+      "file": "opener_trailing_tab.tf",
+      "why": "a tab after the marker, which terraform refuses like a comment \u2014 one of four trailers the rule's comment measured and no row asked the binary about",
+      "fmt": 2,
+      "refuse": "nothing may follow a heredoc opener on its line"
+    },
+    {
+      "file": "opener_trailing_brace.tf",
+      "why": "and a `}` after the marker",
+      "fmt": 2,
+      "refuse": "nothing may follow a heredoc opener on its line"
+    },
+    {
+      "file": "opener_trailing_comma.tf",
+      "why": "and a `,` after one inside a call, where a reader might expect the list to excuse it",
+      "fmt": 2,
+      "refuse": "nothing may follow a heredoc opener on its line"
+    },
+    {
+      "file": "opener_ends_the_line_in_a_call.tf",
+      "why": "an opener that ends its line inside a call is ordinary, and closing the paren on a later line is terraform-clean \u2014 the rule must not reach this, and the body holds an unbalanced header so a reader that stopped recognising the opener reads it as structure",
+      "fmt": 0,
+      "blocks": [
+        "google_kms_crypto_key.after"
+      ]
+    },
+    {
+      "file": "opener_repeated_at_line_end.tf",
+      "why": "the opener's own text repeated at the end of the line \u2014 a rule written as `the raw line ends with the opener` reads this as a bare opener and skips the resource behind it, while terraform answers Invalid expression",
+      "fmt": 2,
+      "refuse": "nothing may follow a heredoc opener on its line"
+    },
+    {
+      "file": "opener_after_escaped_string.tf",
+      "why": "an escape earlier on the opener's line makes the scrubbed line shorter than the raw one, so a rule comparing a scrubbed index against the raw length refuses a file terraform formats cleanly \u2014 the other half of the same rule, and why it is two clauses",
+      "fmt": 0,
+      "blocks": [
+        "google_kms_crypto_key.after"
+      ]
+    },
+    {
+      "file": "opener_dashed_tag.tf",
+      "why": "a `-` inside the tag is legal to terraform, so the class has to carry it \u2014 without it `<<EOT-X` reads as the tag EOT with `-X` behind it, which the opener rule above refuses, and a file terraform formats cleanly is rejected",
+      "fmt": 0,
+      "blocks": [
+        "google_kms_crypto_key.after"
+      ]
+    },
+    {
+      "file": "opener_unicode_tag.tf",
+      "why": "terraform takes any HCL identifier as a heredoc tag, Unicode letters included, and this class does not: unrecognised, `<<\u00d6`'s body is read as configuration, the `<<HIDE` in it becomes the reader's opener, and the real HIDE far below closes it with the braces balanced and a resource swallowed \u2014 the silent short read a refusal replaces",
+      "fmt": 0,
+      "terraform_accepts": true,
+      "refuse": "cannot read as a heredoc opener"
+    },
+    {
+      "file": "opener_unicode_inside_tag.tf",
+      "why": "the other face of the same gap: the tag STARTS in this class and leaves it, so the class truncates `E<O-umlaut>T` to `E` and a file terraform formats cleanly would be read against the wrong terminator \u2014 the refusal has to test that the class matched the tag in full, not merely that it matched",
+      "fmt": 0,
+      "terraform_accepts": true,
+      "refuse": "cannot read as a heredoc opener"
+    },
+    {
+      "file": "opener_tilde_marker.tf",
+      "why": "`<<~TAG` is an Invalid expression to terraform, which therefore reads the lines behind it as structure; matching it as an opener skipped a resource and let the braces balance again, so the class does not match it and the `<<` refusal answers instead",
+      "fmt": 2,
+      "refuse": "cannot read as a heredoc opener"
+    },
+    {
+      "file": "sep_vt_between_statements.tf",
+      "why": "U+000B is not a line ending to terraform (Invalid character) and not one to either reader, so the whole file is one line \u2014 where only the first header can match and the rest is invisible (#768)",
+      "fmt": 2,
+      "refuse": "a line separator Terraform does not read as one"
+    },
+    {
+      "file": "sep_ff_between_statements.tf",
+      "why": "the same for U+000C",
+      "fmt": 2,
+      "refuse": "a line separator Terraform does not read as one"
+    },
+    {
+      "file": "sep_u2028_between_statements.tf",
+      "why": "and for U+2028, which str.splitlines() breaks on and neither reader does",
+      "fmt": 2,
+      "refuse": "a line separator Terraform does not read as one"
+    },
+    {
+      "file": "sep_u0085_between_statements.tf",
+      "why": "and for U+0085",
+      "fmt": 2,
+      "refuse": "a line separator Terraform does not read as one"
+    },
+    {
+      "file": "sep_u2029_between_statements.tf",
+      "why": "and for U+2029",
+      "fmt": 2,
+      "refuse": "a line separator Terraform does not read as one"
+    },
+    {
+      "file": "sep_in_text_positions.tf",
+      "why": "terraform accepts all five inside a string, a comment and a heredoc body \u2014 all five in each position, because a row holding three of them leaves the other two free to drop out of the neutralised set unnoticed",
+      "fmt": 0,
+      "blocks": [
+        "google_kms_crypto_key.after"
+      ]
+    },
+    {
+      "file": "sep_vt_pads_a_terminator.tf",
+      "why": "all five pad a terminator that terraform closes and both readers close \u2014 the opposite of U+001C-U+001F, and all five because a row holding two of them leaves the other three trimmed on the strength of a sweep alone; each body holds an unbalanced header, so a reader that stopped closing any one of them reads it as structure",
+      "fmt": 0,
+      "blocks": [
+        "google_kms_crypto_key.after"
+      ]
+    },
+    {
       "file": "cr_among_structure.tf",
       "why": "the #761 divergence itself: read_text() breaks lines on a bare CR and split(\"\\n\") does not, so these bytes were four lines to one reader and one line to the other \u2014 where only the first header can match",
       "fmt": 2,
