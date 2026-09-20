@@ -6100,7 +6100,7 @@ and the ordering follow-up at
 [16d24be](https://github.com/OpenSDLC-Dev/managed-agents-wire-recordings/tree/16d24be5acdb0ee4729b8051b5363ce17991ed06/2026-09-19-custom-order-followup).
 The follow-up analyzer matched all 90 mirrored entries without an unmatched entry.
 
-Independent verification ran the full make verify gate on a 952-file Linux snapshot
+Independent verification at 059825a ran the full make verify gate on a 952-file Linux snapshot
 matched by SHA256 to the implementation: 61 test packages passed, with 19,946 of
 22,148 statements covered (90.0578%). Separate controlplane, brain, executor and
 worker binaries then passed thirteen runtime cases against isolated PostgreSQL and
@@ -6125,3 +6125,11 @@ Both independent reviews found no open actionable issues at 059825a. The orderin
 review identified the harvest claim/requeue hot loop at 691ffad; its follow-up
 verified the durable retry delay and lease ownership checks. The lifecycle review
 found no actionable issues in either pass.
+
+PR review also exposed an idle-harvest enqueue after platform Web/MCP execution
+in a self-hosted session. The cloud-only gate is covered by both drivers in both
+environment kinds, retaining each remaining custom wait. A proposed maximum
+external-wait retention was declined for this change: custom waits previously
+remained running and were already excluded from idle-TTL reclamation. Plan 52
+preserves that workspace protection when those waits become idle; terminal
+archive, delete and termination still use their existing reclamation tiers.

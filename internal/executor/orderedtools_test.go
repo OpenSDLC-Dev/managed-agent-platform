@@ -8,9 +8,75 @@ import (
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/events"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/mcp/mcptest"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/pgtest"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/queue"
 )
+
+func TestPlatformToolIdleHarvestIsCloudOnly(t *testing.T) {
+	for _, envKind := range []string{"cloud", "self_hosted"} {
+		for _, driver := range []string{"web", "mcp"} {
+			t.Run(envKind+"/"+driver, func(t *testing.T) {
+				ctx := context.Background()
+				var h *harness
+				resultType := domain.EventAgentToolResult
+				if driver == "web" {
+					h = webHarness(t, `{"results":[]}`, "")
+				} else {
+					h = mcpHarness(t)
+					url := mcptest.Server(t, mcptest.Tool{Name: "search", Result: "answer"})
+					h.declareListedMCPServers(t, [2]string{"docs", url})
+					resultType = domain.EventAgentMCPToolResult
+				}
+				if _, err := h.pool.Exec(ctx, `UPDATE environments SET kind=$2, config=jsonb_set(config,'{type}',to_jsonb($2::text)) WHERE id=$1`, h.envID, envKind); err != nil {
+					t.Fatal(err)
+				}
+				if driver == "web" {
+					h.suspendWeb(t, searchUse("query"))
+				} else {
+					h.appendMCPToolUse(t, "docs", "search", `{}`)
+					h.enqueueMCP(t)
+				}
+				pending := domain.NewID("sevt")
+				if _, err := h.log.Append(ctx, h.sid, []events.NewEvent{{
+					ID: pending, Type: domain.EventAgentCustomToolUse,
+					Payload: json.RawMessage(`{"name":"beta","input":{}}`),
+				}}); err != nil {
+					t.Fatal(err)
+				}
+				h.stepOnce(t)
+				results := h.types(t, string(resultType))
+				if len(results) != 1 {
+					t.Fatalf("platform results=%d, want one", len(results))
+				}
+				var result struct {
+					IsError bool `json:"is_error"`
+				}
+				if err := json.Unmarshal(results[0].Body, &result); err != nil || result.IsError {
+					t.Fatalf("platform result failed: %s %v", results[0].Body, err)
+				}
+				idle := h.types(t, string(domain.EventSessionStatusIdle))
+				var wait struct {
+					StopReason domain.StopReason `json:"stop_reason"`
+				}
+				if len(idle) != 1 || json.Unmarshal(idle[0].Body, &wait) != nil ||
+					len(wait.StopReason.EventIDs) != 1 || wait.StopReason.EventIDs[0] != pending {
+					t.Fatalf("remaining custom wait: %v", idle)
+				}
+				if got := h.liveOf(t, queue.ModelTurn); got != 0 {
+					t.Fatalf("premature model turn=%d", got)
+				}
+				wantHarvest := 0
+				if envKind == "cloud" {
+					wantHarvest = 1
+				}
+				if got := h.liveOf(t, queue.OutputsHarvest); got != wantHarvest {
+					t.Fatalf("idle harvest=%d, want %d for %s", got, wantHarvest, envKind)
+				}
+			})
+		}
+	}
+}
 
 func TestCloudResultBeforeLastCustom(t *testing.T) {
 	for _, betaFirst := range []bool{false, true} {

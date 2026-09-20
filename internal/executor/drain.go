@@ -74,10 +74,13 @@ func (e *Executor) settleDrain(ctx context.Context, tx pgx.Tx, item *queue.Item,
 
 	if idled && class == events.ExecNone {
 		var status domain.SessionStatus
-		if err := tx.QueryRow(ctx, "SELECT status FROM sessions WHERE id=$1", item.SessionID.String()).Scan(&status); err != nil {
+		var envKind string
+		if err := tx.QueryRow(ctx,
+			`SELECT s.status, e.kind FROM sessions s JOIN environments e ON e.id=s.environment_id
+			 WHERE s.id=$1`, item.SessionID.String()).Scan(&status, &envKind); err != nil {
 			return err
 		}
-		if status == domain.SessionIdle {
+		if status == domain.SessionIdle && envKind == string(domain.EnvCloud) {
 			if _, err := e.queue.EnqueueOutputsHarvest(ctx, tx, item.EnvironmentID, item.SessionID, false); err != nil {
 				return err
 			}
