@@ -1,9 +1,12 @@
 ---
-status: in-progress
+status: archived
 issue: "#375"
 ---
 
 # External tool waits and ordered resumption
+
+Implemented and verified. Acceptance and review evidence is recorded in
+[HISTORY.md](../HISTORY.md#external-tool-waits-375--acceptance-record-2026-09-20).
 
 Custom results, confirmations and self-hosted results participate in the same
 thread-local tool flow. Receipt is durable and prevents a duplicate answer;

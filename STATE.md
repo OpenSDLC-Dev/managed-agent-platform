@@ -4,12 +4,8 @@ What is being worked on right now, and how far along it is — nothing else. **S
 
 ## Active work
 
-**#375 — external tool waits** ([plan 52](docs/plan/52_external-tool-waits.md)).
-The ordered result processing implementation passed independent verification;
-dual code review, PR and CI are pending.
+None.
 
 ## Tasks
 
-- [x] #375 — real API/SSE regression, ordered waits and recovery, lifecycle checks
-- [x] #375 — make verify (90.03%), recording comparison, independent verification
-- [ ] #375 — dual code review, PR, green CI and squash merge
+None.
