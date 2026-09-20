@@ -213,9 +213,10 @@ OPEN_TEMPLATE_IN_BODY = (
     "a `${...}` or `%{...}` left open at the end of a heredoc body line. Terraform reads "
     "the lines after it as template text and does not end the heredoc at a terminator "
     "inside one, while this reader closes at the first line that trims to the terminator "
-    "— so the body behind it would arrive as configuration. A template this guard can "
-    "read closes on its own line and holds no comment, heredoc or nested interpolation; "
-    "the rest it refuses rather than guess at."
+    "— so the body behind it would arrive as configuration. This guard reads a template "
+    "that closes on its own line, with any `/* ... */` in it closed too; a line comment, "
+    "an unterminated block comment, a heredoc and a nested interpolation it refuses "
+    "rather than guess at."
 )
 
 

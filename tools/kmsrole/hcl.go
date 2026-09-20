@@ -78,7 +78,7 @@ var errLoneCR = errors.New("a carriage return that is not part of a CRLF — ter
 
 // Raised where a heredoc body line ends with a template still open. Mirrors
 // check_split.py's OPEN_TEMPLATE_IN_BODY.
-var errOpenTemplateInBody = errors.New("a `${...}` or `%{...}` left open at the end of a heredoc body line — terraform reads the lines after it as template text and does not end the heredoc at a terminator inside one, while this reader closes at the first line that trims to the terminator, so the body behind it would arrive as configuration; a template this guard can read closes on its own line and holds no comment, heredoc or nested interpolation, and the rest it refuses rather than guess at")
+var errOpenTemplateInBody = errors.New("a `${...}` or `%{...}` left open at the end of a heredoc body line — terraform reads the lines after it as template text and does not end the heredoc at a terminator inside one, while this reader closes at the first line that trims to the terminator, so the body behind it would arrive as configuration; this guard reads a template that closes on its own line, with any `/* ... */` in it closed too, and a line comment, an unterminated block comment, a heredoc and a nested interpolation it refuses rather than guess at")
 
 // plainString reports where the string opened at i ends, or -1 when it cannot
 // say. Only a string that is plain text is answered for: HCL keeps interpolating
