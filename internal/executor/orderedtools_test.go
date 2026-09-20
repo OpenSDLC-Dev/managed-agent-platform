@@ -123,6 +123,7 @@ func TestIdleHarvestAndToolsDoNotOverlap(t *testing.T) {
 		}
 		t.Run(name, func(t *testing.T) {
 			h := newHarness(t, &fakeSandbox{})
+			h.exec.cfg.PollInterval = time.Minute
 			ctx := context.Background()
 			h.enqueueIdleHarvest(t)
 			harvest, err := h.queue.Claim(ctx, queue.OutputsHarvest, time.Minute)
@@ -143,6 +144,9 @@ func TestIdleHarvestAndToolsDoNotOverlap(t *testing.T) {
 			if _, live, err := h.exec.sessionForRun(ctx, tool); err != nil || live {
 				t.Fatalf("tool overlapped claimed harvest: %v %v", live, err)
 			}
+			if worked, err := h.exec.step(ctx); err != nil || worked {
+				t.Fatalf("executor reclaimed work during harvest backoff: %v %v", worked, err)
+			}
 			if harvestFirst {
 				if err := h.queue.Complete(ctx, h.pool, harvest); err != nil {
 					t.Fatal(err)
@@ -151,6 +155,10 @@ func TestIdleHarvestAndToolsDoNotOverlap(t *testing.T) {
 				if _, live, err := h.exec.sessionForRun(ctx, harvest); err != nil || live {
 					t.Fatalf("obsolete harvest admission: %v %v", live, err)
 				}
+			}
+			// Advance the deferred retry without a timing-dependent sleep.
+			if _, err := h.pool.Exec(ctx, `UPDATE work_items SET lease_expires_at=now()-interval '1 second' WHERE id=$1`, tool.ID); err != nil {
+				t.Fatal(err)
 			}
 			tool, err = h.queue.Claim(ctx, queue.ToolExec, time.Minute)
 			if err != nil || tool == nil {

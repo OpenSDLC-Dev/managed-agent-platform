@@ -287,7 +287,8 @@ func traceContextArg(ctx context.Context) any {
 }
 
 // Claim leases the oldest available item of the kind: queued items first-come
-// first-served, plus active items whose lease expired (their claimant died).
+// first-served after any retry delay, plus active items whose lease expired
+// (their claimant died).
 // It returns nil with no error when there is nothing to do.
 //
 // tool_exec claims are scoped to cloud environments — the platform-managed
@@ -306,7 +307,8 @@ func (q *Queue) Claim(ctx context.Context, kind Kind, ttl time.Duration) (*Item,
 		    JOIN environments e ON e.id = w.environment_id
 		    WHERE w.kind = $1
 		      AND (w.kind <> 'tool_exec' OR e.kind = 'cloud')
-		      AND (w.state = 'queued' OR (w.state = 'active' AND w.lease_expires_at < now()))
+		      AND ((w.state = 'queued' AND (w.lease_expires_at IS NULL OR w.lease_expires_at < now()))
+		           OR (w.state = 'active' AND w.lease_expires_at < now()))
 		    ORDER BY w.created_at
 		    FOR UPDATE OF w SKIP LOCKED
 		    LIMIT 1
@@ -559,7 +561,14 @@ func (q *Queue) Extend(ctx context.Context, item *Item, ttl time.Duration) error
 // (input that arrived mid-turn) and chains it under the item's existing
 // live slot — an Enqueue would be suppressed by it. Requires the lease.
 func (q *Queue) Requeue(ctx context.Context, db DB, item *Item) error {
-	return q.requeue(ctx, db, item, 0)
+	return q.requeue(ctx, db, item, 0, 0)
+}
+
+// RequeueAfter hands a claimed item back with a retry delay. The existing lease
+// column holds its earliest next claim, so all replicas skip the deferred item
+// while remaining free to serve other sessions. Requires the current lease.
+func (q *Queue) RequeueAfter(ctx context.Context, db DB, item *Item, delay time.Duration) error {
+	return q.requeue(ctx, db, item, 0, delay)
 }
 
 // RequeueSettlement is Requeue for the one chain nobody feeds. A delegated
@@ -578,7 +587,7 @@ func (q *Queue) Requeue(ctx context.Context, db DB, item *Item) error {
 // starts a fresh run, deliberately, because a message from another agent is
 // input like any other. Requires the lease, exactly as Requeue does.
 func (q *Queue) RequeueSettlement(ctx context.Context, db DB, item *Item, chain int) error {
-	return q.requeue(ctx, db, item, chain)
+	return q.requeue(ctx, db, item, chain, 0)
 }
 
 // RequeueAsGrading hands a claimed outputs_harvest item back as a grading
@@ -605,11 +614,11 @@ func (q *Queue) RequeueAsGrading(ctx context.Context, db DB, item *Item) error {
 	return nil
 }
 
-// requeue is the shared body of the two above: the lease proof is written
+// requeue is the shared body of the requeue variants: the lease proof is written
 // once, because a claim's ownership rule must not be able to differ between
 // two paths that both hand an item back.
 //
-// chain is the only difference. A positive count writes the settlement key; 0
+// A positive chain count writes the settlement key; 0
 // removes it, which is what makes Requeue's meaning "whatever unfed run was
 // in flight has ended" — any other reason to chain an item is progress. The
 // removal is a no-op on the rows that never carried the key, so a tool_exec
@@ -617,15 +626,17 @@ func (q *Queue) RequeueAsGrading(ctx context.Context, db DB, item *Item) error {
 // and since only the delegation settlement passes a positive count, and it
 // only ever holds a model_turn item, the key cannot reach the wire work
 // object either way (workAPIScope is tool_exec only).
-func (q *Queue) requeue(ctx context.Context, db DB, item *Item, chain int) error {
+func (q *Queue) requeue(ctx context.Context, db DB, item *Item, chain int, delay time.Duration) error {
 	tag, err := db.Exec(ctx,
 		`UPDATE work_items
-		 SET state = 'queued', lease_expires_at = NULL, updated_at = now(),
+		 SET state = 'queued', updated_at = now(),
+		     lease_expires_at = CASE WHEN $4::double precision > 0
+		                            THEN now() + make_interval(secs => $4) ELSE NULL END,
 		     metadata = CASE WHEN $3::int > 0
 		                     THEN jsonb_set(metadata, '{settlement_chain}', to_jsonb($3::int), true)
 		                     ELSE metadata - 'settlement_chain' END
 		 WHERE id = $1 AND state = 'active' AND lease_expires_at = $2`,
-		item.ID, item.Lease, chain)
+		item.ID, item.Lease, chain, delay.Seconds())
 	if err != nil {
 		return fmt.Errorf("queue: requeue %s: %w", item.ID, err)
 	}

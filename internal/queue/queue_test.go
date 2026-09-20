@@ -375,6 +375,49 @@ func TestEnqueueUnknownSessionFails(t *testing.T) {
 	}
 }
 
+func TestDelayedRequeueLeavesOtherSessionsRunnable(t *testing.T) {
+	ctx := context.Background()
+	pool := pgtest.NewPool(t)
+	sid, eid := pgtest.NewSession(t, pool, "cloud")
+	q := queue.New(pool)
+	if _, err := q.Enqueue(ctx, pool, eid, sid, queue.ToolExec); err != nil {
+		t.Fatal(err)
+	}
+	item, err := q.Claim(ctx, queue.ToolExec, time.Minute)
+	if err != nil || item == nil {
+		t.Fatalf("claim: %v %v", item, err)
+	}
+	if err := q.RequeueAfter(ctx, pool, item, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	if err := q.RequeueAfter(ctx, pool, item, time.Hour); !errors.Is(err, queue.ErrLeaseLost) {
+		t.Fatalf("stale delayed requeue: %v", err)
+	}
+	// A separate claimant skips the deferred head and serves another session.
+	otherSID, otherEID := pgtest.NewSession(t, pool, "cloud")
+	if _, err := q.Enqueue(ctx, pool, otherEID, otherSID, queue.ToolExec); err != nil {
+		t.Fatal(err)
+	}
+	replica := queue.New(pool)
+	next, err := replica.Claim(ctx, queue.ToolExec, time.Minute)
+	if err != nil || next == nil || next.SessionID != otherSID {
+		t.Fatalf("unrelated session blocked: %v %v", next, err)
+	}
+	if next, err := replica.Claim(ctx, queue.ToolExec, time.Minute); err != nil || next != nil {
+		t.Fatalf("delayed item claimed early: %v %v", next, err)
+	}
+	if _, err := pool.Exec(ctx, `UPDATE work_items SET lease_expires_at=now()-interval '1 second' WHERE id=$1`, item.ID); err != nil {
+		t.Fatal(err)
+	}
+	next, err = replica.Claim(ctx, queue.ToolExec, time.Minute)
+	if err != nil || next == nil || next.ID != item.ID || next.Reclaimed {
+		t.Fatalf("deferred retry: %v %v", next, err)
+	}
+	if err := replica.Complete(ctx, pool, next); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestRequeueHandsTheItemBack(t *testing.T) {
 	ctx := context.Background()
 	pool := pgtest.NewPool(t)

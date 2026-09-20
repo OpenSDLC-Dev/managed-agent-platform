@@ -155,7 +155,9 @@ it found none, so the grader never reads a snapshot the pass did not freshly col
 
 An executor finishing a ready prefix also schedules a harvest when the final session
 fold becomes idle. A queued idle harvest yields to runnable tools; tool execution
-waits for an already active harvest to finish. Outstanding external calls protect
+waits for an already active harvest to finish, with a queue-persisted retry delay
+of one executor poll interval so replicas can serve other sessions during the wait.
+Outstanding external calls protect
 the sandbox from idle reaping.
 
 **External waits / permissions.** An unresolved custom call, worker result or

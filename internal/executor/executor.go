@@ -1018,7 +1018,9 @@ func (e *Executor) sessionForRun(ctx context.Context, item *queue.Item) (session
 			return sessionRun{}, false, err
 		}
 		if harvesting {
-			if err := e.queue.Requeue(ctx, tx, item); err != nil {
+			// Persist the backoff so another replica cannot immediately claim
+			// and return this same item throughout a slow outputs walk.
+			if err := e.queue.RequeueAfter(ctx, tx, item, e.cfg.PollInterval); err != nil {
 				return sessionRun{}, false, err
 			}
 			return sessionRun{}, false, tx.Commit(ctx)
