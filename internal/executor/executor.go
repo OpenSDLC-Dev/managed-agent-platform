@@ -994,6 +994,39 @@ func (e *Executor) sessionForRun(ctx context.Context, item *queue.Item) (session
 		return sessionRun{}, false, tx.Commit(ctx)
 	}
 
+	// Serialize harvesting against actual tool execution under the session row
+	// lock. Queue claims can race, but neither driver begins sandbox work before
+	// this check. Queued tools win over an obsolete idle snapshot.
+	if item.Kind == queue.OutputsHarvest && !item.ChainGrading {
+		class, err := events.RunnableExecClass(ctx, tx, item.SessionID, nil, nil, toolset.IsWebTool, toolset.IsDelegationTool)
+		if err != nil {
+			return sessionRun{}, false, err
+		}
+		var busy bool
+		if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM work_items WHERE session_id=$1 AND kind IN ('tool_exec','web_exec','mcp_exec') AND state IN ('starting','active'))`, item.SessionID.String()).Scan(&busy); err != nil {
+			return sessionRun{}, false, err
+		}
+		if class != events.ExecNone || busy {
+			if err := e.queue.Complete(ctx, tx, item); err != nil {
+				return sessionRun{}, false, err
+			}
+			return sessionRun{}, false, tx.Commit(ctx)
+		}
+	} else if item.Kind != queue.OutputsHarvest {
+		var harvesting bool
+		if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM work_items WHERE session_id=$1 AND kind='outputs_harvest' AND state IN ('starting','active'))`, item.SessionID.String()).Scan(&harvesting); err != nil {
+			return sessionRun{}, false, err
+		}
+		if harvesting {
+			// Persist the backoff so another replica cannot immediately claim
+			// and return this same item throughout a slow outputs walk.
+			if err := e.queue.RequeueAfter(ctx, tx, item, e.cfg.PollInterval); err != nil {
+				return sessionRun{}, false, err
+			}
+			return sessionRun{}, false, tx.Commit(ctx)
+		}
+	}
+
 	// An idle-triggered outputs harvest attaches to a live sandbox by session id
 	// alone (docs/plan/38 decision 8) and reads none of the environment config,
 	// resolved agent, or resources decoded below. Decoding them would fault the

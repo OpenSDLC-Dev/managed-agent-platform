@@ -641,7 +641,7 @@ func (w *Worker) sessionLive(ctx context.Context, sessionID string) (live, coord
 	if err != nil {
 		return false, false, err
 	}
-	live = sess.Status == sdk.BetaManagedAgentsSessionStatusRunning && sess.ArchivedAt.IsZero()
+	live = (sess.Status == sdk.BetaManagedAgentsSessionStatusRunning || sess.Status == sdk.BetaManagedAgentsSessionStatusIdle) && sess.ArchivedAt.IsZero()
 	return live, len(sess.Agent.Multiagent.Agents) > 0, nil
 }
 

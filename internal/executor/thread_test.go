@@ -144,8 +144,13 @@ func TestExecutorRunsOnlyTheRunnableSetAcrossThreads(t *testing.T) {
 
 	// A's allow lands (the API's confirmation arm: the confirmation on A's
 	// thread, A running, the tool_exec enqueued). Now A's call runs.
-	h.appendOn(t, a, domain.EventUserToolConfirm,
+	confirmation := h.appendOn(t, a, domain.EventUserToolConfirm,
 		`{"tool_use_id":"`+askA.String()+`","result":"allow","session_thread_id":null}`)
+	// Receipt alone is not the cloud executor's authorization; emulate the
+	// API's ordered processing after this first-in-thread approval.
+	if _, err := h.pool.Exec(context.Background(), "UPDATE events SET processed_at=clock_timestamp() WHERE id=$1", confirmation.String()); err != nil {
+		t.Fatal(err)
+	}
 	h.setThread(t, a, "running", "")
 	h.enqueueToolExec(t)
 	if worked, err := h.exec.step(context.Background()); err != nil || !worked {

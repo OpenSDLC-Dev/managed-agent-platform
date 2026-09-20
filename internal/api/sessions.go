@@ -1437,6 +1437,28 @@ func (s *server) archiveSessionInTx(ctx context.Context, tx pgx.Tx, id string) (
 		`SELECT archived_at IS NOT NULL FROM sessions WHERE id = $1`, id).Scan(&alreadyArchived); err != nil {
 		return sessionRow{}, nil, err
 	}
+
+	if !alreadyArchived {
+		flow, err := events.ThreadToolFlow(ctx, tx, domain.ID(id), "", platformExecuted)
+		if err != nil {
+			return sessionRow{}, nil, err
+		}
+		if flow.Unsettled {
+			out, err := s.interruptThreadInTx(ctx, tx, interruptThreadIn{sessionID: domain.ID(id), status: string(domain.SessionIdle), all: true, primaryInterrupted: true})
+			if err != nil {
+				return sessionRow{}, nil, err
+			}
+			if _, err = s.log.AppendInTx(ctx, tx, domain.ID(id), out.batch, events.AppendOptions{Then: func(ctx context.Context, tx pgx.Tx) error {
+				if _, err := s.log.AdvanceThreadTools(ctx, tx, domain.ID(id), "", platformExecuted); err != nil {
+					return err
+				}
+				return s.queue.CancelSession(ctx, tx, domain.ID(id))
+			}}); err != nil {
+				return sessionRow{}, nil, err
+			}
+			moves = append(moves, out.moves...)
+		}
+	}
 	row, err := scanSession(tx.QueryRow(ctx,
 		`UPDATE sessions SET
 		   updated_at  = CASE WHEN archived_at IS NULL THEN now() ELSE updated_at END,

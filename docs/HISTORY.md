@@ -6091,3 +6091,45 @@ terminator-looking line, is harmless, and is refused all the same
 (`heredoc_multiline_template_is_refused.tf`, carrying `terraform_accepts`). `deploy/gcp/`
 contains none — `make gcp-split-check` reads the tree and still reports its seven
 protected resources.
+
+## External-tool waits (#375) — acceptance record, 2026-09-20
+
+The acceptance sources are the mixed-tools recording at
+[146c57d](https://github.com/OpenSDLC-Dev/managed-agents-wire-recordings/tree/146c57d734e935f7c7f1d681a3ba2612d5c1dd82/2026-09-19-custom-mixed-tools)
+and the ordering follow-up at
+[16d24be](https://github.com/OpenSDLC-Dev/managed-agents-wire-recordings/tree/16d24be5acdb0ee4729b8051b5363ce17991ed06/2026-09-19-custom-order-followup).
+The follow-up analyzer matched all 90 mirrored entries without an unmatched entry.
+
+Independent verification at 059825a ran the full make verify gate on a 952-file Linux snapshot
+matched by SHA256 to the implementation: 61 test packages passed, with 19,946 of
+22,148 statements covered (90.0578%). Separate controlplane, brain, executor and
+worker binaries then passed thirteen runtime cases against isolated PostgreSQL and
+Docker: twelve cookbook decisions with thirteen model calls; reverse replies over
+a brain restart; cloud publication before the final custom reply; queued approval;
+worker execution while idle; approval-first allow and deny; worker-first order;
+interrupt and late-result rejection; concurrent final replies; SSE; two real
+child threads with routed replies and sibling isolation; and two executor replicas
+with a held harvest, delayed tool retry and progress on an unrelated session.
+The Messages-protocol fixture fixes model output for ordering assertions; it does not evaluate model
+quality. All probe processes and containers were removed afterwards.
+
+Review hardening covers the deferred approval metric after executor commit, atomic
+rollback when result processing fails, MCP names matching built-in/delegation
+names, and durable queue backoff while another executor harvests outputs. Console
+state/summary/page regressions passed 64 tests. Registry shape and
+issue-state checks passed; the SDK citation report had 591 citations and no findings.
+The user authorized Codex in place of Claude for this run's independent verifier
+and dual reviews, each using gpt-5.6-sol with xhigh effort.
+
+Both independent reviews found no open actionable issues at 059825a. The ordering
+review identified the harvest claim/requeue hot loop at 691ffad; its follow-up
+verified the durable retry delay and lease ownership checks. The lifecycle review
+found no actionable issues in either pass.
+
+PR review also exposed an idle-harvest enqueue after platform Web/MCP execution
+in a self-hosted session. The cloud-only gate is covered by both drivers in both
+environment kinds, retaining each remaining custom wait. A proposed maximum
+external-wait retention was declined for this change: custom waits previously
+remained running and were already excluded from idle-TTL reclamation. Plan 52
+preserves that workspace protection when those waits become idle; terminal
+archive, delete and termination still use their existing reclamation tiers.

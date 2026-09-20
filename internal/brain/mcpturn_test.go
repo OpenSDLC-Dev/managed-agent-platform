@@ -176,7 +176,7 @@ func TestAnAllowedMCPCallSchedulesTheMCPDriverFirst(t *testing.T) {
 // The web tools already displace a sandbox tool_exec, so a turn carrying both a
 // web call and an MCP call is where the ranking is actually decided: mcp_exec
 // outranks web_exec, not merely tool_exec. The web driver chains what is left.
-func TestAnMCPCallOutranksAWebCallOnTheSameTurn(t *testing.T) {
+func TestWebCallBeforeMCPRunsFirst(t *testing.T) {
 	h := newHarness(t, [][]provider.Chunk{{
 		provider.Chunk{Kind: provider.KindToolUse, ToolUse: &provider.ToolUse{
 			ID: "toolu_1", Name: "web_fetch", Input: json.RawMessage(`{"url":"https://x.test"}`)}},
@@ -191,11 +191,11 @@ func TestAnMCPCallOutranksAWebCallOnTheSameTurn(t *testing.T) {
 	h.wake(t, "fetch then search")
 	h.runOnce(t)
 
-	if got := h.liveOf(t, queue.MCPExec); got != 1 {
-		t.Errorf("mcp_exec items = %d, want 1", got)
+	if got := h.liveOf(t, queue.MCPExec); got != 0 {
+		t.Errorf("mcp_exec items = %d, want 0 until the preceding web call settles", got)
 	}
-	if got := h.liveOf(t, queue.WebExec); got != 0 {
-		t.Errorf("web_exec items = %d, want 0 (the MCP driver chains it)", got)
+	if got := h.liveOf(t, queue.WebExec); got != 1 {
+		t.Errorf("web_exec items = %d, want 1 for the first call", got)
 	}
 }
 

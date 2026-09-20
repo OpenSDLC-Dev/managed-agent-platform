@@ -504,7 +504,7 @@ func TestSpawnOfAnUnknownAgentIsRefused(t *testing.T) {
 // Reporting and working at once would end the turn with its other calls
 // unanswered, so the report is refused and nothing ends.
 func TestSubmitResultSharingItsTurnWithAToolCallReportsNothing(t *testing.T) {
-	h := newHarness(t, [][]provider.Chunk{{
+	h := newHarnessEnv(t, "cloud", [][]provider.Chunk{{
 		toolUseChunk("t1", "lookup"),
 		toolCall("t2", "submit_result", `{"result":"done"}`),
 		done("tool_use", 2),
@@ -526,8 +526,8 @@ func TestSubmitResultSharingItsTurnWithAToolCallReportsNothing(t *testing.T) {
 	if len(got) != 1 || !got[0].isErr || !strings.Contains(got[0].text, "after your tool calls") {
 		t.Fatalf("answer = %+v, want the report refused", got)
 	}
-	if s := h.threadStatus(t, child); s != "running" {
-		t.Errorf("child = %q, want still running on its own tool call", s)
+	if s := h.threadStatus(t, child); s != "idle" {
+		t.Errorf("child = %q, want idle awaiting its custom result", s)
 	}
 	if n := h.countType(t, "agent.thread_message_sent"); n != 0 {
 		t.Errorf("a refused report still messaged the coordinator")
@@ -958,7 +958,7 @@ func TestCreateAgentOnANonDelegatingSessionIsAnsweredUnknown(t *testing.T) {
 // disabled the way production-ready-agent's financial-analyst disables it
 // (#567's reproduction); bash stays enabled.
 func TestAnUnofferedNameAlongsideARealCallStillRunsTheRealOne(t *testing.T) {
-	h := newHarness(t, [][]provider.Chunk{{
+	h := newHarnessEnv(t, "cloud", [][]provider.Chunk{{
 		toolCall("t1", "edit", `{"file_path":"/tmp/x","command":"view"}`),
 		toolCall("t2", "bash", `{"command":"ls"}`),
 		done("tool_use", 2),
@@ -1357,7 +1357,7 @@ func TestReportLandingDuringAFailedGradeChainsThePrimary(t *testing.T) {
 // (decision 6). Parking would idle the thread with its call unanswered, and
 // no drain, result trigger or message moves an idle thread.
 func TestWaitSharingItsTurnWithAToolCallDoesNotPark(t *testing.T) {
-	h := newHarness(t, [][]provider.Chunk{{
+	h := newHarnessEnv(t, "cloud", [][]provider.Chunk{{
 		toolCall("t1", "bash", `{"command":"ls"}`),
 		toolCall("t2", "wait_for_agents", `{}`),
 		done("tool_use", 2),
@@ -1401,14 +1401,14 @@ func TestWaitSharingItsTurnWithAClientToolCallDoesNotPark(t *testing.T) {
 	h.wake(t, "coordinate")
 	h.runOnce(t)
 
-	if s := h.threadStatus(t, domain.PrimaryThreadID(h.sessionID)); s != "running" {
-		t.Errorf("coordinator = %q, want running with its custom call outstanding", s)
+	if s := h.threadStatus(t, domain.PrimaryThreadID(h.sessionID)); s != "idle" {
+		t.Errorf("coordinator = %q, want requires_action with its custom call outstanding", s)
 	}
 	if n := h.liveWork(t); n != 0 {
 		t.Errorf("live items = %d, want none — the client's result is what resumes this turn", n)
 	}
-	if n := h.countType(t, "session.thread_status_idle"); n != 0 {
-		t.Errorf("the coordinator parked while a client call was outstanding")
+	if n := h.countType(t, "session.thread_status_idle"); n != 1 {
+		t.Errorf("the coordinator did not advertise the custom result wait")
 	}
 }
 
