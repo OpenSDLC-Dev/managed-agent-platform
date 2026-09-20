@@ -11,18 +11,10 @@ import (
 	"github.com/jackc/pgx/v5"
 )
 
-// Tool-flow checks for the control plane's POST /events: a tool result is
-// validated against the log before it is accepted, and it schedules the next
-// turn only once every outstanding tool call — a tool-use event with no
-// result referencing it — has been answered. The model protocol requires
-// every tool_use answered before the conversation continues, which makes
-// these checks correctness, not bookkeeping: resuming on a partial result
-// set replays a request the protocol rejects, and the log is append-only, so
-// a bad reference can never be taken back.
-//
-// The brain does not consult these: a suspended turn's own intents commit
-// with its settlement, so nothing can have answered them yet, and it simply
-// completes its work item and waits for the trigger above.
+// Tool-flow predicates shared by the API, brain and execution drivers.
+// Receipt prevents duplicate answers and execution; ordered processing releases
+// a thread. Every tool_use must have a processed result before the model resumes.
+// The log is append-only, so validation happens before a reply is accepted.
 
 // Querier is the slice of pgx shared by pools and transactions, so the
 // checks can run inside a caller's transaction.
@@ -70,23 +62,33 @@ var (
 // this result land, is this ask still blocking — and a drift between them would
 // wedge a session, so they share one text.
 func answeredBy(typesParam int) string {
+	return toolAnswer(typesParam, "")
+}
+
+func processedAnswerBy(typesParam int) string {
+	return toolAnswer(typesParam, " AND r.processed_at IS NOT NULL")
+}
+
+func toolAnswer(typesParam int, processed string) string {
 	return fmt.Sprintf(`EXISTS (
 		       SELECT 1 FROM events r
-		       WHERE r.session_id = $1 AND r.type = ANY($%d)
+		       WHERE r.session_id = $1 AND r.type = ANY($%d)%s
 		         AND COALESCE(r.payload->>'tool_use_id',
 		                      r.payload->>'custom_tool_use_id',
 		                      r.payload->>'mcp_tool_use_id') = tu.id
-		     )`, typesParam)
+		     )`, typesParam, processed)
 }
 
 // unansweredToolUse is one outstanding tool call, for the two queries that ask
 // about it (does any exist, and which ones): a tool-use event of one of $2's
 // types that no result of $3's types answers, and that $4 does not pre-answer.
 // Written against the alias tu.
-var unansweredToolUse = `
+const toolUseScope = `
 		   tu.session_id = $1 AND tu.type = ANY($2)
-		     AND tu.id != ALL($4)
-		     AND NOT ` + answeredBy(3)
+		     AND tu.id != ALL($4)`
+
+var unansweredToolUse = toolUseScope + " AND NOT " + answeredBy(3)
+var unsettledToolUse = toolUseScope + " AND NOT " + processedAnswerBy(3)
 
 // runnableToolUse narrows unansweredToolUse to the calls the platform may run
 // now (plan 35 decision 5): evaluated_permission allow — a call stamped with
@@ -106,6 +108,24 @@ var runnableToolUse = unansweredToolUse + `
 		            WHERE c.session_id = $1 AND c.type = 'user.tool_confirmation'
 		              AND c.payload->>'tool_use_id' = tu.id AND c.payload->>'result' = 'allow'
 		          ))`
+
+// orderedToolHead prevents a platform driver from crossing an earlier unsettled
+// call on the same thread. Receipt alone does not release this barrier.
+const orderedToolHead = `NOT EXISTS (
+ SELECT 1 FROM events prior WHERE prior.session_id=tu.session_id
+ AND prior.thread_id IS NOT DISTINCT FROM tu.thread_id AND prior.seq<tu.seq
+ AND prior.type IN ('agent.tool_use','agent.custom_tool_use','agent.mcp_tool_use')
+ AND prior.id != ALL($4)
+ AND NOT EXISTS (SELECT 1 FROM events r WHERE r.session_id=prior.session_id
+   AND r.type=ANY($3) AND r.processed_at IS NOT NULL
+   AND COALESCE(r.payload->>'tool_use_id',r.payload->>'custom_tool_use_id',r.payload->>'mcp_tool_use_id')=prior.id))`
+
+const processedPermission = `(COALESCE(tu.payload->>'evaluated_permission','allow')='allow'
+ OR tu.id=ANY($5) OR EXISTS (SELECT 1 FROM events c WHERE c.session_id=tu.session_id
+ AND c.type='user.tool_confirmation' AND c.payload->>'tool_use_id'=tu.id
+ AND c.payload->>'result'='allow' AND c.processed_at IS NOT NULL))`
+
+var orderedRunnableToolUse = unansweredToolUse + " AND " + orderedToolHead + " AND " + processedPermission
 
 // threadClause scopes a tool-use predicate to one thread's own rows, bound as
 // $5: NULL is the primary's (nullableID). runnableToolUse binds $5 to its
@@ -223,7 +243,7 @@ func HasRunnableMCPToolUse(ctx context.Context, q Querier, sessionID domain.ID, 
 	}
 	var runnable bool
 	err := q.QueryRow(ctx,
-		`SELECT EXISTS (SELECT 1 FROM events tu WHERE`+runnableToolUse+`)`,
+		`SELECT EXISTS (SELECT 1 FROM events tu WHERE`+orderedRunnableToolUse+`)`,
 		sessionID.String(), []string{string(domain.EventAgentMCPToolUse)}, toolResultTypes, extraRefs, extraAllowed).Scan(&runnable)
 	if err != nil {
 		return false, fmt.Errorf("runnable mcp tool_use check: %w", err)
@@ -249,7 +269,7 @@ func RunnablePlatformToolNames(ctx context.Context, q Querier, sessionID domain.
 	if extraAllowed == nil {
 		extraAllowed = []string{}
 	}
-	return platformToolNames(ctx, q, sessionID, runnableToolUse, extraRefs, extraAllowed)
+	return platformToolNames(ctx, q, sessionID, orderedRunnableToolUse, extraRefs, extraAllowed)
 }
 
 func platformToolNames(ctx context.Context, q Querier, sessionID domain.ID, predicate string, extraRefs []string, more ...any) ([]string, error) {
@@ -308,28 +328,46 @@ const (
 func RunnableExecClass(ctx context.Context, q Querier, sessionID domain.ID, answered, extraAllowed []string,
 	isWebTool, isSettlementTool func(string) bool) (ExecClass, error) {
 
-	mcp, err := HasRunnableMCPToolUse(ctx, q, sessionID, answered, extraAllowed)
+	if answered == nil {
+		answered = []string{}
+	}
+	if extraAllowed == nil {
+		extraAllowed = []string{}
+	}
+	rows, err := q.Query(ctx, `SELECT tu.type,COALESCE(tu.payload->>'name',''),e.kind,
+ `+orderedToolHead+`,`+processedPermission+`
+ FROM events tu JOIN sessions s ON s.id=tu.session_id JOIN environments e ON e.id=s.environment_id
+ WHERE`+runnableToolUse+` ORDER BY tu.seq`, sessionID.String(), confirmableToolUseTypes, toolResultTypes, answered, extraAllowed)
 	if err != nil {
 		return ExecNone, err
 	}
-	if mcp {
-		return ExecMCP, nil
-	}
-	names, err := RunnablePlatformToolNames(ctx, q, sessionID, answered, extraAllowed)
-	if err != nil {
-		return ExecNone, err
-	}
+	defer rows.Close()
 	class := ExecNone
-	for _, name := range names {
-		switch {
-		case isSettlementTool(name):
-		case isWebTool(name):
-			return ExecWeb, nil
-		default:
-			class = ExecTool
+	for rows.Next() {
+		var typ domain.EventType
+		var name, kind string
+		var head, permitted bool
+		if err := rows.Scan(&typ, &name, &kind, &head, &permitted); err != nil {
+			return ExecNone, err
+		}
+		if typ == domain.EventAgentToolUse && isSettlementTool(name) {
+			continue
+		}
+		worker := kind == string(domain.EnvSelfHosted) && typ == domain.EventAgentToolUse && !isWebTool(name)
+		if !worker && (!head || !permitted) {
+			continue
+		}
+		next := ExecTool
+		if typ == domain.EventAgentMCPToolUse {
+			next = ExecMCP
+		} else if isWebTool(name) {
+			next = ExecWeb
+		}
+		if class == ExecNone || next < class {
+			class = next
 		}
 	}
-	return class, nil
+	return class, rows.Err()
 }
 
 // RunnableToolUse is one call an exec driver runs: the use event's id and
@@ -347,23 +385,54 @@ type RunnableToolUse struct {
 // type — the set a driver drains, across every thread, and re-scans before
 // it completes its item so a call committed under the live item is never
 // stranded.
-func RunnableToolUses(ctx context.Context, q Querier, sessionID domain.ID, useType domain.EventType) ([]RunnableToolUse, error) {
-	rows, err := q.Query(ctx,
-		`SELECT tu.id, tu.payload, COALESCE(tu.thread_id, ''), tu.cross_posted FROM events tu WHERE`+runnableToolUse+` ORDER BY tu.seq`,
-		sessionID.String(), []string{string(useType)}, toolResultTypes, []string{}, []string{})
+func RunnableToolUses(ctx context.Context, q Querier, sessionID domain.ID, useType domain.EventType, isWebTool func(string) bool) ([]RunnableToolUse, error) {
+	// A driver may drain a contiguous ready prefix of its own lane. Its loop
+	// executes in log order and stops on a backend fault; it must not jump a
+	// custom call, an unprocessed reply/approval, or a different driver's call.
+	rows, err := q.Query(ctx, `SELECT tu.id,tu.type,tu.payload,COALESCE(tu.thread_id,''),tu.cross_posted,
+ `+answeredBy(3)+`,`+processedPermission+`
+ FROM events tu WHERE tu.session_id=$1 AND tu.type=ANY($2) AND tu.id != ALL($4)
+ AND NOT `+processedAnswerBy(3)+`
+ ORDER BY tu.seq`, sessionID.String(), toolUseTypes, toolResultTypes, []string{}, []string{})
 	if err != nil {
 		return nil, fmt.Errorf("runnable tool uses: %w", err)
 	}
 	defer rows.Close()
+	blocked := map[domain.ID]bool{}
+	lanes := map[domain.ID]string{}
 	var out []RunnableToolUse
 	for rows.Next() {
 		var u RunnableToolUse
-		var id, thread string
-		if err := rows.Scan(&id, &u.Payload, &thread, &u.CrossPosted); err != nil {
+		var typ domain.EventType
+		var received, permitted bool
+		if err := rows.Scan(&u.ID, &typ, &u.Payload, &u.ThreadID, &u.CrossPosted, &received, &permitted); err != nil {
 			return nil, err
 		}
-		u.ID, u.ThreadID = domain.ID(id), domain.ID(thread)
-		out = append(out, u)
+		if blocked[u.ThreadID] {
+			continue
+		}
+		if typ == domain.EventAgentCustomToolUse || received || !permitted {
+			blocked[u.ThreadID] = true
+			continue
+		}
+		var p struct {
+			Name string `json:"name"`
+		}
+		if err := json.Unmarshal(u.Payload, &p); err != nil {
+			return nil, err
+		}
+		lane := string(typ)
+		if typ == domain.EventAgentToolUse && isWebTool(p.Name) {
+			lane += "/web"
+		}
+		if previous := lanes[u.ThreadID]; previous != "" && previous != lane {
+			blocked[u.ThreadID] = true
+			continue
+		}
+		lanes[u.ThreadID] = lane
+		if typ == useType {
+			out = append(out, u)
+		}
 	}
 	return out, rows.Err()
 }
@@ -420,8 +489,8 @@ func AnsweredSet(ctx context.Context, q Querier, sessionID domain.ID, ids []doma
 // all answered — the threads a driver's pass has brought to the point of
 // their next model_turn (decision 5: the executor wakes per thread as each
 // thread's calls become answered). The primary is the empty id, and first. A
-// thread's running status is the gate: an idle thread has a human verdict or
-// a message outstanding, not a tool. A session from before the thread
+// thread's running status is the gate: settlement wakes an idle external-tool
+// wait only after all its results are processed. A session from before the thread
 // resource, with no rows, is its primary alone at the session's status.
 func ResumableThreads(ctx context.Context, q Querier, sessionID domain.ID) ([]domain.ID, error) {
 	rows, err := q.Query(ctx,
@@ -435,7 +504,7 @@ func ResumableThreads(ctx context.Context, q Querier, sessionID domain.ID) ([]do
 		 SELECT t.id FROM threads t
 		  WHERE t.status = 'running'
 		    AND NOT EXISTS (
-		      SELECT 1 FROM events tu WHERE`+unansweredToolUse+`
+		      SELECT 1 FROM events tu WHERE`+unsettledToolUse+`
 		        AND tu.thread_id IS NOT DISTINCT FROM NULLIF(t.id, '')
 		    )
 		  ORDER BY t.id = '' DESC, t.created_at, t.id`,
@@ -529,6 +598,7 @@ func ValidateToolResults(ctx context.Context, q Querier, sessionID domain.ID, ev
 			          SELECT 1 FROM events c
 			          WHERE c.session_id = $1 AND c.type = $4
 			            AND c.payload->>'tool_use_id' = tu.id
+			            AND c.payload->>'result' = 'allow'
 			        )
 			 FROM events tu WHERE tu.session_id = $1 AND tu.id = $2`,
 			sessionID.String(), ref, toolResultTypes, string(domain.EventUserToolConfirm)).Scan(&useType, &name, &perm, &answered, &confirmed)
@@ -552,9 +622,11 @@ func ValidateToolResults(ctx context.Context, q Querier, sessionID domain.ID, ev
 		if platformOwned != nil && wantUse == domain.EventAgentToolUse && platformOwned(name) {
 			return fmt.Errorf("events[%d]: tool use %q (%s) is platform-executed and cannot be answered by a client result", i, ref, name)
 		}
-		// An ask-gated tool must be confirmed before any result answers it: a
+		// An ask-gated tool must be allowed before any result answers it: a
 		// premature result would bypass the human approval and, on a later
 		// denial, leave the tool use double-answered on the append-only log.
+		// A queued denial is already authoritative even while an earlier call
+		// prevents its result from being synthesized.
 		if perm == string(domain.EvalPermAsk) && !confirmed {
 			return fmt.Errorf("events[%d]: tool use %q is awaiting confirmation and cannot be answered yet", i, ref)
 		}

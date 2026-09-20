@@ -524,6 +524,32 @@ func (b *Brain) claimLiveSession(ctx context.Context, item *queue.Item) (agentJS
 		}
 		return nil, nil, nil, "", false, tx.Commit(ctx)
 	}
+
+	// A stale/reclaimed model item is not permission to replay past tools.
+	// This also repairs a legacy running wait when its old item survived.
+	flow, err := b.log.AdvanceThreadTools(ctx, tx, item.SessionID, item.ThreadID, func(name string) bool { return toolset.IsWebTool(name) || toolset.IsDelegationTool(name) })
+	if err != nil {
+		return nil, nil, nil, "", false, err
+	}
+	if flow.Unsettled {
+		moved, err := b.log.SettleToolFlow(ctx, tx, item.SessionID, item.ThreadID, flow)
+		if err != nil {
+			return nil, nil, nil, "", false, err
+		}
+		if err := b.queue.Complete(ctx, tx, item); err != nil {
+			return nil, nil, nil, "", false, err
+		}
+		if err := b.enqueueRunnableTools(ctx, tx, item); err != nil {
+			return nil, nil, nil, "", false, err
+		}
+		if err := tx.Commit(ctx); err != nil {
+			return nil, nil, nil, "", false, err
+		}
+		if moved != nil {
+			events.RecordSessionStatus(ctx, *moved)
+		}
+		return nil, nil, nil, "", false, nil
+	}
 	return agentJSON, resourcesJSON, outcomesJSON, envKind, true, tx.Commit(ctx)
 }
 
@@ -546,7 +572,10 @@ func pendingInput(ctx context.Context, tx pgx.Tx, sid, threadID domain.ID, water
 	var pending bool
 	err := tx.QueryRow(ctx,
 		`SELECT EXISTS (SELECT 1 FROM events
-		  WHERE session_id = $1 AND type = ANY($2) AND processed_at IS NULL AND seq > $3
+		  WHERE session_id = $1 AND type = ANY($2) AND seq > $3
+		    AND (processed_at IS NULL OR (type IN ('user.tool_result','user.custom_tool_result')
+ AND ($3>0 OR seq>COALESCE((SELECT max(start.seq) FROM events start
+ WHERE start.session_id=$1 AND start.thread_id IS NOT DISTINCT FROM $4 AND start.type='span.model_request_start'),0))))
 		    AND thread_id IS NOT DISTINCT FROM $4)`,
 		sid.String(), pendingInputTypes, watermark, events.NullableThread(threadID)).Scan(&pending)
 	return pending, err
@@ -554,11 +583,9 @@ func pendingInput(ctx context.Context, tx pgx.Tx, sid, threadID domain.ID, water
 
 // stampThread marks a turn's events as its thread's own (plan 35 decision 2);
 // on a child, what a client must answer is cross-posted — the ask-gated calls
-// and the client-executed custom tool calls, the two the docs name — since the
-// session view is where the human or client who answers them reads (decision
-// 9). An allow-policy built-in is the platform's to run and stays on the
-// child's own log — where a self_hosted session's view rule reaches it anyway,
-// without a flag on the row (decision 13 i).
+// and external tool-result waits — since the session view is where the human,
+// client or self_hosted worker who answers them reads (decision 9). An allowed
+// platform-executed call stays on the child's own log.
 //
 // It owns the turn's OWN events and nothing else: an event this settlement
 // writes on another thread's log — a spawned child's first input, a report on
@@ -628,9 +655,11 @@ func turnEvents(turn *turnResult, class map[string]toolClass) (batch []events.Ne
 			// than by any driver.
 			c = toolClass{kind: domain.EventAgentToolUse, settlement: true}
 		}
-		var id domain.ID
+		id := domain.NewID("sevt")
 		gated := false
 		switch c.kind {
+		case domain.EventAgentCustomToolUse:
+			askIDs = append(askIDs, id)
 		case domain.EventAgentToolUse:
 			gated = true
 			// A delegation call escalates nothing: the settlement resolves it
@@ -673,15 +702,12 @@ func turnEvents(turn *turnResult, class map[string]toolClass) (batch []events.Ne
 				perm = domain.EvalPermDeny
 			case c.policy == domain.PolicyAlwaysAsk:
 				perm = domain.EvalPermAsk
-				id = domain.NewID("sevt")
 				askIDs = append(askIDs, id)
 			}
 			fields["evaluated_permission"] = perm
 		}
 		if c.settlement {
-			// An injected tool carries no policy, so the ask branch above never
-			// minted one: this is the only mint on this path.
-			id = domain.NewID("sevt")
+			// Inline settlement uses the same preallocated event identity.
 			delegated = append(delegated, delegatedCall{
 				eventID: id, name: tu.Name, input: tu.Input, unoffered: !offered,
 			})
@@ -773,6 +799,9 @@ func (b *Brain) commitTurn(ctx context.Context, sid domain.ID, item *queue.Item,
 	if err != nil {
 		return err
 	}
+	askIDs = events.ToolWaitIDs(head, envKind, func(name string) bool {
+		return toolset.IsWebTool(name) || toolset.IsDelegationTool(name)
+	})
 	// Absent usage settles as zeroes here, deliberately: the wire schema wants
 	// a model_usage object on every span.model_request_end, and the session's
 	// cumulative usage must still be folded (a skipped fold would also skip the
@@ -833,73 +862,20 @@ func (b *Brain) commitTurn(ctx context.Context, sid domain.ID, item *queue.Item,
 			return b.commitDelegatedTurn(ctx, sid, item, agent, head, opts, workKind, askIDs, delegated,
 				len(delegated) == len(turn.toolUses), watermark, envKind)
 		}
-		if len(askIDs) > 0 {
-			// A confirmation gate: at least one intent's policy is always_ask.
-			// The whole turn suspends — the session idles with a
-			// requires_action stop_reason naming the ask events, and NO
-			// tool_exec is enqueued, so even the allow-policy tools wait. The
-			// session resumes when a user.tool_confirmation resolves the last
-			// ask (the API flips idle→running and enqueues the tool_exec that
-			// runs the allowed tools plus the confirmed ones; a denial is
-			// pre-answered with an error result). Resolving fewer than all
-			// re-emits status_idle with the remainder — that is the API's job,
-			// on the confirmation POST. Like the running-suspend below, this
-			// commits under the lock with no chain-or-idle decision: the
-			// session is genuinely blocked on human input, and any mid-turn
-			// message stays unprocessed and replays when the gate clears. The
-			// thread idles; the session follows only if no sibling runs (plan
-			// 35 decision 4).
-			opts.Then = func(ctx context.Context, tx pgx.Tx) error {
-				if err := b.queue.Complete(ctx, tx, item); err != nil {
-					return err
-				}
-				// The gate reads opts.SetStatus, which the builder below
-				// assigns before AppendInTx runs this closure — the same
-				// deferred read commitDelegatedTurn's Then makes.
-				return b.enqueueIdleHarvest(ctx, tx, item, sid, opts.SetStatus, envKind)
-			}
-			return b.commitUnderLock(ctx, sid, func(ctx context.Context, tx pgx.Tx) ([]events.NewEvent, events.AppendOptions, error) {
-				pair, moved, err := events.TransitionThread(ctx, tx, sid, events.ThreadTransition{
-					ThreadID: item.ThreadID, Status: domain.SessionIdle,
-					Stop: &domain.StopReason{Type: domain.StopRequiresAction, EventIDs: askIDs}})
-				opts.SetStatus = moved
-				return append(head, pair...), opts, err
-			})
-		}
-
-		// Suspend: the session stays running (awaiting a tool is still
-		// working, not awaiting input) and the turn resumes when the full
-		// result set is in — the control plane's trigger fires on the
-		// completing result. Nothing can be chained here: the intents
-		// commit in THIS transaction, and a result may only reference a
-		// committed tool use, so none of them is answered yet. A result
-		// for an earlier intent that landed mid-turn is not lost either —
-		// it stays unprocessed and the resuming turn replays it.
-		//
-		// If any intent is a platform-executed tool, enqueue ONE work item in
-		// the same commit so a driver picks it up. A turn may mix families and
-		// still enqueues one kind, the highest its calls demand (escalate):
-		// each driver answers its own family and chains the next needed. The
-		// ranking is which family must be answered first — an MCP call has only
-		// this platform's MCP driver to answer it, and a web call would be
-		// failed as an unknown tool by a BYOC worker, the one claimant a
-		// tool_exec is visible to. A turn of only client-executed custom tools
-		// enqueues nothing — the client posts user.custom_tool_result and the
-		// control plane's trigger schedules the resume.
+		// The log owns the ordered tool wait for cloud and external execution.
+		// Appending the intents before settling lets every path use the same
+		// received/processed distinction, including inline denial results.
 		opts.Then = func(ctx context.Context, tx pgx.Tx) error {
 			if err := b.queue.Complete(ctx, tx, item); err != nil {
 				return err
 			}
-			if workKind != "" {
-				if _, err := b.queue.Enqueue(ctx, tx, item.EnvironmentID, sid, workKind); err != nil {
-					return err
-				}
+			moved, err := b.settleTools(ctx, tx, item)
+			if err != nil {
+				return err
 			}
-			return nil
+			return b.enqueueIdleHarvest(ctx, tx, item, sid, moved, envKind)
 		}
-		return b.commitUnderLock(ctx, sid, func(context.Context, pgx.Tx) ([]events.NewEvent, events.AppendOptions, error) {
-			return head, opts, nil
-		})
+		return b.commitUnderLock(ctx, sid, func(context.Context, pgx.Tx) ([]events.NewEvent, events.AppendOptions, error) { return head, opts, nil })
 	}
 
 	// A turn that called no tool: end_turn, and everything else —
@@ -1041,6 +1017,10 @@ func (b *Brain) commitUnderLock(ctx context.Context, sid domain.ID,
 		`SELECT 1 FROM sessions WHERE id = $1 FOR UPDATE`, sid.String()); err != nil {
 		return err
 	}
+	before, err := sessionStatusNow(ctx, tx, sid)
+	if err != nil {
+		return err
+	}
 	batch, opts, err := build(ctx, tx)
 	if err != nil {
 		return err
@@ -1048,11 +1028,15 @@ func (b *Brain) commitUnderLock(ctx context.Context, sid domain.ID,
 	if _, err := b.log.AppendInTx(ctx, tx, sid, batch, opts); err != nil {
 		return err
 	}
+	after, err := sessionStatusNow(ctx, tx, sid)
+	if err != nil {
+		return err
+	}
 	if err := tx.Commit(ctx); err != nil {
 		return err
 	}
-	if opts.SetStatus != nil {
-		events.RecordSessionStatus(ctx, *opts.SetStatus)
+	if before != after {
+		events.RecordSessionStatus(ctx, after)
 	}
 	return nil
 }

@@ -66,7 +66,7 @@ func confirm(id, result string, extra map[string]any) map[string]any {
 
 func lastEventOfType(t *testing.T, s *tserver, sessionID, typ string) map[string]any {
 	t.Helper()
-	_, res := s.do(http.MethodGet, "/v1/sessions/"+sessionID+"/events", nil)
+	_, res := s.do(http.MethodGet, "/v1/sessions/"+sessionID+"/events?order=desc&limit=1&types="+typ, nil)
 	var last map[string]any
 	for _, ev := range listData(t, res) {
 		if ev["type"] == typ {
@@ -339,7 +339,7 @@ func TestMCPCallBlocksTheRequiresActionGate(t *testing.T) {
 	builtin := appendAskToolUse(t, s, sessionID, "bash")
 	mcp := appendAskMCPToolUse(t, s, sessionID, "docs", "search")
 
-	sendEvents(t, s, sessionID, confirm(builtin, "allow", nil))
+	sendEvents(t, s, sessionID, confirm(builtin, "deny", nil))
 
 	if got := s.sessionStatus(sessionID); got != "idle" {
 		t.Errorf("status = %q, want idle (the MCP ask is still blocking)", got)
@@ -423,8 +423,8 @@ func TestConfirmationPartialReIdlesWithRemainder(t *testing.T) {
 	idA := appendAskToolUse(t, s, sessionID, "bash")
 	idB := appendAskToolUse(t, s, sessionID, "read")
 
-	// Confirm only A: the session re-idles blocked on B alone.
-	sendEvents(t, s, sessionID, confirm(idA, "allow", nil))
+	// Deny A: the session re-idles blocked on B alone.
+	sendEvents(t, s, sessionID, confirm(idA, "deny", nil))
 
 	if got := s.sessionStatus(sessionID); got != "idle" {
 		t.Errorf("status after partial confirm = %q, want idle", got)
@@ -455,8 +455,8 @@ func TestConfirmationPartialReIdlesWithRemainder(t *testing.T) {
 func TestConfirmationMixedAllowDenyInOneBatch(t *testing.T) {
 	s := newTestServer(t)
 	sessionID := eventsFixture(t, s)
-	idAllow := appendAskToolUse(t, s, sessionID, "bash")
 	idDeny := appendAskToolUse(t, s, sessionID, "write")
+	idAllow := appendAskToolUse(t, s, sessionID, "bash")
 
 	sendEvents(t, s, sessionID,
 		confirm(idAllow, "allow", nil),
@@ -566,8 +566,8 @@ func TestConfirmationDenyWithPendingCustomToolWaitsForClient(t *testing.T) {
 
 	sendEvents(t, s, sessionID, confirm(askID, "deny", map[string]any{"deny_message": "no"}))
 
-	if got := s.sessionStatus(sessionID); got != "running" {
-		t.Errorf("status = %q, want running", got)
+	if got := s.sessionStatus(sessionID); got != "idle" {
+		t.Errorf("status = %q, want idle waiting for custom", got)
 	}
 	if n := s.liveWork(sessionID, queue.ToolExec); n != 0 {
 		t.Errorf("tool_exec = %d, want 0 (no platform work; custom tool is client-executed)", n)

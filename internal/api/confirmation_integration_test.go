@@ -170,8 +170,8 @@ func TestConfirmationClosedLoopAllow(t *testing.T) {
 	}
 	sendEvents(t, s, sessionID, confirm(askID, "allow", nil))
 
-	if got := s.sessionStatus(sessionID); got != "running" {
-		t.Errorf("status after allow = %q, want running", got)
+	if got := s.sessionStatus(sessionID); got != "idle" {
+		t.Errorf("status after allow = %q, want idle awaiting worker result", got)
 	}
 	if n := s.liveWork(sessionID, queue.ToolExec); n != 1 {
 		t.Errorf("tool_exec after allow = %d, want 1 (executor runs the confirmed tool)", n)

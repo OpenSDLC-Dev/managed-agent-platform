@@ -40,6 +40,23 @@ var execKinds = map[events.ExecClass]queue.Kind{
 // only that kind's driver can answer those calls — unless nothing runnable
 // of any kind remains, when it has nothing left to do and completes.
 func (e *Executor) settleDrain(ctx context.Context, tx pgx.Tx, item *queue.Item, own queue.Kind, leaveLive bool) error {
+
+	toolThreads, err := events.ToolFlowThreads(ctx, tx, item.SessionID)
+	if err != nil {
+		return err
+	}
+	idled := false
+	for _, tid := range toolThreads {
+		flow, err := e.log.AdvanceThreadTools(ctx, tx, item.SessionID, tid, func(name string) bool { return toolset.IsWebTool(name) || toolset.IsDelegationTool(name) })
+		if err != nil {
+			return err
+		}
+		moved, err := e.log.SettleToolFlow(ctx, tx, item.SessionID, tid, flow)
+		if err != nil {
+			return err
+		}
+		idled = idled || (moved != nil && *moved == domain.SessionIdle)
+	}
 	threads, err := events.ResumableThreads(ctx, tx, item.SessionID)
 	if err != nil {
 		return err
@@ -53,6 +70,18 @@ func (e *Executor) settleDrain(ctx context.Context, tx pgx.Tx, item *queue.Item,
 		toolset.IsWebTool, toolset.IsDelegationTool)
 	if err != nil {
 		return err
+	}
+
+	if idled && class == events.ExecNone {
+		var status domain.SessionStatus
+		if err := tx.QueryRow(ctx, "SELECT status FROM sessions WHERE id=$1", item.SessionID.String()).Scan(&status); err != nil {
+			return err
+		}
+		if status == domain.SessionIdle {
+			if _, err := e.queue.EnqueueOutputsHarvest(ctx, tx, item.EnvironmentID, item.SessionID, false); err != nil {
+				return err
+			}
+		}
 	}
 	kind := execKinds[class]
 	if kind == "" {
@@ -136,6 +165,14 @@ func (e *Executor) commitResults(ctx context.Context, sid domain.ID, results []e
 	if _, err := tx.Exec(ctx, `SELECT 1 FROM sessions WHERE id = $1 FOR UPDATE`, sid.String()); err != nil {
 		return err
 	}
+	var before, after domain.SessionStatus
+	if err := tx.QueryRow(ctx, "SELECT status FROM sessions WHERE id=$1", sid.String()).Scan(&before); err != nil {
+		return err
+	}
+	approvalThreads, err := events.PendingApprovalThreads(ctx, tx, sid)
+	if err != nil {
+		return err
+	}
 	refs := make([]domain.ID, len(results))
 	for i, r := range results {
 		refs[i] = resultRef(r)
@@ -160,7 +197,29 @@ func (e *Executor) commitResults(ctx context.Context, sid domain.ID, results []e
 	if _, err := e.log.AppendInTx(ctx, tx, sid, kept, events.AppendOptions{Then: settle}); err != nil {
 		return err
 	}
-	return tx.Commit(ctx)
+	var approvalWaits []float64
+	for _, tid := range approvalThreads {
+		seconds, err := events.ClearedApprovalWait(ctx, tx, sid, tid)
+		if err != nil {
+			return err
+		}
+		if seconds != nil {
+			approvalWaits = append(approvalWaits, *seconds)
+		}
+	}
+	if err := tx.QueryRow(ctx, "SELECT status FROM sessions WHERE id=$1", sid.String()).Scan(&after); err != nil {
+		return err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return err
+	}
+	if before != after {
+		events.RecordSessionStatus(ctx, after)
+	}
+	for _, seconds := range approvalWaits {
+		events.RecordApprovalWait(ctx, seconds)
+	}
+	return nil
 }
 
 // resultRef is the tool-use id a driver's result answers (agent.tool_result's

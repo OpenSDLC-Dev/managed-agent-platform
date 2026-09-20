@@ -415,7 +415,10 @@ func terminateThread(ctx context.Context, tx pgx.Tx, log *events.Log, row thread
 		Scan(&row.status, &row.archivedAt, &row.updatedAt); err != nil {
 		return row, nil, err
 	}
-	switch _, err = log.AppendInTx(ctx, tx, domain.ID(row.sessionID), batch, events.AppendOptions{SetStatus: moved}); {
+	switch _, err = log.AppendInTx(ctx, tx, domain.ID(row.sessionID), batch, events.AppendOptions{SetStatus: moved, Then: func(ctx context.Context, tx pgx.Tx) error {
+		_, err := log.AdvanceThreadTools(ctx, tx, domain.ID(row.sessionID), domain.ID(row.id), platformExecuted)
+		return err
+	}}); {
 	case errors.Is(err, events.ErrSessionArchived):
 		// A live child under an archived session: unreachable while the
 		// session's archive ends its children first, and a 400 if it ever is.

@@ -4,15 +4,12 @@ What is being worked on right now, and how far along it is — nothing else. **S
 
 ## Active work
 
-**none.** Nothing is in flight. #762 — nothing executable kept the two hand-written `.tf`
-readers in agreement — closed across three PRs: the shared corpus both suites are pinned
-to, the line rules folded in from #766 and #768, and the template context from #767,
-whose last cell turned out to be a silent short read, a heredoc terminator sitting inside
-an open template. The delivery record is the [changelog.d/](./changelog.d/) fragments and
-[docs/HISTORY.md](./docs/HISTORY.md), which carries the emulation weighed against the
-refusal that shipped.
-The backlog is [GitHub issues](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues).
+**#375 — external tool waits** ([plan 52](docs/plan/52_external-tool-waits.md)).
+The ordered result processing implementation passed independent verification;
+dual code review, PR and CI are pending.
 
 ## Tasks
 
-_None — no active work._
+- [x] #375 — real API/SSE regression, ordered waits and recovery, lifecycle checks
+- [x] #375 — make verify (90.03%), recording comparison, independent verification
+- [ ] #375 — dual code review, PR, green CI and squash merge

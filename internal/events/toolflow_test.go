@@ -59,7 +59,7 @@ func answerWith(t *testing.T, log *events.Log, sid domain.ID, typ domain.EventTy
 
 func confirmOnLog(t *testing.T, log *events.Log, sid, ref domain.ID) {
 	t.Helper()
-	appendEvent(t, log, sid, "", domain.EventUserToolConfirm, fmt.Sprintf(`{"tool_use_id":%q}`, ref.String()))
+	appendEvent(t, log, sid, "", domain.EventUserToolConfirm, fmt.Sprintf(`{"tool_use_id":%q,"result":"allow"}`, ref.String()))
 }
 
 // inResult/inConfirm/inRaw build inbound events that are never appended:
@@ -604,17 +604,14 @@ func TestValidateToolResults(t *testing.T) {
 			}
 		})
 
-		// The gate asks only whether a confirmation exists, never what it
-		// decided: a denial opens it exactly as an approval does, because the
-		// denial's own synthesized result is what follows.
-		t.Run("outcome is not read", func(t *testing.T) {
+		// A queued denial already forbids execution, even when an earlier
+		// custom call postpones synthesis of its error result.
+		t.Run("deny does not authorize a result", func(t *testing.T) {
 			sid := newSession(t, pool)
 			id := ask(t, log, sid)
 			appendEvent(t, log, sid, "", domain.EventUserToolConfirm,
 				fmt.Sprintf(`{"tool_use_id":%q,"result":"deny"}`, id))
-			if err := validate(sid, inResult(domain.EventUserToolResult, "tool_use_id", id.String())); err != nil {
-				t.Errorf("a deny confirmation did not open the gate: %v", err)
-			}
+			wantErrHas(t, validate(sid, inResult(domain.EventUserToolResult, "tool_use_id", id.String())), "cannot be answered yet")
 		})
 
 		t.Run("confirmation is per tool use and session scoped", func(t *testing.T) {

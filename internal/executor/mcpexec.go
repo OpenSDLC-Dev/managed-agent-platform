@@ -51,7 +51,7 @@ type mcpToolUse struct {
 // agent.mcp_tool_result — a client may post neither shape, and no BYOC worker
 // sees an MCP call — and a reclaim re-runs only what is still outstanding.
 func (e *Executor) runnableMCPToolUses(ctx context.Context, sid domain.ID) ([]mcpToolUse, error) {
-	uses, err := events.RunnableToolUses(ctx, e.pool, sid, domain.EventAgentMCPToolUse)
+	uses, err := events.RunnableToolUses(ctx, e.pool, sid, domain.EventAgentMCPToolUse, toolset.IsWebTool)
 	if err != nil {
 		return nil, fmt.Errorf("list mcp tool uses: %w", err)
 	}

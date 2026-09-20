@@ -218,8 +218,17 @@ func TestReapPassIdleReapsOnceTheAskIsAnswered(t *testing.T) {
 	if err := h.exec.reapPass(context.Background()); err != nil {
 		t.Fatalf("reap pass: %v", err)
 	}
+	if len(h.prov.reapedSnapshot()) != 0 {
+		t.Fatal("approval alone allowed reaping a result wait")
+	}
+	if _, err := h.log.Append(context.Background(), h.sid, []events.NewEvent{{Type: domain.EventAgentToolResult, Payload: []byte(`{"tool_use_id":"sevt_ask1","content":[]}`)}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.exec.reapPass(context.Background()); err != nil {
+		t.Fatal(err)
+	}
 	if len(h.prov.reapedSnapshot()) != 1 {
-		t.Error("an answered ask still blocked the idle reap")
+		t.Fatal("settled tool prevented reaping")
 	}
 }
 
@@ -463,7 +472,7 @@ func TestClassifyReadsAsksBeforeMainQuery(t *testing.T) {
 	}
 	ask, main := -1, -1
 	for i, sql := range rq.sqls {
-		if strings.Contains(sql, "evaluated_permission") {
+		if strings.Contains(sql, "SELECT 1 FROM events tu") {
 			ask = i
 		}
 		if strings.Contains(sql, "FROM sessions s JOIN environments") {

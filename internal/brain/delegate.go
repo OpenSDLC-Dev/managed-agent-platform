@@ -703,13 +703,13 @@ func (d *delegate) wake(ctx context.Context, tx pgx.Tx, target domain.ID) error 
 // whatever else the turn holds; what the commit schedules is decided by the
 // turn's own shape, in this order:
 //
-//   - an ask gate still wins for the exec calls: the thread suspends
+//   - external waits, including asks, still take precedence over parking: the thread suspends
 //     requires_action as any gated turn does, and a parking wait is suppressed
 //     because a thread cannot idle on two reasons and the human's verdict is
 //     the one a client can act on. The delegation calls execute all the same —
 //     they are the platform's own, and no confirmation exists for them.
 //   - a turn that also holds a call someone else must answer — a driver's or a
-//     client's — suspends running like any tool turn, whatever a wait in it
+//     client's — uses the shared ordered tool flow, whatever a wait in it
 //     answered; that answer is what wakes the thread.
 //   - a parking wait_for_agents, and a submit_result that reported, each idle
 //     the thread on end_turn with nothing enqueued: a message wakes it. Both
@@ -762,11 +762,9 @@ func (b *Brain) commitDelegatedTurn(ctx context.Context, sid domain.ID, item *qu
 		gated := len(askIDs) > 0
 		// A wait parks nothing while a call this turn made is still
 		// outstanding: settlementOnly is exactly "nothing else to answer", and
-		// without it the thread would idle on a call whose answer wakes
-		// nobody — neither the exec drivers' drain (it resumes running threads)
-		// nor the API's result trigger (it fires on a running thread) moves an
-		// idle one. Such a turn suspends running like any tool turn instead,
-		// and whoever answers the call wakes it.
+		// without it a parking end_turn would hide the remaining external wait.
+		// Mixed turns use the shared tool flow, which advertises requires_action
+		// or schedules the next platform call before the model can continue.
 		park := d.out.park && !gated && settlementOnly
 		chain := !gated && settlementOnly && !park && !d.out.ended
 		idle := !gated && (park || d.out.ended)
@@ -854,14 +852,6 @@ func (b *Brain) commitDelegatedTurn(ctx context.Context, sid domain.ID, item *qu
 			}
 		}
 		switch {
-		case gated:
-			pair, _, err := events.TransitionThread(ctx, tx, sid, events.ThreadTransition{
-				ThreadID: item.ThreadID, Status: domain.SessionIdle,
-				Stop: &domain.StopReason{Type: domain.StopRequiresAction, EventIDs: askIDs}})
-			if err != nil {
-				return nil, opts, err
-			}
-			batch = append(batch, pair...)
 		case idle:
 			pair, _, err := events.TransitionThread(ctx, tx, sid, events.ThreadTransition{
 				ThreadID: item.ThreadID, Status: domain.SessionIdle,
@@ -939,10 +929,12 @@ func (b *Brain) commitDelegatedTurn(ctx context.Context, sid domain.ID, item *qu
 				if err := b.queue.Complete(ctx, tx, item); err != nil {
 					return err
 				}
-				// The gated turn enqueues nothing: even its allow-policy calls
-				// wait for the human, as they do on any suspended turn.
-				if !gated && workKind != "" {
-					if _, err := b.queue.Enqueue(ctx, tx, item.EnvironmentID, sid, workKind); err != nil {
+				if !settlementOnly {
+					moved, err := b.settleTools(ctx, tx, item)
+					if err != nil {
+						return err
+					}
+					if err := b.enqueueIdleHarvest(ctx, tx, item, sid, moved, envKind); err != nil {
 						return err
 					}
 				}
@@ -984,7 +976,7 @@ func chainInput(ctx context.Context, tx pgx.Tx, sid, threadID domain.ID, waterma
 	err := tx.QueryRow(ctx,
 		`SELECT EXISTS (SELECT 1 FROM events
 		  WHERE session_id = $1 AND seq > $2 AND thread_id IS NOT DISTINCT FROM $3
-		    AND ((type = ANY($4) AND processed_at IS NULL) OR type = $5))`,
+		    AND ((type = ANY($4) AND (processed_at IS NULL OR type IN ('user.tool_result','user.custom_tool_result'))) OR type = $5))`,
 		sid.String(), watermark, events.NullableThread(threadID), pendingInputTypes,
 		string(domain.EventAgentThreadMessageReceived)).Scan(&chained)
 	return chained, err

@@ -268,29 +268,28 @@ func (e *Executor) idleTTL() time.Duration {
 // against), no work item stopped within the last lease TTL (an interrupt
 // cancels the row immediately, but the physical claimant only notices at its
 // next lease renewal — until the executor's own lease TTL has passed, the
-// tool may still be running in the sandbox), and no unanswered confirmation
-// ask (HITL-idle is still mid-turn
-// — the approved command must run in the context the human saw; the ask read
+// tool may still be running in the sandbox), and no unanswered tool call
+// (external waiting is still mid-turn and must retain its sandbox; the tool read
 // is ordered before the main query, see below). `user.interrupt` does not
 // reap — an interrupted-then-abandoned session falls to the TTL like any
 // other. Running and rescheduling stay untouchable: each has a turn in flight
 // or being retried, and that turn needs the sandbox.
 func (e *Executor) classifyForReap(ctx context.Context, q events.Querier, sid domain.ID) (reapTier, error) {
-	// The idle tier's ask exclusion is read BEFORE the main criteria query,
-	// deliberately: the two reads are separate snapshots, and a confirmation
-	// batch answers the ask, enqueues the tool's work item, and flips the
-	// session running in ONE transaction. Asks-first means that transaction
+	// The idle tier's outstanding-tool exclusion is read BEFORE the main criteria query,
+	// deliberately: the two reads are separate snapshots, and a result
+	// batch answers a call, schedules the continuation and updates status
+	// in ONE transaction. Tools-first means that transaction
 	// either lands before both reads (the main query then sees running or the
-	// live work item — ineligible) or after the ask read (the ask read still
-	// saw the unanswered ask — ineligible). Main-first would let the
+	// live work item — ineligible) or after the tool read (the tool read still
+	// saw the unanswered call — ineligible). Main-first would let the
 	// transaction land between the reads and both come back permissive.
-	askBlocked := false
+	toolBlocked := false
 	if e.idleTTL() > 0 {
-		asks, err := events.UnconfirmedAskEvents(ctx, q, sid, nil)
+		blocked, err := events.HasUnansweredToolUse(ctx, q, sid, nil)
 		if err != nil {
 			return tierNone, err
 		}
-		askBlocked = len(asks) > 0
+		toolBlocked = blocked
 	}
 
 	var status, kind string
@@ -334,7 +333,7 @@ func (e *Executor) classifyForReap(ctx context.Context, q events.Querier, sid do
 		return tierTerminated, nil
 	}
 	if e.idleTTL() > 0 && status == string(domain.SessionIdle) &&
-		idlePastTTL && !liveWork && !askBlocked {
+		idlePastTTL && !liveWork && !toolBlocked {
 		return tierIdle, nil
 	}
 	return tierNone, nil

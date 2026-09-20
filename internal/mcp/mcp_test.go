@@ -324,19 +324,47 @@ func TestListToolsRefusesAResponseTooLargeToRead(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	conn, err := mcp.Connect(ctx, mcp.Config{URL: ts.URL, HTTPClient: loopbackClient()})
+	var read atomic.Int64
+	client := loopbackClient()
+	client.Transport = &readCountingTransport{base: client.Transport, read: &read}
+	conn, err := mcp.Connect(ctx, mcp.Config{URL: ts.URL, HTTPClient: client})
 	if err == nil {
 		defer conn.Close()
 		if _, err = conn.ListTools(ctx); err == nil {
 			t.Fatal("a response larger than the limit was accepted")
 		}
 	}
-	// The assertion that matters is that the read stopped: without the bound
-	// the handler runs until it has written everything it means to.
-	if got := served.Load(); got > 2*mcp.MaxResponseBytes {
-		t.Errorf("server streamed %d bytes past a %d-byte limit — the body was not bounded",
+	// Count the bytes the client actually reads. Server writes include unread
+	// TCP buffers, whose capacity varies by host and can exceed the body budget.
+	// The byte beyond the budget distinguishes an oversized body from exact EOF.
+	if got := read.Load(); got == 0 || got > mcp.MaxResponseBytes+1 {
+		t.Errorf("client read %d bytes against a %d-byte limit — the body was not bounded",
 			got, mcp.MaxResponseBytes)
 	}
+}
+
+type readCountingTransport struct {
+	base http.RoundTripper
+	read *atomic.Int64
+}
+
+func (t *readCountingTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	res, err := t.base.RoundTrip(req)
+	if err == nil {
+		res.Body = &readCountingBody{ReadCloser: res.Body, read: t.read}
+	}
+	return res, err
+}
+
+type readCountingBody struct {
+	io.ReadCloser
+	read *atomic.Int64
+}
+
+func (b *readCountingBody) Read(p []byte) (int, error) {
+	n, err := b.ReadCloser.Read(p)
+	b.read.Add(int64(n))
+	return n, err
 }
 
 func TestConnectClosesTheConnectionItCannotHandBack(t *testing.T) {

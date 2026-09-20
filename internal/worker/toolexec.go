@@ -397,10 +397,10 @@ scan:
 			sawUse = true
 			// A web call (web_fetch/web_search) is never this worker's: it runs
 			// in the platform executor's web driver for every environment kind,
-			// and the enqueue hold-back keeps a polled item from coexisting with
-			// an unanswered one. A delegation call is never anyone's to run: the
+			// even when an earlier sandbox call makes tool_exec runnable while
+			// that web call still waits. A delegation call is never anyone's to run: the
 			// settlement that emitted it answers it in the same commit. Both
-			// filters guard the stray case, so the six-tool Runner is never fed
+			// filters keep the six-tool Runner from being fed
 			// a name it must answer unknown-tool — an answer the control plane
 			// would then refuse, faulting the item into a reclaim loop. They
 			// still mark sawUse — the call belongs to the trailing turn's run,
@@ -429,8 +429,8 @@ scan:
 				continue
 			}
 			// Not "stop at the first answered use": a turn's tools can be
-			// answered out of order — a denial's result lands at once while an
-			// allowed sibling is still outstanding — so the whole run is read.
+			// received out of order, and a sibling may have settled while this
+			// thread still waits — so the whole run is read.
 			if !answered[ev.ID] {
 				out = append(out, toolUse{id: domain.ID(ev.ID), name: ev.Name, input: ev.Input})
 			}

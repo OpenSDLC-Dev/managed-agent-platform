@@ -351,9 +351,10 @@ func TestWorkStopReArmsForRunnableCalls(t *testing.T) {
 	}
 
 	// Runnable bash call + an MCP call: the re-arm is an mcp_exec.
-	bashID := appendOn(t, s, sid, primary, false, domain.EventAgentToolUse, allowBashCall)
 	mcpID := appendOn(t, s, sid, primary, false, domain.EventAgentMCPToolUse,
 		`{"name":"lookup","mcp_server_name":"srv","input":{},"evaluated_permission":"allow","session_thread_id":null}`)
+	bashID := appendOn(t, s, sid, primary, false, domain.EventAgentToolUse, allowBashCall)
+
 	workID := s.enqueueAndPoll(t, envID, sid, key)
 	stopForce(workID)
 	if n := s.liveWork(sid, queue.MCPExec); n != 1 {

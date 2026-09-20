@@ -1,10 +1,12 @@
 package brain_test
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/api"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -154,26 +156,24 @@ func (h *harness) wake(t *testing.T, text string) {
 	}
 }
 
-// postToolResult mimics the control plane's tool-result trigger: append,
-// and enqueue the next turn only when the result completes the set (no
-// tool use left unanswered).
+// postToolResult exercises the control plane's actual receipt and scheduling.
 func (h *harness) postToolResult(t *testing.T, eventType domain.EventType, payload map[string]any) {
 	t.Helper()
-	raw, _ := json.Marshal(payload)
-	_, err := h.log.AppendWith(context.Background(), h.sessionID, []events.NewEvent{
-		{Type: eventType, Payload: raw},
-	}, events.AppendOptions{
-		Then: func(ctx context.Context, tx pgx.Tx) error {
-			unanswered, err := events.HasUnansweredToolUse(ctx, tx, h.sessionID, nil)
-			if err != nil || unanswered {
-				return err
-			}
-			_, err = h.queue.Enqueue(ctx, tx, h.envID, h.sessionID, queue.ModelTurn)
-			return err
-		},
-	})
+	if err := api.EnsureAPIKey(context.Background(), h.pool, "brain-test", "brain-test-key"); err != nil {
+		t.Fatal(err)
+	}
+	payload["type"] = string(eventType)
+	raw, err := json.Marshal(map[string]any{"events": []any{payload}})
 	if err != nil {
-		t.Fatalf("post tool result: %v", err)
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/v1/sessions/"+h.sessionID.String()+"/events", bytes.NewReader(raw))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("x-api-key", "brain-test-key")
+	rec := httptest.NewRecorder()
+	api.NewHandler(h.pool, nil, nil, nil).ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("post result: %d %s", rec.Code, rec.Body.String())
 	}
 }
 
@@ -438,16 +438,16 @@ func TestToolUseSuspendsAndResumes(t *testing.T) {
 	h.wake(t, "what is go?")
 	h.runOnce(t)
 
-	// Suspended: tool intent on the log, session still running, no idle.
+	// The custom call advertises its result wait to a cookbook client.
 	want := []string{
 		"user.message", "session.status_running",
-		"span.model_request_start", "agent.custom_tool_use", "span.model_request_end",
+		"span.model_request_start", "agent.custom_tool_use", "span.model_request_end", "session.status_idle",
 	}
 	if got := h.types(t); !typesEqual(got, want) {
 		t.Fatalf("after tool turn:\n got %v\nwant %v", got, want)
 	}
-	if got := h.status(t); got != "running" {
-		t.Errorf("status while awaiting tool = %q, want running", got)
+	if got := h.status(t); got != "idle" {
+		t.Errorf("status while awaiting tool = %q, want idle", got)
 	}
 	req := h.provider.calls[0]
 	if len(req.Tools) != 1 {
@@ -502,7 +502,7 @@ func TestToolUseSuspendsAndResumes(t *testing.T) {
 // agent.tool_use (not custom) and a tool_exec item is enqueued in the same
 // commit for an executor to pick up. The session stays running.
 func TestBuiltinToolUseEnqueuesToolExec(t *testing.T) {
-	h := newHarness(t, [][]provider.Chunk{
+	h := newHarnessEnv(t, "cloud", [][]provider.Chunk{
 		{
 			provider.Chunk{Kind: provider.KindToolUse, ToolUse: &provider.ToolUse{
 				ID: "toolu_provider_side", Name: "bash", Input: json.RawMessage(`{"command":"ls"}`)}},
@@ -747,7 +747,7 @@ func TestAlwaysAskToolSuspendsWithRequiresAction(t *testing.T) {
 // turn: requires_action names only the ask tool, nothing runs (no tool_exec)
 // until confirmation, and each intent records its own evaluated_permission.
 func TestMixedPolicyTurnGatesEverythingButNamesOnlyAsk(t *testing.T) {
-	h := newHarness(t, [][]provider.Chunk{
+	h := newHarnessEnv(t, "cloud", [][]provider.Chunk{
 		{
 			provider.Chunk{Kind: provider.KindToolUse, ToolUse: &provider.ToolUse{
 				ID: "toolu_a", Name: "bash", Input: json.RawMessage(`{"command":"ls"}`)}},
@@ -907,7 +907,7 @@ func TestParallelToolCallsResumeOnFullSet(t *testing.T) {
 		t.Fatalf("suspended turn left live work")
 	}
 
-	// First result: set incomplete, nothing scheduled, still running.
+	// First result: set incomplete, nothing scheduled, still idle.
 	h.postToolResult(t, domain.EventUserCustomToolRes, map[string]any{
 		"custom_tool_use_id": evs[0].ID.String(),
 		"content":            []map[string]string{{"type": "text", "text": "one"}},
@@ -915,8 +915,8 @@ func TestParallelToolCallsResumeOnFullSet(t *testing.T) {
 	if n := h.liveWork(t); n != 0 {
 		t.Fatalf("partial result set scheduled a turn (%d live items)", n)
 	}
-	if got := h.status(t); got != "running" {
-		t.Errorf("status after partial results = %q, want running", got)
+	if got := h.status(t); got != "idle" {
+		t.Errorf("status after partial results = %q, want idle", got)
 	}
 
 	// Completing result: the turn resumes with both pairs in the replay.
@@ -955,27 +955,21 @@ func TestEndTurnSettleChainsUnconsumedToolResult(t *testing.T) {
 		{textChunk(0, "ok"), done("end_turn", 2)},
 		{textChunk(0, "consumed the result"), done("end_turn", 2)},
 	}, nil)
-	// An unanswered tool intent from before this turn (the executor seam:
-	// results for it are produced outside the API triggers).
-	evs, err := h.log.Append(context.Background(), h.sessionID, []events.NewEvent{{
-		Type:    domain.EventAgentCustomToolUse,
-		Payload: json.RawMessage(`{"name":"lookup","input":{},"session_thread_id":null}`),
-	}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	toolID := evs[0].ID.String()
+
 	h.provider.onGenerate = func(call int) {
 		if call != 0 {
 			return
 		}
-		payload, _ := json.Marshal(map[string]any{"custom_tool_use_id": toolID,
-			"content": []map[string]string{{"type": "text", "text": "late result"}}})
-		if _, err := h.log.Append(context.Background(), h.sessionID, []events.NewEvent{
-			{Type: domain.EventUserCustomToolRes, Payload: payload},
-		}); err != nil {
-			t.Errorf("mid-turn result append: %v", err)
+		// Inject the durable call after replay to exercise the watermark race.
+		evs, err := h.log.Append(context.Background(), h.sessionID, []events.NewEvent{{
+			Type:    domain.EventAgentCustomToolUse,
+			Payload: json.RawMessage(`{"name":"lookup","input":{},"session_thread_id":null}`),
+		}})
+		if err != nil {
+			t.Fatal(err)
 		}
+		toolID := evs[0].ID.String()
+		h.postToolResult(t, domain.EventUserCustomToolRes, map[string]any{"custom_tool_use_id": toolID, "content": []map[string]string{{"type": "text", "text": "late result"}}})
 	}
 	h.wake(t, "hi")
 	h.runOnce(t)
@@ -999,7 +993,7 @@ func TestEndTurnSettleChainsUnconsumedToolResult(t *testing.T) {
 	if got := h.status(t); got != "idle" {
 		t.Errorf("status after chained turn = %q, want idle", got)
 	}
-	evs, _ = h.log.List(context.Background(), h.sessionID, events.ListQuery{Types: []string{"user.custom_tool_result"}})
+	evs, _ := h.log.List(context.Background(), h.sessionID, events.ListQuery{Types: []string{"user.custom_tool_result"}})
 	if len(evs) != 1 || evs[0].ProcessedAt == nil {
 		t.Errorf("chained turn did not consume the result: %+v", evs)
 	}
@@ -1357,7 +1351,7 @@ func TestNonToolUseStopWithToolBlocksRunsThem(t *testing.T) {
 	// tool_use no result answers. The turn is a tool turn: run them.
 	for _, stop := range []string{"max_tokens", "stop_sequence", "end_turn"} {
 		t.Run(stop, func(t *testing.T) {
-			h := newHarness(t, [][]provider.Chunk{{
+			h := newHarnessEnv(t, "cloud", [][]provider.Chunk{{
 				textChunk(0, "on it"),
 				provider.Chunk{Kind: provider.KindToolUse, ToolUse: &provider.ToolUse{
 					ID: "toolu_provider_side", Name: "bash", Input: json.RawMessage(`{"command":"ls"}`)}},
@@ -1425,13 +1419,13 @@ func TestNonToolUseStopKeepsCustomAndAskRouting(t *testing.T) {
 
 		want := []string{
 			"user.message", "session.status_running",
-			"span.model_request_start", "agent.custom_tool_use", "span.model_request_end",
+			"span.model_request_start", "agent.custom_tool_use", "span.model_request_end", "session.status_idle",
 		}
 		if got := h.types(t); !typesEqual(got, want) {
 			t.Fatalf("after custom-tool turn:\n got %v\nwant %v", got, want)
 		}
-		if got := h.status(t); got != "running" {
-			t.Errorf("status = %q, want running", got)
+		if got := h.status(t); got != "idle" {
+			t.Errorf("status = %q, want idle", got)
 		}
 		if n := h.liveWork(t); n != 0 {
 			t.Errorf("%d work items still live, want 0 (the client answers a custom tool)", n)
@@ -1890,5 +1884,24 @@ func TestPermissionAskIdleEnqueuesOutputsHarvest(t *testing.T) {
 				t.Error("chain_grading = true; no outcome is grading this session")
 			}
 		})
+	}
+}
+
+func TestStaleModelItemCannotRunPastTools(t *testing.T) {
+	h := newHarness(t, [][]provider.Chunk{{textChunk(0, "done"), done("end_turn", 1)}}, nil)
+	h.customTool(t, "lookup")
+	uses, err := h.log.Append(context.Background(), h.sessionID, []events.NewEvent{{Type: domain.EventAgentCustomToolUse, Payload: json.RawMessage(`{"name":"lookup","input":{}}`)}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	h.wake(t, "legacy running wait with a stray model item")
+	h.runOnce(t)
+	if len(h.provider.calls) != 0 || h.status(t) != "idle" || h.liveOf(t, queue.ModelTurn) != 0 {
+		t.Fatal("stale model work bypassed the tool wait")
+	}
+	h.postToolResult(t, domain.EventUserCustomToolRes, map[string]any{"custom_tool_use_id": uses[0].ID.String(), "content": []map[string]string{{"type": "text", "text": "answered"}}})
+	h.runOnce(t)
+	if len(h.provider.calls) != 1 || h.status(t) != "idle" {
+		t.Fatal("legacy wait did not resume exactly once")
 	}
 }

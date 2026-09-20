@@ -80,15 +80,15 @@ they point at is a committed row the listener re-reads for itself.
 2. A brain claims it, replays the log into provider messages, and streams the model's
    response — writing `agent.message` / `agent.thinking` events (with opt-in
    `event_start`/`event_delta` SSE previews) and `span.model_request_start/_end`.
-3. A sandbox tool call becomes an `agent.tool_use` event plus a `tool_exec` work item;
-   the brain suspends (it holds nothing in memory a crash could lose). Not every call
-   does: an `always_ask` policy suspends the turn with no item at all until a
-   confirmation releases it, an MCP call takes `mcp_exec`, and a delegation call is
-   answered in the settlement that commits the turn. A turn carrying a
-   web tool (web_fetch/web_search) enqueues a `web_exec` item instead — the platform
-   executor answers the web calls in its own process (both environment kinds, no
-   sandbox) and chains the `tool_exec` for any sandbox tools on the same turn, so a
-   BYOC worker never observes an unanswered web call.
+3. Tool calls commit as events with stable IDs. Custom calls and self-hosted
+   sandbox calls wait on external results; ask-policy calls wait for authorization.
+   A thread advertises these as idle/requires_action. The shared events-layer
+   processor advances calls in generation order: a queued reply or confirmation
+   cannot bypass an earlier call. Platform work uses tool_exec, web_exec or mcp_exec
+   for the first ready lane; a driver can drain its contiguous ready prefix in order.
+   A cloud command between two custom calls runs after the first reply and publishes
+   its result before waiting on the second. Inline delegation is settled in its
+   emitting transaction. Web and MCP execute on the platform in both environments.
 4. For a platform-managed (`cloud`) environment the executor claims the item straight
    off the Postgres queue (`FOR UPDATE SKIP LOCKED`, lease + reclaim); for a
    `self_hosted` environment a BYOC worker claims the same kind of item over the wire
@@ -112,7 +112,8 @@ they point at is a committed row the listener re-reads for itself.
    next run — or, on the platform side, the reaper, while the BYOC worker flushes its
    writes on the way out instead (below).
 5. The commit that appends the result also enqueues the next `model_turn` — only once
-   every tool use in the turn is answered. A brain claims it (brains wake by polling the
+   every tool use in that thread's turn is processed. Receiving a later result alone
+   does not release its blocker. A brain claims it (brains wake by polling the
    queue; the LISTEN/NOTIFY wakes serve the SSE fan-out, the work API's long poll and the
    sandbox reaper — never the brain), replays, and
    continues until the model stops calling tools, then writes `session.status_idle`
@@ -139,7 +140,7 @@ two that end an outcome cycle, `settleVerdict` and `settleGraderError`, fold idl
 deliberately do not: that cycle's own harvest already published the tree, and only a
 tool-less grader call ran since.) The two idle folds the *API* makes — a `user.interrupt`
 and the archive of a session's last running thread — are out of scope here and tracked by
-#586: a session folded idle by either harvests nothing under this plan. The five share
+#586: a session folded idle by either harvests nothing under this plan. The brain settlements share
 one gate (`brain.enqueueIdleHarvest`) keyed on each site's own net session-level fold, so
 a thread idling under a busy sibling schedules nothing. The work item's `metadata` carries
 which trigger scheduled it (`queue.Item.ChainGrading`) because the session row cannot say,
@@ -152,18 +153,27 @@ two flavors share one live item per session — chaining the grader when it walk
 sandbox, or requeuing itself as a grading harvest (which provisions on its next claim) when
 it found none, so the grader never reads a snapshot the pass did not freshly collect.
 
-**Permissions / human-in-the-loop.** A tool whose resolved `permission_policy` is
-`always_ask` suspends the session *before* execution: the brain writes
-`session.status_idle` with `stop_reason:{type:"requires_action", event_ids:[…]}` naming
-the blocked `agent.tool_use` events (stamped `evaluated_permission:"ask"`). A client
-answers each with `user.tool_confirmation{tool_use_id, result:"allow"|"deny",
-deny_message?}`; allow releases the tool to the queue, deny synthesizes an
-`is_error:true` `agent.tool_result` carrying the deny message, and the turn resumes
-either way. Every driver re-derives that gate rather than trusting the item it claimed:
-the platform's exec drivers and the BYOC worker alike run only a call stamped `allow`,
-or one stamped `ask` and released by a confirmation — a `deny` runs on neither — so a
-turn suspended on two asks and released one at a time never runs the one no human
-answered, on every session, single-agent and coordinator alike.
+An executor finishing a ready prefix also schedules a harvest when the final session
+fold becomes idle. A queued idle harvest yields to runnable tools; tool execution
+waits for an already active harvest to finish. Outstanding external calls protect
+the sandbox from idle reaping.
+
+**External waits / permissions.** An unresolved custom call, worker result or
+approval contributes its event ID to requires_action. Approvals and results are
+validated, routed, saved, selectively marked processed, and scheduled in one
+transaction under the session row lock. Out-of-order inputs live in the existing
+log; no client resend or separate outbox is needed. An allow releases execution;
+a deny produces the usual error result when it reaches the processing position.
+A self-hosted worker accepts both running and idle sessions and may execute later
+already-authorized sandbox calls; its result is still processed in thread order.
+Cloud drivers cannot cross an earlier unresolved call. A completed ready prefix
+can therefore move a thread running → idle while another custom reply is pending.
+Messages cannot bypass this wait. Session status remains the fold over threads,
+and only the answered thread receives model work after all its calls settle.
+Processing timestamps are independent of the model's replay watermark, so input
+accepted during a model call still schedules its continuation. Legacy running
+waits use the same result path. Roll out the running/idle-compatible worker first,
+then coordinate controlplane, brain and executor; do not rewrite historical logs.
 
 **Interrupting.** Not every stall has an owner to wait for: a `self_hosted` worker fleet
 that never comes back, a custom tool the client never answers, a confirmation nobody

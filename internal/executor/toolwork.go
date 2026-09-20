@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/toolset"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/events"
@@ -36,7 +37,7 @@ type toolUse struct {
 // control plane uses; counting only agent.tool_result would re-run a tool a
 // worker already answered.
 func (e *Executor) runnableToolUses(ctx context.Context, sid domain.ID) ([]toolUse, error) {
-	uses, err := events.RunnableToolUses(ctx, e.pool, sid, domain.EventAgentToolUse)
+	uses, err := events.RunnableToolUses(ctx, e.pool, sid, domain.EventAgentToolUse, toolset.IsWebTool)
 	if err != nil {
 		return nil, fmt.Errorf("list tool uses: %w", err)
 	}

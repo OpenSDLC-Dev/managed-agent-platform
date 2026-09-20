@@ -151,7 +151,7 @@ func TestToolResultWhileRunningEnqueuesNextTurn(t *testing.T) {
 		t.Errorf("session.status_running count = %d, want 1", running)
 	}
 
-	// A tool result on an idle session is appended but schedules nothing.
+	// Both idle and legacy running external waits resume on their final result.
 	item, err = q.Claim(ctx, queue.ModelTurn, time.Minute)
 	if err != nil || item == nil {
 		t.Fatal(err)
@@ -164,8 +164,8 @@ func TestToolResultWhileRunningEnqueuesNextTurn(t *testing.T) {
 	sendEvents(t, s, sessionID, map[string]any{
 		"type": "user.tool_result", "tool_use_id": toolUseID2,
 	})
-	if n := s.liveWork(sessionID, queue.ModelTurn); n != 0 {
-		t.Errorf("tool result on idle session enqueued %d turns, want 0", n)
+	if n := s.liveWork(sessionID, queue.ModelTurn); n != 1 {
+		t.Errorf("tool result on idle session enqueued %d turns, want 1", n)
 	}
 }
 

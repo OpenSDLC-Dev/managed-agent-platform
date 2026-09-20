@@ -393,8 +393,8 @@ func TestSandboxPassChainsMCPRatherThanStranding(t *testing.T) {
 
 	h.stepOnce(t)
 
-	if n := len(h.toolResults(t)); n != 1 {
-		t.Fatalf("sandbox results = %d, want 1 (the pass still ran its own tool)", n)
+	if n := len(h.toolResults(t)); n != 0 {
+		t.Fatalf("sandbox results = %d, want 0 (the preceding MCP call blocks this tool)", n)
 	}
 	if n := h.liveOf(t, queue.ToolExec); n != 0 {
 		t.Errorf("live tool_exec = %d, want 0 (completed)", n)
@@ -410,6 +410,7 @@ func TestSandboxPassChainsMCPRatherThanStranding(t *testing.T) {
 	if n := len(h.mcpResults(t)); n != 1 {
 		t.Fatalf("mcp results after the chained pass = %d, want 1", n)
 	}
+	h.stepOnce(t) // The MCP settlement now releases the following sandbox call.
 	if n := h.liveOf(t, queue.ModelTurn); n != 1 {
 		t.Errorf("live model_turn = %d, want 1 — everything is answered now", n)
 	}
