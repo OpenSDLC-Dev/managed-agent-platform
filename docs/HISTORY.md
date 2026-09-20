@@ -6063,16 +6063,26 @@ template still open.
 Refusing won, but the counter behind it still has to be right about one thing: where the
 template ends on its own line. Closing early is not the harmless direction it looks like —
 the body line passes, the terminator below is taken, and the hiding resumes exactly as
-before. Two braces were found closing it early, one inside a quoted string
-(`${ join("}", [`) and one belonging to an object expression (`${ merge({},`), so a string
-is skipped whole and `{` counts as well as `}`. Where the counter cannot say — a string
-that never closes on the line — it answers open and the file is refused.
+before, and review found five shapes doing exactly that over files `terraform fmt`
+accepts. It took three rounds to stop finding them, because each round asked the wrong
+question. "Which braces should I skip" has no closed answer; "what can make a brace not be
+structure" does. In HCL it is three things and no others — a quoted string, a comment, and
+a heredoc body — so the rule became: walk each one exactly, or answer open.
 
-What it does not do is read a template's contents as HCL. It never resolves what a string
-means, only where it ends, and reading a quoted string inside a template is what both
-readers have refused since #760. That is the line between this and the emulation #767
+Two of the three need code. A string is walked to its closing quote, unless an
+interpolation opens inside it first: HCL keeps interpolating inside a quoted string and an
+interpolation may hold another string, so in `${"${"}"}"` the second quote closes nothing
+and a reader that stops there loses the template. A comment running to end of line answers
+open outright, since the template cannot close behind it; a `/* ... */` that ends on the
+line is stepped over. The third needs nothing: a heredoc marker must end its line —
+terraform calls anything after it an `Invalid expression` — so a template holding one
+cannot close on that line and the depth already says open. A branch for it would have been
+code no file could ever exercise.
+
+What none of this does is read a template's contents as HCL. It resolves nothing, only
+where a string or a comment ends. That is the line between this and the emulation #767
 asked for: emulating means carrying template depth across body lines and deciding a
-terminator against it, which needs those contents, and a counter that got them wrong would
+terminator against it, which needs the contents, and a counter that got them wrong would
 put the readers back to disagreeing with Terraform silently about where the heredoc ends —
 the failure being fixed rather than a smaller version of it.
 

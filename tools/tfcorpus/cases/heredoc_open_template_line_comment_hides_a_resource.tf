@@ -1,8 +1,8 @@
 locals {
   a = <<EOT
-${ join("}
+${ length([ // }
   EOT
-", [])) }
+]) }
 z = {
 x = <<Z
 EOT

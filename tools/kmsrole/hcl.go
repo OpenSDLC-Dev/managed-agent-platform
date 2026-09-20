@@ -78,43 +78,85 @@ var errLoneCR = errors.New("a carriage return that is not part of a CRLF — ter
 
 // Raised where a heredoc body line ends with a template still open. Mirrors
 // check_split.py's OPEN_TEMPLATE_IN_BODY.
-var errOpenTemplateInBody = errors.New("a `${...}` or `%{...}` left open at the end of a heredoc body line — terraform reads the lines after it as template text and does not end the heredoc at a terminator inside one, while this reader closes at the first line that trims to the terminator, so the body behind it would arrive as configuration; write the template on one line so this guard can read the file")
+var errOpenTemplateInBody = errors.New("a `${...}` or `%{...}` left open at the end of a heredoc body line — terraform reads the lines after it as template text and does not end the heredoc at a terminator inside one, while this reader closes at the first line that trims to the terminator, so the body behind it would arrive as configuration; a template this guard can read closes on its own line and holds no comment, heredoc or nested interpolation, and the rest it refuses rather than guess at")
+
+// plainString reports where the string opened at i ends, or -1 when it cannot
+// say. Only a string that is plain text is answered for: HCL keeps interpolating
+// inside a quoted string, and an interpolation may hold another string, so a `"`
+// after a `${` does not close this one (`${"${"}"}"` is one string, found in
+// review). A `${` or `%{` before the closing quote therefore gives up, and so
+// does a string that does not close on the line. Mirrors check_split.py's
+// plain_string().
+func plainString(line string, i int) int {
+	for j := i + 1; j < len(line); {
+		switch {
+		case line[j] == '"':
+			return j + 1
+		case line[j] == '\\':
+			j += 2
+		case strings.HasPrefix(line[j:], "$${"), strings.HasPrefix(line[j:], "%%{"):
+			j += 3
+		case strings.HasPrefix(line[j:], "${"), strings.HasPrefix(line[j:], "%{"):
+			return -1
+		default:
+			j++
+		}
+	}
+	return -1
+}
 
 // openTemplate reports whether a `${...}` or `%{...}` is still open when this
-// heredoc body line ends. Every brace between the opener and the end of the
-// line has to be accounted for, or the count reaches zero early and the caller
-// reads on over a file Terraform is still holding open. Two of them do not
-// belong to the template and both were found closing it: one inside a quoted
-// string (`${ join("", ["}",`) and one belonging to an object expression
-// (`${ merge({},`). So a string is skipped whole, and `{` counts as well as `}`.
+// heredoc body line ends. Every brace between the opener and the end of the line
+// has to be accounted for, or the count reaches zero early and the caller reads
+// on over a file Terraform is still holding open. A `{` is literal text only
+// inside a string, a comment or a heredoc body — HCL's whole list — and both of
+// the first two were found closing the template early over a file
+// `terraform fmt` accepts:
 //
-// Ambiguity answers TRUE. A string that never closes on the line leaves this
-// unable to say where the template ends, and the caller refuses rather than
-// reads. Mirrors check_split.py's open_template().
+//	a quoted string   `${ join("}", [`      `${"${"}"}" [`
+//	a comment         `${ length([ # }`     `${ length([ /* } */`
+//
+// So each is walked exactly or answered TRUE, and a comment running to end of
+// line answers TRUE outright — the template cannot close behind it. The third
+// needs no rule: a heredoc marker has to end its line (terraform 1.15.8 calls
+// anything after it an `Invalid expression`), so a template holding one cannot
+// close on that line and the depth already says open.
+//
+// Ambiguity answers TRUE throughout. Where this cannot say where the template
+// ends, the caller refuses. Mirrors check_split.py's open_template().
 func openTemplate(line string) bool {
 	depth := 0
-	for i := 0; i < len(line); i++ {
+	for i := 0; i < len(line); {
 		switch {
 		case strings.HasPrefix(line[i:], "$${"), strings.HasPrefix(line[i:], "%%{"):
-			i += 2
+			i += 3
 		case strings.HasPrefix(line[i:], "${"), strings.HasPrefix(line[i:], "%{"):
 			depth++
+			i += 2
+		case depth == 0:
 			i++
-		case depth > 0 && line[i] == '"':
-			i++
-			for i < len(line) && line[i] != '"' {
-				if line[i] == '\\' {
-					i++
-				}
-				i++
-			}
-			if i >= len(line) {
+		case line[i] == '#', strings.HasPrefix(line[i:], "//"):
+			return true
+		case strings.HasPrefix(line[i:], "/*"):
+			end := strings.Index(line[i+2:], "*/")
+			if end < 0 {
 				return true
 			}
-		case depth > 0 && line[i] == '{':
+			i += 2 + end + 2
+		case line[i] == '"':
+			end := plainString(line, i)
+			if end < 0 {
+				return true
+			}
+			i = end
+		case line[i] == '{':
 			depth++
-		case depth > 0 && line[i] == '}':
+			i++
+		case line[i] == '}':
 			depth--
+			i++
+		default:
+			i++
 		}
 	}
 	return depth > 0
