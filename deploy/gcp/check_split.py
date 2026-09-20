@@ -209,6 +209,98 @@ BAD_BOM = (
     "a resource header behind one matches nothing."
 )
 
+OPEN_TEMPLATE_IN_BODY = (
+    "a `${...}` or `%{...}` left open at the end of a heredoc body line. Terraform reads "
+    "the lines after it as template text and does not end the heredoc at a terminator "
+    "inside one, while this reader closes at the first line that trims to the terminator "
+    "— so the body behind it would arrive as configuration. This guard reads a template "
+    "that closes on its own line, with any `/* ... */` in it closed too; a line comment, "
+    "an unterminated block comment, a heredoc and a nested interpolation it refuses "
+    "rather than guess at."
+)
+
+
+def plain_string(line: str, i: int) -> int:
+    """Where the string opened at `i` ends, or -1 when this cannot say.
+
+    Only a string that is plain text is answered for. HCL keeps interpolating
+    inside a quoted string, and an interpolation may hold another string, so a
+    `"` after a `${` does not close this one (`${"${"}"}"` is one string, found
+    in review). A `${` or `%{` before the closing quote therefore gives up, and
+    so does a string that does not close on the line.
+    """
+    j = i + 1
+    while j < len(line):
+        if line[j] == '"':
+            return j + 1
+        if line[j] == "\\":
+            j += 2
+            continue
+        if line[j : j + 3] in ("$${", "%%{"):
+            j += 3
+            continue
+        if line[j : j + 2] in ("${", "%{"):
+            return -1
+        j += 1
+    return -1
+
+
+def open_template(line: str) -> bool:
+    """Is a `${...}` or `%{...}` still open when this heredoc body line ends?
+
+    Every brace between the opener and the end of the line has to be accounted
+    for, or the count reaches zero early and the caller reads on over a file
+    Terraform is still holding open. A `{` is literal text only inside a string,
+    a comment or a heredoc body — HCL's whole list — and both of the first two
+    were found closing the template early over a file `terraform fmt` accepts:
+
+        a quoted string   `${ join("}", [`      `${"${"}"}" [`
+        a comment         `${ length([ # }`     `${ length([ /* } */`
+
+    So each is walked exactly or answered TRUE, and a comment running to end of
+    line answers TRUE outright — the template cannot close behind it. The third
+    needs no rule: a heredoc marker has to end its line (terraform 1.15.8 calls
+    anything after it an `Invalid expression`), so a template holding one cannot
+    close on that line and the depth already says open.
+
+    Ambiguity answers TRUE throughout. Where this cannot say where the template
+    ends, the caller refuses — the direction that costs a file nobody can deploy
+    around instead of a resource nobody sees.
+    """
+    depth, i, n = 0, 0, len(line)
+    while i < n:
+        if line[i : i + 3] in ("$${", "%%{"):
+            i += 3
+            continue
+        if line[i : i + 2] in ("${", "%{"):
+            depth += 1
+            i += 2
+            continue
+        if not depth:
+            i += 1
+            continue
+        pair, ch = line[i : i + 2], line[i]
+        if ch == "#" or pair == "//":
+            return True
+        if pair == "/*":
+            end = line.find("*/", i + 2)
+            if end < 0:
+                return True
+            i = end + 2
+            continue
+        if ch == '"':
+            end = plain_string(line, i)
+            if end < 0:
+                return True
+            i = end
+            continue
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+        i += 1
+    return depth > 0
+
 
 def scrub(line: str) -> tuple[str, int]:
     """Drop comments, and neutralize the structural characters inside strings.
@@ -436,6 +528,26 @@ def blocks(path: pathlib.Path):
             # U+FEFF is NOT checked: terraform reads one in a body as text.
             if BAD_BYTE.search(line):
                 raise ValueError(f"{path}:{n + 1}: {BAD_UTF8}")
+            # A template left OPEN at the end of a body line. Terraform reads
+            # what follows as template text and does not end the heredoc at a
+            # terminator sitting inside one; this reader compares every trimmed
+            # line to the terminator and closes at the first match. The gap is
+            # not a refusal by itself — the body behind it arrives as structure,
+            # and a heredoc opened in THAT text can swallow the brace closing
+            # the enclosing block and a whole resource with it, while a stray
+            # `{` left in the leaked text balances the count again at EOF. Both
+            # halves are the file's to choose, so the reader ends at depth 0,
+            # says nothing, and reports every resource but the hidden one over a
+            # file `terraform fmt` accepts
+            # (#762, heredoc_open_template_hides_a_resource.tf).
+            #
+            # Refused rather than emulated: deciding the terminator against a
+            # depth carried ACROSS body lines needs the template's contents
+            # read as HCL, which is the sibling rule both readers have
+            # refused since #760. open_template() asks only where a template
+            # ends on its own line, and answers open where it cannot say.
+            if open_template(line):
+                raise ValueError(f"{path}:{n + 1}: {OPEN_TEMPLATE_IN_BODY}")
             # Trimmed, and for `<<EOT` as much as `<<-EOT`: the marker decides
             # how the BODY is dedented, not where the string ends. Measured
             # against terraform 1.15.8 — a plain heredoc closes at `    EOT`,

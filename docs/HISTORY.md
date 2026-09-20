@@ -6034,3 +6034,60 @@ cells `tools/tfcorpus` pins; the other three separators, and the rest of Unicode
 White_Space, are inferred from the sweep rather than measured. Owning a copy of a set we
 cannot cheaply re-measure is the cost the subtraction avoids, and there is no third
 reader to transfer to.
+
+## Emulating a heredoc terminator inside a template (#762, from #767) — rejected alternative, 2026-09-20
+
+Terraform does not end a heredoc at a line reading the terminator when that line sits
+inside an open `${…}` or `%{…}`: measured on 1.15.8, it is expression text, the heredoc
+runs on, and the file parses. Both readers closed at the first such line, so the rest of
+the body arrived as structure.
+
+That is not merely a refusal. `heredoc_open_template_hides_a_resource.tf` is a file
+`terraform fmt` accepts over which both readers reported **everything except the
+`google_kms_crypto_key` it hides, and no error**: the leaked body opens a heredoc only
+they can see, which swallows the brace closing `locals` and that whole resource, while a
+stray `z = {` left in the leaked text pays the brace back so the depth still reaches 0 at
+end of file and the unbalanced-braces refusal never fires. The reasoning that this could
+only ever end in a refusal — that the readers' depth differs from Terraform's by exactly
+the braces they leak, so a displaced header implies an unbalanced end of file — is false:
+the leaked region and the swallowed region are two independent choices the file makes, and
+it can balance one against the other. Two shapes of it are pinned, found independently of
+each other: one leaves the resource's braces in the leaked text and pays them back, and
+`heredoc_open_template_hides_a_braced_resource.tf` takes them into the phantom body along
+with the header, so no arithmetic downstream has anything left to notice.
+
+Two ways to close it. Emulate the rule — track template depth across body lines and close
+only at depth 0, which is what #767 asked for — or refuse a body line that ends with a
+template still open.
+
+Refusing won, but the counter behind it still has to be right about one thing: where the
+template ends on its own line. Closing early is not the harmless direction it looks like —
+the body line passes, the terminator below is taken, and the hiding resumes exactly as
+before, and review found five shapes doing exactly that over files `terraform fmt`
+accepts. It took three rounds to stop finding them, because each round asked the wrong
+question. "Which braces should I skip" has no closed answer; "what can make a brace not be
+structure" does. In HCL it is three things and no others — a quoted string, a comment, and
+a heredoc body — so the rule became: walk each one exactly, or answer open.
+
+Two of the three need code. A string is walked to its closing quote, unless an
+interpolation opens inside it first: HCL keeps interpolating inside a quoted string and an
+interpolation may hold another string, so in `${"${"}"}"` the second quote closes nothing
+and a reader that stops there loses the template. A comment running to end of line answers
+open outright, since the template cannot close behind it; a `/* ... */` that ends on the
+line is stepped over. The third needs nothing: a heredoc marker must end its line —
+terraform calls anything after it an `Invalid expression` — so a template holding one
+cannot close on that line and the depth already says open. A branch for it would have been
+code no file could ever exercise.
+
+What none of this does is read a template's contents as HCL. It resolves nothing, only
+where a string or a comment ends. That is the line between this and the emulation #767
+asked for: emulating means carrying template depth across body lines and deciding a
+terminator against it, which needs the contents, and a counter that got them wrong would
+put the readers back to disagreeing with Terraform silently about where the heredoc ends —
+the failure being fixed rather than a smaller version of it.
+
+The cost is stated and pinned: an ordinary multi-line template in a heredoc body holds no
+terminator-looking line, is harmless, and is refused all the same
+(`heredoc_multiline_template_is_refused.tf`, carrying `terraform_accepts`). `deploy/gcp/`
+contains none — `make gcp-split-check` reads the tree and still reports its seven
+protected resources.

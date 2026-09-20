@@ -336,6 +336,173 @@
       ]
     },
     {
+      "file": "heredoc_open_template_hides_a_resource.tf",
+      "why": "the reason the rule above exists, and the worst outcome these guards have: terraform parses this file and BOTH readers dropped the `hidden` KMS key from what they reported, silently. The first body line leaves a `${` open, so terraform runs the heredoc past the `EOT` inside it while the readers close there; the leaked body then opens a heredoc only they can see, which swallows the brace closing `locals` and the whole `hidden` resource, and the stray `z = {` pays back the brace so the depth still reaches 0 at EOF and the unbalanced-braces refusal never fires",
+      "fmt": 3,
+      "refuse": "left open at the end of a heredoc body line",
+      "terraform_accepts": true
+    },
+    {
+      "file": "heredoc_open_template_hides_a_braced_resource.tf",
+      "why": "the second shape of the same hiding file, found by an independent review: here the heredoc opened in the leaked text takes the resource's braces into its body with it rather than leaving them to be paid back, so the count never needs the stray `{` at all \u2014 the two together are why the rule is about the open template and not about any arithmetic downstream of it",
+      "fmt": 3,
+      "refuse": "left open at the end of a heredoc body line",
+      "terraform_accepts": true
+    },
+    {
+      "file": "heredoc_open_template_brace_in_string_hides_a_resource.tf",
+      "why": "the same hiding file with the template's `}` moved inside a string, which is what a counter that walks braces alone reads as the close: it reached zero on the first line, the terminator below was taken, and `hidden` went unreported over a file terraform parses. Found in review of the counter that had no string awareness",
+      "fmt": 3,
+      "refuse": "left open at the end of a heredoc body line",
+      "terraform_accepts": true
+    },
+    {
+      "file": "heredoc_open_template_object_brace_hides_a_resource.tf",
+      "why": "and the same with an object expression's braces, which needs no string at all \u2014 `{` has to count as well as `}`, or the pair nets out and the count reaches zero with the template still open",
+      "fmt": 3,
+      "refuse": "left open at the end of a heredoc body line",
+      "terraform_accepts": true
+    },
+    {
+      "file": "heredoc_open_template_unterminated_string_is_refused.tf",
+      "why": "the ambiguity exit, with the brace that makes it matter: a string opened inside the template holds a `}` and never closes on the line, so a reader that walks on past the quote counts that brace and calls the template closed. Terraform refuses the file (`Invalid multi-line string`), so nothing is hidden here \u2014 what is pinned is that the reader answers open rather than guessing",
+      "fmt": 2,
+      "refuse": "left open at the end of a heredoc body line"
+    },
+    {
+      "file": "heredoc_open_template_nested_interp_hides_a_resource.tf",
+      "why": "terraform keeps interpolating inside a quoted string, and an interpolation may hold another string, so the `\"` after the inner `${` does not close the outer one \u2014 `${\"${\"}\"}\"` is a single string. A reader that skips a string at the first quote it sees loses the template here and hides `hidden` over a file terraform formats clean. Found by the verifier, which built it independently",
+      "fmt": 0,
+      "refuse": "left open at the end of a heredoc body line",
+      "terraform_accepts": true
+    },
+    {
+      "file": "heredoc_open_template_comment_hides_a_resource.tf",
+      "why": "a `#` comment inside the template runs to end of line, so the `}` behind it is not the template's close and the template cannot close on this line at all. Counting braces through a comment hid `hidden` the same way",
+      "fmt": 3,
+      "refuse": "left open at the end of a heredoc body line",
+      "terraform_accepts": true
+    },
+    {
+      "file": "heredoc_open_template_line_comment_hides_a_resource.tf",
+      "why": "the `//` spelling of the same comment, which is a separate branch in both readers and would otherwise go untested",
+      "fmt": 3,
+      "refuse": "left open at the end of a heredoc body line",
+      "terraform_accepts": true
+    },
+    {
+      "file": "heredoc_open_template_block_comment_hides_a_resource.tf",
+      "why": "and the `/* ... */` spelling, which differs again: it ends on the line rather than running to EOL, so it is walked past exactly instead of answering open",
+      "fmt": 3,
+      "refuse": "left open at the end of a heredoc body line",
+      "terraform_accepts": true
+    },
+    {
+      "file": "heredoc_open_template_unclosed_block_comment_hides_a_resource.tf",
+      "why": "a `/* ... */` that does not close on the line: the template cannot close behind it either, and a reader that walks past the marker counts the `}` inside the comment and hides `hidden` over a file terraform accepts",
+      "fmt": 3,
+      "refuse": "left open at the end of a heredoc body line",
+      "terraform_accepts": true
+    },
+    {
+      "file": "heredoc_open_template_heredoc_is_refused.tf",
+      "why": "a heredoc opened INSIDE the template. It needs no rule of its own and has none: terraform requires the marker to end its line (anything after it is an `Invalid expression`), so the template cannot close on that line and the depth already answers open. The row pins that, so a future reader does not add a branch for it",
+      "fmt": 3,
+      "refuse": "left open at the end of a heredoc body line",
+      "terraform_accepts": true
+    },
+    {
+      "file": "heredoc_template_with_a_closing_comment_is_read.tf",
+      "why": "the boundary the block-comment walk buys back: a comment that closes on the line leaves the template readable, and the file is read",
+      "fmt": 3,
+      "blocks": [
+        "google_kms_crypto_key.after"
+      ]
+    },
+    {
+      "file": "heredoc_template_with_an_escaped_quote_is_read.tf",
+      "why": "a `\\\"` inside the string must not be read as its close, or an ordinary format string would be refused",
+      "fmt": 3,
+      "blocks": [
+        "google_kms_crypto_key.after"
+      ]
+    },
+    {
+      "file": "heredoc_template_with_an_escaped_interp_is_read.tf",
+      "why": "and a `$${` inside the string is literal text, not the nested interpolation that makes a string unreadable \u2014 so this one is still read",
+      "fmt": 3,
+      "blocks": [
+        "google_kms_crypto_key.after"
+      ]
+    },
+    {
+      "file": "heredoc_template_with_a_string_is_read.tf",
+      "why": "the cost the string awareness buys back: an ordinary template holding a string closes on its line and is read, where refusing every template that contains a quote would have rejected most heredocs anyone writes",
+      "fmt": 3,
+      "blocks": [
+        "google_kms_crypto_key.after"
+      ]
+    },
+    {
+      "file": "heredoc_template_with_a_braced_string_is_read.tf",
+      "why": "a `}` inside a string in a template that DOES close on its line: the string is skipped and the real `}` still counts, so the file is read rather than refused",
+      "fmt": 3,
+      "blocks": [
+        "google_kms_crypto_key.after"
+      ]
+    },
+    {
+      "file": "heredoc_template_with_an_object_is_read.tf",
+      "why": "the object-brace half of the same boundary: `{` and `}` pair off inside the template and it closes, so counting `{` costs this file nothing",
+      "fmt": 3,
+      "blocks": [
+        "google_kms_crypto_key.after"
+      ]
+    },
+    {
+      "file": "heredoc_nested_template_is_refused.tf",
+      "why": "a template nested inside a string inside a template, all on one line: terraform's own quote pairing runs through the inner `${`, which this reader cannot follow, so it answers open and the file is refused. The cost of the rule, paid where the rule is honest about not knowing",
+      "fmt": 3,
+      "refuse": "left open at the end of a heredoc body line",
+      "terraform_accepts": true
+    },
+    {
+      "file": "heredoc_multiline_template_is_refused.tf",
+      "why": "the cost of the rule, stated: an ordinary multi-line template in a heredoc body holds no terminator-looking line and is harmless, terraform parses it, and it is refused all the same \u2014 following it would mean reading the template's own contents, braces inside its strings included, which is the emulation #762 weighed and rejected (docs/HISTORY.md)",
+      "fmt": 3,
+      "refuse": "left open at the end of a heredoc body line",
+      "terraform_accepts": true
+    },
+    {
+      "file": "heredoc_escaped_template_in_body_is_read.tf",
+      "why": "`$${` is literal text to terraform, not an opener, so this body line leaves nothing open and the file is read \u2014 a rule that counted the escape would refuse a file terraform formats, which is the direction that costs configuration nobody can deploy around",
+      "fmt": 0,
+      "blocks": [
+        "google_kms_crypto_key.after"
+      ]
+    },
+    {
+      "file": "heredoc_open_template_after_a_brace_is_refused.tf",
+      "why": "a `}` before the opener, which belongs to nothing: the count holds at zero rather than going negative, so the `${` behind it still registers as open. Letting it go negative would net the two out and read the body on",
+      "fmt": 3,
+      "refuse": "left open at the end of a heredoc body line",
+      "terraform_accepts": true
+    },
+    {
+      "file": "heredoc_terminator_inside_template_is_refused.tf",
+      "why": "a line that strips to the terminator, sitting inside an OPEN `${...}`: terraform keeps the heredoc open across it and parses the file, and the readers refuse at the line that left the template open rather than at the terminator \u2014 the narrowest file that reaches the rule",
+      "fmt": 3,
+      "refuse": "left open at the end of a heredoc body line",
+      "terraform_accepts": true
+    },
+    {
+      "file": "heredoc_terminator_inside_directive_is_refused.tf",
+      "why": "the `%{...}` directive half of the same shape, so a rule taught one spelling and not the other cannot pass unnoticed",
+      "fmt": 3,
+      "refuse": "left open at the end of a heredoc body line",
+      "terraform_accepts": true
+    },
+    {
       "file": "opener_trailing_hash_comment.tf",
       "why": "terraform refuses a heredoc opener that carries anything after the marker; the readers scrub the comment first and then see a bare opener, so the configuration behind it became string content (#766)",
       "fmt": 2,
