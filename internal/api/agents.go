@@ -63,6 +63,13 @@ func parseAgentSpecFields(obj map[string]json.RawMessage, spec *agentSpec) error
 		if err != nil {
 			return err
 		}
+		// An omitted effort survives only while the model ID stays the same;
+		// a new model uses its own default. The public guide refines the SDK's
+		// shorter "omitting it leaves the stored value unchanged" comment:
+		// https://platform.claude.com/docs/en/managed-agents/agent-setup#update-semantics
+		if m.Effort == "" && m.ID == spec.Model.ID {
+			m.Effort = spec.Model.Effort
+		}
 		spec.Model = m
 	}
 	for key, dst := range map[string]*string{"system": &spec.System, "description": &spec.Description} {

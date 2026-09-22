@@ -112,6 +112,9 @@ func (p *anthropicProvider) Generate(ctx context.Context, req provider.Request) 
 		Model:     sdk.Model(p.model),
 		MaxTokens: req.MaxTokens,
 	}
+	if req.Effort != "" {
+		params.OutputConfig.Effort = sdk.OutputConfigEffort(req.Effort)
+	}
 	if params.MaxTokens == 0 {
 		params.MaxTokens = p.maxTokens
 	}

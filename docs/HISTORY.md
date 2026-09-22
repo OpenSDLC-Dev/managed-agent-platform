@@ -6133,3 +6133,30 @@ external-wait retention was declined for this change: custom waits previously
 remained running and were already excluded from idle-TTL reclamation. Plan 52
 preserves that workspace protection when those waits become idle; terminal
 archive, delete and termination still use their existing reclamation tiers.
+
+## Model effort (plan 53, #160) — acceptance record, 2026-09-22
+
+Independent verification at 022a3c7 completed all `make verify` targets: 61 test
+packages passed with 90.08% total statement coverage. Its outer status-printing
+shell failed after make completed because an exit variable expanded to empty;
+a direct `make cover-gate` rerun returned 0 with the same coverage. The independent
+five-package regression run passed, as did real controlplane and brain binaries
+against isolated PostgreSQL and HTTP upstream fixtures for both provider protocols
+and upstream rejection. These probes verify persistence, request propagation and
+visible failure, not a real vendor's allocation of reasoning compute. Probe
+processes and containers were removed; the gate's before/after container sets were
+identical. The SDK report covered 594 citations without findings or pending transitions;
+the registry's issue-state check was clean.
+
+Automatic approval review blocked the prescribed external Claude invocation for
+lack of explicit authorization for that transfer and execution. Verification and
+reviews therefore used independent agents in the current Codex environment; no
+Claude/Fable/Opus pass is claimed. Review results and subsequent CI are recorded
+in the pull request.
+
+PR review strengthened the omitted-effort assertion to require a model object
+and replaced the brain propagation test's scripted provider with a configured
+Anthropic adapter and HTTP/SSE fixture over real PostgreSQL. It checks the primary,
+child and grader requests as `high`, `low`, `high`, the configured upstream model,
+and a satisfied outcome. The affected API and brain regression tests passed;
+the before/after container sets were identical.

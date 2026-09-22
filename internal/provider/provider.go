@@ -55,6 +55,7 @@ type Config struct {
 // the non-Anthropic adapters (see provider/openai) except where a route
 // opts the anthropic adapter into one (FlattenSearchResults, above).
 type Request struct {
+	Effort    domain.ModelEffort // empty lets the endpoint choose its default
 	System    string
 	Messages  []Message
 	Tools     []json.RawMessage // Anthropic tool definitions, verbatim
