@@ -41,6 +41,8 @@ We take Anthropic's **Claude Managed Agents** as our **reference implementation*
 
 This is a deliberate compatibility and design choice, not an attempt to reproduce that product. Where our goals — self-hosting, pluggable model backends, first-class OTel — call for something different, we diverge on purpose and document why.
 
+`model.inference_geo` is preserved as protocol-compatible configuration metadata. It does not change provider requests or routing: inference geography is determined by your deployment and upstream configuration. Its echoed value is not a geographic execution guarantee; the platform does not implement workspace geo policies or regional enforcement. See [DIVERGENCES](docs/DIVERGENCES.md).
+
 ## Architecture
 
 An agent is three independently-swappable pieces:

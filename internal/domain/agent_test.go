@@ -72,7 +72,7 @@ func TestModelEffortRoundTrip(t *testing.T) {
 
 func TestModelDecodeReplacesPreviousFields(t *testing.T) {
 	for _, raw := range []string{`"other"`, `{"id":"other"}`} {
-		m := Model{ID: "original", Speed: "fast", Effort: "high"}
+		m := Model{ID: "original", Speed: "fast", Effort: "high", InferenceGeo: "us"}
 		if err := json.Unmarshal([]byte(raw), &m); err != nil {
 			t.Fatal(err)
 		}

@@ -209,6 +209,8 @@ func TestDreamCreateRejections(t *testing.T) {
 		{"empty model object", dreamWithModel(storeID, sessionIDs, map[string]any{})},
 		{"unknown model speed", dreamWithModel(storeID, sessionIDs,
 			map[string]any{"id": model, "speed": "turbo"})},
+		{"agent-only inference geo", dreamWithModel(storeID, sessionIDs,
+			map[string]any{"id": model, "inference_geo": "us"})},
 		{"unknown key in the model object", dreamWithModel(storeID, sessionIDs,
 			map[string]any{"id": model, "extra": 1})},
 		{"empty instructions", dreamWith(storeID, sessionIDs, "instructions", "")},
