@@ -7,12 +7,16 @@ import (
 )
 
 // Model is an agent's model selection. On the wire it is either a bare string
-// ("claude-opus-4-8") or an object ({"id":…, "speed":…, "effort":…}); we
+// ("claude-opus-4-8") or an object ({"id":…, "speed":…, "effort":…, "inference_geo":…}); we
 // normalize to this struct and round-trip both forms.
 type Model struct {
 	ID     string      `json:"id"`
 	Speed  string      `json:"speed,omitempty"` // "standard" | "fast"
 	Effort ModelEffort `json:"effort,omitempty"`
+	// InferenceGeo is compatibility metadata only; it does not constrain routing.
+	// Checked against anthropic-sdk-go v1.70.1 — betaagent.go
+	// BetaManagedAgentsModelConfigParams.InferenceGeo and BetaManagedAgentsModelConfig.InferenceGeo.
+	InferenceGeo ModelInferenceGeo `json:"inference_geo,omitempty"`
 }
 
 // UnmarshalJSON accepts either a bare string or the object form.
@@ -28,6 +32,27 @@ func (m *Model) UnmarshalJSON(b []byte) error {
 		return err
 	}
 	*m = Model(decoded)
+	return nil
+}
+
+// ModelInferenceGeo preserves the optional geo selection, without enforcing it.
+// The supported values come from the public agent guide:
+// https://platform.claude.com/docs/en/managed-agents/agent-setup#pin-the-inference-geo
+type ModelInferenceGeo string
+
+func (g *ModelInferenceGeo) UnmarshalJSON(b []byte) error {
+	var geo *string
+	if err := json.Unmarshal(b, &geo); err != nil {
+		return fmt.Errorf("model.inference_geo must be a string or null")
+	}
+	if geo == nil {
+		*g = ""
+		return nil
+	}
+	if *geo != "us" && *geo != "global" {
+		return fmt.Errorf(`model.inference_geo must be "us" or "global"`)
+	}
+	*g = ModelInferenceGeo(*geo)
 	return nil
 }
 

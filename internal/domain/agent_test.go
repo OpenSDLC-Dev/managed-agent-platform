@@ -72,12 +72,22 @@ func TestModelEffortRoundTrip(t *testing.T) {
 
 func TestModelDecodeReplacesPreviousFields(t *testing.T) {
 	for _, raw := range []string{`"other"`, `{"id":"other"}`} {
-		m := Model{ID: "original", Speed: "fast", Effort: "high"}
+		m := Model{ID: "original", Speed: "fast", Effort: "high", InferenceGeo: "us"}
 		if err := json.Unmarshal([]byte(raw), &m); err != nil {
 			t.Fatal(err)
 		}
 		if m != (Model{ID: "other"}) {
 			t.Fatalf("decode retained old fields: %+v", m)
 		}
+	}
+}
+
+func TestModelInferenceGeoNullClearsPreviousValue(t *testing.T) {
+	geo := ModelInferenceGeo("us")
+	if err := json.Unmarshal([]byte(`null`), &geo); err != nil {
+		t.Fatal(err)
+	}
+	if geo != "" {
+		t.Fatalf("null retained geo = %q", geo)
 	}
 }
