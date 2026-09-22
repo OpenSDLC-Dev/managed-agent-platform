@@ -8,7 +8,10 @@ import (
 
 func wantEffort(t *testing.T, agent map[string]any, level string) {
 	t.Helper()
-	m, _ := agent["model"].(map[string]any)
+	m, ok := agent["model"].(map[string]any)
+	if !ok {
+		t.Fatalf("model = %T, want object", agent["model"])
+	}
 	if level == "" {
 		if _, ok := m["effort"]; ok {
 			t.Fatalf("unexpected effort: %v", m)

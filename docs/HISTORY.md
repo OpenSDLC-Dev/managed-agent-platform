@@ -6153,3 +6153,10 @@ lack of explicit authorization for that transfer and execution. Verification and
 reviews therefore used independent agents in the current Codex environment; no
 Claude/Fable/Opus pass is claimed. Review results and subsequent CI are recorded
 in the pull request.
+
+PR review strengthened the omitted-effort assertion to require a model object
+and replaced the brain propagation test's scripted provider with a configured
+Anthropic adapter and HTTP/SSE fixture over real PostgreSQL. It checks the primary,
+child and grader requests as `high`, `low`, `high`, the configured upstream model,
+and a satisfied outcome. The affected API and brain regression tests passed;
+the before/after container sets were identical.
