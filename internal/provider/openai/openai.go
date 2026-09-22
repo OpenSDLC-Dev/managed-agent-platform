@@ -98,12 +98,13 @@ func (p *openaiProvider) Generate(ctx context.Context, req provider.Request) (pr
 		maxTokens = p.maxTokens
 	}
 	body := chatRequest{
-		Model:         p.model,
-		Messages:      messages,
-		MaxTokens:     maxTokens,
-		Stream:        true,
-		StreamOptions: &streamOptions{IncludeUsage: true},
-		Tools:         tools,
+		ReasoningEffort: string(req.Effort),
+		Model:           p.model,
+		Messages:        messages,
+		MaxTokens:       maxTokens,
+		Stream:          true,
+		StreamOptions:   &streamOptions{IncludeUsage: true},
+		Tools:           tools,
 	}
 	raw, err := json.Marshal(body)
 	if err != nil {
@@ -191,8 +192,11 @@ func (p *openaiProvider) Generate(ctx context.Context, req provider.Request) (pr
 // --- outgoing request shapes (Anthropic-native -> OpenAI Chat Completions) ---
 
 type chatRequest struct {
-	Model    string        `json:"model"`
-	Messages []chatMessage `json:"messages"`
+	// Preserve the level; the endpoint validates model-specific support.
+	// https://developers.openai.com/api/reference/resources/chat/subresources/completions/methods/create
+	ReasoningEffort string        `json:"reasoning_effort,omitempty"`
+	Model           string        `json:"model"`
+	Messages        []chatMessage `json:"messages"`
 	// max_tokens is the field vLLM and the OpenAI-compatible gateways this
 	// adapter targets accept; only api.openai.com's newest reasoning models
 	// have switched to max_completion_tokens. Omitted when zero so the endpoint

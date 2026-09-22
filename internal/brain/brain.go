@@ -371,6 +371,7 @@ func (b *Brain) runTurn(ctx context.Context, item *queue.Item, claimedAt time.Ti
 	if err != nil {
 		return b.failTurn(ctx, sid, item, nil, 0, fmt.Sprintf("replay: %v", err), envKind)
 	}
+	req.Effort = agent.Model.Effort
 
 	p, err := b.registry.Provider(agent.Model.ID)
 	if err != nil {

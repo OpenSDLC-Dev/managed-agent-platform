@@ -4,8 +4,10 @@ What is being worked on right now, and how far along it is — nothing else. **S
 
 ## Active work
 
-None.
+[Plan 53](docs/plan/53_model-effort.md): honor explicit model effort (#160).
 
 ## Tasks
 
-None.
+- [ ] Implement wire parsing, update semantics and provider propagation.
+- [ ] Verify regression tests, runtime behavior and repository gates.
+- [ ] Complete independent verification, reviews and PR CI.

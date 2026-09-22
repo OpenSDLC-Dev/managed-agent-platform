@@ -31,7 +31,7 @@ Most agent platforms are SaaS: your source code, your prompts, and your tool out
 
 This project is that platform, self-hosted:
 
-- **Bring your own model.** Providers are config-driven (`protocol` · `model` · `base_url` · `api_key`). The Anthropic-protocol provider works against *any* endpoint speaking Anthropic Messages — a gateway, a proxy, or a self-hosted model — and an OpenAI-compatible provider covers OpenAI, vLLM, and most internal gateways. Nothing hard-codes a vendor endpoint.
+- **Bring your own model.** Providers are config-driven (`protocol` · `model` · `base_url` · `api_key`). The Anthropic-protocol provider works against *any* endpoint speaking Anthropic Messages — a gateway, a proxy, or a self-hosted model — and an OpenAI-compatible provider covers OpenAI, vLLM, and most internal gateways. Nothing hard-codes a vendor endpoint. Explicit `model.effort` is passed to the chosen endpoint (`output_config.effort` for Anthropic, `reasoning_effort` for OpenAI-compatible routes); omitted effort uses its default, and the endpoint decides model-specific support.
 - **Bring your own compute.** Sandboxes run on Docker or Kubernetes under your control. Customer-run workers pull work from the platform, so **no inbound network access is required** into your environment.
 - **Observability is built in.** OpenTelemetry traces, metrics, and logs over standard OTLP — point it at your existing Jaeger/Tempo/Prometheus stack.
 

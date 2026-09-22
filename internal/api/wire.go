@@ -366,7 +366,7 @@ func validateMetadataCaps(md map[string]string) error {
 func parseModel(raw json.RawMessage) (domain.Model, error) {
 	var m domain.Model
 	if err := json.Unmarshal(raw, &m); err != nil {
-		return m, errInvalid("model must be a model id string or a {id, speed} object")
+		return m, errInvalid("model must be a model id string or a {id, speed, effort} object: %s", err)
 	}
 	if m.ID == "" {
 		return m, errInvalid("model.id is required")

@@ -2,26 +2,65 @@ package domain
 
 import (
 	"encoding/json"
+	"fmt"
 	"time"
 )
 
 // Model is an agent's model selection. On the wire it is either a bare string
-// ("claude-opus-4-8") or an object ({"id":…,"speed":"standard|fast"}); we
+// ("claude-opus-4-8") or an object ({"id":…, "speed":…, "effort":…}); we
 // normalize to this struct and round-trip both forms.
 type Model struct {
-	ID    string `json:"id"`
-	Speed string `json:"speed,omitempty"` // "standard" | "fast"
+	ID     string      `json:"id"`
+	Speed  string      `json:"speed,omitempty"` // "standard" | "fast"
+	Effort ModelEffort `json:"effort,omitempty"`
 }
 
 // UnmarshalJSON accepts either a bare string or the object form.
 func (m *Model) UnmarshalJSON(b []byte) error {
 	var s string
 	if err := json.Unmarshal(b, &s); err == nil {
-		m.ID, m.Speed = s, ""
+		*m = Model{ID: s}
 		return nil
 	}
 	type alias Model
-	return json.Unmarshal(b, (*alias)(m))
+	var decoded alias
+	if err := json.Unmarshal(b, &decoded); err != nil {
+		return err
+	}
+	*m = Model(decoded)
+	return nil
+}
+
+// ModelEffort accepts the input union and renders the response's object form.
+// Checked against anthropic-sdk-go v1.70.1 — betaagent.go
+// BetaManagedAgentsModelConfigParams.Effort and BetaManagedAgentsModelConfigEffortUnion.
+// The zero value leaves the choice to the configured upstream (DIVERGENCES).
+type ModelEffort string
+
+func (e *ModelEffort) UnmarshalJSON(b []byte) error {
+	var level string
+	if err := json.Unmarshal(b, &level); err != nil {
+		var obj struct {
+			Type string `json:"type"`
+		}
+		if err := json.Unmarshal(b, &obj); err != nil {
+			return fmt.Errorf("model.effort must be a level string or a {type: level} object")
+		}
+		level = obj.Type
+	}
+	switch level {
+	case "low", "medium", "high", "xhigh", "max":
+		*e = ModelEffort(level)
+		return nil
+	default:
+		return fmt.Errorf("model.effort must be low, medium, high, xhigh, or max")
+	}
+}
+
+func (e ModelEffort) MarshalJSON() ([]byte, error) {
+	return json.Marshal(struct {
+		Type string `json:"type"`
+	}{Type: string(e)})
 }
 
 // PermissionPolicyType controls whether a tool runs automatically or pauses for

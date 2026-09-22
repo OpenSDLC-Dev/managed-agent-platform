@@ -48,3 +48,36 @@ func TestModelRoundTripInsideAgentSpec(t *testing.T) {
 		t.Errorf("spec.System = %q", spec.System)
 	}
 }
+
+func TestModelEffortRoundTrip(t *testing.T) {
+	for _, level := range []string{"low", "medium", "high", "xhigh", "max"} {
+		for _, effort := range []string{`"` + level + `"`, `{"type":"` + level + `"}`} {
+			t.Run(effort, func(t *testing.T) {
+				var m Model
+				if err := json.Unmarshal([]byte(`{"id":"custom","effort":`+effort+`}`), &m); err != nil {
+					t.Fatal(err)
+				}
+				raw, err := json.Marshal(m)
+				if err != nil {
+					t.Fatal(err)
+				}
+				want := `{"id":"custom","effort":{"type":"` + level + `"}}`
+				if string(raw) != want {
+					t.Fatalf("round trip = %s, want %s", raw, want)
+				}
+			})
+		}
+	}
+}
+
+func TestModelDecodeReplacesPreviousFields(t *testing.T) {
+	for _, raw := range []string{`"other"`, `{"id":"other"}`} {
+		m := Model{ID: "original", Speed: "fast", Effort: "high"}
+		if err := json.Unmarshal([]byte(raw), &m); err != nil {
+			t.Fatal(err)
+		}
+		if m != (Model{ID: "other"}) {
+			t.Fatalf("decode retained old fields: %+v", m)
+		}
+	}
+}
