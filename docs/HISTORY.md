@@ -6160,3 +6160,22 @@ Anthropic adapter and HTTP/SSE fixture over real PostgreSQL. It checks the prima
 child and grader requests as `high`, `low`, `high`, the configured upstream model,
 and a satisfied outcome. The affected API and brain regression tests passed;
 the before/after container sets were identical.
+
+## Inference geo compatibility (plan 54, #433) — acceptance record, 2026-09-22
+
+Independent verification ran the full `make verify` gate at 6705f32: exit 0,
+61 passing packages and 90.08% total statement coverage. Wire review then caught
+valid null input being rejected; the pinned SDK's compressed OpenAPI permits it.
+The corrected implementation at 2687544 passed independent domain/API regressions
+and freshly built controlplane/brain probes against PostgreSQL and HTTP fixtures.
+The probes cover both provider protocols with both geo values, null create/update/
+session clearing and immutable versions. They establish metadata persistence and
+unchanged provider requests, not geographic execution guarantees. Before/after
+container sets were identical and probe resources were removed.
+
+The final implementation passed independent verification and both current-environment
+Codex reviews. The local full gate predates the null fix; final-head CI is the complete
+merge gate, recorded in the pull request. Registry checks were clean; the SDK report
+had 594 citations, no findings and no pending transitions. The earlier automatic
+approval rejection of external Claude execution remained in force, so no local
+Claude/Fable/Opus pass is claimed.

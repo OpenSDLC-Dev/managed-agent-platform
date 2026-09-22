@@ -4,10 +4,8 @@ What is being worked on right now, and how far along it is — nothing else. **S
 
 ## Active work
 
-[Plan 54](docs/plan/54_inference-geo-wire.md): inference_geo protocol compatibility (#433).
+None.
 
 ## Tasks
 
-- [ ] Preserve and validate the wire field, including update and snapshot semantics.
-- [ ] Verify API persistence, SDK decoding and fixed-route runtime behavior.
-- [ ] Complete independent verification, reviews and PR CI.
+None.
