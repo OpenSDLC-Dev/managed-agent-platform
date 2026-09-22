@@ -81,3 +81,13 @@ func TestModelDecodeReplacesPreviousFields(t *testing.T) {
 		}
 	}
 }
+
+func TestModelInferenceGeoNullClearsPreviousValue(t *testing.T) {
+	geo := ModelInferenceGeo("us")
+	if err := json.Unmarshal([]byte(`null`), &geo); err != nil {
+		t.Fatal(err)
+	}
+	if geo != "" {
+		t.Fatalf("null retained geo = %q", geo)
+	}
+}

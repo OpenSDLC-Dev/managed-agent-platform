@@ -8,6 +8,7 @@ import (
 
 	sdk "github.com/anthropics/anthropic-sdk-go"
 	"github.com/anthropics/anthropic-sdk-go/option"
+	"github.com/anthropics/anthropic-sdk-go/packages/param"
 )
 
 func wantInferenceGeo(t *testing.T, agent map[string]any, geo string) {
@@ -29,7 +30,7 @@ func wantInferenceGeo(t *testing.T, agent map[string]any, geo string) {
 func TestInferenceGeoInvalidAtEveryAPIBoundary(t *testing.T) {
 	s := newTestServer(t)
 	id, env := fixture(t, s)
-	for _, geo := range []any{nil, "", "eu", 1, true, []any{}, map[string]any{"type": "us"}} {
+	for _, geo := range []any{"", "eu", 1, true, []any{}, map[string]any{"type": "us"}} {
 		t.Run(fmt.Sprint(geo), func(t *testing.T) {
 			model := map[string]any{"id": "custom", "inference_geo": geo}
 			status, got := s.do(http.MethodPost, "/v1/agents", map[string]any{"name": "invalid", "model": model})
@@ -40,6 +41,18 @@ func TestInferenceGeoInvalidAtEveryAPIBoundary(t *testing.T) {
 			wantErr(t, status, got, http.StatusBadRequest, "invalid_request_error")
 		})
 	}
+}
+
+func TestAgentInferenceGeoSDKNullCreatesUnset(t *testing.T) {
+	s := newTestServer(t)
+	model := sdk.BetaManagedAgentsModelConfigParams{ID: "custom", InferenceGeo: param.Null[string]()}
+	a := createAgent(t, s, map[string]any{"name": "unset geo", "model": model})
+	wantInferenceGeo(t, a, "")
+	status, saved := s.do(http.MethodGet, "/v1/agents/"+a["id"].(string), nil)
+	if status != http.StatusOK {
+		t.Fatalf("read: %d %v", status, saved)
+	}
+	wantInferenceGeo(t, saved, "")
 }
 
 func TestAgentInferenceGeoPersistence(t *testing.T) {
@@ -76,6 +89,7 @@ func TestSessionInferenceGeoOverridesAndSnapshots(t *testing.T) {
 		geo   string
 	}{
 		{nil, "us"}, {map[string]any{"id": "custom", "inference_geo": "global"}, "global"},
+		{sdk.BetaManagedAgentsModelConfigParams{ID: "custom", InferenceGeo: param.Null[string]()}, ""},
 		{map[string]any{"id": "custom"}, ""}, {"custom", ""},
 	} {
 		agent := map[string]any{"type": "agent_with_overrides", "id": id, "version": base["version"]}
@@ -118,6 +132,8 @@ func TestAgentInferenceGeoUpdatesAndVersions(t *testing.T) {
 		{map[string]any{"description": "unrelated update"}, "us"},
 		{map[string]any{"model": map[string]any{"id": "custom", "inference_geo": "global"}}, "global"},
 		{map[string]any{"model": map[string]any{"id": "custom"}}, ""},
+		{map[string]any{"model": map[string]any{"id": "custom", "inference_geo": "us"}}, "us"},
+		{map[string]any{"model": sdk.BetaManagedAgentsModelConfigParams{ID: "custom", InferenceGeo: param.Null[string]()}}, ""},
 		{map[string]any{"model": map[string]any{"id": "custom", "inference_geo": "us"}}, "us"},
 		{map[string]any{"model": "custom"}, ""},
 	} {

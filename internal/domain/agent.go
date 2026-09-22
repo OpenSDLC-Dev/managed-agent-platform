@@ -41,14 +41,18 @@ func (m *Model) UnmarshalJSON(b []byte) error {
 type ModelInferenceGeo string
 
 func (g *ModelInferenceGeo) UnmarshalJSON(b []byte) error {
-	var geo string
+	var geo *string
 	if err := json.Unmarshal(b, &geo); err != nil {
-		return fmt.Errorf("model.inference_geo must be a string")
+		return fmt.Errorf("model.inference_geo must be a string or null")
 	}
-	if geo != "us" && geo != "global" {
+	if geo == nil {
+		*g = ""
+		return nil
+	}
+	if *geo != "us" && *geo != "global" {
 		return fmt.Errorf(`model.inference_geo must be "us" or "global"`)
 	}
-	*g = ModelInferenceGeo(geo)
+	*g = ModelInferenceGeo(*geo)
 	return nil
 }
 
