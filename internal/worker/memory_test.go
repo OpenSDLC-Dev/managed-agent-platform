@@ -711,10 +711,11 @@ func TestMemoryPushRefusedIsRememberedUntilBytesChange(t *testing.T) {
 	}
 }
 
-// TestMemoryDeleteWithheldWhileArchived pins the DeleteRemote-vs-archive arm:
-// a local deletion against an archived store is refused (the store's 400),
-// withheld with its baseline kept, and propagates only after the unarchive.
-func TestMemoryDeleteWithheldWhileArchived(t *testing.T) {
+// TestMemoryDeleteReachesAnArchivedStore pins the DeleteRemote-vs-archive
+// arm: an archived store admits a delete — an erasure, not new content, as
+// the reference's store does (#685) — so a local deletion lands there and its
+// baseline entry drops, where an edit would draw the store's archived 400.
+func TestMemoryDeleteReachesAnArchivedStore(t *testing.T) {
 	sb := &fakeSandbox{}
 	h := newHarness(t, sb)
 	h.seedMemoryStore(t, memStoreID, "Notes")
@@ -728,19 +729,11 @@ func TestMemoryDeleteWithheldWhileArchived(t *testing.T) {
 	}
 	delete(sb.files, memMount+"/a.md")
 	h.runWith(t, token)
-	if _, ok := h.memoryContent(t, memStoreID, "/a.md"); !ok {
-		t.Error("a delete reached an archived store")
-	}
-	if h.baseline(t, memStoreID).Synced["/a.md"] != sha256hex([]byte("alpha")) {
-		t.Errorf("baseline while archived = %+v, want the memory kept", h.baseline(t, memStoreID))
-	}
-
-	if _, err := h.pool.Exec(context.Background(), `UPDATE memory_stores SET archived_at = NULL WHERE id = $1`, memStoreID); err != nil {
-		t.Fatal(err)
-	}
-	h.runWith(t, token)
 	if _, ok := h.memoryContent(t, memStoreID, "/a.md"); ok {
-		t.Error("the deletion did not propagate after the unarchive")
+		t.Error("the deletion did not reach the archived store")
+	}
+	if b := h.baseline(t, memStoreID); b.Synced["/a.md"] != "" {
+		t.Errorf("baseline after the delete = %+v, want the memory dropped", b)
 	}
 }
 
