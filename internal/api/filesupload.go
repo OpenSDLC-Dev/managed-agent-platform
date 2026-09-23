@@ -59,8 +59,10 @@ type fileUpload struct {
 // parseFileUpload reads a multipart/form-data body carrying exactly one part
 // named "file" (BetaFileUploadParams: the SDK emits one `file` part) and at
 // most one named "expires_in_seconds". The filename comes from the part's
-// Content-Disposition and is validated against the documented rules; the MIME
-// type is taken from the part header, falling back to the filename extension.
+// Content-Disposition, cut to its final path component; the MIME type is taken
+// from the part header, falling back to that name's extension; an empty name
+// then becomes "unnamed" plus the type's extension; and the result is
+// validated against the documented rules.
 // Extra, unknown, or duplicate parts are rejected — the reference's strictness
 // here is unrecorded, so this is an inference (docs/DIVERGENCES.md).
 //
@@ -109,7 +111,11 @@ func parseFileUpload(r *http.Request) (*fileUpload, error) {
 		if up != nil {
 			return nil, errInvalid("duplicate file part; send exactly one")
 		}
-		filename := rawPartFilename(part)
+		filename := finalPathComponent(rawPartFilename(part))
+		mimeType := fileMimeType(part, filename)
+		if filename == "" {
+			filename = "unnamed" + mimetab.ExtFor(mimeType)
+		}
 		if err := validateFilename(filename); err != nil {
 			return nil, err
 		}
@@ -124,7 +130,7 @@ func parseFileUpload(r *http.Request) (*fileUpload, error) {
 			return nil, &apiError{http.StatusRequestEntityTooLarge, errTypeRequestTooLarge,
 				fmt.Sprintf("file larger than %d bytes", maxFileBytes)}
 		}
-		up = &fileUpload{filename: filename, mimeType: fileMimeType(part, filename), data: data}
+		up = &fileUpload{filename: filename, mimeType: mimeType, data: data}
 	}
 	if up == nil {
 		return nil, errInvalid(`no file uploaded: send one part named "file"`)
@@ -177,21 +183,32 @@ func parseExpiresIn(part *multipart.Part) (int64, error) {
 }
 
 // forbiddenFilenameChars are the characters the public Files docs reject in a
-// filename: the Windows-reserved set plus both path separators (so a
-// path-qualified name is rejected — a filename is a bare basename).
+// filename: the Windows-reserved set plus both path separators. A "/" never
+// reaches the check — finalPathComponent has already cut the name at the last
+// one — but a "\" does, and is refused.
 const forbiddenFilenameChars = `<>:"|?*\/`
+
+// finalPathComponent keeps what follows the part filename's last "/". The API
+// reference's rule for this form is that "only the final path component of the
+// part's filename is kept", and an absent or empty one "is replaced with
+// unnamed plus the extension for the file's stored mime_type, when known"
+// (checked against anthropic-sdk-go v1.70.1 — betafile.go
+// BetaFileUploadParams.File). Which characters separate a component is not
+// stated; "/" alone does here, so "dir/" leaves an empty name
+// (docs/DIVERGENCES.md).
+func finalPathComponent(name string) string {
+	return name[strings.LastIndexByte(name, '/')+1:]
+}
 
 // validateFilename enforces the documented rule: 1–255 characters, none of the
 // forbidden set, no "Unicode characters 0-31" (U+0000–U+001F, exactly — the
 // public docs' wording, so DEL and the C1 range are deliberately not rejected).
-// Length is counted in runes, not bytes, per "1-255 characters". A filename
-// with invalid UTF-8 is rejected too: it would fail as a 500 at the text-column
-// bind, the #135 class. The exact wire error text is an inference
-// (docs/DIVERGENCES.md).
+// The lower bound holds by construction: parseFileUpload names an empty
+// filename before it gets here. Length is counted in runes, not bytes, per
+// "1-255 characters". A filename with invalid UTF-8 is rejected too: it would
+// fail as a 500 at the text-column bind, the #135 class. The exact wire error
+// text is an inference (docs/DIVERGENCES.md).
 func validateFilename(name string) error {
-	if name == "" {
-		return errInvalid("file part is missing a filename")
-	}
 	if !utf8.ValidString(name) {
 		return errInvalid("filename must be valid UTF-8")
 	}

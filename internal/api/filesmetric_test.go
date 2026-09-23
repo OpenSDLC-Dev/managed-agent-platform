@@ -58,7 +58,7 @@ func TestFileUploadAndDownloadMetrics(t *testing.T) {
 
 	s.uploadFile(t, "ok.bin", &oct, "stored bytes") // one ok upload
 
-	ct, form := fileForm(t, "bad/name.bin", &oct, "x") // one invalid upload (forbidden char)
+	ct, form := fileForm(t, "bad:name.bin", &oct, "x") // one invalid upload (forbidden char)
 	if status, _ := s.doForm("POST", "/v1/files", ct, form); status != http.StatusBadRequest {
 		t.Fatalf("forbidden-char upload = %d, want 400", status)
 	}

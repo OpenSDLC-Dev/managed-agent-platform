@@ -144,13 +144,8 @@ func TestFileUploadValidation(t *testing.T) {
 	s := newTestServer(t)
 	oct := "application/octet-stream"
 
-	t.Run("MissingFilename", func(t *testing.T) {
-		ct, body := fileForm(t, "", &oct, "x")
-		status, obj := s.doForm("POST", "/v1/files", ct, body)
-		wantErr(t, status, obj, http.StatusBadRequest, "invalid_request_error")
-	})
 	t.Run("ForbiddenChar", func(t *testing.T) {
-		ct, body := fileForm(t, "a/b.txt", &oct, "x")
+		ct, body := fileForm(t, "a:b.txt", &oct, "x")
 		status, obj := s.doForm("POST", "/v1/files", ct, body)
 		wantErr(t, status, obj, http.StatusBadRequest, "invalid_request_error")
 	})
