@@ -13,6 +13,9 @@ import (
 // rotted", which log.Fatal's exit 1 reports. A scheduled run's summary is read
 // by someone who was not watching, and telling them the registry rotted when
 // GitHub was merely unreachable is the failure this whole tool argues against.
+// Only a caller that runs the binary sees the code, though: `go run` exits 1
+// whenever its program fails and make reports any failed recipe as 2 (#742),
+// so registry.yml's reader learns which from the message, not the code.
 const exitUnavailable = 2
 
 const usage = `usage:
@@ -44,8 +47,8 @@ func main() {
 		defer cancel()
 		if state, err = fetchStates(ctx, *api, *repo, Referenced(string(src))); err != nil {
 			// exitUnavailable, not 1: "I could not ask GitHub" and "the
-			// registry has rotted" are different facts, and a summary that
-			// cannot tell them apart reports an outage as rot.
+			// registry has rotted" are different facts. registry.yml's summary
+			// names this message's prefix, since the code never reaches it.
 			fmt.Fprintf(os.Stderr, "cannot determine issue state: %v\n", err)
 			os.Exit(exitUnavailable)
 		}

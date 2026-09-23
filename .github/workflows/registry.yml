@@ -81,9 +81,11 @@ jobs:
         # pipe would otherwise report tee's exit status, hence pipefail: a red
         # run is this workflow's whole notification mechanism.
         #
-        # The exit code is captured before the step fails on it, because the
-        # tool distinguishes two reds — 1 for a rotted registry, 2 for "I could
-        # not ask GitHub" — and `job.status` alone flattens them back into one.
+        # The exit code is kept for the summary, which can branch on zero and
+        # nothing finer. The tool exits 1 for findings and 2 for "I could not
+        # ask GitHub", but neither code survives the recipe: `go run` exits 1
+        # whenever its program fails, and make reports any failed recipe as its
+        # own 2 (#742). The output says which.
         run: |
           set -o pipefail
           rc=0
@@ -104,19 +106,15 @@ jobs:
             echo '### `docs/DIVERGENCES.md` pointer guard'
             if [ "$STATUS" = 'cancelled' ]; then
               echo 'Cancelled before the guard could answer. This is **not** a clean result — re-run it.'
+            elif [ -z "$RC" ]; then
+              echo 'The guard never ran: an earlier step failed. This is **not** a clean result — read the step log.'
             elif [ "$RC" = '0' ]; then
-              echo 'Clean: every live tracker names an open issue.'
-            elif [ "$RC" = '2' ]; then
-              echo 'GitHub could not be reached, so the registry was **not** checked. This says nothing about the pointers — re-run it, and read the error below for whether the rate limit is what stopped it.'
-              echo
-              echo '```'
-              cat findings.txt 2>/dev/null || echo '(no output; read the step log)'
-              echo '```'
+              echo 'Clean: the shape rungs found nothing, and every issue a pointer names is in the state the pointer claims.'
             else
-              echo 'A live `Tracked: #N` naming a closed issue tells a reader work is outstanding when it is not. Demote it to provenance — `(delivered)`, or a trailing `landed for #N` clause — and name the issue that will settle the entry. The grammar is the Format legend at the top of the file.'
-              echo
-              echo '```'
-              cat findings.txt 2>/dev/null || echo '(the guard produced no output; read the step log)'
-              echo '```'
+              echo 'The guard failed; the output below says why. Findings end in a count, and each names its own remedy — the grammar is the Format legend at the top of `docs/DIVERGENCES.md`. `cannot determine issue state` means GitHub could not be asked, so the registry was **not** checked: re-run it, and read the error for whether the rate limit is what stopped it.'
             fi
+            echo
+            echo '```'
+            cat findings.txt 2>/dev/null || echo '(the guard produced no output; read the step log)'
+            echo '```'
           } >> "$GITHUB_STEP_SUMMARY"

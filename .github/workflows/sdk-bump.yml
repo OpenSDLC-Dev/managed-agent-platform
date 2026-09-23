@@ -51,10 +51,11 @@ jobs:
       #
       # tee, so the report reaches both the log and the summary; pipefail, so the
       # step's status is the report's and not tee's. The exit code is kept for the
-      # summary, which can branch on zero and nothing finer: make reports a
-      # failed recipe as its own exit 2, so the tool's 1 (a transition awaits a
-      # disposition) and 2 (it could not read what the corpus cites) arrive
-      # here as the same number. The output says which.
+      # summary, which can branch on zero and nothing finer: `go run` exits 1
+      # whenever its program fails, and make reports a failed recipe as its own
+      # exit 2, so the tool's 1 (a transition awaits a disposition) and 2 (it
+      # could not read what the corpus cites) arrive here as the same number
+      # (#742). The output says which.
       - name: sdk bump report
         id: report
         run: |
@@ -78,7 +79,7 @@ jobs:
             elif [ "$RC" = '0' ]; then
               echo 'No transition awaits a disposition. The stamps behind the pin, below, are judgment rather than obligation: a stamp moves only when someone has re-read the claim.'
             else
-              echo 'Either a transition awaits a disposition, or the report could not read a source the corpus cites — the end of the output says which. Each transition awaiting one names the line that would disposition it, unless it was stamped at the pin, where the claim itself is wrong. The ritual is in `docs/REFERENCE_PROJECTS.md`.'
+              echo 'The report failed; the output below says why — a transition awaiting a disposition, or a source the corpus cites that it could not read, among others. Each transition awaiting one names the line that would disposition it, unless it was stamped at the pin, where the claim itself is wrong. The ritual is in `docs/REFERENCE_PROJECTS.md`.'
             fi
             echo
             echo '```'
