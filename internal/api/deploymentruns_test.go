@@ -32,6 +32,13 @@ func TestDeploymentRunCreatesASessionAndRendersTheRun(t *testing.T) {
 	agentID, envID := fixture(t, s)
 	d := createDeployment(t, s, deploymentBody(agentID, envID))
 	deplID := d["id"].(string)
+	// Renamed before the fire, so the title check below tells the name the
+	// deployment carries at the fire from the one it was created with (#678).
+	const firedName = "Renamed order report"
+	if status, res := s.do(http.MethodPost, "/v1/deployments/"+deplID,
+		map[string]any{"name": firedName}); status != http.StatusOK {
+		t.Fatalf("rename deployment: status %d, body %v", status, res)
+	}
 
 	run := runDeployment(t, s, deplID)
 	wantFields(t, run, "type", "id", "deployment_id", "trigger_context",
@@ -86,8 +93,9 @@ func TestDeploymentRunCreatesASessionAndRendersTheRun(t *testing.T) {
 	if meta, _ := sess["metadata"].(map[string]any); len(meta) != 0 {
 		t.Errorf("session.metadata = %v, want empty", sess["metadata"])
 	}
-	if sess["title"] != d["name"] {
-		t.Errorf("session.title = %v, want the deployment's name %v", sess["title"], d["name"])
+	if sess["title"] != firedName {
+		t.Errorf("session.title = %v, want the deployment's name at the fire %q (created as %v)",
+			sess["title"], firedName, d["name"])
 	}
 
 	// The success settlement is durable: succeeded_at is stamped beside the

@@ -152,8 +152,14 @@ func TestSchedulerFiresTheMostRecentDueOccurrence(t *testing.T) {
 	collect := collectMetrics(t)
 	s := newTestServer(t)
 	agentID, envID := fixture(t, s)
-	d := createDeployment(t, s, scheduledBody(agentID, envID, "0 9 * * *", "UTC"))
-	deplID := d["id"].(string)
+	deplID := createDeployment(t, s, scheduledBody(agentID, envID, "0 9 * * *", "UTC"))["id"].(string)
+	// Renamed before the tick, so the title check below tells the name the
+	// deployment carries at the fire from the one it was created with (#678).
+	const firedName = "Renamed order report"
+	if code, res := s.do(http.MethodPost, "/v1/deployments/"+deplID,
+		map[string]any{"name": firedName}); code != http.StatusOK {
+		t.Fatalf("rename deployment: status %d, body %v", code, res)
+	}
 	setResumedAt(t, s, deplID, time.Date(2026, 3, 10, 0, 0, 0, 0, time.UTC))
 
 	// Three occurrences are due (03-10, 03-11, 03-12, each 09:00); only the
@@ -190,8 +196,8 @@ func TestSchedulerFiresTheMostRecentDueOccurrence(t *testing.T) {
 	if sessDeplID == nil || *sessDeplID != deplID {
 		t.Errorf("session.deployment_id = %v, want %s", sessDeplID, deplID)
 	}
-	if title != d["name"] {
-		t.Errorf("session.title = %q, want the deployment's name %v", title, d["name"])
+	if title != firedName {
+		t.Errorf("session.title = %q, want the deployment's name at the fire %q", title, firedName)
 	}
 	if status == nil || *status != "running" {
 		t.Errorf("session.status = %v, want running", status)

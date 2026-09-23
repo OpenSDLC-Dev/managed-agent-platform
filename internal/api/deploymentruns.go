@@ -170,11 +170,13 @@ func settleRun(ctx context.Context, tx pgx.Tx, sql string, args ...any) error {
 
 // deploymentSessionIn hydrates a session create from the deployment's stored
 // columns: the fire validates exactly what POST /v1/sessions validates and no
-// more, the parse stage having run at deployment create/update. The session is
-// titled with the deployment's name, as the reference titles one (#678); the
-// metadata bag is deliberately empty, as the reference's is — session metadata
-// is the application layer's hook, not the deployment's (§8.1 entry 24). The
-// title is not that hook, so the argument never reached it. created_by
+// more, the parse stage having run at deployment create/update. The metadata
+// bag is deliberately empty — session metadata is the application layer's
+// hook, not the deployment's (§8.1 entry 24) — and the reference sends it
+// empty too. The title is the deployment's name as it stands at the fire,
+// which is what the reference sets (#678; the docs/DIVERGENCES.md entry "A
+// fired session is titled with the deployment's name"). Entry 24 also left
+// the title unset; that half of it no longer holds. created_by
 // is left to createSessionInTx's ctx read: a manual run therefore attributes
 // the session to the caller who fired it — the request is authenticated, and
 // created_by is the audit answer to who caused a row to exist — while a
