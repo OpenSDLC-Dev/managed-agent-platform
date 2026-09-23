@@ -391,11 +391,12 @@ func parseDreamOutputBehavior(obj map[string]json.RawMessage) (json.RawMessage, 
 }
 
 // checkDreamInputsExist refuses a create naming inputs that are not there. Each
-// is a 400, the platform's precedent for a missing resource named in a create
-// body (snapshotMemoryStore). The store is read FOR SHARE so a concurrent
-// archive or delete cannot slip between this check and the INSERT; the sessions
-// are not, because an archived session is an accepted input and a deleted one
-// only makes a live dream fail later, which slice 2's tick already handles.
+// is a 400 (INFERRED, docs/DIVERGENCES.md), though session create answers an
+// unknown memory store with the reference's 404 since #668 (snapshotMemoryStore).
+// The store is read FOR SHARE so a concurrent archive or delete cannot slip
+// between this check and the INSERT; the sessions are not, because an archived
+// session is an accepted input and a deleted one only makes a live dream fail
+// later, which slice 2's tick already handles.
 func checkDreamInputsExist(ctx context.Context, db querier, storeID string, sessionIDs []string) error {
 	var archivedAt *time.Time
 	err := db.QueryRow(ctx,

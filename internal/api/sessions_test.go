@@ -499,7 +499,7 @@ func TestSessionCreateValidation(t *testing.T) {
 		"github resource missing token": {map[string]any{"agent": agentID, "environment_id": envID,
 			"resources": []any{map[string]any{"type": "github_repository", "url": "https://github.com/x/y"}}}, 400, "invalid_request_error"},
 		"unknown memory store": {map[string]any{"agent": agentID, "environment_id": envID,
-			"resources": []any{map[string]any{"type": "memory_store", "memory_store_id": "memstore_" + strings.Repeat("0", 23) + "1"}}}, 400, "invalid_request_error"},
+			"resources": []any{map[string]any{"type": "memory_store", "memory_store_id": "memstore_" + strings.Repeat("0", 23) + "1"}}}, 404, "not_found_error"},
 		"unknown vault": {map[string]any{"agent": agentID, "environment_id": envID,
 			"vault_ids": []any{"vlt_missing0000000000000000"}}, 400, "invalid_request_error"},
 		"malformed vault id": {map[string]any{"agent": agentID, "environment_id": envID,
