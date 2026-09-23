@@ -152,7 +152,8 @@ var byType = func() map[string]string {
 // ExtFor returns the extension the table pairs with a MIME type, ignoring its
 // case and parameters, or "" when the type is unlisted. It names an upload
 // that arrived without a filename (internal/api), and ByPath of the name it
-// gives is the type it was given.
+// gives is the same bare type, carrying the table's parameters rather than the
+// caller's ("text/plain" comes back "text/plain; charset=utf-8").
 func ExtFor(mimeType string) string {
 	mt, _, err := mime.ParseMediaType(mimeType)
 	if err != nil {
