@@ -236,11 +236,11 @@ type querier interface {
 // overrideSystemMaxRunes is the documented ceiling on an agent_with_overrides
 // replacement system prompt — "Up to 100,000 characters" (checked against
 // anthropic-sdk-go v1.70.1 — betasession.go
-// BetaManagedAgentsAgentWithOverridesParams.System). The bound is specific to
-// the session override params; agents' own create/update system documents none.
-// Counted in runes (the filesupload.go precedent for character-documented
-// limits, shared with #66/#289's metadata caps); the reference's counting unit
-// and reject shape are unobserved — docs/DIVERGENCES.md (#291).
+// BetaManagedAgentsAgentWithOverridesParams.System). An agent's own system
+// carries the same number (maxAgentSystemRunes, #665), which the resolved spec
+// answers to anyway; this check exists to name the override in its message.
+// Counted in runes — code points, the reference's unit as the 2026-09-02
+// recording measured it — docs/DIVERGENCES.md (#291).
 const overrideSystemMaxRunes = 100_000
 
 // resolveAgent resolves the create-time agent union (plain id string,
@@ -369,10 +369,10 @@ func (s *server) resolveAgent(ctx context.Context, db querier, raw json.RawMessa
 		} else if utf8.RuneCountInString(spec.System) > overrideSystemMaxRunes {
 			// The SDK bounds the replacement prompt — "Up to 100,000
 			// characters" (checked against anthropic-sdk-go v1.70.1 —
-			// betasession.go BetaManagedAgentsAgentWithOverridesParams.System)
-			// — on this override only; the stored agent's own system documents
-			// no ceiling, so the check binds what the override supplies, never
-			// the preserved value.
+			// betasession.go BetaManagedAgentsAgentWithOverridesParams.System).
+			// This binds what the override supplies; a preserved stored system
+			// answers to the agent's own identical cap in validateAgentSpec
+			// below (#665).
 			return snap, errInvalid("agent override system cannot exceed %d characters", overrideSystemMaxRunes)
 		}
 	}

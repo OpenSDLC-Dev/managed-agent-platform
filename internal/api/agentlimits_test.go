@@ -1,6 +1,7 @@
 package api_test
 
 import (
+	"context"
 	"fmt"
 	"net/http"
 	"strings"
@@ -77,6 +78,61 @@ func TestAgentMCPServerCap(t *testing.T) {
 		agentBody(map[string]any{"mcp_servers": servers, "tools": tools}), "20")
 	createAgent(t, s,
 		agentBody(map[string]any{"mcp_servers": servers[:20], "tools": tools[:20]}))
+}
+
+// An agent's own system prompt is bounded at 100,000 characters on create and
+// update alike — the spec's maxLength, which the generated Go doc comments
+// drop (checked against anthropic-sdk-go v1.70.1 — spec
+// components.schemas.BetaManagedAgentsCreateAgentParams.properties.system) —
+// and the reference refuses one past it with 400 invalid_request_error (#665).
+func TestAgentSystemCap(t *testing.T) {
+	s := newTestServer(t)
+	wantAgentRejected(t, s, agentBody(map[string]any{"system": strings.Repeat("a", 100_001)}), "100000")
+	createAgent(t, s, agentBody(map[string]any{"system": strings.Repeat("a", 100_000)}))
+
+	// The unit is code points, which is what the 2026-09-02 recording measured:
+	// it accepted 100,000 "é" — 200,000 UTF-8 bytes — on agent create, and
+	// 50,001 astral characters — 100,002 UTF-16 code units — on the session
+	// override. One "é" past the bound rejects.
+	createAgent(t, s, agentBody(map[string]any{"system": strings.Repeat("é", 100_000)}))
+	wantAgentRejected(t, s, agentBody(map[string]any{"system": strings.Repeat("é", 100_001)}), "100000")
+	createAgent(t, s, agentBody(map[string]any{"system": strings.Repeat("😀", 50_001)}))
+}
+
+// Update is held to the same bound on the merged spec, like every other agent
+// cap: a replacement past it rejects without a version bump. An agent stored
+// over it before #665 — planted here around the API — refuses every update
+// that leaves its system in place, and the update that brings the system back
+// under the bound is the way out.
+func TestAgentUpdateSystemCap(t *testing.T) {
+	s := newTestServer(t)
+	id := createAgent(t, s, agentBody(nil))["id"].(string)
+	update := func(body map[string]any) (int, map[string]any) {
+		return s.do(http.MethodPost, "/v1/agents/"+id, body)
+	}
+
+	status, body := update(map[string]any{"system": strings.Repeat("a", 100_001)})
+	wantErr(t, status, body, http.StatusBadRequest, "invalid_request_error")
+	if msg := errMessage(body); !strings.Contains(msg, "100000") {
+		t.Errorf("error message %q does not name the limit", msg)
+	}
+	if _, got := s.do(http.MethodGet, "/v1/agents/"+id, nil); got["version"] != float64(1) {
+		t.Errorf("version after rejected update = %v, want 1", got["version"])
+	}
+	if status, body := update(map[string]any{"system": strings.Repeat("a", 100_000)}); status != http.StatusOK {
+		t.Fatalf("update at the cap: status %d (body %v)", status, body)
+	}
+
+	if _, err := s.pool.Exec(context.Background(),
+		`UPDATE agents SET spec = jsonb_set(spec, '{system}', to_jsonb($2::text)) WHERE id = $1`,
+		id, strings.Repeat("b", 100_001)); err != nil {
+		t.Fatalf("plant over-cap system: %v", err)
+	}
+	status, body = update(map[string]any{"name": "renamed"})
+	wantErr(t, status, body, http.StatusBadRequest, "invalid_request_error")
+	if status, body := update(map[string]any{"system": "short"}); status != http.StatusOK {
+		t.Fatalf("update replacing the over-cap system: status %d (body %v)", status, body)
+	}
 }
 
 func TestAgentMCPServerNamesUnique(t *testing.T) {

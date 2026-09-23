@@ -238,9 +238,9 @@ func TestSessionMetadataCaps(t *testing.T) {
 
 // The SDK bounds an agent_with_overrides replacement system prompt at 100,000
 // characters (checked against anthropic-sdk-go v1.70.1 — betasession.go
-// BetaManagedAgentsAgentWithOverridesParams.System) — a bound specific to the
-// session override; the stored agent's own system documents none. Counted in
-// runes, the filesupload.go precedent for character-documented limits (#291).
+// BetaManagedAgentsAgentWithOverridesParams.System), the number an agent's own
+// system carries too (#665). Counted in runes — code points, the reference's
+// unit as the 2026-09-02 recording measured it (#291).
 func TestSessionOverrideSystemCap(t *testing.T) {
 	s := newTestServer(t)
 	agentID, envID := fixture(t, s)
@@ -269,21 +269,34 @@ func TestSessionOverrideSystemCap(t *testing.T) {
 	createSession(t, s, withSystem(strings.Repeat("界", 100_000)))
 	wantRejected(strings.Repeat("界", 100_001))
 
-	// The bound binds the override only: the stored agent's own system has no
-	// documented ceiling, so an over-cap stored system still resolves — via a
-	// plain reference and via an override that omits system (omit preserves).
+	// Since #665 the preserved value is bound too: an agent's own system
+	// carries the same 100,000 ceiling, and every resolve re-runs the
+	// whole-spec caps. Agent create no longer stores such a system, so it is
+	// planted around the API as a row from before #665 could be; a plain
+	// reference and an override that omits system (omit preserves) both reject.
 	big := createAgent(t, s, map[string]any{"name": "big-sys",
-		"model": "claude-opus-4-8", "system": strings.Repeat("b", 100_001)})["id"].(string)
-	createSession(t, s, map[string]any{"agent": big, "environment_id": envID})
-	createSession(t, s, map[string]any{
-		"agent":          map[string]any{"type": "agent_with_overrides", "id": big},
-		"environment_id": envID,
-	})
-	// system:null (clear) is never counted, even over an over-cap stored system.
-	createSession(t, s, map[string]any{
-		"agent":          map[string]any{"type": "agent_with_overrides", "id": big, "system": nil},
-		"environment_id": envID,
-	})
+		"model": "claude-opus-4-8", "system": "base system"})["id"].(string)
+	if _, err := s.pool.Exec(context.Background(),
+		`UPDATE agents SET spec = jsonb_set(spec, '{system}', to_jsonb($2::text)) WHERE id = $1`,
+		big, strings.Repeat("b", 100_001)); err != nil {
+		t.Fatalf("plant over-cap system: %v", err)
+	}
+	for _, agent := range []any{big, map[string]any{"type": "agent_with_overrides", "id": big}} {
+		status, res := s.do(http.MethodPost, "/v1/sessions",
+			map[string]any{"agent": agent, "environment_id": envID})
+		wantErr(t, status, res, http.StatusBadRequest, "invalid_request_error")
+		if msg := errMessage(res); !strings.Contains(msg, "100000") {
+			t.Errorf("error message %q does not name the limit", msg)
+		}
+	}
+	// An override that clears the stored system (null is never counted) or
+	// replaces it leaves nothing over the bound, so the same agent resolves.
+	for _, sys := range []any{nil, "short"} {
+		createSession(t, s, map[string]any{
+			"agent":          map[string]any{"type": "agent_with_overrides", "id": big, "system": sys},
+			"environment_id": envID,
+		})
+	}
 }
 
 // fixture creates an agent and an environment and returns their ids.
