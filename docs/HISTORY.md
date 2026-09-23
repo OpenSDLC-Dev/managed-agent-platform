@@ -6200,4 +6200,18 @@ transitions, and the registry's shape and issue-state checks were clean. Probe
 processes and containers were removed; the container set matched the baseline
 taken before the run.
 
+Review then reversed one decision. The pinned Go SDK names an open file by
+`path.Base`, which cuts only at `/`, so on Windows it sends the whole
+`C:\...\report.pdf`, which the 1167a378 build refused; the upload now cuts at either
+separator, and its refusal names only characters that can still reach the check.
+Independent re-verification at c2eb5f4c ran `make verify` green with 90.08%
+coverage. The four new cases — a Windows path, a trailing backslash, a forbidden
+character left after the cut, and a Windows-path upload through the SDK — failed on
+the previous handler in a scratch copy and pass at head. A controlplane built from
+it stored `C:\Users\me\report.pdf` as `report.pdf` typed `application/pdf` and read
+it back the same, stored a nameless untyped part as `unnamed.bin`, and refused a
+forbidden character naming `<>:"|?*` alone. The SDK report then covered 604
+citations with no findings or pending transitions, the registry checks were clean,
+and probe processes and containers were removed.
+
 Review results and CI are recorded in the pull request.
