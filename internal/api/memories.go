@@ -106,22 +106,6 @@ func contentDigest(content string) string {
 	return hex.EncodeToString(sum[:])
 }
 
-// isContentDigest reports whether s has contentDigest's shape: 64 lowercase hex
-// characters.
-func isContentDigest(s string) bool {
-	if len(s) != 2*sha256.Size {
-		return false
-	}
-	for _, c := range s {
-		switch {
-		case c >= '0' && c <= '9', c >= 'a' && c <= 'f':
-		default:
-			return false
-		}
-	}
-	return true
-}
-
 // memoryActor is decision 6's attribution, and it is principalFrom's two lanes
 // under the reference's own actor union: a machine key writes as api_actor
 // carrying the key's row id, a human as user_actor carrying their principal id
@@ -529,8 +513,11 @@ func (s *server) deleteMemory(r *http.Request) (any, error) {
 	// well-formed digest that does not match with the 409 below (#684). A
 	// value of any other shape than contentDigest's could never match, and the
 	// check keeps a byte Postgres cannot store out of the comparison (#135).
-	expected := r.URL.Query().Get("expected_content_sha256")
-	if expected != "" && !isContentDigest(expected) {
+	// Only an absent parameter means no precondition: one supplied empty — the
+	// SDK sends that for param.NewOpt("") — is refused like any other shape.
+	q := r.URL.Query()
+	expected := q.Get("expected_content_sha256")
+	if q.Has("expected_content_sha256") && !memsync.IsDigest([]byte(expected)) {
 		return nil, errInvalid("expected_content_sha256: must be 64 lowercase hex characters")
 	}
 

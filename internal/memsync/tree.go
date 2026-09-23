@@ -157,7 +157,7 @@ func ParseHashTree(stdout []byte) (map[string]string, error) {
 		}
 		rec := stdout[:end]
 		stdout = stdout[end+1:]
-		if len(rec) < 64+2+2 || !isHex(rec[:64]) || rec[64] != ' ' || (rec[65] != ' ' && rec[65] != '*') ||
+		if len(rec) < 64+2+2 || !IsDigest(rec[:64]) || rec[64] != ' ' || (rec[65] != ' ' && rec[65] != '*') ||
 			rec[66] != '.' || rec[67] != '/' || len(rec) == 68 {
 			return nil, fmt.Errorf("memsync: malformed hash record %q", rec)
 		}
@@ -170,7 +170,12 @@ func ParseHashTree(stdout []byte) (map[string]string, error) {
 	return files, nil
 }
 
-func isHex(b []byte) bool {
+// IsDigest reports whether b is a SHA-256 digest as sha256sum and the store's
+// content_sha256 both spell one: 64 lowercase hex characters.
+func IsDigest(b []byte) bool {
+	if len(b) != 64 {
+		return false
+	}
 	for _, c := range b {
 		if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
 			return false

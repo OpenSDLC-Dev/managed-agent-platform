@@ -247,12 +247,15 @@ digest and appends a `session_actor` version; the store wins a both-sides change
 emptied directory against a baseline of several files is re-downloaded, never read as
 deletions), and the settlement is written back; a listing that fails, or holds more
 changed files than a store can, skips the store rather than reading as deletions. A `read_only` or archived store, or a
-directory whose marker was altered, is pulled from and never pushed to. The file tools
+directory whose marker was altered, is pulled from and never pushed to, with one exception
+on `self_hosted` below. The file tools
 refuse to write in a `read_only` store on either kind; an archived store is read-only at
 the tools only on `cloud`, where the executor reads `archived_at` from the row — a
 `self_hosted` worker's token cannot read the store, so it learns the archive from the
-first write the store refuses, and a `bash` write there is withheld at the sync rather
-than refused at the tool. On `cloud` the reaper syncs a sandbox before every tier's
+first create or update the store refuses, and a `bash` write there is withheld at the sync rather
+than refused at the tool. The exception is a local deletion: an archived store admits a
+delete (#685), and the worker settles deletions before its pushes, so a `self_hosted`
+deletion reaches the archived store where the `cloud` executor keeps it local. On `cloud` the reaper syncs a sandbox before every tier's
 action but the deleted tier's, and a run whose sandbox already held a mount syncs it
 before its tools run as well, so a store's change reaches a session at its next run
 rather than the one after. The BYOC worker has no reaper, so beyond the two run boundaries — a mount found already
