@@ -34,7 +34,7 @@ const (
 
 // wantMigrations tracks the number of embedded migration files; bump it when
 // a migration is added.
-const wantMigrations = 41
+const wantMigrations = 42
 
 func open(t *testing.T, dsn string) *pgxpool.Pool {
 	t.Helper()
@@ -114,6 +114,36 @@ func TestDeploymentRunScheduledAtIsTimestamptz(t *testing.T) {
 	}
 	if typ != "timestamp with time zone" {
 		t.Fatalf("deployment_runs.scheduled_at is %q, want timestamp with time zone", typ)
+	}
+}
+
+// A run keeps the id of the session it created after that session is deleted,
+// as the reference's run does (#663). Asserted by behavior rather than by
+// reading pg_constraint, because every foreign key shape fails it differently:
+// SET NULL rewrites the id, CASCADE deletes the run, and NO ACTION refuses the
+// session delete outright.
+func TestDeploymentRunKeepsItsSessionIDPastTheSession(t *testing.T) {
+	pool := open(t, pgtest.FreshDB(t))
+	ctx := context.Background()
+	seedSessionChain(t, pool)
+	for _, q := range []string{
+		`INSERT INTO deployments (id, name, agent_id, agent_version, environment_id)
+		 VALUES ('depl_1', 'd', 'agent_1', 1, 'env_1')`,
+		`INSERT INTO deployment_runs (id, deployment_id, trigger_type, agent_id, agent_version, session_id, succeeded_at)
+		 VALUES ('drun_1', 'depl_1', 'manual', 'agent_1', 1, 'sesn_1', now())`,
+		`DELETE FROM sessions WHERE id = 'sesn_1'`,
+	} {
+		if _, err := pool.Exec(ctx, q); err != nil {
+			t.Fatalf("%q: %v", q, err)
+		}
+	}
+	var sessionID *string
+	if err := pool.QueryRow(ctx,
+		`SELECT session_id FROM deployment_runs WHERE id = 'drun_1'`).Scan(&sessionID); err != nil {
+		t.Fatalf("read the run back: %v", err)
+	}
+	if sessionID == nil || *sessionID != "sesn_1" {
+		t.Errorf("session_id = %v after its session was deleted, want sesn_1 kept verbatim", sessionID)
 	}
 }
 
@@ -791,9 +821,18 @@ func TestDeploymentsAgentLiveIndexLeavesNoSort(t *testing.T) {
 		// constant within an agent and every agent comes out wholly live or
 		// wholly archived — which is not this index's case, and was the fixture's
 		// bug before 3 replaced 4 here.
-		`INSERT INTO deployments (id, name, agent_id, agent_version, environment_id, archived_at)
+		//
+		// created_at is spread a second apart because the column default, now(),
+		// is transaction-constant, and one shared timestamp is a statistic no
+		// production table has (#649). The verdict does not rest on it — the
+		// planner never drops a sort key on statistics, so a transposed
+		// (agent_id, id, created_at) sorts under either seed, measured both ways —
+		// but its costs do: under one timestamp an (agent_id, created_at) index
+		// drew a full Sort where the spread draws an Incremental Sort.
+		`INSERT INTO deployments (id, name, agent_id, agent_version, environment_id, archived_at, created_at)
 		 SELECT 'depl_' || g, 'd', 'agent_bulk_' || (g % 200 + 1), 1, 'env_1',
-		        CASE WHEN g % 3 = 0 THEN now() ELSE NULL END
+		        CASE WHEN g % 3 = 0 THEN now() ELSE NULL END,
+		        now() - (g || ' seconds')::interval
 		   FROM generate_series(1, 6000) g`,
 	} {
 		if _, err := pool.Exec(ctx, q); err != nil {
