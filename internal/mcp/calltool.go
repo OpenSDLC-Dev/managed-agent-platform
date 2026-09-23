@@ -82,26 +82,36 @@ type Content struct {
 const CallTimeout = 2 * time.Minute
 
 // ErrServerAnswered marks every error this package returns from a call the
-// server *did* answer: a JSON-RPC error rather than a result, a request for
-// input this platform cannot supply, and an answer that arrived but could not be
-// read — one whose blocks are all of types a tool result cannot carry, or whose
-// structured value would not re-marshal. All of them leave a caller with nothing
-// to hand a model, which is why they are errors rather than results; none of
-// them is a connection that failed, and the difference is one a caller cannot
-// recover from the message. A caller that reports connection failures separately
-// (the MCP work driver does, on the wire, as mcp_connection_failed_error) tests
-// for this before doing so. The rule is the boundary rather than the list: an
-// error raised after `callTool` returned is the server's answer, not the
-// transport's failure.
+// server *did* answer: a JSON-RPC error on a 2xx rather than a result, a request
+// for input this platform cannot supply, and an answer that arrived but could
+// not be read — one whose blocks are all of types a tool result cannot carry, or
+// whose structured value would not re-marshal. All of them leave a caller with
+// nothing to hand a model, which is why they are errors rather than results;
+// none of them is a connection that failed, and the difference is one a caller
+// cannot recover from the message. A caller that reports connection failures
+// separately (the MCP work driver does, on the wire, as
+// mcp_connection_failed_error) tests for this before doing so. The rule is the
+// boundary rather than the list: an error raised after `callTool` returned is
+// the server's answer, not the transport's failure — and so is a JSON-RPC error
+// raised inside it, but only when a 2xx carried it (see [answered]).
 var ErrServerAnswered = errors.New("the server answered, refusing the call")
 
 // answered reports whether an error is the server's own JSON-RPC error
-// response, which by definition reached us over a connection that worked. The
-// SDK aliases the wire type publicly (jsonrpc.Error), so the test costs this
-// package nothing and the type stays inside it.
-func answered(err error) bool {
+// response: one in the chain, on an operation whose most recent exchange was a
+// 2xx. The SDK aliases the wire type publicly (jsonrpc.Error), so the type test
+// costs this package nothing and the type stays inside it.
+//
+// The type alone no longer says the server answered (#641). The go-sdk wraps
+// the JSON-RPC error it decodes out of a non-2xx body, and turns 500, 502, 503,
+// 504 and 429 — body unread — into jsonrpc2.ErrRejected, as it does every error
+// from the HTTP client, a dropped connection included; ErrRejected is a
+// *jsonrpc.Error too (checked against go-sdk v1.7.0 — mcp/streamable.go
+// streamableClientConn.checkResponse and isTransientHTTPStatus and
+// streamableClientConn.Write). A non-2xx or a missing response is the HTTP layer
+// failing, so the status decides and the body does not.
+func answered(w *authWatch, err error) bool {
 	var wire *jsonrpc.Error
-	return errors.As(err, &wire)
+	return w.delivered() && errors.As(err, &wire)
 }
 
 // CallTool runs one tool on the connected server and returns its answer.
@@ -168,7 +178,7 @@ func (c *Conn) CallTool(ctx context.Context, name string, arguments json.RawMess
 		if c.auth.refused() {
 			return nil, c.auth.mark(fmt.Errorf("mcp: call tool %q: %w", name, err))
 		}
-		if answered(err) {
+		if answered(c.auth, err) {
 			return nil, fmt.Errorf("mcp: call tool %q: %w: %w", name, ErrServerAnswered, err)
 		}
 		return nil, fmt.Errorf("mcp: call tool %q: %w", name, err)

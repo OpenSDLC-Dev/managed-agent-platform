@@ -42,18 +42,22 @@ import (
 var ErrUnauthorized = errors.New("the server refused the credential")
 
 // authWatch is the innermost RoundTripper of a connection's chain: it records
-// whether any exchange came back 401, so an error raised anywhere downstream of
-// one can be marked as an authentication failure.
+// the status of the most recent exchange, so an error raised anywhere downstream
+// of it can be classified by what the wire said — a 401 marks an authentication
+// failure, and only a 2xx lets a JSON-RPC error read as the server's answer (see
+// [authWatch.delivered]).
 //
-// The flag answers for the connection's most recent exchange, within an
+// The status answers for the connection's most recent exchange, within an
 // operation. A failure surfaces at whichever exchange the SDK gave up on, which
-// need not be the refused one, so the flag cannot be per request; but a refusal
-// the SDK recovered from must not speak for what failed afterwards, so each
-// response replaces the last and each operation clears the flag before it
-// begins (see [authWatch.reset]).
+// need not be the refused one, so the status cannot be per request; but a
+// refusal the SDK recovered from must not speak for what failed afterwards, so
+// each response replaces the last and each operation clears the status before
+// it begins (see [authWatch.reset]).
 type authWatch struct {
 	base http.RoundTripper
-	seen atomic.Bool
+	// status is the most recent exchange's HTTP status, and 0 when it produced
+	// no response or when this operation has made none yet.
+	status atomic.Int32
 }
 
 // withAuthWatch returns a shallow copy of client whose transport records
@@ -91,7 +95,11 @@ func (w *authWatch) RoundTrip(req *http.Request) (*http.Response, error) {
 	// it answer for the operation would erase the refusal that caused the
 	// teardown — which is exactly what it did.
 	if req.Method != http.MethodDelete {
-		w.seen.Store(resp != nil && resp.StatusCode == http.StatusUnauthorized)
+		var status int32
+		if resp != nil {
+			status = int32(resp.StatusCode)
+		}
+		w.status.Store(status)
 	}
 	return resp, err
 }
@@ -100,7 +108,7 @@ func (w *authWatch) RoundTrip(req *http.Request) (*http.Response, error) {
 // watch marks nothing, so a Conn built without one (a test's, or a future
 // caller's) behaves exactly as it did before.
 func (w *authWatch) mark(err error) error {
-	if err == nil || w == nil || !w.seen.Load() {
+	if err == nil || !w.refused() {
 		return err
 	}
 	return fmt.Errorf("%w: %w", ErrUnauthorized, err)
@@ -108,14 +116,29 @@ func (w *authWatch) mark(err error) error {
 
 // refused reports whether this operation was answered 401. A nil watch has seen
 // nothing.
-func (w *authWatch) refused() bool { return w != nil && w.seen.Load() }
+func (w *authWatch) refused() bool {
+	return w != nil && w.status.Load() == http.StatusUnauthorized
+}
+
+// delivered reports whether this operation's most recent exchange came back
+// 2xx. MCP's streamable transport carries a JSON-RPC error on a 2xx, so that is
+// the only status on which an error can be the server's own refusal; anything
+// else, or no response at all, is the HTTP layer failing (#641). A nil watch
+// has seen no exchange and vouches for none.
+func (w *authWatch) delivered() bool {
+	if w == nil {
+		return false
+	}
+	status := w.status.Load()
+	return status >= 200 && status < 300
+}
 
 // reset starts a fresh operation. Clearing on the way in rather than on any
-// non-401 response is what keeps the flag readable under the SDK's standalone
+// non-401 response is what keeps the status readable under the SDK's standalone
 // SSE stream, whose exchanges are not this operation's and could otherwise clear
 // a refusal between the refusal and the read of it.
 func (w *authWatch) reset() {
 	if w != nil {
-		w.seen.Store(false)
+		w.status.Store(0)
 	}
 }

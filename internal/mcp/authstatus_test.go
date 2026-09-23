@@ -243,33 +243,23 @@ func jsonRPCError(w http.ResponseWriter, id json.RawMessage) {
 		`{"jsonrpc":"2.0","id":%s,"error":{"code":-32000,"message":"policy says no"}}`, id)
 }
 
-// A call-time 403 is classified by whatever the server sent, exactly as 407 and
-// 500 are. That is the whole of what #572 asks for, on the half a dial-time test
-// cannot reach: before it, the watch marked 403 alongside 401, so [mcp.Conn]
-// asked the refusal question first and a 403 here read ErrUnauthorized whatever
-// the body held. It now falls through to the same question every other status
-// has always been asked.
+// A non-2xx on a call is the HTTP layer failing, not the server answering, and
+// that holds whatever the response carried (#641). MCP's streamable transport
+// carries a JSON-RPC error on a 2xx; a non-2xx says the call never reached the
+// point where the server could refuse it. So none of these is ErrServerAnswered,
+// which would clear the operator's session.error, and none but 401 is a refused
+// credential (#572 — 403 and its peer 407 included).
 //
-// What is asserted is that 403 stops being an authentication failure and starts
-// answering exactly as its peer does, not what that shared answer is — the latter
-// is #641's question, and the recording, which dialled, cannot reach it.
-//
-// **407 is the peer, and 500 and 502 are not quite.** The go-sdk sorts a
-// non-2xx three ways (checked against go-sdk v1.7.0 — mcp/streamable.go
-// streamableClientConn.checkResponse and isTransientHTTPStatus): 404 is a
-// missing session; 500, 502, 503, 504 and 429 are transient and become
-// jsonrpc2.ErrRejected with the body never read; anything else has its body
-// decoded and a JSON-RPC error found there wrapped. ErrRejected is itself a
-// *jsonrpc.Error, so [answered] matches it too — which means a bare 500 reads
-// as the server's answer where a bare 403 does not, a difference about
-// transience and not about credentials. So the exact claim is 403 ≡ 407, in
-// both shapes a server can send; 500 and 502 join them only when a body
-// arrives, and are held here to the part #572 is actually about, that none of
-// them is a refused credential.
-func TestACallTimeForbiddenIsClassifiedLikeItsPeerStatuses(t *testing.T) {
-	type verdict struct{ unauthorized, serverAnswered bool }
-	classify := func(t *testing.T, status int,
-		body func(http.ResponseWriter, json.RawMessage)) verdict {
+// Both shapes are held because the go-sdk sorts a non-2xx two ways that each
+// used to read as the server's answer (checked against go-sdk v1.7.0 —
+// mcp/streamable.go streamableClientConn.checkResponse and
+// isTransientHTTPStatus). 500, 502, 503, 504 and 429 are transient and become
+// jsonrpc2.ErrRejected with the body never read — and ErrRejected is itself a
+// *jsonrpc.Error, so a bare 502 matched. Everything else but 404 has its body
+// decoded and a JSON-RPC error found there wrapped, so a 403 matched once it
+// carried one. A test of either route alone would pass with the other intact.
+func TestANon2xxOnACallIsAConnectionFailureWhateverItCarries(t *testing.T) {
+	call := func(t *testing.T, status int, body func(http.ResponseWriter, json.RawMessage)) error {
 		t.Helper()
 		conn, err := mcp.Connect(context.Background(), mcp.Config{
 			URL:        serveThenFailingWith(t, map[string]int{"tools/call": status}, body),
@@ -278,16 +268,11 @@ func TestACallTimeForbiddenIsClassifiedLikeItsPeerStatuses(t *testing.T) {
 			t.Fatalf("%d: the handshake was expected to succeed: %v", status, err)
 		}
 		defer conn.Close()
-		if _, err = conn.CallTool(context.Background(), "echo", nil); err == nil {
-			t.Fatalf("%d: expected the refused call to fail", status)
+		_, err = conn.CallTool(context.Background(), "echo", nil)
+		if err == nil {
+			t.Fatalf("%d: expected the call to fail", status)
 		}
-		if errors.Is(err, mcp.ErrUnauthorized) {
-			t.Errorf("a %d on the call was marked a refused credential: %v", status, err)
-		}
-		return verdict{
-			unauthorized:   errors.Is(err, mcp.ErrUnauthorized),
-			serverAnswered: errors.Is(err, mcp.ErrServerAnswered),
-		}
+		return err
 	}
 
 	for _, shape := range []struct {
@@ -298,15 +283,83 @@ func TestACallTimeForbiddenIsClassifiedLikeItsPeerStatuses(t *testing.T) {
 		{"a JSON-RPC error body", jsonRPCError},
 	} {
 		t.Run(shape.name, func(t *testing.T) {
-			forbidden := classify(t, http.StatusForbidden, shape.body)
-			if peer := classify(t, http.StatusProxyAuthRequired, shape.body); peer != forbidden {
-				t.Errorf("403 classified %+v but 407 classified %+v; #572 is that they are one class",
-					forbidden, peer)
+			for _, status := range []int{
+				http.StatusBadRequest, http.StatusForbidden, http.StatusProxyAuthRequired,
+				http.StatusTooManyRequests, http.StatusInternalServerError, http.StatusBadGateway,
+				http.StatusServiceUnavailable, http.StatusGatewayTimeout,
+			} {
+				err := call(t, status, shape.body)
+				if errors.Is(err, mcp.ErrUnauthorized) {
+					t.Errorf("a %d on the call was marked a refused credential: %v", status, err)
+				}
+				if errors.Is(err, mcp.ErrServerAnswered) {
+					t.Errorf("a %d on the call read as the server's own answer: %v", status, err)
+				}
 			}
-			classify(t, http.StatusInternalServerError, shape.body)
-			classify(t, http.StatusBadGateway, shape.body)
 		})
 	}
+
+	// The control: the same body on a 200 is the server's answer, so what
+	// decides is the status and not whether a JSON-RPC error arrived.
+	t.Run("the same body on a 200", func(t *testing.T) {
+		if err := call(t, http.StatusOK, jsonRPCError); !errors.Is(err, mcp.ErrServerAnswered) {
+			t.Errorf("a JSON-RPC error on a 200 = %v, want ErrServerAnswered", err)
+		}
+	})
+
+	// The third route to the same misreading: an exchange with no response at
+	// all. The go-sdk wraps every error from the HTTP client in ErrRejected, so a
+	// server that dropped the connection mid-call read as one that answered.
+	t.Run("no response at all", func(t *testing.T) {
+		conn, err := mcp.Connect(context.Background(), mcp.Config{
+			URL: serveThenHangingUpOn(t, "tools/call"), HTTPClient: &http.Client{}, BearerToken: "tok"})
+		if err != nil {
+			t.Fatalf("the handshake was expected to succeed: %v", err)
+		}
+		defer conn.Close()
+		_, err = conn.CallTool(context.Background(), "echo", nil)
+		if err == nil {
+			t.Fatal("expected the call to fail")
+		}
+		if errors.Is(err, mcp.ErrServerAnswered) {
+			t.Errorf("a dropped connection read as the server's own answer: %v", err)
+		}
+	})
+}
+
+// serveThenHangingUpOn serves MCP but closes the connection, with no status and
+// no body, on the named JSON-RPC method — what a middlebox that resets the
+// connection, or a server process that died mid-request, looks like to the
+// client.
+func serveThenHangingUpOn(t *testing.T, method string) string {
+	t.Helper()
+	inner := sdk.NewStreamableHTTPHandler(func(*http.Request) *sdk.Server {
+		return sdk.NewServer(&sdk.Implementation{Name: "hanging-up-server", Version: "1"}, nil)
+	}, nil)
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Errorf("read body: %v", err)
+			return
+		}
+		var msg struct {
+			Method string `json:"method"`
+		}
+		_ = json.Unmarshal(body, &msg)
+		if msg.Method != method {
+			r.Body = io.NopCloser(bytes.NewReader(body))
+			inner.ServeHTTP(w, r)
+			return
+		}
+		conn, _, err := http.NewResponseController(w).Hijack()
+		if err != nil {
+			t.Errorf("hijack: %v", err)
+			return
+		}
+		_ = conn.Close()
+	}))
+	t.Cleanup(ts.Close)
+	return ts.URL
 }
 
 // A refusal that lands after the handshake is the same authentication failure,
