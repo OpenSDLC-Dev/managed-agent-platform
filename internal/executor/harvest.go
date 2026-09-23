@@ -480,10 +480,11 @@ func parseListing(out string) (paths, rejected []string) {
 	return paths, rejected
 }
 
-// harvestForbiddenChars is the Files filename rule's forbidden set
-// (internal/api's validateFilename) minus the path separators: "/" is
-// structural here — the recorded divergence (docs/DIVERGENCES.md) — and a
-// backslash stays rejected.
+// harvestForbiddenChars is the upload's forbidden set (internal/api's
+// forbiddenFilenameChars) plus a backslash. The upload cuts a name at either
+// path separator before that check; here "/" is structural — the recorded
+// divergence (docs/DIVERGENCES.md) — and a "\" is refused, so no harvested
+// name carries one the upload would read as a separator.
 const harvestForbiddenChars = `<>:"|?*\`
 
 // validHarvestPath accepts only a clean relative path that stays inside the

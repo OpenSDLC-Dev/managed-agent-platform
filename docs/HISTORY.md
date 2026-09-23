@@ -6179,3 +6179,39 @@ merge gate, recorded in the pull request. Registry checks were clean; the SDK re
 had 594 citations, no findings and no pending transitions. The earlier automatic
 approval rejection of external Claude execution remained in force, so no local
 Claude/Fable/Opus pass is claimed.
+
+## Upload filename rule and registry corrections (plan 55, #738) — acceptance record, 2026-09-24
+
+Independent verification ran the full `make verify` gate at 1167a378: every package
+passed, with 90.07% total statement coverage. It then ran the new tests against
+origin/main with only the tests applied: `internal/mimetab` failed to build, all
+eight accepting cases of the filename rule failed, and the upload through the pinned
+SDK's `File` with no name got the old 400; only the backslash case, which pins
+unchanged behavior, passed. A controlplane built from the branch, over throwaway
+PostgreSQL and MinIO, stored a nameless PDF as `unnamed.pdf`, `dir/sub/report.pdf`
+sent as octet-stream as `report.pdf` typed `application/pdf`, and a nameless upload
+of an unlisted type as a bare `unnamed`, and refused `dir\report.pdf`. Each
+corrected registry claim was read against its cited source: the SDK at v1.70.1 and
+v1.66.0, the bundled spec, the sessions page and Files guide fetched that day, and
+the recordings archive at 16d24be. That reading found one overclaim, fixed before
+review: `healthcheck` does occur in the archive, in a snapshot of this platform's
+own issues. The SDK report covered 603 citations with no findings or pending
+transitions, and the registry's shape and issue-state checks were clean. Probe
+processes and containers were removed; the container set matched the baseline
+taken before the run.
+
+Review then reversed one decision. The pinned Go SDK names an open file by
+`path.Base`, which cuts only at `/`, so on Windows it sends the whole
+`C:\...\report.pdf`, which the 1167a378 build refused; the upload now cuts at either
+separator, and its refusal names only characters that can still reach the check.
+Independent re-verification at c2eb5f4c ran `make verify` green with 90.08%
+coverage. The four new cases — a Windows path, a trailing backslash, a forbidden
+character left after the cut, and a Windows-path upload through the SDK — failed on
+the previous handler in a scratch copy and pass at head. A controlplane built from
+it stored `C:\Users\me\report.pdf` as `report.pdf` typed `application/pdf` and read
+it back the same, stored a nameless untyped part as `unnamed.bin`, and refused a
+forbidden character naming `<>:"|?*` alone. The SDK report then covered 604
+citations with no findings or pending transitions, the registry checks were clean,
+and probe processes and containers were removed.
+
+Review results and CI are recorded in the pull request.

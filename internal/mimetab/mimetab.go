@@ -8,6 +8,7 @@
 package mimetab
 
 import (
+	"mime"
 	"path"
 	"strings"
 )
@@ -115,4 +116,51 @@ func ByPath(p string) string {
 		return m
 	}
 	return "application/octet-stream"
+}
+
+// preferredExt settles the types byExt lists under more than one extension,
+// so map order never chooses the name ExtFor gives: each takes its
+// conventional spelling, and application/octet-stream the `.bin` Python's
+// mimetypes gives it (docs/DIVERGENCES.md: which extension the reference
+// picks is inferred). TestAmbiguousTypesArePinned fails when a type gains a
+// second extension without an entry here.
+var preferredExt = map[string]string{
+	"application/octet-stream": ".bin",
+	"application/postscript":   ".ps",
+	"application/xhtml+xml":    ".xhtml",
+	"audio/ogg":                ".ogg",
+	"image/jpeg":               ".jpg",
+	"image/tiff":               ".tiff",
+	"text/html":                ".html",
+	"text/javascript":          ".js",
+	"text/plain":               ".txt",
+	"text/xml":                 ".xml",
+	"text/yaml":                ".yaml",
+}
+
+// byType inverts byExt by bare media type; preferredExt overrides it wherever
+// the inversion is not unique.
+var byType = func() map[string]string {
+	m := map[string]string{}
+	for ext, full := range byExt {
+		mt, _, _ := mime.ParseMediaType(full)
+		m[mt] = ext
+	}
+	return m
+}()
+
+// ExtFor returns the extension the table pairs with a MIME type, ignoring its
+// case and parameters, or "" when the type is unlisted. It names an upload
+// that arrived without a filename (internal/api), and ByPath of the name it
+// gives is the same bare type, carrying the table's parameters rather than the
+// caller's ("text/plain" comes back "text/plain; charset=utf-8").
+func ExtFor(mimeType string) string {
+	mt, _, err := mime.ParseMediaType(mimeType)
+	if err != nil {
+		return ""
+	}
+	if ext, ok := preferredExt[mt]; ok {
+		return ext
+	}
+	return byType[mt]
 }
