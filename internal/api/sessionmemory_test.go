@@ -163,9 +163,11 @@ func TestSessionMemoryStoreMountPathSlug(t *testing.T) {
 
 // Stores whose names slug alike all attach (#671). Recorded: a pair ("notes"
 // then "NOTES", and "notes" then "(Notes)") answers 200 with the later store at
-// notes-2. Ours, and registered as such: the order is the request's, a third
-// collider takes -3, every candidate is checked against each slug already
-// claimed — suffixed or not — and the id fallback is a slug like any other.
+// notes-2. Ours, and registered as such: every store claims its own slug
+// before any suffix is handed out, so a suffix never displaces a store whose
+// name slugs to it; among identical slugs the first in request order wins; the
+// losers take the first free -2, -3, …; a suffixed slug is cut to stay inside
+// the 255-byte NAME_MAX; and the id fallback is a slug like any other.
 func TestSessionMemoryStoreSlugCollisions(t *testing.T) {
 	s := newTestServer(t)
 	agentID, envID := fixture(t, s)
@@ -195,6 +197,13 @@ func TestSessionMemoryStoreSlugCollisions(t *testing.T) {
 	namedLikeID := createMemoryStore(t, s, symbols) // its name slugs to the symbol store's fallback
 	idSlug := "memstore-" + strings.ToLower(strings.TrimPrefix(symbols, "memstore_"))
 
+	// Names at the 255-character cap, whose slugs are 255 bytes: a suffix
+	// cannot simply be appended.
+	a := strings.Repeat("a", 252)
+	long, longUpper := createMemoryStore(t, s, a+"aaa"), createMemoryStore(t, s, strings.ToUpper(a+"aaa"))
+	longTail, longTailUpper := createMemoryStore(t, s, a+" bb"), createMemoryStore(t, s, strings.ToUpper(a+" bb"))
+	longTwo := createMemoryStore(t, s, a+"a 2") // slugs to what longUpper's cut -2 would be
+
 	for _, tc := range []struct {
 		name   string
 		stores []string
@@ -203,12 +212,21 @@ func TestSessionMemoryStoreSlugCollisions(t *testing.T) {
 		{"the recorded pair", []string{lower, upper}, want("notes", "notes-2")},
 		{"request order, not creation order", []string{upper, lower}, want("notes", "notes-2")},
 		{"a third collider", []string{lower, upper, title}, want("notes", "notes-2", "notes-3")},
-		{"a claimed suffix is skipped", []string{notes2, lower, upper, title}, want("notes-2", "notes", "notes-3", "notes-4")},
-		{"a claimed suffix is a base too", []string{lower, upper, notes2}, want("notes", "notes-2", "notes-2-2")},
+		{"an own slug ahead of the suffixes", []string{notes2, lower, upper, title}, want("notes-2", "notes", "notes-3", "notes-4")},
+		{"an own slug behind the suffixes", []string{lower, upper, notes2}, want("notes", "notes-3", "notes-2")},
 		{"the id fallback", []string{symbols, namedLikeID}, want(idSlug, idSlug+"-2")},
+		{"a slug at NAME_MAX is cut for its suffix", []string{long, longUpper}, want(a+"aaa", a+"a-2")},
+		{"a cut that ends on a hyphen drops it", []string{longTail, longTailUpper}, want(a+"-bb", a+"-2")},
+		{"a cut candidate is checked like any other", []string{long, longUpper, longTwo}, want(a+"aaa", a+"a-3", a+"a-2")},
 	} {
-		if got := mounts(tc.stores...); !slices.Equal(got, tc.want) {
+		got := mounts(tc.stores...)
+		if !slices.Equal(got, tc.want) {
 			t.Errorf("%s: mount paths = %v, want %v", tc.name, got, tc.want)
+		}
+		for _, m := range got {
+			if slug := strings.TrimPrefix(m.(string), "/mnt/memory/"); len(slug) > 255 {
+				t.Errorf("%s: mount directory %q is %d bytes, over NAME_MAX", tc.name, slug, len(slug))
+			}
 		}
 	}
 }
