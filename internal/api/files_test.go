@@ -20,14 +20,21 @@ import (
 // filename from the Content-Disposition.
 func fileForm(t *testing.T, filename string, contentType *string, content string) (ct, body string) {
 	t.Helper()
+	disposition := `form-data; name="file"`
+	if filename != "" {
+		disposition += fmt.Sprintf(`; filename="%s"`, filename)
+	}
+	return dispositionForm(t, disposition, contentType, content)
+}
+
+// dispositionForm builds a one-part form with the Content-Disposition given
+// verbatim, so a test can send filename="" as well as no filename at all.
+func dispositionForm(t *testing.T, disposition string, contentType *string, content string) (ct, body string) {
+	t.Helper()
 	var buf bytes.Buffer
 	w := multipart.NewWriter(&buf)
 	h := textproto.MIMEHeader{}
-	if filename != "" {
-		h.Set("Content-Disposition", fmt.Sprintf(`form-data; name="file"; filename="%s"`, filename))
-	} else {
-		h.Set("Content-Disposition", `form-data; name="file"`)
-	}
+	h.Set("Content-Disposition", disposition)
 	if contentType != nil {
 		h.Set("Content-Type", *contentType)
 	}

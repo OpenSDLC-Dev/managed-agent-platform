@@ -25,15 +25,19 @@ the handler follows the rule.
    extension, then validate. Deriving the type first is what lets `dir/report.pdf`
    sent as octet-stream store `report.pdf` as `application/pdf`.
 2. **Separators**: the rule does not say which characters separate components.
-   `/` alone does, so `dir/` leaves an empty name; `\` stays one of the Files
-   guide's forbidden characters and a 400.
-3. **Extensions**: `mimetab.ExtFor` inverts the pinned table, so the name and the
-   stored type can never disagree through it (every listed type round-trips
-   through `ByPath`). A type it lists under several extensions takes its
-   conventional one (`.jpg`, `.txt`, `.html` …), and `application/octet-stream`
-   takes `.bin`, as Python's `mimetypes` does; an unlisted type leaves a bare
-   `unnamed`. No content sniffing: the guide says an omitted type "is detected",
-   and nothing says how.
+   `/` and `\` both do, because a `\` comes from the Go SDK itself: on Windows it
+   names an open file by `path.Base`, which cuts only at `/`, and sends the whole
+   `C:\...\report.pdf`. Refusing that would block a real client, where cutting a
+   `\` the reference might refuse only accepts more. `dir/` and `dir\` leave an
+   empty name, and the guide's other forbidden characters apply to what remains.
+3. **Extensions**: `mimetab.ExtFor` inverts the pinned table, so the name maps
+   back to the stored type's bare media type (every listed type round-trips
+   through `ByPath`, with the table's parameters). A type it lists under several
+   extensions takes its conventional one (`.jpg`, `.txt`, `.html` …), and
+   `application/octet-stream` takes `.bin`, as Python's `mimetypes` does; an
+   unlisted type leaves a bare `unnamed`. No content sniffing: the guide says an
+   omitted type "is detected", and nothing says how, so a nameless part without
+   a type is `unnamed.bin`.
 4. **Content-Type under the old beta header**: the guide calls the part
    Content-Type "Required" with `files-api-2025-04-14`. This platform ignores beta
    headers, so a part without one is taken either way; recorded, not enforced.
@@ -53,8 +57,9 @@ separates, and the rejection surface — is in the DIVERGENCES entry, under #78.
 
 - Tests first, red on the old handler: every rule case over a verbatim
   Content-Disposition (absent, empty, charset, no type, unlisted type,
-  path-qualified, trailing slash, backslash), the stored name read back, and an
-  upload through the pinned SDK's `File` with no name.
+  path-qualified, trailing slash, Windows path, trailing backslash, a forbidden
+  character after the cut), the stored name read back, and two uploads through
+  the pinned SDK — `File` with no name, and a reader named by a Windows path.
 - `ExtFor` against the table: round trip, pinned ambiguities, parameters and case.
 - The registry edits pass `tools/sdkref` (`-fail` and `-report`) and
   `tools/registrycheck`; `make verify`, independent verification, both reviews

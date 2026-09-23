@@ -26,8 +26,8 @@ func TestExtFor(t *testing.T) {
 }
 
 // Every listed type names a file ByPath maps straight back to the same value,
-// so a nameless upload's stored mime_type and the name it is given can never
-// disagree through this table.
+// so the name a nameless upload is given always maps back to its stored
+// mime_type's bare media type.
 func TestExtForRoundTrips(t *testing.T) {
 	for _, full := range byExt {
 		ext := ExtFor(full)

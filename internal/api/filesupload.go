@@ -183,21 +183,21 @@ func parseExpiresIn(part *multipart.Part) (int64, error) {
 }
 
 // forbiddenFilenameChars are the characters the public Files docs reject in a
-// filename: the Windows-reserved set plus both path separators. A "/" never
-// reaches the check — finalPathComponent has already cut the name at the last
-// one — but a "\" does, and is refused.
-const forbiddenFilenameChars = `<>:"|?*\/`
+// filename that can still reach the check: the docs list both path separators
+// too, but finalPathComponent has already cut the name at the last of either.
+const forbiddenFilenameChars = `<>:"|?*`
 
-// finalPathComponent keeps what follows the part filename's last "/". The API
-// reference's rule for this form is that "only the final path component of the
-// part's filename is kept", and an absent or empty one "is replaced with
-// unnamed plus the extension for the file's stored mime_type, when known"
-// (checked against anthropic-sdk-go v1.70.1 — betafile.go
+// finalPathComponent keeps what follows the part filename's last "/" or "\".
+// The API reference's rule for this form is that "only the final path
+// component of the part's filename is kept", and an absent or empty one "is
+// replaced with unnamed plus the extension for the file's stored mime_type,
+// when known" (checked against anthropic-sdk-go v1.70.1 — betafile.go
 // BetaFileUploadParams.File). Which characters separate a component is not
-// stated; "/" alone does here, so "dir/" leaves an empty name
-// (docs/DIVERGENCES.md).
+// stated. Both do here, because a "\" arrives from the SDK itself: on Windows
+// it names an open file by path.Base, which cuts only at "/", so the whole
+// "C:\...\report.pdf" goes out (docs/DIVERGENCES.md).
 func finalPathComponent(name string) string {
-	return name[strings.LastIndexByte(name, '/')+1:]
+	return name[strings.LastIndexAny(name, `/\`)+1:]
 }
 
 // validateFilename enforces the documented rule: 1–255 characters, none of the

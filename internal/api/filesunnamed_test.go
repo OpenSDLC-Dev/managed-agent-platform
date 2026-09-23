@@ -3,36 +3,13 @@ package api_test
 import (
 	"bytes"
 	"context"
-	"mime/multipart"
 	"net/http"
-	"net/textproto"
+	"strings"
 	"testing"
 
 	sdk "github.com/anthropics/anthropic-sdk-go"
 	"github.com/anthropics/anthropic-sdk-go/option"
 )
-
-// dispositionForm builds a one-part form with the Content-Disposition given
-// verbatim, so a test can send filename="" as well as no filename at all.
-func dispositionForm(t *testing.T, disposition string, contentType *string) (ct, body string) {
-	t.Helper()
-	var buf bytes.Buffer
-	w := multipart.NewWriter(&buf)
-	h := textproto.MIMEHeader{}
-	h.Set("Content-Disposition", disposition)
-	if contentType != nil {
-		h.Set("Content-Type", *contentType)
-	}
-	pw, err := w.CreatePart(h)
-	if err != nil {
-		t.Fatalf("create part: %v", err)
-	}
-	_, _ = pw.Write([]byte("x"))
-	if err := w.Close(); err != nil {
-		t.Fatalf("close form: %v", err)
-	}
-	return w.FormDataContentType(), buf.String()
-}
 
 // TestFileUploadFilenameRule pins the API reference's rule for the file part
 // (checked against anthropic-sdk-go v1.70.1 — betafile.go
@@ -55,10 +32,13 @@ func TestFileUploadFilenameRule(t *testing.T) {
 		{"absent, unlisted type", `form-data; name="file"`, ptr("application/x-custom"), "unnamed", "application/x-custom"},
 		{"path-qualified", `form-data; name="file"; filename="dir/sub/report.pdf"`, ptr("application/octet-stream"), "report.pdf", "application/pdf"},
 		{"trailing slash", `form-data; name="file"; filename="dir/"`, ptr("application/pdf"), "unnamed.pdf", "application/pdf"},
+		// The quoted-string escapes each "\", as the SDK's encoder does.
+		{"windows path", `form-data; name="file"; filename="C:\\Users\\me\\report.pdf"`, ptr("application/octet-stream"), "report.pdf", "application/pdf"},
+		{"trailing backslash", `form-data; name="file"; filename="dir\\"`, ptr("application/pdf"), "unnamed.pdf", "application/pdf"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			ct, body := dispositionForm(t, tc.disposition, tc.contentType)
+			ct, body := dispositionForm(t, tc.disposition, tc.contentType, "x")
 			status, obj := s.doForm("POST", "/v1/files", ct, body)
 			if status != http.StatusOK {
 				t.Fatalf("upload: status %d body %v", status, obj)
@@ -72,11 +52,16 @@ func TestFileUploadFilenameRule(t *testing.T) {
 			}
 		})
 	}
-	// "\" is not a separator: it stays one of the documented forbidden characters.
-	t.Run("backslash", func(t *testing.T) {
-		ct, body := dispositionForm(t, `form-data; name="file"; filename="dir\\report.pdf"`, ptr("application/pdf"))
+	// The rest of the documented rule applies to what the cut leaves, and the
+	// refusal names only characters that can still be refused.
+	t.Run("forbidden character after the cut", func(t *testing.T) {
+		ct, body := dispositionForm(t, `form-data; name="file"; filename="dir/a:b.txt"`, ptr("text/plain"), "x")
 		status, obj := s.doForm("POST", "/v1/files", ct, body)
 		wantErr(t, status, obj, http.StatusBadRequest, "invalid_request_error")
+		errObj, _ := obj["error"].(map[string]any)
+		if msg, _ := errObj["message"].(string); strings.ContainsAny(msg, `/\`) {
+			t.Errorf("message %q lists a separator the cut has already removed", msg)
+		}
 	})
 }
 
@@ -93,5 +78,30 @@ func TestFileUploadWithoutANameThroughTheSDK(t *testing.T) {
 	}
 	if got.Filename != "unnamed.pdf" || got.MimeType != "application/pdf" {
 		t.Fatalf("filename, mime_type = %q, %q; want unnamed.pdf, application/pdf", got.Filename, got.MimeType)
+	}
+}
+
+// windowsFile stands in for an *os.File opened by a Windows path: the SDK
+// names a reader by path.Base of its Name(), which cuts only at "/", so the
+// whole backslash path goes out as the filename (checked against
+// anthropic-sdk-go v1.70.1 — internal/apiform/encoder.go
+// encoder.newReaderTypeEncoder).
+type windowsFile struct{ *bytes.Reader }
+
+func (windowsFile) Name() string { return `C:\Users\me\report.pdf` }
+
+// TestFileUploadWindowsPathThroughTheSDK is the client that sends a "\": the
+// pinned SDK on Windows, given an open file.
+func TestFileUploadWindowsPathThroughTheSDK(t *testing.T) {
+	s := newTestServer(t)
+	client := sdk.NewClient(option.WithoutEnvironmentDefaults(), option.WithBaseURL(s.url), option.WithAPIKey(testKey))
+	got, err := client.Beta.Files.Upload(context.Background(), sdk.BetaFileUploadParams{
+		File: windowsFile{bytes.NewReader([]byte("%PDF-1.7"))},
+	})
+	if err != nil {
+		t.Fatalf("upload through the SDK: %v", err)
+	}
+	if got.Filename != "report.pdf" || got.MimeType != "application/pdf" {
+		t.Fatalf("filename, mime_type = %q, %q; want report.pdf, application/pdf", got.Filename, got.MimeType)
 	}
 }
