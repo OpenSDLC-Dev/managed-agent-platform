@@ -858,6 +858,11 @@ func TestShapeFindings(t *testing.T) {
 			rules: []string{"undated"},
 		},
 		{
+			name:  "and so is the spec named for its generator",
+			in:    "*Evidence: the v1.70.1 Stainless spec's `BetaManagedAgentsCreateSessionParams`.*",
+			rules: []string{"undated"},
+		},
+		{
 			name:  "prose about a source, with no coordinate and no tag, is not a candidate",
 			in:    "The SDK and CLI checkouts track the API's tip and can run ahead of the pin.",
 			rules: nil,
@@ -1006,6 +1011,11 @@ func TestShapeFindings(t *testing.T) {
 		{
 			name:  "a dated claim naming the spec by what it is",
 			in:    "*Evidence: checked against the v1.70.1 OpenAPI spec's BetaSession.*",
+			rules: []string{"source-unnamed"},
+		},
+		{
+			name:  "or for its generator",
+			in:    "*Evidence: checked against the v1.70.1 Stainless spec's BetaSession.*",
 			rules: []string{"source-unnamed"},
 		},
 		{

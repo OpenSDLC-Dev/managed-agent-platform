@@ -112,11 +112,13 @@ func flattenToolResultBlock(block json.RawMessage) (json.RawMessage, bool) {
 // (TextCitationParamUnion) — a shape mismatch, not a missing field, so it is
 // dropped along with the block's own boundaries, same as
 // provider.SearchResultText already documents. (A search_result's only other
-// wire fields are type and citations: the pinned managed-agents type,
+// wire fields are type and citations: the managed-agents type,
 // BetaManagedAgentsSearchResultBlockParam, has no cache_control unlike a text
-// or tool_result block — and this platform's own inbound validation agrees,
-// rejecting cache_control on an inbound search_result block — so there is
-// nothing else a search_result block could carry over.) A block
+// or tool_result block (absent at anthropic-sdk-go v1.70.1 — betasessionevent.go
+// BetaManagedAgentsSearchResultBlockParam.CacheControl) — and this platform's
+// own inbound validation agrees, rejecting cache_control on an inbound
+// search_result block — so there is nothing else a search_result block could
+// carry over.) A block
 // SearchResultText cannot render — a non-string source, a non-text inner
 // block — is left untouched (reported via the bool) rather than failing the
 // request.

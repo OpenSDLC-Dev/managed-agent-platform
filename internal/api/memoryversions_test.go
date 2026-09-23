@@ -12,7 +12,9 @@ import (
 // attributed row per non-no-op mutation, per the SDK's
 // BetaManagedAgentsMemoryVersion (checked against anthropic-sdk-go v1.70.1 —
 // betamemorystorememoryversion.go BetaManagedAgentsMemoryVersion), with the
-// nulls the spec states for a `deleted` operation and for redaction.
+// nulls the spec states for a `deleted` operation and for redaction (checked
+// against anthropic-sdk-go v1.70.1 — spec
+// components.schemas.BetaManagedAgentsMemoryVersion).
 
 func listVersions(t *testing.T, s *tserver, storeID, query string) []map[string]any {
 	t.Helper()
