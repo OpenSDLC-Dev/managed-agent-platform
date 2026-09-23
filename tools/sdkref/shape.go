@@ -25,6 +25,10 @@ import (
 // none of those — a file and a symbol named in passing, with no source, no tag
 // and no line — is not a candidate, and plan 51's limits say why: telling one
 // into the SDK from a partial path into this repository would need a guess.
+// Nor is an epithet for the pin, "the pinned SDK": it names no source and no
+// tag, and this repository says "pinned" far more often of a test holding a
+// behaviour, so a rule keyed on the word would report prose rather than
+// citations. The registry writes the tag beside such a claim instead (#737).
 //
 // The last of those is what keeps the rung from being keyed on spelling. Each
 // named rule below recognises one way the corpus writes a citation, and a
@@ -137,8 +141,9 @@ var (
 	// untaggedSpec is the same epithet with no tag at all, a schema property
 	// quoted after it — which is to the spec what untaggedHead is to a module: a
 	// source and something inside it, and nothing to say which release. There is
-	// no version token for the sweep below to catch.
-	untaggedSpec = regexp.MustCompile(`\b(?:OpenAPI|bundled) spec\b`)
+	// no version token for the sweep below to catch. The corpus also names the
+	// spec for Stainless, the generator that builds the SDK from it (#737).
+	untaggedSpec = regexp.MustCompile(`\b(?:OpenAPI|bundled|Stainless) spec\b`)
 	// specFile is the spec the SDK bundles, named by its file, which only the
 	// SDK ships: a mention with no head in front of it is an untagged SDK
 	// citation however little else the sentence says. It is not a head, because

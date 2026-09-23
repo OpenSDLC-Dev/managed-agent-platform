@@ -332,10 +332,11 @@ func patchMetadata(existing map[string]string, raw json.RawMessage, emptyDeletes
 }
 
 // The metadata caps the reference documents identically for vaults (the
-// public vaults guide's limits table, plan 12 D7), agents (the pinned SDK's
-// create/update params, #66), and sessions (#289): at most 16 pairs, keys up
-// to 64 chars, values up to 512. Environments document none — recorded in
-// docs/DIVERGENCES.md.
+// public vaults guide's limits table, plan 12 D7), agents (the SDK's
+// create/update params, checked against anthropic-sdk-go v1.70.1 — betaagent.go
+// BetaAgentNewParams.Metadata and BetaAgentUpdateParams.Metadata, #66), and
+// sessions (#289): at most 16 pairs, keys up to 64 chars, values up to 512.
+// Environments document none — recorded in docs/DIVERGENCES.md.
 const (
 	metadataMaxPairs = 16
 	metadataKeyMax   = 64
@@ -467,8 +468,11 @@ func parseMCPServers(raw json.RawMessage) ([]json.RawMessage, error) {
 	return items, nil
 }
 
-// The reference's documented agent caps (the pinned SDK's create/update
-// params): at most 128 tools and 20 MCP servers. Its exact reject statuses
+// The reference's documented agent caps (the SDK's create/update params,
+// checked against anthropic-sdk-go v1.70.1 — betaagent.go
+// BetaAgentNewParams.Tools and BetaAgentNewParams.MCPServers and
+// BetaAgentUpdateParams.Tools and BetaAgentUpdateParams.MCPServers): at most
+// 128 tools and 20 MCP servers. Its exact reject statuses
 // and messages are unobserved, so the messages here are ours, and 128 counts
 // entries of tools[] — both recorded in docs/DIVERGENCES.md (#66).
 const (

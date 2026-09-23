@@ -767,6 +767,11 @@ func TestShapeFindings(t *testing.T) {
 			rules: []string{"untagged"},
 		},
 		{
+			name:  "the spec named for the generator that builds the SDK from it",
+			in:    "*Evidence: the pinned Stainless spec's delete operation (no force parameter).*",
+			rules: []string{"untagged"},
+		},
+		{
 			name:  "a source and the bundled spec's own path with no tag",
 			in:    "// (anthropic-sdk-go scripts/mock-spec.json.gz BetaSessionNewParams)",
 			rules: []string{"untagged"},

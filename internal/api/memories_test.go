@@ -11,9 +11,11 @@ import (
 	"testing"
 )
 
-// The memory wire surface (plan 36 slice 2, #52): shapes per the pinned SDK's
-// BetaManagedAgentsMemory and BetaManagedAgentsMemoryPrefix, rules per the spec
-// the SDK is generated from (the occupancy 409, checked against
+// The memory wire surface (plan 36 slice 2, #52): shapes per the SDK's
+// BetaManagedAgentsMemory and BetaManagedAgentsMemoryPrefix (checked against
+// anthropic-sdk-go v1.70.1 — betamemorystorememory.go BetaManagedAgentsMemory
+// and BetaManagedAgentsMemoryPrefix), rules per the spec the SDK is generated
+// from (the occupancy 409, checked against
 // anthropic-sdk-go v1.70.1 — spec
 // components.schemas.BetaManagedAgentsCreateMemoryParams; the no-op update,
 // checked against anthropic-sdk-go v1.70.1 — spec

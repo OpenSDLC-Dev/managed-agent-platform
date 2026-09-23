@@ -9,9 +9,10 @@ import (
 )
 
 // The memory-version wire surface (plan 36 slice 2, #52): one immutable
-// attributed row per non-no-op mutation, per the pinned SDK's
-// BetaManagedAgentsMemoryVersion, with the nulls the spec states for a
-// `deleted` operation and for redaction.
+// attributed row per non-no-op mutation, per the SDK's
+// BetaManagedAgentsMemoryVersion (checked against anthropic-sdk-go v1.70.1 —
+// betamemorystorememoryversion.go BetaManagedAgentsMemoryVersion), with the
+// nulls the spec states for a `deleted` operation and for redaction.
 
 func listVersions(t *testing.T, s *tserver, storeID, query string) []map[string]any {
 	t.Helper()

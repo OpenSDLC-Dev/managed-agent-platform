@@ -1169,8 +1169,8 @@ func TestSkillVersionAddressing(t *testing.T) {
 	wantErr(t, status, obj, http.StatusNotFound, "not_found_error")
 }
 
-// TestSkillLatestAliasRoundTripsToDownload pins the two-call flow the pinned
-// SDK's agent toolset performs when it materializes a skill into a sandbox
+// TestSkillLatestAliasRoundTripsToDownload pins the two-call flow the SDK's
+// agent toolset performs when it materializes a skill into a sandbox
 // (checked against anthropic-sdk-go v1.70.1 — skills.go
 // AgentToolContext.downloadSkill): retrieve the version addressed by the alias,
 // then download by the concrete id THAT CALL RETURNED. The client no longer
