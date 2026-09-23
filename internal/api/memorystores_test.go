@@ -8,10 +8,11 @@ import (
 	"time"
 )
 
-// The memory-store wire surface (plan 36 slice 1, #52): shapes per the pinned
-// SDK's BetaManagedAgentsMemoryStore, limits per the spec the SDK is generated
-// from (name 1–255 and no control characters, description ≤ 1024, the shared
-// metadata caps), checked against anthropic-sdk-go v1.70.1 — spec
+// The memory-store wire surface (plan 36 slice 1, #52): shapes per the SDK's
+// BetaManagedAgentsMemoryStore (checked against anthropic-sdk-go v1.70.1 —
+// betamemorystore.go BetaManagedAgentsMemoryStore), limits per the spec the SDK
+// is generated from (name 1–255 and no control characters, description ≤ 1024,
+// the shared metadata caps), checked against anthropic-sdk-go v1.70.1 — spec
 // components.schemas.BetaManagedAgentsCreateMemoryStoreRequest.
 
 func createMemoryStore(t *testing.T, s *tserver, name string) string {

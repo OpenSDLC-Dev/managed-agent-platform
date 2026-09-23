@@ -10,9 +10,10 @@ import (
 	"testing"
 )
 
-// The dream wire surface (plan 41, #475): shapes per the pinned SDK's
-// BetaDream, bounds per the spec the SDK is generated from (checked against
-// anthropic-sdk-go v1.70.1 — spec components.schemas.BetaCreateDreamRequest).
+// The dream wire surface (plan 41, #475): shapes per the SDK's BetaDream
+// (checked against anthropic-sdk-go v1.70.1 — betadream.go BetaDream), bounds
+// per the spec the SDK is generated from (checked against anthropic-sdk-go
+// v1.70.1 — spec components.schemas.BetaCreateDreamRequest).
 // The create's last rule is `update_existing`'s (slice 4): the target must be
 // the dream's own memory_store input, and at most one live in-place dream may
 // hold a store — a second is the 409 BetaTargetStoreHeldError names.

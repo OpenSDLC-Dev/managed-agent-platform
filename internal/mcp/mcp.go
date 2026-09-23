@@ -650,12 +650,12 @@ func usableName(name string) bool {
 // The `type` is required, not merely checked when present. An earlier shape
 // accepted a schema that simply omitted it, which let {} through as an
 // "unconstrained" contract — the same fabrication as the absent-schema case
-// below, arrived at from the other direction. Both MCP's schema and the pinned
-// SDK's own server require the root type: AddTool panics unless the decoded
-// schema's type is "object", and reads an absent type as not-"object" rather
-// than as a default (checked against go-sdk v1.7.0 — mcp/server.go
-// Server.AddTool). Anthropic's input_schema requires it too, so a schema
-// without it could not be offered to a model anyway.
+// below, arrived at from the other direction. Both MCP's schema and the SDK's
+// own server require the root type: AddTool panics unless the decoded schema's
+// type is "object", and reads an absent type as not-"object" rather than as a
+// default (checked against go-sdk v1.7.0 — mcp/server.go Server.AddTool).
+// Anthropic's input_schema requires it too, so a schema without it could not
+// be offered to a model anyway.
 //
 // Substituting {"type":"object"} for an absent schema was the first shape of
 // this and was wrong: it reads as "this tool takes no arguments", which is a

@@ -10,9 +10,11 @@ import (
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/api"
 )
 
-// The vault wire surface (plan 12 slice 2): shapes per the pinned SDK's
-// BetaManagedAgentsVault / BetaManagedAgentsCredential, limits per the public
-// docs (D7).
+// The vault wire surface (plan 12 slice 2): shapes per the SDK's
+// BetaManagedAgentsVault (checked against anthropic-sdk-go v1.70.1 —
+// betavault.go BetaManagedAgentsVault) and BetaManagedAgentsCredential (checked
+// against anthropic-sdk-go v1.70.1 — betavaultcredential.go
+// BetaManagedAgentsCredential), limits per the public docs (D7).
 
 func createVault(t *testing.T, s *tserver, name string) string {
 	t.Helper()

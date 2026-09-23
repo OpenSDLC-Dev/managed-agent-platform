@@ -25,6 +25,10 @@ import (
 // none of those — a file and a symbol named in passing, with no source, no tag
 // and no line — is not a candidate, and plan 51's limits say why: telling one
 // into the SDK from a partial path into this repository would need a guess.
+// Nor is an epithet for the pin, "the pinned SDK": it names no source and no
+// tag, and this repository says "pinned" far more often of a test holding a
+// behaviour, so a rule keyed on the word would report prose rather than
+// citations. The registry writes the tag beside such a claim instead (#737).
 //
 // The last of those is what keeps the rung from being keyed on spelling. Each
 // named rule below recognises one way the corpus writes a citation, and a
@@ -127,18 +131,19 @@ var (
 	packagePath  = regexp.MustCompile(`^[a-z][\w.-]*(?:/[\w.-]+)+$`)
 	majorVersion = regexp.MustCompile(`^[vV]\d+$`)
 	// specEpithet is the other way the corpus names a source: not by module but
-	// by what it is. The registry writes a tag and then the kind of document,
-	// which names the SDK's bundled copy at that tag and rots exactly like a
+	// by what it is. The registry writes a tag and then the kind of document —
+	// or Stainless, the generator that builds the SDK from it (#737) — which
+	// names the SDK's bundled copy at that tag and rots exactly like a
 	// coordinate — but carries no source token, so the head above cannot see
 	// it. These are the spec citations slice 2 migrates to a schema path, and a
 	// rung that could not see them would report the migration complete while
 	// every one of them remained.
-	specEpithet = regexp.MustCompile(`(v\d+\.\d+\.\d+)\s+(OpenAPI spec|bundled spec)`)
+	specEpithet = regexp.MustCompile(`(v\d+\.\d+\.\d+)\s+(OpenAPI spec|bundled spec|Stainless spec)`)
 	// untaggedSpec is the same epithet with no tag at all, a schema property
 	// quoted after it — which is to the spec what untaggedHead is to a module: a
 	// source and something inside it, and nothing to say which release. There is
 	// no version token for the sweep below to catch.
-	untaggedSpec = regexp.MustCompile(`\b(?:OpenAPI|bundled) spec\b`)
+	untaggedSpec = regexp.MustCompile(`\b(?:OpenAPI|bundled|Stainless) spec\b`)
 	// specFile is the spec the SDK bundles, named by its file, which only the
 	// SDK ships: a mention with no head in front of it is an untagged SDK
 	// citation however little else the sentence says. It is not a head, because

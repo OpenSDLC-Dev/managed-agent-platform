@@ -120,15 +120,16 @@ func TestAnHSMKeyGetsTheSmallerCeiling(t *testing.T) {
 	}
 }
 
-// Every protection level the pinned SDK defines, and the ceiling each resolves
-// to. HSM_SINGLE_TENANT is the row that matters: it is an HSM, it carries the
+// Every protection level the SDK defines, and the ceiling each resolves to —
+// held to the SDK's own enum, so a level a later release adds fails here until
+// it has a row. HSM_SINGLE_TENANT is the row that matters: it is an HSM, it carries the
 // 8 KiB bound, and a `!= HSM` test would have handed it 64 KiB. Resolving on an
 // affirmative software/external level instead means a protection level added to
 // the SDK after this code was written also lands on the smaller bound rather
 // than on a limit nobody checked.
 func TestEveryProtectionLevelResolvesItsCeiling(t *testing.T) {
 	ctx := context.Background()
-	for _, tc := range []struct {
+	cases := []struct {
 		level kmspb.ProtectionLevel
 		want  int
 	}{
@@ -138,7 +139,17 @@ func TestEveryProtectionLevelResolvesItsCeiling(t *testing.T) {
 		{kmspb.ProtectionLevel_HSM, gcpkms.MaxPlaintextBytesHSM},
 		{kmspb.ProtectionLevel_HSM_SINGLE_TENANT, gcpkms.MaxPlaintextBytesHSM},
 		{kmspb.ProtectionLevel_PROTECTION_LEVEL_UNSPECIFIED, gcpkms.MaxPlaintextBytesHSM},
-	} {
+	}
+	listed := map[kmspb.ProtectionLevel]bool{}
+	for _, tc := range cases {
+		listed[tc.level] = true
+	}
+	for v := range kmspb.ProtectionLevel_name {
+		if level := kmspb.ProtectionLevel(v); !listed[level] {
+			t.Errorf("protection level %s has no row", level)
+		}
+	}
+	for _, tc := range cases {
 		t.Run(tc.level.String(), func(t *testing.T) {
 			c, err := gcpkms.New(ctx, gcpkms.Config{
 				KeyName: gcpkmstest.KeyName,

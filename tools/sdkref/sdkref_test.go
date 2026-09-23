@@ -767,6 +767,11 @@ func TestShapeFindings(t *testing.T) {
 			rules: []string{"untagged"},
 		},
 		{
+			name:  "the spec named for the generator that builds the SDK from it",
+			in:    "*Evidence: the pinned Stainless spec's delete operation (no force parameter).*",
+			rules: []string{"untagged"},
+		},
+		{
 			name:  "a source and the bundled spec's own path with no tag",
 			in:    "// (anthropic-sdk-go scripts/mock-spec.json.gz BetaSessionNewParams)",
 			rules: []string{"untagged"},
@@ -850,6 +855,11 @@ func TestShapeFindings(t *testing.T) {
 		{
 			name:  "the spec named by epithet is still a source at a tag",
 			in:    "*Evidence: the v1.70.1 OpenAPI spec's `BetaManagedAgentsCreateSessionParams`.*",
+			rules: []string{"undated"},
+		},
+		{
+			name:  "and so is the spec named for its generator",
+			in:    "*Evidence: the v1.70.1 Stainless spec's `BetaManagedAgentsCreateSessionParams`.*",
 			rules: []string{"undated"},
 		},
 		{
@@ -1001,6 +1011,11 @@ func TestShapeFindings(t *testing.T) {
 		{
 			name:  "a dated claim naming the spec by what it is",
 			in:    "*Evidence: checked against the v1.70.1 OpenAPI spec's BetaSession.*",
+			rules: []string{"source-unnamed"},
+		},
+		{
+			name:  "or for its generator",
+			in:    "*Evidence: checked against the v1.70.1 Stainless spec's BetaSession.*",
 			rules: []string{"source-unnamed"},
 		},
 		{
