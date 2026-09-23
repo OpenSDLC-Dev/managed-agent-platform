@@ -19,8 +19,8 @@ import (
 const exitUnavailable = 2
 
 // unavailableMsg opens the line an unanswered GitHub prints. registry.yml's
-// summary names it, and TestTheWorkflowNamesTheUnavailableMessage holds the
-// two together.
+// summary names it, and TestTheSummaryRendersEveryOutcome holds the two
+// together.
 const unavailableMsg = "cannot determine issue state"
 
 const usage = `usage:
