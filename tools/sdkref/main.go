@@ -10,9 +10,11 @@ import (
 )
 
 // exitUnavailable separates "I could not resolve the module" from "the corpus
-// has rotted", which exit 1 reports. A run whose module was missing and a run
-// that found real defects must not look the same to whoever reads the summary
-// afterwards.
+// has rotted", which exit 1 reports, for a caller that runs the binary. A run
+// whose module was missing and a run that found real defects must not look the
+// same. sdk-bump.yml cannot see the code — `go run` exits 1 whenever its
+// program fails and make reports any failed recipe as 2 (#742) — so there the
+// output is what tells them apart.
 const exitUnavailable = 2
 
 const usage = `usage:

@@ -6,9 +6,12 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"go.yaml.in/yaml/v3"
 )
 
 // doc is a miniature registry carrying every shape the real one uses: a bare
@@ -552,5 +555,84 @@ func TestFetchStatesNamesTheRateLimit(t *testing.T) {
 	_, err := fetchStates(context.Background(), srv.URL, "o/r", nil)
 	if err == nil || !strings.Contains(err.Error(), "rate limit is exhausted") {
 		t.Fatalf("err = %v, want it to name the rate limit — a red run must not read as a rotted registry", err)
+	}
+}
+
+// renderStep is registry.yml's "render the findings" run: block, verbatim.
+func renderStep(t *testing.T) string {
+	t.Helper()
+	path := filepath.Join("..", "..", ".github", "workflows", "registry.yml")
+	src, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read %s: %v", path, err)
+	}
+	var wf struct {
+		Jobs map[string]struct {
+			Steps []struct {
+				Name string `yaml:"name"`
+				Run  string `yaml:"run"`
+			} `yaml:"steps"`
+		} `yaml:"jobs"`
+	}
+	if err := yaml.Unmarshal(src, &wf); err != nil {
+		t.Fatalf("parse %s: %v", path, err)
+	}
+	for _, s := range wf.Jobs["registry"].Steps {
+		if s.Name == "render the findings" {
+			return s.Run
+		}
+	}
+	t.Fatalf("%s has no \"render the findings\" step in job registry", path)
+	return ""
+}
+
+// TestTheSummaryRendersEveryOutcome runs registry.yml's summary step the way
+// Actions does, once per way the guard can end. The step cannot see the
+// tool's exit code (#742) — only zero, non-zero or none — so the failure
+// headline must name unavailableMsg, the one thing that tells a reader an
+// outage from rot; and a code the guard recorded must outrank a cancelled job.
+func TestTheSummaryRendersEveryOutcome(t *testing.T) {
+	if _, err := exec.LookPath("bash"); err != nil {
+		t.Fatalf("bash is required to run the workflow step: %v", err)
+	}
+	run := renderStep(t)
+	const clean = "docs/DIVERGENCES.md: clean (shape and issue state)\n"
+	cases := []struct {
+		name, rc, status, output, headline string
+	}{
+		{"clean", "0", "success", clean, "Clean:"},
+		{"findings", "2", "failure", "docs/DIVERGENCES.md: 1 finding(s)\nexit status 1\n", "The guard failed"},
+		{"GitHub unreachable", "2", "failure", unavailableMsg + ": dial tcp: i/o timeout\nexit status 2\n", "`" + unavailableMsg + "`"},
+		{"step never finished", "", "failure", "", "No exit code was recorded"},
+		{"cancelled before answering", "", "cancelled", "", "Cancelled before the guard could answer"},
+		{"cancelled after answering", "0", "cancelled", clean, "Clean:"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			if tc.output != "" {
+				if err := os.WriteFile(filepath.Join(dir, "findings.txt"), []byte(tc.output), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			summary := filepath.Join(dir, "summary.md")
+			cmd := exec.Command("bash", "-e", "-c", run)
+			cmd.Dir = dir
+			cmd.Env = append(os.Environ(), "RC="+tc.rc, "STATUS="+tc.status, "GITHUB_STEP_SUMMARY="+summary)
+			if out, err := cmd.CombinedOutput(); err != nil {
+				t.Fatalf("render step failed: %v\n%s", err, out)
+			}
+			got, err := os.ReadFile(summary)
+			if err != nil {
+				t.Fatal(err)
+			}
+			lines := strings.SplitN(string(got), "\n", 3)
+			if len(lines) < 3 || !strings.Contains(lines[1], tc.headline) {
+				t.Fatalf("RC=%q STATUS=%s: the headline does not contain %q:\n%s", tc.rc, tc.status, tc.headline, got)
+			}
+			if !strings.Contains(string(got), tc.output) {
+				t.Errorf("the summary does not carry the guard's output:\n%s", got)
+			}
+		})
 	}
 }
