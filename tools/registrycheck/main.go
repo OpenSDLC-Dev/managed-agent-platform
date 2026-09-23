@@ -10,13 +10,18 @@ import (
 )
 
 // exitUnavailable separates "I could not ask GitHub" from "the registry has
-// rotted", which log.Fatal's exit 1 reports. A scheduled run's summary is read
-// by someone who was not watching, and telling them the registry rotted when
-// GitHub was merely unreachable is the failure this whole tool argues against.
-// Only a caller that runs the binary sees the code, though: `go run` exits 1
-// whenever its program fails and make reports any failed recipe as 2 (#742),
-// so registry.yml's reader learns which from the message, not the code.
+// rotted", which log.Fatal's exit 1 reports, for a caller that runs the binary.
+// registry.yml is not one: `go run` exits 1 whenever its program fails and
+// make reports any failed recipe as 2 (#742). Its summary tells the two apart
+// by unavailableMsg instead — telling a reader who was not watching that the
+// registry rotted when GitHub was merely unreachable is the failure this whole
+// tool argues against.
 const exitUnavailable = 2
+
+// unavailableMsg opens the line an unanswered GitHub prints. registry.yml's
+// summary names it, and TestTheWorkflowNamesTheUnavailableMessage holds the
+// two together.
+const unavailableMsg = "cannot determine issue state"
 
 const usage = `usage:
   registrycheck [-file docs/DIVERGENCES.md] [-issues] [-repo owner/name] [-api URL]
@@ -47,9 +52,8 @@ func main() {
 		defer cancel()
 		if state, err = fetchStates(ctx, *api, *repo, Referenced(string(src))); err != nil {
 			// exitUnavailable, not 1: "I could not ask GitHub" and "the
-			// registry has rotted" are different facts. registry.yml's summary
-			// names this message's prefix, since the code never reaches it.
-			fmt.Fprintf(os.Stderr, "cannot determine issue state: %v\n", err)
+			// registry has rotted" are different facts.
+			fmt.Fprintf(os.Stderr, "%s: %v\n", unavailableMsg, err)
 			os.Exit(exitUnavailable)
 		}
 	}
@@ -58,8 +62,8 @@ func main() {
 		fmt.Printf("%s:%s\n", *file, f)
 	}
 	if len(findings) > 0 {
-		// The count is the last line so a scheduled run's log tail says how
-		// much rotted, not merely that something did.
+		// The count is the tool's last line so a scheduled run's log tail says
+		// how much rotted, not merely that something did.
 		log.Fatalf("%s: %d finding(s)", *file, len(findings))
 	}
 	scope := "shape"

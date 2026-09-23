@@ -554,3 +554,19 @@ func TestFetchStatesNamesTheRateLimit(t *testing.T) {
 		t.Fatalf("err = %v, want it to name the rate limit — a red run must not read as a rotted registry", err)
 	}
 }
+
+// TestTheWorkflowNamesTheUnavailableMessage holds registry.yml's summary to the
+// message this tool prints when it could not ask GitHub. The summary cannot
+// see the exit code (#742), so that message is the one thing telling a reader
+// an outage from rot; reword it here alone and the next outage reads as
+// findings.
+func TestTheWorkflowNamesTheUnavailableMessage(t *testing.T) {
+	path := filepath.Join("..", "..", ".github", "workflows", "registry.yml")
+	src, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read %s: %v", path, err)
+	}
+	if want := "`" + unavailableMsg + "`"; !strings.Contains(string(src), want) {
+		t.Fatalf("%s's summary does not name %s, the message this tool prints when it could not ask GitHub", path, want)
+	}
+}
