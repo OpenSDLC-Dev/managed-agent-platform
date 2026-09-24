@@ -1087,19 +1087,27 @@ scope predicate has exactly that shape. So `internal/api/scopematrix_test.go`:
    bodies and no migration carries an `ADD COLUMN` of these columns — so it is proved by a
    synthetic fixture rather than by the tree (§7.2). The same walk derives a **second set**: a
    table declaring none of the three while carrying a `REFERENCES` to one that does is an
-   **unscoped child**. This is a derivation too, not a shortlist, and it returns **eleven**
-   today: `memories` and `memory_versions` (`0029_memories.sql:8`, `:35`), `skill_versions`
+   **unscoped child**. This is a derivation too, not a shortlist, and it returns **ten** today:
+   `memories` and `memory_versions` (`0029_memories.sql:8`, `:35`), `skill_versions`
    (`0007_skills.sql:32`), `deployment_runs` (`0031_deployments.sql:127`), `agent_versions`
    (`0001_init.sql:30`), `worker_polls` (`0006_worker_polls.sql:15`), `vault_credentials`
    (`0011_vaults.sql:20`), `session_gate_tokens` (`0012_session_gate_tokens.sql:12`),
-   `session_resource_credentials` (`0020_session_resource_credentials.sql:14`), `mcp_catalogs`
-   (`0023_mcp_catalogs.sql:35`) and `work_session_tokens` (`0030_work_session_tokens.sql:16`).
+   `session_resource_credentials` (`0020_session_resource_credentials.sql:14`) and
+   `mcp_catalogs` (`0023_mcp_catalogs.sql:35`). The set has an **eleventh** member:
+   `work_session_tokens` (`0030_work_session_tokens.sql:16`) lost its key to
+   `0043_work_session_tokens_unkeyed.sql` (#643) and is now a **logical child** — `session_id`
+   unkeyed, its rows deleted by a trigger on `sessions` — which a walk that honours
+   `DROP CONSTRAINT` does not derive. The guard therefore **enrols it by name**, beside the ten
+   it derives, so that rule (g) still sees `internal/worktoken`'s statements once slice 5's
+   widening reaches them. It is the one member of either set that is named rather than
+   derived, the test states its reason, and a later logical child would need the same entry.
    No predicate rule can reach any of them, because they hold no column to predicate on. What
    keeps their rows from crossing a workspace is the parent's read, and rule (g) below
    **checks** that rather than trusting it — for all eleven, from slice 2, with the statements a
    later slice fixes riding the exemption list until it does. Naming a subset here and leaving
    the rest to inheritance would make step 2's promise — that both sets are derived, not
-   remembered — false for the second one, and would drop the member carrying the worst blast
+   remembered, bar the one logical child above — false for the second one, and would drop the
+   member carrying the worst blast
    radius: `vault_credentials`, which is why §7.5 enumerates its `internal/api` statements by
    hand instead of leaving them to slice 4's bulk (its four in `internal/vaultresolve` are named
    in step 1 above). **And sized, because eleven members reach much further than four did**: the
@@ -1214,8 +1222,8 @@ scope predicate has exactly that shape. So `internal/api/scopematrix_test.go`:
      rule (c) admits and `outcomes.go:118`'s `FROM files`, which slice 4 gives a predicate;
    - **(d)** an entry on the **exemption list carrying a one-line reason**.
 
-   And for every SQL literal naming an **unscoped child table** — step 2's second set, which no
-   predicate rule can reach — requires:
+   And for every SQL literal naming an **unscoped child table** — step 2's second set, the ten it
+   derives and the logical child it enrols by name, which no predicate rule can reach — requires:
    - **(g)** a scoped read of that child's **parent, in the same function**: rule (b)'s shape,
      applied where there is no column to predicate on — or the parent's scoped **insert**,
      dominating the statement the same way, which is the create route's shape: `agents.go:159`
@@ -1708,7 +1716,7 @@ statically: rule (g) checks that each unscoped child's parent is read under scop
 checks that the rows then land where the guard implies. A
 workspace-B credential reads its own `mcp_catalogs` (`0023:35-36`, `session_id` FK, no scope
 columns), its own `session_gate_tokens` (`0012:12-14`) and `work_session_tokens`
-(`0030:16-19`), and answers absent for A's. `memories`/`memory_versions` leave the
+(`0030:16-19`; unkeyed since 0043, §6.5), and answers absent for A's. `memories`/`memory_versions` leave the
 session-create fixture entirely — they hang off `memory_stores` (`0029:8-10`, `:35-37`), not off
 a session, so a session create writes neither; they are tested from a memory-store create. · A
 scheduled fire and a manual run in workspace B create a session in B, not `default` (via the
@@ -1776,7 +1784,7 @@ gate (`:130`) kept only for the missing-session 404, not for scope. · The by-id
 the clause before any lock suffix — including the ones a bulk count hides: **the events and SSE
 lane's entire scope gate is `sessionExists`** (`internal/api/events.go:1158`, statement `:1160`,
 `SELECT 1 FROM sessions WHERE id = $1`), which resolves the 404 for both the events list and the
-stream by bare id; `sessionSelfHosted` (`:1171`, statement `:1173-1174`) is the second such read
+stream by bare id; `sessionView` (`:1171`, statement `:1173-1174`) is the second such read
 and the append path's locked read (`:77-81`) the third; and in `threads.go`, `loadThread`
 (`:180`, statement `:181`) and `liveChildThreads` (`:450`, statement `:451`, `FOR UPDATE OF t`)
 are two more join-based reads that predicate nothing on the joined `sessions` row. The broker itself is sound —

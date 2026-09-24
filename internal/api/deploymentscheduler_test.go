@@ -153,6 +153,13 @@ func TestSchedulerFiresTheMostRecentDueOccurrence(t *testing.T) {
 	s := newTestServer(t)
 	agentID, envID := fixture(t, s)
 	deplID := createDeployment(t, s, scheduledBody(agentID, envID, "0 9 * * *", "UTC"))["id"].(string)
+	// Renamed before the tick, so the title check below tells the name the
+	// deployment carries at the fire from the one it was created with (#678).
+	const firedName = "Renamed order report"
+	if code, res := s.do(http.MethodPost, "/v1/deployments/"+deplID,
+		map[string]any{"name": firedName}); code != http.StatusOK {
+		t.Fatalf("rename deployment: status %d, body %v", code, res)
+	}
 	setResumedAt(t, s, deplID, time.Date(2026, 3, 10, 0, 0, 0, 0, time.UTC))
 
 	// Three occurrences are due (03-10, 03-11, 03-12, each 09:00); only the
@@ -174,19 +181,23 @@ func TestSchedulerFiresTheMostRecentDueOccurrence(t *testing.T) {
 		t.Fatalf("run settled as session=%v succeeded=%v err=%v, want the success arm", run.sessionID, run.succeededAt, run.errType)
 	}
 
-	// The fired session: linked, running (initial events start the loop),
-	// and unattributed.
+	// The fired session: linked, titled with the deployment's name (#678),
+	// running (initial events start the loop), and unattributed.
 	var (
 		sessDeplID, status *string
 		createdBy          *string
+		title              string
 	)
 	if err := s.pool.QueryRow(t.Context(),
-		`SELECT deployment_id, status, created_by FROM sessions WHERE id = $1`, *run.sessionID).
-		Scan(&sessDeplID, &status, &createdBy); err != nil {
+		`SELECT deployment_id, status, created_by, title FROM sessions WHERE id = $1`, *run.sessionID).
+		Scan(&sessDeplID, &status, &createdBy, &title); err != nil {
 		t.Fatal(err)
 	}
 	if sessDeplID == nil || *sessDeplID != deplID {
 		t.Errorf("session.deployment_id = %v, want %s", sessDeplID, deplID)
+	}
+	if title != firedName {
+		t.Errorf("session.title = %q, want the deployment's name at the fire %q", title, firedName)
 	}
 	if status == nil || *status != "running" {
 		t.Errorf("session.status = %v, want running", status)
@@ -445,6 +456,53 @@ func TestSchedulerFireFailureSettlesAndPauses(t *testing.T) {
 	rm := collect()
 	if got := fireCount(t, rm, "failed", "environment_archived_error"); got != 1 {
 		t.Errorf("fires{outcome=failed,error.type=environment_archived_error} = %d, want 1", got)
+	}
+}
+
+// A deployment whose memory store was deleted after it was created fails each
+// fire as classified, not as the 404 a session create answers the same store
+// with (#668): the classified wrap around that 404 is what makes a manual run
+// record session_resource_not_found_error on a 200, and a scheduled fire pause
+// the deployment on it, as for every other classified type.
+func TestDeletedMemoryStoreFailsAFireAsClassified(t *testing.T) {
+	s := newTestServer(t)
+	agentID, envID := fixture(t, s)
+	storeID := createMemoryStore(t, s, "fire-store")
+	body := scheduledBody(agentID, envID, "0 9 * * *", "UTC")
+	body["resources"] = []any{map[string]any{"type": "memory_store", "memory_store_id": storeID}}
+	deplID := createDeployment(t, s, body)["id"].(string)
+	setResumedAt(t, s, deplID, time.Date(2026, 3, 10, 0, 0, 0, 0, time.UTC))
+	if code, res := s.do(http.MethodDelete, "/v1/memory_stores/"+storeID, nil); code != http.StatusOK {
+		t.Fatalf("delete store: %d %v", code, res)
+	}
+
+	run := runDeployment(t, s, deplID)
+	re, _ := run["error"].(map[string]any)
+	if run["session_id"] != nil || re["type"] != "session_resource_not_found_error" {
+		t.Errorf("manual run = session %v, error %v; want no session and session_resource_not_found_error", run["session_id"], re)
+	}
+	if msg, _ := re["message"].(string); !strings.Contains(msg, storeID+" not found") {
+		t.Errorf("error.message = %q, want it to name the missing store", msg)
+	}
+	if code, d := s.do(http.MethodGet, "/v1/deployments/"+deplID, nil); code != http.StatusOK || d["status"] != "active" {
+		t.Fatalf("after the manual run: %d %v, want active — only a scheduled fire pauses", code, d["status"])
+	}
+
+	if err := api.SchedulerTick(t.Context(), s.pool, time.Date(2026, 3, 12, 9, 0, 10, 0, time.UTC)); err != nil {
+		t.Fatalf("tick: %v", err)
+	}
+	runs := scheduledRuns(t, s, deplID)
+	if len(runs) != 1 || runs[0].errType == nil || *runs[0].errType != "session_resource_not_found_error" {
+		t.Fatalf("scheduled runs = %+v, want one settled on session_resource_not_found_error", runs)
+	}
+	code, d := s.do(http.MethodGet, "/v1/deployments/"+deplID, nil)
+	if code != http.StatusOK {
+		t.Fatalf("get: %d %v", code, d)
+	}
+	reason, _ := d["paused_reason"].(map[string]any)
+	inner, _ := reason["error"].(map[string]any)
+	if d["status"] != "paused" || reason["type"] != "error" || inner["type"] != "session_resource_not_found_error" {
+		t.Errorf("deployment = status %v, paused_reason %v; want paused on session_resource_not_found_error", d["status"], reason)
 	}
 }
 

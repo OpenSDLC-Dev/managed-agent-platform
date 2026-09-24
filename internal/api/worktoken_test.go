@@ -10,17 +10,20 @@ import (
 	"net/http"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/provider"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/queue"
 )
 
 // The sessions token (plan 36 decision 15): a per-item bearer minted when a
 // polled item's session attaches a memory store, carried as the work item's
 // `secret`, and accepted on the routes the reference worker calls with it.
-// Until slice 6 lifts the self_hosted refusal, the attachment is planted
-// through the test seam — the stored element, written into the session's
-// resources directly, the way plan 35's slice 3 landed its substrate.
+// storeWorker plants the attachment through a test seam — the stored element,
+// written into the session's resources directly, the way plan 35's slice 3
+// landed its substrate — a shortcut from before slice 6 lifted the
+// self_hosted refusal; waitingStoreSession attaches through the API.
 
 // storeWorker provisions a self_hosted environment with its worker key, an
 // agent, a session with a store attached through the seam, and one queued
@@ -447,4 +450,170 @@ func TestSessionsTokenInsertFailureLeavesTheItemUnclaimed(t *testing.T) {
 	if _, _, token := pollItem(t, s, envID, key); token == "" {
 		t.Error("the next poll did not hand the item out with a token")
 	}
+}
+
+// TestPollDoesNotDeadlockAgainstTheSessionLock: a worker's poll meeting a
+// delete, or an interrupt, of the session it would claim for (#643), in each
+// order the two can take their locks: the delete (the interrupt) holds the
+// session row and then needs the item, to cascade into it (to cancel it), and
+// the claim holds the item while it mints the session's token. Each order is
+// pinned by parking one side on an advisory lock, not raced for, and every
+// side is the real code: the handlers, and a raw DELETE FROM sessions — what
+// a replica still on the previous build, or any future path, does.
+//
+// Session first: the holder parks with the session row held — the delete at
+// its tombstone, the interrupt at its event — and the poll must hand the item
+// out, token and all, without waiting for that row. Item first: the claim
+// parks at its token insert, the item already taken, while the holder goes
+// for the item; released, the claim finishes and the holder after it. A
+// delete leaves none of the session's tokens behind either way; item first is
+// the order where that depends on the cleanup running only after the cascade
+// into the item has waited the claim out.
+func TestPollDoesNotDeadlockAgainstTheSessionLock(t *testing.T) {
+	for _, h := range []struct {
+		name string
+		// parkAt is the table the holder inserts into while it holds the
+		// session row; "" runs no session-first case.
+		parkAt  string
+		deletes bool
+		start   func(s *tserver, sessionID string) <-chan reply
+	}{
+		{"delete", "deleted_sessions", true, func(s *tserver, sessionID string) <-chan reply {
+			return s.sendAsync(http.MethodDelete, "/v1/sessions/"+sessionID, nil, map[string]string{"x-api-key": testKey})
+		}},
+		{"interrupt", "events", false, func(s *tserver, sessionID string) <-chan reply {
+			return s.sendAsync(http.MethodPost, "/v1/sessions/"+sessionID+"/events",
+				map[string]any{"events": []any{map[string]any{"type": "user.interrupt"}}}, map[string]string{"x-api-key": testKey})
+		}},
+		{"raw_delete", "", true, func(s *tserver, sessionID string) <-chan reply {
+			done := make(chan reply, 1)
+			go func() {
+				_, err := s.pool.Exec(context.Background(), `DELETE FROM sessions WHERE id = $1`, sessionID)
+				done <- reply{code: http.StatusOK, err: err}
+			}()
+			return done
+		}},
+	} {
+		check := func(t *testing.T, s *tserver, logs func() string, sessionID string, held, polled reply) {
+			t.Helper()
+			if held.err != nil || held.code != http.StatusOK {
+				t.Errorf("the %s = %d %s (%v)", h.name, held.code, held.body, held.err)
+			}
+			wantItemWithToken(t, polled)
+			if h.deletes {
+				var left int
+				if err := s.pool.QueryRow(context.Background(),
+					`SELECT count(*) FROM work_session_tokens WHERE session_id = $1`, sessionID).Scan(&left); err != nil || left != 0 {
+					t.Errorf("%d sessions token(s) outlived their session's delete (%v)", left, err)
+				}
+			}
+			if strings.Contains(logs(), "40P01") {
+				t.Errorf("aborted as a deadlock:\n%s", logs())
+			}
+		}
+
+		if h.parkAt != "" {
+			t.Run(h.name+"/session_first", func(t *testing.T) {
+				s := newTestServer(t)
+				logs := captureWarnings(t)
+				envID, key, sessionID := waitingStoreSession(t, s)
+				gate, release := parkInsert(t, s, h.parkAt)
+				held := h.start(s, sessionID)
+				waitUntilBlockedOnALock(t, s.pool, gate, held)
+				polled := s.sendAsync(http.MethodGet, "/v1/environments/"+envID+"/work/poll", nil, asBearer(key))
+				var answer reply
+				answered := false
+				select {
+				case answer = <-polled:
+					answered = true
+				case <-time.After(15 * time.Second):
+					t.Errorf("the poll waited for the session row the %s holds", h.name)
+				}
+				release()
+				heldReply := awaitReply(t, held)
+				if !answered {
+					answer = awaitReply(t, polled)
+				}
+				check(t, s, logs, sessionID, heldReply, answer)
+			})
+		}
+
+		t.Run(h.name+"/item_first", func(t *testing.T) {
+			s := newTestServer(t)
+			logs := captureWarnings(t)
+			envID, key, sessionID := waitingStoreSession(t, s)
+			gate, release := parkInsert(t, s, "work_session_tokens")
+			polled := s.sendAsync(http.MethodGet, "/v1/environments/"+envID+"/work/poll", nil, asBearer(key))
+			claim := waitUntilBlockedOnALock(t, s.pool, gate, polled)
+			held := h.start(s, sessionID)
+			waitUntilBlockedOnALock(t, s.pool, claim, held)
+			release()
+			check(t, s, logs, sessionID, awaitReply(t, held), awaitReply(t, polled))
+		})
+	}
+}
+
+// wantItemWithToken asserts a poll's reply is an item carrying a secret — a
+// sessions token minted for its store session.
+func wantItemWithToken(t *testing.T, r reply) {
+	t.Helper()
+	var item struct {
+		ID     string  `json:"id"`
+		Secret *string `json:"secret"`
+	}
+	if r.err != nil || r.code != http.StatusOK || json.Unmarshal([]byte(r.body), &item) != nil || item.ID == "" || item.Secret == nil {
+		t.Errorf("poll = %d %s (%v); want the item, with its sessions token", r.code, r.body, r.err)
+	}
+}
+
+// waitingStoreSession reaches #643's state the way production does: a
+// self_hosted session with a memory store, whose turn called a worker's tool —
+// idle on requires_action, its tool_exec queued. It returns the environment,
+// its worker key and the session.
+func waitingStoreSession(t *testing.T, s *tserver) (envID, key, sessionID string) {
+	t.Helper()
+	agent := createAgent(t, s, map[string]any{"name": "wait", "model": "claude-opus-4-8",
+		"tools": []any{map[string]any{"type": "agent_toolset_20260401"}}})
+	envID = createEnvironment(t, s, map[string]any{"name": "wait", "config": map[string]any{"type": "self_hosted"}})["id"].(string)
+	key = issueKey(t, s.pool, envID, "wait")
+	storeID := createMemoryStore(t, s, "wait")
+	sessionID = createSession(t, s, map[string]any{"agent": agent["id"], "environment_id": envID,
+		"resources": []any{map[string]any{"type": "memory_store", "memory_store_id": storeID}}})["id"].(string)
+	sendEvents(t, s, sessionID, userMessage("run bash"))
+	turn := []provider.Chunk{
+		{Kind: provider.KindToolUse, ToolUse: &provider.ToolUse{ID: "toolu_bash", Name: "bash", Input: json.RawMessage(`{"command":"true"}`)}},
+		{Kind: provider.KindDone, StopReason: "tool_use", Usage: &domain.ModelUsage{InputTokens: 1, OutputTokens: 1}},
+	}
+	if found, err := newScriptedBrain(t, s.pool, turn).RunOnce(context.Background()); err != nil || !found {
+		t.Fatalf("brain: %v %v", found, err)
+	}
+	if st, live := s.sessionStatus(sessionID), s.liveWork(sessionID, queue.ToolExec); st != "idle" || live != 1 {
+		t.Fatalf("session %s with %d live tool_exec; want idle with 1", st, live)
+	}
+	return envID, key, sessionID
+}
+
+// parkInsert makes every insert into table wait until release is called — a
+// trigger takes an advisory lock that gate, a backend of this test, holds — so
+// whatever makes one stops there, holding what it has already locked.
+func parkInsert(t *testing.T, s *tserver, table string) (gate int, release func()) {
+	t.Helper()
+	ctx := context.Background()
+	if _, err := s.pool.Exec(ctx, `
+		CREATE FUNCTION map_test_park() RETURNS trigger LANGUAGE plpgsql AS $$
+		BEGIN PERFORM pg_advisory_xact_lock(643); RETURN NEW; END $$;
+		CREATE TRIGGER map_test_park BEFORE INSERT ON `+table+`
+		FOR EACH ROW EXECUTE FUNCTION map_test_park()`); err != nil {
+		t.Fatal(err)
+	}
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := tx.QueryRow(ctx, `SELECT pg_backend_pid() FROM pg_advisory_xact_lock(643)`).Scan(&gate); err != nil {
+		t.Fatal(err)
+	}
+	release = func() { _ = tx.Rollback(ctx) }
+	t.Cleanup(release)
+	return gate, release
 }

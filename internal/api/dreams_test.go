@@ -199,8 +199,6 @@ func TestDreamCreateRejections(t *testing.T) {
 			map[string]any{"type": "sessions", "session_ids": []any{sesn}, "memory_store_id": storeID}})},
 		{"zero session ids", with([]any{storeInput,
 			map[string]any{"type": "sessions", "session_ids": []any{}}})},
-		{"unknown memory store", with([]any{
-			map[string]any{"type": "memory_store", "memory_store_id": ghostStore}, sessionsInput})},
 		{"archived memory store", with([]any{
 			map[string]any{"type": "memory_store", "memory_store_id": archivedStore}, sessionsInput})},
 		{"unknown session", with([]any{storeInput,
@@ -231,6 +229,12 @@ func TestDreamCreateRejections(t *testing.T) {
 			wantErr(t, status, body, http.StatusBadRequest, "invalid_request_error")
 		})
 	}
+
+	// A well-formed store id no row carries is a 404, as session create answers
+	// it (#668); the archived store above stays a 400.
+	status, body := s.do(http.MethodPost, "/v1/dreams", with([]any{
+		map[string]any{"type": "memory_store", "memory_store_id": ghostStore}, sessionsInput}))
+	wantErrMsg(t, status, body, http.StatusNotFound, "not_found_error", "memory store "+ghostStore+" not found")
 
 	// These rules each have a later rule behind them that answers the same 400
 	// for a different reason — an id that fails the shape check is also an id

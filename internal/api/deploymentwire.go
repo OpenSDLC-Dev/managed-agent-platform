@@ -65,15 +65,16 @@ func principalPtr(ctx context.Context) *string {
 // reimplemented: its rules stay in one place, and its adjacency rule — a
 // system.message last, and immediately after a user.message — makes this
 // platform narrower than the union the reference publishes, which is plan 37
-// §8.1 entry 23. The environment kind it takes is not threaded through:
-// user.tool_result is the only type that kind gates, and parseInitialEvents
-// has already refused every type but the three a deployment admits.
+// §8.1 entry 23. The environment kind and credential it takes are not threaded
+// through: user.tool_result is the only type either gates, and
+// parseInitialEvents has already refused every type but the three a
+// deployment admits.
 //
 // The second is a file rubric with no object storage to snapshot into. That
 // one the normalizer cannot see, so it is checked here with the message the
 // event path already uses.
 func (s *server) validateDeploymentInitialEvents(initial []json.RawMessage) error {
-	if _, err := events.NormalizeInbound("", initial); err != nil {
+	if _, err := events.NormalizeInbound("", events.ManagementCredential, initial); err != nil {
 		return errInvalid("initial_events: %s", err)
 	}
 	if s.blobs != nil {

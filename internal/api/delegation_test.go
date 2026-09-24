@@ -27,10 +27,10 @@ func TestClientResultForADelegationCallIsRefused(t *testing.T) {
 	child := insertChild(t, s, sid, "running")
 	useID := appendOn(t, s, sid, domain.ID(child), false, domain.EventAgentToolUse, createAgentCall)
 
-	status, res := s.do(http.MethodPost, "/v1/sessions/"+sid+"/events", map[string]any{"events": []any{
+	status, res := readJSON(t, s.doRaw(http.MethodPost, "/v1/sessions/"+sid+"/events", map[string]any{"events": []any{
 		map[string]any{"type": "user.tool_result", "tool_use_id": useID,
 			"content": []any{map[string]any{"type": "text", "text": "sthr_forged"}}},
-	}})
+	}}, workerAuth(t, s, sid)))
 	wantErr(t, status, res, http.StatusBadRequest, "invalid_request_error")
 	if msg, _ := res["error"].(map[string]any)["message"].(string); !strings.Contains(msg, "platform-executed") {
 		t.Errorf("message = %q, want the platform-executed refusal", msg)

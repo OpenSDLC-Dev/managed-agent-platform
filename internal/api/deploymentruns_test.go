@@ -32,6 +32,13 @@ func TestDeploymentRunCreatesASessionAndRendersTheRun(t *testing.T) {
 	agentID, envID := fixture(t, s)
 	d := createDeployment(t, s, deploymentBody(agentID, envID))
 	deplID := d["id"].(string)
+	// Renamed before the fire, so the title check below tells the name the
+	// deployment carries at the fire from the one it was created with (#678).
+	const firedName = "Renamed order report"
+	if status, res := s.do(http.MethodPost, "/v1/deployments/"+deplID,
+		map[string]any{"name": firedName}); status != http.StatusOK {
+		t.Fatalf("rename deployment: status %d, body %v", status, res)
+	}
 
 	run := runDeployment(t, s, deplID)
 	wantFields(t, run, "type", "id", "deployment_id", "trigger_context",
@@ -80,14 +87,15 @@ func TestDeploymentRunCreatesASessionAndRendersTheRun(t *testing.T) {
 	if sess["status"] != "running" {
 		t.Errorf("session.status = %v, want running", sess["status"])
 	}
-	// A fired session inherits no metadata and no title (plan 37 §8.1 entry
-	// 24): metadata is the application layer's hook and the deployment's bag
-	// is not copied into it.
+	// A fired session is titled with the deployment's name and inherits no
+	// metadata, as the reference's fired sessions are (#678): metadata is the
+	// application layer's hook and the deployment's bag is not copied into it.
 	if meta, _ := sess["metadata"].(map[string]any); len(meta) != 0 {
 		t.Errorf("session.metadata = %v, want empty", sess["metadata"])
 	}
-	if sess["title"] != "" {
-		t.Errorf("session.title = %v, want unset", sess["title"])
+	if sess["title"] != firedName {
+		t.Errorf("session.title = %v, want the deployment's name at the fire %q (created as %v)",
+			sess["title"], firedName, d["name"])
 	}
 
 	// The success settlement is durable: succeeded_at is stamped beside the
@@ -333,8 +341,9 @@ func TestSessionsListFiltersByDeployment(t *testing.T) {
 	wantErr(t, status, res, http.StatusBadRequest, "invalid_request_error")
 }
 
-// Deleting a fired session must not unsettle its run (#520): the success
-// marker is succeeded_at, not the session link, so run history and a
+// Deleting a fired session must not unsettle its run (#520): the run keeps
+// its session_id verbatim, as the reference's does (#663), and the success
+// marker is succeeded_at rather than the link, so run history and a
 // schedule's last_run_at stay true about a run that did start.
 func TestDeletingTheSessionDoesNotUnsettleTheRun(t *testing.T) {
 	s := newTestServer(t)
@@ -402,32 +411,35 @@ func TestDeletingTheSessionDoesNotUnsettleTheRun(t *testing.T) {
 		Scan(&sessionRef, &succeededAt); err != nil {
 		t.Fatalf("read run row: %v", err)
 	}
-	if sessionRef != nil {
-		t.Errorf("session_id = %v after the delete, want the FK's null", *sessionRef)
+	if sessionRef == nil || *sessionRef != sessionID {
+		t.Errorf("session_id = %v after the delete, want %s kept verbatim", sessionRef, sessionID)
 	}
 	if succeededAt == nil {
 		t.Errorf("succeeded_at was lost with the session; the marker must be durable")
 	}
 
-	// The read surface renders the stale link honestly: session_id null AND
-	// error null — the published "exactly one is non-null" cannot survive
-	// session deletion, and a null error is what keeps the run a legible
-	// success (#520; the docs/DIVERGENCES.md entry).
+	// The read surface renders the link as it was written, dangling: the
+	// session answers 404 while the run still names it, so the published
+	// "exactly one of session_id or error is non-null" holds for the run's
+	// whole life (#663).
+	if status, res := s.do(http.MethodGet, "/v1/sessions/"+sessionID, nil); status != http.StatusNotFound {
+		t.Fatalf("get deleted session: status %d, body %v, want 404", status, res)
+	}
 	status, got := s.do(http.MethodGet, "/v1/deployment_runs/"+runID, nil)
 	if status != http.StatusOK {
 		t.Fatalf("get run after session delete: status %d, body %v", status, got)
 	}
 	wantFields(t, got, "type", "id", "deployment_id", "trigger_context",
 		"session_id", "error", "agent", "created_at")
-	if got["session_id"] != nil {
-		t.Errorf("session_id = %v, want null after the session's deletion", got["session_id"])
+	if got["session_id"] != sessionID {
+		t.Errorf("session_id = %v after the session's deletion, want %s", got["session_id"], sessionID)
 	}
 	if got["error"] != nil {
 		t.Errorf("error = %v, want null — the run is still a success", got["error"])
 	}
 
-	// And the has_error filter keys off the durable marker, not the stale
-	// link: the run stays in the success set and out of the failure set.
+	// And the has_error filter keys off the durable marker, not the link:
+	// the run stays in the success set and out of the failure set.
 	for _, c := range []struct {
 		param string
 		want  bool

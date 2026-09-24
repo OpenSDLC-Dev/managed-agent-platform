@@ -13,6 +13,7 @@ import (
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/api"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/blob/blobtest"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/identity"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/identity/identitytest"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/secrets/local"
@@ -580,6 +581,33 @@ func TestManagementKeyWinsOverAHumanCredential(t *testing.T) {
 	})
 	if status, errType := laneStatus(t, res); status != http.StatusUnauthorized || errType != "authentication_error" {
 		t.Errorf("bad x-api-key beside a valid admin token: status %d, error %q, want 401 authentication_error", status, errType)
+	}
+}
+
+// TestIdentityLaneCannotPostAToolResult: a human's console session is a
+// management credential, so it may not answer a tool call — the reference's
+// recorded 403 to exactly this (2026-09-02 batch2.json,
+// sessW.send.user.tool_result.console-auth; #662). Even an admin: the refusal
+// is the credential class's, not a role's, and the same human still posts a
+// user.message.
+func TestIdentityLaneCannotPostAToolResult(t *testing.T) {
+	s := newLaneServer(t)
+	sid := selfHostedSession(t, s.tserver)
+	useID := appendToolUse(t, s.tserver, sid, domain.EventAgentToolUse)
+	path := "/v1/sessions/" + sid + "/events"
+	admin := s.token("platform-admins")
+
+	status, errType, body := laneRead(t, s.bearer(http.MethodPost, path, admin, map[string]any{"events": []any{
+		map[string]any{"type": "user.tool_result", "tool_use_id": useID,
+			"content": []any{map[string]any{"type": "text", "text": "from a human"}}}}}))
+	if status != http.StatusForbidden || errType != "permission_error" {
+		t.Fatalf("a human's tool_result: status %d, error %q, want 403 permission_error (%s)", status, errType, body)
+	}
+	if msg := laneMessage(t, body); msg != toolResultRefusal(0) {
+		t.Errorf("message = %q, want %q", msg, toolResultRefusal(0))
+	}
+	if status, errType := laneStatus(t, s.bearer(http.MethodPost, path, admin, map[string]any{"events": []any{userMessage("hi")}})); status != http.StatusOK {
+		t.Errorf("a human's user.message: status %d, error %q, want 200", status, errType)
 	}
 }
 

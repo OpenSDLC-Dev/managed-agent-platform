@@ -387,8 +387,8 @@ func callEndpoint(declared, ready map[string]string, server string) (string, str
 }
 
 // runMCPTool answers one call at the endpoint callEndpoint cleared. The second
-// return is a transport failure worth a session.error, empty when the call
-// reached the server at all — including when the tool itself failed, which is a
+// return is a transport failure worth a session.error, empty when the server
+// answered the call at all — including when the tool itself failed, which is a
 // working server reporting a working failure.
 //
 // The connection is per call rather than per pass. A turn's MCP calls are few,

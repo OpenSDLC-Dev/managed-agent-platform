@@ -34,7 +34,7 @@ const (
 
 // wantMigrations tracks the number of embedded migration files; bump it when
 // a migration is added.
-const wantMigrations = 41
+const wantMigrations = 43
 
 func open(t *testing.T, dsn string) *pgxpool.Pool {
 	t.Helper()
@@ -114,6 +114,36 @@ func TestDeploymentRunScheduledAtIsTimestamptz(t *testing.T) {
 	}
 	if typ != "timestamp with time zone" {
 		t.Fatalf("deployment_runs.scheduled_at is %q, want timestamp with time zone", typ)
+	}
+}
+
+// A run keeps the id of the session it created after that session is deleted,
+// as the reference's run does (#663). Asserted by behavior rather than by
+// reading pg_constraint, because every foreign key shape fails it differently:
+// SET NULL rewrites the id, CASCADE deletes the run, and NO ACTION refuses the
+// session delete outright.
+func TestDeploymentRunKeepsItsSessionIDPastTheSession(t *testing.T) {
+	pool := open(t, pgtest.FreshDB(t))
+	ctx := context.Background()
+	seedSessionChain(t, pool)
+	for _, q := range []string{
+		`INSERT INTO deployments (id, name, agent_id, agent_version, environment_id)
+		 VALUES ('depl_1', 'd', 'agent_1', 1, 'env_1')`,
+		`INSERT INTO deployment_runs (id, deployment_id, trigger_type, agent_id, agent_version, session_id, succeeded_at)
+		 VALUES ('drun_1', 'depl_1', 'manual', 'agent_1', 1, 'sesn_1', now())`,
+		`DELETE FROM sessions WHERE id = 'sesn_1'`,
+	} {
+		if _, err := pool.Exec(ctx, q); err != nil {
+			t.Fatalf("%q: %v", q, err)
+		}
+	}
+	var sessionID *string
+	if err := pool.QueryRow(ctx,
+		`SELECT session_id FROM deployment_runs WHERE id = 'drun_1'`).Scan(&sessionID); err != nil {
+		t.Fatalf("read the run back: %v", err)
+	}
+	if sessionID == nil || *sessionID != "sesn_1" {
+		t.Errorf("session_id = %v after its session was deleted, want sesn_1 kept verbatim", sessionID)
 	}
 }
 
@@ -791,9 +821,18 @@ func TestDeploymentsAgentLiveIndexLeavesNoSort(t *testing.T) {
 		// constant within an agent and every agent comes out wholly live or
 		// wholly archived — which is not this index's case, and was the fixture's
 		// bug before 3 replaced 4 here.
-		`INSERT INTO deployments (id, name, agent_id, agent_version, environment_id, archived_at)
+		//
+		// created_at is spread a second apart because the column default, now(),
+		// is transaction-constant, and one shared timestamp is a statistic no
+		// production table has (#649). The verdict does not rest on it — the
+		// planner never drops a sort key on statistics, so a transposed
+		// (agent_id, id, created_at) sorts under either seed, measured both ways —
+		// but its costs do: under one timestamp an (agent_id, created_at) index
+		// drew a full Sort where the spread draws an Incremental Sort.
+		`INSERT INTO deployments (id, name, agent_id, agent_version, environment_id, archived_at, created_at)
 		 SELECT 'depl_' || g, 'd', 'agent_bulk_' || (g % 200 + 1), 1, 'env_1',
-		        CASE WHEN g % 3 = 0 THEN now() ELSE NULL END
+		        CASE WHEN g % 3 = 0 THEN now() ELSE NULL END,
+		        now() - (g || ' seconds')::interval
 		   FROM generate_series(1, 6000) g`,
 	} {
 		if _, err := pool.Exec(ctx, q); err != nil {
@@ -1142,4 +1181,267 @@ func TestOpenRejectsUnreachableDatabase(t *testing.T) {
 	if _, err := store.Open(context.Background(), ":::not a dsn"); err == nil {
 		t.Errorf("Open with a malformed DSN must fail")
 	}
+}
+
+// TestMigrateRetriesALockConflict: a migration that cannot take a lock live
+// traffic holds gives up at its own lock_timeout, which bounds how long every
+// reader of the table queues behind it, and Migrate retries the whole
+// transaction instead of failing the startup (#643). 0043 is such a migration
+// — it takes work_session_tokens and sessions ACCESS EXCLUSIVE — so a
+// transaction holding the tokens table is the traffic here. The holder lets go
+// only once Migrate has said it is retrying, so the test does not depend on
+// how long either side takes.
+func TestMigrateRetriesALockConflict(t *testing.T) {
+	ctx := context.Background()
+	pool, err := pgxpool.New(ctx, pgtest.FreshDB(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pool.Close()
+	if err := store.MigrateThrough(ctx, pool, "0041_primary_thread_unarchived_check.sql"); err != nil {
+		t.Fatalf("migrate through 0041: %v", err)
+	}
+	holder, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = holder.Rollback(ctx) }()
+	if _, err := holder.Exec(ctx, `LOCK TABLE work_session_tokens IN ACCESS SHARE MODE`); err != nil {
+		t.Fatal(err)
+	}
+
+	logs := &syncBuffer{}
+	prev := slog.Default()
+	prevOut, prevFlags := log.Writer(), log.Flags() // TestMigrateNamesTheDatabaseItChanges says why
+	slog.SetDefault(slog.New(slog.NewTextHandler(logs, nil)))
+	defer func() {
+		slog.SetDefault(prev)
+		log.SetOutput(prevOut)
+		log.SetFlags(prevFlags)
+	}()
+
+	migrated := make(chan error, 1)
+	go func() { migrated <- store.Migrate(ctx, pool) }()
+	for deadline := time.Now().Add(15 * time.Second); !strings.Contains(logs.String(), "retrying"); {
+		select {
+		case err := <-migrated:
+			t.Fatalf("Migrate returned %v before retrying the migration the held lock stopped; log: %s", err, logs.String())
+		case <-time.After(20 * time.Millisecond):
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("Migrate neither retried nor returned within 15s — it is waiting on the held lock; log: %s", logs.String())
+		}
+	}
+	if err := holder.Rollback(ctx); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-migrated:
+		if err != nil {
+			t.Fatalf("Migrate after the holder let go = %v", err)
+		}
+	case <-time.After(30 * time.Second):
+		t.Fatal("Migrate did not finish within 30s of the holder letting go")
+	}
+	var applied bool
+	if err := pool.QueryRow(ctx,
+		`SELECT EXISTS (SELECT 1 FROM schema_migrations WHERE version = '0043_work_session_tokens_unkeyed.sql')`).Scan(&applied); err != nil || !applied {
+		t.Errorf("0043 applied = %v (%v), want true", applied, err)
+	}
+}
+
+// TestMigrateRetriesADeadlock: 0043 holds work_session_tokens while it waits
+// for sessions, so live traffic holding sessions that then wants the tokens
+// table closes a cycle. The migration's own deadlock check has to run before
+// its lock_timeout does: that check is what makes the migration the victim
+// (40P01), and it is also what cancels an autovacuum holding the table, which
+// a lock_timeout firing first would wait out through every retry. Migrate
+// retries the deadlock, and the traffic's lock goes through. The holder's own
+// deadlock_timeout is a minute, so only the migration's check can break the
+// cycle and the test does not race the two timers.
+func TestMigrateRetriesADeadlock(t *testing.T) {
+	ctx := context.Background()
+	pool, err := pgxpool.New(ctx, pgtest.FreshDB(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pool.Close()
+	if err := store.MigrateThrough(ctx, pool, "0041_primary_thread_unarchived_check.sql"); err != nil {
+		t.Fatalf("migrate through 0041: %v", err)
+	}
+	holder, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = holder.Rollback(ctx) }()
+	for _, q := range []string{
+		`SET LOCAL deadlock_timeout = '1min'`,
+		`LOCK TABLE sessions IN ACCESS SHARE MODE`,
+	} {
+		if _, err := holder.Exec(ctx, q); err != nil {
+			t.Fatalf("%s: %v", q, err)
+		}
+	}
+
+	logs := &syncBuffer{}
+	prev := slog.Default()
+	prevOut, prevFlags := log.Writer(), log.Flags() // TestMigrateNamesTheDatabaseItChanges says why
+	slog.SetDefault(slog.New(slog.NewTextHandler(logs, nil)))
+	defer func() {
+		slog.SetDefault(prev)
+		log.SetOutput(prevOut)
+		log.SetFlags(prevFlags)
+	}()
+
+	migrated := make(chan error, 1)
+	go func() { migrated <- store.Migrate(ctx, pool) }()
+	for deadline := time.Now().Add(15 * time.Second); ; {
+		var waiting bool
+		if err := pool.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM pg_locks
+			WHERE relation = 'sessions'::regclass AND mode = 'AccessExclusiveLock' AND NOT granted)`).Scan(&waiting); err != nil {
+			t.Fatal(err)
+		}
+		if waiting {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("0043 never waited for sessions within 15s; log: %s", logs.String())
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	closed := make(chan error, 1)
+	go func() {
+		_, err := holder.Exec(ctx, `LOCK TABLE work_session_tokens IN ACCESS SHARE MODE`)
+		closed <- err
+	}()
+	select {
+	case err := <-closed:
+		if err != nil {
+			t.Fatalf("the traffic closing the cycle = %v, want its lock once the migration gives up", err)
+		}
+	case <-time.After(15 * time.Second):
+		t.Fatalf("the traffic's lock did not go through within 15s; log: %s", logs.String())
+	}
+	for deadline := time.Now().Add(5 * time.Second); !strings.Contains(logs.String(), "retrying"); {
+		select {
+		case err := <-migrated:
+			t.Fatalf("Migrate returned %v instead of retrying; log: %s", err, logs.String())
+		case <-time.After(10 * time.Millisecond):
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("Migrate neither retried nor returned within 5s of the migration giving up; log: %s", logs.String())
+		}
+	}
+	if !strings.Contains(logs.String(), "40P01") {
+		t.Fatalf("the migration gave up without its deadlock check having run — its lock_timeout fired first; log: %s", logs.String())
+	}
+	if err := holder.Rollback(ctx); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-migrated:
+		if err != nil {
+			t.Fatalf("Migrate after the holder let go = %v", err)
+		}
+	case <-time.After(30 * time.Second):
+		t.Fatal("Migrate did not finish within 30s of the holder letting go")
+	}
+	var applied bool
+	if err := pool.QueryRow(ctx,
+		`SELECT EXISTS (SELECT 1 FROM schema_migrations WHERE version = '0043_work_session_tokens_unkeyed.sql')`).Scan(&applied); err != nil || !applied {
+		t.Errorf("0043 applied = %v (%v), want true", applied, err)
+	}
+}
+
+// TestMigrateGivesUpAfterItsAttempts: a lock conflict that outlasts every
+// attempt fails the run with the conflict itself after exactly the configured
+// number of attempts — neither on the first nor never (#643). A holder keeps
+// work_session_tokens for the whole run, so every attempt's 0043 gives up at
+// its lock_timeout (55P03). The schedule is shortened to three attempts 10ms
+// apart; each attempt still waits out 0043's own 2s bound.
+func TestMigrateGivesUpAfterItsAttempts(t *testing.T) {
+	const attempts = 3
+	defer store.SetMigrateRetryForTest(attempts, 10*time.Millisecond)()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	pool, err := pgxpool.New(ctx, pgtest.FreshDB(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pool.Close()
+	if err := store.MigrateThrough(ctx, pool, "0041_primary_thread_unarchived_check.sql"); err != nil {
+		t.Fatalf("migrate through 0041: %v", err)
+	}
+	holder, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = holder.Rollback(ctx) }()
+	if _, err := holder.Exec(ctx, `LOCK TABLE work_session_tokens IN ACCESS SHARE MODE`); err != nil {
+		t.Fatal(err)
+	}
+
+	logs := &syncBuffer{}
+	prev := slog.Default()
+	prevOut, prevFlags := log.Writer(), log.Flags() // TestMigrateNamesTheDatabaseItChanges says why
+	slog.SetDefault(slog.New(slog.NewTextHandler(logs, nil)))
+	defer func() {
+		slog.SetDefault(prev)
+		log.SetOutput(prevOut)
+		log.SetFlags(prevFlags)
+	}()
+
+	// Each attempt logs this line before it runs 0043.
+	const attempt0043 = "version=0043_work_session_tokens_unkeyed.sql"
+	migrated := make(chan error, 1)
+	go func() { migrated <- store.Migrate(ctx, pool) }()
+	deadline := time.Now().Add(30 * time.Second)
+	for done := false; !done; {
+		select {
+		case err = <-migrated:
+			done = true
+		case <-time.After(20 * time.Millisecond):
+			if n := strings.Count(logs.String(), attempt0043); n > attempts || time.Now().After(deadline) {
+				cancel()
+				<-migrated // the goroutine reads the schedule the deferred restore writes
+				t.Fatalf("Migrate still running after %d attempts at 0043, configured for %d; log: %s",
+					n, attempts, logs.String())
+			}
+		}
+	}
+	if n := strings.Count(logs.String(), attempt0043); n != attempts {
+		t.Errorf("Migrate gave up after %d attempts at 0043, want %d; log: %s", n, attempts, logs.String())
+	}
+	if n := strings.Count(logs.String(), "retrying"); n != attempts-1 {
+		t.Errorf("Migrate logged %d retries, want %d; log: %s", n, attempts-1, logs.String())
+	}
+	var pgErr *pgconn.PgError
+	if !errors.As(err, &pgErr) || pgErr.Code != "55P03" {
+		t.Errorf("Migrate = %v, want the last attempt's lock timeout (55P03)", err)
+	}
+	var applied bool
+	if err := pool.QueryRow(ctx,
+		`SELECT EXISTS (SELECT 1 FROM schema_migrations WHERE version = '0043_work_session_tokens_unkeyed.sql')`).Scan(&applied); err != nil || applied {
+		t.Errorf("0043 applied = %v (%v), want false", applied, err)
+	}
+}
+
+// syncBuffer is a bytes.Buffer safe for a log handler writing from one
+// goroutine while the test reads from another.
+type syncBuffer struct {
+	mu sync.Mutex
+	b  bytes.Buffer
+}
+
+func (s *syncBuffer) Write(p []byte) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.b.Write(p)
+}
+
+func (s *syncBuffer) String() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.b.String()
 }

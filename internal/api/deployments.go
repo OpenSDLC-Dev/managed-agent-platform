@@ -119,9 +119,10 @@ func scanDeployment(row pgx.Row) (domain.Deployment, error) {
 // update the field (the trigger filter), it survives archiving (archive
 // touches no run row), and it is null until one completes (no rows, no
 // maximum). Success is judged from succeeded_at, never from session_id: the
-// session link is ON DELETE SET NULL, so keying off it let a deleted session
-// pull the field backwards to an older run — reporting false about a run that
-// did start (#520, migration 0032).
+// session link was ON DELETE SET NULL until migration 0042 (#663), so keying
+// off it let a deleted session pull the field backwards to an older run —
+// reporting false about a run that did start (#520, migration 0032) — and the
+// runs it nulled stay null.
 //
 // The `scheduled_at IS NOT NULL` conjunct is redundant against trigger_type
 // and load-bearing anyway: the occurrence index is partial on exactly that
@@ -332,7 +333,10 @@ func (s *server) getDeployment(r *http.Request) (any, error) {
 
 func (s *server) listDeployments(r *http.Request) (any, error) {
 	ctx := r.Context()
-	q := r.URL.Query()
+	q, err := queryValues(r)
+	if err != nil {
+		return nil, err
+	}
 	page, err := parsePage(q)
 	if err != nil {
 		return nil, err

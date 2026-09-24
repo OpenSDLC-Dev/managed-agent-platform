@@ -374,22 +374,25 @@ func (d *delegate) createAgent(ctx context.Context, tx pgx.Tx, call delegatedCal
 	if err != nil {
 		return "", false, err
 	}
-	// The spawn's four projection events, in the order the session view shows
-	// them: the creation, the coordinator's own copy of the task, the task as
-	// the child's first input, and the child's status.
+	// The spawn's four projection events: the creation, the coordinator's own
+	// copy of the task, then the child's status ahead of the task as its first
+	// input, because every recorded child's own list opens running and then
+	// received (#675). The session view shows all but the received, the status
+	// because it is cross-posted. Only the appends are ordered so:
+	// TransitionThread still updates the row the INSERT above wrote.
 	d.out.events = append(d.out.events, events.NewEvent{Type: domain.EventSessionThreadCreated, Payload: created})
 	target := events.ThreadPeer{ThreadID: child, AgentName: name}
 	sent, received, err := events.ThreadMessage(d.sid, d.caller, target, message)
 	if err != nil {
 		return "", false, err
 	}
-	d.out.events = append(d.out.events, sent, received)
+	d.out.events = append(d.out.events, sent)
 	pair, _, err := events.TransitionThread(ctx, tx, d.sid, events.ThreadTransition{
 		ThreadID: child, Status: domain.SessionRunning})
 	if err != nil {
 		return "", false, err
 	}
-	d.out.events = append(d.out.events, pair...)
+	d.out.events = append(append(d.out.events, pair...), received)
 	d.out.wakes = append(d.out.wakes, child)
 
 	answer, err := json.Marshal(map[string]any{"session_thread_id": child.String()})

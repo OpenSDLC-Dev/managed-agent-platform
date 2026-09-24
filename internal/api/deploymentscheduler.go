@@ -453,7 +453,7 @@ func (s *server) fireScheduledTx(ctx context.Context, f deploymentFire) (outcome
 	// stored form is what carries the sealed tokens: the cipher is never
 	// dialed here.
 	var (
-		envID, agentID        string
+		name, envID, agentID  string
 		agentVersion          int
 		vaultIDs              []string
 		initial, rawResources []byte
@@ -461,12 +461,12 @@ func (s *server) fireScheduledTx(ctx context.Context, f deploymentFire) (outcome
 		curResumedAt          time.Time
 	)
 	err = tx.QueryRow(ctx, `
-		SELECT environment_id, agent_id, agent_version, vault_ids, initial_events, resources,
+		SELECT name, environment_id, agent_id, agent_version, vault_ids, initial_events, resources,
 		       schedule_expression, schedule_timezone, schedule_resumed_at
 		  FROM deployments
 		 WHERE id = $1 AND archived_at IS NULL AND paused_at IS NULL
 		 FOR SHARE`, f.deploymentID).
-		Scan(&envID, &agentID, &agentVersion, &vaultIDs, &initial, &rawResources,
+		Scan(&name, &envID, &agentID, &agentVersion, &vaultIDs, &initial, &rawResources,
 			&curExpr, &curTZ, &curResumedAt)
 	if errors.Is(err, pgx.ErrNoRows) || isLostRace(err) {
 		return fireOutcomeLost, "", nil
@@ -507,7 +507,7 @@ func (s *server) fireScheduledTx(ctx context.Context, f deploymentFire) (outcome
 		return "", "", err
 	}
 
-	in, err := deploymentSessionIn(f.deploymentID, envID, agentID, agentVersion, vaultIDs, initial, rawResources)
+	in, err := deploymentSessionIn(f.deploymentID, name, envID, agentID, agentVersion, vaultIDs, initial, rawResources)
 	if err != nil {
 		return "", "", err
 	}
