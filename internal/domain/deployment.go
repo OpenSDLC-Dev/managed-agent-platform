@@ -241,9 +241,10 @@ type TriggerContext struct {
 // record of a single deployment execution. Records session creation success or
 // failure — no session lifecycle tracking." Exactly one of SessionID and Error
 // is non-null on a settled row — the writers' construction, not a CHECK
-// (0031). SessionID can revert to null after settlement when its session is
-// deleted, which is why success is judged from the stored succeeded_at and
-// never from this link (#520).
+// (0031). SessionID outlives its session, dangling, since migration 0042
+// (#663); on a run whose session was deleted before 0042 it reverted to null,
+// which is why success is judged from the stored succeeded_at and never from
+// this link (#520).
 type DeploymentRun struct {
 	ID             ID             `json:"id"` // drun_…
 	DeploymentID   ID             `json:"deployment_id"`

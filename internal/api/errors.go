@@ -152,6 +152,7 @@ const (
 	ctxKeySession     // the session a gate's Bearer token is scoped to
 	ctxKeyIdentity    // the verified human a request authenticated as (plan 31)
 	ctxKeyWorkSession // the session a worker's sessions token is scoped to (plan 36)
+	ctxKeyCredential  // the class of credential that signed the request (#662); see credentialFrom
 )
 
 func requestIDFrom(ctx context.Context) string {

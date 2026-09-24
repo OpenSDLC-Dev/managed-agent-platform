@@ -1518,16 +1518,15 @@ func TestNoSessionErrorToleratesOnlyARetriedTransientClone(t *testing.T) {
 }
 
 func TestSpawnedAgent(t *testing.T) {
-	spawn := func(id, name string) map[string]any {
-		return map[string]any{
-			"id": id, "type": "agent.tool_use", "name": "create_agent",
-			"input": map[string]any{"agent_name": name, "message": "ask the archivist for the code"},
-		}
+	// A spawn reaches the session view as the primary's session.thread_created
+	// and its copy of the task; the create_agent call and its answer are on no
+	// events surface (#675).
+	created := map[string]any{"type": "session.thread_created", "agent_name": "herald", "session_thread_id": "sthr_1"}
+	task := map[string]any{
+		"type": "agent.thread_message_sent", "to_agent_name": "herald", "to_session_thread_id": "sthr_1",
+		"content": textBlocks("ask the archivist for the code"),
 	}
-	answer := func(useID string, isErr bool) map[string]any {
-		return map[string]any{"type": "agent.tool_result", "tool_use_id": useID, "is_error": isErr}
-	}
-	tr := trialWith([]map[string]any{spawn("sevt_1", "herald"), answer("sevt_1", false)})
+	tr := trialWith([]map[string]any{created, task})
 
 	if err := SpawnedAgent("herald", Model).Check(t, tr); err != nil {
 		t.Errorf("want pass for the agent that was spawned: %v", err)
@@ -1548,22 +1547,16 @@ func TestSpawnedAgent(t *testing.T) {
 		t.Error("the premise does not hold for the agent that was spawned")
 	}
 
-	// A call the settlement refused is the model asking wrongly, not a spawn —
-	// and counting it would hold open the premise of the Platform grader beside
-	// this one, which would then red for a malformed call.
-	refused := trialWith([]map[string]any{spawn("sevt_2", "herald"), answer("sevt_2", true)})
+	// A call the settlement refused is the model asking wrongly, not a spawn: it
+	// creates no thread, so the session view carries nothing of it but what the
+	// agent said — and counting it would hold open the premise of the Platform
+	// grader beside this one, which would then red for a malformed call.
+	refused := trialWith([]map[string]any{{"type": "agent.message", "content": textBlocks("spawning the herald")}})
 	if err := SpawnedAgent("herald", Model).Check(t, refused); err == nil {
-		t.Error("want failure for a create_agent the settlement answered is_error")
+		t.Error("want failure for a session that created no thread")
 	}
 	if spawnedAgent("herald")(refused) {
-		t.Error("the premise holds for a spawn the settlement refused")
-	}
-
-	// A settlement answers every delegation call in the commit that emits it, so
-	// an unanswered create_agent is a turn that never settled.
-	unsettled := trialWith([]map[string]any{spawn("sevt_3", "herald")})
-	if err := SpawnedAgent("herald", Model).Check(t, unsettled); err == nil {
-		t.Error("want failure for a create_agent no result answers")
+		t.Error("the premise holds for a session that created no thread")
 	}
 }
 

@@ -15,6 +15,7 @@ import (
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/api"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/events"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/queue"
 )
 
 // --- helpers ---
@@ -41,13 +42,41 @@ func userMessage(text string) map[string]any {
 	}
 }
 
+// sendEvents posts a batch under the management key and returns the echo.
 func sendEvents(t *testing.T, s *tserver, sessionID string, evs ...map[string]any) []map[string]any {
 	t.Helper()
-	status, res := s.do(http.MethodPost, "/v1/sessions/"+sessionID+"/events", map[string]any{"events": evs})
+	return sendEventsAs(t, s, map[string]string{"x-api-key": testKey}, sessionID, evs...)
+}
+
+// sendEventsAs is sendEvents under the given credential headers.
+func sendEventsAs(t *testing.T, s *tserver, headers map[string]string, sessionID string, evs ...map[string]any) []map[string]any {
+	t.Helper()
+	status, res := readJSON(t, s.doRaw(http.MethodPost, "/v1/sessions/"+sessionID+"/events", map[string]any{"events": evs}, headers))
 	if status != http.StatusOK {
 		t.Fatalf("send events: status %d, body %v", status, res)
 	}
 	return listData(t, res)
+}
+
+// workerAuth is the credential a session's BYOC worker posts under: an
+// environment key for the session's own environment, as a Bearer, issued on
+// the session's first call and reused after. A user.tool_result is admitted
+// under environment credentials alone (#662).
+func workerAuth(t *testing.T, s *tserver, sessionID string) map[string]string {
+	t.Helper()
+	if key, ok := s.workerKeys[sessionID]; ok {
+		return asBearer(key)
+	}
+	var envID string
+	if err := s.pool.QueryRow(context.Background(),
+		`SELECT environment_id FROM sessions WHERE id = $1`, sessionID).Scan(&envID); err != nil {
+		t.Fatalf("session %s's environment: %v", sessionID, err)
+	}
+	if s.workerKeys == nil {
+		s.workerKeys = map[string]string{}
+	}
+	s.workerKeys[sessionID] = issueKey(t, s.pool, envID, "worker")
+	return asBearer(s.workerKeys[sessionID])
 }
 
 func keysOf(m map[string]any) []string {
@@ -105,7 +134,8 @@ func TestSendEchoShapesPerType(t *testing.T) {
 	toolID := appendToolUse(t, s, sid, domain.EventAgentToolUse)
 	riskyID := appendToolUseWithPerm(t, s, sid, "risky", "ask")
 
-	echo := sendEvents(t, s, sid,
+	// Under the worker's credential, since the batch carries a user.tool_result.
+	echo := sendEventsAs(t, s, workerAuth(t, s, sid), sid,
 		map[string]any{"type": "user.interrupt"},
 		map[string]any{"type": "user.tool_confirmation", "result": "deny",
 			"tool_use_id": riskyID, "deny_message": "too risky"},
@@ -262,8 +292,6 @@ func TestSendValidationSweep(t *testing.T) {
 		{"is_error not bool", map[string]any{"events": []any{map[string]any{
 			"type": "user.custom_tool_result", "custom_tool_use_id": "sevt_1",
 			"is_error": "yes"}}}, "boolean"},
-		{"tool_result on cloud env", map[string]any{"events": []any{map[string]any{
-			"type": "user.tool_result", "tool_use_id": "sevt_1"}}}, "self_hosted"},
 		{"thread id rejected", map[string]any{"events": []any{map[string]any{
 			"type": "user.interrupt", "session_thread_id": "sthr_1"}}}, "does not name a thread in this session"},
 		{"NUL in text", map[string]any{"events": []any{userMessage("a\x00b")}}, "U+0000"},
@@ -298,10 +326,12 @@ func TestSendValidationSweep(t *testing.T) {
 	}
 }
 
+// The BYOC pull protocol: a self_hosted session's worker answers a sandbox
+// call under its environment key.
 func TestSendToolResultOnSelfHosted(t *testing.T) {
 	s := newTestServer(t)
 	sid := selfHostedSession(t, s)
-	echo := sendEvents(t, s, sid, map[string]any{
+	echo := sendEventsAs(t, s, workerAuth(t, s, sid), sid, map[string]any{
 		"type": "user.tool_result", "tool_use_id": appendToolUse(t, s, sid, domain.EventAgentToolUse), "is_error": true,
 		"content": []any{map[string]any{"type": "text", "text": "exit 1"}},
 	})
@@ -310,18 +340,239 @@ func TestSendToolResultOnSelfHosted(t *testing.T) {
 	}
 }
 
+// toolResultRefusal is the 403 a management credential's user.tool_result
+// draws, at the batch index of the first one.
+func toolResultRefusal(index int) string {
+	return fmt.Sprintf("events[%d]: `user.tool_result` may only be sent with environment credentials "+
+		"(the self-hosted worker's environment key or its sessions token); "+
+		"an API key or Console session cannot post this event type", index)
+}
+
+// TestToolResultAdmissionIsByCredential pins who may post a user.tool_result
+// (#662): the reference decides by the credential that signed the request,
+// not by the session's environment kind. A management credential is refused
+// 403 permission_error — the recorded answer to a Console session on a
+// self_hosted session (2026-09-02 batch2.json,
+// sessW.send.user.tool_result.console-auth) — and a tool_result anywhere in a
+// batch refuses all of it, so nothing lands. The session's own environment
+// key is admitted (sessW.send.user.tool_result.env-key); another
+// environment's key never reaches the session at all.
+func TestToolResultAdmissionIsByCredential(t *testing.T) {
+	s := newTestServer(t)
+	sid := selfHostedSession(t, s)
+	useID := appendToolUse(t, s, sid, domain.EventAgentToolUse)
+	path := "/v1/sessions/" + sid + "/events"
+	result := map[string]any{"type": "user.tool_result", "tool_use_id": useID,
+		"content": []any{map[string]any{"type": "text", "text": "exit 0"}}}
+	mgmt := map[string]string{"x-api-key": testKey}
+	before := s.eventTypes(sid)
+	wasStatus := s.sessionStatus(sid)
+	untouched := func(after string) {
+		t.Helper()
+		if got := s.eventTypes(sid); strings.Join(got, ",") != strings.Join(before, ",") {
+			t.Errorf("after %s the log is %v, want it unchanged at %v", after, got, before)
+		}
+		if got := s.sessionStatus(sid); got != wasStatus {
+			t.Errorf("after %s the status is %q, want it unchanged at %q", after, got, wasStatus)
+		}
+		if n := s.liveWork(sid, queue.ModelTurn); n != 0 {
+			t.Errorf("after %s live model_turn = %d, want 0", after, n)
+		}
+	}
+
+	st, body := readJSON(t, s.doRaw(http.MethodPost, path, map[string]any{"events": []any{result}}, mgmt))
+	wantErrMsg(t, st, body, http.StatusForbidden, "permission_error", toolResultRefusal(0))
+	untouched("a management key's tool_result")
+
+	// Behind a message the whole batch is refused, the message included —
+	// which would otherwise have resumed the turn, the result answering the
+	// one outstanding call.
+	st, body = readJSON(t, s.doRaw(http.MethodPost, path, map[string]any{"events": []any{userMessage("carry on"), result}}, mgmt))
+	wantErrMsg(t, st, body, http.StatusForbidden, "permission_error", toolResultRefusal(1))
+	untouched("a mixed batch under a management key")
+
+	// A live key for another environment reaches no session outside it: the
+	// not-found an absent session gets, before the handler runs.
+	_, _, otherKey := selfHostedWorker(t, s, "elsewhere")
+	st, body = readJSON(t, s.doRaw(http.MethodPost, path, map[string]any{"events": []any{result}}, asBearer(otherKey)))
+	wantErr(t, st, body, http.StatusNotFound, "not_found_error")
+	untouched("another environment's key")
+
+	// The management key keeps every other event type: the gate is the event
+	// type's, not a lane-wide refusal.
+	sendEvents(t, s, sid, userMessage("still here"))
+
+	echo := sendEventsAs(t, s, workerAuth(t, s, sid), sid, result)
+	if echo[0]["type"] != "user.tool_result" || echo[0]["tool_use_id"] != useID {
+		t.Errorf("the worker's result echoed as %v", echo[0])
+	}
+}
+
+// TestToolResultRefusalOrder pins where the credential rule sits: in the
+// batch's normalization, after the session is read, so a management caller's
+// result to an absent session is the 404 and to an archived one the archived
+// 400, and within a batch the first event that fails decides the answer. The
+// reference's order in all three is unobserved (docs/DIVERGENCES.md).
+func TestToolResultRefusalOrder(t *testing.T) {
+	s := newTestServer(t)
+	mgmt := map[string]string{"x-api-key": testKey}
+	result := map[string]any{"type": "user.tool_result", "tool_use_id": "sevt_00000000000000000000000000"}
+
+	st, body := readJSON(t, s.doRaw(http.MethodPost, "/v1/sessions/"+domain.NewID("sesn").String()+"/events",
+		map[string]any{"events": []any{result}}, mgmt))
+	wantErr(t, st, body, http.StatusNotFound, "not_found_error")
+
+	archived := selfHostedSession(t, s)
+	if st, _ := s.do(http.MethodPost, "/v1/sessions/"+archived+"/archive", nil); st != http.StatusOK {
+		t.Fatalf("archive: %d", st)
+	}
+	st, body = readJSON(t, s.doRaw(http.MethodPost, "/v1/sessions/"+archived+"/events",
+		map[string]any{"events": []any{result}}, mgmt))
+	wantErr(t, st, body, http.StatusBadRequest, "invalid_request_error")
+	if msg, _ := body["error"].(map[string]any)["message"].(string); !strings.Contains(msg, "archived") {
+		t.Errorf("message %q, want the archived refusal", msg)
+	}
+
+	live := selfHostedSession(t, s)
+	st, body = readJSON(t, s.doRaw(http.MethodPost, "/v1/sessions/"+live+"/events",
+		map[string]any{"events": []any{map[string]any{"type": "user.bogus"}, result}}, mgmt))
+	wantErr(t, st, body, http.StatusBadRequest, "invalid_request_error")
+	if msg, _ := body["error"].(map[string]any)["message"].(string); !strings.HasPrefix(msg, "events[0]: unknown event type") {
+		t.Errorf("message %q, want events[0]'s own refusal", msg)
+	}
+	if got := s.eventTypes(live); len(got) != 0 {
+		t.Errorf("the refused batch left %v on the log", got)
+	}
+}
+
+// TestToolResultTypeSpellingsUnderAManagementKey posts raw bodies — which a
+// marshalled map could not carry: a duplicate key, a chosen escape — spelling
+// the type every way a second parse could read differently from the one that
+// decides it. Under a management key none may land a user.tool_result: a
+// spelling that decodes to user.tool_result draws the credential's 403, and
+// the rest the 400 an unknown, absent or ill-typed type, or a stray field,
+// gets (#662).
+func TestToolResultTypeSpellingsUnderAManagementKey(t *testing.T) {
+	s := newTestServer(t)
+	sid := selfHostedSession(t, s)
+	useID := appendToolUse(t, s, sid, domain.EventAgentToolUse)
+	path := "/v1/sessions/" + sid + "/events"
+	mgmt := map[string]string{"x-api-key": testKey}
+	rest := fmt.Sprintf(`"tool_use_id":%q,"content":[{"type":"text","text":"forged"}]`, useID)
+	before := s.eventTypes(sid)
+
+	const forbidden, invalid = http.StatusForbidden, http.StatusBadRequest
+	for _, tc := range []struct {
+		name  string
+		event string
+		want  int
+	}{
+		{"duplicate type, tool_result last", `{"type":"user.message","type":"user.tool_result",` + rest + `}`, forbidden},
+		{"duplicate type, tool_result first", `{"type":"user.tool_result","type":"user.message",` + rest + `}`, invalid},
+		{"escaped key", `{"\u0074ype":"user.tool_result",` + rest + `}`, forbidden},
+		{"escaped key after a plain one", `{"type":"user.message","\u0074ype":"user.tool_result",` + rest + `}`, forbidden},
+		{"escaped key before a plain one", `{"\u0074ype":"user.tool_result","type":"user.message",` + rest + `}`, invalid},
+		{"escaped dot in the value", `{"type":"user\u002etool_result",` + rest + `}`, forbidden},
+		{"every letter escaped", `{"type":"\u0075\u0073\u0065\u0072\u002e\u0074\u006f\u006f\u006c\u005f\u0072\u0065\u0073\u0075\u006c\u0074",` + rest + `}`, forbidden},
+		{"whitespace around the colon", "{\"type\"\t:\n \"user.tool_result\"," + rest + "}", forbidden},
+		{"Type beside type", `{"type":"user.message","Type":"user.tool_result",` + rest + `}`, invalid},
+		{"Type alone", `{"Type":"user.tool_result",` + rest + `}`, invalid},
+		{"TYPE alone", `{"TYPE":"user.tool_result",` + rest + `}`, invalid},
+		{"a space in the key", `{"type ":"user.tool_result",` + rest + `}`, invalid},
+		{"null type", `{"type":null,` + rest + `}`, invalid},
+		{"numeric type", `{"type":7,` + rest + `}`, invalid},
+		{"array type", `{"type":["user.tool_result"],` + rest + `}`, invalid},
+		{"object type", `{"type":{"type":"user.tool_result"},` + rest + `}`, invalid},
+		{"upper-case value", `{"type":"USER.TOOL_RESULT",` + rest + `}`, invalid},
+		{"mixed-case value", `{"type":"User.Tool_Result",` + rest + `}`, invalid},
+		{"leading space", `{"type":" user.tool_result",` + rest + `}`, invalid},
+		{"trailing space", `{"type":"user.tool_result ",` + rest + `}`, invalid},
+		{"escaped trailing space", `{"type":"user.tool_result\u0020",` + rest + `}`, invalid},
+		{"escaped NUL suffix", `{"type":"user.tool_result\u0000",` + rest + `}`, invalid},
+	} {
+		st, body := readJSON(t, s.doRaw(http.MethodPost, path, `{"events":[`+tc.event+`]}`, mgmt))
+		inner, _ := body["error"].(map[string]any)
+		wantType := map[int]string{forbidden: "permission_error", invalid: "invalid_request_error"}[tc.want]
+		if st != tc.want || inner["type"] != wantType {
+			t.Errorf("%s: %d %v, want %d %s", tc.name, st, body, tc.want, wantType)
+		}
+	}
+	if got := s.eventTypes(sid); strings.Join(got, ",") != strings.Join(before, ",") {
+		t.Errorf("the log is %v after every spelling was refused, want it unchanged at %v", got, before)
+	}
+}
+
+// TestToolResultOnACloudSession: the credential gate holds on a cloud session
+// too — the reference refused a Console session's result there with the same
+// 403 (2026-09-02 batch2.json, sessT.send.user.tool_result.for-platform-call).
+// What it answers an environment credential on a cloud session is unobserved,
+// because every recorded cloud probe was refused by that gate first, so the
+// environment-kind refusal this platform keeps behind it is an inference
+// (docs/DIVERGENCES.md). The console issues no key for a cloud environment;
+// this one is seeded directly.
+func TestToolResultOnACloudSession(t *testing.T) {
+	s := newTestServer(t)
+	agentID, envID := fixture(t, s)
+	sid := createSession(t, s, map[string]any{"agent": agentID, "environment_id": envID})["id"].(string)
+	useID := appendToolUse(t, s, sid, domain.EventAgentToolUse)
+	path := "/v1/sessions/" + sid + "/events"
+	body := map[string]any{"events": []any{map[string]any{"type": "user.tool_result", "tool_use_id": useID,
+		"content": []any{map[string]any{"type": "text", "text": "client says hi"}}}}}
+	before := s.eventTypes(sid)
+
+	st, res := readJSON(t, s.doRaw(http.MethodPost, path, body, map[string]string{"x-api-key": testKey}))
+	wantErrMsg(t, st, res, http.StatusForbidden, "permission_error", toolResultRefusal(0))
+
+	st, res = readJSON(t, s.doRaw(http.MethodPost, path, body, asBearer(issueKey(t, s.pool, envID, "cloud"))))
+	wantErr(t, st, res, http.StatusBadRequest, "invalid_request_error")
+	if msg, _ := res["error"].(map[string]any)["message"].(string); !strings.Contains(msg, "self_hosted") {
+		t.Errorf("message %q must name the environment kind that admits a tool result", msg)
+	}
+	if got := s.eventTypes(sid); strings.Join(got, ",") != strings.Join(before, ",") {
+		t.Errorf("the log is %v after two refusals, want it unchanged at %v", got, before)
+	}
+}
+
+// TestSessionsTokenPostsAToolResult: the per-item sessions token is an
+// environment credential here, because the reference worker sends its tool
+// results under it whenever the item carries one (checked against
+// anthropic-sdk-go v1.70.1 — worker.go EnvironmentWorker.handleItem) — so it
+// is admitted, where the 2026-09-02 recording saw the reference refuse a
+// decoded sessions_token (sessW.send.user.tool_result.sessions_token).
+// Registered in docs/DIVERGENCES.md.
+func TestSessionsTokenPostsAToolResult(t *testing.T) {
+	s := newTestServer(t)
+	_, envID, sid, _, key := storeWorker(t, s, "result")
+	workID, _, token := pollItem(t, s, envID, key)
+	if token == "" {
+		t.Fatal("no sessions token on the poll")
+	}
+	if st := status(t, s, http.MethodPost, "/v1/environments/"+envID+"/work/"+workID+"/ack", nil, asBearer(key)); st != http.StatusOK {
+		t.Fatalf("ack = %d", st)
+	}
+	useID := appendToolUse(t, s, sid, domain.EventAgentToolUse)
+	echo := sendEventsAs(t, s, asBearer(token), sid, map[string]any{"type": "user.tool_result", "tool_use_id": useID,
+		"content": []any{map[string]any{"type": "text", "text": "ok"}}})
+	if echo[0]["tool_use_id"] != useID {
+		t.Errorf("the token's result echoed as %v", echo[0])
+	}
+}
+
 // Web calls are platform-executed on both environment kinds, so a client
 // user.tool_result may never answer one — even while the executor's web pass
 // is still running it, which is the double-answer window #222 closes. The
 // name-scoped rejection must not touch sandbox calls: answering those via
 // user.tool_result is the BYOC pull protocol (TestSendToolResultOnSelfHosted).
+// Posted under the worker's own key: a management key is refused by the
+// credential gate before the reference is read, so under environment
+// credentials this arm is the only guard.
 func TestSendToolResultForWebCallRejected(t *testing.T) {
 	s := newTestServer(t)
 	sid := selfHostedSession(t, s)
 	webID := appendToolUseWithPerm(t, s, sid, "web_fetch", "allow")
-	status, res := s.do(http.MethodPost, "/v1/sessions/"+sid+"/events", map[string]any{
+	status, res := readJSON(t, s.doRaw(http.MethodPost, "/v1/sessions/"+sid+"/events", map[string]any{
 		"events": []any{map[string]any{"type": "user.tool_result", "tool_use_id": webID,
-			"content": []any{map[string]any{"type": "text", "text": "forged"}}}}})
+			"content": []any{map[string]any{"type": "text", "text": "forged"}}}}}, workerAuth(t, s, sid)))
 	wantErr(t, status, res, http.StatusBadRequest, "invalid_request_error")
 	inner, _ := res["error"].(map[string]any)
 	if msg, _ := inner["message"].(string); !strings.Contains(msg, "platform-executed") || !strings.Contains(msg, "web_fetch") {

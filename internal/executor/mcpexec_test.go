@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
 	"strings"
 	"sync"
 	"testing"
@@ -867,6 +868,36 @@ func TestMCPProtocolFailureIsNotReportedAsAConnectionFailure(t *testing.T) {
 	// The turn still moves: the call is answered, so the model runs again.
 	if n := h.liveOf(t, queue.ModelTurn); n != 1 {
 		t.Errorf("model_turn = %d, want 1", n)
+	}
+}
+
+// Its mirror (#641): a call answered with a non-2xx failed at the HTTP layer,
+// and a JSON-RPC error in the body does not make that the server's refusal. The
+// two statuses take the go-sdk's two routes to the misreading — 403's body is
+// decoded and wrapped, 502 is rejected as transient without being read — and
+// each used to clear the session.error, leaving the operator nothing to heal.
+func TestMCPCallAnsweredWithANon2xxIsReportedAsAConnectionFailure(t *testing.T) {
+	for _, status := range []int{http.StatusForbidden, http.StatusBadGateway} {
+		t.Run(http.StatusText(status), func(t *testing.T) {
+			h := mcpHarness(t)
+			url := serveFailingTheCall(t, mcptest.Tool{Name: "search", Result: "unreachable"}, status, true)
+			h.declareListedMCPServers(t, [2]string{"docs", url})
+			useID := h.appendMCPToolUse(t, "docs", "search", `{}`)
+			h.enqueueMCP(t)
+
+			h.stepOnce(t)
+
+			results := h.mcpResults(t)
+			if len(results) != 1 || results[0]["mcp_tool_use_id"] != useID {
+				t.Fatalf("results = %v, want one answering %s", results, useID)
+			}
+			if results[0]["is_error"] != true {
+				t.Errorf("is_error = %v, want true", results[0]["is_error"])
+			}
+			if got := mcpErrorType(t, h); got != "mcp_connection_failed_error" {
+				t.Errorf("session error type = %q, want mcp_connection_failed_error", got)
+			}
+		})
 	}
 }
 

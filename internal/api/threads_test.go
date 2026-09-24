@@ -354,9 +354,11 @@ func TestThreadArchive(t *testing.T) {
 	primary := domain.PrimaryThreadID(domain.ID(sid)).String()
 	path := "/v1/sessions/" + sid + "/threads/"
 
+	// The reference's own sentence (recorded, #674): ours carried nothing it
+	// withholds, so nothing was lost adopting it.
 	status, body := s.do(http.MethodPost, path+primary+"/archive", nil)
 	wantErr(t, status, body, http.StatusBadRequest, "invalid_request_error")
-	if msg := errMessage(body); !strings.Contains(msg, "primary thread cannot be archived") {
+	if msg := errMessage(body); msg != "The primary thread cannot be archived; archive the session instead." {
 		t.Errorf("message = %q", msg)
 	}
 	running := insertChild(t, s, sid, "running")

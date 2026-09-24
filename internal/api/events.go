@@ -36,6 +36,38 @@ func platformExecuted(name string) bool {
 	return toolset.IsWebTool(name) || toolset.IsDelegationTool(name)
 }
 
+// wireHiddenTools are the calls no events list or stream of a session that
+// delegates renders, nor the answers to them: the six delegation tools, of
+// which the reference's lists show neither half on any surface (#675) — a
+// spawn reads there as session.thread_created and the
+// agent.thread_message_sent/_received pair. The rows stay in the log, where
+// the thread's replay, the tool-result validation platformExecuted steers and
+// the runnable classification read them.
+var wireHiddenTools = toolset.AllDelegationTools()
+
+// eventsView is what an events surface renders under, settled with its 404
+// from the session row the request reads anyway.
+type eventsView struct {
+	// wide: the surface takes the self_hosted widening (plan 35 decision 13 i).
+	wide bool
+	// delegates: the session's snapshot carries a roster, so its surfaces hide
+	// wireHiddenTools. Only there does the brain class the six names as
+	// delegation calls — all six on every thread, the half a thread was never
+	// offered included, so a call across the roles is hidden with its is_error
+	// answer. On a single-agent session one of the names is an unknown tool
+	// like any other (#567) and renders as one, so its lists skip the filter —
+	// and the lookup it makes per tool result — outright.
+	delegates bool
+}
+
+// apply sets the list-query fields the view decides.
+func (v eventsView) apply(q *events.ListQuery) {
+	q.ThreadToolCalls = v.wide
+	if v.delegates {
+		q.HideTools = wireHiddenTools
+	}
+}
+
 // sendSessionEvents implements POST /v1/sessions/{id}/events. The body is
 // always a batch ({"events":[…]}); the response echoes the persisted events
 // as {"data":[…]} with server-assigned ids.
@@ -68,8 +100,8 @@ func (s *server) sendSessionEvents(r *http.Request) (any, error) {
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
-	// user.tool_result is only valid on self_hosted environments, so the
-	// batch is validated against the session's environment kind.
+	// user.tool_result is valid only under a worker's credential and only on
+	// self_hosted environments, so the batch is validated against both.
 	var envKind, status string
 	var envID domain.ID
 	var sessionArchivedAt *time.Time
@@ -93,7 +125,12 @@ func (s *server) sendSessionEvents(r *http.Request) (any, error) {
 		return nil, err
 	}
 
-	newEvents, err := events.NormalizeInbound(envKind, rawEvents)
+	// A management credential's user.tool_result is the reference's 403, on
+	// every session (#662); the transaction rolls back, so nothing lands.
+	newEvents, err := events.NormalizeInbound(envKind, credentialFrom(ctx), rawEvents)
+	if errors.Is(err, events.ErrEnvironmentCredentialRequired) {
+		return nil, errForbidden(err.Error())
+	}
 	if err != nil {
 		return nil, errInvalid("%s", err)
 	}
@@ -729,7 +766,7 @@ func (s *server) interruptSessionInTx(ctx context.Context, tx pgx.Tx, sessionID 
 	// the session stopped. It is threadless, which is the session-wide spelling
 	// RouteInbound would leave untouched, and unstamped, as the handler leaves
 	// a session-wide interrupt.
-	batch, err := events.NormalizeInbound(envKind, []json.RawMessage{json.RawMessage(`{"type":"user.interrupt"}`)})
+	batch, err := events.NormalizeInbound(envKind, events.ManagementCredential, []json.RawMessage{json.RawMessage(`{"type":"user.interrupt"}`)})
 	if err != nil {
 		return nil, err
 	}
@@ -844,7 +881,7 @@ func (s *server) postDreamStageInTx(ctx context.Context, tx pgx.Tx, sessionID, t
 		"type":    "user.message",
 		"content": []any{map[string]any{"type": "text", "text": text}},
 	})
-	batch, err := events.NormalizeInbound(envKind, []json.RawMessage{json.RawMessage(msg)})
+	batch, err := events.NormalizeInbound(envKind, events.ManagementCredential, []json.RawMessage{json.RawMessage(msg)})
 	if err != nil {
 		return nil, err
 	}
@@ -917,8 +954,8 @@ func (s *server) listSessionEvents(r *http.Request) (any, error) {
 	if err := checkID(id, "session"); err != nil {
 		return nil, err
 	}
-	return s.listEvents(r, id, events.ListQuery{Scope: events.ScopeSession}, true, func(ctx context.Context) (bool, error) {
-		return s.sessionSelfHosted(ctx, id)
+	return s.listEvents(r, id, events.ListQuery{Scope: events.ScopeSession}, true, func(ctx context.Context) (eventsView, error) {
+		return s.sessionView(ctx, id)
 	})
 }
 
@@ -927,8 +964,8 @@ func (s *server) listSessionEvents(r *http.Request) (any, error) {
 // params; the thread lists carry none, so there they are refused rather than
 // silently defaulted. resolve settles the 404 — after the params, so a bad
 // request on a missing resource stays a 400, as every list here answers —
-// and reports whether this surface takes the self_hosted widening.
-func (s *server) listEvents(r *http.Request, id string, query events.ListQuery, filters bool, resolve func(context.Context) (bool, error)) (any, error) {
+// and the view this surface renders under.
+func (s *server) listEvents(r *http.Request, id string, query events.ListQuery, filters bool, resolve func(context.Context) (eventsView, error)) (any, error) {
 	ctx := r.Context()
 	q := r.URL.Query()
 	if !filters {
@@ -988,11 +1025,11 @@ func (s *server) listEvents(r *http.Request, id string, query events.ListQuery, 
 		*dst = t
 	}
 
-	wide, err := resolve(ctx)
+	view, err := resolve(ctx)
 	if err != nil {
 		return nil, err
 	}
-	query.ThreadToolCalls = wide
+	view.apply(&query)
 	evs, err := s.log.List(ctx, domain.ID(id), query)
 	if err != nil {
 		return nil, err
@@ -1030,16 +1067,16 @@ func (s *server) streamSessionEvents(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, err)
 		return
 	}
-	s.streamEvents(w, r, id, events.ListQuery{Scope: events.ScopeSession}, func(ctx context.Context) (bool, error) {
-		return s.sessionSelfHosted(ctx, id)
+	s.streamEvents(w, r, id, events.ListQuery{Scope: events.ScopeSession}, func(ctx context.Context) (eventsView, error) {
+		return s.sessionView(ctx, id)
 	})
 }
 
 // streamEvents tails one surface of a session's log: scope selects the rows
 // and, through the broker, the preview frames (a thread's frames reach only
-// that thread's subscribers). resolve settles the 404 and the widening — after
+// that thread's subscribers). resolve settles the 404 and the view — after
 // the params, as listEvents does.
-func (s *server) streamEvents(w http.ResponseWriter, r *http.Request, id string, scope events.ListQuery, resolve func(context.Context) (bool, error)) {
+func (s *server) streamEvents(w http.ResponseWriter, r *http.Request, id string, scope events.ListQuery, resolve func(context.Context) (eventsView, error)) {
 	ctx := r.Context()
 	q := r.URL.Query()
 
@@ -1051,12 +1088,12 @@ func (s *server) streamEvents(w http.ResponseWriter, r *http.Request, id string,
 		}
 		previews[v] = true
 	}
-	wide, err := resolve(ctx)
+	view, err := resolve(ctx)
 	if err != nil {
 		writeError(w, r, err)
 		return
 	}
-	scope.ThreadToolCalls = wide
+	view.apply(&scope)
 	sub := s.broker.SubscribeThread(domain.ID(id), scope.ThreadID)
 	defer sub.Close()
 
@@ -1333,18 +1370,33 @@ func (s *server) sessionExists(ctx context.Context, id string) error {
 	return err
 }
 
-// sessionSelfHosted reports whether a session's environment is self_hosted —
-// the view rule's whole predicate (plan 35 decision 13 i) — and resolves the
-// same 404 sessionExists does, so the session surfaces pay one round trip for
-// both. The kind is not on the session row, hence the join.
-func (s *server) sessionSelfHosted(ctx context.Context, id string) (bool, error) {
+// sessionView reads a session surface's view — widened when the environment
+// is self_hosted, the view rule's whole predicate (plan 35 decision 13 i), and
+// filtered when the snapshot carries a roster — and resolves the same 404
+// sessionExists does, so the session surfaces pay one round trip for all
+// three. The kind is not on the session row, hence the join.
+func (s *server) sessionView(ctx context.Context, id string) (eventsView, error) {
 	var kind string
+	var multiagent []byte
 	err := s.pool.QueryRow(ctx,
-		`SELECT e.kind FROM sessions s JOIN environments e ON e.id = s.environment_id WHERE s.id = $1`, id).Scan(&kind)
+		`SELECT e.kind, s.resolved_agent->'multiagent' FROM sessions s JOIN environments e ON e.id = s.environment_id WHERE s.id = $1`,
+		id).Scan(&kind, &multiagent)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return false, errNotFound("session %s not found", id)
+		return eventsView{}, errNotFound("session %s not found", id)
 	}
-	return kind == string(domain.EnvSelfHosted), err
+	return eventsView{wide: kind == string(domain.EnvSelfHosted), delegates: hasRoster(multiagent)}, err
+}
+
+// hasRoster reports whether a session snapshot's multiagent is a non-empty
+// roster: the brain's own test for a coordinator (internal/brain/mcptools.go
+// hasRoster), spelled the same way, because the two must agree on which
+// sessions delegate (eventsView.delegates). Decoded rather than measured for
+// the reason that one gives — a single agent stores an explicit JSON null.
+func hasRoster(multiagent []byte) bool {
+	var p struct {
+		Agents []json.RawMessage `json:"agents"`
+	}
+	return json.Unmarshal(multiagent, &p) == nil && len(p.Agents) > 0
 }
 
 // idsOf converts event id strings to domain ids for a stop reason.
