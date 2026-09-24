@@ -1145,8 +1145,8 @@ func TestOpenRejectsUnreachableDatabase(t *testing.T) {
 }
 
 // TestMigrateRetriesALockConflict: a migration that cannot take a lock live
-// traffic holds gives up within its own lock_timeout rather than queueing
-// every reader of the table behind it, and Migrate retries the whole
+// traffic holds gives up at its own lock_timeout, which bounds how long every
+// reader of the table queues behind it, and Migrate retries the whole
 // transaction instead of failing the startup (#643). 0043 is such a migration
 // — it takes work_session_tokens and sessions ACCESS EXCLUSIVE — so a
 // transaction holding the tokens table is the traffic here. The holder lets go
@@ -1192,6 +1192,110 @@ func TestMigrateRetriesALockConflict(t *testing.T) {
 		if time.Now().After(deadline) {
 			t.Fatalf("Migrate neither retried nor returned within 15s — it is waiting on the held lock; log: %s", logs.String())
 		}
+	}
+	if err := holder.Rollback(ctx); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-migrated:
+		if err != nil {
+			t.Fatalf("Migrate after the holder let go = %v", err)
+		}
+	case <-time.After(30 * time.Second):
+		t.Fatal("Migrate did not finish within 30s of the holder letting go")
+	}
+	var applied bool
+	if err := pool.QueryRow(ctx,
+		`SELECT EXISTS (SELECT 1 FROM schema_migrations WHERE version = '0043_work_session_tokens_unkeyed.sql')`).Scan(&applied); err != nil || !applied {
+		t.Errorf("0043 applied = %v (%v), want true", applied, err)
+	}
+}
+
+// TestMigrateRetriesADeadlock: 0043 holds work_session_tokens while it waits
+// for sessions, so live traffic holding sessions that then wants the tokens
+// table closes a cycle. The migration's own deadlock check has to run before
+// its lock_timeout does: that check is what makes the migration the victim
+// (40P01), and it is also what cancels an autovacuum holding the table, which
+// a lock_timeout firing first would wait out through every retry. Migrate
+// retries the deadlock, and the traffic's lock goes through. The holder's own
+// deadlock_timeout is a minute, so only the migration's check can break the
+// cycle and the test does not race the two timers.
+func TestMigrateRetriesADeadlock(t *testing.T) {
+	ctx := context.Background()
+	pool, err := pgxpool.New(ctx, pgtest.FreshDB(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pool.Close()
+	if err := store.MigrateThrough(ctx, pool, "0041_primary_thread_unarchived_check.sql"); err != nil {
+		t.Fatalf("migrate through 0041: %v", err)
+	}
+	holder, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = holder.Rollback(ctx) }()
+	for _, q := range []string{
+		`SET LOCAL deadlock_timeout = '1min'`,
+		`LOCK TABLE sessions IN ACCESS SHARE MODE`,
+	} {
+		if _, err := holder.Exec(ctx, q); err != nil {
+			t.Fatalf("%s: %v", q, err)
+		}
+	}
+
+	logs := &syncBuffer{}
+	prev := slog.Default()
+	prevOut, prevFlags := log.Writer(), log.Flags() // TestMigrateNamesTheDatabaseItChanges says why
+	slog.SetDefault(slog.New(slog.NewTextHandler(logs, nil)))
+	defer func() {
+		slog.SetDefault(prev)
+		log.SetOutput(prevOut)
+		log.SetFlags(prevFlags)
+	}()
+
+	migrated := make(chan error, 1)
+	go func() { migrated <- store.Migrate(ctx, pool) }()
+	for deadline := time.Now().Add(15 * time.Second); ; {
+		var waiting bool
+		if err := pool.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM pg_locks
+			WHERE relation = 'sessions'::regclass AND mode = 'AccessExclusiveLock' AND NOT granted)`).Scan(&waiting); err != nil {
+			t.Fatal(err)
+		}
+		if waiting {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("0043 never waited for sessions within 15s; log: %s", logs.String())
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	closed := make(chan error, 1)
+	go func() {
+		_, err := holder.Exec(ctx, `LOCK TABLE work_session_tokens IN ACCESS SHARE MODE`)
+		closed <- err
+	}()
+	select {
+	case err := <-closed:
+		if err != nil {
+			t.Fatalf("the traffic closing the cycle = %v, want its lock once the migration gives up", err)
+		}
+	case <-time.After(15 * time.Second):
+		t.Fatalf("the traffic's lock did not go through within 15s; log: %s", logs.String())
+	}
+	for deadline := time.Now().Add(5 * time.Second); !strings.Contains(logs.String(), "retrying"); {
+		select {
+		case err := <-migrated:
+			t.Fatalf("Migrate returned %v instead of retrying; log: %s", err, logs.String())
+		case <-time.After(10 * time.Millisecond):
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("Migrate neither retried nor returned within 5s of the migration giving up; log: %s", logs.String())
+		}
+	}
+	if !strings.Contains(logs.String(), "40P01") {
+		t.Fatalf("the migration gave up without its deadlock check having run — its lock_timeout fired first; log: %s", logs.String())
 	}
 	if err := holder.Rollback(ctx); err != nil {
 		t.Fatal(err)

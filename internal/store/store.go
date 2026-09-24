@@ -36,11 +36,12 @@
 // resource tables (agents, environments, sessions, events, work_items,
 // api_keys, skills, files, vaults, principals among them) reserve org_id,
 // workspace_id and project_id as text NOT NULL DEFAULT 'default', while child
-// tables inherit scope through their foreign key to a scoped parent. Rows
-// written today mean the same thing once multi-tenancy lands, which is the
-// whole point of reserving the columns rather than adding them later. Scoping
-// is org/workspace/project and never an end-user: sessions carry no user_id
-// by design, and created_by is audit only.
+// tables inherit scope through their foreign key to a scoped parent (since
+// 0043, work_session_tokens through a session_id with no key, its rows deleted
+// with the session by a trigger). Rows written today mean the same thing once
+// multi-tenancy lands, which is the whole point of reserving the columns
+// rather than adding them later. Scoping is org/workspace/project and never an
+// end-user: sessions carry no user_id by design, and created_by is audit only.
 package store
 
 import (

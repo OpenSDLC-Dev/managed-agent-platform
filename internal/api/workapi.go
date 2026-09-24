@@ -100,7 +100,7 @@ func toWire(w *queue.Work) workWire {
 // plan, byte for byte.
 //
 // The claim locks the item and nothing of its session's: the resources read
-// takes no lock, the item's own key to its session goes unchecked because
+// takes no row lock, the item's own key to its session goes unchecked because
 // PollOn never changes session_id, and the token's row names its session
 // without a foreign key (migration 0043). That key's check took the session
 // row FOR KEY SHARE after the item — the reverse of every path that holds the

@@ -24,12 +24,20 @@
 -- so waiting here can close a cycle, and no LOCK TABLE order avoids every
 -- one; the ALTER's own order at least holds only the token table while it
 -- waits for the busy one. A pending lock on sessions also queues every
--- session read behind it. So this migration waits at most 500ms for each
--- lock, below the deadlock_timeout default of a second, and it is the side
--- that gives up, not live traffic. Migrate retries a transaction that gives
--- up this way (migrate.go). The timeout is reset at the end, so no later
--- migration in the same transaction inherits it.
-SET LOCAL lock_timeout = '500ms';
+-- session read behind it, so this migration waits at most 2s for each lock.
+-- The bound sits above deadlock_timeout (a second by default) on purpose:
+-- only once a waiter has waited that long does Postgres run its deadlock
+-- check, and that check is what cancels an autovacuum holding the table. A
+-- bound below it waits the autovacuum out instead, through every retry, and
+-- so does a deadlock_timeout raised to 2s or more, or an autovacuum preventing
+-- wraparound, which no waiter cancels. Holding neither table when it starts,
+-- the migration asks for sessions the instant it has the token table, so in
+-- a cycle with an old replica it is the first to wait: its check runs first
+-- and it is the side that gives up (40P01), not live traffic. A holder
+-- outside any cycle makes it give up at the bound (55P03). Migrate retries
+-- both (migrate.go). The timeout is reset at the end, so no later migration
+-- in the same transaction inherits it.
+SET LOCAL lock_timeout = '2s';
 
 ALTER TABLE work_session_tokens DROP CONSTRAINT work_session_tokens_session_id_fkey;
 
