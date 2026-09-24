@@ -962,3 +962,46 @@ func TestMemoryShadowingTheMarkerIsSkipped(t *testing.T) {
 		})
 	}
 }
+
+// TestMemorySkippedRowsReportProgress: a row the listing skips still costs
+// its page, so it still reports progress — a store of shadowed memories
+// (memsync.ShadowsMarker) pages through with nothing handed to the callers,
+// and without a report per row a healthy run could outlast StallTimeout and
+// be reclaimed. 105 of them page the full view (20 a page) and the basic one
+// (100 a page), in materialize, the sync and the shutdown flush alike.
+func TestMemorySkippedRowsReportProgress(t *testing.T) {
+	const shadowed = 105
+	sb := &fakeSandbox{}
+	h := newHarness(t, sb)
+	h.seedMemoryStore(t, memStoreID, "Notes")
+	h.seedMemory(t, memStoreID, "/facts/a.md", "alpha")
+	for i := 0; i < shadowed; i++ {
+		h.seedMemory(t, memStoreID, fmt.Sprintf("/%s/%03d.md", memsync.MarkerName, i), "m")
+	}
+	h.refMemory(t, [3]string{memStoreID, memMount, "read_write"})
+	token := h.sessionsToken(t)
+	mounts, err := memoryRefs(context.Background(), h.client, h.sid.String())
+	if err != nil {
+		t.Fatalf("memoryRefs: %v", err)
+	}
+	mem := newMemoryStores(h.client, token, h.sid.String(), sb, mounts)
+
+	count := func(pass func(func())) int {
+		n := 0
+		pass(func() { n++ })
+		return n
+	}
+	if n := count(func(p func()) { mem.materialize(context.Background(), p) }); n < shadowed {
+		t.Errorf("materialize reported progress %d times over %d skipped rows", n, shadowed)
+	}
+	if sb.files[memMount+"/facts/a.md"] != "alpha" || sb.files[memMount+"/"+memsync.MarkerName] != string(memsync.MarkerBytes(memStoreID)) {
+		t.Fatalf("the store did not land around its skipped rows: %v", sb.files)
+	}
+	if n := count(func(p func()) { mem.sync(context.Background(), p) }); n < shadowed {
+		t.Errorf("sync reported progress %d times over %d skipped rows", n, shadowed)
+	}
+	sb.files[memMount+"/facts/b.md"] = "beta"
+	if n := count(func(p func()) { mem.flush(context.Background(), p) }); n < shadowed {
+		t.Errorf("flush reported progress %d times over %d skipped rows", n, shadowed)
+	}
+}
