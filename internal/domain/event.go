@@ -36,8 +36,13 @@ const (
 	// written to the target thread's input stream, so one message is two rows,
 	// one per thread. Each names its peer thread in a field of its own —
 	// to_session_thread_id and from_session_thread_id — rather than in the
-	// envelope's session_thread_id, which neither carries; the agent name beside
-	// it is null when the peer is the primary agent.
+	// envelope's session_thread_id, which neither carries. The agent name beside
+	// it is asymmetric (#675): _received always names its sender in
+	// from_agent_name, the coordinator included, while _sent carries
+	// to_agent_name only when its target is a child and omits the key, rather
+	// than writing a null, when the target is the primary. Rows a build before
+	// #675 wrote hold a present null in either field when that peer is the
+	// primary.
 	EventAgentThreadMessageSent     EventType = "agent.thread_message_sent"
 	EventAgentThreadMessageReceived EventType = "agent.thread_message_received"
 )
